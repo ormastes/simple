@@ -435,7 +435,8 @@ classifies C.EBREAK as unmigrated. This is not an ABI-stability claim for the
 stateful frontend: adding parcel/canonical/length retirement identity inputs
 changes its public port sequence and therefore its closure hash. Existing
 stateful product IDs must remain unqualified until their version/ABI treatment
-is explicit and fresh self-hosted manifests and GHDL receipts are recorded.
+is explicit and the self-hosted qualification writer creates fresh manifests
+and GHDL receipts. No such qualification receipt is retained at present.
 
 `HwParcelRetirementComposition` freezes the next architectural boundary without
 pretending that it already emits a processor. Its producer contract consumes

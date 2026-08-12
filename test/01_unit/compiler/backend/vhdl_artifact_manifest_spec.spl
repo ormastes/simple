@@ -11,6 +11,7 @@ use compiler.mir.hwir.aspects.{HwAspectLock, HwAspectLockEntry, hwir_aspect_lock
 use compiler.mir.hwir.types.{CoreConfig, HwPort}
 use compiler.mir.hwir.stateful_frontend.{strict_zca_single_outstanding_frontend_hwir, strict_zca_trap_single_outstanding_frontend_hwir}
 use compiler.mir.hwir.frontend.{strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_predecode_hwir}
+use compiler.backend.backend.hwir_to_vhdl.{compile_strict_zca_single_outstanding_frontend_product, compile_strict_zca_trap_single_outstanding_frontend_product}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text?
@@ -85,14 +86,15 @@ fn artifact_input(sources: [VhdlArtifactSource], ports: [VhdlArtifactPort], outp
 fn artifact_trap_gen2_input(output: text) -> VhdlArtifactInput:
     val entity = "riscv_gen2_zca_trap_single_outstanding_frontend_rv32"
     var product = artifact_input([], artifact_gen2_ports(entity), output)
-    product.entry_module = "compiler-product:riscv-gen2-zca-trap-single-outstanding-v2"
+    product.entry_module = "compiler-product:riscv-gen2-zca-trap-single-outstanding-v3"
     product.entry_entity = entity
     product.root_modules = [product.entry_module]
     product.catalog_name = product.entry_module
-    product.generation_route = "hwir-gen2-trap-stateful-product"
+    product.generation_route = "hwir-gen2-trap-stateful-product-v3"
     product.hwir_module_node_id = entity + ":module"
     product.hwir_config_profile = "riscv-gen2-rv32-zca-critical"
-    product.hwir_graph_sha256 = artifact_sha()
+    product.hwir_graph_sha256 = compile_strict_zca_trap_single_outstanding_frontend_product(
+        CoreConfig.rv32_zca_mission_critical()).hwir_graph_sha256
     product.target = "riscv32"
     product.xlen = 32
     product.profile = "riscv-gen2-rv32-zca-critical"
@@ -239,7 +241,7 @@ describe "VHDL production artifact manifest":
             name: "result_out", direction: "out", type_name: "Bits[1]", bit_width: 0, index: 0,
             location: artifact_port_location())
         var product = artifact_input([], [port], "build/stateful.vhd")
-        product.generation_route = "hwir-gen2-stateful-product"
+        product.generation_route = "hwir-gen2-stateful-product-v2"
         product.hwir_module_node_id = "stateful:module"
         product.hwir_config_profile = "riscv-gen2-rv32-zca-critical"
         product.riscv_isa_profile = "rv32i"
@@ -250,9 +252,9 @@ describe "VHDL production artifact manifest":
             HwAspectLock(entries: [])).unwrap()
         expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
             "VHDL Gen2 product provenance route does not admit the claimed entry entity")
-        product.entry_module = "compiler-product:riscv-gen2-zca-trap-single-outstanding-v2"
+        product.entry_module = "compiler-product:riscv-gen2-zca-trap-single-outstanding-v3"
         product.entry_entity = "riscv_gen2_zca_trap_single_outstanding_frontend_rv32"
-        product.generation_route = "hwir-gen2-trap-stateful-product"
+        product.generation_route = "hwir-gen2-trap-stateful-product-v3"
         product.root_modules = [product.entry_module]
         product.hwir_module_node_id = product.entry_entity + ":module"
         product.catalog_name = product.entry_module
@@ -268,7 +270,14 @@ describe "VHDL production artifact manifest":
             product.generation_route, product.entry_entity).unwrap()
         product.riscv_capability_sha256 = vhdl_gen2_capability_sha256(
             product.riscv_admitted_instruction_ids).unwrap()
+        product.hwir_graph_sha256 = compile_strict_zca_trap_single_outstanding_frontend_product(
+            CoreConfig.rv32_zca_mission_critical()).hwir_graph_sha256
         expect(vhdl_validate_production_artifact_input(product).is_ok()).to_equal(true)
+        product.hwir_graph_sha256 = artifact_sha()
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 product provenance graph SHA-256 does not match the canonical HWIR closure")
+        product.hwir_graph_sha256 = compile_strict_zca_trap_single_outstanding_frontend_product(
+            CoreConfig.rv32_zca_mission_critical()).hwir_graph_sha256
         product.riscv_capability_scope = "full-rv32i-core"
         expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
             "VHDL Gen2 product provenance must declare its frontend-only implementation scope")
@@ -289,6 +298,14 @@ describe "VHDL production artifact manifest":
             "VHDL Gen2 stateful product provenance decoder dependency does not match the selected route")
         product.generated_items[1] = VhdlArtifactGeneratedItem(kind: "compiler_product_dependency",
             name: "riscv_gen2_zca_trap_migrating_predecode_rv32", location: artifact_port_location())
+        product.entry_module = "compiler-product:riscv-gen2-zca-trap-single-outstanding-v2"
+        product.root_modules = [product.entry_module]
+        product.catalog_name = product.entry_module
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 stateful product provenance requires the current versioned compiler product identity")
+        product.entry_module = "compiler-product:riscv-gen2-zca-trap-single-outstanding-v3"
+        product.root_modules = [product.entry_module]
+        product.catalog_name = product.entry_module
         product.aop_advices_requested = 1
         expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
             "VHDL Gen2 product provenance forbids legacy AOP requests and weaves")
@@ -307,7 +324,7 @@ describe "VHDL production artifact manifest":
         expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
             "VHDL Gen2 product provenance requires the canonical entry module node")
         product.hwir_module_node_id = product.entry_entity + ":module"
-        product.generation_route = "hwir-gen2-stateful-product"
+        product.generation_route = "hwir-gen2-stateful-product-v2"
         product.entry_entity = "riscv_gen2_zca_single_outstanding_frontend_rv32"
         product.hwir_module_node_id = product.entry_entity + ":module"
         product.generated_items[0] = VhdlArtifactGeneratedItem(kind: "compiler_product_entity",
@@ -319,11 +336,13 @@ describe "VHDL production artifact manifest":
             product.generation_route, product.entry_entity).unwrap()
         product.riscv_capability_sha256 = vhdl_gen2_capability_sha256(
             product.riscv_admitted_instruction_ids).unwrap()
+        product.hwir_graph_sha256 = compile_strict_zca_single_outstanding_frontend_product(
+            CoreConfig.rv32_zca_mission_critical()).hwir_graph_sha256
         expect(vhdl_validate_production_artifact_input(product).is_ok()).to_equal(true)
-        product.generation_route = "hwir-gen2-trap-stateful-product"
+        product.generation_route = "hwir-gen2-trap-stateful-product-v3"
         expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
             "VHDL Gen2 product provenance route does not admit the claimed entry entity")
-        product.generation_route = "hwir-gen2-stateful-product-untrusted"
+        product.generation_route = "hwir-gen2-stateful-product-v2-untrusted"
         expect(vhdl_validate_production_artifact_input(product).is_err()).to_equal(true)
 
     it "accepts the RV32-only C.JAL product only with its frozen profile and capability closure":
@@ -393,14 +412,15 @@ describe "VHDL production artifact manifest":
         val module = strict_zca_single_outstanding_frontend_hwir(entity,
             CoreConfig.rv32_zca_cjal_mission_critical()).unwrap()
         var product = artifact_input([], artifact_gen2_ports(entity), "build/rv32-cjal-stateful.vhd")
-        product.entry_module = "compiler-product:riscv-gen2-zca-rv32-cjal-single-outstanding-v1"
+        product.entry_module = "compiler-product:riscv-gen2-zca-rv32-cjal-single-outstanding-v2"
         product.entry_entity = entity
         product.root_modules = [product.entry_module]
         product.catalog_name = product.entry_module
-        product.generation_route = "hwir-gen2-stateful-product"
+        product.generation_route = "hwir-gen2-stateful-product-v2"
         product.hwir_module_node_id = entity + ":module"
         product.hwir_config_profile = module.config.profile
-        product.hwir_graph_sha256 = artifact_sha()
+        product.hwir_graph_sha256 = compile_strict_zca_single_outstanding_frontend_product(
+            CoreConfig.rv32_zca_cjal_mission_critical()).hwir_graph_sha256
         product.target = "riscv32"
         product.xlen = 32
         product.profile = module.config.profile

@@ -6,6 +6,11 @@ This scenario verifies that a minimal Gen2 hardware product selects its XLEN
 at elaboration time, lowers through the strict typed HWIR boundary, and emits a
 non-empty VHDL module without invoking the legacy VHDL route.
 
+No self-hosted qualification receipt exists at this revision. The planned
+qualification writer, not this manual or a bootstrap-seed scenario run, must
+write the RV32/RV64 GHDL receipt set under the retention policy in the system
+test plan before any qualification claim is made.
+
 ## Scenarios
 
 1. Create an RV32 product with two `Bits[32]` inputs and one output; verify
@@ -82,8 +87,11 @@ non-empty VHDL module without invoking the legacy VHDL route.
 
 - REQ-G2-001..005: first scenario.
 - NFR-G2-001..003: deterministic rejection and no-runtime-selection behavior.
-- NFR-G2-004..005: source ownership and V1 route separation are reviewed by
-  the focused source/quality gates.
+- NFR-G2-004: the typed parcel-mask scenario supplies `HwConstant` and
+  `HwCombOp` operands to the renderer rather than VHDL fragments; focused
+  source-ownership lint remains the global ownership gate.
+- NFR-G2-005: the strict-RV32 scenario proves the generated result cannot
+  select legacy fallback; focused route/source review keeps V1 explicit.
 - REQ-G2-007/NFR-G2-007: the shared compressed hardware subset carries only
   fixed-width parcel/canonical data and reason codes. Its zero, reserved, and
   RV32-C.JAL/RV64-C.ADDIW divergent cases remain explicit non-legacy paths.
@@ -128,10 +136,11 @@ non-empty VHDL module without invoking the legacy VHDL route.
   predicates and fixed predecode metadata. GHDL covers C.ADDI4SPN, C.LW,
   C.SW, and C.LWSP; the unit contract covers the whole admitted tranche. Rows
   with reserved, redirect, or trap semantics remain outside composition.
-- REQ-G2-010/NFR-G2-011: the v2 C.EBREAK trap product is emitted through the
+- REQ-G2-010/NFR-G2-011: the versioned C.EBREAK trap product is emitted through the
   same typed sequential plan and records a nonempty compiler-product graph
   hash. The v1 decoder ISA composition remains unchanged; stateful products
-  remain development-stage ABI/version decisions until fresh receipts exist.
+  remain development-stage ABI/version decisions until the self-hosted writer
+  creates a planned qualification receipt.
 - REQ-G2-011: frontend admission is closed against the declarative capability
   table. This is a structural provenance guard, not full generated-RTL
   equivalence.

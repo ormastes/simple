@@ -4,7 +4,8 @@ use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant, Hw
 use compiler.mir.hwir.mir_to_hwir.{HwirLowerInput, lower_strict_hwir_and_module}
 use compiler.mir.hwir.zca_rows.{strict_zca_cebreak_row_hwir, strict_zca_addi4spn_row_hwir, strict_zca_lw_row_hwir, strict_zca_sw_row_hwir, strict_zca_lwsp_row_hwir, strict_zca_swsp_row_hwir, strict_zca_slli_low_row_hwir, strict_zca_srli_low_row_hwir, strict_zca_srai_low_row_hwir, strict_zca_candi_row_hwir, strict_zca_csub_row_hwir, strict_zca_cxor_row_hwir, strict_zca_cor_row_hwir, strict_zca_cand_row_hwir, strict_zca_cjr_row_hwir, strict_zca_cmv_row_hwir, strict_zca_cjalr_row_hwir, strict_zca_cadd_row_hwir, strict_zca_cli_row_hwir}
 use compiler.mir.hwir.stateful_frontend.{strict_zca_single_outstanding_frontend_hwir}
-use compiler.backend.backend.hwir_to_vhdl.{render_strict_hwir_vhdl, compile_strict_zca_single_outstanding_frontend_product, compile_strict_zca_trap_single_outstanding_frontend_product}
+use compiler.mir.hwir.retirement_composition.{strict_zca_single_outstanding_retirement_composition}
+use compiler.backend.backend.hwir_to_vhdl.{HwirStrictVhdlResult, strict_hwir_port_schema_sha256, render_strict_hwir_vhdl, render_strict_retirement_composition_vhdl, compile_strict_zca_single_outstanding_frontend_product, compile_strict_zca_trap_single_outstanding_frontend_product}
 
 fn check(condition: bool):
     expect condition == true
@@ -23,6 +24,31 @@ fn casefold_collision_module() -> HwModuleDef:
         signals: [], constants: [HwConstant.bits("zero", 1, 0)],
         comb_ops: [HwCombOp.unary("passthrough", "result", "zero", 1)],
         compare_ops: [], select_ops: [], clock_domains: [HwClockDomain.default_domain()])
+
+fn strict_retirement_test_port_type(width: i32) -> text:
+    if width == 1: "std_logic" else: "std_logic_vector(" + (width - 1).to_text() + " downto 0)"
+
+fn strict_retirement_producer_child(entity: text) -> HwirStrictVhdlResult:
+    """Text-only admitted-child fixture; it does not claim a producer implementation."""
+    val composition = strict_zca_single_outstanding_retirement_composition(
+        "retirement_child_schema", CoreConfig.rv32_zca_mission_critical(), entity)
+    if val contract = composition.ok():
+        val digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        var ports = ""
+        var index = 0
+        for port in contract.producer.ports():
+            ports = ports + port.name + " : " + port.direction + " " + strict_retirement_test_port_type(port.bit_width)
+            if index + 1 < contract.producer.ports().len():
+                ports = ports + ";\n"
+            index = index + 1
+        HwirStrictVhdlResult(success: true, vhdl: "-- simple-hwir route=hwir-strict profile=" +
+            contract.config.profile + " graph=" + digest + "\n-- simple-hwir port-schema=" +
+            strict_hwir_port_schema_sha256(contract.producer.ports()) + "\nentity " + entity +
+            " is port(\n" + ports + "\n); end entity;\n", diagnostic: "", route: "hwir-strict",
+            module_node_id: entity + ":module", config_xlen: contract.config.xlen,
+            config_profile: contract.config.profile, hwir_graph_sha256: digest)
+    else:
+        HwirStrictVhdlResult.rejected("test setup requires a valid closed retirement composition")
 
 describe "RISC-V Gen2 strict HWIR foundation":
     it "REQ-G2-001 constructs stable typed origins and concrete ports":
@@ -603,8 +629,8 @@ describe "RISC-V Gen2 strict HWIR foundation":
         val trap = compile_strict_zca_trap_single_outstanding_frontend_product(CoreConfig.rv64_zca_mission_critical())
         expect(parcel.is_success()).to_equal(true)
         expect(trap.is_success()).to_equal(true)
-        expect(parcel.route).to_equal("hwir-gen2-stateful-product")
-        expect(trap.route).to_equal("hwir-gen2-trap-stateful-product")
+        expect(parcel.route).to_equal("hwir-gen2-stateful-product-v2")
+        expect(trap.route).to_equal("hwir-gen2-trap-stateful-product-v3")
         expect(parcel.hwir_graph_sha256.len()).to_equal(64)
         expect(trap.hwir_graph_sha256.len()).to_equal(64)
         expect(parcel.vhdl).to_contain("elsif retire_valid='1' and valid_reg='1' and issued_reg='1' and retire_lineage=lineage_reg and retire_original_parcel=parcel_reg and retire_canonical_instruction=decoder_canonical and retire_original_length_bytes=decoder_length and lineage_reg=(others=>'1') then valid_reg <= '0'; issued_reg <= '0'; fault_reg <= retire_valid;")
@@ -614,6 +640,51 @@ describe "RISC-V Gen2 strict HWIR foundation":
         expect(trap.vhdl).to_contain("canonical_instruction <= decoder_canonical when valid_reg='1' and issued_reg='0' and fault_reg='0' else (others=>'0')")
         expect(parcel.uses_legacy_fallback()).to_equal(false)
         expect(trap.uses_legacy_fallback()).to_equal(false)
+
+    it "renders a deterministic closed retirement composition only from admitted child results":
+        val built = strict_zca_single_outstanding_retirement_composition(
+            "riscv_gen2_closed_retirement_rv32", CoreConfig.rv32_zca_mission_critical(),
+            "riscv_gen2_retire_receipt_child_rv32")
+        if val composition = built.ok():
+            val frontend = compile_strict_zca_single_outstanding_frontend_product(composition.config)
+            val producer = strict_retirement_producer_child(composition.producer_entity)
+            val first = render_strict_retirement_composition_vhdl(composition, frontend, producer)
+            val second = render_strict_retirement_composition_vhdl(composition, frontend, producer)
+            expect(first.is_success()).to_equal(true)
+            expect(first.vhdl).to_equal(second.vhdl)
+            expect(first.route).to_equal("hwir-gen2-retirement-composition-v1")
+            expect(first.hwir_graph_sha256).to_equal(second.hwir_graph_sha256)
+            expect(first.vhdl).to_contain("entity riscv_gen2_closed_retirement_rv32 is")
+            expect(first.vhdl).to_contain("frontend: entity work.riscv_gen2_zca_single_outstanding_frontend_rv32")
+            expect(first.vhdl).to_contain("producer: entity work.riscv_gen2_retire_receipt_child_rv32")
+            expect(first.vhdl).to_contain("retire_composition_frontend_to_producer_dispatch_lineage")
+            expect(first.vhdl).to_contain("retire_composition_producer_to_frontend_retire_canonical_instruction")
+        else:
+            expect(false).to_equal(true)
+
+    it "fails closed for retirement child route configuration node digest and schema mismatches":
+        val built = strict_zca_single_outstanding_retirement_composition(
+            "riscv_gen2_closed_retirement_reject", CoreConfig.rv32_zca_mission_critical(),
+            "riscv_gen2_retire_receipt_child_reject")
+        if val composition = built.ok():
+            val frontend = compile_strict_zca_single_outstanding_frontend_product(composition.config)
+            val producer = strict_retirement_producer_child(composition.producer_entity)
+            frontend.route = "forged-route"
+            expect(render_strict_retirement_composition_vhdl(composition, frontend, producer).diagnostic).to_equal("HWIR-E-RETIRE-COMPOSITION-CHILD-ROUTE: frontend child route does not match the closed composition schema")
+            frontend.route = composition.frontend_route
+            frontend.config_xlen = 64
+            expect(render_strict_retirement_composition_vhdl(composition, frontend, producer).diagnostic).to_equal("HWIR-E-RETIRE-COMPOSITION-CHILD-CONFIG: frontend child configuration does not match the closed composition")
+            frontend.config_xlen = composition.config.xlen
+            frontend.module_node_id = "forged:module"
+            expect(render_strict_retirement_composition_vhdl(composition, frontend, producer).diagnostic).to_equal("HWIR-E-RETIRE-COMPOSITION-CHILD-NODE: frontend child node does not match the closed component entity")
+            frontend.module_node_id = composition.frontend_entity + ":module"
+            frontend.hwir_graph_sha256 = "0"
+            expect(render_strict_retirement_composition_vhdl(composition, frontend, producer).diagnostic).to_equal("HWIR-E-RETIRE-COMPOSITION-CHILD-DIGEST: frontend child graph digest does not match its serialized VHDL provenance")
+            val restored_frontend = compile_strict_zca_single_outstanding_frontend_product(composition.config)
+            producer.vhdl = producer.vhdl.replace("port-schema=", "forged-schema=")
+            expect(render_strict_retirement_composition_vhdl(composition, restored_frontend, producer).diagnostic).to_equal("HWIR-E-RETIRE-COMPOSITION-CHILD-SCHEMA: producer child port schema does not match the closed component contract")
+        else:
+            expect(false).to_equal(true)
 
     it "rejects a sequential plan whose assignment width no longer matches state":
         val built = strict_zca_single_outstanding_frontend_hwir("bad_state_plan", CoreConfig.rv32_zca_mission_critical())

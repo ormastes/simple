@@ -4,13 +4,14 @@
 # combinational graph forms represented by HwModuleDef and never delegates a
 # rejected graph to the legacy textual VHDL path.
 
-use compiler.mir.hwir.types.{CoreConfig, HwCombOp, HwConstant, HwModule, HwModuleDef, HwOrigin, HwPort, hwir_hash_fields}
+use compiler.mir.hwir.types.{CoreConfig, HwCombOp, HwConstant, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, hwir_hash_fields}
 use compiler.mir.hwir.mir_to_hwir.{lower_strict_mir_function_to_hwir}
 use compiler.mir.mir_data.{MirFunction, MirModule}
 use compiler.mir.hwir.frontend.{strict_zca_control_predecode_hwir, strict_zca_migrating_predecode_hwir, strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_predecode_hwir}
 use compiler.mir.hwir.trap_frontend.{strict_zca_trap_migrating_predecode_hwir}
 use compiler.mir.hwir.stateful_frontend.{HwParcelFrontendDef, HwTrapParcelFrontendDef, strict_parcel_frontend_decoder_entity, strict_zca_single_outstanding_frontend_hwir, strict_zca_trap_single_outstanding_frontend_hwir}
 use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard, HwSeqOutputBinding, HwSeqRule, HwSeqValue, HwSequentialPlan, HwStateRegister}
+use compiler.mir.hwir.retirement_composition.{HwParcelRetirementComposition, HwRetireCompositionBinding}
 use std.common.crypto.sha256.{sha256_text}
 
 class HwirVhdlBridgeResult:
@@ -29,7 +30,7 @@ class HwirVhdlBridgeResult:
     static fn emitted(module: HwModule, vhdl: text) -> HwirVhdlBridgeResult:
         HwirVhdlBridgeResult(used_hwir: true, module_name: module.name, vhdl: vhdl, fallback_function: module.fallback_function, diagnostic: "")
 
-class HwirStrictVhdlResult:
+pub class HwirStrictVhdlResult:
     success: bool
     vhdl: text
     diagnostic: text
@@ -45,7 +46,7 @@ class HwirStrictVhdlResult:
     me uses_legacy_fallback() -> bool:
         false
 
-    static fn rejected(diagnostic: text) -> HwirStrictVhdlResult:
+    pub static fn rejected(diagnostic: text) -> HwirStrictVhdlResult:
         HwirStrictVhdlResult(success: false, vhdl: "", diagnostic: diagnostic,
             route: "hwir-strict", module_node_id: "", config_xlen: 0, config_profile: "", hwir_graph_sha256: "")
 
@@ -53,6 +54,23 @@ class HwirStrictVhdlResult:
         HwirStrictVhdlResult(success: true, vhdl: vhdl, diagnostic: "", route: route,
             module_node_id: module.node_id.value, config_xlen: module.config.xlen,
             config_profile: module.config.profile, hwir_graph_sha256: module.structural_sha256())
+
+pub fn strict_hwir_port_schema_sha256(ports: [HwPort]) -> text:
+    """Hash the exact ordered child component interface used by strict VHDL.
+
+    A child graph digest binds its implementation graph, while this separate
+    digest makes the port-level component boundary independently auditable.
+    The closed retirement renderer requires both markers from every child.
+    """
+    var fields: [text] = ["simple-hwir-port-schema/v1", ports.len().to_text()]
+    for port in ports:
+        fields.push("port")
+        fields.push(port.name)
+        fields.push(port.direction)
+        fields.push(port.type_name)
+        fields.push(port.bit_width.to_text())
+        fields.push(port.clock_domain)
+    sha256_text(hwir_hash_fields(fields))
 
 fn hwir_bridge_preserve_existing_vhdl(module: HwModule) -> HwirVhdlBridgeResult:
     HwirVhdlBridgeResult.fallback(module, "HWIR bridge not selected; preserve existing VHDL compile path")
@@ -159,7 +177,8 @@ pub fn render_strict_hwir_vhdl(module: HwModuleDef) -> HwirStrictVhdlResult:
         body = body + "    " + op.result + " <= '1' when " + op.lhs + " = " + op.rhs + " else '0';\n"
     for op in module.select_ops:
         body = body + "    " + op.result + " <= " + op.when_true + " when " + op.condition + " = '1' else " + op.when_false + ";\n"
-    val vhdl = "-- simple-hwir route=hwir-strict node=" + module.node_id.value + " profile=" + module.config.profile + "\n" +
+    val vhdl = "-- simple-hwir route=hwir-strict node=" + module.node_id.value + " profile=" + module.config.profile + " graph=" + module.structural_sha256() + "\n" +
+        "-- simple-hwir port-schema=" + strict_hwir_port_schema_sha256(module.ports) + "\n" +
         "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\nentity " + module.summary.name + " is\n" +
         "    port(\n" + ports + "    );\nend entity " + module.summary.name + ";\n\narchitecture rtl of " + module.summary.name + " is\n" + declarations +
         "begin\n" + body + "end architecture rtl;\n"
@@ -245,32 +264,40 @@ fn strict_seq_reset(register: HwStateRegister) -> text:
         return "'1'"
     "std_logic_vector(to_unsigned(" + register.reset_value.to_text() + ", " + register.bit_width.to_text() + "))"
 
-fn strict_seq_guard(guard: HwSeqGuard) -> text:
-    if guard.kind == "high": return guard.lhs + "='1'"
-    if guard.kind == "low": return guard.lhs + "='0'"
-    if guard.kind == "all_ones": return guard.lhs + "=(others=>'1')"
-    guard.lhs + "=" + guard.rhs
+fn strict_seq_guard(guard: HwSeqGuard) -> Result<text, text>:
+    if guard.kind == "high": return Ok(guard.lhs + "='1'")
+    if guard.kind == "low": return Ok(guard.lhs + "='0'")
+    if guard.kind == "equal": return Ok(guard.lhs + "=" + guard.rhs)
+    if guard.kind == "all_ones": return Ok(guard.lhs + "=(others=>'1')")
+    Err("HWIR-E-EMIT-SEQUENTIAL-GUARD: unsupported typed sequential guard " + guard.kind)
 
-fn strict_seq_guards(guards: [HwSeqGuard]) -> text:
+fn strict_seq_guards(guards: [HwSeqGuard]) -> Result<text, text>:
+    if guards.len() == 0:
+        return Err("HWIR-E-EMIT-SEQUENTIAL-GUARD: typed sequential condition cannot be empty")
     var result = ""
     var index = 0
     for guard in guards:
         if index > 0: result = result + " and "
-        result = result + strict_seq_guard(guard)
+        val rendered_guard = strict_seq_guard(guard)?
+        result = result + rendered_guard
         index = index + 1
-    result
+    Ok(result)
 
-fn strict_seq_value(value: HwSeqValue) -> text:
-    if value.kind == "zero": return strict_seq_zero(value.bit_width)
-    if value.kind == "invert": return "not " + value.value
-    if value.kind == "increment": return "std_logic_vector(unsigned(" + value.value + ") + 1)"
-    value.value
+fn strict_seq_value(value: HwSeqValue) -> Result<text, text>:
+    if value.kind == "zero": return Ok(strict_seq_zero(value.bit_width))
+    if value.kind == "copy": return Ok(value.value)
+    if value.kind == "invert": return Ok("not " + value.value)
+    if value.kind == "increment": return Ok("std_logic_vector(unsigned(" + value.value + ") + 1)")
+    Err("HWIR-E-EMIT-SEQUENTIAL-VALUE: unsupported typed sequential value " + value.kind)
 
-fn strict_seq_assignments(assignments: [HwSeqAssignment]) -> text:
+fn strict_seq_assignments(assignments: [HwSeqAssignment]) -> Result<text, text>:
+    if assignments.len() == 0:
+        return Err("HWIR-E-EMIT-SEQUENTIAL-ASSIGNMENT: typed sequential rule cannot be empty")
     var result = ""
     for assignment in assignments:
-        result = result + " " + assignment.destination + " <= " + strict_seq_value(assignment.value) + ";"
-    result
+        val rendered_value = strict_seq_value(assignment.value)?
+        result = result + " " + assignment.destination + " <= " + rendered_value + ";"
+    Ok(result)
 
 fn strict_seq_declarations(plan: HwSequentialPlan) -> text:
     var result = ""
@@ -290,35 +317,43 @@ fn strict_seq_decoder_map(plan: HwSequentialPlan) -> text:
         index = index + 1
     result
 
-fn strict_seq_outputs(plan: HwSequentialPlan) -> text:
+fn strict_seq_outputs(plan: HwSequentialPlan) -> Result<text, text>:
     var result = ""
     for output in plan.outputs:
-        val guards = strict_seq_guards(output.guards)
         result = result + " -- simple-hwir node=" + plan.output_node_id(output).value + "\n"
         if output.kind == "direct":
             result = result + " " + output.result + " <= " + output.source + ";"
         elif output.kind == "all":
+            val guards = strict_seq_guards(output.guards)?
             result = result + " " + output.result + " <= '1' when " + guards + " else '0';"
-        else:
+        elif output.kind == "guarded":
+            val guards = strict_seq_guards(output.guards)?
             result = result + " " + output.result + " <= " + output.source + " when " + guards + " else " + strict_seq_zero(output.bit_width) + ";"
-    result
+        else:
+            return Err("HWIR-E-EMIT-SEQUENTIAL-OUTPUT: unsupported typed sequential output " + output.kind)
+    Ok(result)
 
-fn strict_seq_process(plan: HwSequentialPlan) -> text:
+fn strict_seq_process(plan: HwSequentialPlan) -> Result<text, text>:
     var resets = ""
     for register in plan.registers:
         resets = resets + " " + register.name + " <= " + strict_seq_reset(register) + ";"
     var rules = ""
     for rule in plan.rules:
-        rules = rules + " -- simple-hwir node=" + plan.rule_node_id(rule).value + "\n elsif " + strict_seq_guards(rule.guards) + " then" + strict_seq_assignments(rule.assignments)
-    " process(clk) begin if rising_edge(clk) then if rst='1' then" + resets + rules + " end if; end if; end process;\n"
+        val rendered_guards = strict_seq_guards(rule.guards)?
+        val rendered_assignments = strict_seq_assignments(rule.assignments)?
+        rules = rules + " -- simple-hwir node=" + plan.rule_node_id(rule).value + "\n elsif " + rendered_guards + " then" + rendered_assignments
+    Ok(" process(clk) begin if rising_edge(clk) then if rst='1' then" + resets + rules + " end if; end if; end process;\n")
 
 fn strict_stateful_vhdl(entity: text, config: CoreConfig, decoder_entity: text,
     ports: [HwPort], plan: HwSequentialPlan, decoder_vhdl: text, route: text,
-    graph_sha256: text) -> text:
-    decoder_vhdl + "\nlibrary ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n-- simple-hwir route=" + route + " profile=" + config.profile + " graph=" + graph_sha256 + "\n" +
+    graph_sha256: text) -> Result<text, text>:
+    val outputs = strict_seq_outputs(plan)?
+    val process_vhdl = strict_seq_process(plan)?
+    Ok(decoder_vhdl + "\nlibrary ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n-- simple-hwir route=" + route + " profile=" + config.profile + " graph=" + graph_sha256 + "\n" +
+        "-- simple-hwir port-schema=" + strict_hwir_port_schema_sha256(ports) + "\n" +
         "entity " + entity + " is port(\n" + strict_stateful_ports(ports) + "    ); end entity;\n" +
         "architecture rtl of " + entity + " is\n" + strict_seq_declarations(plan) + "\nbegin\n decoder: entity work." + decoder_entity + " port map(" + strict_seq_decoder_map(plan) + ");\n" +
-        strict_seq_outputs(plan) + "\n" + strict_seq_process(plan) + "end architecture rtl;\n"
+        outputs + "\n" + process_vhdl + "end architecture rtl;\n")
 
 pub fn strict_stateful_graph_sha(node_id: text, config: CoreConfig, origins: [HwOrigin], ports: [HwPort],
     decoder_entity: text, plan: HwSequentialPlan, decoder_graph_sha: text) -> text:
@@ -358,12 +393,16 @@ fn strict_stateful_result(frontend: HwParcelFrontendDef, route: text) -> HwirStr
     val expected_decoder = strict_parcel_frontend_decoder_entity(frontend.config)
     if expected_decoder.is_err() or frontend.decoder_entity != expected_decoder.ok().unwrap():
         return HwirStrictVhdlResult.rejected("HWIR-E-SEQUENTIAL-DECODER: stateful frontend decoder does not match its selected concrete product")
+    if decoder.module_node_id != HwNodeId.module_root(frontend.decoder_entity).value:
+        return HwirStrictVhdlResult.rejected("HWIR-E-SEQUENTIAL-DECODER: emitted decoder node identity does not match the bound decoder entity")
     val graph_sha256 = strict_stateful_graph_sha(frontend.node_id.value, frontend.config,
         frontend.origins, frontend.frontend_contract.ports(), frontend.decoder_entity, frontend.sequential,
         decoder.hwir_graph_sha256)
     val vhdl = strict_stateful_vhdl(frontend.summary_name, frontend.config, frontend.decoder_entity,
         frontend.frontend_contract.ports(), frontend.sequential, decoder.vhdl, route, graph_sha256)
-    HwirStrictVhdlResult(success: true, vhdl: vhdl, diagnostic: "", route: route,
+    if vhdl.is_err():
+        return HwirStrictVhdlResult.rejected(vhdl.err().unwrap())
+    HwirStrictVhdlResult(success: true, vhdl: vhdl.ok().unwrap(), diagnostic: "", route: route,
         module_node_id: frontend.node_id.value, config_xlen: frontend.config.xlen,
         config_profile: frontend.config.profile, hwir_graph_sha256: graph_sha256)
 
@@ -380,12 +419,16 @@ fn strict_trap_stateful_result(frontend: HwTrapParcelFrontendDef) -> HwirStrictV
         return decoder
     if frontend.decoder_entity != decoder_name:
         return HwirStrictVhdlResult.rejected("HWIR-E-SEQUENTIAL-DECODER: trap frontend decoder does not match its selected concrete product")
+    if decoder.module_node_id != HwNodeId.module_root(frontend.decoder_entity).value:
+        return HwirStrictVhdlResult.rejected("HWIR-E-SEQUENTIAL-DECODER: emitted trap decoder node identity does not match the bound decoder entity")
     val graph_sha256 = strict_stateful_graph_sha(frontend.node_id.value, frontend.config,
         frontend.origins, frontend.frontend_contract.ports(), frontend.decoder_entity, frontend.sequential,
         decoder.hwir_graph_sha256)
     val vhdl = strict_stateful_vhdl(frontend.summary_name, frontend.config, frontend.decoder_entity,
-        frontend.frontend_contract.ports(), frontend.sequential, decoder.vhdl, "hwir-gen2-trap-stateful-product", graph_sha256)
-    HwirStrictVhdlResult(success: true, vhdl: vhdl, diagnostic: "", route: "hwir-gen2-trap-stateful-product",
+        frontend.frontend_contract.ports(), frontend.sequential, decoder.vhdl, "hwir-gen2-trap-stateful-product-v3", graph_sha256)
+    if vhdl.is_err():
+        return HwirStrictVhdlResult.rejected(vhdl.err().unwrap())
+    HwirStrictVhdlResult(success: true, vhdl: vhdl.ok().unwrap(), diagnostic: "", route: "hwir-gen2-trap-stateful-product-v3",
         module_node_id: frontend.node_id.value, config_xlen: frontend.config.xlen,
         config_profile: frontend.config.profile, hwir_graph_sha256: graph_sha256)
 
@@ -399,7 +442,7 @@ pub fn compile_strict_zca_single_outstanding_frontend_product(config: CoreConfig
     val frontend = strict_zca_single_outstanding_frontend_hwir(name, config)
     if frontend.is_err():
         return HwirStrictVhdlResult.rejected(frontend.err().unwrap())
-    strict_stateful_result(frontend.ok().unwrap(), "hwir-gen2-stateful-product")
+    strict_stateful_result(frontend.ok().unwrap(), "hwir-gen2-stateful-product-v2")
 
 pub fn compile_strict_zca_trap_single_outstanding_frontend_product(config: CoreConfig) -> HwirStrictVhdlResult:
     val name = if config.xlen == 32: "riscv_gen2_zca_trap_single_outstanding_frontend_rv32" else: "riscv_gen2_zca_trap_single_outstanding_frontend_rv64"
@@ -407,3 +450,177 @@ pub fn compile_strict_zca_trap_single_outstanding_frontend_product(config: CoreC
     if frontend.is_err():
         return HwirStrictVhdlResult.rejected(frontend.err().unwrap())
     strict_trap_stateful_result(frontend.ok().unwrap())
+
+fn strict_hwir_sha256_text(digest: text) -> bool:
+    if digest.len() != 64:
+        return false
+    val hex = "0123456789abcdef"
+    var index = 0
+    while index < digest.len():
+        if not hex.contains(digest[index:index + 1]):
+            return false
+        index = index + 1
+    true
+
+fn strict_retirement_child_diagnostic(role: text, child: HwirStrictVhdlResult,
+    entity: text, route: text, config: CoreConfig, ports: [HwPort]) -> text:
+    """Admit only a child result whose typed metadata and VHDL markers agree.
+
+    This validates serialization provenance, not architectural effects.  In
+    particular, a receipt-producer child must still be supplied by a later
+    architectural owner; this renderer never creates one.
+    """
+    if not child.is_success():
+        return "HWIR-E-RETIRE-COMPOSITION-CHILD-RESULT: " + role + " child must be a successful strict HWIR result"
+    if child.route != route:
+        return "HWIR-E-RETIRE-COMPOSITION-CHILD-ROUTE: " + role + " child route does not match the closed composition schema"
+    if child.config_xlen != config.xlen or child.config_profile != config.profile:
+        return "HWIR-E-RETIRE-COMPOSITION-CHILD-CONFIG: " + role + " child configuration does not match the closed composition"
+    if child.module_node_id != entity + ":module":
+        return "HWIR-E-RETIRE-COMPOSITION-CHILD-NODE: " + role + " child node does not match the closed component entity"
+    if not strict_hwir_sha256_text(child.hwir_graph_sha256) or
+        not child.vhdl.contains("graph=" + child.hwir_graph_sha256):
+        return "HWIR-E-RETIRE-COMPOSITION-CHILD-DIGEST: " + role + " child graph digest does not match its serialized VHDL provenance"
+    val schema = strict_hwir_port_schema_sha256(ports)
+    if not child.vhdl.contains("port-schema=" + schema):
+        return "HWIR-E-RETIRE-COMPOSITION-CHILD-SCHEMA: " + role + " child port schema does not match the closed component contract"
+    for port in ports:
+        if not child.vhdl.contains(port.name + " : " + port.direction + " " + strict_vhdl_type(port.bit_width)):
+            return "HWIR-E-RETIRE-COMPOSITION-CHILD-SCHEMA: " + role + " child VHDL port text does not match the closed component contract"
+    if not child.vhdl.contains("route=" + route) or not child.vhdl.contains("profile=" + config.profile) or
+        not child.vhdl.contains("entity " + entity + " is"):
+        return "HWIR-E-RETIRE-COMPOSITION-CHILD-TEXT: " + role + " child VHDL does not carry its admitted strict component identity"
+    ""
+
+fn strict_retirement_component_entity(composition: HwParcelRetirementComposition) -> Result<text, text>:
+    val suffix = ":module"
+    if not composition.node_id.value.ends_with(suffix):
+        return Err("HWIR-E-RETIRE-COMPOSITION-ID: retirement composition node must be a module root")
+    val entity = composition.node_id.value[0:composition.node_id.value.len() - suffix.len()]
+    if entity == "":
+        return Err("HWIR-E-RETIRE-COMPOSITION-ID: retirement composition requires a concrete VHDL entity name")
+    Ok(entity)
+
+fn strict_retirement_binding_signal(binding: HwRetireCompositionBinding) -> text:
+    "retire_composition_" + binding.kind + "_" + binding.source_port
+
+fn strict_retirement_public_ports(composition: HwParcelRetirementComposition) -> [HwPort]:
+    var ports: [HwPort] = []
+    for port in composition.frontend.ports():
+        var internal = false
+        for binding in composition.bindings:
+            if binding.kind == "frontend_to_producer" and binding.source_port == port.name:
+                internal = true
+            if binding.kind == "producer_to_frontend" and binding.destination_port == port.name:
+                internal = true
+        if not internal:
+            ports.push(port)
+    ports
+
+fn strict_retirement_frontend_port_map(composition: HwParcelRetirementComposition, port: HwPort) -> text:
+    for binding in composition.bindings:
+        if binding.destination_owner == "frontend" and binding.destination_port == port.name:
+            if binding.kind == "shared_input":
+                return binding.source_port
+            return strict_retirement_binding_signal(binding)
+        if binding.source_owner == "frontend" and binding.source_port == port.name:
+            return strict_retirement_binding_signal(binding)
+    port.name
+
+fn strict_retirement_producer_port_map(composition: HwParcelRetirementComposition, port: HwPort) -> text:
+    for binding in composition.bindings:
+        if binding.destination_owner == "producer" and binding.destination_port == port.name:
+            if binding.kind == "shared_input":
+                return binding.source_port
+            return strict_retirement_binding_signal(binding)
+        if binding.source_owner == "producer" and binding.source_port == port.name:
+            return strict_retirement_binding_signal(binding)
+    port.name
+
+fn strict_retirement_child_map(composition: HwParcelRetirementComposition, frontend: bool) -> text:
+    val ports = if frontend: composition.frontend.ports() else: composition.producer.ports()
+    var result = ""
+    var index = 0
+    for port in ports:
+        if index > 0:
+            result = result + ","
+        val signal = if frontend:
+            strict_retirement_frontend_port_map(composition, port)
+        else:
+            strict_retirement_producer_port_map(composition, port)
+        result = result + port.name + "=>" + signal
+        index = index + 1
+    result
+
+fn strict_retirement_composition_graph_sha(composition: HwParcelRetirementComposition,
+    frontend: HwirStrictVhdlResult, producer: HwirStrictVhdlResult) -> text:
+    var fields: [text] = ["simple-hwir-retirement-composition/v1", composition.node_id.value,
+        composition.config.xlen.to_text(), composition.config.physical_address_bits.to_text(),
+        composition.config.register_count.to_text(), composition.config.profile,
+        composition.config.isa_profile, composition.config.compressed_decode_profile,
+        "frontend", frontend.route, frontend.module_node_id, frontend.config_xlen.to_text(),
+        frontend.config_profile, frontend.hwir_graph_sha256,
+        strict_hwir_port_schema_sha256(composition.frontend.ports()),
+        "producer", producer.route, producer.module_node_id, producer.config_xlen.to_text(),
+        producer.config_profile, producer.hwir_graph_sha256,
+        strict_hwir_port_schema_sha256(composition.producer.ports())]
+    for binding in composition.bindings:
+        fields.push("binding")
+        fields.push(binding.kind)
+        fields.push(binding.source_owner)
+        fields.push(binding.source_port)
+        fields.push(binding.destination_owner)
+        fields.push(binding.destination_port)
+        fields.push(binding.bit_width.to_text())
+    sha256_text(hwir_hash_fields(fields))
+
+pub fn render_strict_retirement_composition_vhdl(composition: HwParcelRetirementComposition,
+    frontend: HwirStrictVhdlResult, producer: HwirStrictVhdlResult) -> HwirStrictVhdlResult:
+    """Render one closed frontend/receipt component boundary from admitted children.
+
+    It is intentionally not a producer implementation: all behavior remains
+    inside the already-admitted child entities.  Missing, mismatched, or
+    unproven child metadata returns a diagnostic without any textual fallback.
+    """
+    val composition_error = composition.shape_diagnostic()
+    if composition_error != "":
+        return HwirStrictVhdlResult.rejected(composition_error)
+    val entity = strict_retirement_component_entity(composition)
+    if entity.is_err():
+        return HwirStrictVhdlResult.rejected(entity.err().unwrap())
+    val frontend_error = strict_retirement_child_diagnostic("frontend", frontend,
+        composition.frontend_entity, composition.frontend_route, composition.config,
+        composition.frontend.ports())
+    if frontend_error != "":
+        return HwirStrictVhdlResult.rejected(frontend_error)
+    val producer_error = strict_retirement_child_diagnostic("producer", producer,
+        composition.producer_entity, composition.producer_route, composition.config,
+        composition.producer.ports())
+    if producer_error != "":
+        return HwirStrictVhdlResult.rejected(producer_error)
+    val graph_sha256 = strict_retirement_composition_graph_sha(composition, frontend, producer)
+    val public_ports = strict_retirement_public_ports(composition)
+    var signals = ""
+    for binding in composition.bindings:
+        if binding.kind != "shared_input":
+            signals = signals + "    signal " + strict_retirement_binding_signal(binding) +
+                " : " + strict_vhdl_type(binding.bit_width) + ";\n"
+    val vhdl = frontend.vhdl + "\n" + producer.vhdl + "\n" +
+        "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n" +
+        "-- simple-hwir route=hwir-gen2-retirement-composition-v1 node=" + composition.node_id.value +
+        " profile=" + composition.config.profile + " graph=" + graph_sha256 + "\n" +
+        "-- simple-hwir child=frontend route=" + frontend.route + " node=" + frontend.module_node_id +
+        " graph=" + frontend.hwir_graph_sha256 + " schema=" + strict_hwir_port_schema_sha256(composition.frontend.ports()) + "\n" +
+        "-- simple-hwir child=producer route=" + producer.route + " node=" + producer.module_node_id +
+        " graph=" + producer.hwir_graph_sha256 + " schema=" + strict_hwir_port_schema_sha256(composition.producer.ports()) + "\n" +
+        "-- simple-hwir composition only: retirement behavior is supplied by the admitted producer child.\n" +
+        "entity " + entity.ok().unwrap() + " is port(\n" + strict_stateful_ports(public_ports) +
+        "    ); end entity;\narchitecture rtl of " + entity.ok().unwrap() + " is\n" + signals +
+        "begin\n frontend: entity work." + composition.frontend_entity + " port map(" +
+        strict_retirement_child_map(composition, true) + ");\n producer: entity work." +
+        composition.producer_entity + " port map(" + strict_retirement_child_map(composition, false) +
+        ");\nend architecture rtl;\n"
+    HwirStrictVhdlResult(success: true, vhdl: vhdl, diagnostic: "",
+        route: "hwir-gen2-retirement-composition-v1", module_node_id: composition.node_id.value,
+        config_xlen: composition.config.xlen, config_profile: composition.config.profile,
+        hwir_graph_sha256: graph_sha256)

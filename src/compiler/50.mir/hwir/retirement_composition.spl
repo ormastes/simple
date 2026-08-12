@@ -9,6 +9,21 @@
 use compiler.mir.hwir.types.{CoreConfig, HwNodeId, HwPort, hwir_vhdl_identifier}
 use compiler.mir.hwir.stateful_frontend.{HwParcelFrontendInterface, strict_riscv_parcel_frontend_interface}
 
+fn strict_retirement_frontend_entity(config: CoreConfig) -> text:
+    """Return the sole admitted non-trap parcel frontend child for `config`.
+
+    This is intentionally a closed product selection rather than a generic
+    child-instance API.  The renderer consumes an already-emitted child result
+    and checks this identity before it creates a VHDL component boundary.
+    """
+    if config.profile == "riscv-gen2-rv32-zca-cjal-critical":
+        return "riscv_gen2_zca_rv32_cjal_single_outstanding_frontend"
+    if config.profile == "riscv-gen2-rv64-zca-addiw-critical":
+        return "riscv_gen2_zca_rv64_addiw_single_outstanding_frontend"
+    if config.xlen == 32:
+        return "riscv_gen2_zca_single_outstanding_frontend_rv32"
+    "riscv_gen2_zca_single_outstanding_frontend_rv64"
+
 pub class HwRetireReceiptProducerInterface:
     """Typed port contract an architectural owner must satisfy to retire one dispatch.
 
@@ -140,7 +155,10 @@ pub class HwParcelRetirementComposition:
     config: CoreConfig
     frontend: HwParcelFrontendInterface
     producer: HwRetireReceiptProducerInterface
+    frontend_entity: text
+    frontend_route: text
     producer_entity: text
+    producer_route: text
     bindings: [HwRetireCompositionBinding]
 
     me binding_diagnostic() -> text:
@@ -161,8 +179,14 @@ pub class HwParcelRetirementComposition:
     me shape_diagnostic() -> text:
         val config_error = self.config.diagnostic()
         if config_error != "": return config_error
-        if not self.node_id.is_valid() or not hwir_vhdl_identifier(self.producer_entity):
+        if not self.node_id.is_valid() or not hwir_vhdl_identifier(self.frontend_entity) or
+            not hwir_vhdl_identifier(self.producer_entity):
             return "HWIR-E-RETIRE-COMPOSITION-ID: retirement composition requires stable composition and producer identities"
+        if self.frontend_entity == self.producer_entity or
+            self.frontend_entity != strict_retirement_frontend_entity(self.config) or
+            self.frontend_route != "hwir-gen2-stateful-product-v2" or
+            self.producer_route != "hwir-strict":
+            return "HWIR-E-RETIRE-COMPOSITION-CHILD-SCHEMA: retirement composition requires the admitted frontend and strict producer child schemas"
         val frontend_error = self.frontend.shape_diagnostic()
         if frontend_error != "": return frontend_error
         val producer_error = self.producer.shape_diagnostic()
@@ -185,7 +209,9 @@ pub fn strict_zca_single_outstanding_retirement_composition(module_name: text,
     val producer = strict_riscv_retire_receipt_producer_interface(config)?
     val composition = HwParcelRetirementComposition(
         node_id: HwNodeId.module_root(module_name), config: config, frontend: frontend,
-        producer: producer, producer_entity: producer_entity,
+        producer: producer, frontend_entity: strict_retirement_frontend_entity(config),
+        frontend_route: "hwir-gen2-stateful-product-v2", producer_entity: producer_entity,
+        producer_route: "hwir-strict",
         bindings: strict_retire_composition_bindings())
     val diagnostic = composition.shape_diagnostic()
     if diagnostic != "": return Err(diagnostic)

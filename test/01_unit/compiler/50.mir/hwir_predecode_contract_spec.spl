@@ -10,7 +10,7 @@ use compiler.mir.hwir.stateful_frontend.{HwTrapParcelFrontendInterface, strict_p
 use compiler.mir.hwir.sequential.{HwSeqGuard, HwSeqInstancePin, HwSeqOutputBinding, HwSequentialPlan}
 use compiler.mir.hwir.frontend.{HwFrontendHandoffInterface, strict_riscv_frontend_handoff_interface, strict_zca_control_predecode_hwir, strict_zca_cjr_predecode_row_hwir, strict_zca_cjalr_predecode_row_hwir, strict_zca_migrating_isa_ids, strict_zca_migrating_predecode_hwir, strict_zca_rv32_cjal_migrating_isa_ids, strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_isa_ids, strict_zca_rv64_addiw_migrating_predecode_hwir}
 use compiler.mir.hwir.zca_rows.{strict_zca_cj_predecode_row_hwir, strict_zca_cjal_rv32_predecode_row_hwir, strict_zca_caddiw_rv64_predecode_row_hwir, strict_zca_cbeqz_predecode_row_hwir, strict_zca_cbnez_predecode_row_hwir}
-use compiler.mir.hwir.zca_outcomes.{strict_zca_lw_outcome_hwir, strict_zca_sw_outcome_hwir, strict_zca_lwsp_outcome_hwir, strict_zca_swsp_outcome_hwir, strict_zca_cli_outcome_hwir, strict_zca_caddi_outcome_hwir, strict_zca_caddi16sp_outcome_hwir, strict_zca_clui_outcome_hwir, strict_zca_slli_low_outcome_hwir, strict_zca_srli_low_outcome_hwir, strict_zca_srai_low_outcome_hwir, strict_zca_candi_outcome_hwir, strict_zca_csub_outcome_hwir, strict_zca_cxor_outcome_hwir, strict_zca_cor_outcome_hwir, strict_zca_cand_outcome_hwir, strict_zca_cmv_outcome_hwir, strict_zca_cadd_outcome_hwir}
+use compiler.mir.hwir.zca_outcomes.{strict_zca_addi4spn_outcome_hwir, strict_zca_lw_outcome_hwir, strict_zca_sw_outcome_hwir, strict_zca_lwsp_outcome_hwir, strict_zca_swsp_outcome_hwir, strict_zca_cli_outcome_hwir, strict_zca_caddi_outcome_hwir, strict_zca_caddi16sp_outcome_hwir, strict_zca_clui_outcome_hwir, strict_zca_slli_low_outcome_hwir, strict_zca_srli_low_outcome_hwir, strict_zca_srai_low_outcome_hwir, strict_zca_candi_outcome_hwir, strict_zca_csub_outcome_hwir, strict_zca_cxor_outcome_hwir, strict_zca_cor_outcome_hwir, strict_zca_cand_outcome_hwir, strict_zca_cmv_outcome_hwir, strict_zca_cadd_outcome_hwir}
 use compiler.backend.backend.hwir_to_vhdl.{compile_strict_zca_rv32_cjal_migrating_predecode_product, compile_strict_zca_rv64_addiw_migrating_predecode_product, compile_strict_zca_single_outstanding_frontend_product, render_strict_hwir_vhdl, strict_stateful_graph_sha}
 use std.hardware.riscv_common.isa.isa_database.{riscv_zca_critical_subset_entries}
 
@@ -33,6 +33,35 @@ fn strict_origin_source_count(module: HwModuleDef, source_name: text) -> i32:
         if origin.source_name == source_name:
             count = count + 1
     count
+
+fn strict_has_signal(module: HwModuleDef, signal_name: text) -> bool:
+    for signal in module.signals:
+        if signal.name == signal_name:
+            return true
+    false
+
+fn strict_select_condition(module: HwModuleDef, result_name: text) -> text:
+    for op in module.select_ops:
+        if op.result == result_name:
+            return op.condition
+    ""
+
+fn strict_comb_source(module: HwModuleDef, result_name: text) -> text:
+    for op in module.comb_ops:
+        if op.result == result_name:
+            return op.lhs
+    ""
+
+fn expect_normal_outcome_contract(module: HwModuleDef):
+    expect(module.shape_diagnostic()).to_equal("")
+    for signal_name in ["match_legal", "fallthrough_pc", "effect_register_write",
+        "effect_memory_read", "effect_memory_write", "control_fallthrough"]:
+        expect(strict_has_signal(module, signal_name)).to_be(true)
+    expect(strict_comb_source(module, "legal")).to_equal("match_legal")
+    expect(strict_comb_source(module, "original_length_bytes")).to_equal("two_length")
+    expect(strict_comb_source(module, "next_pc")).to_equal("fallthrough_pc")
+    expect(strict_comb_source(module, "redirect_valid")).to_equal("zero_flag")
+    expect(strict_comb_source(module, "redirect_target")).to_equal("fetch_pc")
 
 describe "strict RISC-V compressed predecode contract":
     it "REQ-G2-001 rejects duplicate strict-HWIR drivers before emission":
@@ -101,7 +130,7 @@ describe "strict RISC-V compressed predecode contract":
         else:
             expect(false).to_equal(true)
 
-    it "REQ-G2-012 isolates RV64 C.ADDIW, including signed immediate and rd=x0 rejection":
+    it "REQ-G2-002/003 isolates RV64 C.ADDIW and fails an incompatible RV32 profile closed":
         val config = CoreConfig.rv64_zca_addiw_mission_critical()
         val row = strict_zca_caddiw_rv64_predecode_row_hwir("caddiw_rv64", config)
         if val module = row.ok():
@@ -129,7 +158,7 @@ describe "strict RISC-V compressed predecode contract":
         expect(strict_zca_rv32_cjal_migrating_predecode_hwir(
             "rv64_cjal_rejected", CoreConfig.rv64_zca_mission_critical()).is_err()).to_equal(true)
 
-    it "REQ-G2-013 binds specialized parcel frontends to their exact elaborated decoders":
+    it "REQ-G2-010 binds specialized parcel frontends to their exact elaborated decoders":
         val cjal_config = CoreConfig.rv32_zca_cjal_mission_critical()
         val addiw_config = CoreConfig.rv64_zca_addiw_mission_critical()
         expect(strict_parcel_frontend_decoder_entity(cjal_config).unwrap()).to_equal(
@@ -186,7 +215,10 @@ describe "strict RISC-V compressed predecode contract":
         val interface = strict_riscv_trap_parcel_frontend_interface(config)
         if val contract = interface.ok():
             expect(contract.shape_diagnostic()).to_equal("")
-            expect(contract.ports().len()).to_equal(24)
+            expect(contract.ports().len()).to_equal(27)
+            expect(contract.retire_original_parcel.name).to_equal("retire_original_parcel")
+            expect(contract.retire_canonical_instruction.name).to_equal("retire_canonical_instruction")
+            expect(contract.retire_original_length_bytes.name).to_equal("retire_original_length_bytes")
             expect(contract.trap_valid.bit_width).to_equal(1)
             expect(contract.trap_cause.bit_width).to_equal(32)
         else:
@@ -382,6 +414,23 @@ describe "strict RISC-V compressed predecode contract":
         else:
             expect(false).to_equal(true)
 
+    it "REQ-G2-010 rejects case-only public port collisions before VHDL emission":
+        val plain = strict_riscv_parcel_frontend_interface(CoreConfig.rv32_zca_mission_critical())
+        if val contract = plain.ok():
+            contract.rst.name = "CLK"
+            expect(contract.shape_diagnostic()).to_equal(
+                "HWIR-E-PARCEL-FRONTEND-DUPLICATE-PORT: stateful frontend port names must be unique")
+        else:
+            expect(false).to_equal(true)
+
+        val trap = strict_riscv_trap_parcel_frontend_interface(CoreConfig.rv32_zca_mission_critical())
+        if val contract = trap.ok():
+            contract.rst.name = "CLK"
+            expect(contract.shape_diagnostic()).to_equal(
+                "HWIR-E-TRAP-PARCEL-FRONTEND-DUPLICATE-PORT: trap frontend port names must be unique")
+        else:
+            expect(false).to_equal(true)
+
     it "REQ-G2-010 rejects type-correct sequential rule ordering and reset drift from the fixed trap product":
         val config = CoreConfig.rv32_zca_mission_critical()
         val frontend = strict_zca_trap_single_outstanding_frontend_hwir("trap_sequential_template", config)
@@ -522,6 +571,7 @@ describe "strict RISC-V compressed predecode contract":
 
     it "REQ-G2-011 admits only classifier-complete normal rows through the explicit outcome adapter":
         val config = CoreConfig.rv32_zca_mission_critical()
+        expect(strict_zca_addi4spn_outcome_hwir("outcome_addi4spn", config).is_ok()).to_be(true)
         expect(strict_zca_lw_outcome_hwir("outcome_lw", config).is_ok()).to_be(true)
         expect(strict_zca_sw_outcome_hwir("outcome_sw", config).is_ok()).to_be(true)
         expect(strict_zca_lwsp_outcome_hwir("outcome_lwsp", config).is_ok()).to_be(true)
@@ -541,6 +591,59 @@ describe "strict RISC-V compressed predecode contract":
         expect(strict_zca_cmv_outcome_hwir("outcome_cmv", config).is_ok()).to_be(true)
         expect(strict_zca_cadd_outcome_hwir("outcome_cadd", config).is_ok()).to_be(true)
         expect(strict_zca_lw_outcome_hwir("outcome_base", CoreConfig.rv32()).is_err()).to_be(true)
+
+    it "REQ-G2-011 gives every normal outcome an explicit legality, fallthrough, and effect contract":
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val outcomes = [
+            strict_zca_addi4spn_outcome_hwir("contract_addi4spn", config).ok().unwrap(),
+            strict_zca_lw_outcome_hwir("contract_lw", config).ok().unwrap(),
+            strict_zca_sw_outcome_hwir("contract_sw", config).ok().unwrap(),
+            strict_zca_lwsp_outcome_hwir("contract_lwsp", config).ok().unwrap(),
+            strict_zca_swsp_outcome_hwir("contract_swsp", config).ok().unwrap(),
+            strict_zca_cli_outcome_hwir("contract_cli", config).ok().unwrap(),
+            strict_zca_caddi_outcome_hwir("contract_addi", config).ok().unwrap(),
+            strict_zca_caddi16sp_outcome_hwir("contract_addi16sp", config).ok().unwrap(),
+            strict_zca_clui_outcome_hwir("contract_lui", config).ok().unwrap(),
+            strict_zca_slli_low_outcome_hwir("contract_slli", config).ok().unwrap(),
+            strict_zca_srli_low_outcome_hwir("contract_srli", config).ok().unwrap(),
+            strict_zca_srai_low_outcome_hwir("contract_srai", config).ok().unwrap(),
+            strict_zca_candi_outcome_hwir("contract_andi", config).ok().unwrap(),
+            strict_zca_csub_outcome_hwir("contract_sub", config).ok().unwrap(),
+            strict_zca_cxor_outcome_hwir("contract_xor", config).ok().unwrap(),
+            strict_zca_cor_outcome_hwir("contract_or", config).ok().unwrap(),
+            strict_zca_cand_outcome_hwir("contract_and", config).ok().unwrap(),
+            strict_zca_cmv_outcome_hwir("contract_mv", config).ok().unwrap(),
+            strict_zca_cadd_outcome_hwir("contract_add", config).ok().unwrap()
+        ]
+        for outcome in outcomes:
+            expect_normal_outcome_contract(outcome)
+        val lw = outcomes[1]
+        val sw = outcomes[2]
+        val addi = outcomes[6]
+        expect(strict_comb_source(lw, "effect_memory_read")).to_equal("match_legal")
+        expect(strict_comb_source(sw, "effect_memory_write")).to_equal("match_legal")
+        expect(strict_comb_source(addi, "effect_register_write")).to_equal("match_legal")
+
+    it "REQ-G2-011 keeps C.MV and C.ADD disjoint from JR JALR and EBREAK boundaries":
+        val config = CoreConfig.rv32_zca_mission_critical()
+        # 0x8082 (JR x1), 0x9082 (JALR x1), and 0x9002 (EBREAK) share
+        # the coarse normal-row tags. Their rs2 field is zero, so the explicit
+        # reserved gate below, rather than a canonical-word sentinel, excludes them.
+        expect(32898 & 61443).to_equal(32770)
+        expect(36994 & 61443).to_equal(36866)
+        expect(36866 & 61443).to_equal(36866)
+        val cmv = strict_zca_cmv_outcome_hwir("boundary_cmv", config).ok().unwrap()
+        val cadd = strict_zca_cadd_outcome_hwir("boundary_cadd", config).ok().unwrap()
+        expect(strict_select_condition(cmv, "cmv_legal_after_reserved_0")).to_equal("cmv_rs2_is_zero")
+        expect(strict_select_condition(cmv, "match_legal")).to_equal("cmv_is_c_mv")
+        expect(strict_select_condition(cadd, "cadd_legal_after_reserved_0")).to_equal("cadd_rs2_is_zero")
+        expect(strict_select_condition(cadd, "match_legal")).to_equal("cadd_is_c_add")
+        val cmv_vhdl = render_strict_hwir_vhdl(cmv)
+        val cadd_vhdl = render_strict_hwir_vhdl(cadd)
+        expect(cmv_vhdl.is_success()).to_be(true)
+        expect(cadd_vhdl.is_success()).to_be(true)
+        expect(cmv_vhdl.vhdl).to_contain("cmv_legal_after_reserved_0 <= zero_flag when cmv_rs2_is_zero = '1'")
+        expect(cadd_vhdl.vhdl).to_contain("cadd_legal_after_reserved_0 <= zero_flag when cadd_rs2_is_zero = '1'")
 
     it "REQ-G2-003 concretely specializes address widths without runtime XLEN selection":
         val rv32 = strict_riscv_predecode_interface(CoreConfig.rv32_zca_mission_critical())

@@ -18,6 +18,7 @@ use compiler.mir.hwir.trap_frontend.{strict_zca_trap_migrating_predecode_hwir}
 use compiler.backend.backend.hwir_to_vhdl.{compile_strict_zca_control_predecode_product, compile_strict_zca_migrating_predecode_product, compile_strict_zca_rv32_cjal_migrating_predecode_product, compile_strict_zca_rv64_addiw_migrating_predecode_product, compile_strict_zca_single_outstanding_frontend_product, compile_strict_zca_trap_single_outstanding_frontend_product, strict_stateful_graph_sha}
 use compiler.driver.driver_build.incremental.{native_build_compiler_identity, native_build_compiler_executable_hash}
 use compiler.driver.driver_vhdl_artifacts.{VhdlArtifactGeneratedItem, VhdlArtifactInput, VhdlArtifactLocation, VhdlArtifactPort, VhdlArtifactRendered, vhdl_gen2_capability_ids, vhdl_gen2_capability_sha256, vhdl_render_production_artifacts, vhdl_remove_production_artifacts, vhdl_validate_production_artifact_input}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 
@@ -29,12 +30,12 @@ const RISCV_GEN2_ZCA_RV32_CJAL_MIGRATING_PREDECODE_PRODUCT = "riscv-gen2-zca-rv3
 const RISCV_GEN2_RV32_CJAL_MIGRATING_PRODUCT_ENTRY_MODULE = "compiler-product:riscv-gen2-zca-rv32-cjal-migrating-predecode-v1"
 const RISCV_GEN2_ZCA_RV64_ADDIW_MIGRATING_PREDECODE_PRODUCT = "riscv-gen2-zca-rv64-addiw-migrating-predecode-v1"
 const RISCV_GEN2_RV64_ADDIW_MIGRATING_PRODUCT_ENTRY_MODULE = "compiler-product:riscv-gen2-zca-rv64-addiw-migrating-predecode-v1"
-const RISCV_GEN2_ZCA_RV32_CJAL_SINGLE_OUTSTANDING_PRODUCT = "riscv-gen2-zca-rv32-cjal-single-outstanding-v1"
-const RISCV_GEN2_RV32_CJAL_SINGLE_OUTSTANDING_ENTRY_MODULE = "compiler-product:riscv-gen2-zca-rv32-cjal-single-outstanding-v1"
-const RISCV_GEN2_ZCA_RV64_ADDIW_SINGLE_OUTSTANDING_PRODUCT = "riscv-gen2-zca-rv64-addiw-single-outstanding-v1"
-const RISCV_GEN2_RV64_ADDIW_SINGLE_OUTSTANDING_ENTRY_MODULE = "compiler-product:riscv-gen2-zca-rv64-addiw-single-outstanding-v1"
-const RISCV_GEN2_ZCA_TRAP_SINGLE_OUTSTANDING_PRODUCT = "riscv-gen2-zca-trap-single-outstanding-v2"
-const RISCV_GEN2_TRAP_SINGLE_OUTSTANDING_ENTRY_MODULE = "compiler-product:riscv-gen2-zca-trap-single-outstanding-v2"
+const RISCV_GEN2_ZCA_RV32_CJAL_SINGLE_OUTSTANDING_PRODUCT = "riscv-gen2-zca-rv32-cjal-single-outstanding-v2"
+const RISCV_GEN2_RV32_CJAL_SINGLE_OUTSTANDING_ENTRY_MODULE = "compiler-product:riscv-gen2-zca-rv32-cjal-single-outstanding-v2"
+const RISCV_GEN2_ZCA_RV64_ADDIW_SINGLE_OUTSTANDING_PRODUCT = "riscv-gen2-zca-rv64-addiw-single-outstanding-v2"
+const RISCV_GEN2_RV64_ADDIW_SINGLE_OUTSTANDING_ENTRY_MODULE = "compiler-product:riscv-gen2-zca-rv64-addiw-single-outstanding-v2"
+const RISCV_GEN2_ZCA_TRAP_SINGLE_OUTSTANDING_PRODUCT = "riscv-gen2-zca-trap-single-outstanding-v3"
+const RISCV_GEN2_TRAP_SINGLE_OUTSTANDING_ENTRY_MODULE = "compiler-product:riscv-gen2-zca-trap-single-outstanding-v3"
 
 # This receipt is intentionally private to the sole compiler-product route.
 # Simple visibility is not yet a hard capability boundary, so this confines the
@@ -43,11 +44,12 @@ struct Gen2VhdlArtifactEmissionReceipt:
     output_path: text
     vhdl: text
     rendered: VhdlArtifactRendered
+    hwir_graph_sha256: text
 
 fn gen2_is_compiler_product_route(route: text) -> bool:
     route == "hwir-gen2-product" or
-        route == "hwir-gen2-stateful-product" or
-        route == "hwir-gen2-trap-stateful-product"
+        route == "hwir-gen2-stateful-product-v2" or
+        route == "hwir-gen2-trap-stateful-product-v3"
 
 fn gen2_authorize_vhdl_artifact_emission(input: VhdlArtifactInput,
     vhdl: text) -> Result<Gen2VhdlArtifactEmissionReceipt, text>:
@@ -55,12 +57,24 @@ fn gen2_authorize_vhdl_artifact_emission(input: VhdlArtifactInput,
     if not gen2_is_compiler_product_route(input.generation_route):
         return Err("VHDL Gen2 artifact receipt requires a compiler-owned Gen2 route")
     vhdl_validate_production_artifact_input(input)?
+    if not vhdl.contains("graph=" + input.hwir_graph_sha256):
+        return Err("VHDL Gen2 artifact receipt requires the canonical HWIR closure SHA-256 in emitted VHDL")
+    val rendered = vhdl_render_production_artifacts(input, vhdl)
+    if not rendered.manifest.contains("\"graph_sha256\":\"" +
+        input.hwir_graph_sha256 + "\""):
+        return Err("VHDL Gen2 artifact receipt requires the canonical HWIR closure SHA-256 in its manifest")
     Ok(Gen2VhdlArtifactEmissionReceipt(output_path: input.output_path,
-        vhdl: vhdl, rendered: vhdl_render_production_artifacts(input, vhdl)))
+        vhdl: vhdl, rendered: rendered,
+        hwir_graph_sha256: input.hwir_graph_sha256))
 
 fn gen2_write_authorized_vhdl_artifact_emission(
     receipt: Gen2VhdlArtifactEmissionReceipt) -> Result<(), text>:
     """Persist only a bundle authorized by the private Gen2 product receipt."""
+    if not sha256_lower_hex_valid(receipt.hwir_graph_sha256) or
+        not receipt.vhdl.contains("graph=" + receipt.hwir_graph_sha256) or
+        not receipt.rendered.manifest.contains("\"graph_sha256\":\"" +
+            receipt.hwir_graph_sha256 + "\""):
+        return Err("VHDL Gen2 artifact write requires one consistent canonical HWIR closure SHA-256")
     val output = receipt.output_path
     if not vhdl_remove_production_artifacts(output):
         return Err("Failed to remove stale VHDL artifacts for {output}")
@@ -192,7 +206,7 @@ fn compile_riscv_gen2_special_stateful_product(driver: CompilerDriver,
     if not vhdl_remove_production_artifacts(output):
         return CompileResult.CodegenError("Failed to remove stale VHDL artifacts for {output}")
     val emitted = compile_strict_zca_single_outstanding_frontend_product(config)
-    if not emitted.is_success() or emitted.route != "hwir-gen2-stateful-product" or emitted.hwir_graph_sha256.len() != 64:
+    if not emitted.is_success() or emitted.route != "hwir-gen2-stateful-product-v2" or emitted.hwir_graph_sha256.len() != 64:
         return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-EMIT: {emitted.diagnostic}")
     val module = match strict_zca_single_outstanding_frontend_hwir(emitted.module_node_id.replace(":module", ""), config):
         case Ok(value): value
@@ -399,7 +413,7 @@ impl CompilerDriver:
         if not vhdl_remove_production_artifacts(output):
             return CompileResult.CodegenError("Failed to remove stale VHDL artifacts for {output}")
         val emitted = compile_strict_zca_trap_single_outstanding_frontend_product(config)
-        if not emitted.is_success() or emitted.route != "hwir-gen2-trap-stateful-product" or emitted.hwir_graph_sha256.len() != 64:
+        if not emitted.is_success() or emitted.route != "hwir-gen2-trap-stateful-product-v3" or emitted.hwir_graph_sha256.len() != 64:
             return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-EMIT: {emitted.diagnostic}")
         val module_name = if config.xlen == 32:
             "riscv_gen2_zca_trap_single_outstanding_frontend_rv32"

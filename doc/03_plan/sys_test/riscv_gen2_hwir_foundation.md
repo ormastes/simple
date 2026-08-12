@@ -51,7 +51,9 @@ evidence.
 | REQ-G2-003/004 control composition | one flattened RV32/RV64 C.J/C.BEQZ/C.BNEZ module target-simulates direct jump, both conditional branches, index mismatch, and unsupported-parcel fallthrough; this is a stateless control slice, not full Zca/frontend evidence |
 | REQ-G2-004 C.LI row equivalence | generated VHDL exhausts all 2,048 C.LI row encodings, checks canonical ADDI-with-x0 assembly, and rejects a non-row parcel |
 | REQ-G2-005 | legacy bridge marker remains distinct from strict result test |
-| NFR-G2-001..006 | repeat render, negative mutation tests, source ownership and critical-profile lint checks; HWIR ports carry only typed width/type metadata while VHDL type serialization remains in the backend owner |
+| NFR-G2-001..003,006 | repeat render, negative mutation tests, and critical-profile lint checks; HWIR ports carry only typed width/type metadata while VHDL type serialization remains in the backend owner |
+| NFR-G2-004 | the executable typed parcel-mask scenario constructs only `HwConstant`/`HwCombOp` operands before rendering; focused source-ownership lint remains the global no-raw-VHDL-fragment gate |
+| NFR-G2-005 | the executable strict-RV32 scenario proves a Gen2 result cannot select legacy fallback; the focused route/source review remains the boundary check that V1 stays explicit |
 | Real-MIR increment | `Bool and Bool -> Bool` graph, origin, wrong-op, non-hardware and clocked rejection tests |
 | REQ-G2-003 C.LI real MIR | reserved one-input C.LI semantic intrinsic lowers only with exact argument/local/return/CFG shape; malformed intrinsic fails without fallback |
 | REQ-G2-003 C.ADDI real MIR | reserved one-input C.ADDI/C.NOP semantic intrinsic lowers only with exact argument/local/return/CFG shape; a non-semantic return fails without fallback |
@@ -117,6 +119,23 @@ lint runs are diagnostic only, and its command surface lacks `duplicate-check`
 and `sspec-maintain`. Do not claim this slice verified until a current
 self-hosted CLI reruns the commands recorded in
 `.spipe/riscv_gen2_hwir_foundation/state.md`.
+
+## Qualification receipt-retention policy
+
+No Gen2 qualification receipt is retained today. The planned qualification
+writer is the provenance-admitted self-hosted CLI, after it executes the RV32
+and RV64 generated-VHDL/GHDL routes. It must write one immutable run directory
+under `build/evidence/riscv_gen2_hwir_foundation/<run-id>/`, headed by
+`qualification_receipt.json`, with the exact CLI path/SHA-256, revision,
+command lines and exits, generated-VHDL hashes, GHDL analyze/elaborate/run
+logs, and the source/config/graph identities for both products. The receipt
+must fail closed if any identity, log, or RV32/RV64 row is absent.
+
+This is a tracked retention policy, not an artifact: this lane creates no
+`build/` files and does not call a seed run, a scenario result, or a manually
+edited document a receipt. Until that self-hosted writer exists and completes a
+run, manuals must say “planned qualification receipt”, never “retained
+receipt”.
 
 ## Critical-profile boundary
 

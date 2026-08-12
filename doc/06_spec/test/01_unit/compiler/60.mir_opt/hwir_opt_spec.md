@@ -1,6 +1,10 @@
 # Hwir Opt Specification
 
-> <details>
+> **Requirement:** REQ-G2-001
+>
+> **Source:** `test/01_unit/compiler/60.mir_opt/hwir_opt_spec.spl`
+> **Scope:** Typed HWIR optimizer planning and accounting. This specification
+> does not establish generated-VHDL or target-execution evidence.
 
 <!-- sdn-diagram:id=hwir_opt_spec.arch -->
 <details class="sdn-source">
@@ -29,245 +33,193 @@ hwir_opt_spec -> compiler
 |-------|--------|---------|--------:|
 | 8 | 8 | 0 | 0 |
 
-<details>
-<summary>Full Scenario Manual</summary>
+## Operator workflow
 
-# Hwir Opt Specification
+Run the focused SSpec with the admitted Simple runtime. Each scenario builds a
+small typed HWIR fixture, invokes exactly one optimizer contract, and checks
+the returned change and accounting fields with built-in matchers.
 
 ## Scenarios
 
 ### HWIR optimizer pass config
 
-#### allows all passes to be independently enabled
+#### should enable every pass for the speed profile
 
-- check
-- check
-- check
-- check
-- check
-- check
-
+1. Create an all-enabled speed pass configuration.
+2. Confirm that each optimization pass is enabled and the profile is `speed`.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
 val config = HwirOptPassConfig.all_enabled("speed")
-check(config.width_narrowing)
-check(config.structural_simplify)
-check(config.resource_binding)
-check(config.fsm_opt)
-check(config.memory_inference)
-check(config.dsp_inference)
-expect config.profile == "speed"
+expect(config.width_narrowing).to_be(true)
+expect(config.structural_simplify).to_be(true)
+expect(config.resource_binding).to_be(true)
+expect(config.fsm_opt).to_be(true)
+expect(config.memory_inference).to_be(true)
+expect(config.dsp_inference).to_be(true)
+expect(config.profile).to_equal("speed")
 ```
 
 </details>
 
-#### allows all passes to be independently disabled
+#### should disable every pass for the area profile
 
-- check
-- check
-- check
-- check
-- check
-- check
-
+1. Create a disabled area pass configuration.
+2. Confirm that each optimization pass is disabled and the profile is `area`.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
 val config = HwirOptPassConfig.none("area")
-check(not config.width_narrowing)
-check(not config.structural_simplify)
-check(not config.resource_binding)
-check(not config.fsm_opt)
-check(not config.memory_inference)
-check(not config.dsp_inference)
-expect config.profile == "area"
+expect(config.width_narrowing).to_be(false)
+expect(config.structural_simplify).to_be(false)
+expect(config.resource_binding).to_be(false)
+expect(config.fsm_opt).to_be(false)
+expect(config.memory_inference).to_be(false)
+expect(config.dsp_inference).to_be(false)
+expect(config.profile).to_equal("area")
 ```
 
 </details>
 
 ### HWIR width narrowing
 
-#### reports narrowed bits from static ranges
+#### should report narrowed bits from a static range
 
-- check
-
+1. Narrow an eight-bit unsigned range whose maximum is seven.
+2. Confirm that the pass changes the module and removes four bits.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
 val range = HwirWidthRange(node_id: "n0", min_value: 0, max_value: 7, original_width: 8, signed_value: false)
 val result = hwir_width_narrowing_pass(test_module(), [range])
-check(result.changed)
-expect result.narrowed_bits == 4
+expect(result.changed).to_be(true)
+expect(result.narrowed_bits).to_equal(4)
 ```
 
 </details>
 
 ### HWIR structural simplification
 
-#### counts folded and removed nodes
+#### should count folded and removed nodes
 
-- check
-
+1. Simplify a module with foldable and dead structural nodes.
+2. Confirm that the pass changes the module and removes seven nodes.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 4 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
 val stats = HwirStructuralStats(constant_folds: 2, dead_signals: 3, dead_registers: 1, redundant_muxes: 1, cse_hits: 2)
 val result = hwir_structural_simplify_pass(test_module(), stats)
-check(result.changed)
-expect result.removed_nodes == 7
+expect(result.changed).to_be(true)
+expect(result.removed_nodes).to_equal(7)
 ```
 
 </details>
 
 ### HWIR resource binding
 
-#### shares resources for area profile
+#### should share multiplier resources for the area profile
 
-- check
-- check
-
+1. Bind an area-profile multiplier plan.
+2. Confirm shared binding, estimated latency, and two shared resources.
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val plan = HwirResourceBindingPlan(profile: "area", multiplier_count: 4, shared_multiplier_count: 2, divider_count: 1, pipeline_stage_count: 0)
 val binding = hwir_binding_for_profile("mul0", "multiplier", "area")
 val result = hwir_resource_binding_pass(test_module(), plan)
-check(binding.is_shared())
-check(result.changed)
-expect result.shared_resources == 2
+expect(binding.is_shared()).to_be(true)
+expect(binding.latency_contract).to_equal("estimated")
+expect(binding.latency_is_committed()).to_equal(false)
+expect(result.changed).to_be(true)
+expect(result.shared_resources).to_equal(2)
 ```
 
 </details>
 
 ### HWIR FSM optimization
 
-#### chooses one hot for speed and removes unreachable states
+#### should choose one-hot speed encoding and remove unreachable states
 
-- check
-
+1. Optimize an eight-state control FSM for speed.
+2. Confirm one-hot encoding and removal of three unreachable states.
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 7 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val fsm = HwFsm.create("ctrl", "state", 8)
 val encoding = hwir_choose_fsm_encoding(8, "speed")
 val plan = HwirFsmOptPlan(fsm: fsm, unreachable_states: 3, encoding: encoding)
 val result = hwir_fsm_opt_pass(test_module(), plan)
-expect encoding == "one_hot"
-check(result.changed)
-expect result.removed_nodes == 3
+expect(encoding).to_equal("one_hot")
+expect(result.changed).to_be(true)
+expect(result.removed_nodes).to_equal(3)
 ```
 
 </details>
 
 ### HWIR memory inference
 
-#### recognizes true dual port RAM patterns
+#### should recognize a true dual-port RAM pattern
 
-- check
-
+1. Infer memory from a two-read-port register-file pattern.
+2. Confirm the true-dual-port template and changed accounting.
 
 <details>
 <summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val pattern = HwirMemoryPattern(name: "rf", element_width: 32, depth: 64, read_ports: 2, write_ports: 1, constant_contents: false, fifo_access: false)
 val memory = hwir_memory_from_pattern(pattern)
 val result = hwir_memory_inference_pass(test_module(), [pattern])
-expect memory.template_kind == "true_dual_port_ram"
-check(result.changed)
-expect result.removed_nodes == 64
+expect(memory.template_kind).to_equal("true_dual_port_ram")
+expect(result.changed).to_be(true)
+expect(result.removed_nodes).to_equal(64)
 ```
 
 </details>
 
 ### HWIR DSP inference
 
-#### binds wide arithmetic patterns to DSP resources
+#### should bind a multiply-accumulate pattern to DSP resources
 
-- check
-- check
-
+1. Infer DSP use for a sixteen-bit multiply-accumulate pattern.
+2. Confirm DSP eligibility, pass mutation, and post-pass DSP count.
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
 ```simple
 val pattern = HwirDspPattern(node_id: "mac0", pattern_kind: "mac", operand_width: 16, term_count: 2, prefer_lut: false)
 val result = hwir_dsp_inference_pass(test_module(), [pattern])
-check(pattern.uses_dsp())
-check(result.changed)
-expect result.cost_after.dsp_count == 5
+expect(pattern.uses_dsp()).to_be(true)
+expect(result.changed).to_be(true)
+expect(result.cost_after.dsp_count).to_equal(5)
 ```
 
 </details>
 
-## At a Glance
+## Scorecard and limitations
 
 | Field | Value |
 |-------|-------|
-| Category | Compiler |
+| Category | Compiler unit specification |
 | Status | Active |
-| Source | `test/01_unit/compiler/60.mir_opt/hwir_opt_spec.spl` |
-| Updated | 2026-07-06 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Scenario count | 8 |
+| Requirement coverage | REQ-G2-001 typed HWIR optimizer contracts |
+| Excluded evidence | VHDL emission, GHDL analysis, synthesis, target execution |
+| Updated | 2026-08-12 |
 
-## Overview
-
-Tests covering:
-- HWIR optimizer pass config
-- HWIR width narrowing
-- HWIR structural simplification
-- HWIR resource binding
-- HWIR FSM optimization
-- HWIR memory inference
-- HWIR DSP inference
-
-## Scenario Summary
-
-| Metric | Count |
-|--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
-| Slow scenarios | 0 |
-| Skipped scenarios | 0 |
-| Pending scenarios | 0 |
-
-
-</details>
+The examples intentionally use a fixed minimal module and deterministic
+optimizer inputs. They prove pass-config selection and reported accounting,
+not global optimization quality on arbitrary hardware designs.
