@@ -1,7 +1,7 @@
 # Versioned effectful compressed-predecode composition for strict RISC-V Gen2.
 
 use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant, HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwSelectOp, HwSignal}
-use compiler.mir.hwir.frontend.{HwFrontendRowFragment, strict_frontend_control_row_fragment, strict_zca_migrating_isa_ids, strict_zca_migrating_predecode_hwir}
+use compiler.mir.hwir.frontend.{HwFrontendRowFragment, strict_frontend_control_row_fragment, strict_zca_migrating_isa_ids, strict_zca_migrating_predecode_hwir, strict_zca_rv32_cjal_migrating_isa_ids, strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_isa_ids, strict_zca_rv64_addiw_migrating_predecode_hwir}
 use compiler.mir.hwir.trap_predecode.{strict_riscv_trap_predecode_interface, strict_zca_cebreak_trap_predecode_hwir}
 
 pub fn strict_zca_trap_migrating_isa_ids() -> [text]:
@@ -9,6 +9,132 @@ pub fn strict_zca_trap_migrating_isa_ids() -> [text]:
     var ids = strict_zca_migrating_isa_ids()
     ids.push("zca.c.ebreak")
     ids
+
+pub fn strict_zca_target_trap_migrating_isa_ids(config: CoreConfig) -> Result<[text], text>:
+    """Return the closed target decoder's exact architectural row set.
+
+    Target selection happens during elaboration. There is no runtime XLEN
+    selector and no generic fallback: an unrecognized product fails before a
+    graph can be emitted.
+    """
+    var ids: [text] = []
+    if config.xlen == 32 and config.profile == "riscv-gen2-rv32-zca-cjal-critical" and
+        config.isa_profile == "rv32i_zca":
+        ids = strict_zca_rv32_cjal_migrating_isa_ids()
+    elif config.xlen == 64 and config.profile == "riscv-gen2-rv64-zca-addiw-critical" and
+        config.isa_profile == "rv64i_zca":
+        ids = strict_zca_rv64_addiw_migrating_isa_ids()
+    else:
+        return Err("HWIR-E-ZCA-TARGET-TRAP-PROFILE: target trap decoder requires a concrete RV32 C.JAL or RV64 C.ADDIW product")
+    var unique: [text] = []
+    for id in ids:
+        if id == "" or unique.contains(id) or id == "zca.c.ebreak":
+            return Err("HWIR-E-ZCA-TARGET-TRAP-CLOSURE: target trap decoder ISA IDs must be unique and leave C.EBREAK to the trap owner")
+        unique.push(id)
+    ids.push("zca.c.ebreak")
+    Ok(ids)
+
+pub fn strict_zca_target_trap_migrating_predecode_hwir(module_name: text,
+    config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Close common Zca, the target-specific row, and C.EBREAK in one product.
+
+    The target decoder remains the sole owner of JR/JALR register binding and
+    redirect calculation. This layer only selects its already-normalized
+    outcome versus the explicit C.EBREAK effect. Any cross-partition overlap
+    clears legality, redirect, canonical output, and trap metadata.
+    """
+    if module_name == "":
+        return Err("HWIR-E-ZCA-TARGET-TRAP-ID: target trap decoder requires a module name")
+    val ids = strict_zca_target_trap_migrating_isa_ids(config)?
+    if ids.len() != 26:
+        return Err("HWIR-E-ZCA-TARGET-TRAP-CLOSURE: target trap decoder requires exactly 26 admitted rows")
+    val contract = strict_riscv_trap_predecode_interface(config)?
+    val target = if config.xlen == 32:
+        strict_zca_rv32_cjal_migrating_predecode_hwir(module_name + "_target", config)?
+    else:
+        strict_zca_rv64_addiw_migrating_predecode_hwir(module_name + "_target", config)?
+    val cbreak = strict_zca_cebreak_trap_predecode_hwir(module_name + "_cebreak", config)?
+    val target_fragment = strict_frontend_control_row_fragment(module_name, "target", target)?
+    val cbreak_fragment = strict_frontend_control_row_fragment(module_name, "cebreak", cbreak)?
+    val pa = config.physical_address_bits
+    val xlen = config.xlen
+    var signals: [HwSignal] = [HwSignal.comb("global_overlap", "Bits", 1),
+        HwSignal.comb("global_no_overlap", "Bits", 1),
+        HwSignal.comb("global_selected_legal", "Bits", 1),
+        HwSignal.comb("global_unique_legal", "Bits", 1),
+        HwSignal.comb("global_trap_selected", "Bits", 1),
+        HwSignal.comb("global_fallthrough_pc", "Bits", pa),
+        HwSignal.comb("global_raw_canonical", "Bits", 32),
+        HwSignal.comb("global_raw_length", "Bits", 2),
+        HwSignal.comb("global_raw_next", "Bits", pa),
+        HwSignal.comb("global_raw_redirect_valid", "Bits", 1),
+        HwSignal.comb("global_raw_redirect_target", "Bits", pa)]
+    for signal in target_fragment.signals: signals.push(signal)
+    for signal in cbreak_fragment.signals: signals.push(signal)
+    var constants: [HwConstant] = [HwConstant.bits("global_zero_instruction", 32, 0),
+        HwConstant.bits("global_zero_flag", 1, 0), HwConstant.bits("global_one_flag", 1, 1),
+        HwConstant.bits("global_two_length", 2, 2), HwConstant.bits("global_two_bytes", pa, 2),
+        HwConstant.bits("global_zero_xlen", xlen, 0)]
+    for constant in target_fragment.constants: constants.push(constant)
+    for constant in cbreak_fragment.constants: constants.push(constant)
+    var comb_ops: [HwCombOp] = [
+        HwCombOp.binary("and", "global_overlap", "target_legal", "cebreak_legal", 1),
+        HwCombOp.binary("or", "global_selected_legal", "target_legal", "cebreak_legal", 1),
+        HwCombOp.binary("and", "global_unique_legal", "global_selected_legal", "global_no_overlap", 1),
+        HwCombOp.binary("and", "global_trap_selected", "cebreak_trap_valid", "global_no_overlap", 1),
+        HwCombOp.binary("add", "global_fallthrough_pc", "fetch_pc", "global_two_bytes", pa),
+        HwCombOp.unary("passthrough", "legal", "global_unique_legal", 1),
+        HwCombOp.unary("passthrough", "trap_valid", "global_trap_selected", 1)]
+    for op in target_fragment.comb_ops: comb_ops.push(op)
+    for op in cbreak_fragment.comb_ops: comb_ops.push(op)
+    var compare_ops = target_fragment.compare_ops
+    for op in cbreak_fragment.compare_ops: compare_ops.push(op)
+    var select_ops = target_fragment.select_ops
+    for op in cbreak_fragment.select_ops: select_ops.push(op)
+    select_ops.push(HwSelectOp.mux("global_no_overlap", "global_overlap",
+        "global_zero_flag", "global_one_flag", 1))
+    select_ops.push(HwSelectOp.mux("global_raw_canonical", "cebreak_legal",
+        "cebreak_canonical_instruction", "target_canonical_instruction", 32))
+    select_ops.push(HwSelectOp.mux("global_raw_length", "cebreak_legal",
+        "cebreak_original_length_bytes", "target_original_length_bytes", 2))
+    select_ops.push(HwSelectOp.mux("global_raw_next", "cebreak_legal",
+        "cebreak_next_pc", "target_next_pc", pa))
+    select_ops.push(HwSelectOp.mux("global_raw_redirect_valid", "cebreak_legal",
+        "cebreak_redirect_valid", "target_redirect_valid", 1))
+    select_ops.push(HwSelectOp.mux("global_raw_redirect_target", "cebreak_legal",
+        "cebreak_redirect_target", "target_redirect_target", pa))
+    select_ops.push(HwSelectOp.mux("canonical_instruction", "global_no_overlap",
+        "global_raw_canonical", "global_zero_instruction", 32))
+    select_ops.push(HwSelectOp.mux("original_length_bytes", "global_no_overlap",
+        "global_raw_length", "global_two_length", 2))
+    select_ops.push(HwSelectOp.mux("next_pc", "global_no_overlap",
+        "global_raw_next", "global_fallthrough_pc", pa))
+    select_ops.push(HwSelectOp.mux("redirect_valid", "global_no_overlap",
+        "global_raw_redirect_valid", "global_zero_flag", 1))
+    select_ops.push(HwSelectOp.mux("redirect_target", "global_no_overlap",
+        "global_raw_redirect_target", "fetch_pc", pa))
+    select_ops.push(HwSelectOp.mux("trap_cause", "global_trap_selected",
+        "cebreak_trap_cause", "global_zero_xlen", xlen))
+    select_ops.push(HwSelectOp.mux("trap_tval", "global_trap_selected",
+        "cebreak_trap_tval", "global_zero_xlen", xlen))
+    var origins: [HwOrigin] = [HwOrigin(node_id: HwNodeId.child(module_name, "compose"),
+        source_name: "riscv.gen2.target_trap_migrating_predecode"),
+        HwOrigin(node_id: HwNodeId.child(module_name, "overlap_guard"),
+        source_name: "riscv.gen2.target_trap_migrating_predecode.overlap_guard")]
+    for origin in target_fragment.origins: origins.push(origin)
+    for origin in cbreak_fragment.origins: origins.push(origin)
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: contract.ports().len(), signal_count: signals.len(), register_count: 0,
+        memory_count: 0, comb_op_count: comb_ops.len() + compare_ops.len() + select_ops.len(),
+        clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: origins, ports: contract.ports(),
+        signals: signals, constants: constants, comb_ops: comb_ops, compare_ops: compare_ops,
+        select_ops: select_ops, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
 
 pub fn strict_zca_trap_migrating_predecode_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
     """Compose v1 migrated rows with the explicit v2 C.EBREAK trap effect.

@@ -467,7 +467,9 @@ pub fn strict_zca_migrating_predecode_hwir(module_name: text, config: CoreConfig
     if config.diagnostic() != "":
         return Err(config.diagnostic())
     val contract = strict_riscv_branch_predecode_interface(config)?
-    val control = strict_zca_control_predecode_hwir(module_name + "_control", config)?
+    val cj = strict_zca_cj_predecode_row_hwir(module_name + "_cj", config)?
+    val cbeqz = strict_zca_cbeqz_predecode_row_hwir(module_name + "_cbeqz", config)?
+    val cbnez = strict_zca_cbnez_predecode_row_hwir(module_name + "_cbnez", config)?
     val cjr = strict_zca_cjr_predecode_row_hwir(module_name + "_cjr", config)?
     val cjalr = strict_zca_cjalr_predecode_row_hwir(module_name + "_cjalr", config)?
     val addi4spn = strict_zca_addi4spn_outcome_hwir(module_name + "_addi4spn", config)?
@@ -489,7 +491,9 @@ pub fn strict_zca_migrating_predecode_hwir(module_name: text, config: CoreConfig
     val cand = strict_zca_cand_outcome_hwir(module_name + "_cand", config)?
     val cmv = strict_zca_cmv_outcome_hwir(module_name + "_cmv", config)?
     val cadd = strict_zca_cadd_outcome_hwir(module_name + "_cadd", config)?
-    val control_fragment = strict_frontend_control_row_fragment(module_name, "control", control)?
+    val cj_fragment = strict_frontend_control_row_fragment(module_name, "cj", cj)?
+    val cbeqz_fragment = strict_frontend_control_row_fragment(module_name, "cbeqz", cbeqz)?
+    val cbnez_fragment = strict_frontend_control_row_fragment(module_name, "cbnez", cbnez)?
     val cjr_fragment = strict_frontend_control_row_fragment(module_name, "cjr", cjr)?
     val cjalr_fragment = strict_frontend_control_row_fragment(module_name, "cjalr", cjalr)?
     val addi4spn_fragment = strict_frontend_predecode_row_fragment(module_name, "addi4spn", addi4spn)?
@@ -511,13 +515,24 @@ pub fn strict_zca_migrating_predecode_hwir(module_name: text, config: CoreConfig
     val cand_fragment = strict_frontend_predecode_row_fragment(module_name, "cand", cand)?
     val cmv_fragment = strict_frontend_predecode_row_fragment(module_name, "cmv", cmv)?
     val cadd_fragment = strict_frontend_predecode_row_fragment(module_name, "cadd", cadd)?
-    val fragments = [control_fragment, cjr_fragment, cjalr_fragment, addi4spn_fragment, lw_fragment, sw_fragment,
+    # Keep one explicit normalized outcome per admitted ISA row. In particular,
+    # C.J/C.BEQZ/C.BNEZ are not hidden behind an aggregate `control_legal`
+    # selector: their individual legal predicates participate in the same
+    # overlap proof and deterministic priority chain as every data row.
+    val fragments = [cj_fragment, cbeqz_fragment, cbnez_fragment,
+        cjr_fragment, cjalr_fragment, addi4spn_fragment, lw_fragment, sw_fragment,
         lwsp_fragment, swsp_fragment, cli_fragment, caddi_fragment, caddi16sp_fragment, clui_fragment,
         slli_fragment, srli_fragment, srai_fragment, candi_fragment, csub_fragment,
         cxor_fragment, cor_fragment, cand_fragment, cmv_fragment, cadd_fragment]
-    val prefixes = ["control", "cjr", "cjalr", "addi4spn", "lw", "sw", "lwsp", "swsp", "cli",
+    val prefixes = ["cj", "cbeqz", "cbnez", "cjr", "cjalr", "addi4spn", "lw", "sw", "lwsp", "swsp", "cli",
         "caddi", "caddi16sp", "clui", "slli", "srli", "srai", "candi", "csub", "cxor",
         "cor", "cand", "cmv", "cadd"]
+    val legal_selectors = ["cj_legal", "cbeqz_legal", "cbnez_legal", "cjr_legal", "cjalr_legal",
+        "addi4spn_match_legal", "lw_match_legal", "sw_match_legal", "lwsp_match_legal",
+        "swsp_match_legal", "cli_match_legal", "caddi_match_legal", "caddi16sp_match_legal",
+        "clui_match_legal", "slli_match_legal", "srli_match_legal", "srai_match_legal",
+        "candi_match_legal", "csub_match_legal", "cxor_match_legal", "cor_match_legal",
+        "cand_match_legal", "cmv_match_legal", "cadd_match_legal"]
     val pa = config.physical_address_bits
     var signals: [HwSignal] = [HwSignal.comb("fallback_next_pc", "Bits", pa)]
     var constants: [HwConstant] = [HwConstant.bits("migrating_zero_instruction", 32, 0),
@@ -544,6 +559,7 @@ pub fn strict_zca_migrating_predecode_hwir(module_name: text, config: CoreConfig
     while index > 0:
         index = index - 1
         val prefix = prefixes[index]
+        val legal_selector = legal_selectors[index]
         val canonical_result = "migrating_canonical_after_" + index.to_text()
         val legal_result = "migrating_legal_after_" + index.to_text()
         val next_result = "migrating_next_after_" + index.to_text()
@@ -554,11 +570,11 @@ pub fn strict_zca_migrating_predecode_hwir(module_name: text, config: CoreConfig
         signals.push(HwSignal.comb(next_result, "Bits", pa))
         signals.push(HwSignal.comb(redirect_valid_result, "Bits", 1))
         signals.push(HwSignal.comb(redirect_target_result, "Bits", pa))
-        select_ops.push(HwSelectOp.mux(canonical_result, prefix + "_legal", prefix + "_canonical_instruction", canonical_prior, 32))
-        select_ops.push(HwSelectOp.mux(legal_result, prefix + "_legal", prefix + "_legal", legal_prior, 1))
-        select_ops.push(HwSelectOp.mux(next_result, prefix + "_legal", prefix + "_next_pc", next_prior, pa))
-        select_ops.push(HwSelectOp.mux(redirect_valid_result, prefix + "_legal", prefix + "_redirect_valid", redirect_valid_prior, 1))
-        select_ops.push(HwSelectOp.mux(redirect_target_result, prefix + "_legal", prefix + "_redirect_target", redirect_target_prior, pa))
+        select_ops.push(HwSelectOp.mux(canonical_result, legal_selector, prefix + "_canonical_instruction", canonical_prior, 32))
+        select_ops.push(HwSelectOp.mux(legal_result, legal_selector, legal_selector, legal_prior, 1))
+        select_ops.push(HwSelectOp.mux(next_result, legal_selector, prefix + "_next_pc", next_prior, pa))
+        select_ops.push(HwSelectOp.mux(redirect_valid_result, legal_selector, prefix + "_redirect_valid", redirect_valid_prior, 1))
+        select_ops.push(HwSelectOp.mux(redirect_target_result, legal_selector, prefix + "_redirect_target", redirect_target_prior, pa))
         canonical_prior = canonical_result
         legal_prior = legal_result
         next_prior = next_result
@@ -572,14 +588,15 @@ pub fn strict_zca_migrating_predecode_hwir(module_name: text, config: CoreConfig
     var overlap_index = 0
     while overlap_index < prefixes.len():
         val prefix = prefixes[overlap_index]
+        val legal_selector = legal_selectors[overlap_index]
         val overlap_here = "migrating_overlap_here_" + overlap_index.to_text()
         val seen_result = "migrating_seen_after_" + overlap_index.to_text()
         val overlap_result = "migrating_overlap_after_" + overlap_index.to_text()
         signals.push(HwSignal.comb(overlap_here, "Bits", 1))
         signals.push(HwSignal.comb(seen_result, "Bits", 1))
         signals.push(HwSignal.comb(overlap_result, "Bits", 1))
-        comb_ops.push(HwCombOp.binary("and", overlap_here, seen_prior, prefix + "_legal", 1))
-        comb_ops.push(HwCombOp.binary("or", seen_result, seen_prior, prefix + "_legal", 1))
+        comb_ops.push(HwCombOp.binary("and", overlap_here, seen_prior, legal_selector, 1))
+        comb_ops.push(HwCombOp.binary("or", seen_result, seen_prior, legal_selector, 1))
         comb_ops.push(HwCombOp.binary("or", overlap_result, overlap_prior, overlap_here, 1))
         seen_prior = seen_result
         overlap_prior = overlap_result
@@ -634,25 +651,59 @@ pub fn strict_zca_rv32_cjal_migrating_predecode_hwir(module_name: text,
     val cjal_fragment = strict_frontend_control_row_fragment(module_name, "cjal", cjal)?
     var signals = common_fragment.signals
     for signal in cjal_fragment.signals: signals.push(signal)
+    val pa = config.physical_address_bits
+    for signal in [HwSignal.comb("special_overlap", "Bits", 1),
+        HwSignal.comb("special_no_overlap", "Bits", 1),
+        HwSignal.comb("special_selected_legal", "Bits", 1),
+        HwSignal.comb("special_unique_legal", "Bits", 1),
+        HwSignal.comb("special_fallthrough_pc", "Bits", pa),
+        HwSignal.comb("special_raw_canonical", "Bits", 32),
+        HwSignal.comb("special_raw_length", "Bits", 2),
+        HwSignal.comb("special_raw_next", "Bits", pa),
+        HwSignal.comb("special_raw_redirect_valid", "Bits", 1),
+        HwSignal.comb("special_raw_redirect_target", "Bits", pa)]: signals.push(signal)
     var constants = common_fragment.constants
     for constant in cjal_fragment.constants: constants.push(constant)
+    constants.push(HwConstant.bits("special_zero_instruction", 32, 0))
+    constants.push(HwConstant.bits("special_zero_flag", 1, 0))
+    constants.push(HwConstant.bits("special_one_flag", 1, 1))
+    constants.push(HwConstant.bits("special_two_length", 2, 2))
+    constants.push(HwConstant.bits("special_two_bytes", pa, 2))
     var comb_ops = common_fragment.comb_ops
     for op in cjal_fragment.comb_ops: comb_ops.push(op)
+    comb_ops.push(HwCombOp.binary("and", "special_overlap", "cjal_legal", "common_legal", 1))
+    comb_ops.push(HwCombOp.binary("or", "special_selected_legal", "cjal_legal", "common_legal", 1))
+    comb_ops.push(HwCombOp.binary("and", "special_unique_legal", "special_selected_legal", "special_no_overlap", 1))
+    comb_ops.push(HwCombOp.binary("add", "special_fallthrough_pc", "fetch_pc", "special_two_bytes", pa))
     var compare_ops = common_fragment.compare_ops
     for op in cjal_fragment.compare_ops: compare_ops.push(op)
     var select_ops = common_fragment.select_ops
     for op in cjal_fragment.select_ops: select_ops.push(op)
-    val pa = config.physical_address_bits
-    select_ops.push(HwSelectOp.mux("canonical_instruction", "cjal_legal",
+    # C.JAL is the 25th explicit row. Priority is deterministic, but overlap
+    # with any of the 24 common rows is an illegal partition failure rather
+    # than implicit authorization of the preferred row.
+    select_ops.push(HwSelectOp.mux("special_no_overlap", "special_overlap",
+        "special_zero_flag", "special_one_flag", 1))
+    select_ops.push(HwSelectOp.mux("special_raw_canonical", "cjal_legal",
         "cjal_canonical_instruction", "common_canonical_instruction", 32))
-    select_ops.push(HwSelectOp.mux("original_length_bytes", "cjal_legal",
+    select_ops.push(HwSelectOp.mux("special_raw_length", "cjal_legal",
         "cjal_original_length_bytes", "common_original_length_bytes", 2))
-    select_ops.push(HwSelectOp.mux("legal", "cjal_legal", "cjal_legal", "common_legal", 1))
-    select_ops.push(HwSelectOp.mux("next_pc", "cjal_legal", "cjal_next_pc", "common_next_pc", pa))
-    select_ops.push(HwSelectOp.mux("redirect_valid", "cjal_legal",
+    select_ops.push(HwSelectOp.mux("special_raw_next", "cjal_legal", "cjal_next_pc", "common_next_pc", pa))
+    select_ops.push(HwSelectOp.mux("special_raw_redirect_valid", "cjal_legal",
         "cjal_redirect_valid", "common_redirect_valid", 1))
-    select_ops.push(HwSelectOp.mux("redirect_target", "cjal_legal",
+    select_ops.push(HwSelectOp.mux("special_raw_redirect_target", "cjal_legal",
         "cjal_redirect_target", "common_redirect_target", pa))
+    select_ops.push(HwSelectOp.mux("canonical_instruction", "special_no_overlap",
+        "special_raw_canonical", "special_zero_instruction", 32))
+    select_ops.push(HwSelectOp.mux("original_length_bytes", "special_no_overlap",
+        "special_raw_length", "special_two_length", 2))
+    comb_ops.push(HwCombOp.unary("passthrough", "legal", "special_unique_legal", 1))
+    select_ops.push(HwSelectOp.mux("next_pc", "special_no_overlap",
+        "special_raw_next", "special_fallthrough_pc", pa))
+    select_ops.push(HwSelectOp.mux("redirect_valid", "special_no_overlap",
+        "special_raw_redirect_valid", "special_zero_flag", 1))
+    select_ops.push(HwSelectOp.mux("redirect_target", "special_no_overlap",
+        "special_raw_redirect_target", "fetch_pc", pa))
     var origins = [HwOrigin(node_id: HwNodeId.child(module_name, "compose"),
         source_name: "riscv.gen2.rv32_cjal_migrating_predecode")]
     for origin in common_fragment.origins: origins.push(origin)
@@ -690,25 +741,57 @@ pub fn strict_zca_rv64_addiw_migrating_predecode_hwir(module_name: text,
     val caddiw_fragment = strict_frontend_control_row_fragment(module_name, "caddiw", caddiw)?
     var signals = common_fragment.signals
     for signal in caddiw_fragment.signals: signals.push(signal)
+    val pa = config.physical_address_bits
+    for signal in [HwSignal.comb("special_overlap", "Bits", 1),
+        HwSignal.comb("special_no_overlap", "Bits", 1),
+        HwSignal.comb("special_selected_legal", "Bits", 1),
+        HwSignal.comb("special_unique_legal", "Bits", 1),
+        HwSignal.comb("special_fallthrough_pc", "Bits", pa),
+        HwSignal.comb("special_raw_canonical", "Bits", 32),
+        HwSignal.comb("special_raw_length", "Bits", 2),
+        HwSignal.comb("special_raw_next", "Bits", pa),
+        HwSignal.comb("special_raw_redirect_valid", "Bits", 1),
+        HwSignal.comb("special_raw_redirect_target", "Bits", pa)]: signals.push(signal)
     var constants = common_fragment.constants
     for constant in caddiw_fragment.constants: constants.push(constant)
+    constants.push(HwConstant.bits("special_zero_instruction", 32, 0))
+    constants.push(HwConstant.bits("special_zero_flag", 1, 0))
+    constants.push(HwConstant.bits("special_one_flag", 1, 1))
+    constants.push(HwConstant.bits("special_two_length", 2, 2))
+    constants.push(HwConstant.bits("special_two_bytes", pa, 2))
     var comb_ops = common_fragment.comb_ops
     for op in caddiw_fragment.comb_ops: comb_ops.push(op)
+    comb_ops.push(HwCombOp.binary("and", "special_overlap", "caddiw_legal", "common_legal", 1))
+    comb_ops.push(HwCombOp.binary("or", "special_selected_legal", "caddiw_legal", "common_legal", 1))
+    comb_ops.push(HwCombOp.binary("and", "special_unique_legal", "special_selected_legal", "special_no_overlap", 1))
+    comb_ops.push(HwCombOp.binary("add", "special_fallthrough_pc", "fetch_pc", "special_two_bytes", pa))
     var compare_ops = common_fragment.compare_ops
     for op in caddiw_fragment.compare_ops: compare_ops.push(op)
     var select_ops = common_fragment.select_ops
     for op in caddiw_fragment.select_ops: select_ops.push(op)
-    val pa = config.physical_address_bits
-    select_ops.push(HwSelectOp.mux("canonical_instruction", "caddiw_legal",
+    # C.ADDIW is the RV64 25th row and obeys the same explicit partition rule.
+    select_ops.push(HwSelectOp.mux("special_no_overlap", "special_overlap",
+        "special_zero_flag", "special_one_flag", 1))
+    select_ops.push(HwSelectOp.mux("special_raw_canonical", "caddiw_legal",
         "caddiw_canonical_instruction", "common_canonical_instruction", 32))
-    select_ops.push(HwSelectOp.mux("original_length_bytes", "caddiw_legal",
+    select_ops.push(HwSelectOp.mux("special_raw_length", "caddiw_legal",
         "caddiw_original_length_bytes", "common_original_length_bytes", 2))
-    select_ops.push(HwSelectOp.mux("legal", "caddiw_legal", "caddiw_legal", "common_legal", 1))
-    select_ops.push(HwSelectOp.mux("next_pc", "caddiw_legal", "caddiw_next_pc", "common_next_pc", pa))
-    select_ops.push(HwSelectOp.mux("redirect_valid", "caddiw_legal",
+    select_ops.push(HwSelectOp.mux("special_raw_next", "caddiw_legal", "caddiw_next_pc", "common_next_pc", pa))
+    select_ops.push(HwSelectOp.mux("special_raw_redirect_valid", "caddiw_legal",
         "caddiw_redirect_valid", "common_redirect_valid", 1))
-    select_ops.push(HwSelectOp.mux("redirect_target", "caddiw_legal",
+    select_ops.push(HwSelectOp.mux("special_raw_redirect_target", "caddiw_legal",
         "caddiw_redirect_target", "common_redirect_target", pa))
+    select_ops.push(HwSelectOp.mux("canonical_instruction", "special_no_overlap",
+        "special_raw_canonical", "special_zero_instruction", 32))
+    select_ops.push(HwSelectOp.mux("original_length_bytes", "special_no_overlap",
+        "special_raw_length", "special_two_length", 2))
+    comb_ops.push(HwCombOp.unary("passthrough", "legal", "special_unique_legal", 1))
+    select_ops.push(HwSelectOp.mux("next_pc", "special_no_overlap",
+        "special_raw_next", "special_fallthrough_pc", pa))
+    select_ops.push(HwSelectOp.mux("redirect_valid", "special_no_overlap",
+        "special_raw_redirect_valid", "special_zero_flag", 1))
+    select_ops.push(HwSelectOp.mux("redirect_target", "special_no_overlap",
+        "special_raw_redirect_target", "fetch_pc", pa))
     var origins = [HwOrigin(node_id: HwNodeId.child(module_name, "compose"),
         source_name: "riscv.gen2.rv64_addiw_migrating_predecode")]
     for origin in common_fragment.origins: origins.push(origin)

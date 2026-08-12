@@ -28,6 +28,22 @@ pub fn strict_parcel_frontend_decoder_entity(config: CoreConfig) -> Result<text,
         return Ok("riscv_gen2_zca_migrating_predecode_rv64")
     Err("HWIR-E-PARCEL-FRONTEND-DECODER: frontend configuration has no admitted concrete decoder")
 
+pub fn strict_trap_parcel_frontend_decoder_entity(config: CoreConfig) -> Result<text, text>:
+    """Resolve the exact effectful decoder for a concrete parcel product."""
+    if config.xlen == 32 and config.profile == "riscv-gen2-rv32-zca-cjal-critical" and
+        config.isa_profile == "rv32i_zca":
+        return Ok("riscv_gen2_zca_rv32_cjal_trap_migrating_predecode")
+    if config.xlen == 64 and config.profile == "riscv-gen2-rv64-zca-addiw-critical" and
+        config.isa_profile == "rv64i_zca":
+        return Ok("riscv_gen2_zca_rv64_addiw_trap_migrating_predecode")
+    if config.xlen == 32 and config.profile == "riscv-gen2-rv32-zca-critical" and
+        config.isa_profile == "rv32i":
+        return Ok("riscv_gen2_zca_trap_migrating_predecode_rv32")
+    if config.xlen == 64 and config.profile == "riscv-gen2-rv64-zca-critical" and
+        config.isa_profile == "rv64i":
+        return Ok("riscv_gen2_zca_trap_migrating_predecode_rv64")
+    Err("HWIR-E-TRAP-PARCEL-FRONTEND-DECODER: trap frontend configuration has no admitted concrete decoder")
+
 fn strict_parcel_state_registers(config: CoreConfig) -> [HwStateRegister]:
     [HwStateRegister(name: "valid_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
         HwStateRegister(name: "issued_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
@@ -507,11 +523,8 @@ class HwTrapParcelFrontendDef:
             self.config.xlen != self.frontend_contract.config.xlen or self.config.register_count != self.frontend_contract.config.register_count or
             self.config.physical_address_bits != self.frontend_contract.config.physical_address_bits:
             return "HWIR-E-TRAP-PARCEL-FRONTEND-CONFIG: trap frontend and interface must use one concrete product configuration"
-        val expected_decoder = if self.config.xlen == 32:
-            "riscv_gen2_zca_trap_migrating_predecode_rv32"
-        else:
-            "riscv_gen2_zca_trap_migrating_predecode_rv64"
-        if self.decoder_entity != expected_decoder:
+        val expected_decoder = strict_trap_parcel_frontend_decoder_entity(self.config)
+        if expected_decoder.is_err() or self.decoder_entity != expected_decoder.ok().unwrap():
             return "HWIR-E-TRAP-PARCEL-FRONTEND-DECODER: trap frontend decoder identity must match the concrete critical product"
         val sequential_error = self.sequential.diagnostic_for_ports(self.frontend_contract.ports())
         if sequential_error != "":
@@ -554,15 +567,17 @@ pub fn strict_zca_trap_single_outstanding_frontend_hwir(module_name: text, confi
     if module_name == "":
         return Err("HWIR-E-TRAP-PARCEL-FRONTEND-MODULE: trap frontend requires a module name")
     val frontend_contract = strict_riscv_trap_parcel_frontend_interface(config)?
-    val decoder_entity = if config.xlen == 32:
-        "riscv_gen2_zca_trap_migrating_predecode_rv32"
+    val decoder_entity = strict_trap_parcel_frontend_decoder_entity(config)?
+    val decoder_origin = if (config.profile == "riscv-gen2-rv32-zca-cjal-critical" or
+        config.profile == "riscv-gen2-rv64-zca-addiw-critical"):
+        "riscv.gen2.target_trap_migrating_predecode"
     else:
-        "riscv_gen2_zca_trap_migrating_predecode_rv64"
+        "riscv.gen2.trap_migrating_predecode"
     val frontend = HwTrapParcelFrontendDef(
         summary_name: module_name, config: config,
         node_id: HwNodeId.module_root(module_name), frontend_contract: frontend_contract,
         origins: [HwOrigin(node_id: HwNodeId.child(module_name, "state"), source_name: "riscv.gen2.trap_parcel_frontend.state"),
-            HwOrigin(node_id: HwNodeId.child(module_name, "decode"), source_name: "riscv.gen2.trap_migrating_predecode"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "decode"), source_name: decoder_origin),
             HwOrigin(node_id: HwNodeId.child(module_name, "trap"), source_name: "zca.c.ebreak.trap")],
         sequential: strict_parcel_sequential_plan(module_name, config, true),
         decoder_entity: decoder_entity

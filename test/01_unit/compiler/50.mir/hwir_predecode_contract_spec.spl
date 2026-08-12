@@ -5,7 +5,7 @@ use compiler.mir.hwir.types.{CoreConfig, HwModuleDef, HwNodeId, HwPort}
 use compiler.mir.hwir.predecode.{HwPredecodeInterface, strict_riscv_predecode_interface}
 use compiler.mir.hwir.branch_predecode.{HwBranchPredecodeInterface, strict_riscv_branch_predecode_interface}
 use compiler.mir.hwir.trap_predecode.{HwTrapPredecodeInterface, strict_riscv_trap_predecode_interface, strict_zca_cebreak_trap_predecode_hwir}
-use compiler.mir.hwir.trap_frontend.{strict_zca_trap_migrating_isa_ids, strict_zca_trap_migrating_predecode_hwir}
+use compiler.mir.hwir.trap_frontend.{strict_zca_target_trap_migrating_isa_ids, strict_zca_target_trap_migrating_predecode_hwir, strict_zca_trap_migrating_isa_ids, strict_zca_trap_migrating_predecode_hwir}
 use compiler.mir.hwir.stateful_frontend.{HwTrapParcelFrontendInterface, strict_parcel_frontend_decoder_entity, strict_riscv_trap_parcel_frontend_interface, strict_zca_single_outstanding_frontend_hwir, strict_zca_trap_single_outstanding_frontend_hwir}
 use compiler.mir.hwir.sequential.{HwSeqGuard, HwSeqInstancePin, HwSeqOutputBinding, HwSequentialPlan}
 use compiler.mir.hwir.frontend.{HwFrontendHandoffInterface, strict_riscv_frontend_handoff_interface, strict_zca_control_predecode_hwir, strict_zca_cjr_predecode_row_hwir, strict_zca_cjalr_predecode_row_hwir, strict_zca_migrating_isa_ids, strict_zca_migrating_predecode_hwir, strict_zca_rv32_cjal_migrating_isa_ids, strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_isa_ids, strict_zca_rv64_addiw_migrating_predecode_hwir}
@@ -258,6 +258,68 @@ describe "strict RISC-V compressed predecode contract":
             expect(malformed.shape_diagnostic()).to_equal("HWIR-E-TRAP-PARCEL-FRONTEND-OUTPUT-WIDTH: trap frontend output widths do not match its concrete product configuration")
         else:
             expect(false).to_equal(true)
+
+    # @req REQ-G2-002 REQ-G2-010 REQ-G2-011 NFR-G2-012
+    it "should close each specialized trap decoder over exactly one target row and C.EBREAK":
+        step("Build the RV32 C.JAL and RV64 C.ADDIW trap decoders from their concrete profiles")
+        val rv32_config = CoreConfig.rv32_zca_cjal_mission_critical()
+        val rv64_config = CoreConfig.rv64_zca_addiw_mission_critical()
+        val rv32_ids = strict_zca_target_trap_migrating_isa_ids(rv32_config)
+        val rv64_ids = strict_zca_target_trap_migrating_isa_ids(rv64_config)
+        expect(rv32_ids.is_ok()).to_equal(true)
+        expect(rv64_ids.is_ok()).to_equal(true)
+        expect(rv32_ids.ok().unwrap().len()).to_equal(26)
+        expect(rv64_ids.ok().unwrap().len()).to_equal(26)
+        expect(rv32_ids.ok().unwrap().contains("zca.c.jal")).to_equal(true)
+        expect(rv32_ids.ok().unwrap().contains("zca.c.addiw")).to_equal(false)
+        expect(rv64_ids.ok().unwrap().contains("zca.c.addiw")).to_equal(true)
+        expect(rv64_ids.ok().unwrap().contains("zca.c.jal")).to_equal(false)
+        var rv32_ebreak_count = 0
+        for id in rv32_ids.ok().unwrap():
+            if id == "zca.c.ebreak":
+                rv32_ebreak_count = rv32_ebreak_count + 1
+        var rv64_ebreak_count = 0
+        for id in rv64_ids.ok().unwrap():
+            if id == "zca.c.ebreak":
+                rv64_ebreak_count = rv64_ebreak_count + 1
+        expect(rv32_ebreak_count).to_equal(1)
+        expect(rv64_ebreak_count).to_equal(1)
+        step("Reject the generic profile before it can claim a target-specific trap closure")
+        val generic_rejected = strict_zca_target_trap_migrating_isa_ids(CoreConfig.rv32_zca_mission_critical())
+        expect(generic_rejected.is_err()).to_equal(true)
+        expect(generic_rejected.err().unwrap()).to_start_with("HWIR-E-ZCA-TARGET-TRAP-PROFILE")
+
+    # @req REQ-G2-010 REQ-G2-011 NFR-G2-010 NFR-G2-012
+    it "should bind each specialized trap frontend and decoder to one closed no-overlap graph":
+        step("Lower concrete RV32 C.JAL and RV64 C.ADDIW trap products with their selected decoder identities")
+        val rv32_config = CoreConfig.rv32_zca_cjal_mission_critical()
+        val rv64_config = CoreConfig.rv64_zca_addiw_mission_critical()
+        val rv32_decoder = strict_zca_target_trap_migrating_predecode_hwir(
+            "riscv_gen2_zca_rv32_cjal_trap_migrating_predecode", rv32_config)
+        val rv64_decoder = strict_zca_target_trap_migrating_predecode_hwir(
+            "riscv_gen2_zca_rv64_addiw_trap_migrating_predecode", rv64_config)
+        val rv32_frontend = strict_zca_trap_single_outstanding_frontend_hwir(
+            "riscv_gen2_zca_rv32_cjal_trap_single_outstanding_frontend", rv32_config)
+        val rv64_frontend = strict_zca_trap_single_outstanding_frontend_hwir(
+            "riscv_gen2_zca_rv64_addiw_trap_single_outstanding_frontend", rv64_config)
+        expect(rv32_decoder.is_ok()).to_equal(true)
+        expect(rv64_decoder.is_ok()).to_equal(true)
+        expect(rv32_frontend.is_ok()).to_equal(true)
+        expect(rv64_frontend.is_ok()).to_equal(true)
+        val rv32_module = rv32_decoder.ok().unwrap()
+        val rv64_module = rv64_decoder.ok().unwrap()
+        expect(rv32_module.shape_diagnostic()).to_equal("")
+        expect(rv64_module.shape_diagnostic()).to_equal("")
+        expect(strict_has_signal(rv32_module, "global_no_overlap")).to_equal(true)
+        expect(strict_has_signal(rv64_module, "global_no_overlap")).to_equal(true)
+        expect(strict_output_driver_count(rv32_module, "legal")).to_equal(1)
+        expect(strict_output_driver_count(rv64_module, "legal")).to_equal(1)
+        expect(strict_output_driver_count(rv32_module, "trap_valid")).to_equal(1)
+        expect(strict_output_driver_count(rv64_module, "trap_valid")).to_equal(1)
+        expect(rv32_frontend.ok().unwrap().decoder_entity).to_equal(
+            "riscv_gen2_zca_rv32_cjal_trap_migrating_predecode")
+        expect(rv64_frontend.ok().unwrap().decoder_entity).to_equal(
+            "riscv_gen2_zca_rv64_addiw_trap_migrating_predecode")
 
     it "REQ-G2-010 rejects a stateful frontend whose decoder is not the concrete typed child":
         val config = CoreConfig.rv32_zca_mission_critical()

@@ -14,7 +14,7 @@ use compiler.mir.hwir.types.{CoreConfig, HwModuleDef, HwPort}
 use compiler.mir.hwir.aspects.{HwAspectLock, hwir_aspect_lock_sha256}
 use compiler.mir.hwir.frontend.{strict_zca_control_predecode_hwir, strict_zca_migrating_predecode_hwir, strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_predecode_hwir}
 use compiler.mir.hwir.stateful_frontend.{strict_zca_single_outstanding_frontend_hwir, strict_zca_trap_single_outstanding_frontend_hwir}
-use compiler.mir.hwir.trap_frontend.{strict_zca_trap_migrating_predecode_hwir}
+use compiler.mir.hwir.trap_frontend.{strict_zca_trap_migrating_predecode_hwir, strict_zca_target_trap_migrating_predecode_hwir}
 use compiler.backend.backend.hwir_to_vhdl.{compile_strict_zca_control_predecode_product, compile_strict_zca_migrating_predecode_product, compile_strict_zca_rv32_cjal_migrating_predecode_product, compile_strict_zca_rv64_addiw_migrating_predecode_product, compile_strict_zca_single_outstanding_frontend_product, compile_strict_zca_trap_single_outstanding_frontend_product, strict_stateful_graph_sha}
 use compiler.driver.driver_build.incremental.{native_build_compiler_identity, native_build_compiler_executable_hash}
 use compiler.driver.driver_vhdl_artifacts.{VhdlArtifactGeneratedItem, VhdlArtifactInput, VhdlArtifactLocation, VhdlArtifactPort, VhdlArtifactRendered, vhdl_gen2_capability_ids, vhdl_gen2_capability_sha256, vhdl_render_production_artifacts, vhdl_remove_production_artifacts, vhdl_validate_production_artifact_input}
@@ -107,6 +107,12 @@ fn gen2_product_config(ctx: CompileContext, product_id: text) -> Result<CoreConf
         product_id == RISCV_GEN2_ZCA_RV64_ADDIW_SINGLE_OUTSTANDING_PRODUCT:
         if ctx.options.riscv_gen2_target != "rv64-zca-addiw-critical":
             return Err("HWIR-E-GEN2-PRODUCT-TARGET: {product_id} requires rv64-zca-addiw-critical")
+    elif product_id == RISCV_GEN2_ZCA_TRAP_SINGLE_OUTSTANDING_PRODUCT:
+        if ctx.options.riscv_gen2_target != "rv32-zca-critical" and
+            ctx.options.riscv_gen2_target != "rv64-zca-critical" and
+            ctx.options.riscv_gen2_target != "rv32-zca-cjal-critical" and
+            ctx.options.riscv_gen2_target != "rv64-zca-addiw-critical":
+            return Err("HWIR-E-GEN2-PRODUCT-TARGET: {product_id} requires a concrete critical Zca target")
     elif ctx.options.riscv_gen2_target != "rv32-zca-critical" and
         ctx.options.riscv_gen2_target != "rv64-zca-critical":
         return Err("HWIR-E-GEN2-PRODUCT-TARGET: {product_id} requires rv32-zca-critical or rv64-zca-critical")
@@ -415,18 +421,32 @@ impl CompilerDriver:
         val emitted = compile_strict_zca_trap_single_outstanding_frontend_product(config)
         if not emitted.is_success() or emitted.route != "hwir-gen2-trap-stateful-product-v3" or emitted.hwir_graph_sha256.len() != 64:
             return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-EMIT: {emitted.diagnostic}")
-        val module_name = if config.xlen == 32:
+        val module_name = if config.profile == "riscv-gen2-rv32-zca-cjal-critical":
+            "riscv_gen2_zca_rv32_cjal_trap_single_outstanding_frontend"
+        elif config.profile == "riscv-gen2-rv64-zca-addiw-critical":
+            "riscv_gen2_zca_rv64_addiw_trap_single_outstanding_frontend"
+        elif config.xlen == 32:
             "riscv_gen2_zca_trap_single_outstanding_frontend_rv32"
         else:
             "riscv_gen2_zca_trap_single_outstanding_frontend_rv64"
         val module = match strict_zca_trap_single_outstanding_frontend_hwir(module_name, config):
             case Ok(value): value
             case Err(error): return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-LOWER: {error}")
-        val decoder_name = if config.xlen == 32:
+        val specialized = (config.profile == "riscv-gen2-rv32-zca-cjal-critical" or
+            config.profile == "riscv-gen2-rv64-zca-addiw-critical")
+        val decoder_name = if config.profile == "riscv-gen2-rv32-zca-cjal-critical":
+            "riscv_gen2_zca_rv32_cjal_trap_migrating_predecode"
+        elif config.profile == "riscv-gen2-rv64-zca-addiw-critical":
+            "riscv_gen2_zca_rv64_addiw_trap_migrating_predecode"
+        elif config.xlen == 32:
             "riscv_gen2_zca_trap_migrating_predecode_rv32"
         else:
             "riscv_gen2_zca_trap_migrating_predecode_rv64"
-        val decoder_module = match strict_zca_trap_migrating_predecode_hwir(decoder_name, config):
+        val decoder_result = if specialized:
+            strict_zca_target_trap_migrating_predecode_hwir(decoder_name, config)
+        else:
+            strict_zca_trap_migrating_predecode_hwir(decoder_name, config)
+        val decoder_module = match decoder_result:
             case Ok(value): value
             case Err(error): return CompileResult.CodegenError("HWIR-E-GEN2-PRODUCT-LOWER: {error}")
         val expected_graph_sha = strict_stateful_graph_sha(module.node_id.value, module.config,
