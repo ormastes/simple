@@ -1,0 +1,228 @@
+use std.spec.*
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarIsaEntry, RiscvScalarProviderSelection, RiscvScalarDecoderPlan,
+    riscv_scalar_database_diagnostic, riscv_scalar_entries_for_xlen,
+    riscv_scalar_entries_for_isa_profile, riscv_scalar_gen2_seed_entries,
+    riscv_scalar_lookup, riscv_scalar_lookup_profile,
+    riscv_scalar_elaborate_provider, riscv_scalar_zmmul_entries, riscv_scalar_decoder_plan}
+
+describe "shared scalar RISC-V Gen2 ISA database":
+    it "declares one valid non-runtime-dispatch seed table":
+        val entries = riscv_scalar_gen2_seed_entries()
+        expect(entries.len()).to_equal(75)
+        expect(riscv_scalar_database_diagnostic(entries)).to_equal("")
+        var fence_extension = ""
+        for entry in entries:
+            if entry.id == "rv.i.fence": fence_extension = entry.extension
+        expect(fence_extension).to_equal("I")
+
+    it "specializes RV32 and RV64 rows without runtime XLEN semantics":
+        val rv32 = riscv_scalar_entries_for_xlen(32)
+        val rv64 = riscv_scalar_entries_for_xlen(64)
+        expect(rv32.len()).to_equal(55)
+        expect(rv64.len()).to_equal(72)
+        expect(riscv_scalar_entries_for_xlen(128).len()).to_equal(0)
+        var rv32_addw = 0
+        var rv64_addw = 0
+        for entry in rv32:
+            if entry.id == "rv64.i.addw": rv32_addw = rv32_addw + 1
+        for entry in rv64:
+            if entry.id == "rv64.i.addw" and entry.writeback_rule == "rd=sign_extend_to_xlen": rv64_addw = rv64_addw + 1
+        expect(rv32_addw).to_equal(0)
+        expect(rv64_addw).to_equal(1)
+
+    it "matches encoding rows only under their concrete XLEN applicability":
+        var add = RiscvScalarIsaEntry(id: "", extension: "", encoding_mask: 0,
+            encoding_value: 0, xlen_scope: "rv32-rv64", semantic_operation: "",
+            execution_class: "", operand_width_bits: 0, writeback_rule: "",
+            memory_effect: "", trap_behavior: "")
+        var addw = add
+        for entry in riscv_scalar_gen2_seed_entries():
+            if entry.id == "rv.i.add": add = entry
+            if entry.id == "rv64.i.addw": addw = entry
+        expect(add.matches(0x00B50533, 32)).to_equal(true)
+        expect(addw.matches(0x00B5053B, 32)).to_equal(false)
+        expect(addw.matches(0x00B5053B, 64)).to_equal(true)
+
+    it "exposes deterministic concrete metadata lookup without an RTL selector":
+        val add = riscv_scalar_lookup(0x00B50533, 32)
+        val addw = riscv_scalar_lookup(0x00B5053B, 64)
+        val mulw = riscv_scalar_lookup(0x02B5053B, 64)
+        val sraiw = riscv_scalar_lookup(0x4035551B, 64)
+        val sraw = riscv_scalar_lookup(0x40B5553B, 64)
+        val ld = riscv_scalar_lookup(0x0005B503, 64)
+        val lwu = riscv_scalar_lookup(0x0005E503, 64)
+        val sd = riscv_scalar_lookup(0x00A5B023, 64)
+        val rv32_addw = riscv_scalar_lookup(0x00B5053B, 32)
+        expect(add.is_ok()).to_equal(true)
+        expect(addw.is_ok()).to_equal(true)
+        expect(mulw.is_ok()).to_equal(true)
+        expect(sraiw.is_ok()).to_equal(true)
+        expect(sraw.is_ok()).to_equal(true)
+        expect(ld.is_ok()).to_equal(true)
+        expect(lwu.is_ok()).to_equal(true)
+        expect(sd.is_ok()).to_equal(true)
+        expect(rv32_addw.is_err()).to_equal(true)
+        if add.is_ok() and addw.is_ok():
+            expect(add.ok().unwrap().id).to_equal("rv.i.add")
+            expect(addw.ok().unwrap().id).to_equal("rv64.i.addw")
+        else:
+            expect(false).to_equal(true)
+        if sraiw.is_ok() and sraw.is_ok():
+            expect(sraiw.ok().unwrap().id).to_equal("rv64.i.sraiw")
+            expect(sraw.ok().unwrap().id).to_equal("rv64.i.sraw")
+            expect(sraiw.ok().unwrap().operand_width_bits).to_equal(32)
+            expect(sraw.ok().unwrap().writeback_rule).to_equal("rd=sign_extend_to_xlen")
+        else:
+            expect(false).to_equal(true)
+        if ld.is_ok() and lwu.is_ok() and sd.is_ok():
+            expect(ld.ok().unwrap().id).to_equal("rv64.i.ld")
+            expect(lwu.ok().unwrap().writeback_rule).to_equal("rd=zero_extend_to_xlen")
+            expect(lwu.ok().unwrap().operand_width_bits).to_equal(32)
+            expect(sd.ok().unwrap().memory_effect).to_equal("store")
+        else:
+            expect(false).to_equal(true)
+        expect(riscv_scalar_lookup(0x4035551B, 32).unwrap_err()).to_contain("RISCV-ISA-E-LOOKUP-ILLEGAL")
+        expect(riscv_scalar_lookup(0x0005B503, 32).unwrap_err()).to_contain("RISCV-ISA-E-LOOKUP-ILLEGAL")
+        expect(riscv_scalar_lookup(0x00000000, 32).unwrap_err()).to_contain("RISCV-ISA-E-LOOKUP-ILLEGAL")
+        expect(riscv_scalar_lookup(0x00000013, 128).unwrap_err()).to_contain("RISCV-ISA-E-LOOKUP-XLEN")
+
+    it "derives exactly the extension rows declared by an ISA profile":
+        val rv32i = riscv_scalar_entries_for_isa_profile("rv32i")
+        val rv64i = riscv_scalar_entries_for_isa_profile("rv64i_zca")
+        val rv32im = riscv_scalar_entries_for_isa_profile("rv32im")
+        val rv64i_privileged = riscv_scalar_entries_for_isa_profile("rv64i_zicsr_zifencei")
+        expect(rv32i.is_ok()).to_equal(true)
+        expect(rv64i.is_ok()).to_equal(true)
+        expect(rv32im.is_ok()).to_equal(true)
+        expect(rv64i_privileged.is_ok()).to_equal(true)
+        if rv32i.is_ok() and rv64i.is_ok() and rv32im.is_ok() and rv64i_privileged.is_ok():
+            expect(rv32i.ok().unwrap().len()).to_equal(40)
+            expect(rv64i.ok().unwrap().len()).to_equal(52)
+            expect(rv32im.ok().unwrap().len()).to_equal(48)
+            expect(rv64i_privileged.ok().unwrap().len()).to_equal(59)
+            var bare_has_csr = false
+            for entry in rv32i.ok().unwrap():
+                if entry.extension == "Zicsr" or entry.extension == "Zifencei": bare_has_csr = true
+            expect(bare_has_csr).to_equal(false)
+            var privileged_has_csr = false
+            var privileged_has_fence_i = false
+            for entry in rv64i_privileged.ok().unwrap():
+                if entry.extension == "Zicsr": privileged_has_csr = true
+                if entry.extension == "Zifencei": privileged_has_fence_i = true
+            expect(privileged_has_csr).to_equal(true)
+            expect(privileged_has_fence_i).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+        expect(riscv_scalar_entries_for_isa_profile("rv64imafdc").unwrap_err()).to_contain("RISCV-ISA-E-PROFILE")
+        expect(riscv_scalar_lookup_profile(0x02000033, "rv32i").unwrap_err()).to_contain("RISCV-ISA-E-PROFILE-ILLEGAL")
+        val multiply = riscv_scalar_lookup_profile(0x02000033, "rv32im")
+        expect(multiply.is_ok()).to_equal(true)
+        if multiply.is_ok():
+            expect(multiply.ok().unwrap().id).to_equal("rv.m.mul")
+        else:
+            expect(false).to_equal(true)
+
+    it "fails closed for malformed or duplicate metadata":
+        val malformed = RiscvScalarIsaEntry(id: "rv.bad", extension: "I",
+            encoding_mask: 0, encoding_value: 0, xlen_scope: "rv32-rv64",
+            semantic_operation: "add", execution_class: "integer", operand_width_bits: 0,
+            writeback_rule: "rd=result", memory_effect: "none", trap_behavior: "precise")
+        expect(riscv_scalar_database_diagnostic([malformed])).to_contain("RISCV-ISA-E-ENCODING")
+        val duplicate = RiscvScalarIsaEntry(id: "rv.duplicate", extension: "I",
+            encoding_mask: 0x7F, encoding_value: 0x33, xlen_scope: "rv32-rv64",
+            semantic_operation: "add", execution_class: "integer", operand_width_bits: 0,
+            writeback_rule: "rd=result", memory_effect: "none", trap_behavior: "precise")
+        expect(riscv_scalar_database_diagnostic([duplicate, duplicate])).to_equal("RISCV-ISA-E-DUPLICATE: scalar ISA entry IDs must be unique")
+        val overlap = RiscvScalarIsaEntry(id: "rv.overlap", extension: "I",
+            encoding_mask: 0x7F, encoding_value: 0x33, xlen_scope: "rv32-rv64",
+            semantic_operation: "alternate_add", execution_class: "integer", operand_width_bits: 0,
+            writeback_rule: "rd=result", memory_effect: "none", trap_behavior: "precise")
+        expect(riscv_scalar_database_diagnostic([duplicate, overlap])).to_equal("RISCV-ISA-E-OVERLAP: scalar ISA encodings must be unambiguous per concrete XLEN")
+
+    it "selects a concrete M provider during elaboration, never at runtime":
+        val rv32i = riscv_scalar_elaborate_provider("rv32i", "none")
+        val rv64im = riscv_scalar_elaborate_provider("rv64im", "pipelined")
+        expect(rv32i.is_ok()).to_equal(true)
+        expect(rv64im.is_ok()).to_equal(true)
+        if rv32i.is_ok() and rv64im.is_ok():
+            val base = rv32i.ok().unwrap()
+            val product = rv64im.ok().unwrap()
+            expect(base.xlen).to_equal(32)
+            expect(base.muldiv_provider).to_equal("none")
+            expect(product.xlen).to_equal(64)
+            expect(product.muldiv_provider).to_equal("pipelined")
+            val multiply = riscv_scalar_lookup_profile(0x02000033, "rv64im")
+            val add = riscv_scalar_lookup_profile(0x00B50533, "rv64im")
+            if multiply.is_ok() and add.is_ok():
+                expect(product.provider_for(multiply.ok().unwrap()).unwrap()).to_equal("pipelined")
+                expect(product.provider_for(add.ok().unwrap()).unwrap()).to_equal("scalar-integer")
+                var forged = multiply.ok().unwrap()
+                forged.semantic_operation = "forged_multiply"
+                expect(product.provider_for(forged).unwrap_err()).to_equal("RISCV-PROVIDER-E-ENTRY: provider lookup requires an entry owned by the elaborated selection")
+                var forged_entries = product.entries
+                var forged_selected = forged_entries[0]
+                forged_selected.semantic_operation = "forged_table_entry"
+                forged_entries[0] = forged_selected
+                val forged_selection = RiscvScalarProviderSelection(isa_profile: product.isa_profile,
+                    xlen: product.xlen, muldiv_provider: product.muldiv_provider,
+                    entries: forged_entries)
+                expect(forged_selection.diagnostic()).to_equal(
+                    "RISCV-PROVIDER-E-ENTRIES: scalar provider selection must retain the exact elaborated ISA entries")
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+        expect(riscv_scalar_elaborate_provider("rv32i", "iterative").unwrap_err()).to_equal("RISCV-PROVIDER-E-MULDIV: an ISA profile without M or Zmmul must select no multiply/divide provider")
+        expect(riscv_scalar_elaborate_provider("rv32im", "none").unwrap_err()).to_equal("RISCV-PROVIDER-E-MULDIV: an ISA profile with M or Zmmul requires one concrete multiply provider")
+        expect(riscv_scalar_elaborate_provider("rv64im", "dynamic").unwrap_err()).to_equal("RISCV-PROVIDER-E-MULDIV: scalar provider selection is unsupported")
+
+    it "freezes a deterministic profile-specialized decoder plan before lowering":
+        val rv64 = riscv_scalar_decoder_plan("rv64i").unwrap()
+        val second = riscv_scalar_decoder_plan("rv64i").unwrap()
+        expect(rv64.diagnostic()).to_equal("")
+        expect(rv64.entries.len()).to_equal(52)
+        expect(rv64.structural_sha256().len()).to_equal(64)
+        expect(rv64.structural_sha256()).to_equal(second.structural_sha256())
+        expect(rv64.lookup(0x0005B503).unwrap().id).to_equal("rv64.i.ld")
+        expect(rv64.lookup(0x00001073).unwrap_err()).to_equal(
+            "RISCV-DECODER-E-ILLEGAL: instruction is not declared by the scalar decoder plan")
+        var forged_entries = rv64.entries
+        var forged_entry = forged_entries[0]
+        forged_entry.encoding_value = 0
+        forged_entries[0] = forged_entry
+        val forged = RiscvScalarDecoderPlan(isa_profile: "rv64i", xlen: 64,
+            entries: forged_entries)
+        expect(forged.diagnostic()).to_equal(
+            "RISCV-DECODER-E-ENTRIES: scalar decoder plan must retain the exact elaborated ISA entries")
+
+    it "derives Zmmul from the shared M rows without admitting divide semantics":
+        val rows = riscv_scalar_zmmul_entries()
+        expect(rows.len()).to_equal(5)
+        var rv64_mulw_count = 0
+        for row in rows:
+            expect(row.id.contains("div")).to_equal(false)
+            expect(row.id.contains("rem")).to_equal(false)
+            if row.id == "rv64.m.mulw": rv64_mulw_count = rv64_mulw_count + 1
+        expect(rv64_mulw_count).to_equal(1)
+        val rv32 = riscv_scalar_entries_for_isa_profile("rv32i_zmmul")
+        expect(rv32.is_ok()).to_equal(true)
+        if rv32.is_ok():
+            expect(rv32.ok().unwrap().len()).to_equal(44)
+        else:
+            expect(false).to_equal(true)
+        expect(riscv_scalar_lookup_profile(0x02000033, "rv32i_zmmul").unwrap().id).to_equal("rv.m.mul")
+        expect(riscv_scalar_lookup_profile(0x02004033, "rv32i_zmmul").unwrap_err()).to_equal("RISCV-ISA-E-PROFILE-ILLEGAL: instruction is not declared by the scalar ISA profile")
+        val provider = riscv_scalar_elaborate_provider("rv32i_zmmul", "iterative")
+        expect(provider.is_ok()).to_equal(true)
+        if provider.is_ok():
+            val multiply = riscv_scalar_lookup_profile(0x02000033, "rv32i_zmmul").unwrap()
+            expect(provider.ok().unwrap().provider_for(multiply).unwrap()).to_equal("iterative")
+        else:
+            expect(false).to_equal(true)
+        val rv64_multiply_word = riscv_scalar_lookup_profile(0x02B5053B, "rv64i_zmmul")
+        expect(rv64_multiply_word.is_ok()).to_equal(true)
+        if rv64_multiply_word.is_ok():
+            expect(rv64_multiply_word.ok().unwrap().id).to_equal("rv64.m.mulw")
+            expect(rv64_multiply_word.ok().unwrap().writeback_rule).to_equal("rd=sign_extend_to_xlen")
+        else:
+            expect(false).to_equal(true)

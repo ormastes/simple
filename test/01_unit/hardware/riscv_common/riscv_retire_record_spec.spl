@@ -1,0 +1,95 @@
+use std.spec.*
+use std.hardware.riscv_common.retire.{RiscvRetireRecord}
+use std.hardware.riscv_common.core.riscv_formal.{check_retire_records}
+use std.hardware.rv32i_rtl.rvfi.{RvfiCoreSnapshot, rvfi_enabled_config, rvfi_trace_from_snapshot, rvfi_retire_record}
+use std.hardware.rv64gc_rtl.rvfi_base.{RvfiCoreSnapshot64, rvfi64_enabled_config, rvfi64_trace_from_snapshot, rvfi64_retire_record}
+
+fn rv32_snapshot() -> RvfiCoreSnapshot:
+    RvfiCoreSnapshot(halted: false, suppress: false, pc: 0x1000, pc_next: 0x1004,
+        insn: 0x00108293, rs1_addr: 1, rs2_addr: 0, rs1_rdata: 9, rs2_rdata: 0,
+        rd_addr: 5, rd_wdata: 10, dmem_addr: 0, dmem_width: 2, dmem_re: false,
+        dmem_we: false, dmem_rdata: 0, dmem_wdata: 0)
+
+fn rv64_snapshot() -> RvfiCoreSnapshot64:
+    RvfiCoreSnapshot64(halted: false, suppress: false, pc: 0x1000, pc_next: 0x1004,
+        insn: 0x00108293, rs1_addr: 1, rs2_addr: 0, rs1_rdata: 9, rs2_rdata: 0,
+        rd_addr: 5, rd_wdata: 10, dmem_addr: 0, dmem_width: 3, dmem_re: false,
+        dmem_we: false, dmem_rdata: 0, dmem_wdata: 0)
+
+fn retire_record(order: i64, xlen: i32, pc_before: i64, pc_after: i64, interrupt: bool) -> RiscvRetireRecord:
+    RiscvRetireRecord(valid: true, order: order, xlen: xlen, privilege: 3,
+        original_instruction: 0x00108293, canonical_instruction: 0x00108293,
+        instruction_length_bytes: 4, pc_before: pc_before, pc_after: pc_after,
+        rd: 5, rd_write: true, rd_value: 10,
+        memory_address: 0, memory_read_mask: 0, memory_write_mask: 0,
+        memory_read_data: 0, memory_write_data: 0, trap: false, interrupt: interrupt,
+        cause: 0, tval: 0)
+
+describe "shared RISC-V retirement record":
+    it "projects RV32 RVFI through one concrete retirement contract":
+        val record = rvfi_retire_record(rvfi_trace_from_snapshot(rvfi_enabled_config(4), 2, rv32_snapshot()))
+        expect(record.is_valid()).to_equal(true)
+        expect(record.xlen).to_equal(32)
+        expect(record.order).to_equal(6)
+        expect(record.canonical_instruction).to_equal(0x00108293)
+        expect(record.pc_before).to_equal(0x1000)
+        expect(record.pc_after).to_equal(0x1004)
+        expect(record.rd).to_equal(5)
+        expect(record.rd_value).to_equal(10)
+
+    it "projects RV64 RVFI through the same retirement contract":
+        val record = rvfi64_retire_record(rvfi64_trace_from_snapshot(rvfi64_enabled_config(8), 3, rv64_snapshot()))
+        expect(record.is_valid()).to_equal(true)
+        expect(record.xlen).to_equal(64)
+        expect(record.order).to_equal(11)
+        expect(record.canonical_instruction).to_equal(0x00108293)
+        expect(record.instruction_length_bytes).to_equal(4)
+        expect(record.pc_after).to_equal(0x1004)
+
+    it "fails closed on invalid architectural retirement effects":
+        val invalid = RiscvRetireRecord(valid: true, order: 0, xlen: 32, privilege: 3,
+            original_instruction: 0, canonical_instruction: 0, instruction_length_bytes: 4,
+            pc_before: 0, pc_after: 4, rd: 0, rd_write: true, rd_value: 1,
+            memory_address: 0, memory_read_mask: 0, memory_write_mask: 0,
+            memory_read_data: 0, memory_write_data: 0, trap: false, interrupt: false,
+            cause: 0, tval: 0)
+        expect(invalid.diagnostic()).to_equal("RISCV-RETIRE-E-X0: retirement record may not write a nonzero value to x0")
+
+    it "preserves compressed instruction lineage and concrete privilege at retirement":
+        var compressed = retire_record(0, 32, 0x1000, 0x1002, false)
+        compressed.original_instruction = 0x9002
+        compressed.canonical_instruction = 0x00100073
+        compressed.instruction_length_bytes = 2
+        expect(compressed.diagnostic()).to_equal("")
+        compressed.original_instruction = 65536
+        expect(compressed.diagnostic()).to_equal(
+            "RISCV-RETIRE-E-COMPRESSED: two-byte retirement records must preserve a 16-bit original instruction")
+        compressed.original_instruction = 0x9002
+        compressed.privilege = 2
+        expect(compressed.diagnostic()).to_equal(
+            "RISCV-RETIRE-E-PRIVILEGE: retirement record requires U, S, or M privilege encoding")
+
+    it "checks homogeneous RV32 retire records without parallel trace arrays":
+        val report = check_retire_records([
+            retire_record(10, 32, 0x1000, 0x1004, false),
+            retire_record(11, 32, 0x1004, 0x1008, false)
+        ])
+        expect(report.ok).to_equal(true)
+        expect(report.checked_retires).to_equal(2)
+        expect(report.vacuous).to_equal(false)
+
+    it "fails closed before chain checking mixed XLEN records":
+        val report = check_retire_records([
+            retire_record(10, 32, 0x1000, 0x1004, false),
+            retire_record(11, 64, 0x1004, 0x1008, false)
+        ])
+        expect(report.ok).to_equal(false)
+        expect(report.violations[0]).to_contain("mixed XLEN")
+
+    it "permits an interrupt control transfer without hiding ordinary PC breaks":
+        val report = check_retire_records([
+            retire_record(20, 64, 0x1000, 0x8000, true),
+            retire_record(21, 64, 0x2000, 0x2004, false)
+        ])
+        expect(report.ok).to_equal(true)
+        expect(report.checked_retires).to_equal(2)

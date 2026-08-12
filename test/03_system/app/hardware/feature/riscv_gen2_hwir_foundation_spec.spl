@@ -1,0 +1,1512 @@
+# codex-system-test
+# @req REQ-G2-001 REQ-G2-002 REQ-G2-003 REQ-G2-004 REQ-G2-005 REQ-G2-006 REQ-G2-009 REQ-G2-010 REQ-G2-011 NFR-G2-001 NFR-G2-002 NFR-G2-003 NFR-G2-006 NFR-G2-008 NFR-G2-010 NFR-G2-011 NFR-G2-012
+# @manual_section RISC-V Gen2 strict HWIR and stateful frontend
+# @evidence-display: links
+"""# RISC-V Gen2 HWIR Foundation
+
+Exercises the fail-closed RV32/RV64 HWIR product boundary, selected compressed
+predecode rows, and the bounded stateful C.EBREAK frontend.  Every generated
+VHDL claim remains development-stage until this scenario is run by a
+provenance-admitted self-hosted Simple CLI and its RV32/RV64 GHDL receipts are
+retained.
+"""
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwCompareOp, HwConstant, HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp, HwSignal}
+use compiler.mir.hwir.mir_to_hwir.{HwirLowerInput, lower_strict_hwir_and_module}
+use compiler.mir.hwir.zca_rows.{strict_zca_cebreak_row_hwir, strict_zca_cj_predecode_row_hwir, strict_zca_cjal_rv32_predecode_row_hwir, strict_zca_caddiw_rv64_predecode_row_hwir, strict_zca_cbeqz_predecode_row_hwir, strict_zca_cbnez_predecode_row_hwir, strict_zca_addi4spn_row_hwir, strict_zca_cli_row_hwir, strict_zca_caddi_row_hwir, strict_zca_caddi16sp_row_hwir, strict_zca_clui_row_hwir, strict_zca_lw_row_hwir, strict_zca_sw_row_hwir, strict_zca_lwsp_row_hwir, strict_zca_swsp_row_hwir, strict_zca_slli_low_row_hwir, strict_zca_srli_low_row_hwir, strict_zca_srai_low_row_hwir, strict_zca_candi_row_hwir, strict_zca_csub_row_hwir, strict_zca_cxor_row_hwir, strict_zca_cor_row_hwir, strict_zca_cand_row_hwir, strict_zca_cjr_row_hwir, strict_zca_cmv_row_hwir, strict_zca_cjalr_row_hwir, strict_zca_cadd_row_hwir}
+use compiler.mir.hwir.frontend.{strict_zca_control_predecode_hwir, strict_zca_migrating_predecode_hwir, strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_predecode_hwir}
+use compiler.mir.hwir.zca_outcomes.{strict_zca_addi4spn_outcome_hwir, strict_zca_lw_outcome_hwir, strict_zca_sw_outcome_hwir, strict_zca_lwsp_outcome_hwir}
+use compiler.mir.hwir.trap_predecode.{strict_zca_cebreak_trap_predecode_hwir}
+use compiler.backend.backend.hwir_to_vhdl.{render_strict_hwir_vhdl, compile_strict_zca_control_predecode_product, compile_strict_zca_single_outstanding_frontend_product, compile_strict_zca_trap_single_outstanding_frontend_product}
+use std.hardware.riscv_common.isa.compressed.zca_seed.{COMPRESSED_REASON_NONE, CompressedCriticalSubsetManifest, riscv_zca_mission_critical_expand_hardware}
+use std.hardware.riscv_common.isa.isa_database.{riscv_zca_critical_subset_entries, riscv_zca_critical_subset_entry_count}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_process_run(command: text, args: [text]) -> (text, text, i64)
+
+fn strict_vhdl_write_file(path: text, content: text) -> bool:
+    rt_file_write_text(path, content)
+
+fn strict_remove_file_if_present(path: text):
+    if rt_file_exists(path):
+        rt_file_delete(path)
+
+fn strict_ghdl_available() -> bool:
+    val (_stdout, _stderr, code) = rt_process_run("ghdl", ["--version"])
+    code == 0
+
+fn strict_ghdl_workdir_ready() -> bool:
+    val (_stdout, _stderr, code) = rt_process_run("mkdir", ["-p", "/tmp/ghdl_work"])
+    code == 0
+
+fn strict_ghdl_analyze(vhdl_file: text) -> bool:
+    if not strict_ghdl_workdir_ready():
+        return false
+    val (_stdout, _stderr, code) = rt_process_run("ghdl", ["-a", "--std=08", "--workdir=/tmp/ghdl_work", vhdl_file])
+    code == 0
+
+fn strict_ghdl_elaborate(entity_name: text) -> bool:
+    if not strict_ghdl_workdir_ready():
+        return false
+    val (_stdout, _stderr, code) = rt_process_run("ghdl", ["-e", "--std=08", "--workdir=/tmp/ghdl_work", entity_name])
+    code == 0
+
+fn strict_ghdl_run(entity_name: text, stop_time: text) -> bool:
+    if not strict_ghdl_workdir_ready():
+        return false
+    val (_stdout, _stderr, code) = rt_process_run("ghdl", ["-r", "--std=08", "--workdir=/tmp/ghdl_work", entity_name, "--stop-time=" + stop_time])
+    code == 0
+
+# Retired pre-64-bit stateful frontend testbench; coverage is in trap_stateful_protocol_64_testbench and trap_stateful_reuse_reset_64_testbench.
+
+fn addi4spn_outcome_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\nentity strict_addi4spn_outcome_tb is end entity;\narchitecture tb of strict_addi4spn_outcome_tb is\n signal original_parcel: std_logic_vector(15 downto 0) := x\"0000\"; signal fetch_pc,next_pc,redirect_target: std_logic_vector(31 downto 0) := x\"00000100\"; signal canonical_instruction: std_logic_vector(31 downto 0); signal original_length_bytes: std_logic_vector(1 downto 0); signal legal,redirect_valid: std_logic;\nbegin\n dut: entity work.strict_addi4spn_outcome port map(original_parcel,fetch_pc,canonical_instruction,original_length_bytes,legal,next_pc,redirect_valid,redirect_target);\n stim: process begin wait for 1 ns; assert legal='0' and canonical_instruction=x\"00000000\" report \"reserved zero immediate must be illegal\" severity failure; original_parcel<=x\"0044\"; wait for 1 ns; assert legal='1' and canonical_instruction/=x\"00000000\" and original_length_bytes=\"10\" and redirect_valid='0' report \"nonzero ADDI4SPN requires explicit normalized legal outcome\" severity failure; finish; end process;\nend architecture;\n"
+
+fn lw_outcome_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\nentity strict_lw_outcome_tb is end entity;\narchitecture tb of strict_lw_outcome_tb is\n signal original_parcel: std_logic_vector(15 downto 0) := x\"4000\"; signal fetch_pc,next_pc,redirect_target: std_logic_vector(31 downto 0) := x\"00000100\"; signal canonical_instruction: std_logic_vector(31 downto 0); signal original_length_bytes: std_logic_vector(1 downto 0); signal legal,redirect_valid: std_logic;\nbegin\n dut: entity work.strict_lw_outcome port map(original_parcel,fetch_pc,canonical_instruction,original_length_bytes,legal,next_pc,redirect_valid,redirect_target);\n stim: process begin wait for 1 ns; assert legal='1' and canonical_instruction=x\"00042403\" and original_length_bytes=\"10\" and next_pc=x\"00000102\" and redirect_valid='0' report \"C.LW explicit classifier outcome mismatch\" severity failure; original_parcel<=x\"0000\"; wait for 1 ns; assert legal='0' and canonical_instruction=x\"00000000\" report \"non-C.LW must be explicitly illegal\" severity failure; finish; end process;\nend architecture;\n"
+
+fn sw_outcome_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\nentity strict_sw_outcome_tb is end entity;\narchitecture tb of strict_sw_outcome_tb is\n signal original_parcel: std_logic_vector(15 downto 0) := x\"C000\"; signal fetch_pc,next_pc,redirect_target: std_logic_vector(31 downto 0) := x\"00000100\"; signal canonical_instruction: std_logic_vector(31 downto 0); signal original_length_bytes: std_logic_vector(1 downto 0); signal legal,redirect_valid: std_logic;\nbegin\n dut: entity work.strict_sw_outcome port map(original_parcel,fetch_pc,canonical_instruction,original_length_bytes,legal,next_pc,redirect_valid,redirect_target);\n stim: process begin wait for 1 ns; assert legal='1' and canonical_instruction=x\"00842023\" and original_length_bytes=\"10\" and next_pc=x\"00000102\" and redirect_valid='0' report \"C.SW explicit classifier outcome mismatch\" severity failure; original_parcel<=x\"0000\"; wait for 1 ns; assert legal='0' and canonical_instruction=x\"00000000\" report \"non-C.SW must be explicitly illegal\" severity failure; finish; end process;\nend architecture;\n"
+
+fn lwsp_outcome_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\nentity strict_lwsp_outcome_tb is end entity;\narchitecture tb of strict_lwsp_outcome_tb is\n signal original_parcel: std_logic_vector(15 downto 0) := x\"4082\"; signal fetch_pc,next_pc,redirect_target: std_logic_vector(31 downto 0) := x\"00000100\"; signal canonical_instruction: std_logic_vector(31 downto 0); signal original_length_bytes: std_logic_vector(1 downto 0); signal legal,redirect_valid: std_logic;\nbegin\n dut: entity work.strict_lwsp_outcome port map(original_parcel,fetch_pc,canonical_instruction,original_length_bytes,legal,next_pc,redirect_valid,redirect_target);\n stim: process begin wait for 1 ns; assert legal='1' and canonical_instruction=x\"00012083\" and original_length_bytes=\"10\" and redirect_valid='0' report \"C.LWSP explicit reserved chain valid outcome mismatch\" severity failure; original_parcel<=x\"4002\"; wait for 1 ns; assert legal='0' and canonical_instruction=x\"00000000\" report \"C.LWSP rd=x0 must stay explicitly illegal\" severity failure; finish; end process;\nend architecture;\n"
+
+fn migrating_predecode_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\nentity strict_migrating_predecode_tb is end entity;\narchitecture tb of strict_migrating_predecode_tb is\n signal original_parcel: std_logic_vector(15 downto 0) := x\"4000\"; signal fetch_pc,next_pc,redirect_target: std_logic_vector(31 downto 0) := x\"00000100\"; signal rs1_index: std_logic_vector(4 downto 0) := \"01000\"; signal rs1_value: std_logic_vector(31 downto 0) := (others=>'0'); signal canonical_instruction: std_logic_vector(31 downto 0); signal original_length_bytes: std_logic_vector(1 downto 0); signal legal,redirect_valid: std_logic;\nbegin\n dut: entity work.strict_migrating_predecode port map(original_parcel,fetch_pc,rs1_index,rs1_value,canonical_instruction,original_length_bytes,legal,next_pc,redirect_valid,redirect_target);\n stim: process begin wait for 1 ns; assert legal='1' and canonical_instruction=x\"00042403\" and original_length_bytes=\"10\" and next_pc=x\"00000102\" and redirect_valid='0' report \"migrating decoder must select admitted C.LW outcome\" severity failure; original_parcel<=x\"6105\"; wait for 1 ns; assert legal='1' and canonical_instruction=x\"02010113\" and next_pc=x\"00000102\" and redirect_valid='0' report \"migrating decoder must select C.ADDI16SP only through tag, x2, and nonzero-immediate legality\" severity failure; original_parcel<=x\"6101\"; wait for 1 ns; assert legal='0' and canonical_instruction=x\"00000000\" and next_pc=x\"00000102\" and redirect_valid='0' report \"reserved zero C.ADDI16SP must remain explicit illegal fallthrough\" severity failure; original_parcel<=x\"8082\"; rs1_index<=\"00001\"; rs1_value<=x\"00000205\"; wait for 1 ns; assert legal='1' and canonical_instruction=x\"00008067\" and redirect_valid='1' and redirect_target=x\"00000204\" and next_pc=x\"00000204\" report \"C.JR must use the matching rs1 read and clear JALR bit zero\" severity failure; original_parcel<=x\"9082\"; rs1_value<=x\"00000307\"; wait for 1 ns; assert legal='1' and canonical_instruction=x\"000080E7\" and redirect_valid='1' and redirect_target=x\"00000306\" and next_pc=x\"00000306\" report \"C.JALR must use the matching rs1 read and clear JALR bit zero\" severity failure; original_parcel<=x\"8082\"; rs1_index<=\"00010\"; wait for 1 ns; assert legal='0' and canonical_instruction=x\"00000000\" and redirect_valid='0' and redirect_target=x\"00000100\" and next_pc=x\"00000102\" report \"C.JR index mismatch must fail closed\" severity failure; finish; end process;\nend architecture;\n"
+
+fn cbreak_trap_predecode_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\nentity strict_cebreak_trap_predecode_tb is end entity;\narchitecture tb of strict_cebreak_trap_predecode_tb is\n signal original_parcel: std_logic_vector(15 downto 0) := x\"9002\"; signal fetch_pc,next_pc,redirect_target: std_logic_vector(31 downto 0) := x\"00000100\"; signal rs1_index: std_logic_vector(4 downto 0) := (others=>'0'); signal rs1_value: std_logic_vector(31 downto 0) := (others=>'0'); signal canonical_instruction: std_logic_vector(31 downto 0); signal original_length_bytes: std_logic_vector(1 downto 0); signal legal,redirect_valid,trap_valid: std_logic; signal trap_cause,trap_tval: std_logic_vector(31 downto 0);\nbegin\n dut: entity work.strict_cebreak_trap_predecode port map(original_parcel,fetch_pc,rs1_index,rs1_value,canonical_instruction,original_length_bytes,legal,next_pc,redirect_valid,redirect_target,trap_valid,trap_cause,trap_tval);\n stim: process begin wait for 1 ns; assert legal='1' and canonical_instruction=x\"00100073\" and original_length_bytes=\"10\" and next_pc=x\"00000102\" and redirect_valid='0' and trap_valid='1' and trap_cause=x\"00000003\" and trap_tval=x\"00000000\" report \"C.EBREAK must remain legal and request precise breakpoint cause three\" severity failure; original_parcel<=x\"0001\"; wait for 1 ns; assert legal='0' and canonical_instruction=x\"00000000\" and trap_valid='0' and trap_cause=x\"00000000\" and trap_tval=x\"00000000\" report \"non-C.EBREAK parcels must not fabricate a trap effect\" severity failure; finish; end process;\nend architecture;\n"
+
+
+fn trap_stateful_protocol_64_testbench(entity_name: text, testbench_name: text, address_bits: i32,
+    xlen: i32, pc_literal: text) -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\nentity " + testbench_name + " is end entity;\narchitecture tb of " + testbench_name + " is\n signal clk: std_logic := '0'; signal rst: std_logic := '1'; signal fetch_valid: std_logic := '0'; signal fetch_parcel: std_logic_vector(15 downto 0) := (others=>'0'); signal fetch_pc: std_logic_vector(" + (address_bits - 1).to_text() + " downto 0) := (others=>'0'); signal rs1_index: std_logic_vector(4 downto 0) := (others=>'0'); signal rs1_value: std_logic_vector(" + (xlen - 1).to_text() + " downto 0) := (others=>'0'); signal dispatch_accept,retire_valid: std_logic := '0'; signal retire_lineage,dispatch_lineage: std_logic_vector(63 downto 0) := (others=>'0'); signal retire_original_parcel: std_logic_vector(15 downto 0) := x\"9002\"; signal retire_canonical_instruction: std_logic_vector(31 downto 0) := x\"00100073\"; signal retire_original_length_bytes: std_logic_vector(1 downto 0) := \"10\"; signal fetch_ready,dispatch_valid,protocol_fault: std_logic; signal original_parcel: std_logic_vector(15 downto 0); signal canonical_instruction: std_logic_vector(31 downto 0); signal original_length_bytes: std_logic_vector(1 downto 0); signal legal,redirect_valid,trap_valid: std_logic; signal next_pc,redirect_target: std_logic_vector(" + (address_bits - 1).to_text() + " downto 0); signal trap_cause,trap_tval: std_logic_vector(" + (xlen - 1).to_text() + " downto 0);\nbegin\n clk<=not clk after 5 ns;\n dut: entity work." + entity_name + " port map(clk,rst,fetch_valid,fetch_parcel,fetch_pc,rs1_index,rs1_value,dispatch_accept,retire_valid,retire_lineage,retire_original_parcel,retire_canonical_instruction,retire_original_length_bytes,fetch_ready,dispatch_valid,dispatch_lineage,protocol_fault,original_parcel,canonical_instruction,original_length_bytes,legal,next_pc,redirect_valid,redirect_target,trap_valid,trap_cause,trap_tval);\n stim: process begin\n  wait until rising_edge(clk); rst<='0'; retire_valid<='1'; retire_lineage<=x\"0000000000000000\";\n  wait until rising_edge(clk); retire_valid<='0'; wait for 1 ns; assert protocol_fault='1' and fetch_ready='0' and trap_valid='0' report \"early retirement must fault without an externally visible trap\" severity failure;\n  rst<='1'; wait until rising_edge(clk); rst<='0'; wait for 1 ns; assert protocol_fault='0' and fetch_ready='1' and trap_valid='0' report \"reset must recover an early-retirement fault\" severity failure;\n  fetch_valid<='1'; fetch_parcel<=x\"9002\"; fetch_pc<=" + pc_literal + "; wait until rising_edge(clk); fetch_valid<='1'; fetch_parcel<=x\"0001\";\n  wait for 1 ns; assert dispatch_valid='1' and fetch_ready='0' and original_parcel=x\"9002\" and canonical_instruction=x\"00100073\" and legal='1' and trap_valid='1' and trap_cause=std_logic_vector(to_unsigned(3," + xlen.to_text() + ")) and trap_tval=(trap_tval'range=>'0') report \"captured C.EBREAK must expose one precise stable dispatch effect\" severity failure;\n  wait until rising_edge(clk); fetch_valid<='0'; wait for 1 ns; assert dispatch_valid='1' and original_parcel=x\"9002\" and canonical_instruction=x\"00100073\" and trap_valid='1' report \"backpressure must hold the captured C.EBREAK payload and trap effect stable\" severity failure;\n  dispatch_accept<='1'; wait until rising_edge(clk); dispatch_accept<='0'; wait for 1 ns; assert dispatch_valid='0' and fetch_ready='0' and trap_valid='0' and trap_cause=(trap_cause'range=>'0') and trap_tval=(trap_tval'range=>'0') report \"accepted dispatch must block fetch and hide the retired C.EBREAK effect\" severity failure;\n  retire_valid<='1'; retire_lineage<=dispatch_lineage; wait until rising_edge(clk); retire_valid<='0'; wait for 1 ns; assert protocol_fault='0' and fetch_ready='1' and trap_valid='0' report \"matching retirement must release exactly one frontend entry\" severity failure;\n  retire_valid<='1'; wait until rising_edge(clk); retire_valid<='0'; wait for 1 ns; assert protocol_fault='1' and fetch_ready='0' and trap_valid='0' report \"repeated matching retirement must become a sticky fault\" severity failure;\n  rst<='1'; wait until rising_edge(clk); rst<='0'; wait for 1 ns; assert protocol_fault='0' and fetch_ready='1' report \"reset must recover a repeated-retirement fault\" severity failure;\n  fetch_valid<='1'; fetch_parcel<=x\"9002\"; fetch_pc<=" + pc_literal + "; wait until rising_edge(clk); fetch_valid<='0'; dispatch_accept<='1'; wait until rising_edge(clk); dispatch_accept<='0'; wait for 1 ns;\n  retire_valid<='1'; retire_lineage<=std_logic_vector(unsigned(dispatch_lineage)+1); wait until rising_edge(clk); retire_valid<='0'; wait for 1 ns; assert protocol_fault='1' and fetch_ready='0' and trap_valid='0' report \"mismatched retirement must make a sticky fault without stale C.EBREAK output\" severity failure;\n  fetch_valid<='1'; fetch_parcel<=x\"0001\"; wait until rising_edge(clk); fetch_valid<='0'; wait for 1 ns; assert protocol_fault='1' and fetch_ready='0' and original_parcel=(original_parcel'range=>'0') and trap_valid='0' report \"faulted frontend must refuse a new fetch and keep stale effects hidden\" severity failure;\n  rst<='1'; wait until rising_edge(clk); rst<='0'; wait for 1 ns; assert protocol_fault='0' and fetch_ready='1' and trap_valid='0' report \"only reset may recover the protocol and clear all trap effects\" severity failure; finish; end process;\nend architecture;\n"
+
+# This companion vector deliberately uses two clean transactions before the
+# fault vector.  It makes lineage advancement and reset dominance observable
+# in the generated RV32 and RV64 products, rather than inferring them from a
+# single retirement.
+fn trap_stateful_reuse_reset_64_testbench(entity_name: text, testbench_name: text, address_bits: i32,
+    xlen: i32, pc_literal: text) -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\nentity " + testbench_name + " is end entity;\narchitecture tb of " + testbench_name + " is\n signal clk: std_logic := '0'; signal rst: std_logic := '1'; signal fetch_valid: std_logic := '0'; signal fetch_parcel: std_logic_vector(15 downto 0) := (others=>'0'); signal fetch_pc: std_logic_vector(" + (address_bits - 1).to_text() + " downto 0) := (others=>'0'); signal rs1_index: std_logic_vector(4 downto 0) := (others=>'0'); signal rs1_value: std_logic_vector(" + (xlen - 1).to_text() + " downto 0) := (others=>'0'); signal dispatch_accept,retire_valid: std_logic := '0'; signal retire_lineage,dispatch_lineage: std_logic_vector(63 downto 0) := (others=>'0'); signal retire_original_parcel: std_logic_vector(15 downto 0) := x\"9002\"; signal retire_canonical_instruction: std_logic_vector(31 downto 0) := x\"00100073\"; signal retire_original_length_bytes: std_logic_vector(1 downto 0) := \"10\"; signal fetch_ready,dispatch_valid,protocol_fault: std_logic; signal original_parcel: std_logic_vector(15 downto 0); signal canonical_instruction: std_logic_vector(31 downto 0); signal original_length_bytes: std_logic_vector(1 downto 0); signal legal,redirect_valid,trap_valid: std_logic; signal next_pc,redirect_target: std_logic_vector(" + (address_bits - 1).to_text() + " downto 0); signal trap_cause,trap_tval: std_logic_vector(" + (xlen - 1).to_text() + " downto 0);\nbegin\n clk<=not clk after 5 ns;\n dut: entity work." + entity_name + " port map(clk,rst,fetch_valid,fetch_parcel,fetch_pc,rs1_index,rs1_value,dispatch_accept,retire_valid,retire_lineage,retire_original_parcel,retire_canonical_instruction,retire_original_length_bytes,fetch_ready,dispatch_valid,dispatch_lineage,protocol_fault,original_parcel,canonical_instruction,original_length_bytes,legal,next_pc,redirect_valid,redirect_target,trap_valid,trap_cause,trap_tval);\n stim: process\n  variable first_lineage: std_logic_vector(63 downto 0);\n  variable second_lineage: std_logic_vector(63 downto 0);\n begin\n  wait until rising_edge(clk); rst<='0'; fetch_valid<='1'; fetch_parcel<=x\"9002\"; fetch_pc<=" + pc_literal + ";\n  wait until rising_edge(clk); fetch_valid<='0'; wait for 1 ns; assert dispatch_valid='1' and trap_valid='1' and protocol_fault='0' report \"first clean dispatch must expose a precise C.EBREAK effect\" severity failure; first_lineage:=dispatch_lineage;\n  dispatch_accept<='1'; wait until rising_edge(clk); dispatch_accept<='0'; retire_valid<='1'; retire_lineage<=first_lineage;\n  wait until rising_edge(clk); retire_valid<='0'; wait for 1 ns; assert fetch_ready='1' and protocol_fault='0' and dispatch_valid='0' report \"first matching retirement must reopen the frontend without a fault\" severity failure;\n  fetch_valid<='1'; fetch_parcel<=x\"9002\"; fetch_pc<=" + pc_literal + "; wait until rising_edge(clk); fetch_valid<='0'; wait for 1 ns; assert dispatch_valid='1' and dispatch_lineage=std_logic_vector(unsigned(first_lineage)+1) and trap_valid='1' report \"second clean dispatch must reuse the frontend with an incremented 64-bit lineage\" severity failure; second_lineage:=dispatch_lineage;\n  dispatch_accept<='1'; wait until rising_edge(clk); dispatch_accept<='0'; retire_valid<='1'; retire_lineage<=second_lineage;\n  wait until rising_edge(clk); retire_valid<='0'; wait for 1 ns; assert fetch_ready='1' and protocol_fault='0' and dispatch_valid='0' report \"second matching retirement must prove consecutive clean reuse\" severity failure;\n  fetch_valid<='1'; fetch_parcel<=x\"9002\"; fetch_pc<=" + pc_literal + "; wait until rising_edge(clk); fetch_valid<='0'; wait for 1 ns; assert dispatch_valid='1' and protocol_fault='0' report \"identity-mismatch setup must hold one live dispatch\" severity failure;\n  dispatch_accept<='1'; wait until rising_edge(clk); dispatch_accept<='0'; retire_valid<='1'; retire_lineage<=dispatch_lineage; retire_canonical_instruction<=x\"00000013\";\n  wait until rising_edge(clk); retire_valid<='0'; wait for 1 ns; assert protocol_fault='1' and fetch_ready='0' and dispatch_valid='0' and trap_valid='0' report \"same-lineage retirement with wrong canonical identity must become a sticky fault\" severity failure;\n  rst<='1'; wait until rising_edge(clk); rst<='0'; retire_canonical_instruction<=x\"00100073\"; wait for 1 ns; assert protocol_fault='0' and fetch_ready='1' report \"reset must recover an identity-mismatch fault\" severity failure;\n  fetch_valid<='1'; fetch_parcel<=x\"9002\"; fetch_pc<=" + pc_literal + "; wait until rising_edge(clk); fetch_valid<='0'; wait for 1 ns; assert dispatch_valid='1' and protocol_fault='0' report \"reset-priority setup must hold one live dispatch\" severity failure;\n  dispatch_accept<='1'; wait until rising_edge(clk); dispatch_accept<='0'; retire_valid<='1'; retire_lineage<=dispatch_lineage; rst<='1';\n  wait until rising_edge(clk); rst<='0'; retire_valid<='0'; wait for 1 ns; assert protocol_fault='0' and fetch_ready='1' and dispatch_valid='0' and trap_valid='0' report \"reset must dominate a same-edge matching retirement and clear the frontend\" severity failure; finish; end process;\nend architecture;\n"
+
+fn parcel_field_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_parcel_field_tb is\nend entity strict_parcel_field_tb;\n\narchitecture tb of strict_parcel_field_tb is\n    signal parcel : std_logic_vector(31 downto 0) := std_logic_vector(to_unsigned(40960, 32));\n    signal field : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_parcel_field\n        port map (parcel => parcel, field => field);\n    stim: process\n    begin\n        wait for 1 ns;\n        assert field = std_logic_vector(to_unsigned(5, 32))\n            report \"expected parcel field 5\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn parcel_left_shift_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_parcel_left_shift_tb is\nend entity strict_parcel_left_shift_tb;\n\narchitecture tb of strict_parcel_left_shift_tb is\n    signal parcel : std_logic_vector(31 downto 0) := std_logic_vector(to_unsigned(19, 32));\n    signal shifted : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_parcel_left_shift\n        port map (parcel => parcel, shifted => shifted);\n    stim: process\n    begin\n        wait for 1 ns;\n        assert shifted = std_logic_vector(to_unsigned(2432, 32))\n            report \"expected parcel left shift by seven\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn cbreak_decode_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_cebreak_decode_tb is\nend entity strict_cebreak_decode_tb;\n\narchitecture tb of strict_cebreak_decode_tb is\n    signal parcel : std_logic_vector(31 downto 0) := std_logic_vector(to_unsigned(36866, 32));\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_cebreak_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n    begin\n        wait for 1 ns;\n        assert canonical_instruction = std_logic_vector(to_unsigned(1048691, 32))\n            report \"expected canonical EBREAK for parcel 0x9002\" severity failure;\n        parcel <= std_logic_vector(to_unsigned(1, 32));\n        wait for 1 ns;\n        assert canonical_instruction = std_logic_vector(to_unsigned(0, 32))\n            report \"expected illegal canonical value for a non-EBREAK parcel\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn cbreak_leaf_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_cebreak_leaf_tb is\nend entity strict_cebreak_leaf_tb;\n\narchitecture tb of strict_cebreak_leaf_tb is\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_cebreak_leaf\n        port map (canonical_instruction => canonical_instruction);\n    stim: process\n    begin\n        wait for 1 ns;\n        assert canonical_instruction = std_logic_vector(to_unsigned(1048691, 32))\n            report \"expected canonical EBREAK\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn caddi_decode_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_caddi_decode_tb is\nend entity strict_caddi_decode_tb;\n\narchitecture tb of strict_caddi_decode_tb is\n    signal parcel : std_logic_vector(31 downto 0) := x\"00000001\";\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_caddi_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n    begin\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000013\" report \"C.NOP must become ADDI x0,x0,0\" severity failure;\n        parcel <= x\"00000505\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00150513\" report \"C.ADDI x10,1 canonical value\" severity failure;\n        parcel <= x\"000010FD\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"FFF08093\" report \"negative C.ADDI immediate sign extension\" severity failure;\n        parcel <= x\"00000FFD\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"01FF8F93\" report \"positive C.ADDI immediate extraction\" severity failure;\n        parcel <= x\"00001585\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"FE158593\" report \"negative C.ADDI rd and immediate extraction\" severity failure;\n        parcel <= x\"00004001\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"non-C.ADDI parcel must remain unclassified\" severity failure;\n        parcel <= x\"00000013\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"32-bit prefix must not decode as C.ADDI\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn caddi_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_caddi_decode_exhaustive_tb is\nend entity strict_caddi_decode_exhaustive_tb;\n\narchitecture tb of strict_caddi_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_caddi_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable imm12 : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rd in 0 to 31 loop\n            for imm in 0 to 63 loop\n                parcel_word := to_unsigned(((imm / 32) * 4096) + (rd * 128) + ((imm mod 32) * 4) + 1, 32);\n                if imm >= 32 then\n                    imm12 := to_unsigned(imm + 4032, 32);\n                else\n                    imm12 := to_unsigned(imm, 32);\n                end if;\n                expected := shift_left(imm12, 20) or shift_left(to_unsigned(rd, 32), 15) or shift_left(to_unsigned(rd, 32), 7) or to_unsigned(19, 32);\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"C.ADDI exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn caddi16sp_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_caddi16sp_decode_exhaustive_tb is\nend entity strict_caddi16sp_decode_exhaustive_tb;\n\narchitecture tb of strict_caddi16sp_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_caddi16sp_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable imm12 : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for imm in 0 to 63 loop\n            parcel_word := to_unsigned(24577 + ((imm / 32) * 4096) + (((imm / 16) mod 2) * 64) + (((imm / 8) mod 2) * 32) + (((imm / 2) mod 4) * 8) + ((imm mod 2) * 4) + 256, 32);\n            imm12 := shift_left(to_unsigned(imm / 32, 32), 9) or shift_left(to_unsigned((imm / 4) mod 2, 32), 8) or shift_left(to_unsigned((imm / 2) mod 2, 32), 7) or shift_left(to_unsigned((imm / 8) mod 2, 32), 6) or shift_left(to_unsigned(imm mod 2, 32), 5) or shift_left(to_unsigned((imm / 16) mod 2, 32), 4);\n            if imm >= 32 then\n                imm12 := imm12 or to_unsigned(3072, 32);\n            end if;\n            if imm = 0 then\n                expected := to_unsigned(0, 32);\n            else\n                expected := shift_left(imm12, 20) or to_unsigned(65811, 32);\n            end if;\n            parcel <= std_logic_vector(parcel_word);\n            wait for 1 ns;\n            assert unsigned(canonical_instruction) = expected\n                report \"C.ADDI16SP exhaustive canonical mismatch\" severity failure;\n        end loop;\n        parcel <= x\"00006185\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.LUI must stay outside C.ADDI16SP\" severity failure;\n        parcel <= x\"00006001\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"zero C.ADDI16SP immediate is reserved\" severity failure;\n        parcel <= x\"00000001\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.ADDI must stay outside C.ADDI16SP\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn clui_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_clui_decode_exhaustive_tb is\nend entity strict_clui_decode_exhaustive_tb;\n\narchitecture tb of strict_clui_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_clui_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable imm20 : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rd in 0 to 31 loop\n            for imm in 0 to 63 loop\n                parcel_word := to_unsigned(24577 + ((imm / 32) * 4096) + (rd * 128) + ((imm mod 32) * 4), 32);\n                imm20 := to_unsigned(imm, 32);\n                if imm >= 32 then\n                    imm20 := imm20 or to_unsigned(1048512, 32);\n                end if;\n                if rd = 0 or rd = 2 or imm = 0 then\n                    expected := to_unsigned(0, 32);\n                else\n                    expected := shift_left(imm20, 12) or shift_left(to_unsigned(rd, 32), 7) or to_unsigned(55, 32);\n                end if;\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"C.LUI exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00006101\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.ADDI16SP must stay outside C.LUI\" severity failure;\n        parcel <= x\"00006181\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"zero C.LUI immediate is reserved\" severity failure;\n        parcel <= x\"00006001\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.LUI rd=x0 is reserved\" severity failure;\n        parcel <= x\"00000001\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.ADDI must stay outside C.LUI\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn addi4spn_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_addi4spn_decode_exhaustive_tb is\nend entity strict_addi4spn_decode_exhaustive_tb;\n\narchitecture tb of strict_addi4spn_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_addi4spn_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable immediate : natural;\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rdp in 0 to 7 loop\n            for raw in 0 to 255 loop\n                parcel_word := to_unsigned((raw * 32) + (rdp * 4), 32);\n                immediate := (((raw / 4) mod 16) * 64) + ((raw / 64) * 16) + ((raw mod 2) * 8) + (((raw / 2) mod 2) * 4);\n                if immediate = 0 then\n                    expected := to_unsigned(0, 32);\n                else\n                    expected := shift_left(to_unsigned(immediate, 32), 20) or to_unsigned(65536, 32) or shift_left(to_unsigned(rdp + 8, 32), 7) or to_unsigned(19, 32);\n                end if;\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"C.ADDI4SPN exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00000001\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"non-C.ADDI4SPN parcel must remain unclassified\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn lw_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_lw_decode_exhaustive_tb is\nend entity strict_lw_decode_exhaustive_tb;\n\narchitecture tb of strict_lw_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_lw_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable immediate : natural;\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rs1p in 0 to 7 loop\n            for rdp in 0 to 7 loop\n                for raw in 0 to 31 loop\n                    parcel_word := to_unsigned(16384 + (rs1p * 128) + (rdp * 4) + ((raw mod 2) * 32) + (((raw / 2) mod 2) * 64) + ((raw / 4) * 256), 32);\n                    immediate := ((raw mod 2) * 64) + ((raw / 4) * 8) + (((raw / 2) mod 2) * 4);\n                    expected := shift_left(to_unsigned(immediate, 32), 20) or shift_left(to_unsigned(rs1p + 8, 32), 15) or to_unsigned(8192, 32) or shift_left(to_unsigned(rdp + 8, 32), 7) or to_unsigned(3, 32);\n                    parcel <= std_logic_vector(parcel_word);\n                    wait for 1 ns;\n                    assert unsigned(canonical_instruction) = expected\n                        report \"C.LW exhaustive canonical mismatch\" severity failure;\n                end loop;\n            end loop;\n        end loop;\n        parcel <= x\"00000001\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"non-C.LW parcel must remain unclassified\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn sw_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_sw_decode_exhaustive_tb is\nend entity strict_sw_decode_exhaustive_tb;\n\narchitecture tb of strict_sw_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_sw_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable immediate : natural;\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rs1p in 0 to 7 loop\n            for rs2p in 0 to 7 loop\n                for raw in 0 to 31 loop\n                    parcel_word := to_unsigned(49152 + (rs1p * 128) + (rs2p * 4) + ((raw mod 2) * 32) + (((raw / 2) mod 2) * 64) + ((raw / 4) * 256), 32);\n                    immediate := ((raw mod 2) * 64) + ((raw / 4) * 8) + (((raw / 2) mod 2) * 4);\n                    expected := shift_left(to_unsigned(immediate / 32, 32), 25) or shift_left(to_unsigned(rs2p + 8, 32), 20) or shift_left(to_unsigned(rs1p + 8, 32), 15) or to_unsigned(8192, 32) or shift_left(to_unsigned(immediate mod 32, 32), 7) or to_unsigned(35, 32);\n                    parcel <= std_logic_vector(parcel_word);\n                    wait for 1 ns;\n                    assert unsigned(canonical_instruction) = expected\n                        report \"C.SW exhaustive canonical mismatch\" severity failure;\n                end loop;\n            end loop;\n        end loop;\n        parcel <= x\"00000001\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"non-C.SW parcel must remain unclassified\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn lwsp_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_lwsp_decode_exhaustive_tb is\nend entity strict_lwsp_decode_exhaustive_tb;\n\narchitecture tb of strict_lwsp_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_lwsp_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable immediate : natural;\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rd in 0 to 31 loop\n            for raw in 0 to 127 loop\n                parcel_word := to_unsigned(16386 + (rd * 128) + ((raw mod 4) * 4) + (((raw / 4) mod 2) * 4096) + ((raw / 8) * 16), 32);\n                immediate := ((raw mod 4) * 64) + (((raw / 4) mod 2) * 32) + ((raw / 8) * 4);\n                if rd = 0 then\n                    expected := to_unsigned(0, 32);\n                else\n                    expected := shift_left(to_unsigned(immediate, 32), 20) or to_unsigned(65536, 32) or to_unsigned(8192, 32) or shift_left(to_unsigned(rd, 32), 7) or to_unsigned(3, 32);\n                end if;\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"C.LWSP exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00000001\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"non-C.LWSP parcel must remain unclassified\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn swsp_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_swsp_decode_exhaustive_tb is\nend entity strict_swsp_decode_exhaustive_tb;\n\narchitecture tb of strict_swsp_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_swsp_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable immediate : natural;\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rs2 in 0 to 31 loop\n            for raw in 0 to 63 loop\n                parcel_word := to_unsigned(49154 + (rs2 * 4) + ((raw mod 4) * 128) + ((raw / 4) * 512), 32);\n                immediate := ((raw mod 4) * 64) + ((raw / 4) * 4);\n                expected := shift_left(to_unsigned(immediate / 32, 32), 25) or shift_left(to_unsigned(rs2, 32), 20) or to_unsigned(65536, 32) or to_unsigned(8192, 32) or shift_left(to_unsigned(immediate mod 32, 32), 7) or to_unsigned(35, 32);\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"C.SWSP exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00000001\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"non-C.SWSP parcel must remain unclassified\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn slli_low_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_slli_low_decode_exhaustive_tb is\nend entity strict_slli_low_decode_exhaustive_tb;\n\narchitecture tb of strict_slli_low_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_slli_low_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rd in 0 to 31 loop\n            for shamt in 0 to 31 loop\n                parcel_word := to_unsigned(2 + (rd * 128) + (shamt * 4), 32);\n                expected := shift_left(to_unsigned(shamt, 32), 20) or shift_left(to_unsigned(rd, 32), 15) or to_unsigned(4096, 32) or shift_left(to_unsigned(rd, 32), 7) or to_unsigned(19, 32);\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"C.SLLI exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00001002\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"bit12-set C.SLLI must stay outside the common row\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn srli_low_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_srli_low_decode_exhaustive_tb is\nend entity strict_srli_low_decode_exhaustive_tb;\n\narchitecture tb of strict_srli_low_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_srli_low_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rdp in 0 to 7 loop\n            for shamt in 0 to 31 loop\n                parcel_word := to_unsigned(32769 + (rdp * 128) + (shamt * 4), 32);\n                expected := shift_left(to_unsigned(shamt, 32), 20) or shift_left(to_unsigned(rdp + 8, 32), 15) or to_unsigned(20480, 32) or shift_left(to_unsigned(rdp + 8, 32), 7) or to_unsigned(19, 32);\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"C.SRLI exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00008401\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.SRAI must stay outside the C.SRLI row\" severity failure;\n        parcel <= x\"00008001\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00045413\" report \"C.SRLI rd'=x0 shamt=0 canonical value\" severity failure;\n        parcel <= x\"00009001\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"bit12-set C.SRLI must stay outside the common row\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn srai_low_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_srai_low_decode_exhaustive_tb is\nend entity strict_srai_low_decode_exhaustive_tb;\n\narchitecture tb of strict_srai_low_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_srai_low_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rdp in 0 to 7 loop\n            for shamt in 0 to 31 loop\n                parcel_word := to_unsigned(33793 + (rdp * 128) + (shamt * 4), 32);\n                expected := to_unsigned(1073741824, 32) or shift_left(to_unsigned(shamt, 32), 20) or shift_left(to_unsigned(rdp + 8, 32), 15) or to_unsigned(20480, 32) or shift_left(to_unsigned(rdp + 8, 32), 7) or to_unsigned(19, 32);\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"C.SRAI exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00008001\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.SRLI must stay outside the C.SRAI row\" severity failure;\n        parcel <= x\"00008401\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"40045413\" report \"C.SRAI rd'=x0 shamt=0 canonical value\" severity failure;\n        parcel <= x\"00009401\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"bit12-set C.SRAI must stay outside the common row\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn candi_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_candi_decode_exhaustive_tb is\nend entity strict_candi_decode_exhaustive_tb;\n\narchitecture tb of strict_candi_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_candi_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable imm12 : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rdp in 0 to 7 loop\n            for imm in 0 to 63 loop\n                parcel_word := to_unsigned(34817 + ((imm / 32) * 4096) + (rdp * 128) + ((imm mod 32) * 4), 32);\n                if imm >= 32 then\n                    imm12 := to_unsigned(imm + 4032, 32);\n                else\n                    imm12 := to_unsigned(imm, 32);\n                end if;\n                expected := shift_left(imm12, 20) or shift_left(to_unsigned(rdp + 8, 32), 15) or to_unsigned(28672, 32) or shift_left(to_unsigned(rdp + 8, 32), 7) or to_unsigned(19, 32);\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"C.ANDI exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00008401\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.SRAI must stay outside the C.ANDI row\" severity failure;\n        parcel <= x\"00009801\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"FE047413\" report \"negative C.ANDI immediate must sign extend\" severity failure;\n        parcel <= x\"00008C01\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.SUB mode must stay outside the C.ANDI row\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn csub_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_csub_decode_exhaustive_tb is\nend entity strict_csub_decode_exhaustive_tb;\n\narchitecture tb of strict_csub_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_csub_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rdp in 0 to 7 loop\n            for rs2p in 0 to 7 loop\n                parcel_word := to_unsigned(35841 + (rdp * 128) + (rs2p * 4), 32);\n                expected := to_unsigned(1073741824, 32) or shift_left(to_unsigned(rs2p + 8, 32), 20) or shift_left(to_unsigned(rdp + 8, 32), 15) or shift_left(to_unsigned(rdp + 8, 32), 7) or to_unsigned(51, 32);\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"C.SUB exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00008C21\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.XOR must stay outside the C.SUB row\" severity failure;\n        parcel <= x\"00008C01\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"40840433\" report \"C.SUB compact-register canonical value\" severity failure;\n        parcel <= x\"00009C01\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.SUBW must stay outside the shared C.SUB row\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn cxor_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_cxor_decode_exhaustive_tb is\nend entity strict_cxor_decode_exhaustive_tb;\n\narchitecture tb of strict_cxor_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_cxor_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rdp in 0 to 7 loop\n            for rs2p in 0 to 7 loop\n                parcel_word := to_unsigned(35873 + (rdp * 128) + (rs2p * 4), 32);\n                expected := shift_left(to_unsigned(rs2p + 8, 32), 20) or shift_left(to_unsigned(rdp + 8, 32), 15) or to_unsigned(16384, 32) or shift_left(to_unsigned(rdp + 8, 32), 7) or to_unsigned(51, 32);\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"C.XOR exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00008C01\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.SUB must stay outside the C.XOR row\" severity failure;\n        parcel <= x\"00008C21\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00844433\" report \"C.XOR compact-register canonical value\" severity failure;\n        parcel <= x\"00008C41\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.OR must stay outside the C.XOR row\" severity failure;\n        parcel <= x\"00009C21\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"bit12-set C.XOR must stay outside the shared row\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn cor_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_cor_decode_exhaustive_tb is\nend entity strict_cor_decode_exhaustive_tb;\n\narchitecture tb of strict_cor_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_cor_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rdp in 0 to 7 loop\n            for rs2p in 0 to 7 loop\n                parcel_word := to_unsigned(35905 + (rdp * 128) + (rs2p * 4), 32);\n                expected := shift_left(to_unsigned(rs2p + 8, 32), 20) or shift_left(to_unsigned(rdp + 8, 32), 15) or to_unsigned(24576, 32) or shift_left(to_unsigned(rdp + 8, 32), 7) or to_unsigned(51, 32);\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"C.OR exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00008C21\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.XOR must stay outside the C.OR row\" severity failure;\n        parcel <= x\"00008C41\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00846433\" report \"C.OR compact-register canonical value\" severity failure;\n        parcel <= x\"00008C61\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.AND must stay outside the C.OR row\" severity failure;\n        parcel <= x\"00009C41\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"bit12-set C.OR must stay outside the shared row\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn cand_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_cand_decode_exhaustive_tb is\nend entity strict_cand_decode_exhaustive_tb;\n\narchitecture tb of strict_cand_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_cand_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rdp in 0 to 7 loop\n            for rs2p in 0 to 7 loop\n                parcel_word := to_unsigned(35937 + (rdp * 128) + (rs2p * 4), 32);\n                expected := shift_left(to_unsigned(rs2p + 8, 32), 20) or shift_left(to_unsigned(rdp + 8, 32), 15) or to_unsigned(28672, 32) or shift_left(to_unsigned(rdp + 8, 32), 7) or to_unsigned(51, 32);\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"C.AND exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00008C41\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.OR must stay outside the C.AND row\" severity failure;\n        parcel <= x\"00008C61\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00847433\" report \"C.AND compact-register canonical value\" severity failure;\n        parcel <= x\"00008C01\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.SUB must stay outside the C.AND row\" severity failure;\n        parcel <= x\"00009C61\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"bit12-set C.AND must stay outside the shared row\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn cjr_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_cjr_decode_exhaustive_tb is\nend entity strict_cjr_decode_exhaustive_tb;\n\narchitecture tb of strict_cjr_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_cjr_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rs1 in 0 to 31 loop\n            parcel_word := to_unsigned(32770 + (rs1 * 128), 32);\n            if rs1 = 0 then\n                expected := to_unsigned(0, 32);\n            else\n                expected := shift_left(to_unsigned(rs1, 32), 15) or to_unsigned(103, 32);\n            end if;\n            parcel <= std_logic_vector(parcel_word);\n            wait for 1 ns;\n            assert unsigned(canonical_instruction) = expected\n                report \"C.JR exhaustive canonical mismatch\" severity failure;\n        end loop;\n        parcel <= x\"00008002\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.JR rd=x0 is reserved\" severity failure;\n        parcel <= x\"00008086\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.MV must stay outside the C.JR row\" severity failure;\n        parcel <= x\"00009082\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"bit12-set C.JALR must stay outside the C.JR row\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn cmv_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_cmv_decode_exhaustive_tb is\nend entity strict_cmv_decode_exhaustive_tb;\n\narchitecture tb of strict_cmv_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_cmv_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rd in 0 to 31 loop\n            for rs2 in 1 to 31 loop\n                parcel_word := to_unsigned(32770 + (rd * 128) + (rs2 * 4), 32);\n                if rd = 0 then\n                    expected := to_unsigned(19, 32);\n                else\n                    expected := shift_left(to_unsigned(rs2, 32), 20) or shift_left(to_unsigned(rd, 32), 7) or to_unsigned(51, 32);\n                end if;\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"C.MV exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00008082\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.JR must stay outside the C.MV row\" severity failure;\n        parcel <= x\"00008002\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"reserved rd=x0/rs2=x0 must remain outside C.MV\" severity failure;\n        parcel <= x\"00009086\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"bit12-set C.ADD must stay outside the C.MV row\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn cjalr_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_cjalr_decode_exhaustive_tb is\nend entity strict_cjalr_decode_exhaustive_tb;\n\narchitecture tb of strict_cjalr_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_cjalr_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rs1 in 0 to 31 loop\n            parcel_word := to_unsigned(36866 + (rs1 * 128), 32);\n            if rs1 = 0 then\n                expected := to_unsigned(0, 32);\n            else\n                expected := shift_left(to_unsigned(rs1, 32), 15) or to_unsigned(231, 32);\n            end if;\n            parcel <= std_logic_vector(parcel_word);\n            wait for 1 ns;\n            assert unsigned(canonical_instruction) = expected\n                report \"C.JALR exhaustive canonical mismatch\" severity failure;\n        end loop;\n        parcel <= x\"00009002\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.JALR rd=x0 is reserved\" severity failure;\n        parcel <= x\"00008082\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.JR must stay outside the C.JALR row\" severity failure;\n        parcel <= x\"00008086\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.MV must stay outside the C.JALR row\" severity failure;\n        parcel <= x\"00009086\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.ADD must stay outside the C.JALR row\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn cadd_rv32_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_cadd_rv32_decode_exhaustive_tb is\nend entity strict_cadd_rv32_decode_exhaustive_tb;\n\narchitecture tb of strict_cadd_rv32_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_cadd_rv32_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rd in 0 to 31 loop\n            for rs2 in 1 to 31 loop\n                parcel_word := to_unsigned(36866 + (rd * 128) + (rs2 * 4), 32);\n                if rd = 0 then\n                    expected := to_unsigned(19, 32);\n                else\n                    expected := shift_left(to_unsigned(rs2, 32), 20) or shift_left(to_unsigned(rd, 32), 15) or shift_left(to_unsigned(rd, 32), 7) or to_unsigned(51, 32);\n                end if;\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"RV32 C.ADD exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00009082\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.JALR must stay outside C.ADD\" severity failure;\n        parcel <= x\"00008086\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.MV must stay outside C.ADD\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn cadd_rv64_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_cadd_rv64_decode_exhaustive_tb is\nend entity strict_cadd_rv64_decode_exhaustive_tb;\n\narchitecture tb of strict_cadd_rv64_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_cadd_rv64_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rd in 0 to 31 loop\n            for rs2 in 1 to 31 loop\n                parcel_word := to_unsigned(36866 + (rd * 128) + (rs2 * 4), 32);\n                expected := shift_left(to_unsigned(rs2, 32), 20) or shift_left(to_unsigned(rd, 32), 15) or shift_left(to_unsigned(rd, 32), 7) or to_unsigned(51, 32);\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"RV64 C.ADD exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00009082\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.JALR must stay outside C.ADD\" severity failure;\n        parcel <= x\"00008086\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"C.MV must stay outside C.ADD\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn cli_exhaustive_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_cli_decode_exhaustive_tb is\nend entity strict_cli_decode_exhaustive_tb;\n\narchitecture tb of strict_cli_decode_exhaustive_tb is\n    signal parcel : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_cli_decode\n        port map (parcel => parcel, canonical_instruction => canonical_instruction);\n    stim: process\n        variable parcel_word : unsigned(31 downto 0);\n        variable imm12 : unsigned(31 downto 0);\n        variable expected : unsigned(31 downto 0);\n    begin\n        for rd in 0 to 31 loop\n            for imm in 0 to 63 loop\n                parcel_word := to_unsigned(16385 + ((imm / 32) * 4096) + (rd * 128) + ((imm mod 32) * 4), 32);\n                if imm >= 32 then\n                    imm12 := to_unsigned(imm + 4032, 32);\n                else\n                    imm12 := to_unsigned(imm, 32);\n                end if;\n                expected := shift_left(imm12, 20) or shift_left(to_unsigned(rd, 32), 7) or to_unsigned(19, 32);\n                parcel <= std_logic_vector(parcel_word);\n                wait for 1 ns;\n                assert unsigned(canonical_instruction) = expected\n                    report \"C.LI exhaustive canonical mismatch\" severity failure;\n            end loop;\n        end loop;\n        parcel <= x\"00000001\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" report \"non-C.LI parcel must remain unclassified\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn cj_predecode_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_cj_predecode_tb is\nend entity strict_cj_predecode_tb;\n\narchitecture tb of strict_cj_predecode_tb is\n    signal original_parcel : std_logic_vector(15 downto 0) := (others => '0');\n    signal fetch_pc : std_logic_vector(31 downto 0) := (others => '0');\n    signal canonical_instruction : std_logic_vector(31 downto 0);\n    signal original_length_bytes : std_logic_vector(1 downto 0);\n    signal legal : std_logic;\n    signal next_pc : std_logic_vector(31 downto 0);\n    signal redirect_valid : std_logic;\n    signal redirect_target : std_logic_vector(31 downto 0);\nbegin\n    dut: entity work.strict_cj_predecode\n        port map (original_parcel => original_parcel, fetch_pc => fetch_pc, canonical_instruction => canonical_instruction, original_length_bytes => original_length_bytes, legal => legal, next_pc => next_pc, redirect_valid => redirect_valid, redirect_target => redirect_target);\n    stim: process\n    begin\n        fetch_pc <= x\"00000100\";\n        original_parcel <= x\"A009\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"0020006F\" report \"C.J positive canonical mismatch\" severity failure;\n        assert legal = '1' and redirect_valid = '1' report \"C.J must be legal and redirect\" severity failure;\n        assert original_length_bytes = \"10\" report \"C.J parcel length mismatch\" severity failure;\n        assert next_pc = x\"00000102\" and redirect_target = x\"00000102\" report \"C.J positive redirect mismatch\" severity failure;\n        original_parcel <= x\"BFFD\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"FFFFF06F\" report \"C.J negative canonical mismatch\" severity failure;\n        assert next_pc = x\"000000FE\" and redirect_target = x\"000000FE\" report \"C.J negative redirect mismatch\" severity failure;\n        original_parcel <= x\"0001\";\n        wait for 1 ns;\n        assert canonical_instruction = x\"00000000\" and legal = '0' and redirect_valid = '0' report \"non-C.J must not redirect\" severity failure;\n        assert next_pc = x\"00000102\" and redirect_target = x\"00000100\" report \"non-C.J fallthrough mismatch\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn cjal_rv32_predecode_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse std.env.all;\nentity strict_cjal_rv32_predecode_tb is end entity;\narchitecture tb of strict_cjal_rv32_predecode_tb is\n signal original_parcel: std_logic_vector(15 downto 0):=(others=>'0'); signal fetch_pc,next_pc,redirect_target: std_logic_vector(31 downto 0):=(others=>'0'); signal canonical_instruction: std_logic_vector(31 downto 0); signal original_length_bytes: std_logic_vector(1 downto 0); signal legal,redirect_valid: std_logic;\nbegin\n dut: entity work.strict_cjal_rv32_predecode port map(original_parcel=>original_parcel,fetch_pc=>fetch_pc,canonical_instruction=>canonical_instruction,original_length_bytes=>original_length_bytes,legal=>legal,next_pc=>next_pc,redirect_valid=>redirect_valid,redirect_target=>redirect_target);\n process begin fetch_pc<=x\"00000100\"; original_parcel<=x\"2009\"; wait for 1 ns; assert canonical_instruction=x\"002000EF\" and legal='1' and redirect_valid='1' and original_length_bytes=\"10\" and next_pc=x\"00000102\" and redirect_target=x\"00000102\" report \"RV32 C.JAL positive/link canonical mismatch\" severity failure; original_parcel<=x\"3FFD\"; wait for 1 ns; assert canonical_instruction=x\"FFFFF0EF\" and legal='1' and redirect_valid='1' and next_pc=x\"000000FE\" and redirect_target=x\"000000FE\" report \"RV32 C.JAL negative redirect mismatch\" severity failure; original_parcel<=x\"A009\"; wait for 1 ns; assert canonical_instruction=x\"00000000\" and legal='0' and redirect_valid='0' and next_pc=x\"00000102\" and redirect_target=x\"00000100\" report \"C.J must stay outside RV32 C.JAL row\" severity failure; finish; end process;\nend architecture;\n"
+
+fn caddiw_rv64_predecode_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse std.env.all;\nentity strict_caddiw_rv64_predecode_tb is end entity;\narchitecture tb of strict_caddiw_rv64_predecode_tb is\n signal original_parcel: std_logic_vector(15 downto 0):=(others=>'0'); signal fetch_pc,next_pc,redirect_target: std_logic_vector(55 downto 0):=(others=>'0'); signal canonical_instruction: std_logic_vector(31 downto 0); signal original_length_bytes: std_logic_vector(1 downto 0); signal legal,redirect_valid: std_logic;\nbegin\n dut: entity work.strict_caddiw_rv64_predecode port map(original_parcel=>original_parcel,fetch_pc=>fetch_pc,canonical_instruction=>canonical_instruction,original_length_bytes=>original_length_bytes,legal=>legal,next_pc=>next_pc,redirect_valid=>redirect_valid,redirect_target=>redirect_target);\n process begin fetch_pc<=x\"00000000000100\"; original_parcel<=x\"35FD\"; wait for 1 ns; assert canonical_instruction=x\"FFF5859B\" and legal='1' and redirect_valid='0' and original_length_bytes=\"10\" and next_pc=x\"00000000000102\" and redirect_target=x\"00000000000100\" report \"RV64 C.ADDIW signed canonical mismatch\" severity failure; original_parcel<=x\"2001\"; wait for 1 ns; assert canonical_instruction=x\"00000000\" and legal='0' and redirect_valid='0' and next_pc=x\"00000000000102\" and redirect_target=x\"00000000000100\" report \"RV64 C.ADDIW rd=x0 must remain illegal\" severity failure; original_parcel<=x\"2009\"; wait for 1 ns; assert canonical_instruction=x\"00000000\" and legal='0' report \"RV32 C.JAL class must not leak into RV64 C.ADDIW row\" severity failure; finish; end process;\nend architecture;\n"
+
+fn control_predecode_testbench(entity_name: text, testbench_name: text, address_bits: i32,
+    xlen: i32, pc_literal: text, plus_two_literal: text) -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse std.env.all;\nentity " + testbench_name + " is end entity;\narchitecture tb of " + testbench_name + " is\n signal original_parcel: std_logic_vector(15 downto 0) := (others => '0'); signal fetch_pc,next_pc,redirect_target: std_logic_vector(" + (address_bits - 1).to_text() + " downto 0) := (others => '0'); signal rs1_index: std_logic_vector(4 downto 0) := \"01000\"; signal rs1_value: std_logic_vector(" + (xlen - 1).to_text() + " downto 0) := (others => '0'); signal canonical_instruction: std_logic_vector(31 downto 0); signal original_length_bytes: std_logic_vector(1 downto 0); signal legal,redirect_valid: std_logic;\nbegin\n dut: entity work." + entity_name + " port map (original_parcel=>original_parcel,fetch_pc=>fetch_pc,canonical_instruction=>canonical_instruction,original_length_bytes=>original_length_bytes,legal=>legal,next_pc=>next_pc,redirect_valid=>redirect_valid,redirect_target=>redirect_target,rs1_index=>rs1_index,rs1_value=>rs1_value);\n process begin fetch_pc<=" + pc_literal + "; original_parcel<=x\"A009\"; wait for 1 ns; assert canonical_instruction=x\"0020006F\" and original_length_bytes=\"10\" and legal='1' and redirect_valid='1' and next_pc=" + plus_two_literal + " and redirect_target=" + plus_two_literal + " report \"C.J composition mismatch\" severity failure; original_parcel<=x\"C009\"; rs1_index<=\"01000\"; rs1_value<=(others=>'0'); wait for 1 ns; assert canonical_instruction=x\"00040163\" and legal='1' and redirect_valid='1' and next_pc=" + plus_two_literal + " report \"C.BEQZ composition mismatch\" severity failure; original_parcel<=x\"E009\"; rs1_value<=(others=>'1'); wait for 1 ns; assert canonical_instruction=x\"00041163\" and legal='1' and redirect_valid='1' and next_pc=" + plus_two_literal + " report \"C.BNEZ composition mismatch\" severity failure; original_parcel<=x\"C009\"; rs1_index<=\"01001\"; rs1_value<=(others=>'0'); wait for 1 ns; assert canonical_instruction=x\"00000000\" and legal='0' and redirect_valid='0' and next_pc=" + plus_two_literal + " and redirect_target=" + pc_literal + " report \"C.B index mismatch must fail closed\" severity failure; original_parcel<=x\"0001\"; wait for 1 ns; assert canonical_instruction=x\"00000000\" and legal='0' and redirect_valid='0' and original_length_bytes=\"10\" and next_pc=" + plus_two_literal + " and redirect_target=" + pc_literal + " report \"unsupported compressed parcel must fail closed\" severity failure; finish; end process;\nend architecture;\n"
+
+fn cb_predecode_rv32_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_cb_predecode_rv32_tb is\nend entity strict_cb_predecode_rv32_tb;\n\narchitecture tb of strict_cb_predecode_rv32_tb is\n    signal fetch_pc : std_logic_vector(31 downto 0) := (others => '0');\n    signal beqz_parcel : std_logic_vector(15 downto 0) := (others => '0');\n    signal bnez_parcel : std_logic_vector(15 downto 0) := (others => '0');\n    signal beqz_rs1_value : std_logic_vector(31 downto 0) := (others => '0');\n    signal bnez_rs1_value : std_logic_vector(31 downto 0) := (others => '0');\n    signal beqz_canonical_instruction : std_logic_vector(31 downto 0);\n    signal beqz_original_length_bytes : std_logic_vector(1 downto 0);\n    signal beqz_legal : std_logic;\n    signal beqz_next_pc : std_logic_vector(31 downto 0);\n    signal beqz_redirect_valid : std_logic;\n    signal beqz_redirect_target : std_logic_vector(31 downto 0);\n    signal bnez_canonical_instruction : std_logic_vector(31 downto 0);\n    signal bnez_original_length_bytes : std_logic_vector(1 downto 0);\n    signal bnez_legal : std_logic;\n    signal bnez_next_pc : std_logic_vector(31 downto 0);\n    signal bnez_redirect_valid : std_logic;\n    signal bnez_redirect_target : std_logic_vector(31 downto 0);\nbegin\n    beqz_dut: entity work.strict_cbeqz_predecode_rv32\n        port map (original_parcel => beqz_parcel, fetch_pc => fetch_pc, canonical_instruction => beqz_canonical_instruction, original_length_bytes => beqz_original_length_bytes, legal => beqz_legal, next_pc => beqz_next_pc, redirect_valid => beqz_redirect_valid, redirect_target => beqz_redirect_target, rs1_value => beqz_rs1_value);\n    bnez_dut: entity work.strict_cbnez_predecode_rv32\n        port map (original_parcel => bnez_parcel, fetch_pc => fetch_pc, canonical_instruction => bnez_canonical_instruction, original_length_bytes => bnez_original_length_bytes, legal => bnez_legal, next_pc => bnez_next_pc, redirect_valid => bnez_redirect_valid, redirect_target => bnez_redirect_target, rs1_value => bnez_rs1_value);\n    stim: process\n    begin\n        fetch_pc <= x\"00000100\";\n        beqz_parcel <= x\"C009\";\n        bnez_parcel <= x\"E009\";\n        beqz_rs1_value <= x\"00000000\";\n        bnez_rs1_value <= x\"00000001\";\n        wait for 1 ns;\n        assert beqz_canonical_instruction = x\"00040163\" and bnez_canonical_instruction = x\"00041163\" report \"RV32 positive C.B canonical mismatch\" severity failure;\n        assert beqz_original_length_bytes = \"10\" and bnez_original_length_bytes = \"10\" report \"RV32 C.B parcel length mismatch\" severity failure;\n        assert beqz_legal = '1' and bnez_legal = '1' and beqz_redirect_valid = '1' and bnez_redirect_valid = '1' report \"RV32 taken C.B rows must be legal and redirect\" severity failure;\n        assert beqz_next_pc = x\"00000102\" and bnez_next_pc = x\"00000102\" and beqz_redirect_target = x\"00000102\" and bnez_redirect_target = x\"00000102\" report \"RV32 positive C.B redirect mismatch\" severity failure;\n        beqz_rs1_value <= x\"00000001\";\n        bnez_rs1_value <= x\"00000000\";\n        wait for 1 ns;\n        assert beqz_redirect_valid = '0' and bnez_redirect_valid = '0' report \"RV32 opposite predicates must not redirect\" severity failure;\n        assert beqz_next_pc = x\"00000102\" and bnez_next_pc = x\"00000102\" and beqz_redirect_target = x\"00000100\" and bnez_redirect_target = x\"00000100\" report \"RV32 untaken C.B fallthrough mismatch\" severity failure;\n        beqz_parcel <= x\"DC7D\";\n        bnez_parcel <= x\"FC7D\";\n        beqz_rs1_value <= x\"00000000\";\n        bnez_rs1_value <= x\"00000001\";\n        wait for 1 ns;\n        assert beqz_canonical_instruction = x\"FE040FE3\" and bnez_canonical_instruction = x\"FE041FE3\" report \"RV32 negative C.B canonical mismatch\" severity failure;\n        assert beqz_redirect_valid = '1' and bnez_redirect_valid = '1' and beqz_next_pc = x\"000000FE\" and bnez_next_pc = x\"000000FE\" report \"RV32 negative C.B redirect mismatch\" severity failure;\n        fetch_pc <= x\"00000200\";\n        beqz_parcel <= x\"D001\";\n        bnez_parcel <= x\"F001\";\n        wait for 1 ns;\n        assert beqz_canonical_instruction = x\"F00400E3\" and bnez_canonical_instruction = x\"F00410E3\" report \"RV32 sign-extension C.B canonical mismatch\" severity failure;\n        assert beqz_redirect_valid = '1' and bnez_redirect_valid = '1' and beqz_next_pc = x\"00000100\" and bnez_next_pc = x\"00000100\" report \"RV32 sign-extension C.B redirect mismatch\" severity failure;\n        beqz_parcel <= x\"E009\";\n        bnez_parcel <= x\"C009\";\n        wait for 1 ns;\n        assert beqz_canonical_instruction = x\"00000000\" and bnez_canonical_instruction = x\"00000000\" and beqz_legal = '0' and bnez_legal = '0' and beqz_redirect_valid = '0' and bnez_redirect_valid = '0' report \"RV32 cross-row parcels must fail closed\" severity failure;\n        assert beqz_next_pc = x\"00000202\" and bnez_next_pc = x\"00000202\" and beqz_redirect_target = x\"00000200\" and bnez_redirect_target = x\"00000200\" report \"RV32 non-row C.B fallthrough mismatch\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn cb_predecode_rv64_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\nuse std.env.all;\n\nentity strict_cb_predecode_rv64_tb is\nend entity strict_cb_predecode_rv64_tb;\n\narchitecture tb of strict_cb_predecode_rv64_tb is\n    signal fetch_pc : std_logic_vector(55 downto 0) := (others => '0');\n    signal beqz_parcel : std_logic_vector(15 downto 0) := (others => '0');\n    signal bnez_parcel : std_logic_vector(15 downto 0) := (others => '0');\n    signal beqz_rs1_value : std_logic_vector(63 downto 0) := (others => '0');\n    signal bnez_rs1_value : std_logic_vector(63 downto 0) := (others => '0');\n    signal beqz_canonical_instruction : std_logic_vector(31 downto 0);\n    signal beqz_original_length_bytes : std_logic_vector(1 downto 0);\n    signal beqz_legal : std_logic;\n    signal beqz_next_pc : std_logic_vector(55 downto 0);\n    signal beqz_redirect_valid : std_logic;\n    signal beqz_redirect_target : std_logic_vector(55 downto 0);\n    signal bnez_canonical_instruction : std_logic_vector(31 downto 0);\n    signal bnez_original_length_bytes : std_logic_vector(1 downto 0);\n    signal bnez_legal : std_logic;\n    signal bnez_next_pc : std_logic_vector(55 downto 0);\n    signal bnez_redirect_valid : std_logic;\n    signal bnez_redirect_target : std_logic_vector(55 downto 0);\nbegin\n    beqz_dut: entity work.strict_cbeqz_predecode_rv64\n        port map (original_parcel => beqz_parcel, fetch_pc => fetch_pc, canonical_instruction => beqz_canonical_instruction, original_length_bytes => beqz_original_length_bytes, legal => beqz_legal, next_pc => beqz_next_pc, redirect_valid => beqz_redirect_valid, redirect_target => beqz_redirect_target, rs1_value => beqz_rs1_value);\n    bnez_dut: entity work.strict_cbnez_predecode_rv64\n        port map (original_parcel => bnez_parcel, fetch_pc => fetch_pc, canonical_instruction => bnez_canonical_instruction, original_length_bytes => bnez_original_length_bytes, legal => bnez_legal, next_pc => bnez_next_pc, redirect_valid => bnez_redirect_valid, redirect_target => bnez_redirect_target, rs1_value => bnez_rs1_value);\n    stim: process\n    begin\n        fetch_pc <= x\"00000000000100\";\n        beqz_parcel <= x\"C009\";\n        bnez_parcel <= x\"E009\";\n        beqz_rs1_value <= x\"0000000000000000\";\n        bnez_rs1_value <= x\"0000000000000001\";\n        wait for 1 ns;\n        assert beqz_canonical_instruction = x\"00040163\" and bnez_canonical_instruction = x\"00041163\" report \"RV64 positive C.B canonical mismatch\" severity failure;\n        assert beqz_original_length_bytes = \"10\" and bnez_original_length_bytes = \"10\" report \"RV64 C.B parcel length mismatch\" severity failure;\n        assert beqz_legal = '1' and bnez_legal = '1' and beqz_redirect_valid = '1' and bnez_redirect_valid = '1' report \"RV64 taken C.B rows must be legal and redirect\" severity failure;\n        assert beqz_next_pc = x\"00000000000102\" and bnez_next_pc = x\"00000000000102\" and beqz_redirect_target = x\"00000000000102\" and bnez_redirect_target = x\"00000000000102\" report \"RV64 positive C.B redirect mismatch\" severity failure;\n        beqz_rs1_value <= x\"0000000000000001\";\n        bnez_rs1_value <= x\"0000000000000000\";\n        wait for 1 ns;\n        assert beqz_redirect_valid = '0' and bnez_redirect_valid = '0' report \"RV64 opposite predicates must not redirect\" severity failure;\n        assert beqz_next_pc = x\"00000000000102\" and bnez_next_pc = x\"00000000000102\" and beqz_redirect_target = x\"00000000000100\" and bnez_redirect_target = x\"00000000000100\" report \"RV64 untaken C.B fallthrough mismatch\" severity failure;\n        beqz_parcel <= x\"DC7D\";\n        bnez_parcel <= x\"FC7D\";\n        beqz_rs1_value <= x\"0000000000000000\";\n        bnez_rs1_value <= x\"0000000000000001\";\n        wait for 1 ns;\n        assert beqz_canonical_instruction = x\"FE040FE3\" and bnez_canonical_instruction = x\"FE041FE3\" report \"RV64 negative C.B canonical mismatch\" severity failure;\n        assert beqz_redirect_valid = '1' and bnez_redirect_valid = '1' and beqz_next_pc = x\"000000000000FE\" and bnez_next_pc = x\"000000000000FE\" report \"RV64 negative C.B redirect mismatch\" severity failure;\n        fetch_pc <= x\"00000000000200\";\n        beqz_parcel <= x\"D001\";\n        bnez_parcel <= x\"F001\";\n        wait for 1 ns;\n        assert beqz_canonical_instruction = x\"F00400E3\" and bnez_canonical_instruction = x\"F00410E3\" report \"RV64 sign-extension C.B canonical mismatch\" severity failure;\n        assert beqz_redirect_valid = '1' and bnez_redirect_valid = '1' and beqz_next_pc = x\"00000000000100\" and bnez_next_pc = x\"00000000000100\" report \"RV64 sign-extension C.B redirect mismatch\" severity failure;\n        beqz_parcel <= x\"E009\";\n        bnez_parcel <= x\"C009\";\n        wait for 1 ns;\n        assert beqz_canonical_instruction = x\"00000000\" and bnez_canonical_instruction = x\"00000000\" and beqz_legal = '0' and bnez_legal = '0' and beqz_redirect_valid = '0' and bnez_redirect_valid = '0' report \"RV64 cross-row parcels must fail closed\" severity failure;\n        assert beqz_next_pc = x\"00000000000202\" and bnez_next_pc = x\"00000000000202\" and beqz_redirect_target = x\"00000000000200\" and bnez_redirect_target = x\"00000000000200\" report \"RV64 non-row C.B fallthrough mismatch\" severity failure;\n        finish;\n    end process;\nend architecture tb;\n"
+
+fn cb_index_binding_rv32_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse std.env.all;\nentity strict_cb_index_binding_rv32_tb is end entity;\narchitecture tb of strict_cb_index_binding_rv32_tb is\n signal pc: std_logic_vector(31 downto 0) := (others => '0'); signal beqz_parcel,bnez_parcel: std_logic_vector(15 downto 0) := (others => '0'); signal beqz_index,bnez_index: std_logic_vector(4 downto 0) := \"01000\"; signal beqz_value,bnez_value: std_logic_vector(31 downto 0) := (others => '0'); signal beqz_insn,bnez_insn: std_logic_vector(31 downto 0); signal beqz_len,bnez_len: std_logic_vector(1 downto 0); signal beqz_legal,bnez_legal,beqz_redirect,bnez_redirect: std_logic; signal beqz_next,bnez_next,beqz_target,bnez_target: std_logic_vector(31 downto 0);\nbegin\n beqz: entity work.strict_cbeqz_predecode_rv32 port map (original_parcel=>beqz_parcel,fetch_pc=>pc,canonical_instruction=>beqz_insn,original_length_bytes=>beqz_len,legal=>beqz_legal,next_pc=>beqz_next,redirect_valid=>beqz_redirect,redirect_target=>beqz_target,rs1_index=>beqz_index,rs1_value=>beqz_value);\n bnez: entity work.strict_cbnez_predecode_rv32 port map (original_parcel=>bnez_parcel,fetch_pc=>pc,canonical_instruction=>bnez_insn,original_length_bytes=>bnez_len,legal=>bnez_legal,next_pc=>bnez_next,redirect_valid=>bnez_redirect,redirect_target=>bnez_target,rs1_index=>bnez_index,rs1_value=>bnez_value);\n process begin pc<=x\"00000100\"; beqz_parcel<=x\"C009\"; bnez_parcel<=x\"E009\"; beqz_value<=x\"00000000\"; bnez_value<=x\"00000001\"; wait for 1 ns; assert beqz_insn=x\"00040163\" and bnez_insn=x\"00041163\" and beqz_len=\"10\" and bnez_len=\"10\" and beqz_legal='1' and bnez_legal='1' and beqz_redirect='1' and bnez_redirect='1' report \"RV32 x8 index binding must admit both C.B rows\" severity failure; beqz_index<=\"01001\"; bnez_index<=\"01001\"; wait for 1 ns; assert beqz_insn=x\"00000000\" and bnez_insn=x\"00000000\" and beqz_legal='0' and bnez_legal='0' and beqz_redirect='0' and bnez_redirect='0' and beqz_next=x\"00000102\" and bnez_next=x\"00000102\" and beqz_target=x\"00000100\" and bnez_target=x\"00000100\" report \"RV32 mismatched rs1_index must fail closed\" severity failure; finish; end process;\nend architecture;\n"
+
+fn cb_index_binding_rv64_testbench() -> text:
+    "library ieee;\nuse ieee.std_logic_1164.all;\nuse std.env.all;\nentity strict_cb_index_binding_rv64_tb is end entity;\narchitecture tb of strict_cb_index_binding_rv64_tb is\n signal pc: std_logic_vector(55 downto 0) := (others => '0'); signal beqz_parcel,bnez_parcel: std_logic_vector(15 downto 0) := (others => '0'); signal beqz_index,bnez_index: std_logic_vector(4 downto 0) := \"01000\"; signal beqz_value,bnez_value: std_logic_vector(63 downto 0) := (others => '0'); signal beqz_insn,bnez_insn: std_logic_vector(31 downto 0); signal beqz_len,bnez_len: std_logic_vector(1 downto 0); signal beqz_legal,bnez_legal,beqz_redirect,bnez_redirect: std_logic; signal beqz_next,bnez_next,beqz_target,bnez_target: std_logic_vector(55 downto 0);\nbegin\n beqz: entity work.strict_cbeqz_predecode_rv64 port map (original_parcel=>beqz_parcel,fetch_pc=>pc,canonical_instruction=>beqz_insn,original_length_bytes=>beqz_len,legal=>beqz_legal,next_pc=>beqz_next,redirect_valid=>beqz_redirect,redirect_target=>beqz_target,rs1_index=>beqz_index,rs1_value=>beqz_value);\n bnez: entity work.strict_cbnez_predecode_rv64 port map (original_parcel=>bnez_parcel,fetch_pc=>pc,canonical_instruction=>bnez_insn,original_length_bytes=>bnez_len,legal=>bnez_legal,next_pc=>bnez_next,redirect_valid=>bnez_redirect,redirect_target=>bnez_target,rs1_index=>bnez_index,rs1_value=>bnez_value);\n process begin pc<=x\"00000000000100\"; beqz_parcel<=x\"C009\"; bnez_parcel<=x\"E009\"; beqz_value<=x\"0000000000000000\"; bnez_value<=x\"0000000000000001\"; wait for 1 ns; assert beqz_insn=x\"00040163\" and bnez_insn=x\"00041163\" and beqz_len=\"10\" and bnez_len=\"10\" and beqz_legal='1' and bnez_legal='1' and beqz_redirect='1' and bnez_redirect='1' report \"RV64 x8 index binding must admit both C.B rows\" severity failure; beqz_index<=\"01001\"; bnez_index<=\"01001\"; wait for 1 ns; assert beqz_insn=x\"00000000\" and bnez_insn=x\"00000000\" and beqz_legal='0' and bnez_legal='0' and beqz_redirect='0' and bnez_redirect='0' and beqz_next=x\"00000000000102\" and bnez_next=x\"00000000000102\" and beqz_target=x\"00000000000100\" and bnez_target=x\"00000000000100\" report \"RV64 mismatched rs1_index must fail closed\" severity failure; finish; end process;\nend architecture;\n"
+
+describe "RISC-V Gen2 HWIR foundation":
+    """A hardware product selects an XLEN during elaboration and emits a typed,
+    deterministic module without reaching the legacy VHDL route."""
+
+    # @req REQ-G2-007 REQ-G2-008 NFR-G2-007 NFR-G2-008 NFR-G2-009
+    it "should expose the fixed-width critical compressed subset without a full-Zca claim":
+        step("Classify representative legal and illegal parcels through the text-free hardware boundary")
+        val ebreak = riscv_zca_mission_critical_expand_hardware(0x9002)
+        val illegal = riscv_zca_mission_critical_expand_hardware(0x0000)
+        expect(ebreak.original_parcel).to_equal(0x9002)
+        expect(ebreak.canonical_instruction).to_equal(0x00100073)
+        expect(ebreak.length_bytes).to_equal(2)
+        expect(ebreak.legal).to_equal(true)
+        expect(ebreak.reason_code).to_equal(COMPRESSED_REASON_NONE)
+        expect(illegal.original_parcel).to_equal(0x0000)
+        expect(illegal.canonical_instruction).to_equal(0)
+        expect(illegal.legal).to_equal(false)
+        step("Derive the non-advertising capability boundary from the declarative ISA table")
+        val manifest = CompressedCriticalSubsetManifest.mission_critical_common_zca_v1()
+        expect(riscv_zca_critical_subset_entry_count()).to_equal(25)
+        expect(riscv_zca_critical_subset_entries().len()).to_equal(25)
+        expect(manifest.verified_entry_count).to_equal(25)
+        expect(manifest.advertises_extension).to_equal(false)
+        expect(manifest.legacy_fallback_allowed).to_equal(false)
+        expect(manifest.target_rtl_equivalence_verified).to_equal(false)
+        expect(manifest.is_release_claimable()).to_equal(false)
+
+    # @req REQ-G2-001 REQ-G2-002 REQ-G2-003 REQ-G2-004 REQ-G2-005
+    # @capture exec
+    # @capture artifact
+    it "should emit an RV32 strict module":
+        step("Select an RV32 Gen2 hardware product")
+        val lower = lower_strict_hwir_and_module(HwirLowerInput.hardware("system_and", 2, 1, 0, 0), CoreConfig.rv32())
+        expect(lower.is_success()).to_equal(true)
+        if val module = lower.module:
+            step("Emit the typed HWIR module without the legacy route")
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.vhdl.contains("std_logic_vector(31 downto 0)")).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            step("Analyze strict HWIR VHDL with the VHDL-2008 target toolchain")
+            expect(strict_ghdl_available()).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_rv32.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_rv32.vhd")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req NFR-G2-001 NFR-G2-002 NFR-G2-003 NFR-G2-006
+    it "should reject an invalid product deterministically":
+        step("Reject an invalid elaboration configuration before VHDL emission")
+        val invalid = CoreConfig(xlen: 128, physical_address_bits: 0, register_count: 0,
+            profile: "", isa_profile: "", compressed_decode_profile: "")
+        val lower = lower_strict_hwir_and_module(HwirLowerInput.hardware("invalid", 2, 1, 0, 0), invalid)
+        expect(lower.is_success()).to_equal(false)
+        expect(lower.diagnostic).to_equal("HWIR-E-XLEN: expected 32 or 64")
+        expect(lower.uses_legacy_fallback()).to_equal(false)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should emit and analyze a typed 16-bit parcel mask graph":
+        step("Construct a fixed-width parcel mask with no textual VHDL operand")
+        val summary = HwModule(name: "strict_parcel_mask", profile: "rv32-zca",
+            port_count: 2, signal_count: 0, register_count: 0, memory_count: 0,
+            comb_op_count: 1, clock_domain_count: 1, fallback_function: "",
+            cost: HwCostModel.empty())
+        val module = HwModuleDef(summary: summary, config: CoreConfig.rv32_zca_integer(),
+            node_id: HwNodeId.module_root("strict_parcel_mask"),
+            origins: [HwOrigin(node_id: HwNodeId.child("strict_parcel_mask", "mask"), source_name: "strict_parcel_mask")],
+            ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("masked", "Bits", 32)],
+            signals: [], constants: [HwConstant.bits("low_16_mask", 32, 65535)],
+            comb_ops: [HwCombOp.binary("and", "masked", "parcel", "low_16_mask", 32)],
+            compare_ops: [], select_ops: [],
+            clock_domains: [HwClockDomain.default_domain()])
+        step("Emit and analyze the typed mask graph as VHDL-2008")
+        val emitted = render_strict_hwir_vhdl(module)
+        expect(emitted.is_success()).to_equal(true)
+        expect(emitted.vhdl.contains("to_unsigned(65535, 32)")).to_equal(true)
+        expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_parcel_mask.vhd", emitted.vhdl)).to_equal(true)
+        expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_parcel_mask.vhd")).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should emit and analyze a bounded typed parcel right shift graph":
+        step("Construct a fixed-width parcel shift with a typed shift amount")
+        val summary = HwModule(name: "strict_parcel_shift", profile: "rv32-zca",
+            port_count: 2, signal_count: 0, register_count: 0, memory_count: 0,
+            comb_op_count: 1, clock_domain_count: 1, fallback_function: "",
+            cost: HwCostModel.empty())
+        val module = HwModuleDef(summary: summary, config: CoreConfig.rv32_zca_integer(),
+            node_id: HwNodeId.module_root("strict_parcel_shift"),
+            origins: [HwOrigin(node_id: HwNodeId.child("strict_parcel_shift", "shift"), source_name: "strict_parcel_shift")],
+            ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("shifted", "Bits", 32)],
+            signals: [], constants: [HwConstant.bits("shift_amount", 32, 13)],
+            comb_ops: [HwCombOp.binary("shr", "shifted", "parcel", "shift_amount", 32)],
+            compare_ops: [], select_ops: [],
+            clock_domains: [HwClockDomain.default_domain()])
+        step("Emit and analyze the typed shift graph as VHDL-2008")
+        val emitted = render_strict_hwir_vhdl(module)
+        expect(emitted.is_success()).to_equal(true)
+        expect(emitted.vhdl.contains("shift_right(unsigned(parcel), to_integer(unsigned(shift_amount)))")).to_equal(true)
+        expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_parcel_shift.vhd", emitted.vhdl)).to_equal(true)
+        expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_parcel_shift.vhd")).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should emit and simulate a bounded typed parcel left shift graph":
+        step("Construct a fixed-width left shift for canonical instruction fields")
+        val summary = HwModule(name: "strict_parcel_left_shift", profile: "rv32-zca-critical",
+            port_count: 2, signal_count: 0, register_count: 0, memory_count: 0,
+            comb_op_count: 1, clock_domain_count: 1, fallback_function: "",
+            cost: HwCostModel.empty())
+        val module = HwModuleDef(summary: summary, config: CoreConfig.rv32_zca_mission_critical(),
+            node_id: HwNodeId.module_root("strict_parcel_left_shift"),
+            origins: [HwOrigin(node_id: HwNodeId.child("strict_parcel_left_shift", "shift"), source_name: "strict_parcel_left_shift")],
+            ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("shifted", "Bits", 32)],
+            signals: [], constants: [HwConstant.bits("shift_amount", 32, 7)],
+            comb_ops: [HwCombOp.binary("shl", "shifted", "parcel", "shift_amount", 32)],
+            compare_ops: [], select_ops: [],
+            clock_domains: [HwClockDomain.default_domain()])
+        step("Emit, analyze, and simulate a canonical-field shift as VHDL-2008")
+        val emitted = render_strict_hwir_vhdl(module)
+        expect(emitted.is_success()).to_equal(true)
+        expect(emitted.vhdl.contains("shift_left(unsigned(parcel), to_integer(unsigned(shift_amount)))")).to_equal(true)
+        expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_parcel_left_shift.vhd", emitted.vhdl)).to_equal(true)
+        expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_parcel_left_shift.vhd")).to_equal(true)
+        expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_parcel_left_shift_tb.vhd", parcel_left_shift_testbench())).to_equal(true)
+        expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_parcel_left_shift_tb.vhd")).to_equal(true)
+        expect(strict_ghdl_elaborate("strict_parcel_left_shift_tb")).to_equal(true)
+        expect(strict_ghdl_run("strict_parcel_left_shift_tb", "2ns")).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should emit and analyze a two-stage typed parcel field graph":
+        step("Construct shift then mask through one typed internal signal")
+        val summary = HwModule(name: "strict_parcel_field", profile: "rv32-zca",
+            port_count: 2, signal_count: 1, register_count: 0, memory_count: 0,
+            comb_op_count: 2, clock_domain_count: 1, fallback_function: "",
+            cost: HwCostModel.empty())
+        val module = HwModuleDef(summary: summary, config: CoreConfig.rv32_zca_integer(),
+            node_id: HwNodeId.module_root("strict_parcel_field"),
+            origins: [
+                HwOrigin(node_id: HwNodeId.child("strict_parcel_field", "shift"), source_name: "strict_parcel_field"),
+                HwOrigin(node_id: HwNodeId.child("strict_parcel_field", "mask"), source_name: "strict_parcel_field")
+            ],
+            ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("field", "Bits", 32)],
+            signals: [HwSignal(name: "shifted", type_name: "Bits", bit_width: 32, driver_count: 1, source_id: "strict_parcel_field")],
+            constants: [HwConstant.bits("shift_amount", 32, 13), HwConstant.bits("field_mask", 32, 7)],
+            comb_ops: [
+                HwCombOp.binary("shr", "shifted", "parcel", "shift_amount", 32),
+                HwCombOp.binary("and", "field", "shifted", "field_mask", 32)
+            ],
+            compare_ops: [], select_ops: [],
+            clock_domains: [HwClockDomain.default_domain()])
+        step("Emit and analyze the typed two-stage graph as VHDL-2008")
+        val emitted = render_strict_hwir_vhdl(module)
+        expect(emitted.is_success()).to_equal(true)
+        expect(emitted.vhdl.contains("signal shifted : std_logic_vector(31 downto 0);")).to_equal(true)
+        expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_parcel_field.vhd", emitted.vhdl)).to_equal(true)
+        expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_parcel_field.vhd")).to_equal(true)
+        step("Simulate a known parcel through the generated field datapath")
+        expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_parcel_field_tb.vhd", parcel_field_testbench())).to_equal(true)
+        expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_parcel_field_tb.vhd")).to_equal(true)
+        expect(strict_ghdl_elaborate("strict_parcel_field_tb")).to_equal(true)
+        expect(strict_ghdl_run("strict_parcel_field_tb", "2ns")).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should emit and simulate a typed C.EBREAK canonical leaf":
+        step("Construct the canonical EBREAK output as a typed u32 constant")
+        val summary = HwModule(name: "strict_cebreak_leaf", profile: "rv32-zca",
+            port_count: 1, signal_count: 0, register_count: 0, memory_count: 0,
+            comb_op_count: 1, clock_domain_count: 1, fallback_function: "",
+            cost: HwCostModel.empty())
+        val module = HwModuleDef(summary: summary, config: CoreConfig.rv32_zca_integer(),
+            node_id: HwNodeId.module_root("strict_cebreak_leaf"),
+            origins: [HwOrigin(node_id: HwNodeId.child("strict_cebreak_leaf", "canonical"), source_name: "strict_cebreak_leaf")],
+            ports: [HwPort.output("canonical_instruction", "Bits", 32)],
+            signals: [], constants: [HwConstant.bits("canonical_value", 32, 1048691)],
+            comb_ops: [HwCombOp.unary("passthrough", "canonical_instruction", "canonical_value", 32)],
+            compare_ops: [], select_ops: [],
+            clock_domains: [HwClockDomain.default_domain()])
+        step("Emit and simulate the canonical EBREAK leaf as VHDL-2008")
+        val emitted = render_strict_hwir_vhdl(module)
+        expect(emitted.is_success()).to_equal(true)
+        expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cebreak_leaf.vhd", emitted.vhdl)).to_equal(true)
+        expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cebreak_leaf.vhd")).to_equal(true)
+        expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cebreak_leaf_tb.vhd", cbreak_leaf_testbench())).to_equal(true)
+        expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cebreak_leaf_tb.vhd")).to_equal(true)
+        expect(strict_ghdl_elaborate("strict_cebreak_leaf_tb")).to_equal(true)
+        expect(strict_ghdl_run("strict_cebreak_leaf_tb", "2ns")).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should emit and simulate a typed C.EBREAK predicate and canonical selection":
+        step("Build the compiler-owned C.EBREAK row for the concrete critical profile")
+        val built = strict_zca_cebreak_row_hwir("strict_cebreak_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.ebreak")
+            step("Emit, analyze, and simulate both matched and unmatched parcel behavior")
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.vhdl.contains("when parcel = cbreak_parcel else '0'")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cebreak_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cebreak_decode.vhd")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cebreak_decode_tb.vhd", cbreak_decode_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cebreak_decode_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_cebreak_decode_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_cebreak_decode_tb", "3ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the compiler-owned Zca C.ADDI4SPN row":
+        step("Build the compiler-owned C.ADDI4SPN row for the concrete critical profile")
+        val built = strict_zca_addi4spn_row_hwir("strict_addi4spn_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.addi4spn")
+            expect(module.summary.comb_op_count).to_equal(29)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_addi4spn_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_addi4spn_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all 2,048 Q0/funct3=000 parcels including the reserved zero immediate")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_addi4spn_decode_exhaustive_tb.vhd", addi4spn_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_addi4spn_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_addi4spn_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_addi4spn_decode_exhaustive_tb", "2052ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the compiler-owned Zca C.LW row":
+        step("Build the compiler-owned C.LW row for the concrete critical profile")
+        val built = strict_zca_lw_row_hwir("strict_lw_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.lw")
+            expect(module.summary.comb_op_count).to_equal(28)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_lw_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_lw_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all 2,048 Q0/funct3=010 C.LW parcels and a non-row parcel")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_lw_decode_exhaustive_tb.vhd", lw_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_lw_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_lw_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_lw_decode_exhaustive_tb", "2052ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the compiler-owned Zca C.SW row":
+        step("Build the compiler-owned C.SW row for the concrete critical profile")
+        val built = strict_zca_sw_row_hwir("strict_sw_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.sw")
+            expect(module.summary.comb_op_count).to_equal(32)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_sw_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_sw_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all 2,048 Q0/funct3=110 C.SW parcels and a non-row parcel")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_sw_decode_exhaustive_tb.vhd", sw_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_sw_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_sw_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_sw_decode_exhaustive_tb", "2052ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the compiler-owned Zca C.LWSP row":
+        step("Build the compiler-owned C.LWSP row for the concrete critical profile")
+        val built = strict_zca_lwsp_row_hwir("strict_lwsp_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.lwsp")
+            expect(module.summary.comb_op_count).to_equal(26)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_lwsp_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_lwsp_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all 4,096 Q2/funct3=010 C.LWSP parcels including reserved rd=x0")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_lwsp_decode_exhaustive_tb.vhd", lwsp_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_lwsp_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_lwsp_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_lwsp_decode_exhaustive_tb", "4100ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the compiler-owned Zca C.SWSP row":
+        step("Build the compiler-owned C.SWSP row for the concrete critical profile")
+        val built = strict_zca_swsp_row_hwir("strict_swsp_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.swsp")
+            expect(module.summary.comb_op_count).to_equal(23)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_swsp_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_swsp_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all 2,048 Q2/funct3=110 C.SWSP parcels and a non-row parcel")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_swsp_decode_exhaustive_tb.vhd", swsp_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_swsp_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_swsp_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_swsp_decode_exhaustive_tb", "2052ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the five-bit C.SLLI common row":
+        step("Build the compiler-owned C.SLLI low-shamt row for the concrete critical profile")
+        val built = strict_zca_slli_low_row_hwir("strict_slli_low_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.slli.low")
+            expect(module.summary.comb_op_count).to_equal(15)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_slli_low_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_slli_low_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all 1,024 low-shamt parcels and reject the RV64-only high-shamt bit")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_slli_low_decode_exhaustive_tb.vhd", slli_low_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_slli_low_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_slli_low_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_slli_low_decode_exhaustive_tb", "1028ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the five-bit C.SRLI common row":
+        step("Build the compiler-owned C.SRLI low-shamt row for the concrete critical profile")
+        val built = strict_zca_srli_low_row_hwir("strict_srli_low_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.srli.low")
+            expect(module.summary.comb_op_count).to_equal(16)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_srli_low_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_srli_low_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all 256 low-shamt C.SRLI parcels and reject C.SRAI and high-shamt forms")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_srli_low_decode_exhaustive_tb.vhd", srli_low_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_srli_low_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_srli_low_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_srli_low_decode_exhaustive_tb", "260ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the five-bit C.SRAI common row":
+        step("Build the compiler-owned C.SRAI low-shamt row for the concrete critical profile")
+        val built = strict_zca_srai_low_row_hwir("strict_srai_low_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.srai.low")
+            expect(module.summary.comb_op_count).to_equal(18)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_srai_low_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_srai_low_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all 256 low-shamt C.SRAI parcels and reject C.SRLI and high-shamt forms")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_srai_low_decode_exhaustive_tb.vhd", srai_low_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_srai_low_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_srai_low_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_srai_low_decode_exhaustive_tb", "260ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the signed-immediate C.ANDI row":
+        step("Build the compiler-owned C.ANDI row for the concrete critical profile")
+        val built = strict_zca_candi_row_hwir("strict_candi_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.andi")
+            expect(module.summary.comb_op_count).to_equal(22)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_candi_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_candi_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all 512 C.ANDI parcels including both immediate-sign values")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_candi_decode_exhaustive_tb.vhd", candi_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_candi_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_candi_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_candi_decode_exhaustive_tb", "516ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the compact-register C.SUB row":
+        step("Build the compiler-owned C.SUB row for the concrete critical profile")
+        val built = strict_zca_csub_row_hwir("strict_csub_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.sub")
+            expect(module.summary.comb_op_count).to_equal(18)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_csub_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_csub_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all 64 compact C.SUB register pairs and reject C.XOR/C.SUBW")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_csub_decode_exhaustive_tb.vhd", csub_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_csub_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_csub_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_csub_decode_exhaustive_tb", "68ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the compact-register C.XOR row":
+        step("Build the compiler-owned C.XOR row for the concrete critical profile")
+        val built = strict_zca_cxor_row_hwir("strict_cxor_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.xor")
+            expect(module.summary.comb_op_count).to_equal(18)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cxor_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cxor_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all 64 compact C.XOR register pairs and reject adjacent modes")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cxor_decode_exhaustive_tb.vhd", cxor_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cxor_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_cxor_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_cxor_decode_exhaustive_tb", "69ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the compact-register C.OR row":
+        step("Build the compiler-owned C.OR row for the concrete critical profile")
+        val built = strict_zca_cor_row_hwir("strict_cor_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.or")
+            expect(module.summary.comb_op_count).to_equal(18)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cor_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cor_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all 64 compact C.OR register pairs and reject adjacent modes")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cor_decode_exhaustive_tb.vhd", cor_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cor_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_cor_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_cor_decode_exhaustive_tb", "69ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the compact-register C.AND row":
+        step("Build the compiler-owned C.AND row for the concrete critical profile")
+        val built = strict_zca_cand_row_hwir("strict_cand_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.and")
+            expect(module.summary.comb_op_count).to_equal(18)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cand_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cand_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all 64 compact C.AND register pairs and reject adjacent modes")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cand_decode_exhaustive_tb.vhd", cand_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cand_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_cand_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_cand_decode_exhaustive_tb", "69ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the C.JR row with reserved-register rejection":
+        step("Build the compiler-owned C.JR row for the concrete critical profile")
+        val built = strict_zca_cjr_row_hwir("strict_cjr_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.jr")
+            expect(module.summary.comb_op_count).to_equal(10)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cjr_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cjr_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all C.JR register fields and reject reserved/adjacent forms")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cjr_decode_exhaustive_tb.vhd", cjr_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cjr_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_cjr_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_cjr_decode_exhaustive_tb", "36ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the C.MV row with hint normalization":
+        step("Build the compiler-owned C.MV row for the concrete critical profile")
+        val built = strict_zca_cmv_row_hwir("strict_cmv_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.mv")
+            expect(module.summary.comb_op_count).to_equal(16)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cmv_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cmv_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all C.MV registers, the x0 hint, and neighboring forms")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cmv_decode_exhaustive_tb.vhd", cmv_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cmv_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_cmv_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_cmv_decode_exhaustive_tb", "970ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the C.JALR row with reserved-register rejection":
+        step("Build the compiler-owned C.JALR row for the concrete critical profile")
+        val built = strict_zca_cjalr_row_hwir("strict_cjalr_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.jalr")
+            expect(module.summary.comb_op_count).to_equal(11)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cjalr_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cjalr_decode.vhd")).to_equal(true)
+            step("Exhaustively simulate all C.JALR registers and reject neighboring forms")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cjalr_decode_exhaustive_tb.vhd", cjalr_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cjalr_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_cjalr_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_cjalr_decode_exhaustive_tb", "37ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate C.ADD as separate RV32 and RV64 products":
+        step("Build concrete RV32 and RV64 C.ADD products without RTL XLEN selection")
+        val rv32 = strict_zca_cadd_row_hwir("strict_cadd_rv32_decode", CoreConfig.rv32_zca_mission_critical())
+        val rv64 = strict_zca_cadd_row_hwir("strict_cadd_rv64_decode", CoreConfig.rv64_zca_mission_critical())
+        expect(rv32.is_ok()).to_equal(true)
+        expect(rv64.is_ok()).to_equal(true)
+        if val module32 = rv32.ok():
+            expect(module32.shape_diagnostic()).to_equal("")
+            expect(module32.summary.comb_op_count).to_equal(18)
+            val emitted32 = render_strict_hwir_vhdl(module32)
+            expect(emitted32.is_success()).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cadd_rv32_decode.vhd", emitted32.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cadd_rv32_decode.vhd")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cadd_rv32_decode_exhaustive_tb.vhd", cadd_rv32_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cadd_rv32_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_cadd_rv32_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_cadd_rv32_decode_exhaustive_tb", "995ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+        if val module64 = rv64.ok():
+            expect(module64.shape_diagnostic()).to_equal("")
+            expect(module64.summary.comb_op_count).to_equal(16)
+            val emitted64 = render_strict_hwir_vhdl(module64)
+            expect(emitted64.is_success()).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cadd_rv64_decode.vhd", emitted64.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cadd_rv64_decode.vhd")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cadd_rv64_decode_exhaustive_tb.vhd", cadd_rv64_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cadd_rv64_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_cadd_rv64_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_cadd_rv64_decode_exhaustive_tb", "995ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should emit and simulate the shared Zca C.ADDI row as a typed critical graph":
+        step("Build the compiler-owned C.ADDI/C.NOP row for the concrete critical profile")
+        val built = strict_zca_caddi_row_hwir("strict_caddi_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.nop_addi")
+            expect(module.summary.comb_op_count).to_equal(20)
+            step("Emit, analyze, and simulate both C.ADDI immediate signs and non-row rejection")
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(emitted.config_xlen).to_equal(32)
+            expect(emitted.vhdl.contains("shift_left(unsigned(imm12), to_integer(unsigned(left_shift_20)))")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_caddi_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_caddi_decode.vhd")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_caddi_decode_tb.vhd", caddi_decode_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_caddi_decode_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_caddi_decode_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_caddi_decode_tb", "8ns")).to_equal(true)
+            step("Exhaustively simulate all 2,048 C.ADDI/C.NOP parcel encodings")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_caddi_decode_exhaustive_tb.vhd", caddi_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_caddi_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_caddi_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_caddi_decode_exhaustive_tb", "2050ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the common Zca C.ADDI16SP row":
+        step("Build the compiler-owned C.ADDI16SP row for the concrete critical profile")
+        val built = strict_zca_caddi16sp_row_hwir("strict_caddi16sp_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.addi16sp")
+            expect(module.summary.comb_op_count).to_equal(36)
+            step("Emit, analyze, and exhaustively simulate the 64 C.ADDI16SP immediate encodings")
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_caddi16sp_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_caddi16sp_decode.vhd")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_caddi16sp_decode_exhaustive_tb.vhd", caddi16sp_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_caddi16sp_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_caddi16sp_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_caddi16sp_decode_exhaustive_tb", "68ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should exhaustively simulate the common Zca C.LUI row":
+        step("Build the compiler-owned C.LUI row for the concrete critical profile")
+        val built = strict_zca_clui_row_hwir("strict_clui_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.lui")
+            expect(module.summary.comb_op_count).to_equal(22)
+            step("Emit, analyze, and exhaustively simulate the 2,048 C.LUI parcel encodings")
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_clui_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_clui_decode.vhd")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_clui_decode_exhaustive_tb.vhd", clui_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_clui_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_clui_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_clui_decode_exhaustive_tb", "2052ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should emit and exhaustively simulate the shared Zca C.LI row as a typed critical graph":
+        step("Build the compiler-owned C.LI row for the concrete critical profile")
+        val built = strict_zca_cli_row_hwir("strict_cli_decode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.li")
+            expect(module.summary.comb_op_count).to_equal(18)
+            step("Emit and exhaustively simulate all C.LI parcel encodings")
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cli_decode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cli_decode.vhd")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cli_decode_exhaustive_tb.vhd", cli_exhaustive_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cli_decode_exhaustive_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_cli_decode_exhaustive_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_cli_decode_exhaustive_tb", "2052ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-003 REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should render and simulate C.J predecode redirect semantics":
+        step("Build C.J through the frozen typed predecode/redirect contract")
+        val built = strict_zca_cj_predecode_row_hwir("strict_cj_predecode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.port_width("original_parcel")).to_equal(16)
+            expect(module.port_width("fetch_pc")).to_equal(32)
+            expect(module.port_width("redirect_target")).to_equal(32)
+            expect(module.origins[3].source_name).to_equal("zca.c.j")
+            step("Emit, analyze, and simulate positive, negative, and non-row redirect behavior")
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cj_predecode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cj_predecode.vhd")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cj_predecode_tb.vhd", cj_predecode_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cj_predecode_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_cj_predecode_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_cj_predecode_tb", "4ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-011
+    # @capture exec
+    # @capture artifact
+    it "should render RV32 C.JAL with x1 link semantics and reject the RV64 configuration":
+        step("Build the RV32-only C.JAL row and reject its common-profile use")
+        val rv32 = strict_zca_cjal_rv32_predecode_row_hwir("strict_cjal_rv32_predecode", CoreConfig.rv32_zca_cjal_mission_critical())
+        expect(rv32.is_ok()).to_equal(true)
+        if val module = rv32.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.port_width("fetch_pc")).to_equal(32)
+            expect(module.origins[2].source_name).to_equal("zca.c.jal")
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cjal_rv32_predecode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cjal_rv32_predecode.vhd")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cjal_rv32_predecode_tb.vhd", cjal_rv32_predecode_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cjal_rv32_predecode_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_cjal_rv32_predecode_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_cjal_rv32_predecode_tb", "4ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+        val common = strict_zca_cjal_rv32_predecode_row_hwir("strict_cjal_common_predecode", CoreConfig.rv32_zca_mission_critical())
+        expect(common.is_err()).to_equal(true)
+        if val diagnostic = common.err():
+            expect(diagnostic).to_start_with("HWIR-E-ZCA-CJAL-PROFILE")
+        else:
+            expect(false).to_equal(true)
+        val composed = strict_zca_rv32_cjal_migrating_predecode_hwir(
+            "strict_cjal_rv32_composed", CoreConfig.rv32_zca_cjal_mission_critical())
+        expect(composed.is_ok()).to_equal(true)
+        if val composed_module = composed.ok():
+            expect(composed_module.shape_diagnostic()).to_equal("")
+            expect(composed_module.origins.any(_.source_name == "zca.c.jal")).to_equal(true)
+            expect(render_strict_hwir_vhdl(composed_module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req NFR-G2-012
+    # @capture exec
+    # @capture artifact
+    it "should render RV64 C.ADDIW only for its concrete profile and reject rd=x0":
+        step("Build the RV64-only C.ADDIW row and reject its common-profile use")
+        val rv64 = strict_zca_caddiw_rv64_predecode_row_hwir("strict_caddiw_rv64_predecode",
+            CoreConfig.rv64_zca_addiw_mission_critical())
+        expect(rv64.is_ok()).to_equal(true)
+        if val module = rv64.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.port_width("fetch_pc")).to_equal(56)
+            expect(module.origins[0].source_name).to_equal("zca.c.addiw")
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_caddiw_rv64_predecode.vhd", emitted.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_caddiw_rv64_predecode.vhd")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_caddiw_rv64_predecode_tb.vhd", caddiw_rv64_predecode_testbench())).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_caddiw_rv64_predecode_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_caddiw_rv64_predecode_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_caddiw_rv64_predecode_tb", "4ns")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+        expect(strict_zca_caddiw_rv64_predecode_row_hwir("strict_caddiw_common",
+            CoreConfig.rv64_zca_mission_critical()).is_err()).to_equal(true)
+        val composed = strict_zca_rv64_addiw_migrating_predecode_hwir(
+            "strict_caddiw_rv64_composed", CoreConfig.rv64_zca_addiw_mission_critical())
+        expect(composed.is_ok()).to_equal(true)
+        if val composed_module = composed.ok():
+            expect(composed_module.shape_diagnostic()).to_equal("")
+            expect(composed_module.origins.any(_.source_name == "zca.c.addiw")).to_equal(true)
+            expect(render_strict_hwir_vhdl(composed_module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-003 REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should emit one fail-closed C.J/C.B control-predecode composition for RV32 and RV64":
+        step("Compile the public strict Gen2 control-product entry point for both concrete XLENs")
+        val rv32 = compile_strict_zca_control_predecode_product(CoreConfig.rv32_zca_mission_critical())
+        val rv64 = compile_strict_zca_control_predecode_product(CoreConfig.rv64_zca_mission_critical())
+        expect(rv32.is_success()).to_equal(true)
+        expect(rv64.is_success()).to_equal(true)
+        expect(rv32.uses_legacy_fallback()).to_equal(false)
+        expect(rv64.uses_legacy_fallback()).to_equal(false)
+        expect(rv32.route).to_equal("hwir-gen2-product")
+        expect(rv64.route).to_equal("hwir-gen2-product")
+        expect(rv32.module_node_id).to_equal("riscv_gen2_zca_control_predecode_rv32:module")
+        expect(rv64.module_node_id).to_equal("riscv_gen2_zca_control_predecode_rv64:module")
+        expect(rv32.config_xlen).to_equal(32)
+        expect(rv64.config_xlen).to_equal(64)
+        expect(rv32.config_profile).to_equal("riscv-gen2-rv32-zca-critical")
+        expect(rv64.config_profile).to_equal("riscv-gen2-rv64-zca-critical")
+        expect(rv32.vhdl).to_contain("route=hwir-gen2-product node=riscv_gen2_zca_control_predecode_rv32:module profile=riscv-gen2-rv32-zca-critical")
+        expect(rv64.vhdl).to_contain("route=hwir-gen2-product node=riscv_gen2_zca_control_predecode_rv64:module profile=riscv-gen2-rv64-zca-critical")
+        step("Run C.J, C.BEQZ, C.BNEZ, index-mismatch, and unsupported-parcel vectors in GHDL")
+        expect(strict_vhdl_write_file("/tmp/riscv_gen2_control_predecode_rv32.vhd", rv32.vhdl)).to_equal(true)
+        expect(strict_ghdl_analyze("/tmp/riscv_gen2_control_predecode_rv32.vhd")).to_equal(true)
+        expect(strict_vhdl_write_file("/tmp/riscv_gen2_control_predecode_rv32_tb.vhd", control_predecode_testbench("riscv_gen2_zca_control_predecode_rv32", "strict_zca_control_predecode_rv32_tb", 32, 32, "x\"00000100\"", "x\"00000102\""))).to_equal(true)
+        expect(strict_ghdl_analyze("/tmp/riscv_gen2_control_predecode_rv32_tb.vhd")).to_equal(true)
+        expect(strict_ghdl_elaborate("strict_zca_control_predecode_rv32_tb")).to_equal(true)
+        expect(strict_ghdl_run("strict_zca_control_predecode_rv32_tb", "6ns")).to_equal(true)
+        expect(strict_vhdl_write_file("/tmp/riscv_gen2_control_predecode_rv64.vhd", rv64.vhdl)).to_equal(true)
+        expect(strict_ghdl_analyze("/tmp/riscv_gen2_control_predecode_rv64.vhd")).to_equal(true)
+        expect(strict_vhdl_write_file("/tmp/riscv_gen2_control_predecode_rv64_tb.vhd", control_predecode_testbench("riscv_gen2_zca_control_predecode_rv64", "strict_zca_control_predecode_rv64_tb", 56, 64, "x\"00000000000100\"", "x\"00000000000102\""))).to_equal(true)
+        expect(strict_ghdl_analyze("/tmp/riscv_gen2_control_predecode_rv64_tb.vhd")).to_equal(true)
+        expect(strict_ghdl_elaborate("strict_zca_control_predecode_rv64_tb")).to_equal(true)
+        expect(strict_ghdl_run("strict_zca_control_predecode_rv64_tb", "6ns")).to_equal(true)
+
+    # @req REQ-G2-003 REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should render and simulate C.BEQZ/C.BNEZ operand-dependent redirect semantics for RV32":
+        step("Build both conditional rows through the frozen RV32 branch-predecode contract")
+        val beqz = strict_zca_cbeqz_predecode_row_hwir("strict_cbeqz_predecode_rv32", CoreConfig.rv32_zca_mission_critical())
+        val bnez = strict_zca_cbnez_predecode_row_hwir("strict_cbnez_predecode_rv32", CoreConfig.rv32_zca_mission_critical())
+        expect(beqz.is_ok()).to_equal(true)
+        expect(bnez.is_ok()).to_equal(true)
+        if val beqz_module = beqz.ok():
+            if val bnez_module = bnez.ok():
+                expect(beqz_module.shape_diagnostic()).to_equal("")
+                expect(bnez_module.shape_diagnostic()).to_equal("")
+                expect(beqz_module.port_width("rs1_index")).to_equal(5)
+                expect(bnez_module.port_width("rs1_index")).to_equal(5)
+                expect(beqz_module.port_width("rs1_value")).to_equal(32)
+                expect(bnez_module.port_width("rs1_value")).to_equal(32)
+                expect(beqz_module.origins[0].source_name).to_equal("zca.c.beqz")
+                expect(bnez_module.origins[0].source_name).to_equal("zca.c.bnez")
+                step("Emit, analyze, and simulate taken, untaken, negative-offset, and cross-row vectors")
+                val beqz_emitted = render_strict_hwir_vhdl(beqz_module)
+                val bnez_emitted = render_strict_hwir_vhdl(bnez_module)
+                expect(beqz_emitted.is_success()).to_equal(true)
+                expect(bnez_emitted.is_success()).to_equal(true)
+                expect(beqz_emitted.uses_legacy_fallback()).to_equal(false)
+                expect(bnez_emitted.uses_legacy_fallback()).to_equal(false)
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cbeqz_predecode_rv32.vhd", beqz_emitted.vhdl)).to_equal(true)
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cbnez_predecode_rv32.vhd", bnez_emitted.vhdl)).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cbeqz_predecode_rv32.vhd")).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cbnez_predecode_rv32.vhd")).to_equal(true)
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cb_predecode_rv32_tb.vhd", cb_index_binding_rv32_testbench())).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cb_predecode_rv32_tb.vhd")).to_equal(true)
+                expect(strict_ghdl_elaborate("strict_cb_predecode_rv32_tb")).to_equal(true)
+                expect(strict_ghdl_run("strict_cb_predecode_rv32_tb", "6ns")).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-003 REQ-G2-004
+    # @capture exec
+    # @capture artifact
+    it "should render and simulate C.BEQZ/C.BNEZ operand-dependent redirect semantics for RV64":
+        step("Build both conditional rows through the frozen RV64 branch-predecode contract")
+        val beqz = strict_zca_cbeqz_predecode_row_hwir("strict_cbeqz_predecode_rv64", CoreConfig.rv64_zca_mission_critical())
+        val bnez = strict_zca_cbnez_predecode_row_hwir("strict_cbnez_predecode_rv64", CoreConfig.rv64_zca_mission_critical())
+        expect(beqz.is_ok()).to_equal(true)
+        expect(bnez.is_ok()).to_equal(true)
+        if val beqz_module = beqz.ok():
+            if val bnez_module = bnez.ok():
+                expect(beqz_module.shape_diagnostic()).to_equal("")
+                expect(bnez_module.shape_diagnostic()).to_equal("")
+                expect(beqz_module.port_width("rs1_index")).to_equal(5)
+                expect(bnez_module.port_width("rs1_index")).to_equal(5)
+                expect(beqz_module.port_width("rs1_value")).to_equal(64)
+                expect(bnez_module.port_width("rs1_value")).to_equal(64)
+                expect(beqz_module.port_width("redirect_target")).to_equal(56)
+                expect(bnez_module.port_width("redirect_target")).to_equal(56)
+                expect(beqz_module.origins[0].source_name).to_equal("zca.c.beqz")
+                expect(bnez_module.origins[0].source_name).to_equal("zca.c.bnez")
+                step("Emit, analyze, and simulate XLEN-specialized branch vectors without runtime selection")
+                val beqz_emitted = render_strict_hwir_vhdl(beqz_module)
+                val bnez_emitted = render_strict_hwir_vhdl(bnez_module)
+                expect(beqz_emitted.is_success()).to_equal(true)
+                expect(bnez_emitted.is_success()).to_equal(true)
+                expect(beqz_emitted.uses_legacy_fallback()).to_equal(false)
+                expect(bnez_emitted.uses_legacy_fallback()).to_equal(false)
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cbeqz_predecode_rv64.vhd", beqz_emitted.vhdl)).to_equal(true)
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cbnez_predecode_rv64.vhd", bnez_emitted.vhdl)).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cbeqz_predecode_rv64.vhd")).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cbnez_predecode_rv64.vhd")).to_equal(true)
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_hwir_cb_predecode_rv64_tb.vhd", cb_index_binding_rv64_testbench())).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_hwir_cb_predecode_rv64_tb.vhd")).to_equal(true)
+                expect(strict_ghdl_elaborate("strict_cb_predecode_rv64_tb")).to_equal(true)
+                expect(strict_ghdl_run("strict_cb_predecode_rv64_tb", "6ns")).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-003
+    # @capture exec
+    # @capture artifact
+    it "should route a critical hardware source through strict HWIR at the VHDL CLI boundary":
+        step("Compile the critical source through the public VHDL CLI")
+        val source_path = "/tmp/riscv_gen2_critical_and.spl"
+        val output_path = "/tmp/riscv_gen2_critical_and.vhd"
+        val manifest_path = output_path + ".gen.json"
+        strict_remove_file_if_present(source_path)
+        strict_remove_file_if_present(output_path)
+        strict_remove_file_if_present(manifest_path)
+        expect(strict_vhdl_write_file(source_path, "@hardware\nfn critical_and(a: bool, b: bool) -> bool:\n    a and b\n")).to_equal(true)
+        expect(rt_env_set("SIMPLE_SAFETY_PROFILE", "critical")).to_equal(true)
+        val (_stdout, _stderr, code) = rt_process_run("bin/simple", ["run", "src/app/cli/vhdl_compile_entry.spl", source_path, "--riscv-gen2-target", "rv32", "--output", output_path])
+        expect(rt_env_set("SIMPLE_SAFETY_PROFILE", "")).to_equal(true)
+        expect(code).to_equal(0)
+        expect(rt_file_exists(output_path)).to_equal(true)
+        expect(rt_file_exists(manifest_path)).to_equal(true)
+        val vhdl = rt_file_read_text(output_path)
+        val manifest = rt_file_read_text(manifest_path)
+        expect(vhdl).to_contain("entity critical_and is")
+        expect(vhdl).to_contain("a and b")
+        expect(manifest).to_contain("\"name\":\"hwir-strict\"")
+        expect(manifest).to_contain("\"hwir_config_profile\":\"rv32\"")
+        strict_remove_file_if_present(source_path)
+        strict_remove_file_if_present(output_path)
+        strict_remove_file_if_present(manifest_path)
+
+    # @req REQ-G2-010 NFR-G2-011
+    # @capture artifact
+    it "should derive a stateful frontend only from the fixed typed sequential plan":
+        step("Build concrete RV32 and RV64 stateful HWIR products")
+        val rv32 = compile_strict_zca_single_outstanding_frontend_product(CoreConfig.rv32_zca_mission_critical())
+        val rv64 = compile_strict_zca_single_outstanding_frontend_product(CoreConfig.rv64_zca_mission_critical())
+        expect(rv32.is_success()).to_equal(true)
+        expect(rv64.is_success()).to_equal(true)
+        expect(rv32.route).to_equal("hwir-gen2-stateful-product")
+        expect(rv64.hwir_graph_sha256.len()).to_equal(64)
+        expect(rv32.vhdl).to_contain("graph=")
+        expect(rv32.vhdl).to_contain("elsif retire_valid='1' and valid_reg='1' and issued_reg='1' and retire_lineage=lineage_reg and retire_original_parcel=parcel_reg and retire_canonical_instruction=decoder_canonical and retire_original_length_bytes=decoder_length then")
+        expect(rv32.uses_legacy_fallback()).to_equal(false)
+        expect(rv64.uses_legacy_fallback()).to_equal(false)
+
+    # @req REQ-G2-010 NFR-G2-011
+    # @capture artifact
+    it "should bind the v2 C.EBREAK frontend to its typed state-graph closure":
+        step("Build the concrete RV32 trap frontend")
+        val rv32 = compile_strict_zca_trap_single_outstanding_frontend_product(CoreConfig.rv32_zca_mission_critical())
+        expect(rv32.is_success()).to_equal(true)
+        expect(rv32.route).to_equal("hwir-gen2-trap-stateful-product")
+        expect(rv32.hwir_graph_sha256.len()).to_equal(64)
+        expect(rv32.vhdl).to_contain("trap_valid <= '1' when decoder_trap_valid='1' and valid_reg='1' and issued_reg='0' and fault_reg='0' else '0';")
+        expect(rv32.uses_legacy_fallback()).to_equal(false)
+
+    # @req REQ-G2-010 NFR-G2-011
+    # @capture exec
+    # @capture artifact
+    it "should contain RV32 and RV64 stateful protocol faults in generated VHDL":
+        step("Build concrete RV32 and RV64 trap frontends")
+        val rv32 = compile_strict_zca_trap_single_outstanding_frontend_product(CoreConfig.rv32_zca_mission_critical())
+        val rv64 = compile_strict_zca_trap_single_outstanding_frontend_product(CoreConfig.rv64_zca_mission_critical())
+        expect(rv32.is_success()).to_equal(true)
+        expect(rv64.is_success()).to_equal(true)
+        step("Require the GHDL VHDL-2008 execution tool")
+        expect(strict_ghdl_available()).to_equal(true)
+        if strict_ghdl_available():
+            step("Analyze, elaborate, and run the RV32 fault-containment and lineage-reuse vector")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_trap_stateful_rv32.vhd", rv32.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_trap_stateful_rv32.vhd")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_trap_stateful_rv32_tb.vhd", trap_stateful_reuse_reset_64_testbench("riscv_gen2_zca_trap_single_outstanding_frontend_rv32", "strict_trap_stateful_protocol_rv32_tb", 32, 32, "x\"00000100\""))).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_trap_stateful_rv32_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_trap_stateful_protocol_rv32_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_trap_stateful_protocol_rv32_tb", "220ns")).to_equal(true)
+            step("Analyze, elaborate, and run the RV64 fault-containment and lineage-reuse vector")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_trap_stateful_rv64.vhd", rv64.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_trap_stateful_rv64.vhd")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_trap_stateful_rv64_tb.vhd", trap_stateful_reuse_reset_64_testbench("riscv_gen2_zca_trap_single_outstanding_frontend_rv64", "strict_trap_stateful_protocol_rv64_tb", 56, 64, "x\"00000000000100\""))).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_trap_stateful_rv64_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_trap_stateful_protocol_rv64_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_trap_stateful_protocol_rv64_tb", "220ns")).to_equal(true)
+
+    # @req REQ-G2-010 NFR-G2-011
+    # @capture exec
+    # @capture artifact
+    it "should preserve reset, stall, retirement, and stale-effect containment":
+        step("Build concrete RV32 and RV64 trap frontends")
+        val rv32 = compile_strict_zca_trap_single_outstanding_frontend_product(CoreConfig.rv32_zca_mission_critical())
+        val rv64 = compile_strict_zca_trap_single_outstanding_frontend_product(CoreConfig.rv64_zca_mission_critical())
+        expect(rv32.is_success()).to_equal(true)
+        expect(rv64.is_success()).to_equal(true)
+        step("Require the GHDL VHDL-2008 execution tool")
+        expect(strict_ghdl_available()).to_equal(true)
+        if strict_ghdl_available():
+            step("Run the extended RV32 reset and stale-effect protocol vector")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_trap_extended_rv32.vhd", rv32.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_trap_extended_rv32.vhd")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_trap_extended_rv32_tb.vhd", trap_stateful_protocol_64_testbench("riscv_gen2_zca_trap_single_outstanding_frontend_rv32", "strict_trap_extended_rv32_tb", 32, 32, "x\"00000100\""))).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_trap_extended_rv32_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_trap_extended_rv32_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_trap_extended_rv32_tb", "220ns")).to_equal(true)
+            step("Run the extended RV64 reset and stale-effect protocol vector")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_trap_extended_rv64.vhd", rv64.vhdl)).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_trap_extended_rv64.vhd")).to_equal(true)
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_trap_extended_rv64_tb.vhd", trap_stateful_protocol_64_testbench("riscv_gen2_zca_trap_single_outstanding_frontend_rv64", "strict_trap_extended_rv64_tb", 56, 64, "x\"00000000000100\""))).to_equal(true)
+            expect(strict_ghdl_analyze("/tmp/riscv_gen2_trap_extended_rv64_tb.vhd")).to_equal(true)
+            expect(strict_ghdl_elaborate("strict_trap_extended_rv64_tb")).to_equal(true)
+            expect(strict_ghdl_run("strict_trap_extended_rv64_tb", "220ns")).to_equal(true)
+
+    # @req REQ-G2-011
+    # @capture exec
+    # @capture artifact
+    it "should normalize a non-control Zca row with explicit reserved-encoding legality":
+        step("Build the C.ADDI4SPN outcome row with explicit reserved-encoding legality")
+        val outcome = strict_zca_addi4spn_outcome_hwir("strict_addi4spn_outcome", CoreConfig.rv32_zca_mission_critical())
+        if outcome.is_ok():
+            val emitted = render_strict_hwir_vhdl(outcome.ok().unwrap())
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.vhdl).to_contain("legal_nonreserved")
+            expect(strict_vhdl_write_file("/tmp/riscv_gen2_addi4spn_outcome.vhd", emitted.vhdl)).to_equal(true)
+            if strict_ghdl_available():
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_addi4spn_outcome.vhd")).to_equal(true)
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_addi4spn_outcome_tb.vhd", addi4spn_outcome_testbench())).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_addi4spn_outcome_tb.vhd")).to_equal(true)
+                expect(strict_ghdl_elaborate("strict_addi4spn_outcome_tb")).to_equal(true)
+                expect(strict_ghdl_run("strict_addi4spn_outcome_tb", "10ns")).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-011
+    # @capture exec
+    # @capture artifact
+    it "should normalize classifier-complete C.LW and C.SW rows without canonical sentinels":
+        step("Build the separate C.LW and C.SW outcome rows")
+        val lw = strict_zca_lw_outcome_hwir("strict_lw_outcome", CoreConfig.rv32_zca_mission_critical())
+        val sw = strict_zca_sw_outcome_hwir("strict_sw_outcome", CoreConfig.rv32_zca_mission_critical())
+        expect(lw.is_ok()).to_equal(true)
+        expect(sw.is_ok()).to_equal(true)
+        if lw.is_ok() and sw.is_ok():
+            val lw_vhdl = render_strict_hwir_vhdl(lw.ok().unwrap())
+            val sw_vhdl = render_strict_hwir_vhdl(sw.ok().unwrap())
+            expect(lw_vhdl.is_success()).to_equal(true)
+            expect(sw_vhdl.is_success()).to_equal(true)
+            expect(lw_vhdl.vhdl).to_contain("lw_is_c_lw")
+            expect(sw_vhdl.vhdl).to_contain("sw_is_c_sw")
+            if strict_ghdl_available():
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_lw_outcome.vhd", lw_vhdl.vhdl)).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_lw_outcome.vhd")).to_equal(true)
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_lw_outcome_tb.vhd", lw_outcome_testbench())).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_lw_outcome_tb.vhd")).to_equal(true)
+                expect(strict_ghdl_elaborate("strict_lw_outcome_tb")).to_equal(true)
+                expect(strict_ghdl_run("strict_lw_outcome_tb", "10ns")).to_equal(true)
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_sw_outcome.vhd", sw_vhdl.vhdl)).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_sw_outcome.vhd")).to_equal(true)
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_sw_outcome_tb.vhd", sw_outcome_testbench())).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_sw_outcome_tb.vhd")).to_equal(true)
+                expect(strict_ghdl_elaborate("strict_sw_outcome_tb")).to_equal(true)
+                expect(strict_ghdl_run("strict_sw_outcome_tb", "10ns")).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-011
+    # @capture exec
+    # @capture artifact
+    it "should derive C.LWSP legality from the explicit reserved-register predicate":
+        step("Build the C.LWSP outcome row with its reserved-register predicate")
+        val lwsp = strict_zca_lwsp_outcome_hwir("strict_lwsp_outcome", CoreConfig.rv32_zca_mission_critical())
+        expect(lwsp.is_ok()).to_equal(true)
+        if lwsp.is_ok():
+            val emitted = render_strict_hwir_vhdl(lwsp.ok().unwrap())
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.vhdl).to_contain("lwsp_legal_after_reserved_0")
+            if strict_ghdl_available():
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_lwsp_outcome.vhd", emitted.vhdl)).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_lwsp_outcome.vhd")).to_equal(true)
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_lwsp_outcome_tb.vhd", lwsp_outcome_testbench())).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_lwsp_outcome_tb.vhd")).to_equal(true)
+                expect(strict_ghdl_elaborate("strict_lwsp_outcome_tb")).to_equal(true)
+                expect(strict_ghdl_run("strict_lwsp_outcome_tb", "10ns")).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-011
+    # @capture exec
+    # @capture artifact
+    it "should emit one migrating decoder that selects admitted rows and reject unmigrated rows":
+        step("Build the bounded migrating decoder from admitted outcome rows")
+        val built = strict_zca_migrating_predecode_hwir("strict_migrating_predecode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if built.is_ok():
+            val emitted = render_strict_hwir_vhdl(built.ok().unwrap())
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(emitted.vhdl).to_contain("migrating_canonical_after_")
+            if strict_ghdl_available():
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_migrating_predecode.vhd", emitted.vhdl)).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_migrating_predecode.vhd")).to_equal(true)
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_migrating_predecode_tb.vhd", migrating_predecode_testbench())).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_migrating_predecode_tb.vhd")).to_equal(true)
+                expect(strict_ghdl_elaborate("strict_migrating_predecode_tb")).to_equal(true)
+                expect(strict_ghdl_run("strict_migrating_predecode_tb", "10ns")).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-011
+    # @capture exec
+    # @capture artifact
+    it "should emit and simulate C.EBREAK as a breakpoint effect through the versioned trap contract":
+        step("Build the C.EBREAK trap predecode row through the versioned contract")
+        val built = strict_zca_cebreak_trap_predecode_hwir("strict_cebreak_trap_predecode", CoreConfig.rv32_zca_mission_critical())
+        expect(built.is_ok()).to_equal(true)
+        if built.is_ok():
+            val emitted = render_strict_hwir_vhdl(built.ok().unwrap())
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.uses_legacy_fallback()).to_equal(false)
+            expect(emitted.vhdl).to_contain("trap_valid")
+            expect(emitted.vhdl).to_contain("breakpoint_cause")
+            if strict_ghdl_available():
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_cebreak_trap_predecode.vhd", emitted.vhdl)).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_cebreak_trap_predecode.vhd")).to_equal(true)
+                expect(strict_vhdl_write_file("/tmp/riscv_gen2_cebreak_trap_predecode_tb.vhd", cbreak_trap_predecode_testbench())).to_equal(true)
+                expect(strict_ghdl_analyze("/tmp/riscv_gen2_cebreak_trap_predecode_tb.vhd")).to_equal(true)
+                expect(strict_ghdl_elaborate("strict_cebreak_trap_predecode_tb")).to_equal(true)
+                expect(strict_ghdl_run("strict_cebreak_trap_predecode_tb", "4ns")).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    # @req REQ-G2-006
+    # @capture exec
+    # @capture artifact
+    it "should reject a Gen2 target outside critical assurance without touching a prior artifact":
+        step("Prepare a prior artifact and invoke the noncritical target route")
+        val source_path = "/tmp/riscv_gen2_noncritical_target.spl"
+        val output_path = "/tmp/riscv_gen2_noncritical_target.vhd"
+        val manifest_path = output_path + ".gen.json"
+        strict_remove_file_if_present(source_path)
+        strict_remove_file_if_present(output_path)
+        strict_remove_file_if_present(manifest_path)
+        expect(strict_vhdl_write_file(source_path, "@hardware\nfn noncritical_target_and(a: bool, b: bool) -> bool:\n    a and b\n")).to_equal(true)
+        expect(strict_vhdl_write_file(output_path, "qualified-stale-artifact")).to_equal(true)
+        expect(rt_env_set("SIMPLE_SAFETY_PROFILE", "")).to_equal(true)
+        val (_stdout, stderr, code) = rt_process_run("bin/simple", ["run", "src/app/cli/vhdl_compile_entry.spl", source_path, "--riscv-gen2-target", "rv32", "--output", output_path])
+        expect(code == 0).to_equal(false)
+        expect(stderr.contains("HWIR-E-CRITICAL-POLICY") or rt_file_read_text(output_path) == "qualified-stale-artifact").to_equal(true)
+        expect(rt_file_exists(output_path)).to_equal(true)
+        expect(rt_file_read_text(output_path)).to_equal("qualified-stale-artifact")
+        expect(rt_file_exists(manifest_path)).to_equal(false)
+        strict_remove_file_if_present(source_path)
+        strict_remove_file_if_present(output_path)
+        strict_remove_file_if_present(manifest_path)
+
+    # @req REQ-G2-009 NFR-G2-010
+    # @capture exec
+    # @capture artifact
+    it "should emit the compiler-owned critical migrating Zca product without a synthetic source closure":
+        step("Emit the source-less RV32 migrating product under critical policy")
+        val output_path = "/tmp/riscv_gen2_zca_migrating_product_rv32.vhd"
+        val manifest_path = output_path + ".gen.json"
+        strict_remove_file_if_present(output_path)
+        strict_remove_file_if_present(manifest_path)
+        expect(rt_env_set("SIMPLE_SAFETY_PROFILE", "critical")).to_equal(true)
+        val (_stdout, _stderr, code) = rt_process_run("bin/simple", ["run", "src/app/cli/vhdl_compile_entry.spl", "--riscv-gen2-product", "riscv-gen2-zca-migrating-predecode-v1", "--riscv-gen2-target", "rv32-zca-critical", "--output", output_path])
+        expect(rt_env_set("SIMPLE_SAFETY_PROFILE", "")).to_equal(true)
+        expect(code).to_equal(0)
+        expect(rt_file_exists(output_path)).to_equal(true)
+        expect(rt_file_exists(manifest_path)).to_equal(true)
+        val vhdl = rt_file_read_text(output_path)
+        val manifest = rt_file_read_text(manifest_path)
+        expect(vhdl).to_contain("entity riscv_gen2_zca_migrating_predecode_rv32 is")
+        expect(manifest).to_contain("\"name\":\"hwir-gen2-product\"")
+        expect(manifest).to_contain("\"entry_module\":\"compiler-product:riscv-gen2-zca-migrating-predecode-v1\"")
+        expect(manifest).to_contain("\"source_closure\":[]")
+        expect(manifest).to_contain("\"kind\":\"compiler_product_entity\"")
+        expect(manifest).to_contain("\"riscv\":{\"isa_profile\":\"rv32i\",\"compressed_decode_profile\":\"zca-common-critical\",\"target_evidence_complete\":false}")
+        expect(manifest.contains("\"graph_sha256\":\"\"")).to_equal(false)
+        if strict_ghdl_available():
+            expect(strict_ghdl_analyze(output_path)).to_equal(true)
+        strict_remove_file_if_present(output_path)
+        strict_remove_file_if_present(manifest_path)
+
+    # @req REQ-G2-010 NFR-G2-011
+    # @capture exec
+    # @capture artifact
+    it "should emit the typed-state v2 trap frontend with a nonempty closure hash":
+        step("Emit the source-less RV64 typed-state trap frontend under critical policy")
+        val output_path = "/tmp/riscv_gen2_zca_trap_frontend_rv64.vhd"
+        val manifest_path = output_path + ".gen.json"
+        strict_remove_file_if_present(output_path)
+        strict_remove_file_if_present(manifest_path)
+        expect(rt_env_set("SIMPLE_SAFETY_PROFILE", "critical")).to_equal(true)
+        val (_stdout, _stderr, code) = rt_process_run("bin/simple", ["run", "src/app/cli/vhdl_compile_entry.spl", "--riscv-gen2-product", "riscv-gen2-zca-trap-single-outstanding-v2", "--riscv-gen2-target", "rv64-zca-critical", "--output", output_path])
+        expect(rt_env_set("SIMPLE_SAFETY_PROFILE", "")).to_equal(true)
+        expect(code).to_equal(0)
+        expect(rt_file_exists(output_path)).to_equal(true)
+        expect(rt_file_exists(manifest_path)).to_equal(true)
+        val vhdl = rt_file_read_text(output_path)
+        val manifest = rt_file_read_text(manifest_path)
+        expect(vhdl).to_contain("entity riscv_gen2_zca_trap_single_outstanding_frontend_rv64 is")
+        expect(vhdl).to_contain("graph=")
+        expect(manifest).to_contain("\"name\":\"hwir-gen2-trap-stateful-product\"")
+        expect(manifest).to_contain("\"riscv\":{\"isa_profile\":\"rv64i\",\"compressed_decode_profile\":\"zca-common-critical\",\"target_evidence_complete\":false}")
+        expect(manifest.contains("\"graph_sha256\":\"\"")).to_equal(false)
+        if strict_ghdl_available():
+            expect(strict_ghdl_analyze(output_path)).to_equal(true)
+        strict_remove_file_if_present(output_path)
+        strict_remove_file_if_present(manifest_path)
+
+    # @req REQ-G2-009 NFR-G2-010
+    # @capture exec
+    # @capture artifact
+    it "should reject a noncritical compiler-owned product before replacing a prior artifact":
+        step("Preserve a prior artifact while requesting a compiler product without critical policy")
+        val output_path = "/tmp/riscv_gen2_zca_control_product_noncritical.vhd"
+        val manifest_path = output_path + ".gen.json"
+        strict_remove_file_if_present(output_path)
+        strict_remove_file_if_present(manifest_path)
+        expect(strict_vhdl_write_file(output_path, "qualified-stale-artifact")).to_equal(true)
+        expect(rt_env_set("SIMPLE_SAFETY_PROFILE", "")).to_equal(true)
+        val (_stdout, stderr, code) = rt_process_run("bin/simple", ["run", "src/app/cli/vhdl_compile_entry.spl", "--riscv-gen2-product", "riscv-gen2-zca-control-predecode-v1", "--riscv-gen2-target", "rv32-zca-critical", "--output", output_path])
+        expect(code == 0).to_equal(false)
+        expect(stderr.contains("HWIR-E-CRITICAL-POLICY") or rt_file_read_text(output_path) == "qualified-stale-artifact").to_equal(true)
+        expect(rt_file_read_text(output_path)).to_equal("qualified-stale-artifact")
+        expect(rt_file_exists(manifest_path)).to_equal(false)
+        strict_remove_file_if_present(output_path)
+        strict_remove_file_if_present(manifest_path)
+
+    # @req REQ-G2-003 REQ-G2-005
+    # @capture exec
+    # @capture artifact
+    it "should reject unsupported critical hardware before legacy VHDL artifacts exist":
+        step("Compile unsupported critical hardware through the strict CLI boundary")
+        val source_path = "/tmp/riscv_gen2_critical_xor.spl"
+        val output_path = "/tmp/riscv_gen2_critical_xor.vhd"
+        val manifest_path = output_path + ".gen.json"
+        strict_remove_file_if_present(source_path)
+        strict_remove_file_if_present(output_path)
+        strict_remove_file_if_present(manifest_path)
+        expect(strict_vhdl_write_file(source_path, "@hardware\nfn critical_xor(a: bool, b: bool) -> bool:\n    a xor b\n")).to_equal(true)
+        expect(rt_env_set("SIMPLE_SAFETY_PROFILE", "critical")).to_equal(true)
+        val (_stdout, _stderr, code) = rt_process_run("bin/simple", ["run", "src/app/cli/vhdl_compile_entry.spl", source_path, "--riscv-gen2-target", "rv32", "--output", output_path])
+        expect(rt_env_set("SIMPLE_SAFETY_PROFILE", "")).to_equal(true)
+        expect(code == 0).to_equal(false)
+        expect(rt_file_exists(output_path)).to_equal(false)
+        expect(rt_file_exists(manifest_path)).to_equal(false)
+        strict_remove_file_if_present(source_path)
+        strict_remove_file_if_present(output_path)
+        strict_remove_file_if_present(manifest_path)

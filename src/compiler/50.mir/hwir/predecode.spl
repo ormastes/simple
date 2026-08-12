@@ -1,0 +1,78 @@
+# Typed compressed-predecode interface for the strict RISC-V Gen2 HWIR path.
+#
+# This is elaboration metadata, not a runtime hardware configuration record.
+# Product selection fixes `physical_address_bits` before this interface is
+# constructed, so RV32/RV64 builds produce separate concrete port widths.
+
+use compiler.mir.hwir.types.{CoreConfig, HwNodeId, HwPort}
+
+class HwPredecodeInterface:
+    """Stable typed contract between parcel decode and fetch redirect.
+
+    The original 16-bit parcel remains visible through retirement so illegal
+    instruction reporting and source-level debug never need to reconstruct it
+    from a canonical 32-bit expansion. Control rows must drive the redirect
+    fields explicitly; non-control rows use `redirect_valid=false` and
+    `next_pc=fetch_pc+2` in their concrete HWIR graph.
+    """
+    node_id: HwNodeId
+    config: CoreConfig
+    original_parcel: HwPort
+    fetch_pc: HwPort
+    canonical_instruction: HwPort
+    original_length_bytes: HwPort
+    legal: HwPort
+    next_pc: HwPort
+    redirect_valid: HwPort
+    redirect_target: HwPort
+
+    me ports() -> [HwPort]:
+        [self.original_parcel, self.fetch_pc, self.canonical_instruction,
+            self.original_length_bytes, self.legal, self.next_pc,
+            self.redirect_valid, self.redirect_target]
+
+    me shape_diagnostic() -> text:
+        val config_error = self.config.diagnostic()
+        if config_error != "":
+            return config_error
+        if self.config.compressed_decode_profile != "zca-common-critical":
+            return "HWIR-E-PREDECODE-PROFILE: strict compressed predecode requires zca-common-critical profile"
+        if not self.node_id.is_valid():
+            return "HWIR-E-PREDECODE-ID: predecode interface requires a stable node ID"
+        val ports = self.ports()
+        var names: [text] = []
+        for port in ports:
+            if port.name == "" or port.type_name != "Bits" or port.bit_width < 1:
+                return "HWIR-E-PREDECODE-PORT: predecode ports require non-empty Bits names and positive widths"
+            if not ((port.name == "original_parcel" or port.name == "fetch_pc") and port.direction == "in") and
+                not ((port.name != "original_parcel" and port.name != "fetch_pc") and port.direction == "out"):
+                return "HWIR-E-PREDECODE-DIRECTION: parcel and fetch PC are inputs; all predecode results are outputs"
+            if names.contains(port.name):
+                return "HWIR-E-PREDECODE-DUPLICATE-PORT: predecode port names must be unique"
+            names.push(port.name)
+        if self.original_parcel.bit_width != 16 or self.canonical_instruction.bit_width != 32:
+            return "HWIR-E-PREDECODE-INSTRUCTION-WIDTH: parcel must be Bits[16] and canonical instruction must be Bits[32]"
+        if self.original_length_bytes.bit_width != 2 or self.legal.bit_width != 1 or self.redirect_valid.bit_width != 1:
+            return "HWIR-E-PREDECODE-CONTROL-WIDTH: length must be UInt[2]-compatible and flags must be Bool-compatible"
+        val address_bits = self.config.physical_address_bits
+        if self.fetch_pc.bit_width != address_bits or self.next_pc.bit_width != address_bits or self.redirect_target.bit_width != address_bits:
+            return "HWIR-E-PREDECODE-ADDRESS-WIDTH: fetch, next, and redirect addresses must use selected PA width"
+        ""
+
+pub fn strict_riscv_predecode_interface(config: CoreConfig) -> Result<HwPredecodeInterface, text>:
+    """Materialize the closed strict-HWIR predecode contract for one product."""
+    val contract = HwPredecodeInterface(
+        node_id: HwNodeId.module_root("riscv_predecode"), config: config,
+        original_parcel: HwPort.input("original_parcel", "Bits", 16),
+        fetch_pc: HwPort.input("fetch_pc", "Bits", config.physical_address_bits),
+        canonical_instruction: HwPort.output("canonical_instruction", "Bits", 32),
+        original_length_bytes: HwPort.output("original_length_bytes", "Bits", 2),
+        legal: HwPort.output("legal", "Bits", 1),
+        next_pc: HwPort.output("next_pc", "Bits", config.physical_address_bits),
+        redirect_valid: HwPort.output("redirect_valid", "Bits", 1),
+        redirect_target: HwPort.output("redirect_target", "Bits", config.physical_address_bits)
+    )
+    val diagnostic = contract.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(contract)

@@ -1,6 +1,12 @@
 # Deterministic VHDL production artifacts.
 
 use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.mir.hwir.aspects.{HwAspectLock, HwAspectLockEntry, hwir_aspect_lock_sha256}
+use compiler.mir.hwir.types.{CoreConfig, HwPort}
+use compiler.mir.hwir.frontend.{strict_zca_control_predecode_hwir, strict_zca_migrating_isa_ids, strict_zca_migrating_predecode_hwir, strict_zca_rv32_cjal_migrating_isa_ids, strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_isa_ids, strict_zca_rv64_addiw_migrating_predecode_hwir}
+use compiler.mir.hwir.stateful_frontend.{strict_zca_single_outstanding_frontend_hwir, strict_zca_trap_single_outstanding_frontend_hwir}
+use compiler.mir.hwir.trap_frontend.{strict_zca_trap_migrating_isa_ids}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
@@ -30,8 +36,14 @@ struct VhdlArtifactPort:
     name: text
     direction: text
     type_name: text
+    bit_width: i64
     index: i64
     location: VhdlArtifactLocation
+
+struct VhdlArtifactAspect:
+    id: text
+    version: text
+    content_hash: text
 
 struct VhdlArtifactInput:
     output_path: text
@@ -49,6 +61,18 @@ struct VhdlArtifactInput:
     entity_count: i64
     type_count: i64
     helper_count: i64
+    generation_route: text
+    hwir_module_node_id: text
+    hwir_config_profile: text
+    hwir_graph_sha256: text
+    riscv_isa_profile: text
+    riscv_compressed_decode_profile: text
+    riscv_capability_scope: text
+    riscv_admitted_instruction_ids: [text]
+    riscv_capability_sha256: text
+    riscv_target_evidence_complete: bool
+    hwir_aspect_lock_sha256: text
+    hwir_aspects: [VhdlArtifactAspect]
     generated_items: [VhdlArtifactGeneratedItem]
     ports: [VhdlArtifactPort]
     aop_advices_requested: i64
@@ -75,23 +99,344 @@ fn vhdl_artifact_target_for_entity(entity: text, fallback_profile: text) -> Vhdl
             profile: "RV64IMAC+Sv39+PMP")
     VhdlArtifactTarget(name: "generic-vhdl", xlen: 0, profile: fallback_profile)
 
+fn vhdl_gen2_expected_profile(xlen: i64) -> text:
+    if xlen == 32:
+        return "riscv-gen2-rv32-zca-critical"
+    if xlen == 64:
+        return "riscv-gen2-rv64-zca-critical"
+    ""
+
+fn vhdl_gen2_expected_profile_for_product(route: text, entity: text, xlen: i64) -> text:
+    if (route == "hwir-gen2-product" or route == "hwir-gen2-stateful-product") and xlen == 32 and
+        entity == "riscv_gen2_zca_rv32_cjal_migrating_predecode":
+        return "riscv-gen2-rv32-zca-cjal-critical"
+    if (route == "hwir-gen2-product" or route == "hwir-gen2-stateful-product") and xlen == 32 and
+        entity == "riscv_gen2_zca_rv32_cjal_single_outstanding_frontend":
+        return "riscv-gen2-rv32-zca-cjal-critical"
+    if (route == "hwir-gen2-product" or route == "hwir-gen2-stateful-product") and xlen == 64 and
+        entity == "riscv_gen2_zca_rv64_addiw_migrating_predecode":
+        return "riscv-gen2-rv64-zca-addiw-critical"
+    if (route == "hwir-gen2-product" or route == "hwir-gen2-stateful-product") and xlen == 64 and
+        entity == "riscv_gen2_zca_rv64_addiw_single_outstanding_frontend":
+        return "riscv-gen2-rv64-zca-addiw-critical"
+    vhdl_gen2_expected_profile(xlen)
+
+fn vhdl_gen2_expected_isa_profile(xlen: i64) -> text:
+    if xlen == 32:
+        return "rv32i"
+    if xlen == 64:
+        return "rv64i"
+    ""
+
+fn vhdl_gen2_expected_isa_profile_for_product(route: text, entity: text, xlen: i64) -> text:
+    if (route == "hwir-gen2-product" or route == "hwir-gen2-stateful-product") and xlen == 32 and
+        entity == "riscv_gen2_zca_rv32_cjal_migrating_predecode":
+        return "rv32i_zca"
+    if (route == "hwir-gen2-product" or route == "hwir-gen2-stateful-product") and xlen == 32 and
+        entity == "riscv_gen2_zca_rv32_cjal_single_outstanding_frontend":
+        return "rv32i_zca"
+    if (route == "hwir-gen2-product" or route == "hwir-gen2-stateful-product") and xlen == 64 and
+        entity == "riscv_gen2_zca_rv64_addiw_migrating_predecode":
+        return "rv64i_zca"
+    if (route == "hwir-gen2-product" or route == "hwir-gen2-stateful-product") and xlen == 64 and
+        entity == "riscv_gen2_zca_rv64_addiw_single_outstanding_frontend":
+        return "rv64i_zca"
+    vhdl_gen2_expected_isa_profile(xlen)
+
+fn vhdl_gen2_product_entity_allowed(route: text, entity: text, xlen: i64) -> bool:
+    if route == "hwir-gen2-product":
+        if xlen == 32:
+            return entity == "riscv_gen2_zca_control_predecode_rv32" or
+                entity == "riscv_gen2_zca_migrating_predecode_rv32" or
+                entity == "riscv_gen2_zca_rv32_cjal_migrating_predecode"
+        if xlen == 64:
+            return entity == "riscv_gen2_zca_control_predecode_rv64" or
+                entity == "riscv_gen2_zca_migrating_predecode_rv64" or
+                entity == "riscv_gen2_zca_rv64_addiw_migrating_predecode"
+        return false
+    if route == "hwir-gen2-stateful-product":
+        if xlen == 32:
+            return entity == "riscv_gen2_zca_single_outstanding_frontend_rv32" or
+                entity == "riscv_gen2_zca_rv32_cjal_single_outstanding_frontend"
+        if xlen == 64:
+            return entity == "riscv_gen2_zca_single_outstanding_frontend_rv64" or
+                entity == "riscv_gen2_zca_rv64_addiw_single_outstanding_frontend"
+        return false
+    if route == "hwir-gen2-trap-stateful-product":
+        if xlen == 32:
+            return entity == "riscv_gen2_zca_trap_single_outstanding_frontend_rv32"
+        if xlen == 64:
+            return entity == "riscv_gen2_zca_trap_single_outstanding_frontend_rv64"
+        return false
+    false
+
+fn vhdl_gen2_expected_decoder_entity(route: text, entity: text, xlen: i64) -> text:
+    if route == "hwir-gen2-stateful-product":
+        if entity == "riscv_gen2_zca_rv32_cjal_single_outstanding_frontend":
+            return "riscv_gen2_zca_rv32_cjal_migrating_predecode"
+        if entity == "riscv_gen2_zca_rv64_addiw_single_outstanding_frontend":
+            return "riscv_gen2_zca_rv64_addiw_migrating_predecode"
+        if xlen == 32:
+            return "riscv_gen2_zca_migrating_predecode_rv32"
+        if xlen == 64:
+            return "riscv_gen2_zca_migrating_predecode_rv64"
+    if route == "hwir-gen2-trap-stateful-product":
+        if xlen == 32:
+            return "riscv_gen2_zca_trap_migrating_predecode_rv32"
+        if xlen == 64:
+            return "riscv_gen2_zca_trap_migrating_predecode_rv64"
+    ""
+
+fn vhdl_gen2_product_config(route: text, entity: text, xlen: i64) -> Result<CoreConfig, text>:
+    if (route == "hwir-gen2-product" or route == "hwir-gen2-stateful-product") and xlen == 32 and
+        entity == "riscv_gen2_zca_rv32_cjal_migrating_predecode":
+        return Ok(CoreConfig.rv32_zca_cjal_mission_critical())
+    if (route == "hwir-gen2-product" or route == "hwir-gen2-stateful-product") and xlen == 32 and
+        entity == "riscv_gen2_zca_rv32_cjal_single_outstanding_frontend":
+        return Ok(CoreConfig.rv32_zca_cjal_mission_critical())
+    if (route == "hwir-gen2-product" or route == "hwir-gen2-stateful-product") and xlen == 64 and
+        entity == "riscv_gen2_zca_rv64_addiw_migrating_predecode":
+        return Ok(CoreConfig.rv64_zca_addiw_mission_critical())
+    if (route == "hwir-gen2-product" or route == "hwir-gen2-stateful-product") and xlen == 64 and
+        entity == "riscv_gen2_zca_rv64_addiw_single_outstanding_frontend":
+        return Ok(CoreConfig.rv64_zca_addiw_mission_critical())
+    if xlen == 32:
+        return Ok(CoreConfig.rv32_zca_mission_critical())
+    if xlen == 64:
+        return Ok(CoreConfig.rv64_zca_mission_critical())
+    Err("VHDL Gen2 product provenance requires a concrete RV32 or RV64 product")
+
+pub fn vhdl_gen2_capability_ids(route: text, entity: text) -> Result<[text], text>:
+    """Return only instructions implemented by this compiler-owned product.
+
+    The scalar ISA profile in `CoreConfig` is an elaboration dependency for
+    canonical instruction semantics; it is not a claim that a predecode-only
+    artifact implements the full scalar core.
+    """
+    if route == "hwir-gen2-product":
+        if entity == "riscv_gen2_zca_control_predecode_rv32" or
+            entity == "riscv_gen2_zca_control_predecode_rv64":
+            return Ok(["zca.c.j", "zca.c.beqz", "zca.c.bnez"])
+        if entity == "riscv_gen2_zca_migrating_predecode_rv32" or
+            entity == "riscv_gen2_zca_migrating_predecode_rv64":
+            return Ok(strict_zca_migrating_isa_ids())
+        if entity == "riscv_gen2_zca_rv32_cjal_migrating_predecode":
+            return Ok(strict_zca_rv32_cjal_migrating_isa_ids())
+        if entity == "riscv_gen2_zca_rv64_addiw_migrating_predecode":
+            return Ok(strict_zca_rv64_addiw_migrating_isa_ids())
+    elif route == "hwir-gen2-trap-stateful-product":
+        if entity == "riscv_gen2_zca_trap_single_outstanding_frontend_rv32" or
+            entity == "riscv_gen2_zca_trap_single_outstanding_frontend_rv64":
+            return Ok(strict_zca_trap_migrating_isa_ids())
+    elif route == "hwir-gen2-stateful-product":
+        if entity == "riscv_gen2_zca_single_outstanding_frontend_rv32" or
+            entity == "riscv_gen2_zca_single_outstanding_frontend_rv64":
+            return Ok(strict_zca_migrating_isa_ids())
+        if entity == "riscv_gen2_zca_rv32_cjal_single_outstanding_frontend":
+            return Ok(strict_zca_rv32_cjal_migrating_isa_ids())
+        if entity == "riscv_gen2_zca_rv64_addiw_single_outstanding_frontend":
+            return Ok(strict_zca_rv64_addiw_migrating_isa_ids())
+    Err("VHDL Gen2 product provenance cannot resolve its implemented instruction capabilities")
+
+pub fn vhdl_gen2_capability_sha256(ids: [text]) -> Result<text, text>:
+    if ids.len() == 0:
+        return Err("VHDL Gen2 product provenance requires at least one implemented instruction capability")
+    var sorted: [text] = []
+    for id in ids:
+        if id == "" or not id.starts_with("zca.c.") or sorted.contains(id):
+            return Err("VHDL Gen2 product provenance requires unique Zca instruction capability IDs")
+        sorted.push(id)
+    var index = 0
+    while index < sorted.len():
+        var next = index + 1
+        while next < sorted.len():
+            if sorted[next] < sorted[index]:
+                val temporary = sorted[index]
+                sorted[index] = sorted[next]
+                sorted[next] = temporary
+            next = next + 1
+        index = index + 1
+    Ok(sha256_text("simple-riscv-gen2-capabilities/v1\nfrontend-predecode-only\n" + sorted.join("\n")))
+
+fn vhdl_gen2_expected_ports(input: VhdlArtifactInput) -> Result<[HwPort], text>:
+    val config = vhdl_gen2_product_config(input.generation_route, input.entry_entity, input.xlen)?
+    if input.generation_route == "hwir-gen2-product":
+        if input.entry_entity == "riscv_gen2_zca_control_predecode_rv32" or
+            input.entry_entity == "riscv_gen2_zca_control_predecode_rv64":
+            val module = strict_zca_control_predecode_hwir(input.entry_entity, config)?
+            return Ok(module.ports)
+        if input.entry_entity == "riscv_gen2_zca_migrating_predecode_rv32" or
+            input.entry_entity == "riscv_gen2_zca_migrating_predecode_rv64":
+            val module = strict_zca_migrating_predecode_hwir(input.entry_entity, config)?
+            return Ok(module.ports)
+        if input.entry_entity == "riscv_gen2_zca_rv32_cjal_migrating_predecode":
+            val module = strict_zca_rv32_cjal_migrating_predecode_hwir(input.entry_entity, config)?
+            return Ok(module.ports)
+        if input.entry_entity == "riscv_gen2_zca_rv64_addiw_migrating_predecode":
+            val module = strict_zca_rv64_addiw_migrating_predecode_hwir(input.entry_entity, config)?
+            return Ok(module.ports)
+    elif input.generation_route == "hwir-gen2-stateful-product":
+        val frontend = strict_zca_single_outstanding_frontend_hwir(input.entry_entity, config)?
+        return Ok(frontend.frontend_contract.ports())
+    elif input.generation_route == "hwir-gen2-trap-stateful-product":
+        val frontend = strict_zca_trap_single_outstanding_frontend_hwir(input.entry_entity, config)?
+        return Ok(frontend.frontend_contract.ports())
+    Err("VHDL Gen2 product provenance cannot resolve the selected typed port contract")
+
+fn vhdl_gen2_validate_product_shape(input: VhdlArtifactInput) -> Result<(), text>:
+    """Reject manifest-only Gen2 product claims that do not match a known
+    compiler-owned product boundary.
+
+    VhdlArtifactInput is intentionally serializable, so its fields are not a
+    cryptographic authority over the HWIR graph.  The compiler driver therefore
+    recomputes the graph closure before it constructs this value.  This second
+    gate prevents a hand-assembled artifact input from changing that boundary
+    into a source-less arbitrary entity, profile, or dependency graph.
+    """
+    if input.sources.len() != 0:
+        return Err("VHDL Gen2 product provenance forbids user source closure entries")
+    if input.root_modules.len() != 1 or input.root_modules[0] != input.entry_module:
+        return Err("VHDL Gen2 product provenance requires one entry-bound compiler root")
+    if input.hwir_config_profile != input.profile or
+        input.profile != vhdl_gen2_expected_profile_for_product(
+            input.generation_route, input.entry_entity, input.xlen) or
+        input.target != "riscv" + input.xlen.to_text() or
+        input.riscv_isa_profile != vhdl_gen2_expected_isa_profile_for_product(
+            input.generation_route, input.entry_entity, input.xlen) or
+        input.riscv_compressed_decode_profile != "zca-common-critical":
+        return Err("VHDL Gen2 product provenance requires the concrete critical XLEN/profile closure")
+    if not vhdl_gen2_product_entity_allowed(input.generation_route, input.entry_entity, input.xlen):
+        return Err("VHDL Gen2 product provenance route does not admit the claimed entry entity")
+    if input.hwir_module_node_id != input.entry_entity + ":module":
+        return Err("VHDL Gen2 product provenance requires the canonical entry module node")
+    if input.module_count <= 0 or input.entity_count <= 0 or
+        input.type_count < 0 or input.helper_count < 0 or
+        input.module_count != input.entity_count or
+        input.generated_items.len() != input.entity_count:
+        return Err("VHDL Gen2 product provenance has an inconsistent compiler product graph shape")
+    if input.generation_route == "hwir-gen2-product" and
+        (input.module_count != 1 or input.entity_count != 1):
+        return Err("VHDL Gen2 predecode product provenance requires one compiler entity")
+    if (input.generation_route == "hwir-gen2-stateful-product" or
+        input.generation_route == "hwir-gen2-trap-stateful-product") and
+        (input.module_count != 2 or input.entity_count != 2):
+        return Err("VHDL Gen2 stateful product provenance requires entry and decoder entities")
+    var entry_items = 0
+    var dependency_items = 0
+    val expected_decoder = vhdl_gen2_expected_decoder_entity(
+        input.generation_route, input.entry_entity, input.xlen)
+    for item in input.generated_items:
+        if item.kind == "compiler_product_entity" and item.name == input.entry_entity:
+            entry_items = entry_items + 1
+        if item.kind == "compiler_product_dependency" and item.name != "" and
+            item.name != input.entry_entity:
+            if expected_decoder != "" and item.name != expected_decoder:
+                return Err("VHDL Gen2 stateful product provenance decoder dependency does not match the selected route")
+            dependency_items = dependency_items + 1
+    if entry_items != 1:
+        return Err("VHDL Gen2 product provenance requires exactly one compiler entry entity item")
+    if input.generation_route == "hwir-gen2-product" and dependency_items != 0:
+        return Err("VHDL Gen2 predecode product provenance forbids undeclared dependencies")
+    if (input.generation_route == "hwir-gen2-stateful-product" or
+        input.generation_route == "hwir-gen2-trap-stateful-product") and dependency_items != 1:
+        return Err("VHDL Gen2 stateful product provenance requires exactly one decoder dependency item")
+    var entry_port_indices: [i64] = []
+    var entry_port_names: [text] = []
+    for port in input.ports:
+        if port.entity != input.entry_entity:
+            return Err("VHDL Gen2 product provenance contains a port outside its entry entity")
+        if port.index < 0 or port.bit_width < 1 or entry_port_indices.contains(port.index) or
+            entry_port_names.contains(port.name):
+            return Err("VHDL Gen2 product provenance requires unique non-negative entry port identities")
+        entry_port_indices.push(port.index)
+        entry_port_names.push(port.name)
+    val expected_ports = vhdl_gen2_expected_ports(input)?
+    if input.ports.len() != expected_ports.len():
+        return Err("VHDL Gen2 product provenance port count does not match the typed HWIR contract")
+    var index = 0
+    while index < expected_ports.len():
+        val actual = input.ports[index]
+        val expected = expected_ports[index]
+        if actual.entity != input.entry_entity or actual.index != index or
+            actual.name != expected.name or actual.direction != expected.direction or
+            actual.type_name != expected.type_name or actual.bit_width != expected.bit_width as i64:
+            return Err("VHDL Gen2 product provenance ports do not match the typed HWIR contract")
+        index = index + 1
+    Ok(())
+
 fn vhdl_validate_production_artifact_input(input: VhdlArtifactInput) -> Result<(), text>:
     if (input.output_path == "" or input.entry_module == "" or
         input.entry_entity == "" or input.root_modules.len() == 0):
         return Err("VHDL artifact provenance requires output, entry entity, and root module")
-    if input.sources.len() == 0:
+    val compiler_product = input.generation_route == "hwir-gen2-product" or
+        input.generation_route == "hwir-gen2-stateful-product" or
+        input.generation_route == "hwir-gen2-trap-stateful-product"
+    # Stateful compiler products are admitted only through HwSequentialPlan.
+    # They use the same concrete node/config/closure-hash requirements as
+    # combinational compiler products; no source-less route bypasses those
+    # checks merely because it contains registers.
+    if input.sources.len() == 0 and not compiler_product:
         return Err("VHDL artifact provenance requires a non-empty reachable source closure")
-    if input.compiler_identity == "" or input.compiler_hash.len() != 64:
+    if input.compiler_identity == "" or not sha256_lower_hex_valid(input.compiler_hash):
         return Err("VHDL artifact provenance requires compiler identity and SHA-256")
-    if input.target == "" or input.profile == "" or input.catalog_name == "":
+    if input.target == "" or input.profile == "" or input.catalog_name == "" or input.generation_route == "":
         return Err("VHDL artifact provenance requires target, profile, and design catalog")
+    val represented_hwir_graph = input.generation_route == "hwir-strict" or compiler_product
+    if (input.generation_route == "hwir-strict" or compiler_product) and
+        (input.hwir_module_node_id == "" or input.hwir_config_profile == ""):
+        return Err("VHDL strict-HWIR provenance requires module node and configuration profile")
+    if represented_hwir_graph and not sha256_lower_hex_valid(input.hwir_graph_sha256):
+        return Err("VHDL strict-HWIR provenance requires a canonical HWIR graph SHA-256")
+    if compiler_product and (input.riscv_isa_profile == "" or
+        input.riscv_compressed_decode_profile == ""):
+        return Err("VHDL Gen2 product provenance requires concrete RISC-V ISA and compressed profiles")
+    if compiler_product and not sha256_lower_hex_valid(input.hwir_aspect_lock_sha256):
+        return Err("VHDL Gen2 product provenance requires a canonical typed aspect-lock SHA-256")
+    if compiler_product and (input.aop_advices_requested != 0 or input.aop_weave_count != 0):
+        return Err("VHDL Gen2 product provenance forbids legacy AOP requests and weaves")
+    if compiler_product:
+        vhdl_gen2_validate_product_shape(input)?
+        if input.riscv_capability_scope != "frontend-predecode-only":
+            return Err("VHDL Gen2 product provenance must declare its frontend-only implementation scope")
+        val expected_capabilities = vhdl_gen2_capability_ids(input.generation_route, input.entry_entity)?
+        if input.riscv_admitted_instruction_ids.len() != expected_capabilities.len():
+            return Err("VHDL Gen2 product provenance capability set does not match the selected product")
+        var capability_index = 0
+        while capability_index < expected_capabilities.len():
+            if input.riscv_admitted_instruction_ids[capability_index] != expected_capabilities[capability_index]:
+                return Err("VHDL Gen2 product provenance capability set does not match the selected product")
+            capability_index = capability_index + 1
+        val expected_capability_sha256 = vhdl_gen2_capability_sha256(input.riscv_admitted_instruction_ids)?
+        if not sha256_lower_hex_valid(input.riscv_capability_sha256) or
+            input.riscv_capability_sha256 != expected_capability_sha256:
+            return Err("VHDL Gen2 product provenance capability SHA-256 does not match the selected product")
+    var aspect_ids: [text] = []
+    for aspect in input.hwir_aspects:
+        if aspect.id == "" or aspect.version == "" or not sha256_lower_hex_valid(aspect.content_hash) or
+            aspect_ids.contains(aspect.id):
+            return Err("VHDL artifact aspect provenance requires unique ID/version/SHA-256 identities")
+        aspect_ids.push(aspect.id)
+    if input.hwir_aspects.len() == 0 and input.hwir_aspect_lock_sha256 != "" and
+        not sha256_lower_hex_valid(input.hwir_aspect_lock_sha256):
+        return Err("VHDL artifact aspect provenance has an invalid empty-lock SHA-256")
+    if input.hwir_aspect_lock_sha256 != "":
+        var aspect_lock_entries: [HwAspectLockEntry] = []
+        for aspect in input.hwir_aspects:
+            aspect_lock_entries.push(HwAspectLockEntry(id: aspect.id,
+                version: aspect.version, content_hash: aspect.content_hash))
+        val expected_aspect_lock_sha256 = match hwir_aspect_lock_sha256(
+            HwAspectLock(entries: aspect_lock_entries)):
+            case Ok(value): value
+            case Err(_): return Err("VHDL artifact aspect provenance cannot construct a canonical typed aspect lock")
+        if input.hwir_aspect_lock_sha256 != expected_aspect_lock_sha256:
+            return Err("VHDL artifact aspect provenance lock SHA-256 does not match pinned aspect identities")
     for source in input.sources:
-        if source.module_name == "" or source.path == "" or source.content_hash.len() != 64:
+        if source.module_name == "" or source.path == "" or not sha256_lower_hex_valid(source.content_hash):
             return Err("VHDL artifact source closure contains incomplete provenance")
     var entry_port_count = 0
     for port in input.ports:
         if (port.entity == "" or port.name == "" or port.direction == "" or
-            port.type_name == "" or port.type_name.contains("-- ERROR:")):
+            port.type_name == "" or port.bit_width < 0 or port.type_name.contains("-- ERROR:")):
             return Err("VHDL artifact flat port manifest contains an incomplete port")
         if port.location.available and (port.location.module_name == "" or
             port.location.file == "" or port.location.line <= 0 or
@@ -111,7 +456,7 @@ fn vhdl_validate_production_artifact_input(input: VhdlArtifactInput) -> Result<(
             return Err("VHDL artifact generated-item source location is incomplete")
         if item.name == input.entry_entity:
             entry_item_count = entry_item_count + 1
-            if not item.location.available:
+            if not item.location.available and not compiler_product:
                 return Err("VHDL artifact selected entry entity has no source span")
     if entry_item_count != 1:
         return Err("VHDL artifact provenance requires exactly one selected entry entity")
@@ -139,6 +484,15 @@ fn vhdl_artifact_json_escape(value: text) -> text:
 
 fn vhdl_artifact_json_text(value: text) -> text:
     "\"{vhdl_artifact_json_escape(value)}\""
+
+fn vhdl_artifact_json_text_array(values: [text]) -> text:
+    var rows: [text] = []
+    for value in vhdl_artifact_sorted_text(values):
+        rows.push(vhdl_artifact_json_text(value))
+    "[" + rows.join(",") + "]"
+
+fn vhdl_artifact_json_bool(value: bool) -> text:
+    if value: "true" else: "false"
 
 fn vhdl_artifact_location_json(location: VhdlArtifactLocation) -> text:
     if not location.available:
@@ -216,6 +570,22 @@ fn vhdl_artifact_sorted_ports(values: [VhdlArtifactPort]) -> [VhdlArtifactPort]:
         i = i + 1
     result
 
+fn vhdl_artifact_sorted_aspects(values: [VhdlArtifactAspect]) -> [VhdlArtifactAspect]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            val left = "{result[i].id}\n{result[i].version}\n{result[i].content_hash}"
+            val right = "{result[j].id}\n{result[j].version}\n{result[j].content_hash}"
+            if right < left:
+                val tmp = result[i]
+                result[i] = result[j]
+                result[j] = tmp
+            j = j + 1
+        i = i + 1
+    result
+
 fn vhdl_artifact_text_array(values: [text]) -> text:
     var rows: [text] = []
     for value in vhdl_artifact_sorted_text(values):
@@ -255,7 +625,17 @@ fn vhdl_artifact_ports_json(ports: [VhdlArtifactPort]) -> text:
             "\"name\":" + vhdl_artifact_json_text(port.name) + "," +
             "\"direction\":" + vhdl_artifact_json_text(port.direction) + "," +
             "\"type\":" + vhdl_artifact_json_text(port.type_name) + "," +
+            "\"bit_width\":" + port.bit_width.to_text() + "," +
             "\"source\":" + vhdl_artifact_location_json(port.location) + "}")
+    "[" + rows.join(",") + "]"
+
+fn vhdl_artifact_aspects_json(aspects: [VhdlArtifactAspect]) -> text:
+    var rows: [text] = []
+    for aspect in vhdl_artifact_sorted_aspects(aspects):
+        rows.push("{" +
+            "\"id\":" + vhdl_artifact_json_text(aspect.id) + "," +
+            "\"version\":" + vhdl_artifact_json_text(aspect.version) + "," +
+            "\"sha256\":" + vhdl_artifact_json_text(aspect.content_hash) + "}")
     "[" + rows.join(",") + "]"
 
 fn vhdl_artifact_entry_ports(ports: [VhdlArtifactPort], entity: text) -> [VhdlArtifactPort]:
@@ -291,6 +671,10 @@ fn vhdl_render_production_artifacts(input: VhdlArtifactInput, vhdl: text) -> Vhd
         "  \"vhdl\":{\"path\":" + vhdl_artifact_json_text(input.output_path) + ",\"sha256\":" + vhdl_artifact_json_text(vhdl_hash) + "},\n" +
         "  \"source_map\":{\"path\":" + vhdl_artifact_json_text(map_path) + ",\"sha256\":" + vhdl_artifact_json_text(source_map_hash) + "},\n" +
         "  \"design_catalog\":{\"name\":" + vhdl_artifact_json_text(input.catalog_name) + ",\"modules\":" + input.module_count.to_text() + ",\"entities\":" + input.entity_count.to_text() + ",\"types\":" + input.type_count.to_text() + ",\"helpers\":" + input.helper_count.to_text() + "},\n" +
+        "  \"generation_route\":" + vhdl_artifact_json_text(input.generation_route) + ",\n" +
+        "  \"hwir\":{\"module_node_id\":" + vhdl_artifact_json_text(input.hwir_module_node_id) + ",\"config_profile\":" + vhdl_artifact_json_text(input.hwir_config_profile) + ",\"graph_sha256\":" + vhdl_artifact_json_text(input.hwir_graph_sha256) + "},\n" +
+        "  \"hwir_aspects\":{\"lock_sha256\":" + vhdl_artifact_json_text(input.hwir_aspect_lock_sha256) + ",\"entries\":" + vhdl_artifact_aspects_json(input.hwir_aspects) + "},\n" +
+        "  \"riscv\":{\"isa_profile\":" + vhdl_artifact_json_text(input.riscv_isa_profile) + ",\"compressed_decode_profile\":" + vhdl_artifact_json_text(input.riscv_compressed_decode_profile) + ",\"implementation_scope\":" + vhdl_artifact_json_text(input.riscv_capability_scope) + ",\"implemented_instruction_ids\":" + vhdl_artifact_json_text_array(input.riscv_admitted_instruction_ids) + ",\"capability_sha256\":" + vhdl_artifact_json_text(input.riscv_capability_sha256) + ",\"target_evidence_complete\":" + vhdl_artifact_json_bool(input.riscv_target_evidence_complete) + "},\n" +
         "  \"ports\":" + vhdl_artifact_ports_json(
             vhdl_artifact_entry_ports(input.ports, input.entry_entity)) + ",\n" +
         "  \"target\":{\"name\":" + vhdl_artifact_json_text(input.target) + ",\"xlen\":" + input.xlen.to_text() + ",\"profile\":" + vhdl_artifact_json_text(input.profile) + "},\n" +
@@ -311,8 +695,21 @@ fn vhdl_remove_production_artifacts(output: text) -> bool:
             return false
     true
 
-fn vhdl_write_production_artifacts(output: text, vhdl: text,
-                                   rendered: VhdlArtifactRendered) -> Result<(), text>:
+fn vhdl_rendered_claims_compiler_owned_gen2(rendered: VhdlArtifactRendered) -> bool:
+    """Identify the three compiler-owned Gen2 provenance routes in a rendered
+    artifact bundle.
+
+    This intentionally examines the canonical manifest route marker, rather
+    than VHDL entity text.  A generic writer cannot infer semantic ownership
+    from raw VHDL, but it must never persist a bundle that *claims* one of the
+    reserved compiler product routes.
+    """
+    rendered.manifest.contains("hwir-gen2-product") or
+        rendered.manifest.contains("hwir-gen2-stateful-product") or
+        rendered.manifest.contains("hwir-gen2-trap-stateful-product")
+
+fn vhdl_write_artifacts_after_authorization(output: text, vhdl: text,
+    rendered: VhdlArtifactRendered) -> Result<(), text>:
     if not vhdl_remove_production_artifacts(output):
         return Err("Failed to remove stale VHDL artifacts for {output}")
     if not rt_file_write_text(output, vhdl):
@@ -331,8 +728,21 @@ fn vhdl_write_production_artifacts(output: text, vhdl: text,
         return Err("Failed to write VHDL manifest to {manifest_path}")
     Ok(())
 
+pub fn vhdl_write_production_artifacts(output: text, vhdl: text,
+    rendered: VhdlArtifactRendered) -> Result<(), text>:
+    """Persist a source-owned VHDL artifact bundle.
+
+    Compiler-owned Gen2 products have a separate writer because their empty
+    source closure is only legitimate after the Gen2 driver has recomputed its
+    typed HWIR closure.  Rejection occurs before stale-artifact cleanup so a
+    raw caller cannot erase a known product bundle while attempting a bypass.
+    """
+    if vhdl_rendered_claims_compiler_owned_gen2(rendered):
+        return Err("VHDL raw artifact writer refuses compiler-owned RISC-V Gen2 routes")
+    vhdl_write_artifacts_after_authorization(output, vhdl, rendered)
+
 export VhdlArtifactSource, VhdlArtifactLocation, VhdlArtifactGeneratedItem
-export VhdlArtifactPort, VhdlArtifactInput, VhdlArtifactRendered
+export VhdlArtifactPort, VhdlArtifactAspect, VhdlArtifactInput, VhdlArtifactRendered
 export VhdlArtifactTarget, vhdl_artifact_target_for_entity
 export vhdl_validate_production_artifact_input
 export vhdl_artifact_source_aggregate_hash, vhdl_render_production_artifacts

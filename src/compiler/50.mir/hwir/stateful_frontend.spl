@@ -1,0 +1,571 @@
+# Stateful parcel-front-end contract for the mission-critical Gen2 HWIR lane.
+#
+# This is deliberately a single-outstanding product, not a generic FIFO.  It
+# provides the first real clocked HWIR boundary while preserving the flattened
+# migrating-predecode module as the sole decoder owner.
+
+use compiler.mir.hwir.types.{CoreConfig, HwNodeId, HwOrigin, HwPort, hwir_vhdl_identifier}
+use compiler.mir.hwir.sequential.{HwStateRegister, HwSeqAssignment, HwSeqGuard, HwSeqInstancePin, HwSeqOutputBinding, HwSeqRule, HwSeqValue, HwSequentialPlan}
+
+pub fn strict_parcel_frontend_decoder_entity(config: CoreConfig) -> Result<text, text>:
+    """Resolve the only decoder a concrete non-trap parcel frontend may use.
+
+    This is elaboration-only selection. The decoder entity is part of the
+    frontend graph hash, so an RV32 C.JAL or RV64 C.ADDIW product cannot be
+    substituted with the common decoder after review.
+    """
+    if config.xlen == 32 and config.profile == "riscv-gen2-rv32-zca-cjal-critical" and
+        config.isa_profile == "rv32i_zca":
+        return Ok("riscv_gen2_zca_rv32_cjal_migrating_predecode")
+    if config.xlen == 64 and config.profile == "riscv-gen2-rv64-zca-addiw-critical" and
+        config.isa_profile == "rv64i_zca":
+        return Ok("riscv_gen2_zca_rv64_addiw_migrating_predecode")
+    if config.xlen == 32 and config.profile == "riscv-gen2-rv32-zca-critical" and
+        config.isa_profile == "rv32i":
+        return Ok("riscv_gen2_zca_migrating_predecode_rv32")
+    if config.xlen == 64 and config.profile == "riscv-gen2-rv64-zca-critical" and
+        config.isa_profile == "rv64i":
+        return Ok("riscv_gen2_zca_migrating_predecode_rv64")
+    Err("HWIR-E-PARCEL-FRONTEND-DECODER: frontend configuration has no admitted concrete decoder")
+
+fn strict_parcel_state_registers(config: CoreConfig) -> [HwStateRegister]:
+    [HwStateRegister(name: "valid_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "issued_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "lineage_reg", bit_width: 64, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "fault_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "parcel_reg", bit_width: 16, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "pc_reg", bit_width: config.physical_address_bits, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "rs1_index_reg", bit_width: 5, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "rs1_value_reg", bit_width: config.xlen, clock_domain: "default", reset_value: 0)]
+
+fn strict_parcel_decoder_pins(config: CoreConfig, include_trap: bool) -> [HwSeqInstancePin]:
+    var pins = [HwSeqInstancePin(port_name: "original_parcel", signal_name: "parcel_reg", direction: "in", bit_width: 16),
+        HwSeqInstancePin(port_name: "fetch_pc", signal_name: "pc_reg", direction: "in", bit_width: config.physical_address_bits),
+        HwSeqInstancePin(port_name: "rs1_index", signal_name: "rs1_index_reg", direction: "in", bit_width: 5),
+        HwSeqInstancePin(port_name: "rs1_value", signal_name: "rs1_value_reg", direction: "in", bit_width: config.xlen),
+        HwSeqInstancePin(port_name: "canonical_instruction", signal_name: "decoder_canonical", direction: "out", bit_width: 32),
+        HwSeqInstancePin(port_name: "original_length_bytes", signal_name: "decoder_length", direction: "out", bit_width: 2),
+        HwSeqInstancePin(port_name: "legal", signal_name: "decoder_legal", direction: "out", bit_width: 1),
+        HwSeqInstancePin(port_name: "next_pc", signal_name: "decoder_next_pc", direction: "out", bit_width: config.physical_address_bits),
+        HwSeqInstancePin(port_name: "redirect_valid", signal_name: "decoder_redirect_valid", direction: "out", bit_width: 1),
+        HwSeqInstancePin(port_name: "redirect_target", signal_name: "decoder_redirect_target", direction: "out", bit_width: config.physical_address_bits)]
+    if include_trap:
+        pins.push(HwSeqInstancePin(port_name: "trap_valid", signal_name: "decoder_trap_valid", direction: "out", bit_width: 1))
+        pins.push(HwSeqInstancePin(port_name: "trap_cause", signal_name: "decoder_trap_cause", direction: "out", bit_width: config.xlen))
+        pins.push(HwSeqInstancePin(port_name: "trap_tval", signal_name: "decoder_trap_tval", direction: "out", bit_width: config.xlen))
+    pins
+
+fn strict_parcel_has_expected_decoder_pins(plan: HwSequentialPlan, config: CoreConfig, include_trap: bool) -> bool:
+    val expected = strict_parcel_decoder_pins(config, include_trap)
+    if plan.decoder_pins.len() != expected.len():
+        return false
+    var index = 0
+    while index < expected.len():
+        val actual = plan.decoder_pins[index]
+        val required = expected[index]
+        if actual.port_name != required.port_name or actual.signal_name != required.signal_name or
+            actual.direction != required.direction or actual.bit_width != required.bit_width:
+            return false
+        index = index + 1
+    true
+
+fn strict_parcel_has_exact_sequential_template(plan: HwSequentialPlan, module_name: text,
+    config: CoreConfig, include_trap: bool) -> bool:
+    """Require the fixed critical product's complete ordered sequential contract.
+
+    The bounded Gen2 frontend is deliberately not an extension point.  A
+    plan's names and individual widths can be valid while a reordered rule,
+    changed guard, extra state element, or substituted decoder pin changes its
+    architectural protocol.  Comparing the canonical typed plan binds every
+    register, ordered rule/guard/assignment, output binding, and decoder pin
+    to the single product template selected by the concrete configuration.
+    """
+    val expected = strict_parcel_sequential_plan(module_name, config, include_trap)
+    plan.canonical_text() == expected.canonical_text()
+
+fn strict_parcel_active_dispatch_guards() -> [HwSeqGuard]:
+    """Guards for the one cycle/window in which a decoded parcel is public.
+
+    The captured registers intentionally survive dispatch acceptance so a
+    matching retirement can consume the lineage token.  Instruction metadata
+    is different: exposing it after acceptance or a protocol fault makes a
+    stale architectural effect too easy for a downstream integration to use.
+    """
+    [HwSeqGuard.high("valid_reg"), HwSeqGuard.low("issued_reg"), HwSeqGuard.low("fault_reg")]
+
+fn strict_parcel_matching_retirement_guards() -> [HwSeqGuard]:
+    [HwSeqGuard.high("retire_valid"), HwSeqGuard.high("valid_reg"),
+        HwSeqGuard.high("issued_reg"), HwSeqGuard.equal("retire_lineage", "lineage_reg"),
+        HwSeqGuard.equal("retire_original_parcel", "parcel_reg"),
+        HwSeqGuard.equal("retire_canonical_instruction", "decoder_canonical"),
+        HwSeqGuard.equal("retire_original_length_bytes", "decoder_length")]
+
+fn strict_parcel_sequential_plan(module_name: text, config: CoreConfig, include_trap: bool) -> HwSequentialPlan:
+    var outputs = [HwSeqOutputBinding.all("fetch_ready", [HwSeqGuard.low("valid_reg"), HwSeqGuard.low("fault_reg")]),
+        HwSeqOutputBinding.all("dispatch_valid", strict_parcel_active_dispatch_guards()),
+        HwSeqOutputBinding.direct("dispatch_lineage", "lineage_reg", 64),
+        HwSeqOutputBinding.direct("protocol_fault", "fault_reg", 1),
+        HwSeqOutputBinding.guarded("original_parcel", "parcel_reg", 16, strict_parcel_active_dispatch_guards()),
+        HwSeqOutputBinding.guarded("canonical_instruction", "decoder_canonical", 32, strict_parcel_active_dispatch_guards()),
+        HwSeqOutputBinding.guarded("original_length_bytes", "decoder_length", 2, strict_parcel_active_dispatch_guards()),
+        HwSeqOutputBinding.guarded("legal", "decoder_legal", 1, strict_parcel_active_dispatch_guards()),
+        HwSeqOutputBinding.guarded("next_pc", "decoder_next_pc", config.physical_address_bits, strict_parcel_active_dispatch_guards()),
+        HwSeqOutputBinding.all("redirect_valid", [HwSeqGuard.high("decoder_redirect_valid"),
+            HwSeqGuard.high("valid_reg"), HwSeqGuard.low("issued_reg"), HwSeqGuard.low("fault_reg")]),
+        HwSeqOutputBinding.guarded("redirect_target", "decoder_redirect_target", config.physical_address_bits, strict_parcel_active_dispatch_guards())]
+    if include_trap:
+        outputs.push(HwSeqOutputBinding.all("trap_valid", [HwSeqGuard.high("decoder_trap_valid"),
+            HwSeqGuard.high("valid_reg"), HwSeqGuard.low("issued_reg"), HwSeqGuard.low("fault_reg")]))
+        outputs.push(HwSeqOutputBinding.guarded("trap_cause", "decoder_trap_cause", config.xlen,
+            [HwSeqGuard.high("decoder_trap_valid"), HwSeqGuard.high("valid_reg"),
+                HwSeqGuard.low("issued_reg"), HwSeqGuard.low("fault_reg")]))
+        outputs.push(HwSeqOutputBinding.guarded("trap_tval", "decoder_trap_tval", config.xlen,
+            [HwSeqGuard.high("decoder_trap_valid"), HwSeqGuard.high("valid_reg"),
+                HwSeqGuard.low("issued_reg"), HwSeqGuard.low("fault_reg")]))
+    var retirement_guards = strict_parcel_matching_retirement_guards()
+    var exhaustion_guards = strict_parcel_matching_retirement_guards()
+    exhaustion_guards.push(HwSeqGuard.all_ones("lineage_reg"))
+    HwSequentialPlan(owner_id: HwNodeId.child(module_name, "sequential"), registers: strict_parcel_state_registers(config),
+        rules: [HwSeqRule(name: "retire_exhaustion", guards: exhaustion_guards, assignments: [
+                HwSeqAssignment(destination: "valid_reg", value: HwSeqValue.zero(1)),
+                HwSeqAssignment(destination: "issued_reg", value: HwSeqValue.zero(1)),
+                HwSeqAssignment(destination: "fault_reg", value: HwSeqValue.copy("retire_valid", 1))]),
+            HwSeqRule(name: "retire_match", guards: retirement_guards, assignments: [
+                HwSeqAssignment(destination: "valid_reg", value: HwSeqValue.zero(1)),
+                HwSeqAssignment(destination: "issued_reg", value: HwSeqValue.zero(1)),
+                HwSeqAssignment(destination: "lineage_reg", value: HwSeqValue.increment("lineage_reg", 64))]),
+            HwSeqRule(name: "retire_fault", guards: [HwSeqGuard.high("retire_valid")], assignments: [
+                HwSeqAssignment(destination: "fault_reg", value: HwSeqValue.copy("retire_valid", 1))]),
+            HwSeqRule(name: "fetch_capture", guards: [HwSeqGuard.high("fetch_valid"), HwSeqGuard.high("fetch_ready")], assignments: [
+                HwSeqAssignment(destination: "valid_reg", value: HwSeqValue.copy("fetch_valid", 1)),
+                HwSeqAssignment(destination: "issued_reg", value: HwSeqValue.zero(1)),
+                HwSeqAssignment(destination: "parcel_reg", value: HwSeqValue.copy("fetch_parcel", 16)),
+                HwSeqAssignment(destination: "pc_reg", value: HwSeqValue.copy("fetch_pc", config.physical_address_bits)),
+                HwSeqAssignment(destination: "rs1_index_reg", value: HwSeqValue.copy("rs1_index", 5)),
+                HwSeqAssignment(destination: "rs1_value_reg", value: HwSeqValue.copy("rs1_value", config.xlen))]),
+            HwSeqRule(name: "dispatch_issue", guards: [HwSeqGuard.high("dispatch_accept"), HwSeqGuard.high("dispatch_valid")], assignments: [
+                HwSeqAssignment(destination: "issued_reg", value: HwSeqValue.copy("dispatch_accept", 1))])],
+        outputs: outputs, decoder_pins: strict_parcel_decoder_pins(config, include_trap))
+
+class HwParcelFrontendInterface:
+    """One-entry fetch/dispatch/retire ownership boundary.
+
+    `dispatch_lineage` is a 64-bit transaction token captured with a fetch.
+    The frontend permits no second fetch until a matching retirement arrives;
+    an early, stale, mismatched, or repeated retirement makes
+    `protocol_fault` sticky until reset.  The upstream retirement source must
+    be reset-coupled. A matching retirement at the terminal lineage value
+    raises the sticky fault instead of wrapping the counter for reuse.
+    This is intentionally conservative while the general channel/retirement
+    HWIR has not yet been introduced.
+    """
+    node_id: HwNodeId
+    config: CoreConfig
+    clk: HwPort
+    rst: HwPort
+    fetch_valid: HwPort
+    fetch_parcel: HwPort
+    fetch_pc: HwPort
+    rs1_index: HwPort
+    rs1_value: HwPort
+    dispatch_accept: HwPort
+    retire_valid: HwPort
+    retire_lineage: HwPort
+    retire_original_parcel: HwPort
+    retire_canonical_instruction: HwPort
+    retire_original_length_bytes: HwPort
+    fetch_ready: HwPort
+    dispatch_valid: HwPort
+    dispatch_lineage: HwPort
+    protocol_fault: HwPort
+    original_parcel: HwPort
+    canonical_instruction: HwPort
+    original_length_bytes: HwPort
+    legal: HwPort
+    next_pc: HwPort
+    redirect_valid: HwPort
+    redirect_target: HwPort
+
+    me ports() -> [HwPort]:
+        [self.clk, self.rst, self.fetch_valid, self.fetch_parcel, self.fetch_pc,
+            self.rs1_index, self.rs1_value, self.dispatch_accept,
+            self.retire_valid, self.retire_lineage, self.retire_original_parcel,
+            self.retire_canonical_instruction, self.retire_original_length_bytes, self.fetch_ready,
+            self.dispatch_valid, self.dispatch_lineage, self.protocol_fault,
+            self.original_parcel, self.canonical_instruction,
+            self.original_length_bytes, self.legal, self.next_pc,
+            self.redirect_valid, self.redirect_target]
+
+    me shape_diagnostic() -> text:
+        val config_error = self.config.diagnostic()
+        if config_error != "":
+            return config_error
+        if self.config.compressed_decode_profile != "zca-common-critical":
+            return "HWIR-E-PARCEL-FRONTEND-PROFILE: stateful parcel frontend requires zca-common-critical profile"
+        if not self.node_id.is_valid():
+            return "HWIR-E-PARCEL-FRONTEND-ID: stateful parcel frontend requires a stable node ID"
+        var names: [text] = []
+        for port in self.ports():
+            if not hwir_vhdl_identifier(port.name) or port.type_name != "Bits" or port.bit_width < 1 or port.clock_domain != "default":
+                return "HWIR-E-PARCEL-FRONTEND-PORT: all stateful frontend ports require default-domain Bits types and positive widths"
+            if names.contains(port.name):
+                return "HWIR-E-PARCEL-FRONTEND-DUPLICATE-PORT: stateful frontend port names must be unique"
+            names.push(port.name)
+        if self.clk.direction != "in" or self.rst.direction != "in" or self.clk.bit_width != 1 or self.rst.bit_width != 1:
+            return "HWIR-E-PARCEL-FRONTEND-CLOCK: frontend requires one-bit clk and synchronous active-high rst inputs"
+        for port in [self.fetch_valid, self.fetch_parcel, self.fetch_pc, self.rs1_index,
+                     self.rs1_value, self.dispatch_accept, self.retire_valid,
+                     self.retire_lineage, self.retire_original_parcel,
+                     self.retire_canonical_instruction, self.retire_original_length_bytes]:
+            if port.direction != "in":
+                return "HWIR-E-PARCEL-FRONTEND-INPUT: fetch, read, dispatch, and retire ports must be inputs"
+        for port in [self.fetch_ready, self.dispatch_valid, self.dispatch_lineage,
+                     self.protocol_fault, self.original_parcel,
+                     self.canonical_instruction, self.original_length_bytes,
+                     self.legal, self.next_pc, self.redirect_valid,
+                     self.redirect_target]:
+            if port.direction != "out":
+                return "HWIR-E-PARCEL-FRONTEND-OUTPUT: ready, dispatch, fault, and predecode ports must be outputs"
+        val pa = self.config.physical_address_bits
+        if self.fetch_valid.bit_width != 1 or self.fetch_parcel.bit_width != 16 or
+            self.fetch_pc.bit_width != pa or self.rs1_index.bit_width != 5 or
+            self.rs1_value.bit_width != self.config.xlen or self.dispatch_accept.bit_width != 1 or
+            self.retire_valid.bit_width != 1 or self.retire_lineage.bit_width != 64 or
+            self.retire_original_parcel.bit_width != 16 or self.retire_canonical_instruction.bit_width != 32 or
+            self.retire_original_length_bytes.bit_width != 2:
+            return "HWIR-E-PARCEL-FRONTEND-INPUT-WIDTH: stateful frontend input widths do not match its concrete product configuration"
+        if self.fetch_ready.bit_width != 1 or self.dispatch_valid.bit_width != 1 or
+            self.dispatch_lineage.bit_width != 64 or self.protocol_fault.bit_width != 1 or
+            self.original_parcel.bit_width != 16 or self.canonical_instruction.bit_width != 32 or
+            self.original_length_bytes.bit_width != 2 or self.legal.bit_width != 1 or
+            self.next_pc.bit_width != pa or self.redirect_valid.bit_width != 1 or
+            self.redirect_target.bit_width != pa:
+            return "HWIR-E-PARCEL-FRONTEND-OUTPUT-WIDTH: stateful frontend output widths do not match its concrete product configuration"
+        ""
+
+pub fn strict_riscv_parcel_frontend_interface(config: CoreConfig) -> Result<HwParcelFrontendInterface, text>:
+    val frontend = HwParcelFrontendInterface(
+        node_id: HwNodeId.module_root("riscv_gen2_parcel_frontend"), config: config,
+        clk: HwPort.input("clk", "Bits", 1), rst: HwPort.input("rst", "Bits", 1),
+        fetch_valid: HwPort.input("fetch_valid", "Bits", 1),
+        fetch_parcel: HwPort.input("fetch_parcel", "Bits", 16),
+        fetch_pc: HwPort.input("fetch_pc", "Bits", config.physical_address_bits),
+        rs1_index: HwPort.input("rs1_index", "Bits", 5),
+        rs1_value: HwPort.input("rs1_value", "Bits", config.xlen),
+        dispatch_accept: HwPort.input("dispatch_accept", "Bits", 1),
+        retire_valid: HwPort.input("retire_valid", "Bits", 1),
+        retire_lineage: HwPort.input("retire_lineage", "Bits", 64),
+        retire_original_parcel: HwPort.input("retire_original_parcel", "Bits", 16),
+        retire_canonical_instruction: HwPort.input("retire_canonical_instruction", "Bits", 32),
+        retire_original_length_bytes: HwPort.input("retire_original_length_bytes", "Bits", 2),
+        fetch_ready: HwPort.output("fetch_ready", "Bits", 1),
+        dispatch_valid: HwPort.output("dispatch_valid", "Bits", 1),
+        dispatch_lineage: HwPort.output("dispatch_lineage", "Bits", 64),
+        protocol_fault: HwPort.output("protocol_fault", "Bits", 1),
+        original_parcel: HwPort.output("original_parcel", "Bits", 16),
+        canonical_instruction: HwPort.output("canonical_instruction", "Bits", 32),
+        original_length_bytes: HwPort.output("original_length_bytes", "Bits", 2),
+        legal: HwPort.output("legal", "Bits", 1),
+        next_pc: HwPort.output("next_pc", "Bits", config.physical_address_bits),
+        redirect_valid: HwPort.output("redirect_valid", "Bits", 1),
+        redirect_target: HwPort.output("redirect_target", "Bits", config.physical_address_bits)
+    )
+    val diagnostic = frontend.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(frontend)
+
+class HwParcelFrontendDef:
+    summary_name: text
+    config: CoreConfig
+    node_id: HwNodeId
+    origins: [HwOrigin]
+    frontend_contract: HwParcelFrontendInterface
+    sequential: HwSequentialPlan
+    decoder_entity: text
+
+    me shape_diagnostic() -> text:
+        if not hwir_vhdl_identifier(self.summary_name) or not self.node_id.is_valid() or not hwir_vhdl_identifier(self.decoder_entity):
+            return "HWIR-E-PARCEL-FRONTEND-MODULE: stateful frontend requires stable module and decoder identities"
+        val interface_error = self.frontend_contract.shape_diagnostic()
+        if interface_error != "":
+            return interface_error
+        if self.config.profile != self.frontend_contract.config.profile or self.config.isa_profile != self.frontend_contract.config.isa_profile or
+            self.config.compressed_decode_profile != self.frontend_contract.config.compressed_decode_profile or
+            self.config.xlen != self.frontend_contract.config.xlen or self.config.register_count != self.frontend_contract.config.register_count or
+            self.config.physical_address_bits != self.frontend_contract.config.physical_address_bits:
+            return "HWIR-E-PARCEL-FRONTEND-CONFIG: frontend module and interface must use one concrete product configuration"
+        val expected_decoder = strict_parcel_frontend_decoder_entity(self.config)
+        if expected_decoder.is_err() or self.decoder_entity != expected_decoder.ok().unwrap():
+            return "HWIR-E-PARCEL-FRONTEND-DECODER: frontend decoder identity must match the concrete critical product"
+        val sequential_error = self.sequential.diagnostic_for_ports(self.frontend_contract.ports())
+        if sequential_error != "":
+            return sequential_error
+        if not strict_parcel_has_exact_sequential_template(self.sequential, self.summary_name, self.config, false):
+            return "HWIR-E-PARCEL-FRONTEND-SEQUENTIAL-TEMPLATE: frontend sequential plan must exactly match the selected fixed critical product"
+        if not strict_parcel_has_expected_decoder_pins(self.sequential, self.config, false):
+            return "HWIR-E-PARCEL-FRONTEND-DECODER-PINS: frontend decoder pins must exactly match the selected concrete decoder"
+        if self.sequential.registers.len() != 8:
+            return "HWIR-E-PARCEL-FRONTEND-STATE: one-entry frontend requires exactly eight explicit state registers"
+        var names: [text] = []
+        for register in self.sequential.registers:
+            if not register.is_valid() or names.contains(register.name):
+                return "HWIR-E-PARCEL-FRONTEND-STATE: frontend state registers must be unique and valid"
+            names.push(register.name)
+        if not names.contains("valid_reg") or not names.contains("issued_reg") or
+            not names.contains("lineage_reg") or not names.contains("fault_reg") or
+            not names.contains("parcel_reg") or not names.contains("pc_reg") or
+            not names.contains("rs1_index_reg") or not names.contains("rs1_value_reg"):
+            return "HWIR-E-PARCEL-FRONTEND-STATE: required frontend state registers are missing"
+        for register in self.sequential.registers:
+            if (register.name == "valid_reg" or register.name == "issued_reg" or
+                register.name == "fault_reg") and register.bit_width != 1:
+                return "HWIR-E-PARCEL-FRONTEND-STATE-WIDTH: control registers must be one bit"
+            if register.name == "lineage_reg" and register.bit_width != 64:
+                return "HWIR-E-PARCEL-FRONTEND-STATE-WIDTH: lineage register must be a 64-bit transaction counter"
+            if register.name == "parcel_reg" and register.bit_width != 16:
+                return "HWIR-E-PARCEL-FRONTEND-STATE-WIDTH: parcel register must be 16 bits"
+            if register.name == "pc_reg" and register.bit_width != self.config.physical_address_bits:
+                return "HWIR-E-PARCEL-FRONTEND-STATE-WIDTH: PC register must use concrete physical-address width"
+            if register.name == "rs1_index_reg" and register.bit_width != 5:
+                return "HWIR-E-PARCEL-FRONTEND-STATE-WIDTH: register-index state must be five bits"
+            if register.name == "rs1_value_reg" and register.bit_width != self.config.xlen:
+                return "HWIR-E-PARCEL-FRONTEND-STATE-WIDTH: register-value state must use concrete XLEN"
+        if self.origins.len() < 2:
+            return "HWIR-E-PARCEL-FRONTEND-ORIGIN: stateful frontend requires state and decoder origins"
+        ""
+
+pub fn strict_zca_single_outstanding_frontend_hwir(module_name: text, config: CoreConfig) -> Result<HwParcelFrontendDef, text>:
+    if module_name == "":
+        return Err("HWIR-E-PARCEL-FRONTEND-MODULE: stateful frontend requires a module name")
+    val frontend_contract = strict_riscv_parcel_frontend_interface(config)?
+    val decoder_entity = strict_parcel_frontend_decoder_entity(config)?
+    val frontend = HwParcelFrontendDef(
+        summary_name: module_name, config: config,
+        node_id: HwNodeId.module_root(module_name), frontend_contract: frontend_contract,
+        origins: [HwOrigin(node_id: HwNodeId.child(module_name, "state"), source_name: "riscv.gen2.parcel_frontend.state"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "decode"), source_name: "riscv.gen2.migrating_predecode")],
+        sequential: strict_parcel_sequential_plan(module_name, config, false),
+        decoder_entity: decoder_entity
+    )
+    val diagnostic = frontend.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(frontend)
+
+class HwTrapParcelFrontendInterface:
+    """Versioned one-entry frontend interface retaining a precise trap effect.
+
+    Trap metadata is combinationally decoded from the captured parcel/register
+    state, so it remains stable from dispatch until the matching retirement.
+    The v1 frontend type remains unchanged and cannot accidentally expose this
+    extended port surface.
+    """
+    node_id: HwNodeId
+    config: CoreConfig
+    clk: HwPort
+    rst: HwPort
+    fetch_valid: HwPort
+    fetch_parcel: HwPort
+    fetch_pc: HwPort
+    rs1_index: HwPort
+    rs1_value: HwPort
+    dispatch_accept: HwPort
+    retire_valid: HwPort
+    retire_lineage: HwPort
+    retire_original_parcel: HwPort
+    retire_canonical_instruction: HwPort
+    retire_original_length_bytes: HwPort
+    fetch_ready: HwPort
+    dispatch_valid: HwPort
+    dispatch_lineage: HwPort
+    protocol_fault: HwPort
+    original_parcel: HwPort
+    canonical_instruction: HwPort
+    original_length_bytes: HwPort
+    legal: HwPort
+    next_pc: HwPort
+    redirect_valid: HwPort
+    redirect_target: HwPort
+    trap_valid: HwPort
+    trap_cause: HwPort
+    trap_tval: HwPort
+
+    me ports() -> [HwPort]:
+        [self.clk, self.rst, self.fetch_valid, self.fetch_parcel, self.fetch_pc,
+            self.rs1_index, self.rs1_value, self.dispatch_accept, self.retire_valid,
+            self.retire_lineage, self.retire_original_parcel,
+            self.retire_canonical_instruction, self.retire_original_length_bytes,
+            self.fetch_ready, self.dispatch_valid,
+            self.dispatch_lineage, self.protocol_fault, self.original_parcel,
+            self.canonical_instruction, self.original_length_bytes, self.legal,
+            self.next_pc, self.redirect_valid, self.redirect_target,
+            self.trap_valid, self.trap_cause, self.trap_tval]
+
+    me shape_diagnostic() -> text:
+        val config_error = self.config.diagnostic()
+        if config_error != "":
+            return config_error
+        if self.config.compressed_decode_profile != "zca-common-critical":
+            return "HWIR-E-TRAP-PARCEL-FRONTEND-PROFILE: trap parcel frontend requires zca-common-critical profile"
+        if not self.node_id.is_valid():
+            return "HWIR-E-TRAP-PARCEL-FRONTEND-ID: trap parcel frontend requires a stable node ID"
+        var names: [text] = []
+        for port in self.ports():
+            if not hwir_vhdl_identifier(port.name) or port.type_name != "Bits" or port.bit_width < 1 or port.clock_domain != "default":
+                return "HWIR-E-TRAP-PARCEL-FRONTEND-PORT: all trap frontend ports require default-domain Bits types and positive widths"
+            if names.contains(port.name):
+                return "HWIR-E-TRAP-PARCEL-FRONTEND-DUPLICATE-PORT: trap frontend port names must be unique"
+            names.push(port.name)
+        if self.clk.direction != "in" or self.rst.direction != "in" or self.clk.bit_width != 1 or self.rst.bit_width != 1:
+            return "HWIR-E-TRAP-PARCEL-FRONTEND-CLOCK: trap frontend requires one-bit clk and synchronous active-high rst inputs"
+        for port in [self.fetch_valid, self.fetch_parcel, self.fetch_pc, self.rs1_index,
+                     self.rs1_value, self.dispatch_accept, self.retire_valid, self.retire_lineage,
+                     self.retire_original_parcel, self.retire_canonical_instruction,
+                     self.retire_original_length_bytes]:
+            if port.direction != "in":
+                return "HWIR-E-TRAP-PARCEL-FRONTEND-INPUT: fetch, read, dispatch, and retire ports must be inputs"
+        for port in [self.fetch_ready, self.dispatch_valid, self.dispatch_lineage,
+                     self.protocol_fault, self.original_parcel, self.canonical_instruction,
+                     self.original_length_bytes, self.legal, self.next_pc,
+                     self.redirect_valid, self.redirect_target, self.trap_valid,
+                     self.trap_cause, self.trap_tval]:
+            if port.direction != "out":
+                return "HWIR-E-TRAP-PARCEL-FRONTEND-OUTPUT: frontend state, predecode, and trap ports must be outputs"
+        val pa = self.config.physical_address_bits
+        if self.fetch_valid.bit_width != 1 or self.fetch_parcel.bit_width != 16 or
+            self.fetch_pc.bit_width != pa or self.rs1_index.bit_width != 5 or
+            self.rs1_value.bit_width != self.config.xlen or self.dispatch_accept.bit_width != 1 or
+            self.retire_valid.bit_width != 1 or self.retire_lineage.bit_width != 64 or
+            self.retire_original_parcel.bit_width != 16 or self.retire_canonical_instruction.bit_width != 32 or
+            self.retire_original_length_bytes.bit_width != 2:
+            return "HWIR-E-TRAP-PARCEL-FRONTEND-INPUT-WIDTH: trap frontend input widths do not match its concrete product configuration"
+        if self.fetch_ready.bit_width != 1 or self.dispatch_valid.bit_width != 1 or
+            self.dispatch_lineage.bit_width != 64 or self.protocol_fault.bit_width != 1 or
+            self.original_parcel.bit_width != 16 or self.canonical_instruction.bit_width != 32 or
+            self.original_length_bytes.bit_width != 2 or self.legal.bit_width != 1 or
+            self.next_pc.bit_width != pa or self.redirect_valid.bit_width != 1 or
+            self.redirect_target.bit_width != pa or self.trap_valid.bit_width != 1 or
+            self.trap_cause.bit_width != self.config.xlen or self.trap_tval.bit_width != self.config.xlen:
+            return "HWIR-E-TRAP-PARCEL-FRONTEND-OUTPUT-WIDTH: trap frontend output widths do not match its concrete product configuration"
+        ""
+
+pub fn strict_riscv_trap_parcel_frontend_interface(config: CoreConfig) -> Result<HwTrapParcelFrontendInterface, text>:
+    val frontend = HwTrapParcelFrontendInterface(
+        node_id: HwNodeId.module_root("riscv_gen2_trap_parcel_frontend"), config: config,
+        clk: HwPort.input("clk", "Bits", 1), rst: HwPort.input("rst", "Bits", 1),
+        fetch_valid: HwPort.input("fetch_valid", "Bits", 1),
+        fetch_parcel: HwPort.input("fetch_parcel", "Bits", 16),
+        fetch_pc: HwPort.input("fetch_pc", "Bits", config.physical_address_bits),
+        rs1_index: HwPort.input("rs1_index", "Bits", 5),
+        rs1_value: HwPort.input("rs1_value", "Bits", config.xlen),
+        dispatch_accept: HwPort.input("dispatch_accept", "Bits", 1),
+        retire_valid: HwPort.input("retire_valid", "Bits", 1),
+        retire_lineage: HwPort.input("retire_lineage", "Bits", 64),
+        retire_original_parcel: HwPort.input("retire_original_parcel", "Bits", 16),
+        retire_canonical_instruction: HwPort.input("retire_canonical_instruction", "Bits", 32),
+        retire_original_length_bytes: HwPort.input("retire_original_length_bytes", "Bits", 2),
+        fetch_ready: HwPort.output("fetch_ready", "Bits", 1),
+        dispatch_valid: HwPort.output("dispatch_valid", "Bits", 1),
+        dispatch_lineage: HwPort.output("dispatch_lineage", "Bits", 64),
+        protocol_fault: HwPort.output("protocol_fault", "Bits", 1),
+        original_parcel: HwPort.output("original_parcel", "Bits", 16),
+        canonical_instruction: HwPort.output("canonical_instruction", "Bits", 32),
+        original_length_bytes: HwPort.output("original_length_bytes", "Bits", 2),
+        legal: HwPort.output("legal", "Bits", 1),
+        next_pc: HwPort.output("next_pc", "Bits", config.physical_address_bits),
+        redirect_valid: HwPort.output("redirect_valid", "Bits", 1),
+        redirect_target: HwPort.output("redirect_target", "Bits", config.physical_address_bits),
+        trap_valid: HwPort.output("trap_valid", "Bits", 1),
+        trap_cause: HwPort.output("trap_cause", "Bits", config.xlen),
+        trap_tval: HwPort.output("trap_tval", "Bits", config.xlen)
+    )
+    val diagnostic = frontend.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(frontend)
+
+class HwTrapParcelFrontendDef:
+    summary_name: text
+    config: CoreConfig
+    node_id: HwNodeId
+    origins: [HwOrigin]
+    frontend_contract: HwTrapParcelFrontendInterface
+    sequential: HwSequentialPlan
+    decoder_entity: text
+
+    me shape_diagnostic() -> text:
+        if not hwir_vhdl_identifier(self.summary_name) or not self.node_id.is_valid() or not hwir_vhdl_identifier(self.decoder_entity):
+            return "HWIR-E-TRAP-PARCEL-FRONTEND-MODULE: trap frontend requires stable module and decoder identities"
+        val interface_error = self.frontend_contract.shape_diagnostic()
+        if interface_error != "":
+            return interface_error
+        if self.config.profile != self.frontend_contract.config.profile or self.config.isa_profile != self.frontend_contract.config.isa_profile or
+            self.config.compressed_decode_profile != self.frontend_contract.config.compressed_decode_profile or
+            self.config.xlen != self.frontend_contract.config.xlen or self.config.register_count != self.frontend_contract.config.register_count or
+            self.config.physical_address_bits != self.frontend_contract.config.physical_address_bits:
+            return "HWIR-E-TRAP-PARCEL-FRONTEND-CONFIG: trap frontend and interface must use one concrete product configuration"
+        val expected_decoder = if self.config.xlen == 32:
+            "riscv_gen2_zca_trap_migrating_predecode_rv32"
+        else:
+            "riscv_gen2_zca_trap_migrating_predecode_rv64"
+        if self.decoder_entity != expected_decoder:
+            return "HWIR-E-TRAP-PARCEL-FRONTEND-DECODER: trap frontend decoder identity must match the concrete critical product"
+        val sequential_error = self.sequential.diagnostic_for_ports(self.frontend_contract.ports())
+        if sequential_error != "":
+            return sequential_error
+        if not strict_parcel_has_exact_sequential_template(self.sequential, self.summary_name, self.config, true):
+            return "HWIR-E-TRAP-PARCEL-FRONTEND-SEQUENTIAL-TEMPLATE: trap frontend sequential plan must exactly match the selected fixed critical product"
+        if not strict_parcel_has_expected_decoder_pins(self.sequential, self.config, true):
+            return "HWIR-E-TRAP-PARCEL-FRONTEND-DECODER-PINS: trap frontend decoder pins must exactly match the selected concrete decoder"
+        if self.sequential.registers.len() != 8:
+            return "HWIR-E-TRAP-PARCEL-FRONTEND-STATE: one-entry trap frontend requires exactly eight explicit state registers"
+        var names: [text] = []
+        for register in self.sequential.registers:
+            if not register.is_valid() or names.contains(register.name):
+                return "HWIR-E-TRAP-PARCEL-FRONTEND-STATE: trap frontend state registers must be unique and valid"
+            names.push(register.name)
+        if not names.contains("valid_reg") or not names.contains("issued_reg") or
+            not names.contains("lineage_reg") or not names.contains("fault_reg") or
+            not names.contains("parcel_reg") or not names.contains("pc_reg") or
+            not names.contains("rs1_index_reg") or not names.contains("rs1_value_reg"):
+            return "HWIR-E-TRAP-PARCEL-FRONTEND-STATE: required trap frontend state registers are missing"
+        for register in self.sequential.registers:
+            if (register.name == "valid_reg" or register.name == "issued_reg" or
+                register.name == "fault_reg") and register.bit_width != 1:
+                return "HWIR-E-TRAP-PARCEL-FRONTEND-STATE-WIDTH: trap control registers must be one bit"
+            if register.name == "lineage_reg" and register.bit_width != 64:
+                return "HWIR-E-TRAP-PARCEL-FRONTEND-STATE-WIDTH: trap lineage register must be a 64-bit transaction counter"
+            if register.name == "parcel_reg" and register.bit_width != 16:
+                return "HWIR-E-TRAP-PARCEL-FRONTEND-STATE-WIDTH: parcel register must be 16 bits"
+            if register.name == "pc_reg" and register.bit_width != self.config.physical_address_bits:
+                return "HWIR-E-TRAP-PARCEL-FRONTEND-STATE-WIDTH: PC register must use concrete physical-address width"
+            if register.name == "rs1_index_reg" and register.bit_width != 5:
+                return "HWIR-E-TRAP-PARCEL-FRONTEND-STATE-WIDTH: register-index state must be five bits"
+            if register.name == "rs1_value_reg" and register.bit_width != self.config.xlen:
+                return "HWIR-E-TRAP-PARCEL-FRONTEND-STATE-WIDTH: register-value state must use concrete XLEN"
+        if self.origins.len() < 3:
+            return "HWIR-E-TRAP-PARCEL-FRONTEND-ORIGIN: trap frontend requires state, decoder, and trap origins"
+        ""
+
+pub fn strict_zca_trap_single_outstanding_frontend_hwir(module_name: text, config: CoreConfig) -> Result<HwTrapParcelFrontendDef, text>:
+    if module_name == "":
+        return Err("HWIR-E-TRAP-PARCEL-FRONTEND-MODULE: trap frontend requires a module name")
+    val frontend_contract = strict_riscv_trap_parcel_frontend_interface(config)?
+    val decoder_entity = if config.xlen == 32:
+        "riscv_gen2_zca_trap_migrating_predecode_rv32"
+    else:
+        "riscv_gen2_zca_trap_migrating_predecode_rv64"
+    val frontend = HwTrapParcelFrontendDef(
+        summary_name: module_name, config: config,
+        node_id: HwNodeId.module_root(module_name), frontend_contract: frontend_contract,
+        origins: [HwOrigin(node_id: HwNodeId.child(module_name, "state"), source_name: "riscv.gen2.trap_parcel_frontend.state"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "decode"), source_name: "riscv.gen2.trap_migrating_predecode"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "trap"), source_name: "zca.c.ebreak.trap")],
+        sequential: strict_parcel_sequential_plan(module_name, config, true),
+        decoder_entity: decoder_entity
+    )
+    val diagnostic = frontend.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(frontend)

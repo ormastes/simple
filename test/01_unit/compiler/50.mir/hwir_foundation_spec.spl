@@ -1,0 +1,632 @@
+# RISC-V Gen2 strict HWIR foundation unit tests.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp, HwSignal, HwCostModel, hwir_hash_fields}
+use compiler.mir.hwir.mir_to_hwir.{HwirLowerInput, lower_strict_hwir_and_module}
+use compiler.mir.hwir.zca_rows.{strict_zca_cebreak_row_hwir, strict_zca_addi4spn_row_hwir, strict_zca_lw_row_hwir, strict_zca_sw_row_hwir, strict_zca_lwsp_row_hwir, strict_zca_swsp_row_hwir, strict_zca_slli_low_row_hwir, strict_zca_srli_low_row_hwir, strict_zca_srai_low_row_hwir, strict_zca_candi_row_hwir, strict_zca_csub_row_hwir, strict_zca_cxor_row_hwir, strict_zca_cor_row_hwir, strict_zca_cand_row_hwir, strict_zca_cjr_row_hwir, strict_zca_cmv_row_hwir, strict_zca_cjalr_row_hwir, strict_zca_cadd_row_hwir, strict_zca_cli_row_hwir}
+use compiler.mir.hwir.stateful_frontend.{strict_zca_single_outstanding_frontend_hwir}
+use compiler.backend.backend.hwir_to_vhdl.{render_strict_hwir_vhdl, compile_strict_zca_single_outstanding_frontend_product, compile_strict_zca_trap_single_outstanding_frontend_product}
+
+fn check(condition: bool):
+    expect condition == true
+
+fn strict_rv32_result():
+    lower_strict_hwir_and_module(HwirLowerInput.hardware("gen2_and", 2, 1, 0, 0), CoreConfig.rv32())
+
+fn casefold_collision_module() -> HwModuleDef:
+    val summary = HwModule(name: "casefold_collision", profile: "rv32", port_count: 2,
+        signal_count: 0, register_count: 0, memory_count: 0, comb_op_count: 1,
+        clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    HwModuleDef(summary: summary, config: CoreConfig.rv32(),
+        node_id: HwNodeId.module_root("casefold_collision"),
+        origins: [HwOrigin(node_id: HwNodeId.child("casefold_collision", "source"), source_name: "test.casefold")],
+        ports: [HwPort.input("parcel", "Bits", 1), HwPort.output("result", "Bits", 1)],
+        signals: [], constants: [HwConstant.bits("zero", 1, 0)],
+        comb_ops: [HwCombOp.unary("passthrough", "result", "zero", 1)],
+        compare_ops: [], select_ops: [], clock_domains: [HwClockDomain.default_domain()])
+
+describe "RISC-V Gen2 strict HWIR foundation":
+    it "REQ-G2-001 constructs stable typed origins and concrete ports":
+        val result = strict_rv32_result()
+        check(result.is_success())
+        if val module = result.module:
+            expect(module.node_id.value).to_equal("gen2_and:module")
+            expect(module.origins[0].node_id.value).to_equal("gen2_and:and")
+            expect(module.ports.len()).to_equal(3)
+            expect(module.shape_diagnostic()).to_equal("")
+        else:
+            expect(false).to_equal(true)
+
+    it "binds strict artifact provenance to the canonical typed graph":
+        val first = strict_rv32_result()
+        val second = strict_rv32_result()
+        if val first_module = first.module:
+            if val second_module = second.module:
+                expect(first_module.structural_sha256().len()).to_equal(64)
+                expect(first_module.structural_sha256()).to_equal(second_module.structural_sha256())
+                second_module.comb_ops[0].op = "or"
+                expect(first_module.structural_sha256() == second_module.structural_sha256()).to_equal(false)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "uses length-prefixed graph fields to prevent delimiter hash ambiguity":
+        expect(hwir_hash_fields(["origin", "a|b", "c"]) == hwir_hash_fields(["origin", "a", "b|c"])).to_equal(false)
+
+    it "binds delimiter-bearing origin lineage without graph-hash aliasing":
+        val first = strict_rv32_result()
+        val second = strict_rv32_result()
+        if val first_module = first.module:
+            if val second_module = second.module:
+                first_module.origins[0].node_id.value = "origin|part"
+                first_module.origins[0].source_name = "tail"
+                second_module.origins[0].node_id.value = "origin"
+                second_module.origins[0].source_name = "part|tail"
+                expect(first_module.shape_diagnostic()).to_equal("")
+                expect(second_module.shape_diagnostic()).to_equal("")
+                expect(first_module.structural_sha256() == second_module.structural_sha256()).to_equal(false)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-002 specializes RV32 and RV64 at elaboration time":
+        val rv32 = strict_rv32_result()
+        val rv64 = lower_strict_hwir_and_module(HwirLowerInput.hardware("gen2_and64", 2, 1, 0, 0), CoreConfig.rv64())
+        if val module32 = rv32.module:
+            expect(module32.ports[0].bit_width).to_equal(32)
+        else:
+            expect(false).to_equal(true)
+        if val module64 = rv64.module:
+            expect(module64.ports[0].bit_width).to_equal(64)
+            expect(module64.config.xlen).to_equal(64)
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-002 rejects invalid elaboration configuration":
+        val invalid = CoreConfig(xlen: 16, physical_address_bits: 0, register_count: 0,
+            profile: "", isa_profile: "", compressed_decode_profile: "")
+        val result = lower_strict_hwir_and_module(HwirLowerInput.hardware("bad", 2, 1, 0, 0), invalid)
+        expect(result.is_success()).to_equal(false)
+        expect(result.diagnostic).to_equal("HWIR-E-CONFIG-XLEN: strict RISC-V HWIR requires XLEN=32 or XLEN=64")
+
+    it "fails closed before a profile can escape strict VHDL provenance":
+        val injected = CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+            profile: "rv32\nend architecture;", isa_profile: "rv32i", compressed_decode_profile: "none")
+        val result = lower_strict_hwir_and_module(HwirLowerInput.hardware("unsafe_profile", 2, 1, 0, 0), injected)
+        expect(result.is_success()).to_equal(false)
+        expect(result.diagnostic).to_equal("HWIR-E-CONFIG-PROFILE: strict RISC-V HWIR requires safe concrete profile names")
+        expect(result.uses_legacy_fallback()).to_equal(false)
+
+    it "rejects VHDL reserved words before strict text emission":
+        val result = strict_rv32_result()
+        if val module = result.module:
+            module.summary.name = "entity"
+            expect(module.shape_diagnostic()).to_equal("HWIR-E-VHDL-IDENTIFIER: module name is not a stable VHDL identifier")
+        else:
+            expect(false).to_equal(true)
+
+    it "rejects VHDL reserved port names before strict text emission":
+        val result = strict_rv32_result()
+        if val module = result.module:
+            module.ports[0].name = "signal"
+            expect(module.shape_diagnostic()).to_equal("HWIR-E-PORT: ports must be unique typed Bits in an existing clock domain")
+        else:
+            expect(false).to_equal(true)
+
+    it "rejects case-only VHDL declaration collisions while preserving stored spellings":
+        val port_collision = casefold_collision_module()
+        port_collision.ports[1].name = "PARCEL"
+        expect(port_collision.shape_diagnostic()).to_equal("HWIR-E-PORT: ports must be unique typed Bits in an existing clock domain")
+
+        val signal_collision = casefold_collision_module()
+        signal_collision.summary.signal_count = 1
+        signal_collision.signals = [HwSignal.comb("PARCEL", "Bits", 1)]
+        expect(signal_collision.shape_diagnostic()).to_equal("HWIR-E-SIGNAL: signals must be unique positive-width Bits")
+
+        val constant_collision = casefold_collision_module()
+        constant_collision.constants[0].name = "PARCEL"
+        expect(constant_collision.shape_diagnostic()).to_equal("HWIR-E-CONSTANT: constants must be unique and positive-width")
+
+    it "selects compressed capability profiles at elaboration time":
+        val rv32 = CoreConfig.rv32_zca_integer()
+        val rv64 = CoreConfig.rv64_zca_integer()
+        val critical32 = CoreConfig.rv32_zca_mission_critical()
+        val critical64 = CoreConfig.rv64_zca_mission_critical()
+        expect(rv32.is_valid()).to_equal(true)
+        expect(rv64.is_valid()).to_equal(true)
+        expect(rv32.compressed_decode_profile).to_equal("zca-integer-rv32")
+        expect(rv64.compressed_decode_profile).to_equal("zca-integer-rv64")
+        expect(critical32.compressed_decode_profile).to_equal("zca-common-critical")
+        expect(critical64.compressed_decode_profile).to_equal("zca-common-critical")
+        val wrong = CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+            profile: "bad", isa_profile: "rv32i_zca",
+            compressed_decode_profile: "zca-integer-rv64")
+        expect(wrong.diagnostic()).to_equal("HWIR-E-CONFIG-COMPRESSED: RV64 compressed profile requires XLEN=64")
+        val mismatched_isa = CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+            profile: "bad", isa_profile: "rv64i", compressed_decode_profile: "none")
+        expect(mismatched_isa.diagnostic()).to_equal("HWIR-E-CONFIG-ISA: RV64 scalar ISA profile requires XLEN=64")
+        val unknown_isa = CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+            profile: "bad", isa_profile: "rv32imafdc", compressed_decode_profile: "none")
+        expect(unknown_isa.diagnostic()).to_equal("HWIR-E-CONFIG-ISA: unsupported strict scalar ISA profile")
+
+    it "uses one closed mapping for mission-critical product targets":
+        expect(CoreConfig.is_supported_critical_target("rv32-zca-critical")).to_equal(true)
+        expect(CoreConfig.is_supported_critical_target("rv64-zca-critical")).to_equal(true)
+        expect(CoreConfig.is_supported_critical_target("rv64-zca")).to_equal(false)
+        val resolved = CoreConfig.from_critical_target("rv32-zca-critical")
+        if val config = resolved.ok():
+            expect(config.xlen).to_equal(32)
+            expect(config.compressed_decode_profile).to_equal("zca-common-critical")
+        else:
+            expect(false).to_equal(true)
+        val rejected = CoreConfig.from_critical_target("rv128")
+        expect(rejected.is_err()).to_equal(true)
+
+    it "REQ-G2-003 rejects non-hardware and unsupported strict shapes without fallback":
+        val software = lower_strict_hwir_and_module(HwirLowerInput.software("software"), CoreConfig.rv32())
+        val wrong_shape = lower_strict_hwir_and_module(HwirLowerInput.hardware("wrong", 1, 1, 0, 0), CoreConfig.rv32())
+        expect(software.diagnostic).to_equal("HWIR-E-NOT-HARDWARE: strict lowering requires a hardware-tagged input")
+        expect(wrong_shape.diagnostic).to_equal("HWIR-E-STRICT-SHAPE: strict Gen2 bridge currently requires two inputs, one output, and no local state")
+        expect(software.uses_legacy_fallback()).to_equal(false)
+        expect(wrong_shape.uses_legacy_fallback()).to_equal(false)
+
+    it "REQ-G2-004 emits deterministic non-empty VHDL for the typed and module":
+        val lower = strict_rv32_result()
+        if val module = lower.module:
+            val first = render_strict_hwir_vhdl(module)
+            val second = render_strict_hwir_vhdl(module)
+            check(first.is_success())
+            expect(first.vhdl).to_equal(second.vhdl)
+            check(first.vhdl.contains("entity gen2_and is"))
+            check(first.vhdl.contains("in_a : in std_logic_vector(31 downto 0)"))
+            check(first.vhdl.contains("out <= in_a and in_b;"))
+            expect(first.uses_legacy_fallback()).to_equal(false)
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-004 rejects malformed typed modules before emission":
+        val summary = HwModule(name: "bad_port", profile: "rv32", port_count: 1, signal_count: 0, register_count: 0, memory_count: 0, comb_op_count: 0, clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+        val malformed = HwModuleDef(summary: summary, config: CoreConfig.rv32(), node_id: HwNodeId.module_root("bad_port"), origins: [HwOrigin(node_id: HwNodeId.child("bad_port", "root"), source_name: "bad_port")], ports: [HwPort.input("", "Bits", 0)], signals: [], constants: [], comb_ops: [], compare_ops: [], select_ops: [], clock_domains: [HwClockDomain.default_domain()])
+        val emitted = render_strict_hwir_vhdl(malformed)
+        expect(emitted.is_success()).to_equal(false)
+        expect(emitted.diagnostic).to_equal("HWIR-E-PORT: ports must be unique typed Bits in an existing clock domain")
+
+    it "fails closed when a stateful product leaves a public output unbound":
+        val built = strict_zca_single_outstanding_frontend_hwir("strict_stateful_unbound", CoreConfig.rv32_zca_mission_critical())
+        if val frontend = built.ok():
+            var retained = []
+            for output in frontend.sequential.outputs:
+                if output.result != "protocol_fault":
+                    retained.push(output)
+            frontend.sequential.outputs = retained
+            expect(frontend.shape_diagnostic()).to_equal("HWIR-E-SEQUENTIAL-OUTPUT: every public output requires exactly one typed binding")
+        else:
+            expect(false).to_equal(true)
+
+    it "emits stable sequential HWIR lineage anchors with the stateful product":
+        val emitted = compile_strict_zca_single_outstanding_frontend_product(CoreConfig.rv32_zca_mission_critical())
+        expect(emitted.is_success()).to_equal(true)
+        expect(emitted.vhdl.contains("graph=" + emitted.hwir_graph_sha256)).to_equal(true)
+        expect(emitted.vhdl.contains("-- simple-hwir node=riscv_gen2_zca_single_outstanding_frontend_rv32:sequential:register:valid_reg")).to_equal(true)
+        expect(emitted.vhdl.contains("-- simple-hwir node=riscv_gen2_zca_single_outstanding_frontend_rv32:sequential:rule:retire_match")).to_equal(true)
+        expect(emitted.vhdl.contains("-- simple-hwir node=riscv_gen2_zca_single_outstanding_frontend_rv32:sequential:output:dispatch_valid")).to_equal(true)
+
+    it "fails closed when the fixed frontend decoder pin map is altered":
+        val built = strict_zca_single_outstanding_frontend_hwir("strict_stateful_pins", CoreConfig.rv64_zca_mission_critical())
+        if val frontend = built.ok():
+            frontend.sequential.decoder_pins[0].signal_name = "fetch_parcel"
+            expect(frontend.shape_diagnostic()).to_equal("HWIR-E-PARCEL-FRONTEND-DECODER-PINS: frontend decoder pins must exactly match the selected concrete decoder")
+        else:
+            expect(false).to_equal(true)
+
+    it "rejects line-control injection through sequential provenance IDs":
+        val built = strict_zca_single_outstanding_frontend_hwir("strict_stateful_id", CoreConfig.rv32_zca_mission_critical())
+        if val frontend = built.ok():
+            frontend.sequential.owner_id.value = "safe:sequential\nunsafe"
+            expect(frontend.shape_diagnostic()).to_equal("HWIR-E-SEQUENTIAL-ID: sequential plan requires a stable owner node ID")
+        else:
+            expect(false).to_equal(true)
+
+    it "rejects serializer-unsafe identifiers before strict VHDL emission":
+        val summary = HwModule(name: "bad-module", profile: "rv32", port_count: 0,
+            signal_count: 0, register_count: 0, memory_count: 0, comb_op_count: 0,
+            clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+        val malformed = HwModuleDef(summary: summary, config: CoreConfig.rv32(),
+            node_id: HwNodeId.module_root("bad-module"),
+            origins: [HwOrigin(node_id: HwNodeId.child("bad-module", "root"), source_name: "bad_module")],
+            ports: [], signals: [], constants: [], comb_ops: [], compare_ops: [], select_ops: [],
+            clock_domains: [HwClockDomain.default_domain()])
+        expect(render_strict_hwir_vhdl(malformed).diagnostic).to_equal("HWIR-E-MODULE-SUMMARY: module summary requires a concrete matching profile")
+
+    it "represents a typed fixed-width mask constant without VHDL text operands":
+        val summary = HwModule(name: "parcel_mask", profile: "rv32", port_count: 2,
+            signal_count: 0, register_count: 0, memory_count: 0, comb_op_count: 1,
+            clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+        val module = HwModuleDef(summary: summary, config: CoreConfig.rv32_zca_integer(),
+            node_id: HwNodeId.module_root("parcel_mask"),
+            origins: [HwOrigin(node_id: HwNodeId.child("parcel_mask", "mask"), source_name: "parcel_mask")],
+            ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("masked", "Bits", 32)],
+            signals: [], constants: [HwConstant.bits("parcel_mask_bits", 32, 65535)],
+            comb_ops: [HwCombOp.binary("and", "masked", "parcel", "parcel_mask_bits", 32)],
+            compare_ops: [], select_ops: [],
+            clock_domains: [HwClockDomain.default_domain()])
+        expect(module.shape_diagnostic()).to_equal("")
+        val emitted = render_strict_hwir_vhdl(module)
+        expect(emitted.is_success()).to_equal(true)
+        expect(emitted.vhdl.contains("constant parcel_mask_bits : std_logic_vector(31 downto 0) := std_logic_vector(to_unsigned(65535, 32));")).to_equal(true)
+        expect(emitted.vhdl.contains("masked <= parcel and parcel_mask_bits;")).to_equal(true)
+
+    it "critical boundary rejects Zca semantic origins outside the critical profile":
+        val summary = HwModule(name: "bad_zca_profile", profile: "rv32", port_count: 0,
+            signal_count: 0, register_count: 0, memory_count: 0, comb_op_count: 0,
+            clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+        val module = HwModuleDef(summary: summary, config: CoreConfig.rv32(),
+            node_id: HwNodeId.module_root("bad_zca_profile"),
+            origins: [HwOrigin(node_id: HwNodeId.child("bad_zca_profile", "row"), source_name: "zca.c.li")],
+            ports: [], signals: [], constants: [], comb_ops: [], compare_ops: [], select_ops: [],
+            clock_domains: [HwClockDomain.default_domain()])
+        expect(module.shape_diagnostic()).to_equal("HWIR-E-COMPRESSED-PROFILE: zca semantic origins require zca-common-critical profile")
+
+    it "constructs the compiler-owned C.LI row only for a critical product":
+        val rejected = strict_zca_cli_row_hwir("strict_cli", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_cli_row_hwir("strict_cli", CoreConfig.rv32_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.li")
+            expect(module.summary.comb_op_count).to_equal(18)
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs the compiler-owned C.EBREAK row only for a critical product":
+        val rejected = strict_zca_cebreak_row_hwir("strict_cebreak", CoreConfig.rv64())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_cebreak_row_hwir("strict_cebreak", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.ebreak")
+            expect(module.config.xlen).to_equal(64)
+            expect(module.select_ops[0].when_true).to_equal("canonical_ebreak")
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs the compiler-owned C.ADDI4SPN row only for a critical product":
+        val rejected = strict_zca_addi4spn_row_hwir("strict_addi4spn", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_addi4spn_row_hwir("strict_addi4spn", CoreConfig.rv32_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.addi4spn")
+            expect(module.summary.comb_op_count).to_equal(29)
+            expect(module.select_ops[1].condition).to_equal("is_c_addi4spn")
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs the compiler-owned C.LW row only for a critical product":
+        val rejected = strict_zca_lw_row_hwir("strict_lw", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_lw_row_hwir("strict_lw", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.lw")
+            expect(module.config.xlen).to_equal(64)
+            expect(module.summary.comb_op_count).to_equal(28)
+            expect(module.select_ops[0].condition).to_equal("is_c_lw")
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs the compiler-owned C.SW row only for a critical product":
+        val rejected = strict_zca_sw_row_hwir("strict_sw", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_sw_row_hwir("strict_sw", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.sw")
+            expect(module.config.xlen).to_equal(64)
+            expect(module.summary.comb_op_count).to_equal(32)
+            expect(module.select_ops[0].condition).to_equal("is_c_sw")
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs the compiler-owned C.LWSP row only for a critical product":
+        val rejected = strict_zca_lwsp_row_hwir("strict_lwsp", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_lwsp_row_hwir("strict_lwsp", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.lwsp")
+            expect(module.config.xlen).to_equal(64)
+            expect(module.summary.comb_op_count).to_equal(26)
+            expect(module.select_ops[1].condition).to_equal("is_c_lwsp")
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs the compiler-owned C.SWSP row only for a critical product":
+        val rejected = strict_zca_swsp_row_hwir("strict_swsp", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_swsp_row_hwir("strict_swsp", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.swsp")
+            expect(module.config.xlen).to_equal(64)
+            expect(module.summary.comb_op_count).to_equal(23)
+            expect(module.select_ops[0].condition).to_equal("is_c_swsp")
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs the five-bit C.SLLI row only for a critical product":
+        val rejected = strict_zca_slli_low_row_hwir("strict_slli", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_slli_low_row_hwir("strict_slli", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.slli.low")
+            expect(module.summary.comb_op_count).to_equal(15)
+            expect(module.select_ops[0].condition).to_equal("is_c_slli_low")
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs the five-bit C.SRLI row only for a critical product":
+        val rejected = strict_zca_srli_low_row_hwir("strict_srli", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_srli_low_row_hwir("strict_srli", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.srli.low")
+            expect(module.summary.comb_op_count).to_equal(16)
+            expect(module.select_ops[0].condition).to_equal("is_c_srli_low")
+            expect(module.constants[1].value).to_equal(64515)
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs the five-bit C.SRAI row only for a critical product":
+        val rejected = strict_zca_srai_low_row_hwir("strict_srai", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_srai_low_row_hwir("strict_srai", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.srai.low")
+            expect(module.summary.comb_op_count).to_equal(17)
+            expect(module.select_ops[0].condition).to_equal("is_c_srai_low")
+            expect(module.constants[1].value).to_equal(64515)
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs signed-immediate C.ANDI only for a critical product":
+        val rejected = strict_zca_candi_row_hwir("strict_candi", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_candi_row_hwir("strict_candi", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.andi")
+            expect(module.summary.comb_op_count).to_equal(22)
+            expect(module.select_ops[1].condition).to_equal("is_c_andi")
+            expect(module.constants[1].value).to_equal(60419)
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs compact-register C.SUB only for a critical product":
+        val rejected = strict_zca_csub_row_hwir("strict_csub", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_csub_row_hwir("strict_csub", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.sub")
+            expect(module.summary.comb_op_count).to_equal(18)
+            expect(module.select_ops[0].condition).to_equal("is_c_sub")
+            expect(module.constants[1].value).to_equal(64611)
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs compact-register C.XOR through the same critical elaborator":
+        val rejected = strict_zca_cxor_row_hwir("strict_cxor", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_cxor_row_hwir("strict_cxor", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.xor")
+            expect(module.summary.comb_op_count).to_equal(18)
+            expect(module.select_ops[0].condition).to_equal("is_c_xor")
+            expect(module.constants[1].value).to_equal(64611)
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs compact-register C.OR through the same critical elaborator":
+        val rejected = strict_zca_cor_row_hwir("strict_cor", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_cor_row_hwir("strict_cor", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.or")
+            expect(module.summary.comb_op_count).to_equal(18)
+            expect(module.select_ops[0].condition).to_equal("is_c_or")
+            expect(module.constants[1].value).to_equal(64611)
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs compact-register C.AND through the same critical elaborator":
+        val rejected = strict_zca_cand_row_hwir("strict_cand", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_cand_row_hwir("strict_cand", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.and")
+            expect(module.summary.comb_op_count).to_equal(18)
+            expect(module.select_ops[0].condition).to_equal("is_c_and")
+            expect(module.constants[1].value).to_equal(64611)
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs C.JR with a reserved-register rejection path":
+        val rejected = strict_zca_cjr_row_hwir("strict_cjr", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_cjr_row_hwir("strict_cjr", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.jr")
+            expect(module.summary.comb_op_count).to_equal(10)
+            expect(module.select_ops[1].condition).to_equal("rd_is_zero")
+            expect(module.constants[1].value).to_equal(61567)
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs C.MV with hint normalization and C.JR exclusion":
+        val rejected = strict_zca_cmv_row_hwir("strict_cmv", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_cmv_row_hwir("strict_cmv", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.mv")
+            expect(module.summary.comb_op_count).to_equal(16)
+            expect(module.select_ops[1].condition).to_equal("rd_is_zero")
+            expect(module.select_ops[2].condition).to_equal("rs2_is_zero")
+            expect(module.constants[1].value).to_equal(61443)
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "constructs C.JALR with a reserved-register rejection path":
+        val rejected = strict_zca_cjalr_row_hwir("strict_cjalr", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val built = strict_zca_cjalr_row_hwir("strict_cjalr", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.origins[0].source_name).to_equal("zca.c.jalr")
+            expect(module.summary.comb_op_count).to_equal(11)
+            expect(module.select_ops[1].condition).to_equal("rd_is_zero")
+            expect(module.constants[1].value).to_equal(61567)
+            expect(render_strict_hwir_vhdl(module).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "specializes C.ADD x0 hint behavior before RTL emission":
+        val rejected = strict_zca_cadd_row_hwir("strict_cadd", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        val rv32 = strict_zca_cadd_row_hwir("strict_cadd32", CoreConfig.rv32_zca_mission_critical())
+        val rv64 = strict_zca_cadd_row_hwir("strict_cadd64", CoreConfig.rv64_zca_mission_critical())
+        if val module32 = rv32.ok():
+            expect(module32.shape_diagnostic()).to_equal("")
+            expect(module32.origins[0].source_name).to_equal("zca.c.add")
+            expect(module32.summary.comb_op_count).to_equal(18)
+            expect(module32.select_ops[1].condition).to_equal("rd_is_zero")
+            expect(render_strict_hwir_vhdl(module32).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+        if val module64 = rv64.ok():
+            expect(module64.shape_diagnostic()).to_equal("")
+            expect(module64.summary.comb_op_count).to_equal(16)
+            expect(module64.signals.len()).to_equal(15)
+            expect(render_strict_hwir_vhdl(module64).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "critical boundary rejects output operands and duplicate origin identities":
+        val lower = strict_rv32_result()
+        if val module = lower.module:
+            module.comb_ops = [HwCombOp.binary("and", "out", "out", "in_b", 32)]
+            expect(module.shape_diagnostic()).to_equal("HWIR-E-OP-OPERAND-DIRECTION: operation operands must be input ports")
+        else:
+            expect(false).to_equal(true)
+
+    it "critical boundary rejects a second combinational driver for one result":
+        val summary = HwModule(name: "duplicate_driver", profile: "rv32", port_count: 3,
+            signal_count: 1, register_count: 0, memory_count: 0, comb_op_count: 2,
+            clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+        val module = HwModuleDef(summary: summary, config: CoreConfig.rv32(),
+            node_id: HwNodeId.module_root("duplicate_driver"),
+            origins: [HwOrigin(node_id: HwNodeId.child("duplicate_driver", "root"), source_name: "duplicate_driver")],
+            ports: [HwPort.input("a", "Bits", 32), HwPort.input("b", "Bits", 32), HwPort.output("out", "Bits", 32)],
+            signals: [HwSignal(name: "shared", type_name: "Bits", bit_width: 32, driver_count: 2, source_id: "")],
+            constants: [],
+            comb_ops: [
+                HwCombOp.binary("and", "shared", "a", "b", 32),
+                HwCombOp.binary("or", "shared", "a", "b", 32)
+            ],
+            compare_ops: [], select_ops: [],
+            clock_domains: [HwClockDomain.default_domain()])
+        expect(module.shape_diagnostic()).to_equal("HWIR-E-MULTIPLE-DRIVER: each strict combinational result must have one driver")
+        val fresh = strict_rv32_result()
+        if val module = fresh.module:
+            module.origins = [HwOrigin(node_id: module.node_id, source_name: "duplicate")]
+            expect(module.shape_diagnostic()).to_equal("HWIR-E-DUPLICATE-ORIGIN: origin IDs must be distinct from the module and each other")
+        else:
+            expect(false).to_equal(true)
+
+    it "critical boundary rejects a non-bit predicate before select emission":
+        val summary = HwModule(name: "bad_select", profile: "rv32-zca-critical", port_count: 1,
+            signal_count: 0, register_count: 0, memory_count: 0, comb_op_count: 1,
+            clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+        val module = HwModuleDef(summary: summary, config: CoreConfig.rv32_zca_mission_critical(),
+            node_id: HwNodeId.module_root("bad_select"),
+            origins: [HwOrigin(node_id: HwNodeId.child("bad_select", "select"), source_name: "bad_select")],
+            ports: [HwPort.output("canonical_instruction", "Bits", 32)], signals: [],
+            constants: [
+                HwConstant.bits("wide_condition", 32, 1),
+                HwConstant.bits("when_true", 32, 1048691),
+                HwConstant.bits("when_false", 32, 0)
+            ],
+            comb_ops: [], compare_ops: [],
+            select_ops: [HwSelectOp.mux("canonical_instruction", "wide_condition", "when_true", "when_false", 32)],
+            clock_domains: [HwClockDomain.default_domain()])
+        expect(module.shape_diagnostic()).to_equal("HWIR-E-SELECT-CONDITION: select condition must be a readable one-bit value")
+        expect(render_strict_hwir_vhdl(module).is_success()).to_equal(false)
+
+    it "critical boundary rejects names that would need VHDL sanitization":
+        val lower = strict_rv32_result()
+        if val module = lower.module:
+            module.summary.name = "not a vhdl entity"
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(false)
+            expect(emitted.diagnostic).to_equal("HWIR-E-VHDL-IDENTIFIER: module name is not a stable VHDL identifier")
+        else:
+            expect(false).to_equal(true)
+
+    it "emits stateful products only from typed sequential HWIR plans":
+        val parcel = compile_strict_zca_single_outstanding_frontend_product(CoreConfig.rv32_zca_mission_critical())
+        val trap = compile_strict_zca_trap_single_outstanding_frontend_product(CoreConfig.rv64_zca_mission_critical())
+        expect(parcel.is_success()).to_equal(true)
+        expect(trap.is_success()).to_equal(true)
+        expect(parcel.route).to_equal("hwir-gen2-stateful-product")
+        expect(trap.route).to_equal("hwir-gen2-trap-stateful-product")
+        expect(parcel.hwir_graph_sha256.len()).to_equal(64)
+        expect(trap.hwir_graph_sha256.len()).to_equal(64)
+        expect(parcel.vhdl).to_contain("elsif retire_valid='1' and valid_reg='1' and issued_reg='1' and retire_lineage=lineage_reg and retire_original_parcel=parcel_reg and retire_canonical_instruction=decoder_canonical and retire_original_length_bytes=decoder_length and lineage_reg=(others=>'1') then valid_reg <= '0'; issued_reg <= '0'; fault_reg <= retire_valid;")
+        expect(parcel.vhdl).to_contain("elsif retire_valid='1' and valid_reg='1' and issued_reg='1' and retire_lineage=lineage_reg and retire_original_parcel=parcel_reg and retire_canonical_instruction=decoder_canonical and retire_original_length_bytes=decoder_length then")
+        expect(parcel.vhdl).to_contain("fetch_ready <= '1' when valid_reg='0' and fault_reg='0' else '0';")
+        expect(trap.vhdl).to_contain("trap_valid <= '1' when decoder_trap_valid='1' and valid_reg='1' and issued_reg='0' and fault_reg='0' else '0';")
+        expect(trap.vhdl).to_contain("canonical_instruction <= decoder_canonical when valid_reg='1' and issued_reg='0' and fault_reg='0' else (others=>'0')")
+        expect(parcel.uses_legacy_fallback()).to_equal(false)
+        expect(trap.uses_legacy_fallback()).to_equal(false)
+
+    it "rejects a sequential plan whose assignment width no longer matches state":
+        val built = strict_zca_single_outstanding_frontend_hwir("bad_state_plan", CoreConfig.rv32_zca_mission_critical())
+        if val frontend = built.ok():
+            frontend.sequential.rules[0].assignments[0].value.bit_width = 2
+            expect(frontend.shape_diagnostic()).to_equal("HWIR-E-SEQUENTIAL-ASSIGNMENT: sequential assignment value width must match its register")
+        else:
+            expect(false).to_equal(true)
+
+    it "rejects unsafe sequential identifiers before VHDL serialization":
+        val built = strict_zca_single_outstanding_frontend_hwir("bad_identifier_plan", CoreConfig.rv32_zca_mission_critical())
+        if val frontend = built.ok():
+            frontend.sequential.registers[0].name = "bad state"
+            expect(frontend.shape_diagnostic()).to_equal("HWIR-E-SEQUENTIAL-REGISTER: sequential registers must be unique and valid")
+        else:
+            expect(false).to_equal(true)

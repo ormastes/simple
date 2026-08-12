@@ -1,0 +1,90 @@
+use std.spec
+use std.io_runtime.{file_write, file_delete, file_exists}
+use compiler.common.driver_core_types.{CompileMode, compile_result_errors,
+    compile_result_is_success, driver_core_compile_options_default,
+    compileoptions_normalize_mir_optimization}
+use compiler.common.assurance.policy.{policy_from_env_value}
+use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_vhdl}
+
+# The source-route contract deliberately exercises CompilerDriver directly.
+# The public source facade has a legacy subset fallback and is therefore not a
+# valid oracle for critical Gen2 admission.
+
+fn strict_route_source_path() -> text:
+    "/tmp/simple-riscv-gen2-strict-route-contract.spl"
+
+fn strict_route_output_path(case_name: text) -> text:
+    "/tmp/simple-riscv-gen2-strict-route-" + case_name + ".vhd"
+
+fn strict_route_cleanup(output: text):
+    val _ = file_delete(output)
+    val _ = file_delete(output + ".map.json")
+    val _ = file_delete(output + ".gen.json")
+
+fn strict_route_driver(source: text, output: text, target: text):
+    var options = driver_core_compile_options_default()
+    options.input_files = [source]
+    options.mode = CompileMode.Aot
+    options.output_file = Some(output)
+    options.backend = "vhdl"
+    options.riscv_gen2_target = target
+    options = compileoptions_normalize_mir_optimization(options)
+    var driver = compiler_driver_create(options)
+    # Keep the test hermetic: critical admission is a context policy, not a
+    # process-global environment mutation that can race sibling specs.
+    driver.ctx.assurance_policy = policy_from_env_value("critical")
+    driver
+
+fn strict_route_errors(source: text, output: text, target: text) -> text:
+    val result = compiler_driver_run_vhdl(strict_route_driver(source, output, target))
+    expect(compile_result_is_success(result)).to_equal(false)
+    compile_result_errors(result).join("\n")
+
+fn strict_route_assert_no_artifact(output: text):
+    expect(file_exists(output)).to_equal(false)
+    expect(file_exists(output + ".map.json")).to_equal(false)
+    expect(file_exists(output + ".gen.json")).to_equal(false)
+
+fn strict_route_write_hardware_source() -> text:
+    val source = strict_route_source_path()
+    # Addition is valid frontend source but outside the deliberately closed
+    # first strict-HWIR instruction subset.  A critical route must reject it,
+    # rather than serialize it via legacy textual VHDL.
+    expect(file_write(source, """
+@hardware
+fn strict_route_unsupported_add(left: u32, right: u32) -> u32:
+    left + right
+""")).to_equal(true)
+    source
+
+describe "critical Gen2 source VHDL route":
+    it "requires an explicit critical target before legacy VHDL emission":
+        val source = strict_route_write_hardware_source()
+        val output = strict_route_output_path("missing-target")
+        strict_route_cleanup(output)
+        val errors = strict_route_errors(source, output, "")
+        expect(errors).to_contain("HWIR-E-CRITICAL-CONFIG")
+        strict_route_assert_no_artifact(output)
+        strict_route_cleanup(output)
+        val _ = file_delete(source)
+
+    it "rejects an unsupported target before any VHDL artifact exists":
+        val source = strict_route_write_hardware_source()
+        val output = strict_route_output_path("unsupported-target")
+        strict_route_cleanup(output)
+        val errors = strict_route_errors(source, output, "rv99")
+        expect(errors).to_contain("HWIR-E-CORE-CONFIG")
+        strict_route_assert_no_artifact(output)
+        strict_route_cleanup(output)
+        val _ = file_delete(source)
+
+    it "rejects unsupported strict HWIR source without falling back to legacy VHDL":
+        val source = strict_route_write_hardware_source()
+        val output = strict_route_output_path("unsupported-mir")
+        strict_route_cleanup(output)
+        val errors = strict_route_errors(source, output, "rv32")
+        expect(errors).to_contain("HWIR-E-CRITICAL-LOWER")
+        expect(errors).to_contain("HWIR-E-MIR-INSTRUCTION")
+        strict_route_assert_no_artifact(output)
+        strict_route_cleanup(output)
+        val _ = file_delete(source)

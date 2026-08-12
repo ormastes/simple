@@ -1,0 +1,373 @@
+# Typed compile-time hardware-aspect manifests for Gen2 HWIR.
+#
+# This is intentionally not a textual VHDL patch interface and not a runtime
+# loader. A later graph weaver consumes a validated plan before target
+# legalization; an empty plan contributes no ports, state, or logic.
+
+use compiler.mir.hwir.types.{HwCombOp, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, hwir_vhdl_identifier}
+use std.common.crypto.sha256.{sha256_text}
+
+fn hwir_aspect_hash_valid(content_hash: text) -> bool:
+    if content_hash.len() != 64:
+        return false
+    val hex = "0123456789abcdef"
+    var index = 0
+    while index < content_hash.len():
+        if not hex.contains(content_hash[index:index + 1]):
+            return false
+        index = index + 1
+    true
+
+fn hwir_aspect_unique(values: [text]) -> bool:
+    var seen: [text] = []
+    for value in values:
+        if value == "" or seen.contains(value):
+            return false
+        seen.push(value)
+    true
+
+fn hwir_aspect_join_point_valid(join_point: text) -> bool:
+    join_point == "module.port" or join_point == "module.state" or
+        join_point == "fetch.request" or join_point == "fetch.response" or
+        join_point == "fetch.redirect" or join_point == "instruction.predecode" or
+        join_point == "instruction.decompress" or join_point == "instruction.decode" or
+        join_point == "execute.request" or join_point == "execute.complete" or
+        join_point == "lsu.request" or join_point == "lsu.response" or
+        join_point == "branch.predict" or join_point == "branch.resolve" or
+        join_point == "commit.before" or join_point == "commit.retire" or
+        join_point == "trap.enter" or join_point == "interrupt.accept" or
+        join_point == "register.read" or join_point == "register.write" or
+        join_point == "csr.read" or join_point == "csr.write"
+
+fn hwir_aspect_required_proof(effect_class: text) -> text:
+    if effect_class == "observational": return "architectural_noninterference"
+    if effect_class == "timing-transparent": return "cycle_equivalence"
+    if effect_class == "timing-changing": return "retirement_equivalence"
+    if effect_class == "architectural": return "differential_isa"
+    if effect_class == "fault-model": return "fault_free_equivalence"
+    if effect_class == "provider-replacement": return "interface_refinement"
+    ""
+
+pub class HwAspectManifest:
+    id: text
+    version: text
+    content_hash: text
+    stage: text
+    advice_kind: text
+    effect_class: text
+    required: bool
+    required_capabilities: [text]
+    provided_capabilities: [text]
+    conflicts_with: [text]
+    join_point_selectors: [text]
+    added_port_count: i32
+    added_state_count: i32
+    latency_contract: text
+    proof_obligations: [text]
+
+    me diagnostic() -> text:
+        if self.id == "" or self.version == "" or not hwir_aspect_hash_valid(self.content_hash):
+            return "HWIR-E-ASPECT-IDENTITY: hardware aspect requires ID, version, and lowercase SHA-256 hash"
+        if self.stage != "Elaboration" and self.stage != "Architecture" and self.stage != "RTL" and
+            self.stage != "Target" and self.stage != "Verification":
+            return "HWIR-E-ASPECT-STAGE: hardware aspect stage is unsupported"
+        if self.advice_kind != "observe" and self.advice_kind != "attach" and
+            self.advice_kind != "before" and self.advice_kind != "after" and
+            self.advice_kind != "wrap" and self.advice_kind != "replace" and
+            self.advice_kind != "verify":
+            return "HWIR-E-ASPECT-ADVICE: hardware aspect advice kind is unsupported"
+        if self.effect_class != "observational" and self.effect_class != "timing-transparent" and
+            self.effect_class != "timing-changing" and self.effect_class != "architectural" and
+            self.effect_class != "fault-model" and self.effect_class != "provider-replacement":
+            return "HWIR-E-ASPECT-EFFECT: hardware aspect effect class is unsupported"
+        if (self.advice_kind == "observe" or self.advice_kind == "verify") and
+            self.effect_class != "observational":
+            return "HWIR-E-ASPECT-EFFECT: observe/verify advice must be observational"
+        if self.advice_kind == "replace" and self.effect_class != "provider-replacement":
+            return "HWIR-E-ASPECT-EFFECT: replace advice requires provider-replacement effect class"
+        if self.latency_contract != "transparent" and self.latency_contract != "fixed" and
+            self.latency_contract != "elastic" and self.latency_contract != "variable":
+            return "HWIR-E-ASPECT-LATENCY: hardware aspect latency contract is unsupported"
+        if self.added_port_count < 0 or self.added_state_count < 0:
+            return "HWIR-E-ASPECT-RESOURCES: hardware aspect resource counts must be nonnegative"
+        if self.join_point_selectors.len() == 0:
+            return "HWIR-E-ASPECT-JOIN-POINT: hardware aspect requires at least one frozen semantic join point"
+        if not hwir_aspect_unique(self.required_capabilities) or
+            not hwir_aspect_unique(self.provided_capabilities) or
+            not hwir_aspect_unique(self.conflicts_with) or
+            not hwir_aspect_unique(self.join_point_selectors) or
+            not hwir_aspect_unique(self.proof_obligations):
+            return "HWIR-E-ASPECT-LIST: nonempty hardware aspect manifest list items must be unique"
+        for join_point in self.join_point_selectors:
+            if not hwir_aspect_join_point_valid(join_point):
+                return "HWIR-E-ASPECT-JOIN-POINT: hardware aspect selector is not a frozen semantic join point"
+        if self.proof_obligations.len() == 0:
+            return "HWIR-E-ASPECT-PROOF: hardware aspect requires an explicit proof obligation"
+        val required_proof = hwir_aspect_required_proof(self.effect_class)
+        if required_proof == "" or not self.proof_obligations.contains(required_proof):
+            return "HWIR-E-ASPECT-PROOF: hardware aspect effect class requires its declared proof obligation"
+        ""
+
+pub class HwAspectLockEntry:
+    """A reproducible compiler-host identity for one allowed aspect pack."""
+    id: text
+    version: text
+    content_hash: text
+
+    me diagnostic() -> text:
+        if self.id == "" or self.version == "" or not hwir_aspect_hash_valid(self.content_hash):
+            return "HWIR-E-ASPECT-LOCK: aspect lock entries require ID, version, and lowercase SHA-256 hash"
+        ""
+
+pub class HwAspectLock:
+    """The checked-in content-addressed allowlist for a certified aspect plan."""
+    entries: [HwAspectLockEntry]
+
+    me diagnostic() -> text:
+        var ids: [text] = []
+        for entry in self.entries:
+            val diagnostic = entry.diagnostic()
+            if diagnostic != "": return diagnostic
+            if ids.contains(entry.id):
+                return "HWIR-E-ASPECT-LOCK: aspect lock entry IDs must be unique"
+            ids.push(entry.id)
+        ""
+
+fn hwir_aspect_lock_entry_for(lock: HwAspectLock, aspect_id: text) -> HwAspectLockEntry?:
+    for entry in lock.entries:
+        if entry.id == aspect_id:
+            return Some(entry)
+    nil
+
+pub fn hwir_aspect_lock_for_plan(plan: HwAspectPlan) -> Result<HwAspectLock, text>:
+    """Derive a deterministic lock only after the plan itself validates."""
+    val plan_diagnostic = plan.diagnostic()
+    if plan_diagnostic != "": return Err(plan_diagnostic)
+    var entries: [HwAspectLockEntry] = []
+    for manifest in plan.manifests:
+        entries.push(HwAspectLockEntry(id: manifest.id, version: manifest.version,
+            content_hash: manifest.content_hash))
+    val lock = HwAspectLock(entries: entries)
+    val lock_diagnostic = lock.diagnostic()
+    if lock_diagnostic != "": return Err(lock_diagnostic)
+    Ok(lock)
+
+pub fn hwir_aspect_plan_lock_diagnostic(plan: HwAspectPlan, lock: HwAspectLock) -> text:
+    val plan_diagnostic = plan.diagnostic()
+    if plan_diagnostic != "": return plan_diagnostic
+    val lock_diagnostic = lock.diagnostic()
+    if lock_diagnostic != "": return lock_diagnostic
+    if plan.manifests.len() != lock.entries.len():
+        return "HWIR-E-ASPECT-LOCK: aspect lock must contain exactly the planned manifests"
+    for manifest in plan.manifests:
+        val entry = hwir_aspect_lock_entry_for(lock, manifest.id)
+        if entry == nil or entry.unwrap().version != manifest.version or
+            entry.unwrap().content_hash != manifest.content_hash:
+            return "HWIR-E-ASPECT-LOCK: aspect lock does not pin the planned manifest identity"
+    ""
+
+pub fn hwir_aspect_lock_sha256(lock: HwAspectLock) -> Result<text, text>:
+    """Digest a lock as an order-independent, content-addressed identity set."""
+    val diagnostic = lock.diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    var rows: [text] = []
+    for entry in lock.entries:
+        rows.push(entry.id + "\n" + entry.version + "\n" + entry.content_hash)
+    var index = 0
+    while index < rows.len():
+        var next = index + 1
+        while next < rows.len():
+            if rows[next] < rows[index]:
+                val temporary = rows[index]
+                rows[index] = rows[next]
+                rows[next] = temporary
+            next = next + 1
+        index = index + 1
+    Ok(sha256_text("simple-hwir-aspect-lock/v1\n" + rows.join("\n")))
+
+pub class HwAspectApplication:
+    aspect_id: text
+    matched_node_ids: [HwNodeId]
+    woven_node_count: i32
+
+    me diagnostic() -> text:
+        if self.aspect_id == "" or self.woven_node_count < 0:
+            return "HWIR-E-ASPECT-APPLICATION: aspect application requires ID and nonnegative weave count"
+        var ids: [text] = []
+        for node_id in self.matched_node_ids:
+            if not node_id.is_valid() or ids.contains(node_id.value):
+                return "HWIR-E-ASPECT-APPLICATION: matched HWIR node IDs must be valid and unique"
+            ids.push(node_id.value)
+        ""
+
+pub class HwAspectPlan:
+    manifests: [HwAspectManifest]
+    applications: [HwAspectApplication]
+
+    me is_absent() -> bool:
+        self.manifests.len() == 0 and self.applications.len() == 0
+
+    me diagnostic() -> text:
+        var ids: [text] = []
+        for manifest in self.manifests:
+            val diagnostic = manifest.diagnostic()
+            if diagnostic != "": return diagnostic
+            if ids.contains(manifest.id):
+                return "HWIR-E-ASPECT-DUPLICATE: hardware aspect manifest IDs must be unique"
+            ids.push(manifest.id)
+        for manifest in self.manifests:
+            for conflict in manifest.conflicts_with:
+                if conflict == manifest.id or ids.contains(conflict):
+                    return "HWIR-E-ASPECT-CONFLICT: conflicting hardware aspects cannot share one plan"
+        var applied_ids: [text] = []
+        for application in self.applications:
+            val diagnostic = application.diagnostic()
+            if diagnostic != "": return diagnostic
+            if not ids.contains(application.aspect_id) or applied_ids.contains(application.aspect_id):
+                return "HWIR-E-ASPECT-APPLICATION: each application must name one unique planned manifest"
+            applied_ids.push(application.aspect_id)
+        for manifest in self.manifests:
+            if manifest.required and not applied_ids.contains(manifest.id):
+                return "HWIR-E-ASPECT-REQUIRED: required hardware aspect did not produce an application"
+        for application in self.applications:
+            var required = false
+            for manifest in self.manifests:
+                if manifest.id == application.aspect_id: required = manifest.required
+            if required and (application.matched_node_ids.len() == 0 or application.woven_node_count == 0):
+                return "HWIR-E-ASPECT-NO-MATCH: required hardware aspect did not weave a matched semantic HWIR node"
+        ""
+
+pub fn hwir_aspect_plan_absent() -> HwAspectPlan:
+    """The only valid disabled-aspect plan; it has no hardware contribution."""
+    HwAspectPlan(manifests: [], applications: [])
+
+pub class HwAspectProbe:
+    """A typed observational output attachment for one existing HWIR value."""
+    aspect_id: text
+    target_node_id: HwNodeId
+    source_value: text
+    output_port: text
+
+    me diagnostic() -> text:
+        if self.aspect_id == "" or not self.target_node_id.is_valid() or
+            self.source_value == "" or not hwir_vhdl_identifier(self.output_port):
+            return "HWIR-E-ASPECT-PROBE: observational probe requires an aspect, semantic node, source value, and VHDL-safe output port"
+        ""
+
+pub class HwAspectWeaveResult:
+    module: HwModuleDef
+    added_port_count: i32
+    route: text
+
+    me is_unchanged() -> bool:
+        self.added_port_count == 0
+
+fn hwir_aspect_manifest_index(plan: HwAspectPlan, aspect_id: text) -> i32:
+    var index = 0
+    for manifest in plan.manifests:
+        if manifest.id == aspect_id:
+            return index
+        index = index + 1
+    -1
+
+fn hwir_aspect_application_matches(plan: HwAspectPlan, aspect_id: text, node_id: HwNodeId) -> bool:
+    for application in plan.applications:
+        if application.aspect_id == aspect_id:
+            for matched in application.matched_node_ids:
+                if matched.value == node_id.value:
+                    return true
+    false
+
+fn hwir_aspect_probe_count(probes: [HwAspectProbe], aspect_id: text) -> i32:
+    var count = 0
+    for probe in probes:
+        if probe.aspect_id == aspect_id:
+            count = count + 1
+    count
+
+pub fn weave_hwir_observational_ports(module: HwModuleDef, plan: HwAspectPlan,
+    probes: [HwAspectProbe]) -> Result<HwAspectWeaveResult, text>:
+    """Weave typed observational output ports before target legalization.
+
+    This first real transform only supports observational `observe` manifests.
+    It preserves all existing graph nodes, adds one declared output/pass-through
+    per probe, and validates the result with the same HWIR legality checks used
+    by normal lowering. Other advice kinds fail closed until their typed graph
+    transforms exist.
+    """
+    val module_diagnostic = module.shape_diagnostic()
+    if module_diagnostic != "": return Err(module_diagnostic)
+    val plan_diagnostic = plan.diagnostic()
+    if plan_diagnostic != "": return Err(plan_diagnostic)
+    if plan.is_absent():
+        if probes.len() != 0:
+            return Err("HWIR-E-ASPECT-ABSENT: disabled hardware aspect plan cannot receive probes")
+        return Ok(HwAspectWeaveResult(module: module, added_port_count: 0, route: "hwir-aspect-absent"))
+    var probe_ports: [text] = []
+    for probe in probes:
+        val diagnostic = probe.diagnostic()
+        if diagnostic != "": return Err(diagnostic)
+        if probe.target_node_id.value != module.node_id.value or
+            not hwir_aspect_application_matches(plan, probe.aspect_id, probe.target_node_id):
+            return Err("HWIR-E-ASPECT-PROBE-TARGET: probe must bind an applied stable module HWIR node")
+        val manifest_index = hwir_aspect_manifest_index(plan, probe.aspect_id)
+        if manifest_index < 0:
+            return Err("HWIR-E-ASPECT-PROBE-ASPECT: probe must name a planned hardware aspect")
+        val manifest = plan.manifests[manifest_index]
+        if manifest.advice_kind != "observe" or manifest.effect_class != "observational" or
+            manifest.added_state_count != 0 or manifest.latency_contract != "transparent":
+            return Err("HWIR-E-ASPECT-UNSUPPORTED: observational port weaving requires a transparent state-free observe aspect")
+        # This transform materializes one specific semantic operation: an RTL
+        # module-port observation.  A broader selector must not be treated as
+        # applied merely because it can be attached to this module root.
+        if manifest.stage != "RTL" or manifest.join_point_selectors.len() != 1 or
+            manifest.join_point_selectors[0] != "module.port":
+            return Err("HWIR-E-ASPECT-JOIN-SCOPE: observational port weaving supports only the RTL module.port join point")
+        if probe_ports.contains(probe.output_port) or module.value_width(probe.output_port) != 0:
+            return Err("HWIR-E-ASPECT-PROBE-PORT: observational probe output port collides with existing HWIR value")
+        if module.value_width(probe.source_value) == 0 or module.port_direction(probe.source_value) == "out":
+            return Err("HWIR-E-ASPECT-PROBE-SOURCE: observational probe source must be an existing readable HWIR value")
+        probe_ports.push(probe.output_port)
+    for manifest in plan.manifests:
+        val count = hwir_aspect_probe_count(probes, manifest.id)
+        if count != manifest.added_port_count:
+            return Err("HWIR-E-ASPECT-RESOURCE-MISMATCH: declared aspect port count must match typed probe attachments")
+    for application in plan.applications:
+        var matches_module = false
+        for matched in application.matched_node_ids:
+            if matched.value == module.node_id.value:
+                matches_module = true
+            else:
+                return Err("HWIR-E-ASPECT-SCOPE: module observational weaving requires every matched node to be the supplied module node")
+        if matches_module and application.woven_node_count != hwir_aspect_probe_count(probes, application.aspect_id):
+            return Err("HWIR-E-ASPECT-ACCOUNTING: declared weave count must equal typed probe attachments")
+    var ports = module.ports
+    var comb_ops = module.comb_ops
+    var origins = module.origins
+    for probe in probes:
+        val width = module.value_width(probe.source_value)
+        ports.push(HwPort.output(probe.output_port, "Bits", width))
+        comb_ops.push(HwCombOp.unary("passthrough", probe.output_port, probe.source_value, width))
+        origins.push(HwOrigin(node_id: HwNodeId.child(module.summary.name,
+            "aspect_" + probe.aspect_id + "_" + probe.output_port),
+            source_name: "hwir.aspect." + probe.aspect_id + ".observe"))
+    val summary = HwModule(name: module.summary.name, profile: module.summary.profile,
+        port_count: ports.len(), signal_count: module.signals.len(),
+        register_count: module.summary.register_count, memory_count: module.summary.memory_count,
+        comb_op_count: comb_ops.len() + module.compare_ops.len() + module.select_ops.len(),
+        clock_domain_count: module.clock_domains.len(), fallback_function: module.summary.fallback_function,
+        cost: module.summary.cost)
+    val woven = HwModuleDef(summary: summary, config: module.config, node_id: module.node_id,
+        origins: origins, ports: ports, signals: module.signals, constants: module.constants,
+        comb_ops: comb_ops, compare_ops: module.compare_ops, select_ops: module.select_ops,
+        clock_domains: module.clock_domains)
+    val woven_diagnostic = woven.shape_diagnostic()
+    if woven_diagnostic != "": return Err(woven_diagnostic)
+    Ok(HwAspectWeaveResult(module: woven, added_port_count: probes.len(), route: "hwir-aspect-observe"))
+
+pub fn weave_hwir_observational_ports_locked(module: HwModuleDef, plan: HwAspectPlan,
+    lock: HwAspectLock, probes: [HwAspectProbe]) -> Result<HwAspectWeaveResult, text>:
+    """Weave only when an exact content-addressed plan lock has been checked."""
+    val lock_diagnostic = hwir_aspect_plan_lock_diagnostic(plan, lock)
+    if lock_diagnostic != "": return Err(lock_diagnostic)
+    weave_hwir_observational_ports(module, plan, probes)

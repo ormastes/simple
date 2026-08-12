@@ -3,6 +3,9 @@
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{CompileResult}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.backend.backend.hwir_to_vhdl.{compile_strict_hwir_module}
 use compiler.common.config.{Logger}
 use compiler.mir.mir_aop_injection.{aop_advices_requested, aop_weave_count}
 use compiler.backend.backend.vhdl.vhdl_design_catalog.{
@@ -16,6 +19,7 @@ use compiler.driver.driver_vhdl_artifact_build.{
 use compiler.driver.driver_vhdl_artifacts.{
     vhdl_render_production_artifacts,
     vhdl_remove_production_artifacts,
+    vhdl_validate_production_artifact_input,
     vhdl_write_production_artifacts
 }
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -69,10 +73,6 @@ impl CompilerDriver:
         val ctx: CompileContext = self.ctx
         val log = ctx.logger
         vhdl_log_debug(log, "AOT VHDL: generating VHDL to {output}")
-        if not vhdl_remove_production_artifacts(output):
-            return CompileResult.CodegenError(
-                "Failed to remove stale VHDL artifacts for {output}")
-
         val entry_result = driver_vhdl_entry_module(ctx)
         if rt_enum_discriminant(entry_result) == rt_enum_discriminant(Err("")):
             val entry_error: text = rt_enum_payload(entry_result)
@@ -115,17 +115,42 @@ impl CompilerDriver:
         vhdl_log_trace(
             log,
             "translating {catalog.source_module_count} MIR modules as one VHDL design")
-        val compiled = vhdl_compile_module_text(catalog.design)
         var all_vhdl = ""
-        match compiled:
-            case Err(e):
-                return CompileResult.CodegenError(
-                    "VHDL design compile error: {e.message}")
-            case Ok(vhdl):
-                all_vhdl = vhdl
-            case _:
-                return CompileResult.CodegenError(
-                    "VHDL design compile error: backend result not Ok")
+        var strict_node_id = ""
+        var strict_profile = ""
+        var strict_xlen = 0
+        var strict_graph_sha256 = ""
+        val strict_target = ctx.options.riscv_gen2_target
+        if strict_target != "":
+            if not ctx.assurance_policy.strictness.at_least(AssuranceStrictness.Critical):
+                return CompileResult.CodegenError("HWIR-E-CRITICAL-POLICY: strict RISC-V Gen2 VHDL requires SIMPLE_SAFETY_PROFILE=critical")
+            val config = match CoreConfig.from_critical_target(strict_target):
+                case Ok(value): value
+                case Err(error): return CompileResult.CodegenError(error)
+            if not ctx.mir_modules.has(entry_module):
+                return CompileResult.CodegenError("HWIR-E-CRITICAL-DESIGN: selected entry has no MIR module")
+            val strict = compile_strict_hwir_module(ctx.mir_modules[entry_module], config)
+            if not strict.is_success():
+                return CompileResult.CodegenError("HWIR-E-CRITICAL-LOWER: {strict.diagnostic}")
+            all_vhdl = strict.vhdl
+            strict_node_id = strict.module_node_id
+            strict_profile = strict.config_profile
+            strict_xlen = strict.config_xlen
+            strict_graph_sha256 = strict.hwir_graph_sha256
+        else:
+            if ctx.assurance_policy.strictness.at_least(AssuranceStrictness.Critical) and
+                catalog.hardware_entity_count > 0:
+                return CompileResult.CodegenError("HWIR-E-CRITICAL-CONFIG: critical hardware VHDL requires explicit --riscv-gen2-target rv32 or rv64")
+            val compiled = vhdl_compile_module_text(catalog.design)
+            match compiled:
+                case Err(e):
+                    return CompileResult.CodegenError(
+                        "VHDL design compile error: {e.message}")
+                case Ok(vhdl):
+                    all_vhdl = vhdl
+                case _:
+                    return CompileResult.CodegenError(
+                        "VHDL design compile error: backend result not Ok")
         if all_vhdl == "":
             return CompileResult.CodegenError(
                 "VHDL design compile produced an empty artifact")
@@ -136,7 +161,7 @@ impl CompilerDriver:
             return CompileResult.CodegenError(
                 "VHDL generation error: {aop_requested} AOP advice declaration(s) were requested but 0 weaves were applied before VHDL emission — refusing to emit RTL with silently dropped aspects")
 
-        val artifact_input = match vhdl_artifact_input_from_catalog(
+        var artifact_input = match vhdl_artifact_input_from_catalog(
             catalog,
             ctx.sources,
             output,
@@ -150,6 +175,20 @@ impl CompilerDriver:
             case Err(err):
                 return CompileResult.CodegenError(
                     "VHDL artifact provenance error: {err}")
+        if strict_target != "":
+            artifact_input.generation_route = "hwir-strict"
+            artifact_input.hwir_module_node_id = strict_node_id
+            artifact_input.hwir_config_profile = strict_profile
+            artifact_input.hwir_graph_sha256 = strict_graph_sha256
+            artifact_input.target = "riscv" + strict_xlen.to_text()
+            artifact_input.xlen = strict_xlen
+            artifact_input.profile = strict_profile
+            val strict_artifact_error = vhdl_validate_production_artifact_input(artifact_input)
+            if strict_artifact_error.is_err():
+                return CompileResult.CodegenError("VHDL strict-HWIR provenance error: {strict_artifact_error.err().unwrap()}")
+        if not vhdl_remove_production_artifacts(output):
+            return CompileResult.CodegenError(
+                "Failed to remove stale VHDL artifacts for {output}")
         val rendered = vhdl_render_production_artifacts(
             artifact_input, all_vhdl)
         match vhdl_write_production_artifacts(output, all_vhdl, rendered):

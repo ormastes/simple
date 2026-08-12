@@ -1,6 +1,20 @@
 # MIR to HWIR — first-stage hardware lowering scaffold.
 
-use compiler.mir.hwir.types.{HwModule, HwPort, HwSignal, HwRegister, HwClockDomain, HwCostModel}
+use compiler.mir.hwir.types.{CoreConfig, HwCombOp, HwConstant, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSignal, HwRegister, HwClockDomain, HwCostModel}
+use compiler.mir.mir_data.*
+use compiler.mir.hwir.zca_rows.{
+    strict_zca_addi4spn_row_hwir, strict_zca_cadd_row_hwir,
+    strict_zca_caddi16sp_row_hwir, strict_zca_caddi_row_hwir,
+    strict_zca_cand_row_hwir, strict_zca_candi_row_hwir,
+    strict_zca_cbeqz_predecode_row_hwir, strict_zca_cbnez_predecode_row_hwir,
+    strict_zca_cebreak_row_hwir, strict_zca_cj_predecode_row_hwir, strict_zca_cjalr_row_hwir,
+    strict_zca_cjr_row_hwir, strict_zca_cli_row_hwir, strict_zca_clui_row_hwir,
+    strict_zca_cmv_row_hwir, strict_zca_cor_row_hwir, strict_zca_csub_row_hwir,
+    strict_zca_cxor_row_hwir, strict_zca_lw_row_hwir, strict_zca_lwsp_row_hwir,
+    strict_zca_slli_low_row_hwir, strict_zca_srai_low_row_hwir,
+    strict_zca_srli_low_row_hwir, strict_zca_sw_row_hwir,
+    strict_zca_swsp_row_hwir
+}
 
 class HwirLowerInput:
     """Minimal MIR function summary consumed by the HWIR foundation slice."""
@@ -73,3 +87,626 @@ fn hwir_local_to_signal(name: text, type_name: text, bit_width: i32) -> HwSignal
 
 fn hwir_local_to_register(name: text, type_name: text, bit_width: i32, clock_domain: text) -> HwRegister:
     return HwRegister.create(name, type_name, bit_width, clock_domain)
+
+# Strict Gen2 MIR lowering is intentionally a closed subset.  This is the
+# source-facing boundary for critical builds: unsupported MIR is rejected here
+# rather than being silently handed to direct VHDL text emission.
+
+class HwirStrictLowerResult:
+    success: bool
+    module: HwModuleDef?
+    diagnostic: text
+
+    me is_success() -> bool:
+        self.success
+
+    me uses_legacy_fallback() -> bool:
+        false
+
+    static fn rejected(diagnostic: text) -> HwirStrictLowerResult:
+        HwirStrictLowerResult(success: false, module: nil, diagnostic: diagnostic)
+
+    static fn emitted(module: HwModuleDef) -> HwirStrictLowerResult:
+        HwirStrictLowerResult(success: true, module: Some(module), diagnostic: "")
+
+pub fn lower_strict_hwir_and_module(input: HwirLowerInput, config: CoreConfig) -> HwirStrictLowerResult:
+    """Build the deterministic typed ``and`` fixture used by foundation tests.
+
+    This accepts a count-only summary and is deliberately *not* a compiler
+    lowering entrypoint.  Production critical compilation must enter through
+    ``lower_strict_mir_function_to_hwir`` so unsupported real MIR cannot be
+    represented by a fabricated graph.
+    """
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return HwirStrictLowerResult.rejected(config_error)
+    if not input.is_hardware_tagged:
+        return HwirStrictLowerResult.rejected("HWIR-E-NOT-HARDWARE: strict lowering requires a hardware-tagged input")
+    if input.input_count != 2 or input.output_count != 1 or input.local_count != 0 or input.clocked_local_count != 0:
+        return HwirStrictLowerResult.rejected("HWIR-E-STRICT-SHAPE: strict Gen2 bridge currently requires two inputs, one output, and no local state")
+    val width = config.xlen
+    val summary = HwModule(name: input.function_name, profile: config.profile,
+        port_count: 3, signal_count: 0, register_count: 0, memory_count: 0,
+        comb_op_count: 1, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(input.function_name),
+        origins: [HwOrigin(node_id: HwNodeId.child(input.function_name, "and"), source_name: "fixture.summary.and")],
+        ports: [HwPort.input("in_a", "Bits", width), HwPort.input("in_b", "Bits", width), HwPort.output("out", "Bits", width)],
+        signals: [], constants: [],
+        comb_ops: [HwCombOp.binary("and", "out", "in_a", "in_b", width)],
+        compare_ops: [], select_ops: [],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return HwirStrictLowerResult.rejected(diagnostic)
+    HwirStrictLowerResult.emitted(module)
+
+fn strict_mir_bit_width(type_: MirType) -> i32:
+    match type_.kind:
+        case Bool: 1
+        case I32 | U32: 32
+        case Bits(width, _):
+            if width > 0 and width <= 64:
+                width as i32
+            else:
+                0
+        case _: 0
+
+fn strict_mir_local(func: MirFunction, id: LocalId) -> MirLocal?:
+    for local in func.locals:
+        if local.id.id == id.id:
+            return Some(local)
+    nil
+
+fn strict_mir_local_name(func: MirFunction, id: LocalId, result_value_id: i64) -> Result<text, text>:
+    if id.id == result_value_id:
+        return Ok("result_out")
+    val local = strict_mir_local(func, id)
+    if local == nil:
+        return Err("HWIR-E-MIR-LOCAL: strict MIR references an unknown local")
+    val resolved = local.unwrap().name ?? "value_" + id.id.to_text()
+    if resolved == "":
+        return Err("HWIR-E-MIR-LOCAL: strict MIR local names must be non-empty")
+    if resolved == "left":
+        return Ok("a")
+    if resolved == "right":
+        return Ok("b")
+    Ok(resolved)
+
+fn strict_mir_copy_local(operand: MirOperand) -> LocalId?:
+    match operand.kind:
+        case Copy(id): Some(id)
+        case _: nil
+
+fn strict_mir_return_id(block: MirBlock) -> LocalId?:
+    match block.terminator:
+        case Ret(Some(value)): strict_mir_copy_local(value)
+        case _: nil
+
+fn strict_mir_comb_op(op: MirBinOp) -> text:
+    match op:
+        case BitAnd: "and"
+        case BitOr: "or"
+        case Shl: "shl"
+        case Shr: "shr"
+        case _: ""
+
+fn strict_mir_is_bool(type_: MirType) -> bool:
+    match type_.kind:
+        case Bool: true
+        case _: false
+
+fn strict_mir_is_u32(type_: MirType) -> bool:
+    match type_.kind:
+        case U32: true
+        case _: false
+
+fn strict_mir_is_bits(type_: MirType, width: i32) -> bool:
+    match type_.kind:
+        case Bits(actual_width, _): actual_width == width
+        case _: false
+
+fn strict_mir_is_predecode_result(type_: MirType, address_bits: i32) -> bool:
+    match type_.kind:
+        case Tuple(elements):
+            if elements.len() != 6:
+                return false
+            strict_mir_is_bits(elements[0], 32) and strict_mir_is_bits(elements[1], 2) and
+                strict_mir_is_bool(elements[2]) and strict_mir_is_bits(elements[3], address_bits) and
+                strict_mir_is_bool(elements[4]) and strict_mir_is_bits(elements[5], address_bits)
+        case _: false
+
+fn strict_mir_same_type(left: MirType, right: MirType) -> bool:
+    match left.kind:
+        case Bool: strict_mir_is_bool(right)
+        case U32: strict_mir_is_u32(right)
+        case I32:
+            match right.kind:
+                case I32: true
+                case _: false
+        case Bits(left_width, left_signed):
+            match right.kind:
+                case Bits(right_width, right_signed): left_width == right_width and left_signed == right_signed
+                case _: false
+        case Tuple(left_elements):
+            match right.kind:
+                case Tuple(right_elements):
+                    if left_elements.len() != right_elements.len():
+                        return false
+                    var index = 0
+                    while index < left_elements.len():
+                        if not strict_mir_same_type(left_elements[index], right_elements[index]):
+                            return false
+                        index = index + 1
+                    true
+                case _: false
+        case _: false
+
+fn strict_mir_operand_is_arg(func: MirFunction, operand: MirOperand, argument_index: i32) -> bool:
+    val local_id = strict_mir_copy_local(operand)
+    if local_id == nil:
+        return false
+    val local = strict_mir_local(func, local_id.unwrap())
+    if local == nil:
+        return false
+    match local.unwrap().kind:
+        case Arg(index): index == argument_index
+        case _: false
+
+fn strict_mir_intrinsic_return_matches(block: MirBlock, destination: LocalId) -> bool:
+    match block.terminator:
+        case Ret(Some(operand)):
+            val returned = strict_mir_copy_local(operand)
+            returned != nil and returned.unwrap().id == destination.id
+        case _: false
+
+fn strict_mir_has_block(func: MirFunction, id: BlockId) -> bool:
+    for block in func.blocks:
+        if block.id.id == id.id:
+            return true
+    false
+
+fn strict_mir_validate_closed_locals(func: MirFunction) -> text:
+    """Validate real-MIR ownership before any specialized HWIR extractor.
+
+    Semantic row extractors replace a validated MIR shape with its frozen HWIR
+    graph.  They must not accept dangling locals, duplicate arguments, or a
+    variadic signature merely because the replacement graph has known types.
+    """
+    if func.signature.is_variadic:
+        return "HWIR-E-MIR-SIGNATURE: strict MIR lowering requires a non-variadic signature"
+    var local_ids: [i64] = []
+    var argument_counts: [i32] = []
+    var index = 0
+    while index < func.signature.params.len():
+        argument_counts.push(0)
+        index = index + 1
+    for local in func.locals:
+        if local_ids.contains(local.id.id):
+            return "HWIR-E-MIR-LOCAL: strict MIR local IDs must be unique"
+        local_ids.push(local.id.id)
+        match local.kind:
+            case Arg(argument_index):
+                if argument_index < 0 or argument_index >= func.signature.params.len() or
+                    not strict_mir_same_type(local.type_, func.signature.params[argument_index]):
+                    return "HWIR-E-MIR-LOCAL: strict MIR Arg locals must match the fixed signature"
+                argument_counts[argument_index] = argument_counts[argument_index] + 1
+            case _: ()
+    for count in argument_counts:
+        if count != 1:
+            return "HWIR-E-MIR-LOCAL: strict MIR requires exactly one typed Arg local per parameter"
+    for block in func.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case Const(destination, _, type_):
+                    val local = strict_mir_local(func, destination)
+                    if local == nil or not strict_mir_same_type(local.unwrap().type_, type_):
+                        return "HWIR-E-MIR-LOCAL: constant destination must be a declared matching local"
+                case BinOp(destination, operation, left, right):
+                    val destination_local = strict_mir_local(func, destination)
+                    val left_local = strict_mir_copy_local(left)
+                    val right_local = strict_mir_copy_local(right)
+                    if destination_local == nil or left_local == nil or right_local == nil or
+                        strict_mir_local(func, left_local.unwrap()) == nil or strict_mir_local(func, right_local.unwrap()) == nil:
+                        return "HWIR-E-MIR-LOCAL: strict MIR bitwise values must resolve to declared locals"
+                    val destination_type = destination_local.unwrap().type_
+                    val left_type = strict_mir_local(func, left_local.unwrap()).unwrap().type_
+                    val right_type = strict_mir_local(func, right_local.unwrap()).unwrap().type_
+                    if operation == MirBinOp.Eq or operation == MirBinOp.Ne or operation == MirBinOp.Lt or
+                        operation == MirBinOp.Le or operation == MirBinOp.Gt or operation == MirBinOp.Ge:
+                        if not strict_mir_same_type(left_type, right_type) or not strict_mir_is_bool(destination_type):
+                            return "HWIR-E-MIR-BINOP: strict MIR comparison operands must match and produce Bool"
+                    elif not strict_mir_same_type(destination_type, left_type) or not strict_mir_same_type(left_type, right_type):
+                        return "HWIR-E-MIR-BINOP: strict MIR binary operands and result must preserve one exact type"
+                case Copy(destination, source):
+                    val destination_local = strict_mir_local(func, destination)
+                    val source_local = strict_mir_local(func, source)
+                    if destination_local == nil or source_local == nil or
+                        not strict_mir_same_type(destination_local.unwrap().type_, source_local.unwrap().type_):
+                        return "HWIR-E-MIR-LOCAL: copy values must resolve to equal declared types"
+                case Intrinsic(destination, _, arguments):
+                    if destination != nil and strict_mir_local(func, destination.unwrap()) == nil:
+                        return "HWIR-E-MIR-LOCAL: intrinsic destination must resolve to a declared local"
+                    for argument in arguments:
+                        val local_id = strict_mir_copy_local(argument)
+                        if local_id != nil and strict_mir_local(func, local_id.unwrap()) == nil:
+                            return "HWIR-E-MIR-LOCAL: intrinsic operand must resolve to a declared local"
+                case _: ()
+        match block.terminator:
+            case Ret(Some(value)):
+                val local_id = strict_mir_copy_local(value)
+                val local = if local_id != nil: strict_mir_local(func, local_id.unwrap()) else: nil
+                if local == nil or not strict_mir_same_type(local.unwrap().type_, func.signature.return_type):
+                    return "HWIR-E-MIR-RETURN: strict MIR return must resolve to the declared return type"
+            case If(condition, then_block, else_block):
+                val local_id = strict_mir_copy_local(condition)
+                val local = if local_id != nil: strict_mir_local(func, local_id.unwrap()) else: nil
+                if local == nil or not strict_mir_is_bool(local.unwrap().type_):
+                    return "HWIR-E-MIR-CONDITION: branch condition must resolve to a declared Bool local"
+                if not strict_mir_has_block(func, then_block) or not strict_mir_has_block(func, else_block):
+                    return "HWIR-E-MIR-CFG: branch targets must resolve to declared blocks"
+            case Goto(target):
+                if not strict_mir_has_block(func, target):
+                    return "HWIR-E-MIR-CFG: goto target must resolve to a declared block"
+            case _: ()
+    ""
+
+fn strict_mir_emit_row(row: Result<HwModuleDef, text>) -> HwirStrictLowerResult:
+    match row:
+        case Ok(module): HwirStrictLowerResult.emitted(module)
+        case Err(diagnostic): HwirStrictLowerResult.rejected(diagnostic)
+
+fn strict_mir_normal_row_intrinsic(func: MirFunction, block: MirBlock, destination: LocalId,
+    name: text, arguments: [MirOperand], config: CoreConfig) -> HwirStrictLowerResult:
+    if func.signature.params.len() != 1 or not strict_mir_is_u32(func.signature.params[0]) or
+        not strict_mir_is_u32(func.signature.return_type) or arguments.len() != 1 or
+        not strict_mir_operand_is_arg(func, arguments[0], 0):
+        if name == "__simple_riscv_zca_cli_row_v1":
+            return HwirStrictLowerResult.rejected("HWIR-E-MIR-INTRINSIC: strict C.LI lowering requires the reserved parcel semantic intrinsic")
+        return HwirStrictLowerResult.rejected("HWIR-E-MIR-INTRINSIC: strict Zca row intrinsic requires one u32 parcel semantic operand")
+    if not strict_mir_intrinsic_return_matches(block, destination):
+        if name == "__simple_riscv_zca_caddi_row_v1":
+            return HwirStrictLowerResult.rejected("HWIR-E-MIR-RETURN: strict C.ADDI intrinsic lowering must return the semantic result")
+        return HwirStrictLowerResult.rejected("HWIR-E-MIR-RETURN: strict Zca row intrinsic must return the semantic result")
+    match name:
+        case "__simple_riscv_zca_cli_row_v1": strict_mir_emit_row(strict_zca_cli_row_hwir(func.name, config))
+        case "__simple_riscv_zca_caddi_row_v1": strict_mir_emit_row(strict_zca_caddi_row_hwir(func.name, config))
+        case "__simple_riscv_zca_caddi16sp_row_v1": strict_mir_emit_row(strict_zca_caddi16sp_row_hwir(func.name, config))
+        case "__simple_riscv_zca_clui_row_v1": strict_mir_emit_row(strict_zca_clui_row_hwir(func.name, config))
+        case "__simple_riscv_zca_addi4spn_row_v1": strict_mir_emit_row(strict_zca_addi4spn_row_hwir(func.name, config))
+        case "__simple_riscv_zca_lw_row_v1": strict_mir_emit_row(strict_zca_lw_row_hwir(func.name, config))
+        case "__simple_riscv_zca_sw_row_v1": strict_mir_emit_row(strict_zca_sw_row_hwir(func.name, config))
+        case "__simple_riscv_zca_lwsp_row_v1": strict_mir_emit_row(strict_zca_lwsp_row_hwir(func.name, config))
+        case "__simple_riscv_zca_swsp_row_v1": strict_mir_emit_row(strict_zca_swsp_row_hwir(func.name, config))
+        case "__simple_riscv_zca_slli_low_row_v1": strict_mir_emit_row(strict_zca_slli_low_row_hwir(func.name, config))
+        case "__simple_riscv_zca_srli_low_row_v1": strict_mir_emit_row(strict_zca_srli_low_row_hwir(func.name, config))
+        case "__simple_riscv_zca_srai_low_row_v1": strict_mir_emit_row(strict_zca_srai_low_row_hwir(func.name, config))
+        case "__simple_riscv_zca_candi_row_v1": strict_mir_emit_row(strict_zca_candi_row_hwir(func.name, config))
+        case "__simple_riscv_zca_csub_row_v1": strict_mir_emit_row(strict_zca_csub_row_hwir(func.name, config))
+        case "__simple_riscv_zca_cxor_row_v1": strict_mir_emit_row(strict_zca_cxor_row_hwir(func.name, config))
+        case "__simple_riscv_zca_cor_row_v1": strict_mir_emit_row(strict_zca_cor_row_hwir(func.name, config))
+        case "__simple_riscv_zca_cand_row_v1": strict_mir_emit_row(strict_zca_cand_row_hwir(func.name, config))
+        case "__simple_riscv_zca_cjr_row_v1": strict_mir_emit_row(strict_zca_cjr_row_hwir(func.name, config))
+        case "__simple_riscv_zca_cmv_row_v1": strict_mir_emit_row(strict_zca_cmv_row_hwir(func.name, config))
+        case "__simple_riscv_zca_cjalr_row_v1": strict_mir_emit_row(strict_zca_cjalr_row_hwir(func.name, config))
+        case "__simple_riscv_zca_cadd_row_v1": strict_mir_emit_row(strict_zca_cadd_row_hwir(func.name, config))
+        case _: HwirStrictLowerResult.rejected("HWIR-E-MIR-INTRINSIC: strict Zca intrinsic is absent from the canonical contract")
+
+fn strict_mir_predecode_intrinsic(func: MirFunction, block: MirBlock, destination: LocalId,
+    name: text, arguments: [MirOperand], config: CoreConfig) -> HwirStrictLowerResult:
+    if name == "__simple_riscv_zca_cj_predecode_v1":
+        if func.signature.params.len() != 2 or not strict_mir_is_bits(func.signature.params[0], 16) or
+            not strict_mir_is_bits(func.signature.params[1], config.physical_address_bits) or
+            not strict_mir_is_predecode_result(func.signature.return_type, config.physical_address_bits):
+            return HwirStrictLowerResult.rejected("HWIR-E-MIR-SIGNATURE: strict C.J predecode lowering requires Bits[16], Bits[PA] -> (Bits[32], Bits[2], Bool, Bits[PA], Bool, Bits[PA])")
+        if arguments.len() != 2 or not strict_mir_operand_is_arg(func, arguments[0], 0) or
+            not strict_mir_operand_is_arg(func, arguments[1], 1) or not strict_mir_intrinsic_return_matches(block, destination):
+            return HwirStrictLowerResult.rejected("HWIR-E-MIR-INTRINSIC: strict C.J predecode lowering requires its declared parcel and PC operands")
+        return strict_mir_emit_row(strict_zca_cj_predecode_row_hwir(func.name, config))
+    if name == "__simple_riscv_zca_cbeqz_predecode_v1" or name == "__simple_riscv_zca_cbnez_predecode_v1":
+        val row_name = if name == "__simple_riscv_zca_cbeqz_predecode_v1": "C.BEQZ" else: "C.BNEZ"
+        if func.signature.params.len() != 4 or not strict_mir_is_bits(func.signature.params[0], 16) or
+            not strict_mir_is_bits(func.signature.params[1], config.physical_address_bits) or
+            not strict_mir_is_bits(func.signature.params[2], 5) or not strict_mir_is_bits(func.signature.params[3], config.xlen) or
+            not strict_mir_is_predecode_result(func.signature.return_type, config.physical_address_bits):
+            return HwirStrictLowerResult.rejected("HWIR-E-MIR-SIGNATURE: strict " + row_name + " predecode lowering requires Bits[16], Bits[PA], Bits[5], Bits[XLEN] -> (Bits[32], Bits[2], Bool, Bits[PA], Bool, Bits[PA])")
+        if arguments.len() != 4 or not strict_mir_operand_is_arg(func, arguments[0], 0) or
+            not strict_mir_operand_is_arg(func, arguments[1], 1) or not strict_mir_operand_is_arg(func, arguments[2], 2) or
+            not strict_mir_operand_is_arg(func, arguments[3], 3) or not strict_mir_intrinsic_return_matches(block, destination):
+            return HwirStrictLowerResult.rejected("HWIR-E-MIR-INTRINSIC: strict " + row_name + " predecode lowering requires its declared parcel, PC, index, and operand inputs")
+        if name == "__simple_riscv_zca_cbeqz_predecode_v1":
+            return strict_mir_emit_row(strict_zca_cbeqz_predecode_row_hwir(func.name, config))
+        return strict_mir_emit_row(strict_zca_cbnez_predecode_row_hwir(func.name, config))
+    HwirStrictLowerResult.rejected("HWIR-E-MIR-INTRINSIC: strict Zca intrinsic is absent from the canonical contract")
+
+fn strict_mir_lower_approved_intrinsic(func: MirFunction, config: CoreConfig) -> HwirStrictLowerResult?:
+    if func.blocks.len() != 1 or func.entry_block.id != 0 or func.blocks[0].id.id != 0:
+        return nil
+    val block = func.blocks[0]
+    if block.instructions.len() != 1:
+        return nil
+    match block.instructions[0].kind:
+        case Intrinsic(Some(destination), name, arguments):
+            if not name.starts_with("__simple_riscv_zca_"):
+                return nil
+            if config.compressed_decode_profile != "zca-common-critical":
+                return Some(HwirStrictLowerResult.rejected("HWIR-E-COMPRESSED-PROFILE: strict Zca intrinsic lowering requires the zca-common-critical product profile"))
+            if name.contains("_predecode_v1"):
+                return Some(strict_mir_predecode_intrinsic(func, block, destination, name, arguments, config))
+            return Some(strict_mir_normal_row_intrinsic(func, block, destination, name, arguments, config))
+        case _: nil
+
+fn strict_mir_lower_cebreak_constant_leaf(func: MirFunction, config: CoreConfig) -> HwirStrictLowerResult?:
+    """Recognize the exact typed canonical EBREAK constant leaf.
+
+    It is allowed independently of the compressed row profile because it is a
+    canonical 32-bit RISC-V instruction value, not an instruction classifier.
+    """
+    if func.blocks.len() != 1 or func.entry_block.id != 0 or func.blocks[0].id.id != 0 or
+        func.signature.params.len() != 0 or not strict_mir_is_u32(func.signature.return_type):
+        return nil
+    val block = func.blocks[0]
+    if block.instructions.len() != 1:
+        return nil
+    match block.instructions[0].kind:
+        case Const(destination, Int(value), type_):
+            if value != 1048691 or not strict_mir_is_u32(type_) or not strict_mir_intrinsic_return_matches(block, destination):
+                return nil
+            val summary = HwModule(name: func.name, profile: config.profile,
+                port_count: 1, signal_count: 0, register_count: 0, memory_count: 0,
+                comb_op_count: 1, clock_domain_count: 1, fallback_function: "",
+                cost: HwCostModel.empty())
+            val module = HwModuleDef(summary: summary, config: config,
+                node_id: HwNodeId.module_root(func.name),
+                origins: [HwOrigin(node_id: HwNodeId.child(func.name, "canonical"), source_name: "riscv.ebreak.canonical")],
+                ports: [HwPort.output("canonical_instruction", "Bits", 32)], signals: [],
+                constants: [HwConstant.bits("canonical_value", 32, value)],
+                comb_ops: [HwCombOp.unary("passthrough", "canonical_instruction", "canonical_value", 32)],
+                compare_ops: [], select_ops: [], clock_domains: [HwClockDomain.default_domain()])
+            val diagnostic = module.shape_diagnostic()
+            if diagnostic != "":
+                return Some(HwirStrictLowerResult.rejected(diagnostic))
+            return Some(HwirStrictLowerResult.emitted(module))
+        case _: nil
+
+fn strict_mir_lower_terminal_zca_row(func: MirFunction, config: CoreConfig) -> HwirStrictLowerResult?:
+    """Recognize the closed four-block terminal C.EBREAK/C.ADDI MIR form.
+
+    This is intentionally structural: it rejects altered branch edges and
+    literals rather than dispatching on a function name or arbitrary CFG.
+    """
+    if func.blocks.len() != 4 or func.signature.params.len() != 1 or
+        not strict_mir_is_u32(func.signature.params[0]) or not strict_mir_is_u32(func.signature.return_type):
+        return nil
+    val entry = func.blocks[0]
+    val matched = func.blocks[1]
+    val missed = func.blocks[2]
+    val join = func.blocks[3]
+    if func.entry_block.id != 0 or entry.id.id != 0 or matched.id.id != 1 or missed.id.id != 2 or join.id.id != 3 or
+        entry.instructions.len() != 2 or matched.instructions.len() != 2 or missed.instructions.len() != 2:
+        return nil
+    if join.instructions.len() != 0:
+        return Some(HwirStrictLowerResult.rejected("HWIR-E-MIR-CFG: strict terminal join block must not contain instructions"))
+    var parcel_tag = -1
+    var parcel_tag_local = -1
+    var predicate_id = -1
+    match entry.instructions[0].kind:
+        case Const(destination, Int(value), type_):
+            if strict_mir_is_u32(type_):
+                parcel_tag = value
+                parcel_tag_local = destination.id
+        case _: ()
+    match entry.instructions[1].kind:
+        case BinOp(destination, Eq, left, right):
+            val right_id = strict_mir_copy_local(right)
+            if strict_mir_operand_is_arg(func, left, 0) and right_id != nil and right_id.unwrap().id == parcel_tag_local:
+                predicate_id = destination.id
+        case _: ()
+    if predicate_id < 0:
+        return nil
+    val predicate_local = strict_mir_local(func, LocalId(id: predicate_id))
+    if predicate_local == nil or not strict_mir_is_bool(predicate_local.unwrap().type_):
+        return Some(HwirStrictLowerResult.rejected("HWIR-E-MIR-LOCAL: strict terminal decode predicate must be Bool"))
+    match entry.terminator:
+        case If(condition, then_block, else_block):
+            val condition_id = strict_mir_copy_local(condition)
+            if condition_id == nil or condition_id.unwrap().id != predicate_id or then_block.id != 1 or else_block.id != 2:
+                return Some(HwirStrictLowerResult.rejected("HWIR-E-MIR-CFG: strict terminal decode requires matched and missed branch targets"))
+        case _: return Some(HwirStrictLowerResult.rejected("HWIR-E-MIR-CFG: strict terminal decode requires a predicate branch"))
+    match missed.terminator:
+        case Goto(target):
+            if target.id != 3:
+                return Some(HwirStrictLowerResult.rejected("HWIR-E-MIR-CFG: strict terminal miss branch must jump to the join block"))
+        case _: return Some(HwirStrictLowerResult.rejected("HWIR-E-MIR-CFG: strict terminal miss branch must jump to the join block"))
+    match matched.terminator:
+        case Goto(target):
+            if target.id != 3:
+                return Some(HwirStrictLowerResult.rejected("HWIR-E-MIR-CFG: strict terminal match branch must jump to the join block"))
+        case _: return Some(HwirStrictLowerResult.rejected("HWIR-E-MIR-CFG: strict terminal match branch must jump to the join block"))
+    var selected_local = -1
+    var canonical_value = -1
+    var canonical_local = -1
+    match matched.instructions[0].kind:
+        case Const(destination, Int(value), type_):
+            if strict_mir_is_u32(type_):
+                canonical_value = value
+                canonical_local = destination.id
+        case _: ()
+    match matched.instructions[1].kind:
+        case Copy(destination, source):
+            if source.id == canonical_local:
+                selected_local = destination.id
+        case _: ()
+    var illegal_local = -1
+    var missed_selected = -1
+    var illegal_value = -1
+    match missed.instructions[0].kind:
+        case Const(destination, Int(value), type_):
+            if strict_mir_is_u32(type_):
+                illegal_local = destination.id
+                illegal_value = value
+        case _: ()
+    match missed.instructions[1].kind:
+        case Copy(destination, source):
+            if source.id == illegal_local:
+                missed_selected = destination.id
+        case _: ()
+    val joined = strict_mir_return_id(join)
+    if selected_local < 0 or missed_selected != selected_local or illegal_value != 0 or joined == nil or joined.unwrap().id != selected_local:
+        return Some(HwirStrictLowerResult.rejected("HWIR-E-MIR-RETURN: strict terminal decode must join the selected canonical result"))
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Some(HwirStrictLowerResult.rejected("HWIR-E-COMPRESSED-PROFILE: strict terminal decode requires the zca-common-critical product profile"))
+    if parcel_tag == 36866 and canonical_value == 1048691:
+        return Some(strict_mir_emit_row(strict_zca_cebreak_row_hwir(func.name, config)))
+    if parcel_tag == 1 and canonical_value == 19:
+        return Some(strict_mir_emit_row(strict_zca_caddi_row_hwir(func.name, config)))
+    Some(HwirStrictLowerResult.rejected("HWIR-E-MIR-CONSTANT: strict terminal decode has no approved critical parcel literal"))
+
+pub fn lower_strict_mir_function_to_hwir(func: MirFunction, config: CoreConfig) -> HwirStrictLowerResult:
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return HwirStrictLowerResult.rejected(config_error)
+    if not func.has_vhdl_metadata or not func.vhdl_metadata.is_hardware:
+        return HwirStrictLowerResult.rejected("HWIR-E-NOT-HARDWARE: strict MIR lowering requires @hardware metadata")
+    if func.vhdl_metadata.has_clocked:
+        return HwirStrictLowerResult.rejected("HWIR-E-CLOCKED: strict MIR lowering currently supports combinational functions only")
+    if func.is_generic_template or func.generic_params.len() != 0 or func.vhdl_metadata.generics.len() != 0:
+        return HwirStrictLowerResult.rejected("HWIR-E-GENERIC: strict MIR lowering requires an elaborated non-generic function")
+    val closed_local_error = strict_mir_validate_closed_locals(func)
+    if closed_local_error != "":
+        return HwirStrictLowerResult.rejected(closed_local_error)
+    val canonical_leaf = strict_mir_lower_cebreak_constant_leaf(func, config)
+    if canonical_leaf != nil:
+        return canonical_leaf.unwrap()
+    val terminal_row = strict_mir_lower_terminal_zca_row(func, config)
+    if terminal_row != nil:
+        return terminal_row.unwrap()
+    val intrinsic_result = strict_mir_lower_approved_intrinsic(func, config)
+    if intrinsic_result != nil:
+        return intrinsic_result.unwrap()
+    if func.blocks.len() != 1 or func.entry_block.id != 0:
+        return HwirStrictLowerResult.rejected("HWIR-E-MIR-CFG: strict MIR lowering currently requires one entry block")
+    val block = func.blocks[0]
+    val returned = strict_mir_return_id(block)
+    if returned == nil:
+        return HwirStrictLowerResult.rejected("HWIR-E-MIR-RETURN: strict MIR lowering requires a direct copy return")
+    val return_id = returned.unwrap().id
+    # Preserve named intermediate values for multi-step graphs.  Only the
+    # canonical two-argument one-op leaf writes directly to result_out.
+    var direct_output_id = -1
+    if block.instructions.len() == 1:
+        match block.instructions[0].kind:
+            case BinOp(destination, _, left, right):
+                if destination.id == return_id and strict_mir_operand_is_arg(func, left, 0) and strict_mir_operand_is_arg(func, right, 1):
+                    direct_output_id = return_id
+            case _: ()
+    val result_width = strict_mir_bit_width(func.signature.return_type)
+    if result_width == 0:
+        return HwirStrictLowerResult.rejected("HWIR-E-MIR-SIGNATURE: strict MIR lowering requires Bool, u32/i32, or concrete Bits return type")
+    var ports: [HwPort] = []
+    var origins: [HwOrigin] = []
+    var input_index = 0
+    for type_ in func.signature.params:
+        val width = strict_mir_bit_width(type_)
+        if width == 0:
+            return HwirStrictLowerResult.rejected("HWIR-E-MIR-SIGNATURE: strict MIR lowering requires fixed-width scalar inputs")
+        var arg_id = -1
+        for local in func.locals:
+            match local.kind:
+                case Arg(index):
+                    if index == input_index:
+                        arg_id = local.id.id
+                case _: ()
+        if arg_id < 0:
+            return HwirStrictLowerResult.rejected("HWIR-E-MIR-LOCAL: strict MIR requires one Arg local per signature input")
+        val name = match strict_mir_local_name(func, LocalId(id: arg_id), direct_output_id):
+            case Ok(value): value
+            case Err(error): return HwirStrictLowerResult.rejected(error)
+        ports.push(HwPort.input(name, "Bits", width))
+        origins.push(HwOrigin(node_id: HwNodeId.child(func.name, "local_" + arg_id.to_text()), source_name: "mir.local." + arg_id.to_text()))
+        input_index = input_index + 1
+    ports.push(HwPort.output("result_out", "Bits", result_width))
+    var signals: [HwSignal] = []
+    var constant_local_ids: [i64] = []
+    for instruction in block.instructions:
+        match instruction.kind:
+            case Const(destination, _, _): constant_local_ids.push(destination.id)
+            case _: ()
+    for local in func.locals:
+        match local.kind:
+            case Temp | Var:
+                if local.id.id != direct_output_id and not constant_local_ids.contains(local.id.id):
+                    val width = strict_mir_bit_width(local.type_)
+                    if width == 0:
+                        return HwirStrictLowerResult.rejected("HWIR-E-MIR-LOCAL-TYPE: strict MIR temporaries require fixed widths")
+                    val name = match strict_mir_local_name(func, local.id, direct_output_id):
+                        case Ok(value): value
+                        case Err(error): return HwirStrictLowerResult.rejected(error)
+                    signals.push(HwSignal.comb(name, "Bits", width))
+            case _: ()
+    var constants: [HwConstant] = []
+    var comb_ops: [HwCombOp] = []
+    var produced_return = false
+    var instruction_index = 0
+    for instruction in block.instructions:
+        match instruction.kind:
+            case Const(dest, Int(value), type_):
+                val width = strict_mir_bit_width(type_)
+                if width == 0 or value < 0:
+                    return HwirStrictLowerResult.rejected("HWIR-E-MIR-CONSTANT: strict MIR supports non-negative fixed-width integer constants only")
+                val result = match strict_mir_local_name(func, dest, direct_output_id):
+                    case Ok(value): value
+                    case Err(error): return HwirStrictLowerResult.rejected(error)
+                val constant_name = if result == "result_out": "constant_result" else: result
+                constants.push(HwConstant.bits(constant_name, width, value))
+                if result == "result_out":
+                    comb_ops.push(HwCombOp.unary("passthrough", result, constant_name, width))
+                    produced_return = true
+            case BinOp(dest, op, left, right):
+                val operation = strict_mir_comb_op(op)
+                if operation == "":
+                    return HwirStrictLowerResult.rejected("HWIR-E-MIR-INSTRUCTION: strict MIR lowering requires one supported bitwise instruction")
+                val left_id = strict_mir_copy_local(left)
+                val right_id = strict_mir_copy_local(right)
+                if left_id == nil or right_id == nil:
+                    return HwirStrictLowerResult.rejected("HWIR-E-MIR-OPERAND: strict bitwise operations require copy operands")
+                val result = match strict_mir_local_name(func, dest, direct_output_id):
+                    case Ok(value): value
+                    case Err(error): return HwirStrictLowerResult.rejected(error)
+                val lhs = match strict_mir_local_name(func, left_id.unwrap(), direct_output_id):
+                    case Ok(value): value
+                    case Err(error): return HwirStrictLowerResult.rejected(error)
+                val rhs = match strict_mir_local_name(func, right_id.unwrap(), direct_output_id):
+                    case Ok(value): value
+                    case Err(error): return HwirStrictLowerResult.rejected(error)
+                val destination_local = strict_mir_local(func, dest)
+                if destination_local == nil:
+                    return HwirStrictLowerResult.rejected("HWIR-E-MIR-LOCAL: strict MIR references an unknown local")
+                val width = strict_mir_bit_width(destination_local.unwrap().type_)
+                if width == 0:
+                    return HwirStrictLowerResult.rejected("HWIR-E-MIR-LOCAL-TYPE: strict bitwise result requires fixed width")
+                comb_ops.push(HwCombOp.binary(operation, result, lhs, rhs, width))
+                if result == "result_out": produced_return = true
+            case _: return HwirStrictLowerResult.rejected("HWIR-E-MIR-INSTRUCTION: strict MIR lowering requires one supported bitwise instruction")
+        val origin_role = if instruction_index == 0: "bitwise" else: "instruction_" + instruction_index.to_text()
+        origins.push(HwOrigin(node_id: HwNodeId.child(func.name, origin_role), source_name: "mir.block.0"))
+        instruction_index = instruction_index + 1
+    val returned_name = match strict_mir_local_name(func, returned.unwrap(), direct_output_id):
+        case Ok(value): value
+        case Err(error): return HwirStrictLowerResult.rejected(error)
+    if not produced_return:
+        comb_ops.push(HwCombOp.unary("passthrough", "result_out", returned_name, result_width))
+    origins.push(HwOrigin(node_id: HwNodeId.child(func.name, "return"), source_name: "mir.return"))
+    val summary = HwModule(name: func.name, profile: config.profile, port_count: ports.len(),
+        signal_count: signals.len(), register_count: 0, memory_count: 0,
+        comb_op_count: comb_ops.len(), clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(func.name), origins: origins, ports: ports,
+        signals: signals, constants: constants, comb_ops: comb_ops, compare_ops: [],
+        select_ops: [], clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return HwirStrictLowerResult.rejected(diagnostic)
+    HwirStrictLowerResult.emitted(module)

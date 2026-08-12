@@ -14,19 +14,20 @@ extern fn rt_ghdl_verify_vhdl_constraints(arch: text) -> i64
 extern fn rt_ghdl_verify_return_zero_contract(code_start: i64, exit_code: i64, arch: text) -> i64
 
 use std.nogc_sync_mut.debug.remote.exec.capability_report.{CapabilityReport, probe_external_formal}
+use std.hardware.riscv_common.retire.{RiscvRetireRecord}
 
 # ============================================================================
 # Concrete retire-chain theorem (XLEN-agnostic, non-vacuous)
 # ============================================================================
 
-struct RetireChainReport:
+pub struct RetireChainReport:
     """Result of the retire-chain check over one concrete RVFI trace."""
     ok: bool
     checked_retires: i64
     vacuous: bool
     violations: [text]
 
-fn check_retire_chain(orders: [i64], pc_rdata: [i64], pc_wdata: [i64], traps: [bool]) -> RetireChainReport:
+pub fn check_retire_chain(orders: [i64], pc_rdata: [i64], pc_wdata: [i64], traps: [bool]) -> RetireChainReport:
     """Concrete retire-chain theorem over a collected RVFI trace.
 
     Inputs are parallel arrays, one entry per VALID retire, XLEN-agnostic
@@ -58,6 +59,44 @@ fn check_retire_chain(orders: [i64], pc_rdata: [i64], pc_wdata: [i64], traps: [b
         checked_retires: n,
         vacuous: false,
         violations: violations)
+
+pub fn check_retire_records(records: [RiscvRetireRecord]) -> RetireChainReport:
+    """Check one concrete, homogeneous architectural retirement trace.
+
+    The common record is the only accepted RV32/RV64 migration boundary here:
+    invalid *valid* records and mixed-XLEN traces fail before the chain theorem
+    runs. Non-retiring samples (`valid=false`) are intentionally ignored so a
+    cycle-by-cycle collector may submit its raw trace. Fewer than two
+    architectural retirements is vacuous and never reports success.
+    """
+    var orders: [i64] = []
+    var pc_rdata: [i64] = []
+    var pc_wdata: [i64] = []
+    var traps: [bool] = []
+    var trace_xlen = 0
+    var index = 0
+    for record in records:
+        if record.valid:
+            val diagnostic = record.diagnostic()
+            if diagnostic != "":
+                return RetireChainReport(
+                    ok: false, checked_retires: orders.len(), vacuous: false,
+                    violations: ["retire {index}: {diagnostic}"])
+            if trace_xlen == 0:
+                trace_xlen = record.xlen
+            else if record.xlen != trace_xlen:
+                return RetireChainReport(
+                    ok: false, checked_retires: orders.len(), vacuous: false,
+                    violations: ["retire {index}: mixed XLEN trace ({record.xlen} after {trace_xlen})"])
+            orders = orders.push(record.order)
+            pc_rdata = pc_rdata.push(record.pc_before)
+            pc_wdata = pc_wdata.push(record.pc_after)
+            # An interrupt, like a synchronous trap, is an architectural
+            # control transfer and therefore may legitimately break ordinary
+            # sequential PC chaining.
+            traps = traps.push(record.trap or record.interrupt)
+        index = index + 1
+    check_retire_chain(orders, pc_rdata, pc_wdata, traps)
 
 fn render_retire_chain_report(report: RetireChainReport) -> text:
     """Human-readable one-line-per-issue rendering of a RetireChainReport."""

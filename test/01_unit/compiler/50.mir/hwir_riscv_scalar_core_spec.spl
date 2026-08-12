@@ -1,0 +1,68 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_core.{riscv_gen2_scalar_elaboration, riscv_gen2_scalar_dispatch}
+
+describe "RISC-V Gen2 unified scalar elaboration":
+    it "freezes separate RV32 and RV64 scalar products from one descriptor":
+        val rv32 = riscv_gen2_scalar_elaboration(CoreConfig.rv32_zca_mission_critical(), "none")
+        val rv64 = riscv_gen2_scalar_elaboration(CoreConfig.rv64_zca_mission_critical(), "none")
+        expect(rv32.is_ok()).to_equal(true)
+        expect(rv64.is_ok()).to_equal(true)
+        if rv32.is_ok() and rv64.is_ok():
+            expect(rv32.ok().unwrap().diagnostic()).to_equal("")
+            expect(rv64.ok().unwrap().diagnostic()).to_equal("")
+            expect(rv32.ok().unwrap().decoder.xlen).to_equal(32)
+            expect(rv64.ok().unwrap().decoder.xlen).to_equal(64)
+            expect(rv32.ok().unwrap().node_id.value == rv64.ok().unwrap().node_id.value).to_equal(false)
+        else:
+            expect(false).to_equal(true)
+
+    it "rejects a provider that does not belong to the selected scalar ISA profile":
+        val result = riscv_gen2_scalar_elaboration(CoreConfig.rv64_zca_mission_critical(), "dsp")
+        expect(result.is_err()).to_equal(true)
+        expect(result.err().unwrap()).to_equal(
+            "RISCV-PROVIDER-E-MULDIV: an ISA profile without M or Zmmul must select no multiply/divide provider")
+
+    it "does not alias valid concrete scalar products that share a profile label":
+        val standard = CoreConfig.rv32_zca_mission_critical()
+        val wider_pa = CoreConfig(xlen: 32, physical_address_bits: 40,
+            register_count: 32, profile: standard.profile,
+            isa_profile: standard.isa_profile,
+            compressed_decode_profile: standard.compressed_decode_profile)
+        val standard_result = riscv_gen2_scalar_elaboration(standard, "none")
+        val wider_pa_result = riscv_gen2_scalar_elaboration(wider_pa, "none")
+        expect(standard_result.is_ok()).to_equal(true)
+        expect(wider_pa_result.is_ok()).to_equal(true)
+        if standard_result.is_ok() and wider_pa_result.is_ok():
+            expect(standard_result.ok().unwrap().node_id.value ==
+                wider_pa_result.ok().unwrap().node_id.value).to_equal(false)
+        else:
+            expect(false).to_equal(true)
+
+    it "resolves an instruction only through the selected concrete scalar table":
+        val rv32 = riscv_gen2_scalar_elaboration(CoreConfig.rv32_zca_mission_critical(), "none").unwrap()
+        val add = riscv_gen2_scalar_dispatch(rv32, 0x00B50533)
+        val rv64_word = riscv_gen2_scalar_dispatch(rv32, 0x00B5053B)
+        expect(add.is_ok()).to_equal(true)
+        if add.is_ok():
+            expect(add.ok().unwrap().entry.id).to_equal("rv.i.add")
+            expect(add.ok().unwrap().provider).to_equal("scalar-integer")
+            expect(add.ok().unwrap().diagnostic()).to_equal("")
+        else:
+            expect(false).to_equal(true)
+        expect(rv64_word.is_err()).to_equal(true)
+        expect(rv64_word.err().unwrap()).to_equal(
+            "RISCV-DECODER-E-ILLEGAL: instruction is not declared by the scalar decoder plan")
+
+    it "fixes an M instruction to the provider selected at elaboration":
+        val config = CoreConfig(xlen: 32, physical_address_bits: 32,
+            register_count: 32, profile: "riscv-gen2-rv32-im-critical",
+            isa_profile: "rv32im", compressed_decode_profile: "none")
+        val scalar = riscv_gen2_scalar_elaboration(config, "iterative").unwrap()
+        val multiply = riscv_gen2_scalar_dispatch(scalar, 0x02000033)
+        expect(multiply.is_ok()).to_equal(true)
+        if multiply.is_ok():
+            expect(multiply.ok().unwrap().entry.id).to_equal("rv.m.mul")
+            expect(multiply.ok().unwrap().provider).to_equal("iterative")
+        else:
+            expect(false).to_equal(true)

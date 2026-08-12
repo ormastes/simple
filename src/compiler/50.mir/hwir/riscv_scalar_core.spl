@@ -1,0 +1,103 @@
+# Unified scalar-core elaboration descriptor for RISC-V Gen2.
+
+use compiler.mir.hwir.types.{CoreConfig, HwNodeId}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan, RiscvScalarIsaEntry, RiscvScalarProviderSelection, riscv_scalar_decoder_plan, riscv_scalar_elaborate_provider}
+
+pub class RiscvGen2ScalarElaboration:
+    """One frozen scalar product view for a concrete XLEN configuration.
+
+    It is compiler-host elaboration metadata, never a runtime hardware
+    configuration bus or a claim that complete scalar RTL has been emitted.
+    """
+    node_id: HwNodeId
+    config: CoreConfig
+    decoder: RiscvScalarDecoderPlan
+    providers: RiscvScalarProviderSelection
+
+    me diagnostic() -> text:
+        val config_error = self.config.diagnostic()
+        if config_error != "": return config_error
+        if self.config.xlen != self.decoder.xlen as i32 or self.config.xlen != self.providers.xlen as i32:
+            return "HWIR-E-RISCV-SCALAR-XLEN: scalar elaboration must retain one concrete XLEN across configuration, decode, and providers"
+        if self.config.isa_profile != self.decoder.isa_profile or self.config.isa_profile != self.providers.isa_profile:
+            return "HWIR-E-RISCV-SCALAR-PROFILE: scalar elaboration must retain one concrete ISA profile"
+        if self.decoder.diagnostic() != "" or self.providers.diagnostic() != "":
+            return "HWIR-E-RISCV-SCALAR-PLAN: scalar elaboration requires validated declarative decoder and provider plans"
+        if not self.node_id.is_valid():
+            return "HWIR-E-RISCV-SCALAR-ID: scalar elaboration requires a stable product node ID"
+        ""
+
+pub fn riscv_gen2_scalar_elaboration(config: CoreConfig,
+    muldiv_provider: text) -> Result<RiscvGen2ScalarElaboration, text>:
+    """Freeze one shared RV32/RV64 scalar product before HWIR lowering.
+
+    The selected configuration is concrete, so no resulting netlist needs an
+    XLEN or extension multiplexer.
+    """
+    val config_error = config.diagnostic()
+    if config_error != "": return Err(config_error)
+    val decoder = riscv_scalar_decoder_plan(config.isa_profile)?
+    val providers = riscv_scalar_elaborate_provider(config.isa_profile, muldiv_provider)?
+    # A profile label is not a complete product identity: a valid elaboration
+    # may use a different concrete PA width while retaining the same profile.
+    # Include every CoreConfig field that can affect scalar integration so
+    # provenance cannot alias two concrete products.
+    val product_id = "riscv_gen2_scalar_" + config.profile + "_x" +
+        config.xlen.to_text() + "_pa" + config.physical_address_bits.to_text() +
+        "_r" + config.register_count.to_text()
+    val descriptor = RiscvGen2ScalarElaboration(
+        node_id: HwNodeId.module_root(product_id),
+        config: config, decoder: decoder, providers: providers)
+    val diagnostic = descriptor.diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(descriptor)
+
+pub class RiscvGen2ScalarDispatchPlan:
+    """One concrete scalar instruction decision owned by an elaborated product.
+
+    This is a compiler-host lowering input for a future typed execution unit.
+    It has no runtime XLEN, extension, or provider lookup: construction fixes
+    the exact declarative ISA row and its selected implementation identity.
+    """
+    node_id: HwNodeId
+    elaboration: RiscvGen2ScalarElaboration
+    instruction: u32
+    entry: RiscvScalarIsaEntry
+    provider: text
+
+    me diagnostic() -> text:
+        val elaboration_error = self.elaboration.diagnostic()
+        if elaboration_error != "": return elaboration_error
+        val decoded = self.elaboration.decoder.lookup(self.instruction)
+        if decoded.is_err():
+            return "HWIR-E-RISCV-SCALAR-DECODE: scalar dispatch requires one instruction declared by the selected decoder plan"
+        # provider_for performs an exact structural table-ownership check, so
+        # an entry with a copied ID but altered encoding/effect cannot reach a
+        # concrete execution binding.
+        val expected_provider = self.elaboration.providers.provider_for(self.entry)
+        if expected_provider.is_err():
+            return "HWIR-E-RISCV-SCALAR-ENTRY: scalar dispatch entry must be structurally owned by the selected provider plan"
+        if self.provider != expected_provider.ok().unwrap():
+            return "HWIR-E-RISCV-SCALAR-PROVIDER: scalar dispatch provider must equal the elaborated concrete provider"
+        if self.entry.id != decoded.ok().unwrap().id or
+            not self.entry.matches(self.instruction, self.elaboration.decoder.xlen):
+            return "HWIR-E-RISCV-SCALAR-DECODE: scalar dispatch entry must match the selected concrete instruction"
+        if not self.node_id.is_valid():
+            return "HWIR-E-RISCV-SCALAR-DISPATCH-ID: scalar dispatch requires a stable node ID"
+        ""
+
+pub fn riscv_gen2_scalar_dispatch(elaboration: RiscvGen2ScalarElaboration,
+    instruction: u32) -> Result<RiscvGen2ScalarDispatchPlan, text>:
+    """Resolve one instruction through a frozen product plan before HWIR lowering."""
+    val elaboration_error = elaboration.diagnostic()
+    if elaboration_error != "": return Err(elaboration_error)
+    val entry = elaboration.decoder.lookup(instruction)?
+    val provider = elaboration.providers.provider_for(entry)?
+    val plan = RiscvGen2ScalarDispatchPlan(
+        node_id: HwNodeId.child(elaboration.node_id.value,
+            "scalar_dispatch_" + entry.id + "_" + instruction.to_text()),
+        elaboration: elaboration, instruction: instruction, entry: entry,
+        provider: provider)
+    val diagnostic = plan.diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(plan)

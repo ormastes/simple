@@ -1,0 +1,791 @@
+# Strict compressed-predecode interface tests.
+
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig, HwModuleDef, HwNodeId, HwPort}
+use compiler.mir.hwir.predecode.{HwPredecodeInterface, strict_riscv_predecode_interface}
+use compiler.mir.hwir.branch_predecode.{HwBranchPredecodeInterface, strict_riscv_branch_predecode_interface}
+use compiler.mir.hwir.trap_predecode.{HwTrapPredecodeInterface, strict_riscv_trap_predecode_interface, strict_zca_cebreak_trap_predecode_hwir}
+use compiler.mir.hwir.trap_frontend.{strict_zca_trap_migrating_isa_ids, strict_zca_trap_migrating_predecode_hwir}
+use compiler.mir.hwir.stateful_frontend.{HwTrapParcelFrontendInterface, strict_parcel_frontend_decoder_entity, strict_riscv_trap_parcel_frontend_interface, strict_zca_single_outstanding_frontend_hwir, strict_zca_trap_single_outstanding_frontend_hwir}
+use compiler.mir.hwir.sequential.{HwSeqGuard, HwSeqInstancePin, HwSeqOutputBinding, HwSequentialPlan}
+use compiler.mir.hwir.frontend.{HwFrontendHandoffInterface, strict_riscv_frontend_handoff_interface, strict_zca_control_predecode_hwir, strict_zca_cjr_predecode_row_hwir, strict_zca_cjalr_predecode_row_hwir, strict_zca_migrating_isa_ids, strict_zca_migrating_predecode_hwir, strict_zca_rv32_cjal_migrating_isa_ids, strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_isa_ids, strict_zca_rv64_addiw_migrating_predecode_hwir}
+use compiler.mir.hwir.zca_rows.{strict_zca_cj_predecode_row_hwir, strict_zca_cjal_rv32_predecode_row_hwir, strict_zca_caddiw_rv64_predecode_row_hwir, strict_zca_cbeqz_predecode_row_hwir, strict_zca_cbnez_predecode_row_hwir}
+use compiler.mir.hwir.zca_outcomes.{strict_zca_lw_outcome_hwir, strict_zca_sw_outcome_hwir, strict_zca_lwsp_outcome_hwir, strict_zca_swsp_outcome_hwir, strict_zca_cli_outcome_hwir, strict_zca_caddi_outcome_hwir, strict_zca_caddi16sp_outcome_hwir, strict_zca_clui_outcome_hwir, strict_zca_slli_low_outcome_hwir, strict_zca_srli_low_outcome_hwir, strict_zca_srai_low_outcome_hwir, strict_zca_candi_outcome_hwir, strict_zca_csub_outcome_hwir, strict_zca_cxor_outcome_hwir, strict_zca_cor_outcome_hwir, strict_zca_cand_outcome_hwir, strict_zca_cmv_outcome_hwir, strict_zca_cadd_outcome_hwir}
+use compiler.backend.backend.hwir_to_vhdl.{compile_strict_zca_rv32_cjal_migrating_predecode_product, compile_strict_zca_rv64_addiw_migrating_predecode_product, compile_strict_zca_single_outstanding_frontend_product, render_strict_hwir_vhdl, strict_stateful_graph_sha}
+use std.hardware.riscv_common.isa.isa_database.{riscv_zca_critical_subset_entries}
+
+fn strict_output_driver_count(module: HwModuleDef, output_name: text) -> i32:
+    var count = 0
+    for op in module.comb_ops:
+        if op.result == output_name:
+            count = count + 1
+    for op in module.compare_ops:
+        if op.result == output_name:
+            count = count + 1
+    for op in module.select_ops:
+        if op.result == output_name:
+            count = count + 1
+    count
+
+fn strict_origin_source_count(module: HwModuleDef, source_name: text) -> i32:
+    var count = 0
+    for origin in module.origins:
+        if origin.source_name == source_name:
+            count = count + 1
+    count
+
+describe "strict RISC-V compressed predecode contract":
+    it "REQ-G2-001 rejects duplicate strict-HWIR drivers before emission":
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val one_driver = HwModuleDef(
+            summary: HwModule(name: "one_driver", profile: config.profile,
+                port_count: 1, signal_count: 0, register_count: 0, memory_count: 0,
+                comb_op_count: 1, clock_domain_count: 1, fallback_function: "",
+                cost: HwCostModel.empty()), config: config,
+            node_id: HwNodeId.module_root("one_driver"),
+            origins: [HwOrigin(node_id: HwNodeId.child("one_driver", "source"), source_name: "test.one_driver")],
+            ports: [HwPort.output("result", "Bits", 1)], signals: [],
+            constants: [HwConstant.bits("zero", 1, 0)],
+            comb_ops: [HwCombOp.unary("passthrough", "result", "zero", 1)],
+            compare_ops: [], select_ops: [], clock_domains: [HwClockDomain.default_domain()])
+        expect(one_driver.shape_diagnostic()).to_equal("")
+        val duplicate_driver = HwModuleDef(
+            summary: HwModule(name: "duplicate_driver", profile: config.profile,
+                port_count: 1, signal_count: 0, register_count: 0, memory_count: 0,
+                comb_op_count: 2, clock_domain_count: 1, fallback_function: "",
+                cost: HwCostModel.empty()), config: config,
+            node_id: HwNodeId.module_root("duplicate_driver"),
+            origins: [HwOrigin(node_id: HwNodeId.child("duplicate_driver", "source"), source_name: "test.duplicate_driver")],
+            ports: [HwPort.output("result", "Bits", 1)], signals: [],
+            constants: [HwConstant.bits("zero", 1, 0)],
+            comb_ops: [HwCombOp.unary("passthrough", "result", "zero", 1),
+                HwCombOp.unary("passthrough", "result", "zero", 1)],
+            compare_ops: [], select_ops: [], clock_domains: [HwClockDomain.default_domain()])
+        expect(duplicate_driver.shape_diagnostic()).to_start_with("HWIR-E-COMB")
+
+    it "REQ-G2-011 isolates RV32 C.JAL from the common profile and preserves its x1 link field":
+        val rv32 = strict_zca_cjal_rv32_predecode_row_hwir("cjal_rv32", CoreConfig.rv32_zca_cjal_mission_critical())
+        if val module = rv32.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(strict_origin_source_count(module, "zca.c.jal")).to_equal(4)
+            var link_field_present = false
+            for constant in module.constants:
+                if constant.name == "jal_link_register_field" and constant.value == 128:
+                    link_field_present = true
+            expect(link_field_present).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+        val common = strict_zca_cjal_rv32_predecode_row_hwir("cjal_common", CoreConfig.rv32_zca_mission_critical())
+        expect(common.is_err()).to_equal(true)
+        if val diagnostic = common.err():
+            expect(diagnostic).to_start_with("HWIR-E-ZCA-CJAL-PROFILE")
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-011 composes C.JAL only into a distinct RV32 migrating frontend product":
+        val config = CoreConfig.rv32_zca_cjal_mission_critical()
+        val module = strict_zca_rv32_cjal_migrating_predecode_hwir(
+            "rv32_cjal_migrating", config)
+        if val decoded = module.ok():
+            expect(decoded.shape_diagnostic()).to_equal("")
+            expect(decoded.ports.len()).to_equal(10)
+            expect(decoded.port_width("rs1_value")).to_equal(32)
+            expect(strict_origin_source_count(decoded, "zca.c.jal")).to_be_greater_than(0)
+            expect(strict_zca_rv32_cjal_migrating_isa_ids().contains("zca.c.jal")).to_equal(true)
+            for output_name in ["canonical_instruction", "original_length_bytes", "legal", "next_pc", "redirect_valid", "redirect_target"]:
+                expect(strict_output_driver_count(decoded, output_name)).to_equal(1)
+            val emitted = compile_strict_zca_rv32_cjal_migrating_predecode_product(config)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.config_profile).to_equal("riscv-gen2-rv32-zca-cjal-critical")
+            expect(emitted.vhdl).to_contain("entity riscv_gen2_zca_rv32_cjal_migrating_predecode is")
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-012 isolates RV64 C.ADDIW, including signed immediate and rd=x0 rejection":
+        val config = CoreConfig.rv64_zca_addiw_mission_critical()
+        val row = strict_zca_caddiw_rv64_predecode_row_hwir("caddiw_rv64", config)
+        if val module = row.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.port_width("fetch_pc")).to_equal(56)
+            expect(strict_origin_source_count(module, "zca.c.addiw")).to_be_greater_than(0)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.vhdl.contains("entity caddiw_rv64 is")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+        val frontend = strict_zca_rv64_addiw_migrating_predecode_hwir("caddiw_rv64_frontend", config)
+        if val module = frontend.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.port_width("rs1_value")).to_equal(64)
+            expect(strict_origin_source_count(module, "zca.c.addiw")).to_be_greater_than(0)
+            expect(strict_zca_rv64_addiw_migrating_isa_ids().contains("zca.c.addiw")).to_equal(true)
+            expect(strict_output_driver_count(module, "canonical_instruction")).to_equal(1)
+            expect(compile_strict_zca_rv64_addiw_migrating_predecode_product(config).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+        val rv32_rejected = strict_zca_caddiw_rv64_predecode_row_hwir("caddiw_bad", CoreConfig.rv32_zca_cjal_mission_critical())
+        expect(rv32_rejected.is_err()).to_equal(true)
+        expect(rv32_rejected.err().unwrap()).to_equal("HWIR-E-ZCA-ADDIW-PROFILE: C.ADDIW requires the concrete RV64 Zca-ADDIW product profile")
+        expect(strict_zca_rv32_cjal_migrating_predecode_hwir(
+            "rv64_cjal_rejected", CoreConfig.rv64_zca_mission_critical()).is_err()).to_equal(true)
+
+    it "REQ-G2-013 binds specialized parcel frontends to their exact elaborated decoders":
+        val cjal_config = CoreConfig.rv32_zca_cjal_mission_critical()
+        val addiw_config = CoreConfig.rv64_zca_addiw_mission_critical()
+        expect(strict_parcel_frontend_decoder_entity(cjal_config).unwrap()).to_equal(
+            "riscv_gen2_zca_rv32_cjal_migrating_predecode")
+        expect(strict_parcel_frontend_decoder_entity(addiw_config).unwrap()).to_equal(
+            "riscv_gen2_zca_rv64_addiw_migrating_predecode")
+        val cjal = strict_zca_single_outstanding_frontend_hwir(
+            "riscv_gen2_zca_rv32_cjal_single_outstanding_frontend", cjal_config)
+        val addiw = strict_zca_single_outstanding_frontend_hwir(
+            "riscv_gen2_zca_rv64_addiw_single_outstanding_frontend", addiw_config)
+        if cjal.is_ok() and addiw.is_ok():
+            expect(cjal.ok().unwrap().decoder_entity).to_equal("riscv_gen2_zca_rv32_cjal_migrating_predecode")
+            expect(addiw.ok().unwrap().decoder_entity).to_equal("riscv_gen2_zca_rv64_addiw_migrating_predecode")
+            val emitted_cjal = compile_strict_zca_single_outstanding_frontend_product(cjal_config)
+            val emitted_addiw = compile_strict_zca_single_outstanding_frontend_product(addiw_config)
+            expect(emitted_cjal.is_success()).to_equal(true)
+            expect(emitted_addiw.is_success()).to_equal(true)
+            expect(emitted_cjal.vhdl).to_contain("entity riscv_gen2_zca_rv32_cjal_migrating_predecode is")
+            expect(emitted_addiw.vhdl).to_contain("entity riscv_gen2_zca_rv64_addiw_migrating_predecode is")
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-011 closes the v2 frontend admission list over the declarative critical subset":
+        val expected = riscv_zca_critical_subset_entries()
+        val v1_ids = strict_zca_migrating_isa_ids()
+        val v2_ids = strict_zca_trap_migrating_isa_ids()
+        expect(v1_ids.len()).to_equal(expected.len() - 1)
+        expect(v2_ids.len()).to_equal(expected.len())
+        expect(v1_ids.contains("zca.c.ebreak")).to_equal(false)
+        var v2_match_count = 0
+        for entry in expected:
+            expect(v2_ids.contains(entry.id)).to_equal(true)
+            var occurrences = 0
+            for id in v2_ids:
+                if id == entry.id:
+                    occurrences = occurrences + 1
+            expect(occurrences).to_equal(1)
+            v2_match_count = v2_match_count + 1
+        expect(v2_match_count).to_equal(v2_ids.len())
+
+    it "REQ-G2-010 retains the v2 C.EBREAK trap effect through a one-entry frontend boundary":
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val decoder = strict_zca_trap_migrating_predecode_hwir("trap_migrating_predecode", config)
+        if val module = decoder.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.ports.len()).to_equal(13)
+            expect(strict_origin_source_count(module, "riscv.gen2.trap_migrating_predecode")).to_equal(1)
+            expect(strict_origin_source_count(module, "zca.c.ebreak.trap")).to_be_greater_than(0)
+            expect(strict_output_driver_count(module, "trap_valid")).to_equal(1)
+            expect(strict_output_driver_count(module, "trap_cause")).to_equal(1)
+            expect(strict_output_driver_count(module, "trap_tval")).to_equal(1)
+        else:
+            expect(false).to_equal(true)
+        val interface = strict_riscv_trap_parcel_frontend_interface(config)
+        if val contract = interface.ok():
+            expect(contract.shape_diagnostic()).to_equal("")
+            expect(contract.ports().len()).to_equal(24)
+            expect(contract.trap_valid.bit_width).to_equal(1)
+            expect(contract.trap_cause.bit_width).to_equal(32)
+        else:
+            expect(false).to_equal(true)
+        val frontend = strict_zca_trap_single_outstanding_frontend_hwir("trap_stateful_frontend", config)
+        if val product = frontend.ok():
+            expect(product.shape_diagnostic()).to_equal("")
+            expect(product.decoder_entity).to_equal("riscv_gen2_zca_trap_migrating_predecode_rv32")
+            expect(product.registers.len()).to_equal(8)
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-003 rejects a malformed v2 trap-retirement interface":
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val base = strict_riscv_trap_parcel_frontend_interface(config)
+        if val contract = base.ok():
+            val malformed = HwTrapParcelFrontendInterface(
+                node_id: contract.node_id, config: contract.config,
+                clk: contract.clk, rst: contract.rst, fetch_valid: contract.fetch_valid,
+                fetch_parcel: contract.fetch_parcel, fetch_pc: contract.fetch_pc,
+                rs1_index: contract.rs1_index, rs1_value: contract.rs1_value,
+                dispatch_accept: contract.dispatch_accept, retire_valid: contract.retire_valid,
+                retire_lineage: contract.retire_lineage,
+                retire_original_parcel: contract.retire_original_parcel,
+                retire_canonical_instruction: contract.retire_canonical_instruction,
+                retire_original_length_bytes: contract.retire_original_length_bytes,
+                fetch_ready: contract.fetch_ready,
+                dispatch_valid: contract.dispatch_valid, dispatch_lineage: contract.dispatch_lineage,
+                protocol_fault: contract.protocol_fault, original_parcel: contract.original_parcel,
+                canonical_instruction: contract.canonical_instruction,
+                original_length_bytes: contract.original_length_bytes, legal: contract.legal,
+                next_pc: contract.next_pc, redirect_valid: contract.redirect_valid,
+                redirect_target: contract.redirect_target,
+                trap_valid: HwPort.output("trap_valid", "Bits", 2),
+                trap_cause: contract.trap_cause, trap_tval: contract.trap_tval
+            )
+            expect(malformed.shape_diagnostic()).to_equal("HWIR-E-TRAP-PARCEL-FRONTEND-OUTPUT-WIDTH: trap frontend output widths do not match its concrete product configuration")
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-010 rejects a stateful frontend whose decoder is not the concrete typed child":
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val frontend = strict_zca_trap_single_outstanding_frontend_hwir("trap_decoder_identity", config)
+        if val product = frontend.ok():
+            product.decoder_entity = "unbound_decoder"
+            expect(product.shape_diagnostic()).to_equal("HWIR-E-TRAP-PARCEL-FRONTEND-DECODER: trap frontend decoder identity must match the concrete critical product")
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-010 rejects malformed sequential bindings and commits decoder identity into the graph hash":
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val frontend = strict_zca_trap_single_outstanding_frontend_hwir("trap_sequential_contract", config)
+        if val product = frontend.ok():
+            var duplicate_pins = product.sequential.decoder_pins
+            duplicate_pins.push(HwSeqInstancePin(port_name: "original_parcel", signal_name: "parcel_duplicate", direction: "in", bit_width: 16))
+            val duplicate_pin_plan = HwSequentialPlan(owner_id: product.sequential.owner_id,
+                registers: product.sequential.registers, rules: product.sequential.rules,
+                outputs: product.sequential.outputs, decoder_pins: duplicate_pins)
+            expect(duplicate_pin_plan.diagnostic_for_ports(product.frontend_contract.ports())).to_equal("HWIR-E-SEQUENTIAL-INSTANCE: decoder pins must be typed inputs or outputs")
+
+            val invalid_output_plan = HwSequentialPlan(owner_id: product.sequential.owner_id,
+                registers: product.sequential.registers, rules: product.sequential.rules,
+                outputs: [HwSeqOutputBinding.direct("fetch_ready", "valid_reg", 2)],
+                decoder_pins: product.sequential.decoder_pins)
+            expect(invalid_output_plan.diagnostic_for_ports(product.frontend_contract.ports())).to_equal("HWIR-E-SEQUENTIAL-OUTPUT: sequential bindings must drive matching public outputs")
+
+            val graph = strict_stateful_graph_sha(product.node_id.value, product.config,
+                product.origins, product.frontend_contract.ports(), product.decoder_entity,
+                product.sequential, "decoder-graph-a")
+            val changed_decoder_graph = strict_stateful_graph_sha(product.node_id.value,
+                product.config, product.origins, product.frontend_contract.ports(),
+                "riscv_gen2_zca_trap_migrating_predecode_rv64", product.sequential,
+                "decoder-graph-a")
+            expect(graph.len()).to_equal(64)
+            expect(graph == changed_decoder_graph).to_equal(false)
+
+            var changed_outputs = product.sequential.outputs
+            var changed_ready = changed_outputs[0]
+            changed_ready.guards = [HwSeqGuard.high("valid_reg"), HwSeqGuard.low("fault_reg")]
+            changed_outputs[0] = changed_ready
+            val changed_guard_plan = HwSequentialPlan(owner_id: product.sequential.owner_id,
+                registers: product.sequential.registers, rules: product.sequential.rules,
+                outputs: changed_outputs, decoder_pins: product.sequential.decoder_pins)
+            expect(changed_guard_plan.diagnostic_for_ports(product.frontend_contract.ports())).to_equal("")
+            val changed_guard_graph = strict_stateful_graph_sha(product.node_id.value,
+                product.config, product.origins, product.frontend_contract.ports(),
+                product.decoder_entity, changed_guard_plan, "decoder-graph-a")
+            expect(product.sequential.canonical_text() == changed_guard_plan.canonical_text()).to_equal(false)
+            expect(graph == changed_guard_graph).to_equal(false)
+        else:
+            expect(false).to_equal(true)
+
+    it "rejects case-only sequential names before VHDL serialization":
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val register_product = strict_zca_trap_single_outstanding_frontend_hwir("casefold_register", config)
+        if val product = register_product.ok():
+            product.sequential.registers[1].name = "VALID_REG"
+            expect(product.sequential.diagnostic()).to_equal("HWIR-E-SEQUENTIAL-REGISTER: sequential registers must be unique and valid")
+        else:
+            expect(false).to_equal(true)
+
+        val rule_product = strict_zca_trap_single_outstanding_frontend_hwir("casefold_rule", config)
+        if val product = rule_product.ok():
+            product.sequential.rules[1].name = "RETIRE_MATCH"
+            expect(product.sequential.diagnostic()).to_equal("HWIR-E-SEQUENTIAL-RULE: sequential rules require unique names, guards, and assignments")
+        else:
+            expect(false).to_equal(true)
+
+        val pin_product = strict_zca_trap_single_outstanding_frontend_hwir("casefold_pin", config)
+        if val product = pin_product.ok():
+            product.sequential.decoder_pins[1].port_name = "ORIGINAL_PARCEL"
+            expect(product.sequential.diagnostic_for_ports(product.frontend_contract.ports())).to_equal("HWIR-E-SEQUENTIAL-INSTANCE: decoder pins must be typed inputs or outputs")
+        else:
+            expect(false).to_equal(true)
+
+        val output_product = strict_zca_trap_single_outstanding_frontend_hwir("casefold_output", config)
+        if val product = output_product.ok():
+            product.sequential.outputs[1].result = "FETCH_READY"
+            expect(product.sequential.diagnostic_for_ports(product.frontend_contract.ports())).to_equal("HWIR-E-SEQUENTIAL-OUTPUT: sequential bindings must drive matching public outputs")
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-002 rejects every concrete configuration boundary before strict predecode construction":
+        val invalid_pa = CoreConfig(xlen: 32, physical_address_bits: 15,
+            register_count: 32, profile: "rv32-critical", isa_profile: "rv32i",
+            compressed_decode_profile: "none")
+        expect(invalid_pa.diagnostic()).to_equal(
+            "HWIR-E-CONFIG-PA: physical address width must be in 16..64")
+
+        val invalid_register_count = CoreConfig(xlen: 32, physical_address_bits: 32,
+            register_count: 16, profile: "rv32-critical", isa_profile: "rv32i",
+            compressed_decode_profile: "none")
+        expect(invalid_register_count.diagnostic()).to_equal(
+            "HWIR-E-CONFIG-REGISTERS: strict RISC-V HWIR requires 32 architectural registers")
+
+        val unsafe_profile = CoreConfig(xlen: 32, physical_address_bits: 32,
+            register_count: 32, profile: "rv32 critical", isa_profile: "rv32i",
+            compressed_decode_profile: "none")
+        expect(unsafe_profile.diagnostic()).to_equal(
+            "HWIR-E-CONFIG-PROFILE: strict RISC-V HWIR requires safe concrete profile names")
+
+        val unknown_compressed = CoreConfig(xlen: 32, physical_address_bits: 32,
+            register_count: 32, profile: "rv32-critical", isa_profile: "rv32i",
+            compressed_decode_profile: "zcb-unadmitted")
+        expect(unknown_compressed.diagnostic()).to_equal(
+            "HWIR-E-CONFIG-COMPRESSED: unsupported strict compressed profile")
+
+        expect(strict_riscv_predecode_interface(invalid_pa).is_err()).to_equal(true)
+        expect(strict_riscv_predecode_interface(invalid_register_count).is_err()).to_equal(true)
+        expect(strict_riscv_predecode_interface(unsafe_profile).is_err()).to_equal(true)
+        expect(strict_riscv_predecode_interface(unknown_compressed).is_err()).to_equal(true)
+
+    it "REQ-G2-010 commits config, lineage, public ports, decoder identity, and decoder digest into the stateful graph hash":
+        val frontend = strict_zca_trap_single_outstanding_frontend_hwir(
+            "trap_graph_closure", CoreConfig.rv32_zca_mission_critical())
+        if val product = frontend.ok():
+            val baseline = strict_stateful_graph_sha(product.node_id.value, product.config,
+                product.origins, product.frontend_contract.ports(), product.decoder_entity,
+                product.sequential, "decoder-graph-a")
+
+            var changed_config = product.config
+            changed_config.physical_address_bits = 33
+            val config_mutation = strict_stateful_graph_sha(product.node_id.value,
+                changed_config, product.origins, product.frontend_contract.ports(),
+                product.decoder_entity, product.sequential, "decoder-graph-a")
+
+            var changed_origins = product.origins
+            changed_origins[0].source_name = changed_origins[0].source_name + ".mutated"
+            val origin_mutation = strict_stateful_graph_sha(product.node_id.value,
+                product.config, changed_origins, product.frontend_contract.ports(),
+                product.decoder_entity, product.sequential, "decoder-graph-a")
+
+            var changed_ports = product.frontend_contract.ports()
+            changed_ports[0].clock_domain = "derived"
+            val port_mutation = strict_stateful_graph_sha(product.node_id.value,
+                product.config, product.origins, changed_ports, product.decoder_entity,
+                product.sequential, "decoder-graph-a")
+
+            val decoder_digest_mutation = strict_stateful_graph_sha(product.node_id.value,
+                product.config, product.origins, product.frontend_contract.ports(),
+                product.decoder_entity, product.sequential, "decoder-graph-b")
+            val decoder_entity_mutation = strict_stateful_graph_sha(product.node_id.value,
+                product.config, product.origins, product.frontend_contract.ports(),
+                "riscv_gen2_zca_trap_migrating_predecode_rv64", product.sequential,
+                "decoder-graph-a")
+
+            expect(baseline.len()).to_equal(64)
+            expect(baseline == config_mutation).to_equal(false)
+            expect(baseline == origin_mutation).to_equal(false)
+            expect(baseline == port_mutation).to_equal(false)
+            expect(baseline == decoder_digest_mutation).to_equal(false)
+            expect(baseline == decoder_entity_mutation).to_equal(false)
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-010 rejects type-correct sequential rule ordering and reset drift from the fixed trap product":
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val frontend = strict_zca_trap_single_outstanding_frontend_hwir("trap_sequential_template", config)
+        if val product = frontend.ok():
+            val canonical_plan = product.sequential
+            var reordered_rules = canonical_plan.rules
+            val first_rule = reordered_rules[0]
+            reordered_rules[0] = reordered_rules[1]
+            reordered_rules[1] = first_rule
+            val reordered_plan = HwSequentialPlan(owner_id: canonical_plan.owner_id,
+                registers: canonical_plan.registers, rules: reordered_rules,
+                outputs: canonical_plan.outputs, decoder_pins: canonical_plan.decoder_pins)
+            expect(reordered_plan.diagnostic_for_ports(product.frontend_contract.ports())).to_equal("")
+            product.sequential = reordered_plan
+            expect(product.shape_diagnostic()).to_equal("HWIR-E-TRAP-PARCEL-FRONTEND-SEQUENTIAL-TEMPLATE: trap frontend sequential plan must exactly match the selected fixed critical product")
+
+            var changed_registers = canonical_plan.registers
+            var changed_valid = changed_registers[0]
+            changed_valid.reset_value = 1
+            changed_registers[0] = changed_valid
+            val changed_reset_plan = HwSequentialPlan(owner_id: canonical_plan.owner_id,
+                registers: changed_registers, rules: canonical_plan.rules,
+                outputs: canonical_plan.outputs, decoder_pins: canonical_plan.decoder_pins)
+            expect(changed_reset_plan.diagnostic_for_ports(product.frontend_contract.ports())).to_equal("")
+            product.sequential = changed_reset_plan
+            expect(product.shape_diagnostic()).to_equal("HWIR-E-TRAP-PARCEL-FRONTEND-SEQUENTIAL-TEMPLATE: trap frontend sequential plan must exactly match the selected fixed critical product")
+
+            var weakened_rules = canonical_plan.rules
+            var weakened_retire_match = weakened_rules[1]
+            weakened_retire_match.guards = [HwSeqGuard.high("retire_valid"),
+                HwSeqGuard.high("valid_reg"), HwSeqGuard.high("issued_reg"),
+                HwSeqGuard.equal("lineage_reg", "lineage_reg")]
+            weakened_rules[1] = weakened_retire_match
+            val weakened_guard_plan = HwSequentialPlan(owner_id: canonical_plan.owner_id,
+                registers: canonical_plan.registers, rules: weakened_rules,
+                outputs: canonical_plan.outputs, decoder_pins: canonical_plan.decoder_pins)
+            expect(weakened_guard_plan.diagnostic_for_ports(product.frontend_contract.ports())).to_equal("")
+            product.sequential = weakened_guard_plan
+            expect(product.shape_diagnostic()).to_equal("HWIR-E-TRAP-PARCEL-FRONTEND-SEQUENTIAL-TEMPLATE: trap frontend sequential plan must exactly match the selected fixed critical product")
+
+            var malformed_exhaustion_rules = canonical_plan.rules
+            var malformed_exhaustion = malformed_exhaustion_rules[0]
+            malformed_exhaustion.guards[7] = HwSeqGuard.all_ones("valid_reg")
+            malformed_exhaustion_rules[0] = malformed_exhaustion
+            val malformed_exhaustion_plan = HwSequentialPlan(owner_id: canonical_plan.owner_id,
+                registers: canonical_plan.registers, rules: malformed_exhaustion_rules,
+                outputs: canonical_plan.outputs, decoder_pins: canonical_plan.decoder_pins)
+            expect(malformed_exhaustion_plan.diagnostic_for_ports(product.frontend_contract.ports())).to_equal("HWIR-E-SEQUENTIAL-GUARD: all-ones guards require multi-bit typed values")
+
+            var bypass_exhaustion_rules = canonical_plan.rules
+            var bypass_exhaustion = bypass_exhaustion_rules[0]
+            bypass_exhaustion.guards[7] = HwSeqGuard.equal("lineage_reg", "lineage_reg")
+            bypass_exhaustion_rules[0] = bypass_exhaustion
+            val bypass_exhaustion_plan = HwSequentialPlan(owner_id: canonical_plan.owner_id,
+                registers: canonical_plan.registers, rules: bypass_exhaustion_rules,
+                outputs: canonical_plan.outputs, decoder_pins: canonical_plan.decoder_pins)
+            expect(bypass_exhaustion_plan.diagnostic_for_ports(product.frontend_contract.ports())).to_equal("")
+            product.sequential = bypass_exhaustion_plan
+            expect(product.shape_diagnostic()).to_equal("HWIR-E-TRAP-PARCEL-FRONTEND-SEQUENTIAL-TEMPLATE: trap frontend sequential plan must exactly match the selected fixed critical product")
+
+            var duplicate_outputs = canonical_plan.outputs
+            duplicate_outputs.push(HwSeqOutputBinding.direct("protocol_fault", "fault_reg", 1))
+            val duplicate_output_plan = HwSequentialPlan(owner_id: canonical_plan.owner_id,
+                registers: canonical_plan.registers, rules: canonical_plan.rules,
+                outputs: duplicate_outputs, decoder_pins: canonical_plan.decoder_pins)
+            expect(duplicate_output_plan.diagnostic_for_ports(product.frontend_contract.ports())).to_equal("HWIR-E-SEQUENTIAL-OUTPUT: sequential bindings must drive matching public outputs")
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-011 keeps C.EBREAK as a legal breakpoint effect in the versioned trap contract":
+        val rv32 = strict_riscv_trap_predecode_interface(CoreConfig.rv32_zca_mission_critical())
+        val rv64 = strict_riscv_trap_predecode_interface(CoreConfig.rv64_zca_mission_critical())
+        if val interface32 = rv32.ok():
+            expect(interface32.shape_diagnostic()).to_equal("")
+            expect(interface32.ports().len()).to_equal(13)
+            expect(interface32.trap_valid.bit_width).to_equal(1)
+            expect(interface32.trap_cause.bit_width).to_equal(32)
+            expect(interface32.trap_tval.bit_width).to_equal(32)
+        else:
+            expect(false).to_equal(true)
+        if val interface64 = rv64.ok():
+            expect(interface64.trap_cause.bit_width).to_equal(64)
+            expect(interface64.trap_tval.bit_width).to_equal(64)
+        else:
+            expect(false).to_equal(true)
+        val row = strict_zca_cebreak_trap_predecode_hwir("strict_cebreak_trap", CoreConfig.rv32_zca_mission_critical())
+        if val module = row.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(strict_origin_source_count(module, "zca.c.ebreak.trap")).to_equal(1)
+            expect(strict_output_driver_count(module, "legal")).to_equal(1)
+            expect(strict_output_driver_count(module, "trap_valid")).to_equal(1)
+            expect(strict_output_driver_count(module, "trap_cause")).to_equal(1)
+            expect(strict_output_driver_count(module, "trap_tval")).to_equal(1)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_be(true)
+            expect(emitted.vhdl.contains("breakpoint_cause")).to_be(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-003 rejects malformed C.EBREAK trap-effect ports before emission":
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val branch = strict_riscv_branch_predecode_interface(config)
+        if val branch_contract = branch.ok():
+            val malformed = HwTrapPredecodeInterface(
+                node_id: HwNodeId.module_root("riscv_trap_predecode"), config: config,
+                branch_predecode: branch_contract,
+                trap_valid: HwPort.output("trap_valid", "Bits", 1),
+                trap_cause: HwPort.output("trap_cause", "Bits", 31),
+                trap_tval: HwPort.output("trap_tval", "Bits", 32)
+            )
+            expect(malformed.shape_diagnostic()).to_equal("HWIR-E-TRAP-PREDECODE-CAUSE: trap predecode requires an XLEN-wide Bits trap_cause output")
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-011 composes admitted outcome rows with the branch-control slice through one legal-priority chain":
+        val rv32 = strict_zca_migrating_predecode_hwir("migrating_predecode_rv32", CoreConfig.rv32_zca_mission_critical())
+        val rv64 = strict_zca_migrating_predecode_hwir("migrating_predecode_rv64", CoreConfig.rv64_zca_mission_critical())
+        if rv32.is_ok() and rv64.is_ok():
+            val module32 = rv32.ok().unwrap()
+            val module64 = rv64.ok().unwrap()
+            expect(module32.shape_diagnostic()).to_equal("")
+            expect(module64.shape_diagnostic()).to_equal("")
+            expect(module32.port_width("rs1_value")).to_equal(32)
+            expect(module64.port_width("rs1_value")).to_equal(64)
+            expect(strict_origin_source_count(module32, "riscv.gen2.migrating_predecode")).to_equal(1)
+            expect(strict_origin_source_count(module32, "zca.c.lw.outcome")).to_be_greater_than(0)
+            expect(strict_origin_source_count(module32, "zca.c.addi16sp.outcome")).to_be_greater_than(0)
+            expect(strict_origin_source_count(module32, "zca.c.jr.predecode")).to_be_greater_than(0)
+            expect(strict_origin_source_count(module32, "zca.c.jalr.predecode")).to_be_greater_than(0)
+            expect(strict_origin_source_count(module32, "zca.c.lwsp.outcome")).to_be_greater_than(0)
+            expect(strict_output_driver_count(module32, "canonical_instruction")).to_equal(1)
+            expect(strict_output_driver_count(module32, "legal")).to_equal(1)
+            expect(strict_output_driver_count(module32, "next_pc")).to_equal(1)
+            expect(strict_output_driver_count(module32, "redirect_valid")).to_equal(1)
+            expect(strict_output_driver_count(module32, "redirect_target")).to_equal(1)
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-011 admits only classifier-complete normal rows through the explicit outcome adapter":
+        val config = CoreConfig.rv32_zca_mission_critical()
+        expect(strict_zca_lw_outcome_hwir("outcome_lw", config).is_ok()).to_be(true)
+        expect(strict_zca_sw_outcome_hwir("outcome_sw", config).is_ok()).to_be(true)
+        expect(strict_zca_lwsp_outcome_hwir("outcome_lwsp", config).is_ok()).to_be(true)
+        expect(strict_zca_swsp_outcome_hwir("outcome_swsp", config).is_ok()).to_be(true)
+        expect(strict_zca_cli_outcome_hwir("outcome_cli", config).is_ok()).to_be(true)
+        expect(strict_zca_caddi_outcome_hwir("outcome_caddi", config).is_ok()).to_be(true)
+        expect(strict_zca_caddi16sp_outcome_hwir("outcome_caddi16sp", config).is_ok()).to_be(true)
+        expect(strict_zca_clui_outcome_hwir("outcome_clui", config).is_ok()).to_be(true)
+        expect(strict_zca_slli_low_outcome_hwir("outcome_slli", config).is_ok()).to_be(true)
+        expect(strict_zca_srli_low_outcome_hwir("outcome_srli", config).is_ok()).to_be(true)
+        expect(strict_zca_srai_low_outcome_hwir("outcome_srai", config).is_ok()).to_be(true)
+        expect(strict_zca_candi_outcome_hwir("outcome_candi", config).is_ok()).to_be(true)
+        expect(strict_zca_csub_outcome_hwir("outcome_csub", config).is_ok()).to_be(true)
+        expect(strict_zca_cxor_outcome_hwir("outcome_cxor", config).is_ok()).to_be(true)
+        expect(strict_zca_cor_outcome_hwir("outcome_cor", config).is_ok()).to_be(true)
+        expect(strict_zca_cand_outcome_hwir("outcome_cand", config).is_ok()).to_be(true)
+        expect(strict_zca_cmv_outcome_hwir("outcome_cmv", config).is_ok()).to_be(true)
+        expect(strict_zca_cadd_outcome_hwir("outcome_cadd", config).is_ok()).to_be(true)
+        expect(strict_zca_lw_outcome_hwir("outcome_base", CoreConfig.rv32()).is_err()).to_be(true)
+
+    it "REQ-G2-003 concretely specializes address widths without runtime XLEN selection":
+        val rv32 = strict_riscv_predecode_interface(CoreConfig.rv32_zca_mission_critical())
+        val rv64 = strict_riscv_predecode_interface(CoreConfig.rv64_zca_mission_critical())
+        if val interface32 = rv32.ok():
+            expect(interface32.shape_diagnostic()).to_equal("")
+            expect(interface32.original_parcel.bit_width).to_equal(16)
+            expect(interface32.fetch_pc.bit_width).to_equal(32)
+            expect(interface32.canonical_instruction.bit_width).to_equal(32)
+            expect(interface32.original_length_bytes.bit_width).to_equal(2)
+            expect(interface32.next_pc.bit_width).to_equal(32)
+            expect(interface32.redirect_target.bit_width).to_equal(32)
+        else:
+            expect(false).to_equal(true)
+        if val interface64 = rv64.ok():
+            expect(interface64.fetch_pc.bit_width).to_equal(56)
+            expect(interface64.next_pc.bit_width).to_equal(56)
+            expect(interface64.redirect_target.bit_width).to_equal(56)
+            expect(interface64.config.xlen).to_equal(64)
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-003 refuses non-critical and malformed predecode interfaces before emission":
+        val base = strict_riscv_predecode_interface(CoreConfig.rv32())
+        expect(base.is_err()).to_be(true)
+        if val diagnostic = base.err():
+            expect(diagnostic).to_equal("HWIR-E-PREDECODE-PROFILE: strict compressed predecode requires zca-common-critical profile")
+        else:
+            expect(false).to_equal(true)
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val malformed = HwPredecodeInterface(
+            node_id: HwNodeId.module_root("riscv_predecode"), config: config,
+            original_parcel: HwPort.output("original_parcel", "Bits", 16),
+            fetch_pc: HwPort.input("fetch_pc", "Bits", 31),
+            canonical_instruction: HwPort.output("canonical_instruction", "Bits", 32),
+            original_length_bytes: HwPort.output("original_length_bytes", "Bits", 2),
+            legal: HwPort.output("legal", "Bits", 1),
+            next_pc: HwPort.output("next_pc", "Bits", 32),
+            redirect_valid: HwPort.output("redirect_valid", "Bits", 1),
+            redirect_target: HwPort.output("redirect_target", "Bits", 32)
+        )
+        expect(malformed.shape_diagnostic()).to_equal("HWIR-E-PREDECODE-DIRECTION: parcel and fetch PC are inputs; all predecode results are outputs")
+
+    it "REQ-G2-003 constructs C.J only as a typed predecode and redirect graph":
+        val built = strict_zca_cj_predecode_row_hwir("strict_cj_predecode", CoreConfig.rv64_zca_mission_critical())
+        if val module = built.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.port_width("original_parcel")).to_equal(16)
+            expect(module.port_width("canonical_instruction")).to_equal(32)
+            expect(module.port_width("fetch_pc")).to_equal(56)
+            expect(module.port_width("next_pc")).to_equal(56)
+            expect(module.port_width("redirect_target")).to_equal(56)
+            expect(module.has_port("redirect_valid")).to_be(true)
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_be(true)
+            expect(emitted.vhdl.contains("resize(signed(immediate_signed), 56)")).to_be(true)
+            expect(emitted.vhdl.contains("unsigned(fetch_pc) + unsigned(immediate_pa)")).to_be(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-003 rejects C.J predecode outside the frozen critical profile":
+        val rejected = strict_zca_cj_predecode_row_hwir("strict_cj_base", CoreConfig.rv32())
+        expect(rejected.is_err()).to_be(true)
+        if val diagnostic = rejected.err():
+            expect(diagnostic).to_equal("HWIR-E-PREDECODE-PROFILE: strict compressed predecode requires zca-common-critical profile")
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-003 specializes conditional-branch operand width with the product":
+        val rv32 = strict_riscv_branch_predecode_interface(CoreConfig.rv32_zca_mission_critical())
+        val rv64 = strict_riscv_branch_predecode_interface(CoreConfig.rv64_zca_mission_critical())
+        if val interface32 = rv32.ok():
+            expect(interface32.shape_diagnostic()).to_equal("")
+            expect(interface32.rs1_index.bit_width).to_equal(5)
+            expect(interface32.rs1_value.bit_width).to_equal(32)
+            expect(interface32.ports().len()).to_equal(10)
+        else:
+            expect(false).to_equal(true)
+        if val interface64 = rv64.ok():
+            expect(interface64.rs1_value.bit_width).to_equal(64)
+            expect(interface64.predecode.redirect_target.bit_width).to_equal(56)
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-003 rejects a conditional branch operand that is not XLEN-wide Bits":
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val predecode = strict_riscv_predecode_interface(config)
+        if val base = predecode.ok():
+            val malformed = HwBranchPredecodeInterface(
+                node_id: HwNodeId.module_root("riscv_branch_predecode"), config: config,
+                predecode: base, rs1_index: HwPort.input("rs1_index", "Bits", 5),
+                rs1_value: HwPort.input("rs1_value", "Bits", 31)
+            )
+            expect(malformed.shape_diagnostic()).to_equal("HWIR-E-BRANCH-PREDECODE-OPERAND: conditional branch requires an XLEN-wide Bits rs1_value input")
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-004 freezes a concrete frontend-to-dispatch handoff without claiming row composition":
+        val rv32 = strict_riscv_frontend_handoff_interface(CoreConfig.rv32_zca_mission_critical())
+        val rv64 = strict_riscv_frontend_handoff_interface(CoreConfig.rv64_zca_mission_critical())
+        if val frontend32 = rv32.ok():
+            expect(frontend32.shape_diagnostic()).to_equal("")
+            expect(frontend32.ports().len()).to_equal(12)
+            expect(frontend32.branch_predecode.predecode.original_parcel.name).to_equal("original_parcel")
+            expect(frontend32.branch_predecode.predecode.original_parcel.bit_width).to_equal(16)
+            expect(frontend32.branch_predecode.predecode.canonical_instruction.name).to_equal("canonical_instruction")
+            expect(frontend32.branch_predecode.predecode.canonical_instruction.bit_width).to_equal(32)
+            expect(frontend32.branch_predecode.predecode.original_length_bytes.bit_width).to_equal(2)
+            expect(frontend32.branch_predecode.predecode.legal.bit_width).to_equal(1)
+            expect(frontend32.branch_predecode.predecode.next_pc.bit_width).to_equal(32)
+            expect(frontend32.branch_predecode.predecode.redirect_target.bit_width).to_equal(32)
+            expect(frontend32.branch_predecode.rs1_index.name).to_equal("rs1_index")
+            expect(frontend32.branch_predecode.rs1_index.direction).to_equal("in")
+            expect(frontend32.branch_predecode.rs1_index.bit_width).to_equal(5)
+            expect(frontend32.branch_predecode.rs1_value.name).to_equal("rs1_value")
+            expect(frontend32.branch_predecode.rs1_value.direction).to_equal("in")
+            expect(frontend32.branch_predecode.rs1_value.bit_width).to_equal(32)
+            expect(frontend32.dispatch_accept.name).to_equal("dispatch_accept")
+            expect(frontend32.dispatch_accept.direction).to_equal("in")
+            expect(frontend32.dispatch_accept.bit_width).to_equal(1)
+            expect(frontend32.retire_valid.name).to_equal("retire_valid")
+            expect(frontend32.retire_valid.direction).to_equal("out")
+            expect(frontend32.retire_valid.bit_width).to_equal(1)
+        else:
+            expect(false).to_equal(true)
+        if val frontend64 = rv64.ok():
+            expect(frontend64.config.xlen).to_equal(64)
+            expect(frontend64.branch_predecode.rs1_value.bit_width).to_equal(64)
+            expect(frontend64.branch_predecode.predecode.fetch_pc.bit_width).to_equal(56)
+            expect(frontend64.branch_predecode.predecode.next_pc.bit_width).to_equal(56)
+            expect(frontend64.branch_predecode.predecode.redirect_target.bit_width).to_equal(56)
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-004 fails closed for a frontend configuration mismatch":
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val branch = strict_riscv_branch_predecode_interface(CoreConfig.rv64_zca_mission_critical())
+        if val branch64 = branch.ok():
+            val mismatch = HwFrontendHandoffInterface(
+                node_id: HwNodeId.module_root("riscv_gen2_frontend_handoff"), config: config,
+                branch_predecode: branch64,
+                dispatch_accept: HwPort.input("dispatch_accept", "Bits", 1),
+                retire_valid: HwPort.output("retire_valid", "Bits", 1)
+            )
+            expect(mismatch.shape_diagnostic()).to_equal("HWIR-E-FRONTEND-CONFIG: frontend and branch-predecode interfaces must use one concrete product configuration")
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-004 fails closed for malformed dispatch and retire ownership ports":
+        val config = CoreConfig.rv32_zca_mission_critical()
+        val branch = strict_riscv_branch_predecode_interface(config)
+        if val branch_contract = branch.ok():
+            val malformed_dispatch = HwFrontendHandoffInterface(
+                node_id: HwNodeId.module_root("riscv_gen2_frontend_handoff"), config: config,
+                branch_predecode: branch_contract,
+                dispatch_accept: HwPort.output("dispatch_accept", "Bits", 1),
+                retire_valid: HwPort.output("retire_valid", "Bits", 1)
+            )
+            expect(malformed_dispatch.shape_diagnostic()).to_equal("HWIR-E-FRONTEND-DISPATCH: frontend handoff requires a one-bit Bits dispatch_accept input")
+            val malformed_retire = HwFrontendHandoffInterface(
+                node_id: HwNodeId.module_root("riscv_gen2_frontend_handoff"), config: config,
+                branch_predecode: branch_contract,
+                dispatch_accept: HwPort.input("dispatch_accept", "Bits", 1),
+                retire_valid: HwPort.output("retire_valid", "Bits", 2)
+            )
+            expect(malformed_retire.shape_diagnostic()).to_equal("HWIR-E-FRONTEND-RETIRE: frontend handoff requires a one-bit Bits retire_valid output")
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-003 constructs conditional rows with an explicit XLEN operand and typed branch direction":
+        val beqz = strict_zca_cbeqz_predecode_row_hwir("strict_cbeqz_predecode", CoreConfig.rv32_zca_mission_critical())
+        val bnez = strict_zca_cbnez_predecode_row_hwir("strict_cbnez_predecode", CoreConfig.rv64_zca_mission_critical())
+        if val module = beqz.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.port_width("rs1_value")).to_equal(32)
+            expect(module.port_width("redirect_target")).to_equal(32)
+            expect(module.origins[0].source_name).to_equal("zca.c.beqz")
+            val emitted = render_strict_hwir_vhdl(module)
+            expect(emitted.is_success()).to_be(true)
+            expect(emitted.vhdl.contains("rs1_value = zero_xlen")).to_be(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-003 binds indirect compressed redirects to the decoded rs1 read pair":
+        val cjr = strict_zca_cjr_predecode_row_hwir("strict_cjr_predecode", CoreConfig.rv32_zca_mission_critical())
+        val cjalr = strict_zca_cjalr_predecode_row_hwir("strict_cjalr_predecode", CoreConfig.rv64_zca_mission_critical())
+        if cjr.is_ok() and cjalr.is_ok():
+            expect(cjr.ok().unwrap().shape_diagnostic()).to_equal("")
+            expect(cjr.ok().unwrap().port_width("rs1_value")).to_equal(32)
+            expect(cjalr.ok().unwrap().shape_diagnostic()).to_equal("")
+            expect(cjalr.ok().unwrap().port_width("rs1_value")).to_equal(64)
+            expect(cjalr.ok().unwrap().port_width("redirect_target")).to_equal(56)
+        else:
+            expect(false).to_equal(true)
+        if val module = bnez.ok():
+            expect(module.shape_diagnostic()).to_equal("")
+            expect(module.port_width("rs1_value")).to_equal(64)
+            expect(module.port_width("redirect_target")).to_equal(56)
+            expect(module.origins[0].source_name).to_equal("zca.c.bnez")
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-004 emits a flat critical C.J/C.BEQZ/C.BNEZ control-predecode composition":
+        val rv32 = strict_zca_control_predecode_hwir("strict_zca_control_rv32", CoreConfig.rv32_zca_mission_critical())
+        val rv64 = strict_zca_control_predecode_hwir("strict_zca_control_rv64", CoreConfig.rv64_zca_mission_critical())
+        if val module32 = rv32.ok():
+            expect(module32.shape_diagnostic()).to_equal("")
+            expect(module32.ports.len()).to_equal(10)
+            expect(module32.port_width("original_parcel")).to_equal(16)
+            expect(module32.port_width("fetch_pc")).to_equal(32)
+            expect(module32.port_width("rs1_index")).to_equal(5)
+            expect(module32.port_width("rs1_value")).to_equal(32)
+            expect(module32.port_width("canonical_instruction")).to_equal(32)
+            expect(module32.port_width("next_pc")).to_equal(32)
+            expect(module32.port_width("redirect_target")).to_equal(32)
+            expect(strict_origin_source_count(module32, "zca.c.j")).to_be_greater_than(0)
+            expect(strict_origin_source_count(module32, "zca.c.beqz")).to_be_greater_than(0)
+            expect(strict_origin_source_count(module32, "zca.c.bnez")).to_be_greater_than(0)
+            for output_name in ["canonical_instruction", "original_length_bytes", "legal", "next_pc", "redirect_valid", "redirect_target"]:
+                expect(strict_output_driver_count(module32, output_name)).to_equal(1)
+            val emitted = render_strict_hwir_vhdl(module32)
+            expect(emitted.is_success()).to_equal(true)
+            expect(emitted.vhdl.contains("entity strict_zca_control_rv32 is")).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+        if val module64 = rv64.ok():
+            expect(module64.shape_diagnostic()).to_equal("")
+            expect(module64.ports.len()).to_equal(10)
+            expect(module64.port_width("rs1_value")).to_equal(64)
+            expect(module64.port_width("fetch_pc")).to_equal(56)
+            expect(module64.port_width("next_pc")).to_equal(56)
+            expect(module64.port_width("redirect_target")).to_equal(56)
+            expect(strict_origin_source_count(module64, "zca.c.j")).to_be_greater_than(0)
+            expect(strict_origin_source_count(module64, "zca.c.beqz")).to_be_greater_than(0)
+            expect(strict_origin_source_count(module64, "zca.c.bnez")).to_be_greater_than(0)
+            for output_name in ["canonical_instruction", "original_length_bytes", "legal", "next_pc", "redirect_valid", "redirect_target"]:
+                expect(strict_output_driver_count(module64, output_name)).to_equal(1)
+            expect(render_strict_hwir_vhdl(module64).is_success()).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "REQ-G2-004 refuses control-predecode composition outside the critical compressed profile":
+        val rejected = strict_zca_control_predecode_hwir("strict_zca_control_base", CoreConfig.rv32())
+        expect(rejected.is_err()).to_equal(true)
+        if val diagnostic = rejected.err():
+            expect(diagnostic).to_equal("HWIR-E-PREDECODE-PROFILE: strict compressed predecode requires zca-common-critical profile")
+        else:
+            expect(false).to_equal(true)

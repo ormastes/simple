@@ -1,9 +1,19 @@
-# HWIR to VHDL Bridge — non-invasive bridge to the existing VHDL backend.
+# Strict HWIR to VHDL-2008 emission.
+#
+# This is intentionally a fail-closed serializer.  It accepts only the typed
+# combinational graph forms represented by HwModuleDef and never delegates a
+# rejected graph to the legacy textual VHDL path.
 
-use compiler.mir.hwir.types.{HwModule, HwPort}
+use compiler.mir.hwir.types.{CoreConfig, HwCombOp, HwConstant, HwModule, HwModuleDef, HwOrigin, HwPort, hwir_hash_fields}
+use compiler.mir.hwir.mir_to_hwir.{lower_strict_mir_function_to_hwir}
+use compiler.mir.mir_data.{MirFunction, MirModule}
+use compiler.mir.hwir.frontend.{strict_zca_control_predecode_hwir, strict_zca_migrating_predecode_hwir, strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_predecode_hwir}
+use compiler.mir.hwir.trap_frontend.{strict_zca_trap_migrating_predecode_hwir}
+use compiler.mir.hwir.stateful_frontend.{HwParcelFrontendDef, HwTrapParcelFrontendDef, strict_parcel_frontend_decoder_entity, strict_zca_single_outstanding_frontend_hwir, strict_zca_trap_single_outstanding_frontend_hwir}
+use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard, HwSeqOutputBinding, HwSeqRule, HwSeqValue, HwSequentialPlan, HwStateRegister}
+use std.common.crypto.sha256.{sha256_text}
 
 class HwirVhdlBridgeResult:
-    """Result of translating or deferring an HWIR module."""
     used_hwir: bool
     module_name: text
     vhdl: text
@@ -14,24 +24,386 @@ class HwirVhdlBridgeResult:
         return not self.used_hwir
 
     static fn fallback(module: HwModule, diagnostic: text) -> HwirVhdlBridgeResult:
-        return HwirVhdlBridgeResult(used_hwir: false, module_name: module.name, vhdl: "", fallback_function: module.fallback_function, diagnostic: diagnostic)
+        HwirVhdlBridgeResult(used_hwir: false, module_name: module.name, vhdl: "", fallback_function: module.fallback_function, diagnostic: diagnostic)
 
     static fn emitted(module: HwModule, vhdl: text) -> HwirVhdlBridgeResult:
-        return HwirVhdlBridgeResult(used_hwir: true, module_name: module.name, vhdl: vhdl, fallback_function: module.fallback_function, diagnostic: "")
+        HwirVhdlBridgeResult(used_hwir: true, module_name: module.name, vhdl: vhdl, fallback_function: module.fallback_function, diagnostic: "")
+
+class HwirStrictVhdlResult:
+    success: bool
+    vhdl: text
+    diagnostic: text
+    route: text
+    module_node_id: text
+    config_xlen: i32
+    config_profile: text
+    hwir_graph_sha256: text
+
+    me is_success() -> bool:
+        self.success
+
+    me uses_legacy_fallback() -> bool:
+        false
+
+    static fn rejected(diagnostic: text) -> HwirStrictVhdlResult:
+        HwirStrictVhdlResult(success: false, vhdl: "", diagnostic: diagnostic,
+            route: "hwir-strict", module_node_id: "", config_xlen: 0, config_profile: "", hwir_graph_sha256: "")
+
+    static fn emitted(module: HwModuleDef, vhdl: text, route: text) -> HwirStrictVhdlResult:
+        HwirStrictVhdlResult(success: true, vhdl: vhdl, diagnostic: "", route: route,
+            module_node_id: module.node_id.value, config_xlen: module.config.xlen,
+            config_profile: module.config.profile, hwir_graph_sha256: module.structural_sha256())
 
 fn hwir_bridge_preserve_existing_vhdl(module: HwModule) -> HwirVhdlBridgeResult:
-    """Return a fallback bridge result for callers that have not opted into HWIR."""
-    return HwirVhdlBridgeResult.fallback(module, "HWIR bridge not selected; preserve existing VHDL compile path")
+    HwirVhdlBridgeResult.fallback(module, "HWIR bridge not selected; preserve existing VHDL compile path")
 
 fn render_hwir_port(port: HwPort) -> text:
-    """Render one HWIR port declaration using VHDL-2008 syntax."""
-    return "        " + port.name + " : " + port.direction + " " + port.vhdl_type()
+    "        " + port.name + " : " + port.direction + " " + strict_vhdl_type(port.bit_width)
 
 fn render_empty_hwir_entity(module: HwModule) -> HwirVhdlBridgeResult:
-    """Render a minimal entity for smoke tests of the HWIR bridge.
-
-    Production code emission still routes through the existing VHDL builder once
-    the compiler selects HWIR lowering for a concrete function.
-    """
     val vhdl = "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\nentity " + module.name + " is\nend entity " + module.name + ";\n\narchitecture rtl of " + module.name + " is\nbegin\nend architecture rtl;\n"
-    return HwirVhdlBridgeResult.emitted(module, vhdl)
+    HwirVhdlBridgeResult.emitted(module, vhdl)
+
+fn strict_vhdl_type(width: i32) -> text:
+    if width == 1:
+        return "std_logic"
+    "std_logic_vector(" + (width - 1).to_text() + " downto 0)"
+
+fn strict_vhdl_unsigned(value: text, width: i32) -> text:
+    if width == 1:
+        return "unsigned'(0 => " + value + ")"
+    "unsigned(" + value + ")"
+
+fn strict_vhdl_signed(value: text, width: i32) -> text:
+    if width == 1:
+        return "signed'(0 => " + value + ")"
+    "signed(" + value + ")"
+
+fn strict_vhdl_constant(constant: HwConstant) -> Result<text, text>:
+    if constant.value < 0:
+        if constant.bit_width == 1:
+            return Err("HWIR-E-CONSTANT-VALUE: one-bit constants must be zero or one")
+        return Ok("    constant " + constant.name + " : " + strict_vhdl_type(constant.bit_width) +
+            " := std_logic_vector(to_signed(" + constant.value.to_text() + ", " + constant.bit_width.to_text() + "));\n")
+    if constant.bit_width == 1:
+        if constant.value == 0:
+            return Ok("    constant " + constant.name + " : std_logic := '0';\n")
+        if constant.value == 1:
+            return Ok("    constant " + constant.name + " : std_logic := '1';\n")
+        return Err("HWIR-E-CONSTANT-VALUE: one-bit constants must be zero or one")
+    Ok("    constant " + constant.name + " : " + strict_vhdl_type(constant.bit_width) +
+        " := std_logic_vector(to_unsigned(" + constant.value.to_text() + ", " + constant.bit_width.to_text() + "));\n")
+
+fn strict_vhdl_comb(module: HwModuleDef, op: HwCombOp) -> Result<text, text>:
+    val lhs_width = module.value_width(op.lhs)
+    # The graph validator resolves signals/constants too; emitter-specific
+    # width checks use the operation declaration as the serializer contract.
+    if op.op == "and" or op.op == "or":
+        return Ok("    " + op.result + " <= " + op.lhs + " " + op.op + " " + op.rhs + ";\n")
+    if op.op == "add":
+        if op.bit_width == 1:
+            return Ok("    " + op.result + " <= " + op.lhs + " xor " + op.rhs + ";\n")
+        return Ok("    " + op.result + " <= std_logic_vector(" + strict_vhdl_unsigned(op.lhs, op.bit_width) +
+            " + " + strict_vhdl_unsigned(op.rhs, op.bit_width) + ");\n")
+    if op.op == "shl":
+        if op.bit_width == 1:
+            return Ok("    " + op.result + " <= " + op.lhs + ";\n")
+        return Ok("    " + op.result + " <= std_logic_vector(shift_left(" + strict_vhdl_unsigned(op.lhs, op.bit_width) +
+            ", to_integer(" + strict_vhdl_unsigned(op.rhs, op.bit_width) + ")));\n")
+    if op.op == "shr":
+        if op.bit_width == 1:
+            return Ok("    " + op.result + " <= " + op.lhs + ";\n")
+        return Ok("    " + op.result + " <= std_logic_vector(shift_right(" + strict_vhdl_unsigned(op.lhs, op.bit_width) +
+            ", to_integer(" + strict_vhdl_unsigned(op.rhs, op.bit_width) + ")));\n")
+    if op.op == "passthrough":
+        return Ok("    " + op.result + " <= " + op.lhs + ";\n")
+    if op.op == "zext" or op.op == "trunc":
+        if op.bit_width == 1:
+            return Ok("    " + op.result + " <= " + op.lhs + ";\n")
+        return Ok("    " + op.result + " <= std_logic_vector(resize(" + strict_vhdl_unsigned(op.lhs, lhs_width) +
+            ", " + op.bit_width.to_text() + "));\n")
+    if op.op == "sext":
+        if op.bit_width == 1:
+            return Ok("    " + op.result + " <= " + op.lhs + ";\n")
+        return Ok("    " + op.result + " <= std_logic_vector(resize(" + strict_vhdl_signed(op.lhs, lhs_width) +
+            ", " + op.bit_width.to_text() + "));\n")
+    Err("HWIR-E-EMIT-OP: unsupported strict combinational operation " + op.op)
+
+pub fn render_strict_hwir_vhdl(module: HwModuleDef) -> HwirStrictVhdlResult:
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return HwirStrictVhdlResult.rejected(diagnostic)
+    var ports = ""
+    var port_index = 0
+    for port in module.ports:
+        ports = ports + render_hwir_port(port)
+        if port_index + 1 < module.ports.len():
+            ports = ports + ";"
+        ports = ports + "\n"
+        port_index = port_index + 1
+    var declarations = ""
+    for constant in module.constants:
+        val rendered = strict_vhdl_constant(constant)
+        if rendered.is_err():
+            return HwirStrictVhdlResult.rejected(rendered.err().unwrap())
+        declarations = declarations + rendered.ok().unwrap()
+    for signal in module.signals:
+        declarations = declarations + "    signal " + signal.name + " : " + strict_vhdl_type(signal.bit_width) + ";\n"
+    var body = ""
+    for op in module.comb_ops:
+        val rendered = strict_vhdl_comb(module, op)
+        if rendered.is_err():
+            return HwirStrictVhdlResult.rejected(rendered.err().unwrap())
+        body = body + rendered.ok().unwrap()
+    for op in module.compare_ops:
+        body = body + "    " + op.result + " <= '1' when " + op.lhs + " = " + op.rhs + " else '0';\n"
+    for op in module.select_ops:
+        body = body + "    " + op.result + " <= " + op.when_true + " when " + op.condition + " = '1' else " + op.when_false + ";\n"
+    val vhdl = "-- simple-hwir route=hwir-strict node=" + module.node_id.value + " profile=" + module.config.profile + "\n" +
+        "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\nentity " + module.summary.name + " is\n" +
+        "    port(\n" + ports + "    );\nend entity " + module.summary.name + ";\n\narchitecture rtl of " + module.summary.name + " is\n" + declarations +
+        "begin\n" + body + "end architecture rtl;\n"
+    HwirStrictVhdlResult.emitted(module, vhdl, "hwir-strict")
+
+pub fn compile_strict_hwir_module(mir: MirModule, config: CoreConfig) -> HwirStrictVhdlResult:
+    """Compile exactly one real MIR hardware function through strict HWIR.
+
+    This public route is deliberately separate from the legacy catalog backend.
+    A caller that selects it gets either typed VHDL or one stable HWIR error;
+    it never receives a textual-VHDL fallback.
+    """
+    if mir.functions.len() != 1:
+        return HwirStrictVhdlResult.rejected("HWIR-E-MIR-MODULE: strict HWIR compilation requires exactly one MIR function")
+    var function_found = false
+    var selected: MirFunction? = nil
+    for function in mir.functions.values():
+        selected = Some(function)
+        function_found = true
+    if not function_found:
+        return HwirStrictVhdlResult.rejected("HWIR-E-MIR-MODULE: strict HWIR compilation requires exactly one MIR function")
+    val lowered = lower_strict_mir_function_to_hwir(selected.unwrap(), config)
+    if not lowered.is_success():
+        return HwirStrictVhdlResult.rejected(lowered.diagnostic)
+    if lowered.module == nil:
+        return HwirStrictVhdlResult.rejected("HWIR-E-MIR-LOWER: strict lowering returned no module")
+    render_strict_hwir_vhdl(lowered.module.unwrap())
+
+fn strict_product_result(module: HwModuleDef, route: text) -> HwirStrictVhdlResult:
+    val rendered = render_strict_hwir_vhdl(module)
+    if not rendered.is_success():
+        return rendered
+    HwirStrictVhdlResult.emitted(module, rendered.vhdl.replace("route=hwir-strict", "route=" + route), route)
+
+pub fn compile_strict_zca_control_predecode_product(config: CoreConfig) -> HwirStrictVhdlResult:
+    val name = if config.xlen == 32: "riscv_gen2_zca_control_predecode_rv32" else: "riscv_gen2_zca_control_predecode_rv64"
+    val module = strict_zca_control_predecode_hwir(name, config)
+    if module.is_err():
+        return HwirStrictVhdlResult.rejected(module.err().unwrap())
+    strict_product_result(module.ok().unwrap(), "hwir-gen2-product")
+
+pub fn compile_strict_zca_migrating_predecode_product(config: CoreConfig) -> HwirStrictVhdlResult:
+    val name = if config.xlen == 32: "riscv_gen2_zca_migrating_predecode_rv32" else: "riscv_gen2_zca_migrating_predecode_rv64"
+    val module = strict_zca_migrating_predecode_hwir(name, config)
+    if module.is_err():
+        return HwirStrictVhdlResult.rejected(module.err().unwrap())
+    strict_product_result(module.ok().unwrap(), "hwir-gen2-product")
+
+pub fn compile_strict_zca_rv32_cjal_migrating_predecode_product(config: CoreConfig) -> HwirStrictVhdlResult:
+    """Emit the RV32-only C.JAL extension of the typed migrating decoder."""
+    val module = strict_zca_rv32_cjal_migrating_predecode_hwir(
+        "riscv_gen2_zca_rv32_cjal_migrating_predecode", config)
+    if module.is_err():
+        return HwirStrictVhdlResult.rejected(module.err().unwrap())
+    strict_product_result(module.ok().unwrap(), "hwir-gen2-product")
+
+pub fn compile_strict_zca_rv64_addiw_migrating_predecode_product(config: CoreConfig) -> HwirStrictVhdlResult:
+    """Emit the RV64-only C.ADDIW extension of the typed migrating decoder."""
+    val module = strict_zca_rv64_addiw_migrating_predecode_hwir(
+        "riscv_gen2_zca_rv64_addiw_migrating_predecode", config)
+    if module.is_err():
+        return HwirStrictVhdlResult.rejected(module.err().unwrap())
+    strict_product_result(module.ok().unwrap(), "hwir-gen2-product")
+
+fn strict_stateful_ports(ports: [HwPort]) -> text:
+    var result = ""
+    var index = 0
+    for port in ports:
+        result = result + render_hwir_port(port)
+        if index + 1 < ports.len():
+            result = result + ";"
+        result = result + "\n"
+        index = index + 1
+    result
+
+fn strict_seq_zero(width: i32) -> text:
+    if width == 1: "'0'" else: "(others=>'0')"
+
+fn strict_seq_reset(register: HwStateRegister) -> text:
+    if register.reset_value == 0:
+        return strict_seq_zero(register.bit_width)
+    if register.bit_width == 1:
+        return "'1'"
+    "std_logic_vector(to_unsigned(" + register.reset_value.to_text() + ", " + register.bit_width.to_text() + "))"
+
+fn strict_seq_guard(guard: HwSeqGuard) -> text:
+    if guard.kind == "high": return guard.lhs + "='1'"
+    if guard.kind == "low": return guard.lhs + "='0'"
+    if guard.kind == "all_ones": return guard.lhs + "=(others=>'1')"
+    guard.lhs + "=" + guard.rhs
+
+fn strict_seq_guards(guards: [HwSeqGuard]) -> text:
+    var result = ""
+    var index = 0
+    for guard in guards:
+        if index > 0: result = result + " and "
+        result = result + strict_seq_guard(guard)
+        index = index + 1
+    result
+
+fn strict_seq_value(value: HwSeqValue) -> text:
+    if value.kind == "zero": return strict_seq_zero(value.bit_width)
+    if value.kind == "invert": return "not " + value.value
+    if value.kind == "increment": return "std_logic_vector(unsigned(" + value.value + ") + 1)"
+    value.value
+
+fn strict_seq_assignments(assignments: [HwSeqAssignment]) -> text:
+    var result = ""
+    for assignment in assignments:
+        result = result + " " + assignment.destination + " <= " + strict_seq_value(assignment.value) + ";"
+    result
+
+fn strict_seq_declarations(plan: HwSequentialPlan) -> text:
+    var result = ""
+    for register in plan.registers:
+        result = result + " -- simple-hwir node=" + plan.register_node_id(register).value + "\n signal " + register.name + ": " + strict_vhdl_type(register.bit_width) + " := " + strict_seq_reset(register) + ";"
+    for pin in plan.decoder_pins:
+        if pin.direction == "out":
+            result = result + " -- simple-hwir node=" + plan.decoder_pin_node_id(pin).value + "\n signal " + pin.signal_name + ": " + strict_vhdl_type(pin.bit_width) + ";"
+    result
+
+fn strict_seq_decoder_map(plan: HwSequentialPlan) -> text:
+    var result = ""
+    var index = 0
+    for pin in plan.decoder_pins:
+        if index > 0: result = result + ","
+        result = result + pin.port_name + "=>" + pin.signal_name
+        index = index + 1
+    result
+
+fn strict_seq_outputs(plan: HwSequentialPlan) -> text:
+    var result = ""
+    for output in plan.outputs:
+        val guards = strict_seq_guards(output.guards)
+        result = result + " -- simple-hwir node=" + plan.output_node_id(output).value + "\n"
+        if output.kind == "direct":
+            result = result + " " + output.result + " <= " + output.source + ";"
+        elif output.kind == "all":
+            result = result + " " + output.result + " <= '1' when " + guards + " else '0';"
+        else:
+            result = result + " " + output.result + " <= " + output.source + " when " + guards + " else " + strict_seq_zero(output.bit_width) + ";"
+    result
+
+fn strict_seq_process(plan: HwSequentialPlan) -> text:
+    var resets = ""
+    for register in plan.registers:
+        resets = resets + " " + register.name + " <= " + strict_seq_reset(register) + ";"
+    var rules = ""
+    for rule in plan.rules:
+        rules = rules + " -- simple-hwir node=" + plan.rule_node_id(rule).value + "\n elsif " + strict_seq_guards(rule.guards) + " then" + strict_seq_assignments(rule.assignments)
+    " process(clk) begin if rising_edge(clk) then if rst='1' then" + resets + rules + " end if; end if; end process;\n"
+
+fn strict_stateful_vhdl(entity: text, config: CoreConfig, decoder_entity: text,
+    ports: [HwPort], plan: HwSequentialPlan, decoder_vhdl: text, route: text,
+    graph_sha256: text) -> text:
+    decoder_vhdl + "\nlibrary ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n-- simple-hwir route=" + route + " profile=" + config.profile + " graph=" + graph_sha256 + "\n" +
+        "entity " + entity + " is port(\n" + strict_stateful_ports(ports) + "    ); end entity;\n" +
+        "architecture rtl of " + entity + " is\n" + strict_seq_declarations(plan) + "\nbegin\n decoder: entity work." + decoder_entity + " port map(" + strict_seq_decoder_map(plan) + ");\n" +
+        strict_seq_outputs(plan) + "\n" + strict_seq_process(plan) + "end architecture rtl;\n"
+
+pub fn strict_stateful_graph_sha(node_id: text, config: CoreConfig, origins: [HwOrigin], ports: [HwPort],
+    decoder_entity: text, plan: HwSequentialPlan, decoder_graph_sha: text) -> text:
+    var fields: [text] = ["simple-hwir-stateful/v2", node_id, config.xlen.to_text(),
+        config.physical_address_bits.to_text(), config.register_count.to_text(),
+        config.profile, config.isa_profile, config.compressed_decode_profile]
+    for origin in origins:
+        fields.push("origin")
+        fields.push(origin.node_id.value)
+        fields.push(origin.source_name)
+    for port in ports:
+        fields.push("port")
+        fields.push(port.name)
+        fields.push(port.direction)
+        fields.push(port.type_name)
+        fields.push(port.bit_width.to_text())
+        fields.push(port.clock_domain)
+    fields.push("plan")
+    fields.push(plan.canonical_text())
+    fields.push("decoder")
+    fields.push(decoder_entity)
+    fields.push(decoder_graph_sha)
+    sha256_text(hwir_hash_fields(fields))
+
+fn strict_stateful_result(frontend: HwParcelFrontendDef, route: text) -> HwirStrictVhdlResult:
+    val error = frontend.shape_diagnostic()
+    if error != "":
+        return HwirStrictVhdlResult.rejected(error)
+    val decoder = if frontend.decoder_entity == "riscv_gen2_zca_rv32_cjal_migrating_predecode":
+        compile_strict_zca_rv32_cjal_migrating_predecode_product(frontend.config)
+    elif frontend.decoder_entity == "riscv_gen2_zca_rv64_addiw_migrating_predecode":
+        compile_strict_zca_rv64_addiw_migrating_predecode_product(frontend.config)
+    else:
+        compile_strict_zca_migrating_predecode_product(frontend.config)
+    if not decoder.is_success():
+        return decoder
+    val expected_decoder = strict_parcel_frontend_decoder_entity(frontend.config)
+    if expected_decoder.is_err() or frontend.decoder_entity != expected_decoder.ok().unwrap():
+        return HwirStrictVhdlResult.rejected("HWIR-E-SEQUENTIAL-DECODER: stateful frontend decoder does not match its selected concrete product")
+    val graph_sha256 = strict_stateful_graph_sha(frontend.node_id.value, frontend.config,
+        frontend.origins, frontend.frontend_contract.ports(), frontend.decoder_entity, frontend.sequential,
+        decoder.hwir_graph_sha256)
+    val vhdl = strict_stateful_vhdl(frontend.summary_name, frontend.config, frontend.decoder_entity,
+        frontend.frontend_contract.ports(), frontend.sequential, decoder.vhdl, route, graph_sha256)
+    HwirStrictVhdlResult(success: true, vhdl: vhdl, diagnostic: "", route: route,
+        module_node_id: frontend.node_id.value, config_xlen: frontend.config.xlen,
+        config_profile: frontend.config.profile, hwir_graph_sha256: graph_sha256)
+
+fn strict_trap_stateful_result(frontend: HwTrapParcelFrontendDef) -> HwirStrictVhdlResult:
+    val error = frontend.shape_diagnostic()
+    if error != "":
+        return HwirStrictVhdlResult.rejected(error)
+    val decoder_name = if frontend.config.xlen == 32: "riscv_gen2_zca_trap_migrating_predecode_rv32" else: "riscv_gen2_zca_trap_migrating_predecode_rv64"
+    val decoder_module = strict_zca_trap_migrating_predecode_hwir(decoder_name, frontend.config)
+    if decoder_module.is_err():
+        return HwirStrictVhdlResult.rejected(decoder_module.err().unwrap())
+    val decoder = strict_product_result(decoder_module.ok().unwrap(), "hwir-gen2-product")
+    if not decoder.is_success():
+        return decoder
+    if frontend.decoder_entity != decoder_name:
+        return HwirStrictVhdlResult.rejected("HWIR-E-SEQUENTIAL-DECODER: trap frontend decoder does not match its selected concrete product")
+    val graph_sha256 = strict_stateful_graph_sha(frontend.node_id.value, frontend.config,
+        frontend.origins, frontend.frontend_contract.ports(), frontend.decoder_entity, frontend.sequential,
+        decoder.hwir_graph_sha256)
+    val vhdl = strict_stateful_vhdl(frontend.summary_name, frontend.config, frontend.decoder_entity,
+        frontend.frontend_contract.ports(), frontend.sequential, decoder.vhdl, "hwir-gen2-trap-stateful-product", graph_sha256)
+    HwirStrictVhdlResult(success: true, vhdl: vhdl, diagnostic: "", route: "hwir-gen2-trap-stateful-product",
+        module_node_id: frontend.node_id.value, config_xlen: frontend.config.xlen,
+        config_profile: frontend.config.profile, hwir_graph_sha256: graph_sha256)
+
+pub fn compile_strict_zca_single_outstanding_frontend_product(config: CoreConfig) -> HwirStrictVhdlResult:
+    val name = if config.profile == "riscv-gen2-rv32-zca-cjal-critical":
+        "riscv_gen2_zca_rv32_cjal_single_outstanding_frontend"
+    elif config.profile == "riscv-gen2-rv64-zca-addiw-critical":
+        "riscv_gen2_zca_rv64_addiw_single_outstanding_frontend"
+    elif config.xlen == 32: "riscv_gen2_zca_single_outstanding_frontend_rv32"
+    else: "riscv_gen2_zca_single_outstanding_frontend_rv64"
+    val frontend = strict_zca_single_outstanding_frontend_hwir(name, config)
+    if frontend.is_err():
+        return HwirStrictVhdlResult.rejected(frontend.err().unwrap())
+    strict_stateful_result(frontend.ok().unwrap(), "hwir-gen2-stateful-product")
+
+pub fn compile_strict_zca_trap_single_outstanding_frontend_product(config: CoreConfig) -> HwirStrictVhdlResult:
+    val name = if config.xlen == 32: "riscv_gen2_zca_trap_single_outstanding_frontend_rv32" else: "riscv_gen2_zca_trap_single_outstanding_frontend_rv64"
+    val frontend = strict_zca_trap_single_outstanding_frontend_hwir(name, config)
+    if frontend.is_err():
+        return HwirStrictVhdlResult.rejected(frontend.err().unwrap())
+    strict_trap_stateful_result(frontend.ok().unwrap())

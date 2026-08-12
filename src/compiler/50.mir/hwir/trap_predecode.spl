@@ -1,0 +1,126 @@
+# Typed trap-effect extension for strict RISC-V Gen2 compressed predecode.
+#
+# This is a v2 contract adjacent to the stable v1 predecode ports.  It does
+# not retrofit an effect into the existing migration product: a consumer must
+# explicitly select this interface and carry the trap through retirement.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant, HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp, HwSignal}
+use compiler.mir.hwir.branch_predecode.{HwBranchPredecodeInterface, strict_riscv_branch_predecode_interface}
+use compiler.mir.hwir.zca_rows.{strict_zca_cebreak_row_hwir}
+use compiler.mir.hwir.frontend.{strict_frontend_data_row_fragment}
+
+class HwTrapPredecodeInterface:
+    """Versioned predecode contract with a precise synchronous-trap request.
+
+    `trap_valid` is asserted only for an architecturally legal instruction
+    that requests a synchronous trap. `trap_cause` and `trap_tval` use XLEN
+    so a selected privilege/trap provider can consume them without host-width
+    coercion. The original 16-bit parcel remains in the inherited contract.
+    """
+    node_id: HwNodeId
+    config: CoreConfig
+    branch_predecode: HwBranchPredecodeInterface
+    trap_valid: HwPort
+    trap_cause: HwPort
+    trap_tval: HwPort
+
+    me ports() -> [HwPort]:
+        var ports = self.branch_predecode.ports()
+        ports.push(self.trap_valid)
+        ports.push(self.trap_cause)
+        ports.push(self.trap_tval)
+        ports
+
+    me shape_diagnostic() -> text:
+        val branch_error = self.branch_predecode.shape_diagnostic()
+        if branch_error != "":
+            return branch_error
+        if self.config.diagnostic() != "":
+            return self.config.diagnostic()
+        val branch_config = self.branch_predecode.config
+        if branch_config.xlen != self.config.xlen or
+            branch_config.physical_address_bits != self.config.physical_address_bits or
+            branch_config.register_count != self.config.register_count or
+            branch_config.profile != self.config.profile or
+            branch_config.isa_profile != self.config.isa_profile or
+            branch_config.compressed_decode_profile != self.config.compressed_decode_profile:
+            return "HWIR-E-TRAP-PREDECODE-CONFIG: trap and branch-predecode interfaces must use one concrete product configuration"
+        if not self.node_id.is_valid():
+            return "HWIR-E-TRAP-PREDECODE-ID: trap predecode requires a stable node ID"
+        if self.trap_valid.name != "trap_valid" or self.trap_valid.direction != "out" or
+            self.trap_valid.type_name != "Bits" or self.trap_valid.bit_width != 1:
+            return "HWIR-E-TRAP-PREDECODE-VALID: trap predecode requires a one-bit Bits trap_valid output"
+        if self.trap_cause.name != "trap_cause" or self.trap_cause.direction != "out" or
+            self.trap_cause.type_name != "Bits" or self.trap_cause.bit_width != self.config.xlen:
+            return "HWIR-E-TRAP-PREDECODE-CAUSE: trap predecode requires an XLEN-wide Bits trap_cause output"
+        if self.trap_tval.name != "trap_tval" or self.trap_tval.direction != "out" or
+            self.trap_tval.type_name != "Bits" or self.trap_tval.bit_width != self.config.xlen:
+            return "HWIR-E-TRAP-PREDECODE-TVAL: trap predecode requires an XLEN-wide Bits trap_tval output"
+        ""
+
+pub fn strict_riscv_trap_predecode_interface(config: CoreConfig) -> Result<HwTrapPredecodeInterface, text>:
+    """Materialize the v2 trap-effect contract for one selected product."""
+    val branch_predecode = strict_riscv_branch_predecode_interface(config)?
+    val contract = HwTrapPredecodeInterface(
+        node_id: HwNodeId.module_root("riscv_trap_predecode"), config: config,
+        branch_predecode: branch_predecode,
+        trap_valid: HwPort.output("trap_valid", "Bits", 1),
+        trap_cause: HwPort.output("trap_cause", "Bits", config.xlen),
+        trap_tval: HwPort.output("trap_tval", "Bits", config.xlen)
+    )
+    val diagnostic = contract.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(contract)
+
+pub fn strict_zca_cebreak_trap_predecode_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Build the precise C.EBREAK predecode outcome for the v2 trap contract.
+
+    `0x9002` is legal C.EBREAK, expands to canonical `EBREAK`, requests cause
+    3 (breakpoint), and has zero `tval`. Every other parcel is explicitly
+    non-legal and emits no trap; it must be classified by another v2 row or by
+    the top-level illegal-instruction path.
+    """
+    if module_name == "":
+        return Err("HWIR-E-TRAP-PREDECODE-ID: C.EBREAK trap predecode requires a module name")
+    val contract = strict_riscv_trap_predecode_interface(config)?
+    val row = strict_zca_cebreak_row_hwir(module_name + "_row", config)?
+    val fragment = strict_frontend_data_row_fragment(module_name, "cebreak", row, "parcel32")?
+    val pa = config.physical_address_bits
+    val xlen = config.xlen
+    var signals: [HwSignal] = [HwSignal.comb("parcel32", "Bits", 32),
+        HwSignal.comb("fallthrough_pc", "Bits", pa)]
+    for signal in fragment.signals: signals.push(signal)
+    var constants: [HwConstant] = [HwConstant.bits("two_bytes", pa, 2),
+        HwConstant.bits("two_length", 2, 2), HwConstant.bits("zero_flag", 1, 0),
+        HwConstant.bits("one_flag", 1, 1), HwConstant.bits("breakpoint_cause", xlen, 3),
+        HwConstant.bits("zero_xlen", xlen, 0)]
+    for constant in fragment.constants: constants.push(constant)
+    var comb_ops: [HwCombOp] = [HwCombOp.unary("zext", "parcel32", "original_parcel", 32),
+        HwCombOp.binary("add", "fallthrough_pc", "fetch_pc", "two_bytes", pa),
+        HwCombOp.unary("passthrough", "canonical_instruction", "cebreak_canonical_instruction", 32),
+        HwCombOp.unary("passthrough", "original_length_bytes", "two_length", 2),
+        HwCombOp.unary("passthrough", "next_pc", "fallthrough_pc", pa),
+        HwCombOp.unary("passthrough", "redirect_valid", "zero_flag", 1),
+        HwCombOp.unary("passthrough", "redirect_target", "fetch_pc", pa),
+        HwCombOp.unary("passthrough", "trap_tval", "zero_xlen", xlen)]
+    for op in fragment.comb_ops: comb_ops.push(op)
+    var compare_ops = fragment.compare_ops
+    var select_ops = fragment.select_ops
+    select_ops.push(HwSelectOp.mux("legal", "cebreak_is_cebreak", "one_flag", "zero_flag", 1))
+    select_ops.push(HwSelectOp.mux("trap_valid", "cebreak_is_cebreak", "one_flag", "zero_flag", 1))
+    select_ops.push(HwSelectOp.mux("trap_cause", "cebreak_is_cebreak", "breakpoint_cause", "zero_xlen", xlen))
+    var origins: [HwOrigin] = [HwOrigin(node_id: HwNodeId.child(module_name, "trap"), source_name: "zca.c.ebreak.trap")]
+    for origin in fragment.origins: origins.push(origin)
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: contract.ports().len(), signal_count: signals.len(), register_count: 0,
+        memory_count: 0, comb_op_count: comb_ops.len() + compare_ops.len() + select_ops.len(),
+        clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: origins, ports: contract.ports(),
+        signals: signals, constants: constants, comb_ops: comb_ops, compare_ops: compare_ops,
+        select_ops: select_ops, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)

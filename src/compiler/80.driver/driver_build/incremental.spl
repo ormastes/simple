@@ -28,6 +28,7 @@ extern fn rt_getpid() -> i64
 extern fn rt_dir_exists(path: text) -> bool
 extern fn rt_dir_list(path: text) -> [text]
 extern fn rt_file_delete(path: text) -> bool
+extern fn rt_env_get(key: text) -> text
 
 fn incremental_file_exists(path: text) -> bool:
     rt_file_exists(path)
@@ -113,13 +114,66 @@ fn native_build_compiler_executable_hash() -> text:
             return hash
     ""
 
+fn native_build_runtime_artifact(path: text) -> bool:
+    path.ends_with(".a") or path.ends_with(".o") or
+        path.ends_with(".so") or path.ends_with(".dylib") or
+        path.ends_with(".dll") or path.ends_with(".lib")
+
+fn native_build_runtime_provider_fingerprint(runtime_path: text) -> text:
+    """Fingerprint the runtime artifacts which can affect native code ABI.
+
+    Runtime provider directories also contain logs, receipts, and native-build
+    caches. Hashing the whole directory would make the cache key depend on its
+    own outputs. Restrict the manifest to linkable runtime artifacts, while a
+    direct runtime archive/object path is hashed as-is. Missing or unreadable
+    configured providers return a per-process uncacheable identity.
+    """
+    if runtime_path == "":
+        return "embedded"
+    if rt_file_exists(runtime_path) and not rt_dir_exists(runtime_path):
+        val direct_hash = rt_file_hash_sha256(runtime_path)
+        if direct_hash.len() == 64:
+            return "file-{direct_hash}"
+        return "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    if not rt_dir_exists(runtime_path):
+        return "missing-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    var lines: [text] = []
+    # Linkers consume providers directly from SIMPLE_RUNTIME_PATH (-L/path and
+    # explicit /path/archive names). Do not recurse: bootstrap cache directories
+    # commonly live below this root, and binding their .o files would make the
+    # cache key depend on its own outputs.
+    val entries = incremental_sorted_text(rt_dir_list(runtime_path) ?? [])
+    for entry in entries:
+        val full = runtime_path + "/" + entry
+        if native_build_runtime_artifact(full) and not rt_dir_exists(full):
+            val digest = rt_file_hash_sha256(full)
+            if digest.len() != 64:
+                return "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+            lines = lines.push("{entry}|{rt_file_size(full)}|{digest}")
+    if lines.len() == 0:
+        return "empty-{rt_getpid()}-{rt_time_now_unix_micros()}"
+    val manifest = lines.join("\n")
+    val tmp = "build/.runtime_provider_fp.{rt_getpid()}.tmp"
+    if rt_file_write_text(tmp, manifest):
+        val digest = rt_file_hash_sha256(tmp)
+        rt_file_delete(tmp)
+        if digest.len() == 64:
+            return "dir-{digest.substring(0, 16)}n{lines.len()}"
+    "unfingerprintable-{rt_getpid()}-{rt_time_now_unix_micros()}"
+
+pub fn native_build_producer_identity(executable_hash: text, compiler_source_fingerprint: text, runtime_provider_fingerprint: text, runtime_bundle: text) -> text:
+    """Canonical cache producer identity; every codegen/ABI authority is bound."""
+    "exe={executable_hash};compiler={compiler_source_fingerprint};runtime={runtime_provider_fingerprint};bundle={runtime_bundle}"
+
 fn native_build_compiler_identity() -> text:
     val src_fp = native_build_compiler_source_fingerprint()
     val hash = native_build_compiler_executable_hash()
     if hash != "":
-        if src_fp == "":
-            return hash
-        return "{hash}+src{src_fp}"
+        val compiler_fp = if src_fp == "": "embedded" else: src_fp
+        val runtime_path = rt_env_get("SIMPLE_RUNTIME_PATH") ?? ""
+        val runtime_bundle = rt_env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+        val runtime_fp = native_build_runtime_provider_fingerprint(runtime_path)
+        return native_build_producer_identity(hash, compiler_fp, runtime_fp, runtime_bundle)
     # Fail closed: an unknown compiler must not reuse another compiler's cache.
     "uncacheable-{rt_getpid()}-{rt_time_now_unix_micros()}"
 
@@ -713,4 +767,4 @@ fn merge_mir(cached_fns: {text: text}, new_fns: {text: text}) -> {text: text}:
 
 export FileFingerprint, DependencyEntry, ChangeKind, IncrChangeSet
 export BuildCache, IncrementalCompiler
-export merge_mir, native_build_cache_scope_key, native_build_compiler_identity, native_build_compiler_executable_hash
+export merge_mir, native_build_cache_scope_key, native_build_compiler_identity, native_build_compiler_executable_hash, native_build_producer_identity

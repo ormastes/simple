@@ -21,6 +21,84 @@ Do not mix them. Lane (a) tries to compile Simple semantics into a CPU; lane (b)
 is a structured emitter whose acceptance bar is byte-equality with the
 already-silicon-tested RTL, so the RTL cannot drift while it becomes generated.
 
+### Compiler Gen2 strict-HWIR development route
+
+The compiler lane now has a bounded, development-stage critical route for one
+`@hardware` source function:
+
+```bash
+SIMPLE_SAFETY_PROFILE=critical simple-vhdl source.spl \
+  --riscv-gen2-target rv32 --output source.vhd
+```
+
+`rv64` is the other accepted target. The selected target is elaboration data;
+critical compilation snapshots the policy, lowers only the supported real-MIR
+combinational subset into typed HWIR, and rejects unsupported MIR with
+`HWIR-E-*` before it can reach the legacy VHDL catalog emitter. The generated
+manifest records `generation_route=hwir-strict`, the HWIR node ID, and the
+concrete profile. This is not an alternative path for the silicon-proven cores,
+not a full RISC-V core compiler, and not release-qualified until the self-hosted
+CLI and GHDL route evidence are available.
+
+### Compiler-owned Gen2 product route
+
+Compiler-owned Gen2 products have no user source file. Invoke a supported
+product explicitly, with an output path and its stricter elaboration target:
+
+```bash
+SIMPLE_SAFETY_PROFILE=critical simple-vhdl \
+  --riscv-gen2-product riscv-gen2-zca-control-predecode-v1 \
+  --riscv-gen2-target rv32-zca-critical --output zca_control.vhd
+```
+
+`rv64-zca-critical` selects the corresponding RV64 graph. The enabled IDs are
+`riscv-gen2-zca-control-predecode-v1`,
+`riscv-gen2-zca-migrating-predecode-v1`, and
+`riscv-gen2-zca-trap-single-outstanding-v2`. The trap frontend serializes only
+from its typed sequential state plan and records its decoder-closure hash. A source pathname and
+`--riscv-gen2-product` are mutually exclusive. The emitted manifest preserves
+the exact `generation_route`, a `compiler-product:` entry identity, and an
+empty user `source_closure`; it must not be represented as a generated source
+program. These are bounded frontend products, not full Zca or qualified
+processor products.
+
+The generic raw artifact writer refuses any bundle that claims a compiler-owned
+Gen2 route before removing a prior output. Product drivers use the dedicated
+Gen2 writer after rebuilding and checking their typed graph/provenance. This is
+an internal compiler boundary, not a cryptographic signature; the remaining
+module-encapsulation requirement is tracked before release.
+
+The v2 trap product accepts retirement only when the 64-bit lineage, original
+16-bit parcel, canonical 32-bit instruction, and original-length encoding all
+match the outstanding entry. Matching lineage alone is insufficient. Any valid
+retirement with an identity mismatch enters sticky `protocol_fault`; only reset
+recovers it. The lineage remains a development-stage bounded transaction token,
+not an unbounded proof token. A terminal full-identity match faults before
+increment, preventing wrap and token reuse before reset. Release still requires
+a reset-coupled architectural retirement producer and successful self-hosted
+RV32/RV64 VHDL/GHDL receipts. Bootstrap-seed output, including warning-truncated
+test output, is diagnostic only and does not establish any of those conditions.
+
+`riscv-gen2-zca-rv32-cjal-migrating-predecode-v1` is a separate RV32-only
+product and requires `--riscv-gen2-target rv32-zca-cjal-critical`. It adds the
+RV32 C.JAL parcel to the common migrating predecode graph under a concrete
+`rv32i_zca` profile. The common and RV64 targets reject it because the same
+parcel class is RV64 C.ADDIW. Its manifest remains `frontend-predecode-only`:
+
+`riscv-gen2-zca-rv64-addiw-migrating-predecode-v1` is the reciprocal RV64-only
+product and requires `--riscv-gen2-target rv64-zca-addiw-critical`. It admits
+only C.ADDIW for that overlapping parcel class under a concrete `rv64i_zca`
+profile, rejects `rd=x0`, and records a distinct capability hash. It is also
+`frontend-predecode-only`; neither product is a processor or an ISA-profile
+compliance claim.
+
+The corresponding `riscv-gen2-zca-rv32-cjal-single-outstanding-v1` and
+`riscv-gen2-zca-rv64-addiw-single-outstanding-v1` products retain the same
+respective targets and add the bounded one-entry fetch/dispatch/retire lineage
+protocol. Their manifests record the specialized decoder as a graph-hashed
+dependency. They remain frontend products, not processor/profile claims.
+this is not a full RV32 core claim.
+
 See also: [`riscv_guide.md`](riscv_guide.md),
 [`../fpga/simpleos_on_simple_riscv_fpga.md`](../fpga/simpleos_on_simple_riscv_fpga.md),
 [`../fpga/kv260_rv64gc_fpga_boot.md`](../fpga/kv260_rv64gc_fpga_boot.md).

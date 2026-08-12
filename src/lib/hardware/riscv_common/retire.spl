@@ -1,0 +1,51 @@
+# Shared architectural retirement record for RISC-V Gen2 migration.
+#
+# This is host/formal/debug metadata, not an emitted universal hardware word.
+# XLEN is concrete at each adapter boundary; i64 fields preserve existing RV64
+# bit patterns without introducing runtime XLEN dispatch into RTL.
+
+pub struct RiscvRetireRecord:
+    valid: bool
+    order: i64
+    xlen: i32
+    privilege: u32
+    original_instruction: u32
+    canonical_instruction: u32
+    instruction_length_bytes: i32
+    pc_before: i64
+    pc_after: i64
+    rd: u32
+    rd_write: bool
+    rd_value: i64
+    memory_address: i64
+    memory_read_mask: u32
+    memory_write_mask: u32
+    memory_read_data: i64
+    memory_write_data: i64
+    trap: bool
+    interrupt: bool
+    cause: i64
+    tval: i64
+
+    me diagnostic() -> text:
+        if self.xlen != 32 and self.xlen != 64:
+            return "RISCV-RETIRE-E-XLEN: retirement record requires XLEN=32 or XLEN=64"
+        if self.privilege != 0 and self.privilege != 1 and self.privilege != 3:
+            return "RISCV-RETIRE-E-PRIVILEGE: retirement record requires U, S, or M privilege encoding"
+        if self.instruction_length_bytes != 2 and self.instruction_length_bytes != 4:
+            return "RISCV-RETIRE-E-LENGTH: retirement record requires a two- or four-byte instruction"
+        if self.instruction_length_bytes == 2 and self.original_instruction > 0xFFFF:
+            return "RISCV-RETIRE-E-COMPRESSED: two-byte retirement records must preserve a 16-bit original instruction"
+        if not self.trap and (self.canonical_instruction & 0x3) != 0x3:
+            return "RISCV-RETIRE-E-CANONICAL: non-trapping retirement records require a canonical 32-bit instruction"
+        if self.rd > 31:
+            return "RISCV-RETIRE-E-RD: retirement record destination register is out of range"
+        if self.rd == 0 and self.rd_write and self.rd_value != 0:
+            return "RISCV-RETIRE-E-X0: retirement record may not write a nonzero value to x0"
+        if self.memory_read_mask != 0 and self.memory_write_mask != 0 and
+            (self.canonical_instruction & 0x7F) != 0x2F:
+            return "RISCV-RETIRE-E-MEMORY: simultaneous read/write masks require an AMO"
+        ""
+
+    me is_valid() -> bool:
+        self.diagnostic() == ""

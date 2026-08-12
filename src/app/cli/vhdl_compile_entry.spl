@@ -1,7 +1,9 @@
 # Core-safe in-process VHDL compiler entry.
 #
 # Usage:
-#   simple-vhdl <source.spl> [-o <output.vhd>]
+#   simple-vhdl <source.spl> [-o <output.vhd>] [--riscv-gen2-target rv32|rv64]
+#   simple-vhdl --riscv-gen2-product <supported-product-id> \
+#       --riscv-gen2-target rv32-zca-critical|rv64-zca-critical -o <output.vhd>
 
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_env_set(key: text, value: text) -> bool
@@ -10,7 +12,22 @@ use compiler.common.driver_core_types.{
     CompileMode, compile_result_is_success, compile_result_errors,
     driver_core_compile_options_default, compileoptions_normalize_mir_optimization}
 use compiler.driver.driver.{
-    compiler_driver_create, compiler_driver_run_vhdl}
+    compiler_driver_create, compiler_driver_run_vhdl,
+    compiler_driver_run_riscv_gen2_zca_control_predecode_product,
+    compiler_driver_run_riscv_gen2_zca_migrating_predecode_product,
+    compiler_driver_run_riscv_gen2_zca_rv32_cjal_migrating_predecode_product,
+    compiler_driver_run_riscv_gen2_zca_rv64_addiw_migrating_predecode_product,
+    compiler_driver_run_riscv_gen2_zca_rv32_cjal_single_outstanding_product,
+    compiler_driver_run_riscv_gen2_zca_rv64_addiw_single_outstanding_product,
+    compiler_driver_run_riscv_gen2_zca_trap_single_outstanding_product}
+
+const RISCV_GEN2_ZCA_CONTROL_PREDECODE_PRODUCT = "riscv-gen2-zca-control-predecode-v1"
+const RISCV_GEN2_ZCA_MIGRATING_PREDECODE_PRODUCT = "riscv-gen2-zca-migrating-predecode-v1"
+const RISCV_GEN2_ZCA_RV32_CJAL_MIGRATING_PREDECODE_PRODUCT = "riscv-gen2-zca-rv32-cjal-migrating-predecode-v1"
+const RISCV_GEN2_ZCA_RV64_ADDIW_MIGRATING_PREDECODE_PRODUCT = "riscv-gen2-zca-rv64-addiw-migrating-predecode-v1"
+const RISCV_GEN2_ZCA_RV32_CJAL_SINGLE_OUTSTANDING_PRODUCT = "riscv-gen2-zca-rv32-cjal-single-outstanding-v1"
+const RISCV_GEN2_ZCA_RV64_ADDIW_SINGLE_OUTSTANDING_PRODUCT = "riscv-gen2-zca-rv64-addiw-single-outstanding-v1"
+const RISCV_GEN2_ZCA_TRAP_SINGLE_OUTSTANDING_PRODUCT = "riscv-gen2-zca-trap-single-outstanding-v2"
 
 fn vhdl_entry_default_output(source: text) -> text:
     if source.ends_with(".spl"):
@@ -18,13 +35,17 @@ fn vhdl_entry_default_output(source: text) -> text:
     source + ".vhd"
 
 fn vhdl_entry_usage(exit_code: i64) -> i64:
-    print "Usage: simple-vhdl <source.spl> [-o <output.vhd>]"
+    print "Usage: simple-vhdl (<source.spl> | --riscv-gen2-product <supported-product-id>) [-o <output.vhd>] [--riscv-gen2-target <target>]"
+    print "  source target: rv32 | rv64; compiler product target: rv32-zca-critical | rv64-zca-critical | rv32-zca-cjal-critical | rv64-zca-addiw-critical"
+    print "  enabled products: riscv-gen2-zca-control-predecode-v1 | riscv-gen2-zca-migrating-predecode-v1 | riscv-gen2-zca-rv32-cjal-migrating-predecode-v1 | riscv-gen2-zca-rv64-addiw-migrating-predecode-v1 | riscv-gen2-zca-rv32-cjal-single-outstanding-v1 | riscv-gen2-zca-rv64-addiw-single-outstanding-v1 | riscv-gen2-zca-trap-single-outstanding-v2"
     exit_code
 
 fn main() -> i64:
     val args = rt_cli_get_args() ?? []
     var source = ""
     var output = ""
+    var riscv_gen2_target = ""
+    var riscv_gen2_product = ""
     var i = 1
     while i < args.len():
         val arg = args[i]
@@ -42,6 +63,24 @@ fn main() -> i64:
         elif arg.starts_with("--output="):
             output = arg.substring(9)
             i = i + 1
+        elif arg == "--riscv-gen2-target":
+            if i + 1 >= args.len():
+                return vhdl_entry_usage(2)
+            riscv_gen2_target = args[i + 1]
+            i = i + 2
+        elif arg.starts_with("--riscv-gen2-target="):
+            riscv_gen2_target = arg.substring(20)
+            i = i + 1
+        elif arg == "--riscv-gen2-product":
+            if i + 1 >= args.len() or riscv_gen2_product != "":
+                return vhdl_entry_usage(2)
+            riscv_gen2_product = args[i + 1]
+            i = i + 2
+        elif arg.starts_with("--riscv-gen2-product="):
+            if riscv_gen2_product != "":
+                return vhdl_entry_usage(2)
+            riscv_gen2_product = arg.substring(21)
+            i = i + 1
         elif arg == "-h" or arg == "--help":
             return vhdl_entry_usage(0)
         elif arg.starts_with("-") or source != "":
@@ -50,25 +89,55 @@ fn main() -> i64:
             source = arg
             i = i + 1
 
-    if source == "":
+    if (source == "" and riscv_gen2_product == "") or
+        (source != "" and riscv_gen2_product != ""):
+        return vhdl_entry_usage(2)
+    if riscv_gen2_product != "" and riscv_gen2_product != RISCV_GEN2_ZCA_CONTROL_PREDECODE_PRODUCT and
+        riscv_gen2_product != RISCV_GEN2_ZCA_MIGRATING_PREDECODE_PRODUCT and
+        riscv_gen2_product != RISCV_GEN2_ZCA_RV32_CJAL_MIGRATING_PREDECODE_PRODUCT and
+        riscv_gen2_product != RISCV_GEN2_ZCA_TRAP_SINGLE_OUTSTANDING_PRODUCT:
         return vhdl_entry_usage(2)
     if output == "":
+        if riscv_gen2_product != "":
+            # A compiler-owned design has no source pathname from which an
+            # output can be derived.  Requiring -o also prevents a product
+            # invocation from impersonating a source-derived artifact.
+            return vhdl_entry_usage(2)
         output = vhdl_entry_default_output(source)
 
-    if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", source):
-        print "error: failed to select VHDL entry closure"
-        return 1
-    if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0"):
-        print "error: failed to initialize VHDL entry closure"
-        return 1
+    if source != "":
+        if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY", source):
+            print "error: failed to select VHDL entry closure"
+            return 1
+        if not rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0"):
+            print "error: failed to initialize VHDL entry closure"
+            return 1
 
     var options = driver_core_compile_options_default()
-    options.input_files = [source]
+    if source != "":
+        options.input_files = [source]
     options.mode = CompileMode.Aot
     options.output_file = Some(output)
     options.backend = "vhdl"
+    options.riscv_gen2_target = riscv_gen2_target
     options = compileoptions_normalize_mir_optimization(options)
-    val result = compiler_driver_run_vhdl(compiler_driver_create(options))
+    val driver = compiler_driver_create(options)
+    val result = if riscv_gen2_product == RISCV_GEN2_ZCA_CONTROL_PREDECODE_PRODUCT:
+        compiler_driver_run_riscv_gen2_zca_control_predecode_product(driver)
+    elif riscv_gen2_product == RISCV_GEN2_ZCA_MIGRATING_PREDECODE_PRODUCT:
+        compiler_driver_run_riscv_gen2_zca_migrating_predecode_product(driver)
+    elif riscv_gen2_product == RISCV_GEN2_ZCA_RV32_CJAL_MIGRATING_PREDECODE_PRODUCT:
+        compiler_driver_run_riscv_gen2_zca_rv32_cjal_migrating_predecode_product(driver)
+    elif riscv_gen2_product == RISCV_GEN2_ZCA_RV64_ADDIW_MIGRATING_PREDECODE_PRODUCT:
+        compiler_driver_run_riscv_gen2_zca_rv64_addiw_migrating_predecode_product(driver)
+    elif riscv_gen2_product == RISCV_GEN2_ZCA_RV32_CJAL_SINGLE_OUTSTANDING_PRODUCT:
+        compiler_driver_run_riscv_gen2_zca_rv32_cjal_single_outstanding_product(driver)
+    elif riscv_gen2_product == RISCV_GEN2_ZCA_RV64_ADDIW_SINGLE_OUTSTANDING_PRODUCT:
+        compiler_driver_run_riscv_gen2_zca_rv64_addiw_single_outstanding_product(driver)
+    elif riscv_gen2_product == RISCV_GEN2_ZCA_TRAP_SINGLE_OUTSTANDING_PRODUCT:
+        compiler_driver_run_riscv_gen2_zca_trap_single_outstanding_product(driver)
+    else:
+        compiler_driver_run_vhdl(driver)
     if compile_result_is_success(result):
         print "Output: {output}"
         return 0

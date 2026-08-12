@@ -1,0 +1,480 @@
+# Shared, width-neutral compressed-instruction semantic seed.
+#
+# This is intentionally a table boundary, not a fetch adapter.  RV32 and RV64
+# front ends keep their own parcel-window assembly while both consume the same
+# classification contract.  The current seed establishes the common Zca
+# invariants (16-bit origin, two-byte length, C.EBREAK, C.NOP/C.ADDI and
+# fail-closed reserved/XLEN checks); later rows extend this table.
+
+use std.hardware.riscv_common.isa.isa_database.{riscv_zca_critical_subset_entry_count, riscv_zca_target_rtl_evidence_count}
+
+struct CompressedExpansion:
+    original_parcel: u32
+    canonical_instruction: u32
+    length_bytes: u32
+    legal: bool
+    required_extensions: text
+    illegal_reason: text
+
+val COMPRESSED_REASON_NONE: u32 = 0
+val COMPRESSED_REASON_INVALID_XLEN: u32 = 1
+val COMPRESSED_REASON_NOT_COMPRESSED: u32 = 2
+val COMPRESSED_REASON_RESERVED_ZERO: u32 = 3
+val COMPRESSED_REASON_RV64_ONLY: u32 = 4
+val COMPRESSED_REASON_UNSUPPORTED_ZCA_SEED: u32 = 5
+val COMPRESSED_REASON_RESERVED_ENCODING: u32 = 6
+
+struct CompressedHardwareExpansion:
+    """Synthesizable compressed result used by RTL adapters.
+
+    Text diagnostics deliberately stay out of this structure: a hardware
+    caller must not acquire runtime strings or a text-valued layout merely to
+    classify one instruction parcel.
+    """
+    original_parcel: u32
+    canonical_instruction: u32
+    length_bytes: u32
+    legal: bool
+    reason_code: u32
+
+class CompressedCriticalSubsetManifest:
+    """Host-side capability truth for the critical compressed subset.
+
+    This record is intentionally not a hardware type. It prevents a product
+    assembler/ELF/ISA string layer from advertising full Zca merely because a
+    fail-closed subset decoder exists.
+    """
+    subset_id: text
+    extension_name: text
+    advertises_extension: bool
+    legacy_fallback_allowed: bool
+    exhaustive_classification_required: bool
+    target_rtl_equivalence_required: bool
+    exhaustive_classification_verified: bool
+    row_target_evidence_complete: bool
+    target_rtl_equivalence_verified: bool
+    verified_entry_count: i32
+    target_rtl_equivalent_entry_count: i32
+
+    fn is_release_claimable() -> bool:
+        # A partial critical subset is never a full-Zca product claim. Check
+        # both evidence flags explicitly so an incomplete record stays visibly
+        # non-releasable, then retain the permanent subset boundary even when
+        # both are eventually true.
+        if not self.exhaustive_classification_verified or not self.target_rtl_equivalence_verified:
+            return false
+        false
+
+    fn has_complete_row_target_evidence() -> bool:
+        """Whether every selected row has its own strict-HWIR target proof.
+
+        This is intentionally weaker than composed-frontend equivalence. The
+        latter remains false until one generated frontend proves parcel queue,
+        operand binding, redirect, and retirement integration together.
+        """
+        self.row_target_evidence_complete and
+            self.target_rtl_equivalent_entry_count == self.verified_entry_count
+
+    static fn mission_critical_common_zca_v1() -> CompressedCriticalSubsetManifest:
+        CompressedCriticalSubsetManifest(
+            subset_id: "zca-common-integer-v1",
+            extension_name: "Zca",
+            advertises_extension: false,
+            legacy_fallback_allowed: false,
+            exhaustive_classification_required: true,
+            target_rtl_equivalence_required: true,
+            exhaustive_classification_verified: true,
+            # The catalog below closes source-level row coverage, but target
+            # evidence is not complete until the self-hosted compiler runs the
+            # generated VHDL/GHDL lane. A static allowlist must never promote
+            # unexecuted target scenarios into a mission-critical claim.
+            row_target_evidence_complete: false,
+            target_rtl_equivalence_verified: false,
+            verified_entry_count: riscv_zca_critical_subset_entry_count(),
+            # The catalog prevents declared row coverage from drifting while
+            # the separate target-equivalence receipt remains unavailable.
+            target_rtl_equivalent_entry_count: riscv_zca_target_rtl_evidence_count()
+        )
+
+fn compressed_hardware_legal(parcel: u32, instruction: u32) -> CompressedHardwareExpansion:
+    CompressedHardwareExpansion(original_parcel: parcel & 0xFFFF,
+        canonical_instruction: instruction, length_bytes: 2, legal: true,
+        reason_code: COMPRESSED_REASON_NONE)
+
+fn compressed_hardware_illegal(parcel: u32, reason_code: u32) -> CompressedHardwareExpansion:
+    CompressedHardwareExpansion(original_parcel: parcel & 0xFFFF,
+        canonical_instruction: 0, length_bytes: 2, legal: false,
+        reason_code: reason_code)
+
+pub fn riscv_compressed_is_parcel(parcel: u32) -> bool:
+    (parcel & 3) != 3
+
+fn compressed_sign_extend_6(value: u32) -> u32:
+    val low = value & 0x3F
+    if (low & 0x20) != 0:
+        return low | 0xFFFF_FFC0
+    low
+
+fn compressed_addi(rd: u32, immediate: u32) -> u32:
+    (((immediate & 0xFFF) << 20) | ((rd & 0x1F) << 15) |
+        ((rd & 0x1F) << 7) | 0x13)
+
+fn compressed_i(rd: u32, funct3: u32, rs1: u32, immediate: u32) -> u32:
+    (((immediate & 0xFFF) << 20) | ((rs1 & 0x1F) << 15) |
+        ((funct3 & 7) << 12) | ((rd & 0x1F) << 7) | 0x13)
+
+fn compressed_i_opcode(rd: u32, funct3: u32, rs1: u32,
+                       immediate: u32, opcode: u32) -> u32:
+    (((immediate & 0xFFF) << 20) | ((rs1 & 0x1F) << 15) |
+        ((funct3 & 7) << 12) | ((rd & 0x1F) << 7) | (opcode & 0x7F))
+
+fn compressed_s(funct3: u32, rs1: u32, rs2: u32, immediate: u32) -> u32:
+    val value = immediate
+    ((((value >> 5) & 0x7F) << 25) | ((rs2 & 0x1F) << 20) |
+        ((rs1 & 0x1F) << 15) | ((funct3 & 7) << 12) |
+        ((value & 0x1F) << 7) | 0x23)
+
+fn compressed_b(funct3: u32, rs1: u32, immediate: u32) -> u32:
+    val value = immediate
+    ((((value >> 12) & 1) << 31) | (((value >> 5) & 0x3F) << 25) |
+        ((rs1 & 0x1F) << 15) | ((funct3 & 7) << 12) |
+        (((value >> 1) & 0xF) << 8) | (((value >> 11) & 1) << 7) | 0x63)
+
+fn compressed_j(rd: u32, immediate: u32) -> u32:
+    val value = immediate
+    ((((value >> 20) & 1) << 31) | (((value >> 1) & 0x3FF) << 21) |
+        (((value >> 11) & 1) << 20) | (((value >> 12) & 0xFF) << 12) |
+        ((rd & 0x1F) << 7) | 0x6F)
+
+fn compressed_r(rd: u32, funct3: u32, rs1: u32, rs2: u32, funct7: u32) -> u32:
+    (((funct7 & 0x7F) << 25) | ((rs2 & 0x1F) << 20) |
+        ((rs1 & 0x1F) << 15) | ((funct3 & 7) << 12) |
+        ((rd & 0x1F) << 7) | 0x33)
+
+fn compressed_r_opcode(rd: u32, funct3: u32, rs1: u32, rs2: u32,
+                       funct7: u32, opcode: u32) -> u32:
+    (((funct7 & 0x7F) << 25) | ((rs2 & 0x1F) << 20) |
+        ((rs1 & 0x1F) << 15) | ((funct3 & 7) << 12) |
+        ((rd & 0x1F) << 7) | (opcode & 0x7F))
+
+fn compressed_jalr(rd: u32, rs1: u32) -> u32:
+    ((rs1 & 0x1F) << 15) | ((rd & 0x1F) << 7) | 0x67
+
+fn compressed_sign_extend(value: u32, width: u32) -> u32:
+    val low = value & ((1 << width) - 1)
+    if (low & (1 << (width - 1))) != 0:
+        return low | (0xFFFF_FFFF << width)
+    low
+
+fn compressed_prime(value: u32) -> u32:
+    8 + (value & 7)
+
+fn compressed_addi4spn_imm(c: u32) -> u32:
+    ((((c >> 7) & 0xF) << 6) | (((c >> 11) & 3) << 4) |
+        (((c >> 5) & 1) << 3) | (((c >> 6) & 1) << 2))
+
+fn compressed_lw_imm(c: u32) -> u32:
+    ((((c >> 5) & 1) << 6) | (((c >> 10) & 7) << 3) |
+        (((c >> 6) & 1) << 2))
+
+fn compressed_jump_imm(c: u32) -> u32:
+    compressed_sign_extend((((c >> 12) & 1) << 11) | (((c >> 11) & 1) << 4) |
+        (((c >> 9) & 3) << 8) | (((c >> 8) & 1) << 10) |
+        (((c >> 7) & 1) << 6) | (((c >> 6) & 1) << 7) |
+        (((c >> 3) & 7) << 1) | (((c >> 2) & 1) << 5), 12)
+
+fn compressed_branch_imm(c: u32) -> u32:
+    compressed_sign_extend((((c >> 12) & 1) << 8) | (((c >> 10) & 3) << 3) |
+        (((c >> 5) & 3) << 6) | (((c >> 3) & 3) << 1) |
+        (((c >> 2) & 1) << 5), 9)
+
+fn compressed_lwsp_imm(c: u32) -> u32:
+    ((((c >> 2) & 3) << 6) | (((c >> 12) & 1) << 5) |
+        (((c >> 4) & 7) << 2))
+
+fn compressed_swsp_imm(c: u32) -> u32:
+    (((c >> 7) & 3) << 6) | (((c >> 9) & 0xF) << 2)
+
+fn compressed_ld_imm(c: u32) -> u32:
+    (((c >> 10) & 7) << 3) | (((c >> 5) & 3) << 6)
+
+fn compressed_ldsp_imm(c: u32) -> u32:
+    ((((c >> 12) & 1) << 5) | (((c >> 5) & 3) << 3) |
+        (((c >> 2) & 7) << 6))
+
+fn compressed_sdsp_imm(c: u32) -> u32:
+    (((c >> 10) & 7) << 3) | (((c >> 7) & 7) << 6)
+
+fn compressed_addi16sp_imm(c: u32) -> u32:
+    compressed_sign_extend((((c >> 12) & 1) << 9) | (((c >> 6) & 1) << 4) |
+        (((c >> 5) & 1) << 6) | (((c >> 3) & 3) << 7) |
+        (((c >> 2) & 1) << 5), 10)
+
+@hardware
+pub fn riscv_zca_seed_expand_hardware(parcel: u32) -> CompressedHardwareExpansion:
+    """Classify and expand the first shared Zca rows for one 16-bit parcel.
+
+    This entry contains only rows that have identical RV32/RV64 behavior, so
+    its RTL interface has no XLEN input or runtime width selector. Width- and
+    extension-specific rows remain in the adapters until typed ISA capability
+    selection is available at elaboration.
+    """
+    val c = parcel & 0xFFFF
+    if not riscv_compressed_is_parcel(c):
+        return compressed_hardware_illegal(c, COMPRESSED_REASON_NOT_COMPRESSED)
+    if c == 0:
+        return compressed_hardware_illegal(c, COMPRESSED_REASON_RESERVED_ZERO)
+    # C.EBREAK: quadrant 2, funct3 100, bit12 set, rd=x0, rs2=x0.
+    if c == 0x9002:
+        return compressed_hardware_legal(c, 0x00100073)
+
+    val quadrant = c & 3
+    val funct3 = (c >> 13) & 7
+    val rd = (c >> 7) & 0x1F
+    val rs2 = (c >> 2) & 0x1F
+    val rd_prime = compressed_prime((c >> 7) & 7)
+    val rs2_prime = compressed_prime((c >> 2) & 7)
+    # Q0 contains shared integer stack-relative/frequent-register operations.
+    if quadrant == 0:
+        if funct3 == 0:
+            val immediate = compressed_addi4spn_imm(c)
+            if immediate == 0:
+                return compressed_hardware_illegal(c, COMPRESSED_REASON_RESERVED_ENCODING)
+            return compressed_hardware_legal(c, compressed_i(rs2_prime, 0, 2, immediate))
+        if funct3 == 2:
+            return compressed_hardware_legal(c, compressed_i(rs2_prime, 2, rd_prime, compressed_lw_imm(c)))
+        if funct3 == 6:
+            return compressed_hardware_legal(c, compressed_s(2, rd_prime, rs2_prime, compressed_lw_imm(c)))
+    # Q1/funct3=000 is C.NOP (rd=x0, imm=0) or C.ADDI. Both canonicalize to
+    # ADDI and are shared unchanged by RV32 and RV64.
+    if quadrant == 1 and funct3 == 0:
+        val immediate = compressed_sign_extend_6(((c >> 12) << 5) | ((c >> 2) & 0x1F))
+        return compressed_hardware_legal(c, compressed_addi(rd, immediate))
+    if quadrant == 1 and funct3 == 2:
+        val immediate = compressed_sign_extend_6(((c >> 12) << 5) | ((c >> 2) & 0x1F))
+        return compressed_hardware_legal(c, compressed_i(rd, 0, 0, immediate))
+    if quadrant == 1 and funct3 == 3:
+        if rd == 2:
+            val immediate = compressed_addi16sp_imm(c)
+            if immediate == 0:
+                return compressed_hardware_illegal(c, COMPRESSED_REASON_RESERVED_ENCODING)
+            return compressed_hardware_legal(c, compressed_i(2, 0, 2, immediate))
+        # rd=x0 is a legacy-adapter-owned hint discrepancy.  For ordinary C.LUI
+        # rows the expansion is identical across XLEN values.
+        if rd != 0:
+            val immediate = compressed_sign_extend_6(((c >> 12) << 5) | ((c >> 2) & 0x1F))
+            if immediate == 0:
+                return compressed_hardware_illegal(c, COMPRESSED_REASON_RESERVED_ENCODING)
+            return compressed_hardware_legal(c, ((immediate as u32) << 12) | (rd << 7) | 0x37)
+    if quadrant == 1 and funct3 == 4:
+        val mode = (c >> 10) & 3
+        val immediate = compressed_sign_extend_6(((c >> 12) << 5) | ((c >> 2) & 0x1F))
+        val shamt = (((c >> 12) & 1) << 5) | ((c >> 2) & 0x1F)
+        if mode == 0 and (c & 0x1000) == 0:
+            return compressed_hardware_legal(c, compressed_i(rd_prime, 5, rd_prime, shamt))
+        if mode == 1 and (c & 0x1000) == 0:
+            return compressed_hardware_legal(c, compressed_i(rd_prime, 5, rd_prime, 0x400 | shamt))
+        if mode == 2:
+            return compressed_hardware_legal(c, compressed_i(rd_prime, 7, rd_prime, immediate))
+        if mode == 3 and (c & 0x1000) == 0:
+            val op = (c >> 5) & 3
+            if op == 0:
+                return compressed_hardware_legal(c, compressed_r(rd_prime, 0, rd_prime, rs2_prime, 0x20))
+            if op == 1:
+                return compressed_hardware_legal(c, compressed_r(rd_prime, 4, rd_prime, rs2_prime, 0))
+            if op == 2:
+                return compressed_hardware_legal(c, compressed_r(rd_prime, 6, rd_prime, rs2_prime, 0))
+            return compressed_hardware_legal(c, compressed_r(rd_prime, 7, rd_prime, rs2_prime, 0))
+    if quadrant == 1 and funct3 == 5:
+        return compressed_hardware_legal(c, compressed_j(0, compressed_jump_imm(c)))
+    if quadrant == 1 and funct3 == 6:
+        return compressed_hardware_legal(c, compressed_b(0, rd_prime, compressed_branch_imm(c)))
+    if quadrant == 1 and funct3 == 7:
+        return compressed_hardware_legal(c, compressed_b(1, rd_prime, compressed_branch_imm(c)))
+    # Q2 stack-relative integer forms are common to RV32 and RV64.
+    if quadrant == 2 and funct3 == 2:
+        if rd == 0:
+            return compressed_hardware_illegal(c, COMPRESSED_REASON_RESERVED_ENCODING)
+        return compressed_hardware_legal(c, compressed_i(rd, 2, 2, compressed_lwsp_imm(c)))
+    if quadrant == 2 and funct3 == 6:
+        return compressed_hardware_legal(c, compressed_s(2, 2, rs2, compressed_swsp_imm(c)))
+    if quadrant == 2 and funct3 == 0 and (c & 0x1000) == 0:
+        val shamt = (c >> 2) & 0x1F
+        return compressed_hardware_legal(c, compressed_i(rd, 1, rd, shamt))
+    if quadrant == 2 and funct3 == 4:
+        val high = (c & 0x1000) != 0
+        if not high and rs2 == 0 and rd != 0:
+            return compressed_hardware_legal(c, compressed_jalr(0, rd))
+        if not high and rs2 != 0 and rd != 0:
+            return compressed_hardware_legal(c, compressed_r(rd, 0, 0, rs2, 0))
+        if high and rs2 == 0 and rd != 0:
+            return compressed_hardware_legal(c, compressed_jalr(1, rd))
+        if high and rs2 != 0 and rd != 0:
+            return compressed_hardware_legal(c, compressed_r(rd, 0, rd, rs2, 0))
+    compressed_hardware_illegal(c, COMPRESSED_REASON_UNSUPPORTED_ZCA_SEED)
+
+@hardware
+pub fn riscv_zca_mission_critical_expand_hardware(parcel: u32) -> CompressedHardwareExpansion:
+    """Fail-closed critical boundary for the currently verified common Zca rows.
+
+    It accepts no feature/config object, XLEN, text, provider, or fallback
+    callback.  An unsupported or reserved parcel is an illegal result, never a
+    request to the legacy decoder.  Products may select this boundary only when
+    their ISA capability manifest advertises exactly this verified subset.
+    """
+    val result = riscv_zca_seed_expand_hardware(parcel)
+    if result.legal:
+        return result
+    compressed_hardware_illegal(result.original_parcel, result.reason_code)
+
+@hardware
+pub fn riscv_zca_expand_rv32_hardware(parcel: u32) -> CompressedHardwareExpansion:
+    """Complete RV32C integer expansion over the shared Zca operation owner.
+
+    Common rows are dispatched once by `riscv_zca_seed_expand_hardware`.
+    This RV32-specific tail owns only the ISA-defined differences: C.JAL,
+    RV32 shift reservations, and x0 hint behavior. Unsupported FP/64-bit rows
+    are terminal illegal results.
+    """
+    val c = parcel & 0xFFFF
+    if not riscv_compressed_is_parcel(c):
+        return compressed_hardware_illegal(c, COMPRESSED_REASON_NOT_COMPRESSED)
+    val shared = riscv_zca_seed_expand_hardware(c)
+    if shared.legal or shared.reason_code == COMPRESSED_REASON_RESERVED_ZERO or
+        shared.reason_code == COMPRESSED_REASON_RESERVED_ENCODING:
+        return shared
+    val quadrant = c & 3
+    val funct3 = (c >> 13) & 7
+    val rd = (c >> 7) & 0x1F
+    val rs2 = (c >> 2) & 0x1F
+    if quadrant == 1 and funct3 == 1:
+        return compressed_hardware_legal(c, compressed_j(1, compressed_jump_imm(c)))
+    if quadrant == 1 and funct3 == 3 and rd == 0:
+        # RV32 C.LUI x0 is a HINT and therefore canonicalizes to NOP.
+        return compressed_hardware_legal(c, compressed_addi(0, 0))
+    if quadrant == 1 and funct3 == 4:
+        val mode = (c >> 10) & 3
+        if (mode == 0 or mode == 1 or mode == 3) and (c & 0x1000) != 0:
+            return compressed_hardware_illegal(c, COMPRESSED_REASON_RESERVED_ENCODING)
+    if quadrant == 2 and funct3 == 0 and (c & 0x1000) != 0:
+        return compressed_hardware_illegal(c, COMPRESSED_REASON_RESERVED_ENCODING)
+    if quadrant == 2 and funct3 == 4:
+        val high = (c & 0x1000) != 0
+        if not high and rs2 == 0 and rd == 0:
+            return compressed_hardware_illegal(c, COMPRESSED_REASON_RESERVED_ENCODING)
+        if not high and rs2 != 0 and rd == 0:
+            # C.MV x0, rs2 is an architectural hint.
+            return compressed_hardware_legal(c, compressed_addi(0, 0))
+        if high and rs2 != 0 and rd == 0:
+            # C.ADD x0, rs2 is an architectural hint.
+            return compressed_hardware_legal(c, compressed_addi(0, 0))
+    compressed_hardware_illegal(c, COMPRESSED_REASON_UNSUPPORTED_ZCA_SEED)
+
+@hardware
+pub fn riscv_zca_expand_rv64_hardware(parcel: u32) -> CompressedHardwareExpansion:
+    """Complete RV64C integer expansion over the shared Zca operation owner.
+
+    The common function owns identical RV32/RV64 rows. This specialization
+    supplies only RV64 semantics: C.LD/SD, C.ADDIW, 6-bit shifts, C.SUBW/ADDW,
+    C.LDSP/SDSP, and RV64's x0 legality rules. No XLEN value is an RTL input.
+    """
+    val c = parcel & 0xFFFF
+    if not riscv_compressed_is_parcel(c):
+        return compressed_hardware_illegal(c, COMPRESSED_REASON_NOT_COMPRESSED)
+    val shared = riscv_zca_seed_expand_hardware(c)
+    if shared.legal or shared.reason_code == COMPRESSED_REASON_RESERVED_ZERO or
+        shared.reason_code == COMPRESSED_REASON_RESERVED_ENCODING:
+        return shared
+    val quadrant = c & 3
+    val funct3 = (c >> 13) & 7
+    val rd = (c >> 7) & 0x1F
+    val rs2 = (c >> 2) & 0x1F
+    val rd_prime = compressed_prime((c >> 7) & 7)
+    val rs2_prime = compressed_prime((c >> 2) & 7)
+    if quadrant == 0:
+        if funct3 == 3:
+            return compressed_hardware_legal(c,
+                compressed_i(rd_prime, 3, compressed_prime((c >> 7) & 7), compressed_ld_imm(c)))
+        if funct3 == 7:
+            return compressed_hardware_legal(c,
+                compressed_s(3, compressed_prime((c >> 7) & 7), rs2_prime, compressed_ld_imm(c)))
+    if quadrant == 1:
+        if funct3 == 1:
+            if rd == 0:
+                return compressed_hardware_illegal(c, COMPRESSED_REASON_RESERVED_ENCODING)
+            val immediate = compressed_sign_extend_6(((c >> 12) << 5) | ((c >> 2) & 0x1F))
+            return compressed_hardware_legal(c, compressed_i_opcode(rd, 0, rd, immediate, 0x1B))
+        if funct3 == 3 and rd == 0:
+            return compressed_hardware_illegal(c, COMPRESSED_REASON_RESERVED_ENCODING)
+        if funct3 == 4:
+            val mode = (c >> 10) & 3
+            val shamt = (((c >> 12) & 1) << 5) | ((c >> 2) & 0x1F)
+            if mode == 0 and (c & 0x1000) != 0:
+                return compressed_hardware_legal(c, compressed_i(rd_prime, 5, rd_prime, shamt))
+            if mode == 1 and (c & 0x1000) != 0:
+                return compressed_hardware_legal(c, compressed_i(rd_prime, 5, rd_prime, 0x400 | shamt))
+            if mode == 3 and (c & 0x1000) != 0:
+                val operation = (c >> 5) & 3
+                if operation == 0:
+                    return compressed_hardware_legal(c,
+                        compressed_r_opcode(rd_prime, 0, rd_prime, rs2_prime, 0x20, 0x3B))
+                if operation == 1:
+                    return compressed_hardware_legal(c,
+                        compressed_r_opcode(rd_prime, 0, rd_prime, rs2_prime, 0, 0x3B))
+                return compressed_hardware_illegal(c, COMPRESSED_REASON_RESERVED_ENCODING)
+    if quadrant == 2:
+        if funct3 == 0 and (c & 0x1000) != 0:
+            val shamt = (((c >> 12) & 1) << 5) | ((c >> 2) & 0x1F)
+            return compressed_hardware_legal(c, compressed_i(rd, 1, rd, shamt))
+        if funct3 == 3:
+            if rd == 0:
+                return compressed_hardware_illegal(c, COMPRESSED_REASON_RESERVED_ENCODING)
+            return compressed_hardware_legal(c, compressed_i(rd, 3, 2, compressed_ldsp_imm(c)))
+        if funct3 == 7:
+            return compressed_hardware_legal(c, compressed_s(3, 2, rs2, compressed_sdsp_imm(c)))
+        if funct3 == 4:
+            val high = (c & 0x1000) != 0
+            if not high and rs2 == 0 and rd == 0:
+                return compressed_hardware_illegal(c, COMPRESSED_REASON_RESERVED_ENCODING)
+            if not high and rs2 != 0 and rd == 0:
+                return compressed_hardware_legal(c, compressed_r(0, 0, 0, rs2, 0))
+            if high and rs2 != 0 and rd == 0:
+                return compressed_hardware_legal(c, compressed_r(0, 0, 0, rs2, 0))
+    compressed_hardware_illegal(c, COMPRESSED_REASON_UNSUPPORTED_ZCA_SEED)
+
+fn compressed_reason_text(reason_code: u32) -> text:
+    if reason_code == COMPRESSED_REASON_NONE:
+        return ""
+    if reason_code == COMPRESSED_REASON_INVALID_XLEN:
+        return "invalid_xlen"
+    if reason_code == COMPRESSED_REASON_NOT_COMPRESSED:
+        return "not_compressed_parcel"
+    if reason_code == COMPRESSED_REASON_RESERVED_ZERO:
+        return "reserved_zero_encoding"
+    if reason_code == COMPRESSED_REASON_RV64_ONLY:
+        return "rv64_only_form"
+    if reason_code == COMPRESSED_REASON_RESERVED_ENCODING:
+        return "reserved_encoding"
+    "unsupported_zca_seed_form"
+
+pub fn riscv_zca_seed_expand(parcel: u32, xlen: u32) -> CompressedExpansion:
+    """Host-facing metadata projection of the synthesizable seed result."""
+    if xlen != 32 and xlen != 64:
+        return CompressedExpansion(original_parcel: parcel & 0xFFFF,
+            canonical_instruction: 0, length_bytes: 2, legal: false,
+            required_extensions: "Zca",
+            illegal_reason: compressed_reason_text(COMPRESSED_REASON_INVALID_XLEN))
+    val hardware = riscv_zca_seed_expand_hardware(parcel)
+    val c = parcel & 0xFFFF
+    # Metadata can classify this future extension-sensitive form without
+    # adding XLEN data/control to the synthesizable common hardware function.
+    if not hardware.legal and hardware.reason_code == COMPRESSED_REASON_UNSUPPORTED_ZCA_SEED and
+        (c & 3) == 0 and ((c >> 13) & 7) == 3 and xlen == 32:
+        return CompressedExpansion(original_parcel: c, canonical_instruction: 0,
+            length_bytes: 2, legal: false, required_extensions: "Zca",
+            illegal_reason: compressed_reason_text(COMPRESSED_REASON_RV64_ONLY))
+    CompressedExpansion(original_parcel: hardware.original_parcel,
+        canonical_instruction: hardware.canonical_instruction,
+        length_bytes: hardware.length_bytes, legal: hardware.legal,
+        required_extensions: "Zca",
+        illegal_reason: compressed_reason_text(hardware.reason_code))

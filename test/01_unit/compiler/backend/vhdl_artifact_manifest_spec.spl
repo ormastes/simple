@@ -1,10 +1,16 @@
 use std.spec
 use compiler.driver.driver_vhdl_artifacts.{
     VhdlArtifactSource, VhdlArtifactLocation, VhdlArtifactGeneratedItem,
-    VhdlArtifactPort, VhdlArtifactInput, vhdl_render_production_artifacts,
-    vhdl_write_production_artifacts, vhdl_artifact_target_for_entity,
+    VhdlArtifactPort, VhdlArtifactAspect, VhdlArtifactInput, vhdl_render_production_artifacts,
+    vhdl_write_production_artifacts,
+    vhdl_artifact_target_for_entity,
+    vhdl_gen2_capability_ids, vhdl_gen2_capability_sha256,
     vhdl_validate_production_artifact_input
 }
+use compiler.mir.hwir.aspects.{HwAspectLock, HwAspectLockEntry, hwir_aspect_lock_sha256}
+use compiler.mir.hwir.types.{CoreConfig, HwPort}
+use compiler.mir.hwir.stateful_frontend.{strict_zca_single_outstanding_frontend_hwir, strict_zca_trap_single_outstanding_frontend_hwir}
+use compiler.mir.hwir.frontend.{strict_zca_rv32_cjal_migrating_predecode_hwir, strict_zca_rv64_addiw_migrating_predecode_hwir}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text?
@@ -15,6 +21,10 @@ extern fn rt_dir_remove_all(path: text) -> bool
 fn artifact_sha() -> text:
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+fn artifact_non_hex_sha() -> text:
+    "gggggggg" + "gggggggg" + "gggggggg" + "gggggggg" +
+        "gggggggg" + "gggggggg" + "gggggggg" + "gggggggg"
+
 fn artifact_location() -> VhdlArtifactLocation:
     VhdlArtifactLocation(available: true, module_name: "hardware.rv32.entry",
         file: "src/lib/hardware/rv32i_rtl/protected_entry.spl",
@@ -23,6 +33,35 @@ fn artifact_location() -> VhdlArtifactLocation:
 fn artifact_port_location() -> VhdlArtifactLocation:
     VhdlArtifactLocation(available: false, module_name: "", file: "",
         start: 0, end: 0, line: 0, col: 0)
+
+fn artifact_gen2_ports(entity: text) -> [VhdlArtifactPort]:
+    val config = CoreConfig.rv32_zca_mission_critical()
+    var typed_ports: [HwPort] = []
+    if entity == "riscv_gen2_zca_trap_single_outstanding_frontend_rv32":
+        typed_ports = strict_zca_trap_single_outstanding_frontend_hwir(entity, config).unwrap().frontend_contract.ports()
+    elif entity == "riscv_gen2_zca_rv32_cjal_migrating_predecode":
+        typed_ports = strict_zca_rv32_cjal_migrating_predecode_hwir(entity,
+            CoreConfig.rv32_zca_cjal_mission_critical()).unwrap().ports
+    elif entity == "riscv_gen2_zca_rv64_addiw_migrating_predecode":
+        typed_ports = strict_zca_rv64_addiw_migrating_predecode_hwir(entity,
+            CoreConfig.rv64_zca_addiw_mission_critical()).unwrap().ports
+    elif entity == "riscv_gen2_zca_rv32_cjal_single_outstanding_frontend":
+        typed_ports = strict_zca_single_outstanding_frontend_hwir(entity,
+            CoreConfig.rv32_zca_cjal_mission_critical()).unwrap().frontend_contract.ports()
+    elif entity == "riscv_gen2_zca_rv64_addiw_single_outstanding_frontend":
+        typed_ports = strict_zca_single_outstanding_frontend_hwir(entity,
+            CoreConfig.rv64_zca_addiw_mission_critical()).unwrap().frontend_contract.ports()
+    else:
+        typed_ports = strict_zca_single_outstanding_frontend_hwir(entity, config).unwrap().frontend_contract.ports()
+    var ports: [VhdlArtifactPort] = []
+    var index = 0
+    for port in typed_ports:
+        ports.push(VhdlArtifactPort(entity: entity, name: port.name,
+            direction: port.direction, type_name: port.type_name,
+            bit_width: port.bit_width as i64, index: index,
+            location: artifact_port_location()))
+        index = index + 1
+    ports
 
 fn artifact_input(sources: [VhdlArtifactSource], ports: [VhdlArtifactPort], output: text) -> VhdlArtifactInput:
     VhdlArtifactInput(output_path: output,
@@ -33,9 +72,45 @@ fn artifact_input(sources: [VhdlArtifactSource], ports: [VhdlArtifactPort], outp
         target: "riscv32", xlen: 32, profile: "RV32IMAC+Sv32+PMP",
         catalog_name: "simple_vhdl_design", module_count: 2,
         entity_count: 1, type_count: 3, helper_count: 4,
+        generation_route: "legacy-vhdl", hwir_module_node_id: "",
+        hwir_config_profile: "", hwir_graph_sha256: "",
+        riscv_isa_profile: "", riscv_compressed_decode_profile: "",
+        riscv_capability_scope: "", riscv_admitted_instruction_ids: [], riscv_capability_sha256: "",
+        riscv_target_evidence_complete: false,
+        hwir_aspect_lock_sha256: "", hwir_aspects: [],
         generated_items: [VhdlArtifactGeneratedItem(kind: "entity",
             name: "core32_protected_product_entry", location: artifact_location())],
         ports: ports, aop_advices_requested: 0, aop_weave_count: 0)
+
+fn artifact_trap_gen2_input(output: text) -> VhdlArtifactInput:
+    val entity = "riscv_gen2_zca_trap_single_outstanding_frontend_rv32"
+    var product = artifact_input([], artifact_gen2_ports(entity), output)
+    product.entry_module = "compiler-product:riscv-gen2-zca-trap-single-outstanding-v2"
+    product.entry_entity = entity
+    product.root_modules = [product.entry_module]
+    product.catalog_name = product.entry_module
+    product.generation_route = "hwir-gen2-trap-stateful-product"
+    product.hwir_module_node_id = entity + ":module"
+    product.hwir_config_profile = "riscv-gen2-rv32-zca-critical"
+    product.hwir_graph_sha256 = artifact_sha()
+    product.target = "riscv32"
+    product.xlen = 32
+    product.profile = "riscv-gen2-rv32-zca-critical"
+    product.riscv_isa_profile = "rv32i"
+    product.riscv_compressed_decode_profile = "zca-common-critical"
+    product.riscv_capability_scope = "frontend-predecode-only"
+    product.riscv_admitted_instruction_ids = vhdl_gen2_capability_ids(
+        product.generation_route, entity).unwrap()
+    product.riscv_capability_sha256 = vhdl_gen2_capability_sha256(
+        product.riscv_admitted_instruction_ids).unwrap()
+    product.hwir_aspect_lock_sha256 = hwir_aspect_lock_sha256(HwAspectLock(entries: [])).unwrap()
+    product.module_count = 2
+    product.entity_count = 2
+    product.generated_items = [VhdlArtifactGeneratedItem(kind: "compiler_product_entity",
+        name: entity, location: artifact_port_location()),
+        VhdlArtifactGeneratedItem(kind: "compiler_product_dependency",
+            name: "riscv_gen2_zca_trap_migrating_predecode_rv32", location: artifact_port_location())]
+    product
 
 describe "VHDL production artifact manifest":
     it "routes every artifact writer error to CompileResult failure":
@@ -43,7 +118,8 @@ describe "VHDL production artifact manifest":
             "src/compiler/80.driver/driver_aot_vhdl_output.spl") ?? ""
         expect(source).to_contain("if not vhdl_remove_production_artifacts(output)")
         expect(source).to_contain("match vhdl_write_production_artifacts(output, all_vhdl, rendered)")
-        expect(source).to_contain("case Err(err): return CompileResult.CodegenError(err)")
+        expect(source).to_contain("case Err(err):")
+        expect(source).to_contain("return CompileResult.CodegenError(err)")
 
     it "pins the production RISC-V target profiles":
         val rv32 = vhdl_artifact_target_for_entity("core32_protected_product_entry", "dev")
@@ -61,11 +137,11 @@ describe "VHDL production artifact manifest":
         val b = VhdlArtifactSource(module_name: "hardware.rv32.core",
             path: "core.spl", content_hash: artifact_sha())
         val p0 = VhdlArtifactPort(entity: "core32_protected_product_entry",
-            name: "clk", direction: "in", type_name: "std_logic", index: 0,
+            name: "clk", direction: "in", type_name: "std_logic", bit_width: 0, index: 0,
             location: artifact_port_location())
         val p1 = VhdlArtifactPort(entity: "core32_protected_product_entry",
             name: "bus_addr", direction: "out", type_name: "unsigned(33 downto 0)",
-            index: 1, location: artifact_port_location())
+            bit_width: 0, index: 1, location: artifact_port_location())
         val first = vhdl_render_production_artifacts(
             artifact_input([a, b], [p1, p0], "build/core32.vhd"), "entity rtl is\n")
         val second = vhdl_render_production_artifacts(
@@ -73,19 +149,271 @@ describe "VHDL production artifact manifest":
         expect(first.manifest).to_equal(second.manifest)
         expect(first.source_map).to_equal(second.source_map)
         expect(first.manifest).to_contain("\"qualification\":{\"status\":\"FAIL\"")
+        expect(first.manifest).to_contain("\"riscv\":{\"isa_profile\":\"\",\"compressed_decode_profile\":\"\",\"implementation_scope\":\"\",\"implemented_instruction_ids\":[],\"capability_sha256\":\"\",\"target_evidence_complete\":false}")
         expect(first.manifest).to_contain("\"source_closure_sha256\"")
         expect(first.manifest).to_contain("\"name\":\"bus_addr\",\"direction\":\"out\"")
         expect(first.source_map).to_contain("\"file\":\"src/lib/hardware/rv32i_rtl/protected_entry.spl\"")
         expect(first.source_map).to_contain("\"line\":8")
-        expect(first.source_map).to_contain("\"name\":\"clk\",\"direction\":\"in\",\"type\":\"std_logic\",\"source\":null")
+        expect(first.source_map).to_contain("\"name\":\"clk\",\"direction\":\"in\",\"type\":\"std_logic\",\"bit_width\":0,\"source\":null")
         expect(vhdl_validate_production_artifact_input(
             artifact_input([a, b], [p0, p1], "build/core32.vhd")).is_ok()).to_equal(true)
+
+    it "records typed HWIR aspect-lock provenance independently of legacy AOP counts":
+        val source = VhdlArtifactSource(module_name: "hardware.rv32.entry",
+            path: "entry.spl", content_hash: artifact_sha())
+        val port = VhdlArtifactPort(entity: "core32_protected_product_entry",
+            name: "result_out", direction: "out", type_name: "Bits[1]", bit_width: 0, index: 0,
+            location: artifact_port_location())
+        var input = artifact_input([source], [port], "build/aspect.vhd")
+        input.hwir_aspects = [VhdlArtifactAspect(id: "debug.rvfi", version: "1.0.0",
+            content_hash: artifact_sha())]
+        input.hwir_aspect_lock_sha256 = hwir_aspect_lock_sha256(HwAspectLock(entries: [
+            HwAspectLockEntry(id: "debug.rvfi", version: "1.0.0",
+                content_hash: artifact_sha())])).unwrap()
+        expect(vhdl_validate_production_artifact_input(input).is_ok()).to_equal(true)
+        val rendered = vhdl_render_production_artifacts(input, "entity rtl is\n")
+        expect(rendered.manifest).to_contain("\"hwir_aspects\":{\"lock_sha256\":\"" + artifact_sha() + "\"")
+        expect(rendered.manifest).to_contain("\"id\":\"debug.rvfi\",\"version\":\"1.0.0\",\"sha256\":\"" + artifact_sha() + "\"")
+        input.hwir_aspects = [VhdlArtifactAspect(id: "debug.rvfi", version: "1.0.0",
+            content_hash: artifact_sha()), VhdlArtifactAspect(id: "debug.rvfi",
+            version: "1.0.1", content_hash: artifact_sha())]
+        expect(vhdl_validate_production_artifact_input(input).unwrap_err()).to_equal("VHDL artifact aspect provenance requires unique ID/version/SHA-256 identities")
 
     it "rejects missing compiler and source hashes":
         val source = VhdlArtifactSource(module_name: "hardware.rv32.entry",
             path: "entry.spl", content_hash: "")
         val input = artifact_input([source], [], "build/core32.vhd")
         expect(vhdl_validate_production_artifact_input(input).is_err()).to_equal(true)
+
+    it "rejects syntactically forged SHA-256 provenance identities":
+        val source = VhdlArtifactSource(module_name: "hardware.rv32.entry",
+            path: "entry.spl", content_hash: artifact_sha())
+        val port = VhdlArtifactPort(entity: "core32_protected_product_entry",
+            name: "result_out", direction: "out", type_name: "Bits[1]", bit_width: 0, index: 0,
+            location: artifact_port_location())
+        var input = artifact_input([source], [port], "build/digest.vhd")
+        input.compiler_hash = artifact_non_hex_sha()
+        expect(vhdl_validate_production_artifact_input(input).unwrap_err()).to_equal(
+            "VHDL artifact provenance requires compiler identity and SHA-256")
+        input.compiler_hash = artifact_sha()
+        input.generation_route = "hwir-strict"
+        input.hwir_module_node_id = "critical_and:module"
+        input.hwir_config_profile = "riscv-gen2-rv32-zca-critical"
+        input.hwir_graph_sha256 = artifact_non_hex_sha()
+        expect(vhdl_validate_production_artifact_input(input).unwrap_err()).to_equal(
+            "VHDL strict-HWIR provenance requires a canonical HWIR graph SHA-256")
+        input.generation_route = "legacy-vhdl"
+        input.hwir_graph_sha256 = ""
+        input.sources[0].content_hash = artifact_non_hex_sha()
+        expect(vhdl_validate_production_artifact_input(input).unwrap_err()).to_equal(
+            "VHDL artifact source closure contains incomplete provenance")
+
+    it "requires concrete HWIR provenance for strict source emission":
+        val source = VhdlArtifactSource(module_name: "hardware.rv32.entry",
+            path: "entry.spl", content_hash: artifact_sha())
+        val port = VhdlArtifactPort(entity: "core32_protected_product_entry",
+            name: "result_out", direction: "out", type_name: "Bits[1]", bit_width: 0, index: 0,
+            location: artifact_port_location())
+        var strict = artifact_input([source], [port], "build/strict.vhd")
+        strict.generation_route = "hwir-strict"
+        expect(vhdl_validate_production_artifact_input(strict).is_err()).to_equal(true)
+        strict.hwir_module_node_id = "critical_and:module"
+        strict.hwir_config_profile = "riscv-gen2-rv32-zca-critical"
+        strict.hwir_graph_sha256 = artifact_sha()
+        expect(vhdl_validate_production_artifact_input(strict).is_ok()).to_equal(true)
+        val rendered = vhdl_render_production_artifacts(strict, "entity strict is\n")
+        expect(rendered.manifest).to_contain("\"generation_route\":\"hwir-strict\"")
+        expect(rendered.manifest).to_contain("\"module_node_id\":\"critical_and:module\"")
+        expect(rendered.manifest).to_contain("\"graph_sha256\":\"" + artifact_sha() + "\"")
+
+    it "requires graph-bound provenance for typed stateful compiler products":
+        val port = VhdlArtifactPort(entity: "core32_protected_product_entry",
+            name: "result_out", direction: "out", type_name: "Bits[1]", bit_width: 0, index: 0,
+            location: artifact_port_location())
+        var product = artifact_input([], [port], "build/stateful.vhd")
+        product.generation_route = "hwir-gen2-stateful-product"
+        product.hwir_module_node_id = "stateful:module"
+        product.hwir_config_profile = "riscv-gen2-rv32-zca-critical"
+        product.riscv_isa_profile = "rv32i"
+        product.riscv_compressed_decode_profile = "zca-common-critical"
+        expect(vhdl_validate_production_artifact_input(product).is_err()).to_equal(true)
+        product.hwir_graph_sha256 = artifact_sha()
+        product.hwir_aspect_lock_sha256 = hwir_aspect_lock_sha256(
+            HwAspectLock(entries: [])).unwrap()
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 product provenance route does not admit the claimed entry entity")
+        product.entry_module = "compiler-product:riscv-gen2-zca-trap-single-outstanding-v2"
+        product.entry_entity = "riscv_gen2_zca_trap_single_outstanding_frontend_rv32"
+        product.generation_route = "hwir-gen2-trap-stateful-product"
+        product.root_modules = [product.entry_module]
+        product.hwir_module_node_id = product.entry_entity + ":module"
+        product.catalog_name = product.entry_module
+        product.module_count = 2
+        product.entity_count = 2
+        product.generated_items = [VhdlArtifactGeneratedItem(kind: "compiler_product_entity",
+            name: product.entry_entity, location: artifact_port_location()),
+            VhdlArtifactGeneratedItem(kind: "compiler_product_dependency",
+            name: "riscv_gen2_zca_trap_migrating_predecode_rv32", location: artifact_port_location())]
+        product.ports = artifact_gen2_ports(product.entry_entity)
+        product.riscv_capability_scope = "frontend-predecode-only"
+        product.riscv_admitted_instruction_ids = vhdl_gen2_capability_ids(
+            product.generation_route, product.entry_entity).unwrap()
+        product.riscv_capability_sha256 = vhdl_gen2_capability_sha256(
+            product.riscv_admitted_instruction_ids).unwrap()
+        expect(vhdl_validate_production_artifact_input(product).is_ok()).to_equal(true)
+        product.riscv_capability_scope = "full-rv32i-core"
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 product provenance must declare its frontend-only implementation scope")
+        product.riscv_capability_scope = "frontend-predecode-only"
+        product.riscv_admitted_instruction_ids = []
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 product provenance capability set does not match the selected product")
+        product.riscv_admitted_instruction_ids = vhdl_gen2_capability_ids(
+            product.generation_route, product.entry_entity).unwrap()
+        product.riscv_capability_sha256 = artifact_sha()
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 product provenance capability SHA-256 does not match the selected product")
+        product.riscv_capability_sha256 = vhdl_gen2_capability_sha256(
+            product.riscv_admitted_instruction_ids).unwrap()
+        product.generated_items[1] = VhdlArtifactGeneratedItem(kind: "compiler_product_dependency",
+            name: "riscv_gen2_zca_migrating_predecode_rv32", location: artifact_port_location())
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 stateful product provenance decoder dependency does not match the selected route")
+        product.generated_items[1] = VhdlArtifactGeneratedItem(kind: "compiler_product_dependency",
+            name: "riscv_gen2_zca_trap_migrating_predecode_rv32", location: artifact_port_location())
+        product.aop_advices_requested = 1
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 product provenance forbids legacy AOP requests and weaves")
+        product.aop_advices_requested = 0
+        product.aop_weave_count = 1
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 product provenance forbids legacy AOP requests and weaves")
+        product.aop_weave_count = 0
+        var forged_port = product.ports[0]
+        forged_port.bit_width = 2
+        product.ports[0] = forged_port
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 product provenance ports do not match the typed HWIR contract")
+        product.ports = artifact_gen2_ports(product.entry_entity)
+        product.hwir_module_node_id = "forged:module"
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 product provenance requires the canonical entry module node")
+        product.hwir_module_node_id = product.entry_entity + ":module"
+        product.generation_route = "hwir-gen2-stateful-product"
+        product.entry_entity = "riscv_gen2_zca_single_outstanding_frontend_rv32"
+        product.hwir_module_node_id = product.entry_entity + ":module"
+        product.generated_items[0] = VhdlArtifactGeneratedItem(kind: "compiler_product_entity",
+            name: product.entry_entity, location: artifact_port_location())
+        product.generated_items[1] = VhdlArtifactGeneratedItem(kind: "compiler_product_dependency",
+            name: "riscv_gen2_zca_migrating_predecode_rv32", location: artifact_port_location())
+        product.ports = artifact_gen2_ports(product.entry_entity)
+        product.riscv_admitted_instruction_ids = vhdl_gen2_capability_ids(
+            product.generation_route, product.entry_entity).unwrap()
+        product.riscv_capability_sha256 = vhdl_gen2_capability_sha256(
+            product.riscv_admitted_instruction_ids).unwrap()
+        expect(vhdl_validate_production_artifact_input(product).is_ok()).to_equal(true)
+        product.generation_route = "hwir-gen2-trap-stateful-product"
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 product provenance route does not admit the claimed entry entity")
+        product.generation_route = "hwir-gen2-stateful-product-untrusted"
+        expect(vhdl_validate_production_artifact_input(product).is_err()).to_equal(true)
+
+    it "accepts the RV32-only C.JAL product only with its frozen profile and capability closure":
+        val entity = "riscv_gen2_zca_rv32_cjal_migrating_predecode"
+        val module = strict_zca_rv32_cjal_migrating_predecode_hwir(entity,
+            CoreConfig.rv32_zca_cjal_mission_critical()).unwrap()
+        var product = artifact_input([], artifact_gen2_ports(entity), "build/rv32-cjal.vhd")
+        product.entry_module = "compiler-product:riscv-gen2-zca-rv32-cjal-migrating-predecode-v1"
+        product.entry_entity = entity
+        product.root_modules = [product.entry_module]
+        product.catalog_name = product.entry_module
+        product.generation_route = "hwir-gen2-product"
+        product.hwir_module_node_id = entity + ":module"
+        product.hwir_config_profile = module.config.profile
+        product.hwir_graph_sha256 = module.structural_sha256()
+        product.target = "riscv32"
+        product.xlen = 32
+        product.profile = module.config.profile
+        product.riscv_isa_profile = module.config.isa_profile
+        product.riscv_compressed_decode_profile = module.config.compressed_decode_profile
+        product.riscv_capability_scope = "frontend-predecode-only"
+        product.riscv_admitted_instruction_ids = vhdl_gen2_capability_ids(
+            product.generation_route, entity).unwrap()
+        product.riscv_capability_sha256 = vhdl_gen2_capability_sha256(
+            product.riscv_admitted_instruction_ids).unwrap()
+        product.hwir_aspect_lock_sha256 = hwir_aspect_lock_sha256(HwAspectLock(entries: [])).unwrap()
+        product.generated_items = [VhdlArtifactGeneratedItem(kind: "compiler_product_entity",
+            name: entity, location: artifact_port_location())]
+        expect(vhdl_validate_production_artifact_input(product).is_ok()).to_equal(true)
+        product.profile = "riscv-gen2-rv32-zca-critical"
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 product provenance requires the concrete critical XLEN/profile closure")
+
+    it "accepts the RV64-only C.ADDIW product only with its frozen profile and capability closure":
+        val entity = "riscv_gen2_zca_rv64_addiw_migrating_predecode"
+        val module = strict_zca_rv64_addiw_migrating_predecode_hwir(entity,
+            CoreConfig.rv64_zca_addiw_mission_critical()).unwrap()
+        var product = artifact_input([], artifact_gen2_ports(entity), "build/rv64-addiw.vhd")
+        product.entry_module = "compiler-product:riscv-gen2-zca-rv64-addiw-migrating-predecode-v1"
+        product.entry_entity = entity
+        product.root_modules = [product.entry_module]
+        product.catalog_name = product.entry_module
+        product.generation_route = "hwir-gen2-product"
+        product.hwir_module_node_id = entity + ":module"
+        product.hwir_config_profile = module.config.profile
+        product.hwir_graph_sha256 = module.structural_sha256()
+        product.target = "riscv64"
+        product.xlen = 64
+        product.profile = module.config.profile
+        product.riscv_isa_profile = module.config.isa_profile
+        product.riscv_compressed_decode_profile = module.config.compressed_decode_profile
+        product.riscv_capability_scope = "frontend-predecode-only"
+        product.riscv_admitted_instruction_ids = vhdl_gen2_capability_ids(
+            product.generation_route, entity).unwrap()
+        product.riscv_capability_sha256 = vhdl_gen2_capability_sha256(
+            product.riscv_admitted_instruction_ids).unwrap()
+        product.hwir_aspect_lock_sha256 = hwir_aspect_lock_sha256(HwAspectLock(entries: [])).unwrap()
+        product.generated_items = [VhdlArtifactGeneratedItem(kind: "compiler_product_entity",
+            name: entity, location: artifact_port_location())]
+        expect(vhdl_validate_production_artifact_input(product).is_ok()).to_equal(true)
+        product.riscv_isa_profile = "rv64i"
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 product provenance requires the concrete critical ISA profile")
+
+    it "admits specialized stateful frontend manifests only with their matching decoder closure":
+        val entity = "riscv_gen2_zca_rv32_cjal_single_outstanding_frontend"
+        val module = strict_zca_single_outstanding_frontend_hwir(entity,
+            CoreConfig.rv32_zca_cjal_mission_critical()).unwrap()
+        var product = artifact_input([], artifact_gen2_ports(entity), "build/rv32-cjal-stateful.vhd")
+        product.entry_module = "compiler-product:riscv-gen2-zca-rv32-cjal-single-outstanding-v1"
+        product.entry_entity = entity
+        product.root_modules = [product.entry_module]
+        product.catalog_name = product.entry_module
+        product.generation_route = "hwir-gen2-stateful-product"
+        product.hwir_module_node_id = entity + ":module"
+        product.hwir_config_profile = module.config.profile
+        product.hwir_graph_sha256 = artifact_sha()
+        product.target = "riscv32"
+        product.xlen = 32
+        product.profile = module.config.profile
+        product.riscv_isa_profile = module.config.isa_profile
+        product.riscv_compressed_decode_profile = module.config.compressed_decode_profile
+        product.riscv_capability_scope = "frontend-predecode-only"
+        product.riscv_admitted_instruction_ids = vhdl_gen2_capability_ids(
+            product.generation_route, entity).unwrap()
+        product.riscv_capability_sha256 = vhdl_gen2_capability_sha256(
+            product.riscv_admitted_instruction_ids).unwrap()
+        product.hwir_aspect_lock_sha256 = hwir_aspect_lock_sha256(HwAspectLock(entries: [])).unwrap()
+        product.module_count = 2
+        product.entity_count = 2
+        product.generated_items = [VhdlArtifactGeneratedItem(kind: "compiler_product_entity", name: entity,
+            location: artifact_port_location()), VhdlArtifactGeneratedItem(kind: "compiler_product_dependency",
+            name: module.decoder_entity, location: artifact_port_location())]
+        expect(vhdl_validate_production_artifact_input(product).is_ok()).to_equal(true)
+        product.generated_items[1] = VhdlArtifactGeneratedItem(kind: "compiler_product_dependency",
+            name: "riscv_gen2_zca_migrating_predecode_rv32", location: artifact_port_location())
+        expect(vhdl_validate_production_artifact_input(product).unwrap_err()).to_equal(
+            "VHDL Gen2 stateful product provenance decoder dependency does not match the selected route")
 
     it "removes the VHDL when a sidecar write fails":
         val root = "build/vhdl_artifact_write_failure_contract"
@@ -100,6 +428,34 @@ describe "VHDL production artifact manifest":
         expect(result.is_err()).to_equal(true)
         expect(rt_file_exists(output)).to_equal(false)
         expect(rt_file_exists(output + ".gen.json")).to_equal(false)
+        rt_dir_remove_all(root)
+
+    it "rejects forged raw Gen2 text and preserves stale artifacts without an exported special writer":
+        val root = "build/vhdl_artifact_gen2_writer_boundary"
+        rt_dir_remove_all(root)
+        expect(rt_dir_create(root, true)).to_equal(true)
+        val output = root + "/gen2.vhd"
+        expect(rt_file_write_text(output, "known-vhdl")).to_equal(true)
+        expect(rt_file_write_text(output + ".map.json", "known-map")).to_equal(true)
+        expect(rt_file_write_text(output + ".gen.json", "known-manifest")).to_equal(true)
+        val product = artifact_trap_gen2_input(output)
+        expect(vhdl_validate_production_artifact_input(product).is_ok()).to_equal(true)
+        val rendered = vhdl_render_production_artifacts(product, "entity gen2 is\n")
+        expect(vhdl_write_production_artifacts(output, "entity gen2 is\n", rendered).unwrap_err()).to_equal(
+            "VHDL raw artifact writer refuses compiler-owned RISC-V Gen2 routes")
+        expect(rt_file_read_text(output).unwrap()).to_equal("known-vhdl")
+        expect(rt_file_read_text(output + ".map.json").unwrap()).to_equal("known-map")
+        expect(rt_file_read_text(output + ".gen.json").unwrap()).to_equal("known-manifest")
+        val artifacts_source = rt_file_read_text(
+            "src/compiler/80.driver/driver_vhdl_artifacts.spl") ?? ""
+        expect(artifacts_source.contains("pub fn vhdl_write_compiler_gen2_production_artifacts")).to_equal(false)
+        expect(artifacts_source.contains("export vhdl_write_compiler_gen2_production_artifacts")).to_equal(false)
+        val driver_source = rt_file_read_text(
+            "src/compiler/80.driver/driver_riscv_gen2_product.spl") ?? ""
+        expect(driver_source).to_contain("struct Gen2VhdlArtifactEmissionReceipt")
+        expect(driver_source).to_contain("gen2_write_authorized_vhdl_artifact_emission")
+        expect(driver_source.contains("vhdl_write_compiler_gen2_production_artifacts")).to_equal(false)
+        expect(driver_source.contains("vhdl_write_production_artifacts(output, emitted.vhdl")).to_equal(false)
         rt_dir_remove_all(root)
 
     it "returns an error when the VHDL path is not writable":

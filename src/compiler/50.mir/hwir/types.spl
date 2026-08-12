@@ -4,6 +4,70 @@
 # VHDL emission.  The first production slice keeps the model explicit and
 # target-neutral so existing VHDL output can continue through the direct path.
 
+use compiler.core.lexer_chars.{is_alpha, is_digit}
+use std.common.crypto.sha256.{sha256_text}
+
+fn hwir_vhdl_reserved_word(name: text) -> bool:
+    # VHDL basic identifiers are case-insensitive.  Keep this conservative
+    # VHDL-2008 set local to the strict-HWIR boundary so every graph owner
+    # shares one legality rule before text emission.
+    val words = ",abs,access,after,alias,all,and,architecture,array,assert,attribute,begin,block,body,buffer,bus,case,component,configuration,constant,context,disconnect,downto,else,elsif,end,entity,exit,file,for,force,function,generate,generic,group,guarded,if,impure,in,inertial,inout,is,label,library,linkage,literal,loop,map,mod,nand,new,next,nor,not,null,of,on,open,or,others,out,package,parameter,port,postponed,procedure,process,protected,pure,range,record,register,reject,release,rem,report,return,rol,ror,select,severity,signal,shared,sla,sll,sra,srl,subtype,then,to,transport,type,unaffected,units,until,use,variable,wait,when,while,with,xnor,xor,"
+    words.contains("," + name.lower() + ",")
+
+pub fn hwir_vhdl_identifier(name: text) -> bool:
+    """Accept the conservative subset of VHDL basic identifiers we emit.
+
+    Strict HWIR preserves names for lineage, so it rejects unsafe identifiers
+    instead of silently applying a lossy serializer-side rename.
+    """
+    if name.len() == 0 or not is_alpha(name[0:1]) or hwir_vhdl_reserved_word(name):
+        return false
+    var previous_underscore = false
+    var index = 0
+    while index < name.len():
+        val character = name[index:index + 1]
+        if character == "_":
+            if previous_underscore:
+                return false
+            previous_underscore = true
+        elif not is_alpha(character) and not is_digit(character):
+            return false
+        else:
+            previous_underscore = false
+        index = index + 1
+    not previous_underscore
+
+pub fn hwir_safe_profile_name(name: text) -> bool:
+    """Accept profile text that is safe in strict VHDL and JSON provenance.
+
+    Product profiles are compiler configuration labels, not free-form user
+    comments.  The strict emitter records them in a VHDL comment and artifact
+    metadata, so admitting line breaks or punctuation would create a raw-text
+    escape around the typed HWIR boundary.
+    """
+    if name.len() == 0 or name.len() > 96 or not is_alpha(name[0:1]):
+        return false
+    var index = 0
+    while index < name.len():
+        val character = name[index:index + 1]
+        if not is_alpha(character) and not is_digit(character) and character != "_" and character != "-":
+            return false
+        index = index + 1
+    true
+
+pub fn hwir_hash_fields(values: [text]) -> text:
+    """Return an unambiguous length-prefixed canonical field sequence.
+
+    Strict graph identities must distinguish metadata such as `a|bc` from
+    `a|b`/`c`.  Delimiter-only encodings cannot provide that guarantee because
+    node and source lineage are text.  This codec is deliberately small and
+    shared by combinational and sequential HWIR provenance.
+    """
+    var encoded = ""
+    for value in values:
+        encoded = encoded + value.len().to_text() + ":" + value
+    encoded
+
 class HwPort:
     """External hardware module port."""
     name: text
@@ -11,11 +75,6 @@ class HwPort:
     type_name: text
     bit_width: i32
     clock_domain: text
-
-    me vhdl_type() -> text:
-        if self.bit_width == 1:
-            return "std_logic"
-        return "std_logic_vector(" + (self.bit_width - 1).to_text() + " downto 0)"
 
     static fn input(name: text, type_name: text, bit_width: i32) -> HwPort:
         return HwPort(name: name, direction: "in", type_name: type_name, bit_width: bit_width, clock_domain: "default")
@@ -123,18 +182,27 @@ class HwResetPolicy:
         return HwResetPolicy(kind: "sync", active_level: "high", value_style: "zero")
 
 class HwResourceBinding:
-    """Resource binding decision for an operation or memory."""
+    """Resource binding decision for an operation or memory.
+
+    `latency_cycles` is meaningful only when `latency_contract` is `fixed` or
+    `variable`.  An elaboration-only binding must use `uncommitted` and -1 so
+    a target planner cannot accidentally be treated as scheduled RTL.
+    """
     resource_id: text
     resource_kind: text
     profile: text
     sharing_group: text
     latency_cycles: i32
+    latency_contract: text
 
     me is_shared() -> bool:
         return self.sharing_group != ""
 
+    me latency_is_committed() -> bool:
+        return self.latency_contract == "fixed" or self.latency_contract == "variable"
+
     static fn lut(resource_id: text) -> HwResourceBinding:
-        return HwResourceBinding(resource_id: resource_id, resource_kind: "lut", profile: "balanced", sharing_group: "", latency_cycles: 0)
+        return HwResourceBinding(resource_id: resource_id, resource_kind: "lut", profile: "balanced", sharing_group: "", latency_cycles: 0, latency_contract: "fixed")
 
 class HwSourceMap:
     """Mapping from HWIR nodes back to Simple source and MIR objects."""
@@ -164,6 +232,357 @@ class HwCostModel:
 
     static fn empty() -> HwCostModel:
         return HwCostModel(lut_count: 0, ff_count: 0, dsp_count: 0, bram_count: 0, latency_cycles: 0, fmax_mhz: 0)
+
+# Gen2 strict-HWIR schema. These are deliberately data-only elaboration
+# records: a selected configuration is concrete before graph construction, so
+# none of these fields represents runtime hardware dispatch.
+
+class CoreConfig:
+    xlen: i32
+    physical_address_bits: i32
+    register_count: i32
+    profile: text
+    isa_profile: text
+    compressed_decode_profile: text
+
+    me diagnostic() -> text:
+        if self.xlen != 32 and self.xlen != 64:
+            return "HWIR-E-CONFIG-XLEN: strict RISC-V HWIR requires XLEN=32 or XLEN=64"
+        if self.physical_address_bits < 16 or self.physical_address_bits > 64:
+            return "HWIR-E-CONFIG-PA: physical address width must be in 16..64"
+        if self.register_count != 32:
+            return "HWIR-E-CONFIG-REGISTERS: strict RISC-V HWIR requires 32 architectural registers"
+        if not hwir_safe_profile_name(self.profile) or self.isa_profile == "" or self.compressed_decode_profile == "":
+            return "HWIR-E-CONFIG-PROFILE: strict RISC-V HWIR requires safe concrete profile names"
+        if self.isa_profile != "rv32i" and self.isa_profile != "rv64i" and
+            self.isa_profile != "rv32im" and self.isa_profile != "rv64im" and
+            self.isa_profile != "rv32i_zca" and self.isa_profile != "rv64i_zca" and
+            self.isa_profile != "rv32i_zmmul" and self.isa_profile != "rv64i_zmmul" and
+            self.isa_profile != "rv32i_zicsr_zifencei" and self.isa_profile != "rv64i_zicsr_zifencei":
+            return "HWIR-E-CONFIG-ISA: unsupported strict scalar ISA profile"
+        if self.isa_profile.starts_with("rv32") and self.xlen != 32:
+            return "HWIR-E-CONFIG-ISA: RV32 scalar ISA profile requires XLEN=32"
+        if self.isa_profile.starts_with("rv64") and self.xlen != 64:
+            return "HWIR-E-CONFIG-ISA: RV64 scalar ISA profile requires XLEN=64"
+        if self.compressed_decode_profile != "none" and
+            self.compressed_decode_profile != "zca-integer-rv32" and
+            self.compressed_decode_profile != "zca-integer-rv64" and
+            self.compressed_decode_profile != "zca-common-critical":
+            return "HWIR-E-CONFIG-COMPRESSED: unsupported strict compressed profile"
+        if self.compressed_decode_profile == "zca-integer-rv32" and self.xlen != 32:
+            return "HWIR-E-CONFIG-COMPRESSED: RV32 compressed profile requires XLEN=32"
+        if self.compressed_decode_profile == "zca-integer-rv64" and self.xlen != 64:
+            return "HWIR-E-CONFIG-COMPRESSED: RV64 compressed profile requires XLEN=64"
+        ""
+
+    me is_valid() -> bool:
+        self.diagnostic() == ""
+
+    static fn rv32() -> CoreConfig:
+        CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+            profile: "rv32", isa_profile: "rv32i", compressed_decode_profile: "none")
+
+    static fn rv64() -> CoreConfig:
+        CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+            profile: "rv64", isa_profile: "rv64i", compressed_decode_profile: "none")
+
+    static fn rv32_zca_integer() -> CoreConfig:
+        CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+            profile: "rv32-zca", isa_profile: "rv32i_zca", compressed_decode_profile: "zca-integer-rv32")
+
+    static fn rv64_zca_integer() -> CoreConfig:
+        CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+            profile: "rv64-zca", isa_profile: "rv64i_zca", compressed_decode_profile: "zca-integer-rv64")
+
+    static fn rv32_zca_mission_critical() -> CoreConfig:
+        CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+            profile: "riscv-gen2-rv32-zca-critical", isa_profile: "rv32i",
+            compressed_decode_profile: "zca-common-critical")
+
+    static fn rv32_zca_cjal_mission_critical() -> CoreConfig:
+        """Concrete RV32-only product configuration that admits C.JAL.
+
+        Its compressed row substrate remains the shared common-Zca graph, but
+        the distinct product/ISA profile is required before the RV32-only
+        parcel class can be composed.  RV64 uses that encoding for C.ADDIW.
+        """
+        CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+            profile: "riscv-gen2-rv32-zca-cjal-critical", isa_profile: "rv32i_zca",
+            compressed_decode_profile: "zca-common-critical")
+
+    static fn rv64_zca_mission_critical() -> CoreConfig:
+        CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+            profile: "riscv-gen2-rv64-zca-critical", isa_profile: "rv64i",
+            compressed_decode_profile: "zca-common-critical")
+
+    static fn rv64_zca_addiw_mission_critical() -> CoreConfig:
+        """Concrete RV64-only product configuration that admits C.ADDIW."""
+        CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+            profile: "riscv-gen2-rv64-zca-addiw-critical", isa_profile: "rv64i_zca",
+            compressed_decode_profile: "zca-common-critical")
+
+    static fn is_supported_critical_target(target: text) -> bool:
+        target == "rv32" or target == "rv64" or target == "rv32-zca-critical" or
+            target == "rv64-zca-critical" or target == "rv32-zca-cjal-critical" or
+            target == "rv64-zca-addiw-critical"
+
+    static fn from_critical_target(target: text) -> Result<CoreConfig, text>:
+        if target == "rv32" or target == "rv32-zca-critical":
+            return Ok(CoreConfig.rv32_zca_mission_critical())
+        if target == "rv64" or target == "rv64-zca-critical":
+            return Ok(CoreConfig.rv64_zca_mission_critical())
+        if target == "rv32-zca-cjal-critical":
+            return Ok(CoreConfig.rv32_zca_cjal_mission_critical())
+        if target == "rv64-zca-addiw-critical":
+            return Ok(CoreConfig.rv64_zca_addiw_mission_critical())
+        Err("HWIR-E-CRITICAL-CONFIG: critical VHDL requires explicit RISC-V Gen2 target rv32 or rv64")
+
+class HwNodeId:
+    value: text
+
+    me is_valid() -> bool:
+        # IDs appear in manifests and strict-VHDL lineage comments.  Reject
+        # every line-control character so an untrusted/invalid graph cannot
+        # inject a second VHDL statement through a provenance marker.
+        self.value != "" and not self.value.contains(" ") and
+            not self.value.contains("\n") and not self.value.contains("\r") and
+            not self.value.contains("\t")
+
+    static fn module_root(name: text) -> HwNodeId:
+        HwNodeId(value: name + ":module")
+
+    static fn child(parent: text, role: text) -> HwNodeId:
+        HwNodeId(value: parent + ":" + role)
+
+class HwOrigin:
+    node_id: HwNodeId
+    source_name: text
+
+class HwConstant:
+    name: text
+    bit_width: i32
+    value: i64
+
+    static fn bits(name: text, bit_width: i32, value: i64) -> HwConstant:
+        HwConstant(name: name, bit_width: bit_width, value: value)
+
+class HwCompareOp:
+    result: text
+    lhs: text
+    rhs: text
+    bit_width: i32
+
+    static fn equal(result: text, lhs: text, rhs: text, bit_width: i32) -> HwCompareOp:
+        HwCompareOp(result: result, lhs: lhs, rhs: rhs, bit_width: bit_width)
+
+class HwSelectOp:
+    result: text
+    condition: text
+    when_true: text
+    when_false: text
+    bit_width: i32
+
+    static fn mux(result: text, condition: text, when_true: text, when_false: text,
+        bit_width: i32) -> HwSelectOp:
+        HwSelectOp(result: result, condition: condition, when_true: when_true,
+            when_false: when_false, bit_width: bit_width)
+
+fn hwir_width_for_name(module: HwModuleDef, name: text) -> i32:
+    for port in module.ports:
+        if port.name == name:
+            return port.bit_width
+    for signal in module.signals:
+        if signal.name == name:
+            return signal.bit_width
+    for constant in module.constants:
+        if constant.name == name:
+            return constant.bit_width
+    0
+
+fn hwir_value_is_writable(module: HwModuleDef, name: text) -> bool:
+    if module.port_direction(name) == "out":
+        return true
+    for signal in module.signals:
+        if signal.name == name:
+            return true
+    false
+
+fn hwir_value_is_readable(module: HwModuleDef, name: text) -> bool:
+    hwir_width_for_name(module, name) != 0 and module.port_direction(name) != "out"
+
+fn hwir_supported_comb_op(op: text) -> bool:
+    op == "and" or op == "or" or op == "add" or op == "shl" or op == "shr" or
+        op == "passthrough" or op == "zext" or op == "trunc" or op == "sext"
+
+class HwModuleDef:
+    summary: HwModule
+    config: CoreConfig
+    node_id: HwNodeId
+    origins: [HwOrigin]
+    ports: [HwPort]
+    signals: [HwSignal]
+    constants: [HwConstant]
+    comb_ops: [HwCombOp]
+    compare_ops: [HwCompareOp]
+    select_ops: [HwSelectOp]
+    clock_domains: [HwClockDomain]
+
+    me port_width(name: text) -> i32:
+        for port in self.ports:
+            if port.name == name:
+                return port.bit_width
+        0
+
+    me value_width(name: text) -> i32:
+        val port = self.port_width(name)
+        if port != 0:
+            return port
+        for signal in self.signals:
+            if signal.name == name:
+                return signal.bit_width
+        for constant in self.constants:
+            if constant.name == name:
+                return constant.bit_width
+        0
+
+    me port_direction(name: text) -> text:
+        for port in self.ports:
+            if port.name == name:
+                return port.direction
+        ""
+
+    me structural_sha256() -> text:
+        """Hash the complete typed combinational graph in deterministic order.
+
+        A node ID names the lineage root; this digest binds the selected
+        concrete types, values, operations, origins, and domains that the
+        strict serializer is actually allowed to consume.
+        """
+        var rows: [text] = [hwir_hash_fields(["simple-hwir-rtl/v2", self.node_id.value,
+            self.summary.name, self.config.xlen.to_text(),
+            self.config.physical_address_bits.to_text(), self.config.register_count.to_text(),
+            self.config.profile, self.config.isa_profile, self.config.compressed_decode_profile])]
+        for origin in self.origins:
+            rows.push(hwir_hash_fields(["origin", origin.node_id.value, origin.source_name]))
+        for domain in self.clock_domains:
+            rows.push(hwir_hash_fields(["domain", domain.name, domain.clock_signal, domain.reset_signal, domain.reset_active, domain.reset_policy]))
+        for port in self.ports:
+            rows.push(hwir_hash_fields(["port", port.name, port.direction, port.type_name, port.bit_width.to_text(), port.clock_domain]))
+        for signal in self.signals:
+            rows.push(hwir_hash_fields(["signal", signal.name, signal.type_name, signal.bit_width.to_text()]))
+        for constant in self.constants:
+            rows.push(hwir_hash_fields(["constant", constant.name, constant.bit_width.to_text(), constant.value.to_text()]))
+        for operation in self.comb_ops:
+            rows.push(hwir_hash_fields(["comb", operation.op, operation.result, operation.lhs, operation.rhs, operation.bit_width.to_text()]))
+        for operation in self.compare_ops:
+            rows.push(hwir_hash_fields(["compare", operation.result, operation.lhs, operation.rhs, operation.bit_width.to_text()]))
+        for operation in self.select_ops:
+            rows.push(hwir_hash_fields(["select", operation.result, operation.condition, operation.when_true, operation.when_false, operation.bit_width.to_text()]))
+        sha256_text(rows.join("\n"))
+
+    me shape_diagnostic() -> text:
+        val config_error = self.config.diagnostic()
+        if config_error != "":
+            return config_error
+        if not hwir_vhdl_identifier(self.summary.name):
+            return "HWIR-E-VHDL-IDENTIFIER: module name is not a stable VHDL identifier"
+        if self.summary.profile != self.config.profile:
+            return "HWIR-E-MODULE-SUMMARY: module summary requires a concrete matching profile"
+        if not self.node_id.is_valid():
+            return "HWIR-E-MODULE-ID: module requires a stable node ID"
+        if self.summary.port_count != self.ports.len() or self.summary.signal_count != self.signals.len() or
+            self.summary.comb_op_count != self.comb_ops.len() + self.compare_ops.len() + self.select_ops.len() or
+            self.summary.clock_domain_count != self.clock_domains.len():
+            return "HWIR-E-MODULE-COUNT: summary counts must match represented strict-HWIR nodes"
+        if self.summary.register_count != 0 or self.summary.memory_count != 0:
+            return "HWIR-E-MODULE-STATE: combinational module definition cannot claim unrepresented state or memories"
+        var domains: [text] = []
+        for domain in self.clock_domains:
+            if domain.name == "" or domains.contains(domain.name):
+                return "HWIR-E-CLOCK-DOMAIN: clock domains must be non-empty and unique"
+            domains.push(domain.name)
+        if not domains.contains("default"):
+            return "HWIR-E-CLOCK-DOMAIN: strict combinational modules require the default clock domain metadata"
+        # VHDL basic identifiers are case-insensitive.  Preserve each spelling
+        # in the graph for source lineage and deterministic emission, but use
+        # a folded comparison key so `Result` and `result` cannot create two
+        # declarations for the same VHDL object.
+        var names: [text] = []
+        for port in self.ports:
+            val comparison_name = port.name.lower()
+            if not hwir_vhdl_identifier(port.name) or names.contains(comparison_name) or (port.direction != "in" and port.direction != "out") or
+                port.type_name != "Bits" or port.bit_width < 1 or not domains.contains(port.clock_domain):
+                return "HWIR-E-PORT: ports must be unique typed Bits in an existing clock domain"
+            names.push(comparison_name)
+        for signal in self.signals:
+            val comparison_name = signal.name.lower()
+            if not hwir_vhdl_identifier(signal.name) or names.contains(comparison_name) or signal.type_name != "Bits" or signal.bit_width < 1:
+                return "HWIR-E-SIGNAL: signals must be unique positive-width Bits"
+            names.push(comparison_name)
+        for constant in self.constants:
+            val comparison_name = constant.name.lower()
+            if not hwir_vhdl_identifier(constant.name) or names.contains(comparison_name) or constant.bit_width < 1:
+                return "HWIR-E-CONSTANT: constants must be unique and positive-width"
+            if constant.bit_width < 63 and constant.value >= 0 and constant.value >= (1i64 << constant.bit_width):
+                return "HWIR-E-CONSTANT-VALUE: unsigned constant does not fit its declared width"
+            if constant.bit_width < 63 and constant.value < 0 and
+                (constant.value < -(1i64 << (constant.bit_width - 1)) or constant.value >= (1i64 << (constant.bit_width - 1))):
+                return "HWIR-E-CONSTANT-VALUE: signed constant does not fit its declared width"
+            names.push(comparison_name)
+        var origin_ids: [text] = []
+        for origin in self.origins:
+            if not origin.node_id.is_valid() or origin.source_name == "" or origin.node_id.value == self.node_id.value or origin_ids.contains(origin.node_id.value):
+                return "HWIR-E-DUPLICATE-ORIGIN: origin IDs must be distinct from the module and each other"
+            if origin.source_name.starts_with("zca.") and self.config.compressed_decode_profile != "zca-common-critical":
+                return "HWIR-E-COMPRESSED-PROFILE: zca semantic origins require zca-common-critical profile"
+            origin_ids.push(origin.node_id.value)
+        if self.origins.len() == 0:
+            return "HWIR-E-ORIGIN: strict HWIR module requires source origins"
+        var driven: [text] = []
+        for op in self.comb_ops:
+            if not hwir_supported_comb_op(op.op) or not hwir_value_is_writable(self, op.result) or hwir_width_for_name(self, op.result) != op.bit_width:
+                return "HWIR-E-COMB: combinational operations require a supported writable result"
+            if not hwir_value_is_readable(self, op.lhs) or (op.rhs != "" and not hwir_value_is_readable(self, op.rhs)):
+                return "HWIR-E-OP-OPERAND-DIRECTION: operation operands must be input ports"
+            if op.lhs == op.result or op.rhs == op.result:
+                return "HWIR-E-COMB-CYCLE: strict combinational operation cannot read its own result"
+            if (op.op == "and" or op.op == "or" or op.op == "add") and
+                (op.rhs == "" or hwir_width_for_name(self, op.lhs) != op.bit_width or hwir_width_for_name(self, op.rhs) != op.bit_width):
+                return "HWIR-E-COMB-WIDTH: binary operation operands and result must have the declared width"
+            if (op.op == "shl" or op.op == "shr") and
+                (op.rhs == "" or hwir_width_for_name(self, op.lhs) != op.bit_width):
+                return "HWIR-E-COMB-WIDTH: shift input and result must have the declared width"
+            if (op.op == "passthrough" or op.op == "zext" or op.op == "trunc" or op.op == "sext") and op.rhs != "":
+                return "HWIR-E-COMB-WIDTH: unary operation must not have a right operand"
+            if driven.contains(op.result):
+                return "HWIR-E-MULTIPLE-DRIVER: each strict combinational result must have one driver"
+            driven.push(op.result)
+        for op in self.compare_ops:
+            if not hwir_value_is_writable(self, op.result) or hwir_width_for_name(self, op.result) != 1 or hwir_width_for_name(self, op.lhs) != op.bit_width or
+                hwir_width_for_name(self, op.rhs) != op.bit_width or not hwir_value_is_readable(self, op.lhs) or
+                not hwir_value_is_readable(self, op.rhs):
+                return "HWIR-E-COMPARE: comparisons require same-width readable operands and one-bit result"
+            if op.lhs == op.result or op.rhs == op.result:
+                return "HWIR-E-COMB-CYCLE: strict comparison cannot read its own result"
+            if driven.contains(op.result):
+                return "HWIR-E-MULTIPLE-DRIVER: each strict combinational result must have one driver"
+            driven.push(op.result)
+        for op in self.select_ops:
+            if hwir_width_for_name(self, op.condition) != 1 or not hwir_value_is_readable(self, op.condition):
+                return "HWIR-E-SELECT-CONDITION: select condition must be a readable one-bit value"
+            if not hwir_value_is_writable(self, op.result) or hwir_width_for_name(self, op.result) != op.bit_width or
+                hwir_width_for_name(self, op.when_true) != op.bit_width or hwir_width_for_name(self, op.when_false) != op.bit_width or
+                not hwir_value_is_readable(self, op.when_true) or not hwir_value_is_readable(self, op.when_false):
+                return "HWIR-E-SELECT: muxes require same-width readable branches and a writable result"
+            if op.condition == op.result or op.when_true == op.result or op.when_false == op.result:
+                return "HWIR-E-COMB-CYCLE: strict select cannot read its own result"
+            if driven.contains(op.result):
+                return "HWIR-E-MULTIPLE-DRIVER: each strict combinational result must have one driver"
+            driven.push(op.result)
+        for port in self.ports:
+            if port.direction == "out" and not driven.contains(port.name):
+                return "HWIR-E-OUTPUT-DRIVER: every output must have exactly one explicit driver"
+        ""
 
 class HwModule:
     """Top-level HWIR module summary.

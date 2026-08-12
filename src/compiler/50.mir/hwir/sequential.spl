@@ -1,0 +1,235 @@
+# Typed sequential-HWIR primitives for bounded Gen2 products.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.hwir.types.{HwNodeId, HwPort, hwir_hash_fields, hwir_vhdl_identifier}
+
+pub class HwStateRegister:
+    name: text
+    bit_width: i32
+    clock_domain: text
+    reset_value: i64
+
+    me is_valid() -> bool:
+        self.name != "" and self.bit_width > 0 and self.clock_domain == "default" and self.reset_value >= 0
+
+pub class HwSeqGuard:
+    kind: text
+    lhs: text
+    rhs: text
+
+    static fn high(signal: text) -> HwSeqGuard:
+        HwSeqGuard(kind: "high", lhs: signal, rhs: "")
+    static fn low(signal: text) -> HwSeqGuard:
+        HwSeqGuard(kind: "low", lhs: signal, rhs: "")
+    static fn equal(lhs: text, rhs: text) -> HwSeqGuard:
+        HwSeqGuard(kind: "equal", lhs: lhs, rhs: rhs)
+    static fn all_ones(signal: text) -> HwSeqGuard:
+        HwSeqGuard(kind: "all_ones", lhs: signal, rhs: "")
+
+pub class HwSeqValue:
+    kind: text
+    value: text
+    bit_width: i32
+
+    static fn zero(bit_width: i32) -> HwSeqValue:
+        HwSeqValue(kind: "zero", value: "", bit_width: bit_width)
+    static fn copy(signal: text, bit_width: i32) -> HwSeqValue:
+        HwSeqValue(kind: "copy", value: signal, bit_width: bit_width)
+    static fn invert(signal: text) -> HwSeqValue:
+        HwSeqValue(kind: "invert", value: signal, bit_width: 1)
+    static fn increment(signal: text, bit_width: i32) -> HwSeqValue:
+        HwSeqValue(kind: "increment", value: signal, bit_width: bit_width)
+
+pub class HwSeqAssignment:
+    destination: text
+    value: HwSeqValue
+
+pub class HwSeqRule:
+    name: text
+    guards: [HwSeqGuard]
+    assignments: [HwSeqAssignment]
+
+pub class HwSeqOutputBinding:
+    result: text
+    kind: text
+    source: text
+    bit_width: i32
+    guards: [HwSeqGuard]
+
+    static fn direct(result: text, source: text, bit_width: i32) -> HwSeqOutputBinding:
+        HwSeqOutputBinding(result: result, kind: "direct", source: source, bit_width: bit_width, guards: [])
+    static fn all(result: text, guards: [HwSeqGuard]) -> HwSeqOutputBinding:
+        HwSeqOutputBinding(result: result, kind: "all", source: "", bit_width: 1, guards: guards)
+    static fn guarded(result: text, source: text, bit_width: i32, guards: [HwSeqGuard]) -> HwSeqOutputBinding:
+        HwSeqOutputBinding(result: result, kind: "guarded", source: source, bit_width: bit_width, guards: guards)
+
+pub class HwSeqInstancePin:
+    port_name: text
+    signal_name: text
+    direction: text
+    bit_width: i32
+
+pub class HwSequentialPlan:
+    owner_id: HwNodeId
+    registers: [HwStateRegister]
+    rules: [HwSeqRule]
+    outputs: [HwSeqOutputBinding]
+    decoder_pins: [HwSeqInstancePin]
+
+    me register_node_id(register: HwStateRegister) -> HwNodeId:
+        HwNodeId.child(self.owner_id.value, "register:" + register.name)
+    me rule_node_id(rule: HwSeqRule) -> HwNodeId:
+        HwNodeId.child(self.owner_id.value, "rule:" + rule.name)
+    me output_node_id(output: HwSeqOutputBinding) -> HwNodeId:
+        HwNodeId.child(self.owner_id.value, "output:" + output.result)
+    me decoder_pin_node_id(pin: HwSeqInstancePin) -> HwNodeId:
+        HwNodeId.child(self.owner_id.value, "decoder_pin:" + pin.port_name)
+
+    me named_width(ports: [HwPort], name: text) -> i32:
+        for port in ports:
+            if port.name == name: return port.bit_width
+        for register in self.registers:
+            if register.name == name: return register.bit_width
+        for pin in self.decoder_pins:
+            if pin.direction == "out" and pin.signal_name == name: return pin.bit_width
+        for output in self.outputs:
+            if output.result == name: return output.bit_width
+        -1
+
+    me port_direction(ports: [HwPort], name: text) -> text:
+        for port in ports:
+            if port.name == name: return port.direction
+        ""
+
+    me readable_width(ports: [HwPort], name: text) -> i32:
+        val direction = self.port_direction(ports, name)
+        if direction == "in": return self.named_width(ports, name)
+        for register in self.registers:
+            if register.name == name: return register.bit_width
+        for pin in self.decoder_pins:
+            if pin.direction == "out" and pin.signal_name == name: return pin.bit_width
+        -1
+
+    me guards_diagnostic(ports: [HwPort], guards: [HwSeqGuard]) -> text:
+        if guards.len() == 0:
+            return "HWIR-E-SEQUENTIAL-GUARD: sequential conditions must be explicit and nonempty"
+        for guard in guards:
+            if (guard.kind != "high" and guard.kind != "low" and guard.kind != "equal" and guard.kind != "all_ones") or
+                not hwir_vhdl_identifier(guard.lhs) or (guard.kind == "equal" and not hwir_vhdl_identifier(guard.rhs)):
+                return "HWIR-E-SEQUENTIAL-GUARD: sequential guards must use typed high, low, equality, or all-ones predicates"
+            if guard.kind != "equal" and guard.rhs != "":
+                return "HWIR-E-SEQUENTIAL-GUARD: sequential guards must use typed high, low, equality, or all-ones predicates"
+            if self.readable_width(ports, guard.lhs) < 1 or
+                (guard.kind == "equal" and self.readable_width(ports, guard.rhs) < 1):
+                return "HWIR-E-SEQUENTIAL-GUARD: sequential guard references must resolve to readable typed values"
+            if (guard.kind == "high" or guard.kind == "low") and self.readable_width(ports, guard.lhs) != 1:
+                return "HWIR-E-SEQUENTIAL-GUARD: high and low guards require one-bit typed values"
+            if guard.kind == "all_ones" and self.readable_width(ports, guard.lhs) < 2:
+                return "HWIR-E-SEQUENTIAL-GUARD: all-ones guards require multi-bit typed values"
+            if guard.kind == "equal" and self.readable_width(ports, guard.lhs) != self.readable_width(ports, guard.rhs):
+                return "HWIR-E-SEQUENTIAL-GUARD: equality guards require equal-width typed values"
+        ""
+
+    me diagnostic() -> text:
+        if not self.owner_id.is_valid(): return "HWIR-E-SEQUENTIAL-ID: sequential plan requires a stable owner node ID"
+        if self.registers.len() == 0 or self.rules.len() == 0 or self.outputs.len() == 0 or self.decoder_pins.len() == 0:
+            return "HWIR-E-SEQUENTIAL-PLAN: sequential plan requires registers, ordered rules, outputs, and decoder pins"
+        # Keep the authored spelling for VHDL and provenance, but compare
+        # identifiers as VHDL does.  Without folded keys, two records such as
+        # `valid_reg` and `VALID_REG` would silently describe one register.
+        var registers: [text] = []
+        for register in self.registers:
+            val comparison_name = register.name.lower()
+            if not register.is_valid() or not hwir_vhdl_identifier(register.name) or registers.contains(comparison_name):
+                return "HWIR-E-SEQUENTIAL-REGISTER: sequential registers must be unique and valid"
+            if register.bit_width < 63 and register.reset_value > ((1 << register.bit_width) - 1):
+                return "HWIR-E-SEQUENTIAL-RESET: sequential reset values must fit their register width"
+            registers.push(comparison_name)
+        var rules: [text] = []
+        for rule in self.rules:
+            val comparison_name = rule.name.lower()
+            if not hwir_vhdl_identifier(rule.name) or rules.contains(comparison_name) or rule.guards.len() == 0 or rule.assignments.len() == 0:
+                return "HWIR-E-SEQUENTIAL-RULE: sequential rules require unique names, guards, and assignments"
+            rules.push(comparison_name)
+            var assigned: [text] = []
+            for assignment in rule.assignments:
+                val destination_key = assignment.destination.lower()
+                if not registers.contains(destination_key) or assigned.contains(destination_key) or assignment.value.bit_width < 1:
+                    return "HWIR-E-SEQUENTIAL-ASSIGNMENT: one sequential rule may assign each typed register once"
+                if assignment.value.kind != "zero" and assignment.value.kind != "copy" and
+                    assignment.value.kind != "invert" and assignment.value.kind != "increment":
+                    return "HWIR-E-SEQUENTIAL-ASSIGNMENT: sequential assignments use only zero, copy, invert, or increment values"
+                if assignment.value.kind == "invert" and assignment.value.bit_width != 1:
+                    return "HWIR-E-SEQUENTIAL-ASSIGNMENT: inversion is defined only for one-bit state"
+                assigned.push(destination_key)
+        ""
+
+    me diagnostic_for_ports(ports: [HwPort]) -> text:
+        val basic = self.diagnostic()
+        if basic != "": return basic
+        var decoder_ports: [text] = []
+        var decoder_signals: [text] = []
+        for pin in self.decoder_pins:
+            val port_key = pin.port_name.lower()
+            val signal_key = pin.signal_name.lower()
+            if not hwir_vhdl_identifier(pin.port_name) or not hwir_vhdl_identifier(pin.signal_name) or pin.bit_width < 1 or
+                (pin.direction != "in" and pin.direction != "out") or decoder_ports.contains(port_key) or decoder_signals.contains(signal_key):
+                return "HWIR-E-SEQUENTIAL-INSTANCE: decoder pins must be typed inputs or outputs"
+            if pin.direction == "in" and self.readable_width(ports, pin.signal_name) != pin.bit_width:
+                return "HWIR-E-SEQUENTIAL-INSTANCE: decoder inputs must bind width-matched typed values"
+            decoder_ports.push(port_key)
+            decoder_signals.push(signal_key)
+        for rule in self.rules:
+            val guard_error = self.guards_diagnostic(ports, rule.guards)
+            if guard_error != "": return guard_error
+            for assignment in rule.assignments:
+                if assignment.value.kind != "zero" and self.readable_width(ports, assignment.value.value) != assignment.value.bit_width:
+                    return "HWIR-E-SEQUENTIAL-ASSIGNMENT: sequential assignment sources must preserve width"
+                if self.named_width(ports, assignment.destination) != assignment.value.bit_width:
+                    return "HWIR-E-SEQUENTIAL-ASSIGNMENT: sequential assignment value width must match its register"
+        var output_names: [text] = []
+        for output in self.outputs:
+            val result_key = output.result.lower()
+            if not hwir_vhdl_identifier(output.result) or output_names.contains(result_key) or self.port_direction(ports, output.result) != "out" or
+                self.named_width(ports, output.result) != output.bit_width:
+                return "HWIR-E-SEQUENTIAL-OUTPUT: sequential bindings must drive matching public outputs"
+            if output.kind != "direct" and output.kind != "all" and output.kind != "guarded":
+                return "HWIR-E-SEQUENTIAL-OUTPUT: sequential bindings must use direct, all, or guarded forms"
+            if output.kind == "all" and (output.bit_width != 1 or output.source != ""):
+                return "HWIR-E-SEQUENTIAL-OUTPUT: all bindings require a one-bit output without a data source"
+            if output.kind != "all" and self.readable_width(ports, output.source) != output.bit_width:
+                return "HWIR-E-SEQUENTIAL-OUTPUT: sequential binding sources must preserve width"
+            if output.kind == "direct" and output.guards.len() != 0:
+                return "HWIR-E-SEQUENTIAL-OUTPUT: direct bindings may not discard guard semantics"
+            if output.kind != "direct":
+                val guard_error = self.guards_diagnostic(ports, output.guards)
+                if guard_error != "": return guard_error
+            output_names.push(result_key)
+        for port in ports:
+            if port.direction == "out" and not output_names.contains(port.name.lower()):
+                return "HWIR-E-SEQUENTIAL-OUTPUT: every public output requires exactly one typed binding"
+        ""
+
+    me canonical_text() -> text:
+        var text = hwir_hash_fields(["simple-hwir-sequential/v2", "owner", self.owner_id.value])
+        for register in self.registers:
+            text = text + hwir_hash_fields(["register", register.name, register.bit_width.to_text(), register.clock_domain, register.reset_value.to_text()])
+        for rule in self.rules:
+            text = text + hwir_hash_fields(["rule", rule.name])
+            for guard in rule.guards:
+                text = text + hwir_hash_fields(["guard", guard.kind, guard.lhs, guard.rhs])
+            for assignment in rule.assignments:
+                text = text + hwir_hash_fields(["assignment", assignment.destination, assignment.value.kind, assignment.value.value, assignment.value.bit_width.to_text()])
+        for output in self.outputs:
+            text = text + hwir_hash_fields(["output", output.result, output.kind, output.source, output.bit_width.to_text()])
+            # Output guards are behavior, not display metadata.  Omitting them
+            # would let a changed ready/valid/trap visibility condition retain
+            # the same product HWIR hash while producing different VHDL.
+            for guard in output.guards:
+                text = text + hwir_hash_fields(["output_guard", guard.kind, guard.lhs, guard.rhs])
+        for pin in self.decoder_pins:
+            text = text + hwir_hash_fields(["pin", pin.port_name, pin.signal_name, pin.direction, pin.bit_width.to_text()])
+        text
+
+    me structural_sha256() -> text:
+        sha256_text(self.canonical_text())

@@ -1,0 +1,1901 @@
+# Proven common-Zca row constructors for the strict HWIR boundary.
+#
+# These are elaboration-time graph definitions, not a runtime decoder table.
+# Real-MIR shape extractors may invoke them only after validating the complete
+# semantic source shape for the corresponding declarative ISA entry.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwCompareOp, HwConstant, HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSelectOp, HwSignal}
+use compiler.mir.hwir.predecode.{strict_riscv_predecode_interface}
+use compiler.mir.hwir.branch_predecode.{strict_riscv_branch_predecode_interface}
+
+pub fn strict_zca_cebreak_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the typed C.EBREAK parcel row for one critical product.
+
+    The row recognizes only parcel `0x9002` and emits canonical `EBREAK`.
+    It is a compile-time graph constructor, never a runtime extension lookup.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 1, register_count: 0, memory_count: 0,
+        comb_op_count: 2, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.ebreak"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "select"), source_name: "zca.c.ebreak")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [HwSignal.comb("is_cebreak", "Bits", 1)],
+        constants: [
+            HwConstant.bits("cebreak_parcel", 32, 36866),
+            HwConstant.bits("canonical_ebreak", 32, 1048691),
+            HwConstant.bits("illegal_instruction", 32, 0)
+        ],
+        comb_ops: [],
+        compare_ops: [HwCompareOp.equal("is_cebreak", "parcel", "cebreak_parcel", 32)],
+        select_ops: [HwSelectOp.mux("canonical_instruction", "is_cebreak", "canonical_ebreak", "illegal_instruction", 32)],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+fn strict_zca_cj_like_predecode_row_hwir(module_name: text, config: CoreConfig,
+    compressed_tag: i64, isa_name: text, jal_link_field: i64) -> Result<HwModuleDef, text>:
+    """Construct C.J/C.JAL as a closed predecode and fetch-redirect graph.
+
+    The port list comes directly from the frozen predecode interface.  The
+    selected product fixes the address width before this graph is built; the
+    emitted RTL contains neither XLEN selection nor a decoder-provider path.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    val predecode_contract = match strict_riscv_predecode_interface(config):
+        case Ok(value): value
+        case Err(diagnostic): return Err(diagnostic)
+    val address_bits = config.physical_address_bits
+    val signals: [HwSignal] = [
+        HwSignal.comb("opcode_tag", "Bits", 16), HwSignal.comb("is_c_j", "Bits", 1),
+        HwSignal.comb("imm_sign_bit", "Bits", 16), HwSignal.comb("imm_bit_11", "Bits", 16),
+        HwSignal.comb("imm_bit_4_source", "Bits", 16), HwSignal.comb("imm_bit_4", "Bits", 16),
+        HwSignal.comb("imm_bits_9_8_source", "Bits", 16), HwSignal.comb("imm_bits_9_8", "Bits", 16),
+        HwSignal.comb("imm_bit_10_source", "Bits", 16), HwSignal.comb("imm_bit_10", "Bits", 16),
+        HwSignal.comb("imm_bit_6_source", "Bits", 16), HwSignal.comb("imm_bit_6", "Bits", 16),
+        HwSignal.comb("imm_bit_7_source", "Bits", 16), HwSignal.comb("imm_bit_7", "Bits", 16),
+        HwSignal.comb("imm_bits_3_1_source", "Bits", 16), HwSignal.comb("imm_bits_3_1", "Bits", 16),
+        HwSignal.comb("imm_bit_5_source", "Bits", 16), HwSignal.comb("imm_bit_5", "Bits", 16),
+        HwSignal.comb("imm_partial_1", "Bits", 16),
+        HwSignal.comb("imm_partial_2", "Bits", 16), HwSignal.comb("imm_partial_3", "Bits", 16),
+        HwSignal.comb("imm_partial_4", "Bits", 16), HwSignal.comb("imm_partial_5", "Bits", 16),
+        HwSignal.comb("imm_partial_6", "Bits", 16), HwSignal.comb("imm_low", "Bits", 16),
+        HwSignal.comb("sign_is_clear", "Bits", 1), HwSignal.comb("immediate_negative", "Bits", 16),
+        HwSignal.comb("immediate_signed", "Bits", 16), HwSignal.comb("immediate32", "Bits", 32),
+        HwSignal.comb("immediate_pa", "Bits", address_bits), HwSignal.comb("canonical_sign_source", "Bits", 32),
+        HwSignal.comb("canonical_sign", "Bits", 32), HwSignal.comb("canonical_bits30_21_source", "Bits", 32),
+        HwSignal.comb("canonical_bits30_21", "Bits", 32), HwSignal.comb("canonical_bit20_source", "Bits", 32),
+        HwSignal.comb("canonical_bit20", "Bits", 32), HwSignal.comb("canonical_bits19_12", "Bits", 32),
+        HwSignal.comb("canonical_partial_1", "Bits", 32), HwSignal.comb("canonical_partial_2", "Bits", 32),
+        HwSignal.comb("canonical_without_opcode", "Bits", 32), HwSignal.comb("jal_with_link", "Bits", 32),
+        HwSignal.comb("jal_instruction", "Bits", 32),
+        HwSignal.comb("fallthrough_pc", "Bits", address_bits), HwSignal.comb("raw_redirect_target", "Bits", address_bits)
+    ]
+    val constants: [HwConstant] = [
+        HwConstant.bits("c_j_tag_mask", 16, 57347), HwConstant.bits("c_j_tag", 16, compressed_tag),
+        HwConstant.bits("parcel_bit_12", 16, 4096), HwConstant.bits("parcel_bit_11", 16, 2048),
+        HwConstant.bits("parcel_bits_10_9", 16, 1536), HwConstant.bits("parcel_bit_8", 16, 256),
+        HwConstant.bits("parcel_bit_7", 16, 128), HwConstant.bits("parcel_bit_6", 16, 64),
+        HwConstant.bits("parcel_bits_5_3", 16, 56), HwConstant.bits("parcel_bit_2", 16, 4),
+        HwConstant.bits("right_shift_1", 16, 1), HwConstant.bits("right_shift_2", 16, 2),
+        HwConstant.bits("right_shift_7", 16, 7), HwConstant.bits("left_shift_1", 16, 1),
+        HwConstant.bits("left_shift_2", 16, 2), HwConstant.bits("left_shift_3", 16, 3),
+        HwConstant.bits("negative_imm_upper", 16, 61440), HwConstant.bits("zero16", 16, 0),
+        HwConstant.bits("imm_bit_11_mask32", 32, 2048), HwConstant.bits("imm_bits_10_1_mask32", 32, 2046),
+        HwConstant.bits("imm_bits_19_12_mask32", 32, 1044480), HwConstant.bits("left_shift_20", 32, 20),
+        HwConstant.bits("left_shift_9", 32, 9), HwConstant.bits("jal_link_register_field", 32, jal_link_field),
+        HwConstant.bits("jal_opcode", 32, 111),
+        HwConstant.bits("zero_instruction", 32, 0), HwConstant.bits("two_bytes", address_bits, 2),
+        HwConstant.bits("two_bytes_length", 2, 2)
+    ]
+    val comb_ops: [HwCombOp] = [
+        HwCombOp.binary("and", "opcode_tag", "original_parcel", "c_j_tag_mask", 16),
+        HwCombOp.binary("and", "imm_sign_bit", "original_parcel", "parcel_bit_12", 16),
+        HwCombOp.binary("shr", "imm_bit_11", "imm_sign_bit", "right_shift_1", 16),
+        HwCombOp.binary("and", "imm_bit_4_source", "original_parcel", "parcel_bit_11", 16),
+        HwCombOp.binary("shr", "imm_bit_4", "imm_bit_4_source", "right_shift_7", 16),
+        HwCombOp.binary("and", "imm_bits_9_8_source", "original_parcel", "parcel_bits_10_9", 16),
+        HwCombOp.binary("shr", "imm_bits_9_8", "imm_bits_9_8_source", "right_shift_1", 16),
+        HwCombOp.binary("and", "imm_bit_10_source", "original_parcel", "parcel_bit_8", 16),
+        HwCombOp.binary("shl", "imm_bit_10", "imm_bit_10_source", "left_shift_2", 16),
+        HwCombOp.binary("and", "imm_bit_6_source", "original_parcel", "parcel_bit_7", 16),
+        HwCombOp.binary("shr", "imm_bit_6", "imm_bit_6_source", "right_shift_1", 16),
+        HwCombOp.binary("and", "imm_bit_7_source", "original_parcel", "parcel_bit_6", 16),
+        HwCombOp.binary("shl", "imm_bit_7", "imm_bit_7_source", "left_shift_1", 16),
+        HwCombOp.binary("and", "imm_bits_3_1_source", "original_parcel", "parcel_bits_5_3", 16),
+        HwCombOp.binary("shr", "imm_bits_3_1", "imm_bits_3_1_source", "right_shift_2", 16),
+        HwCombOp.binary("and", "imm_bit_5_source", "original_parcel", "parcel_bit_2", 16),
+        HwCombOp.binary("shl", "imm_bit_5", "imm_bit_5_source", "left_shift_3", 16),
+        HwCombOp.binary("or", "imm_partial_1", "imm_bit_11", "imm_bit_4", 16),
+        HwCombOp.binary("or", "imm_partial_2", "imm_partial_1", "imm_bits_9_8", 16),
+        HwCombOp.binary("or", "imm_partial_3", "imm_partial_2", "imm_bit_10", 16),
+        HwCombOp.binary("or", "imm_partial_4", "imm_partial_3", "imm_bit_6", 16),
+        HwCombOp.binary("or", "imm_partial_5", "imm_partial_4", "imm_bit_7", 16),
+        HwCombOp.binary("or", "imm_partial_6", "imm_partial_5", "imm_bits_3_1", 16),
+        HwCombOp.binary("or", "imm_low", "imm_partial_6", "imm_bit_5", 16),
+        HwCombOp.binary("or", "immediate_negative", "imm_low", "negative_imm_upper", 16),
+        HwCombOp.unary("sext", "immediate32", "immediate_signed", 32),
+        HwCombOp.unary("sext", "immediate_pa", "immediate_signed", address_bits),
+        HwCombOp.binary("and", "canonical_sign_source", "immediate32", "imm_bit_11_mask32", 32),
+        HwCombOp.binary("shl", "canonical_sign", "canonical_sign_source", "left_shift_20", 32),
+        HwCombOp.binary("and", "canonical_bits30_21_source", "immediate32", "imm_bits_10_1_mask32", 32),
+        HwCombOp.binary("shl", "canonical_bits30_21", "canonical_bits30_21_source", "left_shift_20", 32),
+        HwCombOp.binary("and", "canonical_bit20_source", "immediate32", "imm_bit_11_mask32", 32),
+        HwCombOp.binary("shl", "canonical_bit20", "canonical_bit20_source", "left_shift_9", 32),
+        HwCombOp.binary("and", "canonical_bits19_12", "immediate32", "imm_bits_19_12_mask32", 32),
+        HwCombOp.binary("or", "canonical_partial_1", "canonical_sign", "canonical_bits30_21", 32),
+        HwCombOp.binary("or", "canonical_partial_2", "canonical_partial_1", "canonical_bit20", 32),
+        HwCombOp.binary("or", "canonical_without_opcode", "canonical_partial_2", "canonical_bits19_12", 32),
+        HwCombOp.binary("or", "jal_with_link", "canonical_without_opcode", "jal_link_register_field", 32),
+        HwCombOp.binary("or", "jal_instruction", "jal_with_link", "jal_opcode", 32),
+        HwCombOp.binary("add", "fallthrough_pc", "fetch_pc", "two_bytes", address_bits),
+        HwCombOp.binary("add", "raw_redirect_target", "fetch_pc", "immediate_pa", address_bits),
+        HwCombOp.unary("passthrough", "original_length_bytes", "two_bytes_length", 2),
+        HwCombOp.unary("passthrough", "legal", "is_c_j", 1),
+        HwCombOp.unary("passthrough", "redirect_valid", "is_c_j", 1)
+    ]
+    val compare_ops: [HwCompareOp] = [
+        HwCompareOp.equal("is_c_j", "opcode_tag", "c_j_tag", 16),
+        HwCompareOp.equal("sign_is_clear", "imm_sign_bit", "zero16", 16)
+    ]
+    val select_ops: [HwSelectOp] = [
+        HwSelectOp.mux("immediate_signed", "sign_is_clear", "imm_low", "immediate_negative", 16),
+        HwSelectOp.mux("canonical_instruction", "is_c_j", "jal_instruction", "zero_instruction", 32),
+        HwSelectOp.mux("redirect_target", "is_c_j", "raw_redirect_target", "fetch_pc", address_bits),
+        HwSelectOp.mux("next_pc", "is_c_j", "raw_redirect_target", "fallthrough_pc", address_bits)
+    ]
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: predecode_contract.ports().len(), signal_count: signals.len(), register_count: 0, memory_count: 0,
+        comb_op_count: comb_ops.len() + compare_ops.len() + select_ops.len(), clock_domain_count: 1,
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: isa_name),
+            HwOrigin(node_id: HwNodeId.child(module_name, "immediate"), source_name: isa_name),
+            HwOrigin(node_id: HwNodeId.child(module_name, "canonical"), source_name: isa_name),
+            HwOrigin(node_id: HwNodeId.child(module_name, "redirect"), source_name: isa_name)
+        ], ports: predecode_contract.ports(), signals: signals, constants: constants, comb_ops: comb_ops,
+        compare_ops: compare_ops, select_ops: select_ops, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_cj_predecode_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the common C.J row, whose canonical JAL writes x0."""
+    strict_zca_cj_like_predecode_row_hwir(module_name, config, 40961, "zca.c.j", 0)
+
+pub fn strict_zca_cjal_rv32_predecode_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct RV32-only C.JAL with its canonical x1 link-register write.
+
+    This row is intentionally outside `zca-common-critical`: the same parcel
+    class is RV64 C.ADDIW. A distinct RV32 product must select and prove it
+    before it can extend any advertised capability.
+    """
+    if config.xlen != 32 or config.profile != "riscv-gen2-rv32-zca-cjal-critical" or
+        config.isa_profile != "rv32i_zca":
+        return Err("HWIR-E-ZCA-CJAL-PROFILE: C.JAL requires the concrete RV32 Zca-C.JAL product profile")
+    strict_zca_cj_like_predecode_row_hwir(module_name, config, 8193, "zca.c.jal", 128)
+
+pub fn strict_zca_caddiw_rv64_predecode_row_hwir(module_name: text,
+    config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct RV64-only C.ADDIW with an explicit `rd != x0` legality gate.
+
+    This recognizes Q1/funct3=001, reconstructs its signed six-bit immediate,
+    and emits `ADDIW rd, rd, imm`.  The same parcel class is RV32 C.JAL, so
+    construction is restricted to the dedicated RV64 product profile.
+    """
+    if module_name == "":
+        return Err("HWIR-E-ZCA-ADDIW-ID: C.ADDIW row requires a module name")
+    if config.xlen != 64 or config.profile != "riscv-gen2-rv64-zca-addiw-critical" or
+        config.isa_profile != "rv64i_zca":
+        return Err("HWIR-E-ZCA-ADDIW-PROFILE: C.ADDIW requires the concrete RV64 Zca-ADDIW product profile")
+    val contract = strict_riscv_predecode_interface(config)?
+    val pa = config.physical_address_bits
+    val signals = [
+        HwSignal.comb("opcode_tag", "Bits", 16), HwSignal.comb("is_c_addiw", "Bits", 1),
+        HwSignal.comb("rd_source", "Bits", 16), HwSignal.comb("rd", "Bits", 16),
+        HwSignal.comb("rd_is_zero", "Bits", 1), HwSignal.comb("rd_nonzero", "Bits", 1),
+        HwSignal.comb("legal_gate", "Bits", 1), HwSignal.comb("imm_low_source", "Bits", 16),
+        HwSignal.comb("imm_low", "Bits", 16), HwSignal.comb("imm_sign_source", "Bits", 16),
+        HwSignal.comb("imm_high", "Bits", 16), HwSignal.comb("imm6", "Bits", 16),
+        HwSignal.comb("sign_is_clear", "Bits", 1), HwSignal.comb("imm_negative", "Bits", 16),
+        HwSignal.comb("imm_signed", "Bits", 16), HwSignal.comb("imm32", "Bits", 32),
+        HwSignal.comb("imm_field", "Bits", 32), HwSignal.comb("rd32", "Bits", 32),
+        HwSignal.comb("rs1_field", "Bits", 32), HwSignal.comb("rd_field", "Bits", 32),
+        HwSignal.comb("instruction_partial", "Bits", 32), HwSignal.comb("instruction_with_rs1", "Bits", 32),
+        HwSignal.comb("instruction_with_rd", "Bits", 32), HwSignal.comb("addiw_instruction", "Bits", 32),
+        HwSignal.comb("fallthrough_pc", "Bits", pa)
+    ]
+    val constants = [
+        HwConstant.bits("tag_mask", 16, 57347), HwConstant.bits("c_addiw_tag", 16, 8193),
+        HwConstant.bits("right_shift_7", 16, 7), HwConstant.bits("right_shift_2", 16, 2),
+        HwConstant.bits("register_mask", 16, 31), HwConstant.bits("imm_low_mask", 16, 31),
+        HwConstant.bits("imm_sign_mask", 16, 4096), HwConstant.bits("right_shift_7_sign", 16, 7),
+        HwConstant.bits("negative_imm_upper", 16, 65472), HwConstant.bits("zero16", 16, 0),
+        HwConstant.bits("zero_flag", 1, 0), HwConstant.bits("one_flag", 1, 1),
+        HwConstant.bits("left_shift_20", 32, 20), HwConstant.bits("left_shift_15", 32, 15),
+        HwConstant.bits("left_shift_7", 32, 7), HwConstant.bits("addiw_opcode", 32, 27),
+        HwConstant.bits("zero_instruction", 32, 0), HwConstant.bits("two_bytes", pa, 2),
+        HwConstant.bits("two_length", 2, 2)
+    ]
+    val comb_ops = [
+        HwCombOp.binary("and", "opcode_tag", "original_parcel", "tag_mask", 16),
+        HwCombOp.binary("shr", "rd_source", "original_parcel", "right_shift_7", 16),
+        HwCombOp.binary("and", "rd", "rd_source", "register_mask", 16),
+        HwCombOp.binary("shr", "imm_low_source", "original_parcel", "right_shift_2", 16),
+        HwCombOp.binary("and", "imm_low", "imm_low_source", "imm_low_mask", 16),
+        HwCombOp.binary("and", "imm_sign_source", "original_parcel", "imm_sign_mask", 16),
+        HwCombOp.binary("shr", "imm_high", "imm_sign_source", "right_shift_7_sign", 16),
+        HwCombOp.binary("or", "imm6", "imm_low", "imm_high", 16),
+        HwCombOp.unary("sext", "imm32", "imm_signed", 32),
+        HwCombOp.binary("shl", "imm_field", "imm32", "left_shift_20", 32),
+        HwCombOp.unary("zext", "rd32", "rd", 32),
+        HwCombOp.binary("shl", "rs1_field", "rd32", "left_shift_15", 32),
+        HwCombOp.binary("shl", "rd_field", "rd32", "left_shift_7", 32),
+        HwCombOp.binary("or", "instruction_partial", "imm_field", "rs1_field", 32),
+        HwCombOp.binary("or", "instruction_with_rs1", "instruction_partial", "rd_field", 32),
+        HwCombOp.binary("or", "instruction_with_rd", "instruction_with_rs1", "addiw_opcode", 32),
+        HwCombOp.unary("passthrough", "addiw_instruction", "instruction_with_rd", 32),
+        HwCombOp.binary("and", "legal_gate", "is_c_addiw", "rd_nonzero", 1),
+        HwCombOp.binary("add", "fallthrough_pc", "fetch_pc", "two_bytes", pa),
+        HwCombOp.unary("passthrough", "original_length_bytes", "two_length", 2),
+        HwCombOp.unary("passthrough", "legal", "legal_gate", 1),
+        HwCombOp.unary("passthrough", "next_pc", "fallthrough_pc", pa),
+        HwCombOp.unary("passthrough", "redirect_valid", "zero_flag", 1),
+        HwCombOp.unary("passthrough", "redirect_target", "fetch_pc", pa)
+    ]
+    val compare_ops = [
+        HwCompareOp.equal("is_c_addiw", "opcode_tag", "c_addiw_tag", 16),
+        HwCompareOp.equal("rd_is_zero", "rd", "zero16", 16),
+        HwCompareOp.equal("sign_is_clear", "imm_sign_source", "zero16", 16)
+    ]
+    val select_ops = [
+        HwSelectOp.mux("rd_nonzero", "rd_is_zero", "zero_flag", "one_flag", 1),
+        HwSelectOp.mux("imm_negative", "sign_is_clear", "imm6", "negative_imm_upper", 16),
+        HwSelectOp.mux("imm_signed", "sign_is_clear", "imm6", "imm_negative", 16),
+        HwSelectOp.mux("canonical_instruction", "legal_gate", "addiw_instruction", "zero_instruction", 32)
+    ]
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: contract.ports().len(), signal_count: signals.len(), register_count: 0,
+        memory_count: 0, comb_op_count: comb_ops.len() + compare_ops.len() + select_ops.len(),
+        clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.addiw"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "immediate"), source_name: "zca.c.addiw"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "canonical"), source_name: "zca.c.addiw")
+        ], ports: contract.ports(), signals: signals, constants: constants, comb_ops: comb_ops,
+        compare_ops: compare_ops, select_ops: select_ops, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+fn strict_zca_cb_predecode_row_hwir(module_name: text, config: CoreConfig,
+    tag: i64, branch_funct3: i64, isa_name: text, branch_when_zero: bool) -> Result<HwModuleDef, text>:
+    """Construct one C.BEQZ/C.BNEZ row with an explicit rs1 value.
+
+    `rs1_value` is a concrete XLEN-wide input from the frozen branch-predecode
+    interface. The parcel classification remains independent of the operand;
+    only redirect validity and next PC depend on the typed zero comparison.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    val branch_contract = match strict_riscv_branch_predecode_interface(config):
+        case Ok(value): value
+        case Err(diagnostic): return Err(diagnostic)
+    val address_bits = config.physical_address_bits
+    val signals: [HwSignal] = [
+        HwSignal.comb("opcode_tag", "Bits", 16), HwSignal.comb("is_c_branch", "Bits", 1),
+        HwSignal.comb("sign_is_clear", "Bits", 1), HwSignal.comb("rs1_is_zero", "Bits", 1),
+        HwSignal.comb("rs1_index_matches", "Bits", 1), HwSignal.comb("binding_valid", "Bits", 1),
+        HwSignal.comb("rs1_compact_source", "Bits", 16), HwSignal.comb("rs1_compact", "Bits", 16),
+        HwSignal.comb("rs1_prime", "Bits", 16), HwSignal.comb("rs1_prime5", "Bits", 5), HwSignal.comb("rs1_prime32", "Bits", 32), HwSignal.comb("rs1_field", "Bits", 32),
+        HwSignal.comb("imm_sign_source", "Bits", 16), HwSignal.comb("imm_sign", "Bits", 16),
+        HwSignal.comb("imm_bits_7_6_source", "Bits", 16), HwSignal.comb("imm_bits_7_6", "Bits", 16),
+        HwSignal.comb("imm_bit_5_source", "Bits", 16), HwSignal.comb("imm_bit_5", "Bits", 16),
+        HwSignal.comb("imm_bits_4_3_source", "Bits", 16), HwSignal.comb("imm_bits_4_3", "Bits", 16),
+        HwSignal.comb("imm_bits_2_1_source", "Bits", 16), HwSignal.comb("imm_bits_2_1", "Bits", 16),
+        HwSignal.comb("imm_partial_1", "Bits", 16), HwSignal.comb("imm_partial_2", "Bits", 16),
+        HwSignal.comb("imm_partial_3", "Bits", 16), HwSignal.comb("imm_low", "Bits", 16),
+        HwSignal.comb("immediate_negative", "Bits", 16), HwSignal.comb("immediate_signed", "Bits", 16),
+        HwSignal.comb("immediate32", "Bits", 32), HwSignal.comb("immediate_pa", "Bits", address_bits),
+        HwSignal.comb("canonical_sign_source", "Bits", 32), HwSignal.comb("canonical_sign", "Bits", 32),
+        HwSignal.comb("canonical_bits_10_5_source", "Bits", 32), HwSignal.comb("canonical_bits_10_5", "Bits", 32),
+        HwSignal.comb("canonical_bits_4_1_source", "Bits", 32), HwSignal.comb("canonical_bits_4_1", "Bits", 32),
+        HwSignal.comb("canonical_bit_11_source", "Bits", 32), HwSignal.comb("canonical_bit_11", "Bits", 32),
+        HwSignal.comb("canonical_partial_1", "Bits", 32), HwSignal.comb("canonical_partial_2", "Bits", 32),
+        HwSignal.comb("canonical_partial_3", "Bits", 32), HwSignal.comb("canonical_with_rs1", "Bits", 32),
+        HwSignal.comb("canonical_with_funct3", "Bits", 32), HwSignal.comb("canonical_branch", "Bits", 32),
+        HwSignal.comb("fallthrough_pc", "Bits", address_bits), HwSignal.comb("raw_redirect_target", "Bits", address_bits),
+        HwSignal.comb("branch_condition", "Bits", 1), HwSignal.comb("taken", "Bits", 1)
+    ]
+    val constants: [HwConstant] = [
+        HwConstant.bits("c_branch_tag_mask", 16, 57347), HwConstant.bits("c_branch_tag", 16, tag),
+        HwConstant.bits("right_shift_2", 16, 2), HwConstant.bits("compact_mask", 16, 7),
+        HwConstant.bits("prime_register_base", 16, 8), HwConstant.bits("left_shift_15", 32, 15),
+        HwConstant.bits("parcel_bit_12", 16, 4096), HwConstant.bits("parcel_bits_6_5", 16, 96),
+        HwConstant.bits("parcel_bit_2", 16, 4), HwConstant.bits("parcel_bits_11_10", 16, 3072),
+        HwConstant.bits("parcel_bits_4_3", 16, 24), HwConstant.bits("right_shift_1", 16, 1),
+        HwConstant.bits("right_shift_4", 16, 4), HwConstant.bits("right_shift_7", 16, 7),
+        HwConstant.bits("left_shift_1", 16, 1), HwConstant.bits("left_shift_3", 16, 3),
+        HwConstant.bits("negative_imm_upper", 16, 65024), HwConstant.bits("zero16", 16, 0),
+        HwConstant.bits("imm_bit_12_mask", 32, 4096), HwConstant.bits("imm_bits_10_5_mask", 32, 2016),
+        HwConstant.bits("imm_bits_4_1_mask", 32, 30), HwConstant.bits("imm_bit_11_mask", 32, 2048),
+        HwConstant.bits("left_shift_19", 32, 19), HwConstant.bits("left_shift_20", 32, 20),
+        HwConstant.bits("left_shift_7", 32, 7), HwConstant.bits("right_shift_4_32", 32, 4),
+        HwConstant.bits("branch_opcode", 32, 99),
+        HwConstant.bits("branch_funct3", 32, branch_funct3), HwConstant.bits("zero_instruction", 32, 0),
+        HwConstant.bits("two_bytes", address_bits, 2), HwConstant.bits("two_bytes_length", 2, 2),
+        HwConstant.bits("zero_xlen", config.xlen, 0),
+        HwConstant.bits("branch_when_zero", 1, if branch_when_zero: 1 else: 0),
+        HwConstant.bits("branch_when_nonzero", 1, if branch_when_zero: 0 else: 1)
+    ]
+    val comb_ops: [HwCombOp] = [
+        HwCombOp.binary("and", "opcode_tag", "original_parcel", "c_branch_tag_mask", 16),
+        HwCombOp.binary("shr", "rs1_compact_source", "original_parcel", "right_shift_7", 16),
+        HwCombOp.binary("and", "rs1_compact", "rs1_compact_source", "compact_mask", 16),
+        HwCombOp.binary("or", "rs1_prime", "rs1_compact", "prime_register_base", 16),
+        HwCombOp.unary("trunc", "rs1_prime5", "rs1_prime", 5),
+        HwCombOp.unary("zext", "rs1_prime32", "rs1_prime", 32),
+        HwCombOp.binary("shl", "rs1_field", "rs1_prime32", "left_shift_15", 32),
+        HwCombOp.binary("and", "imm_sign_source", "original_parcel", "parcel_bit_12", 16),
+        HwCombOp.binary("shr", "imm_sign", "imm_sign_source", "right_shift_4", 16),
+        HwCombOp.binary("and", "imm_bits_7_6_source", "original_parcel", "parcel_bits_6_5", 16),
+        HwCombOp.binary("shl", "imm_bits_7_6", "imm_bits_7_6_source", "left_shift_1", 16),
+        HwCombOp.binary("and", "imm_bit_5_source", "original_parcel", "parcel_bit_2", 16),
+        HwCombOp.binary("shl", "imm_bit_5", "imm_bit_5_source", "left_shift_3", 16),
+        HwCombOp.binary("and", "imm_bits_4_3_source", "original_parcel", "parcel_bits_11_10", 16),
+        HwCombOp.binary("shr", "imm_bits_4_3", "imm_bits_4_3_source", "right_shift_7", 16),
+        HwCombOp.binary("and", "imm_bits_2_1_source", "original_parcel", "parcel_bits_4_3", 16),
+        HwCombOp.binary("shr", "imm_bits_2_1", "imm_bits_2_1_source", "right_shift_2", 16),
+        HwCombOp.binary("or", "imm_partial_1", "imm_sign", "imm_bits_7_6", 16),
+        HwCombOp.binary("or", "imm_partial_2", "imm_partial_1", "imm_bit_5", 16),
+        HwCombOp.binary("or", "imm_partial_3", "imm_partial_2", "imm_bits_4_3", 16),
+        HwCombOp.binary("or", "imm_low", "imm_partial_3", "imm_bits_2_1", 16),
+        HwCombOp.binary("or", "immediate_negative", "imm_low", "negative_imm_upper", 16),
+        HwCombOp.unary("sext", "immediate32", "immediate_signed", 32),
+        HwCombOp.unary("sext", "immediate_pa", "immediate_signed", address_bits),
+        HwCombOp.binary("and", "canonical_sign_source", "immediate32", "imm_bit_12_mask", 32),
+        HwCombOp.binary("shl", "canonical_sign", "canonical_sign_source", "left_shift_19", 32),
+        HwCombOp.binary("and", "canonical_bits_10_5_source", "immediate32", "imm_bits_10_5_mask", 32),
+        HwCombOp.binary("shl", "canonical_bits_10_5", "canonical_bits_10_5_source", "left_shift_20", 32),
+        HwCombOp.binary("and", "canonical_bits_4_1_source", "immediate32", "imm_bits_4_1_mask", 32),
+        HwCombOp.binary("shl", "canonical_bits_4_1", "canonical_bits_4_1_source", "left_shift_7", 32),
+        HwCombOp.binary("and", "canonical_bit_11_source", "immediate32", "imm_bit_11_mask", 32),
+        HwCombOp.binary("shr", "canonical_bit_11", "canonical_bit_11_source", "right_shift_4_32", 32),
+        HwCombOp.binary("or", "canonical_partial_1", "canonical_sign", "canonical_bits_10_5", 32),
+        HwCombOp.binary("or", "canonical_partial_2", "canonical_partial_1", "canonical_bits_4_1", 32),
+        HwCombOp.binary("or", "canonical_partial_3", "canonical_partial_2", "canonical_bit_11", 32),
+        HwCombOp.binary("or", "canonical_with_rs1", "canonical_partial_3", "rs1_field", 32),
+        HwCombOp.binary("or", "canonical_with_funct3", "canonical_with_rs1", "branch_funct3", 32),
+        HwCombOp.binary("or", "canonical_branch", "canonical_with_funct3", "branch_opcode", 32),
+        HwCombOp.binary("add", "fallthrough_pc", "fetch_pc", "two_bytes", address_bits),
+        HwCombOp.binary("add", "raw_redirect_target", "fetch_pc", "immediate_pa", address_bits),
+        HwCombOp.binary("and", "binding_valid", "is_c_branch", "rs1_index_matches", 1),
+        HwCombOp.binary("and", "taken", "binding_valid", "branch_condition", 1),
+        HwCombOp.unary("passthrough", "original_length_bytes", "two_bytes_length", 2),
+        HwCombOp.unary("passthrough", "legal", "binding_valid", 1),
+        HwCombOp.unary("passthrough", "redirect_valid", "taken", 1)
+    ]
+    val compare_ops: [HwCompareOp] = [
+        HwCompareOp.equal("is_c_branch", "opcode_tag", "c_branch_tag", 16),
+        HwCompareOp.equal("sign_is_clear", "imm_sign", "zero16", 16),
+        HwCompareOp.equal("rs1_index_matches", "rs1_index", "rs1_prime5", 5),
+        HwCompareOp.equal("rs1_is_zero", "rs1_value", "zero_xlen", config.xlen)
+    ]
+    val select_ops: [HwSelectOp] = [
+        HwSelectOp.mux("immediate_signed", "sign_is_clear", "imm_low", "immediate_negative", 16),
+        HwSelectOp.mux("branch_condition", "rs1_is_zero", "branch_when_zero", "branch_when_nonzero", 1),
+        HwSelectOp.mux("canonical_instruction", "binding_valid", "canonical_branch", "zero_instruction", 32),
+        HwSelectOp.mux("redirect_target", "taken", "raw_redirect_target", "fetch_pc", address_bits),
+        HwSelectOp.mux("next_pc", "taken", "raw_redirect_target", "fallthrough_pc", address_bits)
+    ]
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: branch_contract.ports().len(), signal_count: signals.len(), register_count: 0, memory_count: 0,
+        comb_op_count: comb_ops.len() + compare_ops.len() + select_ops.len(), clock_domain_count: 1,
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: isa_name),
+            HwOrigin(node_id: HwNodeId.child(module_name, "operand"), source_name: isa_name),
+            HwOrigin(node_id: HwNodeId.child(module_name, "immediate"), source_name: isa_name),
+            HwOrigin(node_id: HwNodeId.child(module_name, "canonical"), source_name: isa_name),
+            HwOrigin(node_id: HwNodeId.child(module_name, "redirect"), source_name: isa_name)
+        ], ports: branch_contract.ports(), signals: signals, constants: constants, comb_ops: comb_ops,
+        compare_ops: compare_ops, select_ops: select_ops, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_cbeqz_predecode_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct C.BEQZ: redirect only when the explicit rs1 value is zero."""
+    strict_zca_cb_predecode_row_hwir(module_name, config, 49153, 0, "zca.c.beqz", true)
+
+pub fn strict_zca_cbnez_predecode_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct C.BNEZ: redirect only when the explicit rs1 value is nonzero."""
+    strict_zca_cb_predecode_row_hwir(module_name, config, 57345, 4096, "zca.c.bnez", false)
+
+pub fn strict_zca_addi4spn_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the typed C.ADDI4SPN row for one critical product.
+
+    This common RV32/RV64 row recognizes Q0/funct3=000, rebuilds its unsigned
+    nonzero immediate, maps rd' into x8..x15, and emits canonical ADDI rd',x2.
+    The reserved zero-immediate encoding is gated to zero before target output.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 28, register_count: 0, memory_count: 0,
+        comb_op_count: 29, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.addi4spn"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "immediate"), source_name: "zca.c.addi4spn"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.addi4spn"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "select"), source_name: "zca.c.addi4spn")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_addi4spn", "Bits", 1), HwSignal.comb("shifted_2", "Bits", 32),
+            HwSignal.comb("rd_compact", "Bits", 32), HwSignal.comb("rd_prime", "Bits", 32),
+            HwSignal.comb("shifted_7", "Bits", 32), HwSignal.comb("imm_high4", "Bits", 32),
+            HwSignal.comb("imm_high", "Bits", 32), HwSignal.comb("shifted_11", "Bits", 32),
+            HwSignal.comb("imm_mid2", "Bits", 32), HwSignal.comb("imm_mid", "Bits", 32),
+            HwSignal.comb("shifted_5", "Bits", 32), HwSignal.comb("imm_bit3", "Bits", 32),
+            HwSignal.comb("imm_low3", "Bits", 32), HwSignal.comb("shifted_6", "Bits", 32),
+            HwSignal.comb("imm_bit2", "Bits", 32), HwSignal.comb("imm_low2", "Bits", 32),
+            HwSignal.comb("immediate_upper", "Bits", 32), HwSignal.comb("immediate_partial", "Bits", 32),
+            HwSignal.comb("immediate", "Bits", 32),
+            HwSignal.comb("immediate_is_zero", "Bits", 1), HwSignal.comb("imm_field", "Bits", 32),
+            HwSignal.comb("rd_field", "Bits", 32), HwSignal.comb("instruction_partial", "Bits", 32),
+            HwSignal.comb("instruction_with_rd", "Bits", 32), HwSignal.comb("addi_instruction", "Bits", 32),
+            HwSignal.comb("nonzero_instruction", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 57347),
+            HwConstant.bits("c_addi4spn_tag", 32, 0), HwConstant.bits("right_shift_2", 32, 2),
+            HwConstant.bits("rd_compact_mask", 32, 7), HwConstant.bits("prime_register_base", 32, 8),
+            HwConstant.bits("right_shift_7", 32, 7), HwConstant.bits("imm_high4_mask", 32, 15),
+            HwConstant.bits("left_shift_6", 32, 6), HwConstant.bits("right_shift_11", 32, 11),
+            HwConstant.bits("imm_mid2_mask", 32, 3), HwConstant.bits("left_shift_4", 32, 4),
+            HwConstant.bits("right_shift_5", 32, 5), HwConstant.bits("imm_bit_mask", 32, 1),
+            HwConstant.bits("left_shift_3", 32, 3), HwConstant.bits("right_shift_6", 32, 6),
+            HwConstant.bits("left_shift_2", 32, 2), HwConstant.bits("zero_immediate", 32, 0),
+            HwConstant.bits("left_shift_20", 32, 20), HwConstant.bits("left_shift_7", 32, 7),
+            HwConstant.bits("sp_rs1_field", 32, 65536), HwConstant.bits("addi_opcode", 32, 19),
+            HwConstant.bits("zero_instruction", 32, 0)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+            HwCombOp.binary("and", "rd_compact", "shifted_2", "rd_compact_mask", 32),
+            HwCombOp.binary("or", "rd_prime", "rd_compact", "prime_register_base", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "imm_high4", "shifted_7", "imm_high4_mask", 32),
+            HwCombOp.binary("shl", "imm_high", "imm_high4", "left_shift_6", 32),
+            HwCombOp.binary("shr", "shifted_11", "parcel16", "right_shift_11", 32),
+            HwCombOp.binary("and", "imm_mid2", "shifted_11", "imm_mid2_mask", 32),
+            HwCombOp.binary("shl", "imm_mid", "imm_mid2", "left_shift_4", 32),
+            HwCombOp.binary("shr", "shifted_5", "parcel16", "right_shift_5", 32),
+            HwCombOp.binary("and", "imm_bit3", "shifted_5", "imm_bit_mask", 32),
+            HwCombOp.binary("shl", "imm_low3", "imm_bit3", "left_shift_3", 32),
+            HwCombOp.binary("shr", "shifted_6", "parcel16", "right_shift_6", 32),
+            HwCombOp.binary("and", "imm_bit2", "shifted_6", "imm_bit_mask", 32),
+            HwCombOp.binary("shl", "imm_low2", "imm_bit2", "left_shift_2", 32),
+            HwCombOp.binary("or", "immediate_upper", "imm_high", "imm_mid", 32),
+            HwCombOp.binary("or", "immediate_partial", "immediate_upper", "imm_low3", 32),
+            HwCombOp.binary("or", "immediate", "immediate_partial", "imm_low2", 32),
+            HwCombOp.binary("shl", "imm_field", "immediate", "left_shift_20", 32),
+            HwCombOp.binary("shl", "rd_field", "rd_prime", "left_shift_7", 32),
+            HwCombOp.binary("or", "instruction_partial", "imm_field", "sp_rs1_field", 32),
+            HwCombOp.binary("or", "instruction_with_rd", "instruction_partial", "rd_field", 32),
+            HwCombOp.binary("or", "addi_instruction", "instruction_with_rd", "addi_opcode", 32)
+        ],
+        compare_ops: [
+            HwCompareOp.equal("is_c_addi4spn", "opcode_tag", "c_addi4spn_tag", 32),
+            HwCompareOp.equal("immediate_is_zero", "immediate", "zero_immediate", 32)
+        ],
+        select_ops: [
+            HwSelectOp.mux("nonzero_instruction", "immediate_is_zero", "zero_instruction", "addi_instruction", 32),
+            HwSelectOp.mux("canonical_instruction", "is_c_addi4spn", "nonzero_instruction", "zero_instruction", 32)
+        ],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_lw_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the typed C.LW row for one critical product.
+
+    This shared row recognizes Q0/funct3=010, rebuilds its unsigned offset,
+    maps both prime register fields to x8..x15, and emits canonical LW.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 27, register_count: 0, memory_count: 0,
+        comb_op_count: 28, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.lw"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "immediate"), source_name: "zca.c.lw"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "registers"), source_name: "zca.c.lw"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.lw")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_lw", "Bits", 1), HwSignal.comb("shifted_2", "Bits", 32),
+            HwSignal.comb("rd_compact", "Bits", 32), HwSignal.comb("rd_prime", "Bits", 32),
+            HwSignal.comb("shifted_7", "Bits", 32), HwSignal.comb("rs1_compact", "Bits", 32),
+            HwSignal.comb("rs1_prime", "Bits", 32), HwSignal.comb("shifted_5", "Bits", 32),
+            HwSignal.comb("imm_bit6", "Bits", 32), HwSignal.comb("imm_high", "Bits", 32),
+            HwSignal.comb("shifted_10", "Bits", 32), HwSignal.comb("imm_mid3", "Bits", 32),
+            HwSignal.comb("imm_mid", "Bits", 32), HwSignal.comb("shifted_6", "Bits", 32),
+            HwSignal.comb("imm_bit2", "Bits", 32), HwSignal.comb("imm_low", "Bits", 32),
+            HwSignal.comb("immediate_upper", "Bits", 32), HwSignal.comb("immediate", "Bits", 32),
+            HwSignal.comb("imm_field", "Bits", 32), HwSignal.comb("rs1_field", "Bits", 32),
+            HwSignal.comb("rd_field", "Bits", 32), HwSignal.comb("instruction_partial_1", "Bits", 32),
+            HwSignal.comb("instruction_partial_2", "Bits", 32), HwSignal.comb("instruction_with_funct3", "Bits", 32),
+            HwSignal.comb("lw_instruction", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 57347),
+            HwConstant.bits("c_lw_tag", 32, 16384), HwConstant.bits("right_shift_2", 32, 2),
+            HwConstant.bits("compact_register_mask", 32, 7), HwConstant.bits("prime_register_base", 32, 8),
+            HwConstant.bits("right_shift_7", 32, 7), HwConstant.bits("right_shift_5", 32, 5),
+            HwConstant.bits("imm_bit_mask", 32, 1), HwConstant.bits("left_shift_6", 32, 6),
+            HwConstant.bits("right_shift_10", 32, 10), HwConstant.bits("imm_mid3_mask", 32, 7),
+            HwConstant.bits("left_shift_3", 32, 3), HwConstant.bits("right_shift_6", 32, 6),
+            HwConstant.bits("left_shift_2", 32, 2), HwConstant.bits("left_shift_20", 32, 20),
+            HwConstant.bits("left_shift_15", 32, 15), HwConstant.bits("left_shift_7", 32, 7),
+            HwConstant.bits("lw_funct3", 32, 8192), HwConstant.bits("lw_opcode", 32, 3),
+            HwConstant.bits("zero_instruction", 32, 0)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+            HwCombOp.binary("and", "rd_compact", "shifted_2", "compact_register_mask", 32),
+            HwCombOp.binary("or", "rd_prime", "rd_compact", "prime_register_base", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "rs1_compact", "shifted_7", "compact_register_mask", 32),
+            HwCombOp.binary("or", "rs1_prime", "rs1_compact", "prime_register_base", 32),
+            HwCombOp.binary("shr", "shifted_5", "parcel16", "right_shift_5", 32),
+            HwCombOp.binary("and", "imm_bit6", "shifted_5", "imm_bit_mask", 32),
+            HwCombOp.binary("shl", "imm_high", "imm_bit6", "left_shift_6", 32),
+            HwCombOp.binary("shr", "shifted_10", "parcel16", "right_shift_10", 32),
+            HwCombOp.binary("and", "imm_mid3", "shifted_10", "imm_mid3_mask", 32),
+            HwCombOp.binary("shl", "imm_mid", "imm_mid3", "left_shift_3", 32),
+            HwCombOp.binary("shr", "shifted_6", "parcel16", "right_shift_6", 32),
+            HwCombOp.binary("and", "imm_bit2", "shifted_6", "imm_bit_mask", 32),
+            HwCombOp.binary("shl", "imm_low", "imm_bit2", "left_shift_2", 32),
+            HwCombOp.binary("or", "immediate_upper", "imm_high", "imm_mid", 32),
+            HwCombOp.binary("or", "immediate", "immediate_upper", "imm_low", 32),
+            HwCombOp.binary("shl", "imm_field", "immediate", "left_shift_20", 32),
+            HwCombOp.binary("shl", "rs1_field", "rs1_prime", "left_shift_15", 32),
+            HwCombOp.binary("shl", "rd_field", "rd_prime", "left_shift_7", 32),
+            HwCombOp.binary("or", "instruction_partial_1", "imm_field", "rs1_field", 32),
+            HwCombOp.binary("or", "instruction_partial_2", "instruction_partial_1", "rd_field", 32),
+            HwCombOp.binary("or", "instruction_with_funct3", "instruction_partial_2", "lw_funct3", 32),
+            HwCombOp.binary("or", "lw_instruction", "instruction_with_funct3", "lw_opcode", 32)
+        ],
+        compare_ops: [HwCompareOp.equal("is_c_lw", "opcode_tag", "c_lw_tag", 32)],
+        select_ops: [HwSelectOp.mux("canonical_instruction", "is_c_lw", "lw_instruction", "zero_instruction", 32)],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_sw_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the typed C.SW row for one critical product.
+
+    This shared row recognizes Q0/funct3=110, rebuilds its unsigned offset,
+    maps both prime register fields to x8..x15, and emits canonical SW.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 31, register_count: 0, memory_count: 0,
+        comb_op_count: 32, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.sw"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "immediate"), source_name: "zca.c.sw"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "registers"), source_name: "zca.c.sw"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.sw")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_sw", "Bits", 1), HwSignal.comb("shifted_2", "Bits", 32),
+            HwSignal.comb("rs2_compact", "Bits", 32), HwSignal.comb("rs2_prime", "Bits", 32),
+            HwSignal.comb("shifted_7", "Bits", 32), HwSignal.comb("rs1_compact", "Bits", 32),
+            HwSignal.comb("rs1_prime", "Bits", 32), HwSignal.comb("shifted_5", "Bits", 32),
+            HwSignal.comb("imm_bit6", "Bits", 32), HwSignal.comb("imm_high", "Bits", 32),
+            HwSignal.comb("shifted_10", "Bits", 32), HwSignal.comb("imm_mid3", "Bits", 32),
+            HwSignal.comb("imm_mid", "Bits", 32), HwSignal.comb("shifted_6", "Bits", 32),
+            HwSignal.comb("imm_bit2", "Bits", 32), HwSignal.comb("imm_low", "Bits", 32),
+            HwSignal.comb("immediate_upper", "Bits", 32), HwSignal.comb("immediate", "Bits", 32),
+            HwSignal.comb("immediate_shifted_5", "Bits", 32), HwSignal.comb("imm_upper_field", "Bits", 32),
+            HwSignal.comb("imm_low_bits", "Bits", 32), HwSignal.comb("imm_low_field", "Bits", 32),
+            HwSignal.comb("rs2_field", "Bits", 32), HwSignal.comb("rs1_field", "Bits", 32),
+            HwSignal.comb("instruction_partial_1", "Bits", 32), HwSignal.comb("instruction_partial_2", "Bits", 32),
+            HwSignal.comb("instruction_partial_3", "Bits", 32), HwSignal.comb("instruction_with_funct3", "Bits", 32),
+            HwSignal.comb("sw_instruction", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 57347),
+            HwConstant.bits("c_sw_tag", 32, 49152), HwConstant.bits("right_shift_2", 32, 2),
+            HwConstant.bits("compact_register_mask", 32, 7), HwConstant.bits("prime_register_base", 32, 8),
+            HwConstant.bits("right_shift_7", 32, 7), HwConstant.bits("right_shift_5", 32, 5),
+            HwConstant.bits("imm_bit_mask", 32, 1), HwConstant.bits("left_shift_6", 32, 6),
+            HwConstant.bits("right_shift_10", 32, 10), HwConstant.bits("imm_mid3_mask", 32, 7),
+            HwConstant.bits("left_shift_3", 32, 3), HwConstant.bits("right_shift_6", 32, 6),
+            HwConstant.bits("left_shift_2", 32, 2), HwConstant.bits("left_shift_25", 32, 25),
+            HwConstant.bits("imm_low5_mask", 32, 31), HwConstant.bits("left_shift_7", 32, 7),
+            HwConstant.bits("left_shift_20", 32, 20), HwConstant.bits("left_shift_15", 32, 15),
+            HwConstant.bits("sw_funct3", 32, 8192), HwConstant.bits("sw_opcode", 32, 35),
+            HwConstant.bits("zero_instruction", 32, 0)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+            HwCombOp.binary("and", "rs2_compact", "shifted_2", "compact_register_mask", 32),
+            HwCombOp.binary("or", "rs2_prime", "rs2_compact", "prime_register_base", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "rs1_compact", "shifted_7", "compact_register_mask", 32),
+            HwCombOp.binary("or", "rs1_prime", "rs1_compact", "prime_register_base", 32),
+            HwCombOp.binary("shr", "shifted_5", "parcel16", "right_shift_5", 32),
+            HwCombOp.binary("and", "imm_bit6", "shifted_5", "imm_bit_mask", 32),
+            HwCombOp.binary("shl", "imm_high", "imm_bit6", "left_shift_6", 32),
+            HwCombOp.binary("shr", "shifted_10", "parcel16", "right_shift_10", 32),
+            HwCombOp.binary("and", "imm_mid3", "shifted_10", "imm_mid3_mask", 32),
+            HwCombOp.binary("shl", "imm_mid", "imm_mid3", "left_shift_3", 32),
+            HwCombOp.binary("shr", "shifted_6", "parcel16", "right_shift_6", 32),
+            HwCombOp.binary("and", "imm_bit2", "shifted_6", "imm_bit_mask", 32),
+            HwCombOp.binary("shl", "imm_low", "imm_bit2", "left_shift_2", 32),
+            HwCombOp.binary("or", "immediate_upper", "imm_high", "imm_mid", 32),
+            HwCombOp.binary("or", "immediate", "immediate_upper", "imm_low", 32),
+            HwCombOp.binary("shr", "immediate_shifted_5", "immediate", "right_shift_5", 32),
+            HwCombOp.binary("shl", "imm_upper_field", "immediate_shifted_5", "left_shift_25", 32),
+            HwCombOp.binary("and", "imm_low_bits", "immediate", "imm_low5_mask", 32),
+            HwCombOp.binary("shl", "imm_low_field", "imm_low_bits", "left_shift_7", 32),
+            HwCombOp.binary("shl", "rs2_field", "rs2_prime", "left_shift_20", 32),
+            HwCombOp.binary("shl", "rs1_field", "rs1_prime", "left_shift_15", 32),
+            HwCombOp.binary("or", "instruction_partial_1", "imm_upper_field", "rs2_field", 32),
+            HwCombOp.binary("or", "instruction_partial_2", "instruction_partial_1", "rs1_field", 32),
+            HwCombOp.binary("or", "instruction_partial_3", "instruction_partial_2", "imm_low_field", 32),
+            HwCombOp.binary("or", "instruction_with_funct3", "instruction_partial_3", "sw_funct3", 32),
+            HwCombOp.binary("or", "sw_instruction", "instruction_with_funct3", "sw_opcode", 32)
+        ],
+        compare_ops: [HwCompareOp.equal("is_c_sw", "opcode_tag", "c_sw_tag", 32)],
+        select_ops: [HwSelectOp.mux("canonical_instruction", "is_c_sw", "sw_instruction", "zero_instruction", 32)],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_lwsp_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the typed C.LWSP row for one critical product.
+
+    This shared stack-relative row recognizes Q2/funct3=010, rejects reserved
+    rd=x0 encodings, reconstructs its unsigned offset, and emits canonical LW.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 25, register_count: 0, memory_count: 0,
+        comb_op_count: 26, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.lwsp"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "immediate"), source_name: "zca.c.lwsp"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "register"), source_name: "zca.c.lwsp"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.lwsp")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_lwsp", "Bits", 1), HwSignal.comb("shifted_7", "Bits", 32),
+            HwSignal.comb("rd", "Bits", 32), HwSignal.comb("shifted_2", "Bits", 32),
+            HwSignal.comb("imm_high2", "Bits", 32), HwSignal.comb("imm_high", "Bits", 32),
+            HwSignal.comb("shifted_12", "Bits", 32), HwSignal.comb("imm_bit5", "Bits", 32),
+            HwSignal.comb("imm_mid", "Bits", 32), HwSignal.comb("shifted_4", "Bits", 32),
+            HwSignal.comb("imm_low3", "Bits", 32), HwSignal.comb("imm_low", "Bits", 32),
+            HwSignal.comb("immediate_upper", "Bits", 32), HwSignal.comb("immediate_partial", "Bits", 32),
+            HwSignal.comb("immediate", "Bits", 32), HwSignal.comb("rd_is_zero", "Bits", 1),
+            HwSignal.comb("imm_field", "Bits", 32), HwSignal.comb("rd_field", "Bits", 32),
+            HwSignal.comb("instruction_partial", "Bits", 32), HwSignal.comb("instruction_with_rd", "Bits", 32),
+            HwSignal.comb("lw_instruction", "Bits", 32), HwSignal.comb("lw_instruction_with_opcode", "Bits", 32),
+            HwSignal.comb("nonzero_instruction", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 57347),
+            HwConstant.bits("c_lwsp_tag", 32, 16386), HwConstant.bits("right_shift_7", 32, 7),
+            HwConstant.bits("register_mask", 32, 31), HwConstant.bits("right_shift_2", 32, 2),
+            HwConstant.bits("imm_high2_mask", 32, 3), HwConstant.bits("left_shift_6", 32, 6),
+            HwConstant.bits("right_shift_12", 32, 12), HwConstant.bits("imm_bit_mask", 32, 1),
+            HwConstant.bits("left_shift_5", 32, 5), HwConstant.bits("right_shift_4", 32, 4),
+            HwConstant.bits("imm_low3_mask", 32, 7), HwConstant.bits("left_shift_2", 32, 2),
+            HwConstant.bits("zero_register", 32, 0), HwConstant.bits("left_shift_20", 32, 20),
+            HwConstant.bits("left_shift_7", 32, 7), HwConstant.bits("sp_rs1_field", 32, 65536),
+            HwConstant.bits("lw_funct3", 32, 8192), HwConstant.bits("lw_opcode", 32, 3),
+            HwConstant.bits("zero_instruction", 32, 0)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "rd", "shifted_7", "register_mask", 32),
+            HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+            HwCombOp.binary("and", "imm_high2", "shifted_2", "imm_high2_mask", 32),
+            HwCombOp.binary("shl", "imm_high", "imm_high2", "left_shift_6", 32),
+            HwCombOp.binary("shr", "shifted_12", "parcel16", "right_shift_12", 32),
+            HwCombOp.binary("and", "imm_bit5", "shifted_12", "imm_bit_mask", 32),
+            HwCombOp.binary("shl", "imm_mid", "imm_bit5", "left_shift_5", 32),
+            HwCombOp.binary("shr", "shifted_4", "parcel16", "right_shift_4", 32),
+            HwCombOp.binary("and", "imm_low3", "shifted_4", "imm_low3_mask", 32),
+            HwCombOp.binary("shl", "imm_low", "imm_low3", "left_shift_2", 32),
+            HwCombOp.binary("or", "immediate_upper", "imm_high", "imm_mid", 32),
+            HwCombOp.binary("or", "immediate_partial", "immediate_upper", "imm_low", 32),
+            HwCombOp.binary("or", "immediate", "immediate_partial", "zero_register", 32),
+            HwCombOp.binary("shl", "imm_field", "immediate", "left_shift_20", 32),
+            HwCombOp.binary("shl", "rd_field", "rd", "left_shift_7", 32),
+            HwCombOp.binary("or", "instruction_partial", "imm_field", "sp_rs1_field", 32),
+            HwCombOp.binary("or", "instruction_with_rd", "instruction_partial", "rd_field", 32),
+            HwCombOp.binary("or", "lw_instruction", "instruction_with_rd", "lw_funct3", 32),
+            HwCombOp.binary("or", "lw_instruction_with_opcode", "lw_instruction", "lw_opcode", 32)
+        ],
+        compare_ops: [
+            HwCompareOp.equal("is_c_lwsp", "opcode_tag", "c_lwsp_tag", 32),
+            HwCompareOp.equal("rd_is_zero", "rd", "zero_register", 32)
+        ],
+        select_ops: [
+            HwSelectOp.mux("nonzero_instruction", "rd_is_zero", "zero_instruction", "lw_instruction_with_opcode", 32),
+            HwSelectOp.mux("canonical_instruction", "is_c_lwsp", "nonzero_instruction", "zero_instruction", 32)
+        ],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_swsp_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the typed C.SWSP row for one critical product.
+
+    This shared stack-relative row recognizes Q2/funct3=110, rebuilds its
+    unsigned offset and source register, and emits canonical SW with rs1=x2.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 22, register_count: 0, memory_count: 0,
+        comb_op_count: 23, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.swsp"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "immediate"), source_name: "zca.c.swsp"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "register"), source_name: "zca.c.swsp"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.swsp")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_swsp", "Bits", 1), HwSignal.comb("shifted_2", "Bits", 32),
+            HwSignal.comb("rs2", "Bits", 32), HwSignal.comb("shifted_7", "Bits", 32),
+            HwSignal.comb("imm_high2", "Bits", 32), HwSignal.comb("imm_high", "Bits", 32),
+            HwSignal.comb("shifted_9", "Bits", 32), HwSignal.comb("imm_low4", "Bits", 32),
+            HwSignal.comb("imm_low", "Bits", 32), HwSignal.comb("immediate", "Bits", 32),
+            HwSignal.comb("immediate_shifted_5", "Bits", 32), HwSignal.comb("imm_upper_field", "Bits", 32),
+            HwSignal.comb("imm_low_bits", "Bits", 32), HwSignal.comb("imm_low_field", "Bits", 32),
+            HwSignal.comb("rs2_field", "Bits", 32), HwSignal.comb("instruction_partial_1", "Bits", 32),
+            HwSignal.comb("instruction_partial_2", "Bits", 32), HwSignal.comb("instruction_partial_3", "Bits", 32),
+            HwSignal.comb("instruction_with_funct3", "Bits", 32), HwSignal.comb("sw_instruction", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 57347),
+            HwConstant.bits("c_swsp_tag", 32, 49154), HwConstant.bits("right_shift_2", 32, 2),
+            HwConstant.bits("register_mask", 32, 31), HwConstant.bits("right_shift_7", 32, 7),
+            HwConstant.bits("imm_high2_mask", 32, 3), HwConstant.bits("left_shift_6", 32, 6),
+            HwConstant.bits("right_shift_9", 32, 9), HwConstant.bits("imm_low4_mask", 32, 15),
+            HwConstant.bits("left_shift_2", 32, 2), HwConstant.bits("right_shift_5", 32, 5),
+            HwConstant.bits("left_shift_25", 32, 25), HwConstant.bits("imm_low5_mask", 32, 31),
+            HwConstant.bits("left_shift_7", 32, 7), HwConstant.bits("left_shift_20", 32, 20),
+            HwConstant.bits("sp_rs1_field", 32, 65536), HwConstant.bits("sw_funct3", 32, 8192),
+            HwConstant.bits("sw_opcode", 32, 35), HwConstant.bits("zero_instruction", 32, 0)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+            HwCombOp.binary("and", "rs2", "shifted_2", "register_mask", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "imm_high2", "shifted_7", "imm_high2_mask", 32),
+            HwCombOp.binary("shl", "imm_high", "imm_high2", "left_shift_6", 32),
+            HwCombOp.binary("shr", "shifted_9", "parcel16", "right_shift_9", 32),
+            HwCombOp.binary("and", "imm_low4", "shifted_9", "imm_low4_mask", 32),
+            HwCombOp.binary("shl", "imm_low", "imm_low4", "left_shift_2", 32),
+            HwCombOp.binary("or", "immediate", "imm_high", "imm_low", 32),
+            HwCombOp.binary("shr", "immediate_shifted_5", "immediate", "right_shift_5", 32),
+            HwCombOp.binary("shl", "imm_upper_field", "immediate_shifted_5", "left_shift_25", 32),
+            HwCombOp.binary("and", "imm_low_bits", "immediate", "imm_low5_mask", 32),
+            HwCombOp.binary("shl", "imm_low_field", "imm_low_bits", "left_shift_7", 32),
+            HwCombOp.binary("shl", "rs2_field", "rs2", "left_shift_20", 32),
+            HwCombOp.binary("or", "instruction_partial_1", "imm_upper_field", "rs2_field", 32),
+            HwCombOp.binary("or", "instruction_partial_2", "instruction_partial_1", "sp_rs1_field", 32),
+            HwCombOp.binary("or", "instruction_partial_3", "instruction_partial_2", "imm_low_field", 32),
+            HwCombOp.binary("or", "instruction_with_funct3", "instruction_partial_3", "sw_funct3", 32),
+            HwCombOp.binary("or", "sw_instruction", "instruction_with_funct3", "sw_opcode", 32)
+        ],
+        compare_ops: [HwCompareOp.equal("is_c_swsp", "opcode_tag", "c_swsp_tag", 32)],
+        select_ops: [HwSelectOp.mux("canonical_instruction", "is_c_swsp", "sw_instruction", "zero_instruction", 32)],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_cli_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the typed C.LI row graph for one concrete critical product.
+
+    The graph recognizes Q1/funct3=010, reconstructs the six-bit signed
+    immediate, hard-wires rs1=x0, and emits canonical ADDI. Any other parcel
+    produces zero; no host text, XLEN selector, or legacy decoder is present.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 17, register_count: 0, memory_count: 0,
+        comb_op_count: 18, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.li"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "immediate"), source_name: "zca.c.li"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.li"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "select"), source_name: "zca.c.li")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_li", "Bits", 1), HwSignal.comb("shifted_7", "Bits", 32),
+            HwSignal.comb("rd", "Bits", 32), HwSignal.comb("imm_bit5", "Bits", 32),
+            HwSignal.comb("shifted_2", "Bits", 32), HwSignal.comb("imm_low5", "Bits", 32),
+            HwSignal.comb("imm6", "Bits", 32), HwSignal.comb("sign_probe", "Bits", 32),
+            HwSignal.comb("is_negative", "Bits", 1), HwSignal.comb("sign_fill12", "Bits", 32),
+            HwSignal.comb("imm12", "Bits", 32), HwSignal.comb("imm_field", "Bits", 32),
+            HwSignal.comb("rd_field", "Bits", 32), HwSignal.comb("instruction_partial", "Bits", 32),
+            HwSignal.comb("addi_instruction", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 57347),
+            HwConstant.bits("c_li_tag", 32, 16385), HwConstant.bits("right_shift_7", 32, 7),
+            HwConstant.bits("rd_mask", 32, 31), HwConstant.bits("imm_bit5_mask", 32, 32),
+            HwConstant.bits("right_shift_2", 32, 2), HwConstant.bits("imm_low5_mask", 32, 31),
+            HwConstant.bits("sign_mask", 32, 4096), HwConstant.bits("negative_sign_probe", 32, 4096),
+            HwConstant.bits("sign_fill", 32, 4032), HwConstant.bits("zero_instruction", 32, 0),
+            HwConstant.bits("left_shift_20", 32, 20), HwConstant.bits("left_shift_7", 32, 7),
+            HwConstant.bits("addi_opcode", 32, 19)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "rd", "shifted_7", "rd_mask", 32),
+            HwCombOp.binary("and", "imm_bit5", "shifted_7", "imm_bit5_mask", 32),
+            HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+            HwCombOp.binary("and", "imm_low5", "shifted_2", "imm_low5_mask", 32),
+            HwCombOp.binary("or", "imm6", "imm_low5", "imm_bit5", 32),
+            HwCombOp.binary("and", "sign_probe", "parcel16", "sign_mask", 32),
+            HwCombOp.binary("or", "imm12", "imm6", "sign_fill12", 32),
+            HwCombOp.binary("shl", "imm_field", "imm12", "left_shift_20", 32),
+            HwCombOp.binary("shl", "rd_field", "rd", "left_shift_7", 32),
+            HwCombOp.binary("or", "instruction_partial", "imm_field", "rd_field", 32),
+            HwCombOp.binary("or", "addi_instruction", "instruction_partial", "addi_opcode", 32)
+        ],
+        compare_ops: [
+            HwCompareOp.equal("is_c_li", "opcode_tag", "c_li_tag", 32),
+            HwCompareOp.equal("is_negative", "sign_probe", "negative_sign_probe", 32)
+        ],
+        select_ops: [
+            HwSelectOp.mux("sign_fill12", "is_negative", "sign_fill", "zero_instruction", 32),
+            HwSelectOp.mux("canonical_instruction", "is_c_li", "addi_instruction", "zero_instruction", 32)
+        ],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_caddi_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the typed shared C.ADDI/C.NOP row graph for a critical product."""
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 19, register_count: 0, memory_count: 0,
+        comb_op_count: 20, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.nop_addi"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "immediate"), source_name: "zca.c.nop_addi"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.nop_addi"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "select"), source_name: "zca.c.nop_addi")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_addi", "Bits", 1), HwSignal.comb("shifted_7", "Bits", 32),
+            HwSignal.comb("rd", "Bits", 32), HwSignal.comb("imm_bit5", "Bits", 32),
+            HwSignal.comb("shifted_2", "Bits", 32), HwSignal.comb("imm_low5", "Bits", 32),
+            HwSignal.comb("imm6", "Bits", 32), HwSignal.comb("sign_probe", "Bits", 32),
+            HwSignal.comb("is_negative", "Bits", 1), HwSignal.comb("sign_fill12", "Bits", 32),
+            HwSignal.comb("imm12", "Bits", 32), HwSignal.comb("imm_field", "Bits", 32),
+            HwSignal.comb("rs1_field", "Bits", 32), HwSignal.comb("rd_field", "Bits", 32),
+            HwSignal.comb("instruction_partial_1", "Bits", 32), HwSignal.comb("instruction_partial_2", "Bits", 32),
+            HwSignal.comb("addi_instruction", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 57347),
+            HwConstant.bits("c_addi_tag", 32, 1), HwConstant.bits("right_shift_7", 32, 7),
+            HwConstant.bits("rd_mask", 32, 31), HwConstant.bits("imm_bit5_mask", 32, 32),
+            HwConstant.bits("right_shift_2", 32, 2), HwConstant.bits("imm_low5_mask", 32, 31),
+            HwConstant.bits("sign_mask", 32, 4096), HwConstant.bits("negative_sign_probe", 32, 4096),
+            HwConstant.bits("sign_fill", 32, 4032), HwConstant.bits("zero_instruction", 32, 0),
+            HwConstant.bits("left_shift_20", 32, 20), HwConstant.bits("left_shift_15", 32, 15),
+            HwConstant.bits("left_shift_7", 32, 7), HwConstant.bits("addi_opcode", 32, 19)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "rd", "shifted_7", "rd_mask", 32),
+            HwCombOp.binary("and", "imm_bit5", "shifted_7", "imm_bit5_mask", 32),
+            HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+            HwCombOp.binary("and", "imm_low5", "shifted_2", "imm_low5_mask", 32),
+            HwCombOp.binary("or", "imm6", "imm_low5", "imm_bit5", 32),
+            HwCombOp.binary("and", "sign_probe", "parcel16", "sign_mask", 32),
+            HwCombOp.binary("or", "imm12", "imm6", "sign_fill12", 32),
+            HwCombOp.binary("shl", "imm_field", "imm12", "left_shift_20", 32),
+            HwCombOp.binary("shl", "rs1_field", "rd", "left_shift_15", 32),
+            HwCombOp.binary("shl", "rd_field", "rd", "left_shift_7", 32),
+            HwCombOp.binary("or", "instruction_partial_1", "imm_field", "rs1_field", 32),
+            HwCombOp.binary("or", "instruction_partial_2", "instruction_partial_1", "rd_field", 32),
+            HwCombOp.binary("or", "addi_instruction", "instruction_partial_2", "addi_opcode", 32)
+        ],
+        compare_ops: [
+            HwCompareOp.equal("is_c_addi", "opcode_tag", "c_addi_tag", 32),
+            HwCompareOp.equal("is_negative", "sign_probe", "negative_sign_probe", 32)
+        ],
+        select_ops: [
+            HwSelectOp.mux("sign_fill12", "is_negative", "sign_fill", "zero_instruction", 32),
+            HwSelectOp.mux("canonical_instruction", "is_c_addi", "addi_instruction", "zero_instruction", 32)
+        ],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_caddi16sp_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the common C.ADDI16SP row with reserved encodings gated out.
+
+    This is Q1/funct3=011 with `rd=x2`. The nonzero signed stack adjustment is
+    reconstructed from its discontinuous compressed immediate into a 12-bit
+    ADDI immediate. `rd!=x2`, an all-zero immediate, and adjacent C.LUI forms
+    produce zero at this row boundary.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 35, register_count: 0, memory_count: 0,
+        comb_op_count: 36, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.addi16sp"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "immediate"), source_name: "zca.c.addi16sp"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "reserved"), source_name: "zca.c.addi16sp"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.addi16sp")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_addi16sp", "Bits", 1), HwSignal.comb("shifted_7", "Bits", 32),
+            HwSignal.comb("rd", "Bits", 32), HwSignal.comb("shifted_12", "Bits", 32),
+            HwSignal.comb("bit_12", "Bits", 32), HwSignal.comb("imm_9", "Bits", 32),
+            HwSignal.comb("shifted_6", "Bits", 32), HwSignal.comb("bit_6", "Bits", 32),
+            HwSignal.comb("imm_4", "Bits", 32), HwSignal.comb("shifted_5", "Bits", 32),
+            HwSignal.comb("bit_5", "Bits", 32), HwSignal.comb("imm_6", "Bits", 32),
+            HwSignal.comb("shifted_3", "Bits", 32), HwSignal.comb("bits_4_3", "Bits", 32),
+            HwSignal.comb("imm_8_7", "Bits", 32), HwSignal.comb("shifted_2", "Bits", 32),
+            HwSignal.comb("bit_2", "Bits", 32), HwSignal.comb("imm_5", "Bits", 32),
+            HwSignal.comb("imm_partial_1", "Bits", 32), HwSignal.comb("imm_partial_2", "Bits", 32),
+            HwSignal.comb("imm_partial_3", "Bits", 32), HwSignal.comb("imm_raw", "Bits", 32),
+            HwSignal.comb("is_negative", "Bits", 1), HwSignal.comb("sign_fill12", "Bits", 32),
+            HwSignal.comb("imm12", "Bits", 32), HwSignal.comb("imm_field", "Bits", 32),
+            HwSignal.comb("addi_partial_1", "Bits", 32), HwSignal.comb("addi_partial_2", "Bits", 32),
+            HwSignal.comb("addi_instruction", "Bits", 32), HwSignal.comb("rd_is_sp", "Bits", 1),
+            HwSignal.comb("imm_is_zero", "Bits", 1), HwSignal.comb("caddi16sp_if_tag", "Bits", 32),
+            HwSignal.comb("caddi16sp_if_rd", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 57347),
+            HwConstant.bits("c_addi16sp_tag", 32, 24577), HwConstant.bits("right_shift_7", 32, 7),
+            HwConstant.bits("register_mask", 32, 31), HwConstant.bits("sp_register", 32, 2),
+            HwConstant.bits("right_shift_12", 32, 12), HwConstant.bits("right_shift_6", 32, 6),
+            HwConstant.bits("right_shift_5", 32, 5), HwConstant.bits("right_shift_3", 32, 3),
+            HwConstant.bits("right_shift_2", 32, 2), HwConstant.bits("bit_mask", 32, 1),
+            HwConstant.bits("two_bit_mask", 32, 3), HwConstant.bits("left_shift_9", 32, 9),
+            HwConstant.bits("left_shift_8_7", 32, 7), HwConstant.bits("left_shift_6", 32, 6),
+            HwConstant.bits("left_shift_5", 32, 5), HwConstant.bits("left_shift_4", 32, 4),
+            HwConstant.bits("negative_imm_9", 32, 512), HwConstant.bits("sign_fill", 32, 3072),
+            HwConstant.bits("left_shift_20", 32, 20), HwConstant.bits("sp_rs1_field", 32, 65536),
+            HwConstant.bits("sp_rd_field", 32, 128), HwConstant.bits("addi_opcode", 32, 19),
+            HwConstant.bits("zero_instruction", 32, 0)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "rd", "shifted_7", "register_mask", 32),
+            HwCombOp.binary("shr", "shifted_12", "parcel16", "right_shift_12", 32),
+            HwCombOp.binary("and", "bit_12", "shifted_12", "bit_mask", 32),
+            HwCombOp.binary("shl", "imm_9", "bit_12", "left_shift_9", 32),
+            HwCombOp.binary("shr", "shifted_6", "parcel16", "right_shift_6", 32),
+            HwCombOp.binary("and", "bit_6", "shifted_6", "bit_mask", 32),
+            HwCombOp.binary("shl", "imm_4", "bit_6", "left_shift_4", 32),
+            HwCombOp.binary("shr", "shifted_5", "parcel16", "right_shift_5", 32),
+            HwCombOp.binary("and", "bit_5", "shifted_5", "bit_mask", 32),
+            HwCombOp.binary("shl", "imm_6", "bit_5", "left_shift_6", 32),
+            HwCombOp.binary("shr", "shifted_3", "parcel16", "right_shift_3", 32),
+            HwCombOp.binary("and", "bits_4_3", "shifted_3", "two_bit_mask", 32),
+            HwCombOp.binary("shl", "imm_8_7", "bits_4_3", "left_shift_8_7", 32),
+            HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+            HwCombOp.binary("and", "bit_2", "shifted_2", "bit_mask", 32),
+            HwCombOp.binary("shl", "imm_5", "bit_2", "left_shift_5", 32),
+            HwCombOp.binary("or", "imm_partial_1", "imm_9", "imm_8_7", 32),
+            HwCombOp.binary("or", "imm_partial_2", "imm_partial_1", "imm_6", 32),
+            HwCombOp.binary("or", "imm_partial_3", "imm_partial_2", "imm_5", 32),
+            HwCombOp.binary("or", "imm_raw", "imm_partial_3", "imm_4", 32),
+            HwCombOp.binary("or", "imm12", "imm_raw", "sign_fill12", 32),
+            HwCombOp.binary("shl", "imm_field", "imm12", "left_shift_20", 32),
+            HwCombOp.binary("or", "addi_partial_1", "imm_field", "sp_rs1_field", 32),
+            HwCombOp.binary("or", "addi_partial_2", "addi_partial_1", "sp_rd_field", 32),
+            HwCombOp.binary("or", "addi_instruction", "addi_partial_2", "addi_opcode", 32)
+        ],
+        compare_ops: [
+            HwCompareOp.equal("is_c_addi16sp", "opcode_tag", "c_addi16sp_tag", 32),
+            HwCompareOp.equal("rd_is_sp", "rd", "sp_register", 32),
+            HwCompareOp.equal("imm_is_zero", "imm_raw", "zero_instruction", 32),
+            HwCompareOp.equal("is_negative", "imm_9", "negative_imm_9", 32)
+        ],
+        select_ops: [
+            HwSelectOp.mux("sign_fill12", "is_negative", "sign_fill", "zero_instruction", 32),
+            HwSelectOp.mux("caddi16sp_if_tag", "is_c_addi16sp", "addi_instruction", "zero_instruction", 32),
+            HwSelectOp.mux("caddi16sp_if_rd", "rd_is_sp", "caddi16sp_if_tag", "zero_instruction", 32),
+            HwSelectOp.mux("canonical_instruction", "imm_is_zero", "zero_instruction", "caddi16sp_if_rd", 32)
+        ],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_clui_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the common C.LUI row with reserved encodings gated out.
+
+    This is Q1/funct3=011 with a nonzero destination outside x0/x2.  The
+    signed six-bit `nzimm` from parcel[12|6:2] is sign-extended to the LUI
+    twenty-bit immediate field.  C.ADDI16SP, reserved zero-immediate C.LUI,
+    and C.ADDI neighbours all produce zero at this row boundary.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 22, register_count: 0, memory_count: 0,
+        comb_op_count: 22, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.lui"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "immediate"), source_name: "zca.c.lui"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "reserved"), source_name: "zca.c.lui"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.lui")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_lui", "Bits", 1), HwSignal.comb("shifted_7", "Bits", 32),
+            HwSignal.comb("rd", "Bits", 32), HwSignal.comb("imm_bit5", "Bits", 32),
+            HwSignal.comb("shifted_2", "Bits", 32), HwSignal.comb("imm_low5", "Bits", 32),
+            HwSignal.comb("imm6", "Bits", 32), HwSignal.comb("is_negative", "Bits", 1),
+            HwSignal.comb("sign_fill20", "Bits", 32), HwSignal.comb("imm20", "Bits", 32),
+            HwSignal.comb("imm_field", "Bits", 32), HwSignal.comb("rd_field", "Bits", 32),
+            HwSignal.comb("lui_partial", "Bits", 32), HwSignal.comb("lui_instruction", "Bits", 32),
+            HwSignal.comb("rd_is_zero", "Bits", 1), HwSignal.comb("rd_is_sp", "Bits", 1),
+            HwSignal.comb("imm_is_zero", "Bits", 1), HwSignal.comb("clui_if_tag", "Bits", 32),
+            HwSignal.comb("clui_if_rd0", "Bits", 32), HwSignal.comb("clui_if_rdsp", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 57347),
+            HwConstant.bits("c_lui_tag", 32, 24577), HwConstant.bits("right_shift_7", 32, 7),
+            HwConstant.bits("register_mask", 32, 31), HwConstant.bits("imm_bit5_mask", 32, 32),
+            HwConstant.bits("right_shift_2", 32, 2), HwConstant.bits("imm_low5_mask", 32, 31),
+            HwConstant.bits("negative_imm6", 32, 32), HwConstant.bits("sign_fill", 32, 1048512),
+            HwConstant.bits("left_shift_12", 32, 12), HwConstant.bits("left_shift_7", 32, 7),
+            HwConstant.bits("lui_opcode", 32, 55), HwConstant.bits("zero_register", 32, 0),
+            HwConstant.bits("sp_register", 32, 2), HwConstant.bits("zero_instruction", 32, 0)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "rd", "shifted_7", "register_mask", 32),
+            HwCombOp.binary("and", "imm_bit5", "shifted_7", "imm_bit5_mask", 32),
+            HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+            HwCombOp.binary("and", "imm_low5", "shifted_2", "imm_low5_mask", 32),
+            HwCombOp.binary("or", "imm6", "imm_low5", "imm_bit5", 32),
+            HwCombOp.binary("or", "imm20", "imm6", "sign_fill20", 32),
+            HwCombOp.binary("shl", "imm_field", "imm20", "left_shift_12", 32),
+            HwCombOp.binary("shl", "rd_field", "rd", "left_shift_7", 32),
+            HwCombOp.binary("or", "lui_partial", "imm_field", "rd_field", 32),
+            HwCombOp.binary("or", "lui_instruction", "lui_partial", "lui_opcode", 32)
+        ],
+        compare_ops: [
+            HwCompareOp.equal("is_c_lui", "opcode_tag", "c_lui_tag", 32),
+            HwCompareOp.equal("rd_is_zero", "rd", "zero_register", 32),
+            HwCompareOp.equal("rd_is_sp", "rd", "sp_register", 32),
+            HwCompareOp.equal("imm_is_zero", "imm6", "zero_instruction", 32),
+            HwCompareOp.equal("is_negative", "imm_bit5", "negative_imm6", 32)
+        ],
+        select_ops: [
+            HwSelectOp.mux("sign_fill20", "is_negative", "sign_fill", "zero_instruction", 32),
+            HwSelectOp.mux("clui_if_tag", "is_c_lui", "lui_instruction", "zero_instruction", 32),
+            HwSelectOp.mux("clui_if_rd0", "rd_is_zero", "zero_instruction", "clui_if_tag", 32),
+            HwSelectOp.mux("clui_if_rdsp", "rd_is_sp", "zero_instruction", "clui_if_rd0", 32),
+            HwSelectOp.mux("canonical_instruction", "imm_is_zero", "zero_instruction", "clui_if_rdsp", 32)
+        ],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_slli_low_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the typed common C.SLLI row with a five-bit shift amount.
+
+    The classifier includes bit12 in its tag, so RV64-only six-bit shifts are
+    not accepted by this shared RV32/RV64 graph.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 14, register_count: 0, memory_count: 0,
+        comb_op_count: 15, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.slli.low"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.slli.low")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_slli_low", "Bits", 1), HwSignal.comb("shifted_7", "Bits", 32),
+            HwSignal.comb("rd", "Bits", 32), HwSignal.comb("shifted_2", "Bits", 32),
+            HwSignal.comb("shamt", "Bits", 32), HwSignal.comb("shamt_field", "Bits", 32),
+            HwSignal.comb("rs1_field", "Bits", 32), HwSignal.comb("rd_field", "Bits", 32),
+            HwSignal.comb("instruction_partial_1", "Bits", 32), HwSignal.comb("instruction_partial_2", "Bits", 32),
+            HwSignal.comb("slli_instruction_with_funct3", "Bits", 32), HwSignal.comb("slli_instruction", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 61443),
+            HwConstant.bits("c_slli_low_tag", 32, 2), HwConstant.bits("right_shift_7", 32, 7),
+            HwConstant.bits("register_mask", 32, 31), HwConstant.bits("right_shift_2", 32, 2),
+            HwConstant.bits("shamt_mask", 32, 31), HwConstant.bits("left_shift_20", 32, 20),
+            HwConstant.bits("left_shift_15", 32, 15), HwConstant.bits("left_shift_7", 32, 7),
+            HwConstant.bits("slli_funct3", 32, 4096), HwConstant.bits("op_imm_opcode", 32, 19),
+            HwConstant.bits("zero_instruction", 32, 0)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "rd", "shifted_7", "register_mask", 32),
+            HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+            HwCombOp.binary("and", "shamt", "shifted_2", "shamt_mask", 32),
+            HwCombOp.binary("shl", "shamt_field", "shamt", "left_shift_20", 32),
+            HwCombOp.binary("shl", "rs1_field", "rd", "left_shift_15", 32),
+            HwCombOp.binary("shl", "rd_field", "rd", "left_shift_7", 32),
+            HwCombOp.binary("or", "instruction_partial_1", "shamt_field", "rs1_field", 32),
+            HwCombOp.binary("or", "instruction_partial_2", "instruction_partial_1", "rd_field", 32),
+            HwCombOp.binary("or", "slli_instruction_with_funct3", "instruction_partial_2", "slli_funct3", 32),
+            HwCombOp.binary("or", "slli_instruction", "slli_instruction_with_funct3", "op_imm_opcode", 32)
+        ],
+        compare_ops: [HwCompareOp.equal("is_c_slli_low", "opcode_tag", "c_slli_low_tag", 32)],
+        select_ops: [HwSelectOp.mux("canonical_instruction", "is_c_slli_low", "slli_instruction", "zero_instruction", 32)],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_srli_low_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the typed common C.SRLI row with a five-bit shift amount.
+
+    The full tag fixes quadrant, funct3, mode, and bit12.  This graph therefore
+    cannot accept the RV64-only six-bit shift forms or adjacent C.SRAI/C.ANDI
+    encodings.  The compressed register prime is rebuilt as `rd' | 8`, which
+    is equivalent to `rd' + 8` because `rd'` is constrained to three bits.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 15, register_count: 0, memory_count: 0,
+        comb_op_count: 16, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.srli.low"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.srli.low")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_srli_low", "Bits", 1), HwSignal.comb("shifted_7", "Bits", 32),
+            HwSignal.comb("rd_prime_raw", "Bits", 32), HwSignal.comb("rd_prime", "Bits", 32),
+            HwSignal.comb("shifted_2", "Bits", 32), HwSignal.comb("shamt", "Bits", 32),
+            HwSignal.comb("shamt_field", "Bits", 32), HwSignal.comb("rs1_field", "Bits", 32),
+            HwSignal.comb("rd_field", "Bits", 32), HwSignal.comb("instruction_partial_1", "Bits", 32),
+            HwSignal.comb("instruction_partial_2", "Bits", 32), HwSignal.comb("srli_instruction_with_funct3", "Bits", 32),
+            HwSignal.comb("srli_instruction", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 64515),
+            HwConstant.bits("c_srli_low_tag", 32, 32769), HwConstant.bits("right_shift_7", 32, 7),
+            HwConstant.bits("prime_mask", 32, 7), HwConstant.bits("prime_register_base", 32, 8),
+            HwConstant.bits("right_shift_2", 32, 2), HwConstant.bits("shamt_mask", 32, 31),
+            HwConstant.bits("left_shift_20", 32, 20), HwConstant.bits("left_shift_15", 32, 15),
+            HwConstant.bits("left_shift_7", 32, 7), HwConstant.bits("srli_funct3", 32, 20480),
+            HwConstant.bits("op_imm_opcode", 32, 19), HwConstant.bits("zero_instruction", 32, 0)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "rd_prime_raw", "shifted_7", "prime_mask", 32),
+            HwCombOp.binary("or", "rd_prime", "rd_prime_raw", "prime_register_base", 32),
+            HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+            HwCombOp.binary("and", "shamt", "shifted_2", "shamt_mask", 32),
+            HwCombOp.binary("shl", "shamt_field", "shamt", "left_shift_20", 32),
+            HwCombOp.binary("shl", "rs1_field", "rd_prime", "left_shift_15", 32),
+            HwCombOp.binary("shl", "rd_field", "rd_prime", "left_shift_7", 32),
+            HwCombOp.binary("or", "instruction_partial_1", "shamt_field", "rs1_field", 32),
+            HwCombOp.binary("or", "instruction_partial_2", "instruction_partial_1", "rd_field", 32),
+            HwCombOp.binary("or", "srli_instruction_with_funct3", "instruction_partial_2", "srli_funct3", 32),
+            HwCombOp.binary("or", "srli_instruction", "srli_instruction_with_funct3", "op_imm_opcode", 32)
+        ],
+        compare_ops: [HwCompareOp.equal("is_c_srli_low", "opcode_tag", "c_srli_low_tag", 32)],
+        select_ops: [HwSelectOp.mux("canonical_instruction", "is_c_srli_low", "srli_instruction", "zero_instruction", 32)],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_srai_low_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the typed common C.SRAI row with a five-bit shift amount.
+
+    Its tag differs from C.SRLI by the fixed compressed mode bits.  Bit12 is
+    also fixed low, retaining a shared RV32/RV64 five-bit-shift graph and
+    rejecting the unproven RV64-only six-bit variants.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 16, register_count: 0, memory_count: 0,
+        comb_op_count: 17, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.srai.low"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.srai.low")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_srai_low", "Bits", 1), HwSignal.comb("shifted_7", "Bits", 32),
+            HwSignal.comb("rd_prime_raw", "Bits", 32), HwSignal.comb("rd_prime", "Bits", 32),
+            HwSignal.comb("shifted_2", "Bits", 32), HwSignal.comb("shamt", "Bits", 32),
+            HwSignal.comb("shamt_field", "Bits", 32), HwSignal.comb("rs1_field", "Bits", 32),
+            HwSignal.comb("rd_field", "Bits", 32), HwSignal.comb("instruction_partial_1", "Bits", 32),
+            HwSignal.comb("instruction_partial_2", "Bits", 32), HwSignal.comb("srai_instruction_with_funct3", "Bits", 32),
+            HwSignal.comb("srai_instruction_without_high_imm", "Bits", 32), HwSignal.comb("srai_instruction", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 64515),
+            HwConstant.bits("c_srai_low_tag", 32, 33793), HwConstant.bits("right_shift_7", 32, 7),
+            HwConstant.bits("prime_mask", 32, 7), HwConstant.bits("prime_register_base", 32, 8),
+            HwConstant.bits("right_shift_2", 32, 2), HwConstant.bits("shamt_mask", 32, 31),
+            HwConstant.bits("left_shift_20", 32, 20), HwConstant.bits("left_shift_15", 32, 15),
+            HwConstant.bits("left_shift_7", 32, 7), HwConstant.bits("srai_funct3", 32, 20480),
+            HwConstant.bits("op_imm_opcode", 32, 19), HwConstant.bits("srai_high_imm", 32, 1073741824),
+            HwConstant.bits("zero_instruction", 32, 0)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "rd_prime_raw", "shifted_7", "prime_mask", 32),
+            HwCombOp.binary("or", "rd_prime", "rd_prime_raw", "prime_register_base", 32),
+            HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+            HwCombOp.binary("and", "shamt", "shifted_2", "shamt_mask", 32),
+            HwCombOp.binary("shl", "shamt_field", "shamt", "left_shift_20", 32),
+            HwCombOp.binary("shl", "rs1_field", "rd_prime", "left_shift_15", 32),
+            HwCombOp.binary("shl", "rd_field", "rd_prime", "left_shift_7", 32),
+            HwCombOp.binary("or", "instruction_partial_1", "shamt_field", "rs1_field", 32),
+            HwCombOp.binary("or", "instruction_partial_2", "instruction_partial_1", "rd_field", 32),
+            HwCombOp.binary("or", "srai_instruction_with_funct3", "instruction_partial_2", "srai_funct3", 32),
+            HwCombOp.binary("or", "srai_instruction_without_high_imm", "srai_instruction_with_funct3", "op_imm_opcode", 32),
+            HwCombOp.binary("or", "srai_instruction", "srai_instruction_without_high_imm", "srai_high_imm", 32)
+        ],
+        compare_ops: [HwCompareOp.equal("is_c_srai_low", "opcode_tag", "c_srai_low_tag", 32)],
+        select_ops: [HwSelectOp.mux("canonical_instruction", "is_c_srai_low", "srai_instruction", "zero_instruction", 32)],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_candi_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the typed shared C.ANDI row with its signed six-bit immediate.
+
+    Unlike the low-shamt shift rows, bit12 is deliberately absent from the
+    classifier because it is C.ANDI immediate bit5.  The graph sign-extends it
+    into the canonical ANDI immediate while retaining a concrete RV32/RV64
+    elaboration product and no legacy decode path.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 21, register_count: 0, memory_count: 0,
+        comb_op_count: 22, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.andi"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "immediate"), source_name: "zca.c.andi"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.andi")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_andi", "Bits", 1), HwSignal.comb("shifted_7", "Bits", 32),
+            HwSignal.comb("rd_prime_raw", "Bits", 32), HwSignal.comb("rd_prime", "Bits", 32),
+            HwSignal.comb("imm_bit5", "Bits", 32), HwSignal.comb("shifted_2", "Bits", 32),
+            HwSignal.comb("imm_low5", "Bits", 32), HwSignal.comb("imm6", "Bits", 32),
+            HwSignal.comb("sign_probe", "Bits", 32), HwSignal.comb("is_negative", "Bits", 1),
+            HwSignal.comb("sign_fill12", "Bits", 32), HwSignal.comb("imm12", "Bits", 32),
+            HwSignal.comb("imm_field", "Bits", 32), HwSignal.comb("rs1_field", "Bits", 32),
+            HwSignal.comb("rd_field", "Bits", 32), HwSignal.comb("instruction_partial_1", "Bits", 32),
+            HwSignal.comb("instruction_partial_2", "Bits", 32), HwSignal.comb("andi_instruction_with_funct3", "Bits", 32),
+            HwSignal.comb("andi_instruction", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 60419),
+            HwConstant.bits("c_andi_tag", 32, 34817), HwConstant.bits("right_shift_7", 32, 7),
+            HwConstant.bits("prime_mask", 32, 7), HwConstant.bits("prime_register_base", 32, 8),
+            HwConstant.bits("imm_bit5_mask", 32, 32), HwConstant.bits("right_shift_2", 32, 2),
+            HwConstant.bits("imm_low5_mask", 32, 31), HwConstant.bits("sign_mask", 32, 4096),
+            HwConstant.bits("negative_sign_probe", 32, 4096), HwConstant.bits("sign_fill", 32, 4032),
+            HwConstant.bits("zero_instruction", 32, 0), HwConstant.bits("left_shift_20", 32, 20),
+            HwConstant.bits("left_shift_15", 32, 15), HwConstant.bits("left_shift_7", 32, 7),
+            HwConstant.bits("andi_funct3", 32, 28672), HwConstant.bits("op_imm_opcode", 32, 19)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "rd_prime_raw", "shifted_7", "prime_mask", 32),
+            HwCombOp.binary("or", "rd_prime", "rd_prime_raw", "prime_register_base", 32),
+            HwCombOp.binary("and", "imm_bit5", "shifted_7", "imm_bit5_mask", 32),
+            HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+            HwCombOp.binary("and", "imm_low5", "shifted_2", "imm_low5_mask", 32),
+            HwCombOp.binary("or", "imm6", "imm_low5", "imm_bit5", 32),
+            HwCombOp.binary("and", "sign_probe", "parcel16", "sign_mask", 32),
+            HwCombOp.binary("or", "imm12", "imm6", "sign_fill12", 32),
+            HwCombOp.binary("shl", "imm_field", "imm12", "left_shift_20", 32),
+            HwCombOp.binary("shl", "rs1_field", "rd_prime", "left_shift_15", 32),
+            HwCombOp.binary("shl", "rd_field", "rd_prime", "left_shift_7", 32),
+            HwCombOp.binary("or", "instruction_partial_1", "imm_field", "rs1_field", 32),
+            HwCombOp.binary("or", "instruction_partial_2", "instruction_partial_1", "rd_field", 32),
+            HwCombOp.binary("or", "andi_instruction_with_funct3", "instruction_partial_2", "andi_funct3", 32),
+            HwCombOp.binary("or", "andi_instruction", "andi_instruction_with_funct3", "op_imm_opcode", 32)
+        ],
+        compare_ops: [
+            HwCompareOp.equal("is_c_andi", "opcode_tag", "c_andi_tag", 32),
+            HwCompareOp.equal("is_negative", "sign_probe", "negative_sign_probe", 32)
+        ],
+        select_ops: [
+            HwSelectOp.mux("sign_fill12", "is_negative", "sign_fill", "zero_instruction", 32),
+            HwSelectOp.mux("canonical_instruction", "is_c_andi", "andi_instruction", "zero_instruction", 32)
+        ],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+fn strict_zca_compact_r_row_hwir(module_name: text, config: CoreConfig,
+    source_name: text, predicate_name: text, tag: i64, funct3: i64, funct7: i64) -> Result<HwModuleDef, text>:
+    """Build one approved common compact-register R-type row during elaboration.
+
+    This is compiler-host specialization, not hardware dispatch.  Each public
+    wrapper below binds a fixed ISA row and canonical operation before HWIR
+    emission.  The closed source-name set prevents accidental unreviewed rows.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    if source_name != "zca.c.sub" and source_name != "zca.c.xor" and source_name != "zca.c.or" and source_name != "zca.c.and":
+        return Err("HWIR-E-COMPACT-R-ROW: unsupported compact R-type row")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 17, register_count: 0, memory_count: 0,
+        comb_op_count: 18, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: source_name),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: source_name)
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb(predicate_name, "Bits", 1), HwSignal.comb("shifted_7", "Bits", 32),
+            HwSignal.comb("rd_prime_raw", "Bits", 32), HwSignal.comb("rd_prime", "Bits", 32),
+            HwSignal.comb("shifted_2", "Bits", 32), HwSignal.comb("rs2_prime_raw", "Bits", 32),
+            HwSignal.comb("rs2_prime", "Bits", 32), HwSignal.comb("rs2_field", "Bits", 32),
+            HwSignal.comb("rs1_field", "Bits", 32), HwSignal.comb("rd_field", "Bits", 32),
+            HwSignal.comb("instruction_partial_1", "Bits", 32), HwSignal.comb("instruction_partial_2", "Bits", 32),
+            HwSignal.comb("compact_r_instruction_without_funct7", "Bits", 32), HwSignal.comb("compact_r_instruction_with_funct7", "Bits", 32),
+            HwSignal.comb("compact_r_instruction", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 64611),
+            HwConstant.bits("compact_r_tag", 32, tag), HwConstant.bits("right_shift_7", 32, 7),
+            HwConstant.bits("prime_mask", 32, 7), HwConstant.bits("prime_register_base", 32, 8),
+            HwConstant.bits("right_shift_2", 32, 2), HwConstant.bits("left_shift_20", 32, 20),
+            HwConstant.bits("left_shift_15", 32, 15), HwConstant.bits("left_shift_7", 32, 7),
+            HwConstant.bits("compact_r_funct3", 32, funct3), HwConstant.bits("compact_r_funct7", 32, funct7), HwConstant.bits("op_opcode", 32, 51),
+            HwConstant.bits("zero_instruction", 32, 0)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "rd_prime_raw", "shifted_7", "prime_mask", 32),
+            HwCombOp.binary("or", "rd_prime", "rd_prime_raw", "prime_register_base", 32),
+            HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+            HwCombOp.binary("and", "rs2_prime_raw", "shifted_2", "prime_mask", 32),
+            HwCombOp.binary("or", "rs2_prime", "rs2_prime_raw", "prime_register_base", 32),
+            HwCombOp.binary("shl", "rs2_field", "rs2_prime", "left_shift_20", 32),
+            HwCombOp.binary("shl", "rs1_field", "rd_prime", "left_shift_15", 32),
+            HwCombOp.binary("shl", "rd_field", "rd_prime", "left_shift_7", 32),
+            HwCombOp.binary("or", "instruction_partial_1", "rs2_field", "rs1_field", 32),
+            HwCombOp.binary("or", "instruction_partial_2", "instruction_partial_1", "rd_field", 32),
+            HwCombOp.binary("or", "compact_r_instruction_without_funct7", "instruction_partial_2", "compact_r_funct3", 32),
+            HwCombOp.binary("or", "compact_r_instruction_with_funct7", "compact_r_instruction_without_funct7", "compact_r_funct7", 32),
+            HwCombOp.binary("or", "compact_r_instruction", "compact_r_instruction_with_funct7", "op_opcode", 32)
+        ],
+        compare_ops: [HwCompareOp.equal(predicate_name, "opcode_tag", "compact_r_tag", 32)],
+        select_ops: [HwSelectOp.mux("canonical_instruction", predicate_name, "compact_r_instruction", "zero_instruction", 32)],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_csub_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct C.SUB through the closed compact-register R-type elaborator."""
+    strict_zca_compact_r_row_hwir(module_name, config, "zca.c.sub", "is_c_sub", 35841, 0, 1073741824)
+
+pub fn strict_zca_cxor_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct C.XOR through the closed compact-register R-type elaborator."""
+    strict_zca_compact_r_row_hwir(module_name, config, "zca.c.xor", "is_c_xor", 35873, 16384, 0)
+
+pub fn strict_zca_cor_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct C.OR through the closed compact-register R-type elaborator."""
+    strict_zca_compact_r_row_hwir(module_name, config, "zca.c.or", "is_c_or", 35905, 24576, 0)
+
+pub fn strict_zca_cand_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct C.AND through the closed compact-register R-type elaborator."""
+    strict_zca_compact_r_row_hwir(module_name, config, "zca.c.and", "is_c_and", 35937, 28672, 0)
+
+pub fn strict_zca_cjr_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the typed C.JR control-transfer row with reserved-rd rejection."""
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 9, register_count: 0, memory_count: 0,
+        comb_op_count: 10, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.jr"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "reserved"), source_name: "zca.c.jr"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.jr")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_jr", "Bits", 1), HwSignal.comb("shifted_7", "Bits", 32),
+            HwSignal.comb("rs1", "Bits", 32), HwSignal.comb("rs1_field", "Bits", 32),
+            HwSignal.comb("jr_instruction", "Bits", 32), HwSignal.comb("rd_is_zero", "Bits", 1),
+            HwSignal.comb("cjr_if_tag", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 61567),
+            HwConstant.bits("c_jr_tag", 32, 32770), HwConstant.bits("right_shift_7", 32, 7),
+            HwConstant.bits("register_mask", 32, 31), HwConstant.bits("left_shift_15", 32, 15),
+            HwConstant.bits("jalr_opcode", 32, 103), HwConstant.bits("zero_register", 32, 0),
+            HwConstant.bits("zero_instruction", 32, 0)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "rs1", "shifted_7", "register_mask", 32),
+            HwCombOp.binary("shl", "rs1_field", "rs1", "left_shift_15", 32),
+            HwCombOp.binary("or", "jr_instruction", "rs1_field", "jalr_opcode", 32)
+        ],
+        compare_ops: [
+            HwCompareOp.equal("is_c_jr", "opcode_tag", "c_jr_tag", 32),
+            HwCompareOp.equal("rd_is_zero", "rs1", "zero_register", 32)
+        ],
+        select_ops: [
+            HwSelectOp.mux("cjr_if_tag", "is_c_jr", "jr_instruction", "zero_instruction", 32),
+            HwSelectOp.mux("canonical_instruction", "rd_is_zero", "zero_instruction", "cjr_if_tag", 32)
+        ],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_cmv_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct C.MV with architectural-hint normalization and C.JR exclusion.
+
+    C.MV is Q2/funct3=100/bit12=0 with a nonzero rs2 field.  The zero-rd
+    encoding is a hint and canonicalizes to NOP, matching the shared ISA owner;
+    rs2=zero remains outside this row so C.JR/reserved encodings cannot leak in.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 15, register_count: 0, memory_count: 0,
+        comb_op_count: 16, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.mv"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "hint"), source_name: "zca.c.mv"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.mv")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_mv", "Bits", 1), HwSignal.comb("shifted_7", "Bits", 32),
+            HwSignal.comb("rd", "Bits", 32), HwSignal.comb("rd_field", "Bits", 32),
+            HwSignal.comb("shifted_2", "Bits", 32), HwSignal.comb("rs2", "Bits", 32),
+            HwSignal.comb("rs2_field", "Bits", 32), HwSignal.comb("mv_partial", "Bits", 32),
+            HwSignal.comb("mv_instruction", "Bits", 32), HwSignal.comb("rd_is_zero", "Bits", 1),
+            HwSignal.comb("rs2_is_zero", "Bits", 1), HwSignal.comb("cmv_if_tag", "Bits", 32),
+            HwSignal.comb("cmv_if_rd", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 61443),
+            HwConstant.bits("c_mv_tag", 32, 32770), HwConstant.bits("right_shift_7", 32, 7),
+            HwConstant.bits("right_shift_2", 32, 2), HwConstant.bits("register_mask", 32, 31),
+            HwConstant.bits("left_shift_7", 32, 7), HwConstant.bits("left_shift_20", 32, 20),
+            HwConstant.bits("op_opcode", 32, 51), HwConstant.bits("zero_register", 32, 0),
+            HwConstant.bits("nop_instruction", 32, 19), HwConstant.bits("zero_instruction", 32, 0)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "rd", "shifted_7", "register_mask", 32),
+            HwCombOp.binary("shl", "rd_field", "rd", "left_shift_7", 32),
+            HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+            HwCombOp.binary("and", "rs2", "shifted_2", "register_mask", 32),
+            HwCombOp.binary("shl", "rs2_field", "rs2", "left_shift_20", 32),
+            HwCombOp.binary("or", "mv_partial", "rs2_field", "rd_field", 32),
+            HwCombOp.binary("or", "mv_instruction", "mv_partial", "op_opcode", 32)
+        ],
+        compare_ops: [
+            HwCompareOp.equal("is_c_mv", "opcode_tag", "c_mv_tag", 32),
+            HwCompareOp.equal("rd_is_zero", "rd", "zero_register", 32),
+            HwCompareOp.equal("rs2_is_zero", "rs2", "zero_register", 32)
+        ],
+        select_ops: [
+            HwSelectOp.mux("cmv_if_tag", "is_c_mv", "mv_instruction", "zero_instruction", 32),
+            HwSelectOp.mux("cmv_if_rd", "rd_is_zero", "nop_instruction", "cmv_if_tag", 32),
+            HwSelectOp.mux("canonical_instruction", "rs2_is_zero", "zero_instruction", "cmv_if_rd", 32)
+        ],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_cjalr_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct the typed C.JALR control-transfer row with reserved-rd rejection."""
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: 10, register_count: 0, memory_count: 0,
+        comb_op_count: 11, clock_domain_count: 1, fallback_function: "",
+        cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.jalr"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "reserved"), source_name: "zca.c.jalr"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.jalr")
+        ],
+        ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: [
+            HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+            HwSignal.comb("is_c_jalr", "Bits", 1), HwSignal.comb("shifted_7", "Bits", 32),
+            HwSignal.comb("rs1", "Bits", 32), HwSignal.comb("rs1_field", "Bits", 32),
+            HwSignal.comb("jalr_partial", "Bits", 32), HwSignal.comb("jalr_instruction", "Bits", 32), HwSignal.comb("rd_is_zero", "Bits", 1),
+            HwSignal.comb("cjalr_if_tag", "Bits", 32)
+        ],
+        constants: [
+            HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 61567),
+            HwConstant.bits("c_jalr_tag", 32, 36866), HwConstant.bits("right_shift_7", 32, 7),
+            HwConstant.bits("register_mask", 32, 31), HwConstant.bits("left_shift_15", 32, 15),
+            HwConstant.bits("jalr_rd_field", 32, 128), HwConstant.bits("jalr_opcode", 32, 103),
+            HwConstant.bits("zero_register", 32, 0), HwConstant.bits("zero_instruction", 32, 0)
+        ],
+        comb_ops: [
+            HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+            HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+            HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+            HwCombOp.binary("and", "rs1", "shifted_7", "register_mask", 32),
+            HwCombOp.binary("shl", "rs1_field", "rs1", "left_shift_15", 32),
+            HwCombOp.binary("or", "jalr_partial", "rs1_field", "jalr_rd_field", 32),
+            HwCombOp.binary("or", "jalr_instruction", "jalr_partial", "jalr_opcode", 32)
+        ],
+        compare_ops: [
+            HwCompareOp.equal("is_c_jalr", "opcode_tag", "c_jalr_tag", 32),
+            HwCompareOp.equal("rd_is_zero", "rs1", "zero_register", 32)
+        ],
+        select_ops: [
+            HwSelectOp.mux("cjalr_if_tag", "is_c_jalr", "jalr_instruction", "zero_instruction", 32),
+            HwSelectOp.mux("canonical_instruction", "rd_is_zero", "zero_instruction", "cjalr_if_tag", 32)
+        ],
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_cadd_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Construct C.ADD with XLEN-specialized x0-hint canonicalization.
+
+    RV32 canonicalizes C.ADD x0, rs2 to NOP while RV64 retains ADD x0, x0,
+    rs2.  This conditional runs during compiler-host elaboration; no XLEN or
+    provider selection reaches the emitted circuit.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict Zca row requires a module name")
+    val config_error = config.diagnostic()
+    if config_error != "":
+        return Err(config_error)
+    if config.compressed_decode_profile != "zca-common-critical":
+        return Err("HWIR-E-COMPRESSED-PROFILE: strict Zca row requires zca-common-critical profile")
+    var signals: [HwSignal] = [
+        HwSignal.comb("parcel16", "Bits", 32), HwSignal.comb("opcode_tag", "Bits", 32),
+        HwSignal.comb("is_c_add", "Bits", 1), HwSignal.comb("shifted_7", "Bits", 32),
+        HwSignal.comb("rd", "Bits", 32), HwSignal.comb("rd_field", "Bits", 32),
+        HwSignal.comb("rs1_field", "Bits", 32), HwSignal.comb("shifted_2", "Bits", 32),
+        HwSignal.comb("rs2", "Bits", 32), HwSignal.comb("rs2_field", "Bits", 32),
+        HwSignal.comb("add_partial_1", "Bits", 32), HwSignal.comb("add_partial_2", "Bits", 32),
+        HwSignal.comb("add_instruction", "Bits", 32), HwSignal.comb("rs2_is_zero", "Bits", 1),
+        HwSignal.comb("cadd_if_tag", "Bits", 32)
+    ]
+    var constants: [HwConstant] = [
+        HwConstant.bits("low_16_mask", 32, 65535), HwConstant.bits("opcode_tag_mask", 32, 61443),
+        HwConstant.bits("c_add_tag", 32, 36866), HwConstant.bits("right_shift_7", 32, 7),
+        HwConstant.bits("right_shift_2", 32, 2), HwConstant.bits("register_mask", 32, 31),
+        HwConstant.bits("left_shift_20", 32, 20), HwConstant.bits("left_shift_15", 32, 15),
+        HwConstant.bits("left_shift_7", 32, 7), HwConstant.bits("op_opcode", 32, 51),
+        HwConstant.bits("zero_register", 32, 0), HwConstant.bits("zero_instruction", 32, 0)
+    ]
+    val comb_ops: [HwCombOp] = [
+        HwCombOp.binary("and", "parcel16", "parcel", "low_16_mask", 32),
+        HwCombOp.binary("and", "opcode_tag", "parcel16", "opcode_tag_mask", 32),
+        HwCombOp.binary("shr", "shifted_7", "parcel16", "right_shift_7", 32),
+        HwCombOp.binary("and", "rd", "shifted_7", "register_mask", 32),
+        HwCombOp.binary("shl", "rd_field", "rd", "left_shift_7", 32),
+        HwCombOp.binary("shl", "rs1_field", "rd", "left_shift_15", 32),
+        HwCombOp.binary("shr", "shifted_2", "parcel16", "right_shift_2", 32),
+        HwCombOp.binary("and", "rs2", "shifted_2", "register_mask", 32),
+        HwCombOp.binary("shl", "rs2_field", "rs2", "left_shift_20", 32),
+        HwCombOp.binary("or", "add_partial_1", "rs2_field", "rs1_field", 32),
+        HwCombOp.binary("or", "add_partial_2", "add_partial_1", "rd_field", 32),
+        HwCombOp.binary("or", "add_instruction", "add_partial_2", "op_opcode", 32)
+    ]
+    var compare_ops: [HwCompareOp] = [
+        HwCompareOp.equal("is_c_add", "opcode_tag", "c_add_tag", 32),
+        HwCompareOp.equal("rs2_is_zero", "rs2", "zero_register", 32)
+    ]
+    var select_ops: [HwSelectOp] = [
+        HwSelectOp.mux("cadd_if_tag", "is_c_add", "add_instruction", "zero_instruction", 32)
+    ]
+    if config.xlen == 32:
+        signals.push(HwSignal.comb("rd_is_zero", "Bits", 1))
+        signals.push(HwSignal.comb("cadd_if_rd", "Bits", 32))
+        constants.push(HwConstant.bits("nop_instruction", 32, 19))
+        compare_ops.push(HwCompareOp.equal("rd_is_zero", "rd", "zero_register", 32))
+        select_ops.push(HwSelectOp.mux("cadd_if_rd", "rd_is_zero", "nop_instruction", "cadd_if_tag", 32))
+        select_ops.push(HwSelectOp.mux("canonical_instruction", "rs2_is_zero", "zero_instruction", "cadd_if_rd", 32))
+    else:
+        select_ops.push(HwSelectOp.mux("canonical_instruction", "rs2_is_zero", "zero_instruction", "cadd_if_tag", 32))
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: 2, signal_count: signals.len(), register_count: 0, memory_count: 0,
+        comb_op_count: comb_ops.len() + compare_ops.len() + select_ops.len(), clock_domain_count: 1,
+        fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name),
+        origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "classify"), source_name: "zca.c.add"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "xlen_hint"), source_name: "zca.c.add"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "assemble"), source_name: "zca.c.add")
+        ], ports: [HwPort.input("parcel", "Bits", 32), HwPort.output("canonical_instruction", "Bits", 32)],
+        signals: signals, constants: constants, comb_ops: comb_ops, compare_ops: compare_ops,
+        select_ops: select_ops, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)

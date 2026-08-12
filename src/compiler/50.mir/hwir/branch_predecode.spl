@@ -1,0 +1,61 @@
+# Typed conditional-branch predecode interface for strict RISC-V Gen2 HWIR.
+
+use compiler.mir.hwir.types.{CoreConfig, HwNodeId, HwPort}
+use compiler.mir.hwir.predecode.{HwPredecodeInterface, strict_riscv_predecode_interface}
+
+class HwBranchPredecodeInterface:
+    """C.BEQZ/C.BNEZ boundary with an explicit architectural operand.
+
+    Unconditional C.J can redirect from a parcel and PC alone. Conditional
+    compressed branches cannot: their redirect is resolved only with the
+    XLEN-wide value read from the selected register file. This interface keeps
+    that dependency typed and elaboration-specialized instead of treating a
+    dynamic register provider as a decoder-side runtime lookup.
+    """
+    node_id: HwNodeId
+    config: CoreConfig
+    predecode: HwPredecodeInterface
+    rs1_index: HwPort
+    rs1_value: HwPort
+
+    me ports() -> [HwPort]:
+        var ports = self.predecode.ports()
+        ports.push(self.rs1_index)
+        ports.push(self.rs1_value)
+        ports
+
+    me shape_diagnostic() -> text:
+        val predecode_error = self.predecode.shape_diagnostic()
+        if predecode_error != "":
+            return predecode_error
+        if self.config.diagnostic() != "":
+            return self.config.diagnostic()
+        if self.predecode.config.xlen != self.config.xlen or
+            self.predecode.config.physical_address_bits != self.config.physical_address_bits or
+            self.predecode.config.register_count != self.config.register_count or
+            self.predecode.config.profile != self.config.profile or
+            self.predecode.config.isa_profile != self.config.isa_profile or
+            self.predecode.config.compressed_decode_profile != self.config.compressed_decode_profile:
+            return "HWIR-E-BRANCH-PREDECODE-CONFIG: branch and predecode interfaces must use one concrete product configuration"
+        if not self.node_id.is_valid():
+            return "HWIR-E-BRANCH-PREDECODE-ID: branch predecode requires a stable node ID"
+        if self.rs1_index.name != "rs1_index" or self.rs1_index.direction != "in" or
+            self.rs1_index.type_name != "Bits" or self.rs1_index.bit_width != 5:
+            return "HWIR-E-BRANCH-PREDECODE-INDEX: conditional branch requires a five-bit Bits rs1_index input"
+        if self.rs1_value.name != "rs1_value" or self.rs1_value.direction != "in" or
+            self.rs1_value.type_name != "Bits" or self.rs1_value.bit_width != self.config.xlen:
+            return "HWIR-E-BRANCH-PREDECODE-OPERAND: conditional branch requires an XLEN-wide Bits rs1_value input"
+        ""
+
+pub fn strict_riscv_branch_predecode_interface(config: CoreConfig) -> Result<HwBranchPredecodeInterface, text>:
+    """Materialize conditional compressed-branch ports for one concrete core."""
+    val predecode = strict_riscv_predecode_interface(config)?
+    val contract = HwBranchPredecodeInterface(
+        node_id: HwNodeId.module_root("riscv_branch_predecode"), config: config,
+        predecode: predecode, rs1_index: HwPort.input("rs1_index", "Bits", 5),
+        rs1_value: HwPort.input("rs1_value", "Bits", config.xlen)
+    )
+    val diagnostic = contract.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(contract)

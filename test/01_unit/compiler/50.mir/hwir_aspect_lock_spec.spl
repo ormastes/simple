@@ -1,0 +1,65 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.mir_to_hwir.{HwirLowerInput, lower_strict_hwir_and_module}
+use compiler.mir.hwir.aspects.{HwAspectApplication, HwAspectLock, HwAspectLockEntry, HwAspectManifest,
+    HwAspectPlan, HwAspectProbe, hwir_aspect_lock_for_plan,
+    hwir_aspect_plan_lock_diagnostic, weave_hwir_observational_ports_locked}
+
+fn locked_aspect_manifest() -> HwAspectManifest:
+    HwAspectManifest(id: "debug.rvfi", version: "1.0.0",
+        content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        stage: "RTL", advice_kind: "observe", effect_class: "observational",
+        required: true, required_capabilities: [], provided_capabilities: ["debug.rvfi"],
+        conflicts_with: [], join_point_selectors: ["module.port"],
+        added_port_count: 1, added_state_count: 0, latency_contract: "transparent",
+        proof_obligations: ["architectural_noninterference"])
+
+describe "content-addressed Gen2 hardware aspect locks":
+    it "pins exactly the planned manifest identity":
+        var manifest = locked_aspect_manifest()
+        manifest.required = false
+        val plan = HwAspectPlan(manifests: [manifest], applications: [])
+        val lock_result = hwir_aspect_lock_for_plan(plan)
+        expect(lock_result.is_ok()).to_equal(true)
+        if lock_result.is_ok():
+            val lock = lock_result.ok().unwrap()
+            expect(lock.entries.len()).to_equal(1)
+            expect(hwir_aspect_plan_lock_diagnostic(plan, lock)).to_equal("")
+            val changed = HwAspectLock(entries: [HwAspectLockEntry(id: "debug.rvfi",
+                version: "1.0.0",
+                content_hash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")])
+            expect(hwir_aspect_plan_lock_diagnostic(plan, changed)).to_equal("HWIR-E-ASPECT-LOCK: aspect lock does not pin the planned manifest identity")
+        else:
+            expect(false).to_equal(true)
+
+    it "permits weaving only under an exact content-addressed lock":
+        val lowered = lower_strict_hwir_and_module(
+            HwirLowerInput.hardware("locked_aspect_and", 2, 1, 0, 0), CoreConfig.rv32())
+        if lowered.module != nil:
+            val module = lowered.module.unwrap()
+            val manifest = locked_aspect_manifest()
+            val plan = HwAspectPlan(manifests: [manifest], applications: [
+                HwAspectApplication(aspect_id: "debug.rvfi", matched_node_ids: [module.node_id], woven_node_count: 1)
+            ])
+            val lock_result = hwir_aspect_lock_for_plan(plan)
+            if lock_result.is_ok():
+                val result = weave_hwir_observational_ports_locked(module, plan, lock_result.ok().unwrap(), [
+                    HwAspectProbe(aspect_id: "debug.rvfi", target_node_id: module.node_id,
+                        source_value: "in_a", output_port: "rvfi_in_a")
+                ])
+                expect(result.is_ok()).to_equal(true)
+                if result.is_ok():
+                    expect(result.ok().unwrap().added_port_count).to_equal(1)
+                else:
+                    expect(false).to_equal(true)
+            else:
+                expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "fails closed for an incomplete lock before graph mutation":
+        var manifest = locked_aspect_manifest()
+        manifest.required = false
+        val plan = HwAspectPlan(manifests: [manifest], applications: [])
+        val empty_lock = HwAspectLock(entries: [])
+        expect(hwir_aspect_plan_lock_diagnostic(plan, empty_lock)).to_equal("HWIR-E-ASPECT-LOCK: aspect lock must contain exactly the planned manifests")

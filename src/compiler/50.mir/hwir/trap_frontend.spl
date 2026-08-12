@@ -1,0 +1,64 @@
+# Versioned effectful compressed-predecode composition for strict RISC-V Gen2.
+
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwConstant, HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwSelectOp, HwSignal}
+use compiler.mir.hwir.frontend.{HwFrontendRowFragment, strict_frontend_control_row_fragment, strict_zca_migrating_isa_ids, strict_zca_migrating_predecode_hwir}
+use compiler.mir.hwir.trap_predecode.{strict_riscv_trap_predecode_interface, strict_zca_cebreak_trap_predecode_hwir}
+
+pub fn strict_zca_trap_migrating_isa_ids() -> [text]:
+    """The exact declarative Zca subset admitted by the v2 trap frontend."""
+    var ids = strict_zca_migrating_isa_ids()
+    ids.push("zca.c.ebreak")
+    ids
+
+pub fn strict_zca_trap_migrating_predecode_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Compose v1 migrated rows with the explicit v2 C.EBREAK trap effect.
+
+    C.EBREAK has priority only over its own parcel. All other values preserve
+    the v1 migrating decoder's result. The trap outputs are driven solely from
+    the trap row, never inferred from canonical instruction bits.
+    """
+    if module_name == "":
+        return Err("HWIR-E-TRAP-FRONTEND-ID: trap migrating predecode requires a module name")
+    val contract = strict_riscv_trap_predecode_interface(config)?
+    val migrating = strict_zca_migrating_predecode_hwir(module_name + "_v1", config)?
+    val cbreak = strict_zca_cebreak_trap_predecode_hwir(module_name + "_cebreak", config)?
+    val migrating_fragment = strict_frontend_control_row_fragment(module_name, "migrating", migrating)?
+    val cbreak_fragment = strict_frontend_control_row_fragment(module_name, "cebreak", cbreak)?
+    var signals: [HwSignal] = []
+    for signal in migrating_fragment.signals: signals.push(signal)
+    for signal in cbreak_fragment.signals: signals.push(signal)
+    var constants: [HwConstant] = []
+    for constant in migrating_fragment.constants: constants.push(constant)
+    for constant in cbreak_fragment.constants: constants.push(constant)
+    var comb_ops: [HwCombOp] = []
+    for op in migrating_fragment.comb_ops: comb_ops.push(op)
+    for op in cbreak_fragment.comb_ops: comb_ops.push(op)
+    comb_ops.push(HwCombOp.unary("passthrough", "trap_valid", "cebreak_trap_valid", 1))
+    comb_ops.push(HwCombOp.unary("passthrough", "trap_cause", "cebreak_trap_cause", config.xlen))
+    comb_ops.push(HwCombOp.unary("passthrough", "trap_tval", "cebreak_trap_tval", config.xlen))
+    var compare_ops = migrating_fragment.compare_ops
+    for op in cbreak_fragment.compare_ops: compare_ops.push(op)
+    var select_ops = migrating_fragment.select_ops
+    for op in cbreak_fragment.select_ops: select_ops.push(op)
+    val pa = config.physical_address_bits
+    select_ops.push(HwSelectOp.mux("canonical_instruction", "cebreak_legal", "cebreak_canonical_instruction", "migrating_canonical_instruction", 32))
+    select_ops.push(HwSelectOp.mux("original_length_bytes", "cebreak_legal", "cebreak_original_length_bytes", "migrating_original_length_bytes", 2))
+    select_ops.push(HwSelectOp.mux("legal", "cebreak_legal", "cebreak_legal", "migrating_legal", 1))
+    select_ops.push(HwSelectOp.mux("next_pc", "cebreak_legal", "cebreak_next_pc", "migrating_next_pc", pa))
+    select_ops.push(HwSelectOp.mux("redirect_valid", "cebreak_legal", "cebreak_redirect_valid", "migrating_redirect_valid", 1))
+    select_ops.push(HwSelectOp.mux("redirect_target", "cebreak_legal", "cebreak_redirect_target", "migrating_redirect_target", pa))
+    var origins: [HwOrigin] = [HwOrigin(node_id: HwNodeId.child(module_name, "compose"), source_name: "riscv.gen2.trap_migrating_predecode")]
+    for origin in migrating_fragment.origins: origins.push(origin)
+    for origin in cbreak_fragment.origins: origins.push(origin)
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: contract.ports().len(), signal_count: signals.len(), register_count: 0,
+        memory_count: 0, comb_op_count: comb_ops.len() + compare_ops.len() + select_ops.len(),
+        clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: origins, ports: contract.ports(),
+        signals: signals, constants: constants, comb_ops: comb_ops, compare_ops: compare_ops,
+        select_ops: select_ops, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)

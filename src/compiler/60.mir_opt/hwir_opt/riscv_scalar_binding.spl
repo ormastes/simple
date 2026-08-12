@@ -1,0 +1,85 @@
+# RISC-V scalar provider to HWIR resource-binding planning.
+#
+# This is elaboration metadata, not a decoder or an RTL resource instance.
+# It closes the type-safe boundary between the validated declarative ISA view
+# and later target legalization without introducing runtime provider dispatch.
+
+use compiler.mir.hwir.types.{HwResourceBinding}
+use compiler.mir_opt.hwir_opt.resource_binding.{hwir_uncommitted_binding_for_profile}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarProviderSelection}
+
+fn hwir_riscv_scalar_target_profile_valid(profile: text) -> bool:
+    profile == "area" or profile == "balanced" or profile == "speed"
+
+fn hwir_riscv_scalar_multiply_operation(operation: text) -> bool:
+    operation.starts_with("multiply")
+
+fn hwir_riscv_scalar_divide_operation(operation: text) -> bool:
+    operation.starts_with("divide") or operation.starts_with("remainder")
+
+pub class HwirRiscvScalarBindingPlan:
+    """Concrete, profile-specific resource plan for one scalar ISA selection.
+
+    Bindings are named by immutable ISA entry ID, not by generated VHDL signal.
+    A later RTL-HWIR resource pass must consume these identities to attach real
+    instances; this plan itself has no hardware side effect.
+    """
+    isa_profile: text
+    xlen: u32
+    target_profile: text
+    bindings: [HwResourceBinding]
+    multiply_operation_count: i32
+    divide_operation_count: i32
+
+    me diagnostic() -> text:
+        if self.isa_profile == "" or (self.xlen != 32 and self.xlen != 64) or
+            not hwir_riscv_scalar_target_profile_valid(self.target_profile):
+            return "HWIR-E-RISCV-BINDING-PLAN: scalar binding plan requires concrete ISA, XLEN, and target profile"
+        if self.multiply_operation_count < 0 or self.divide_operation_count < 0 or
+            self.bindings.len() != self.multiply_operation_count + self.divide_operation_count:
+            return "HWIR-E-RISCV-BINDING-COUNT: scalar binding plan counts must equal concrete bound operations"
+        var ids: [text] = []
+        for binding in self.bindings:
+            if binding.resource_id == "" or binding.resource_kind == "" or
+                binding.profile != self.target_profile or ids.contains(binding.resource_id) or
+                binding.latency_contract != "uncommitted" or binding.latency_cycles != -1:
+                return "HWIR-E-RISCV-BINDING-IDENTITY: scalar bindings require unique ISA IDs and one target profile"
+            ids.push(binding.resource_id)
+        ""
+
+pub fn hwir_riscv_scalar_binding_plan(selection: RiscvScalarProviderSelection,
+    target_profile: text) -> Result<HwirRiscvScalarBindingPlan, text>:
+    """Freeze one target binding per selected multiply/divide ISA entry.
+
+    Base-I produces a valid empty plan. Zmmul produces multiply bindings only;
+    full M adds divide/remainder bindings. The provider was selected earlier by
+    compiler-host elaboration, so this routine never synthesizes a mux or a
+    run-time service lookup.
+    """
+    val selection_diagnostic = selection.diagnostic()
+    if selection_diagnostic != "": return Err(selection_diagnostic)
+    if not hwir_riscv_scalar_target_profile_valid(target_profile):
+        return Err("HWIR-E-RISCV-BINDING-PROFILE: scalar binding requires area, balanced, or speed target profile")
+    var bindings: [HwResourceBinding] = []
+    var multiply_count = 0
+    var divide_count = 0
+    for entry in selection.entries:
+        if entry.execution_class == "multiply-divide":
+            val provider = selection.provider_for(entry)?
+            val kind = if hwir_riscv_scalar_multiply_operation(entry.semantic_operation):
+                "multiply_" + provider
+            elif hwir_riscv_scalar_divide_operation(entry.semantic_operation):
+                "divide_" + provider
+            else:
+                return Err("HWIR-E-RISCV-BINDING-SEMANTICS: multiply/divide entry has an unsupported semantic operation")
+            bindings.push(hwir_uncommitted_binding_for_profile(entry.id, kind, target_profile))
+            if hwir_riscv_scalar_multiply_operation(entry.semantic_operation):
+                multiply_count = multiply_count + 1
+            else:
+                divide_count = divide_count + 1
+    val plan = HwirRiscvScalarBindingPlan(isa_profile: selection.isa_profile,
+        xlen: selection.xlen, target_profile: target_profile, bindings: bindings,
+        multiply_operation_count: multiply_count, divide_operation_count: divide_count)
+    val diagnostic = plan.diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(plan)

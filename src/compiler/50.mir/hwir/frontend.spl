@@ -1,0 +1,727 @@
+# Mission-critical Gen2 frontend handoff contract.
+#
+# This is a typed elaboration boundary, not a second owner of the legacy
+# protected-core PC or retirement state. A Gen2 frontend implementation must
+# compose compressed rows behind this contract and hand the resulting parcel
+# lineage to its sole dispatch/retirement owner.
+
+use compiler.mir.hwir.types.{CoreConfig, HwNodeId, HwPort}
+use compiler.mir.hwir.branch_predecode.{HwBranchPredecodeInterface, strict_riscv_branch_predecode_interface}
+use compiler.mir.hwir.types.{HwClockDomain, HwCombOp, HwCompareOp, HwConstant, HwCostModel, HwModule, HwModuleDef, HwOrigin, HwSelectOp, HwSignal}
+use compiler.mir.hwir.zca_rows.{strict_zca_cj_predecode_row_hwir, strict_zca_cjal_rv32_predecode_row_hwir, strict_zca_caddiw_rv64_predecode_row_hwir, strict_zca_cbeqz_predecode_row_hwir, strict_zca_cbnez_predecode_row_hwir, strict_zca_cjr_row_hwir, strict_zca_cjalr_row_hwir}
+use compiler.mir.hwir.zca_outcomes.{strict_zca_addi4spn_outcome_hwir, strict_zca_lw_outcome_hwir, strict_zca_sw_outcome_hwir, strict_zca_lwsp_outcome_hwir, strict_zca_swsp_outcome_hwir, strict_zca_cli_outcome_hwir, strict_zca_caddi_outcome_hwir, strict_zca_caddi16sp_outcome_hwir, strict_zca_clui_outcome_hwir, strict_zca_slli_low_outcome_hwir, strict_zca_srli_low_outcome_hwir, strict_zca_srai_low_outcome_hwir, strict_zca_candi_outcome_hwir, strict_zca_csub_outcome_hwir, strict_zca_cxor_outcome_hwir, strict_zca_cor_outcome_hwir, strict_zca_cand_outcome_hwir, strict_zca_cmv_outcome_hwir, strict_zca_cadd_outcome_hwir}
+
+pub fn strict_zca_migrating_isa_ids() -> [text]:
+    """The declarative ISA IDs admitted by the v1 non-trap frontend.
+
+    This list is deliberately separate from the implementation fragment list:
+    unit evidence compares it with the ISA capability database. C.EBREAK is
+    excluded because only the versioned trap frontend owns that architectural
+    effect.
+    """
+    ["zca.c.addi4spn", "zca.c.lw", "zca.c.sw", "zca.c.nop_addi",
+        "zca.c.li", "zca.c.addi16sp", "zca.c.lui", "zca.c.srli",
+        "zca.c.srai", "zca.c.andi", "zca.c.sub", "zca.c.xor",
+        "zca.c.or", "zca.c.and", "zca.c.j", "zca.c.beqz", "zca.c.bnez",
+        "zca.c.slli", "zca.c.lwsp", "zca.c.swsp", "zca.c.jr", "zca.c.mv",
+        "zca.c.jalr", "zca.c.add"]
+
+pub fn strict_zca_rv32_cjal_migrating_isa_ids() -> [text]:
+    """The common migration closure plus the RV32-only C.JAL row."""
+    var ids = strict_zca_migrating_isa_ids()
+    ids.push("zca.c.jal")
+    ids
+
+pub fn strict_zca_rv64_addiw_migrating_isa_ids() -> [text]:
+    """The common migration closure plus the RV64-only C.ADDIW row."""
+    var ids = strict_zca_migrating_isa_ids()
+    ids.push("zca.c.addiw")
+    ids
+
+class HwFrontendHandoffInterface:
+    """Closed contract between the Gen2 compressed frontend and dispatch.
+
+    `branch_predecode` retains the fetched parcel, canonical instruction,
+    instruction length, legality, and concrete-PA redirect information. The
+    explicit `dispatch_accept`/`retire_valid` pair prevents a wrapper from
+    silently treating row-level predecode as architectural retirement. This
+    contract does not itself compose rows or implement a PC state machine.
+    """
+    node_id: HwNodeId
+    config: CoreConfig
+    branch_predecode: HwBranchPredecodeInterface
+    dispatch_accept: HwPort
+    retire_valid: HwPort
+
+    me ports() -> [HwPort]:
+        var ports = self.branch_predecode.ports()
+        ports.push(self.dispatch_accept)
+        ports.push(self.retire_valid)
+        ports
+
+    me shape_diagnostic() -> text:
+        val branch_error = self.branch_predecode.shape_diagnostic()
+        if branch_error != "":
+            return branch_error
+        val config_error = self.config.diagnostic()
+        if config_error != "":
+            return config_error
+        if self.branch_predecode.config.xlen != self.config.xlen or
+            self.branch_predecode.config.physical_address_bits != self.config.physical_address_bits or
+            self.branch_predecode.config.register_count != self.config.register_count or
+            self.branch_predecode.config.profile != self.config.profile or
+            self.branch_predecode.config.isa_profile != self.config.isa_profile or
+            self.branch_predecode.config.compressed_decode_profile != self.config.compressed_decode_profile:
+            return "HWIR-E-FRONTEND-CONFIG: frontend and branch-predecode interfaces must use one concrete product configuration"
+        if not self.node_id.is_valid():
+            return "HWIR-E-FRONTEND-ID: frontend handoff requires a stable node ID"
+        if self.dispatch_accept.name != "dispatch_accept" or self.dispatch_accept.direction != "in" or
+            self.dispatch_accept.type_name != "Bits" or self.dispatch_accept.bit_width != 1:
+            return "HWIR-E-FRONTEND-DISPATCH: frontend handoff requires a one-bit Bits dispatch_accept input"
+        if self.retire_valid.name != "retire_valid" or self.retire_valid.direction != "out" or
+            self.retire_valid.type_name != "Bits" or self.retire_valid.bit_width != 1:
+            return "HWIR-E-FRONTEND-RETIRE: frontend handoff requires a one-bit Bits retire_valid output"
+        var names: [text] = []
+        for port in self.ports():
+            if names.contains(port.name):
+                return "HWIR-E-FRONTEND-DUPLICATE-PORT: frontend handoff port names must be unique"
+            names.push(port.name)
+        ""
+
+pub fn strict_riscv_frontend_handoff_interface(config: CoreConfig) -> Result<HwFrontendHandoffInterface, text>:
+    """Materialize the fixed Gen2 frontend-to-dispatch boundary for one product.
+
+    The caller must still provide an emitted composition with a single PC and
+    retirement owner; this constructor only creates the fail-closed interface
+    that such a composition is required to implement.
+    """
+    val branch_predecode = strict_riscv_branch_predecode_interface(config)?
+    val contract = HwFrontendHandoffInterface(
+        node_id: HwNodeId.module_root("riscv_gen2_frontend_handoff"),
+        config: config,
+        branch_predecode: branch_predecode,
+        dispatch_accept: HwPort.input("dispatch_accept", "Bits", 1),
+        retire_valid: HwPort.output("retire_valid", "Bits", 1)
+    )
+    val diagnostic = contract.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(contract)
+
+class HwFrontendRowFragment:
+    """One alpha-renamed control-row graph embedded in a frontend module."""
+    signals: [HwSignal]
+    constants: [HwConstant]
+    comb_ops: [HwCombOp]
+    compare_ops: [HwCompareOp]
+    select_ops: [HwSelectOp]
+    origins: [HwOrigin]
+
+fn frontend_data_name(prefix: text, parcel_value: text, name: text) -> text:
+    if name == "":
+        return ""
+    if name == "parcel":
+        return parcel_value
+    prefix + "_" + name
+
+pub fn strict_frontend_data_row_fragment(module_name: text, prefix: text,
+    row: HwModuleDef, parcel_value: text) -> Result<HwFrontendRowFragment, text>:
+    """Embed a normal Zca row behind an explicitly named parcel value.
+
+    Normal rows are not silently treated as predecode outcomes: callers must
+    separately derive and validate their `match_legal` predicate.  This helper
+    only preserves the original typed semantic graph under alpha-renamed
+    values, avoiding a second textual implementation of instruction assembly.
+    """
+    var signals: [HwSignal] = []
+    for port in row.ports:
+        if port.direction == "in":
+            if port.name != "parcel":
+                return Err("HWIR-E-FRONTEND-ROW-INPUT: normal row has an unsupported frontend input")
+        elif port.direction == "out":
+            signals.push(HwSignal.comb(prefix + "_" + port.name, "Bits", port.bit_width))
+        else:
+            return Err("HWIR-E-FRONTEND-ROW-PORT: normal row has an unsupported port direction")
+    for signal in row.signals:
+        signals.push(HwSignal.comb(prefix + "_" + signal.name, signal.type_name, signal.bit_width))
+    var constants: [HwConstant] = []
+    for constant in row.constants:
+        constants.push(HwConstant.bits(prefix + "_" + constant.name, constant.bit_width, constant.value))
+    var comb_ops: [HwCombOp] = []
+    for op in row.comb_ops:
+        comb_ops.push(HwCombOp(op: op.op, result: frontend_data_name(prefix, parcel_value, op.result), lhs: frontend_data_name(prefix, parcel_value, op.lhs), rhs: frontend_data_name(prefix, parcel_value, op.rhs), bit_width: op.bit_width))
+    var compare_ops: [HwCompareOp] = []
+    for op in row.compare_ops:
+        compare_ops.push(HwCompareOp.equal(frontend_data_name(prefix, parcel_value, op.result), frontend_data_name(prefix, parcel_value, op.lhs), frontend_data_name(prefix, parcel_value, op.rhs), op.bit_width))
+    var select_ops: [HwSelectOp] = []
+    for op in row.select_ops:
+        select_ops.push(HwSelectOp.mux(frontend_data_name(prefix, parcel_value, op.result), frontend_data_name(prefix, parcel_value, op.condition), frontend_data_name(prefix, parcel_value, op.when_true), frontend_data_name(prefix, parcel_value, op.when_false), op.bit_width))
+    var origins: [HwOrigin] = []
+    var index = 0
+    for origin in row.origins:
+        origins.push(HwOrigin(node_id: HwNodeId.child(module_name, prefix + "_origin_" + index.to_text()), source_name: origin.source_name))
+        index = index + 1
+    Ok(HwFrontendRowFragment(signals: signals, constants: constants, comb_ops: comb_ops,
+        compare_ops: compare_ops, select_ops: select_ops, origins: origins))
+
+fn frontend_control_input(name: text) -> bool:
+    name == "original_parcel" or name == "fetch_pc" or name == "rs1_index" or name == "rs1_value"
+
+fn frontend_control_name(prefix: text, name: text) -> text:
+    if name == "":
+        return ""
+    if frontend_control_input(name):
+        return name
+    prefix + "_" + name
+
+pub fn strict_frontend_control_row_fragment(module_name: text, prefix: text,
+    row: HwModuleDef) -> Result<HwFrontendRowFragment, text>:
+    """Embed a proved control row without sharing any internal node names."""
+    var signals: [HwSignal] = []
+    for port in row.ports:
+        if port.direction == "in":
+            if not frontend_control_input(port.name):
+                return Err("HWIR-E-FRONTEND-ROW-INPUT: control row has an unsupported frontend input")
+        elif port.direction == "out":
+            signals.push(HwSignal.comb(frontend_control_name(prefix, port.name), "Bits", port.bit_width))
+        else:
+            return Err("HWIR-E-FRONTEND-ROW-PORT: control row has an unsupported port direction")
+    for signal in row.signals:
+        signals.push(HwSignal.comb(frontend_control_name(prefix, signal.name), signal.type_name, signal.bit_width))
+    var constants: [HwConstant] = []
+    for constant in row.constants:
+        constants.push(HwConstant.bits(frontend_control_name(prefix, constant.name), constant.bit_width, constant.value))
+    var comb_ops: [HwCombOp] = []
+    for op in row.comb_ops:
+        comb_ops.push(HwCombOp(
+            op: op.op,
+            result: frontend_control_name(prefix, op.result),
+            lhs: frontend_control_name(prefix, op.lhs),
+            rhs: frontend_control_name(prefix, op.rhs),
+            bit_width: op.bit_width
+        ))
+    var compare_ops: [HwCompareOp] = []
+    for op in row.compare_ops:
+        compare_ops.push(HwCompareOp.equal(
+            frontend_control_name(prefix, op.result),
+            frontend_control_name(prefix, op.lhs),
+            frontend_control_name(prefix, op.rhs), op.bit_width))
+    var select_ops: [HwSelectOp] = []
+    for op in row.select_ops:
+        select_ops.push(HwSelectOp.mux(
+            frontend_control_name(prefix, op.result),
+            frontend_control_name(prefix, op.condition),
+            frontend_control_name(prefix, op.when_true),
+            frontend_control_name(prefix, op.when_false), op.bit_width))
+    var origins: [HwOrigin] = []
+    var origin_index = 0
+    for origin in row.origins:
+        origins.push(HwOrigin(
+            node_id: HwNodeId.child(module_name, prefix + "_origin_" + origin_index.to_text()),
+            source_name: origin.source_name
+        ))
+        origin_index = origin_index + 1
+    Ok(HwFrontendRowFragment(
+        signals: signals, constants: constants, comb_ops: comb_ops,
+        compare_ops: compare_ops, select_ops: select_ops, origins: origins
+    ))
+
+fn frontend_predecode_input(name: text) -> bool:
+    name == "original_parcel" or name == "fetch_pc"
+
+fn frontend_predecode_name(prefix: text, name: text) -> text:
+    if name == "":
+        return ""
+    if frontend_predecode_input(name):
+        return name
+    prefix + "_" + name
+
+fn strict_frontend_predecode_row_fragment(module_name: text, prefix: text,
+    row: HwModuleDef) -> Result<HwFrontendRowFragment, text>:
+    """Embed a normalized outcome under the common predecode inputs.
+
+    This accepts only the frozen `{original_parcel, fetch_pc}` input contract;
+    any unmodeled effect/read input fails before a decoder can be composed.
+    """
+    var signals: [HwSignal] = []
+    for port in row.ports:
+        if port.direction == "in":
+            if not frontend_predecode_input(port.name):
+                return Err("HWIR-E-FRONTEND-ROW-INPUT: normalized outcome has an unsupported frontend input")
+        elif port.direction == "out":
+            signals.push(HwSignal.comb(frontend_predecode_name(prefix, port.name), "Bits", port.bit_width))
+        else:
+            return Err("HWIR-E-FRONTEND-ROW-PORT: normalized outcome has an unsupported port direction")
+    for signal in row.signals:
+        signals.push(HwSignal.comb(frontend_predecode_name(prefix, signal.name), signal.type_name, signal.bit_width))
+    var constants: [HwConstant] = []
+    for constant in row.constants:
+        constants.push(HwConstant.bits(frontend_predecode_name(prefix, constant.name), constant.bit_width, constant.value))
+    var comb_ops: [HwCombOp] = []
+    for op in row.comb_ops:
+        comb_ops.push(HwCombOp(op: op.op,
+            result: frontend_predecode_name(prefix, op.result),
+            lhs: frontend_predecode_name(prefix, op.lhs),
+            rhs: frontend_predecode_name(prefix, op.rhs), bit_width: op.bit_width))
+    var compare_ops: [HwCompareOp] = []
+    for op in row.compare_ops:
+        compare_ops.push(HwCompareOp.equal(frontend_predecode_name(prefix, op.result),
+            frontend_predecode_name(prefix, op.lhs), frontend_predecode_name(prefix, op.rhs), op.bit_width))
+    var select_ops: [HwSelectOp] = []
+    for op in row.select_ops:
+        select_ops.push(HwSelectOp.mux(frontend_predecode_name(prefix, op.result),
+            frontend_predecode_name(prefix, op.condition), frontend_predecode_name(prefix, op.when_true),
+            frontend_predecode_name(prefix, op.when_false), op.bit_width))
+    var origins: [HwOrigin] = []
+    var origin_index = 0
+    for origin in row.origins:
+        origins.push(HwOrigin(node_id: HwNodeId.child(module_name, prefix + "_origin_" + origin_index.to_text()), source_name: origin.source_name))
+        origin_index = origin_index + 1
+    Ok(HwFrontendRowFragment(signals: signals, constants: constants, comb_ops: comb_ops,
+        compare_ops: compare_ops, select_ops: select_ops, origins: origins))
+
+pub fn strict_zca_control_predecode_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Emit the closed C.J/C.BEQZ/C.BNEZ control-predecode composition.
+
+    The caller supplies one already length-predecoded 16-bit parcel and a
+    concrete architectural branch read. This is deliberately not a full Zca
+    frontend: unsupported parcels are illegal with a two-byte fallthrough;
+    C.JR/C.JALR, trapping, parcel buffering, dispatch, and retirement remain
+    outside this stateless control slice.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict control predecode requires a module name")
+    if config.diagnostic() != "":
+        return Err(config.diagnostic())
+    val contract = strict_riscv_branch_predecode_interface(config)?
+    val cj = strict_zca_cj_predecode_row_hwir(module_name + "_cj", config)?
+    val cbeqz = strict_zca_cbeqz_predecode_row_hwir(module_name + "_cbeqz", config)?
+    val cbnez = strict_zca_cbnez_predecode_row_hwir(module_name + "_cbnez", config)?
+    val cj_fragment = strict_frontend_control_row_fragment(module_name, "cj", cj)?
+    val cbeqz_fragment = strict_frontend_control_row_fragment(module_name, "cbeqz", cbeqz)?
+    val cbnez_fragment = strict_frontend_control_row_fragment(module_name, "cbnez", cbnez)?
+    val address_bits = config.physical_address_bits
+
+    var signals: [HwSignal] = []
+    for signal in cj_fragment.signals: signals.push(signal)
+    for signal in cbeqz_fragment.signals: signals.push(signal)
+    for signal in cbnez_fragment.signals: signals.push(signal)
+    signals.push(HwSignal.comb("fallback_next_pc", "Bits", address_bits))
+    signals.push(HwSignal.comb("branch_legal", "Bits", 1))
+    signals.push(HwSignal.comb("canonical_after_cbnez", "Bits", 32))
+    signals.push(HwSignal.comb("canonical_after_cbeqz", "Bits", 32))
+    signals.push(HwSignal.comb("next_after_cbnez", "Bits", address_bits))
+    signals.push(HwSignal.comb("next_after_cbeqz", "Bits", address_bits))
+    signals.push(HwSignal.comb("redirect_after_branches", "Bits", 1))
+    signals.push(HwSignal.comb("target_after_cbnez", "Bits", address_bits))
+    signals.push(HwSignal.comb("target_after_cbeqz", "Bits", address_bits))
+
+    var constants: [HwConstant] = []
+    for constant in cj_fragment.constants: constants.push(constant)
+    for constant in cbeqz_fragment.constants: constants.push(constant)
+    for constant in cbnez_fragment.constants: constants.push(constant)
+    constants.push(HwConstant.bits("frontend_zero_instruction", 32, 0))
+    constants.push(HwConstant.bits("frontend_two_length", 2, 2))
+    constants.push(HwConstant.bits("frontend_two_bytes", address_bits, 2))
+
+    var comb_ops: [HwCombOp] = []
+    for op in cj_fragment.comb_ops: comb_ops.push(op)
+    for op in cbeqz_fragment.comb_ops: comb_ops.push(op)
+    for op in cbnez_fragment.comb_ops: comb_ops.push(op)
+    comb_ops.push(HwCombOp.binary("add", "fallback_next_pc", "fetch_pc", "frontend_two_bytes", address_bits))
+    comb_ops.push(HwCombOp.unary("passthrough", "original_length_bytes", "frontend_two_length", 2))
+    comb_ops.push(HwCombOp.binary("or", "branch_legal", "cbeqz_legal", "cbnez_legal", 1))
+    comb_ops.push(HwCombOp.binary("or", "legal", "cj_legal", "branch_legal", 1))
+    comb_ops.push(HwCombOp.binary("or", "redirect_after_branches", "cbeqz_redirect_valid", "cbnez_redirect_valid", 1))
+    comb_ops.push(HwCombOp.binary("or", "redirect_valid", "cj_redirect_valid", "redirect_after_branches", 1))
+
+    var compare_ops: [HwCompareOp] = []
+    for op in cj_fragment.compare_ops: compare_ops.push(op)
+    for op in cbeqz_fragment.compare_ops: compare_ops.push(op)
+    for op in cbnez_fragment.compare_ops: compare_ops.push(op)
+
+    var select_ops: [HwSelectOp] = []
+    for op in cj_fragment.select_ops: select_ops.push(op)
+    for op in cbeqz_fragment.select_ops: select_ops.push(op)
+    for op in cbnez_fragment.select_ops: select_ops.push(op)
+    select_ops.push(HwSelectOp.mux("canonical_after_cbnez", "cbnez_legal", "cbnez_canonical_instruction", "frontend_zero_instruction", 32))
+    select_ops.push(HwSelectOp.mux("canonical_after_cbeqz", "cbeqz_legal", "cbeqz_canonical_instruction", "canonical_after_cbnez", 32))
+    select_ops.push(HwSelectOp.mux("canonical_instruction", "cj_legal", "cj_canonical_instruction", "canonical_after_cbeqz", 32))
+    select_ops.push(HwSelectOp.mux("next_after_cbnez", "cbnez_legal", "cbnez_next_pc", "fallback_next_pc", address_bits))
+    select_ops.push(HwSelectOp.mux("next_after_cbeqz", "cbeqz_legal", "cbeqz_next_pc", "next_after_cbnez", address_bits))
+    select_ops.push(HwSelectOp.mux("next_pc", "cj_legal", "cj_next_pc", "next_after_cbeqz", address_bits))
+    select_ops.push(HwSelectOp.mux("target_after_cbnez", "cbnez_legal", "cbnez_redirect_target", "fetch_pc", address_bits))
+    select_ops.push(HwSelectOp.mux("target_after_cbeqz", "cbeqz_legal", "cbeqz_redirect_target", "target_after_cbnez", address_bits))
+    select_ops.push(HwSelectOp.mux("redirect_target", "cj_legal", "cj_redirect_target", "target_after_cbeqz", address_bits))
+
+    var origins: [HwOrigin] = [HwOrigin(
+        node_id: HwNodeId.child(module_name, "compose"), source_name: "riscv.gen2.control_predecode"
+    )]
+    for origin in cj_fragment.origins: origins.push(origin)
+    for origin in cbeqz_fragment.origins: origins.push(origin)
+    for origin in cbnez_fragment.origins: origins.push(origin)
+    val summary = HwModule(
+        name: module_name, profile: config.profile,
+        port_count: contract.ports().len(), signal_count: signals.len(), register_count: 0,
+        memory_count: 0, comb_op_count: comb_ops.len() + compare_ops.len() + select_ops.len(),
+        clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty()
+    )
+    val module = HwModuleDef(
+        summary: summary, config: config, node_id: HwNodeId.module_root(module_name),
+        origins: origins, ports: contract.ports(), signals: signals, constants: constants,
+        comb_ops: comb_ops, compare_ops: compare_ops, select_ops: select_ops,
+        clock_domains: [HwClockDomain.default_domain()]
+    )
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+fn strict_zca_indirect_predecode_row_hwir(module_name: text, config: CoreConfig,
+    prefix: text, source_name: text, row: HwModuleDef, classifier_name: text) -> Result<HwModuleDef, text>:
+    """Wrap a canonical C.JR/C.JALR row with a bound architectural redirect.
+
+    The canonical row determines encoding legality, while this wrapper binds its
+    decoded rs1 field to the sole typed register-read pair. The redirected PC
+    is the concrete PA-width low portion of the XLEN read value with bit zero
+    cleared, matching JALR's alignment rule. No decoder-side register lookup or
+    runtime XLEN selection is introduced.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict indirect predecode requires a module name")
+    val contract = strict_riscv_branch_predecode_interface(config)?
+    val fragment = strict_frontend_data_row_fragment(module_name, prefix, row, "parcel32")?
+    val pa = config.physical_address_bits
+    var signals: [HwSignal] = [HwSignal.comb("parcel32", "Bits", 32),
+        HwSignal.comb("fallthrough_pc", "Bits", pa),
+        HwSignal.comb("decoded_rs1_index", "Bits", 5),
+        HwSignal.comb("rs1_value_pa", "Bits", pa),
+        HwSignal.comb("target_shifted", "Bits", pa),
+        HwSignal.comb("raw_redirect_target", "Bits", pa),
+        HwSignal.comb("row_nonreserved", "Bits", 1),
+        HwSignal.comb("binding_with_index", "Bits", 1),
+        HwSignal.comb("binding_valid", "Bits", 1),
+        HwSignal.comb("rs1_index_matches", "Bits", 1)]
+    for signal in fragment.signals: signals.push(signal)
+    var constants: [HwConstant] = [HwConstant.bits("two_bytes", pa, 2),
+        HwConstant.bits("two_length", 2, 2), HwConstant.bits("zero_flag", 1, 0),
+        HwConstant.bits("one_flag", 1, 1), HwConstant.bits("one_shift", pa, 1)]
+    for constant in fragment.constants: constants.push(constant)
+    var comb_ops: [HwCombOp] = [HwCombOp.unary("zext", "parcel32", "original_parcel", 32),
+        HwCombOp.binary("add", "fallthrough_pc", "fetch_pc", "two_bytes", pa),
+        HwCombOp.unary("trunc", "decoded_rs1_index", prefix + "_rs1", 5),
+        HwCombOp.binary("shr", "target_shifted", "rs1_value_pa", "one_shift", pa),
+        HwCombOp.binary("shl", "raw_redirect_target", "target_shifted", "one_shift", pa),
+        HwCombOp.binary("and", "binding_with_index", prefix + "_" + classifier_name, "rs1_index_matches", 1),
+        HwCombOp.binary("and", "binding_valid", "binding_with_index", "row_nonreserved", 1),
+        HwCombOp.unary("passthrough", "canonical_instruction", prefix + "_canonical_instruction", 32),
+        HwCombOp.unary("passthrough", "original_length_bytes", "two_length", 2),
+        HwCombOp.unary("passthrough", "legal", "binding_valid", 1),
+        HwCombOp.unary("passthrough", "redirect_valid", "binding_valid", 1)]
+    if config.xlen == pa:
+        comb_ops.push(HwCombOp.unary("passthrough", "rs1_value_pa", "rs1_value", pa))
+    else:
+        comb_ops.push(HwCombOp.unary("trunc", "rs1_value_pa", "rs1_value", pa))
+    for op in fragment.comb_ops: comb_ops.push(op)
+    var compare_ops = fragment.compare_ops
+    compare_ops.push(HwCompareOp.equal("rs1_index_matches", "rs1_index", "decoded_rs1_index", 5))
+    var select_ops = fragment.select_ops
+    select_ops.push(HwSelectOp.mux("row_nonreserved", prefix + "_rd_is_zero", "zero_flag", "one_flag", 1))
+    select_ops.push(HwSelectOp.mux("redirect_target", "binding_valid", "raw_redirect_target", "fetch_pc", pa))
+    select_ops.push(HwSelectOp.mux("next_pc", "binding_valid", "raw_redirect_target", "fallthrough_pc", pa))
+    var origins: [HwOrigin] = [HwOrigin(node_id: HwNodeId.child(module_name, "indirect_redirect"), source_name: source_name + ".predecode")]
+    for origin in fragment.origins: origins.push(origin)
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: contract.ports().len(), signal_count: signals.len(), register_count: 0,
+        memory_count: 0, comb_op_count: comb_ops.len() + compare_ops.len() + select_ops.len(),
+        clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: origins,
+        ports: contract.ports(), signals: signals, constants: constants,
+        comb_ops: comb_ops, compare_ops: compare_ops, select_ops: select_ops,
+        clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_cjr_predecode_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    strict_zca_indirect_predecode_row_hwir(module_name, config, "cjr", "zca.c.jr",
+        strict_zca_cjr_row_hwir(module_name + "_row", config)?, "is_c_jr")
+
+pub fn strict_zca_cjalr_predecode_row_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    strict_zca_indirect_predecode_row_hwir(module_name, config, "cjalr", "zca.c.jalr",
+        strict_zca_cjalr_row_hwir(module_name + "_row", config)?, "is_c_jalr")
+
+pub fn strict_zca_migrating_predecode_hwir(module_name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Compose the proven, non-effectful Zca migration set into one decoder.
+
+    This intentionally remains a *migrating* subset. C.EBREAK requires a trap
+    contract that this stateless interface does
+    not yet provide, so their parcels fall through as explicit illegal output.
+    Each admitted row supplies its own `legal` result; the priority mux never
+    treats a canonical instruction word as a match predicate.
+    """
+    if module_name == "":
+        return Err("HWIR-E-MODULE-ID: strict migrating predecode requires a module name")
+    if config.diagnostic() != "":
+        return Err(config.diagnostic())
+    val contract = strict_riscv_branch_predecode_interface(config)?
+    val control = strict_zca_control_predecode_hwir(module_name + "_control", config)?
+    val cjr = strict_zca_cjr_predecode_row_hwir(module_name + "_cjr", config)?
+    val cjalr = strict_zca_cjalr_predecode_row_hwir(module_name + "_cjalr", config)?
+    val addi4spn = strict_zca_addi4spn_outcome_hwir(module_name + "_addi4spn", config)?
+    val lw = strict_zca_lw_outcome_hwir(module_name + "_lw", config)?
+    val sw = strict_zca_sw_outcome_hwir(module_name + "_sw", config)?
+    val lwsp = strict_zca_lwsp_outcome_hwir(module_name + "_lwsp", config)?
+    val swsp = strict_zca_swsp_outcome_hwir(module_name + "_swsp", config)?
+    val cli = strict_zca_cli_outcome_hwir(module_name + "_cli", config)?
+    val caddi = strict_zca_caddi_outcome_hwir(module_name + "_caddi", config)?
+    val caddi16sp = strict_zca_caddi16sp_outcome_hwir(module_name + "_caddi16sp", config)?
+    val clui = strict_zca_clui_outcome_hwir(module_name + "_clui", config)?
+    val slli = strict_zca_slli_low_outcome_hwir(module_name + "_slli", config)?
+    val srli = strict_zca_srli_low_outcome_hwir(module_name + "_srli", config)?
+    val srai = strict_zca_srai_low_outcome_hwir(module_name + "_srai", config)?
+    val candi = strict_zca_candi_outcome_hwir(module_name + "_candi", config)?
+    val csub = strict_zca_csub_outcome_hwir(module_name + "_csub", config)?
+    val cxor = strict_zca_cxor_outcome_hwir(module_name + "_cxor", config)?
+    val cor = strict_zca_cor_outcome_hwir(module_name + "_cor", config)?
+    val cand = strict_zca_cand_outcome_hwir(module_name + "_cand", config)?
+    val cmv = strict_zca_cmv_outcome_hwir(module_name + "_cmv", config)?
+    val cadd = strict_zca_cadd_outcome_hwir(module_name + "_cadd", config)?
+    val control_fragment = strict_frontend_control_row_fragment(module_name, "control", control)?
+    val cjr_fragment = strict_frontend_control_row_fragment(module_name, "cjr", cjr)?
+    val cjalr_fragment = strict_frontend_control_row_fragment(module_name, "cjalr", cjalr)?
+    val addi4spn_fragment = strict_frontend_predecode_row_fragment(module_name, "addi4spn", addi4spn)?
+    val lw_fragment = strict_frontend_predecode_row_fragment(module_name, "lw", lw)?
+    val sw_fragment = strict_frontend_predecode_row_fragment(module_name, "sw", sw)?
+    val lwsp_fragment = strict_frontend_predecode_row_fragment(module_name, "lwsp", lwsp)?
+    val swsp_fragment = strict_frontend_predecode_row_fragment(module_name, "swsp", swsp)?
+    val cli_fragment = strict_frontend_predecode_row_fragment(module_name, "cli", cli)?
+    val caddi_fragment = strict_frontend_predecode_row_fragment(module_name, "caddi", caddi)?
+    val caddi16sp_fragment = strict_frontend_predecode_row_fragment(module_name, "caddi16sp", caddi16sp)?
+    val clui_fragment = strict_frontend_predecode_row_fragment(module_name, "clui", clui)?
+    val slli_fragment = strict_frontend_predecode_row_fragment(module_name, "slli", slli)?
+    val srli_fragment = strict_frontend_predecode_row_fragment(module_name, "srli", srli)?
+    val srai_fragment = strict_frontend_predecode_row_fragment(module_name, "srai", srai)?
+    val candi_fragment = strict_frontend_predecode_row_fragment(module_name, "candi", candi)?
+    val csub_fragment = strict_frontend_predecode_row_fragment(module_name, "csub", csub)?
+    val cxor_fragment = strict_frontend_predecode_row_fragment(module_name, "cxor", cxor)?
+    val cor_fragment = strict_frontend_predecode_row_fragment(module_name, "cor", cor)?
+    val cand_fragment = strict_frontend_predecode_row_fragment(module_name, "cand", cand)?
+    val cmv_fragment = strict_frontend_predecode_row_fragment(module_name, "cmv", cmv)?
+    val cadd_fragment = strict_frontend_predecode_row_fragment(module_name, "cadd", cadd)?
+    val fragments = [control_fragment, cjr_fragment, cjalr_fragment, addi4spn_fragment, lw_fragment, sw_fragment,
+        lwsp_fragment, swsp_fragment, cli_fragment, caddi_fragment, caddi16sp_fragment, clui_fragment,
+        slli_fragment, srli_fragment, srai_fragment, candi_fragment, csub_fragment,
+        cxor_fragment, cor_fragment, cand_fragment, cmv_fragment, cadd_fragment]
+    val prefixes = ["control", "cjr", "cjalr", "addi4spn", "lw", "sw", "lwsp", "swsp", "cli",
+        "caddi", "caddi16sp", "clui", "slli", "srli", "srai", "candi", "csub", "cxor",
+        "cor", "cand", "cmv", "cadd"]
+    val pa = config.physical_address_bits
+    var signals: [HwSignal] = [HwSignal.comb("fallback_next_pc", "Bits", pa)]
+    var constants: [HwConstant] = [HwConstant.bits("migrating_zero_instruction", 32, 0),
+        HwConstant.bits("migrating_zero_flag", 1, 0), HwConstant.bits("migrating_one_flag", 1, 1), HwConstant.bits("migrating_two_length", 2, 2),
+        HwConstant.bits("migrating_two_bytes", pa, 2)]
+    var comb_ops: [HwCombOp] = [HwCombOp.binary("add", "fallback_next_pc", "fetch_pc", "migrating_two_bytes", pa),
+        HwCombOp.unary("passthrough", "original_length_bytes", "migrating_two_length", 2)]
+    var compare_ops: [HwCompareOp] = []
+    var select_ops: [HwSelectOp] = []
+    var origins: [HwOrigin] = [HwOrigin(node_id: HwNodeId.child(module_name, "compose"), source_name: "riscv.gen2.migrating_predecode")]
+    for fragment in fragments:
+        for signal in fragment.signals: signals.push(signal)
+        for constant in fragment.constants: constants.push(constant)
+        for op in fragment.comb_ops: comb_ops.push(op)
+        for op in fragment.compare_ops: compare_ops.push(op)
+        for op in fragment.select_ops: select_ops.push(op)
+        for origin in fragment.origins: origins.push(origin)
+    var canonical_prior = "migrating_zero_instruction"
+    var legal_prior = "migrating_zero_flag"
+    var next_prior = "fallback_next_pc"
+    var redirect_valid_prior = "migrating_zero_flag"
+    var redirect_target_prior = "fetch_pc"
+    var index = fragments.len()
+    while index > 0:
+        index = index - 1
+        val prefix = prefixes[index]
+        val canonical_result = "migrating_canonical_after_" + index.to_text()
+        val legal_result = "migrating_legal_after_" + index.to_text()
+        val next_result = "migrating_next_after_" + index.to_text()
+        val redirect_valid_result = "migrating_redirect_valid_after_" + index.to_text()
+        val redirect_target_result = "migrating_redirect_target_after_" + index.to_text()
+        signals.push(HwSignal.comb(canonical_result, "Bits", 32))
+        signals.push(HwSignal.comb(legal_result, "Bits", 1))
+        signals.push(HwSignal.comb(next_result, "Bits", pa))
+        signals.push(HwSignal.comb(redirect_valid_result, "Bits", 1))
+        signals.push(HwSignal.comb(redirect_target_result, "Bits", pa))
+        select_ops.push(HwSelectOp.mux(canonical_result, prefix + "_legal", prefix + "_canonical_instruction", canonical_prior, 32))
+        select_ops.push(HwSelectOp.mux(legal_result, prefix + "_legal", prefix + "_legal", legal_prior, 1))
+        select_ops.push(HwSelectOp.mux(next_result, prefix + "_legal", prefix + "_next_pc", next_prior, pa))
+        select_ops.push(HwSelectOp.mux(redirect_valid_result, prefix + "_legal", prefix + "_redirect_valid", redirect_valid_prior, 1))
+        select_ops.push(HwSelectOp.mux(redirect_target_result, prefix + "_legal", prefix + "_redirect_target", redirect_target_prior, pa))
+        canonical_prior = canonical_result
+        legal_prior = legal_result
+        next_prior = next_result
+        redirect_valid_prior = redirect_valid_result
+        redirect_target_prior = redirect_target_result
+    # Priority documents a preferred row only. It never authorizes ambiguous
+    # decoding: an accidental future classifier overlap is made illegal at the
+    # same combinational boundary, with no redirect or selected canonical word.
+    var seen_prior = "migrating_zero_flag"
+    var overlap_prior = "migrating_zero_flag"
+    var overlap_index = 0
+    while overlap_index < prefixes.len():
+        val prefix = prefixes[overlap_index]
+        val overlap_here = "migrating_overlap_here_" + overlap_index.to_text()
+        val seen_result = "migrating_seen_after_" + overlap_index.to_text()
+        val overlap_result = "migrating_overlap_after_" + overlap_index.to_text()
+        signals.push(HwSignal.comb(overlap_here, "Bits", 1))
+        signals.push(HwSignal.comb(seen_result, "Bits", 1))
+        signals.push(HwSignal.comb(overlap_result, "Bits", 1))
+        comb_ops.push(HwCombOp.binary("and", overlap_here, seen_prior, prefix + "_legal", 1))
+        comb_ops.push(HwCombOp.binary("or", seen_result, seen_prior, prefix + "_legal", 1))
+        comb_ops.push(HwCombOp.binary("or", overlap_result, overlap_prior, overlap_here, 1))
+        seen_prior = seen_result
+        overlap_prior = overlap_result
+        overlap_index = overlap_index + 1
+    signals.push(HwSignal.comb("migrating_no_overlap", "Bits", 1))
+    signals.push(HwSignal.comb("migrating_unique_legal", "Bits", 1))
+    select_ops.push(HwSelectOp.mux("migrating_no_overlap", overlap_prior,
+        "migrating_zero_flag", "migrating_one_flag", 1))
+    comb_ops.push(HwCombOp.binary("and", "migrating_unique_legal", legal_prior,
+        "migrating_no_overlap", 1))
+    select_ops.push(HwSelectOp.mux("canonical_instruction", "migrating_no_overlap",
+        canonical_prior, "migrating_zero_instruction", 32))
+    comb_ops.push(HwCombOp.unary("passthrough", "legal", "migrating_unique_legal", 1))
+    select_ops.push(HwSelectOp.mux("next_pc", "migrating_no_overlap", next_prior,
+        "fallback_next_pc", pa))
+    select_ops.push(HwSelectOp.mux("redirect_valid", "migrating_no_overlap",
+        redirect_valid_prior, "migrating_zero_flag", 1))
+    select_ops.push(HwSelectOp.mux("redirect_target", "migrating_no_overlap",
+        redirect_target_prior, "fetch_pc", pa))
+    origins.push(HwOrigin(node_id: HwNodeId.child(module_name, "overlap_guard"),
+        source_name: "riscv.gen2.migrating_predecode.overlap_guard"))
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: contract.ports().len(), signal_count: signals.len(), register_count: 0,
+        memory_count: 0, comb_op_count: comb_ops.len() + compare_ops.len() + select_ops.len(),
+        clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: origins, ports: contract.ports(),
+        signals: signals, constants: constants, comb_ops: comb_ops, compare_ops: compare_ops,
+        select_ops: select_ops, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_rv32_cjal_migrating_predecode_hwir(module_name: text,
+    config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Extend the common migrating decoder with the RV32-only C.JAL parcel.
+
+    This is a separate concrete product.  It never adds a runtime XLEN test:
+    construction rejects every configuration except the frozen RV32 C.JAL
+    profile, and C.JAL is a disjoint parcel class from the common rows.
+    """
+    if module_name == "":
+        return Err("HWIR-E-ZCA-CJAL-FRONTEND-ID: RV32 C.JAL frontend requires a module name")
+    if config.xlen != 32 or config.profile != "riscv-gen2-rv32-zca-cjal-critical" or
+        config.isa_profile != "rv32i_zca":
+        return Err("HWIR-E-ZCA-CJAL-FRONTEND-PROFILE: RV32 C.JAL frontend requires its concrete product profile")
+    val contract = strict_riscv_branch_predecode_interface(config)?
+    val common = strict_zca_migrating_predecode_hwir(module_name + "_common", config)?
+    val cjal = strict_zca_cjal_rv32_predecode_row_hwir(module_name + "_cjal", config)?
+    val common_fragment = strict_frontend_control_row_fragment(module_name, "common", common)?
+    val cjal_fragment = strict_frontend_control_row_fragment(module_name, "cjal", cjal)?
+    var signals = common_fragment.signals
+    for signal in cjal_fragment.signals: signals.push(signal)
+    var constants = common_fragment.constants
+    for constant in cjal_fragment.constants: constants.push(constant)
+    var comb_ops = common_fragment.comb_ops
+    for op in cjal_fragment.comb_ops: comb_ops.push(op)
+    var compare_ops = common_fragment.compare_ops
+    for op in cjal_fragment.compare_ops: compare_ops.push(op)
+    var select_ops = common_fragment.select_ops
+    for op in cjal_fragment.select_ops: select_ops.push(op)
+    val pa = config.physical_address_bits
+    select_ops.push(HwSelectOp.mux("canonical_instruction", "cjal_legal",
+        "cjal_canonical_instruction", "common_canonical_instruction", 32))
+    select_ops.push(HwSelectOp.mux("original_length_bytes", "cjal_legal",
+        "cjal_original_length_bytes", "common_original_length_bytes", 2))
+    select_ops.push(HwSelectOp.mux("legal", "cjal_legal", "cjal_legal", "common_legal", 1))
+    select_ops.push(HwSelectOp.mux("next_pc", "cjal_legal", "cjal_next_pc", "common_next_pc", pa))
+    select_ops.push(HwSelectOp.mux("redirect_valid", "cjal_legal",
+        "cjal_redirect_valid", "common_redirect_valid", 1))
+    select_ops.push(HwSelectOp.mux("redirect_target", "cjal_legal",
+        "cjal_redirect_target", "common_redirect_target", pa))
+    var origins = [HwOrigin(node_id: HwNodeId.child(module_name, "compose"),
+        source_name: "riscv.gen2.rv32_cjal_migrating_predecode")]
+    for origin in common_fragment.origins: origins.push(origin)
+    for origin in cjal_fragment.origins: origins.push(origin)
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: contract.ports().len(), signal_count: signals.len(), register_count: 0,
+        memory_count: 0, comb_op_count: comb_ops.len() + compare_ops.len() + select_ops.len(),
+        clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: origins, ports: contract.ports(),
+        signals: signals, constants: constants, comb_ops: comb_ops, compare_ops: compare_ops,
+        select_ops: select_ops, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
+
+pub fn strict_zca_rv64_addiw_migrating_predecode_hwir(module_name: text,
+    config: CoreConfig) -> Result<HwModuleDef, text>:
+    """Extend the common migrating decoder with RV64-only C.ADDIW.
+
+    The Q1/funct3=001 parcel class is deliberately frozen behind its own
+    concrete RV64 product. No emitted node selects XLEN at run time, and the
+    dedicated C.ADDIW legality gate remains the only authority for this row.
+    """
+    if module_name == "":
+        return Err("HWIR-E-ZCA-ADDIW-FRONTEND-ID: RV64 C.ADDIW frontend requires a module name")
+    if config.xlen != 64 or config.profile != "riscv-gen2-rv64-zca-addiw-critical" or
+        config.isa_profile != "rv64i_zca":
+        return Err("HWIR-E-ZCA-ADDIW-FRONTEND-PROFILE: RV64 C.ADDIW frontend requires its concrete product profile")
+    val contract = strict_riscv_branch_predecode_interface(config)?
+    val common = strict_zca_migrating_predecode_hwir(module_name + "_common", config)?
+    val caddiw = strict_zca_caddiw_rv64_predecode_row_hwir(module_name + "_caddiw", config)?
+    val common_fragment = strict_frontend_control_row_fragment(module_name, "common", common)?
+    val caddiw_fragment = strict_frontend_control_row_fragment(module_name, "caddiw", caddiw)?
+    var signals = common_fragment.signals
+    for signal in caddiw_fragment.signals: signals.push(signal)
+    var constants = common_fragment.constants
+    for constant in caddiw_fragment.constants: constants.push(constant)
+    var comb_ops = common_fragment.comb_ops
+    for op in caddiw_fragment.comb_ops: comb_ops.push(op)
+    var compare_ops = common_fragment.compare_ops
+    for op in caddiw_fragment.compare_ops: compare_ops.push(op)
+    var select_ops = common_fragment.select_ops
+    for op in caddiw_fragment.select_ops: select_ops.push(op)
+    val pa = config.physical_address_bits
+    select_ops.push(HwSelectOp.mux("canonical_instruction", "caddiw_legal",
+        "caddiw_canonical_instruction", "common_canonical_instruction", 32))
+    select_ops.push(HwSelectOp.mux("original_length_bytes", "caddiw_legal",
+        "caddiw_original_length_bytes", "common_original_length_bytes", 2))
+    select_ops.push(HwSelectOp.mux("legal", "caddiw_legal", "caddiw_legal", "common_legal", 1))
+    select_ops.push(HwSelectOp.mux("next_pc", "caddiw_legal", "caddiw_next_pc", "common_next_pc", pa))
+    select_ops.push(HwSelectOp.mux("redirect_valid", "caddiw_legal",
+        "caddiw_redirect_valid", "common_redirect_valid", 1))
+    select_ops.push(HwSelectOp.mux("redirect_target", "caddiw_legal",
+        "caddiw_redirect_target", "common_redirect_target", pa))
+    var origins = [HwOrigin(node_id: HwNodeId.child(module_name, "compose"),
+        source_name: "riscv.gen2.rv64_addiw_migrating_predecode")]
+    for origin in common_fragment.origins: origins.push(origin)
+    for origin in caddiw_fragment.origins: origins.push(origin)
+    val summary = HwModule(name: module_name, profile: config.profile,
+        port_count: contract.ports().len(), signal_count: signals.len(), register_count: 0,
+        memory_count: 0, comb_op_count: comb_ops.len() + compare_ops.len() + select_ops.len(),
+        clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(module_name), origins: origins, ports: contract.ports(),
+        signals: signals, constants: constants, comb_ops: comb_ops, compare_ops: compare_ops,
+        select_ops: select_ops, clock_domains: [HwClockDomain.default_domain()])
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    Ok(module)
