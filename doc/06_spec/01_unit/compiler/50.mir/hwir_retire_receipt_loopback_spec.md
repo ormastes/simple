@@ -19,10 +19,14 @@ and generated RTL evidence exist.
    configurations.
 2. Accept one `(lineage, parcel, canonical instruction, length)` dispatch
    tuple and require the exact tuple on the following cycle only.
-3. Assert synchronous reset while a tuple is pending, then require no stale
-   receipt after reset and only a post-reset tuple to retire.
-4. Reject removal of the verification-only safety bit and out-of-range typed
-   dispatch fields.
+3. Assert synchronous reset while a tuple is pending and while another dispatch
+   is offered. Require reset to discard both identities and zero every invalid
+   receipt field.
+4. Offer a competing dispatch during the pending cycle; require backpressure,
+   retirement of only the earlier tuple, and a fully zeroed subsequent idle
+   observation.
+5. Reject malformed CoreConfig, producer-contract, one-entry scope, one-bit
+   input, tuple-width, and stale-empty-slot state before any cycle advances.
 
 The test traces REQ-G2-010 and NFR-G2-006/NFR-G2-011. It is elaboration and
 host-model evidence only; self-hosted/GHDL qualification of a real producer

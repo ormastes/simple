@@ -9,7 +9,7 @@ architectural retirement emitter or certificate.
 
 use std.spec.*
 use compiler.mir.hwir.types.{CoreConfig}
-use compiler.mir.hwir.retire_receipt_loopback.{HwRetireReceiptLoopbackInput, advance_strict_riscv_retire_receipt_loopback, strict_riscv_retire_receipt_loopback_initial_state, strict_riscv_retire_receipt_loopback_plan}
+use compiler.mir.hwir.retire_receipt_loopback.{HwRetireReceiptLoopbackInput, HwRetireReceiptLoopbackState, advance_strict_riscv_retire_receipt_loopback, strict_riscv_retire_receipt_loopback_initial_state, strict_riscv_retire_receipt_loopback_plan}
 
 fn dispatch(lineage: i64, parcel: i64, canonical: i64, length: i64) -> HwRetireReceiptLoopbackInput:
     HwRetireReceiptLoopbackInput(rst: 0, dispatch_valid: 1, dispatch_lineage: lineage,
@@ -65,6 +65,118 @@ describe "RISC-V Gen2 verification-only retirement receipt loopback":
         expect(new_retired.retire_lineage).to_equal(8)
         expect(new_retired.retire_original_parcel).to_equal(0x9002)
         expect(new_retired.retire_canonical_instruction).to_equal(0x001000ef)
+
+    # @req REQ-G2-010 NFR-G2-006 NFR-G2-011
+    it "should discard a simultaneous dispatch on reset and erase every invalid receipt field":
+        step("Assert reset with a valid dispatch while a distinct receipt is pending")
+        val plan = strict_riscv_retire_receipt_loopback_plan(
+            CoreConfig.rv64_zca_addiw_mission_critical()).unwrap()
+        val initial = strict_riscv_retire_receipt_loopback_initial_state(plan).unwrap()
+        val pending = advance_strict_riscv_retire_receipt_loopback(plan, initial,
+            dispatch(41, 0x8082, 0x00008067, 2)).unwrap()
+        val reset_with_dispatch = HwRetireReceiptLoopbackInput(rst: 1, dispatch_valid: 1,
+            dispatch_lineage: 42, dispatch_original_parcel: 0x9002,
+            dispatch_canonical_instruction: 0x001000ef, dispatch_original_length_bytes: 2)
+        val reset = advance_strict_riscv_retire_receipt_loopback(plan, pending.next_state,
+            reset_with_dispatch).unwrap()
+        expect(reset.dispatch_accept).to_equal(0)
+        expect(reset.retire_valid).to_equal(0)
+        expect(reset.retire_lineage).to_equal(0)
+        expect(reset.retire_original_parcel).to_equal(0)
+        expect(reset.retire_canonical_instruction).to_equal(0)
+        expect(reset.retire_original_length_bytes).to_equal(0)
+        expect(reset.next_state.pending).to_equal(0)
+        expect(reset.next_state.lineage).to_equal(0)
+        val idle = advance_strict_riscv_retire_receipt_loopback(plan, reset.next_state,
+            HwRetireReceiptLoopbackInput.idle()).unwrap()
+        expect(idle.retire_valid).to_equal(0)
+        expect(idle.retire_lineage).to_equal(0)
+        expect(idle.retire_original_parcel).to_equal(0)
+        expect(idle.retire_canonical_instruction).to_equal(0)
+        expect(idle.retire_original_length_bytes).to_equal(0)
+
+    # @req REQ-G2-010 NFR-G2-011
+    it "should stall a competing dispatch while returning the pending receipt exactly once":
+        step("Attempt a second dispatch in the pending receipt cycle")
+        val plan = strict_riscv_retire_receipt_loopback_plan(
+            CoreConfig.rv32_zca_cjal_mission_critical()).unwrap()
+        val initial = strict_riscv_retire_receipt_loopback_initial_state(plan).unwrap()
+        val first = advance_strict_riscv_retire_receipt_loopback(plan, initial,
+            dispatch(51, 0x9002, 0x001000ef, 2)).unwrap()
+        val competing = advance_strict_riscv_retire_receipt_loopback(plan, first.next_state,
+            dispatch(52, 0x8082, 0x00008067, 2)).unwrap()
+        expect(competing.dispatch_accept).to_equal(0)
+        expect(competing.retire_valid).to_equal(1)
+        expect(competing.retire_lineage).to_equal(51)
+        expect(competing.retire_original_parcel).to_equal(0x9002)
+        expect(competing.retire_canonical_instruction).to_equal(0x001000ef)
+        expect(competing.next_state.pending).to_equal(0)
+        val no_competing_receipt = advance_strict_riscv_retire_receipt_loopback(plan,
+            competing.next_state, HwRetireReceiptLoopbackInput.idle()).unwrap()
+        expect(no_competing_receipt.dispatch_accept).to_equal(0)
+        expect(no_competing_receipt.retire_valid).to_equal(0)
+        expect(no_competing_receipt.retire_lineage).to_equal(0)
+        expect(no_competing_receipt.retire_original_parcel).to_equal(0)
+        expect(no_competing_receipt.retire_canonical_instruction).to_equal(0)
+        expect(no_competing_receipt.retire_original_length_bytes).to_equal(0)
+
+    # @req REQ-G2-010 NFR-G2-006 NFR-G2-011
+    it "should reject malformed plan configurations and producer contracts before any cycle advances":
+        step("Corrupt each closed plan boundary and require its typed diagnostic")
+        val invalid_config = strict_riscv_retire_receipt_loopback_plan(
+            CoreConfig.rv32_zca_cjal_mission_critical()).unwrap()
+        invalid_config.config.xlen = 16
+        val invalid_config_result = strict_riscv_retire_receipt_loopback_initial_state(invalid_config)
+        expect(invalid_config_result.is_ok()).to_equal(false)
+        expect(invalid_config_result.err()).to_equal(
+            "HWIR-E-CONFIG-XLEN: strict RISC-V HWIR requires XLEN=32 or XLEN=64")
+        val mismatched_config = strict_riscv_retire_receipt_loopback_plan(
+            CoreConfig.rv32_zca_cjal_mission_critical()).unwrap()
+        mismatched_config.producer.config = CoreConfig.rv64_zca_addiw_mission_critical()
+        expect(mismatched_config.shape_diagnostic()).to_equal(
+            "HWIR-E-RETIRE-LOOPBACK-CONFIG: verification loopback and producer require one concrete product configuration")
+        val malformed_producer = strict_riscv_retire_receipt_loopback_plan(
+            CoreConfig.rv64_zca_addiw_mission_critical()).unwrap()
+        malformed_producer.producer.retire_valid.bit_width = 2
+        val malformed_producer_result = strict_riscv_retire_receipt_loopback_initial_state(malformed_producer)
+        expect(malformed_producer_result.is_ok()).to_equal(false)
+        expect(malformed_producer_result.err()).to_equal(
+            "HWIR-E-RETIRE-PRODUCER-RECEIPT-WIDTH: retirement producer must publish the exact receipt identity tuple")
+        val unsafe_scope = strict_riscv_retire_receipt_loopback_plan(
+            CoreConfig.rv64_zca_addiw_mission_critical()).unwrap()
+        unsafe_scope.maximum_inflight = 2
+        expect(unsafe_scope.shape_diagnostic()).to_equal(
+            "HWIR-E-RETIRE-LOOPBACK-SCOPE: loopback is a closed one-entry one-cycle verification-only plan")
+
+    # @req REQ-G2-010 NFR-G2-006 NFR-G2-011
+    it "should reject malformed synchronous inputs and stale empty-slot state":
+        step("Fail closed before accepting invalid one-bit, tuple-width, or empty-slot values")
+        val plan = strict_riscv_retire_receipt_loopback_plan(
+            CoreConfig.rv32_zca_cjal_mission_critical()).unwrap()
+        val initial = strict_riscv_retire_receipt_loopback_initial_state(plan).unwrap()
+        val invalid_valid = HwRetireReceiptLoopbackInput(rst: 0, dispatch_valid: 2,
+            dispatch_lineage: 0, dispatch_original_parcel: 0, dispatch_canonical_instruction: 0,
+            dispatch_original_length_bytes: 0)
+        val invalid_valid_result = advance_strict_riscv_retire_receipt_loopback(plan, initial,
+            invalid_valid)
+        expect(invalid_valid_result.is_ok()).to_equal(false)
+        expect(invalid_valid_result.err()).to_equal(
+            "HWIR-E-RETIRE-LOOPBACK-INPUT: reset and dispatch valid must be one-bit values")
+        val oversized_tuple = HwRetireReceiptLoopbackInput(rst: 0, dispatch_valid: 1,
+            dispatch_lineage: 0, dispatch_original_parcel: 65536,
+            dispatch_canonical_instruction: 4294967296, dispatch_original_length_bytes: 4)
+        val oversized_tuple_result = advance_strict_riscv_retire_receipt_loopback(plan, initial,
+            oversized_tuple)
+        expect(oversized_tuple_result.is_ok()).to_equal(false)
+        expect(oversized_tuple_result.err()).to_equal(
+            "HWIR-E-RETIRE-LOOPBACK-INPUT: dispatch fields must fit the typed identity tuple")
+        val stale_empty_slot = HwRetireReceiptLoopbackState(pending: 0, lineage: 1,
+            original_parcel: 0, canonical_instruction: 0, original_length_bytes: 0)
+        val stale_empty_slot_result = advance_strict_riscv_retire_receipt_loopback(plan,
+            stale_empty_slot, HwRetireReceiptLoopbackInput.idle())
+        expect(stale_empty_slot_result.is_ok()).to_equal(false)
+        expect(stale_empty_slot_result.err()).to_equal(
+            "HWIR-E-RETIRE-LOOPBACK-STATE: an empty loopback slot must erase retained receipt identity")
 
     # @req REQ-G2-010 NFR-G2-006 NFR-G2-011
     it "should fail closed outside the one-entry verification-only transport boundary":
