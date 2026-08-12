@@ -9,6 +9,10 @@
 use os.kernel.boot.ports.{FramebufferInfo, framebuffer_info_phys_addr}
 use os.kernel.boot.mmio.{mmio_write32, mmio_read32}
 use std.gpu.engine2d.framebuffer_surface.{FramebufferSurface}
+use std.gpu.engine2d.color.{blend}
+use std.gpu.engine2d.simd_kernels.{
+    native_pixel_rows_enabled, rt_engine2d_simd_blend_span_u32
+}
 use common.ui.glyph_bitmap_8x16.{get_glyph_8x16}
 use common.gpu.simpleos_host_gpu_protocol.{simpleos_host_gpu_readback_checksum_step, simpleos_host_gpu_readback_checksum_finalize}
 
@@ -692,6 +696,44 @@ impl FramebufferSurface for FramebufferDriver:
             mmio_write32(self.front_addr + offset, color)
         else:
             self.put_pixel(x, y, framebuffer_argb_to_color(color))
+
+    me framebuffer_blend_span_argb(x: u32, y: u32, src: [u32], src_offset: i32, count: i32):
+        if y >= self.height or x >= self.width or src_offset < 0 or count <= 0:
+            return
+        var safe_count = count
+        if safe_count.to_u32() > self.width - x:
+            safe_count = (self.width - x).to_i32()
+        if src_offset.to_i64() + safe_count.to_i64() > src.len():
+            safe_count = (src.len() - src_offset.to_i64()).to_i32()
+        if safe_count <= 0:
+            return
+        val dst_offset = (y * self.width + x).to_i64()
+        var buffered = false
+        if self.front_addr != 0u64:
+            buffered = self.has_staging_buffer()
+        if native_pixel_rows_enabled():
+            if self.front_addr == 0u64:
+                self.host_buffer = rt_engine2d_simd_blend_span_u32(
+                    self.host_buffer, dst_offset, src,
+                    src_offset.to_i64(), safe_count.to_i64())
+                self.mark_dirty_rect(x, y, safe_count.to_u32(), 1u32)
+                return
+            if buffered:
+                self.back_buffer = rt_engine2d_simd_blend_span_u32(
+                    self.back_buffer, dst_offset, src,
+                    src_offset.to_i64(), safe_count.to_i64())
+                self.mark_dirty_rect(x, y, safe_count.to_u32(), 1u32)
+                return
+        # Direct LFB and non-native hosts preserve exact straight-alpha
+        # semantics without constructing temporary destination rows.
+        var i = 0
+        while i < safe_count:
+            val px = x + i.to_u32()
+            val source = src[src_offset.to_i64() + i.to_i64()]
+            if (source >> 24) != 0u32:
+                val destination = self.read_pixel(px, y)
+                self.framebuffer_put_pixel_argb(px, y, blend(source, destination))
+            i += 1
 
     fn framebuffer_read_pixel_argb(x: u32, y: u32) -> u32:
         self.read_pixel(x, y)
