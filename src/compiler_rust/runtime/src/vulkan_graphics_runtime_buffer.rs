@@ -4,6 +4,10 @@ use super::vulkan_graphics_runtime_core::{alloc_handle, BufferUsage, VulkanBuffe
 use std::sync::Arc;
 use crate::value::{byte_array_bytes, byte_array_write, rt_byte_array_new, rt_byte_array_new_len, RuntimeValue};
 
+// A tightly packed 8K ARGB framebuffer is 132,710,400 bytes. Keep the raw ABI
+// bounded while allowing one complete 8K seed/upload.
+const MAX_RAW_TRANSFER_BYTES: i64 = 256 * 1024 * 1024;
+
 // ============================================================================
 // Buffer Management
 // ============================================================================
@@ -157,7 +161,7 @@ fn copy_to_buffer_bytes(handle: i64, data: &[u8], offset: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_copy_to_buffer_raw(handle: i64, data_ptr: i64, byte_count: i64, offset: i64) -> i64 {
-    if byte_count < 0 || offset < 0 || byte_count > 64 * 1024 * 1024 {
+    if byte_count < 0 || offset < 0 || byte_count > MAX_RAW_TRANSFER_BYTES {
         return 0;
     }
     let Some(end) = offset.checked_add(byte_count) else {
@@ -229,7 +233,7 @@ pub extern "C" fn rt_vulkan_copy_from_buffer(data: RuntimeValue, handle: i64, of
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_copy_from_buffer_raw(data_ptr: i64, byte_count: i64, handle: i64, offset: i64) -> i64 {
-    if data_ptr <= 0 || byte_count < 0 || offset < 0 || byte_count > 64 * 1024 * 1024 {
+    if data_ptr <= 0 || byte_count < 0 || offset < 0 || byte_count > MAX_RAW_TRANSFER_BYTES {
         return 0;
     }
     let end = match offset.checked_add(byte_count) {
@@ -270,7 +274,7 @@ pub extern "C" fn rt_vulkan_copy_from_buffer_strided_raw(
         || row_count < 0
         || src_stride < 0
         || (row_count > 0 && row_bytes > 0 && src_stride < row_bytes)
-        || data_len > 64 * 1024 * 1024
+        || data_len > MAX_RAW_TRANSFER_BYTES
         || row_count > 16_384
     {
         return 0;
@@ -300,6 +304,51 @@ pub extern "C" fn rt_vulkan_copy_from_buffer_strided_raw(
     1
 }
 
+/// Download packed disjoint row regions with one Vulkan transfer submission.
+/// `regions_ptr` points to little-endian u64 tuples:
+/// (source_offset, row_bytes, row_count, source_stride).
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_copy_from_buffer_regions_raw(
+    data_ptr: i64,
+    data_len: i64,
+    handle: i64,
+    regions_ptr: i64,
+    regions_len: i64,
+) -> i64 {
+    const RECORD_BYTES: i64 = 32;
+    if data_len <= 0
+        || data_len > MAX_RAW_TRANSFER_BYTES
+        || data_ptr <= 0
+        || regions_ptr <= 0
+        || regions_len <= 0
+        || regions_len > 256 * RECORD_BYTES
+        || regions_len % RECORD_BYTES != 0
+    {
+        return 0;
+    }
+    let state = STATE.lock();
+    let Some(buf) = state.buffers.get(&handle) else {
+        return 0;
+    };
+    let raw = unsafe { std::slice::from_raw_parts(regions_ptr as *const u8, regions_len as usize) };
+    let mut regions = Vec::with_capacity((regions_len / RECORD_BYTES) as usize);
+    for record in raw.chunks_exact(RECORD_BYTES as usize) {
+        let field = |offset: usize| u64::from_le_bytes(record[offset..offset + 8].try_into().unwrap());
+        regions.push((field(0), field(8), field(16), field(24)));
+    }
+    let Ok(downloaded) = buf.download_regions(&regions) else {
+        return 0;
+    };
+    if downloaded.len() != data_len as usize {
+        return 0;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(downloaded.as_ptr(), data_ptr as *mut u8, downloaded.len());
+    }
+    1
+}
+
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_copy_from_buffer(_data: i64, _handle: i64, _offset: i64) -> i64 {
@@ -322,6 +371,18 @@ pub extern "C" fn rt_vulkan_copy_from_buffer_strided_raw(
     _row_bytes: i64,
     _row_count: i64,
     _src_stride: i64,
+) -> i64 {
+    0
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_copy_from_buffer_regions_raw(
+    _data_ptr: i64,
+    _data_len: i64,
+    _handle: i64,
+    _regions_ptr: i64,
+    _regions_len: i64,
 ) -> i64 {
     0
 }
@@ -411,7 +472,10 @@ pub extern "C" fn rt_vulkan_copy_buffer(_dst: i64, _src: i64, _size: i64) -> i64
 
 #[cfg(test)]
 mod tests {
-    use super::{rt_vulkan_copy_from_buffer_strided_raw, rt_vulkan_copy_to_buffer_raw, rt_vulkan_read_buffer_bytes};
+    use super::{
+        rt_vulkan_copy_from_buffer_regions_raw, rt_vulkan_copy_from_buffer_strided_raw, rt_vulkan_copy_to_buffer_raw,
+        rt_vulkan_read_buffer_bytes, MAX_RAW_TRANSFER_BYTES,
+    };
     use crate::value::{byte_array_bytes, rt_array_len};
 
     #[test]
@@ -422,10 +486,23 @@ mod tests {
     }
 
     #[test]
+    fn raw_transfer_cap_covers_one_8k_argb_frame() {
+        assert!(MAX_RAW_TRANSFER_BYTES >= 7_680 * 4_320 * 4);
+        assert_eq!(MAX_RAW_TRANSFER_BYTES, 256 * 1024 * 1024);
+    }
+
+    #[test]
     fn strided_raw_guard_rejects_invalid_shape_before_pointer_access() {
         assert_eq!(rt_vulkan_copy_from_buffer_strided_raw(0, 8, 0, 0, 4, 3, 8), 0);
         assert_eq!(rt_vulkan_copy_from_buffer_strided_raw(0, 12, 0, 0, 4, 3, 2), 0);
         assert_eq!(rt_vulkan_copy_from_buffer_strided_raw(0, 0, 0, 0, 0, 16_385, 0), 0);
+    }
+
+    #[test]
+    fn region_raw_guard_rejects_invalid_shape_before_pointer_access() {
+        assert_eq!(rt_vulkan_copy_from_buffer_regions_raw(0, 8, 0, 0, 0), 0);
+        assert_eq!(rt_vulkan_copy_from_buffer_regions_raw(1, 8, 0, 1, 31), 0);
+        assert_eq!(rt_vulkan_copy_from_buffer_regions_raw(1, 8, 0, 1, 32 * 257), 0);
     }
 
     #[cfg(feature = "vulkan")]
@@ -467,6 +544,22 @@ mod tests {
             1
         );
         assert_eq!(packed, [11, 12, 21, 22, 31, 32]);
+        let mut descriptors = Vec::new();
+        for value in [0u64, 2, 2, 4, 10, 2, 1, 2] {
+            descriptors.extend_from_slice(&value.to_le_bytes());
+        }
+        let mut regions_packed = [0u8; 6];
+        assert_eq!(
+            rt_vulkan_copy_from_buffer_regions_raw(
+                regions_packed.as_mut_ptr() as i64,
+                regions_packed.len() as i64,
+                buffer,
+                descriptors.as_ptr() as i64,
+                descriptors.len() as i64,
+            ),
+            1
+        );
+        assert_eq!(regions_packed, [10, 11, 20, 21, 32, 33]);
         assert_eq!(rt_vulkan_copy_to_buffer_raw(buffer, 0, 0, 16), 1);
         assert_eq!(rt_vulkan_copy_to_buffer_raw(buffer, 0, 0, 17), 0);
         assert_eq!(rt_vulkan_free_buffer(buffer), 1);

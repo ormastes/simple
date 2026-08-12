@@ -117,6 +117,25 @@ fn checked_strided_download(
     Ok((packed_size, end))
 }
 
+fn checked_region_download(buffer_size: u64, regions: &[(u64, u64, u64, u64)]) -> VulkanResult<(u64, u64)> {
+    if regions.len() > 256 {
+        return Err(VulkanError::BufferTooSmall);
+    }
+    let mut packed_size = 0u64;
+    let mut total_rows = 0u64;
+    for &(src_offset, row_bytes, row_count, src_stride) in regions {
+        let (region_size, _) = checked_strided_download(buffer_size, src_offset, row_bytes, row_count, src_stride)?;
+        packed_size = packed_size
+            .checked_add(region_size)
+            .ok_or(VulkanError::BufferTooSmall)?;
+        total_rows = total_rows.checked_add(row_count).ok_or(VulkanError::BufferTooSmall)?;
+        if total_rows > MAX_STRIDED_TRANSFER_ROWS {
+            return Err(VulkanError::BufferTooSmall);
+        }
+    }
+    Ok((packed_size, total_rows))
+}
+
 fn download_barrier_masks(
     usage: BufferUsage,
 ) -> (
@@ -149,7 +168,10 @@ fn download_barrier_masks(
 
 #[cfg(test)]
 mod tests {
-    use super::{checked_download_end, checked_strided_download, checked_upload_end, download_barrier_masks, BufferUsage};
+    use super::{
+        checked_download_end, checked_region_download, checked_strided_download, checked_upload_end,
+        download_barrier_masks, BufferUsage,
+    };
     use ash::vk;
 
     #[test]
@@ -183,6 +205,16 @@ mod tests {
         assert_eq!(checked_download_end(16, 16, 0).unwrap(), 16);
         assert!(checked_download_end(16, 15, 2).is_err());
         assert!(checked_download_end(16, u64::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn region_download_sums_packed_bytes_and_rejects_bad_members() {
+        let regions = [(4, 4, 2, 16), (40, 8, 3, 12)];
+        assert_eq!(checked_region_download(80, &regions).unwrap(), (32, 5));
+        assert!(checked_region_download(64, &[(60, 8, 1, 8)]).is_err());
+        assert!(checked_region_download(64, &[(0, 8, 2, 4)]).is_err());
+        assert!(checked_region_download(1, &[(0, 1, 16_385, 1)]).is_err());
+        assert!(checked_region_download(64, &vec![(0, 1, 1, 1); 257]).is_err());
     }
 
     #[test]
@@ -345,6 +377,22 @@ impl VulkanBuffer {
         staging.read(packed_size as usize)
     }
 
+    /// Download multiple disjoint row regions through one staging buffer and
+    /// one transfer submission. Each tuple is
+    /// (source offset, row bytes, row count, source stride).
+    pub fn download_regions(&self, regions: &[(u64, u64, u64, u64)]) -> VulkanResult<Vec<u8>> {
+        let (packed_size, _) = checked_region_download(self.size, regions)?;
+        if packed_size == 0 {
+            return Ok(Vec::new());
+        }
+        let device = self.device()?;
+        let _direct_compute = device.direct_compute_gate().lock();
+        device.ensure_buffer_io_available()?;
+        let staging = StagingBuffer::new(Arc::clone(&device), packed_size)?;
+        self.copy_regions_to_staging(&device, &staging, regions)?;
+        staging.read(packed_size as usize)
+    }
+
     fn copy_from_staging(
         &self,
         device: &Arc<VulkanDevice>,
@@ -469,6 +517,53 @@ impl VulkanBuffer {
                 .buffer(self.buffer)
                 .offset(src_offset)
                 .size(span_size);
+            device.handle().cmd_pipeline_barrier(
+                cmd,
+                src_stage,
+                dst_stage,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[barrier],
+                &[],
+            );
+            device
+                .handle()
+                .cmd_copy_buffer(cmd, self.buffer, staging.handle(), &regions);
+        }
+        device.submit_transfer_command(cmd)?;
+        Ok(())
+    }
+
+    fn copy_regions_to_staging(
+        &self,
+        device: &Arc<VulkanDevice>,
+        staging: &StagingBuffer,
+        inputs: &[(u64, u64, u64, u64)],
+    ) -> VulkanResult<()> {
+        let cmd = device.begin_transfer_command()?;
+        let mut regions = Vec::new();
+        let mut dst_offset = 0u64;
+        for &(src_offset, row_bytes, row_count, src_stride) in inputs {
+            for row in 0..row_count {
+                regions.push(
+                    vk::BufferCopy::default()
+                        .src_offset(src_offset + row * src_stride)
+                        .dst_offset(dst_offset)
+                        .size(row_bytes),
+                );
+                dst_offset += row_bytes;
+            }
+        }
+        let (src_stage, src_access, dst_stage, dst_access) = download_barrier_masks(self.usage);
+        unsafe {
+            let barrier = vk::BufferMemoryBarrier::default()
+                .src_access_mask(src_access)
+                .dst_access_mask(dst_access)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(self.buffer)
+                .offset(0)
+                .size(self.size);
             device.handle().cmd_pipeline_barrier(
                 cmd,
                 src_stage,

@@ -44,6 +44,7 @@ extern fn rt_vulkan_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool
 extern fn rt_vulkan_copy_to_buffer_raw(handle: i64, data_ptr: i64, byte_count: i64, offset: i64) -> bool
 extern fn rt_vulkan_copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool
 extern fn rt_vulkan_copy_from_buffer_raw(data_ptr: i64, byte_count: i64, handle: i64, offset: i64) -> bool
+extern fn rt_vulkan_copy_from_buffer_regions_raw(data_ptr: i64, data_len: i64, handle: i64, regions_ptr: i64, regions_len: i64) -> bool
 extern fn rt_vulkan_copy_from_buffer_strided_raw(data_ptr: i64, data_len: i64, handle: i64, src_offset: i64, row_bytes: i64, row_count: i64, src_stride: i64) -> bool
 extern fn rt_vulkan_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> [u8]
 extern fn rt_byte_array_new_len(len: i64) -> [u8]
@@ -110,7 +111,8 @@ fn _vulkan_read_buffer_strided_bytes_abi(handle: i64, src_offset: i64, row_bytes
         return []
     if row_count > 16384 or src_stride < row_bytes:
         return []
-    if row_bytes > 67108864 or row_count > 67108864 / row_bytes:
+    # One full 8K ARGB surface is 132,710,400 bytes.
+    if row_bytes > 268435456 or row_count > 268435456 / row_bytes:
         return []
     val byte_count = row_bytes * row_count
     if byte_count <= 0:
@@ -133,6 +135,63 @@ fn _vulkan_read_buffer_strided_bytes_abi(handle: i64, src_offset: i64, row_bytes
     if not rt_vulkan_copy_from_buffer_strided_raw(
         rt_array_data_ptr_u8(packed), byte_count, handle, src_offset,
         row_bytes, row_count, src_stride):
+        return []
+    packed
+
+fn _vulkan_read_buffer_regions_bytes_abi(handle: i64, regions: [i64]) -> [u8]:
+    # Flat tuples: source offset, row bytes, row count, source stride.
+    if regions.len() == 0 or (regions.len() % 4) != 0 or regions.len() > 1024:
+        return []
+    var total_bytes: i64 = 0
+    var total_rows: i64 = 0
+    var i = 0
+    while i < regions.len():
+        val src_offset = regions[i]
+        val row_bytes = regions[i + 1]
+        val row_count = regions[i + 2]
+        val src_stride = regions[i + 3]
+        if src_offset < 0 or row_bytes <= 0 or row_count <= 0 or src_stride < row_bytes:
+            return []
+        if row_count > 16384 - total_rows:
+            return []
+        if row_bytes > 268435456 / row_count:
+            return []
+        val region_bytes = row_bytes * row_count
+        if region_bytes > 268435456 - total_bytes:
+            return []
+        total_rows += row_count
+        total_bytes += region_bytes
+        i += 4
+    if gpu_sffi_uses_interpreter_array_abi():
+        var packed: [u8] = []
+        i = 0
+        while i < regions.len():
+            val bytes = _vulkan_read_buffer_strided_bytes_abi(
+                handle, regions[i], regions[i + 1], regions[i + 2], regions[i + 3])
+            if bytes.len().to_i64() != regions[i + 1] * regions[i + 2]:
+                return []
+            var b = 0
+            while b < bytes.len():
+                packed.push(bytes[b])
+                b += 1
+            i += 4
+        return packed
+    var descriptor_bytes: [u8] = []
+    i = 0
+    while i < regions.len():
+        var field = 0
+        while field < 4:
+            val value = regions[i + field]
+            var byte = 0
+            while byte < 8:
+                descriptor_bytes.push(((value >> (byte * 8)) & 255).to_u8())
+                byte += 1
+            field += 1
+        i += 4
+    val packed = rt_byte_array_new_len(total_bytes)
+    if not rt_vulkan_copy_from_buffer_regions_raw(
+        rt_array_data_ptr_u8(packed), total_bytes, handle,
+        rt_array_data_ptr_u8(descriptor_bytes), descriptor_bytes.len().to_i64()):
         return []
     packed
 
@@ -683,6 +742,9 @@ fn vulkan_sffi_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> [
 fn vulkan_sffi_read_buffer_strided_bytes(handle: i64, src_offset: i64, row_bytes: i64, row_count: i64, src_stride: i64) -> [u8]:
     _vulkan_read_buffer_strided_bytes_abi(
         handle, src_offset, row_bytes, row_count, src_stride)
+
+fn vulkan_sffi_read_buffer_regions_bytes(handle: i64, regions: [i64]) -> [u8]:
+    _vulkan_read_buffer_regions_bytes_abi(handle, regions)
 
 fn vulkan_sffi_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool:
     _vulkan_copy_to_buffer_abi(handle, data, offset)

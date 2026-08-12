@@ -50,7 +50,7 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_is_available,
     vulkan_sffi_alloc_buffer, vulkan_sffi_free_buffer,
     vulkan_sffi_copy_to_buffer, vulkan_sffi_copy_from_buffer,
-    vulkan_sffi_read_buffer_bytes,
+    vulkan_sffi_read_buffer_bytes, vulkan_sffi_read_buffer_regions_bytes,
     vulkan_sffi_destroy_shader, vulkan_sffi_destroy_pipeline,
     vulkan_sffi_last_error,
     vulkan_sffi_recover_dependency_quarantine,
@@ -1209,8 +1209,13 @@ impl RenderBackend for VulkanBackend:
             return false
         if self.present_damage_rects.len() == 0:
             return false
-        var packed_pixels: [u32] = []
+        if self.present_damage_rects.len() > 1024:
+            self.frame_full_fallback = true
+            self.frame_fallback_reason = "damage-transfer-region-cap"
+            return self._refresh_host_full()
+        var regions: [i64] = []
         var expected_pixels: i64 = 0
+        var total_rows: i64 = 0
         var i = 0
         while i < self.present_damage_rects.len():
             val x = self.present_damage_rects[i]
@@ -1218,20 +1223,24 @@ impl RenderBackend for VulkanBackend:
             val rw = self.present_damage_rects[i + 2]
             val rh = self.present_damage_rects[i + 3]
             val pixel_count = rw * rh
+            if rh > 16384 - total_rows:
+                self.frame_full_fallback = true
+                self.frame_fallback_reason = "damage-transfer-row-cap"
+                return self._refresh_host_full()
             val src_offset = (y * _i64(self.w) + x) * 4
-            val packed = vulkan_sffi_read_buffer_strided_bytes(
-                self.d_framebuffer, src_offset, rw * 4, rh, _i64(self.w) * 4)
-            val pixels = _bytes_to_pixel_array(packed, pixel_count.to_i32())
-            if pixels.len().to_i64() != pixel_count:
-                self.last_error = "Vulkan damaged framebuffer readback byte count mismatch"
-                return false
-            var p = 0
-            while p < pixels.len():
-                packed_pixels.push(pixels[p])
-                p += 1
+            regions.push(src_offset)
+            regions.push(rw * 4)
+            regions.push(rh)
+            regions.push(_i64(self.w) * 4)
             expected_pixels += pixel_count
+            total_rows += rh
             i += 4
+        val packed = vulkan_sffi_read_buffer_regions_bytes(
+            self.d_framebuffer, regions)
+        val packed_pixels = _bytes_to_pixel_array(
+            packed, expected_pixels.to_i32())
         if packed_pixels.len().to_i64() != expected_pixels:
+            self.last_error = "Vulkan damaged framebuffer readback byte count mismatch"
             return false
 
         var source_index: i64 = 0

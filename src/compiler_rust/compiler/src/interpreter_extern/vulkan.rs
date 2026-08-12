@@ -89,6 +89,7 @@ pub const VULKAN_FNS: &[(&str, Ret, &str)] = &[
     ("rt_vulkan_copy_buffer", Ret::I, "iii"),
     ("rt_vulkan_copy_from_buffer", Ret::I, "vii"),
     ("rt_vulkan_copy_from_buffer_raw", Ret::I, "iiii"),
+    ("rt_vulkan_copy_from_buffer_regions_raw", Ret::I, "iiiii"),
     ("rt_vulkan_copy_from_buffer_strided_raw", Ret::I, "iiiiiii"),
     ("rt_vulkan_copy_from_image", Ret::I, "vi"),
     ("rt_vulkan_copy_to_buffer", Ret::I, "ivi"),
@@ -229,9 +230,7 @@ unsafe fn text_from_ptr(ptr: *const std::os::raw::c_char) -> Value {
 /// Dispatch an `rt_vulkan_*` call to the linked runtime implementation.
 pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
     let Some((ret, spec)) = signature_of(name) else {
-        return Err(CompileError::runtime(format!(
-            "unknown Vulkan extern function: {name}"
-        )));
+        return Err(CompileError::runtime(format!("unknown Vulkan extern function: {name}")));
     };
 
     // `RuntimeValue` is the runtime crate's tagged value type. The interpreter's
@@ -268,9 +267,9 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
 
     let fptr = symbol(name)?;
 
-    // Integer-only argument lists cover 88 of the 90 entry points; the two
-    // mixed-class ones are handled explicitly below because `f64` arguments are
-    // passed in SSE registers and cannot be smuggled through an `i64` slot.
+    // Integer-only argument lists cover every non-RuntimeValue entry point
+    // except the two mixed-class calls handled below. `f64` arguments use SSE
+    // registers and cannot be smuggled through an `i64` slot.
     let ints: Option<Vec<i64>> = raw
         .iter()
         .map(|a| match a {
@@ -306,28 +305,16 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                     Value::Int(f(v[0], v[1], v[2], v[3]))
                 }
                 (Ret::I, 5) => {
-                    let f: extern "C" fn(i64, i64, i64, i64, i64) -> i64 =
-                        std::mem::transmute(fptr);
+                    let f: extern "C" fn(i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
                     Value::Int(f(v[0], v[1], v[2], v[3], v[4]))
                 }
                 (Ret::I, 6) => {
-                    let f: extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 =
-                        std::mem::transmute(fptr);
+                    let f: extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(fptr);
                     Value::Int(f(v[0], v[1], v[2], v[3], v[4], v[5]))
                 }
                 (Ret::I, 10) => {
-                    let f: extern "C" fn(
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                        i64,
-                    ) -> i64 = std::mem::transmute(fptr);
+                    let f: extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 =
+                        std::mem::transmute(fptr);
                     Value::Int(f(v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9]))
                 }
                 (Ret::T, 0) => {
@@ -358,17 +345,9 @@ pub fn dispatch(name: &str, args: &[Value]) -> Result<Value, CompileError> {
                 Ok(Value::Int(f(a0, a1, a2, a3, a4)))
             }
             "iiidddd" => {
-                let f: extern "C" fn(i64, i64, i64, f64, f64, f64, f64) -> i64 =
-                    std::mem::transmute(fptr);
-                let (
-                    Arg::I(a0),
-                    Arg::I(a1),
-                    Arg::I(a2),
-                    Arg::D(a3),
-                    Arg::D(a4),
-                    Arg::D(a5),
-                    Arg::D(a6),
-                ) = (raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6])
+                let f: extern "C" fn(i64, i64, i64, f64, f64, f64, f64) -> i64 = std::mem::transmute(fptr);
+                let (Arg::I(a0), Arg::I(a1), Arg::I(a2), Arg::D(a3), Arg::D(a4), Arg::D(a5), Arg::D(a6)) =
+                    (raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6])
                 else {
                     return Err(CompileError::runtime(format!("{name}: argument class mismatch")));
                 };
@@ -440,8 +419,7 @@ mod tests {
             "failed to parse any rt_vulkan_* prototypes from the runtime crate"
         );
 
-        let mut missing: Vec<&String> =
-            exported.iter().filter(|sym| signature_of(sym).is_none()).collect();
+        let mut missing: Vec<&String> = exported.iter().filter(|sym| signature_of(sym).is_none()).collect();
         missing.sort();
         assert!(
             missing.is_empty(),
@@ -460,11 +438,11 @@ mod tests {
         );
     }
 
-    /// Both cross-validation methods agreed on 90; hold that number so a silent
+    /// Both cross-validation methods agreed on 92; hold that number so a silent
     /// drop is a failure rather than a smaller sweep.
     #[test]
-    fn family_size_is_ninety() {
-        assert_eq!(VULKAN_FNS.len(), 90);
+    fn family_size_is_ninety_two() {
+        assert_eq!(VULKAN_FNS.len(), 92);
     }
 
     /// Names outside the family are rejected, never silently succeed.
@@ -490,7 +468,11 @@ mod tests {
             .filter(|(_, r, s)| *r == Ret::V || s.contains('v'))
             .map(|(n, _, _)| *n)
             .collect();
-        assert_eq!(refused.len(), 7, "expected 7 RuntimeValue entry points, got {refused:?}");
+        assert_eq!(
+            refused.len(),
+            7,
+            "expected 7 RuntimeValue entry points, got {refused:?}"
+        );
 
         for name in refused {
             let (_, spec) = signature_of(name).expect("registered");

@@ -168,7 +168,6 @@ pub fn runtime_funcs_for_target(_target: &simple_common::target::Target) -> Vec<
     RUNTIME_FUNCS.iter().collect()
 }
 
-
 /// Look up the declared spec for a runtime symbol by exact name.
 ///
 /// This exists so a backend can declare a runtime import with the signature the
@@ -1607,6 +1606,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_vulkan_copy_from_buffer", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_copy_from_buffer_raw", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new(
+        "rt_vulkan_copy_from_buffer_regions_raw",
+        &[I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new(
         "rt_vulkan_copy_from_buffer_strided_raw",
         &[I64, I64, I64, I64, I64, I64, I64],
         &[I64],
@@ -1879,12 +1883,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_package_copy_file", &[I64, I64, I64, I64], &[I32]), // src(ptr,len), dst(ptr,len) -> i32
     RuntimeFuncSpec::new("rt_package_create_symlink", &[I64, I64, I64, I64], &[I32]), // target(ptr,len), link(ptr,len) -> i32
     RuntimeFuncSpec::new("rt_package_create_tarball", &[I64, I64, I64, I64], &[I32]), // src(ptr,len), out(ptr,len) -> i32
-    RuntimeFuncSpec::new("rt_package_exists", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
+    RuntimeFuncSpec::new("rt_package_exists", &[I64, I64], &[I32]),                   // path_ptr, path_len -> i32
     RuntimeFuncSpec::new("rt_package_extract_tarball", &[I64, I64, I64, I64], &[I32]), // tar(ptr,len), dest(ptr,len) -> i32
-    RuntimeFuncSpec::new("rt_package_file_size", &[I64, I64], &[I64]), // path_ptr, path_len -> i64
-    RuntimeFuncSpec::new("rt_package_is_dir", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
-    RuntimeFuncSpec::new("rt_package_mkdir_all", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
-    RuntimeFuncSpec::new("rt_package_remove_dir_all", &[I64, I64], &[I32]), // path_ptr, path_len -> i32
+    RuntimeFuncSpec::new("rt_package_file_size", &[I64, I64], &[I64]),                 // path_ptr, path_len -> i64
+    RuntimeFuncSpec::new("rt_package_is_dir", &[I64, I64], &[I32]),                    // path_ptr, path_len -> i32
+    RuntimeFuncSpec::new("rt_package_mkdir_all", &[I64, I64], &[I32]),                 // path_ptr, path_len -> i32
+    RuntimeFuncSpec::new("rt_package_remove_dir_all", &[I64, I64], &[I32]),            // path_ptr, path_len -> i32
     RuntimeFuncSpec::new("rt_package_sha256", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue(text)
     RuntimeFuncSpec::new("rt_pop", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_push", &[I64, I64], &[I64]),

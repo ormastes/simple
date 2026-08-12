@@ -2059,6 +2059,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_copy_buffer",
     "rt_vulkan_copy_from_buffer",
     "rt_vulkan_copy_from_buffer_raw",
+    "rt_vulkan_copy_from_buffer_regions_raw",
     "rt_vulkan_copy_from_buffer_strided_raw",
     "rt_vulkan_copy_to_buffer",
     "rt_vulkan_copy_to_buffer_raw",
@@ -2148,8 +2149,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_opt_i64_to_string",
     "rt_file_delete", // -> rt_file_remove
     "rt_neighbor_load",
-    "rt_print",       // -> rt_print_value
-    "rt_println",     // -> rt_println_value
+    "rt_print",   // -> rt_print_value
+    "rt_println", // -> rt_println_value
     "rt_sleep_ms",
     "rt_str_hash",
     "rt_value_as_int",
