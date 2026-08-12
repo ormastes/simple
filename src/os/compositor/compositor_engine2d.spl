@@ -9,6 +9,12 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
 }
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 use common.ui.render_opt.property_trees.{PropertyTrees}
+use common.ui.render_opt.damage_tiles.{
+    DirtyTilePyramid, damage_tiles_mark_property_damage
+}
+use common.ui.render_opt.damage_plan.{
+    DamagePlanPolicy, build_damage_plan, DAMAGE_PLAN_NONE
+}
 
 extern fn rt_env_get(key: text) -> text?
 
@@ -85,15 +91,23 @@ class Engine2dCompositorBackend:
     # O0/O1 `PropertyTrees` damage sink as a plain rect accumulator — no
     # transform/clip/effect nodes are registered here, only `push_damage`.
     damage: PropertyTrees = PropertyTrees.create()
+    damage_pyramid: DirtyTilePyramid
+    last_damage_plan_mode: i64 = DAMAGE_PLAN_NONE
+    last_damage_plan_rect_count: i64 = 0
+    last_damage_plan_pixels: i64 = 0
 
     static fn create(engine: Engine2D) -> Engine2dCompositorBackend:
         val id = _engine2d_compositor_next_id
         _engine2d_compositor_next_id = _engine2d_compositor_next_id + 1
+        val width = engine.width()
+        val height = engine.height()
+        val pyramid = DirtyTilePyramid.create(
+            width.to_i64(), height.to_i64(), [64, 256], [64, 256])
         Engine2dCompositorBackend(
             id: id,
             engine: engine,
-            w: engine.width(),
-            h: engine.height(),
+            w: width,
+            h: height,
             last_backend: engine.backend_name(),
             last_readback_source: "unavailable",
             last_backend_handle: 0,
@@ -105,7 +119,8 @@ class Engine2dCompositorBackend:
             last_readback_format: "",
             last_composition_id: "",
             last_scene_key: "",
-            last_web_content_image_count: 0
+            last_web_content_image_count: 0,
+            damage_pyramid: pyramid
         )
 
     # Backend-by-name factory — the WM "gpu process" fix: ONE persistent
@@ -336,10 +351,27 @@ impl CompositorBackend for Engine2dCompositorBackend:
         self.engine.present()
 
     me present():
+        if self.damage.damage_len > 0:
+            self.damage_pyramid.begin_frame()
+            damage_tiles_mark_property_damage(
+                self.damage_pyramid, self.damage)
+            val plan = build_damage_plan(
+                self.damage_pyramid, 0,
+                DamagePlanPolicy.create(256, 60))
+            self.last_damage_plan_mode = plan.mode
+            self.last_damage_plan_rect_count = plan.output_rect_count
+            self.last_damage_plan_pixels = plan.planned_pixels
+            self.engine.stage_present_damage(plan.rects)
+            self.damage.clear_damage()
+        else:
+            self.last_damage_plan_mode = DAMAGE_PLAN_NONE
+            self.last_damage_plan_rect_count = 0
+            self.last_damage_plan_pixels = 0
         self.engine.present()
 
     me present_rect(x: i32, y: i32, w: i32, h: i32):
-        self.engine.present()
+        self.report_damage(x, y, w, h)
+        self.present()
 
     fn as_glass_capable() -> CompositorGlassCapable?:
         nil
