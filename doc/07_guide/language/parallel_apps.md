@@ -42,8 +42,9 @@ runtime gate before relying on a path in production.
 Actor mailboxes also have finite admission by default: zero or negative
 capacity resolves to 256 rather than enabling an unbounded queue. A positive
 capacity remains an explicit override. This prevents accidental unbounded
-retention, but it does not yet provide a fixed-ring implementation or a typed
-public backpressure receipt.
+retention. The actor FIFO uses a bounded head cursor and compacts only when a
+full backing buffer needs reuse; a native execution gate and typed public
+backpressure receipt remain open.
 
 WP-18 now has internal runtime groundwork for a deliberately narrow bounded
 scalar pool-state pilot. Capacity counts pending, running, and completed but

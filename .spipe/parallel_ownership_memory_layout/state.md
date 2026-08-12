@@ -582,9 +582,10 @@ dev-done
 - impl: Tightened the reachable WP-14 actor mailbox admission contract.
   `ActorMailbox.new(0)` and negative capacities now resolve to the finite
   policy default of 256 rather than creating an unbounded queue; explicit
-  positive capacities remain configurable. The direct source check passes.
-  The new pure capacity-resolution unit fixture is retained, but the current
-  test runner hangs during dependency loading before a verdict and was
-  terminated; it is not counted as behavioral evidence. FIFO storage still
-  uses an array front-slice, so replacing it with a bounded ring representation
-  remains a distinct memory-churn follow-up.
+  positive capacities remain configurable. The mailbox now uses a bounded head
+  cursor and compacts only when full backing storage is reused, avoiding an
+  array front-slice on every dequeue. The new pure capacity-resolution unit
+  fixture is retained, but the available bootstrap runner/check path emits
+  dependency warnings without a final verdict; it is not counted as behavioral
+  evidence. A real self-hosted native FIFO/compaction/backpressure execution
+  gate remains required.
