@@ -60,6 +60,12 @@
     cast, RuntimeValue array, or free-form provenance string is not ownership proof.
 13. Register producer evidence only through the driver batch/install owner;
     freeze before cache lookup or parallel codegen and reject later mutation.
+14. Freeze owns a deep-copied, module-qualified site/evidence registry and the
+    zero-site module universe. Never consult live registration rows after the
+    one-way freeze or use delimiter-concatenated configurable text as identity.
+15. Until an immutable MIR+storage capsule exists, compile storage-bearing
+    modules on the driver owner thread. ParallelBuilder may handle ordinary
+    modules, but capturing mutable CompileContext is not storage-worker proof.
 
 The W^X store/load parity scenario requires a fresh runtime containing
 `rt_ptr_read_u8`; a stale runner or unresolved-symbol stub is not evidence.

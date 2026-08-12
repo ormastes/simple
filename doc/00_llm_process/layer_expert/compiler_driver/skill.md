@@ -31,3 +31,8 @@ Focused contract:
 `test/01_unit/compiler/driver/interpret_lazy_project_sources_spec.spl`.
 MCP end-to-end witness:
 `test/02_integration/app/mcp_stdio_integration_spec.spl`.
+
+Typed-storage native codegen freezes deep-copied module-qualified evidence
+before cache lookup. Storage-bearing modules remain owner-threaded until the
+driver can pass an immutable MIR+storage capsule; do not re-enable them in the
+ParallelBuilder closure by reading live `CompileContext` arrays.

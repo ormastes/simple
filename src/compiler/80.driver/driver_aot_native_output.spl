@@ -18,7 +18,7 @@ use compiler.backend.linker.linker_wrapper.{
 use compiler.backend.backend.llvm_native_link.{link_llvm_native, NativeLinkOptions}
 use compiler.driver.smf_writer.{Target}
 use compiler.driver.smf_binary_helpers.{smf_u64_to_bytes}
-use driver_types.{CompileResult, CompileContext}
+use driver_types.{CompileResult, CompileContext, FrozenStorageModuleSnapshotV1}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.driver_core_modes.{driver_mir_eviction_enabled}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
@@ -308,6 +308,10 @@ pub fn compile_bootstrap_context_to_native(ctx: CompileContext, backend_name: te
     `CompilerDriver.compile_to_native` extension method. Keep the bootstrap lane
     on a plain function that takes the already-available context.
     """
+    val storage_identity = ctx.freeze_storage_registry()
+    if storage_identity == "invalid":
+        return CompileResult.CodegenError(
+            "typed storage registry is malformed before bootstrap native compile")
     val is_release = ctx.options.release
     val driver_opt_level = driver_effective_native_opt_level(ctx, is_release)
     val trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
@@ -496,15 +500,28 @@ impl CompilerDriver:
             total_modules - uncached_names.len(), total_modules,
             native_compile_current, 5, 6, 0, cache_hit_count, "running")
         if uncached_names.len() > 0:
-            if uncached_names.len() == 1:
-                val name = uncached_names[0]
+            # Storage-bearing modules remain on the owner thread until native
+            # workers receive an immutable MIR+storage capsule. This prevents
+            # the parallel closure from capturing live CompileContext storage
+            # authority while preserving parallelism for ordinary modules.
+            val storage_names = ctx.frozen_storage_names_with_sites(uncached_names)
+            val parallel_names = ctx.frozen_storage_names_without_sites(uncached_names)
+            for storage_name in storage_names:
+                val storage_result = _compile_one_module_and_cache(ctx, build_cache,
+                    backend_name, is_release, driver_opt_level, object_base,
+                    storage_name)
+                match storage_result:
+                    case Err(e): return CompileResult.CodegenError(e)
+                    case Ok(_): cache_miss_count = cache_miss_count + 1
+            if parallel_names.len() == 1:
+                val name = parallel_names[0]
                 val direct_result = _compile_one_module_and_cache(ctx, build_cache, backend_name, is_release, driver_opt_level, object_base, name)
                 match direct_result:
                     case Ok(_):
-                        cache_miss_count = 1
+                        cache_miss_count = cache_miss_count + 1
                     case Err(e):
                         return CompileResult.CodegenError(e)
-            else:
+            elif parallel_names.len() > 1:
                 val parallel_cfg = ParallelBuildConfig(
                     num_threads: driver_native_build_threads(),
                     parallel_threshold: 4,
@@ -513,11 +530,12 @@ impl CompilerDriver:
                 )
                 var builder = ParallelBuilder.create(parallel_cfg)
 
-                for name in uncached_names:
+                for name in parallel_names:
                     builder.add_unit(name, [])
 
                 val build_result = builder.build(_compile_one_module_and_cache(ctx, build_cache, backend_name, is_release, driver_opt_level, object_base, _1))
-                cache_miss_count = build_result.stats.completed + build_result.stats.failed
+                cache_miss_count = cache_miss_count + build_result.stats.completed
+                    + build_result.stats.failed
 
                 if not build_result.success:
                     val first_err = build_result.errors[0]
@@ -711,6 +729,9 @@ fn _compile_one_module_and_cache(ctx: any, build_cache: BuildCache, backend_name
 
 fn _compile_one_module(ctx: any, backend_name: text, is_release: bool, opt_level: i64, output_base: text, name: text) -> Result<text, text>:
     """Compile a single module by name, write object file, return path."""
+    val storage_snapshot = ctx.frozen_storage_module_snapshot(name)
+    if not storage_snapshot.ok:
+        return Err("AOT compile error in {name}: {storage_snapshot.reason}")
     val trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
     if trace:
         print "[NATIVE] compiling module: {name}"
@@ -725,17 +746,19 @@ fn _compile_one_module(ctx: any, backend_name: text, is_release: bool, opt_level
             val direct_mir = ctx.bootstrap_entry_mir.unwrap()
             return _compile_selected_module(backend_name, is_release, opt_level,
                 output_base, name, direct_mir,
-                ctx.storage_view_site_bindings_for_module(name))
+                storage_snapshot)
     if trace:
         print "[NATIVE] select module:dict"
     val mir_module = ctx.mir_modules[name]
     return _compile_selected_module(backend_name, is_release, opt_level,
         output_base, name, mir_module,
-        ctx.storage_view_site_bindings_for_module(name))
+        storage_snapshot)
 
 fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64,
                             output_base: text, name: text, mir_module: MirModule,
-                            storage_bindings: [MirStorageViewSiteBindingV1]) -> Result<text, text>:
+                            storage_snapshot: FrozenStorageModuleSnapshotV1) -> Result<text, text>:
+    if not storage_snapshot.ok or storage_snapshot.module_name != name:
+        return Err("AOT compile error in {name}: storage-snapshot-module-mismatch")
     if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1":
         print "[NATIVE] select module:done"
     if mir_module.functions.keys().len() == 0:
@@ -755,7 +778,7 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
     val target_cpu = rt_env_get("SIMPLE_NATIVE_CPU") ?? ""
     val compiled = compile_module_with_backend_target_cpu_storage_bindings(
         backend_name, mir_module, is_release, opt_level, target_cpu,
-        storage_bindings)
+        storage_snapshot.sites)
 
     match compiled:
         case Err(err):

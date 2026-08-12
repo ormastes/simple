@@ -26,7 +26,9 @@ use compiler.common.compiler_services.{CompilerServices, create_default_services
 use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
 use compiler.common.assurance.policy.{policy_from_env_value}
 use compiler.common.assurance.policy_schema.{ResolvedAssurancePolicyV1}
-use compiler.mir_opt.mir_opt.storage_projection_lowering.{MirStorageViewSiteBindingV1}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{
+    MirStorageFieldBindingV1, MirStorageViewBindingV1, MirStorageViewSiteBindingV1
+}
 use compiler.mir_opt.mir_opt.typed_storage_view_producer.{
     MirTypedStorageViewEvidenceV1, MirTypedStorageViewProducerResultV1
 }
@@ -34,8 +36,53 @@ use std.common.structural.storage_layout.storage_layout_contracts.{
     storage_layout_kind_to_u8, storage_conversion_policy_to_u8
 }
 
+class FrozenStorageModuleSnapshotV1:
+    ok: bool
+    module_name: text
+    registry_identity: text
+    module_identity: text
+    sites: [MirStorageViewSiteBindingV1]
+    evidence: [MirTypedStorageViewEvidenceV1]
+    reason: text
+
 extern fn rt_string_free(value: text) -> i64
 extern fn rt_env_get(key: text) -> text
+
+fn storage_identity_text_v1(value: text) -> text:
+    "{value.len()}:{value}"
+
+fn frozen_storage_site_identity_v1(site: MirStorageViewSiteBindingV1,
+                                   evidence: MirTypedStorageViewEvidenceV1) -> text:
+    val view = site.binding
+    val plan = view.plan
+    var field_rows: [text] = []
+    for field in view.fields:
+        field_rows.push("{field.field_id},{field.logical_offset},{field.field_size},{field.column_offset}")
+    var i = 0
+    while i < field_rows.len():
+        var j = i + 1
+        while j < field_rows.len():
+            if field_rows[j] < field_rows[i]:
+                val temporary = field_rows[i]
+                field_rows[i] = field_rows[j]
+                field_rows[j] = temporary
+            j = j + 1
+        i = i + 1
+    val fields_identity = field_rows.join(":")
+    "{site.function_symbol_id}|{site.base_local_id}|{site.index_bounds_proven}|{view.logical_type_id}|{view.revision}|{view.element_count}|{view.allocation_byte_len}|{view.logical_stride}|{view.address_observed}|{plan.contract_version}|{storage_layout_kind_to_u8(plan.layout)}|{plan.block_width}|{plan.alignment}|{plan.abi_pinned}|{storage_conversion_policy_to_u8(plan.conversion)}|{storage_identity_text_v1(plan.policy_hash)}|{storage_identity_text_v1(plan.decision_reason)}|{storage_identity_text_v1(fields_identity)}|{storage_identity_text_v1(evidence.allocation_identity)}|{storage_identity_text_v1(evidence.allocation_provenance)}|{storage_identity_text_v1(evidence.source_revision)}|{evidence.producer_contract_version}|{storage_identity_text_v1(evidence.producer_pattern)}|{storage_identity_text_v1(evidence.bounds_proof_kind)}|{evidence.produced_projection_count}"
+
+fn frozen_storage_copy_site_v1(site: MirStorageViewSiteBindingV1) -> MirStorageViewSiteBindingV1:
+    var copied_fields: [MirStorageFieldBindingV1] = []
+    for field in site.binding.fields:
+        copied_fields.push(field)
+    MirStorageViewSiteBindingV1(..site,
+        binding: MirStorageViewBindingV1(..site.binding, fields: copied_fields))
+
+fn frozen_storage_copy_evidence_v1(
+    evidence: MirTypedStorageViewEvidenceV1,
+    copied_site: MirStorageViewSiteBindingV1
+) -> MirTypedStorageViewEvidenceV1:
+    MirTypedStorageViewEvidenceV1(..evidence, site: copied_site)
 
 # Stem (filename without extension) computed with rfind + `>= 0`/`> 0`
 # checks, NOT std.path.stem/extension: those match rfind's raw i64 result
@@ -114,6 +161,12 @@ class CompileContext:
     storage_view_evidence_rows: [MirTypedStorageViewEvidenceV1]
     storage_registry_frozen: bool
     storage_registry_frozen_identity: text
+    # Immutable worker input captured at the one-way freeze boundary. Native
+    # module workers never consult the live registration arrays.
+    frozen_storage_module_names: [text]
+    frozen_storage_sites: [MirStorageViewSiteBindingV1]
+    frozen_storage_evidence: [MirTypedStorageViewEvidenceV1]
+    frozen_storage_known_module_names: [text]
 
     static fn create(options: CompileOptions) -> CompileContext:
         # Load config
@@ -217,7 +270,11 @@ class CompileContext:
             storage_evidence_module_names: [],
             storage_view_evidence_rows: [],
             storage_registry_frozen: false,
-            storage_registry_frozen_identity: ""
+            storage_registry_frozen_identity: "",
+            frozen_storage_module_names: [],
+            frozen_storage_sites: [],
+            frozen_storage_evidence: []
+            , frozen_storage_known_module_names: []
         )
 
     fn storage_binding_rows_well_formed() -> bool:
@@ -237,7 +294,9 @@ class CompileContext:
             val evidence = self.storage_view_evidence_rows[index]
             if self.storage_binding_module_names[index] != self.storage_evidence_module_names[index]
                 or site.function_symbol_id != evidence.site.function_symbol_id
-                or site.base_local_id != evidence.site.base_local_id:
+                or site.base_local_id != evidence.site.base_local_id
+                or frozen_storage_site_identity_v1(site, evidence)
+                    != frozen_storage_site_identity_v1(evidence.site, evidence):
                 return false
             index = index + 1
         true
@@ -378,7 +437,7 @@ class CompileContext:
                     field_j = field_j + 1
                 field_i = field_i + 1
             val fields = field_rows.join(":")
-            rows.push("{self.storage_binding_module_names[index]}|{site.function_symbol_id}|{site.base_local_id}|{site.index_bounds_proven}|{view.logical_type_id}|{view.revision}|{view.element_count}|{view.allocation_byte_len}|{view.logical_stride}|{view.address_observed}|{plan.contract_version}|{storage_layout_kind_to_u8(plan.layout)}|{plan.block_width}|{plan.alignment}|{plan.abi_pinned}|{storage_conversion_policy_to_u8(plan.conversion)}|{plan.policy_hash}|{plan.decision_reason}|{fields}")
+            rows.push("{storage_identity_text_v1(self.storage_binding_module_names[index])}|{site.function_symbol_id}|{site.base_local_id}|{site.index_bounds_proven}|{view.logical_type_id}|{view.revision}|{view.element_count}|{view.allocation_byte_len}|{view.logical_stride}|{view.address_observed}|{plan.contract_version}|{storage_layout_kind_to_u8(plan.layout)}|{plan.block_width}|{plan.alignment}|{plan.abi_pinned}|{storage_conversion_policy_to_u8(plan.conversion)}|{storage_identity_text_v1(plan.policy_hash)}|{storage_identity_text_v1(plan.decision_reason)}|{storage_identity_text_v1(fields)}")
             index = index + 1
         # Registration order is not semantic. Keep the cache identity stable.
         var i = 0
@@ -399,7 +458,7 @@ class CompileContext:
         var index = 0
         while index < self.storage_evidence_module_names.len():
             val evidence = self.storage_view_evidence_rows[index]
-            rows.push("{self.storage_evidence_module_names[index]}|{evidence.site.function_symbol_id}|{evidence.site.base_local_id}|{evidence.allocation_identity}|{evidence.allocation_provenance}|{evidence.source_revision}|{evidence.producer_contract_version}|{evidence.producer_pattern}|{evidence.bounds_proof_kind}|{evidence.produced_projection_count}")
+            rows.push("{storage_identity_text_v1(self.storage_evidence_module_names[index])}|{evidence.site.function_symbol_id}|{evidence.site.base_local_id}|{storage_identity_text_v1(evidence.allocation_identity)}|{storage_identity_text_v1(evidence.allocation_provenance)}|{storage_identity_text_v1(evidence.source_revision)}|{evidence.producer_contract_version}|{storage_identity_text_v1(evidence.producer_pattern)}|{storage_identity_text_v1(evidence.bounds_proof_kind)}|{evidence.produced_projection_count}")
             index = index + 1
         var i = 0
         while i < rows.len():
@@ -418,15 +477,124 @@ class CompileContext:
             return self.storage_registry_frozen_identity
         "unfrozen:{self.storage_live_binding_identity()}|evidence:{self.storage_live_evidence_identity()}"
 
+    fn frozen_storage_registry_well_formed() -> bool:
+        if self.frozen_storage_module_names.len() != self.frozen_storage_sites.len()
+            or self.frozen_storage_module_names.len() != self.frozen_storage_evidence.len():
+            return false
+        var index = 0
+        while index < self.frozen_storage_module_names.len():
+            val site = self.frozen_storage_sites[index]
+            val evidence = self.frozen_storage_evidence[index]
+            if self.frozen_storage_module_names[index] == ""
+                or frozen_storage_site_identity_v1(site, evidence)
+                    != frozen_storage_site_identity_v1(evidence.site, evidence):
+                return false
+            index = index + 1
+        true
+
     me freeze_storage_registry() -> text:
         if self.storage_registry_frozen:
+            if not self.frozen_storage_registry_well_formed(): return "invalid"
             return self.storage_registry_frozen_identity
         if not self.storage_registry_rows_well_formed():
             return "invalid"
         self.storage_registry_frozen_identity =
             "frozen:{self.storage_live_binding_identity()}|evidence:{self.storage_live_evidence_identity()}"
+        var frozen_names: [text] = []
+        var frozen_sites: [MirStorageViewSiteBindingV1] = []
+        var frozen_evidence: [MirTypedStorageViewEvidenceV1] = []
+        var frozen_known_names = self.mir_modules.keys()
+        if self.bootstrap_entry_mir_name != "":
+            var found_bootstrap = false
+            for known_name in frozen_known_names:
+                if known_name == self.bootstrap_entry_mir_name: found_bootstrap = true
+            if not found_bootstrap:
+                frozen_known_names.push(self.bootstrap_entry_mir_name)
+        var index = 0
+        while index < self.storage_binding_module_names.len():
+            val copied_site = frozen_storage_copy_site_v1(
+                self.storage_view_site_bindings[index])
+            frozen_names.push(self.storage_binding_module_names[index])
+            frozen_sites.push(copied_site)
+            frozen_evidence.push(frozen_storage_copy_evidence_v1(
+                self.storage_view_evidence_rows[index], copied_site))
+            index = index + 1
+        self.frozen_storage_module_names = frozen_names
+        self.frozen_storage_sites = frozen_sites
+        self.frozen_storage_evidence = frozen_evidence
+        self.frozen_storage_known_module_names = frozen_known_names
+        if not self.frozen_storage_registry_well_formed(): return "invalid"
         self.storage_registry_frozen = true
         self.storage_registry_frozen_identity
+
+    fn frozen_storage_module_snapshot(module_name: text) -> FrozenStorageModuleSnapshotV1:
+        if not self.storage_registry_frozen:
+            return FrozenStorageModuleSnapshotV1(ok: false, module_name: module_name,
+                registry_identity: "", module_identity: "", sites: [], evidence: [],
+                reason: "storage-registry-not-frozen")
+        if not self.frozen_storage_registry_well_formed():
+            return FrozenStorageModuleSnapshotV1(ok: false, module_name: module_name,
+                registry_identity: self.storage_registry_frozen_identity,
+                module_identity: "", sites: [], evidence: [],
+                reason: "frozen-storage-registry-malformed")
+        var sites: [MirStorageViewSiteBindingV1] = []
+        var evidence: [MirTypedStorageViewEvidenceV1] = []
+        var identity_rows: [text] = []
+        var found_frozen_module = false
+        var index = 0
+        while index < self.frozen_storage_module_names.len():
+            if self.frozen_storage_module_names[index] == module_name:
+                found_frozen_module = true
+                val site = self.frozen_storage_sites[index]
+                val row = self.frozen_storage_evidence[index]
+                val copied_site = frozen_storage_copy_site_v1(site)
+                sites.push(copied_site)
+                evidence.push(frozen_storage_copy_evidence_v1(row, copied_site))
+                identity_rows.push(frozen_storage_site_identity_v1(site, row))
+            index = index + 1
+        var i = 0
+        while i < identity_rows.len():
+            var j = i + 1
+            while j < identity_rows.len():
+                if identity_rows[j] < identity_rows[i]:
+                    val temporary = identity_rows[i]
+                    identity_rows[i] = identity_rows[j]
+                    identity_rows[j] = temporary
+                j = j + 1
+            i = i + 1
+        var known_module = found_frozen_module
+        for known_name in self.frozen_storage_known_module_names:
+            if known_name == module_name: known_module = true
+        if not known_module:
+            return FrozenStorageModuleSnapshotV1(ok: false, module_name: module_name,
+                registry_identity: self.storage_registry_frozen_identity,
+                module_identity: "", sites: [], evidence: [],
+                reason: "module-not-in-frozen-storage-registry")
+        val module_rows_identity = identity_rows.join(";")
+        FrozenStorageModuleSnapshotV1(ok: true, module_name: module_name,
+            registry_identity: self.storage_registry_frozen_identity,
+            module_identity: "storage-module-v1|{storage_identity_text_v1(module_name)}|{storage_identity_text_v1(module_rows_identity)}",
+            sites: sites, evidence: evidence, reason: "ok")
+
+    fn frozen_storage_module_has_sites(module_name: text) -> bool:
+        if not self.storage_registry_frozen: return false
+        for frozen_name in self.frozen_storage_module_names:
+            if frozen_name == module_name: return true
+        false
+
+    fn frozen_storage_names_with_sites(module_names: [text]) -> [text]:
+        var result: [text] = []
+        for module_name in module_names:
+            if self.frozen_storage_module_has_sites(module_name):
+                result.push(module_name)
+        result
+
+    fn frozen_storage_names_without_sites(module_names: [text]) -> [text]:
+        var result: [text] = []
+        for module_name in module_names:
+            if not self.frozen_storage_module_has_sites(module_name):
+                result.push(module_name)
+        result
 
     me add_error(message: text):
         self.errors.push(message)

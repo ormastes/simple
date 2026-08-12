@@ -533,3 +533,14 @@ dev-done
   the existing planner's locality hint, while ABI, GPU, and SIMD inputs remain
   explicit and no alias/scheduling authority is emitted. Advisory, access, and
   producer gates pass 4/4, 6/6, and 5/5.
+- impl: Hardened the WP-22 native handoff boundary. Registry freeze now
+  deep-copies field rows and full evidence, validates site/evidence equality,
+  records the complete module universe including zero-site modules, and uses
+  length-prefixed text components for stable cache/module identity. Storage-
+  bearing modules are kept on the owner compilation thread because the current
+  ParallelBuilder closure still captures mutable CompileContext and no frozen
+  MIR+storage capsule exists. Bootstrap-local routes reject typed-storage rows
+  instead of bypassing lowering. The focused registry gate passes 11/11 and
+  the bootstrap leaf check passes; the large AOT leaf/check and changed-file
+  lint exceed the current pure checker 180-second watchdog, so full Stage4
+  worker-capsule and compiler-wide verification remain open.

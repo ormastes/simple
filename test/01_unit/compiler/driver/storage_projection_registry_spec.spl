@@ -148,3 +148,131 @@ describe "driver-owned storage projection registry":
         assert_equal(ctx.install_produced_storage_module("particles", produced), "ok")
         assert_equal(ctx.mir_modules["particles"].name, "rewritten")
         assert_equal(ctx.storage_view_evidence_for_module("particles").len(), 1)
+
+    it "freezes module-local worker snapshots independently of live registry rows":
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        ctx.mir_modules["particles"] = MirModule(name: "particles", functions: {},
+            statics: {}, constants: {}, types: {})
+        val row = registry_evidence(StorageLayoutKind.SoA, 7, 64,
+            "allocation:a", "snapshot:a")
+        assert_equal(ctx.register_storage_view_evidence_batch("particles", [row]), "ok")
+        val before = ctx.frozen_storage_module_snapshot("particles")
+        assert_false(before.ok)
+        assert_equal(before.reason, "storage-registry-not-frozen")
+        _ = ctx.freeze_storage_registry()
+        val frozen = ctx.frozen_storage_module_snapshot("particles")
+        assert_true(frozen.ok)
+        if frozen.ok:
+            assert_equal(frozen.module_name, "particles")
+            assert_equal(frozen.sites.len(), 1)
+            assert_equal(frozen.evidence.len(), 1)
+            assert_true(frozen.module_identity.starts_with("storage-module-v1|9:particles|"))
+        assert_equal(ctx.frozen_storage_names_with_sites(
+            ["plain", "particles"]), ["particles"])
+        assert_equal(ctx.frozen_storage_names_without_sites(
+            ["plain", "particles"]), ["plain"])
+        # Sabotage the mutable registration rows after freeze. Worker input is
+        # the copied frozen authority and must remain unchanged.
+        ctx.storage_binding_module_names = []
+        ctx.storage_view_site_bindings = []
+        ctx.storage_evidence_module_names = []
+        ctx.storage_view_evidence_rows = []
+        val after = ctx.frozen_storage_module_snapshot("particles")
+        assert_true(after.ok)
+        if after.ok and frozen.ok:
+            assert_equal(after.module_identity, frozen.module_identity)
+            assert_equal(after.sites.len(), 1)
+            assert_equal(after.evidence.len(), 1)
+
+    it "keeps frozen module identities scoped and stable across registration order":
+        val first = CompileContext.create(driver_core_compile_options_default())
+        val second = CompileContext.create(driver_core_compile_options_default())
+        val module_a = MirModule(name: "a", functions: {}, statics: {}, constants: {}, types: {})
+        val module_b = MirModule(name: "b", functions: {}, statics: {}, constants: {}, types: {})
+        first.mir_modules["a"] = module_a
+        first.mir_modules["b"] = module_b
+        second.mir_modules["a"] = module_a
+        second.mir_modules["b"] = module_b
+        val row_a = registry_evidence(StorageLayoutKind.SoA, 7, 64,
+            "allocation:a", "snapshot:a")
+        val row_b = MirTypedStorageViewEvidenceV1(..registry_evidence(
+            StorageLayoutKind.AoS, 9, 0, "allocation:b", "snapshot:b"),
+            site: mir_storage_view_site_binding_v1(42, 1, true,
+                registry_site(StorageLayoutKind.AoS, 9, 0).binding))
+        _ = first.register_storage_view_evidence_batch("a", [row_a])
+        _ = first.register_storage_view_evidence_batch("b", [row_b])
+        _ = second.register_storage_view_evidence_batch("b", [row_b])
+        _ = second.register_storage_view_evidence_batch("a", [row_a])
+        assert_equal(first.freeze_storage_registry(), second.freeze_storage_registry())
+        val first_a = first.frozen_storage_module_snapshot("a")
+        val second_a = second.frozen_storage_module_snapshot("a")
+        val first_b = first.frozen_storage_module_snapshot("b")
+        assert_true(first_a.ok and second_a.ok and first_b.ok)
+        if first_a.ok and second_a.ok and first_b.ok
+            and first_a.sites.len() == 1 and first_b.sites.len() == 1:
+            assert_equal(first_a.module_identity, second_a.module_identity)
+            assert_false(first_a.module_identity == first_b.module_identity)
+            assert_true(first_a.sites[0].binding.plan.layout == StorageLayoutKind.SoA)
+            assert_true(first_b.sites[0].binding.plan.layout == StorageLayoutKind.AoS)
+        val missing = first.frozen_storage_module_snapshot("missing")
+        assert_false(missing.ok)
+        assert_equal(missing.reason, "module-not-in-frozen-storage-registry")
+        first.evict_mir_module("a")
+        val after_evict = first.frozen_storage_module_snapshot("a")
+        assert_true(after_evict.ok)
+        if after_evict.ok and first_a.ok:
+            assert_equal(after_evict.module_identity, first_a.module_identity)
+
+    it "freezes zero-site module membership without live MIR lookup":
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        ctx.mir_modules["plain"] = MirModule(name: "plain", functions: {},
+            statics: {}, constants: {}, types: {})
+        _ = ctx.freeze_storage_registry()
+        ctx.evict_mir_module("plain")
+        val plain = ctx.frozen_storage_module_snapshot("plain")
+        assert_true(plain.ok)
+        if plain.ok:
+            assert_equal(plain.sites.len(), 0)
+            assert_equal(plain.evidence.len(), 0)
+
+    it "establishes the bootstrap-direct zero-site snapshot boundary":
+        val ctx = CompileContext.create(driver_core_compile_options_default())
+        ctx.bootstrap_entry_mir_name = "entry"
+        ctx.bootstrap_entry_mir = Some(MirModule(name: "entry", functions: {},
+            statics: {}, constants: {}, types: {}))
+        ctx.mir_modules["entry"] = ctx.bootstrap_entry_mir.unwrap()
+        val frozen = ctx.freeze_storage_registry()
+        assert_true(frozen.starts_with("frozen:"))
+        val entry = ctx.frozen_storage_module_snapshot("entry")
+        assert_true(entry.ok)
+        if entry.ok:
+            assert_equal(entry.sites.len(), 0)
+            assert_equal(entry.evidence.len(), 0)
+
+        val malformed = CompileContext.create(driver_core_compile_options_default())
+        malformed.bootstrap_entry_mir_name = "entry"
+        malformed.storage_binding_module_names = ["entry"]
+        assert_equal(malformed.freeze_storage_registry(), "invalid")
+
+    it "rejects mismatched evidence and delimiter-shaped identity collisions":
+        val mismatch = CompileContext.create(driver_core_compile_options_default())
+        mismatch.mir_modules["particles"] = MirModule(name: "particles", functions: {},
+            statics: {}, constants: {}, types: {})
+        val valid = registry_evidence(StorageLayoutKind.SoA, 7, 64,
+            "allocation|a", "snapshot;a")
+        assert_equal(mismatch.register_storage_view_evidence_batch("particles", [valid]), "ok")
+        var mismatched_rows = mismatch.storage_view_evidence_rows
+        mismatched_rows[0] = MirTypedStorageViewEvidenceV1(
+            ..valid, site: registry_site(StorageLayoutKind.AoS, 7, 0))
+        mismatch.storage_view_evidence_rows = mismatched_rows
+        assert_equal(mismatch.freeze_storage_registry(), "invalid")
+
+        val first = CompileContext.create(driver_core_compile_options_default())
+        val second = CompileContext.create(driver_core_compile_options_default())
+        first.mir_modules["a|b"] = MirModule(name: "a|b", functions: {}, statics: {}, constants: {}, types: {})
+        second.mir_modules["a"] = MirModule(name: "a", functions: {}, statics: {}, constants: {}, types: {})
+        _ = first.register_storage_view_evidence_batch("a|b", [
+            registry_evidence(StorageLayoutKind.SoA, 7, 64, "c", "snapshot")])
+        _ = second.register_storage_view_evidence_batch("a", [
+            registry_evidence(StorageLayoutKind.SoA, 7, 64, "b|c", "snapshot")])
+        assert_false(first.freeze_storage_registry() == second.freeze_storage_registry())

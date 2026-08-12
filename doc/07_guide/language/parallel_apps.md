@@ -59,6 +59,12 @@ from locality counts only when all of its uses are direct field projections.
 This deliberate difference never flows backward: a SoA recommendation cannot
 prove field disjointness, ownership, or parallel scheduling safety.
 
+Native typed-storage evidence is frozen as a deep-copied module-qualified
+registry before cache lookup. Storage-bearing modules currently compile on the
+driver owner thread: the generic parallel builder still captures mutable driver
+context and does not yet carry an immutable MIR-plus-storage capsule. This is a
+fail-closed implementation boundary, not public parallel `T[]` support.
+
 The common storage contract also includes a checked reference conversion oracle
 for fixed-size records. It can convert non-overlapping fields among AoS, SoA,
 and tail-padded AoSoA plans and verify exact logical round trips. The oracle is
