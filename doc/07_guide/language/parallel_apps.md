@@ -39,6 +39,12 @@ structured task groups, physical layout lowering, and end-to-end process/device
 evidence remain work-package gates. Consult the receipt and the matching
 runtime gate before relying on a path in production.
 
+Actor mailboxes also have finite admission by default: zero or negative
+capacity resolves to 256 rather than enabling an unbounded queue. A positive
+capacity remains an explicit override. This prevents accidental unbounded
+retention, but it does not yet provide a fixed-ring implementation or a typed
+public backpressure receipt.
+
 WP-18 now has internal runtime groundwork for a deliberately narrow bounded
 scalar pool-state pilot. Capacity counts pending, running, and completed but
 unreleased tasks; credit returns only on release. Tagged generation handles are

@@ -17,6 +17,18 @@
 
 use std.thread_sffi.{mutex_create, MutexHandle}
 
+# A zero-capacity mailbox used to mean "unbounded". That makes an ordinary
+# configuration typo a permanent memory-growth path, so every mailbox now has
+# a finite admission ceiling. Callers that need a different limit pass a
+# positive capacity explicitly.
+const ACTOR_MAILBOX_DEFAULT_CAPACITY = 256
+
+fn actor_mailbox_effective_capacity(requested_capacity: i64) -> i64:
+    """Resolve a finite actor-mailbox capacity without an unbounded sentinel."""
+    if requested_capacity > 0:
+        return requested_capacity
+    ACTOR_MAILBOX_DEFAULT_CAPACITY
+
 # ================================================================
 # Message Types
 # ================================================================
@@ -81,19 +93,20 @@ impl ActorMailbox:
         """Create a new mailbox with the given capacity.
 
         Args:
-            capacity: Maximum messages before back-pressure (0 = unbounded)
+            capacity: Maximum messages before back-pressure. Zero or a
+                negative value resolves to the finite policy default (256).
         """
         ActorMailbox(
             queue: [],
-            capacity: capacity,
+            capacity: actor_mailbox_effective_capacity(capacity),
             mutex: mutex_create(),
             total_received: 0,
             total_dropped: 0
         )
 
     static fn default() -> ActorMailbox:
-        """Create a mailbox with default capacity (1000)."""
-        ActorMailbox.new(1000)
+        """Create a mailbox with the finite policy default capacity (256)."""
+        ActorMailbox.new(ACTOR_MAILBOX_DEFAULT_CAPACITY)
 
     me enqueue(msg: ActorMessage) -> bool:
         """Add a message to the mailbox.
@@ -104,7 +117,7 @@ impl ActorMailbox:
         self.mutex.lock()
         self.total_received = self.total_received + 1
 
-        if self.capacity > 0 and self.queue.len() >= self.capacity:
+        if self.queue.len() >= self.capacity:
             self.total_dropped = self.total_dropped + 1
             self.mutex.unlock()
             return false
@@ -139,8 +152,6 @@ impl ActorMailbox:
 
     fn is_full() -> bool:
         """Check if the mailbox is at capacity."""
-        if self.capacity <= 0:
-            return false
         self.queue.len() >= self.capacity
 
     me drain() -> [ActorMessage]:
