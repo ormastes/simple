@@ -28,7 +28,7 @@ scenarios() {
         fault-injection) echo 'MCI-ALLOC-006,MCI-NFR-009,MCI-NFR-010' ;;
         process-safety) echo 'MCI-PROC-001,MCI-PROC-002,MCI-PROC-003' ;;
         stress) echo 'MCI-NFR-015,MCI-NFR-016' ;;
-        traceability) echo 'MCI-DOC-001,MCI-DOC-002,MCI-DOC-003' ;;
+        traceability) echo 'MCI-DOC-003' ;;
         reviewer) echo 'MCI-NFR-017,MCI-NFR-018' ;;
     esac
 }
@@ -108,6 +108,11 @@ build_baseline() {
         else
             { echo "$schema_key=$schema"; echo artifact_mode=live; echo release_eligible=true; echo result=PASS; } > "$artifact"
         fi
+        if [ "$baseline_check" = traceability ]; then
+            docgen_rel=doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.docgen-receipt.env
+            docgen_sha=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+            echo "file=$docgen_rel|$docgen_sha" >> "$artifact"
+        fi
         receipt="$evidence/receipts/$baseline_check.receipt"
         {
             echo receipt_schema=mci-lane-receipt-v1; echo check_id="$baseline_check"
@@ -119,6 +124,7 @@ build_baseline() {
             echo result=pass; echo scenarios="$(scenarios "$baseline_check")"
             echo artifact_relpath="$baseline_check.evidence"; echo artifact_sha256="$(hash_file "$artifact")"
             echo artifact_schema="$schema"; echo artifact_mode=live; echo release_eligible=true
+            if [ "$baseline_check" = traceability ]; then echo "docgen_receipt_relpath=$docgen_rel"; echo "docgen_receipt_sha256=$docgen_sha"; fi
         } > "$work/$baseline_check.unsigned.template"
         if [ "$baseline_check" = allocation ] || [ "$baseline_check" = fault-injection ]; then
             # Exact producer-template conversion: only signer-owned fields and
@@ -151,6 +157,7 @@ grep -q '^result=PASS$' "$evidence/aggregate-report-v1.env"
 grep -q '^row=reviewer|PASS|none|' "$evidence/aggregate-report-v1.env"
 grep -q '^row=allocation|PASS|none|MCI-ALLOC-001,MCI-ALLOC-002,MCI-ALLOC-003,MCI-ALLOC-004,MCI-ALLOC-005,MCI-NFR-007,MCI-NFR-008$' "$evidence/aggregate-report-v1.env"
 grep -q '^row=fault-injection|PASS|none|MCI-ALLOC-006,MCI-NFR-009,MCI-NFR-010$' "$evidence/aggregate-report-v1.env"
+grep -q '^row=traceability|PASS|none|MCI-DOC-003$' "$evidence/aggregate-report-v1.env"
 [ "$(grep -c '^row=.*|PASS|none|' "$evidence/aggregate-report-v1.env")" -eq 10 ]
 first_hash=$(sed -n 's/^manifest_sha256=//p' "$evidence/aggregate-report-v1.env")
 evidence_reverse="$work/evidence-reverse"; mkdir -p "$evidence_reverse/receipts" "$evidence_reverse/artifacts" "$evidence_reverse/signatures"
@@ -199,7 +206,7 @@ rm "$evidence/receipts/rendering.receipt"
 if "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args; then exit 1; fi
 grep -q '^row=compiler|BLOCKED|stale-or-invalid-lifetime|' "$evidence/aggregate-report-v1.env"
 grep -q '^row=rendering|BLOCKED|missing|' "$evidence/aggregate-report-v1.env"
-grep -q '^resume=rendering|BLOCKED prerequisite: executable owner script missing:' "$evidence/aggregate-report-v1.env"
+grep -q '^resume=rendering|BLOCKED prerequisite: set required resume environment:' "$evidence/aggregate-report-v1.env"
 ! grep -q '^resume=.*|sh scripts/check/check-mci-v2-' "$evidence/aggregate-report-v1.env"
 grep -q '^collector_contract=PASS$' "$evidence/aggregate-report-v1.env"
 [ "$(grep -c '^row=.*|BLOCKED|' "$evidence/aggregate-report-v1.env")" -eq 3 ]

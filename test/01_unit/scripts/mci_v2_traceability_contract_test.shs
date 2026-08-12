@@ -5,21 +5,84 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 copy_tree() {
     root=$1
-    for rel in test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl test/01_unit/scripts/mci_v2_aggregate_contract_test.shs test/01_unit/scripts/mci_v2_allocation_contract_test.shs test/01_unit/scripts/mci_v2_process_safety_contract_test.shs test/01_unit/scripts/mci_v2_traceability_contract_test.shs doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md doc/02_requirements/feature/mission_critical_infra_hardening_v2.md doc/02_requirements/nfr/mission_critical_infra_hardening_v2.md doc/04_architecture/mission_critical_infra_hardening_v2.md doc/05_design/mission_critical_infra_hardening_v2.md doc/07_guide/app/spipe/mission_critical_infra_hardening_v2.md doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md; do
+    for rel in test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl test/01_unit/scripts/mci_v2_aggregate_contract_test.shs test/01_unit/scripts/mci_v2_resume_command_contract_test.shs test/01_unit/scripts/mci_v2_allocation_contract_test.shs test/01_unit/scripts/mci_v2_process_safety_contract_test.shs test/01_unit/scripts/mci_v2_traceability_contract_test.shs doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md doc/02_requirements/feature/mission_critical_infra_hardening_v2.md doc/02_requirements/nfr/mission_critical_infra_hardening_v2.md doc/04_architecture/mission_critical_infra_hardening_v2.md doc/05_design/mission_critical_infra_hardening_v2.md doc/07_guide/app/spipe/mission_critical_infra_hardening_v2.md doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md; do
         mkdir -p "$root/$(dirname "$rel")"; cp "$repo/$rel" "$root/$rel"
     done
 }
-run_gate() { sh "$repo/scripts/check/check-mci-v2-traceability.shs" --repo-root "$1" --evidence evidence --run-id contract --source-hash "$(printf '%064d' 0)" --configuration-hash "$(printf '%064d' 1)" --captured-at-utc-ns 100 --valid-until-utc-ns 200 --trusted-key-id contract-key; }
+run_gate() {
+    root=$1
+    docgen_path=$root/doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.docgen-receipt.env
+    if [ "${MCI_TEST_NO_DOCGEN:-0}" != 1 ] && [ ! -e "$docgen_path" ]; then write_docgen_receipt "$root"; fi
+    sh "$repo/scripts/check/check-mci-v2-traceability.shs" --repo-root "$root" --evidence evidence --run-id contract --source-hash "$(printf '%064d' 0)" --configuration-hash "$(printf '%064d' 1)" --captured-at-utc-ns 100 --valid-until-utc-ns 200 --trusted-key-id contract-key
+}
 sync_manual_hash() {
     root=$1
     hash=$(sha256sum "$root/test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl" | awk '{print $1}')
     sed -i "s/^\*\*Executable source SHA-256:\*\* .*/\*\*Executable source SHA-256:\*\* \`$hash\`  /" "$root/doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md"
 }
+write_docgen_receipt() {
+    root=$1
+    spec_hash=$(sha256sum "$root/test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl" | awk '{print $1}')
+    manual_hash=$(sha256sum "$root/doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md" | awk '{print $1}')
+    receipt="$root/doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.docgen-receipt.env"
+    {
+        echo schema=mci-spipe-docgen-provenance-v1
+        echo tool_version=contract-docgen-1
+        echo 'command=bin/simple spipe-docgen test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl --output doc/06_spec --no-index'
+        echo "spec_sha256=$spec_hash"
+        echo "manual_sha256=$manual_hash"
+    } > "$receipt"
+}
 
 good=$tmp/good; mkdir -p "$good"; copy_tree "$good"
-if run_gate "$good" >/dev/null 2>&1; then echo "missing real docgen/full scenario provenance accepted" >&2; exit 1; fi
+if MCI_TEST_NO_DOCGEN=1 run_gate "$good" >/dev/null 2>&1; then echo "missing real docgen/full scenario provenance accepted" >&2; exit 1; fi
 test ! -e "$good/evidence/artifacts/traceability-v1.env"
-test ! -e "$good/evidence/receipts/traceability.unsigned-receipt"
+test ! -e "$good/evidence/receipts/traceability.unsigned.template"
+
+# A real, hash-bound docgen receipt permits only the focused DOC-003 lane.
+# The output is canonical receipt-shaped but still requires external signing.
+write_docgen_receipt "$good"
+run_gate "$good" >/dev/null
+template=$good/evidence/receipts/traceability.unsigned.template
+grep -Fxq 'receipt_schema=mci-lane-receipt-v1' "$template"
+grep -Fxq 'attestation=EXTERNAL_SIGNER_SETS_signed-v1' "$template"
+grep -Fxq 'scenarios=MCI-DOC-003' "$template"
+if grep -Eq 'MCI-DOC-001|MCI-DOC-002' "$template"; then echo 'blocked DOC scenario claimed by traceability template' >&2; exit 1; fi
+grep -Fxq 'receipt_hash=EXTERNAL_SIGNER_RECOMPUTES_CANONICAL_SHA256' "$template"
+docgen_rel=doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.docgen-receipt.env
+docgen_sha=$(sha256sum "$good/$docgen_rel" | awk '{print $1}')
+grep -Fxq "docgen_receipt_relpath=$docgen_rel" "$template"
+grep -Fxq "docgen_receipt_sha256=$docgen_sha" "$template"
+grep -Fxq "file=$docgen_rel|$docgen_sha" "$good/evidence/artifacts/traceability-v1.env"
+openssl genpkey -algorithm ED25519 -out "$tmp/traceability-private.pem" >/dev/null 2>&1
+openssl pkey -in "$tmp/traceability-private.pem" -pubout -out "$tmp/traceability-public.pem" >/dev/null 2>&1
+sed -e 's/^attestation=.*/attestation=signed-v1/' \
+    -e 's/^trusted_key_id=.*/trusted_key_id=contract-key/' \
+    -e '/^receipt_hash=/d' "$template" > "$tmp/traceability.canonical"
+receipt_hash=$(sha256sum "$tmp/traceability.canonical" | awk '{print $1}')
+{ cat "$tmp/traceability.canonical"; echo "receipt_hash=$receipt_hash"; } > "$tmp/traceability.receipt"
+openssl pkeyutl -sign -inkey "$tmp/traceability-private.pem" -rawin -in "$tmp/traceability.canonical" -out "$tmp/traceability.sig"
+openssl pkeyutl -verify -pubin -inkey "$tmp/traceability-public.pem" -rawin -in "$tmp/traceability.canonical" -sigfile "$tmp/traceability.sig" >/dev/null 2>&1
+
+# A valid replacement is a new evidence generation; mutation with stale
+# content bindings is rejected before publication.
+first_template_hash=$(sha256sum "$template" | awk '{print $1}')
+sed -i 's/^tool_version=.*/tool_version=contract-docgen-2/' "$good/$docgen_rel"
+run_gate "$good" >/dev/null
+second_template_hash=$(sha256sum "$template" | awk '{print $1}')
+[ "$first_template_hash" != "$second_template_hash" ]
+replacement_sha=$(sha256sum "$good/$docgen_rel" | awk '{print $1}')
+grep -Fxq "docgen_receipt_sha256=$replacement_sha" "$template"
+
+mutated=$tmp/docgen-mutated; mkdir -p "$mutated"; copy_tree "$mutated"; write_docgen_receipt "$mutated"
+sed -i 's/^manual_sha256=.*/manual_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/' "$mutated/$docgen_rel"
+if run_gate "$mutated" >/dev/null 2>&1; then echo 'mutated docgen provenance accepted' >&2; exit 1; fi
+test ! -e "$mutated/evidence/artifacts/traceability-v1.env"
+
+docgen_link=$tmp/docgen-link; mkdir -p "$docgen_link"; copy_tree "$docgen_link"; write_docgen_receipt "$docgen_link"
+mv "$docgen_link/$docgen_rel" "$docgen_link/docgen-real.env"
+ln -s ../../../../docgen-real.env "$docgen_link/$docgen_rel"
+if run_gate "$docgen_link" >/dev/null 2>&1; then echo 'symlinked docgen provenance accepted' >&2; exit 1; fi
 
 missing=$tmp/missing; mkdir -p "$missing"; copy_tree "$missing"; rm "$missing/doc/04_architecture/mission_critical_infra_hardening_v2.md"
 if run_gate "$missing" >/dev/null 2>&1; then echo "missing canonical path accepted" >&2; exit 1; fi

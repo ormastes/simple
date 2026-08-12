@@ -88,9 +88,16 @@ The deterministic `aggregate-report-v1.env` preserves fixed check order. The
 shell contract `test/01_unit/scripts/mci_v2_aggregate_contract_test.shs` owns
 `MCI-AGG-001/002/003`; its `collector_contract=PASS` proves collector mechanics
 only. The release-facing `result` remains `BLOCKED` while any real owner receipt
-is absent or invalid. The report prints a resume command for each blocked row only when that exact
-owner script exists and is executable. Otherwise it prints a `BLOCKED
-prerequisite`, never a speculative command. Publication uses a private
+is absent or invalid. The report prints a resume command for each blocked row
+only when that exact owner script exists and is executable and every
+producer-required argument has an explicit, non-empty `MCI_*` environment
+prerequisite. Compiler, tooling, SimpleOS, rendering,
+allocation/fault-injection, process-safety, and traceability all receive the
+same aggregate `--evidence "$MCI_EVIDENCE"` root; lane-owned artifact names
+provide separation. Missing mappings produce `BLOCKED prerequisite: set
+required resume environment: ...`, never an incomplete command. The static
+`mci_v2_resume_command_contract_test.shs` checks executable ownership, usage
+flags, common-root routing, and environment gating. Publication uses a private
 same-directory temporary generation, sync, atomic rename, and post-rename hash
 verification.
 
@@ -195,12 +202,15 @@ architecture, detail design, guide, and system-test plan; requires the frozen
 20-requirement and 51-scenario sets and their exact requirement-to-scenario
 tuples; rejects source-provenance/manual-path/layout, duplicate/embedded-ID,
 symlink, and placeholder defects; and emits `artifacts/traceability-v1.env`
-plus `receipts/traceability.unsigned-receipt` only after consuming a real
+plus `receipts/traceability.unsigned.template` only after consuming a real
 docgen-produced provenance receipt alongside the manual, binding the docgen
-tool version, exact command, SSpec hash, and manual hash. Missing provenance or
-the present incomplete 51-scenario annotations/rows leaves the producer
-**BLOCKED**; source text cannot self-declare freshness. The latter is deliberately an
-`unsigned-v1` template, not an aggregate-admissible receipt. The producer never
+tool version, exact command, SSpec hash, and manual hash. Missing provenance
+leaves the producer **BLOCKED**; source text cannot self-declare freshness.
+`MCI-DOC-001/002` remain explicitly blocked and are not claimed by the
+template; only the focused negative-control scenario `MCI-DOC-003` is bound.
+The template is canonical lane-receipt-shaped but is not aggregate-admissible
+until its signer placeholders and hash are replaced and a detached signature
+is published. The producer never
 holds a private key and does not perform reviewer work:
 
 ```sh
@@ -212,9 +222,10 @@ sh scripts/check/check-mci-v2-traceability.shs \
 ```
 
 After independently verifying the artifact and template, the producer-key
-operator must convert `receipt_template_schema=mci-lane-unsigned-template-v1`
-to `receipt_schema=mci-lane-receipt-v1`, convert `attestation=unsigned-v1` to
-`attestation=signed-v1`, append `receipt_hash` over those canonical lines, sign
+operator must replace `attestation=EXTERNAL_SIGNER_SETS_signed-v1` with
+`attestation=signed-v1`, set the reviewed producer key ID and signature path,
+replace the receipt-hash placeholder with SHA-256 over the canonical pre-hash
+lines, sign
 those same pre-hash canonical bytes, and atomically publish both
 `receipts/traceability.receipt` and `signatures/traceability.sig` from private
 same-directory temporary files. The aggregate must remain blocked until both

@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P); gate=$root/scripts/check/check-mci-v2-independent-review.shs
+mkdir -p "$root/build"; work=$(mktemp -d "$root/build/mci-review.XXXXXX"); trap 'rm -rf "$work"' EXIT HUP INT TERM
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/reviewer-private.pem" >/dev/null 2>&1
+openssl pkey -in "$work/reviewer-private.pem" -pubout -out "$work/reviewer.pem" >/dev/null 2>&1
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/producer-private.pem" >/dev/null 2>&1
+openssl pkey -in "$work/producer-private.pem" -pubout -out "$work/producer.pem" >/dev/null 2>&1
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+ids='compiler tooling simpleos rendering allocation fault-injection process-safety stress traceability'
+run=review-contract; source=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; config=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+{ echo candidate_schema=mci-aggregate-candidate-v1; echo run_id=$run; echo source_hash=$source; echo configuration_hash=$config; for id in $ids; do echo "evidence=$id|PASS|none|contract"; done; } > "$work/graph"
+candidate=$(hash_file "$work/graph")
+{ echo run_id=$run; echo source_hash=$source; echo configuration_hash=$config; echo aggregate_candidate_sha256=$candidate; for id in $ids; do echo "row=$id|PASS|none|contract"; done; echo 'row=reviewer|BLOCKED|missing|MCI-NFR-017,MCI-NFR-018'; } > "$work/report"
+make_policy() { { echo policy_schema=mci-independent-review-trust-v1; echo reviewer_key_id=reviewer-key; echo reviewer_key_sha256=$(hash_file "$work/reviewer.pem"); echo reviewer_role=independent-release-reviewer; echo reviewer_scope=mci-v2-aggregate; echo mode=$1; } > "$work/policy"; }
+make_decision() { { echo receipt_schema=mci-independent-review-decision-v1; echo check_id=reviewer; echo producer_class=independent-review; echo attestation=signed-v1; echo trusted_key_id=reviewer-key; echo signature_relpath=reviewer.sig; echo reviewer_identity=human-contract-reviewer; echo reviewer_role=independent-release-reviewer; echo reviewer_scope=mci-v2-aggregate; echo run_id=$run; echo source_hash=$source; echo configuration_hash=$config; echo aggregate_candidate_sha256=$candidate; echo decided_at_utc_ns=100; echo valid_until_utc_ns=86400000000100; echo decision=approve; echo scenarios=MCI-NFR-017,MCI-NFR-018; echo artifact_schema=mci-aggregate-candidate-v1; echo artifact_mode=$1; echo release_eligible=$2; } > "$work/decision"; openssl dgst -sha256 -sign "$work/reviewer-private.pem" -out "$work/decision.sig" "$work/decision"; }
+run_gate() { "$gate" --evidence "$1" --aggregate-report "$work/report" --candidate-graph "$work/graph" --decision "$work/decision" --decision-signature "$work/decision.sig" --reviewer-key "$work/reviewer.pem" --reviewer-key-id reviewer-key --reviewer-trust-policy "$work/policy" --producer-key "$work/producer.pem" --producer-key-id producer-key --now-utc-ns 200 ${2:-}; }
+make_policy CONTRACT_ONLY; make_decision CONTRACT_ONLY false; run_gate "$work/fixture" --contract-fixture >/dev/null
+fixture_generation=$(cat "$work/fixture/reviewer-generation.current"); fixture_receipt=$work/fixture/reviewer-generations/$fixture_generation/reviewer.receipt
+grep -q '^artifact_mode=CONTRACT_ONLY$' "$fixture_receipt"; grep -q '^release_eligible=false$' "$fixture_receipt"
+make_policy live; make_decision independent-review true; run_gate "$work/live" >/dev/null
+live_generation=$(cat "$work/live/reviewer-generation.current"); live_dir=$work/live/reviewer-generations/$live_generation
+sed '/^receipt_hash=/d' "$live_dir/reviewer.receipt" > "$work/published"; cmp -s "$work/published" "$work/decision"
+[ "$(sed -n 's/^receipt_hash=//p' "$live_dir/reviewer.receipt")" = "$(hash_file "$work/decision")" ]; [ -f "$live_dir/complete.env" ]
+openssl dgst -sha256 -verify "$work/reviewer.pem" -signature "$live_dir/reviewer.sig" "$work/published" >/dev/null
+# Pin the producer key in a diagnostic policy so the explicit distinct-key
+# rejection is reached and its reason is asserted.
+sed "s/^reviewer_key_sha256=.*/reviewer_key_sha256=$(hash_file "$work/producer.pem")/" "$work/policy" > "$work/self-policy"
+if "$gate" --evidence "$work/self" --aggregate-report "$work/report" --candidate-graph "$work/graph" --decision "$work/decision" --decision-signature "$work/decision.sig" --reviewer-key "$work/producer.pem" --reviewer-key-id reviewer-key --reviewer-trust-policy "$work/self-policy" --producer-key "$work/producer.pem" --producer-key-id producer-key --now-utc-ns 200 >"$work/self.out" 2>"$work/self.err"; then exit 1; fi
+grep -q '^BLOCKED: reviewer public key must differ from producer public key$' "$work/self.err"; [ ! -e "$work/self/reviewer-generation.current" ]
+sed 's/^decision=approve$/decision=reject/' "$work/decision" > "$work/rejected"; openssl dgst -sha256 -sign "$work/reviewer-private.pem" -out "$work/rejected.sig" "$work/rejected"
+if "$gate" --evidence "$work/reject" --aggregate-report "$work/report" --candidate-graph "$work/graph" --decision "$work/rejected" --decision-signature "$work/rejected.sig" --reviewer-key "$work/reviewer.pem" --reviewer-key-id reviewer-key --reviewer-trust-policy "$work/policy" --producer-key "$work/producer.pem" --producer-key-id producer-key --now-utc-ns 200 >/dev/null 2>&1; then exit 1; fi
+echo 'PASS: MCI-v2 independent reviewer producer contract'

@@ -1,0 +1,78 @@
+#!/bin/sh
+# Independently administered MCI-v2 aggregate reviewer decision producer.
+set -eu
+LC_ALL=C; export LC_ALL
+
+usage() { echo "usage: $0 --evidence DIR --aggregate-report FILE --candidate-graph FILE --decision FILE --decision-signature FILE --reviewer-key PEM --reviewer-key-id ID --reviewer-trust-policy FILE --producer-key PEM --producer-key-id ID --now-utc-ns NS [--contract-fixture]" >&2; exit 2; }
+evidence= report= graph= decision= decision_sig= reviewer_key= reviewer_id= policy= producer_key= producer_id= now= fixture=false
+while [ "$#" -gt 0 ]; do case "$1" in
+ --evidence) evidence=$2; shift 2;; --aggregate-report) report=$2; shift 2;; --candidate-graph) graph=$2; shift 2;;
+ --decision) decision=$2; shift 2;; --decision-signature) decision_sig=$2; shift 2;; --reviewer-key) reviewer_key=$2; shift 2;;
+ --reviewer-key-id) reviewer_id=$2; shift 2;; --reviewer-trust-policy) policy=$2; shift 2;; --producer-key) producer_key=$2; shift 2;;
+ --producer-key-id) producer_id=$2; shift 2;; --now-utc-ns) now=$2; shift 2;; --contract-fixture) fixture=true; shift;; *) usage;; esac; done
+
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+token() { [ -n "$1" ] && case "$1" in *[!A-Za-z0-9._-]*) return 1;; esac; }
+sha() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1;; esac; }
+uint() { [ -n "$1" ] && case "$1" in *[!0-9]*) return 1;; esac; }
+hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+field() { [ "$(awk -F= -v k="$1" '$1==k{n++}END{print n+0}' "$2")" -eq 1 ] || return 1; sed -n "s/^$1=//p" "$2"; }
+blocked() { echo "BLOCKED: $1" >&2; exit 2; }
+dec_le() { awk -v a="$1" -v b="$2" 'BEGIN{sub(/^0+/,"",a);sub(/^0+/,"",b);if(a=="")a="0";if(b=="")b="0";exit !((length(a)<length(b))||(length(a)==length(b)&&a<=b))}'; }
+age_day() { awk -v a="$1" -v b="$2" 'BEGIN{sub(/^0+/,"",a);sub(/^0+/,"",b);if(a=="")a="0";if(b=="")b="0";if(length(b)<length(a)||(length(b)==length(a)&&b<a))exit 1;borrow=0;out="";i=length(b);j=length(a);while(i>0){x=substr(b,i,1)+0-borrow;y=(j>0?substr(a,j,1)+0:0);if(x<y){x+=10;borrow=1}else borrow=0;out=(x-y)out;i--;j--}sub(/^0+/,"",out);if(out=="")out="0";lim="86400000000000";exit !((length(out)<length(lim))||(length(out)==length(lim)&&out<=lim))}'; }
+
+[ -n "$evidence" ] && regular "$report" && regular "$graph" && regular "$decision" && regular "$decision_sig" && regular "$reviewer_key" && regular "$policy" && regular "$producer_key" && token "$reviewer_id" && token "$producer_id" && uint "$now" || usage
+[ "$reviewer_id" != "$producer_id" ] || blocked 'reviewer and producer key ids must differ'
+[ "$(hash_file "$reviewer_key")" != "$(hash_file "$producer_key")" ] || blocked 'reviewer public key must differ from producer public key'
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P); case "$evidence" in /*) out=$evidence;; *) out=$root/$evidence;; esac
+case "$out" in "$root"/*) :;; *) blocked 'evidence path escapes repository';; esac
+walk=$root; rel=${out#"$root"/}; oldifs=$IFS; IFS=/
+for c in $rel; do [ -n "$c" ] && [ "$c" != . ] && [ "$c" != .. ] || blocked 'unsafe evidence path'; walk=$walk/$c; [ ! -L "$walk" ] || blocked 'symlink in evidence path'; done
+IFS=$oldifs; mkdir -p "$out/receipts" "$out/signatures"; chmod 0700 "$out" "$out/receipts" "$out/signatures"
+work=$(mktemp -d "$out/.review.XXXXXX"); stage=
+cleanup() { rm -rf "$work"; [ -z "$stage" ] || rm -rf "$stage"; }
+trap cleanup EXIT HUP INT TERM
+snapshot() { s=$1 d=$2; before=$(hash_file "$s"); cp -- "$s" "$d"; regular "$s" && [ "$before" = "$(hash_file "$s")" ] && [ "$before" = "$(hash_file "$d")" ]; }
+snapshot "$report" "$work/report" && snapshot "$graph" "$work/graph" && snapshot "$decision" "$work/decision" && snapshot "$decision_sig" "$work/decision.sig" && snapshot "$reviewer_key" "$work/reviewer.pem" && snapshot "$producer_key" "$work/producer.pem" && snapshot "$policy" "$work/policy" || blocked 'input changed during snapshot'
+
+mode=live; artifact_policy=independent-review; release=true
+[ "$fixture" = false ] || { mode=CONTRACT_ONLY; artifact_policy=CONTRACT_ONLY; release=false; }
+[ "$(field policy_schema "$work/policy" 2>/dev/null || true)" = mci-independent-review-trust-v1 ] || blocked 'invalid reviewer trust policy schema'
+[ "$(field reviewer_key_id "$work/policy" 2>/dev/null || true)" = "$reviewer_id" ] && [ "$(field reviewer_key_sha256 "$work/policy" 2>/dev/null || true)" = "$(hash_file "$work/reviewer.pem")" ] || blocked 'reviewer key is not pinned by policy'
+[ "$(field reviewer_role "$work/policy" 2>/dev/null || true)" = independent-release-reviewer ] && [ "$(field reviewer_scope "$work/policy" 2>/dev/null || true)" = mci-v2-aggregate ] && [ "$(field mode "$work/policy" 2>/dev/null || true)" = "$mode" ] || blocked 'reviewer role, scope, or mode is not trusted'
+graph_run=$(field run_id "$work/graph" 2>/dev/null || true); graph_source=$(field source_hash "$work/graph" 2>/dev/null || true); graph_config=$(field configuration_hash "$work/graph" 2>/dev/null || true)
+report_run=$(field run_id "$work/report" 2>/dev/null || true); report_source=$(field source_hash "$work/report" 2>/dev/null || true); report_config=$(field configuration_hash "$work/report" 2>/dev/null || true)
+token "$graph_run" && sha "$graph_source" && sha "$graph_config" || blocked 'candidate graph canonical identity headers are invalid'
+[ "$report_run" = "$graph_run" ] && [ "$report_source" = "$graph_source" ] && [ "$report_config" = "$graph_config" ] || blocked 'aggregate report and candidate graph identities differ'
+candidate=$(field aggregate_candidate_sha256 "$work/report" 2>/dev/null || true); sha "$candidate" || blocked 'aggregate report has no unique candidate hash'
+[ "$candidate" = "$(hash_file "$work/graph")" ] || blocked 'candidate graph hash does not match aggregate report'
+ids='compiler tooling simpleos rendering allocation fault-injection process-safety stress traceability'
+for id in $ids; do [ "$(grep -c "^row=$id|PASS|none|" "$work/report")" -eq 1 ] || blocked "non-review row is not complete: $id"; [ "$(grep -c "^evidence=$id|PASS|none|" "$work/graph")" -eq 1 ] || blocked "candidate graph row incomplete: $id"; done
+
+schema=$(field receipt_schema "$work/decision" 2>/dev/null || true); check=$(field check_id "$work/decision" 2>/dev/null || true); class=$(field producer_class "$work/decision" 2>/dev/null || true); attest=$(field attestation "$work/decision" 2>/dev/null || true); key_id=$(field trusted_key_id "$work/decision" 2>/dev/null || true); sig_rel=$(field signature_relpath "$work/decision" 2>/dev/null || true)
+identity=$(field reviewer_identity "$work/decision" 2>/dev/null || true); role=$(field reviewer_role "$work/decision" 2>/dev/null || true); scope=$(field reviewer_scope "$work/decision" 2>/dev/null || true); run=$(field run_id "$work/decision" 2>/dev/null || true); source=$(field source_hash "$work/decision" 2>/dev/null || true); config=$(field configuration_hash "$work/decision" 2>/dev/null || true)
+got_candidate=$(field aggregate_candidate_sha256 "$work/decision" 2>/dev/null || true); decided=$(field decided_at_utc_ns "$work/decision" 2>/dev/null || true); valid=$(field valid_until_utc_ns "$work/decision" 2>/dev/null || true); verdict=$(field decision "$work/decision" 2>/dev/null || true); scenarios=$(field scenarios "$work/decision" 2>/dev/null || true); artifact_schema=$(field artifact_schema "$work/decision" 2>/dev/null || true); artifact_mode=$(field artifact_mode "$work/decision" 2>/dev/null || true); eligible=$(field release_eligible "$work/decision" 2>/dev/null || true)
+[ "$schema" = mci-independent-review-decision-v1 ] && [ "$check" = reviewer ] && [ "$class" = independent-review ] && [ "$attest" = signed-v1 ] && [ "$key_id" = "$reviewer_id" ] && [ "$sig_rel" = reviewer.sig ] || blocked 'decision envelope is not canonical'
+token "$identity" && [ "$identity" != independent-review ] && [ "$role" = independent-release-reviewer ] && [ "$scope" = mci-v2-aggregate ] || blocked 'human reviewer identity, role, or scope is invalid'
+[ "$run" = "$graph_run" ] && [ "$source" = "$graph_source" ] && [ "$config" = "$graph_config" ] && [ "$got_candidate" = "$candidate" ] || blocked 'decision identities do not exactly equal candidate identities'
+uint "$decided" && uint "$valid" && dec_le "$decided" "$now" && dec_le "$now" "$valid" && age_day "$decided" "$now" && age_day "$decided" "$valid" || blocked 'decision is stale or exceeds 24 hours'
+case "$verdict" in approve|reject) :;; *) blocked 'decision must be approve or reject';; esac; [ "$verdict" = approve ] || blocked 'independent reviewer rejected aggregate candidate'
+[ "$scenarios" = MCI-NFR-017,MCI-NFR-018 ] && [ "$artifact_schema" = mci-aggregate-candidate-v1 ] && [ "$artifact_mode" = "$artifact_policy" ] && [ "$eligible" = "$release" ] || blocked 'decision artifact policy mismatch'
+openssl dgst -sha256 -verify "$work/reviewer.pem" -signature "$work/decision.sig" "$work/decision" >/dev/null 2>&1 || blocked 'invalid external reviewer signature'
+cp "$work/decision" "$work/receipt"; echo "receipt_hash=$(hash_file "$work/decision")" >> "$work/receipt"
+cc -O2 -Wall -Wextra -Werror "$root/scripts/check/lib/mci-secure-publish.c" -o "$work/secure-publish"
+# The signed pair becomes visible only by one directory rename. Consumers must
+# resolve reviewer-generation.current and never admit an unmarked/staged file.
+generations=$out/reviewer-generations; mkdir -p "$generations"; chmod 0700 "$generations"; [ ! -L "$generations" ] || blocked 'unsafe reviewer generation directory'
+stage=$generations/.stage-$candidate-$$; final=$generations/$candidate
+[ ! -e "$stage" ] && [ ! -e "$final" ] && [ ! -e "$out/reviewer-generation.current" ] || blocked 'review generation collision; preserve evidence and use a fresh candidate directory'
+mkdir "$stage"; chmod 0700 "$stage"
+"$work/secure-publish" "$stage" "$work/receipt" reviewer.receipt || { rmdir "$stage" 2>/dev/null || true; blocked 'secure receipt staging failed; retry with unchanged signed inputs'; }
+"$work/secure-publish" "$stage" "$work/decision.sig" reviewer.sig || { rm -f "$stage/reviewer.receipt"; rmdir "$stage" 2>/dev/null || true; blocked 'secure signature staging failed; no generation published; retry'; }
+{ echo generation_schema=mci-independent-review-generation-v1; echo aggregate_candidate_sha256=$candidate; echo receipt_sha256=$(hash_file "$stage/reviewer.receipt"); echo signature_sha256=$(hash_file "$stage/reviewer.sig"); } > "$work/complete"
+"$work/secure-publish" "$stage" "$work/complete" complete.env || { rm -f "$stage/reviewer.receipt" "$stage/reviewer.sig"; rmdir "$stage" 2>/dev/null || true; blocked 'generation marker staging failed; no generation published; retry'; }
+mv "$stage" "$final" || blocked 'atomic generation publication failed; preserve staged evidence and retry after inspection'
+stage=
+printf '%s\n' "$candidate" > "$work/current"
+"$work/secure-publish" "$out" "$work/current" reviewer-generation.current || { rm -f "$final/reviewer.receipt" "$final/reviewer.sig" "$final/complete.env"; rmdir "$final" 2>/dev/null || true; blocked 'activation marker failed; generation rolled back; retry full publication'; }
+echo "PASS: independent reviewer generation published; mode=$mode candidate=$candidate generation=$final"
