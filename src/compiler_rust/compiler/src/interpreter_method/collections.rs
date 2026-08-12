@@ -930,6 +930,21 @@ pub fn handle_byte_array_methods(
             ctx,
         ));
     }
+    // Packed fast paths: read-only metadata ops must NOT widen the blob into
+    // a Vec<Value> — one Value per byte. Font loading measures a ~1.7MB TTF
+    // via per-glyph `.len()` checks; widening made each call O(n) and the
+    // interpreted font path spun at 100% CPU (2.4B Value allocs in 25s —
+    // see doc/08_tracking/bug/interpreter_byte_array_len_widening_spin_2026-08-13.md).
+    if args.is_empty() {
+        match method {
+            "len" | "length" => return Ok(Some(Value::Int(bytes.len() as i64))),
+            "is_empty" => return Ok(Some(Value::Bool(bytes.is_empty()))),
+            _ => {}
+        }
+    }
+    if std::env::var("SIMPLE_TRACE_BIG_BYTEARRAY").is_ok() && bytes.len() > 1_000_000 {
+        eprintln!("[bigba] method={method} len={}", bytes.len());
+    }
     let values = Value::byte_array_values(bytes);
     handle_array_methods(&values, method, args, env, functions, classes, enums, impl_methods)
         .map(|result| result.map(|value| repack_byte_result(value, frozen)))
