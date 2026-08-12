@@ -1,0 +1,73 @@
+# Vulkan 8K strict-JIT retained host-buffer sample crash
+
+Date: 2026-08-12
+
+## Status
+
+OPEN. The retained Vulkan workload completes 200 timed frames, then strict JIT
+terminates with SIGSEGV when the evidence harness directly samples the retained
+`VulkanBackend.host_buf` for readback parity.
+
+## Reproducer shape
+
+- viewport: 7680x4320
+- backend: Vulkan compute on pinned lavapipe
+- damage: one 64x64 rectangle
+- warmup/timed frames: 10/200
+- mirror seed: exact full-width 64-row strided transfers
+- runtime: composed Vulkan-enabled Rust runner plus isolated canonical process
+  owner
+- mode: `SIMPLE_JIT_STRICT=1`
+
+The immediately preceding run, before direct sample assertions were added,
+reported p50 1,040,146 ns and p95 1,539,488 ns, exact 3,276,800 transfer bytes,
+zero full fallbacks, `cpu_fallback=false`, and `completion_unknown=false`, but
+also an invalid zero checksum. Adding reads of indices 0, the damaged pixel,
+and the last pixel changes the post-frame evidence phase into SIGSEGV. GNU time
+reported peak RSS 2,137,920 KiB for the crashing run.
+
+## Required closure
+
+- Isolate whether class-field array borrowing, direct indexed access, or the
+  retained mirror's lifetime is corrupted under JIT.
+- Add a small strict-JIT regression that reads first/middle/last values from a
+  class-owned `[u32]` after repeated mutation.
+- Preserve a nonzero checksum or explicit sampled parity receipt.
+- Re-run the 8K benchmark only after that regression passes.
+
+The timing-only row is not an admissible 8K/80 pass because readback parity is
+unproven. Do not replace the missing proof with an expected checksum.
+
+## Reduction result
+
+`test/fixtures/jit_class_u32_array_retained_read/main.spl` allocates the same
+33,177,600-element `[u32]` size, stores it in a class field, mutates one retained
+pixel for 210 frames, aliases the field, and reads first/changed/last under
+strict JIT. It passes:
+
+```text
+JIT_RETAINED_ARRAY first=0 changed=4280207470 last=0
+```
+
+The defect is therefore not generic large class-owned array access.
+
+## Backend identity collision
+
+Lifecycle markers then proved that `backend.host_buf.len()` remained
+33,177,600 after initialization, mirror seeding, warmup, and all 200 timed
+frames. Materializing the field into a local array produced length zero before
+the first sample read. Repository inspection found two physical classes named
+`VulkanBackend`: Engine2D's retained backend and Skia's unrelated command
+translator. The Skia physical class is now `SkiaVulkanBackend`, with
+`type VulkanBackend = SkiaVulkanBackend` preserving its public API. Its focused
+interpreter specification passes 11/11 through the public alias after the
+rename. A later attempt to extend the same spec did not reach its examples
+because the shared host was saturated by unrelated compiler builds; that
+unverified assertion was not retained.
+
+The first post-fix strict-JIT 8K attempt did not reach frame execution. It
+stalled during compilation while several unrelated Simple builds were active;
+the exact benchmark and `/usr/bin/time` processes were terminated, leaving an
+empty timing receipt. This is host-concurrency/build-capacity evidence, not a
+rendering failure or pass. Do not retry until the host can compile the fixture
+without competing high-memory builds.
