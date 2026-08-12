@@ -139,10 +139,6 @@ pub fn default_runtime_provider() -> Arc<dyn RuntimeSymbolProvider> {
     let mode = RuntimeLoadMode::default_for_profile();
     let mut chained = ChainedProvider::new();
 
-    if let Ok(process_provider) = create_runtime_provider(RuntimeLoadMode::Process) {
-        chained.add(process_provider);
-    }
-
     let base_provider = create_runtime_provider(mode.clone()).unwrap_or_else(|err| {
         eprintln!(
             "warning: failed to initialize runtime provider {:?}: {}; falling back to static",
@@ -151,8 +147,29 @@ pub fn default_runtime_provider() -> Arc<dyn RuntimeSymbolProvider> {
         Arc::new(StaticSymbolProvider)
     });
 
-    chained.add(base_provider);
+    // An explicitly selected dynamic runtime is an override, not a fallback.
+    // Hosted GPU builds use it to replace unavailable executable stubs with a
+    // feature-complete provider. Process-first ordering made
+    // SIMPLE_RUNTIME_PATH ineffective whenever the executable had a stub.
+    if runtime_mode_is_explicit_override(&mode) {
+        chained.add(base_provider);
+        if let Ok(process_provider) = create_runtime_provider(RuntimeLoadMode::Process) {
+            chained.add(process_provider);
+        }
+    } else {
+        if let Ok(process_provider) = create_runtime_provider(RuntimeLoadMode::Process) {
+            chained.add(process_provider);
+        }
+        chained.add(base_provider);
+    }
     Arc::new(chained)
+}
+
+fn runtime_mode_is_explicit_override(mode: &RuntimeLoadMode) -> bool {
+    matches!(
+        mode,
+        RuntimeLoadMode::Dynamic | RuntimeLoadMode::DynamicPath(_) | RuntimeLoadMode::Chained(_)
+    )
 }
 
 /// Create a static-only provider.
@@ -256,5 +273,19 @@ mod tests {
             other => panic!("expected Dynamic, got {:?}", other),
         }
         std::env::remove_var("SIMPLE_RUNTIME_LOAD");
+    }
+
+    #[test]
+    fn test_explicit_dynamic_modes_override_process_symbols() {
+        assert!(!runtime_mode_is_explicit_override(&RuntimeLoadMode::Static));
+        assert!(!runtime_mode_is_explicit_override(&RuntimeLoadMode::Process));
+        assert!(runtime_mode_is_explicit_override(&RuntimeLoadMode::Dynamic));
+        assert!(runtime_mode_is_explicit_override(&RuntimeLoadMode::DynamicPath(
+            "/tmp/runtime-provider.so".to_string()
+        )));
+        assert!(runtime_mode_is_explicit_override(&RuntimeLoadMode::Chained(vec![
+            RuntimeLoadMode::Dynamic,
+            RuntimeLoadMode::Static,
+        ])));
     }
 }
