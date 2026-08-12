@@ -120,6 +120,8 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "__simple_runtime_shutdown",
     "rt_is_interpreter_runtime",
     "rt_alloc",
+    "rt_struct_alloc",
+    "rt_struct_receiver_valid",
     "rt_free",
     "rt_realloc",
     "rt_memcpy",
@@ -2168,13 +2170,35 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_selected_device_name",
     "rt_vulkan_submit_graphics_and_wait_fence",
     "rt_write_file",
-    "sys_get_args",   // -> rt_get_args
-    "sys_exit",       // -> rt_exit
+    "sys_get_args", // -> rt_get_args
+    "sys_exit",     // -> rt_exit
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn struct_allocator_pair_is_present_in_core_and_full_manifests() {
+        for symbol in ["rt_struct_alloc", "rt_struct_receiver_valid"] {
+            assert!(CORE_REQUIRED_RUNTIME_SYMBOLS.contains(&symbol));
+            assert!(RUNTIME_SYMBOL_NAMES.contains(&symbol));
+        }
+    }
+
+    #[test]
+    fn realloc_is_exactly_once_and_adjacent_to_alloc_in_full_manifest() {
+        assert_eq!(
+            RUNTIME_SYMBOL_NAMES
+                .iter()
+                .filter(|&&symbol| symbol == "rt_realloc")
+                .count(),
+            1
+        );
+        assert!(RUNTIME_SYMBOL_NAMES
+            .windows(2)
+            .any(|pair| pair == ["rt_alloc", "rt_realloc"]));
+    }
 
     #[test]
     fn test_abi_version_compatibility() {

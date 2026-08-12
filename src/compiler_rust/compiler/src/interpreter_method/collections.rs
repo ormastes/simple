@@ -38,6 +38,19 @@ fn array_ndim(arr: &[Value]) -> i64 {
     }
 }
 
+/// Read any language-level array representation through the generic array
+/// method kernel.  Packed `[u8]` is deliberately widened only at this
+/// polymorphic boundary; callers that can retain byte semantics repack the
+/// result afterwards.
+fn generic_array_values(value: &Value) -> Option<Vec<Value>> {
+    match value {
+        Value::Array(values) | Value::FrozenArray(values) => Some(values.as_ref().clone()),
+        Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => Some(Value::byte_array_values(bytes)),
+        Value::FixedSizeArray { data, .. } => Some(data.clone()),
+        _ => None,
+    }
+}
+
 /// Handle Array methods
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_array_methods(
@@ -135,9 +148,9 @@ pub fn handle_array_methods(
                 enums,
                 impl_methods,
             )?;
-            if let Value::Array(other_arr) = other {
+            if let Some(other_arr) = generic_array_values(&other) {
                 let mut new_arr = arr.to_vec();
-                new_arr.extend(other_arr.iter().cloned());
+                new_arr.extend(other_arr);
                 Value::array(new_arr)
             } else {
                 let ctx = ErrorContext::new()
@@ -364,7 +377,7 @@ pub fn handle_array_methods(
                 enums,
                 impl_methods,
             )?;
-            if let Value::Array(other_arr) = other {
+            if let Some(other_arr) = generic_array_values(&other) {
                 let result: Vec<Value> = arr
                     .iter()
                     .zip(other_arr.iter())
@@ -870,6 +883,56 @@ pub fn handle_frozen_array_methods(
 
     // Allow all read-only operations by delegating to regular array handler
     handle_array_methods(arr.as_ref(), method, args, env, functions, classes, enums, impl_methods)
+}
+
+fn repack_byte_result(value: Value, frozen: bool) -> Value {
+    let Value::Array(values) = value else {
+        return value;
+    };
+    let bytes: Option<Vec<u8>> = values
+        .iter()
+        .map(|value| match value {
+            Value::UInt { value, .. } => u8::try_from(*value).ok(),
+            Value::Int(value) => u8::try_from(*value).ok(),
+            _ => None,
+        })
+        .collect();
+    match bytes {
+        Some(bytes) if frozen => Value::frozen_byte_array(bytes),
+        Some(bytes) => Value::byte_array(bytes),
+        None => Value::Array(values),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn handle_byte_array_methods(
+    bytes: &[u8],
+    frozen: bool,
+    method: &str,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    if frozen
+        && matches!(
+            method,
+            "push" | "append" | "pop" | "insert" | "remove" | "clear" | "reverse" | "sort" | "extend"
+        )
+    {
+        let ctx = ErrorContext::new()
+            .with_code(codes::INVALID_OPERATION)
+            .with_help("Cannot mutate a frozen byte array");
+        return Err(CompileError::semantic_with_context(
+            format!("Cannot call {}() on frozen byte array", method),
+            ctx,
+        ));
+    }
+    let values = Value::byte_array_values(bytes);
+    handle_array_methods(&values, method, args, env, functions, classes, enums, impl_methods)
+        .map(|result| result.map(|value| repack_byte_result(value, frozen)))
 }
 
 /// Handle FixedSizeArray methods (no size-changing operations)

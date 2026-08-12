@@ -1,0 +1,149 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+test_tmp=$(mktemp -d)
+trap 'chmod -R u+w "$test_tmp" 2>/dev/null || true; rm -rf "$test_tmp"' \
+    EXIT INT TERM
+BOOTSTRAP_STAGE3_FACADE_PATH=\
+"$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+make_tuple() {
+    tuple_root=$1
+    mkdir -p "$tuple_root/deps"
+    printf '#!/bin/sh\necho seed\n' >"$tuple_root/simple"
+    chmod 755 "$tuple_root/simple"
+    dd if=/dev/zero of="$tuple_root/libsimple_native_all.a" \
+        bs=1048576 count=8 >/dev/null 2>&1
+    printf 'backfill\n' >"$tuple_root/libsimple_compiler_backfill.a"
+    printf 'runtime-static\n' >"$tuple_root/deps/libsimple_runtime.a"
+    dd if=/dev/zero of="$tuple_root/deps/decoy.rlib" \
+        bs=1048576 count=64 >/dev/null 2>&1
+    printf 'metadata\n' >"$tuple_root/decoy.d"
+}
+
+source_root="$test_tmp/source"
+generation_root="$test_tmp/generations"
+make_tuple "$source_root"
+mkdir "$generation_root"
+fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+# The 64 MiB dependency decoy is larger than this RSS budget. Projection must
+# neither copy nor retain it while selecting the three authority members.
+if [ "$(uname -s)" = Linux ] && [ -x /usr/bin/time ]; then
+    probe_out="$test_tmp/probe-out"
+    /usr/bin/time -f '%M' sh -c '
+        BOOTSTRAP_STAGE3_FACADE_PATH="$1"
+        export BOOTSTRAP_STAGE3_FACADE_PATH
+        . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+        bootstrap_stage3_copy_seed_tuple "$2" "$3" simple \
+            libsimple_native_all.a libsimple_compiler_backfill.a
+    ' sh "$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs" \
+        "$source_root" "$probe_out" >"$test_tmp/probe.stdout" \
+        2>"$test_tmp/probe.stderr" || fail "tuple RSS probe failed"
+    probe_rss_kib=$(tail -n 1 "$test_tmp/probe.stderr")
+    case "$probe_rss_kib" in
+        ''|*[!0-9]*) fail "tuple RSS probe did not emit KiB: $probe_rss_kib" ;;
+    esac
+    [ "$probe_rss_kib" -le 32768 ] ||
+        fail "tuple projection used ${probe_rss_kib} KiB with a 64 MiB decoy"
+    chmod -R u+w "$probe_out"
+    rm -rf "$probe_out"
+fi
+
+bootstrap_stage3_prepare_seed_generation "$source_root" "$generation_root" \
+    "$fingerprint" simple libsimple_native_all.a \
+    libsimple_compiler_backfill.a aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+staging=$BOOTSTRAP_STAGE3_PREPARED_STAGING
+[ "$(find "$staging" -type f | wc -l | tr -d ' ')" -eq 5 ] ||
+    fail "prepared generation did not contain consumer tuple plus stamp"
+[ ! -e "$staging/deps/decoy.rlib" ] && [ ! -e "$staging/decoy.d" ] ||
+    fail "Cargo decoys entered authority generation"
+[ -f "$staging/deps/libsimple_runtime.a" ] ||
+    fail "Stage4 static runtime consumer artifact was omitted"
+expected_bytes=$(wc -c <"$source_root/simple")
+expected_bytes=$((expected_bytes + $(wc -c \
+    <"$source_root/libsimple_native_all.a")))
+expected_bytes=$((expected_bytes + $(wc -c \
+    <"$source_root/libsimple_compiler_backfill.a")))
+expected_bytes=$((expected_bytes + $(wc -c \
+    <"$source_root/deps/libsimple_runtime.a")))
+actual_payload_bytes=$(wc -c <"$staging/simple")
+actual_payload_bytes=$((actual_payload_bytes + $(wc -c \
+    <"$staging/libsimple_native_all.a")))
+actual_payload_bytes=$((actual_payload_bytes + $(wc -c \
+    <"$staging/libsimple_compiler_backfill.a")))
+actual_payload_bytes=$((actual_payload_bytes + $(wc -c \
+    <"$staging/deps/libsimple_runtime.a")))
+[ "$actual_payload_bytes" -eq "$expected_bytes" ] ||
+    fail "projected payload byte count changed"
+[ "$actual_payload_bytes" -lt 10485760 ] ||
+    fail "decoy bytes were copied into authority"
+
+missing="$test_tmp/missing"
+make_tuple "$missing"
+rm "$missing/libsimple_compiler_backfill.a"
+if bootstrap_stage3_copy_seed_tuple "$missing" "$test_tmp/missing-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a; then
+    fail "missing tuple member was accepted"
+fi
+
+linked="$test_tmp/linked"
+make_tuple "$linked"
+mv "$linked/libsimple_native_all.a" "$linked/native.real"
+ln -s native.real "$linked/libsimple_native_all.a"
+if bootstrap_stage3_copy_seed_tuple "$linked" "$test_tmp/linked-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a; then
+    fail "symlink tuple member was accepted"
+fi
+
+changing="$test_tmp/changing"
+make_tuple "$changing"
+BOOTSTRAP_STAGE3_TEST_MUTATE_AFTER_TUPLE_COPY=1
+export BOOTSTRAP_STAGE3_TEST_MUTATE_AFTER_TUPLE_COPY
+if bootstrap_stage3_copy_seed_tuple "$changing" "$test_tmp/changing-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a; then
+    fail "source mutation during tuple projection was accepted"
+fi
+unset BOOTSTRAP_STAGE3_TEST_MUTATE_AFTER_TUPLE_COPY
+
+replacing="$test_tmp/replacing"
+make_tuple "$replacing"
+BOOTSTRAP_STAGE3_TEST_REPLACE_AFTER_TUPLE_COPY=1
+export BOOTSTRAP_STAGE3_TEST_REPLACE_AFTER_TUPLE_COPY
+if bootstrap_stage3_copy_seed_tuple "$replacing" "$test_tmp/replacing-out" \
+    simple libsimple_native_all.a libsimple_compiler_backfill.a; then
+    fail "source inode replacement during tuple projection was accepted"
+fi
+unset BOOTSTRAP_STAGE3_TEST_REPLACE_AFTER_TUPLE_COPY
+
+[ "$(stat -c '%a' "$staging/simple")" = 500 ] ||
+    fail "seed mode was not frozen executable"
+[ "$(stat -c '%a' "$staging/libsimple_native_all.a")" = 400 ] ||
+    fail "native-all mode was not frozen read-only"
+[ "$(stat -c '%a' "$staging/deps/libsimple_runtime.a")" = 400 ] ||
+    fail "runtime mode was not frozen read-only"
+
+# Name mapping is target-derived: GNU covers Linux, Darwin, and FreeBSD;
+# MSVC uses .exe/.lib. No host-specific copy primitive is involved.
+msvc="$test_tmp/msvc"
+mkdir -p "$msvc/deps"
+printf 'MZ seed\n' >"$msvc/simple.exe"
+chmod 755 "$msvc/simple.exe"
+printf 'native\n' >"$msvc/simple_native_all.lib"
+printf 'backfill\n' >"$msvc/simple_compiler_backfill.lib"
+printf 'runtime\n' >"$msvc/deps/simple_runtime.lib"
+bootstrap_stage3_copy_seed_tuple "$msvc" "$test_tmp/msvc-out" \
+    simple.exe simple_native_all.lib simple_compiler_backfill.lib ||
+    fail "Windows MSVC consumer tuple mapping failed"
+[ -f "$test_tmp/msvc-out/deps/simple_runtime.lib" ] ||
+    fail "Windows MSVC runtime archive was omitted"
+
+echo "PASS: bootstrap Stage 3 projects only a stable seed tuple"

@@ -104,8 +104,7 @@ pub fn rt_text_to_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Str(s)) => s.as_str(),
         _ => "",
     };
-    let bytes: Vec<Value> = text.as_bytes().iter().map(|b| Value::Int(*b as i64)).collect();
-    Ok(Value::Array(std::sync::Arc::new(bytes)))
+    Ok(Value::byte_array(text.as_bytes().to_vec()))
 }
 
 /// Read the raw BYTE at a BYTE index of `text`.
@@ -164,7 +163,7 @@ pub fn rt_char_from_code_fn(args: &[Value]) -> Result<Value, CompileError> {
 /// Callable from Simple as: `rt_bytes_to_text(bytes)`
 pub fn rt_bytes_to_text_fn(args: &[Value]) -> Result<Value, CompileError> {
     match args.first() {
-        Some(Value::Array(arr)) => {
+        Some(value) => {
             // `[u8]` array literals (e.g. `111u8`) evaluate to
             // `Value::UInt { .. }`, not `Value::Int`. A match on `Value::Int`
             // alone silently filtered every element out of a `[u8]` array,
@@ -174,10 +173,9 @@ pub fn rt_bytes_to_text_fn(args: &[Value]) -> Result<Value, CompileError> {
             // `i64.to_char()` dispatch bug was fixed and this became
             // reachable). `Value::as_int()` already handles both `Int` and
             // `UInt` uniformly; use it instead of a manual match.
-            let bytes: Vec<u8> = arr
-                .iter()
-                .filter_map(|v| v.as_int().ok().map(|i| i as u8))
-                .collect();
+            let Some(bytes) = value.try_array_bytes() else {
+                return Ok(Value::text(String::new()));
+            };
             let text = String::from_utf8_lossy(&bytes).into_owned();
             Ok(Value::text(text))
         }
@@ -229,19 +227,16 @@ fn extract_byte(v: &Value) -> u64 {
 ///
 /// Callable from Simple as: `bytes_to_u32_le(bytes)`
 pub fn bytes_to_u32_le_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let items = match args.first() {
-        Some(Value::Array(arr)) => arr.as_ref(),
-        Some(Value::FrozenArray(arr)) => arr.as_ref(),
-        Some(Value::Tuple(arr)) => arr,
-        _ => return Ok(Value::Int(0)),
+    let bytes: Option<Vec<u64>> = match args.first() {
+        Some(Value::Tuple(arr)) => Some(arr.iter().map(extract_byte).collect()),
+        Some(value) => value.try_array_bytes().map(|bytes| bytes.into_iter().map(u64::from).collect()),
+        None => None,
     };
+    let Some(items) = bytes else { return Ok(Value::Int(0)); };
     if items.len() < 4 {
         return Ok(Value::Int(0));
     }
-    let result = extract_byte(&items[0])
-        | (extract_byte(&items[1]) << 8)
-        | (extract_byte(&items[2]) << 16)
-        | (extract_byte(&items[3]) << 24);
+    let result = items[0] | (items[1] << 8) | (items[2] << 16) | (items[3] << 24);
     Ok(Value::Int(result as i64))
 }
 
@@ -276,19 +271,15 @@ pub fn rt_tuple_get_fn(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `bytes_to_u32_be(bytes)`
 pub fn bytes_to_u32_be_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let items = match args.first() {
-        Some(Value::Array(arr)) => arr.as_ref(),
-        Some(Value::FrozenArray(arr)) => arr.as_ref(),
-        Some(Value::Tuple(arr)) => arr,
-        _ => return Ok(Value::Int(0)),
+    let items: Vec<u64> = match args.first() {
+        Some(Value::Tuple(arr)) => arr.iter().map(extract_byte).collect(),
+        Some(value) => match value.try_array_bytes() { Some(bytes) => bytes.into_iter().map(u64::from).collect(), None => return Ok(Value::Int(0)) },
+        None => return Ok(Value::Int(0)),
     };
     if items.len() < 4 {
         return Ok(Value::Int(0));
     }
-    let result = (extract_byte(&items[0]) << 24)
-        | (extract_byte(&items[1]) << 16)
-        | (extract_byte(&items[2]) << 8)
-        | extract_byte(&items[3]);
+    let result = (items[0] << 24) | (items[1] << 16) | (items[2] << 8) | items[3];
     Ok(Value::Int(result as i64))
 }
 
@@ -296,23 +287,22 @@ pub fn bytes_to_u32_be_fn(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `bytes_to_u64_le(bytes)`
 pub fn bytes_to_u64_le_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let items = match args.first() {
-        Some(Value::Array(arr)) => arr.as_ref(),
-        Some(Value::FrozenArray(arr)) => arr.as_ref(),
-        Some(Value::Tuple(arr)) => arr,
-        _ => return Ok(Value::Int(0)),
+    let items: Vec<u64> = match args.first() {
+        Some(Value::Tuple(arr)) => arr.iter().map(extract_byte).collect(),
+        Some(value) => match value.try_array_bytes() { Some(bytes) => bytes.into_iter().map(u64::from).collect(), None => return Ok(Value::Int(0)) },
+        None => return Ok(Value::Int(0)),
     };
     if items.len() < 8 {
         return Ok(Value::Int(0));
     }
-    let result = extract_byte(&items[0])
-        | (extract_byte(&items[1]) << 8)
-        | (extract_byte(&items[2]) << 16)
-        | (extract_byte(&items[3]) << 24)
-        | (extract_byte(&items[4]) << 32)
-        | (extract_byte(&items[5]) << 40)
-        | (extract_byte(&items[6]) << 48)
-        | (extract_byte(&items[7]) << 56);
+    let result = items[0]
+        | (items[1] << 8)
+        | (items[2] << 16)
+        | (items[3] << 24)
+        | (items[4] << 32)
+        | (items[5] << 40)
+        | (items[6] << 48)
+        | (items[7] << 56);
     Ok(Value::Int(result as i64))
 }
 
@@ -320,23 +310,22 @@ pub fn bytes_to_u64_le_fn(args: &[Value]) -> Result<Value, CompileError> {
 ///
 /// Callable from Simple as: `bytes_to_u64_be(bytes)`
 pub fn bytes_to_u64_be_fn(args: &[Value]) -> Result<Value, CompileError> {
-    let items = match args.first() {
-        Some(Value::Array(arr)) => arr.as_ref(),
-        Some(Value::FrozenArray(arr)) => arr.as_ref(),
-        Some(Value::Tuple(arr)) => arr,
-        _ => return Ok(Value::Int(0)),
+    let items: Vec<u64> = match args.first() {
+        Some(Value::Tuple(arr)) => arr.iter().map(extract_byte).collect(),
+        Some(value) => match value.try_array_bytes() { Some(bytes) => bytes.into_iter().map(u64::from).collect(), None => return Ok(Value::Int(0)) },
+        None => return Ok(Value::Int(0)),
     };
     if items.len() < 8 {
         return Ok(Value::Int(0));
     }
-    let result = (extract_byte(&items[0]) << 56)
-        | (extract_byte(&items[1]) << 48)
-        | (extract_byte(&items[2]) << 40)
-        | (extract_byte(&items[3]) << 32)
-        | (extract_byte(&items[4]) << 24)
-        | (extract_byte(&items[5]) << 16)
-        | (extract_byte(&items[6]) << 8)
-        | extract_byte(&items[7]);
+    let result = (items[0] << 56)
+        | (items[1] << 48)
+        | (items[2] << 40)
+        | (items[3] << 32)
+        | (items[4] << 24)
+        | (items[5] << 16)
+        | (items[6] << 8)
+        | items[7];
     Ok(Value::Int(result as i64))
 }
 

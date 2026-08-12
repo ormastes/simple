@@ -3,8 +3,12 @@ use std::fs;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+#[path = "src/runtime_export_scan.rs"]
+mod runtime_export_scan;
+
 fn main() {
     println!("cargo:rerun-if-changed=../common/src/runtime_symbols.rs");
+    println!("cargo:rerun-if-changed=src/runtime_export_scan.rs");
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_guard.h");
@@ -350,15 +354,14 @@ fn collect_c_runtime_exports(
             continue;
         };
         if *source == "runtime_simd_dispatch.c" {
-            let mut dispatch_exports = HashSet::new();
-            collect_c_file_exports(&file, &mut dispatch_exports);
+            let dispatch_exports = runtime_export_scan::c_function_definitions(&file);
             exported.extend(
                 dispatch_exports
                     .into_iter()
                     .filter(|symbol| symbol.starts_with("rt_opencl_")),
             );
         } else {
-            collect_c_file_exports(&file, exported);
+            exported.extend(runtime_export_scan::c_function_definitions(&file));
         }
     }
 }
@@ -393,25 +396,6 @@ fn rust_function_name(line: &str) -> Option<&str> {
     let after_fn = &line[fn_pos + 3..];
     let end = after_fn.find('(')?;
     Some(after_fn[..end].trim())
-}
-
-fn collect_c_file_exports(file: &str, exported: &mut HashSet<String>) {
-    for line in file.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("static ") || trimmed.starts_with("//") || !trimmed.ends_with('{') {
-            continue;
-        }
-        let Some(paren) = trimmed.find('(') else {
-            continue;
-        };
-        let head = trimmed[..paren].trim_end();
-        let Some(symbol) = head.split_whitespace().last() else {
-            continue;
-        };
-        if symbol.chars().all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) {
-            exported.insert(symbol.to_string());
-        }
-    }
 }
 
 fn runtime_symbol_alias(symbol: &str) -> String {

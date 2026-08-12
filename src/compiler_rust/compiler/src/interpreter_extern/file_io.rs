@@ -488,7 +488,7 @@ pub fn rt_file_rename(args: &[Value]) -> Result<Value, CompileError> {
 
 /// Read file as lines.
 ///
-/// Returns a bare `Value::Array` on success and `Value::Nil` on failure --
+/// Returns a bare packed `Value::ByteArray` on success and `Value::Nil` on failure --
 /// NOT an `Option::Some`/`None`-wrapped enum. Every real `.spl` call site
 /// (`src/compiler_rust/lib/std/src/infra/file_io.spl`,
 /// `src/lib/nogc_sync_mut/ffi/io.spl`, `src/lib/nogc_sync_mut/sffi/io.spl`)
@@ -546,10 +546,7 @@ pub fn rt_file_append_text(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_file_read_bytes(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     match fs::read(&path) {
-        Ok(bytes) => {
-            let arr: Vec<Value> = bytes.into_iter().map(|b| Value::Int(b as i64)).collect();
-            Ok(Value::array(arr))
-        }
+        Ok(bytes) => Ok(Value::byte_array(bytes)),
         Err(_) => Ok(Value::Nil),
     }
 }
@@ -579,14 +576,19 @@ pub fn rt_black_box(args: &[Value]) -> Result<Value, CompileError> {
 /// per-element push, sidestepping interpreter dispatch overhead.
 pub fn rt_bytes_alloc(args: &[Value]) -> Result<Value, CompileError> {
     let len = match args.first() {
-        Some(Value::Int(n)) => *n,
-        _ => return Ok(Value::array(vec![])),
+        Some(Value::Int(n)) if *n > 0 => usize::try_from(*n).ok(),
+        Some(Value::UInt { value, .. }) if *value > 0 => usize::try_from(*value).ok(),
+        _ => None,
     };
-    if len <= 0 {
-        return Ok(Value::array(vec![]));
+    let Some(len) = len else {
+        return Ok(Value::byte_array(vec![]));
+    };
+    let mut bytes = Vec::new();
+    if bytes.try_reserve_exact(len).is_err() {
+        return Ok(Value::byte_array(vec![]));
     }
-    let arr: Vec<Value> = vec![Value::Int(0); len as usize];
-    Ok(Value::array(arr))
+    bytes.resize(len, 0);
+    Ok(Value::byte_array(bytes))
 }
 
 fn typed_alloc_len(args: &[Value]) -> Option<usize> {
@@ -659,9 +661,12 @@ pub fn rt_intern_symbol(args: &[Value]) -> Result<Value, CompileError> {
 /// This bypasses the O(N²) interpreter push loop for 100k+ entry tables.
 pub fn rt_smf_parse_relocs(args: &[Value]) -> Result<Value, CompileError> {
     // Extract the [u8] data array
+    if let Some(bytes) = args.first().and_then(Value::byte_array_view) {
+        return parse_smf_relocs_from_bytes(args, bytes);
+    }
     let data_vals = match args.first() {
         Some(Value::Array(a)) => a.as_ref().clone(),
-        _ => return Ok(Value::array(vec![])),
+        _ => return Ok(Value::byte_array(vec![])),
     };
     let data: Vec<u8> = data_vals
         .iter()
@@ -671,9 +676,14 @@ pub fn rt_smf_parse_relocs(args: &[Value]) -> Result<Value, CompileError> {
         })
         .collect();
 
+    parse_smf_relocs_from_bytes(args, &data)
+}
+
+fn parse_smf_relocs_from_bytes(args: &[Value], data: &[u8]) -> Result<Value, CompileError> {
+
     let sections_off = match args.get(1) {
         Some(Value::Int(n)) => *n as usize,
-        _ => return Ok(Value::array(vec![])),
+        _ => return Ok(Value::byte_array(vec![])),
     };
     let section_count = match args.get(2) {
         Some(Value::Int(n)) => *n as usize,
@@ -853,19 +863,18 @@ pub fn rt_smf_relocs_from_path(args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_bytes_from_raw(args: &[Value]) -> Result<Value, CompileError> {
     let ptr = match args.first() {
         Some(Value::Int(n)) => *n,
-        _ => return Ok(Value::array(vec![])),
+        _ => return Ok(Value::byte_array(vec![])),
     };
     let len = match args.get(1) {
         Some(Value::Int(n)) => *n,
-        _ => return Ok(Value::array(vec![])),
+        _ => return Ok(Value::byte_array(vec![])),
     };
     if ptr == 0 || len <= 0 {
-        return Ok(Value::array(vec![]));
+        return Ok(Value::byte_array(vec![]));
     }
     let src = ptr as usize as *const u8;
     let slice = unsafe { std::slice::from_raw_parts(src, len as usize) };
-    let arr: Vec<Value> = slice.iter().map(|&b| Value::Int(b as i64)).collect();
-    Ok(Value::array(arr))
+    Ok(Value::byte_array(slice.to_vec()))
 }
 
 /// Create a [u32] array from a raw pointer to count little-endian u32 values.
@@ -942,6 +951,9 @@ pub fn rt_write_u32s_to_raw(args: &[Value]) -> Result<Value, CompileError> {
 /// zstd frames). Fix: map both variants to their u8 representation.
 pub fn rt_file_write_bytes(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
+    if let Some(bytes) = args.get(1).and_then(Value::byte_array_view) {
+        return Ok(Value::Bool(fs::write(&path, bytes).is_ok()));
+    }
     let bytes_arr = match args.get(1) {
         Some(Value::Array(arr)) => arr,
         Some(Value::FrozenArray(arr)) => arr,
@@ -1096,6 +1108,53 @@ pub fn rt_file_move(args: &[Value]) -> Result<Value, CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_alloc_uses_packed_storage_for_signed_and_unsigned_lengths() {
+        for length in [Value::Int(4), Value::UInt { value: 4, width: 64 }] {
+            let allocated = rt_bytes_alloc(&[length]).unwrap();
+            let Value::ByteArray(bytes) = allocated else {
+                panic!("rt_bytes_alloc must produce packed byte storage");
+            };
+            assert_eq!(bytes.as_slice(), &[0, 0, 0, 0]);
+            assert!(bytes.capacity() <= 8, "small packed allocation must not box one Value per byte");
+        }
+    }
+
+    #[test]
+    fn bytes_alloc_invalid_lengths_fail_closed() {
+        for args in [vec![], vec![Value::Int(0)], vec![Value::Int(-1)], vec![Value::Bool(true)]] {
+            let allocated = rt_bytes_alloc(&args).unwrap();
+            assert_eq!(allocated.byte_array_view(), Some([].as_slice()));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bytes_alloc_rss_stays_within_four_times_payload() {
+        fn rss_bytes() -> u64 {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .find_map(|line| line.strip_prefix("VmRSS:"))
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap()
+                * 1024
+        }
+
+        const LEN: usize = 8 * 1024 * 1024;
+        let before = rss_bytes();
+        let allocated = rt_bytes_alloc(&[Value::UInt { value: LEN as u64, width: 64 }]).unwrap();
+        let after = rss_bytes();
+        assert_eq!(allocated.byte_array_view().map(<[u8]>::len), Some(LEN));
+        let delta = after.saturating_sub(before);
+        assert!(
+            delta <= (LEN as u64 * 4) + (4 * 1024 * 1024),
+            "packed allocation RSS delta {delta} exceeds 4x payload plus measurement slack"
+        );
+        assert!(std::mem::size_of::<Value>() > 4, "boxed Value storage would not demonstrate the regression");
+    }
 
     // Regression coverage for the P2 interpreter-over-count bug
     // (doc/08_tracking/bug/dir_walk_native_runtime_parity_2026-07-16.md,
@@ -1311,7 +1370,7 @@ mod tests {
         // Option-wrapped return left those call sites holding a boxed enum
         // where a raw array was expected.
         match bytes {
-            Value::Array(values) => assert_eq!(values.len(), 11),
+            Value::ByteArray(values) => assert_eq!(values.len(), 11),
             other => panic!("unexpected bytes value: {other:?}"),
         }
     }

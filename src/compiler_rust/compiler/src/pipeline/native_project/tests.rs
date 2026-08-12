@@ -6759,46 +6759,162 @@ fn test_compile_failure_does_not_link_cached_objects() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_compile_failure_preserves_completed_objects_for_retry() {
-    for parallel in [false, true] {
-        let temp = tempfile::tempdir().unwrap();
-        let source_dir = temp.path().join("src");
-        fs::create_dir_all(&source_dir).unwrap();
-        fs::write(source_dir.join("good.spl"), "fn good_probe() -> i64:\n    return 101\n").unwrap();
-        let failing = source_dir.join("failing.spl");
-        fs::write(&failing, "fn failing_probe() -> i64:\n    return )\n").unwrap();
+    for no_mangle in [false, true] {
+        for parallel in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let source_dir = temp.path().join("src");
+            fs::create_dir_all(&source_dir).unwrap();
+            fs::write(source_dir.join("good.spl"), "fn good_probe() -> i64:\n    return 101\n").unwrap();
+            let failing = source_dir.join("failing.spl");
+            fs::write(&failing, "fn failing_probe() -> i64:\n    return )\n").unwrap();
 
-        let cache_dir = temp.path().join("cache");
-        let archive = temp.path().join("libretry.a");
-        let config = || NativeBuildConfig {
-            emit_archive: true,
-            incremental: true,
-            parallel,
-            no_mangle: true,
-            cache_dir: Some(cache_dir.clone()),
-            ..NativeBuildConfig::default()
-        };
+            let cache_dir = temp.path().join("cache");
+            let archive = temp.path().join("libretry.a");
+            let config = || NativeBuildConfig {
+                emit_archive: true,
+                incremental: true,
+                parallel,
+                no_mangle,
+                cache_dir: Some(cache_dir.clone()),
+                ..NativeBuildConfig::default()
+            };
 
+            NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+                .config(config())
+                .source_dir(source_dir.clone())
+                .build()
+                .unwrap_err();
+
+            let completed = fs::read_dir(cache_dir.join("objects"))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "o"))
+                .count();
+            assert_eq!(completed, 1, "successful object was discarded with failed batch");
+
+            fs::write(&failing, "fn failing_probe() -> i64:\n    return 202\n").unwrap();
+            let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive)
+                .config(config())
+                .source_dir(source_dir)
+                .build()
+                .unwrap();
+            assert_eq!(result.cached, 1, "retry did not reuse the completed object");
+        }
+    }
+}
+
+/// A keyed cache pathname does not make corrupt bytes trustworthy. Reject the
+/// bad payload, rebuild that module, and retain the other valid cache hit.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_incremental_cache_rejects_corrupt_mangled_object() {
+    let temp = tempfile::tempdir().unwrap();
+    let source_dir = temp.path().join("src");
+    fs::create_dir_all(&source_dir).unwrap();
+    fs::write(source_dir.join("a.spl"), "fn cache_a() -> i64:\n    return 11\n").unwrap();
+    fs::write(source_dir.join("b.spl"), "fn cache_b() -> i64:\n    return 22\n").unwrap();
+
+    let cache_dir = temp.path().join("cache");
+    let archive = temp.path().join("libcache.a");
+    let config = || NativeBuildConfig {
+        emit_archive: true,
+        incremental: true,
+        parallel: false,
+        no_mangle: false,
+        cache_dir: Some(cache_dir.clone()),
+        ..NativeBuildConfig::default()
+    };
+    let build = || {
         NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
             .config(config())
             .source_dir(source_dir.clone())
             .build()
-            .unwrap_err();
-
-        let completed = fs::read_dir(cache_dir.join("objects"))
             .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "o"))
-            .count();
-        assert_eq!(completed, 1, "successful object was discarded with failed batch");
+    };
 
-        fs::write(&failing, "fn failing_probe() -> i64:\n    return 202\n").unwrap();
-        let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive)
-            .config(config())
-            .source_dir(source_dir)
-            .build()
-            .unwrap();
-        assert_eq!(result.cached, 1, "retry did not reuse the completed object");
-    }
+    let cold = build();
+    assert_eq!(cold.cached, 0);
+    let mut objects: Vec<_> = fs::read_dir(cache_dir.join("objects"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "o"))
+        .collect();
+    objects.sort();
+    assert_eq!(objects.len(), 2);
+    fs::write(&objects[0], b"not an object").unwrap();
+
+    let retry = build();
+    assert_eq!(retry.cached, 1, "valid sibling object should remain reusable");
+    assert_eq!(retry.compiled, 1, "corrupt keyed object must be recompiled");
+
+    fs::write(source_dir.join("b.spl"), "fn cache_b() -> i64:\n    return 33\n").unwrap();
+    let changed = build();
+    assert_eq!(changed.cached, 1, "unchanged sibling should still hit its key");
+    assert_eq!(changed.compiled, 1, "changed source key must not reuse stale object bytes");
+}
+
+#[test]
+fn test_cache_key_separates_effective_llvm_instrumentation() {
+    let base = GlobalBuildFingerprint {
+        producer: 1,
+        opt_level: 2,
+        entry_closure: 3,
+        target: 4,
+        linker_script: 5,
+        layout: 6,
+        instrumentation: super::hash_one(&(false, false)),
+    };
+    let mut asan = base;
+    asan.instrumentation = super::hash_one(&(true, false));
+    let mut memprof = base;
+    memprof.instrumentation = super::hash_one(&(false, true));
+    assert_ne!(base.combined(), asan.combined());
+    assert_ne!(base.combined(), memprof.combined());
+    assert_ne!(asan.combined(), memprof.combined());
+    assert_eq!(asan.changed_reason(&base), Some("codegen instrumentation changed"));
+}
+
+#[test]
+fn test_cache_persist_failure_is_best_effort() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing_parent = temp.path().join("missing").join("object.o");
+    assert!(!super::compiler::persist_compiled_object_best_effort(
+        &missing_parent,
+        b"object bytes",
+        Path::new("probe.spl"),
+    ));
+}
+
+#[test]
+fn test_cache_rejects_relocatable_object_for_wrong_architecture() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("wrong-arch.o");
+    let (expected, format) = super::expected_cached_object_identity();
+    let wrong = if expected == object::Architecture::Aarch64 {
+        object::Architecture::X86_64
+    } else {
+        object::Architecture::Aarch64
+    };
+    let object = object::write::Object::new(format, wrong, object::Endianness::Little);
+    fs::write(&path, object.write().unwrap()).unwrap();
+    assert!(super::read_usable_cached_object(&path).is_none());
+}
+
+#[test]
+fn test_cache_invalid_read_never_unlinks_concurrent_publication_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("shared.o");
+    fs::write(&path, b"invalid").unwrap();
+    assert!(super::read_usable_cached_object(&path).is_none());
+    assert!(path.exists(), "reader must not unlink a path another builder can publish");
+}
+
+#[test]
+fn test_cache_excludes_entry_and_inline_asm_objects() {
+    assert!(!super::object_cache_eligible(true, "fn main():\n    return 0\n"));
+    assert!(!super::object_cache_eligible(false, "asm { nop }\n"));
+    assert!(super::object_cache_eligible(false, "fn helper():\n    return 0\n"));
 }
 
 /// Regression test for a suspected cache hit/miss mix bug (issue #64): when an
@@ -7352,6 +7468,7 @@ fn test_global_build_fingerprint_manifest_roundtrip_and_reason() {
         target: 0x3333_3333_3333_3333,
         linker_script: 0x4444_4444_4444_4444,
         layout: 0x5555_5555_5555_5555,
+        instrumentation: 0x6666_6666_6666_6666,
     };
     let line = base.to_manifest_line();
     let parsed = GlobalBuildFingerprint::from_manifest_line(&line).expect("manifest line must parse");

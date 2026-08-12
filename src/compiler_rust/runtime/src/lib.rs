@@ -9,6 +9,11 @@
 
 include!(concat!(env!("OUT_DIR"), "/runtime_symbol_entries.rs"));
 
+// The build script consumes this scanner directly; include it in the library
+// test target as well so its definition/prototype discrimination is executed.
+#[cfg(test)]
+mod runtime_export_scan;
+
 pub mod hir_core;
 pub mod loader;
 pub mod aop;
@@ -350,6 +355,55 @@ fn runtime_symbol_table_contains_monotonic_time() {
     let second = now();
     assert!(first >= 0);
     assert!(second >= first);
+}
+
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
+fn runtime_symbol_table_keeps_struct_allocator_and_receiver_validator_paired() {
+    let allocator = RUNTIME_SYMBOL_ENTRIES
+        .iter()
+        .find(|entry| entry.name == "rt_struct_alloc")
+        .expect("struct allocator provider must be registered");
+    let validator = RUNTIME_SYMBOL_ENTRIES
+        .iter()
+        .find(|entry| entry.name == "rt_struct_receiver_valid")
+        .expect("struct receiver validator provider must be registered");
+    assert!(!allocator.ptr.is_null());
+    assert!(!validator.ptr.is_null());
+
+    let alloc: extern "C" fn(i64) -> *mut u8 = unsafe { std::mem::transmute(allocator.ptr) };
+    let valid: extern "C" fn(i64, i64, i64) -> i8 = unsafe { std::mem::transmute(validator.ptr) };
+    let realloc: extern "C" fn(*mut u8, i64) -> *mut u8 = unsafe {
+        let entry = RUNTIME_SYMBOL_ENTRIES
+            .iter()
+            .find(|entry| entry.name == "rt_realloc")
+            .expect("runtime realloc provider must be registered");
+        std::mem::transmute(entry.ptr)
+    };
+    let free: extern "C" fn(*mut u8) = unsafe {
+        let entry = RUNTIME_SYMBOL_ENTRIES
+            .iter()
+            .find(|entry| entry.name == "rt_free")
+            .expect("runtime free provider must be registered");
+        std::mem::transmute(entry.ptr)
+    };
+
+    let ptr = alloc(16);
+    assert!(!ptr.is_null());
+    let tagged = (ptr as i64) | 1;
+    assert_eq!(valid(tagged, 0, 8), 1);
+    assert_eq!(valid(tagged, 8, 8), 1);
+    assert_eq!(valid(tagged, 9, 8), 0);
+    assert_eq!(valid(9, 0, 8), 0);
+    unsafe { ptr.write(0x5a) };
+    let grown = realloc(ptr, 24);
+    assert!(!grown.is_null());
+    assert_eq!(valid(tagged, 0, 8), 0);
+    let grown_tagged = (grown as i64) | 1;
+    assert_eq!(valid(grown_tagged, 16, 8), 1);
+    assert_eq!(unsafe { grown.read() }, 0x5a);
+    free(grown);
+    assert_eq!(valid(grown_tagged, 0, 8), 0);
 }
 
 #[cfg(all(test, feature = "runtime-symbol-table"))]
@@ -727,7 +781,7 @@ pub use value::{
     rt_browser_http_job_cancel, rt_browser_http_job_free, rt_browser_http_job_poll, rt_browser_http_job_start,
     rt_browser_http_job_start_public_limited, rt_browser_http_job_take_error, rt_browser_http_job_take_response,
     rt_dns_lookup, rt_io_tcp_connect, rt_io_tcp_connect_timeout, rt_io_tcp_drain_line, rt_io_tcp_flush,
-    rt_io_tcp_local_addr, rt_io_tcp_peer_addr, rt_io_tcp_read, rt_io_tcp_read_exact, rt_io_tcp_read_exact_len,
+    rt_io_tcp_local_addr, rt_io_tcp_peer_addr, rt_io_tcp_probe_peer, rt_io_tcp_read, rt_io_tcp_read_exact, rt_io_tcp_read_exact_len,
     rt_io_tcp_read_line, rt_io_tcp_set_nodelay, rt_io_tcp_set_read_timeout, rt_io_tcp_set_write_timeout,
     rt_io_tcp_shutdown, rt_io_tcp_write, rt_io_tcp_write_text, rt_io_tcp_write_text_read_exact_len,
     rt_tls_client_close, rt_tls_client_config_add_root_cert, rt_tls_client_config_enable_sni,

@@ -319,6 +319,10 @@ impl From<&Value> for BridgeValue {
             Value::Symbol(s) => BridgeValue::symbol(s),
             Value::Array(items) => Self::from_vec_with_tag(items, bridge_tags::ARRAY),
             Value::FrozenArray(items) => Self::from_vec_with_tag(items, bridge_tags::ARRAY),
+            Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => {
+                let items = Value::byte_array_values(bytes);
+                Self::from_vec_with_tag(&items, bridge_tags::ARRAY)
+            }
             Value::FixedSizeArray { data, .. } => Self::from_vec_with_tag(data, bridge_tags::ARRAY),
             Value::Tuple(items) => Self::from_vec_with_tag(items, bridge_tags::TUPLE),
             Value::LabeledTuple { values, .. } => Self::from_vec_with_tag(values, bridge_tags::TUPLE),
@@ -492,6 +496,19 @@ impl From<&Value> for BridgeValue {
                     extended: CString::new(data).unwrap().into_raw() as *mut u8,
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod packed_byte_tests {
+    use super::*;
+
+    #[test]
+    fn packed_and_frozen_bytes_cross_the_array_bridge() {
+        for value in [Value::byte_array(vec![1, 2]), Value::frozen_byte_array(vec![3, 4])] {
+            let bridge = BridgeValue::from(&value);
+            assert_eq!(bridge.tag, bridge_tags::ARRAY);
         }
     }
 }

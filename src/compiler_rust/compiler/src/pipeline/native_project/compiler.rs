@@ -179,7 +179,7 @@ fn persist_llvm_codegen_success(
     Ok(())
 }
 
-fn persist_compiled_object(cache_path: &Path, object: &[u8]) -> Result<(), String> {
+pub(super) fn persist_compiled_object(cache_path: &Path, object: &[u8]) -> Result<(), String> {
     let parent = cache_path
         .parent()
         .ok_or_else(|| format!("cache object has no parent: {}", cache_path.display()))?;
@@ -191,6 +191,16 @@ fn persist_compiled_object(cache_path: &Path, object: &[u8]) -> Result<(), Strin
             Ok(existing) if existing == object => Ok(()),
             _ => Err(format!("persist cache object: {}", e.error)),
         },
+    }
+}
+
+pub(super) fn persist_compiled_object_best_effort(cache_path: &Path, object: &[u8], source_path: &Path) -> bool {
+    match persist_compiled_object(cache_path, object) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("[native-incremental] cache write skipped for {}: {error}", source_path.display());
+            false
+        }
     }
 }
 
@@ -467,7 +477,7 @@ impl NativeProjectBuilder {
                         let obj_path = temp_dir.join(format!("mod_{}.o", idx));
                         std::fs::write(&obj_path, &obj_code).map_err(|e| (path.clone(), format!("write .o: {e}")))?;
                         if let Some(cache_path) = cache_path {
-                            persist_compiled_object(cache_path, &obj_code).map_err(|e| (path.clone(), e))?;
+                            persist_compiled_object_best_effort(cache_path, &obj_code, path);
                         }
                         if verbose && (progress_i + 1) % 50 == 0 {
                             eprintln!("  [{}/{}] compiled", progress_i + 1, total);
@@ -518,7 +528,7 @@ impl NativeProjectBuilder {
                         let obj_path = temp_dir.join(format!("mod_{}.o", idx));
                         std::fs::write(&obj_path, &obj_code).map_err(|e| (path.clone(), format!("write .o: {e}")))?;
                         if let Some(cache_path) = cache_path {
-                            persist_compiled_object(cache_path, &obj_code).map_err(|e| (path.clone(), e))?;
+                            persist_compiled_object_best_effort(cache_path, &obj_code, path);
                         }
                         if self.config.verbose && (progress_i + 1) % 10 == 0 {
                             eprintln!("  [{}/{}] compiled", progress_i + 1, total);

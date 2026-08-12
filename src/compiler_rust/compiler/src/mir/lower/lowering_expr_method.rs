@@ -147,6 +147,17 @@ impl<'a> MirLowerer<'a> {
         if args.is_empty() {
             let effective_ty = receiver_local_ty.unwrap_or(receiver.ty);
             match method {
+                "bytes" if effective_ty == TypeId::STRING => {
+                    // The receiver type is authoritative.  Leaving this as a
+                    // name-dispatched method lets a same-leaf user method
+                    // (for example `PointerSize.bytes`) capture the call when
+                    // the module-wide import map is built.
+                    return self.lower_builtin_call_expr(
+                        "rt_string_bytes",
+                        std::slice::from_ref(receiver),
+                        TypeId::ANY,
+                    );
+                }
                 "ord" | "codepoint" | "code_point" if effective_ty == TypeId::STRING => {
                     let zero = HirExpr {
                         kind: crate::hir::HirExprKind::Integer(0),
