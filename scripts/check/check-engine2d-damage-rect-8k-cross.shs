@@ -3,6 +3,12 @@
 # same real-8K/64x64 damage oracle on x86, AArch64, and RV64GCV.
 set -euo pipefail
 
+p95_budget_ns="${ENGINE2D_DAMAGE_P95_BUDGET_NS:-12500000}"
+[[ "$p95_budget_ns" =~ ^[0-9]+$ ]] && [[ "$p95_budget_ns" -gt 0 ]] || {
+    echo "engine2d_damage_rect_8k_cross_status=fail reason=invalid-p95-budget" >&2
+    exit 2
+}
+
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 for tool in git cc aarch64-linux-gnu-gcc riscv64-linux-gnu-gcc qemu-aarch64 qemu-riscv64 timeout; do
     command -v "$tool" >/dev/null 2>&1 || {
@@ -27,9 +33,19 @@ riscv64-linux-gnu-gcc "${common[@]}" -static -march=rv64gcv -mabi=lp64d \
     "$work/src/runtime/runtime_simd_dispatch.c" "$work/test/bench.c" \
     -Wl,--gc-sections -o "$work/bench-rv64"
 
+receipt_value() {
+    local receipt="$1" key="$2" token
+    for token in $receipt; do
+        case "$token" in
+            "$key"=*) printf '%s\n' "${token#*=}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
 run_lane() {
-    local lane="$1"; shift
-    local output
+    local lane="$1" require_hits="$2"; shift 2
+    local output blit_p95 scroll_p95 hits
     output="$(timeout 60s "$@")" || {
         echo "engine2d_damage_rect_8k_lane=$lane status=fail reason=execution" >&2
         return 1
@@ -42,11 +58,26 @@ run_lane() {
         echo "engine2d_damage_rect_8k_lane=$lane status=fail reason=parity-receipt" >&2
         return 1
     }
+    blit_p95="$(receipt_value "$output" blit_p95_ns)" || return 1
+    scroll_p95="$(receipt_value "$output" scroll_p95_ns)" || return 1
+    hits="$(receipt_value "$output" native_hits)" || return 1
+    [[ "$blit_p95" =~ ^[0-9]+$ && "$scroll_p95" =~ ^[0-9]+$ && "$hits" =~ ^[0-9]+$ ]] || {
+        echo "engine2d_damage_rect_8k_lane=$lane status=fail reason=numeric-receipt" >&2
+        return 1
+    }
+    if (( blit_p95 > p95_budget_ns || scroll_p95 > p95_budget_ns )); then
+        echo "engine2d_damage_rect_8k_lane=$lane status=fail reason=p95-budget blit_p95_ns=$blit_p95 scroll_p95_ns=$scroll_p95 budget_ns=$p95_budget_ns" >&2
+        return 1
+    fi
+    if [[ "$require_hits" == "true" && "$hits" -le 0 ]]; then
+        echo "engine2d_damage_rect_8k_lane=$lane status=fail reason=no-native-hits" >&2
+        return 1
+    fi
     echo "$output"
-    echo "engine2d_damage_rect_8k_lane=$lane status=pass"
+    echo "engine2d_damage_rect_8k_lane=$lane status=pass budget_ns=$p95_budget_ns native_hits=$hits"
 }
 
-run_lane x86_64 "$work/bench-x86"
-run_lane aarch64 qemu-aarch64 -cpu max "$work/bench-arm64"
-run_lane riscv64 qemu-riscv64 -cpu rv64,v=true,vlen=128,elen=64,vext_spec=v1.0 "$work/bench-rv64"
+run_lane x86_64 false "$work/bench-x86"
+run_lane aarch64 true qemu-aarch64 -cpu max "$work/bench-arm64"
+run_lane riscv64 true qemu-riscv64 -cpu rv64,v=true,vlen=128,elen=64,vext_spec=v1.0 "$work/bench-rv64"
 echo "engine2d_damage_rect_8k_cross_status=pass source=committed-head"
