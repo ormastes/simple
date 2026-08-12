@@ -49,8 +49,8 @@ static uint64_t checksum(const int64_t *data, int64_t count) {
     return h;
 }
 
-static void emit_times(const char *op, uint64_t *times, int samples,
-                       int64_t pixels, uint64_t budget_ns) {
+static uint64_t emit_times(const char *op, uint64_t *times, int samples,
+                           int64_t pixels, uint64_t budget_ns) {
     qsort(times, (size_t)samples, sizeof(uint64_t), compare_u64);
     int p50_index = (samples - 1) / 2;
     int p95_index = (95 * samples + 99) / 100 - 1;
@@ -64,6 +64,7 @@ static void emit_times(const char *op, uint64_t *times, int samples,
                                 (times[p50_index] ? times[p50_index] : 1)));
     printf("engine2d_8k_%s_within_80fps_single_op_budget=%s\n", op,
            times[p95_index] <= budget_ns ? "true" : "false");
+    return times[p95_index];
 }
 
 int main(int argc, char **argv) {
@@ -87,7 +88,9 @@ int main(int argc, char **argv) {
     uint64_t *copy_ns = (uint64_t *)calloc((size_t)samples, sizeof(uint64_t));
     uint64_t *blend_ns = (uint64_t *)calloc((size_t)samples, sizeof(uint64_t));
     uint64_t *blend_const_ns = (uint64_t *)calloc((size_t)samples, sizeof(uint64_t));
-    if (!dst || !src || !fill_ns || !copy_ns || !blend_ns || !blend_const_ns) return 3;
+    uint64_t *frame_ns = (uint64_t *)calloc((size_t)samples, sizeof(uint64_t));
+    if (!dst || !src || !fill_ns || !copy_ns || !blend_ns ||
+        !blend_const_ns || !frame_ns) return 3;
     for (int64_t i = 0; i < pixels; i++) {
         uint32_t sa = (uint32_t)((i * 37) & 255);
         uint32_t sp = (sa << 24) | ((uint32_t)(i * 13) & 0x00ffffffu);
@@ -98,7 +101,8 @@ int main(int argc, char **argv) {
     BenchArray src_array = {0, 0, {0}, pixels, pixels, src};
     rt_simd_engine2d_neon_reset();
     for (int sample = 0; sample < samples; sample++) {
-        uint64_t start = now_ns();
+        uint64_t frame_start = now_ns();
+        uint64_t start = frame_start;
         rt_engine2d_simd_fill_span_u32((SplArray *)&dst_array, 0, active_pixels, 0xff102030u);
         fill_ns[sample] = now_ns() - start;
 
@@ -118,6 +122,7 @@ int main(int argc, char **argv) {
         rt_engine2d_simd_blend_const_span_u32((SplArray *)&dst_array, 0,
                                              active_pixels, 0x804080c0u);
         blend_const_ns[sample] = now_ns() - start;
+        frame_ns[sample] = now_ns() - frame_start;
     }
     const uint64_t budget_ns = 12500000ULL;
     printf("engine2d_8k_schema=engine2d-simd-ops-v1\n");
@@ -134,6 +139,10 @@ int main(int argc, char **argv) {
     emit_times("copy", copy_ns, samples, active_pixels, budget_ns);
     emit_times("blend", blend_ns, samples, active_pixels, budget_ns);
     emit_times("blend_const", blend_const_ns, samples, active_pixels, budget_ns);
+    uint64_t frame_p95 = emit_times(
+        "six_call_frame", frame_ns, samples, active_pixels, budget_ns);
+    printf("engine2d_8k_active_damage_primitive_budget_met=%s\n",
+           frame_p95 <= budget_ns ? "true" : "false");
     printf("engine2d_8k_native_simd_hits=%lld\n",
            (long long)rt_simd_engine2d_neon_hits());
     printf("engine2d_8k_checksum=%llu\n", (unsigned long long)checksum(dst, pixels));
@@ -141,7 +150,7 @@ int main(int argc, char **argv) {
     if (getrusage(RUSAGE_SELF, &usage) == 0)
         printf("engine2d_8k_max_rss_kib=%ld\n", usage.ru_maxrss);
     printf("engine2d_8k_full_dynamic_frame_80fps_proven=false\n");
-    free(blend_const_ns); free(blend_ns); free(copy_ns); free(fill_ns);
+    free(frame_ns); free(blend_const_ns); free(blend_ns); free(copy_ns); free(fill_ns);
     free(src); free(dst);
     return 0;
 }
