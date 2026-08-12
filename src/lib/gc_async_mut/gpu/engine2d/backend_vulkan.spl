@@ -219,6 +219,7 @@ class VulkanBackend:
     present_readback_rect_count: i64
     present_full_readback_count: i64
     present_noop_count: i64
+    device_finalize_no_readback_count: i64
     frame_batching_enabled: bool
     pending_compute_command: i64
     pending_compute_pipelines: [i64]   # preallocated, VK_PENDING_COMPUTE_CAP=16 slots
@@ -291,6 +292,7 @@ class VulkanBackend:
             present_readback_rect_count: 0,
             present_full_readback_count: 0,
             present_noop_count: 0,
+            device_finalize_no_readback_count: 0,
             frame_batching_enabled: false,
             pending_compute_command: 0,
             pending_compute_pipelines: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -417,6 +419,7 @@ impl RenderBackend for VulkanBackend:
         self.present_readback_rect_count = 0
         self.present_full_readback_count = 0
         self.present_noop_count = 0
+        self.device_finalize_no_readback_count = 0
         self.pending_compute_command = 0
         self.pending_compute_pipelines = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         self.pending_compute_descriptors = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -854,6 +857,29 @@ impl RenderBackend for VulkanBackend:
             self.completion_unknown = true
             return false
         pending_status != 0
+
+    me finalize_compute_frame_no_readback() -> bool:
+        """Finish a storage-buffer frame without copying it to the host.
+
+        This is deliberately not called presentation: VulkanBackend currently
+        owns no swapchain/surface. A skipped cache refresh invalidates the host
+        mirror so any later present/readback must reseed it from the complete
+        device framebuffer instead of patching a stale retained frame.
+        """
+        self.present_readback_bytes = 0
+        self.present_readback_rect_count = 0
+        if self.completion_unknown:
+            return false
+        val pending_status = self._flush_pending_compute()
+        if pending_status <= 0:
+            if pending_status < 0:
+                self.completion_unknown = true
+            return false
+        if self.dirty:
+            self.host_mirror_valid = false
+        self._clear_present_damage()
+        self.device_finalize_no_readback_count += 1
+        true
 
     me stage_present_damage(rects: [i64]) -> bool:
         """Copy an exact, non-overlapping damage plan for the next present.
