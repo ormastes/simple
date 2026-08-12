@@ -25,8 +25,9 @@ use std.common.ui.draw_ir.{
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_tiles_gpu.{
     TileLaneRender, tile_gpu_backend_name, tile_gpu_flag_enabled,
-    tile_lane_render_commands
+    tile_lane_render_commands, tile_lane_render_retained_damage_into
 }
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 # Two 600x400 readback + per-tile checksum passes exceed the interpreter's
 # default 10M-operation cap. The driver reads SIMPLE_EXECUTION_LIMIT once at
 # startup, so the runner forwards this directive into the child env:
@@ -103,6 +104,22 @@ fn _gpu_lane() -> TileLaneRender:
         tile_gpu_backend_name())
 
 describe "tile gpu lane (T4)":
+
+    it "reuses a retained web surface without clearing outside damage":
+        var engine = Engine2D.create_with_backend(6, 3, "software")
+        engine.clear(CLEAR)
+        engine.present()
+        val frame = tile_lane_render_retained_damage_into(
+            engine, [draw_ir_rect("update", 0, 0, 6, 3, 0xFFCC2222u32)],
+            [2, 1, 2, 1], "software", true)
+        engine = frame.engine
+        expect(frame.render.readback_source != "not_requested").to_equal(true)
+        expect(frame.render.pixels).to_equal([
+            CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR,
+            CLEAR, CLEAR, 0xFFCC2222u32, 0xFFCC2222u32, CLEAR, CLEAR,
+            CLEAR, CLEAR, CLEAR, CLEAR, CLEAR, CLEAR
+        ])
+        engine.shutdown()
 
     it "defaults the gpu lane flag off and resolves a backend name":
         expect(tile_gpu_flag_enabled()).to_equal(false)

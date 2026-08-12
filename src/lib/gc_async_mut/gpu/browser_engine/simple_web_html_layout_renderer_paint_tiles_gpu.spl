@@ -25,7 +25,8 @@ use std.common.ui.draw_ir.{
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dDrawIrTileOutcome, engine2d_draw_ir_adv_composition,
-    engine2d_draw_ir_command_samples_parent, engine2d_draw_ir_render_tiled
+    engine2d_draw_ir_command_samples_parent, engine2d_draw_ir_render_damaged,
+    engine2d_draw_ir_render_tiled
 }
 use std.gc_async_mut.gpu.engine2d.helpers_availability.{backend_is_hardware}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_tiles.{
@@ -251,6 +252,47 @@ fn tile_lane_render_into(engine: Engine2D, commands: [DrawIrCommand], doc_w: i32
         pixels: readback.pixels,
         tile_pixel_checksums: empty_sums
     )
+    TileLaneFrame(engine: eng, render: render)
+
+fn tile_lane_render_retained_damage_into(
+    engine: Engine2D,
+    commands: [DrawIrCommand],
+    damage_rects: [i64],
+    backend_requested: text,
+    readback_frame: bool
+) -> TileLaneFrame:
+    """Render semantic/layout-owned damage into an already-seeded surface.
+
+    Production frames pass readback_frame=false. Correctness/evidence frames
+    request readback explicitly; neither mode clears the retained framebuffer.
+    """
+    val outcome = engine2d_draw_ir_render_damaged(
+        engine, commands, damage_rects, readback_frame)
+    val eng = outcome.engine
+    val readback = outcome.readback
+    var rb_handle: i64 = 0
+    var rb_identity: i64 = 0
+    if readback.backend_handle != nil:
+        rb_handle = readback.backend_handle
+    if readback.device_identity != nil:
+        rb_identity = readback.device_identity
+    val render = TileLaneRender(
+        backend_requested: backend_requested,
+        backend_selected: eng.backend_name(),
+        readback_source: readback.source,
+        readback_backend_handle: rb_handle,
+        readback_device_identity: rb_identity,
+        readback_pixel_count: readback.pixel_count,
+        cpu_fallback_reason: eng.vulkan_cpu_fallback_reason(),
+        tiles_total: outcome.tiles_total,
+        tiles_rendered: outcome.tiles_rendered,
+        tiles_skipped: outcome.tiles_skipped,
+        ops_rendered: outcome.ops_rendered,
+        ops_skipped: outcome.ops_skipped,
+        unsupported_kinds: outcome.unsupported_kinds,
+        pixels: readback.pixels,
+        tile_pixel_checksums: [],
+        ordered_replay: true)
     TileLaneFrame(engine: eng, render: render)
 
 # Oracle entry: create an engine on the requested backend, render one frame
