@@ -1,0 +1,371 @@
+#!/bin/sh
+# check-spec-comment-cheat.shs -- BASELINE-RATCHETED GATE for spec-vacuity
+# family 5 (comment-cheat / hollow source assertion, code HOLLOW).
+#
+#   Family 5 -- COMMENT-CHEAT / HOLLOW SOURCE ASSERTION   (code HOLLOW)
+#     A spec asserts a product-path-shaped literal via `to_contain(...)` /
+#     `.contains(...)` against content read from a target file, but the
+#     literal appears ONLY inside a COMMENT of that target file (a line that,
+#     trimmed, starts with `#`, `//`, `*`, or `/*`), never in live code. The
+#     spec's claimed code path is never actually proven. Manually enumerated
+#     as 108 deduped hollow sites in
+#     doc/08_tracking/test/comment_cheat_spec_census_2026-08-09.md by hand
+#     scanning 1,768 candidate files; this gate mirrors
+#     check-spec-vacuity-semantic.shs (families 3 & 4) to make that census
+#     re-runnable and ratcheted instead of a one-off hand pass.
+#
+# DETECTION IS NOT REIMPLEMENTED HERE. The scorer lives in
+# `scripts/check/census-spec-vacuity.spl` (same driver families 3/4 use) --
+# it already implements family 5 end to end: `reads_source_text`,
+# `spec_product_paths`, `spec_needles`, `classify_needle` (code / hollow /
+# absent), with its own positive control (2 planted comment-only needles must
+# fire; 8 documented false-positive shapes -- shell `case` arm, C
+# preprocessor directive, C `#define`, mispaired path, markdown heading,
+# negative assertion, non-source receiver, commented-out spec line -- must
+# stay silent). This script is the GATE layer: it runs that census in
+# `--list` mode, extracts the family-5 HOLLOW findings, ratchets them against
+# a baseline, and FAILS on anything NEW.
+#
+# PARTIAL COVERAGE (advisory caveat, printed in every verdict): the hand
+# census's ABSENT bucket (a needle whose nearest-preceding-path pairing
+# mis-associates it with the wrong file) is a heuristic artifact, not a
+# finding -- the census script deliberately does not gate it, matching the
+# hand census's own caveat. A gate PASS here means "no NEW comment-only
+# needle beyond the baseline", not "every spec-vs-source pairing in the
+# corpus is correct" -- pairing quality is out of scope for this gate exactly
+# as it was out of scope for the hand census.
+#
+# EXCLUDED ON PURPOSE (mirrors check-spec-vacuity-semantic.shs):
+#   * NOSRC -- LOW PRECISION triage signal only, never gated.
+#   * Families 3 (VTM001/VTM002) and 4 (SHADOW) -- gated separately by
+#     check-spec-vacuity-semantic.shs; not this script's mandate.
+#
+# DEPENDENCY: same as check-spec-vacuity-semantic.shs -- if
+# `scripts/check/census-spec-vacuity.spl` is ever missing (e.g. a fresh clone
+# racing another session's in-flight work), this gate fails CLOSED:
+#     ERROR -- nothing was checked (census scorer missing: ...)   exit 2
+#
+# Baseline: scripts/check/spec_comment_cheat_baseline.txt
+#   One finding key per line, LINE-NUMBER-FREE on purpose (matches the
+#   family-3/4 baseline convention) so editing unrelated code above a known
+#   hollow needle does not churn the baseline:
+#     HOLLOW <specfile> needle="<needle text>" in <product file>
+#
+# Verdict convention -- ALWAYS the last line of stdout, on EVERY exit path:
+#   PASS  -- <n> spec(s) checked, ...            exit 0   (n is always > 0)
+#   FAIL  -- ...                                 exit 1
+#   ERROR -- nothing was checked                 exit 2
+# 0 specs scanned is an ERROR, never a pass.
+#
+# --selftest runs BEFORE every scan and is FATAL. See selftest_run() for the
+# fixture set: extraction of a true-positive HOLLOW line, a sound corpus
+# (no findings), the documented false-positive shapes that must stay
+# unflagged (NOSRC, VTM/SHADOW families, summary counter lines), and the
+# ratchet (baselined silent, new one reported).
+#
+# Usage:
+#   sh scripts/check/check-spec-comment-cheat.shs [roots...]
+#   sh scripts/check/check-spec-comment-cheat.shs --selftest
+#   sh scripts/check/check-spec-comment-cheat.shs --generate-baseline [roots...]
+#
+# NOTE: the census walks the whole spec corpus and takes many minutes. A
+# repo-local watchdog SIGTERMs foreground runs at 60s CPU, so run this
+# DETACHED (`setsid`) with no timeout and wait for the verdict line.
+
+set -u
+
+REPO_ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+CENSUS="$REPO_ROOT/scripts/check/census-spec-vacuity.spl"
+BASELINE="$REPO_ROOT/scripts/check/spec_comment_cheat_baseline.txt"
+SIMPLE="$REPO_ROOT/bin/simple"
+CENSUS_CPU_LIMIT=${CENSUS_CPU_LIMIT:-7200}
+
+WORK=${TMPDIR:-/tmp}/spec-comment-cheat.$$
+trap 'rm -rf "$WORK"' EXIT INT TERM
+mkdir -p "$WORK" || { echo "ERROR -- nothing was checked (cannot create $WORK)"; exit 2; }
+
+on_signal() {
+    echo "ERROR -- nothing was checked (interrupted)"
+    exit 2
+}
+trap on_signal INT TERM
+
+die_error() {
+    echo "ERROR -- nothing was checked ($1)"
+    exit 2
+}
+
+# ---------------------------------------------------------------- extraction
+#
+# Census emits, under `--- family 5 HOLLOW findings (deduped) ---`:
+#     "  HOLLOW test/x_spec.spl:42 needle=\"foo\""
+# Line numbers are stripped for the baseline key (same rationale as the
+# family-3/4 gate: unrelated edits above a hollow needle must not churn the
+# baseline). Summary counter lines (e.g. "HOLLOW needles comment-only in
+# every referenced file : 108 / 183") share the "HOLLOW" prefix but not the
+# finding shape, so they are excluded by shape, not by prefix match alone.
+extract_keys() {
+    sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' |
+    awk '
+        /^HOLLOW / && $2 ~ /\.spl:[0-9]+$/ {
+            sub(/:[0-9]+ /, " ", $0)
+            print
+            next
+        }
+    ' |
+    LC_ALL=C sort -u
+}
+
+run_census() {
+    _out="$1"; shift
+    [ -f "$CENSUS" ] || die_error "census scorer missing: $CENSUS"
+    [ -x "$SIMPLE" ] || die_error "compiler missing: $SIMPLE"
+    ( cd "$REPO_ROOT" && SIMPLE_TIMEOUT_SECONDS="$CENSUS_CPU_LIMIT" \
+        "$SIMPLE" run "$CENSUS" --list "$@" ) >"$_out" 2>"$_out.err"
+    _rc=$?
+    if ! grep -q '^REPORT -- ' "$_out" 2>/dev/null; then
+        if grep -q '^ERROR -- nothing was scanned' "$_out" 2>/dev/null; then
+            return 2
+        fi
+        echo "census produced no verdict line (rc=$_rc); see $_out.err" >&2
+        return 3
+    fi
+    return 0
+}
+
+scanned_count() {
+    sed -n 's/^REPORT -- \([0-9][0-9]*\) file(s) scanned.*/\1/p' "$1" | head -1
+}
+
+# ------------------------------------------------------------------ selftest
+selftest_run() {
+    _fail=0
+    _n=0
+
+    # --- (A) detector control, fatal -------------------------------------
+    _ctl="$WORK/control.txt"
+    ( cd "$REPO_ROOT" && "$SIMPLE" run "$CENSUS" --selftest ) >"$_ctl" 2>&1
+    _n=$((_n + 1))
+    if grep -q '^REPORT -- positive control reproduced' "$_ctl"; then
+        echo "  selftest A/detector-control            : OK (census control reproduced)"
+    else
+        echo "  selftest A/detector-control            : MISMATCH -- census positive control did not reproduce"
+        sed 's/^/      /' "$_ctl" | head -20
+        _fail=$((_fail + 1))
+    fi
+
+    # --- (B1) true positive: HOLLOW line must produce a key ---------------
+    cat >"$WORK/tp5.txt" <<'EOF'
+
+--- family 5 HOLLOW findings (deduped) ---
+  HOLLOW test/01_unit/foo_spec.spl:42 needle="gui_shell_run(session)"
+  HOLLOW test/01_unit/bar_spec.spl:7 needle="editor_tui_run(session)"
+REPORT -- 3 file(s) scanned, 0 deduped VTM finding(s), 0 raw; 0 deduped SHADOW file(s); 2 deduped HOLLOW needle(s)
+EOF
+    _got=$(extract_keys <"$WORK/tp5.txt")
+    _want='HOLLOW test/01_unit/bar_spec.spl needle="editor_tui_run(session)"
+HOLLOW test/01_unit/foo_spec.spl needle="gui_shell_run(session)"'
+    _n=$((_n + 1))
+    if [ "$_got" = "$_want" ]; then
+        echo "  selftest B1/family5-true-positive       : OK (2 keys, line numbers stripped)"
+    else
+        echo "  selftest B1/family5-true-positive       : MISMATCH"
+        echo "      want: $_want"
+        echo "      got : $_got"
+        _fail=$((_fail + 1))
+    fi
+
+    # --- (B2) sound corpus: no findings, must PASS -------------------------
+    cat >"$WORK/sound.txt" <<'EOF'
+
+--- family 5 HOLLOW findings (deduped) ---
+REPORT -- 7 file(s) scanned, 0 deduped VTM finding(s), 0 raw; 0 deduped SHADOW file(s); 0 deduped HOLLOW needle(s)
+EOF
+    _got=$(extract_keys <"$WORK/sound.txt")
+    _n=$((_n + 1))
+    if [ -z "$_got" ]; then
+        echo "  selftest B2/sound-fixture               : OK (no keys)"
+    else
+        echo "  selftest B2/sound-fixture               : MISMATCH -- flagged '$_got'"
+        _fail=$((_fail + 1))
+    fi
+
+    # --- (B3) FALSE-POSITIVE SHAPE: VTM/SHADOW lines never gated here ------
+    cat >"$WORK/fp_other.txt" <<'EOF'
+
+--- family 3 findings ---
+  VTM001 test/01_unit/btree_spec.spl:42 fn delete_key(tree: BTree)
+
+--- family 4 SHADOW files (deduped) ---
+  SHADOW test/01_unit/lease_manager_spec.spl
+
+--- family 5 HOLLOW findings (deduped) ---
+REPORT -- 4 file(s) scanned, 1 deduped VTM finding(s), 1 raw; 1 deduped SHADOW file(s); 0 deduped HOLLOW needle(s)
+EOF
+    _got=$(extract_keys <"$WORK/fp_other.txt")
+    _n=$((_n + 1))
+    if [ -z "$_got" ]; then
+        echo "  selftest B3/fp-shape-VTM-SHADOW-excluded: OK (other families not gated here)"
+    else
+        echo "  selftest B3/fp-shape-VTM-SHADOW-excluded: MISMATCH -- flagged '$_got'"
+        _fail=$((_fail + 1))
+    fi
+
+    # --- (B4) FALSE-POSITIVE SHAPE: summary counter line is not a finding --
+    cat >"$WORK/fp_summary.txt" <<'EOF'
+--- family 5: comment-cheat / hollow source assertion ---
+HOLLOW needles comment-only in every referenced file : 108 / 183
+needles located as real CODE                         : 8316
+REPORT -- 19761 file(s) scanned, 0 deduped VTM finding(s), 0 raw; 0 deduped SHADOW file(s); 108 deduped HOLLOW needle(s)
+EOF
+    _got=$(extract_keys <"$WORK/fp_summary.txt")
+    _n=$((_n + 1))
+    if [ -z "$_got" ]; then
+        echo "  selftest B4/fp-shape-summary-counter    : OK (counter line is not a finding)"
+    else
+        echo "  selftest B4/fp-shape-summary-counter    : MISMATCH -- flagged '$_got'"
+        _fail=$((_fail + 1))
+    fi
+
+    # --- (B5) RATCHET: baselined finding is silent, NEW one FAILs ----------
+    printf '%s\n' 'HOLLOW test/01_unit/foo_spec.spl needle="gui_shell_run(session)"' |
+        LC_ALL=C sort -u >"$WORK/base.txt"
+    printf '%s\n' \
+        'HOLLOW test/01_unit/foo_spec.spl needle="gui_shell_run(session)"' \
+        'HOLLOW test/01_unit/new_spec.spl needle="brand_new_needle"' |
+        LC_ALL=C sort -u >"$WORK/cur.txt"
+    _new=$(LC_ALL=C comm -13 "$WORK/base.txt" "$WORK/cur.txt")
+    _n=$((_n + 1))
+    if [ "$_new" = 'HOLLOW test/01_unit/new_spec.spl needle="brand_new_needle"' ]; then
+        echo "  selftest B5/ratchet-new-only            : OK (baselined silent, new one reported)"
+    else
+        echo "  selftest B5/ratchet-new-only            : MISMATCH -- got '$_new'"
+        _fail=$((_fail + 1))
+    fi
+
+    # --- (B6) non-vacuity: a zero-spec census must be ERROR, not PASS ------
+    _n=$((_n + 1))
+    _c=$(printf 'ERROR -- nothing was scanned\n' >"$WORK/empty.txt"; scanned_count "$WORK/empty.txt")
+    if [ -z "$_c" ]; then
+        echo "  selftest B6/zero-specs-is-ERROR         : OK (no scanned count -> ERROR path)"
+    else
+        echo "  selftest B6/zero-specs-is-ERROR         : MISMATCH -- parsed count '$_c'"
+        _fail=$((_fail + 1))
+    fi
+
+    if [ "$_fail" -ne 0 ]; then
+        echo "FAIL -- selftest: $_fail of $_n fixture(s) mismatched; scan not attempted"
+        exit 1
+    fi
+    echo "  selftest: $_n/$_n fixtures correct"
+    return 0
+}
+
+# ---------------------------------------------------------------------- main
+GENERATE=0
+ROOTS=""
+SELFTEST_ONLY=0
+SAVE_CENSUS=""
+CENSUS_INPUT=""
+_expect=""
+for arg in "$@"; do
+    if [ -n "$_expect" ]; then
+        case "$_expect" in
+            save)  SAVE_CENSUS="$arg" ;;
+            input) CENSUS_INPUT="$arg" ;;
+        esac
+        _expect=""
+        continue
+    fi
+    case "$arg" in
+        --selftest)          SELFTEST_ONLY=1 ;;
+        --generate-baseline) GENERATE=1 ;;
+        --save-census)       _expect=save ;;
+        --census-input)      _expect=input ;;
+        --*)                 die_error "unknown option: $arg" ;;
+        *)                   ROOTS="$ROOTS $arg" ;;
+    esac
+done
+[ -z "$_expect" ] || die_error "--$_expect requires a file argument"
+
+selftest_run || exit 1
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    echo "PASS -- selftest only, no corpus scanned"
+    exit 0
+fi
+
+[ -n "$ROOTS" ] || ROOTS=" test"
+
+OUT="$WORK/census.txt"
+if [ -n "$CENSUS_INPUT" ]; then
+    [ -f "$CENSUS_INPUT" ] || die_error "census input not found: $CENSUS_INPUT"
+    cp "$CENSUS_INPUT" "$OUT" || die_error "cannot read census input"
+    grep -q '^REPORT -- ' "$OUT" || die_error "census input has no verdict line"
+else
+    # shellcheck disable=SC2086
+    run_census "$OUT" $ROOTS
+    rc=$?
+    [ "$rc" -eq 2 ] && die_error "census scanned no spec files"
+    [ "$rc" -eq 3 ] && die_error "census did not reach a verdict line"
+fi
+
+if [ -n "$SAVE_CENSUS" ]; then
+    cp "$OUT" "$SAVE_CENSUS" || die_error "cannot write --save-census file"
+fi
+
+NSPEC=$(scanned_count "$OUT")
+case "$NSPEC" in
+    ''|*[!0-9]*) die_error "could not parse the census scanned-file count" ;;
+esac
+[ "$NSPEC" -gt 0 ] || die_error "census reported 0 spec files scanned"
+
+extract_keys <"$OUT" >"$WORK/current.txt"
+NCUR=$(grep -c . "$WORK/current.txt" 2>/dev/null || echo 0)
+
+if [ "$GENERATE" -eq 1 ]; then
+    {
+        echo "# Baseline for scripts/check/check-spec-comment-cheat.shs"
+        echo "# Family 5 (HOLLOW, comment-cheat / hollow source assertion)."
+        echo "# Keys are line-number-free so unrelated edits do not churn this file."
+        echo "# Regenerate ONLY as a deliberate, reviewed update -- read the diff."
+        cat "$WORK/current.txt"
+    } >"$BASELINE"
+    echo "PASS -- $NSPEC spec(s) checked, baseline regenerated with $NCUR finding(s)"
+    exit 0
+fi
+
+if [ -f "$BASELINE" ]; then
+    grep -v '^[[:space:]]*#' "$BASELINE" | grep . | LC_ALL=C sort -u >"$WORK/baseline.txt"
+else
+    : >"$WORK/baseline.txt"
+fi
+NBASE=$(grep -c . "$WORK/baseline.txt" 2>/dev/null || echo 0)
+
+NEW=$(LC_ALL=C comm -13 "$WORK/baseline.txt" "$WORK/current.txt")
+FIXED=$(LC_ALL=C comm -23 "$WORK/baseline.txt" "$WORK/current.txt")
+
+if [ -n "$NEW" ]; then
+    echo "New comment-cheat (family 5, HOLLOW) finding(s) -- not in the baseline:"
+    echo "$NEW" | sed 's/^/  /'
+    echo ""
+    echo "  HOLLOW: a source-grep assertion's needle appears only inside a COMMENT"
+    echo "          of the referenced product file, never in live code. Fix by"
+    echo "          anchoring the needle to real declaration/dispatch syntax (see"
+    echo "          doc/08_tracking/test/comment_cheat_spec_census_2026-08-09.md"
+    echo "          'Fix guidance'). Do NOT weaken or delete the assertion."
+    NNEW=$(echo "$NEW" | grep -c .)
+    echo "FAIL -- $NSPEC spec(s) checked, $NNEW new finding(s) beyond the $NBASE baselined"
+    exit 1
+fi
+
+if [ -n "$FIXED" ]; then
+    echo "Baselined finding(s) no longer present (baseline is stale -- shrink it):"
+    echo "$FIXED" | sed 's/^/  /'
+    NFIX=$(echo "$FIXED" | grep -c .)
+    echo "FAIL -- $NSPEC spec(s) checked, $NFIX baselined finding(s) gone; rerun with --generate-baseline"
+    exit 1
+fi
+
+echo "PASS -- $NSPEC spec(s) checked, $NCUR finding(s), all $NBASE baselined, 0 new [advisory: pairing-mismatch (ABSENT) specs are out of scope, see header caveat]"
+exit 0
