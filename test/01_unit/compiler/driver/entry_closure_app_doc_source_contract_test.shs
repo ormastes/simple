@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+OWNER="$ROOT/src/compiler/80.driver/driver_source_loading.spl"
+IMPORTER="$ROOT/src/app/cli/check_capsule.spl"
+TARGET="$ROOT/src/app/doc/public_check/statistics.spl"
+
+need() {
+    pattern=$1
+    file=$2
+    grep -Fq "$pattern" "$file" || {
+        echo "FAIL: missing '$pattern' in ${file#$ROOT/}" >&2
+        exit 1
+    }
+}
+
+[ -s "$TARGET" ] || { echo 'FAIL: production app.doc statistics source missing/empty' >&2; exit 1; }
+need 'use app.doc.public_check.statistics.{' "$IMPORTER"
+need 'val is_source_tree = normalized.starts_with("src/") or normalized.contains("/src/")' "$OWNER"
+need 'val is_repository_doc = not is_source_tree' "$OWNER"
+
+# Exact regression: an imported production source under src/app/doc must not
+# satisfy the old blanket `/doc/` exclusion.
+case "$TARGET" in
+    */src/app/doc/*) ;;
+    *) echo 'FAIL: fixture does not exercise src/app/doc path' >&2; exit 1 ;;
+esac
+
+# Adjacent boundary cases preserve the intended filter distinction.
+classify() {
+    path=$1
+    case "$path" in */src/*|src/*) source_tree=1 ;; *) source_tree=0 ;; esac
+    case "$path" in doc/*|*/doc/*) has_doc=1 ;; *) has_doc=0 ;; esac
+    [ "$source_tree" -eq 0 ] && [ "$has_doc" -eq 1 ]
+}
+if classify "$TARGET"; then
+    echo 'FAIL: src/app/doc production source classified as repository docs' >&2
+    exit 1
+fi
+classify "$ROOT/doc/07_guide/example.spl" || {
+    echo 'FAIL: repository doc tree no longer excluded' >&2
+    exit 1
+}
+
+need 'normalized.contains("/test/")' "$OWNER"
+need 'normalized.contains("/testdata/")' "$OWNER"
+need 'normalized.contains("/verification/")' "$OWNER"
+
+echo 'PASS: entry closure distinguishes app.doc source from repository docs'

@@ -849,6 +849,13 @@ pub(crate) fn evaluate_method_call(
                 return Ok(result);
             }
         }
+        Value::ByteArray(bytes) => {
+            if let Some(result) = collections::handle_byte_array_methods(
+                bytes, false, method, args, env, functions, classes, enums, impl_methods,
+            )? {
+                return Ok(result);
+            }
+        }
         Value::FrozenArray(arc_arr) => {
             if let Some(result) = collections::handle_frozen_array_methods(
                 arc_arr,
@@ -859,6 +866,13 @@ pub(crate) fn evaluate_method_call(
                 classes,
                 enums,
                 impl_methods,
+            )? {
+                return Ok(result);
+            }
+        }
+        Value::FrozenByteArray(bytes) => {
+            if let Some(result) = collections::handle_byte_array_methods(
+                bytes, true, method, args, env, functions, classes, enums, impl_methods,
             )? {
                 return Ok(result);
             }
@@ -1439,7 +1453,11 @@ pub(crate) fn evaluate_method_call(
             Value::Float(_) => &["f64", "float"],
             Value::Float32(_) => &["f32", "float"],
             Value::Bool(_) => &["bool"],
-            Value::Array(_) | Value::FrozenArray(_) | Value::FixedSizeArray { .. } => &["array", "Array"],
+            Value::Array(_)
+            | Value::ByteArray(_)
+            | Value::FrozenArray(_)
+            | Value::FrozenByteArray(_)
+            | Value::FixedSizeArray { .. } => &["array", "Array"],
             Value::Dict(_) | Value::FrozenDict(_) => &["dict", "Dict"],
             Value::Tuple(_) => &["tuple", "Tuple"],
             _ => &[],
@@ -1882,6 +1900,14 @@ pub(crate) fn evaluate_method_call_with_self_update(
             trimmed.pop();
             return Ok((result, Some(Value::array(trimmed))));
         }
+        if let Value::ByteArray(bytes) = &recv_val {
+            if bytes.is_empty() {
+                return Ok((result, None));
+            }
+            let mut trimmed = bytes.as_ref().clone();
+            trimmed.pop();
+            return Ok((result, Some(Value::byte_array(trimmed))));
+        }
     }
 
     // `remove(index)` on an ARRAY is the second such mutator, for exactly the
@@ -1918,6 +1944,20 @@ pub(crate) fn evaluate_method_call_with_self_update(
             shortened.remove(idx as usize);
             return Ok((result, Some(Value::array(shortened))));
         }
+        if let Value::ByteArray(bytes) = &recv_val {
+            let idx = match args.first() {
+                Some(a) => evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)?
+                    .as_int()
+                    .unwrap_or(-1),
+                None => -1,
+            };
+            if idx < 0 || idx as usize >= bytes.len() {
+                return Ok((result, None));
+            }
+            let mut shortened = bytes.as_ref().clone();
+            shortened.remove(idx as usize);
+            return Ok((result, Some(Value::byte_array(shortened))));
+        }
     }
 
     // TEXT IS A VALUE TYPE: never rebind a text receiver, for ANY method.
@@ -1950,6 +1990,17 @@ pub(crate) fn evaluate_method_call_with_self_update(
     // is covered by the same rule.
     if matches!(recv_val, Value::Str(_) | Value::StrBytes(_)) {
         return Ok((result, None));
+    }
+
+    // A packed byte mutator deliberately widens to the legacy generic array
+    // when a pushed/inserted element is not representable as u8. That changes
+    // the enum discriminant, so the generic same-discriminant write-back gate
+    // below cannot observe it. Widening is nevertheless a receiver mutation.
+    if matches!(recv_val, Value::ByteArray(_))
+        && MUTATING_METHODS.contains(&method)
+        && matches!(result, Value::ByteArray(_) | Value::Array(_))
+    {
+        return Ok((result.clone(), Some(result)));
     }
 
     let updated_self =

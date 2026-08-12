@@ -87,6 +87,7 @@ fn arg_u32(args: &[Value], idx: usize, name: &str) -> Result<u32, CompileError> 
 fn backing_len(value: &Value) -> i64 {
     match value.clone().deref_pointer() {
         Value::Array(items) | Value::FrozenArray(items) => items.len() as i64,
+        Value::ByteArray(items) | Value::FrozenByteArray(items) => items.len() as i64,
         _ => -1,
     }
 }

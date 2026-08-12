@@ -142,6 +142,8 @@ pub fn tier_of(name: &str) -> RuntimeFuncTier {
         || name.starts_with("rt_hashset_")
         || name.starts_with("rt_btreeset_")
         || name.starts_with("rt_alloc")
+        || name.starts_with("rt_struct_alloc")
+        || name == "rt_struct_receiver_valid"
         || name.starts_with("rt_free")
         || name.starts_with("rt_ptr_to_value")
         || name.starts_with("rt_value_to_ptr")
@@ -607,6 +609,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Raw memory allocation (zero-cost struct support)
     // =========================================================================
     RuntimeFuncSpec::new("rt_alloc", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_struct_alloc", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_struct_receiver_valid", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_free", &[I64], &[]),
     RuntimeFuncSpec::new("rt_ptr_to_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_to_ptr", &[I64], &[I64]),
@@ -2048,6 +2052,8 @@ mod tests {
         assert_eq!(tier_of("rt_closure_new"), Alloc);
         assert_eq!(tier_of("rt_hashmap_new"), Alloc);
         assert_eq!(tier_of("rt_alloc"), Alloc);
+        assert_eq!(tier_of("rt_struct_alloc"), Alloc);
+        assert_eq!(tier_of("rt_struct_receiver_valid"), Alloc);
         // Sys
         assert_eq!(tier_of("rt_print_str"), Sys);
         assert_eq!(tier_of("rt_file_read_text"), Sys);
@@ -2072,6 +2078,24 @@ mod tests {
         assert_eq!(tier_of("rt_cranelift_module_new"), Ext);
         assert_eq!(tier_of("rt_par_map"), Ext);
         assert_eq!(tier_of("rt_simd_aes_round_u8x16"), Ext);
+    }
+
+    #[test]
+    fn struct_allocator_and_receiver_guard_signatures_are_registered() {
+        let alloc = spec_for("rt_struct_alloc").expect("struct allocator runtime spec");
+        assert_eq!(alloc.params, [I64]);
+        assert_eq!(alloc.returns, [I64]);
+
+        let valid = spec_for("rt_struct_receiver_valid").expect("struct receiver guard runtime spec");
+        assert_eq!(valid.params, [I64, I64, I64]);
+        assert_eq!(valid.returns, [I8]);
+    }
+
+    #[test]
+    fn owned_process_receipt_abi_is_registered_with_bounded_inputs() {
+        let spec = spec_for("rt_process_run_owned_bounded_value").expect("owned process runtime spec");
+        assert_eq!(spec.params, [I64, I64, I64, I64, I64]);
+        assert_eq!(spec.returns, [I64]);
     }
 
     #[test]

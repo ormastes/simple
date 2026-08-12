@@ -43,6 +43,12 @@ fn get_ptr(val: &Value, func_name: &str) -> Result<*mut u8, CompileError> {
             }
             Ok(bytes.as_ptr() as *mut u8)
         }
+        Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => {
+            if bytes.is_empty() {
+                return Err(CompileError::runtime(format!("{}: ptr is null", func_name)));
+            }
+            Ok(bytes.as_ptr() as *mut u8)
+        }
         _ => Err(CompileError::runtime(format!(
             "{}: ptr must be Int or Array",
             func_name
@@ -55,6 +61,7 @@ fn get_ptr_nullable(val: &Value) -> *mut u8 {
     match val {
         Value::Int(addr) => *addr as *mut u8,
         Value::Array(bytes) if !bytes.is_empty() => bytes.as_ptr() as *mut u8,
+        Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) if !bytes.is_empty() => bytes.as_ptr() as *mut u8,
         _ => std::ptr::null_mut(),
     }
 }

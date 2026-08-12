@@ -67,12 +67,57 @@ if [ -z "${SIMPLE_BINARY:-}" ]; then
         SIMPLE_BINARY="bin/release/simple"
     elif simple_binary_usable "bin/release/x86_64-unknown-linux-gnu/simple"; then
         SIMPLE_BINARY="bin/release/x86_64-unknown-linux-gnu/simple"
-    elif simple_binary_usable "src/compiler_rust/target/debug/simple"; then
-        SIMPLE_BINARY="src/compiler_rust/target/debug/simple"
     else
         SIMPLE_BINARY="bin/simple"
     fi
 fi
+
+if ! simple_binary_usable "$SIMPLE_BINARY"; then
+    echo "error=Simple compiler is missing or unusable: $SIMPLE_BINARY" >&2
+    exit 2
+fi
+. "$ROOT_DIR/scripts/check/lib/require-self-hosted.shs"
+# `simple_binary_is_self_hosted` was the former local heuristic. Admission is
+# now owned by the canonical require_self_hosted receipt.
+require_self_hosted "$SIMPLE_BINARY" "cross-language compiler"
+SIMPLE_BINARY="$SELF_HOSTED_BIN"
+SIMPLE_COMPILER_REAL="$SELF_HOSTED_REAL"
+SIMPLE_COMPILER_VERSION="$SELF_HOSTED_VERSION"
+SIMPLE_COMPILER_PROVENANCE="${SIMPLE_COMPILER_PROVENANCE:-}"
+[ -n "$SIMPLE_COMPILER_PROVENANCE" ] ||
+    check_untestable "SIMPLE_COMPILER_PROVENANCE must name the admitted Stage 3 manifest or adjacent Stage 4 provenance receipt"
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$ROOT_DIR/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+SIMPLE_COMPILER_PROVENANCE=$(bootstrap_stage3_canonical_file "$SIMPLE_COMPILER_PROVENANCE") ||
+    check_untestable "compiler provenance is missing, symlinked, or non-canonical"
+_compiler_provenance_schema=$(bootstrap_stage3_manifest_value schema "$SIMPLE_COMPILER_PROVENANCE") ||
+    check_untestable "compiler provenance has no singular schema"
+case "$_compiler_provenance_schema" in
+    simple-bootstrap-stage3-provenance-v3)
+        bootstrap_stage3_verify_manifest "$SIMPLE_COMPILER_PROVENANCE" "$ROOT_DIR" "$SIMPLE_COMPILER_REAL" ||
+            check_untestable "Stage 3 compiler provenance does not verify against the exact benchmark executable and sealed source"
+        SIMPLE_COMPILER_ADMISSION=admitted-stage3
+        ;;
+    simple-bootstrap-stage4-provenance-v1)
+        [ "$SIMPLE_COMPILER_PROVENANCE" = "${SIMPLE_COMPILER_REAL}.provenance.env" ] ||
+            check_untestable "Stage 4 provenance must be adjacent to the exact benchmark executable"
+        stage4_verify_candidate_provenance "$SIMPLE_COMPILER_PROVENANCE" "$SIMPLE_COMPILER_REAL" "$ROOT_DIR" ||
+            check_untestable "Stage 4 compiler provenance does not verify against the exact benchmark executable, Stage 3 lineage, and sealed source"
+        SIMPLE_COMPILER_ADMISSION=admitted-stage4
+        ;;
+    *) check_untestable "unsupported compiler provenance schema: $_compiler_provenance_schema" ;;
+esac
+echo "compiler_provenance:  $SIMPLE_COMPILER_PROVENANCE"
+echo "compiler_admission:  $SIMPLE_COMPILER_ADMISSION"
+PROFILE_DOCKER_COMPILER_PROVENANCE="$SIMPLE_COMPILER_PROVENANCE"
+case "$SIMPLE_COMPILER_PROVENANCE" in
+    "$ROOT_DIR"/*) PROFILE_DOCKER_COMPILER_PROVENANCE="/workspace/${SIMPLE_COMPILER_PROVENANCE#"$ROOT_DIR"/}" ;;
+esac
+export SIMPLE_NO_STUB_FALLBACK=1
+# Admission requires SIMPLE_NO_STUB_FALLBACK=1 at compile and execution time.
 if [ -z "$PROFILE_DOCKER_SIMPLE_BINARY" ]; then
     PROFILE_DOCKER_SIMPLE_BINARY="__auto__"
 fi
@@ -116,6 +161,10 @@ fi
 WARM_ITERS="${WARM_ITERS:-5}"
 WARM_IN_PROCESS="${WARM_IN_PROCESS:-10}"
 RUN_TIMEOUT="${RUN_TIMEOUT:-30}"
+if [ "$FIB_N" -ne 35 ]; then
+    echo "error=FIB_N=$FIB_N is unsupported; checksum contract requires FIB_N=35" >&2
+    exit 2
+fi
 
 if [ "$PROFILE_DOCKER_ISOLATION" = "1" ] && [ "$PROFILE_DOCKER_INSIDE" != "1" ]; then
     if ! command -v docker >/dev/null 2>&1; then
@@ -143,6 +192,7 @@ if [ "$PROFILE_DOCKER_ISOLATION" = "1" ] && [ "$PROFILE_DOCKER_INSIDE" != "1" ];
         -e SKIP_PROFILE_REPORT_CONTRACT="${SKIP_PROFILE_REPORT_CONTRACT:-0}" \
         -e PROFILE_DOCKER_SIMPLE_BINARY="$PROFILE_DOCKER_SIMPLE_BINARY" \
         -e PROFILE_DOCKER_SIMPLE_BINARY_EXPLICIT="$PROFILE_DOCKER_SIMPLE_BINARY_EXPLICIT" \
+        -e SIMPLE_COMPILER_PROVENANCE="$PROFILE_DOCKER_COMPILER_PROVENANCE" \
         -e BUILD_DIR="$BUILD_DIR" \
         -e REPORT_PATH="$REPORT_PATH" \
         -e PROFILE_REPORT_CONTRACT_TEST="$PROFILE_REPORT_CONTRACT_TEST" \
@@ -186,6 +236,14 @@ run_bounded() {
         timeout "$RUN_TIMEOUT" sh -c "$_cmd"
     else
         sh -c "$_cmd"
+    fi
+}
+
+run_bounded_argv() {
+    if have timeout; then
+        timeout "$RUN_TIMEOUT" "$@"
+    else
+        "$@"
     fi
 }
 
@@ -330,16 +388,18 @@ fn fib(n: i64) -> i64:
 fn main():
     val warmup = ${WARM_IN_PROCESS}
     val measured = ${RUNS}
+    var checksum: i64 = 0
     for i in 0..warmup:
-        fib(35)
+        checksum = fib(35)
     val start = rt_time_now_unix_micros()
     for i in 0..measured:
-        fib(35)
+        checksum = fib(35)
     val elapsed = rt_time_now_unix_micros() - start
     val avg_us = elapsed / measured
     val avg_ms_int = avg_us / 1000
     val avg_ms_frac = avg_us % 1000
     println("warm_ms: {avg_ms_int}.{avg_ms_frac}")
+    println("fib(35) = {checksum}")
 SIMPLE
 }
 
@@ -810,16 +870,36 @@ write_c_fib_warm() {
 static int64_t fib(int64_t n) { return n < 2 ? n : fib(n-1) + fib(n-2); }
 int main(void) {
     int warmup = ${WARM_IN_PROCESS}, measured = ${RUNS};
-    for (int i = 0; i < warmup; i++) fib(35);
+    volatile int64_t result = 0;
+    for (int i = 0; i < warmup; i++) result = fib(35);
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    for (int i = 0; i < measured; i++) fib(35);
+    for (int i = 0; i < measured; i++) result = fib(35);
     clock_gettime(CLOCK_MONOTONIC, &t1);
     int64_t ns = (t1.tv_sec - t0.tv_sec)*1000000000LL + (t1.tv_nsec - t0.tv_nsec);
     printf("warm_ms: %.3f\n", (double)ns / measured / 1e6);
+    printf("fib(35) = %ld\n", (long)result);
     return 0;
 }
 C
+}
+
+write_rust_fib_warm() {
+    cat >"$BUILD_DIR/fib_warm.rs" <<RUST
+use std::hint::black_box;
+use std::time::Instant;
+fn fib(n: i64) -> i64 {
+    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+}
+fn main() {
+    let mut result = 0;
+    for _ in 0..${WARM_IN_PROCESS} { result = black_box(fib(black_box(35))); }
+    let start = Instant::now();
+    for _ in 0..${RUNS} { result = black_box(fib(black_box(35))); }
+    println!("warm_ms: {:.3}", start.elapsed().as_secs_f64() * 1000.0 / ${RUNS}.0);
+    println!("fib(35) = {result}");
+}
+RUST
 }
 
 write_c_parallel() {
@@ -953,11 +1033,13 @@ import ("fmt"; "time")
 func fib(n int64) int64 { if n < 2 { return n }; return fib(n-1) + fib(n-2) }
 func main() {
     warmup, measured := ${WARM_IN_PROCESS}, ${RUNS}
-    for i := 0; i < warmup; i++ { fib(35) }
+    result := int64(0)
+    for i := 0; i < warmup; i++ { result = fib(35) }
     start := time.Now()
-    for i := 0; i < measured; i++ { fib(35) }
+    for i := 0; i < measured; i++ { result = fib(35) }
     elapsed := time.Since(start)
     fmt.Printf("warm_ms: %.3f\n", float64(elapsed.Nanoseconds())/float64(measured)/1e6)
+    fmt.Printf("fib(35) = %d\n", result)
 }
 GO
 }
@@ -1059,11 +1141,13 @@ def fib(n):
     if n < 2: return n
     return fib(n-1) + fib(n-2)
 warmup, measured = ${WARM_IN_PROCESS}, ${RUNS}
-for _ in range(warmup): fib(35)
+result = 0
+for _ in range(warmup): result = fib(35)
 t0 = time.monotonic_ns()
-for _ in range(measured): fib(35)
+for _ in range(measured): result = fib(35)
 elapsed = time.monotonic_ns() - t0
 print(f"warm_ms: {elapsed / measured / 1e6:.3f}")
+print(f"fib(35) = {result}")
 PY
 }
 
@@ -1115,11 +1199,13 @@ write_bun_fib_warm() {
     cat >"$BUILD_DIR/fib_warm.js" <<JS
 function fib(n) { return n < 2 ? n : fib(n-1) + fib(n-2); }
 const warmup = ${WARM_IN_PROCESS}, measured = ${RUNS};
-for (let i = 0; i < warmup; i++) fib(35);
+let result = 0;
+for (let i = 0; i < warmup; i++) result = fib(35);
 const t0 = process.hrtime.bigint();
-for (let i = 0; i < measured; i++) fib(35);
+for (let i = 0; i < measured; i++) result = fib(35);
 const elapsed = Number(process.hrtime.bigint() - t0);
 console.log(\`warm_ms: \${(elapsed / measured / 1e6).toFixed(3)}\`);
+console.log(\`fib(35) = \${result}\`);
 JS
 }
 
@@ -1310,6 +1396,7 @@ write_simple_hosted_loop_safepoint_fairness
 write_c_hello
 write_c_fib
 write_c_fib_warm
+write_rust_fib_warm
 write_c_parallel
 write_c_fanout
 write_c_fanout_stress
@@ -1352,6 +1439,15 @@ if have gcc; then
     echo "  [ok] C (gcc)"
 else echo "  [skip] C — gcc not found"; fi
 
+# Rust is a required comparison row whenever rustc is installed.  Compilation
+# failure is fatal under `set -e`; it must not degrade into an unavailable row.
+if have rustc; then
+    rustc -C opt-level=2 -o "$BUILD_DIR/fib_warm_rust" "$BUILD_DIR/fib_warm.rs"
+    echo "  [ok] Rust (rustc -O)"
+else
+    echo "  [skip] Rust — rustc not found"
+fi
+
 # Go
 GO_VERSION="unavailable"
 GO_SCHEDULER="GOMAXPROCS=unavailable NumCPU=unavailable"
@@ -1380,7 +1476,7 @@ if [ -x "$SIMPLE_BINARY" ]; then
         _spl="$BUILD_DIR/${_src}.spl"
         _out="$BUILD_DIR/${_src}_simple_native"
         if [ -f "$_spl" ]; then
-            if run_bounded "$SIMPLE_BINARY compile $_spl --native -o $_out" >/dev/null 2>&1; then
+            if run_bounded_argv "$SIMPLE_BINARY" compile "$_spl" --native -o "$_out" >/dev/null 2>&1; then
                 : # ok
             else
                 _status=$?
@@ -1404,7 +1500,7 @@ if [ -x "$SIMPLE_BINARY" ]; then
         _spl="$BUILD_DIR/${_src}.spl"
         _out="$BUILD_DIR/${_src}_simple.smf"
         if [ -f "$_spl" ]; then
-            if run_bounded "$SIMPLE_BINARY compile $_spl -o $_out" >/dev/null 2>&1; then
+            if run_bounded_argv "$SIMPLE_BINARY" compile "$_spl" -o "$_out" >/dev/null 2>&1; then
                 : # ok
             else
                 _status=$?
@@ -1446,7 +1542,7 @@ cat >"$REPORT_PATH" <<EOF
 - Optional language inventory is explicit: Python participates when available; Bun, Java, and Erlang rows are emitted when their toolchains exist. C and Go remain the required native baselines for release-blocking M:N comparisons.
 - Measures binary/script size, cold process startup, warm throughput, parallel worker latency, fanout latency, parallel binary size, and peak RSS where the runtime and compiler are available.
 - Uses bounded commands so failed, missing, timed-out, or unavailable lanes are classified instead of silently treated as passing data.
-- Supports \`PROFILE_DOCKER_ISOLATION=1\` to re-exec the same profile script in a Docker container with \`--network=none\`, a memory limit, a CPU limit, and the current UID/GID. Use this mode for crash-prone native and SMF profile runs. Build \`simple-cross-language-perf:latest\` with \`docker build -t simple-cross-language-perf:latest -f tools/docker/Dockerfile.cross-language-perf tools/docker\` for contract-gated C/Go comparison evidence. Unless \`PROFILE_DOCKER_SIMPLE_BINARY\` is explicitly set, the container run probes each auto-selected Simple binary with \`--version\`, prefers the release wrapper (\`bin/simple\` / \`bin/release/simple\`) when it is runnable, and only falls back to \`src/compiler_rust/target/debug/simple\` when the release path is unavailable or stale. The current debug binary still hits the Docker-native linker regression tracked in \`doc/08_tracking/bug/docker_cross_language_profile_native_link_2026-06-08.md\`, so auto mode must not prefer it over a runnable release path.
+- Supports \`PROFILE_DOCKER_ISOLATION=1\` to re-exec the same profile script in a Docker container with \`--network=none\`, a memory limit, a CPU limit, and the current UID/GID. The canonical \`require-self-hosted.shs\` identity gate rejects Rust bootstrap seeds; unavailable or stale release paths are untestable, never fallback evidence.
 - Docker CPU quota is containment metadata, not the scheduler-width proof; release-blocking M:N comparisons use the recorded \`CPU_WORKERS == GOMAXPROCS\` scheduler-width contract.
 - Generated Simple concurrency workloads compute an expected checksum and exit nonzero on mismatch, so runtime-pool closure failures cannot be timed as valid M:N evidence.
 - Go commands inherit \`GOMAXPROCS=$GOMAXPROCS\`, defaulting to \`CPU_WORKERS\`. Contract-gated Go-like M:N evidence requires the recorded Go scheduler width to match \`CPU_WORKERS\`; caller overrides are exploratory unless they keep that equality.
@@ -1526,25 +1622,9 @@ if [ -x "$BUILD_DIR/hello_c" ]; then
     ms=$(avg_ms "$BUILD_DIR/hello_c" "$RUNS")
     row "C (gcc -O2)" "$ms" "native" "" ""
 fi
-if have go && [ -f "$BUILD_DIR/fib_go" ]; then
-    ms=$(avg_ms "$BUILD_DIR/fib_go" "$RUNS")
-    row "Go (compiled)" "$ms" "native" "" ""
-fi
 if have python3; then
     ms=$(avg_ms "python3 -c 'print(\"Hello World\")'" "$RUNS")
     row "Python" "$ms" "interpret" "" ""
-fi
-if have bun; then
-    ms=$(avg_ms "bun $BUILD_DIR/fib.js" "$RUNS")
-    row "Bun" "$ms" "JIT" "" ""
-fi
-if have java; then
-    ms=$(avg_ms "java -cp $BUILD_DIR Fib" "$RUNS")
-    row "Java" "$ms" "JIT (JVM)" "" ""
-fi
-if have erl; then
-    ms=$(avg_ms "erl -noshell -pa $BUILD_DIR -eval 'fib:main([]).' -s init stop" "$RUNS")
-    row "Erlang" "$ms" "BEAM VM" "" ""
 fi
 
 # ── Warm throughput — fib in-process ─────────────────────────────────────
@@ -2171,6 +2251,221 @@ cat >>"$REPORT_PATH" <<'EOF'
 > OS-thread languages (Simple, C) pay ~8MB default stack per thread but RSS
 > reflects only committed pages, not reserved virtual memory.
 EOF
+
+# ── retained comparable results ─────────────────────────────────────────
+# These rows are the release-facing subset.  Legacy average tables above are
+# exploratory only: admission requires identity, exact mode, no fallback,
+# exact checksum, every requested iteration, raw samples, p50/p95 and RSS.
+section "Retained Comparable Results"
+cat >>"$REPORT_PATH" <<'EOF'
+| language | toolchain | compiler_path | compiler_sha256 | executable_path | executable_sha256 | selfhost_verdict | workload | requested_mode | actual_mode | fallback | warmups | iterations | wall_samples_ms | wall_ms_p50 | wall_ms_p95 | max_rss_kib | exit_status | checksum | admission / mode receipt | rejection_reason |
+|---|---|---|---|---|---|---|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---|---|
+EOF
+
+sha256_file() {
+    if have sha256sum; then sha256sum "$1" | awk '{print $1}'
+    elif have shasum; then shasum -a 256 "$1" | awk '{print $1}'
+    else echo unavailable
+    fi
+}
+
+retained_unavailable_row() {
+    _language="$1"; _mode="$2"; _reason="$3"
+    printf '| %s | unavailable | n/a | n/a | n/a | n/a | n/a | recursive-fib-35 | %s | unavailable | n/a | %s | 0 | n/a | n/a | n/a | n/a | n/a | n/a | rejected | %s |\n' \
+        "$_language" "$_mode" "$WARM_IN_PROCESS" "$_reason" >>"$REPORT_PATH"
+}
+
+retained_measure() {
+    _language="$1"; _toolchain="$2"; _executable="$3"; _selfhost="$4"
+    _requested="$5"; _actual="$6"; shift 6
+    case "$_language" in
+        simple_*) _compiler_real="$SIMPLE_COMPILER_REAL" ;;
+        c) _compiler_real="$(readlink -f "$(command -v gcc)")" ;;
+        rust) _compiler_real="$(readlink -f "$(command -v rustc)")" ;;
+        go) _compiler_real="$(readlink -f "$(command -v go)")" ;;
+        python|bun) _compiler_real="$(readlink -f "$_executable")" ;;
+        *) _compiler_real=n/a ;;
+    esac
+    if [ "$_compiler_real" = n/a ]; then _compiler_hash=n/a; else _compiler_hash="$(sha256_file "$_compiler_real")"; fi
+    _tmp="$BUILD_DIR/retained_${_language}"
+    [ -x /usr/bin/time ] || {
+        echo "error=/usr/bin/time is required for admitted max RSS: $_language" >&2; return 1;
+    }
+    : >"${_tmp}.samples"
+    _max_rss=0; _i=0
+    while [ "$_i" -lt "$RUNS" ]; do
+        if have timeout; then
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" timeout "$RUN_TIMEOUT" "$@" >"${_tmp}.out" 2>"${_tmp}.err" || {
+                echo "error=retained admitted row failed: $_language" >&2; return 1;
+            }
+        else
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" "$@" >"${_tmp}.out" 2>"${_tmp}.err" || {
+                echo "error=retained admitted row failed: $_language" >&2; return 1;
+            }
+        fi
+        _rss=$(sed -n '1p' "${_tmp}.rss")
+        grep -Fxq 'fib(35) = 9227465' "${_tmp}.out" || {
+            echo "error=checksum_mismatch language=$_language expected=9227465" >&2; return 1;
+        }
+        _ms=$(sed -n 's/^warm_ms: *//p' "${_tmp}.out" | tail -1)
+        printf '%s\n' "$_ms" | grep -Eq '^[0-9]+([.][0-9]+)?$' || {
+            echo "error=missing warm_ms receipt: $_language" >&2; return 1;
+        }
+        printf '%s\n' "$_ms" >>"${_tmp}.samples"
+        [ "$_rss" -le "$_max_rss" ] || _max_rss="$_rss"
+        _i=$((_i + 1))
+    done
+    _sorted="${_tmp}.sorted"; sort -n "${_tmp}.samples" >"$_sorted"
+    _p50_line=$(( (RUNS + 1) / 2 )); _p95_line=$(( (RUNS * 95 + 99) / 100 ))
+    _p50=$(sed -n "${_p50_line}p" "$_sorted"); _p95=$(sed -n "${_p95_line}p" "$_sorted")
+    _samples=$(paste -sd, "${_tmp}.samples")
+    _real_exec=$(readlink -f "$_executable")
+    _hash=$(sha256_file "$_real_exec")
+    printf '| %s | %s | %s | %s | %s | %s | %s | recursive-fib-35-in-process | %s | %s | false | %s | %s | %s | %s | %s | %s | 0 | 9227465 | admitted: in-process timing and checksum receipt | n/a |\n' \
+        "$_language" "$_toolchain" "$_compiler_real" "$_compiler_hash" "$_real_exec" "$_hash" "$_selfhost" \
+        "$_requested" "$_actual" "$WARM_IN_PROCESS" "$RUNS" "$_samples" \
+        "$_p50" "$_p95" "$_max_rss" >>"$REPORT_PATH"
+}
+
+retained_simple_mode_measure() {
+    _language="$1"; _requested="$2"; _actual="$3"; _artifact="$4"; shift 4
+    _tmp="$BUILD_DIR/retained_${_language}"
+    _expected_receipt="simple_execution_mode_v1 requested=${_requested} actual=${_actual} fallback=false"
+    [ -x /usr/bin/time ] || { echo "error=/usr/bin/time is required for admitted max RSS: $_language" >&2; return 1; }
+    : >"${_tmp}.samples"
+    _max_rss=0; _i=0
+    while [ "$_i" -lt "$RUNS" ]; do
+        if have timeout; then
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" timeout "$RUN_TIMEOUT" \
+                env SIMPLE_EXECUTION_MODE_RECEIPT=1 "$@" >"${_tmp}.out" 2>"${_tmp}.err" || return 1
+        else
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" \
+                env SIMPLE_EXECUTION_MODE_RECEIPT=1 "$@" >"${_tmp}.out" 2>"${_tmp}.err" || return 1
+        fi
+        [ "$(grep -Fxc "$_expected_receipt" "${_tmp}.err")" -eq 1 ] || {
+            echo "error=missing_or_ambiguous_execution_mode_receipt language=$_language" >&2; return 1;
+        }
+        [ "$(grep -c '^simple_execution_mode_v1 ' "${_tmp}.err")" -eq 1 ] || {
+            echo "error=multiple_execution_mode_receipts language=$_language" >&2; return 1;
+        }
+        grep -Fxq 'fib(35) = 9227465' "${_tmp}.out" || return 1
+        _ms=$(sed -n 's/^warm_ms: *//p' "${_tmp}.out" | tail -1)
+        printf '%s\n' "$_ms" | grep -Eq '^[0-9]+([.][0-9]+)?$' || return 1
+        printf '%s\n' "$_ms" >>"${_tmp}.samples"
+        _rss=$(sed -n '1p' "${_tmp}.rss")
+        [ "$_rss" -le "$_max_rss" ] || _max_rss="$_rss"
+        _i=$((_i + 1))
+    done
+    sort -n "${_tmp}.samples" >"${_tmp}.sorted"
+    _p50=$(sed -n "$(( (RUNS + 1) / 2 ))p" "${_tmp}.sorted")
+    _p95=$(sed -n "$(( (RUNS * 95 + 99) / 100 ))p" "${_tmp}.sorted")
+    _samples=$(paste -sd, "${_tmp}.samples")
+    _artifact_real=$(readlink -f "$_artifact")
+    printf '| %s | %s | %s | %s | %s | %s | %s | recursive-fib-35-in-process | %s | %s | false | %s | %s | %s | %s | %s | %s | 0 | 9227465 | admitted: exactly one `%s` receipt per process | n/a |\n' \
+        "$_language" "$SIMPLE_COMPILER_VERSION" "$SIMPLE_COMPILER_REAL" "$(sha256_file "$SIMPLE_COMPILER_REAL")" \
+        "$_artifact_real" "$(sha256_file "$_artifact_real")" "$SIMPLE_COMPILER_ADMISSION" \
+        "$_requested" "$_actual" "$WARM_IN_PROCESS" "$RUNS" "$_samples" "$_p50" "$_p95" "$_max_rss" \
+        "$_expected_receipt" >>"$REPORT_PATH"
+}
+
+retained_compile_measure() {
+    _tmp="$BUILD_DIR/retained_simple_compiler_native"
+    _out="$BUILD_DIR/retained_fib_compiler_native"
+    [ -x /usr/bin/time ] || { echo 'error=/usr/bin/time is required for compiler RSS' >&2; return 1; }
+    : >"${_tmp}.samples"
+    _max_rss=0; _i=0
+    while [ "$_i" -lt "$RUNS" ]; do
+        rm -f "$_out"
+        _start=$(date +%s%N)
+        if have timeout; then
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" timeout "$RUN_TIMEOUT" \
+                "$SIMPLE_BINARY" compile "$BUILD_DIR/fib.spl" --native -o "$_out" \
+                >"${_tmp}.out" 2>"${_tmp}.err" || return 1
+        else
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" \
+                "$SIMPLE_BINARY" compile "$BUILD_DIR/fib.spl" --native -o "$_out" \
+                >"${_tmp}.out" 2>"${_tmp}.err" || return 1
+        fi
+        _end=$(date +%s%N)
+        [ -x "$_out" ] || { echo 'error=native compile produced no executable' >&2; return 1; }
+        "$_out" | grep -Fxq 'fib(35) = 9227465' || { echo 'error=compiled artifact checksum mismatch' >&2; return 1; }
+        _ms=$(awk "BEGIN {printf \"%.3f\", ($_end - $_start) / 1000000}")
+        printf '%s\n' "$_ms" >>"${_tmp}.samples"
+        _rss=$(sed -n '1p' "${_tmp}.rss")
+        [ "$_rss" -le "$_max_rss" ] || _max_rss="$_rss"
+        _i=$((_i + 1))
+    done
+    _sorted="${_tmp}.sorted"; sort -n "${_tmp}.samples" >"$_sorted"
+    _p50_line=$(( (RUNS + 1) / 2 )); _p95_line=$(( (RUNS * 95 + 99) / 100 ))
+    _p50=$(sed -n "${_p50_line}p" "$_sorted"); _p95=$(sed -n "${_p95_line}p" "$_sorted")
+    _samples=$(paste -sd, "${_tmp}.samples")
+    _compiler_hash=$(sha256_file "$SIMPLE_COMPILER_REAL")
+    _out_real=$(readlink -f "$_out"); _out_hash=$(sha256_file "$_out_real")
+    printf '| simple_compiler_native | %s | %s | %s | %s | %s | %s | compile-recursive-fib-35 | native-compile | native-compile | false | 0 | %s | %s | %s | %s | %s | 0 | 9227465 | admitted: verified provenance, --native, no-stub-fallback, executable checksum | n/a |\n' \
+        "$SIMPLE_COMPILER_VERSION" "$SIMPLE_COMPILER_REAL" "$_compiler_hash" "$_out_real" "$_out_hash" \
+        "$SIMPLE_COMPILER_ADMISSION" "$RUNS" "$_samples" "$_p50" "$_p95" "$_max_rss" >>"$REPORT_PATH"
+}
+
+retained_byte_measure() {
+    _label="$1"; _bytes="$2"; _executable="$3"
+    _tmp="$BUILD_DIR/retained_bytes_${_bytes}"
+    [ -x /usr/bin/time ] || { echo 'error=/usr/bin/time is required for byte RSS' >&2; return 1; }
+    : >"${_tmp}.samples"
+    _max_rss=0; _i=0
+    while [ "$_i" -lt "$RUNS" ]; do
+        _start=$(date +%s%N)
+        if have timeout; then
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" timeout "$RUN_TIMEOUT" \
+                env PERF_BYTE_SIZE="$_bytes" "$_executable" >"${_tmp}.out" 2>"${_tmp}.err" || return 1
+        else
+            /usr/bin/time -f '%M' -o "${_tmp}.rss" \
+                env PERF_BYTE_SIZE="$_bytes" "$_executable" >"${_tmp}.out" 2>"${_tmp}.err" || return 1
+        fi
+        _end=$(date +%s%N)
+        grep -Fxq "$_label: len=$_bytes elapsed_ms=$(sed -n "s/^$_label: len=$_bytes elapsed_ms=\([0-9][0-9]*\) zero_fill_checksum=0$/\1/p" "${_tmp}.out") zero_fill_checksum=0" "${_tmp}.out" || {
+            echo "error=byte receipt mismatch requested=$_bytes" >&2; return 1;
+        }
+        _ms=$(awk "BEGIN {printf \"%.3f\", ($_end - $_start) / 1000000}")
+        printf '%s\n' "$_ms" >>"${_tmp}.samples"
+        _rss=$(sed -n '1p' "${_tmp}.rss")
+        printf '%s\n' "$_rss" | grep -Eq '^[1-9][0-9]*$' || return 1
+        [ "$_rss" -le "$_max_rss" ] || _max_rss="$_rss"
+        _i=$((_i + 1))
+    done
+    sort -n "${_tmp}.samples" >"${_tmp}.sorted"
+    _p50=$(sed -n "$(( (RUNS + 1) / 2 ))p" "${_tmp}.sorted")
+    _p95=$(sed -n "$(( (RUNS * 95 + 99) / 100 ))p" "${_tmp}.sorted")
+    _samples=$(paste -sd, "${_tmp}.samples")
+    printf '| simple_bytes_native_%s | Simple selfhost | %s | %s | %s | %s | %s | bytes-zero-fill-%s | native | native | false | 0 | %s | %s | %s | %s | %s | 0 | len=%s;zero_fill_checksum=0 | admitted: verified provenance, exact length/content, total process RSS | n/a |\n' \
+        "$_bytes" "$SIMPLE_COMPILER_REAL" "$(sha256_file "$SIMPLE_COMPILER_REAL")" \
+        "$(readlink -f "$_executable")" "$(sha256_file "$_executable")" "$SIMPLE_COMPILER_ADMISSION" \
+        "$_bytes" "$RUNS" "$_samples" "$_p50" "$_p95" "$_max_rss" "$_bytes" >>"$REPORT_PATH"
+}
+
+[ -f "$BUILD_DIR/fib_warm.spl" ] || { echo 'error=missing retained interpreter fixture' >&2; exit 1; }
+retained_simple_mode_measure "simple_interpreter" "interpreter" "interpreter" \
+    "$BUILD_DIR/fib_warm.spl" env SIMPLE_NO_BOOTSTRAP_DELEGATE=1 \
+    SIMPLE_EXECUTION_MODE=interpret "$SIMPLE_BINARY" "$BUILD_DIR/fib_warm.spl" || {
+        echo 'error=retained Simple interpreter row failed mode admission' >&2; exit 1;
+    }
+[ -f "$BUILD_DIR/fib_warm_simple.smf" ] || { echo 'error=missing retained SMF fixture' >&2; exit 1; }
+retained_simple_mode_measure "simple_smf_loader" "smf-loader" "smf-loader" \
+    "$BUILD_DIR/fib_warm_simple.smf" "$SIMPLE_BINARY" "$BUILD_DIR/fib_warm_simple.smf" || {
+        echo 'error=retained Simple SMF-loader row failed mode admission' >&2; exit 1;
+    }
+retained_compile_measure || { echo 'error=retained Simple compiler row failed' >&2; exit 1; }
+[ -x "$BUILD_DIR/bytes_push_native" ] || run_bounded_argv "$SIMPLE_BINARY" compile test/05_perf/bytes_push_1mib.spl --native -o "$BUILD_DIR/bytes_push_native"
+[ -x "$BUILD_DIR/bytes_push_native" ] || { echo 'error=missing admitted byte-memory native artifact' >&2; exit 1; }
+retained_byte_measure "1 MiB" 1048576 "$BUILD_DIR/bytes_push_native" || { echo 'error=retained 1 MiB row failed' >&2; exit 1; }
+retained_byte_measure "4 MiB" 4194304 "$BUILD_DIR/bytes_push_native" || { echo 'error=retained 4 MiB row failed' >&2; exit 1; }
+retained_byte_measure "32 MiB" 33554432 "$BUILD_DIR/bytes_push_native" || { echo 'error=retained 32 MiB row failed' >&2; exit 1; }
+[ -x "$BUILD_DIR/fib_warm_simple_native" ] || { echo 'error=missing admitted Simple native warm artifact' >&2; exit 1; }
+retained_measure "simple_native" "Simple selfhost" "$BUILD_DIR/fib_warm_simple_native" "$SIMPLE_COMPILER_ADMISSION" "native" "native" "$BUILD_DIR/fib_warm_simple_native"
+if have gcc; then [ -x "$BUILD_DIR/fib_warm_c" ] || { echo 'error=installed gcc produced no retained artifact' >&2; exit 1; }; retained_measure "c" "$(gcc --version | sed -n '1p')" "$BUILD_DIR/fib_warm_c" "n/a" "native" "native" "$BUILD_DIR/fib_warm_c"; else retained_unavailable_row "c" "native" "toolchain unavailable"; fi
+if have rustc; then [ -x "$BUILD_DIR/fib_warm_rust" ] || { echo 'error=installed rustc produced no retained artifact' >&2; exit 1; }; retained_measure "rust" "$(rustc --version)" "$BUILD_DIR/fib_warm_rust" "n/a" "native" "native" "$BUILD_DIR/fib_warm_rust"; else retained_unavailable_row "rust" "native" "toolchain unavailable"; fi
+if have go; then [ -x "$BUILD_DIR/fib_warm_go" ] || { echo 'error=installed go produced no retained artifact' >&2; exit 1; }; retained_measure "go" "$GO_VERSION" "$BUILD_DIR/fib_warm_go" "n/a" "native" "native" "$BUILD_DIR/fib_warm_go"; else retained_unavailable_row "go" "native" "toolchain unavailable"; fi
+if have python3; then retained_measure "python" "$(python3 --version 2>&1)" "$(command -v python3)" "n/a" "interpreter" "interpreter" python3 "$BUILD_DIR/fib_warm.py"; else retained_unavailable_row "python" "interpreter" "toolchain unavailable"; fi
+if have bun; then retained_measure "bun" "$(bun --version 2>&1)" "$(command -v bun)" "n/a" "jsc-runtime" "jsc-runtime" bun "$BUILD_DIR/fib_warm.js"; else retained_unavailable_row "bun" "jsc-runtime" "toolchain unavailable"; fi
 
 # ── footer ───────────────────────────────────────────────────────────────
 

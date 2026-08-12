@@ -66,6 +66,14 @@ fn _find_simple_binary() -> text:
 # CLI Command Handlers
 # ============================================================================
 
+fn execution_mode_receipt_enabled() -> bool:
+    (rt_env_get("SIMPLE_EXECUTION_MODE_RECEIPT") ?? "") == "1"
+
+fn emit_execution_mode_receipt(requested: text, actual: text, fallback: bool):
+    if execution_mode_receipt_enabled():
+        val fallback_text = if fallback: "true" else: "false"
+        _cli_eprint("simple_execution_mode_v1 requested={requested} actual={actual} fallback={fallback_text}")
+
 fn cli_run_code(code: text, gc_log: bool, gc_off: bool) -> i64:
     val driver = _cli_driver_binary()
     if driver.len() > 0:
@@ -101,7 +109,12 @@ fn cli_run_code(code: text, gc_log: bool, gc_off: bool) -> i64:
 fn cli_run_file(path: text, args: [text], gc_log: bool, gc_off: bool) -> i64:
     if path.ends_with(".smf"):
         return match moduleloader_execute_smf(path):
-            case Ok(exit_code): exit_code
+            case Ok(exit_code):
+                # The loader has accepted the artifact, resolved main, and
+                # executed it.  Malformed/pre-dispatch failures take the Err
+                # arm and deliberately emit no receipt.
+                emit_execution_mode_receipt("smf-loader", "smf-loader", false)
+                exit_code
             case Err(message):
                 _cli_eprint("error: {message}")
                 1
@@ -117,7 +130,13 @@ fn cli_run_file(path: text, args: [text], gc_log: bool, gc_off: bool) -> i64:
 
     val result = interpret_file(path)
     match result:
-        case CompileResult.Success(_): 0
+        case CompileResult.Success(_):
+            val requested = rt_env_get("SIMPLE_EXECUTION_REQUESTED_MODE") ?? "jit"
+            val selection_fallback =
+                (rt_env_get("SIMPLE_EXECUTION_SELECTION_FALLBACK") ?? "") == "1"
+            emit_execution_mode_receipt(requested, "interpreter",
+                selection_fallback or requested != "interpreter")
+            0
         case CompileResult.ParseError(errs):
             _cli_eprint("Parse error in {path}:")
             for e in errs:

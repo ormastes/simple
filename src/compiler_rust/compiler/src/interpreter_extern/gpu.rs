@@ -575,6 +575,11 @@ pub(super) fn arg_bytes_ptr(
             .with_help(format!("{name} requires exactly {expected} argument(s)"));
         CompileError::semantic_with_context(format!("{name} expects {expected} arguments"), ctx)
     })?;
+    if let Some(bytes) = value.byte_array_view() {
+        let owned = bytes.to_vec();
+        let ptr = owned.as_ptr() as i64;
+        return Ok((owned, ptr));
+    }
     match value {
         Value::Array(items) | Value::FrozenArray(items) => {
             let mut bytes = Vec::with_capacity(items.len());
@@ -4074,30 +4079,30 @@ pub fn rt_vulkan_read_buffer_bytes_fn(args: &[Value]) -> Result<Value, CompileEr
     let byte_count = arg_i64(args, 1, "rt_vulkan_read_buffer_bytes", 3)?;
     let offset = arg_i64(args, 2, "rt_vulkan_read_buffer_bytes", 3)?;
     if handle == 0 || byte_count < 0 || offset < 0 {
-        return Ok(Value::Array(Arc::new(Vec::new())));
+        return Ok(Value::byte_array(vec![]));
     }
 
     let guard = VK_STATE.lock().unwrap();
     let s = match guard.as_ref() {
         Some(s) => s,
-        None => return Ok(Value::Array(Arc::new(Vec::new()))),
+        None => return Ok(Value::byte_array(vec![])),
     };
     if handle > s.buffers.len() {
-        return Ok(Value::Array(Arc::new(Vec::new())));
+        return Ok(Value::byte_array(vec![]));
     }
     let buffer = match s.buffers[handle - 1].as_ref() {
         Some(buffer) => buffer,
-        None => return Ok(Value::Array(Arc::new(Vec::new()))),
+        None => return Ok(Value::byte_array(vec![])),
     };
     let offset_u = offset as u64;
     let count_u = byte_count as u64;
     if offset_u > buffer.size || count_u > buffer.size.saturating_sub(offset_u) {
-        return Ok(Value::Array(Arc::new(Vec::new())));
+        return Ok(Value::byte_array(vec![]));
     }
 
     unsafe {
         if buffer.mapped.is_null() {
-            return Ok(Value::Array(Arc::new(Vec::new())));
+            return Ok(Value::byte_array(vec![]));
         }
         let range = vulkan_dlopen::VkMappedMemoryRange {
             s_type: 6,
@@ -4108,14 +4113,7 @@ pub fn rt_vulkan_read_buffer_bytes_fn(args: &[Value]) -> Result<Value, CompileEr
         };
         let _ = (s.fns.invalidate_mapped_memory_ranges)(s.device, 1, &range);
         let bytes = std::slice::from_raw_parts((buffer.mapped as *const u8).add(offset_u as usize), count_u as usize);
-        let values = bytes
-            .iter()
-            .map(|b| Value::UInt {
-                value: *b as u64,
-                width: 8,
-            })
-            .collect();
-        Ok(Value::Array(Arc::new(values)))
+        Ok(Value::byte_array(bytes.to_vec()))
     }
 }
 

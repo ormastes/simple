@@ -683,7 +683,10 @@ bootstrap_stage3_directory_snapshot() {
     bootstrap_stage3_directory_snapshot_root=$2
     [ -d "$bootstrap_stage3_directory_snapshot_root" ] &&
         [ ! -L "$bootstrap_stage3_directory_snapshot_root" ] || return 1
-    perl -MDigest::SHA=sha256_hex -MFile::Find -e '
+    # Digest::SHA::addfile streams in binary mode. Authority archives can be
+    # hundreds of MiB, so retaining a whole file here is both unnecessary and
+    # capable of exhausting a constrained bootstrap host.
+    perl -MDigest::SHA -MFile::Find -e '
         use strict;
         use warnings;
         my ($root) = @ARGV;
@@ -696,14 +699,12 @@ bootstrap_stage3_directory_snapshot() {
                     return if $absolute eq $root;
                     -l $absolute and die "authority symlink rejected\n";
                     return unless -f $absolute;
-                    open my $fh, "<:raw", $absolute or die "open\n";
-                    local $/;
-                    my $bytes = <$fh>;
-                    close $fh or die "close\n";
+                    my $sha = Digest::SHA->new(256);
+                    $sha->addfile($absolute, "b") or die "hash\n";
                     my $relative = substr($absolute, length($root) + 1);
                     push @records, join(
                         ":", "file-hex", unpack("H*", $relative),
-                        (-x $absolute ? 1 : 0), sha256_hex($bytes)
+                        (-x $absolute ? 1 : 0), $sha->hexdigest
                     );
                 },
             },
@@ -759,6 +760,206 @@ bootstrap_stage3_copy_authority() {
     ' "$bootstrap_stage3_copy_source" "$bootstrap_stage3_copy_destination" ||
         return 1
     chmod 500 "$bootstrap_stage3_copy_destination"
+}
+
+# Project the immutable Rust bootstrap authority from Cargo's profile tree.
+# Cargo's profile directory also contains thousands of dependency artifacts;
+# none are part of the admitted authority contract. Copy exactly the seed,
+# native runtime archive, and compiler backfill archive, while detecting a
+# producer that changes any member during projection.
+bootstrap_stage3_copy_seed_tuple() {
+    [ "$#" -eq 5 ] || return 64
+    bootstrap_stage3_tuple_source=$1
+    bootstrap_stage3_tuple_destination=$2
+    shift 2
+    [ -d "$bootstrap_stage3_tuple_source" ] &&
+        [ ! -L "$bootstrap_stage3_tuple_source" ] || return 1
+    [ ! -e "$bootstrap_stage3_tuple_destination" ] || return 1
+
+    # Stage4 consumes the non-LTO Rust static runtime directly from deps.
+    # Do not infer authority from everything Cargo happened to leave in the
+    # profile directory (notably the cdylib: the native linker deliberately
+    # forces the Simple runtime static).  Derive the target spelling from the
+    # native-all archive selected by the platform owner.
+    case "$2" in
+        libsimple_native_all.a)
+            bootstrap_stage3_tuple_runtime_name=deps/libsimple_runtime.a
+            ;;
+        simple_native_all.lib)
+            bootstrap_stage3_tuple_runtime_name=deps/simple_runtime.lib
+            ;;
+        *) return 1 ;;
+    esac
+    set -- "$@" "$bootstrap_stage3_tuple_runtime_name"
+
+    bootstrap_stage3_tuple_seen='|'
+    for bootstrap_stage3_tuple_name in "$@"; do
+        [ -n "$bootstrap_stage3_tuple_name" ] || return 1
+        case "$bootstrap_stage3_tuple_name" in
+            ''|/*|*\\*|.|..|*/.|*/..|../*|*/../*|*[!A-Za-z0-9._/-]*)
+                return 1
+                ;;
+        esac
+        case "$bootstrap_stage3_tuple_seen" in
+            *"|$bootstrap_stage3_tuple_name|"*) return 1 ;;
+        esac
+        bootstrap_stage3_tuple_seen=\
+"$bootstrap_stage3_tuple_seen$bootstrap_stage3_tuple_name|"
+        bootstrap_stage3_tuple_path=\
+"$bootstrap_stage3_tuple_source/$bootstrap_stage3_tuple_name"
+        [ -f "$bootstrap_stage3_tuple_path" ] &&
+            [ ! -L "$bootstrap_stage3_tuple_path" ] || return 1
+    done
+
+    # One process owns the whole vector.  It binds every source identity and
+    # digest before copying, copies from O_NOFOLLOW descriptors, then rechecks
+    # the complete vector.  A writer cannot produce a silently torn tuple by
+    # changing an early member while a later member is copied.
+    perl -MDigest::SHA -MFcntl=:DEFAULT,:mode -e '
+        use strict;
+        use warnings;
+        my ($source, $destination, @names) = @ARGV;
+        my @source_root_stat = lstat($source);
+        @source_root_stat && S_ISDIR($source_root_stat[2]) &&
+            !S_ISLNK($source_root_stat[2]) or die "unsafe source root\n";
+        mkdir($destination, 0700) or die "mkdir destination: $!\n";
+        my (@before, @targets);
+        sub source_path {
+            my ($root, $name) = @_;
+            my @rst = lstat($root);
+            @rst && S_ISDIR($rst[2]) && !S_ISLNK($rst[2]) &&
+                $rst[0] == $source_root_stat[0] &&
+                $rst[1] == $source_root_stat[1]
+                or die "source root changed\n";
+            my @parts = split m{/}, $name;
+            pop @parts;
+            my $parent = $root;
+            for my $part (@parts) {
+                $parent .= "/$part";
+                my @st = lstat($parent);
+                @st && S_ISDIR($st[2]) && !S_ISLNK($st[2])
+                    or die "unsafe source parent\n";
+            }
+            return "$root/$name";
+        }
+        sub open_bound {
+            my ($path) = @_;
+            my @lst = lstat($path);
+            @lst && S_ISREG($lst[2]) && !S_ISLNK($lst[2])
+                or die "unsafe source leaf\n";
+            my $flags = O_RDONLY;
+            $flags |= O_NOFOLLOW if defined(&O_NOFOLLOW);
+            sysopen(my $fh, $path, $flags) or die "open source: $!\n";
+            binmode($fh) or die "binmode source: $!\n";
+            my @st = stat($fh);
+            @st && S_ISREG($st[2]) && $st[0] == $lst[0] &&
+                $st[1] == $lst[1] or die "source identity raced\n";
+            return ($fh, \@st);
+        }
+        sub digest_fh {
+            my ($fh) = @_;
+            seek($fh, 0, 0) or die "seek source: $!\n";
+            my $sha = Digest::SHA->new(256);
+            $sha->addfile($fh);
+            return $sha->hexdigest;
+        }
+        for my $name (@names) {
+            my $path = source_path($source, $name);
+            my ($fh, $st) = open_bound($path);
+            my $digest = digest_fh($fh);
+            push @before, [$name, $st->[0], $st->[1], $st->[2],
+                $st->[7], $st->[9], $st->[10], $digest];
+            close($fh) or die "close source: $!\n";
+        }
+        my $copied = 0;
+        for my $record (@before) {
+            my ($name, $dev, $ino, $source_mode, $size, $mtime, $ctime,
+                $digest) = @$record;
+            my $path = source_path($source, $name);
+            my ($in, $now) = open_bound($path);
+            ($now->[0] == $dev && $now->[1] == $ino && $now->[2] == $source_mode)
+                or die "source identity changed\n";
+            my @parts = split m{/}, $name;
+            my $leaf = pop @parts;
+            my $parent = $destination;
+            for my $part (@parts) {
+                $parent .= "/$part";
+                if (!-e $parent) { mkdir($parent, 0700) or die "mkdir parent: $!\n"; }
+                my @pst = lstat($parent);
+                @pst && S_ISDIR($pst[2]) && !S_ISLNK($pst[2])
+                    or die "unsafe destination parent\n";
+            }
+            my $target = "$parent/$leaf";
+            sysopen(my $out, $target, O_WRONLY | O_CREAT | O_EXCL, 0600)
+                or die "create target: $!\n";
+            binmode($out) or die "binmode target: $!\n";
+            seek($in, 0, 0) or die "seek copy: $!\n";
+            my $copy_sha = Digest::SHA->new(256);
+            my $buffer;
+            while (1) {
+                my $read = sysread($in, $buffer, 1024 * 1024);
+                defined($read) or die "read source: $!\n";
+                last if $read == 0;
+                $copy_sha->add(substr($buffer, 0, $read));
+                my $offset = 0;
+                while ($offset < $read) {
+                    my $written = syswrite($out, $buffer, $read - $offset, $offset);
+                    defined($written) && $written > 0 or die "write target: $!\n";
+                    $offset += $written;
+                }
+            }
+            $copy_sha->hexdigest eq $digest or die "copy digest changed\n";
+            my $wanted = ($source_mode & 0111) ? 0500 : 0400;
+            chmod($wanted, $out) or die "chmod target: $!\n";
+            my @dst = stat($out);
+            S_IMODE($dst[2]) == $wanted or die "target mode mismatch\n";
+            close($out) or die "close target: $!\n";
+            close($in) or die "close source: $!\n";
+            push @targets, [$target, $wanted, $digest];
+            $copied++;
+            if ($copied == 1 && ($ENV{BOOTSTRAP_STAGE3_TEST_MUTATE_AFTER_TUPLE_COPY} // q{}) eq q{1}) {
+                open(my $mutate, ">>", $path) or die "test mutation: $!\n";
+                print {$mutate} "test-source-mutation\n";
+                close($mutate) or die "test mutation close: $!\n";
+            }
+            if ($copied == 1 && ($ENV{BOOTSTRAP_STAGE3_TEST_REPLACE_AFTER_TUPLE_COPY} // q{}) eq q{1}) {
+                my $replacement = "$path.replacement";
+                open(my $replace, ">", $replacement) or die "test replacement: $!\n";
+                print {$replace} "replacement\n";
+                close($replace) or die "test replacement close: $!\n";
+                rename($replacement, $path) or die "test replacement rename: $!\n";
+            }
+        }
+        for my $record (@before) {
+            my ($name, $dev, $ino, $mode, $size, $mtime, $ctime, $digest) = @$record;
+            my ($fh, $now) = open_bound(source_path($source, $name));
+            ($now->[0] == $dev && $now->[1] == $ino && $now->[2] == $mode &&
+             $now->[7] == $size && $now->[9] == $mtime && $now->[10] == $ctime &&
+             digest_fh($fh) eq $digest) or die "source vector changed\n";
+            close($fh) or die "close verify source: $!\n";
+        }
+        for my $target (@targets) {
+            my ($path, $wanted, $digest) = @$target;
+            my @st = lstat($path);
+            @st && S_ISREG($st[2]) && !S_ISLNK($st[2]) &&
+                S_IMODE($st[2]) == $wanted or die "target identity/mode changed\n";
+            my ($fh) = open_bound($path);
+            digest_fh($fh) eq $digest or die "target digest changed\n";
+            close($fh) or die "close verify target: $!\n";
+        }
+        for my $name (@names) {
+            next unless $name =~ m{/};
+            my $parent = $destination;
+            my @parts = split m{/}, $name;
+            pop @parts;
+            for my $part (@parts) {
+                $parent .= "/$part";
+                chmod(0500, $parent) or die "freeze parent: $!\n";
+            }
+        }
+        chmod(0500, $destination) or die "freeze destination: $!\n";
+    ' "$bootstrap_stage3_tuple_source" \
+        "$bootstrap_stage3_tuple_destination" "$@"
 }
 
 bootstrap_stage3_write_seed_stamp() {
@@ -882,8 +1083,11 @@ bootstrap_stage3_prepare_seed_generation() {
 "$bootstrap_stage3_generation_root/.staging.$bootstrap_stage3_generation_nonce"
     rm -rf "$bootstrap_stage3_generation_staging"
     mkdir -p "$bootstrap_stage3_generation_root" || return 1
-    bootstrap_stage3_copy_authority "$bootstrap_stage3_generation_source" \
-        "$bootstrap_stage3_generation_staging" || return 1
+    bootstrap_stage3_copy_seed_tuple "$bootstrap_stage3_generation_source" \
+        "$bootstrap_stage3_generation_staging" \
+        "$bootstrap_stage3_generation_seed_name" \
+        "$bootstrap_stage3_generation_native_name" \
+        "$bootstrap_stage3_generation_backfill_name" || return 1
     chmod 700 "$bootstrap_stage3_generation_staging" || return 1
     bootstrap_stage3_generation_stamp=\
 "$bootstrap_stage3_generation_staging/$bootstrap_stage3_generation_seed_name.inputs.sha256"
@@ -937,6 +1141,18 @@ bootstrap_stage3_publish_seed_generation() {
     else
         return 1
     fi
+    # The prepared directory can wait for the publication lock.  Rebind its
+    # complete bytes and executable-mode vector at the commit boundary rather
+    # than trusting a hash returned before that wait.
+    bootstrap_stage3_publish_snapshot=\
+"$bootstrap_stage3_publish_root/.publish.$$.snapshot"
+    bootstrap_stage3_directory_snapshot "$bootstrap_stage3_publish_snapshot" \
+        "$bootstrap_stage3_publish_material" || return 1
+    bootstrap_stage3_publish_observed_hash=$(bootstrap_stage3_hash_file \
+        "$bootstrap_stage3_publish_snapshot") || return 1
+    rm -f "$bootstrap_stage3_publish_snapshot"
+    [ "$bootstrap_stage3_publish_observed_hash" = \
+        "$bootstrap_stage3_publish_hash" ] || return 1
     set -- "$bootstrap_stage3_publish_material"/*.inputs.sha256
     [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
     bootstrap_stage3_publish_stamp=$1

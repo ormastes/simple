@@ -62,6 +62,25 @@ fn str_eq(a: text, b: text) -> bool:
     a.len() == b.len() and a.starts_with(b)
 
 fn apply_jit_env_vars(flags: GlobalFlags):
+    # Preserve the caller's resolved request across a possible driver process
+    # hop.  The execution owner reads this only for the opt-in mode receipt;
+    # it is not itself an engine-selection knob.
+    var requested_mode = "jit"
+    val configured_mode = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    var selection_fallback = false
+    if flags.force_interpret:
+        requested_mode = "interpreter"
+        # `--interpret` is otherwise filtered out before cli_run_file delegates.
+        # Carry the resolved selection to the child as the canonical public knob.
+        env_set("SIMPLE_EXECUTION_MODE", "interpret")
+    elif not str_eq(flags.backend, "auto"):
+        requested_mode = "jit"
+    elif configured_mode != "" and not str_eq(configured_mode, "jit"):
+        requested_mode = configured_mode
+        selection_fallback = true
+    env_set("SIMPLE_EXECUTION_REQUESTED_MODE", requested_mode)
+    env_set("SIMPLE_EXECUTION_SELECTION_FALLBACK",
+        if selection_fallback: "1" else: "0")
     if flags.no_jit:
         env_set("SIMPLE_NO_JIT", "1")
     if flags.jit_threshold != 10:
