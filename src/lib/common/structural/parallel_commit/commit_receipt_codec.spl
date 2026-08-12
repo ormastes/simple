@@ -1,0 +1,171 @@
+# Canonical, exact-length wire identity for ParallelCommitReceiptV1.
+# Publication serialization/CAS remains the runtime owner's responsibility.
+
+use std.common.base_encoding.utilities.{
+    text_to_bytes_linear,
+    validated_utf8_bytes_to_text_linear
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.wire.{
+    WIRE_ENVELOPE_LEN,
+    wire_check_envelope,
+    wire_get_u16,
+    wire_get_u32,
+    wire_get_u64,
+    wire_get_u8,
+    wire_magic,
+    wire_put_envelope,
+    wire_put_u16,
+    wire_put_u32,
+    wire_put_u64,
+    wire_put_u8
+}
+use std.common.structural.parallel_commit.commit_contracts.{
+    PARALLEL_COMMIT_SCHEMA_VERSION
+}
+use std.common.structural.parallel_commit.commit_engine.{
+    PARALLEL_COMMIT_RECEIPT_MAX_ITEMS,
+    PARALLEL_COMMIT_RECEIPT_MAX_REASON_BYTES,
+    ParallelCommitReceiptV1,
+    parallel_commit_receipt,
+    parallel_commit_receipt_v1_well_formed
+}
+
+val PARALLEL_COMMIT_RECEIPT_WIRE_FIXED_LEN: i64 = WIRE_ENVELOPE_LEN + 44
+
+struct ParallelCommitReceiptDecodeResult:
+    ok: bool
+    value: ParallelCommitReceiptV1
+    reason: text
+
+fn parallel_commit_receipt_magic() -> i64:
+    wire_magic("SPCR")
+
+fn parallel_commit_receipt_zero() -> ParallelCommitReceiptV1:
+    parallel_commit_receipt(false, 0, 0, 1, 1, 0, [], [], [], "invalid")
+
+fn parallel_commit_append_bytes(out: [u8], source: [u8]) -> [u8]:
+    var result = out
+    var i = 0
+    while i < source.len():
+        result.push(source[i])
+        i = i + 1
+    result
+
+fn parallel_commit_receipt_v1_equal(left: ParallelCommitReceiptV1,
+                                    right: ParallelCommitReceiptV1) -> bool:
+    if left.ok != right.ok or left.base_revision != right.base_revision
+        or left.published_revision != right.published_revision
+        or left.input_snapshot_token != right.input_snapshot_token
+        or left.output_snapshot_token != right.output_snapshot_token
+        or left.applied_count != right.applied_count or left.reason != right.reason:
+        return false
+    if left.ordered_task_ids.len() != right.ordered_task_ids.len()
+        or left.ordered_sequences.len() != right.ordered_sequences.len()
+        or left.ordered_payload_tokens.len() != right.ordered_payload_tokens.len():
+        return false
+    var i = 0
+    while i < left.applied_count:
+        if left.ordered_task_ids[i] != right.ordered_task_ids[i]
+            or left.ordered_sequences[i] != right.ordered_sequences[i]
+            or left.ordered_payload_tokens[i] != right.ordered_payload_tokens[i]:
+            return false
+        i = i + 1
+    true
+
+fn encode_parallel_commit_receipt(value: ParallelCommitReceiptV1) -> [u8]:
+    var out: [u8] = []
+    if not parallel_commit_receipt_v1_well_formed(value):
+        return out
+    val reason = text_to_bytes_linear(value.reason)
+    if reason.len() > PARALLEL_COMMIT_RECEIPT_MAX_REASON_BYTES:
+        return out
+    out = wire_put_envelope(out, parallel_commit_receipt_magic(),
+        PARALLEL_COMMIT_SCHEMA_VERSION)
+    out = wire_put_u8(out, if value.ok: 1 else: 0)
+    out = wire_put_u8(out, 0)
+    out = wire_put_u8(out, 0)
+    out = wire_put_u8(out, 0)
+    out = wire_put_u64(out, value.base_revision)
+    out = wire_put_u64(out, value.published_revision)
+    out = wire_put_u64(out, value.input_snapshot_token)
+    out = wire_put_u64(out, value.output_snapshot_token)
+    out = wire_put_u32(out, value.applied_count)
+    out = wire_put_u16(out, reason.len())
+    out = wire_put_u16(out, 0)
+    var i = 0
+    while i < value.applied_count:
+        out = wire_put_u64(out, value.ordered_task_ids[i])
+        i = i + 1
+    i = 0
+    while i < value.applied_count:
+        out = wire_put_u64(out, value.ordered_sequences[i])
+        i = i + 1
+    i = 0
+    while i < value.applied_count:
+        out = wire_put_u64(out, value.ordered_payload_tokens[i])
+        i = i + 1
+    parallel_commit_append_bytes(out, reason)
+
+fn decode_parallel_commit_receipt(data: [u8]) -> ParallelCommitReceiptDecodeResult:
+    val zero = parallel_commit_receipt_zero()
+    if data.len() < PARALLEL_COMMIT_RECEIPT_WIRE_FIXED_LEN:
+        return ParallelCommitReceiptDecodeResult(ok: false, value: zero, reason: "truncated")
+    if not wire_check_envelope(data, 0, parallel_commit_receipt_magic(),
+            PARALLEL_COMMIT_SCHEMA_VERSION):
+        return ParallelCommitReceiptDecodeResult(ok: false, value: zero, reason: "invalid-envelope")
+    val off = WIRE_ENVELOPE_LEN
+    val success = wire_get_u8(data, off)
+    if success > 1 or wire_get_u8(data, off + 1) != 0
+        or wire_get_u8(data, off + 2) != 0 or wire_get_u8(data, off + 3) != 0
+        or wire_get_u16(data, off + 42) != 0:
+        return ParallelCommitReceiptDecodeResult(ok: false, value: zero, reason: "invalid-reserved")
+    val count = wire_get_u32(data, off + 36)
+    val reason_len = wire_get_u16(data, off + 40)
+    if count > PARALLEL_COMMIT_RECEIPT_MAX_ITEMS
+        or reason_len > PARALLEL_COMMIT_RECEIPT_MAX_REASON_BYTES:
+        return ParallelCommitReceiptDecodeResult(ok: false, value: zero, reason: "invalid-count")
+    val array_bytes = count * 24
+    val payload_bytes = array_bytes + reason_len
+    if data.len() - PARALLEL_COMMIT_RECEIPT_WIRE_FIXED_LEN != payload_bytes:
+        return ParallelCommitReceiptDecodeResult(ok: false, value: zero, reason: "invalid-wire-length")
+    var tasks: [i64] = []
+    var sequences: [i64] = []
+    var tokens: [i64] = []
+    var cursor = PARALLEL_COMMIT_RECEIPT_WIRE_FIXED_LEN
+    var i = 0
+    while i < count:
+        tasks.push(wire_get_u64(data, cursor))
+        cursor = cursor + 8
+        i = i + 1
+    i = 0
+    while i < count:
+        sequences.push(wire_get_u64(data, cursor))
+        cursor = cursor + 8
+        i = i + 1
+    i = 0
+    while i < count:
+        tokens.push(wire_get_u64(data, cursor))
+        cursor = cursor + 8
+        i = i + 1
+    var reason_bytes: [u8] = []
+    i = 0
+    while i < reason_len:
+        reason_bytes.push(data[cursor + i])
+        i = i + 1
+    val decoded_reason = match validated_utf8_bytes_to_text_linear(reason_bytes):
+        Err(_): return ParallelCommitReceiptDecodeResult(ok: false, value: zero, reason: "invalid-reason-utf8")
+        Ok(value): value
+    val value = parallel_commit_receipt(success == 1,
+        wire_get_u64(data, off + 4), wire_get_u64(data, off + 12),
+        wire_get_u64(data, off + 20), wire_get_u64(data, off + 28),
+        count, tasks, sequences, tokens, decoded_reason)
+    if not parallel_commit_receipt_v1_well_formed(value):
+        return ParallelCommitReceiptDecodeResult(ok: false, value: zero, reason: "invalid-receipt")
+    ParallelCommitReceiptDecodeResult(ok: true, value: value, reason: "")
+
+fn parallel_commit_receipt_v1_sha256(value: ParallelCommitReceiptV1) -> text:
+    val encoded = encode_parallel_commit_receipt(value)
+    if encoded.len() == 0:
+        return ""
+    sha256_u8_hex(encoded)

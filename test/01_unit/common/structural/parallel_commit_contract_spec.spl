@@ -9,11 +9,19 @@ use std.common.structural.parallel_commit.commit_contracts.{
 }
 use std.common.structural.parallel_commit.commit_engine.{
     parallel_commit_publish_envelopes,
+    parallel_commit_receipt,
     parallel_commit_receipt_v1_well_formed,
     parallel_commit_state_v1,
     parallel_commit_validate
 }
 use std.common.structural.parallel_commit.commit_contracts.{ParallelConflictPolicy}
+use std.common.structural.parallel_commit.commit_receipt_codec.{
+    decode_parallel_commit_receipt,
+    encode_parallel_commit_receipt,
+    parallel_commit_receipt_v1_equal,
+    parallel_commit_receipt_v1_sha256
+}
+use std.common.structural.wire.{wire_to_hex}
 
 describe "Parallel parent commit contract":
     it "orders results independently of completion order":
@@ -43,6 +51,18 @@ describe "Parallel parent commit contract":
             ParallelCommitOrder.TaskIdThenSequence, ParallelConflictPolicy.Reduce)
         assert_false(validated.ok)
 
+    it "requires the reduce policy for overlapping reduction results":
+        val left = result_envelope_v1(3, 1, 0, 22,
+            ParallelResultKind.Reduce, 77, "left")
+        val right = result_envelope_v1(3, 2, 0, 22,
+            ParallelResultKind.Reduce, 78, "right")
+        val rejected = parallel_commit_validate([left, right],
+            ParallelCommitOrder.TaskIdThenSequence, ParallelConflictPolicy.Reject)
+        val admitted = parallel_commit_validate([left, right],
+            ParallelCommitOrder.TaskIdThenSequence, ParallelConflictPolicy.Reduce)
+        assert_equal(rejected.reason, "reduction-requires-reduce-policy")
+        assert_true(admitted.ok)
+
     it "publishes child results once in canonical order":
         val initial = parallel_commit_state_v1(3, 300)
         val late = result_envelope_v1(3, 9, 0, 13, ParallelResultKind.Patch, 73, "late")
@@ -67,6 +87,14 @@ describe "Parallel parent commit contract":
         assert_equal(outcome.receipt.reason, "stale-base-revision")
         assert_equal(outcome.state.revision, 3)
         assert_equal(outcome.state.snapshot_token, 300)
+
+    it "returns a valid diagnostic receipt for malformed owner state":
+        val invalid = parallel_commit_state_v1(-1, 0)
+        val outcome = parallel_commit_publish_envelopes(invalid, [], 0,
+            ParallelCommitOrder.TaskIdThenSequence, ParallelConflictPolicy.Reject)
+        assert_false(outcome.receipt.ok)
+        assert_equal(outcome.receipt.reason, "invalid-owner-state")
+        assert_true(parallel_commit_receipt_v1_well_formed(outcome.receipt))
 
     it "leaves canonical state unchanged on conflict":
         val initial = parallel_commit_state_v1(3, 300)
@@ -109,3 +137,56 @@ describe "Parallel parent commit contract":
         assert_equal(forward.receipt.ordered_payload_tokens[2], 111)
         assert_equal(reverse.receipt.ordered_payload_tokens[2], 111)
         assert_equal(mixed.receipt.ordered_payload_tokens[2], 111)
+
+    it "rejects malformed receipt element identities":
+        val invalid_task = parallel_commit_receipt(true, 3, 4, 300, 301,
+            1, [0], [0], [74], "")
+        val invalid_sequence = parallel_commit_receipt(true, 3, 4, 300, 301,
+            1, [2], [-1], [74], "")
+        val invalid_token = parallel_commit_receipt(true, 3, 4, 300, 301,
+            1, [2], [0], [0], "")
+        assert_false(parallel_commit_receipt_v1_well_formed(invalid_task))
+        assert_false(parallel_commit_receipt_v1_well_formed(invalid_sequence))
+        assert_false(parallel_commit_receipt_v1_well_formed(invalid_token))
+
+    it "pins canonical commit receipt bytes and SHA-256 identity":
+        val receipt = parallel_commit_receipt(true, 3, 4, 300, 301, 2,
+            [2, 9], [0, 0], [74, 73], "")
+        val encoded = encode_parallel_commit_receipt(receipt)
+        assert_equal(wire_to_hex(encoded),
+            "535043520100000001000000030000000000000004000000000000002c010000000000002d01000000000000020000000000000002000000000000000900000000000000000000000000000000000000000000004a000000000000004900000000000000")
+        val decoded = decode_parallel_commit_receipt(encoded)
+        assert_true(decoded.ok)
+        assert_true(parallel_commit_receipt_v1_equal(receipt, decoded.value))
+        assert_equal(parallel_commit_receipt_v1_sha256(receipt),
+            "6a9ef4e674370f985ac1feebd11a06a405d941fb7e60ad1029fddacca2191456")
+
+    it "rejects malformed reserved trailing and invalid receipt wire":
+        val receipt = parallel_commit_receipt(true, 3, 4, 300, 301, 2,
+            [2, 9], [0, 0], [74, 73], "")
+        var bad_magic = encode_parallel_commit_receipt(receipt)
+        bad_magic[0] = 0
+        assert_equal(decode_parallel_commit_receipt(bad_magic).reason,
+            "invalid-envelope")
+        var reserved = encode_parallel_commit_receipt(receipt)
+        reserved[9] = 1
+        assert_equal(decode_parallel_commit_receipt(reserved).reason,
+            "invalid-reserved")
+        var trailing = encode_parallel_commit_receipt(receipt)
+        trailing.push(0)
+        assert_equal(decode_parallel_commit_receipt(trailing).reason,
+            "invalid-wire-length")
+        var invalid_task = encode_parallel_commit_receipt(receipt)
+        invalid_task[52] = 0
+        invalid_task[53] = 0
+        assert_equal(decode_parallel_commit_receipt(invalid_task).reason,
+            "invalid-receipt")
+
+    it "round trips a failure receipt with canonical reason evidence":
+        val receipt = parallel_commit_receipt(false, 3, 3, 300, 300, 0,
+            [], [], [], "stale-base-revision")
+        val decoded = decode_parallel_commit_receipt(
+            encode_parallel_commit_receipt(receipt))
+        assert_true(decoded.ok)
+        assert_true(parallel_commit_receipt_v1_equal(receipt, decoded.value))
+        assert_equal(decoded.value.reason, "stale-base-revision")

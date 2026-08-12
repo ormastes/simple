@@ -7,6 +7,7 @@ use std.common.structural.parallel_commit.commit_contracts.{
     ParallelConflictPolicy,
     ResultEnvelopeV1,
     parallel_conflict_policy_to_u8,
+    parallel_result_kind_to_u8,
     parallel_result_before,
     parallel_results_conflict,
     result_envelope_v1_well_formed
@@ -37,6 +38,9 @@ struct ParallelCommitOutcomeV1:
     state: ParallelCommitStateV1
     receipt: ParallelCommitReceiptV1
 
+val PARALLEL_COMMIT_RECEIPT_MAX_ITEMS: i64 = 65535
+val PARALLEL_COMMIT_RECEIPT_MAX_REASON_BYTES: i64 = 256
+
 fn parallel_commit_state_v1(revision: i64,
                             snapshot_token: i64) -> ParallelCommitStateV1:
     ParallelCommitStateV1(revision: revision,
@@ -63,6 +67,12 @@ fn parallel_commit_receipt(ok: bool, base_revision: i64,
         ordered_payload_tokens: ordered_payload_tokens, reason: reason)
 
 fn parallel_commit_receipt_v1_well_formed(value: ParallelCommitReceiptV1) -> bool:
+    if not value.ok and value.reason == "invalid-owner-state":
+        return value.published_revision == value.base_revision
+            and value.output_snapshot_token == value.input_snapshot_token
+            and value.applied_count == 0 and value.ordered_task_ids.len() == 0
+            and value.ordered_sequences.len() == 0
+            and value.ordered_payload_tokens.len() == 0
     if value.base_revision < 0 or value.published_revision < value.base_revision:
         return false
     if value.input_snapshot_token <= 0 or value.output_snapshot_token <= 0
@@ -72,12 +82,23 @@ fn parallel_commit_receipt_v1_well_formed(value: ParallelCommitReceiptV1) -> boo
         or value.ordered_sequences.len() != value.applied_count
         or value.ordered_payload_tokens.len() != value.applied_count:
         return false
+    if value.applied_count > PARALLEL_COMMIT_RECEIPT_MAX_ITEMS
+        or value.reason.len() > PARALLEL_COMMIT_RECEIPT_MAX_REASON_BYTES:
+        return false
+    var i = 0
+    while i < value.applied_count:
+        if value.ordered_task_ids[i] <= 0 or value.ordered_sequences[i] < 0
+            or value.ordered_payload_tokens[i] <= 0:
+            return false
+        i = i + 1
     if value.ok:
         if value.reason.len() != 0:
             return false
         if value.applied_count == 0:
             return value.published_revision == value.base_revision
                 and value.output_snapshot_token == value.input_snapshot_token
+        if value.base_revision == 9223372036854775807:
+            return false
         return value.published_revision == value.base_revision + 1
             and value.output_snapshot_token != value.input_snapshot_token
     value.reason.len() > 0 and value.applied_count == 0
@@ -133,6 +154,8 @@ fn parallel_commit_batch_has_duplicate_identity(results: [ResultEnvelopeV1]) -> 
 fn parallel_commit_validate(results: [ResultEnvelopeV1],
                             order: ParallelCommitOrder,
                             conflict: ParallelConflictPolicy) -> ParallelCommitValidationV1:
+    if results.len() > PARALLEL_COMMIT_RECEIPT_MAX_ITEMS:
+        return parallel_commit_validation_failure("result-batch-too-large")
     for result in results:
         if not result_envelope_v1_well_formed(result):
             return parallel_commit_validation_failure("invalid-result-envelope")
@@ -143,6 +166,13 @@ fn parallel_commit_validate(results: [ResultEnvelopeV1],
     while i < ordered.len():
         var j = i + 1
         while j < ordered.len():
+            val left_reduce = parallel_result_kind_to_u8(ordered[i].kind) == 3
+            val right_reduce = parallel_result_kind_to_u8(ordered[j].kind) == 3
+            if ordered[i].write_region == ordered[j].write_region
+                and left_reduce and right_reduce
+                and parallel_conflict_policy_to_u8(conflict) != 2:
+                return parallel_commit_validation_failure(
+                    "reduction-requires-reduce-policy")
             if parallel_results_conflict(ordered[i], ordered[j]):
                 # Rebase requires payload-aware application owned by a later
                 # runtime adapter; common validation therefore fails closed.

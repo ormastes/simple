@@ -185,3 +185,12 @@ dev-done
   access-range/fixed-tree integration, candidate capability checks, and a
   serialized/CAS runtime/MDSOC owner adapter remain open; this common value
   function is not itself concurrent atomic publication.
+- impl: Advanced WP-03 receipt integrity with a bounded canonical `SPCR` wire
+  identity, exact checked decoding, field/array equality, SHA-256 identity, and
+  a hand-pinned golden vector. Receipt validation now rejects invalid ordered
+  IDs/sequences/tokens, oversized batches, revision overflow, and reductions
+  used without the explicit reduce policy. Malformed owner states produce a
+  valid diagnostic receipt. This hash attests receipt/order identity only: it
+  does not attest payload contents, candidate-root lineage, or concurrent
+  atomic publication; those still require the runtime owner adapter and V2
+  root/payload evidence.
