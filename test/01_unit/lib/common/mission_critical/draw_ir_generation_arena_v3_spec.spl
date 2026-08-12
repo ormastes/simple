@@ -1,0 +1,180 @@
+# @cover src/lib/common/mission_critical/draw_ir_generation_arena_v3.spl 80%
+# @tag: unit, mission_critical, rendering, arena
+
+use std.spec.*
+use common.mission_critical.draw_ir_generation_arena_v3.*
+
+describe "bounded Draw IR generation arena v3":
+
+    it "admits and seals an exact-capacity generation":
+        val counts = draw_ir_generation_count_v3(2u32, 1u32, 1u32, 1u32, 1u32, 2u32)
+        val planned = draw_ir_generation_plan_v3(7u64, 1u64, counts, 8u64, 64u64, 8u64)
+        var arena = DrawIrGenerationArenaV3.bounded(7u64, 64u64, 8u64)
+        var admitted = false
+        match planned:
+            DrawIrPlanOutcomeV3.Planned(plan):
+                match arena.admit(plan):
+                    DrawIrAdmissionOutcomeV3.Admitted(accepted):
+                        admitted = accepted.total_bytes == 64u64
+                    DrawIrAdmissionOutcomeV3.Refused(receipt):
+                        admitted = false
+            DrawIrPlanOutcomeV3.Refused(receipt):
+                admitted = false
+        expect(admitted).to_equal(true)
+        expect(arena.seal(64u64, 8u64)).to_be_nil()
+        expect(arena.retire()).to_equal(true)
+        expect(arena.next_generation).to_equal(2u64)
+
+    it "rejects one row over capacity before arena mutation":
+        val counts = draw_ir_generation_count_v3(9u32, 0u32, 0u32, 0u32, 0u32, 0u32)
+        val planned = draw_ir_generation_plan_v3(8u64, 1u64, counts, 8u64, 64u64, 8u64)
+        var arena = DrawIrGenerationArenaV3.bounded(8u64, 64u64, 8u64)
+        var reason = 0u16
+        match planned:
+            DrawIrPlanOutcomeV3.Refused(receipt):
+                reason = receipt.reason
+            DrawIrPlanOutcomeV3.Planned(plan):
+                reason = 99u16
+        expect(reason).to_equal(DRAW_IR_OVERFLOW_COUNT)
+        expect(arena.active).to_equal(false)
+        expect(arena.admitted_bytes).to_equal(0u64)
+
+    it "does not grow an active generation":
+        val counts = draw_ir_generation_count_v3(1u32, 0u32, 0u32, 0u32, 0u32, 0u32)
+        val planned = draw_ir_generation_plan_v3(9u64, 1u64, counts, 8u64, 64u64, 8u64)
+        var arena = DrawIrGenerationArenaV3.bounded(9u64, 64u64, 8u64)
+        var reason = 0u16
+        match planned:
+            DrawIrPlanOutcomeV3.Planned(plan):
+                arena.admit(plan)
+                match arena.admit(plan):
+                    DrawIrAdmissionOutcomeV3.Refused(receipt):
+                        reason = receipt.reason
+                    DrawIrAdmissionOutcomeV3.Admitted(accepted):
+                        reason = 99u16
+            DrawIrPlanOutcomeV3.Refused(receipt):
+                reason = receipt.reason
+        expect(reason).to_equal(DRAW_IR_OVERFLOW_ACTIVE_GENERATION)
+        expect(arena.admitted_bytes).to_equal(8u64)
+
+    it "rejects a plan created for another arena before mutation":
+        val counts = draw_ir_generation_count_v3(1u32, 0u32, 0u32, 0u32, 0u32, 0u32)
+        val planned = draw_ir_generation_plan_v3(99u64, 1u64, counts, 8u64, 64u64, 8u64)
+        var arena = DrawIrGenerationArenaV3.bounded(10u64, 64u64, 8u64)
+        var reason = 0u16
+        match planned:
+            DrawIrPlanOutcomeV3.Planned(plan):
+                match arena.admit(plan):
+                    DrawIrAdmissionOutcomeV3.Refused(receipt):
+                        reason = receipt.reason
+                    DrawIrAdmissionOutcomeV3.Admitted(accepted):
+                        reason = 99u16
+            DrawIrPlanOutcomeV3.Refused(receipt):
+                reason = receipt.reason
+        expect(reason).to_equal(DRAW_IR_OVERFLOW_PLAN_MISMATCH)
+        expect(arena.active).to_equal(false)
+
+    it "recomputes forged row and byte totals before admission":
+        val counts = draw_ir_generation_count_v3(2u32, 0u32, 0u32, 0u32, 0u32, 0u32)
+        var arena = DrawIrGenerationArenaV3.bounded(11u64, 64u64, 8u64)
+        val forged_rows = DrawIrGenerationPlanV3(
+            arena_id: 11u64, generation: 1u64, counts: counts,
+            total_rows: 1u64, total_bytes: 8u64,
+            layout_id: DRAW_IR_LAYOUT_PACKED_V3,
+            bytes_per_row: DRAW_IR_PACKED_BYTES_PER_ROW_V3
+        )
+        var row_reason = 0u16
+        match arena.admit(forged_rows):
+            DrawIrAdmissionOutcomeV3.Refused(receipt): row_reason = receipt.reason
+            DrawIrAdmissionOutcomeV3.Admitted(accepted): row_reason = 99u16
+        expect(row_reason).to_equal(DRAW_IR_OVERFLOW_PLAN_MISMATCH)
+        expect(arena.active).to_equal(false)
+
+        val forged_bytes = DrawIrGenerationPlanV3(
+            arena_id: 11u64, generation: 1u64, counts: counts,
+            total_rows: 2u64, total_bytes: 8u64,
+            layout_id: DRAW_IR_LAYOUT_PACKED_V3,
+            bytes_per_row: DRAW_IR_PACKED_BYTES_PER_ROW_V3
+        )
+        var byte_reason = 0u16
+        match arena.admit(forged_bytes):
+            DrawIrAdmissionOutcomeV3.Refused(receipt): byte_reason = receipt.reason
+            DrawIrAdmissionOutcomeV3.Admitted(accepted): byte_reason = 99u16
+        expect(byte_reason).to_equal(DRAW_IR_OVERFLOW_PLAN_MISMATCH)
+        expect(arena.admitted_bytes).to_equal(0u64)
+
+    it "binds admission to packed layout identity and row width":
+        val counts = draw_ir_generation_count_v3(1u32, 0u32, 0u32, 0u32, 0u32, 0u32)
+        var arena = DrawIrGenerationArenaV3.bounded(12u64, 64u64, 8u64)
+        val forged_layout = DrawIrGenerationPlanV3(
+            arena_id: 12u64, generation: 1u64, counts: counts,
+            total_rows: 1u64, total_bytes: 8u64,
+            layout_id: 99u64, bytes_per_row: DRAW_IR_PACKED_BYTES_PER_ROW_V3
+        )
+        val forged_width = DrawIrGenerationPlanV3(
+            arena_id: 12u64, generation: 1u64, counts: counts,
+            total_rows: 1u64, total_bytes: 16u64,
+            layout_id: DRAW_IR_LAYOUT_PACKED_V3, bytes_per_row: 16u64
+        )
+        var layout_reason = 0u16
+        var width_reason = 0u16
+        match arena.admit(forged_layout):
+            DrawIrAdmissionOutcomeV3.Refused(receipt): layout_reason = receipt.reason
+            DrawIrAdmissionOutcomeV3.Admitted(accepted): layout_reason = 99u16
+        match arena.admit(forged_width):
+            DrawIrAdmissionOutcomeV3.Refused(receipt): width_reason = receipt.reason
+            DrawIrAdmissionOutcomeV3.Admitted(accepted): width_reason = 99u16
+        expect(layout_reason).to_equal(DRAW_IR_OVERFLOW_PLAN_MISMATCH)
+        expect(width_reason).to_equal(DRAW_IR_OVERFLOW_PLAN_MISMATCH)
+        expect(arena.active).to_equal(false)
+
+    it "aborts a failed seal without publication and admits the next generation":
+        val counts = draw_ir_generation_count_v3(1u32, 0u32, 0u32, 0u32, 0u32, 0u32)
+        var arena = DrawIrGenerationArenaV3.bounded(13u64, 64u64, 8u64)
+        val first = draw_ir_generation_plan_v3(13u64, 1u64, counts, 8u64, 64u64, 8u64)
+        match first:
+            DrawIrPlanOutcomeV3.Planned(plan): arena.admit(plan)
+            DrawIrPlanOutcomeV3.Refused(receipt): expect(false).to_equal(true)
+        val mismatch = arena.seal(7u64, 1u64)
+        var mismatch_seen = false
+        if val receipt = mismatch:
+            mismatch_seen = receipt.reason == DRAW_IR_OVERFLOW_PLAN_MISMATCH
+        expect(mismatch_seen).to_equal(true)
+        expect(arena.sealed).to_equal(false)
+        expect(arena.retire()).to_equal(false)
+        var advanced = false
+        match arena.abort():
+            DrawIrTerminalOutcomeV3.Advanced(generation): advanced = generation == 2u64
+            DrawIrTerminalOutcomeV3.Refused(receipt): advanced = false
+        expect(advanced).to_equal(true)
+        expect(arena.active).to_equal(false)
+        expect(arena.admitted_bytes).to_equal(0u64)
+
+        val second = draw_ir_generation_plan_v3(13u64, 2u64, counts, 8u64, 64u64, 8u64)
+        var next_admitted = false
+        match second:
+            DrawIrPlanOutcomeV3.Planned(plan):
+                match arena.admit(plan):
+                    DrawIrAdmissionOutcomeV3.Admitted(accepted): next_admitted = true
+                    DrawIrAdmissionOutcomeV3.Refused(receipt): next_admitted = false
+            DrawIrPlanOutcomeV3.Refused(receipt): next_admitted = false
+        expect(next_admitted).to_equal(true)
+
+    it "rejects terminal generation advance without wrapping":
+        val counts = draw_ir_generation_count_v3(1u32, 0u32, 0u32, 0u32, 0u32, 0u32)
+        var arena = DrawIrGenerationArenaV3.bounded(14u64, 64u64, 8u64)
+        arena.next_generation = 0xFFFFFFFFFFFFFFFFu64
+        val planned = draw_ir_generation_plan_v3(
+            14u64, 0xFFFFFFFFFFFFFFFFu64, counts, 8u64, 64u64, 8u64
+        )
+        match planned:
+            DrawIrPlanOutcomeV3.Planned(plan): arena.admit(plan)
+            DrawIrPlanOutcomeV3.Refused(receipt): expect(false).to_equal(true)
+        expect(arena.seal(8u64, 1u64)).to_be_nil()
+        var reason = 0u16
+        match arena.retire_checked():
+            DrawIrTerminalOutcomeV3.Refused(receipt): reason = receipt.reason
+            DrawIrTerminalOutcomeV3.Advanced(generation): reason = 99u16
+        expect(reason).to_equal(DRAW_IR_OVERFLOW_GENERATION_EXHAUSTED)
+        expect(arena.next_generation).to_equal(0xFFFFFFFFFFFFFFFFu64)
+        expect(arena.terminal).to_equal(true)

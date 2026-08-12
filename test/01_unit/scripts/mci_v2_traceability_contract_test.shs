@@ -1,0 +1,86 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+copy_tree() {
+    root=$1
+    for rel in test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl test/01_unit/scripts/mci_v2_aggregate_contract_test.shs test/01_unit/scripts/mci_v2_allocation_contract_test.shs test/01_unit/scripts/mci_v2_process_safety_contract_test.shs test/01_unit/scripts/mci_v2_traceability_contract_test.shs doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md doc/02_requirements/feature/mission_critical_infra_hardening_v2.md doc/02_requirements/nfr/mission_critical_infra_hardening_v2.md doc/04_architecture/mission_critical_infra_hardening_v2.md doc/05_design/mission_critical_infra_hardening_v2.md doc/07_guide/app/spipe/mission_critical_infra_hardening_v2.md doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md; do
+        mkdir -p "$root/$(dirname "$rel")"; cp "$repo/$rel" "$root/$rel"
+    done
+}
+run_gate() { sh "$repo/scripts/check/check-mci-v2-traceability.shs" --repo-root "$1" --evidence evidence --run-id contract --source-hash "$(printf '%064d' 0)" --configuration-hash "$(printf '%064d' 1)" --captured-at-utc-ns 100 --valid-until-utc-ns 200 --trusted-key-id contract-key; }
+sync_manual_hash() {
+    root=$1
+    hash=$(sha256sum "$root/test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl" | awk '{print $1}')
+    sed -i "s/^\*\*Executable source SHA-256:\*\* .*/\*\*Executable source SHA-256:\*\* \`$hash\`  /" "$root/doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md"
+}
+
+good=$tmp/good; mkdir -p "$good"; copy_tree "$good"
+if run_gate "$good" >/dev/null 2>&1; then echo "missing real docgen/full scenario provenance accepted" >&2; exit 1; fi
+test ! -e "$good/evidence/artifacts/traceability-v1.env"
+test ! -e "$good/evidence/receipts/traceability.unsigned-receipt"
+
+missing=$tmp/missing; mkdir -p "$missing"; copy_tree "$missing"; rm "$missing/doc/04_architecture/mission_critical_infra_hardening_v2.md"
+if run_gate "$missing" >/dev/null 2>&1; then echo "missing canonical path accepted" >&2; exit 1; fi
+
+mismatch=$tmp/mismatch; mkdir -p "$mismatch"; copy_tree "$mismatch"; sed -i 's#test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl#test/wrong_spec.spl#' "$mismatch/doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md"
+if run_gate "$mismatch" >/dev/null 2>&1; then echo "manual path mismatch accepted" >&2; exit 1; fi
+
+stale=$tmp/stale; mkdir -p "$stale"; copy_tree "$stale"; echo '# provenance drift' >> "$stale/test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl"
+if run_gate "$stale" >/dev/null 2>&1; then echo "manual provenance mismatch accepted" >&2; exit 1; fi
+
+placeholder=$tmp/placeholder; mkdir -p "$placeholder"; copy_tree "$placeholder"; echo 'expect(true).to_equal(true)' >> "$placeholder/test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl"
+if run_gate "$placeholder" >/dev/null 2>&1; then echo "placeholder accepted" >&2; exit 1; fi
+
+unmapped=$tmp/unmapped; mkdir -p "$unmapped"; copy_tree "$unmapped"; sed -i 's/MCI-DOC-003/MCI-DOC-099/g' "$unmapped/doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md"
+if run_gate "$unmapped" >/dev/null 2>&1; then echo "scenario-set mismatch accepted" >&2; exit 1; fi
+
+duplicate=$tmp/duplicate; mkdir -p "$duplicate"; copy_tree "$duplicate"; sed -i 's/`MCI-DOC-003`/`MCI-DOC-003` `MCI-DOC-003`/' "$duplicate/doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md"
+if run_gate "$duplicate" >/dev/null 2>&1; then echo "duplicate scenario accepted" >&2; exit 1; fi
+
+class_drift=$tmp/class-drift; mkdir -p "$class_drift"; copy_tree "$class_drift"
+sed -i 's/MCI-NFR-017 class=evidence-contract/MCI-NFR-017 class=blocked/' "$class_drift/test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl"
+sync_manual_hash "$class_drift"
+if run_gate "$class_drift" >"$tmp/class-drift.log" 2>&1; then echo "scenario class drift accepted" >&2; exit 1; fi
+grep -q '^BLOCKED: evidence-contract classification mismatch$' "$tmp/class-drift.log"
+
+missing_reason=$tmp/missing-reason; mkdir -p "$missing_reason"; copy_tree "$missing_reason"
+sed -i 's/ reason=owner-producer-missing//' "$missing_reason/test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl"
+sync_manual_hash "$missing_reason"
+if run_gate "$missing_reason" >"$tmp/missing-reason.log" 2>&1; then echo "scenario without reason accepted" >&2; exit 1; fi
+grep -q '^BLOCKED: malformed scenario classification$' "$tmp/missing-reason.log"
+
+manual_class=$tmp/manual-class; mkdir -p "$manual_class"; copy_tree "$manual_class"
+sed -i 's/| MCI-NFR-017 | evidence-contract |/| MCI-NFR-017 | blocked |/' "$manual_class/doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md"
+if run_gate "$manual_class" >"$tmp/manual-class.log" 2>&1; then echo "manual/spec class mismatch accepted" >&2; exit 1; fi
+grep -q '^BLOCKED: manual scenario matrix metadata mismatch$' "$tmp/manual-class.log"
+
+manual_owner=$tmp/manual-owner; mkdir -p "$manual_owner"; copy_tree "$manual_owner"
+sed -i 's#`test/01_unit/scripts/mci_v2_aggregate_contract_test.shs` | `focused-reviewer-contract-only`#`test/wrong-owner.shs` | `focused-reviewer-contract-only`#' "$manual_owner/doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md"
+if run_gate "$manual_owner" >"$tmp/manual-owner.log" 2>&1; then echo "manual owner drift accepted" >&2; exit 1; fi
+grep -q '^BLOCKED: manual scenario matrix metadata mismatch$' "$tmp/manual-owner.log"
+
+manual_reason=$tmp/manual-reason; mkdir -p "$manual_reason"; copy_tree "$manual_reason"
+sed -i 's/`focused-reviewer-contract-only`/`wrong-reason`/' "$manual_reason/doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md"
+if run_gate "$manual_reason" >"$tmp/manual-reason.log" 2>&1; then echo "manual reason drift accepted" >&2; exit 1; fi
+grep -q '^BLOCKED: manual scenario matrix metadata mismatch$' "$tmp/manual-reason.log"
+
+manual_resume=$tmp/manual-resume; mkdir -p "$manual_resume"; copy_tree "$manual_resume"
+sed -i 's/`obtain-independent-reviewer-receipt`/`wrong-resume`/' "$manual_resume/doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md"
+if run_gate "$manual_resume" >"$tmp/manual-resume.log" 2>&1; then echo "manual resume drift accepted" >&2; exit 1; fi
+grep -q '^BLOCKED: manual scenario matrix metadata mismatch$' "$tmp/manual-resume.log"
+
+manual_id=$tmp/manual-id; mkdir -p "$manual_id"; copy_tree "$manual_id"
+sed -i 's/| MCI-NFR-017 |/| MCI-NFR-099 |/' "$manual_id/doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md"
+if run_gate "$manual_id" >"$tmp/manual-id.log" 2>&1; then echo "manual ID drift accepted" >&2; exit 1; fi
+grep -q '^BLOCKED: manual scenario matrix/class mismatch\|^BLOCKED: manual scenario matrix metadata mismatch$' "$tmp/manual-id.log"
+
+symlinked=$tmp/symlinked; mkdir -p "$symlinked"; copy_tree "$symlinked"; mkdir "$symlinked/real-evidence"; ln -s real-evidence "$symlinked/evidence"
+if run_gate "$symlinked" >/dev/null 2>&1; then echo "symlink evidence accepted" >&2; exit 1; fi
+
+input_link=$tmp/input-link; mkdir -p "$input_link"; copy_tree "$input_link"; mv "$input_link/doc/04_architecture" "$input_link/doc/architecture-real"; ln -s architecture-real "$input_link/doc/04_architecture"
+if run_gate "$input_link" >/dev/null 2>&1; then echo "symlink authoritative parent accepted" >&2; exit 1; fi
+
+if sh "$repo/scripts/check/check-mci-v2-traceability.shs" --repo-root "$good" --evidence "$tmp/outside" --run-id contract --source-hash "$(printf '%064d' 0)" --configuration-hash "$(printf '%064d' 1)" --captured-at-utc-ns 100 --valid-until-utc-ns 200 --trusted-key-id contract-key >/dev/null 2>&1; then echo "outside evidence accepted" >&2; exit 1; fi
+echo "PASS: MCI-v2 traceability producer contract negatives"

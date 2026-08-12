@@ -1,0 +1,347 @@
+# @cover src/os/sosix/mission_critical/certified_manifest.spl 80%
+use std.spec
+use os.sosix.mission_critical.certified_manifest.{
+    CertifiedGuestEvidenceV1,
+    CertifiedGuestPayloadV1,
+    CertifiedCellV1,
+    CertifiedSimpleOsManifestV1,
+    certified_simpleos_cell_catalog_v1,
+    certified_simpleos_host_identity_v1,
+    certified_simpleos_guest_identity_v1,
+    certified_simpleos_configuration_identity_v1,
+    certified_simpleos_manifest_validate,
+    certified_simpleos_manifest_hash_v1
+}
+
+val SOURCE_HASH: text = "1111111111111111111111111111111111111111111111111111111111111111"
+val COMPILER_HASH: text = "2222222222222222222222222222222222222222222222222222222222222222"
+val IMAGE_HASH: text = "3333333333333333333333333333333333333333333333333333333333333333"
+val CONFIG_HASH: text = "4444444444444444444444444444444444444444444444444444444444444444"
+
+fn evidence(run_id: text, source: text, cell_id: text) -> CertifiedGuestEvidenceV1:
+    CertifiedGuestEvidenceV1(
+        present: true, passed: true, target_side: true, run_id: run_id,
+        source_revision: source, host_identity: certified_simpleos_host_identity_v1(cell_id),
+        guest_identity: certified_simpleos_guest_identity_v1(cell_id),
+        configuration_identity: certified_simpleos_configuration_identity_v1(cell_id), image_hash: IMAGE_HASH,
+        configuration_hash: CONFIG_HASH, release_id: "release-1",
+        compiler_receipt_hash: COMPILER_HASH, captured_at_epoch_s: 900u64,
+        expires_at_epoch_s: 1100u64
+    )
+
+fn selected_cell(cell_id: text) -> CertifiedCellV1:
+    val guest = certified_simpleos_guest_identity_v1(cell_id)
+    val receipt = evidence("run-1", SOURCE_HASH, cell_id)
+    CertifiedCellV1(
+        cell_id: cell_id, selected: true, unselected_reason: "", run_id: "run-1",
+        source_revision: SOURCE_HASH, host_identity: certified_simpleos_host_identity_v1(cell_id),
+        guest_identity: guest,
+        configuration_identity: certified_simpleos_configuration_identity_v1(cell_id), image_hash: IMAGE_HASH,
+        configuration_hash: CONFIG_HASH, boot: receipt, mount: receipt,
+        target_listing: receipt, arbitrary_fs_program: receipt, compiler_lineage: receipt,
+        source_identity: receipt, run_correlation: receipt,
+        payload: CertifiedGuestPayloadV1(evidence: receipt, usr_bin: true, bin: true, sys_apps: true, sys_simpletool_sdn: true, executed_from_guest_storage: true,
+            usr_bin_artifact_hash: IMAGE_HASH, bin_artifact_hash: IMAGE_HASH,
+            sys_apps_artifact_hash: IMAGE_HASH, sys_simpletool_sdn_artifact_hash: IMAGE_HASH),
+        stress_24h: receipt,
+        pure_simple_lineage: true
+    )
+
+fn unselect(cell: CertifiedCellV1) -> CertifiedCellV1:
+    var out = cell
+    out.selected = false
+    out.unselected_reason = "host-not-certified"
+    out.boot.present = false
+    out.boot.passed = false
+    out.mount.present = false
+    out.mount.passed = false
+    out.target_listing.present = false
+    out.target_listing.passed = false
+    out.arbitrary_fs_program.present = false
+    out.arbitrary_fs_program.passed = false
+    out.compiler_lineage.present = false
+    out.compiler_lineage.passed = false
+    out.source_identity.present = false
+    out.source_identity.passed = false
+    out.run_correlation.present = false
+    out.run_correlation.passed = false
+    out.payload.evidence.present = false
+    out.payload.evidence.passed = false
+    out.stress_24h.present = false
+    out.stress_24h.passed = false
+    out
+
+fn extend_all_receipts(cell: CertifiedCellV1, expires_at_epoch_s: u64) -> CertifiedCellV1:
+    var out = cell
+    out.boot.expires_at_epoch_s = expires_at_epoch_s
+    out.mount.expires_at_epoch_s = expires_at_epoch_s
+    out.target_listing.expires_at_epoch_s = expires_at_epoch_s
+    out.arbitrary_fs_program.expires_at_epoch_s = expires_at_epoch_s
+    out.compiler_lineage.expires_at_epoch_s = expires_at_epoch_s
+    out.source_identity.expires_at_epoch_s = expires_at_epoch_s
+    out.run_correlation.expires_at_epoch_s = expires_at_epoch_s
+    out.payload.evidence.expires_at_epoch_s = expires_at_epoch_s
+    out.stress_24h.expires_at_epoch_s = expires_at_epoch_s
+    out
+
+fn full_manifest() -> CertifiedSimpleOsManifestV1:
+    var cells: [CertifiedCellV1] = []
+    for cell_id in certified_simpleos_cell_catalog_v1():
+        cells.push(selected_cell(cell_id))
+    var manifest = CertifiedSimpleOsManifestV1(schema_version: 2, run_id: "run-1", release_id: "release-1", source_revision: SOURCE_HASH, compiler_receipt_hash: COMPILER_HASH, admission_at_epoch_s: 1000u64, cells: cells, manifest_hash: "")
+    manifest.manifest_hash = certified_simpleos_manifest_hash_v1(manifest)
+    manifest
+
+describe "certified SimpleOS manifest schema 2 (V1 source API compatibility)":
+    it "maps every canonical host independently of guest architecture":
+        expect(certified_simpleos_host_identity_v1("linux:x86_32")).to_equal("host-linux")
+        expect(certified_simpleos_host_identity_v1("linux:riscv64")).to_equal("host-linux")
+        expect(certified_simpleos_host_identity_v1("windows:arm32")).to_equal("host-windows")
+        expect(certified_simpleos_host_identity_v1("windows:x86_64")).to_equal("host-windows")
+        expect(certified_simpleos_host_identity_v1("macos:arm64")).to_equal("host-macos")
+        expect(certified_simpleos_host_identity_v1("macos:riscv32")).to_equal("host-macos")
+        expect(certified_simpleos_host_identity_v1("freebsd:x86_64")).to_equal("host-freebsd")
+        expect(certified_simpleos_host_identity_v1("freebsd:arm32")).to_equal("host-freebsd")
+        expect(certified_simpleos_host_identity_v1("solaris:x86_64")).to_equal("")
+        expect(certified_simpleos_guest_identity_v1("linux:arm64")).to_equal("guest-arm64")
+        expect(certified_simpleos_guest_identity_v1("freebsd:arm64")).to_equal("guest-arm64")
+        expect(certified_simpleos_guest_identity_v1("linux:invented64")).to_equal("")
+
+    it "admits exactly twenty four unique, fully correlated selected cells":
+        val result = certified_simpleos_manifest_validate(full_manifest())
+        expect(result.status).to_equal("pass")
+        expect(result.structurally_valid).to_equal(true)
+        expect(result.accepted).to_equal(true)
+        expect(result.visible_cell_count).to_equal(24)
+        expect(result.passing_cell_count).to_equal(24)
+        expect(result.umbrella_all_platforms).to_equal(true)
+
+    it "fails structurally when a visible cell is missing or duplicated":
+        var missing = full_manifest()
+        missing.cells.pop()
+        expect(certified_simpleos_manifest_validate(missing).reason).to_equal("visible-cell-count-must-be-24")
+
+        var duplicate = full_manifest()
+        duplicate.cells[23] = selected_cell("linux:x86_32")
+        expect(certified_simpleos_manifest_validate(duplicate).reason).to_equal("cells-must-exactly-match-catalog-v1")
+
+    it "rejects a unique arbitrary cell even when the other canonical cells remain visible":
+        var manifest = full_manifest()
+        manifest.cells[23] = selected_cell("vendor:invented64")
+        val result = certified_simpleos_manifest_validate(manifest)
+        expect(result.reason).to_equal("cells-must-exactly-match-catalog-v1")
+        expect(result.structurally_valid).to_equal(false)
+        expect(result.accepted).to_equal(false)
+
+    it "blocks an incomplete selected cell instead of inventing host evidence":
+        var manifest = full_manifest()
+        var weak = selected_cell("windows:x86_64")
+        weak.target_listing = evidence("run-1", SOURCE_HASH, "windows:x86_64")
+        weak.target_listing.target_side = false
+        manifest.cells[7] = weak
+        manifest.manifest_hash = certified_simpleos_manifest_hash_v1(manifest)
+        val result = certified_simpleos_manifest_validate(manifest)
+        expect(result.status).to_equal("blocked")
+        expect(result.structurally_valid).to_equal(true)
+        expect(result.accepted).to_equal(false)
+        expect(result.reason).to_contain("missing-or-nontarget-guest-evidence")
+        expect(result.umbrella_all_platforms).to_equal(false)
+
+    it "requires pure Simple lineage, correlation, and every canonical guest placement":
+        var lineage_manifest = full_manifest()
+        var hybrid = selected_cell("linux:arm64")
+        hybrid.pure_simple_lineage = false
+        lineage_manifest.cells[3] = hybrid
+        lineage_manifest.manifest_hash = certified_simpleos_manifest_hash_v1(lineage_manifest)
+        expect(certified_simpleos_manifest_validate(lineage_manifest).reason).to_contain("non-pure-simple-lineage")
+
+        var correlation_manifest = full_manifest()
+        var mismatched = selected_cell("linux:riscv32")
+        mismatched.run_correlation = evidence("different-run", SOURCE_HASH, "linux:riscv32")
+        correlation_manifest.cells[4] = mismatched
+        correlation_manifest.manifest_hash = certified_simpleos_manifest_hash_v1(correlation_manifest)
+        expect(certified_simpleos_manifest_validate(correlation_manifest).reason).to_contain("receipt-correlation-mismatch")
+
+        var payload_manifest = full_manifest()
+        var misplaced = selected_cell("linux:riscv64")
+        misplaced.payload.sys_simpletool_sdn = false
+        payload_manifest.cells[5] = misplaced
+        payload_manifest.manifest_hash = certified_simpleos_manifest_hash_v1(payload_manifest)
+        expect(certified_simpleos_manifest_validate(payload_manifest).reason).to_contain("incomplete-canonical-guest-payload")
+
+    it "rejects cross-labeled coordinates and evidence even when mutable labels agree":
+        var cell_label_manifest = full_manifest()
+        var cross_labeled = selected_cell("linux:x86_32")
+        cross_labeled.guest_identity = "guest-x86_64"
+        cross_labeled.configuration_identity = "config-windows:x86_64"
+        cell_label_manifest.cells[0] = cross_labeled
+        cell_label_manifest.manifest_hash = certified_simpleos_manifest_hash_v1(cell_label_manifest)
+        expect(certified_simpleos_manifest_validate(cell_label_manifest).reason).to_contain("cell-coordinate-identity-mismatch")
+
+        var evidence_label_manifest = full_manifest()
+        var cross_evidence = selected_cell("linux:x86_32")
+        var boot = cross_evidence.boot
+        boot.guest_identity = "guest-x86_64"
+        boot.configuration_identity = "config-windows:x86_64"
+        cross_evidence.boot = boot
+        evidence_label_manifest.cells[0] = cross_evidence
+        evidence_label_manifest.manifest_hash = certified_simpleos_manifest_hash_v1(evidence_label_manifest)
+        expect(certified_simpleos_manifest_validate(evidence_label_manifest).reason).to_contain("receipt-correlation-mismatch")
+
+    it "binds canonical host identity to each row and receipt":
+        var row_manifest = full_manifest()
+        var wrong_row = row_manifest.cells[0]
+        wrong_row.host_identity = "host-windows"
+        row_manifest.cells[0] = wrong_row
+        row_manifest.manifest_hash = certified_simpleos_manifest_hash_v1(row_manifest)
+        expect(certified_simpleos_manifest_validate(row_manifest).reason).to_contain("cell-coordinate-identity-mismatch")
+
+        var receipt_manifest = full_manifest()
+        var wrong_receipt_row = receipt_manifest.cells[0]
+        var wrong_boot = wrong_receipt_row.boot
+        wrong_boot.host_identity = "host-windows"
+        wrong_receipt_row.boot = wrong_boot
+        receipt_manifest.cells[0] = wrong_receipt_row
+        receipt_manifest.manifest_hash = certified_simpleos_manifest_hash_v1(receipt_manifest)
+        expect(certified_simpleos_manifest_validate(receipt_manifest).reason).to_contain("receipt-correlation-mismatch")
+
+    it "rejects cells and receipts mixed from a different manifest run":
+        var cell_run_manifest = full_manifest()
+        var mixed_cell = selected_cell("linux:x86_32")
+        mixed_cell.run_id = "run-2"
+        cell_run_manifest.cells[0] = mixed_cell
+        cell_run_manifest.manifest_hash = certified_simpleos_manifest_hash_v1(cell_run_manifest)
+        expect(certified_simpleos_manifest_validate(cell_run_manifest).reason).to_contain("manifest-run-id-mismatch")
+
+        var receipt_run_manifest = full_manifest()
+        var mixed_receipt_cell = selected_cell("linux:x86_32")
+        var mount = mixed_receipt_cell.mount
+        mount.run_id = "run-2"
+        mixed_receipt_cell.mount = mount
+        receipt_run_manifest.cells[0] = mixed_receipt_cell
+        receipt_run_manifest.manifest_hash = certified_simpleos_manifest_hash_v1(receipt_run_manifest)
+        expect(certified_simpleos_manifest_validate(receipt_run_manifest).reason).to_contain("receipt-correlation-mismatch")
+
+    it "rejects decorative compiler linkage, malformed hashes, and stale receipts":
+        var compiler_manifest = full_manifest()
+        var compiler_cell = compiler_manifest.cells[0]
+        var compiler_boot = compiler_cell.boot
+        compiler_boot.compiler_receipt_hash = "5555555555555555555555555555555555555555555555555555555555555555"
+        compiler_cell.boot = compiler_boot
+        compiler_manifest.cells[0] = compiler_cell
+        compiler_manifest.manifest_hash = certified_simpleos_manifest_hash_v1(compiler_manifest)
+        expect(certified_simpleos_manifest_validate(compiler_manifest).reason).to_contain("missing-or-nontarget-guest-evidence")
+
+        var malformed = full_manifest()
+        malformed.compiler_receipt_hash = "compiler-hash"
+        expect(certified_simpleos_manifest_validate(malformed).reason).to_equal("invalid-manifest-identity")
+
+        var stale = full_manifest()
+        var stale_cell = stale.cells[0]
+        var stale_mount = stale_cell.mount
+        stale_mount.expires_at_epoch_s = 999u64
+        stale_cell.mount = stale_mount
+        stale.cells[0] = stale_cell
+        stale.manifest_hash = certified_simpleos_manifest_hash_v1(stale)
+        expect(certified_simpleos_manifest_validate(stale).reason).to_contain("missing-or-nontarget-guest-evidence")
+
+    it "rejects ancient future replayed and overlong receipt windows without timestamp overflow":
+        var ancient = full_manifest()
+        ancient.admission_at_epoch_s = 90000u64
+        for i in 0..24:
+            ancient.cells[i] = extend_all_receipts(ancient.cells[i], 90001u64)
+        ancient.manifest_hash = certified_simpleos_manifest_hash_v1(ancient)
+        expect(certified_simpleos_manifest_validate(ancient).reason).to_contain("missing-or-nontarget-guest-evidence")
+
+        var future = full_manifest()
+        var future_cell = future.cells[0]
+        var future_boot = future_cell.boot
+        future_boot.captured_at_epoch_s = 1001u64
+        future_cell.boot = future_boot
+        future.cells[0] = future_cell
+        future.manifest_hash = certified_simpleos_manifest_hash_v1(future)
+        expect(certified_simpleos_manifest_validate(future).reason).to_contain("missing-or-nontarget-guest-evidence")
+
+        var replay = full_manifest()
+        var replay_cell = replay.cells[0]
+        var replay_boot = replay_cell.boot
+        replay_boot.expires_at_epoch_s = 999u64
+        replay_cell.boot = replay_boot
+        replay.cells[0] = replay_cell
+        replay.manifest_hash = certified_simpleos_manifest_hash_v1(replay)
+        expect(certified_simpleos_manifest_validate(replay).reason).to_contain("missing-or-nontarget-guest-evidence")
+
+        var overlong = full_manifest()
+        var overlong_cell = overlong.cells[0]
+        var overlong_boot = overlong_cell.boot
+        overlong_boot.expires_at_epoch_s = 87301u64
+        overlong_cell.boot = overlong_boot
+        overlong.cells[0] = overlong_cell
+        overlong.manifest_hash = certified_simpleos_manifest_hash_v1(overlong)
+        expect(certified_simpleos_manifest_validate(overlong).reason).to_contain("missing-or-nontarget-guest-evidence")
+
+    it "admits an evidenced subset while denying an umbrella claim":
+        var manifest = full_manifest()
+        val cell = unselect(selected_cell("windows:arm64"))
+        manifest.cells[9] = cell
+        manifest.manifest_hash = certified_simpleos_manifest_hash_v1(manifest)
+        val result = certified_simpleos_manifest_validate(manifest)
+        expect(result.status).to_equal("pass")
+        expect(result.reason).to_equal("certified-subset-pass")
+        expect(result.visible_cell_count).to_equal(24)
+        expect(result.selected_cell_count).to_equal(23)
+        expect(result.structurally_valid).to_equal(true)
+        expect(result.accepted).to_equal(true)
+        expect(result.umbrella_all_platforms).to_equal(false)
+
+    it "blocks a manifest with no certified cells selected":
+        var manifest = full_manifest()
+        val catalog = certified_simpleos_cell_catalog_v1()
+        for i in 0..24:
+            manifest.cells[i] = unselect(selected_cell(catalog[i]))
+        manifest.manifest_hash = certified_simpleos_manifest_hash_v1(manifest)
+        val result = certified_simpleos_manifest_validate(manifest)
+        expect(result.status).to_equal("blocked")
+        expect(result.reason).to_equal("no-certified-cells-selected")
+        expect(result.structurally_valid).to_equal(true)
+        expect(result.accepted).to_equal(false)
+
+    it "keeps admission status invariant across pass blocked and failed results":
+        val passed = certified_simpleos_manifest_validate(full_manifest())
+        expect(passed.status).to_equal("pass")
+        expect(passed.accepted).to_equal(true)
+
+        var blocked_manifest = full_manifest()
+        var blocked_cell = blocked_manifest.cells[0]
+        blocked_cell.pure_simple_lineage = false
+        blocked_manifest.cells[0] = blocked_cell
+        blocked_manifest.manifest_hash = certified_simpleos_manifest_hash_v1(blocked_manifest)
+        val blocked = certified_simpleos_manifest_validate(blocked_manifest)
+        expect(blocked.status).to_equal("blocked")
+        expect(blocked.accepted).to_equal(false)
+
+        var failed_manifest = full_manifest()
+        failed_manifest.schema_version = 1u16
+        val failed = certified_simpleos_manifest_validate(failed_manifest)
+        expect(failed.status).to_equal("failed")
+        expect(failed.structurally_valid).to_equal(false)
+        expect(failed.accepted).to_equal(false)
+
+    it "rejects retained PASS evidence on an unselected cell":
+        var manifest = full_manifest()
+        var cell = selected_cell("linux:x86_32")
+        cell.selected = false
+        cell.unselected_reason = "outside-subset"
+        manifest.cells[0] = cell
+        manifest.manifest_hash = certified_simpleos_manifest_hash_v1(manifest)
+        expect(certified_simpleos_manifest_validate(manifest).reason).to_contain("unselected-cell-retains-pass-evidence")
+
+    it "binds payload artifacts stress evidence and every cell to the manifest hash":
+        var payload_mutation = full_manifest()
+        payload_mutation.cells[0].payload.usr_bin_artifact_hash = CONFIG_HASH
+        expect(certified_simpleos_manifest_validate(payload_mutation).reason).to_equal("manifest-content-hash-mismatch")
+
+        var stress_missing = full_manifest()
+        stress_missing.cells[0].stress_24h.present = false
+        stress_missing.manifest_hash = certified_simpleos_manifest_hash_v1(stress_missing)
+        expect(certified_simpleos_manifest_validate(stress_missing).reason).to_contain("missing-or-uncorrelated-stress-24h-evidence")

@@ -1,0 +1,226 @@
+# codex-impl: pure fail-closed mission-critical evidence aggregation.
+
+use std.common.crypto.sha256.{sha256_text}
+
+const MCI_EVIDENCE_PASS: u16 = 1u16
+const MCI_EVIDENCE_FAIL: u16 = 2u16
+const MCI_EVIDENCE_BLOCKED: u16 = 3u16
+const MCI_EVIDENCE_SKIPPED: u16 = 4u16
+
+const MCI_BLOCK_DUPLICATE: u16 = 1u16
+const MCI_BLOCK_UNEXPECTED: u16 = 2u16
+const MCI_BLOCK_MISSING: u16 = 3u16
+const MCI_BLOCK_STALE: u16 = 4u16
+const MCI_BLOCK_SKIPPED: u16 = 5u16
+const MCI_BLOCK_WRONG_RUN: u16 = 6u16
+const MCI_BLOCK_WRONG_SOURCE: u16 = 7u16
+const MCI_BLOCK_WRONG_CONFIG: u16 = 8u16
+const MCI_BLOCK_INVALID_HASH: u16 = 9u16
+const MCI_BLOCK_RECEIPT_FAILED: u16 = 10u16
+
+struct MciEvidenceReceiptV1:
+    schema_version: u16
+    check_id: text
+    run_id: text
+    source_hash: text
+    configuration_hash: text
+    valid_until_utc_ns: i64
+    result: u16
+    receipt_hash: text
+
+struct MciAdmissionBlockerV1:
+    check_id: text
+    reason: u16
+    receipt_index: i64
+
+struct MciEvidenceRowV1:
+    check_id: text
+    receipt_index: i64
+    result: u16
+    admitted: bool
+
+struct MciEvidencePolicyV1:
+    schema_version: u16
+    run_id: text
+    source_hash: text
+    configuration_hash: text
+    now_utc_ns: i64
+    required_check_ids: [text]
+
+struct HardeningEvidenceMatrix:
+    schema_version: u16
+    rows: [MciEvidenceRowV1]
+    blockers: [MciAdmissionBlockerV1]
+    result: u16
+
+struct MciEvidenceManifestV1:
+    schema_version: u16
+    run_id: text
+    source_hash: text
+    configuration_hash: text
+    required_check_ids: [text]
+    matrix: HardeningEvidenceMatrix
+
+fn mci_hash256_valid(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    val alphabet = "0123456789abcdef"
+    for i in 0..64:
+        if not alphabet.contains(value[i:i + 1]):
+            return false
+    true
+
+fn mci_evidence_frame(name: text, value: text) -> text:
+    name.len().to_text() + ":" + name + value.len().to_text() + ":" + value
+
+fn mci_evidence_receipt_canonical(
+    policy: MciEvidencePolicyV1, receipt: MciEvidenceReceiptV1
+) -> text:
+    # receipt_hash is the digest of this material and is intentionally omitted.
+    # The ordered required set is policy-owned and included to prevent replay
+    # under a weaker or differently ordered aggregate policy.
+    var parts: [text] = []
+    parts.push(mci_evidence_frame("schema_version", receipt.schema_version.to_text()))
+    parts.push(mci_evidence_frame("check_id", receipt.check_id))
+    parts.push(mci_evidence_frame("run_id", receipt.run_id))
+    parts.push(mci_evidence_frame("source_hash", receipt.source_hash))
+    parts.push(mci_evidence_frame("configuration_hash", receipt.configuration_hash))
+    parts.push(mci_evidence_frame("valid_until_utc_ns", receipt.valid_until_utc_ns.to_text()))
+    parts.push(mci_evidence_frame("result", receipt.result.to_text()))
+    parts.push(mci_evidence_frame("required_count", policy.required_check_ids.len().to_text()))
+    var index = 0
+    for required_id in policy.required_check_ids:
+        parts.push(mci_evidence_frame(
+            "required_check_ids[" + index.to_text() + "]", required_id))
+        index = index + 1
+    parts.join("")
+
+fn mci_evidence_receipt_hash(
+    policy: MciEvidencePolicyV1, receipt: MciEvidenceReceiptV1
+) -> text:
+    sha256_text(mci_evidence_receipt_canonical(policy, receipt))
+
+fn mci_push_blocker(
+    blockers: [MciAdmissionBlockerV1], check_id: text, reason: u16, receipt_index: i64
+) -> [MciAdmissionBlockerV1]:
+    var out = blockers
+    out.push(MciAdmissionBlockerV1(
+        check_id: check_id, reason: reason, receipt_index: receipt_index
+    ))
+    out
+
+fn mci_receipt_occurrences(check_id: text, receipts: [MciEvidenceReceiptV1]) -> i64:
+    var count = 0
+    for receipt in receipts:
+        if receipt.check_id == check_id:
+            count = count + 1
+    count
+
+fn mci_required(check_id: text, required_check_ids: [text]) -> bool:
+    for required_id in required_check_ids:
+        if required_id == check_id:
+            return true
+    false
+
+fn mci_first_receipt_index(check_id: text, receipts: [MciEvidenceReceiptV1]) -> i64:
+    var index = 0
+    for receipt in receipts:
+        if receipt.check_id == check_id:
+            return index
+        index = index + 1
+    -1
+
+fn mci_validate_receipt(
+    policy: MciEvidencePolicyV1, receipt: MciEvidenceReceiptV1,
+    receipt_index: i64, blockers: [MciAdmissionBlockerV1]
+) -> [MciAdmissionBlockerV1]:
+    var out = blockers
+    if receipt.valid_until_utc_ns <= policy.now_utc_ns:
+        out = mci_push_blocker(out, receipt.check_id, MCI_BLOCK_STALE, receipt_index)
+    if receipt.result == MCI_EVIDENCE_SKIPPED:
+        out = mci_push_blocker(out, receipt.check_id, MCI_BLOCK_SKIPPED, receipt_index)
+    if receipt.run_id == "" or receipt.run_id != policy.run_id:
+        out = mci_push_blocker(out, receipt.check_id, MCI_BLOCK_WRONG_RUN, receipt_index)
+    if not mci_hash256_valid(receipt.source_hash) or receipt.source_hash != policy.source_hash:
+        out = mci_push_blocker(out, receipt.check_id, MCI_BLOCK_WRONG_SOURCE, receipt_index)
+    if not mci_hash256_valid(receipt.configuration_hash) or receipt.configuration_hash != policy.configuration_hash:
+        out = mci_push_blocker(out, receipt.check_id, MCI_BLOCK_WRONG_CONFIG, receipt_index)
+    if (receipt.schema_version != 1u16 or not mci_hash256_valid(receipt.receipt_hash)
+            or receipt.receipt_hash != mci_evidence_receipt_hash(policy, receipt)):
+        out = mci_push_blocker(out, receipt.check_id, MCI_BLOCK_INVALID_HASH, receipt_index)
+    if receipt.result == MCI_EVIDENCE_FAIL or receipt.result == MCI_EVIDENCE_BLOCKED or
+       (receipt.result != MCI_EVIDENCE_PASS and receipt.result != MCI_EVIDENCE_SKIPPED):
+        out = mci_push_blocker(out, receipt.check_id, MCI_BLOCK_RECEIPT_FAILED, receipt_index)
+    out
+
+pub fn aggregate_mci_evidence_v1(
+    policy: MciEvidencePolicyV1, receipts: [MciEvidenceReceiptV1]
+) -> MciEvidenceManifestV1:
+    var rows: [MciEvidenceRowV1] = []
+    var blockers: [MciAdmissionBlockerV1] = []
+
+    # Required-order traversal makes row and required-check blocker order stable.
+    for check_id in policy.required_check_ids:
+        var required_occurrences = 0
+        for candidate in policy.required_check_ids:
+            if candidate == check_id:
+                required_occurrences = required_occurrences + 1
+        val occurrences = mci_receipt_occurrences(check_id, receipts)
+        val receipt_index = mci_first_receipt_index(check_id, receipts)
+        val blockers_before = blockers.len()
+        if occurrences == 0:
+            blockers = mci_push_blocker(blockers, check_id, MCI_BLOCK_MISSING, -1)
+        elif occurrences > 1:
+            blockers = mci_push_blocker(blockers, check_id, MCI_BLOCK_DUPLICATE, receipt_index)
+        if required_occurrences > 1:
+            blockers = mci_push_blocker(blockers, check_id, MCI_BLOCK_DUPLICATE, -1)
+        if receipt_index >= 0:
+            blockers = mci_validate_receipt(policy, receipts[receipt_index], receipt_index, blockers)
+        # Simple does not guarantee short-circuit evaluation. Never form an
+        # array access from the missing-receipt sentinel (-1).
+        var admitted = false
+        if receipt_index >= 0:
+            if occurrences == 1 and blockers.len() == blockers_before:
+                admitted = receipts[receipt_index].result == MCI_EVIDENCE_PASS
+        val row_result = if admitted: MCI_EVIDENCE_PASS else: MCI_EVIDENCE_BLOCKED
+        rows.push(MciEvidenceRowV1(
+            check_id: check_id, receipt_index: receipt_index,
+            result: row_result, admitted: admitted
+        ))
+
+    # Input-order traversal deterministically exposes receipts outside policy.
+    var receipt_index = 0
+    for receipt in receipts:
+        if not mci_required(receipt.check_id, policy.required_check_ids):
+            blockers = mci_push_blocker(
+                blockers, receipt.check_id, MCI_BLOCK_UNEXPECTED, receipt_index
+            )
+        receipt_index = receipt_index + 1
+
+    val policy_valid = (policy.schema_version == 1u16 and policy.run_id != "" and
+        mci_hash256_valid(policy.source_hash) and
+        mci_hash256_valid(policy.configuration_hash) and policy.now_utc_ns > 0 and
+        policy.required_check_ids.len() > 0)
+    if not policy_valid:
+        blockers = mci_push_blocker(blockers, "policy", MCI_BLOCK_INVALID_HASH, -1)
+    val result = if blockers.len() == 0 and rows.len() == policy.required_check_ids.len():
+        MCI_EVIDENCE_PASS
+    else:
+        MCI_EVIDENCE_BLOCKED
+    MciEvidenceManifestV1(
+        schema_version: 1u16, run_id: policy.run_id, source_hash: policy.source_hash,
+        configuration_hash: policy.configuration_hash,
+        required_check_ids: policy.required_check_ids,
+        matrix: HardeningEvidenceMatrix(
+            schema_version: 1u16, rows: rows, blockers: blockers, result: result
+        )
+    )
+
+export MCI_EVIDENCE_PASS, MCI_EVIDENCE_FAIL, MCI_EVIDENCE_BLOCKED,
+    MCI_EVIDENCE_SKIPPED, MCI_BLOCK_DUPLICATE, MCI_BLOCK_UNEXPECTED,
+    MCI_BLOCK_MISSING, MCI_BLOCK_STALE, MCI_BLOCK_SKIPPED,
+    MCI_BLOCK_WRONG_RUN, MCI_BLOCK_WRONG_SOURCE, MCI_BLOCK_WRONG_CONFIG,
+    MCI_BLOCK_INVALID_HASH, MCI_BLOCK_RECEIPT_FAILED, MciEvidenceReceiptV1,
+    MciAdmissionBlockerV1, MciEvidenceRowV1, MciEvidencePolicyV1,
+    HardeningEvidenceMatrix, MciEvidenceManifestV1, aggregate_mci_evidence_v1,
+    mci_evidence_receipt_hash

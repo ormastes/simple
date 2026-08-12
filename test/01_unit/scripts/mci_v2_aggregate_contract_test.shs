@@ -1,0 +1,289 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
+gate="$root/scripts/check/check-mci-v2-aggregate.shs"
+mkdir -p "$root/build"
+work=$(mktemp -d "$root/build/mci-aggregate.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+evidence="$work/evidence"; mkdir -p "$evidence/receipts" "$evidence/artifacts" "$evidence/signatures"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/private.pem" >/dev/null 2>&1
+openssl pkey -in "$work/private.pem" -pubout -out "$work/public.pem" >/dev/null 2>&1
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/other-private.pem" >/dev/null 2>&1
+openssl pkey -in "$work/other-private.pem" -pubout -out "$work/other-public.pem" >/dev/null 2>&1
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$work/reviewer-private.pem" >/dev/null 2>&1
+openssl pkey -in "$work/reviewer-private.pem" -pubout -out "$work/reviewer-public.pem" >/dev/null 2>&1
+trust_args="--trusted-key $work/public.pem --trusted-key-id test-key --reviewer-key $work/reviewer-public.pem --reviewer-key-id reviewer-key"
+source_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+config_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+run_id=run-contract
+
+hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+scenarios() {
+    case "$1" in
+        compiler) echo 'MCI-COMP-001,MCI-COMP-002,MCI-COMP-003,MCI-NFR-003,MCI-NFR-004' ;;
+        tooling) echo 'MCI-TOOL-001,MCI-TOOL-002,MCI-TOOL-003,MCI-NFR-001,MCI-NFR-002,MCI-NFR-005,MCI-NFR-006,MCI-NFR-013,MCI-NFR-014' ;;
+        simpleos) echo 'MCI-OS-001,MCI-OS-002,MCI-OS-003,MCI-OS-004,MCI-OS-005,MCI-OS-006' ;;
+        rendering) echo 'MCI-REN-001,MCI-REN-002,MCI-REN-003,MCI-REN-004,MCI-REN-005,MCI-REN-006,MCI-NFR-011,MCI-NFR-012' ;;
+        allocation|fault-injection) echo 'MCI-ALLOC-001,MCI-ALLOC-002,MCI-ALLOC-003,MCI-ALLOC-004,MCI-ALLOC-005,MCI-ALLOC-006,MCI-NFR-007,MCI-NFR-008,MCI-NFR-009,MCI-NFR-010' ;;
+        process-safety) echo 'MCI-PROC-001,MCI-PROC-002,MCI-PROC-003' ;;
+        stress) echo 'MCI-NFR-015,MCI-NFR-016' ;;
+        traceability) echo 'MCI-DOC-001,MCI-DOC-002,MCI-DOC-003' ;;
+        reviewer) echo 'MCI-NFR-017,MCI-NFR-018' ;;
+    esac
+}
+checks='compiler tooling simpleos rendering allocation fault-injection process-safety stress traceability reviewer'
+sign_receipt() {
+    receipt=$1 signature=$2 canonical="$work/canonical"
+    sed '/^receipt_hash=/d' "$receipt" > "$canonical"
+    sed '/^receipt_hash=/d' "$receipt" > "$work/receipt-with-hash"
+    echo receipt_hash="$(hash_file "$canonical")" >> "$work/receipt-with-hash"
+    mv "$work/receipt-with-hash" "$receipt"
+    openssl dgst -sha256 -sign "$work/private.pem" -out "$signature" "$canonical"
+}
+sign_review() {
+    receipt=$1 signature=$2 canonical="$work/reviewer-canonical"
+    sed '/^receipt_hash=/d' "$receipt" > "$canonical"
+    cp "$canonical" "$work/review-with-hash"
+    echo receipt_hash="$(hash_file "$canonical")" >> "$work/review-with-hash"
+    mv "$work/review-with-hash" "$receipt"
+    openssl dgst -sha256 -sign "$work/reviewer-private.pem" -out "$signature" "$canonical"
+}
+build_review() {
+    evidence=$1
+    candidate=$(sed -n 's/^aggregate_candidate_sha256=//p' "$evidence/aggregate-report-v1.env")
+    receipt="$evidence/receipts/reviewer.receipt"
+    {
+        echo receipt_schema=mci-independent-review-decision-v1; echo check_id=reviewer
+        echo producer_class=independent-review; echo attestation=signed-v1
+        echo trusted_key_id=reviewer-key; echo signature_relpath=reviewer.sig
+        echo reviewer_identity=contract-reviewer; echo reviewer_role=independent-release-reviewer; echo reviewer_scope=mci-v2-aggregate
+        echo run_id="$run_id"; echo source_hash="$source_hash"; echo configuration_hash="$config_hash"
+        echo aggregate_candidate_sha256="$candidate"; echo decided_at_utc_ns=18446657673709551615; echo valid_until_utc_ns=18446744073709551615
+        echo decision=approve; echo scenarios="$(scenarios reviewer)"
+    } > "$receipt"
+    sign_review "$receipt" "$evidence/signatures/reviewer.sig"
+}
+build_baseline() {
+    evidence=$1
+    rm -rf "$evidence"; mkdir -p "$evidence/receipts" "$evidence/artifacts" "$evidence/signatures"
+    for check in $checks; do
+        [ "$check" = reviewer ] && continue
+        artifact="$evidence/artifacts/$check.evidence"; echo "$check evidence" > "$artifact"
+        receipt="$evidence/receipts/$check.receipt"
+        {
+            echo receipt_schema=mci-lane-receipt-v1; echo check_id="$check"
+            case "$check" in compiler) producer=compiler-admission;; tooling) producer=tooling-admission;; simpleos) producer=simpleos-target;; rendering) producer=rendering-target;; allocation|fault-injection) producer=allocation-runtime;; process-safety) producer=process-runtime;; stress) producer=stress-target;; traceability) producer=traceability-gate;; reviewer) producer=independent-review;; esac
+            echo producer_class="$producer"; echo attestation=signed-v1
+            echo trusted_key_id=test-key; echo signature_relpath="$check.sig"; echo run_id="$run_id"
+            echo source_hash="$source_hash"; echo configuration_hash="$config_hash"
+            echo captured_at_utc_ns=18446657673709551615; echo valid_until_utc_ns=18446744073709551615
+            echo result=pass; echo scenarios="$(scenarios "$check")"
+            echo artifact_relpath="$check.evidence"; echo artifact_sha256="$(hash_file "$artifact")"
+        } > "$receipt"
+        sign_receipt "$receipt" "$evidence/signatures/$check.sig"
+    done
+    "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns 18446744073709551614 $trust_args >/dev/null 2>&1 || :
+    build_review "$evidence"
+}
+build_baseline "$evidence"
+
+now_ns=18446744073709551614
+"$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args
+grep -q '^collector_contract=PASS$' "$evidence/aggregate-report-v1.env"
+grep -q '^collector_contract_scenarios=MCI-AGG-001,MCI-AGG-002,MCI-AGG-003$' "$evidence/aggregate-report-v1.env"
+grep -q '^result=PASS$' "$evidence/aggregate-report-v1.env"
+grep -q '^row=reviewer|PASS|none|' "$evidence/aggregate-report-v1.env"
+[ "$(grep -c '^row=.*|PASS|none|' "$evidence/aggregate-report-v1.env")" -eq 10 ]
+first_hash=$(sed -n 's/^manifest_sha256=//p' "$evidence/aggregate-report-v1.env")
+evidence_reverse="$work/evidence-reverse"; mkdir -p "$evidence_reverse/receipts" "$evidence_reverse/artifacts" "$evidence_reverse/signatures"
+for check in $(printf '%s\n' $checks | sort -r); do
+    cp "$evidence/receipts/$check.receipt" "$evidence_reverse/receipts/"
+    [ "$check" = reviewer ] || cp "$evidence/artifacts/$check.evidence" "$evidence_reverse/artifacts/"
+    cp "$evidence/signatures/$check.sig" "$evidence_reverse/signatures/"
+done
+"$gate" --evidence "$evidence_reverse" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null
+[ "$(sed -n 's/^manifest_sha256=//p' "$evidence_reverse/aggregate-report-v1.env")" = "$first_hash" ]
+
+# A valid-to-valid evidence generation change keeps its lane PASS but makes an
+# old review a replay. A separately signed review of generation B admits it.
+old_candidate=$(sed -n 's/^aggregate_candidate_sha256=//p' "$evidence/aggregate-report-v1.env")
+echo 'tooling evidence generation B' > "$evidence/artifacts/tooling.evidence"
+sed "s/^artifact_sha256=.*/artifact_sha256=$(hash_file "$evidence/artifacts/tooling.evidence")/" "$evidence/receipts/tooling.receipt" > "$work/tooling-b.receipt"
+mv "$work/tooling-b.receipt" "$evidence/receipts/tooling.receipt"
+sign_receipt "$evidence/receipts/tooling.receipt" "$evidence/signatures/tooling.sig"
+if "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null; then exit 1; fi
+grep -q '^row=tooling|PASS|none|' "$evidence/aggregate-report-v1.env"
+grep -q '^row=reviewer|BLOCKED|review-replay-or-wrong-candidate|' "$evidence/aggregate-report-v1.env"
+new_candidate=$(sed -n 's/^aggregate_candidate_sha256=//p' "$evidence/aggregate-report-v1.env")
+[ "$new_candidate" != "$old_candidate" ]
+build_review "$evidence"
+"$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null
+
+# Unexpected receipt membership is part of the candidate graph in both
+# directions: add, review that blocked graph, then remove and reject the replay.
+echo unexpected > "$evidence/receipts/unexpected.receipt"
+if "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null; then exit 1; fi
+grep -q '^row=reviewer|BLOCKED|review-replay-or-wrong-candidate|' "$evidence/aggregate-report-v1.env"
+build_review "$evidence"
+if "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null; then exit 1; fi
+grep -q '^row=reviewer|PASS|none|' "$evidence/aggregate-report-v1.env"
+rm "$evidence/receipts/unexpected.receipt"
+if "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null; then exit 1; fi
+grep -q '^row=reviewer|BLOCKED|review-replay-or-wrong-candidate|' "$evidence/aggregate-report-v1.env"
+
+# Stale mutation, missing receipt, and unavailable row owner all fail closed.
+build_baseline "$evidence"
+sed 's/^valid_until_utc_ns=.*/valid_until_utc_ns=99/' "$evidence/receipts/compiler.receipt" > "$work/stale"
+mv "$work/stale" "$evidence/receipts/compiler.receipt"
+sign_receipt "$evidence/receipts/compiler.receipt" "$evidence/signatures/compiler.sig"
+rm "$evidence/receipts/rendering.receipt"
+if "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args; then exit 1; fi
+grep -q '^row=compiler|BLOCKED|stale-or-invalid-lifetime|' "$evidence/aggregate-report-v1.env"
+grep -q '^row=rendering|BLOCKED|missing|' "$evidence/aggregate-report-v1.env"
+grep -q '^resume=rendering|BLOCKED prerequisite: executable owner script missing:' "$evidence/aggregate-report-v1.env"
+! grep -q '^resume=.*|sh scripts/check/check-mci-v2-' "$evidence/aggregate-report-v1.env"
+grep -q '^collector_contract=PASS$' "$evidence/aggregate-report-v1.env"
+[ "$(grep -c '^row=.*|BLOCKED|' "$evidence/aggregate-report-v1.env")" -eq 3 ]
+grep -q '^row=reviewer|BLOCKED|review-replay-or-wrong-candidate|' "$evidence/aggregate-report-v1.env"
+
+# Review categories each start from a fully green, signed evidence set.
+negative_count=0
+for mode in symlink artifact_path synthetic screenshot_only source_only cached unknown duplicate wrong_run skipped bad_hash missing_signature bad_signature wrong_key_id missing_key_id; do
+    build_baseline "$evidence"
+    receipt="$evidence/receipts/tooling.receipt"
+    base="$work/base.receipt"; cp "$receipt" "$base"
+    case "$mode" in
+        symlink) rm "$receipt"; ln -s "$base" "$receipt"; expected=unsafe-receipt-file ;;
+        artifact_path) sed 's/^artifact_relpath=.*/artifact_relpath=..\/escape/' "$base" > "$receipt"; expected=unsafe-artifact-path ;;
+        synthetic) sed 's/^attestation=.*/attestation=synthetic/' "$base" > "$receipt"; expected=untrusted-producer ;;
+        screenshot_only) sed 's/^producer_class=.*/producer_class=screenshot-only/' "$base" > "$receipt"; expected=untrusted-producer ;;
+        source_only) sed 's/^producer_class=.*/producer_class=source-only/' "$base" > "$receipt"; expected=untrusted-producer ;;
+        cached) sed 's/^producer_class=.*/producer_class=cached/' "$base" > "$receipt"; expected=untrusted-producer ;;
+        unknown) sed '/^receipt_hash=/i unknown_field=x' "$base" > "$receipt"; expected=invalid-receipt-hash ;;
+        duplicate) sed '/^receipt_hash=/i run_id=duplicate' "$base" > "$receipt"; expected=wrong-run ;;
+        wrong_run) sed 's/^run_id=.*/run_id=other/' "$base" > "$receipt"; expected=wrong-run ;;
+        skipped) sed 's/^result=.*/result=skipped/' "$base" > "$receipt"; expected=skipped ;;
+        bad_hash) sed 's/^artifact_sha256=.*/artifact_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/' "$base" > "$receipt"; expected=invalid-artifact-hash ;;
+        missing_signature) rm "$evidence/signatures/tooling.sig"; expected=invalid-signature ;;
+        bad_signature) cp "$evidence/signatures/compiler.sig" "$evidence/signatures/tooling.sig"; expected=invalid-signature ;;
+        wrong_key_id) sed 's/^trusted_key_id=.*/trusted_key_id=other-key/' "$base" > "$receipt"; expected=untrusted-producer ;;
+        missing_key_id) sed '/^trusted_key_id=/d' "$base" > "$receipt"; expected=untrusted-producer ;;
+    esac
+    case "$mode" in symlink|missing_signature|bad_signature) :;; *) sign_receipt "$receipt" "$evidence/signatures/tooling.sig";; esac
+    "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null 2>&1 && exit 1
+    grep -q "^row=tooling|BLOCKED|$expected|" "$evidence/aggregate-report-v1.env"
+    # Mutating a lane also invalidates the reviewer's candidate binding.
+    [ "$(grep -c '^row=.*|BLOCKED|' "$evidence/aggregate-report-v1.env")" -eq 2 ]
+    negative_count=$((negative_count + 1))
+done
+[ "$negative_count" -eq 15 ]
+
+# Reviewer trust is independent: missing, producer-key/self-issued, stale,
+# replayed candidate, and missing identity fail; a distinct signature admits.
+for mode in missing self_key stale replay missing_identity; do
+    build_baseline "$evidence"
+    receipt="$evidence/receipts/reviewer.receipt"; cp "$receipt" "$work/reviewer.base"
+    case "$mode" in
+        missing) rm "$receipt" "$evidence/signatures/reviewer.sig"; expected=missing ;;
+        self_key) sed 's/^trusted_key_id=.*/trusted_key_id=test-key/' "$work/reviewer.base" > "$receipt"; sign_receipt "$receipt" "$evidence/signatures/reviewer.sig"; expected=untrusted-reviewer ;;
+        stale) sed 's/^valid_until_utc_ns=.*/valid_until_utc_ns=99/' "$work/reviewer.base" > "$receipt"; sign_review "$receipt" "$evidence/signatures/reviewer.sig"; expected=stale-or-invalid-review ;;
+        replay) sed 's/^aggregate_candidate_sha256=.*/aggregate_candidate_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/' "$work/reviewer.base" > "$receipt"; sign_review "$receipt" "$evidence/signatures/reviewer.sig"; expected=review-replay-or-wrong-candidate ;;
+        missing_identity) sed '/^reviewer_identity=/d' "$work/reviewer.base" > "$receipt"; sign_review "$receipt" "$evidence/signatures/reviewer.sig"; expected=invalid-reviewer-identity-role-or-scope ;;
+    esac
+    "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null 2>&1 && exit 1
+    grep -q "^row=reviewer|BLOCKED|$expected|" "$evidence/aggregate-report-v1.env"
+done
+
+# Replacing either trust-root file while preserving its configured ID changes
+# the reviewed graph. The old approval is a replay, independent of downstream
+# signature failures caused by the replacement itself.
+build_baseline "$evidence"
+cp "$work/other-public.pem" "$work/reviewer-public.pem"
+if "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null 2>&1; then exit 1; fi
+grep -q '^row=reviewer|BLOCKED|review-replay-or-wrong-candidate|' "$evidence/aggregate-report-v1.env"
+openssl pkey -in "$work/reviewer-private.pem" -pubout -out "$work/reviewer-public.pem" >/dev/null 2>&1
+build_baseline "$evidence"
+cp "$work/other-public.pem" "$work/public.pem"
+if "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null 2>&1; then exit 1; fi
+grep -q '^row=reviewer|BLOCKED|review-replay-or-wrong-candidate|' "$evidence/aggregate-report-v1.env"
+openssl pkey -in "$work/private.pem" -pubout -out "$work/public.pem" >/dev/null 2>&1
+
+# Missing and wrong trust roots cannot establish aggregate ownership.
+build_baseline "$evidence"
+if "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" --trusted-key "$work/missing.pem" --trusted-key-id test-key --reviewer-key "$work/reviewer-public.pem" --reviewer-key-id reviewer-key >/dev/null 2>&1; then exit 1; fi
+if "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" --trusted-key "$work/public.pem" --reviewer-key "$work/reviewer-public.pem" --reviewer-key-id reviewer-key >/dev/null 2>&1; then exit 1; fi
+if "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" --trusted-key "$work/other-public.pem" --trusted-key-id test-key --reviewer-key "$work/reviewer-public.pem" --reviewer-key-id reviewer-key >/dev/null 2>&1; then exit 1; fi
+grep -q '^row=tooling|BLOCKED|invalid-signature|' "$evidence/aggregate-report-v1.env"
+grep -q '^collector_contract=PASS$' "$evidence/aggregate-report-v1.env"
+
+# Force identity changes immediately after cp to exercise trust-root and
+# signature snapshot TOCTOU rejection deterministically.
+real_cp=$(command -v cp)
+mkdir -p "$work/bin"
+cat > "$work/bin/cp" <<'EOF'
+#!/bin/sh
+"$MCI_REAL_CP" "$@"
+source_path=$2
+if [ "${MCI_MUTATE_CP_SOURCE:-}" = "$source_path" ]; then
+    if [ "${MCI_ABA:-0}" = 1 ]; then
+        "$MCI_REAL_CP" "$source_path" "$source_path.original"
+        "$MCI_REAL_CP" "$MCI_MUTATE_CP_REPLACEMENT" "$source_path.replacement"
+        mv "$source_path.replacement" "$source_path"
+        mv "$source_path.original" "$source_path"
+    elif [ "${MCI_MUTATE_IN_PLACE:-0}" = 1 ]; then
+        printf x >> "$source_path"
+    elif [ "${MCI_TORN_COPY:-0}" = 1 ]; then
+        size=$(wc -c < "$source_path")
+        dd if="$source_path" of="$3" bs=1 count=$((size / 2)) 2>/dev/null
+        printf x >> "$source_path"
+    else
+        "$MCI_REAL_CP" "$MCI_MUTATE_CP_REPLACEMENT" "$source_path.replacement"
+        mv "$source_path.replacement" "$source_path"
+    fi
+fi
+EOF
+chmod +x "$work/bin/cp"
+
+build_baseline "$evidence"
+if PATH="$work/bin:$PATH" MCI_REAL_CP="$real_cp" MCI_MUTATE_CP_SOURCE="$work/public.pem" MCI_MUTATE_CP_REPLACEMENT="$work/other-public.pem" MCI_ABA=1 \
+    "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >"$work/key.out" 2>"$work/key.err"; then exit 1; fi
+grep -q '^BLOCKED: trusted public key changed during snapshot$' "$work/key.err"
+
+cp "$work/other-public.pem" "$work/public.pem"
+openssl pkey -in "$work/private.pem" -pubout -out "$work/public.pem" >/dev/null 2>&1
+build_baseline "$evidence"
+cp "$evidence/signatures/compiler.sig" "$work/replacement.sig"
+if PATH="$work/bin:$PATH" MCI_REAL_CP="$real_cp" MCI_MUTATE_CP_SOURCE="$evidence/signatures/tooling.sig" MCI_MUTATE_CP_REPLACEMENT="$work/replacement.sig" MCI_ABA=1 \
+    "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null 2>&1; then exit 1; fi
+grep -q '^row=tooling|BLOCKED|signature-changed-during-snapshot|' "$evidence/aggregate-report-v1.env"
+[ "$(grep -c '^row=.*|BLOCKED|' "$evidence/aggregate-report-v1.env")" -eq 2 ]
+grep -q '^row=reviewer|BLOCKED|review-replay-or-wrong-candidate|' "$evidence/aggregate-report-v1.env"
+
+# Same-inode receipt mutation and a torn artifact snapshot are detected by the
+# content-bound identity, even when a copy command reports success.
+build_baseline "$evidence"
+if PATH="$work/bin:$PATH" MCI_REAL_CP="$real_cp" MCI_MUTATE_CP_SOURCE="$evidence/receipts/tooling.receipt" MCI_MUTATE_IN_PLACE=1 \
+    "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null 2>&1; then exit 1; fi
+grep -q '^row=tooling|BLOCKED|receipt-changed-during-snapshot|' "$evidence/aggregate-report-v1.env"
+[ "$(grep -c '^row=.*|BLOCKED|' "$evidence/aggregate-report-v1.env")" -eq 2 ]
+grep -q '^row=reviewer|BLOCKED|review-replay-or-wrong-candidate|' "$evidence/aggregate-report-v1.env"
+build_baseline "$evidence"
+if PATH="$work/bin:$PATH" MCI_REAL_CP="$real_cp" MCI_MUTATE_CP_SOURCE="$evidence/artifacts/tooling.evidence" MCI_TORN_COPY=1 \
+    "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >/dev/null 2>&1; then exit 1; fi
+grep -q '^row=tooling|BLOCKED|invalid-artifact-hash|' "$evidence/aggregate-report-v1.env"
+[ "$(grep -c '^row=.*|BLOCKED|' "$evidence/aggregate-report-v1.env")" -eq 2 ]
+grep -q '^row=reviewer|BLOCKED|review-replay-or-wrong-candidate|' "$evidence/aggregate-report-v1.env"
+
+# Replacing the published report after the atomic rename must fail the gate's
+# post-publication content-hash verification.
+cat > "$work/bin/mv" <<'EOF'
+#!/bin/sh
+"$MCI_REAL_MV" "$@"
+case "$2" in */aggregate-report-v1.env) printf tampered >> "$2";; esac
+EOF
+chmod +x "$work/bin/mv"
+build_baseline "$evidence"
+if PATH="$work/bin:$PATH" MCI_REAL_CP="$real_cp" MCI_REAL_MV="$(command -v mv)" \
+    "$gate" --evidence "$evidence" --run-id "$run_id" --source-hash "$source_hash" --configuration-hash "$config_hash" --now-utc-ns "$now_ns" $trust_args >"$work/publish.out" 2>"$work/publish.err"; then exit 1; fi
+grep -q '^BLOCKED: published report verification failed$' "$work/publish.err"
+echo 'PASS: MCI aggregate contract'

@@ -1,0 +1,72 @@
+# @cover src/lib/common/mission_critical/draw_ir_packed_generation_store_v3.spl 80%
+
+use spec
+use common.mission_critical.draw_ir_packed_generation_store_v3.*
+
+describe "packed Draw IR generation storage and bounded handoff":
+    it "publishes only a completely written sealed generation":
+        var store = DrawIrPackedGenerationStoreV3.bounded(41u64, 2u32, 3u32, 1u32)
+        var admitted = DrawIrPackedGenerationRefV3(arena_id: 0u64, generation: 0u64, slot: 0u32)
+        match store.admit(2u32):
+            DrawIrPackedAdmissionV3.Admitted(value): admitted = value
+            DrawIrPackedAdmissionV3.Refused(reason): expect(false).to_equal(true)
+        expect(store.write(admitted, 11u64)).to_equal(DRAW_IR_PACKED_REASON_OK)
+        match store.seal(admitted):
+            DrawIrPackedSealV3.Refused(reason): expect(reason).to_equal(DRAW_IR_PACKED_REASON_COUNT_MISMATCH)
+            DrawIrPackedSealV3.Sealed(value): expect(false).to_equal(true)
+        expect(store.write(admitted, 22u64)).to_equal(DRAW_IR_PACKED_REASON_OK)
+        var sealed = DrawIrPackedSubmissionV3(generation_ref: admitted, row_count: 0u32, content_hash: "")
+        match store.seal(admitted):
+            DrawIrPackedSealV3.Sealed(value): sealed = value
+            DrawIrPackedSealV3.Refused(reason): expect(false).to_equal(true)
+        expect(sealed.content_hash.len()).to_equal(64)
+        expect(store.publish(sealed)).to_equal(DRAW_IR_PACKED_REASON_OK)
+        match store.take():
+            DrawIrPackedHandoffV3.Ready(value):
+                expect(value.generation_ref.generation).to_equal(admitted.generation)
+                expect(value.content_hash).to_equal(sealed.content_hash)
+            DrawIrPackedHandoffV3.Refused(reason): expect(false).to_equal(true)
+        expect(store.complete(admitted)).to_equal(DRAW_IR_PACKED_REASON_OK)
+
+    it "keeps a sealed generation immutable when the queue is full":
+        var store = DrawIrPackedGenerationStoreV3.bounded(42u64, 2u32, 1u32, 1u32)
+        var first = DrawIrPackedGenerationRefV3(arena_id: 0u64, generation: 0u64, slot: 0u32)
+        var second = first
+        match store.admit(1u32):
+            DrawIrPackedAdmissionV3.Admitted(value): first = value
+            DrawIrPackedAdmissionV3.Refused(reason): expect(false).to_equal(true)
+        expect(store.write(first, 7u64)).to_equal(DRAW_IR_PACKED_REASON_OK)
+        var first_sealed = DrawIrPackedSubmissionV3(generation_ref: first, row_count: 0u32, content_hash: "")
+        match store.seal(first):
+            DrawIrPackedSealV3.Sealed(value): first_sealed = value
+            DrawIrPackedSealV3.Refused(reason): expect(false).to_equal(true)
+        expect(store.publish(first_sealed)).to_equal(DRAW_IR_PACKED_REASON_OK)
+        match store.admit(1u32):
+            DrawIrPackedAdmissionV3.Admitted(value): second = value
+            DrawIrPackedAdmissionV3.Refused(reason): expect(false).to_equal(true)
+        expect(store.write(second, 8u64)).to_equal(DRAW_IR_PACKED_REASON_OK)
+        var second_sealed = DrawIrPackedSubmissionV3(generation_ref: second, row_count: 0u32, content_hash: "")
+        match store.seal(second):
+            DrawIrPackedSealV3.Sealed(value): second_sealed = value
+            DrawIrPackedSealV3.Refused(reason): expect(false).to_equal(true)
+        expect(store.publish(second_sealed)).to_equal(DRAW_IR_PACKED_REASON_QUEUE_FULL)
+        expect(store.write(second, 9u64)).to_equal(DRAW_IR_PACKED_REASON_STATE)
+        match store.take():
+            DrawIrPackedHandoffV3.Ready(value): expect(value.generation_ref.generation).to_equal(first.generation)
+            DrawIrPackedHandoffV3.Refused(reason): expect(false).to_equal(true)
+        expect(store.publish(second_sealed)).to_equal(DRAW_IR_PACKED_REASON_OK)
+
+    it "rejects overflow, stale references, and slot reuse before completion":
+        var store = DrawIrPackedGenerationStoreV3.bounded(43u64, 1u32, 1u32, 1u32)
+        match store.admit(2u32):
+            DrawIrPackedAdmissionV3.Refused(reason): expect(reason).to_equal(DRAW_IR_PACKED_REASON_CAPACITY)
+            DrawIrPackedAdmissionV3.Admitted(value): expect(false).to_equal(true)
+        var admitted = DrawIrPackedGenerationRefV3(arena_id: 0u64, generation: 0u64, slot: 0u32)
+        match store.admit(1u32):
+            DrawIrPackedAdmissionV3.Admitted(value): admitted = value
+            DrawIrPackedAdmissionV3.Refused(reason): expect(false).to_equal(true)
+        match store.admit(1u32):
+            DrawIrPackedAdmissionV3.Refused(reason): expect(reason).to_equal(DRAW_IR_PACKED_REASON_NO_SLOT)
+            DrawIrPackedAdmissionV3.Admitted(value): expect(false).to_equal(true)
+        val stale = DrawIrPackedGenerationRefV3(arena_id: 43u64, generation: admitted.generation + 1u64, slot: admitted.slot)
+        expect(store.write(stale, 1u64)).to_equal(DRAW_IR_PACKED_REASON_STALE)

@@ -1,0 +1,487 @@
+# codex-impl: sealed quota transaction for relaxed, non-critical allocation.
+
+use std.common.crypto.sha256.{sha256_text}
+
+const ARENA_EXHAUSTION_QUOTA: u16 = 1u16
+const ARENA_EXHAUSTION_ALLOCATION_COUNT: u16 = 2u16
+const ARENA_EXHAUSTION_FORBIDDEN_CONTEXT: u16 = 3u16
+const ARENA_EXHAUSTION_UNSEALED: u16 = 4u16
+const ARENA_EXHAUSTION_GENERATION_MISMATCH: u16 = 5u16
+const ARENA_EXHAUSTION_INVALID_REQUEST: u16 = 6u16
+const ARENA_EXHAUSTION_INJECTED_FAULT: u16 = 7u16
+
+const ARENA_FAULT_NONE: u16 = 0u16
+const ARENA_FAULT_BEFORE_CURSOR_ADVANCE: u16 = 1u16
+const ARENA_FAULT_BEFORE_PUBLICATION: u16 = 2u16
+const ARENA_FAULT_POINT_COUNT: u16 = 2u16
+
+const ARENA_FAULT_NAME_BEFORE_CURSOR_ADVANCE: text = "before_cursor_advance"
+const ARENA_FAULT_NAME_BEFORE_PUBLICATION: text = "before_publication"
+
+const ARENA_CONTEXT_NORMAL: u64 = 1u64
+const ARENA_CONTEXT_KERNEL: u64 = 2u64
+const ARENA_CONTEXT_ISR: u64 = 4u64
+const ARENA_CONTEXT_STORAGE_COMMIT: u64 = 8u64
+const ARENA_CONTEXT_OWNERSHIP_PUBLICATION: u64 = 16u64
+const ARENA_CONTEXT_ISOLATION_TRANSITION: u64 = 32u64
+const ARENA_CONTEXT_CRITICAL_MASK: u64 = 62u64
+const DOMAIN_ARENA_U64_MAX: u64 = 0xFFFFFFFFFFFFFFFF
+
+struct RelaxedAllocationProfileV1:
+    schema_version: u16
+    profile_id: text
+    strict_default: bool
+    domain_id: u32
+    quota_bytes: u64
+    alignment: u32
+    max_allocations_per_generation: u32
+    allowed_context_mask: u64
+    forbidden_context_mask: u64
+    sealed: bool
+
+struct ArenaCheckpointV1:
+    arena_id: u64
+    domain_id: u32
+    generation: u64
+    cursor_bytes: u64
+    allocation_count: u32
+    publication_epoch: u64
+
+struct ArenaExhaustionV1:
+    arena_id: u64
+    domain_id: u32
+    generation: u64
+    requested_bytes: u64
+    remaining_bytes: u64
+    reason: u16
+    high_water_bytes: u64
+
+struct ArenaFailureInjectionLedgerEntryV1:
+    schema_version: u16
+    run_id: text
+    fault_point: u16
+    fault_name: text
+    occurrence: u16
+    subject_arena_id: u64
+    subject_generation: u64
+    isolated_arena_id: u64
+    isolated_generation: u64
+    subject_before_hash: text
+    subject_after_hash: text
+    isolated_before_hash: text
+    isolated_after_hash: text
+    injected: bool
+    rolled_back: bool
+    row_hash: text
+
+fn arena_failure_point_count_v1() -> u16: ARENA_FAULT_POINT_COUNT
+
+fn arena_failure_point_at_v1(index: u16) -> u16:
+    if index == 0u16: ARENA_FAULT_BEFORE_CURSOR_ADVANCE
+    elif index == 1u16: ARENA_FAULT_BEFORE_PUBLICATION
+    else: ARENA_FAULT_NONE
+
+fn arena_failure_point_name_v1(fault_point: u16) -> text:
+    if fault_point == ARENA_FAULT_BEFORE_CURSOR_ADVANCE:
+        ARENA_FAULT_NAME_BEFORE_CURSOR_ADVANCE
+    elif fault_point == ARENA_FAULT_BEFORE_PUBLICATION:
+        ARENA_FAULT_NAME_BEFORE_PUBLICATION
+    else:
+        ""
+
+fn arena_failure_point_registered_v1(fault_point: u16) -> bool:
+    arena_failure_point_name_v1(fault_point).len() > 0
+
+fn arena_sha256_lower_hex_valid_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    var i = 0
+    while i < value.len():
+        val c = value[i:i + 1]
+        if not ((c >= "0" and c <= "9") or (c >= "a" and c <= "f")):
+            return false
+        i = i + 1
+    true
+
+fn arena_failure_injection_ledger_row_hash_v1(entry: ArenaFailureInjectionLedgerEntryV1) -> text:
+    val canonical = (
+        "domain-arena-fault-ledger-v1|schema=" + entry.schema_version.to_text() +
+        "|run_id=" + entry.run_id.len().to_text() + ":" + entry.run_id +
+        "|point=" + entry.fault_point.to_text() +
+        "|point_name=" + entry.fault_name.len().to_text() + ":" + entry.fault_name +
+        "|occurrence=" + entry.occurrence.to_text() +
+        "|subject_arena=" + entry.subject_arena_id.to_text() +
+        "|subject_generation=" + entry.subject_generation.to_text() +
+        "|isolated_arena=" + entry.isolated_arena_id.to_text() +
+        "|isolated_generation=" + entry.isolated_generation.to_text() +
+        "|subject_before=" + entry.subject_before_hash +
+        "|subject_after=" + entry.subject_after_hash +
+        "|isolated_before=" + entry.isolated_before_hash +
+        "|isolated_after=" + entry.isolated_after_hash +
+        "|injected=" + (if entry.injected: "1" else: "0") +
+        "|rolled_back=" + (if entry.rolled_back: "1" else: "0")
+    )
+    sha256_text(canonical)
+
+fn arena_failure_injection_ledger_entry_valid_v1(entry: ArenaFailureInjectionLedgerEntryV1) -> bool:
+    (entry.schema_version == 1u16 and entry.run_id.len() > 0 and
+        arena_failure_point_registered_v1(entry.fault_point) and
+        entry.fault_name == arena_failure_point_name_v1(entry.fault_point) and
+        entry.occurrence == 1u16 and
+        entry.subject_arena_id != 0u64 and entry.isolated_arena_id != 0u64 and
+        entry.subject_arena_id != entry.isolated_arena_id and
+        entry.subject_generation > 0u64 and entry.isolated_generation > 0u64 and
+        arena_sha256_lower_hex_valid_v1(entry.subject_before_hash) and
+        arena_sha256_lower_hex_valid_v1(entry.subject_after_hash) and
+        entry.subject_before_hash == entry.subject_after_hash and
+        arena_sha256_lower_hex_valid_v1(entry.isolated_before_hash) and
+        arena_sha256_lower_hex_valid_v1(entry.isolated_after_hash) and
+        entry.isolated_before_hash == entry.isolated_after_hash and
+        entry.injected and entry.rolled_back and
+        arena_sha256_lower_hex_valid_v1(entry.row_hash) and
+        entry.row_hash == arena_failure_injection_ledger_row_hash_v1(entry))
+
+fn arena_failure_injection_ledger_complete_v1(entries: [ArenaFailureInjectionLedgerEntryV1], run_id: text, subject_arena_id: u64, subject_generation: u64, subject_snapshot_hash: text, isolated_arena_id: u64, isolated_generation: u64, isolated_snapshot_hash: text) -> bool:
+    if not arena_sha256_lower_hex_valid_v1(subject_snapshot_hash): return false
+    if not arena_sha256_lower_hex_valid_v1(isolated_snapshot_hash): return false
+    if entries.len() != arena_failure_point_count_v1() as i64: return false
+    var registry_index = 0u16
+    while registry_index < arena_failure_point_count_v1():
+        val required_point = arena_failure_point_at_v1(registry_index)
+        var matches = 0
+        for entry in entries:
+            if (arena_failure_injection_ledger_entry_valid_v1(entry) and
+                entry.run_id == run_id and entry.fault_point == required_point and
+                entry.subject_arena_id == subject_arena_id and
+                entry.subject_generation == subject_generation and
+                entry.subject_before_hash == subject_snapshot_hash and
+                entry.subject_after_hash == subject_snapshot_hash and
+                entry.isolated_arena_id == isolated_arena_id and
+                entry.isolated_generation == isolated_generation and
+                entry.isolated_before_hash == isolated_snapshot_hash and
+                entry.isolated_after_hash == isolated_snapshot_hash):
+                matches = matches + 1
+        if matches != 1: return false
+        registry_index = registry_index + 1u16
+    true
+
+struct ArenaCommittedSnapshotV1:
+    generation: u64
+    cursor_bytes: u64
+    allocation_count: u32
+    publication_epoch: u64
+
+struct DomainArenaRefV1:
+    arena_id: u64
+    domain_id: u32
+    generation: u64
+    offset_bytes: u64
+    size_bytes: u64
+
+enum DomainArenaAllocationV1:
+    Allocated(DomainArenaRefV1)
+    Exhausted(ArenaExhaustionV1)
+
+class DomainArenaV1:
+    arena_id: u64
+    profile: RelaxedAllocationProfileV1
+    sealed_profile_fingerprint: text
+    generation: u64
+    committed_generation: u64
+    staging_generation: u64
+    next_generation: u64
+    cursor_bytes: u64
+    committed_cursor_bytes: u64
+    high_water_bytes: u64
+    overflow_count: u64
+    injected_fault_count: u64
+    allocation_count: u32
+    committed_allocation_count: u32
+    publication_epoch: u64
+    transaction_open: bool
+    armed_fault_point: u16
+    checkpoint_generation: u64
+    checkpoint_cursor_bytes: u64
+    checkpoint_allocation_count: u32
+    checkpoint_publication_epoch: u64
+    generation_terminal: bool
+    committed_state: ArenaCommittedSnapshotV1
+
+impl DomainArenaV1:
+    static fn from_sealed_profile(arena_id: u64, profile: RelaxedAllocationProfileV1) -> DomainArenaV1:
+        DomainArenaV1(
+            arena_id: arena_id, profile: profile,
+            sealed_profile_fingerprint: relaxed_allocation_profile_fingerprint_v1(profile),
+            generation: 0u64,
+            committed_generation: 0u64, staging_generation: 0u64,
+            next_generation: 1u64, cursor_bytes: 0u64,
+            committed_cursor_bytes: 0u64, high_water_bytes: 0u64, overflow_count: 0u64,
+            injected_fault_count: 0u64,
+            allocation_count: 0u32, committed_allocation_count: 0u32,
+            publication_epoch: 0u64, transaction_open: false,
+            armed_fault_point: ARENA_FAULT_NONE,
+            checkpoint_generation: 0u64, checkpoint_cursor_bytes: 0u64,
+            checkpoint_allocation_count: 0u32, checkpoint_publication_epoch: 0u64,
+            generation_terminal: false,
+            committed_state: ArenaCommittedSnapshotV1(
+                generation: 0u64, cursor_bytes: 0u64, allocation_count: 0u32,
+                publication_epoch: 0u64
+            )
+        )
+
+    me arm_fault_once(fault_point: u16) -> bool:
+        if not arena_failure_point_registered_v1(fault_point):
+            return false
+        if not self.transaction_open or self.armed_fault_point != ARENA_FAULT_NONE:
+            return false
+        self.armed_fault_point = fault_point
+        true
+
+    me checkpoint() -> ArenaCheckpointV1:
+        if not self.transaction_open:
+            if self.generation_terminal:
+                return ArenaCheckpointV1(
+                    arena_id: self.arena_id, domain_id: self.profile.domain_id,
+                    generation: 0u64, cursor_bytes: self.committed_state.cursor_bytes,
+                    allocation_count: self.committed_state.allocation_count,
+                    publication_epoch: self.committed_state.publication_epoch
+                )
+            self.transaction_open = true
+            self.staging_generation = self.next_generation
+            self.generation = self.staging_generation
+            if self.next_generation == DOMAIN_ARENA_U64_MAX:
+                self.generation_terminal = true
+            else:
+                self.next_generation = self.next_generation + 1u64
+            self.cursor_bytes = 0u64
+            self.allocation_count = 0u32
+            self.checkpoint_generation = self.staging_generation
+            self.checkpoint_cursor_bytes = 0u64
+            self.checkpoint_allocation_count = 0u32
+            self.checkpoint_publication_epoch = self.committed_state.publication_epoch
+        ArenaCheckpointV1(
+            arena_id: self.arena_id, domain_id: self.profile.domain_id,
+            generation: self.checkpoint_generation,
+            cursor_bytes: self.checkpoint_cursor_bytes,
+            allocation_count: self.checkpoint_allocation_count,
+            publication_epoch: self.checkpoint_publication_epoch
+        )
+
+    fn _checkpoint_matches(checkpoint: ArenaCheckpointV1) -> bool:
+        (checkpoint.arena_id == self.arena_id and
+            checkpoint.domain_id == self.profile.domain_id and
+            checkpoint.generation == self.checkpoint_generation and
+            checkpoint.cursor_bytes == self.checkpoint_cursor_bytes and
+            checkpoint.allocation_count == self.checkpoint_allocation_count and
+            checkpoint.publication_epoch == self.checkpoint_publication_epoch)
+
+    fn _profile_is_frozen() -> bool:
+        self.sealed_profile_fingerprint == relaxed_allocation_profile_fingerprint_v1(self.profile)
+
+    fn _exhaustion(requested_bytes: u64, reason: u16) -> ArenaExhaustionV1:
+        val remaining = if self.cursor_bytes <= self.profile.quota_bytes:
+            self.profile.quota_bytes - self.cursor_bytes
+        else:
+            0u64
+        ArenaExhaustionV1(
+            arena_id: self.arena_id, domain_id: self.profile.domain_id,
+            generation: self.staging_generation, requested_bytes: requested_bytes,
+            remaining_bytes: remaining, reason: reason,
+            high_water_bytes: self.high_water_bytes
+        )
+
+    me try_allocate(bytes: u64, context: u64) -> DomainArenaAllocationV1:
+        var reason = 0u16
+        var aligned_cursor = self.cursor_bytes
+        val alignment = self.profile.alignment as u64
+        var alignment_is_power_of_two = false
+        if self.profile.alignment > 0u32:
+            alignment_is_power_of_two = (
+                self.profile.alignment & (self.profile.alignment - 1u32)
+            ) == 0u32
+        val profile_masks_are_valid = (
+            self.profile.allowed_context_mask == ARENA_CONTEXT_NORMAL and
+            (self.profile.forbidden_context_mask & ARENA_CONTEXT_CRITICAL_MASK) == ARENA_CONTEXT_CRITICAL_MASK and
+            (self.profile.forbidden_context_mask & ARENA_CONTEXT_NORMAL) == 0u64
+        )
+        if (not self._profile_is_frozen() or
+            self.profile.schema_version != 1u16 or self.profile.profile_id.len() == 0 or
+            not self.profile.strict_default or self.profile.domain_id == 0u32 or
+            self.profile.quota_bytes == 0u64 or
+            self.profile.max_allocations_per_generation == 0u32 or
+            not alignment_is_power_of_two or not profile_masks_are_valid):
+            reason = ARENA_EXHAUSTION_INVALID_REQUEST
+        elif not self.profile.sealed or not self.transaction_open:
+            reason = ARENA_EXHAUSTION_UNSEALED
+        elif context != ARENA_CONTEXT_NORMAL or
+             (context & ARENA_CONTEXT_CRITICAL_MASK) != 0u64 or
+             (context & self.profile.forbidden_context_mask) != 0u64 or
+             (context & self.profile.allowed_context_mask) == 0u64:
+            reason = ARENA_EXHAUSTION_FORBIDDEN_CONTEXT
+        elif bytes == 0u64:
+            reason = ARENA_EXHAUSTION_INVALID_REQUEST
+        elif alignment == 0u64:
+            reason = ARENA_EXHAUSTION_INVALID_REQUEST
+        elif self.allocation_count >= self.profile.max_allocations_per_generation:
+            reason = ARENA_EXHAUSTION_ALLOCATION_COUNT
+        else:
+            val remainder = self.cursor_bytes % alignment
+            if remainder != 0u64:
+                val padding = alignment - remainder
+                if self.cursor_bytes > self.profile.quota_bytes or padding > self.profile.quota_bytes - self.cursor_bytes:
+                    reason = ARENA_EXHAUSTION_QUOTA
+                else:
+                    aligned_cursor = self.cursor_bytes + padding
+            if (reason == 0u16 and
+                (aligned_cursor > self.profile.quota_bytes or bytes > self.profile.quota_bytes - aligned_cursor)):
+                reason = ARENA_EXHAUSTION_QUOTA
+        if reason == 0u16 and self.armed_fault_point == ARENA_FAULT_BEFORE_CURSOR_ADVANCE:
+            self.armed_fault_point = ARENA_FAULT_NONE
+            if self.injected_fault_count != DOMAIN_ARENA_U64_MAX:
+                self.injected_fault_count = self.injected_fault_count + 1u64
+            reason = ARENA_EXHAUSTION_INJECTED_FAULT
+        if reason != 0u16:
+            if self.overflow_count != DOMAIN_ARENA_U64_MAX:
+                self.overflow_count = self.overflow_count + 1u64
+            return DomainArenaAllocationV1.Exhausted(self._exhaustion(bytes, reason))
+        val offset = aligned_cursor
+        self.cursor_bytes = aligned_cursor + bytes
+        self.allocation_count = self.allocation_count + 1u32
+        if self.cursor_bytes > self.high_water_bytes:
+            self.high_water_bytes = self.cursor_bytes
+        DomainArenaAllocationV1.Allocated(DomainArenaRefV1(
+            arena_id: self.arena_id, domain_id: self.profile.domain_id,
+            generation: self.staging_generation, offset_bytes: offset, size_bytes: bytes
+        ))
+
+    me commit(checkpoint: ArenaCheckpointV1) -> bool:
+        if not self.transaction_open or not self._checkpoint_matches(checkpoint):
+            return false
+        if not self._profile_is_frozen():
+            return false
+        if checkpoint.generation != self.staging_generation or checkpoint.publication_epoch != self.committed_state.publication_epoch:
+            return false
+        if self.armed_fault_point == ARENA_FAULT_BEFORE_PUBLICATION:
+            self.armed_fault_point = ARENA_FAULT_NONE
+            if self.injected_fault_count != DOMAIN_ARENA_U64_MAX:
+                self.injected_fault_count = self.injected_fault_count + 1u64
+            return false
+        if self.committed_state.publication_epoch == DOMAIN_ARENA_U64_MAX:
+            return false
+        val published = ArenaCommittedSnapshotV1(
+            generation: self.staging_generation, cursor_bytes: self.cursor_bytes,
+            allocation_count: self.allocation_count,
+            publication_epoch: self.committed_state.publication_epoch + 1u64
+        )
+        # This single value assignment is the observable publication point.
+        self.committed_state = published
+        # Compatibility mirrors are not publication authority.
+        self.publication_epoch = published.publication_epoch
+        self.committed_generation = published.generation
+        self.committed_cursor_bytes = published.cursor_bytes
+        self.committed_allocation_count = published.allocation_count
+        self.transaction_open = false
+        true
+
+    me rollback(checkpoint: ArenaCheckpointV1) -> bool:
+        if not self.transaction_open or not self._checkpoint_matches(checkpoint):
+            return false
+        if checkpoint.generation != self.staging_generation or checkpoint.publication_epoch != self.committed_state.publication_epoch:
+            return false
+        self.cursor_bytes = self.committed_state.cursor_bytes
+        self.allocation_count = self.committed_state.allocation_count
+        self.transaction_open = false
+        self.generation = self.committed_state.generation
+        true
+
+    fn validates(reference: DomainArenaRefV1) -> bool:
+        var end_is_bounded = false
+        if reference.size_bytes > 0u64 and reference.offset_bytes < self.committed_state.cursor_bytes:
+            end_is_bounded = (
+                reference.size_bytes <= self.committed_state.cursor_bytes - reference.offset_bytes
+            )
+        reference.arena_id == self.arena_id and
+            reference.domain_id == self.profile.domain_id and
+            reference.generation > 0u64 and
+            reference.generation == self.committed_state.generation and
+            self._profile_is_frozen() and end_is_bounded
+
+fn relaxed_allocation_profile_canonical_v1(profile: RelaxedAllocationProfileV1) -> text:
+    # Decimal values and byte-counted text make this independent of host word
+    # size, endianness, struct padding, locale, and map/field iteration order.
+    ("domain-arena-profile-v1|schema=" + profile.schema_version.to_text() +
+        "|profile_id=" + profile.profile_id.len().to_text() + ":" + profile.profile_id +
+        "|strict_default=" + (if profile.strict_default: "1" else: "0") +
+        "|domain_id=" + profile.domain_id.to_text() +
+        "|quota_bytes=" + profile.quota_bytes.to_text() +
+        "|alignment=" + profile.alignment.to_text() +
+        "|max_allocations=" + profile.max_allocations_per_generation.to_text() +
+        "|allowed_context_mask=" + profile.allowed_context_mask.to_text() +
+        "|forbidden_context_mask=" + profile.forbidden_context_mask.to_text() +
+        "|sealed=" + (if profile.sealed: "1" else: "0"))
+
+fn relaxed_allocation_profile_hash_v1(profile: RelaxedAllocationProfileV1) -> text:
+    sha256_text(relaxed_allocation_profile_canonical_v1(profile))
+
+# Compatibility alias for V1 callers. New code should use profile_hash.
+fn relaxed_allocation_profile_fingerprint_v1(profile: RelaxedAllocationProfileV1) -> text:
+    relaxed_allocation_profile_hash_v1(profile)
+
+fn domain_arena_committed_state_hash_v1(arena: DomainArenaV1) -> text:
+    val canonical = (
+        "domain-arena-committed-state-v1|arena_id=" + arena.arena_id.to_text() +
+        "|domain_id=" + arena.profile.domain_id.to_text() +
+        "|profile_hash=" + relaxed_allocation_profile_hash_v1(arena.profile) +
+        "|generation=" + arena.committed_state.generation.to_text() +
+        "|cursor_bytes=" + arena.committed_state.cursor_bytes.to_text() +
+        "|allocation_count=" + arena.committed_state.allocation_count.to_text() +
+        "|publication_epoch=" + arena.committed_state.publication_epoch.to_text()
+    )
+    sha256_text(canonical)
+
+fn domain_arena_evidence_scenario_row_v1(scenario_id: text) -> text:
+    "MCI_DOMAIN_ARENA_EVIDENCE|schema=1|kind=scenario|id=" + scenario_id + "|result=pass"
+
+fn domain_arena_evidence_profile_row_v1(profile_hash: text) -> text:
+    "MCI_DOMAIN_ARENA_EVIDENCE|schema=1|kind=profile|profile_hash=" + profile_hash
+
+fn domain_arena_evidence_snapshot_row_v1(snapshot_hash: text) -> text:
+    "MCI_DOMAIN_ARENA_EVIDENCE|schema=1|kind=committed_snapshot|snapshot_hash=" + snapshot_hash
+
+fn domain_arena_evidence_ledger_row_v1(entry: ArenaFailureInjectionLedgerEntryV1) -> text:
+    ("MCI_DOMAIN_ARENA_EVIDENCE|schema=1|kind=ledger|fault_id=" + entry.fault_point.to_text() +
+        "|fault_name=" + entry.fault_name + "|run_id=" + entry.run_id +
+        "|occurrence=" + entry.occurrence.to_text() +
+        "|subject_arena=" + entry.subject_arena_id.to_text() +
+        "|subject_generation=" + entry.subject_generation.to_text() +
+        "|isolated_arena=" + entry.isolated_arena_id.to_text() +
+        "|isolated_generation=" + entry.isolated_generation.to_text() +
+        "|subject_before=" + entry.subject_before_hash +
+        "|subject_after=" + entry.subject_after_hash +
+        "|isolated_before=" + entry.isolated_before_hash +
+        "|isolated_after=" + entry.isolated_after_hash +
+        "|injected=" + (if entry.injected: "1" else: "0") +
+        "|rolled_back=" + (if entry.rolled_back: "1" else: "0") +
+        "|row_hash=" + entry.row_hash)
+
+export ARENA_EXHAUSTION_QUOTA, ARENA_EXHAUSTION_ALLOCATION_COUNT,
+    ARENA_EXHAUSTION_FORBIDDEN_CONTEXT, ARENA_EXHAUSTION_UNSEALED,
+    ARENA_EXHAUSTION_GENERATION_MISMATCH, ARENA_EXHAUSTION_INVALID_REQUEST,
+    ARENA_EXHAUSTION_INJECTED_FAULT, ARENA_FAULT_NONE,
+    ARENA_FAULT_BEFORE_CURSOR_ADVANCE, ARENA_FAULT_BEFORE_PUBLICATION,
+    ARENA_FAULT_POINT_COUNT, ARENA_FAULT_NAME_BEFORE_CURSOR_ADVANCE,
+    ARENA_FAULT_NAME_BEFORE_PUBLICATION,
+    ARENA_CONTEXT_NORMAL, ARENA_CONTEXT_KERNEL, ARENA_CONTEXT_ISR,
+    ARENA_CONTEXT_STORAGE_COMMIT, ARENA_CONTEXT_OWNERSHIP_PUBLICATION,
+    ARENA_CONTEXT_ISOLATION_TRANSITION, ARENA_CONTEXT_CRITICAL_MASK,
+    RelaxedAllocationProfileV1, ArenaCheckpointV1, ArenaExhaustionV1,
+    ArenaFailureInjectionLedgerEntryV1, ArenaCommittedSnapshotV1,
+    DomainArenaRefV1, DomainArenaAllocationV1, DomainArenaV1
+export relaxed_allocation_profile_fingerprint_v1
+export relaxed_allocation_profile_canonical_v1, relaxed_allocation_profile_hash_v1,
+    domain_arena_committed_state_hash_v1, arena_failure_point_count_v1,
+    arena_failure_point_at_v1, arena_failure_point_name_v1,
+    arena_failure_point_registered_v1, arena_failure_injection_ledger_entry_valid_v1
+export arena_sha256_lower_hex_valid_v1, arena_failure_injection_ledger_complete_v1
+export arena_failure_injection_ledger_row_hash_v1
+export domain_arena_evidence_scenario_row_v1, domain_arena_evidence_profile_row_v1,
+    domain_arena_evidence_snapshot_row_v1, domain_arena_evidence_ledger_row_v1

@@ -1,0 +1,391 @@
+# @cover src/lib/nogc_sync_mut/mission_critical/domain_arena_v1.spl 80%
+# @tag: unit, mission_critical, memory, arena
+
+use std.spec.*
+use nogc_sync_mut.mission_critical.domain_arena_v1.*
+
+fn relaxed_test_profile_v1(quota: u64) -> RelaxedAllocationProfileV1:
+    RelaxedAllocationProfileV1(
+        schema_version: 1u16, profile_id: "render-domain", strict_default: true,
+        domain_id: 4u32, quota_bytes: quota, alignment: 8u32,
+        max_allocations_per_generation: 2u32,
+        allowed_context_mask: ARENA_CONTEXT_NORMAL,
+        forbidden_context_mask: ARENA_CONTEXT_CRITICAL_MASK,
+        sealed: true
+    )
+
+describe "sealed relaxed-allocation domain arena v1":
+
+    it "uses a canonical SHA-256 identity for the sealed profile":
+        val profile = relaxed_test_profile_v1(64u64)
+        val fingerprint = relaxed_allocation_profile_fingerprint_v1(profile)
+        expect(fingerprint.len()).to_equal(64)
+        expect(fingerprint).to_equal(relaxed_allocation_profile_hash_v1(profile))
+        expect(fingerprint).to_equal("a77be0b0e329204db951474c0085526c103049d51ce6ae6a194e5f9312bd11b3")
+        expect(relaxed_allocation_profile_hash_v1(relaxed_test_profile_v1(65u64)) == fingerprint).to_equal(false)
+        var delimiter_profile = relaxed_test_profile_v1(64u64)
+        delimiter_profile.profile_id = "render|domain:µ"
+        val framed = relaxed_allocation_profile_canonical_v1(delimiter_profile)
+        expect(framed).to_contain("profile_id=16:render|domain:µ")
+        expect(relaxed_allocation_profile_hash_v1(delimiter_profile) == fingerprint).to_equal(false)
+        var field_profile = relaxed_test_profile_v1(64u64)
+        field_profile.alignment = 16u32
+        expect(relaxed_allocation_profile_hash_v1(field_profile) == fingerprint).to_equal(false)
+
+    it "enumerates the complete named failure-point registry":
+        expect(arena_failure_point_count_v1()).to_equal(2u16)
+        expect(arena_failure_point_at_v1(0u16)).to_equal(ARENA_FAULT_BEFORE_CURSOR_ADVANCE)
+        expect(arena_failure_point_at_v1(1u16)).to_equal(ARENA_FAULT_BEFORE_PUBLICATION)
+        expect(arena_failure_point_at_v1(2u16)).to_equal(ARENA_FAULT_NONE)
+        expect(arena_failure_point_name_v1(ARENA_FAULT_BEFORE_CURSOR_ADVANCE)).to_equal("before_cursor_advance")
+        expect(arena_failure_point_name_v1(ARENA_FAULT_BEFORE_PUBLICATION)).to_equal("before_publication")
+        expect(arena_failure_point_registered_v1(99u16)).to_equal(false)
+
+    it "binds every profile and committed-snapshot field into its hash":
+        val base_profile = relaxed_test_profile_v1(64u64)
+        val base_hash = relaxed_allocation_profile_hash_v1(base_profile)
+        var changed = base_profile
+        changed.schema_version = 2u16
+        expect(relaxed_allocation_profile_hash_v1(changed) == base_hash).to_equal(false)
+        changed = base_profile
+        changed.profile_id = "other"
+        expect(relaxed_allocation_profile_hash_v1(changed) == base_hash).to_equal(false)
+        changed = base_profile
+        changed.strict_default = false
+        expect(relaxed_allocation_profile_hash_v1(changed) == base_hash).to_equal(false)
+        changed = base_profile
+        changed.domain_id = 5u32
+        expect(relaxed_allocation_profile_hash_v1(changed) == base_hash).to_equal(false)
+        changed = base_profile
+        changed.quota_bytes = 65u64
+        expect(relaxed_allocation_profile_hash_v1(changed) == base_hash).to_equal(false)
+        changed = base_profile
+        changed.alignment = 16u32
+        expect(relaxed_allocation_profile_hash_v1(changed) == base_hash).to_equal(false)
+        changed = base_profile
+        changed.max_allocations_per_generation = 3u32
+        expect(relaxed_allocation_profile_hash_v1(changed) == base_hash).to_equal(false)
+        changed = base_profile
+        changed.allowed_context_mask = 3u64
+        expect(relaxed_allocation_profile_hash_v1(changed) == base_hash).to_equal(false)
+        changed = base_profile
+        changed.forbidden_context_mask = 60u64
+        expect(relaxed_allocation_profile_hash_v1(changed) == base_hash).to_equal(false)
+        changed = base_profile
+        changed.sealed = false
+        expect(relaxed_allocation_profile_hash_v1(changed) == base_hash).to_equal(false)
+
+        val arena = DomainArenaV1.from_sealed_profile(77u64, base_profile)
+        val checkpoint = arena.checkpoint()
+        arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL)
+        expect(arena.commit(checkpoint)).to_equal(true)
+        val committed_hash = domain_arena_committed_state_hash_v1(arena)
+        arena.committed_state.generation = 2u64
+        expect(domain_arena_committed_state_hash_v1(arena) == committed_hash).to_equal(false)
+        arena.committed_state.generation = 1u64
+        arena.committed_state.cursor_bytes = 16u64
+        expect(domain_arena_committed_state_hash_v1(arena) == committed_hash).to_equal(false)
+        arena.committed_state.cursor_bytes = 8u64
+        arena.committed_state.allocation_count = 2u32
+        expect(domain_arena_committed_state_hash_v1(arena) == committed_hash).to_equal(false)
+        arena.committed_state.allocation_count = 1u32
+        arena.committed_state.publication_epoch = 2u64
+        expect(domain_arena_committed_state_hash_v1(arena) == committed_hash).to_equal(false)
+        arena.committed_state.publication_epoch = 1u64
+        arena.profile.domain_id = 5u32
+        expect(domain_arena_committed_state_hash_v1(arena) == committed_hash).to_equal(false)
+
+    it "ignores compatibility mirror tampering in operational paths":
+        val arena = DomainArenaV1.from_sealed_profile(78u64, relaxed_test_profile_v1(64u64))
+        val first = arena.checkpoint()
+        arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL)
+        expect(arena.commit(first)).to_equal(true)
+        arena.committed_generation = 999u64
+        arena.committed_cursor_bytes = 63u64
+        arena.committed_allocation_count = 99u32
+        arena.publication_epoch = 999u64
+        val second = arena.checkpoint()
+        expect(second.publication_epoch).to_equal(1u64)
+        expect(arena.rollback(second)).to_equal(true)
+        expect(arena.cursor_bytes).to_equal(8u64)
+        expect(arena.generation).to_equal(1u64)
+
+    it "accepts exact quota and rejects plus one without cursor mutation":
+        val arena = DomainArenaV1.from_sealed_profile(11u64, relaxed_test_profile_v1(64u64))
+        val checkpoint = arena.checkpoint()
+        var exact = false
+        match arena.try_allocate(64u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Allocated(reference):
+                exact = reference.offset_bytes == 0u64
+            DomainArenaAllocationV1.Exhausted(receipt):
+                exact = false
+        expect(exact).to_equal(true)
+        match arena.try_allocate(1u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Exhausted(receipt):
+                expect(receipt.reason).to_equal(ARENA_EXHAUSTION_QUOTA)
+            DomainArenaAllocationV1.Allocated(reference):
+                expect(false).to_equal(true)
+        expect(arena.cursor_bytes).to_equal(64u64)
+        expect(arena.rollback(checkpoint)).to_equal(true)
+        expect(arena.cursor_bytes).to_equal(0u64)
+        expect(arena.allocation_count).to_equal(0u32)
+
+    it "rejects strict and forbidden contexts before mutation":
+        var unsealed = relaxed_test_profile_v1(64u64)
+        unsealed.sealed = false
+        val strict_arena = DomainArenaV1.from_sealed_profile(12u64, unsealed)
+        strict_arena.checkpoint()
+        match strict_arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Exhausted(receipt):
+                expect(receipt.reason).to_equal(ARENA_EXHAUSTION_UNSEALED)
+            DomainArenaAllocationV1.Allocated(reference):
+                expect(false).to_equal(true)
+        expect(strict_arena.cursor_bytes).to_equal(0u64)
+
+        val forbidden_arena = DomainArenaV1.from_sealed_profile(13u64, relaxed_test_profile_v1(64u64))
+        forbidden_arena.checkpoint()
+        match forbidden_arena.try_allocate(8u64, ARENA_CONTEXT_ISR):
+            DomainArenaAllocationV1.Exhausted(receipt):
+                expect(receipt.reason).to_equal(ARENA_EXHAUSTION_FORBIDDEN_CONTEXT)
+            DomainArenaAllocationV1.Allocated(reference):
+                expect(false).to_equal(true)
+        expect(forbidden_arena.cursor_bytes).to_equal(0u64)
+
+    it "commits a transaction and invalidates rolled-back references":
+        val arena = DomainArenaV1.from_sealed_profile(14u64, relaxed_test_profile_v1(64u64))
+        val checkpoint = arena.checkpoint()
+        var allocated_ref = DomainArenaRefV1(
+            arena_id: 0u64, domain_id: 0u32, generation: 0u64,
+            offset_bytes: 0u64, size_bytes: 0u64
+        )
+        match arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Allocated(reference):
+                allocated_ref = reference
+            DomainArenaAllocationV1.Exhausted(receipt):
+                expect(false).to_equal(true)
+        # Staging references stay private until a successful commit.
+        expect(arena.validates(allocated_ref)).to_equal(false)
+        expect(arena.rollback(checkpoint)).to_equal(true)
+        expect(arena.validates(allocated_ref)).to_equal(false)
+
+        val committed = arena.checkpoint()
+        arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL)
+        expect(arena.commit(committed)).to_equal(true)
+        expect(arena.publication_epoch).to_equal(1u64)
+
+    it "preserves the committed generation when a later staging generation rolls back":
+        val arena = DomainArenaV1.from_sealed_profile(17u64, relaxed_test_profile_v1(64u64))
+        val first_checkpoint = arena.checkpoint()
+        var first_ref = DomainArenaRefV1(
+            arena_id: 0u64, domain_id: 0u32, generation: 0u64,
+            offset_bytes: 0u64, size_bytes: 0u64
+        )
+        match arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Allocated(reference):
+                first_ref = reference
+            DomainArenaAllocationV1.Exhausted(receipt):
+                expect(false).to_equal(true)
+        expect(arena.commit(first_checkpoint)).to_equal(true)
+        expect(arena.validates(first_ref)).to_equal(true)
+
+        val second_checkpoint = arena.checkpoint()
+        var second_ref = DomainArenaRefV1(
+            arena_id: 0u64, domain_id: 0u32, generation: 0u64,
+            offset_bytes: 0u64, size_bytes: 0u64
+        )
+        match arena.try_allocate(16u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Allocated(reference):
+                second_ref = reference
+            DomainArenaAllocationV1.Exhausted(receipt):
+                expect(false).to_equal(true)
+        expect(arena.rollback(second_checkpoint)).to_equal(true)
+        expect(arena.validates(first_ref)).to_equal(true)
+        expect(arena.validates(second_ref)).to_equal(false)
+
+    it "rejects forged checkpoints and keeps the original rollback point":
+        val arena = DomainArenaV1.from_sealed_profile(15u64, relaxed_test_profile_v1(64u64))
+        val original = arena.checkpoint()
+        arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL)
+        val nested = arena.checkpoint()
+        expect(nested.cursor_bytes).to_equal(0u64)
+        val forged = ArenaCheckpointV1(
+            arena_id: 15u64, domain_id: 4u32, generation: 1u64,
+            cursor_bytes: 32u64, allocation_count: 1u32, publication_epoch: 0u64
+        )
+        expect(arena.rollback(forged)).to_equal(false)
+        expect(arena.cursor_bytes).to_equal(8u64)
+        expect(arena.rollback(original)).to_equal(true)
+        expect(arena.cursor_bytes).to_equal(0u64)
+
+    it "rejects malformed relaxed profiles before cursor mutation":
+        var invalid = relaxed_test_profile_v1(64u64)
+        invalid.strict_default = false
+        val arena = DomainArenaV1.from_sealed_profile(16u64, invalid)
+        arena.checkpoint()
+        match arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Exhausted(receipt):
+                expect(receipt.reason).to_equal(ARENA_EXHAUSTION_INVALID_REQUEST)
+            DomainArenaAllocationV1.Allocated(reference):
+                expect(false).to_equal(true)
+        expect(arena.cursor_bytes).to_equal(0u64)
+
+        var bad_alignment = relaxed_test_profile_v1(64u64)
+        bad_alignment.alignment = 3u32
+        val alignment_arena = DomainArenaV1.from_sealed_profile(18u64, bad_alignment)
+        alignment_arena.checkpoint()
+        match alignment_arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Exhausted(receipt):
+                expect(receipt.reason).to_equal(ARENA_EXHAUSTION_INVALID_REQUEST)
+            DomainArenaAllocationV1.Allocated(reference):
+                expect(false).to_equal(true)
+
+        val unknown_context_arena = DomainArenaV1.from_sealed_profile(19u64, relaxed_test_profile_v1(64u64))
+        unknown_context_arena.checkpoint()
+        match unknown_context_arena.try_allocate(8u64, 65u64):
+            DomainArenaAllocationV1.Exhausted(receipt):
+                expect(receipt.reason).to_equal(ARENA_EXHAUSTION_FORBIDDEN_CONTEXT)
+            DomainArenaAllocationV1.Allocated(reference):
+                expect(false).to_equal(true)
+
+    it "rejects profile mutation after sealing and forged zero-size references":
+        val arena = DomainArenaV1.from_sealed_profile(20u64, relaxed_test_profile_v1(64u64))
+        val checkpoint = arena.checkpoint()
+        arena.profile.quota_bytes = 128u64
+        match arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Exhausted(receipt):
+                expect(receipt.reason).to_equal(ARENA_EXHAUSTION_INVALID_REQUEST)
+            DomainArenaAllocationV1.Allocated(reference):
+                expect(false).to_equal(true)
+        expect(arena.commit(checkpoint)).to_equal(false)
+        expect(arena.rollback(checkpoint)).to_equal(true)
+
+        val forged = DomainArenaRefV1(
+            arena_id: 20u64, domain_id: 4u32, generation: arena.committed_generation,
+            offset_bytes: arena.committed_cursor_bytes, size_bytes: 0u64
+        )
+        expect(arena.validates(forged)).to_equal(false)
+
+    it "injects every registered arena failure boundary without cross-domain mutation":
+        val protected_arena = DomainArenaV1.from_sealed_profile(
+            21u64, relaxed_test_profile_v1(64u64)
+        )
+        val protected_checkpoint = protected_arena.checkpoint()
+        var protected_ref = DomainArenaRefV1(
+            arena_id: 0u64, domain_id: 0u32, generation: 0u64,
+            offset_bytes: 0u64, size_bytes: 0u64
+        )
+        match protected_arena.try_allocate(16u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Allocated(reference):
+                protected_ref = reference
+            DomainArenaAllocationV1.Exhausted(receipt):
+                expect(false).to_equal(true)
+        expect(protected_arena.commit(protected_checkpoint)).to_equal(true)
+        val isolated_before_hash = domain_arena_committed_state_hash_v1(protected_arena)
+
+        val fault_arena = DomainArenaV1.from_sealed_profile(
+            22u64, relaxed_test_profile_v1(64u64)
+        )
+        val baseline_checkpoint = fault_arena.checkpoint()
+        fault_arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL)
+        expect(fault_arena.commit(baseline_checkpoint)).to_equal(true)
+        expect(domain_arena_committed_state_hash_v1(fault_arena)).to_equal(
+            "632e0465fb204ef8d4cb278ccb58190f1adfda98ac086ad743af1247a5dfefdd"
+        )
+        expect(domain_arena_committed_state_hash_v1(fault_arena) == isolated_before_hash).to_equal(false)
+        expect(fault_arena.committed_state.generation).to_equal(fault_arena.committed_generation)
+        expect(fault_arena.committed_state.publication_epoch).to_equal(fault_arena.publication_epoch)
+        val allocation_checkpoint = fault_arena.checkpoint()
+        val allocation_before_hash = domain_arena_committed_state_hash_v1(fault_arena)
+        expect(fault_arena.arm_fault_once(ARENA_FAULT_BEFORE_CURSOR_ADVANCE)).to_equal(true)
+        match fault_arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL):
+            DomainArenaAllocationV1.Exhausted(receipt):
+                expect(receipt.reason).to_equal(ARENA_EXHAUSTION_INJECTED_FAULT)
+            DomainArenaAllocationV1.Allocated(reference):
+                expect(false).to_equal(true)
+        expect(fault_arena.cursor_bytes).to_equal(0u64)
+        expect(fault_arena.rollback(allocation_checkpoint)).to_equal(true)
+        val allocation_after_hash = domain_arena_committed_state_hash_v1(fault_arena)
+        var allocation_ledger = ArenaFailureInjectionLedgerEntryV1(
+            schema_version: 1u16, run_id: "arena-ledger-run-1",
+            fault_point: ARENA_FAULT_BEFORE_CURSOR_ADVANCE,
+            fault_name: arena_failure_point_name_v1(ARENA_FAULT_BEFORE_CURSOR_ADVANCE),
+            occurrence: 1u16, subject_arena_id: 22u64, subject_generation: 1u64,
+            isolated_arena_id: 21u64, isolated_generation: 1u64,
+            subject_before_hash: allocation_before_hash,
+            subject_after_hash: allocation_after_hash,
+            isolated_before_hash: isolated_before_hash,
+            isolated_after_hash: domain_arena_committed_state_hash_v1(protected_arena),
+            injected: true, rolled_back: true, row_hash: ""
+        )
+        allocation_ledger.row_hash = arena_failure_injection_ledger_row_hash_v1(allocation_ledger)
+        expect(arena_failure_injection_ledger_entry_valid_v1(allocation_ledger)).to_equal(true)
+
+        val publication_checkpoint = fault_arena.checkpoint()
+        val publication_before_hash = domain_arena_committed_state_hash_v1(fault_arena)
+        fault_arena.try_allocate(8u64, ARENA_CONTEXT_NORMAL)
+        expect(fault_arena.arm_fault_once(ARENA_FAULT_BEFORE_PUBLICATION)).to_equal(true)
+        expect(fault_arena.commit(publication_checkpoint)).to_equal(false)
+        expect(fault_arena.publication_epoch).to_equal(1u64)
+        expect(fault_arena.rollback(publication_checkpoint)).to_equal(true)
+        expect(fault_arena.committed_generation).to_equal(1u64)
+        expect(fault_arena.injected_fault_count).to_equal(2u64)
+        var publication_ledger = ArenaFailureInjectionLedgerEntryV1(
+            schema_version: 1u16, run_id: "arena-ledger-run-1",
+            fault_point: ARENA_FAULT_BEFORE_PUBLICATION,
+            fault_name: arena_failure_point_name_v1(ARENA_FAULT_BEFORE_PUBLICATION),
+            occurrence: 1u16, subject_arena_id: 22u64, subject_generation: 1u64,
+            isolated_arena_id: 21u64, isolated_generation: 1u64,
+            subject_before_hash: publication_before_hash,
+            subject_after_hash: domain_arena_committed_state_hash_v1(fault_arena),
+            isolated_before_hash: isolated_before_hash,
+            isolated_after_hash: domain_arena_committed_state_hash_v1(protected_arena),
+            injected: true, rolled_back: true, row_hash: ""
+        )
+        publication_ledger.row_hash = arena_failure_injection_ledger_row_hash_v1(publication_ledger)
+        expect(arena_failure_injection_ledger_entry_valid_v1(publication_ledger)).to_equal(true)
+        val complete_ledger = [allocation_ledger, publication_ledger]
+        expect(arena_failure_injection_ledger_complete_v1(
+            complete_ledger, "arena-ledger-run-1", 22u64, 1u64,
+            allocation_before_hash, 21u64, 1u64, isolated_before_hash
+        )).to_equal(true)
+        expect(arena_failure_injection_ledger_complete_v1(
+            [allocation_ledger, allocation_ledger], "arena-ledger-run-1",
+            22u64, 1u64, allocation_before_hash, 21u64, 1u64, isolated_before_hash
+        )).to_equal(false)
+        expect(arena_failure_injection_ledger_complete_v1(
+            [allocation_ledger], "arena-ledger-run-1", 22u64, 1u64,
+            allocation_before_hash, 21u64, 1u64, isolated_before_hash
+        )).to_equal(false)
+        expect(arena_failure_injection_ledger_complete_v1(
+            complete_ledger, "replayed-run", 22u64, 1u64,
+            allocation_before_hash, 21u64, 1u64, isolated_before_hash
+        )).to_equal(false)
+        expect(arena_failure_injection_ledger_complete_v1(
+            complete_ledger, "arena-ledger-run-1", 21u64, 1u64,
+            isolated_before_hash, 22u64, 1u64, allocation_before_hash
+        )).to_equal(false)
+        var relabeled = publication_ledger
+        relabeled.run_id = "replayed-run"
+        relabeled.row_hash = arena_failure_injection_ledger_row_hash_v1(relabeled)
+        expect(arena_failure_injection_ledger_complete_v1(
+            [allocation_ledger, relabeled], "arena-ledger-run-1", 22u64, 1u64,
+            allocation_before_hash, 21u64, 1u64, isolated_before_hash
+        )).to_equal(false)
+        expect(arena_sha256_lower_hex_valid_v1("A77be0b0e329204db951474c0085526c103049d51ce6ae6a194e5f9312bd11b3")).to_equal(false)
+
+        expect(protected_arena.publication_epoch).to_equal(1u64)
+        expect(protected_arena.validates(protected_ref)).to_equal(true)
+        for scenario_id in [
+            "MCI-ARENA-001", "MCI-ARENA-002", "MCI-ARENA-003", "MCI-ARENA-004",
+            "MCI-ARENA-005", "MCI-ARENA-006", "MCI-ARENA-007", "MCI-ARENA-008",
+            "MCI-ARENA-009", "MCI-ARENA-010", "MCI-ARENA-011", "MCI-ARENA-012"
+        ]:
+            print(domain_arena_evidence_scenario_row_v1(scenario_id))
+        print(domain_arena_evidence_profile_row_v1(
+            relaxed_allocation_profile_hash_v1(relaxed_test_profile_v1(64u64))
+        ))
+        print(domain_arena_evidence_snapshot_row_v1(
+            domain_arena_committed_state_hash_v1(fault_arena)
+        ))
+        print(domain_arena_evidence_ledger_row_v1(allocation_ledger))
+        print(domain_arena_evidence_ledger_row_v1(publication_ledger))

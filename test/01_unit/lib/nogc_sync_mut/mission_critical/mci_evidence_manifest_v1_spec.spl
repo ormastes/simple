@@ -1,0 +1,109 @@
+# @cover src/lib/nogc_sync_mut/mission_critical/mci_evidence_manifest_v1.spl 80%
+# @tag: unit, mission_critical, evidence, admission
+
+use std.spec.*
+use nogc_sync_mut.mission_critical.mci_evidence_manifest_v1.*
+
+const MCI_TEST_SOURCE_HASH: text = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+const MCI_TEST_CONFIG_HASH: text = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+fn mci_test_policy(required: [text]) -> MciEvidencePolicyV1:
+    MciEvidencePolicyV1(
+        schema_version: 1u16, run_id: "run-7", source_hash: MCI_TEST_SOURCE_HASH,
+        configuration_hash: MCI_TEST_CONFIG_HASH, now_utc_ns: 100i64,
+        required_check_ids: required
+    )
+
+fn mci_test_receipt(policy: MciEvidencePolicyV1, check_id: text) -> MciEvidenceReceiptV1:
+    var receipt = MciEvidenceReceiptV1(
+        schema_version: 1u16, check_id: check_id, run_id: "run-7",
+        source_hash: MCI_TEST_SOURCE_HASH, configuration_hash: MCI_TEST_CONFIG_HASH,
+        valid_until_utc_ns: 200i64, result: MCI_EVIDENCE_PASS,
+        receipt_hash: ""
+    )
+    receipt.receipt_hash = mci_evidence_receipt_hash(policy, receipt)
+    receipt
+
+fn mci_has_blocker(manifest: MciEvidenceManifestV1, reason: u16) -> bool:
+    for blocker in manifest.matrix.blockers:
+        if blocker.reason == reason:
+            return true
+    false
+
+describe "mission-critical evidence manifest v1":
+
+    it "REQ-MCI-002 passes only a complete exact evidence set":
+        val policy = mci_test_policy(["compiler", "render"])
+        val manifest = aggregate_mci_evidence_v1(policy,
+            [mci_test_receipt(policy, "compiler"), mci_test_receipt(policy, "render")])
+        expect(manifest.matrix.result).to_equal(MCI_EVIDENCE_PASS)
+        expect(manifest.matrix.blockers.len()).to_equal(0)
+        expect(manifest.matrix.rows.len()).to_equal(2)
+        expect(manifest.matrix.rows[0].check_id).to_equal("compiler")
+        expect(manifest.matrix.rows[1].check_id).to_equal("render")
+
+    it "REQ-MCI-002 blocks missing duplicate and unexpected receipts":
+        val policy = mci_test_policy(["compiler", "render"])
+        val manifest = aggregate_mci_evidence_v1(policy,
+            [mci_test_receipt(policy, "compiler"), mci_test_receipt(policy, "compiler"),
+             mci_test_receipt(policy, "unknown")])
+        expect(manifest.matrix.result).to_equal(MCI_EVIDENCE_BLOCKED)
+        expect(mci_has_blocker(manifest, MCI_BLOCK_DUPLICATE)).to_equal(true)
+        expect(mci_has_blocker(manifest, MCI_BLOCK_MISSING)).to_equal(true)
+        expect(mci_has_blocker(manifest, MCI_BLOCK_UNEXPECTED)).to_equal(true)
+
+    it "REQ-MCI-002 never indexes the missing-receipt sentinel":
+        val policy = mci_test_policy(["missing"])
+        val manifest = aggregate_mci_evidence_v1(policy, [])
+        expect(manifest.matrix.rows[0].receipt_index).to_equal(-1)
+        expect(manifest.matrix.rows[0].admitted).to_equal(false)
+        expect(mci_has_blocker(manifest, MCI_BLOCK_MISSING)).to_equal(true)
+
+    it "REQ-MCI-010 makes every invalid correlation an explicit blocker":
+        val policy = mci_test_policy(["compiler"])
+        var receipt = mci_test_receipt(policy, "compiler")
+        receipt.valid_until_utc_ns = 99i64
+        receipt.result = MCI_EVIDENCE_SKIPPED
+        receipt.run_id = "wrong-run"
+        receipt.source_hash = "wrong-source"
+        receipt.configuration_hash = "wrong-config"
+        val manifest = aggregate_mci_evidence_v1(policy, [receipt])
+        expect(mci_has_blocker(manifest, MCI_BLOCK_STALE)).to_equal(true)
+        expect(mci_has_blocker(manifest, MCI_BLOCK_SKIPPED)).to_equal(true)
+        expect(mci_has_blocker(manifest, MCI_BLOCK_WRONG_RUN)).to_equal(true)
+        expect(mci_has_blocker(manifest, MCI_BLOCK_WRONG_SOURCE)).to_equal(true)
+        expect(mci_has_blocker(manifest, MCI_BLOCK_WRONG_CONFIG)).to_equal(true)
+        expect(mci_has_blocker(manifest, MCI_BLOCK_INVALID_HASH)).to_equal(true)
+
+    it "REQ-MCI-002 retains stable required order independent of receipt order":
+        val policy = mci_test_policy(["compiler", "os", "render"])
+        val manifest = aggregate_mci_evidence_v1(policy,
+            [mci_test_receipt(policy, "render"), mci_test_receipt(policy, "compiler"),
+             mci_test_receipt(policy, "os")])
+        expect(manifest.matrix.result).to_equal(MCI_EVIDENCE_PASS)
+        expect(manifest.matrix.rows[0].check_id).to_equal("compiler")
+        expect(manifest.matrix.rows[1].check_id).to_equal("os")
+        expect(manifest.matrix.rows[2].check_id).to_equal("render")
+
+    it "REQ-MCI-010 blocks failed receipts and invalid empty policy":
+        val policy = mci_test_policy(["compiler"])
+        var failed = mci_test_receipt(policy, "compiler")
+        failed.result = MCI_EVIDENCE_FAIL
+        val failed_manifest = aggregate_mci_evidence_v1(policy, [failed])
+        expect(mci_has_blocker(failed_manifest, MCI_BLOCK_RECEIPT_FAILED)).to_equal(true)
+        val invalid_manifest = aggregate_mci_evidence_v1(mci_test_policy([]), [])
+        expect(invalid_manifest.matrix.result).to_equal(MCI_EVIDENCE_BLOCKED)
+        expect(mci_has_blocker(invalid_manifest, MCI_BLOCK_INVALID_HASH)).to_equal(true)
+
+    it "REQ-MCI-010 rejects receipt mutation and required-order replay":
+        val policy = mci_test_policy(["compiler", "render"])
+        var mutated = mci_test_receipt(policy, "compiler")
+        mutated.valid_until_utc_ns = 201i64
+        val mutation_manifest = aggregate_mci_evidence_v1(policy,
+            [mutated, mci_test_receipt(policy, "render")])
+        expect(mci_has_blocker(mutation_manifest, MCI_BLOCK_INVALID_HASH)).to_equal(true)
+
+        val reversed = mci_test_policy(["render", "compiler"])
+        val replay_manifest = aggregate_mci_evidence_v1(reversed,
+            [mci_test_receipt(policy, "compiler"), mci_test_receipt(policy, "render")])
+        expect(mci_has_blocker(replay_manifest, MCI_BLOCK_INVALID_HASH)).to_equal(true)

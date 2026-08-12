@@ -1,0 +1,259 @@
+# codex-impl: bounded Draw IR generation planning and admission.
+
+const DRAW_IR_OVERFLOW_COUNT: u16 = 1u16
+const DRAW_IR_OVERFLOW_BYTES: u16 = 2u16
+const DRAW_IR_OVERFLOW_ACTIVE_GENERATION: u16 = 3u16
+const DRAW_IR_OVERFLOW_NOT_ACTIVE: u16 = 4u16
+const DRAW_IR_OVERFLOW_PLAN_MISMATCH: u16 = 5u16
+const DRAW_IR_OVERFLOW_GENERATION_EXHAUSTED: u16 = 6u16
+const DRAW_IR_LAYOUT_PACKED_V3: u64 = 3u64
+const DRAW_IR_PACKED_BYTES_PER_ROW_V3: u64 = 8u64
+const DRAW_IR_U64_MAX: u64 = 0xFFFFFFFFFFFFFFFF
+
+struct DrawIrOverflowReceiptV1:
+    arena_id: u64
+    generation: u64
+    reason: u16
+    requested: u64
+    limit: u64
+
+struct DrawIrGenerationCountsV3:
+    commands: u32
+    geometries: u32
+    paints: u32
+    text_runs: u32
+    glyphs: u32
+    resources: u32
+
+struct DrawIrGenerationPlanV3:
+    arena_id: u64
+    generation: u64
+    counts: DrawIrGenerationCountsV3
+    total_rows: u64
+    total_bytes: u64
+    layout_id: u64
+    bytes_per_row: u64
+
+enum DrawIrPlanOutcomeV3:
+    Planned(DrawIrGenerationPlanV3)
+    Refused(DrawIrOverflowReceiptV1)
+
+enum DrawIrAdmissionOutcomeV3:
+    Admitted(DrawIrGenerationPlanV3)
+    Refused(DrawIrOverflowReceiptV1)
+
+enum DrawIrTerminalOutcomeV3:
+    Advanced(u64)
+    Refused(DrawIrOverflowReceiptV1)
+
+fn draw_ir_generation_count_v3(
+    commands: u32, geometries: u32, paints: u32,
+    text_runs: u32, glyphs: u32, resources: u32
+) -> DrawIrGenerationCountsV3:
+    DrawIrGenerationCountsV3(
+        commands: commands, geometries: geometries, paints: paints,
+        text_runs: text_runs, glyphs: glyphs, resources: resources
+    )
+
+fn _draw_ir_total_rows_v3(counts: DrawIrGenerationCountsV3) -> u64:
+    counts.commands as u64 + counts.geometries as u64 + counts.paints as u64 +
+        counts.text_runs as u64 + counts.glyphs as u64 + counts.resources as u64
+
+fn draw_ir_generation_plan_v3(
+    arena_id: u64, generation: u64, counts: DrawIrGenerationCountsV3,
+    row_limit: u64, byte_limit: u64, bytes_per_row: u64
+) -> DrawIrPlanOutcomeV3:
+    val rows = _draw_ir_total_rows_v3(counts)
+    if rows > row_limit:
+        return DrawIrPlanOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+            arena_id: arena_id, generation: generation,
+            reason: DRAW_IR_OVERFLOW_COUNT, requested: rows, limit: row_limit
+        ))
+    if bytes_per_row > 0u64 and rows > byte_limit / bytes_per_row:
+        return DrawIrPlanOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+            arena_id: arena_id, generation: generation,
+            reason: DRAW_IR_OVERFLOW_BYTES, requested: rows, limit: byte_limit
+        ))
+    val bytes = rows * bytes_per_row
+    if bytes > byte_limit:
+        return DrawIrPlanOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+            arena_id: arena_id, generation: generation,
+            reason: DRAW_IR_OVERFLOW_BYTES, requested: bytes, limit: byte_limit
+        ))
+    DrawIrPlanOutcomeV3.Planned(DrawIrGenerationPlanV3(
+        arena_id: arena_id, generation: generation, counts: counts,
+        total_rows: rows, total_bytes: bytes,
+        layout_id: DRAW_IR_LAYOUT_PACKED_V3, bytes_per_row: bytes_per_row
+    ))
+
+class DrawIrGenerationArenaV3:
+    arena_id: u64
+    capacity_bytes: u64
+    row_capacity: u64
+    next_generation: u64
+    active: bool
+    sealed: bool
+    admitted_bytes: u64
+    admitted_rows: u64
+    layout_id: u64
+    bytes_per_row: u64
+    terminal: bool
+
+impl DrawIrGenerationArenaV3:
+    static fn bounded(arena_id: u64, capacity_bytes: u64, row_capacity: u64) -> DrawIrGenerationArenaV3:
+        DrawIrGenerationArenaV3(
+            arena_id: arena_id, capacity_bytes: capacity_bytes,
+            row_capacity: row_capacity, next_generation: 1u64,
+            active: false, sealed: false, admitted_bytes: 0u64, admitted_rows: 0u64,
+            layout_id: DRAW_IR_LAYOUT_PACKED_V3,
+            bytes_per_row: DRAW_IR_PACKED_BYTES_PER_ROW_V3, terminal: false
+        )
+
+    me admit(plan: DrawIrGenerationPlanV3) -> DrawIrAdmissionOutcomeV3:
+        if self.terminal:
+            return DrawIrAdmissionOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_GENERATION_EXHAUSTED,
+                requested: self.next_generation, limit: DRAW_IR_U64_MAX
+            ))
+        if self.active:
+            return DrawIrAdmissionOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_ACTIVE_GENERATION,
+                requested: plan.total_bytes, limit: self.capacity_bytes
+            ))
+        if plan.arena_id != self.arena_id:
+            return DrawIrAdmissionOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_PLAN_MISMATCH,
+                requested: plan.arena_id, limit: self.arena_id
+            ))
+        if plan.generation != self.next_generation:
+            return DrawIrAdmissionOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_PLAN_MISMATCH,
+                requested: plan.generation, limit: self.next_generation
+            ))
+        if plan.layout_id != self.layout_id or plan.bytes_per_row != self.bytes_per_row:
+            return DrawIrAdmissionOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_PLAN_MISMATCH,
+                requested: plan.layout_id, limit: self.layout_id
+            ))
+        val verified_rows = _draw_ir_total_rows_v3(plan.counts)
+        if plan.total_rows != verified_rows:
+            return DrawIrAdmissionOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_PLAN_MISMATCH,
+                requested: plan.total_rows, limit: verified_rows
+            ))
+        if plan.bytes_per_row > 0u64 and verified_rows > DRAW_IR_U64_MAX / plan.bytes_per_row:
+            return DrawIrAdmissionOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_BYTES,
+                requested: verified_rows, limit: self.capacity_bytes
+            ))
+        val verified_bytes = verified_rows * plan.bytes_per_row
+        if plan.total_bytes != verified_bytes:
+            return DrawIrAdmissionOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_PLAN_MISMATCH,
+                requested: plan.total_bytes, limit: verified_bytes
+            ))
+        if plan.total_rows > self.row_capacity:
+            return DrawIrAdmissionOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_COUNT,
+                requested: plan.total_rows, limit: self.row_capacity
+            ))
+        if plan.total_bytes > self.capacity_bytes:
+            return DrawIrAdmissionOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_BYTES,
+                requested: plan.total_bytes, limit: self.capacity_bytes
+            ))
+        self.active = true
+        self.sealed = false
+        self.admitted_bytes = plan.total_bytes
+        self.admitted_rows = plan.total_rows
+        DrawIrAdmissionOutcomeV3.Admitted(plan)
+
+    me seal(used_bytes: u64, used_rows: u64) -> DrawIrOverflowReceiptV1?:
+        if not self.active:
+            return DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_NOT_ACTIVE, requested: used_bytes, limit: 0u64
+            )
+        if used_bytes != self.admitted_bytes or used_rows != self.admitted_rows:
+            # A failed seal never publishes a partial generation. The caller must
+            # explicitly abort it before another generation can be admitted.
+            self.sealed = false
+            return DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_PLAN_MISMATCH,
+                requested: used_bytes, limit: self.admitted_bytes
+            )
+        self.sealed = true
+        nil
+
+    me abort() -> DrawIrTerminalOutcomeV3:
+        if not self.active:
+            return DrawIrTerminalOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_NOT_ACTIVE, requested: 0u64, limit: 0u64
+            ))
+        self.active = false
+        self.sealed = false
+        self.admitted_bytes = 0u64
+        self.admitted_rows = 0u64
+        if self.next_generation == DRAW_IR_U64_MAX:
+            self.terminal = true
+            return DrawIrTerminalOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_GENERATION_EXHAUSTED,
+                requested: self.next_generation, limit: DRAW_IR_U64_MAX
+            ))
+        self.next_generation = self.next_generation + 1u64
+        DrawIrTerminalOutcomeV3.Advanced(self.next_generation)
+
+    me retire_checked() -> DrawIrTerminalOutcomeV3:
+        if not self.active or not self.sealed:
+            return DrawIrTerminalOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_NOT_ACTIVE, requested: 0u64, limit: 0u64
+            ))
+        self.active = false
+        self.sealed = false
+        self.admitted_bytes = 0u64
+        self.admitted_rows = 0u64
+        if self.next_generation == DRAW_IR_U64_MAX:
+            self.terminal = true
+            return DrawIrTerminalOutcomeV3.Refused(DrawIrOverflowReceiptV1(
+                arena_id: self.arena_id, generation: self.next_generation,
+                reason: DRAW_IR_OVERFLOW_GENERATION_EXHAUSTED,
+                requested: self.next_generation, limit: DRAW_IR_U64_MAX
+            ))
+        self.next_generation = self.next_generation + 1u64
+        DrawIrTerminalOutcomeV3.Advanced(self.next_generation)
+
+    me retire() -> bool:
+        if not self.active or not self.sealed:
+            return false
+        self.active = false
+        self.sealed = false
+        self.admitted_bytes = 0u64
+        self.admitted_rows = 0u64
+        if self.next_generation == DRAW_IR_U64_MAX:
+            self.terminal = true
+            return false
+        self.next_generation = self.next_generation + 1u64
+        true
+
+export DRAW_IR_OVERFLOW_COUNT, DRAW_IR_OVERFLOW_BYTES,
+    DRAW_IR_OVERFLOW_ACTIVE_GENERATION, DRAW_IR_OVERFLOW_NOT_ACTIVE,
+    DRAW_IR_OVERFLOW_PLAN_MISMATCH, DRAW_IR_OVERFLOW_GENERATION_EXHAUSTED,
+    DRAW_IR_LAYOUT_PACKED_V3, DRAW_IR_PACKED_BYTES_PER_ROW_V3,
+    DrawIrOverflowReceiptV1,
+    DrawIrGenerationCountsV3, DrawIrGenerationPlanV3, DrawIrPlanOutcomeV3,
+    DrawIrAdmissionOutcomeV3, DrawIrTerminalOutcomeV3, DrawIrGenerationArenaV3,
+    draw_ir_generation_count_v3, draw_ir_generation_plan_v3

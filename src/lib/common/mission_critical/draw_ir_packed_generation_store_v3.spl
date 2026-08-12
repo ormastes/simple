@@ -1,0 +1,254 @@
+# codex-impl: host-independent packed Draw IR generation storage and handoff.
+
+use std.common.crypto.sha256.{sha256_text}
+
+const DRAW_IR_PACKED_SLOT_FREE: u16 = 0u16
+const DRAW_IR_PACKED_SLOT_ENCODING: u16 = 1u16
+const DRAW_IR_PACKED_SLOT_SEALED: u16 = 2u16
+const DRAW_IR_PACKED_SLOT_IN_FLIGHT: u16 = 3u16
+
+const DRAW_IR_PACKED_REASON_OK: u16 = 0u16
+const DRAW_IR_PACKED_REASON_CAPACITY: u16 = 1u16
+const DRAW_IR_PACKED_REASON_NO_SLOT: u16 = 2u16
+const DRAW_IR_PACKED_REASON_STALE: u16 = 3u16
+const DRAW_IR_PACKED_REASON_STATE: u16 = 4u16
+const DRAW_IR_PACKED_REASON_WRITE_LIMIT: u16 = 5u16
+const DRAW_IR_PACKED_REASON_COUNT_MISMATCH: u16 = 6u16
+const DRAW_IR_PACKED_REASON_QUEUE_FULL: u16 = 7u16
+const DRAW_IR_PACKED_REASON_QUEUE_EMPTY: u16 = 8u16
+
+struct DrawIrPackedGenerationRefV3:
+    arena_id: u64
+    generation: u64
+    slot: u32
+
+struct DrawIrPackedSubmissionV3:
+    generation_ref: DrawIrPackedGenerationRefV3
+    row_count: u32
+    content_hash: text
+
+enum DrawIrPackedAdmissionV3:
+    Admitted(DrawIrPackedGenerationRefV3)
+    Refused(u16)
+
+enum DrawIrPackedSealV3:
+    Sealed(DrawIrPackedSubmissionV3)
+    Refused(u16)
+
+enum DrawIrPackedHandoffV3:
+    Ready(DrawIrPackedSubmissionV3)
+    Refused(u16)
+
+fn _draw_ir_packed_hash_v3(arena_id: u64, generation: u64, rows: [u64]) -> text:
+    var canonical = "draw-ir-packed-v3|arena={arena_id}|generation={generation}|rows={rows.len()}|"
+    var i = 0
+    while i < rows.len():
+        canonical = canonical + "{rows[i]};"
+        i = i + 1
+    sha256_text(canonical)
+
+class DrawIrPackedGenerationStoreV3:
+    arena_id: u64
+    slot_count: u32
+    rows_per_slot: u32
+    queue_capacity: u32
+    next_generation: u64
+    terminal: bool
+    slot_states: [u16]
+    slot_generations: [u64]
+    slot_planned_rows: [u32]
+    slot_written_rows: [u32]
+    slot_hashes: [text]
+    packed_rows: [u64]
+    queue_slots: [u32]
+    queue_generations: [u64]
+    queue_rows: [u32]
+    queue_hashes: [text]
+    queue_head: u32
+    queue_tail: u32
+    queue_len: u32
+
+impl DrawIrPackedGenerationStoreV3:
+    static fn bounded(arena_id: u64, slot_count: u32, rows_per_slot: u32, queue_capacity: u32) -> DrawIrPackedGenerationStoreV3:
+        var states: [u16] = []
+        var generations: [u64] = []
+        var planned: [u32] = []
+        var written: [u32] = []
+        var hashes: [text] = []
+        var slot = 0u32
+        while slot < slot_count:
+            states.push(DRAW_IR_PACKED_SLOT_FREE)
+            generations.push(0u64)
+            planned.push(0u32)
+            written.push(0u32)
+            hashes.push("")
+            slot = slot + 1u32
+        var storage: [u64] = []
+        var row = 0u64
+        val total_rows = slot_count as u64 * rows_per_slot as u64
+        while row < total_rows:
+            storage.push(0u64)
+            row = row + 1u64
+        var qslots: [u32] = []
+        var qgenerations: [u64] = []
+        var qrows: [u32] = []
+        var qhashes: [text] = []
+        var q = 0u32
+        while q < queue_capacity:
+            qslots.push(0u32)
+            qgenerations.push(0u64)
+            qrows.push(0u32)
+            qhashes.push("")
+            q = q + 1u32
+        DrawIrPackedGenerationStoreV3(
+            arena_id: arena_id, slot_count: slot_count, rows_per_slot: rows_per_slot,
+            queue_capacity: queue_capacity, next_generation: 1u64, terminal: false,
+            slot_states: states, slot_generations: generations,
+            slot_planned_rows: planned, slot_written_rows: written, slot_hashes: hashes,
+            packed_rows: storage, queue_slots: qslots, queue_generations: qgenerations,
+            queue_rows: qrows, queue_hashes: qhashes,
+            queue_head: 0u32, queue_tail: 0u32, queue_len: 0u32
+        )
+
+    me admit(row_count: u32) -> DrawIrPackedAdmissionV3:
+        if self.terminal or row_count > self.rows_per_slot:
+            return DrawIrPackedAdmissionV3.Refused(DRAW_IR_PACKED_REASON_CAPACITY)
+        var slot = 0u32
+        while slot < self.slot_count:
+            if self.slot_states[slot] == DRAW_IR_PACKED_SLOT_FREE:
+                val generation = self.next_generation
+                if generation == 0xFFFFFFFFFFFFFFFFu64:
+                    self.terminal = true
+                    return DrawIrPackedAdmissionV3.Refused(DRAW_IR_PACKED_REASON_CAPACITY)
+                self.next_generation = generation + 1u64
+                self.slot_states[slot] = DRAW_IR_PACKED_SLOT_ENCODING
+                self.slot_generations[slot] = generation
+                self.slot_planned_rows[slot] = row_count
+                self.slot_written_rows[slot] = 0u32
+                self.slot_hashes[slot] = ""
+                return DrawIrPackedAdmissionV3.Admitted(DrawIrPackedGenerationRefV3(
+                    arena_id: self.arena_id, generation: generation, slot: slot
+                ))
+            slot = slot + 1u32
+        DrawIrPackedAdmissionV3.Refused(DRAW_IR_PACKED_REASON_NO_SLOT)
+
+    me write(generation_ref: DrawIrPackedGenerationRefV3, row: u64) -> u16:
+        if generation_ref.arena_id != self.arena_id or generation_ref.slot >= self.slot_count:
+            return DRAW_IR_PACKED_REASON_STALE
+        val slot = generation_ref.slot
+        if self.slot_generations[slot] != generation_ref.generation:
+            return DRAW_IR_PACKED_REASON_STALE
+        if self.slot_states[slot] != DRAW_IR_PACKED_SLOT_ENCODING:
+            return DRAW_IR_PACKED_REASON_STATE
+        val cursor = self.slot_written_rows[slot]
+        if cursor >= self.slot_planned_rows[slot]:
+            return DRAW_IR_PACKED_REASON_WRITE_LIMIT
+        val offset = slot as u64 * self.rows_per_slot as u64 + cursor as u64
+        self.packed_rows[offset] = row
+        self.slot_written_rows[slot] = cursor + 1u32
+        DRAW_IR_PACKED_REASON_OK
+
+    me seal(generation_ref: DrawIrPackedGenerationRefV3) -> DrawIrPackedSealV3:
+        if generation_ref.arena_id != self.arena_id or generation_ref.slot >= self.slot_count:
+            return DrawIrPackedSealV3.Refused(DRAW_IR_PACKED_REASON_STALE)
+        val slot = generation_ref.slot
+        if self.slot_generations[slot] != generation_ref.generation:
+            return DrawIrPackedSealV3.Refused(DRAW_IR_PACKED_REASON_STALE)
+        if self.slot_states[slot] != DRAW_IR_PACKED_SLOT_ENCODING:
+            return DrawIrPackedSealV3.Refused(DRAW_IR_PACKED_REASON_STATE)
+        val used = self.slot_written_rows[slot]
+        if used != self.slot_planned_rows[slot]:
+            return DrawIrPackedSealV3.Refused(DRAW_IR_PACKED_REASON_COUNT_MISMATCH)
+        var rows: [u64] = []
+        val base = slot as u64 * self.rows_per_slot as u64
+        var i = 0u32
+        while i < used:
+            rows.push(self.packed_rows[base + i as u64])
+            i = i + 1u32
+        val content_hash = _draw_ir_packed_hash_v3(self.arena_id, generation_ref.generation, rows)
+        self.slot_hashes[slot] = content_hash
+        self.slot_states[slot] = DRAW_IR_PACKED_SLOT_SEALED
+        DrawIrPackedSealV3.Sealed(DrawIrPackedSubmissionV3(
+            generation_ref: generation_ref, row_count: used, content_hash: content_hash
+        ))
+
+    me publish(submission: DrawIrPackedSubmissionV3) -> u16:
+        val generation_ref = submission.generation_ref
+        if generation_ref.arena_id != self.arena_id or generation_ref.slot >= self.slot_count:
+            return DRAW_IR_PACKED_REASON_STALE
+        val slot = generation_ref.slot
+        if self.slot_generations[slot] != generation_ref.generation or self.slot_hashes[slot] != submission.content_hash:
+            return DRAW_IR_PACKED_REASON_STALE
+        if self.slot_states[slot] != DRAW_IR_PACKED_SLOT_SEALED:
+            return DRAW_IR_PACKED_REASON_STATE
+        if self.queue_len >= self.queue_capacity:
+            return DRAW_IR_PACKED_REASON_QUEUE_FULL
+        val tail = self.queue_tail
+        self.queue_slots[tail] = slot
+        self.queue_generations[tail] = generation_ref.generation
+        self.queue_rows[tail] = submission.row_count
+        self.queue_hashes[tail] = submission.content_hash
+        self.queue_tail = (tail + 1u32) % self.queue_capacity
+        self.queue_len = self.queue_len + 1u32
+        self.slot_states[slot] = DRAW_IR_PACKED_SLOT_IN_FLIGHT
+        DRAW_IR_PACKED_REASON_OK
+
+    me take() -> DrawIrPackedHandoffV3:
+        if self.queue_len == 0u32:
+            return DrawIrPackedHandoffV3.Refused(DRAW_IR_PACKED_REASON_QUEUE_EMPTY)
+        val head = self.queue_head
+        val slot = self.queue_slots[head]
+        val generation_ref = DrawIrPackedGenerationRefV3(
+            arena_id: self.arena_id, generation: self.queue_generations[head], slot: slot
+        )
+        val submission = DrawIrPackedSubmissionV3(
+            generation_ref: generation_ref, row_count: self.queue_rows[head],
+            content_hash: self.queue_hashes[head]
+        )
+        self.queue_head = (head + 1u32) % self.queue_capacity
+        self.queue_len = self.queue_len - 1u32
+        DrawIrPackedHandoffV3.Ready(submission)
+
+    fn matches(submission: DrawIrPackedSubmissionV3, rows: [u64]) -> bool:
+        val generation_ref = submission.generation_ref
+        if generation_ref.arena_id != self.arena_id or generation_ref.slot >= self.slot_count:
+            return false
+        val slot = generation_ref.slot
+        if (self.slot_generations[slot] != generation_ref.generation or
+            self.slot_states[slot] != DRAW_IR_PACKED_SLOT_IN_FLIGHT or
+            submission.row_count != rows.len() as u32 or
+            self.slot_written_rows[slot] != submission.row_count or
+            self.slot_hashes[slot] != submission.content_hash):
+            return false
+        val base = slot as u64 * self.rows_per_slot as u64
+        var i = 0u32
+        while i < submission.row_count:
+            if self.packed_rows[base + i as u64] != rows[i]:
+                return false
+            i = i + 1u32
+        _draw_ir_packed_hash_v3(self.arena_id, generation_ref.generation, rows) == submission.content_hash
+
+    me complete(generation_ref: DrawIrPackedGenerationRefV3) -> u16:
+        if generation_ref.arena_id != self.arena_id or generation_ref.slot >= self.slot_count:
+            return DRAW_IR_PACKED_REASON_STALE
+        val slot = generation_ref.slot
+        if self.slot_generations[slot] != generation_ref.generation:
+            return DRAW_IR_PACKED_REASON_STALE
+        if self.slot_states[slot] != DRAW_IR_PACKED_SLOT_IN_FLIGHT:
+            return DRAW_IR_PACKED_REASON_STATE
+        self.slot_states[slot] = DRAW_IR_PACKED_SLOT_FREE
+        self.slot_planned_rows[slot] = 0u32
+        self.slot_written_rows[slot] = 0u32
+        self.slot_hashes[slot] = ""
+        DRAW_IR_PACKED_REASON_OK
+
+export DRAW_IR_PACKED_SLOT_FREE, DRAW_IR_PACKED_SLOT_ENCODING,
+    DRAW_IR_PACKED_SLOT_SEALED, DRAW_IR_PACKED_SLOT_IN_FLIGHT,
+    DRAW_IR_PACKED_REASON_OK, DRAW_IR_PACKED_REASON_CAPACITY,
+    DRAW_IR_PACKED_REASON_NO_SLOT, DRAW_IR_PACKED_REASON_STALE,
+    DRAW_IR_PACKED_REASON_STATE, DRAW_IR_PACKED_REASON_WRITE_LIMIT,
+    DRAW_IR_PACKED_REASON_COUNT_MISMATCH, DRAW_IR_PACKED_REASON_QUEUE_FULL,
+    DRAW_IR_PACKED_REASON_QUEUE_EMPTY,
+    DrawIrPackedGenerationRefV3, DrawIrPackedSubmissionV3,
+    DrawIrPackedAdmissionV3, DrawIrPackedSealV3, DrawIrPackedHandoffV3,
+    DrawIrPackedGenerationStoreV3

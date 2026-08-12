@@ -1,0 +1,412 @@
+#!/bin/sh
+# Canonical host-independent producer for the MCI-v2 allocation/fault lanes.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+usage() {
+    echo "usage: $0 --evidence DIR --run-id ID --source-hash SHA256 --configuration-hash SHA256 --captured-at-utc-ns NS --valid-until-utc-ns NS --compiler-launcher FILE --compiler-launcher-receipt FILE --compiler-launcher-signature FILE [--launcher-trust-policy FILE] [--simple-bin FILE] [--fixture-log FILE --fixture-runner FILE]" >&2
+    exit 2
+}
+
+evidence= run_id= source_hash= configuration_hash= captured_at= valid_until=
+simple_bin= fixture_log= fixture_runner= runner_provenance= compiler_launcher= compiler_launcher_receipt= compiler_launcher_signature= launcher_trust_policy=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --evidence) [ "$#" -ge 2 ] || usage; evidence=$2; shift 2 ;;
+        --run-id) [ "$#" -ge 2 ] || usage; run_id=$2; shift 2 ;;
+        --source-hash) [ "$#" -ge 2 ] || usage; source_hash=$2; shift 2 ;;
+        --configuration-hash) [ "$#" -ge 2 ] || usage; configuration_hash=$2; shift 2 ;;
+        --captured-at-utc-ns) [ "$#" -ge 2 ] || usage; captured_at=$2; shift 2 ;;
+        --valid-until-utc-ns) [ "$#" -ge 2 ] || usage; valid_until=$2; shift 2 ;;
+        --simple-bin) [ "$#" -ge 2 ] || usage; simple_bin=$2; shift 2 ;;
+        --fixture-log) [ "$#" -ge 2 ] || usage; fixture_log=$2; shift 2 ;;
+        --fixture-runner) [ "$#" -ge 2 ] || usage; fixture_runner=$2; shift 2 ;;
+        --runner-provenance) [ "$#" -ge 2 ] || usage; runner_provenance=$2; shift 2 ;;
+        --compiler-launcher) [ "$#" -ge 2 ] || usage; compiler_launcher=$2; shift 2 ;;
+        --compiler-launcher-receipt) [ "$#" -ge 2 ] || usage; compiler_launcher_receipt=$2; shift 2 ;;
+        --compiler-launcher-signature) [ "$#" -ge 2 ] || usage; compiler_launcher_signature=$2; shift 2 ;;
+        --launcher-trust-policy) [ "$#" -ge 2 ] || usage; launcher_trust_policy=$2; shift 2 ;;
+        *) usage ;;
+    esac
+done
+
+is_sha256() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1;; esac; }
+is_uint() { [ -n "$1" ] && case "$1" in *[!0-9]*) return 1;; esac; }
+is_safe_ns() { is_uint "$1" && dec_le "$1" 9223372036854775807; }
+safe_token() { [ -n "$1" ] && case "$1" in *[!A-Za-z0-9._-]*) return 1;; esac; }
+dec_le() {
+    left=$(printf '%s' "$1" | sed 's/^0*//'); right=$(printf '%s' "$2" | sed 's/^0*//')
+    [ -n "$left" ] || left=0; [ -n "$right" ] || right=0
+    left_len=${#left}; right_len=${#right}
+    [ "$left_len" -lt "$right_len" ] && return 0
+    [ "$left_len" -gt "$right_len" ] && return 1
+    digit=1
+    while [ "$digit" -le "$left_len" ]; do
+        left_digit=$(printf '%s' "$left" | cut -c "$digit"); right_digit=$(printf '%s' "$right" | cut -c "$digit")
+        [ "$left_digit" -lt "$right_digit" ] && return 0
+        [ "$left_digit" -gt "$right_digit" ] && return 1
+        digit=$((digit + 1))
+    done
+    return 0
+}
+ns_window_valid() {
+    window_captured=$1 window_now=$2 window_valid=$3
+    is_safe_ns "$window_captured" && is_safe_ns "$window_now" && is_safe_ns "$window_valid" || return 1
+    dec_le "$window_captured" "$window_now" && dec_le "$window_now" "$window_valid" || return 1
+    # Valid nanosecond timestamps are bounded to signed i64 above; subtraction
+    # therefore stays exact in POSIX shells used by this gate.
+    [ "$((window_valid - window_captured))" -le 86400000000000 ] &&
+        [ "$((window_now - window_captured))" -le 86400000000000 ]
+}
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" | sed 's/^.*= //'
+    else echo 'BLOCKED: no SHA-256 implementation' >&2; exit 2
+    fi
+}
+file_identity() {
+    if stat -c '%F:%d:%i:%s:%y:%z' "$1" >/dev/null 2>&1; then metadata=$(stat -c '%F:%d:%i:%s:%y:%z' "$1")
+    else metadata=$(stat -f '%HT:%d:%i:%z:%m:%c' "$1"); fi
+    printf '%s|%s\n' "$metadata" "$(hash_file "$1")"
+}
+regular_nonsymlink() { [ -f "$1" ] && [ ! -L "$1" ]; }
+resolve_executable() {
+    resolve_command=$1 resolve_chain_file=$2
+    resolved=$(command -v "$resolve_command") || return 1
+    case "$resolved" in
+        /*) : ;;
+        */*) resolved=$(CDPATH= cd -- "$(dirname "$resolved")" && pwd -P)/$(basename "$resolved") ;;
+        *) return 1 ;;
+    esac
+    : > "$resolve_chain_file"
+    seen='|'
+    hops=0
+    while [ -L "$resolved" ]; do
+        case "$resolved" in *'|'*) return 1;; esac
+        case "$seen" in *"|$resolved|"*) return 1;; esac
+        seen=$seen$resolved'|'
+        target=$(readlink "$resolved") || return 1
+        [ -n "$target" ] || return 1
+        case "$target" in *'|'*) return 1;; esac
+        printf '%s -> %s\n' "$resolved" "$target" >> "$resolve_chain_file"
+        case "$target" in /*) next=$target;; *) next=$(dirname "$resolved")/$target;; esac
+        next_dir=$(CDPATH= cd -- "$(dirname "$next")" 2>/dev/null && pwd -P) || return 1
+        resolved=$next_dir/$(basename "$next")
+        case "$resolved" in /*) :;; *) return 1;; esac
+        hops=$((hops + 1)); [ "$hops" -le 40 ] || return 1
+    done
+    regular_nonsymlink "$resolved" && [ -x "$resolved" ] || return 1
+    printf '%s\n' "$resolved" >> "$resolve_chain_file"
+    printf '%s\n' "$resolved"
+}
+snapshot_file() {
+    snapshot_source=$1 snapshot_target=$2
+    regular_nonsymlink "$snapshot_source" || return 1
+    snapshot_identity=$(file_identity "$snapshot_source") || return 1
+    cp -- "$snapshot_source" "$snapshot_target" || return 1
+    regular_nonsymlink "$snapshot_target" || return 1
+    [ "$(hash_file "$snapshot_target")" = "${snapshot_identity##*|}" ] || return 1
+    [ "$(file_identity "$snapshot_source")" = "$snapshot_identity" ] || return 1
+}
+field() {
+    field_name=$1 field_file=$2
+    [ "$(grep -c "^$field_name=" "$field_file")" -eq 1 ] || return 1
+    sed -n "s/^$field_name=//p" "$field_file"
+}
+
+[ -n "$evidence" ] && safe_token "$run_id" && is_sha256 "$source_hash" &&
+    is_sha256 "$configuration_hash" && is_safe_ns "$captured_at" && is_safe_ns "$valid_until" || usage
+dec_le "$captured_at" "$valid_until" || usage
+
+repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+fixture_requested=false
+if [ -n "$fixture_log" ] || [ -n "$fixture_runner" ]; then fixture_requested=true; fi
+[ -n "$launcher_trust_policy" ] || launcher_trust_policy=$repo_root/scripts/check/policy/mci-v2-allocation-launcher-trust.env
+case "$evidence" in /*) evidence_abs=$evidence;; *) evidence_abs=$repo_root/$evidence;; esac
+case "$evidence_abs" in "$repo_root"/*) :;; *) echo 'BLOCKED: evidence must be below repository root' >&2; exit 2;; esac
+walk=$repo_root; relative=${evidence_abs#"$repo_root"/}; old_ifs=$IFS; IFS=/
+for component in $relative; do
+    [ -n "$component" ] && [ "$component" != . ] && [ "$component" != .. ] || { IFS=$old_ifs; usage; }
+    walk=$walk/$component; [ ! -L "$walk" ] || { IFS=$old_ifs; echo 'BLOCKED: symlink in evidence path' >&2; exit 2; }
+done
+IFS=$old_ifs
+mkdir -p "$evidence_abs/artifacts" "$evidence_abs/receipts"
+[ -d "$evidence_abs/artifacts" ] && [ ! -L "$evidence_abs/artifacts" ] &&
+    [ -d "$evidence_abs/receipts" ] && [ ! -L "$evidence_abs/receipts" ] || { echo 'BLOCKED: unsafe evidence directories' >&2; exit 2; }
+
+spec_rel=test/01_unit/lib/nogc_sync_mut/mission_critical/domain_arena_v1_spec.spl
+impl_rel=src/lib/nogc_sync_mut/mission_critical/domain_arena_v1.spl
+spec=$repo_root/$spec_rel; implementation=$repo_root/$impl_rel
+regular_nonsymlink "$spec" && regular_nonsymlink "$implementation" || { echo 'BLOCKED: canonical DomainArena sources missing or unsafe' >&2; exit 2; }
+work=$(mktemp -d "$evidence_abs/.allocation.XXXXXX") || exit 2
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+snapshot_file "$launcher_trust_policy" "$work/launcher-trust-policy.env" || { echo 'BLOCKED: launcher trust policy missing, unsafe, or changed' >&2; exit 2; }
+policy_schema=$(field policy_schema "$work/launcher-trust-policy.env" 2>/dev/null || true)
+policy_scope=$(field scope "$work/launcher-trust-policy.env" 2>/dev/null || true)
+policy_state=$(field state "$work/launcher-trust-policy.env" 2>/dev/null || true)
+policy_algorithm=$(field algorithm "$work/launcher-trust-policy.env" 2>/dev/null || true)
+policy_key_id=$(field trusted_key_id "$work/launcher-trust-policy.env" 2>/dev/null || true)
+policy_key_path=$(field trusted_public_key_path "$work/launcher-trust-policy.env" 2>/dev/null || true)
+policy_key_sha=$(field trusted_public_key_sha256 "$work/launcher-trust-policy.env" 2>/dev/null || true)
+policy_review=$(field review_status "$work/launcher-trust-policy.env" 2>/dev/null || true)
+policy_reviewer=$(field reviewer_id "$work/launcher-trust-policy.env" 2>/dev/null || true)
+policy_version=$(field policy_version "$work/launcher-trust-policy.env" 2>/dev/null || true)
+policy_revocation_epoch=$(field revocation_epoch "$work/launcher-trust-policy.env" 2>/dev/null || true)
+policy_min_build_epoch=$(field min_build_epoch "$work/launcher-trust-policy.env" 2>/dev/null || true)
+[ "$policy_schema" = mci-allocation-launcher-trust-policy-v1 ] && [ "$policy_state" = provisioned ] &&
+    [ "$policy_algorithm" = ed25519 ] && safe_token "$policy_key_id" && is_sha256 "$policy_key_sha" &&
+    [ "$policy_review" = approved ] && safe_token "$policy_reviewer" && is_uint "$policy_version" &&
+    is_uint "$policy_revocation_epoch" && is_uint "$policy_min_build_epoch" || { echo 'BLOCKED: launcher trust policy is unprovisioned or unreviewed' >&2; exit 2; }
+if [ "$fixture_requested" = true ]; then
+    [ "$policy_scope" = fixture ] || { echo 'BLOCKED: controlled fixture requires an explicit fixture trust policy' >&2; exit 2; }
+else
+    [ "$policy_scope" = live ] || { echo 'BLOCKED: live mode requires a provisioned live trust policy' >&2; exit 2; }
+fi
+case "$policy_key_path" in /*) policy_key_abs=$policy_key_path;; *) policy_key_abs=$repo_root/$policy_key_path;; esac
+snapshot_file "$policy_key_abs" "$work/launcher-trust-key.pem" || { echo 'BLOCKED: trusted launcher public key missing or unsafe' >&2; exit 2; }
+[ "$(hash_file "$work/launcher-trust-key.pem")" = "$policy_key_sha" ] || { echo 'BLOCKED: trusted launcher public key digest mismatch' >&2; exit 2; }
+command -v openssl >/dev/null 2>&1 || { echo 'BLOCKED: OpenSSL required for Ed25519 launcher receipt verification' >&2; exit 2; }
+secure_publish_source=$repo_root/scripts/check/lib/mci-secure-publish.c
+compiler_launcher_source=$repo_root/scripts/check/lib/mci-fexec-launch.c
+regular_nonsymlink "$secure_publish_source" || { echo 'BLOCKED: secure publisher source missing or unsafe' >&2; exit 2; }
+regular_nonsymlink "$compiler_launcher_source" || { echo 'BLOCKED: compiler launcher source missing or unsafe' >&2; exit 2; }
+command -v cc >/dev/null 2>&1 || { echo 'BLOCKED: C compiler required for secure publication owner' >&2; exit 2; }
+snapshot_file "$secure_publish_source" "$work/mci-secure-publish.c" || { echo 'BLOCKED: secure publisher source changed during snapshot' >&2; exit 2; }
+snapshot_file "$compiler_launcher_source" "$work/mci-fexec-launch.c" || { echo 'BLOCKED: compiler launcher source changed during snapshot' >&2; exit 2; }
+[ -n "$compiler_launcher" ] && [ -n "$compiler_launcher_receipt" ] && [ -n "$compiler_launcher_signature" ] || { echo 'BLOCKED: signed compiler launcher receipt is required' >&2; exit 2; }
+snapshot_file "$compiler_launcher" "$work/compiler-launch" && snapshot_file "$compiler_launcher_receipt" "$work/compiler-launch.receipt" && snapshot_file "$compiler_launcher_signature" "$work/compiler-launch.sig" || { echo 'BLOCKED: compiler launcher attestation changed during snapshot' >&2; exit 2; }
+chmod 0500 "$work/compiler-launch"
+compiler_launcher_source_sha=$(hash_file "$work/mci-fexec-launch.c")
+compiler_launcher_binary_sha=$(hash_file "$work/compiler-launch")
+receipt_build_id=$(field build_id "$work/compiler-launch.receipt" 2>/dev/null || true)
+receipt_build_epoch=$(field build_epoch "$work/compiler-launch.receipt" 2>/dev/null || true)
+receipt_captured=$(field captured_at_utc_ns "$work/compiler-launch.receipt" 2>/dev/null || true)
+receipt_valid=$(field valid_until_utc_ns "$work/compiler-launch.receipt" 2>/dev/null || true)
+safe_token "$receipt_build_id" && is_uint "$receipt_build_epoch" &&
+    dec_le "$policy_min_build_epoch" "$receipt_build_epoch" &&
+    ns_window_valid "$receipt_captured" "$captured_at" "$receipt_valid" || { echo 'BLOCKED: compiler launcher receipt is stale, future-dated, expired, or overlong' >&2; exit 2; }
+{
+    echo 'receipt_schema=mci-compiler-launcher-v1'
+    echo 'attestation=signed-v1'
+    echo 'algorithm=ed25519'
+    echo "trusted_key_id=$policy_key_id"
+    echo "policy_version=$policy_version"
+    echo "revocation_epoch=$policy_revocation_epoch"
+    echo "build_id=$receipt_build_id"
+    echo "build_epoch=$receipt_build_epoch"
+    echo "captured_at_utc_ns=$receipt_captured"
+    echo "valid_until_utc_ns=$receipt_valid"
+    echo "source_sha256=$compiler_launcher_source_sha"
+    echo "binary_sha256=$compiler_launcher_binary_sha"
+} > "$work/compiler-launch.expected"
+cmp -s "$work/compiler-launch.receipt" "$work/compiler-launch.expected" || { echo 'BLOCKED: compiler launcher source/binary receipt mismatch' >&2; exit 2; }
+openssl pkeyutl -verify -pubin -inkey "$work/launcher-trust-key.pem" -rawin -in "$work/compiler-launch.receipt" -sigfile "$work/compiler-launch.sig" >/dev/null 2>&1 || { echo 'BLOCKED: compiler launcher receipt signature is invalid' >&2; exit 2; }
+compiler_command=cc
+compiler_path=$(resolve_executable "$compiler_command" "$work/compiler.path-chain") || { echo 'BLOCKED: C compiler executable cannot be resolved safely' >&2; exit 2; }
+compiler_identity_before=$(file_identity "$compiler_path") || exit 2
+snapshot_file "$compiler_path" "$work/compiler" || { echo 'BLOCKED: final C compiler executable changed during snapshot' >&2; exit 2; }
+chmod 0500 "$work/compiler"
+"$work/compiler-launch" "$work/compiler" "$compiler_path" --version > "$work/compiler.identity" 2>&1 || { echo 'BLOCKED: fd-pinned compiler identity unavailable or compiler snapshot changed' >&2; exit 2; }
+"$work/compiler-launch" "$work/compiler" "$compiler_path" -std=c11 -O2 "$work/mci-secure-publish.c" -o "$work/secure-publish" || { echo 'BLOCKED: fd-pinned secure publisher build failed or compiler snapshot changed' >&2; exit 2; }
+[ "$(file_identity "$compiler_path")" = "$compiler_identity_before" ] || { echo 'BLOCKED: compiler changed during helper build' >&2; exit 2; }
+chmod 0500 "$work/secure-publish"
+secure_publish() { "$work/secure-publish" "$1" "$2" "$3"; }
+snapshot_file "$spec" "$work/spec.spl" && snapshot_file "$implementation" "$work/implementation.spl" || {
+    echo 'BLOCKED: DomainArena source changed during snapshot' >&2; exit 2
+}
+spec_sha=$(hash_file "$work/spec.spl"); implementation_sha=$(hash_file "$work/implementation.spl")
+{
+    echo 'manifest_schema=mci-allocation-source-manifest-v1'
+    echo "spec_path=$spec_rel"; echo "spec_sha256=$spec_sha"
+    echo "implementation_path=$impl_rel"; echo "implementation_sha256=$implementation_sha"
+} > "$work/source.manifest"
+[ "$(hash_file "$work/source.manifest")" = "$source_hash" ] || { echo 'BLOCKED: source hash does not match derived source manifest' >&2; exit 2; }
+
+fixture=false
+release_eligible=true
+receipt_result=PASS
+if [ -n "$fixture_log" ] || [ -n "$fixture_runner" ]; then
+    [ "${MCI_ALLOCATION_CONTROLLED_FIXTURE:-0}" = 1 ] && [ -n "$fixture_log" ] && [ -n "$fixture_runner" ] || {
+        echo 'BLOCKED: controlled fixture mode requires both fixtures and MCI_ALLOCATION_CONTROLLED_FIXTURE=1' >&2; exit 2
+    }
+    fixture=true
+    release_eligible=false
+    receipt_result=CONTRACT_ONLY
+    snapshot_file "$fixture_log" "$work/run.log" && snapshot_file "$fixture_runner" "$work/runner.env" || {
+        echo 'BLOCKED: fixture changed during snapshot' >&2; exit 2
+    }
+    grep -Fxq 'runner_authority=self-hosted-pure-simple' "$work/runner.env" || { echo 'BLOCKED: non-authoritative fixture runner' >&2; exit 2; }
+    grep -Fxq 'runner_seed=false' "$work/runner.env" || { echo 'BLOCKED: seed fixture runner' >&2; exit 2; }
+    runner_sha=$(hash_file "$work/runner.env")
+    runner_identity=controlled-contract-fixture
+else
+    [ -z "$fixture_log" ] && [ -z "$fixture_runner" ] || usage
+    [ -n "$simple_bin" ] || simple_bin=$repo_root/bin/simple
+    if [ -L "$simple_bin" ]; then
+        link_target=$(readlink "$simple_bin") || { echo 'BLOCKED: runner symlink cannot be resolved' >&2; exit 2; }
+        case "$link_target" in /*) simple_bin=$link_target;; *) simple_bin=$(dirname "$simple_bin")/$link_target;; esac
+    fi
+    regular_nonsymlink "$simple_bin" || { echo 'BLOCKED: runner missing or unsafe' >&2; exit 2; }
+    simple_real=$(CDPATH= cd -- "$(dirname "$simple_bin")" && pwd -P)/$(basename "$simple_bin")
+    case "$simple_real" in "$repo_root"/bin/release/*/simple) :;; *) echo 'BLOCKED: runner is not a canonical self-hosted release binary' >&2; exit 2;; esac
+    command -v nm >/dev/null 2>&1 || { echo 'BLOCKED: nm is required for runner lineage authority' >&2; exit 2; }
+    runner_live_identity=$(file_identity "$simple_real") || exit 2
+    snapshot_file "$simple_real" "$work/simple-runner" || { echo 'BLOCKED: runner changed during snapshot' >&2; exit 2; }
+    chmod 0500 "$work/simple-runner"
+    simple_symbols=$(nm "$work/simple-runner" 2>/dev/null | awk '/ T [a-z][A-Za-z0-9_]*__[A-Za-z0-9_]/{n++} END{print n+0}')
+    [ "$simple_symbols" -gt 0 ] || { echo 'BLOCKED: seed/non-authoritative runner has no unmangled Simple symbols' >&2; exit 2; }
+    runner_version=$($work/simple-runner --version 2>&1) || { echo 'BLOCKED: runner authority probe failed' >&2; exit 2; }
+    case "$runner_version $simple_real" in *bootstrap*seed*only*|*simple_seed*|*/compiler_rust/*|*/stage3/*) echo 'BLOCKED: seed/non-authoritative runner' >&2; exit 2;; esac
+    runner_sha=$(hash_file "$work/simple-runner"); runner_identity=$simple_real
+fi
+
+producer_sha=$(hash_file "$repo_root/scripts/check/check-mci-v2-allocation.shs")
+publisher_sha=$(hash_file "$work/mci-secure-publish.c")
+publisher_binary_sha=$(hash_file "$work/secure-publish")
+publisher_compiler_sha=$(hash_file "$work/compiler")
+publisher_compiler_identity_sha=$(hash_file "$work/compiler.identity")
+publisher_compiler_path_chain_sha=$(hash_file "$work/compiler.path-chain")
+printf '%s' "$compiler_identity_before" > "$work/compiler.final-identity"
+publisher_compiler_final_identity_sha=$(hash_file "$work/compiler.final-identity")
+launcher_policy_sha=$(hash_file "$work/launcher-trust-policy.env")
+launcher_receipt_sha=$(hash_file "$work/compiler-launch.receipt")
+launcher_signature_sha=$(hash_file "$work/compiler-launch.sig")
+{
+    echo 'manifest_schema=mci-allocation-configuration-manifest-v1'
+    echo "producer_sha256=$producer_sha"; echo "publisher_sha256=$publisher_sha"; echo "publisher_binary_sha256=$publisher_binary_sha"
+    echo "compiler_launcher_source_sha256=$compiler_launcher_source_sha"; echo "compiler_launcher_binary_sha256=$compiler_launcher_binary_sha"
+    echo "compiler_launcher_trust_key_id=$policy_key_id"; echo "compiler_launcher_trust_key_sha256=$policy_key_sha"
+    echo "compiler_launcher_policy_version=$policy_version"; echo "compiler_launcher_revocation_epoch=$policy_revocation_epoch"
+    echo "compiler_launcher_build_id=$receipt_build_id"; echo "compiler_launcher_build_epoch=$receipt_build_epoch"
+    echo "compiler_launcher_trust_policy_sha256=$launcher_policy_sha"; echo "compiler_launcher_receipt_sha256=$launcher_receipt_sha"; echo "compiler_launcher_signature_sha256=$launcher_signature_sha"
+    echo "publisher_compiler_command=$compiler_command"; echo "publisher_compiler_final_path=$compiler_path"
+    echo "publisher_compiler_path_chain_sha256=$publisher_compiler_path_chain_sha"; echo "publisher_compiler_final_identity_sha256=$publisher_compiler_final_identity_sha"
+    echo "publisher_compiler_sha256=$publisher_compiler_sha"; echo "publisher_compiler_identity_sha256=$publisher_compiler_identity_sha"
+    echo "runner_sha256=$runner_sha"; echo "controlled_fixture=$fixture"
+} > "$work/configuration.manifest"
+[ "$(hash_file "$work/configuration.manifest")" = "$configuration_hash" ] || { echo 'BLOCKED: configuration hash does not match derived configuration manifest' >&2; exit 2; }
+[ -n "$runner_provenance" ] || { echo 'BLOCKED: runner provenance receipt is required' >&2; exit 2; }
+snapshot_file "$runner_provenance" "$work/runner-provenance.receipt" || { echo 'BLOCKED: runner provenance changed during snapshot' >&2; exit 2; }
+expected_provenance="$work/runner-provenance.expected"
+{
+    echo 'provenance_schema=mci-allocation-runner-provenance-v1'
+    echo 'lineage=self-hosted-pure-simple'
+    echo "runner_sha256=$runner_sha"; echo "source_manifest_sha256=$source_hash"; echo "configuration_manifest_sha256=$configuration_hash"
+} > "$expected_provenance"
+cmp -s "$work/runner-provenance.receipt" "$expected_provenance" || { echo 'BLOCKED: runner provenance receipt mismatch' >&2; exit 2; }
+if [ "$fixture" = false ]; then
+    # This is the sole focused DomainArena contract execution.
+    if ! SIMPLE_LIB="$repo_root/src" "$work/simple-runner" test "$spec" --mode=interpreter >"$work/run.log" 2>&1; then
+        secure_publish "$evidence_abs/artifacts" "$work/run.log" allocation-domain-arena-v1.failed.log || true
+        echo 'BLOCKED: DomainArena focused spec failed' >&2; exit 1
+    fi
+    [ "$(file_identity "$simple_real")" = "$runner_live_identity" ] || { echo 'BLOCKED: live runner changed during execution' >&2; exit 2; }
+fi
+
+markers='uses a canonical SHA-256 identity for the sealed profile
+enumerates the complete named failure-point registry
+binds every profile and committed-snapshot field into its hash
+ignores compatibility mirror tampering in operational paths
+accepts exact quota and rejects plus one without cursor mutation
+rejects strict and forbidden contexts before mutation
+commits a transaction and invalidates rolled-back references
+preserves the committed generation when a later staging generation rolls back
+rejects forged checkpoints and keeps the original rollback point
+rejects malformed relaxed profiles before cursor mutation
+rejects profile mutation after sealing and forged zero-size references
+injects every registered arena failure boundary without cross-domain mutation'
+marker_count=0
+old_ifs=$IFS; IFS='
+'
+for marker in $markers; do
+    matches=$(grep -F -c "$marker" "$work/run.log" || true)
+    [ "$matches" -eq 1 ] || { IFS=$old_ifs; echo "BLOCKED: canonical marker missing or duplicated: $marker" >&2; exit 1; }
+    marker_count=$((marker_count + 1))
+done
+IFS=$old_ifs
+[ "$marker_count" -eq 12 ] || { echo 'BLOCKED: canonical evidence marker cardinality is not 12' >&2; exit 1; }
+[ "$(grep -c '^MCI_DOMAIN_ARENA_EVIDENCE|' "$work/run.log")" -eq 16 ] || { echo 'BLOCKED: structured evidence has extra or missing rows' >&2; exit 1; }
+scenario_index=1
+while [ "$scenario_index" -le 12 ]; do
+    scenario_id=$(printf 'MCI-ARENA-%03d' "$scenario_index")
+    row="MCI_DOMAIN_ARENA_EVIDENCE|schema=1|kind=scenario|id=$scenario_id|result=pass"
+    [ "$(grep -Fxc "$row" "$work/run.log")" -eq 1 ] || { echo "BLOCKED: structured scenario row missing or duplicated: $scenario_id" >&2; exit 1; }
+    scenario_index=$((scenario_index + 1))
+done
+profile_row='MCI_DOMAIN_ARENA_EVIDENCE|schema=1|kind=profile|profile_hash=a77be0b0e329204db951474c0085526c103049d51ce6ae6a194e5f9312bd11b3'
+snapshot_row='MCI_DOMAIN_ARENA_EVIDENCE|schema=1|kind=committed_snapshot|snapshot_hash=632e0465fb204ef8d4cb278ccb58190f1adfda98ac086ad743af1247a5dfefdd'
+[ "$(grep -Fxc "$profile_row" "$work/run.log")" -eq 1 ] && [ "$(grep -Fxc "$snapshot_row" "$work/run.log")" -eq 1 ] || { echo 'BLOCKED: structured profile/snapshot evidence invalid' >&2; exit 1; }
+[ "$(grep -Ec '^MCI_DOMAIN_ARENA_EVIDENCE\|schema=1\|kind=ledger\|fault_id=[12]\|fault_name=(before_cursor_advance|before_publication)\|run_id=arena-ledger-run-1\|occurrence=1\|subject_arena=22\|subject_generation=1\|isolated_arena=21\|isolated_generation=1\|subject_before=[0-9a-f]{64}\|subject_after=[0-9a-f]{64}\|isolated_before=[0-9a-f]{64}\|isolated_after=[0-9a-f]{64}\|injected=1\|rolled_back=1\|row_hash=[0-9a-f]{64}$' "$work/run.log")" -eq 2 ] || { echo 'BLOCKED: structured ledger evidence invalid' >&2; exit 1; }
+[ "$(grep -Fc 'kind=ledger|fault_id=1|fault_name=before_cursor_advance|' "$work/run.log")" -eq 1 ] && [ "$(grep -Fc 'kind=ledger|fault_id=2|fault_name=before_publication|' "$work/run.log")" -eq 1 ] || { echo 'BLOCKED: structured ledger IDs duplicated or missing' >&2; exit 1; }
+grep '^MCI_DOMAIN_ARENA_EVIDENCE|schema=1|kind=ledger|' "$work/run.log" > "$work/ledger.rows"
+while IFS= read -r ledger_row; do
+    value() { printf '%s\n' "$ledger_row" | tr '|' '\n' | sed -n "s/^$1=//p"; }
+    point=$(value fault_id); point_name=$(value fault_name); ledger_run=$(value run_id); occurrence=$(value occurrence)
+    subject_arena=$(value subject_arena); subject_generation=$(value subject_generation); isolated_arena=$(value isolated_arena); isolated_generation=$(value isolated_generation)
+    subject_before=$(value subject_before); subject_after=$(value subject_after); isolated_before=$(value isolated_before); isolated_after=$(value isolated_after)
+    injected=$(value injected); rolled_back=$(value rolled_back); declared_row_hash=$(value row_hash)
+    canonical="domain-arena-fault-ledger-v1|schema=1|run_id=${#ledger_run}:$ledger_run|point=$point|point_name=${#point_name}:$point_name|occurrence=$occurrence|subject_arena=$subject_arena|subject_generation=$subject_generation|isolated_arena=$isolated_arena|isolated_generation=$isolated_generation|subject_before=$subject_before|subject_after=$subject_after|isolated_before=$isolated_before|isolated_after=$isolated_after|injected=$injected|rolled_back=$rolled_back"
+    printf '%s' "$canonical" > "$work/ledger.canonical"
+    [ "$(hash_file "$work/ledger.canonical")" = "$declared_row_hash" ] || { echo 'BLOCKED: ledger row hash mismatch' >&2; exit 1; }
+    [ "$subject_before" = "$subject_after" ] && [ "$isolated_before" = "$isolated_after" ] && [ "$subject_before" = "632e0465fb204ef8d4cb278ccb58190f1adfda98ac086ad743af1247a5dfefdd" ] || { echo 'BLOCKED: ledger aggregate snapshot mismatch' >&2; exit 1; }
+done < "$work/ledger.rows"
+grep -Fq 'a77be0b0e329204db951474c0085526c103049d51ce6ae6a194e5f9312bd11b3' "$work/spec.spl" || { echo 'BLOCKED: sealed profile snapshot contract missing' >&2; exit 1; }
+grep -Fq '632e0465fb204ef8d4cb278ccb58190f1adfda98ac086ad743af1247a5dfefdd' "$work/spec.spl" || { echo 'BLOCKED: committed ledger snapshot contract missing' >&2; exit 1; }
+[ "$(grep -c 'schema_version: 1u16, run_id: "arena-ledger-run-1"' "$work/spec.spl")" -eq 2 ] || { echo 'BLOCKED: exact two-row ledger schema contract missing' >&2; exit 1; }
+[ "$(grep -c '^    it ' "$work/spec.spl")" -eq 12 ] || { echo 'BLOCKED: source scenario schema is not 12/12' >&2; exit 1; }
+log_sha=$(hash_file "$work/run.log")
+published_log="$evidence_abs/artifacts/allocation-domain-arena-v1.log"
+secure_publish "$evidence_abs/artifacts" "$work/run.log" allocation-domain-arena-v1.log || { echo 'BLOCKED: secure raw-log publication failed' >&2; exit 2; }
+[ "$(hash_file "$published_log")" = "$log_sha" ] || { echo 'BLOCKED: raw log changed during publication' >&2; exit 2; }
+
+artifact="$work/allocation-domain-arena-v1.evidence"
+{
+    echo 'artifact_schema=mci-allocation-domain-arena-evidence-v1'
+    echo "run_id=$run_id"; echo "source_hash=$source_hash"; echo "configuration_hash=$configuration_hash"
+    echo "spec_path=$spec_rel"; echo "spec_sha256=$spec_sha"; echo "implementation_path=$impl_rel"; echo "implementation_sha256=$implementation_sha"
+    echo "runner_identity=$runner_identity"; echo "runner_sha256=$runner_sha"; echo "focused_run_count=1"
+    echo "controlled_fixture=$fixture"; echo "release_eligible=$release_eligible"
+    echo 'scenario_schema=domain-arena-v1-12'; echo 'canonical_markers_passed=12'; echo 'canonical_markers_required=12'
+    echo 'profile_schema_version=1'; echo 'profile_snapshot_sha256=a77be0b0e329204db951474c0085526c103049d51ce6ae6a194e5f9312bd11b3'
+    echo 'ledger_schema_version=1'; echo 'ledger_rows=2'; echo 'ledger_registry_points=before_cursor_advance,before_publication'
+    echo 'committed_snapshot_sha256=632e0465fb204ef8d4cb278ccb58190f1adfda98ac086ad743af1247a5dfefdd'
+    echo 'raw_log_relpath=allocation-domain-arena-v1.log'; echo "raw_log_sha256=$log_sha"; echo 'contract_result=PASS'
+} > "$artifact"
+artifact_sha=$(hash_file "$artifact")
+published="$evidence_abs/artifacts/allocation-domain-arena-v1.evidence"
+secure_publish "$evidence_abs/artifacts" "$artifact" allocation-domain-arena-v1.evidence || { echo 'BLOCKED: secure artifact publication failed' >&2; exit 2; }
+[ "$(hash_file "$published")" = "$artifact_sha" ] || { echo 'BLOCKED: artifact changed during publication' >&2; exit 2; }
+
+receipt="$evidence_abs/receipts/allocation.unsigned.template"
+receipt_work=$work/allocation.unsigned.template
+{
+    echo 'receipt_schema=mci-lane-receipt-v1'; echo 'check_id=allocation'; echo 'producer_class=allocation-runtime'
+    echo 'attestation=EXTERNAL_SIGNER_SETS_signed-v1'; echo 'trusted_key_id=EXTERNAL_SIGNER_KEY_ID'; echo 'signature_relpath=allocation.sig'
+    echo "run_id=$run_id"; echo "source_hash=$source_hash"; echo "configuration_hash=$configuration_hash"
+    echo "captured_at_utc_ns=$captured_at"; echo "valid_until_utc_ns=$valid_until"
+    echo "result=$(if [ "$receipt_result" = PASS ]; then echo pass; else echo contract-only; fi)"; echo 'scenarios=MCI-ALLOC-001,MCI-ALLOC-002,MCI-ALLOC-003,MCI-ALLOC-004,MCI-ALLOC-005,MCI-ALLOC-006,MCI-NFR-007,MCI-NFR-008,MCI-NFR-009,MCI-NFR-010'
+    echo 'artifact_relpath=allocation-domain-arena-v1.evidence'; echo "artifact_sha256=$artifact_sha"
+    echo 'receipt_hash=EXTERNAL_SIGNER_RECOMPUTES_CANONICAL_SHA256'
+} > "$receipt_work"
+secure_publish "$evidence_abs/receipts" "$receipt_work" allocation.unsigned.template || { echo 'BLOCKED: secure receipt-template publication failed' >&2; exit 2; }
+
+report="$work/allocation-report-v1.env"
+{
+    echo 'report_schema=mci-allocation-producer-report-v1'
+    echo "run_id=$run_id"; echo "source_hash=$source_hash"; echo "configuration_hash=$configuration_hash"
+    echo "result=$receipt_result"; echo "release_eligible=$release_eligible"
+    echo 'canonical_markers=12/12'; echo "artifact_sha256=$artifact_sha"
+    echo 'artifact_relpath=artifacts/allocation-domain-arena-v1.evidence'
+    echo 'unsigned_receipt_relpath=receipts/allocation.unsigned.template'
+} > "$report"
+report_sha=$(hash_file "$report")
+secure_publish "$evidence_abs" "$report" allocation-report-v1.env || { echo 'BLOCKED: secure report publication failed' >&2; exit 2; }
+[ "$(hash_file "$evidence_abs/allocation-report-v1.env")" = "$report_sha" ] || { echo 'BLOCKED: report changed during publication' >&2; exit 2; }
+
+echo "allocation_contract_result=PASS"
+echo "allocation_release_eligible=$release_eligible"
+echo "allocation_artifact=$published"
+echo "allocation_unsigned_receipt=$receipt"
+echo "allocation_report=$evidence_abs/allocation-report-v1.env"

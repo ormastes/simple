@@ -1,0 +1,68 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_packed_owner_v3.spl 80%
+
+use spec
+use common.mission_critical.draw_ir_packed_generation_store_v3.*
+use common.ui.draw_ir_v3.*
+use std.gc_async_mut.gpu.engine2d.draw_ir_packed_owner_v3.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+fn _packed_rect_scene(generation: u32, color: u32) -> DrawIrV3Scene:
+    var scene = draw_ir_v3_empty_scene(19u32, generation)
+    scene.geometry = draw_ir_v3_geometry_append(scene.geometry, 1, 1, 2, 2, 0)
+    scene.paint = draw_ir_v3_paint_append(scene.paint, color, 0u32, 0, 1000, 0u16)
+    var command = draw_ir_v3_empty_command()
+    command.kind = DRAW_IR_V3_KIND_RECT
+    command.geometry_id = 0u32
+    command.paint_id = 0u32
+    draw_ir_v3_scene_push_command(scene, command)
+
+fn _publish_scene(store: DrawIrPackedGenerationStoreV3, scene: DrawIrV3Scene) -> DrawIrPackedGenerationStoreV3:
+    var owned = store
+    val rows = engine2d_draw_ir_v3_identity_rows(scene)
+    var generation_ref = DrawIrPackedGenerationRefV3(arena_id: 0u64, generation: 0u64, slot: 0u32)
+    match owned.admit(rows.len() as u32):
+        DrawIrPackedAdmissionV3.Admitted(value): generation_ref = value
+        DrawIrPackedAdmissionV3.Refused(reason): return owned
+    for row in rows:
+        if owned.write(generation_ref, row) != DRAW_IR_PACKED_REASON_OK:
+            return owned
+    match owned.seal(generation_ref):
+        DrawIrPackedSealV3.Sealed(submission):
+            owned.publish(submission)
+        DrawIrPackedSealV3.Refused(reason):
+            return owned
+    owned
+
+describe "Engine2D packed DrawIR-v3 owner boundary":
+    it "renders only the queued sealed scene and releases its slot":
+        val scene = _packed_rect_scene(7u32, 0xff336699u32)
+        var store = DrawIrPackedGenerationStoreV3.bounded(77u64, 1u32, 17u32, 1u32)
+        store = _publish_scene(store, scene)
+        val engine = Engine2D.create_with_backend(4, 4, "cpu")
+        val (rendered_engine, returned_store, receipt) = engine2d_draw_ir_v3_take_and_render(engine, store, scene)
+        expect(receipt.accepted).to_equal(true)
+        expect(receipt.reason).to_equal(ENGINE2D_PACKED_V3_OK)
+        expect(receipt.rendered_command_count).to_equal(1u32)
+        expect(receipt.storage_released).to_equal(true)
+        expect(receipt.content_hash.len()).to_equal(64)
+        val pixels = rendered_engine.read_pixels()
+        expect(pixels[5]).to_equal(0xff336699u32)
+        match returned_store.admit(17u32):
+            DrawIrPackedAdmissionV3.Admitted(value): expect(value.generation).to_be_greater_than(receipt.generation)
+            DrawIrPackedAdmissionV3.Refused(reason): expect(false).to_equal(true)
+
+    it "rejects a mutated scene instead of bypassing the queued identity":
+        val sealed_scene = _packed_rect_scene(8u32, 0xff112233u32)
+        val mutated_scene = _packed_rect_scene(8u32, 0xff445566u32)
+        var store = DrawIrPackedGenerationStoreV3.bounded(78u64, 1u32, 17u32, 1u32)
+        store = _publish_scene(store, sealed_scene)
+        val engine = Engine2D.create_with_backend(4, 4, "cpu")
+        val (returned_engine, returned_store, receipt) = engine2d_draw_ir_v3_take_and_render(engine, store, mutated_scene)
+        expect(receipt.accepted).to_equal(false)
+        expect(receipt.reason).to_equal(ENGINE2D_PACKED_V3_IDENTITY_MISMATCH)
+        expect(receipt.rendered_command_count).to_equal(0u32)
+        expect(receipt.storage_released).to_equal(true)
+        expect(returned_engine.read_pixels()[5]).to_equal(0u32)
+        match returned_store.admit(17u32):
+            DrawIrPackedAdmissionV3.Admitted(value): expect(true).to_equal(true)
+            DrawIrPackedAdmissionV3.Refused(reason): expect(false).to_equal(true)

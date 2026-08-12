@@ -1,0 +1,151 @@
+use compiler.common.mission_critical.compiler_admission.*
+
+val H_SOURCE = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val H_CONFIG = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val H_TOOLCHAIN = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+val H_DEPENDENCY = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+val H_ENVIRONMENT = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+val H_BUNDLE = "1111111111111111111111111111111111111111111111111111111111111111"
+val H_EXECUTABLE = "3333333333333333333333333333333333333333333333333333333333333333"
+val H_PATH = "4444444444444444444444444444444444444444444444444444444444444444"
+val H_PARENT = "5555555555555555555555555555555555555555555555555555555555555555"
+val H_COMMAND = "6666666666666666666666666666666666666666666666666666666666666666"
+val H_CAPTURE = "7777777777777777777777777777777777777777777777777777777777777777"
+val H_OUTPUT = "8888888888888888888888888888888888888888888888888888888888888888"
+
+fn expected_fixture() -> MciExpectedFixtureV2:
+    MciExpectedFixtureV2(fixture_id: "closure-dispatch-v1", command_hash: H_COMMAND,
+        timeout_ms: 2000, expected_exit_code: 0,
+        expected_capture_hash: H_CAPTURE, expected_artifact_hash: H_OUTPUT,
+        expected_emitted_function_count: 3)
+
+fn valid_run(receipt_hash: text = mci_compiler_receipt_hash(receipt()),
+             fixtures: [MciExpectedFixtureV2] = [expected_fixture()]) -> MciRunIdentityV1:
+    MciRunIdentityV1(schema_version: "mci-compiler-admission-run-v2",
+        run_id: "release-42", source_hash: H_SOURCE, config_hash: H_CONFIG,
+        toolchain_hash: H_TOOLCHAIN, dependency_hash: H_DEPENDENCY,
+        environment_hash: H_ENVIRONMENT, input_bundle_hash: H_BUNDLE,
+        expected_receipt_hash: receipt_hash,
+        expected_parent_artifact_id: "simple-stage-parent",
+        expected_parent_source_hash: H_SOURCE,
+        expected_parent_executable_hash: H_EXECUTABLE,
+        expected_parent_receipt_hash: H_PARENT,
+        expected_fixtures: fixtures)
+
+fn valid_run_for(receipt_value: MciGateReceiptV1,
+                 fixtures: [MciExpectedFixtureV2] = [expected_fixture()]) -> MciRunIdentityV1:
+    valid_run(receipt_hash: mci_compiler_receipt_hash(receipt_value), fixtures: fixtures)
+
+fn artifact(lineage: MciCompilerLineageV1 = MciCompilerLineageV1.PureSimple,
+            source_hash: text = H_SOURCE,
+            parent_lineage: MciCompilerLineageV1 = MciCompilerLineageV1.PureSimple) -> MciArtifactIdentityV1:
+    MciArtifactIdentityV1(schema_version: "mci-compiler-artifact-v2",
+        artifact_id: "simple-linux-x86_64", lineage: lineage,
+        compiler_source_hash: source_hash, executable_path_hash: H_PATH,
+        executable_hash: H_EXECUTABLE, input_bundle_hash: H_BUNDLE,
+        parent: MciParentLineageEvidenceV2(lineage: parent_lineage,
+            parent_artifact_id: "simple-stage-parent", parent_source_hash: H_SOURCE,
+            parent_executable_hash: H_EXECUTABLE, parent_receipt_hash: H_PARENT))
+
+fn fixture(command_hash: text = H_COMMAND, timeout_ms: i64 = 2000,
+           exit_code: i64 = 0, capture_hash: text = H_CAPTURE,
+           function_count: i64 = 3, executable_hash: text = H_EXECUTABLE) -> MciFixtureReceiptV2:
+    MciFixtureReceiptV2(fixture_id: "closure-dispatch-v1", command_hash: command_hash,
+        timeout_ms: timeout_ms, exit_code: exit_code, capture_hash: capture_hash,
+        emitted_artifact_hash: H_OUTPUT, resolved_executable_path_hash: H_PATH,
+        compiler_executable_hash: executable_hash, emitted_function_count: function_count)
+
+fn receipt(run_id: text = "release-42", receipt_hash: text = "",
+           source_hash: text = H_SOURCE,
+           fixtures: [MciFixtureReceiptV2] = [fixture()]) -> MciGateReceiptV1:
+    var value = MciGateReceiptV1(schema_version: "mci-compiler-collector-receipt-v2",
+        collector_id: "pure-collector-v2", run_id: run_id, receipt_hash: receipt_hash,
+        input_bundle_hash: H_BUNDLE, source_hash: source_hash, config_hash: H_CONFIG,
+        toolchain_hash: H_TOOLCHAIN, dependency_hash: H_DEPENDENCY,
+        environment_hash: H_ENVIRONMENT, resolved_executable_path_hash: H_PATH,
+        compiler_executable_hash: H_EXECUTABLE, parent_receipt_hash: H_PARENT,
+        fixtures: fixtures)
+    if receipt_hash == "":
+        value.receipt_hash = mci_compiler_receipt_hash(value)
+    value
+
+describe "mission-critical exact-current compiler admission":
+    it "admits a complete hash-bound pure collector receipt":
+        val result = CompilerAdmissionV1.evaluate(valid_run(), artifact(), receipt())
+        expect(result.is_admitted()).to_equal(true)
+        expect(result.rejection.name()).to_equal("none")
+
+    it "rejects malformed and uppercase hash256 values":
+        val short_hash = run_compiler_admission(valid_run(receipt_hash: "abc"), artifact(), receipt())
+        expect(short_hash.rejection.name()).to_equal("invalid_run_identity")
+        val uppercase = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        val malformed = run_compiler_admission(valid_run(), artifact(),
+            receipt(source_hash: uppercase))
+        expect(malformed.rejection.name()).to_equal("invalid_hash")
+
+    it "rejects receipts not correlated to the release run":
+        val wrong_run = run_compiler_admission(valid_run(), artifact(),
+            receipt(run_id: "release-41"))
+        expect(wrong_run.rejection.name()).to_equal("run_correlation_mismatch")
+        val wrong_receipt = run_compiler_admission(valid_run(), artifact(),
+            receipt(receipt_hash: H_PARENT))
+        expect(wrong_receipt.rejection.name()).to_equal("run_correlation_mismatch")
+
+    it "rejects receipt tampering without a matching canonical rehash":
+        val original = receipt()
+        val mutated = receipt(receipt_hash: original.receipt_hash,
+            fixtures: [fixture(capture_hash: H_PARENT)])
+        val result = run_compiler_admission(valid_run(), artifact(), mutated)
+        expect(result.rejection.name()).to_equal("run_correlation_mismatch")
+
+    it "rejects parent identity not frozen by run policy":
+        var run = valid_run()
+        run.expected_parent_source_hash = H_PARENT
+        val result = run_compiler_admission(run, artifact(), receipt())
+        expect(result.rejection.name()).to_equal("invalid_parent_lineage")
+
+    it "rejects mismatched source and input evidence":
+        val wrong_source = receipt(source_hash: H_PARENT)
+        val result = run_compiler_admission(valid_run_for(wrong_source), artifact(),
+            wrong_source)
+        expect(result.rejection.name()).to_equal("input_identity_mismatch")
+        val stale = run_compiler_admission(valid_run(),
+            artifact(source_hash: H_PARENT), receipt())
+        expect(stale.rejection.name()).to_equal("source_hash_mismatch")
+
+    it "rejects bootstrap, hybrid, stale, and unknown compiler lineages":
+        expect(run_compiler_admission(valid_run(), artifact(MciCompilerLineageV1.RustSeed), receipt()).rejection.name()).to_equal("rust_seed_lineage")
+        expect(run_compiler_admission(valid_run(), artifact(MciCompilerLineageV1.Hybrid), receipt()).rejection.name()).to_equal("hybrid_lineage")
+        expect(run_compiler_admission(valid_run(), artifact(MciCompilerLineageV1.Stale), receipt()).rejection.name()).to_equal("stale_lineage")
+        expect(run_compiler_admission(valid_run(), artifact(MciCompilerLineageV1.Unknown), receipt()).rejection.name()).to_equal("unknown_lineage")
+
+    it "rejects missing pure-Simple parent lineage":
+        val result = run_compiler_admission(valid_run(),
+            artifact(parent_lineage: MciCompilerLineageV1.RustSeed), receipt())
+        expect(result.rejection.name()).to_equal("invalid_parent_lineage")
+
+    it "rejects incomplete and extra fixture sets":
+        val missing = run_compiler_admission(valid_run(), artifact(), receipt(fixtures: []))
+        expect(missing.rejection.name()).to_equal("invalid_collector_receipt")
+        val extra_receipt = receipt(fixtures: [fixture(), fixture()])
+        val extra = run_compiler_admission(valid_run_for(extra_receipt), artifact(),
+            extra_receipt)
+        expect(extra.rejection.name()).to_equal("incomplete_fixture_set")
+        val duplicate_receipt = receipt(fixtures: [fixture(), fixture()])
+        val duplicate = run_compiler_admission(valid_run_for(duplicate_receipt,
+            fixtures: [expected_fixture(), expected_fixture()]), artifact(), duplicate_receipt)
+        expect(duplicate.rejection.name()).to_equal("incomplete_fixture_set")
+
+    it "rejects fixture command timeout exit capture executable and function mismatches":
+        val wrong_command = receipt(fixtures: [fixture(command_hash: H_PARENT)])
+        expect(run_compiler_admission(valid_run_for(wrong_command), artifact(), wrong_command).rejection.name()).to_equal("non_discriminating_fixture")
+        val wrong_timeout = receipt(fixtures: [fixture(timeout_ms: 1)])
+        expect(run_compiler_admission(valid_run_for(wrong_timeout), artifact(), wrong_timeout).rejection.name()).to_equal("fixture_not_executed")
+        val wrong_exit = receipt(fixtures: [fixture(exit_code: 7)])
+        expect(run_compiler_admission(valid_run_for(wrong_exit), artifact(), wrong_exit).rejection.name()).to_equal("fixture_failed")
+        val wrong_capture = receipt(fixtures: [fixture(capture_hash: H_PARENT)])
+        expect(run_compiler_admission(valid_run_for(wrong_capture), artifact(), wrong_capture).rejection.name()).to_equal("non_discriminating_fixture")
+        val wrong_executable = receipt(fixtures: [fixture(executable_hash: H_PARENT)])
+        expect(run_compiler_admission(valid_run_for(wrong_executable), artifact(), wrong_executable).rejection.name()).to_equal("non_executable_fixture")
+        val wrong_function_count = receipt(fixtures: [fixture(function_count: 0)])
+        expect(run_compiler_admission(valid_run_for(wrong_function_count), artifact(), wrong_function_count).rejection.name()).to_equal("missing_function_evidence")

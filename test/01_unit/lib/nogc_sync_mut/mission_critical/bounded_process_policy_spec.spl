@@ -1,0 +1,184 @@
+# @req REQ-MCI-009 NFR-MCI-003
+use std.spec
+use nogc_sync_mut.mission_critical.bounded_process_policy.*
+
+describe "bounded mission-critical process policy":
+    it "POLICY-MCI-PROC rejects non-positive signal and wait targets":
+        expect(validate_process_signal_pid(-1).accepted).to_be(false)
+        expect(validate_process_signal_pid(0).accepted).to_be(false)
+        expect(validate_process_signal_pid(1).accepted).to_be(true)
+
+    it "POLICY-MCI-PROC admits exact worker and queue boundaries":
+        val worker = BoundedWorkPoolV1(
+            max_workers: 2,
+            max_pending: 1,
+            active_workers: 1,
+            pending_work: 0
+        )
+        val queued = BoundedWorkPoolV1(
+            max_workers: 2,
+            max_pending: 1,
+            active_workers: 2,
+            pending_work: 0
+        )
+        expect(admit_bounded_work(worker).accepted).to_be(true)
+        expect(admit_bounded_work(queued).accepted).to_be(true)
+
+    it "POLICY-MCI-PROC rejects work beyond the fixed queue":
+        val full = BoundedWorkPoolV1(
+            max_workers: 2,
+            max_pending: 1,
+            active_workers: 2,
+            pending_work: 1
+        )
+        val receipt = admit_bounded_work(full)
+        expect(receipt.accepted).to_be(false)
+        expect(receipt.observed).to_equal(1)
+        expect(receipt.limit).to_equal(1)
+
+    it "POLICY-MCI-PROC admits exact capture limits and rejects one byte beyond":
+        val exact = BoundedProcessCaptureV1(
+            max_stdout_bytes: 16,
+            max_stderr_bytes: 8,
+            stdout_bytes: 16,
+            stderr_bytes: 8
+        )
+        val overflow = BoundedProcessCaptureV1(
+            max_stdout_bytes: 16,
+            max_stderr_bytes: 8,
+            stdout_bytes: 17,
+            stderr_bytes: 8
+        )
+        val stderr_overflow = BoundedProcessCaptureV1(
+            max_stdout_bytes: 16,
+            max_stderr_bytes: 8,
+            stdout_bytes: 16,
+            stderr_bytes: 9
+        )
+        expect(admit_bounded_capture(exact).accepted).to_be(true)
+        expect(admit_bounded_capture(overflow).accepted).to_be(false)
+        expect(admit_bounded_capture(stderr_overflow).accepted).to_be(false)
+
+    it "POLICY-MCI-PROC rejects invalid capacities before admission":
+        val invalid = BoundedWorkPoolV1(
+            max_workers: 0,
+            max_pending: 1,
+            active_workers: 0,
+            pending_work: 0
+        )
+        expect(admit_bounded_work(invalid).accepted).to_be(false)
+
+        val overcommitted = BoundedWorkPoolV1(
+            max_workers: 2,
+            max_pending: 4,
+            active_workers: 3,
+            pending_work: 0
+        )
+        val receipt = admit_bounded_work(overcommitted)
+        expect(receipt.accepted).to_be(false)
+        expect(receipt.observed).to_equal(3)
+        expect(receipt.limit).to_equal(2)
+
+    it "POLICY-MCI-PROC keeps worker and process in-flight ceilings distinct":
+        val policy = BoundedProcessPolicyV2(max_timeout_ms: 1000, max_in_flight: 2)
+        val exact_last_slot = BoundedProcessAdmissionV2(
+            policy: policy, requested_timeout_ms: 1000,
+            active_workers: 7, in_flight_processes: 1)
+        val full = BoundedProcessAdmissionV2(
+            policy: policy, requested_timeout_ms: 1000,
+            active_workers: 0, in_flight_processes: 2)
+        expect(admit_bounded_process(exact_last_slot).accepted).to_be(true)
+        val receipt = admit_bounded_process(full)
+        expect(receipt.accepted).to_be(false)
+        expect(receipt.code).to_equal(ProcessSafetyCodeV1.InFlightLimitReached)
+
+    it "POLICY-MCI-PROC admits the exact timeout and rejects zero and one beyond":
+        val policy = BoundedProcessPolicyV2(max_timeout_ms: 1000, max_in_flight: 1)
+        expect(admit_bounded_process(BoundedProcessAdmissionV2(
+            policy: policy, requested_timeout_ms: 1000,
+            active_workers: 0, in_flight_processes: 0)).accepted).to_be(true)
+        expect(admit_bounded_process(BoundedProcessAdmissionV2(
+            policy: policy, requested_timeout_ms: 0,
+            active_workers: 0, in_flight_processes: 0)).accepted).to_be(false)
+        val beyond = admit_bounded_process(BoundedProcessAdmissionV2(
+            policy: policy, requested_timeout_ms: 1001,
+            active_workers: 0, in_flight_processes: 0))
+        expect(beyond.code).to_equal(ProcessSafetyCodeV1.TimeoutLimitReached)
+
+    it "POLICY-MCI-PROC rejects invalid policy and negative in-flight state":
+        val invalid_policy = BoundedProcessPolicyV2(
+            max_timeout_ms: 1000, max_in_flight: 0)
+        expect(admit_bounded_process(BoundedProcessAdmissionV2(
+            policy: invalid_policy, requested_timeout_ms: 1000,
+            active_workers: 0, in_flight_processes: 0)).code).to_equal(ProcessSafetyCodeV1.InvalidCapacity)
+        val valid_policy = BoundedProcessPolicyV2(
+            max_timeout_ms: 1000, max_in_flight: 1)
+        expect(admit_bounded_process(BoundedProcessAdmissionV2(
+            policy: valid_policy, requested_timeout_ms: 1000,
+            active_workers: 0, in_flight_processes: -1)).accepted).to_be(false)
+
+    it "REQ-MCI-009 binds termination to lease identity and rejects PID reuse forged group and replay":
+        val slot = "slot-7"
+        val token = process_owner_lease_token_v4(1, 2, 3, 4, 41, 41, slot)
+        val lease = ProcessOwnerLeaseV4(run_id: 1, execution_id: 2, generation: 3,
+            start_identity: 4, pid: 41, process_group_id: 41,
+            admission_slot_token: slot, lease_token: token)
+        val running = BoundedExecutionV4(
+            state: BoundedExecutionStateV4.Running, lease: lease, transition_sequence: 9)
+        val forged = ProcessOwnerLeaseV4(run_id: 1, execution_id: 2, generation: 3,
+            start_identity: 4, pid: 41, process_group_id: 99,
+            admission_slot_token: slot, lease_token: token)
+        expect(transition_bounded_execution_v4(running,
+            BoundedExecutionEventV4.ReachTimeout, forged, 9).accepted).to_be(false)
+        val reused = ProcessOwnerLeaseV4(run_id: 1, execution_id: 2, generation: 3,
+            start_identity: 5, pid: 41, process_group_id: 41,
+            admission_slot_token: slot, lease_token: token)
+        expect(transition_bounded_execution_v4(running,
+            BoundedExecutionEventV4.ReachTimeout, reused, 9).accepted).to_be(false)
+        val stale = transition_bounded_execution_v4(running,
+            BoundedExecutionEventV4.RequestCancel, lease, 8)
+        expect(stale.code).to_equal(ProcessSafetyCodeV1.InvalidTransition)
+
+    it "REQ-MCI-009 requires termination confirmation and registered reap before terminal state":
+        val slot = "slot-8"
+        val token = process_owner_lease_token_v4(2, 3, 4, 5, 51, 51, slot)
+        val lease = ProcessOwnerLeaseV4(run_id: 2, execution_id: 3, generation: 4,
+            start_identity: 5, pid: 51, process_group_id: 51,
+            admission_slot_token: slot, lease_token: token)
+        val running = BoundedExecutionV4(
+            state: BoundedExecutionStateV4.Running, lease: lease, transition_sequence: 0)
+        val requested = transition_bounded_execution_v4(
+            running, BoundedExecutionEventV4.ReachTimeout, lease, 0)
+        expect(requested.after).to_equal(BoundedExecutionStateV4.TerminationRequested)
+        val terminating = BoundedExecutionV4(
+            state: requested.after, lease: lease, transition_sequence: requested.next_sequence)
+        val pending = transition_bounded_execution_v4(
+            terminating, BoundedExecutionEventV4.ConfirmTermination, lease, 1)
+        expect(pending.after).to_equal(BoundedExecutionStateV4.ReapPending)
+        expect(pending.reap_intent).to_be(true)
+        val reaping = BoundedExecutionV4(
+            state: pending.after, lease: lease, transition_sequence: pending.next_sequence)
+        val complete = transition_bounded_execution_v4(
+            reaping, BoundedExecutionEventV4.AcknowledgeRegisteredReap, lease, 2)
+        expect(complete.after).to_equal(BoundedExecutionStateV4.Completed)
+
+    it "REQ-MCI-009 policy-model reserves the last slot and rejects competing stale reservation":
+        val pool = ProcessSlotPoolV4(max_in_flight: 2, reserved: 1, generation: 6)
+        val winner = reserve_process_slot_v4(pool)
+        expect(winner.accepted).to_be(true)
+        val committed = ProcessSlotPoolV4(max_in_flight: 2,
+            reserved: winner.next_reserved, generation: 6)
+        expect(reserve_process_slot_v4(committed).code).to_equal(ProcessSafetyCodeV1.InFlightLimitReached)
+        expect(release_process_slot_v4(committed, 2, winner.slot_token).next_reserved).to_equal(1)
+        expect(release_process_slot_v4(committed, 1, winner.slot_token).accepted).to_be(false)
+
+    it "NFR-MCI-003 incrementally admits exact capture chunks and rejects plus one without mutation":
+        val initial = CaptureAccumulatorV4(max_stdout_bytes: 16, max_stderr_bytes: 8,
+            stdout_bytes: 15, stderr_bytes: 7, lease_token: "lease-hash", sequence: 3)
+        val exact = append_capture_chunk_v4(initial, 1, 1)
+        expect(exact.accepted).to_be(true)
+        expect(exact.next.stdout_bytes).to_equal(16)
+        expect(exact.receipt_token.len()).to_equal(64)
+        val overflow = append_capture_chunk_v4(exact.next, 1, 0)
+        expect(overflow.code).to_equal(ProcessSafetyCodeV1.CaptureLimitReached)
+        expect(overflow.next.stdout_bytes).to_equal(16)

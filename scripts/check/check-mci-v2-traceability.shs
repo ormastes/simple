@@ -1,0 +1,101 @@
+#!/bin/sh
+# Host-independent, fail-closed MCI-v2 traceability evidence producer.
+set -eu
+LC_ALL=C; export LC_ALL
+usage(){ echo "usage: $0 --evidence DIR --run-id ID --source-hash SHA256 --configuration-hash SHA256 --captured-at-utc-ns NS --valid-until-utc-ns NS --trusted-key-id ID [--signature-relpath NAME] [--repo-root DIR]" >&2; exit 2; }
+evidence= run_id= source_hash= configuration_hash= captured= valid_until= key_id= repo_arg= signature_relpath=traceability.sig
+while [ $# -gt 0 ]; do case "$1" in
+ --evidence) evidence=$2;shift 2;; --run-id) run_id=$2;shift 2;; --source-hash) source_hash=$2;shift 2;;
+ --configuration-hash) configuration_hash=$2;shift 2;; --captured-at-utc-ns) captured=$2;shift 2;;
+ --valid-until-utc-ns) valid_until=$2;shift 2;; --trusted-key-id) key_id=$2;shift 2;;
+ --signature-relpath) signature_relpath=$2;shift 2;; --repo-root) repo_arg=$2;shift 2;; *) usage;; esac; done
+[ -n "$evidence$run_id$source_hash$configuration_hash$captured$valid_until$key_id" ] || usage
+token(){ [ -n "$1" ] && case "$1" in *[!A-Za-z0-9._-]*) return 1;; esac; }
+sha(){ [ ${#1} -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1;; esac; }
+uint(){ [ -n "$1" ] && case "$1" in *[!0-9]*) return 1;; esac; }
+token "$run_id" && token "$key_id" && token "$signature_relpath" && sha "$source_hash" && sha "$configuration_hash" && uint "$captured" && uint "$valid_until" || usage
+
+script_root=$(CDPATH= cd -P -- "$(dirname "$0")/../.." && pwd -P)
+if [ -n "$repo_arg" ]; then [ -d "$repo_arg" ] && [ ! -L "$repo_arg" ] || { echo 'BLOCKED: unsafe repo root' >&2;exit 2;}; repo_root=$(CDPATH= cd -P -- "$repo_arg" && pwd -P); else repo_root=$script_root; fi
+case "$repo_root" in /*) :;; *) exit 2;; esac
+case "$evidence" in /*) evidence_lex=$evidence;; *) evidence_lex=$repo_root/$evidence;; esac
+case "$evidence_lex" in "$repo_root"/*) :;; *) echo 'BLOCKED: evidence outside repo' >&2;exit 2;; esac
+# Reject every existing symlink component before creating anything.
+walk=$repo_root; rel=${evidence_lex#"$repo_root"/}; oldIFS=$IFS; IFS=/
+for part in $rel; do [ -n "$part" ] && [ "$part" != . ] && [ "$part" != .. ] || { IFS=$oldIFS;exit 2;}; walk=$walk/$part; [ ! -L "$walk" ] || { IFS=$oldIFS;echo 'BLOCKED: symlink in evidence path' >&2;exit 2;}; done; IFS=$oldIFS
+mkdir -p "$evidence_lex/artifacts" "$evidence_lex/receipts" "$evidence_lex/signatures"
+evidence_abs=$(CDPATH= cd -P -- "$evidence_lex" && pwd -P)
+[ "$evidence_abs" = "$evidence_lex" ] || { echo 'BLOCKED: noncanonical evidence path' >&2;exit 2;}
+for d in "$evidence_abs" "$evidence_abs/artifacts" "$evidence_abs/receipts" "$evidence_abs/signatures"; do [ -d "$d" ] && [ ! -L "$d" ] || exit 2; done
+hash_file(){ if command -v sha256sum >/dev/null 2>&1;then sha256sum "$1"|awk '{print $1}';elif command -v shasum >/dev/null 2>&1;then shasum -a 256 "$1"|awk '{print $1}';else openssl dgst -sha256 "$1"|sed 's/^.*= //';fi; }
+identity(){ if stat -c '%d:%i:%s:%Y' "$1" >/dev/null 2>&1;then stat -c '%d:%i:%s:%Y' "$1";else stat -f '%d:%i:%z:%m' "$1";fi; }
+work=$(mktemp -d "$evidence_abs/.traceability.XXXXXX") || exit 2; trap 'rm -rf "$work"' EXIT HUP INT TERM
+paths='test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl test/01_unit/scripts/mci_v2_aggregate_contract_test.shs test/01_unit/scripts/mci_v2_allocation_contract_test.shs test/01_unit/scripts/mci_v2_process_safety_contract_test.shs test/01_unit/scripts/mci_v2_traceability_contract_test.shs doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md doc/02_requirements/feature/mission_critical_infra_hardening_v2.md doc/02_requirements/nfr/mission_critical_infra_hardening_v2.md doc/04_architecture/mission_critical_infra_hardening_v2.md doc/05_design/mission_critical_infra_hardening_v2.md doc/07_guide/app/spipe/mission_critical_infra_hardening_v2.md doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md'
+for rel in $paths; do
+ src=$repo_root/$rel; parent=$repo_root; oldIFS=$IFS; IFS=/
+ for part in $rel; do parent=$parent/$part; [ ! -L "$parent" ] || { IFS=$oldIFS;echo "BLOCKED: symlink in authoritative input path: $rel" >&2;exit 1;}; done; IFS=$oldIFS
+ [ -f "$src" ] || { echo "BLOCKED: missing canonical path: $rel" >&2;exit 1;}; before=$(identity "$src"); mkdir -p "$work/input/$(dirname "$rel")"; cp -p -- "$src" "$work/input/$rel"; [ "$before" = "$(identity "$src")" ] && [ "$(hash_file "$src")" = "$(hash_file "$work/input/$rel")" ] || { echo "BLOCKED: input changed during snapshot: $rel" >&2;exit 1;}
+done
+root=$work/input; spec=test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl; manual=doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md
+[ "$(find "$repo_root/doc/06_spec" -type f -name '*_spec.spl' -print | head -1)" = '' ] || { echo 'BLOCKED: executable spec under doc/06_spec' >&2;exit 1;}
+spec_hash=$(hash_file "$root/$spec")
+sed 's/[[:space:]]*$//' "$root/$manual" | grep -Fx "**Executable source:** \`$spec\`" >/dev/null || { echo 'BLOCKED: manual source path mismatch' >&2;exit 1;}
+sed 's/[[:space:]]*$//' "$root/$manual" | grep -Fx "**Executable source SHA-256:** \`$spec_hash\`" >/dev/null || { echo 'BLOCKED: manual source provenance mismatch' >&2;exit 1;}
+# Verify-skill trivial/stub patterns; comments do not excuse executable placeholders.
+grep -E 'pass_todo|pass_do_nothing|pass_dn|expect[[:space:]]*\([[:space:]]*true[[:space:]]*\)|assert[[:space:]]*\([[:space:]]*true[[:space:]]*\)|to_equal[[:space:]]*\([[:space:]]*true[[:space:]]*\)|TODO|FIXME|dummy|placeholder' "$root/$spec" >/dev/null && { echo 'BLOCKED: placeholder/trivial SSpec oracle' >&2;exit 1;} || :
+grep -E 'pass_todo|expect[[:space:]]*\([[:space:]]*true[[:space:]]*\)|assert[[:space:]]*\([[:space:]]*true[[:space:]]*\)' "$root/$manual" >/dev/null && { echo 'BLOCKED: placeholder/trivial manual oracle' >&2;exit 1;} || :
+req_expected='REQ-MCI-001,REQ-MCI-002,REQ-MCI-003,REQ-MCI-004,REQ-MCI-005,REQ-MCI-006,REQ-MCI-007,REQ-MCI-008,REQ-MCI-009,REQ-MCI-010,REQ-MCI-011'
+nfr_expected='NFR-MCI-001,NFR-MCI-002,NFR-MCI-003,NFR-MCI-004,NFR-MCI-005,NFR-MCI-006,NFR-MCI-007,NFR-MCI-008,NFR-MCI-009'
+ids(){ grep -Eo "$1" "$2"|sort -u|paste -sd, -; }
+feature=$root/doc/02_requirements/feature/mission_critical_infra_hardening_v2.md; nfr=$root/doc/02_requirements/nfr/mission_critical_infra_hardening_v2.md
+[ "$(grep -Ec '^- \*\*REQ-MCI-[0-9]{3} —' "$feature")" -eq 11 ] && [ "$(grep -Eo '^- \*\*REQ-MCI-[0-9]{3} —' "$feature"|sort|uniq -d|wc -l|tr -d ' ')" -eq 0 ] && [ "$(ids 'REQ-MCI-[0-9]{3}' "$feature")" = "$req_expected" ] || { echo 'BLOCKED: anchored/unique feature requirements' >&2;exit 1;}
+[ "$(grep -Ec '^- \*\*NFR-MCI-[0-9]{3} —' "$nfr")" -eq 9 ] && [ "$(grep -Eo '^- \*\*NFR-MCI-[0-9]{3} —' "$nfr"|sort|uniq -d|wc -l|tr -d ' ')" -eq 0 ] && [ "$(ids 'NFR-MCI-[0-9]{3}' "$nfr")" = "$nfr_expected" ] || { echo 'BLOCKED: anchored/unique NFRs' >&2;exit 1;}
+# Exact anchored table tuples. Each ID must occur once as a row key; embedded IDs are rejected by total-count comparison.
+plan=$root/doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md; tuples=$work/tuples
+awk -F'|' '/^\| (REQ|NFR)-MCI-[0-9][0-9][0-9] /{id=$2;gsub(/^ +| +$/,"",id); line=$0;out="";while(match(line,/MCI-(AGG|ALLOC|COMP|DOC|NFR|OS|PROC|REN|TOOL)-[0-9][0-9][0-9]/)){x=substr(line,RSTART,RLENGTH);out=out (out?",":"") x;line=substr(line,RSTART+RLENGTH)};print id"="out}' "$plan" > "$tuples"
+[ "$(hash_file "$tuples")" = 7f75350bed174a15831be282ac0012c742aecaf2f2dbf56b1f4a1871038573ed ] || { echo 'BLOCKED: exact requirement/scenario mapping mismatch' >&2;exit 1;}
+[ "$(wc -l < "$tuples"|tr -d ' ')" -eq 20 ] && [ "$(cut -d= -f1 "$tuples"|sort|uniq -d|wc -l|tr -d ' ')" -eq 0 ] || { echo 'BLOCKED: duplicate/missing mapping rows' >&2;exit 1;}
+scenario_count=$(cut -d= -f2- "$tuples"|tr ',' '\n'|sed '/^$/d'|wc -l|tr -d ' '); [ "$scenario_count" -eq 51 ] || { echo 'BLOCKED: mapping tuple count' >&2;exit 1;}
+[ "$(cut -d= -f2- "$tuples"|tr ',' '\n'|sort|uniq -d|wc -l|tr -d ' ')" -eq 0 ] || { echo 'BLOCKED: duplicate mapped scenario' >&2;exit 1;}
+all_scenarios=$(grep -Eo 'MCI-(AGG|ALLOC|COMP|DOC|NFR|OS|PROC|REN|TOOL)-[0-9]{3}' "$plan"|wc -l|tr -d ' '); [ "$all_scenarios" -eq 51 ] || { echo 'BLOCKED: embedded/duplicate scenario ID' >&2;exit 1;}
+expected_scenarios=$(cut -d= -f2- "$tuples"|tr ',' '\n'|sort|paste -sd, -)
+# Scenario metadata is deliberately distinct from executable `it` bodies.
+# A contract link or blocked row is traceability, never execution evidence.
+scenario_classes=$work/scenario-classes
+awk '
+/^# @scenario / {
+  if (NF != 7 || $4 !~ /^class=(evidence-contract|blocked)$/ ||
+      $5 !~ /^owner=[A-Za-z0-9._\/-]+$/ ||
+      $6 !~ /^reason=[A-Za-z0-9._-]+$/ ||
+      $7 !~ /^resume=[A-Za-z0-9._-]+$/) exit 2
+  print $3 "|" substr($4,7) "|" substr($5,7) "|" substr($6,8) "|" substr($7,8)
+}' "$root/$spec" > "$scenario_classes" || { echo 'BLOCKED: malformed scenario classification' >&2;exit 1;}
+[ "$(wc -l < "$scenario_classes"|tr -d ' ')" -eq 51 ] &&
+[ "$(cut -d'|' -f1 "$scenario_classes"|sort|uniq -d|wc -l|tr -d ' ')" -eq 0 ] &&
+[ "$(cut -d'|' -f1 "$scenario_classes"|sort|paste -sd, -)" = "$expected_scenarios" ] || { echo 'BLOCKED: scenario classification set mismatch' >&2;exit 1;}
+contract_expected='MCI-AGG-001,MCI-AGG-002,MCI-AGG-003,MCI-ALLOC-001,MCI-ALLOC-002,MCI-ALLOC-003,MCI-ALLOC-004,MCI-ALLOC-005,MCI-ALLOC-006,MCI-DOC-003,MCI-NFR-001,MCI-NFR-002,MCI-NFR-007,MCI-NFR-008,MCI-NFR-009,MCI-NFR-010,MCI-NFR-017,MCI-NFR-018,MCI-PROC-001,MCI-PROC-002,MCI-PROC-003'
+[ "$(awk -F'|' '$2=="evidence-contract"{print $1}' "$scenario_classes"|sort|paste -sd, -)" = "$contract_expected" ] || { echo 'BLOCKED: evidence-contract classification mismatch' >&2;exit 1;}
+while IFS='|' read -r scenario class owner reason resume; do
+ [ -n "$scenario$class$owner$reason$resume" ] || { echo 'BLOCKED: incomplete scenario classification' >&2;exit 1;}
+ if [ "$class" = evidence-contract ]; then [ -f "$root/$owner" ] || { echo "BLOCKED: contract owner absent: $scenario" >&2;exit 1;}; fi
+done < "$scenario_classes"
+manual_rows=$work/manual-scenario-rows
+awk -F'|' '/^\| MCI-(AGG|ALLOC|COMP|DOC|NFR|OS|PROC|REN|TOOL)-[0-9][0-9][0-9] \|/{id=$2;class=$3;owner=$4;reason=$5;resume=$6;gsub(/^ +| +$/,"",id);gsub(/^ +| +$/,"",class);gsub(/^ +| +$/,"",owner);gsub(/^ +| +$/,"",reason);gsub(/^ +| +$/,"",resume);gsub(/^`|`$/,"",owner);gsub(/^`|`$/,"",reason);gsub(/^`|`$/,"",resume);if(class!="evidence-contract"&&class!="blocked")exit 2;if(owner==""||reason==""||resume=="")exit 2;print id"|"class"|"owner"|"reason"|"resume}' "$root/$manual" > "$manual_rows" || { echo 'BLOCKED: malformed manual scenario matrix' >&2;exit 1;}
+[ "$(wc -l < "$manual_rows"|tr -d ' ')" -eq 51 ] &&
+[ "$(cut -d'|' -f1 "$manual_rows"|sort|uniq -d|wc -l|tr -d ' ')" -eq 0 ] &&
+[ "$(cut -d'|' -f1 "$manual_rows"|sort|paste -sd, -)" = "$expected_scenarios" ] &&
+[ "$(sort "$manual_rows"|paste -sd, -)" = "$(sort "$scenario_classes"|paste -sd, -)" ] || { echo 'BLOCKED: manual scenario matrix metadata mismatch' >&2;exit 1;}
+# Each executable scenario body must contain a nontrivial matcher. Empty/todo/no-op bodies fail.
+awk '/^[[:space:]]*it "/{if(seen&&!asserted)exit 1;seen=1;asserted=0;next} seen&&/expect\(/&&!/expect[[:space:]]*\([[:space:]]*true[[:space:]]*\)/{asserted=1} seen&&/(pass_todo|pass_dn|pass_do_nothing|todo\()/ {exit 1} END{if(seen&&!asserted)exit 1}' "$root/$spec" || { echo 'BLOCKED: empty/trivial/todo SSpec scenario body' >&2;exit 1;}
+# Only docgen itself may create this receipt; the gate consumes and snapshots it.
+docgen=$repo_root/doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.docgen-receipt.env
+[ -f "$docgen" ] && [ ! -L "$docgen" ] || { echo 'BLOCKED: real docgen provenance receipt absent' >&2;exit 1;}
+grep -Fx 'schema=mci-spipe-docgen-provenance-v1' "$docgen" >/dev/null && grep -Eq '^tool_version=[A-Za-z0-9._-]+$' "$docgen" && grep -Fx 'command=bin/simple spipe-docgen test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl --output doc/06_spec --no-index' "$docgen" >/dev/null && grep -Fx "spec_sha256=$spec_hash" "$docgen" >/dev/null && grep -Fx "manual_sha256=$(hash_file "$root/$manual")" "$docgen" >/dev/null || { echo 'BLOCKED: invalid docgen provenance receipt' >&2;exit 1;}
+artifact=$work/traceability-v1.env
+{ echo schema_version=mci-traceability-artifact-v1;echo policy=simple/mci-v2-traceability-v1;echo "run_id=$run_id";echo "source_hash=$source_hash";echo "configuration_hash=$configuration_hash";echo "requirements=$req_expected,$nfr_expected";while IFS= read -r x;do echo "mapping=$x";done < "$tuples";for rel in $paths;do echo "file=$rel|$(hash_file "$root/$rel")";done;echo result=PASS;} > "$artifact"
+artifact_hash=$(hash_file "$artifact"); template=$work/traceability.unsigned-receipt
+{ echo receipt_template_schema=mci-lane-unsigned-template-v1;echo check_id=traceability;echo producer_class=traceability-gate;echo attestation=unsigned-v1;echo "trusted_key_id=$key_id";echo "signature_relpath=$signature_relpath";echo "run_id=$run_id";echo "source_hash=$source_hash";echo "configuration_hash=$configuration_hash";echo "captured_at_utc_ns=$captured";echo "valid_until_utc_ns=$valid_until";echo result=pass;echo scenarios=MCI-DOC-003;echo artifact_relpath=traceability-v1.env;echo "artifact_sha256=$artifact_hash";} > "$template"
+publish(){ src=$1; dst=$2; tmp=$(mktemp "$dst.tmp.XXXXXX"); [ -f "$tmp" ] && [ ! -L "$tmp" ] || exit 2; cp -- "$src" "$tmp"; [ "$(hash_file "$src")" = "$(hash_file "$tmp")" ] || exit 2; mv -f -- "$tmp" "$dst"; [ -f "$dst" ] && [ ! -L "$dst" ] && [ "$(hash_file "$src")" = "$(hash_file "$dst")" ] || exit 2; }
+publish "$artifact" "$evidence_abs/artifacts/traceability-v1.env"
+publish "$template" "$evidence_abs/receipts/traceability.unsigned-receipt"
+echo "PASS: MCI traceability unsigned template; artifact_sha256=$artifact_hash template=$evidence_abs/receipts/traceability.unsigned-receipt"

@@ -1,0 +1,381 @@
+#!/bin/sh
+# Host-independent, fail-closed REQ-MCI-002/010 evidence admission gate.
+set -eu
+LC_ALL=C
+export LC_ALL
+
+usage() {
+    echo "usage: $0 --evidence DIR --run-id ID --source-hash SHA256 --configuration-hash SHA256 --now-utc-ns NS --trusted-key PEM --trusted-key-id ID --reviewer-key PEM --reviewer-key-id ID" >&2
+    exit 2
+}
+
+evidence= run_id= source_hash= configuration_hash= now_ns= trusted_key= trusted_key_id= reviewer_key= reviewer_key_id=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --evidence) [ "$#" -ge 2 ] || usage; evidence=$2; shift 2 ;;
+        --run-id) [ "$#" -ge 2 ] || usage; run_id=$2; shift 2 ;;
+        --source-hash) [ "$#" -ge 2 ] || usage; source_hash=$2; shift 2 ;;
+        --configuration-hash) [ "$#" -ge 2 ] || usage; configuration_hash=$2; shift 2 ;;
+        --now-utc-ns) [ "$#" -ge 2 ] || usage; now_ns=$2; shift 2 ;;
+        --trusted-key) [ "$#" -ge 2 ] || usage; trusted_key=$2; shift 2 ;;
+        --trusted-key-id) [ "$#" -ge 2 ] || usage; trusted_key_id=$2; shift 2 ;;
+        --reviewer-key) [ "$#" -ge 2 ] || usage; reviewer_key=$2; shift 2 ;;
+        --reviewer-key-id) [ "$#" -ge 2 ] || usage; reviewer_key_id=$2; shift 2 ;;
+        *) usage ;;
+    esac
+done
+[ -n "$evidence" ] && [ -n "$run_id" ] && [ -n "$source_hash" ] &&
+    [ -n "$configuration_hash" ] && [ -n "$now_ns" ] && [ -n "$trusted_key" ] && [ -n "$trusted_key_id" ] &&
+    [ -n "$reviewer_key" ] && [ -n "$reviewer_key_id" ] || usage
+case "$evidence" in *[!A-Za-z0-9_./-]*) usage;; esac
+
+is_sha256() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1;; esac; }
+is_uint() { [ -n "$1" ] && case "$1" in *[!0-9]*) return 1;; esac; }
+safe_token() { [ -n "$1" ] && case "$1" in *[!A-Za-z0-9._-]*) return 1;; esac; }
+# Decimal comparisons avoid shell signed-integer overflow for nanosecond clocks.
+dec_le() { awk -v a="$1" -v b="$2" 'BEGIN{sub(/^0+/,"",a);sub(/^0+/,"",b);if(a=="")a="0";if(b=="")b="0";if(length(a)!=length(b))exit !(length(a)<length(b));exit !(sprintf("%s",a)<=sprintf("%s",b))}'; }
+age_within_day() { awk -v a="$1" -v b="$2" 'BEGIN{sub(/^0+/,"",a);sub(/^0+/,"",b);if(a=="")a="0";if(b=="")b="0";if(length(b)<length(a)||(length(b)==length(a)&&b<a))exit 1; borrow=0;out="";i=length(b);j=length(a);while(i>0){x=substr(b,i,1)+0-borrow;y=(j>0?substr(a,j,1)+0:0);if(x<y){x+=10;borrow=1}else borrow=0;out=(x-y) out;i--;j--}sub(/^0+/,"",out);if(out=="")out="0";lim="86400000000000";exit !((length(out)<length(lim))||(length(out)==length(lim)&&out<=lim))}'; }
+is_sha256 "$source_hash" && is_sha256 "$configuration_hash" && is_uint "$now_ns" || usage
+
+hash_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" | sed 's/^.*= //'
+    else echo "BLOCKED: no SHA-256 implementation (sha256sum, shasum, or openssl)" >&2; exit 2
+    fi
+}
+
+field() {
+    key=$1 file=$2
+    count=$(awk -F= -v key="$key" '$1 == key { count++ } END { print count + 0 }' "$file")
+    [ "$count" -eq 1 ] || return 1
+    sed -n "s/^${key}=//p" "$file"
+}
+
+file_metadata() {
+    if stat -c '%F:%d:%i:%s:%y:%z' -- "$1" >/dev/null 2>&1; then
+        stat -c '%F:%d:%i:%s:%y:%z' -- "$1"
+    else
+        stat -f '%HT:%d:%i:%z:%m:%c' "$1"
+    fi
+}
+file_shape() {
+    if stat -c '%F:%s' -- "$1" >/dev/null 2>&1; then
+        stat -c '%F:%s' -- "$1"
+    else
+        stat -f '%HT:%z' "$1"
+    fi
+}
+file_identity() {
+    metadata=$(file_metadata "$1") || return 1
+    digest=$(hash_file "$1") || return 1
+    printf '%s|%s\n' "$metadata" "$digest"
+}
+regular_nonsymlink() { [ -f "$1" ] && [ ! -L "$1" ]; }
+dir_nonsymlink() { [ -d "$1" ] && [ ! -L "$1" ]; }
+snapshot_file() {
+    source_file=$1 snapshot_file_path=$2
+    regular_nonsymlink "$source_file" || return 1
+    before_shape=$(file_shape "$source_file") || return 1
+    before_identity=$(file_identity "$source_file") || return 1
+    before_digest=${before_identity##*|}
+    cp -- "$source_file" "$snapshot_file_path" || return 1
+    regular_nonsymlink "$snapshot_file_path" || return 1
+    [ "$(file_shape "$snapshot_file_path")" = "$before_shape" ] || return 1
+    [ "$(hash_file "$snapshot_file_path")" = "$before_digest" ] || return 1
+    regular_nonsymlink "$source_file" || return 1
+    [ "$(file_identity "$source_file")" = "$before_identity" ] || return 1
+}
+
+# Order is policy and output order. Keep changes review-visible.
+required_checks='compiler tooling simpleos rendering allocation fault-injection process-safety stress traceability reviewer'
+
+resume_for() {
+    case "$1" in
+        compiler) echo 'sh scripts/check/check-mci-v2-compiler-admission.shs --evidence "$MCI_EVIDENCE/compiler"' ;;
+        simpleos) echo 'sh scripts/check/check-mci-v2-simpleos-manifest.shs --evidence "$MCI_EVIDENCE/simpleos"' ;;
+        rendering) echo 'sh scripts/check/check-mci-v2-rendering.shs --evidence "$MCI_EVIDENCE/rendering"' ;;
+        allocation|fault-injection) echo 'sh scripts/check/check-mci-v2-allocation.shs --evidence "$MCI_EVIDENCE/allocation"' ;;
+        process-safety) echo 'sh scripts/check/check-mci-v2-process-safety.shs --evidence "$MCI_EVIDENCE/process"' ;;
+        stress) echo 'sh scripts/check/check-mci-v2-stress.shs --duration 24h --evidence "$MCI_EVIDENCE/stress"' ;;
+        traceability) echo 'sh scripts/check/check-mci-v2-traceability.shs --evidence "$MCI_EVIDENCE/docs"' ;;
+        tooling) echo 'sh scripts/check/check-mci-v2-tooling-admission.shs --evidence "$MCI_EVIDENCE/tooling"' ;;
+        reviewer) echo 'BLOCKED prerequisite: obtain a fresh decision from the independently operated reviewer producer for aggregate_candidate_sha256' ;;
+    esac
+}
+
+producer_for() {
+    case "$1" in
+        compiler) echo compiler-admission ;;
+        tooling) echo tooling-admission ;;
+        simpleos) echo simpleos-target ;;
+        rendering) echo rendering-target ;;
+        allocation|fault-injection) echo allocation-runtime ;;
+        process-safety) echo process-runtime ;;
+        stress) echo stress-target ;;
+        traceability) echo traceability-gate ;;
+        reviewer) echo independent-review ;;
+    esac
+}
+
+scenario_map() {
+    case "$1" in
+        compiler) echo 'MCI-COMP-001,MCI-COMP-002,MCI-COMP-003,MCI-NFR-003,MCI-NFR-004' ;;
+        tooling) echo 'MCI-TOOL-001,MCI-TOOL-002,MCI-TOOL-003,MCI-NFR-001,MCI-NFR-002,MCI-NFR-005,MCI-NFR-006,MCI-NFR-013,MCI-NFR-014' ;;
+        simpleos) echo 'MCI-OS-001,MCI-OS-002,MCI-OS-003,MCI-OS-004,MCI-OS-005,MCI-OS-006' ;;
+        rendering) echo 'MCI-REN-001,MCI-REN-002,MCI-REN-003,MCI-REN-004,MCI-REN-005,MCI-REN-006,MCI-NFR-011,MCI-NFR-012' ;;
+        allocation|fault-injection) echo 'MCI-ALLOC-001,MCI-ALLOC-002,MCI-ALLOC-003,MCI-ALLOC-004,MCI-ALLOC-005,MCI-ALLOC-006,MCI-NFR-007,MCI-NFR-008,MCI-NFR-009,MCI-NFR-010' ;;
+        process-safety) echo 'MCI-PROC-001,MCI-PROC-002,MCI-PROC-003' ;;
+        stress) echo 'MCI-NFR-015,MCI-NFR-016' ;;
+        traceability) echo 'MCI-DOC-001,MCI-DOC-002,MCI-DOC-003' ;;
+        reviewer) echo 'MCI-NFR-017,MCI-NFR-018' ;;
+    esac
+}
+
+safe_token "$run_id" && safe_token "$trusted_key_id" && safe_token "$reviewer_key_id" || usage
+[ "$reviewer_key_id" != "$trusted_key_id" ] || { echo 'BLOCKED: reviewer key id must differ from producer key id' >&2; exit 2; }
+repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd -P)
+case "$evidence" in /*) evidence_abs=$evidence;; *) evidence_abs=$repo_root/$evidence;; esac
+case "$evidence_abs" in "$repo_root"/*) :;; *) echo 'BLOCKED: evidence must be below repository root' >&2; exit 2;; esac
+relative=${evidence_abs#"$repo_root"/}; walk=$repo_root
+old_ifs=$IFS; IFS=/
+for component in $relative; do [ -n "$component" ] && [ "$component" != . ] && [ "$component" != .. ] || { IFS=$old_ifs; exit 2; }; walk=$walk/$component; [ ! -L "$walk" ] || { IFS=$old_ifs; echo 'BLOCKED: symlink in evidence path' >&2; exit 2; }; done
+IFS=$old_ifs; evidence=$evidence_abs
+dir_nonsymlink "$evidence" && dir_nonsymlink "$evidence/receipts" && dir_nonsymlink "$evidence/artifacts" && dir_nonsymlink "$evidence/signatures" || { echo 'BLOCKED: evidence subdirectories must be real directories' >&2; exit 2; }
+regular_nonsymlink "$trusted_key" || { echo 'BLOCKED: trusted public key missing or unsafe' >&2; exit 2; }
+regular_nonsymlink "$reviewer_key" || { echo 'BLOCKED: reviewer public key missing or unsafe' >&2; exit 2; }
+work=$(mktemp -d "$evidence/.aggregate.XXXXXX") || exit 2
+tmp="$work/report"
+candidate_graph="$work/aggregate-candidate-v1"
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+trusted_key_snapshot="$work/trusted-public-key.pem"
+reviewer_key_snapshot="$work/reviewer-public-key.pem"
+snapshot_file "$trusted_key" "$trusted_key_snapshot" || {
+    echo 'BLOCKED: trusted public key changed during snapshot' >&2
+    exit 2
+}
+snapshot_file "$reviewer_key" "$reviewer_key_snapshot" || {
+    echo 'BLOCKED: reviewer public key changed during snapshot' >&2
+    exit 2
+}
+[ "$(hash_file "$reviewer_key_snapshot")" != "$(hash_file "$trusted_key_snapshot")" ] || {
+    echo 'BLOCKED: reviewer public key must differ from producer public key' >&2
+    exit 2
+}
+{
+    echo 'schema_version=1'
+    echo "run_id=$run_id"
+    echo "source_hash=$source_hash"
+    echo "configuration_hash=$configuration_hash"
+    echo "now_utc_ns=$now_ns"
+} > "$tmp"
+{
+    echo 'candidate_schema=mci-aggregate-candidate-v1'
+    echo 'policy=simple/mci-v2-aggregate-v1'
+    echo "required_check_ids=$required_checks"
+    echo "run_id=$run_id"
+    echo "source_hash=$source_hash"
+    echo "configuration_hash=$configuration_hash"
+    echo "producer_trust_key_id=$trusted_key_id"
+    echo "producer_trust_key_sha256=$(hash_file "$trusted_key_snapshot")"
+    echo "reviewer_trust_key_id=$reviewer_key_id"
+    echo "reviewer_trust_key_sha256=$(hash_file "$reviewer_key_snapshot")"
+    # The entire supplied non-policy receipt set is review-relevant. Reviewer
+    # receipt bytes are excluded to avoid a circular signature dependency.
+    for supplied_path in "$evidence"/receipts/*.receipt; do
+        [ -e "$supplied_path" ] || continue
+        supplied_name=$(basename "$supplied_path" .receipt)
+        expected=false
+        for policy_id in $required_checks; do [ "$supplied_name" = "$policy_id" ] && expected=true; done
+        if [ "$expected" = false ]; then
+            if regular_nonsymlink "$supplied_path"; then
+                echo "unexpected_receipt=$supplied_name|$(hash_file "$supplied_path")"
+            else
+                echo "unexpected_receipt=$supplied_name|unsafe"
+            fi
+        fi
+    done
+} > "$candidate_graph"
+
+blocked=0
+for check_id in $required_checks; do
+    snapshot= signature_snapshot= asnapshot= receipt_hash= artifact_hash=
+    rm -f "$tmp.canonical"
+    if [ "$check_id" = reviewer ]; then
+        aggregate_candidate_hash=$(hash_file "$candidate_graph")
+        echo "aggregate_candidate_sha256=$aggregate_candidate_hash" >> "$tmp"
+    fi
+    receipt="$evidence/receipts/$check_id.receipt"
+    reason=none
+    if [ ! -e "$receipt" ]; then
+        reason=missing
+    elif ! regular_nonsymlink "$receipt"; then
+        reason=unsafe-receipt-file
+    else
+        snapshot="$work/$check_id.receipt"
+        snapshot_file "$receipt" "$snapshot" || reason=receipt-changed-during-snapshot
+        schema=$(field receipt_schema "$snapshot" 2>/dev/null || true)
+        got_check=$(field check_id "$snapshot" 2>/dev/null || true)
+        producer_class=$(field producer_class "$snapshot" 2>/dev/null || true)
+        attestation=$(field attestation "$snapshot" 2>/dev/null || true)
+        key_id=$(field trusted_key_id "$snapshot" 2>/dev/null || true)
+        signature_relpath=$(field signature_relpath "$snapshot" 2>/dev/null || true)
+        got_run=$(field run_id "$snapshot" 2>/dev/null || true)
+        got_source=$(field source_hash "$snapshot" 2>/dev/null || true)
+        got_config=$(field configuration_hash "$snapshot" 2>/dev/null || true)
+        captured_at=$(field captured_at_utc_ns "$snapshot" 2>/dev/null || true)
+        valid_until=$(field valid_until_utc_ns "$snapshot" 2>/dev/null || true)
+        result=$(field result "$snapshot" 2>/dev/null || true)
+        scenarios=$(field scenarios "$snapshot" 2>/dev/null || true)
+        artifact_relpath=$(field artifact_relpath "$snapshot" 2>/dev/null || true)
+        artifact_hash=$(field artifact_sha256 "$snapshot" 2>/dev/null || true)
+        receipt_hash=$(field receipt_hash "$snapshot" 2>/dev/null || true)
+        expected_scenarios=$(scenario_map "$check_id")
+        if [ "$reason" != none ]; then :
+        elif [ "$check_id" = reviewer ]; then
+            reviewer_identity=$(field reviewer_identity "$snapshot" 2>/dev/null || true)
+            reviewer_role=$(field reviewer_role "$snapshot" 2>/dev/null || true)
+            reviewer_scope=$(field reviewer_scope "$snapshot" 2>/dev/null || true)
+            decision=$(field decision "$snapshot" 2>/dev/null || true)
+            decided_at=$(field decided_at_utc_ns "$snapshot" 2>/dev/null || true)
+            candidate_hash=$(field aggregate_candidate_sha256 "$snapshot" 2>/dev/null || true)
+            if [ "$schema" != mci-independent-review-decision-v1 ] || [ "$got_check" != reviewer ]; then reason=invalid-schema-or-check
+            elif [ "$producer_class" != independent-review ] || [ "$attestation" != signed-v1 ] || [ "$key_id" != "$reviewer_key_id" ] || ! safe_token "$signature_relpath"; then reason=untrusted-reviewer
+            elif [ "$key_id" = "$trusted_key_id" ]; then reason=self-issued-review
+            elif ! safe_token "$reviewer_identity" || [ "$reviewer_identity" = "$producer_class" ] || [ "$reviewer_role" != independent-release-reviewer ] || [ "$reviewer_scope" != mci-v2-aggregate ]; then reason=invalid-reviewer-identity-role-or-scope
+            elif [ "$got_run" != "$run_id" ]; then reason=review-replay-or-wrong-run
+            elif ! is_sha256 "$got_source" || [ "$got_source" != "$source_hash" ]; then reason=wrong-source
+            elif ! is_sha256 "$got_config" || [ "$got_config" != "$configuration_hash" ]; then reason=wrong-config
+            elif ! is_sha256 "$candidate_hash" || [ "$candidate_hash" != "$aggregate_candidate_hash" ]; then reason=review-replay-or-wrong-candidate
+            elif ! is_uint "$decided_at" || ! is_uint "$valid_until" || ! dec_le "$decided_at" "$now_ns" || ! dec_le "$now_ns" "$valid_until" || ! age_within_day "$decided_at" "$now_ns" || ! age_within_day "$decided_at" "$valid_until"; then reason=stale-or-invalid-review
+            elif [ "$decision" != approve ]; then reason=review-not-approved
+            elif [ "$scenarios" != "$expected_scenarios" ]; then reason=scenario-map-mismatch
+            else
+                {
+                    echo "receipt_schema=$schema"; echo 'check_id=reviewer'
+                    echo "producer_class=$producer_class"; echo "attestation=$attestation"; echo "trusted_key_id=$key_id"; echo "signature_relpath=$signature_relpath"
+                    echo "reviewer_identity=$reviewer_identity"; echo "reviewer_role=$reviewer_role"; echo "reviewer_scope=$reviewer_scope"
+                    echo "run_id=$got_run"; echo "source_hash=$got_source"; echo "configuration_hash=$got_config"
+                    echo "aggregate_candidate_sha256=$candidate_hash"; echo "decided_at_utc_ns=$decided_at"; echo "valid_until_utc_ns=$valid_until"
+                    echo "decision=$decision"; echo "scenarios=$scenarios"
+                } > "$tmp.canonical"
+                if ! sed '/^receipt_hash=/d' "$snapshot" | cmp -s - "$tmp.canonical" || ! is_sha256 "$receipt_hash" || [ "$(hash_file "$tmp.canonical")" != "$receipt_hash" ]; then reason=invalid-receipt-hash
+                else
+                    signature_path="$evidence/signatures/$signature_relpath"
+                    signature_snapshot="$work/reviewer.signature"
+                    if ! regular_nonsymlink "$signature_path" || ! snapshot_file "$signature_path" "$signature_snapshot"; then reason=invalid-signature
+                    elif ! openssl dgst -sha256 -verify "$reviewer_key_snapshot" -signature "$signature_snapshot" "$tmp.canonical" >/dev/null 2>&1; then reason=invalid-signature
+                    fi
+                fi
+            fi
+        elif [ "$schema" != mci-lane-receipt-v1 ] || [ "$got_check" != "$check_id" ] || ! safe_token "$got_check"; then reason=invalid-schema-or-check
+        elif [ "$producer_class" != "$(producer_for "$check_id")" ] || [ "$attestation" != signed-v1 ] || [ "$key_id" != "$trusted_key_id" ] || ! safe_token "$signature_relpath"; then reason=untrusted-producer
+        elif [ "$got_run" != "$run_id" ]; then reason=wrong-run
+        elif ! is_sha256 "$got_source" || [ "$got_source" != "$source_hash" ]; then reason=wrong-source
+        elif ! is_sha256 "$got_config" || [ "$got_config" != "$configuration_hash" ]; then reason=wrong-config
+        elif ! is_uint "$captured_at" || ! is_uint "$valid_until" || ! dec_le "$captured_at" "$now_ns" || ! dec_le "$now_ns" "$valid_until" || ! age_within_day "$captured_at" "$now_ns" || ! age_within_day "$captured_at" "$valid_until"; then reason=stale-or-invalid-lifetime
+        elif [ "$result" = skipped ]; then reason=skipped
+        elif [ "$result" != pass ]; then reason=failed-or-blocked
+        elif [ "$scenarios" != "$expected_scenarios" ]; then reason=scenario-map-mismatch
+        elif ! safe_token "$artifact_relpath"; then reason=unsafe-artifact-path
+        else
+            artifact_path="$evidence/artifacts/$artifact_relpath"
+            if ! regular_nonsymlink "$artifact_path"; then reason=unsafe-artifact-file
+            else
+                asnapshot="$work/$check_id.artifact"
+                if ! snapshot_file "$artifact_path" "$asnapshot" || ! is_sha256 "$artifact_hash" || [ "$(hash_file "$asnapshot")" != "$artifact_hash" ]; then reason=invalid-artifact-hash; fi
+            fi
+        fi
+        if [ "$reason" = none ] && [ "$check_id" != reviewer ]; then
+            {
+                echo "receipt_schema=$schema"; echo "check_id=$got_check"
+                echo "producer_class=$producer_class"; echo "attestation=$attestation"; echo "trusted_key_id=$key_id"; echo "signature_relpath=$signature_relpath"; echo "run_id=$got_run"
+                echo "source_hash=$got_source"; echo "configuration_hash=$got_config"
+                echo "captured_at_utc_ns=$captured_at"; echo "valid_until_utc_ns=$valid_until"; echo "result=$result"
+                echo "scenarios=$scenarios"; echo "artifact_relpath=$artifact_relpath"
+                echo "artifact_sha256=$artifact_hash"
+            } > "$tmp.canonical"
+            if ! sed '/^receipt_hash=/d' "$snapshot" | cmp -s - "$tmp.canonical" ||
+               ! is_sha256 "$receipt_hash" || [ "$(hash_file "$tmp.canonical")" != "$receipt_hash" ]; then
+                reason=invalid-receipt-hash
+            else
+                signature_path="$evidence/signatures/$signature_relpath"
+                if ! regular_nonsymlink "$signature_path"; then
+                    reason=invalid-signature
+                else
+                    signature_snapshot="$work/$check_id.signature"
+                    if ! snapshot_file "$signature_path" "$signature_snapshot"; then
+                        reason=signature-changed-during-snapshot
+                    elif ! openssl dgst -sha256 -verify "$trusted_key_snapshot" -signature "$signature_snapshot" "$tmp.canonical" >/dev/null 2>&1; then
+                        reason=invalid-signature
+                    fi
+                fi
+            fi
+        fi
+    fi
+    if [ "$reason" = none ]; then status=PASS; else status=BLOCKED; blocked=$((blocked + 1)); fi
+    echo "row=$check_id|$status|$reason|$(scenario_map "$check_id")" >> "$tmp"
+    if [ "$status" = BLOCKED ]; then
+        command=$(resume_for "$check_id")
+        if [ "$check_id" = reviewer ]; then
+            echo "resume=$check_id|$command" >> "$tmp"
+        else
+            script=$(printf '%s\n' "$command" | awk '{print $2}'); owner="$repo_root/$script"
+            if [ -x "$owner" ] && regular_nonsymlink "$owner"; then echo "resume=$check_id|sh $owner ${command#*"$script"}" >> "$tmp"
+            else echo "resume=$check_id|BLOCKED prerequisite: executable owner script missing: $owner" >> "$tmp"; fi
+        fi
+    fi
+    if [ "$check_id" != reviewer ]; then
+        receipt_bytes=missing; canonical_digest=none; signature_digest=none; verified_artifact_digest=none
+        [ -f "${snapshot:-}" ] && receipt_bytes=$(hash_file "$snapshot")
+        [ -f "$tmp.canonical" ] && canonical_digest=$(hash_file "$tmp.canonical")
+        [ -f "${signature_snapshot:-}" ] && signature_digest=$(hash_file "$signature_snapshot")
+        [ -f "${asnapshot:-}" ] && verified_artifact_digest=$(hash_file "$asnapshot")
+        command=$(resume_for "$check_id")
+        script=$(printf '%s\n' "$command" | awk '{print $2}')
+        owner="$repo_root/$script"
+        if [ -x "$owner" ] && regular_nonsymlink "$owner"; then resume_owner="executable:$script"
+        else resume_owner="blocked-owner:$script"; fi
+        echo "evidence=$check_id|$status|$reason|receipt_bytes=$receipt_bytes|canonical_receipt=$canonical_digest|receipt_field=$receipt_hash|signature=$signature_digest|declared_artifact=$artifact_hash|verified_artifact=$verified_artifact_digest|resume=$resume_owner" >> "$candidate_graph"
+    fi
+done
+
+# A receipt outside the frozen policy is evidence substitution, not ignorable input.
+for receipt in "$evidence"/receipts/*.receipt; do
+    [ -e "$receipt" ] || continue
+    supplied=$(basename "$receipt" .receipt)
+    if ! safe_token "$supplied"; then
+        echo 'row=unsafe-receipt-name|BLOCKED|unexpected|' >> "$tmp"
+        echo 'resume=unsafe-receipt-name|BLOCKED prerequisite: remove unsafe receipt filename after preserving rejected evidence' >> "$tmp"
+        blocked=$((blocked + 1))
+        continue
+    fi
+    expected=false
+    for check_id in $required_checks; do [ "$supplied" = "$check_id" ] && expected=true; done
+    if [ "$expected" = false ]; then
+        echo "row=$supplied|BLOCKED|unexpected|" >> "$tmp"
+        echo "resume=$supplied|remove unexpected receipt after preserving it as rejected evidence: $receipt" >> "$tmp"
+        blocked=$((blocked + 1))
+    fi
+done
+
+echo 'collector_contract=PASS' >> "$tmp"
+echo 'collector_contract_scenarios=MCI-AGG-001,MCI-AGG-002,MCI-AGG-003' >> "$tmp"
+if [ "$blocked" -eq 0 ]; then
+    result=PASS
+else
+    result=BLOCKED
+fi
+echo "result=$result" >> "$tmp"
+echo "blocked_count=$blocked" >> "$tmp"
+manifest_hash=$(hash_file "$tmp")
+echo "manifest_sha256=$manifest_hash" >> "$tmp"
+sync
+[ "$(sed '$d' "$tmp" | hash_file /dev/stdin 2>/dev/null || true)" = "$manifest_hash" ] || { echo 'BLOCKED: report verification failed' >&2; exit 2; }
+mv "$tmp" "$evidence/aggregate-report-v1.env"
+sync
+[ "$(sed '$d' "$evidence/aggregate-report-v1.env" | hash_file /dev/stdin 2>/dev/null || true)" = "$manifest_hash" ] || { echo 'BLOCKED: published report verification failed' >&2; exit 2; }
+trap - EXIT HUP INT TERM
+rm -rf "$work"
+echo "$result: MCI aggregate ($blocked blocked); report=$evidence/aggregate-report-v1.env sha256=$manifest_hash"
+[ "$blocked" -eq 0 ]

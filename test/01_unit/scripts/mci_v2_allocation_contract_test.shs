@@ -1,0 +1,216 @@
+#!/bin/sh
+set -eu
+umask 077
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd)
+gate=$root/scripts/check/check-mci-v2-allocation.shs
+work=$(mktemp -d "$root/build/mci-allocation.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+mkdir -p "$work/evidence"
+awk '/^    it "/ { line=$0; sub(/^    it "/, "", line); sub(/":$/, "", line); print line }' \
+    "$root/test/01_unit/lib/nogc_sync_mut/mission_critical/domain_arena_v1_spec.spl" > "$work/pass.log"
+index=1
+while [ "$index" -le 12 ]; do printf 'MCI_DOMAIN_ARENA_EVIDENCE|schema=1|kind=scenario|id=MCI-ARENA-%03d|result=pass\n' "$index" >> "$work/pass.log"; index=$((index + 1)); done
+printf '%s\n' \
+    'MCI_DOMAIN_ARENA_EVIDENCE|schema=1|kind=profile|profile_hash=a77be0b0e329204db951474c0085526c103049d51ce6ae6a194e5f9312bd11b3' \
+    'MCI_DOMAIN_ARENA_EVIDENCE|schema=1|kind=committed_snapshot|snapshot_hash=632e0465fb204ef8d4cb278ccb58190f1adfda98ac086ad743af1247a5dfefdd' >> "$work/pass.log"
+printf '%s\n' 'runner_authority=self-hosted-pure-simple' 'runner_seed=false' > "$work/runner.env"
+hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
+file_identity() {
+    if stat -c '%F:%d:%i:%s:%y:%z' "$1" >/dev/null 2>&1; then metadata=$(stat -c '%F:%d:%i:%s:%y:%z' "$1")
+    else metadata=$(stat -f '%HT:%d:%i:%z:%m:%c' "$1"); fi
+    printf '%s|%s\n' "$metadata" "$(hash_file "$1")"
+}
+resolve_executable() {
+    resolve_command=$1 resolve_chain_file=$2
+    resolved=$(command -v "$resolve_command") || return 1
+    case "$resolved" in /*) :;; */*) resolved=$(CDPATH= cd -- "$(dirname "$resolved")" && pwd -P)/$(basename "$resolved");; *) return 1;; esac
+    : > "$resolve_chain_file"; seen='|'; hops=0
+    while [ -L "$resolved" ]; do
+        case "$resolved" in *'|'*) return 1;; esac
+        case "$seen" in *"|$resolved|"*) return 1;; esac
+        seen=$seen$resolved'|'; target=$(readlink "$resolved") || return 1
+        [ -n "$target" ] || return 1; case "$target" in *'|'*) return 1;; esac
+        printf '%s -> %s\n' "$resolved" "$target" >> "$resolve_chain_file"
+        case "$target" in /*) next=$target;; *) next=$(dirname "$resolved")/$target;; esac
+        next_dir=$(CDPATH= cd -- "$(dirname "$next")" 2>/dev/null && pwd -P) || return 1
+        resolved=$next_dir/$(basename "$next"); case "$resolved" in /*) :;; *) return 1;; esac
+        hops=$((hops + 1)); [ "$hops" -le 40 ] || return 1
+    done
+    [ -f "$resolved" ] && [ ! -L "$resolved" ] && [ -x "$resolved" ] || return 1
+    printf '%s\n' "$resolved" >> "$resolve_chain_file"; printf '%s\n' "$resolved"
+}
+profile_hash=a77be0b0e329204db951474c0085526c103049d51ce6ae6a194e5f9312bd11b3
+subject_hash=632e0465fb204ef8d4cb278ccb58190f1adfda98ac086ad743af1247a5dfefdd
+printf '%s' "domain-arena-committed-state-v1|arena_id=21|domain_id=4|profile_hash=$profile_hash|generation=1|cursor_bytes=16|allocation_count=1|publication_epoch=1" > "$work/isolated.canonical"
+isolated_hash=$(hash_file "$work/isolated.canonical")
+emit_ledger() {
+    point=$1; point_name=$2
+    canonical="domain-arena-fault-ledger-v1|schema=1|run_id=18:arena-ledger-run-1|point=$point|point_name=${#point_name}:$point_name|occurrence=1|subject_arena=22|subject_generation=1|isolated_arena=21|isolated_generation=1|subject_before=$subject_hash|subject_after=$subject_hash|isolated_before=$isolated_hash|isolated_after=$isolated_hash|injected=1|rolled_back=1"
+    printf '%s' "$canonical" > "$work/row.canonical"; row_hash=$(hash_file "$work/row.canonical")
+    printf 'MCI_DOMAIN_ARENA_EVIDENCE|schema=1|kind=ledger|fault_id=%s|fault_name=%s|run_id=arena-ledger-run-1|occurrence=1|subject_arena=22|subject_generation=1|isolated_arena=21|isolated_generation=1|subject_before=%s|subject_after=%s|isolated_before=%s|isolated_after=%s|injected=1|rolled_back=1|row_hash=%s\n' "$point" "$point_name" "$subject_hash" "$subject_hash" "$isolated_hash" "$isolated_hash" "$row_hash" >> "$work/pass.log"
+}
+emit_ledger 1 before_cursor_advance
+emit_ledger 2 before_publication
+spec_sha=$(hash_file "$root/test/01_unit/lib/nogc_sync_mut/mission_critical/domain_arena_v1_spec.spl")
+impl_sha=$(hash_file "$root/src/lib/nogc_sync_mut/mission_critical/domain_arena_v1.spl")
+{
+    echo 'manifest_schema=mci-allocation-source-manifest-v1'
+    echo 'spec_path=test/01_unit/lib/nogc_sync_mut/mission_critical/domain_arena_v1_spec.spl'; echo "spec_sha256=$spec_sha"
+    echo 'implementation_path=src/lib/nogc_sync_mut/mission_critical/domain_arena_v1.spl'; echo "implementation_sha256=$impl_sha"
+} > "$work/source.manifest"
+sha_a=$(hash_file "$work/source.manifest")
+runner_sha=$(hash_file "$work/runner.env"); producer_sha=$(hash_file "$gate")
+publisher_sha=$(hash_file "$root/scripts/check/lib/mci-secure-publish.c")
+compiler_launcher_source_sha=$(hash_file "$root/scripts/check/lib/mci-fexec-launch.c")
+cc -std=c11 -O2 "$root/scripts/check/lib/mci-secure-publish.c" -o "$work/secure-publish-production"
+publisher_binary_sha=$(hash_file "$work/secure-publish-production")
+cc -std=c11 -O2 "$root/scripts/check/lib/mci-fexec-launch.c" -o "$work/compiler-launch-production"
+compiler_launcher_binary_sha=$(hash_file "$work/compiler-launch-production")
+openssl genpkey -algorithm ED25519 -out "$work/launcher-fixture-private.pem" >/dev/null 2>&1
+openssl pkey -in "$work/launcher-fixture-private.pem" -pubout -out "$work/launcher-fixture-public.pem" >/dev/null 2>&1
+launcher_key_sha=$(hash_file "$work/launcher-fixture-public.pem")
+{
+    echo 'receipt_schema=mci-compiler-launcher-v1'
+    echo 'attestation=signed-v1'
+    echo 'algorithm=ed25519'
+    echo 'trusted_key_id=fixture-launcher-key'
+    echo 'policy_version=7'
+    echo 'revocation_epoch=3'
+    echo 'build_id=fixture-build-9'
+    echo 'build_epoch=9'
+    echo 'captured_at_utc_ns=50'
+    echo 'valid_until_utc_ns=150'
+    echo "source_sha256=$compiler_launcher_source_sha"
+    echo "binary_sha256=$compiler_launcher_binary_sha"
+} > "$work/compiler-launch.receipt"
+openssl pkeyutl -sign -inkey "$work/launcher-fixture-private.pem" -rawin -in "$work/compiler-launch.receipt" -out "$work/compiler-launch.sig"
+{
+    echo 'policy_schema=mci-allocation-launcher-trust-policy-v1'; echo 'policy_version=7'; echo 'revocation_epoch=3'; echo 'min_build_epoch=9'
+    echo 'scope=fixture'; echo 'state=provisioned'; echo 'algorithm=ed25519'
+    echo 'trusted_key_id=fixture-launcher-key'; echo "trusted_public_key_path=$work/launcher-fixture-public.pem"
+    echo "trusted_public_key_sha256=$launcher_key_sha"; echo 'review_status=approved'; echo 'reviewer_id=contract-test-reviewer'
+} > "$work/launcher-fixture-policy.env"
+compiler_command=cc
+compiler_path=$(resolve_executable "$compiler_command" "$work/compiler.path-chain")
+compiler_identity_before=$(file_identity "$compiler_path")
+cp -- "$compiler_path" "$work/compiler.snapshot"
+[ "$(hash_file "$work/compiler.snapshot")" = "${compiler_identity_before##*|}" ]
+[ "$(file_identity "$compiler_path")" = "$compiler_identity_before" ]
+publisher_compiler_sha=$(hash_file "$work/compiler.snapshot")
+"$compiler_path" --version > "$work/compiler.identity"
+publisher_compiler_identity_sha=$(hash_file "$work/compiler.identity")
+publisher_compiler_path_chain_sha=$(hash_file "$work/compiler.path-chain")
+printf '%s' "$compiler_identity_before" > "$work/compiler.final-identity"
+publisher_compiler_final_identity_sha=$(hash_file "$work/compiler.final-identity")
+launcher_policy_sha=$(hash_file "$work/launcher-fixture-policy.env")
+launcher_receipt_sha=$(hash_file "$work/compiler-launch.receipt")
+launcher_signature_sha=$(hash_file "$work/compiler-launch.sig")
+{
+    echo 'manifest_schema=mci-allocation-configuration-manifest-v1'
+    echo "producer_sha256=$producer_sha"; echo "publisher_sha256=$publisher_sha"; echo "publisher_binary_sha256=$publisher_binary_sha"
+    echo "compiler_launcher_source_sha256=$compiler_launcher_source_sha"; echo "compiler_launcher_binary_sha256=$compiler_launcher_binary_sha"
+    echo 'compiler_launcher_trust_key_id=fixture-launcher-key'; echo "compiler_launcher_trust_key_sha256=$launcher_key_sha"
+    echo 'compiler_launcher_policy_version=7'; echo 'compiler_launcher_revocation_epoch=3'
+    echo 'compiler_launcher_build_id=fixture-build-9'; echo 'compiler_launcher_build_epoch=9'
+    echo "compiler_launcher_trust_policy_sha256=$launcher_policy_sha"; echo "compiler_launcher_receipt_sha256=$launcher_receipt_sha"; echo "compiler_launcher_signature_sha256=$launcher_signature_sha"
+    echo "publisher_compiler_command=$compiler_command"; echo "publisher_compiler_final_path=$compiler_path"
+    echo "publisher_compiler_path_chain_sha256=$publisher_compiler_path_chain_sha"; echo "publisher_compiler_final_identity_sha256=$publisher_compiler_final_identity_sha"
+    echo "publisher_compiler_sha256=$publisher_compiler_sha"; echo "publisher_compiler_identity_sha256=$publisher_compiler_identity_sha"
+    echo "runner_sha256=$runner_sha"; echo 'controlled_fixture=true'
+} > "$work/config.manifest"
+sha_b=$(hash_file "$work/config.manifest")
+{
+    echo 'provenance_schema=mci-allocation-runner-provenance-v1'; echo 'lineage=self-hosted-pure-simple'
+    echo "runner_sha256=$runner_sha"; echo "source_manifest_sha256=$sha_a"; echo "configuration_manifest_sha256=$sha_b"
+} > "$work/provenance.receipt"
+
+# The launcher executes the opened inode, then rejects a replaced command path.
+cc -std=c11 -O2 -DTEST_ONLY "$root/scripts/check/lib/mci-fexec-launch.c" -o "$work/compiler-launch-test"
+printf '%s\n' '#!/bin/sh' 'printf "%s\n" original' > "$work/compiler-a"; chmod 0700 "$work/compiler-a"
+printf '%s\n' '#!/bin/sh' 'printf "%s\n" replacement' > "$work/compiler-b"; chmod 0700 "$work/compiler-b"
+set +e
+MCI_FEXEC_TEST_REPLACEMENT="$work/compiler-b" "$work/compiler-launch-test" "$work/compiler-a" "$work/compiler-a" > "$work/compiler-launch.out"
+launcher_rc=$?
+set -e
+[ "$launcher_rc" -eq 70 ] && grep -Fxq original "$work/compiler-launch.out"
+
+# Secure publisher rejects hostile final/temp leaves and a directory swap.
+cc -std=c11 -O2 -DTEST_ONLY "$root/scripts/check/lib/mci-secure-publish.c" -o "$work/secure-publish"
+mkdir -m 0700 "$work/publish-dir"; printf secure > "$work/publish-source"
+ln -s "$work/publish-source" "$work/publish-dir/final"
+if "$work/secure-publish" "$work/publish-dir" "$work/publish-source" final; then exit 1; fi
+rm "$work/publish-dir/final"; ln "$work/publish-source" "$work/publish-dir/final"
+if "$work/secure-publish" "$work/publish-dir" "$work/publish-source" final; then exit 1; fi
+rm "$work/publish-dir/final"
+"$work/secure-publish" "$work/publish-dir" "$work/publish-source" __test_dir_swap__ >/dev/null 2>&1 && exit 1
+[ ! -e "$work/publish-dir/__test_dir_swap__" ]
+if [ -d "$work/publish-dir.old" ]; then rm -r "$work/publish-dir"; mv "$work/publish-dir.old" "$work/publish-dir"; fi
+set +e
+"$work/secure-publish" "$work/publish-dir" "$work/publish-source" __test_fsync_fail__ >/dev/null 2>&1
+fsync_rc=$?
+set -e
+[ "$fsync_rc" -eq 3 ] && [ -f "$work/publish-dir/__test_fsync_fail__" ]
+for output_name in allocation-domain-arena-v1.log allocation-domain-arena-v1.evidence allocation.unsigned.template allocation-report-v1.env; do
+    printf existing > "$work/publish-dir/$output_name"
+    if "$work/secure-publish" "$work/publish-dir" "$work/publish-source" "$output_name"; then exit 1; fi
+done
+run_gate() {
+    MCI_ALLOCATION_CONTROLLED_FIXTURE=1 "$gate" --evidence "$work/evidence" \
+        --run-id allocation-contract --source-hash "$sha_a" --configuration-hash "$sha_b" \
+        --captured-at-utc-ns 100 --valid-until-utc-ns 200 \
+        --compiler-launcher "$work/compiler-launch-production" --compiler-launcher-receipt "$work/compiler-launch.receipt" \
+        --compiler-launcher-signature "$work/compiler-launch.sig" --launcher-trust-policy "$work/launcher-fixture-policy.env" \
+        --fixture-log "$1" --fixture-runner "$2" --runner-provenance "$work/provenance.receipt"
+}
+run_gate "$work/pass.log" "$work/runner.env" > "$work/out"
+grep -Fxq 'allocation_contract_result=PASS' "$work/out"
+grep -Fxq 'allocation_release_eligible=false' "$work/out"
+grep -Fxq 'controlled_fixture=true' "$work/evidence/artifacts/allocation-domain-arena-v1.evidence"
+grep -Fxq 'release_eligible=false' "$work/evidence/artifacts/allocation-domain-arena-v1.evidence"
+grep -Fxq 'canonical_markers_passed=12' "$work/evidence/artifacts/allocation-domain-arena-v1.evidence"
+grep -Fxq 'attestation=EXTERNAL_SIGNER_SETS_signed-v1' "$work/evidence/receipts/allocation.unsigned.template"
+grep -Fxq 'result=CONTRACT_ONLY' "$work/evidence/allocation-report-v1.env"
+[ ! -e "$work/evidence/receipts/allocation.receipt" ]
+
+# Live mode is blocked by the tracked unprovisioned policy; fixture trust cannot
+# be substituted into live mode.
+if "$gate" --evidence "$work/live-unprovisioned" --run-id allocation-contract --source-hash "$sha_a" \
+    --configuration-hash "$sha_b" --captured-at-utc-ns 100 --valid-until-utc-ns 200 \
+    --compiler-launcher "$work/compiler-launch-production" --compiler-launcher-receipt "$work/compiler-launch.receipt" \
+    --compiler-launcher-signature "$work/compiler-launch.sig" --runner-provenance "$work/provenance.receipt" >/dev/null 2>&1; then exit 1; fi
+if "$gate" --evidence "$work/live-fixture-policy" --run-id allocation-contract --source-hash "$sha_a" \
+    --configuration-hash "$sha_b" --captured-at-utc-ns 100 --valid-until-utc-ns 200 \
+    --compiler-launcher "$work/compiler-launch-production" --compiler-launcher-receipt "$work/compiler-launch.receipt" \
+    --compiler-launcher-signature "$work/compiler-launch.sig" --launcher-trust-policy "$work/launcher-fixture-policy.env" \
+    --runner-provenance "$work/provenance.receipt" >/dev/null 2>&1; then exit 1; fi
+
+# Invalid signature, key digest, and review state all fail before evidence runs.
+cp "$work/compiler-launch.sig" "$work/bad.sig"; printf x >> "$work/bad.sig"
+if MCI_ALLOCATION_CONTROLLED_FIXTURE=1 "$gate" --evidence "$work/bad-signature" --run-id allocation-contract --source-hash "$sha_a" --configuration-hash "$sha_b" --captured-at-utc-ns 100 --valid-until-utc-ns 200 --compiler-launcher "$work/compiler-launch-production" --compiler-launcher-receipt "$work/compiler-launch.receipt" --compiler-launcher-signature "$work/bad.sig" --launcher-trust-policy "$work/launcher-fixture-policy.env" --fixture-log "$work/pass.log" --fixture-runner "$work/runner.env" --runner-provenance "$work/provenance.receipt" >/dev/null 2>&1; then exit 1; fi
+sed 's/^trusted_public_key_sha256=.*/trusted_public_key_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$work/launcher-fixture-policy.env" > "$work/bad-digest-policy.env"
+if MCI_ALLOCATION_CONTROLLED_FIXTURE=1 "$gate" --evidence "$work/bad-digest" --run-id allocation-contract --source-hash "$sha_a" --configuration-hash "$sha_b" --captured-at-utc-ns 100 --valid-until-utc-ns 200 --compiler-launcher "$work/compiler-launch-production" --compiler-launcher-receipt "$work/compiler-launch.receipt" --compiler-launcher-signature "$work/compiler-launch.sig" --launcher-trust-policy "$work/bad-digest-policy.env" --fixture-log "$work/pass.log" --fixture-runner "$work/runner.env" --runner-provenance "$work/provenance.receipt" >/dev/null 2>&1; then exit 1; fi
+sed 's/^review_status=.*/review_status=pending/' "$work/launcher-fixture-policy.env" > "$work/unreviewed-policy.env"
+if MCI_ALLOCATION_CONTROLLED_FIXTURE=1 "$gate" --evidence "$work/unreviewed" --run-id allocation-contract --source-hash "$sha_a" --configuration-hash "$sha_b" --captured-at-utc-ns 100 --valid-until-utc-ns 200 --compiler-launcher "$work/compiler-launch-production" --compiler-launcher-receipt "$work/compiler-launch.receipt" --compiler-launcher-signature "$work/compiler-launch.sig" --launcher-trust-policy "$work/unreviewed-policy.env" --fixture-log "$work/pass.log" --fixture-runner "$work/runner.env" --runner-provenance "$work/provenance.receipt" >/dev/null 2>&1; then exit 1; fi
+
+resign_receipt_negative() {
+    negative_name=$1 pattern=$2 replacement=$3
+    sed "s/^$pattern=.*/$pattern=$replacement/" "$work/compiler-launch.receipt" > "$work/$negative_name.receipt"
+    openssl pkeyutl -sign -inkey "$work/launcher-fixture-private.pem" -rawin -in "$work/$negative_name.receipt" -out "$work/$negative_name.sig"
+    if MCI_ALLOCATION_CONTROLLED_FIXTURE=1 "$gate" --evidence "$work/$negative_name" --run-id allocation-contract --source-hash "$sha_a" --configuration-hash "$sha_b" --captured-at-utc-ns 100 --valid-until-utc-ns 200 --compiler-launcher "$work/compiler-launch-production" --compiler-launcher-receipt "$work/$negative_name.receipt" --compiler-launcher-signature "$work/$negative_name.sig" --launcher-trust-policy "$work/launcher-fixture-policy.env" --fixture-log "$work/pass.log" --fixture-runner "$work/runner.env" --runner-provenance "$work/provenance.receipt" >/dev/null 2>&1; then exit 1; fi
+}
+resign_receipt_negative future captured_at_utc_ns 101
+resign_receipt_negative expired valid_until_utc_ns 99
+resign_receipt_negative overlong valid_until_utc_ns 86400000000051
+resign_receipt_negative overflow valid_until_utc_ns 9223372036854775808
+resign_receipt_negative old-policy policy_version 6
+resign_receipt_negative old-revocation revocation_epoch 2
+resign_receipt_negative revoked-build build_epoch 8
+
+sed '$d' "$work/pass.log" > "$work/missing.log"
+if run_gate "$work/missing.log" "$work/runner.env" >/dev/null 2>&1; then exit 1; fi
+printf '%s\n' 'runner_authority=rust-bootstrap-seed' 'runner_seed=true' > "$work/seed.env"
+if run_gate "$work/pass.log" "$work/seed.env" >/dev/null 2>&1; then exit 1; fi
+if "$gate" --evidence "$work/evidence" --run-id allocation-contract --source-hash "$sha_a" \
+    --configuration-hash "$sha_b" --captured-at-utc-ns 100 --valid-until-utc-ns 200 \
+    --fixture-log "$work/pass.log" --fixture-runner "$work/runner.env" --launcher-trust-policy "$work/launcher-fixture-policy.env" >/dev/null 2>&1; then exit 1; fi
+echo 'PASS: MCI-v2 allocation producer controlled contract'
