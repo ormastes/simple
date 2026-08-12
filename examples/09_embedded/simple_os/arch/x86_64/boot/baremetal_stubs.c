@@ -19600,6 +19600,15 @@ static uint32_t _bm_blend_pixel(uint32_t sp, uint32_t dp)
     if (sa == 0u) return dp;
     uint32_t da = (dp >> 24) & 0xFFu;
     uint32_t inv = 255u - sa;
+    if (da == 255u) {
+        uint32_t r = ((((sp >> 16) & 0xFFu) * sa) +
+                      (((dp >> 16) & 0xFFu) * inv)) / 255u;
+        uint32_t g = ((((sp >> 8) & 0xFFu) * sa) +
+                      (((dp >> 8) & 0xFFu) * inv)) / 255u;
+        uint32_t b = (((sp & 0xFFu) * sa) +
+                      ((dp & 0xFFu) * inv)) / 255u;
+        return 0xFF000000u | (r << 16) | (g << 8) | b;
+    }
     uint32_t dst_weight = (da * inv) / 255u;
     uint32_t out_a = sa + dst_weight;          /* >= sa >= 1 */
     uint32_t r = (((sp >> 16) & 0xFFu) * sa + ((dp >> 16) & 0xFFu) * dst_weight) / out_a;
@@ -19742,7 +19751,9 @@ RuntimeValue rt_engine2d_simd_blend_span_u32(RuntimeValue dst, int64_t dst_offse
     RuntimeValue *si = runtime_array_items(s);
     if (!di || !si) return dst;
 
-    for (int64_t i = 0; i < n; i++) {
+    int backwards = (di == si && d_off > s_off && d_off - s_off < n);
+    for (int64_t step = 0; step < n; step++) {
+        int64_t i = backwards ? n - 1 - step : step;
         uint32_t sp = _bm_unbox_pixel(si[s_off + i]);
         uint32_t dp = _bm_unbox_pixel(di[d_off + i]);
         di[d_off + i] = _bm_box_pixel(_bm_blend_pixel(sp, dp));
@@ -19859,6 +19870,11 @@ RuntimeValue rt_engine2d_simd_blend_const_span_u32(RuntimeValue dst, int64_t off
     uint32_t sp = (uint32_t)(uint64_t)const_color;
     uint32_t sa = (sp >> 24) & 0xFFu;
     if (sa == 0u) return dst;
+    if (sa == 255u) {
+        RuntimeValue word = _bm_box_pixel(sp);
+        for (int64_t i = 0; i < n; i++) items[off + i] = word;
+        return dst;
+    }
     for (int64_t i = 0; i < n; i++) {
         uint32_t dp = _bm_unbox_pixel(items[off + i]);
         items[off + i] = _bm_box_pixel(_bm_blend_pixel(sp, dp));
