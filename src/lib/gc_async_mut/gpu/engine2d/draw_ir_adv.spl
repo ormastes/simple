@@ -1454,13 +1454,13 @@ struct Engine2dClippedImage:
     height: i32
     pixels: [u32]
 
-fn _engine2d_draw_ir_clip_exact_image(
+fn _engine2d_draw_ir_materialize_image_damage(
     image: Engine2dResolvedDrawIrImage, x: i32, y: i32,
     command: DrawIrCommand, active_clip: DrawIrRect,
     offset_x: i32, offset_y: i32
 ) -> Engine2dClippedImage:
-    if (not active_clip.present or command.width != image.width or
-        command.height != image.height):
+    if (not active_clip.present or command.width <= 0 or
+        command.height <= 0):
         return Engine2dClippedImage(
             handled: false, valid: false, x: x, y: y,
             width: 0, height: 0, pixels: [])
@@ -1473,19 +1473,25 @@ fn _engine2d_draw_ir_clip_exact_image(
         return Engine2dClippedImage(
             handled: true, valid: false, x: clip.x, y: clip.y,
             width: 0, height: 0, pixels: [])
-    if clip.width == image.width and clip.height == image.height:
+    if clip.width == command.width and clip.height == command.height:
         return Engine2dClippedImage(
             handled: false, valid: false, x: x, y: y,
             width: 0, height: 0, pixels: [])
-    val source_x = clip.x - x
-    val source_y = clip.y - y
+    val destination_x = clip.x - x
+    val destination_y = clip.y - y
     var cropped: [u32] = []
     var row = 0
     while row < clip.height:
         var col = 0
         while col < clip.width:
+            val source_x = (
+                (destination_x + col).to_i64() * image.width.to_i64() /
+                command.width.to_i64()).to_i32()
+            val source_y = (
+                (destination_y + row).to_i64() * image.height.to_i64() /
+                command.height.to_i64()).to_i32()
             cropped.push(image.pixels[
-                (source_y + row) * image.width + source_x + col])
+                source_y * image.width + source_x])
             col += 1
         row += 1
     Engine2dClippedImage(
@@ -1798,7 +1804,7 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
                         unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(
                             unsupported_kinds, "image-css-background")
                 else:
-                    val clipped = _engine2d_draw_ir_clip_exact_image(
+                    val clipped = _engine2d_draw_ir_materialize_image_damage(
                         image, x, y, command, active_clip,
                         offset_x, offset_y)
                     if clipped.valid:
