@@ -371,3 +371,15 @@ dev-done
   and alignment rules. The current native system harness is vacuous, so real
   AVX2 host execution, CPU-feature receipts, liveness reuse/spills, and native
   end-to-end system evidence remain open rather than being called complete.
+- impl: Closed the first real-host evidence gap for the custom x86 AVX2 route.
+  Native SIMD selection now requires `NativeAvx2CapabilityV1`, whose canonical
+  receipt key records target, evidence source/hash, admission, and reason; the
+  legacy scalar entry denies AVX2 by default. A compiled-only system spec uses
+  the canonical CPUID/XGETBV detector, W^X executable mappings, the actual
+  MIR-to-ISel-to-regalloc-to-encoder bytes, three ABI pointer arguments, and
+  eight exact IEEE-754 output checks while proving the second input unchanged.
+  It passed in native mode on the current AVX2 host. Luna audits exposed the
+  fake loader specs, genuine runtime detector, and correct execution oracle;
+  primary review added explicit capability injection and retained honest
+  skips only for absent AVX2 hardware. Production driver propagation of the
+  receipt and reusable/spillable vector allocation remain open.

@@ -88,9 +88,12 @@ The x86 native route accepts only an explicit `native-x86_64-avx2` storage
 selection with a 32-byte projection-alignment proof. It lowers f32x8 aligned
 loads, Add/Sub/Mul/Div, and aligned stores through machine selection, low-eight
 YMM assignment, scalar pointer allocation, and exact VEX encoding. Unsupported
-shapes, missing alignment evidence, and vector pressure fail closed. CPU
-feature receipts, YMM liveness reuse/spills, high vector registers, and a real
-host-execution system test remain required before this is a production route.
+shapes, missing alignment evidence, missing target-capability receipts, and
+vector pressure fail closed. A compiled-only system spec now maps the emitted
+bytes W^X, runs them only after the canonical CPUID/XGETBV AVX2 probe, and
+checks eight exact f32 results plus unchanged input. Production driver receipt
+propagation, YMM liveness reuse/spills, high vector registers, and broader
+application migration remain required before this is a production route.
 
 ## Recommended shape
 

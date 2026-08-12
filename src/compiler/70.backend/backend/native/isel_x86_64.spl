@@ -15,6 +15,7 @@ use compiler.backend.native.mach_inst.{X86_ARG_REGS, X86_ARG_REG_COUNT, X86_CALL
 use compiler.backend.native.mach_inst.{X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X86_OP_MOV_REG_MEM, X86_OP_MOV_MEM_REG, X86_OP_ADD, X86_OP_SUB, X86_OP_IMUL, X86_OP_IDIV, X86_OP_AND, X86_OP_OR, X86_OP_XOR, X86_OP_SHL, X86_OP_SAR, X86_OP_SHR, X86_OP_NEG, X86_OP_NOT, X86_OP_BSWAP, X86_OP_POPCNT, X86_OP_CMP, X86_OP_TEST, X86_OP_SETE, X86_OP_SETNE, X86_OP_SETL, X86_OP_SETLE, X86_OP_SETG, X86_OP_SETGE, X86_OP_JMP, X86_OP_JE, X86_OP_JNE, X86_OP_JNZ, X86_OP_JZ, X86_OP_CALL, X86_OP_RET, X86_OP_PUSH, X86_OP_POP, X86_OP_LEA, X86_OP_MOVZX, X86_OP_CQO, X86_OP_NOP, X86_OP_INT3, X86_OP_ADD_IMM, X86_OP_SUB_IMM, X86_OP_CMP_IMM, X86_OP_MOV_REG_IMM32, X86_OP_CALL_INDIRECT, X86_OP_VMOVAPS_LOAD_YMM, X86_OP_VMOVAPS_STORE_YMM, X86_OP_VADDPS_YMM, X86_OP_VSUBPS_YMM, X86_OP_VMULPS_YMM, X86_OP_VDIVPS_YMM}
 use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label}
 use compiler.backend.common.ascii_utils.{char_to_ascii}
+use compiler.backend.native.native_avx2_capability.{NativeAvx2CapabilityV1, native_avx2_denied_v1}
 
 # ============================================================================
 # Operand Lowering
@@ -52,13 +53,16 @@ fn x64_lower_const(ctx: ISelContext, value: MirConstValue, type_: MirType) -> Lo
 # ============================================================================
 
 fn isel_module(module: MirModule) -> MachModule:
+    isel_module_with_avx2_capability(module, native_avx2_denied_v1())
+
+fn isel_module_with_avx2_capability(module: MirModule, capability: NativeAvx2CapabilityV1) -> MachModule:
     var mach_module = new_mach_module(module.name)
     var ctx = new_isel_context()
 
     val func_keys = module.functions.keys()
     for key in func_keys:
         val func = module.functions[key]
-        var result = isel_function(ctx, func)
+        var result = isel_function_with_avx2_capability(ctx, func, capability)
         ctx = result.ctx
         mach_module = mach_module_add_func(mach_module, result.func)
 
@@ -73,9 +77,14 @@ fn isel_module(module: MirModule) -> MachModule:
     mach_module
 
 fn isel_function(ctx: ISelContext, func: MirFunction) -> ISelFuncResult:
+    isel_function_with_avx2_capability(ctx, func, native_avx2_denied_v1())
+
+fn isel_function_with_avx2_capability(ctx: ISelContext, func: MirFunction, capability: NativeAvx2CapabilityV1) -> ISelFuncResult:
     val simd_plan = x86_plan_avx2_f32x8(func)
     if not simd_plan.ok:
         panic("x86_64 SIMD selection rejected: {simd_plan.reason}")
+    if simd_plan.registers.len() > 0 and not capability.avx2_admitted:
+        panic("x86_64 SIMD selection rejected: {capability.reason}")
     var mach_func = new_mach_function(func.name)
 
     # Reset vreg counter - use local IDs directly, start high for temps

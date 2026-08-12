@@ -1,6 +1,7 @@
 use std.spec.{describe, it, assert_equal, assert_true}
 use compiler.mir.mir_data.*
-use compiler.backend.native.isel_x86_64.{isel_module}
+use compiler.backend.native.isel_x86_64.{isel_module_with_avx2_capability}
+use compiler.backend.native.native_avx2_capability.{native_avx2_capability_v1, native_avx2_receipt_key}
 use compiler.backend.native.regalloc.{regalloc_module}
 use compiler.backend.native.encode_x86_64.{encode_module}
 use compiler.backend.native.mach_inst.{
@@ -51,9 +52,16 @@ fn contains_bytes(haystack: [i64], needle: [i64]) -> bool:
         if matches: return true
     false
 
+fn avx2_capability():
+    native_avx2_capability_v1(
+        "x86_64-unknown-linux-gnu", "unit-injected", "fixture-avx2-v1", true)
+
+fn selected_module():
+    isel_module_with_avx2_capability(avx2_test_module(), avx2_capability())
+
 describe "x86 AVX2 typed MIR route":
     it "selects aligned f32x8 MIR without scalar NOP substitution":
-        val module = isel_module(avx2_test_module())
+        val module = selected_module()
         val block = module.functions[0].blocks[1]
         assert_equal(block.insts.len(), 4)
         assert_equal(block.insts[0].opcode, X86_OP_VMOVAPS_LOAD_YMM)
@@ -62,7 +70,7 @@ describe "x86 AVX2 typed MIR route":
         assert_equal(block.insts[3].opcode, X86_OP_VMOVAPS_STORE_YMM)
 
     it "preserves YMM classes through scalar pointer allocation":
-        val module = regalloc_module(isel_module(avx2_test_module()))
+        val module = regalloc_module(selected_module())
         val block = module.functions[0].blocks[1]
         for inst in block.insts:
             if inst.opcode == X86_OP_VADDPS_YMM:
@@ -74,9 +82,13 @@ describe "x86 AVX2 typed MIR route":
                         case _: assert_true(false)
 
     it "encodes the selected load add store route as AVX2 bytes":
-        val allocated = regalloc_module(isel_module(avx2_test_module()))
+        val allocated = regalloc_module(selected_module())
         val encoded = encode_module(allocated)[0].code
         assert_true(contains_bytes(encoded, [0xC4, 0xE1, 0x7C, 0x28, 0x83, 0, 0, 0, 0]))
         assert_true(contains_bytes(encoded, [0xC4, 0xC1, 0x7C, 0x28, 0x8C, 0x24, 0, 0, 0, 0]))
         assert_true(contains_bytes(encoded, [0xC4, 0xE1, 0x7C, 0x58, 0xD1]))
         assert_true(contains_bytes(encoded, [0xC4, 0xC1, 0x7C, 0x29, 0x95, 0, 0, 0, 0]))
+
+    it "carries a deterministic target capability receipt":
+        assert_equal(native_avx2_receipt_key(avx2_capability()),
+            "native-avx2/v1|target=x86_64-unknown-linux-gnu|source=unit-injected|hash=fixture-avx2-v1|admitted=true|reason=avx2-capability-admitted")

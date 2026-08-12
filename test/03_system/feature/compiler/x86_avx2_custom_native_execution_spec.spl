@@ -1,0 +1,97 @@
+use std.spec.{describe, it, assert_equal, assert_true, skip_on_interpreter, skip}
+use compiler.mir.mir_data.*
+use compiler.backend.native.isel_x86_64.{isel_module_with_avx2_capability}
+use compiler.backend.native.native_avx2_capability.{native_avx2_capability_v1}
+use compiler.backend.native.regalloc.{regalloc_module}
+use compiler.backend.native.encode_x86_64.{encode_module}
+use compiler.loader.loader.smf_mmap_native.{
+    native_alloc_rw_memory, native_write_exec_memory, native_make_executable,
+    native_flush_icache, native_get_function_pointer, native_call_function_3,
+    native_mmap_read_bytes, native_free_exec_memory, native_munmap
+}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+
+extern fn rt_simd_has_avx2() -> bool
+extern fn rt_ptr_write_i32(address: i64, offset: i64, value: i32)
+
+fn execution_module() -> MirModule:
+    val f32_type = MirType(kind: MirTypeKind.F32)
+    val ptr_type = MirType(kind: MirTypeKind.Ptr(pointee: f32_type, mutable: true))
+    val vec_type = MirType(kind: MirTypeKind.Vec8f)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("left"), type_: ptr_type, kind: LocalKind.Arg(0)),
+        MirLocal(id: LocalId(id: 1), name: Some("right"), type_: ptr_type, kind: LocalKind.Arg(1)),
+        MirLocal(id: LocalId(id: 2), name: Some("output"), type_: ptr_type, kind: LocalKind.Arg(2)),
+        MirLocal(id: LocalId(id: 3), name: Some("left_vec"), type_: vec_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 4), name: Some("right_vec"), type_: vec_type, kind: LocalKind.Temp),
+        MirLocal(id: LocalId(id: 5), name: Some("sum"), type_: vec_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(id: BlockId.new(0), label: Some("entry"), instructions: [
+        MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 3), MirOperand.copy(LocalId(id: 0)), true, vec_type), span: nil),
+        MirInst(kind: MirInstKind.MirSimdLoad(LocalId(id: 4), MirOperand.copy(LocalId(id: 1)), true, vec_type), span: nil),
+        MirInst(kind: MirInstKind.MirSimdBinop(LocalId(id: 5), MirOperand.copy(LocalId(id: 3)), MirOperand.copy(LocalId(id: 4)), "Add"), span: nil),
+        MirInst(kind: MirInstKind.MirSimdStore(MirOperand.copy(LocalId(id: 5)), MirOperand.copy(LocalId(id: 2)), true), span: nil)
+    ], terminator: MirTerminator.Ret(nil))
+    val function = MirFunction(
+        symbol: SymbolId.new(0), name: "add_f32x8",
+        signature: MirSignature(params: [ptr_type, ptr_type, ptr_type], return_type: MirType.unit(), is_variadic: false),
+        locals: locals, blocks: [entry], entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = function
+    MirModule(name: "avx2_execution", functions: functions, statics: {}, constants: {}, types: {})
+
+fn encoded_execution_bytes() -> [u8]:
+    val capability = native_avx2_capability_v1(
+        "x86_64-unknown-linux-gnu", "runtime-cpuid-xgetbv", "rt_simd_has_avx2", true)
+    val selected = isel_module_with_avx2_capability(execution_module(), capability)
+    val encoded = encode_module(regalloc_module(selected))[0].code
+    var bytes: [u8] = []
+    for byte in encoded: bytes.push(byte as u8)
+    bytes
+
+fn read_u32_le(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) + ((bytes[offset + 1] as i64) << 8)
+        + ((bytes[offset + 2] as i64) << 16)
+        + ((bytes[offset + 3] as i64) << 24)
+
+describe "custom-native x86 AVX2 execution":
+    skip_on_interpreter "executes emitted aligned f32x8 addition on a capable host", fn():
+        val skip_without_avx2 = skip(
+            platforms: [], runtimes: [], profiles: [], architectures: [],
+            features: [], version: "", hardware: ["avx2"], dependencies: [],
+            env_vars: {}, fs_features: [], network: false, tags: [],
+            reason: "CPUID/XGETBV AVX2 support required")
+        skip_without_avx2 "executes CPUID-admitted AVX2 bytes", fn():
+            assert_true(rt_simd_has_avx2())
+            val code = encoded_execution_bytes()
+            val code_address = native_alloc_rw_memory(code.len())
+            val left = native_alloc_rw_memory(32)
+            val right = native_alloc_rw_memory(32)
+            val output = native_alloc_rw_memory(32)
+            assert_true(code_address != 0 and left != 0 and right != 0 and output != 0)
+            assert_equal(left % 32, 0)
+            assert_equal(right % 32, 0)
+            assert_equal(output % 32, 0)
+            for lane in 0..8:
+                rt_ptr_write_i32(left, lane * 4, 0x3f800000 as i32)
+                rt_ptr_write_i32(right, lane * 4, 0x40000000 as i32)
+                rt_ptr_write_i32(output, lane * 4, 0)
+            assert_equal(native_write_exec_memory(code_address, code, 0), code.len())
+            assert_true(native_make_executable(code_address, code.len()))
+            native_flush_icache(code_address, code.len())
+            val fn_ptr = native_get_function_pointer(code_address)
+            _ = native_call_function_3(fn_ptr, left, right, output)
+            val result = native_mmap_read_bytes(output, 0, 32)
+            val unchanged = native_mmap_read_bytes(right, 0, 32)
+            assert_equal(result.len(), 32)
+            for lane in 0..8:
+                assert_equal(read_u32_le(result, lane * 4), 0x40400000)
+                assert_equal(read_u32_le(unchanged, lane * 4), 0x40000000)
+            assert_true(native_free_exec_memory(code_address, code.len()))
+            assert_true(native_munmap(left, 32))
+            assert_true(native_munmap(right, 32))
+            assert_true(native_munmap(output, 32))
+            print "AVX2_CUSTOM_NATIVE_EXECUTION_PASS lanes=8 result_bits=0x40400000"
