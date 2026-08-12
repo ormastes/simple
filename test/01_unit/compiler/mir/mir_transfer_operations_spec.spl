@@ -1,0 +1,83 @@
+#!/usr/bin/env simple
+
+use std.spec
+use compiler.mir.mir_data.*
+use compiler.mir.mir_json.{serialize_mir_inst_kind}
+use compiler.borrow.borrow_check.{BorrowChecker}
+
+fn transfer_inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn transfer_body(insts: [MirInst]) -> MirBody:
+    MirBody(
+        name: "transfer_facts",
+        blocks: [MirBlock(
+            id: BlockId.new(0),
+            label: nil,
+            instructions: insts,
+            terminator: MirTerminator.Ret(nil)
+        )],
+        locals: [],
+        arg_count: 0,
+        return_ty: MirType.unit()
+    )
+
+fn transfer_body_has_errors(insts: [MirInst]) -> bool:
+    var checker = BorrowChecker.create()
+    checker.check_function(transfer_body(insts))
+    checker.errors.len() > 0
+
+describe "WP-12 explicit MIR transfer operations":
+    it "serializes stable transfer direction and mode facts":
+        val json = serialize_mir_inst_kind(MirInstKind.TransferOut(
+            LocalId(id: 8), LocalId(id: 7), MirExecutionDomain.Process,
+            MirTransferMode.Copy, MirTransferPayload.EncodedCopy, false))
+        expect(json).to_equal(
+            "{\"TransferOut\":{\"dest\":8,\"source\":7,\"destination\":\"process\",\"mode\":\"copy\",\"payload\":\"encoded_copy\",\"runtime_classify\":false}}")
+
+    it "treats an owned transfer as source-consuming":
+        val source = LocalId(id: 0)
+        val use_dest = LocalId(id: 1)
+        val insts = [
+            transfer_inst(MirInstKind.TransferOut(
+                LocalId(id: 2), source, MirExecutionDomain.Thread,
+                MirTransferMode.OwnedMove, MirTransferPayload.OwnedRegion,
+                false)),
+            transfer_inst(MirInstKind.Copy(use_dest, source))
+        ]
+        assert_true(transfer_body_has_errors(insts))
+
+    it "keeps inline-copy transfer source usable":
+        val source = LocalId(id: 0)
+        val use_dest = LocalId(id: 1)
+        val insts = [
+            transfer_inst(MirInstKind.TransferOut(
+                LocalId(id: 2), source, MirExecutionDomain.Thread,
+                MirTransferMode.Copy, MirTransferPayload.InlineCopy, false)),
+            transfer_inst(MirInstKind.Copy(use_dest, source))
+        ]
+        assert_false(transfer_body_has_errors(insts))
+
+    it "initializes received and snapshot destinations":
+        val received = LocalId(id: 0)
+        val snapshot = LocalId(id: 1)
+        val insts = [
+            transfer_inst(MirInstKind.TransferIn(
+                received, MirExecutionDomain.Actor,
+                MirTransferMode.OwnedMove, MirTransferPayload.OwnedRegion)),
+            transfer_inst(MirInstKind.AcquireSnapshot(snapshot, received)),
+            transfer_inst(MirInstKind.Copy(received, snapshot))
+        ]
+        assert_false(transfer_body_has_errors(insts))
+
+    it "consumes committed update ownership":
+        val base = LocalId(id: 0)
+        val updates = LocalId(id: 1)
+        val result = LocalId(id: 2)
+        val later = LocalId(id: 3)
+        val insts = [
+            transfer_inst(MirInstKind.CommitUpdates(
+                Some(result), base, updates)),
+            transfer_inst(MirInstKind.Copy(later, updates))
+        ]
+        assert_true(transfer_body_has_errors(insts))

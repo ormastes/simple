@@ -4361,6 +4361,8 @@ impl MirLowering:
         # several callee shapes (direct/indirect/lambda/bitfield) -- not
         # attempted in this lane; scoped out per binding-transfer-only.
         var arg_operands: [MirOperand] = []
+        val is_thread_boundary = is_direct and (
+            direct_name == "spawn" or direct_name == "spawn_actor")
         var call_param_types: [HirType] = []
         # A Var/NamedVar callee keeps its resolved symbol even when it names a
         # local function value and therefore is not a direct call. Recover the
@@ -4421,14 +4423,34 @@ impl MirLowering:
                     arg_operands = arg_operands.push(lambda_operand.unwrap())
                     continue
             var arg_local = self.lower_expr(arg_value)
+            var boundary_transfer_mode = MirTransferMode.Copy
+            var boundary_transfer_payload = MirTransferPayload.InlineCopy
+            var boundary_runtime_classify = true
             if current_arg_index < call_param_types.len():
                 val declared_param_type = call_param_types[current_arg_index]
                 match declared_param_type.kind:
+                    case HirTypeKind.Float(_):
+                        boundary_transfer_mode = MirTransferMode.Copy
+                        boundary_runtime_classify = false
+                    case HirTypeKind.Bool:
+                        boundary_transfer_mode = MirTransferMode.Copy
+                        boundary_runtime_classify = false
+                    case HirTypeKind.Char:
+                        boundary_transfer_mode = MirTransferMode.Copy
+                        boundary_runtime_classify = false
+                    case HirTypeKind.Unit:
+                        boundary_transfer_mode = MirTransferMode.Copy
+                        boundary_runtime_classify = false
+                    case HirTypeKind.Never:
+                        boundary_transfer_mode = MirTransferMode.Copy
+                        boundary_runtime_classify = false
                     case HirTypeKind.Optional(_):
                         # Producer-side provenance is the only authority that
                         # can distinguish raw payload 3 from the nil sentinel.
                         arg_local = self.ensure_option_handle(arg_local, declared_param_type)
                     case HirTypeKind.Int(declared_width, _):
+                        boundary_transfer_mode = MirTransferMode.Copy
+                        boundary_runtime_classify = false
                         # Narrow to the DECLARED width at the call boundary:
                         # untyped literal/expr args lower as i64, and on rv32
                         # ilp32 an i64 operand marshals as a REGISTER PAIR —
@@ -4456,6 +4478,9 @@ impl MirLowering:
                         # already-tagged/str/array/dict local.
                         arg_local = self.box_runtime_value(arg_local)
                     case HirTypeKind.Isolated(_):
+                        boundary_transfer_mode = MirTransferMode.OwnedMove
+                        boundary_transfer_payload = MirTransferPayload.OwnedRegion
+                        boundary_runtime_classify = false
                         # WP-M (2026-08-06): an iso-typed call argument is an
                         # ownership TRANSFER into the callee, same as the
                         # iso-typed variable-to-variable let-binding site
@@ -4474,12 +4499,13 @@ impl MirLowering:
                         # direct-call arg loop only -- indirect/lambda callee
                         # shapes (arg_operands.push at lines 4104/4116 above)
                         # are unaffected and remain open gaps (filed).
-                        var b_move = self.builder
-                        val moved_ty = self.local_mir_type_of(arg_local) ?? MirType.i64()
-                        val moved_local = b_move.new_temp(moved_ty)
-                        b_move.emit_move(moved_local, arg_local)
-                        self.builder = b_move
-                        arg_local = moved_local
+                        if not is_thread_boundary:
+                            var b_move = self.builder
+                            val moved_ty = self.local_mir_type_of(arg_local) ?? MirType.i64()
+                            val moved_local = b_move.new_temp(moved_ty)
+                            b_move.emit_move(moved_local, arg_local)
+                            self.builder = b_move
+                            arg_local = moved_local
                     case _:
                         ()
                 # SF1 (c), 2026-07-28 — flag-gated, DEFAULT OFF: under
@@ -4506,7 +4532,18 @@ impl MirLowering:
                                 self.builder = b_ref
                         case _:
                             ()
-            arg_operands = arg_operands.push(mir_operand_copy(arg_local))
+            if is_thread_boundary:
+                var b_transfer = self.builder
+                val transfer_ty = self.local_mir_type_of(arg_local) ?? MirType.i64()
+                val transfer_dest = b_transfer.new_temp(transfer_ty)
+                b_transfer.emit(MirInst(kind: MirInstKind.TransferOut(
+                    transfer_dest, arg_local, MirExecutionDomain.Thread,
+                    boundary_transfer_mode, boundary_transfer_payload,
+                    boundary_runtime_classify), span: Some(arg_value.span)))
+                self.builder = b_transfer
+                arg_operands = arg_operands.push(mir_operand_copy(transfer_dest))
+            else:
+                arg_operands = arg_operands.push(mir_operand_copy(arg_local))
 
         if is_direct:
             val resolved_name = if direct_name != "": direct_name else: self.bootstrap_resolved_call_name(direct_symbol)

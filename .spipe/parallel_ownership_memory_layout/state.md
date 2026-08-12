@@ -221,5 +221,22 @@ dev-done
   assurance strictness. Eight focused HIR examples pass once. This is partial:
   the active seed still lowers source `spawn(...)` incorrectly, method/task/
   actor/process capture surfaces are incomplete, explicit source `move` is not
-  yet preserved at this HIR call site, and MIR TransferOut/In operations remain
-  WP-12 work.
+  yet preserved at this HIR call site; the following WP-12 slice begins that
+  MIR work without claiming runtime transport completion.
+- impl: Advanced WP-12 with explicit MIR `TransferOut`, `TransferIn`,
+  `FreezeRegion`, `AcquireSnapshot`, and `CommitUpdates` operations plus stable
+  JSON text, optimizer/visitor use/definition facts, GC-copy facts, and
+  borrow-checker ownership facts. MIR keeps WP-01's mode and payload as
+  separate enums and marks unresolved dynamic classification explicitly.
+  `TransferOut` produces a distinct transport local so an owned move consumes
+  the source exactly once while the following transport call reads the
+  envelope local. Both the dormant structured Spawn/Send lowering and the
+  currently reachable literal `spawn`/`spawn_actor` ordinary-call path emit
+  transfer facts; isolated arguments use owned-move and unclassified values
+  remain runtime-classified. The final `bin/simple check src/compiler` reached
+  no errors. The focused five-example spec
+  compiled past that correction but the current broad `SIMPLE_LIB=src` runner
+  exited during dependency loading without a verdict on three capped attempts.
+  Runtime/backend transfer-envelope lowering, process/device domains, incoming
+  receive emission, and real source-to-MIR execution evidence remain open; no
+  backend alias claim may rely on this partial slice.

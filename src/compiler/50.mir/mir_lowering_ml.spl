@@ -13,6 +13,36 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 
+struct MirLowerTransferDecision:
+    mode: MirTransferMode
+    payload: MirTransferPayload
+    runtime_classify: bool
+
+fn mir_transfer_decision_for_hir_type(type_: HirType) -> MirLowerTransferDecision:
+    match type_.kind:
+        case Int(_, _) | Float(_) | Bool | Char | Unit | Never:
+            MirLowerTransferDecision(mode: MirTransferMode.Copy,
+                payload: MirTransferPayload.InlineCopy,
+                runtime_classify: false)
+        case Isolated(_):
+            MirLowerTransferDecision(mode: MirTransferMode.OwnedMove,
+                payload: MirTransferPayload.OwnedRegion,
+                runtime_classify: false)
+        case _:
+            MirLowerTransferDecision(mode: MirTransferMode.Copy,
+                payload: MirTransferPayload.InlineCopy,
+                runtime_classify: true)
+
+fn mir_transfer_decision_for_hir_expr(expr: HirExpr) -> MirLowerTransferDecision:
+    if expr.has_type_:
+        mir_transfer_decision_for_hir_type(expr.type_)
+    else:
+        # Missing type evidence must remain visible to the runtime classifier;
+        # it is never upgraded to copy/share/move by assumption.
+        MirLowerTransferDecision(mode: MirTransferMode.Copy,
+            payload: MirTransferPayload.InlineCopy,
+            runtime_classify: true)
+
 # ============================================================================
 # Runtime Function Operand Helpers
 # ============================================================================
@@ -243,7 +273,17 @@ impl MirLowering:
         var arg_operands: [MirOperand] = []
         for arg in args:
             val arg_local = self.lower_expr(arg)
-            arg_operands = arg_operands.push(mir_operand_copy(arg_local))
+            val transfer = mir_transfer_decision_for_hir_expr(arg)
+            val transfer_dest = self.builder.new_temp(
+                self.local_mir_type_of(arg_local) ?? MirType.i64())
+            self.builder.emit(MirInst(
+                kind: MirInstKind.TransferOut(
+                    transfer_dest, arg_local,
+                    MirExecutionDomain.Thread, transfer.mode,
+                    transfer.payload, transfer.runtime_classify),
+                span: Some(arg.span)
+            ))
+            arg_operands = arg_operands.push(mir_operand_copy(transfer_dest))
 
         # Create destination for the task handle
         val dest = self.builder.new_temp(MirType.i64())  # Task handle type
@@ -269,9 +309,22 @@ impl MirLowering:
         val target_local = self.lower_expr(target_expr)
         val message_local = self.lower_expr(message)
 
+        val transfer = mir_transfer_decision_for_hir_expr(message)
+        val transfer_dest = self.builder.new_temp(
+            self.local_mir_type_of(message_local) ?? MirType.i64())
+        self.builder.emit(MirInst(
+            kind: MirInstKind.TransferOut(
+                transfer_dest, message_local,
+                MirExecutionDomain.Actor, transfer.mode,
+                transfer.payload, transfer.runtime_classify),
+            span: Some(message.span)
+        ))
+
         # Emit Send instruction
         self.builder.emit(MirInst(
-            kind: MirInstKind.Send(target: mir_operand_copy(target_local), message: mir_operand_copy(message_local)),
+            kind: MirInstKind.Send(
+                target: mir_operand_copy(target_local),
+                message: mir_operand_copy(transfer_dest)),
             span: nil
         ))
 
