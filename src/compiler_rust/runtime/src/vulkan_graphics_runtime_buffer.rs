@@ -243,12 +243,11 @@ pub extern "C" fn rt_vulkan_copy_from_buffer_raw(data_ptr: i64, byte_count: i64,
     if end as u64 > buf.size() {
         return 0;
     }
-    let Ok(downloaded) = buf.download(end as u64) else {
+    let Ok(downloaded) = buf.download_range(offset as u64, byte_count as u64) else {
         return 0;
     };
-    let source = &downloaded[offset as usize..end as usize];
     unsafe {
-        std::ptr::copy_nonoverlapping(source.as_ptr(), data_ptr as *mut u8, source.len());
+        std::ptr::copy_nonoverlapping(downloaded.as_ptr(), data_ptr as *mut u8, downloaded.len());
     }
     1
 }
@@ -292,12 +291,11 @@ pub extern "C" fn rt_vulkan_read_buffer_bytes(handle: i64, byte_count: i64, offs
         Some(end) if end as u64 <= buf.size() => end,
         _ => return rt_byte_array_new(0),
     };
-    let Ok(downloaded) = buf.download(end as u64) else {
+    let Ok(downloaded) = buf.download_range(offset as u64, byte_count as u64) else {
         return rt_byte_array_new(0);
     };
-    let bytes = &downloaded[offset as usize..end as usize];
-    let result = rt_byte_array_new_len(bytes.len() as u64);
-    if byte_array_write(result, bytes) {
+    let result = rt_byte_array_new_len(downloaded.len() as u64);
+    if byte_array_write(result, &downloaded) {
         result
     } else {
         rt_byte_array_new(0)

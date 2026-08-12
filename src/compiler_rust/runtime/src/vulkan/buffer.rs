@@ -81,6 +81,14 @@ fn checked_upload_end(buffer_size: u64, data_len: usize, offset: u64) -> VulkanR
     Ok(end)
 }
 
+fn checked_download_end(buffer_size: u64, offset: u64, size: u64) -> VulkanResult<u64> {
+    let end = offset.checked_add(size).ok_or(VulkanError::BufferTooSmall)?;
+    if end > buffer_size {
+        return Err(VulkanError::BufferTooSmall);
+    }
+    Ok(end)
+}
+
 fn download_barrier_masks(
     usage: BufferUsage,
 ) -> (
@@ -113,7 +121,7 @@ fn download_barrier_masks(
 
 #[cfg(test)]
 mod tests {
-    use super::{checked_upload_end, download_barrier_masks, BufferUsage};
+    use super::{checked_download_end, checked_upload_end, download_barrier_masks, BufferUsage};
     use ash::vk;
 
     #[test]
@@ -139,6 +147,14 @@ mod tests {
         assert_eq!(checked_upload_end(16, 0, 16).unwrap(), 16);
         assert!(checked_upload_end(16, 2, 15).is_err());
         assert!(checked_upload_end(16, 1, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn download_range_accepts_offsets_and_rejects_overflow() {
+        assert_eq!(checked_download_end(16, 5, 6).unwrap(), 11);
+        assert_eq!(checked_download_end(16, 16, 0).unwrap(), 16);
+        assert!(checked_download_end(16, 15, 2).is_err());
+        assert!(checked_download_end(16, u64::MAX, 1).is_err());
     }
 
     #[test]
@@ -254,11 +270,20 @@ impl VulkanBuffer {
 
     /// Download data from this buffer
     pub fn download(&self, size: u64) -> VulkanResult<Vec<u8>> {
+        self.download_range(0, size)
+    }
+
+    /// Download an exact byte range from this buffer.
+    pub fn download_range(&self, offset: u64, size: u64) -> VulkanResult<Vec<u8>> {
+        checked_download_end(self.size, offset, size)?;
+        if size == 0 {
+            return Ok(Vec::new());
+        }
         let device = self.device()?;
         let _direct_compute = device.direct_compute_gate().lock();
         device.ensure_buffer_io_available()?;
         let staging = StagingBuffer::new(Arc::clone(&device), size)?;
-        self.copy_to_staging(&device, &staging, size)?;
+        self.copy_to_staging(&device, &staging, offset, size)?;
         staging.read(size as usize)
     }
 
@@ -318,10 +343,16 @@ impl VulkanBuffer {
         Ok(())
     }
 
-    fn copy_to_staging(&self, device: &Arc<VulkanDevice>, staging: &StagingBuffer, size: u64) -> VulkanResult<()> {
+    fn copy_to_staging(
+        &self,
+        device: &Arc<VulkanDevice>,
+        staging: &StagingBuffer,
+        src_offset: u64,
+        size: u64,
+    ) -> VulkanResult<()> {
         let cmd = device.begin_transfer_command()?;
 
-        let region = vk::BufferCopy::default().size(size);
+        let region = vk::BufferCopy::default().src_offset(src_offset).size(size);
         let (src_stage, src_access, dst_stage, dst_access) = download_barrier_masks(self.usage);
 
         unsafe {
@@ -331,7 +362,7 @@ impl VulkanBuffer {
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .buffer(self.buffer)
-                .offset(0)
+                .offset(src_offset)
                 .size(size);
             device.handle().cmd_pipeline_barrier(
                 cmd,
