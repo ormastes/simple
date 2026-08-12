@@ -1006,3 +1006,14 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   admitted non-vacuous Stage-3 and `pure-simple-full-cli` Stage-4, then run
   the exact RV32/RV64 foundation commands recorded here. See
   `doc/08_tracking/bug/self_hosted_runtime_authority_republish_path_2026-08-12.md`.
+- impl: Added a prepared strict-HWIR host evaluator and an exhaustive composed
+  target-trap oracle. The oracle executes all 65,536 parcels for each RV32
+  C.JAL and RV64 C.ADDIW product through independently prepared typed graphs,
+  checking full tuple determinism, closed legal/illegal/trap partitioning, and
+  the sole C.EBREAK trap. This is a compiler-host composition check, not
+  independent generated-RTL equivalence or a qualification receipt.
+- impl: Added a verification-only one-entry, reset-coupled retirement receipt
+  loopback model. It proves host-model tuple capture, one-cycle return, reset
+  priority, and stale-receipt erasure. It has an explicit production rejection
+  and no emitter/product API; it does not replace the real architectural commit
+  owner or resolve the retirement-lineage tracking issue.
