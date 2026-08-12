@@ -96,10 +96,37 @@ fn payload_checksum(payload: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::transfer::{TransferMode, TransferPayload};
     use std::process::Command;
 
     fn reverse_payload(payload: &[u8]) -> Vec<u8> {
         payload.iter().rev().copied().collect()
+    }
+
+    #[test]
+    fn process_frame_matches_simple_golden_vector() {
+        let frame = ProcessTransferFrame {
+            envelope: RuntimeTransferEnvelopeV1 {
+                region_id: 7,
+                generation: 2,
+                source_domain: TransferDomain::Parent,
+                target_domain: TransferDomain::Process,
+                mode: TransferMode::Copy,
+                payload: TransferPayload::EncodedCopy,
+                ownership_token: 0,
+                source_invalidated: false,
+            },
+            payload: b"typed".to_vec(),
+        };
+        assert_eq!(
+            frame.encode().unwrap(),
+            [
+                0x53, 0x50, 0x54, 0x52, 0x01, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x90, 0xd7,
+                0xaa, 0xef, 0xba, 0x7a, 0xbb, 0x74, 0x79, 0x70, 0x65, 0x64,
+            ]
+        );
     }
 
     #[test]

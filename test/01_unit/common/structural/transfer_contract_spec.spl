@@ -19,6 +19,13 @@ use std.common.structural.transfer.transfer_codec.{
     decode_transfer_envelope,
     encode_transfer_envelope
 }
+use std.common.structural.transfer.process_frame_codec.{
+    MAX_PROCESS_TRANSFER_BYTES,
+    PROCESS_TRANSFER_FRAME_HEADER_LEN,
+    decode_process_transfer_frame,
+    encode_process_transfer_frame,
+    process_transfer_frame_v1
+}
 use std.common.structural.wire.{wire_to_hex}
 
 describe "TransferEnvelopeV1 contract":
@@ -100,3 +107,43 @@ describe "TransferEnvelopeV1 contract":
         var malformed = encode_transfer_envelope(moved)
         malformed[TRANSFER_ENVELOPE_WIRE_LEN - 1] = 1
         assert_false(decode_transfer_envelope(malformed).ok)
+
+    it "matches the native bounded process-frame golden vector":
+        val envelope = transfer_envelope_v1(7, 2,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Process,
+            ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy,
+            0, false)
+        val payload: [u8] = [116, 121, 112, 101, 100]
+        val encoded = encode_process_transfer_frame(
+            process_transfer_frame_v1(envelope, payload))
+        assert_equal(encoded.len(), PROCESS_TRANSFER_FRAME_HEADER_LEN + 5)
+        assert_equal(wire_to_hex(encoded),
+            "5350545201000000070000000000000002000000000000000002000300000000000000000000000005000000000000000b90d7aaefba7abb7479706564")
+        val decoded = decode_process_transfer_frame(encoded,
+            ParallelExecutionDomain.Process)
+        assert_true(decoded.ok)
+        assert_equal(decoded.value.payload.len(), 5)
+        assert_equal(decoded.value.payload[0], 116)
+        assert_equal(decoded.value.payload[4], 100)
+
+    it "rejects wrong routes corruption trailing bytes and oversize":
+        val envelope = transfer_envelope_v1(7, 2,
+            ParallelExecutionDomain.Parent, ParallelExecutionDomain.Process,
+            ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy,
+            0, false)
+        val payload: [u8] = [116, 121, 112, 101, 100]
+        val frame = process_transfer_frame_v1(envelope, payload)
+        val encoded = encode_process_transfer_frame(frame)
+        assert_equal(decode_process_transfer_frame(encoded,
+            ParallelExecutionDomain.Parent).reason, "wrong-target")
+        var corrupt = encode_process_transfer_frame(frame)
+        corrupt[PROCESS_TRANSFER_FRAME_HEADER_LEN] = 0
+        assert_equal(decode_process_transfer_frame(corrupt,
+            ParallelExecutionDomain.Process).reason, "checksum-mismatch")
+        var trailing = encode_process_transfer_frame(frame)
+        trailing.push(0)
+        assert_equal(decode_process_transfer_frame(trailing,
+            ParallelExecutionDomain.Process).reason, "invalid-wire-length")
+        var huge: [u8] = [0; MAX_PROCESS_TRANSFER_BYTES + 1]
+        assert_equal(encode_process_transfer_frame(
+            process_transfer_frame_v1(envelope, huge)).len(), 0)

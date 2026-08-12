@@ -154,7 +154,9 @@ dev-done
 - impl: Advanced WP-17 with `process_transfer.rs`: an encoded-copy-only process
   frame reuses the 40-byte `SPTR` metadata, enforces the destination domain,
   carries an exact length and corruption checksum, and caps codec payloads at
-  4 MiB. PID-namespaced region IDs prevent parent/child counter collisions. One
+  4 MiB. PID-namespaced region IDs prevent counter collisions for one live
+  same-host parent/child pair; they are not global identity across PID
+  namespaces, PID reuse, or replay. One
   focused test launches a real child test process to decode parent input and
   return a child-created result; a second test rejects wrong
   targets, corruption, and oversize. Both passed once. Current `main` has no
@@ -170,6 +172,13 @@ dev-done
   `rt_*` symbol; `rejected_shortcuts` = inherited heap pointers, raw
   RuntimeValue bits, the removed aggregate PG-worker handoff, unbounded bytes,
   and calling a focused fork test production integration.
+- impl: Added the missing common/native WP-17 frame agreement. Pure Simple now
+  encodes and decodes the exact native 56-byte process header plus bounded
+  payload, using the same Parent/Process route checks, 4 MiB cap, and FNV-1a
+  corruption checksum. Both runtimes pin the same complete-frame golden vector;
+  Simple also rejects wrong target, corruption, trailing bytes, and oversize.
+  FNV is corruption detection, not authentication. Production spawn/piped
+  integration and parent-issued session/generation replay checks remain open.
 - impl: Advanced WP-15 with a memory-bounded functional owner transition.
   `ParallelCommitStateV1` retains only `(revision, snapshot_token)` rather than
   an unbounded envelope history. The engine validates the complete batch before

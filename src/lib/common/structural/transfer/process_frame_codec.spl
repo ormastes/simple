@@ -1,0 +1,111 @@
+# Canonical bounded process-frame codec shared with the native runtime.
+# The payload is schema-owned bytes; RuntimeValue/pointer bits have no form.
+
+use std.common.structural.wire.{wire_get_u64, wire_put_u64}
+use std.common.structural.transfer.transfer_contracts.{
+    ParallelExecutionDomain,
+    ParallelTransferMode,
+    ParallelTransferPayload,
+    TransferEnvelopeV1,
+    parallel_execution_domain_to_u8,
+    parallel_transfer_mode_to_u8,
+    parallel_transfer_payload_to_u8
+}
+use std.common.structural.transfer.transfer_codec.{
+    TRANSFER_ENVELOPE_WIRE_LEN,
+    decode_transfer_envelope,
+    encode_transfer_envelope,
+    transfer_envelope_zero
+}
+
+val PROCESS_TRANSFER_FRAME_HEADER_LEN: i64 = TRANSFER_ENVELOPE_WIRE_LEN + 16
+val MAX_PROCESS_TRANSFER_BYTES: i64 = 4 * 1024 * 1024
+val PROCESS_TRANSFER_FNV1A_OFFSET: i64 = -3750763034362895579
+val PROCESS_TRANSFER_FNV1A_PRIME: i64 = 1099511628211
+
+struct ProcessTransferFrameV1:
+    envelope: TransferEnvelopeV1
+    payload: [u8]
+
+struct ProcessTransferFrameResult:
+    ok: bool
+    value: ProcessTransferFrameV1
+    reason: text
+
+fn process_transfer_frame_v1(envelope: TransferEnvelopeV1,
+                             payload: [u8]) -> ProcessTransferFrameV1:
+    ProcessTransferFrameV1(envelope: envelope, payload: payload)
+
+fn process_transfer_frame_zero() -> ProcessTransferFrameV1:
+    ProcessTransferFrameV1(envelope: transfer_envelope_zero(), payload: [])
+
+fn process_transfer_route_allowed(envelope: TransferEnvelopeV1) -> bool:
+    val source = parallel_execution_domain_to_u8(envelope.source_domain)
+    val target = parallel_execution_domain_to_u8(envelope.target_domain)
+    val route = (source == 0 and target == 2) or (source == 2 and target == 0)
+    route and parallel_transfer_mode_to_u8(envelope.mode) == 0
+        and parallel_transfer_payload_to_u8(envelope.payload) == 3
+        and envelope.ownership_token == 0 and not envelope.source_invalidated
+
+fn process_transfer_payload_checksum(payload: [u8]) -> i64:
+    var hash = PROCESS_TRANSFER_FNV1A_OFFSET
+    var i = 0
+    while i < payload.len():
+        hash = hash ^ (payload[i] as i64)
+        hash = hash * PROCESS_TRANSFER_FNV1A_PRIME
+        i = i + 1
+    hash
+
+fn process_transfer_append(out: [u8], source: [u8]) -> [u8]:
+    var result = out
+    var i = 0
+    while i < source.len():
+        result.push(source[i])
+        i = i + 1
+    result
+
+fn encode_process_transfer_frame(value: ProcessTransferFrameV1) -> [u8]:
+    var out: [u8] = []
+    if not process_transfer_route_allowed(value.envelope)
+        or value.payload.len() > MAX_PROCESS_TRANSFER_BYTES:
+        return out
+    val envelope = encode_transfer_envelope(value.envelope)
+    if envelope.len() != TRANSFER_ENVELOPE_WIRE_LEN:
+        return out
+    out = process_transfer_append(out, envelope)
+    out = wire_put_u64(out, value.payload.len())
+    out = wire_put_u64(out, process_transfer_payload_checksum(value.payload))
+    process_transfer_append(out, value.payload)
+
+fn decode_process_transfer_frame(data: [u8],
+                                 target: ParallelExecutionDomain) -> ProcessTransferFrameResult:
+    val zero = process_transfer_frame_zero()
+    if data.len() < PROCESS_TRANSFER_FRAME_HEADER_LEN:
+        return ProcessTransferFrameResult(ok: false, value: zero, reason: "truncated")
+    var envelope_bytes: [u8] = []
+    var i = 0
+    while i < TRANSFER_ENVELOPE_WIRE_LEN:
+        envelope_bytes.push(data[i])
+        i = i + 1
+    val decoded = decode_transfer_envelope(envelope_bytes)
+    if not decoded.ok or not process_transfer_route_allowed(decoded.value):
+        return ProcessTransferFrameResult(ok: false, value: zero, reason: "invalid-envelope")
+    if parallel_execution_domain_to_u8(decoded.value.target_domain)
+        != parallel_execution_domain_to_u8(target):
+        return ProcessTransferFrameResult(ok: false, value: zero, reason: "wrong-target")
+    val payload_len = wire_get_u64(data, TRANSFER_ENVELOPE_WIRE_LEN)
+    if payload_len < 0 or payload_len > MAX_PROCESS_TRANSFER_BYTES:
+        return ProcessTransferFrameResult(ok: false, value: zero, reason: "invalid-payload-length")
+    if data.len() - PROCESS_TRANSFER_FRAME_HEADER_LEN != payload_len:
+        return ProcessTransferFrameResult(ok: false, value: zero, reason: "invalid-wire-length")
+    var payload: [u8] = []
+    i = 0
+    while i < payload_len:
+        payload.push(data[PROCESS_TRANSFER_FRAME_HEADER_LEN + i])
+        i = i + 1
+    val expected = wire_get_u64(data, TRANSFER_ENVELOPE_WIRE_LEN + 8)
+    if process_transfer_payload_checksum(payload) != expected:
+        return ProcessTransferFrameResult(ok: false, value: zero, reason: "checksum-mismatch")
+    ProcessTransferFrameResult(ok: true,
+        value: ProcessTransferFrameV1(envelope: decoded.value, payload: payload),
+        reason: "")

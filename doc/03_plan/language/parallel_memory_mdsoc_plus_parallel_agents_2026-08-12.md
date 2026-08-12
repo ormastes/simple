@@ -26,7 +26,7 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 | WP-14 bounded mailbox | partial implementation | native compatibility channel and actor/common inbox/outbox queues have finite capacity 256; channel/common handle report full, but the legacy void native actor ABI cannot surface it; policy-selected capacities and checked public actor send remain |
 | WP-15 commit engine | partial implementation | common functional owner transition validates the whole batch before one revision/snapshot-token root assignment and emits canonical-order receipts; concurrent CAS/lock publication, payload apply/verify, and admitted Stage 4 evidence remain |
 | WP-16 actor/channel migration | partial implementation | native safe paths carry route-validated inline packets, actor reply provenance is explicit, and heap actor context is rejected; typed heap/owned payloads remain |
-| WP-17 process transport | partial implementation | bounded encoded-copy framing and a real exec-child round trip exist; production spawn/piped integration, schema registry, ObjectRef, and rollback remain |
+| WP-17 process transport | partial implementation | common/native bounded encoded-copy frames share a complete golden vector and a real exec-child round trip; production spawn/piped integration, session/replay binding, schema registry, ObjectRef, and rollback remain |
 | WP-18 thread pool | planned | stable typed pool rewrite not started |
 | WP-20..27 layout/performance | planned | no MIR lowering, allocator adoption, or evidence yet |
 | WP-30..36 MDSOC/pilots | planned | do not start before safe transport and layout inputs |
