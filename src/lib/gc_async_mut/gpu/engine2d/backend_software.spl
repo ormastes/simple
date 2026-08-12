@@ -1140,8 +1140,18 @@ impl SoftwareBackend:
         var cap = max_rects
         if cap <= 0:
             cap = 16
+        # Output tuple indices for the prior tile row.  Keeping every active
+        # run (rather than only inspecting the last emitted rectangle) lets
+        # separated columns extend vertically without fragmenting damage.
+        var prev_x: [i32] = []
+        var prev_w: [i32] = []
+        var prev_out: [i32] = []
         var ty = 0
         while ty < self.tiles_y:
+            var curr_x: [i32] = []
+            var curr_w: [i32] = []
+            var curr_out: [i32] = []
+            var prev_cursor = 0
             val y0 = ty * TILE_SIZE
             var y1 = y0 + TILE_SIZE
             if y1 > self.h:
@@ -1159,22 +1169,31 @@ impl SoftwareBackend:
                     val rw = x1 - x0
                     val rh = y1 - y0
                     if rw > 0 and rh > 0:
-                        # Vertical merge with the previous rect when the column
-                        # extent matches and the rows abut exactly.
-                        val n = out.len()
                         var merged = false
-                        if n >= 4:
-                            if out[n - 4] == x0 and out[n - 2] == rw and (out[n - 3] + out[n - 1]) == y0:
-                                out[n - 1] = out[n - 1] + rh
-                                merged = true
+                        var output_index = -1
+                        # Both row run lists are x-sorted, so one monotonic
+                        # cursor finds exact predecessor runs in linear time.
+                        while prev_cursor < prev_x.len() and prev_x[prev_cursor] < x0:
+                            prev_cursor += 1
+                        if prev_cursor < prev_x.len() and prev_x[prev_cursor] == x0 and prev_w[prev_cursor] == rw:
+                            output_index = prev_out[prev_cursor]
+                            out[output_index + 3] = out[output_index + 3] + rh
+                            merged = true
                         if not merged:
+                            output_index = out.len()
                             out.push(x0)
                             out.push(y0)
                             out.push(rw)
                             out.push(rh)
+                        curr_x.push(x0)
+                        curr_w.push(rw)
+                        curr_out.push(output_index)
                     tx = run_end
                 else:
                     tx = tx + 1
+            prev_x = curr_x
+            prev_w = curr_w
+            prev_out = curr_out
             ty = ty + 1
         val rect_count = out.len() / 4
         if rect_count == 0:
@@ -1196,9 +1215,14 @@ impl SoftwareBackend:
             if out[o + 1] + out[o + 3] > by1:
                 by1 = out[o + 1] + out[o + 3]
             r = r + 1
-        val bound_area = (bx1 - bx0) * (by1 - by0)
-        val surface_area = self.w * self.h
-        if surface_area > 0 and bound_area * 100 > surface_area * 60:
+        # 8K areas multiplied by a percentage exceed i32.  Widen before every
+        # multiply so the full/local decision is deterministic at large sizes.
+        val bound_area = (bx1 - bx0).to_i64() * (by1 - by0).to_i64()
+        val surface_area = self.w.to_i64() * self.h.to_i64()
+        # Compare against floor(3/5 surface) without cross-multiplication;
+        # even the largest positive i32 dimensions cannot overflow this form.
+        val full_threshold = (surface_area / 5) * 3 + ((surface_area % 5) * 3) / 5
+        if surface_area > 0 and bound_area > full_threshold:
             return [0, 0, self.w, self.h]
         if rect_count > cap:
             return [bx0, by0, bx1 - bx0, by1 - by0]
