@@ -53,6 +53,13 @@ fn get_actor_handle(actor_id: usize) -> Option<ActorHandle> {
     ACTOR_REGISTRY.read().ok()?.get(&actor_id).cloned()
 }
 
+fn encode_inline_actor_message(value: RuntimeValue) -> Option<Message> {
+    if !value.is_inline_transfer_value() {
+        return None;
+    }
+    Some(Message::Bytes(value.to_raw().to_le_bytes().to_vec()))
+}
+
 /// Spawn a new actor. `body_func` is a pointer to the actor body.
 /// Returns a heap-allocated actor handle.
 #[no_mangle]
@@ -93,16 +100,17 @@ pub extern "C" fn rt_actor_spawn(body_func: u64, ctx: RuntimeValue) -> RuntimeVa
     alloc_actor(actor_id)
 }
 
-/// Send a runtime value to an actor. Messages are transported as raw bits.
+/// Send an inline runtime value to an actor.
+/// Heap-backed values require a typed transfer envelope and are rejected.
 #[no_mangle]
 pub extern "C" fn rt_actor_send(actor: RuntimeValue, message: RuntimeValue) {
     if let Some(actor_ptr) = as_actor_ptr(actor) {
         unsafe {
             let actor_id = (*actor_ptr).actor_id;
             if let Some(handle) = get_actor_handle(actor_id) {
-                let bits = message.to_raw();
-                let payload = Message::Bytes(bits.to_le_bytes().to_vec());
-                let _ = handle.send(payload);
+                if let Some(payload) = encode_inline_actor_message(message) {
+                    let _ = handle.send(payload);
+                }
             }
         }
     }
@@ -136,9 +144,9 @@ pub extern "C" fn rt_actor_recv() -> RuntimeValue {
 pub extern "C" fn rt_actor_reply(message: RuntimeValue) -> RuntimeValue {
     CURRENT_ACTOR_OUTBOX.with(|cell| {
         if let Some(tx) = cell.borrow().as_ref() {
-            let bits = message.to_raw();
-            let payload = Message::Bytes(bits.to_le_bytes().to_vec());
-            let _ = tx.send(payload);
+            if let Some(payload) = encode_inline_actor_message(message) {
+                let _ = tx.send(payload);
+            }
         }
     });
     RuntimeValue::NIL

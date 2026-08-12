@@ -191,6 +191,19 @@ impl RuntimeValue {
         self.0
     }
 
+    /// Whether this value is self-contained in its 64-bit representation.
+    ///
+    /// Safe cross-domain transports may copy these bits. Heap-tagged values
+    /// are addresses into this process and require a typed graph codec,
+    /// immutable object handle, or ownership envelope instead.
+    #[inline]
+    pub const fn is_inline_transfer_value(self) -> bool {
+        matches!(
+            self.tag(),
+            tags::TAG_INT | tags::TAG_FLOAT | tags::TAG_SPECIAL
+        )
+    }
+
     /// Get the tag bits (lowest 3 bits)
     #[inline]
     pub const fn tag(self) -> u64 {
@@ -494,16 +507,14 @@ impl RuntimeValue {
                     return Self::NIL;
                 };
 
-                // For now, heap objects that are thread-safe (channels) are shared
-                // Other heap objects need deep copy - this is a placeholder that
-                // returns the original for thread-safe types, NIL for others
+                // Explicit synchronized handles may be shared. Every other heap
+                // graph must fail closed until its type has a real graph clone or
+                // ownership-transfer implementation; returning `self` here would
+                // silently preserve mutable pointer identity across the boundary.
                 match object_type {
                     // Channels are thread-safe, can be shared
                     HeapObjectType::Channel => self,
-                    // For other types, we'd need to implement deep copy
-                    // For now, return self (shallow copy) and rely on
-                    // the language's type system to enforce copy semantics
-                    _ => self,
+                    _ => Self::NIL,
                 }
             }
             _ => self,

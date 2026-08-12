@@ -112,3 +112,11 @@ dev-done
   60 seconds amid unrelated bootstrap warnings. Neither is recorded as PASS.
   Resume command when an admitted Stage 4 CLI exists:
   `bin/simple test test/01_unit/common/structural/transfer_contract_spec.spl --mode=interpreter`.
+- impl: Partially mitigated WP-13/WP-16 in the native runtime. Inline scalar
+  `RuntimeValue` messages remain supported, while channel and actor paths now
+  reject heap-tagged pointer payloads. Placeholder `deep_copy()` fails closed
+  for mutable heap graphs instead of returning the source pointer. Focused
+  native evidence passed once: actor inline/reject (1/1), channel heap reject
+  (1/1), and mutable heap deep-copy reject (1/1). Full `TransferEnvelopeV1`
+  runtime decoding, bounded mailbox/backpressure, graph codecs, ownership-token
+  lifecycle, and separate-process evidence remain open; the P0 bug stays open.

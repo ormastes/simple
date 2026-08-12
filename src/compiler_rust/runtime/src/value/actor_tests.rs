@@ -3,7 +3,7 @@
 //! Note: These tests use thread-local state and rt_actor_join to avoid
 //! race conditions between parallel test execution.
 
-use super::{rt_actor_id, rt_actor_is_alive, rt_actor_join, rt_actor_recv, rt_actor_send, rt_actor_spawn};
+use super::{encode_inline_actor_message, rt_actor_id, rt_actor_is_alive, rt_actor_join, rt_actor_recv, rt_actor_send, rt_actor_spawn};
 use crate::value::RuntimeValue;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::thread;
@@ -11,6 +11,13 @@ use std::time::Duration;
 
 // Test helper: Actor that stores execution flag
 static ACTOR_RAN: AtomicBool = AtomicBool::new(false);
+
+#[test]
+fn actor_wire_accepts_inline_values_and_rejects_heap_addresses() {
+    assert!(encode_inline_actor_message(RuntimeValue::from_int(42)).is_some());
+    assert!(encode_inline_actor_message(RuntimeValue::from_raw(0x1001)).is_none());
+    assert!(encode_inline_actor_message(RuntimeValue::from_raw(0x1004)).is_none());
+}
 
 extern "C" fn flag_setting_actor(_ctx: *const u8) {
     ACTOR_RAN.store(true, Ordering::SeqCst);

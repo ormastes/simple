@@ -104,6 +104,11 @@ pub extern "C" fn rt_channel_send(channel: RuntimeValue, value: RuntimeValue) ->
     let Some(ch_ptr) = as_channel_ptr(channel) else {
         return 0;
     };
+    // A heap-tagged RuntimeValue contains process-local pointer identity. Safe
+    // channel transport must use a typed envelope/codec rather than copying it.
+    if !value.is_inline_transfer_value() {
+        return 0;
+    }
 
     unsafe {
         if (*ch_ptr).closed != 0 || (*ch_ptr).sender.is_null() {
@@ -281,6 +286,7 @@ pub extern "C" fn rt_channel_free(channel: RuntimeValue) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::{rt_array_free, rt_array_new};
 
     #[test]
     fn test_channel_new() {
@@ -367,5 +373,26 @@ mod tests {
         assert_eq!(rt_channel_id(forged_heap), 0);
         rt_channel_close(forged_heap);
         rt_channel_free(forged_heap);
+    }
+
+    #[test]
+    fn test_channel_rejects_heap_tagged_payload() {
+        let ch = rt_channel_new();
+        let process_local_pointer = RuntimeValue::from_raw(0x1001);
+
+        assert!(!process_local_pointer.is_inline_transfer_value());
+        assert_eq!(rt_channel_send(ch, process_local_pointer), 0);
+        assert_eq!(rt_channel_send(ch, RuntimeValue::from_raw(0x1004)), 0);
+        assert_eq!(rt_channel_try_recv(ch), RuntimeValue::NIL);
+
+        rt_channel_free(ch);
+    }
+
+    #[test]
+    fn test_deep_copy_fails_closed_for_mutable_heap_graph() {
+        let array = rt_array_new(1);
+        assert!(array.is_heap());
+        assert_eq!(array.deep_copy(), RuntimeValue::NIL);
+        rt_array_free(array);
     }
 }

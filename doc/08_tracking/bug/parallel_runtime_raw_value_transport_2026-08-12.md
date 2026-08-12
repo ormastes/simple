@@ -32,3 +32,18 @@ raw-bit actor transport and unbounded channel payload transport, implement
 graph clone/freeze/seal semantics, and add real heap graph, separate-process,
 closed-channel, bounded-backpressure, and cancellation rollback tests. Verify
 through an admitted self-hosted binary and native runtime evidence.
+
+## 2026-08-12 partial mitigation
+
+The native runtime now fails closed for the unsafe compatibility paths:
+
+- `RuntimeValue::deep_copy()` returns `NIL` for mutable heap graphs instead of
+  preserving their pointer identity; explicit channel handles remain shared.
+- native channel send rejects every heap-tagged payload until a typed envelope
+  decoder owns that payload class;
+- actor send and reply encode inline values only and reject heap addresses.
+
+Focused native tests pass for actor rejection, channel rejection, and mutable
+heap-copy rejection. This does **not** close the P0: bounded mailboxes, typed
+graph/envelope transport, ownership-token lifecycle, actor/process codecs, and
+real cancellation/backpressure evidence remain required.
