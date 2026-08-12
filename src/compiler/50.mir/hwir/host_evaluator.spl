@@ -1,0 +1,170 @@
+# Host evaluator for validated strict combinational HWIR.
+#
+# This is intentionally a compiler-host verification surface. It executes the
+# exact typed graph that the strict VHDL emitter consumes, so composed-parcel
+# tests never substitute a separate decoder classifier for frontend behavior.
+
+use compiler.mir.hwir.types.{HwCombOp, HwCompareOp, HwModuleDef, HwSelectOp}
+
+pub class HwHostInput:
+    name: text
+    value: i64
+
+    static fn bits(name: text, value: i64) -> HwHostInput:
+        HwHostInput(name: name, value: value)
+
+pub class HwHostValue:
+    name: text
+    value: i64
+
+class HwHostEvaluationState:
+    values: [HwHostValue]
+
+    me get(name: text) -> Option<i64>:
+        for entry in self.values:
+            if entry.name == name:
+                return Some(entry.value)
+        None
+
+    me set(name: text, value: i64) -> bool:
+        var index = 0
+        while index < self.values.len():
+            if self.values[index].name == name:
+                if self.values[index].value == value:
+                    return false
+                self.values[index] = HwHostValue(name: name, value: value)
+                return true
+            index = index + 1
+        self.values.push(HwHostValue(name: name, value: value))
+        true
+
+pub class HwHostEvaluation:
+    """Concrete values produced by one validated strict combinational graph."""
+    values: [HwHostValue]
+
+    me value_of(name: text) -> Result<i64, text>:
+        for entry in self.values:
+            if entry.name == name:
+                return Ok(entry.value)
+        Err("HWIR-E-HOST-EVAL-VALUE: requested result is absent from the evaluated graph: " + name)
+
+fn hwir_host_mask(width: i32) -> i64:
+    if width < 1 or width > 64:
+        return 0
+    if width == 64:
+        return -1
+    (1 << width) - 1
+
+fn hwir_host_normalize(value: i64, width: i32) -> i64:
+    value & hwir_host_mask(width)
+
+fn hwir_host_comb_value(module: HwModuleDef, op: HwCombOp,
+    lhs: i64, rhs: i64) -> Result<i64, text>:
+    if op.op == "and":
+        return Ok(hwir_host_normalize(lhs & rhs, op.bit_width))
+    if op.op == "or":
+        return Ok(hwir_host_normalize(lhs | rhs, op.bit_width))
+    if op.op == "add":
+        return Ok(hwir_host_normalize(lhs + rhs, op.bit_width))
+    if op.op == "shl":
+        if rhs < 0 or rhs >= 64:
+            return Ok(0)
+        return Ok(hwir_host_normalize(lhs << rhs, op.bit_width))
+    if op.op == "shr":
+        if rhs < 0 or rhs >= op.bit_width:
+            return Ok(0)
+        # Strict VHDL lowers SHR through numeric_std.unsigned shift_right.
+        # Simple's i64 right shift is arithmetic, so normalize to precisely
+        # the remaining logical width after the shift. This is significant for
+        # PA=64 C.JR/C.JALR targets whose source register has bit 63 set.
+        return Ok(hwir_host_normalize(lhs >> rhs, op.bit_width - (rhs as i32)))
+    if op.op == "passthrough" or op.op == "zext" or op.op == "trunc":
+        return Ok(hwir_host_normalize(lhs, op.bit_width))
+    if op.op == "sext":
+        val source_width = module.value_width(op.lhs)
+        if source_width < 1 or source_width > op.bit_width:
+            return Err("HWIR-E-HOST-EVAL-SEXT: sign extension requires a declared source width no larger than its result")
+        val source = hwir_host_normalize(lhs, source_width)
+        if source_width == 64 or (source & (1 << (source_width - 1))) == 0:
+            return Ok(hwir_host_normalize(source, op.bit_width))
+        return Ok(hwir_host_normalize(source | (-1 << source_width), op.bit_width))
+    Err("HWIR-E-HOST-EVAL-OP: unsupported strict combinational operation " + op.op)
+
+fn hwir_host_apply_comb(module: HwModuleDef, state: HwHostEvaluationState,
+    op: HwCombOp) -> Result<bool, text>:
+    if val lhs = state.get(op.lhs):
+        if op.rhs == "":
+            return Ok(state.set(op.result, hwir_host_comb_value(module, op, lhs, 0)?))
+        if val rhs = state.get(op.rhs):
+            return Ok(state.set(op.result, hwir_host_comb_value(module, op, lhs, rhs)?))
+    Ok(false)
+
+fn hwir_host_apply_compare(state: HwHostEvaluationState,
+    op: HwCompareOp) -> bool:
+    if val lhs = state.get(op.lhs):
+        if val rhs = state.get(op.rhs):
+            return state.set(op.result, if lhs == rhs: 1 else: 0)
+    false
+
+fn hwir_host_apply_select(state: HwHostEvaluationState,
+    op: HwSelectOp) -> bool:
+    if val condition = state.get(op.condition):
+        if val when_true = state.get(op.when_true):
+            if val when_false = state.get(op.when_false):
+                return state.set(op.result,
+                    hwir_host_normalize(if condition != 0: when_true else: when_false,
+                        op.bit_width))
+    false
+
+fn hwir_host_inputs_diagnostic(module: HwModuleDef, inputs: [HwHostInput]) -> text:
+    var names: [text] = []
+    for input in inputs:
+        if input.name == "" or names.contains(input.name):
+            return "HWIR-E-HOST-EVAL-INPUT: host evaluation inputs must have unique non-empty names"
+        if module.port_direction(input.name) != "in":
+            return "HWIR-E-HOST-EVAL-INPUT: host evaluation input is not a declared graph input: " + input.name
+        names.push(input.name)
+    for port in module.ports:
+        if port.direction == "in" and not names.contains(port.name):
+            return "HWIR-E-HOST-EVAL-INPUT: host evaluation is missing declared graph input: " + port.name
+    ""
+
+pub fn evaluate_strict_comb_hwir(module: HwModuleDef,
+    inputs: [HwHostInput]) -> Result<HwHostEvaluation, text>:
+    """Evaluate a validated strict combinational graph to a fixed point.
+
+    This verifier accepts only the same typed operations supported by strict
+    VHDL emission. It rejects missing inputs, unresolved dependencies, and
+    unsupported operations rather than inventing a fallback semantic path.
+    """
+    val diagnostic = module.shape_diagnostic()
+    if diagnostic != "":
+        return Err(diagnostic)
+    val input_diagnostic = hwir_host_inputs_diagnostic(module, inputs)
+    if input_diagnostic != "":
+        return Err(input_diagnostic)
+    val state = HwHostEvaluationState(values: [])
+    for constant in module.constants:
+        state.set(constant.name, hwir_host_normalize(constant.value, constant.bit_width))
+    for input in inputs:
+        state.set(input.name, hwir_host_normalize(input.value, module.value_width(input.name)))
+    var round = 0
+    val limit = (module.comb_ops.len() + module.compare_ops.len() + module.select_ops.len() + 1) * 2
+    while round < limit:
+        var changed = false
+        for op in module.comb_ops:
+            if hwir_host_apply_comb(module, state, op)?:
+                changed = true
+        for op in module.compare_ops:
+            if hwir_host_apply_compare(state, op):
+                changed = true
+        for op in module.select_ops:
+            if hwir_host_apply_select(state, op):
+                changed = true
+        if not changed:
+            break
+        round = round + 1
+    for port in module.ports:
+        if port.direction == "out" and state.get(port.name) == None:
+            return Err("HWIR-E-HOST-EVAL-UNRESOLVED: strict graph did not resolve output " + port.name)
+    Ok(HwHostEvaluation(values: state.values))

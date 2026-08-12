@@ -1,0 +1,96 @@
+# codex-system-test
+# @manual_section RISC-V Gen2 strict HWIR host evaluator
+"""Execute the exact strict combinational graph for composed-predecode oracles."""
+
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
+use compiler.mir.hwir.trap_frontend.{strict_zca_target_trap_migrating_predecode_hwir}
+
+fn target_trap_inputs(parcel: i64, pc: i64, rs1_index: i64, rs1_value: i64) -> [HwHostInput]:
+    [HwHostInput.bits("original_parcel", parcel), HwHostInput.bits("fetch_pc", pc),
+        HwHostInput.bits("rs1_index", rs1_index), HwHostInput.bits("rs1_value", rs1_value)]
+
+fn target_trap_module(config: CoreConfig):
+    strict_zca_target_trap_migrating_predecode_hwir("host_eval_target_trap", config).unwrap()
+
+describe "RISC-V Gen2 strict HWIR host evaluator":
+    # @req REQ-G2-010 REQ-G2-011 NFR-G2-012
+    it "should evaluate the exact RV32 and RV64 C.EBREAK trap tuple":
+        step("Build each concrete target-trap graph and execute its typed operations")
+        for config in [CoreConfig.rv32_zca_cjal_mission_critical(),
+            CoreConfig.rv64_zca_addiw_mission_critical()]:
+            val result = evaluate_strict_comb_hwir(target_trap_module(config),
+                target_trap_inputs(0x9002, 0x120, 8, 0)).unwrap()
+            expect(result.value_of("original_parcel").unwrap()).to_equal(0x9002)
+            expect(result.value_of("canonical_instruction").unwrap()).to_equal(0x00100073)
+            expect(result.value_of("original_length_bytes").unwrap()).to_equal(2)
+            expect(result.value_of("legal").unwrap()).to_equal(1)
+            expect(result.value_of("next_pc").unwrap()).to_equal(0x122)
+            expect(result.value_of("redirect_valid").unwrap()).to_equal(0)
+            expect(result.value_of("redirect_target").unwrap()).to_equal(0x120)
+            expect(result.value_of("trap_valid").unwrap()).to_equal(1)
+            expect(result.value_of("trap_cause").unwrap()).to_equal(3)
+            expect(result.value_of("trap_tval").unwrap()).to_equal(0)
+
+    # @req REQ-G2-010 REQ-G2-011 NFR-G2-012
+    it "should fail closed for an unsupported parcel through the composed graph":
+        step("Execute the target-trap graph rather than an independent decoder classifier")
+        for config in [CoreConfig.rv32_zca_cjal_mission_critical(),
+            CoreConfig.rv64_zca_addiw_mission_critical()]:
+            val result = evaluate_strict_comb_hwir(target_trap_module(config),
+                target_trap_inputs(0, 0x340, 8, 0)).unwrap()
+            expect(result.value_of("canonical_instruction").unwrap()).to_equal(0)
+            expect(result.value_of("legal").unwrap()).to_equal(0)
+            expect(result.value_of("next_pc").unwrap()).to_equal(0x342)
+            expect(result.value_of("redirect_valid").unwrap()).to_equal(0)
+            expect(result.value_of("redirect_target").unwrap()).to_equal(0x340)
+            expect(result.value_of("trap_valid").unwrap()).to_equal(0)
+
+    # @req REQ-G2-010 REQ-G2-011 NFR-G2-003 NFR-G2-012
+    it "should execute the distinct RV32 C.JAL and RV64 C.ADDIW target rows":
+        step("Evaluate the target-specific parcel class through each selected graph")
+        val rv32 = evaluate_strict_comb_hwir(
+            target_trap_module(CoreConfig.rv32_zca_cjal_mission_critical()),
+            target_trap_inputs(0x2001, 0x180, 0, 0)).unwrap()
+        expect(rv32.value_of("legal").unwrap()).to_equal(1)
+        expect(rv32.value_of("canonical_instruction").unwrap()).to_equal(0x000000ef)
+        expect(rv32.value_of("redirect_valid").unwrap()).to_equal(1)
+        expect(rv32.value_of("next_pc").unwrap()).to_equal(0x180)
+        expect(rv32.value_of("trap_valid").unwrap()).to_equal(0)
+        val rv64 = evaluate_strict_comb_hwir(
+            target_trap_module(CoreConfig.rv64_zca_addiw_mission_critical()),
+            target_trap_inputs(0x2085, 0x1a0, 1, 0)).unwrap()
+        expect(rv64.value_of("legal").unwrap()).to_equal(1)
+        expect(rv64.value_of("canonical_instruction").unwrap()).to_equal(0x0010809b)
+        expect(rv64.value_of("redirect_valid").unwrap()).to_equal(0)
+        expect(rv64.value_of("next_pc").unwrap()).to_equal(0x1a2)
+        expect(rv64.value_of("trap_valid").unwrap()).to_equal(0)
+
+    # @req REQ-G2-010 NFR-G2-003
+    it "should preserve a PA64 high-bit indirect JALR target as a logical shift":
+        step("Use an allowed PA64 RV64 product to expose unsigned shift-right semantics")
+        val config = CoreConfig(xlen: 64, physical_address_bits: 64, register_count: 32,
+            profile: "riscv-gen2-rv64-zca-addiw-critical", isa_profile: "rv64i_zca",
+            compressed_decode_profile: "zca-common-critical")
+        val result = evaluate_strict_comb_hwir(target_trap_module(config),
+            target_trap_inputs(0x8082, 0x80, 1, -9223372036854775805)).unwrap()
+        expect(result.value_of("legal").unwrap()).to_equal(1)
+        expect(result.value_of("canonical_instruction").unwrap()).to_equal(0x00008067)
+        expect(result.value_of("redirect_valid").unwrap()).to_equal(1)
+        expect(result.value_of("redirect_target").unwrap()).to_equal(-9223372036854775806)
+        expect(result.value_of("next_pc").unwrap()).to_equal(-9223372036854775806)
+
+    # @req REQ-G2-001 NFR-G2-002
+    it "should reject missing or non-input host values before graph execution":
+        step("Prove the evaluator cannot silently fabricate a register operand")
+        val module = target_trap_module(CoreConfig.rv32_zca_cjal_mission_critical())
+        val missing = evaluate_strict_comb_hwir(module,
+            [HwHostInput.bits("original_parcel", 0x9002), HwHostInput.bits("fetch_pc", 0),
+                HwHostInput.bits("rs1_index", 8)])
+        expect(missing.err().unwrap()).to_contain("HWIR-E-HOST-EVAL-INPUT")
+        val output_as_input = evaluate_strict_comb_hwir(module,
+            [HwHostInput.bits("original_parcel", 0x9002), HwHostInput.bits("fetch_pc", 0),
+                HwHostInput.bits("rs1_index", 8), HwHostInput.bits("rs1_value", 0),
+                HwHostInput.bits("legal", 1)])
+        expect(output_as_input.err().unwrap()).to_contain("HWIR-E-HOST-EVAL-INPUT")
