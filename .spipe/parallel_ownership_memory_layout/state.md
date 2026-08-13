@@ -803,3 +803,7 @@ in-progress
   This prevents the global convenience runtime from retaining one completed
   entry per blocking call; detached `spawn` result retention remains a
   separate bounded join/result-contract task.
+- blocker: Legacy `Runtime.spawn` has no admitted join/take/cancel result
+  lifecycle, so detached completed entries remain unbounded. Tracked as
+  `async_runtime_detached_completed_results_unbounded_2026-08-13.md`; do not
+  add silent eviction before WP-14/WP-18 supplies explicit terminal outcomes.
