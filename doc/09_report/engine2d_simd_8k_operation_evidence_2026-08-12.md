@@ -189,3 +189,19 @@ The forced-SSE2 C kernel and in-place span corpus passed. Both benchmark runs
 produced checksum `2436809228175672195`; the after run recorded 35 native SIMD
 hits. This proves the production SSE2 fallback under forced dispatch and its
 isolated retained-damage envelope, not full-frame or end-to-end 8K/80.
+
+## 2026-08-13 refreshed one-percent host row
+
+The current tree was measured again with
+`ENGINE2D_SIMD_8K_ACTIVE_BASIS_POINTS=100 sh scripts/check/check-engine2d-simd-8k-ops.shs`.
+At 7680x4320 with 331,776 active pixels, seven samples produced six-call p50
+`1,424,553 ns`, p95 `1,710,737 ns`, checksum
+`2436809228175672195`, and 35 native SIMD hits. Individual p95 values were
+250,497 ns fill, 275,725 ns copy, 565,917 ns variable blend, and 500,824 ns
+constant blend. The harness reported
+`engine2d_8k_active_damage_primitive_budget_met=true` and
+`engine2d_8k_full_dynamic_frame_80fps_proven=false`.
+
+This refresh is an operation-level native C retained-damage row. It does not
+establish a self-hosted Simple DrawIR/Web/GUI/WM frame, GPU presentation,
+physical scanout, or a full dynamic 8K/80 result.
