@@ -401,3 +401,25 @@ to be `discrete` by default, and fails unless each timed frame reports one
 region, exactly 1,320,960 copy bytes, zero readback bytes, known completion,
 and the window-swapchain presentation mode. The dynamic-update run above
 measured p50 63,665,076 ns and p95 69,783,159 ns; this remains a FAIL.
+
+## 2026-08-13 lavapipe retained-region revalidation
+
+The feature-enabled `simple-runtime` Vulkan test target was run against the
+local llvmpipe ICD, avoiding the default seed binary's no-Vulkan stubs:
+
+```sh
+cd src/compiler_rust
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
+  cargo test --locked --offline -p simple-runtime --release --features vulkan \
+  vulkan_graphics_runtime::vulkan_graphics_runtime_swapchain::tests::bench_headless_swapchain_present_8k_one_percent_damage \
+  -- --ignored --exact --nocapture
+```
+
+The 20-frame 7680×4320 headless-swapchain run changed one 7680×43 region per
+frame: `damage_bytes=1320960`, `damage_rects=1`, p50 `85,923 ns`, p95
+`112,433 ns`, RSS `532,552 KiB`, `readback_bytes=0`, `fallback=false`, and
+`completion_known=true`. The source checksum was `15184660652564333443`.
+
+This is a passing retained device-transfer/present receipt for a CPU Vulkan
+implementation (llvmpipe). It does not demonstrate a physical GPU, visible
+surface, scanout, DrawIR/Web/GUI/WM frame, or full dynamic 8K/80 performance.
