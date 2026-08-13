@@ -23,6 +23,9 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_scroll_encode,
     browser_renderer_text_encode
 }
+use common.ui.render_opt.damage_plan.{
+    DAMAGE_PLAN_FULL, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_NONE
+}
 use os.hosted.hosted_browser_renderer_worker.{
     HostedBrowserRendererWorkerSession,
     hosted_browser_renderer_handle_init,
@@ -372,6 +375,7 @@ describe "hosted browser renderer worker":
             48
         )
         expect(initial_frame.ok).to_be(true)
+        expect(initial_frame.damage_receipt.mode).to_equal(DAMAGE_PLAN_FULL)
         val before_composition_revision = (
             worker.render_session.counters.composition_revision
         )
@@ -390,6 +394,7 @@ describe "hosted browser renderer worker":
             48
         )
         expect(reused_frame.ok).to_be(true)
+        expect(reused_frame.damage_receipt.mode).to_equal(DAMAGE_PLAN_NONE)
         val after = worker.render_session.counters
 
         expect(after.serialize_count).to_equal(1)
@@ -497,9 +502,18 @@ describe "hosted browser renderer worker":
         val animation_checksum = (
             animation_worker.render_session.composition_checksum()
         )
-        expect(animation_worker.handle(BrowserRendererMessage(
+        val animation_render = animation_worker.handle(BrowserRendererMessage(
             kind: "advance", generation: 7, request_id: 3, payload: "500"
-        )).ok).to_be(true)
+        ))
+        expect(animation_render.ok).to_be(true)
+        val animation_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), animation_render.wire
+            ).message, 64, 48
+        )
+        expect(animation_frame.ok).to_be(true)
+        expect(animation_frame.damage_receipt.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        expect(animation_frame.damage_receipt.rects.len()).to_be_greater_than(0)
         val animation_after = animation_worker.render_session.counters
         expect(animation_after.parse_count).to_equal(1)
         expect(animation_after.css_count).to_equal(1)

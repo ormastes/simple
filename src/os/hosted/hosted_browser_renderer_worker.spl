@@ -19,7 +19,9 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_fetch_request_encode,
     browser_renderer_frame_encode_with_state_and_images,
     browser_renderer_frame_encode_with_history_proposal,
+    browser_renderer_frame_encode_with_retained_damage,
     browser_renderer_frame_encode_with_state_and_retained_images_and_title,
+    browser_renderer_damage_receipt,
     browser_renderer_image_resource_revisions,
     browser_renderer_referenced_image_resources,
     browser_renderer_message_encode,
@@ -33,6 +35,9 @@ use std.common.web.browser_renderer_history_protocol.{
 }
 use std.common.gpu.simpleos_host_gpu_draw_ir.{
     SimpleOsHostGpuImageResourceRevision
+}
+use common.ui.render_opt.damage_plan.{
+    DAMAGE_PLAN_FULL, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_NONE
 }
 use common.ui.access.{WinTextActionRequest}
 use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
@@ -266,7 +271,20 @@ fn _worker_frame(
             prior_image_resource_revisions
         )
     else:
-        browser_renderer_frame_encode_with_state_and_retained_images_and_title(
+        val damage_receipt = if render_session.last_damage_stage == "none":
+            browser_renderer_damage_receipt(DAMAGE_PLAN_NONE, [])
+        elif (render_session.last_damage_stage == "paint" or
+            render_session.last_damage_stage == "animation-paint") and
+            render_session.last_damage_rects.len() > 0:
+            browser_renderer_damage_receipt(
+                DAMAGE_PLAN_LOCAL, render_session.last_damage_rects
+            )
+        else:
+            browser_renderer_damage_receipt(
+                DAMAGE_PLAN_FULL,
+                [0, 0, width.to_i64(), height.to_i64()]
+            )
+        browser_renderer_frame_encode_with_retained_damage(
             layout.composition,
             message.generation,
             response_request_id,
@@ -288,7 +306,10 @@ fn _worker_frame(
             document_title,
             composition_revision,
             frame_image_resources,
-            prior_image_resource_revisions
+            prior_image_resource_revisions,
+            width,
+            height,
+            damage_receipt
         )
     val encoded = browser_renderer_capability_bind_encoded(
         legacy_encoded,
