@@ -23,6 +23,8 @@ use os.kernel.arch_adapt.x86_64.paging.{paging_switch_address_space}
 extern fn rt_memcpy(dest: i64, src: i64, len: i64)
 extern fn rt_memset(dest: i64, value: i64, len: i64) -> i64
 extern fn unsafe_addr_of(ref: any) -> u64
+@cfg(x86_64)
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
 
 var g_staged_user_as_root: u64 = 0u64
 var g_staged_user_as_id: u64 = 0u64
@@ -403,8 +405,27 @@ fn vmm_get_manager() -> VirtMemManager:
 # Phase-2 VMM APIs
 # ============================================================================
 
+@cfg(x86_64)
 fn vmm_copy_bytes_to_phys(dst_phys: u64, src: [u8], src_offset: u64, len: u64):
-    """Bulk-copy `len` bytes from `src[src_offset..]` to physical `dst_phys` via HHDM."""
+    """Copy decoded x86_64 byte-array elements to physical memory.
+
+    The freestanding x86_64 ABI represents `[u8]` elements as boxed
+    RuntimeValues.  A raw memcpy of the array backing store therefore copies
+    tag bits and an eight-byte stride, not the ELF bytes.  Decode each element
+    before writing the destination page.
+    """
+    if len == 0:
+        return
+    val dst_virt = _phys_to_virt(dst_phys)
+    var i: u64 = 0
+    while i < len:
+        val byte = rt_bytes_u8_at(src, (src_offset + i) as i64) as u8
+        mmio_write8(dst_virt + i, byte)
+        i = i + 1
+
+@cfg(not(x86_64))
+fn vmm_copy_bytes_to_phys(dst_phys: u64, src: [u8], src_offset: u64, len: u64):
+    """Bulk-copy packed `src[src_offset..]` bytes to physical memory via HHDM."""
     if len == 0:
         return
     val dst_virt = _phys_to_virt(dst_phys)
