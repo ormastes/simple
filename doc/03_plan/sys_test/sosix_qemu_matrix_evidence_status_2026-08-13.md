@@ -20,7 +20,7 @@ excluded or complete.
 | Linux | x86_64 | canonical row PASS | `linux/x86_64-ovmf-canonical-20260813-final/canonical-root/linux/x86_64/run-X86_64_COLLECTOR_NONCE_20260813_V3/evidence.env`; OVMF pflash → GRUB → guest entry → real FS program/reap. |
 | Linux | arm64 | canonical row PASS | `linux/arm64-canonical-v21-20260812/canonical-root/linux/arm64/run-arm64-collector-v21-20260812-n1/evidence.env`; direct-kernel v2 receipt. |
 | Linux | riscv32 | canonical row PASS | `native-v2-1832753b/linux/riscv32/run-COLLECTOR-RV32-1832753B-A/evidence.env`; direct-kernel v2 receipt. |
-| Linux | x86_32 | blocked | CPL3 filesystem lifecycle needs the frozen GDT/TSS, kernel-stack/token, trap and scheduler owners wired and live-proven. |
+| Linux | x86_32 | blocked | CPL3 filesystem lifecycle has no linked `enter_user_first.s`, no installed GDT/TSS/`esp0` owner, only a weak same-CPL `int 0x80` probe bridge, and a context switch that never restores `to`; freeze and wire authenticated token/stack/trap/scheduler owners before a live run. |
 | Linux | arm32 | blocked | ARM32 vector/SVC owners exist only below canonical fs-exec staging/boot-secret integration; no live row. |
 | Linux | riscv64 | blocked | Existing retained records are diagnostics; rebuild and canonical direct-kernel/OpenSBI closure remains required. |
 | Windows | all six | blocked, target-host execution required | Use `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -AllGuests -Run -Parallel` on a prepared Windows host, then the native producer. |
