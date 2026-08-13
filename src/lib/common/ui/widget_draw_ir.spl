@@ -317,11 +317,10 @@ fn _default_text_centered(node: WidgetNode, component_id: text, x: i32, legacy_y
 # (ox=scroll.x, oy=scroll.y+offset) whose embedding re-adds the origin.
 # =========================================================================
 
-fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32, oy: i32, cmds: [DrawIrCommand], theme: WidgetDrawIrTheme) -> [DrawIrCommand]:
-    var result = cmds
+fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32, oy: i32, mut result: [DrawIrCommand], theme: WidgetDrawIrTheme):
     val rect = rects[rect_index]
     if rect.w <= 0 or rect.h <= 0:
-        return result
+        return
     val x = rect.x - ox
     val y = rect.y - oy
     val kind = node.kind_name()
@@ -518,31 +517,28 @@ fn _emit_widget(node: WidgetNode, rects: [WidgetRect], rect_index: i64, ox: i32,
     else:
         # container / panel / unknown -> background surface
         result.push(draw_ir_rect(rect.id, x, y, rect.w, rect.h, theme.surface))
-    return result
 
 # =========================================================================
 # Main-batch walk (absolute coords). Scroll subtrees are handled separately,
 # so the walk draws the scroll frame but does not recurse into it.
 # =========================================================================
 
-fn _walk_main(node: WidgetNode, rects: [WidgetRect], cmds: [DrawIrCommand], theme: WidgetDrawIrTheme) -> [DrawIrCommand]:
-    var result = cmds
+fn _walk_main(node: WidgetNode, rects: [WidgetRect], mut result: [DrawIrCommand], theme: WidgetDrawIrTheme):
     if not node.is_visible():
-        return result
+        return
     val rect_index = find_rect_index(rects, node.id)
     if rect_index < 0:
-        return result
-    result = _emit_widget(node, rects, rect_index, 0, 0, result, theme)
+        return
+    _emit_widget(node, rects, rect_index, 0, 0, result, theme)
     if node.kind_name() == "scroll":
-        return result
+        return
     if node.kind_name() == "dropdown":
         # A closed dropdown's items are its option list, not visible content:
         # the emitter draws the current value, and the items only belong on
         # screen while the popup is open (not modeled here yet).
-        return result
+        return
     for child in node.children():
-        result = _walk_main(child, rects, result, theme)
-    return result
+        _walk_main(child, rects, result, theme)
 
 # =========================================================================
 # Scroll batches: each scroll node becomes a clipped batch whose descendants
@@ -551,31 +547,28 @@ fn _walk_main(node: WidgetNode, rects: [WidgetRect], cmds: [DrawIrCommand], them
 # depth-aware split if a real app needs it.
 # =========================================================================
 
-fn _walk_scroll_children(node: WidgetNode, rects: [WidgetRect], ox: i32, oy: i32, cmds: [DrawIrCommand], theme: WidgetDrawIrTheme) -> [DrawIrCommand]:
-    var result = cmds
+fn _walk_scroll_children(node: WidgetNode, rects: [WidgetRect], ox: i32, oy: i32, mut result: [DrawIrCommand], theme: WidgetDrawIrTheme):
     if not node.is_visible():
-        return result
+        return
     val rect_index = find_rect_index(rects, node.id)
     if rect_index >= 0:
-        result = _emit_widget(node, rects, rect_index, ox, oy, result, theme)
+        _emit_widget(node, rects, rect_index, ox, oy, result, theme)
     for child in node.children():
-        result = _walk_scroll_children(child, rects, ox, oy, result, theme)
-    return result
+        _walk_scroll_children(child, rects, ox, oy, result, theme)
 
 fn _build_scroll_batch(scroll_node: WidgetNode, rects: [WidgetRect], rect_index: i64, backend: text, theme: WidgetDrawIrTheme) -> DrawIrBatch:
     val srect = rects[rect_index]
     val offset = _prop_int(scroll_node, "scroll_offset")
     var cmds: [DrawIrCommand] = []
     for child in scroll_node.children():
-        cmds = _walk_scroll_children(child, rects, srect.x, srect.y + offset, cmds, theme)
+        _walk_scroll_children(child, rects, srect.x, srect.y + offset, cmds, theme)
     val embedding = draw_ir_embedding_config("scroll-{scroll_node.id}", scroll_node.id, srect.x, srect.y, srect.w, srect.h, 5, 1000, true)
     val source = draw_ir_source_gui_ast(scroll_node.id, "widget-scroll", "1")
     draw_ir_batch_with_source("scroll-{scroll_node.id}", backend, embedding, cmds, source)
 
-fn _collect_scroll_batches(node: WidgetNode, rects: [WidgetRect], backend: text, batches: [DrawIrBatch], theme: WidgetDrawIrTheme) -> [DrawIrBatch]:
-    var result = batches
+fn _collect_scroll_batches(node: WidgetNode, rects: [WidgetRect], backend: text, mut result: [DrawIrBatch], theme: WidgetDrawIrTheme):
     if not node.is_visible():
-        return result
+        return
     if node.kind_name() == "scroll":
         val rect_index = find_rect_index(rects, node.id)
         if rect_index >= 0:
@@ -583,8 +576,7 @@ fn _collect_scroll_batches(node: WidgetNode, rects: [WidgetRect], backend: text,
                 node, rects, rect_index, backend, theme
             ))
     for child in node.children():
-        result = _collect_scroll_batches(child, rects, backend, result, theme)
-    return result
+        _collect_scroll_batches(child, rects, backend, result, theme)
 
 # =========================================================================
 # Root surface projection
@@ -657,7 +649,7 @@ fn widget_tree_to_draw_ir_with_theme(root: WidgetNode, w: i32, h: i32, backend: 
     val theme = widget_draw_ir_theme_from_snapshot(snapshot)
     val rects = compute_layout(root, 0, 0, w, h)
     var main_cmds: [DrawIrCommand] = []
-    main_cmds = _walk_main(root, rects, main_cmds, theme)
+    _walk_main(root, rects, main_cmds, theme)
     main_cmds = _widget_draw_ir_root_surface_commands(
         root, w, h, backend, snapshot, main_cmds
     )
@@ -665,19 +657,19 @@ fn widget_tree_to_draw_ir_with_theme(root: WidgetNode, w: i32, h: i32, backend: 
     val source = draw_ir_source_gui_ast(root.id, "widget-tree", "1")
     val main_batch = draw_ir_batch_with_source("widget-main", backend, embedding, main_cmds, source)
     var batches: [DrawIrBatch] = [main_batch]
-    batches = _collect_scroll_batches(root, rects, backend, batches, theme)
+    _collect_scroll_batches(root, rects, backend, batches, theme)
     draw_ir_composition("widget-composition", "widget:{w}x{h}", backend, batches)
 
 fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> DrawIrComposition:
     val theme = _widget_draw_ir_theme_for_root(root)
     val rects = compute_layout(root, 0, 0, w, h)
     var main_cmds: [DrawIrCommand] = []
-    main_cmds = _walk_main(root, rects, main_cmds, theme)
+    _walk_main(root, rects, main_cmds, theme)
     val embedding = draw_ir_embedding_config("widget-root", root.id, 0, 0, w, h, 0, 1000, false)
     val source = draw_ir_source_gui_ast(root.id, "widget-tree", "1")
     val main_batch = draw_ir_batch_with_source("widget-main", backend, embedding, main_cmds, source)
     var batches: [DrawIrBatch] = [main_batch]
-    batches = _collect_scroll_batches(root, rects, backend, batches, theme)
+    _collect_scroll_batches(root, rects, backend, batches, theme)
     draw_ir_composition("widget-composition", "widget:{w}x{h}", backend, batches)
 
 fn widget_tree_to_draw_ir_cpu(root: WidgetNode, w: i32, h: i32) -> DrawIrComposition:
