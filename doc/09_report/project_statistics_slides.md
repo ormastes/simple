@@ -60,6 +60,7 @@ Servers and Agent Tooling
 |---|---:|---:|
 | DB server | 20 | 2,892 |
 | Web server | 27 | 2,078 |
+| Web Browser | 584 | 178,495 |
 | Agents Manager | 42 | 2,148 |
 | SPipe | 334 | 49,383 |
 

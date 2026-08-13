@@ -13,7 +13,7 @@ Extend the authoritative `app.stats` capsule. A single `StatsInventoryV2` model 
 - `markdown_report.spl`: full report, TLDR and SimpleOS-themed slide Markdown projections.
 - Existing duplicate-check/coupling tools remain semantic owners. Stats never reimplements clone, graph or LCOM algorithms.
 
-Project ownership rows are disjoint. Firmware, RISC-V, DB/web server,
+Project ownership rows are disjoint. Firmware, RISC-V, DB/web server, Web Browser,
 UI/rendering, Office, CRM, Agent Caret, Agents Manager, and SPipe are overlapping
 focus tags and are excluded from portfolio summation. Canonical test tier paths
 win over legacy mirrors using normalized relative identities.
