@@ -35,3 +35,34 @@ produced `SIMPLEOS_FS_EXEC_OK`, exit status 37, exact scheduler reap, and final
 This row is not collector-promoted. Canonical 24-row completion still requires
 valid evidence bundles for the remaining rows and their firmware/admission
 contracts.
+
+## Canonical nonce-separation replay
+
+Commit `6ea9d38c4d0` adds a second, fixed `SOSIXNON.TXT` media slot and keeps
+it separate from the workload challenge in `QEMUNONC.TXT`.  The nonce-media
+preparer now accepts an optional fourth collector nonce argument and patches
+both slots with exact readback.  The x86_64 entry fails closed unless it can
+read and validate the collector slot, emits its labeled collector nonce exactly
+once, then emits `guest-entry`, and only afterward reads the workload nonce.
+
+One clean admitted rebuild and one OVMF/Q35 boot prove the following order:
+
+1. `SOSIX_COLLECTOR_RUN_NONCE=X86_64_COLLECTOR_NONCE_20260813`
+2. `guest-entry`
+3. `SIMPLEOS_QEMU_NONCE=X86_64_WORKLOAD_NONCE_20260813`
+4. ten real `/SYS/APPS` entries, mounted `/FSEXEC.ELF`, target output, exit
+   37, exact reap, and `TEST PASSED`.
+
+| Item | Evidence |
+| --- | --- |
+| Isolated source head | `6ea9d38c4d0` |
+| Admitted compiler SHA-256 | `23513399e970cfc1c850484c6d75bde7aebe47446835da19f7387c83c6672dd7` |
+| Kernel SHA-256 | `a9df52f13cb071ca3beecc138ee068d0cf903ac21472b52181c0b7aa652ab833` |
+| Base image SHA-256 | `836824dd8715001985ae330475b52dffccf58c1b14e22a1524c0456d7fddb382` |
+| Patched image SHA-256 | `20df69cade68a140abc60e70a3ab4830f6afb8865ada6de84319f3a5b0ee6141` |
+| Transcript | `/mnt/data/.simple/qemu/artifacts/sosix-qemu/linux/x86_64-canonical-nonce-20260813/ovmf-check/serial.log` |
+
+This is still functional evidence, not a canonical bundle: the OVMF/GRUB
+launch has not yet produced the producer's required closed firmware-stage
+admission and ordered `firmware-entry>firmware-handoff>guest-entry` contract.
+It must not be mislabeled as the existing `direct-kernel` evidence mode.
