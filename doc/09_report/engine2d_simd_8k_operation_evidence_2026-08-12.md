@@ -149,6 +149,23 @@ SIMD hits. This demonstrates bit-exact cross-architecture execution and a QEMU
 regression direction. Emulator timing is not physical ARM performance, bare
 metal scanout, or end-to-end 8K/80 proof.
 
+## 2026-08-13 host revalidation — frame-switch boundary
+
+The native C harness was rerun on the x86-64 host with the current
+`runtime_simd_dispatch.c` and seven samples.  At 7680x4320 with **1% active
+damage** (331,776 pixels), the six-call retained operation frame recorded p95
+**2,394,350 ns**, checksum `2436809228175672195`, and 35 native SIMD hits.  The
+isolated active-damage primitive budget therefore passed.
+
+The same harness at **100% active damage** recorded six-call p95
+**379,656,624 ns** (checksum `6655426588272231299`), so the full-repaint budget
+failed.  This is expected memory-bandwidth pressure from six 8-byte-per-pixel
+buffer operations, not evidence that the retained route has regressed.
+
+This is still operation-level native C evidence only. It does not prove
+end-to-end DrawIR, GUI, WM, physical scanout, ARM/RISC-V hardware performance,
+or dynamic 8K/80 application throughput.
+
 ## SSE2 fallback vectorization and forced-dispatch evidence
 
 The x86-64 SSE2 fallback previously invoked a one-pixel helper for every pixel.
