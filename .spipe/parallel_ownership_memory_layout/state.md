@@ -715,6 +715,9 @@ in-progress
   self-hosted binary and also segfaulted before a verdict, so this is a
   source-reviewed metric plus focused contract fixture, not native execution
   evidence.
+- impl: Reader close is now terminal for retention as well as frame admission.
+  It clears a partial armored line and rejects subsequent chunks before they
+  can be appended, closing the prior closed-inbox-but-retained-text gap.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters

@@ -89,6 +89,9 @@ line budget, but cannot enlarge that transport bound.
 The reader also records its retained partial-line high-water mark, so a focused
 memory gate can assert its maximum without relying on host RSS. That metric is
 per reader lifetime and does not represent child-side or pipe-kernel buffering.
+Closing the reader clears any partial line and makes later stdout chunks fail
+at the reader boundary; a closed inbox alone is not used as a reason to retain
+more child output.
 
 This is still not an application process API or an implicit retry queue. Child
 launch, stdin request protocol, cancellation, exit cleanup, and native
