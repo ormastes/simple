@@ -21,6 +21,15 @@ them; they must not fork their own variants.
 | Evidence | native producer + 24-row collector | Row producer owns artifacts; collector is the only parent-authoritative matrix commit. |
 | Status ledger | `sosix_qemu_matrix_evidence_status_2026-08-13.md` | Every unavailable row stays visible with owner and exact resume command. |
 
+Before a native-host run, an operator validates the reusable producer with:
+
+```sh
+sh scripts/check/produce-sosix-qemu-native-pass-bundle.shs --self-test
+```
+
+The fixture emits a temporary direct-kernel bundle only; it never substitutes
+for a host admission or a row's real evidence.
+
 ## Parallel lanes
 
 | Lane | Scope / exclusive owner files | Current state | Acceptance evidence | Sidecar | Merge owner | Final reviewer |
