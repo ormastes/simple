@@ -759,6 +759,190 @@ pub(crate) fn handle_method_call_with_self_update(
                     }
                 }
             }
+            // Packed `[u8]` values use the same identifier-lvalue contract as
+            // generic arrays.  Falling through to `evaluate_expr` computes the
+            // mutator result, but loses the receiver write-back; consequently
+            // `bytes.push(x)` returned the enlarged byte array while leaving
+            // `bytes` unchanged.  Keep the packed Arc compact and use
+            // `Arc::make_mut` so a uniquely-owned binding mutates in place while
+            // an aliased binding gets an isolated COW copy.
+            if let Some(Value::ByteArray(_)) = env.get(obj_name) {
+                if ARRAY_MUTATING_METHODS.contains(&method.as_str()) {
+                    let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(obj_name));
+                    if is_const {
+                        let ctx = ErrorContext::new()
+                            .with_code(codes::INVALID_ASSIGNMENT)
+                            .with_help(format!("consider using '{obj_name}_' for a mutable variable"));
+                        return Err(CompileError::semantic_with_context(
+                            format!(
+                                "cannot call mutating method '{}' on immutable byte array '{}'",
+                                method, obj_name
+                            ),
+                            ctx,
+                        ));
+                    }
+
+                    let m = method.as_str();
+                    let item = match m {
+                        "push" | "append" => Some(eval_arg(
+                            args,
+                            0,
+                            Value::Nil,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?),
+                        "extend" => Some(eval_arg(
+                            args,
+                            0,
+                            Value::array(vec![]),
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                        )?),
+                        _ => None,
+                    };
+                    let (idx, second) = match m {
+                        "insert" => (
+                            Some(eval_arg_usize(
+                                args,
+                                0,
+                                0,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?),
+                            Some(eval_arg(
+                                args,
+                                1,
+                                Value::Nil,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?),
+                        ),
+                        "remove" => (
+                            Some(eval_arg_usize(
+                                args,
+                                0,
+                                0,
+                                env,
+                                functions,
+                                classes,
+                                enums,
+                                impl_methods,
+                            )?),
+                            None,
+                        ),
+                        _ => (None, None),
+                    };
+
+                    if let Some(Value::ByteArray(arc)) = env.get_mut(obj_name) {
+                        let byte_value = |value: &Value| match value {
+                            Value::UInt { value, width: 8 } => u8::try_from(*value).ok(),
+                            _ => None,
+                        };
+                        let mut element_result = None;
+                        let mut widened = None;
+                        {
+                            let bytes = Arc::make_mut(arc);
+                            match m {
+                                "push" | "append" => {
+                                    let value = item.unwrap_or(Value::Nil);
+                                    if let Some(byte) = byte_value(&value) {
+                                        bytes.push(byte);
+                                    } else {
+                                        let mut values = Value::byte_array_values(bytes);
+                                        values.push(value);
+                                        widened = Some(Value::array(values));
+                                    }
+                                }
+                                "pop" => {
+                                    element_result = Some(
+                                        bytes
+                                            .pop()
+                                            .map(|byte| Value::UInt {
+                                                value: u64::from(byte),
+                                                width: 8,
+                                            })
+                                            .unwrap_or(Value::Nil),
+                                    );
+                                }
+                                "insert" => {
+                                    let index = idx.unwrap_or(0);
+                                    let value = second.unwrap_or(Value::Nil);
+                                    if index <= bytes.len() {
+                                        if let Some(byte) = byte_value(&value) {
+                                            bytes.insert(index, byte);
+                                        } else {
+                                            let mut values = Value::byte_array_values(bytes);
+                                            values.insert(index, value);
+                                            widened = Some(Value::array(values));
+                                        }
+                                    }
+                                }
+                                "remove" => {
+                                    let index = idx.unwrap_or(0);
+                                    element_result = Some(if index < bytes.len() {
+                                        Value::UInt {
+                                            value: u64::from(bytes.remove(index)),
+                                            width: 8,
+                                        }
+                                    } else {
+                                        Value::Nil
+                                    });
+                                }
+                                "extend" => match item {
+                                    // `[u8]` is a first-class array representation.  Preserve the
+                                    // packed fast path when extending with packed mutable or frozen
+                                    // bytes; accepting only `Value::Array` made `a.extend(b)` fail
+                                    // solely because `b` used the compact representation.
+                                    Some(Value::ByteArray(other)) | Some(Value::FrozenByteArray(other)) => {
+                                        bytes.extend(other.iter().copied());
+                                    }
+                                    Some(Value::Array(other)) => {
+                                        let mut values = Value::byte_array_values(bytes);
+                                        values.extend(other.iter().cloned());
+                                        let packed: Option<Vec<u8>> = values.iter().map(byte_value).collect();
+                                        if let Some(packed) = packed {
+                                            *bytes = packed;
+                                        } else {
+                                            widened = Some(Value::array(values));
+                                        }
+                                    }
+                                    _ => {
+                                        let ctx = ErrorContext::new()
+                                            .with_code(codes::TYPE_MISMATCH)
+                                            .with_help("concat/extend/merge expects an array argument");
+                                        return Err(CompileError::semantic_with_context(
+                                            "concat/extend/merge expects array argument",
+                                            ctx,
+                                        ));
+                                    }
+                                },
+                                "clear" => bytes.clear(),
+                                _ => {}
+                            }
+                        }
+
+                        if let Some(new_value) = widened {
+                            let result = element_result.unwrap_or_else(|| new_value.clone());
+                            return Ok((result, Some((obj_name.clone(), new_value))));
+                        }
+                        let new_value = Value::ByteArray(Arc::clone(arc));
+                        let result = element_result.unwrap_or_else(|| new_value.clone());
+                        return Ok((result, Some((obj_name.clone(), new_value))));
+                    }
+                }
+            }
             // Handle Dict mutations for mutating methods
             if let Some(Value::Dict(_)) = env.get(obj_name) {
                 let dict_mutating = ["set", "insert", "remove", "delete", "merge", "extend", "clear"];

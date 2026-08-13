@@ -87,4 +87,176 @@ fn main() -> i32:
     assert_eq!(result.exit_code, 45);
 }
 
+#[test]
+fn interpreter_byte_array_identifier_mutators_write_back_with_cow() {
+    let writeback = run_code(
+        r#"
+extern fn rt_byte_array_new(len: i64) -> [u8]
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn main() -> i32:
+    var bytes = rt_byte_array_new(0)
+    bytes.push(0x2du8)
+    return (bytes.len() * 10 + rt_bytes_u8_at(bytes, 0)).to_i32()
+"#,
+        &[],
+        "",
+    )
+    .unwrap();
+    assert_eq!(
+        writeback.exit_code, 55,
+        "identifier receiver must be rebound after push"
+    );
+
+    let cow = run_code(
+        r#"
+extern fn rt_byte_array_new(len: i64) -> [u8]
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn main() -> i32:
+    var bytes = rt_byte_array_new(1)
+    var alias = bytes
+    bytes.push(0x09u8)
+    return (alias.len() * 100 + rt_bytes_u8_at(alias, 0) * 10 + rt_bytes_u8_at(bytes, 1)).to_i32()
+"#,
+        &[],
+        "",
+    )
+    .unwrap();
+    assert_eq!(
+        cow.exit_code, 109,
+        "mutating one packed-byte alias must preserve its content and length"
+    );
+
+    let pop_writeback = run_code(
+        r#"
+extern fn rt_byte_array_new(len: i64) -> [u8]
+
+fn main() -> i32:
+    var bytes = rt_byte_array_new(0)
+    bytes.push(0x07u8)
+    val removed = bytes.pop()
+    return (removed.to_i64() * 10 + bytes.len()).to_i32()
+"#,
+        &[],
+        "",
+    )
+    .unwrap();
+    assert_eq!(
+        pop_writeback.exit_code, 70,
+        "pop must return the removed byte and trim the binding"
+    );
+}
+
+#[test]
+fn interpreter_byte_array_identifier_mutators_cover_packed_extend_and_structural_updates() {
+    let packed_extend = run_code(
+        r#"
+extern fn rt_byte_array_new(len: i64) -> [u8]
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn main() -> i32:
+    var bytes = rt_byte_array_new(0)
+    var more = rt_byte_array_new(0)
+    bytes.push(0x01u8)
+    more.push(0x02u8)
+    more.push(0x03u8)
+    bytes.extend(more)
+    return (bytes.len() * 10 + rt_bytes_u8_at(bytes, 2)).to_i32()
+"#,
+        &[],
+        "",
+    )
+    .unwrap();
+    assert_eq!(
+        packed_extend.exit_code, 33,
+        "packed [u8] extend must retain packed receiver semantics"
+    );
+
+    let structural_updates = run_code(
+        r#"
+extern fn rt_byte_array_new(len: i64) -> [u8]
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn main() -> i32:
+    var bytes = rt_byte_array_new(0)
+    bytes.append(0x01u8)
+    bytes.push(0x03u8)
+    bytes.insert(1, 0x02u8)
+    val removed = bytes.remove(1)
+    val score = removed.to_i64() * 100 + bytes.len() * 10 + rt_bytes_u8_at(bytes, 1)
+    bytes.clear()
+    return (score + bytes.len()).to_i32()
+"#,
+        &[],
+        "",
+    )
+    .unwrap();
+    assert_eq!(
+        structural_updates.exit_code, 223,
+        "append/insert/remove/clear must update the identifier receiver"
+    );
+}
+
+#[test]
+fn interpreter_byte_array_identifier_mutators_widen_on_non_u8_elements() {
+    let widened = run_code(
+        r#"
+extern fn rt_byte_array_new(len: i64) -> [u8]
+
+fn main() -> i32:
+    var bytes = rt_byte_array_new(0)
+    bytes.push(0x01u8)
+    bytes.insert(1, "widen")
+    bytes.append(0x02u8)
+    return bytes.len().to_i32()
+"#,
+        &[],
+        "",
+    )
+    .unwrap();
+    assert_eq!(
+        widened.exit_code, 3,
+        "a non-u8 identifier mutation must widen once and keep the rebound generic array"
+    );
+}
+
+#[test]
+fn interpreter_byte_array_identifier_mutators_reject_immutable_receivers() {
+    let constant = run_code(
+        r#"
+extern fn rt_byte_array_new(len: i64) -> [u8]
+
+fn main() -> i32:
+    val bytes = rt_byte_array_new(0)
+    bytes.push(0x01u8)
+    return 0
+"#,
+        &[],
+        "",
+    );
+    assert!(
+        constant.is_err(),
+        "a val ByteArray must reject identifier-mutating methods"
+    );
+
+    let frozen = run_code(
+        r#"
+extern fn rt_byte_array_new(len: i64) -> [u8]
+
+fn main() -> i32:
+    var bytes = rt_byte_array_new(0)
+    val frozen = bytes.freeze()
+    frozen.push(0x01u8)
+    return 0
+"#,
+        &[],
+        "",
+    );
+    assert!(
+        frozen.is_err(),
+        "a frozen ByteArray must reject identifier-mutating methods"
+    );
+}
+
 // ============ Context Blocks (#35) ============
