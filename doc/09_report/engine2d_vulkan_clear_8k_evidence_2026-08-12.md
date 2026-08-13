@@ -89,6 +89,30 @@ retains `swapchain_presented=false` and
 `engine2d_vulkan_mixed_dynamic_frame_80fps_proven=false`; it must not be read
 as a complete GPU/DrawIR/Web/GUI/WM 8K/80 result.
 
+## 2026-08-13 headless presentation capability result
+
+The physical NVIDIA adapter does not expose `VK_EXT_headless_surface`. An
+attempt to run the existing ignored 8K same-device headless-swapchain benchmark
+therefore cannot establish presentation evidence on this host. Before this
+check, `Surface::new_headless` constructed Ash's generated loader despite the
+extension being absent; Ash then panicked in a non-unwinding FFI call and
+aborted the test process. `VulkanInstance` now records whether the extension
+was enabled at instance creation, and `new_headless` returns
+`VulkanError::NotSupported` before loading the extension when it was not.
+
+With the NVIDIA ICD, the formerly aborting test now reaches the normal
+unsupported result:
+
+```text
+headless present surface: Feature not supported:
+VK_EXT_headless_surface was not enabled by this Vulkan instance
+```
+
+This is a runtime-hardening fix and a capability result, not a failed GPU
+compute measurement. Headless 8K presentation remains unavailable here; a
+visible WSI surface or a driver with the extension is still required for a
+device-present/scanout evidence row.
+
 ## Batched filled rectangles and barrier correction
 
 The representative DrawIR-style batch seeds a retained 8K framebuffer, records

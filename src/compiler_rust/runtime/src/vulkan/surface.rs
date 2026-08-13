@@ -29,6 +29,11 @@ impl Surface {
 
     /// Create a headless presentation surface for same-device swapchain tests.
     pub fn new_headless(instance: Arc<VulkanInstance>) -> VulkanResult<Arc<Self>> {
+        if !instance.has_headless_surface() {
+            return Err(VulkanError::NotSupported(
+                "VK_EXT_headless_surface was not enabled by this Vulkan instance".to_string(),
+            ));
+        }
         let loader = ash::ext::headless_surface::Instance::new(instance.entry(), instance.instance());
         let info = vk::HeadlessSurfaceCreateInfoEXT::default();
         let surface = unsafe { loader.create_headless_surface(&info, None) }

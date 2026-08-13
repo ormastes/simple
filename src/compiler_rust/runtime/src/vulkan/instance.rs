@@ -15,6 +15,8 @@ pub struct VulkanInstance {
     instance: ash::Instance,
     #[cfg(feature = "vulkan")]
     surface_loader: ash::khr::surface::Instance,
+    #[cfg(feature = "vulkan")]
+    headless_surface_enabled: bool,
     debug_utils: Option<ash::ext::debug_utils::Instance>,
     debug_messenger: Option<vk::DebugUtilsMessengerEXT>,
 }
@@ -95,16 +97,23 @@ impl VulkanInstance {
 
         // Surface extensions for windowing
         #[cfg(feature = "vulkan")]
+        let mut headless_surface_enabled = false;
+        #[cfg(feature = "vulkan")]
         {
             extension_names_raw.push(ash::khr::surface::NAME.to_owned());
             let headless_available = unsafe {
-                entry.enumerate_instance_extension_properties(None)
-                    .map(|extensions| extensions.iter().any(|extension| {
-                        CStr::from_ptr(extension.extension_name.as_ptr()) == ash::ext::headless_surface::NAME
-                    })).unwrap_or(false)
+                entry
+                    .enumerate_instance_extension_properties(None)
+                    .map(|extensions| {
+                        extensions.iter().any(|extension| {
+                            CStr::from_ptr(extension.extension_name.as_ptr()) == ash::ext::headless_surface::NAME
+                        })
+                    })
+                    .unwrap_or(false)
             };
             if headless_available {
                 extension_names_raw.push(ash::ext::headless_surface::NAME.to_owned());
+                headless_surface_enabled = true;
             }
 
             // Platform-specific surface extensions
@@ -187,6 +196,8 @@ impl VulkanInstance {
             instance,
             #[cfg(feature = "vulkan")]
             surface_loader,
+            #[cfg(feature = "vulkan")]
+            headless_surface_enabled,
             debug_utils,
             debug_messenger,
         })
@@ -214,6 +225,14 @@ impl VulkanInstance {
     /// Get the Vulkan entry
     pub fn entry(&self) -> &ash::Entry {
         &self.entry
+    }
+
+    /// True only when this instance enabled VK_EXT_headless_surface.
+    /// Ash's generated loader aborts when asked to load an absent extension,
+    /// so callers must gate construction before creating that loader.
+    #[cfg(feature = "vulkan")]
+    pub fn has_headless_surface(&self) -> bool {
+        self.headless_surface_enabled
     }
 
     /// Get the surface loader
