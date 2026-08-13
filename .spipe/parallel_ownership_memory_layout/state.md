@@ -695,6 +695,15 @@ in-progress
   actual stdout into the new reader, then commits the decoded child result.
   Its interpreter capability probe skips only the known seed extern gap;
   no self-hosted native verdict has been obtained in this environment.
+- verify-blocked: The one available deployed self-hosted launcher was invoked
+  for that exact native gate on 2026-08-13. `bin/release/simple` rejected the
+  run before test discovery because its bounded ABI probe executes
+  `release/x86_64-unknown-linux-gnu/simple test --help`; that binary
+  segfaulted (exit 139). Its `--version` succeeds and identifies
+  `Simple v1.0.0-beta`, so this is a concrete deployed test-command crash,
+  not evidence that the process result test passed or failed. Resume only
+  after repairing the self-hosted `test --help` crash, then run once:
+  `SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl --mode=native`.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters
