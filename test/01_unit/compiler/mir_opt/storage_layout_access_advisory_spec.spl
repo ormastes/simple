@@ -5,8 +5,11 @@ use compiler.mir_opt.mir_opt.storage_access_analysis.{
     analyze_mir_storage_access_summary, mir_storage_region_binding_v1
 }
 use compiler.mir_opt.mir_opt.storage_layout_access_advisory.{
-    storage_layout_access_advisory_v1
+    storage_layout_access_advisory_v1,
+    storage_layout_access_advisory_with_memory_policy_v1
 }
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.common.parallel_policy.policy_schema.{ResolvedMemoryPolicyV1}
 use std.common.structural.parallel_commit.access_contracts.{
     parallel_access_paths_conflict
 }
@@ -175,4 +178,30 @@ describe "typed storage access layout advisory":
         assert_false(escaped.independent_field_access)
         assert_equal(storage_layout_kind_to_u8(
             storage_layout_plan_auto(escaped.request).layout),
+            storage_layout_kind_to_u8(StorageLayoutKind.AoS))
+
+    it "uses memory policy to pin observed storage and deny critical conversion":
+        val observed_function = MirFunction(..advisory_function(false, false),
+            blocks: [MirBlock(id: BlockId.new(0), label: Some("entry"),
+                instructions: [MirInst(kind: MirInstKind.Cast(
+                    LocalId(id: 50), advisory_copy(10), MirType.i64()), span: nil)],
+                terminator: MirTerminator.Ret(nil))])
+        val observed_summary = analyze_mir_storage_access_summary(
+            observed_function, [mir_storage_region_binding_v1(10, 200)])
+        val balanced = storage_layout_access_advisory_with_memory_policy_v1(
+            observed_summary, 9201, 3, 32, 16, 8, true, false,
+            "access-policy-v1", ResolvedMemoryPolicyV1.balanced())
+        assert_equal(storage_layout_kind_to_u8(
+            storage_layout_plan_auto(balanced.request).layout),
+            storage_layout_kind_to_u8(StorageLayoutKind.ExternalFixed))
+
+        val clean_summary = analyze_mir_storage_access_summary(
+            advisory_function(false, false), [mir_storage_region_binding_v1(10, 200)])
+        val critical = storage_layout_access_advisory_with_memory_policy_v1(
+            clean_summary, 9201, 3, 32, 16, 8, true, false,
+            "access-policy-v1", ResolvedMemoryPolicyV1.for_assurance(
+                AssuranceStrictness.Critical))
+        assert_false(critical.independent_field_access)
+        assert_equal(storage_layout_kind_to_u8(
+            storage_layout_plan_auto(critical.request).layout),
             storage_layout_kind_to_u8(StorageLayoutKind.AoS))

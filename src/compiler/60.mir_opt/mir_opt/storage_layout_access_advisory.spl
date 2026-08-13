@@ -6,6 +6,8 @@
 use compiler.mir_opt.mir_opt.storage_access_analysis.{
     MIR_STORAGE_UNKNOWN_REGION_ID, MirStorageAccessSummaryV1
 }
+use compiler.common.parallel_policy.policy_schema.{ResolvedMemoryPolicyV1}
+use std.common.crypto.sha256.{sha256_text}
 use std.common.structural.parallel_commit.access_contracts.{
     parallel_access_mode_to_u8
 }
@@ -83,3 +85,41 @@ fn storage_layout_access_advisory_v1(
     StorageLayoutAccessAdvisoryV1(request: request, complete: complete,
         independent_field_access: independent,
         identity: "access-advisory-v1|{logical_type_id}|{schema_field_count}|{element_count}|{alignment}|{simd_width}|{gpu_bulk_fields}|{abi_pinned}|{policy_hash.len()}:{policy_hash}|{complete}|{summary.address_observed}|{summary.unknown_access}|{independent}|{rows_identity}")
+
+fn storage_layout_access_advisory_with_memory_policy_v1(
+    summary: MirStorageAccessSummaryV1,
+    logical_type_id: i64, schema_field_count: i64,
+    element_count: i64, alignment: i64,
+    simd_width: i64, gpu_bulk_fields: bool, abi_pinned: bool,
+    policy_hash: text, memory_policy: ResolvedMemoryPolicyV1
+) -> StorageLayoutAccessAdvisoryV1:
+    """Apply fail-closed memory constraints before physical selection.
+
+    The policy cannot select a layout. It can only pin address-observed/ABI
+    storage or suppress automatic representation conversion. Its canonical
+    material is hashed into the planner policy identity so a changed memory
+    constraint cannot reuse an incompatible layout receipt/cache entry.
+    """
+    val effective_abi_pinned = abi_pinned
+        or (memory_policy.pin_address_observed_layout and summary.address_observed)
+        or (memory_policy.pin_external_abi_layout and abi_pinned)
+    val transforms_allowed = not memory_policy.deny_implicit_layout_conversion
+        and not effective_abi_pinned
+    val effective_simd_width = if transforms_allowed: simd_width else: 1
+    val effective_gpu_bulk_fields = if transforms_allowed: gpu_bulk_fields else: false
+    val effective_policy_hash = sha256_text(
+        "storage-layout-memory-policy-v1|{policy_hash.len()}:{policy_hash}|{memory_policy.canonical_text()}")
+    val base = storage_layout_access_advisory_v1(
+        summary, logical_type_id, schema_field_count, element_count, alignment,
+        effective_simd_width, effective_gpu_bulk_fields, effective_abi_pinned,
+        effective_policy_hash)
+    if transforms_allowed:
+        return base
+    val request = storage_layout_request_v1(
+        logical_type_id, element_count, alignment, 1, false, false,
+        effective_abi_pinned, effective_policy_hash)
+    StorageLayoutAccessAdvisoryV1(
+        request: request,
+        complete: base.complete,
+        independent_field_access: false,
+        identity: base.identity + "|memory-policy-transform=denied")

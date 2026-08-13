@@ -539,6 +539,13 @@ in-progress
   the existing planner's locality hint, while ABI, GPU, and SIMD inputs remain
   explicit and no alias/scheduling authority is emitted. Advisory, access, and
   producer gates pass 4/4, 6/6, and 5/5.
+- impl: Connected `ResolvedMemoryPolicyV1` to that advisory as a fail-closed
+  compiler adapter. Address-observed policy pins produce `ExternalFixed`; a
+  conversion-denying profile suppresses automatic SoA/SIMD/GPU choices, and a
+  SHA-256 of the base policy plus memory policy participates in the selected
+  layout identity. The bootstrap leaf check passed. Driver/SDN policy loading,
+  planner invocation from a real allocation owner, and self-hosted execution
+  remain open.
 - impl: Hardened the WP-22 native handoff boundary. Registry freeze now
   deep-copies field rows and full evidence, validates site/evidence equality,
   records the complete module universe including zero-site modules, and uses
