@@ -2,8 +2,67 @@
 
 use common.ui.draw_ir.{DrawIrComposition}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir_cpu_bitmap}
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
+use common.ui.render_opt.damage_plan.{DamagePlan, DAMAGE_PLAN_NONE}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dDrawIrTileOutcome,
+    engine2d_draw_ir_adv_composition,
+    engine2d_draw_ir_render_composition_damaged,
+    engine2d_draw_ir_retained_idle,
+    engine2d_draw_ir_retained_rejected
+}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+"""Persistent CPU Engine2D surface for canonical web DrawIR compositions.
+
+The hosted web worker publishes DrawIrComposition to the compositor rather
+than owning pixels.  Consumers which do own a persistent surface can use this
+adapter to replay an exact old+new damage plan without creating and clearing an
+Engine2D instance every frame.  Damage remains out-of-band: no WebIR/cache
+state is added to DrawIR itself.
+"""
+pub class SimpleWebCpuDrawIrRetainedSurface:
+    engine: Engine2D
+    width: i32
+    height: i32
+    backend_name: text
+    seeded: bool
+
+    static fn create(width: i32, height: i32,
+                     backend_name: text) -> SimpleWebCpuDrawIrRetainedSurface:
+        val resolved = if backend_name == "cpu_simd": "cpu_simd" else: "cpu"
+        SimpleWebCpuDrawIrRetainedSurface(
+            engine: Engine2D.create_with_backend(width, height, resolved),
+            width: width, height: height, backend_name: resolved, seeded: false)
+
+    me seed(composition: DrawIrComposition,
+            readback_frame: bool) -> Engine2dDrawIrTileOutcome:
+        if self.width <= 0 or self.height <= 0:
+            return engine2d_draw_ir_retained_rejected(
+                self.engine, "retained-invalid-surface")
+        self.engine.clear(0u32)
+        val rendered = engine2d_draw_ir_adv_composition(
+            self.engine, composition, self.backend_name == "cpu_simd")
+        if rendered.fallback_required or rendered.skipped_command_count != 0:
+            self.seeded = false
+            return engine2d_draw_ir_retained_rejected(
+                self.engine, "retained-seed-failed")
+        self.seeded = true
+        engine2d_draw_ir_retained_idle(self.engine, readback_frame)
+
+    me render_damage(composition: DrawIrComposition, plan: DamagePlan,
+                     readback_frame: bool) -> Engine2dDrawIrTileOutcome:
+        if not self.seeded:
+            return self.seed(composition, readback_frame)
+        if plan.mode == DAMAGE_PLAN_NONE and plan.rects.len() == 0:
+            return engine2d_draw_ir_retained_idle(self.engine, readback_frame)
+        val outcome = engine2d_draw_ir_render_composition_damaged(
+            self.engine, composition, plan.rects, readback_frame)
+        self.engine = outcome.engine
+        outcome
+
+    me shutdown():
+        self.engine.shutdown()
+        self.seeded = false
 
 fn _simple_web_render_draw_ir_composition_with_cpu_backend(
     composition: DrawIrComposition, width: i32, height: i32, backend_name: text

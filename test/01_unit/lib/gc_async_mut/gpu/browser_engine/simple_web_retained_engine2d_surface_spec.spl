@@ -1,0 +1,71 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_cpu.spl 80%
+# @tag: unit, web, draw_ir, retained
+"""Exact retained-frame contract for the direct Web-to-Engine2D CPU adapter."""
+
+use std.spec.*
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect
+}
+use common.ui.render_opt.damage_plan.{
+    DamagePlan, DAMAGE_FALLBACK_NONE, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_NONE
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_cpu.{
+    SimpleWebCpuDrawIrRetainedSurface
+}
+
+val RETAINED_GREEN: u32 = 0xff22c55eu32
+val RETAINED_RED: u32 = 0xffef4444u32
+
+fn _retained_web_composition(commands) :
+    draw_ir_composition(
+        "web-root", "web:8x4", DRAW_IR_BACKEND_CPU,
+        [draw_ir_batch(
+            "web-root", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "web-surface", "web", 0, 0, 8, 4, 0, 1000, false),
+            commands)])
+
+fn _retained_local_plan() -> DamagePlan:
+    DamagePlan(
+        rects: [2, 1, 2, 1], mode: DAMAGE_PLAN_LOCAL,
+        source_tile_count: 1, output_rect_count: 1,
+        merged_tile_count: 0, dirty_pixels: 2, planned_pixels: 2,
+        full_fallback_count: 0, fallback_reason: DAMAGE_FALLBACK_NONE,
+        tiles_examined: 1)
+
+fn _retained_idle_plan() -> DamagePlan:
+    DamagePlan(
+        rects: [], mode: DAMAGE_PLAN_NONE,
+        source_tile_count: 0, output_rect_count: 0,
+        merged_tile_count: 0, dirty_pixels: 0, planned_pixels: 0,
+        full_fallback_count: 0, fallback_reason: DAMAGE_FALLBACK_NONE,
+        tiles_examined: 0)
+
+describe "Simple Web retained Engine2D surface":
+
+    it "seeds once, replays exact damage, and leaves an idle frame untouched":
+        var surface = SimpleWebCpuDrawIrRetainedSurface.create(8, 4, "cpu")
+        val seed = surface.seed(_retained_web_composition([
+            draw_ir_rect("background", 0, 0, 8, 4, RETAINED_GREEN)
+        ]), true)
+        expect(seed.readback.pixels[0]).to_equal(RETAINED_GREEN)
+
+        val changed = surface.render_damage(_retained_web_composition([
+            draw_ir_rect("changed", 2, 1, 2, 1, RETAINED_RED)
+        ]), _retained_local_plan(), true)
+        expect(changed.unsupported_kinds).to_equal("none")
+        expect(changed.ops_rendered).to_equal(1)
+        expect(changed.readback.pixels[1 * 8 + 2]).to_equal(RETAINED_RED)
+        expect(changed.readback.pixels[1 * 8 + 3]).to_equal(RETAINED_RED)
+        expect(changed.readback.pixels[0]).to_equal(RETAINED_GREEN)
+        expect(changed.readback.pixels[1 * 8 + 1]).to_equal(RETAINED_GREEN)
+
+        val idle = surface.render_damage(
+            _retained_web_composition([]), _retained_idle_plan(), true)
+        expect(idle.ops_rendered).to_equal(0)
+        expect(idle.readback.pixels).to_equal(changed.readback.pixels)
+        surface.shutdown()
