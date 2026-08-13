@@ -77,7 +77,7 @@ fn ast_reset_seq_get() -> i64:
 # is evicted and lookups report -1 ("outside the window"), same as today.
 const AST_ARENA_SLOT_POISON: i64 = -777
 
-var ast_gen_harden_slot: [i64] = []
+var ast_gen_harden_value: bool = false
 var ast_harden_retired_gens: [i64] = []
 var ast_harden_retired_decl_tag: [[i64]] = []
 var ast_harden_retired_module_decl_slots: [[i64]] = []
@@ -85,17 +85,13 @@ var ast_harden_retired_module_decl_slots: [[i64]] = []
 fn ast_gen_harden_refresh():
     # Cached read, refreshed once per ast_reset() cycle (same pattern as
     # ast_decl_mode_slots_refresh/expr_mode_slots_refresh) — a hot-path check
-    # is then a slot read, not a per-call env syscall.
-    if ast_gen_harden_slot == nil or ast_gen_harden_slot.len() == 0:
-        ast_gen_harden_slot = [0]
-    ast_gen_harden_slot[0] = rt_env_get_i64("SIMPLE_AST_GEN_HARDEN", 0)
+    # is then a scalar read, not a per-call env syscall. This cache must remain
+    # scalar: ast_reset() also runs inside the Stage3 discard parser arena, and
+    # an array-backed module cache allocated there dangles after scope teardown.
+    ast_gen_harden_value = rt_env_get_i64("SIMPLE_AST_GEN_HARDEN", 0) == 1
 
 fn ast_gen_harden_enabled() -> bool:
-    if ast_gen_harden_slot != nil and ast_gen_harden_slot.len() > 0:
-        return ast_gen_harden_slot[0] == 1
-    # Interpreter module vars may not persist between calls (same
-    # compatibility fallback as the other *_enabled() gates in this family).
-    rt_env_get_i64("SIMPLE_AST_GEN_HARDEN", 0) == 1
+    ast_gen_harden_value
 
 fn _ast_harden_delay_slots() -> i64:
     val configured = rt_env_get_i64("SIMPLE_MEM_ARENA_DELAY_SLOTS", 4)

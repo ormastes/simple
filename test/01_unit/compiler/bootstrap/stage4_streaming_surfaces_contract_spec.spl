@@ -17,12 +17,19 @@ val RUNTIME = "src/runtime/runtime_native.c"
 val RUNTIME_CHECK = "src/runtime/test/rt_transient_heap_scope_selfcheck.c"
 val RUST_RUNTIME = "src/compiler_rust/runtime/src/value/collections.rs"
 val RUST_MEMORY = "src/runtime/runtime_memory.c"
+val AST_STATE = "src/compiler/10.frontend/core/_Ast/module_state.spl"
 
 describe "Stage4 streaming surface ownership":
     it "keeps the complete module surface registry reference-owned":
         val surface = file_read(SURFACE)
         expect(surface).to_contain("class ModuleSurfacesByName:")
         expect(surface.contains("struct ModuleSurfacesByName:")).to_equal(false)
+        val freeze_start = surface.index_of("fn module_surfaces_freeze(")
+        val freeze_end = surface.index_of("fn module_surface_unique_sibling_origin(")
+        val freeze_body = surface.substring(freeze_start, freeze_end)
+        expect(freeze_body.contains("registry.surfaces[surface_index] = surface")).to_equal(false)
+        expect(freeze_body.contains("import_target_indices = import_target_indices.push(")).to_equal(false)
+        expect(freeze_body.contains("export_route_sources = export_route_sources.push(")).to_equal(false)
 
     it "bounds source 11 and projects it through compact headers and a reference owner":
         val parser_types = file_read(PARSER_TYPES)
@@ -60,10 +67,10 @@ describe "Stage4 streaming surface ownership":
         val lowering = file_read(LOWERING)
         expect(surface).to_contain("type_aliases: Dict<text, ModuleSurfaceTypeAlias>")
         expect(surface).to_contain("for name in owner.value.type_aliases.keys():")
-        expect(surface).to_contain("default_methods: [Function]")
+        expect(surface).to_contain("default_methods: [ParserFunction]")
         expect(surface).to_contain("variants: [Variant]")
         expect(lowering).to_contain("if m.type_aliases.contains_key(name):")
-        expect(lowering).to_contain("keys = imported_mod.type_aliases.keys()")
+        expect(lowering).to_contain("elif imported_mod.type_aliases.contains_key(imported_name):")
 
     it "requires every explicit Stage4 admission condition without a resource-profile gate":
         val driver = file_read(ORCHESTRATION)
@@ -131,9 +138,11 @@ describe "Stage4 streaming surface ownership":
 
     it "promotes only the retained surface before reclaiming the rich module":
         val driver = file_read(SOURCE_PARSING)
+        val ast_state = file_read(AST_STATE)
         val start = driver.index_of("me add_streaming_module_surface")
         val end = driver.index_of("me parse_all_streaming_surfaces_impl")
         val body = driver.substring(start, end)
+        val persistent_reset = body.index_of("ast_reset()")
         val begin = body.index_of("rt_transient_array_scope_begin()")
         val parse = body.index_of("parse_full_frontend(")
         val owner = body.index_of("ModuleSurfaceParserOwner.new(module)")
@@ -144,6 +153,8 @@ describe "Stage4 streaming surface ownership":
         val publish = body.index_of("builder.add_surface_canonical(")
         val reclaim = body.last_index_of("driver_end_transient_parse_scope()")
         expect(begin).to_be_greater_than(0)
+        expect(persistent_reset).to_be_greater_than(0)
+        expect(begin).to_be_greater_than(persistent_reset)
         expect(parse).to_be_greater_than(begin)
         expect(owner).to_be_greater_than(parse)
         expect(build).to_be_greater_than(owner)
@@ -153,6 +164,9 @@ describe "Stage4 streaming surface ownership":
         expect(publish).to_be_greater_than(promote)
         expect(reclaim).to_be_greater_than(publish)
         expect(body.contains("rt_transient_heap_promote(module)")).to_equal(false)
+        expect(ast_state).to_contain("var ast_gen_harden_value: bool = false")
+        expect(ast_state).to_contain("ast_gen_harden_value = rt_env_get_i64")
+        expect(ast_state.contains("ast_gen_harden_slot: [i64]")).to_equal(false)
 
     it "walks retained graphs through raw struct allocations":
         val runtime = file_read(RUNTIME)
@@ -177,7 +191,7 @@ describe "Stage4 streaming surface ownership":
         val begin = body.index_of("rt_transient_array_scope_begin()")
         val parse = body.index_of("parse_full_frontend(")
         val pause = body.index_of("rt_transient_array_scope_pause()")
-        val lower = body.index_of("lowering.lower_parser_module_unstub(module)")
+        val lower = body.index_of("lowering.lower_parser_module_unstub(module, is_entry)")
         val promote = body.index_of("rt_transient_heap_promote(hir_module)")
         val diagnostic_promote = body.index_of("rt_transient_heap_promote(lowering.errors)")
         val reclaim = body.last_index_of("driver_end_transient_parse_scope()")
