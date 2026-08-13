@@ -43,6 +43,41 @@ Run the target-native hello probe first, then the full bootstrap CLI entry with
 the same cache. Require static ELF identity and a non-crashing `--version` run;
 host-only or seed-built output does not close this bug.
 
+## Revalidation — 2026-08-13
+
+The canonical WM fullscreen evidence runner was invoked with an explicitly
+selected non-seed binary, rather than its automatic seed-symlink candidate:
+
+```sh
+BUILD_DIR=build/simpleos_wm_fullscreen_evidence_20260813_selfhost \
+REPORT_PATH=build/simpleos_wm_fullscreen_evidence_20260813_selfhost/report.md \
+SIMPLE_BIN=release/x86_64-unknown-linux-gnu/simple \
+SIMPLE_BIN_SOURCE=explicit-selfhost \
+SIMPLEOS_WM_NATIVE_BUILD_TIMEOUT_SECONDS=300 \
+SIMPLEOS_WM_NATIVE_BUILD_WORKER_TIMEOUT_SECONDS=270 \
+SIMPLEOS_WM_READINESS_TIMEOUT_MS=300000 \
+sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
+```
+
+The binary passed the runner's provenance check (`Simple v1.0.0-beta`, SHA256
+`04a38e21d6fbd86149d46d3ee2d761349f8ad29b02c5037a8eb589b6a1b9e4e0`). It
+resolved a 1,094-file closure, then failed on the first native-build attempt:
+
+```text
+simpleos_wm_fullscreen_reason=wm-simple-web-build-failed
+simpleos_wm_fullscreen_kernel_build_status=failed-cache-preserved
+native-build.out: timeout: the monitored command dumped core
+native-build.out: Segmentation fault
+```
+
+No ELF, disk image, QEMU output, or serial bytes were produced. This is fresh
+self-hosted compiler-admission evidence, not a WM/Engine2D rendering failure
+and not an 8K throughput result. The automatic runner's seed rejection was
+also independently observed first; it is avoided only by the explicit binary
+above. A debugger-backed signature comparison is required before assigning
+this revalidation to the stale-runtime ABI diagnosis or a new native-build
+defect.
+
 ## Pure-Simple runtime archive blocker
 
 A fresh stage2 compiler now advertises `--emit-archive`, but building the
