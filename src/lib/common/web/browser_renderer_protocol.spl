@@ -29,6 +29,9 @@ use std.common.ui.draw_ir.{
     DrawIrBatch, DrawIrComposition,
     draw_ir_batch_with_source, draw_ir_composition
 }
+use common.ui.render_opt.damage_plan.{
+    DAMAGE_PLAN_NONE, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_FULL
+}
 
 pub val BROWSER_RENDERER_MAX_HEADER_BYTES: i64 = 256
 pub val BROWSER_RENDERER_MAX_PAYLOAD_BYTES: i64 = 1048576
@@ -158,6 +161,48 @@ pub struct BrowserRendererFrameDecodeResult:
     solid_material_count: i32
     solid_material_sha256: text
     diagnostics: text
+
+"""Bounded producer receipt for a retained DrawIR frame.
+
+The next wire codec revision carries this; legacy frames use a full replay.
+Rectangles are viewport-local, half-open tuples `[x, y, width, height]`.
+Overlaps are permitted because old/new DrawIR bounds intentionally overlap on
+an in-place paint update. The renderer/compositor clips and coalesces them
+through its canonical damage planner after independently checking that the
+receipt matches the received composition.
+"""
+pub struct BrowserRendererDamageReceipt:
+    mode: i64
+    rects: [i64]
+
+pub fn browser_renderer_damage_receipt(
+    mode: i64, rects: [i64]
+) -> BrowserRendererDamageReceipt:
+    BrowserRendererDamageReceipt(mode: mode, rects: rects)
+
+pub fn browser_renderer_damage_receipt_valid(
+    receipt: BrowserRendererDamageReceipt, width: i32, height: i32
+) -> bool:
+    if width <= 0 or height <= 0:
+        return false
+    if receipt.mode == DAMAGE_PLAN_NONE:
+        return receipt.rects.len() == 0
+    if receipt.mode == DAMAGE_PLAN_FULL:
+        return receipt.rects == [0, 0, width.to_i64(), height.to_i64()]
+    if receipt.mode != DAMAGE_PLAN_LOCAL or receipt.rects.len() == 0 or
+            receipt.rects.len() % 4 != 0 or receipt.rects.len() > 1024:
+        return false
+    var i = 0
+    while i < receipt.rects.len():
+        val x = receipt.rects[i]
+        val y = receipt.rects[i + 1]
+        val w = receipt.rects[i + 2]
+        val h = receipt.rects[i + 3]
+        if x < 0 or y < 0 or w <= 0 or h <= 0 or x > width.to_i64() - w or
+                y > height.to_i64() - h:
+            return false
+        i = i + 4
+    true
 
 pub struct BrowserRendererActionDecodeResult:
     ok: bool
