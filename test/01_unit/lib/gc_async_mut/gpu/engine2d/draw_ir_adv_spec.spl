@@ -368,6 +368,40 @@ describe "Engine2D advanced Draw IR executor":
         expected_engine.shutdown()
         damaged_engine.shutdown()
 
+    it "indexes embedded batch damage without scanning distant plain fills":
+        var commands: [DrawIrCommand] = [
+            draw_ir_rect("background", 0, 0, 511, 2, BG),
+            draw_ir_rect("changed", 5, 0, 1, 1, RED)
+        ]
+        var i = 0
+        while i < 512:
+            commands.push(draw_ir_rect(
+                "distant-{i}", 300 + (i % 200), 1,
+                1, 1, BLUE))
+            i += 1
+        val batch = draw_ir_batch(
+            "embedded-index", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "embedded-index", "window", 1, 1, 511, 2,
+                1, 1000, true), commands)
+        val composition = draw_ir_composition(
+            "embedded-index", "embedded-index:512x2",
+            DRAW_IR_BACKEND_CPU, [batch])
+        var engine = Engine2D.create_with_backend(512, 2, "cpu")
+        engine.clear(BG)
+        engine.present()
+        # The damage begins outside the embedded surface; the executor must
+        # clamp it before local grid selection, then raster only its 1x1
+        # overlap at the nonzero embedding offset.
+        val outcome = engine2d_draw_ir_render_composition_damaged(
+            engine, composition, [0, 1, 7, 1], true)
+        engine = outcome.engine
+        expect(outcome.unsupported_kinds).to_equal("none")
+        expect(outcome.ops_rendered).to_equal(2)
+        expect(outcome.commands_considered).to_equal(2)
+        expect(outcome.commands_culled_by_damage).to_equal(512)
+        engine.shutdown()
+
     it "matches full redraw for cropped translucent retained images":
         val root = draw_ir_batch(
             "desktop", DRAW_IR_BACKEND_CPU,

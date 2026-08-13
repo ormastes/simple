@@ -3256,6 +3256,8 @@ fn engine2d_draw_ir_render_composition_damaged_with_images(
     var eng = engine
     var rendered = 0
     var skipped = 0
+    var commands_considered = 0
+    var commands_culled_by_damage = 0
     var unsupported = ""
     var css_background_pixel_work_remaining = (
         eng.width().to_i64() * eng.height().to_i64())
@@ -3265,10 +3267,13 @@ fn engine2d_draw_ir_render_composition_damaged_with_images(
     # batches incur no planning work.
     var command_plans: [Engine2dDrawIrCommandPlan] = []
     var command_plan_ready: [bool] = []
+    var spatial_indexes: [Engine2dDrawIrSpatialIndex] = []
+    var spatial_index_slots: [i32] = []
     for batch in composition.batches:
         command_plans.push(Engine2dDrawIrCommandPlan(
             commands: [], logical_weights: []))
         command_plan_ready.push(false)
+        spatial_index_slots.push(-1)
     var i = 0
     while i < damage_rects.len():
         val damage = draw_ir_rect_bounds(
@@ -3286,9 +3291,24 @@ fn engine2d_draw_ir_render_composition_damaged_with_images(
                     command_plans[batch_index] = (
                         engine2d_draw_ir_coalesce_plain_fills(batch.commands))
                     command_plan_ready[batch_index] = true
+                if spatial_index_slots[batch_index] < 0:
+                    spatial_indexes.push(_engine2d_draw_ir_build_spatial_index(
+                        command_plans[batch_index], embedding.width,
+                        embedding.height))
+                    spatial_index_slots[batch_index] = (
+                        spatial_indexes.len().to_i32() - 1)
+                # Batch commands are local to their embedding. Selection uses
+                # that local clip, while the renderer retains the global clip
+                # and embedding offset for exact raster writes.
+                val local_clip = draw_ir_rect_bounds(
+                    clip.x - embedding.x, clip.y - embedding.y,
+                    clip.width, clip.height)
+                val selection = _engine2d_draw_ir_select_damage_indexed(
+                    command_plans[batch_index],
+                    spatial_indexes[spatial_index_slots[batch_index]], local_clip)
                 eng.set_clip(clip.x, clip.y, clip.width, clip.height)
                 val outcome = _engine2d_draw_ir_render_command_plan(
-                    eng, command_plans[batch_index],
+                    eng, selection.plan,
                     embedding.x, embedding.y, images,
                     true, false, clip,
                     css_background_pixel_work_remaining)
@@ -3298,7 +3318,9 @@ fn engine2d_draw_ir_render_composition_damaged_with_images(
                     css_background_pixel_work_remaining = (
                         outcome.css_background_pixel_work_remaining)
                 rendered += outcome.rendered
-                skipped += outcome.skipped
+                skipped += outcome.skipped + selection.culled_logical_count
+                commands_considered += selection.plan.commands.len().to_i32()
+                commands_culled_by_damage += selection.culled_command_count
                 if (outcome.unsupported_kinds != "" and
                     outcome.unsupported_kinds != "none"):
                     if unsupported != "": unsupported = unsupported + ","
@@ -3321,7 +3343,9 @@ fn engine2d_draw_ir_render_composition_damaged_with_images(
         ops_rendered: rendered,
         ops_skipped: skipped,
         unsupported_kinds: unsupported,
-        readback: readback)
+        readback: readback,
+        commands_considered: commands_considered,
+        commands_culled_by_damage: commands_culled_by_damage)
 
 fn engine2d_draw_ir_render_composition_damaged(
     engine: Engine2D,
