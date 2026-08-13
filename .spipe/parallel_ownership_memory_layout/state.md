@@ -789,3 +789,6 @@ in-progress
 - impl: Reworked `HostJoinSet` completion delivery to use a consumed-prefix
   cursor. Completed result order remains FIFO while streaming joins no longer
   copy the remaining completion queue per result.
+- impl: Reworked `HostScheduler` global FIFO dequeue to use a consumed-prefix
+  cursor. Normal-priority scheduling is amortized O(1); critical-priority
+  prepend compacts only the live suffix to preserve its existing precedence.
