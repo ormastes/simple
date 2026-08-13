@@ -1,0 +1,129 @@
+use std.spec
+use compiler.mir.mir_instructions.{
+    BlockId, LocalId, LocalKind, MirBlock, MirConstValue, MirInst, MirInstKind,
+    MirLocal, MirOperand, MirOperandKind, MirTerminator, MirType
+}
+use compiler.mir.mir_json.{serialize_mir_inst_kind}
+use compiler.mir.mir_coverage_probe_admission.{
+    mir_coverage_probe_admission_diagnostic_inst_v1
+}
+use compiler.mir_opt.mir_opt.dce.{dce_instruction_is_mandatory_observation}
+use compiler.mir_opt.mir_opt.mir_visitor.{MirVisitor, mir_visitor_walk_inst}
+use compiler.mir_opt.mir_opt.var_reassign_ssa.{ssa_var_transform_blocks}
+use compiler.mir_opt.mir_opt._Inline.policy.{FunctionInliner}
+use compiler.interp.mir_interpreter.{MirInterpreter}
+
+fn probe_bool_local() -> MirLocal:
+    MirLocal(LocalId(id: 0), "condition", MirType.bool(), LocalKind.Var, false)
+
+fn probe_result() -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))
+
+fn decision_probe(runtime_id: i64 = 7, path: text = "src/example.spl") -> MirInst:
+    MirInst(kind: MirInstKind.DecisionProbe(
+        runtime_id, "decision:sha256", probe_result(), path, 12, 0
+    ), span: nil)
+
+fn condition_probe() -> MirInst:
+    MirInst(kind: MirInstKind.ConditionProbe(
+        8, "condition:sha256", 7, "decision:sha256", probe_result(),
+        "src/example.spl", 12, 4
+    ), span: nil)
+
+class ProbeOperandVisitor:
+    operands: i64
+
+impl MirVisitor for ProbeOperandVisitor:
+    me visit_inst(inst: MirInst):
+        mir_visitor_walk_inst(self, inst)
+
+    me visit_operand(_operand: MirOperand):
+        self.operands = self.operands + 1
+
+describe "typed MIR coverage opcode admission":
+    it "serializes decision and condition probes without UnsupportedInst":
+        val decision_json = serialize_mir_inst_kind(decision_probe().kind)
+        val condition_json = serialize_mir_inst_kind(condition_probe().kind)
+        expect(decision_json).to_contain("\"DecisionProbe\"")
+        expect(decision_json).to_contain("\"runtime_id\":7")
+        expect(decision_json).to_contain("\"semantic_id\":\"decision:sha256\"")
+        expect(decision_json).to_contain("\"authored_path\":\"src/example.spl\"")
+        expect(condition_json).to_contain("\"ConditionProbe\"")
+        expect(condition_json).to_contain("\"parent_runtime_id\":7")
+        expect(condition_json).to_contain("\"parent_semantic_id\":\"decision:sha256\"")
+        expect(decision_json.contains("UnsupportedInst")).to_equal(false)
+        expect(condition_json.contains("UnsupportedInst")).to_equal(false)
+
+    it "walks the boolean operand and treats both probes as mandatory observations":
+        var visitor = ProbeOperandVisitor(operands: 0)
+        visitor.visit_inst(decision_probe())
+        visitor.visit_inst(condition_probe())
+        expect(visitor.operands).to_equal(2)
+        expect(dce_instruction_is_mandatory_observation(decision_probe())).to_equal(true)
+        expect(dce_instruction_is_mandatory_observation(condition_probe())).to_equal(true)
+
+    it "validates IDs paths positions and boolean operands before rejecting unlowered probes":
+        val locals = [probe_bool_local()]
+        expect(mir_coverage_probe_admission_diagnostic_inst_v1(
+            decision_probe().kind, locals
+        )).to_contain("MIRCOV-PROBE-E-UNLOWERED")
+        expect(mir_coverage_probe_admission_diagnostic_inst_v1(
+            decision_probe(0).kind, locals
+        )).to_contain("RUNTIME-ID")
+        expect(mir_coverage_probe_admission_diagnostic_inst_v1(
+            decision_probe(4294967296).kind, locals
+        )).to_contain("RUNTIME-ID")
+        expect(mir_coverage_probe_admission_diagnostic_inst_v1(
+            decision_probe(7, "../escape.spl").kind, locals
+        )).to_contain("PATH")
+        val non_bool = MirInstKind.DecisionProbe(
+            7, "decision:bad", MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Int(1), MirType.i64()
+            )), "src/example.spl", 12, 0
+        )
+        expect(mir_coverage_probe_admission_diagnostic_inst_v1(
+            non_bool, locals
+        )).to_contain("OPERAND")
+
+    it "makes SSA and inlining reject probe-bearing blocks":
+        val block = MirBlock(
+            id: BlockId.entry(), label: "entry",
+            instructions: [
+                MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Bool(true), MirType.bool()), span: nil),
+                MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Bool(false), MirType.bool()), span: nil),
+                decision_probe()
+            ],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val ssa = ssa_var_transform_blocks([block])
+        expect(ssa.applied).to_equal(false)
+        expect(ssa.reason).to_equal("unsupported instruction")
+        var inliner = FunctionInliner.new(10)
+        expect(inliner.can_inline_block(block)).to_equal(false)
+
+    it "makes the MIR interpreter reject probes explicitly":
+        var interpreter = MirInterpreter.create()
+        val decision_error = interpreter.execute_instruction(decision_probe())
+        val condition_error = interpreter.execute_instruction(condition_probe())
+        expect(decision_error != nil).to_equal(true)
+        expect(condition_error != nil).to_equal(true)
+        expect(decision_error.unwrap().message()).to_contain("unlowered DecisionProbe")
+        expect(condition_error.unwrap().message()).to_contain("unlowered ConditionProbe")
+
+    it "guards both LLVM translation paths before any probe can be skipped":
+        extern fn rt_file_read_text(path: text) -> text
+        val text_llvm = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+        ) ?? ""
+        val lib_backend = rt_file_read_text(
+            "src/compiler/70.backend/backend/llvm_lib_backend.spl"
+        ) ?? ""
+        val lib_translate = rt_file_read_text(
+            "src/compiler/70.backend/backend/llvm_lib_translate_expr.spl"
+        ) ?? ""
+        expect(text_llvm).to_contain("mir_coverage_probe_admission_diagnostic_module_v1(module)")
+        expect(text_llvm).to_contain("unlowered DecisionProbe")
+        expect(lib_backend).to_contain("mir_coverage_probe_admission_diagnostic_module_v1(module)")
+        expect(lib_backend).to_contain("return Err(compileerror_backend_error")
+        expect(lib_translate).to_contain("unlowered ConditionProbe")
+

@@ -1,0 +1,109 @@
+# Fail-closed admission for typed MIR coverage probes.
+#
+# This module validates the frozen V1 payload contract, then still rejects the
+# instruction as unlowered.  Runtime calls, optimizer rewrites, and backend
+# emission belong to later phases; no executable backend may silently erase a
+# probe while those phases are absent.
+
+use compiler.mir.mir_instructions.{
+    MirConstValue, MirFunction, MirInstKind, MirLocal, MirModule, MirOperand,
+    MirOperandKind, MirTypeKind
+}
+
+fn mir_coverage_probe_u32_nonzero_v1(value: i64) -> bool:
+    value > 0 and value <= 4294967295
+
+fn mir_coverage_probe_u32_v1(value: i64) -> bool:
+    value >= 0 and value <= 4294967295
+
+fn mir_coverage_probe_atom_valid_v1(value: text) -> bool:
+    value != "" and value == value.trim() and
+        not value.contains("\n") and not value.contains("\r") and
+        not value.contains("\t") and not value.contains("|")
+
+fn mir_coverage_probe_authored_path_valid_v1(path: text) -> bool:
+    if not mir_coverage_probe_atom_valid_v1(path): return false
+    if path.starts_with("/") or path.contains("\\") or path.contains(":"):
+        return false
+    for component in path.split("/"):
+        if component == "" or component == "." or component == "..":
+            return false
+    true
+
+fn mir_coverage_probe_local_is_bool_v1(local_id: i64, locals: [MirLocal]) -> bool:
+    for local in locals:
+        if local.id.id == local_id:
+            return local.type_.kind == MirTypeKind.Bool
+    false
+
+fn mir_coverage_probe_operand_is_bool_v1(result: MirOperand, locals: [MirLocal]) -> bool:
+    match result.kind:
+        case Copy(local) | Move(local):
+            mir_coverage_probe_local_is_bool_v1(local.id, locals)
+        case Const(value, type_):
+            match value:
+                case Bool(_): type_.kind == MirTypeKind.Bool
+                case _: false
+
+fn mir_coverage_probe_common_diagnostic_v1(
+    runtime_id: i64,
+    semantic_id: text,
+    result: MirOperand,
+    authored_path: text,
+    line: i64,
+    column: i64,
+    locals: [MirLocal]
+) -> text:
+    if not mir_coverage_probe_u32_nonzero_v1(runtime_id):
+        return "MIRCOV-PROBE-E-RUNTIME-ID: runtime_id must be a nonzero u32"
+    if not mir_coverage_probe_atom_valid_v1(semantic_id):
+        return "MIRCOV-PROBE-E-SEMANTIC-ID: semantic_id must be a nonempty canonical atom"
+    if not mir_coverage_probe_operand_is_bool_v1(result, locals):
+        return "MIRCOV-PROBE-E-OPERAND: result must be a boolean MIR operand"
+    if not mir_coverage_probe_authored_path_valid_v1(authored_path):
+        return "MIRCOV-PROBE-E-PATH: authored_path must be repository-relative and canonical"
+    if not mir_coverage_probe_u32_nonzero_v1(line):
+        return "MIRCOV-PROBE-E-LINE: line must be a nonzero u32"
+    if not mir_coverage_probe_u32_v1(column):
+        return "MIRCOV-PROBE-E-COLUMN: column must be a u32"
+    ""
+
+fn mir_coverage_probe_admission_diagnostic_inst_v1(
+    kind: MirInstKind,
+    locals: [MirLocal]
+) -> text:
+    match kind:
+        case DecisionProbe(runtime_id, semantic_id, result, authored_path, line, column):
+            val invalid = mir_coverage_probe_common_diagnostic_v1(
+                runtime_id, semantic_id, result, authored_path, line, column, locals
+            )
+            if invalid != "": return invalid
+            "MIRCOV-PROBE-E-UNLOWERED: DecisionProbe '{semantic_id}' requires admitted backend lowering"
+        case ConditionProbe(runtime_id, semantic_id, parent_runtime_id, parent_semantic_id, result, authored_path, line, column):
+            val invalid = mir_coverage_probe_common_diagnostic_v1(
+                runtime_id, semantic_id, result, authored_path, line, column, locals
+            )
+            if invalid != "": return invalid
+            if not mir_coverage_probe_u32_nonzero_v1(parent_runtime_id):
+                return "MIRCOV-PROBE-E-PARENT-RUNTIME-ID: parent_runtime_id must be a nonzero u32"
+            if not mir_coverage_probe_atom_valid_v1(parent_semantic_id):
+                return "MIRCOV-PROBE-E-PARENT-SEMANTIC-ID: parent_semantic_id must be a nonempty canonical atom"
+            "MIRCOV-PROBE-E-UNLOWERED: ConditionProbe '{semantic_id}' requires admitted backend lowering"
+        case _: ""
+
+fn mir_coverage_probe_admission_diagnostic_function_v1(func: MirFunction) -> text:
+    for block in func.blocks:
+        for inst in block.instructions:
+            val diagnostic = mir_coverage_probe_admission_diagnostic_inst_v1(
+                inst.kind, func.locals
+            )
+            if diagnostic != "": return diagnostic
+    ""
+
+fn mir_coverage_probe_admission_diagnostic_module_v1(module: MirModule) -> text:
+    for fn_ in module.functions.values():
+        val func: MirFunction = fn_
+        val diagnostic = mir_coverage_probe_admission_diagnostic_function_v1(func)
+        if diagnostic != "":
+            return "{diagnostic} in function '{func.name}'"
+    ""

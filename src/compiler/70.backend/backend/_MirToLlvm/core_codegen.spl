@@ -25,6 +25,9 @@ use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integ
     llvm_ir_builder_build}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
+use compiler.mir.mir_coverage_probe_admission.{
+    mir_coverage_probe_admission_diagnostic_module_v1
+}
 
 extern fn rt_string_builder_len(handle: i64) -> i64
 extern fn rt_string_builder_push(handle: i64, value: text)
@@ -127,6 +130,10 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_module(module: MirModule) -> text:
         """Translate MIR module to LLVM IR."""
+        val coverage_probe_diagnostic =
+            mir_coverage_probe_admission_diagnostic_module_v1(module)
+        if coverage_probe_diagnostic != "":
+            panic("compile error: {coverage_probe_diagnostic}")
         self.entry_main_symbol = llvm_module_is_native_entry(module.name)
         if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
             llvm_bootstrap_string_globals_reset()
@@ -754,6 +761,10 @@ impl MirTextCodegen for MirToLlvm:
             case SimdHminF32x4(dest, a): self.translate_simd_horizontal(dest, a, "hmin_f32x4")
             case DebugValue(_, _): ()
             case Nop: ()
+            case DecisionProbe(_, semantic_id, _, _, _, _):
+                panic("compile error: unlowered DecisionProbe '{semantic_id}' reached LLVM instruction translation")
+            case ConditionProbe(_, semantic_id, _, _, _, _, _, _):
+                panic("compile error: unlowered ConditionProbe '{semantic_id}' reached LLVM instruction translation")
             # MirTextCodegen's default unsupported hook is a no-op. Keep that
             # behavior in place so a MirInst aggregate never crosses another
             # method boundary in the bootstrap translator.

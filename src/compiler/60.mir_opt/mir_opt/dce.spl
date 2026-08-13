@@ -23,6 +23,13 @@ use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock}
 use compiler.mir_opt.mod.{MirPass}
 
+fn dce_instruction_is_mandatory_observation(inst: MirInst) -> bool:
+    """True for ordered observations which may never be removed as dead."""
+    match inst.kind:
+        case DecisionProbe(_, _, _, _, _, _): true
+        case ConditionProbe(_, _, _, _, _, _, _, _): true
+        case _: false
+
 # ============================================================================
 # Liveness Analysis
 # ============================================================================
@@ -270,6 +277,7 @@ impl DeadCodeElimination:
         - Memory stores (visible to other code)
         - Checked operations (may trap)
         """
+        if dce_instruction_is_mandatory_observation(inst): return true
         match inst.kind:
             case Call(_, _, _):
                 true  # Function calls may have side effects
@@ -382,6 +390,10 @@ impl DeadCodeElimination:
                 false
             case GetField(_, base, _):
                 self.operand_uses_local(base, local)
+            case DecisionProbe(_, _, result, _, _, _):
+                self.operand_uses_local(result, local)
+            case ConditionProbe(_, _, _, _, result, _, _, _):
+                self.operand_uses_local(result, local)
             case _: false
 
     fn operand_uses_local(operand: MirOperand, local: LocalId) -> bool:
