@@ -107,6 +107,10 @@ class HostedBrowserRendererEntry:
     address_replace_on_text: bool
     pressed_control: text
     mutation_revision: i64
+    # Transport identity is monotonic per persistent hosted renderer. It is
+    # distinct from the semantic HTML/theme revision: retained animations can
+    # change pixels while that semantic key remains constant.
+    published_content_revision: i64
     pending_frame: WmContentFrame
     failure_reason: text
     failure_published: bool
@@ -135,6 +139,7 @@ class HostedBrowserRendererEntry:
             address_replace_on_text: false,
             pressed_control: "",
             mutation_revision: 0,
+            published_content_revision: 0,
             pending_frame: _empty_registry_frame(),
             failure_reason: "",
             failure_published: false,
@@ -506,7 +511,7 @@ pub class HostedBrowserRendererRegistry:
             self.theme_id
         else:
             _active_or_default_wm_theme_id()
-        val revision = if self.theme_enabled:
+        val semantic_revision = if self.theme_enabled:
             simple_web_content_revision_with_theme_receipt(
                 self.theme_source_manifest_sha256,
                 self.theme_material_sha256,
@@ -525,6 +530,11 @@ pub class HostedBrowserRendererRegistry:
                 entry.renderer.height,
                 0
             )
+        if semantic_revision <= 0 or
+            entry.published_content_revision >= 9223372036854775806:
+            self.entries[index] = entry
+            return self._fail(index, "renderer-content-revision-unavailable")
+        val revision = entry.published_content_revision + 1
         val frame = if self.theme_enabled:
             simple_web_external_content_frame_with_theme_receipt(
                 entry.window_id.to_text(),
@@ -560,6 +570,7 @@ pub class HostedBrowserRendererRegistry:
             self.entries[index] = entry
             return self._fail(index, "renderer-raster-rejected")
         entry.mutation_revision = entry.mutation_revision + 1
+        entry.published_content_revision = revision
         if not entry.address_editing and entry.renderer.document_url != "":
             entry.address_draft = entry.renderer.document_url
             entry.startup_html = ""
