@@ -55,50 +55,50 @@ pub fn backend_session_kind_name(kind: BackendSessionKind) -> text:
         return "qualcomm"
     "cpu"
 
-class ComputeError:
+class GcComputeError:
     """Structured error returned by shared compute-session operations.
 
     Concrete backends can still expose native integer return codes for their
     low-level APIs; this type is the portable contract used by the unified
     ComputeSession path.
     """
-    kind_name: text
+    kind: text
     code: i64
     message: text
 
     fn is_ok() -> bool:
         self.code == 0
 
-pub fn compute_error_create(kind: BackendSessionKind, code: i64, message: text) -> ComputeError:
-    ComputeError(kind_name: backend_session_kind_name(kind), code: code, message: message)
+pub fn compute_error_create(kind: BackendSessionKind, code: i64, message: text) -> GcComputeError:
+    GcComputeError(kind: backend_session_kind_name(kind), code: code, message: message)
 
-pub fn compute_error_unavailable(kind: BackendSessionKind, message: text) -> ComputeError:
+pub fn compute_error_unavailable(kind: BackendSessionKind, message: text) -> GcComputeError:
     compute_error_create(kind, 1, message)
 
 trait ComputeSession:
     """Shared 2D compute-session contract for CUDA, HIP/ROCm, OpenCL, and CPU SIMD."""
 
     fn kind() -> BackendSessionKind
-    fn init() -> ComputeError?
+    fn init() -> GcComputeError?
     fn is_available() -> bool
     fn shutdown()
-    fn synchronize() -> ComputeError?
+    fn synchronize() -> GcComputeError?
 
-    fn fill(dst: [u32], offset: i64, count: i64, color: u32) -> ComputeError?
-    fn copy(dst: [u32], dst_off: i64, src: [u32], src_off: i64, count: i64) -> ComputeError?
-    fn alpha_blend(dst: [u32], src: [u32], offset: i64, count: i64) -> ComputeError?
-    fn blit_rect(dst: [u32], dst_stride: i64, dx: i64, dy: i64, src: [u32], src_stride: i64, sx: i64, sy: i64, w: i64, h: i64) -> ComputeError?
-    fn scroll(buf: [u32], stride: i64, x: i64, y: i64, w: i64, h: i64, delta_y: i64) -> ComputeError?
+    fn fill(dst: [u32], offset: i64, count: i64, color: u32) -> GcComputeError?
+    fn copy(dst: [u32], dst_off: i64, src: [u32], src_off: i64, count: i64) -> GcComputeError?
+    fn alpha_blend(dst: [u32], src: [u32], offset: i64, count: i64) -> GcComputeError?
+    fn blit_rect(dst: [u32], dst_stride: i64, dx: i64, dy: i64, src: [u32], src_stride: i64, sx: i64, sy: i64, w: i64, h: i64) -> GcComputeError?
+    fn scroll(buf: [u32], stride: i64, x: i64, y: i64, w: i64, h: i64, delta_y: i64) -> GcComputeError?
 
-    fn load_module(name: text, source: text) -> ComputeError?
-    fn launch_kernel(name: text, gx: i64, gy: i64, bx: i64, by: i64) -> ComputeError?
+    fn load_module(name: text, source: text) -> GcComputeError?
+    fn launch_kernel(name: text, gx: i64, gy: i64, bx: i64, by: i64) -> GcComputeError?
     fn hit_counts() -> SimdHitCounts
 
 # ============================================================================
 # BackendSessionPolicy
 # ============================================================================
 
-class BackendSessionPolicy:
+class GcBackendSessionPolicy:
     """Configuration controlling how a backend session is created and managed."""
     mode: BackendSessionMode
     allow_fallback: bool          # Fall back to Cpu if requested kind unavailable
@@ -106,9 +106,9 @@ class BackendSessionPolicy:
     allow_readback: bool          # Allow GPU-to-host readback (slower, enables read_pixels)
     perf_counters_enabled: bool   # Enable internal timing/perf counters
 
-    static fn default_for(kind: BackendSessionKind) -> BackendSessionPolicy:
+    static fn default_for(kind: BackendSessionKind) -> GcBackendSessionPolicy:
         """Sensible defaults: managed-shared, fallback on, readback on, counters off."""
-        BackendSessionPolicy(
+        GcBackendSessionPolicy(
             mode: BackendSessionMode.ManagedShared,
             allow_fallback: true,
             strict_backend: false,
@@ -120,7 +120,7 @@ class BackendSessionPolicy:
 # BackendSessionHandle
 # ============================================================================
 
-class BackendSessionHandle:
+class GcBackendSessionHandle:
     """Lightweight metadata descriptor for a live backend session.
 
     The handle carries identity information (id, kind, mode, device name,
@@ -133,9 +133,9 @@ class BackendSessionHandle:
     device_name: text
     generation: i64
 
-    static fn null() -> BackendSessionHandle:
+    static fn null() -> GcBackendSessionHandle:
         """A sentinel handle representing 'no session'."""
-        BackendSessionHandle(
+        GcBackendSessionHandle(
             id: 0,
             kind: BackendSessionKind.Cpu,
             mode: BackendSessionMode.LegacyNoSession,
@@ -155,7 +155,7 @@ class BackendSessionHandle:
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 
-fn backend_session_create(kind: BackendSessionKind, policy: BackendSessionPolicy, clock: FrameClock? = nil) -> BackendSessionHandle:
+fn backend_session_create(kind: BackendSessionKind, policy: GcBackendSessionPolicy, clock: FrameClock? = nil) -> GcBackendSessionHandle:
     """Allocate a new session handle.
 
     The caller is responsible for creating the concrete GPU session object
@@ -164,7 +164,7 @@ fn backend_session_create(kind: BackendSessionKind, policy: BackendSessionPolicy
     """
     val ck: FrameClock = if clock == nil: default_frame_clock() else: clock
     val id = ck.now_micros() / 1000
-    BackendSessionHandle(
+    GcBackendSessionHandle(
         id: id,
         kind: kind,
         mode: policy.mode,
@@ -172,15 +172,15 @@ fn backend_session_create(kind: BackendSessionKind, policy: BackendSessionPolicy
         generation: 0
     )
 
-fn backend_session_retain(handle: BackendSessionHandle) -> BackendSessionHandle:
+fn backend_session_retain(handle: GcBackendSessionHandle) -> GcBackendSessionHandle:
     """Return a copy of the handle with an incremented generation counter.
 
-    Since BackendSessionHandle is a value type (class-by-value semantics in
+    Since GcBackendSessionHandle is a value type (class-by-value semantics in
     Simple), the actual refcount lives in the concrete session object
     (MetalSession.refcount).  This function just bumps the generation to
     mark that another owner has taken a reference.
     """
-    BackendSessionHandle(
+    GcBackendSessionHandle(
         id: handle.id,
         kind: handle.kind,
         mode: handle.mode,
@@ -188,7 +188,7 @@ fn backend_session_retain(handle: BackendSessionHandle) -> BackendSessionHandle:
         generation: handle.generation + 1
     )
 
-fn backend_session_release(handle: BackendSessionHandle):
+fn backend_session_release(handle: GcBackendSessionHandle):
     """Signal that the caller is releasing its reference.
 
     The concrete session object (MetalSession) tracks the real refcount and
@@ -196,6 +196,10 @@ fn backend_session_release(handle: BackendSessionHandle):
     here for the pure-handle path.
     """
     pass_do_nothing("pure handle release is owned by the concrete session refcount")
+
+alias ComputeError = GcComputeError
+alias BackendSessionPolicy = GcBackendSessionPolicy
+alias BackendSessionHandle = GcBackendSessionHandle
 
 export BackendSessionMode, BackendSessionKind, ComputeError, BackendSessionPolicy, BackendSessionHandle
 export backend_session_kind_name, compute_error_create, compute_error_unavailable

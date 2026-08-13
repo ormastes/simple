@@ -156,3 +156,23 @@ threaded into the JIT lowerer). Until then `run` on any module whose closure
 contains same-named structs with divergent fields silently de-JITs the whole
 module (~100-1000x slowdown — observed: GUI showcase window mapped but first
 frame not presented after ~30 min interpreted).
+
+## 2026-08-13 Vulkan retained-render follow-up
+
+The canonical lavapipe readback gate again produced exact clear and rectangle
+checksums with device-readback provenance, but correctly returned
+`native_execution_status=fail` because the JIT fell back to the interpreter.
+
+Two local flat-name collisions in the GC Engine2D session contract were removed
+without changing its public compatibility names: the GC-only concrete classes
+are now `GcComputeError`, `GcBackendSessionPolicy`, and
+`GcBackendSessionHandle`; compatibility aliases retain the documented session
+surface. The focused backend-session contract passed. This advanced the gate
+from `ComputeError.kind` and `BackendSessionPolicy.allow_interop_present`
+lowering failures to the existing `GlyphBitmap.gbm_width` failure.
+
+The remaining `GlyphBitmap` failure is the duplicate-struct JIT feed issue
+described above. Do not enable `SIMPLE_JIT_DUP_STRUCT_FEED=1` to claim this
+Vulkan lane native: the prior UI-showcase A/B recorded a fast but pixel-wrong
+frame with that feed enabled. The gate remains valid interpreter
+correctness/readback evidence only, not native Vulkan throughput evidence.
