@@ -216,6 +216,34 @@ describe "Engine2D compositor producer revision cache":
         expect(full.pixels[1 * 4 + 1]).to_equal(0xFFDC2626u32)
         raster.shutdown()
 
+    it "extracts only normalized retained rows into an owned packed delta":
+        var raster = Engine2dCompositorBackend.create_named(128, 128, "cpu_simd")
+        # Use the 128px fixture so one 1px source change normalizes to one
+        # 64x64 tile rather than a hidden full-surface read.
+        val base = revision_cache_culled_damage_fixture(
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32)
+        val changed = revision_cache_culled_damage_fixture(
+            0xFF2563EBu32, 0xFFDC2626u32, 0xFF2563EBu32)
+        val changed_again = revision_cache_culled_damage_fixture(
+            0xFF2563EBu32, 0xFF16A34Au32, 0xFF2563EBu32)
+        raster.render_draw_ir_composition_resources_revision_damaged(
+            base, [], 7, 1, [0, 0, 128, 128])
+        val packed = raster.render_draw_ir_composition_resources_packed_damage(
+            changed, [], 7, 2, [1, 1, 1, 1])
+        expect(packed.ok).to_equal(true)
+        expect(packed.rects).to_equal([0, 0, 64, 64])
+        expect(packed.pixels.len()).to_equal(64 * 64)
+        expect(packed.pixels[1 * 64 + 1]).to_equal(0xFFDC2626u32)
+        expect(packed.pixels[0]).to_equal(0xFF2563EBu32)
+        val packed_again = raster.render_draw_ir_composition_resources_packed_damage(
+            changed_again, [], 7, 3, [1, 1, 1, 1])
+        expect(packed_again.ok).to_equal(true)
+        expect(packed_again.pixels[1 * 64 + 1]).to_equal(0xFF16A34Au32)
+        val exact = raster.render_draw_ir_composition_resources_revision(
+            changed_again, [], 7, 3)
+        expect(exact.pixels[1 * 128 + 1]).to_equal(0xFF16A34Au32)
+        raster.shutdown()
+
     it "accepts commands intentionally culled outside CPU damage":
         val blue = revision_cache_culled_damage_fixture(
             0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32)

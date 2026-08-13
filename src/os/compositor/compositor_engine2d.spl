@@ -31,6 +31,21 @@ var _engine2d_compositor_override_height: i32 = 0
 var _engine2d_compositor_override_pixels: [u32] = []
 val _ENGINE2D_REVISION_CACHE_COMPOSITION_SATURATION: i64 = 9223372036854775806
 
+pub struct Engine2dCompositorPackedDamage:
+    ok: bool
+    reason: text
+    rects: [i64]
+    pixels: [u32]
+    selected_backend: text
+    rendered_command_count: i32
+
+fn _engine2d_compositor_packed_damage_reject(
+    reason: text, backend: text
+) -> Engine2dCompositorPackedDamage:
+    Engine2dCompositorPackedDamage(
+        ok: false, reason: reason, rects: [], pixels: [],
+        selected_backend: backend, rendered_command_count: 0)
+
 fn _engine2d_compositor_gpu_backend(selected: text) -> bool:
     selected != "software" and selected != "cpu" and selected != "cpu_simd"
 
@@ -585,6 +600,80 @@ class Engine2dCompositorBackend:
             full.pixels.len() == self.w * self.h):
             self.seed_cpu_damage_mirror()
         full
+
+    me render_draw_ir_composition_resources_packed_damage(
+        composition: DrawIrComposition,
+        resources: [SimpleOsHostGpuImageResource],
+        producer_generation: i64,
+        composition_revision: i64,
+        dirty_rects: [i64]
+    ) -> Engine2dCompositorPackedDamage:
+        """Raster an exact retained CPU update and extract only planned rows.
+
+        The returned pixels are an independent packed sequence in rect order;
+        the backend mirror remains borrowed and is never published beyond this
+        call. Callers need an exact external-frame base before accepting it.
+        """
+        val selected = self.engine.backend_name()
+        val contiguous_base = (
+            self.cpu_damage_seeded and self.cpu_damage_enabled() and
+            producer_generation >= 0 and composition_revision > 0 and
+            self.revision_cache_producer_generation == producer_generation and
+            self.revision_cache_composition_revision == composition_revision - 1 and
+            self.revision_cache_backend == selected and
+            self.revision_cache_transfer_profile ==
+                _engine2d_compositor_transfer_profile() and
+            self.revision_cache_resources == resources and
+            self.revision_cache_composition != nil)
+        if not contiguous_base:
+            return _engine2d_compositor_packed_damage_reject(
+                "missing-retained-base", selected)
+        val before = self.revision_cache_composition.unwrap()
+        if not _engine2d_compositor_damage_covers_patch(
+            before, composition, dirty_rects):
+            return _engine2d_compositor_packed_damage_reject(
+                "damage-does-not-cover-patch", selected)
+        var images: [Engine2dResolvedDrawIrImage] = []
+        for resource in resources:
+            images.push(engine2d_resolved_draw_ir_image(
+                resource.image_uri, resource.width, resource.height,
+                resource.pixels))
+        if not self.render_draw_ir_composition_cpu_damaged(
+            composition, images, dirty_rects):
+            return _engine2d_compositor_packed_damage_reject(
+                "retained-raster-rejected", selected)
+        val rects = self.cpu_damage_rects
+        val mirror = self.cpu_damage_pixels()
+        var packed: [u32] = []
+        var ri = 0
+        while ri < rects.len():
+            val x = rects[ri].to_i32()
+            val y = rects[ri + 1].to_i32()
+            val w = rects[ri + 2].to_i32()
+            val h = rects[ri + 3].to_i32()
+            var row = 0
+            while row < h:
+                var col = 0
+                while col < w:
+                    packed.push(mirror[(y + row) * self.w + x + col])
+                    col += 1
+                row += 1
+            ri += 4
+        self.present_cpu_damage()
+        self.revision_cache_producer_generation = producer_generation
+        self.revision_cache_composition_revision = composition_revision
+        self.revision_cache_backend = selected
+        self.revision_cache_transfer_profile = _engine2d_compositor_transfer_profile()
+        self.revision_cache_composition = Some(composition)
+        self.revision_cache_resources = resources
+        # This producer intentionally never materializes a whole-frame
+        # snapshot. Retaining the prior result under the new exact key would
+        # make a following NONE frame re-publish stale pixels.
+        self.revision_cache_result = nil
+        Engine2dCompositorPackedDamage(
+            ok: true, reason: "ok", rects: rects, pixels: packed,
+            selected_backend: selected,
+            rendered_command_count: self.last_damage_ops_rendered)
 
     me render_draw_ir_composition_resources_window_revision(
         composition: DrawIrComposition,
