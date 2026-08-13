@@ -86,6 +86,27 @@ the SBI SRST helper and capture UART concurrently. Do not substitute OpenOCD
 firmware sequence is absent, report reset as failed or blocked rather than
 PASS.
 
+## StarFive VisionFive 2 NVMe storage
+
+- **Hardware lane:** JH7110 PCIe1/domain 1 drives the M.2 M-key socket; PCIe0 is
+  the USB-controller lane.
+- **Layering:** the StarFive port owns DT validation, PHY/clocks/resets/PERST,
+  PLDA quirks and link state. Common PCI/NVMe owns ECAM enumeration, controller
+  and namespace commands; GPT/FAT32/VFS consume a partition-bounded lease.
+- **Identify first:** record PCI BDF/vendor/device/class plus NVMe model, serial,
+  firmware, NSID, LBA size/count and capacity with zero storage writes.
+- **Do not infer:** Tigard presence, ECAM identity, or missing U-Boot commands
+  does not establish an NVMe namespace identity.
+- **Provision:** require exact identity-bound authorization, write GPT/FAT32 only
+  inside the selected non-boot namespace/partition, then flush, unmount,
+  remount, hash-read, and run command-correlated VFS `ls /nvme`.
+- **Recovery:** if OpenOCD cannot examine the selected U74 hart after a failed
+  high-address access, do not loop software reset; request one physical reset or
+  power-cycle.
+- **Primary documents:**
+  `doc/04_architecture/starfive_visionfive2_nvme_storage.md` and
+  `doc/07_guide/platform/simpleos/starfive_visionfive2_simpleos.md`.
+
 ## Simple embedded DB / Simple SQLite
 
 - **Canonical meaning:** `std.database.pure_sql.{PureDatabase}`.

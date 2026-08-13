@@ -75,6 +75,13 @@ spl_u64 rt_mem_read_u8(spl_u64 address) {
     return *(volatile const spl_u8 *)address;
 }
 
+spl_u64 rt_starfive_mmio_read32(spl_u64 address) {
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    spl_u32 value = *(volatile const spl_u32 *)address;
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    return (spl_u64)value;
+}
+
 spl_i64 rt_string_new_literal(const spl_u8 *bytes, spl_u64 len) {
     return rt_string_new((spl_i64)(spl_u64)bytes, (spl_i64)len);
 }

@@ -1060,3 +1060,21 @@ oracle. Do not claim reset from the OpenOCD command alone: the retained UART
 transcript must show a fresh BootROM/OpenSBI/U-Boot sequence. For immutable
 packaged roots, a VFS-owned manifest is valid evidence when the shell calls
 public `readdir`; names must not be embedded in the shell output path.
+
+For StarFive VisionFive 2 NVMe work, separate PCI identity, NVMe Identify, and
+destructive provisioning. The M.2 socket is JH7110 PCIe1/domain 1; DT parsing,
+clocks, resets, PHY, PERST, PLDA quirks, and link validation remain in the
+StarFive port, while ECAM enumeration, NVMe commands, GPT, FAT32, and VFS remain
+host-neutral. A missing `pci`/`nvme` command in vendor U-Boot is firmware-build
+evidence, not proof that the SSD is absent. JTAG/ECAM can at most establish PCI
+vendor/device/class and cannot substitute for an NVMe Identify command.
+
+Run identification without writes and retain exact controller serial, model,
+firmware, NSID, LBA size/count, and capacity. Provisioning requires a separate
+explicit action bound to that immutable identity; never use a password as the
+destructive confirmation. Reject mounted, in-use, ambiguous, changed, or boot-
+source targets. Format only a bounded GPT partition, never namespace LBA 0 as a
+filesystem. Persistence PASS requires write, flush, unmount, remount, hash-
+equal read, and command-correlated VFS `ls /nvme` from one retained transcript.
+If failed high-address debug access leaves a hart unexaminable, stop software-
+reset retries and require a physical reset/power-cycle.

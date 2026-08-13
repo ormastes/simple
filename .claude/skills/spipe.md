@@ -2472,6 +2472,18 @@ scratch address allowlisted, reject arbitrary payloads/addresses, and preserve
 the UART reset-burst transcript. An immutable packaged-root
 manifest remains real VFS evidence when CLI `ls` calls public `readdir`; never
 hardcode the listing in the shell command handler.
+
+For VisionFive 2 NVMe acceptance, keep the JH7110 PCIe1 provider outside the
+common PCI/NVMe layer. Identification is read-only and must report domain/BDF,
+PCI vendor/device/class, NVMe serial/model/firmware, NSID, LBA geometry, and
+capacity before any provisioning capability exists. U-Boot command absence is
+not device-absence evidence, and JTAG PCI reads are not NVMe Identify evidence.
+Destructive provisioning must be a distinct identity-bound mode; reject any
+serial/NSID/capacity/hash mismatch, mounted/in-use/boot devices, or write before
+authorization. Filesystem PASS requires bounded GPT partitioning, FAT32 mount,
+write+flush+unmount+remount+hash verification, and command-correlated public
+VFS `ls /nvme`. Hardware absence or a hart requiring physical recovery is
+BLOCKED/pending, never a contract PASS.
 ## When NO SSpec can be executed at all (2026-08-16)
 
 Sometimes the answer to "run the spec" is that **no runtime exists to run any

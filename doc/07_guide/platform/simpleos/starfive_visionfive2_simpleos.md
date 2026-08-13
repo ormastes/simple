@@ -70,3 +70,30 @@ ELF's program headers. `bootelf -s 0x48000000` is the proven loader and reaches
 `_start` at `0x40200000`. Because its application ABI supplies argc/argv rather
 than OpenSBI's hart/FDT pair, the entry shim validates the preserved FDT magic
 at `0x42200000` before binding hart 1. Missing FDT magic remains a hard stop.
+
+## NVMe bring-up
+
+The VisionFive 2 M.2 socket is PCIe1/domain 1. SimpleOS keeps JH7110 DT parsing,
+PHY/clocks/resets, PERST, PLDA configuration and link validation in
+`src/os/kernel/arch/riscv64/starfive/`; common PCI enumeration and
+`src/os/drivers/nvme/` contain no StarFive constants.
+
+The first RAM image uses `starfive_find_nvme_read_only()`. It checks link-status
+bit 5 at `0x10240368`, scans only the bounded 16 MiB PCIe1 ECAM aperture, and
+accepts class `01:08:02`. Its UART line reports domain, BDF, vendor/device IDs,
+BARs, and `read_only=1`, or a precise link/not-found reason. It does not write
+PCI config, NVMe registers, queues, partitions, or storage.
+
+The vendor U-Boot may report `Unknown command` for `pci` and `nvme`; that is a
+firmware configuration limitation, not SSD absence. NVMe model, serial,
+firmware and namespace geometry require a real NVMe Identify command with DMA.
+Never copy an example device ID from web documentation into an authorization
+receipt.
+
+Provisioning is intentionally separate. It requires an immutable identify
+receipt bound to exact serial, NSID, capacity and image hash, rejects mounted,
+in-use and boot-source devices, creates a bounded GPT partition, formats that
+partition as FAT32, and mounts it at `/nvme`. PASS then requires a nonce file to
+survive flush, unmount and remount with an equal hash, followed by a command-
+correlated public-VFS `ls /nvme`. A password is privilege input, never storage
+identity confirmation.
