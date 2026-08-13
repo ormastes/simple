@@ -296,3 +296,29 @@ the 12.5 ms primitive budget. The receipt still emitted
 `engine2d_8k_full_dynamic_frame_80fps_proven=false`: it excludes retained
 DrawIR traversal, WM copying/frame switching, scheduling, and scanout, so it
 must not be promoted to an application 8K/80 claim.
+
+## 2026-08-13 operation revalidation — native and QEMU retained damage
+
+Revision `7af3af8d516` was measured through the canonical native C span
+harness at 7680×4320 with 1% active damage (331,776 pixels), seven samples,
+and checksum `2436809228175672195`. Each row recorded nonzero SIMD hits.
+
+| Lane | Execution | Fill p95 | Copy p95 | Blend p95 | Const blend p95 | Six-call p95 | Isolated 12.5 ms budget |
+|---|---|---:|---:|---:|---:|---:|---|
+| x86-64 | native C | 0.242 ms | 0.332 ms | 0.809 ms | 0.682 ms | 2.169 ms | PASS |
+| AArch64 NEON | QEMU user emulation | 0.695 ms | 0.810 ms | 3.961 ms | 4.495 ms | 10.947 ms | PASS |
+| RV64GCV VLEN=128 | QEMU user emulation | 4.603 ms | 8.633 ms | 32.778 ms | 27.075 ms | 80.038 ms | FAIL |
+
+Commands were the canonical `check-engine2d-simd-8k-ops.shs`, setting
+`ENGINE2D_SIMD_8K_ACTIVE_BASIS_POINTS=100`; cross rows used
+`aarch64-linux-gnu-gcc` or `riscv64-linux-gnu-gcc -march=rv64gcv -mabi=lp64d`
+with the matching QEMU user runner. The same source also passed
+`check-simpleos-baremetal-engine2d-spans.shs` and C target execution on x86,
+QEMU AArch64, and QEMU RISC-V.
+
+The AArch64 and RVV timings are emulator-specific correctness/dispatch
+evidence, not physical-board or bare-metal performance. The RVV row fails the
+retained primitive budget under QEMU; it must not be promoted to an ARM/RISC-V
+8K/80 application claim. All rows remain operation-level evidence: they
+exclude self-hosted Simple execution, Web/GUI/WM traversal, presentation, and
+display scanout; full dynamic 8K/80 remains unproven.
