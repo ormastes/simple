@@ -161,6 +161,7 @@ pub struct BrowserRendererFrameDecodeResult:
     solid_material_count: i32
     solid_material_sha256: text
     diagnostics: text
+    damage_receipt: BrowserRendererDamageReceipt
 
 """Bounded producer receipt for a retained DrawIR frame.
 
@@ -697,6 +698,8 @@ fn _browser_renderer_capability_wire_payload(
         return "SBRN2\t" + payload.slice(6, payload.len())
     if kind == "frame" and payload.starts_with("SBRF8\t"):
         return "SBRF9\t" + payload.slice(6, payload.len())
+    if kind == "frame" and payload.starts_with("SBRF10\t"):
+        return "SBRF11\t" + payload.slice(7, payload.len())
     payload
 
 fn _browser_renderer_capability_decode_payload(
@@ -711,6 +714,8 @@ fn _browser_renderer_capability_decode_payload(
             return ""
         return "SBRN1\t" + payload.slice(6, payload.len())
     if kind == "frame":
+        if payload.starts_with("SBRF11\t"):
+            return "SBRF10\t" + payload.slice(7, payload.len())
         if not payload.starts_with("SBRF9\t"):
             return ""
         return "SBRF8\t" + payload.slice(6, payload.len())
@@ -724,7 +729,7 @@ fn _browser_renderer_capability_payload_schema_valid(
     if kind == "network_response":
         return payload.starts_with("SBRN2\t")
     if kind == "frame":
-        return payload.starts_with("SBRF9\t")
+        return payload.starts_with("SBRF9\t") or payload.starts_with("SBRF11\t")
     true
 
 pub fn browser_renderer_capability_payload_message(
@@ -1968,7 +1973,8 @@ fn _browser_renderer_frame_reject(reason: text) -> BrowserRendererFrameDecodeRes
         cpu_composited_sha256: "",
         solid_material_count: 0,
         solid_material_sha256: "",
-        diagnostics: ""
+        diagnostics: "",
+        damage_receipt: browser_renderer_damage_receipt(DAMAGE_PLAN_NONE, [])
     )
 
 fn _browser_renderer_advance_list_valid(value: text) -> bool:
@@ -2423,7 +2429,8 @@ fn _browser_renderer_frame_encode_with_state_and_images(
     document_title: text,
     title_wire: bool,
     history_proposal: text,
-    history_proposal_wire: bool
+    history_proposal_wire: bool,
+    damage_receipt: BrowserRendererDamageReceipt?
 ) -> BrowserRendererEncodeResult:
     val current_len = text_to_bytes(history_current_url).len()
     val back_len = text_to_bytes(history_back_url).len()
@@ -2523,6 +2530,12 @@ fn _browser_renderer_frame_encode_with_state_and_images(
         base64_encode(history_proposal)
     else:
         ""
+    val damage_payload = match damage_receipt:
+        Some(receipt): browser_renderer_damage_receipt_encode(receipt)
+        nil: ""
+    val damage_wire = damage_receipt != nil
+    if damage_wire and composition_revision < 0:
+        return _browser_renderer_reject_encode("damage-receipt-needs-revision")
     val encoded_images = base64url_encode_bytes(image_payload.bytes)
     if encoded_images.len() > (
         BROWSER_RENDERER_MAX_IMAGE_RESOURCE_ENCODED_BYTES
@@ -2536,7 +2549,8 @@ fn _browser_renderer_frame_encode_with_state_and_images(
             diagnostic_payload.len() - current_payload.len() -
             back_payload.len() - forward_payload.len() -
             title_payload.len() - title_bytes -
-            history_proposal_payload.len() - encoded_images.len(),
+            history_proposal_payload.len() - encoded_images.len() -
+            damage_payload.len(),
         BROWSER_RENDERER_MAX_COMMANDS
     )
     if not encoded.ok:
@@ -2550,7 +2564,9 @@ fn _browser_renderer_frame_encode_with_state_and_images(
     else:
         solid_material_sha256
     val revision_frame = composition_revision >= 0
-    val frame_version = if history_proposal_wire:
+    val frame_version = if damage_wire:
+        "SBRF10"
+    elif history_proposal_wire:
         "SBRF8"
     elif title_wire:
         "SBRF8"
@@ -2572,6 +2588,9 @@ fn _browser_renderer_frame_encode_with_state_and_images(
         "\t{composition_revision}"
     else:
         ""
+    val damage_fields = match damage_receipt:
+        Some(receipt): "\t{receipt.mode}\t{damage_payload.len()}"
+        nil: ""
     val payload = (
         "{frame_version}\t{reply_to_request_id}\t{cpu_composited_count}\t{cpu_digest}" +
         "\t{solid_material_count}\t{solid_digest}\t{next_animation_ms}" +
@@ -2579,10 +2598,10 @@ fn _browser_renderer_frame_encode_with_state_and_images(
         "\t{back_payload.len()}\t{forward_payload.len()}" +
         title_field + history_proposal_field +
         "\t{image_payload.resource_count}\t{image_payload.checksum}" +
-        "\t{encoded_images.len()}{revision_field}\n" +
+        "\t{encoded_images.len()}{revision_field}{damage_fields}\n" +
         diagnostic_payload + current_payload + back_payload +
         forward_payload + title_payload + history_proposal_payload +
-        encoded_images +
+        encoded_images + damage_payload +
         bytes_to_text(encoded.bytes)
     )
     browser_renderer_message_encode("frame", generation, request_id, payload)
@@ -2608,7 +2627,7 @@ pub fn browser_renderer_frame_encode_with_state_and_images(
         next_animation_ms, cpu_composited_count, cpu_composited_sha256,
         solid_material_count, solid_material_sha256, diagnostics,
         history_current_url, history_back_url, history_forward_url,
-        -1, image_resources, [], false, "", false, "", false
+        -1, image_resources, [], false, "", false, "", false, nil
     )
 
 pub fn browser_renderer_frame_encode_with_state_and_retained_images(
@@ -2639,7 +2658,7 @@ pub fn browser_renderer_frame_encode_with_state_and_retained_images(
         solid_material_count, solid_material_sha256, diagnostics,
         history_current_url, history_back_url, history_forward_url,
         composition_revision, image_resources, prior_revisions, true,
-        "", false, "", false
+        "", false, "", false, nil
     )
 
 pub fn browser_renderer_frame_encode_with_state_and_retained_images_and_title(
@@ -2671,7 +2690,46 @@ pub fn browser_renderer_frame_encode_with_state_and_retained_images_and_title(
         solid_material_count, solid_material_sha256, diagnostics,
         history_current_url, history_back_url, history_forward_url,
         composition_revision, image_resources, prior_revisions, true,
-        document_title, true, "", false
+        document_title, true, "", false, nil
+    )
+
+pub fn browser_renderer_frame_encode_with_retained_damage(
+    composition: DrawIrComposition,
+    generation: i64,
+    request_id: i64,
+    reply_to_request_id: i64,
+    next_animation_ms: i64,
+    cpu_composited_count: i32,
+    cpu_composited_sha256: text,
+    solid_material_count: i32,
+    solid_material_sha256: text,
+    diagnostics: text,
+    history_current_url: text,
+    history_back_url: text,
+    history_forward_url: text,
+    document_title: text,
+    composition_revision: i64,
+    image_resources: [SimpleOsHostGpuImageResource],
+    prior_revisions: [SimpleOsHostGpuImageResourceRevision],
+    viewport_width: i32,
+    viewport_height: i32,
+    damage_receipt: BrowserRendererDamageReceipt
+) -> BrowserRendererEncodeResult:
+    if composition_revision < 0:
+        return _browser_renderer_reject_encode(
+            "invalid-composition-revision"
+        )
+    if not browser_renderer_damage_receipt_valid(
+        damage_receipt, viewport_width, viewport_height
+    ):
+        return _browser_renderer_reject_encode("invalid-damage-receipt")
+    _browser_renderer_frame_encode_with_state_and_images(
+        composition, generation, request_id, reply_to_request_id,
+        next_animation_ms, cpu_composited_count, cpu_composited_sha256,
+        solid_material_count, solid_material_sha256, diagnostics,
+        history_current_url, history_back_url, history_forward_url,
+        composition_revision, image_resources, prior_revisions, true,
+        document_title, true, "", false, Some(damage_receipt)
     )
 
 pub fn browser_renderer_frame_encode_with_history_proposal(
@@ -2704,7 +2762,7 @@ pub fn browser_renderer_frame_encode_with_history_proposal(
         solid_material_count, solid_material_sha256, diagnostics,
         history_current_url, history_back_url, history_forward_url,
         composition_revision, image_resources, prior_revisions, true,
-        document_title, true, history_proposal, true
+        document_title, true, history_proposal, true, nil
     )
 
 pub fn browser_renderer_frame_reply_to_request_id(
@@ -2725,7 +2783,9 @@ pub fn browser_renderer_frame_reply_to_request_id(
             (fields[0] == "SBRF5" or fields[0] == "SBRF6")) or
         (fields.len() == 15 and fields[0] == "SBRF7") or
         (fields.len() == 16 and fields[0] == "SBRF8") or
-        (fields.len() == 17 and fields[0] == "SBRF8")):
+        (fields.len() == 17 and fields[0] == "SBRF8") or
+        (fields.len() == 18 and fields[0] == "SBRF10") or
+        (fields.len() == 19 and fields[0] == "SBRF10")):
         return -1
     val reply_to_request_id = fields[1].to_i64() ?? -1
     if (reply_to_request_id <= 0 or
@@ -2755,27 +2815,38 @@ fn _browser_renderer_frame_decode(
             (fields[0] == "SBRF5" or fields[0] == "SBRF6")) or
         (fields.len() == 15 and fields[0] == "SBRF7") or
         (fields.len() == 16 and fields[0] == "SBRF8") or
-        (fields.len() == 17 and fields[0] == "SBRF8")
+        (fields.len() == 17 and fields[0] == "SBRF8") or
+        (fields.len() == 18 and fields[0] == "SBRF10") or
+        (fields.len() == 19 and fields[0] == "SBRF10")
     )
     val image_frame = (
         (fields.len() == 14 and
             (fields[0] == "SBRF5" or fields[0] == "SBRF6")) or
         (fields.len() == 15 and fields[0] == "SBRF7") or
         (fields.len() == 16 and fields[0] == "SBRF8") or
-        (fields.len() == 17 and fields[0] == "SBRF8")
+        (fields.len() == 17 and fields[0] == "SBRF8") or
+        (fields.len() == 18 and fields[0] == "SBRF10") or
+        (fields.len() == 19 and fields[0] == "SBRF10")
     )
     val retained_frame = (
         (fields.len() == 14 and fields[0] == "SBRF6") or
         (fields.len() == 15 and fields[0] == "SBRF7") or
         (fields.len() == 16 and fields[0] == "SBRF8") or
-        (fields.len() == 17 and fields[0] == "SBRF8")
+        (fields.len() == 17 and fields[0] == "SBRF8") or
+        (fields.len() == 18 and fields[0] == "SBRF10") or
+        (fields.len() == 19 and fields[0] == "SBRF10")
+    )
+    val damage_frame = (
+        (fields.len() == 18 or fields.len() == 19) and
+        fields[0] == "SBRF10"
     )
     val title_frame = (
         (fields.len() == 16 and fields[0] == "SBRF8") or
-        (fields.len() == 17 and fields[0] == "SBRF8")
+        (fields.len() == 17 and fields[0] == "SBRF8") or damage_frame
     )
     val history_proposal_frame = (
-        fields.len() == 17 and fields[0] == "SBRF8"
+        (fields.len() == 17 and fields[0] == "SBRF8") or
+        (fields.len() == 19 and fields[0] == "SBRF10")
     )
     if not legacy_frame and not diagnostic_frame and not state_frame:
         return _browser_renderer_frame_reject("malformed-material-witness")
@@ -2816,6 +2887,9 @@ fn _browser_renderer_frame_decode(
     var history_proposal = ""
     var document_title = ""
     var image_resources: [SimpleOsHostGpuImageResource] = []
+    var damage_receipt = browser_renderer_damage_receipt(
+        DAMAGE_PLAN_FULL, [0, 0, width.to_i64(), height.to_i64()]
+    )
     var draw_ir_start = witness_end + 1
     if diagnostic_frame or state_frame:
         val diagnostic_len = fields[7].to_i64() ?? -1
@@ -3062,6 +3136,41 @@ fn _browser_renderer_frame_decode(
                 if pixel_reason != "":
                     return _browser_renderer_frame_reject(pixel_reason)
                 draw_ir_start = image_end
+                if damage_frame:
+                    val damage_mode_index = revision_field_index + 1
+                    val damage_len_index = revision_field_index + 2
+                    val damage_mode = fields[damage_mode_index].to_i64() ?? -1
+                    val damage_len = fields[damage_len_index].to_i64() ?? -1
+                    if (damage_len <= 0 or damage_len >
+                            BROWSER_RENDERER_MAX_HEADER_BYTES or
+                        str(damage_mode) != fields[damage_mode_index] or
+                        str(damage_len) != fields[damage_len_index]):
+                        return _browser_renderer_frame_reject(
+                            "malformed-damage-receipt"
+                        )
+                    val damage_end = _browser_renderer_checked_end(
+                        image_end, damage_len, message.payload.len()
+                    )
+                    if damage_end < 0 or damage_end >= message.payload.len():
+                        return _browser_renderer_frame_reject(
+                            "malformed-damage-receipt"
+                        )
+                    val encoded_damage = _browser_renderer_byte_slice(
+                        message.payload, image_end, damage_end
+                    )
+                    match browser_renderer_damage_receipt_decode(
+                        encoded_damage, width, height
+                    ):
+                        Some(receipt):
+                            if receipt.mode != damage_mode:
+                                return _browser_renderer_frame_reject(
+                                    "invalid-damage-receipt"
+                                )
+                            damage_receipt = receipt
+                        nil: return _browser_renderer_frame_reject(
+                            "invalid-damage-receipt"
+                        )
+                    draw_ir_start = damage_end
     val decoded = simpleos_host_gpu_draw_ir_decode(
         text_to_bytes(_browser_renderer_byte_slice(
             message.payload, draw_ir_start, message.payload.len()
@@ -3101,7 +3210,8 @@ fn _browser_renderer_frame_decode(
         cpu_composited_sha256: cpu_digest,
         solid_material_count: solid_count.to_i32(),
         solid_material_sha256: solid_digest,
-        diagnostics: diagnostics
+        diagnostics: diagnostics,
+        damage_receipt: damage_receipt
     )
 
 pub fn browser_renderer_frame_decode(

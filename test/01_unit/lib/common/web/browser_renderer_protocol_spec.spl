@@ -11,8 +11,10 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_damage_receipt_encode,
     browser_renderer_damage_receipt_valid,
     browser_renderer_advance_encode,
+    browser_renderer_capability_bind_encoded,
     browser_renderer_capability_decoder_feed,
     browser_renderer_capability_decoder_new,
+    browser_renderer_capability_payload_message,
     browser_renderer_chrome_encode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_frame_decode,
@@ -23,6 +25,7 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_frame_encode_with_state_and_images,
     browser_renderer_frame_encode_with_state_and_retained_images,
     browser_renderer_frame_encode_with_state_and_retained_images_and_title,
+    browser_renderer_frame_encode_with_retained_damage,
     browser_renderer_frame_encode_with_witness,
     browser_renderer_frame_reply_to_request_id,
     hosted_browser_title_is_valid,
@@ -83,6 +86,42 @@ describe "Browser renderer retained damage receipt":
         expect(decoded != nil).to_equal(true)
         expect(decoded.unwrap().rects).to_equal(receipt.rects)
         expect(browser_renderer_damage_receipt_decode("0,", 64, 48) == nil).to_equal(true)
+
+    it "round-trips a retained frame with its local receipt":
+        val receipt = browser_renderer_damage_receipt(
+            DAMAGE_PLAN_LOCAL, [4, 4, 8, 8, 6, 4, 8, 8])
+        val encoded = browser_renderer_frame_encode_with_retained_damage(
+            _renderer_protocol_fixture(), 7, 2, 41, -1, 0, "", 0, "", "",
+            "https://damage.test/", "", "", "Damage", 1, [], [], 64, 48,
+            receipt
+        )
+        expect(encoded.ok).to_equal(true)
+        val message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), encoded.wire).message
+        val frame = browser_renderer_frame_decode(message, 64, 48)
+        expect(frame.ok).to_equal(true)
+        expect(frame.damage_receipt.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        expect(frame.damage_receipt.rects).to_equal(receipt.rects)
+        val outer = browser_renderer_capability_bind_encoded(
+            encoded, 7, 2, 41, "11111111111111111111111111111111"
+        )
+        expect(outer.ok).to_equal(true)
+        val envelope = browser_renderer_capability_decoder_feed(
+            browser_renderer_capability_decoder_new(7), outer.wire
+        )
+        expect(envelope.status).to_equal("message")
+        expect(envelope.message.payload).to_start_with("SBRF11\t")
+        val bounded_frame = browser_renderer_frame_decode(
+            browser_renderer_capability_payload_message(envelope.message), 64, 48
+        )
+        expect(bounded_frame.ok).to_equal(true)
+        expect(bounded_frame.damage_receipt.rects).to_equal(receipt.rects)
+        val invalid = browser_renderer_frame_encode_with_retained_damage(
+            _renderer_protocol_fixture(), 7, 2, 41, -1, 0, "", 0, "", "",
+            "https://damage.test/", "", "", "Damage", 1, [], [], 64, 48,
+            browser_renderer_damage_receipt(DAMAGE_PLAN_LOCAL, [0, 0, 1])
+        )
+        expect(invalid.ok).to_equal(false)
         expect(browser_renderer_damage_receipt_valid(
             browser_renderer_damage_receipt(
                 DAMAGE_PLAN_LOCAL, [0, 0, 8, 4, 16, 8, 4, 4]), 64, 48
