@@ -546,6 +546,13 @@ in-progress
   layout identity. The bootstrap leaf check passed. Driver/SDN policy loading,
   planner invocation from a real allocation owner, and self-hosted execution
   remain open.
+- audit: WP-30 remains intentionally unimplemented. The current `85.mdsoc`
+  codegen/optimization/module-loading ports are descriptive counters without
+  a driver stage call chain carrying transfer/layout/commit policy. Adding a
+  parallel port there would be paper-only and could not satisfy the required
+  bypass probe. The next real integration owner is the production process
+  spawn/piped adapter, after it can hand a bounded frame to the parent ingress
+  and retain cancellation/cleanup evidence.
 - impl: Hardened the WP-22 native handoff boundary. Registry freeze now
   deep-copies field rows and full evidence, validates site/evidence equality,
   records the complete module universe including zero-site modules, and uses
