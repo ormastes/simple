@@ -2,6 +2,54 @@
 # Production bootstrap authority wiring shared by bootstrap-from-scratch and
 # focused behavioral tests. All mutation entrypoints require an owned lock.
 
+# Fingerprint helpers use mktemp internally. Keep that scratch traffic on the
+# bootstrap output filesystem: a full /tmp must not make an otherwise healthy
+# authority build fail, and pre/post/commit observations must share one routing
+# contract. On failure retain both a small machine-readable manifest and the
+# helper's stderr without adding anything to successful fingerprint stdout.
+bootstrap_authority_seed_inputs_fingerprint() {
+  [ "$#" -eq 9 ] || return 64
+  bootstrap_fingerprint_phase=$1
+  bootstrap_fingerprint_tmp=$2
+  bootstrap_fingerprint_manifest=$3
+  bootstrap_fingerprint_error=$4
+  shift 4
+  case "${bootstrap_fingerprint_phase}" in
+    pre|post|commit) ;;
+    *) return 64 ;;
+  esac
+  mkdir -p "${bootstrap_fingerprint_tmp}" \
+    "$(dirname -- "${bootstrap_fingerprint_manifest}")" || return 1
+  bootstrap_fingerprint_error_pending="${bootstrap_fingerprint_error}.raw.$$"
+  if TMPDIR="${bootstrap_fingerprint_tmp}" \
+    bootstrap_stage3_seed_inputs_fingerprint "$@" \
+      2>"${bootstrap_fingerprint_error_pending}"; then
+    rm -f "${bootstrap_fingerprint_manifest}" \
+      "${bootstrap_fingerprint_error}" \
+      "${bootstrap_fingerprint_error_pending}"
+    return 0
+  else
+    bootstrap_fingerprint_status=$?
+  fi
+  {
+    printf 'phase=%s\n' "${bootstrap_fingerprint_phase}"
+    cat "${bootstrap_fingerprint_error_pending}"
+  } >"${bootstrap_fingerprint_error}.tmp.$$" &&
+    mv -f "${bootstrap_fingerprint_error}.tmp.$$" \
+      "${bootstrap_fingerprint_error}"
+  rm -f "${bootstrap_fingerprint_error_pending}"
+  {
+    printf 'schema=simple-bootstrap-fingerprint-error-v1\n'
+    printf 'phase=%s\n' "${bootstrap_fingerprint_phase}"
+    printf 'status=%s\n' "${bootstrap_fingerprint_status}"
+    printf 'tmpdir=%s\n' "${bootstrap_fingerprint_tmp}"
+    printf 'error=%s\n' "${bootstrap_fingerprint_error}"
+  } >"${bootstrap_fingerprint_manifest}.tmp.$$" &&
+    mv -f "${bootstrap_fingerprint_manifest}.tmp.$$" \
+      "${bootstrap_fingerprint_manifest}"
+  return "${bootstrap_fingerprint_status}"
+}
+
 bootstrap_authority_require_owned_lock() {
   [ "$#" -eq 1 ] || return 64
   portable_lock_handle_is_owned "$1"

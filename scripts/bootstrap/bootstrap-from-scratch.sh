@@ -1035,8 +1035,17 @@ fi
 # churn. Any doubt (missing stamp, hash failure → empty mismatch) rebuilds: a
 # stale seed would silently miscompile, which is worse than a slow build.
 seed_stamp="${seed_bin}.inputs.sha256"
+seed_fingerprint_tmp="${output_dir}/rust-authority-fingerprint-tmp"
+seed_fingerprint_error_manifest=\
+"${output_dir}/rust-authority-fingerprint-error.manifest"
+seed_fingerprint_error=\
+"${output_dir}/rust-authority-fingerprint-error.log"
 seed_inputs_hash() {
-  bootstrap_stage3_seed_inputs_fingerprint "${repo_root}" \
+  seed_fingerprint_phase=$1
+  bootstrap_authority_seed_inputs_fingerprint \
+    "${seed_fingerprint_phase}" "${seed_fingerprint_tmp}" \
+    "${seed_fingerprint_error_manifest}" "${seed_fingerprint_error}" \
+    "${repo_root}" \
     "${backend}" "${llvm_features}" "${PATH}" "${PLATFORM}"
 }
 seed_stale=0
@@ -1088,7 +1097,7 @@ fi
 # backend/features are final before they enter the fingerprint. If the seed or
 # runtime library is missing, the cargo branch below rebuilds regardless.
 bootstrap_progress_mark fingerprint ""
-seed_inputs_fingerprint=$(seed_inputs_hash) || {
+seed_inputs_fingerprint=$(seed_inputs_hash pre) || {
   echo "error: failed to fingerprint Rust seed inputs" >&2
   exit 1
 }
@@ -1367,7 +1376,7 @@ if [ "${full_bootstrap}" -eq 1 ] \
   compiler_backfill_rebuilt=1
 fi
 if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
-  seed_inputs_fingerprint_after=$(seed_inputs_hash) || {
+  seed_inputs_fingerprint_after=$(seed_inputs_hash post) || {
     echo "error: failed to re-fingerprint Rust seed inputs after Cargo" >&2
     exit 1
   }
@@ -1391,7 +1400,7 @@ if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
     exit 1
   }
   bootstrap_acquire_rust_authority || exit 1
-  seed_inputs_fingerprint_commit=$(seed_inputs_hash) || {
+  seed_inputs_fingerprint_commit=$(seed_inputs_hash commit) || {
     echo "error: failed to fingerprint Rust inputs before authority commit" >&2
     exit 1
   }
@@ -1578,7 +1587,7 @@ else
       exit 1
     }
     legacy_generation_nonce=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
-    legacy_observed_fingerprint=$(seed_inputs_hash) || exit 1
+    legacy_observed_fingerprint=$(seed_inputs_hash commit) || exit 1
     bootstrap_authority_migrate_complete_legacy \
       "${runtime_origin_absolute}" "${rust_authority_generation_root}" \
       "${rust_authority_current_marker}" \
