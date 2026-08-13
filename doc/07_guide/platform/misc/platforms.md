@@ -218,7 +218,7 @@ text_file_write("output.txt", "line1\nline2\n", win_cfg)  # Forces CRLF
 
 ```bash
 # 1. Install QEMU and seed ISO tooling
-sudo apt install qemu-system-x86 qemu-utils openssh-client wget xz-utils genisoimage
+sudo apt install qemu-system-x86 qemu-utils openssh-client genisoimage
 
 # 2. Run the repo-managed FreeBSD bootstrap smoke in QEMU
 sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke
@@ -227,9 +227,14 @@ sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke
 ssh -p 2222 freebsd@localhost
 ```
 
-The wrapper creates `build/freebsd/vm/freebsd-cloudinit-seed.iso` from the host
-SSH public key, provisions/checks the FreeBSD `BASIC-CLOUDINIT-ufs` qcow2 image,
-keeps that downloaded base pristine, creates a fresh working overlay for each
+Before running it, provision the canonical FreeBSD 14.4
+`BASIC-CLOUDINIT-ufs` qcow2 into
+`${SIMPLE_BIG_STORAGE_ROOT:-$HOME/.simple}/qemu/images/freebsd/` and provide a
+trusted SHA-256 through `SIMPLE_FREEBSD_MEDIA_SHA256` or an adjacent
+`<image>.sha256` sidecar. The wrapper never downloads VM media and fails closed
+when the image or digest is absent or mismatched. It creates
+`build/freebsd/vm/freebsd-cloudinit-seed.iso` from the host SSH public key,
+uses that admitted pristine base, creates a fresh working overlay for each
 run, starts QEMU with SSH forwarded to localhost port `2222`, syncs the repo
 into the guest, and runs the FreeBSD bootstrap smoke as the default cloud user
 `freebsd`. Use `--full` for the repeated bootstrap verification pass.

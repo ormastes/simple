@@ -4,9 +4,9 @@ use std.spec.*
 
 val SCRIPT = "scripts/check/check-freebsd-bootstrap-qemu.shs"
 val PREFLIGHT_ORDER =
-    "mode,download,port,user,memory,cpus,ssh_timeout,root_ssh_timeout," +
+    "mode,port,user,memory,cpus,ssh_timeout,root_ssh_timeout," +
     "timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool," +
-    "base_image,ssh_public_key,ssh_private_key,workspace"
+    "admitted_media,ssh_public_key,ssh_private_key,workspace"
 
 fn receipt_value(output: text, key: text) -> text:
     val prefix = key + "="
@@ -34,13 +34,15 @@ fn step_freebsd_bootstrap_preflight(extra_env: text) -> (text, text, i64):
         "/bin/printf '%s\\n' '#!/bin/sh' 'exit 0' > \"$fixture/bin/rsync\"; " +
         "/bin/chmod 755 \"$fixture/bin/rsync\"; " +
         "/bin/printf '%s\\n' 'base image fixture' > \"$fixture/base.qcow2\"; " +
+        "media_sha=$(/usr/bin/sha256sum \"$fixture/base.qcow2\" | /usr/bin/awk '{print $1}'); " +
         "/bin/printf '%s\\n' 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFreeBSDPreflightFixture freebsd-preflight' > \"$fixture/key public.pub\"; " +
         "/bin/printf '%s\\n' '-----BEGIN OPENSSH PRIVATE KEY-----' 'freebsd-preflight-fixture' '-----END OPENSSH PRIVATE KEY-----' > \"$fixture/key private\"; " +
         "/usr/bin/env PATH=\"$fixture/bin:$PATH\" " +
         "QEMU_SSH_PUBLIC_KEY=\"$fixture/key public.pub\" " +
         "QEMU_SSH_PRIVATE_KEY=\"$fixture/key private\" " +
         "QEMU_BASE_VM_PATH=\"$fixture/base.qcow2\" " +
-        "QEMU_WORKSPACE=\"$fixture/workspace\" " +
+        "SIMPLE_FREEBSD_MEDIA_SHA256=\"$media_sha\" " +
+        "QEMU_VM_DIR=\"$fixture/workspace\" " +
         "QEMU_MEM=8G QEMU_USER=freebsd " + extra_env + " " +
         "/bin/sh " + SCRIPT + " --preflight"
     process_run("/bin/sh", ["-c", command])
@@ -78,6 +80,21 @@ describe "FreeBSD QEMU bootstrap bounded preflight":
         expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("fail")
         expect(stdout.contains("Smoke test PASSED")).to_equal(false)
         expect(stdout.contains("Full bootstrap PASSED")).to_equal(false)
+
+    it "refuses a present image without a trusted media digest":
+        val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(
+            "SIMPLE_FREEBSD_MEDIA_SHA256=")
+        expect(code).to_equal(1)
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("admitted_media")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("fail")
+
+    it "refuses a present image whose trusted digest mismatches":
+        val zero_digest = "0000000000000000000000000000000000000000000000000000000000000000"
+        val (stdout, _stderr, code) = step_freebsd_bootstrap_preflight(
+            "SIMPLE_FREEBSD_MEDIA_SHA256=" + zero_digest)
+        expect(code).to_equal(1)
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_reason")).to_equal("admitted_media")
+        expect(receipt_value(stdout, "freebsd_qemu_preflight_status")).to_equal("fail")
 
     it "keeps PASS evidence scoped to the FreeBSD QEMU preflight contract":
         val source = file_read(SCRIPT)

@@ -37,15 +37,16 @@ set -eu
 #   sh scripts/check/check-freebsd-wm-seam-refusal.shs
 #
 # Env knobs (same names/defaults as check-freebsd-bootstrap-qemu.shs where
-# they overlap, so both scripts can share one already-downloaded image):
+# they overlap, so both scripts share one admitted offline image):
 #   QEMU_VM_PATH, QEMU_BASE_VM_PATH, QEMU_CLOUDINIT_ISO, QEMU_SSH_PUBLIC_KEY,
 #   QEMU_SSH_PRIVATE_KEY, QEMU_PORT, QEMU_USER, QEMU_MEM, QEMU_CPUS,
-#   QEMU_SSH_TIMEOUT, QEMU_ROOT_SSH_TIMEOUT, BUILD_TIMEOUT_SEC
+#   QEMU_SSH_TIMEOUT, QEMU_ROOT_SSH_TIMEOUT, BUILD_TIMEOUT_SEC,
+#   SIMPLE_BIG_STORAGE_ROOT, SIMPLE_FREEBSD_MEDIA_SHA256
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-VM_DIR="${ROOT_DIR}/build/freebsd/vm"
+VM_DIR="${QEMU_VM_DIR:-${ROOT_DIR}/build/freebsd/vm}"
 QEMU_PORT="${QEMU_PORT:-2222}"
 QEMU_USER="${QEMU_USER:-freebsd}"
 QEMU_MEM="${QEMU_MEM:-8G}"
@@ -55,7 +56,9 @@ QEMU_ROOT_SSH_TIMEOUT="${QEMU_ROOT_SSH_TIMEOUT:-120}"
 BUILD_TIMEOUT_SEC="${BUILD_TIMEOUT_SEC:-2400}"
 FREEBSD_VERSION="14.4"
 FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
-QEMU_VM_PATH="${QEMU_VM_PATH:-${QEMU_BASE_VM_PATH:-${VM_DIR}/${FREEBSD_IMAGE_NAME}}}"
+MEDIA_CHECKER="${ROOT_DIR}/scripts/qemu/simple-freebsd-media.shs"
+SHARED_MEDIA_ROOT="${SIMPLE_BIG_STORAGE_ROOT:-${HOME}/.simple}/qemu/images/freebsd"
+QEMU_VM_PATH="${QEMU_VM_PATH:-${QEMU_BASE_VM_PATH:-${SIMPLE_FREEBSD_MEDIA_PATH:-${SHARED_MEDIA_ROOT}/${FREEBSD_IMAGE_NAME}}}}"
 QEMU_CLOUDINIT_ISO="${QEMU_CLOUDINIT_ISO:-${VM_DIR}/freebsd-cloudinit-seed.iso}"
 PID_FILE="${VM_DIR}/wm-seam-qemu.pid"
 SERIAL_LOG="${VM_DIR}/wm-seam-qemu-serial.log"
@@ -106,9 +109,15 @@ command -v qemu-system-x86_64 >/dev/null 2>&1 || fail "qemu-system-x86_64 not fo
 command -v qemu-img >/dev/null 2>&1 || fail "qemu-img not found"
 command -v ssh >/dev/null 2>&1 || fail "ssh not found"
 command -v rsync >/dev/null 2>&1 || fail "rsync not found"
-[ -f "$QEMU_VM_PATH" ] || fail "Base image not found: $QEMU_VM_PATH (run check-freebsd-bootstrap-qemu.shs --download once first)"
+MEDIA_RECEIPT="$(sh "$MEDIA_CHECKER" --check --path "$QEMU_VM_PATH")" || {
+    printf '%s\n' "$MEDIA_RECEIPT" >&2
+    fail "Admitted FreeBSD base image required; provision shared media and trusted SHA-256 offline"
+}
+MEDIA_EXPECTED_SHA256=$(printf '%s\n' "$MEDIA_RECEIPT" | sed -n 's/^freebsd_media_expected_sha256=//p')
+MEDIA_ACTUAL_SHA256=$(printf '%s\n' "$MEDIA_RECEIPT" | sed -n 's/^freebsd_media_actual_sha256=//p')
+[ -n "$MEDIA_EXPECTED_SHA256" ] && [ "$MEDIA_EXPECTED_SHA256" = "$MEDIA_ACTUAL_SHA256" ] || fail "Admitted FreeBSD base image receipt incomplete"
 [ -f "$QEMU_CLOUDINIT_ISO" ] || fail "Cloud-init ISO not found: $QEMU_CLOUDINIT_ISO (run check-freebsd-bootstrap-qemu.shs --smoke once first to generate it)"
-pass "qemu, ssh, rsync found; base image and cloud-init ISO already present"
+pass "qemu, ssh, rsync found; admitted base image and cloud-init ISO already present"
 
 printf '[2/6] SSH key\n'
 if [ -n "${QEMU_SSH_PUBLIC_KEY:-}" ]; then

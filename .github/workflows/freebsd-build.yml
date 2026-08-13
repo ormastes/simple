@@ -1,4 +1,4 @@
-name: FreeBSD Build & Test
+name: FreeBSD QEMU Contract
 
 on:
   push:
@@ -11,6 +11,7 @@ on:
       - 'src/runtime/**'
       - 'scripts/bootstrap/**'
       - 'scripts/check/check-freebsd-bootstrap-qemu.shs'
+      - 'scripts/qemu/simple-freebsd-media.shs'
       - 'scripts/check/check-bootstrap-portability.shs'
       - 'scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs'
       - 'scripts/check/check-stage4-hosted-dynload-provider-archive.shs'
@@ -37,6 +38,7 @@ on:
       - 'src/runtime/**'
       - 'scripts/bootstrap/**'
       - 'scripts/check/check-freebsd-bootstrap-qemu.shs'
+      - 'scripts/qemu/simple-freebsd-media.shs'
       - 'scripts/check/check-bootstrap-portability.shs'
       - 'scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs'
       - 'scripts/check/check-stage4-hosted-dynload-provider-archive.shs'
@@ -60,49 +62,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  native-freebsd-bootstrap:
-    name: Native FreeBSD pure-Simple bootstrap
+  freebsd-media-contract:
+    name: FreeBSD offline media admission contract
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install QEMU prerequisites
+      # Hosted runners do not hold the reviewed FreeBSD qcow2 and digest. A
+      # full VM claim is therefore intentionally not made in GitHub Actions.
+      - name: Verify offline media refusal contract
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            genisoimage openssh-client qemu-system-x86 qemu-utils rsync xz-utils
-          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
-          mkdir -p "$HOME/.ssh"
-          ssh-keygen -q -t ed25519 -N '' -f "$HOME/.ssh/id_ed25519"
-
-      - name: Bootstrap and verify inside native FreeBSD
-        timeout-minutes: 90
-        run: sh scripts/check/check-freebsd-bootstrap-qemu.shs --full --download
-
-      - name: Upload bootstrap failure logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: freebsd-bootstrap-failure-${{ github.run_id }}
-          path: build/freebsd/bootstrap-logs/
-          if-no-files-found: warn
-
-      # Task #60 Lane B: proves the WM/host seam correctly REFUSES a 2D
-      # surface on a real FreeBSD guest. Reuses the base image + cloud-init
-      # ISO the bootstrap step above already downloaded (same VM_DIR, same
-      # QEMU_BASE_VM_PATH/QEMU_CLOUDINIT_ISO defaults), so it must run after
-      # that step, not standalone.
-      - name: FreeBSD WM seam refusal (in-VM)
-        if: ${{ !cancelled() }}
-        timeout-minutes: 70
-        run: sh scripts/check/check-freebsd-wm-seam-refusal.shs
-
-      - name: Upload FreeBSD WM seam failure log
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: freebsd-wm-seam-failure-${{ github.run_id }}
-          path: build/freebsd/vm/wm-seam-qemu-serial.log
-          if-no-files-found: warn
+          sh -n scripts/qemu/simple-freebsd-media.shs
+          sh -n scripts/check/check-freebsd-bootstrap-qemu.shs
+          sh -n scripts/check/check-freebsd-wm-seam-refusal.shs
+          if sh scripts/qemu/simple-freebsd-media.shs --check; then
+            echo "unprovisioned runner unexpectedly admitted FreeBSD media" >&2
+            exit 1
+          fi

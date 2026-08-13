@@ -8,10 +8,12 @@ set -eu
 #   sh scripts/check-freebsd-bootstrap-qemu.shs --full    # Full bootstrap verification
 #
 # Env knobs:
-#   QEMU_VM_PATH         Base qcow2 image (default: build/freebsd/vm/FreeBSD-14.4-*.qcow2)
+#   QEMU_VM_PATH         Admitted base qcow2 image (default: shared media)
 #   QEMU_BASE_VM_PATH    Alias for QEMU_VM_PATH
 #   QEMU_CLOUDINIT_ISO   Cloud-init seed ISO (default: build/freebsd/vm/freebsd-cloudinit-seed.iso)
-#   QEMU_VM_DIR          Working directory for VM overlays and retained logs
+#   QEMU_VM_DIR          Working directory for disposable overlays and retained logs
+#   SIMPLE_BIG_STORAGE_ROOT Shared media root (default: $HOME/.simple)
+#   SIMPLE_FREEBSD_MEDIA_SHA256 Trusted SHA-256 (or use <image>.sha256 sidecar)
 #   QEMU_SSH_PUBLIC_KEY   SSH public key to inject (default: ~/.ssh/id_ed25519.pub or ~/.ssh/id_rsa.pub)
 #   QEMU_SSH_PRIVATE_KEY  Matching SSH private key (default: public-key path without .pub)
 #   QEMU_PORT            SSH forwarding port (default: 2222)
@@ -40,8 +42,9 @@ QEMU_SMOKE_TIMEOUT="${QEMU_SMOKE_TIMEOUT:-600}"
 QEMU_FULL_TIMEOUT="${QEMU_FULL_TIMEOUT:-7200}"
 FREEBSD_VERSION="14.4"
 FREEBSD_IMAGE_NAME="FreeBSD-${FREEBSD_VERSION}-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2"
-FREEBSD_IMAGE_URL="https://download.freebsd.org/releases/VM-IMAGES/${FREEBSD_VERSION}-RELEASE/amd64/Latest/${FREEBSD_IMAGE_NAME}.xz"
-QEMU_VM_PATH="${QEMU_VM_PATH:-${QEMU_BASE_VM_PATH:-${VM_DIR}/${FREEBSD_IMAGE_NAME}}}"
+MEDIA_CHECKER="${ROOT_DIR}/scripts/qemu/simple-freebsd-media.shs"
+SHARED_MEDIA_ROOT="${SIMPLE_BIG_STORAGE_ROOT:-${HOME}/.simple}/qemu/images/freebsd"
+QEMU_VM_PATH="${QEMU_VM_PATH:-${QEMU_BASE_VM_PATH:-${SIMPLE_FREEBSD_MEDIA_PATH:-${SHARED_MEDIA_ROOT}/${FREEBSD_IMAGE_NAME}}}}"
 QEMU_CLOUDINIT_ISO="${QEMU_CLOUDINIT_ISO:-${VM_DIR}/freebsd-cloudinit-seed.iso}"
 PID_FILE="${VM_DIR}/qemu.pid"
 SERIAL_LOG="${VM_DIR}/qemu-serial.log"
@@ -53,12 +56,10 @@ PROVENANCE_RECEIPT="${PROVENANCE_DIR}/freebsd_qemu_bootstrap_provenance.env"
 MODE=""
 MODE_SET=0
 MODE_VALID=1
-DOWNLOAD=0
-DOWNLOAD_VALID=1
 PREFLIGHT=0
 ARG_REASON="none"
 usage_error() {
-    printf 'Usage: %s [--smoke|--full] [--download] [--preflight]\n' "$0" >&2
+    printf 'Usage: %s [--smoke|--full] [--preflight]\n' "$0" >&2
     exit 1
 }
 
@@ -82,16 +83,9 @@ for arg in "$@"; do
                 MODE_SET=1
             fi
             ;;
-        --download)
-            if [ "$DOWNLOAD" -eq 1 ]; then
-                DOWNLOAD_VALID=0
-                ARG_REASON="download_multiple"
-            fi
-            DOWNLOAD=1
-            ;;
         --preflight) PREFLIGHT=1 ;;
         --help|-h)
-            printf 'Usage: %s [--smoke|--full] [--download] [--preflight]\n' "$0"
+            printf 'Usage: %s [--smoke|--full] [--preflight]\n' "$0"
             exit 0
             ;;
         *)
@@ -136,7 +130,7 @@ if [ -z "$TIMEOUT_BIN" ]; then
     TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
 fi
 
-PREFLIGHT_ORDER="mode,download,port,user,memory,cpus,ssh_timeout,root_ssh_timeout,timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool,base_image,ssh_public_key,ssh_private_key,workspace"
+PREFLIGHT_ORDER="mode,port,user,memory,cpus,ssh_timeout,root_ssh_timeout,timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool,admitted_media,ssh_public_key,ssh_private_key,workspace"
 PREFLIGHT_REASON="none"
 
 preflight_try() {
@@ -151,14 +145,6 @@ preflight_try() {
 
 preflight_mode() {
     [ "$MODE_VALID" -eq 1 ] && [ "$ARG_REASON" = "none" ]
-}
-
-preflight_download() {
-    [ "$DOWNLOAD_VALID" -eq 1 ] || return 1
-    if [ "$DOWNLOAD" -eq 1 ]; then
-        (command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1) &&
-            command -v xz >/dev/null 2>&1
-    fi
 }
 
 preflight_port() { is_valid_port "$QEMU_PORT"; }
@@ -192,9 +178,7 @@ preflight_iso_tool() {
         command -v mkisofs >/dev/null 2>&1 ||
         command -v xorriso >/dev/null 2>&1
 }
-preflight_base_image() {
-    [ "$DOWNLOAD" -eq 1 ] || [ -f "$QEMU_VM_PATH" ]
-}
+preflight_admitted_media() { sh "$MEDIA_CHECKER" --check --path "$QEMU_VM_PATH" >/dev/null; }
 preflight_public_key() {
     if [ -n "${QEMU_SSH_PUBLIC_KEY:-}" ]; then
         SSH_PUB_KEY="$QEMU_SSH_PUBLIC_KEY"
@@ -229,7 +213,6 @@ preflight_workspace() {
 
 run_preflight() {
     preflight_try mode preflight_mode
-    preflight_try download preflight_download
     preflight_try port preflight_port
     preflight_try user preflight_user
     preflight_try memory preflight_memory
@@ -243,7 +226,7 @@ run_preflight() {
     preflight_try ssh preflight_ssh
     preflight_try rsync preflight_rsync
     preflight_try iso_tool preflight_iso_tool
-    preflight_try base_image preflight_base_image
+    preflight_try admitted_media preflight_admitted_media
     preflight_try ssh_public_key preflight_public_key
     preflight_try ssh_private_key preflight_private_key
     preflight_try workspace preflight_workspace
@@ -481,26 +464,14 @@ printf '[3/7] Base image\n'
 
 mkdir -p "$VM_DIR"
 
-if [ ! -f "$QEMU_VM_PATH" ]; then
-    if [ "$DOWNLOAD" -eq 1 ]; then
-        info "Downloading FreeBSD ${FREEBSD_VERSION} CLOUDINIT image..."
-        xz_path="${QEMU_VM_PATH}.xz"
-        if command -v curl >/dev/null 2>&1; then
-            run_bounded "$QEMU_TRANSFER_TIMEOUT" curl -fSL -o "$xz_path" "$FREEBSD_IMAGE_URL"
-        elif command -v wget >/dev/null 2>&1; then
-            run_bounded "$QEMU_TRANSFER_TIMEOUT" wget -q -O "$xz_path" "$FREEBSD_IMAGE_URL"
-        else
-            fail "Neither curl nor wget available for download"
-        fi
-        info "Extracting..."
-        run_bounded "$QEMU_TRANSFER_TIMEOUT" xz -d "$xz_path"
-        pass "Downloaded and extracted: $QEMU_VM_PATH"
-    else
-        fail "Base image not found: $QEMU_VM_PATH (use --download to fetch)"
-    fi
-else
-    pass "Base image: $QEMU_VM_PATH"
-fi
+MEDIA_RECEIPT="$(sh "$MEDIA_CHECKER" --check --path "$QEMU_VM_PATH")" || {
+    printf '%s\n' "$MEDIA_RECEIPT" >&2
+    fail "Admitted FreeBSD base image required; provision shared media and its trusted SHA-256 offline"
+}
+MEDIA_EXPECTED_SHA256=$(printf '%s\n' "$MEDIA_RECEIPT" | sed -n 's/^freebsd_media_expected_sha256=//p')
+MEDIA_ACTUAL_SHA256=$(printf '%s\n' "$MEDIA_RECEIPT" | sed -n 's/^freebsd_media_actual_sha256=//p')
+[ -n "$MEDIA_EXPECTED_SHA256" ] && [ "$MEDIA_EXPECTED_SHA256" = "$MEDIA_ACTUAL_SHA256" ] || fail "Admitted FreeBSD base image receipt incomplete"
+pass "Admitted base image: $QEMU_VM_PATH"
 
 # ── Cloud-Init ISO ─────────────────────────────────────────────────────
 printf '[4/7] Cloud-init ISO\n'
@@ -896,8 +867,7 @@ else
 
     info "Retaining guest bootstrap logs for provenance..."
     copy_guest_bootstrap_logs
-    BASE_IMAGE_SHA256=$(hash_file "$QEMU_VM_PATH") ||
-        fail "Could not hash FreeBSD base image"
+    BASE_IMAGE_SHA256="$MEDIA_ACTUAL_SHA256"
     SOURCE_SHA256=$(hash_tree "$ROOT_DIR/src") ||
         fail "Could not hash Simple source tree"
     LOGS_SHA256=$(hash_tree "$PROVENANCE_DIR") ||
@@ -910,6 +880,8 @@ else
         printf 'freebsd_qemu_bootstrap_architecture=x86_64\n'
         printf 'freebsd_qemu_bootstrap_base_image_path=%s\n' "$QEMU_VM_PATH"
         printf 'freebsd_qemu_bootstrap_base_image_sha256=%s\n' "$BASE_IMAGE_SHA256"
+        printf 'freebsd_qemu_bootstrap_base_image_expected_sha256=%s\n' "$MEDIA_EXPECTED_SHA256"
+        printf 'freebsd_qemu_bootstrap_media_admission=pass\n'
         printf 'freebsd_qemu_bootstrap_source_identity=%s\n' "simple-source:$ROOT_DIR"
         printf 'freebsd_qemu_bootstrap_source_sha256=%s\n' "$SOURCE_SHA256"
         printf 'freebsd_qemu_bootstrap_command=%s\n' "$EXACT_COMMAND"
