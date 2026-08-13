@@ -725,6 +725,10 @@ in-progress
   instead of racing queue/head fields with enqueue or dequeue. A retained
   message high-water counter records bounded occupancy across copies; it does
   not upgrade the legacy actor route into typed native transport evidence.
+- impl: The single-threaded actor scheduler now consumes ready IDs through a
+  cursor and compacts only a half-consumed large prefix. Requeue deduplication
+  scans the active suffix, preserving round-robin semantics without one
+  front-slice allocation/copy per dispatch.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters

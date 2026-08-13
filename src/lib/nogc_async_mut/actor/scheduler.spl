@@ -29,6 +29,19 @@ use std.actor.actor.{Actor, HandlerTable, ActorState}
 use std.actor.mailbox.{ActorMailbox, ActorMessage}
 use std.env.variables.{env_has}
 
+val ACTOR_READY_QUEUE_COMPACT_MIN_CONSUMED: i64 = 64
+
+fn actor_scheduler_ready_queue_should_compact(consumed: i64, total: i64) -> bool:
+    """Amortize ready-queue prefix reclamation without an O(n) front pop."""
+    if consumed <= 0 or total <= 0:
+        return false
+    if consumed >= total:
+        return true
+    # `consumed >= total - consumed` is the half-full test without a
+    # multiplication overflow at large scheduler queues.
+    consumed >= ACTOR_READY_QUEUE_COMPACT_MIN_CONSUMED
+        and consumed >= total - consumed
+
 # ================================================================
 # Reply Store
 # ================================================================
@@ -100,6 +113,7 @@ struct ActorScheduler:
     """
     actors: [Actor]
     ready_queue: [i64]
+    ready_head: i64
     replies: ReplyStore
     total_dispatched: i64
     total_errors: i64
@@ -111,6 +125,7 @@ impl ActorScheduler:
         ActorScheduler(
             actors: [],
             ready_queue: [],
+            ready_head: 0,
             replies: ReplyStore.new(),
             total_dispatched: 0,
             total_errors: 0,
@@ -211,28 +226,33 @@ impl ActorScheduler:
 
         Returns true if there are more messages to process.
         """
-        if self.ready_queue.is_empty():
+        if self._ready_pending_count() <= 0:
             self._refresh_ready_queue()
-            if self.ready_queue.is_empty():
+            if self._ready_pending_count() <= 0:
                 return false
 
-        # `ready_queue` is a plain [i64] array — no `pop_front`; dequeue the front
-        # by index read + slice-shrink (the codebase's array-shrink idiom).
-        val actor_id = self.ready_queue[0]
-        self.ready_queue = self.ready_queue.slice(1, self.ready_queue.len())
+        # Cursor dequeue avoids an O(n) slice-shrink for every dispatched
+        # message. `_enqueue_ready` scans only the active suffix, so an actor
+        # can be requeued after this read without duplicate suppression seeing
+        # its consumed predecessor.
+        val actor_id = self.ready_queue[self.ready_head]
+        self.ready_head = self.ready_head + 1
+        if self.ready_head >= self.ready_queue.len():
+            self.ready_queue = []
+            self.ready_head = 0
 
         for act in self.actors:
             if act.id == actor_id:
                 # Peek at the message to get reply_id before processing
                 val msg_peek = act.mailbox.dequeue()
                 if not msg_peek.?:
-                    return not self.ready_queue.is_empty()
+                    return self._ready_pending_count() > 0
 
                 val the_msg = match msg_peek:
                     Some(msg):
                         msg
                     nil:
-                        return not self.ready_queue.is_empty()
+                        return self._ready_pending_count() > 0
                 val result = act.handlers.dispatch(the_msg.method, the_msg.args)
 
                 if result.is_ok():
@@ -260,9 +280,9 @@ impl ActorScheduler:
                 if act.has_messages():
                     self._enqueue_ready(actor_id)
 
-                return not self.ready_queue.is_empty() or self._has_any_messages()
+                return self._ready_pending_count() > 0 or self._has_any_messages()
 
-        not self.ready_queue.is_empty()
+        self._ready_pending_count() > 0
 
     me run_until_idle():
         """Process all pending messages across all actors.
@@ -296,20 +316,43 @@ impl ActorScheduler:
     # Internal Helpers
     # ================================================================
 
+    fn _ready_pending_count() -> i64:
+        val pending = self.ready_queue.len() - self.ready_head
+        if pending < 0:
+            return 0
+        pending
+
+    me _compact_ready_consumed_prefix_if_needed():
+        if not actor_scheduler_ready_queue_should_compact(
+            self.ready_head, self.ready_queue.len()):
+            return
+        if self.ready_head >= self.ready_queue.len():
+            self.ready_queue = []
+        else:
+            self.ready_queue = self.ready_queue.slice(
+                self.ready_head, self.ready_queue.len())
+        self.ready_head = 0
+
     me _enqueue_ready(actor_id: i64):
         """Add actor to ready queue if not already present."""
-        for id in self.ready_queue:
-            if id == actor_id:
+        self._compact_ready_consumed_prefix_if_needed()
+        var index = self.ready_head
+        while index < self.ready_queue.len():
+            if self.ready_queue[index] == actor_id:
                 return
+            index = index + 1
         self.ready_queue.push(actor_id)
 
     me _remove_ready(actor_id: i64):
         """Remove actor from ready queue."""
         var new_queue: [i64] = []
-        for id in self.ready_queue:
-            if id != actor_id:
-                new_queue.push(id)
+        var index = self.ready_head
+        while index < self.ready_queue.len():
+            if self.ready_queue[index] != actor_id:
+                new_queue.push(self.ready_queue[index])
+            index = index + 1
         self.ready_queue = new_queue
+        self.ready_head = 0
 
     me _refresh_ready_queue():
         """Scan all actors and add those with pending messages."""

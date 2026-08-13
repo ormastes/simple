@@ -56,6 +56,10 @@ Mailbox reads, fullness checks, and statistics now take the same state mutex as
 enqueue/dequeue, and the mailbox exposes a retained-message high-water count
 for bounded-memory evidence. That metric does not establish native actor
 lifecycle or typed transfer safety.
+The single-threaded actor scheduler also uses a consumed-prefix cursor for its
+ready IDs. It reclaims a half-consumed large prefix in bounded batches rather
+than slicing the front after every dispatch; this is an amortized scheduling
+storage repair, not evidence of multi-threaded actor execution.
 
 The scalar `BoundedChannel` implementation also uses a consumed-prefix cursor:
 receive is normally O(1), and backing storage is compacted only when a later
