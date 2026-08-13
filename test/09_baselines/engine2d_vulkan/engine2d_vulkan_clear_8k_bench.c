@@ -27,6 +27,10 @@ extern int64_t rt_vulkan_wait_fence(int64_t, int64_t);
 extern int64_t rt_vulkan_destroy_fence(int64_t);
 extern int64_t rt_vulkan_copy_from_buffer_raw(int64_t, int64_t, int64_t, int64_t);
 extern int64_t rt_vulkan_copy_to_buffer_raw(int64_t, int64_t, int64_t, int64_t);
+extern const char *rt_vulkan_selected_device_name(void);
+extern const char *rt_vulkan_selected_device_type(void);
+extern const char *rt_vulkan_selected_device_driver_identity(void);
+extern int64_t rt_vulkan_selected_device_driver_identity_hash(void);
 
 typedef struct { uint32_t color, width, height, reserved[13]; } ClearPush;
 typedef struct {
@@ -82,6 +86,13 @@ int main(int argc, char **argv) {
     uint64_t bytes = full_pixels * 4;
     size_t spirv_size = 0; unsigned char *spirv = read_file(argv[1], &spirv_size);
     if (!spirv || !rt_vulkan_init()) return 3;
+    const char *adapter_name = rt_vulkan_selected_device_name();
+    const char *adapter_type = rt_vulkan_selected_device_type();
+    const char *adapter_identity = rt_vulkan_selected_device_driver_identity();
+    int64_t adapter_identity_hash = rt_vulkan_selected_device_driver_identity_hash();
+    if (!adapter_name) adapter_name = "";
+    if (!adapter_type) adapter_type = "";
+    if (!adapter_identity) adapter_identity = "";
     int64_t buffer = rt_vulkan_alloc_buffer((int64_t)bytes, 0x83);
     int64_t shader = rt_vulkan_compile_spirv_raw((int64_t)(uintptr_t)spirv, (int64_t)spirv_size);
     int64_t pipe = rt_vulkan_create_compute_pipeline(shader, (int64_t)(uintptr_t)"main", 64);
@@ -258,6 +269,11 @@ int main(int argc, char **argv) {
     }
     printf("engine2d_vulkan_schema=engine2d-vulkan-primitive-v2\n");
     printf("engine2d_vulkan_width=%u\nengine2d_vulkan_height=%u\n", width, height);
+    printf("engine2d_vulkan_adapter_name=%s\n", adapter_name);
+    printf("engine2d_vulkan_adapter_type=%s\n", adapter_type);
+    printf("engine2d_vulkan_adapter_identity=%s\n", adapter_identity);
+    printf("engine2d_vulkan_adapter_identity_hash=%lld\n",
+           (long long)adapter_identity_hash);
     printf("engine2d_vulkan_active_basis_points=%u\n", bp);
     printf("engine2d_vulkan_active_pixels=%llu\n", (unsigned long long)active_pixels);
     printf("engine2d_vulkan_operation=%s\n", axis_line_mode ? "axis_line_rect_batched" :

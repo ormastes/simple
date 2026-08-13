@@ -30,6 +30,33 @@ Reproduce with `scripts/check/check-engine2d-vulkan-clear-8k.shs`; set
 `ENGINE2D_VULKAN_ACTIVE_BASIS_POINTS` for retained sweeps and
 `VK_ICD_FILENAMES` for an explicitly selected device ICD.
 
+## 2026-08-13 physical-GPU retained clear receipt
+
+The primitive benchmark receipt now records the selected adapter name, type,
+driver identity, and stable identity hash. This prevents an ICD selection from
+being reported as hardware evidence without identifying the device that the
+runtime actually chose. The following 15-sample run used the NVIDIA ICD:
+
+```sh
+BUILD_DIR=build/check/engine2d-vulkan-clear-8k-nvidia-active1-attributed-20260813 \
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+ENGINE2D_VULKAN_ACTIVE_BASIS_POINTS=100 ENGINE2D_VULKAN_SAMPLES=15 \
+sh scripts/check/check-engine2d-vulkan-clear-8k.shs
+```
+
+| Adapter | Type | Active pixels | p50 ns | p95 ns | Timed readback | Oracle | Result |
+|---|---|---:|---:|---:|---:|---|---|
+| NVIDIA RTX A6000 | discrete | 331,776 (1%) | 608,384 | 670,132 | 0 bytes | 0 mismatches; checksum `9960456387733476227` | isolated PASS |
+
+The recorded driver identity was
+`NVIDIA RTX A6000|vendor=000010de|device=00002230|driver=911f8400|api=00404138`
+(hash `666008366`). The evidence readback after timing was 1,327,104 bytes and
+is solely the exact oracle for the changed region. The receipt still says
+`swapchain_presented=false` and
+`engine2d_vulkan_dynamic_frame_80fps_proven=false`: this proves only an
+isolated retained clear compute submission on a physical adapter, not DrawIR
+traversal, mixed rendering, device presentation, scanout, or end-to-end 8K/80.
+
 ## Batched filled rectangles and barrier correction
 
 The representative DrawIR-style batch seeds a retained 8K framebuffer, records
