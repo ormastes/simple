@@ -792,3 +792,6 @@ in-progress
 - impl: Reworked `HostScheduler` global FIFO dequeue to use a consumed-prefix
   cursor. Normal-priority scheduling is amortized O(1); critical-priority
   prepend compacts only the live suffix to preserve its existing precedence.
+- impl: Reworked the legacy cooperative `Executor` ready queue to use a
+  consumed-prefix cursor. Ready-task ordering is unchanged while completed
+  dequeues avoid copying the remaining ready IDs on every iteration.
