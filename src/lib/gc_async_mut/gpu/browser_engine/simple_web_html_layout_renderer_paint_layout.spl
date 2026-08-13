@@ -1459,12 +1459,34 @@ fn node_in_paint_subtree(nodes: [HNode], boundary: i32, i: i32) -> bool:
         cur = nodes[cur].parent as i32
     false
 
+fn paint_contain_subtree_members(nodes: [HNode], boundary: i32) -> [bool]:
+    """Build the containment mask once for a retained repaint.
+
+    The canonical parse_html HNode arena places parents before children, so
+    membership is inherited in one forward pass rather than walking a parent
+    chain for every node. Malformed/non-topological input retains the old exact
+    chain walk, preserving the fast path's conservative behaviour.
+    """
+    var members: [bool] = []
+    var i = 0
+    while i < nodes.len():
+        var inside = i == boundary
+        if not inside:
+            val parent = nodes[i].parent as i32
+            if parent >= 0 and parent < i:
+                inside = members[parent]
+            elif parent >= 0:
+                inside = node_in_paint_subtree(nodes, boundary, i)
+        members.push(inside)
+        i += 1
+    members
+
 fn paint_contain_subtree_node_count(nodes: [HNode], boundary: i32) -> i32:
-    val node_count = nodes.len() as i32
+    val members = paint_contain_subtree_members(nodes, boundary)
     var total = 0
     var i = 0
-    while i < node_count:
-        if node_in_paint_subtree(nodes, boundary, i):
+    while i < members.len():
+        if members[i]:
             total = total + 1
         i = i + 1
     total
@@ -1518,13 +1540,14 @@ pub fn paint_selected(
         return paint(nodes, styles, bx, by, bw, bh, wrap_cache, retained_fb, fbw, fbh, widget_mode)
 
     val node_count = nodes.len()
+    val subtree_members = paint_contain_subtree_members(nodes, boundary)
     var culled_styles = styles
     var i = 0
     # cpu-lane-loop-ok: suppresses every node outside the contain:paint
     # boundary subtree so the unmodified paint() call below performs no
     # raster work for them; bound is node_count, one linear pass
     while i < node_count:
-        if not node_in_paint_subtree(nodes, boundary, i):
+        if not subtree_members[i]:
             var cst = culled_styles[i]
             cst.visibility_hidden = true
             culled_styles[i] = cst
