@@ -2472,7 +2472,6 @@ scratch address allowlisted, reject arbitrary payloads/addresses, and preserve
 the UART reset-burst transcript. An immutable packaged-root
 manifest remains real VFS evidence when CLI `ls` calls public `readdir`; never
 hardcode the listing in the shell command handler.
-
 ## When NO SSpec can be executed at all (2026-08-16)
 
 Sometimes the answer to "run the spec" is that **no runtime exists to run any
@@ -2656,3 +2655,13 @@ Rules:
   sdl2}_display_adapter.spl` carry byte-identical `_completion`/`_rejected`
   helpers three times. Adding a fourth backend by copying the third is the
   failure mode this rule exists to stop.
+
+## UP Squared Apollo Lake first-light safety
+
+Use a dedicated removable GPT/FAT32 x64 UEFI device and
+`EFI/BOOT/BOOTX64.EFI`; select it through the one-time F7 menu. Never write the
+host system disk, UP2 eMMC, BIOS/SPI, or UEFI variables for first light. CN16
+is 3.3 V TTL UART. CN22 is documented for 1.8 V CPLD/BIOS update and is not a
+proven CPU-debug JTAG path; do not drive it with Tigard/OpenOCD. Offline build
+or image checks cannot promote the lane to physical PASS. Resume unfinished
+work from `doc/03_plan/agent_tasks/up_squared_apl_simpleos.md`.

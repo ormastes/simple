@@ -172,6 +172,14 @@ receipt; do not assume `timeout head -c <large-count>` preserves reset bursts.
 If a direct read sees bytes while the wrapper reports silence, classify the
 wrapper as failed and repair it before diagnosing target wiring.
 
+For original UP Squared Apollo Lake bring-up, use removable x64 UEFI media and
+the fallback path `EFI/BOOT/BOOTX64.EFI`; never use the host system disk or the
+board's internal eMMC for first light. CN16 is 3.3 V TTL UART. CN22 is a 1.8 V
+CPLD/BIOS-update connector, not a proven Apollo Lake CPU JTAG port, so do not
+drive it with Tigard/OpenOCD. The retained handoff is
+`doc/03_plan/agent_tasks/up_squared_apl_simpleos.md`; its offline image and
+partial source state are not physical boot or `ls` evidence.
+
 When a user asks to close an implementation phase with external verification
 still unavailable, record an **implementation handoff** in the plan and Todo
 DB. It may end the coding turn only after code and host-independent tests are

@@ -45,6 +45,22 @@ same-thread/typed-payload exclusions and the Stage-4 blocker.
   sidecar means no retained execution provenance, not a generated evidence PASS.
 - **Primary guide:** `doc/07_guide/infra/sspec_typed_evidence.md`.
 
+## UP Squared Apollo Lake SimpleOS bring-up
+
+- **Current status:** paused partial implementation; no physical boot or `ls`
+  PASS yet.
+- **Canonical handoff:**
+  `doc/03_plan/agent_tasks/up_squared_apl_simpleos.md`.
+- **Safe upload:** dedicated removable GPT/FAT32 x64 UEFI media at
+  `EFI/BOOT/BOOTX64.EFI`, selected once with F7.
+- **Debug:** CN16 3.3 V TTL UART. Do not use CN22 as CPU JTAG; it is documented
+  as a 1.8 V CPLD/BIOS-update connector.
+- **Never write:** host system disk, UP2 internal eMMC/NVMe, BIOS/SPI, or UEFI
+  variables during first light.
+- **Verdict rule:** offline image structure, Tigard enumeration, or retained
+  partial source is not live board evidence. PASS requires ordered UART boot
+  markers and a command-correlated VFS-backed `ls /` response.
+
 ## StarFive JH7110 software reset over Tigard JTAG
 
 - **Canonical command:** `scripts/os/starfive-jtag-sbi-reset.shs`.
