@@ -11,19 +11,24 @@ use os.kernel.arch.x86_64.user_entry_validation.{validate_enter_user_blocking_ha
 extern fn rt_x86_exec_token_install(task_id: u64, generation: u64, expected_cr3: u64) -> i64
 extern fn rt_x86_exec_token_cancel(task_id: u64, generation: u64, expected_cr3: u64) -> i64
 extern fn rt_x86_exec_token_take_result(task_id: u64, generation: u64, expected_cr3: u64) -> i64
+extern fn serial_println(msg: text)
 
 fn dispatch_enter_user_blocking(pid_hint: u64, scheduler: Scheduler) -> i64:
     """Syscall 14: EnterUserBlocking — look up a user TCB and jump to ring-3."""
     val validation = validate_enter_user_blocking_handoff(pid_hint, scheduler)
     if not validation.ok:
+        serial_println("[x86_64-user] handoff rejected")
         return -22
 
     if rt_x86_exec_token_install(validation.pid, validation.generation, validation.cr3) != 1:
+        serial_println("[x86_64-user] token install rejected")
         return -16
 
+    serial_println("[x86_64-user] handoff enter pid={validation.pid} generation={validation.generation} cr3={validation.cr3}")
     val ctx: TaskContext = validation.context.unwrap()
     arch_x86_64_enter_user_task(ctx, validation.cr3)
     val rc = rt_x86_exec_token_take_result(validation.pid, validation.generation, validation.cr3)
+    serial_println("[x86_64-user] handoff returned rc={rc}")
     if rc == -4096:
         val _cancelled = rt_x86_exec_token_cancel(validation.pid, validation.generation, validation.cr3)
         return -22
