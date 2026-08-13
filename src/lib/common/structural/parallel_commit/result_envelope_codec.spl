@@ -1,0 +1,128 @@
+# Canonical bounded payload codec for one child-created ResultEnvelopeV1.
+#
+# Process transport owns framing/checksum; this codec owns only the typed
+# result payload. It deliberately contains no RuntimeValue or pointer bits.
+
+use std.common.base_encoding.utilities.{
+    text_to_bytes_linear,
+    validated_utf8_bytes_to_text_linear
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.structural.wire.{
+    WIRE_ENVELOPE_LEN,
+    wire_check_envelope,
+    wire_get_u16,
+    wire_get_u64,
+    wire_get_u8,
+    wire_magic,
+    wire_put_envelope,
+    wire_put_u16,
+    wire_put_u64,
+    wire_put_u8
+}
+use std.common.structural.parallel_commit.commit_contracts.{
+    PARALLEL_COMMIT_SCHEMA_VERSION,
+    ParallelResultKind,
+    ResultEnvelopeV1,
+    parallel_result_kind_from_u8,
+    parallel_result_kind_to_u8,
+    result_envelope_v1,
+    result_envelope_v1_well_formed
+}
+
+val RESULT_ENVELOPE_WIRE_FIXED_LEN: i64 = WIRE_ENVELOPE_LEN + 48
+val RESULT_ENVELOPE_MAX_KEY_BYTES: i64 = 256
+
+struct ResultEnvelopeDecodeResult:
+    ok: bool
+    value: ResultEnvelopeV1
+    reason: text
+
+fn result_envelope_magic() -> i64:
+    wire_magic("SPRS")
+
+fn result_envelope_zero() -> ResultEnvelopeV1:
+    result_envelope_v1(0, 0, 0, 0, ParallelResultKind.Replace, 0, "invalid")
+
+fn result_envelope_append_bytes(out: [u8], source: [u8]) -> [u8]:
+    var result = out
+    var i = 0
+    while i < source.len():
+        result.push(source[i])
+        i = i + 1
+    result
+
+fn result_envelope_v1_equal(left: ResultEnvelopeV1, right: ResultEnvelopeV1) -> bool:
+    left.contract_version == right.contract_version
+        and left.base_revision == right.base_revision
+        and left.task_id == right.task_id
+        and left.sequence == right.sequence
+        and left.write_region == right.write_region
+        and parallel_result_kind_to_u8(left.kind) == parallel_result_kind_to_u8(right.kind)
+        and left.payload_token == right.payload_token
+        and left.deterministic_key == right.deterministic_key
+
+fn encode_result_envelope(value: ResultEnvelopeV1) -> [u8]:
+    var out: [u8] = []
+    if not result_envelope_v1_well_formed(value):
+        return out
+    val key = text_to_bytes_linear(value.deterministic_key)
+    if key.len() > RESULT_ENVELOPE_MAX_KEY_BYTES:
+        return out
+    out = wire_put_envelope(out, result_envelope_magic(), PARALLEL_COMMIT_SCHEMA_VERSION)
+    out = wire_put_u64(out, value.base_revision)
+    out = wire_put_u64(out, value.task_id)
+    out = wire_put_u64(out, value.sequence)
+    out = wire_put_u64(out, value.write_region)
+    out = wire_put_u8(out, parallel_result_kind_to_u8(value.kind))
+    out = wire_put_u8(out, 0)
+    out = wire_put_u8(out, 0)
+    out = wire_put_u8(out, 0)
+    out = wire_put_u64(out, value.payload_token)
+    out = wire_put_u16(out, key.len())
+    out = wire_put_u16(out, 0)
+    result_envelope_append_bytes(out, key)
+
+fn decode_result_envelope(data: [u8]) -> ResultEnvelopeDecodeResult:
+    val zero = result_envelope_zero()
+    if data.len() < RESULT_ENVELOPE_WIRE_FIXED_LEN:
+        return ResultEnvelopeDecodeResult(ok: false, value: zero, reason: "truncated")
+    if not wire_check_envelope(data, 0, result_envelope_magic(), PARALLEL_COMMIT_SCHEMA_VERSION):
+        return ResultEnvelopeDecodeResult(ok: false, value: zero, reason: "invalid-envelope")
+    val off = WIRE_ENVELOPE_LEN
+    val kind = wire_get_u8(data, off + 32)
+    if kind < 0 or kind > 4:
+        return ResultEnvelopeDecodeResult(ok: false, value: zero, reason: "invalid-kind")
+    if wire_get_u8(data, off + 33) != 0 or wire_get_u8(data, off + 34) != 0
+        or wire_get_u8(data, off + 35) != 0 or wire_get_u16(data, off + 46) != 0:
+        return ResultEnvelopeDecodeResult(ok: false, value: zero, reason: "invalid-reserved")
+    val key_len = wire_get_u16(data, off + 44)
+    if key_len <= 0 or key_len > RESULT_ENVELOPE_MAX_KEY_BYTES:
+        return ResultEnvelopeDecodeResult(ok: false, value: zero, reason: "invalid-key-length")
+    if data.len() != RESULT_ENVELOPE_WIRE_FIXED_LEN + key_len:
+        return ResultEnvelopeDecodeResult(ok: false, value: zero, reason: "invalid-wire-length")
+    var key_bytes: [u8] = []
+    var i = 0
+    while i < key_len:
+        key_bytes.push(data[RESULT_ENVELOPE_WIRE_FIXED_LEN + i])
+        i = i + 1
+    val key = match validated_utf8_bytes_to_text_linear(key_bytes):
+        Err(_): return ResultEnvelopeDecodeResult(ok: false, value: zero, reason: "invalid-key-utf8")
+        Ok(value): value
+    val value = result_envelope_v1(
+        wire_get_u64(data, off),
+        wire_get_u64(data, off + 8),
+        wire_get_u64(data, off + 16),
+        wire_get_u64(data, off + 24),
+        parallel_result_kind_from_u8(kind),
+        wire_get_u64(data, off + 36),
+        key)
+    if not result_envelope_v1_well_formed(value):
+        return ResultEnvelopeDecodeResult(ok: false, value: zero, reason: "invalid-result")
+    ResultEnvelopeDecodeResult(ok: true, value: value, reason: "")
+
+fn result_envelope_v1_sha256(value: ResultEnvelopeV1) -> text:
+    val encoded = encode_result_envelope(value)
+    if encoded.len() == 0:
+        return ""
+    sha256_u8_hex(encoded)

@@ -12,7 +12,6 @@ use std.common.structural.parallel_commit.commit_contracts.{
 }
 use std.common.structural.parallel_commit.commit_engine.{
     ParallelCommitOutcomeV1,
-    ParallelCommitReceiptV1,
     ParallelCommitStateV1,
     parallel_commit_publish_envelopes,
     parallel_commit_receipt
@@ -23,6 +22,8 @@ use std.common.structural.transfer.transfer_contracts.{
     parallel_execution_domain_to_u8,
     transfer_envelope_v1_boundary_allowed
 }
+use std.common.structural.transfer.process_frame_codec.{decode_process_transfer_frame}
+use std.common.structural.parallel_commit.result_envelope_codec.{decode_result_envelope}
 use std.thread_sffi.{MutexHandle, mutex_create}
 
 struct ParentCommitSubmissionV1:
@@ -124,9 +125,35 @@ impl ParentCommitOwnerV1:
         self.mutex.unlock()
         outcome
 
+    me commit_process_result_frame(frame: [u8],
+                                   candidate_snapshot_token: i64) -> ParallelCommitOutcomeV1:
+        """Decode one encoded Process→Parent result before committing it.
+
+        The process frame authenticates its bounded byte extent/checksum and
+        route; the result codec then validates typed commit metadata. Neither
+        layer exposes raw process-local addresses to the parent owner.
+        """
+        val decoded_frame = decode_process_transfer_frame(
+            frame, ParallelExecutionDomain.Parent)
+        if not decoded_frame.ok:
+            return self.reject_process_frame()
+        val decoded_result = decode_result_envelope(decoded_frame.value.payload)
+        if not decoded_result.ok:
+            return self.reject_process_frame()
+        val submission = parent_commit_submission_v1(
+            decoded_frame.value.envelope, decoded_result.value)
+        self.commit_submissions([submission], candidate_snapshot_token)
+
     fn lock_failure() -> ParallelCommitOutcomeV1:
         """Return a diagnostic-only outcome if runtime serialization is absent."""
         self.failure("commit-owner-lock-unavailable")
+
+    me reject_process_frame() -> ParallelCommitOutcomeV1:
+        if not self.mutex.lock():
+            return self.lock_failure()
+        val rejected = self.failure("invalid-process-result-frame")
+        self.mutex.unlock()
+        rejected
 
     fn failure(reason: text) -> ParallelCommitOutcomeV1:
         """Keep the root unchanged while returning one well-formed diagnostic."""

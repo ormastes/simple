@@ -14,6 +14,11 @@ use std.common.structural.transfer.transfer_contracts.{
     transfer_envelope_v1
 }
 use std.nogc_async_mut.parent_commit_owner.{parent_commit_submission_v1}
+use std.common.structural.parallel_commit.result_envelope_codec.{encode_result_envelope}
+use std.common.structural.transfer.process_frame_codec.{
+    encode_process_transfer_frame,
+    process_transfer_frame_v1
+}
 
 describe "ParentCommitOwnerV1 serialized publication":
     it "publishes one deterministic child batch and exposes the new root":
@@ -81,3 +86,31 @@ describe "ParentCommitOwnerV1 serialized publication":
         val rejected = owner.commit_submissions([forged_parent_source], 402)
         assert_false(rejected.receipt.ok)
         assert_equal(rejected.receipt.reason, "invalid-child-result-transfer")
+
+    it "decodes an encoded child-process result before publishing it":
+        val owner = parent_commit_owner_v1(
+            parallel_commit_state_v1(4, 400),
+            ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        val result = result_envelope_v1(4, 7, 0, 17,
+            ParallelResultKind.Patch, 707, "child")
+        val envelope = transfer_envelope_v1(17, 0,
+            ParallelExecutionDomain.Process,
+            ParallelExecutionDomain.Parent,
+            ParallelTransferMode.Copy,
+            ParallelTransferPayload.EncodedCopy,
+            0, false)
+        val frame = encode_process_transfer_frame(
+            process_transfer_frame_v1(envelope, encode_result_envelope(result)))
+        val committed = owner.commit_process_result_frame(frame, 401)
+        assert_true(committed.receipt.ok)
+        assert_equal(committed.receipt.ordered_payload_tokens[0], 707)
+
+    it "rejects malformed encoded process result bytes before publication":
+        val owner = parent_commit_owner_v1(
+            parallel_commit_state_v1(4, 400),
+            ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        val rejected = owner.commit_process_result_frame([0, 1, 2], 401)
+        assert_false(rejected.receipt.ok)
+        assert_equal(rejected.receipt.reason, "invalid-process-result-frame")

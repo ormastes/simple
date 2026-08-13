@@ -620,6 +620,15 @@ dev-done
   submissions return a diagnostic receipt without replacing the root. This
   is contract/runtime wiring only until a real child actor/process delivers
   one submission through the native transport path.
+- impl: Added the bounded `SPRS` ResultEnvelopeV1 payload codec and connected
+  it to the Process-to-Parent owner boundary. The frame codec first validates
+  its process route/checksum, then the result codec validates a versioned,
+  UTF-8, pointer-free result before the existing transfer-gated submission
+  path may publish it. A pinned wire vector and malformed kind/reserved-byte
+  checks cover the codec contract. The bootstrap-only source check did not
+  produce a final verdict and the prior interpreter SSpec output was
+  truncated, so this remains contract wiring—not evidence of a child process
+  executing or delivering an accepted result.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters

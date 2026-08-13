@@ -22,6 +22,11 @@ use std.common.structural.parallel_commit.commit_receipt_codec.{
     parallel_commit_receipt_v1_equal,
     parallel_commit_receipt_v1_sha256
 }
+use std.common.structural.parallel_commit.result_envelope_codec.{
+    decode_result_envelope,
+    encode_result_envelope,
+    result_envelope_v1_equal
+}
 use std.common.structural.wire.{wire_to_hex}
 
 describe "Parallel parent commit contract":
@@ -196,6 +201,26 @@ describe "Parallel parent commit contract":
         invalid_task[53] = 0
         assert_equal(decode_parallel_commit_receipt(invalid_task).reason,
             "invalid-receipt")
+
+    it "round trips one bounded child result payload":
+        val result = result_envelope_v1(4, 7, 0, 17,
+            ParallelResultKind.Patch, 707, "child")
+        val encoded = encode_result_envelope(result)
+        assert_equal(wire_to_hex(encoded),
+            "5350525301000000040000000000000007000000000000000000000000000000110000000000000001000000c302000000000000050000006368696c64")
+        val decoded = decode_result_envelope(encoded)
+        assert_true(decoded.ok)
+        assert_true(result_envelope_v1_equal(result, decoded.value))
+
+    it "rejects malformed child result payload discriminants and reserved bytes":
+        val result = result_envelope_v1(4, 7, 0, 17,
+            ParallelResultKind.Patch, 707, "child")
+        var invalid_kind = encode_result_envelope(result)
+        invalid_kind[40] = 9
+        assert_equal(decode_result_envelope(invalid_kind).reason, "invalid-kind")
+        var reserved = encode_result_envelope(result)
+        reserved[41] = 1
+        assert_equal(decode_result_envelope(reserved).reason, "invalid-reserved")
 
     it "round trips a failure receipt with canonical reason evidence":
         val receipt = parallel_commit_receipt(false, 3, 3, 300, 300, 0,
