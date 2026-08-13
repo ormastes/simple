@@ -7,6 +7,43 @@ usage() {
     exit 64
 }
 
+self_test() {
+    root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+    work=$(mktemp -d "${TMPDIR:-/tmp}/sosix-native-pass-selftest.XXXXXX")
+    trap 'rm -rf "$work"' EXIT HUP INT TERM
+    printf 'qemu argv\n' > "$work/qemu.argv"
+    printf '%s\n' "$(/bin/true --version | sed -n '1p')" > "$work/qemu.version"
+    : > "$work/kernel.elf"; : > "$work/guest.img"; : > "$work/program.elf"
+    nonce=SOSIXPRODUCERSELFTEST20260813
+    cat > "$work/admission.env" <<EOF
+detected_host=linux
+requested_host=linux
+host_identity_status=pass
+host_identity_reason=matched
+qemu_binary=/bin/true
+qemu_binary_resolved=/bin/true
+qemu_sha256=$(sha256sum /bin/true | awk '{print $1}')
+qemu_version=$(sed -n '1p' "$work/qemu.version")
+requested_accelerator=tcg
+accelerator_advertised_status=pass
+accelerator_advertised_reason=advertised
+accelerator_probe_status=pass
+accelerator_probe_reason=executed
+native_timing_applicable=false
+simple_qemu_storage_root=/tmp
+EOF
+    printf '%s\nguest-entry\nTEST PASSED\n' "$nonce" > "$work/transcript.log"
+    printf 'guest-entry\nTEST PASSED\n' > "$work/markers.txt"
+    "$0" --host linux --guest riscv32 --output "$work/out" --admission "$work/admission.env" --qemu-binary /bin/true --qemu-argv-file "$work/qemu.argv" --qemu-version-file "$work/qemu.version" --accelerator tcg --firmware none --firmware-id none --firmware-mode direct-kernel --firmware-version none --firmware-stages guest-entry --kernel "$work/kernel.elf" --image "$work/guest.img" --program "$work/program.elf" --transcript "$work/transcript.log" --required-markers-file "$work/markers.txt" --nonce "$nonce" --owner selftest --reviewer selftest --compiler-identity selftest --source "$root" >/dev/null
+    [ -f "$work/out/linux/riscv32/run-$nonce/evidence.env" ] || exit 1
+    echo sosix_qemu_native_pass_bundle_self_test=pass
+}
+
+if [ "${1:-}" = --self-test ] && [ "$#" -eq 1 ]; then
+    self_test
+    exit 0
+fi
+
 host= guest= output= admission= qemu_binary= qemu_argv_file= qemu_version_file=
 accelerator= firmware= firmware_id= firmware_mode= firmware_version= firmware_stages=
 kernel= image= program= transcript= required_markers_file= nonce= owner= reviewer= compiler_identity= source=
