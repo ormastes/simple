@@ -342,6 +342,38 @@ class SharedWmPixelBufferBackend:
         if (width <= 0 or height <= 0 or source_stride <= 0 or
             source_x < 0 or source_y < 0):
             return
+        # The retained-frame presenter supplies complete in-bounds mirror
+        # rectangles. Hoist those checks once so the hot loop does not route
+        # every pixel through `_shared_wm_px_store`'s destination bounds
+        # predicates. Generic/clipped callers retain the guarded path below.
+        val sw = width.to_i64()
+        val sh = height.to_i64()
+        val stride = source_stride.to_i64()
+        val sx = source_x.to_i64()
+        val sy = source_y.to_i64()
+        val dx = x.to_i64()
+        val dy = y.to_i64()
+        val source_rows_fit = (
+            sy <= 9223372036854775807 - sh and
+            sy + sh <= source.len().to_i64() / stride)
+        val source_cols_fit = sw <= stride and sx <= stride - sw
+        val destination_fit = (_shared_wm_px_addr != 0 and
+            sw <= _shared_wm_px_width and sh <= _shared_wm_px_height and
+            dx >= 0 and dy >= 0 and dx <= _shared_wm_px_width - sw and
+            dy <= _shared_wm_px_height - sh)
+        if source_rows_fit and source_cols_fit and destination_fit:
+            var fast_row: i64 = 0
+            while fast_row < sh:
+                val source_row = (sy + fast_row) * stride + sx
+                val destination_row = (dy + fast_row) * _shared_wm_px_width + dx
+                var fast_col: i64 = 0
+                while fast_col < sw:
+                    rt_ptr_write_i32(_shared_wm_px_addr,
+                        (destination_row + fast_col) * 4,
+                        source[(source_row + fast_col).to_i32()] as i32)
+                    fast_col += 1
+                fast_row += 1
+            return
         var row = 0
         while row < height:
             val source_row = (source_y + row) * source_stride + source_x
