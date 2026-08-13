@@ -205,3 +205,28 @@ constant blend. The harness reported
 This refresh is an operation-level native C retained-damage row. It does not
 establish a self-hosted Simple DrawIR/Web/GUI/WM frame, GPU presentation,
 physical scanout, or a full dynamic 8K/80 result.
+
+## 2026-08-13 current full-frame x86 revalidation
+
+The current vector-blend runtime (including the AVX2/SSE2/NEON/RVV boxed-span
+implementations) was measured again with the canonical native C harness at
+100% active damage. Runtime source revision: `1da6889c5dd`; command:
+
+```sh
+BUILD_DIR=build/check/engine2d-simd-8k-ops-current-20260813 \
+  sh scripts/check/check-engine2d-simd-8k-ops.shs
+```
+
+| Operation | p50 ns | p95 ns | 12.5 ms operation budget |
+|---|---:|---:|---|
+| fill | 25,659,712 | 26,195,297 | FAIL |
+| copy | 22,081,525 | 22,222,845 | FAIL |
+| variable alpha blend | 60,966,735 | 62,520,087 | FAIL |
+| constant alpha blend | 49,290,170 | 52,176,664 | FAIL |
+| six-call frame | 210,360,430 | 211,572,430 | FAIL |
+
+The final checksum was `6655426588272231299`, native SIMD hits were `35`, and
+maximum RSS was `519,680 KiB`. This is a substantial improvement over the
+older scalar-heavy blend rows, but the canonical harness still emitted
+`engine2d_8k_full_dynamic_frame_80fps_proven=false`. It is native C runtime
+evidence, not a self-hosted Simple application or end-to-end display result.
