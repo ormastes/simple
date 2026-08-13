@@ -1,0 +1,32 @@
+#!/bin/sh
+# Static fail-closed guard for the RV64 `addi {dst}, {src}, {shift}`
+# reproducer.  This intentionally does not compile, bootstrap, or launch QEMU:
+# it verifies that a named `in(imm)` operand survives parser -> HIR -> MIR ->
+# LLVM-template lowering and receives LLVM's immediate (`i`) constraint.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+parser_types=$root/src/compiler/10.frontend/parser_types_expr.spl
+hir=$root/src/compiler/20.hir/hir_lowering/expressions.spl
+mir=$root/src/compiler/50.mir/_MirLowering/function_lowering.spl
+llvm=$root/src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl
+constraints=$root/src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl
+spec=$root/test/01_unit/compiler/backend/llvm_inline_asm_template_spec.spl
+
+fail() { echo "rv64-inline-asm-operand-transport: $*" >&2; exit 1; }
+need() { grep -Fq "$2" "$1" || fail "missing $3"; }
+
+need "$parser_types" 'Imm         # Immediate value' 'frontend immediate location'
+need "$hir" 'name: constraint.name,' 'HIR operand name transport'
+need "$hir" 'location: constraint.location,' 'HIR operand location transport'
+need "$mir" 'name: constraint.name,' 'MIR operand name transport'
+need "$mir" 'location: constraint.location,' 'MIR operand location transport'
+need "$constraints" 'case Imm: "i"' 'LLVM immediate constraint'
+need "$llvm" 'input_names.push(input.name)' 'LLVM named input collection'
+need "$llvm" 'asm_template, output_names, input_names' 'LLVM template rewrite call'
+need "$llvm" 'rewritten = rewritten.replace("{" + name + "}", llvm_operand)' 'named placeholder rewrite'
+need "$spec" 'transports named RV64 immediate operands' 'RV64 named-immediate reproducer'
+need "$spec" 'r"addi {dst}, {src}, {shift}"' 'RV64 addi template'
+need "$spec" 'expect(lowered).to_equal("addi $0, $1, $2")' 'RV64 LLVM operand order assertion'
+
+echo 'PASS RV64 named immediate operand transport static gate'
