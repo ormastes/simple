@@ -366,3 +366,23 @@ virtual X server. The source checksum proves the immutable presented buffer,
 not post-scanout pixels. An attached display/direct-scanout test with a device
 origin readback or captured scanout checksum is still required before claiming
 physical-GPU 8K/80 completion.
+
+## Physical-device 8K one-percent window damage
+
+The visible-window probe now also seeds the acquired swapchain images and then
+submits a 7,680x43 rectangle (330,240 pixels, 1,320,960 bytes) through the
+native region-transfer entrypoint. On the same Xvfb/NVIDIA RTX A6000 lane,
+all 20 timed frames reported one exact region and 1,320,960 device-copy bytes, with no
+device-to-host readback, no CPU fallback, known completion, and completed
+`vkQueuePresentKHR` calls.
+
+| Frame class | Damage | p50 ns | p95 ns | Budget |
+|---|---:|---:|---:|---:|
+| Changed revision / exact region transfer | 7,680x43, 1,320,960 bytes | 61,306,062 | 65,185,677 | FAIL |
+
+The source checksum is `14100917488874079107`; native present mode is
+`IMMEDIATE`; adapter identity is `NVIDIA RTX A6000|vendor=000010de|device=00002230|driver=911f8400|api=00404138`.
+The exact copy receipt proves that the runtime avoided the 132,710,400-byte
+full buffer-to-image transfer. It does not make an 8K/80 claim: the virtual
+X11 presentation path remains the dominant cost at about 65 ms p95, and Xvfb
+is not a physical-display scanout oracle.
