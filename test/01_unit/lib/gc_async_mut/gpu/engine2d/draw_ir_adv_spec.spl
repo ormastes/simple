@@ -604,6 +604,55 @@ describe "Engine2D advanced Draw IR executor":
                 before + 1)
         engine.shutdown()
 
+    it "stages retained Vulkan composition damage for a partial host refresh":
+        var engine = Engine2D.create_with_backend(4, 3, "vulkan")
+        if engine.backend_name() == "vulkan":
+            engine.clear(BG)
+            engine.present()
+            val batch = draw_ir_batch(
+                "vulkan-retained-root", DRAW_IR_BACKEND_GPU,
+                draw_ir_embedding_config(
+                    "vulkan-surface", "vulkan", 0, 0, 4, 3, 0, 1000, false),
+                [
+                    draw_ir_rect("background", 0, 0, 4, 3, BG),
+                    draw_ir_rect("changed", 2, 1, 1, 1, RED),
+                ])
+            val composition = draw_ir_composition(
+                "vulkan-retained", "vulkan:4x3", DRAW_IR_BACKEND_GPU, [batch])
+            val outcome = engine2d_draw_ir_render_composition_damaged(
+                engine, composition, [2, 1, 1, 1], true)
+            engine = outcome.engine
+            expect(outcome.unsupported_kinds).to_equal("none")
+            expect(outcome.readback.pixels[1 * 4 + 2]).to_equal(RED)
+            expect(engine.vulkan_present_readback_bytes()).to_equal(4)
+        engine.shutdown()
+
+    it "does not retain a Vulkan damage plan after rejected composition preflight":
+        var engine = Engine2D.create_with_backend(4, 3, "vulkan")
+        if engine.backend_name() == "vulkan":
+            engine.clear(BG)
+            engine.present()
+            val translucent = draw_ir_batch(
+                "rejected-vulkan-root", DRAW_IR_BACKEND_GPU,
+                draw_ir_embedding_config(
+                    "rejected-surface", "vulkan", 0, 0, 4, 3, 0, 500, false),
+                [draw_ir_rect("translucent", 0, 0, 4, 3, RED)])
+            val rejected_composition = draw_ir_composition(
+                "rejected-vulkan", "vulkan:4x3", DRAW_IR_BACKEND_GPU, [translucent])
+            # Use the multi-batch entrypoint directly so this reaches the
+            # composition preflight immediately preceding Vulkan staging.
+            val rejected = engine2d_draw_ir_render_composition_damaged_with_images(
+                engine, rejected_composition, [], [0, 0, 1, 1], false)
+            engine = rejected.engine
+            expect(rejected.unsupported_kinds).to_equal(
+                "fresh-device-opaque-full-target-first-command-required")
+            engine.draw_rect_filled(3, 2, 1, 1, RED)
+            engine.present()
+            # No rejected [0,0,1,1] plan may be consumed for this unrelated
+            # device write: an already seeded host mirror needs a full refresh.
+            expect(engine.vulkan_present_readback_bytes()).to_equal(4 * 3 * 4)
+        engine.shutdown()
+
     it "fails closed before strict Vulkan primitive execution without a Vulkan engine":
         var engine = Engine2D.create_with_backend(8, 6, "cpu")
         engine.clear(BG)
