@@ -376,6 +376,21 @@ fn _host_empty_external_web_frame() -> WmContentFrame:
         offset_y: 0
     )
 
+fn _host_wm_content_checksum_raw(pixels: [u32]) -> u64:
+    var checksum = 0x9E3779B97F4A7C15u64
+    var i = 0
+    while i < pixels.len():
+        checksum = checksum ^ (
+            pixels[i].to_u64() + (i + 1).to_u64() * 0x100000001B3u64)
+        i += 1
+    checksum
+
+fn _host_copy_wm_content_pixels(pixels: [u32]) -> [u32]:
+    var copied: [u32] = []
+    for pixel in pixels:
+        copied.push(pixel)
+    copied
+
 fn host_taskbar_clock_label(now_micros: i64) -> text:
     """Return a stable UTC HH:MM label from the host wall clock."""
     val seconds = (now_micros / 1000000) % 86400
@@ -845,6 +860,9 @@ class HostCompositor:
         val window_index = self._find_window_index(window_id)
         if frame_index < 0 or window_index < 0:
             return false
+        if frame.damage_rects.len() > 0:
+            return self._apply_external_web_frame_damage(
+                frame_index, window_index, window_id, frame)
         val window = self.windows[window_index]
         val expected_width = window.w - 8
         val expected_height = window.h - 36 -
@@ -862,6 +880,8 @@ class HostCompositor:
             frame.checksum != wm_content_frame_checksum(frame.pixels) or
             frame.parent_window_id != "" or
             frame.offset_x != 0 or frame.offset_y != 0 or
+            frame.base_content_revision != 0 or
+            frame.damage_rects.len() != 0 or frame.damage_pixels.len() != 0 or
             not wm_content_frame_web_provenance_valid(frame)):
             return false
         var aggregate_pixels = frame.pixels.len()
@@ -879,6 +899,102 @@ class HostCompositor:
             updated_window.app_id, frame.origin_kind
         )
         self.windows[window_index] = updated_window
+        self.dirty.add_full_screen(self.width, self.height)
+        true
+
+    me _apply_external_web_frame_damage(
+        frame_index: i32,
+        window_index: i32,
+        window_id: i64,
+        frame: WmContentFrame
+    ) -> bool:
+        """Apply an owned, packed retained delta without rescanning pixels."""
+        val window = self.windows[window_index]
+        val expected_width = window.w - 8
+        val expected_height = window.h - 36 -
+            shared_wm_browser_content_extra_height(window.app_id)
+        val base = self.external_web_frames[frame_index]
+        if (frame.pixels.len() != 0 or frame.checksum != 0u64 or
+            frame.base_content_revision <= 0 or
+            frame.base_content_revision != base.content_revision or
+            frame.content_revision <= base.content_revision or
+            frame.width != expected_width or frame.height != expected_height or
+            frame.window_id != ui_native_i64_text(window_id) or
+            frame.parent_window_id != "" or frame.offset_x != 0 or
+            frame.offset_y != 0 or frame.damage_rects.len() % 4 != 0 or
+            not wm_content_frame_origin_valid(frame.origin_kind) or
+            not wm_content_frame_web_provenance_valid(frame) or
+            base.content_revision <= 0 or base.window_id != frame.window_id or
+            base.width != frame.width or base.height != frame.height or
+            base.origin_kind != frame.origin_kind or
+            base.theme_id != frame.theme_id or
+            base.theme_source_manifest_sha256 !=
+                frame.theme_source_manifest_sha256 or
+            base.pixels.len() != frame.width.to_i64() * frame.height.to_i64() or
+            base.checksum == 0u64 or
+            base.checksum != wm_content_frame_checksum(base.pixels)):
+            return false
+        if frame.damage_rects.len() > 1024:
+            return false
+        var required: i64 = 0
+        var ri = 0
+        while ri < frame.damage_rects.len():
+            val x = frame.damage_rects[ri]
+            val y = frame.damage_rects[ri + 1]
+            val w = frame.damage_rects[ri + 2]
+            val h = frame.damage_rects[ri + 3]
+            if (x < 0 or y < 0 or w <= 0 or h <= 0 or
+                w > frame.width.to_i64() or h > frame.height.to_i64() or
+                x > frame.width.to_i64() - w or
+                y > frame.height.to_i64() - h or
+                required > frame.width.to_i64() * frame.height.to_i64() - w * h):
+                return false
+            required = required + w * h
+            ri += 4
+        if required <= 0 or frame.damage_pixels.len().to_i64() != required:
+            return false
+        # A WmContentFrame is a value, but its array can be shared by a prior
+        # reader. Clone before writing and swap the completed value once.
+        var committed = base
+        committed.pixels = _host_copy_wm_content_pixels(base.pixels)
+        var checksum = if base.checksum == 1u64:
+            _host_wm_content_checksum_raw(base.pixels)
+        else:
+            base.checksum
+        var packed = 0
+        ri = 0
+        while ri < frame.damage_rects.len():
+            val x = frame.damage_rects[ri].to_i32()
+            val y = frame.damage_rects[ri + 1].to_i32()
+            val w = frame.damage_rects[ri + 2].to_i32()
+            val h = frame.damage_rects[ri + 3].to_i32()
+            var row = 0
+            while row < h:
+                var col = 0
+                while col < w:
+                    val index = (y + row) * frame.width + x + col
+                    val old = committed.pixels[index]
+                    val current = frame.damage_pixels[packed]
+                    val mix = (index + 1).to_u64() * 0x100000001B3u64
+                    checksum = checksum ^ (old.to_u64() + mix)
+                    checksum = checksum ^ (current.to_u64() + mix)
+                    committed.pixels[index] = current
+                    packed += 1
+                    col += 1
+                row += 1
+            ri += 4
+        committed.content_revision = frame.content_revision
+        committed.engine2d_status = frame.engine2d_status
+        committed.engine2d_backend = frame.engine2d_backend
+        committed.engine2d_reason = frame.engine2d_reason
+        committed.material_fallback_kind = frame.material_fallback_kind
+        committed.material_fallback_reason = frame.material_fallback_reason
+        committed.material_fallback_sha256 = frame.material_fallback_sha256
+        committed.theme_id = frame.theme_id
+        committed.theme_source_manifest_sha256 = frame.theme_source_manifest_sha256
+        checksum = checksum & 0x7FFFFFFFFFFFFFFFu64
+        committed.checksum = if checksum == 0u64: 1u64 else: checksum
+        self.external_web_frames[frame_index] = committed
         self.dirty.add_full_screen(self.width, self.height)
         true
 

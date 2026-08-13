@@ -47,6 +47,17 @@ fn trusted_frame(window_id: text, revision: i64, color: u32) -> WmContentFrame:
             "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
     )
 
+fn trusted_damage_frame(
+    window_id: text, base_revision: i64, revision: i64, color: u32
+) -> WmContentFrame:
+    var frame = trusted_frame(window_id, revision, color)
+    frame.pixels = []
+    frame.checksum = 0u64
+    frame.base_content_revision = base_revision
+    frame.damage_rects = [1, 1, 1, 1]
+    frame.damage_pixels = [color]
+    frame
+
 describe "hosted external browser frames":
     # @req REQ-WEB-BROWSER-014
     it "keeps positive-owner content out of the in-process renderer":
@@ -141,3 +152,33 @@ describe "hosted external browser frames":
             comp.pure_simple_pixel_buffer(), 0xFFABCDEFu32
         )).to_be_greater_than(5000)
         raster.shutdown()
+
+    it "patches only an exact retained external frame base":
+        val body = "<div>retained damage</div>"
+        var comp = HostCompositor.new_headless(Size(
+            width: 160u64, height: 120u64
+        ))
+        comp.apply_bridge_request(
+            1, 1, COMP_CREATE_WINDOW.to_i64(), 0, "Retained",
+            8, 8, 112, 160, body, 1, "browser"
+        )
+        expect(comp.require_external_web_frame(1)).to_be(true)
+        val theme = default_theme_id()
+        val base_revision = simple_web_content_revision_with_theme(
+            theme, "Retained", body, 104, 80, 0
+        )
+        val base = trusted_frame("1", base_revision, 0xFF123456u32)
+        expect(comp.set_external_web_frame(1, base)).to_be(true)
+        val delta = trusted_damage_frame(
+            "1", base_revision, base_revision + 1, 0xFFABCDEFu32)
+        expect(comp.set_external_web_frame(1, delta)).to_be(true)
+        val committed = comp.external_web_frames[0]
+        expect(committed.pixels[1 * 104 + 1]).to_equal(0xFFABCDEFu32)
+        expect(committed.pixels[0]).to_equal(0xFF123456u32)
+        expect(base.pixels[1 * 104 + 1]).to_equal(0xFF123456u32)
+        expect(committed.checksum).to_equal(
+            wm_content_frame_checksum(committed.pixels))
+        expect(comp.set_external_web_frame(1, delta)).to_be(false)
+        val no_base = trusted_damage_frame(
+            "1", 0, base_revision + 2, 0xFF16A34Au32)
+        expect(comp.set_external_web_frame(1, no_base)).to_be(false)
