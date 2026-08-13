@@ -250,7 +250,7 @@ pub extern "C" fn rt_vulkan_present_buffer(sc: i64, buffer: i64, w: i64, h: i64,
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_present_buffer_regions_raw(sc: i64, buffer: i64, w: i64, h: i64, content_revision: i64, rects_ptr: i64, rects_len: i64) -> i64 {
-    if rects_ptr <= 0 || rects_len <= 0 || rects_len % 32 != 0 || rects_len > 32 * 256 || w <= 0 || h <= 0 || w > u32::MAX as i64 || h > u32::MAX as i64 { return 0; }
+    if rects_ptr <= 0 || rects_len <= 0 || rects_len % 32 != 0 || rects_len > 32 * crate::vulkan::swapchain::MAX_PRESENT_DAMAGE_RECTS as i64 || w <= 0 || h <= 0 || w > u32::MAX as i64 || h > u32::MAX as i64 { return 0; }
     let bytes = unsafe { std::slice::from_raw_parts(rects_ptr as *const u8, rects_len as usize) };
     let mut rects = Vec::with_capacity(bytes.len() / 32);
     for tuple in bytes.chunks_exact(32) {
@@ -451,6 +451,9 @@ mod tests {
     fn damaged_present_rejects_invalid_descriptor_storage() {
         assert_eq!(rt_vulkan_present_buffer_regions_raw(0, 0, 8, 8, 1, 0, 32), 0);
         assert_eq!(rt_vulkan_present_buffer_regions_raw(0, 0, 8, 8, 1, 1, 31), 0);
+        // The raw ABI must reject the first descriptor length beyond the
+        // shared 1,024-region cap before it ever dereferences the pointer.
+        assert_eq!(rt_vulkan_present_buffer_regions_raw(0, 0, 8, 8, 1, 1, 32 * 1025), 0);
     }
 
     #[test]

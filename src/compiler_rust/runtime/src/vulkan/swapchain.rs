@@ -9,6 +9,11 @@ use ash::vk;
 use parking_lot::Mutex;
 use std::sync::Arc;
 
+/// Bound the retained-region descriptor and its history replay.  Four i64
+/// fields per region make this a 32 KiB FFI descriptor at capacity, while
+/// permitting sparse 8K damage plans without forcing a full transfer.
+pub const MAX_PRESENT_DAMAGE_RECTS: usize = 1024;
+
 #[derive(Clone)]
 struct PresentDamageRecord { revision: i64, rects: Vec<[u32; 4]> }
 
@@ -22,7 +27,7 @@ fn retained_damage_regions(history: &[PresentDamageRecord], prior: i64, current:
     let mut regions = Vec::new();
     for record in records {
         for &[x, y, w, h] in &record.rects {
-            if w == 0 || h == 0 || x >= width || y >= height || w > width - x || h > height - y || regions.len() >= 256 { return None; }
+            if w == 0 || h == 0 || x >= width || y >= height || w > width - x || h > height - y || regions.len() >= MAX_PRESENT_DAMAGE_RECTS { return None; }
             let rect = [x, y, w, h];
             if !regions.contains(&rect) { regions.push(rect); }
         }
@@ -44,13 +49,13 @@ fn retained_damage_regions_with_candidate(history: &[PresentDamageRecord], prior
     for record in &history[start + 1..] {
         if record.rects.is_empty() { return None; }
         for &rect in &record.rects {
-            if regions.len() >= 256 { return None; }
+            if regions.len() >= MAX_PRESENT_DAMAGE_RECTS { return None; }
             if !regions.contains(&rect) { regions.push(rect); }
         }
     }
     if damage.is_empty() { return None; }
     for &[x, y, w, h] in damage {
-        if w == 0 || h == 0 || x >= width || y >= height || w > width - x || h > height - y || regions.len() >= 256 { return None; }
+        if w == 0 || h == 0 || x >= width || y >= height || w > width - x || h > height - y || regions.len() >= MAX_PRESENT_DAMAGE_RECTS { return None; }
         let rect = [x, y, w, h];
         if !regions.contains(&rect) { regions.push(rect); }
     }
@@ -762,6 +767,37 @@ mod tests {
             Some(vec![[8, 9, 2, 2], [40, 50, 3, 2]])
         );
         assert_eq!(history.len(), 3);
+    }
+
+    #[test]
+    fn retained_damage_accepts_the_shared_1024_region_cap() {
+        let many: Vec<[u32; 4]> = (0..MAX_PRESENT_DAMAGE_RECTS as u32)
+            .map(|x| [x, 0, 1, 1])
+            .collect();
+        let history = vec![
+            PresentDamageRecord { revision: 10, rects: vec![[0, 0, 1, 1]] },
+            PresentDamageRecord { revision: 20, rects: many },
+        ];
+        let regions = retained_damage_regions(
+            &history, 10, 20, (MAX_PRESENT_DAMAGE_RECTS + 1) as u32, 1,
+        ).expect("the shared cap is admissible");
+        assert_eq!(regions.len(), MAX_PRESENT_DAMAGE_RECTS);
+        assert_eq!(regions.first(), Some(&[0, 0, 1, 1]));
+        assert_eq!(regions.last(), Some(&[(MAX_PRESENT_DAMAGE_RECTS - 1) as u32, 0, 1, 1]));
+
+        let overflow: Vec<[u32; 4]> = (0..=MAX_PRESENT_DAMAGE_RECTS as u32)
+            .map(|x| [x, 0, 1, 1])
+            .collect();
+        let overfull = vec![
+            PresentDamageRecord { revision: 10, rects: vec![[0, 0, 1, 1]] },
+            PresentDamageRecord { revision: 20, rects: overflow },
+        ];
+        assert_eq!(
+            retained_damage_regions(
+                &overfull, 10, 20, (MAX_PRESENT_DAMAGE_RECTS + 2) as u32, 1,
+            ),
+            None,
+        );
     }
 
     #[test]

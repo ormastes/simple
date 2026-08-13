@@ -322,7 +322,7 @@ pub extern "C" fn rt_vulkan_copy_from_buffer_regions_raw(
         || data_ptr <= 0
         || regions_ptr <= 0
         || regions_len <= 0
-        || regions_len > 256 * RECORD_BYTES
+        || regions_len > crate::vulkan::swapchain::MAX_PRESENT_DAMAGE_RECTS as i64 * RECORD_BYTES
         || regions_len % RECORD_BYTES != 0
     {
         return 0;
@@ -502,7 +502,7 @@ mod tests {
     fn region_raw_guard_rejects_invalid_shape_before_pointer_access() {
         assert_eq!(rt_vulkan_copy_from_buffer_regions_raw(0, 8, 0, 0, 0), 0);
         assert_eq!(rt_vulkan_copy_from_buffer_regions_raw(1, 8, 0, 1, 31), 0);
-        assert_eq!(rt_vulkan_copy_from_buffer_regions_raw(1, 8, 0, 1, 32 * 257), 0);
+        assert_eq!(rt_vulkan_copy_from_buffer_regions_raw(1, 8, 0, 1, 32 * 1025), 0);
     }
 
     #[cfg(feature = "vulkan")]
