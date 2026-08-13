@@ -735,6 +735,10 @@ in-progress
   prevents unconsumed completed replies from growing without bound and rejects
   new asks rather than silently dropping outcomes. Native lifecycle evidence,
   typed payload transfer, and actor-stop outside the scheduler remain open.
+- impl: `ActorScheduler` is now a class-backed authority rather than a copied
+  value struct. Global actor references therefore mutate the same scheduler
+  registry, ready queue, reply reservations, and counters; this closes the
+  scheduler half of the prior copied-handle split.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters

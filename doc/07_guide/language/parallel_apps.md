@@ -60,6 +60,9 @@ The single-threaded actor scheduler also uses a consumed-prefix cursor for its
 ready IDs. It reclaims a half-consumed large prefix in bounded batches rather
 than slicing the front after every dispatch; this is an amortized scheduling
 storage repair, not evidence of multi-threaded actor execution.
+The scheduler itself is a class-backed authority, so global `ActorRef` send
+and ask operations update the same actor registry, ready queue, and reply
+reservations rather than a copied scheduler value.
 Legacy `ask()` replies now reserve a finite scheduler-owned result slot at
 admission. That credit remains consumed through handler completion until the
 caller consumes or cancels the reply; an exhausted store rejects the ask rather
