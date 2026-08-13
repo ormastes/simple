@@ -4,6 +4,7 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "${repo_root}"
+spec_runtime=${SIMPLE_QEMU_RUNTIME:-bin/simple}
 
 host_override=
 guest_filter=
@@ -256,6 +257,12 @@ check_row riscv64 "$(setting simple_qemu_riscv64_bin)" \
 emit "sosix_qemu_matrix_ready_count=${ready}"
 emit "sosix_qemu_matrix_blocked_count=${blocked}"
 
+if [ ! -x "${spec_runtime}" ]; then
+    emit 'sosix_qemu_matrix_status=blocked'
+    emit "sosix_qemu_matrix_reason=missing-spec-runtime:${spec_runtime}"
+    exit 1
+fi
+
 if [ "${mode}" = preflight ]; then
     if [ "${blocked}" -ne 0 ]; then
         emit 'sosix_qemu_matrix_status=blocked'
@@ -265,7 +272,7 @@ if [ "${mode}" = preflight ]; then
     exit 0
 fi
 
-version_output=$(bin/simple --version 2>&1 || true)
+version_output=$("${spec_runtime}" --version 2>&1 || true)
 if printf '%s\n' "${version_output}" | grep -q 'bootstrap seed only'; then
     emit 'sosix_qemu_matrix_status=blocked'
     emit 'sosix_qemu_matrix_reason=deployed-cli-is-bootstrap-seed'
@@ -292,7 +299,7 @@ run_spec_checked() {
     nonce="${run_id}-${host}-${guest}"
     : > "${reason_file}"
     if ! SOSIX_QEMU_NONCE="${nonce}" SIMPLE_QEMU_ACCELERATOR="${row_accelerator}" \
-        SIMPLE_TIMEOUT_SECONDS=900 bin/simple test "${spec}" --no-session-daemon --timeout 180 >"${log}" 2>&1; then
+        SIMPLE_TIMEOUT_SECONDS=900 "${spec_runtime}" test "${spec}" --no-session-daemon --timeout 180 >"${log}" 2>&1; then
         printf '%s\n' "spec-failed:${spec}" > "${reason_file}"
         return 1
     fi
@@ -465,4 +472,3 @@ else
 fi
 
 emit 'sosix_qemu_matrix_status=pass'
-
