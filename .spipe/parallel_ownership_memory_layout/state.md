@@ -750,6 +750,8 @@ in-progress
 - impl: Removed the priority mailbox's capacity-zero unbounded admission mode.
   Compatibility `unbounded()` now selects the finite default, and the queue
   owner normalizes forged/non-positive configurations before it accepts work.
+- impl: Priority-mailbox selective receive now decrements retained-byte
+  accounting on every queue branch, matching ordinary receive and stale-drop.
 - impl: `Actor` is now class-backed too, preserving its lifecycle, dispatch,
   and error fields through scheduler registry iteration. Mailbox sharing alone
   was insufficient because the surrounding actor values still lost those
