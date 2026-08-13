@@ -25,6 +25,12 @@ frame timing, checksum, or a misleading 8K/80 pass.  The deployed `bin/simple`
 also identifies itself as a Rust bootstrap seed, so it cannot supply the
 required pure-Simple evidence in its place.
 
+On 2026-08-13 the bundled `bin/simple_native --version` was also tried as a
+possible direct native launcher. It immediately terminated with
+`timeout: the monitored command dumped core`, before emitting provenance or a
+version. It is therefore unavailable for benchmark evidence and must not be
+substituted for the required self-hosted artifact.
+
 ## Related bounded observations
 
 - GTK at 7680x4320 completed its one-frame draw-only row in **81.460 ms**
