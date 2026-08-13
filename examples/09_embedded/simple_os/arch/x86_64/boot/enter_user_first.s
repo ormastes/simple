@@ -70,6 +70,16 @@ rt_x86_enter_user_first:
      * (and it is — create_user_address_space copies the kernel mappings). */
     movq    %r9, %rax               /* cr3 */
 
+    /* Fault-only IRET receipt.  Capture the unmodified ABI arguments before
+     * the diagnostic UART writes and before the frame is built, so an IRET
+     * #GP can distinguish an invalid supplied frame from descriptor state.
+     * These are kernel-private BSS words in the cloned PML4[0] mapping. */
+    movq    %rdi, _ring3_iret_rip(%rip)
+    movq    %rsi, _ring3_iret_rsp(%rip)
+    movq    %rdx, _ring3_iret_cs(%rip)
+    movq    %rcx, _ring3_iret_ss(%rip)
+    movq    %r8,  _ring3_iret_rflags(%rip)
+
     /* Diagnostic-only boundary receipts. Preserve the cached CR3 and user
      * CS around the first UART write: this code runs before the iret frame is
      * built and must not mutate either value consumed below. */
@@ -181,6 +191,21 @@ _ring3_resume_valid:
     .skip 8
     .globl _ring3_exit_rc
 _ring3_exit_rc:
+    .skip 8
+    .globl _ring3_iret_rip
+_ring3_iret_rip:
+    .skip 8
+    .globl _ring3_iret_rsp
+_ring3_iret_rsp:
+    .skip 8
+    .globl _ring3_iret_cs
+_ring3_iret_cs:
+    .skip 8
+    .globl _ring3_iret_ss
+_ring3_iret_ss:
+    .skip 8
+    .globl _ring3_iret_rflags
+_ring3_iret_rflags:
     .skip 8
 
     .section .note.GNU-stack,"",@progbits

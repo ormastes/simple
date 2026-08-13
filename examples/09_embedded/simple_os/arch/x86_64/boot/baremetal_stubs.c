@@ -16303,6 +16303,11 @@ __attribute__((naked)) static void _rich_fault_entry(void)
 void _rich_fault_print(uint64_t rip, uint64_t errcode, uint64_t cs,
                         uint64_t rflags, uint64_t cr2, uint64_t cr3)
 {
+    extern uint64_t _ring3_iret_rip;
+    extern uint64_t _ring3_iret_rsp;
+    extern uint64_t _ring3_iret_cs;
+    extern uint64_t _ring3_iret_ss;
+    extern uint64_t _ring3_iret_rflags;
     serial_puts("\r\n[fault] *** EXCEPTION FRAME ***\r\n");
     serial_puts("[fault] rip=");     _serial_puthex64(rip);     serial_puts("\r\n");
     serial_puts("[fault] errcode="); _serial_puthex64(errcode); serial_puts("\r\n");
@@ -16310,6 +16315,11 @@ void _rich_fault_print(uint64_t rip, uint64_t errcode, uint64_t cs,
     serial_puts("[fault] rflags=");  _serial_puthex64(rflags);  serial_puts("\r\n");
     serial_puts("[fault] cr2=");     _serial_puthex64(cr2);     serial_puts("\r\n");
     serial_puts("[fault] cr3=");     _serial_puthex64(cr3);     serial_puts("\r\n");
+    serial_puts("[fault] iret-rip="); _serial_puthex64(_ring3_iret_rip); serial_puts("\r\n");
+    serial_puts("[fault] iret-rsp="); _serial_puthex64(_ring3_iret_rsp); serial_puts("\r\n");
+    serial_puts("[fault] iret-cs="); _serial_puthex64(_ring3_iret_cs); serial_puts("\r\n");
+    serial_puts("[fault] iret-ss="); _serial_puthex64(_ring3_iret_ss); serial_puts("\r\n");
+    serial_puts("[fault] iret-rflags="); _serial_puthex64(_ring3_iret_rflags); serial_puts("\r\n");
     _bt_dump_from(g_fault_rbp); /* DEBUG-INSTR */
     serial_puts("[fault] *** END FRAME (recovering) ***\r\n");
 }
