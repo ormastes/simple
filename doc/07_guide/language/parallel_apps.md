@@ -52,6 +52,10 @@ and actor stop now closes that shared state before it discards queued work, so
 future sends are rejected through every copy. This is still not an
 ownership-safe actor transport: native send/ask routing, close wakeups,
 cancellation, and typed transfer envelopes remain required.
+Mailbox reads, fullness checks, and statistics now take the same state mutex as
+enqueue/dequeue, and the mailbox exposes a retained-message high-water count
+for bounded-memory evidence. That metric does not establish native actor
+lifecycle or typed transfer safety.
 
 The scalar `BoundedChannel` implementation also uses a consumed-prefix cursor:
 receive is normally O(1), and backing storage is compacted only when a later

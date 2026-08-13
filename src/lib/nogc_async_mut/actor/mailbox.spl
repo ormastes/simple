@@ -87,6 +87,7 @@ class ActorMailboxState:
     closed: bool
     total_received: i64
     total_dropped: i64
+    pending_high_water: i64
 
 struct ActorMailbox:
     """Copyable handle to one thread-safe bounded actor mailbox authority.
@@ -114,18 +115,26 @@ impl ActorMailbox:
             mutex: mutex_create(),
             closed: false,
             total_received: 0,
-            total_dropped: 0
+            total_dropped: 0,
+            pending_high_water: 0
         ))
 
     static fn default() -> ActorMailbox:
         """Create a mailbox with the finite policy default capacity (256)."""
         ActorMailbox.new(ACTOR_MAILBOX_DEFAULT_CAPACITY)
 
-    fn pending_count() -> i64:
-        """Count pending entries without treating consumed prefix storage as live."""
+    fn pending_count_unlocked() -> i64:
+        """Count pending entries while the caller owns the mailbox mutex."""
         val pending = self.state.queue.len() - self.state.head
         if pending < 0:
             return 0
+        pending
+
+    fn pending_count() -> i64:
+        """Count pending entries without treating consumed prefix storage as live."""
+        self.state.mutex.lock()
+        val pending = self.pending_count_unlocked()
+        self.state.mutex.unlock()
         pending
 
     me compact_consumed_prefix_if_needed():
@@ -149,13 +158,16 @@ impl ActorMailbox:
         self.state.total_received = self.state.total_received + 1
 
         if self.state.closed
-            or not actor_mailbox_can_accept(self.pending_count(), self.state.capacity):
+            or not actor_mailbox_can_accept(self.pending_count_unlocked(), self.state.capacity):
             self.state.total_dropped = self.state.total_dropped + 1
             self.state.mutex.unlock()
             return false
 
         self.compact_consumed_prefix_if_needed()
         self.state.queue.push(msg)
+        val pending = self.pending_count_unlocked()
+        if pending > self.state.pending_high_water:
+            self.state.pending_high_water = pending
         self.state.mutex.unlock()
         true
 
@@ -165,7 +177,7 @@ impl ActorMailbox:
         Returns nil if the mailbox is empty. Thread-safe via mutex.
         """
         self.state.mutex.lock()
-        if self.pending_count() <= 0:
+        if self.pending_count_unlocked() <= 0:
             self.state.mutex.unlock()
             return nil
         val msg = self.state.queue[self.state.head]
@@ -201,7 +213,17 @@ impl ActorMailbox:
 
     fn is_full() -> bool:
         """Check if the mailbox is at capacity."""
-        self.pending_count() >= self.state.capacity
+        self.state.mutex.lock()
+        val result = self.pending_count_unlocked() >= self.state.capacity
+        self.state.mutex.unlock()
+        result
+
+    fn pending_high_water_count() -> i64:
+        """Largest number of retained messages in this mailbox lifetime."""
+        self.state.mutex.lock()
+        val result = self.state.pending_high_water
+        self.state.mutex.unlock()
+        result
 
     me drain() -> [ActorMessage]:
         """Remove and return all messages from the mailbox."""
@@ -217,4 +239,12 @@ impl ActorMailbox:
 
     fn stats_string() -> text:
         """Return mailbox statistics as a string."""
-        "Mailbox(pending={self.pending_count()}, capacity={self.state.capacity}, closed={self.state.closed}, received={self.state.total_received}, dropped={self.state.total_dropped})"
+        self.state.mutex.lock()
+        val pending = self.pending_count_unlocked()
+        val capacity = self.state.capacity
+        val closed = self.state.closed
+        val received = self.state.total_received
+        val dropped = self.state.total_dropped
+        val high_water = self.state.pending_high_water
+        self.state.mutex.unlock()
+        "Mailbox(pending={pending}, capacity={capacity}, closed={closed}, received={received}, dropped={dropped}, high_water={high_water})"

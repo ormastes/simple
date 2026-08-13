@@ -721,6 +721,10 @@ in-progress
 - impl: The armored stdout reader now rejects non-ASCII text before buffering
   it. This makes its advertised line ceiling a real retained-byte bound rather
   than a character-count approximation over the host `text` surface.
+- impl: Actor mailbox read-side observations now use the shared mailbox mutex
+  instead of racing queue/head fields with enqueue or dequeue. A retained
+  message high-water counter records bounded occupancy across copies; it does
+  not upgrade the legacy actor route into typed native transport evidence.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters
