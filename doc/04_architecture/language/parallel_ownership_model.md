@@ -24,6 +24,24 @@ bounded transport --> owner validation/order/conflict/apply --> Snapshot N+1
 
 `Local(owner, generation)` may freeze, begin move, begin scoped loan, or free. A move enters `InTransit`; receipt creates `Local(destination, generation + 1)`. A loan returns only at structured scope join. Source access after move is invalid. Device and process boundaries carry a lease/codec/handle, never an ordinary host address.
 
+### Landed parent ingress boundary
+
+`ParentCommitOwnerV1` is the one mutable root authority currently available to
+runtime applications. It serializes revision/token publication and delegates
+validation, deterministic ordering, and conflict resolution to the common
+commit engine. `ParentCommitFrameInboxV1` is a separate bounded ingress owner:
+it validates a Process-to-Parent frame plus its pointer-free `SPRS` result
+payload before retaining an independent byte copy. Admission requires both a
+frame slot and byte budget; the queue uses a cursor and releases exact retained
+bytes on receive. The owner may drain a finite batch and submit it to one
+common-engine transition.
+
+This boundary intentionally stops short of process execution. An OS IPC
+adapter must still supply child lifecycle, cancellation, and close wakeups;
+the inbox consumes a drained frame and never recreates a failed/stale child
+result. That keeps retry ownership explicit and prevents a parent from
+resurrecting a child-owned update after failure.
+
 ## Tree encapsulation and visibility
 
 | Raw layer | Common tree node | Public to parent | Public to next-layer sibling |

@@ -57,6 +57,25 @@ left-to-right input order while large result batches avoid quadratic selection
 work. Payload application and concurrent publication remain owner-runtime
 responsibilities.
 
+`ParentCommitOwnerV1` is the current internal runtime owner for that root. It
+serializes the live revision/token with a mutex and commits only fully
+validated batches. Process-to-parent results use a framed, pointer-free `SPRS`
+payload: the frame route/checksum and the typed result codec must both validate
+before the owner builds a submission. `ParentCommitFrameInboxV1` provides the
+matching parent ingress boundary. It copies accepted frames, rejects malformed
+ones before retention, limits both frame count and copied bytes (16 MiB by
+default), drains after close, and uses a head cursor rather than repeatedly
+slicing the FIFO front. The parent may drain an explicit bounded batch and
+commit it in one canonical transition.
+
+This is not an OS process API or an implicit retry queue. An adapter still has
+to provide real child IPC, cancellation, and child cleanup. A frame is consumed
+once the parent drains it; a stale or conflicting batch remains rejected and
+the application must produce a new result against a new snapshot. The local
+runner currently exposes only a Rust bootstrap seed, so native child delivery,
+backpressure, and cleanup execution evidence remain required before using this
+internal path as a production process transport.
+
 WP-18 now has internal runtime groundwork for a deliberately narrow bounded
 scalar pool-state pilot. Capacity counts pending, running, and completed but
 unreleased tasks; credit returns only on release. Tagged generation handles are
