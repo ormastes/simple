@@ -62,7 +62,24 @@ One clean admitted rebuild and one OVMF/Q35 boot prove the following order:
 | Patched image SHA-256 | `20df69cade68a140abc60e70a3ab4830f6afb8865ada6de84319f3a5b0ee6141` |
 | Transcript | `/mnt/data/.simple/qemu/artifacts/sosix-qemu/linux/x86_64-canonical-nonce-20260813/ovmf-check/serial.log` |
 
-This is still functional evidence, not a canonical bundle: the OVMF/GRUB
-launch has not yet produced the producer's required closed firmware-stage
-admission and ordered `firmware-entry>firmware-handoff>guest-entry` contract.
-It must not be mislabeled as the existing `direct-kernel` evidence mode.
+At this earlier point the launch was functional evidence only: it lacked the
+producer's closed firmware-stage admission. It was not mislabeled as
+`direct-kernel`; the subsequent section records the separate canonical replay.
+
+## Canonical OVMF bundle
+
+The v2 evidence schema now admits the literal OVMF/GRUB profile
+`BdsDxe: starting Boot>[grub-uefi] multiboot loading>guest-entry`, preserving
+the actual firmware and bootloader text rather than inventing generic labels.
+From clean source `49db401660aa3aac7b2439ce45a1a73d0e8b5876`, a new pre-admitted
+TCG run produced a canonical nine-artifact Linux/x86_64 UEFI-pflash bundle:
+
+`/mnt/data/.simple/qemu/artifacts/sosix-qemu/linux/x86_64-ovmf-canonical-20260813-final/canonical-root/linux/x86_64/run-X86_64_COLLECTOR_NONCE_20260813_V3/evidence.env`
+
+The evidence record SHA-256 is
+`d812a871aa5764fd2e099209862b25e6252490cc99c304ac09bb2f3c7031ec03`.
+It binds OVMF file SHA-256, package version `2024.02-2ubuntu0.8`, pre-run host
+admission, one-line QEMU argv/version, collector nonce once, workload nonce
+twice (kernel and child), the mounted program, and the full exit-37/reap/PASS
+lifecycle. The collector was invoked and correctly stopped with `expected
+exactly 24 evidence bundles`; this is a row PASS, not a false matrix promotion.
