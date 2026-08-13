@@ -82,6 +82,12 @@ in-progress
   deterministic commits, denies dynamic transport, and requires frozen layout
   receipts. Resolver merging is raise-only. A focused policy spec exists;
   executable PASS still awaits an admitted self-hosted CLI.
+- impl: Added the missing `ResolvedMemoryPolicyV1` companion. It owns only
+  raise-only memory constraints—bounded buffers, address/ABI pinning, implicit
+  conversion denial, and frozen receipt requirements—while leaving physical
+  AoS/SoA and allocator selection to the planner/backend. Its focused leaf
+  source check passed under the bootstrap seed; SDN/driver/planner consumption
+  and self-hosted execution remain required.
 - impl: Added an executable common parent-commit validation/order step. It
   orders envelopes by declared canonical key before checking writes and fails
   closed on malformed results, overlapping writes, and mixed reduction/normal

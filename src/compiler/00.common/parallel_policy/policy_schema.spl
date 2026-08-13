@@ -17,6 +17,78 @@ fn existing_parent_move_policy_to_u8(value: ExistingParentMovePolicy) -> i64:
         case ExistingParentMovePolicy.Warn: 0
         case ExistingParentMovePolicy.Deny: 1
 
+struct ResolvedMemoryPolicyV1:
+    """Raise-only physical-memory constraints selected outside layout code.
+
+    This policy deliberately says what representations are *forbidden*; it
+    does not select AoS, SoA, or an allocator. The planner/backend remains the
+    only owner of those physical choices after it has received target and
+    schema evidence.
+    """
+    require_bounded_buffer_bytes: bool
+    pin_address_observed_layout: bool
+    pin_external_abi_layout: bool
+    deny_implicit_layout_conversion: bool
+    require_frozen_layout_receipt: bool
+
+impl ResolvedMemoryPolicyV1:
+    static fn balanced() -> ResolvedMemoryPolicyV1:
+        ResolvedMemoryPolicyV1(
+            require_bounded_buffer_bytes: true,
+            pin_address_observed_layout: true,
+            pin_external_abi_layout: true,
+            deny_implicit_layout_conversion: false,
+            require_frozen_layout_receipt: false
+        )
+
+    static fn for_assurance(strictness: AssuranceStrictness) -> ResolvedMemoryPolicyV1:
+        val base = ResolvedMemoryPolicyV1.balanced()
+        if strictness.at_least(AssuranceStrictness.Critical):
+            return ResolvedMemoryPolicyV1(
+                require_bounded_buffer_bytes: true,
+                pin_address_observed_layout: true,
+                pin_external_abi_layout: true,
+                deny_implicit_layout_conversion: true,
+                require_frozen_layout_receipt: true
+            )
+        base
+
+    fn canonical_text() -> text:
+        "MemoryPolicyV1|bounded_bytes=" + self.require_bounded_buffer_bytes.to_string()
+            + "|pin_address=" + self.pin_address_observed_layout.to_string()
+            + "|pin_abi=" + self.pin_external_abi_layout.to_string()
+            + "|implicit_conversion=" + self.deny_implicit_layout_conversion.to_string()
+            + "|layout_receipt=" + self.require_frozen_layout_receipt.to_string()
+
+    fn is_at_least_as_strict_as(other: ResolvedMemoryPolicyV1) -> bool:
+        if other.require_bounded_buffer_bytes and not self.require_bounded_buffer_bytes:
+            return false
+        if other.pin_address_observed_layout and not self.pin_address_observed_layout:
+            return false
+        if other.pin_external_abi_layout and not self.pin_external_abi_layout:
+            return false
+        if other.deny_implicit_layout_conversion and not self.deny_implicit_layout_conversion:
+            return false
+        if other.require_frozen_layout_receipt and not self.require_frozen_layout_receipt:
+            return false
+        true
+
+fn resolve_memory_policy(project: ResolvedMemoryPolicyV1,
+                         candidate: ResolvedMemoryPolicyV1) -> ResolvedMemoryPolicyV1:
+    """Raise-only merge; callers cannot relax project/profile layout guards."""
+    ResolvedMemoryPolicyV1(
+        require_bounded_buffer_bytes: project.require_bounded_buffer_bytes
+            or candidate.require_bounded_buffer_bytes,
+        pin_address_observed_layout: project.pin_address_observed_layout
+            or candidate.pin_address_observed_layout,
+        pin_external_abi_layout: project.pin_external_abi_layout
+            or candidate.pin_external_abi_layout,
+        deny_implicit_layout_conversion: project.deny_implicit_layout_conversion
+            or candidate.deny_implicit_layout_conversion,
+        require_frozen_layout_receipt: project.require_frozen_layout_receipt
+            or candidate.require_frozen_layout_receipt
+    )
+
 struct ResolvedParallelPolicyV1:
     parent_to_child_existing: ExistingParentMovePolicy
     require_bounded_mailbox: bool
