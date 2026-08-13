@@ -655,6 +655,11 @@ in-progress
   byte ceiling is 16 MiB and callers that need a tighter bound can pass an
   explicit positive budget. This prevents a small frame-count capacity from
   becoming an implicit multi-megabyte-per-frame growth policy.
+- impl: Added parent-ingress high-water and admission counters under the same
+  mutex as its queue state. Tests can now assert bounded accepted/rejected
+  frames, retained bytes, and peak occupancy deterministically without using
+  host RSS as the primary oracle. Native multi-process pressure evidence is
+  still required before treating these counters as an end-to-end result.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters

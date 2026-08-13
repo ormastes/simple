@@ -74,7 +74,9 @@ matching parent ingress boundary. It copies accepted frames, rejects malformed
 ones before retention, limits both frame count and copied bytes (16 MiB by
 default), drains after close, and uses a head cursor rather than repeatedly
 slicing the FIFO front. The parent may drain an explicit bounded batch and
-commit it in one canonical transition.
+commit it in one canonical transition. Its mutex-protected counters expose
+accepted/rejected totals and frame/byte high-water marks for deterministic
+bounded-memory checks.
 
 This is not an OS process API or an implicit retry queue. An adapter still has
 to provide real child IPC, cancellation, and child cleanup. A frame is consumed

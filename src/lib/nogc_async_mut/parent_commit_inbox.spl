@@ -21,6 +21,14 @@ struct ParentCommitFrameReceiveV1:
     frame: [u8]
     reason: text
 
+struct ParentCommitFrameInboxStatsV1:
+    depth: i64
+    retained_bytes: i64
+    accepted_frames: i64
+    rejected_frames: i64
+    high_water_frames: i64
+    high_water_bytes: i64
+
 fn parent_commit_frame_copy(source: [u8]) -> [u8]:
     var result: [u8] = []
     var i = 0
@@ -47,6 +55,10 @@ class ParentCommitFrameInboxV1:
     frames: [[u8]]
     head: i64
     retained_bytes: i64
+    accepted_frames: i64
+    rejected_frames: i64
+    high_water_frames: i64
+    high_water_bytes: i64
     closed: bool
     mutex: MutexHandle
 
@@ -63,6 +75,10 @@ impl ParentCommitFrameInboxV1:
             frames: [],
             head: 0,
             retained_bytes: 0,
+            accepted_frames: 0,
+            rejected_frames: 0,
+            high_water_frames: 0,
+            high_water_bytes: 0,
             closed: false,
             mutex: mutex_create()
         )
@@ -70,22 +86,32 @@ impl ParentCommitFrameInboxV1:
     me offer_process_result_frame(frame: [u8]) -> bool:
         """Accept one bounded Process-to-Parent frame or signal backpressure."""
         if frame.len() == 0 or frame.len() > MAX_PROCESS_TRANSFER_BYTES:
+            self.record_rejection()
             return false
         val decoded_frame = decode_process_transfer_frame(
             frame, ParallelExecutionDomain.Parent)
         if not decoded_frame.ok:
+            self.record_rejection()
             return false
         if not decode_result_envelope(decoded_frame.value.payload).ok:
+            self.record_rejection()
             return false
         if not self.mutex.lock():
             return false
         if self.closed or self.capacity <= 0 or self.byte_capacity <= 0
             or self.frames.len() - self.head >= self.capacity
             or frame.len() > self.byte_capacity - self.retained_bytes:
+            self.rejected_frames = self.rejected_frames + 1
             self.mutex.unlock()
             return false
         self.frames.push(parent_commit_frame_copy(frame))
         self.retained_bytes = self.retained_bytes + frame.len()
+        self.accepted_frames = self.accepted_frames + 1
+        val depth = self.frames.len() - self.head
+        if depth > self.high_water_frames:
+            self.high_water_frames = depth
+        if self.retained_bytes > self.high_water_bytes:
+            self.high_water_bytes = self.retained_bytes
         self.mutex.unlock()
         true
 
@@ -129,12 +155,35 @@ impl ParentCommitFrameInboxV1:
         self.mutex.unlock()
         result
 
+    fn stats() -> ParentCommitFrameInboxStatsV1:
+        """Return deterministic bounded-memory counters under one lock."""
+        if not self.mutex.lock():
+            return ParentCommitFrameInboxStatsV1(
+                depth: -1, retained_bytes: -1, accepted_frames: -1,
+                rejected_frames: -1, high_water_frames: -1,
+                high_water_bytes: -1)
+        val result = ParentCommitFrameInboxStatsV1(
+            depth: self.frames.len() - self.head,
+            retained_bytes: self.retained_bytes,
+            accepted_frames: self.accepted_frames,
+            rejected_frames: self.rejected_frames,
+            high_water_frames: self.high_water_frames,
+            high_water_bytes: self.high_water_bytes)
+        self.mutex.unlock()
+        result
+
     fn is_closed() -> bool:
         if not self.mutex.lock():
             return true
         val result = self.closed
         self.mutex.unlock()
         result
+
+    me record_rejection():
+        if not self.mutex.lock():
+            return
+        self.rejected_frames = self.rejected_frames + 1
+        self.mutex.unlock()
 
 fn parent_commit_frame_inbox_v1(capacity: i64) -> ParentCommitFrameInboxV1:
     ParentCommitFrameInboxV1.create(capacity)
