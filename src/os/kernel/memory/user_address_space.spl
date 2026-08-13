@@ -8,7 +8,7 @@ use os.kernel.types.memory_types.{VirtAddr, PhysAddr, PageFrame, VmFlags}
 use os.kernel.memory.vmm_address_space.{
     create_user_address_space as vmm_create_user_address_space,
     destroy_user_address_space as vmm_destroy_user_address_space,
-    vmm_map_page_in,
+    vmm_map_page_in, vmm_map_user_low_page,
     vmm_clone_kernel_low_private
 }
 use os.kernel.memory.pmm.{pmm_alloc_page}
@@ -145,7 +145,13 @@ fn destroy_user_address_space(space: AddressSpace):
 
 @cfg(x86_64)
 fn map_user_page_in(space: AddressSpace, virt: VirtAddr, phys: PhysAddr, flags: VmFlags) -> bool:
-    vmm_map_page_in(space, virt, phys, flags)
+    # User ELF PT_LOADs live in PML4[0], which starts as a clone of the boot
+    # 2 MiB identity mapping. The generic explicit-root mapper assumes every
+    # present intermediate entry is a table; it would therefore treat a huge
+    # PDE as a PT pointer. This x86_64 owner privatizes and splits it before
+    # installing the user leaf, preserving W^X and setting USER at every walk
+    # level required for an executable CPL3 mapping.
+    vmm_map_user_low_page(space, virt, phys, flags)
 
 @cfg(x86_64)
 fn alloc_user_page_frame() -> PageFrame?:
