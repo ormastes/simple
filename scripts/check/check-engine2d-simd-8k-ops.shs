@@ -15,20 +15,34 @@ ACTIVE_BASIS_POINTS="${ENGINE2D_SIMD_8K_ACTIVE_BASIS_POINTS:-10000}"
 EXTRA_CFLAGS="${ENGINE2D_SIMD_8K_CFLAGS:-}"
 
 mkdir -p "$BUILD_DIR"
+LOCK_DIR="$BUILD_DIR/.engine2d-simd-8k-ops.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo "engine2d-simd-8k-ops: another run owns BUILD_DIR=$BUILD_DIR" >&2
+    exit 1
+fi
+TMP_REPORT=""
+cleanup_report() {
+    if [ -n "$TMP_REPORT" ]; then
+        rm -f "$TMP_REPORT"
+    fi
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+trap cleanup_report EXIT
+# A signal must release the lock *and* terminate this owner.  Cleaning up and
+# continuing would let a later run acquire the directory while this shell can
+# still compile or publish a receipt.
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 RUNTIME_OBJ="$BUILD_DIR/runtime_simd_dispatch.o"
 BENCH_OBJ="$BUILD_DIR/engine2d_simd_8k_ops_bench.o"
 BENCH_BIN="$BUILD_DIR/engine2d_simd_8k_ops_bench"
 REPORT="$BUILD_DIR/receipt.env"
-TMP_REPORT="$(mktemp "$BUILD_DIR/receipt.XXXXXX")"
 CFLAGS="-O3 -std=gnu11 -ffunction-sections -fdata-sections -Isrc/runtime $EXTRA_CFLAGS"
 # A failed replacement must not leave an older PASS-looking receipt at the
 # caller-selected evidence path.
 rm -f "$REPORT"
-
-cleanup_report() {
-    rm -f "$TMP_REPORT"
-}
-trap cleanup_report EXIT HUP INT TERM
+TMP_REPORT="$(mktemp "$BUILD_DIR/receipt.XXXXXX")"
 
 $CC_BIN $CFLAGS -c src/runtime/runtime_simd_dispatch.c -o "$RUNTIME_OBJ"
 $CC_BIN $CFLAGS -c test/09_baselines/engine2d_simd/engine2d_simd_8k_ops_bench.c -o "$BENCH_OBJ"
@@ -45,7 +59,7 @@ if ! $RUNNER "$BENCH_BIN" "$WIDTH" "$HEIGHT" "$SAMPLES" "$MODE" \
     exit 1
 fi
 mv "$TMP_REPORT" "$REPORT"
-trap - EXIT HUP INT TERM
+TMP_REPORT=""
 cat "$REPORT"
 grep -q '^engine2d_8k_checksum=[0-9][0-9]*$' "$REPORT"
 grep -q '^engine2d_8k_native_simd_hits=[1-9][0-9]*$' "$REPORT"
