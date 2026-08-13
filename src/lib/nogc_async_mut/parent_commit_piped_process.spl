@@ -28,13 +28,29 @@ fn parent_commit_piped_read_result_v1(ok: bool, accepted: i64, rejected: i64,
 class ParentCommitPipedResultReaderV1:
     """Parent-owned line reassembler around one already-bounded frame inbox."""
     inbox: ParentCommitFrameInboxV1
+    max_line_bytes: i64
     pending: text
     dropping_oversize_line: bool
 
 impl ParentCommitPipedResultReaderV1:
     static fn create(inbox: ParentCommitFrameInboxV1) -> ParentCommitPipedResultReaderV1:
+        ParentCommitPipedResultReaderV1.create_with_line_budget(
+            inbox, PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES)
+
+    static fn create_with_line_budget(inbox: ParentCommitFrameInboxV1,
+                                      requested_max_line_bytes: i64) -> ParentCommitPipedResultReaderV1:
+        """Create with a parent-selected ceiling that can only tighten v1.
+
+        The codec owns the global maximum needed to carry its largest legal
+        frame.  Applications may choose a smaller bound, but a request cannot
+        silently enlarge the process transport beyond that frozen limit.
+        """
+        var max_line_bytes = requested_max_line_bytes
+        if max_line_bytes <= 0 or max_line_bytes > PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES:
+            max_line_bytes = PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES
         ParentCommitPipedResultReaderV1(
             inbox: inbox,
+            max_line_bytes: max_line_bytes,
             pending: "",
             dropping_oversize_line: false
         )
@@ -61,7 +77,7 @@ impl ParentCommitPipedResultReaderV1:
         while i < input.len():
             if processed >= max_lines:
                 val suffix = input.substring(i, input.len())
-                if self.pending.len() + suffix.len() > PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES:
+                if self.pending.len() + suffix.len() > self.max_line_bytes:
                     self.pending = ""
                     self.dropping_oversize_line = true
                     return parent_commit_piped_read_result_v1(false, accepted,
@@ -76,7 +92,7 @@ impl ParentCommitPipedResultReaderV1:
                     self.dropping_oversize_line = false
                 continue
             if ch != "\n":
-                if self.pending.len() >= PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES:
+                if self.pending.len() >= self.max_line_bytes:
                     self.pending = ""
                     self.dropping_oversize_line = true
                     rejected = rejected + 1
@@ -112,3 +128,9 @@ impl ParentCommitPipedResultReaderV1:
 
 fn parent_commit_piped_result_reader_v1(inbox: ParentCommitFrameInboxV1) -> ParentCommitPipedResultReaderV1:
     ParentCommitPipedResultReaderV1.create(inbox)
+
+fn parent_commit_piped_result_reader_v1_with_line_budget(
+    inbox: ParentCommitFrameInboxV1,
+    max_line_bytes: i64
+) -> ParentCommitPipedResultReaderV1:
+    ParentCommitPipedResultReaderV1.create_with_line_budget(inbox, max_line_bytes)

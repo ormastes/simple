@@ -83,7 +83,9 @@ native piped-child stdout surface. It accepts only newline-terminated `SPRF1`
 ASCII armor containing canonical lowercase-hex frame bytes, reassembles
 partial reads, and passes verified frames into the inbox. It never decodes
 arbitrary stdout as a frame, and it discards overlong lines through their next
-newline rather than retaining unbounded partial text.
+newline rather than retaining unbounded partial text. Its default maximum line
+matches the process-frame codec maximum; an application may pass a smaller
+line budget, but cannot enlarge that transport bound.
 
 This is still not an application process API or an implicit retry queue. Child
 launch, stdin request protocol, cancellation, exit cleanup, and native
