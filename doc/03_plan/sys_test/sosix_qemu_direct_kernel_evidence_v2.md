@@ -13,4 +13,3 @@ can be promoted.
 
 Lower-model lane: `N/A` because Spark is unavailable. Merge owner and final
 reviewer: root/high-capability agent.
-
