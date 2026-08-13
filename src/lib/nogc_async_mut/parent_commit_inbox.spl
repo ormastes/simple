@@ -14,6 +14,8 @@ use std.common.structural.transfer.process_frame_codec.{
 use std.common.structural.transfer.transfer_contracts.{ParallelExecutionDomain}
 use std.thread_sffi.{MutexHandle, mutex_create}
 
+val PARENT_COMMIT_INBOX_DEFAULT_MAX_BYTES: i64 = 16 * 1024 * 1024
+
 struct ParentCommitFrameReceiveV1:
     ok: bool
     frame: [u8]
@@ -41,17 +43,26 @@ class ParentCommitFrameInboxV1:
     does not reinsert it, avoiding an implicit retry/ownership resurrection.
     """
     capacity: i64
+    byte_capacity: i64
     frames: [[u8]]
     head: i64
+    retained_bytes: i64
     closed: bool
     mutex: MutexHandle
 
 impl ParentCommitFrameInboxV1:
     static fn create(capacity: i64) -> ParentCommitFrameInboxV1:
+        ParentCommitFrameInboxV1.create_with_byte_budget(
+            capacity, PARENT_COMMIT_INBOX_DEFAULT_MAX_BYTES)
+
+    static fn create_with_byte_budget(capacity: i64,
+                                      byte_capacity: i64) -> ParentCommitFrameInboxV1:
         ParentCommitFrameInboxV1(
             capacity: capacity,
+            byte_capacity: byte_capacity,
             frames: [],
             head: 0,
+            retained_bytes: 0,
             closed: false,
             mutex: mutex_create()
         )
@@ -68,10 +79,13 @@ impl ParentCommitFrameInboxV1:
             return false
         if not self.mutex.lock():
             return false
-        if self.closed or self.capacity <= 0 or self.frames.len() - self.head >= self.capacity:
+        if self.closed or self.capacity <= 0 or self.byte_capacity <= 0
+            or self.frames.len() - self.head >= self.capacity
+            or frame.len() > self.byte_capacity - self.retained_bytes:
             self.mutex.unlock()
             return false
         self.frames.push(parent_commit_frame_copy(frame))
+        self.retained_bytes = self.retained_bytes + frame.len()
         self.mutex.unlock()
         true
 
@@ -84,6 +98,7 @@ impl ParentCommitFrameInboxV1:
             self.mutex.unlock()
             return parent_commit_frame_receive_v1(false, [], reason)
         val frame = parent_commit_frame_copy(self.frames[self.head])
+        self.retained_bytes = self.retained_bytes - self.frames[self.head].len()
         self.head = self.head + 1
         if self.head == self.frames.len():
             self.frames = []
@@ -106,6 +121,14 @@ impl ParentCommitFrameInboxV1:
         self.mutex.unlock()
         result
 
+    fn retained_byte_count() -> i64:
+        """Return copied frame bytes retained by this queue, or -1 on lock failure."""
+        if not self.mutex.lock():
+            return -1
+        val result = self.retained_bytes
+        self.mutex.unlock()
+        result
+
     fn is_closed() -> bool:
         if not self.mutex.lock():
             return true
@@ -115,3 +138,7 @@ impl ParentCommitFrameInboxV1:
 
 fn parent_commit_frame_inbox_v1(capacity: i64) -> ParentCommitFrameInboxV1:
     ParentCommitFrameInboxV1.create(capacity)
+
+fn parent_commit_frame_inbox_v1_with_byte_budget(capacity: i64,
+                                                  byte_capacity: i64) -> ParentCommitFrameInboxV1:
+    ParentCommitFrameInboxV1.create_with_byte_budget(capacity, byte_capacity)

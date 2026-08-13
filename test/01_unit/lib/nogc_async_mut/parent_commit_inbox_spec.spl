@@ -17,7 +17,10 @@ use std.common.structural.transfer.transfer_contracts.{
     ParallelTransferPayload,
     transfer_envelope_v1
 }
-use std.nogc_async_mut.parent_commit_inbox.{parent_commit_frame_inbox_v1}
+use std.nogc_async_mut.parent_commit_inbox.{
+    parent_commit_frame_inbox_v1,
+    parent_commit_frame_inbox_v1_with_byte_budget
+}
 use std.nogc_async_mut.parent_commit_owner.{parent_commit_owner_v1}
 
 fn child_process_result_frame(task_id: i64, payload: i64) -> [u8]:
@@ -51,6 +54,18 @@ describe "ParentCommitFrameInboxV1 bounded process ingress":
         assert_equal(received_second.frame, second)
         assert_equal(received_third.frame, third)
         assert_equal(inbox.depth(), 0)
+
+    it "bounds retained bytes independently of frame-count capacity":
+        val first = child_process_result_frame(1, 101)
+        val second = child_process_result_frame(2, 102)
+        val inbox = parent_commit_frame_inbox_v1_with_byte_budget(2, first.len())
+        assert_true(inbox.offer_process_result_frame(first))
+        assert_equal(inbox.retained_byte_count(), first.len())
+        assert_false(inbox.offer_process_result_frame(second))
+        val received = inbox.receive()
+        assert_true(received.ok)
+        assert_equal(inbox.retained_byte_count(), 0)
+        assert_true(inbox.offer_process_result_frame(second))
 
     it "rejects malformed frames and drains after close":
         val inbox = parent_commit_frame_inbox_v1(1)

@@ -649,6 +649,12 @@ dev-done
   overriding queue capacity, receives only already accepted frames, stops at
   empty/closed, and publishes the drained set in one atomic transition. Empty,
   broken-lock, and non-positive-budget paths remain diagnostic/no-publish.
+- impl: Added an independent retained-byte ceiling to the process ingress
+  queue. Admission now requires both a frame slot and sufficient byte budget;
+  dequeue subtracts the exact copied frame length before reuse. The default
+  byte ceiling is 16 MiB and callers that need a tighter bound can pass an
+  explicit positive budget. This prevents a small frame-count capacity from
+  becoming an implicit multi-megabyte-per-frame growth policy.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters
