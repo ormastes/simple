@@ -638,6 +638,12 @@ dev-done
   rather than silently retrying. The bootstrap source check passed; the
   focused interpreter SSpec produced truncated bootstrap output without a
   final verdict, so real IPC and native backpressure execution remain open.
+- impl: Extended the parent owner to decode and commit a bounded batch of
+  accepted Process-to-Parent frames in one common-engine transition. Every
+  frame must pass route, checksum, and typed-result validation before the
+  owner calls `commit_submissions`; one malformed frame leaves the root
+  unchanged. Reverse-arrival coverage pins task-id canonicalization, but the
+  changed focused SSpec has not yet obtained a self-hosted verdict.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters

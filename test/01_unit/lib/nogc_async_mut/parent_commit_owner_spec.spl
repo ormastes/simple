@@ -114,3 +114,34 @@ describe "ParentCommitOwnerV1 serialized publication":
         val rejected = owner.commit_process_result_frame([0, 1, 2], 401)
         assert_false(rejected.receipt.ok)
         assert_equal(rejected.receipt.reason, "invalid-process-result-frame")
+
+    it "commits a reverse-arrival process batch in canonical task order":
+        val owner = parent_commit_owner_v1(
+            parallel_commit_state_v1(4, 400),
+            ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        val late = result_envelope_v1(4, 9, 0, 19,
+            ParallelResultKind.Patch, 709, "late")
+        val early = result_envelope_v1(4, 2, 0, 12,
+            ParallelResultKind.Patch, 702, "early")
+        val late_envelope = transfer_envelope_v1(19, 0,
+            ParallelExecutionDomain.Process,
+            ParallelExecutionDomain.Parent,
+            ParallelTransferMode.Copy,
+            ParallelTransferPayload.EncodedCopy,
+            0, false)
+        val early_envelope = transfer_envelope_v1(12, 0,
+            ParallelExecutionDomain.Process,
+            ParallelExecutionDomain.Parent,
+            ParallelTransferMode.Copy,
+            ParallelTransferPayload.EncodedCopy,
+            0, false)
+        val committed = owner.commit_process_result_frames([
+            encode_process_transfer_frame(process_transfer_frame_v1(
+                late_envelope, encode_result_envelope(late))),
+            encode_process_transfer_frame(process_transfer_frame_v1(
+                early_envelope, encode_result_envelope(early)))
+        ], 401)
+        assert_true(committed.receipt.ok)
+        assert_equal(committed.receipt.ordered_task_ids[0], 2)
+        assert_equal(committed.receipt.ordered_payload_tokens[1], 709)

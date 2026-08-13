@@ -134,16 +134,31 @@ impl ParentCommitOwnerV1:
         route; the result codec then validates typed commit metadata. Neither
         layer exposes raw process-local addresses to the parent owner.
         """
-        val decoded_frame = decode_process_transfer_frame(
-            frame, ParallelExecutionDomain.Parent)
-        if not decoded_frame.ok:
+        self.commit_process_result_frames([frame], candidate_snapshot_token)
+
+    me commit_process_result_frames(frames: [[u8]],
+                                    candidate_snapshot_token: i64) -> ParallelCommitOutcomeV1:
+        """Decode and atomically publish one bounded process-result batch.
+
+        Each frame is independently route- and schema-checked before the
+        common transition sees any child result. A malformed frame rejects the
+        complete batch before the root mutex is acquired for publication, so
+        partially decoded process results never advance the parent snapshot.
+        """
+        if frames.len() == 0:
             return self.reject_process_frame()
-        val decoded_result = decode_result_envelope(decoded_frame.value.payload)
-        if not decoded_result.ok:
-            return self.reject_process_frame()
-        val submission = parent_commit_submission_v1(
-            decoded_frame.value.envelope, decoded_result.value)
-        self.commit_submissions([submission], candidate_snapshot_token)
+        var submissions: [ParentCommitSubmissionV1] = []
+        for frame in frames:
+            val decoded_frame = decode_process_transfer_frame(
+                frame, ParallelExecutionDomain.Parent)
+            if not decoded_frame.ok:
+                return self.reject_process_frame()
+            val decoded_result = decode_result_envelope(decoded_frame.value.payload)
+            if not decoded_result.ok:
+                return self.reject_process_frame()
+            submissions.push(parent_commit_submission_v1(
+                decoded_frame.value.envelope, decoded_result.value))
+        self.commit_submissions(submissions, candidate_snapshot_token)
 
     me commit_next_process_result(inbox: ParentCommitFrameInboxV1,
                                   candidate_snapshot_token: i64) -> ParallelCommitOutcomeV1:
