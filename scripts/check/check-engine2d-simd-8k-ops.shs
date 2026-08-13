@@ -19,15 +19,34 @@ RUNTIME_OBJ="$BUILD_DIR/runtime_simd_dispatch.o"
 BENCH_OBJ="$BUILD_DIR/engine2d_simd_8k_ops_bench.o"
 BENCH_BIN="$BUILD_DIR/engine2d_simd_8k_ops_bench"
 REPORT="$BUILD_DIR/receipt.env"
+TMP_REPORT="$(mktemp "$BUILD_DIR/receipt.XXXXXX")"
 CFLAGS="-O3 -std=gnu11 -ffunction-sections -fdata-sections -Isrc/runtime $EXTRA_CFLAGS"
+# A failed replacement must not leave an older PASS-looking receipt at the
+# caller-selected evidence path.
+rm -f "$REPORT"
+
+cleanup_report() {
+    rm -f "$TMP_REPORT"
+}
+trap cleanup_report EXIT HUP INT TERM
 
 $CC_BIN $CFLAGS -c src/runtime/runtime_simd_dispatch.c -o "$RUNTIME_OBJ"
 $CC_BIN $CFLAGS -c test/09_baselines/engine2d_simd/engine2d_simd_8k_ops_bench.c -o "$BENCH_OBJ"
 $CC_BIN $CFLAGS -Wl,--gc-sections "$RUNTIME_OBJ" "$BENCH_OBJ" -o "$BENCH_BIN"
 
+# `$RUNNER` deliberately permits a configured QEMU command with arguments.
+# Capture the benchmark's actual exit status before publishing its receipt:
+# a pipeline ending in `tee` would otherwise turn a compiler/emulator failure
+# into a plausible-looking evidence pass.
 # shellcheck disable=SC2086
-$RUNNER "$BENCH_BIN" "$WIDTH" "$HEIGHT" "$SAMPLES" "$MODE" \
-    "$ACTIVE_BASIS_POINTS" | tee "$REPORT"
+if ! $RUNNER "$BENCH_BIN" "$WIDTH" "$HEIGHT" "$SAMPLES" "$MODE" \
+    "$ACTIVE_BASIS_POINTS" > "$TMP_REPORT"; then
+    cat "$TMP_REPORT"
+    exit 1
+fi
+mv "$TMP_REPORT" "$REPORT"
+trap - EXIT HUP INT TERM
+cat "$REPORT"
 grep -q '^engine2d_8k_checksum=[0-9][0-9]*$' "$REPORT"
 grep -q '^engine2d_8k_native_simd_hits=[1-9][0-9]*$' "$REPORT"
 grep -q '^engine2d_8k_six_call_frame_p95_ns=[0-9][0-9]*$' "$REPORT"
