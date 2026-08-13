@@ -30,18 +30,21 @@
 # - component_id is assumed unique per composition (matches the existing
 #   assumption in draw_ir_diff.spl's find-by-id semantics). apply()'s
 #   bijection fill relies on this; duplicate ids are unsupported.
-# - Change detection and the round-trip oracle (draw_ir_patch_commands_equal)
-#   cover kind/component_id/parent_id/geometry/color/text_value/
-#   computed_style/glyph_run. border_rect/content_rect/hit_rect/clip_rect/image_uri/
-#   edge/points are neither diffed nor compared -- they are not yet patchable.
-#   This keeps the round-trip invariant sound for the fields it does cover; it
-#   does not claim full-command coverage.
+# - Change detection and the round-trip oracle cover every DrawIrCommand field
+#   that can alter retained raster output. Fields without a dedicated patch-op
+#   kind (image URI, auxiliary rects, edge, points) use UpdateStyle as the
+#   existing full-command payload carrier. This keeps the fixed op vocabulary
+#   while preventing stale image/clip/path data from being accepted as an
+#   unchanged command.
 
 use common.ui.draw_ir.{
     DrawIrBatch,
     DrawIrCommand,
     DrawIrComposition,
+    DrawEdge,
+    DrawIrPoint,
     DrawIrRect,
+    DrawIrStyleProp,
     draw_ir_batch,
     draw_ir_embedding_config,
     draw_ir_no_rect,
@@ -82,8 +85,46 @@ struct DrawIrPatchApplyResult:
     reason: text
     composition: DrawIrComposition
 
+fn _draw_ir_patch_points_bounds(points: [DrawIrPoint]) -> DrawIrRect:
+    """Conservative one-pixel padded bounds for path/edge raster writes."""
+    if points.len() == 0:
+        return draw_ir_no_rect()
+    var min_x = points[0].x.to_i64()
+    var max_x = min_x
+    var min_y = points[0].y.to_i64()
+    var max_y = min_y
+    var i = 1
+    while i < points.len():
+        val point = points[i]
+        val x = point.x.to_i64()
+        val y = point.y.to_i64()
+        if x < min_x: min_x = x
+        if x > max_x: max_x = x
+        if y < min_y: min_y = y
+        if y > max_y: max_y = y
+        i = i + 1
+    val left = if min_x > -2147483648: min_x - 1 else: min_x
+    val top = if min_y > -2147483648: min_y - 1 else: min_y
+    val right = if max_x < 2147483647: max_x + 1 else: max_x
+    val bottom = if max_y < 2147483647: max_y + 1 else: max_y
+    draw_ir_rect_bounds(
+        left.to_i32(), top.to_i32(),
+        (right - left + 1).to_i32(), (bottom - top + 1).to_i32())
+
 fn _draw_ir_patch_bounds(command: DrawIrCommand) -> DrawIrRect:
-    draw_ir_rect_bounds(command.x, command.y, command.width, command.height)
+    # Linear strokes ignore command geometry: PATH reads command.points and
+    # EDGE reads edge.points. Check those authoritative payloads first, since
+    # decoded commands can carry stale nonzero geometry alongside fresh points.
+    if command.kind == "edge":
+        match command.edge:
+            Some(edge): return _draw_ir_patch_points_bounds(edge.points)
+            nil: return _draw_ir_patch_points_bounds(command.points)
+    if command.kind == "path":
+        return _draw_ir_patch_points_bounds(command.points)
+    if command.width > 0 and command.height > 0:
+        return draw_ir_rect_bounds(
+            command.x, command.y, command.width, command.height)
+    _draw_ir_patch_points_bounds(command.points)
 
 fn _draw_ir_patch_geometry_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
     a.x != b.x or a.y != b.y or a.width != b.width or a.height != b.height
@@ -95,18 +136,18 @@ fn _draw_ir_patch_geometry_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
 # pattern and carries the identical latent defect, masked there because its
 # spec only exercises changed/empty styles; filed as a bug, not touched here
 # per the additive-only constraint on draw_ir_diff.spl's report semantics).
-# This raw double-loop membership check has no optional in the comparison
-# path and is verified consistent under both evaluators.
+# Style lookup is first-key-wins in Engine2D, so retain the producer's exact
+# ordered key/value sequence. Set comparison would accept duplicate-key
+# reorderings that visibly change a stroke/fill property.
 fn _draw_ir_patch_style_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
     if a.computed_style.len() != b.computed_style.len():
         return true
-    for prop in a.computed_style:
-        var matched = false
-        for other in b.computed_style:
-            if other.key == prop.key and other.value == prop.value:
-                matched = true
-        if not matched:
+    var i = 0
+    while i < a.computed_style.len():
+        if a.computed_style[i].key != b.computed_style[i].key or
+                a.computed_style[i].value != b.computed_style[i].value:
             return true
+        i = i + 1
     false
 
 fn _draw_ir_patch_text_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
@@ -122,12 +163,75 @@ fn _draw_ir_patch_array_equal<T>(a: [T], b: [T]) -> bool:
         i = i + 1
     true
 
+fn _draw_ir_patch_i32_array_equal(a: [i32], b: [i32]) -> bool:
+    _draw_ir_patch_array_equal(a, b)
+
+fn _draw_ir_patch_point_array_equal(
+    a: [DrawIrPoint], b: [DrawIrPoint]
+) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i].x != b[i].x or a[i].y != b[i].y:
+            return false
+        i = i + 1
+    true
+
+fn _draw_ir_patch_rect_equal(a: DrawIrRect, b: DrawIrRect) -> bool:
+    a.present == b.present and a.x == b.x and a.y == b.y and
+        a.width == b.width and a.height == b.height
+
+fn _draw_ir_patch_style_equal(
+    a: [DrawIrStyleProp], b: [DrawIrStyleProp]
+) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i].key != b[i].key or a[i].value != b[i].value:
+            return false
+        i = i + 1
+    true
+
+fn _draw_ir_patch_edge_equal(a: DrawEdge?, b: DrawEdge?) -> bool:
+    match a:
+        nil:
+            match b:
+                nil: true
+                Some(_): false
+        Some(edge_a):
+            match b:
+                nil: false
+                Some(edge_b):
+                    edge_a.id == edge_b.id and
+                    edge_a.source == edge_b.source and
+                    edge_a.target == edge_b.target and
+                    edge_a.routing == edge_b.routing and
+                    _draw_ir_patch_point_array_equal(
+                        edge_a.points, edge_b.points) and
+                    _draw_ir_patch_style_equal(edge_a.style, edge_b.style)
+
 fn _draw_ir_patch_glyph_run_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
     a.glyph_run.valid != b.glyph_run.valid or
         not _draw_ir_patch_array_equal(a.glyph_run.glyph_ids, b.glyph_run.glyph_ids) or
         not _draw_ir_patch_array_equal(a.glyph_run.xs, b.glyph_run.xs) or
-        not _draw_ir_patch_array_equal(a.glyph_run.ys, b.glyph_run.ys) or
-        not _draw_ir_patch_array_equal(a.glyph_run.clusters, b.glyph_run.clusters)
+    not _draw_ir_patch_array_equal(a.glyph_run.ys, b.glyph_run.ys) or
+    not _draw_ir_patch_array_equal(a.glyph_run.clusters, b.glyph_run.clusters)
+
+fn _draw_ir_patch_retained_payload_changed(
+    a: DrawIrCommand, b: DrawIrCommand
+) -> bool:
+    """True for non-style command payload that affects retained raster output."""
+    (
+        not _draw_ir_patch_rect_equal(a.border_rect, b.border_rect) or
+        not _draw_ir_patch_rect_equal(a.content_rect, b.content_rect) or
+        not _draw_ir_patch_rect_equal(a.hit_rect, b.hit_rect) or
+        not _draw_ir_patch_rect_equal(a.clip_rect, b.clip_rect) or
+        a.image_uri != b.image_uri or
+        not _draw_ir_patch_edge_equal(a.edge, b.edge) or
+        not _draw_ir_patch_point_array_equal(a.points, b.points)
+    )
 
 fn _draw_ir_patch_push_damage(damage: mut [DrawIrRect], old_bounds: DrawIrRect, new_bounds: DrawIrRect):
     if old_bounds.present:
@@ -172,7 +276,14 @@ fn _draw_ir_patch_build_forward_ops(baseline_index: DrawIrCommandIndex, current_
             val geometry_changed = _draw_ir_patch_geometry_changed(base, current)
             val style_prop_changed = _draw_ir_patch_style_changed(base, current)
             val text_changed = _draw_ir_patch_text_changed(base, current)
-            val misc_changed = base.color != current.color or base.kind != current.kind or base.parent_id != current.parent_id or _draw_ir_patch_glyph_run_changed(base, current)
+            val misc_changed = (
+                base.color != current.color or base.kind != current.kind or
+                base.parent_id != current.parent_id or
+                not _draw_ir_patch_i32_array_equal(
+                    base.advance_widths, current.advance_widths) or
+                _draw_ir_patch_glyph_run_changed(base, current) or
+                _draw_ir_patch_retained_payload_changed(base, current)
+            )
             val style_changed = style_prop_changed or misc_changed
             val old_bounds = _draw_ir_patch_bounds(base)
             val new_bounds = _draw_ir_patch_bounds(current)
@@ -349,9 +460,15 @@ fn draw_ir_patch_commands_equal(a: DrawIrComposition, b: DrawIrComposition) -> b
             return false
         if ca.text_value != cb.text_value:
             return false
+        if not _draw_ir_patch_i32_array_equal(
+            ca.advance_widths, cb.advance_widths
+        ):
+            return false
         if _draw_ir_patch_style_changed(ca, cb):
             return false
         if _draw_ir_patch_glyph_run_changed(ca, cb):
+            return false
+        if _draw_ir_patch_retained_payload_changed(ca, cb):
             return false
         i = i + 1
     true

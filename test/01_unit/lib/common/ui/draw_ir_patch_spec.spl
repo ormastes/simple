@@ -31,16 +31,22 @@ patch-covered field.
 use std.spec
 use common.ui.draw_ir.{
     DRAW_IR_BACKEND_CPU,
+    draw_edge,
     DrawIrCommand,
     draw_ir_batch,
     draw_ir_box_with_style,
     draw_ir_composition,
     draw_ir_embedding_config,
+    draw_ir_edge_command,
     draw_ir_glyph_run_payload,
+    draw_ir_image_command,
     draw_ir_no_rect,
+    draw_ir_path_command,
+    draw_ir_point,
     draw_ir_rect,
     draw_ir_style_prop,
     draw_ir_text,
+    draw_ir_text_resolved_font,
     draw_ir_text_shaped_font
 }
 use common.ui.draw_ir_patch.{
@@ -73,6 +79,136 @@ fn _op_kind_count(ops: [DrawIrPatchOp], kind: i32, component_id: text) -> i32:
     count
 
 describe "Draw IR patch generation":
+
+    it "patches an image URI change and damages its existing bounds":
+        val baseline = draw_ir_composition("rev-1", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
+                draw_ir_image_command("content", 10, 20, 30, 40,
+                    "wm-content://window/old", [])
+            ])
+        ])
+        val current = draw_ir_composition("rev-2", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
+                draw_ir_image_command("content", 10, 20, 30, 40,
+                    "wm-content://window/new", [])
+            ])
+        ])
+        val patch = draw_ir_patch_between(baseline, "rev-1", current, "rev-2")
+        expect(_op_kind_present(
+            patch.operations, DRAW_IR_PATCH_OP_UPDATE_STYLE, "content"
+        )).to_equal(true)
+        expect(patch.damage_rects.len()).to_equal(2)
+        expect(patch.damage_rects[0].x).to_equal(10)
+        expect(patch.damage_rects[0].width).to_equal(30)
+        val applied = draw_ir_patch_apply(baseline, patch)
+        expect(applied.ok).to_equal(true)
+        expect(draw_ir_patch_commands_equal(applied.composition, current)).to_equal(true)
+
+    it "patches resolved text advance changes at the same geometry":
+        val baseline = draw_ir_composition("rev-1", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
+                draw_ir_text_resolved_font("text", 10, 20, "ab", 1u32,
+                    "sans", "font", [5, 15], 20, 12, 12)
+            ])
+        ])
+        val current = draw_ir_composition("rev-2", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
+                draw_ir_text_resolved_font("text", 10, 20, "ab", 1u32,
+                    "sans", "font", [7, 13], 20, 12, 12)
+            ])
+        ])
+        val patch = draw_ir_patch_between(baseline, "rev-1", current, "rev-2")
+        expect(_op_kind_present(
+            patch.operations, DRAW_IR_PATCH_OP_UPDATE_STYLE, "text"
+        )).to_equal(true)
+        val applied = draw_ir_patch_apply(baseline, patch)
+        expect(draw_ir_patch_commands_equal(applied.composition, current)).to_equal(true)
+
+    it "uses point bounds for changed path and edge damage":
+        val baseline = draw_ir_composition("rev-1", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
+                draw_ir_path_command("path", [draw_ir_point(10, 20),
+                    draw_ir_point(30, 40)], []),
+                draw_ir_edge_command(draw_edge("edge", "a", "b", "straight",
+                    [draw_ir_point(50, 60), draw_ir_point(70, 80)], []))
+            ])
+        ])
+        val current = draw_ir_composition("rev-2", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
+                draw_ir_path_command("path", [draw_ir_point(11, 20),
+                    draw_ir_point(31, 40)], []),
+                draw_ir_edge_command(draw_edge("edge", "a", "b", "straight",
+                    [draw_ir_point(51, 60), draw_ir_point(71, 80)], []))
+            ])
+        ])
+        val patch = draw_ir_patch_between(baseline, "rev-1", current, "rev-2")
+        expect(_op_kind_present(
+            patch.operations, DRAW_IR_PATCH_OP_UPDATE_STYLE, "path"
+        )).to_equal(true)
+        expect(_op_kind_present(
+            patch.operations, DRAW_IR_PATCH_OP_UPDATE_STYLE, "edge"
+        )).to_equal(true)
+        expect(patch.damage_rects[0].width).to_be_greater_than(0)
+        expect(patch.damage_rects[0].height).to_be_greater_than(0)
+        val applied = draw_ir_patch_apply(baseline, patch)
+        expect(draw_ir_patch_commands_equal(applied.composition, current)).to_equal(true)
+
+    it "uses edge payload points even when the mirrored command points are stale":
+        val old_edge = draw_ir_edge_command(draw_edge(
+            "edge", "a", "b", "straight",
+            [draw_ir_point(10, 10), draw_ir_point(20, 20)], []))
+        var new_edge = old_edge
+        new_edge.edge = Some(draw_edge(
+            "edge", "a", "b", "straight",
+            [draw_ir_point(100, 110), draw_ir_point(120, 130)], []))
+        # Leave new_edge.points at the old values to model an independently
+        # decoded/stale mirror; retained damage must still cover the payload
+        # the edge rasterizer actually consumes.
+        val baseline = draw_ir_composition("rev-1", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [old_edge])
+        ])
+        val current = draw_ir_composition("rev-2", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [new_edge])
+        ])
+        val patch = draw_ir_patch_between(baseline, "rev-1", current, "rev-2")
+        expect(patch.damage_rects.len()).to_equal(2)
+        expect(patch.damage_rects[1].x).to_equal(99)
+        expect(patch.damage_rects[1].y).to_equal(109)
+        expect(patch.damage_rects[1].width).to_equal(23)
+        expect(patch.damage_rects[1].height).to_equal(23)
+
+    it "uses stroke payloads despite stale nonzero geometry and ordered styles":
+        val old_path = draw_ir_path_command("path", [draw_ir_point(10, 10),
+            draw_ir_point(20, 20)], [draw_ir_style_prop("stroke-color", "1")])
+        var new_path = old_path
+        new_path.points = [draw_ir_point(100, 100), draw_ir_point(120, 120)]
+        new_path.x = 1
+        new_path.y = 2
+        new_path.width = 3
+        new_path.height = 4
+        new_path.computed_style = [
+            draw_ir_style_prop("stroke-color", "1"),
+            draw_ir_style_prop("stroke-color", "2")
+        ]
+        var old_with_duplicate = old_path
+        old_with_duplicate.computed_style = [
+            draw_ir_style_prop("stroke-color", "1"),
+            draw_ir_style_prop("stroke-color", "1")
+        ]
+        val baseline = draw_ir_composition("rev-1", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [old_with_duplicate])
+        ])
+        val current = draw_ir_composition("rev-2", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [new_path])
+        ])
+        val patch = draw_ir_patch_between(baseline, "rev-1", current, "rev-2")
+        expect(_op_kind_present(
+            patch.operations, DRAW_IR_PATCH_OP_UPDATE_GEOMETRY, "path"
+        )).to_equal(true)
+        expect(patch.damage_rects[1].x).to_equal(99)
+        expect(patch.damage_rects[1].y).to_equal(99)
+        val applied = draw_ir_patch_apply(baseline, patch)
+        expect(draw_ir_patch_commands_equal(applied.composition, current)).to_equal(true)
 
     it "emits an Insert op for a new component with new_bounds set and no old_bounds":
         val baseline = draw_ir_composition("rev-1", "scene", DRAW_IR_BACKEND_CPU, [
