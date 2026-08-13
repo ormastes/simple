@@ -356,6 +356,10 @@ refreshed after executable specs and profile scripts change.
 
 - If a change touches `scripts/check/check-cross-language-perf.shs`, Go Profile
   Evidence Agent owns the report shape and must rerun the profile contract.
+  The harness must create a current-run report before compilation and exit
+  nonzero with a terminal failure receipt when any required installed compiler
+  or any Simple native/SMF workload compile fails; failed artifacts never
+  degrade to unavailable or warning-only rows.
 - If a change touches `thread_spawn_with_args`, Simple OS-Thread Baseline Agent
   must update `scripts/check/check-thread-spawn-with-args-native.shs` and the
   matching tracking note.

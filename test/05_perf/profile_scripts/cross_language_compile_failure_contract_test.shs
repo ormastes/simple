@@ -1,0 +1,108 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+HARNESS="$ROOT_DIR/scripts/check/check-cross-language-perf.shs"
+STATUS_LIB="$ROOT_DIR/scripts/check/lib/cross-language-perf-status.shs"
+
+fail() {
+    echo "cross_language_compile_failure_contract=false"
+    echo "error=$1"
+    exit 1
+}
+
+grep -Fq '. "$ROOT_DIR/scripts/check/lib/cross-language-perf-status.shs"' "$HARNESS" ||
+    fail "harness does not load the compile-status gate"
+grep -Fq 'cross_language_perf_require_simple_compiles "$COMPILE_FAIL" "$COMPILE_FAIL_SMF"' "$HARNESS" ||
+    fail "harness does not apply the compile-status gate after report generation"
+
+run_case() {
+    _name="$1"
+    _native="$2"
+    _smf="$3"
+    _expected_status="$4"
+    _expected_text="$5"
+    _output="$ROOT_DIR/build/tmp/${_name}.out"
+
+    set +e
+    sh -c '. "$1"; cross_language_perf_require_simple_compiles "$2" "$3" "$4"' \
+        sh "$STATUS_LIB" "$_native" "$_smf" "$_expected_status" >"$_output" 2>&1
+    _status=$?
+    set -e
+
+    [ "$_status" -eq "$_expected_status" ] ||
+        fail "$_name returned $_status, expected $_expected_status"
+    if [ -n "$_expected_text" ]; then
+        grep -Fq "$_expected_text" "$_output" || fail "$_name omitted failure detail"
+    elif [ -s "$_output" ]; then
+        fail "$_name emitted unexpected diagnostics"
+    fi
+}
+
+mkdir -p "$ROOT_DIR/build/tmp"
+run_case native_fail ' native:fib' '' 1 'native_compile_failures= native:fib'
+run_case smf_fail '' ' smf:fib' 1 'smf_compile_failures= smf:fib'
+run_case native_timeout ' native:fib(timeout)' '' 124 'native:fib(timeout)'
+run_case smf_timeout '' ' smf:fib(timeout)' 124 'smf:fib(timeout)'
+run_case all_green '' '' 0 ''
+
+run_receipt_case() {
+    _name="$1"; _status="$2"; _classification="$3"
+    _report="$ROOT_DIR/build/tmp/${_name}.md"
+    : >"$_report"
+    . "$STATUS_LIB"
+    cross_language_perf_append_failure "$_report" compile simple "$_name" "$_status"
+    grep -Fq 'profile_status: failure' "$_report" || fail "$_name lacks failure status"
+    grep -Fq "exit_status: \`$_status\`" "$_report" || fail "$_name lacks original status"
+    grep -Fq "classification: \`$_classification\`" "$_report" || fail "$_name misclassified"
+    ! grep -Fq 'profile_status: success' "$_report" || fail "$_name contains success marker"
+}
+
+run_receipt_case native_nonzero 42 failed
+run_receipt_case native_timeout 124 timeout
+run_receipt_case smf_nonzero 43 failed
+run_receipt_case smf_timeout 124 timeout
+run_receipt_case c_compile 2 failed
+run_receipt_case go_compile 2 failed
+
+run_lifecycle_case() {
+    _name="$1"; _tool="$2"; _lane="$3"; _status="$4"; _classification="$5"
+    _report="$ROOT_DIR/build/tmp/lifecycle_${_name}.md"
+    printf 'profile_status: success\nstale=true\n## Artifact Footprint\n' >"$_report"
+    set +e
+    sh -c '. "$1"; cross_language_perf_initialize_report "$2" "$2.fallback" 2026-01-01 scripts/check/check-cross-language-perf.shs; trap cross_language_perf_terminal_receipt EXIT; PROFILE_PHASE=compile; PROFILE_TOOL="$3"; PROFILE_LANE="$4"; exit "$5"' \
+        sh "$STATUS_LIB" "$_report" "$_tool" "$_lane" "$_status"
+    _actual=$?
+    set -e
+    [ "$_actual" -eq "$_status" ] || fail "$_name lifecycle returned $_actual, expected $_status"
+    [ "$(grep -Fc '## Terminal status' "$_report")" -eq 1 ] || fail "$_name terminal receipt count"
+    grep -Fq "classification: \`$_classification\`" "$_report" || fail "$_name lifecycle classification"
+    ! grep -Fq 'stale=true' "$_report" || fail "$_name retained stale report"
+    ! grep -Fq 'profile_status: success' "$_report" || fail "$_name has success marker"
+    ! grep -Fq '## Artifact Footprint' "$_report" || fail "$_name has measurement section"
+}
+
+run_lifecycle_case native_fail simple native 2 failed
+run_lifecycle_case native_timeout simple native 124 timeout
+run_lifecycle_case smf_fail simple smf 2 failed
+run_lifecycle_case smf_timeout simple smf 124 timeout
+run_lifecycle_case c_fail gcc c 2 failed
+run_lifecycle_case go_timeout go go 124 timeout
+
+_green_report="$ROOT_DIR/build/tmp/lifecycle_green.md"
+printf 'profile_status: failure\nstale=true\n' >"$_green_report"
+sh -c '. "$1"; cross_language_perf_initialize_report "$2" "$2.fallback" 2026-01-01 scripts/check/check-cross-language-perf.shs; trap cross_language_perf_terminal_receipt EXIT; PROFILE_PHASE=complete; PROFILE_TOOL=harness; PROFILE_LANE=report; printf "\nprofile_status: success\n" >>"$2"' sh "$STATUS_LIB" "$_green_report"
+grep -Fq 'profile_status: success' "$_green_report" || fail "green lifecycle lacks success"
+! grep -Fq '## Terminal status' "$_green_report" || fail "green lifecycle has failure receipt"
+! grep -Fq 'stale=true' "$_green_report" || fail "green lifecycle retained stale report"
+
+grep -Fq 'PROFILE_PHASE=compile PROFILE_TOOL=gcc PROFILE_LANE=c' "$HARNESS" || fail "C failure phase is not tracked"
+grep -Fq 'PROFILE_PHASE=compile PROFILE_TOOL=go PROFILE_LANE=go' "$HARNESS" || fail "Go failure phase is not tracked"
+grep -Fq 'cross-language-perf-report-write-failure.md' "$HARNESS" || fail "report-write fallback is missing"
+grep -Fq 'trap cross_language_perf_terminal_receipt EXIT' "$HARNESS" || fail "harness does not use shared EXIT finalizer"
+_gate_line=$(grep -n 'cross_language_perf_require_simple_compiles "$COMPILE_FAIL"' "$HARNESS" | tail -1 | cut -d: -f1)
+_measure_line=$(grep -n '^# ── Artifact footprint' "$HARNESS" | cut -d: -f1)
+[ "$_gate_line" -lt "$_measure_line" ] || fail "Simple failure gate follows measurement section"
+
+echo "cross_language_compile_failure_contract=true"
+echo "cases=18"

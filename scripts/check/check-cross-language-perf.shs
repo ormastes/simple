@@ -77,6 +77,7 @@ if ! simple_binary_usable "$SIMPLE_BINARY"; then
     exit 2
 fi
 . "$ROOT_DIR/scripts/check/lib/require-self-hosted.shs"
+. "$ROOT_DIR/scripts/check/lib/cross-language-perf-status.shs"
 # `simple_binary_is_self_hosted` was the former local heuristic. Admission is
 # now owned by the canonical require_self_hosted receipt.
 require_self_hosted "$SIMPLE_BINARY" "cross-language compiler"
@@ -219,6 +220,14 @@ if [ "$PROFILE_DOCKER_ISOLATION" = "1" ] && [ "$PROFILE_DOCKER_INSIDE" != "1" ];
 fi
 
 mkdir -p "$BUILD_DIR" "$(dirname "$REPORT_PATH")"
+
+# Claim the report path before any compiler is launched.  The EXIT finalizer
+# turns every subsequent nonzero exit into current-run evidence rather than
+# leaving a stale successful report at this path.
+cross_language_perf_initialize_report "$REPORT_PATH" \
+    "$BUILD_DIR/cross-language-perf-report-write-failure.md" "$(date +%Y-%m-%d)" \
+    scripts/check/check-cross-language-perf.shs
+trap cross_language_perf_terminal_receipt EXIT
 
 # ── PATH fixup for common non-PATH locations ─────────────────────────────
 for _d in /usr/lib/erlang/bin /usr/lib/go/bin /usr/local/go/bin /snap/go/current/bin; do
@@ -1427,22 +1436,25 @@ write_erlang_fanout
 
 echo "=== Compiling workloads ==="
 COMPILE_FAIL=""
+COMPILE_FAIL_STATUS=0
 
 # C
 if have gcc; then
-    gcc -O2 -o "$BUILD_DIR/hello_c" "$BUILD_DIR/hello.c"
-    gcc -O2 -o "$BUILD_DIR/fib_c" "$BUILD_DIR/fib.c"
-    gcc -O2 -o "$BUILD_DIR/fib_warm_c" "$BUILD_DIR/fib_warm.c"
-    gcc -O2 -pthread -o "$BUILD_DIR/parallel_c" "$BUILD_DIR/parallel.c"
-    gcc -O2 -pthread -o "$BUILD_DIR/fanout_c" "$BUILD_DIR/fanout.c"
-    gcc -O2 -pthread -o "$BUILD_DIR/fanout_stress_c" "$BUILD_DIR/fanout_stress.c"
+    PROFILE_PHASE=compile PROFILE_TOOL=gcc PROFILE_LANE=c
+    run_bounded_argv gcc -O2 -o "$BUILD_DIR/hello_c" "$BUILD_DIR/hello.c"
+    run_bounded_argv gcc -O2 -o "$BUILD_DIR/fib_c" "$BUILD_DIR/fib.c"
+    run_bounded_argv gcc -O2 -o "$BUILD_DIR/fib_warm_c" "$BUILD_DIR/fib_warm.c"
+    run_bounded_argv gcc -O2 -pthread -o "$BUILD_DIR/parallel_c" "$BUILD_DIR/parallel.c"
+    run_bounded_argv gcc -O2 -pthread -o "$BUILD_DIR/fanout_c" "$BUILD_DIR/fanout.c"
+    run_bounded_argv gcc -O2 -pthread -o "$BUILD_DIR/fanout_stress_c" "$BUILD_DIR/fanout_stress.c"
     echo "  [ok] C (gcc)"
 else echo "  [skip] C — gcc not found"; fi
 
 # Rust is a required comparison row whenever rustc is installed.  Compilation
 # failure is fatal under `set -e`; it must not degrade into an unavailable row.
 if have rustc; then
-    rustc -C opt-level=2 -o "$BUILD_DIR/fib_warm_rust" "$BUILD_DIR/fib_warm.rs"
+    PROFILE_PHASE=compile PROFILE_TOOL=rustc PROFILE_LANE=rust
+    run_bounded_argv rustc -C opt-level=2 -o "$BUILD_DIR/fib_warm_rust" "$BUILD_DIR/fib_warm.rs"
     echo "  [ok] Rust (rustc -O)"
 else
     echo "  [skip] Rust — rustc not found"
@@ -1452,26 +1464,30 @@ fi
 GO_VERSION="unavailable"
 GO_SCHEDULER="GOMAXPROCS=unavailable NumCPU=unavailable"
 if have go; then
+    PROFILE_PHASE=compile PROFILE_TOOL=go PROFILE_LANE=go
     GO_VERSION="$(go version 2>/dev/null || echo unavailable)"
-    (cd "$BUILD_DIR" && go build -o fib_go fib.go && go build -o fib_warm_go fib_warm.go && go build -o parallel_go parallel.go && go build -o fanout_go fanout.go && go build -o fanout_stress_go fanout_stress.go && go build -o gomaxprocs_go gomaxprocs.go)
+    (cd "$BUILD_DIR" && run_bounded_argv go build -o fib_go fib.go && run_bounded_argv go build -o fib_warm_go fib_warm.go && run_bounded_argv go build -o parallel_go parallel.go && run_bounded_argv go build -o fanout_go fanout.go && run_bounded_argv go build -o fanout_stress_go fanout_stress.go && run_bounded_argv go build -o gomaxprocs_go gomaxprocs.go)
     GO_SCHEDULER="$("$BUILD_DIR/gomaxprocs_go" 2>/dev/null || echo "GOMAXPROCS=unavailable NumCPU=unavailable")"
     echo "  [ok] Go"
 else echo "  [skip] Go — go not found"; fi
 
 # Java
 if have javac; then
-    javac -d "$BUILD_DIR" "$BUILD_DIR/Fib.java" "$BUILD_DIR/FibWarm.java" "$BUILD_DIR/Parallel.java" "$BUILD_DIR/Fanout.java"
+    PROFILE_PHASE=compile PROFILE_TOOL=javac PROFILE_LANE=java
+    run_bounded_argv javac -d "$BUILD_DIR" "$BUILD_DIR/Fib.java" "$BUILD_DIR/FibWarm.java" "$BUILD_DIR/Parallel.java" "$BUILD_DIR/Fanout.java"
     echo "  [ok] Java (javac)"
 else echo "  [skip] Java — javac not found"; fi
 
 # Erlang
 if have erlc; then
-    erlc -o "$BUILD_DIR" "$BUILD_DIR/fib.erl" "$BUILD_DIR/fib_warm.erl" "$BUILD_DIR/parallel.erl" "$BUILD_DIR/fanout.erl"
+    PROFILE_PHASE=compile PROFILE_TOOL=erlc PROFILE_LANE=erlang
+    run_bounded_argv erlc -o "$BUILD_DIR" "$BUILD_DIR/fib.erl" "$BUILD_DIR/fib_warm.erl" "$BUILD_DIR/parallel.erl" "$BUILD_DIR/fanout.erl"
     echo "  [ok] Erlang (erlc)"
 else echo "  [skip] Erlang — erlc not found"; fi
 
 # Simple native
 if [ -x "$SIMPLE_BINARY" ]; then
+    PROFILE_PHASE=compile PROFILE_TOOL=simple PROFILE_LANE=native
     for _src in hello fib fib_warm parallel parallel_cooperative_green parallel_multicore_green fanout fanout_cooperative_green fanout_multicore_green fanout_stress_multicore_green hosted_sliced_fairness hosted_loop_safepoint_fairness; do
         _spl="$BUILD_DIR/${_src}.spl"
         _out="$BUILD_DIR/${_src}_simple_native"
@@ -1480,6 +1496,7 @@ if [ -x "$SIMPLE_BINARY" ]; then
                 : # ok
             else
                 _status=$?
+                [ "$COMPILE_FAIL_STATUS" -ne 0 ] || COMPILE_FAIL_STATUS=$_status
                 rm -f "$_out"
                 echo "  [FAIL] Simple native: $_spl"
                 if [ "$_status" -eq 124 ]; then
@@ -1495,7 +1512,9 @@ else echo "  [skip] Simple — $SIMPLE_BINARY not found"; fi
 
 # Simple SMF
 COMPILE_FAIL_SMF=""
+COMPILE_FAIL_SMF_STATUS=0
 if [ -x "$SIMPLE_BINARY" ]; then
+    PROFILE_PHASE=compile PROFILE_TOOL=simple PROFILE_LANE=smf
     for _src in hello fib fib_warm parallel parallel_cooperative_green parallel_multicore_green fanout fanout_cooperative_green fanout_multicore_green; do
         _spl="$BUILD_DIR/${_src}.spl"
         _out="$BUILD_DIR/${_src}_simple.smf"
@@ -1504,6 +1523,7 @@ if [ -x "$SIMPLE_BINARY" ]; then
                 : # ok
             else
                 _status=$?
+                [ "$COMPILE_FAIL_SMF_STATUS" -ne 0 ] || COMPILE_FAIL_SMF_STATUS=$_status
                 rm -f "$_out"
                 echo "  [FAIL] Simple SMF: $_spl"
                 if [ "$_status" -eq 124 ]; then
@@ -1567,6 +1587,18 @@ TUI startup speed is not measured by this cross-language profile. It is covered 
 \`Simple standalone TUI\` and \`Simple full TUI app\` rows in
 \`doc/09_report/startup_size_performance_audit_2026-05-27.md\`.
 EOF
+
+# Fail before emitting any measurement from a known-incomplete Simple matrix.
+PROFILE_PHASE=compile PROFILE_TOOL=simple PROFILE_LANE=native
+_simple_compile_status=$COMPILE_FAIL_STATUS
+if [ -z "$COMPILE_FAIL" ]; then
+    PROFILE_LANE=smf
+    _simple_compile_status=$COMPILE_FAIL_SMF_STATUS
+elif [ -n "$COMPILE_FAIL_SMF" ]; then
+    PROFILE_LANE=native-and-smf
+fi
+[ "$_simple_compile_status" -ne 0 ] || _simple_compile_status=1
+cross_language_perf_require_simple_compiles "$COMPILE_FAIL" "$COMPILE_FAIL_SMF" "$_simple_compile_status"
 
 # ── Artifact footprint ───────────────────────────────────────────────────
 
@@ -2527,10 +2559,10 @@ EOF
 
 echo ""
 echo "=== Report written to: $REPORT_PATH ==="
+PROFILE_PHASE=report-contract PROFILE_TOOL=profile-report-contract PROFILE_LANE=cross-language
 if [ "${SKIP_PROFILE_REPORT_CONTRACT:-0}" != "1" ]; then
     sh "$PROFILE_REPORT_CONTRACT_TEST" cross_language scripts/check/check-cross-language-perf.shs "$REPORT_PATH"
 fi
-if [ -n "$COMPILE_FAIL$COMPILE_FAIL_SMF" ]; then
-    echo "WARNING: Some Simple compilations failed — check output above"
-fi
+PROFILE_PHASE=complete PROFILE_TOOL=harness PROFILE_LANE=report
+printf '\nprofile_status: success\n' >>"$REPORT_PATH"
 echo ""

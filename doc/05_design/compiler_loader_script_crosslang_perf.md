@@ -1,5 +1,16 @@
 # Compiler, loader, script, and cross-language performance detail design
 
+## Report lifecycle and failure schema
+
+The cross-language harness claims its report path before invoking any compiler,
+replacing stale evidence with `profile_status: running`. Installed compiler and
+Simple native/SMF invocations are bounded by `RUN_TIMEOUT`. Any post-init
+failure preserves the original process status and appends exactly one terminal
+receipt containing phase, tool, lane, numeric status, and `timeout` only for
+status 124. Known Simple compilation failures stop immediately after the full
+report header, before artifact or timing sections. `profile_status: success` is
+written only after compilation, measurements, and the success-schema contract.
+
 The shell harness keeps the existing retained-table schema. Byte execution is
 `/usr/bin/time -f %M -o receipt timeout RUN_TIMEOUT env PERF_BYTE_SIZE executable`.
 GNU time's Linux wait4 accounting over `timeout` is contract-tested for positive

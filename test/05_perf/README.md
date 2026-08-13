@@ -20,6 +20,7 @@ Benchmarks are used to:
 | `native_layout_performance_spec.spl` | Native code layout performance tests | Run with test runner |
 | `profile_scripts/profile_report_contract_test.shs` | Common contract test for profile scripts that generate Markdown under `doc/09_report` | Called by profile scripts; can run directly with kind, script path, and report path |
 | `profile_scripts/profile_report_contract_negative_test.shs` | Negative mutation coverage for the cross-language report contract | Mutates temporary report copies and expects failures for slow Go fanout, slow Simple multicore-green fanout/stress, missing runtime-pool/counter evidence, bad OS-thread labels, cooperative-green M:N or missing-current-thread claims, SMF-baseline/pherallel profile drift, and forbidden numbered API names |
+| `profile_scripts/cross_language_compile_failure_contract_test.shs` | Fail-closed compiler/report lifecycle | Exercises stale-report replacement, native/SMF/C/Go failures and exact timeout status, one terminal receipt, no measurement section, and all-green admission |
 | `profile_scripts/profile_help_contract_test.shs` | Cross-language profile help contract | Verifies `--help` prints usage and exits before expensive workload compilation starts |
 | `profile_scripts/profile_binary_autoselect_test.shs` | Cross-language profile Simple-binary auto-selection regression | Runs a reduced profile and verifies stale wrappers are skipped |
 | `profile_scripts/profile_docker_isolation_contract_test.shs` | Cross-language profile Docker isolation contract | Stubs Docker and verifies the profile re-execs with network disabled, memory/CPU limits, UID/GID mapping, workspace mount, and env handoff |
@@ -104,6 +105,8 @@ val results = runner.run_all()
 
 ### Profile Script Reports
 - **Cross-language profile:** `scripts/check/check-cross-language-perf.shs`
+  Reports transition `running` → exactly one terminal `failure` receipt, or to
+  `success` only after all compilation, measurement, and report-contract gates.
 - **GUI profile:** `tools/gui_perf_bench/run_all_benchmarks.shs`
 - **Common report contract:** `test/05_perf/profile_scripts/profile_report_contract_test.shs` (no args checks the canonical checked-in cross-language report, `doc/09_report/README.md`, and `doc/03_plan/agent_tasks/multicore_green.md`, printing `report_index_checked=doc/09_report/README.md` and `agent_task_plan_checked=doc/03_plan/agent_tasks/multicore_green.md`; profile wrappers pass kind, script path, and report path explicitly)
 - **Negative report mutations:** `test/05_perf/profile_scripts/profile_report_contract_negative_test.shs` keeps Go-vs-C, Simple-vs-C, OS-thread, cooperative-green current-OS-thread wording, runtime-pool/counter evidence, SMF-baseline separation, and forbidden-numbered-name failures release-visible
