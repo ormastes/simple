@@ -175,6 +175,7 @@ class PriorityMailbox:
             val msg = self.high_messages_ready[self.high_messages_ready.len() - 1]
             self.high_messages_ready = self.high_messages_ready[0:self.high_messages_ready.len() - 1]
             self.stats.current_size = Count(value: self.stats.current_size.value - 1)
+            self.stats.high_priority_count = Count(value: self.stats.high_priority_count.value - 1)
             self.stats.total_processed = Count(value: self.stats.total_processed.value + 1)
             self.stats.off_heap_bytes = ByteSize(value: self.stats.off_heap_bytes.value - msg.size_bytes.value)
             return msg
@@ -200,6 +201,7 @@ class PriorityMailbox:
             if pred(hmsg):
                 self.high_messages_ready.remove(hidx)
                 self.stats.current_size = Count(value: self.stats.current_size.value - 1)
+                self.stats.high_priority_count = Count(value: self.stats.high_priority_count.value - 1)
                 self.stats.total_processed = Count(value: self.stats.total_processed.value + 1)
                 self.stats.off_heap_bytes = ByteSize(
                     value: self.stats.off_heap_bytes.value - hmsg.size_bytes.value)
@@ -210,6 +212,7 @@ class PriorityMailbox:
             if pred(hmsg2):
                 self.high_messages.remove(hidx2)
                 self.stats.current_size = Count(value: self.stats.current_size.value - 1)
+                self.stats.high_priority_count = Count(value: self.stats.high_priority_count.value - 1)
                 self.stats.total_processed = Count(value: self.stats.total_processed.value + 1)
                 self.stats.off_heap_bytes = ByteSize(
                     value: self.stats.off_heap_bytes.value - hmsg2.size_bytes.value)
@@ -259,10 +262,12 @@ class PriorityMailbox:
         self.high_messages_ready = []
         self.stats.current_size = Count(value: 0)
         self.stats.off_heap_bytes = ByteSize(value: 0)
+        self.stats.high_priority_count = Count(value: 0)
 
     me drop_stale(threshold_ms: i64) -> i64:
         var dropped = 0
         var dropped_bytes = 0
+        var dropped_high = 0
         var new_msgs = []
         for msg in self.messages:
             if msg.is_stale(threshold_ms):
@@ -284,6 +289,7 @@ class PriorityMailbox:
             if msg.is_stale(threshold_ms):
                 dropped = dropped + 1
                 dropped_bytes = dropped_bytes + msg.size_bytes.value
+                dropped_high = dropped_high + 1
             else:
                 new_high.push(msg)
         self.high_messages = new_high
@@ -292,12 +298,15 @@ class PriorityMailbox:
             if msg.is_stale(threshold_ms):
                 dropped = dropped + 1
                 dropped_bytes = dropped_bytes + msg.size_bytes.value
+                dropped_high = dropped_high + 1
             else:
                 new_high_ready.push(msg)
         self.high_messages_ready = new_high_ready
         self.stats.current_size = Count(value: self.stats.current_size.value - dropped)
         self.stats.total_dropped = Count(value: self.stats.total_dropped.value + dropped)
         self.stats.off_heap_bytes = ByteSize(value: self.stats.off_heap_bytes.value - dropped_bytes)
+        self.stats.high_priority_count = Count(
+            value: self.stats.high_priority_count.value - dropped_high)
         dropped
 
     me close():

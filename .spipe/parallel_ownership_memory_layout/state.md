@@ -755,6 +755,9 @@ in-progress
 - impl: Priority-mailbox lifecycle counters now classify selective delivery as
   processed and stale eviction as dropped, keeping bounded-memory telemetry
   consistent with the queue's actual ownership transitions.
+- impl: Priority-mailbox high-priority occupancy now releases on delivery,
+  selective removal, stale eviction, and clear, so reserve telemetry cannot
+  retain phantom high-priority pressure.
 - impl: `Actor` is now class-backed too, preserving its lifecycle, dispatch,
   and error fields through scheduler registry iteration. Mailbox sharing alone
   was insufficient because the surrounding actor values still lost those
