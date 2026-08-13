@@ -63,7 +63,9 @@ storage repair, not evidence of multi-threaded actor execution.
 The scheduler itself is a class-backed authority. Every `ActorRef` retains the
 scheduler that admitted it, so `spawn_on(custom_scheduler, ...)` send/ask/run
 operations cannot fall back to the ambient global scheduler. References copied
-from that actor retain the same routing authority.
+from that actor retain the same routing authority. `ActorRef.stop()` uses that
+same scheduler to drain queued asks and release their reply reservations before
+the actor closes.
 Each `Actor` is likewise class-backed: lifecycle state and error/dispatch
 counters remain with the scheduler’s actor handle instead of disappearing in
 value-array iteration.

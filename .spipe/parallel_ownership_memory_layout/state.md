@@ -744,6 +744,9 @@ in-progress
   bounded reply cancellation through that custom scheduler instead of the
   ambient global scheduler. It is a single-threaded routing repair; native
   actor lifecycle evidence and typed transfer remain open.
+- impl: `ActorRef.stop()` now delegates to that same scheduler. Scheduler-owned
+  stop drains queued asks, cancels their bounded reply reservations, removes
+  ready work, and reports a wrong-scheduler/unknown-actor stop as false.
 - impl: `Actor` is now class-backed too, preserving its lifecycle, dispatch,
   and error fields through scheduler registry iteration. Mailbox sharing alone
   was insufficient because the surrounding actor values still lost those
