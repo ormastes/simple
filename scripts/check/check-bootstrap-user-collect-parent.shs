@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+bootstrap="$root/src/os/kernel/scheduler/scheduler_arm_bootstrap.spl"
+collector="$root/src/os/kernel/scheduler/scheduler_task_mgmt.spl"
+
+fail() {
+    printf '%s\n' "bootstrap collect-parent gate: $*" >&2
+    exit 1
+}
+
+grep -F 'capabilities: caps, parent: Some(TaskId(id: 0))' "$bootstrap" >/dev/null || fail "bootstrap child must bind synthetic PID 0 parent"
+grep -F 'val synthetic_bootstrap_collect = parent_id.id == 0 and child_id.id != 0 and child_id.id != 0xFFFFFFFFFFFFFFFF' "$collector" >/dev/null || fail "collector must admit only a named synthetic-parent child"
+grep -F 'if parent_slot < 0 and not synthetic_bootstrap_collect:' "$collector" >/dev/null || fail "missing-parent rejection must retain the synthetic exact-child exception"
+
+if grep -F 'parent_slot < 0:' "$collector" >/dev/null; then
+    fail "unconditional missing-parent rejection reintroduced"
+fi
+
+printf '%s\n' 'PASS bootstrap synthetic parent exact-child collection'

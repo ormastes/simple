@@ -277,7 +277,12 @@ pub fn sched_wait_for_collect_impl(
 ) -> (WaitCollectResult, [TaskControlBlock?], bool):
     """Collect a child exit event. Returns (result, updated_tasks, should_block_parent)."""
     val parent_slot = _find_slot_in(tasks, parent_id)
-    if parent_slot < 0:
+    # PID 0 is the synthetic bootstrap-kernel parent. It has no TCB, but may
+    # collect only one explicitly named child that was itself bound to PID 0.
+    # In particular, wildcard waits remain rejected and ordinary missing
+    # parents keep the fail-closed ECHILD result.
+    val synthetic_bootstrap_collect = parent_id.id == 0 and child_id.id != 0 and child_id.id != 0xFFFFFFFFFFFFFFFF
+    if parent_slot < 0 and not synthetic_bootstrap_collect:
         return (WaitCollectResult(pid: 0, status: 0, error: -10), tasks, false)
 
     val any_child = child_id.id == 0 or child_id.id == 0xFFFFFFFFFFFFFFFF
