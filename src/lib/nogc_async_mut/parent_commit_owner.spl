@@ -24,6 +24,7 @@ use std.common.structural.transfer.transfer_contracts.{
 }
 use std.common.structural.transfer.process_frame_codec.{decode_process_transfer_frame}
 use std.common.structural.parallel_commit.result_envelope_codec.{decode_result_envelope}
+use std.nogc_async_mut.parent_commit_inbox.{ParentCommitFrameInboxV1}
 use std.thread_sffi.{MutexHandle, mutex_create}
 
 struct ParentCommitSubmissionV1:
@@ -144,6 +145,20 @@ impl ParentCommitOwnerV1:
             decoded_frame.value.envelope, decoded_result.value)
         self.commit_submissions([submission], candidate_snapshot_token)
 
+    me commit_next_process_result(inbox: ParentCommitFrameInboxV1,
+                                  candidate_snapshot_token: i64) -> ParallelCommitOutcomeV1:
+        """Drain exactly one accepted ingress frame into the parent commit.
+
+        The inbox transfers the frame before this method acquires the commit
+        root. A stale/conflicting result is therefore terminal for that frame;
+        callers must create a new child result against a new snapshot rather
+        than relying on implicit queue retries.
+        """
+        val received = inbox.receive()
+        if not received.ok:
+            return self.inbox_failure(received.reason)
+        self.commit_process_result_frame(received.frame, candidate_snapshot_token)
+
     fn lock_failure() -> ParallelCommitOutcomeV1:
         """Return a diagnostic-only outcome if runtime serialization is absent."""
         self.failure("commit-owner-lock-unavailable")
@@ -152,6 +167,13 @@ impl ParentCommitOwnerV1:
         if not self.mutex.lock():
             return self.lock_failure()
         val rejected = self.failure("invalid-process-result-frame")
+        self.mutex.unlock()
+        rejected
+
+    me inbox_failure(reason: text) -> ParallelCommitOutcomeV1:
+        if not self.mutex.lock():
+            return self.lock_failure()
+        val rejected = self.failure("process-result-inbox-" + reason)
         self.mutex.unlock()
         rejected
 

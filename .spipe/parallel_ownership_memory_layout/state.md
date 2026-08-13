@@ -629,6 +629,15 @@ dev-done
   produce a final verdict and the prior interpreter SSpec output was
   truncated, so this remains contract wiring—not evidence of a child process
   executing or delivering an accepted result.
+- impl: Added `ParentCommitFrameInboxV1`, a mutex-owned bounded FIFO for
+  Process-to-Parent result frames. Admission validates both existing frame
+  transport and the typed result codec before retaining an independent byte
+  copy; a head cursor avoids front-slice churn, close drains accepted frames,
+  and a full inbox returns backpressure. The parent drains one frame through
+  `ParentCommitOwnerV1`, preserving permanent consumption on stale/conflict
+  rather than silently retrying. The bootstrap source check passed; the
+  focused interpreter SSpec produced truncated bootstrap output without a
+  final verdict, so real IPC and native backpressure execution remain open.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters

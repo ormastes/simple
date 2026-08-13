@@ -1,0 +1,79 @@
+use std.spec
+use std.common.structural.parallel_commit.commit_contracts.{
+    ParallelCommitOrder,
+    ParallelConflictPolicy,
+    ParallelResultKind,
+    result_envelope_v1
+}
+use std.common.structural.parallel_commit.commit_engine.{parallel_commit_state_v1}
+use std.common.structural.parallel_commit.result_envelope_codec.{encode_result_envelope}
+use std.common.structural.transfer.process_frame_codec.{
+    encode_process_transfer_frame,
+    process_transfer_frame_v1
+}
+use std.common.structural.transfer.transfer_contracts.{
+    ParallelExecutionDomain,
+    ParallelTransferMode,
+    ParallelTransferPayload,
+    transfer_envelope_v1
+}
+use std.nogc_async_mut.parent_commit_inbox.{parent_commit_frame_inbox_v1}
+use std.nogc_async_mut.parent_commit_owner.{parent_commit_owner_v1}
+
+fn child_process_result_frame(task_id: i64, payload: i64) -> [u8]:
+    val result = result_envelope_v1(4, task_id, 0, task_id,
+        ParallelResultKind.Patch, payload, "child-{task_id}")
+    val envelope = transfer_envelope_v1(task_id, 0,
+        ParallelExecutionDomain.Process,
+        ParallelExecutionDomain.Parent,
+        ParallelTransferMode.Copy,
+        ParallelTransferPayload.EncodedCopy,
+        0, false)
+    encode_process_transfer_frame(
+        process_transfer_frame_v1(envelope, encode_result_envelope(result)))
+
+describe "ParentCommitFrameInboxV1 bounded process ingress":
+    it "enforces bounded acceptance and FIFO delivery":
+        val inbox = parent_commit_frame_inbox_v1(2)
+        val first = child_process_result_frame(1, 101)
+        val second = child_process_result_frame(2, 102)
+        val third = child_process_result_frame(3, 103)
+        assert_true(inbox.offer_process_result_frame(first))
+        assert_true(inbox.offer_process_result_frame(second))
+        assert_false(inbox.offer_process_result_frame(third))
+        assert_equal(inbox.depth(), 2)
+        val received_first = inbox.receive()
+        assert_true(received_first.ok)
+        assert_equal(received_first.frame, first)
+        assert_true(inbox.offer_process_result_frame(third))
+        val received_second = inbox.receive()
+        val received_third = inbox.receive()
+        assert_equal(received_second.frame, second)
+        assert_equal(received_third.frame, third)
+        assert_equal(inbox.depth(), 0)
+
+    it "rejects malformed frames and drains after close":
+        val inbox = parent_commit_frame_inbox_v1(1)
+        assert_false(inbox.offer_process_result_frame([0, 1, 2]))
+        val valid = child_process_result_frame(1, 101)
+        assert_true(inbox.offer_process_result_frame(valid))
+        inbox.close()
+        assert_true(inbox.is_closed())
+        assert_false(inbox.offer_process_result_frame(child_process_result_frame(2, 102)))
+        assert_true(inbox.receive().ok)
+        assert_equal(inbox.receive().reason, "closed")
+
+    it "drains one accepted frame into the serialized parent root":
+        val inbox = parent_commit_frame_inbox_v1(1)
+        val owner = parent_commit_owner_v1(
+            parallel_commit_state_v1(4, 400),
+            ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        assert_true(inbox.offer_process_result_frame(
+            child_process_result_frame(7, 707)))
+        val committed = owner.commit_next_process_result(inbox, 401)
+        assert_true(committed.receipt.ok)
+        assert_equal(committed.receipt.ordered_payload_tokens[0], 707)
+        assert_equal(inbox.depth(), 0)
+        assert_equal(owner.commit_next_process_result(inbox, 402).receipt.reason,
+            "process-result-inbox-empty")

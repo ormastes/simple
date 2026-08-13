@@ -1,0 +1,117 @@
+# Bounded parent-owned ingress for framed child process results.
+#
+# The queue retains only independently copied, already schema-valid frames.
+# It is deliberately not an IPC implementation: an OS pipe/socket/process
+# adapter must call `offer_process_result_frame` and the parent alone drains it
+# into ParentCommitOwnerV1. This keeps process-local pointers outside the
+# parent root and supplies deterministic bounded backpressure before commit.
+
+use std.common.structural.parallel_commit.result_envelope_codec.{decode_result_envelope}
+use std.common.structural.transfer.process_frame_codec.{
+    MAX_PROCESS_TRANSFER_BYTES,
+    decode_process_transfer_frame
+}
+use std.common.structural.transfer.transfer_contracts.{ParallelExecutionDomain}
+use std.thread_sffi.{MutexHandle, mutex_create}
+
+struct ParentCommitFrameReceiveV1:
+    ok: bool
+    frame: [u8]
+    reason: text
+
+fn parent_commit_frame_copy(source: [u8]) -> [u8]:
+    var result: [u8] = []
+    var i = 0
+    while i < source.len():
+        result.push(source[i])
+        i = i + 1
+    result
+
+fn parent_commit_frame_receive_v1(ok: bool, frame: [u8],
+                                  reason: text) -> ParentCommitFrameReceiveV1:
+    ParentCommitFrameReceiveV1(ok: ok, frame: frame, reason: reason)
+
+class ParentCommitFrameInboxV1:
+    """One bounded FIFO owned by the parent result-ingress boundary.
+
+    A rejected frame never consumes a slot. Frames that pass the route and
+    typed result codecs are copied before retention, so a caller cannot mutate
+    an accepted buffer after `offer_process_result_frame` returns. `receive`
+    transfers one copied frame out of the queue; an unsuccessful later commit
+    does not reinsert it, avoiding an implicit retry/ownership resurrection.
+    """
+    capacity: i64
+    frames: [[u8]]
+    head: i64
+    closed: bool
+    mutex: MutexHandle
+
+impl ParentCommitFrameInboxV1:
+    static fn create(capacity: i64) -> ParentCommitFrameInboxV1:
+        ParentCommitFrameInboxV1(
+            capacity: capacity,
+            frames: [],
+            head: 0,
+            closed: false,
+            mutex: mutex_create()
+        )
+
+    me offer_process_result_frame(frame: [u8]) -> bool:
+        """Accept one bounded Process-to-Parent frame or signal backpressure."""
+        if frame.len() == 0 or frame.len() > MAX_PROCESS_TRANSFER_BYTES:
+            return false
+        val decoded_frame = decode_process_transfer_frame(
+            frame, ParallelExecutionDomain.Parent)
+        if not decoded_frame.ok:
+            return false
+        if not decode_result_envelope(decoded_frame.value.payload).ok:
+            return false
+        if not self.mutex.lock():
+            return false
+        if self.closed or self.capacity <= 0 or self.frames.len() - self.head >= self.capacity:
+            self.mutex.unlock()
+            return false
+        self.frames.push(parent_commit_frame_copy(frame))
+        self.mutex.unlock()
+        true
+
+    me receive() -> ParentCommitFrameReceiveV1:
+        """Remove the oldest accepted frame without front-slicing the buffer."""
+        if not self.mutex.lock():
+            return parent_commit_frame_receive_v1(false, [], "lock-unavailable")
+        if self.head >= self.frames.len():
+            val reason = if self.closed: "closed" else: "empty"
+            self.mutex.unlock()
+            return parent_commit_frame_receive_v1(false, [], reason)
+        val frame = parent_commit_frame_copy(self.frames[self.head])
+        self.head = self.head + 1
+        if self.head == self.frames.len():
+            self.frames = []
+            self.head = 0
+        self.mutex.unlock()
+        parent_commit_frame_receive_v1(true, frame, "")
+
+    me close():
+        """Reject future frames while allowing already accepted frames to drain."""
+        if not self.mutex.lock():
+            return
+        self.closed = true
+        self.mutex.unlock()
+
+    fn depth() -> i64:
+        """Return the current bounded occupancy, or -1 if locking fails."""
+        if not self.mutex.lock():
+            return -1
+        val result = self.frames.len() - self.head
+        self.mutex.unlock()
+        result
+
+    fn is_closed() -> bool:
+        if not self.mutex.lock():
+            return true
+        val result = self.closed
+        self.mutex.unlock()
+        result
+
+fn parent_commit_frame_inbox_v1(capacity: i64) -> ParentCommitFrameInboxV1:
+    ParentCommitFrameInboxV1.create(capacity)
