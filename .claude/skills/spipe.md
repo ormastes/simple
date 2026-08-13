@@ -2451,6 +2451,11 @@ the loader is not guest-entry evidence even if the ELF was staged correctly.
 Where hart-only OpenOCD reset cannot restore firmware, a fixed, allowlisted RAM
 trampoline may invoke SBI SRST cold reboot. PASS requires UART evidence that
 BootROM, OpenSBI, peripherals, and U-Boot restarted plus restored probe-driver
-state; issuing the `ecall` alone is insufficient. An immutable packaged-root
+state; issuing the `ecall` alone is insufficient. For the proven StarFive
+JH7110/Tigard lane, the canonical command is
+`scripts/os/starfive-jtag-sbi-reset.shs`; generic OpenOCD `reset run` is not a
+full-SoC reset oracle. The helper must keep its instruction sequence and RAM
+scratch address allowlisted, reject arbitrary payloads/addresses, and preserve
+the UART reset-burst transcript. An immutable packaged-root
 manifest remains real VFS evidence when CLI `ls` calls public `readdir`; never
 hardcode the listing in the shell command handler.

@@ -3,6 +3,31 @@
 Short, canonical term resolution for coding agents. Read this index when a user
 names a repository capability whose implementation owner is ambiguous.
 
+## StarFive JH7110 software reset over Tigard JTAG
+
+- **Canonical command:** `scripts/os/starfive-jtag-sbi-reset.shs`.
+- **Meaning:** load a fixed, reviewed SBI SRST cold-reboot trampoline into an
+  allowlisted RAM scratch address through Tigard JTAG, select the proven U74
+  hart, and execute the supervisor-mode `ecall`.
+- **Why:** generic OpenOCD `reset run` controls a debug hart but did not restore
+  the complete JH7110 firmware/SoC state on the tested VisionFive 2.
+- **PASS evidence:** a retained UART transcript shows a fresh BootROM, OpenSBI,
+  peripheral initialization, and U-Boot sequence; Tigard channel B's kernel
+  driver is restored. The `ecall` or OpenOCD exit status alone is not proof.
+- **Safety boundary:** never accept arbitrary instructions, payload files, or
+  RAM addresses. Use the reviewed fixed trampoline and scratch address; do not
+  write QSPI, eMMC, environment, or other persistent storage.
+- **Primary guide:**
+  `doc/07_guide/platform/simpleos/starfive_visionfive2_simpleos.md`.
+
+### Agent lookup rule
+
+When asked to software-reset or reboot a StarFive JH7110 through Tigard, use
+the SBI SRST helper and capture UART concurrently. Do not substitute OpenOCD
+`reset run`, a direct PC write, or hardware-reset claims. If the expected fresh
+firmware sequence is absent, report reset as failed or blocked rather than
+PASS.
+
 ## Simple embedded DB / Simple SQLite
 
 - **Canonical meaning:** `std.database.pure_sql.{PureDatabase}`.

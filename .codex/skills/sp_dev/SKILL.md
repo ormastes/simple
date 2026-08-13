@@ -1034,6 +1034,10 @@ If generic JTAG reset does not reboot the SoC, a reviewed SBI SRST trampoline
 may be injected into an allowlisted RAM scratch address: set the SRST EID/FID
 and cold-reboot arguments, execute `ecall` in supervisor mode, retain UART proof
 of BootROM/OpenSBI/U-Boot restart, and restore the debug-probe driver. Keep the
-trampoline fixed and reject arbitrary code/addresses. For immutable packaged
-roots, a VFS-owned manifest is valid evidence when the shell calls public
-`readdir`; names must not be embedded in the shell output path.
+trampoline fixed and reject arbitrary code/addresses. On the proven StarFive
+JH7110/Tigard lane, use `scripts/os/starfive-jtag-sbi-reset.shs`; generic
+OpenOCD `reset run` is hart-level debug control and is not a full-SoC reset
+oracle. Do not claim reset from the OpenOCD command alone: the retained UART
+transcript must show a fresh BootROM/OpenSBI/U-Boot sequence. For immutable
+packaged roots, a VFS-owned manifest is valid evidence when the shell calls
+public `readdir`; names must not be embedded in the shell output path.
