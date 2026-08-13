@@ -798,3 +798,4 @@ in-progress
 - impl: Reworked mimalloc page free-list allocation to pop its appended tail.
   Local and raw frees already append, so LIFO reuse avoids copying remaining
   free-list entries while preserving page ownership and capacity accounting.
+  The tail pop is direct (not a tail slice), so the cost claim is exact.
