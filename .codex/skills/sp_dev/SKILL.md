@@ -189,6 +189,9 @@ sole matrix promotion owner. Keep Windows/FreeBSD target-host rows blocked and
 macOS postponed when their native executor is unavailable—never omit or count
 them as PASS. The current evidence ledger is
 `doc/03_plan/sys_test/sosix_qemu_matrix_evidence_status_2026-08-13.md`.
+Before a native run, execute `sh scripts/check/produce-sosix-qemu-native-pass-bundle.shs --self-test`;
+that temporary direct-kernel fixture validates producer closure only and never
+replaces pre-run host admission or real row evidence.
 
 For recent unfinished-plan cleanup lanes, use
 `doc/07_guide/infra/recent_plan_cleanup.md`. Keep the cleanup matrix under

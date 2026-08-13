@@ -437,7 +437,11 @@ Compiler-bearing media additionally needs target-native
 host bundles only through `produce-sosix-qemu-native-pass-bundle.shs` followed
 by `collect-sosix-qemu-evidence.shs`; missing hosts or media remain owned
 `blocked` rows with exact resume commands. TCG proves correctness only, and
-macOS postponement is not PASS. The current PASS/blocked ledger is
+macOS postponement is not PASS. Before a native-host attempt, run
+`sh scripts/check/produce-sosix-qemu-native-pass-bundle.shs --self-test`; its
+temporary fixture checks producer closure but is not host admission and cannot
+be published as a row.
+The current PASS/blocked ledger is
 `doc/03_plan/sys_test/sosix_qemu_matrix_evidence_status_2026-08-13.md`.
 
 Canonical operator detail is
