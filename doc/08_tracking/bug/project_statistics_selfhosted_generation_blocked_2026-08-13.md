@@ -14,6 +14,14 @@ Partially resolved — parser repaired; current admitted CLI/PPTX generation rem
   `stats` tool is unavailable.
 - `bin/simple spipe-docgen ... --no-index` succeeds with 1/1 complete manuals
   and 0 stubs, so documentation generation itself is not the blocker.
+- A direct native Office conversion was attempted three times. Grammar-safe
+  parenthesization advanced the shared closure past `verification_ir.spl`,
+  `process_ops.spl`, and `simpleos_host_gpu_protocol.spl`; the third bounded
+  attempt stops at `src/lib/gc_async_mut/gpu/browser_engine/web_paint_chunk_frame.spl`
+  with `Unexpected token: expected LParen, found Dot`.
+- `StatsInventoryV2` scanning now rejects filesystem symlinks, preventing
+  source aliases such as `src/std -> lib` and test links into `src` from
+  double-counting or recursively traversing the inventory.
 
 ## Impact
 
