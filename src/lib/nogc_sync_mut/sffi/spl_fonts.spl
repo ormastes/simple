@@ -77,15 +77,15 @@ fn font_rasterizer_void_transport_probe() -> bool:
     meta_ok and pixels_ok
 
 # ============================================================================
-# GlyphBitmap — metrics + an owned snapshot of the glyph pixel coverage
+# SffiGlyphBitmap — metrics + an owned snapshot of the glyph pixel coverage
 # ============================================================================
 #
-# Phase 3a: GlyphBitmap owns its pixel data. `rasterize()` eagerly copies
+# Phase 3a: SffiGlyphBitmap owns its pixel data. `rasterize()` eagerly copies
 # width*height alpha samples out of the dylib's single-slot buffer into
 # `pixels` before returning, so subsequent rasterize calls cannot silently
 # clobber this glyph's bitmap. `handle` is retained only for diagnostics.
 
-class GlyphBitmap:
+class SffiGlyphBitmap:
     # Field names are prefixed (`gbm_*`) to stay GLOBALLY unique rather than
     # reusing `width`/`height`/`advance`/`bearing_x`/`bearing_y`/`pixels` —
     # those exact names are also declared (at different indices) by the much
@@ -94,8 +94,8 @@ class GlyphBitmap:
     # an ANY-erased cross-module receiver via a receiver-blind "struct
     # declaring this name with the MOST fields wins" scan (see
     # doc/08_tracking/bug/simpleos_native_build_framebufferdriver_crossmodule_field_offset_shift_2026-07-14.md),
-    # so a GlyphBitmap value passed as a typed param across a module boundary
-    # (e.g. `_sffi_glyph_to_cached(gb: GlyphBitmap, ...)`) silently reads
+    # so a SffiGlyphBitmap value passed as a typed param across a module boundary
+    # (e.g. `_sffi_glyph_to_cached(gb: SffiGlyphBitmap, ...)`) silently reads
     # CachedGlyph's field offsets instead of its own — root cause of the
     # 2026-07-19 pure-sfnt-glyf rasterizer pointer-corruption fault. `handle`
     # is left unprefixed: it is never read across a module boundary here.
@@ -107,7 +107,7 @@ class GlyphBitmap:
     handle: i64
     gbm_pixels: [u8]
 
-impl GlyphBitmap:
+impl SffiGlyphBitmap:
     # Alpha coverage (0..255) at pixel (x,y) in the rasterized glyph.
     # Out-of-bounds coordinates return 0 (no panic, no dylib round-trip).
     fn alpha_at(x: i64, y: i64) -> i64:
@@ -336,7 +336,7 @@ impl FontRasterizer:
         args = args.push(handle)
         spl_wffi_call_i64(self.glyph_free_fp, args, 1)
 
-    fn _rasterize_selected_outline(selector_kind: i64, selector_value: i64, size_px: i64) -> GlyphBitmap?:
+    fn _rasterize_selected_outline(selector_kind: i64, selector_value: i64, size_px: i64) -> SffiGlyphBitmap?:
         if self.selected_blob.len() == 0 or size_px <= 0:
             return nil
         var meta: [i64] = [0; 20]
@@ -350,7 +350,7 @@ impl FontRasterizer:
             return nil
         if not self.is_current():
             return nil
-        GlyphBitmap(
+        SffiGlyphBitmap(
             gbm_width: meta[0],
             gbm_height: meta[1],
             gbm_advance: meta[2],
@@ -361,16 +361,16 @@ impl FontRasterizer:
         )
 
     # Rasterize the given Unicode codepoint at the given pixel size.
-    # Returns a GlyphBitmap with metrics and an OWNED pixel snapshot, or nil
+    # Returns a SffiGlyphBitmap with metrics and an OWNED pixel snapshot, or nil
     # on failure (invalid codepoint, non-positive size, not yet initialized).
     #
     # Phase 3a: even though the Phase 1 dylib still uses a single global
     # glyph slot, we eagerly copy the entire w*h alpha buffer into the
-    # returned GlyphBitmap. Subsequent rasterize calls clobber the dylib
-    # slot but leave previously returned GlyphBitmaps untouched, so callers
+    # returned SffiGlyphBitmap. Subsequent rasterize calls clobber the dylib
+    # slot but leave previously returned SffiGlyphBitmaps untouched, so callers
     # can safely interleave rasterize/read. A 0x0 glyph (whitespace) still
-    # yields a valid GlyphBitmap with an empty `pixels` array.
-    fn rasterize(codepoint: i64, size_px: i64) -> GlyphBitmap?:
+    # yields a valid SffiGlyphBitmap with an empty `pixels` array.
+    fn rasterize(codepoint: i64, size_px: i64) -> SffiGlyphBitmap?:
         if not self.is_current():
             return nil
         if self.lib_handle == 0:
@@ -404,7 +404,7 @@ impl FontRasterizer:
         self._free_glyph(handle)
         if not self.is_current():
             return nil
-        GlyphBitmap(
+        SffiGlyphBitmap(
             gbm_width: w,
             gbm_height: h,
             gbm_advance: adv,
@@ -416,7 +416,7 @@ impl FontRasterizer:
 
     # Rasterize a producer-shaped glyph ID from this exact selected face.
     # The result owns its pixels and never exposes the selected face handle.
-    fn rasterize_glyph_index(glyph_index: i64, size_px: i64) -> GlyphBitmap?:
+    fn rasterize_glyph_index(glyph_index: i64, size_px: i64) -> SffiGlyphBitmap?:
         if (not self.is_current() or self.selected_blob.len() == 0 or
             glyph_index <= 0 or glyph_index > 4294967295 or size_px <= 0 or size_px > 512):
             return nil
