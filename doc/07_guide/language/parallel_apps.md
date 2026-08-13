@@ -60,6 +60,11 @@ The single-threaded actor scheduler also uses a consumed-prefix cursor for its
 ready IDs. It reclaims a half-consumed large prefix in bounded batches rather
 than slicing the front after every dispatch; this is an amortized scheduling
 storage repair, not evidence of multi-threaded actor execution.
+Legacy `ask()` replies now reserve a finite scheduler-owned result slot at
+admission. That credit remains consumed through handler completion until the
+caller consumes or cancels the reply; an exhausted store rejects the ask rather
+than silently dropping a completed result. This remains a scalar legacy actor
+convention, not a typed transfer/parent-commit channel.
 
 The scalar `BoundedChannel` implementation also uses a consumed-prefix cursor:
 receive is normally O(1), and backing storage is compacted only when a later

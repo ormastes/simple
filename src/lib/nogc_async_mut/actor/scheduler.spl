@@ -30,6 +30,7 @@ use std.actor.mailbox.{ActorMailbox, ActorMessage}
 use std.env.variables.{env_has}
 
 val ACTOR_READY_QUEUE_COMPACT_MIN_CONSUMED: i64 = 64
+val ACTOR_REPLY_STORE_DEFAULT_CAPACITY: i64 = 256
 
 fn actor_scheduler_ready_queue_should_compact(consumed: i64, total: i64) -> bool:
     """Amortize ready-queue prefix reclamation without an O(n) front pop."""
@@ -52,23 +53,60 @@ struct ReplyEntry:
     value: text
 
 struct ReplyStore:
-    """Collects results from ask-style messages."""
+    """Bounded reply reservations and completed results for ask messages."""
     entries: [ReplyEntry]
+    reserved_reply_ids: [i64]
     next_reply_id: i64
+    capacity: i64
 
 impl ReplyStore:
     static fn new() -> ReplyStore:
-        ReplyStore(entries: [], next_reply_id: 1)
+        ReplyStore.with_capacity(ACTOR_REPLY_STORE_DEFAULT_CAPACITY)
+
+    static fn with_capacity(requested_capacity: i64) -> ReplyStore:
+        var capacity = requested_capacity
+        if capacity <= 0:
+            capacity = ACTOR_REPLY_STORE_DEFAULT_CAPACITY
+        ReplyStore(entries: [], reserved_reply_ids: [], next_reply_id: 1,
+            capacity: capacity)
+
+    fn outstanding_count() -> i64:
+        self.entries.len() + self.reserved_reply_ids.len()
+
+    fn is_full() -> bool:
+        self.outstanding_count() >= self.capacity
 
     me allocate_id() -> i64:
-        """Allocate a unique reply ID."""
+        """Reserve bounded reply capacity and allocate its unique ID.
+
+        `-1` is an admission failure, never a valid reply ID. A reservation
+        consumes capacity before the actor runs so completed replies cannot be
+        silently dropped later.
+        """
+        if self.is_full():
+            return -1
         val id = self.next_reply_id
         self.next_reply_id = self.next_reply_id + 1
+        self.reserved_reply_ids.push(id)
         id
 
-    me put(reply_id: i64, value: text):
-        """Store a reply value."""
+    me remove_reservation(reply_id: i64) -> bool:
+        var found = false
+        var remaining: [i64] = []
+        for id in self.reserved_reply_ids:
+            if id == reply_id:
+                found = true
+            else:
+                remaining.push(id)
+        self.reserved_reply_ids = remaining
+        found
+
+    me put(reply_id: i64, value: text) -> bool:
+        """Publish a result only for an admission-time reservation."""
+        if not self.remove_reservation(reply_id):
+            return false
         self.entries.push(ReplyEntry(reply_id: reply_id, value: value))
+        true
 
     fn get(reply_id: i64) -> text?:
         """Retrieve a reply value, or nil if not yet available."""
@@ -91,6 +129,11 @@ impl ReplyStore:
             if entry.reply_id != reply_id:
                 new_entries.push(entry)
         self.entries = new_entries
+
+    me cancel(reply_id: i64):
+        """Release a pending reservation or discard an unconsumed reply."""
+        self.remove_reservation(reply_id)
+        self.remove(reply_id)
 
 # ================================================================
 # Actor Scheduler
@@ -159,6 +202,11 @@ impl ActorScheduler:
         var new_actors: [Actor] = []
         for act in self.actors:
             if act.id == actor_id:
+                val abandoned = act.mailbox.drain()
+                for message in abandoned:
+                    match message.reply_id:
+                        Some(reply_id): self.replies.cancel(reply_id)
+                        nil: ()
                 act.stop()
             else:
                 new_actors.push(act)
@@ -192,14 +240,17 @@ impl ActorScheduler:
         The caller can later retrieve the reply via get_reply(reply_id).
         Returns the reply ID, or -1 if the actor was not found.
         """
-        val reply_id = self.replies.allocate_id()
         for act in self.actors:
             if act.id == actor_id:
+                val reply_id = self.replies.allocate_id()
+                if reply_id < 0:
+                    return -1
                 val msg = ActorMessage.with_reply(method, args, reply_id)
                 val ok = act.mailbox.enqueue(msg)
                 if ok:
                     self._enqueue_ready(actor_id)
                     return reply_id
+                self.replies.cancel(reply_id)
                 return -1
         -1
 
@@ -262,10 +313,14 @@ impl ActorScheduler:
                     # Store reply if requested
                     match the_msg.reply_id:
                         Some(rid):
-                            self.replies.put(rid, result.value)
+                            if not self.replies.put(rid, result.value):
+                                self.total_errors = self.total_errors + 1
                         nil:
                             pass_do_nothing("fire-and-forget message has no reply id")
                 else:
+                    match the_msg.reply_id:
+                        Some(rid): self.replies.cancel(rid)
+                        nil: ()
                     act.error_count = act.error_count + 1
                     act.last_error = result.error_msg
                     self.total_errors = self.total_errors + 1
