@@ -604,3 +604,9 @@ dev-done
   with `bin/simple test test/01_unit/common/structural/parallel_commit_contract_spec.spl --mode=interpreter`
   on an admitted self-hosted CLI before treating the regression as execution
   evidence.
+- impl: Made bounded actor send admission observable: `ActorRef.send` now
+  returns the mailbox acceptance result and queues scheduler work only after
+  a message is admitted. The shared pure predicate rejects malformed counters
+  and non-positive capacities rather than reintroducing an unbounded sentinel.
+  One focused interpreter invocation reached bootstrap-seed diagnostics without
+  a final verdict, so native actor send/ask routing remains an explicit gate.

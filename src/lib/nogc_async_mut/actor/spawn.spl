@@ -41,21 +41,26 @@ struct ActorRef:
     _mailbox: ActorMailbox
 
 impl ActorRef:
-    fn send(method: text, args: [text]):
+    fn send(method: text, args: [text]) -> bool:
         """Send a fire-and-forget message to the actor.
 
         The message is placed in the actor's mailbox and will be
         dispatched when the scheduler processes it. Does not wait
-        for the message to be processed.
+        for the message to be processed. Returns false when bounded
+        admission rejects the message; rejected messages are never
+        placed on the ready queue.
 
         Args:
             method: Name of the receive handler to invoke
             args: Arguments as text values
         """
         val msg = ActorMessage.fire_and_forget(method, args)
-        self._mailbox.enqueue(msg)
-        # Ensure actor is in the scheduler's ready queue
-        get_scheduler()._enqueue_ready(self.actor_id)
+        val accepted = self._mailbox.enqueue(msg)
+        if accepted:
+            # Ensure actor is in the scheduler's ready queue only after the
+            # mailbox's single owner has admitted the message.
+            get_scheduler()._enqueue_ready(self.actor_id)
+        accepted
 
     fn ask(method: text, args: [text]) -> i64:
         """Send a message and get a reply ID for later retrieval.
