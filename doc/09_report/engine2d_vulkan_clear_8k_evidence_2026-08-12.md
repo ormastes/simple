@@ -57,6 +57,38 @@ is solely the exact oracle for the changed region. The receipt still says
 isolated retained clear compute submission on a physical adapter, not DrawIR
 traversal, mixed rendering, device presentation, scanout, or end-to-end 8K/80.
 
+## 2026-08-13 physical-GPU mixed retained batch receipt
+
+The mixed Engine2D baseline now records selected-adapter provenance and a
+full-buffer FNV checksum as well as its exact oracle mismatch count. It creates
+the 8K retained framebuffer once, then each timed frame records a 100-pixel
+solid strip, 16 one-pixel axis-aligned lines, a stable 50-pixel-high image
+copy, and 1,024 packed 16×16 atlas glyphs into one command buffer and waits one
+fence. The post-timing readback is the entire framebuffer and is not charged to
+the timing interval.
+
+```sh
+BUILD_DIR=build/check/engine2d-vulkan-mixed-8k-nvidia-attributed-20260813 \
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+ENGINE2D_VULKAN_SAMPLES=31 ENGINE2D_VULKAN_GLYPHS=1024 \
+ENGINE2D_VULKAN_LINES=16 \
+sh scripts/check/check-engine2d-vulkan-mixed-8k.shs
+```
+
+| Adapter | Workload | Dispatches / submissions | Changed pixels | p50 ns | p95 ns | Oracle |
+|---|---|---:|---:|---:|---:|---|
+| NVIDIA RTX A6000 (discrete) | retained fills, lines, image, packed text | 19 / 1 | 1,537,024 | 1,434,555 | 1,463,700 | 0 mismatches; checksum `11020250275472069507` |
+
+The adapter identity was
+`NVIDIA RTX A6000|vendor=000010de|device=00002230|driver=911f8400|api=00404138`
+(hash `666008366`). The row fits the isolated 12.5 ms GPU compute/fence budget
+and has zero timed readback bytes. Its 132,710,400-byte evidence readback,
+full-frame framebuffer seed, DrawIR traversal, resource upload, swapchain
+presentation, and scanout are excluded or absent. The receipt deliberately
+retains `swapchain_presented=false` and
+`engine2d_vulkan_mixed_dynamic_frame_80fps_proven=false`; it must not be read
+as a complete GPU/DrawIR/Web/GUI/WM 8K/80 result.
+
 ## Batched filled rectangles and barrier correction
 
 The representative DrawIR-style batch seeds a retained 8K framebuffer, records
