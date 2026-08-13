@@ -1,0 +1,113 @@
+"""Behavioral regression coverage for owner-thread ready queues.
+
+These tests exercise one HostScheduler or Executor receiver on one owner
+thread. They do not claim M:N scheduling, OS-thread safety, global shared
+safety, work stealing, process isolation, or bounded admission.
+"""
+
+use std.async_core.{Poll, Priority}
+use std.async_host.scheduler.{HostScheduler}
+use std.async.executor.{Executor}
+use std.async.task.{Task}
+use std.async.future.{Future}
+use std.spec.{describe, it, expect}
+
+var scheduler_order: [i64] = []
+
+fn record_0() -> Poll<()>:
+    scheduler_order = scheduler_order.push(0)
+    Poll.Ready(())
+
+fn record_1() -> Poll<()>:
+    scheduler_order = scheduler_order.push(1)
+    Poll.Ready(())
+
+fn record_2() -> Poll<()>:
+    scheduler_order = scheduler_order.push(2)
+    Poll.Ready(())
+
+fn record_3() -> Poll<()>:
+    scheduler_order = scheduler_order.push(3)
+    Poll.Ready(())
+
+fn ready_task() -> Future<i64>:
+    Future.from_value(1)
+
+fn fill_executor(count: i64) -> Executor:
+    var executor = Executor.new()
+    for _ in 0..count:
+        executor.spawn(Task.new(ready_task))
+    executor
+
+describe "owner-thread HostScheduler ready queue behavior":
+    it "dispatches normal tasks FIFO exactly once":
+        scheduler_order = []
+        var scheduler = HostScheduler.new(1)
+        scheduler.schedule(Priority.Normal, record_0)
+        scheduler.schedule(Priority.Normal, record_1)
+        scheduler.schedule(Priority.Normal, record_2)
+        expect(scheduler.run_one_worker(0)).to_equal(true)
+        expect(scheduler.run_one_worker(0)).to_equal(true)
+        expect(scheduler.run_one_worker(0)).to_equal(true)
+        expect(scheduler.run_one_worker(0)).to_equal(false)
+        expect(scheduler_order).to_equal([0, 1, 2])
+
+    it "keeps critical LIFO ahead of the live normal suffix without resurrecting the consumed prefix":
+        scheduler_order = []
+        var scheduler = HostScheduler.new(1)
+        scheduler.schedule(Priority.Normal, record_0)
+        scheduler.schedule(Priority.Normal, record_1)
+        expect(scheduler.run_one_worker(0)).to_equal(true)
+        scheduler.schedule(Priority.Critical, record_2)
+        scheduler.schedule(Priority.Critical, record_3)
+        expect(scheduler.global_head).to_equal(0)
+        expect(scheduler.global_queue.len()).to_equal(3)
+        scheduler.run()
+        expect(scheduler_order).to_equal([0, 3, 2, 1])
+
+    it "compacts at the exact 63 to 64 and half-consumed boundary":
+        var scheduler = HostScheduler.new(1)
+        for _ in 0..128:
+            scheduler.schedule(Priority.Normal, record_0)
+        for _ in 0..63:
+            expect(scheduler.run_one_worker(0)).to_equal(true)
+        expect(scheduler.global_head).to_equal(63)
+        expect(scheduler.global_queue.len()).to_equal(128)
+        expect(scheduler.run_one_worker(0)).to_equal(true)
+        expect(scheduler.global_head).to_equal(0)
+        expect(scheduler.global_queue.len()).to_equal(64)
+
+describe "owner-thread Executor ready queue behavior":
+    it "removes FIFO task IDs exactly once":
+        var executor = fill_executor(3)
+        val first = executor.ready_queue[0]
+        val second = executor.ready_queue[1]
+        val third = executor.ready_queue[2]
+        executor.run_iteration()
+        expect(executor.task_count()).to_equal(2)
+        expect(executor.tasks[0].id).to_equal(second)
+        executor.run_iteration()
+        expect(executor.task_count()).to_equal(1)
+        expect(executor.tasks[0].id).to_equal(third)
+        executor.run_iteration()
+        executor.run_iteration()
+        expect(executor.task_count()).to_equal(0)
+        expect(first == second or second == third or first == third).to_equal(false)
+
+    it "compacts once the threshold prefix reaches at least the live suffix, then resets empty":
+        var executor = fill_executor(130)
+        for _ in 0..63:
+            executor.run_iteration()
+        expect(executor.ready_head).to_equal(63)
+        expect(executor.ready_queue.len()).to_equal(130)
+        executor.run_iteration()
+        expect(executor.ready_head).to_equal(64)
+        expect(executor.ready_queue.len()).to_equal(130)
+        executor.run_iteration()
+        expect(executor.ready_head).to_equal(0)
+        expect(executor.ready_queue.len()).to_equal(65)
+        for _ in 0..65:
+            executor.run_iteration()
+        expect(executor.ready_head).to_equal(0)
+        expect(executor.ready_queue.len()).to_equal(0)
+        expect(executor.task_count()).to_equal(0)
