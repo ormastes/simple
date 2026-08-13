@@ -86,6 +86,9 @@ arbitrary stdout as a frame, and it discards overlong lines through their next
 newline rather than retaining unbounded partial text. Its default maximum line
 matches the process-frame codec maximum; an application may pass a smaller
 line budget, but cannot enlarge that transport bound.
+The reader also records its retained partial-line high-water mark, so a focused
+memory gate can assert its maximum without relying on host RSS. That metric is
+per reader lifetime and does not represent child-side or pipe-kernel buffering.
 
 This is still not an application process API or an implicit retry queue. Child
 launch, stdin request protocol, cancellation, exit cleanup, and native

@@ -704,6 +704,13 @@ in-progress
   not evidence that the process result test passed or failed. Resume only
   after repairing the self-hosted `test --help` crash, then run once:
   `SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl --mode=native`.
+- impl: Added a parent-reader retained-partial-line high-water counter. The
+  line reassembler records the maximum text it owns across split writes and
+  deferred scheduling, while oversized input is discarded rather than raised
+  into that metric. The focused leaf check was attempted once with the deployed
+  self-hosted binary and also segfaulted before a verdict, so this is a
+  source-reviewed metric plus focused contract fixture, not native execution
+  evidence.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters

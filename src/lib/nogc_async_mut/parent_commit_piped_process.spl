@@ -30,6 +30,7 @@ class ParentCommitPipedResultReaderV1:
     inbox: ParentCommitFrameInboxV1
     max_line_bytes: i64
     pending: text
+    pending_high_water_bytes: i64
     dropping_oversize_line: bool
 
 impl ParentCommitPipedResultReaderV1:
@@ -52,8 +53,13 @@ impl ParentCommitPipedResultReaderV1:
             inbox: inbox,
             max_line_bytes: max_line_bytes,
             pending: "",
+            pending_high_water_bytes: 0,
             dropping_oversize_line: false
         )
+
+    me observe_pending_high_water():
+        if self.pending.len() > self.pending_high_water_bytes:
+            self.pending_high_water_bytes = self.pending.len()
 
     me receive_stdout_chunk(chunk: text, max_lines: i64) -> ParentCommitPipedReadResultV1:
         """Consume at most `max_lines` completed stdout lines.
@@ -83,6 +89,7 @@ impl ParentCommitPipedResultReaderV1:
                     return parent_commit_piped_read_result_v1(false, accepted,
                         rejected + 1, 0, "pending-text-overflow")
                 self.pending = self.pending + suffix
+                self.observe_pending_high_water()
                 return parent_commit_piped_read_result_v1(true, accepted, rejected,
                     self.pending.len(), "")
             val ch = input.substring(i, i + 1)
@@ -98,6 +105,7 @@ impl ParentCommitPipedResultReaderV1:
                     rejected = rejected + 1
                 else:
                     self.pending = self.pending + ch
+                    self.observe_pending_high_water()
                 continue
             processed = processed + 1
             val decoded = decode_process_transfer_text_line(
@@ -125,6 +133,10 @@ impl ParentCommitPipedResultReaderV1:
 
     fn pending_byte_count() -> i64:
         self.pending.len()
+
+    fn pending_high_water_byte_count() -> i64:
+        """Largest retained partial-line size during this reader lifetime."""
+        self.pending_high_water_bytes
 
 fn parent_commit_piped_result_reader_v1(inbox: ParentCommitFrameInboxV1) -> ParentCommitPipedResultReaderV1:
     ParentCommitPipedResultReaderV1.create(inbox)
