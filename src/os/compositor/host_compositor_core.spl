@@ -652,6 +652,12 @@ class HostCompositor:
     # closed at the existing content-frame gate.
     external_web_window_ids: [i64]
     external_web_frames: [WmContentFrame]
+    # An owned frame came from HostedBrowserRendererRegistry.take_frame(),
+    # whose pending slot is cleared before the handoff.  Only this explicit
+    # transfer contract may reuse the retained backing after presentation.
+    external_web_frame_owned: [bool]
+    external_web_frame_consumed_revision: [i64]
+    external_web_in_place_delta_count: i64 = 0
     external_child_frames: [WmContentFrame]
     # GUI-session content registry: hosted parity with the baremetal
     # compositor's dispatch_gui_* lane (os.compositor.compositor). A window
@@ -718,6 +724,8 @@ class HostCompositor:
             content_caches: {},
             external_web_window_ids: [],
             external_web_frames: [],
+            external_web_frame_owned: [],
+            external_web_frame_consumed_revision: [],
             external_child_frames: [],
             gui_content_window_ids: [],
             gui_content_trees: [],
@@ -757,14 +765,21 @@ class HostCompositor:
             return false
         var kept_ids: [i64] = []
         var kept_frames: [WmContentFrame] = []
+        var kept_owned: [bool] = []
+        var kept_consumed: [i64] = []
         var i = 0
         while i < self.external_web_window_ids.len():
             if i != drop_index:
                 kept_ids.push(self.external_web_window_ids[i])
                 kept_frames.push(self.external_web_frames[i])
+                kept_owned.push(self.external_web_frame_owned[i])
+                kept_consumed.push(
+                    self.external_web_frame_consumed_revision[i])
             i = i + 1
         self.external_web_window_ids = kept_ids
         self.external_web_frames = kept_frames
+        self.external_web_frame_owned = kept_owned
+        self.external_web_frame_consumed_revision = kept_consumed
         true
 
     me _drop_window_render_state(window_id: i64):
@@ -824,6 +839,8 @@ class HostCompositor:
             self.external_web_frames.push(
                 _host_empty_external_web_frame()
             )
+            self.external_web_frame_owned.push(false)
+            self.external_web_frame_consumed_revision.push(0)
         else:
             # A silent capacity refusal here is a bug generator: the caller only
             # sees `false`, so a window set that outgrows the ceiling ships as a
@@ -842,6 +859,8 @@ class HostCompositor:
         val frame_index = self._external_web_frame_index(window_id)
         if frame_index >= 0:
             self.external_web_frames[frame_index] = _host_empty_external_web_frame()
+            self.external_web_frame_owned[frame_index] = false
+            self.external_web_frame_consumed_revision[frame_index] = 0
             self.dirty.add_full_screen(self.width, self.height)
 
     me release_external_web_frame(window_id: i64):
@@ -859,13 +878,33 @@ class HostCompositor:
         window_id: i64,
         frame: WmContentFrame
     ) -> bool:
+        self._set_external_web_frame_with_ownership(window_id, frame, false)
+
+    me set_external_web_frame_owned(
+        window_id: i64,
+        frame: WmContentFrame
+    ) -> bool:
+        """Consume a registry frame whose pixels will not be read again.
+
+        HostedBrowserRendererRegistry.take_frame() clears its pending owner
+        before calling this method.  The compositor may therefore reuse the
+        retained pixels after a successful consume receipt; ordinary callers
+        must use set_external_web_frame(), which preserves snapshot isolation.
+        """
+        self._set_external_web_frame_with_ownership(window_id, frame, true)
+
+    me _set_external_web_frame_with_ownership(
+        window_id: i64,
+        frame: WmContentFrame,
+        transfer_owned: bool
+    ) -> bool:
         val frame_index = self._external_web_frame_index(window_id)
         val window_index = self._find_window_index(window_id)
         if frame_index < 0 or window_index < 0:
             return false
         if frame.damage_rects.len() > 0:
             return self._apply_external_web_frame_damage(
-                frame_index, window_index, window_id, frame)
+                frame_index, window_index, window_id, frame, transfer_owned)
         val window = self.windows[window_index]
         val expected_width = window.w - 8
         val expected_height = window.h - 36 -
@@ -898,7 +937,14 @@ class HostCompositor:
             i = i + 1
         if aggregate_pixels > HOST_EXTERNAL_WEB_FRAME_MAX_PIXELS:
             return false
-        self.external_web_frames[frame_index] = frame
+        var retained = frame
+        if not transfer_owned:
+            # The normal public setter accepts borrowed values.  Isolate their
+            # pixel storage before a later delta can update the retained base.
+            retained.pixels = _host_copy_wm_content_pixels(frame.pixels)
+        self.external_web_frames[frame_index] = retained
+        self.external_web_frame_owned[frame_index] = transfer_owned
+        self.external_web_frame_consumed_revision[frame_index] = 0
         var updated_window = self.windows[window_index]
         updated_window.content_owner = host_content_owner_for_frame(
             updated_window.app_id, frame.origin_kind
@@ -911,7 +957,8 @@ class HostCompositor:
         frame_index: i32,
         window_index: i32,
         window_id: i64,
-        frame: WmContentFrame
+        frame: WmContentFrame,
+        transfer_owned: bool
     ) -> bool:
         """Apply an owned, packed retained delta without rescanning pixels."""
         val window = self.windows[window_index]
@@ -958,10 +1005,17 @@ class HostCompositor:
             ri += 4
         if required <= 0 or frame.damage_pixels.len().to_i64() != required:
             return false
-        # A WmContentFrame is a value, but its array can be shared by a prior
-        # reader. Clone before writing and swap the completed value once.
+        # A normal frame is a borrowed value and must retain snapshot isolation.
+        # The owned registry route may write in place only after the exact base
+        # has completed a synchronous compositor consume.
+        val can_reuse_owned_base = (
+            transfer_owned and
+            self.external_web_frame_owned[frame_index] and
+            self.external_web_frame_consumed_revision[frame_index] ==
+                base.content_revision)
         var committed = base
-        committed.pixels = _host_copy_wm_content_pixels(base.pixels)
+        if not can_reuse_owned_base:
+            committed.pixels = _host_copy_wm_content_pixels(base.pixels)
         var checksum = if base.checksum == 1u64:
             _host_wm_content_checksum_raw(base.pixels)
         else:
@@ -1000,6 +1054,11 @@ class HostCompositor:
         checksum = checksum & 0x7FFFFFFFFFFFFFFFu64
         committed.checksum = if checksum == 0u64: 1u64 else: checksum
         self.external_web_frames[frame_index] = committed
+        self.external_web_frame_owned[frame_index] = can_reuse_owned_base
+        self.external_web_frame_consumed_revision[frame_index] = 0
+        if can_reuse_owned_base:
+            self.external_web_in_place_delta_count =
+                self.external_web_in_place_delta_count + 1
         # Keep the producer's exact packed damage through the WM boundary.
         # A LOCAL web delta changes only this content surface; promoting it to
         # full-screen here forces the retained CPU/Vulkan compositor to lose
@@ -1744,6 +1803,29 @@ class HostCompositor:
         self.render_revision = self.render_revision - 1
         false
 
+    me _mark_external_web_frames_consumed(frames: [WmContentFrame]):
+        """Receipt that the submitted compositor frame no longer reads pixels.
+
+        This runs only after the selected CPU or Vulkan route has completed
+        its synchronous present work.  It keys the receipt by both window ID
+        and content revision so a replacement admitted during another owner
+        turn cannot be mistaken for the submitted base.
+        """
+        var fi = 0
+        while fi < frames.len():
+            val frame = frames[fi]
+            var slot = 0
+            while slot < self.external_web_window_ids.len():
+                if (self.external_web_frame_owned[slot] and
+                    ui_native_i64_text(self.external_web_window_ids[slot]) ==
+                        frame.window_id and
+                    self.external_web_frames[slot].content_revision ==
+                        frame.content_revision):
+                    self.external_web_frame_consumed_revision[slot] =
+                        frame.content_revision
+                slot += 1
+            fi += 1
+
     me render_frame_engine2d(executor: Engine2dCompositorBackend) -> bool:
         # Resolve dimensions through the layout-owning module. Direct
         # cross-module field reads can shift by the object-header slot.
@@ -1829,6 +1911,7 @@ class HostCompositor:
                 return self._reject_engine2d_frame()
             for frame in frames:
                 print "[hosted-wm] content-presented scene_revision={self.render_revision} path=vulkan-window-swapchain window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}"
+            self._mark_external_web_frames_consumed(frames)
             self.dirty.clear()
             return true
         # CPU/SIMD retained frame switch. The first frame stays on the normal
@@ -1857,6 +1940,7 @@ class HostCompositor:
             self.pixel_backend.present()
             for frame in frames:
                 print "[hosted-wm] content-presented scene_revision={self.render_revision} path=cpu-retained-damage window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}"
+            self._mark_external_web_frames_consumed(frames)
             self.dirty.clear()
             return true
         var accepted_composition = composition
@@ -1896,6 +1980,7 @@ class HostCompositor:
         executor.seed_cpu_damage_mirror()
         for frame in frames:
             print "[hosted-wm] content-presented scene_revision={self.render_revision} window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}"
+        self._mark_external_web_frames_consumed(frames)
         self.dirty.clear()
         true
 
@@ -2080,6 +2165,8 @@ class HostCompositor:
                     val external_index = self._external_web_frame_index(win.id)
                     if external_index >= 0:
                         self.external_web_frames[external_index] = _host_empty_external_web_frame()
+                        self.external_web_frame_owned[external_index] = false
+                        self.external_web_frame_consumed_revision[external_index] = 0
                 if prior.x != win.x or prior.y != win.y or prior.w != win.w or prior.h != win.h or prior.minimized != win.minimized or prior.focused != win.focused or prior.content != win.content or prior.title != win.title:
                     self.dirty.add_rect(prior.x, prior.y, prior.w, prior.h)
                     self.dirty.add_rect(win.x, win.y, win.w, win.h)

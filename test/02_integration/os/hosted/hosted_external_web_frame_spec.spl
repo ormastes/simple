@@ -195,3 +195,42 @@ describe "hosted external browser frames":
         val no_base = trusted_damage_frame(
             "1", 0, base_revision + 2, 0xFF16A34Au32)
         expect(comp.set_external_web_frame(1, no_base)).to_be(false)
+
+    it "reuses a consumed registry-owned retained base across deltas":
+        val body = "<div>owned retained damage</div>"
+        var comp = HostCompositor.new_headless(Size(
+            width: 160u64, height: 120u64
+        ))
+        comp.apply_bridge_request(
+            1, 1, COMP_CREATE_WINDOW.to_i64(), 0, "Owned",
+            8, 8, 112, 160, body, 1, "browser"
+        )
+        expect(comp.require_external_web_frame(1)).to_be(true)
+        val revision = simple_web_content_revision_with_theme(
+            default_theme_id(), "Owned", body, 104, 80, 0
+        )
+        # This models HostedBrowserRendererRegistry.take_frame(): once handed
+        # off, the caller must not retain or mutate the full pixel array.
+        expect(comp.set_external_web_frame_owned(
+            1, trusted_frame("1", revision, 0xFF123456u32)
+        )).to_be(true)
+        val raster = Engine2dCompositorBackend.create_named(
+            160, 120, "software"
+        )
+        expect(comp.render_frame_engine2d(raster)).to_be(true)
+
+        val first = trusted_damage_frame(
+            "1", revision, revision + 1, 0xFFABCDEFu32)
+        expect(comp.set_external_web_frame_owned(1, first)).to_be(true)
+        expect(comp.external_web_in_place_delta_count).to_equal(1)
+        expect(comp.external_web_frames[0].pixels[1 * 104 + 1]).to_equal(
+            0xFFABCDEFu32)
+        expect(comp.render_frame_engine2d(raster)).to_be(true)
+
+        val second = trusted_damage_frame(
+            "1", revision + 1, revision + 2, 0xFF16A34Au32)
+        expect(comp.set_external_web_frame_owned(1, second)).to_be(true)
+        expect(comp.external_web_in_place_delta_count).to_equal(2)
+        expect(comp.external_web_frames[0].pixels[1 * 104 + 1]).to_equal(
+            0xFF16A34Au32)
+        raster.shutdown()
