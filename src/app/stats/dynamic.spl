@@ -5,6 +5,11 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
 use compiler.tools.stats.json_formatter (format_json)
 use std.cli.cli_util (get_cli_args, has_flag, parse_csv_fields)
 use app.stats.markdown_report.{stats_report_path, stats_markdown, write_stats_markdown}
+use app.stats.markdown_report.{stats_markdown_v2, stats_tldr_markdown_v2, stats_slides_markdown_v2}
+use app.stats.inventory_scan_v2 (collect_stats_inventory_v2)
+use app.stats.quality_evidence (collect_quality_evidence)
+use app.stats.types.{StatsInventoryV2, StatsQualityEvidenceV2}
+use app.stats.json_v2 (stats_json_v2)
 
 # Helper to run shell command and get output
 fn run_cmd(cmd: text) -> text:
@@ -19,6 +24,64 @@ fn run_cmd(cmd: text) -> text:
 
 fn parse_count(output: text) -> i64:
     output.to_int() ?? 0
+
+fn stats_option(args: [text], name: text, default_value: text) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == name and i + 1 < args.len():
+            return args[i + 1]
+        if arg.starts_with(name + "="):
+            return arg.substring(name.len() + 1)
+        i = i + 1
+    default_value
+
+fn stats_inventory_with_quality(inventory: StatsInventoryV2, quality: [StatsQualityEvidenceV2]) -> StatsInventoryV2:
+    StatsInventoryV2(
+        projects: inventory.projects,
+        focus_areas: inventory.focus_areas,
+        languages: inventory.languages,
+        test_surfaces: inventory.test_surfaces,
+        markdown_files: inventory.markdown_files,
+        quality: quality
+    )
+
+fn refresh_quality_evidence() -> bool:
+    val duplicate = process_run("bin/simple", ["duplicate-check", "src", "--mode", "token", "--min-lines", "5", "--format", "sdn"])
+    if duplicate.2 == 0:
+        write_stats_markdown("doc/01_research/analysis/duplicate_db.sdn", duplicate.0)
+    val coupling = process_run("bin/simple", ["build", "coupling", "src", "--format=json", "--lcom"])
+    if coupling.2 == 0:
+        write_stats_markdown("build/stats/coupling.json", coupling.0)
+    duplicate.2 == 0 and coupling.2 == 0
+
+fn generate_stats_v2_artifacts(args: [text], report_path: text) -> bool:
+    if report_path == "":
+        return true
+    val quality_mode = stats_option(args, "--quality", "off")
+    if quality_mode == "full":
+        val refreshed = refresh_quality_evidence()
+        if not refreshed:
+            print "Warning: one or more quality analyzers did not refresh; retained evidence status will be reported"
+    var quality: [StatsQualityEvidenceV2] = []
+    if quality_mode == "summary" or quality_mode == "full":
+        quality = collect_quality_evidence(".")
+    val inventory = stats_inventory_with_quality(collect_stats_inventory_v2(), quality)
+
+    val tldr_path = stats_option(args, "--tldr", "doc/09_report/project_statistics_tldr.md")
+    val slides_path = stats_option(args, "--slides", "doc/09_report/project_statistics_slides.md")
+    val pptx_path = stats_option(args, "--pptx", "doc/09_report/project_statistics.pptx")
+    var ok = write_stats_markdown(report_path, stats_markdown_v2(inventory))
+    ok = write_stats_markdown(tldr_path, stats_tldr_markdown_v2(inventory)) and ok
+    ok = write_stats_markdown(slides_path, stats_slides_markdown_v2(inventory)) and ok
+    if pptx_path != "":
+        val converted = process_run("bin/simple", ["office", "convert", "slides", slides_path, pptx_path])
+        if converted.2 != 0:
+            print "Warning: SimpleOS-themed PPTX conversion failed: {converted.1.trim()}"
+            ok = false
+    if ok:
+        print "Statistics artifacts: {report_path}, {tldr_path}, {slides_path}, {pptx_path}"
+    ok
 
 fn owned_source_excludes() -> text:
     "-not -path '*/vendor/*' -not -path '*/third_party/*' -not -path '*/external/*' -not -path '*/miniaudio.h' -not -path '*/stb_image.h' -not -path '*/stb_truetype.h'"
@@ -275,6 +338,16 @@ fn run_stats(args: [text]):
     val is_verbose = has_flag(args, "--verbose")
     val is_json = has_flag(args, "--json")
     val is_quick = has_flag(args, "--quick")
+
+    if is_json:
+        val quality_mode = stats_option(args, "--quality", "off")
+        if quality_mode == "full":
+            refresh_quality_evidence()
+        var quality: [StatsQualityEvidenceV2] = []
+        if quality_mode == "summary" or quality_mode == "full":
+            quality = collect_quality_evidence(".")
+        print stats_json_v2(stats_inventory_with_quality(collect_stats_inventory_v2(), quality))
+        return
 
     if not is_json:
         print "========================================="
@@ -562,7 +635,7 @@ fn run_stats(args: [text]):
         test_count, pass_count, feat_total, feat_complete, feat_progress, feat_planned,
         total_public, documented
     )
-    val report_written = write_stats_markdown(report_path, report)
+    val report_written = generate_stats_v2_artifacts(args, report_path)
     if not is_json and report_path != "":
         if report_written:
             print "Markdown report: {report_path}"

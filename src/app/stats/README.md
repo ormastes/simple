@@ -24,6 +24,15 @@ simple stats
 # Select or disable the Markdown report
 simple stats --report=build/project-statistics.md
 simple stats --no-report
+
+# Include retained or freshly generated quality evidence
+simple stats --quality=summary
+simple stats --quality=full
+
+# Presentation artifacts (defaults shown)
+simple stats --tldr=doc/09_report/project_statistics_tldr.md \
+  --slides=doc/09_report/project_statistics_slides.md \
+  --pptx=doc/09_report/project_statistics.pptx
 ```
 
 ## Statistics Displayed
@@ -33,6 +42,11 @@ simple stats --no-report
 - **Tests**: Test counts and pass rates from test_result.md
 - **Features**: Feature counts by status from feature_db.sdn
 - **Documentation**: Links to detailed reports
+- **Projects**: Disjoint source/test files and SLOC by compiler, app, library,
+  OS, runtime, hardware, verification, tooling and examples
+- **Focus areas**: Non-additive firmware and RISC-V views
+- **Quality evidence**: Coverage, duplication, coupling and cohesion with
+  measured/stale/unavailable status
 
 ## Implementation Notes
 

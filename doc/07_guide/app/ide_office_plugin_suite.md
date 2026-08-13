@@ -210,3 +210,10 @@ the canonical Office Sheets launcher action without modifying the file.
 canonical UI-access snapshot/event owners before requesting still or motion
 capture. When no image-backed capture host is configured, it publishes the
 exact `vision.no_image` blocker instead of claiming GUI evidence.
+# Project statistics decks
+
+`simple stats` can generate a native Slides Markdown deck and PPTX alongside
+its full report and TLDR. The first slide carries the
+`simpleos-default-theme` notes marker; the PPTX exporter maps that marker to
+the SimpleOS default accent/font scheme while retaining normal Office behavior
+for every other deck.

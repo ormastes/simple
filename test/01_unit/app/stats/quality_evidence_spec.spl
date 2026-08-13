@@ -1,0 +1,33 @@
+#!/usr/bin/env simple
+
+use std.spipe
+use app.stats.quality_evidence.{classify_quality_evidence}
+
+describe "stats quality evidence adapters":
+    it "reports measured zero coverage without fabricating unavailable":
+        val content = "summary:\n  total_decisions: 0\n  covered_decisions: 0\n  total_conditions: 0\n  covered_conditions: 0\n"
+        val row = classify_quality_evidence("coverage", "coverage.sdn", content, 1000, 1100, 200)
+        expect(row.status).to_equal("measured")
+        expect(row.measured_at).to_equal("1000")
+        expect(row.summary).to_equal("decisions 0/0; conditions 0/0")
+
+    it "marks old valid duplication evidence stale":
+        val content = "metadata:\n  total_groups: 2\n  total_lines: 18\n  total_occurrences: 4\n\nduplicate_groups |group_id, occurrences, lines, impact|\n"
+        val row = classify_quality_evidence("duplication", "duplicate_db.sdn", content, 100, 1000, 300)
+        expect(row.status).to_equal("stale")
+        expect(row.summary).to_equal("2 groups; 4 occurrences; 18 duplicated lines")
+
+    it "fails closed for malformed evidence instead of reporting zero or PASS":
+        val row = classify_quality_evidence("coupling", "coupling.json", "{}", 1000, 1001, 300)
+        expect(row.status).to_equal("unavailable")
+        expect(row.measured_at).to_equal("")
+        expect(row.summary).to_contain("missing required coupling evidence fields")
+
+    it "projects coupling and cohesion from the retained coupling owner report":
+        val content = "{\n  \"modules\": [\n    {\"name\": \"a\", \"cbo\": 1},\n    {\"name\": \"b\", \"cbo\": 2}\n  ],\n  \"cycles\": [],\n  \"layer_violations\": [\n    {\"from\": \"a\", \"to\": \"b\"}\n  ],\n  \"lcom\": [\n    {\"class\": \"Thing\", \"lcom4\": 1}\n  ]\n}"
+        val coupling = classify_quality_evidence("coupling", "coupling.json", content, 1000, 1001, 300)
+        val cohesion = classify_quality_evidence("cohesion", "coupling.json", content, 1000, 1001, 300)
+        expect(coupling.status).to_equal("measured")
+        expect(coupling.summary).to_contain("2 modules; 1 layer violations")
+        expect(cohesion.status).to_equal("measured")
+        expect(cohesion.summary).to_equal("LCOM evidence for 1 classes")

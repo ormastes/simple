@@ -1,0 +1,153 @@
+# Canonical, pure repository inventory classification and aggregation.
+#
+# Filesystem discovery supplies StatsFileFactV2 values.  This module deliberately
+# performs no I/O, allowing every ownership and exclusion rule to be tested.
+
+use app.stats.types.{StatsCountRowV2, StatsProjectRowV2, StatsTestSurfaceV2, StatsInventoryV2}
+
+struct StatsFileFactV2:
+    path: text
+    sloc: i64
+    markdown_test_sloc: i64
+    comment_test_sloc: i64
+
+fn stats_normalize_path(path: text) -> text:
+    var normalized = path.replace("\\", "/")
+    while normalized.starts_with("./"):
+        normalized = normalized[2:]
+    normalized
+
+fn stats_path_is_excluded(path: text) -> bool:
+    val p = stats_normalize_path(path)
+    if p == "src/runtime/miniaudio.h" or p == "src/runtime/stb_image.h" or p == "src/runtime/stb_truetype.h":
+        return true
+    if p.starts_with("src/compiler_rust/vendor/") or p.starts_with("src/runtime/vendor/") or p.contains("/src/compiler_rust/vendor/") or p.contains("/src/runtime/vendor/"):
+        return true
+    if p.starts_with("build/") or p.starts_with(".git/") or p.starts_with(".jj/"):
+        return true
+    if p.contains("/node_modules/") or p.starts_with("node_modules/"):
+        return true
+    false
+
+fn stats_is_tldr_markdown(path: text) -> bool:
+    stats_normalize_path(path).lower().ends_with("_tldr.md")
+
+fn stats_language_for_path(path: text) -> text:
+    val p = stats_normalize_path(path).lower()
+    if p.ends_with(".spl"): return "Simple"
+    if p.ends_with(".rs"): return "Rust"
+    if p.ends_with(".c") or p.ends_with(".cc") or p.ends_with(".cpp") or p.ends_with(".cxx") or p.ends_with(".h") or p.ends_with(".hpp") or p.ends_with(".s") or p.ends_with(".asm"):
+        return "C/C++/headers/assembly"
+    if p.ends_with(".sh") or p.ends_with(".shs") or p.ends_with(".py") or p.ends_with(".js") or p.ends_with(".ts") or p.ends_with(".rb") or p.ends_with(".ps1"):
+        return "Scripts"
+    if p.ends_with(".md"): return "Markdown"
+    "Other"
+
+fn stats_is_test_path(path: text) -> bool:
+    val p = stats_normalize_path(path)
+    p.starts_with("test/") or p.contains("/test/") or p.contains("/tests/")
+
+fn stats_test_tier(path: text) -> text:
+    val p = stats_normalize_path(path)
+    if p.starts_with("test/01_unit/") or p.starts_with("test/unit/"): return "Unit SSpec"
+    if p.starts_with("test/02_integration/") or p.starts_with("test/integration/"): return "Integration SSpec"
+    if p.starts_with("test/03_system/") or p.starts_with("test/system/"): return "System SSpec"
+    if stats_is_test_path(p) and p.ends_with(".spl"): return "Other SSpec"
+    ""
+
+fn stats_project_for_path(path: text) -> text:
+    val p = stats_normalize_path(path).lower()
+    if p.starts_with("src/compiler/") or p.starts_with("src/compiler_rust/") or p.contains("/compiler/"): return "compiler"
+    if p.starts_with("src/os/") or p.contains("/simpleos/") or p.contains("/sosix/") or p.contains("/os/"): return "OS"
+    if p.starts_with("src/runtime/") or p.contains("/runtime/"): return "runtime"
+    if p.starts_with("src/hardware/") or p.contains("/hardware/"): return "hardware"
+    if p.starts_with("src/app/") or p.contains("/app/"): return "app"
+    if p.starts_with("src/lib/") or p.starts_with("src/std/") or p.starts_with("src/core/") or p.starts_with("src/i18n/") or p.contains("/lib/"): return "lib"
+    if p.starts_with("test/") or p.starts_with("verification/"): return "verification"
+    if p.starts_with("tools/") or p.starts_with("scripts/"): return "tooling"
+    if p.starts_with("examples/"): return "examples"
+    if p.starts_with("src/"): return "remaining source"
+    "other"
+
+fn stats_has_focus(path: text, focus: text) -> bool:
+    val p = stats_normalize_path(path).lower()
+    if focus == "firmware":
+        return p.contains("firmware") or p.contains("baremetal") or p.contains("embedded")
+    if focus == "RISC-V":
+        return p.contains("riscv") or p.contains("risc_v") or p.contains("rv32") or p.contains("rv64")
+    false
+
+fn stats_project_row(name: text, facts: [StatsFileFactV2], focus: bool) -> StatsProjectRowV2:
+    var total_files = 0
+    var total_sloc = 0
+    var source_files = 0
+    var source_sloc = 0
+    var test_files = 0
+    var test_sloc = 0
+    for fact in facts:
+        if stats_path_is_excluded(fact.path) or stats_is_tldr_markdown(fact.path):
+            continue
+        if stats_language_for_path(fact.path) == "Markdown":
+            continue
+        val selected = if focus: stats_has_focus(fact.path, name) else: stats_project_for_path(fact.path) == name
+        if selected:
+            total_files = total_files + 1
+            total_sloc = total_sloc + fact.sloc
+            if stats_is_test_path(fact.path):
+                test_files = test_files + 1
+                test_sloc = test_sloc + fact.sloc
+            else:
+                source_files = source_files + 1
+                source_sloc = source_sloc + fact.sloc
+    StatsProjectRowV2(name: name, total_files: total_files, total_sloc: total_sloc, source_files: source_files, source_sloc: source_sloc, test_files: test_files, test_sloc: test_sloc)
+
+fn stats_language_row(name: text, facts: [StatsFileFactV2]) -> StatsCountRowV2:
+    var files = 0
+    var sloc = 0
+    for fact in facts:
+        if not stats_path_is_excluded(fact.path) and not stats_is_tldr_markdown(fact.path) and stats_language_for_path(fact.path) == name:
+            files = files + 1
+            sloc = sloc + fact.sloc
+    StatsCountRowV2(name: name, files: files, sloc: sloc)
+
+fn stats_test_surface(name: text, facts: [StatsFileFactV2]) -> StatsTestSurfaceV2:
+    var files = 0
+    var sloc = 0
+    for fact in facts:
+        if stats_path_is_excluded(fact.path) or stats_is_tldr_markdown(fact.path):
+            continue
+        var contribution = 0
+        if name == "Total tests":
+            if stats_is_test_path(fact.path): contribution = fact.sloc
+            contribution = contribution + fact.markdown_test_sloc + fact.comment_test_sloc
+        elif name == "SSpec" and stats_test_tier(fact.path) != "": contribution = fact.sloc
+        elif name == "Markdown fenced tests": contribution = fact.markdown_test_sloc
+        elif name == "Comment SDoctests": contribution = fact.comment_test_sloc
+        elif stats_test_tier(fact.path) == name: contribution = fact.sloc
+        if contribution > 0:
+            files = files + 1
+            sloc = sloc + contribution
+    StatsTestSurfaceV2(name: name, files: files, runnable_sloc: sloc)
+
+fn aggregate_stats_inventory_v2(facts: [StatsFileFactV2]) -> StatsInventoryV2:
+    val project_names = ["compiler", "app", "lib", "OS", "runtime", "hardware", "verification", "tooling", "examples", "remaining source"]
+    var projects: [StatsProjectRowV2] = []
+    for name in project_names:
+        projects.push(stats_project_row(name, facts, false))
+    val focus_areas = [stats_project_row("firmware", facts, true), stats_project_row("RISC-V", facts, true)]
+    val languages = [
+        stats_language_row("Simple", facts), stats_language_row("Rust", facts),
+        stats_language_row("C/C++/headers/assembly", facts), stats_language_row("Scripts", facts),
+        stats_language_row("Markdown", facts)
+    ]
+    val test_surfaces = [
+        stats_test_surface("Total tests", facts), stats_test_surface("SSpec", facts),
+        stats_test_surface("Unit SSpec", facts), stats_test_surface("Integration SSpec", facts),
+        stats_test_surface("System SSpec", facts), stats_test_surface("Other SSpec", facts), stats_test_surface("Markdown fenced tests", facts),
+        stats_test_surface("Comment SDoctests", facts)
+    ]
+    var markdown_files = 0
+    for fact in facts:
+        if not stats_path_is_excluded(fact.path) and not stats_is_tldr_markdown(fact.path) and stats_language_for_path(fact.path) == "Markdown":
+            markdown_files = markdown_files + 1
+    StatsInventoryV2(projects: projects, focus_areas: focus_areas, languages: languages, test_surfaces: test_surfaces, markdown_files: markdown_files, quality: [])

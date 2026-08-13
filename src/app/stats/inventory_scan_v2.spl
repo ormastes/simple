@@ -1,0 +1,85 @@
+# Filesystem adapter for the pure StatsInventoryV2 aggregator.
+
+use app.io.mod.{dir_list, is_dir, file_read}
+use app.stats.inventory_v2.{StatsFileFactV2, stats_normalize_path, stats_path_is_excluded, stats_is_tldr_markdown, stats_language_for_path, aggregate_stats_inventory_v2}
+use app.stats.types (StatsInventoryV2)
+
+fn stats_count_sloc(path: text, content: text) -> i64:
+    val language = stats_language_for_path(path)
+    var count = 0
+    var in_block_comment = false
+    for raw in content.split("\n"):
+        val line = raw.trim()
+        if line.len() == 0:
+            continue
+        if in_block_comment:
+            if line.contains("*/"):
+                in_block_comment = false
+            continue
+        if line.starts_with("/*"):
+            if not line.contains("*/"):
+                in_block_comment = true
+            continue
+        if language == "Simple" or language == "Scripts":
+            if line.starts_with("#"):
+                continue
+        elif language == "Rust" or language == "C/C++/headers/assembly":
+            if line.starts_with("//"):
+                continue
+        count = count + 1
+    count
+
+fn stats_markdown_test_sloc(content: text) -> i64:
+    var count = 0
+    var in_test_fence = false
+    for raw in content.split("\n"):
+        val line = raw.trim()
+        if line.starts_with("```"):
+            if in_test_fence:
+                in_test_fence = false
+            else:
+                in_test_fence = line == "```simple" or line == "```spl" or line == "```sdoctest" or line == "```sspec"
+            continue
+        if in_test_fence and line.len() > 0:
+            count = count + 1
+    count
+
+fn stats_comment_test_sloc(content: text) -> i64:
+    var count = 0
+    for raw in content.split("\n"):
+        if raw.trim().starts_with(">>>"):
+            count = count + 1
+    count
+
+fn stats_scan_tree(root: text) -> [StatsFileFactV2]:
+    var facts: [StatsFileFactV2] = []
+    for entry in dir_list(root):
+        val path = stats_normalize_path(root + "/" + entry)
+        if stats_path_is_excluded(path):
+            continue
+        if is_dir(path):
+            facts = facts.merge(stats_scan_tree(path))
+            continue
+        val language = stats_language_for_path(path)
+        if language == "Other" or stats_is_tldr_markdown(path):
+            continue
+        val content = file_read(path)
+        val markdown_sloc = if language == "Markdown": stats_markdown_test_sloc(content) else: 0
+        val comment_sloc = if language == "Simple": stats_comment_test_sloc(content) else: 0
+        facts.push(StatsFileFactV2(
+            path: path,
+            sloc: stats_count_sloc(path, content),
+            markdown_test_sloc: markdown_sloc,
+            comment_test_sloc: comment_sloc
+        ))
+    facts
+
+fn collect_stats_inventory_v2() -> StatsInventoryV2:
+    var facts: [StatsFileFactV2] = []
+    for root in ["src", "test", "doc", "examples", "scripts", "tools"]:
+        if is_dir(root):
+            facts = facts.merge(stats_scan_tree(root))
+    aggregate_stats_inventory_v2(facts)
+
+export stats_count_sloc, stats_markdown_test_sloc, stats_comment_test_sloc
+export stats_scan_tree, collect_stats_inventory_v2

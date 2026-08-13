@@ -5,6 +5,10 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Project statistics quality reports** — inventory owned source and test LOC
+  by project, language, and test tier; retain provenance for coverage,
+  duplication, coupling, and cohesion; and emit Markdown, TLDR, and native
+  SimpleOS-themed PPTX-ready slide artifacts from one typed model.
 - **Pinned-corpus GSUB/GPOS shaping** — validate and apply the selected
   Latin, Han, Devanagari, Arabic/Urdu, and Cyrillic OpenType layout plans with
   bounded work, feature-mask provenance, atomic failure, and canonical

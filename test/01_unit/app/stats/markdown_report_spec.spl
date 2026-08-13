@@ -1,7 +1,8 @@
 #!/usr/bin/env simple
 
 use std.spipe
-use app.stats.markdown_report.{stats_report_path, stats_markdown}
+use app.stats.markdown_report.{stats_report_path, stats_markdown, stats_markdown_v2, stats_tldr_markdown_v2, stats_slides_markdown_v2}
+use app.stats.types.{StatsCountRowV2, StatsProjectRowV2, StatsTestSurfaceV2, StatsQualityEvidenceV2, StatsInventoryV2}
 
 describe "stats Markdown report":
     it "uses the repository report location by default":
@@ -26,3 +27,38 @@ describe "stats Markdown report":
         expect(report).to_contain("Source comment SDoctests (`>>>`) | 1 | 3")
         expect(report).to_contain("Recorded tests passed | 9 / 10 (90%)")
         expect(report).to_contain("Public API documentation | 4 / 5 (80%)")
+
+    it "projects one inventory into full, TLDR, and SimpleOS slide Markdown":
+        val inventory = StatsInventoryV2(
+            projects: [StatsProjectRowV2(name: "compiler", total_files: 12, total_sloc: 1200, source_files: 8, source_sloc: 900, test_files: 4, test_sloc: 300)],
+            focus_areas: [StatsProjectRowV2(name: "RISC-V", total_files: 3, total_sloc: 250, source_files: 2, source_sloc: 200, test_files: 1, test_sloc: 50)],
+            languages: [StatsCountRowV2(name: "Simple", files: 12, sloc: 1200)],
+            test_surfaces: [StatsTestSurfaceV2(name: "Unit SSpec", files: 4, runnable_sloc: 300)],
+            markdown_files: 25,
+            quality: [StatsQualityEvidenceV2(metric: "Duplication", status: "measured", source: "duplicate-check.json", measured_at: "2026-08-13T00:00:00Z", summary: "1.2% duplicated blocks")]
+        )
+        val full = stats_markdown_v2(inventory)
+        expect(full).to_contain("| compiler | 12 | 1200 |")
+        expect(full).to_contain("| compiler | 8 | 900 | 4 | 300 |")
+        expect(full).to_contain("Focus Areas (non-additive)")
+        expect(full).to_contain("| Duplication | measured | duplicate-check.json")
+
+        val tldr = stats_tldr_markdown_v2(inventory)
+        expect(tldr).to_contain("| Owned SLOC | 1200 |")
+        expect(tldr).to_contain("Runnable test LOC | 300")
+        expect(tldr).to_contain("Duplication: measured")
+
+        val slides = stats_slides_markdown_v2(inventory)
+        expect(slides).to_start_with("Project Statistics\n@layout: section")
+        expect(slides).to_contain("@notes: simpleos-default-theme")
+        expect(slides).to_contain("Risks\n")
+        expect(slides).to_contain("Methodology\n")
+
+    it "renders absent optional quality evidence truthfully":
+        val inventory = StatsInventoryV2(
+            projects: [], focus_areas: [], languages: [], test_surfaces: [],
+            markdown_files: 0, quality: []
+        )
+        expect(stats_markdown_v2(inventory)).to_contain("| Quality analysis | unavailable | not requested")
+        expect(stats_tldr_markdown_v2(inventory)).to_contain("unavailable (not requested)")
+        expect(stats_slides_markdown_v2(inventory)).to_contain("analysis was not requested")

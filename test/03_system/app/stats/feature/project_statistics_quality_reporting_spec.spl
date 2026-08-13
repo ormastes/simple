@@ -1,0 +1,45 @@
+#!/usr/bin/env simple
+
+use std.spipe
+use app.stats.inventory_v2.{StatsFileFactV2, aggregate_stats_inventory_v2}
+use app.stats.markdown_report.{stats_markdown_v2, stats_tldr_markdown_v2, stats_slides_markdown_v2}
+use app.stats.json_v2 (stats_json_v2)
+use app.stats.quality_evidence (classify_quality_evidence)
+use app.stats.types.{StatsInventoryV2, StatsQualityEvidenceV2}
+
+fn setup_statistics_fixture() -> StatsInventoryV2:
+    val facts = [
+        StatsFileFactV2(path: "src/compiler/main.spl", sloc: 20, markdown_test_sloc: 0, comment_test_sloc: 1),
+        StatsFileFactV2(path: "src/os/firmware/riscv64/boot.spl", sloc: 12, markdown_test_sloc: 0, comment_test_sloc: 0),
+        StatsFileFactV2(path: "test/01_unit/compiler/main_spec.spl", sloc: 8, markdown_test_sloc: 0, comment_test_sloc: 0),
+        StatsFileFactV2(path: "doc/operator.md", sloc: 10, markdown_test_sloc: 2, comment_test_sloc: 0),
+        StatsFileFactV2(path: "doc/operator_tldr.md", sloc: 3, markdown_test_sloc: 1, comment_test_sloc: 0)
+    ]
+    aggregate_stats_inventory_v2(facts)
+
+describe "project statistics and quality reporting":
+    describe "REQ-STAT-001..006: Collect the owned inventory":
+        it "reports disjoint projects, overlapping focus areas, and all test surfaces":
+            val inventory = setup_statistics_fixture()
+            expect(inventory.projects[0].source_sloc).to_equal(20)
+            expect(inventory.focus_areas[0].source_sloc).to_equal(12)
+            expect(inventory.focus_areas[1].source_sloc).to_equal(12)
+            expect(inventory.markdown_files).to_equal(1)
+            expect(inventory.test_surfaces[0].runnable_sloc).to_equal(11)
+
+    describe "REQ-STAT-007..008: Review quality evidence":
+        it "distinguishes a measured zero from unavailable evidence":
+            val measured = classify_quality_evidence("coverage", "coverage.sdn", "summary:\n total_decisions: 0\n covered_decisions: 0\n total_conditions: 0\n covered_conditions: 0", 100, 101, 10)
+            val unavailable = classify_quality_evidence("coverage", "coverage.sdn", "", 0, 101, 10)
+            expect(measured.status).to_equal("measured")
+            expect(unavailable.status).to_equal("unavailable")
+
+    describe "REQ-STAT-009..010: Generate presentation artifacts":
+        it "projects one inventory to JSON, report, TLDR, and native SimpleOS deck":
+            val base = setup_statistics_fixture()
+            val quality = StatsQualityEvidenceV2(metric: "coverage", status: "unavailable", source: "coverage.sdn", measured_at: "", summary: "artifact not found")
+            val inventory = StatsInventoryV2(projects: base.projects, focus_areas: base.focus_areas, languages: base.languages, test_surfaces: base.test_surfaces, markdown_files: base.markdown_files, quality: [quality])
+            expect(stats_json_v2(inventory)).to_contain("\"schema\":\"simple.stats.v2\"")
+            expect(stats_markdown_v2(inventory)).to_contain("## Quality Evidence")
+            expect(stats_tldr_markdown_v2(inventory)).to_contain("Project Statistics — TLDR")
+            expect(stats_slides_markdown_v2(inventory)).to_contain("@notes: simpleos-default-theme")
