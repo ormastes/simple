@@ -230,3 +230,23 @@ maximum RSS was `519,680 KiB`. This is a substantial improvement over the
 older scalar-heavy blend rows, but the canonical harness still emitted
 `engine2d_8k_full_dynamic_frame_80fps_proven=false`. It is native C runtime
 evidence, not a self-hosted Simple application or end-to-end display result.
+
+## 2026-08-13 current QEMU ISA rows at one-percent damage
+
+The current runtime was cross-compiled from the same source and run through the
+canonical operation harness at 1% active damage (331,776 of 33,177,600 pixels,
+seven samples). Both rows preserved checksum `2436809228175672195` and recorded
+42 SIMD-hit receipts. These are target instruction/parity checks under QEMU;
+their timings are not physical ARM/RISC-V or bare-metal results.
+
+| Target / emulator | Fill p95 | Copy p95 | Blend p95 | Const blend p95 | Six-call p95 | Isolated primitive budget |
+|---|---:|---:|---:|---:|---:|---|
+| AArch64 NEON / `qemu-aarch64` | 0.641 ms | 0.785 ms | 3.885 ms | 2.999 ms | 9.327 ms | PASS |
+| RV64GCV VLEN=128 / `qemu-riscv64` | 2.798 ms | 5.633 ms | 24.117 ms | 16.186 ms | 53.688 ms | FAIL |
+
+Commands used `aarch64-linux-gnu-gcc -static -march=armv8-a+simd` and
+`riscv64-linux-gnu-gcc -static -march=rv64gcv -mabi=lp64d`, with the RISC-V
+runner fixed to `-cpu rv64,v=true,vlen=128,elen=64`. The ARM QEMU row fits this
+narrow retained primitive mix; the RVV QEMU row does not. Neither result proves
+an 8K/80 application, self-hosted Simple execution, display scanout, or
+hardware performance.
