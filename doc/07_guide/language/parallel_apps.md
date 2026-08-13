@@ -48,8 +48,10 @@ backpressure receipt remain open.
 
 The legacy actor mailbox now uses one class-backed state shared by copied
 `ActorRef` and scheduler values. This repairs the previous copied-queue split,
-but is not yet an ownership-safe actor transport: native send/ask routing,
-lifecycle closure, cancellation, and typed transfer envelopes remain required.
+and actor stop now closes that shared state before it discards queued work, so
+future sends are rejected through every copy. This is still not an
+ownership-safe actor transport: native send/ask routing, close wakeups,
+cancellation, and typed transfer envelopes remain required.
 
 Parent commit order is independent of child completion order. The bounded
 commit engine uses stable merge ordering, so equal keys preserve their

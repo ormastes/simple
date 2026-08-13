@@ -661,3 +661,9 @@ dev-done
   and non-positive capacities rather than reintroducing an unbounded sentinel.
   One focused interpreter invocation reached bootstrap-seed diagnostics without
   a final verdict, so native actor send/ask routing remains an explicit gate.
+- impl: Added shared mailbox closure: `Actor.stop` closes its class-backed
+  mailbox before discarding queued work, and all copied handles thereafter
+  reject new sends while any already accepted work can still drain. A focused
+  close/copy fixture exists. The bootstrap-only mailbox check did not emit a
+  final verdict, so native close wakeup, scheduler interaction, and actor
+  lifecycle execution remain open.

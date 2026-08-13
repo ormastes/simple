@@ -84,6 +84,7 @@ class ActorMailboxState:
     head: i64
     capacity: i64
     mutex: MutexHandle
+    closed: bool
     total_received: i64
     total_dropped: i64
 
@@ -111,6 +112,7 @@ impl ActorMailbox:
             head: 0,
             capacity: resolved_capacity,
             mutex: mutex_create(),
+            closed: false,
             total_received: 0,
             total_dropped: 0
         ))
@@ -146,7 +148,8 @@ impl ActorMailbox:
         self.state.mutex.lock()
         self.state.total_received = self.state.total_received + 1
 
-        if not actor_mailbox_can_accept(self.pending_count(), self.state.capacity):
+        if self.state.closed
+            or not actor_mailbox_can_accept(self.pending_count(), self.state.capacity):
             self.state.total_dropped = self.state.total_dropped + 1
             self.state.mutex.unlock()
             return false
@@ -175,6 +178,19 @@ impl ActorMailbox:
         self.state.mutex.unlock()
         Some(msg)
 
+    me close():
+        """Reject future sends while preserving accepted FIFO work for drain."""
+        self.state.mutex.lock()
+        self.state.closed = true
+        self.state.mutex.unlock()
+
+    fn is_closed() -> bool:
+        """Return whether this shared mailbox has stopped accepting work."""
+        self.state.mutex.lock()
+        val result = self.state.closed
+        self.state.mutex.unlock()
+        result
+
     fn is_empty() -> bool:
         """Check if the mailbox has no pending messages."""
         self.pending_count() <= 0
@@ -201,4 +217,4 @@ impl ActorMailbox:
 
     fn stats_string() -> text:
         """Return mailbox statistics as a string."""
-        "Mailbox(pending={self.pending_count()}, capacity={self.state.capacity}, received={self.state.total_received}, dropped={self.state.total_dropped})"
+        "Mailbox(pending={self.pending_count()}, capacity={self.state.capacity}, closed={self.state.closed}, received={self.state.total_received}, dropped={self.state.total_dropped})"
