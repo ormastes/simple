@@ -799,3 +799,7 @@ in-progress
   Local and raw frees already append, so LIFO reuse avoids copying remaining
   free-list entries while preserving page ownership and capacity accounting.
   The tail pop is direct (not a tail slice), so the cost claim is exact.
+- impl: `Runtime.block_on` now consumes its completed result before returning.
+  This prevents the global convenience runtime from retaining one completed
+  entry per blocking call; detached `spawn` result retention remains a
+  separate bounded join/result-contract task.
