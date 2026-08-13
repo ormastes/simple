@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+disk=$root/scripts/os/make_os_disk.c
+entry=$root/examples/09_embedded/simple_os/arch/x86_64/fs_exec_entry.spl
+stub=$root/examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c
+contract=$root/examples/09_embedded/simple_os/arch/x86_64/boot/x86_64_nonce_slot_contract.h
+fail() { echo "x86-64-collector-nonce: $*" >&2; exit 1; }
+
+grep -Fq 'SOSIX_COLLECTOR_RUN_NONCE=__SOSIX_COLLECTOR_RUN_NONCE_SLOT_V1__' "$disk" || fail "collector slot missing"
+grep -Fq '"SOSIXNONTXT"' "$disk" || fail "collector root entry missing"
+grep -Fq 'rt_sosix_collector_nonce_echo' "$stub" || fail "collector reader missing"
+grep -Fq '"/SOSIXNON.TXT"' "$stub" || fail "collector reader path missing"
+grep -Fq 'x86_64_collector_nonce_slot_line_length' "$stub" || fail "collector validator missing"
+grep -Fq 'SOSIX_COLLECTOR_RUN_NONCE=' "$contract" || fail "collector prefix missing"
+grep -Fq 'rt_sosix_collector_nonce_echo() != 1' "$entry" || fail "entry does not fail closed"
+grep -Fq 'serial_println("guest-entry")' "$entry" || fail "guest entry marker missing"
+
+collector_line=$(grep -n 'rt_sosix_collector_nonce_echo() != 1' "$entry" | cut -d: -f1)
+guest_line=$(grep -n 'serial_println("guest-entry")' "$entry" | cut -d: -f1)
+workload_line=$(grep -n 'rt_qemu_nonce_echo() != 1' "$entry" | cut -d: -f1)
+[ "$collector_line" -lt "$guest_line" ] || fail "collector marker is not before guest entry"
+[ "$guest_line" -lt "$workload_line" ] || fail "workload nonce is not after guest entry"
+
+echo 'PASS x86_64 collector/workload nonce separation'

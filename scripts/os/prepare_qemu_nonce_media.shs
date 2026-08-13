@@ -9,10 +9,11 @@ fail() {
     exit 1
 }
 
-[ "$#" -eq 3 ] || fail "usage: SOURCE_IMAGE RUN_IMAGE NONCE"
+[ "$#" -eq 3 ] || [ "$#" -eq 4 ] || fail "usage: SOURCE_IMAGE RUN_IMAGE WORKLOAD_NONCE [COLLECTOR_NONCE]"
 source_image="$1"
 run_image="$2"
 nonce="$3"
+collector_nonce=${4:-}
 
 [ -f "$source_image" ] || fail "missing source image: $source_image"
 [ "$source_image" != "$run_image" ] || fail "source and run image must differ"
@@ -28,12 +29,23 @@ tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/simpleos-qemu-nonce.XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 nonce_file="$tmp_dir/QEMUNONC.TXT"
 payload_nonce_file="$tmp_dir/FSEXEC.NONCE"
+collector_nonce_file="$tmp_dir/SOSIXNON.TXT"
 run_tmp="$tmp_dir/run.img"
 dd if=/dev/zero of="$nonce_file" bs=118 count=1 2>/dev/null
 printf 'SIMPLEOS_QEMU_NONCE=%s\n' "$nonce" \
     | dd of="$nonce_file" conv=notrunc 2>/dev/null
 dd if=/dev/zero of="$payload_nonce_file" bs=96 count=1 2>/dev/null
 printf '%s' "$nonce" | dd of="$payload_nonce_file" conv=notrunc 2>/dev/null
+if [ -n "$collector_nonce" ]; then
+    [ "${#collector_nonce}" -le 96 ] || fail "collector nonce exceeds 96 bytes"
+    case "$collector_nonce" in
+        *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-]*)
+            fail "collector nonce contains unsupported characters" ;;
+    esac
+    dd if=/dev/zero of="$collector_nonce_file" bs=118 count=1 2>/dev/null
+    printf 'SOSIX_COLLECTOR_RUN_NONCE=%s\n' "$collector_nonce" \
+        | dd of="$collector_nonce_file" conv=notrunc 2>/dev/null
+fi
 
 placeholder='SIMPLEOS_QEMU_NONCE=__SIMPLEOS_QEMU_NONCE_SLOT_V1__'
 offsets="$(LC_ALL=C grep -aob "$placeholder" "$source_image" | cut -d: -f1)"
@@ -46,17 +58,27 @@ payload_offsets="$(LC_ALL=C grep -aob "$payload_placeholder" "$source_image" | c
 [ "$(printf '%s\n' "$payload_offsets" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 1 ] \
     || fail "source image does not contain exactly one fs-exec nonce slot"
 payload_offset="$(printf '%s\n' "$payload_offsets" | sed -n '1p')"
+collector_offset=
+if [ -n "$collector_nonce" ]; then
+    collector_placeholder='SOSIX_COLLECTOR_RUN_NONCE=__SOSIX_COLLECTOR_RUN_NONCE_SLOT_V1__'
+    collector_offsets="$(LC_ALL=C grep -aob "$collector_placeholder" "$source_image" | cut -d: -f1)"
+    [ "$(printf '%s\n' "$collector_offsets" | sed '/^$/d' | wc -l | tr -d ' ')" -eq 1 ] \
+        || fail "source image does not contain exactly one collector nonce slot"
+    collector_offset="$(printf '%s\n' "$collector_offsets" | sed -n '1p')"
+fi
 
 # Patch both fixed slots by seek, verify exact readback, locate the nearest
 # preceding ELF in 64 KiB blocks, parse its PT_LOAD extent directly, and copy
 # only those bytes for hashing. This avoids the old `dd bs=1` whole-image-tail
 # copy while remaining independent of GNU dd byte-seek extensions.
 elf_facts=$(perl - "$run_tmp" "$offset" "$nonce_file" "$payload_offset" \
-    "$payload_nonce_file" "$tmp_dir/fs-exec-patched.elf" <<'PERL'
+    "$payload_nonce_file" "$collector_offset" "$collector_nonce_file" \
+    "$tmp_dir/fs-exec-patched.elf" <<'PERL'
 use strict;
 use warnings;
 
-my ($path, $guest_at, $guest_file, $payload_at, $payload_file, $out_path) = @ARGV;
+my ($path, $guest_at, $guest_file, $payload_at, $payload_file, $collector_at,
+    $collector_file, $out_path) = @ARGV;
 sub read_exact {
     my ($fh, $at, $len) = @_;
     sysseek($fh, $at, 0) == $at or die "seek failed\n";
@@ -98,6 +120,12 @@ write_exact($img, $guest_at, $guest);
 write_exact($img, $payload_at, $payload);
 read_exact($img, $guest_at, 118) eq $guest or die "guest nonce readback mismatch\n";
 read_exact($img, $payload_at, 96) eq $payload or die "payload nonce readback mismatch\n";
+if (length($collector_at)) {
+    my $collector = file_bytes($collector_file, 118);
+    write_exact($img, $collector_at, $collector);
+    read_exact($img, $collector_at, 118) eq $collector
+        or die "collector nonce readback mismatch\n";
+}
 
 my ($pos, $elf_at) = ($payload_at, -1);
 my $block = 65536;
@@ -158,12 +186,17 @@ elf_offset=$1
 elf_size=$2
 [ "$(LC_ALL=C grep -aFo "$payload_placeholder" "$run_tmp" | wc -l | tr -d ' ')" -eq 0 ] \
     || fail "fs-exec nonce placeholder remains after patch"
+if [ -n "$collector_nonce" ]; then
+    [ "$(LC_ALL=C grep -aFo "$collector_placeholder" "$run_tmp" | wc -l | tr -d ' ')" -eq 0 ] \
+        || fail "collector nonce placeholder remains after patch"
+fi
 payload_sha256=$(sha256sum "$tmp_dir/fs-exec-patched.elf" | awk '{print $1}')
 image_sha256=$(sha256sum "$run_tmp" | awk '{print $1}')
 mv "$run_tmp" "$run_image"
 cat > "$run_image.fs-exec-receipt.tmp" <<EOF
 contract=simpleos-fs-exec-run-v1
 nonce=$nonce
+collector_nonce=${collector_nonce:-none}
 nonce_slot_bytes=96
 elf_offset=$elf_offset
 elf_size=$elf_size

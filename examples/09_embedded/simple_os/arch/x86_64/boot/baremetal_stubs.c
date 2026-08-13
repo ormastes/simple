@@ -3470,6 +3470,20 @@ int64_t rt_qemu_nonce_echo(void) {
     return 1;
 }
 
+/* Canonical evidence nonce: distinct from the workload nonce in QEMUNONC. */
+int64_t rt_sosix_collector_nonce_echo(void) {
+    uint8_t nonce_file[118];
+    uint32_t bytes_read = 0;
+    if (!_fat32.initialized && _fat32_init() != 0) return 0;
+    if (fat32_read_file("/SOSIXNON.TXT", nonce_file, sizeof(nonce_file),
+                        &bytes_read) != 0)
+        return 0;
+    size_t line_len = x86_64_collector_nonce_slot_line_length(nonce_file, bytes_read);
+    if (line_len == 0U) return 0;
+    for (size_t i = 0; i < line_len; i++) serial_putchar((char)nonce_file[i]);
+    return 1;
+}
+
 /* Syscall wrapper: Fat32ReadFile
  * a0 = pointer to null-terminated filename string
  * a1 = destination buffer address
