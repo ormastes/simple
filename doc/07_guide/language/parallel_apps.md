@@ -73,7 +73,11 @@ Legacy `ask()` replies now reserve a finite scheduler-owned result slot at
 admission. That credit remains consumed through handler completion until the
 caller consumes or calls `cancel_ask(reply_id)`; an exhausted store rejects the ask rather
 than silently dropping a completed result. This remains a scalar legacy actor
-convention, not a typed transfer/parent-commit channel.
+convention, not a typed transfer/parent-commit channel. Use
+`ActorScheduler.with_reply_capacity(n)` to select one finite scheduler-wide
+budget; zero and negative values resolve to the finite default, never to
+unbounded storage. `reply_capacity()` and `outstanding_reply_count()` expose
+the admitted limit and current retained work.
 
 The scalar `BoundedChannel` implementation also uses a consumed-prefix cursor:
 receive is normally O(1), and backing storage is compacted only when a later
