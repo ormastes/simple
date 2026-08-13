@@ -14,128 +14,86 @@ val WEB_DIRTY_INTRINSIC: i64 = (
 )
 val WEB_DIRTY_FONT_RESOURCE: i64 = WEB_DIRTY_INTRINSIC | DIRTY_RESOURCE
 
-fn _web_layout_merge_dirty(
-    nodes: [WebLayoutDirtyNode], id: i64, dirty_bits: i64
-) -> [WebLayoutDirtyNode]:
-    if id <= 0 or dirty_bits == 0:
-        return nodes
-    var merged = nodes
-    var index = 0
-    while index < merged.len():
-        if merged[index].id == id:
-            merged[index] = WebLayoutDirtyNode(
-                id: id,
-                dirty_bits: merged[index].dirty_bits | dirty_bits
-            )
-            return merged
-        index = index + 1
-    merged.push(WebLayoutDirtyNode(id: id, dirty_bits: dirty_bits))
-    merged
+class _WebLayoutDirtyMerge:
+    # The frontier's external ordering is first occurrence order.  The index
+    # removes the former O(unique_nodes) scan for every merged dependency.
+    nodes: [WebLayoutDirtyNode]
+    index_by_id: Dict<i64, i64>
 
-fn _web_layout_merge_many(
-    nodes: [WebLayoutDirtyNode], ids: [i64], dirty_bits: i64
-) -> [WebLayoutDirtyNode]:
-    var merged = nodes
-    for id in ids:
-        merged = _web_layout_merge_dirty(merged, id, dirty_bits)
-    merged
+    static fn create() -> _WebLayoutDirtyMerge:
+        _WebLayoutDirtyMerge(nodes: [], index_by_id: {})
+
+    me merge(id: i64, dirty_bits: i64):
+        if id <= 0 or dirty_bits == 0:
+            return
+        val existing = self.index_by_id.get(id)
+        if val Some(index) = existing:
+            val node = self.nodes[index]
+            self.nodes[index] = WebLayoutDirtyNode(
+                id: id, dirty_bits: node.dirty_bits | dirty_bits
+            )
+            return
+        val index = self.nodes.len()
+        self.nodes.push(WebLayoutDirtyNode(id: id, dirty_bits: dirty_bits))
+        self.index_by_id[id] = index
+
+    me merge_many(ids: [i64], dirty_bits: i64):
+        for id in ids:
+            self.merge(id, dirty_bits)
 
 fn _web_layout_style_frontier(
-    nodes: [WebLayoutDirtyNode], change: WebLayoutChange
-) -> [WebLayoutDirtyNode]:
-    var merged = nodes
+    merged: _WebLayoutDirtyMerge, change: WebLayoutChange
+):
     match change.difference:
-        StyleDifference.NoChange: return merged
-        StyleDifference.InheritedOnly: return merged
-        StyleDifference.PaintOnly: return merged
-        StyleDifference.CompositeOnly: return merged
+        StyleDifference.NoChange: return
+        StyleDifference.InheritedOnly: return
+        StyleDifference.PaintOnly: return
+        StyleDifference.CompositeOnly: return
         StyleDifference.IntrinsicMeasure:
-            merged = _web_layout_merge_dirty(
-                merged, change.node_id, WEB_DIRTY_INTRINSIC
-            )
-            merged = _web_layout_merge_dirty(
-                merged, change.containing_context_id, WEB_DIRTY_GEOMETRY
-            )
-            merged = _web_layout_merge_many(
-                merged, change.line_box_ids, WEB_DIRTY_INTRINSIC
-            )
-            merged = _web_layout_merge_many(
-                merged, change.intrinsic_ancestor_ids, WEB_DIRTY_INTRINSIC
-            )
+            merged.merge(change.node_id, WEB_DIRTY_INTRINSIC)
+            merged.merge(change.containing_context_id, WEB_DIRTY_GEOMETRY)
+            merged.merge_many(change.line_box_ids, WEB_DIRTY_INTRINSIC)
+            merged.merge_many(change.intrinsic_ancestor_ids, WEB_DIRTY_INTRINSIC)
         StyleDifference.LayoutSelf:
-            merged = _web_layout_merge_dirty(
-                merged, change.node_id, WEB_DIRTY_GEOMETRY
-            )
-            merged = _web_layout_merge_dirty(
-                merged, change.containing_context_id, WEB_DIRTY_GEOMETRY
-            )
+            merged.merge(change.node_id, WEB_DIRTY_GEOMETRY)
+            merged.merge(change.containing_context_id, WEB_DIRTY_GEOMETRY)
         StyleDifference.LayoutSubtree:
-            merged = _web_layout_merge_dirty(
-                merged, change.node_id, WEB_DIRTY_GEOMETRY
-            )
-            merged = _web_layout_merge_many(
-                merged, change.subtree_ids, WEB_DIRTY_GEOMETRY
-            )
-            merged = _web_layout_merge_dirty(
-                merged, change.containing_context_id, WEB_DIRTY_GEOMETRY
-            )
+            merged.merge(change.node_id, WEB_DIRTY_GEOMETRY)
+            merged.merge_many(change.subtree_ids, WEB_DIRTY_GEOMETRY)
+            merged.merge(change.containing_context_id, WEB_DIRTY_GEOMETRY)
         StyleDifference.RebuildFormattingContext:
-            merged = _web_layout_merge_dirty(
-                merged, change.node_id, WEB_DIRTY_GEOMETRY
-            )
-            merged = _web_layout_merge_many(
-                merged, change.subtree_ids, WEB_DIRTY_GEOMETRY
-            )
-            merged = _web_layout_merge_dirty(
-                merged, change.containing_context_id, WEB_DIRTY_GEOMETRY
-            )
-    merged
+            merged.merge(change.node_id, WEB_DIRTY_GEOMETRY)
+            merged.merge_many(change.subtree_ids, WEB_DIRTY_GEOMETRY)
+            merged.merge(change.containing_context_id, WEB_DIRTY_GEOMETRY)
 
 fn _web_layout_change_frontier(
-    nodes: [WebLayoutDirtyNode], change: WebLayoutChange
-) -> [WebLayoutDirtyNode]:
-    var merged = nodes
+    merged: _WebLayoutDirtyMerge, change: WebLayoutChange
+):
     match change.kind:
         WebLayoutMutationKind.StyleMutation:
-            merged = _web_layout_style_frontier(merged, change)
+            _web_layout_style_frontier(merged, change)
         WebLayoutMutationKind.Insert:
-            merged = _web_layout_merge_many(
-                merged, change.inserted_ids, WEB_DIRTY_GEOMETRY
-            )
-            merged = _web_layout_merge_dirty(
-                merged, change.containing_context_id, WEB_DIRTY_GEOMETRY
-            )
-            merged = _web_layout_merge_many(
-                merged, change.downstream_sibling_ids, WEB_DIRTY_GEOMETRY
-            )
+            merged.merge_many(change.inserted_ids, WEB_DIRTY_GEOMETRY)
+            merged.merge(change.containing_context_id, WEB_DIRTY_GEOMETRY)
+            merged.merge_many(change.downstream_sibling_ids, WEB_DIRTY_GEOMETRY)
         WebLayoutMutationKind.FontResource:
-            merged = _web_layout_merge_many(
-                merged, change.font_metric_ids, WEB_DIRTY_FONT_RESOURCE
-            )
-            merged = _web_layout_merge_many(
-                merged, change.line_box_ids, WEB_DIRTY_INTRINSIC
-            )
-            merged = _web_layout_merge_many(
-                merged, change.intrinsic_ancestor_ids,
-                WEB_DIRTY_INTRINSIC
-            )
+            merged.merge_many(change.font_metric_ids, WEB_DIRTY_FONT_RESOURCE)
+            merged.merge_many(change.line_box_ids, WEB_DIRTY_INTRINSIC)
+            merged.merge_many(change.intrinsic_ancestor_ids, WEB_DIRTY_INTRINSIC)
         WebLayoutMutationKind.Viewport:
-            merged = _web_layout_merge_many(
-                merged, change.viewport_geometry_ids, WEB_DIRTY_GEOMETRY
-            )
-    merged
+            merged.merge_many(change.viewport_geometry_ids, WEB_DIRTY_GEOMETRY)
 
 fn web_layout_dirty_frontier(
     changes: [WebLayoutChange]
 ) -> WebLayoutFrontier:
-    var dirty_nodes: [WebLayoutDirtyNode] = []
+    val merged = _WebLayoutDirtyMerge.create()
     for change in changes:
-        dirty_nodes = _web_layout_change_frontier(dirty_nodes, change)
+        _web_layout_change_frontier(merged, change)
     var invalidated_ids: [i64] = []
-    for node in dirty_nodes:
+    for node in merged.nodes:
         invalidated_ids.push(node.id)
     WebLayoutFrontier(
-        dirty_nodes: dirty_nodes,
+        dirty_nodes: merged.nodes,
         invalidated_ids: invalidated_ids,
         fault: ""
     )
