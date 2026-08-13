@@ -1,0 +1,54 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+ELF="${STARFIVE_ELF:-$ROOT_DIR/build/os/starfive-jh7110/simpleos.elf}"
+RECEIPT="${STARFIVE_RECEIPT:-$ELF.receipt}"
+SCRATCH=0x48000000
+OUTPUT="${STARFIVE_OPENOCD_STAGE_LOG:-$ROOT_DIR/build/test-artifacts/starfive-jh7110/openocd-stage.log}"
+
+test -f "$ELF" -a -f "$RECEIPT" || { echo "starfive_status=blocked"; echo "starfive_reason=image-or-receipt-missing"; exit 2; }
+EXPECTED="$(awk -F= '/^artifact_sha256=/ {print $2}' "$RECEIPT")"
+ACTUAL="$(sha256sum "$ELF" | awk '{print $1}')"
+test -n "$EXPECTED" -a "$EXPECTED" = "$ACTUAL" || { echo "starfive_status=fail"; echo "starfive_reason=image-receipt-hash-mismatch"; exit 1; }
+
+DETECT="$($ROOT_DIR/scripts/os/starfive-tigard-detect.shs)" || { printf '%s\n' "$DETECT"; exit 2; }
+JTAG_PATH="$(printf '%s\n' "$DETECT" | awk -F= '/^tigard_jtag_path=/ {print $2}')"
+JTAG_TTY="$(basename "$JTAG_PATH")"
+JTAG_SYS_DEVICE="$(readlink -f "/sys/class/tty/$JTAG_TTY/device")"
+USB_IFACE="$(basename "$(dirname "$JTAG_SYS_DEVICE")")"
+test "$(id -u)" -eq 0 || { echo "starfive_status=blocked"; echo "starfive_reason=jtag-driver-release-needs-root"; exit 2; }
+
+mkdir -p "$(dirname "$OUTPUT")"
+WAS_BOUND=0
+test -L "/sys/bus/usb/devices/$USB_IFACE/driver" && WAS_BOUND=1
+restore_driver() {
+    if test "$WAS_BOUND" -eq 1 && ! test -L "/sys/bus/usb/devices/$USB_IFACE/driver"; then
+        printf '%s' "$USB_IFACE" | tee /sys/bus/usb/drivers/ftdi_sio/bind >/dev/null 2>&1 || true
+    fi
+}
+trap restore_driver EXIT HUP INT TERM
+if test "$WAS_BOUND" -eq 1; then
+    printf '%s' "$USB_IFACE" | tee /sys/bus/usb/drivers/ftdi_sio/unbind >/dev/null
+fi
+
+set +e
+timeout 45 openocd \
+    -f interface/ftdi/tigard.cfg \
+    -c 'ftdi device_desc {port A:Serial  port B:JTAG}' \
+    -f "$ROOT_DIR/scripts/os/openocd-starfive-jh7110-target.cfg" \
+    -c init -c 'targets jh7110.u74_hart1' -c halt \
+    -c "load_image $ELF $SCRATCH bin" \
+    -c "verify_image $ELF $SCRATCH bin" \
+    -c resume -c shutdown > "$OUTPUT" 2>&1
+RC=$?
+set -e
+test "$RC" -eq 0 || { echo "starfive_status=fail"; echo "starfive_reason=jtag-stage-failed"; echo "openocd_log=$OUTPUT"; exit 1; }
+grep -qi 'verified.*bytes' "$OUTPUT" || { echo "starfive_status=fail"; echo "starfive_reason=jtag-stage-verify-missing"; exit 1; }
+
+echo "jtag_stage_status=pass"
+echo "jtag_stage_address=$SCRATCH"
+echo "jtag_stage_size=$(wc -c < "$ELF")"
+echo "jtag_stage_sha256=$ACTUAL"
+echo "jtag_flash_writes=0"
+echo "openocd_log=$OUTPUT"

@@ -1476,8 +1476,19 @@ spl_u64 unsafe_addr_of(spl_i64 value) {
     return (spl_u64)value;
 }
 
+#ifndef RT_RISCV_UART_BASE
+#define RT_RISCV_UART_BASE 0x10000000ULL
+#endif
+
 static void uart_put_byte(spl_u8 byte) {
-    *(volatile spl_u8 *)0x10000000ULL = byte;
+#if defined(RT_RISCV_UART_MMIO32)
+    volatile spl_u32 *uart = (volatile spl_u32 *)RT_RISCV_UART_BASE;
+    spl_u64 spins = 1000000ULL;
+    while (spins > 0ULL && (uart[5] & 0x20U) == 0U) spins = spins - 1ULL;
+    uart[0] = (spl_u32)byte;
+#else
+    *(volatile spl_u8 *)RT_RISCV_UART_BASE = byte;
+#endif
 }
 
 void rt_riscv_uart_put(spl_u64 byte) {

@@ -1,0 +1,16 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+DETECT="$($ROOT_DIR/scripts/os/starfive-tigard-detect.shs)" || { printf '%s\n' "$DETECT"; exit 2; }
+UART_PATH="$(printf '%s\n' "$DETECT" | awk -F= '/^tigard_uart_path=/ {print $2}')"
+DURATION="${STARFIVE_UART_TIMEOUT_SECONDS:-10}"
+OUTPUT="${STARFIVE_UART_LOG:-build/test-artifacts/starfive-jh7110/uart.log}"
+case "$DURATION" in *[!0-9]*|'') echo "error: invalid UART timeout" >&2; exit 1;; esac
+mkdir -p "$(dirname "$OUTPUT")"
+stty -F "$UART_PATH" 115200 cs8 -cstopb -parenb -crtscts raw -echo
+# Preserve reset-driven short bursts even when the bounded read times out.
+timeout "$DURATION" dd if="$UART_PATH" of="$OUTPUT" bs=1 count=1048576 status=none || true
+test -s "$OUTPUT" || { echo "starfive_status=blocked"; echo "starfive_reason=uart-silent"; echo "uart_log=$OUTPUT"; exit 2; }
+echo "uart_capture_status=pass"
+echo "uart_log=$OUTPUT"

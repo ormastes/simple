@@ -1800,6 +1800,33 @@ same false-green rules apply (conditional PASS markers only; final line
   `doc/00_llm_process/feature_expert/riscv_soc_linux/skill.md` — read it
   before any "does X exist / why does it fail" hardware question.
 
+### Physical-board UART/JTAG acceptance
+
+Run one bounded, stateful UART session for detection, load, ordered boot
+markers, shell command, and transcript capture. Do not compose a PASS from
+separate passive captures or fixed `/dev/ttyUSB0` assumptions. Resolve a probe
+by stable VID:PID, serial, and USB interface metadata; if JTAG detaches a kernel
+driver, record its original state and restore only the interface the tool
+detached.
+
+Classify unavailable adapter, silent UART, all-zero/all-one scan, or missing
+provenance-admitted compiler as `BLOCKED` with exit 2 and a specific receipt
+reason. Classify wrong TAP, target-observed boot failure, malformed/missing
+evidence, forbidden flash command, or failed driver restoration as FAIL. An
+SSpec helper must translate BLOCKED to `pending("BLOCKED: ...")`; it must never
+return early as success or assert that a blocked marker is a live PASS. Offline
+contract and negative self-tests validate policy only. Physical PASS requires
+the exact image/compiler hashes, load/entry and DTB contract, ordered target
+markers, real mounted-filesystem output, bounded timings, transcript paths, and
+restoration receipt from the same run.
+
+The UART capture primitive itself is part of the oracle. Verify that a bounded
+timeout retains partial reset-burst bytes in the artifact. A `timeout head -c`
+reader may discard or fail to expose such bytes on a tty; use a byte-streaming
+`dd`-style capture (or an equivalently proven reader). When a direct raw read
+captures data but the wrapper reports silence, fail the wrapper and fix it
+before attributing the result to board wiring.
+
 ## GPU / notebook remote lanes (planned, 2026-08-07)
 
 `cuda` and `vulkan` are planned composite remote backends at the same grammar depth as
@@ -2397,3 +2424,33 @@ The exact candidate runs
 `test/03_system/check/post_bootstrap_stage4_acceptance_spec.spl` once with its
 absolute path and adjacent provenance. Missing or symlinked inputs fail closed.
 Retained smoke is hash-verified without rerun; platform gates remain downstream.
+
+## Multi-TAP JTAG evidence
+
+Treat TAP identity and target identity as separate evidence. Declare the full
+ordered JTAG chain even when multiple TAPs share an ID, then explicitly select
+the required architecture and hart. A RAM-access PASS requires a bounded,
+reversible probe: save the original word at a reviewed scratch address,
+write/read a distinctive pattern, restore the original word, resume the hart,
+and restore the host USB driver. A successful scan alone is not evidence that
+target memory is readable or writable.
+
+Keep `jtag_load_status` distinct from boot-marker and shell status. Firmware-
+managed RISC-V boards require a proven privilege/interrupt/hart/DTB handoff;
+writing PC through debug is diagnostic unless it reproduces that contract.
+UART evidence includes MMIO access width and register shift as well as base and
+baud: equal base addresses do not make QEMU byte-wide 16550 operations valid
+for a 32-bit DesignWare 8250 implementation.
+
+U-Boot `bootelf` uses an application ABI, not necessarily the OpenSBI kernel
+`a0=hart/a1=FDT` contract. A board shim may use a firmware-known FDT address
+only after checking its magic and must report that fallback. Track `bootelf
+-p` and `bootelf -s` separately for the exact U-Boot version; an exception in
+the loader is not guest-entry evidence even if the ELF was staged correctly.
+
+Where hart-only OpenOCD reset cannot restore firmware, a fixed, allowlisted RAM
+trampoline may invoke SBI SRST cold reboot. PASS requires UART evidence that
+BootROM, OpenSBI, peripherals, and U-Boot restarted plus restored probe-driver
+state; issuing the `ecall` alone is insufficient. An immutable packaged-root
+manifest remains real VFS evidence when CLI `ls` calls public `readdir`; never
+hardcode the listing in the shell command handler.

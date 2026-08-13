@@ -1,0 +1,80 @@
+# StarFive JH7110 S-mode entry through existing OpenSBI/U-Boot firmware.
+
+use os.kernel.boot.riscv_noalloc_handoff.{riscv_noalloc_handoff, riscv_noalloc_boot_idle}
+use os.kernel.boot.riscv_noalloc_heap.{riscv_noalloc_heap_init}
+use os.kernel.boot.riscv_noalloc_log.{riscv_noalloc_log_init, riscv_noalloc_log_boot_ok}
+use os.kernel.boot.riscv_noalloc_services.{riscv_noalloc_services_init}
+use os.kernel.arch.riscv64.starfive.console.{starfive_serial_shell_main}
+use os.kernel.arch.riscv64.starfive_root.{starfive_mount_packaged_root}
+
+extern fn log_raw_println(msg: text)
+extern fn __simple_call_module_inits()
+extern fn rt_riscv_uart_put(byte: u64)
+extern fn rt_riscv_noalloc_pmm_init(ram_base: u64, ram_size: u64, reserved_end: u64, heap_start: u64) -> bool
+extern fn rt_mem_read_u8(addr: u64) -> u64
+extern fn rt_starfive_resolve_dtb(candidate: u64) -> u64
+
+val STARFIVE_RAM_BASE: u64 = 0x40000000
+val STARFIVE_RAM_SIZE_MIN: u64 = 0x80000000
+val STARFIVE_RESERVED_END: u64 = 0x48000000
+val STARFIVE_HEAP_START: u64 = 0x70000000
+val STARFIVE_HEAP_SIZE: u64 = 0x01000000
+val STARFIVE_UBOOT_DTB: u64 = 0x42200000
+
+fn _put_text_entry():
+    rt_riscv_uart_put(83)
+    rt_riscv_uart_put(84)
+    rt_riscv_uart_put(65)
+    rt_riscv_uart_put(82)
+    rt_riscv_uart_put(70)
+    rt_riscv_uart_put(73)
+    rt_riscv_uart_put(86)
+    rt_riscv_uart_put(69)
+    rt_riscv_uart_put(32)
+    rt_riscv_uart_put(101)
+    rt_riscv_uart_put(110)
+    rt_riscv_uart_put(116)
+    rt_riscv_uart_put(114)
+    rt_riscv_uart_put(121)
+    rt_riscv_uart_put(13)
+    rt_riscv_uart_put(10)
+
+fn _starfive_dtb_valid(dtb_addr: u64) -> bool:
+    dtb_addr != 0 and
+        rt_mem_read_u8(dtb_addr) == 0xD0 and
+        rt_mem_read_u8(dtb_addr + 1) == 0x0D and
+        rt_mem_read_u8(dtb_addr + 2) == 0xFE and
+        rt_mem_read_u8(dtb_addr + 3) == 0xED
+
+@no_mangle
+fn starfive_boot_main(hart_id: u64, dtb_addr: u64):
+    _put_text_entry()
+    var active_hart = hart_id
+    val active_dtb = rt_starfive_resolve_dtb(dtb_addr)
+    if active_dtb == 0:
+        riscv_noalloc_boot_idle()
+        return
+    val used_uboot_fallback = active_dtb != dtb_addr
+    if used_uboot_fallback:
+        active_hart = 1
+    riscv_noalloc_log_init()
+    if used_uboot_fallback:
+        log_raw_println("STARFIVE uboot-dtb-fallback")
+    riscv_noalloc_handoff(active_hart, active_dtb)
+    rt_riscv_noalloc_pmm_init(STARFIVE_RAM_BASE, STARFIVE_RAM_SIZE_MIN, STARFIVE_RESERVED_END, STARFIVE_HEAP_START)
+    riscv_noalloc_heap_init(STARFIVE_HEAP_START, STARFIVE_HEAP_SIZE)
+    __simple_call_module_inits()
+    riscv_noalloc_services_init(true)
+    log_raw_println("STARFIVE console-ready")
+    val root_r = starfive_mount_packaged_root()
+    if root_r.is_err():
+        log_raw_println("STARFIVE filesystem-failed: {root_r.unwrap_err()}")
+        riscv_noalloc_boot_idle()
+        return
+    log_raw_println("STARFIVE filesystem-ready entries={root_r.unwrap()}")
+    riscv_noalloc_log_boot_ok()
+    log_raw_println("STARFIVE shell-ready")
+    starfive_serial_shell_main()
+    riscv_noalloc_boot_idle()
+
+export starfive_boot_main

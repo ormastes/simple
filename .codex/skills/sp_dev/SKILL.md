@@ -155,6 +155,23 @@ it as PASS. `Current-host scope complete` is narrower than feature completion.
 The authoritative resume plan must name the target host/capability,
 prerequisites, exact command, retained artifacts, owner, and final reviewer.
 
+For physical-board bring-up, run the stateful serial session once and make its
+receipt the sole acceptance oracle. Detect adapters by stable USB identity and
+interface metadata, never fixed `ttyUSB` numbering; preserve and restore any
+temporarily detached kernel driver. A missing adapter, silent UART, all-zero or
+all-one JTAG scan, or unavailable admitted compiler is `BLOCKED` (exit 2 plus a
+specific reason), never PASS. A wrong TAP ID, malformed receipt, observed boot
+failure, destructive flash verb, or missing restoration evidence is FAIL.
+Offline contract/self-tests may prove the classifier, but cannot promote live
+hardware acceptance. Bind the build receipt to the exact compiler path/hash and
+provenance; a stale Stage 2/3 binary may diagnose a closure but cannot supply
+release, SPipe/docgen, or physical-board PASS evidence.
+For UART evidence, prove the bounded reader retains partial bytes when timeout
+terminates a tty read. Prefer a byte-streaming `dd`-style capture with a file
+receipt; do not assume `timeout head -c <large-count>` preserves reset bursts.
+If a direct read sees bytes while the wrapper reports silence, classify the
+wrapper as failed and repair it before diagnosing target wiring.
+
 When a user asks to close an implementation phase with external verification
 still unavailable, record an **implementation handoff** in the plan and Todo
 DB. It may end the coding turn only after code and host-independent tests are
@@ -987,3 +1004,36 @@ Run the exact candidate once against
 absolute `STAGE4_POST_BOOTSTRAP_BINARY` and adjacent
 `STAGE4_POST_BOOTSTRAP_PROVENANCE`. It verifies unchanged retained smoke and
 does not replace deployment, rollback, QEMU, or native-host gates.
+
+## Multi-TAP JTAG evidence
+
+Do not infer a CPU target from a matching TAP ID alone. A board may expose
+multiple TAPs with the same ID code. Declare the complete ordered chain and
+select the architecture/hart required by the boot contract before any memory
+oracle. A RAM-write acceptance probe must use a reviewed scratch address, save
+the original value, write and read back a distinctive pattern, restore the
+original value, resume the target, and restore any host USB driver. Scan-only
+evidence never proves RAM read/write access.
+
+For firmware-managed targets, a verified JTAG RAM load is not a verified kernel
+handoff. Record load and boot as separate phases. Direct debug-PC resume must
+reproduce the firmware privilege, interrupt, hart, and DTB contract or remain a
+diagnostic action; prefer the board firmware's reviewed ELF/FIT handoff for
+acceptance. Derive UART register width and shift from the board contract: a
+shared base does not make QEMU byte-wide 16550 access compatible with a
+DesignWare 8250 requiring 32-bit accesses.
+
+When U-Boot is the launcher, distinguish its ELF application ABI from an
+OpenSBI kernel handoff. `bootelf` may pass argc/argv instead of hart/FDT in
+`a0/a1`; the board shim must validate any fixed firmware FDT address before
+using it and fail closed otherwise. Record whether program-header (`-p`) or
+section-header (`-s`) loading was proven on the exact U-Boot build. A loader
+exception is a loader failure, not a guest boot failure.
+
+If generic JTAG reset does not reboot the SoC, a reviewed SBI SRST trampoline
+may be injected into an allowlisted RAM scratch address: set the SRST EID/FID
+and cold-reboot arguments, execute `ecall` in supervisor mode, retain UART proof
+of BootROM/OpenSBI/U-Boot restart, and restore the debug-probe driver. Keep the
+trampoline fixed and reject arbitrary code/addresses. For immutable packaged
+roots, a VFS-owned manifest is valid evidence when the shell calls public
+`readdir`; names must not be embedded in the shell output path.

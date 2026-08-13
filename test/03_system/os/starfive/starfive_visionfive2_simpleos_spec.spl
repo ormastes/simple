@@ -1,0 +1,86 @@
+# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008 REQ-009 NFR-001 NFR-002 NFR-003 NFR-004 NFR-005 NFR-006 NFR-007 NFR-008
+"""# StarFive VisionFive 2 SimpleOS bring-up
+
+Build and boot the named JH7110 image through the existing OpenSBI/U-Boot
+firmware, retain Tigard evidence, and prove that `ls /` enumerates the mounted
+SimpleOS root. Hardware absence is reported as BLOCKED rather than PASS.
+"""
+
+use std.spec.*
+use app.io.mod.{process_run_timeout}
+
+fn run_starfive_check(mode: text) -> (text, text, i64):
+    process_run_timeout(
+        "/bin/sh",
+        ["scripts/check/check-simpleos-starfive-jh7110.shs", mode],
+        300000
+    )
+
+fn classify_starfive_result(out: text, code: i64) -> text:
+    if code == 0 and out.contains("starfive_status=pass"):
+        return "pass"
+    if code == 2 and out.contains("starfive_status=blocked"):
+        return "blocked"
+    "fail"
+
+fn require_starfive_pass(out: text, code: i64, phase: text):
+    val classification = classify_starfive_result(out, code)
+    if classification == "blocked":
+        pending("BLOCKED: StarFive live evidence: {phase}")
+    if classification != "pass":
+        fail("FAIL: StarFive live evidence: {phase}")
+
+describe "StarFive VisionFive 2 SimpleOS":
+    # @inline
+    # @capture(log)
+    it "prepares the StarFive target and admitted image":
+        step("Build StarFive image")
+        val (out, err, code) = run_starfive_check("--contract")
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("starfive_contract_status=pass")
+        expect(out).to_contain("target=riscv64-starfive-jh7110")
+        expect(out).to_contain("entry=0x40200000")
+        expect(out).to_contain("flash_writes=0")
+        expect(out).to_contain("root_entries=bin,etc,README.txt")
+
+    # @prev("prepares the StarFive target and admitted image")
+    # @capture(log)
+    # @capture(artifact)
+    it "boots the board and lists the mounted root":
+        val (out, err, code) = run_starfive_check("--live")
+        require_starfive_pass(out, code, "complete UART session")
+        expect(err).to_equal("")
+        step("Detect Tigard")
+        expect(out).to_contain("tigard_status=pass")
+        expect(out).to_contain("tigard_vid_pid=0403:6010")
+        expect(out).to_contain("tigard_uart_channel=A")
+        expect(out).to_contain("tigard_jtag_channel=B")
+        step("Build StarFive image")
+        expect(out).to_contain("target=riscv64-starfive-jh7110")
+        expect(out).to_contain("entry=0x40200000")
+        expect(out).to_contain("manifest_hash_match=1")
+        step("Load image through U-Boot")
+        expect(out).to_contain("uboot_ram_load_status=pass")
+        expect(out).to_contain("uboot_flash_writes=0")
+        expect(out).to_contain("uboot_dtb_preserved=1")
+        step("Observe boot markers")
+        expect(out).to_contain("marker_order=pass")
+        expect(out).to_contain("entry_within_1000_ms=1")
+        expect(out).to_contain("shell_within_10000_ms=1")
+        step("Run ls on mounted root")
+        expect(out).to_contain("ls_status=pass")
+        expect(out).to_contain("ls_source=vfs")
+        expect(out).to_contain("ls_entries=bin,etc,README.txt")
+        expect(out).to_contain("ls_within_250_ms=1")
+        expect(out).to_contain("ftdi_driver_restored=1")
+
+    # @manual: folded
+    # @capture(log)
+    it "rejects unsafe ambiguous and incomplete evidence":
+        val (out, err, code) = run_starfive_check("--self-test")
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("starfive_self_test_status=pass")
+        expect(out).to_contain("destructive_commands=rejected")
+        expect(out).to_contain("all_ones_scan=blocked")

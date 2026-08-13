@@ -1,0 +1,55 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+OUTPUT="${STARFIVE_OPENOCD_LOG:-build/test-artifacts/starfive-jh7110/openocd.log}"
+DETECT="$($ROOT_DIR/scripts/os/starfive-tigard-detect.shs)" || { printf '%s\n' "$DETECT"; exit 2; }
+JTAG_PATH="$(printf '%s\n' "$DETECT" | awk -F= '/^tigard_jtag_path=/ {print $2}')"
+JTAG_TTY="$(basename "$JTAG_PATH")"
+JTAG_SYS_DEVICE="$(readlink -f "/sys/class/tty/$JTAG_TTY/device")"
+USB_IFACE="$(basename "$(dirname "$JTAG_SYS_DEVICE")")"
+mkdir -p "$(dirname "$OUTPUT")"
+command -v openocd >/dev/null 2>&1 || { echo "starfive_status=blocked"; echo "starfive_reason=openocd-missing"; exit 2; }
+
+case "$USB_IFACE" in *[!0-9.:_-]*) echo "error: invalid USB interface" >&2; exit 1;; esac
+test -e "/sys/bus/usb/devices/$USB_IFACE" || { echo "starfive_status=blocked"; echo "starfive_reason=tigard-jtag-interface-missing"; exit 2; }
+
+if test "$(id -u)" -eq 0; then
+    AS_ROOT=""
+elif sudo -n true 2>/dev/null; then
+    AS_ROOT="sudo -n"
+else
+    echo "starfive_status=blocked"
+    echo "starfive_reason=jtag-driver-release-needs-root"
+    exit 2
+fi
+
+WAS_BOUND=0
+test -L "/sys/bus/usb/devices/$USB_IFACE/driver" && WAS_BOUND=1
+restore_driver() {
+    if test "$WAS_BOUND" -eq 1 && ! test -L "/sys/bus/usb/devices/$USB_IFACE/driver"; then
+        printf '%s' "$USB_IFACE" | $AS_ROOT tee /sys/bus/usb/drivers/ftdi_sio/bind >/dev/null 2>&1 || true
+    fi
+}
+trap restore_driver EXIT HUP INT TERM
+if test "$WAS_BOUND" -eq 1; then
+    printf '%s' "$USB_IFACE" | $AS_ROOT tee /sys/bus/usb/drivers/ftdi_sio/unbind >/dev/null
+fi
+
+set +e
+timeout 15 $AS_ROOT openocd \
+    -f interface/ftdi/tigard.cfg \
+    -c 'ftdi device_desc {port A:Serial  port B:JTAG}' \
+    -f "$ROOT_DIR/scripts/os/openocd-starfive-jh7110.cfg" \
+    -c init -c scan_chain -c shutdown > "$OUTPUT" 2>&1
+RC=$?
+set -e
+if grep -q 'all ones' "$OUTPUT"; then
+    echo "starfive_status=blocked"; echo "starfive_reason=jtag-all-ones"; echo "openocd_log=$OUTPUT"; exit 2
+fi
+if test "$RC" -ne 0 || ! grep -qi '0x07110cfd' "$OUTPUT"; then
+    echo "starfive_status=fail"; echo "starfive_reason=jtag-unexpected-tap"; echo "openocd_log=$OUTPUT"; exit 1
+fi
+echo "jtag_status=pass"
+echo "jtag_tap=0x07110cfd"
+echo "openocd_log=$OUTPUT"

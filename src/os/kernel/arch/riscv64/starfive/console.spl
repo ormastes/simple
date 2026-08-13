@@ -1,0 +1,49 @@
+# StarFive firmware-preserved UART shell for the RAM-boot MVP.
+
+use os.kernel.arch.riscv64.starfive.vfs.{g_vfs_readdir}
+
+extern fn rt_riscv_uart_put(byte: u64)
+extern fn rt_starfive_uart_read() -> i64
+extern fn rt_string_from_byte_array(arr: [u8]) -> text
+extern fn rt_string_char_code_at(value: text, index: i64) -> i64
+
+val STARFIVE_UART_BASE: u64 = 0x10000000
+
+fn _write(text_value: text):
+    for i in 0..text_value.len():
+        rt_riscv_uart_put(rt_string_char_code_at(text_value, i) as u64)
+
+fn _writeln(text_value: text):
+    _write(text_value)
+    rt_riscv_uart_put(13)
+    rt_riscv_uart_put(10)
+
+fn _list_root():
+    val entries = g_vfs_readdir("/")
+    for entry in entries:
+        _write("/")
+        _writeln(entry.name)
+
+fn starfive_serial_shell_main():
+    _writeln("SimpleOS StarFive JH7110")
+    _write("simpleos> ")
+    var input: [u8] = []
+    loop:
+        val raw_byte = rt_starfive_uart_read()
+        if raw_byte >= 0:
+            val byte = raw_byte as u8
+            if byte == 13 or byte == 10:
+                _writeln("")
+                val command = rt_string_from_byte_array(input)
+                if command == "ls" or command == "ls /":
+                    _list_root()
+                else:
+                    _writeln("commands: ls, ls /")
+                input = []
+                _write("simpleos> ")
+            else:
+                if input.len() < 128:
+                    input.push(byte)
+                    rt_riscv_uart_put(byte as u64)
+
+export starfive_serial_shell_main

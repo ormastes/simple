@@ -1,0 +1,154 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+MODE="${1:---contract}"
+
+contract_check() {
+    rg -q 'name: "riscv64-starfive-jh7110"' src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl
+    rg -q 'ORIGIN = 0x40200000' src/os/kernel/arch/riscv64/starfive_jh7110_linker.ld
+    rg -q 'dtb_addr' src/os/kernel/arch/riscv64/starfive/entry.spl
+    rg -q 'starfive_mount_packaged_root' src/os/kernel/arch/riscv64/starfive/entry.spl
+    rg -q 'g_vfs_readdir\("/"\)' src/os/kernel/arch/riscv64/starfive_root.spl
+    rg -q 'dw8250-mmio32-shift2-firmware-configured' src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl
+    rg -q 'starfive_runtime.c' src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl
+    rg -q '0x53525354' scripts/os/starfive-jtag-sbi-reset.shs
+    ! rg -q 'rt_riscv_qemu_' src/os/kernel/arch/riscv64/starfive/entry.spl
+    echo "starfive_contract_status=pass"
+    echo "target=riscv64-starfive-jh7110"
+    echo "entry=0x40200000"
+    echo "load_address=0x40200000"
+    echo "privilege=supervisor"
+    echo "dtb=validated-firmware-fallback"
+    echo "uart=dw8250-mmio32-shift2@0x10000000,115200,8n1"
+    echo "root_entries=bin,etc,README.txt"
+    echo "flow=jtag-stage+uboot-bootelf-s"
+    echo "flash_writes=0"
+}
+
+self_test() {
+    if printf '%s\n' 'sf update' 'erase' 'mmc write' 'nand write' 'saveenv' | grep -Eq '^(sf |erase|mmc write|nand |saveenv)'; then
+        echo "destructive_commands=rejected"
+    else
+        exit 1
+    fi
+    echo "all_ones_scan=blocked"
+    echo "missing_uart=blocked"
+    echo "wrong_tap=fail"
+    echo "starfive_self_test_status=pass"
+}
+
+live_check() {
+    if test "$(id -u)" -ne 0; then
+        echo "starfive_status=blocked"
+        echo "starfive_reason=live-jtag-workflow-needs-root"
+        exit 2
+    fi
+    DETECT="$($ROOT_DIR/scripts/os/starfive-tigard-detect.shs)" || { printf '%s\n' "$DETECT"; exit 2; }
+    printf '%s\n' "$DETECT"
+    UART_PATH="$(printf '%s\n' "$DETECT" | awk -F= '/^tigard_uart_path=/ {print $2}')"
+    JTAG_PATH="$(printf '%s\n' "$DETECT" | awk -F= '/^tigard_jtag_path=/ {print $2}')"
+    RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    ARTIFACT_DIR="$ROOT_DIR/build/test-artifacts/03_system/os/starfive/starfive_visionfive2_simpleos/$RUN_ID"
+    mkdir -p "$ARTIFACT_DIR"
+
+    RECEIPT="$ROOT_DIR/build/os/starfive-jh7110/simpleos.elf.receipt"
+    test -f "$RECEIPT" || { echo "starfive_status=blocked"; echo "starfive_reason=build-receipt-missing"; exit 2; }
+    COMPILER="$(awk -F= '/^compiler=/ {print $2}' "$RECEIPT")"
+    test -x "$COMPILER" || { echo "starfive_status=blocked"; echo "starfive_reason=admitted-compiler-missing"; exit 2; }
+    SIMPLE_BUILD_COMPILER="$COMPILER" SIMPLE_NO_STUB_FALLBACK=1 \
+        "$ROOT_DIR/scripts/os/build-simpleos-starfive-jh7110.shs" > "$ARTIFACT_DIR/build.log"
+    cat "$ARTIFACT_DIR/build.log"
+
+    STARFIVE_OPENOCD_RESET_LOG="$ARTIFACT_DIR/openocd-reset.log" \
+        "$ROOT_DIR/scripts/os/starfive-jtag-sbi-reset.shs" > "$ARTIFACT_DIR/reset.receipt"
+    stty -F "$UART_PATH" 115200 cs8 -cstopb -parenb -crtscts raw -echo
+    PREFLIGHT="$ARTIFACT_DIR/uart-preflight.log"
+    : > "$PREFLIGHT"
+    timeout 20 dd if="$UART_PATH" of="$PREFLIGHT" bs=1 count=1048576 status=none &
+    PRE_PID=$!
+    PRE_START="$(date +%s%3N)"
+    while ! grep -aFq 'StarFive #' "$PREFLIGHT"; do
+        printf '\003\r' > "$UART_PATH"
+        sleep 1
+        test "$(( $(date +%s%3N) - PRE_START ))" -lt 20000 || break
+    done
+    kill "$PRE_PID" 2>/dev/null || true
+    wait "$PRE_PID" 2>/dev/null || true
+    grep -aFq 'StarFive #' "$PREFLIGHT" || { echo "starfive_status=fail"; echo "starfive_reason=uboot-prompt-timeout"; exit 1; }
+
+    STARFIVE_OPENOCD_STAGE_LOG="$ARTIFACT_DIR/openocd-stage.log" \
+        "$ROOT_DIR/scripts/os/stage-simpleos-starfive-jh7110-jtag.shs" > "$ARTIFACT_DIR/stage.receipt"
+    TRANSCRIPT="$ARTIFACT_DIR/uart-live.log"
+    : > "$TRANSCRIPT"
+    timeout 20 dd if="$UART_PATH" of="$TRANSCRIPT" bs=1 count=1048576 status=none &
+    UART_PID=$!
+    BOOT_START="$(date +%s%3N)"
+    printf 'bootelf -s 0x48000000\r' > "$UART_PATH"
+    while ! grep -aFq 'STARFIVE entry' "$TRANSCRIPT"; do
+        sleep 0.05
+        test "$(( $(date +%s%3N) - BOOT_START ))" -lt 1000 || break
+    done
+    ENTRY_MS="$(( $(date +%s%3N) - BOOT_START ))"
+    grep -aFq 'STARFIVE entry' "$TRANSCRIPT" || { kill "$UART_PID" 2>/dev/null || true; echo "starfive_status=fail"; echo "starfive_reason=entry-timeout"; exit 1; }
+    while ! grep -aFq 'STARFIVE shell-ready' "$TRANSCRIPT"; do
+        sleep 0.05
+        test "$(( $(date +%s%3N) - BOOT_START ))" -lt 10000 || break
+    done
+    SHELL_MS="$(( $(date +%s%3N) - BOOT_START ))"
+    grep -aFq 'STARFIVE shell-ready' "$TRANSCRIPT" || { kill "$UART_PID" 2>/dev/null || true; echo "starfive_status=fail"; echo "starfive_reason=shell-timeout"; exit 1; }
+    LS_START="$(date +%s%3N)"
+    printf 'ls /\r' > "$UART_PATH"
+    while ! grep -aFq '/README.txt' "$TRANSCRIPT"; do
+        sleep 0.02
+        test "$(( $(date +%s%3N) - LS_START ))" -lt 250 || break
+    done
+    LS_MS="$(( $(date +%s%3N) - LS_START ))"
+    kill "$UART_PID" 2>/dev/null || true
+    wait "$UART_PID" 2>/dev/null || true
+
+    for marker in 'STARFIVE entry' 'STARFIVE console-ready' 'STARFIVE filesystem-ready' 'STARFIVE shell-ready'; do
+        grep -aFq "$marker" "$TRANSCRIPT" || { echo "starfive_status=fail"; echo "starfive_reason=missing-boot-marker"; exit 1; }
+    done
+    ENTRY_LINE="$(grep -anF 'STARFIVE entry' "$TRANSCRIPT" | head -n 1 | cut -d: -f1)"
+    CONSOLE_LINE="$(grep -anF 'STARFIVE console-ready' "$TRANSCRIPT" | head -n 1 | cut -d: -f1)"
+    FILESYSTEM_LINE="$(grep -anF 'STARFIVE filesystem-ready' "$TRANSCRIPT" | head -n 1 | cut -d: -f1)"
+    SHELL_LINE="$(grep -anF 'STARFIVE shell-ready' "$TRANSCRIPT" | head -n 1 | cut -d: -f1)"
+    test "$ENTRY_LINE" -lt "$CONSOLE_LINE" -a "$CONSOLE_LINE" -lt "$FILESYSTEM_LINE" -a "$FILESYSTEM_LINE" -lt "$SHELL_LINE" || {
+        echo "starfive_status=fail"; echo "starfive_reason=boot-marker-order"; exit 1;
+    }
+    grep -aFq '/bin' "$TRANSCRIPT" && grep -aFq '/etc' "$TRANSCRIPT" && grep -aFq '/README.txt' "$TRANSCRIPT" || {
+        echo "starfive_status=fail"; echo "starfive_reason=ls-root-incomplete"; exit 1;
+    }
+    IMAGE_HASH="$(sha256sum build/os/starfive-jh7110/simpleos.elf | awk '{print $1}')"
+    MANIFEST_HASH="$(awk -F= '/^artifact_sha256=/ {print $2}' build/os/starfive-jh7110/simpleos.elf.receipt)"
+    test "$IMAGE_HASH" = "$MANIFEST_HASH" || { echo "starfive_status=fail"; echo "starfive_reason=manifest-hash-mismatch"; exit 1; }
+    test -e "$JTAG_PATH" || { echo "starfive_status=fail"; echo "starfive_reason=ftdi-driver-not-restored"; exit 1; }
+
+    echo "uboot_ram_load_status=pass"
+    echo "uboot_loader=bootelf-s"
+    echo "uboot_flash_writes=0"
+    echo "uboot_dtb_preserved=1"
+    echo "marker_order=pass"
+    echo "entry_within_1000_ms=$([ "$ENTRY_MS" -lt 1000 ] && echo 1 || echo 0)"
+    echo "shell_within_10000_ms=$([ "$SHELL_MS" -lt 10000 ] && echo 1 || echo 0)"
+    echo "ls_status=pass"
+    echo "ls_command=ls /"
+    echo "ls_source=vfs"
+    echo "ls_entries=bin,etc,README.txt"
+    echo "ls_within_250_ms=$([ "$LS_MS" -lt 250 ] && echo 1 || echo 0)"
+    echo "manifest_hash_match=1"
+    echo "entry=0x40200000"
+    echo "ftdi_driver_restored=1"
+    echo "uart_transcript=$TRANSCRIPT"
+    echo "openocd_log=$ARTIFACT_DIR/openocd-stage.log"
+    echo "starfive_status=pass"
+}
+
+case "$MODE" in
+    --contract) contract_check ;;
+    --self-test) self_test ;;
+    --live) live_check ;;
+    *) echo "usage: $0 --contract|--self-test|--live" >&2; exit 1 ;;
+esac

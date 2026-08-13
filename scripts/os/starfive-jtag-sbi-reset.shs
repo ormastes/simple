@@ -1,0 +1,47 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+OUTPUT="${STARFIVE_OPENOCD_RESET_LOG:-$ROOT_DIR/build/test-artifacts/starfive-jh7110/openocd-sbi-reset.log}"
+SCRATCH=0x48000000
+
+DETECT="$($ROOT_DIR/scripts/os/starfive-tigard-detect.shs)" || { printf '%s\n' "$DETECT"; exit 2; }
+JTAG_PATH="$(printf '%s\n' "$DETECT" | awk -F= '/^tigard_jtag_path=/ {print $2}')"
+JTAG_TTY="$(basename "$JTAG_PATH")"
+JTAG_SYS_DEVICE="$(readlink -f "/sys/class/tty/$JTAG_TTY/device")"
+USB_IFACE="$(basename "$(dirname "$JTAG_SYS_DEVICE")")"
+test "$(id -u)" -eq 0 || { echo "starfive_status=blocked"; echo "starfive_reason=jtag-driver-release-needs-root"; exit 2; }
+
+mkdir -p "$(dirname "$OUTPUT")"
+WAS_BOUND=0
+test -L "/sys/bus/usb/devices/$USB_IFACE/driver" && WAS_BOUND=1
+restore_driver() {
+    if test "$WAS_BOUND" -eq 1 && ! test -L "/sys/bus/usb/devices/$USB_IFACE/driver"; then
+        printf '%s' "$USB_IFACE" | tee /sys/bus/usb/drivers/ftdi_sio/bind >/dev/null 2>&1 || true
+    fi
+}
+trap restore_driver EXIT HUP INT TERM
+if test "$WAS_BOUND" -eq 1; then
+    printf '%s' "$USB_IFACE" | tee /sys/bus/usb/drivers/ftdi_sio/unbind >/dev/null
+fi
+
+# SBI SRST: EID 0x53525354, FID 0, reset_type 1 (cold reboot), reason 0.
+# The reviewed scratch contains only: ecall; wfi; jump-to-wfi.
+set +e
+timeout 20 openocd \
+    -f interface/ftdi/tigard.cfg \
+    -c 'ftdi device_desc {port A:Serial  port B:JTAG}' \
+    -f "$ROOT_DIR/scripts/os/openocd-starfive-jh7110-target.cfg" \
+    -c init -c 'targets jh7110.u74_hart1' -c halt \
+    -c "mww $SCRATCH 0x00000073" \
+    -c "mww 0x48000004 0x10500073" \
+    -c "mww 0x48000008 0xffdff06f" \
+    -c 'reg a7 0x53525354' -c 'reg a6 0' -c 'reg a0 1' -c 'reg a1 0' \
+    -c "reg pc $SCRATCH" -c resume -c shutdown > "$OUTPUT" 2>&1
+RC=$?
+set -e
+test "$RC" -eq 0 || test "$RC" -eq 124 || { echo "starfive_status=fail"; echo "starfive_reason=sbi-reset-command-failed"; exit 1; }
+echo "jtag_sbi_reset_status=issued"
+echo "jtag_sbi_reset_type=cold-reboot"
+echo "jtag_flash_writes=0"
+echo "openocd_log=$OUTPUT"

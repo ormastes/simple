@@ -1,0 +1,73 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+OUTPUT="${STARFIVE_OPENOCD_RAM_LOG:-build/test-artifacts/starfive-jh7110/openocd-ram.log}"
+ADDRESS="${STARFIVE_JTAG_SCRATCH_ADDRESS:-0x48000000}"
+PATTERN="${STARFIVE_JTAG_SCRATCH_PATTERN:-0x53464a54}"
+
+case "$ADDRESS" in 0x[0-9a-fA-F]*) ;; *) echo "error: invalid scratch address" >&2; exit 1;; esac
+case "$PATTERN" in 0x[0-9a-fA-F]*) ;; *) echo "error: invalid scratch pattern" >&2; exit 1;; esac
+test "$ADDRESS" = "0x48000000" || { echo "error: only reviewed scratch address 0x48000000 is allowed" >&2; exit 1; }
+
+DETECT="$($ROOT_DIR/scripts/os/starfive-tigard-detect.shs)" || { printf '%s\n' "$DETECT"; exit 2; }
+JTAG_PATH="$(printf '%s\n' "$DETECT" | awk -F= '/^tigard_jtag_path=/ {print $2}')"
+JTAG_TTY="$(basename "$JTAG_PATH")"
+JTAG_SYS_DEVICE="$(readlink -f "/sys/class/tty/$JTAG_TTY/device")"
+USB_IFACE="$(basename "$(dirname "$JTAG_SYS_DEVICE")")"
+test -e "/sys/bus/usb/devices/$USB_IFACE" || { echo "starfive_status=blocked"; echo "starfive_reason=tigard-jtag-interface-missing"; exit 2; }
+
+if test "$(id -u)" -eq 0; then
+    AS_ROOT=""
+elif sudo -n true 2>/dev/null; then
+    AS_ROOT="sudo -n"
+else
+    echo "starfive_status=blocked"
+    echo "starfive_reason=jtag-driver-release-needs-root"
+    exit 2
+fi
+
+mkdir -p "$(dirname "$OUTPUT")"
+WAS_BOUND=0
+test -L "/sys/bus/usb/devices/$USB_IFACE/driver" && WAS_BOUND=1
+restore_driver() {
+    if test "$WAS_BOUND" -eq 1 && ! test -L "/sys/bus/usb/devices/$USB_IFACE/driver"; then
+        printf '%s' "$USB_IFACE" | $AS_ROOT tee /sys/bus/usb/drivers/ftdi_sio/bind >/dev/null 2>&1 || true
+    fi
+}
+trap restore_driver EXIT HUP INT TERM
+if test "$WAS_BOUND" -eq 1; then
+    printf '%s' "$USB_IFACE" | $AS_ROOT tee /sys/bus/usb/drivers/ftdi_sio/unbind >/dev/null
+fi
+
+set +e
+timeout 25 $AS_ROOT openocd \
+    -f interface/ftdi/tigard.cfg \
+    -c 'ftdi device_desc {port A:Serial  port B:JTAG}' \
+    -f "$ROOT_DIR/scripts/os/openocd-starfive-jh7110-target.cfg" \
+    -c init -c 'targets jh7110.u74_hart1' -c halt \
+    -c "mdw $ADDRESS 1" \
+    -c "set _original [read_memory $ADDRESS 32 1]" \
+    -c "mww $ADDRESS $PATTERN" \
+    -c "mdw $ADDRESS 1" \
+    -c "write_memory $ADDRESS 32 \$_original" \
+    -c "mdw $ADDRESS 1" \
+    -c resume -c shutdown > "$OUTPUT" 2>&1
+RC=$?
+set -e
+
+if test "$RC" -ne 0; then
+    echo "starfive_status=fail"
+    echo "starfive_reason=jtag-ram-command-failed"
+    echo "openocd_log=$OUTPUT"
+    exit 1
+fi
+grep -qi '0x07110cfd' "$OUTPUT" || { echo "starfive_status=fail"; echo "starfive_reason=jtag-tap-missing"; exit 1; }
+grep -qi "${ADDRESS}: ${PATTERN#0x}" "$OUTPUT" || { echo "starfive_status=fail"; echo "starfive_reason=jtag-ram-pattern-mismatch"; exit 1; }
+
+echo "jtag_ram_status=pass"
+echo "jtag_tap=0x07110cfd"
+echo "jtag_scratch_address=$ADDRESS"
+echo "jtag_pattern=$PATTERN"
+echo "jtag_original_restored=1"
+echo "openocd_log=$OUTPUT"
