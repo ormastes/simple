@@ -58,3 +58,8 @@ allocation, frame timing, DrawIR receipt, or checksum occurred. This is a
 self-hosted launcher compatibility/admission blocker distinct from the earlier
 boxed-interpreter timeout; it is not a DrawIR performance result and does not
 alter the 8K/80 status.
+
+A correctly quoted independent `-c 'print(123)'` probe returned the same
+`missing command` response. This confirms that the binary's execution
+dispatcher is nonfunctional beyond direct source-file argument parsing; it is
+not a benchmark-file-specific failure.
