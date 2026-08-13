@@ -718,6 +718,9 @@ in-progress
 - impl: Reader close is now terminal for retention as well as frame admission.
   It clears a partial armored line and rejects subsequent chunks before they
   can be appended, closing the prior closed-inbox-but-retained-text gap.
+- impl: The armored stdout reader now rejects non-ASCII text before buffering
+  it. This makes its advertised line ceiling a real retained-byte bound rather
+  than a character-count approximation over the host `text` surface.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters
