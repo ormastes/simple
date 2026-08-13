@@ -10,6 +10,7 @@ source contracts and bootstrap-seed diagnostics do not satisfy those budgets.
 """
 
 use std.io.{file_read}
+use std.io_runtime.{getpid}
 use std.spec.{describe, it, expect, step}
 use compiler.core.interpreter.module_loader_resolve.{
     resolve_module_path,
@@ -21,8 +22,120 @@ val HARNESS = "scripts/check/check-cross-language-perf.shs"
 val BYTE_FIXTURE = "test/05_perf/bytes_push_1mib.spl"
 val LOADER_BUG = "doc/08_tracking/bug/module_loader_negative_cache_stat_storm_2026-08-11.md"
 val BYTE_BUG = "doc/08_tracking/bug/interpreter_bytes_u64_false_green_memory_2026-08-11.md"
+val BOOTSTRAP_C_RUNTIME = "src/runtime/runtime.c"
+val C_RUNTIME = "src/runtime/runtime_native.c"
+val RUNTIME_HEADER = "src/runtime/runtime.h"
+val C_PROBE_SELFCHECK = "src/runtime/test/rt_file_exists_probe_selfcheck.c"
+val C_PROBE_SCRIPT = "scripts/check/check-file-exists-probe-c.shs"
+val TEXT_EXTERN_ABI_ROUTER = "src/compiler/50.mir/text_extern_abi.spl"
+val LLVM_BACKEND = "src/compiler/70.backend/backend/llvm_backend.spl"
+val LLVM_LIB_TRANSLATE = "src/compiler/70.backend/backend/llvm_lib_translate.spl"
+val SFFI_MINIMAL = "src/compiler/70.backend/sffi_minimal.spl"
+val INTERPRETER_CALLS = "src/compiler/70.backend/backend/interpreter_calls.spl"
+val RUST_RUNTIME = "src/compiler_rust/runtime/src/value/sffi/file_io/metadata.rs"
+val RUST_FILE_IO_EXPORTS = "src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs"
+val RUST_VALUE_EXPORTS = "src/compiler_rust/runtime/src/value/mod.rs"
+val CODEGEN_EXPORTS = "src/compiler_rust/compiler/src/codegen/runtime_sffi.rs"
+val SIMPLE_CORE_PROVIDER = "src/compiler_rust/compiler/src/interpreter_extern/file_io.rs"
+val INTERPRETER_EXPORTS = "src/compiler_rust/compiler/src/interpreter_extern/mod.rs"
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_exists_probe_begin() -> i64
+extern fn rt_file_exists_probe_end(token: i64) -> i64
+
+fn total_existence_probe_count(packed: i64) -> i64:
+    packed >> 32
+
+fn failed_existence_probe_count(packed: i64) -> i64:
+    packed & 0xffffffff
+
+fn check_exact_failed_existence_probe_packing() -> text:
+    val missing = "/tmp/simple_failed_existence_probe_contract_missing_" + getpid().to_text()
+    if rt_file_exists(missing):
+        return "exact packed probe fixture unexpectedly exists"
+    val token = rt_file_exists_probe_begin()
+    if token <= 0:
+        return "exact packed probe check did not acquire a generation"
+    val first_exists = rt_file_exists(missing)
+    val second_exists = rt_file_exists(missing)
+    val packed = rt_file_exists_probe_end(token)
+    if packed < 0:
+        return "exact packed probe check returned an error"
+    if first_exists or second_exists:
+        return "exact packed probe fixture unexpectedly exists"
+    if total_existence_probe_count(packed) != 2:
+        return "exact packed probe total was not two facade calls"
+    if failed_existence_probe_count(packed) != 2:
+        return "exact packed probe failed count was not two misses"
+    if rt_file_exists_probe_end(token) != -2:
+        return "stale probe token was accepted"
+    ""
+
+fn check_failed_existence_probe_cache_gate() -> text:
+    """Measure facade-level failed existence probes without a timing counter.
+
+    The 100-request baseline clears the resolver cache before every request.
+    The retained 1000-request path clears once, so it must preserve one
+    uncached resolution and then reuse the exact same cached resolution.
+    """
+    val module_name = "local_missing_failed_existence_probe"
+    val caller = "/tmp/simple_failed_existence_probe/main.spl"
+
+    val baseline_token = rt_file_exists_probe_begin()
+    if baseline_token <= 0:
+        return "failed existence probe baseline did not acquire a generation"
+    var baseline_resolution = ""
+    var baseline_uncached = 0
+    for _ in 0..100:
+        module_resolve_cache_reset()
+        val resolved = resolve_module_path(module_name, caller)
+        if baseline_resolution == "":
+            baseline_resolution = resolved
+        elif resolved != baseline_resolution:
+            return "uncached baseline changed resolution"
+        baseline_uncached = baseline_uncached + module_resolve_uncached_count()
+    val baseline_packed = rt_file_exists_probe_end(baseline_token)
+    if baseline_packed < 0:
+        return "failed existence probe baseline returned an error"
+    if baseline_uncached != 100:
+        return "baseline did not perform 100 uncached resolutions"
+
+    module_resolve_cache_reset()
+    val cached_token = rt_file_exists_probe_begin()
+    if cached_token <= 0:
+        return "failed existence probe cached path did not acquire a generation"
+    var cached_resolution = ""
+    for _ in 0..1000:
+        val resolved = resolve_module_path(module_name, caller)
+        if cached_resolution == "":
+            cached_resolution = resolved
+        elif resolved != cached_resolution:
+            return "retained cached path changed resolution"
+    val cached_packed = rt_file_exists_probe_end(cached_token)
+    if cached_packed < 0:
+        return "failed existence probe cached path returned an error"
+    if module_resolve_uncached_count() != 1:
+        return "retained cached path did not keep exactly one uncached resolution"
+    if baseline_resolution != cached_resolution:
+        return "baseline and cached paths resolved differently"
+
+    val baseline = failed_existence_probe_count(baseline_packed)
+    val cached = failed_existence_probe_count(cached_packed)
+    val baseline_total = total_existence_probe_count(baseline_packed)
+    val cached_total = total_existence_probe_count(cached_packed)
+    if baseline <= 0:
+        return "uncached baseline recorded no failed existence probes"
+    if baseline_total < baseline or cached_total < cached:
+        return "packed probe failed count exceeded its facade total"
+    if cached * 100 > baseline * 10:
+        return "cached failed existence probes exceed the 10 percent gate"
+    ""
 
 describe "Compiler loader script cross-language performance B+B":
+    it "packs exact facade totals and failed existence probes":
+        step("Check two deterministic missing facade calls")
+        expect(check_exact_failed_existence_probe_packing()).to_equal("")
+
     it "should reuse an exact unresolved module result within one cache generation":
         step("Prepare equivalent performance fixtures")
         module_resolve_cache_reset()
@@ -50,6 +163,91 @@ describe "Compiler loader script cross-language performance B+B":
         val after_reset = resolve_module_path(module_name, "test/05_perf/a.spl")
         expect(after_reset).to_equal(first)
         expect(module_resolve_uncached_count()).to_equal(1)
+
+    it "cuts failed existence probes across 100 uncached and 1000 retained resolutions":
+        step("Measure failed existence probes at the file-exists facade")
+        expect(check_failed_existence_probe_cache_gate()).to_equal("")
+
+    it "keeps the probe provider native-atomic and Simple-core fail-closed":
+        step("Audit C, Rust, and interpreter-provider probe contracts")
+        val bootstrap_c_runtime = file_read(BOOTSTRAP_C_RUNTIME)
+        val c_runtime = file_read(C_RUNTIME)
+        val runtime_header = file_read(RUNTIME_HEADER)
+        val c_probe_selfcheck = file_read(C_PROBE_SELFCHECK)
+        val c_probe_script = file_read(C_PROBE_SCRIPT)
+        val text_extern_abi_router = file_read(TEXT_EXTERN_ABI_ROUTER)
+        val llvm_backend = file_read(LLVM_BACKEND)
+        val llvm_lib_translate = file_read(LLVM_LIB_TRANSLATE)
+        val sffi_minimal = file_read(SFFI_MINIMAL)
+        val interpreter_calls = file_read(INTERPRETER_CALLS)
+        val rust_runtime = file_read(RUST_RUNTIME)
+        val rust_file_io_exports = file_read(RUST_FILE_IO_EXPORTS)
+        val rust_value_exports = file_read(RUST_VALUE_EXPORTS)
+        val codegen_exports = file_read(CODEGEN_EXPORTS)
+        val simple_core_provider = file_read(SIMPLE_CORE_PROVIDER)
+        val interpreter_exports = file_read(INTERPRETER_EXPORTS)
+        expect(bootstrap_c_runtime).to_contain("rt_file_exists_probe_lease_admit")
+        expect(bootstrap_c_runtime).to_contain("rt_file_exists_probe_try_add_total")
+        expect(bootstrap_c_runtime).to_contain("rt_file_exists_probe_test_seed_counters")
+        expect(bootstrap_c_runtime).to_contain("rt_file_exists_probe_record(lease, exists)")
+        expect(bootstrap_c_runtime).to_contain("RT_FILE_EXISTS_PROBE_GENERATION_MAX UINT64_C(0x7fffffffffffffff)")
+        expect(bootstrap_c_runtime).to_contain("memory_order_relaxed")
+        expect(c_runtime).to_contain("rt_file_exists_probe_begin")
+        expect(c_runtime).to_contain("rt_file_exists_probe_end")
+        expect(c_runtime).to_contain("rt_file_exists_probe_lease_admit")
+        expect(c_runtime).to_contain("rt_file_exists_probe_try_add_total")
+        expect(c_runtime).to_contain("rt_file_exists_probe_test_seed_counters")
+        expect(c_runtime).to_contain("rt_file_exists_probe_record(lease, exists)")
+        expect(c_runtime).to_contain("RT_FILE_EXISTS_PROBE_GENERATION_MAX UINT64_C(0x7fffffffffffffff)")
+        expect(c_runtime).to_contain("memory_order_relaxed")
+        expect(runtime_header).to_contain("rt_file_exists_probe_begin")
+        expect(runtime_header).to_contain("rt_file_exists_probe_end")
+        expect(runtime_header).to_contain("SIMPLE_RUNTIME_TESTING")
+        expect(runtime_header).to_contain("rt_file_exists_probe_test_seed_counters")
+        expect(c_probe_selfcheck).to_contain("rt_file_exists_probe_test_seed_counters")
+        expect(c_probe_selfcheck).to_contain("access(missing, F_OK) == 0 || errno != ENOENT")
+        expect(c_probe_script).to_contain("runtime.c runtime_native.c")
+        expect(c_probe_script).to_contain("-DSIMPLE_RUNTIME_TESTING")
+        expect(rust_runtime).to_contain("FILE_EXISTS_PROBE_STATE")
+        expect(rust_runtime).to_contain("Ordering::Relaxed")
+        expect(rust_runtime).to_contain("rt_file_exists_probe_end")
+        expect(rust_runtime).to_contain("file_exists_probe_lease_admit")
+        expect(rust_runtime).to_contain("file_exists_probe_record(lease, exists)")
+        expect(rust_runtime).to_contain("file_exists_probe_try_add_total")
+        expect(rust_runtime).to_contain("file_exists_probe_test_seed_counters")
+        expect(rust_runtime).to_contain("0x7fff_ffff_ffff_ffff")
+        expect(rust_runtime).to_contain("file_exists_probe_after_admit_test_hook")
+        expect(rust_runtime).to_contain("file_exists_probe_end_closed_test_hook")
+        expect(rust_file_io_exports).to_contain("rt_file_exists_probe_begin")
+        expect(rust_file_io_exports).to_contain("rt_file_exists_probe_end")
+        expect(rust_value_exports).to_contain("rt_file_exists_probe_begin")
+        expect(rust_value_exports).to_contain("rt_file_exists_probe_end")
+        expect(codegen_exports).to_contain("rt_file_exists_probe_begin")
+        expect(codegen_exports).to_contain("rt_file_exists_probe_end")
+        expect(simple_core_provider).to_contain("single-thread, fail-closed")
+        expect(simple_core_provider).to_contain("rt_file_exists_probe_begin")
+        expect(simple_core_provider).to_contain("rt_file_exists_probe_end")
+        expect(simple_core_provider).to_contain("file_exists_probe_lease_admit")
+        expect(simple_core_provider).to_contain("file_exists_probe_record(lease, exists)")
+        expect(simple_core_provider).to_contain("file_exists_probe_test_seed_counters")
+        expect(interpreter_exports).to_contain("rt_file_exists_probe_begin")
+        expect(interpreter_exports).to_contain("rt_file_exists_probe_end")
+        expect(text_extern_abi_router).to_contain("rt_file_exists_probe_begin")
+        expect(text_extern_abi_router).to_contain("rt_file_exists_probe_end")
+        expect(llvm_backend).to_contain("declare i64 @rt_file_exists_probe_begin()")
+        expect(llvm_backend).to_contain("declare i64 @rt_file_exists_probe_end(i64)")
+        expect(llvm_lib_translate).to_contain("rt_file_exists_probe_begin")
+        expect(llvm_lib_translate).to_contain("rt_file_exists_probe_end")
+        expect(sffi_minimal).to_contain("extern fn rt_file_exists_probe_begin() -> i64")
+        expect(sffi_minimal).to_contain("extern fn rt_file_exists_probe_end(token: i64) -> i64")
+        expect(interpreter_calls).to_contain("rt_file_exists_probe_begin")
+        expect(interpreter_calls).to_contain("rt_file_exists_probe_end")
+
+    it "isolates the direct missing-path fixture per process":
+        step("Reject a preexisting fixture without deleting any path")
+        val fixture = file_read("test/05_perf/compiler_loader_script_crosslang_perf_spec.spl")
+        expect(fixture).to_contain("getpid().to_text()")
+        expect(fixture).to_contain("fixture unexpectedly exists")
 
     it "should reject non-self-hosted Simple evidence before measurement":
         step("Admit executable identity and execution modes")

@@ -1300,6 +1300,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_create_excl", file_io::rt_file_create_excl);
     insert_simple!("rt_file_delete", native_sffi::rt_file_delete);
     insert_simple!("rt_file_exists", file_io::rt_file_exists);
+    insert_simple!("rt_file_exists_probe_begin", file_io::rt_file_exists_probe_begin);
+    insert_simple!("rt_file_exists_probe_end", file_io::rt_file_exists_probe_end);
     insert_simple!("rt_file_is_regular_no_follow", file_io::rt_file_is_regular_no_follow);
     insert_simple!("rt_file_is_char_device", file_io::rt_file_is_char_device);
     insert_simple!("rt_file_exists_str", file_io::rt_file_exists);

@@ -14,6 +14,8 @@ use std::sync::{LazyLock, Mutex};
 // Global lock handle counter and active locks
 static LOCK_HANDLES: Mutex<Option<LockState>> = Mutex::new(None);
 static SYMBOL_INTERNER: LazyLock<Mutex<SymbolInterner>> = LazyLock::new(|| Mutex::new(SymbolInterner::new()));
+static FILE_EXISTS_PROBE: LazyLock<Mutex<FileExistsProbeState>> =
+    LazyLock::new(|| Mutex::new(FileExistsProbeState::new()));
 
 struct LockState {
     next_id: i64,
@@ -32,6 +34,35 @@ impl LockState {
 struct SymbolInterner {
     next_id: i64,
     ids: HashMap<String, i64>,
+}
+
+/*
+ * The pure-Simple interpreter has documented single-thread, fail-closed
+ * parity for failed existence probes.  It deliberately does not claim the
+ * native C/Rust atomic drain contract.  It nevertheless admits its lease
+ * before Path::exists, closes accepting before draining that lease, and records
+ * only against its captured generation.  Concurrent callers are fail-closed.
+ */
+struct FileExistsProbeState {
+    accepting: bool,
+    closing: bool,
+    generation: i64,
+    in_flight: u64,
+    total: u64,
+    failed: u64,
+}
+
+impl FileExistsProbeState {
+    fn new() -> Self {
+        FileExistsProbeState {
+            accepting: false,
+            closing: false,
+            generation: 0,
+            in_flight: 0,
+            total: 0,
+            failed: 0,
+        }
+    }
 }
 
 impl SymbolInterner {
@@ -107,6 +138,126 @@ fn extract_content(args: &[Value], idx: usize) -> Result<String, CompileError> {
     }
 }
 
+fn file_exists_probe_lease_admit() -> i64 {
+    let mut probe = FILE_EXISTS_PROBE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !probe.accepting || probe.in_flight == u64::MAX {
+        return 0;
+    }
+    probe.in_flight += 1;
+    probe.generation
+}
+
+fn file_exists_probe_record(lease: i64, exists: bool) {
+    if lease == 0 {
+        return;
+    }
+    let mut probe = FILE_EXISTS_PROBE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if probe.generation == lease && (probe.accepting || probe.closing) {
+        if probe.total < 0x7fff_ffff {
+            probe.total += 1;
+            if !exists {
+                probe.failed = probe.failed.saturating_add(1).min(0x7fff_ffff);
+            }
+        }
+    }
+    probe.in_flight = probe.in_flight.saturating_sub(1);
+}
+
+/// Interpreter-only single-thread compatibility provider for the native
+/// failed-existence-probe facade contract.  A positive, never-reused token
+/// starts a window; -1 rejects an overlapping/draining window and -3 is a
+/// fail-closed generation overflow.
+pub fn rt_file_exists_probe_begin(_args: &[Value]) -> Result<Value, CompileError> {
+    let mut probe = FILE_EXISTS_PROBE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if probe.accepting || probe.closing || probe.in_flight != 0 {
+        return Ok(Value::Int(-1));
+    }
+    if probe.generation >= 0x7fff_ffff_ffff_ffff {
+        return Ok(Value::Int(-3));
+    }
+    probe.generation += 1;
+    probe.total = 0;
+    probe.failed = 0;
+    probe.accepting = true;
+    Ok(Value::Int(probe.generation))
+}
+
+/// End the interpreter compatibility window.  The nonnegative result packs
+/// total in high 31 bits and failed existence probes in low 32 bits, with
+/// `failed <= total <= 0x7fffffff`; -2 is a stale, invalid, or already-ended
+/// token. The accepted lease count is drained before snapshotting, so a
+/// pre-end facade call belongs only to this token.
+pub fn rt_file_exists_probe_end(args: &[Value]) -> Result<Value, CompileError> {
+    let token = match args.first() {
+        Some(Value::Int(value)) => *value,
+        _ => return Ok(Value::Int(-2)),
+    };
+    let mut probe = FILE_EXISTS_PROBE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !probe.accepting || token <= 0 || token != probe.generation {
+        return Ok(Value::Int(-2));
+    }
+    probe.accepting = false;
+    probe.closing = true;
+    drop(probe);
+
+    loop {
+        let mut probe = FILE_EXISTS_PROBE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if probe.generation != token || !probe.closing {
+            return Ok(Value::Int(-2));
+        }
+        if probe.in_flight == 0 {
+            let packed = ((probe.total << 32) | probe.failed) as i64;
+            probe.closing = false;
+            return Ok(Value::Int(packed));
+        }
+        drop(probe);
+        std::thread::yield_now();
+    }
+}
+
+#[cfg(test)]
+fn file_exists_probe_test_seed_generation(generation: i64) -> i64 {
+    if !(0..=0x7fff_ffff_ffff_ffff).contains(&generation) {
+        return -3;
+    }
+    let mut probe = FILE_EXISTS_PROBE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if probe.accepting || probe.closing || probe.in_flight != 0 {
+        return -1;
+    }
+    probe.generation = generation;
+    probe.total = 0;
+    probe.failed = 0;
+    0
+}
+
+#[cfg(test)]
+fn file_exists_probe_test_seed_counters(total: u64, failed: u64) -> i64 {
+    if total > 0x7fff_ffff || failed > total {
+        return -3;
+    }
+    let mut probe = FILE_EXISTS_PROBE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !probe.accepting || probe.closing || probe.in_flight != 0 {
+        return -1;
+    }
+    probe.total = total;
+    probe.failed = failed;
+    0
+}
+
 // ============================================================================
 // File Metadata
 // ============================================================================
@@ -114,7 +265,10 @@ fn extract_content(args: &[Value], idx: usize) -> Result<String, CompileError> {
 /// Check if file exists
 pub fn rt_file_exists(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
-    Ok(Value::Bool(Path::new(&path).exists()))
+    let lease = file_exists_probe_lease_admit();
+    let exists = Path::new(&path).exists();
+    file_exists_probe_record(lease, exists);
+    Ok(Value::Bool(exists))
 }
 
 /// Check if path is a directory
@@ -1161,6 +1315,78 @@ pub fn rt_file_move(args: &[Value]) -> Result<Value, CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static FILE_EXISTS_PROBE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn file_exists_probe_interpreter_packs_exact_facade_totals() {
+        let _serial = FILE_EXISTS_PROBE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(file_exists_probe_test_seed_generation(0), 0);
+        let missing = std::env::temp_dir().join(format!(
+            "simple_interpreter_failed_existence_probe_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&missing);
+        let args = [Value::text(missing.to_string_lossy().to_string())];
+
+        let Value::Int(token) = rt_file_exists_probe_begin(&[]).unwrap() else {
+            panic!("probe begin must return an integer token");
+        };
+        assert!(token > 0);
+        assert_eq!(rt_file_exists(&args).unwrap(), Value::Bool(false));
+        assert_eq!(rt_file_exists(&args).unwrap(), Value::Bool(false));
+        let Value::Int(packed) = rt_file_exists_probe_end(&[Value::Int(token)]).unwrap() else {
+            panic!("probe end must return packed integer evidence");
+        };
+        assert_eq!(packed >> 32, 2);
+        assert_eq!(packed & 0xffff_ffff, 2);
+        assert_eq!(
+            rt_file_exists_probe_end(&[Value::Int(token)]).unwrap(),
+            Value::Int(-2)
+        );
+    }
+
+    #[test]
+    fn file_exists_probe_interpreter_fails_closed_at_generation_limit() {
+        let _serial = FILE_EXISTS_PROBE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(file_exists_probe_test_seed_generation(0x7fff_ffff_ffff_fffe), 0);
+        assert_eq!(rt_file_exists_probe_begin(&[]).unwrap(), Value::Int(0x7fff_ffff_ffff_ffff));
+        assert_eq!(
+            rt_file_exists_probe_end(&[Value::Int(0x7fff_ffff_ffff_ffff)]).unwrap(),
+            Value::Int(0)
+        );
+        assert_eq!(rt_file_exists_probe_begin(&[]).unwrap(), Value::Int(-3));
+        assert_eq!(file_exists_probe_test_seed_generation(0), 0);
+    }
+
+    #[test]
+    fn file_exists_probe_interpreter_saturates_total_and_failed_together() {
+        let _serial = FILE_EXISTS_PROBE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(file_exists_probe_test_seed_generation(0), 0);
+        let missing = std::env::temp_dir().join(format!(
+            "simple_interpreter_failed_existence_probe_saturation_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&missing);
+        let args = [Value::text(missing.to_string_lossy().to_string())];
+        let Value::Int(token) = rt_file_exists_probe_begin(&[]).unwrap() else {
+            panic!("probe begin must return an integer token");
+        };
+        assert_eq!(file_exists_probe_test_seed_counters(0x7fff_fffe, 0x7fff_fffe), 0);
+        assert_eq!(rt_file_exists(&args).unwrap(), Value::Bool(false));
+        assert_eq!(rt_file_exists(&args).unwrap(), Value::Bool(false));
+        let Value::Int(packed) = rt_file_exists_probe_end(&[Value::Int(token)]).unwrap() else {
+            panic!("probe end must return packed integer evidence");
+        };
+        assert_eq!(packed >> 32, 0x7fff_ffff);
+        assert_eq!(packed & 0xffff_ffff, 0x7fff_ffff);
+    }
 
     #[test]
     fn bytes_alloc_uses_packed_storage_for_signed_and_unsigned_lengths() {

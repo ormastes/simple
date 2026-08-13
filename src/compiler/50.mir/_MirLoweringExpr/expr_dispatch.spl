@@ -594,29 +594,22 @@ impl MirLowering:
             val widened = b_widen.emit_cast(mir_operand_copy(local), MirType.f64())
             self.builder = b_widen
             render_src = mir_operand_copy(widened)
+        # Scalar renderers return a TAGGED runtime-string HANDLE, not a raw
+        # C-string pointer. Keep that value nominally i64 until the one
+        # explicit rt_interp_cstr bridge in bootstrap_coerce_to_raw_str.
+        # In particular, never type the rt_raw_i64_to_string result as
+        # Opaque("str"): doing so gives one SSA value incompatible nominal
+        # identities across the renderer -> C-string boundary and lets a
+        # later store/call treat tagged text as a raw pointer.
+        var render_param_type = MirType.i64()
+        if is_float:
+            render_param_type = MirType.f64()
         val num_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str(render_fn),
-            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [render_param_type], return_type: MirType.i64(), is_variadic: false)))
         ))
         var b_num = self.builder
-        # Dest type must be Opaque("str"), NOT i64: rt_raw_*_to_string returns
-        # a TAGGED heap string handle (see this fn's docstring -- "render the
-        # scalar to a TAGGED heap string"), and callers of this helper (the
-        # `str(x)` builtin below and the `+` text-concat lowering) both re-test
-        # the returned local via local_is_str()/coerce_concat_operand() before
-        # deciding whether to render it AGAIN. Tagging the dest i64 (the old
-        # code) made every downstream local_is_str() check see a plain numeric
-        # local instead of a string, so e.g. `"n=" + str(count())` rendered
-        # count() to a string once (correct) and then coerce_concat_operand
-        # rendered THAT tagged handle through rt_raw_i64_to_string a SECOND
-        # time -- printing rt_raw_i64_to_string's decimal rendering of the
-        # first call's string-handle integer instead of the count (bug
-        # native_double_stringify_concat_operand). The LLVM backend already
-        # freely mixes i64/Opaque("str") operands at call sites keyed off the
-        # SysV x86_64 ABI (both single 8-byte registers, see rt_strcat_tagged
-        # call sites taking a `ptr`-typed and an `i64`-typed arg side by side),
-        # so retyping this dest changes only mid-end type tracking, not codegen.
-        val num_res = b_num.emit_call(num_op, [render_src], MirType(kind: MirTypeKind.Opaque("str")))
+        val num_res = b_num.emit_call(num_op, [render_src], MirType.i64())
         self.builder = b_num
         if val num_local = num_res:
             return mir_operand_copy(num_local)

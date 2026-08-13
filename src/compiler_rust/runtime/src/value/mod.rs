@@ -399,6 +399,8 @@ pub use wsffi_native::{spl_dlclose, spl_dlopen, spl_dlsym, spl_wffi_call_f64, sp
 pub use sffi::{
     // Metadata
     rt_file_exists,
+    rt_file_exists_probe_begin,
+    rt_file_exists_probe_end,
     rt_file_is_char_device,
     rt_file_is_regular_no_follow,
     rt_file_stat,

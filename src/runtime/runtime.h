@@ -791,6 +791,16 @@ void        rt_prefetch_wait(void);                /* FFI alias */
 int64_t     rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len);
 int64_t     rt_file_read_text_rv(int64_t path);
 int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len);
+/* Failed-existence-probe measurement. begin returns a non-reusable monotonic
+ * generation and end returns a nonnegative packed (total << 32) | failed
+ * snapshot. Negative values are fail-closed errors. The counter observes this
+ * rt_* facade only, never an underlying libc/syscall operation. */
+int64_t     rt_file_exists_probe_begin(void);
+int64_t     rt_file_exists_probe_end(int64_t token);
+#if defined(SIMPLE_RUNTIME_TESTING)
+int64_t     rt_file_exists_probe_test_seed_generation(int64_t generation);
+int64_t     rt_file_exists_probe_test_seed_counters(int64_t total, int64_t failed);
+#endif
 int         rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len);
 int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len);

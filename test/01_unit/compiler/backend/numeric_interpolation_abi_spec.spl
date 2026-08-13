@@ -1,0 +1,130 @@
+# Numeric interpolation ABI regression: scalar text renderers return tagged
+# i64 handles; rt_interp_cstr is the single bridge to raw char*. This test
+# interprets the Pure-Simple frontend/MIR/LLVM owners and inspects emitted IR.
+# A rebuilt self-hosted binary is still required for native executable proof;
+# numeric_interpolation_abi_contract.shs guards the exact source ABI split.
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.core.ast.{ast_reset, module_get_decls}
+use compiler.core.parser.{parser_has_errors, parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+
+fn generic_numeric_line<T>(value: T) -> text:
+    "generic={value}"
+
+fn heap_registry_log_line(path: text, count: i64) -> text:
+    "phase2:surface:file:start path={path} heap_registry={count}"
+
+fn find_call_line(output: text, marker: text) -> text:
+    for line in output.split("\n"):
+        if line.contains(marker) and line.contains("call "):
+            return line
+    ""
+
+fn find_call_line_using(output: text, marker: text, arg_fragment: text) -> text:
+    for line in output.split("\n"):
+        if line.contains(marker) and line.contains("call ") and line.contains(arg_fragment):
+            return line
+    ""
+
+fn call_result_ssa(call_line: text) -> text:
+    val assignment = call_line.find(" = call ")
+    if assignment < 0:
+        return ""
+    call_line.substring(0, assignment)
+
+fn renderer_cstr_strcat_flow(llvm: text, renderer: text) -> bool:
+    """Prove the ABI pipeline: tagged i64 renderer -> rt_interp_cstr -> rt_strcat.
+
+    Looking only for declarations cannot catch an alias that gives the renderer
+    result Opaque(str) and bypasses the raw-pointer bridge. Follow the emitted
+    SSA names instead, for every scalar renderer family.
+    """
+    val renderer_call = find_call_line(llvm, renderer + "(")
+    val renderer_ssa = call_result_ssa(renderer_call)
+    if renderer_ssa == "":
+        return false
+    val cstr_call = find_call_line_using(llvm, "rt_interp_cstr(", "i64 " + renderer_ssa)
+    val cstr_ssa = call_result_ssa(cstr_call)
+    if cstr_ssa == "":
+        return false
+    find_call_line_using(llvm, "rt_strcat(", "ptr " + cstr_ssa) != ""
+
+fn compile_numeric_interpolation_fixture() -> text:
+    val source = "fn generic_numeric_line<T>(value: T) -> text:\n    \"generic={value}\"\n\nfn numeric_extremes(minimum: i64, maximum: i64) -> text:\n    \"min={minimum};max={maximum}\"\n\nfn renderer_family(b: bool, f: f64, u: u64, i: i64) -> text:\n    \"b={b};f={f};u={u};i={i}\"\n\nfn diagnostic(path: text, count: i64) -> text:\n    \"phase2:surface:file:start path={path} heap_registry={count}\"\n"
+    val ast = parse_full_frontend(source, "numeric_interpolation_abi_fixture.spl", "numeric_interpolation_abi_fixture.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("numeric_interpolation_abi_fixture.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for err in mir_lowering.errors:
+        errors = errors + err.message + "\n"
+    if errors != "":
+        return "MIR_LOWERING_ERRORS:\n" + errors
+    MirToLlvm.create("test.numeric.interpolation.abi", CodegenTarget.X86_64, nil).translate_module(mir)
+
+describe "numeric interpolation tagged-handle ABI":
+    it "keeps numeric extremes and generic values correct in the interpreter":
+        val minimum: i64 = -9223372036854775807 - 1
+        val maximum: i64 = 9223372036854775807
+        expect("min={minimum};max={maximum}").to_equal("min=-9223372036854775808;max=9223372036854775807")
+        expect(generic_numeric_line(42)).to_equal("generic=42")
+
+    it "preserves every scalar renderer signature and SSA bridge into raw concatenation":
+        val llvm = compile_numeric_interpolation_fixture()
+        assert_true(not llvm.starts_with("MIR_LOWERING_ERRORS:"), "fixture failed to lower to MIR: " + llvm)
+        expect(llvm).to_contain("declare i64 @rt_raw_i64_to_string(i64)")
+        expect(llvm).to_contain("declare i64 @rt_raw_u64_to_string(i64)")
+        expect(llvm).to_contain("declare i64 @rt_raw_bool_to_string(i64)")
+        expect(llvm).to_contain("declare i64 @rt_raw_f64_to_string(double)")
+        expect(llvm).to_contain("declare ptr @rt_interp_cstr(i64)")
+
+        val i64_call = find_call_line(llvm, "rt_raw_i64_to_string(")
+        val u64_call = find_call_line(llvm, "rt_raw_u64_to_string(")
+        val bool_call = find_call_line(llvm, "rt_raw_bool_to_string(")
+        val f64_call = find_call_line(llvm, "rt_raw_f64_to_string(")
+        expect(i64_call).to_contain("= call i64 @rt_raw_i64_to_string(i64 ")
+        expect(u64_call).to_contain("= call i64 @rt_raw_u64_to_string(i64 ")
+        expect(bool_call).to_contain("= call i64 @rt_raw_bool_to_string(i64 ")
+        expect(f64_call).to_contain("= call i64 @rt_raw_f64_to_string(double ")
+
+        assert_true(renderer_cstr_strcat_flow(llvm, "rt_raw_i64_to_string"), "i64 renderer must flow through rt_interp_cstr into rt_strcat")
+        assert_true(renderer_cstr_strcat_flow(llvm, "rt_raw_u64_to_string"), "u64 renderer must flow through rt_interp_cstr into rt_strcat")
+        assert_true(renderer_cstr_strcat_flow(llvm, "rt_raw_bool_to_string"), "bool renderer must flow through rt_interp_cstr into rt_strcat")
+        assert_true(renderer_cstr_strcat_flow(llvm, "rt_raw_f64_to_string"), "f64 renderer must flow through rt_interp_cstr into rt_strcat")
+
+    it "survives two parser reset cycles after a large numeric diagnostic line":
+        val line = heap_registry_log_line("first.spl", 9223372036854775807)
+        expect(line).to_equal("phase2:surface:file:start path=first.spl heap_registry=9223372036854775807")
+
+        ast_reset()
+        parser_init_with_path("fn first() -> i64:\n    1\n", "first.spl")
+        parse_module_body()
+        expect(parser_has_errors()).to_equal(false)
+        expect(module_get_decls().len()).to_equal(1)
+
+        ast_reset()
+        parser_init_with_path("fn second() -> i64:\n    2\n", "second.spl")
+        parse_module_body()
+        expect(parser_has_errors()).to_equal(false)
+        expect(module_get_decls().len()).to_equal(1)
+        ast_reset()
+
+    it "keeps the focused native runtime probe aligned with this ABI contract":
+        val probe = file_read("test/fixtures/compiler/native_numeric_interpolation_abi_probe.spl")
+        # Keep the executable probe narrow: its successful native-build/run
+        # verifies the numeric extrema and diagnostic shape. The in-process
+        # test above owns generic interpolation and parser_init_with_path /
+        # ast_reset cycles because native generic declarations remain an
+        # independently tracked unsupported feature.
+        expect(probe.contains("fn generic_numeric_line<T>")).to_equal(false)
+        expect(probe).to_contain("-9223372036854775808")
+        expect(probe).to_contain("heap_registry=807339")

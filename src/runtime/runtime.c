@@ -58,6 +58,182 @@
 static bool spl_macro_trace_enabled = false;
 static bool spl_debug_mode_enabled = false;
 
+/*
+ * Failed existence probes are measured at the rt_file_exists facade, never at
+ * spl_file_exists or at a libc/syscall boundary.  A gate holds accepting and
+ * in-flight leases; a separate monotonic generation is captured by each lease.
+ * end() first closes the gate, then drains those leases before it snapshots.
+ */
+#define RT_FILE_EXISTS_PROBE_ACCEPTING    (UINT64_C(1) << 63)
+#define RT_FILE_EXISTS_PROBE_TRANSITION   (UINT64_C(1) << 62)
+#define RT_FILE_EXISTS_PROBE_LEASE_MASK   (RT_FILE_EXISTS_PROBE_TRANSITION - 1)
+#define RT_FILE_EXISTS_PROBE_GENERATION_MAX UINT64_C(0x7fffffffffffffff)
+#define RT_FILE_EXISTS_PROBE_TOTAL_MAX    UINT64_C(0x7fffffff)
+
+static atomic_uint_fast64_t rt_file_exists_probe_state = ATOMIC_VAR_INIT(0);
+static atomic_uint_fast64_t rt_file_exists_probe_generation = ATOMIC_VAR_INIT(0);
+static atomic_uint_fast64_t rt_file_exists_probe_total = ATOMIC_VAR_INIT(0);
+static atomic_uint_fast64_t rt_file_exists_probe_failed = ATOMIC_VAR_INIT(0);
+
+/* Reserve one total slot. A failed slot is incremented only after this succeeds,
+ * so concurrent records preserve failed <= total <= TOTAL_MAX. */
+static int rt_file_exists_probe_try_add_total(void) {
+    uint_fast64_t current = atomic_load_explicit(
+        &rt_file_exists_probe_total, memory_order_relaxed);
+    while (current < RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
+        if (atomic_compare_exchange_weak_explicit(
+                &rt_file_exists_probe_total, &current, current + 1,
+                memory_order_relaxed, memory_order_relaxed)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static uint_fast64_t rt_file_exists_probe_lease_admit(void) {
+    /* Disabled source path: one relaxed gate load, without assembly claims. */
+    uint_fast64_t state = atomic_load_explicit(
+        &rt_file_exists_probe_state, memory_order_relaxed);
+    if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0) return 0;
+
+    for (;;) {
+        if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0) return 0;
+        if ((state & RT_FILE_EXISTS_PROBE_LEASE_MASK) ==
+            RT_FILE_EXISTS_PROBE_LEASE_MASK) return 0;
+        if (atomic_compare_exchange_weak_explicit(
+                &rt_file_exists_probe_state, &state, state + UINT64_C(1),
+                memory_order_acquire, memory_order_relaxed)) {
+            uint_fast64_t generation = atomic_load_explicit(
+                &rt_file_exists_probe_generation, memory_order_acquire);
+            if (generation != 0) return generation;
+            atomic_fetch_sub_explicit(
+                &rt_file_exists_probe_state, UINT64_C(1), memory_order_release);
+            return 0;
+        }
+    }
+}
+
+static void rt_file_exists_probe_record(uint_fast64_t lease, int exists) {
+    if (lease != 0 && atomic_load_explicit(
+            &rt_file_exists_probe_generation, memory_order_acquire) == lease) {
+        if (rt_file_exists_probe_try_add_total() && !exists) {
+            uint_fast64_t failed = atomic_load_explicit(
+                &rt_file_exists_probe_failed, memory_order_relaxed);
+            while (failed < RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
+                if (atomic_compare_exchange_weak_explicit(
+                        &rt_file_exists_probe_failed, &failed, failed + 1,
+                        memory_order_relaxed, memory_order_relaxed)) {
+                    break;
+                }
+            }
+        }
+    }
+    if (lease != 0) {
+        atomic_fetch_sub_explicit(
+            &rt_file_exists_probe_state, UINT64_C(1), memory_order_release);
+    }
+}
+
+int64_t rt_file_exists_probe_begin(void) {
+    uint_fast64_t idle = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &rt_file_exists_probe_state, &idle, RT_FILE_EXISTS_PROBE_TRANSITION,
+            memory_order_acq_rel, memory_order_acquire)) {
+        return -1;
+    }
+    uint_fast64_t generation = atomic_load_explicit(
+        &rt_file_exists_probe_generation, memory_order_acquire);
+    if (generation >= RT_FILE_EXISTS_PROBE_GENERATION_MAX) {
+        atomic_store_explicit(&rt_file_exists_probe_state, 0, memory_order_release);
+        return -3;
+    }
+    generation += 1;
+    atomic_store_explicit(
+        &rt_file_exists_probe_generation, generation, memory_order_release);
+    atomic_store_explicit(&rt_file_exists_probe_total, 0, memory_order_relaxed);
+    atomic_store_explicit(&rt_file_exists_probe_failed, 0, memory_order_relaxed);
+    atomic_store_explicit(
+        &rt_file_exists_probe_state, RT_FILE_EXISTS_PROBE_ACCEPTING,
+        memory_order_release);
+    return (int64_t)generation;
+}
+
+int64_t rt_file_exists_probe_end(int64_t token) {
+    if (token <= 0 || (uint_fast64_t)token > RT_FILE_EXISTS_PROBE_GENERATION_MAX ||
+        atomic_load_explicit(&rt_file_exists_probe_generation, memory_order_acquire) !=
+            (uint_fast64_t)token) return -2;
+
+    uint_fast64_t state = atomic_load_explicit(
+        &rt_file_exists_probe_state, memory_order_acquire);
+    for (;;) {
+        if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0 ||
+            atomic_load_explicit(&rt_file_exists_probe_generation, memory_order_acquire) !=
+                (uint_fast64_t)token) {
+            return -2;
+        }
+        uint_fast64_t closing =
+            (state & RT_FILE_EXISTS_PROBE_LEASE_MASK) |
+            RT_FILE_EXISTS_PROBE_TRANSITION;
+        if (atomic_compare_exchange_weak_explicit(
+                &rt_file_exists_probe_state, &state, closing,
+                memory_order_acq_rel, memory_order_acquire)) {
+            break;
+        }
+    }
+
+    do {
+        state = atomic_load_explicit(
+            &rt_file_exists_probe_state, memory_order_acquire);
+    } while ((state & RT_FILE_EXISTS_PROBE_LEASE_MASK) != 0);
+
+    uint_fast64_t total = atomic_load_explicit(
+        &rt_file_exists_probe_total, memory_order_acquire);
+    uint_fast64_t failed = atomic_load_explicit(
+        &rt_file_exists_probe_failed, memory_order_acquire);
+    if (total > RT_FILE_EXISTS_PROBE_TOTAL_MAX) total = RT_FILE_EXISTS_PROBE_TOTAL_MAX;
+    if (failed > RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
+        failed = RT_FILE_EXISTS_PROBE_TOTAL_MAX;
+    }
+    atomic_store_explicit(
+        &rt_file_exists_probe_state,
+        0,
+        memory_order_release);
+    return (int64_t)((total << 32) | failed);
+}
+
+#if defined(SIMPLE_RUNTIME_TESTING)
+int64_t rt_file_exists_probe_test_seed_generation(int64_t generation) {
+    if (generation < 0 || (uint_fast64_t)generation >
+            RT_FILE_EXISTS_PROBE_GENERATION_MAX) return -3;
+    uint_fast64_t idle = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &rt_file_exists_probe_state, &idle, RT_FILE_EXISTS_PROBE_TRANSITION,
+            memory_order_acq_rel, memory_order_acquire)) return -1;
+    atomic_store_explicit(
+        &rt_file_exists_probe_generation, (uint_fast64_t)generation,
+        memory_order_release);
+    atomic_store_explicit(&rt_file_exists_probe_total, 0, memory_order_relaxed);
+    atomic_store_explicit(&rt_file_exists_probe_failed, 0, memory_order_relaxed);
+    atomic_store_explicit(&rt_file_exists_probe_state, 0, memory_order_release);
+    return 0;
+}
+
+int64_t rt_file_exists_probe_test_seed_counters(int64_t total, int64_t failed) {
+    if (total < 0 || failed < 0 || (uint_fast64_t)total >
+            RT_FILE_EXISTS_PROBE_TOTAL_MAX || (uint_fast64_t)failed >
+            (uint_fast64_t)total) return -3;
+    uint_fast64_t state = atomic_load_explicit(
+        &rt_file_exists_probe_state, memory_order_acquire);
+    if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0 ||
+        (state & RT_FILE_EXISTS_PROBE_LEASE_MASK) != 0) return -1;
+    atomic_store_explicit(
+        &rt_file_exists_probe_total, (uint_fast64_t)total, memory_order_relaxed);
+    atomic_store_explicit(
+        &rt_file_exists_probe_failed, (uint_fast64_t)failed, memory_order_relaxed);
+    return 0;
+}
+#endif
+
 void rt_set_macro_trace(bool enabled) {
     spl_macro_trace_enabled = enabled;
 }
@@ -1509,9 +1685,14 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
 /* (ptr, len): see rt_text_arg_to_path above -- a Simple `text` is not
  * NUL-terminated and the compiler passes it as a pair. */
 int         rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
+    uint_fast64_t lease = rt_file_exists_probe_lease_admit();
     char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
-    return spl_file_exists(path);
+    int exists = 0;
+    if (rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) {
+        exists = spl_file_exists(path);
+    }
+    rt_file_exists_probe_record(lease, exists);
+    return exists;
 }
 int         rt_dir_exists(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];

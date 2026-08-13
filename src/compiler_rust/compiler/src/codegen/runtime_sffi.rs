@@ -1764,6 +1764,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // (ptr, len) pair.
     RuntimeFuncSpec::new("rt_mem_attr_set_owner", &[I64, I64], &[]),
     RuntimeFuncSpec::new("rt_file_exists", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
+    RuntimeFuncSpec::new("rt_file_exists_probe_begin", &[], &[I64]), // () -> generation token/error
+    RuntimeFuncSpec::new("rt_file_exists_probe_end", &[I64], &[I64]), // token -> packed total/failed or error
     RuntimeFuncSpec::new("rt_file_is_regular_no_follow", &[I64, I64], &[I8]), // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_dir_exists", &[I64, I64], &[I8]),  // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_file_stat", &[I64, I64], &[I64]),  // path_ptr, path_len -> i64 (mtime seconds)
