@@ -250,3 +250,20 @@ runner fixed to `-cpu rv64,v=true,vlen=128,elen=64`. The ARM QEMU row fits this
 narrow retained primitive mix; the RVV QEMU row does not. Neither result proves
 an 8K/80 application, self-hosted Simple execution, display scanout, or
 hardware performance.
+
+## 2026-08-13 freestanding span ABI check
+
+Current source revision `4fd694ea7c5` passed:
+
+```sh
+sh scripts/check/check-simpleos-baremetal-engine2d-spans.shs
+```
+
+The check compiles the Engine2D span contract with the SimpleOS x86_64 boot
+stubs at `-O3`, links only the required freestanding symbols, and executes its
+bit-exact fill/copy/blend assertions on the host. It verifies that the span ABI
+remains linkable for the baremetal target after the retained-damage work.
+
+It is intentionally **not** a guest boot, QEMU framebuffer, physical-board,
+or throughput result. The existing SimpleOS desktop QEMU gate remains unable to
+establish an 8K/80 baremetal claim; no such claim is made here.
