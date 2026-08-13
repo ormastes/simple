@@ -63,6 +63,9 @@ storage repair, not evidence of multi-threaded actor execution.
 The scheduler itself is a class-backed authority, so global `ActorRef` send
 and ask operations update the same actor registry, ready queue, and reply
 reservations rather than a copied scheduler value.
+Each `Actor` is likewise class-backed: lifecycle state and error/dispatch
+counters remain with the scheduler’s actor handle instead of disappearing in
+value-array iteration.
 Legacy `ask()` replies now reserve a finite scheduler-owned result slot at
 admission. That credit remains consumed through handler completion until the
 caller consumes or cancels the reply; an exhausted store rejects the ask rather

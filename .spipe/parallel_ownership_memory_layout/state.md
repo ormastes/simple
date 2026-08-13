@@ -739,6 +739,10 @@ in-progress
   value struct. Global actor references therefore mutate the same scheduler
   registry, ready queue, reply reservations, and counters; this closes the
   scheduler half of the prior copied-handle split.
+- impl: `Actor` is now class-backed too, preserving its lifecycle, dispatch,
+  and error fields through scheduler registry iteration. Mailbox sharing alone
+  was insufficient because the surrounding actor values still lost those
+  updates when copied.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters
