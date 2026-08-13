@@ -179,6 +179,17 @@ stubs, host-side compiles, and placeholder marker apps are blockers, not proof.
 Physical-board claims additionally need board identity, boot/download path, and
 serial or SSH transcript; otherwise record QEMU-only or source-present status.
 
+For SimpleOS QEMU matrix work, use the shared settings and host-admission
+scripts before every run, isolate each nonce-patched image, and make the
+collector nonce distinct from any workload nonce that the target also prints.
+The ordered transcript must prove `guest-entry`, real filesystem listing,
+mounted target stdout, exit 37, exact reap, and `TEST PASSED`. Emit a row only
+with `produce-sosix-qemu-native-pass-bundle.shs`; the 24-row collector is the
+sole matrix promotion owner. Keep Windows/FreeBSD target-host rows blocked and
+macOS postponed when their native executor is unavailable—never omit or count
+them as PASS. The current evidence ledger is
+`doc/03_plan/sys_test/sosix_qemu_matrix_evidence_status_2026-08-13.md`.
+
 For recent unfinished-plan cleanup lanes, use
 `doc/07_guide/infra/recent_plan_cleanup.md`. Keep the cleanup matrix under
 `doc/03_plan/agent_tasks/` with sidecar lanes/`N/A`, merge owner, and final

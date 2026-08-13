@@ -167,6 +167,22 @@ classify explicit TCG as correctness-only even on the same ISA. Keep mapping,
 negotiation, and completion receipts ordered and correlated, and do not promote
 a single timing sample to warm p95 evidence.
 
+For SimpleOS filesystem-exec matrix work, every reusable QEMU lane must use
+`scripts/qemu/simple-qemu-settings.shs` and
+`scripts/qemu/simple-qemu-host-admission.shs` before launch. A PASS row needs
+one immutable, per-run media copy; a distinct collector nonce emitted exactly
+once before `guest-entry`; real `/SYS/APPS` listing; mounted filesystem program
+stdout; exit status 37; exact reap; and `TEST PASSED`. Preserve the workload
+nonce separately when it is intentionally echoed by both kernel and child.
+Publish the row only through
+`scripts/check/produce-sosix-qemu-native-pass-bundle.shs`, then import it only
+through `scripts/check/collect-sosix-qemu-evidence.shs`. The collector's
+24-row requirement is a parent-authoritative matrix commit: a single row PASS,
+diagnostic transcript, host-side command, or postponed external host never
+promotes the matrix. See
+`doc/03_plan/sys_test/sosix_qemu_matrix_evidence_status_2026-08-13.md` for
+current row ownership and resume commands.
+
 Final verification must fail stale workflow/tooling documentation instead of
 deferring cleanup to release. If a lane changed workflow, evidence wrappers,
 generated-manual shape, or verification contracts, refresh the matching
