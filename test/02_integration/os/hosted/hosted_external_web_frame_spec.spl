@@ -6,6 +6,7 @@ use common.ui.window_scene.{
     WmContentFrame,
     wm_content_frame_checksum
 }
+use common.ui.window_scene_draw_ir.{shared_wm_browser_content_extra_height}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.host_compositor_core.{HostCompositor}
@@ -169,9 +170,21 @@ describe "hosted external browser frames":
         )
         val base = trusted_frame("1", base_revision, 0xFF123456u32)
         expect(comp.set_external_web_frame(1, base)).to_be(true)
+        # Isolate the packed-delta invalidation from window creation/full
+        # frame admission.  A local content patch must not widen to desktop.
+        comp.dirty.clear()
         val delta = trusted_damage_frame(
             "1", base_revision, base_revision + 1, 0xFFABCDEFu32)
         expect(comp.set_external_web_frame(1, delta)).to_be(true)
+        expect(comp.dirty.count()).to_equal(1)
+        val dirty = comp.dirty.bounding_box()
+        # The frame's [1,1,1,1] content-local delta is translated through the
+        # normal 4px border / 28px titlebar / browser toolbar content origin.
+        expect(dirty.x).to_equal(8 + 4 + 1)
+        expect(dirty.y).to_equal(
+            8 + 32 + shared_wm_browser_content_extra_height("browser") + 1)
+        expect(dirty.w).to_equal(1)
+        expect(dirty.h).to_equal(1)
         val committed = comp.external_web_frames[0]
         expect(committed.pixels[1 * 104 + 1]).to_equal(0xFFABCDEFu32)
         expect(committed.pixels[0]).to_equal(0xFF123456u32)

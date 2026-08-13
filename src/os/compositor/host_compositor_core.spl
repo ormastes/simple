@@ -999,7 +999,34 @@ class HostCompositor:
         checksum = checksum & 0x7FFFFFFFFFFFFFFFu64
         committed.checksum = if checksum == 0u64: 1u64 else: checksum
         self.external_web_frames[frame_index] = committed
-        self.dirty.add_full_screen(self.width, self.height)
+        # Keep the producer's exact packed damage through the WM boundary.
+        # A LOCAL web delta changes only this content surface; promoting it to
+        # full-screen here forces the retained CPU/Vulkan compositor to lose
+        # its raster and transfer locality. Clip to the desktop because a
+        # partially off-screen window is still a valid content owner.
+        val content_x = window.x.to_i64() + 4
+        val content_y = window.y.to_i64() + 32 +
+            shared_wm_browser_content_extra_height(window.app_id).to_i64()
+        val screen_w = self.width.to_i64()
+        val screen_h = self.height.to_i64()
+        ri = 0
+        while ri < frame.damage_rects.len():
+            val rx = frame.damage_rects[ri]
+            val ry = frame.damage_rects[ri + 1]
+            val rw = frame.damage_rects[ri + 2]
+            val rh = frame.damage_rects[ri + 3]
+            var left = content_x + rx
+            var top = content_y + ry
+            var right = left + rw
+            var bottom = top + rh
+            if left < 0: left = 0
+            if top < 0: top = 0
+            if right > screen_w: right = screen_w
+            if bottom > screen_h: bottom = screen_h
+            if right > left and bottom > top:
+                self.dirty.add_rect(left.to_i32(), top.to_i32(),
+                    (right - left).to_i32(), (bottom - top).to_i32())
+            ri += 4
         true
 
     me set_external_content_frame(
