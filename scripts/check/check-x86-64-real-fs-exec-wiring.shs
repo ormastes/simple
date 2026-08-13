@@ -9,6 +9,8 @@ runtime=examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c
 bridge=src/os/kernel/arch/x86_64/user_entry.spl
 validation=src/os/kernel/arch/x86_64/user_entry_validation.spl
 launcher=src/os/kernel/loader/x86_64_fs_exec_spawn.spl
+user_as=src/os/kernel/memory/user_address_space.spl
+vmm_as=src/os/kernel/memory/vmm_address_space.spl
 matrix=src/os/qemu_systest_contract.spl
 
 require() {
@@ -32,6 +34,9 @@ require 'generation: u64' "$validation"
 require 'generation: task.isolation.capability_generation' "$validation"
 require 'scheduler.exit_task_by_id(child, rc as i32)' "$launcher"
 require 'scheduler.wait_for_collect(TaskId(id: 0), child, false)' "$launcher"
+require 'if not vmm_clone_kernel_low_private(space.phys_root):' "$user_as"
+require 'return AddressSpace(phys_root: 0, id: 0)' "$user_as"
+require 'if _pte_is_present(existing) and (existing & PTE_USER) != 0:' "$vmm_as"
 require '_x86_current_cr3() == _x86_exec_token_cr3' "$runtime"
 require 'task != _x86_exec_token_task' "$runtime"
 require 'generation != _x86_exec_token_generation' "$runtime"
@@ -45,6 +50,12 @@ cp "$bridge" "$tmp/bridge.spl"
 sed -i 's/validation\.cr3/0u64/g' "$tmp/bridge.spl"
 if grep -Fq 'rt_x86_exec_token_install(validation.pid, validation.generation, validation.cr3)' "$tmp/bridge.spl"; then
     fail 'CR3-substitution sabotage was not applied'
+fi
+
+cp "$user_as" "$tmp/user_address_space.spl"
+sed -i 's/if not vmm_clone_kernel_low_private(space\.phys_root):/if false:/' "$tmp/user_address_space.spl"
+if grep -Fq 'if not vmm_clone_kernel_low_private(space.phys_root):' "$tmp/user_address_space.spl"; then
+    fail 'low-identity-clone sabotage was not applied'
 fi
 
 echo 'PASS x86_64 real filesystem execution wiring contract'

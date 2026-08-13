@@ -8,7 +8,8 @@ use os.kernel.types.memory_types.{VirtAddr, PhysAddr, PageFrame, VmFlags}
 use os.kernel.memory.vmm_address_space.{
     create_user_address_space as vmm_create_user_address_space,
     destroy_user_address_space as vmm_destroy_user_address_space,
-    vmm_map_page_in
+    vmm_map_page_in,
+    vmm_clone_kernel_low_private
 }
 use os.kernel.memory.pmm.{pmm_alloc_page}
 
@@ -125,7 +126,18 @@ fn alloc_user_page_frame() -> PageFrame?:
 
 @cfg(x86_64)
 fn create_user_address_space() -> AddressSpace:
-    vmm_create_user_address_space()
+    # A first x86_64 CR3 switch continues to execute the low identity-mapped
+    # kernel/trampoline before iretq.  The generic constructor copies only the
+    # upper half, so make the required private PML4[0] clone part of this
+    # architecture owner rather than relying on individual loaders to remember
+    # it.  Failure is fail-closed through the existing synthetic-root checks.
+    val space = vmm_create_user_address_space()
+    if space.phys_root == 0 or space.phys_root == 1:
+        return space
+    if not vmm_clone_kernel_low_private(space.phys_root):
+        vmm_destroy_user_address_space(space)
+        return AddressSpace(phys_root: 0, id: 0)
+    space
 
 @cfg(x86_64)
 fn destroy_user_address_space(space: AddressSpace):

@@ -148,6 +148,13 @@ fn vmm_clone_kernel_low_private(user_phys_root: u64) -> bool:
         return false
     if vmm_kernel_pml4_phys() == 0:
         return false
+    val user_pml4_virt = _phys_to_virt(user_phys_root)
+    val existing = _read_pte(user_pml4_virt, 0)
+    # Address-space construction owns this clone.  Keep the helper idempotent
+    # for legacy direct-loader callers so a second call cannot allocate a new
+    # private PDPT and silently strand the first one.
+    if _pte_is_present(existing) and (existing & PTE_USER) != 0:
+        return true
     val kernel_pml4_virt = _phys_to_virt(vmm_kernel_pml4_phys())
     val kentry = _read_pte(kernel_pml4_virt, 0)
     if not _pte_is_present(kentry):
@@ -156,7 +163,6 @@ fn vmm_clone_kernel_low_private(user_phys_root: u64) -> bool:
     val new_pdpt_phys = _clone_table(kpdpt_virt)
     if new_pdpt_phys == 0:
         return false
-    val user_pml4_virt = _phys_to_virt(user_phys_root)
     _write_pte(user_pml4_virt, 0, new_pdpt_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER)
     true
 
