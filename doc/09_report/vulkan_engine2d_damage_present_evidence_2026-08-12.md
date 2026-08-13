@@ -34,3 +34,27 @@ transfer accounting for this narrow workload. Its checksum covers the immutable
 source buffer rather than post-scanout pixels. This evidence does not prove
 physical-GPU throughput or physical-display scanout. Those remain separate
 hardware evidence gates.
+
+## 2026-08-13 native transfer recheck
+
+The native Rust runtime transfer test passed against the pinned llvmpipe ICD:
+
+```text
+cargo test --locked --offline -p simple-runtime --features vulkan \
+  vulkan_graphics_runtime::vulkan_graphics_runtime_buffer::tests::native_vulkan_upload_honors_nonzero_offset \
+  -- --ignored --exact
+result: 1 passed
+```
+
+That test performs a nonzero-offset upload, a packed strided read, and a
+two-region packed read in one native runtime session. It verifies the exact
+range/region mechanism used by damaged host-cache refreshes.
+
+The authoritative Simple Engine2D readback script was also rerun with the
+pinned llvmpipe ICD. Its clear and rectangle device readbacks had zero pixel
+mismatches and concrete device identities, but the overall script status was
+`fail` because `bin/simple` identified itself as a Rust bootstrap seed and
+fell back to the interpreter for its requested native execution mode. The
+focused strict/parity specs were intentionally not run after that provenance
+gate. Consequently this recheck adds native runtime-transfer correctness only;
+it does not refresh, replace, or extend the 8K/80 evidence claim above.
