@@ -28,6 +28,7 @@ class ThreadSafeQueue:
             case nil: # timeout
     """
     items: [usize]
+    head: usize
     mutex: MutexHandle
     not_empty: CondVarHandle
 
@@ -35,9 +36,33 @@ class ThreadSafeQueue:
         """Create new thread-safe queue."""
         ThreadSafeQueue(
             items: [],
+            head: 0,
             mutex: mutex_create(),
             not_empty: condvar_create()
         )
+
+    me pop_unlocked() -> usize:
+        """Remove one queued item while the caller owns ``mutex``.
+
+        Advancing a cursor avoids copying the remaining queue on every pop.
+        When consumed storage dominates, compact once; this keeps the queue
+        FIFO and makes removal amortized O(1) without changing its sentinel
+        API or its currently unbounded admission contract.
+        """
+        if self.head >= self.items.len():
+            return 0
+
+        val result = self.items[self.head]
+        self.head = self.head + 1
+
+        if self.head == self.items.len():
+            self.items = []
+            self.head = 0
+        else if self.head >= 64 and self.head * 2 >= self.items.len():
+            self.items = self.items[self.head:]
+            self.head = 0
+
+        result
 
     me push(item: usize):
         """Push item to queue (thread-safe).
@@ -64,9 +89,8 @@ class ThreadSafeQueue:
             return 0
 
         var result = 0
-        if not self.items.is_empty():
-            result = self.items[0]
-            self.items = self.items[1:]
+        if self.head < self.items.len():
+            result = self.pop_unlocked()
 
         self.mutex.unlock()
         result
@@ -90,7 +114,7 @@ class ThreadSafeQueue:
         var result = 0
 
         # Wait for item
-        if self.items.is_empty():
+        if self.head >= self.items.len():
             if timeout_ms == 0:
                 # Wait forever
                 self.not_empty.wait(self.mutex)
@@ -102,9 +126,8 @@ class ThreadSafeQueue:
                     return 0
 
         # Item available
-        if not self.items.is_empty():
-            result = self.items[0]
-            self.items = self.items[1:]
+        if self.head < self.items.len():
+            result = self.pop_unlocked()
 
         self.mutex.unlock()
         result
@@ -118,7 +141,7 @@ class ThreadSafeQueue:
         if not self.mutex.lock():
             return 0
 
-        val size = self.items.len()
+        val size = self.items.len() - self.head
         self.mutex.unlock()
         size
 
@@ -131,7 +154,7 @@ class ThreadSafeQueue:
         if not self.mutex.lock():
             return true
 
-        val empty = self.items.is_empty()
+        val empty = self.head >= self.items.len()
         self.mutex.unlock()
         empty
 
@@ -139,10 +162,10 @@ class ThreadSafeQueue:
         """Clear all items (thread-safe)."""
         self.mutex.lock()
         self.items = []
+        self.head = 0
         self.mutex.unlock()
 
     me destroy():
         """Destroy queue and free resources."""
         self.mutex.destroy()
         self.not_empty.destroy()
-

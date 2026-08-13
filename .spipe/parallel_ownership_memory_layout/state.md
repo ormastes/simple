@@ -782,3 +782,7 @@ in-progress
   bounded backing storage, rather than calling front removal on every receive.
   The focused bootstrap source check passed; this is a storage-cost repair,
   not evidence of a thread-safe task mailbox or typed transfer transport.
+- impl: Reworked `ThreadSafeQueue` removal to use a consumed-prefix cursor.
+  It compacts amortized storage under its mutex rather than slicing the full
+  remaining task-ID queue on each pop; admission and sentinel semantics are
+  intentionally unchanged pending the separate bounded typed-envelope rewrite.
