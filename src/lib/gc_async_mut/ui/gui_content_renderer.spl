@@ -8,6 +8,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dDrawIrTileOutcome,
     engine2d_draw_ir_adv_composition_with_images,
     engine2d_draw_ir_render_composition_damaged,
+    engine2d_draw_ir_render_composition_damaged_with_images,
     engine2d_draw_ir_retained_idle,
     engine2d_draw_ir_retained_rejected,
 }
@@ -31,9 +32,15 @@ class GuiRetainedRenderSession:
         val composition = session.submit_widget_draw_ir(
             self.width, self.height, self.backend)
         self.engine.clear(gui_content_frame_clear_color())
-        val rendered = engine2d_draw_ir_adv_composition_with_images(
-            self.engine, composition, self.backend != "cpu" and self.backend != "software", [])
-        if rendered.fallback_required or rendered.skipped_command_count != 0:
+        # Preserve the executor's explicit retained Engine2D result.  The
+        # convenience composition API returns a readback receipt, not the
+        # mutated engine value needed by a later LOCAL damage replay.
+        val seeded = engine2d_draw_ir_render_composition_damaged_with_images(
+            self.engine, composition, [],
+            [0i64, 0i64, self.width.to_i64(), self.height.to_i64()], false)
+        self.engine = seeded.engine
+        if seeded.unsupported_kinds != "none" or seeded.ops_rendered <= 0:
+            self.seeded = false
             return false
         self.seeded = true
         true

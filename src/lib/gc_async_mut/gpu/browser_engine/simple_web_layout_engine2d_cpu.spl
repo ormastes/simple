@@ -7,7 +7,6 @@ use common.ui.render_opt.damage_plan.{
 }
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dDrawIrTileOutcome,
-    engine2d_draw_ir_adv_composition,
     engine2d_draw_ir_render_composition_damaged,
     engine2d_draw_ir_retained_idle,
     engine2d_draw_ir_retained_rejected
@@ -43,14 +42,20 @@ pub class SimpleWebCpuDrawIrRetainedSurface:
             return engine2d_draw_ir_retained_rejected(
                 self.engine, "retained-invalid-surface")
         self.engine.clear(0u32)
-        val rendered = engine2d_draw_ir_adv_composition(
-            self.engine, composition, self.backend_name == "cpu_simd")
-        if rendered.fallback_required or rendered.skipped_command_count != 0:
+        # The retained executor returns its authoritative Engine2D value.
+        # Keep it rather than relying on mutations through the convenience
+        # composition API's by-value receiver on every runtime backend.
+        val seeded = engine2d_draw_ir_render_composition_damaged(
+            self.engine, composition,
+            [0i64, 0i64, self.width.to_i64(), self.height.to_i64()],
+            readback_frame)
+        self.engine = seeded.engine
+        if seeded.unsupported_kinds != "none" or seeded.ops_rendered <= 0:
             self.seeded = false
             return engine2d_draw_ir_retained_rejected(
                 self.engine, "retained-seed-failed")
         self.seeded = true
-        engine2d_draw_ir_retained_idle(self.engine, readback_frame)
+        seeded
 
     me render_damage(composition: DrawIrComposition, plan: DamagePlan,
                      readback_frame: bool) -> Engine2dDrawIrTileOutcome:
