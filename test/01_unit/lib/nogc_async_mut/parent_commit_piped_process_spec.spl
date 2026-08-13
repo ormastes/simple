@@ -1,0 +1,100 @@
+use std.spec
+use std.common.structural.parallel_commit.commit_contracts.{
+    ParallelResultKind
+}
+use std.common.structural.parallel_commit.result_envelope_codec.{encode_result_envelope}
+use std.common.structural.transfer.process_frame_codec.{
+    encode_process_transfer_frame,
+    process_transfer_frame_v1,
+    process_transfer_text_line_encode
+}
+use std.common.structural.transfer.transfer_contracts.{
+    ParallelExecutionDomain,
+    ParallelTransferMode,
+    ParallelTransferPayload,
+    transfer_envelope_v1
+}
+use std.common.structural.parallel_commit.commit_contracts.{result_envelope_v1}
+use std.nogc_async_mut.parent_commit_inbox.{parent_commit_frame_inbox_v1}
+use std.nogc_async_mut.parent_commit_piped_process.{
+    parent_commit_piped_result_reader_v1
+}
+
+fn piped_child_line(task_id: i64, payload: i64) -> text:
+    val result = result_envelope_v1(4, task_id, 0, task_id,
+        ParallelResultKind.Patch, payload, "child-{task_id}")
+    val envelope = transfer_envelope_v1(task_id, 0,
+        ParallelExecutionDomain.Process,
+        ParallelExecutionDomain.Parent,
+        ParallelTransferMode.Copy,
+        ParallelTransferPayload.EncodedCopy,
+        0, false)
+    process_transfer_text_line_encode(process_transfer_frame_v1(
+        envelope, encode_result_envelope(result)))
+
+fn piped_child_frame(task_id: i64, payload: i64) -> [u8]:
+    val result = result_envelope_v1(4, task_id, 0, task_id,
+        ParallelResultKind.Patch, payload, "child-{task_id}")
+    val envelope = transfer_envelope_v1(task_id, 0,
+        ParallelExecutionDomain.Process,
+        ParallelExecutionDomain.Parent,
+        ParallelTransferMode.Copy,
+        ParallelTransferPayload.EncodedCopy,
+        0, false)
+    encode_process_transfer_frame(process_transfer_frame_v1(
+        envelope, encode_result_envelope(result)))
+
+describe "ParentCommitPipedResultReaderV1":
+    it "reassembles a child result split across stdout reads":
+        val inbox = parent_commit_frame_inbox_v1(2)
+        val reader = parent_commit_piped_result_reader_v1(inbox)
+        val line = piped_child_line(7, 707)
+        val split = line.len() / 2
+        val first = reader.receive_stdout_chunk(line.substring(0, split), 2)
+        assert_true(first.ok)
+        assert_equal(first.accepted, 0)
+        assert_true(first.pending_bytes > 0)
+        val second = reader.receive_stdout_chunk(line.substring(split, line.len()), 2)
+        assert_true(second.ok)
+        assert_equal(second.accepted, 1)
+        assert_equal(second.rejected, 0)
+        assert_equal(reader.pending_byte_count(), 0)
+        val received = inbox.receive()
+        assert_true(received.ok)
+        assert_equal(received.frame, piped_child_frame(7, 707))
+
+    it "keeps complete later lines pending at the parent scheduling budget":
+        val inbox = parent_commit_frame_inbox_v1(3)
+        val reader = parent_commit_piped_result_reader_v1(inbox)
+        val first = piped_child_line(1, 701)
+        val second = piped_child_line(2, 702)
+        val one = reader.receive_stdout_chunk(first + second, 1)
+        assert_true(one.ok)
+        assert_equal(one.accepted, 1)
+        assert_true(one.pending_bytes > 0)
+        val two = reader.receive_stdout_chunk("", 1)
+        assert_true(two.ok)
+        assert_equal(two.accepted, 1)
+        assert_equal(inbox.receive().frame, piped_child_frame(1, 701))
+        assert_equal(inbox.receive().frame, piped_child_frame(2, 702))
+
+    it "rejects bad and oversized stdout without retaining it":
+        val inbox = parent_commit_frame_inbox_v1(1)
+        val reader = parent_commit_piped_result_reader_v1(inbox)
+        val invalid = reader.receive_stdout_chunk("unexpected output\n", 1)
+        assert_true(invalid.ok)
+        assert_equal(invalid.accepted, 0)
+        assert_equal(invalid.rejected, 1)
+        val oversized = "x".repeat(8388720) + "\n"
+        val rejected = reader.receive_stdout_chunk(oversized, 1)
+        assert_true(rejected.ok)
+        assert_true(rejected.rejected >= 1)
+        assert_equal(reader.pending_byte_count(), 0)
+
+    it "closes the shared inbox and rejects invalid process handles":
+        val inbox = parent_commit_frame_inbox_v1(1)
+        val reader = parent_commit_piped_result_reader_v1(inbox)
+        assert_equal(reader.poll_process_stdout(0, 1).reason, "invalid-process-handle")
+        reader.close()
+        assert_true(inbox.is_closed())
+        assert_false(inbox.offer_process_result_frame(piped_child_frame(1, 701)))

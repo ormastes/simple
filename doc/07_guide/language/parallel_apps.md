@@ -78,8 +78,16 @@ commit it in one canonical transition. Its mutex-protected counters expose
 accepted/rejected totals and frame/byte high-water marks for deterministic
 bounded-memory checks.
 
-This is not an OS process API or an implicit retry queue. An adapter still has
-to provide real child IPC, cancellation, and child cleanup. A frame is consumed
+`ParentCommitPipedResultReaderV1` is the bounded adapter for the existing
+native piped-child stdout surface. It accepts only newline-terminated `SPRF1`
+ASCII armor containing canonical lowercase-hex frame bytes, reassembles
+partial reads, and passes verified frames into the inbox. It never decodes
+arbitrary stdout as a frame, and it discards overlong lines through their next
+newline rather than retaining unbounded partial text.
+
+This is still not an application process API or an implicit retry queue. Child
+launch, stdin request protocol, cancellation, exit cleanup, and native
+backpressure evidence remain application/runtime work. A frame is consumed
 once the parent drains it; a stale or conflicting batch remains rejected and
 the application must produce a new result against a new snapshot. The local
 runner currently exposes only a Rust bootstrap seed, so native child delivery,

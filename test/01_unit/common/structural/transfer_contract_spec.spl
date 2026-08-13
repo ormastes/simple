@@ -23,8 +23,10 @@ use std.common.structural.transfer.process_frame_codec.{
     MAX_PROCESS_TRANSFER_BYTES,
     PROCESS_TRANSFER_FRAME_HEADER_LEN,
     decode_process_transfer_frame,
+    decode_process_transfer_text_line,
     encode_process_transfer_frame,
-    process_transfer_frame_v1
+    process_transfer_frame_v1,
+    process_transfer_text_line_encode
 }
 use std.common.structural.wire.{wire_to_hex}
 
@@ -147,3 +149,37 @@ describe "TransferEnvelopeV1 contract":
         var huge: [u8] = [0; MAX_PROCESS_TRANSFER_BYTES + 1]
         assert_equal(encode_process_transfer_frame(
             process_transfer_frame_v1(envelope, huge)).len(), 0)
+
+    it "round trips a canonical ASCII piped-process frame line":
+        val envelope = transfer_envelope_v1(7, 2,
+            ParallelExecutionDomain.Process, ParallelExecutionDomain.Parent,
+            ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy,
+            0, false)
+        val line = process_transfer_text_line_encode(process_transfer_frame_v1(
+            envelope, [116, 121, 112, 101, 100]))
+        assert_true(line.starts_with("SPRF1 53505452"))
+        assert_true(line.ends_with("\n"))
+        val decoded = decode_process_transfer_text_line(
+            line.substring(0, line.len() - 1), ParallelExecutionDomain.Parent)
+        assert_true(decoded.ok)
+        assert_equal(decoded.wire,
+            encode_process_transfer_frame(process_transfer_frame_v1(
+                envelope, [116, 121, 112, 101, 100])))
+
+    it "rejects noncanonical stdout armor before process-frame decode":
+        val envelope = transfer_envelope_v1(7, 2,
+            ParallelExecutionDomain.Process, ParallelExecutionDomain.Parent,
+            ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy,
+            0, false)
+        val line = process_transfer_text_line_encode(process_transfer_frame_v1(
+            envelope, [116]))
+        val bare = line.substring(0, line.len() - 1)
+        assert_equal(decode_process_transfer_text_line(
+            "other " + bare, ParallelExecutionDomain.Parent).reason,
+            "missing-text-prefix")
+        assert_equal(decode_process_transfer_text_line(
+            bare.to_upper(), ParallelExecutionDomain.Parent).reason,
+            "invalid-text-hex")
+        assert_equal(decode_process_transfer_text_line(
+            "SPRF1 0", ParallelExecutionDomain.Parent).reason,
+            "invalid-text-hex-length")

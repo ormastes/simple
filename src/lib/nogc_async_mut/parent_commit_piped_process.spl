@@ -1,0 +1,114 @@
+# Bounded ASCII process-result ingress for the existing native piped process.
+#
+# `rt_process_read_stdout` is text-based and may split a child write at any
+# point.  This reader accepts only `SPRF1 <lowercase-hex>\n` lines, restores
+# the verified binary process frame, and offers it to the parent-owned bounded
+# inbox.  It never treats stdout bytes or child-local addresses as values.
+
+use std.common.structural.transfer.process_frame_codec.{
+    PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES,
+    decode_process_transfer_text_line
+}
+use std.common.structural.transfer.transfer_contracts.{ParallelExecutionDomain}
+use std.nogc_async_mut.parent_commit_inbox.{ParentCommitFrameInboxV1}
+use std.nogc_sync_mut.io.process_ops.{process_read_stdout}
+
+struct ParentCommitPipedReadResultV1:
+    ok: bool
+    accepted: i64
+    rejected: i64
+    pending_bytes: i64
+    reason: text
+
+fn parent_commit_piped_read_result_v1(ok: bool, accepted: i64, rejected: i64,
+                                      pending_bytes: i64, reason: text) -> ParentCommitPipedReadResultV1:
+    ParentCommitPipedReadResultV1(ok: ok, accepted: accepted, rejected: rejected,
+        pending_bytes: pending_bytes, reason: reason)
+
+class ParentCommitPipedResultReaderV1:
+    """Parent-owned line reassembler around one already-bounded frame inbox."""
+    inbox: ParentCommitFrameInboxV1
+    pending: text
+    dropping_oversize_line: bool
+
+impl ParentCommitPipedResultReaderV1:
+    static fn create(inbox: ParentCommitFrameInboxV1) -> ParentCommitPipedResultReaderV1:
+        ParentCommitPipedResultReaderV1(
+            inbox: inbox,
+            pending: "",
+            dropping_oversize_line: false
+        )
+
+    me receive_stdout_chunk(chunk: text, max_lines: i64) -> ParentCommitPipedReadResultV1:
+        """Consume at most `max_lines` completed stdout lines.
+
+        Remaining text is retained only up to the maximum valid armored frame
+        line.  An oversized line is discarded through its newline so a noisy
+        child cannot turn partial-frame buffering into unbounded parent memory.
+        """
+        if max_lines <= 0:
+            return parent_commit_piped_read_result_v1(false, 0, 0,
+                self.pending.len(), "invalid-line-limit")
+        var accepted = 0
+        var rejected = 0
+        var processed = 0
+        # Retained bytes may already contain a complete line deferred by the
+        # prior parent scheduling budget.  Scan them before requiring another
+        # child write; otherwise an idle child could strand an accepted result.
+        val input = self.pending + chunk
+        self.pending = ""
+        var i = 0
+        while i < input.len():
+            if processed >= max_lines:
+                val suffix = input.substring(i, input.len())
+                if self.pending.len() + suffix.len() > PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES:
+                    self.pending = ""
+                    self.dropping_oversize_line = true
+                    return parent_commit_piped_read_result_v1(false, accepted,
+                        rejected + 1, 0, "pending-text-overflow")
+                self.pending = self.pending + suffix
+                return parent_commit_piped_read_result_v1(true, accepted, rejected,
+                    self.pending.len(), "")
+            val ch = input.substring(i, i + 1)
+            i = i + 1
+            if self.dropping_oversize_line:
+                if ch == "\n":
+                    self.dropping_oversize_line = false
+                continue
+            if ch != "\n":
+                if self.pending.len() >= PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES:
+                    self.pending = ""
+                    self.dropping_oversize_line = true
+                    rejected = rejected + 1
+                else:
+                    self.pending = self.pending + ch
+                continue
+            processed = processed + 1
+            val decoded = decode_process_transfer_text_line(
+                self.pending, ParallelExecutionDomain.Parent)
+            self.pending = ""
+            if not decoded.ok or not self.inbox.offer_process_result_frame(decoded.wire):
+                rejected = rejected + 1
+            else:
+                accepted = accepted + 1
+        parent_commit_piped_read_result_v1(true, accepted, rejected,
+            self.pending.len(), "")
+
+    me poll_process_stdout(pid: i64, max_lines: i64) -> ParentCommitPipedReadResultV1:
+        """Poll the canonical native pipe; no process-global buffer is used."""
+        if pid <= 0:
+            return parent_commit_piped_read_result_v1(false, 0, 0,
+                self.pending.len(), "invalid-process-handle")
+        self.receive_stdout_chunk(process_read_stdout(pid), max_lines)
+
+    me close():
+        """Terminally reject later frames and drop incomplete child output."""
+        self.pending = ""
+        self.dropping_oversize_line = false
+        self.inbox.close()
+
+    fn pending_byte_count() -> i64:
+        self.pending.len()
+
+fn parent_commit_piped_result_reader_v1(inbox: ParentCommitFrameInboxV1) -> ParentCommitPipedResultReaderV1:
+    ParentCommitPipedResultReaderV1.create(inbox)

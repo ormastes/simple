@@ -680,6 +680,15 @@ in-progress
   frames, retained bytes, and peak occupancy deterministically without using
   host RSS as the primary oracle. Native multi-process pressure evidence is
   still required before treating these counters as an end-to-end result.
+- impl: Added `SPRF1` canonical lowercase-hex armor and
+  `ParentCommitPipedResultReaderV1` over the existing native text-pipe
+  surface. The reader reassembles split stdout writes, obeys a parent line
+  budget, and sends only route/checksum/schema-verified frames into the
+  bounded inbox; malformed and oversized text is rejected without becoming
+  retained binary input. Focused bootstrap-seed syntax checking passed, while
+  focused interpreter invocations produced truncated output with no final
+  verdict. Self-hosted native child launch, pipe backpressure, cancellation,
+  and cleanup evidence remain required.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters

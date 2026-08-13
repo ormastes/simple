@@ -1,7 +1,7 @@
 # Canonical bounded process-frame codec shared with the native runtime.
 # The payload is schema-owned bytes; RuntimeValue/pointer bits have no form.
 
-use std.common.structural.wire.{wire_get_u64, wire_put_u64}
+use std.common.structural.wire.{wire_get_u64, wire_put_u64, wire_to_hex}
 use std.common.structural.transfer.transfer_contracts.{
     ParallelExecutionDomain,
     ParallelTransferMode,
@@ -22,6 +22,9 @@ val PROCESS_TRANSFER_FRAME_HEADER_LEN: i64 = TRANSFER_ENVELOPE_WIRE_LEN + 16
 val MAX_PROCESS_TRANSFER_BYTES: i64 = 4 * 1024 * 1024
 val PROCESS_TRANSFER_FNV1A_OFFSET: i64 = -3750763034362895579
 val PROCESS_TRANSFER_FNV1A_PRIME: i64 = 1099511628211
+val PROCESS_TRANSFER_TEXT_PREFIX: text = "SPRF1 "
+val PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES: i64 = PROCESS_TRANSFER_TEXT_PREFIX.len()
+    + (PROCESS_TRANSFER_FRAME_HEADER_LEN + MAX_PROCESS_TRANSFER_BYTES) * 2
 
 struct ProcessTransferFrameV1:
     envelope: TransferEnvelopeV1
@@ -32,12 +35,26 @@ struct ProcessTransferFrameResult:
     value: ProcessTransferFrameV1
     reason: text
 
+struct ProcessTransferTextLineResult:
+    """A bounded ASCII carrier decoded back to one verified wire frame.
+
+    Piped host-process APIs expose `text`, not a raw byte stream.  This
+    carrier therefore keeps binary frame bytes out of UTF-8 conversion by
+    carrying their canonical lowercase hexadecimal spelling on one line.
+    """
+    ok: bool
+    wire: [u8]
+    reason: text
+
 fn process_transfer_frame_v1(envelope: TransferEnvelopeV1,
                              payload: [u8]) -> ProcessTransferFrameV1:
     ProcessTransferFrameV1(envelope: envelope, payload: payload)
 
 fn process_transfer_frame_zero() -> ProcessTransferFrameV1:
     ProcessTransferFrameV1(envelope: transfer_envelope_zero(), payload: [])
+
+fn process_transfer_text_line_result(ok: bool, wire: [u8], reason: text) -> ProcessTransferTextLineResult:
+    ProcessTransferTextLineResult(ok: ok, wire: wire, reason: reason)
 
 fn process_transfer_route_allowed(envelope: TransferEnvelopeV1) -> bool:
     val source = parallel_execution_domain_to_u8(envelope.source_domain)
@@ -63,6 +80,54 @@ fn process_transfer_append(out: [u8], source: [u8]) -> [u8]:
         result.push(source[i])
         i = i + 1
     result
+
+fn process_transfer_hex_nibble(code: i64) -> i64:
+    """Decode only canonical lowercase ASCII hex; all other text is rejected."""
+    if code >= 48 and code <= 57:
+        return code - 48
+    if code >= 97 and code <= 102:
+        return code - 97 + 10
+    -1
+
+fn process_transfer_text_line_encode(value: ProcessTransferFrameV1) -> text:
+    """Encode one validated frame as an ASCII-only, newline-terminated line.
+
+    The process frame remains the canonical wire authority.  This adapter is
+    only required because the existing piped-process runtime exposes stdout as
+    `text`; it does not make arbitrary text a transfer payload.
+    """
+    val wire = encode_process_transfer_frame(value)
+    if wire.len() == 0:
+        return ""
+    PROCESS_TRANSFER_TEXT_PREFIX + wire_to_hex(wire) + "\n"
+
+fn decode_process_transfer_text_line(line: text,
+                                     target: ParallelExecutionDomain) -> ProcessTransferTextLineResult:
+    """Fail closed on noncanonical/oversize stdout lines before wire decode."""
+    var normalized = line
+    if normalized.ends_with("\r"):
+        normalized = normalized.substring(0, normalized.len() - 1)
+    if not normalized.starts_with(PROCESS_TRANSFER_TEXT_PREFIX):
+        return process_transfer_text_line_result(false, [], "missing-text-prefix")
+    if normalized.len() > PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES:
+        return process_transfer_text_line_result(false, [], "oversize-text-line")
+    val hex_start = PROCESS_TRANSFER_TEXT_PREFIX.len()
+    val hex_len = normalized.len() - hex_start
+    if hex_len == 0 or hex_len % 2 != 0:
+        return process_transfer_text_line_result(false, [], "invalid-text-hex-length")
+    var wire: [u8] = []
+    var i = hex_start
+    while i < normalized.len():
+        val hi = process_transfer_hex_nibble(normalized.char_code_at(i))
+        val lo = process_transfer_hex_nibble(normalized.char_code_at(i + 1))
+        if hi < 0 or lo < 0:
+            return process_transfer_text_line_result(false, [], "invalid-text-hex")
+        wire.push((hi * 16 + lo) as u8)
+        i = i + 2
+    val decoded = decode_process_transfer_frame(wire, target)
+    if not decoded.ok:
+        return process_transfer_text_line_result(false, [], "invalid-process-frame")
+    process_transfer_text_line_result(true, wire, "")
 
 fn encode_process_transfer_frame(value: ProcessTransferFrameV1) -> [u8]:
     var out: [u8] = []
