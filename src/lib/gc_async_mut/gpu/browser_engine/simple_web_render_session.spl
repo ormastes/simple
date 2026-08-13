@@ -44,6 +44,7 @@ use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.cuda_execution_port.{
 }
 use std.gc_async_mut.web.browser_session.{BrowserRenderSnapshot}
 use std.common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use std.common.ui.draw_ir_patch.{draw_ir_patch_between}
 use std.common.crypto.sha256.{sha256_text}
 
 val SIMPLE_WEB_LAYOUT_FIXED_POINT_CAP: i64 = 4
@@ -144,6 +145,19 @@ fn _simple_web_render_command_count(
         count = count + batch.commands.len().to_i64()
     count
 
+fn _simple_web_render_root_damage_eligible(
+    result: SimpleWebLayoutDrawIrResult, width: i32, height: i32
+) -> bool:
+    # draw_ir_patch_between reports command-local bounds. Until the producer
+    # emits transformed bounds per embedding, accept them only for the same
+    # one opaque root batch that Engine2D's retained executor accepts.
+    if result.composition.batches.len() != 1:
+        return false
+    val embedding = result.composition.batches[0].embedding
+    embedding.x == 0 and embedding.y == 0 and
+        embedding.width == width and embedding.height == height and
+        embedding.opacity_milli == 1000
+
 pub class SimpleWebRenderCounters:
     serialize_count: i64
     parse_count: i64
@@ -193,6 +207,11 @@ pub class SimpleWebRenderSession:
     current_web_layout_snapshot: WebLayoutSnapshot?
     current_web_layout_run: WebLayoutRunResult?
     counters: SimpleWebRenderCounters
+    # Producer-owned raw old/new DrawIR bounds for the immediately preceding
+    # render. These are deliberately not a backend damage plan: consumers
+    # must clip/coalesce them with their own viewport and tile policy.
+    last_damage_stage: text
+    last_damage_rects: [i64]
     checksum_revision: i64
     checksum_cache: text
 
@@ -216,6 +235,8 @@ pub class SimpleWebRenderSession:
             current_web_layout_snapshot: nil,
             current_web_layout_run: nil,
             counters: SimpleWebRenderCounters.create(),
+            last_damage_stage: "full",
+            last_damage_rects: [],
             checksum_revision: -1,
             checksum_cache: ""
         )
@@ -276,6 +297,8 @@ pub class SimpleWebRenderSession:
                 self.counters.reuse_count
             )
             self.animation_time_ms = animation_time_ms
+            self.last_damage_stage = "none"
+            self.last_damage_rects = []
             return self.current_result.unwrap()
 
         if val Some(html) = snapshot.document_html:
@@ -392,6 +415,31 @@ pub class SimpleWebRenderSession:
         self.overlay_view_start_byte = overlay.view_start_byte
         self.overlay_caret_visible = overlay.caret_visible
         self.animation_time_ms = animation_time_ms
+        self.last_damage_stage = dirty_stage
+        self.last_damage_rects = []
+        # Only paint-only stages preserve node identity and geometry by
+        # construction. A full/css/style stage may add, remove, or relocate
+        # layout boxes, so consumers must seed/replay the full composition.
+        # Raw patch bounds retain both prior and current extents; the retained
+        # surface owns clipping, tiling, coalescing, and full-fallback policy.
+        if (has_prior and not resource_changed and
+            (dirty_stage == "paint" or dirty_stage == "animation-paint") and
+            _simple_web_render_root_damage_eligible(
+                self.current_result.unwrap(), width, height) and
+            _simple_web_render_root_damage_eligible(result, width, height)):
+            val patch = draw_ir_patch_between(
+                self.current_result.unwrap().composition, "prior",
+                result.composition, "current")
+            for rect in patch.damage_rects:
+                if rect.present and rect.width > 0 and rect.height > 0:
+                    self.last_damage_rects.push(rect.x.to_i64())
+                    self.last_damage_rects.push(rect.y.to_i64())
+                    self.last_damage_rects.push(rect.width.to_i64())
+                    self.last_damage_rects.push(rect.height.to_i64())
+        elif dirty_stage == "paint" or dirty_stage == "animation-paint":
+            # Image-resource revisions and non-root embeddings lack an exact
+            # producer coordinate receipt. Full is the only truthful signal.
+            self.last_damage_stage = "full"
         self.current_result = Some(result)
         if dirty_stage == "full":
             self.counters.parse_count = _simple_web_render_counter_next(
@@ -450,6 +498,8 @@ pub class SimpleWebRenderSession:
         self.web_layout_manager_state = nil
         self.current_web_layout_snapshot = nil
         self.current_web_layout_run = nil
+        self.last_damage_stage = "full"
+        self.last_damage_rects = []
         self.counters.retained_node_count = 0
         self.counters.retained_style_count = 0
         self.counters.retained_box_count = 0
