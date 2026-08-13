@@ -1,7 +1,9 @@
 use std.spec
+use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_instructions.{
     BlockId, LocalId, LocalKind, MirBlock, MirConstValue, MirInst, MirInstKind,
-    MirLocal, MirOperand, MirOperandKind, MirTerminator, MirType
+    MirFunction, MirLocal, MirOperand, MirOperandKind, MirSignature,
+    MirTerminator, MirType
 }
 use compiler.mir.mir_json.{serialize_mir_inst_kind}
 use compiler.mir.mir_coverage_probe_admission.{
@@ -11,6 +13,7 @@ use compiler.mir_opt.mir_opt.dce.{dce_instruction_is_mandatory_observation}
 use compiler.mir_opt.mir_opt.mir_visitor.{MirVisitor, mir_visitor_walk_inst}
 use compiler.mir_opt.mir_opt.var_reassign_ssa.{ssa_var_transform_blocks}
 use compiler.mir_opt.mir_opt._Inline.policy.{FunctionInliner}
+use compiler.mir_opt.optimization_passes.{OptimizationEngine, OptimizationLevel}
 use compiler.interp.mir_interpreter.{MirInterpreter}
 
 fn probe_bool_local() -> MirLocal:
@@ -61,6 +64,49 @@ describe "typed MIR coverage opcode admission":
         expect(visitor.operands).to_equal(2)
         expect(dce_instruction_is_mandatory_observation(decision_probe())).to_equal(true)
         expect(dce_instruction_is_mandatory_observation(condition_probe())).to_equal(true)
+
+    it "keeps definitions used only by probes through optimization engine DCE":
+        val condition_local = MirLocal(
+            LocalId(id: 1), "atomic_condition", MirType.bool(),
+            LocalKind.Var, false
+        )
+        val block = MirBlock(
+            id: BlockId.entry(), label: "entry",
+            instructions: [
+                MirInst(kind: MirInstKind.Const(
+                    LocalId(id: 0), MirConstValue.Bool(true), MirType.bool()
+                ), span: nil),
+                decision_probe(),
+                MirInst(kind: MirInstKind.Const(
+                    LocalId(id: 1), MirConstValue.Bool(false), MirType.bool()
+                ), span: nil),
+                MirInst(kind: MirInstKind.ConditionProbe(
+                    8, "condition:sha256", 7, "decision:sha256",
+                    MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))),
+                    "src/example.spl", 12, 4
+                ), span: nil)
+            ],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val function = MirFunction(
+            symbol: SymbolId(id: 0), name: "probe_liveness",
+            signature: MirSignature(
+                params: [], return_type: MirType.unit(), is_variadic: false
+            ),
+            locals: [probe_bool_local(), condition_local], blocks: [block],
+            entry_block: BlockId.entry(), span: nil, generic_params: [],
+            is_generic_template: false, specialization_of: nil,
+            type_bindings: {}
+        )
+        val engine = OptimizationEngine.create(OptimizationLevel.Standard)
+        val optimized = engine.optimize_function(function)
+        expect(optimized.blocks[0].instructions.len()).to_equal(4)
+        match optimized.blocks[0].instructions[0].kind:
+            case Const(local, Bool(true), _): expect(local.id).to_equal(0)
+            case _: expect(false).to_equal(true)
+        match optimized.blocks[0].instructions[2].kind:
+            case Const(local, Bool(false), _): expect(local.id).to_equal(1)
+            case _: expect(false).to_equal(true)
 
     it "validates IDs paths positions and boolean operands before rejecting unlowered probes":
         val locals = [probe_bool_local()]
@@ -126,4 +172,3 @@ describe "typed MIR coverage opcode admission":
         expect(lib_backend).to_contain("mir_coverage_probe_admission_diagnostic_module_v1(module)")
         expect(lib_backend).to_contain("return Err(compileerror_backend_error")
         expect(lib_translate).to_contain("unlowered ConditionProbe")
-
