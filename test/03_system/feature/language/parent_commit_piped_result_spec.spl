@@ -1,0 +1,92 @@
+# Native-only Process→Parent delivery gate for the bounded parent commit path.
+#
+# It deliberately uses the shipped piped process facade, not an in-memory
+# chunk, so a self-hosted native run proves the child stdout reader boundary.
+
+use std.spec
+use std.io.{file_delete, file_write, shell_output_trimmed}
+use std.common.structural.parallel_commit.commit_contracts.{
+    ParallelCommitOrder,
+    ParallelConflictPolicy,
+    ParallelResultKind,
+    result_envelope_v1
+}
+use std.common.structural.parallel_commit.commit_engine.{parallel_commit_state_v1}
+use std.common.structural.parallel_commit.result_envelope_codec.{encode_result_envelope}
+use std.common.structural.transfer.process_frame_codec.{
+    process_transfer_frame_v1,
+    process_transfer_text_line_encode
+}
+use std.common.structural.transfer.transfer_contracts.{
+    ParallelExecutionDomain,
+    ParallelTransferMode,
+    ParallelTransferPayload,
+    transfer_envelope_v1
+}
+use std.nogc_async_mut.parent_commit_inbox.{parent_commit_frame_inbox_v1}
+use std.nogc_async_mut.parent_commit_owner.{parent_commit_owner_v1}
+use std.nogc_async_mut.parent_commit_piped_process.{
+    parent_commit_piped_result_reader_v1
+}
+use std.nogc_sync_mut.io.process_ops.{
+    process_close_piped,
+    process_is_piped_alive,
+    process_spawn_piped
+}
+use std.thread_sffi.{thread_sleep}
+
+fn piped_process_extern_available() -> bool:
+    """Avoid a seed-interpreter extern abort; native evidence stays mandatory."""
+    val probe_path = "/tmp/simple_parent_commit_pipe_probe.spl"
+    val probe_src = "use std.nogc_sync_mut.io.{process_spawn_piped}\n\nfn main():\n    val pid = process_spawn_piped(\"true\", [])\n    if pid > 0:\n        print \"PIPED_OK\"\n    else:\n        print \"PIPED_FAIL\"\n"
+    file_write(probe_path, probe_src)
+    val output = shell_output_trimmed("bin/simple run {probe_path} 2>/dev/null", "")
+    file_delete(probe_path)
+    output.contains("PIPED_OK")
+
+fn child_result_line() -> text:
+    val result = result_envelope_v1(4, 7, 0, 7,
+        ParallelResultKind.Patch, 707, "child-7")
+    val envelope = transfer_envelope_v1(7, 0,
+        ParallelExecutionDomain.Process,
+        ParallelExecutionDomain.Parent,
+        ParallelTransferMode.Copy,
+        ParallelTransferPayload.EncodedCopy,
+        0, false)
+    process_transfer_text_line_encode(process_transfer_frame_v1(
+        envelope, encode_result_envelope(result))).trim()
+
+describe "native piped parent commit result delivery":
+    it "delivers one armored child frame through the real stdout pipe":
+        if not piped_process_extern_available():
+            print "SKIP: piped-process extern unavailable in this interpreter runtime; self-hosted native evidence remains required"
+            return
+        val inbox = parent_commit_frame_inbox_v1(1)
+        val reader = parent_commit_piped_result_reader_v1(inbox)
+        val pid = process_spawn_piped("/bin/echo", [child_result_line()])
+        assert_true(pid > 0)
+        if pid <= 0:
+            return
+        var delivered = false
+        var polls = 0
+        while polls < 40 and not delivered:
+            val read = reader.poll_process_stdout(pid, 1)
+            if read.accepted == 1:
+                delivered = true
+            elif read.rejected > 0:
+                assert_equal(read.reason, "")
+                break
+            if not delivered and process_is_piped_alive(pid):
+                thread_sleep(5)
+            polls = polls + 1
+        assert_true(delivered)
+        if delivered:
+            val owner = parent_commit_owner_v1(
+                parallel_commit_state_v1(4, 400),
+                ParallelCommitOrder.TaskIdThenSequence,
+                ParallelConflictPolicy.Reject)
+            val committed = owner.commit_next_process_result(inbox, 401)
+            assert_true(committed.receipt.ok)
+            assert_equal(committed.receipt.ordered_task_ids[0], 7)
+            assert_equal(committed.receipt.ordered_payload_tokens[0], 707)
+        assert_true(process_close_piped(pid))

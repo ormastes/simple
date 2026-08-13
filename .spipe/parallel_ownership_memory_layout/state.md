@@ -689,6 +689,12 @@ in-progress
   focused interpreter invocations produced truncated output with no final
   verdict. Self-hosted native child launch, pipe backpressure, cancellation,
   and cleanup evidence remain required.
+- test: Added the native-only system gate
+  `test/03_system/feature/language/parent_commit_piped_result_spec.spl`.
+  It launches `/bin/echo` through the canonical piped-process facade, polls
+  actual stdout into the new reader, then commits the decoded child result.
+  Its interpreter capability probe skips only the known seed extern gap;
+  no self-hosted native verdict has been obtained in this environment.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters

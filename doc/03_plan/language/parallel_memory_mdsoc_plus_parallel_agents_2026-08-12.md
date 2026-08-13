@@ -52,7 +52,7 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 
 1. WP-10: replace block/point ambiguity with CFG-sensitive region facts and add dynamic-index, branch, loop, capture, and move regression evidence.
 2. WP-13/WP-16/WP-17: connect bounded encoded process frames to the production spawn/piped facade, add schema/ObjectRef codecs, and prove failure rollback; the native compatibility channel now has checked ref-counted lifetime across concurrent send/close/free, but still needs typed public endpoints and policy-selected capacity. Never revive the removed aggregate `rt_pg_parallel_worker_handoff_*` design.
-3. WP-15: keep `ParentCommitOwnerV1` as the serialized local root and add application-owned payload apply/verify plus mutation receipts; obtain one admitted Stage 4 framed child-result delivery verdict.
+3. WP-15/WP-17: keep `ParentCommitOwnerV1` as the serialized local root and add application-owned payload apply/verify plus mutation receipts; run `parent_commit_piped_result_spec.spl` with the self-hosted native runtime to obtain an admitted framed child-result delivery verdict.
 4. WP-30/WP-33: route the frozen transfer/layout/commit policy through one real MDSOC process pilot, where a bypass fails before publication and cancellation/cleanup are observable.
 5. WP-20/WP-22: preserve MIR access paths into typed AoS/SoA reference parity before SIMD/GPU lowering.
 
