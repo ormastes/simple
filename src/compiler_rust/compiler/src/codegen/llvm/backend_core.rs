@@ -487,7 +487,8 @@ impl LlvmBackend {
     /// `generate_module_init` (common_backend.rs): for each entry in
     /// `global_init_strings / _arrays / _functions / _structs`, build the heap
     /// object via `rt_string_new` / `rt_array_new`(+push) / `rt_byte_array_new`
-    /// (+`rt_typed_bytes_u8_push`) / `rt_alloc`, and store the handle into the
+    /// (+`rt_typed_bytes_u8_push`) / `rt_alloc` or `rt_struct_alloc`, and store the
+    /// handle into the
     /// global. The linker's `generate_init_caller` discovers `__module_init_*` and
     /// aggregates them into `__simple_call_module_inits`.
     #[cfg(feature = "llvm")]
@@ -789,10 +790,16 @@ impl LlvmBackend {
         let mut sorted_structs: Vec<_> = module_ir.global_init_structs.iter().collect();
         sorted_structs.sort_by_key(|(name, _)| (*name).clone());
         if !sorted_structs.is_empty() {
-            let alloc = get_rt("rt_alloc", 1);
+            // Module-global struct literals are direct-field receivers just like
+            // function-local StructInit values.  Allocate their non-empty flat
+            // payload through the paired registered allocator; `rt_alloc` does
+            // not admit a block to `rt_struct_receiver_valid`.  The global keeps
+            // the raw pointer representation used by the module-global ABI: only
+            // ordinary RuntimeValue flows add the heap tag.
+            let alloc = get_rt("rt_struct_alloc", 1);
             for (global_name, init) in sorted_structs {
-                let size = (init.fields.len().max(1) * 8) as u64;
-                let struct_pi = call_i64(alloc, &[i64_type.const_int(size, false)], "init_struct")?;
+                let payload_bytes = init.fields.len().saturating_mul(8).max(8) as u64;
+                let struct_pi = call_i64(alloc, &[i64_type.const_int(payload_bytes, false)], "init_struct")?;
                 let struct_ptr = builder
                     .build_int_to_ptr(struct_pi, ptr_type, "struct_ptr")
                     .map_err(|e| crate::error::factory::llvm_build_failed("struct inttoptr", &e))?;
@@ -1419,7 +1426,7 @@ impl LlvmBackend {
 mod tests {
     use super::LlvmBackend;
     use crate::codegen::backend_trait::NativeBackend;
-    use crate::hir::TypeId;
+    use crate::hir::{HirGlobalFieldInit, HirGlobalStructInit, TypeId};
     use crate::mir::{MirFunction, MirInst, MirModule, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
     use simple_parser::ast::Visibility;
@@ -1436,6 +1443,40 @@ mod tests {
         assert!(ir.contains("target triple"));
         assert!(ir.contains("x86_64"));
         assert!(ir.contains("target datalayout"));
+    }
+
+    #[test]
+    fn module_global_struct_init_uses_registered_raw_allocator() {
+        let mut backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Linux)).unwrap();
+        let mut mir = MirModule::new();
+        mir.name = Some("global_struct_receiver".to_string());
+        mir.globals.push(("global_point".to_string(), TypeId::I64, false));
+        mir.local_globals.insert("global_point".to_string());
+        mir.global_init_structs.insert(
+            "global_point".to_string(),
+            HirGlobalStructInit {
+                fields: vec![HirGlobalFieldInit::Value(42)],
+            },
+        );
+
+        backend.compile(&mir).unwrap();
+        let ir = backend.get_ir().unwrap();
+        let init_start = ir.find("define void @__module_init()").expect("module init IR");
+        let init_body = &ir[init_start..];
+
+        assert!(
+            init_body.contains("call i64 @rt_struct_alloc(i64 8)"),
+            "module-global struct must use a non-empty registered allocation:\n{init_body}"
+        );
+        assert!(
+            !init_body.contains("call i64 @rt_alloc"),
+            "module-global struct must not use generic allocation:\n{init_body}"
+        );
+        assert!(
+            init_body.contains("store i64 %init_struct, ptr @global_point"),
+            "module-global ABI stores the allocator's raw handle, without a RuntimeValue tag:\n{init_body}"
+        );
+        backend.verify().unwrap();
     }
 
     #[cfg(target_os = "linux")]
