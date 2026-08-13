@@ -25,6 +25,15 @@ fn parent_commit_piped_read_result_v1(ok: bool, accepted: i64, rejected: i64,
     ParentCommitPipedReadResultV1(ok: ok, accepted: accepted, rejected: rejected,
         pending_bytes: pending_bytes, reason: reason)
 
+fn parent_commit_piped_stdout_is_ascii(value: text) -> bool:
+    """Armored process frames are byte-indexed ASCII, never generic UTF-8."""
+    var index = 0
+    while index < value.len():
+        if value.char_code_at(index) > 127:
+            return false
+        index = index + 1
+    true
+
 class ParentCommitPipedResultReaderV1:
     """Parent-owned line reassembler around one already-bounded frame inbox."""
     inbox: ParentCommitFrameInboxV1
@@ -76,6 +85,14 @@ impl ParentCommitPipedResultReaderV1:
         if max_lines <= 0:
             return parent_commit_piped_read_result_v1(false, 0, 0,
                 self.pending.len(), "invalid-line-limit")
+        if not parent_commit_piped_stdout_is_ascii(chunk):
+            # `text.len()` is a byte count, while text navigation can be
+            # character-oriented. Reject UTF-8 before retaining any part of
+            # it so the advertised byte ceiling stays an ASCII byte ceiling.
+            self.pending = ""
+            self.dropping_oversize_line = false
+            return parent_commit_piped_read_result_v1(false, 0, 1,
+                0, "non-ascii-stdout")
         var accepted = 0
         var rejected = 0
         var processed = 0

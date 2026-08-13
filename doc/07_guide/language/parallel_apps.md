@@ -86,6 +86,8 @@ arbitrary stdout as a frame, and it discards overlong lines through their next
 newline rather than retaining unbounded partial text. Its default maximum line
 matches the process-frame codec maximum; an application may pass a smaller
 line budget, but cannot enlarge that transport bound.
+Non-ASCII stdout is rejected before it is retained, keeping this an actual
+byte bound even though the host pipe surface is `text`.
 The reader also records its retained partial-line high-water mark, so a focused
 memory gate can assert its maximum without relying on host RSS. That metric is
 per reader lifetime and does not represent child-side or pipe-kernel buffering.
