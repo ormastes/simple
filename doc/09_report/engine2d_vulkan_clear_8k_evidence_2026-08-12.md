@@ -370,22 +370,24 @@ physical-GPU 8K/80 completion.
 ## Physical-device 8K one-percent window damage
 
 The visible-window probe now also seeds the acquired swapchain images and then
-submits a 7,680x43 rectangle (330,240 pixels, 1,320,960 bytes) through the
-native region-transfer entrypoint. On the same Xvfb/NVIDIA RTX A6000 lane,
-all 20 timed frames reported one exact region and 1,320,960 device-copy bytes, with no
+updates and submits a 7,680x43 rectangle (330,240 pixels, 1,320,960 bytes)
+through the native upload and region-transfer entrypoints. Each timed revision
+writes a new colour into that device-buffer region before presentation. On the
+same Xvfb/NVIDIA RTX A6000 lane, all 20 timed frames reported one exact region,
+1,320,960 source-update bytes, and 1,320,960 device-copy bytes, with no
 device-to-host readback, no CPU fallback, known completion, and completed
 `vkQueuePresentKHR` calls.
 
 | Frame class | Damage | p50 ns | p95 ns | Budget |
 |---|---:|---:|---:|---:|
-| Changed revision / exact region transfer | 7,680x43, 1,320,960 bytes | 61,306,062 | 65,185,677 | FAIL |
+| Changed content / exact update plus region transfer | 7,680x43, 1,320,960 bytes | 63,665,076 | 69,783,159 | FAIL |
 
-The source checksum is `14100917488874079107`; native present mode is
+The source checksum is `14177648258271307651`; native present mode is
 `IMMEDIATE`; adapter identity is `NVIDIA RTX A6000|vendor=000010de|device=00002230|driver=911f8400|api=00404138`.
-The exact copy receipt proves that the runtime avoided the 132,710,400-byte
-full buffer-to-image transfer. It does not make an 8K/80 claim: the virtual
-X11 presentation path remains the dominant cost at about 65 ms p95, and Xvfb
-is not a physical-display scanout oracle.
+The exact receipts prove that the runtime avoided the 132,710,400-byte full
+upload and full buffer-to-image transfer. It does not make an 8K/80 claim: the
+virtual X11 presentation path remains the dominant cost, and Xvfb is not a
+physical-display scanout oracle.
 
 The checked reproducer is:
 
@@ -397,6 +399,5 @@ BUILD_DIR=build/check/engine2d-vulkan-window-8k \
 It creates a disposable 7680x4320 Xvfb surface, requires the selected device
 to be `discrete` by default, and fails unless each timed frame reports one
 region, exactly 1,320,960 copy bytes, zero readback bytes, known completion,
-and the window-swapchain presentation mode. A repeat on the same A6000 lane
-recorded p50 57,974,250 ns and p95 58,221,362 ns; this variation does not
-change the FAIL classification.
+and the window-swapchain presentation mode. The dynamic-update run above
+measured p50 63,665,076 ns and p95 69,783,159 ns; this remains a FAIL.

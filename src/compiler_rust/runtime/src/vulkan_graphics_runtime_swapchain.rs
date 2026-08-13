@@ -435,6 +435,18 @@ mod tests {
         }
     }
 
+    fn upload_damage_rows(buffer: i64, pixels: &mut [u32], damage: &mut [u32], revision: i64) {
+        let colour = 0xff000000u32 | ((revision as u32).wrapping_mul(0x00123457) & 0x00ffffff);
+        for pixel in damage.iter_mut() {
+            *pixel = colour;
+        }
+        let bytes = unsafe {
+            std::slice::from_raw_parts(damage.as_ptr().cast::<u8>(), damage.len() * std::mem::size_of::<u32>())
+        };
+        assert_eq!(rt_vulkan_copy_to_buffer_raw(buffer, bytes.as_ptr() as i64, bytes.len() as i64, 0), 1);
+        pixels[..damage.len()].copy_from_slice(damage);
+    }
+
     #[test]
     fn damaged_present_rejects_invalid_descriptor_storage() {
         assert_eq!(rt_vulkan_present_buffer_regions_raw(0, 0, 8, 8, 1, 0, 32), 0);
@@ -699,7 +711,7 @@ mod tests {
         let device_type = unsafe { CStr::from_ptr(rt_vulkan_selected_device_type()) }
             .to_string_lossy().into_owned();
         let native_present_mode = format!("{:?}", STATE.lock().swapchains.get(&swapchain).unwrap().present_mode());
-        let pixels = vec![0xff315783u32; (width * height) as usize];
+        let mut pixels = vec![0xff315783u32; (width * height) as usize];
         let byte_count = width * height * 4;
         let bytes = unsafe { std::slice::from_raw_parts(pixels.as_ptr().cast::<u8>(), byte_count as usize) };
         let buffer = rt_vulkan_alloc_buffer(byte_count, 0x80);
@@ -718,9 +730,11 @@ mod tests {
 
         let rect = [0i64, 0, width, 43];
         let expected_damage_bytes = width * 43 * 4;
+        let mut damage_pixels = vec![0u32; (width * 43) as usize];
         let mut next_revision = seed_frames + 1;
         let mut partial_seeded = false;
         for _ in 0..(image_count * 3) {
+            upload_damage_rows(buffer, &mut pixels, &mut damage_pixels, next_revision);
             let status = rt_vulkan_present_buffer_regions_raw(
                 swapchain, buffer, width, height, next_revision, rect.as_ptr() as i64, 32);
             assert!(status > 0, "{}", STATE.lock().last_error);
@@ -735,6 +749,7 @@ mod tests {
         let mut samples = Vec::with_capacity(frames);
         for revision in next_revision..=(next_revision + frames as i64 - 1) {
             let start = Instant::now();
+            upload_damage_rows(buffer, &mut pixels, &mut damage_pixels, revision);
             let status = rt_vulkan_present_buffer_regions_raw(
                 swapchain, buffer, width, height, revision, rect.as_ptr() as i64, 32);
             samples.push(start.elapsed().as_nanos() as u64);
@@ -754,7 +769,7 @@ mod tests {
                     .and_then(|v| v.split_whitespace().next())
                     .and_then(|v| v.parse::<u64>().ok())
             })).unwrap_or(0);
-        println!("window_present_damage width={width} height={height} frames={frames} damage_x=0 damage_y=0 damage_w={width} damage_h=43 damage_bytes={expected_damage_bytes} damage_rects=1 p50_ns={p50} p95_ns={p95} rss_kib={rss_kib} readback_bytes=0 fallback=false completion_known=true present_mode=window-swapchain native_present_mode={native_present_mode} checksum={checksum} device_type={device_type} device={identity}");
+        println!("window_present_damage width={width} height={height} frames={frames} damage_x=0 damage_y=0 damage_w={width} damage_h=43 damage_bytes={expected_damage_bytes} source_update_bytes={expected_damage_bytes} dynamic_content=true damage_rects=1 p50_ns={p50} p95_ns={p95} rss_kib={rss_kib} readback_bytes=0 fallback=false completion_known=true present_mode=window-swapchain native_present_mode={native_present_mode} checksum={checksum} device_type={device_type} device={identity}");
         assert_eq!(rt_vulkan_free_buffer(buffer), 1);
         assert_eq!(rt_vulkan_destroy_swapchain(swapchain), 1);
         assert_eq!(rt_vulkan_shutdown(), 1);
