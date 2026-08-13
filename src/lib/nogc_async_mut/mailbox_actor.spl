@@ -26,6 +26,21 @@ enum SendResult:
 val SEND_SUCCESS = SendResult.Success
 val SEND_QUEUE_FULL = SendResult.QueueFull
 val SEND_MAILBOX_CLOSED = SendResult.MailboxClosed
+val PRIORITY_MAILBOX_DEFAULT_CAPACITY: i64 = 1000
+
+fn priority_mailbox_effective_capacity(requested: i64) -> i64:
+    """Resolve an invalid capacity to the finite compatibility default."""
+    if requested > 0:
+        return requested
+    PRIORITY_MAILBOX_DEFAULT_CAPACITY
+
+fn priority_mailbox_effective_reserve(requested: i64, capacity: i64) -> i64:
+    """Clamp priority reserve to the normalized finite queue capacity."""
+    if requested <= 0:
+        return 0
+    if requested >= capacity:
+        return capacity
+    requested
 
 # --- MailboxConfig ---
 
@@ -36,16 +51,18 @@ class MailboxConfig:
     high_priority_reserve: Capacity
 
     static fn with_priority() -> MailboxConfig:
-        MailboxConfig(capacity: Capacity(value: 1000), off_heap: true, priority_enabled: true, high_priority_reserve: Capacity(value: 100))
+        MailboxConfig(capacity: Capacity(value: PRIORITY_MAILBOX_DEFAULT_CAPACITY), off_heap: true, priority_enabled: true, high_priority_reserve: Capacity(value: 100))
 
     static fn unbounded() -> MailboxConfig:
-        MailboxConfig(capacity: Capacity(value: 0), off_heap: true, priority_enabled: false, high_priority_reserve: Capacity(value: 0))
+        """Compatibility constructor; zero is no longer an unbounded mode."""
+        MailboxConfig.default()
 
     static fn bounded(cap: Capacity) -> MailboxConfig:
-        MailboxConfig(capacity: cap, off_heap: true, priority_enabled: false, high_priority_reserve: Capacity(value: 0))
+        val capacity = priority_mailbox_effective_capacity(cap.value)
+        MailboxConfig(capacity: Capacity(value: capacity), off_heap: true, priority_enabled: false, high_priority_reserve: Capacity(value: 0))
 
     static fn default() -> MailboxConfig:
-        MailboxConfig(capacity: Capacity(value: 1000), off_heap: true, priority_enabled: false, high_priority_reserve: Capacity(value: 100))
+        MailboxConfig(capacity: Capacity(value: PRIORITY_MAILBOX_DEFAULT_CAPACITY), off_heap: true, priority_enabled: false, high_priority_reserve: Capacity(value: 100))
 
 # --- MessageRef ---
 
@@ -121,20 +138,19 @@ class PriorityMailbox:
             return SEND_MAILBOX_CLOSED
         val total = self.total_size()
         val is_high = priority == MessagePriority.High
-        if self.config.capacity.value > 0:
-            if not is_high:
-                # Normal: respect capacity minus reserve
-                val effective_cap = self.config.capacity.value - self.config.high_priority_reserve.value
-                if total >= effective_cap:
-                    self.stats.total_dropped = Count(value: self.stats.total_dropped.value + 1)
-                    self.stats.total_received = Count(value: self.stats.total_received.value + 1)
-                    return SEND_QUEUE_FULL
-            else:
-                # High priority: use full capacity
-                if total >= self.config.capacity.value:
-                    self.stats.total_dropped = Count(value: self.stats.total_dropped.value + 1)
-                    self.stats.total_received = Count(value: self.stats.total_received.value + 1)
-                    return SEND_QUEUE_FULL
+        if not is_high:
+            # Normal: respect capacity minus reserve.
+            val effective_cap = self.config.capacity.value - self.config.high_priority_reserve.value
+            if total >= effective_cap:
+                self.stats.total_dropped = Count(value: self.stats.total_dropped.value + 1)
+                self.stats.total_received = Count(value: self.stats.total_received.value + 1)
+                return SEND_QUEUE_FULL
+        else:
+            # High priority: use the full finite capacity.
+            if total >= self.config.capacity.value:
+                self.stats.total_dropped = Count(value: self.stats.total_dropped.value + 1)
+                self.stats.total_received = Count(value: self.stats.total_received.value + 1)
+                return SEND_QUEUE_FULL
         val msg = MessageRef.new(self.next_id, sender, priority, size_bytes, 0)
         self.next_id = self.next_id + 1
         if is_high:
@@ -222,8 +238,6 @@ class PriorityMailbox:
         self.total_size() == 0
 
     fn is_full() -> bool:
-        if self.config.capacity.value == 0:
-            return false
         self.total_size() >= self.config.capacity.value
 
     me clear():
@@ -291,14 +305,26 @@ class PriorityMailbox:
         "PriorityMailbox(size={self.total_size()}, closed={self.is_closed})"
 
     static fn unbounded() -> PriorityMailbox:
+        """Compatibility spelling for a finite-default mailbox."""
         PriorityMailbox.new(MailboxConfig.unbounded())
 
     static fn default() -> PriorityMailbox:
         PriorityMailbox.new(MailboxConfig.default())
 
     static fn new(config: MailboxConfig) -> PriorityMailbox:
+        # Normalize at the owning queue too, so direct aggregate construction
+        # cannot smuggle zero/negative capacity back in as an unbounded mode.
+        val capacity = priority_mailbox_effective_capacity(config.capacity.value)
+        val reserve = priority_mailbox_effective_reserve(
+            config.high_priority_reserve.value, capacity)
+        val normalized = MailboxConfig(
+            capacity: Capacity(value: capacity),
+            off_heap: config.off_heap,
+            priority_enabled: config.priority_enabled,
+            high_priority_reserve: Capacity(value: reserve)
+        )
         PriorityMailbox(
-            config: config,
+            config: normalized,
             messages: [],
             messages_ready: [],
             high_messages: [],
@@ -310,3 +336,4 @@ class PriorityMailbox:
 
 export MailboxConfig, PriorityMailbox, MailboxStats, MessageRef, MessagePriority, SendResult
 export SEND_SUCCESS, SEND_QUEUE_FULL, SEND_MAILBOX_CLOSED
+export PRIORITY_MAILBOX_DEFAULT_CAPACITY, priority_mailbox_effective_capacity

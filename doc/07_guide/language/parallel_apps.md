@@ -79,6 +79,10 @@ budget; zero and negative values resolve to the finite default, never to
 unbounded storage. `reply_capacity()` and `outstanding_reply_count()` expose
 the admitted limit and current retained work.
 
+The legacy `PriorityMailbox` compatibility spelling `unbounded()` also now
+selects its finite default capacity. Queue owners normalize non-positive or
+forged capacities before admission, so zero cannot reopen an unbounded queue.
+
 The scalar `BoundedChannel` implementation also uses a consumed-prefix cursor:
 receive is normally O(1), and backing storage is compacted only when a later
 send needs capacity. This retains its existing scalar sentinel API and does

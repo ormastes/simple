@@ -747,6 +747,9 @@ in-progress
 - impl: `ActorRef.stop()` now delegates to that same scheduler. Scheduler-owned
   stop drains queued asks, cancels their bounded reply reservations, removes
   ready work, and reports a wrong-scheduler/unknown-actor stop as false.
+- impl: Removed the priority mailbox's capacity-zero unbounded admission mode.
+  Compatibility `unbounded()` now selects the finite default, and the queue
+  owner normalizes forged/non-positive configurations before it accepts work.
 - impl: `Actor` is now class-backed too, preserving its lifecycle, dispatch,
   and error fields through scheduler registry iteration. Mailbox sharing alone
   was insufficient because the surrounding actor values still lost those
