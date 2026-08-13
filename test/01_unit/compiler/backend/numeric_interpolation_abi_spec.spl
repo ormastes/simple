@@ -51,8 +51,19 @@ fn tagged_text_container_round_trip() -> text:
 fn tagged_text_identity(value: text) -> text:
     value
 
+fn tagged_text_consumer(value: text) -> text:
+    if value.len() == 2 and value.starts_with("4"):
+        return "count=" + value
+    "invalid"
+
 fn tagged_text_return_call() -> text:
     tagged_text_identity(str(count()))
+
+fn raw_text_return_call() -> text:
+    tagged_text_identity("plain")
+
+fn tagged_text_consumer_call() -> text:
+    tagged_text_consumer(str(count()))
 
 fn heap_registry_log_line(path: text, count: i64) -> text:
     "phase2:surface:file:start path={path} heap_registry={count}"
@@ -92,8 +103,17 @@ fn renderer_cstr_strcat_flow(llvm: text, renderer: text) -> bool:
         return false
     find_call_line_using(llvm, "rt_strcat(", "ptr " + cstr_ssa) != ""
 
+fn tagged_text_direct_param_flow(llvm: text) -> bool:
+    """The direct user text call must use the cstr bridge, never I64->ptr."""
+    val cstr_call = find_call_line(llvm, "rt_interp_cstr(")
+    val cstr_ssa = call_result_ssa(cstr_call)
+    if cstr_ssa == "" or cstr_call.contains("inttoptr"):
+        return false
+    val direct_call = find_call_line_using(llvm, "tagged_text_param_consumer(", "ptr " + cstr_ssa)
+    direct_call != "" and not direct_call.contains("inttoptr")
+
 fn compile_numeric_interpolation_fixture() -> text:
-    val source = "fn generic_numeric_line<T>(value: T) -> text:\n    \"generic={value}\"\n\nfn numeric_extremes(minimum: i64, maximum: i64) -> text:\n    \"min={minimum};max={maximum}\"\n\nfn renderer_family(b: bool, f: f64, u: u64, i: i64) -> text:\n    \"b={b};f={f};u={u};i={i}\"\n\nfn diagnostic(path: text, count: i64) -> text:\n    \"phase2:surface:file:start path={path} heap_registry={count}\"\n"
+    val source = "fn tagged_text_param_consumer(value: text) -> text:\n    value\n\nfn tagged_text_direct_param() -> text:\n    tagged_text_param_consumer(str(42))\n\nfn generic_numeric_line<T>(value: T) -> text:\n    \"generic={value}\"\n\nfn numeric_extremes(minimum: i64, maximum: i64) -> text:\n    \"min={minimum};max={maximum}\"\n\nfn renderer_family(b: bool, f: f64, u: u64, i: i64) -> text:\n    \"b={b};f={f};u={u};i={i}\"\n\nfn diagnostic(path: text, count: i64) -> text:\n    \"phase2:surface:file:start path={path} heap_registry={count}\"\n"
     val ast = parse_full_frontend(source, "numeric_interpolation_abi_fixture.spl", "numeric_interpolation_abi_fixture.spl", Logger(level: 0))
     var hir_lowering = HirLowering.with_filename("numeric_interpolation_abi_fixture.spl")
     val hir = hir_lowering.lower_module(ast)
@@ -123,6 +143,8 @@ describe "numeric interpolation tagged-handle ABI":
         expect(tagged_text_methods()).to_equal(true)
         expect(tagged_text_container_round_trip()).to_equal("42:42")
         expect(tagged_text_return_call()).to_equal("42")
+        expect(raw_text_return_call()).to_equal("plain")
+        expect(tagged_text_consumer_call()).to_equal("count=42")
 
     it "preserves every scalar renderer signature and SSA bridge into raw concatenation":
         val llvm = compile_numeric_interpolation_fixture()
@@ -146,6 +168,7 @@ describe "numeric interpolation tagged-handle ABI":
         assert_true(renderer_cstr_strcat_flow(llvm, "rt_raw_u64_to_string"), "u64 renderer must flow through rt_interp_cstr into rt_strcat")
         assert_true(renderer_cstr_strcat_flow(llvm, "rt_raw_bool_to_string"), "bool renderer must flow through rt_interp_cstr into rt_strcat")
         assert_true(renderer_cstr_strcat_flow(llvm, "rt_raw_f64_to_string"), "f64 renderer must flow through rt_interp_cstr into rt_strcat")
+        assert_true(tagged_text_direct_param_flow(llvm), "tagged scalar text must bridge through rt_interp_cstr before a user text parameter")
 
     it "survives two parser reset cycles after a large numeric diagnostic line":
         val line = heap_registry_log_line("first.spl", 9223372036854775807)
@@ -182,3 +205,5 @@ describe "numeric interpolation tagged-handle ABI":
         expect(probe).to_contain("val values: [text] = [rendered]")
         expect(probe).to_contain("val named: Dict<text, text> = {\"count\": rendered}")
         expect(probe).to_contain("tagged_text_identity(str(value))")
+        expect(probe).to_contain("tagged_text_consumer(str(value))")
+        expect(probe).to_contain("print_tagged_text(value) == 0")

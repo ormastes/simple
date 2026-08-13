@@ -28,6 +28,8 @@ grep -F 'rendered.len() == 2 and rendered.starts_with("4")' "$spec" >/dev/null
 grep -F 'val values: [text] = [rendered]' "$spec" >/dev/null
 grep -F 'val named: Dict<text, text> = {"count": rendered}' "$spec" >/dev/null
 grep -F 'tagged_text_identity(str(count()))' "$spec" >/dev/null
+grep -F 'tagged_text_identity("plain")' "$spec" >/dev/null
+grep -F 'tagged_text_consumer(str(count()))' "$spec" >/dev/null
 
 # Print must treat a tagged scalar renderer result as text before its I64 ABI
 # type is classified. The existing rt_interp_cstr bridge remains the sole
@@ -36,6 +38,22 @@ grep -F 'val arg_is_semantic_text = self.local_is_str(arg_local)' "$print_loweri
 grep -F 'if not arg_is_semantic_text:' "$print_lowering" >/dev/null
 grep -F 'MirConstValue.Str("rt_interp_cstr")' "$print_lowering" >/dev/null
 grep -F 'print(str(value))' "$probe" >/dev/null
+
+# A direct user `text` parameter has pointer/text ABI. A renderer result is
+# still I64 in MIR, so it must be unwrapped by rt_interp_cstr before that ABI;
+# the bridge region must not ask generic LLVM coercion for an I64->ptr cast.
+grep -F 'me bridge_tagged_text_direct_arg(arg_local: LocalId, declared_param_type: HirType) -> LocalId:' "$print_lowering" >/dev/null
+grep -F 'if self.is_tagged_text_local(arg_local.id):' "$print_lowering" >/dev/null
+grep -F 'val cstr_res = b_cstr.emit_call(cstr_op, [mir_operand_copy(arg_local)], self.bootstrap_text_type())' "$print_lowering" >/dev/null
+grep -F 'arg_local = self.bridge_tagged_text_direct_arg(arg_local, declared_param_type)' "$print_lowering" >/dev/null
+bridge_region=$(sed -n '/me bridge_tagged_text_direct_arg/,/me lower_call/p' "$print_lowering")
+printf '%s\n' "$bridge_region" | grep -F 'rt_interp_cstr' >/dev/null
+if printf '%s\n' "$bridge_region" | grep -F 'emit_cast' >/dev/null; then
+    exit 1
+fi
+if printf '%s\n' "$bridge_region" | grep -F 'inttoptr' >/dev/null; then
+    exit 1
+fi
 
 grep -F 'MirSignature(params: [MirType.i64()], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)' "$bridge" >/dev/null
 grep -F 'self.remember_function_return_type("rt_raw_i64_to_string", "i64")' "$llvm" >/dev/null
@@ -57,5 +75,8 @@ grep -F 'rendered.len() == 6 and rendered.starts_with("807")' "$probe" >/dev/nul
 grep -F 'val values: [text] = [rendered]' "$probe" >/dev/null
 grep -F 'val named: Dict<text, text> = {"count": rendered}' "$probe" >/dev/null
 grep -F 'tagged_text_identity(str(value))' "$probe" >/dev/null
+grep -F 'tagged_text_identity("plain")' "$probe" >/dev/null
+grep -F 'tagged_text_consumer(str(value))' "$probe" >/dev/null
+grep -F 'print_tagged_text(heap_registry) != 0' "$probe" >/dev/null
 grep -F 'parser_init_with_path' "$bug" >/dev/null
 grep -F 'ast_reset' "$bug" >/dev/null

@@ -4208,6 +4208,34 @@ impl MirLowering:
             case _:
                 nil
 
+    me bridge_tagged_text_direct_arg(arg_local: LocalId, declared_param_type: HirType) -> LocalId:
+        """Adapt a tagged scalar-renderer result at a user `text` parameter.
+
+        `rt_raw_*_to_string` deliberately returns an I64 MIR local so LLVM
+        retains the tagged runtime-string ABI.  A normal user text parameter,
+        however, is emitted through the pointer/text ABI.  Letting generic
+        call coercion see that I64 asks LLVM for an integer-to-pointer cast,
+        which passes the tagged handle instead of its character buffer. Bridge marked locals
+        through rt_interp_cstr here; unmarked text already is the established
+        raw pointer form and must remain untouched.  This is direct-call-only:
+        indirect closures still use their independent all-I64 ABI below.
+        """
+        match declared_param_type.kind:
+            case HirTypeKind.Str:
+                if self.is_tagged_text_local(arg_local.id):
+                    val cstr_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_interp_cstr"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: self.bootstrap_text_type(), is_variadic: false)))
+                    ))
+                    var b_cstr = self.builder
+                    val cstr_res = b_cstr.emit_call(cstr_op, [mir_operand_copy(arg_local)], self.bootstrap_text_type())
+                    self.builder = b_cstr
+                    if val cstr_local = cstr_res:
+                        return cstr_local
+            case _:
+                ()
+        arg_local
+
     me lower_call(callee: HirExpr, args: [HirCallArg]) -> LocalId:
         """Lower function call.
 
@@ -4434,6 +4462,8 @@ impl MirLowering:
             var boundary_runtime_classify = true
             if current_arg_index < call_param_types.len():
                 val declared_param_type = call_param_types[current_arg_index]
+                if is_direct:
+                    arg_local = self.bridge_tagged_text_direct_arg(arg_local, declared_param_type)
                 match declared_param_type.kind:
                     case HirTypeKind.Float(_):
                         boundary_transfer_mode = MirTransferMode.Copy
