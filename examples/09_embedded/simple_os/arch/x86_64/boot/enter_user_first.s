@@ -64,6 +64,13 @@ rt_x86_enter_user_first:
     movq    %rax, _ring3_resume_buf+56(%rip)   /* kernel cr3 (pre-swap) */
     movq    $1, _ring3_resume_valid(%rip)
 
+    /* Bounded live-transition receipt: A=savepoint published, B=user CR3
+     * loaded, C=iret frame ready.  These bytes are emitted before user GPRs
+     * are cleared and never form part of the child's register ABI. */
+    movw    $0x3f8, %dx
+    movb    $'A', %al
+    outb    %al, %dx
+
     /* Stash CR3 into a callee-saved register before any stack push so the
      * stack writes happen before we swap address spaces. The pushes below
      * write to the kernel stack, which must still be mapped after cr3 load
@@ -82,6 +89,9 @@ rt_x86_enter_user_first:
      * (clone of kernel range), so execution continues past this. */
     movq    %rax, %cr3
 
+    movb    $'B', %al
+    outb    %al, %dx
+
     /* Zero GPRs so the user starts with a clean register file. */
     xorl    %eax, %eax
     xorl    %ebx, %ebx
@@ -99,6 +109,9 @@ rt_x86_enter_user_first:
     xorl    %r14d, %r14d
     xorl    %r15d, %r15d
 
+    movw    $0x3f8, %dx
+    movb    $'C', %al
+    outb    %al, %dx
     iretq
     .size rt_x86_enter_user_first, . - rt_x86_enter_user_first
 
