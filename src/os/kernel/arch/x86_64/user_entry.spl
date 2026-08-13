@@ -3,9 +3,8 @@
 # Owns the ring-3 handoff path so the architecture-neutral syscall dispatcher
 # does not pull x86 context-switch code into other kernel targets.
 
-use os.kernel.arch.x86_64.context.{arch_x86_64_enter_user_task}
+use os.kernel.arch.x86_64.context.{arch_x86_64_enter_user_scalars}
 use os.kernel.scheduler.scheduler.{Scheduler}
-use os.kernel.types.task_types.{TaskContext}
 use os.kernel.arch.x86_64.user_entry_validation.{validate_enter_user_blocking_handoff}
 
 extern fn rt_x86_exec_token_install(task_id: u64, generation: u64, expected_cr3: u64) -> i64
@@ -25,13 +24,11 @@ fn dispatch_enter_user_blocking(pid_hint: u64, scheduler: Scheduler) -> i64:
         return -16
 
     serial_println("[x86_64-user] handoff enter pid={validation.pid} generation={validation.generation} cr3={validation.cr3}")
-    val ctx: TaskContext = validation.context.unwrap()
-    # Fault-only provenance receipt: distinguishes corruption while extracting
-    # the optional scheduler context from corruption across the by-value
-    # architecture bridge. The assembly handoff independently snapshots the
-    # raw arguments it receives.
-    serial_println("[x86_64-user] frame rip={ctx.rip} rsp={ctx.rsp} cs={ctx.cs} ss={ctx.ss} rflags={ctx.rflags}")
-    arch_x86_64_enter_user_task(ctx, validation.cr3)
+    if validation.entry == 0u64 or validation.initial_rsp == 0u64:
+        serial_println("[x86_64-user] scalar handoff rejected")
+        val _cancelled = rt_x86_exec_token_cancel(validation.pid, validation.generation, validation.cr3)
+        return -22
+    arch_x86_64_enter_user_scalars(validation.entry, validation.initial_rsp, validation.cr3)
     val rc = rt_x86_exec_token_take_result(validation.pid, validation.generation, validation.cr3)
     serial_println("[x86_64-user] handoff returned rc={rc}")
     if rc == -4096:
