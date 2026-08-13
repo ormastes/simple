@@ -729,6 +729,12 @@ in-progress
   cursor and compacts only a half-consumed large prefix. Requeue deduplication
   scans the active suffix, preserving round-robin semantics without one
   front-slice allocation/copy per dispatch.
+- audit: The mailbox cap does not bound legacy actor request/reply retention:
+  `ActorScheduler.ReplyStore` keeps completed replies until caller consumption.
+  A future bounded reply design must reserve capacity at ask admission and
+  define cancellation/error/actor-stop cleanup; silently dropping completed
+  replies would violate existing ask semantics. This route remains outside
+  admitted typed parent-commit transport.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters
