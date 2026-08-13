@@ -1,0 +1,62 @@
+#!/bin/sh
+# x86_32 CPL3 filesystem-exec admission gate.
+#
+# --contract validates that the public QEMU descriptor cannot accept the
+# legacy CPL0 initrd/string-search probe.  --admit is deliberately stricter:
+# it is the gate a matrix runner must pass before it may attempt to publish an
+# x86_32 FS-exec row.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+mode=${1:---contract}
+
+fail() { printf '%s\n' "x86-32-cpl3-lifecycle: $*" >&2; exit 1; }
+require() { grep -Fq "$1" "$2" || fail "missing '$1' in $2"; }
+
+matrix=$root/src/os/qemu_systest_contract.spl
+unit=$root/test/01_unit/os/qemu_systest_contract_spec.spl
+entry=$root/examples/09_embedded/simple_os/arch/x86_32/boot/enter_user_first.s
+stub=$root/examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c
+bridge=$root/src/os/kernel/arch/x86_32/user_entry.spl
+context=$root/src/os/kernel/arch/x86_32/context.spl
+
+contract() {
+    require 'SimpleOS x86_32 boot OK' "$matrix"
+    require 'FS_LS_BEGIN path=/SYS/APPS' "$matrix"
+    require 'FS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=x86_32' "$matrix"
+    require 'SIMPLEOS_FS_EXEC_OK arch=x86_32 nonce=' "$matrix"
+    require 'FS_PROGRAM_END rc=37 reaped=true' "$matrix"
+    require 'rejects the legacy same-CPL x86_32 initrd probe as fs-exec evidence' "$unit"
+    require 'boot-fail:SimpleOS x86_32 boot OK' "$unit"
+}
+
+admit() {
+    contract
+    [ -f "$entry" ] || fail 'not admitted: missing enter_user_first.s'
+    require 'rt_x86_32_enter_user_first:' "$entry"
+    require 'iret' "$entry"
+    require 'rt_x86_32_tss_init' "$stub"
+    require 'rt_x86_32_tss_set_esp0' "$stub"
+    require 'rt_x86_32_exec_token_install' "$bridge"
+    require 'rt_x86_32_exec_token_take_result' "$bridge"
+    if grep -Fq '(void)to;' "$stub"; then
+        fail 'not admitted: context switch discards the destination context'
+    fi
+    printf '%s\n' 'PASS x86_32 CPL3 filesystem-exec lifecycle admitted'
+}
+
+case "$mode" in
+    --contract)
+        contract
+        printf '%s\n' 'PASS x86_32 CPL3 contract rejects the legacy same-CPL probe'
+        ;;
+    --admit) admit ;;
+    --self-test)
+        contract
+        if "$0" --admit >/dev/null 2>&1; then
+            fail 'self-test expected the unimplemented CPL3 lifecycle to be rejected'
+        fi
+        printf '%s\n' 'PASS x86_32 CPL3 lifecycle gate self-test'
+        ;;
+    *) fail 'usage: check-x86-32-cpl3-lifecycle-contract.shs [--contract|--admit|--self-test]' ;;
+esac
