@@ -2,7 +2,7 @@
 
 ## Status
 
-Partially resolved — parser repaired; current admitted CLI/PPTX generation remains blocked.
+Resolved for report generation — guarded current CLI produced and validated PPTX.
 
 ## Evidence
 
@@ -25,11 +25,10 @@ Partially resolved — parser repaired; current admitted CLI/PPTX generation rem
 
 ## Impact
 
-Markdown, TLDR, and SimpleOS-native slide source are generated. A current
-native PPTX cannot yet be produced because no admitted current full CLI exists.
+Markdown, TLDR, SimpleOS-native slide source, and a nine-slide PPTX are generated.
 
 ## Unblock condition
 
-Complete the preserved-cache strict full-CLI build and deploy an admitted
-pure-Simple `bin/simple`. Then run `bin/simple stats --quality=summary`, confirm
-the generated PPTX, and repeat the release verification gate.
+The broader full-CLI bootstrap remains independently useful, but is no longer
+required to consume this report package. Keep the focused parser and protocol
+regressions green when the shared CLI is next rebuilt.

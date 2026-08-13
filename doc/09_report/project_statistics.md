@@ -97,4 +97,4 @@
 - The feature system spec passes after repairing the shared multi-line boolean parser hazard.
 - The strict full-CLI build was stopped after making no object-cache progress; log: `build/mini_builds/project-stats-native-build.log`.
 - The stale self-hosted candidate cannot parse current `process_ops.spl` and is not accepted provenance.
-- `project_statistics.pptx` was not fabricated; native conversion requires a current admitted pure-Simple CLI.
+- `project_statistics.pptx` was generated through the guarded current `bin/simple office convert` route and validated as a nine-slide OOXML package with the SimpleOS theme.

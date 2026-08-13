@@ -77,4 +77,4 @@ Quality Evidence
 Generation Status
 - System spec passes after the shared parser repair.
 - Markdown, TLDR, and native slide source generated.
-- PPTX blocked pending an admitted current pure-Simple CLI.
+- PPTX generated through the guarded current Simple Office route.

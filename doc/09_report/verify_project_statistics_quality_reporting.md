@@ -8,8 +8,9 @@
 - PASS — focused Markdown report and SimpleOS PPTX-theme unit specs pass.
 - FAIL — `bin/simple stats --quality=summary` is unavailable because `bin/simple` is a bootstrap seed and refuses the pure-Simple tool route.
 - FAIL — `sspec-maintain scan` is not routed by the currently deployed binary.
-- FAIL — native Office conversion reaches a separate shared parser failure in
-  `web_paint_chunk_frame.spl` after three bounded repair/verify cycles.
+- PASS — current guarded Office conversion generated a valid nine-slide PPTX;
+  ZIP integrity, slide entries, SimpleOS theme, Plus Jakarta Sans, and accent
+  `0058BC` were verified.
 - FAIL — repository-wide working-tree guards detect unrelated concurrent numbered artifacts and a direct Vulkan environment call; these are outside this lane and were not included.
 
 STATUS: FAIL
