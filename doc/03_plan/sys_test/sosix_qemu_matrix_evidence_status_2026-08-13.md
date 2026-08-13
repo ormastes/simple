@@ -21,7 +21,7 @@ excluded or complete.
 | Linux | arm64 | canonical row PASS | `linux/arm64-canonical-v21-20260812/canonical-root/linux/arm64/run-arm64-collector-v21-20260812-n1/evidence.env`; direct-kernel v2 receipt. |
 | Linux | riscv32 | canonical row PASS | `native-v2-1832753b/linux/riscv32/run-COLLECTOR-RV32-1832753B-A/evidence.env`; direct-kernel v2 receipt. |
 | Linux | x86_32 | blocked | CPL3 filesystem lifecycle has no linked `enter_user_first.s`, no installed GDT/TSS/`esp0` owner, only a weak same-CPL `int 0x80` probe bridge, and a context switch that never restores `to`; freeze and wire authenticated token/stack/trap/scheduler owners before a live run. |
-| Linux | arm32 | blocked | ARM32 vector/SVC owners exist only below canonical fs-exec staging/boot-secret integration; no live row. |
+| Linux | arm32 | blocked | The current entry is an NVFS/SMF probe chain that can print `TEST PASSED`; it neither reads mounted `/FSEXEC.ELF` nor performs a user-mode/SVC/reap lifecycle. ARM32 vector/SVC owners remain below canonical staging and boot-secret integration, so no live row exists. |
 | Linux | riscv64 | blocked | Existing retained records are diagnostics; rebuild and canonical direct-kernel/OpenSBI closure remains required. |
 | Windows | all six | blocked, target-host execution required | Use `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -AllGuests -Run -Parallel` on a prepared Windows host, then the native producer. |
 | macOS | all six | postponed, not complete | On a prepared Darwin host use `SIMPLE_QEMU_ACCELERATOR=tcg sh scripts/check/check-sosix-qemu-matrix.shs --host macos --all-guests --run --parallel`; retain native-host blockers until then. |
