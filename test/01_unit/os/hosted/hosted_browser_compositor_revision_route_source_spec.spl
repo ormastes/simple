@@ -1,5 +1,9 @@
 extern fn rt_file_read_text(path: text) -> text
 use std.spec.{describe, it, expect}
+use common.ui.window_scene.{WmContentFrame, WM_CONTENT_ORIGIN_SIMPLE_WEB}
+use os.hosted.hosted_browser_renderer_registry.{
+    hosted_browser_renderer_frame_pending
+}
 
 fn executable_source(path: text) -> text:
     val source = rt_file_read_text(path) ?? ""
@@ -10,6 +14,32 @@ fn executable_source(path: text) -> text:
     out
 
 describe "hosted browser compositor production revision route source":
+    it "treats a checksum-zero retained delta as a queued frame":
+        val delta = WmContentFrame(
+            window_id: "91", scene_revision: 0, content_revision: 2,
+            origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB, width: 64, height: 48,
+            pixels: [], checksum: 0u64, parent_window_id: "",
+            offset_x: 0, offset_y: 0, engine2d_status: "engine2d_rendered",
+            engine2d_backend: "cpu_simd", engine2d_reason: "draw-ir-retained-damage",
+            material_fallback_kind: "solid-material",
+            material_fallback_reason: "cpu-raster-backdrop-sampling-unavailable",
+            material_fallback_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            theme_id: "default",
+            theme_source_manifest_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            base_content_revision: 1, damage_rects: [1, 1, 1, 1],
+            damage_pixels: [0xff123456u32]
+        )
+        expect(delta.checksum).to_equal(0u64)
+        expect(delta.pixels.len()).to_equal(0)
+        expect(delta.damage_pixels.len()).to_equal(1)
+        expect(hosted_browser_renderer_frame_pending(delta)).to_be(true)
+        val consumed = WmContentFrame(
+            window_id: "", scene_revision: 0, content_revision: 0,
+            origin_kind: "", width: 0, height: 0, pixels: [], checksum: 0u64,
+            parent_window_id: "", offset_x: 0, offset_y: 0
+        )
+        expect(hosted_browser_renderer_frame_pending(consumed)).to_be(false)
+
     it "pins process, registry, and hosted entry to revision-aware rasterization":
         val process = executable_source(
             "src/os/hosted/hosted_browser_renderer_process.spl"
@@ -40,6 +70,15 @@ describe "hosted browser compositor production revision route source":
         expect(store).to_contain(
             "raster.render_draw_ir_composition_resources_revision("
         )
+        expect(store).to_contain(
+            "raster.render_draw_ir_composition_resources_packed_damage("
+        )
+        expect(store).to_contain("result.damage_receipt.mode == DAMAGE_PLAN_LOCAL")
+        expect(store).to_contain("base_content_revision: entry.published_content_revision")
+        expect(store).to_contain("damage_rects: packed.rects, damage_pixels: packed.pixels")
+        expect(store).to_contain("entry.published_frame_valid")
+        expect(store).to_contain("entry.pending_frame.window_id == \"\"")
+        expect(registry).to_contain("hosted_browser_renderer_frame_pending(")
         expect(store).to_contain("result.composition")
         expect(store).to_contain("result.image_resources")
         expect(store).to_contain("result.producer_generation")

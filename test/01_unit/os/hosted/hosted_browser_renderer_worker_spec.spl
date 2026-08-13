@@ -2154,3 +2154,75 @@ describe "hosted browser renderer worker":
         expect(advanced.ok).to_be(true)
         expect(backward.ok).to_be(false)
         expect(backward.reason).to_equal("invalid-animation-time")
+
+    it "publishes chained retained animation rows only after a full base is consumed":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        val initial_wire = worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>@keyframes pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;animation:pulse 1000ms linear forwards}</style><div id='stage'></div>"
+        ))
+        val initial_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), initial_wire.wire
+            ).message, 64, 48
+        )
+        expect(initial_frame.ok).to_be(true)
+        var registry = HostedBrowserRendererRegistry.create(
+            "/definitely/missing/simple-browser-renderer", "https://home.test/"
+        )
+        expect(registry.ensure(91, "", 64, 48, 1000, 1000)).to_equal("failed")
+        var entry = registry.entries[0]
+        entry.renderer = HostedBrowserRendererProcess.create(7, 64, 48)
+        entry.renderer.state = "ready"
+        entry.renderer_closed = false
+        entry.failure_reason = ""
+        entry.failure_published = false
+        registry.entries[0] = entry
+        val initial_result = entry.renderer._accept_decoded_frame(initial_frame, 7)
+        expect(registry._accept_polled_result(
+            0, initial_result, "", "", 1001, 1001
+        )).to_equal("frame")
+        val full = registry.take_frame(91)
+        expect(full.pixels.len()).to_equal(64 * 48)
+        expect(full.content_revision).to_equal(1)
+
+        val local_wire = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "500"
+        ))
+        val local_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), local_wire.wire
+            ).message, 64, 48
+        )
+        expect(local_frame.damage_receipt.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        entry = registry.entries[0]
+        val local_result = entry.renderer._accept_decoded_frame(local_frame, 7)
+        expect(registry._accept_polled_result(
+            0, local_result, "", "", 1002, 1002
+        )).to_equal("frame")
+        val delta = registry.take_frame(91)
+        expect(delta.pixels.len()).to_equal(0)
+        expect(delta.checksum).to_equal(0u64)
+        expect(delta.base_content_revision).to_equal(1)
+        expect(delta.content_revision).to_equal(2)
+        expect(delta.damage_rects.len()).to_be_greater_than(0)
+        expect(delta.damage_pixels.len()).to_be_greater_than(0)
+
+        val chained_wire = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 4, payload: "750"
+        ))
+        val chained_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), chained_wire.wire
+            ).message, 64, 48
+        )
+        expect(chained_frame.damage_receipt.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        entry = registry.entries[0]
+        val chained_result = entry.renderer._accept_decoded_frame(chained_frame, 7)
+        expect(registry._accept_polled_result(
+            0, chained_result, "", "", 1003, 1003
+        )).to_equal("frame")
+        val chained = registry.take_frame(91)
+        expect(chained.pixels.len()).to_equal(0)
+        expect(chained.base_content_revision).to_equal(2)
+        expect(chained.content_revision).to_equal(3)

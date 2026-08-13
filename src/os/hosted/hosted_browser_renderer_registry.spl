@@ -1,6 +1,6 @@
 """Bounded secondary hosted-browser renderer ownership."""
 
-use common.ui.window_scene.{WmContentFrame}
+use common.ui.window_scene.{WmContentFrame, WM_CONTENT_ORIGIN_SIMPLE_WEB}
 use common.ui.wm_chrome_theme.{
     active_wm_theme_id
 }
@@ -27,7 +27,7 @@ use os.hosted.hosted_browser_renderer_process.{
     HostedBrowserRendererResult
 }
 use std.common.web.browser_renderer_protocol.{BROWSER_RENDERER_MAX_VIEWPORT}
-use common.ui.render_opt.damage_plan.{DAMAGE_PLAN_NONE}
+use common.ui.render_opt.damage_plan.{DAMAGE_PLAN_NONE, DAMAGE_PLAN_LOCAL}
 use os.hosted.hosted_theme_runtime.{
     hosted_theme_id,
     hosted_theme_material_sha256,
@@ -74,6 +74,12 @@ fn _empty_registry_frame() -> WmContentFrame:
         offset_y: 0
     )
 
+# Full snapshots use a checksum, while retained deltas deliberately leave it
+# zero until HostCompositor applies them. Window identity is the common
+# nonempty transaction marker for both forms.
+pub fn hosted_browser_renderer_frame_pending(frame: WmContentFrame) -> bool:
+    frame.window_id != ""
+
 fn _drop_renderer_close_failure(reason: text) -> text:
     val marker = "renderer-close-failed"
     if reason == "":
@@ -111,6 +117,23 @@ class HostedBrowserRendererEntry:
     # distinct from the semantic HTML/theme revision: retained animations can
     # change pixels while that semantic key remains constant.
     published_content_revision: i64
+    # Metadata for the compositor-owned base frame.  Deliberately retain no
+    # pixels here: HostCompositor is the sole owner of the retained snapshot.
+    published_frame_valid: bool
+    published_frame_width: i32
+    published_frame_height: i32
+    published_frame_backend: text
+    published_frame_material_kind: text
+    published_frame_material_reason: text
+    published_frame_material_sha256: text
+    published_frame_theme_id: text
+    published_frame_theme_source_manifest_sha256: text
+    published_theme_revision: i64
+    published_renderer_theme_revision: i64
+    published_cpu_composited_count: i32
+    published_cpu_composited_sha256: text
+    published_solid_material_count: i32
+    published_solid_material_sha256: text
     pending_frame: WmContentFrame
     failure_reason: text
     failure_published: bool
@@ -140,6 +163,21 @@ class HostedBrowserRendererEntry:
             pressed_control: "",
             mutation_revision: 0,
             published_content_revision: 0,
+            published_frame_valid: false,
+            published_frame_width: 0,
+            published_frame_height: 0,
+            published_frame_backend: "",
+            published_frame_material_kind: "",
+            published_frame_material_reason: "",
+            published_frame_material_sha256: "",
+            published_frame_theme_id: "",
+            published_frame_theme_source_manifest_sha256: "",
+            published_theme_revision: 0,
+            published_renderer_theme_revision: 0,
+            published_cpu_composited_count: 0,
+            published_cpu_composited_sha256: "",
+            published_solid_material_count: 0,
+            published_solid_material_sha256: "",
             pending_frame: _empty_registry_frame(),
             failure_reason: "",
             failure_published: false,
@@ -466,6 +504,7 @@ pub class HostedBrowserRendererRegistry:
         # A new renderer generation must not retain the prior site's pixels or
         # image payload while its replacement starts.
         entry.pending_frame = _empty_registry_frame()
+        entry.published_frame_valid = false
         entry.raster.invalidate_frame_receipt()
         entry.startup_html = restart_html
         entry.bookmark_revision = -1
@@ -495,18 +534,7 @@ pub class HostedBrowserRendererRegistry:
             raster = Engine2dCompositorBackend.create_from_env(
                 entry.renderer.width, entry.renderer.height
             )
-        val rendered = if result.damage_receipt.mode == DAMAGE_PLAN_NONE:
-            raster.render_draw_ir_composition_resources_revision(
-                result.composition, result.image_resources,
-                result.producer_generation, result.composition_revision
-            )
-        else:
-            raster.render_draw_ir_composition_resources_revision_damaged(
-                result.composition, result.image_resources,
-                result.producer_generation, result.composition_revision,
-                result.damage_receipt.rects
-            )
-        entry.raster = raster
+            entry.published_frame_valid = false
         val theme = if self.theme_enabled:
             self.theme_id
         else:
@@ -535,6 +563,75 @@ pub class HostedBrowserRendererRegistry:
             self.entries[index] = entry
             return self._fail(index, "renderer-content-revision-unavailable")
         val revision = entry.published_content_revision + 1
+        # A packed update is legal only when every provenance input remains
+        # identical to the frame retained by HostCompositor.  The packed CPU
+        # executor independently verifies DrawIR coverage and base revision.
+        val packed_base_valid = (
+            result.damage_receipt.mode == DAMAGE_PLAN_LOCAL and
+            entry.published_frame_valid and
+            entry.published_content_revision > 0 and
+            # The full base must have left the registry; otherwise replacing
+            # a queued full frame with a delta would leave HostCompositor with
+            # no base snapshot to patch.
+            entry.pending_frame.window_id == "" and
+            entry.published_frame_width == entry.renderer.width and
+            entry.published_frame_height == entry.renderer.height and
+            entry.published_frame_theme_id == theme and
+            entry.published_theme_revision == self.theme_revision and
+            entry.published_renderer_theme_revision == entry.renderer.theme_revision and
+            entry.published_frame_material_kind == "solid-material" and
+            entry.published_cpu_composited_count == result.cpu_composited_count and
+            entry.published_cpu_composited_sha256 == result.cpu_composited_sha256 and
+            entry.published_solid_material_count == result.solid_material_count and
+            entry.published_solid_material_sha256 == result.solid_material_sha256)
+        if packed_base_valid:
+            val packed = raster.render_draw_ir_composition_resources_packed_damage(
+                result.composition, result.image_resources,
+                result.producer_generation, result.composition_revision,
+                result.damage_receipt.rects
+            )
+            if (packed.ok and packed.selected_backend == entry.published_frame_backend and
+                packed.rects.len() > 0 and packed.pixels.len() > 0):
+                val frame = WmContentFrame(
+                    window_id: entry.window_id.to_text(), scene_revision: 0,
+                    content_revision: revision,
+                    origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
+                    width: entry.renderer.width, height: entry.renderer.height,
+                    pixels: [], checksum: 0u64, parent_window_id: "",
+                    offset_x: 0, offset_y: 0,
+                    engine2d_status: "engine2d_rendered",
+                    engine2d_backend: packed.selected_backend,
+                    engine2d_reason: "draw-ir-retained-damage",
+                    material_fallback_kind: entry.published_frame_material_kind,
+                    material_fallback_reason: entry.published_frame_material_reason,
+                    material_fallback_sha256: entry.published_frame_material_sha256,
+                    theme_id: entry.published_frame_theme_id,
+                    theme_source_manifest_sha256:
+                        entry.published_frame_theme_source_manifest_sha256,
+                    base_content_revision: entry.published_content_revision,
+                    damage_rects: packed.rects, damage_pixels: packed.pixels
+                )
+                entry.raster = raster
+                entry.mutation_revision = entry.mutation_revision + 1
+                entry.published_content_revision = revision
+                if not entry.address_editing and entry.renderer.document_url != "":
+                    entry.address_draft = entry.renderer.document_url
+                    entry.startup_html = ""
+                entry.pending_frame = frame
+                self.entries[index] = entry
+                return "frame"
+        val rendered = if result.damage_receipt.mode == DAMAGE_PLAN_NONE:
+            raster.render_draw_ir_composition_resources_revision(
+                result.composition, result.image_resources,
+                result.producer_generation, result.composition_revision
+            )
+        else:
+            raster.render_draw_ir_composition_resources_revision_damaged(
+                result.composition, result.image_resources,
+                result.producer_generation, result.composition_revision,
+                result.damage_receipt.rects
+            )
+        entry.raster = raster
         val frame = if self.theme_enabled:
             simple_web_external_content_frame_with_theme_receipt(
                 entry.window_id.to_text(),
@@ -571,6 +668,22 @@ pub class HostedBrowserRendererRegistry:
             return self._fail(index, "renderer-raster-rejected")
         entry.mutation_revision = entry.mutation_revision + 1
         entry.published_content_revision = revision
+        entry.published_frame_valid = true
+        entry.published_frame_width = frame.width
+        entry.published_frame_height = frame.height
+        entry.published_frame_backend = frame.engine2d_backend
+        entry.published_frame_material_kind = frame.material_fallback_kind
+        entry.published_frame_material_reason = frame.material_fallback_reason
+        entry.published_frame_material_sha256 = frame.material_fallback_sha256
+        entry.published_frame_theme_id = frame.theme_id
+        entry.published_frame_theme_source_manifest_sha256 = (
+            frame.theme_source_manifest_sha256)
+        entry.published_theme_revision = self.theme_revision
+        entry.published_renderer_theme_revision = entry.renderer.theme_revision
+        entry.published_cpu_composited_count = result.cpu_composited_count
+        entry.published_cpu_composited_sha256 = result.cpu_composited_sha256
+        entry.published_solid_material_count = result.solid_material_count
+        entry.published_solid_material_sha256 = result.solid_material_sha256
         if not entry.address_editing and entry.renderer.document_url != "":
             entry.address_draft = entry.renderer.document_url
             entry.startup_html = ""
@@ -588,7 +701,9 @@ pub class HostedBrowserRendererRegistry:
     ) -> text:
         val existing = self._index(window_id)
         if existing >= 0:
-            if self.entries[existing].pending_frame.checksum > 0u64:
+            if hosted_browser_renderer_frame_pending(
+                self.entries[existing].pending_frame
+            ):
                 return "frame"
             if (self.entries[existing].renderer_closed or
                 self.entries[existing].close_pending or
