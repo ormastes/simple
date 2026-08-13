@@ -413,8 +413,9 @@ bridge, and database workers are examples of this carrier pattern.
 
 All agents testing SimpleOS filesystem execution must reuse
 `scripts/qemu/simple-qemu-settings.shs` and
-`scripts/qemu/simple-big-storage-root.shs`; do not copy QEMU argv or invent a
-private artifact root. Storage resolves in this order:
+`scripts/qemu/simple-big-storage-root.shs`, and must create a closed pre-run
+receipt with `scripts/qemu/simple-qemu-host-admission.shs`; do not copy QEMU
+argv or invent a private artifact root. Storage resolves in this order:
 `SIMPLE_BIG_STORAGE_ROOT`, the workspace-local config selected by
 `SIMPLE_BIG_STORAGE_CONFIG`, then `$HOME/.simple`. This host selects
 `/mnt/data/.simple`.
@@ -428,12 +429,16 @@ isolated rows and waits for every result. Never relabel the current host.
 Every PASS needs boot, mount, target-side directory listing, one
 filesystem-loaded target-native program, clean commit/tree identity, exact
 argv and hashes, resolved firmware identity/mode with boot-stage correlation,
-and a run nonce literally correlated with the retained serial transcript.
+and a collector run nonce literally correlated exactly once with the retained
+serial transcript. When the workload nonce is echoed by both kernel and child,
+it must be a separate media slot and cannot serve as the collector nonce.
 Compiler-bearing media additionally needs target-native
 `simple --version` plus nonce-bound hello compile/run artifacts. Import cross-
-host bundles only through `collect-sosix-qemu-evidence.shs`; missing hosts or
-media remain owned `blocked` rows with exact resume commands. TCG proves
-correctness only, and macOS postponement is not PASS.
+host bundles only through `produce-sosix-qemu-native-pass-bundle.shs` followed
+by `collect-sosix-qemu-evidence.shs`; missing hosts or media remain owned
+`blocked` rows with exact resume commands. TCG proves correctness only, and
+macOS postponement is not PASS. The current PASS/blocked ledger is
+`doc/03_plan/sys_test/sosix_qemu_matrix_evidence_status_2026-08-13.md`.
 
 Canonical operator detail is
 `doc/07_guide/platform/simpleos/sosix_qemu_shared_settings.md`.
