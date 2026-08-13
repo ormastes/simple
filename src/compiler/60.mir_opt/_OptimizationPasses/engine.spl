@@ -262,18 +262,16 @@ impl OptimizationEngine:
                 if val inferred_type = operand_type:
                     self.type_map[dest.id] = inferred_type
 
-            case Cast(dest, operand, target):
-                # A cast can be the immediate definition observed by a
-                # coverage probe. Keep its input live as part of the same
-                # transitive definition chain, including when optimization
-                # later rewrites a no-op cast to Copy.
+            case Cast(dest, operand, target) | Bitcast(dest, operand, target):
+                # A cast or bitcast can be the immediate definition observed
+                # by a coverage probe. Retain its input in the analysis graph.
                 self.track_operand_use(operand)
                 self.def_map[dest.id] = inst
                 self.type_map[dest.id] = target
 
             case DecisionProbe(_, _, result, _, _, _):
                 # The probe is live on its own, but its observed value also
-                # keeps the defining instruction live through engine DCE.
+                # remains represented in the compatibility analysis graph.
                 self.track_operand_use(result)
 
             case ConditionProbe(_, _, _, _, result, _, _, _):
@@ -600,11 +598,18 @@ impl OptimizationEngine:
         # No-op cast elimination
         if val source_type = src_type:
             if self.types_equal(source_type, target):
-                self.stats.redundant_casts = self.stats.redundant_casts + 1
-                return Some(MirInst(
-                    kind: MirInstKind.Copy(dest, self.operand_to_local(operand)),
-                    span: span
-                ))
+                match operand.kind:
+                    case Copy(local) | Move(local):
+                        self.stats.redundant_casts =
+                            self.stats.redundant_casts + 1
+                        return Some(MirInst(
+                            kind: MirInstKind.Copy(dest, local),
+                            span: span
+                        ))
+                    case Const(_, _):
+                        # An inline constant has no source local. Preserve the
+                        # valid Cast instead of fabricating LocalId(0).
+                        ()
 
         # No optimization
         Some(MirInst(
@@ -614,8 +619,7 @@ impl OptimizationEngine:
 
     me optimize_copy(dest: LocalId, src: LocalId, span: Span?) -> MirInst?:
         """Optimize copy instruction."""
-        # If source is never used again, this is dead (will be eliminated later)
-        # For now, keep it
+        # Liveness-based removal belongs to the dedicated exhaustive MIR DCE.
         Some(MirInst(
             kind: MirInstKind.Copy(dest, src),
             span: span
@@ -626,44 +630,12 @@ impl OptimizationEngine:
     # ========================================================================
 
     me eliminate_dead_code(blocks: [MirBlock]) -> [MirBlock]:
-        """Remove instructions that are never used."""
-        var optimized: [MirBlock] = []
-
-        for block in blocks:
-            var live_insts: [MirInst] = []
-
-            for inst in block.instructions:
-                if self.is_live_instruction(inst):
-                    live_insts = live_insts.push(inst)
-                else:
-                    self.stats.dead_instructions = self.stats.dead_instructions + 1
-
-            optimized = optimized.push(MirBlock(
-                id: block.id,
-                label: block.label,
-                instructions: live_insts,
-                terminator: block.terminator
-            ))
-
-        optimized
-
-    fn is_live_instruction(inst: MirInst) -> bool:
-        """Check if instruction has side effects or is used."""
-        match inst.kind:
-            case Const(dest, _, _) | Copy(dest, _) | Move(dest, _) | BinOp(dest, _, _, _) | UnaryOp(dest, _, _) | Cast(dest, _, _):
-                (self.use_count[dest.id] ?? 0) > 0
-
-            case Store(_, _) | Call(_, _, _):
-                # Side effects - always live
-                true
-
-            case DecisionProbe(_, _, _, _, _, _) | ConditionProbe(_, _, _, _, _, _, _, _):
-                # Coverage probes are ordered observational side effects.
-                true
-
-            case _:
-                # Conservative: keep unknown instructions
-                true
+        """Preserve instructions until use collection is exhaustive."""
+        # The legacy engine does not collect uses from every MirInstKind or
+        # from terminators. Deleting from that partial graph can remove a
+        # producer still consumed by retained MIR. The dedicated MIR DCE owns
+        # removal; this compatibility engine must fail safe meanwhile.
+        blocks
 
     # ========================================================================
     # Helper Methods

@@ -8,10 +8,15 @@ backend lowering consumes them.
 ## Optimizer contract
 
 The optimization engine treats both probe variants as live side effects and
-records each observed boolean operand as a use. Operand liveness is transitive
-through a cast: the cast result remains live because the probe observes it,
-and the cast input remains live because it defines that result. This also
-holds when a no-op cast is rewritten to `Copy` before engine DCE.
+records each observed boolean operand as a use. Cast and Bitcast analysis also
+records their input uses. A no-op Cast with an inline constant remains a Cast
+because it has no source local; optimization must never fabricate `LocalId(0)`
+for it.
+
+The compatibility engine's local DCE is fail-safe disabled because its legacy
+use collector is not exhaustive across MIR instruction kinds or terminators.
+The dedicated MIR DCE owns removal. Until exhaustive collection is integrated,
+the compatibility engine preserves all optimized instructions.
 
 ## Executable scenarios
 
@@ -20,13 +25,18 @@ The mirrored spec verifies:
 1. decision and condition opcodes serialize with stable identity metadata;
 2. the MIR visitor walks both boolean operands;
 3. both opcodes are mandatory DCE observations;
-4. direct definitions used only by either probe survive engine DCE;
+4. direct definitions used only by either probe survive compatibility
+   optimization;
 5. cast inputs used transitively only by either probe survive no-op cast
-   rewriting and engine DCE;
-6. malformed IDs, paths, positions, and operand types fail closed;
-7. SSA rewriting and inlining reject probe-bearing blocks;
-8. the interpreter rejects unlowered probes; and
-9. LLVM translation paths reject unlowered probes before emission.
+   rewriting;
+6. Bitcast inputs used only through a probe remain intact;
+7. an inline-constant no-op Cast never becomes a Copy from fabricated local
+   zero;
+8. a producer consumed only by a block terminator remains intact;
+9. malformed IDs, paths, positions, and operand types fail closed;
+10. SSA rewriting and inlining reject probe-bearing blocks;
+11. the interpreter rejects unlowered probes; and
+12. LLVM translation paths reject unlowered probes before emission.
 
 ## Deferred integration
 
