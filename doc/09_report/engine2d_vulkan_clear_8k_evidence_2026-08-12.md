@@ -386,3 +386,17 @@ The exact copy receipt proves that the runtime avoided the 132,710,400-byte
 full buffer-to-image transfer. It does not make an 8K/80 claim: the virtual
 X11 presentation path remains the dominant cost at about 65 ms p95, and Xvfb
 is not a physical-display scanout oracle.
+
+The checked reproducer is:
+
+```sh
+BUILD_DIR=build/check/engine2d-vulkan-window-8k \
+  sh scripts/check/check-engine2d-vulkan-window-8k.shs
+```
+
+It creates a disposable 7680x4320 Xvfb surface, requires the selected device
+to be `discrete` by default, and fails unless each timed frame reports one
+region, exactly 1,320,960 copy bytes, zero readback bytes, known completion,
+and the window-swapchain presentation mode. A repeat on the same A6000 lane
+recorded p50 57,974,250 ns and p95 58,221,362 ns; this variation does not
+change the FAIL classification.

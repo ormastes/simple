@@ -424,7 +424,9 @@ mod tests {
     use super::{rt_vulkan_destroy_swapchain, rt_vulkan_init_external_window_present, rt_vulkan_init_headless_present, rt_vulkan_init_window_present, rt_vulkan_last_present_copy_bytes, rt_vulkan_last_present_copy_rects, rt_vulkan_present_buffer, rt_vulkan_present_buffer_regions_raw};
     use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_buffer::{rt_vulkan_alloc_buffer, rt_vulkan_copy_to_buffer_raw, rt_vulkan_free_buffer};
     use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_core::{rt_vulkan_shutdown, STATE};
-    use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_device::rt_vulkan_selected_device_driver_identity;
+    use crate::vulkan_graphics_runtime::vulkan_graphics_runtime_device::{
+        rt_vulkan_selected_device_driver_identity, rt_vulkan_selected_device_type,
+    };
 
     fn upload_chunks(buffer: i64, bytes: &[u8]) {
         const MAX_UPLOAD: usize = 64 * 1024 * 1024;
@@ -694,6 +696,8 @@ mod tests {
         assert!(swapchain > 0, "{}", STATE.lock().last_error);
         let identity_ptr = rt_vulkan_selected_device_driver_identity();
         let identity = unsafe { CStr::from_ptr(identity_ptr) }.to_string_lossy().into_owned();
+        let device_type = unsafe { CStr::from_ptr(rt_vulkan_selected_device_type()) }
+            .to_string_lossy().into_owned();
         let native_present_mode = format!("{:?}", STATE.lock().swapchains.get(&swapchain).unwrap().present_mode());
         let pixels = vec![0xff315783u32; (width * height) as usize];
         let byte_count = width * height * 4;
@@ -750,7 +754,7 @@ mod tests {
                     .and_then(|v| v.split_whitespace().next())
                     .and_then(|v| v.parse::<u64>().ok())
             })).unwrap_or(0);
-        println!("window_present_damage width={width} height={height} frames={frames} damage_x=0 damage_y=0 damage_w={width} damage_h=43 damage_bytes={expected_damage_bytes} damage_rects=1 p50_ns={p50} p95_ns={p95} rss_kib={rss_kib} readback_bytes=0 fallback=false completion_known=true present_mode=window-swapchain native_present_mode={native_present_mode} checksum={checksum} device={identity}");
+        println!("window_present_damage width={width} height={height} frames={frames} damage_x=0 damage_y=0 damage_w={width} damage_h=43 damage_bytes={expected_damage_bytes} damage_rects=1 p50_ns={p50} p95_ns={p95} rss_kib={rss_kib} readback_bytes=0 fallback=false completion_known=true present_mode=window-swapchain native_present_mode={native_present_mode} checksum={checksum} device_type={device_type} device={identity}");
         assert_eq!(rt_vulkan_free_buffer(buffer), 1);
         assert_eq!(rt_vulkan_destroy_swapchain(swapchain), 1);
         assert_eq!(rt_vulkan_shutdown(), 1);

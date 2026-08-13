@@ -1,0 +1,106 @@
+#!/bin/sh
+# Run the physical-adapter X11 swapchain damage receipt under a disposable Xvfb
+# surface.  This is evidence collection, not an 8K/80 pass gate: it verifies
+# device ownership, exact partial-copy accounting, and no device-to-host copy.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+BUILD_DIR="${BUILD_DIR:-$ROOT/build/check/engine2d-vulkan-window-8k}"
+ICD="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/nvidia_icd.json}"
+DISPLAY_NUMBER="${ENGINE2D_VULKAN_X11_DISPLAY:-97}"
+DEVICE_TYPE="${ENGINE2D_VULKAN_DEVICE_TYPE:-discrete}"
+RUN_DIR=""
+DISPLAY_LOCK=""
+
+mkdir -p "$BUILD_DIR"
+if [ ! -f "$ICD" ]; then
+    echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=missing-icd"
+    exit 2
+fi
+if ! command -v Xvfb >/dev/null 2>&1 || ! command -v xdpyinfo >/dev/null 2>&1; then
+    echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=missing-xvfb"
+    exit 2
+fi
+
+claim_display() {
+    candidate="$1"
+    lock="/tmp/simple-engine2d-vulkan-x11-$candidate.lock"
+    if mkdir "$lock" 2>/dev/null; then
+        DISPLAY_NUMBER="$candidate"
+        DISPLAY_LOCK="$lock"
+        return 0
+    fi
+    return 1
+}
+
+if [ -n "${ENGINE2D_VULKAN_X11_DISPLAY:-}" ]; then
+    if ! claim_display "$DISPLAY_NUMBER"; then
+        echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=x11-display-already-claimed"
+        exit 2
+    fi
+else
+    DISPLAY_NUMBER=90
+    while [ "$DISPLAY_NUMBER" -lt 200 ]; do
+        if [ ! -e "/tmp/.X11-unix/X$DISPLAY_NUMBER" ] &&
+           [ ! -e "/tmp/.X$DISPLAY_NUMBER-lock" ] &&
+           claim_display "$DISPLAY_NUMBER"; then
+            break
+        fi
+        DISPLAY_NUMBER=$((DISPLAY_NUMBER + 1))
+    done
+    if [ "$DISPLAY_NUMBER" -ge 200 ]; then
+        echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=no-free-x11-display"
+        exit 2
+    fi
+fi
+
+RUN_DIR="$(mktemp -d "$BUILD_DIR/run.XXXXXX")"
+RECEIPT="$RUN_DIR/receipt.env"
+Xvfb ":$DISPLAY_NUMBER" -screen 0 7680x4320x24 -nolisten tcp \
+    >"$RUN_DIR/xvfb.log" 2>&1 &
+XVFB_PID=$!
+cleanup() {
+    kill "$XVFB_PID" 2>/dev/null || true
+    wait "$XVFB_PID" 2>/dev/null || true
+    rmdir "$DISPLAY_LOCK" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+ready=0
+attempt=0
+while [ "$attempt" -lt 10 ]; do
+    if ! kill -0 "$XVFB_PID" 2>/dev/null; then
+        break
+    fi
+    if DISPLAY=":$DISPLAY_NUMBER" xdpyinfo >/dev/null 2>&1 &&
+       kill -0 "$XVFB_PID" 2>/dev/null; then
+        ready=1
+        break
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+done
+if [ "$ready" -ne 1 ]; then
+    echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=xvfb-not-ready"
+    exit 2
+fi
+
+if ! (
+    cd "$ROOT/src/compiler_rust"
+    DISPLAY=":$DISPLAY_NUMBER" VK_ICD_FILENAMES="$ICD" \
+        cargo test -p simple-runtime --release --features vulkan \
+        vulkan_graphics_runtime::vulkan_graphics_runtime_swapchain::tests::bench_window_swapchain_present_8k_one_percent_damage \
+        -- --ignored --exact --nocapture
+) >"$RECEIPT" 2>&1; then
+    sed -n '1,160p' "$RECEIPT"
+    echo "engine2d_vulkan_window_8k_evidence_status=failed reason=cargo-test"
+    exit 1
+fi
+sed -n '1,160p' "$RECEIPT"
+
+grep -q '^window_present_damage width=7680 height=4320 ' "$RECEIPT"
+grep -q 'damage_bytes=1320960 damage_rects=1 ' "$RECEIPT"
+grep -q 'readback_bytes=0 fallback=false completion_known=true ' "$RECEIPT"
+grep -q 'present_mode=window-swapchain ' "$RECEIPT"
+grep -q "device_type=$DEVICE_TYPE " "$RECEIPT"
+echo "engine2d_vulkan_window_8k_evidence_status=pass"
