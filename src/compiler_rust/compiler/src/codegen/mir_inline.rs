@@ -43,7 +43,8 @@ pub fn inline_small_pure_functions(mir: &MirModule, functions: Vec<MirFunction>)
 }
 
 fn is_inline_candidate(func: &MirFunction) -> bool {
-    if func.name == "main"
+    if func.blocks.is_empty()
+        || func.name == "main"
         || func.name.starts_with("rt_")
         || func.generator_states.is_some()
         || func.async_states.is_some()
@@ -420,6 +421,57 @@ mod tests {
     use crate::hir::TypeId;
     use crate::mir::MirLocal;
     use simple_parser::ast::Visibility;
+
+    fn call_target_remains(function: &MirFunction, expected: &str) -> bool {
+        function.blocks.iter().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, MirInst::Call { target, .. } if target.name() == expected))
+        })
+    }
+
+    #[test]
+    fn referenced_empty_extern_is_not_an_inline_candidate() {
+        let mut extern_decl = MirFunction::new("external_used".to_string(), TypeId::I64, Visibility::Public);
+        extern_decl.blocks.clear();
+
+        let mut caller = MirFunction::new("caller".to_string(), TypeId::I64, Visibility::Private);
+        let result = caller.new_vreg();
+        caller.blocks[0].instructions.push(MirInst::Call {
+            dest: Some(result),
+            target: CallTarget::from_name("external_used"),
+            args: vec![],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(result));
+
+        let mut module = MirModule::new();
+        module.functions.push(extern_decl);
+        module.functions.push(caller);
+
+        let functions = inline_small_pure_functions(&module, module.functions.clone());
+        let external = functions.iter().find(|f| f.name == "external_used").unwrap();
+        let caller = functions.iter().find(|f| f.name == "caller").unwrap();
+        assert!(external.blocks.is_empty());
+        assert!(call_target_remains(caller, "external_used"));
+    }
+
+    #[test]
+    fn adjacent_unreferenced_empty_extern_is_unchanged() {
+        let mut extern_decl = MirFunction::new("external_unused".to_string(), TypeId::I64, Visibility::Public);
+        extern_decl.blocks.clear();
+
+        let mut caller = MirFunction::new("caller".to_string(), TypeId::I64, Visibility::Private);
+        caller.blocks[0].terminator = Terminator::Return(None);
+
+        let mut module = MirModule::new();
+        module.functions.push(extern_decl);
+        module.functions.push(caller);
+
+        let functions = inline_small_pure_functions(&module, module.functions.clone());
+        let external = functions.iter().find(|f| f.name == "external_unused").unwrap();
+        assert!(external.blocks.is_empty());
+    }
 
     #[test]
     fn inlines_small_tail_call_and_removes_call_inst() {

@@ -295,7 +295,10 @@ fn codegen_bare_unwrap_or_calls_rt_unwrap_or_self_not_rt_enum_payload() {
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
         block.instructions.push(MirInst::ConstInt { dest: recv, value: 100 });
-        block.instructions.push(MirInst::ConstInt { dest: fallback, value: 0 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: fallback,
+            value: 0,
+        });
         block.instructions.push(MirInst::MethodCallStatic {
             dest: Some(dest),
             receiver: recv,
@@ -1670,7 +1673,10 @@ fn codegen_string_bytes_method_calls_rt_string_bytes() {
         let receiver = f.new_vreg();
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ConstInt { dest: receiver, value: 1 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: receiver,
+            value: 1,
+        });
         block.instructions.push(MirInst::MethodCallStatic {
             dest: Some(dest),
             receiver,
@@ -1686,20 +1692,19 @@ fn codegen_string_bytes_method_calls_rt_string_bytes() {
 }
 
 #[test]
-fn codegen_typed_string_bytes_ignores_same_leaf_user_owner() {
+fn bytes_evidence_qualified_imported_pointer_size_bytes_retains_exact_owner() {
     let mut user_bytes = MirFunction::new(
         "PointerSize.bytes".to_string(),
         TypeId::I64,
         simple_parser::ast::Visibility::Public,
     );
-    let user_receiver = user_bytes.new_vreg();
     user_bytes.params.push(MirLocal {
         name: "self".to_string(),
         ty: TypeId::I64,
         kind: LocalKind::Parameter,
         is_ghost: false,
     });
-    user_bytes.block_mut(BlockId(0)).unwrap().terminator = Terminator::Return(Some(user_receiver));
+    user_bytes.blocks.clear();
 
     let mut caller = MirFunction::new(
         "typed_string_bytes_collision".to_string(),
@@ -1715,7 +1720,7 @@ fn codegen_typed_string_bytes_ignores_same_leaf_user_owner() {
     });
     block.instructions.push(MirInst::Call {
         dest: Some(dest),
-        target: crate::mir::CallTarget::from_name("bytes"),
+        target: crate::mir::CallTarget::from_name("PointerSize.bytes"),
         args: vec![receiver],
     });
     block.terminator = Terminator::Return(Some(dest));
@@ -1726,8 +1731,12 @@ fn codegen_typed_string_bytes_ignores_same_leaf_user_owner() {
     let codegen = crate::codegen::Codegen::new().expect("failed to create codegen");
     let object = codegen.compile_module(&module).expect("AOT compilation failed");
     assert!(
-        object_relocates_to_symbol(&object, "rt_string_bytes"),
-        "typed string bytes must relocate to rt_string_bytes even when PointerSize.bytes is present"
+        object_relocates_to_symbol(&object, "PointerSize_dot_bytes"),
+        "qualified imported PointerSize.bytes must retain its exact relocation"
+    );
+    assert!(
+        !object_relocates_to_symbol(&object, "rt_string_bytes"),
+        "qualified imported PointerSize.bytes must not relocate to rt_string_bytes"
     );
 }
 
@@ -1737,7 +1746,10 @@ fn codegen_string_chars_method_calls_rt_string_chars() {
         let receiver = f.new_vreg();
         let dest = f.new_vreg();
         let block = f.block_mut(BlockId(0)).unwrap();
-        block.instructions.push(MirInst::ConstInt { dest: receiver, value: 1 });
+        block.instructions.push(MirInst::ConstInt {
+            dest: receiver,
+            value: 1,
+        });
         block.instructions.push(MirInst::MethodCallStatic {
             dest: Some(dest),
             receiver,

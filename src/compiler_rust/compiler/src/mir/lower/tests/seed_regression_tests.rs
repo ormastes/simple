@@ -28,6 +28,17 @@ fn has_call(func: &MirFunction, name: &str) -> bool {
     block_index_with_call(func, name).is_some()
 }
 
+fn has_exact_declared_call(func: &MirFunction, name: &str) -> bool {
+    func.blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .any(|inst| match inst {
+            MirInst::Call { target, .. } => target.name() == name,
+            MirInst::MethodCallStatic { func_name, .. } => func_name == name,
+            _ => false,
+        })
+}
+
 #[test]
 fn typed_text_bytes_does_not_bind_same_leaf_user_owner() {
     let source = include_str!("../../../../../../../test/fixtures/compiler/text_bytes_owner_collision.spl");
@@ -66,7 +77,7 @@ fn typed_text_bytes_does_not_bind_same_leaf_user_owner() {
         );
     }
 
-    for function_name in ["user_bytes", "pointer_bytes"] {
+    for (function_name, declared_owner) in [("user_bytes", "UserType.bytes"), ("pointer_bytes", "PointerSize.bytes")] {
         let function = mir
             .functions
             .iter()
@@ -77,12 +88,8 @@ fn typed_text_bytes_does_not_bind_same_leaf_user_owner() {
             "{function_name} must retain custom bytes dispatch"
         );
         assert!(
-            function
-                .blocks
-                .iter()
-                .flat_map(|b| b.instructions.iter())
-                .any(|inst| { matches!(inst, MirInst::Call { target, .. } if target.name().contains("bytes")) }),
-            "{function_name} must emit its declared custom bytes callee"
+            has_exact_declared_call(function, declared_owner),
+            "{function_name} must emit exact declared owner {declared_owner}"
         );
     }
 

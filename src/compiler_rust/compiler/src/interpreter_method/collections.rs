@@ -11,6 +11,20 @@ use crate::value::{Env, Value};
 use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef};
 use std::collections::HashMap;
 
+#[cfg(test)]
+thread_local! {
+    static BYTE_ARRAY_WIDEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn measure_byte_array_widens<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    BYTE_ARRAY_WIDEN_COUNT.with(|count| {
+        count.set(0);
+        let result = f();
+        (result, count.get())
+    })
+}
+
 /// Trust `.?`'s own presence decision instead of re-testing the payload's
 /// truthiness. `expr.?` (`Expr::ExistsCheck`) already evaluates to "the
 /// unwrapped value if present, `Value::Nil` if absent" -- feeding that value
@@ -290,17 +304,8 @@ pub fn handle_array_methods(
             )?));
         }
         "join" => {
-            let sep = eval_arg(
-                args,
-                0,
-                Value::text(""),
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?
-            .to_display_string();
+            let sep =
+                eval_arg(args, 0, Value::text(""), env, functions, classes, enums, impl_methods)?.to_display_string();
             // Byte-aware join: text-like items contribute raw bytes so
             // mid-codepoint slice fragments (Value::StrBytes) reassemble and
             // re-validate instead of being lossy-rendered to U+FFFD.
@@ -945,9 +950,85 @@ pub fn handle_byte_array_methods(
     if std::env::var("SIMPLE_TRACE_BIG_BYTEARRAY").is_ok() && bytes.len() > 1_000_000 {
         eprintln!("[bigba] method={method} len={}", bytes.len());
     }
+    #[cfg(test)]
+    BYTE_ARRAY_WIDEN_COUNT.with(|count| count.set(count.get() + 1));
     let values = Value::byte_array_values(bytes);
     handle_array_methods(&values, method, args, env, functions, classes, enums, impl_methods)
         .map(|result| result.map(|value| repack_byte_result(value, frozen)))
+}
+
+#[cfg(test)]
+mod byte_array_metadata_fast_path_tests {
+    use super::super::evaluate_method_call;
+    use super::*;
+
+    fn call_value(value: Value, method: &str, args: &[Argument]) -> Result<Value, CompileError> {
+        let mut env = Env::new();
+        env.insert("subject".to_string(), value);
+        evaluate_method_call(
+            &Box::new(Expr::Identifier("subject".to_string())),
+            method,
+            args,
+            &mut env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &Enums::new(),
+            &ImplMethods::new(),
+        )
+    }
+
+    fn assert_metadata_without_widening(value: Value, expected_len: i64, expected_empty: bool) {
+        for (method, expected) in [
+            ("len", Value::Int(expected_len)),
+            ("length", Value::Int(expected_len)),
+            ("is_empty", Value::Bool(expected_empty)),
+        ] {
+            let (result, widen_count) = measure_byte_array_widens(|| call_value(value.clone(), method, &[]));
+            assert_eq!(result.expect("metadata method"), expected);
+            assert_eq!(widen_count, 0, "{method} widened packed byte storage");
+        }
+    }
+
+    #[test]
+    fn bytes_evidence_byte_backed_and_array_metadata_preserve_direct_semantics() {
+        for bytes in [Vec::new(), vec![3, 7, 11]] {
+            let expected_len = bytes.len() as i64;
+            let expected_empty = bytes.is_empty();
+            assert_metadata_without_widening(Value::byte_array(bytes.clone()), expected_len, expected_empty);
+            assert_metadata_without_widening(Value::frozen_byte_array(bytes.clone()), expected_len, expected_empty);
+            assert_metadata_without_widening(
+                Value::StrBytes(std::sync::Arc::new(bytes)),
+                expected_len,
+                expected_empty,
+            );
+        }
+
+        for values in [Vec::new(), vec![Value::Int(1), Value::Int(2)]] {
+            let expected_len = values.len() as i64;
+            let expected_empty = values.is_empty();
+            assert_metadata_without_widening(Value::array(values.clone()), expected_len, expected_empty);
+            assert_metadata_without_widening(Value::frozen_array(values), expected_len, expected_empty);
+        }
+    }
+
+    #[test]
+    fn bytes_evidence_byte_array_fallback_and_mutation_contracts_are_unchanged() {
+        let bogus_arg = [Argument::new(None, Expr::Integer(99))];
+        let (fallback, widen_count) =
+            measure_byte_array_widens(|| call_value(Value::byte_array(vec![1, 2]), "len", &bogus_arg));
+        assert_eq!(fallback.expect("legacy len fallback"), Value::Int(2));
+        assert_eq!(
+            widen_count, 1,
+            "argument-bearing len incorrectly took the direct fast path"
+        );
+
+        let push = [Argument::new(None, Expr::Integer(9))];
+        assert!(call_value(Value::frozen_byte_array(vec![1]), "push", &push).is_err());
+        assert_eq!(
+            call_value(Value::byte_array(vec![1]), "push", &push).expect("mutable push"),
+            Value::byte_array(vec![1, 9])
+        );
+    }
 }
 
 /// Handle FixedSizeArray methods (no size-changing operations)
