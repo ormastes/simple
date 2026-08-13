@@ -239,24 +239,49 @@ run_arch() {
     source_sha256=""
     simple_bin_sha256=""
     frame_receipt_sha256=""
+    bin_pinned=0
+    if [ "$bin" != "" ]; then
+        bin_pinned=1
+    fi
     if [ "$bin" = "" ] && [ "$arch" = "$current_host" ]; then
-        bin="${SIMPLE_BIN:-bin/simple}"
+        # Do not pin the convenience bin/simple path by default.  It may be
+        # a Rust bootstrap seed while a runnable self-hosted candidate exists
+        # under release/; the nested evidence gate owns candidate discovery.
+        # Most developer shells export the conventional bin/simple value.
+        # That is not an intentional evidence pin: let the nested gate
+        # discover an admitted self-hosted artifact instead. Any other value
+        # remains an explicit caller override.
+        if [ -n "${SIMPLE_BIN:-}" ] && [ "${SIMPLE_BIN:-}" != "bin/simple" ]; then
+            bin="$SIMPLE_BIN"
+            bin_pinned=1
+        fi
     fi
 
     if [ "$SKIP_RUN" = "1" ]; then
         status=unavailable
         reason=skip-run
-    elif [ "$bin" = "" ]; then
+    elif [ "$bin" = "" ] && [ "$arch" != "$current_host" ]; then
         status=unavailable
         reason=missing-simple-bin
-    elif [ ! -x "$bin" ]; then
+    elif [ "$bin" != "" ] && [ ! -x "$bin" ]; then
         status=unavailable
         reason=missing-simple-bin
     else
         set +e
-        CPU_SIMD_EXPECTED_ARCH="$arch" SIMPLE_BIN="$bin" BUILD_DIR="$arch_out" REPORT_PATH="$arch_dir/report.md" \
-            sh scripts/check/check-cpu-simd-engine2d-evidence.shs \
-            >"$arch_dir/stdout.txt" 2>"$arch_dir/stderr.txt"
+        if [ "$bin_pinned" = "1" ]; then
+            CPU_SIMD_EXPECTED_ARCH="$arch" SIMPLE_BIN="$bin" BUILD_DIR="$arch_out" REPORT_PATH="$arch_dir/report.md" \
+                sh scripts/check/check-cpu-simd-engine2d-evidence.shs \
+                >"$arch_dir/stdout.txt" 2>"$arch_dir/stderr.txt"
+        else
+            # Removing an assignment from this command is insufficient when
+            # the parent exported SIMPLE_BIN=bin/simple.  Explicitly unset it
+            # in the child so the evidence producer can discover a valid
+            # self-hosted artifact rather than treating the seed as pinned.
+            (unset SIMPLE_BIN
+             CPU_SIMD_EXPECTED_ARCH="$arch" BUILD_DIR="$arch_out" REPORT_PATH="$arch_dir/report.md" \
+                 sh scripts/check/check-cpu-simd-engine2d-evidence.shs) \
+                >"$arch_dir/stdout.txt" 2>"$arch_dir/stderr.txt"
+        fi
         code=$?
         set -e
         env_file="$arch_out/evidence.env"
@@ -269,6 +294,9 @@ run_arch() {
         simple_bin_sha256="$(env_value "$env_file" cpu_simd_evidence_compiler_sha256)"
         frame_receipt_sha256="$(env_value "$env_file" cpu_simd_evidence_frame_receipt_sha256)"
         nested_bin="$(env_value "$env_file" cpu_simd_evidence_simple_bin)"
+        if [ "$bin_pinned" = "0" ]; then
+            bin="$nested_bin"
+        fi
         expected_receipt="$(printf 'arch=%s\nfeature=%s\nexecution_environment=%s\ndiagram_actual_checksum=%s\ncanonical_source_sha256=%s\ncompiler_sha256=%s\n' \
             "$evidence_arch" "$(env_value "$env_file" cpu_simd_evidence_feature)" "$execution_environment" "$frame_checksum" "$source_sha256" "$simple_bin_sha256" | text_sha256)"
         if [ "$status" = "" ]; then
