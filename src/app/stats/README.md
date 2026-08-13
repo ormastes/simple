@@ -44,7 +44,8 @@ simple stats --tldr=doc/09_report/project_statistics_tldr.md \
 - **Documentation**: Links to detailed reports
 - **Projects**: Disjoint source/test files and SLOC by compiler, app, library,
   OS, runtime, hardware, verification, tooling and examples
-- **Focus areas**: Non-additive firmware and RISC-V views
+- **Focus areas**: Non-additive firmware, RISC-V, DB/web server,
+  UI/rendering, Office, CRM, Agent Caret, Agents Manager, and SPipe views
 - **Quality evidence**: Coverage, duplication, coupling and cohesion with
   measured/stale/unavailable status
 

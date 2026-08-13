@@ -45,6 +45,26 @@ Cross-cutting Focus
 
 ---
 
+Product Applications
+| Area | Files | Total SLOC |
+|---|---:|---:|
+| UI/rendering | 1,784 | 293,796 |
+| Agent Caret | 1,057 | 91,525 |
+| Office | 288 | 50,930 |
+| CRM | 1 | 84 |
+
+---
+
+Servers and Agent Tooling
+| Area | Files | Total SLOC |
+|---|---:|---:|
+| DB server | 20 | 2,892 |
+| Web server | 27 | 2,078 |
+| Agents Manager | 42 | 2,148 |
+| SPipe | 334 | 49,383 |
+
+---
+
 Quality Evidence
 - Coverage: unavailable — schema-only retained table
 - Duplication: unavailable — schema-only retained table

@@ -3,7 +3,7 @@
 `simple stats` performs one owned-code inventory and projects the same typed
 `StatsInventoryV2` into JSON, Markdown, TLDR, and native Simple Office slides.
 
-- Project rows are disjoint; firmware and RISC-V are explicitly overlapping focus views.
+- Project rows are disjoint; platform and product-area rows are explicitly overlapping focus views.
 - Tests include SSpec tiers, Markdown fenced tests, and `>>>` comment tests.
 - Vendored/generated code and `*_tldr.md` files are excluded from owned-code totals.
 - Coverage, duplication, coupling, and cohesion retain provenance and freshness.
