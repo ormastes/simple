@@ -423,3 +423,17 @@ frame: `damage_bytes=1320960`, `damage_rects=1`, p50 `85,923 ns`, p95
 This is a passing retained device-transfer/present receipt for a CPU Vulkan
 implementation (llvmpipe). It does not demonstrate a physical GPU, visible
 surface, scanout, DrawIR/Web/GUI/WM frame, or full dynamic 8K/80 performance.
+
+## 2026-08-13 visible-window damage refresh
+
+The checked visible-window reproducer was refreshed on the same physical
+NVIDIA RTX A6000/Xvfb lane. It still admitted one exact 7680×43 dynamic region
+per frame with `damage_bytes=1320960`, matching source-update bytes, zero
+readback, no fallback, known completion, and `IMMEDIATE` presentation. The
+20-frame receipt measured p50 `59,759,287 ns`, p95 `60,119,023 ns`, RSS
+`486,724 KiB`, and checksum `14177648258271307651`.
+
+The transfer accounting remains correct and substantially below a full-frame
+copy, but p95 is still over the 12.5 ms 8K/80 budget. This is Xvfb virtual
+window evidence, not physical-display scanout evidence; no full 8K/80 claim
+is made.

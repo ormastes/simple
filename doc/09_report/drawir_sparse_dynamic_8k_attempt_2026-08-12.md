@@ -63,3 +63,19 @@ A correctly quoted independent `-c 'print(123)'` probe returned the same
 `missing command` response. This confirms that the binary's execution
 dispatcher is nonfunctional beyond direct source-file argument parsing; it is
 not a benchmark-file-specific failure.
+
+## 2026-08-13 bootstrap executor diagnostic
+
+The bootstrap interpreter can execute the canonical sparse retained executor
+benchmark, but remains unsuitable as production-native evidence. The completed
+20-frame diagnostic reported a 7680×4320 CPU target, one 256×128 (32,768
+pixel) dynamic rectangle per frame, and exact full-buffer parity (zero
+mismatches; checksum `141975213147783168`). It considered two commands and
+culled 512 off-damage commands per frame. Timed executor-only p50/p95 were
+`4,945,464 ns` / `7,263,659 ns`; final CPU readback was outside timing.
+
+This meets the isolated 12.5 ms executor budget but does **not** overturn the
+status above: the route prints the bootstrap-seed warning and excludes Web
+layout, retained Web/GUI/WM publication, source/resource work, present, and
+scanout. A deployed self-hosted binary must reproduce this row before it can
+be promoted to a Simple 8K/80 result.
