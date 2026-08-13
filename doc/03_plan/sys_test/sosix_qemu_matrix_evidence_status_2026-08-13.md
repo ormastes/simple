@@ -30,6 +30,13 @@ excluded or complete.
 All artifact paths above are rooted at
 `/mnt/data/.simple/qemu/artifacts/sosix-qemu/`.
 
+The 2026-08-13 Linux all-guest preflight is retained at
+`linux/matrix/linux-matrix-preflight-20260813/`. All six host-admission
+receipts passed (including emulator, accelerator and shared-storage checks),
+but this checkout publishes only the x86_64 kernel/image pair; the other five
+rows correctly report missing current build artifacts. That local publication
+state does not supersede the immutable ARM64 and RV32 PASS bundles above.
+
 ## Parallel ownership plan
 
 1. The matrix wrapper remains the sole host-admission/settings owner. It may
