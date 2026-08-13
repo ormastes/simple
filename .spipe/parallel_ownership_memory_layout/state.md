@@ -613,6 +613,13 @@ dev-done
   `bin/simple test test/01_unit/lib/nogc_async_mut/parent_commit_owner_spec.spl --mode=native`
   using an admitted self-hosted CLI; child transport, payload apply/verify,
   cancellation, and process-level commit remain open.
+- impl: Connected that owner to the frozen transfer contract through
+  `ParentCommitSubmissionV1`. `commit_submissions` requires a boundary-valid,
+  non-parent source whose destination is the parent before the common
+  deterministic commit transition runs; parent-originated and wrong-domain
+  submissions return a diagnostic receipt without replacing the root. This
+  is contract/runtime wiring only until a real child actor/process delivers
+  one submission through the native transport path.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters

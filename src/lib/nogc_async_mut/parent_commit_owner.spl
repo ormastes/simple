@@ -17,7 +17,40 @@ use std.common.structural.parallel_commit.commit_engine.{
     parallel_commit_publish_envelopes,
     parallel_commit_receipt
 }
+use std.common.structural.transfer.transfer_contracts.{
+    ParallelExecutionDomain,
+    TransferEnvelopeV1,
+    parallel_execution_domain_to_u8,
+    transfer_envelope_v1_boundary_allowed
+}
 use std.thread_sffi.{MutexHandle, mutex_create}
+
+struct ParentCommitSubmissionV1:
+    """One child-created result paired with its checked return boundary."""
+    transfer: TransferEnvelopeV1
+    result: ResultEnvelopeV1
+
+fn parent_commit_submission_v1(transfer: TransferEnvelopeV1,
+                               result: ResultEnvelopeV1) -> ParentCommitSubmissionV1:
+    ParentCommitSubmissionV1(transfer: transfer, result: result)
+
+fn parent_commit_submission_v1_well_formed(value: ParentCommitSubmissionV1) -> bool:
+    """Admit only a boundary-valid child result returned to its parent.
+
+    This layer intentionally does not reinterpret payload bytes. Process
+    results therefore remain encoded copies, while thread/actor children may
+    use the existing admitted inline/frozen/owned routes. Raw pointer bits have
+    no transfer payload variant and fail before a result reaches the owner.
+    """
+    if not transfer_envelope_v1_boundary_allowed(value.transfer):
+        return false
+    if parallel_execution_domain_to_u8(value.transfer.target_domain)
+        != parallel_execution_domain_to_u8(ParallelExecutionDomain.Parent):
+        return false
+    if parallel_execution_domain_to_u8(value.transfer.source_domain)
+        == parallel_execution_domain_to_u8(ParallelExecutionDomain.Parent):
+        return false
+    true
 
 class ParentCommitOwnerV1:
     """One mutex-serialized authority for a parent snapshot root.
@@ -71,8 +104,32 @@ impl ParentCommitOwnerV1:
         self.mutex.unlock()
         outcome
 
+    me commit_submissions(submissions: [ParentCommitSubmissionV1],
+                          candidate_snapshot_token: i64) -> ParallelCommitOutcomeV1:
+        """Commit only child-created results with an admitted parent boundary."""
+        if not self.mutex.lock():
+            return self.lock_failure()
+        var results: [ResultEnvelopeV1] = []
+        for submission in submissions:
+            if not parent_commit_submission_v1_well_formed(submission):
+                val rejected = self.failure("invalid-child-result-transfer")
+                self.mutex.unlock()
+                return rejected
+            results.push(submission.result)
+        val current = self.state
+        val outcome = parallel_commit_publish_envelopes(
+            current, results, candidate_snapshot_token, self.order, self.conflict)
+        if outcome.receipt.ok:
+            self.state = outcome.state
+        self.mutex.unlock()
+        outcome
+
     fn lock_failure() -> ParallelCommitOutcomeV1:
         """Return a diagnostic-only outcome if runtime serialization is absent."""
+        self.failure("commit-owner-lock-unavailable")
+
+    fn failure(reason: text) -> ParallelCommitOutcomeV1:
+        """Keep the root unchanged while returning one well-formed diagnostic."""
         val current = self.state
         ParallelCommitOutcomeV1(
             state: current,
@@ -84,7 +141,7 @@ impl ParentCommitOwnerV1:
                 current.snapshot_token,
                 0,
                 [], [], [],
-                "commit-owner-lock-unavailable"
+                reason
             )
         )
 

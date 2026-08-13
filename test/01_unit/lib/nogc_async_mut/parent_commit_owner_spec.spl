@@ -7,6 +7,13 @@ use std.common.structural.parallel_commit.commit_contracts.{
     result_envelope_v1
 }
 use std.common.structural.parallel_commit.commit_engine.{parallel_commit_state_v1}
+use std.common.structural.transfer.transfer_contracts.{
+    ParallelExecutionDomain,
+    ParallelTransferMode,
+    ParallelTransferPayload,
+    transfer_envelope_v1
+}
+use std.nogc_async_mut.parent_commit_owner.{parent_commit_submission_v1}
 
 describe "ParentCommitOwnerV1 serialized publication":
     it "publishes one deterministic child batch and exposes the new root":
@@ -45,3 +52,32 @@ describe "ParentCommitOwnerV1 serialized publication":
             assert_equal(snapshot.snapshot_token, 401)
         else:
             assert_false(true)
+
+    it "requires a non-parent child boundary before it commits a result":
+        val owner = parent_commit_owner_v1(
+            parallel_commit_state_v1(4, 400),
+            ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        val child_result = result_envelope_v1(4, 7, 0, 17,
+            ParallelResultKind.Patch, 707, "child")
+        val returned = parent_commit_submission_v1(
+            transfer_envelope_v1(17, 0,
+                ParallelExecutionDomain.Actor,
+                ParallelExecutionDomain.Parent,
+                ParallelTransferMode.Copy,
+                ParallelTransferPayload.InlineCopy,
+                0, false),
+            child_result)
+        assert_true(owner.commit_submissions([returned], 401).receipt.ok)
+        val forged_parent_source = parent_commit_submission_v1(
+            transfer_envelope_v1(18, 0,
+                ParallelExecutionDomain.Parent,
+                ParallelExecutionDomain.Parent,
+                ParallelTransferMode.Copy,
+                ParallelTransferPayload.InlineCopy,
+                0, false),
+            result_envelope_v1(5, 8, 0, 18,
+                ParallelResultKind.Patch, 708, "forged"))
+        val rejected = owner.commit_submissions([forged_parent_source], 402)
+        assert_false(rejected.receipt.ok)
+        assert_equal(rejected.receipt.reason, "invalid-child-result-transfer")
