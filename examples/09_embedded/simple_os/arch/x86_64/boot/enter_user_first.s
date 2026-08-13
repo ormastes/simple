@@ -70,6 +70,15 @@ rt_x86_enter_user_first:
      * (and it is — create_user_address_space copies the kernel mappings). */
     movq    %r9, %rax               /* cr3 */
 
+    /* Diagnostic-only boundary receipts.  Preserve the cached CR3 around
+     * the first UART write: this code runs before the iret frame is built and
+     * must not mutate the physical root consumed by `movq %rax,%cr3`. */
+    pushq   %rax
+    movw    $0x3f8, %dx
+    movb    $'A', %al
+    outb    %al, %dx
+    popq    %rax
+
     /* Build the iret frame on the current (kernel) stack.
      * Hardware pops in order RIP, CS, RFLAGS, RSP, SS — so we push SS first. */
     pushq   %rcx                    /* SS   (arg4) */
@@ -81,6 +90,11 @@ rt_x86_enter_user_first:
     /* Swap to the user address space. Kernel is mapped in the user PML4
      * (clone of kernel range), so execution continues past this. */
     movq    %rax, %cr3
+
+    /* B proves the new CR3 accepted and still maps kernel serial code. */
+    movw    $0x3f8, %dx
+    movb    $'B', %al
+    outb    %al, %dx
 
     /* Zero GPRs so the user starts with a clean register file. */
     xorl    %eax, %eax
@@ -99,6 +113,11 @@ rt_x86_enter_user_first:
     xorl    %r14d, %r14d
     xorl    %r15d, %r15d
 
+    /* C is immediately before the hardware CPL transition.  eax/edx have
+     * already been zeroed for the child, so the receipt preserves its ABI. */
+    movw    $0x3f8, %dx
+    movb    $'C', %al
+    outb    %al, %dx
     iretq
     .size rt_x86_enter_user_first, . - rt_x86_enter_user_first
 
