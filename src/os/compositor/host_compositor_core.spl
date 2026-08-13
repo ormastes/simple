@@ -1657,24 +1657,63 @@ class HostCompositor:
             images.push(engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(frame), frame.width, frame.height, frame.pixels))
             top_frames.push(frame)
         val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar_input.taskbar, frames, selected_backend, 1000, taskbar_input.clock_label, 0)
+        # One canonical damage input feeds both the native-window GPU path and
+        # the retained CPU mirror path below. It contains the compositor's
+        # conservative old/new invalidation rectangles, not inferred command
+        # bounds, so removals and moves erase their prior pixels correctly.
+        var dirty_rects: [i64] = []
+        for rect in self.dirty.rects:
+            dirty_rects.push(rect.x.to_i64())
+            dirty_rects.push(rect.y.to_i64())
+            dirty_rects.push(rect.w.to_i64())
+            dirty_rects.push(rect.h.to_i64())
         if executor.window_present_enabled():
             var resources: [SimpleOsHostGpuImageResource] = []
             for frame in top_frames:
                 resources.push(simpleos_host_gpu_image_resource(
                     shared_wm_content_frame_image_uri(frame), frame.width,
                     frame.height, frame.pixels))
-            var dirty_rects: [i64] = []
-            for rect in self.dirty.rects:
-                dirty_rects.push(rect.x.to_i64())
-                dirty_rects.push(rect.y.to_i64())
-                dirty_rects.push(rect.w.to_i64())
-                dirty_rects.push(rect.h.to_i64())
             if not executor.render_draw_ir_composition_resources_window_revision_damaged(
                 composition, resources, self.render_revision,
                 self.render_revision, dirty_rects):
                 return self._reject_engine2d_frame()
             for frame in frames:
                 print "[hosted-wm] content-presented scene_revision={self.render_revision} path=vulkan-window-swapchain window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}"
+            self.dirty.clear()
+            return true
+        # CPU/SIMD retained frame switch. The first frame stays on the normal
+        # snapshot route and seeds the mirror below. Later frames raster only
+        # the conservative damage plan, copy only those regions into the host
+        # pixel backend, then present once to retire the Engine2D dirty tiles.
+        if executor.cpu_damage_seeded and executor.render_draw_ir_composition_cpu_damaged(
+            composition, images, dirty_rects):
+            val mirror = executor.cpu_damage_pixels()
+            if mirror.len() != self.width * self.height:
+                executor.abort_cpu_damage()
+                return self._reject_engine2d_frame()
+            var ri = 0
+            while ri + 3 < executor.cpu_damage_rects.len():
+                val x = executor.cpu_damage_rects[ri].to_i32()
+                val y = executor.cpu_damage_rects[ri + 1].to_i32()
+                val w = executor.cpu_damage_rects[ri + 2].to_i32()
+                val h = executor.cpu_damage_rects[ri + 3].to_i32()
+                if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > self.width or y + h > self.height:
+                    executor.abort_cpu_damage()
+                    return self._reject_engine2d_frame()
+                var region: [u32] = [0u32; w * h]
+                var row = 0
+                while row < h:
+                    var col = 0
+                    while col < w:
+                        region[row * w + col] = mirror[(y + row) * self.width + x + col]
+                        col += 1
+                    row += 1
+                self.pixel_backend.blit_pixels(x, y, w, h, region)
+                ri += 4
+            executor.present_cpu_damage()
+            self.pixel_backend.present()
+            for frame in frames:
+                print "[hosted-wm] content-presented scene_revision={self.render_revision} path=cpu-retained-damage window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}"
             self.dirty.clear()
             return true
         var accepted_composition = composition
@@ -1708,6 +1747,10 @@ class HostCompositor:
             return self._reject_engine2d_frame()
         self.pixel_backend.blit_pixels(0, 0, self.width, self.height, accepted_result.pixels)
         self.pixel_backend.present()
+        # The ordinary result already established the compositor-visible full
+        # frame. Seed the Engine2D retained mirror now, after successful
+        # validation, so the next damaged frame can avoid another full copy.
+        executor.seed_cpu_damage_mirror()
         for frame in frames:
             print "[hosted-wm] content-presented scene_revision={self.render_revision} window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}"
         self.dirty.clear()

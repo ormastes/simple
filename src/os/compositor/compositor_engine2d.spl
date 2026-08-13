@@ -7,6 +7,7 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dResolvedDrawIrImage,
     engine2d_draw_ir_adv_composition_window_present_with_images,
     engine2d_draw_ir_adv_composition_with_images,
+    engine2d_draw_ir_render_composition_damaged_deferred_cpu_with_images,
     engine2d_draw_ir_render_composition_damaged_with_images,
     engine2d_resolved_draw_ir_image
 }
@@ -125,6 +126,11 @@ class Engine2dCompositorBackend:
     last_damage_plan_mode: i64 = DAMAGE_PLAN_NONE
     last_damage_plan_rect_count: i64 = 0
     last_damage_plan_pixels: i64 = 0
+    # CPU retained presentation is seeded only after a validated full frame.
+    # The flat plan belongs to this frame transaction and is consumed before
+    # `present_cpu_damage()` clears the SoftwareBackend dirty bits.
+    cpu_damage_seeded: bool = false
+    cpu_damage_rects: [i64] = []
 
     static fn create(engine: Engine2D) -> Engine2dCompositorBackend:
         val id = _engine2d_compositor_next_id
@@ -187,6 +193,10 @@ class Engine2dCompositorBackend:
     # consume this concrete name instead of independently reinterpreting auto.
     fn selected_backend() -> text:
         self.engine.backend_name()
+
+    fn cpu_damage_enabled() -> bool:
+        val selected = self.engine.backend_name()
+        selected == "cpu" or selected == "cpu_simd" or selected == "software"
 
     fn window_present_enabled() -> bool:
         self.engine.window_present_enabled()
@@ -262,6 +272,11 @@ class Engine2dCompositorBackend:
         return its validated readback candidate to the hosted presenter."""
         _engine2d_compositor_clear_override(self.id)
         self.invalidate_frame_receipt()
+        # Ordinary composition execution obtains a snapshot and presents it.
+        # Any following retained read must seed from that complete frame.
+        self.cpu_damage_seeded = false
+        self.cpu_damage_rects = []
+        self.engine.invalidate_damage_mirror()
         self.revision_render_count = self.revision_render_count + 1
         var web_content_image_count = 0
         var batch_index = 0
@@ -293,6 +308,83 @@ class Engine2dCompositorBackend:
             self.last_scene_key = composition.scene_key
             self.last_web_content_image_count = web_content_image_count
         result
+
+    me seed_cpu_damage_mirror() -> bool:
+        """Seed the CPU retained mirror from a validated full-frame result."""
+        if not self.cpu_damage_enabled():
+            return false
+        val pixels = self.engine.read_pixels_damaged(256)
+        if pixels.len() != self.w * self.h:
+            return false
+        self.cpu_damage_seeded = true
+        true
+
+    me render_draw_ir_composition_cpu_damaged(
+        composition: DrawIrComposition,
+        images: [Engine2dResolvedDrawIrImage],
+        dirty_rects: [i64]
+    ) -> bool:
+        """Replay one CPU retained frame without presenting or copying it.
+
+        Callers consume `cpu_damage_pixels()` only for `cpu_damage_rects`, then
+        call `present_cpu_damage()` exactly once. A missing seed or malformed
+        plan returns false before raster mutation so the caller can use the
+        normal full-frame renderer.
+        """
+        if (not self.cpu_damage_enabled() or not self.cpu_damage_seeded or
+            dirty_rects.len() == 0 or dirty_rects.len() % 4 != 0):
+            return false
+        self.damage_pyramid.begin_frame()
+        var i = 0
+        while i < dirty_rects.len():
+            self.damage_pyramid.mark_rect(
+                dirty_rects[i], dirty_rects[i + 1],
+                dirty_rects[i + 2], dirty_rects[i + 3])
+            i += 4
+        val plan = build_damage_plan(
+            self.damage_pyramid, 0, DamagePlanPolicy.create(256, 60))
+        self.last_damage_plan_mode = plan.mode
+        self.last_damage_plan_rect_count = plan.output_rect_count
+        self.last_damage_plan_pixels = plan.planned_pixels
+        if plan.rects.len() == 0:
+            return false
+        val outcome: Engine2dDrawIrTileOutcome =
+            engine2d_draw_ir_render_composition_damaged_deferred_cpu_with_images(
+                self.engine, composition, images, plan.rects)
+        self.engine = outcome.engine
+        # `ops_skipped` includes commands deliberately culled by the exact
+        # damage index. That is the normal retained fast path, not an
+        # execution failure; only an explicit unsupported receipt rejects it.
+        if (outcome.unsupported_kinds != "none" or
+            outcome.ops_rendered <= 0):
+            # Deferred replay may already have touched a subset of the
+            # framebuffer. Clear and retire it before reporting failure so a
+            # later normal full render starts from a known blank surface,
+            # never from a partially blended retained frame.
+            self.engine.clear(0u32)
+            self.engine.present()
+            self.engine.invalidate_damage_mirror()
+            self.cpu_damage_seeded = false
+            self.cpu_damage_rects = []
+            return false
+        self.revision_render_count = self.revision_render_count + 1
+        self.cpu_damage_rects = plan.rects
+        true
+
+    me cpu_damage_pixels() -> [u32]:
+        self.engine.read_pixels_damaged(256)
+
+    me present_cpu_damage():
+        self.engine.present()
+        self.cpu_damage_rects = []
+
+    me abort_cpu_damage():
+        """Discard a post-replay CPU transaction that cannot be presented."""
+        self.engine.clear(0u32)
+        self.engine.present()
+        self.engine.invalidate_damage_mirror()
+        self.cpu_damage_seeded = false
+        self.cpu_damage_rects = []
 
     me render_draw_ir_composition_resources(
         composition: DrawIrComposition,
