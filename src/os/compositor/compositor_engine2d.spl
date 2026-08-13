@@ -1,6 +1,7 @@
 use std.gpu.engine2d.engine.{Engine2D}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 use common.ui.draw_ir.{DRAW_IR_COMMAND_IMAGE, DrawIrComposition}
+use common.ui.draw_ir_patch.{draw_ir_patch_between}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dDrawIrAdvResult,
     Engine2dDrawIrTileOutcome,
@@ -47,6 +48,48 @@ fn _engine2d_compositor_clear_override(owner_id: i32):
     _engine2d_compositor_override_width = 0
     _engine2d_compositor_override_height = 0
     _engine2d_compositor_override_pixels = []
+
+fn _engine2d_compositor_copy_pixels(pixels: [u32]) -> [u32]:
+    var copied: [u32] = []
+    for pixel in pixels:
+        copied.push(pixel)
+    copied
+
+fn _engine2d_compositor_pixels_checksum(pixels: [u32]) -> i64:
+    var checksum: i64 = 0
+    for pixel in pixels:
+        checksum = (checksum + pixel.to_i64()) % 2147483647
+    checksum
+
+fn _engine2d_compositor_damage_covers_patch(
+    before: DrawIrComposition, after: DrawIrComposition, dirty_rects: [i64]
+) -> bool:
+    if dirty_rects.len() == 0 or dirty_rects.len() % 4 != 0:
+        return false
+    val patch = draw_ir_patch_between(before, "cached", after, "current")
+    var required = 0
+    for rect in patch.damage_rects:
+        if rect.present and rect.width > 0 and rect.height > 0:
+            required += 1
+            val rx = rect.x.to_i64()
+            val ry = rect.y.to_i64()
+            val rw = rect.width.to_i64()
+            val rh = rect.height.to_i64()
+            var covered = false
+            var i = 0
+            while i < dirty_rects.len():
+                val dx = dirty_rects[i]
+                val dy = dirty_rects[i + 1]
+                val dw = dirty_rects[i + 2]
+                val dh = dirty_rects[i + 3]
+                if (dw > 0 and dh > 0 and dx <= rx and dy <= ry and
+                    dx + dw >= rx + rw and dy + dh >= ry + rh):
+                    covered = true
+                    break
+                i += 4
+            if not covered:
+                return false
+    required > 0
 
 fn engine2d_window_revision_exact_match(
     cached_producer_generation: i64,
@@ -126,6 +169,7 @@ class Engine2dCompositorBackend:
     last_damage_plan_mode: i64 = DAMAGE_PLAN_NONE
     last_damage_plan_rect_count: i64 = 0
     last_damage_plan_pixels: i64 = 0
+    last_damage_ops_rendered: i32 = 0
     # CPU retained presentation is seeded only after a validated full frame.
     # The flat plan belongs to this frame transaction and is consumed before
     # `present_cpu_damage()` clears the SoftwareBackend dirty bits.
@@ -334,6 +378,7 @@ class Engine2dCompositorBackend:
         if (not self.cpu_damage_enabled() or not self.cpu_damage_seeded or
             dirty_rects.len() == 0 or dirty_rects.len() % 4 != 0):
             return false
+        self.last_damage_ops_rendered = 0
         self.damage_pyramid.begin_frame()
         var i = 0
         while i < dirty_rects.len():
@@ -368,6 +413,7 @@ class Engine2dCompositorBackend:
             self.cpu_damage_rects = []
             return false
         self.revision_render_count = self.revision_render_count + 1
+        self.last_damage_ops_rendered = outcome.ops_rendered
         self.cpu_damage_rects = plan.rects
         true
 
@@ -451,6 +497,94 @@ class Engine2dCompositorBackend:
             self.revision_cache_resources = resources
             self.revision_cache_result = Some(result)
         result
+
+    me render_draw_ir_composition_resources_revision_damaged(
+        composition: DrawIrComposition,
+        resources: [SimpleOsHostGpuImageResource],
+        producer_generation: i64,
+        composition_revision: i64,
+        dirty_rects: [i64]
+    ) -> Engine2dDrawIrAdvResult:
+        """Consume one producer-owned retained receipt, conservatively.
+
+        NONE reuses the exact revision cache. LOCAL is admitted only on an
+        already seeded CPU surface; all other states take the complete
+        revision route, which seeds the next CPU retained update after a
+        validated full result.
+        """
+        if dirty_rects.len() == 0:
+            return self.render_draw_ir_composition_resources_revision(
+                composition, resources, producer_generation,
+                composition_revision)
+        val contiguous_base = (
+            producer_generation >= 0 and composition_revision > 0 and
+            self.revision_cache_producer_generation == producer_generation and
+            self.revision_cache_composition_revision == composition_revision - 1 and
+            self.revision_cache_backend == self.engine.backend_name() and
+            self.revision_cache_transfer_profile ==
+                _engine2d_compositor_transfer_profile() and
+            self.revision_cache_resources == resources)
+        if (self.cpu_damage_seeded and self.cpu_damage_enabled() and
+            contiguous_base and self.revision_cache_result != nil):
+            val cached_composition = self.revision_cache_composition.unwrap()
+            if not _engine2d_compositor_damage_covers_patch(
+                cached_composition, composition, dirty_rects):
+                val full = self.render_draw_ir_composition_resources_revision(
+                    composition, resources, producer_generation,
+                    composition_revision)
+                if (not full.fallback_required and
+                    full.skipped_command_count == 0 and
+                    full.rendered_command_count > 0 and
+                    full.pixels.len() == self.w * self.h):
+                    self.seed_cpu_damage_mirror()
+                return full
+            var images: [Engine2dResolvedDrawIrImage] = []
+            for resource in resources:
+                images.push(engine2d_resolved_draw_ir_image(
+                    resource.image_uri, resource.width, resource.height,
+                    resource.pixels))
+            if self.render_draw_ir_composition_cpu_damaged(
+                composition, images, dirty_rects):
+                val pixels = _engine2d_compositor_copy_pixels(
+                    self.cpu_damage_pixels())
+                self.present_cpu_damage()
+                if pixels.len() == self.w * self.h:
+                    if self.revision_cache_result != nil:
+                        val retained = Engine2dDrawIrAdvResult(
+                            schema: "simple-draw-ir-v2",
+                            unit_id: composition.composition_id,
+                            selected_backend: self.engine.backend_name(),
+                            fallback_required: false,
+                            fallback_reason: "",
+                            rendered_command_count: self.last_damage_ops_rendered,
+                            # Spatial culls are the expected retained path;
+                            # unsupported execution has already failed above.
+                            skipped_command_count: 0,
+                            pixels: pixels,
+                            readback_source: "cpu_damage_mirror_copy",
+                            backend_handle: 0,
+                            device_identity: 0,
+                            readback_checksum: (
+                                _engine2d_compositor_pixels_checksum(pixels))
+                        )
+                        self.revision_cache_producer_generation = producer_generation
+                        self.revision_cache_composition_revision = composition_revision
+                        self.revision_cache_backend = self.engine.backend_name()
+                        self.revision_cache_transfer_profile = (
+                            _engine2d_compositor_transfer_profile())
+                        self.revision_cache_composition = Some(composition)
+                        self.revision_cache_resources = resources
+                        self.revision_cache_result = Some(retained)
+                        return retained
+                self.abort_cpu_damage()
+        val full = self.render_draw_ir_composition_resources_revision(
+            composition, resources, producer_generation, composition_revision)
+        if (not full.fallback_required and
+            full.skipped_command_count == 0 and
+            full.rendered_command_count > 0 and
+            full.pixels.len() == self.w * self.h):
+            self.seed_cpu_damage_mirror()
+        full
 
     me render_draw_ir_composition_resources_window_revision(
         composition: DrawIrComposition,
