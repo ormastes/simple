@@ -53,6 +53,12 @@ future sends are rejected through every copy. This is still not an
 ownership-safe actor transport: native send/ask routing, close wakeups,
 cancellation, and typed transfer envelopes remain required.
 
+The scalar `BoundedChannel` implementation also uses a consumed-prefix cursor:
+receive is normally O(1), and backing storage is compacted only when a later
+send needs capacity. This retains its existing scalar sentinel API and does
+not turn it into a typed task/process transport; task envelopes still require
+their own ownership and lifecycle contract.
+
 Parent commit order is independent of child completion order. The bounded
 commit engine uses stable merge ordering, so equal keys preserve their
 left-to-right input order while large result batches avoid quadratic selection

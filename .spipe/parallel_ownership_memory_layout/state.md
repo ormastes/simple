@@ -667,3 +667,8 @@ dev-done
   close/copy fixture exists. The bootstrap-only mailbox check did not emit a
   final verdict, so native close wakeup, scheduler interaction, and actor
   lifecycle execution remain open.
+- impl: Reworked the generic scalar `BoundedChannel` receive path to use a
+  consumed-prefix cursor. It now compacts only when a later append needs the
+  bounded backing storage, rather than calling front removal on every receive.
+  The focused bootstrap source check passed; this is a storage-cost repair,
+  not evidence of a thread-safe task mailbox or typed transfer transport.

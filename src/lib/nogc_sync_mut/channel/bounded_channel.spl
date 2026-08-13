@@ -15,19 +15,27 @@ fn chan_state_closed() -> i64:
 class BoundedChannel:
     capacity: i64
     items: [i64]
+    head: i64
     state: i64
 
     fn is_closed() -> bool:
         self.state == chan_state_closed()
 
     fn is_full() -> bool:
-        self.items.len() >= self.capacity
+        self.len() >= self.capacity
 
     fn is_empty() -> bool:
-        self.items.len() == 0
+        self.len() == 0
 
     fn len() -> i64:
-        self.items.len()
+        self.items.len() - self.head
+
+    me compact_consumed_prefix_if_needed():
+        """Reuse bounded storage before appending after cursor-only receives."""
+        if self.head <= 0 or self.items.len() < self.capacity:
+            return
+        self.items = self.items.slice(self.head, self.items.len())
+        self.head = 0
 
     # Returns true if item was accepted, false if channel closed or full
     me fn send(item: i64) -> bool:
@@ -35,14 +43,18 @@ class BoundedChannel:
             return false
         if self.is_full():
             return false
+        self.compact_consumed_prefix_if_needed()
         self.items.push(item)
         true
 
     # Returns item or -1 if empty; -2 if closed-and-empty
     me fn recv() -> i64:
-        if self.items.len() > 0:
-            val item = self.items[0]
-            self.items.remove(0)
+        if self.len() > 0:
+            val item = self.items[self.head]
+            self.head = self.head + 1
+            if self.head >= self.items.len():
+                self.items = []
+                self.head = 0
             return item
         if self.is_closed():
             return -2
@@ -53,4 +65,4 @@ class BoundedChannel:
         self.state = chan_state_closed()
 
 fn bounded_channel_new(capacity: i64) -> BoundedChannel:
-    BoundedChannel(capacity: capacity, items: [], state: chan_state_open())
+    BoundedChannel(capacity: capacity, items: [], head: 0, state: chan_state_open())
