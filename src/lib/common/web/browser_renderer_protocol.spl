@@ -38,7 +38,11 @@ pub val BROWSER_RENDERER_MAX_PAYLOAD_BYTES: i64 = 1048576
 pub val BROWSER_RENDERER_MAX_SEQUENCE_ID: i64 = 9223372036854775806
 pub val BROWSER_RENDERER_COMMAND_CAPABILITY_BYTES: i64 = 32
 pub val BROWSER_RENDERER_MAX_COMMANDS: i64 = 1024
-pub val BROWSER_RENDERER_MAX_VIEWPORT: i64 = 4096
+# 8K-class retained Web frames need 7680x4320 (= 33,177,600 pixels). Keep a
+# separate side and area budget so an 8192x8192 square cannot turn the
+# protocol's dimension limit into a 256 MiB allocation request.
+pub val BROWSER_RENDERER_MAX_VIEWPORT: i64 = 8192
+pub val BROWSER_RENDERER_MAX_VIEWPORT_PIXELS: i64 = 33554432
 pub val BROWSER_RENDERER_MAX_SCROLL_DELTA_MILLI: i64 = 1048576000
 pub val BROWSER_RENDERER_WORKER_ARG: text = "--__simple-web-renderer-worker"
 val BROWSER_RENDERER_MAX_READ_CHUNK_BYTES: i64 = 8192
@@ -65,6 +69,12 @@ val BROWSER_RENDERER_MAX_FRAME_OVERDRAW: i64 = 16
 val BROWSER_RENDERER_MAX_FRAME_TEXT_UNITS: i64 = 262144
 val BROWSER_RENDERER_MAX_FRAME_STYLE_PROPS: i64 = 16384
 val BROWSER_RENDERER_MAX_FRAME_GLYPHS: i64 = 65536
+
+pub fn browser_renderer_viewport_valid(width: i64, height: i64) -> bool:
+    width > 0 and height > 0 and
+    width <= BROWSER_RENDERER_MAX_VIEWPORT and
+    height <= BROWSER_RENDERER_MAX_VIEWPORT and
+    width <= BROWSER_RENDERER_MAX_VIEWPORT_PIXELS / height
 
 pub struct BrowserRendererMessage:
     kind: text
@@ -1412,9 +1422,7 @@ pub fn browser_renderer_bookmark_snapshot_decode(
 pub fn browser_renderer_resize_encode(
     generation: i64, request_id: i64, width: i32, height: i32
 ) -> BrowserRendererEncodeResult:
-    if (width <= 0 or height <= 0 or
-        width.to_i64() > BROWSER_RENDERER_MAX_VIEWPORT or
-        height.to_i64() > BROWSER_RENDERER_MAX_VIEWPORT):
+    if not browser_renderer_viewport_valid(width.to_i64(), height.to_i64()):
         return _browser_renderer_reject_encode("invalid-resize")
     browser_renderer_message_encode(
         "resize", generation, request_id, "SBRZ1\t{width}\t{height}"
@@ -1434,9 +1442,7 @@ pub fn browser_renderer_resize_decode(
         )
     val width = fields[1].to_i64() ?? -1
     val height = fields[2].to_i64() ?? -1
-    if (width <= 0 or height <= 0 or
-        width > BROWSER_RENDERER_MAX_VIEWPORT or
-        height > BROWSER_RENDERER_MAX_VIEWPORT or
+    if (not browser_renderer_viewport_valid(width, height) or
         str(width) != fields[1] or str(height) != fields[2]):
         return BrowserRendererResizeDecodeResult(
             ok: false, reason: "invalid-resize", width: 0, height: 0
@@ -2326,9 +2332,8 @@ fn _browser_renderer_image_resource_valid(
     (resource.image_uri != "" and
         text_to_bytes(resource.image_uri).len().to_i64() <=
             SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES and
-        resource.width > 0 and resource.height > 0 and
-        resource.width.to_i64() <= BROWSER_RENDERER_MAX_VIEWPORT and
-        resource.height.to_i64() <= BROWSER_RENDERER_MAX_VIEWPORT and
+        browser_renderer_viewport_valid(
+            resource.width.to_i64(), resource.height.to_i64()) and
         pixel_count > 0 and resource.pixels.len().to_i64() == pixel_count)
 
 pub fn browser_renderer_referenced_image_resources(
