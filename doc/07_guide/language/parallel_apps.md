@@ -60,15 +60,16 @@ The single-threaded actor scheduler also uses a consumed-prefix cursor for its
 ready IDs. It reclaims a half-consumed large prefix in bounded batches rather
 than slicing the front after every dispatch; this is an amortized scheduling
 storage repair, not evidence of multi-threaded actor execution.
-The scheduler itself is a class-backed authority, so global `ActorRef` send
-and ask operations update the same actor registry, ready queue, and reply
-reservations rather than a copied scheduler value.
+The scheduler itself is a class-backed authority. Every `ActorRef` retains the
+scheduler that admitted it, so `spawn_on(custom_scheduler, ...)` send/ask/run
+operations cannot fall back to the ambient global scheduler. References copied
+from that actor retain the same routing authority.
 Each `Actor` is likewise class-backed: lifecycle state and error/dispatch
 counters remain with the scheduler’s actor handle instead of disappearing in
 value-array iteration.
 Legacy `ask()` replies now reserve a finite scheduler-owned result slot at
 admission. That credit remains consumed through handler completion until the
-caller consumes or cancels the reply; an exhausted store rejects the ask rather
+caller consumes or calls `cancel_ask(reply_id)`; an exhausted store rejects the ask rather
 than silently dropping a completed result. This remains a scalar legacy actor
 convention, not a typed transfer/parent-commit channel.
 

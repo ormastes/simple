@@ -29,8 +29,10 @@ use std.actor.scheduler.{get_scheduler, run_all, ActorScheduler}
 struct ActorRef:
     """Lightweight handle for sending messages to an actor.
 
-    ActorRef holds only the actor's ID and a reference to its mailbox.
-    It can be freely copied and passed between functions.
+    ActorRef holds the actor ID, mailbox, and the scheduler authority that
+    admitted the actor. It can be copied, but every copy routes through that
+    same scheduler; a reference returned by spawn_on() never falls back to the
+    ambient global scheduler.
 
     Example:
         val ref = spawn(handlers)
@@ -39,6 +41,7 @@ struct ActorRef:
     """
     actor_id: i64
     _mailbox: ActorMailbox
+    _scheduler: ActorScheduler
 
 impl ActorRef:
     fn send(method: text, args: [text]) -> bool:
@@ -59,7 +62,7 @@ impl ActorRef:
         if accepted:
             # Ensure actor is in the scheduler's ready queue only after the
             # mailbox's single owner has admitted the message.
-            get_scheduler()._enqueue_ready(self.actor_id)
+            self._scheduler._enqueue_ready(self.actor_id)
         accepted
 
     fn ask(method: text, args: [text]) -> i64:
@@ -67,7 +70,7 @@ impl ActorRef:
 
         The scheduler stores the handler's return value under the
         reply ID. After calling run() or run_until_idle(), retrieve
-        the result with get_scheduler().get_reply(reply_id).
+        the result through this reference's scheduler.
 
         Args:
             method: Name of the receive handler to invoke
@@ -76,7 +79,7 @@ impl ActorRef:
         Returns:
             Reply ID for retrieving the response (-1 on failure)
         """
-        get_scheduler().ask_message(self.actor_id, method, args)
+        self._scheduler.ask_message(self.actor_id, method, args)
 
     fn ask_sync(method: text, args: [text]) -> text?:
         """Send a message, run the scheduler, and return the reply.
@@ -95,8 +98,17 @@ impl ActorRef:
         val reply_id = self.ask(method, args)
         if reply_id < 0:
             return nil
-        get_scheduler().run_until_idle()
-        get_scheduler().consume_reply(reply_id)
+        self._scheduler.run_until_idle()
+        self._scheduler.consume_reply(reply_id)
+
+    fn cancel_ask(reply_id: i64) -> bool:
+        """Release a pending or completed reply reservation.
+
+        Cancellation releases bounded reply-store capacity immediately. A
+        message already admitted to the mailbox may still run, but it can no
+        longer retain a reply value after cancellation.
+        """
+        self._scheduler.cancel_reply(reply_id)
 
     fn get_id() -> i64:
         """Return the actor's unique ID."""
@@ -131,8 +143,9 @@ fn spawn(handlers: HandlerTable) -> ActorRef:
     val actor = Actor.new(handlers)
     val mailbox = actor.mailbox
     val aid = actor.id
-    get_scheduler().register_actor(actor)
-    ActorRef(actor_id: aid, _mailbox: mailbox)
+    val scheduler = get_scheduler()
+    scheduler.register_actor(actor)
+    ActorRef(actor_id: aid, _mailbox: mailbox, _scheduler: scheduler)
 
 fn spawn_with_mailbox(handlers: HandlerTable, mailbox: ActorMailbox) -> ActorRef:
     """Spawn an actor with a custom mailbox configuration.
@@ -147,8 +160,9 @@ fn spawn_with_mailbox(handlers: HandlerTable, mailbox: ActorMailbox) -> ActorRef
     val actor = Actor.with_mailbox(handlers, mailbox)
     val mb = actor.mailbox
     val aid = actor.id
-    get_scheduler().register_actor(actor)
-    ActorRef(actor_id: aid, _mailbox: mb)
+    val scheduler = get_scheduler()
+    scheduler.register_actor(actor)
+    ActorRef(actor_id: aid, _mailbox: mb, _scheduler: scheduler)
 
 fn spawn_on(scheduler: ActorScheduler, handlers: HandlerTable) -> ActorRef:
     """Spawn an actor on a specific scheduler (not the global one).
@@ -164,7 +178,7 @@ fn spawn_on(scheduler: ActorScheduler, handlers: HandlerTable) -> ActorRef:
     val mailbox = actor.mailbox
     val aid = actor.id
     scheduler.register_actor(actor)
-    ActorRef(actor_id: aid, _mailbox: mailbox)
+    ActorRef(actor_id: aid, _mailbox: mailbox, _scheduler: scheduler)
 
 # ================================================================
 # Pool and Broadcast Utilities

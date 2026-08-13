@@ -739,6 +739,11 @@ in-progress
   value struct. Global actor references therefore mutate the same scheduler
   registry, ready queue, reply reservations, and counters; this closes the
   scheduler half of the prior copied-handle split.
+- impl: `ActorRef` now retains its admitting `ActorScheduler` authority. This
+  makes `spawn_on(custom_scheduler, ...)` route send, ask, synchronous ask, and
+  bounded reply cancellation through that custom scheduler instead of the
+  ambient global scheduler. It is a single-threaded routing repair; native
+  actor lifecycle evidence and typed transfer remain open.
 - impl: `Actor` is now class-backed too, preserving its lifecycle, dispatch,
   and error fields through scheduler registry iteration. Mailbox sharing alone
   was insufficient because the surrounding actor values still lost those
