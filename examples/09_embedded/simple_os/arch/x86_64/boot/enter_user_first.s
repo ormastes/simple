@@ -70,13 +70,15 @@ rt_x86_enter_user_first:
      * (and it is — create_user_address_space copies the kernel mappings). */
     movq    %r9, %rax               /* cr3 */
 
-    /* Diagnostic-only boundary receipts.  Preserve the cached CR3 around
-     * the first UART write: this code runs before the iret frame is built and
-     * must not mutate the physical root consumed by `movq %rax,%cr3`. */
+    /* Diagnostic-only boundary receipts. Preserve the cached CR3 and user
+     * CS around the first UART write: this code runs before the iret frame is
+     * built and must not mutate either value consumed below. */
     pushq   %rax
+    pushq   %rdx
     movw    $0x3f8, %dx
     movb    $'A', %al
     outb    %al, %dx
+    popq    %rdx
     popq    %rax
 
     /* Build the iret frame on the current (kernel) stack.
