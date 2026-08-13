@@ -1,0 +1,47 @@
+use std.spec
+use std.nogc_async_mut.parent_commit_owner.{parent_commit_owner_v1}
+use std.common.structural.parallel_commit.commit_contracts.{
+    ParallelCommitOrder,
+    ParallelConflictPolicy,
+    ParallelResultKind,
+    result_envelope_v1
+}
+use std.common.structural.parallel_commit.commit_engine.{parallel_commit_state_v1}
+
+describe "ParentCommitOwnerV1 serialized publication":
+    it "publishes one deterministic child batch and exposes the new root":
+        val owner = parent_commit_owner_v1(
+            parallel_commit_state_v1(4, 400),
+            ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        val late = result_envelope_v1(4, 9, 0, 19,
+            ParallelResultKind.Patch, 709, "late")
+        val early = result_envelope_v1(4, 2, 0, 12,
+            ParallelResultKind.Patch, 702, "early")
+        val outcome = owner.commit([late, early], 401)
+        assert_true(outcome.receipt.ok)
+        assert_equal(outcome.receipt.ordered_task_ids[0], 2)
+        if val snapshot = owner.snapshot():
+            assert_equal(snapshot.revision, 5)
+            assert_equal(snapshot.snapshot_token, 401)
+        else:
+            assert_false(true)
+
+    it "retains the published root when a later child result is stale":
+        val owner = parent_commit_owner_v1(
+            parallel_commit_state_v1(4, 400),
+            ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        val first = result_envelope_v1(4, 1, 0, 11,
+            ParallelResultKind.Patch, 701, "first")
+        assert_true(owner.commit([first], 401).receipt.ok)
+        val stale = result_envelope_v1(4, 2, 0, 12,
+            ParallelResultKind.Patch, 702, "stale")
+        val rejected = owner.commit([stale], 402)
+        assert_false(rejected.receipt.ok)
+        assert_equal(rejected.receipt.reason, "stale-base-revision")
+        if val snapshot = owner.snapshot():
+            assert_equal(snapshot.revision, 5)
+            assert_equal(snapshot.snapshot_token, 401)
+        else:
+            assert_false(true)

@@ -604,6 +604,15 @@ dev-done
   with `bin/simple test test/01_unit/common/structural/parallel_commit_contract_spec.spl --mode=interpreter`
   on an admitted self-hosted CLI before treating the regression as execution
   evidence.
+- impl: Added `ParentCommitOwnerV1` as the runtime-owned serialized parent
+  root for local applications. It holds only the current revision/snapshot
+  token behind one mutex, delegates batch validation/order to the frozen common
+  engine, publishes a new root only on a valid receipt, and leaves stale or
+  conflicting batches unchanged. Its native-focused spec reached bootstrap-seed
+  runner diagnostics without a verdict. Resume once with
+  `bin/simple test test/01_unit/lib/nogc_async_mut/parent_commit_owner_spec.spl --mode=native`
+  using an admitted self-hosted CLI; child transport, payload apply/verify,
+  cancellation, and process-level commit remain open.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters

@@ -1,0 +1,95 @@
+# Parent-authoritative commit owner for bounded local parallel applications.
+#
+# This is intentionally a runtime owner, not a second commit contract. Child
+# results remain `ResultEnvelopeV1` values; the common engine determines their
+# canonical order and whether the whole batch may publish. This class supplies
+# the missing serialization boundary around the one mutable snapshot root.
+
+use std.common.structural.parallel_commit.commit_contracts.{
+    ParallelCommitOrder,
+    ParallelConflictPolicy,
+    ResultEnvelopeV1
+}
+use std.common.structural.parallel_commit.commit_engine.{
+    ParallelCommitOutcomeV1,
+    ParallelCommitReceiptV1,
+    ParallelCommitStateV1,
+    parallel_commit_publish_envelopes,
+    parallel_commit_receipt
+}
+use std.thread_sffi.{MutexHandle, mutex_create}
+
+class ParentCommitOwnerV1:
+    """One mutex-serialized authority for a parent snapshot root.
+
+    The owner never retains child envelopes after `commit`; only the common
+    transition's constant-size revision/token state survives. A failed batch
+    leaves that root unchanged, including stale and conflicting child results.
+    """
+    state: ParallelCommitStateV1
+    order: ParallelCommitOrder
+    conflict: ParallelConflictPolicy
+    mutex: MutexHandle
+
+impl ParentCommitOwnerV1:
+    static fn create(initial: ParallelCommitStateV1,
+                     order: ParallelCommitOrder,
+                     conflict: ParallelConflictPolicy) -> ParentCommitOwnerV1:
+        ParentCommitOwnerV1(
+            state: initial,
+            order: order,
+            conflict: conflict,
+            mutex: mutex_create()
+        )
+
+    fn snapshot() -> ParallelCommitStateV1?:
+        """Read the currently published root under the owner's mutex.
+
+        `nil` is deliberate fail-closed behavior for a broken runtime mutex;
+        callers must not infer a snapshot from an unsynchronized field read.
+        """
+        if not self.mutex.lock():
+            return nil
+        val snapshot = self.state
+        self.mutex.unlock()
+        Some(snapshot)
+
+    me commit(results: [ResultEnvelopeV1], candidate_snapshot_token: i64) -> ParallelCommitOutcomeV1:
+        """Validate, order, and atomically publish one child-result batch.
+
+        Publication is serialized before calling the pure common transition,
+        so a second child batch observes the revision written by the first.
+        No result history or mutable child payload is stored in this owner.
+        """
+        if not self.mutex.lock():
+            return self.lock_failure()
+        val current = self.state
+        val outcome = parallel_commit_publish_envelopes(
+            current, results, candidate_snapshot_token, self.order, self.conflict)
+        if outcome.receipt.ok:
+            self.state = outcome.state
+        self.mutex.unlock()
+        outcome
+
+    fn lock_failure() -> ParallelCommitOutcomeV1:
+        """Return a diagnostic-only outcome if runtime serialization is absent."""
+        val current = self.state
+        ParallelCommitOutcomeV1(
+            state: current,
+            receipt: parallel_commit_receipt(
+                false,
+                current.revision,
+                current.revision,
+                current.snapshot_token,
+                current.snapshot_token,
+                0,
+                [], [], [],
+                "commit-owner-lock-unavailable"
+            )
+        )
+
+fn parent_commit_owner_v1(initial: ParallelCommitStateV1,
+                          order: ParallelCommitOrder,
+                          conflict: ParallelConflictPolicy) -> ParentCommitOwnerV1:
+    """Construct the local parent authority after validating its root."""
+    ParentCommitOwnerV1.create(initial, order, conflict)
