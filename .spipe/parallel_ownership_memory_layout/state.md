@@ -644,6 +644,11 @@ dev-done
   owner calls `commit_submissions`; one malformed frame leaves the root
   unchanged. Reverse-arrival coverage pins task-id canonicalization, but the
   changed focused SSpec has not yet obtained a self-hosted verdict.
+- impl: Composed that inbox and batch transition through
+  `drain_process_result_batch`. The parent chooses a per-drain budget without
+  overriding queue capacity, receives only already accepted frames, stops at
+  empty/closed, and publishes the drained set in one atomic transition. Empty,
+  broken-lock, and non-positive-budget paths remain diagnostic/no-publish.
 - impl: Made bounded actor send admission observable: `ActorRef.send` now
   returns the mailbox acceptance result and queues scheduler work only after
   a message is admitted. The shared pure predicate rejects malformed counters

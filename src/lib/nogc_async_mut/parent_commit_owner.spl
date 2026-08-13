@@ -174,6 +174,31 @@ impl ParentCommitOwnerV1:
             return self.inbox_failure(received.reason)
         self.commit_process_result_frame(received.frame, candidate_snapshot_token)
 
+    me drain_process_result_batch(inbox: ParentCommitFrameInboxV1,
+                                  max_frames: i64,
+                                  candidate_snapshot_token: i64) -> ParallelCommitOutcomeV1:
+        """Drain up to a bounded number of accepted frames into one commit.
+
+        `max_frames` is an explicit parent scheduling budget, not a queue
+        capacity override. The owner consumes only frames already accepted by
+        the bounded inbox and delegates their canonical ordering to the common
+        commit engine in one transition.
+        """
+        if max_frames <= 0:
+            return self.inbox_failure("invalid-batch-limit")
+        var frames: [[u8]] = []
+        while frames.len() < max_frames:
+            val received = inbox.receive()
+            if received.ok:
+                frames.push(received.frame)
+                continue
+            if received.reason == "empty" or received.reason == "closed":
+                break
+            return self.inbox_failure(received.reason)
+        if frames.len() == 0:
+            return self.inbox_failure("empty")
+        self.commit_process_result_frames(frames, candidate_snapshot_token)
+
     fn lock_failure() -> ParallelCommitOutcomeV1:
         """Return a diagnostic-only outcome if runtime serialization is absent."""
         self.failure("commit-owner-lock-unavailable")
