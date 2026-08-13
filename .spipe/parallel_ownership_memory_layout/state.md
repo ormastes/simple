@@ -704,6 +704,10 @@ in-progress
   not evidence that the process result test passed or failed. Resume only
   after repairing the self-hosted `test --help` crash, then run once:
   `SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl --mode=native`.
+  The established root-cause record is
+  `doc/08_tracking/bug/native_selfhosted_run_segfault_startup_normalize_2026-07-24.md`:
+  the source guard is landed, while fresh deployment is blocked by the
+  stage-4 parse-memory balloon. This lane must not duplicate that compiler fix.
 - impl: Added a parent-reader retained-partial-line high-water counter. The
   line reassembler records the maximum text it owns across split writes and
   deferred scheduling, while oversized input is discarded rather than raised

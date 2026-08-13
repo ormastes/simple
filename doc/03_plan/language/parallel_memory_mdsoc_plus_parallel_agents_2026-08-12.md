@@ -60,9 +60,13 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 
 The available `bin/simple` identifies itself as a bootstrap seed. The deployed
 `bin/release/simple` wrapper identifies a self-hosted beta runtime, but rejects
-tests because its bounded `test --help` ABI probe currently segfaults. Before a
-lane claims executable PASS, repair that runtime defect and re-run its focused
-spec with the admitted Stage 4 CLI, capturing the resolved binary identity.
+tests because its bounded `test --help` ABI probe currently segfaults. The
+source guard is already tracked; its fresh redeploy is blocked by the documented
+stage-4 parse-memory balloon in
+[native_selfhosted_run_segfault_startup_normalize_2026-07-24.md](../../08_tracking/bug/native_selfhosted_run_segfault_startup_normalize_2026-07-24.md).
+Before a lane claims executable PASS, repair that deployment prerequisite and
+re-run its focused spec with the admitted Stage 4 CLI, capturing the resolved
+binary identity.
 The raw-value runtime blocker is
 [tracked](../../08_tracking/bug/parallel_runtime_raw_value_transport_2026-08-12.md);
 do not label actor/process isolation as complete until that record is resolved.
