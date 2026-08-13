@@ -942,6 +942,59 @@ pub fn rt_write_u32s_to_raw(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(written))
 }
 
+/// Checked strided `[u32]` to packed-raw copy. This mirrors the native runtime
+/// boundary and intentionally decodes interpreter Values instead of treating
+/// their backing array as a four-byte pixel buffer.
+pub fn rt_write_u32s_strided_to_raw(args: &[Value]) -> Result<Value, CompileError> {
+    let int_at = |index: usize| match args.get(index) {
+        Some(Value::Int(value)) => Some(*value),
+        _ => None,
+    };
+    let (ptr, capacity, destination_row_bytes, source_stride, source_x, source_y, width, height) = match (
+        int_at(0), int_at(1), int_at(2), int_at(4), int_at(5), int_at(6), int_at(7), int_at(8),
+    ) {
+        (Some(ptr), Some(capacity), Some(row_bytes), Some(stride), Some(x), Some(y), Some(width), Some(height)) =>
+            (ptr, capacity, row_bytes, stride, x, y, width, height),
+        _ => return Ok(Value::Int(0)),
+    };
+    let items: &[Value] = match args.get(3) {
+        Some(Value::Array(values)) => values,
+        Some(Value::FrozenArray(values)) => values,
+        Some(Value::FixedSizeArray { data, .. }) => data,
+        _ => return Ok(Value::Int(0)),
+    };
+    if ptr <= 0 || capacity < 0 || destination_row_bytes <= 0 || source_stride <= 0 || source_x < 0 || source_y < 0 || width <= 0 || height <= 0 || width > destination_row_bytes / 4 || width > source_stride || source_x > source_stride - width {
+        return Ok(Value::Int(0));
+    }
+    let row_bytes = match width.checked_mul(4) { Some(value) => value, None => return Ok(Value::Int(0)) };
+    if row_bytes > capacity {
+        return Ok(Value::Int(0));
+    }
+    let source_end_row = match source_y.checked_add(height) { Some(value) => value, None => return Ok(Value::Int(0)) };
+    if source_end_row > items.len() as i64 / source_stride {
+        return Ok(Value::Int(0));
+    }
+    let copied = match width.checked_mul(height) { Some(value) => value, None => return Ok(Value::Int(0)) };
+    let last_row_bytes = match height.checked_sub(1).and_then(|rows| rows.checked_mul(destination_row_bytes)) { Some(value) => value, None => return Ok(Value::Int(0)) };
+    if last_row_bytes > capacity - row_bytes {
+        return Ok(Value::Int(0));
+    }
+    let destination = ptr as usize as *mut u8;
+    for row in 0..height {
+        let source_base = (source_y + row) * source_stride + source_x;
+        let destination_base = row * destination_row_bytes;
+        for col in 0..width {
+            let word = match &items[(source_base + col) as usize] {
+                Value::Int(value) => *value as u32,
+                Value::UInt { value, .. } => *value as u32,
+                _ => 0,
+            };
+            unsafe { std::ptr::copy_nonoverlapping(word.to_le_bytes().as_ptr(), destination.add((destination_base + col * 4) as usize), 4) };
+        }
+    }
+    Ok(Value::Int(copied))
+}
+
 /// Write bytes to file
 ///
 /// Handles both `Value::Int(i)` (plain integer byte) and

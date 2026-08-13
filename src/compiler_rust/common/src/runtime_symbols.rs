@@ -1013,6 +1013,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_bytes_from_raw",
     "rt_u32s_from_raw",
     "rt_write_u32s_to_raw",
+    "rt_write_u32s_strided_to_raw",
     "rt_write_u32s_to_raw_checksum",
     "rt_write_fill_u32s_to_raw_checksum",
     "rt_simple_sandbox_section_start",
@@ -2293,6 +2294,7 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_ptr_read_i32"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_ptr_read_u8"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_write_u32s_to_raw_checksum"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_write_u32s_strided_to_raw"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_write_fill_u32s_to_raw_checksum"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_rocm_init"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_engine2d_rocm_download_pixels"));

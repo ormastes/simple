@@ -435,6 +435,7 @@ pub use sffi::{
     rt_file_read_bytes,
     rt_bytes_from_raw,
     rt_write_u32s_to_raw,
+    rt_write_u32s_strided_to_raw,
     rt_write_u32s_to_raw_checksum,
     rt_write_fill_u32s_to_raw_checksum,
     rt_bytes_to_text,

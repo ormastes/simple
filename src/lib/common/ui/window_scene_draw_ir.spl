@@ -194,6 +194,15 @@ extern fn rt_memset(dst: i64, value: i64, n: i64) -> i64
 # (230,400 at 480x480 — see doc/09_report/ws_f4_presentation_readback_audit_2026-08-06.md).
 # The returned array is a fresh copy, so it carries NO live-alias hazard.
 extern fn rt_u32s_from_raw(data_ptr: i64, count: i64) -> [u32]
+# Copy a rectangular `[u32]` source window into a packed raw framebuffer in
+# one runtime call. The source is deliberately an array, not a raw pointer:
+# Simple u32 arrays use 8-byte value slots and cannot safely be memcpy'd.
+# Returns the exact copied pixel count, or zero without writing on validation
+# failure. The scalar path below remains the clipping/malformed-input fallback.
+extern fn rt_write_u32s_strided_to_raw(data_ptr: i64, capacity_bytes: i64,
+                                       destination_row_bytes: i64, source: [u32],
+                                       source_stride: i64, source_x: i64, source_y: i64,
+                                       width: i64, height: i64) -> i64
 
 var _shared_wm_px_addr: i64 = 0
 var _shared_wm_px_count: i64 = 0
@@ -362,18 +371,13 @@ class SharedWmPixelBufferBackend:
             dx >= 0 and dy >= 0 and dx <= _shared_wm_px_width - sw and
             dy <= _shared_wm_px_height - sh)
         if source_rows_fit and source_cols_fit and destination_fit:
-            var fast_row: i64 = 0
-            while fast_row < sh:
-                val source_row = (sy + fast_row) * stride + sx
-                val destination_row = (dy + fast_row) * _shared_wm_px_width + dx
-                var fast_col: i64 = 0
-                while fast_col < sw:
-                    rt_ptr_write_i32(_shared_wm_px_addr,
-                        (destination_row + fast_col) * 4,
-                        source[(source_row + fast_col).to_i32()] as i32)
-                    fast_col += 1
-                fast_row += 1
-            return
+            val destination_offset = (dy * _shared_wm_px_width + dx) * 4
+            val copied = rt_write_u32s_strided_to_raw(
+                _shared_wm_px_addr + destination_offset,
+                _shared_wm_px_count * 4 - destination_offset,
+                _shared_wm_px_width * 4, source, stride, sx, sy, sw, sh)
+            if copied == sw * sh:
+                return
         var row = 0
         while row < height:
             val source_row = (source_y + row) * source_stride + source_x

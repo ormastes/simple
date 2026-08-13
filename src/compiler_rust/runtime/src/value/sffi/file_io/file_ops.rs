@@ -1048,6 +1048,79 @@ pub unsafe extern "C" fn rt_write_u32s_to_raw(ptr: i64, values: RuntimeValue) ->
     len
 }
 
+/// Copy a checked strided rectangle from a Simple `[u32]` array to packed raw
+/// pixels. The array stores runtime values rather than packed u32 words, so it
+/// must be decoded element-by-element inside this one runtime boundary.
+#[no_mangle]
+pub unsafe extern "C" fn rt_write_u32s_strided_to_raw(
+    ptr: i64,
+    capacity_bytes: i64,
+    destination_row_bytes: i64,
+    values: RuntimeValue,
+    source_stride: i64,
+    source_x: i64,
+    source_y: i64,
+    width: i64,
+    height: i64,
+) -> i64 {
+    if ptr <= 0
+        || capacity_bytes < 0
+        || destination_row_bytes <= 0
+        || source_stride <= 0
+        || source_x < 0
+        || source_y < 0
+        || width <= 0
+        || height <= 0
+        || width > destination_row_bytes / 4
+        || width > source_stride
+        || source_x > source_stride - width
+    {
+        return 0;
+    }
+    let row_bytes = match width.checked_mul(4) {
+        Some(value) => value,
+        None => return 0,
+    };
+    if row_bytes > capacity_bytes {
+        return 0;
+    }
+    let source_end_row = match source_y.checked_add(height) {
+        Some(value) => value,
+        None => return 0,
+    };
+    if source_end_row > rt_array_len(values) / source_stride {
+        return 0;
+    }
+    let copied = match width.checked_mul(height) {
+        Some(value) => value,
+        None => return 0,
+    };
+    let last_row_bytes = match height
+        .checked_sub(1)
+        .and_then(|rows| rows.checked_mul(destination_row_bytes))
+    {
+        Some(value) => value,
+        None => return 0,
+    };
+    if last_row_bytes > capacity_bytes - row_bytes {
+        return 0;
+    }
+    let dst = ptr as usize as *mut u8;
+    for row in 0..height {
+        let source_base = (source_y + row) * source_stride + source_x;
+        let destination_base = row * destination_row_bytes;
+        for col in 0..width {
+            let word = rt_array_get(values, source_base + col).as_int() as u32;
+            std::ptr::copy_nonoverlapping(
+                word.to_le_bytes().as_ptr(),
+                dst.add((destination_base + col * 4) as usize),
+                4,
+            );
+        }
+    }
+    copied
+}
+
 /// Copy the first `count` u32 values and return their wire checksum.
 #[no_mangle]
 pub unsafe extern "C" fn rt_write_u32s_to_raw_checksum(ptr: i64, values: RuntimeValue, count: i64) -> i64 {
@@ -1713,6 +1786,51 @@ sandbox_lowering:
 
         assert_eq!(written, 3);
         assert_eq!(output, [0, 0x7fff_ffff, 0xffff_ffff]);
+    }
+
+    #[test]
+    fn test_write_u32s_strided_to_raw_is_exact_and_rejects_short_destination() {
+        let values = rt_array_new(9);
+        for value in [0x0102_0304, 2, 3, 4, 0x8000_0000, 6, 7, 8, 0xffff_ffff] {
+            rt_array_push(values, RuntimeValue::from_int(value));
+        }
+        let mut output = [0xDEAD_BEEFu32; 15];
+        let written = unsafe {
+            rt_write_u32s_strided_to_raw(
+                output.as_mut_ptr() as i64,
+                (output.len() * std::mem::size_of::<u32>()) as i64,
+                5 * 4,
+                values,
+                3,
+                1,
+                1,
+                2,
+                2,
+            )
+        };
+        assert_eq!(written, 4);
+        assert_eq!(
+            output[0..7],
+            [0x8000_0000, 6, 0xDEAD_BEEF, 0xDEAD_BEEF, 0xDEAD_BEEF, 8, 0xffff_ffff]
+        );
+        let unchanged = output;
+        assert_eq!(
+            unsafe {
+                rt_write_u32s_strided_to_raw(
+                    output.as_mut_ptr() as i64,
+                    6 * 4,
+                    5 * 4,
+                    values,
+                    3,
+                    1,
+                    1,
+                    2,
+                    2,
+                )
+            },
+            0
+        );
+        assert_eq!(output, unchanged);
     }
 
     #[test]

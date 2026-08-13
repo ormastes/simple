@@ -437,6 +437,45 @@ pub fn rt_u32s_from_raw(data_ptr: i64, count: i64) -> i64:
         i = i + 1
     result
 
+# Write a checked rectangular window from a boxed `[u32]` array into packed
+# native pixels. Array elements are decoded through rt_typed_words_u32_at;
+# they are not a packed four-byte source buffer. Every bound is checked before
+# the first store, so callers can use zero as an all-or-nothing failure result.
+pub fn rt_write_u32s_strided_to_raw(data_ptr: i64, capacity_bytes: i64,
+                                    destination_row_bytes: i64, source: i64,
+                                    source_stride: i64, source_x: i64, source_y: i64,
+                                    width: i64, height: i64) -> i64:
+    if (data_ptr <= 0 or capacity_bytes < 0 or destination_row_bytes <= 0 or
+        source_stride <= 0 or source_x < 0 or source_y < 0 or
+        width <= 0 or height <= 0 or array_is_valid(source) < 1):
+        return 0
+    if width > destination_row_bytes / 4 or width > source_stride or source_x > source_stride - width:
+        return 0
+    val row_bytes = width * 4
+    if row_bytes > capacity_bytes:
+        return 0
+    if source_y > 9223372036854775807 - height or source_y + height > array_len_value(source) / source_stride:
+        return 0
+    if height > 9223372036854775807 / width:
+        return 0
+    if height - 1 > (capacity_bytes - row_bytes) / destination_row_bytes:
+        return 0
+    var row = 0
+    while row < height:
+        val source_base = (source_y + row) * source_stride + source_x
+        val destination_base = row * destination_row_bytes
+        var col = 0
+        while col < width:
+            val pixel = rt_typed_words_u32_at(source, source_base + col)
+            val offset = destination_base + col * 4
+            spl_store_u8(data_ptr, offset, pixel & 255)
+            spl_store_u8(data_ptr, offset + 1, (pixel >> 8) & 255)
+            spl_store_u8(data_ptr, offset + 2, (pixel >> 16) & 255)
+            spl_store_u8(data_ptr, offset + 3, (pixel >> 24) & 255)
+            col = col + 1
+        row = row + 1
+    return width * height
+
 pub fn rt_typed_words_u32_store_known_data_at(array: i64, items: i64, idx: i64, value: i64) -> i8:
     return rt_typed_words_u32_push_known_data_at(array, items, idx, value)
 

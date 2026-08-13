@@ -693,6 +693,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_bytes_from_raw", file_io::rt_bytes_from_raw);
     insert_simple!("rt_u32s_from_raw", file_io::rt_u32s_from_raw);
     insert_simple!("rt_write_u32s_to_raw", file_io::rt_write_u32s_to_raw);
+    insert_simple!("rt_write_u32s_strided_to_raw", file_io::rt_write_u32s_strided_to_raw);
     insert_simple!("rt_bytes_to_text", conversion::rt_bytes_to_text_fn);
     insert_simple!("rt_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn);
     insert_simple!("rt_bytes_u64_le_at", sffi_array::rt_bytes_u64_le_at_fn);
