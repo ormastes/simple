@@ -786,3 +786,6 @@ in-progress
   It compacts amortized storage under its mutex rather than slicing the full
   remaining task-ID queue on each pop; admission and sentinel semantics are
   intentionally unchanged pending the separate bounded typed-envelope rewrite.
+- impl: Reworked `HostJoinSet` completion delivery to use a consumed-prefix
+  cursor. Completed result order remains FIFO while streaming joins no longer
+  copy the remaining completion queue per result.
