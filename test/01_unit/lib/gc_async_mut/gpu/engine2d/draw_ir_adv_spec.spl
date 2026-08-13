@@ -56,7 +56,7 @@ use common.ui.draw_ir.{
     draw_ir_text_shaped_font,
     draw_ir_style_prop
 }
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_batch_with_images, engine2d_draw_ir_adv_composition, engine2d_draw_ir_adv_composition_with_images, engine2d_draw_ir_adv_composition_present_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images, engine2d_draw_ir_adv_strict_vulkan_primitives_with_images, engine2d_draw_ir_coalesce_plain_fills, engine2d_draw_ir_render_damaged, engine2d_draw_ir_render_composition_damaged, engine2d_draw_ir_render_composition_damaged_with_images, engine2d_draw_ir_render_tiled, engine2d_resolved_draw_ir_image}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_batch_with_images, engine2d_draw_ir_adv_composition, engine2d_draw_ir_adv_composition_with_images, engine2d_draw_ir_adv_composition_present_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images, engine2d_draw_ir_adv_strict_vulkan_primitives_with_images, engine2d_draw_ir_coalesce_plain_fills, engine2d_draw_ir_render_damaged, engine2d_draw_ir_render_composition_damaged, engine2d_draw_ir_render_composition_damaged_deferred_cpu_with_images, engine2d_draw_ir_render_composition_damaged_with_images, engine2d_draw_ir_render_tiled, engine2d_resolved_draw_ir_image}
 use std.gc_async_mut.gpu.engine2d.draw_ir_runtime_adv.{engine2d_draw_ir_adv_batch_runtime_queue}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{engine2d_host_gpu_runtime_queue_with_backend_handle, engine2d_host_gpu_runtime_reset}
@@ -255,6 +255,30 @@ describe "Engine2D advanced Draw IR executor":
         expect(outcome.unsupported_kinds).to_equal("none")
         expect(outcome.readback.pixels[2 * 8 + 4]).to_equal(GREEN)
         expect(outcome.readback.pixels[0]).to_equal(BG)
+        engine.shutdown()
+
+    it "leaves CPU dirty state intact until the retained region presenter consumes it":
+        var engine = Engine2D.create_with_backend(8, 4, "cpu_simd")
+        engine.clear(BG)
+        val seed = engine.read_pixels_damaged(16)
+        expect(seed[0]).to_equal(BG)
+        engine.present()
+        val batch = draw_ir_batch(
+            "cpu-root", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "cpu", "cpu", 0, 0, 8, 4, 0, 1000, false),
+            [draw_ir_rect("damage", 2, 1, 2, 1, RED)])
+        val composition = draw_ir_composition(
+            "cpu-retained", "cpu:8x4", DRAW_IR_BACKEND_CPU, [batch])
+        val outcome = engine2d_draw_ir_render_composition_damaged_deferred_cpu_with_images(
+            engine, composition, [], [2, 1, 2, 1])
+        engine = outcome.engine
+        expect(outcome.unsupported_kinds).to_equal("none")
+        expect(outcome.readback.source).to_equal("not_requested")
+        val mirror = engine.read_pixels_damaged(16)
+        expect(mirror[1 * 8 + 2]).to_equal(RED)
+        expect(mirror[0]).to_equal(BG)
+        engine.present()
         engine.shutdown()
 
     it "rejects malformed composition damage before narrowing coordinates":

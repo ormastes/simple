@@ -3219,14 +3219,20 @@ fn engine2d_draw_ir_retained_rejected(
         unsupported_kinds: reason,
         readback: engine2d_readback([], "preflight_rejected"))
 
-fn engine2d_draw_ir_render_composition_damaged_with_images(
+fn _engine2d_draw_ir_render_composition_damaged_with_images(
     engine: Engine2D,
     composition: DrawIrComposition,
     images: [Engine2dResolvedDrawIrImage],
     damage_rects: [i64],
-    readback_frame: bool
+    readback_frame: bool,
+    defer_cpu_present: bool
 ) -> Engine2dDrawIrTileOutcome:
     """Retained damaged replay with the composition's resolved image table."""
+    if (defer_cpu_present and engine.backend_name() != "cpu" and
+        engine.backend_name() != "cpu_simd" and
+        engine.backend_name() != "software"):
+        return engine2d_draw_ir_retained_rejected(
+            engine, "retained-cpu-present-defer-requires-cpu")
     if not _engine2d_draw_ir_damage_rects_valid(
         damage_rects, engine.width(), engine.height()):
         return Engine2dDrawIrTileOutcome(
@@ -3334,7 +3340,8 @@ fn engine2d_draw_ir_render_composition_damaged_with_images(
         eng.present()
         readback = eng.read_pixels_with_source()
     else:
-        if not eng.finalize_compute_frame_no_readback(): eng.present()
+        if not defer_cpu_present:
+            if not eng.finalize_compute_frame_no_readback(): eng.present()
     Engine2dDrawIrTileOutcome(
         engine: eng,
         tiles_total: damage_rects.len().to_i32() / 4,
@@ -3346,6 +3353,31 @@ fn engine2d_draw_ir_render_composition_damaged_with_images(
         readback: readback,
         commands_considered: commands_considered,
         commands_culled_by_damage: commands_culled_by_damage)
+
+fn engine2d_draw_ir_render_composition_damaged_with_images(
+    engine: Engine2D,
+    composition: DrawIrComposition,
+    images: [Engine2dResolvedDrawIrImage],
+    damage_rects: [i64],
+    readback_frame: bool
+) -> Engine2dDrawIrTileOutcome:
+    _engine2d_draw_ir_render_composition_damaged_with_images(
+        engine, composition, images, damage_rects, readback_frame, false)
+
+fn engine2d_draw_ir_render_composition_damaged_deferred_cpu_with_images(
+    engine: Engine2D,
+    composition: DrawIrComposition,
+    images: [Engine2dResolvedDrawIrImage],
+    damage_rects: [i64]
+) -> Engine2dDrawIrTileOutcome:
+    """CPU-only retained replay that leaves dirty state for region present.
+
+    The caller must consume `engine.read_pixels_damaged()` and then call
+    `engine.present()` exactly once. This is intentionally separate from the
+    normal executor so all legacy callers retain their current present timing.
+    """
+    _engine2d_draw_ir_render_composition_damaged_with_images(
+        engine, composition, images, damage_rects, false, true)
 
 fn engine2d_draw_ir_render_composition_damaged(
     engine: Engine2D,
@@ -3466,4 +3498,5 @@ export engine2d_draw_ir_render_damaged
 export engine2d_draw_ir_render_damaged_with_images
 export engine2d_draw_ir_render_composition_damaged
 export engine2d_draw_ir_render_composition_damaged_with_images
+export engine2d_draw_ir_render_composition_damaged_deferred_cpu_with_images
 export engine2d_resolved_draw_ir_image
