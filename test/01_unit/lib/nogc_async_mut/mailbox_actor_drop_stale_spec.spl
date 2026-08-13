@@ -1,5 +1,5 @@
 use std.spec
-use std.nogc_async_mut.mailbox_actor.{PriorityMailbox, MailboxConfig, PRIORITY_MAILBOX_DEFAULT_CAPACITY}
+use std.nogc_async_mut.mailbox_actor.{PriorityMailbox, MailboxConfig, PRIORITY_MAILBOX_DEFAULT_CAPACITY, SEND_SUCCESS, SEND_QUEUE_FULL}
 use std.nogc_async_mut.types.{Capacity}
 
 describe "PriorityMailbox drop_stale off_heap_bytes accounting":
@@ -19,6 +19,20 @@ describe "PriorityMailbox drop_stale off_heap_bytes accounting":
         )
         val mailbox = PriorityMailbox.new(forged)
         expect(mailbox.config.capacity.value).to_equal(PRIORITY_MAILBOX_DEFAULT_CAPACITY)
+
+    it "does not reserve priority capacity when priority is disabled":
+        val mailbox = PriorityMailbox.new(MailboxConfig.default())
+        var accepted = 0
+        while accepted < PRIORITY_MAILBOX_DEFAULT_CAPACITY:
+            val result = mailbox.send_normal(accepted, 1, nil)
+            if result == SEND_SUCCESS:
+                accepted = accepted + 1
+            else:
+                # Keep the loop bounded even when a broken admission rule
+                # rejects early; the exact accepted count is the oracle.
+                break
+        expect(accepted).to_equal(PRIORITY_MAILBOX_DEFAULT_CAPACITY)
+        expect(mailbox.send_normal(1001, 1, nil)).to_equal(SEND_QUEUE_FULL)
 
     it "decrements off_heap_bytes when dropping stale messages, like receive() does":
         val mb = PriorityMailbox.new(MailboxConfig.unbounded())

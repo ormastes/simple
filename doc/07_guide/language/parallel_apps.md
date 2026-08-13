@@ -82,6 +82,8 @@ the admitted limit and current retained work.
 The legacy `PriorityMailbox` compatibility spelling `unbounded()` also now
 selects its finite default capacity. Queue owners normalize non-positive or
 forged capacities before admission, so zero cannot reopen an unbounded queue.
+The high-priority reserve is active only when priority admission is enabled;
+the default normal-only mailbox retains its full configured finite capacity.
 
 The scalar `BoundedChannel` implementation also uses a consumed-prefix cursor:
 receive is normally O(1), and backing storage is compacted only when a later
