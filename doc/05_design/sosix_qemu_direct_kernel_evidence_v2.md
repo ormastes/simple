@@ -31,3 +31,7 @@ from declared hashes. Collector source keeps duplicate-nonce rejection and
 hash-selected artifact uniqueness gates; root review must require those gates
 to remain intact before accepting the patch.
 
+For OVMF/GRUB, the accepted external-firmware profile is literal rather than
+synthetic: `BdsDxe: starting Boot>[grub-uefi] multiboot loading>guest-entry`.
+The first two strings originate in OVMF and GRUB respectively, so the guest is
+responsible only for the final `guest-entry` marker.

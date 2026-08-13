@@ -34,6 +34,14 @@ firmware rows and v2 for all modes, but direct-kernel is v2-only.
 The collector remains the sole matrix admission owner. Producer evidence does
 not itself promote a row.
 
+### OVMF/GRUB stage profile
+
+UEFI pflash may use the concrete, externally emitted stage sequence
+`BdsDxe: starting Boot>[grub-uefi] multiboot loading>guest-entry`. The first
+marker is OVMF BDS output and the second is GRUB's own serial echo. This is an
+alternative to the legacy generic UEFI labels, not a relabeling step: producer
+and collector require the literal transcript bytes in order.
+
 ## Invariants
 
 - A nonce identifies one immutable workload run and cannot double as
@@ -49,4 +57,3 @@ not itself promote a row.
 
 Lower-model sidecar: `N/A` (Codex Spark unavailable). Merge owner: root agent.
 Final reviewer: root/high-capability model.
-
