@@ -267,3 +267,32 @@ remains linkable for the baremetal target after the retained-damage work.
 It is intentionally **not** a guest boot, QEMU framebuffer, physical-board,
 or throughput result. The existing SimpleOS desktop QEMU gate remains unable to
 establish an 8K/80 baremetal claim; no such claim is made here.
+
+## 2026-08-13 refreshed native retained-operation receipt
+
+Current source revision `80c9d2c3250` was measured with the hardened
+single-owner harness:
+
+```sh
+BUILD_DIR=build/check/engine2d-simd-8k-ops-retained-current-20260813 \
+  ENGINE2D_SIMD_8K_ACTIVE_BASIS_POINTS=100 \
+  sh scripts/check/check-engine2d-simd-8k-ops.shs
+```
+
+At 7680×4320 with 331,776 active pixels (1%), seven samples produced these
+native x86 receipts:
+
+| Operation | p50 ns | p95 ns |
+|---|---:|---:|
+| fill | 44,065 | 221,174 |
+| copy | 84,723 | 270,970 |
+| variable alpha blend | 488,767 | 536,199 |
+| constant alpha blend | 425,235 | 470,432 |
+| six-call retained mix | 1,169,542 | 1,505,216 |
+
+The checksum was `2436809228175672195`, the native SIMD receipt count was
+`35`, and maximum RSS was `519,680 KiB`. Every isolated operation satisfied
+the 12.5 ms primitive budget. The receipt still emitted
+`engine2d_8k_full_dynamic_frame_80fps_proven=false`: it excludes retained
+DrawIR traversal, WM copying/frame switching, scheduling, and scanout, so it
+must not be promoted to an application 8K/80 claim.
