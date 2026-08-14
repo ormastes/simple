@@ -2,6 +2,7 @@
 
 use std.spec.{describe, it, expect}
 use std.io_runtime.file_read
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_vulkan_observed_delta}
 
 val OWNER = "src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl"
 
@@ -18,9 +19,27 @@ describe "strict Vulkan DrawIR submit/readback separation":
             "val finalized = if submitted: eng.finalize_compute_frame_no_readback() else: false")
         expect(source).to_contain("val receipt = eng.latest_vulkan_frame_receipt()")
         expect(source).to_contain(
-            "submitted and finalized and completion_known and")
-        expect(source).to_contain("device_submit_count: if completed: 1 else: 0")
-        expect(source).to_contain("device_fence_count: if completed: 1 else: 0")
+            "submitted and finalized and observed.valid and completion_known and")
+        expect(source).to_contain("observed.submit_count")
+        expect(source).to_contain("observed.fence_count")
+
+    it "accepts exactly one observed submit and completed fence delta":
+        val observed = engine2d_vulkan_observed_delta(17, 23, 18, 24)
+        expect(observed.valid).to_be(true)
+        expect(observed.submit_count).to_equal(1)
+        expect(observed.fence_count).to_equal(1)
+
+    it "rejects a successful backend no-op without observed deltas":
+        val no_op = engine2d_vulkan_observed_delta(17, 23, 17, 23)
+        expect(no_op.valid).to_be(false)
+        expect(no_op.submit_count).to_equal(0)
+        expect(no_op.fence_count).to_equal(0)
+
+    it "rejects submission without an observed completed fence":
+        val incomplete = engine2d_vulkan_observed_delta(17, 23, 18, 23)
+        expect(incomplete.valid).to_be(false)
+        expect(incomplete.submit_count).to_equal(1)
+        expect(incomplete.fence_count).to_equal(0)
 
     it "keeps framebuffer transfer outside the submit timing boundary":
         val source = file_read(OWNER)

@@ -1,36 +1,32 @@
 # Render 8K80 container acceptance hardening gaps
 
-Status: **OPEN / FINAL REVIEW REJECTED AFTER THREE FIX CYCLES**
+Status: **RESOLVED / IMPLEMENTATION HANDOFF ACCEPTED (WARN)**
 
-The container/GPU research and design are complete, and substantial source
-implementation exists, but independent review rejected the handoff. No A4,
-A5, or A7 acceptance item may be promoted from this source-only state.
+The container/GPU research, design, checker hardening, and Vulkan observation
+work are complete. Independent highest-capability review accepted the corrected
+implementation handoff as WARN. No A4, A5, or A7 acceptance item may be
+promoted from this source-only state; live admitted receipts remain TODO810 and
+TODO811.
 
 ## Checker and provenance gaps
 
-- The checker applies A4's 20-revision/256x128 workload hash to A5's distinct
-  60-sample semantic workload. Give each lane its own workload hash and
-  correlate them with a separate campaign ID.
-- A4 validation omits the exact considered, culled, rendered, and skipped
-  command counts required by TODO687.
-- Compiler provenance, native-build logs, and the CUDA qualification receipt
-  are deleted with the temporary run. Publish and hash these inputs in the
-  immutable run set before accepting `container_gpu_admission`.
+- A4 and A5 have distinct workload hashes under a shared campaign contract.
+- A4 validates exact per-frame and 20-frame considered, culled, rendered, and
+  skipped command counts.
+- Immutable runs retain a sorted hash manifest covering compiler provenance,
+  native-build logs/timing, container identity, and CUDA qualification evidence.
 
 ## Device and process-verdict gaps
 
-- Strict DrawIR submit/fence counts are assigned from aggregate success rather
-  than observed backend counters; `submit_batch()` may succeed as a no-op.
-  Extend the Vulkan frame receipt with actual submit/fence deltas and require
-  those observed values.
-- The strict producer's `--out` path returns zero after writing a blocked or
-  failed receipt. Preserve the receipt status in the process exit code.
+- Strict DrawIR requires exact backend-owner submit/fence deltas and rejects
+  no-op or incomplete-fence evidence; the default producer requires 62/62.
+- The strict producer returns 0/2/1 for pass/blocked/failed on both output paths.
 - The physical wrapper does not yet emit the correlated physical receipt
   schema. Full promotion remains TODO684/TODO685.
 
 ## Unblock condition
 
-Resolve every item above, extend deliberate-red tests so each former defect is
-detected, obtain independent highest-capability acceptance, then run the live
-paths with a provenance-admitted Stage 4 compiler. The three-cycle cap for the
-current session is exhausted; resume in a fresh scoped session.
+Implementation unblock conditions are satisfied and deliberate-red coverage
+detects each former defect. Campaign completion still requires running the live
+paths with a provenance-admitted Stage 4 compiler (TODO810/TODO811) and, for
+full PASS, correlated physical evidence (TODO684/TODO685).

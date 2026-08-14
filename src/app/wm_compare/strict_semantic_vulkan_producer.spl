@@ -101,7 +101,8 @@ pub fn strict_semantic_vulkan_receipt_values(
     revision_end: i64, checksum_start: i64, checksum_end: i64,
     completion_known: bool, fallback_used: bool, warmup_count: i32,
     sample_count: i32, p50_ns: i64, p95_ns: i64,
-    timed_readback_bytes: i64
+    timed_readback_bytes: i64, device_submit_count: i64,
+    device_fence_count: i64
 ) -> text:
     "producer_receipt_status=" + status + "\n" +
         "producer_receipt_reason=" + reason + "\n" +
@@ -120,7 +121,9 @@ pub fn strict_semantic_vulkan_receipt_values(
         "producer_receipt_sample_count=" + sample_count.to_string() + "\n" +
         "producer_receipt_p50_ns=" + p50_ns.to_string() + "\n" +
         "producer_receipt_p95_ns=" + p95_ns.to_string() + "\n" +
-        "producer_receipt_timed_readback_bytes=" + timed_readback_bytes.to_string() + "\n"
+        "producer_receipt_timed_readback_bytes=" + timed_readback_bytes.to_string() + "\n" +
+        "producer_receipt_device_submit_count=" + device_submit_count.to_string() + "\n" +
+        "producer_receipt_device_fence_count=" + device_fence_count.to_string() + "\n"
 
 pub fn strict_semantic_vulkan_producer_receipt(
     width: i32, height: i32, revision_start: i64, warmup_count: i32 = 1,
@@ -133,13 +136,13 @@ pub fn strict_semantic_vulkan_producer_receipt(
         return strict_semantic_vulkan_receipt_values(
             "failed", "invalid-workload", "", "", 0, 0,
             revision_start, revision_end, 0, 0, false, false,
-            warmup_count, sample_count, 0, 0, 0)
+            warmup_count, sample_count, 0, 0, 0, 0, 0)
     val created = Engine2D.create_with_backend_strict(width, height, "vulkan")
     if not created.is_ok():
         return strict_semantic_vulkan_receipt_values(
             "blocked", "strict-vulkan-unavailable", "", "", 0, 0,
             revision_start, revision_end, 0, 0, false, false,
-            warmup_count, sample_count, 0, 0, 0)
+            warmup_count, sample_count, 0, 0, 0, 0, 0)
     var engine = created.unwrap()
     val ck: FrameClock = if clock == nil: default_frame_clock() else: clock
     var evidence_valid = true
@@ -148,6 +151,8 @@ pub fn strict_semantic_vulkan_producer_receipt(
     var expected_identity: i64 = 0
     val start_submission = engine2d_draw_ir_adv_strict_vulkan_submit_with_images(
         engine, _vulkan_composition(revision_start, width, height), [])
+    var device_submit_count = start_submission.device_submit_count
+    var device_fence_count = start_submission.device_fence_count
     if not _strict_submit_valid(start_submission): evidence_valid = false
     engine = start_submission.engine
     val start_readback = engine2d_draw_ir_adv_strict_vulkan_readback(
@@ -166,6 +171,8 @@ pub fn strict_semantic_vulkan_producer_receipt(
         val warm_result = engine2d_draw_ir_adv_strict_vulkan_submit_with_images(
             engine, _vulkan_composition(warm_revision, width, height), [])
         if not _strict_submit_valid(warm_result): evidence_valid = false
+        device_submit_count = device_submit_count + warm_result.device_submit_count
+        device_fence_count = device_fence_count + warm_result.device_fence_count
         fallback_used = fallback_used or warm_result.fallback_required
         if (warm_result.backend_handle != expected_handle or
             warm_result.device_identity != expected_identity):
@@ -185,6 +192,8 @@ pub fn strict_semantic_vulkan_producer_receipt(
         samples.push(elapsed_ns)
         if elapsed_ns <= 0: evidence_valid = false
         if not _strict_submit_valid(result): evidence_valid = false
+        device_submit_count = device_submit_count + result.device_submit_count
+        device_fence_count = device_fence_count + result.device_fence_count
         fallback_used = fallback_used or result.fallback_required
         timed_readback_bytes = timed_readback_bytes + result.readback_bytes
         if (result.backend_handle != expected_handle or
@@ -206,9 +215,12 @@ pub fn strict_semantic_vulkan_producer_receipt(
     engine.shutdown()
     val revisions_changed = (revision_end > revision_start and
         checksum_end != 0 and checksum_end != checksum_start)
+    val expected_device_count = 1 + warmup_count.to_i64() + sample_count.to_i64()
     val accepted = (selected_backend == "vulkan" and
         evidence_valid and expected_handle > 0 and expected_identity > 0 and
-        revisions_changed and not fallback_used and timed_readback_bytes == 0)
+        revisions_changed and not fallback_used and timed_readback_bytes == 0 and
+        device_submit_count == expected_device_count and
+        device_fence_count == expected_device_count)
     val sorted = _sort_i64(samples)
     val p50_ns = _percentile_nearest_rank(sorted, 50)
     val p95_ns = _percentile_nearest_rank(sorted, 95)
@@ -218,7 +230,13 @@ pub fn strict_semantic_vulkan_producer_receipt(
         readback_source, expected_handle, expected_identity,
         revision_start, revision_end, checksum_start, checksum_end, accepted,
         fallback_used, warmup_count, sample_count, p50_ns, p95_ns,
-        timed_readback_bytes)
+        timed_readback_bytes, device_submit_count, device_fence_count)
+
+pub fn strict_semantic_vulkan_receipt_exit_code(receipt: text) -> i64:
+    """Map the written receipt status to the producer process contract."""
+    if receipt.contains("producer_receipt_status=pass\n"): return 0
+    if receipt.contains("producer_receipt_status=blocked\n"): return 2
+    1
 
 fn main() -> i64:
     val args = get_args()
@@ -230,9 +248,10 @@ fn main() -> i64:
     val out_path = _arg_value(args, "--out", "")
     if out_path != "":
         if file_write_text(out_path, receipt):
-            return 0
+            return strict_semantic_vulkan_receipt_exit_code(receipt)
         print "failed to write strict semantic Vulkan receipt: " + out_path
         return 1
     print(receipt)
-    if receipt.contains("producer_receipt_status=pass"): return 0
-    2
+    strict_semantic_vulkan_receipt_exit_code(receipt)
+
+export strict_semantic_vulkan_receipt_exit_code

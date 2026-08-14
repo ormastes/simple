@@ -123,10 +123,9 @@ struct Engine2dDrawIrAdvResult:
     glass_execution_target: text = ""
     glass_backend_handle: i64 = 0
     glass_device_identity: i64 = 0
-    # Device execution receipts, not caller-inferred frame counters. A submit
-    # is counted only when the backend accepts submit_batch(). A fence is
-    # counted only when that submission is followed by a device-origin
-    # readback bound to concrete backend and device identities.
+    # Device execution receipts, not caller-inferred frame counters. These are
+    # exact deltas from the Vulkan owner's observed submission and completed-
+    # fence counters. Device readback is a separate attestation below.
     device_submit_count: i64 = 0
     device_fence_count: i64 = 0
 
@@ -149,6 +148,21 @@ struct Engine2dDrawIrAdvSubmitResult:
     no_readback: bool
     readback_bytes: i64
     font_evidence_valid: bool
+
+struct Engine2dVulkanObservedDelta:
+    submit_count: i64
+    fence_count: i64
+    valid: bool
+
+fn engine2d_vulkan_observed_delta(before_submit: i64, before_fence: i64,
+                                  after_submit: i64, after_fence: i64) -> Engine2dVulkanObservedDelta:
+    """Validate one real Vulkan submit plus one completed fence observation."""
+    val submit_delta = after_submit - before_submit
+    val fence_delta = after_fence - before_fence
+    Engine2dVulkanObservedDelta(
+        submit_count: if submit_delta > 0: submit_delta else: 0,
+        fence_count: if fence_delta > 0: fence_delta else: 0,
+        valid: submit_delta == 1 and fence_delta == 1)
 
 struct Engine2dResolvedDrawIrImage:
     image_uri: text
@@ -2762,15 +2776,14 @@ fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: Engine2D, c
         return _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan, 0, 1, prepared.1, engine2d_readback([], "preflight_rejected"))
     _engine2d_draw_ir_adv_composition_with_images(prepared.0, composition, true, images, true, false, true)
 
-fn _engine2d_draw_ir_strict_vulkan_result_with_font_evidence(composition: DrawIrComposition, rendered: i32, skipped: i32, readback: Engine2DReadback, engine: Engine2D, submitted: bool) -> Engine2dDrawIrAdvResult:
+fn _engine2d_draw_ir_strict_vulkan_result_with_font_evidence(composition: DrawIrComposition, rendered: i32, skipped: i32, readback: Engine2DReadback, engine: Engine2D, submit_count: i64, fence_count: i64) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
     var result = _engine2d_draw_ir_result_from_composition_plan_with_unsupported(
         plan, rendered, skipped, if skipped == 0: "none" else: "strict-vulkan-execution", readback)
-    val device_receipt_count: i64 = if (submitted and
-        readback.source == "device_readback" and readback.backend_handle > 0 and
-        readback.device_identity > 0): 1 else: 0
-    result.device_submit_count = device_receipt_count
-    result.device_fence_count = device_receipt_count
+    val readback_attested = (readback.source == "device_readback" and
+        readback.backend_handle > 0 and readback.device_identity > 0)
+    result.device_submit_count = if readback_attested: submit_count else: 0
+    result.device_fence_count = if readback_attested: fence_count else: 0
     result.font_identity = engine.selected_font_identity()
     result.font_execution_target = engine.font_execution_target()
     val target_font = engine.draw_ir_font_evidence()
@@ -2791,6 +2804,12 @@ fn _engine2d_draw_ir_strict_vulkan_result_with_font_evidence(composition: DrawIr
 
 fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composition: DrawIrComposition) -> Engine2dDrawIrAdvSubmitResult:
     var eng = engine
+    val receipt_before = eng.latest_vulkan_frame_receipt()
+    var submit_before: i64 = 0
+    var fence_before: i64 = 0
+    if val Some(frame) = receipt_before:
+        submit_before = frame.device_submit_count
+        fence_before = frame.device_fence_count
     var rendered = 0
     var skipped = 0
     var first = true
@@ -2845,12 +2864,17 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
     var completion_known = false
     var no_readback = false
     var readback_bytes: i64 = 0
+    var observed = engine2d_vulkan_observed_delta(
+        submit_before, fence_before, submit_before, fence_before)
     if val Some(frame) = receipt:
         backend_handle = frame.backend_handle
         device_identity = frame.device_identity
         completion_known = frame.completion_known
         no_readback = frame.no_readback
         readback_bytes = frame.readback_bytes
+        observed = engine2d_vulkan_observed_delta(
+            submit_before, fence_before,
+            frame.device_submit_count, frame.device_fence_count)
     val font_required = _engine2d_draw_ir_composition_has_text(composition)
     val target_font = eng.draw_ir_font_evidence()
     var font_valid = not font_required
@@ -2860,7 +2884,7 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
                 evidence.device_executed and evidence.promotion_ready and
                 evidence.readback_source == "device_readback"))
     val expected = _engine2d_draw_ir_strict_vulkan_command_count(composition)
-    val completed = (submitted and finalized and completion_known and
+    val completed = (submitted and finalized and observed.valid and completion_known and
         no_readback and readback_bytes == 0 and backend_handle > 0 and
         device_identity > 0 and rendered == expected and skipped == 0 and
         font_valid)
@@ -2874,8 +2898,8 @@ fn _engine2d_draw_ir_execute_strict_vulkan_primitives(engine: Engine2D, composit
         skipped_command_count: if completed: skipped else: expected,
         backend_handle: if completed: backend_handle else: 0,
         device_identity: if completed: device_identity else: 0,
-        device_submit_count: if completed: 1 else: 0,
-        device_fence_count: if completed: 1 else: 0,
+        device_submit_count: if completed: observed.submit_count else: 0,
+        device_fence_count: if completed: observed.fence_count else: 0,
         completion_known: completed,
         no_readback: completed,
         readback_bytes: if completed: 0 else: readback_bytes,
@@ -2941,7 +2965,7 @@ fn engine2d_draw_ir_adv_strict_vulkan_readback(submission: Engine2dDrawIrAdvSubm
     _engine2d_draw_ir_strict_vulkan_result_with_font_evidence(
         submission.composition, submission.rendered_command_count,
         submission.skipped_command_count, readback, eng,
-        submission.device_submit_count == 1)
+        submission.device_submit_count, submission.device_fence_count)
 
 fn engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(engine: Engine2D, composition: DrawIrComposition, images: [Engine2dResolvedDrawIrImage]) -> Engine2dDrawIrAdvResult:
     """Execute only device-attested Vulkan DrawIR primitives.
@@ -3603,6 +3627,8 @@ fn engine2d_draw_ir_render_tiled(
 
 export Engine2dDrawIrAdvResult
 export Engine2dDrawIrAdvSubmitResult
+export Engine2dVulkanObservedDelta
+export engine2d_vulkan_observed_delta
 export Engine2dDrawIrTileOutcome
 export Engine2dMetalGlassReceipt
 export Engine2dResolvedDrawIrImage

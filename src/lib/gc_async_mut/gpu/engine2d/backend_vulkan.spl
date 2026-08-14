@@ -122,6 +122,11 @@ struct VulkanFrameReceipt:
     backend_handle: i64
     device_identity: i64
     swapchain_identity: i64
+    # Monotonic backend-owner observations. A submit is recorded only after
+    # the Vulkan SFFI returns a concrete fence for a real command buffer; a
+    # fence completion is recorded only after the explicit wait succeeds.
+    device_submit_count: i64
+    device_fence_count: i64
 
 fn _err_is_device_lost(err: text) -> bool:
     err.contains("device lost") or err.contains("DEVICE_LOST")
@@ -280,6 +285,8 @@ class VulkanBackend:
     font_frame_command_count: i64
     font_frame_submission_count: i64
     font_frame_fence_count: i64
+    observed_device_submit_count: i64
+    observed_device_fence_count: i64
     cpu_fallback_used: bool      # Sticky conservative provenance for this backend lifetime
     cpu_fallback_reason: text    # First transition reason; empty while device-only
     completion_unknown: bool    # True when dependent Vulkan work may still be in flight
@@ -374,6 +381,8 @@ class VulkanBackend:
             font_frame_command_count: 0,
             font_frame_submission_count: 0,
             font_frame_fence_count: 0,
+            observed_device_submit_count: 0,
+            observed_device_fence_count: 0,
             cpu_fallback_used: false,
             cpu_fallback_reason: "",
             completion_unknown: false,
@@ -1085,7 +1094,9 @@ impl RenderBackend for VulkanBackend:
             completion_known: not self.completion_unknown,
             backend_handle: self.d_framebuffer,
             device_identity: self.session.device,
-            swapchain_identity: self.presentation_swapchain)
+            swapchain_identity: self.presentation_swapchain,
+            device_submit_count: self.observed_device_submit_count,
+            device_fence_count: self.observed_device_fence_count)
 
     fn window_present_enabled() -> bool:
         self.presentation_mode == "window-swapchain" and

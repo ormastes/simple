@@ -92,11 +92,14 @@ environmental gate.  Do not start unrelated O/P/G expansion while A4–A6 are
 open.  Canonical evidence sources are the 2026-08-12 reports under
 `doc/09_report/` and their linked open bugs under `doc/08_tracking/bug/`.
 
-2026-08-14 container/GPU implementation review: research and design completed,
-but the final handoff was rejected after three fix cycles. TODO812 owns distinct
-A4/A5 workload correlation, exact A4 counters, and retained compiler/build/CUDA
-provenance. TODO813 owns observed Vulkan submit/fence counters and truthful
-producer CLI exit status. Source and fixture checks do not close A4/A5/A7.
+2026-08-14 container/GPU implementation review: research and design completed.
+Fresh scoped TODO812/TODO813 work corrected the rejected handoff: A4 and A5 now
+use distinct workload hashes under one campaign contract, A4 validates every
+exact command counter, immutable runs retain a hashed provenance/build/CUDA
+manifest, Vulkan submit/fence evidence is backend-observed, and the producer
+preserves pass/blocked/failed process status. Independent highest-capability
+review accepted this implementation handoff as **WARN**. Source and fixture
+checks still do not close live A4/A5/A7 evidence.
 
 ### Implementation handoff — blocked rows remain active
 

@@ -1,14 +1,14 @@
 # @tag: rendering, web, drawir, vulkan, wm_compare, 8k80
 # @cover src/app/wm_compare/strict_semantic_vulkan_producer.spl 80%
 
-use app.wm_compare.strict_semantic_vulkan_producer.{strict_semantic_vulkan_receipt_values}
+use app.wm_compare.strict_semantic_vulkan_producer.{strict_semantic_vulkan_receipt_values, strict_semantic_vulkan_receipt_exit_code}
 use app.io.mod.{file_read_text}
 
 describe "strict semantic Vulkan producer receipt":
     it "publishes every fail-closed A5 receipt field for completed changing revisions":
         val receipt = strict_semantic_vulkan_receipt_values(
             "pass", "pass", "vulkan", "device_readback", 71, 83,
-            10, 11, 101, 202, true, false, 1, 60, 4000, 6000, 0)
+            10, 11, 101, 202, true, false, 1, 60, 4000, 6000, 0, 62, 62)
         expect(receipt).to_contain("producer_receipt_status=pass")
         expect(receipt).to_contain("producer_receipt_requested_backend=vulkan")
         expect(receipt).to_contain("producer_receipt_selected_backend=vulkan")
@@ -26,15 +26,25 @@ describe "strict semantic Vulkan producer receipt":
         expect(receipt).to_contain("producer_receipt_p50_ns=4000")
         expect(receipt).to_contain("producer_receipt_p95_ns=6000")
         expect(receipt).to_contain("producer_receipt_timed_readback_bytes=0")
+        expect(receipt).to_contain("producer_receipt_device_submit_count=62")
+        expect(receipt).to_contain("producer_receipt_device_fence_count=62")
 
     it "keeps unavailable Vulkan distinct from an accepted rendering receipt":
         val receipt = strict_semantic_vulkan_receipt_values(
             "blocked", "strict-vulkan-unavailable", "", "", 0, 0,
-            10, 11, 0, 0, false, false, 1, 60, 0, 0, 0)
+            10, 11, 0, 0, false, false, 1, 60, 0, 0, 0, 0, 0)
         expect(receipt).to_contain("producer_receipt_status=blocked")
         expect(receipt).to_contain("producer_receipt_reason=strict-vulkan-unavailable")
         expect(receipt).to_contain("producer_receipt_completion_known=false")
         expect(receipt).to_contain("producer_receipt_backend_handle=0")
+
+    it "preserves pass blocked and failed status in process exits after write":
+        expect(strict_semantic_vulkan_receipt_exit_code(
+            "producer_receipt_status=pass\n")).to_equal(0)
+        expect(strict_semantic_vulkan_receipt_exit_code(
+            "producer_receipt_status=blocked\n")).to_equal(2)
+        expect(strict_semantic_vulkan_receipt_exit_code(
+            "producer_receipt_status=failed\n")).to_equal(1)
 
     it "keeps warmup outside the sixty-frame timed percentile sample":
         val source = file_read_text(

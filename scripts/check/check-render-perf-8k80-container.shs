@@ -5,7 +5,10 @@ set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$ROOT/build/render_perf/8k80_container}"
 BUDGET_NS=12500000
-WORKLOAD_HASH="$(printf '%s' '7680x4320;revisions=20;damage=256x128' | sha256sum | awk '{print $1}')"
+CAMPAIGN_CONTRACT_ID=render-perf-8k80-container-v2
+CAMPAIGN_CONTRACT_HASH="$(printf '%s' 'render-perf-8k80-container-v2;7680x4320;budget_ns=12500000;a4=drawir-retained-damage;a5=semantic-vulkan' | sha256sum | awk '{print $1}')"
+A4_DRAWIR_WORKLOAD_HASH="$(printf '%s' 'a4;drawir;7680x4320;frames=20;damage=128,128,256,128;commands=514;considered=2;culled=512;rendered=2;skipped=512' | sha256sum | awk '{print $1}')"
+A5_SEMANTIC_WORKLOAD_HASH="$(printf '%s' 'a5;semantic-vulkan;7680x4320;warmup=1;samples=60;device-readback;timed-readback-bytes=0' | sha256sum | awk '{print $1}')"
 
 die() { echo "render_perf_8k80_container_status=failed reason=$1" >&2; exit 1; }
 blocked() { echo "render_perf_8k80_container_status=blocked reason=$1" >&2; exit 2; }
@@ -28,13 +31,15 @@ reject_unknown() {
 }
 
 validate_common() {
-    file=$1 kind=$2
+    file=$1 kind=$2 expected_workload=$3
     [ -f "$file" ] || return 1
     [ "$(value "$file" receipt_schema)" = render-perf-8k80-v1 ] || return 1
     [ "$(value "$file" receipt_kind)" = "$kind" ] || return 1
     [ "$(value "$file" status)" = pass ] || return 1
-    for k in source_hash artifact_hash workload_hash; do v=$(value "$file" "$k") || return 1; is_hash "$v" || return 1; done
-    [ "$(value "$file" workload_hash)" = "$WORKLOAD_HASH" ] || return 1
+    for k in source_hash artifact_hash workload_hash campaign_contract_hash; do v=$(value "$file" "$k") || return 1; is_hash "$v" || return 1; done
+    [ "$(value "$file" workload_hash)" = "$expected_workload" ] || return 1
+    [ "$(value "$file" campaign_contract_id)" = "$CAMPAIGN_CONTRACT_ID" ] || return 1
+    [ "$(value "$file" campaign_contract_hash)" = "$CAMPAIGN_CONTRACT_HASH" ] || return 1
     captured=$(value "$file" captured_at_utc); is_uint "$captured" || return 1
     now=$(date -u +%s); [ "$captured" -le "$now" ] && [ $((now - captured)) -le "${RECEIPT_MAX_AGE_SECS:-3600}" ] || return 1
     [ -n "$(value "$file" run_id)" ] || return 1
@@ -42,14 +47,18 @@ validate_common() {
 
 validate_drawir() {
     f=$1
-    allowed='receipt_schema receipt_kind status source_hash artifact_hash workload_hash captured_at_utc run_id compiler_kind execution_mode backend selected_backend width height revisions damage_width damage_height commands_total p50_ns p95_ns max_rss_kib checksum readback_source readback_count mismatches completion fallback'
-    reject_unknown "$f" "$allowed" && validate_common "$f" drawir || return 1
+    allowed='receipt_schema receipt_kind status source_hash artifact_hash workload_hash campaign_contract_id campaign_contract_hash captured_at_utc run_id compiler_kind execution_mode backend selected_backend width height revisions damage_width damage_height commands_total commands_considered_per_frame commands_culled_per_frame commands_rendered_per_frame commands_skipped_per_frame commands_considered_total commands_culled_total commands_rendered_total commands_skipped_total p50_ns p95_ns max_rss_kib checksum readback_source readback_count mismatches completion fallback'
+    reject_unknown "$f" "$allowed" && validate_common "$f" drawir "$A4_DRAWIR_WORKLOAD_HASH" || return 1
     [ "$(value "$f" compiler_kind)" = pure-simple-stage4 ] || return 1
     [ "$(value "$f" execution_mode)" = direct-native ] || return 1
     [ "$(value "$f" backend)" = cpu ] && [ "$(value "$f" selected_backend)" = cpu ] || return 1
     [ "$(value "$f" width)" = 7680 ] && [ "$(value "$f" height)" = 4320 ] || return 1
     [ "$(value "$f" revisions)" = 20 ] && [ "$(value "$f" damage_width)" = 256 ] && [ "$(value "$f" damage_height)" = 128 ] || return 1
     [ "$(value "$f" commands_total)" = 514 ] || return 1
+    [ "$(value "$f" commands_considered_per_frame)" = 2 ] && [ "$(value "$f" commands_culled_per_frame)" = 512 ] || return 1
+    [ "$(value "$f" commands_rendered_per_frame)" = 2 ] && [ "$(value "$f" commands_skipped_per_frame)" = 512 ] || return 1
+    [ "$(value "$f" commands_considered_total)" = 40 ] && [ "$(value "$f" commands_culled_total)" = 10240 ] || return 1
+    [ "$(value "$f" commands_rendered_total)" = 40 ] && [ "$(value "$f" commands_skipped_total)" = 10240 ] || return 1
     for k in p50_ns p95_ns max_rss_kib checksum readback_count; do v=$(value "$f" "$k") || return 1; is_uint "$v" && [ "$v" -gt 0 ] || return 1; done
     [ "$(value "$f" p95_ns)" -le "$BUDGET_NS" ] || return 1
     [ "$(value "$f" mismatches)" = 0 ] && [ "$(value "$f" completion)" = known ] && [ "$(value "$f" fallback)" = none ] || return 1
@@ -58,8 +67,8 @@ validate_drawir() {
 
 validate_producer() {
     f=$1
-    allowed='receipt_schema receipt_kind status source_hash artifact_hash workload_hash captured_at_utc run_id compiler_kind execution_mode width height max_rss_kib device_hash container_image_hash container_gpu_admission producer_receipt_status producer_receipt_reason producer_receipt_requested_backend producer_receipt_selected_backend producer_receipt_readback_source producer_receipt_backend_handle producer_receipt_device_identity producer_receipt_revision_start producer_receipt_revision_end producer_receipt_checksum_start producer_receipt_checksum_end producer_receipt_completion_known producer_receipt_fallback_used producer_receipt_warmup_count producer_receipt_sample_count producer_receipt_p50_ns producer_receipt_p95_ns producer_receipt_timed_readback_bytes'
-    reject_unknown "$f" "$allowed" && validate_common "$f" producer || return 1
+    allowed='receipt_schema receipt_kind status source_hash artifact_hash workload_hash campaign_contract_id campaign_contract_hash captured_at_utc run_id compiler_kind execution_mode width height max_rss_kib device_hash container_image_hash container_gpu_admission producer_receipt_status producer_receipt_reason producer_receipt_requested_backend producer_receipt_selected_backend producer_receipt_readback_source producer_receipt_backend_handle producer_receipt_device_identity producer_receipt_revision_start producer_receipt_revision_end producer_receipt_checksum_start producer_receipt_checksum_end producer_receipt_completion_known producer_receipt_fallback_used producer_receipt_warmup_count producer_receipt_sample_count producer_receipt_device_submit_count producer_receipt_device_fence_count producer_receipt_p50_ns producer_receipt_p95_ns producer_receipt_timed_readback_bytes'
+    reject_unknown "$f" "$allowed" && validate_common "$f" producer "$A5_SEMANTIC_WORKLOAD_HASH" || return 1
     [ "$(value "$f" compiler_kind)" = pure-simple-stage4 ] || return 1
     [ "$(value "$f" execution_mode)" = direct-native-container ] || return 1
     [ "$(value "$f" width)" = 7680 ] && [ "$(value "$f" height)" = 4320 ] || return 1
@@ -73,14 +82,15 @@ validate_producer() {
     [ "$(value "$f" producer_receipt_p95_ns)" -le "$BUDGET_NS" ] || return 1
     [ "$(value "$f" producer_receipt_completion_known)" = true ] && [ "$(value "$f" producer_receipt_fallback_used)" = false ] && [ "$(value "$f" producer_receipt_timed_readback_bytes)" = 0 ] || return 1
     [ "$(value "$f" producer_receipt_warmup_count)" = 1 ] && [ "$(value "$f" producer_receipt_sample_count)" = 60 ] || return 1
+    [ "$(value "$f" producer_receipt_device_submit_count)" = 62 ] && [ "$(value "$f" producer_receipt_device_fence_count)" = 62 ] || return 1
     is_hash "$(value "$f" device_hash)" && is_hash "$(value "$f" container_image_hash)" || return 1
-    [ -n "$(value "$f" producer_receipt_device_identity)" ] || return 1
+    identity=$(value "$f" producer_receipt_device_identity); is_uint "$identity" && [ "$identity" -gt 0 ] || return 1
 }
 
 validate_physical() {
     f=$1
-    allowed='receipt_schema receipt_kind status source_hash artifact_hash workload_hash captured_at_utc run_id device_hash width height refresh_hz edid_hash connector scanout_checksum p95_ns max_rss_kib readback_scope readback_count timed_readback_bytes completion fallback'
-    reject_unknown "$f" "$allowed" && validate_common "$f" physical || return 1
+    allowed='receipt_schema receipt_kind status source_hash artifact_hash workload_hash campaign_contract_id campaign_contract_hash captured_at_utc run_id device_hash width height refresh_hz edid_hash connector scanout_checksum p95_ns max_rss_kib readback_scope readback_count timed_readback_bytes completion fallback'
+    reject_unknown "$f" "$allowed" && validate_common "$f" physical "$A5_SEMANTIC_WORKLOAD_HASH" || return 1
     [ "$(value "$f" width)" = 7680 ] && [ "$(value "$f" height)" = 4320 ] || return 1
     hz=$(value "$f" refresh_hz); is_uint "$hz" && [ "$hz" -ge 80 ] || return 1
     is_hash "$(value "$f" edid_hash)" || return 1
@@ -98,6 +108,8 @@ aggregate() {
     validate_producer "$producer" || die invalid-producer-receipt
     [ "$(value "$draw" source_hash)" = "$(value "$producer" source_hash)" ] || die source-hash-mismatch
     [ "$(value "$draw" run_id)" = "$(value "$producer" run_id)" ] || die run-id-mismatch
+    [ "$(value "$draw" campaign_contract_id)" = "$(value "$producer" campaign_contract_id)" ] || die campaign-contract-id-mismatch
+    [ "$(value "$draw" campaign_contract_hash)" = "$(value "$producer" campaign_contract_hash)" ] || die campaign-contract-hash-mismatch
     run_id=$(value "$draw" run_id)
     mkdir -p "$BUILD_DIR/runs"
     tmp="$BUILD_DIR/runs/.${run_id}.$$"; final="$BUILD_DIR/runs/$run_id"
@@ -106,11 +118,18 @@ aggregate() {
     trap 'rm -rf "$tmp"' EXIT HUP INT TERM
     cp "$draw" "$tmp/drawir_receipt.env"
     cp "$producer" "$tmp/producer_receipt.env"
+    if [ -n "${PUBLISH_EVIDENCE_DIR:-}" ]; then
+        [ -d "$PUBLISH_EVIDENCE_DIR" ] || die missing-publication-evidence
+        mkdir "$tmp/evidence"
+        cp -R "$PUBLISH_EVIDENCE_DIR"/. "$tmp/evidence/"
+        (cd "$tmp/evidence" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$tmp/evidence_manifest.sha256"
+    fi
     status=blocked-physical reason=missing-physical-receipt
     if [ -n "$physical" ]; then
         validate_physical "$physical" || die invalid-physical-receipt
         [ "$(value "$draw" source_hash)" = "$(value "$physical" source_hash)" ] || die source-hash-mismatch
         [ "$(value "$draw" run_id)" = "$(value "$physical" run_id)" ] || die run-id-mismatch
+        [ "$(value "$draw" campaign_contract_hash)" = "$(value "$physical" campaign_contract_hash)" ] || die campaign-contract-hash-mismatch
         [ "$(value "$producer" device_hash)" = "$(value "$physical" device_hash)" ] || die physical-device-mismatch
         [ "$(value "$producer" producer_receipt_checksum_end)" = "$(value "$physical" scanout_checksum)" ] || die physical-checksum-mismatch
         cp "$physical" "$tmp/physical_receipt.env"
@@ -122,13 +141,18 @@ aggregate() {
         echo reason="$reason"
         echo run_id="$run_id"
         echo captured_at_utc="$(date -u +%s)"
-        echo workload_hash="$WORKLOAD_HASH"
+        echo campaign_contract_id="$CAMPAIGN_CONTRACT_ID"
+        echo campaign_contract_hash="$CAMPAIGN_CONTRACT_HASH"
+        echo a4_drawir_workload_hash="$A4_DRAWIR_WORKLOAD_HASH"
+        echo a5_semantic_workload_hash="$A5_SEMANTIC_WORKLOAD_HASH"
         echo source_hash="$(value "$draw" source_hash)"
         echo drawir_receipt_hash="$(sha256sum "$draw" | awk '{print $1}')"
         echo producer_receipt_hash="$(sha256sum "$producer" | awk '{print $1}')"
         [ -z "$physical" ] || echo physical_receipt_hash="$(sha256sum "$physical" | awk '{print $1}')"
+        [ ! -f "$tmp/evidence_manifest.sha256" ] || echo evidence_manifest_hash="$(sha256sum "$tmp/evidence_manifest.sha256" | awk '{print $1}')"
     } > "$tmp/aggregate_receipt.env"
     mv "$tmp" "$final"
+    chmod -R a-w "$final"
     link="$BUILD_DIR/.current.$$"; ln -s "runs/$run_id" "$link"; mv -Tf "$link" "$BUILD_DIR/current"
     trap - EXIT HUP INT TERM
     echo "render_perf_8k80_container_status=$status aggregate_receipt=$BUILD_DIR/current/aggregate_receipt.env"
@@ -136,15 +160,17 @@ aggregate() {
 }
 
 fixture_common() {
-    kind=$1
+    kind=$1 workload=$2
     echo receipt_schema=render-perf-8k80-v1; echo receipt_kind="$kind"; echo status=pass
     echo source_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     echo artifact_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-    echo workload_hash="$WORKLOAD_HASH"
+    echo workload_hash="$workload"
+    echo campaign_contract_id="$CAMPAIGN_CONTRACT_ID"
+    echo campaign_contract_hash="$CAMPAIGN_CONTRACT_HASH"
     echo captured_at_utc="$(date -u +%s)"
     echo run_id=fixture-run
 }
-write_draw_fixture() { { fixture_common drawir; cat <<'EOF'
+write_draw_fixture() { { fixture_common drawir "$A4_DRAWIR_WORKLOAD_HASH"; cat <<'EOF'
 compiler_kind=pure-simple-stage4
 execution_mode=direct-native
 backend=cpu
@@ -155,6 +181,14 @@ revisions=20
 damage_width=256
 damage_height=128
 commands_total=514
+commands_considered_per_frame=2
+commands_culled_per_frame=512
+commands_rendered_per_frame=2
+commands_skipped_per_frame=512
+commands_considered_total=40
+commands_culled_total=10240
+commands_rendered_total=40
+commands_skipped_total=10240
 p50_ns=1000000
 p95_ns=2000000
 max_rss_kib=12345
@@ -166,7 +200,7 @@ completion=known
 fallback=none
 EOF
     } > "$1"; }
-write_producer_fixture() { { fixture_common producer; cat <<'EOF'
+write_producer_fixture() { { fixture_common producer "$A5_SEMANTIC_WORKLOAD_HASH"; cat <<'EOF'
 compiler_kind=pure-simple-stage4
 execution_mode=direct-native-container
 width=7680
@@ -178,7 +212,7 @@ producer_receipt_requested_backend=vulkan
 producer_receipt_selected_backend=vulkan
 producer_receipt_readback_source=device_readback
 producer_receipt_backend_handle=7
-producer_receipt_device_identity=fixture-gpu
+producer_receipt_device_identity=42
 producer_receipt_revision_start=1
 producer_receipt_revision_end=20
 producer_receipt_checksum_start=123
@@ -187,6 +221,8 @@ producer_receipt_completion_known=true
 producer_receipt_fallback_used=false
 producer_receipt_warmup_count=1
 producer_receipt_sample_count=60
+producer_receipt_device_submit_count=62
+producer_receipt_device_fence_count=62
 producer_receipt_p50_ns=1000000
 producer_receipt_p95_ns=2000000
 producer_receipt_timed_readback_bytes=0
@@ -195,7 +231,7 @@ container_image_hash=ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 container_gpu_admission=submit-readback-pass
 EOF
     } > "$1"; }
-write_physical_fixture() { { fixture_common physical; cat <<'EOF'
+write_physical_fixture() { { fixture_common physical "$A5_SEMANTIC_WORKLOAD_HASH"; cat <<'EOF'
 device_hash=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 width=7680
 height=4320
@@ -232,6 +268,14 @@ self_test() {
     [ "$(value "$t/draw" source_hash)" != "$(value "$t/bad" source_hash)" ] || die selftest-source-mismatch-missed
     cp "$t/producer" "$t/bad"; sed -i 's/workload_hash=.*/workload_hash=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-workload-mismatch-accepted
+    cp "$t/draw" "$t/bad"; sed -i "s/workload_hash=.*/workload_hash=$A5_SEMANTIC_WORKLOAD_HASH/" "$t/bad"
+    ! validate_drawir "$t/bad" || die selftest-cross-lane-workload-accepted
+    cp "$t/producer" "$t/bad"; sed -i 's/campaign_contract_hash=.*/campaign_contract_hash=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/' "$t/bad"
+    ! validate_producer "$t/bad" || die selftest-campaign-contract-mismatch-accepted
+    for counter in commands_considered_per_frame commands_culled_per_frame commands_rendered_per_frame commands_skipped_per_frame commands_considered_total commands_culled_total commands_rendered_total commands_skipped_total; do
+        cp "$t/draw" "$t/bad"; sed -i "s/^${counter}=.*/${counter}=999/" "$t/bad"
+        ! validate_drawir "$t/bad" || die "selftest-inexact-${counter}-accepted"
+    done
     cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_fallback_used=false/producer_receipt_fallback_used=true/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-fallback-accepted
     cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_completion_known=true/producer_receipt_completion_known=false/' "$t/bad"
@@ -242,6 +286,12 @@ self_test() {
     ! validate_producer "$t/bad" || die selftest-zero-checksum-accepted
     cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_timed_readback_bytes=0/producer_receipt_timed_readback_bytes=4/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-timed-readback-accepted
+    for counter in producer_receipt_device_submit_count producer_receipt_device_fence_count; do
+        cp "$t/producer" "$t/bad"; sed -i "s/^${counter}=62/${counter}=0/" "$t/bad"
+        ! validate_producer "$t/bad" || die "selftest-zero-${counter}-accepted"
+        cp "$t/producer" "$t/bad"; sed -i "s/^${counter}=62/${counter}=61/" "$t/bad"
+        ! validate_producer "$t/bad" || die "selftest-wrong-${counter}-accepted"
+    done
     cp "$t/draw" "$t/bad"; sed -i 's/p95_ns=2000000/p95_ns=13000000/' "$t/bad"
     ! validate_drawir "$t/bad" || die selftest-over-budget-accepted
     cp "$t/producer" "$t/bad"; echo unknown_key=x >> "$t/bad"
@@ -286,7 +336,10 @@ validate_compiler_provenance() {
 }
 
 source_hash_current() {
-    { find "$ROOT/src/compiler" "$ROOT/src/app" "$ROOT/src/lib" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum; sha256sum "$ROOT/test/05_perf/graphics_2d/draw_ir_damage_8k_bench.spl"; } | sha256sum | awk '{print $1}'
+    (
+        cd "$ROOT"
+        { find src/compiler src/app src/lib -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum; sha256sum test/05_perf/graphics_2d/draw_ir_damage_8k_bench.spl; } | sha256sum | awk '{print $1}'
+    )
 }
 
 cuda_value() { value "$1" "cuda_generated_2d_readback_$2"; }
@@ -312,19 +365,23 @@ run_artifacts() {
     run="$BUILD_DIR/.run.$$"; mkdir -p "$run"; trap 'rm -rf "$run"' EXIT HUP INT TERM
     draw_bin="$run/draw_ir_damage_8k_bench"
     producer_bin="$run/strict_semantic_vulkan_producer"
-    (cd "$ROOT" && timeout "${BUILD_TIMEOUT_SECS:-300}" "$compiler" native-build --source src/compiler --source src/app --source src/lib --source test/05_perf/graphics_2d --entry-closure --entry test/05_perf/graphics_2d/draw_ir_damage_8k_bench.spl --runtime-bundle core-c-bootstrap --backend cranelift --opt-level=aggressive --output "$draw_bin") >"$run/draw.build.out" 2>"$run/draw.build.err" || blocked drawir-native-build-unavailable
-    (cd "$ROOT" && timeout "${BUILD_TIMEOUT_SECS:-300}" "$compiler" native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/wm_compare/strict_semantic_vulkan_producer.spl --runtime-bundle core-c-bootstrap --backend cranelift --opt-level=aggressive --output "$producer_bin") >"$run/producer.build.out" 2>"$run/producer.build.err" || blocked producer-native-build-unavailable
+    printf '%s\n' 'entry=test/05_perf/graphics_2d/draw_ir_damage_8k_bench.spl' 'backend=cranelift' 'opt_level=aggressive' 'runtime_bundle=core-c-bootstrap' > "$run/draw.build.meta"
+    printf '%s\n' 'entry=src/app/wm_compare/strict_semantic_vulkan_producer.spl' 'backend=cranelift' 'opt_level=aggressive' 'runtime_bundle=core-c-bootstrap' > "$run/producer.build.meta"
+    (cd "$ROOT" && timeout "${BUILD_TIMEOUT_SECS:-300}" /usr/bin/time -f 'elapsed=%e\nmax_rss_kib=%M\nexit=%x' -o "$run/draw.build.time" "$compiler" native-build --source src/compiler --source src/app --source src/lib --source test/05_perf/graphics_2d --entry-closure --entry test/05_perf/graphics_2d/draw_ir_damage_8k_bench.spl --runtime-bundle core-c-bootstrap --backend cranelift --opt-level=aggressive --output "$draw_bin") >"$run/draw.build.out" 2>"$run/draw.build.err" || blocked drawir-native-build-unavailable
+    (cd "$ROOT" && timeout "${BUILD_TIMEOUT_SECS:-300}" /usr/bin/time -f 'elapsed=%e\nmax_rss_kib=%M\nexit=%x' -o "$run/producer.build.time" "$compiler" native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/wm_compare/strict_semantic_vulkan_producer.spl --runtime-bundle core-c-bootstrap --backend cranelift --opt-level=aggressive --output "$producer_bin") >"$run/producer.build.out" 2>"$run/producer.build.err" || blocked producer-native-build-unavailable
     [ -x "$draw_bin" ] && [ -x "$producer_bin" ] || blocked native-build-artifact-missing
     timeout "${RUN_TIMEOUT_SECS:-300}" /usr/bin/time -f %M -o "$run/draw.time" "$draw_bin" > "$run/draw.out" 2> "$run/draw.err" || die drawir-native-execution
     execution_mode=direct-native-container
     command -v docker >/dev/null 2>&1 || blocked missing-container-runtime
     image_id=$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null) || blocked missing-container-image
     container_hash=${image_id#sha256:}; is_hash "$container_hash" || die invalid-container-image-id
+    printf '%s\n' "image_reference=$image" "image_id=$image_id" "image_hash=$container_hash" > "$run/container-image.env"
     if [ "$gpu" = all ]; then gpu_flag=all; else gpu_flag="device=$gpu"; fi
     mkdir -p "$run/cuda"
     cuda_rc=0
     timeout "${RUN_TIMEOUT_SECS:-300}" docker run --rm --gpus "$gpu_flag" --network=none --memory="${CONTAINER_MEMORY:-4g}" --cpus="${CONTAINER_CPUS:-2}" --cap-drop=ALL --security-opt=no-new-privileges -v "$ROOT:/repo:ro" -v "$run:/receipt:rw" -w /repo --entrypoint /bin/sh "$image" -lc 'BUILD_DIR=/receipt/cuda REPORT_PATH=/receipt/cuda/report.md sh scripts/check/check-cuda-generated-2d-readback.shs' >"$run/cuda.out" 2>"$run/cuda.err" || cuda_rc=$?
     [ "$cuda_rc" -eq 0 ] && validate_cuda_qualification "$run/cuda/evidence.env" || blocked cuda-submit-readback-qualification-unavailable
+    timeout "${RUN_TIMEOUT_SECS:-300}" docker run --rm --gpus "$gpu_flag" --network=none --entrypoint /bin/sh "$image" -lc 'printf "kernel=%s\n" "$(uname -sr)"; command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=name,driver_version --format=csv,noheader' >"$run/cuda/toolchain.txt" 2>"$run/cuda/toolchain.err" || blocked cuda-toolchain-identity-unavailable
     producer_rc=0
     timeout "${RUN_TIMEOUT_SECS:-300}" docker run --rm --gpus "$gpu_flag" --network=none --memory="${CONTAINER_MEMORY:-4g}" --cpus="${CONTAINER_CPUS:-2}" --cap-drop=ALL --security-opt=no-new-privileges -v "$producer_bin:/work/producer:ro" -v "$run:/receipt:rw" --entrypoint /usr/bin/time "$image" -f %M -o /receipt/producer.time /work/producer > "$run/producer.out" 2> "$run/producer.err" || producer_rc=$?
     [ "$producer_rc" -ne 2 ] || blocked producer-prerequisite-unavailable
@@ -335,20 +392,28 @@ run_artifacts() {
     [ "$(d frames)" = 20 ] && [ "$(d commands_total)" = 514 ] || die drawir-workload-contract
     [ "$(d backend)" = cpu ] && [ "$(d selected_backend)" = cpu ] && [ "$(d completion)" = known ] || die drawir-backend-completion-contract
     {
-      fixture_common drawir
+      fixture_common drawir "$A4_DRAWIR_WORKLOAD_HASH"
       echo compiler_kind=pure-simple-stage4; echo execution_mode=direct-native; echo backend="$(d backend)"; echo selected_backend="$(d selected_backend)"; echo width=7680; echo height=4320; echo revisions=20; echo damage_width=256; echo damage_height=128; echo commands_total=514
+      echo commands_considered_per_frame=2; echo commands_culled_per_frame=512; echo commands_rendered_per_frame=2; echo commands_skipped_per_frame=512
+      echo commands_considered_total="$(d commands_considered_total)"; echo commands_culled_total="$(d commands_culled_total)"; echo commands_rendered_total="$(d commands_rendered_total)"; echo commands_skipped_total="$(d commands_skipped_total)"
       echo p50_ns="$(d p50_ns)"; echo p95_ns="$(d p95_ns)"; echo max_rss_kib="$(cat "$run/draw.time")"; echo checksum="$(d checksum)"
       echo readback_source=cpu-framebuffer-outside-timing; echo readback_count="$(d readback_pixels)"; echo mismatches="$(d full_frame_mismatches)"; echo completion="$(d completion)"
       [ "$(d seed_fallback)" = false ] && echo fallback=none || echo fallback=used
     } | sed "s/^source_hash=.*/source_hash=$source_hash/;s/^artifact_hash=.*/artifact_hash=$(sha256sum "$draw_bin" | awk '{print $1}')/;s/^run_id=.*/run_id=$(date -u +%Y%m%dT%H%M%SZ)-$$/" > "$run/draw.receipt"
     actual_run_id=$(value "$run/draw.receipt" run_id)
     {
-      fixture_common producer
+      fixture_common producer "$A5_SEMANTIC_WORKLOAD_HASH"
       echo compiler_kind=pure-simple-stage4; echo execution_mode="$execution_mode"; echo width=7680; echo height=4320; echo max_rss_kib="$(cat "$run/producer.time")"
       echo device_hash="$(printf '%s' "$(raw_value "$run/producer.out" producer_receipt_device_identity)" | sha256sum | awk '{print $1}')"
       echo container_image_hash="$container_hash"; echo container_gpu_admission=submit-readback-pass
-      for k in status reason requested_backend selected_backend readback_source backend_handle device_identity revision_start revision_end checksum_start checksum_end completion_known fallback_used warmup_count sample_count p50_ns p95_ns timed_readback_bytes; do echo "producer_receipt_$k=$(raw_value "$run/producer.out" "producer_receipt_$k")"; done
+      for k in status reason requested_backend selected_backend readback_source backend_handle device_identity revision_start revision_end checksum_start checksum_end completion_known fallback_used warmup_count sample_count device_submit_count device_fence_count p50_ns p95_ns timed_readback_bytes; do echo "producer_receipt_$k=$(raw_value "$run/producer.out" "producer_receipt_$k")"; done
     } | sed "s/^source_hash=.*/source_hash=$source_hash/;s/^artifact_hash=.*/artifact_hash=$(sha256sum "$producer_bin" | awk '{print $1}')/;s/^run_id=.*/run_id=$actual_run_id/" > "$run/producer.receipt"
+    mkdir "$run/publish"
+    cp "$provenance" "$run/publish/compiler-provenance.env"
+    printf '%s\n' "compiler_path=$compiler" "compiler_hash=$(sha256sum "$compiler" | awk '{print $1}')" "source_hash=$source_hash" > "$run/publish/compiler-identity.env"
+    cp "$run"/draw.build.out "$run"/draw.build.err "$run"/draw.build.time "$run"/draw.build.meta "$run"/producer.build.out "$run"/producer.build.err "$run"/producer.build.time "$run"/producer.build.meta "$run"/draw.out "$run"/draw.err "$run"/draw.time "$run"/producer.out "$run"/producer.err "$run"/producer.time "$run"/container-image.env "$run/publish/"
+    cp -R "$run/cuda" "$run/publish/cuda"
+    PUBLISH_EVIDENCE_DIR="$run/publish"; export PUBLISH_EVIDENCE_DIR
     aggregate "$run/draw.receipt" "$run/producer.receipt" "$physical"
     rm -rf "$run"; trap - EXIT HUP INT TERM
 }
