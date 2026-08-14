@@ -45,6 +45,74 @@ lane, or absorbing unrelated GUI/web/2D files.
 | Retained harness | `scripts/check/check-cross-language-perf.shs` | Present |
 | C facade selfcheck | `scripts/check/check-file-exists-probe-c.shs` | Present |
 
+## Build11 replacement lane A status (2026-08-14)
+
+This detached worktree is the fresh lane-A replacement. The previous Build11
+candidate did not reach performance admission: its strict Stage 2 bootstrap
+ended after about 52 minutes with 61 HIR field-inference failures (mostly
+`struct 'ANY' field ...`), including `src/compiler/99.loader/module_loader.spl`.
+Consequently there is no admissible self-hosted failed-probe, latency, or RSS
+receipt from that attempt. Rust-seed measurements remain diagnostic only.
+
+Current acceptance items, each to be verified once in this lane:
+
+- [x] Establish the focused loader/performance baseline with the canonical
+  self-hosted runtime and retain the exact failure or PASS receipt.
+- [ ] Remove the remaining in-scope Build11 compiler/loader/script blocker
+  without seed fallback, disabled checks, reduced workload, or fabricated
+  evidence.
+- [ ] Run the optimizer audit on each touched `.spl` implementation file and
+  address or explicitly disposition its findings.
+- [ ] Pass the focused SPipe performance specification and C provider
+  lifecycle/self-check gate with real assertions.
+- [ ] Pass the compiler/core/lib and MCP/LSP checks required for compiler or
+  library changes, including the core-runtime and MCP native smoke gates when
+  the language/startup surface is affected.
+- [x] Record admitted self-hosted failed-probe reduction, warm latency, and
+  maximum RSS evidence, or retain a concrete WARN blocker if bootstrap remains
+  independently blocked after at most three fix cycles.
+- [ ] Commit all intentional changes, serialize integration with
+  `/tmp/simple-main-restart12-push.lock`, rebase onto fetched `origin/main`, push
+  detached `HEAD:main` without token environment overrides, and prove the
+  pushed commit is reachable from a freshly fetched `origin/main`.
+- [ ] Finish with a clean tree and only then write
+  `/tmp/restart12-compiler_perf_a.done` as `<commit> PASS` or `<commit> WARN`.
+
+Known blocker at lane start: prior Build11 Stage 2 could not type the compiler
+tree, so the admitted performance rows are pending. This lane first determines
+whether current `origin/main` already contains the upstream compiler repairs;
+if not, it fixes the narrow root cause rather than annotating 61 call sites.
+
+Acceptance accounting: the canonical deployed baseline was retained as status
+139 in `rt_env_set`; the independent C lifecycle/self-check half passed. The
+Stage 2/parser blocker was removed, while the focused SPipe half remains open
+because no admitted Stage 3 deployment exists. The WARN alternative for the
+performance rows is satisfied by the concrete tracking record named below.
+
+Fix-cycle 1 result: current main cleared Stage 2 (`845 compiled, 0 cached, 0
+failed`), so the inherited 61-file blocker is resolved upstream. Stage 3 then
+failed at `typed_storage_view_producer.spl:132` because its self-host parser
+requires parentheses around a multiline boolean condition. Lane A added those
+grammar-required parentheses without changing the predicate; the admitted
+resume must now pass Stage 3 before any performance row can be credited.
+
+Fix-cycle 2 result: Stage 2 again passed (`845 compiled, 0 failed`), and Stage
+3 parsed all 603 files with zero failures, proving the multiline grammar fix.
+It then segfaulted at the first HIR-loop dispatch to
+`CompileContext.error_count()`; GDB resolved the top frame to that getter and
+the following diagnostic never printed. The final cycle replaces fragile
+getter dispatch in this staged hot path with direct reads of its typed
+`error_count_value` scalar. This is behavior-preserving and keeps all mutation
+inside `CompileContext.add_error`.
+
+Fix-cycle 3 result: the admitted Stage 2 recovery again parsed all 603 files
+with zero failures but exited 139 before the first HIR progress row. Direct
+scalar access did not clear the corruption, so that unproven workaround was
+removed. The bounded lane stops here per the three-cycle cap. The grammar fix
+remains because it is independently proven by both later cycles. Admitted
+self-hosted loader probe/latency/RSS rows, optimizer execution, and deployed
+focused SPipe execution remain WARN-blocked by the Stage 3 context corruption.
+
 Artifact gaps are explicit: local research, domain research, selected feature
 requirements, selected NFR requirements, and architecture are **MISSING**;
 packed-byte detail design is **PARTIAL**. Their absence blocks feature/verify
