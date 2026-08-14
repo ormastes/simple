@@ -32,6 +32,8 @@ else
     /bin/sh "$0" "$@"
 fi
 set -eu
+bootstrap_early_repo_root=$(CDPATH= cd -- "${bootstrap_entry_dir}/../.." && pwd -P) || exit 70
+. "${bootstrap_early_repo_root}/scripts/check/lib/bootstrap-planner-admission-bound.shs"
 
 # Bootstrap wrapper for Linux, macOS, Windows/MSYS2, and FreeBSD.
 #
@@ -281,36 +283,23 @@ if [ -z "${bootstrap_receipt_path}" ] || [ ! -f "${bootstrap_receipt_path}" ]; t
   echo "bootstrap-policy-error: reason-receipt-required; run 'simple build bootstrap --bootstrap-reason=<typed-reason> --bootstrap-receipt=<path>'" >&2
   exit 64
 fi
-bootstrap_receipt=$(cat -- "${bootstrap_receipt_path}") || {
-  echo "bootstrap-policy-error: receipt-read-failed: ${bootstrap_receipt_path}" >&2
-  exit 64
-}
+case "${bootstrap_receipt_path}" in
+  /*) ;;
+  *) bootstrap_receipt_path="${PWD}/${bootstrap_receipt_path}" ;;
+esac
 bootstrap_receipt_target='//bootstrap:stage4'
 if [ -n "${resume_stage3_output}" ]; then
   bootstrap_receipt_target='//bootstrap:stage3'
 fi
-bootstrap_receipt_prefix="simple-bootstrap-receipt-v1|producer=simple-build-planner-v1|target=${bootstrap_receipt_target}|reason="
-case "${bootstrap_receipt}" in
-  "${bootstrap_receipt_prefix}"*) bootstrap_reason=${bootstrap_receipt#"${bootstrap_receipt_prefix}"} ;;
-  *)
-    echo "bootstrap-policy-error: malformed-or-untrusted-receipt" >&2
-    exit 64
-    ;;
-esac
-case "${bootstrap_reason}" in
-  seed-missing|seed-corrupt|seed-target-unsupported|\
-  seed-cannot-parse-required-language-feature|\
-  seed-cannot-lower-required-compiler-feature|\
-  bootstrap-runtime-abi-major-changed|\
-  bootstrap-artifact-format-major-changed|\
-  bootstrap-core-interface-major-changed|\
-  self-host-convergence-check|release-trust-verification|diverse-double-compilation)
-    ;;
-  *)
-    echo "bootstrap-policy-error: typed-reason-required" >&2
-    exit 64
-    ;;
-esac
+bootstrap_planner_v2_verify "${bootstrap_receipt_path}" "${bootstrap_early_repo_root}" || {
+  echo "bootstrap-policy-error: malformed-or-untrusted-planner-admission-v2" >&2
+  exit 64
+}
+[ "$(bootstrap_planner_v2_field target "${bootstrap_receipt_path}")" = "${bootstrap_receipt_target}" ] || {
+  echo "bootstrap-policy-error: planner-admission-target-mismatch" >&2
+  exit 64
+}
+bootstrap_reason=$(bootstrap_planner_v2_field reason "${bootstrap_receipt_path}") || exit 64
 SIMPLE_BOOTSTRAP_REASON_RECEIPT=${bootstrap_receipt_path}
 export SIMPLE_BOOTSTRAP_REASON_RECEIPT
 if [ "${validate_bootstrap_receipt}" -eq 1 ]; then

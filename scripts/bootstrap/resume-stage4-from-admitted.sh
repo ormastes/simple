@@ -30,6 +30,10 @@ resume_stage4_snapshot() {
 resume_stage4_prepare() {
   output=$(bootstrap_stage3_canonical_path "$1") || return 1
   root=$2 platform=$3 planner_receipt=$(bootstrap_stage3_canonical_file "$4") || return 1
+  bootstrap_planner_v2_verify "$planner_receipt" "$root" || {
+    echo "error: Stage 4 planner admission v2 did not verify" >&2; return 1;
+  }
+  [ "$(bootstrap_planner_v2_field target "$planner_receipt")" = "//bootstrap:stage4" ] || return 1
   [ "$output" = "$1" ] && [ -d "$output" ] && [ ! -L "$output" ] || return 1
   manifest="$output/stage3/$platform/provenance.env"
   candidate="$output/stage3/$platform/simple"

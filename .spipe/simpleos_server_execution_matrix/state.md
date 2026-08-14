@@ -305,3 +305,11 @@ implementation-active
   root, fuse/rollback policy, signed SimpleOS manifest, or redistribution and
   recovery authorization. The pinned trust file remains intentionally absent;
   physical mutation and AC-4..8 stay blocked.
+- build-blocked-planner-admission: The retained Stage2 executable has no
+  Stage2 sanity or admission receipt, so it cannot non-circularly build the
+  authorization planner. Planner admission now uses the exact bound v2 schema,
+  and common bootstrap plus direct Stage3/Stage4 resume reject even structurally
+  valid forged receipts with `planner-admission-v2-producer-unavailable`.
+  The rejected post-build recovery experiment was omitted because its envelope
+  was self-describing and forgeable. This is a safe WARN checkpoint, not an
+  admitted planner, Stage2, Stage3, or Stage4 result.

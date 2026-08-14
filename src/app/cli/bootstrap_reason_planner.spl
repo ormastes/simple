@@ -13,18 +13,28 @@ extern fn rt_get_args() -> [text]
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
 
-fn planner_reason_allowed(reason: text) -> bool:
-    reason == "seed-missing" or
+fn planner_reason_allowed(target: text, reason: text) -> bool:
+    (target == "//bootstrap:stage3" and (reason == "seed-missing" or
         reason == "seed-corrupt" or
         reason == "seed-target-unsupported" or
         reason == "seed-cannot-parse-required-language-feature" or
         reason == "seed-cannot-lower-required-compiler-feature" or
         reason == "bootstrap-runtime-abi-major-changed" or
         reason == "bootstrap-artifact-format-major-changed" or
-        reason == "bootstrap-core-interface-major-changed" or
-        reason == "self-host-convergence-check" or
+        reason == "bootstrap-core-interface-major-changed")) or
+        (target == "//bootstrap:stage4" and (reason == "self-host-convergence-check" or
         reason == "release-trust-verification" or
-        reason == "diverse-double-compilation"
+        reason == "diverse-double-compilation"))
+
+fn planner_sha256_allowed(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var i = 0
+    while i < value.len():
+        if not "0123456789abcdef".contains(value.substring(i, i + 1)):
+            return false
+        i = i + 1
+    true
 
 fn planner_arg_value(args: [text], prefix: text) -> text:
     var i = 0
@@ -42,22 +52,30 @@ fn main() -> i64:
     val args = rt_get_args()
     val reason_name = planner_arg_value(args, "--bootstrap-reason=")
     val receipt_path = planner_arg_value(args, "--bootstrap-receipt=")
-    var target = planner_arg_value(args, "--bootstrap-target=")
-    if target.len() == 0:
-        target = "//bootstrap:stage4"
-    if not planner_reason_allowed(reason_name):
+    val target = planner_arg_value(args, "--bootstrap-target=")
+    val parent_sha = planner_arg_value(args, "--parent-compiler-sha256=")
+    val runtime_sha = planner_arg_value(args, "--runtime-snapshot-sha256=")
+    val closure_sha = planner_arg_value(args, "--planner-source-closure-sha256=")
+    val planner_sha = planner_arg_value(args, "--planner-sha256=")
+    if not planner_reason_allowed(target, reason_name):
         print("bootstrap-policy-error: typed-reason-required")
         return 2
     if receipt_path.trim().len() == 0:
         print("bootstrap-policy-error: receipt-path-required")
         return 2
-    if not target.starts_with("//bootstrap:") and
-            not target.starts_with("//release:"):
-        print("bootstrap-policy-error: target-required")
+    if not planner_sha256_allowed(parent_sha) or
+            not planner_sha256_allowed(runtime_sha) or
+            not planner_sha256_allowed(closure_sha) or
+            not planner_sha256_allowed(planner_sha):
+        print("bootstrap-policy-error: admission-hash-required")
         return 2
-    val receipt = "simple-bootstrap-receipt-v1" +
-        "|producer=simple-build-planner-v1" +
-        "|target=" + target + "|reason=" + reason_name
+    val receipt = "simple-bootstrap-authorization-v2" +
+        "|producer=simple-build-planner-v2" +
+        "|target=" + target + "|reason=" + reason_name +
+        "|parent_sha256=" + parent_sha +
+        "|runtime_sha256=" + runtime_sha +
+        "|source_closure_sha256=" + closure_sha +
+        "|planner_sha256=" + planner_sha
     if not planner_file_write(receipt_path, receipt + "\n"):
         print("bootstrap-policy-error: receipt-write-failed: " + receipt_path)
         return 2

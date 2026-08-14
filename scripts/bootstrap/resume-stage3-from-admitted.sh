@@ -10,6 +10,14 @@ output="$root/$source_output"
 BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 export BOOTSTRAP_STAGE3_FACADE_PATH
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+planner_admission=${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}
+[ -n "$planner_admission" ] || {
+  echo "bootstrap-policy-error: planner-admission-v2-required" >&2; exit 64;
+}
+bootstrap_planner_v2_verify "$planner_admission" "$root" || exit 64
+[ "$(bootstrap_planner_v2_field target "$planner_admission")" = \
+  //bootstrap:stage3 ] || exit 64
 
 platform=$(bootstrap_stage3_host_platform)
 stage3="$output/stage3/$platform"

@@ -111,6 +111,22 @@ work. Timing and RSS may be recorded with host and producer labels but are not
 initial pass/fail thresholds. No bootstrap process may start before the planner
 emits and validates its typed reason.
 
+The current fail-closed authorization boundary is planner admission v2. The
+planner authorization leaf accepts only `//bootstrap:stage3` or
+`//bootstrap:stage4`; each target has its own closed typed-reason enumeration.
+The leaf binds the parent compiler, frozen runtime, planner source closure, and
+planner executable hashes. The canonical admission then records, in fixed
+unique field order, the parent sanity and provenance anchors, runtime and
+source-closure snapshots, git state, build argv/environment hashes,
+runtime-plus-closure cache scope, planner smoke, and authorization receipt.
+Every evidence path is absolute, canonical, nonsymlinked, and hash-checked.
+No canonical non-circular producer exists yet: it requires an independently
+admitted Stage 2 parent to build and execute the planner while capturing its
+locked exact invocation, environment, stdout/exit, derivation, and smoke.
+`scripts/check/verify-bootstrap-planner-admission-bound.shs` therefore rejects
+even a structurally perfect shell-authored body. Bootstrap remains fail-closed;
+a fixture never becomes build evidence.
+
 Current CLI boundary: `simple build explain --target <name>` validates the
 declared target graph and prints its deterministic dependency plan. It reports
 `digest-evidence=unavailable` and `execution=not-attempted`; this is planning
@@ -147,30 +163,37 @@ convergence, release trust verification, or diverse double compilation. App
 metadata, command registration, provider-private code, documentation, cache
 absence, or merely living under `src/compiler/**` are not reasons.
 
-The executable gate is two-step and fail-closed. `simple build bootstrap` is a
-receipt-only planner; it never starts a stage:
+The intended executable gate is two-step and fail-closed. `simple build
+bootstrap` is a receipt-only planner leaf; it never starts a stage. The leaf
+requires the exact target-specific reason plus four lowercase SHA-256 bindings:
+the admitted parent compiler, frozen runtime snapshot, planner source closure,
+and planner executable:
 
 ```text
 simple build bootstrap --bootstrap-reason=self-host-convergence-check \
-  --bootstrap-receipt=build/bootstrap/reason.receipt
+  --bootstrap-target=//bootstrap:stage4 \
+  --parent-compiler-sha256=<64-lowercase-hex> \
+  --runtime-snapshot-sha256=<64-lowercase-hex> \
+  --planner-source-closure-sha256=<64-lowercase-hex> \
+  --planner-sha256=<64-lowercase-hex> \
+  --bootstrap-receipt=build/bootstrap/authorization.receipt
 scripts/bootstrap/bootstrap-from-scratch.sh \
-  --bootstrap-receipt=build/bootstrap/reason.receipt
+  --bootstrap-receipt=build/bootstrap/planner-admission-v2.env
 ```
 
-The staged driver rejects a missing, malformed, unknown, or `None` receipt
-before Stage 1. Ordinary `simple build`, configuration targets, and provider
-targets never manufacture this receipt or select Stage 4. Direct/ad-hoc callers
-must use the same planner or receive `bootstrap-policy-error:
-reason-receipt-required`. Windows forwarding and admitted Stage 3 resume enter
-the same guarded driver. The v1 receipt is a canonical provenance marker, not a
-cryptographic authorization token; host users able to modify arbitrary files
-can forge it. Cryptographic or OS-mediated authorization remains out of scope
-until bootstrap execution has a dedicated privilege boundary.
-Stage-limited workflows bind the receipt to their exact target: use
-`--bootstrap-target=//bootstrap:stage3` with
-`--resume-stage3-from-admitted`. The default planner target is
-`//bootstrap:stage4`. `--validate-bootstrap-receipt` validates the binding and
-exits with `execution=not-attempted`.
+The authorization leaf is deliberately non-authoritative. Only a future
+non-circular producer, executing a planner built by an independently admitted
+Stage 2 parent under an owned pre-exec lock and capturing exact build lineage,
+argv, environment, stdout, exit status, and smoke evidence, may wrap it in the
+29-field planner admission v2 envelope. That producer does not yet exist.
+
+Consequently both normal execution and `--validate-bootstrap-receipt`
+intentionally fail with `planner-admission-v2-producer-unavailable`, even for a
+structurally perfect shell-authored envelope. No stage starts. Direct Stage 3
+resume and Stage 4 continuation enforce the same public verifier. The exact
+Stage 3 target is `--bootstrap-target=//bootstrap:stage3`; Stage 4 is
+`--bootstrap-target=//bootstrap:stage4`. Missing receipts still fail earlier
+with `reason-receipt-required`.
 
 ## Expected containment
 

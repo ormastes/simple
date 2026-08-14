@@ -1,0 +1,67 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/planner-admission-v2.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir "$tmp/runtime-dir" "$tmp/out"
+source_path="$root/src/app/cli/bootstrap_reason_planner.spl"
+for name in parent sanity provenance runtime closure git planner smoke; do
+    printf '%s\n' "$name-evidence" >"$tmp/$name"
+done
+h() { bootstrap_planner_v2_hash_file "$1"; }
+parent_sha=$(h "$tmp/parent")
+runtime_sha=$(h "$tmp/runtime")
+closure_sha=$(h "$tmp/closure")
+planner_sha=$(h "$tmp/planner")
+cache_key=$(printf '%s:%s\n' "$runtime_sha" "$closure_sha" | sha256sum | awk '{print $1}')
+auth="$tmp/auth"
+bootstrap_planner_v2_authorization_text //bootstrap:stage4 self-host-convergence-check "$parent_sha" "$runtime_sha" "$closure_sha" "$planner_sha" >"$auth"
+body="$tmp/body"
+write_body() {
+    { echo schema=simple-bootstrap-planner-admission-v2; echo status=pass
+      echo platform=x86_64-unknown-linux-gnu; echo target=//bootstrap:stage4
+      echo reason=self-host-convergence-check
+      for pair in parent_compiler:parent parent_stage2_sanity:sanity parent_stage2_provenance:provenance; do
+        stem=${pair%%:*}; file=${pair#*:}; echo "${stem}_path=$tmp/$file"; echo "${stem}_sha256=$(h "$tmp/$file")"
+      done
+      echo runtime_dir="$tmp/runtime-dir"; echo runtime_snapshot_path="$tmp/runtime"; echo runtime_snapshot_sha256="$(h "$tmp/runtime")"
+      echo planner_source_path="$source_path"; echo planner_source_sha256="$(h "$source_path")"
+      echo planner_source_closure_snapshot_path="$tmp/closure"; echo planner_source_closure_snapshot_sha256="$(h "$tmp/closure")"
+      echo git_state_path="$tmp/git"; echo git_state_sha256="$(h "$tmp/git")"
+      echo build_argv_sha256="$(printf argv | sha256sum | awk '{print $1}')"; echo build_env_sha256="$(printf env | sha256sum | awk '{print $1}')"
+      echo cache_scope_key="$cache_key"; echo planner_path="$tmp/planner"; echo planner_sha256="$(h "$tmp/planner")"
+      echo planner_smoke_path="$tmp/smoke"; echo planner_smoke_sha256="$(h "$tmp/smoke")"
+      echo authorization_receipt_path="$auth"; echo authorization_receipt_sha256="$(h "$auth")"
+    } >"$body"
+}
+expect_reject() {
+    label=$1 candidate=$2
+    if bootstrap_planner_v2_verify "$candidate" "$root"; then
+        echo "FAIL: admitted $label" >&2; exit 1
+    fi
+}
+
+write_body
+bootstrap_planner_v2_verify_structure "$body" "$root"
+expect_reject forged-valid-body "$body"
+
+cp "$body" "$tmp/duplicate"; echo status=pass >>"$tmp/duplicate"
+expect_reject duplicate-field "$tmp/duplicate"
+sed 's#target=//bootstrap:stage4#target=//release:all#' "$body" >"$tmp/target"
+expect_reject arbitrary-target "$tmp/target"
+sed 's/reason=self-host-convergence-check/reason=seed-missing/' "$body" >"$tmp/reason"
+expect_reject stage-reason-mismatch "$tmp/reason"
+sed 's/^cache_scope_key=.*/cache_scope_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' "$body" >"$tmp/cache"
+expect_reject unbound-cache "$tmp/cache"
+cp "$body" "$tmp/hash"; printf mutation >>"$tmp/planner"
+expect_reject mutated-planner "$tmp/hash"
+printf '%s\n' planner-evidence >"$tmp/planner"
+ln -s "$tmp/parent" "$tmp/parent-link"
+sed "s#parent_compiler_path=$tmp/parent#parent_compiler_path=$tmp/parent-link#" "$body" >"$tmp/symlink"
+expect_reject symlink-path "$tmp/symlink"
+printf '%s\n' forged >"$auth"
+write_body
+expect_reject unbound-authorization "$body"
+
+echo 'PASS: planner admission v2 rejects shell-forged bodies until a non-circular admitted producer exists'
