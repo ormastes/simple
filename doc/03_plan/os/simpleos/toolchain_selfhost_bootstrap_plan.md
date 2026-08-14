@@ -1,6 +1,7 @@
 # SimpleOS Toolchain Self-Host Bootstrap — Parallel Lane Plan
 
-Status: ACTIVE (research complete 2026-08-06)
+Status: ACTIVE / WARN (restart12 implementation blocked after three cycles;
+plan acceptance reviewed 2026-08-14)
 Scope: 4 goals — (G1) Simple compiler/interpreter/loader on SimpleOS,
 (G2) clang-for-SimpleOS recheck + in-guest hello-world smoke,
 (G3) in-QEMU clang bootstrap + ormastes llvm-project fork,
@@ -245,3 +246,156 @@ Maximum parallelism at t0: **C1 + S1 + F1 + C2 + B2 + B3** (six independent lane
   landmine catalog applies (`baremetal_simple_codegen_landmines.md`).
 - Postponement ≠ completion: blocked rows (aarch64, physical board, B4) stay
   visible with owner, prerequisite, resume command, retained artifacts.
+
+## 7. Restart12 deployment-image + production-desktop acceptance ledger
+
+This section is the canonical current plan for the restart12 deployment lane.
+Sections 0–6 and their paths/hashes are historical context only and confer no
+PASS in restart12. In particular, a Rust-seed-built payload, fixed-command SSH
+fixture, QEMU `-kernel` boot, or old transcript is not acceptance evidence.
+
+Merge owner: `/root`. Sidecar findings: `acceptance_audit` and
+`guide_trace_audit`. Separate higher-capability reviewer:
+`higher_model_review`, final plan verdict PASS on 2026-08-14 after checking
+acceptance completeness, blocker honesty, guide coverage, manual readability,
+and done/exclusion marks. This verdict accepts plan completeness only.
+
+| AC | Status | Authoritative evidence | Blocker / exact resume | Owner | Final reviewer |
+|---|---|---|---|---|---|
+| AC-1 current evidence only | PASS | This ledger; current filesystem inspection; bootstrap logs below | N/A | `/root` | `higher_model_review` |
+| AC-2 admitted host compiler + pure-Simple payload | BLOCKED | Stage 2 sanity passed; Stage 3 log retained | B-STAGE3; fresh lane runs the command in its bug | compiler bootstrap | `higher_model_review` |
+| AC-3 two-record image admission | BLOCKED | Frozen schemas below | needs AC-2 payload and genuine guest `ld.lld` | image owner | `higher_model_review` |
+| AC-4 same-run production desktop boot | BLOCKED | canonical route frozen below | B-DESKTOP-LIVE; run wrapper below after AC-3 | desktop/QEMU owner | `higher_model_review` |
+| AC-5 guest compile/link/run | BLOCKED | literal guest contract below | needs AC-2–4 | guest toolchain owner | `higher_model_review` |
+| AC-6 frozen SSpec interface | PASS | exact names/text below | N/A | system-test owner | `higher_model_review` |
+| AC-7 executable/manual/trace gates | BLOCKED | target paths and commands below | implementation and admitted `bin/simple` absent | system-test owner | `higher_model_review` |
+| AC-8 capability matrix | PASS | matrix below | rows remain independently blocked | `/root` | `higher_model_review` |
+| AC-9 bounded cycles | PASS | cycle ledger below | no fourth cycle permitted | `/root` | `higher_model_review` |
+| AC-10 knowledge/blocker coverage | PASS | checklist and bug paths below | execution evidence still blocked | `/root` | `higher_model_review` |
+| AC-11 cooperative review | PASS | named merge/review receipt above | N/A | `/root` | `higher_model_review` |
+| AC-12 detached integration | BLOCKED | exact lifecycle below | performed only after final commit | `/root` | `higher_model_review` |
+
+### Admission and non-circular records
+
+Host admission records exact pure-Simple compiler path, SHA-256, source commit,
+runtime authority, target triple, producer command, and validator result.
+`scripts/ci/build-simpleos-toolchain.shs` is not deployment evidence while it
+executes the Rust seed; the seed is bootstrap-only. Payload production must set
+`SIMPLE_NO_STUB_FALLBACK=1`.
+
+Embedded `/SYS/SIMPLETOOL.SDN` is schema
+`simpleos_toolchain_deployment_manifest/v1`. It records producer/validator,
+target-native static-ELF checks, SHA-256 for the admitted compiler, SimpleOS
+payload, genuine guest-static `ld.lld`, `/usr/lib/SIMAIN.O`, `/HELLO.SPL`, and
+kernel, plus byte-identical alias inventory:
+`/usr/bin/simple(.smf)`, `/bin/simple(.smf)`,
+`/sys/apps/simple(.smf)`, `/sys/apps/simple_compiler(.smf)`,
+`/sys/apps/simple_interpreter(.smf)`, `/sys/apps/simple_loader(.smf)`, and
+`/SYS/SIMPLETOOL.SDN`. It cannot hash its containing image.
+
+External `simpleos_toolchain_image_admission_receipt/v1` records the final
+image SHA-256, embedded-manifest SHA-256, kernel SHA-256, producer/validator,
+timestamp, command, and validation signatures. Thus image admission is not
+self-referential.
+
+### Frozen boot and SSpec contract
+
+The single canonical owner route is a new
+`scripts/os/check_simpleos_toolchain_desktop_boot.shs`, launching OVMF CODE plus
+per-run VARS pflash and GRUB standalone EFI into canonical
+`gui_entry_desktop.spl`; `-kernel` is forbidden. One run must bind kernel/image
+hashes to `[desktop-gui]`, `[production-readiness]`, `[scanout-evidence]`, a
+framebuffer receipt, serial log, and SSH log. It must literally execute
+`/usr/bin/simple --version`, compile `/HELLO.SPL` with embedded
+`/usr/bin/ld.lld` and `/usr/lib/SIMAIN.O`, execute the mounted-filesystem ELF,
+and require exact `Hello World` plus rc=0.
+
+Executable target:
+`test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl`.
+Manual target:
+`doc/06_spec/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.md`.
+Frozen helpers are `step_prepare_toolchain_deployment_image`,
+`step_boot_simpleos_desktop`, `step_compile_and_run_guest_hello`,
+`prepare_toolchain_deployment_fixture`,
+`require_toolchain_deployment_manifest`,
+`require_simpleos_desktop_boot_receipt`, and `require_guest_hello_receipt`.
+Incomplete helpers call `fail(...)`. Exact visible steps are:
+`Prepare the toolchain deployment image`,
+`Boot the SimpleOS production desktop`, and
+`Compile and run Hello World inside the guest`.
+
+One-time post-unblock gates:
+
+```sh
+SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl --mode=interpreter
+bin/simple spipe-docgen test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl --output doc/06_spec --no-index
+bin/simple sspec-maintain scan test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl
+test "$(find doc/06_spec -name '*_spec.spl' -print -quit)" = ''
+```
+
+### Host/capability matrix
+
+| Capability | State | Missing prerequisite | Exact resume command | Retained artifacts | Owner |
+|---|---|---|---|---|---|
+| Linux x86_64 build/admission | BLOCKED | B-STAGE3 | command in `stage3_runtime_error_static_owner_receiver_corruption_2026-08-14.md` after its unblock condition | `build/bootstrap/logs/x86_64-unknown-linux-gnu/` | compiler bootstrap |
+| Linux x86_64 OVMF+GRUB desktop + guest | BLOCKED | admitted payload, linker, image, wrapper | `sh scripts/os/check_simpleos_toolchain_desktop_boot.shs` | `build/os/transcripts/`, manifests/receipts | desktop/QEMU owner |
+| Physical x86_64 board | BLOCKED | purchased board identity, NIC support, live serial/SSH | `sh scripts/os/check_simpleos_toolchain_physical_boot.shs --board-id <inventory-id> --image <admitted-image>` (safe wrapper must validate removable target before imaging) | board identity + serial/SSH transcript | board owner |
+| aarch64/riscv64 | BLOCKED / out of this lane | architecture-specific firmware/toolchain prerequisites | commands remain in their linked architecture plans | their own build trees | architecture owners |
+
+QEMU never satisfies the physical row. Unavailable rows remain active and are
+never silently excluded or skipped.
+
+### Global fix/verify cycle ledger and stop rule
+
+Attempt 1 exposed the missing typed parser contract owner. Attempt 2 passed
+Stage 2 and failed Stage 3 on fourteen folded-constant type recoveries. Attempt
+3 passed Stage 2, proved those errors absent, and then exited 139 at the new
+`runtime_error` static-owner frontier. All three feature-wide cycles are
+consumed. No unchanged green criterion or identical failed command may rerun.
+
+PASS requires fresh authoritative evidence for AC-1 through AC-12. WARN is
+allowed only after at most three cycles with every unresolved item retained as
+BLOCKED, a bug and exact resume condition recorded, and no deployment/desktop
+done or release claim.
+
+### Knowledge and blocker checklist
+
+Current anchors: local/domain research and feature/NFR requirements for
+`simpleos_filesystem_toolchain_servers`; architecture/detail design and sys-test
+plan of the same name; this plan; the deployment SSpec/manual targets above;
+`simpleos_llvm_toolchain.md`, `simpleos_x86_64_wm_qemu.md`,
+`simpleos_board_bringup.md`, `qemu_system_tests.md`, and
+`simpleos_baremetal_board_support.md`; feature expert
+`simpleos_toolchain_selfhost/skill.md`; layer experts `llvm_toolchain_port`,
+`os_kernel_exec`, and `compiler_driver`. Refresh each when its workflow or
+evidence changes. Workflow skill/command docs are N/A unless their contract
+changes; generated manuals are mandatory.
+
+Current blockers are B-STAGE3
+(`stage3_runtime_error_static_owner_receiver_corruption_2026-08-14.md`),
+B-DESKTOP-LIVE (missing combined wrapper/receipt, owner route specified above),
+and B-PHYSICAL (board-support guide physical-board prerequisites). Each remains
+BLOCKED until its stated command produces hash-bound evidence.
+
+### Exact detached-worktree integration lifecycle
+
+Run fail-fast while holding the lock across the entire sequence:
+
+```sh
+set -eu
+exec 9>/tmp/simple-main-restart12-push.lock
+flock 9
+git fetch origin main
+git rebase origin/main
+env -u GH_TOKEN -u GITHUB_TOKEN git push origin HEAD:main
+git fetch origin main
+git merge-base --is-ancestor HEAD origin/main
+test -z "$(git status --porcelain)"
+hash=$(git rev-parse HEAD)
+tmp=/tmp/restart12-simpleos.done.tmp.$$
+printf '%s WARN\n' "$hash" >"$tmp"
+mv "$tmp" /tmp/restart12-simpleos.done
+```
+
+Never force-push and never create a branch. The receipt is absent until the
+push is reachable and the tree is clean.

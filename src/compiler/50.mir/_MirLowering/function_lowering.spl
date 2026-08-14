@@ -43,25 +43,36 @@ use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_lowering_ml.*
 
 impl MirLowering:
-    fn mir_const_value_type(value: MirConstValue) -> MirType?:
+    fn mir_folded_const_type(expr: HirExpr, value: MirConstValue) -> MirType?:
         """Recover a concrete MIR type when HIR left a const type inferred.
 
         Module constants are lowered before the full expression-inference
         result is available. Scalar-foldable expressions can therefore carry
         `HirTypeKind.Infer` even though `lower_const_expr` has already proved
-        their concrete value. The folded value is authoritative here.
+        their concrete value. Recover from the original HIR expression first.
+        Native payload-enum values must not be classified a second time after
+        folding: that turned fourteen scalar constants into the wildcard arm
+        in the Stage 3 self-host build. The expression match is the same match
+        that already succeeded in `lower_const_expr`.
         """
-        match value:
-            case Int(_): Some(MirType.i64())
-            case Float(_): Some(MirType.f64())
-            case Bool(_): Some(MirType(kind: MirTypeKind.Bool))
-            case Str(_): Some(MirType(kind: MirTypeKind.Opaque("str")))
-            # An inferred module-level integer literal `0` folds to Zero. Bool
-            # and float zero retain their distinct variants, while nil must be
-            # explicitly typed before this boundary, so Zero is the canonical
-            # inferred i64 representation rather than an ambiguous failure.
-            case Zero: Some(MirType.i64())
-            case _: nil
+        match expr.kind:
+            case IntLit(_, _): Some(MirType.i64())
+            case FloatLit(_, _): Some(MirType.f64())
+            case BoolLit(_): Some(MirType(kind: MirTypeKind.Bool))
+            case StringLit(_, _): Some(MirType(kind: MirTypeKind.Opaque("str")))
+            # `lower_const_expr` only folds integer binary expressions.
+            case Binary(_, _, _): Some(MirType.i64())
+            case _:
+                # Defensive compatibility for future folded scalar forms.
+                match value:
+                    case Int(_): Some(MirType.i64())
+                    case Float(_): Some(MirType.f64())
+                    case Bool(_): Some(MirType(kind: MirTypeKind.Bool))
+                    case Str(_): Some(MirType(kind: MirTypeKind.Opaque("str")))
+                    # Preserve upstream's canonical inferred integer-zero
+                    # handling for future folded expression forms.
+                    case Zero: Some(MirType.i64())
+                    case _: nil
 
     me reset_function_local_tracking():
         """Reset every table keyed by a per-function LocalId.
@@ -648,7 +659,7 @@ impl MirLowering:
             # turning valid source into an `[infer-arm]` crash.
             val const_type = match const_.type_.kind:
                 case HirTypeKind.Infer(_, _):
-                    if val derived_type = self.mir_const_value_type(const_value):
+                    if val derived_type = self.mir_folded_const_type(const_.value, const_value):
                         derived_type
                     else:
                         self.error_fatal("cannot derive module constant type for '" + const_.name + "' from folded value; add an explicit annotation", Some(const_.value.span))

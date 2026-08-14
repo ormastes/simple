@@ -1,0 +1,45 @@
+# codex-system-test
+"""
+# Native method-resolution payload enum regression
+
+This scenario compiles and executes a standalone native fixture. It reproduces
+the Stage3 failure shape where an unresolved method-resolution enum was read
+through the interpreter tagged-Any discriminant ABI, corrupting static-owner
+recovery and the receiver local. The Rust seed is rejected as test authority.
+"""
+
+extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)
+
+fn prepare_native_method_resolution_fixture() -> (text, text, i64):
+    rt_process_run("sh", [
+        "scripts/check/check-native-method-resolution-payload-enum.shs"
+    ])
+
+val _native_gate = prepare_native_method_resolution_fixture()
+
+describe "REQ-BST-ENUM-001: native method-resolution payload integrity":
+    it "should preserve every adjacent payload-enum shape in native execution":
+        step("Compile and execute all method-resolution payload variants")
+        expect(_native_gate.2).to_equal(0)
+        expect(_native_gate.0).to_contain("STATUS: PASS native-method-resolution")
+        expect(_native_gate.0).to_contain("payload-variants=5")
+
+    it "should preserve static factory owner recovery in native execution":
+        step("Exercise a static factory call shaped like BackendError.type_error")
+        expect(_native_gate.2).to_equal(0)
+        expect(_native_gate.0).to_contain("static-factory=pass")
+
+    it "should preserve inferred array push receiver lowering":
+        step("Exercise push on an initially empty inferred array")
+        expect(_native_gate.2).to_equal(0)
+        expect(_native_gate.0).to_contain("inferred-push=pass")
+
+    it "should infer every scalar and folded-binary module constant":
+        step("Compile inferred module constants without reclassifying folded payloads")
+        expect(_native_gate.2).to_equal(0)
+        expect(_native_gate.0).to_contain("constant-inference=pass")
+
+    it "should fail closed when native compilation or execution is unavailable":
+        step("Require a real native candidate and an explicit probe verdict")
+        expect(_native_gate.1).to_equal("")
+        expect(_native_gate.0.contains("STATUS: FAIL")).to_equal(false)
