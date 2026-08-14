@@ -1,7 +1,7 @@
 # Stage 2 loses `HirContractBlock` type at optional narrowing
 
 Date: 2026-08-14
-Status: ROOT-CAUSE AND BOUNDED ALIAS FIX IMPLEMENTED; render-CLI cycle 3 pending
+Status: ROOT CONTRACT FIX ADVANCED; parser contract owner incomplete
 Owner: canonical HIR definitions / driver entry-closure ownership
 Source authority: implementation commit `cc30abb73ddc4652d8324bfa28768eda1cf4efeb`
 
@@ -130,3 +130,31 @@ would remain diagnostic-only because provenance rejects the stale seed stamp.
 The exact authoritative resume is the fresh-session, uncontended
 `--full-bootstrap --full-cli --deploy` transaction recorded in the canonical
 system-test plan. No fourth bootstrap was run in the exhausted session.
+
+## Render-CLI continuation: parser contract frontier
+
+The isolated render-CLI cycle 3 consumed the canonical HIR contract definition
+and cleared both `proof_uses` diagnostics. Stage 2 then failed on one later,
+more precise owner:
+
+`src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl: hir:
+Unsupported feature: cannot infer field type while lowering
+HirLowering.lower_verification_contract: struct 'ANY' field
+'decrease_measure'`
+
+Inspection proved `ParserFunction.contract`, `ContractBlock`, and
+`ContractClause` are consumed by current HIR lowering but are absent from the
+canonical `src/compiler/10.frontend/parser_types.spl`. Historical integration
+commit `5958de7d4c7` contains the complete intended typed-AST contract surface,
+flat-AST contract extraction, and constructor propagation; it must be ported
+selectively onto current main rather than cherry-picking that broad historical
+WIP commit or suppressing contract lowering.
+
+The render-CLI session exhausted its three verification/fix cycles after this
+diagnostic. Exact next verification is the retained Stage 2 command transcript
+with a new isolated cache rooted beside
+`build/restart12-render-cli-pass2/stage3/x86_64-unknown-linux-gnu/stage2-native-cache-cycle3`.
+Require the `decrease_measure` frontier to clear, a produced Stage 2 executable,
+and its sanity receipt before continuing to Stage 3. Do not replace the missing
+typed parser owner with `Any`, drop verification contracts, or reuse a stale
+cached object.
