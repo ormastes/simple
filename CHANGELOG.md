@@ -5,6 +5,10 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Fail-closed MIR coverage evidence** — represent typed decision and condition
+  probes explicitly, preserve their operand liveness through MIR optimization,
+  serialize them deterministically, and reject unlowered probes in interpreter
+  and LLVM paths instead of silently discarding formal evidence.
 - **Project statistics quality reports** — inventory owned source and test LOC
   by project, language, and test tier; retain provenance for coverage,
   duplication, coupling, and cohesion; and emit Markdown, TLDR, and native
