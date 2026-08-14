@@ -3698,7 +3698,7 @@ fn test_runtime_bundle_hosted_is_allowed_for_bootstrap_entry_only() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn test_bootstrap_mutex_capsule_exports_only_canonical_mutex_abi() {
+fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
     let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let core = build_core_c_runtime_library(&temp.path().join("core")).unwrap();
@@ -3711,6 +3711,9 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_mutex_abi() {
         "spl_mutex_try_lock",
         "spl_mutex_unlock",
         "spl_mutex_destroy",
+        "rt_mem_snapshot_open",
+        "rt_mem_snapshot_record",
+        "rt_mem_snapshot_close",
     ]
     .into_iter()
     .map(str::to_string)
@@ -3722,10 +3725,18 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_mutex_abi() {
     assert_eq!(actual, expected);
     assert!(!defined.contains_key("rt_native_build"));
     assert!(!defined.contains_key("rt_thread_spawn_isolated"));
-    assert!(undefined
+    let unresolved_runtime = undefined
         .iter()
-        .all(|symbol| !symbol.trim_start_matches('_').starts_with("rt_")
-            && !symbol.trim_start_matches('_').starts_with("spl_")));
+        .map(|symbol| symbol.trim_start_matches('_').to_string())
+        .filter(|symbol| symbol.starts_with("rt_") || symbol.starts_with("spl_"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        unresolved_runtime,
+        ["rt_heap_live_bytes", "rt_heap_peak_bytes"]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    );
 }
 
 #[cfg(target_os = "linux")]

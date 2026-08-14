@@ -121,6 +121,22 @@ authority and this record binds the Restart-12 reproduction/evidence.
 Three build/fix cycles were consumed in this session. Resume in a fresh scoped
 session; do not repeat the unchanged command here.
 
+## Restart-12 actor/process continuation evidence
+
+A typed-receipt full-bootstrap transaction produced and sanity-admitted a
+current-source pure-Simple Stage 2 (SHA-256
+`4c2d7d7328372175260d75ffd1ee2e475d9848a1d534c73ace7a9ef1eee0b68e`).
+Its Stage-3 child advanced to parse file 200/617, then grew monotonically from
+2,713,164 KiB through 29,019,120 KiB RSS and was externally terminated with
+status 143. The compiler emitted no diagnostic and produced no candidate.
+The durable series is retained at
+`build/bootstrap-restart12-current/bootstrap-retry-progress.log`.
+
+This confirms the P0 remains reproducible with a current admitted Stage-2
+authority. It does not identify the retained allocation owner, so the next
+cycle must consume the existing durable instrumentation and root-cause the
+growth; an unchanged rebuild is prohibited.
+
 ## Retained-evidence audit (2026-08-14)
 
 The retained cycle does **not** identify an allocation or retention owner.  It

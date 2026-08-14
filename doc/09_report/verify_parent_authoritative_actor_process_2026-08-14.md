@@ -9,8 +9,17 @@ the canonical architecture, guide, expert knowledge, and plans.
 ## Results
 
 - PASS: a full bootstrap admitted the pure-Simple Stage-2 binary at
-  `build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple` (856
-  compiled, 0 failed) and advanced to Stage 3.
+  `build/bootstrap-restart12-current/stage2/x86_64-unknown-linux-gnu/simple`
+  from current source and advanced to Stage 3. Its SHA-256 is
+  `4c2d7d7328372175260d75ffd1ee2e475d9848a1d534c73ace7a9ef1eee0b68e`.
+- PASS: the typed bootstrap receipt was emitted by the pure-Simple recovery
+  planner and validated before the canonical full-bootstrap transaction.
+- PASS by source inspection: the bootstrap core-C projection now carries the
+  existing durable memory-snapshot open/record/close providers. Its focused
+  projection test asserts the exact exported set and permits only the two
+  explicitly native-all-owned heap counters unresolved. The test passed in the
+  current terminal session, but no separate provenance-bound test log was
+  retained, so this report does not promote it to retained executable evidence.
 - PASS: the core C runtime capsule self-check passed all 33 checks after its
   coverage fixture gained the required string constructor.
 - PASS: hosted Rust evidence passed checked actor invalid/heap/disconnected
@@ -33,13 +42,17 @@ the canonical architecture, guide, expert knowledge, and plans.
   cleared, completed HIR for all 616 closure files and then reported fourteen
   remaining folded module constants without explicit types during MIR lowering.
   The cap forbids another diagnostic/build cycle in this session.
-- WARN: the next recovery pass proved the retained Stage-2 authority predates
-  current `mir_folded_const_type` and cannot rebuild itself through the full
-  planner: a four-module planner crashed, a two-module planner rejected three
-  folded constants, and a one-module planner rejected exactly its three typed
-  module constants. A pure-Simple recovery planner with no module constants is
-  now prepared, but its three-cycle mini-build cap was exhausted before an
-  executable verdict. No receipt or replacement Stage 2 was manufactured.
+- PASS: the zero-module-constant recovery planner compiled with the retained
+  Stage 2 when invoked through its documented `--entry`/`--source` interface;
+  the resulting typed receipt authorized a replacement current-source Stage 2.
+- WARN: the replacement Stage 2 began Stage 3 and parsed 200/617 files, then
+  grew monotonically to 29,019,120 KiB RSS and was terminated with status 143
+  before a compiler diagnostic or candidate. The retained progress receipt is
+  `build/bootstrap-restart12-current/bootstrap-retry-progress.log`.
+- WARN: the replacement Stage 2 supports only `compile` and `native-build`, not
+  the Stage-4 `test`/SPipe commands. Its focused process-system native build
+  reached link, then failed closed because the general core-C lane did not
+  retain mutex/thread-sleep/piped-process providers. No stub fallback was used.
 - WARN: the remaining Stage-2 system scenarios exposed aggregate/`Option`
   corruption: fragmented real-child delivery, atomic rollback, and cancellation
   did not produce valid executable verdicts. Assertions were retained.
@@ -52,7 +65,9 @@ the canonical architecture, guide, expert knowledge, and plans.
   not read canonical state. The reviewer still correctly withheld ACCEPT
   because the executable WARN gates above remain open.
 
-The blocker is the existing deployed-runtime failure tracked in
+The blockers are the Stage-3 RSS termination tracked in
+`doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`
+and the existing deployed-runtime failure tracked in
 `doc/08_tracking/bug/native_selfhosted_run_segfault_startup_normalize_2026-07-24.md`.
 No Rust seed result was substituted for Simple acceptance evidence.
 

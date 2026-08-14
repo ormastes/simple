@@ -85,7 +85,7 @@ separately instead of silently substituting the Rust seed.
 | AC-4 lifecycle, cancellation, no resurrection | **implemented; mixed evidence** | Actor stop is observable once, drains asks, and hosted native stop wakes receive. Process cancel revokes retained frames; natural exit/cancel/close record one terminal lifecycle receipt and one close attempt. | Obtain admitted Simple copied-ref and real-child cancellation/reap verdicts. |
 | AC-5 focused executable evidence | **partial** | Focused actor/process units and the five-step system spec contain non-vacuous assertions and AC/REQ traceability. Hosted actor tests pass; Stage-2 copied-frame isolation passes. Three Stage-2 system scenarios fail due aggregate/`Option` corruption, so no overall PASS is claimed. | Repair the compiler/runtime blocker and run the Simple specs once. |
 | AC-6 SPipe manual and maintenance | **authored; generation blocked** | The exact five frozen steps and matching operator manual exist with traceability and no skip-success path. | Stage-4 `spipe-docgen` and seven-score `sspec-maintain` remain unavailable; the authored manual is not labeled generated PASS. |
-| AC-7 production verification | **WARN / blocked** | An admitted but stale Stage-2 compiler was produced; core C capsule self-check passed 33 checks. Hosted actor gates pass. Current main fixes folded constant classification, but the retained Stage 2 predates it and cannot lower even explicitly typed planner module constants. A zero-module-constant pure-Simple recovery planner is prepared after three bounded mini-build diagnostics. Stage-4 still exits 139. | In a fresh bounded lane, build the prepared recovery planner once, use its typed receipt to rebuild Stage 2 from current source, then complete Stage 3/4 and run compiler/lib/MCP/LSP, focused Simple, lint, duplication, and SPipe gates. |
+| AC-7 production verification | **WARN / blocked** | A typed receipt authorized a current-source Stage-2 compiler at `build/bootstrap-restart12-current/stage2/x86_64-unknown-linux-gnu/simple` (SHA-256 `4c2d7d7328372175260d75ffd1ee2e475d9848a1d534c73ace7a9ef1eee0b68e`). Stage 2 passed sanity. Stage 3 was terminated at 29,019,120 KiB RSS during parse, and the Stage-2 focused native build then exposed missing retained core-C providers. Stage-4 still exits 139. | Repair the profiled Stage-3 retention owner and general core-C provider projection, then complete Stage 3/4 and run compiler/lib/MCP/LSP, focused Simple, lint, duplication, and SPipe gates. Do not rerun the unchanged memory-growing transaction. |
 | AC-8 guide and expert knowledge | **complete** | Architecture, detail design, guide, feature/layer experts, test plans, and blocker classifications reflect the landed actor/process contracts and current evidence. | Reopen if final review finds an overclaim or an interface changes. |
 | AC-9 cooperative review | **review complete; acceptance withheld** | A separate highest-capability reviewer inspected the merged diff. Three source findings were fixed and re-reviewed; the reviewer correctly withheld ACCEPT because AC-5..7 executable evidence remains WARN. | Repeat final acceptance after the staged/Stage-4 and SPipe blockers pass. |
 
@@ -148,11 +148,12 @@ separately instead of silently substituting the Rust seed.
 
 ## Mandatory handoff record
 
-This lane produced the admitted pure-Simple Stage-2 binary at
-`build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple`.
-Stage-3 compilation was stopped after the mandatory three resumed cycles. It
-now completes HIR across the 616-file closure, but the final MIR verdict remains
-fourteen unnamed module-constant type derivation failures. The repo-managed
+This lane produced the current-source pure-Simple Stage-2 binary at
+`build/bootstrap-restart12-current/stage2/x86_64-unknown-linux-gnu/simple`
+(SHA-256 `4c2d7d7328372175260d75ffd1ee2e475d9848a1d534c73ace7a9ef1eee0b68e`).
+Stage 2 passed the canonical sanity gate. Stage 3 was terminated at
+29,019,120 KiB RSS while parsing file 200/617, before a diagnostic or candidate;
+do not repeat that unchanged transaction. The repo-managed
 Stage-4 wrapper still rejects tests because its bounded `test --help` ABI probe
 segfaults. The source guard is tracked by
 [native_selfhosted_run_segfault_startup_normalize_2026-07-24.md](../../08_tracking/bug/native_selfhosted_run_segfault_startup_normalize_2026-07-24.md).
