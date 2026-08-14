@@ -40,7 +40,11 @@ fn coverage_condition_id(condition_eid: i64) -> i64:
     val condition_span = expr_get(condition_eid).span_id
     if span_is_valid(condition_span):
         return span_start(condition_span) + 1
-    condition_eid + 1
+    -1
+
+fn coverage_span_decision_id(span_id: i64) -> i64:
+    if span_is_valid(span_id): return span_start(span_id) + 1
+    -1
 
 fn record_control_decision(file: text, line: i64, column: i64, decision_id: i64, taken: bool):
     if rt_coverage_enabled():
@@ -55,10 +59,12 @@ fn record_control_condition(decision_id: i64, condition_eid: i64, taken: bool):
         if span_is_valid(condition_span):
             condition_line = span_line(condition_span)
             condition_column = span_col(condition_span)
-        rt_coverage_condition_probe(
-            decision_id, coverage_condition_id(condition_eid), taken,
-            coverage_owner_file(), condition_line, condition_column
-        )
+        val condition_id = coverage_condition_id(condition_eid)
+        if decision_id >= 0 and condition_id >= 0:
+            rt_coverage_condition_probe(
+                decision_id, condition_id, taken,
+                coverage_owner_file(), condition_line, condition_column
+            )
 
 # Evaluates a control predicate while preserving language short-circuit
 # semantics.  Only leaf operands are conditions: the enclosing `and`/`or`
@@ -569,7 +575,7 @@ fn eval_if_expr(eid: i64) -> i64:
     val then_id = e_node.right
     val else_id = e_node.extra
 
-    val cond_val = eval_control_condition(cond_id, eid)
+    val cond_val = eval_control_condition(cond_id, coverage_span_decision_id(e_node.span_id))
     if eval_had_error: return -1
 
     val taken = val_is_truthy(cond_val)
@@ -579,7 +585,8 @@ fn eval_if_expr(eid: i64) -> i64:
     if span_is_valid(span_id):
         source_line = span_line(span_id)
         source_column = span_col(span_id)
-    record_control_decision(coverage_owner_file(), source_line, source_column, eid, taken)
+    if span_is_valid(span_id):
+        record_control_decision(coverage_owner_file(), source_line, source_column, span_start(span_id) + 1, taken)
 
     if taken:
         return eval_expr(then_id)
@@ -790,7 +797,7 @@ fn eval_while_expr(eid: i64) -> i64:
         if eval_had_error: break
         if eval_returning: break
         if eval_breaking: break
-        val cond_val = eval_control_condition(cond_eid, eid)
+        val cond_val = eval_control_condition(cond_eid, coverage_span_decision_id(e_node.span_id))
         if eval_had_error: break
         val taken = val_is_truthy(cond_val)
         val span_id = e_node.span_id
@@ -799,7 +806,8 @@ fn eval_while_expr(eid: i64) -> i64:
         if span_is_valid(span_id):
             source_line = span_line(span_id)
             source_column = span_col(span_id)
-        record_control_decision(coverage_owner_file(), source_line, source_column, eid, taken)
+        if span_is_valid(span_id):
+            record_control_decision(coverage_owner_file(), source_line, source_column, span_start(span_id) + 1, taken)
         if taken == false: break
         eval_continuing = false
         env_push_scope()
@@ -844,7 +852,7 @@ fn eval_match_expr(eid: i64) -> i64:
         if matched:
             # Check guard
             if guard_eid >= 0:
-                val guard_val = eval_control_condition(guard_eid, arm_id)
+                val guard_val = eval_control_condition(guard_eid, coverage_span_decision_id(expr_get(guard_eid).span_id))
                 if eval_had_error:
                     env_pop_scope()
                     return -1
@@ -855,9 +863,11 @@ fn eval_match_expr(eid: i64) -> i64:
                 if span_is_valid(guard_span):
                     guard_line = span_line(guard_span)
                     guard_column = span_col(guard_span)
-                record_control_decision(
-                    coverage_owner_file(), guard_line, guard_column, arm_id, guard_taken
-                )
+                if span_is_valid(guard_span):
+                    record_control_decision(
+                        coverage_owner_file(), guard_line, guard_column,
+                        span_start(guard_span) + 1, guard_taken
+                    )
                 if guard_taken == false:
                     env_pop_scope()
                     continue

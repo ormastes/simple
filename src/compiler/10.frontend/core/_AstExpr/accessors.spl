@@ -151,6 +151,9 @@ fn expr_get_span(idx: i64) -> i64:
         return -1
     expr_owner_span(idx)
 
+fn expr_set_span(idx: i64, span_id: i64):
+    if expr_idx_is_live(idx): expr_owner_span_set(idx, span_id)
+
 fn expr_get_int(idx: i64) -> i64:
     if not expr_idx_is_live(idx):
         expr_oob_trace("expr_get_int", idx, expr_owner_len())
@@ -204,6 +207,72 @@ fn expr_get_stmts(idx: i64) -> [i64]:
         expr_oob_trace("expr_get_stmts", idx, expr_owner_len())
         return []
     expr_owner_stmts(idx)
+
+# Canonical flat-AST ownership contract.  These accessors deliberately dispatch
+# on the constructor tag instead of exposing every populated arena slot as a
+# child: some slots contain arm ids or metadata rather than expression ids.
+fn expr_child_exprs(idx: i64) -> [i64]:
+    val tag = expr_get_tag(idx)
+    var children: [i64] = []
+    if tag == EXPR_BINARY or tag == EXPR_INDEX or tag == EXPR_RANGE or tag == EXPR_ASSIGN or tag == EXPR_COMPOUND_ASSIGN or tag == EXPR_NULL_COALESCE or tag == EXPR_ARRAY_REPEAT:
+        children.push(expr_get_left(idx))
+        children.push(expr_get_right(idx))
+    elif tag == EXPR_UNARY or tag == EXPR_FIELD_ACCESS or tag == EXPR_RETURN or tag == EXPR_AWAIT or tag == EXPR_YIELD or tag == EXPR_SPAWN or tag == EXPR_SPREAD or tag == EXPR_EXISTS_CHECK or tag == EXPR_FORCE_UNWRAP or tag == EXPR_TRY or tag == EXPR_CAST or tag == EXPR_OPTIONAL_CHAIN:
+        children.push(expr_get_left(idx))
+    elif tag == EXPR_CALL or tag == EXPR_METHOD_CALL:
+        children.push(expr_get_left(idx))
+        for child in expr_get_args(idx): children.push(child)
+    elif tag == EXPR_ARRAY_LIT or tag == EXPR_TUPLE or tag == EXPR_INTERPOLATED_STRING:
+        for child in expr_get_args(idx): children.push(child)
+    elif tag == EXPR_DICT_LIT:
+        for child in expr_get_args(idx): children.push(child)
+        for child in expr_get_stmts(idx): children.push(child)
+    elif tag == EXPR_STRUCT_LIT:
+        # ARGS holds field-name metadata nodes; STMTS holds executable values.
+        for child in expr_get_stmts(idx): children.push(child)
+    elif tag == EXPR_LAMBDA:
+        # ARGS holds parameter-name metadata; STMTS is historically named but
+        # stores body expression IDs (see interpreter eval_lambda).
+        for child in expr_get_stmts(idx): children.push(child)
+    elif tag == EXPR_IF:
+        children.push(expr_get_left(idx))
+        children.push(expr_get_right(idx))
+        children.push(expr_get_extra(idx))
+    elif tag == EXPR_MATCH:
+        children.push(expr_get_left(idx))
+    elif tag == EXPR_FOR or tag == EXPR_WHILE:
+        children.push(expr_get_left(idx))
+    elif tag == EXPR_BLOCK:
+        children.push(expr_get_left(idx))
+    elif tag == EXPR_SLICE:
+        children.push(expr_get_left(idx))
+        children.push(expr_get_right(idx))
+        children.push(expr_get_extra(idx))
+    elif tag == EXPR_NEW:
+        children.push(expr_get_left(idx))
+        children.push(expr_get_right(idx))
+    elif tag == EXPR_LIST_COMP:
+        children.push(expr_get_left(idx))
+        children.push(expr_get_right(idx))
+        children.push(expr_get_extra(idx))
+    elif tag == EXPR_DICT_COMP:
+        children.push(expr_get_left(idx))
+        children.push(expr_get_right(idx))
+        children.push(expr_get_extra(idx))
+        for child in expr_get_args(idx): children.push(child)
+    [for child in children if child >= 0: child]
+
+fn expr_child_stmts(idx: i64) -> [i64]:
+    val tag = expr_get_tag(idx)
+    if tag == EXPR_FOR or tag == EXPR_WHILE or tag == EXPR_BLOCK or tag == EXPR_DO_BLOCK or tag == EXPR_ASYNC_BLOCK or tag == EXPR_UNSAFE_BLOCK:
+        return expr_get_stmts(idx)
+    []
+
+fn expr_child_arms(idx: i64) -> [i64]:
+    val tag = expr_get_tag(idx)
+    if tag == EXPR_MATCH:
+        return expr_get_args(idx)
+    []
 
 # ===== Expression Kind Names (for debugging) =====
 

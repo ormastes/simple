@@ -1,0 +1,140 @@
+use std.spec.*
+use compiler.core.ast.*
+use compiler.core.ast_expr.*
+use compiler.core.ast_stmt.*
+use compiler.core.ast_traversal.*
+use compiler.core.ast_coverage_inventory.*
+use compiler.core.types.{flat_span_new}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+
+describe "flat AST canonical child ownership":
+    it "distinguishes dict expressions, struct metadata, and block statements":
+        ast_reset()
+        val key = expr_string_lit("key", 0)
+        val value = expr_int_lit(7, 0)
+        val dict = expr_dict_lit([key], [value], 0)
+        expect(flat_expr_child_exprs(dict)).to_equal([key, value])
+
+        val field_name = expr_ident("field", 0)
+        val field_value = expr_int_lit(9, 0)
+        val record = expr_struct_lit("Record", [field_name], [field_value], 0)
+        expect(flat_expr_child_exprs(record)).to_equal([field_value])
+
+        val body_stmt = stmt_expr_stmt(value, 0)
+        val block = expr_block([body_stmt], key, 0)
+        expect(flat_expr_child_exprs(block)).to_equal([key])
+        expect(flat_expr_child_stmts(block)).to_equal([body_stmt])
+        val lambda = expr_lambda([expr_ident("arg", 0)], [record], 0)
+        expect(flat_expr_child_exprs(lambda)).to_equal([record])
+        expect(flat_expr_child_stmts(lambda)).to_equal([])
+
+    it "keeps match arms separate and never retypes asm arms as match arms":
+        ast_reset()
+        val pattern = expr_int_lit(1, 0)
+        val body_stmt = stmt_return_stmt(pattern, 0)
+        val arm = arm_new(pattern, -1, [body_stmt])
+        val match_expr = expr_match_expr(pattern, [arm], 0)
+        expect(flat_expr_child_exprs(match_expr)).to_equal([pattern])
+        expect(flat_expr_child_arms(match_expr)).to_equal([arm])
+        expect(flat_arm_child_exprs(arm)).to_equal([pattern])
+        expect(flat_arm_child_stmts(arm)).to_equal([body_stmt])
+
+        val asm_expr = expr_asm_match([0], 0)
+        expect(flat_expr_child_arms(asm_expr)).to_equal([])
+
+    it "owns the primary if condition and both branch statement lists once":
+        ast_reset()
+        val condition = expr_bool_lit(1, 0)
+        val then_stmt = stmt_return_stmt(expr_int_lit(1, 0), 0)
+        val else_stmt = stmt_return_stmt(expr_int_lit(0, 0), 0)
+        val branches = elif_new(condition, [then_stmt], [else_stmt])
+        val if_stmt = stmt_if_stmt(condition, [then_stmt], branches, 0)
+        expect(flat_stmt_child_exprs(if_stmt)).to_equal([condition])
+        expect(flat_stmt_child_stmts(if_stmt)).to_equal([then_stmt, else_stmt])
+
+    it "dispatches trait and cli bodies as declaration ids":
+        ast_reset()
+        val method_stmt = stmt_return_stmt(expr_int_lit(1, 0), 0)
+        val method = decl_fn("method", [], [], -1, [method_stmt], 0, [], 0)
+        val trait_decl = decl_struct_def("Trait", [], [], [], [], 0)
+        decl_set_trait(trait_decl, [method])
+        expect(flat_decl_child_decls(trait_decl)).to_equal([method])
+        expect(flat_decl_child_stmts(trait_decl)).to_equal([])
+
+        val default_expr = expr_int_lit(2, 0)
+        val subcommand = decl_cli_def("sub", [], [], [], [], [], 0)
+        val cli_decl = decl_cli_def("Root", ["count|i|2||"], [0], [default_expr], [subcommand], [], 0)
+        expect(flat_decl_child_decls(cli_decl)).to_equal([subcommand])
+        expect(flat_decl_child_exprs(cli_decl)).to_equal([default_expr])
+        expect(flat_decl_child_stmts(cli_decl)).to_equal([])
+
+    it "renders stable reachable zero-count keys with exact path escaping and dedup":
+        ast_reset()
+        compiler_coverage_inventory_reset(true)
+        val decision_span = flat_span_new(10, 30, 2, 5)
+        val condition_span = flat_span_new(20, 25, 2, 8)
+        val condition = expr_bool_lit(1, condition_span)
+        val then_stmt = stmt_return_stmt(expr_int_lit(1, condition_span), condition_span)
+        val branches = elif_new(condition, [then_stmt], [])
+        val reachable_if = stmt_if_stmt(condition, [then_stmt], branches, decision_span)
+        val function = decl_fn("covered", [], [], -1, [reachable_if], 0, [], decision_span)
+        module_add_decl(function)
+        val orphan = stmt_if_stmt(condition, [], elif_new(condition, [], []), flat_span_new(40, 50, 4, 1))
+
+        compiler_coverage_inventory_record_module("comma,percent%\nfile.spl")
+        val once = compiler_coverage_inventory_sdn()
+        compiler_coverage_inventory_record_module("comma,percent%\nfile.spl")
+        val twice = compiler_coverage_inventory_sdn()
+        expect(compiler_coverage_inventory_valid()).to_equal(true)
+        expect(twice).to_equal(once)
+        expect(once).to_contain("11, comma%2Cpercent%25%0Afile.spl, 2, 5, 0, 0")
+        expect(once).to_contain("11, 21, comma%2Cpercent%25%0Afile.spl, 2, 8, 0, 0")
+        expect(once.contains("41, comma%2Cpercent%25%0Afile.spl")).to_equal(false)
+        val marked = compiler_coverage_inventory_marked()
+        expect(marked.index_of("__SIMPLE_COMPILER_COVERAGE_MANIFEST_BEGIN__")).to_equal(marked.last_index_of("__SIMPLE_COMPILER_COVERAGE_MANIFEST_BEGIN__"))
+        expect(marked.index_of("__SIMPLE_COMPILER_COVERAGE_MANIFEST_END__")).to_equal(marked.last_index_of("__SIMPLE_COMPILER_COVERAGE_MANIFEST_END__"))
+
+    it "derives distinct decision and atomic-condition keys from parsed source":
+        compiler_coverage_inventory_reset(true)
+        val source = "fn probe(a: bool, b: bool, c: bool):\n" +
+            "    if a and b:\n        pass\n" +
+            "    while c or a:\n        break\n"
+        val _module = parse_and_build_module(source, "parsed_coverage.spl")
+        val manifest = compiler_coverage_inventory_sdn()
+        expect(compiler_coverage_inventory_valid()).to_equal(true)
+        expect(manifest).to_contain("parsed_coverage.spl, 2,")
+        expect(manifest).to_contain("parsed_coverage.spl, 4,")
+        var decision_rows = 0
+        var condition_rows = 0
+        var section = ""
+        for line in manifest.split("\n"):
+            if line.starts_with("decisions |"):
+                section = "decision"
+            elif line.starts_with("conditions |"):
+                section = "condition"
+            elif line.contains("parsed_coverage.spl"):
+                if section == "decision": decision_rows = decision_rows + 1
+                if section == "condition": condition_rows = condition_rows + 1
+        expect(decision_rows).to_equal(2)
+        expect(condition_rows).to_equal(4)
+
+    it "retains distinct nested control spans through placeholder desugaring":
+        compiler_coverage_inventory_reset(true)
+        val source = "fn mapper(values: [bool], flag: bool, other: bool):\n" +
+            "    values.map(if _ and flag then (if other or _ then 1 else 2) else 0)\n"
+        val _module = parse_and_build_module(source, "placeholder_coverage.spl")
+        val manifest = compiler_coverage_inventory_sdn()
+        expect(compiler_coverage_inventory_valid()).to_equal(true)
+        var decision_rows = 0
+        var condition_rows = 0
+        var section = ""
+        for line in manifest.split("\n"):
+            if line.starts_with("decisions |"):
+                section = "decision"
+            elif line.starts_with("conditions |"):
+                section = "condition"
+            elif line.contains("placeholder_coverage.spl"):
+                if section == "decision": decision_rows = decision_rows + 1
+                if section == "condition": condition_rows = condition_rows + 1
+        expect(decision_rows).to_equal(2)
+        expect(condition_rows).to_equal(4)

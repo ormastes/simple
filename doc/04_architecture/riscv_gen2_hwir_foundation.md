@@ -549,6 +549,12 @@ set. An absent plan accepts no attachments and returns the original composition
 with zero added ports. This is a pre-legalization contract, not RVFI or formal
 noninterference qualification.
 
+Compiler coverage authority uses a canonical flat-AST child-ownership layer.
+It tag-dispatches overloaded declaration, statement, expression, and match-arm
+arenas; parser and placeholder transforms preserve span-derived semantic keys.
+The compiler publishes one bounded, deduplicated zero-count inventory after the
+complete parse, while runtime probes contribute outcomes under identical keys.
+
 ## Canonical parcel/trap sequential lowering (2026-08-14)
 
 The fixed parcel and trap frontend contracts remain product validators and

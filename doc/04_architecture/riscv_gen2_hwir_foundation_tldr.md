@@ -105,9 +105,12 @@ non-production, so bootstrap-seed output is not release evidence.
 
 - Qualification v2 is source-level only. It separates command-producing
   staging from the Simple receipt composer, but PASS still requires
-  compiler-time zero-count coverage inventory, exact/duplicate-safe evidence
-  validation, writer deliberate reds, an admitted Stage-4 CLI, and independent
+  executable proof of the compiler-time zero-count coverage inventory,
+  exact/duplicate-safe evidence validation, writer deliberate reds, an admitted Stage-4 CLI, and independent
   RV32/RV64 GHDL receipts.
+  The inventory source is implemented with canonical tag-dispatched flat-AST
+  ownership and span-preserving parser/desugar keys; the available Stage-3
+  bootstrap artifact exits 139 on both focused native and SMF compile probes.
 
 - [Architecture](riscv_gen2_hwir_foundation.md)
 - [Predecode interface](../../src/compiler/50.mir/hwir/predecode.spl)

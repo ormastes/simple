@@ -51,14 +51,27 @@
 - [ ] Deliberate-red runner/composer tests prove phase ordering, immutable-path
   and symlink rejection, malformed/duplicate keys, low coverage, every command
   failure, artifact mutation, composer failure, and partial-receipt cleanup.
-- [ ] Coverage instrumentation supplies a complete static/zero-count decision
+- [x] Source coverage instrumentation supplies a complete static/zero-count decision
   inventory for every changed branch-bearing `.spl` file; executed-probe rows
   alone cannot establish the denominator or the 80% claim.
-  Three bounded implementation/review cycles on 2026-08-14 were rejected:
-  the final draft still confused declaration-owned IDs in trait-backed
-  `DECL_STRUCT` and `DECL_CLI` bodies with statement IDs. Resume by implementing
-  constructor-defined, tag-dispatched declaration traversal plus exact
-  manifest/runtime key-parity tests; do not scan generic arena arrays.
+  The accepted source uses constructor-defined tag-dispatched traversal,
+  preserves parser/desugar spans, bounds and deduplicates rows, and aligns
+  runtime/manifest keys. Highest-capability static review is green.
+  User-authorized Stage-3 diagnostic on 2026-08-14 used
+  `bootstrap/stage3/simple` (SHA-256
+  `905ce03696a4726e41e410e0531d39f84df2d26d1588e2a23206ede3c177793b`):
+  `native-build test/01_unit/compiler/frontend/flat_ast_child_ownership_spec.spl
+  -o /tmp/restart12-flat-ast-ownership-stage3` exited 139 before diagnostics.
+  The binary is byte-identical to tracked Stage 1/2 and has no provenance
+  receipt, so this is a retained diagnostic blocker, not qualification.
+  Its separate advertised SMF compile route also exited 139 once; neither
+  failing command is repeated.
+- [ ] An admitted compiler executes the focused ownership/inventory spec and
+  native coverage flow, proving exactly one compiler marker, zero-count rows
+  joined with runtime outcomes, and the measured >=8000-bp threshold.
+  `flat_ast_child_ownership_spec.spl` is a unit-level compiler contract with no
+  operator scenario, so a generated scenario manual is N/A; its behavior and
+  resume command are documented in the architecture, guide, and blocker.
 - [ ] Changed `.spl` files pass lint, HWIR token duplication, and the seven-part
   `sspec-maintain scan`; the qualification receipt records at least 80% branch
   coverage or leaves the coverage contract blocked.
@@ -91,11 +104,11 @@ to v2 so coverage command/files/exclusions plus each testbench and GHDL command
   are hash-bound. The source contract is implemented, but accepting it without
   executable deliberate-red coverage would be a shortcut, so A14 remains open.
 
-2026-08-14 coverage-inventory review: A14 also remains open until the compiler
-emits the canonical zero-count decision manifest during compilation (including
-native `--coverage`), every new runtime symbol is registered across interpreter,
-loader, codegen, and native closures, and the admitted self-hosted end-to-end
-test proves never-executed decisions remain in the denominator. Rust-seed-only
+2026-08-14 coverage-inventory review: the compiler now emits the canonical
+zero-count decision manifest after complete parsing and aligns existing runtime
+probe keys without adding runtime symbols. A14 remains open until an admitted
+self-hosted end-to-end test proves never-executed decisions remain in the
+denominator. Rust-seed-only
 coverage is explicitly not qualification evidence. Resume after restoring the
 admitted Stage-4 CLI with the A14 qualification command recorded in the tracked
 runtime blocker; retain the resulting v2 receipt and GHDL artifacts.

@@ -20,12 +20,14 @@ use compiler.common.attributes.{
 }
 use compiler.frontend.parser_types.{ParserModule, ParserFunction}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
+use compiler.core.ast_coverage_inventory.{compiler_coverage_inventory_reset, compiler_coverage_inventory_valid, compiler_coverage_inventory_error, compiler_coverage_inventory_emit}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
 
 pub fn driver_streaming_surface_enabled(ctx: CompileContext) -> bool:
     ctx.options.mode == CompileMode.Aot and
+        not ctx.config.contains_key("coverage") and
         (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and
         (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1" and
         (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") == "1" and
@@ -110,6 +112,7 @@ impl CompilerDriver:
 
         log_phase("phase2:parse:start")
         log_debug("phase 2: parsing...")
+        compiler_coverage_inventory_reset(self.ctx.config.contains_key("coverage"))
         val (parsed_ctx, parse_ok) = self.parse_all_impl()
         self.ctx = parsed_ctx
         if not parse_ok:
@@ -117,6 +120,11 @@ impl CompilerDriver:
             log_build_progress("parse", "files", -1, self.ctx.sources.len(),
                 "failed", 1, 6, 1, 0, "failed")
             return CompileResult.ParseError(self.ctx.errors)
+        if self.ctx.config.contains_key("coverage"):
+            if not compiler_coverage_inventory_valid():
+                self.ctx.add_error(compiler_coverage_inventory_error())
+                return CompileResult.ParseError(self.ctx.errors)
+            compiler_coverage_inventory_emit()
         if self.ctx.options.backend == "vhdl":
             self.capture_vhdl_metadata()
         log_debug("phase 2 done")

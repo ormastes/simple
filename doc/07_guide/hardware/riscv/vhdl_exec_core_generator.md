@@ -638,6 +638,13 @@ admitted RV32/RV64 run remain open in the canonical
 [task plan](../../../03_plan/agent_tasks/riscv_gen2_hwir_foundation.md) and
 [qualification bug](../../../08_tracking/bug/riscv_gen2_hwir_qualification_contract_mismatch_2026-08-14.md).
 
+The compiler-side inventory now walks only canonical, tag-dispatched flat-AST
+children, preserves source spans through parsing and placeholder desugaring,
+and emits bounded zero-count rows whose keys/escaping match runtime probes.
+This source is highest-capability static-review green; the tracked Stage-3
+bootstrap artifact exits 139 on its focused native build, so no executable
+coverage or Stage-4 qualification is claimed.
+
 **`expected Fn, found FString` when running the spec.** Pre-existing, not a
 regression in this lane: the deployed seed's `simple test` cannot parse the
 `@step "..."` decorator form. HEAD fails identically. The spec in this lane is

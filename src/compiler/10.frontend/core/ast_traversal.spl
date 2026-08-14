@@ -1,0 +1,87 @@
+# Canonical child ownership for overloaded flat-AST arenas.
+use compiler.core.ast.*
+use compiler.core.ast_expr.*
+use compiler.core.ast_stmt.*
+
+fn flat_stmt_child_exprs(idx: i64) -> [i64]:
+    val tag = stmt_get_tag(idx)
+    var children: [i64] = []
+    if tag == STMT_IF:
+        # stmt_if_stmt mirrors the primary condition/body into its elif record;
+        # use the statement-owned copies once and take only ELSE from the record.
+        children.push(stmt_get_expr(idx))
+    elif tag == STMT_ASSIGN or tag == STMT_COMPOUND_ASSIGN:
+        children.push(stmt_get_expr(idx))
+        val values = stmt_get_body(idx)
+        if values.len() > 0: children.push(values[0])
+    elif tag == STMT_EXPR or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_LAZY_VAL_DECL or tag == STMT_RETURN or tag == STMT_FOR or tag == STMT_STATIC_FOR or tag == STMT_WHILE or tag == STMT_MATCH or tag == STMT_DEFER or tag == STMT_ERRDEFER or tag == STMT_RECEIVE or tag == STMT_BIND:
+        children.push(stmt_get_expr(idx))
+    elif tag == STMT_GPU_LAUNCH:
+        for child in stmt_get_gpu_grid(idx): children.push(child)
+        for child in stmt_get_gpu_block(idx): children.push(child)
+    [for child in children if child >= 0: child]
+
+fn flat_stmt_child_stmts(idx: i64) -> [i64]:
+    val tag = stmt_get_tag(idx)
+    if tag == STMT_IF:
+        val elif_idx = stmt_get_type(idx)
+        var children: [i64] = stmt_get_body(idx)
+        if elif_idx >= 0:
+            for child in elif_get_else(elif_idx): children.push(child)
+        return children
+    if tag == STMT_FOR or tag == STMT_STATIC_FOR or tag == STMT_WHILE or tag == STMT_BLOCK or tag == STMT_COMPTIME or tag == STMT_DEFER or tag == STMT_ERRDEFER or tag == STMT_LABELED_LOOP or tag == STMT_GPU_LAUNCH:
+        return stmt_get_body(idx)
+    if tag == STMT_RECEIVE:
+        val timeout_body = stmt_get_type(idx)
+        if timeout_body >= 0: return [timeout_body]
+    []
+
+fn flat_stmt_child_arms(idx: i64) -> [i64]:
+    val tag = stmt_get_tag(idx)
+    if tag == STMT_MATCH or tag == STMT_RECEIVE: return stmt_get_body(idx)
+    []
+
+fn flat_expr_child_exprs(idx: i64) -> [i64]: expr_child_exprs(idx)
+fn flat_expr_child_stmts(idx: i64) -> [i64]: expr_child_stmts(idx)
+fn flat_expr_child_arms(idx: i64) -> [i64]: expr_child_arms(idx)
+
+fn flat_arm_child_exprs(idx: i64) -> [i64]:
+    var children: [i64] = []
+    val pattern = arm_get_pattern(idx)
+    val guard = arm_get_guard(idx)
+    if pattern >= 0: children.push(pattern)
+    if guard >= 0: children.push(guard)
+    children
+
+fn flat_arm_child_stmts(idx: i64) -> [i64]: arm_get_body(idx)
+
+fn flat_decl_child_decls(idx: i64) -> [i64]:
+    val tag = decl_get_tag(idx)
+    if tag == DECL_IMPL or tag == DECL_CLI: return decl_get_body(idx)
+    if tag == DECL_STRUCT and decl_get_is_trait(idx) == 1: return decl_get_body(idx)
+    []
+
+fn flat_decl_child_stmts(idx: i64) -> [i64]:
+    val tag = decl_get_tag(idx)
+    if tag == DECL_FN or tag == DECL_CE: return decl_get_body(idx)
+    []
+
+fn flat_decl_child_exprs(idx: i64) -> [i64]:
+    val tag = decl_get_tag(idx)
+    var children: [i64] = []
+    if tag == DECL_VAL or tag == DECL_VAR or tag == DECL_LAZY_VAL:
+        for child in decl_get_body(idx): children.push(child)
+    elif tag == DECL_STRUCT:
+        if decl_get_is_trait(idx) == 0:
+            for child in decl_get_field_defaults(idx): children.push(child)
+    elif tag == DECL_ENUM or tag == DECL_CLI:
+        for child in decl_get_field_defaults(idx): children.push(child)
+    if tag == DECL_FN:
+        for child in decl_get_param_defaults(idx): children.push(child)
+        for child in decl_get_vhdl_generic_args(idx): children.push(child)
+    [for child in children if child >= 0: child]
+
+export flat_stmt_child_exprs, flat_stmt_child_stmts, flat_stmt_child_arms
+export flat_expr_child_exprs, flat_expr_child_stmts, flat_expr_child_arms
+export flat_arm_child_exprs, flat_arm_child_stmts
+export flat_decl_child_decls, flat_decl_child_stmts, flat_decl_child_exprs

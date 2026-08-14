@@ -1,0 +1,147 @@
+# Reachable, zero-count compiler coverage manifest over canonical flat-AST
+# ownership. Rows follow deterministic source/module/constructor order.
+use compiler.core.ast.*
+use compiler.core.ast_expr.*
+use compiler.core.ast_stmt.*
+use compiler.core.ast_traversal.*
+use compiler.core.types.{span_is_valid, span_line, span_col, span_start}
+
+const COMPILER_COVERAGE_ROW_CAP = 1000000
+var inventory_decisions: [text] = []
+var inventory_conditions: [text] = []
+var inventory_decision_location_by_key: Dict<text, text> = {}
+var inventory_condition_location_by_key: Dict<text, text> = {}
+var inventory_seen_decl: Dict<i64, bool> = {}
+var inventory_seen_stmt: Dict<i64, bool> = {}
+var inventory_seen_expr: Dict<i64, bool> = {}
+var inventory_seen_arm: Dict<i64, bool> = {}
+var inventory_error = ""
+var inventory_enabled = false
+
+fn compiler_coverage_inventory_reset(enabled: bool):
+    inventory_enabled = enabled
+    inventory_decisions = []
+    inventory_conditions = []
+    inventory_decision_location_by_key = {}
+    inventory_condition_location_by_key = {}
+    inventory_seen_decl = {}
+    inventory_seen_stmt = {}
+    inventory_seen_expr = {}
+    inventory_seen_arm = {}
+    inventory_error = ""
+
+fn inventory_row_available() -> bool:
+    if inventory_decisions.len() + inventory_conditions.len() >= COMPILER_COVERAGE_ROW_CAP:
+        inventory_error = "compiler coverage inventory exceeds bounded row cap"
+        return false
+    true
+
+fn inventory_escape_path(path: text) -> text:
+    var escaped = path.replace("%", "%25")
+    escaped = escaped.replace(",", "%2C")
+    escaped = escaped.replace("\r", "%0A")
+    escaped.replace("\n", "%0A")
+
+fn inventory_add_decision(path: text, span_id: i64):
+    if inventory_error != "" or not span_is_valid(span_id): return
+    val id = span_start(span_id) + 1
+    val escaped_path = inventory_escape_path(path)
+    val key = escaped_path + "|" + "{id}"
+    val location = "{span_line(span_id)}|{span_col(span_id)}"
+    if inventory_decision_location_by_key.contains_key(key):
+        if (inventory_decision_location_by_key[key] ?? "") != location:
+            inventory_error = "compiler coverage decision key has conflicting locations: " + key
+        return
+    if not inventory_row_available(): return
+    inventory_decision_location_by_key[key] = location
+    inventory_decisions.push("{id}, {escaped_path}, {span_line(span_id)}, {span_col(span_id)}, 0, 0")
+
+fn inventory_add_condition(path: text, decision_span: i64, condition_expr: i64):
+    if inventory_error != "" or not span_is_valid(decision_span): return
+    val condition_span = expr_get_span(condition_expr)
+    if not span_is_valid(condition_span): return
+    val decision_id = span_start(decision_span) + 1
+    val condition_id = span_start(condition_span) + 1
+    val escaped_path = inventory_escape_path(path)
+    val key = escaped_path + "|{decision_id}|{condition_id}"
+    val location = "{span_line(condition_span)}|{span_col(condition_span)}"
+    if inventory_condition_location_by_key.contains_key(key):
+        if (inventory_condition_location_by_key[key] ?? "") != location:
+            inventory_error = "compiler coverage condition key has conflicting locations: " + key
+        return
+    if not inventory_row_available(): return
+    inventory_condition_location_by_key[key] = location
+    inventory_conditions.push("{decision_id}, {condition_id}, {escaped_path}, {span_line(condition_span)}, {span_col(condition_span)}, 0, 0")
+
+fn inventory_condition_tree(path: text, decision_span: i64, expr_id: i64):
+    if expr_id < 0: return
+    if expr_get_tag(expr_id) == EXPR_BINARY and (expr_get_int(expr_id) == 55 or expr_get_int(expr_id) == 56):
+        inventory_condition_tree(path, decision_span, expr_get_left(expr_id))
+        inventory_condition_tree(path, decision_span, expr_get_right(expr_id))
+    else: inventory_add_condition(path, decision_span, expr_id)
+
+fn inventory_walk_expr(path: text, id: i64):
+    if id < 0 or inventory_seen_expr.contains_key(id): return
+    inventory_seen_expr[id] = true
+    val tag = expr_get_tag(id)
+    if tag == EXPR_IF or tag == EXPR_WHILE:
+        val span = expr_get_span(id); inventory_add_decision(path, span)
+        inventory_condition_tree(path, span, expr_get_left(id))
+    for x in flat_expr_child_exprs(id): inventory_walk_expr(path, x)
+    for x in flat_expr_child_stmts(id): inventory_walk_stmt(path, x)
+    for x in flat_expr_child_arms(id): inventory_walk_arm(path, x)
+
+fn inventory_walk_arm(path: text, id: i64):
+    if id < 0 or inventory_seen_arm.contains_key(id): return
+    inventory_seen_arm[id] = true
+    val guard = arm_get_guard(id)
+    if guard >= 0:
+        val span = expr_get_span(guard); inventory_add_decision(path, span)
+        inventory_condition_tree(path, span, guard)
+    for x in flat_arm_child_exprs(id): inventory_walk_expr(path, x)
+    for x in flat_arm_child_stmts(id): inventory_walk_stmt(path, x)
+
+fn inventory_walk_stmt(path: text, id: i64):
+    if id < 0 or inventory_seen_stmt.contains_key(id): return
+    inventory_seen_stmt[id] = true
+    val tag = stmt_get_tag(id)
+    if tag == STMT_IF or tag == STMT_WHILE:
+        val span = stmt_get_span(id); inventory_add_decision(path, span)
+        val exprs = flat_stmt_child_exprs(id)
+        if exprs.len() > 0: inventory_condition_tree(path, span, exprs[0])
+    for x in flat_stmt_child_exprs(id): inventory_walk_expr(path, x)
+    for x in flat_stmt_child_stmts(id): inventory_walk_stmt(path, x)
+    for x in flat_stmt_child_arms(id): inventory_walk_arm(path, x)
+
+fn inventory_walk_decl(path: text, id: i64):
+    if id < 0 or inventory_seen_decl.contains_key(id): return
+    inventory_seen_decl[id] = true
+    for x in flat_decl_child_exprs(id): inventory_walk_expr(path, x)
+    for x in flat_decl_child_stmts(id): inventory_walk_stmt(path, x)
+    for x in flat_decl_child_decls(id): inventory_walk_decl(path, x)
+
+fn compiler_coverage_inventory_record_module(path: text):
+    if not inventory_enabled: return
+    inventory_seen_decl = {}; inventory_seen_stmt = {}
+    inventory_seen_expr = {}; inventory_seen_arm = {}
+    for id in module_get_decls(): inventory_walk_decl(path, id)
+
+fn compiler_coverage_inventory_valid() -> bool: inventory_error == ""
+fn compiler_coverage_inventory_error() -> text: inventory_error
+fn compiler_coverage_inventory_sdn() -> text:
+    var out = "version: 1.0\ndecisions |id, file, line, column, true_count, false_count|\n"
+    for row in inventory_decisions: out = out + row + "\n"
+    out = out + "conditions |decision_id, condition_id, file, line, column, true_count, false_count|\n"
+    for row in inventory_conditions: out = out + row + "\n"
+    out
+fn compiler_coverage_inventory_marked() -> text:
+    "__SIMPLE_COMPILER_COVERAGE_MANIFEST_BEGIN__\n" +
+        compiler_coverage_inventory_sdn() +
+        "__SIMPLE_COMPILER_COVERAGE_MANIFEST_END__"
+fn compiler_coverage_inventory_emit():
+    print compiler_coverage_inventory_marked()
+
+export compiler_coverage_inventory_reset, compiler_coverage_inventory_record_module
+export compiler_coverage_inventory_valid, compiler_coverage_inventory_error
+export compiler_coverage_inventory_sdn, compiler_coverage_inventory_marked
+export compiler_coverage_inventory_emit

@@ -183,3 +183,7 @@
     coverage, testbench, and GHDL command evidence while the final path is
     absent. The Simple composer validates a v2 exact-key manifest, copies
     hash-bound artifacts into a fresh run, and writes its receipt last.
+  - Coverage inventory is compiler-owned: canonical tag-dispatched flat-AST
+    traversal records only reachable semantic decisions, uses span-derived
+    decision/condition keys and runtime-compatible escaping, rejects conflicts
+    or row-cap overflow, and emits exactly one marked zero-count block.

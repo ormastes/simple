@@ -62,12 +62,21 @@ independent static denominator. Therefore a missing branch cannot earn PASS;
 the coverage producer must expose a complete zero-count decision inventory
 before the 80% gate can close.
 
-The 2026-08-14 compiler-inventory attempt exhausted three bounded fix cycles
-and was reverted. The last review found that trait-backed `DECL_STRUCT` bodies
-and `DECL_CLI` bodies store declaration IDs; a generic statement walk therefore
-pollutes or omits the denominator. Resume with tag-dispatched traversal derived
-from the flat-AST constructors, exact runtime-key parity, reachable/orphan
-regressions, and exactly-one compile-stdout marker evidence.
+The 2026-08-14 continuation implemented and statically validated tag-dispatched
+traversal derived from flat-AST constructors, parser/desugar span preservation,
+exact runtime-key parity, reachable/orphan regressions, bounded deduplication,
+and one aggregate compile-stdout marker. The open condition is executable:
+an admitted compiler must run the focused spec and native coverage flow.
+
+The user-authorized tracked Stage-3 candidate was exercised directly after the
+canonical child-ownership contract was added. `bootstrap/stage3/simple`
+(`905ce036...`) exited 139 on the focused `native-build` before producing a
+diagnostic. It has no Stage-3 provenance receipt and is byte-identical to the
+tracked Stage 1/2 binaries, so it is a diagnostic reproducer only. Resume needs
+a provenance-bound Stage 3 or Stage 4 compiler capable of completing the same
+command, followed by the focused test/check gates. Its distinct advertised SMF
+compile route also exited 139 after the static-green handoff. Logs are retained
+under `/tmp/restart12-flat-ast-*`.
 
 Resume after the admitted runtime and complete decision inventory exist:
 

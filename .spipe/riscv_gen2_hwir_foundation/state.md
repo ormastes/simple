@@ -1077,27 +1077,34 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   child leakage, shared GHDL work library, missing reuse/identity vectors,
   partial-final cleanup, real `riscv32`/`riscv64` artifact target binding, and
   coverage scalar/list cross-checks. Remaining acceptance requires a complete
-  zero-count decision inventory plus executable writer-level deliberate reds
+  executable compiler-inventory and writer-level deliberate reds
   for command grammar, duplicate-safe artifact parsing, destination rehash,
   canonical parents, mutation, and cleanup. Until then A14 is WARN, not PASS.
-- review-blocked (2026-08-14, A14 coverage inventory): zero-count semantic
-  decision inventory is not accepted yet. Highest-capability review found that
-  the draft runtime externs are not registered through every interpreter,
-  loader, codegen, and native symbol closure, and wrapper-time emission cannot
-  satisfy the native runner's compile-stdout manifest contract. Acceptance
-  requires compiler-time marked-manifest emission plus an admitted self-hosted
-  end-to-end receipt; a Rust-seed fixture is not evidence. Phase remains
-  `implementation-handoff` / WARN.
+- review-history (2026-08-14, A14 coverage inventory): the rejected runtime-
+  extern/wrapper-time draft was removed. The accepted source now emits from the
+  compiler after complete parsing without expanding runtime ABI. Acceptance
+  still requires an admitted self-hosted end-to-end receipt; a seed or crashing
+  Stage-3 fixture is not evidence. Phase remains `implementation-handoff` / WARN.
 - review-blocked (2026-08-14, A14 receipt authority): the runner's current
-  `base..HEAD` scope includes unrelated later `.spl` changes, command records
-  remain hash-only, product JSON binding is substring-based, parent symlink and
-  final-destination rehash checks are incomplete, and executable runner/writer
-  deliberate-reds are absent. These are active resume items, not exclusions.
-- review-blocked (2026-08-14, A14 inventory cycle 3): compiler-time semantic
-  inventory was attempted and fully reverted after highest-capability review
-  found declaration-arena aliasing: trait-backed `DECL_STRUCT` method bodies
-  and `DECL_CLI` subcommand bodies contain declaration IDs, not statement IDs.
-  Resume requires constructor-defined tag dispatch across declaration,
-  statement, and expression arenas; exact span-key parity with runtime probes;
-  reachable-vs-orphan regressions; and one admitted native compile marker.
-  The three-cycle cap is exhausted for this session, so A14 remains WARN.
+  `base..HEAD` scope includes unrelated later `.spl` changes. Exact command,
+  duplicate-safe JSON, parent canonicality, and destination rehash are now
+  implemented at source level, but executable runner/writer deliberate-reds
+  remain absent. These are active resume items, not exclusions.
+- impl (2026-08-14, A14 inventory continuation): added constructor-defined,
+  tag-dispatched flat-AST ownership for declaration/statement/expression/arm
+  overloads, including trait and CLI declaration bodies, dict/struct/lambda
+  values, and ordinary versus assembler match arms. Parser and placeholder
+  desugar now preserve source spans; compiler inventory emits bounded,
+  deterministic, deduplicated zero-count rows with runtime-identical keys and
+  escaping. Highest-capability static review is green. Executable acceptance
+  remains WARN because the authorized Stage-3 command exits 139.
+- verify-blocked (2026-08-14, user-authorized Stage 3): the only local candidate
+  is `bootstrap/stage3/simple`, SHA-256 `905ce03696a4726e41e410e0531d39f84df2d26d1588e2a23206ede3c177793b`.
+  It exposes only `compile`/`native-build`, is byte-identical to Stage 1/2, and
+  has no adjacent provenance receipt. The exact focused ownership-spec
+  `native-build` exited 139 before diagnostics; logs are retained at
+  `/tmp/restart12-flat-ast-ownership-stage3-build.log`. This cannot satisfy
+  AC-4/AC-5 or convert WARN to PASS.
+  The distinct advertised `compile ... --format=smf` route was attempted once
+  after the static-green source handoff and also exited 139; its log is
+  `/tmp/restart12-flat-ast-ownership-stage3-smf.log`.

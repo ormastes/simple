@@ -44,9 +44,9 @@ use compiler.core.ast.{expr_method_call}
 use compiler.core.ast.{EXPR_CAST, expr_get_int}
 use compiler.core.types.{named_type_name, TYPE_NAMED_BASE}
 use compiler.frontend.desugar.placeholder_lambda.{set_placeholder_transform_suppressed}
-use compiler.frontend.core.lexer.{lex_token_end_get, lex_source_char_at}
+use compiler.frontend.core.lexer.{lex_token_start_get, lex_token_end_get, lex_source_char_at}
 use compiler.frontend.core.lexer.{lex_pop_indent, lex_enable_forced_indentation, lex_disable_forced_indentation}
-use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args}
+use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args, expr_set_span}
 use compiler.core.ast.{expr_get_arg_names, expr_call_args_set}
 use compiler.core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_if_val_decl, stmt_lazy_val_decl, stmt_var_decl}
 use compiler.core.ast.{stmt_return_stmt, stmt_if_stmt, stmt_for_stmt, stmt_while_stmt, stmt_block_stmt}
@@ -63,7 +63,7 @@ use compiler.core.ast.{elif_new}
 use compiler.core.ast.{EXPR_RETURN, EXPR_BREAK, EXPR_CONTINUE}
 use compiler.core.ast.{STMT_RETURN, STMT_BREAK, STMT_CONTINUE, STMT_EXPR}
 use compiler.core.ast.{stmt_tag, stmt_expr}
-use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID}
+use compiler.core.types.{TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_BOOL, TYPE_VOID, flat_span_new}
 use compiler.core.types.{TYPE_ARRAY_ANY}
 use compiler.core.types.{TYPE_NIL}
 use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
@@ -1059,6 +1059,9 @@ fn var_no_init_default_expr(type_tag: i64, type_looks_named: bool) -> i64:
 # ===== Control Flow Statements =====
 
 fn parse_if_stmt() -> i64:
+    val decision_start = lex_token_start_get()
+    val decision_line = par_line_get()
+    val decision_col = par_col_get()
     parser_advance()
 
     # G19: if val NAME = EXPR: body  (pattern-binding / nil-check form)
@@ -1111,7 +1114,7 @@ fn parse_if_stmt() -> i64:
             if wildcard_body.len() == 0:
                 wildcard_body.push(stmt_expr_stmt(expr_unit(0), 0))
             arm_indices.push(arm_new_with_binding_and_rationale(wildcard_pattern, -1, wildcard_body, "", ""))
-            return stmt_match_stmt(init_expr, arm_indices, 0)
+            return stmt_match_stmt(init_expr, arm_indices, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))
 
         # Plain identifier binding.
         # Mark the synthetic binding so the interpreter unwraps Option only.
@@ -1120,8 +1123,10 @@ fn parse_if_stmt() -> i64:
         val name_expr = expr_ident(bind_name, 0)
         val nil_expr = expr_nil_lit(0)
         val cond_expr = expr_binary(TOK_NEQ, name_expr, nil_expr, 0)
+        val binding_decision_span = flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col)
+        expr_set_span(cond_expr, binding_decision_span)
         val elif_idx = elif_new(cond_expr, then_body, else_body)
-        val if_stmt = stmt_if_stmt(cond_expr, then_body, elif_idx, 0)
+        val if_stmt = stmt_if_stmt(cond_expr, then_body, elif_idx, binding_decision_span)
         var block_stmts: [i64] = []
         block_stmts.push(bind_stmt)
         block_stmts.push(if_stmt)
@@ -1151,7 +1156,7 @@ fn parse_if_stmt() -> i64:
 
     # Store elif chain using elif arena
     val elif_idx = elif_new(cond, then_body, else_body)
-    stmt_if_stmt(cond, then_body, elif_idx, 0)
+    stmt_if_stmt(cond, then_body, elif_idx, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))
 
 fn parse_for_binding_name() -> text:
     # G26/G40: plain identifiers must preserve their token text; keyword and
@@ -1223,6 +1228,9 @@ fn parse_static_for_stmt() -> i64:
     stmt_static_for_stmt(iter_name, iterable, body, 0)
 
 fn parse_while_stmt() -> i64:
+    val decision_start = lex_token_start_get()
+    val decision_line = par_line_get()
+    val decision_col = par_col_get()
     parser_advance()
 
     # G19: while val NAME = EXPR: body  (re-bind each iteration, break on nil)
@@ -1241,23 +1249,26 @@ fn parse_while_stmt() -> i64:
         val nil_expr2 = expr_nil_lit(0)
         # == is kind 80; break if NAME == nil
         val nil_cond_eq = expr_binary(80, name_expr, nil_expr2, 0)
+        val nil_check_span = flat_span_new(decision_start + 1, decision_start + 2, decision_line, decision_col + 1)
+        expr_set_span(nil_cond_eq, nil_check_span)
         var break_body: [i64] = []
         val break_s = stmt_break_stmt(0)
         break_body.push(break_s)
         val nil_check_if_idx = elif_new(nil_cond_eq, break_body, [])
-        val nil_check_stmt = stmt_if_stmt(nil_cond_eq, break_body, nil_check_if_idx, 0)
+        val nil_check_stmt = stmt_if_stmt(nil_cond_eq, break_body, nil_check_if_idx, nil_check_span)
         var loop_body: [i64] = []
         loop_body.push(bind_stmt)
         loop_body.push(nil_check_stmt)
         for i in 0..body.len():
             loop_body.push(body[i])
         val true_expr = expr_ident("true", 0)
-        return stmt_while_stmt(true_expr, loop_body, 0)
+        expr_set_span(true_expr, flat_span_new(decision_start, decision_start + 1, decision_line, decision_col))
+        return stmt_while_stmt(true_expr, loop_body, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))
 
     val cond = parse_expr()
     parser_expect(161)
     val body = parse_block()
-    stmt_while_stmt(cond, body, 0)
+    stmt_while_stmt(cond, body, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))
 
 # Statement-form `loop: <body>` -- desugar to the exact AST shape that
 # `while true: <body>` produces (see the `true_expr` desugar above), so
@@ -1652,6 +1663,9 @@ fn parse_bind_stmt() -> i64:
 # ===== Expression-Level Control Flow (for module-level statements) =====
 
 fn parse_if_expr() -> i64:
+    val decision_start = lex_token_start_get()
+    val decision_line = par_line_get()
+    val decision_col = par_col_get()
     parser_advance()
 
     # G_ifval_expr: `if val/var NAME = EXPR: body [elif/else]` in EXPRESSION
@@ -1721,7 +1735,9 @@ fn parse_if_expr() -> i64:
         val name_expr = expr_ident(bind_name, 0)
         val nil_expr = expr_nil_lit(0)
         val cond_expr = expr_binary(TOK_NEQ, name_expr, nil_expr, 0)
-        val if_val_expr = expr_if_expr(cond_expr, then_expr, else_expr, 0)
+        val if_val_span = flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col)
+        expr_set_span(cond_expr, if_val_span)
+        val if_val_expr = expr_if_expr(cond_expr, then_expr, else_expr, if_val_span)
         var block_stmts: [i64] = []
         block_stmts.push(bind_stmt)
         block_stmts.push(stmt_expr_stmt(if_val_expr, 0))
@@ -1753,7 +1769,7 @@ fn parse_if_expr() -> i64:
                 parser_expect(143)
             else:
                 br_else = parse_expr()
-        return expr_if_expr(cond, br_then, br_else, 0)
+        return expr_if_expr(cond, br_then, br_else, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))
     if par_kind_get() == 6:
         parser_advance()
         # G45: optional `:` after `then` (`then: X` variant)
@@ -1770,7 +1786,7 @@ fn parse_if_expr() -> i64:
             if par_kind_get() == 161:
                 parser_advance()
             tern_else = parse_expr()
-        return expr_if_expr(cond, tern_then, tern_else, 0)
+        return expr_if_expr(cond, tern_then, tern_else, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))
     parser_expect(161)
     val inline_then = par_kind_get() != TOK_NEWLINE
     val then_body = parse_block()
@@ -1800,7 +1816,7 @@ fn parse_if_expr() -> i64:
         parser_skip_newlines()
         if par_kind_get() == TOK_DEDENT:
             parser_advance()
-    expr_if_expr(cond, then_expr, else_expr, 0)
+    expr_if_expr(cond, then_expr, else_expr, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))
 
 fn parse_for_expr() -> i64:
     parser_advance()
@@ -1813,11 +1829,14 @@ fn parse_for_expr() -> i64:
     expr_for_expr(iter_name, iterable, body, 0)
 
 fn parse_while_expr() -> i64:
+    val decision_start = lex_token_start_get()
+    val decision_line = par_line_get()
+    val decision_col = par_col_get()
     parser_advance()
     val cond = parse_expr()
     parser_expect(161)
     val body = parse_block()
-    expr_while_expr(cond, body, 0)
+    expr_while_expr(cond, body, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))
 
 # ===== Tuple Destructuring =====
 # val (a, b, c) = expr  →  val "(a,b,c)" = expr
