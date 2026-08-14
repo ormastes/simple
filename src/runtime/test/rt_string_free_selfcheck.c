@@ -19,7 +19,11 @@ extern int64_t rt_string_new(const uint8_t* bytes, uint64_t len);
 extern int64_t rt_string_new_literal(const uint8_t* bytes, uint64_t len);
 extern int64_t rt_string_free(int64_t value);
 extern int64_t rt_heap_registry_count(void);
+extern int64_t rt_heap_live_bytes(void);
+extern int64_t rt_heap_peak_bytes(void);
 extern int64_t rt_string_len(int64_t value);
+extern void spl_memtrack_record(void* ptr, int64_t size, const char* tag);
+extern void spl_memtrack_unrecord(void* ptr);
 
 static int failures = 0;
 
@@ -37,6 +41,17 @@ static int64_t mkstr(const char* s) {
 }
 
 int main(void) {
+    /* Core-C durable snapshot counters use the allocation tracker owner. */
+    int tracked_probe = 0;
+    int64_t live_before = rt_heap_live_bytes();
+    int64_t peak_before = rt_heap_peak_bytes();
+    spl_memtrack_record(&tracked_probe, 17, "selfcheck");
+    check(rt_heap_live_bytes() == live_before + 17, "tracked live bytes increase exactly");
+    check(rt_heap_peak_bytes() >= peak_before && rt_heap_peak_bytes() >= live_before + 17,
+          "tracked peak bytes retain high water");
+    spl_memtrack_unrecord(&tracked_probe);
+    check(rt_heap_live_bytes() == live_before, "tracked live bytes return to baseline");
+
     /* 1. an ordinary heap string is reclaimed, and the registry shrinks */
     int64_t before = rt_heap_registry_count();
     int64_t a = mkstr("a reasonably long unique string for case one");

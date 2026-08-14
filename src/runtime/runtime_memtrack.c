@@ -40,6 +40,12 @@ static int64_t        g_cap       = 0;
 static int64_t        g_len       = 0;      /* live entries */
 static int64_t        g_tombstone = 0;
 static int64_t        g_alloc_id  = 0;      /* monotonic counter */
+static int64_t        g_live_bytes = 0;
+static int64_t        g_peak_bytes = 0;
+
+static void memtrack_update_peak(void) {
+    if (g_live_bytes > g_peak_bytes) g_peak_bytes = g_live_bytes;
+}
 
 /* ===== Hash function (pointer -> index) ===== */
 
@@ -144,6 +150,8 @@ void spl_memtrack_record(void* ptr, int64_t size, const char* tag) {
             e->alloc_id = ++g_alloc_id;
             e->occupied = 1;
             g_len++;
+            g_live_bytes += size;
+            memtrack_update_peak();
             /* Notify listener */
             if (g_listener_fn) {
                 SplAllocEvent ev;
@@ -159,9 +167,12 @@ void spl_memtrack_record(void* ptr, int64_t size, const char* tag) {
         }
         if (e->ptr == ptr) {
             /* Same address reused (shouldn't normally happen without unrecord) */
+            g_live_bytes -= e->size;
             e->size     = size;
             e->tag      = tag;
             e->alloc_id = ++g_alloc_id;
+            g_live_bytes += size;
+            memtrack_update_peak();
             /* Notify listener */
             if (g_listener_fn) {
                 SplAllocEvent ev;
@@ -195,6 +206,7 @@ void spl_memtrack_unrecord(void* ptr) {
         g_listener_fn(&ev, g_listener_data);
     }
     e->ptr      = NULL;
+    g_live_bytes -= e->size;
     e->occupied = -1;  /* tombstone */
     g_len--;
     g_tombstone++;
@@ -229,15 +241,18 @@ int64_t spl_memtrack_live_count(void) {
 }
 
 int64_t spl_memtrack_live_bytes(void) {
-    int64_t total = 0;
-    if (g_entries) {
-        for (int64_t i = 0; i < g_cap; i++) {
-            if (g_entries[i].occupied == 1) {
-                total += g_entries[i].size;
-            }
-        }
-    }
-    return total;
+    return g_live_bytes;
+}
+
+/* Core-C provider parity for the durable compiler snapshot boundary. These
+ * counters intentionally describe allocations admitted through memtrack; the
+ * Rust hosted runtime provides the corresponding RuntimeValue heap counters. */
+int64_t rt_heap_live_bytes(void) {
+    return g_live_bytes;
+}
+
+int64_t rt_heap_peak_bytes(void) {
+    return g_peak_bytes;
 }
 
 void spl_memtrack_reset(void) {
@@ -249,6 +264,8 @@ void spl_memtrack_reset(void) {
     g_len       = 0;
     g_tombstone = 0;
     g_alloc_id  = 0;
+    g_live_bytes = 0;
+    g_peak_bytes = 0;
 }
 
 int64_t spl_memtrack_count_since(int64_t snapshot_id) {
