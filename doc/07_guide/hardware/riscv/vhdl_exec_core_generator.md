@@ -640,6 +640,14 @@ copy/publication/cleanup deliberate-reds have not run under an admitted runtime.
 Those Simple writer reds and an admitted RV32/RV64 run remain open in the canonical
 [task plan](../../../03_plan/agent_tasks/riscv_gen2_hwir_foundation.md) and
 [qualification bug](../../../08_tracking/bug/riscv_gen2_hwir_qualification_contract_mismatch_2026-08-14.md).
+The source tree now includes a provenance-validating, test-only writer-red
+harness and deterministic host-native failpoint fixture for copy and final
+publication cleanup. The fixture is green, but this is not admitted writer
+evidence: the qualification runner retains its manifest at a PID-suffixed
+staging path without printing that unique path or invoking the harness. Wire
+the harness after manifest revalidation and before successful composition (or
+publish a unique retained-manifest receipt) before running these reds. Do not
+discover a manifest by an ambiguous glob or count the host fixture as A14 PASS.
 
 The compiler-side inventory now walks only canonical, tag-dispatched flat-AST
 children, preserves source spans through parsing and placeholder desugaring,

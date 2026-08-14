@@ -1032,14 +1032,18 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   guards pass, the spec layout count is zero, and the changed files contain no
   placeholder assertions or stubs. The canonical wrapper rejects its deployed
   runtime ABI and direct self-hosted `check`/focused-test execution exits by
-  signal 11. Resume exactly once after an admitted self-hosted CLI is deployed:
-  `bin/simple test test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl --mode=interpreter`,
-  `bin/simple check src/compiler`, `bin/simple check src/lib`,
-  `bin/simple check src/app/mcp`, `bin/simple check src/app/simple_lsp_mcp`,
-  `SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter`,
-  `bin/simple lint src/compiler/50.mir/hwir/riscv_lsu_config.spl src/compiler/50.mir/hwir/riscv_scalar_retirement_owner.spl src/compiler/50.mir/hwir/sequential.spl src/compiler/70.backend/backend/hwir_to_vhdl.spl test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl`,
-  `bin/simple duplicate-check src/compiler/50.mir/hwir --mode token --min-lines 5`,
-  and `bin/simple sspec-maintain scan test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl`.
+  signal 11. Resume exactly once after an admitted self-hosted CLI is deployed.
+  Set `STAGE4` to its absolute canonical path; B6's coverage command owns the
+  single execution of the mixed-sequential, predecode/provenance, system, and
+  receipt specs. Do not rerun those focused specs in B5. Run B5 with:
+  `env SIMPLE_SAFETY_PROFILE=critical "$STAGE4" check src/compiler`,
+  `env SIMPLE_SAFETY_PROFILE=critical "$STAGE4" check src/lib`,
+  `env SIMPLE_SAFETY_PROFILE=critical "$STAGE4" check src/app/mcp`,
+  `env SIMPLE_SAFETY_PROFILE=critical "$STAGE4" check src/app/simple_lsp_mcp`,
+  `env SIMPLE_LIB=src SIMPLE_SAFETY_PROFILE=critical "$STAGE4" test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter`,
+  `env SIMPLE_SAFETY_PROFILE=critical "$STAGE4" lint src/compiler/50.mir/hwir/riscv_lsu_config.spl src/compiler/50.mir/hwir/riscv_scalar_retirement_owner.spl src/compiler/50.mir/hwir/sequential.spl src/compiler/70.backend/backend/hwir_to_vhdl.spl test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl`,
+  `env SIMPLE_SAFETY_PROFILE=critical "$STAGE4" duplicate-check src/compiler/50.mir/hwir --mode token --min-lines 5`,
+  and `env SIMPLE_SAFETY_PROFILE=critical "$STAGE4" sspec-maintain scan test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl`.
   This is an implementation handoff, not verify PASS or Gen2 umbrella
   completion. Owner and final reviewer remain `/root`.
 - review-blocked (2026-08-14): Independent highest-capability review found the
@@ -1180,3 +1184,19 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   measured >=8000-bp coverage. A red retains diagnostics but no claim-bearing
   receipt. Until this and the A13 commands at lines 1035-1042 pass, phase stays
   `implementation-handoff` / WARN and every executable gate remains unchecked.
+- impl-review (2026-08-14, A14 writer reds and Stage-4 gate): corrected
+  `check-post-bootstrap-stage4-sspec.shs` to load the complete canonical
+  Stage-3 provenance facade; the shell contract rejects the former
+  authority-only import. Added a test-only LD_PRELOAD interposer plus host
+  fixture that deterministically proves exact `fopen` copy denial, final
+  receipt-rename denial, nonmatching pass-through, exact hit identity/count,
+  and status separation. The native fixture passed once; no production
+  composer failpoint or admission bypass exists. Highest-capability review is
+  source-green. Executable writer closure remains open because the
+  qualification runner leaves its valid manifest under an unreported
+  `<run-id>.staging.<pid>/run_manifest.env` and neither invokes the harness nor
+  publishes a unique canonical manifest receipt. Resume by wiring the harness
+  after manifest revalidation and before the successful composer, or by
+  publishing that unique retained path; then run it with the admitted Stage-4
+  CLI/provenance. This does not close the broader command-failure/mutation red
+  matrix or change the WARN phase.

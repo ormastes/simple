@@ -52,6 +52,22 @@ fictitious switches. This record remains open because the deployed runtime
 cannot execute the Simple positive/deliberate-red suite or produce the admitted
 RV32/RV64 GHDL receipt; static token checks are not closure evidence.
 
+The 2026-08-14 source wave added a deterministic, test-only LD_PRELOAD
+interposer and host-native fixture for writer copy failure and final receipt
+publication failure. Exact EACCES-only statuses, hit identity/count,
+nonmatching pass-through, cleanup, admitted Stage-4 provenance, retained
+commands/logs, and manifest/failpoint/harness input hashes are enforced; the
+host fixture passed. The production
+composer has no failpoint or admission bypass. This remains executable-WARN:
+the runner leaves `run_manifest.env` under a PID-suffixed staging directory but
+does not print/publish its unique path or invoke the writer-red harness.
+Ambiguous glob discovery is not an authority interface. Unblock this row by
+invoking the harness after manifest revalidation and before the successful
+composer, or by publishing one unique retained-manifest receipt, then execute
+the harness with the admitted Stage-4 CLI/provenance. The broader phase-command,
+artifact-mutation, low-coverage, and partial-receipt red matrix also remains
+open.
+
 Highest-capability adversarial review additionally requires writer-level tests
 for exact command content, duplicate-safe product-manifest parsing,
 destination-side rehashing, canonical parent/no-symlink handling, and partial

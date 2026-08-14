@@ -1,0 +1,140 @@
+#!/bin/sh
+# Deterministic deliberate-red tests for the qualification receipt writer.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+EVIDENCE_ROOT="$ROOT_DIR/build/evidence/riscv_gen2_hwir_foundation"
+WRITER_RED_ROOT="$ROOT_DIR/build/evidence/riscv_gen2_hwir_writer_reds"
+COMPOSER_SOURCE=src/app/test/riscv_gen2_qualification_receipt.spl
+FAILPOINT_SOURCE="$ROOT_DIR/scripts/check/lib/riscv-gen2-writer-red-failpoint.c"
+TIMEOUT_SECS=${RISCV_GEN2_WRITER_RED_TIMEOUT_SECS:-120}
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$ROOT_DIR/scripts/check/lib/stage4-candidate-provenance.shs"
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+
+usage() {
+    printf '%s\n' "usage: $0 --stage4-cli ABS --stage4-provenance ABS --manifest REPO_RELATIVE --run-id-prefix SAFE_ID" >&2
+    exit 2
+}
+fail() { printf 'riscv_gen2_writer_red_status=fail\nreason=%s\n' "$1" >&2; exit 1; }
+
+simple=
+provenance=
+manifest=
+prefix=
+while [ "$#" -gt 0 ]; do
+    [ "$#" -ge 2 ] || usage
+    case "$1" in
+        --stage4-cli) simple=$2 ;;
+        --stage4-provenance) provenance=$2 ;;
+        --manifest) manifest=$2 ;;
+        --run-id-prefix) prefix=$2 ;;
+        *) usage ;;
+    esac
+    shift 2
+done
+[ -n "$simple" ] && [ -n "$provenance" ] && [ -n "$manifest" ] &&
+    [ -n "$prefix" ] || usage
+case "$manifest" in /*|./*|../*|*//*|*/../*|*/./*) fail manifest-path-invalid ;; esac
+case "$prefix" in ''|*[!A-Za-z0-9_-]*) fail run-id-prefix-invalid ;; esac
+[ "${#prefix}" -le 72 ] || fail run-id-prefix-too-long
+
+simple=$(bootstrap_stage3_canonical_file "$simple") || fail stage4-cli-invalid
+provenance=$(bootstrap_stage3_canonical_file "$provenance") || fail stage4-provenance-invalid
+[ "$provenance" = "${simple}.provenance.env" ] || fail stage4-provenance-not-adjacent
+case "$simple" in "$ROOT_DIR"/*) ;; *) fail stage4-cli-outside-workspace ;; esac
+case "$provenance" in "$ROOT_DIR"/*) ;; *) fail stage4-provenance-outside-workspace ;; esac
+stage4_verify_candidate_provenance "$provenance" "$simple" "$ROOT_DIR" ||
+    fail stage4-cli-provenance-not-admitted
+manifest_canonical=$(bootstrap_stage3_canonical_file "$ROOT_DIR/$manifest") ||
+    fail manifest-missing-symlinked-or-noncanonical
+[ "$manifest_canonical" = "$ROOT_DIR/$manifest" ] || fail manifest-path-not-canonical
+[ -f "$FAILPOINT_SOURCE" ] && [ ! -L "$FAILPOINT_SOURCE" ] || fail failpoint-source-invalid
+command -v cc >/dev/null 2>&1 || fail c-compiler-unavailable
+command -v timeout >/dev/null 2>&1 || fail timeout-unavailable
+[ -d "$EVIDENCE_ROOT" ] && [ ! -L "$EVIDENCE_ROOT" ] || fail evidence-root-invalid
+[ "$(bootstrap_stage3_canonical_path "$EVIDENCE_ROOT")" = "$EVIDENCE_ROOT" ] ||
+    fail evidence-root-noncanonical
+evidence_parent=$(dirname -- "$WRITER_RED_ROOT")
+[ -d "$evidence_parent" ] && [ ! -L "$evidence_parent" ] ||
+    fail writer-red-evidence-parent-invalid
+[ "$(bootstrap_stage3_canonical_path "$evidence_parent")" = "$evidence_parent" ] ||
+    fail writer-red-evidence-parent-noncanonical
+if [ ! -e "$WRITER_RED_ROOT" ] && [ ! -L "$WRITER_RED_ROOT" ]; then
+    mkdir "$WRITER_RED_ROOT" || fail writer-red-evidence-root-create-failed
+fi
+[ -d "$WRITER_RED_ROOT" ] && [ ! -L "$WRITER_RED_ROOT" ] ||
+    fail writer-red-evidence-root-invalid
+[ "$(bootstrap_stage3_canonical_path "$WRITER_RED_ROOT")" = "$WRITER_RED_ROOT" ] ||
+    fail writer-red-evidence-root-noncanonical
+
+temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/riscv-g2-writer-red.XXXXXX") || fail temp-create-failed
+cleanup() { rm -rf -- "$temp_dir"; }
+trap cleanup EXIT HUP INT TERM
+nonce=$(basename -- "$temp_dir")
+nonce=${nonce#riscv-g2-writer-red.}
+case "$nonce" in ''|*[!A-Za-z0-9]*) fail generated-nonce-invalid ;; esac
+evidence_id="$prefix-$$-$nonce"
+[ "${#evidence_id}" -le 112 ] || fail generated-evidence-id-too-long
+evidence_dir="$WRITER_RED_ROOT/$evidence_id"
+[ ! -e "$evidence_dir" ] && [ ! -L "$evidence_dir" ] || fail evidence-directory-collision
+mkdir "$evidence_dir" || fail evidence-directory-create-failed
+[ "$(bootstrap_stage3_canonical_path "$evidence_dir")" = "$evidence_dir" ] ||
+    fail evidence-directory-noncanonical
+failpoint="$temp_dir/writer-red-failpoint.so"
+cc -std=c11 -Wall -Wextra -Werror -fPIC -shared "$FAILPOINT_SOURCE" \
+    -ldl -o "$failpoint" || fail failpoint-build-failed
+[ -s "$failpoint" ] || fail failpoint-build-empty
+
+run_red() {
+    mode=$1
+    run_id=$2
+    deny_kind=$3
+    deny_suffix=$4
+    expected_reason=$5
+    run_dir="$EVIDENCE_ROOT/$run_id"
+    log="$evidence_dir/$mode.composer.log"
+    marker="$evidence_dir/$mode.hit"
+    command="$evidence_dir/$mode.command.env"
+    expected_path="build/evidence/riscv_gen2_hwir_foundation/$run_id$deny_suffix"
+    [ "${#run_id}" -le 128 ] || fail "$mode-generated-run-id-too-long"
+    [ ! -e "$run_dir" ] && [ ! -L "$run_dir" ] || fail "$mode-run-directory-exists"
+    {
+        printf 'schema=riscv-gen2-writer-red-command-v1\n'
+        printf 'mode=%s\nrun_id=%s\n' "$mode" "$run_id"
+        printf 'stage4_cli=%s\nstage4_provenance=%s\n' "$simple" "$provenance"
+        printf 'manifest=%s\nfailpoint_source=%s\n' "$manifest" "$FAILPOINT_SOURCE"
+        printf 'manifest_sha256=%s\n' "$(bootstrap_stage3_hash_file "$manifest_canonical")"
+        printf 'failpoint_source_sha256=%s\n' "$(bootstrap_stage3_hash_file "$FAILPOINT_SOURCE")"
+        printf 'harness_sha256=%s\n' "$(bootstrap_stage3_hash_file "$ROOT_DIR/scripts/check/test-riscv-gen2-qualification-writer-reds.shs")"
+        printf 'deny_kind=%s\ndeny_suffix=%s\nexpected_path=%s\n' \
+            "$deny_kind" "$deny_suffix" "$expected_path"
+    } >"$command" || fail "$mode-command-evidence-write-failed"
+
+    if (cd "$ROOT_DIR" && env LD_PRELOAD="$failpoint" \
+            RISCV_GEN2_TEST_DENY_KIND="$deny_kind" \
+            RISCV_GEN2_TEST_DENY_SUFFIX="$deny_suffix" \
+            RISCV_GEN2_TEST_FAILPOINT_MARKER="$marker" \
+            timeout -k 10 "$TIMEOUT_SECS" "$simple" run "$COMPOSER_SOURCE" \
+            --manifest "$manifest" --run-id "$run_id") >"$log" 2>&1; then
+        composer_status=0
+    else
+        composer_status=$?
+    fi
+    [ -f "$marker" ] && [ ! -L "$marker" ] || fail "$mode-hit-evidence-missing"
+    [ "$(wc -l <"$marker")" -eq 1 ] || fail "$mode-hit-count-not-one"
+    grep -Fx "kind=$deny_kind path=$expected_path" "$marker" >/dev/null ||
+        fail "$mode-hit-identity-mismatch"
+    [ "$composer_status" -eq 1 ] || fail "$mode-composer-exit-not-one:$composer_status"
+    grep -Fx "reason=$expected_reason" "$log" >/dev/null || fail "$mode-unexpected-reason"
+    [ ! -e "$run_dir" ] && [ ! -L "$run_dir" ] || fail "$mode-partial-run-not-cleaned"
+    printf 'writer_red_%s=pass\n' "$mode"
+}
+
+run_red copy "$evidence_id-copy" write "/rv64.run.log" \
+    qualification-evidence-copy-failed
+run_red publication "$evidence_id-publication" rename "/qualification_receipt.json" \
+    qualification-receipt-write-failed
+printf 'riscv_gen2_writer_red_evidence=%s\n' "$evidence_dir"
+printf '%s\n' 'riscv_gen2_writer_red_status=pass'
