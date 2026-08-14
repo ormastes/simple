@@ -31,7 +31,8 @@ No Linux evidence may be relabelled as Windows, FreeBSD, or macOS. No Rust seed,
 
 ## Cooperative Review
 
-N/A for delegation in this turn: the user requested implementation and tests but did not request parallel agents. `/root` owns merge and high-capability review.
+Parallel architecture/compiler lanes were explicitly requested. `/root` owns
+the merge; each broad lane required high-capability review before acceptance.
 
 Shared interfaces: `simple-qemu-settings.shs`, `simple-qemu-host-admission.shs`, `prepare_qemu_nonce_media.shs`, `produce-sosix-qemu-native-pass-bundle.shs`, `collect-sosix-qemu-evidence.shs`.
 
@@ -45,7 +46,14 @@ blocked
 
 - dev: Refined the implementation request into ten acceptance criteria; external-host evidence remains active and cannot be completed locally.
 - impl: AC-1 through AC-3 now have behavioral proof: a real 24-row non-PASS collector fixture, physical/symlink alias rejection before mutation, and path/SHA/version-bound runtime admission with missing/seed/stale/identity-mismatch rejection. The integrated shared-owner self-test passed once.
-- blocked: AC-4 requires admitted RV64 named/immediate inline-asm lowering and fresh QEMU evidence; AC-5 requires real x86_32 CPL3/TSS/token/trap owners; AC-6 requires real ARM32 EL0/vector/SVC/token owners.
+- impl: AC-4 through AC-6 now have direct live-QEMU implementation evidence:
+  RV64 Sv39 isolation and exact fault/reap ownership; x86_32 PAE/NX CPL3,
+  hardened ELF/FAT admission, context/fault/reap ownership; and ARM32 EL0 MMU,
+  hardened ELF/FAT admission, scrubbed entry, authenticated SVC/fault/reap.
+  Each emitted its architecture contract markers and `TEST PASSED`.
+- blocked: AC-4 through AC-7 are not canonical matrix PASS until a usable
+  source-matched self-hosted runtime produces native bundles and executes the
+  SSpec/docgen. Direct QEMU receipts cannot substitute for those owners.
 - impl: AC-7 source uses bounded process execution, typed command evidence, and an exact 24-row oracle (3 PASS, 15 BLOCKED, 6 POSTPONED); AC-8 and AC-9 Todo/document contracts are synchronized.
 - blocked: The available self-hosted runtime crashed with exit 139 when executing the modern SSpec, and its earlier `spipe-docgen` attempt also crashed with exit 139. Neither unchanged command will be retried this session; no handwritten manual substitutes for generated evidence.
 - tracking: Todo DB rows 784-805 retain all shared, Linux, Windows, FreeBSD, and macOS owners.

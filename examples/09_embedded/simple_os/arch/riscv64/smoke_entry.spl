@@ -6,6 +6,16 @@ extern fn rt_riscv_smf_cli_load() -> i64
 extern fn rt_riscv_smf_gui_probe() -> i64
 extern fn rt_riscv_native_gui_process_render() -> i64
 extern fn rt_riscv_harden_canary_value() -> i64
+extern fn rt_riscv_fs_exec_probe() -> i64
+extern fn rt_riscv_fs_exec_run() -> i64
+extern fn rt_riscv_fs_list_apps() -> i64
+extern fn rt_riscv_fs_exec_malformed_selftest() -> i64
+extern fn rt_riscv_fs_exec_privilege_selftest() -> i64
+extern fn rt_riscv_fs_reaped_generation() -> i64
+extern fn rt_riscv_fs_reap_auth_ok() -> i64
+extern fn rt_riscv_fs_last_trap_cause() -> i64
+extern fn rt_riscv_fs_last_trap_sepc() -> i64
+extern fn rt_riscv_fs_last_trap_stval() -> i64
 
 fn spl_start():
     serial_println("")
@@ -50,6 +60,33 @@ fn spl_start():
         serial_println("TEST FAILED")
         rt_qemu_exit_success()
         return
+    val fs_exec_present = rt_riscv_fs_exec_probe()
+    val fs_listing_count = rt_riscv_fs_list_apps()
+    val malformed_rejected = rt_riscv_fs_exec_malformed_selftest()
+    val privilege_rejected = rt_riscv_fs_exec_privilege_selftest()
+    if not malformed_rejected:
+        serial_println("[riscv-fs-exec] malformed admission selftest failed")
+    if not privilege_rejected:
+        serial_println("[riscv-fs-exec] privilege/state restoration selftest failed")
+    if not fs_exec_present or fs_listing_count <= 0 or not malformed_rejected or not privilege_rejected:
+        serial_println("[riscv-fs-exec] payload lookup failed")
+        serial_println("TEST FAILED")
+        rt_qemu_exit_success()
+        return
+    serial_println("RV64_ELF_ADMISSION_NEGATIVE_OK")
+    serial_println("RV64_USER_ISOLATION_OK write_fault_cause=15")
+    serial_println("RV64_SUPERVISOR_STATE_RESTORE_OK")
+    serial_println("FS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=riscv64")
+    val fs_exec_rc = rt_riscv_fs_exec_run()
+    if fs_exec_rc != 37 or not rt_riscv_fs_reap_auth_ok():
+        serial_println("[riscv-fs-exec] child status={fs_exec_rc} trap={rt_riscv_fs_last_trap_cause()}")
+        serial_println("[riscv-fs-exec] sepc={rt_riscv_fs_last_trap_sepc()} stval={rt_riscv_fs_last_trap_stval()}")
+        serial_println("TEST FAILED")
+        rt_qemu_exit_success()
+        return
+    serial_println("FS_TASK_REAP generation={rt_riscv_fs_reaped_generation()} status=37")
+    serial_println("RV64_TASK_REAP_AUTH_EXACT_ONCE_OK")
+    serial_println("FS_PROGRAM_END rc=37 reaped=true")
     serial_println("SIMPLEOS_RISCV_SMF_FS_PASS")
     serial_println("TEST PASSED")
     rt_qemu_exit_success()

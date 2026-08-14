@@ -234,6 +234,7 @@ typedef struct {
     uint32_t fat_size;
     uint32_t root_cluster;
     uint32_t data_start;
+    uint32_t data_clusters;
 } Fat32Probe;
 
 static unsigned char *sector_data(void)
@@ -258,6 +259,11 @@ static int fat32_probe_bpb(Fat32Probe *fat)
     fat->root_cluster = rd32(b + 44U);
     if (fat->spc == 0 || fat->reserved == 0 || fat->fats == 0 || fat->fat_size == 0 || fat->root_cluster < 2U) return 0;
     fat->data_start = fat->reserved + (fat->fats * fat->fat_size);
+    uint32_t total_sectors = rd16(b + 19U);
+    if (total_sectors == 0U) total_sectors = rd32(b + 32U);
+    if (total_sectors <= fat->data_start) return 0;
+    fat->data_clusters = (total_sectors - fat->data_start) / fat->spc;
+    if (fat->data_clusters == 0U) return 0;
     return 1;
 }
 
@@ -273,7 +279,9 @@ static uint32_t fat32_next_cluster(const Fat32Probe *fat, uint32_t cluster)
 static uint32_t fat32_find_entry_cluster(const Fat32Probe *fat, uint32_t dir_cluster, const char *name11, uint32_t want_dir, uint32_t *size_out)
 {
     uint32_t cluster = dir_cluster;
-    while (cluster >= 2U && cluster < 0x0ffffff8U) {
+    uint32_t hops = 0;
+    while (cluster >= 2U && cluster < 0x0ffffff8U &&
+           cluster - 2U < fat->data_clusters && hops++ < fat->data_clusters) {
         uint32_t first_sector = fat_cluster_sector(fat, cluster);
         for (uint32_t sec = 0; sec < fat->spc; sec++) {
             if (!virtio_blk_read_sector(first_sector + sec)) return 0;
@@ -289,7 +297,10 @@ static uint32_t fat32_find_entry_cluster(const Fat32Probe *fat, uint32_t dir_clu
                 return ((uint32_t)rd16(e + 20U) << 16) | rd16(e + 26U);
             }
         }
-        cluster = fat32_next_cluster(fat, cluster);
+        uint32_t next = fat32_next_cluster(fat, cluster);
+        if (next >= 0x0ffffff8U) return 0;
+        if (next < 2U || next >= 0x0ffffff0U || next - 2U >= fat->data_clusters) return 0;
+        cluster = next;
     }
     return 0;
 }

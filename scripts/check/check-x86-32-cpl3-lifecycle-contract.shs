@@ -19,6 +19,7 @@ entry=$root/examples/09_embedded/simple_os/arch/x86_32/boot/enter_user_first.s
 stub=$root/examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c
 bridge=$root/src/os/kernel/arch/x86_32/user_entry.spl
 context=$root/src/os/kernel/arch/x86_32/context.spl
+probe=$root/examples/09_embedded/simple_os/arch/x86_32/initrd_fs_exec_probe_entry.spl
 
 contract() {
     require 'SimpleOS x86_32 boot OK' "$matrix"
@@ -26,6 +27,13 @@ contract() {
     require 'FS_PROGRAM_BEGIN path=/FSEXEC.ELF arch=x86_32' "$matrix"
     require 'SIMPLEOS_FS_EXEC_OK arch=x86_32 nonce=' "$matrix"
     require 'FS_PROGRAM_END rc=37 reaped=true' "$matrix"
+    require 'X86_32_CONTEXT_ROUNDTRIP status=pass' "$matrix"
+    require 'X86_32_CONTEXT_SWITCH_ROUNDTRIP ecx=preserved edx=preserved status=pass' "$matrix"
+    require 'X86_32_EXACT_REAP generation=2 stale_rejected=true pending_overwrite_rejected=true status=-13' "$matrix"
+    require 'X86_32_HOSTILE_ELF_BAD_EI_VERSION rejected=true' "$matrix"
+    require 'X86_32_HOSTILE_FAT_BOUNDS large_skip=reject chain_bounds=reject bpb_overflow=reject canary=preserved status=pass' "$matrix"
+    require 'X86_32_WX_FAULT status=pass' "$matrix"
+    require 'qemu32,+pae,+nx' "$matrix"
     require 'rejects the legacy same-CPL x86_32 initrd probe as fs-exec evidence' "$unit"
     require 'boot-fail:SimpleOS x86_32 boot OK' "$unit"
 }
@@ -39,6 +47,34 @@ admit() {
     require 'rt_x86_32_tss_set_esp0' "$stub"
     require 'rt_x86_32_exec_token_install' "$bridge"
     require 'rt_x86_32_exec_token_take_result' "$bridge"
+    require 'rt_x86_32_fs_exec_load' "$stub"
+    require 'x86_32_fat_find_root' "$stub"
+    require 'rt_x86_32_fs_list_apps' "$stub"
+    require 'X86_32_PAE_NX' "$stub"
+    require 'x86_32_gp_handler' "$stub"
+    require 'x86_32_pf_handler' "$stub"
+    require 'rt_x86_32_context_roundtrip_probe' "$stub"
+    require 'rt_x86_32_elf_policy_self_test' "$stub"
+    require 'rt_x86_32_fat_hostile_self_test' "$stub"
+    require 'x86_32_result_valid || !task' "$stub"
+    require 'error == 0x15U' "$stub"
+    require 'writable && executable' "$stub"
+    require "{'F','S','E','X','E','C',' ',' ','E','L','F'}" "$stub"
+    require 'rt_x86_32_fs_exec_load()' "$probe"
+    require 'rt_x86_32_enter_user_first(entry, user_stack' "$probe"
+    require 'FS_PROGRAM_END rc=37 reaped=true' "$probe"
+    require 'rt_x86_32_fs_list_apps()' "$probe"
+    require 'rt_x86_32_context_roundtrip_probe()' "$probe"
+    require 'rt_x86_32_elf_policy_self_test()' "$probe"
+    require 'rt_x86_32_fat_hostile_self_test()' "$probe"
+    require 'rt_x86_32_exec_token_install(1u32, 3u32, cr3) != 0' "$probe"
+    require 'rt_x86_32_fault_probe_entry(13u32)' "$probe"
+    require 'rt_x86_32_fault_probe_entry(14u32)' "$probe"
+    require 'rt_x86_32_exec_token_take_result(1u32, 3u32, cr3) != -4096' "$probe"
+    require 'x86_32) payload_link_flag=--image-base=0x40000000' "$root/scripts/os/build_simpleos_fs_exec_probe.shs"
+    if grep -Fq 'rt_x86_32_trigger_int80(13u32' "$probe"; then
+        fail 'not admitted: legacy CPL0 spawn probe remains in the FS-exec entry'
+    fi
     if grep -Fq '(void)to;' "$stub"; then
         fail 'not admitted: context switch discards the destination context'
     fi
@@ -52,11 +88,8 @@ case "$mode" in
         ;;
     --admit) admit ;;
     --self-test)
-        contract
-        if "$0" --admit >/dev/null 2>&1; then
-            fail 'self-test expected the unimplemented CPL3 lifecycle to be rejected'
-        fi
-        printf '%s\n' 'PASS x86_32 CPL3 lifecycle gate self-test'
+        admit >/dev/null
+        printf '%s\n' 'PASS x86_32 CPL3 lifecycle gate self-test (real FAT/ELF/CPL3 owners present)'
         ;;
     *) fail 'usage: check-x86-32-cpl3-lifecycle-contract.shs [--contract|--admit|--self-test]' ;;
 esac

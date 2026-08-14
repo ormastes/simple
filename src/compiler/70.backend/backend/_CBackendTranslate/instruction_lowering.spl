@@ -251,23 +251,35 @@ impl MirToC:
                 self.builder.emit_comment("layer connect (~>)")
 
             # === Inline Assembly ===
-            case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers):
+            case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers, clobber_abis, options):
                 val volatile_str = if is_volatile: " volatile" else: ""
                 self.builder.emit(r"#if !(defined(_MSC_VER) && !defined(__clang__))")
 
                 # Convert template placeholders {0},{1} to GCC %0,%1 syntax
                 var c_template = asm_template
-                var placeholder_idx = 0
-                while placeholder_idx < 20:
-                    c_template = c_template.replace("{" + placeholder_idx.to_string() + "}", "%" + placeholder_idx.to_string())
-                    placeholder_idx = placeholder_idx + 1
+                var named_output_index = 0
+                for output in outputs:
+                    if output.name != "": c_template = c_template.replace("{" + output.name + "}", "%" + named_output_index.to_string())
+                    c_template = c_template.replace("{" + output.constraint_index.to_string() + "}", "%" + named_output_index.to_string())
+                    named_output_index = named_output_index + 1
+                var named_input_index = 0
+                for input in inputs:
+                    var operand_index = outputs.len() + named_input_index
+                    if input.kind == AsmConstraintKind.InOut:
+                        var tied_index = 0
+                        for output in outputs:
+                            if output.constraint_index == input.constraint_index: operand_index = tied_index
+                            tied_index = tied_index + 1
+                    if input.name != "": c_template = c_template.replace("{" + input.name + "}", "%" + operand_index.to_string())
+                    c_template = c_template.replace("{" + input.constraint_index.to_string() + "}", "%" + operand_index.to_string())
+                    named_input_index = named_input_index + 1
 
                 # Build output constraints: "=r" (var), "=&r" (late_out_var)
                 var output_parts: [text] = []
                 var out_idx = 0
                 while out_idx < outputs.len():
                     val out_op: MirAsmOperand = outputs[out_idx]
-                    val constraint = self.asm_constraint_for_c(out_op.kind, out_op.location)
+                    val constraint = if out_op.kind == AsmConstraintKind.InOut: "=" + self.asm_constraint_for_c(AsmConstraintKind.In, out_op.location) else: self.asm_constraint_for_c(out_op.kind, out_op.location)
                     val operand_val = self.translate_operand(out_op.operand)
                     output_parts.push("\"" + constraint + "\" (" + operand_val + ")")
                     out_idx = out_idx + 1
@@ -277,18 +289,53 @@ impl MirToC:
                 var in_idx = 0
                 while in_idx < inputs.len():
                     val in_op: MirAsmOperand = inputs[in_idx]
-                    val constraint = self.asm_constraint_for_c(in_op.kind, in_op.location)
+                    var constraint = self.asm_constraint_for_c(in_op.kind, in_op.location)
+                    if in_op.kind == AsmConstraintKind.InOut:
+                        var tied_index = 0
+                        for output in outputs:
+                            if output.constraint_index == in_op.constraint_index: constraint = tied_index.to_string()
+                            tied_index = tied_index + 1
                     val operand_val = self.translate_operand(in_op.operand)
                     input_parts.push("\"" + constraint + "\" (" + operand_val + ")")
                     in_idx = in_idx + 1
 
                 # Build clobber list: "memory", "cc", register names
                 var clobber_parts: [text] = []
+                val no_memory = options.contains("nomem")
+                val readonly_memory = options.contains("readonly")
+                val preserves_flags = options.contains("preserves_flags")
                 for clob in clobbers:
-                    clobber_parts.push("\"" + clob + "\"")
+                    if not (no_memory and clob == "memory") and not (preserves_flags and clob == "cc"):
+                        clobber_parts.push("\"" + clob + "\"")
+
+                # GCC extended asm has no read-only memory effect attribute.
+                # A conservative "memory" clobber is therefore required to
+                # keep loads observed by readonly asm from moving across it.
+                if readonly_memory and not no_memory and not clobbers.contains("memory"):
+                    clobber_parts.push("\"memory\"")
+
+                var has_c_abi_clobber = false
+                for clobber_abi in clobber_abis:
+                    if clobber_abi == "C" or clobber_abi == "C-unwind": has_c_abi_clobber = true
+                if has_c_abi_clobber:
+                    self.builder.emit(r"#if defined(__x86_64__)")
+                    self.builder.emit("#define SIMPLE_INLINE_ASM_C_ABI_CLOBBERS \"rax\", \"rcx\", \"rdx\", \"rsi\", \"rdi\", \"r8\", \"r9\", \"r10\", \"r11\", \"xmm0\", \"xmm1\", \"xmm2\", \"xmm3\", \"xmm4\", \"xmm5\", \"xmm6\", \"xmm7\", \"xmm8\", \"xmm9\", \"xmm10\", \"xmm11\", \"xmm12\", \"xmm13\", \"xmm14\", \"xmm15\"")
+                    self.builder.emit(r"#elif defined(__i386__)")
+                    self.builder.emit("#define SIMPLE_INLINE_ASM_C_ABI_CLOBBERS \"eax\", \"ecx\", \"edx\", \"xmm0\", \"xmm1\", \"xmm2\", \"xmm3\", \"xmm4\", \"xmm5\", \"xmm6\", \"xmm7\"")
+                    self.builder.emit(r"#elif defined(__aarch64__)")
+                    self.builder.emit("#define SIMPLE_INLINE_ASM_C_ABI_CLOBBERS \"x0\", \"x1\", \"x2\", \"x3\", \"x4\", \"x5\", \"x6\", \"x7\", \"x8\", \"x9\", \"x10\", \"x11\", \"x12\", \"x13\", \"x14\", \"x15\", \"x16\", \"x17\", \"x18\", \"v0\", \"v1\", \"v2\", \"v3\", \"v4\", \"v5\", \"v6\", \"v7\", \"v16\", \"v17\", \"v18\", \"v19\", \"v20\", \"v21\", \"v22\", \"v23\", \"v24\", \"v25\", \"v26\", \"v27\", \"v28\", \"v29\", \"v30\", \"v31\"")
+                    self.builder.emit(r"#elif defined(__arm__)")
+                    self.builder.emit("#define SIMPLE_INLINE_ASM_C_ABI_CLOBBERS \"r0\", \"r1\", \"r2\", \"r3\", \"r12\", \"lr\", \"s0\", \"s1\", \"s2\", \"s3\", \"s4\", \"s5\", \"s6\", \"s7\", \"s8\", \"s9\", \"s10\", \"s11\", \"s12\", \"s13\", \"s14\", \"s15\"")
+                    self.builder.emit(r"#elif defined(__riscv)")
+                    self.builder.emit("#define SIMPLE_INLINE_ASM_C_ABI_CLOBBERS \"ra\", \"t0\", \"t1\", \"t2\", \"t3\", \"t4\", \"t5\", \"t6\", \"a0\", \"a1\", \"a2\", \"a3\", \"a4\", \"a5\", \"a6\", \"a7\", \"ft0\", \"ft1\", \"ft2\", \"ft3\", \"ft4\", \"ft5\", \"ft6\", \"ft7\", \"ft8\", \"ft9\", \"ft10\", \"ft11\", \"fa0\", \"fa1\", \"fa2\", \"fa3\", \"fa4\", \"fa5\", \"fa6\", \"fa7\"")
+                    self.builder.emit(r"#else")
+                    self.builder.emit(r"#error unsupported C ABI clobber set target")
+                    self.builder.emit(r"#endif")
+                    clobber_parts.push("SIMPLE_INLINE_ASM_C_ABI_CLOBBERS")
 
                 # Emit GCC extended asm
-                var asm_str = "__asm__" + volatile_str + " (\n"
+                val effective_volatile = if options.contains("pure"): "" else: volatile_str
+                var asm_str = "__asm__" + effective_volatile + " (\n"
                 asm_str = asm_str + "    \"" + c_template + "\""
 
                 # Output operands section
@@ -303,6 +350,7 @@ impl MirToC:
 
                 asm_str = asm_str + "\n);"
                 self.builder.emit(asm_str)
+                if has_c_abi_clobber: self.builder.emit(r"#undef SIMPLE_INLINE_ASM_C_ABI_CLOBBERS")
                 self.builder.emit(r"#endif")
 
             # === Debug/Nop ===

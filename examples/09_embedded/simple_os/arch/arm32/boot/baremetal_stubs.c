@@ -1567,6 +1567,11 @@ typedef struct {
     uint32_t fpu_state;
 } Arm32SavedContext;
 
+volatile uint32_t rt_arm32_restore_context_ptr;
+volatile uint32_t rt_arm32_restore_frame_sp;
+extern void rt_arm32_context_restore_asm(Arm32SavedContext *ctx);
+extern int32_t rt_arm32_context_roundtrip_enter(Arm32SavedContext *ctx);
+
 RuntimeValue rt_arm32_context_save(RuntimeValue ctx_ptr_val)
 {
     Arm32SavedContext *ctx = (Arm32SavedContext *)(uintptr_t)(uint32_t)ctx_ptr_val;
@@ -1583,7 +1588,11 @@ RuntimeValue rt_arm32_context_save(RuntimeValue ctx_ptr_val)
 RuntimeValue rt_arm32_context_restore(RuntimeValue ctx_ptr_val)
 {
     Arm32SavedContext *ctx = (Arm32SavedContext *)(uintptr_t)(uint32_t)ctx_ptr_val;
-    (void)ctx;
+    if (!ctx || !ctx->sp || !ctx->pc || (ctx->sp & 7U) != 0U ||
+        (ctx->pc & 3U) != 0U || (ctx->cpsr & 0x1fU) != 0x10U)
+        return NIL_VALUE;
+    rt_arm32_context_restore_asm(ctx);
+    __builtin_unreachable();
     return NIL_VALUE;
 }
 
@@ -2113,7 +2122,26 @@ typedef struct {
     uint32_t fat_size;
     uint32_t root_cluster;
     uint32_t data_start;
+    uint32_t total_sectors;
+    uint32_t cluster_count;
+    uint32_t max_cluster;
 } Arm32Fat32Probe;
+
+static uint32_t arm32_u32_div_floor(uint32_t numerator, uint32_t denominator)
+{
+    if (!denominator) return 0;
+    uint32_t quotient = 0, remainder = 0;
+    for (uint32_t bit = 32U; bit > 0U; bit--) {
+        uint32_t incoming = (numerator >> (bit - 1U)) & 1U;
+        uint32_t carry = remainder >> 31;
+        remainder = (remainder << 1) | incoming;
+        if (carry || remainder >= denominator) {
+            remainder -= denominator;
+            quotient |= 1U << (bit - 1U);
+        }
+    }
+    return quotient;
+}
 
 static uint32_t arm32_fat32_rd16(const uint8_t *p)
 {
@@ -2157,9 +2185,36 @@ static int arm32_fat32_probe_bpb(Arm32Fat32Probe *fat)
     fat->fats = b[16U];
     fat->fat_size = arm32_fat32_rd32(b + 36U);
     fat->root_cluster = arm32_fat32_rd32(b + 44U);
-    if (fat->spc == 0 || fat->reserved == 0 || fat->fats == 0 || fat->fat_size == 0 || fat->root_cluster < 2U) return 0;
+    fat->total_sectors = arm32_fat32_rd16(b + 19U);
+    if (!fat->total_sectors) fat->total_sectors = arm32_fat32_rd32(b + 32U);
+    if (fat->spc == 0 || (fat->spc & (fat->spc - 1U)) != 0U ||
+        fat->reserved == 0 || fat->fats == 0 || fat->fats > 2U ||
+        fat->fat_size == 0 || fat->root_cluster < 2U ||
+        (fat->fats == 2U && fat->fat_size > ((0xffffffffU - fat->reserved) >> 1))) return 0;
     fat->data_start = fat->reserved + (fat->fats * fat->fat_size);
+    if (fat->total_sectors <= fat->data_start) return 0;
+    fat->cluster_count = arm32_u32_div_floor(
+        fat->total_sectors - fat->data_start, fat->spc);
+    if (!fat->cluster_count || fat->cluster_count > 0x0fffffeeU) return 0;
+    fat->max_cluster = fat->cluster_count + 1U;
+    if (fat->root_cluster > fat->max_cluster) return 0;
     return 1;
+}
+
+static int arm32_fat32_data_cluster(const Arm32Fat32Probe *fat, uint32_t cluster)
+{
+    return cluster >= 2U && cluster <= fat->max_cluster;
+}
+
+static int arm32_fat32_eoc(uint32_t cluster)
+{
+    return cluster >= 0x0ffffff8U && cluster <= 0x0fffffffU;
+}
+
+static int arm32_fat32_hop_allowed(const Arm32Fat32Probe *fat,
+                                   uint32_t cluster, uint32_t hops)
+{
+    return hops < fat->cluster_count && arm32_fat32_data_cluster(fat, cluster);
 }
 
 static uint32_t arm32_fat32_cluster_sector(const Arm32Fat32Probe *fat, uint32_t cluster)
@@ -2169,10 +2224,11 @@ static uint32_t arm32_fat32_cluster_sector(const Arm32Fat32Probe *fat, uint32_t 
 
 static uint32_t arm32_fat32_next_cluster(const Arm32Fat32Probe *fat, uint32_t cluster)
 {
+    if (!arm32_fat32_data_cluster(fat, cluster)) return 0;
     uint32_t fat_offset = cluster * 4U;
     uint32_t sector = fat->reserved + (fat_offset / 512U);
     uint32_t offset = fat_offset % 512U;
-    if (!arm32_fat32_read_sector(sector)) return 0x0fffffffu;
+    if (!arm32_fat32_read_sector(sector)) return 0;
     return arm32_fat32_rd32(arm32_fat32_sector_data() + offset) & 0x0fffffffu;
 }
 
@@ -2180,7 +2236,9 @@ static uint32_t arm32_fat32_find_entry(const Arm32Fat32Probe *fat, uint32_t dir_
                                        const char *name11, uint32_t want_dir, uint32_t *size_out)
 {
     uint32_t cluster = dir_cluster;
-    while (cluster >= 2U && cluster < 0x0ffffff8U) {
+    uint32_t hops = 0;
+    while (arm32_fat32_hop_allowed(fat, cluster, hops)) {
+        hops++;
         uint32_t first = arm32_fat32_cluster_sector(fat, cluster);
         for (uint32_t sec = 0; sec < fat->spc; sec++) {
             if (!arm32_fat32_read_sector(first + sec)) return 0;
@@ -2196,7 +2254,9 @@ static uint32_t arm32_fat32_find_entry(const Arm32Fat32Probe *fat, uint32_t dir_
                 return ((uint32_t)arm32_fat32_rd16(e + 20U) << 16) | arm32_fat32_rd16(e + 26U);
             }
         }
-        cluster = arm32_fat32_next_cluster(fat, cluster);
+        uint32_t next = arm32_fat32_next_cluster(fat, cluster);
+        if (arm32_fat32_eoc(next)) return 0;
+        cluster = next;
     }
     return 0;
 }
@@ -2248,7 +2308,9 @@ static uint32_t arm32_fat32_read_file(const Arm32Fat32Probe *fat, uint32_t clust
     if (cluster < 2U || file_size == 0 || file_size > cap) return 0;
     uint32_t copied = 0;
     uint32_t cur = cluster;
-    while (cur >= 2U && cur < 0x0ffffff8U && copied < file_size) {
+    uint32_t hops = 0;
+    while (copied < file_size && arm32_fat32_hop_allowed(fat, cur, hops)) {
+        hops++;
         uint32_t first = arm32_fat32_cluster_sector(fat, cur);
         for (uint32_t sec = 0; sec < fat->spc && copied < file_size; sec++) {
             if (!arm32_fat32_read_sector(first + sec)) return copied;
@@ -2258,9 +2320,676 @@ static uint32_t arm32_fat32_read_file(const Arm32Fat32Probe *fat, uint32_t clust
             for (uint32_t i = 0; i < chunk; i++) out[copied + i] = data[i];
             copied += chunk;
         }
-        cur = arm32_fat32_next_cluster(fat, cur);
+        uint32_t next = arm32_fat32_next_cluster(fat, cur);
+        if (copied == file_size) return arm32_fat32_eoc(next) ? copied : 0;
+        if (arm32_fat32_eoc(next)) return 0;
+        cur = next;
     }
     return copied;
+}
+
+/* Echo the per-run guest nonce from the real FAT root file patched by
+ * prepare_qemu_nonce_media.shs. Fail closed on name, size, prefix, newline,
+ * or character-policy mismatch; never print an unbounded disk string. */
+RuntimeValue rt_arm32_qemu_nonce_echo(void)
+{
+    static const char prefix[] = "SIMPLEOS_QEMU_NONCE=";
+    uint8_t record[118];
+    Arm32Fat32Probe fat;
+    if (!arm32_fat32_probe_bpb(&fat)) return 0;
+    uint32_t file_size = 0;
+    uint32_t cluster = arm32_fat32_find_entry(
+        &fat, fat.root_cluster, "QEMUNONCTXT", 0, &file_size);
+    if (cluster < 2U || file_size != sizeof(record)) return 0;
+    if (arm32_fat32_read_file(&fat, cluster, file_size, record,
+                              (uint32_t)sizeof(record)) != sizeof(record))
+        return 0;
+    uint32_t prefix_len = (uint32_t)(sizeof(prefix) - 1U);
+    for (uint32_t i = 0; i < prefix_len; i++)
+        if (record[i] != (uint8_t)prefix[i]) return 0;
+    uint32_t end = prefix_len;
+    while (end < sizeof(record) && record[end] != '\n' && record[end] != 0U) {
+        uint8_t c = record[end];
+        uint32_t safe = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+                        c == ':' || c == '-';
+        if (!safe) return 0;
+        end++;
+    }
+    if (end == prefix_len || end >= sizeof(record) || record[end] != '\n')
+        return 0;
+    for (uint32_t i = 0; i < end; i++) serial_putchar((char)record[i]);
+    serial_puts("\r\n");
+    return 1;
+}
+
+RuntimeValue rt_arm32_fat32_bounds_selftest(void)
+{
+    Arm32Fat32Probe mounted;
+    if (!arm32_fat32_probe_bpb(&mounted) ||
+        !arm32_fat32_data_cluster(&mounted, mounted.root_cluster) ||
+        !mounted.cluster_count || mounted.max_cluster != mounted.cluster_count + 1U)
+        return 0;
+    Arm32Fat32Probe synthetic = mounted;
+    synthetic.cluster_count = 3U;
+    synthetic.max_cluster = 4U;
+    uint32_t hops = 0;
+    while (arm32_fat32_hop_allowed(&synthetic, 2U, hops)) hops++;
+    if (hops != 3U || arm32_fat32_hop_allowed(&synthetic, 2U, hops) ||
+        arm32_fat32_data_cluster(&synthetic, 5U) ||
+        arm32_fat32_data_cluster(&synthetic, 0x0ffffff7U) ||
+        arm32_fat32_eoc(0x0ffffff7U) || !arm32_fat32_eoc(0x0ffffff8U))
+        return 0;
+    serial_puts("ARM32_FAT_NEGATIVE case=cycle reason=cluster-count-bound\r\n");
+    serial_puts("ARM32_FAT_NEGATIVE case=reserved reason=not-data-or-eoc\r\n");
+    serial_puts("ARM32_FAT_EOC_OK value=0x0ffffff8\r\n");
+    return 1;
+}
+
+RuntimeValue rt_arm32_fs_list_apps(void)
+{
+    Arm32Fat32Probe fat;
+    if (!arm32_fat32_probe_bpb(&fat)) return 0;
+    uint32_t sys = arm32_fat32_find_entry(
+        &fat, fat.root_cluster, "SYS        ", 1, 0);
+    if (sys < 2U) return 0;
+    uint32_t apps = arm32_fat32_find_entry(&fat, sys, "APPS       ", 1, 0);
+    if (apps < 2U) return 0;
+    uint32_t count = 0;
+    uint32_t cur = apps;
+    uint32_t hops = 0;
+    serial_puts("FS_LS_BEGIN path=/SYS/APPS\r\n");
+    while (arm32_fat32_hop_allowed(&fat, cur, hops)) {
+        hops++;
+        uint32_t first = arm32_fat32_cluster_sector(&fat, cur);
+        for (uint32_t sec = 0; sec < fat.spc; sec++) {
+            if (!arm32_fat32_read_sector(first + sec)) return 0;
+            const uint8_t *data = arm32_fat32_sector_data();
+            for (uint32_t off = 0; off < 512U; off += 32U) {
+                const uint8_t *e = data + off;
+                if (e[0] == 0x00U) goto arm32_list_done;
+                if (e[0] == 0xe5U || e[11] == 0x0fU || (e[11] & 0x08U)) continue;
+                serial_puts("FS_LS_ENTRY name=");
+                for (uint32_t i = 0; i < 8U && e[i] != ' '; i++)
+                    serial_putchar((char)e[i]);
+                if (!(e[11] & 0x10U) && e[8] != ' ') {
+                    serial_putchar('.');
+                    for (uint32_t i = 8U; i < 11U && e[i] != ' '; i++)
+                        serial_putchar((char)e[i]);
+                }
+                serial_puts("\r\n");
+                count++;
+            }
+        }
+        uint32_t next = arm32_fat32_next_cluster(&fat, cur);
+        if (arm32_fat32_eoc(next)) goto arm32_list_done;
+        cur = next;
+    }
+    return 0;
+arm32_list_done:
+    if (!count) return 0;
+    serial_puts("FS_LS_END status=pass\r\n");
+    return (RuntimeValue)count;
+}
+
+/* --- ARM32 mounted-ELF EL0 lifecycle ------------------------------------
+ *
+ * The generated acceptance child is linked at 0x00201000, below QEMU virt's
+ * physical RAM base.  Copying and branching would therefore be fabricated
+ * execution.  These tables map its ELF virtual pages onto a private physical
+ * arena while preserving an identity-mapped, privileged kernel/MMIO window.
+ * The SVC owner accepts calls only while a kernel-generated token is active;
+ * exit completion is consumed once by the blocked kernel continuation.
+ */
+#define ARM32_USER_ARENA_BYTES (1024U * 1024U)
+#define ARM32_ELF_FILE_BYTES   (1024U * 1024U)
+#define ARM32_USER_STACK_VA    0x00f00000U
+#define ARM32_USER_STACK_BYTES 4096U
+#define ARM32_L1_SECTION       0x00000402U /* privileged RW, user denied */
+#define ARM32_L1_COARSE        0x00000001U
+#define ARM32_L2_USER_RO_X     0x00000022U /* AP=10: user RO, executable */
+#define ARM32_L2_USER_RO_XN    0x00000023U /* AP=10: user RO, XN */
+#define ARM32_L2_USER_RW_XN    0x00000033U /* AP=11: user RW, XN */
+#define ARM32_L2_POOL_COUNT    16U
+#define ARM32_MAX_LOADS        16U
+
+static uint8_t g_arm32_user_arena[ARM32_USER_ARENA_BYTES]
+    __attribute__((aligned(1048576)));
+static uint8_t g_arm32_elf_file[ARM32_ELF_FILE_BYTES]
+    __attribute__((aligned(4096)));
+static uint8_t g_arm32_user_stack[ARM32_USER_STACK_BYTES]
+    __attribute__((aligned(4096)));
+static uint32_t g_arm32_el0_l1[4096] __attribute__((aligned(16384)));
+static uint32_t g_arm32_el0_l2[ARM32_L2_POOL_COUNT][256]
+    __attribute__((aligned(1024)));
+static uint32_t g_arm32_l2_l1_index[ARM32_L2_POOL_COUNT];
+static uint32_t g_arm32_l2_used;
+static uint32_t g_arm32_exec_first[ARM32_MAX_LOADS];
+static uint32_t g_arm32_exec_last[ARM32_MAX_LOADS];
+static uint32_t g_arm32_exec_range_count;
+
+volatile uint32_t rt_arm32_saved_kernel_sp;
+volatile uint32_t rt_arm32_completed_exit_status;
+volatile uint32_t rt_arm32_user_entry_pc;
+static uint32_t g_arm32_program_entry;
+static uint32_t g_arm32_program_sp;
+static uint32_t g_arm32_program_generation;
+static uint32_t g_arm32_exec_token;
+static uint32_t g_arm32_exec_generation;
+static uint32_t g_arm32_exec_ttbr;
+static uint32_t g_arm32_expected_fault_origin;
+static uint32_t g_arm32_exec_state; /* 0 idle, 1 active, 2 completed */
+
+extern void rt_arm32_svc_vector_install(void);
+extern void rt_arm32_svc_resume_kernel(void);
+
+static void arm32_el0_zero_tables(void)
+{
+    for (uint32_t i = 0; i < 4096U; i++) g_arm32_el0_l1[i] = 0;
+    for (uint32_t n = 0; n < ARM32_L2_POOL_COUNT; n++) {
+        g_arm32_l2_l1_index[n] = 0xffffffffU;
+        for (uint32_t i = 0; i < 256U; i++) g_arm32_el0_l2[n][i] = 0;
+    }
+    g_arm32_l2_used = 0;
+    g_arm32_exec_range_count = 0;
+}
+
+static void arm32_el0_identity_sections(uint32_t first, uint32_t last)
+{
+    for (uint32_t addr = first; addr < last; addr += 0x00100000U)
+        g_arm32_el0_l1[addr >> 20] = (addr & 0xfff00000U) | ARM32_L1_SECTION;
+}
+
+static int arm32_u32_add(uint32_t a, uint32_t b, uint32_t *out)
+{
+    if (a > 0xffffffffU - b) return 0;
+    *out = a + b;
+    return 1;
+}
+
+static uint32_t *arm32_el0_l2_for(uint32_t l1_index)
+{
+    for (uint32_t n = 0; n < g_arm32_l2_used; n++)
+        if (g_arm32_l2_l1_index[n] == l1_index) return g_arm32_el0_l2[n];
+    if (g_arm32_l2_used >= ARM32_L2_POOL_COUNT || g_arm32_el0_l1[l1_index] != 0)
+        return (uint32_t *)0;
+    uint32_t n = g_arm32_l2_used++;
+    g_arm32_l2_l1_index[n] = l1_index;
+    g_arm32_el0_l1[l1_index] =
+        ((uint32_t)(uintptr_t)g_arm32_el0_l2[n] & 0xfffffc00U) | ARM32_L1_COARSE;
+    return g_arm32_el0_l2[n];
+}
+
+static int arm32_el0_map_payload(uint32_t va, uint32_t pa, uint32_t bytes,
+                                uint32_t descriptor)
+{
+    uint32_t end;
+    if (!bytes || !arm32_u32_add(va, bytes, &end)) return 0;
+    uint32_t page_va = va & ~4095U;
+    uint32_t page_pa = pa & ~4095U;
+    uint32_t rounded;
+    if (!arm32_u32_add(end, 4095U, &rounded)) return 0;
+    uint32_t page_end = rounded & ~4095U;
+    while (page_va < page_end) {
+        uint32_t *l2 = arm32_el0_l2_for(page_va >> 20);
+        if (!l2) return 0;
+        uint32_t slot = (page_va >> 12) & 0xffU;
+        if (l2[slot] != 0) return 0;
+        l2[slot] = (page_pa & 0xfffff000U) | descriptor;
+        page_va += 4096U;
+        page_pa += 4096U;
+    }
+    return 1;
+}
+
+static int arm32_el0_map_stack(void)
+{
+    return arm32_el0_map_payload(ARM32_USER_STACK_VA,
+        (uint32_t)(uintptr_t)g_arm32_user_stack,
+        ARM32_USER_STACK_BYTES, ARM32_L2_USER_RW_XN);
+}
+
+static void arm32_cache_clean_range(uint32_t first, uint32_t bytes)
+{
+    uint32_t end = first + bytes;
+    for (uint32_t p = first & ~31U; p < end; p += 32U)
+        __asm__ volatile("mcr p15, 0, %0, c7, c14, 1" : : "r"(p) : "memory");
+}
+
+static uint32_t arm32_current_ttbr0(void)
+{
+    uint32_t value;
+    __asm__ volatile("mrc p15, 0, %0, c2, c0, 0" : "=r"(value));
+    return value & 0xffffc000U;
+}
+
+static void arm32_el0_enable_mmu(void)
+{
+    uint32_t ttbr = (uint32_t)(uintptr_t)g_arm32_el0_l1;
+    uint32_t sctlr;
+    arm32_cache_clean_range((uint32_t)(uintptr_t)g_arm32_el0_l1, sizeof(g_arm32_el0_l1));
+    arm32_cache_clean_range((uint32_t)(uintptr_t)g_arm32_el0_l2, sizeof(g_arm32_el0_l2));
+    arm32_cache_clean_range((uint32_t)(uintptr_t)g_arm32_user_arena, ARM32_USER_ARENA_BYTES);
+    __asm__ volatile("dsb\n"
+                     "mov r1, #0\n"
+                     "mcr p15, 0, r1, c7, c5, 0\n"
+                     "mcr p15, 0, %0, c2, c0, 0\n"
+                     "mov r1, #0\n"
+                     "mcr p15, 0, r1, c2, c0, 2\n"
+                     "mov r1, #1\n"
+                     "mcr p15, 0, r1, c3, c0, 0\n"
+                     "mcr p15, 0, r1, c8, c7, 0\n"
+                     "isb\n"
+                     : : "r"(ttbr) : "r1", "memory");
+    __asm__ volatile("mrc p15, 0, %0, c1, c0, 0" : "=r"(sctlr));
+    sctlr |= 1U;
+    __asm__ volatile("mcr p15, 0, %0, c1, c0, 0\nisb" : : "r"(sctlr) : "memory");
+}
+
+RuntimeValue rt_arm32_svc_vector_init(void)
+{
+    rt_arm32_svc_vector_install();
+    return 1;
+}
+
+RuntimeValue rt_arm32_exec_token_install(RuntimeValue token_val, RuntimeValue generation_val)
+{
+    uint32_t token = (uint32_t)token_val;
+    uint32_t generation = (uint32_t)generation_val;
+    if (!token || !generation || generation != g_arm32_program_generation ||
+        g_arm32_exec_state != 0U) return 0;
+    g_arm32_exec_token = token;
+    g_arm32_exec_generation = generation;
+    g_arm32_exec_ttbr = arm32_current_ttbr0();
+    rt_arm32_completed_exit_status = 0xffffffffU;
+    g_arm32_exec_state = 1U;
+    return 1;
+}
+
+RuntimeValue rt_arm32_exec_reap(RuntimeValue token_val, RuntimeValue generation_val,
+                               RuntimeValue expected_status_val)
+{
+    uint32_t token = (uint32_t)token_val;
+    uint32_t generation = (uint32_t)generation_val;
+    if (!token || token != g_arm32_exec_token ||
+        generation != g_arm32_exec_generation || g_arm32_exec_state != 2U)
+        return (RuntimeValue)-13;
+    uint32_t result = rt_arm32_completed_exit_status;
+    if (result != (uint32_t)expected_status_val) return (RuntimeValue)-10;
+    g_arm32_exec_token = 0;
+    g_arm32_exec_generation = 0;
+    g_arm32_exec_ttbr = 0;
+    g_arm32_exec_state = 0;
+    return (RuntimeValue)(int32_t)result;
+}
+
+/* Called only by exception_vectors.s with the complete user register frame
+ * retained on the SVC stack. Return 0 to resume EL0 or 1 to resume kernel. */
+static int arm32_origin_is_executable(uint32_t origin)
+{
+    for (uint32_t i = 0; i < g_arm32_exec_range_count; i++)
+        if (origin >= g_arm32_exec_first[i] && origin < g_arm32_exec_last[i]) return 1;
+    return 0;
+}
+
+uint32_t rt_arm32_svc_dispatch(uint32_t id, uint32_t a0, uint32_t return_pc,
+                               uint32_t saved_cpsr)
+{
+    uint32_t origin = return_pc >= 4U ? return_pc - 4U : 0U;
+    if (g_arm32_exec_state != 1U || g_arm32_exec_token == 0U ||
+        g_arm32_exec_generation != g_arm32_program_generation ||
+        g_arm32_exec_ttbr != arm32_current_ttbr0() ||
+        (saved_cpsr & 0x1fU) != 0x10U ||
+        !arm32_origin_is_executable(origin)) {
+        return 2U;
+    }
+    if (id == 60U) {
+        serial_putchar((char)(a0 & 0xffU));
+        return 0U;
+    }
+    if (id == 0U) {
+        rt_arm32_completed_exit_status = a0;
+        g_arm32_exec_state = 2U;
+        return 1U;
+    }
+    rt_arm32_completed_exit_status = 0xffffffdaU; /* -ENOSYS */
+    g_arm32_exec_state = 2U;
+    return 1U;
+}
+
+RuntimeValue rt_arm32_unowned_svc_selftest(void)
+{
+    uint32_t prior_status = rt_arm32_completed_exit_status;
+    uint32_t prior_sp = rt_arm32_saved_kernel_sp;
+    uint32_t prior_state = g_arm32_exec_state;
+    uint32_t result = rt_arm32_svc_dispatch(0U, 37U, 0x2004U, 0x13U);
+    if (result != 2U || rt_arm32_completed_exit_status != prior_status ||
+        rt_arm32_saved_kernel_sp != prior_sp || g_arm32_exec_state != prior_state)
+        return 0;
+    return 1;
+}
+
+uint32_t rt_arm32_user_fault_dispatch(uint32_t kind, uint32_t origin,
+                                      uint32_t saved_cpsr)
+{
+    if (g_arm32_exec_state != 1U || g_arm32_exec_token == 0U ||
+        g_arm32_exec_generation != g_arm32_program_generation ||
+        g_arm32_exec_ttbr != arm32_current_ttbr0() ||
+        (saved_cpsr & 0x1fU) != 0x10U || kind != 1U ||
+        origin != g_arm32_expected_fault_origin ||
+        !arm32_origin_is_executable(origin))
+        return 0U;
+    g_arm32_expected_fault_origin = 0;
+    rt_arm32_completed_exit_status = 0xfffffff2U; /* -EFAULT */
+    g_arm32_exec_state = 2U;
+    return 1U;
+}
+
+enum {
+    ARM32_ELF_OK = 0,
+    ARM32_ELF_BAD_HEADER = 1,
+    ARM32_ELF_BAD_PHDR_TABLE = 2,
+    ARM32_ELF_BAD_ARITHMETIC = 3,
+    ARM32_ELF_BAD_WX = 4,
+    ARM32_ELF_BAD_ENTRY = 5,
+    ARM32_ELF_BAD_OVERLAP = 6,
+    ARM32_ELF_BAD_ALIGNMENT = 7,
+    ARM32_ELF_NO_LOAD = 8
+};
+
+static uint32_t arm32_elf32_admission_reason(const uint8_t *elf, uint32_t loaded,
+                                             uint32_t *phoff_out,
+                                             uint32_t *phentsize_out,
+                                             uint32_t *phnum_out)
+{
+    if (!elf || loaded < 52U || elf[0] != 0x7fU || elf[1] != 'E' ||
+        elf[2] != 'L' || elf[3] != 'F' || elf[4] != 1U || elf[5] != 1U ||
+        elf[6] != 1U || arm32_fat32_rd16(elf + 16U) != 2U ||
+        arm32_fat32_rd16(elf + 18U) != 40U ||
+        arm32_fat32_rd32(elf + 20U) != 1U ||
+        arm32_fat32_rd16(elf + 40U) != 52U) return ARM32_ELF_BAD_HEADER;
+    uint32_t phoff = arm32_fat32_rd32(elf + 28U);
+    uint32_t phentsize = arm32_fat32_rd16(elf + 42U);
+    uint32_t phnum = arm32_fat32_rd16(elf + 44U);
+    uint32_t phend;
+    if (phentsize < 32U || phnum == 0U || phnum > ARM32_MAX_LOADS ||
+        !arm32_u32_add(phoff, phentsize * phnum, &phend) || phend > loaded)
+        return ARM32_ELF_BAD_PHDR_TABLE;
+    uint32_t first[ARM32_MAX_LOADS];
+    uint32_t last[ARM32_MAX_LOADS];
+    uint32_t loads = 0;
+    uint32_t entry = arm32_fat32_rd32(elf + 24U);
+    uint32_t entry_executable = 0;
+    for (uint32_t i = 0; i < phnum; i++) {
+        const uint8_t *ph = elf + phoff + i * phentsize;
+        if (arm32_fat32_rd32(ph) != 1U) continue;
+        uint32_t offset = arm32_fat32_rd32(ph + 4U);
+        uint32_t va = arm32_fat32_rd32(ph + 8U);
+        uint32_t filesz = arm32_fat32_rd32(ph + 16U);
+        uint32_t memsz = arm32_fat32_rd32(ph + 20U);
+        uint32_t flags = arm32_fat32_rd32(ph + 24U);
+        uint32_t align = arm32_fat32_rd32(ph + 28U);
+        uint32_t file_end, virt_end;
+        if (!memsz || filesz > memsz ||
+            !arm32_u32_add(offset, filesz, &file_end) || file_end > loaded ||
+            !arm32_u32_add(va, memsz, &virt_end) || va < 0x1000U ||
+            virt_end >= ARM32_USER_STACK_VA)
+            return ARM32_ELF_BAD_ARITHMETIC;
+        if (align > 1U && ((align & (align - 1U)) != 0U ||
+                          ((va - offset) & (align - 1U)) != 0U))
+            return ARM32_ELF_BAD_ALIGNMENT;
+        if ((flags & 3U) == 3U) return ARM32_ELF_BAD_WX;
+        for (uint32_t n = 0; n < loads; n++)
+            if (va < last[n] && virt_end > first[n]) return ARM32_ELF_BAD_OVERLAP;
+        first[loads] = va;
+        last[loads++] = virt_end;
+        if ((flags & 1U) && entry >= va && entry < virt_end) entry_executable = 1;
+    }
+    if (!loads) return ARM32_ELF_NO_LOAD;
+    if (!entry_executable) return ARM32_ELF_BAD_ENTRY;
+    *phoff_out = phoff;
+    *phentsize_out = phentsize;
+    *phnum_out = phnum;
+    return ARM32_ELF_OK;
+}
+
+static void arm32_fixture_put32(uint8_t *p, uint32_t value)
+{
+    p[0] = (uint8_t)value; p[1] = (uint8_t)(value >> 8);
+    p[2] = (uint8_t)(value >> 16); p[3] = (uint8_t)(value >> 24);
+}
+
+RuntimeValue rt_arm32_fs_exec_malformed_selftest(void)
+{
+    uint8_t fixture[148];
+    for (uint32_t i = 0; i < sizeof(fixture); i++) fixture[i] = 0;
+    fixture[0] = 0x7fU; fixture[1] = 'E'; fixture[2] = 'L'; fixture[3] = 'F';
+    fixture[4] = 1U; fixture[5] = 1U;
+    fixture[6] = 1U; fixture[16] = 2U; fixture[18] = 40U;
+    arm32_fixture_put32(fixture + 20U, 1U);
+    fixture[40] = 52U;
+    arm32_fixture_put32(fixture + 24U, 0x2000U);
+    arm32_fixture_put32(fixture + 28U, 52U);
+    fixture[42] = 32U; fixture[44] = 1U;
+    uint8_t *ph = fixture + 52U;
+    arm32_fixture_put32(ph, 1U);
+    arm32_fixture_put32(ph + 4U, 84U);
+    arm32_fixture_put32(ph + 8U, 0x2000U);
+    arm32_fixture_put32(ph + 16U, 0U);
+    arm32_fixture_put32(ph + 20U, 4U);
+    arm32_fixture_put32(ph + 24U, 5U);
+    arm32_fixture_put32(ph + 28U, 4U);
+    uint32_t off, size, count;
+    if (arm32_elf32_admission_reason(fixture, sizeof(fixture), &off, &size, &count) != ARM32_ELF_OK) return 0;
+    fixture[6] = 0U;
+    if (arm32_elf32_admission_reason(fixture, sizeof(fixture), &off, &size, &count) != ARM32_ELF_BAD_HEADER) return 0;
+    serial_puts("ARM32_ELF_NEGATIVE case=ei-version reason=identity\r\n"); fixture[6] = 1U;
+    fixture[16] = 3U;
+    if (arm32_elf32_admission_reason(fixture, sizeof(fixture), &off, &size, &count) != ARM32_ELF_BAD_HEADER) return 0;
+    serial_puts("ARM32_ELF_NEGATIVE case=type reason=identity\r\n"); fixture[16] = 2U;
+    arm32_fixture_put32(fixture + 20U, 2U);
+    if (arm32_elf32_admission_reason(fixture, sizeof(fixture), &off, &size, &count) != ARM32_ELF_BAD_HEADER) return 0;
+    serial_puts("ARM32_ELF_NEGATIVE case=version reason=identity\r\n"); arm32_fixture_put32(fixture + 20U, 1U);
+    fixture[40] = 0U;
+    if (arm32_elf32_admission_reason(fixture, sizeof(fixture), &off, &size, &count) != ARM32_ELF_BAD_HEADER) return 0;
+    serial_puts("ARM32_ELF_NEGATIVE case=ehsize reason=identity\r\n"); fixture[40] = 52U;
+    arm32_fixture_put32(ph + 24U, 7U);
+    if (arm32_elf32_admission_reason(fixture, sizeof(fixture), &off, &size, &count) != ARM32_ELF_BAD_WX) return 0;
+    serial_puts("ARM32_ELF_NEGATIVE case=wx reason=wx\r\n");
+    arm32_fixture_put32(ph + 24U, 5U);
+    arm32_fixture_put32(ph + 4U, 0xfffffff0U); arm32_fixture_put32(ph + 16U, 32U);
+    arm32_fixture_put32(ph + 20U, 32U);
+    if (arm32_elf32_admission_reason(fixture, sizeof(fixture), &off, &size, &count) != ARM32_ELF_BAD_ARITHMETIC) return 0;
+    serial_puts("ARM32_ELF_NEGATIVE case=arithmetic reason=range\r\n");
+    arm32_fixture_put32(ph + 4U, 84U); arm32_fixture_put32(ph + 16U, 0U);
+    arm32_fixture_put32(ph + 20U, 4U);
+    arm32_fixture_put32(fixture + 24U, 0x3000U);
+    if (arm32_elf32_admission_reason(fixture, sizeof(fixture), &off, &size, &count) != ARM32_ELF_BAD_ENTRY) return 0;
+    serial_puts("ARM32_ELF_NEGATIVE case=entry reason=not-executable\r\n");
+    arm32_fixture_put32(fixture + 24U, 0x2000U); fixture[44] = 2U;
+    uint8_t *ph2 = fixture + 84U;
+    arm32_fixture_put32(ph2, 1U); arm32_fixture_put32(ph2 + 4U, 116U);
+    arm32_fixture_put32(ph2 + 8U, 0x2002U); arm32_fixture_put32(ph2 + 20U, 4U);
+    arm32_fixture_put32(ph2 + 24U, 4U); arm32_fixture_put32(ph2 + 28U, 2U);
+    if (arm32_elf32_admission_reason(fixture, sizeof(fixture), &off, &size, &count) != ARM32_ELF_BAD_OVERLAP) return 0;
+    serial_puts("ARM32_ELF_NEGATIVE case=overlap reason=virtual-overlap\r\n");
+    fixture[44] = 1U; arm32_fixture_put32(ph + 28U, 4096U);
+    if (arm32_elf32_admission_reason(fixture, sizeof(fixture), &off, &size, &count) != ARM32_ELF_BAD_ALIGNMENT) return 0;
+    serial_puts("ARM32_ELF_NEGATIVE case=alignment reason=congruence\r\n");
+    return 1;
+}
+
+RuntimeValue rt_arm32_fs_read_program(void)
+{
+    Arm32Fat32Probe fat;
+    if (!arm32_fat32_probe_bpb(&fat)) { serial_puts("[arm32-user] stage:bpb\r\n"); return 0; }
+    uint32_t file_size = 0;
+    uint32_t cluster = arm32_fat32_find_entry(
+        &fat, fat.root_cluster, "FSEXEC  ELF", 0, &file_size);
+    if (cluster < 2U || file_size < 52U || file_size > ARM32_ELF_FILE_BYTES) {
+        serial_puts("[arm32-user] stage:root-file\r\n");
+        return 0;
+    }
+
+    uint8_t *elf = g_arm32_elf_file;
+    for (uint32_t i = 0; i < ARM32_ELF_FILE_BYTES; i++) elf[i] = 0;
+    uint32_t loaded = arm32_fat32_read_file(
+        &fat, cluster, file_size, elf, ARM32_ELF_FILE_BYTES);
+    uint32_t phoff, phentsize, phnum;
+    if (loaded != file_size || arm32_elf32_admission_reason(
+            elf, loaded, &phoff, &phentsize, &phnum) != ARM32_ELF_OK)
+        { serial_puts("[arm32-user] stage:phdr-table\r\n"); return 0; }
+
+    arm32_el0_zero_tables();
+    arm32_el0_identity_sections(0x08000000U, 0x10000000U); /* virt MMIO */
+    arm32_el0_identity_sections(0x40000000U, 0x48000000U); /* kernel RAM */
+    g_arm32_program_entry = arm32_fat32_rd32(elf + 24U);
+    uint32_t arena_next = 0;
+    uint32_t load_count = 0;
+    uint32_t entry_executable = 0;
+    for (uint32_t i = 0; i < phnum; i++) {
+        uint8_t *ph = elf + phoff + i * phentsize;
+        if (arm32_fat32_rd32(ph) != 1U) continue;
+        uint32_t offset = arm32_fat32_rd32(ph + 4U);
+        uint32_t va = arm32_fat32_rd32(ph + 8U);
+        uint32_t filesz = arm32_fat32_rd32(ph + 16U);
+        uint32_t memsz = arm32_fat32_rd32(ph + 20U);
+        uint32_t flags = arm32_fat32_rd32(ph + 24U);
+        uint32_t file_end;
+        uint32_t virt_end;
+        if (memsz == 0U || filesz > memsz ||
+            !arm32_u32_add(offset, filesz, &file_end) || file_end > loaded ||
+            !arm32_u32_add(va, memsz, &virt_end) || va < 0x1000U ||
+            virt_end >= ARM32_USER_STACK_VA)
+            { serial_puts("[arm32-user] stage:segment-shape\r\n"); return 0; }
+        uint32_t writable = flags & 2U;
+        uint32_t executable = flags & 1U;
+        if (writable && executable) { serial_puts("[arm32-user] stage:wx-segment\r\n"); return 0; }
+        for (uint32_t n = 0; n < load_count; n++)
+            if (va < g_arm32_exec_last[n] && virt_end > g_arm32_exec_first[n]) {
+                serial_puts("[arm32-user] stage:virtual-overlap\r\n"); return 0;
+            }
+        g_arm32_exec_first[load_count] = va;
+        g_arm32_exec_last[load_count] = virt_end;
+        load_count++;
+        if (executable && g_arm32_program_entry >= va && g_arm32_program_entry < virt_end)
+            entry_executable = 1;
+
+        uint32_t page_off = va & 4095U;
+        uint32_t allocation;
+        uint32_t rounded;
+        if (!arm32_u32_add(page_off, memsz, &allocation) ||
+            !arm32_u32_add(allocation, 4095U, &rounded)) return 0;
+        allocation = rounded & ~4095U;
+        if (allocation > ARM32_USER_ARENA_BYTES ||
+            arena_next > ARM32_USER_ARENA_BYTES - allocation) {
+            serial_puts("[arm32-user] stage:segment-range\r\n"); return 0;
+        }
+        uint8_t *dest = g_arm32_user_arena + arena_next + page_off;
+        for (uint32_t j = 0; j < filesz; j++) dest[j] = elf[offset + j];
+        for (uint32_t j = filesz; j < memsz; j++) dest[j] = 0;
+        uint32_t descriptor = writable ? ARM32_L2_USER_RW_XN :
+            (executable ? ARM32_L2_USER_RO_X : ARM32_L2_USER_RO_XN);
+        if (!arm32_el0_map_payload(
+                va, (uint32_t)(uintptr_t)dest, memsz, descriptor)) {
+            serial_puts("[arm32-user] stage:segment-map\r\n"); return 0;
+        }
+        arena_next += allocation;
+    }
+    if (load_count == 0U || !entry_executable) {
+        serial_puts("[arm32-user] stage:entry-not-executable\r\n"); return 0;
+    }
+    g_arm32_exec_range_count = 0;
+    for (uint32_t i = 0; i < phnum; i++) {
+        uint8_t *ph = elf + phoff + i * phentsize;
+        if (arm32_fat32_rd32(ph) != 1U || !(arm32_fat32_rd32(ph + 24U) & 1U)) continue;
+        uint32_t va = arm32_fat32_rd32(ph + 8U);
+        uint32_t end;
+        if (!arm32_u32_add(va, arm32_fat32_rd32(ph + 20U), &end)) return 0;
+        g_arm32_exec_first[g_arm32_exec_range_count] = va;
+        g_arm32_exec_last[g_arm32_exec_range_count++] = end;
+    }
+    if (!arm32_el0_map_stack()) { serial_puts("[arm32-user] stage:stack-map\r\n"); return 0; }
+    g_arm32_program_sp = ARM32_USER_STACK_VA + ARM32_USER_STACK_BYTES - 8U;
+    g_arm32_program_generation++;
+    if (g_arm32_program_generation == 0U) g_arm32_program_generation = 1U;
+    __asm__ volatile("dsb\nisb" : : : "memory");
+    arm32_el0_enable_mmu();
+    return (RuntimeValue)g_arm32_program_entry;
+}
+
+RuntimeValue rt_arm32_fs_program_stack(void)
+{
+    return (RuntimeValue)g_arm32_program_sp;
+}
+
+RuntimeValue rt_arm32_fs_program_generation(void)
+{
+    return (RuntimeValue)g_arm32_program_generation;
+}
+
+RuntimeValue rt_arm32_fs_privilege_fault_entry(void)
+{
+    uint32_t probe = g_arm32_program_entry + 0x100U;
+    if (!arm32_origin_is_executable(probe)) return 0;
+    g_arm32_expected_fault_origin = probe;
+    return (RuntimeValue)probe;
+}
+
+RuntimeValue rt_arm32_exec_stale_reap_selftest(RuntimeValue token_val,
+                                               RuntimeValue generation_val)
+{
+    uint32_t token = (uint32_t)token_val;
+    uint32_t generation = (uint32_t)generation_val;
+    if (rt_arm32_exec_reap(token, generation, 37) != (RuntimeValue)-13) return 0;
+    if (rt_arm32_exec_reap(token, generation + 1U, 37) != (RuntimeValue)-13) return 0;
+    return 1;
+}
+
+RuntimeValue rt_arm32_context_roundtrip_probe(RuntimeValue token_val,
+                                             RuntimeValue generation_val)
+{
+    uint32_t token = (uint32_t)token_val;
+    uint32_t generation = (uint32_t)generation_val;
+    uint32_t probe = g_arm32_program_entry + 0x200U;
+    if (!arm32_origin_is_executable(probe) ||
+        rt_arm32_exec_token_install(token, generation) != 1) return (RuntimeValue)-16;
+    static Arm32SavedContext ctx __attribute__((aligned(8)));
+    for (uint32_t i = 0; i < 13U; i++) ctx.r[i] = 0;
+    ctx.r[4] = 50U;
+    ctx.sp = g_arm32_program_sp;
+    ctx.lr = 0;
+    ctx.pc = probe;
+    ctx.cpsr = 0x10U;
+    ctx.fpu_state = 0;
+    int32_t raw = rt_arm32_context_roundtrip_enter(&ctx);
+    return rt_arm32_exec_reap(token, generation, raw);
+}
+
+RuntimeValue rt_arm32_user_isolation_verify(void)
+{
+    /* Short-descriptor AP is AP[2]:bit9 + AP[1:0]:bits5:4. No deprecated
+     * subpage AP replication is accepted. Kernel RAM must be AP=01; every
+     * user page must be AP=10 (RO) or AP=11 (RW), and RW must be XN. */
+    uint32_t kernel = g_arm32_el0_l1[0x402U];
+    if ((kernel & 3U) != 2U || ((kernel >> 10) & 3U) != 1U) return 0;
+    for (uint32_t n = 0; n < g_arm32_l2_used; n++) {
+        for (uint32_t i = 0; i < 256U; i++) {
+            uint32_t d = g_arm32_el0_l2[n][i];
+            if (!d) continue;
+            uint32_t ap = ((d >> 4) & 3U) | (((d >> 9) & 1U) << 2);
+            if (ap != 2U && ap != 3U) return 0;
+            if (ap == 3U && !(d & 1U)) return 0;
+        }
+    }
+    uint32_t *entry_l2 = (uint32_t *)0;
+    for (uint32_t n = 0; n < g_arm32_l2_used; n++)
+        if (g_arm32_l2_l1_index[n] == (g_arm32_program_entry >> 20))
+            entry_l2 = g_arm32_el0_l2[n];
+    if (!entry_l2) return 0;
+    uint32_t entry_d = entry_l2[(g_arm32_program_entry >> 12) & 0xffU];
+    if ((entry_d & 1U) != 0U || ((entry_d >> 4) & 3U) != 2U) return 0;
+    return 1;
 }
 
 /* Probe: file exists at SYS/APPS/<name11> and its first sector contains both "SMF" and <marker> */

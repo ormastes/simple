@@ -826,6 +826,541 @@ RuntimeValue rt_x86_32_initrd_contains_x86_32_marker(void)
     return x86_32_initrd_contains_ascii("elf-machine=x86_32") ? 1 : 0;
 }
 
+/* Bounded FAT32 root-file reader for the Multiboot initrd.  Unlike the legacy
+ * ASCII scan, this follows the BPB/FAT chain and accepts only the root dirent
+ * named FSEXEC.ELF. */
+typedef struct {
+    const uint8_t *base;
+    uint32_t bytes;
+    uint32_t sector_bytes;
+    uint32_t cluster_bytes;
+    uint32_t fat_off;
+    uint32_t fat_bytes;
+    uint32_t data_off;
+    uint32_t cluster_limit;
+    uint32_t max_chain_hops;
+    uint32_t root_cluster;
+} X86_32Fat;
+
+static uint16_t x86_32_le16(const uint8_t *p)
+{ return (uint16_t)p[0] | ((uint16_t)p[1] << 8); }
+static uint32_t x86_32_le32(const uint8_t *p)
+{ return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+         ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+
+static int x86_32_fat_mount_image(X86_32Fat *fs, const uint8_t *image,
+                                  uint32_t bytes)
+{
+    uint32_t part_lba = 0, bpb_off = 0;
+    if (!image || bytes < 512U) return 0;
+    if (image[510] == 0x55 && image[511] == 0xAA && image[0] != 0xEB && image[0] != 0xE9)
+        part_lba = x86_32_le32(image + 446 + 8);
+    if (part_lba > bytes / 512U) return 0;
+    bpb_off = part_lba * 512U;
+    if (bpb_off > bytes || 512U > bytes - bpb_off) return 0;
+    const uint8_t *bpb = image + bpb_off;
+    uint32_t bps = x86_32_le16(bpb + 11);
+    uint32_t spc = bpb[13], reserved = x86_32_le16(bpb + 14), fats = bpb[16];
+    uint32_t fat_sectors = x86_32_le32(bpb + 36);
+    uint32_t root = x86_32_le32(bpb + 44);
+    if (bps != 512U || !spc || !reserved || !fats || !fat_sectors || root < 2U) return 0;
+    uint32_t total_sectors = x86_32_le16(bpb + 19);
+    if (!total_sectors) total_sectors = x86_32_le32(bpb + 32);
+    if (!total_sectors || spc > 128U || reserved > 0xFFFFFFFFU / bps ||
+        fat_sectors > 0xFFFFFFFFU / bps) return 0;
+    uint32_t reserved_bytes = reserved * bps;
+    uint32_t fat_bytes = fat_sectors * bps;
+    if (fats > 0xFFFFFFFFU / fat_bytes) return 0;
+    uint32_t all_fat_bytes = fats * fat_bytes;
+    if (bpb_off > bytes || reserved_bytes > bytes - bpb_off) return 0;
+    uint32_t fat_off = bpb_off + reserved_bytes;
+    if (all_fat_bytes > bytes - fat_off) return 0;
+    uint32_t data_off = fat_off + all_fat_bytes;
+    if (total_sectors > (bytes - bpb_off) / bps) return 0;
+    uint32_t volume_bytes = total_sectors * bps;
+    if (reserved_bytes > volume_bytes || all_fat_bytes > volume_bytes - reserved_bytes) return 0;
+    uint32_t data_bytes = volume_bytes - reserved_bytes - all_fat_bytes;
+    uint32_t cluster_bytes = spc * bps;
+    uint32_t data_clusters = data_bytes / cluster_bytes;
+    uint32_t fat_entries = fat_bytes / 4U;
+    uint32_t cluster_limit = data_clusters > 0xFFFFFFFDU ? 0xFFFFFFFFU : data_clusters + 2U;
+    if (cluster_limit > fat_entries) cluster_limit = fat_entries;
+    if (cluster_limit <= 2U || root >= cluster_limit || data_off >= bytes) return 0;
+    fs->base = image; fs->bytes = bytes; fs->sector_bytes = bps;
+    fs->cluster_bytes = cluster_bytes; fs->fat_off = fat_off;
+    fs->fat_bytes = fat_bytes; fs->data_off = data_off;
+    fs->cluster_limit = cluster_limit; fs->max_chain_hops = cluster_limit - 2U;
+    fs->root_cluster = root;
+    return 1;
+}
+
+static int x86_32_fat_mount(X86_32Fat *fs)
+{
+    if (x86_32_initrd_end <= x86_32_initrd_start) return 0;
+    const uint8_t *image = (const uint8_t *)(uintptr_t)x86_32_initrd_start;
+    uint32_t bytes = x86_32_initrd_end - x86_32_initrd_start;
+    return x86_32_fat_mount_image(fs, image, bytes);
+}
+
+static uint32_t x86_32_fat_next(const X86_32Fat *fs, uint32_t cluster)
+{
+    if (cluster < 2U || cluster >= fs->cluster_limit || cluster > 0xFFFFFFFFU / 4U)
+        return 0x0FFFFFFFU;
+    uint32_t entry_off = cluster * 4U;
+    if (entry_off > fs->fat_bytes || 4U > fs->fat_bytes - entry_off)
+        return 0x0FFFFFFFU;
+    uint32_t next = x86_32_le32(fs->base + fs->fat_off + entry_off) & 0x0FFFFFFFU;
+    if (next >= 0x0FFFFFF8U) return next;
+    if (next < 2U || next >= fs->cluster_limit || (next >= 0x0FFFFFF0U && next <= 0x0FFFFFF7U))
+        return 0x0FFFFFFFU;
+    return next;
+}
+
+static const uint8_t *x86_32_fat_cluster(const X86_32Fat *fs, uint32_t cluster)
+{
+    if (cluster < 2U || cluster >= fs->cluster_limit) return 0;
+    uint32_t index = cluster - 2U;
+    if (index > 0xFFFFFFFFU / fs->cluster_bytes) return 0;
+    uint32_t delta = index * fs->cluster_bytes;
+    if (delta > fs->bytes - fs->data_off) return 0;
+    uint32_t off = fs->data_off + delta;
+    if (off > fs->bytes || fs->cluster_bytes > fs->bytes - off) return 0;
+    return fs->base + off;
+}
+
+static int x86_32_fat_find_root(const X86_32Fat *fs, const char name[11],
+                                uint32_t *first, uint32_t *size)
+{
+    uint32_t cluster = fs->root_cluster;
+    for (uint32_t hop = 0; hop < fs->max_chain_hops && cluster < 0x0FFFFFF8U; ++hop) {
+        const uint8_t *dir = x86_32_fat_cluster(fs, cluster);
+        if (!dir) return 0;
+        for (uint32_t off = 0; off + 32U <= fs->cluster_bytes; off += 32U) {
+            const uint8_t *e = dir + off;
+            if (e[0] == 0) return 0;
+            if (e[0] == 0xE5 || e[11] == 0x0F || (e[11] & 0x18U)) continue;
+            uint32_t i = 0; while (i < 11U && e[i] == (uint8_t)name[i]) ++i;
+            if (i == 11U) {
+                *first = ((uint32_t)x86_32_le16(e + 20) << 16) | x86_32_le16(e + 26);
+                *size = x86_32_le32(e + 28);
+                return *first >= 2U && *first < fs->cluster_limit && *size > 0U;
+            }
+        }
+        cluster = x86_32_fat_next(fs, cluster);
+    }
+    return 0;
+}
+
+static int x86_32_fat_read(const X86_32Fat *fs, uint32_t first, uint32_t file_size,
+                           uint32_t offset, void *dst_value, uint32_t count)
+{
+    uint8_t *dst = (uint8_t *)dst_value;
+    if (!fs->cluster_bytes || offset > file_size || count > file_size - offset) return 0;
+    uint32_t cluster = first, skip = offset;
+    uint32_t hops = 0;
+    while (skip >= fs->cluster_bytes) {
+        if (hops++ >= fs->max_chain_hops) return 0;
+        cluster = x86_32_fat_next(fs, cluster); skip -= fs->cluster_bytes;
+        if (cluster >= 0x0FFFFFF8U) return 0;
+    }
+    if (skip >= fs->cluster_bytes) return 0;
+    while (count) {
+        if (hops++ >= fs->max_chain_hops) return 0;
+        const uint8_t *src = x86_32_fat_cluster(fs, cluster);
+        if (!src) return 0;
+        uint32_t n = fs->cluster_bytes - skip; if (n > count) n = count;
+        for (uint32_t i = 0; i < n; ++i) dst[i] = src[skip + i];
+        dst += n; count -= n; skip = 0;
+        if (count) { cluster = x86_32_fat_next(fs, cluster); if (cluster >= 0x0FFFFFF8U) return 0; }
+    }
+    return 1;
+}
+
+RuntimeValue rt_x86_32_fat_hostile_self_test(void)
+{
+    uint8_t image[4096];
+    for (uint32_t i = 0; i < sizeof(image); ++i) image[i] = 0;
+    image[11] = 0; image[12] = 2; image[13] = 1; image[14] = 1;
+    image[16] = 1; image[32] = 8; image[36] = 1; image[44] = 2;
+    X86_32Fat fs;
+    if (!x86_32_fat_mount_image(&fs, image, sizeof(image))) return 0;
+    /* A cyclic chain plus an offset beyond every data cluster used to exhaust
+     * the fixed skip loop and index beyond the selected cluster. */
+    image[512 + 8] = 2;
+    uint8_t canary[3] = {0xA5U, 0x5AU, 0xC3U};
+    if (x86_32_fat_read(&fs, 2U, 0xFFFFFFFFU, 0x40000001U, canary + 1, 1U)) return 0;
+    image[512 + 8] = 0xF7U; image[512 + 9] = 0xFFU;
+    image[512 + 10] = 0xFFU; image[512 + 11] = 0x0FU;
+    if (x86_32_fat_read(&fs, 2U, 1024U, 512U, canary + 1, 1U)) return 0;
+    image[512 + 8] = 0xF8U;
+    if (x86_32_fat_read(&fs, 2U, 1024U, 512U, canary + 1, 1U)) return 0;
+    if (x86_32_fat_read(&fs, fs.cluster_limit, 1U, 0U, canary + 1, 1U)) return 0;
+    if (canary[0] != 0xA5U || canary[1] != 0x5AU || canary[2] != 0xC3U) return 0;
+    /* A BPB whose FAT product exceeds the image must be rejected before any
+     * wrapped offset can become a trusted extent. */
+    image[16] = 255U; image[36] = 0xFFU; image[37] = 0xFFU;
+    image[38] = 0xFFU; image[39] = 0x7FU;
+    if (x86_32_fat_mount_image(&fs, image, sizeof(image))) return 0;
+    return 1;
+}
+
+/* The i386 QEMU lane owns a compact PAE address-space implementation.  It is
+ * architecture-equivalent to the common VMM owner: physical backing is
+ * allocated separately, mutable kernel heap aliases never cross into CPL3,
+ * and every user PTE is installed with an explicit W^X policy. */
+#define X86_32_PAGE_SIZE 4096U
+#define X86_32_USER_BASE 0x40000000U
+#define X86_32_USER_LIMIT 0x50000000U
+#define X86_32_USER_STACK_BASE 0x4FFF0000U
+#define X86_32_PAE_P 0x001ULL
+#define X86_32_PAE_W 0x002ULL
+#define X86_32_PAE_U 0x004ULL
+#define X86_32_PAE_PS 0x080ULL
+#define X86_32_PAE_NX (1ULL << 63)
+#define X86_32_USER_PAGE_COUNT 96U
+#define X86_32_PT_COUNT 8U
+
+static uint64_t x86_32_pdpt[4] __attribute__((aligned(32)));
+static uint64_t x86_32_pd[4][512] __attribute__((aligned(4096)));
+static uint64_t x86_32_pt[X86_32_PT_COUNT][512] __attribute__((aligned(4096)));
+static uint8_t x86_32_user_pages[X86_32_USER_PAGE_COUNT][X86_32_PAGE_SIZE]
+    __attribute__((aligned(4096)));
+static uint32_t x86_32_user_page_used;
+static uint32_t x86_32_pt_used;
+static uint32_t x86_32_user_cr3;
+static uint32_t x86_32_loaded_entry;
+static uint32_t x86_32_expected_fault_vector;
+static uint32_t x86_32_expected_fault_eip;
+
+static void x86_32_zero(void *ptr, uint32_t bytes)
+{
+    uint8_t *p = (uint8_t *)ptr;
+    for (uint32_t i = 0; i < bytes; ++i) p[i] = 0;
+}
+
+static uint64_t *x86_32_user_pte(uint32_t va, int create)
+{
+    uint32_t pdpti = va >> 30;
+    uint32_t pdi = (va >> 21) & 0x1FFU;
+    uint32_t pti = (va >> 12) & 0x1FFU;
+    uint64_t pde = x86_32_pd[pdpti][pdi];
+    uint64_t *pt;
+    if (!(pde & X86_32_PAE_P)) {
+        if (!create || x86_32_pt_used >= X86_32_PT_COUNT) return 0;
+        pt = x86_32_pt[x86_32_pt_used++];
+        x86_32_zero(pt, X86_32_PAGE_SIZE);
+        x86_32_pd[pdpti][pdi] = ((uint32_t)(uintptr_t)pt & ~0xFFFU) |
+                                X86_32_PAE_P | X86_32_PAE_W | X86_32_PAE_U;
+    } else {
+        if (pde & X86_32_PAE_PS) return 0;
+        pt = (uint64_t *)(uintptr_t)((uint32_t)pde & ~0xFFFU);
+    }
+    return &pt[pti];
+}
+
+static int x86_32_map_user_page(uint32_t va, int writable, int executable,
+                                uint8_t **kernel_alias)
+{
+    if ((va & 0xFFFU) || va < X86_32_USER_BASE || va >= X86_32_USER_LIMIT ||
+        (writable && executable) || x86_32_user_page_used >= X86_32_USER_PAGE_COUNT)
+        return 0;
+    uint64_t *pte = x86_32_user_pte(va, 1);
+    if (!pte || (*pte & X86_32_PAE_P)) return 0;
+    uint8_t *page = x86_32_user_pages[x86_32_user_page_used++];
+    x86_32_zero(page, X86_32_PAGE_SIZE);
+    uint64_t flags = X86_32_PAE_P | X86_32_PAE_U;
+    if (writable) flags |= X86_32_PAE_W;
+    if (!executable) flags |= X86_32_PAE_NX;
+    *pte = ((uint32_t)(uintptr_t)page & ~0xFFFU) | flags;
+    *kernel_alias = page;
+    return 1;
+}
+
+static int x86_32_prepare_user_address_space(void)
+{
+    x86_32_zero(x86_32_pdpt, sizeof(x86_32_pdpt));
+    x86_32_zero(x86_32_pd, sizeof(x86_32_pd));
+    x86_32_zero(x86_32_pt, sizeof(x86_32_pt));
+    x86_32_user_page_used = 0;
+    x86_32_pt_used = 0;
+    for (uint32_t i = 0; i < 4U; ++i)
+        x86_32_pdpt[i] = ((uint32_t)(uintptr_t)x86_32_pd[i] & ~0xFFFU) | X86_32_PAE_P;
+    /* Map the complete kernel/static owner aperture supervisor-only.  Large
+     * pages are used only for the kernel identity map; no user bit appears. */
+    extern uint8_t _kernel_end;
+    uint32_t kernel_end = ((uint32_t)(uintptr_t)&_kernel_end + 0x1FFFFFU) & ~0x1FFFFFU;
+    for (uint32_t pa = 0; pa < kernel_end; pa += 0x200000U)
+        x86_32_pd[pa >> 30][(pa >> 21) & 0x1FFU] =
+            (uint64_t)pa | X86_32_PAE_P | X86_32_PAE_W | X86_32_PAE_PS;
+    x86_32_user_cr3 = (uint32_t)(uintptr_t)x86_32_pdpt;
+    return (x86_32_user_cr3 & 31U) == 0U;
+}
+
+static int x86_32_enable_pae_nx(void)
+{
+    uint32_t eax, edx;
+    __asm__ volatile("mov $0x80000001,%%eax; cpuid" : "=d"(edx) : : "eax", "ebx", "ecx");
+    if (!(edx & (1U << 20))) return 0;
+    __asm__ volatile("mov $0xC0000080,%%ecx; rdmsr; or $0x800,%%eax; wrmsr"
+                     : "=a"(eax), "=d"(edx) : : "ecx", "memory");
+    /* PAE supplies the 64-bit entries/NX bit; PSE is also required because
+     * the supervisor identity aperture deliberately uses 2 MiB PDEs. */
+    __asm__ volatile("mov %%cr4,%%eax; or $0x30,%%eax; mov %%eax,%%cr4"
+                     : : : "eax", "memory");
+    __asm__ volatile("mov %0,%%cr3; mov %%cr0,%%eax; or $0x80000000,%%eax; mov %%eax,%%cr0"
+                     : : "r"(x86_32_user_cr3) : "eax", "memory");
+    return 1;
+}
+
+static int x86_32_fat_find_child(const X86_32Fat *fs, uint32_t dir_cluster,
+                                 const char name[11], uint8_t required_attr,
+                                 uint32_t *first, uint32_t *size)
+{
+    uint32_t cluster = dir_cluster;
+    for (uint32_t hop = 0; hop < fs->max_chain_hops && cluster < 0x0FFFFFF8U; ++hop) {
+        const uint8_t *dir = x86_32_fat_cluster(fs, cluster);
+        if (!dir) return 0;
+        for (uint32_t off = 0; off + 32U <= fs->cluster_bytes; off += 32U) {
+            const uint8_t *e = dir + off;
+            if (e[0] == 0) return 0;
+            if (e[0] == 0xE5 || e[11] == 0x0F || (e[11] & 0x08U)) continue;
+            uint32_t i = 0; while (i < 11U && e[i] == (uint8_t)name[i]) ++i;
+            if (i == 11U && (!required_attr || (e[11] & required_attr))) {
+                *first = ((uint32_t)x86_32_le16(e + 20) << 16) | x86_32_le16(e + 26);
+                *size = x86_32_le32(e + 28);
+                return *first >= 2U && *first < fs->cluster_limit;
+            }
+        }
+        cluster = x86_32_fat_next(fs, cluster);
+    }
+    return 0;
+}
+
+RuntimeValue rt_x86_32_fs_list_apps(void)
+{
+    X86_32Fat fs; uint32_t sys, apps, ignored;
+    static const char sys_name[11] = {'S','Y','S',' ',' ',' ',' ',' ',' ',' ',' '};
+    static const char apps_name[11] = {'A','P','P','S',' ',' ',' ',' ',' ',' ',' '};
+    if (!x86_32_fat_mount(&fs) ||
+        !x86_32_fat_find_child(&fs, fs.root_cluster, sys_name, 0x10U, &sys, &ignored) ||
+        !x86_32_fat_find_child(&fs, sys, apps_name, 0x10U, &apps, &ignored)) return 0;
+    serial_puts("FS_LS_BEGIN path=/SYS/APPS\r\n");
+    uint32_t count = 0, cluster = apps;
+    for (uint32_t hop = 0; hop < fs.max_chain_hops && cluster < 0x0FFFFFF8U; ++hop) {
+        const uint8_t *dir = x86_32_fat_cluster(&fs, cluster);
+        if (!dir) return 0;
+        for (uint32_t off = 0; off + 32U <= fs.cluster_bytes; off += 32U) {
+            const uint8_t *e = dir + off;
+            if (e[0] == 0) { cluster = 0x0FFFFFFFU; break; }
+            if (e[0] == 0xE5 || e[11] == 0x0F || (e[11] & 0x18U)) continue;
+            serial_puts("FS_LS_ENTRY name=");
+            for (uint32_t i = 0; i < 8U && e[i] != ' '; ++i) serial_putchar((char)e[i]);
+            if (e[8] != ' ') { serial_putchar('.'); for (uint32_t i = 8; i < 11U && e[i] != ' '; ++i) serial_putchar((char)e[i]); }
+            serial_puts("\r\n"); count++;
+        }
+        if (cluster < 0x0FFFFFF8U) cluster = x86_32_fat_next(&fs, cluster);
+    }
+    serial_puts("FS_LS_END status=pass\r\n");
+    return count ? 1 : 0;
+}
+
+static uint32_t x86_32_fs_exec_status;
+RuntimeValue rt_x86_32_fs_exec_status(void) { return x86_32_fs_exec_status; }
+
+static int x86_32_elf_header_valid(const uint8_t eh[52])
+{
+    return eh[0] == 0x7F && eh[1] == 'E' && eh[2] == 'L' && eh[3] == 'F' &&
+           eh[4] == 1 && eh[5] == 1 && eh[6] == 1 && x86_32_le16(eh + 16) == 2 &&
+           x86_32_le16(eh + 18) == 3 && x86_32_le32(eh + 20) == 1U &&
+           x86_32_le16(eh + 40) == 52U;
+}
+
+static int x86_32_load_shape_valid(uint32_t off, uint32_t va, uint32_t filesz,
+                                   uint32_t memsz, uint32_t flags, uint32_t align,
+                                   uint32_t file_size)
+{
+    if ((flags & 2U) && (flags & 1U)) return 0;
+    if (align > X86_32_PAGE_SIZE || (align > 1U && (align & (align - 1U))) ||
+        (align > 1U && (va & (align - 1U)) != (off & (align - 1U)))) return 0;
+    return va >= X86_32_USER_BASE && va < X86_32_USER_STACK_BASE && memsz &&
+           memsz >= filesz && memsz <= 0x200000U &&
+           va <= X86_32_USER_STACK_BASE - memsz && off <= file_size &&
+           filesz <= file_size - off;
+}
+
+RuntimeValue rt_x86_32_elf_policy_self_test(void)
+{
+    uint8_t eh[52]; x86_32_zero(eh, sizeof(eh));
+    eh[0] = 0x7F; eh[1] = 'E'; eh[2] = 'L'; eh[3] = 'F'; eh[4] = 1; eh[5] = 1; eh[6] = 1;
+    eh[16] = 2; eh[18] = 3; eh[20] = 1; eh[40] = 52;
+    if (!x86_32_elf_header_valid(eh)) return 0;
+    eh[16] = 3; if (x86_32_elf_header_valid(eh)) return 0; eh[16] = 2;
+    eh[6] = 0; if (x86_32_elf_header_valid(eh)) return 0; eh[6] = 1;
+    eh[20] = 0; if (x86_32_elf_header_valid(eh)) return 0; eh[20] = 1;
+    eh[40] = 51; if (x86_32_elf_header_valid(eh)) return 0;
+    if (!x86_32_load_shape_valid(0x1000U, X86_32_USER_BASE, 16U, 32U, 5U,
+                                 0x1000U, 0x4000U)) return 0;
+    if (x86_32_load_shape_valid(0x1000U, X86_32_USER_BASE, 16U, 32U, 7U,
+                                0x1000U, 0x4000U)) return 0;
+    if (x86_32_load_shape_valid(0x1001U, X86_32_USER_BASE, 16U, 32U, 5U,
+                                0x1000U, 0x4000U)) return 0;
+    if (x86_32_load_shape_valid(0x3FF8U, X86_32_USER_BASE, 16U, 32U, 5U,
+                                1U, 0x4000U)) return 0;
+    return 1;
+}
+RuntimeValue rt_x86_32_fs_exec_status_report(void)
+{
+    serial_puts("FS_PROGRAM_LOAD_FAIL status=");
+    serial_put_dec((int32_t)x86_32_fs_exec_status);
+    serial_puts("\r\n");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_x86_32_fs_exec_load(void)
+{
+    X86_32Fat fs; uint32_t first, size; uint8_t eh[52];
+    static const char name[11] = {'F','S','E','X','E','C',' ',' ','E','L','F'};
+    x86_32_fs_exec_status = 1;
+    if (!x86_32_fat_mount(&fs)) return 0;
+    x86_32_fs_exec_status = 2;
+    if (!x86_32_fat_find_root(&fs, name, &first, &size)) return 0;
+    x86_32_fs_exec_status = 3;
+    if (!x86_32_fat_read(&fs, first, size, 0, eh, sizeof(eh))) return 0;
+    x86_32_fs_exec_status = 4;
+    if (!x86_32_elf_header_valid(eh)) return 0;
+    uint32_t phoff = x86_32_le32(eh + 28); uint16_t phentsz = x86_32_le16(eh + 42);
+    uint16_t phnum = x86_32_le16(eh + 44); uint32_t entry = x86_32_le32(eh + 24);
+    x86_32_fs_exec_status = 5;
+    if (phentsz != 32U) { x86_32_fs_exec_status = 51; return 0; }
+    if (!phnum || phnum > 16U) { x86_32_fs_exec_status = 52; return 0; }
+    if (phoff > size || (uint32_t)phnum > (size - phoff) / 32U) {
+        x86_32_fs_exec_status = 53; return 0;
+    }
+    if (entry < X86_32_USER_BASE || entry >= X86_32_USER_LIMIT) {
+        x86_32_fs_exec_status = 54; return 0;
+    }
+    uint32_t load_first[16], load_last[16];
+    uint32_t load_count = 0;
+    /* Validate the complete load plan before allocating a single page. */
+    for (uint16_t i = 0; i < phnum; ++i) {
+        uint8_t ph[32];
+        if (!x86_32_fat_read(&fs, first, size, phoff + (uint32_t)i * 32U, ph, 32U)) {
+            x86_32_fs_exec_status = 57; return 0;
+        }
+        if (x86_32_le32(ph) != 1U) continue;
+        if (load_count >= 16U) { x86_32_fs_exec_status = 58; return 0; }
+        uint32_t off = x86_32_le32(ph + 4), va = x86_32_le32(ph + 8);
+        uint32_t filesz = x86_32_le32(ph + 16), memsz = x86_32_le32(ph + 20);
+        uint32_t flags = x86_32_le32(ph + 24), align = x86_32_le32(ph + 28);
+        if (!x86_32_load_shape_valid(off, va, filesz, memsz, flags, align, size)) {
+            x86_32_fs_exec_status = 61; return 0;
+        }
+        uint32_t page_first = va & ~0xFFFU;
+        uint32_t page_last = (va + memsz + 0xFFFU) & ~0xFFFU;
+        if (page_last <= page_first) { x86_32_fs_exec_status = 62; return 0; }
+        for (uint32_t j = 0; j < load_count; ++j) {
+            if (page_first < load_last[j] && load_first[j] < page_last) {
+                x86_32_fs_exec_status = 63; return 0;
+            }
+        }
+        load_first[load_count] = page_first;
+        load_last[load_count] = page_last;
+        load_count++;
+    }
+    if (!load_count) { x86_32_fs_exec_status = 64; return 0; }
+    if (!x86_32_prepare_user_address_space()) { x86_32_fs_exec_status = 55; return 0; }
+    int entry_executable = 0;
+    for (uint16_t i = 0; i < phnum; ++i) {
+        uint8_t ph[32];
+        x86_32_fs_exec_status = 6;
+        if (!x86_32_fat_read(&fs, first, size, phoff + (uint32_t)i * 32U, ph, 32U)) return 0;
+        if (x86_32_le32(ph) != 1U) continue;
+        uint32_t off = x86_32_le32(ph + 4), va = x86_32_le32(ph + 8);
+        uint32_t filesz = x86_32_le32(ph + 16), memsz = x86_32_le32(ph + 20);
+        uint32_t flags = x86_32_le32(ph + 24);
+        int writable = (flags & 2U) != 0, executable = (flags & 1U) != 0;
+        if (writable && executable) { x86_32_fs_exec_status = 8; return 0; }
+        if (va < X86_32_USER_BASE || va >= X86_32_USER_STACK_BASE || memsz < filesz ||
+            memsz == 0 || memsz > 0x200000U || va + memsz < va ||
+            va + memsz > X86_32_USER_STACK_BASE || off > size || filesz > size - off)
+            return 0;
+        uint32_t first_page = va & ~0xFFFU;
+        uint32_t last_page = (va + memsz + 0xFFFU) & ~0xFFFU;
+        for (uint32_t page_va = first_page; page_va < last_page; page_va += X86_32_PAGE_SIZE) {
+            uint8_t *alias;
+            if (!x86_32_map_user_page(page_va, writable, executable, &alias)) return 0;
+            uint32_t copy_begin = page_va > va ? page_va : va;
+            uint32_t copy_end = page_va + X86_32_PAGE_SIZE;
+            if (copy_end > va + filesz) copy_end = va + filesz;
+            if (copy_end > copy_begin &&
+                !x86_32_fat_read(&fs, first, size, off + copy_begin - va,
+                                  alias + copy_begin - page_va, copy_end - copy_begin)) return 0;
+        }
+        if (executable && entry >= va && entry < va + memsz) entry_executable = 1;
+    }
+    if (!entry_executable) { x86_32_fs_exec_status = 9; return 0; }
+    for (uint32_t va = X86_32_USER_STACK_BASE; va < X86_32_USER_STACK_BASE + 0x4000U; va += 0x1000U) {
+        uint8_t *alias;
+        if (!x86_32_map_user_page(va, 1, 0, &alias)) return 0;
+    }
+    /* The Multiboot module is bootloader-owned physical memory outside the
+     * kernel aperture. Finish every FAT read before enabling the restricted
+     * address space; afterward only dedicated user frames remain reachable. */
+    if (!x86_32_enable_pae_nx()) { x86_32_fs_exec_status = 56; return 0; }
+    x86_32_loaded_entry = entry;
+    x86_32_fs_exec_status = 100;
+    return (RuntimeValue)entry;
+}
+
+RuntimeValue rt_x86_32_user_stack_top(void)
+{
+    return (RuntimeValue)(X86_32_USER_STACK_BASE + 0x4000U - 16U);
+}
+
+RuntimeValue rt_x86_32_security_contract(void)
+{
+    uint64_t kernel_pde = x86_32_pd[0][0];
+    uint64_t *entry_pte = x86_32_user_pte(x86_32_loaded_entry & ~0xFFFU, 0);
+    uint64_t *stack_pte = x86_32_user_pte(X86_32_USER_STACK_BASE, 0);
+    if (!entry_pte || !stack_pte || (kernel_pde & X86_32_PAE_U) ||
+        !(*entry_pte & X86_32_PAE_U) || (*entry_pte & X86_32_PAE_W) ||
+        (*entry_pte & X86_32_PAE_NX) || !(*stack_pte & X86_32_PAE_U) ||
+        !(*stack_pte & X86_32_PAE_W) || !(*stack_pte & X86_32_PAE_NX)) return 0;
+    return 1;
+}
+
+RuntimeValue rt_x86_32_fault_probe_entry(RuntimeValue kind)
+{
+    if ((uint32_t)kind == 13U) {
+        const uint32_t va = 0x4FFE0000U;
+        uint8_t *alias;
+        uint64_t *pte = x86_32_user_pte(va, 0);
+        if (!pte || !(*pte & X86_32_PAE_P)) {
+            if (!x86_32_map_user_page(va, 0, 1, &alias)) return 0;
+        } else {
+            alias = (uint8_t *)(uintptr_t)((uint32_t)*pte & ~0xFFFU);
+        }
+        alias[0] = 0xFA; /* cli: privileged at CPL3, deterministically #GP(0). */
+        alias[1] = 0xF4;
+        __asm__ volatile("invlpg (%0)" : : "r"(va) : "memory");
+        x86_32_expected_fault_vector = 13U;
+        x86_32_expected_fault_eip = va;
+        return va;
+    }
+    if ((uint32_t)kind == 14U) {
+        /* Executing the already-present RW+NX stack page must raise #PF with
+         * the instruction-fetch bit, proving hardware—not metadata—W^X. */
+        uint64_t *pte = x86_32_user_pte(X86_32_USER_STACK_BASE, 0);
+        if (!pte || !(*pte & X86_32_PAE_P)) return 0;
+        uint8_t *alias = (uint8_t *)(uintptr_t)((uint32_t)*pte & ~0xFFFU);
+        alias[0] = 0xF4;
+        x86_32_expected_fault_vector = 14U;
+        x86_32_expected_fault_eip = X86_32_USER_STACK_BASE;
+        return X86_32_USER_STACK_BASE;
+    }
+    return 0;
+}
+
 void _start(uint32_t multiboot_magic, uint32_t multiboot_info)
 {
     x86_32_capture_multiboot_modules(multiboot_magic, multiboot_info);
@@ -1290,6 +1825,83 @@ extern int32_t os__kernel__arch__x86_32__early_syscall__x86_32_dispatch_installe
 static X86_32IdtEntry x86_32_probe_idt[256] __attribute__((aligned(8)));
 static X86_32IdtPointer x86_32_probe_idtr;
 
+/* Authenticated, single-consumer scheduler handoff.  The identity tuple is
+ * scalar-only so the trap path never retains a mutable Task/Context alias. */
+static uint32_t x86_32_exec_task;
+static uint32_t x86_32_exec_generation;
+static uint32_t x86_32_exec_cr3;
+static uint32_t x86_32_result_task;
+static uint32_t x86_32_result_generation;
+static uint32_t x86_32_result_cr3;
+static int32_t x86_32_result_rc;
+static uint8_t x86_32_exec_active;
+static uint8_t x86_32_result_valid;
+
+extern void rt_x86_32_ring3_resume(int32_t rc) __attribute__((noreturn));
+extern int32_t rt_x86_32_ring3_resume_valid(void);
+
+static uint32_t x86_32_current_cr3(void)
+{
+    uint32_t cr3;
+    __asm__ volatile("mov %%cr3,%0" : "=r"(cr3));
+    /* Legacy PAE uses a 32-byte-aligned PDPT. Bits 11:5 are address bits,
+     * unlike non-PAE CR3; clearing a full page silently retargets the PDPT. */
+    return cr3 & ~0x1FU;
+}
+
+uint32_t rt_x86_32_current_cr3(void)
+{
+    uint32_t active = x86_32_current_cr3();
+    return active ? active : x86_32_user_cr3;
+}
+
+int32_t rt_x86_32_exec_token_install(uint32_t task, uint32_t generation,
+                                     uint32_t expected_cr3)
+{
+    expected_cr3 &= ~0x1FU;
+    if (x86_32_exec_active || x86_32_result_valid || !task || !generation ||
+        !expected_cr3 || expected_cr3 != x86_32_user_cr3 ||
+        x86_32_current_cr3() != expected_cr3) return 0;
+    x86_32_exec_task = task;
+    x86_32_exec_generation = generation;
+    x86_32_exec_cr3 = expected_cr3;
+    x86_32_exec_active = 1;
+    return 1;
+}
+
+int32_t rt_x86_32_exec_token_cancel(uint32_t task, uint32_t generation,
+                                    uint32_t expected_cr3)
+{
+    if (!x86_32_exec_active || task != x86_32_exec_task ||
+        generation != x86_32_exec_generation ||
+        (expected_cr3 & ~0x1FU) != x86_32_exec_cr3) return 0;
+    x86_32_exec_active = 0;
+    return 1;
+}
+
+int32_t rt_x86_32_exec_token_take_result(uint32_t task, uint32_t generation,
+                                         uint32_t expected_cr3)
+{
+    if (!x86_32_result_valid || task != x86_32_result_task ||
+        generation != x86_32_result_generation ||
+        (expected_cr3 & ~0x1FU) != x86_32_result_cr3) return -4096;
+    x86_32_result_valid = 0;
+    return x86_32_result_rc;
+}
+
+static int x86_32_complete_authenticated_exit(int32_t rc)
+{
+    if (!x86_32_exec_active || x86_32_current_cr3() != x86_32_exec_cr3 ||
+        !rt_x86_32_ring3_resume_valid()) return 0;
+    x86_32_result_task = x86_32_exec_task;
+    x86_32_result_generation = x86_32_exec_generation;
+    x86_32_result_cr3 = x86_32_exec_cr3;
+    x86_32_result_rc = rc;
+    x86_32_result_valid = 1;
+    x86_32_exec_active = 0;
+    rt_x86_32_ring3_resume(rc);
+}
+
 int32_t simpleos_x86_32_dispatch_int80_probe(
     uint32_t id,
     uint32_t arg0,
@@ -1300,6 +1912,13 @@ int32_t simpleos_x86_32_dispatch_int80_probe(
     uint32_t arg5
 )
 {
+    if (id == 0U && x86_32_complete_authenticated_exit((int32_t)arg0)) {
+        __builtin_unreachable();
+    }
+    if (id == 60U && x86_32_exec_active && x86_32_current_cr3() == x86_32_exec_cr3) {
+        serial_putchar((char)(arg0 & 0xFFU));
+        return 0;
+    }
     if (os__kernel__arch__x86_32__early_syscall__x86_32_dispatch_installed_syscall_abi) {
         return os__kernel__arch__x86_32__early_syscall__x86_32_dispatch_installed_syscall_abi(
             id, arg0, arg1, arg2, arg3, arg4, arg5
@@ -1340,18 +1959,144 @@ __attribute__((naked)) void x86_32_int80_probe_handler(void)
     );
 }
 
+__attribute__((used, noinline)) void x86_32_privilege_fault(
+    uint32_t vector, uint32_t error, uint32_t eip, uint32_t cs, uint32_t cr2)
+{
+    int exact_gp = vector == 13U && error == 0U &&
+                   x86_32_expected_fault_vector == 13U && eip == x86_32_expected_fault_eip;
+    int exact_pf = vector == 14U && error == 0x15U &&
+                   x86_32_expected_fault_vector == 14U && eip == x86_32_expected_fault_eip &&
+                   cr2 == X86_32_USER_STACK_BASE;
+    if ((exact_gp || exact_pf) && (cs & 3U) == 3U && x86_32_exec_active &&
+        x86_32_current_cr3() == x86_32_exec_cr3 && rt_x86_32_ring3_resume_valid()) {
+        serial_puts(vector == 13U ? "X86_32_PRIVILEGE_FAULT vector=GP eip=" :
+                                   "X86_32_PRIVILEGE_FAULT vector=PF eip=");
+        serial_put_hex(eip);
+        if (vector == 14U) { serial_puts(" cr2="); serial_put_hex(cr2); }
+        serial_puts(" error="); serial_put_hex(error); serial_puts("\r\n");
+        x86_32_expected_fault_vector = 0;
+        x86_32_expected_fault_eip = 0;
+        x86_32_complete_authenticated_exit(-(int32_t)vector);
+        __builtin_unreachable();
+    }
+    serial_puts("X86_32_KERNEL_FAULT_FATAL\r\n");
+    for (;;) __asm__ volatile("cli; hlt");
+}
+
+__attribute__((naked)) void x86_32_gp_handler(void)
+{
+    __asm__ volatile(
+        "pusha\n\t"
+        "movl 32(%esp), %ebx\n\t"
+        "movl 36(%esp), %ecx\n\t"
+        "movl 40(%esp), %edx\n\t"
+        "pushl $0\n\tpushl %edx\n\tpushl %ecx\n\tpushl %ebx\n\tpushl $13\n\t"
+        "call x86_32_privilege_fault\n\t"
+        "ud2\n\t"
+    );
+}
+
+__attribute__((naked)) void x86_32_pf_handler(void)
+{
+    __asm__ volatile(
+        "pusha\n\t"
+        "movl %cr2, %eax\n\t"
+        "movl 32(%esp), %ebx\n\t"
+        "movl 36(%esp), %ecx\n\t"
+        "movl 40(%esp), %edx\n\t"
+        "pushl %eax\n\tpushl %edx\n\tpushl %ecx\n\tpushl %ebx\n\tpushl $14\n\t"
+        "call x86_32_privilege_fault\n\t"
+        "ud2\n\t"
+    );
+}
+
+static void x86_32_idt_set(uint32_t vector, void (*handler)(void), uint8_t attr)
+{
+    uint32_t address = (uint32_t)(uintptr_t)handler;
+    x86_32_probe_idt[vector].offset_low = (uint16_t)address;
+    x86_32_probe_idt[vector].selector = 0x08U;
+    x86_32_probe_idt[vector].zero = 0;
+    x86_32_probe_idt[vector].type_attr = attr;
+    x86_32_probe_idt[vector].offset_high = (uint16_t)(address >> 16);
+}
+
 RuntimeValue rt_x86_32_install_int80_probe(void)
 {
-    uint32_t handler = (uint32_t)(uintptr_t)x86_32_int80_probe_handler;
-    x86_32_probe_idt[0x80].offset_low = (uint16_t)(handler & 0xFFFFU);
-    x86_32_probe_idt[0x80].selector = 0x08U;
-    x86_32_probe_idt[0x80].zero = 0;
-    x86_32_probe_idt[0x80].type_attr = 0xEEU;
-    x86_32_probe_idt[0x80].offset_high = (uint16_t)((handler >> 16) & 0xFFFFU);
+    x86_32_zero(x86_32_probe_idt, sizeof(x86_32_probe_idt));
+    x86_32_idt_set(13U, x86_32_gp_handler, 0x8EU);
+    x86_32_idt_set(14U, x86_32_pf_handler, 0x8EU);
+    x86_32_idt_set(0x80U, x86_32_int80_probe_handler, 0xEEU);
     x86_32_probe_idtr.limit = (uint16_t)(sizeof(x86_32_probe_idt) - 1U);
     x86_32_probe_idtr.base = (uint32_t)(uintptr_t)x86_32_probe_idt;
     __asm__ volatile("lidt (%0)" : : "r"(&x86_32_probe_idtr) : "memory");
     return (RuntimeValue)1;
+}
+
+/* 32-bit protected-mode GDT and TSS.  esp0 is refreshed at every scheduler
+ * handoff; the CPU uses it for CPL3 -> CPL0 int 0x80 and fault transitions. */
+typedef struct __attribute__((packed)) {
+    uint16_t prev, _pad0;
+    uint32_t esp0;
+    uint16_t ss0, _pad1;
+    uint32_t esp1;
+    uint16_t ss1, _pad2;
+    uint32_t esp2;
+    uint16_t ss2, _pad3;
+    uint32_t cr3, eip, eflags, eax, ecx, edx, ebx, esp, ebp, esi, edi;
+    uint16_t es, _p4, cs, _p5, ss, _p6, ds, _p7, fs, _p8, gs, _p9;
+    uint16_t ldt, _p10, trap, iomap;
+} X86_32Tss;
+
+static uint64_t x86_32_gdt[6] __attribute__((aligned(8)));
+static X86_32Tss x86_32_tss __attribute__((aligned(16)));
+static uint8_t x86_32_ring0_stack[8192] __attribute__((aligned(16)));
+
+static uint64_t x86_32_segment(uint32_t base, uint32_t limit,
+                               uint8_t access, uint8_t flags)
+{
+    return (uint64_t)(limit & 0xFFFFU) |
+           ((uint64_t)(base & 0xFFFFFFU) << 16) |
+           ((uint64_t)access << 40) |
+           ((uint64_t)((limit >> 16) & 0xFU) << 48) |
+           ((uint64_t)(flags & 0xFU) << 52) |
+           ((uint64_t)(base >> 24) << 56);
+}
+
+int32_t rt_x86_32_tss_set_esp0(uint32_t esp0)
+{
+    if (!esp0) return 0;
+    x86_32_tss.esp0 = esp0;
+    return 1;
+}
+
+int32_t rt_x86_32_tss_init(void)
+{
+    struct __attribute__((packed)) { uint16_t limit; uint32_t base; } gdtr;
+    uint32_t tss_base = (uint32_t)(uintptr_t)&x86_32_tss;
+    uint32_t tss_limit = sizeof(x86_32_tss) - 1U;
+    for (uint32_t i = 0; i < sizeof(x86_32_tss); ++i)
+        ((volatile uint8_t *)&x86_32_tss)[i] = 0;
+    x86_32_tss.ss0 = 0x10U;
+    x86_32_tss.esp0 = (uint32_t)(uintptr_t)(x86_32_ring0_stack + sizeof(x86_32_ring0_stack));
+    x86_32_tss.iomap = sizeof(x86_32_tss);
+    x86_32_gdt[0] = 0;
+    x86_32_gdt[1] = x86_32_segment(0, 0xFFFFFU, 0x9AU, 0xCU);
+    x86_32_gdt[2] = x86_32_segment(0, 0xFFFFFU, 0x92U, 0xCU);
+    x86_32_gdt[3] = x86_32_segment(0, 0xFFFFFU, 0xFAU, 0xCU);
+    x86_32_gdt[4] = x86_32_segment(0, 0xFFFFFU, 0xF2U, 0xCU);
+    x86_32_gdt[5] = x86_32_segment(tss_base, tss_limit, 0x89U, 0);
+    gdtr.limit = sizeof(x86_32_gdt) - 1U;
+    gdtr.base = (uint32_t)(uintptr_t)x86_32_gdt;
+    __asm__ volatile("lgdt %0\n\t"
+                     "movw $0x10, %%ax\n\t"
+                     "movw %%ax, %%ds\n\t"
+                     "movw %%ax, %%es\n\t"
+                     "movw %%ax, %%ss\n\t"
+                     "ljmp $0x08, $1f\n\t1:\n\t"
+                     "movw $0x28, %%ax\n\t"
+                     "ltr %%ax"
+                     : : "m"(gdtr) : "eax", "memory");
+    return 1;
 }
 
 RuntimeValue rt_x86_32_trigger_int80(
@@ -1572,24 +2317,97 @@ typedef struct {
     uint32_t fpu_state;
 } X86_32SavedContext;
 
-RuntimeValue rt_x86_32_context_switch(RuntimeValue from_ptr_val, RuntimeValue to_ptr_val)
+__attribute__((naked)) RuntimeValue
+rt_x86_32_context_switch(RuntimeValue from_ptr_val, RuntimeValue to_ptr_val)
 {
-    X86_32SavedContext *from = (X86_32SavedContext *)(uintptr_t)(uint32_t)from_ptr_val;
-    X86_32SavedContext *to = (X86_32SavedContext *)(uintptr_t)(uint32_t)to_ptr_val;
-    if (from) {
-        from->eax = 0;
-        from->ebx = 0;
-        from->ecx = 0;
-        from->edx = 0;
-        from->esi = 0;
-        from->edi = 0;
-        from->ebp = (uint32_t)(uintptr_t)&from;
-        from->esp = (uint32_t)(uintptr_t)&from;
-        from->eip = (uint32_t)(uintptr_t)__builtin_return_address(0);
-        from->eflags = 0x202U;
-    }
-    (void)to;
-    return NIL_VALUE;
+    __asm__ volatile(
+        /* Snapshot before using any GPR as a pointer.  After pushfl/pusha:
+         * edi..eax are at 0..28, eflags at 32, return/from/to at 36/40/44. */
+        "pushfl\n\t"
+        "pusha\n\t"
+        "movl 40(%esp), %eax\n\t"
+        "testl %eax, %eax\n\t"
+        "jz 1f\n\t"
+        "movl 28(%esp), %edx\n\tmovl %edx, 0(%eax)\n\t"
+        "movl 16(%esp), %edx\n\tmovl %edx, 4(%eax)\n\t"
+        "movl 24(%esp), %edx\n\tmovl %edx, 8(%eax)\n\t"
+        "movl 20(%esp), %edx\n\tmovl %edx, 12(%eax)\n\t"
+        "movl 4(%esp), %edx\n\tmovl %edx, 16(%eax)\n\t"
+        "movl 0(%esp), %edx\n\tmovl %edx, 20(%eax)\n\t"
+        "movl 8(%esp), %edx\n\tmovl %edx, 24(%eax)\n\t"
+        "movl 12(%esp), %edx\n\taddl $8, %edx\n\tmovl %edx, 28(%eax)\n\t"
+        "movl 36(%esp), %edx\n\tmovl %edx, 32(%eax)\n\t"
+        "movl 32(%esp), %edx\n\tmovl %edx, 36(%eax)\n\t"
+        "movw %cs, %dx\n\tmovzwl %dx, %edx\n\tmovl %edx, 40(%eax)\n\t"
+        "movw %ss, %dx\n\tmovzwl %dx, %edx\n\tmovl %edx, 44(%eax)\n\t"
+        "movw %ds, %dx\n\tmovzwl %dx, %edx\n\tmovl %edx, 48(%eax)\n\t"
+        "movw %es, %dx\n\tmovzwl %dx, %edx\n\tmovl %edx, 52(%eax)\n\t"
+        "1:\n\t"
+        "movl 44(%esp), %ebp\n\t"
+        "testl %ebp, %ebp\n\t"
+        "jz 4f\n\t"
+        /* A privilege-changing iret consumes SS:ESP as well as EFLAGS:CS:EIP. */
+        "testb $3, 40(%ebp)\n\t"
+        "jz 2f\n\t"
+        "pushl 44(%ebp)\n\tpushl 28(%ebp)\n\t"
+        "jmp 3f\n\t"
+        "2:\n\t"
+        "movl 28(%ebp), %esp\n\t"
+        "3:\n\t"
+        "pushl 36(%ebp)\n\tpushl 40(%ebp)\n\tpushl 32(%ebp)\n\t"
+        "movw 48(%ebp), %ax\n\tmovw %ax, %ds\n\t"
+        "movw 52(%ebp), %ax\n\tmovw %ax, %es\n\t"
+        "movl 4(%ebp), %ebx\n\tmovl 16(%ebp), %esi\n\tmovl 20(%ebp), %edi\n\t"
+        "movl 0(%ebp), %eax\n\tmovl 12(%ebp), %edx\n\tmovl 8(%ebp), %ecx\n\t"
+        "movl 24(%ebp), %ebp\n\t"
+        "iret\n\t"
+        "4:\n\t"
+        "popa\n\tpopfl\n\txorl %eax, %eax\n\tret\n\t"
+    );
+}
+
+static X86_32SavedContext x86_32_context_probe_from;
+static X86_32SavedContext x86_32_context_probe_to;
+static uint8_t x86_32_context_probe_stack[4096] __attribute__((aligned(16)));
+static volatile uint32_t x86_32_context_probe_ecx;
+static volatile uint32_t x86_32_context_probe_edx;
+
+__attribute__((naked, used)) static void x86_32_context_probe_target(void)
+{
+    __asm__ volatile(
+        "movl %ecx, x86_32_context_probe_ecx\n\t"
+        "movl %edx, x86_32_context_probe_edx\n\t"
+        "pushl $x86_32_context_probe_from\n\t"
+        "pushl $x86_32_context_probe_to\n\t"
+        "call rt_x86_32_context_switch\n\t"
+        "ud2\n\t"
+    );
+}
+
+RuntimeValue rt_x86_32_context_roundtrip_probe(void)
+{
+    x86_32_zero(&x86_32_context_probe_from, sizeof(x86_32_context_probe_from));
+    x86_32_zero(&x86_32_context_probe_to, sizeof(x86_32_context_probe_to));
+    x86_32_context_probe_ecx = 0;
+    x86_32_context_probe_edx = 0;
+    x86_32_context_probe_to.ecx = 0x13579BDFU;
+    x86_32_context_probe_to.edx = 0x2468ACE0U;
+    x86_32_context_probe_to.esp =
+        (uint32_t)(uintptr_t)(x86_32_context_probe_stack + sizeof(x86_32_context_probe_stack));
+    x86_32_context_probe_to.eip = (uint32_t)(uintptr_t)x86_32_context_probe_target;
+    x86_32_context_probe_to.eflags = 2U;
+    x86_32_context_probe_to.cs = 0x08U;
+    x86_32_context_probe_to.ss = 0x10U;
+    x86_32_context_probe_to.ds = 0x10U;
+    x86_32_context_probe_to.es = 0x10U;
+    rt_x86_32_context_switch((RuntimeValue)(uintptr_t)&x86_32_context_probe_from,
+                             (RuntimeValue)(uintptr_t)&x86_32_context_probe_to);
+    if (x86_32_context_probe_ecx != 0x13579BDFU ||
+        x86_32_context_probe_edx != 0x2468ACE0U ||
+        !x86_32_context_probe_from.eip || !x86_32_context_probe_from.esp ||
+        x86_32_context_probe_from.cs != 0x08U || x86_32_context_probe_from.ss != 0x10U)
+        return 0;
+    return 1;
 }
 
 RuntimeValue rt_x86_32_fpu_save(RuntimeValue ctx_ptr_val)

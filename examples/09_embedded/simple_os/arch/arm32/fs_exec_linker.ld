@@ -15,6 +15,7 @@ MEMORY {
 SECTIONS {
     .text : ALIGN(4K) {
         KEEP(*(.text.entry))
+        KEEP(*(.vectors))
         *(.text*)
     } > RAM
 

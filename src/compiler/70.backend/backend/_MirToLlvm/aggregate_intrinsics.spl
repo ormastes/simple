@@ -19,7 +19,7 @@ use compiler.backend.common.mir_text_codegen.MirTextCodegen
 extern fn rt_env_get(key: text) -> text
 
 fn llvm_inline_asm_rewrite_template(
-    asm_template: text, output_names: [text], input_names: [text]
+    asm_template: text, outputs: [MirAsmOperand], inputs: [MirAsmOperand]
 ) -> text:
     """Map Simple `{name}`/`{N}` operands to LLVM inline-asm `$N` operands.
 
@@ -28,17 +28,41 @@ fn llvm_inline_asm_rewrite_template(
     """
     var rewritten = asm_template
     var operand_index = 0
-    for name in output_names:
+    for output in outputs:
         val llvm_operand = "$" + operand_index.to_string()
-        rewritten = rewritten.replace("{" + name + "}", llvm_operand)
-        rewritten = rewritten.replace("{" + operand_index.to_string() + "}", llvm_operand)
+        if output.name != "": rewritten = rewritten.replace("{" + output.name + "}", llvm_operand)
+        rewritten = rewritten.replace("{" + output.constraint_index.to_string() + "}", llvm_operand)
         operand_index = operand_index + 1
-    for name in input_names:
-        val llvm_operand = "$" + operand_index.to_string()
-        rewritten = rewritten.replace("{" + name + "}", llvm_operand)
-        rewritten = rewritten.replace("{" + operand_index.to_string() + "}", llvm_operand)
+    for input in inputs:
+        var backend_index = operand_index
+        if input.kind == AsmConstraintKind.InOut:
+            var output_index = 0
+            for output in outputs:
+                if output.constraint_index == input.constraint_index: backend_index = output_index
+                output_index = output_index + 1
+        val llvm_operand = "$" + backend_index.to_string()
+        if input.name != "": rewritten = rewritten.replace("{" + input.name + "}", llvm_operand)
+        rewritten = rewritten.replace("{" + input.constraint_index.to_string() + "}", llvm_operand)
         operand_index = operand_index + 1
     rewritten
+
+fn llvm_c_abi_clobbers(arch: text) -> [text]:
+    """LLVM register clobbers for the platform C calling convention."""
+    if arch == "x86_64":
+        return ["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11",
+                "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7",
+                "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"]
+    if arch == "i686" or arch == "x86":
+        return ["eax", "ecx", "edx", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7"]
+    if arch == "aarch64":
+        return ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "x18",
+                "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v16", "v17", "v18", "v19", "v20", "v21", "v22", "v23", "v24", "v25", "v26", "v27", "v28", "v29", "v30", "v31"]
+    if arch == "armv7" or arch == "arm":
+        return ["r0", "r1", "r2", "r3", "r12", "lr", "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "s12", "s13", "s14", "s15"]
+    if arch == "riscv64" or arch == "riscv32":
+        return ["ra", "t0", "t1", "t2", "t3", "t4", "t5", "t6", "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7",
+                "ft0", "ft1", "ft2", "ft3", "ft4", "ft5", "ft6", "ft7", "ft8", "ft9", "ft10", "ft11", "fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"]
+    []
 
 # ============================================================================
 # MIR to LLVM IR Translation
@@ -521,51 +545,65 @@ impl MirToLlvm:
                 else:
                     self.builder.emit("  call void @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
 
-    me translate_inline_asm(asm_template: text, is_volatile: bool, inputs: [MirAsmOperand], outputs: [MirAsmOperand], clobbers: [text]):
+    me translate_inline_asm(asm_template: text, is_volatile: bool, inputs: [MirAsmOperand], outputs: [MirAsmOperand], clobbers: [text], clobber_abis: [text], options: [text]):
         """Translate inline assembly to LLVM inline asm call."""
         var constraint_parts: [text] = []
         var arg_values: [text] = []
         var arg_types: [text] = []
-        var output_names: [text] = []
-        var input_names: [text] = []
 
         for output in outputs:
-            val constraint = self.build_output_constraint(output)
+            # LLVM represents a read/write operand as an ordinary output plus
+            # a numeric input constraint tied to that output.
+            val constraint = if output.kind == AsmConstraintKind.InOut: "=" + self.constraint_location(output.location) else: self.build_output_constraint(output)
             constraint_parts.push(constraint)
-            output_names.push(output.name)
 
         for input in inputs:
-            val constraint = self.build_input_constraint(input)
+            var constraint = self.build_input_constraint(input)
+            if input.kind == AsmConstraintKind.InOut:
+                var output_index = 0
+                for output in outputs:
+                    if output.constraint_index == input.constraint_index:
+                        constraint = output_index.to_string()
+                    output_index = output_index + 1
             constraint_parts.push(constraint)
             val operand_value = self.translate_operand(input.operand)
             arg_values.push(operand_value)
             arg_types.push(self.native_int())
-            input_names.push(input.name)
 
+        val no_memory = options.contains("nomem")
+        val preserves_flags = options.contains("preserves_flags")
         for clobber in clobbers:
-            constraint_parts.push("~{{clobber}}")
+            if not (no_memory and clobber == "memory") and not (preserves_flags and clobber == "cc"):
+                constraint_parts.push("~{{clobber}}")
+
+        for clobber_abi in clobber_abis:
+            if clobber_abi == "C" or clobber_abi == "C-unwind":
+                for register in llvm_c_abi_clobbers(self.config.triple.arch):
+                    constraint_parts.push("~{{register}}")
 
         val constraints = constraint_parts.join(",")
-        val llvm_asm_template = llvm_inline_asm_rewrite_template(
-            asm_template, output_names, input_names)
+        val llvm_asm_template = llvm_inline_asm_rewrite_template(asm_template, outputs, inputs)
 
         var arg_list_parts: [text] = []
         for i in 0..arg_values.len():
             arg_list_parts.push("{arg_types[i]} {arg_values[i]}")
         val arg_list = arg_list_parts.join(", ")
 
-        val volatile_flag = if is_volatile: " sideeffect" else: ""
+        var asm_flags = if is_volatile and not options.contains("pure"): " sideeffect" else: ""
+        if options.contains("alignstack"): asm_flags = asm_flags + " alignstack"
+        if options.contains("intel_syntax"): asm_flags = asm_flags + " inteldialect"
+        val memory_attr = if options.contains("nomem"): " memory(none)" elif options.contains("readonly"): " memory(read)" else: ""
 
         if outputs.len() == 0:
             # No outputs: call void
-            val asm_call = "  call void asm{volatile_flag} \"{llvm_asm_template}\", \"{constraints}\"({arg_list})"
+            val asm_call = "  call void asm{asm_flags} \"{llvm_asm_template}\", \"{constraints}\"({arg_list}){memory_attr}"
             self.builder.emit(asm_call)
         elif outputs.len() == 1:
             # Single output: capture result directly
             val out_op = outputs[0]
             val out_val = self.translate_operand(out_op.operand)
             val out_ty = self.native_int()
-            val asm_call = "  {out_val} = call {out_ty} asm{volatile_flag} \"{llvm_asm_template}\", \"{constraints}\"({arg_list})"
+            val asm_call = "  {out_val} = call {out_ty} asm{asm_flags} \"{llvm_asm_template}\", \"{constraints}\"({arg_list}){memory_attr}"
             self.builder.emit(asm_call)
         else:
             # Multiple outputs: use struct return type
@@ -575,7 +613,7 @@ impl MirToLlvm:
             val struct_ty = "{{ " + out_types.join(", ") + " }}"
             val first_out_val = self.translate_operand(outputs[0].operand)
             val tmp_name = "{first_out_val}.asm_ret"
-            val asm_call = "  {tmp_name} = call {struct_ty} asm{volatile_flag} \"{llvm_asm_template}\", \"{constraints}\"({arg_list})"
+            val asm_call = "  {tmp_name} = call {struct_ty} asm{asm_flags} \"{llvm_asm_template}\", \"{constraints}\"({arg_list}){memory_attr}"
             self.builder.emit(asm_call)
             # Extract each output value
             var out_idx = 0

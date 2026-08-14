@@ -28,22 +28,27 @@ SECTIONS
     /* Code section -- .text.entry first for Multiboot header */
     .text ALIGN(4K) :
     {
+        __kernel_text_start = .;
         KEEP(*(.text.entry))
         KEEP(*(.multiboot))
         *(.text)
         *(.text.*)
+        __kernel_text_end = .;
     }
 
     /* Read-only data */
     .rodata ALIGN(4K) :
     {
+        __kernel_rodata_start = .;
         *(.rodata)
         *(.rodata.*)
+        __kernel_rodata_end = .;
     }
 
     /* Initialized data */
     .data ALIGN(4K) :
     {
+        __kernel_writable_start = .;
         *(.data)
         *(.data.*)
     }
@@ -75,6 +80,7 @@ SECTIONS
 
     /* End of kernel */
     _kernel_end = .;
+    __kernel_writable_end = .;
 
     /* Debug sections */
     .debug_info 0 : { *(.debug_info) }

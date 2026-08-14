@@ -53,3 +53,8 @@ _entry_asm:
 
 .Lcrt0_banner:
     .asciz "[BOOT] ARM32 crt0 entered\r\n"
+
+/* Keep the lifecycle capsules in the canonical crt0 translation unit so the
+ * ARM32 native linker cannot silently omit the privilege boundary. */
+    .include "examples/09_embedded/simple_os/arch/arm32/boot/enter_user_first.s"
+    .include "examples/09_embedded/simple_os/arch/arm32/boot/exception_vectors.s"

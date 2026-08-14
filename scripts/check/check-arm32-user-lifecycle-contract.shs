@@ -20,6 +20,8 @@ vectors=$root/examples/09_embedded/simple_os/arch/arm32/boot/exception_vectors.s
 stub=$root/examples/09_embedded/simple_os/arch/arm32/boot/baremetal_stubs.c
 bridge=$root/src/os/kernel/arch/arm32/user_entry.spl
 fs_entry=$root/examples/09_embedded/simple_os/arch/arm32/fs_exec_entry.spl
+kernel=$root/build/os/simpleos_arm32_fs_exec.elf
+image=$root/build/os/fat32-arm32.img
 
 contract() {
     require 'FS_MOUNT_OK' "$matrix"
@@ -38,18 +40,109 @@ admit() {
     require 'rt_arm32_enter_user_first:' "$entry"
     require 'spsr' "$entry"
     require 'movs' "$entry"
+    require 'rt_arm32_saved_kernel_sp' "$entry"
     require 'rt_arm32_svc_vector:' "$vectors"
+    require 'rt_arm32_svc_dispatch' "$vectors"
+    require 'rt_arm32_user_fault_dispatch' "$vectors"
+    require 'mrs r3, spsr' "$vectors"
     require 'rt_arm32_svc_vector_init' "$stub"
     require 'rt_arm32_svc_resume_kernel' "$stub"
+    require 'arm32_el0_enable_mmu' "$stub"
+    require 'FSEXEC  ELF' "$stub"
+    require 'g_arm32_exec_state' "$stub"
+    require 'g_arm32_exec_generation' "$stub"
+    require 'g_arm32_exec_ttbr' "$stub"
+    require 'stage:entry-not-executable' "$stub"
+    require 'stage:virtual-overlap' "$stub"
+    require 'stage:wx-segment' "$stub"
+    require 'arm32_cache_clean_range' "$stub"
+    require 'rt_arm32_user_isolation_verify' "$stub"
+    require 'rt_arm32_exec_reap' "$stub"
+    require 'rt_arm32_context_restore_asm' "$stub"
+    require 'rt_arm32_qemu_nonce_echo' "$stub"
+    require 'QEMUNONCTXT' "$stub"
     [ -f "$bridge" ] || fail 'not admitted: missing user_entry.spl'
     require 'rt_arm32_exec_token_install' "$bridge"
-    require 'rt_arm32_exec_token_take_result' "$bridge"
+    require 'rt_arm32_exec_reap' "$bridge"
     require 'rt_arm32_fs_read_program' "$fs_entry"
     require 'rt_arm32_enter_user_first' "$fs_entry"
+    require 'rt_arm32_qemu_nonce_echo' "$fs_entry"
+    require 'rt_arm32_fs_list_apps' "$fs_entry"
+    require 'ARM32_EL0_ISOLATION_OK' "$fs_entry"
+    require 'ARM32_ELF_ADMISSION_NEGATIVE_OK' "$fs_entry"
+    require 'ARM32_EL0_PRIVILEGE_FAULT_OK' "$fs_entry"
+    require 'ARM32_CONTEXT_ROUNDTRIP_OK' "$fs_entry"
+    require 'arm32_elf32_admission_reason' "$stub"
+    require 'rt_arm32_fs_exec_malformed_selftest' "$stub"
+    require 'rt_arm32_exec_stale_reap_selftest' "$stub"
+    require 'rt_arm32_context_roundtrip_probe' "$stub"
+    require 'rt_arm32_fat32_bounds_selftest' "$stub"
+    require 'rt_arm32_unowned_svc_selftest' "$stub"
+    require 'elf[6] != 1U' "$stub"
+    require 'arm32_fat32_hop_allowed' "$stub"
+    require 'rt_arm32_user_entry_pc' "$entry"
+    require 'mov lr, #0' "$entry"
+    require '(saved_cpsr & 0x1fU) != 0x10U' "$stub"
+    require 'kind != 1U' "$stub"
+    require 'origin != g_arm32_expected_fault_origin' "$stub"
+    require 'return 2U;' "$stub"
+    require 'b .Larm32_unowned_vector' "$vectors"
+    if grep -Eq '0x00000(ff2|ff3)U' "$stub"; then
+        fail 'not admitted: reserved replicated-subpage AP encoding present'
+    fi
     if grep -Fq '(void)ctx;' "$stub"; then
         fail 'not admitted: context restore discards its destination context'
     fi
     printf '%s\n' 'PASS arm32 EL0 filesystem-exec lifecycle admitted'
+}
+
+behavioral() {
+    admit >/dev/null
+    [ -s "$kernel" ] || fail "behavioral kernel missing: $kernel"
+    [ -s "$image" ] || fail "behavioral image missing: $image"
+    qemu=${SIMPLE_QEMU_ARM32_BIN:-qemu-system-arm}
+    command -v "$qemu" >/dev/null 2>&1 || fail "behavioral qemu missing: $qemu"
+    work=$(mktemp -d "${TMPDIR:-/tmp}/arm32-lifecycle.XXXXXX")
+    trap 'rm -rf "$work"' EXIT HUP INT TERM
+    nonce=arm32-behavioral-gate
+    sh "$root/scripts/os/prepare_qemu_nonce_media.shs" \
+        "$image" "$work/disk.img" "$nonce" >/dev/null
+    set +e
+    timeout -k 2 45 "$qemu" -machine virt -cpu cortex-a15 -m 384M \
+        -nographic -global virtio-mmio.force-legacy=false \
+        -drive "file=$work/disk.img,if=none,id=armdisk,format=raw" \
+        -device virtio-blk-device,drive=armdisk \
+        -semihosting-config enable=on,target=native \
+        -device "loader,file=$kernel,addr=0x40200000" \
+        -device loader,addr=0x40200000,cpu-num=0 >"$work/serial.log" 2>&1
+    qemu_rc=$?
+    set -e
+    [ "$qemu_rc" -eq 0 ] || [ "$qemu_rc" -eq 1 ] || \
+        fail "behavioral qemu failed rc=$qemu_rc"
+    ! grep -Fq 'TEST FAILED' "$work/serial.log" || fail 'behavioral guest reported TEST FAILED'
+    for marker in \
+        'ARM32_FIRST_ENTRY_REGS_LR_ZERO' \
+        'ARM32_FAT_NEGATIVE case=cycle reason=cluster-count-bound' \
+        'ARM32_FAT_NEGATIVE case=reserved reason=not-data-or-eoc' \
+        'ARM32_FAT_EOC_OK value=0x0ffffff8' \
+        'ARM32_UNOWNED_SVC_OK completion=unchanged continuation=unconsumed' \
+        'ARM32_ELF_NEGATIVE case=ei-version reason=identity' \
+        'ARM32_ELF_NEGATIVE case=type reason=identity' \
+        'ARM32_ELF_NEGATIVE case=version reason=identity' \
+        'ARM32_ELF_NEGATIVE case=ehsize reason=identity' \
+        'ARM32_ELF_NEGATIVE case=wx reason=wx' \
+        'ARM32_ELF_NEGATIVE case=arithmetic reason=range' \
+        'ARM32_ELF_NEGATIVE case=entry reason=not-executable' \
+        'ARM32_ELF_NEGATIVE case=overlap reason=virtual-overlap' \
+        'ARM32_ELF_NEGATIVE case=alignment reason=congruence' \
+        'ARM32_ELF_ADMISSION_NEGATIVE_OK fixtures=identity,wx,arithmetic,entry,overlap,alignment' \
+        'FS_PROGRAM_END rc=37 reaped=true generation=exact stale=denied' \
+        'ARM32_EL0_PRIVILEGE_FAULT_OK rc=-14 instruction=mrc-p15' \
+        'ARM32_CONTEXT_ROUNDTRIP_OK r4=50 rc=41' \
+        'TEST PASSED'; do
+        grep -Fq "$marker" "$work/serial.log" || fail "behavioral marker missing: $marker"
+    done
+    printf '%s\n' 'PASS arm32 behavioral malformed-ELF, exact-reap, EL0-fault, and context-roundtrip QEMU evidence'
 }
 
 case "$mode" in
@@ -58,12 +151,10 @@ case "$mode" in
         printf '%s\n' 'PASS arm32 contract rejects the NVFS/SMF probe'
         ;;
     --admit) admit ;;
+    --behavioral) behavioral ;;
     --self-test)
-        contract
-        if "$0" --admit >/dev/null 2>&1; then
-            fail 'self-test expected the unimplemented EL0 lifecycle to be rejected'
-        fi
+        admit >/dev/null
         printf '%s\n' 'PASS arm32 EL0 lifecycle gate self-test'
         ;;
-    *) fail 'usage: check-arm32-user-lifecycle-contract.shs [--contract|--admit|--self-test]' ;;
+    *) fail 'usage: check-arm32-user-lifecycle-contract.shs [--contract|--admit|--behavioral|--self-test]' ;;
 esac

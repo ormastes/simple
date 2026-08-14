@@ -1513,6 +1513,626 @@ __attribute__((naked, section(".text.entry"))) void _start(void)
     );
 }
 
+/* ---- RV64 filesystem child lifecycle -----------------------------------
+ * Load the nonce-patched /FSEXEC.ELF from FAT32, place every admitted PT_LOAD
+ * segment in private DRAM pages, enter genuine U-mode with sret, service its
+ * byte-write and exit ecalls in S-mode, and return the exact exit status.
+ * Sv39 exposes only U-marked ELF/stack pages to the child; kernel/MMIO leaves
+ * remain supervisor-only even though OpenSBI's physical PMP region is broad. */
+static unsigned char g_rv64_fs_exec_elf[8192] __attribute__((aligned(16)));
+static unsigned char g_rv64_fs_exec_elf_backup[8192] __attribute__((aligned(16)));
+static unsigned char g_rv64_fs_exec_pages[65536] __attribute__((aligned(4096)));
+static unsigned char g_rv64_fs_exec_stack[4096] __attribute__((aligned(4096)));
+static uint64_t g_rv64_fs_page_tables[32][512] __attribute__((aligned(4096)));
+static uint32_t g_rv64_fs_page_table_count;
+static volatile int64_t g_rv64_fs_exec_status;
+static volatile uint64_t g_rv64_fs_exec_trap_cause;
+static volatile uint64_t g_rv64_fs_exec_trap_sepc, g_rv64_fs_exec_trap_stval;
+static uint32_t g_rv64_fs_exec_file_size;
+static uint64_t g_rv64_fs_task_generation;
+static uint64_t g_rv64_fs_active_generation, g_rv64_fs_active_token;
+static uint64_t g_rv64_fs_completed_generation, g_rv64_fs_completed_token;
+static uint64_t g_rv64_fs_reaped_generation;
+static uint32_t g_rv64_fs_task_state;
+static uint32_t g_rv64_fs_reap_auth_ok;
+
+extern void rv64_fs_exec_trap_vector(void);
+extern void rv64_fs_exec_kernel_return(void);
+extern void rv64_fs_exec_user_write_probe(void);
+extern void rv64_fs_exec_user_write_fault(void);
+extern int64_t rv64_fs_exec_enter(uint64_t entry, uint64_t user_sp, uint64_t satp);
+
+__asm__(
+".align 4\n"
+".global rv64_fs_exec_enter\n"
+"rv64_fs_exec_enter:\n"
+"  addi sp, sp, -176\n"
+"  sd ra, 0(sp)\n"
+"  sd s0, 8(sp)\n"
+"  sd s1, 16(sp)\n"
+"  sd s2, 24(sp)\n"
+"  sd s3, 32(sp)\n"
+"  sd s4, 40(sp)\n"
+"  sd s5, 48(sp)\n"
+"  sd s6, 56(sp)\n"
+"  sd s7, 64(sp)\n"
+"  sd s8, 72(sp)\n"
+"  sd s9, 80(sp)\n"
+"  sd s10, 88(sp)\n"
+"  sd s11, 96(sp)\n"
+"  sd gp, 104(sp)\n"
+"  sd tp, 112(sp)\n"
+"  csrr t0, satp\n"
+"  sd t0, 120(sp)\n"
+"  csrr t0, stvec\n"
+"  sd t0, 128(sp)\n"
+"  csrr t0, sscratch\n"
+"  sd t0, 136(sp)\n"
+"  csrr t0, sstatus\n"
+"  sd t0, 144(sp)\n"
+"  csrr t0, sepc\n"
+"  sd t0, 152(sp)\n"
+"  csrw sscratch, sp\n"
+"  la t0, rv64_fs_exec_trap_vector\n"
+"  csrw stvec, t0\n"
+"  csrw satp, a2\n"
+"  sfence.vma zero, zero\n"
+"  csrw sepc, a0\n"
+"  csrr t0, sstatus\n"
+"  li t1, 0x100\n"
+"  not t1, t1\n"
+"  and t0, t0, t1\n"
+"  ori t0, t0, 0x20\n"
+"  csrw sstatus, t0\n"
+"  li ra, 0\n"
+"  li gp, 0\n"
+"  li tp, 0\n"
+"  li t0, 0\n"
+"  li t1, 0\n"
+"  li t2, 0\n"
+"  li s0, 0\n"
+"  li s1, 0\n"
+"  li s2, 0\n"
+"  li s3, 0\n"
+"  li s4, 0\n"
+"  li s5, 0\n"
+"  li s6, 0\n"
+"  li s7, 0\n"
+"  li s8, 0\n"
+"  li s9, 0\n"
+"  li s10, 0\n"
+"  li s11, 0\n"
+"  li t3, 0\n"
+"  li t4, 0\n"
+"  li t5, 0\n"
+"  li t6, 0\n"
+"  mv sp, a1\n"
+"  li a0, 0\n"
+"  li a1, 0\n"
+"  li a2, 0\n"
+"  li a3, 0\n"
+"  li a4, 0\n"
+"  li a5, 0\n"
+"  li a6, 0\n"
+"  li a7, 0\n"
+"  sret\n"
+".global rv64_fs_exec_kernel_return\n"
+"rv64_fs_exec_kernel_return:\n"
+"  ld t0, 120(sp)\n"
+"  csrw satp, t0\n"
+"  sfence.vma zero, zero\n"
+"  ld t0, 128(sp)\n"
+"  csrw stvec, t0\n"
+"  ld t0, 136(sp)\n"
+"  csrw sscratch, t0\n"
+"  ld t0, 144(sp)\n"
+"  csrw sstatus, t0\n"
+"  ld t0, 152(sp)\n"
+"  csrw sepc, t0\n"
+"  ld ra, 0(sp)\n"
+"  ld s0, 8(sp)\n"
+"  ld s1, 16(sp)\n"
+"  ld s2, 24(sp)\n"
+"  ld s3, 32(sp)\n"
+"  ld s4, 40(sp)\n"
+"  ld s5, 48(sp)\n"
+"  ld s6, 56(sp)\n"
+"  ld s7, 64(sp)\n"
+"  ld s8, 72(sp)\n"
+"  ld s9, 80(sp)\n"
+"  ld s10, 88(sp)\n"
+"  ld s11, 96(sp)\n"
+"  ld gp, 104(sp)\n"
+"  ld tp, 112(sp)\n"
+"  addi sp, sp, 176\n"
+"  la t0, g_rv64_fs_exec_status\n"
+"  ld a0, 0(t0)\n"
+"  ret\n"
+".align 4\n"
+".global rv64_fs_exec_trap_vector\n"
+"rv64_fs_exec_trap_vector:\n"
+"  csrrw sp, sscratch, sp\n"
+"  addi sp, sp, -24\n"
+"  sd t0, 0(sp)\n"
+"  sd t1, 8(sp)\n"
+"  sd t2, 16(sp)\n"
+"  csrr t0, scause\n"
+"  la t1, g_rv64_fs_exec_trap_cause\n"
+"  sd t0, 0(t1)\n"
+"  csrr t0, sepc\n"
+"  la t1, g_rv64_fs_exec_trap_sepc\n"
+"  sd t0, 0(t1)\n"
+"  csrr t0, stval\n"
+"  la t1, g_rv64_fs_exec_trap_stval\n"
+"  sd t0, 0(t1)\n"
+"  csrr t0, scause\n"
+"  li t1, 8\n"
+"  bne t0, t1, 3f\n"
+"  li t0, 60\n"
+"  beq a7, t0, 1f\n"
+"  beqz a7, 2f\n"
+"  j 3f\n"
+"1:\n"
+"  li t0, 0x10000005\n"
+"4: lbu t1, 0(t0)\n"
+"  andi t1, t1, 0x20\n"
+"  beqz t1, 4b\n"
+"  li t0, 0x10000000\n"
+"  sb a0, 0(t0)\n"
+"  csrr t0, sepc\n"
+"  addi t0, t0, 4\n"
+"  csrw sepc, t0\n"
+"  ld t0, 0(sp)\n"
+"  ld t1, 8(sp)\n"
+"  ld t2, 16(sp)\n"
+"  addi sp, sp, 24\n"
+"  csrrw sp, sscratch, sp\n"
+"  sret\n"
+"2:\n"
+"  la t0, g_rv64_fs_exec_status\n"
+"  sd a0, 0(t0)\n"
+"6:\n"
+"  la t0, g_rv64_fs_active_generation\n"
+"  ld t1, 0(t0)\n"
+"  la t0, g_rv64_fs_completed_generation\n"
+"  sd t1, 0(t0)\n"
+"  la t0, g_rv64_fs_active_token\n"
+"  ld t1, 0(t0)\n"
+"  la t0, g_rv64_fs_completed_token\n"
+"  sd t1, 0(t0)\n"
+"  la t0, g_rv64_fs_task_state\n"
+"  li t1, 2\n"
+"  sw t1, 0(t0)\n"
+"  j 5f\n"
+"3:\n"
+"  la t0, g_rv64_fs_exec_status\n"
+"  li t1, -1\n"
+"  sd t1, 0(t0)\n"
+"  j 6b\n"
+"5:\n"
+"  ld t0, 0(sp)\n"
+"  ld t1, 8(sp)\n"
+"  ld t2, 16(sp)\n"
+"  addi sp, sp, 24\n"
+"  la t0, rv64_fs_exec_kernel_return\n"
+"  csrw sepc, t0\n"
+"  csrr t0, sstatus\n"
+"  ori t0, t0, 0x100\n"
+"  csrw sstatus, t0\n"
+"  sret\n"
+".align 4\n"
+".global rv64_fs_exec_user_write_probe\n"
+"rv64_fs_exec_user_write_probe:\n"
+"  li t0, 0x80200000\n"
+".global rv64_fs_exec_user_write_fault\n"
+"rv64_fs_exec_user_write_fault:\n"
+"  sd zero, 0(t0)\n"
+"  li a0, 99\n"
+"  li a7, 0\n"
+"  ecall\n"
+);
+
+static int rv64_fs_elf_header_valid(const unsigned char *elf)
+{
+    return mem_eq(elf, "\177ELF", 4U) && elf[4] == 2U && elf[5] == 1U &&
+        elf[6] == 1U && rd16(elf + 16U) == 2U && rd16(elf + 18U) == 243U &&
+        rd32(elf + 20U) == 1U && rd16(elf + 52U) == 64U;
+}
+
+RuntimeValue rt_riscv_fs_exec_probe(void)
+{
+    Fat32Probe fat;
+    if (!fat32_probe_bpb(&fat)) return 0;
+    uint32_t file_size = 0;
+    uint32_t cluster = fat32_find_entry_cluster(&fat, fat.root_cluster, "FSEXEC  ELF", 0, &file_size);
+    if (cluster < 2U || file_size < 64U || file_size > sizeof(g_rv64_fs_exec_elf)) return 0;
+    if (fat32_read_file_into(&fat, cluster, file_size, g_rv64_fs_exec_elf,
+                             sizeof(g_rv64_fs_exec_elf)) != file_size) return 0;
+    if (!rv64_fs_elf_header_valid(g_rv64_fs_exec_elf)) return 0;
+    g_rv64_fs_exec_file_size = file_size;
+    return 1;
+}
+
+static void rv64_fs_puts(const char *s)
+{
+    while (*s) uart_putc(*s++);
+}
+
+static int rv64_fat_next_checked(const Fat32Probe *fat, uint32_t cluster,
+                                 uint32_t *next_out)
+{
+    uint64_t fat_offset = (uint64_t)cluster * 4U;
+    uint64_t fat_bytes = (uint64_t)fat->fat_size * 512U;
+    if (fat_offset + 4U > fat_bytes) return 0;
+    uint32_t sector = fat->reserved + (uint32_t)(fat_offset / 512U);
+    uint32_t offset = (uint32_t)(fat_offset % 512U);
+    if (!virtio_blk_read_sector(sector)) return 0;
+    *next_out = rd32(sector_data() + offset) & 0x0fffffffU;
+    return 1;
+}
+
+RuntimeValue rt_riscv_fs_list_apps(void)
+{
+    Fat32Probe fat;
+    if (!fat32_probe_bpb(&fat)) return 0;
+    if (!virtio_blk_read_sector(0)) return 0;
+    const unsigned char *bpb = sector_data();
+    uint64_t total_sectors = rd16(bpb + 19U);
+    if (total_sectors == 0) total_sectors = rd32(bpb + 32U);
+    uint64_t metadata_sectors = (uint64_t)fat.reserved + (uint64_t)fat.fats * fat.fat_size;
+    if (fat.spc == 0 || total_sectors <= metadata_sectors) return 0;
+    uint64_t data_clusters = (total_sectors - metadata_sectors) / fat.spc;
+    if (data_clusters == 0 || data_clusters > 0xffffffffU - 2U) return 0;
+    uint32_t sys = fat32_find_entry_cluster(&fat, fat.root_cluster, "SYS        ", 1, 0);
+    uint32_t apps = sys >= 2U ? fat32_find_entry_cluster(&fat, sys, "APPS       ", 1, 0) : 0;
+    if (apps < 2U) return 0;
+    uint32_t count = 0, cluster = apps, chain_steps = 0;
+    uint32_t cluster_limit = (uint32_t)data_clusters + 2U;
+    uint32_t entries_done = 0, valid_eoc = 0;
+    rv64_fs_puts("FS_LS_BEGIN path=/SYS/APPS\r\n");
+    while (cluster >= 2U && cluster < 0x0ffffff0U) {
+        if (++chain_steps > cluster_limit) return 0;
+        if (!entries_done) {
+            uint32_t first = fat_cluster_sector(&fat, cluster);
+            for (uint32_t sec = 0; sec < fat.spc && !entries_done; sec++) {
+                if (!virtio_blk_read_sector(first + sec)) return 0;
+                const unsigned char *data = sector_data();
+                for (uint32_t off = 0; off < 512U; off += 32U) {
+                    const unsigned char *e = data + off;
+                    if (e[0] == 0x00U) { entries_done = 1; break; }
+                    if (e[0] == 0xe5U || e[11] == 0x0fU) continue;
+                    rv64_fs_puts("FS_LS_ENTRY name=");
+                    for (uint32_t i = 0; i < 8U && e[i] != ' '; i++) uart_putc((char)e[i]);
+                    if (e[8] != ' ') {
+                        uart_putc('.');
+                        for (uint32_t i = 8U; i < 11U && e[i] != ' '; i++) uart_putc((char)e[i]);
+                    }
+                    rv64_fs_puts("\r\n");
+                    count++;
+                }
+            }
+        }
+        uint32_t next = 0;
+        if (!rv64_fat_next_checked(&fat, cluster, &next)) return 0;
+        if (next >= 0x0ffffff8U) { valid_eoc = 1; break; }
+        if (next < 2U || next >= 0x0ffffff0U) return 0;
+        cluster = next;
+    }
+    if (!valid_eoc) return 0;
+    rv64_fs_puts("FS_LS_END status=pass\r\n");
+    return (RuntimeValue)count;
+}
+
+static uint64_t rv64_elf_u64(const unsigned char *p)
+{
+    return (uint64_t)rd32(p) | ((uint64_t)rd32(p + 4U) << 32);
+}
+
+static void rv64_elf_put_u32(unsigned char *p, uint32_t value)
+{
+    p[0] = value; p[1] = value >> 8; p[2] = value >> 16; p[3] = value >> 24;
+}
+
+static void rv64_elf_put_u64(unsigned char *p, uint64_t value)
+{
+    rv64_elf_put_u32(p, (uint32_t)value);
+    rv64_elf_put_u32(p + 4U, (uint32_t)(value >> 32));
+}
+
+static int rv64_u64_range(uint64_t start, uint64_t size, uint64_t limit)
+{
+    return start <= limit && size <= limit - start;
+}
+
+static uint64_t *rv64_pt_alloc(void)
+{
+    if (g_rv64_fs_page_table_count >= 32U) return 0;
+    uint64_t *pt = g_rv64_fs_page_tables[g_rv64_fs_page_table_count++];
+    rv_memzero(pt, 4096U);
+    return pt;
+}
+
+static uint64_t rv64_pt_pte(uint64_t pa, uint64_t flags)
+{
+    return ((pa >> 12) << 10) | flags;
+}
+
+static int rv64_pt_map_4k(uint64_t *root, uint64_t va, uint64_t pa, uint64_t flags)
+{
+    uint64_t *table = root;
+    for (int level = 2; level > 0; level--) {
+        uint64_t index = (va >> (12 + level * 9)) & 511U;
+        if ((table[index] & 1U) != 0 && (table[index] & (2U | 4U | 8U)) != 0) return 0;
+        if ((table[index] & 1U) == 0) {
+            uint64_t *next = rv64_pt_alloc();
+            if (!next) return 0;
+            table[index] = rv64_pt_pte((uint64_t)(uintptr_t)next, 1U);
+        }
+        table = (uint64_t *)(uintptr_t)(((table[index] >> 10) << 12));
+    }
+    uint64_t index = (va >> 12) & 511U;
+    if (table[index] & 1U) return 0;
+    table[index] = rv64_pt_pte(pa, flags | 1U | 64U | 128U);
+    return 1;
+}
+
+static uint64_t *rv64_fs_address_space(void)
+{
+    g_rv64_fs_page_table_count = 0;
+    uint64_t *root = rv64_pt_alloc();
+    if (!root) return 0;
+    /* One supervisor-only 1 GiB leaf covers the kernel, its stack and trap. */
+    root[2] = rv64_pt_pte(0x80000000ULL, 1U | 2U | 4U | 8U | 64U | 128U);
+    if (!rv64_pt_map_4k(root, UART_BASE, UART_BASE, 2U | 4U)) return 0;
+    if (!rv64_pt_map_4k(root, SIFIVE_TEST_BASE, SIFIVE_TEST_BASE, 2U | 4U)) return 0;
+    return root;
+}
+
+static int rv64_fs_map_user_elf(uint64_t *root, uint64_t file_size,
+                                uint64_t *entry_out)
+{
+    uint64_t entry = rv64_elf_u64(g_rv64_fs_exec_elf + 24U);
+    uint64_t phoff = rv64_elf_u64(g_rv64_fs_exec_elf + 32U);
+    uint16_t phentsize = rd16(g_rv64_fs_exec_elf + 54U);
+    uint16_t phnum = rd16(g_rv64_fs_exec_elf + 56U);
+    if (phentsize < 56U || phnum == 0U || phnum > 64U ||
+        !rv64_u64_range(phoff, (uint64_t)phentsize * phnum, file_size)) return 0;
+    uint64_t ranges_start[64], ranges_end[64];
+    uint32_t range_count = 0, page_count = 0, entry_exec = 0;
+    rv_memzero(g_rv64_fs_exec_pages, sizeof(g_rv64_fs_exec_pages));
+    for (uint16_t i = 0; i < phnum; i++) {
+        const unsigned char *ph = g_rv64_fs_exec_elf + phoff + (uint64_t)i * phentsize;
+        if (rd32(ph) != 1U) continue;
+        uint32_t flags = rd32(ph + 4U);
+        uint64_t offset = rv64_elf_u64(ph + 8U), vaddr = rv64_elf_u64(ph + 16U);
+        uint64_t filesz = rv64_elf_u64(ph + 32U), memsz = rv64_elf_u64(ph + 40U);
+        uint64_t align = rv64_elf_u64(ph + 48U);
+        if (memsz == 0 || memsz < filesz || !rv64_u64_range(offset, filesz, file_size) ||
+            !rv64_u64_range(vaddr, memsz, (1ULL << 38)) ||
+            vaddr >= 0x80000000ULL ||
+            (vaddr < UART_BASE + 4096U && UART_BASE < vaddr + memsz) ||
+            (vaddr < SIFIVE_TEST_BASE + 4096U && SIFIVE_TEST_BASE < vaddr + memsz) ||
+            (align && ((align & (align - 1U)) || ((vaddr - offset) & (align - 1U)))) ||
+            ((flags & 2U) && (flags & 1U))) return 0;
+        uint64_t end = vaddr + memsz;
+        for (uint32_t r = 0; r < range_count; r++)
+            if (vaddr < ranges_end[r] && ranges_start[r] < end) return 0;
+        ranges_start[range_count] = vaddr; ranges_end[range_count++] = end;
+        if ((flags & 1U) && entry >= vaddr && entry < end) entry_exec = 1;
+        uint64_t first = vaddr & ~0xfffULL, last = (end + 0xfffU) & ~0xfffULL;
+        for (uint64_t page = first; page < last; page += 4096U) {
+            if (page_count >= sizeof(g_rv64_fs_exec_pages) / 4096U) return 0;
+            unsigned char *dst = g_rv64_fs_exec_pages + page_count * 4096U;
+            uint64_t copy_start = page > vaddr ? page : vaddr;
+            uint64_t file_end = vaddr + filesz;
+            uint64_t copy_end = page + 4096U < file_end ? page + 4096U : file_end;
+            if (copy_end > copy_start)
+                for (uint64_t j = copy_start; j < copy_end; j++) dst[j - page] = g_rv64_fs_exec_elf[offset + (j - vaddr)];
+            uint64_t pte = 16U | 2U;
+            if (flags & 2U) pte |= 4U;
+            if (flags & 1U) pte |= 8U;
+            if (!rv64_pt_map_4k(root, page, (uint64_t)(uintptr_t)dst, pte)) return 0;
+            page_count++;
+        }
+    }
+    if (!entry_exec) return 0;
+    if (!rv64_pt_map_4k(root, 0x40000000ULL,
+                        (uint64_t)(uintptr_t)g_rv64_fs_exec_stack, 16U | 2U | 4U)) return 0;
+    *entry_out = entry;
+    return 1;
+}
+
+RuntimeValue rt_riscv_fs_exec_malformed_selftest(void)
+{
+    if (!rt_riscv_fs_exec_probe()) return 0;
+    uint64_t ignored = 0;
+    uint64_t *clean_root = rv64_fs_address_space();
+    if (!clean_root || !rv64_fs_map_user_elf(clean_root, g_rv64_fs_exec_file_size, &ignored)) return 0;
+    for (uint32_t i = 0; i < sizeof(g_rv64_fs_exec_elf); i++)
+        g_rv64_fs_exec_elf_backup[i] = g_rv64_fs_exec_elf[i];
+    const uint32_t identity_offsets[] = {4U, 5U, 6U, 16U, 18U, 20U, 52U};
+    for (uint32_t i = 0; i < sizeof(identity_offsets) / sizeof(identity_offsets[0]); i++) {
+        uint32_t at = identity_offsets[i];
+        g_rv64_fs_exec_elf[at] ^= 0x7fU;
+        if (rv64_fs_elf_header_valid(g_rv64_fs_exec_elf)) return 0;
+        memcpy(g_rv64_fs_exec_elf, g_rv64_fs_exec_elf_backup, sizeof(g_rv64_fs_exec_elf));
+    }
+    uint64_t original_phoff = rv64_elf_u64(g_rv64_fs_exec_elf + 32U);
+    uint16_t phentsize = rd16(g_rv64_fs_exec_elf + 54U), phnum = rd16(g_rv64_fs_exec_elf + 56U);
+    unsigned char *first = 0, *second = 0;
+    for (uint16_t i = 0; i < phnum; i++) {
+        unsigned char *ph = g_rv64_fs_exec_elf + original_phoff + (uint64_t)i * phentsize;
+        if (rd32(ph) == 1U) { if (!first) first = ph; else if (!second) second = ph; }
+    }
+    if (!first || !second) return 0;
+    rv64_elf_put_u64(g_rv64_fs_exec_elf + 32U, ~(uint64_t)0);
+    if (rv64_fs_map_user_elf(rv64_fs_address_space(), g_rv64_fs_exec_file_size, &ignored)) return 0;
+    memcpy(g_rv64_fs_exec_elf, g_rv64_fs_exec_elf_backup, sizeof(g_rv64_fs_exec_elf));
+    /* Locate afresh after restore; pointers above referred to the same base. */
+    first = second = 0;
+    for (uint16_t i = 0; i < phnum; i++) {
+        unsigned char *ph = g_rv64_fs_exec_elf + original_phoff + (uint64_t)i * phentsize;
+        if (rd32(ph) == 1U) { if (!first) first = ph; else if (!second) second = ph; }
+    }
+    rv64_elf_put_u64(first + 40U, 0U);
+    if (rv64_fs_map_user_elf(rv64_fs_address_space(), g_rv64_fs_exec_file_size, &ignored)) return 0;
+    memcpy(g_rv64_fs_exec_elf, g_rv64_fs_exec_elf_backup, sizeof(g_rv64_fs_exec_elf));
+    /* Reject W+X independently of the segment's original permissions. */
+    for (uint16_t i = 0; i < phnum; i++) {
+        unsigned char *ph = g_rv64_fs_exec_elf + original_phoff + (uint64_t)i * phentsize;
+        if (rd32(ph) == 1U) { first = ph; break; }
+    }
+    rv64_elf_put_u32(first + 4U, rd32(first + 4U) | 3U);
+    if (rv64_fs_map_user_elf(rv64_fs_address_space(), g_rv64_fs_exec_file_size, &ignored)) return 0;
+    memcpy(g_rv64_fs_exec_elf, g_rv64_fs_exec_elf_backup, sizeof(g_rv64_fs_exec_elf));
+    rv64_elf_put_u64(g_rv64_fs_exec_elf + 24U, 0U);
+    if (rv64_fs_map_user_elf(rv64_fs_address_space(), g_rv64_fs_exec_file_size, &ignored)) return 0;
+    memcpy(g_rv64_fs_exec_elf, g_rv64_fs_exec_elf_backup, sizeof(g_rv64_fs_exec_elf));
+    for (uint16_t i = 0; i < phnum; i++) {
+        unsigned char *ph = g_rv64_fs_exec_elf + original_phoff + (uint64_t)i * phentsize;
+        if (rd32(ph) == 1U) { rv64_elf_put_u64(ph + 48U, 3U); break; }
+    }
+    if (rv64_fs_map_user_elf(rv64_fs_address_space(), g_rv64_fs_exec_file_size, &ignored)) return 0;
+    memcpy(g_rv64_fs_exec_elf, g_rv64_fs_exec_elf_backup, sizeof(g_rv64_fs_exec_elf));
+    first = second = 0;
+    for (uint16_t i = 0; i < phnum; i++) {
+        unsigned char *ph = g_rv64_fs_exec_elf + original_phoff + (uint64_t)i * phentsize;
+        if (rd32(ph) == 1U) { if (!first) first = ph; else if (!second) second = ph; }
+    }
+    rv64_elf_put_u64(second + 16U, rv64_elf_u64(first + 16U));
+    rv64_elf_put_u64(second + 48U, 1U);
+    if (rv64_fs_map_user_elf(rv64_fs_address_space(), g_rv64_fs_exec_file_size, &ignored)) return 0;
+    memcpy(g_rv64_fs_exec_elf, g_rv64_fs_exec_elf_backup, sizeof(g_rv64_fs_exec_elf));
+    for (uint16_t i = 0; i < phnum; i++) {
+        unsigned char *ph = g_rv64_fs_exec_elf + original_phoff + (uint64_t)i * phentsize;
+        if (rd32(ph) == 1U) { rv64_elf_put_u64(ph + 16U, 0x80000000ULL); break; }
+    }
+    rv64_elf_put_u64(g_rv64_fs_exec_elf + 24U, 0x80000000ULL);
+    if (rv64_fs_map_user_elf(rv64_fs_address_space(), g_rv64_fs_exec_file_size, &ignored)) return 0;
+    memcpy(g_rv64_fs_exec_elf, g_rv64_fs_exec_elf_backup, sizeof(g_rv64_fs_exec_elf));
+    for (uint16_t i = 0; i < phnum; i++) {
+        unsigned char *ph = g_rv64_fs_exec_elf + original_phoff + (uint64_t)i * phentsize;
+        if (rd32(ph) == 1U) { rv64_elf_put_u64(ph + 16U, UART_BASE); break; }
+    }
+    rv64_elf_put_u64(g_rv64_fs_exec_elf + 24U, UART_BASE);
+    if (rv64_fs_map_user_elf(rv64_fs_address_space(), g_rv64_fs_exec_file_size, &ignored)) return 0;
+    memcpy(g_rv64_fs_exec_elf, g_rv64_fs_exec_elf_backup, sizeof(g_rv64_fs_exec_elf));
+    uint64_t *leaf_root = rv64_fs_address_space();
+    if (!leaf_root) return 0;
+    leaf_root[0] = rv64_pt_pte(0, 1U | 2U | 8U);
+    if (rv64_pt_map_4k(leaf_root, 0x1000U,
+                       (uint64_t)(uintptr_t)g_rv64_fs_exec_stack, 16U | 2U)) return 0;
+    return 1;
+}
+
+RuntimeValue rt_riscv_fs_exec_privilege_selftest(void)
+{
+    uint64_t *root = rv64_fs_address_space();
+    if (!root || !rv64_pt_map_4k(root, 0x40000000ULL,
+            (uint64_t)(uintptr_t)g_rv64_fs_exec_stack, 16U | 2U | 4U)) return 0;
+    uint64_t probe_pa = (uint64_t)(uintptr_t)rv64_fs_exec_user_write_probe;
+    uint64_t probe_va = 0x50000000ULL + (probe_pa & 0xfffU);
+    if (!rv64_pt_map_4k(root, 0x50000000ULL, probe_pa & ~0xfffULL,
+                        16U | 2U | 8U)) return 0;
+    uint64_t satp = (8ULL << 60) | ((uint64_t)(uintptr_t)root >> 12);
+    g_rv64_fs_exec_status = -1;
+    g_rv64_fs_exec_trap_cause = 0;
+    g_rv64_fs_exec_trap_sepc = 0;
+    g_rv64_fs_exec_trap_stval = 0;
+    g_rv64_fs_active_generation = 0;
+    g_rv64_fs_active_token = 0x5256363450524f42ULL;
+    g_rv64_fs_task_state = 1;
+    uint64_t satp_before, stvec_before, sscratch_before, sstatus_before, sepc_before;
+    uint64_t saved_gp, saved_tp;
+    __asm__ volatile("mv %0, gp" : "=r"(saved_gp));
+    __asm__ volatile("mv %0, tp" : "=r"(saved_tp));
+    __asm__ volatile("csrr %0, satp" : "=r"(satp_before));
+    __asm__ volatile("csrr %0, stvec" : "=r"(stvec_before));
+    __asm__ volatile("csrr %0, sscratch" : "=r"(sscratch_before));
+    __asm__ volatile("csrr %0, sstatus" : "=r"(sstatus_before));
+    __asm__ volatile("csrr %0, sepc" : "=r"(sepc_before));
+    __asm__ volatile("fence.i" ::: "memory");
+    rv64_fs_exec_enter(probe_va, 0x40001000ULL, satp);
+    uint64_t satp_after, stvec_after, sscratch_after, sstatus_after, sepc_after;
+    uint64_t gp_after, tp_after;
+    __asm__ volatile("mv %0, gp" : "=r"(gp_after));
+    __asm__ volatile("mv %0, tp" : "=r"(tp_after));
+    __asm__ volatile("csrr %0, satp" : "=r"(satp_after));
+    __asm__ volatile("csrr %0, stvec" : "=r"(stvec_after));
+    __asm__ volatile("csrr %0, sscratch" : "=r"(sscratch_after));
+    __asm__ volatile("csrr %0, sstatus" : "=r"(sstatus_after));
+    __asm__ volatile("csrr %0, sepc" : "=r"(sepc_after));
+    uint64_t fault_va = 0x50000000ULL +
+        ((uint64_t)(uintptr_t)rv64_fs_exec_user_write_fault & 0xfffU);
+    int valid = g_rv64_fs_exec_trap_cause == 15U && g_rv64_fs_exec_trap_sepc == fault_va &&
+        g_rv64_fs_exec_trap_stval == 0x80200000ULL && satp_after == satp_before &&
+        stvec_after == stvec_before && sscratch_after == sscratch_before &&
+        sstatus_after == sstatus_before && sepc_after == sepc_before &&
+        gp_after == saved_gp && tp_after == saved_tp && g_rv64_fs_task_state == 2U &&
+        g_rv64_fs_completed_generation == 0 &&
+        g_rv64_fs_completed_token == 0x5256363450524f42ULL;
+    g_rv64_fs_task_state = 0;
+    g_rv64_fs_completed_generation = 0;
+    g_rv64_fs_completed_token = 0;
+    return valid;
+}
+
+RuntimeValue rt_riscv_fs_reaped_generation(void)
+{
+    return (RuntimeValue)g_rv64_fs_reaped_generation;
+}
+
+RuntimeValue rt_riscv_fs_reap_auth_ok(void)
+{
+    return (RuntimeValue)g_rv64_fs_reap_auth_ok;
+}
+
+RuntimeValue rt_riscv_fs_last_trap_cause(void)
+{
+    return (RuntimeValue)g_rv64_fs_exec_trap_cause;
+}
+RuntimeValue rt_riscv_fs_last_trap_sepc(void) { return (RuntimeValue)g_rv64_fs_exec_trap_sepc; }
+RuntimeValue rt_riscv_fs_last_trap_stval(void) { return (RuntimeValue)g_rv64_fs_exec_trap_stval; }
+
+static int rv64_fs_reap(uint64_t generation, uint64_t token, int64_t *status)
+{
+    if (g_rv64_fs_task_state != 2U || g_rv64_fs_completed_generation != generation ||
+        g_rv64_fs_completed_token != token || g_rv64_fs_reaped_generation == generation) return 0;
+    *status = g_rv64_fs_exec_status;
+    g_rv64_fs_task_state = 0;
+    g_rv64_fs_completed_generation = 0;
+    g_rv64_fs_completed_token = 0;
+    g_rv64_fs_reaped_generation = generation;
+    return 1;
+}
+
+RuntimeValue rt_riscv_fs_exec_run(void)
+{
+    if (g_rv64_fs_task_state != 0U) return (RuntimeValue)-1;
+    if (!rt_riscv_fs_exec_probe()) return (RuntimeValue)-1;
+    uint64_t *root = rv64_fs_address_space();
+    uint64_t entry = 0;
+    if (!root || !rv64_fs_map_user_elf(root, g_rv64_fs_exec_file_size, &entry)) return (RuntimeValue)-1;
+    uint64_t satp = (8ULL << 60) | ((uint64_t)(uintptr_t)root >> 12);
+    uint64_t generation = ++g_rv64_fs_task_generation;
+    uint64_t token = generation ^ 0x525636345441534bULL;
+    g_rv64_fs_active_generation = generation;
+    g_rv64_fs_active_token = token;
+    g_rv64_fs_task_state = 1;
+    g_rv64_fs_exec_status = -1;
+    g_rv64_fs_exec_trap_cause = 0;
+    __asm__ volatile("fence.i" ::: "memory");
+    rv64_fs_exec_enter(entry, 0x40001000ULL, satp);
+    int64_t status = -1;
+    g_rv64_fs_reap_auth_ok = 0;
+    if (rv64_fs_reap(generation, token ^ 1U, &status)) return (RuntimeValue)-1;
+    if (!rv64_fs_reap(generation, token, &status)) return (RuntimeValue)-1;
+    int64_t duplicate_status = -1;
+    if (rv64_fs_reap(generation, token, &duplicate_status)) return (RuntimeValue)-1;
+    g_rv64_fs_reap_auth_ok = 1;
+    return (RuntimeValue)status;
+}
+
 /* ---- Lane BR64: in-guest Simple toolchain staging gate --------------------
  * Probes the REAL riscv64-unknown-simpleos `simple` interpreter ELF staged by
  * scripts/os/fsexec_mkimg_simple.spl at the FAT32 root (/FSEXEC.ELF, aliased

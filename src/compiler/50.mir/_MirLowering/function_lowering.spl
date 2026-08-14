@@ -1002,7 +1002,10 @@ impl MirLowering:
         # Lower all constraint value expressions to MIR operands
         var inputs: [MirAsmOperand] = []
         var outputs: [MirAsmOperand] = []
+        var output_destinations: [LocalId] = []
+        var output_results: [LocalId] = []
 
+        var constraint_index = 0
         for constraint in asm_node.constraints:
             # Lower the HIR expression to a local
             val value_local = self.lower_expr(constraint.value)
@@ -1012,7 +1015,8 @@ impl MirLowering:
                 name: constraint.name,
                 kind: constraint.kind,
                 location: constraint.location,
-                operand: mir_operand
+                operand: mir_operand,
+                constraint_index: constraint_index
             )
 
             # Categorize as input or output
@@ -1020,11 +1024,33 @@ impl MirLowering:
                 case In:
                     inputs.push(asm_operand)
                 case Out | LateOut:
-                    outputs.push(asm_operand)
+                    val output_temp = self.builder.new_temp(self.lookup_local_type(value_local))
+                    outputs.push(MirAsmOperand(
+                        name: constraint.name,
+                        kind: constraint.kind,
+                        location: constraint.location,
+                        operand: mir_operand_copy(output_temp),
+                        constraint_index: constraint_index
+                    ))
+                    output_destinations.push(value_local)
+                    output_results.push(output_temp)
                 case InOut:
                     # InOut constraints appear in both lists
                     inputs.push(asm_operand)
-                    outputs.push(asm_operand)
+                    val output_destination = match constraint.output_value:
+                        case Some(output): self.lower_expr(output)
+                        case None: value_local
+                    val output_temp = self.builder.new_temp(self.lookup_local_type(output_destination))
+                    outputs.push(MirAsmOperand(
+                        name: constraint.name,
+                        kind: constraint.kind,
+                        location: constraint.location,
+                        operand: mir_operand_copy(output_temp),
+                        constraint_index: constraint_index
+                    ))
+                    output_destinations.push(output_destination)
+                    output_results.push(output_temp)
+            constraint_index = constraint_index + 1
 
         # Emit inline assembly instruction
         self.builder.emit(MirInst(
@@ -1033,10 +1059,23 @@ impl MirLowering:
                 is_volatile: asm_node.is_volatile,
                 inputs: inputs,
                 outputs: outputs,
-                clobbers: asm_node.clobbers
+                clobbers: asm_node.clobbers,
+                clobber_abis: asm_node.clobber_abis,
+                options: asm_node.options
             ),
             span: Some(asm_node.span)
         ))
+
+        # Inline asm defines fresh SSA result locals. Explicit copies perform
+        # the source-level output writeback and let var-reassign SSA rename or
+        # spill a destination that already had an initializer.
+        var writeback_index = 0
+        while writeback_index < output_destinations.len():
+            self.builder.emit(MirInst(
+                kind: MirInstKind.Copy(output_destinations[writeback_index], output_results[writeback_index]),
+                span: Some(asm_node.span)
+            ))
+            writeback_index = writeback_index + 1
 
         # Return a unit value (inline asm doesn't produce a value directly)
         self.builder.new_temp(MirType.unit())

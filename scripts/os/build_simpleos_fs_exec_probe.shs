@@ -51,13 +51,38 @@ EOF
 .section .text
 .global _start
 _start:
+ cmp lr,#0; bne 8f
+ cmp r12,#0; bne 8f
+ orr r12,r0,r1; orr r12,r12,r2; orr r12,r12,r3; orr r12,r12,r4
+ orr r12,r12,r5; orr r12,r12,r6; orr r12,r12,r7; orr r12,r12,r8
+ orr r12,r12,r9; orr r12,r12,r10; orr r12,r12,r11
+ cmp r12,#0; bne 8f
+ ldr r4,=zero_prefix; ldr r5,=zero_prefix_end; sub r5,r5,r4
+9: ldrb r0,[r4],#1; mov r7,#60; svc #0; subs r5,r5,#1; bne 9b
  ldr r4,=prefix; ldr r5,=prefix_end; sub r5,r5,r4
 1: ldrb r0,[r4],#1; mov r7,#60; svc #0; subs r5,r5,#1; bne 1b
  ldr r4,=nonce; mov r5,#96
 2: ldrb r0,[r4],#1; cmp r0,#0; beq 3f; mov r7,#60; svc #0; subs r5,r5,#1; bne 2b
 3: mov r0,#10; mov r7,#60; svc #0; mov r0,#37; mov r7,#0; svc #0
 4: wfe; b 4b
+.balign 256
+.global arm32_privilege_fault_probe
+arm32_privilege_fault_probe:
+ mrc p15,0,r0,c0,c0,0
+ mov r0,#99; mov r7,#0; svc #0
+5: wfe; b 5b
+.balign 256
+.global arm32_context_roundtrip_probe
+arm32_context_roundtrip_probe:
+ cmp r4,#50; bne 6f
+ mov r0,#67; mov r7,#60; svc #0
+ mov r0,#41; mov r7,#0; svc #0
+6: mov r0,#98; mov r7,#0; svc #0
+7: wfe; b 7b
+8: mov r0,#96; mov r7,#0; svc #0; b 8b
 .section .rodata
+zero_prefix: .ascii "ARM32_FIRST_ENTRY_REGS_LR_ZERO\n"
+zero_prefix_end:
 prefix: .ascii "SIMPLEOS_FS_EXEC_OK arch=arm32 nonce="
 prefix_end:
 nonce: .ascii "$placeholder"; .zero 96-(.-nonce)
@@ -99,7 +124,11 @@ EOF
  *) fail "unsupported architecture: $arch" ;;
 esac
 "$clang" --target="$triple" -c -ffreestanding -nostdlib "$work/probe.S" -o "$work/probe.o"
-"$ld_lld" -m "$emulation" -static --build-id=none -z max-page-size=4096 -e _start -Ttext=0x201000 "$work/probe.o" -o "$work/probe.elf"
+case "$arch" in
+    x86_32) payload_link_flag=--image-base=0x40000000 ;;
+    *) payload_link_flag=-Ttext=0x201000 ;;
+esac
+"$ld_lld" -m "$emulation" -static --build-id=none -z max-page-size=4096 -e _start "$payload_link_flag" "$work/probe.o" -o "$work/probe.elf"
 sh scripts/check/check-simpleos-fs-exec-payload-elf.shs "$arch" "$work/probe.elf"
 mkdir -p "$(dirname "$output")" "$(dirname "$manifest")"
 cp "$work/probe.elf" "$output.tmp"; mv "$output.tmp" "$output"

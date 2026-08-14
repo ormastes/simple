@@ -596,6 +596,60 @@ fn flat_asm_expr(asm_template_text: text, span: Span) -> AsmExpr:
         is_volatile: true,
         constraints: [],
         clobbers: [],
+        clobber_abis: [],
+        options: [],
+        span: span
+    )
+
+fn flat_asm_expr_with_operands(idx: i64, span: Span) -> AsmExpr:
+    val values = expr_get_args(idx)
+    val names = expr_get_arg_names(idx)
+    val kinds = expr_get_asm_kinds(idx)
+    val locations = expr_get_asm_locations(idx)
+    val clobbers = expr_get_asm_clobbers(idx)
+    val outputs = expr_get_asm_outputs(idx)
+    var plain_clobbers: [text] = []
+    var clobber_abis: [text] = []
+    var asm_options: [text] = []
+    for item in clobbers:
+        if item.starts_with("clobber_abi:"): clobber_abis.push(item[12..])
+        elif item.starts_with("options:"):
+            for option in item[8..].split(","):
+                val normalized_option = option.trim()
+                if normalized_option != "": asm_options.push(normalized_option)
+        elif item.starts_with("clobber:"): plain_clobbers.push(item[8..])
+    var constraints: [AsmConstraint] = []
+    var operand_index = 0
+    while operand_index < values.len():
+        val kind_text = if operand_index < kinds.len(): kinds[operand_index] else: "in"
+        val location_text = if operand_index < locations.len(): locations[operand_index] else: "reg"
+        val kind = match kind_text:
+            case "out": AsmConstraintKind.Out
+            case "inout": AsmConstraintKind.InOut
+            case "lateout": AsmConstraintKind.LateOut
+            case _: AsmConstraintKind.In
+        val location = match location_text:
+            case "reg": AsmLocation.Reg
+            case "mem": AsmLocation.Mem
+            case "imm": AsmLocation.Imm
+            case _: AsmLocation.RegSpec(location_text)
+        val name = if operand_index < names.len(): names[operand_index] else: ""
+        constraints.push(AsmConstraint(
+            name: name,
+            kind: kind,
+            location: location,
+            value: convert_flat_expr(values[operand_index]),
+            output_value: if operand_index < outputs.len() and outputs[operand_index] >= 0: convert_flat_expr(outputs[operand_index]) else: nil,
+            span: span
+        ))
+        operand_index = operand_index + 1
+    AsmExpr(
+        asm_template: expr_get_str(idx),
+        is_volatile: true,
+        constraints: constraints,
+        clobbers: plain_clobbers,
+        clobber_abis: clobber_abis,
+        options: asm_options,
         span: span
     )
 
@@ -1044,7 +1098,7 @@ fn convert_flat_expr(idx: i64) -> Expr:
             return Expr(kind: ExprKind.Cast(Expr(kind: ExprKind.FloatLit(suf_float_text.to_float()), span: span), suf_type), span: span)
         return Expr(kind: ExprKind.Cast(Expr(kind: ExprKind.IntLit(expr_get_int(idx)), span: span), suf_type), span: span)
     elif tag == EXPR_ASM:
-        return Expr(kind: ExprKind.AsmBlock(flat_asm_expr(expr_get_str(idx), span)), span: span)
+        return Expr(kind: ExprKind.AsmBlock(flat_asm_expr_with_operands(idx, span)), span: span)
     elif tag == EXPR_ASM_MATCH:
         var arms: [AsmMatchArm] = []
         val arm_indices = expr_get_args(idx)

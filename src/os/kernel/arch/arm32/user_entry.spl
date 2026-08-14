@@ -1,0 +1,23 @@
+# ARM32 one-shot EL0 execution owner.
+#
+# The token is kernel-created and never shared with the child. It authenticates
+# the active blocking lifecycle at the SVC owner and makes result consumption
+# single-use. The assembly owner retains the kernel continuation frame.
+
+extern fn rt_arm32_exec_token_install(token: u32, generation: u32) -> i32
+extern fn rt_arm32_exec_reap(token: u32, generation: u32, expected_status: i32) -> i32
+extern fn rt_arm32_enter_user_first(entry: u32, user_sp: u32) -> i32
+
+fn enter_user_blocking(entry: u32, user_sp: u32, token: u32, generation: u32) -> i64:
+    """Enter one mounted ELF at EL0 and consume its authenticated SVC result."""
+    if entry == 0 or user_sp == 0 or token == 0 or generation == 0:
+        return -22
+    if rt_arm32_exec_token_install(token, generation) != 1:
+        return -16
+    val raw_status = rt_arm32_enter_user_first(entry, user_sp).to_i64()
+    val consumed = rt_arm32_exec_reap(token, generation, raw_status as i32).to_i64()
+    if consumed < 0:
+        return consumed
+    if raw_status != consumed:
+        return -71
+    consumed

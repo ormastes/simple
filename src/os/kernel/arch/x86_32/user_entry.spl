@@ -5,8 +5,8 @@
 #
 # The assembly stub `rt_x86_32_enter_user_first` is intentionally separate
 # (lives in examples/09_embedded/simple_os/arch/x86_32/boot/enter_user_first.s) and is
-# blocked until an i686-capable freestanding native-build lane is available.
-# This file provides the pure-Simple wrapper and syscall-14 dispatch so the
+# implemented by the i686 freestanding boot lane. This file provides the
+# pure-Simple wrapper and authenticated syscall-14 dispatch so the
 # x86_32 process-backed path mirrors the x86_64 lane at the Simple layer.
 
 use os.kernel.arch.x86_32.context.{X86_32ContextSwitch}
@@ -14,13 +14,16 @@ use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.types.task_types.{TaskId, TaskContext}
 use os.kernel.log.klog_api.{log_raw_println}
 
+extern fn rt_x86_32_exec_token_install(task_id: u32, generation: u32, expected_cr3: u32) -> i32
+extern fn rt_x86_32_exec_token_cancel(task_id: u32, generation: u32, expected_cr3: u32) -> i32
+extern fn rt_x86_32_exec_token_take_result(task_id: u32, generation: u32, expected_cr3: u32) -> i32
+
 # ============================================================================
 # FR-SOS-025 — ring-3 first-dispatch helper (x86_32).
 #
-# Will be implemented in examples/09_embedded/simple_os/arch/x86_32/boot/enter_user_first.s
-# as a standalone .s file.  Passes the i386 iret frame fields as explicit u32
-# arguments (cdecl), zeroes user GPRs internally, does not return.
-# Blocked until an i686 freestanding native-build lane is available.
+# Implemented in boot/enter_user_first.s. Passes the i386 iret frame fields as
+# explicit u32 arguments (cdecl), zeroes user GPRs, and returns only through
+# the authenticated exit continuation.
 # ============================================================================
 extern fn rt_x86_32_enter_user_first(
     eip: u32,
@@ -79,6 +82,17 @@ fn dispatch_enter_user_blocking_x86_32(pid_hint: u64, scheduler: Scheduler) -> i
 
     val ctx: TaskContext = uctx.unwrap()
     val cr3 = task.address_space as u32
+    val generation = task.isolation.capability_generation as u32
+    if target_pid == 0u64 or generation == 0u32 or cr3 == 0u32:
+        log_raw_println("[syscall14-x86_32] invalid scalar handoff")
+        return -22
+    if rt_x86_32_exec_token_install(target_pid as u32, generation, cr3) != 1:
+        log_raw_println("[syscall14-x86_32] token install rejected")
+        return -16
     log_raw_println("[syscall14-x86_32] entering ring-3 pid={target_pid} eip={ctx.rip} cr3={cr3}")
     arch_x86_32_enter_user_task(ctx, cr3)
-    -22
+    val rc = rt_x86_32_exec_token_take_result(target_pid as u32, generation, cr3)
+    if rc == -4096:
+        val _cancelled = rt_x86_32_exec_token_cancel(target_pid as u32, generation, cr3)
+        return -22
+    rc as i64

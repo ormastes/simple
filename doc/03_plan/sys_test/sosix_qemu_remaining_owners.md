@@ -6,8 +6,11 @@ Executable spec:
 ## Oracle
 
 The spec uses bounded process capture and typed `CommandEvidence` and
-`RowOracle` values. The row oracle contains exactly 24 stable IDs and expects
-3 `PASS`, 15 `BLOCKED`, and 6 `POSTPONED`. A non-PASS expected state proves
+`RowOracle` values. The retained handoff oracle contains exactly 24 stable IDs
+and expects 3 `PASS`, 15 `BLOCKED`, and 6 `POSTPONED`. The three Linux
+lifecycle sources now also have direct-QEMU implementation receipts, but remain
+non-PASS here until the self-hosted SSpec/docgen and canonical producer bundles
+run. A non-PASS expected state proves
 only honest retention in this handoff test; it cannot promote a live row.
 
 ## Frozen displayed steps
@@ -31,3 +34,19 @@ release/x86_64-unknown-linux-gnu/simple spipe-docgen test/03_system/os/qemu/sosi
 The test must pass and docgen must report zero stubs. Exit 139, timeout,
 missing output, or a handwritten manual is FAIL/BLOCKED, never substitute
 evidence.
+
+## Current implementation evidence
+
+- RV64: Sv39-isolated U-mode, checked ELF/FAT admission, exact fault provenance,
+  supervisor-state restoration, generation-bound exact-once reap, and live
+  `TEST PASSED` are implemented and directly exercised.
+- x86_32: PAE/NX-isolated CPL3, checked ELF/FAT admission, context round trip,
+  exact #GP/#PF ownership, generation-bound reap, and live `TEST PASSED` are
+  implemented and directly exercised.
+- ARM32: EL0 page isolation/W^X, checked ELF/FAT admission, authenticated fault
+  and SVC ownership, scrubbed first-entry registers, exact reap, and live
+  `TEST PASSED` are implemented and directly exercised.
+
+These receipts close the source/lifecycle implementation blockers in AC-4
+through AC-6. They do not promote a matrix row without a source-matched admitted
+runtime, canonical producer bundle, executable SSpec, and generated manual.

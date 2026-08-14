@@ -148,27 +148,67 @@ fn parse_raw_braced_payload(kind: text) -> text:
 fn parse_raw_asm_braced_payload() -> text:
     parse_raw_asm_normalize(parse_raw_braced_payload("asm"))
 
-fn parse_legacy_parenthesized_asm() -> text:
+fn parse_legacy_parenthesized_asm() -> i64:
     parser_warn("legacy inline asm syntax; use asm { ... }")
     parser_expect(140)
-    var depth = 1
     var asm_lines: [text] = []
-    while true:
-        if depth <= 0:
-            break
-        if par_kind_get() == 190:
-            break
-        if par_kind_get() == 140:
-            depth = depth + 1
-            parser_advance()
-            continue
-        if par_kind_get() == 141:
-            depth = depth - 1
-            parser_advance()
-            continue
-        if par_kind_get() == 3:
-            asm_lines.push(par_text_get())
-            parser_advance()
-            continue
+    while par_kind_get() == 3:
+        asm_lines.push(par_text_get())
         parser_advance()
-    asm_lines.join("\n")
+        if par_kind_get() == 160:
+            parser_advance()
+
+    var values: [i64] = []
+    var names: [text] = []
+    var kinds: [text] = []
+    var locations: [text] = []
+    var clobbers: [text] = []
+    var outputs: [i64] = []
+    while par_kind_get() != 141 and par_kind_get() != 190:
+        var name = ""
+        var directive = par_text_get()
+        if directive != "in" and directive != "out" and directive != "inout" and directive != "lateout" and directive != "clobber" and directive != "clobber_abi" and directive != "options":
+            name = directive
+            parser_advance()
+            parser_expect(TOK_ASSIGN)
+            directive = par_text_get()
+        if directive == "clobber" or directive == "clobber_abi" or directive == "options":
+            # These directives do not carry a value operand. The rich AST has
+            # no options field yet, matching the prior flat-parser behavior;
+            # consume the balanced directive without fabricating a MIR input.
+            parser_advance()
+            parser_expect(140)
+            var directive_depth = 1
+            var directive_parts: [text] = []
+            while directive_depth > 0 and par_kind_get() != 190:
+                if par_kind_get() == 140: directive_depth = directive_depth + 1
+                elif par_kind_get() == 141: directive_depth = directive_depth - 1
+                if directive_depth > 0: directive_parts.push(par_text_get())
+                parser_advance()
+            clobbers.push(directive + ":" + directive_parts.join(""))
+            if par_kind_get() == 160: parser_advance()
+            continue
+        if directive != "in" and directive != "out" and directive != "inout" and directive != "lateout":
+            parser_error("expected in/out/inout/lateout inline-asm operand")
+            while par_kind_get() != 141 and par_kind_get() != 190:
+                parser_advance()
+            break
+        parser_advance()
+        parser_expect(140)
+        val location = par_text_get()
+        parser_advance()
+        parser_expect(141)
+        val value = parse_expr()
+        var output = -1
+        if directive == "inout" and par_kind_get() == 168:
+            parser_advance()
+            output = parse_expr()
+        values.push(value)
+        names.push(name)
+        kinds.push(directive)
+        locations.push(location)
+        outputs.push(output)
+        if par_kind_get() == 160:
+            parser_advance()
+    parser_expect(141)
+    expr_asm_operands(asm_lines.join("\n"), values, names, kinds, locations, outputs, clobbers, 0)
