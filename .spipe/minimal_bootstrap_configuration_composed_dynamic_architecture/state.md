@@ -200,8 +200,10 @@ implementation-in-progress
   capability identities. These are isolated modules, not yet the deployed
   `bin/simple` composition root. Config-section-only planning records zero
   parsed/typed/lowered modules, objects, and links, with one SCI section.
-- provider activation remains fail closed after admission. A canonical
-  pure-Simple 44-byte request / 60-byte result codec now removes the private
-  struct-layout ambiguity. The remaining production blocker is an exact
-  `int32` query-call runtime ABI plus a loader-owned, generation-pinned session;
-  scalar `rt_dyncall_2` has an incompatible return type and cannot be reused.
+- provider query/session follow-up: the canonical 44-byte request / 60-byte
+  result codec now feeds an exact hosted/native `int32`
+  `rt_provider_query_v1_call`; scalar `rt_dyncall_2` remains prohibited.
+  Dynamic admission retains its `DynLibKind`, successful query results receive
+  unique live pins, replayed release fails, and close refuses pinned sessions.
+  Naked evidence remains fail closed. A real provider artifact and admitted
+  B2/B3 run are still required before deployed activation is claimed.

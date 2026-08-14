@@ -586,6 +586,7 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_vulkan_present_buffer_regions" => {
             simple_runtime::vulkan_graphics_runtime::rt_vulkan_present_buffer_regions as *const () as usize
         }
+        "rt_provider_query_v1_call" => simple_runtime::rt_provider_query_v1_call as *const () as usize,
         "rt_process_is_running" => value::rt_process_is_running as *const () as usize,
         "rt_process_wait" => value::rt_process_wait as *const () as usize,
         "rt_process_kill" => value::rt_process_kill as *const () as usize,

@@ -4,22 +4,24 @@
 # compatibility, symbol presence, and process-callability.  It is deliberately
 # not equivalent to invoking the provider query ABI.
 #
-# The current runtime dynamic-call surface accepts scalar i64 arguments only.
-# SimpleProviderQueryV1 requires pointers to canonical packed 44-byte and
-# 60-byte descriptors, but no runtime-owned encoder/decoder and no owned
-# dynamic-library session are exposed to this layer.  Passing Simple object or
-# struct addresses would depend on private compiler layout and could outlive the
-# loader handle.  Activation therefore fails closed until those two facilities
-# are provided by their owners.
+# The exact packed query-call bridge now exists. Admission still returns only a
+# naked symbol address, however, so a successful provider-owned interface or
+# context could outlive the dynamic-library handle. Activation remains closed
+# until admission returns an owned, generation-pinned loader session.
 
-use os.smf.provider_loader.{PROVIDER_ADMISSION_OK, ProviderAdmissionResultV1}
+use os.smf.provider_loader.{
+    PROVIDER_ADMISSION_OK,
+    ProviderAdmissionResultV1, ProviderDynamicAdmissionV1, ProviderSessionQueryV1,
+    provider_session_query_v1
+}
+use std.nogc_sync_mut.composition.provider_contract.{SimpleProviderQueryV1}
 
 val PROVIDER_ACTIVATION_OK: i32 = 0
 val PROVIDER_ACTIVATION_NOT_ADMITTED: i32 = 1
 val PROVIDER_ACTIVATION_QUERY_BRIDGE_UNAVAILABLE: i32 = 2
 
-val PROVIDER_ACTIVATION_BLOCKER_OWNER: text = "src/os/posix/dynlib_sffi.spl + runtime ABI"
-val PROVIDER_ACTIVATION_BLOCKER: text = "canonical-packed-provider-query-bridge-and-owned-loader-session-unavailable"
+val PROVIDER_ACTIVATION_BLOCKER_OWNER: text = "src/os/smf/provider_loader.spl"
+val PROVIDER_ACTIVATION_BLOCKER: text = "owned-generation-pinned-loader-session-unavailable"
 
 class ProviderActivationResultV1:
     status: i32
@@ -36,9 +38,9 @@ fn provider_activate_admitted_v1(admission: ProviderAdmissionResultV1) -> Provid
             blocker_owner: ""
         )
 
-    # Do not call rt_dyncall_2 with addresses of language-private values.  The
-    # provider remains admitted but inactive, and the loader handle is left
-    # untouched rather than being closed behind a returned function address.
+    # Do not let a provider-owned handle escape a naked symbol admission. The
+    # provider remains admitted but inactive until its library generation can
+    # be pinned and later released by an owner-issued receipt.
     ProviderActivationResultV1(
         status: PROVIDER_ACTIVATION_QUERY_BRIDGE_UNAVAILABLE,
         activated: false,
@@ -46,7 +48,14 @@ fn provider_activate_admitted_v1(admission: ProviderAdmissionResultV1) -> Provid
         blocker_owner: PROVIDER_ACTIVATION_BLOCKER_OWNER
     )
 
+fn provider_activate_session_v1(
+    dynamic: ProviderDynamicAdmissionV1,
+    request: SimpleProviderQueryV1
+) -> ProviderSessionQueryV1:
+    provider_session_query_v1(dynamic.session, request)
+
 export PROVIDER_ACTIVATION_OK, PROVIDER_ACTIVATION_NOT_ADMITTED
 export PROVIDER_ACTIVATION_QUERY_BRIDGE_UNAVAILABLE
 export PROVIDER_ACTIVATION_BLOCKER_OWNER, PROVIDER_ACTIVATION_BLOCKER
 export ProviderActivationResultV1, provider_activate_admitted_v1
+export provider_activate_session_v1

@@ -34,10 +34,13 @@ The first coarse compiler boundary is implemented by
 cross that contract only as monotonic numeric handles; compiler options,
 diagnostics, and internal IR remain provider-owned. The in-process adapter is a
 contract/proof slice, not dynamic-loader evidence: its query reports no locked
-implementation digest. Dynamic or SMF dispatch must fail closed until an
-admitted artifact supplies a process-callable query entry. Consequently the
-concrete bootstrap driver import remains in place; its exact unblock evidence
-is tracked in
+implementation digest. Dynamic or SMF dispatch must fail closed unless
+admission retains the loader session. The runtime now has an exact `int32`
+query call, canonical packed buffers, and session pins that prevent close while
+provider-owned handles are live; naked symbol evidence remains inactive. A
+real provider artifact still needs admitted B2/B3 execution evidence before
+root dispatch is wired. Consequently the concrete bootstrap driver import
+remains in place; its exact unblock evidence is tracked in
 `doc/08_tracking/bug/compiler_driver_v1_bootstrap_activation_blocked_on_callable_loader_2026-08-14.md`.
 
 ## Development build selection

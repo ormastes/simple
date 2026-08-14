@@ -10148,6 +10148,15 @@ void rt_ptr_write_i64(int64_t addr, int64_t offset, int64_t value) {
     *ptr = value;
 }
 
+/* Exact SimpleProviderQueryV1 discovery call.  Keep this separate from the
+ * generic i64 dynamic-call family: the provider ABI returns int32_t. */
+int32_t rt_provider_query_v1_call(int64_t fn_ptr, int64_t request_ptr, int64_t result_ptr) {
+    typedef int32_t (*simple_provider_query_v1_fn)(const uint8_t*, uint8_t*);
+    if (fn_ptr <= 0 || request_ptr <= 0 || result_ptr <= 0) return -1;
+    simple_provider_query_v1_fn query = (simple_provider_query_v1_fn)(uintptr_t)fn_ptr;
+    return query((const uint8_t*)(uintptr_t)request_ptr, (uint8_t*)(uintptr_t)result_ptr);
+}
+
 /* ================================================================
  * Error Handling
  * ================================================================ */

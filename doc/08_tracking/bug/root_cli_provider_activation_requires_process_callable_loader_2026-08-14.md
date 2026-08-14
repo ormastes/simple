@@ -7,8 +7,8 @@ Open. The separately targetable in-process proof lives at
 `src/os/smf/provider_loader.spl` now performs path, SHA-256 artifact identity,
 capability, host/interface version, loader, symbol, and process-callability
 admission. `provider_generation.spl` owns atomic in-process replacement and pin
-lifetime. Neither currently invokes the admitted query entry or binds it to an
-SCI command record.
+lifetime. The exact query-call and owned-session slices now exist, but the root
+CLI still does not bind them to an SCI command record.
 
 ## Evidence
 
@@ -41,6 +41,18 @@ families must use the same provider contract and fail closed when any proof is
 absent. After focused native/SMF old/new version and unload-pin tests pass, the
 root CLI may add one generic SCI command-registry hook instead of per-provider
 imports.
+
+## 2026-08-14 progress
+
+The hosted and native runtimes now expose the exact `int32`
+`rt_provider_query_v1_call` ABI; Simple marshals canonical 44-byte request and
+60-byte result buffers without exposing language-private layouts. Dynamic
+admission retains its `DynLibKind`, successful query results receive unique
+session pins, release rejects replay, and close refuses live pins.
+
+Still required: run a real native/SMF provider through an admitted B2/B3 tool,
+validate signature/target evidence, then connect the generic SCI route to the
+root executable. Source and Rust-runtime checks do not prove deployed dispatch.
 
 ## Prohibited workaround
 

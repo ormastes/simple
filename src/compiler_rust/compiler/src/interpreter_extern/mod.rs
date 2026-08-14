@@ -2305,6 +2305,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_fonts_call_init_blob", dynamic_sffi::spl_fonts_call_init_blob_fn);
     insert_simple!("spl_fonts_call_init_path", dynamic_sffi::spl_fonts_call_init_path_fn);
     insert_simple!("spl_fonts_call_layout_text", dynamic_sffi::spl_fonts_call_layout_text_fn);
+    insert_simple!("rt_provider_query_v1_call", simple_runtime::rt_provider_query_v1_call);
     insert_simple!("sqrt", math::sqrt);
     insert_simple!("stderr_flush", io::stderr_flush);
     insert_simple!("stderr_write", io::stderr_write);

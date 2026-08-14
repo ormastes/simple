@@ -309,6 +309,7 @@ void*    rt_struct_alloc(int64_t size);
 int8_t   rt_struct_receiver_valid(int64_t receiver, int64_t byte_offset, int64_t access_width);
 void*    rt_realloc(void* ptr, int64_t size);
 void     rt_free(void* ptr);
+int32_t  rt_provider_query_v1_call(int64_t fn_ptr, int64_t request_ptr, int64_t result_ptr);
 void*    rt_memcpy(void* dst, const void* src, int64_t n);
 void*    copy_mem(void* dst, const void* src, int64_t n);
 void*    rt_memset(void* dst, int8_t val, int64_t n);

@@ -11,7 +11,18 @@ use os.smf.provider_loader.{
     ProviderAdmissionRequestV1,
     ProviderCallableEvidenceV1,
     provider_artifact_digest_v1,
-    provider_admit_evidence_v1
+    PROVIDER_SESSION_NOT_OPEN,
+    PROVIDER_SESSION_PIN_UNKNOWN,
+    ProviderLoaderSessionV1,
+    provider_admit_evidence_v1,
+    provider_session_query_v1,
+    provider_session_release_v1,
+    provider_session_close_v1
+}
+use os.posix.dynlib.{DynLibKind}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_QUERY_V1_SIZE,
+    SimpleProviderQueryV1
 }
 use os.smf.provider_activation.{
     PROVIDER_ACTIVATION_NOT_ADMITTED,
@@ -120,3 +131,26 @@ describe "SimpleProviderQueryV1 loader admission":
         expect(activation.status).to_equal(PROVIDER_ACTIVATION_NOT_ADMITTED)
         expect(activation.activated).to_equal(false)
         expect(activation.blocker_owner).to_equal("")
+
+    it "rejects query release and close for a session that never owned a library":
+        val admission = provider_admit_evidence_v1(request_v1(), evidence_v1())
+        val session = ProviderLoaderSessionV1(
+            library: DynLibKind.Invalid,
+            admission: admission,
+            open: false,
+            next_pin_id: 1,
+            live_pins: []
+        )
+        val query = provider_session_query_v1(session, SimpleProviderQueryV1(
+            descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+            interface_id: 5999723006133093425,
+            minimum_major: 1,
+            minimum_minor: 0,
+            host_abi: 1,
+            target_offset: 0,
+            target_length: 0,
+            requested_capability_bits: 0
+        ))
+        expect(query.status).to_equal(PROVIDER_SESSION_NOT_OPEN)
+        expect(provider_session_release_v1(session, 1)).to_equal(PROVIDER_SESSION_PIN_UNKNOWN)
+        expect(provider_session_close_v1(session)).to_equal(PROVIDER_SESSION_NOT_OPEN)

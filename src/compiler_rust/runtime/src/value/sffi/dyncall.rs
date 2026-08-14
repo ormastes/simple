@@ -38,6 +38,24 @@ pub extern "C" fn rt_dyncall_2(fn_ptr: i64, arg0: i64, arg1: i64) -> i64 {
     func(arg0, arg1)
 }
 
+/// Call the exact SimpleProviderQueryV1 discovery ABI.
+///
+/// This must remain separate from `rt_dyncall_2`: provider discovery returns
+/// `int32_t` and accepts pointers to packed request/result buffers. Calling it
+/// through the generic `fn(i64, i64) -> i64` type is incompatible-function-
+/// type undefined behaviour even on targets where it appears to work.
+#[no_mangle]
+pub extern "C" fn rt_provider_query_v1_call(fn_ptr: i64, request_ptr: i64, result_ptr: i64) -> i32 {
+    let Some(ptr) = valid_fn_ptr(fn_ptr) else {
+        return -1;
+    };
+    if request_ptr <= 0 || result_ptr <= 0 {
+        return -1;
+    }
+    let func: extern "C" fn(*const u8, *mut u8) -> i32 = unsafe { std::mem::transmute(ptr) };
+    func(request_ptr as usize as *const u8, result_ptr as usize as *mut u8)
+}
+
 #[no_mangle]
 pub extern "C" fn rt_dyncall_3(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64) -> i64 {
     let Some(ptr) = valid_fn_ptr(fn_ptr) else {
@@ -86,6 +104,16 @@ mod tests {
         a + b
     }
 
+    extern "C" fn provider_query(request: *const u8, result: *mut u8) -> i32 {
+        if request.is_null() || result.is_null() {
+            return -9;
+        }
+        unsafe {
+            *result = *request;
+        }
+        7
+    }
+
     extern "C" fn sum6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {
         a + b + c + d + e + f
     }
@@ -104,6 +132,23 @@ mod tests {
     #[test]
     fn calls_two_arg_function_pointer() {
         assert_eq!(rt_dyncall_2(sum2 as usize as i64, 10, 32), 42);
+    }
+
+    #[test]
+    fn calls_exact_provider_query_signature() {
+        let request = [41u8; 44];
+        let mut result = [0u8; 60];
+        assert_eq!(
+            rt_provider_query_v1_call(
+                provider_query as usize as i64,
+                request.as_ptr() as usize as i64,
+                result.as_mut_ptr() as usize as i64,
+            ),
+            7
+        );
+        assert_eq!(result[0], 41);
+        assert_eq!(rt_provider_query_v1_call(0, 1, 1), -1);
+        assert_eq!(rt_provider_query_v1_call(provider_query as usize as i64, 0, 1), -1);
     }
 
     #[test]

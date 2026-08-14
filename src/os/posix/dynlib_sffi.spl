@@ -6,9 +6,9 @@
 # therefore safe to call.
 # Safe wrappers resolve a named symbol from a DynLibKind, then dispatch.
 
-# Provider-query bridge blocker (2026-08-14)
-# ------------------------------------------
-# `simple_provider_query_v1` is NOT representable by rt_dyncall_2:
+# Provider-query exact bridge
+# ---------------------------
+# `simple_provider_query_v1` is intentionally not represented by rt_dyncall_2:
 #
 # * its C return type is int32_t, while rt_dyncall_2 casts the target to a
 #   function returning i64 (calling through an incompatible function type is
@@ -18,20 +18,19 @@
 # * the successful result can contain interface/context handles whose lifetime
 #   is bounded by the open library generation.
 #
-# The minimal safe owner change is one exact runtime entry point
-#
-#   rt_provider_query_v1_call(fn_ptr, request_ptr, result_ptr) -> i32
-#
-# plus a loader-owned session/generation token returned by admission and pinned
-# by every successful interface result.  Request/result scratch memory must be
-# runtime allocated, byte-encoded, copied to scalar Simple records, and freed
-# before returning.  Closing must be refused while a generation is pinned.
-# `ProviderAdmissionResultV1` currently returns only a naked symbol address and
-# loses the DynLibKind handle, so this file cannot implement that ownership
-# rule without a coordinated provider-loader contract change.  Keep activation
-# fail-closed until those owners land together.
+# The exact runtime entry below uses the real int32 return and pointers to
+# canonical packed buffers. Loader-session pinning remains a separate owner
+# rule: a successful result must not outlive the DynLibKind generation.
 
 use os.posix.dynlib.{DynLibKind, dynlib_symbol}
+use os.smf.provider_query_wire.{
+    encode_provider_query_request_v1, decode_provider_query_result_v1
+}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE,
+    SimpleProviderQueryV1, SimpleProviderQueryResultV1,
+    simple_provider_query_error_v1
+}
 
 # --- Scalar runtime externs ---
 
@@ -42,6 +41,58 @@ extern fn rt_dyncall_3(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64) -> i64
 extern fn rt_dyncall_4(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64, arg3: i64) -> i64
 extern fn rt_dyncall_5(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64, arg3: i64, arg4: i64) -> i64
 extern fn rt_dyncall_6(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64, arg3: i64, arg4: i64, arg5: i64) -> i64
+extern fn rt_provider_query_v1_call(fn_ptr: i64, request_ptr: i64, result_ptr: i64) -> i32
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_memset(dest: i64, value: i64, len: i64) -> i64
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
+extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
+
+class ProviderQueryCallV1:
+    ok: bool
+    call_status: i32
+    result: SimpleProviderQueryResultV1
+    diagnostic: text
+
+fn _provider_query_call_error(status: i32, diagnostic: text) -> ProviderQueryCallV1:
+    ProviderQueryCallV1(
+        ok: false,
+        call_status: status,
+        result: simple_provider_query_error_v1(status),
+        diagnostic: diagnostic
+    )
+
+fn call_provider_query_v1(fn_ptr: i64, request: SimpleProviderQueryV1) -> ProviderQueryCallV1:
+    val encoded = encode_provider_query_request_v1(request)
+    if not encoded.ok:
+        return _provider_query_call_error(-1, encoded.diagnostic)
+    if fn_ptr <= 0:
+        return _provider_query_call_error(-1, "provider-query-pointer-invalid")
+
+    val request_ptr = rt_alloc(encoded.bytes.len())
+    if request_ptr <= 0:
+        return _provider_query_call_error(-1, "provider-query-request-allocation-failed")
+    val result_ptr = rt_alloc(SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE as i64)
+    if result_ptr <= 0:
+        rt_free(request_ptr)
+        return _provider_query_call_error(-1, "provider-query-result-allocation-failed")
+
+    var i = 0
+    while i < encoded.bytes.len():
+        rt_ptr_write_u8(request_ptr, i, encoded.bytes[i] as i64)
+        i = i + 1
+    rt_memset(result_ptr, 0, SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE as i64)
+    val status = rt_provider_query_v1_call(fn_ptr, request_ptr, result_ptr)
+    val result_bytes = rt_bytes_from_raw(result_ptr, SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE as i64)
+    rt_free(result_ptr)
+    rt_free(request_ptr)
+
+    val decoded = decode_provider_query_result_v1(result_bytes)
+    if not decoded.ok:
+        return _provider_query_call_error(status, decoded.diagnostic)
+    if decoded.value.status != status:
+        return _provider_query_call_error(status, "provider-query-status-mismatch")
+    ProviderQueryCallV1(ok: true, call_status: status, result: decoded.value, diagnostic: "")
 
 # --- Safe wrappers: resolve symbol by name, then call ---
 
@@ -93,3 +144,5 @@ fn dynlib_call_6(lib: DynLibKind, name: text, arg0: i64, arg1: i64, arg2: i64, a
     if ptr < 0:
         return ptr
     rt_dyncall_6(ptr, arg0, arg1, arg2, arg3, arg4, arg5)
+
+export ProviderQueryCallV1, call_provider_query_v1
