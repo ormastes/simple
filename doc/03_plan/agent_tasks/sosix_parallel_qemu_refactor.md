@@ -21,6 +21,9 @@ them; they must not fork their own variants.
 | Evidence | native producer + 24-row collector | Row producer owns artifacts; collector is the only parent-authoritative matrix commit. |
 | Status ledger | `sosix_qemu_matrix_evidence_status_2026-08-13.md` | Every unavailable row stays visible with owner and exact resume command. |
 
+The operator-facing settings, storage, admission, nonce, and evidence contract
+is [SOSIX shared QEMU settings](../../07_guide/platform/simpleos/sosix_qemu_shared_settings.md).
+
 Before a native-host run, an operator validates the reusable producer with:
 
 ```sh
