@@ -8,6 +8,72 @@
 use super::core::RuntimeValue;
 use super::collections::{byte_array_bytes, rt_array_get, rt_array_len, rt_string_data, rt_string_len};
 
+fn raw_text_cstring(ptr: *const u8, len: i64) -> Option<std::ffi::CString> {
+    if ptr.is_null() || len <= 0 || len > 1024 * 1024 {
+        return None;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    std::ffi::CString::new(bytes).ok()
+}
+
+#[no_mangle]
+pub extern "C" fn rt_host_dynlib_open(path_ptr: *const u8, path_len: i64, mode: i64) -> i64 {
+    let Some(path) = raw_text_cstring(path_ptr, path_len) else {
+        return 0;
+    };
+    #[cfg(unix)]
+    unsafe {
+        let flags = if mode & 2 != 0 { libc::RTLD_NOW } else { libc::RTLD_LAZY } | libc::RTLD_LOCAL;
+        libc::dlopen(path.as_ptr(), flags) as i64
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::LibraryLoader::LoadLibraryA;
+        LoadLibraryA(path.as_ptr() as *const u8) as i64
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_host_dynlib_symbol(handle: i64, name_ptr: *const u8, name_len: i64) -> i64 {
+    if handle <= 0 {
+        return 0;
+    }
+    let Some(name) = raw_text_cstring(name_ptr, name_len) else {
+        return 0;
+    };
+    #[cfg(unix)]
+    unsafe {
+        libc::dlsym(handle as *mut libc::c_void, name.as_ptr()) as i64
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+        GetProcAddress(handle as _, name.as_ptr() as *const u8)
+            .map(|symbol| symbol as *const () as i64)
+            .unwrap_or(0)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_host_dynlib_close(handle: i64) -> i64 {
+    if handle <= 0 {
+        return -1;
+    }
+    #[cfg(unix)]
+    unsafe {
+        libc::dlclose(handle as *mut libc::c_void) as i64
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::Foundation::FreeLibrary;
+        if FreeLibrary(handle as _) != 0 {
+            0
+        } else {
+            -1
+        }
+    }
+}
+
 /// spl_dlopen(path: text) -> i64
 ///
 /// Decodes the tagged text RuntimeValue to a raw C string, calls dlopen.

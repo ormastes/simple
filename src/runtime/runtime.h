@@ -313,6 +313,9 @@ int32_t  rt_provider_query_v1_call(int64_t fn_ptr, int64_t request_ptr, int64_t 
 int32_t  rt_cli_command_v1_call(int64_t fn_ptr, int64_t interface_handle,
         int64_t provider_context, int64_t request_ptr, int64_t request_len,
         int64_t result_ptr, int64_t result_capacity);
+int64_t  rt_host_dynlib_open(const uint8_t *path_ptr, int64_t path_len, int64_t mode);
+int64_t  rt_host_dynlib_symbol(int64_t handle, const uint8_t *name_ptr, int64_t name_len);
+int64_t  rt_host_dynlib_close(int64_t handle);
 void*    rt_memcpy(void* dst, const void* src, int64_t n);
 void*    copy_mem(void* dst, const void* src, int64_t n);
 void*    rt_memset(void* dst, int8_t val, int64_t n);

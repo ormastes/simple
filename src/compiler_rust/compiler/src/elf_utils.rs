@@ -588,6 +588,9 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         }
         "rt_provider_query_v1_call" => simple_runtime::rt_provider_query_v1_call as *const () as usize,
         "rt_cli_command_v1_call" => simple_runtime::value::sffi::rt_cli_command_v1_call as *const () as usize,
+        "rt_host_dynlib_open" => value::rt_host_dynlib_open as *const () as usize,
+        "rt_host_dynlib_symbol" => value::rt_host_dynlib_symbol as *const () as usize,
+        "rt_host_dynlib_close" => value::rt_host_dynlib_close as *const () as usize,
         "rt_process_is_running" => value::rt_process_is_running as *const () as usize,
         "rt_process_wait" => value::rt_process_wait as *const () as usize,
         "rt_process_kill" => value::rt_process_kill as *const () as usize,

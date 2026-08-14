@@ -6,6 +6,10 @@
 
 use os.posix.dylib_async.{dylib_open, dylib_symbol, dylib_symbol_is_process_callable, dylib_close}
 
+extern fn rt_host_dynlib_open(path: text, mode: i64) -> i64
+extern fn rt_host_dynlib_symbol(handle: i64, name: text) -> i64
+extern fn rt_host_dynlib_close(handle: i64) -> i64
+
 struct ElfLibState:
     """State for a loaded ELF shared object."""
     handle: i64
@@ -62,7 +66,7 @@ fn dynlib_open(path: text, mode: u32) -> DynLibKind:
     if fmt == "unknown":
         return DynLibKind.Invalid
 
-    val handle = dylib_open(path, mode)
+    val handle = if fmt == "elf": rt_host_dynlib_open(path, mode as i64) else: dylib_open(path, mode)
     if handle < 0:
         return DynLibKind.Invalid
 
@@ -84,7 +88,7 @@ fn dynlib_symbol(lib: DynLibKind, name: text) -> i64:
     """Resolve a named symbol from a loaded library."""
     match lib:
         DynLibKind.Elf(state):
-            return dylib_symbol(state.handle, name)
+            return rt_host_dynlib_symbol(state.handle, name)
         DynLibKind.Smf(state):
             return dylib_symbol(state.handle, name)
         DynLibKind.Pe(state):
@@ -96,7 +100,7 @@ fn dynlib_symbol_is_process_callable(lib: DynLibKind, name: text) -> bool:
     """Return whether `name` resolves to a process-callable function pointer."""
     match lib:
         DynLibKind.Elf(state):
-            return dylib_symbol_is_process_callable(state.handle, name)
+            return rt_host_dynlib_symbol(state.handle, name) > 0
         DynLibKind.Smf(state):
             return dylib_symbol_is_process_callable(state.handle, name)
         DynLibKind.Pe(state):
@@ -108,7 +112,7 @@ fn dynlib_close(lib: DynLibKind) -> i64:
     """Close a loaded dynamic library, releasing kernel resources."""
     match lib:
         DynLibKind.Elf(state):
-            return dylib_close(state.handle)
+            return rt_host_dynlib_close(state.handle)
         DynLibKind.Smf(state):
             return dylib_close(state.handle)
         DynLibKind.Pe(state):

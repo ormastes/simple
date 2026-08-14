@@ -1940,6 +1940,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     ),
     RuntimeFuncSpec::new("rt_provider_query_v1_call", &[I64, I64, I64], &[I32]),
     RuntimeFuncSpec::new("rt_cli_command_v1_call", &[I64, I64, I64, I64, I64, I64, I64], &[I32]),
+    RuntimeFuncSpec::new("rt_host_dynlib_open", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_host_dynlib_symbol", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_host_dynlib_close", &[I64], &[I64]),
     RuntimeFuncSpec::new("spl_wffi_call_f64", &[I64, I64, I64], &[F64]),
     // Call-scoped packed-byte adapters for optional GPU/font providers.
     RuntimeFuncSpec::new("rt_font_load_array", &[I64], &[I64]),

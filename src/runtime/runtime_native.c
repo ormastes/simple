@@ -10173,6 +10173,34 @@ int32_t rt_cli_command_v1_call(int64_t fn_ptr, int64_t interface_handle,
         (uint64_t)result_ptr, (uint32_t)result_capacity);
 }
 
+int64_t rt_host_dynlib_open(const uint8_t *path_ptr, int64_t path_len, int64_t mode) {
+    if (!path_ptr || path_len <= 0 || path_len > 1048576) return 0;
+    char *path = (char*)malloc((size_t)path_len + 1);
+    if (!path) return 0;
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[path_len] = '\0';
+    int flags = ((mode & 2) ? RTLD_NOW : RTLD_LAZY) | RTLD_LOCAL;
+    void *handle = dlopen(path, flags);
+    free(path);
+    return (int64_t)(intptr_t)handle;
+}
+
+int64_t rt_host_dynlib_symbol(int64_t handle, const uint8_t *name_ptr, int64_t name_len) {
+    if (handle <= 0 || !name_ptr || name_len <= 0 || name_len > 1048576) return 0;
+    char *name = (char*)malloc((size_t)name_len + 1);
+    if (!name) return 0;
+    memcpy(name, name_ptr, (size_t)name_len);
+    name[name_len] = '\0';
+    void *symbol = dlsym((void*)(intptr_t)handle, name);
+    free(name);
+    return (int64_t)(intptr_t)symbol;
+}
+
+int64_t rt_host_dynlib_close(int64_t handle) {
+    if (handle <= 0) return -1;
+    return (int64_t)dlclose((void*)(intptr_t)handle);
+}
+
 /* ================================================================
  * Error Handling
  * ================================================================ */

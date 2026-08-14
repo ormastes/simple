@@ -16,8 +16,7 @@ use std.nogc_sync_mut.composition.provider_contract.{
     SimpleProviderQueryResultV1
 }
 use std.nogc_sync_mut.composition.cli_command_wire.{
-    CliCommandRequestViewV1, CliCommandResultArenaV1,
-    decode_cli_command_request_v1, encode_cli_command_result_v1
+    CliCommandRequestViewV1, decode_cli_command_request_v1
 }
 
 extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
@@ -32,6 +31,12 @@ fn _copy_to_raw(address: i64, bytes: [u8]):
     while i < bytes.len():
         rt_ptr_write_u8(address, i, bytes[i] as i64)
         i = i + 1
+
+fn _write_u32_raw(address: i64, offset: i64, value: u32):
+    rt_ptr_write_u8(address, offset, (value & 255) as i64)
+    rt_ptr_write_u8(address, offset + 1, ((value >> 8) & 255) as i64)
+    rt_ptr_write_u8(address, offset + 2, ((value >> 16) & 255) as i64)
+    rt_ptr_write_u8(address, offset + 3, ((value >> 24) & 255) as i64)
 
 fn _query_error(status: i32, result_address: i64) -> i32:
     val encoded: ProviderQueryWireWriteV1 = encode_provider_query_result_v1(SimpleProviderQueryResultV1(
@@ -98,12 +103,21 @@ fn simple_cli_command_invoke_v1(
     if not request.ok or request.operation != SIMPLE_CLI_RUN or
             request.command != "fmt":
         return SIMPLE_CLI_INVALID_ARGS
-    val encoded: CliCommandResultArenaV1 = encode_cli_command_result_v1(
-        SIMPLE_CLI_OK, "pure-simple-provider-ok", ""
-    )
-    if not encoded.ok or encoded.bytes.len() > result_capacity:
+    val output: [u8] = [
+        112, 117, 114, 101, 45, 115, 105, 109, 112, 108, 101, 45,
+        112, 114, 111, 118, 105, 100, 101, 114, 45, 111, 107,
+    ]
+    if result_capacity < 43:
         return SIMPLE_CLI_INVALID_ARGS
-    _copy_to_raw(result_address, encoded.bytes)
+    _write_u32_raw(result_address, 0, SIMPLE_CLI_OK as u32)
+    _write_u32_raw(result_address, 4, 20)
+    _write_u32_raw(result_address, 8, output.len() as u32)
+    _write_u32_raw(result_address, 12, 43)
+    _write_u32_raw(result_address, 16, 0)
+    var i = 0
+    while i < output.len():
+        rt_ptr_write_u8(result_address, 20 + i, output[i] as i64)
+        i = i + 1
     SIMPLE_CLI_OK
 
 export simple_provider_query_v1, simple_cli_command_invoke_v1
