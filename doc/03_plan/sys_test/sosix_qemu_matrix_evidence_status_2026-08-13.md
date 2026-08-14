@@ -25,7 +25,7 @@ excluded or complete.
 | Linux | riscv64 | blocked | Existing retained records are diagnostics; rebuild and canonical direct-kernel/OpenSBI closure remains required. |
 | Windows | all six | blocked, target-host execution required | `scripts/check/check-sosix-qemu-matrix.ps1` now provides strict row/runtime/admission records, but PowerShell validation and real guest execution remain pending on Windows. Run its self-test first, then `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -AllGuests -Run -Parallel` with all native artifacts present. |
 | macOS | all six | postponed, not complete | On a prepared Darwin host use `SIMPLE_QEMU_ACCELERATOR=tcg sh scripts/check/check-sosix-qemu-matrix.shs --host macos --all-guests --run --parallel`; retain native-host blockers until then. |
-| FreeBSD | all six | blocked, target-host execution required | Linux bootstrap preflight currently fails `base_image`: obtain the checksum-pinned FreeBSD 14.4 cloud image, run `sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke --download`, then on FreeBSD run `sh scripts/check/check-sosix-qemu-matrix.shs --host freebsd --all-guests --run --parallel`. |
+| FreeBSD | all six | blocked, target-host execution required | Supply the checksum-pinned FreeBSD 14.4 cloud qcow2 and its trusted SHA-256 under the shared image root; `sh scripts/qemu/simple-freebsd-media.shs --check` must pass before `sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke`. Then, on FreeBSD, run `sh scripts/check/check-sosix-qemu-matrix.shs --host freebsd --all-guests --run --parallel`. The wrapper no longer downloads a floating image. |
 
 All artifact paths above are rooted at
 `/mnt/data/.simple/qemu/artifacts/sosix-qemu/`.
