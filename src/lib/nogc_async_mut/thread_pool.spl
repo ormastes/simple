@@ -273,26 +273,39 @@ class TaskHandle:
     """Join handle for a pool-backed value task."""
     task_id: usize
     native_handle: i64
+    joined: bool
+    cached_result: i64
 
     fn is_done() -> bool:
+        if self.joined:
+            return true
         if task_is_done(self.task_id):
             return true
         match get_task_pool_handle(self.task_id):
             Some(handle): handle.is_done()
             nil: false
 
-    fn join() -> i64:
+    me join() -> i64:
+        if self.joined:
+            return self.cached_result
+        var result = 0
         if task_is_done(self.task_id):
-            return task_result(self.task_id)
-        match get_task_pool_handle(self.task_id):
-            Some(handle):
-                val result = handle.join()
-                mark_task_done(self.task_id, result)
-                result
-            nil:
-                while not self.is_done():
-                    thread_yield()
-                task_result(self.task_id)
+            result = task_result(self.task_id)
+        else:
+            match get_task_pool_handle(self.task_id):
+                Some(handle):
+                    result = handle.join()
+                    mark_task_done(self.task_id, result)
+                nil:
+                    while not self.is_done():
+                        thread_yield()
+                    result = task_result(self.task_id)
+        # The scalar result becomes owned by this handle. Release all legacy
+        # global callback/result rows so joined tasks do not accumulate.
+        release_task_registry(self.task_id)
+        self.cached_result = result
+        self.joined = true
+        result
 
     fn id() -> usize:
         self.task_id
@@ -367,6 +380,48 @@ fn task_result(task_id: usize) -> i64:
             return GLOBAL_TASK_RESULTS[i]
     0
 
+fn release_task_registry(task_id: usize):
+    """Drop global bookkeeping after one handle has consumed its result.
+
+    This is a legacy memory bound only. It does not make the global registry
+    thread-safe or turn this task facade into the WP-18 typed pool API.
+    """
+    if GLOBAL_TASK_CALLBACKS.contains_key(task_id):
+        GLOBAL_TASK_CALLBACKS.remove(task_id)
+
+    var value_ids: [usize] = []
+    var value_callbacks: [fn() -> i64] = []
+    for i in 0..GLOBAL_TASK_VALUE_IDS.len():
+        if GLOBAL_TASK_VALUE_IDS[i] != task_id:
+            value_ids = value_ids + [GLOBAL_TASK_VALUE_IDS[i]]
+            value_callbacks = value_callbacks + [GLOBAL_TASK_VALUE_CALLBACKS[i]]
+    GLOBAL_TASK_VALUE_IDS = value_ids
+    GLOBAL_TASK_VALUE_CALLBACKS = value_callbacks
+
+    var result_ids: [usize] = []
+    var results: [i64] = []
+    for i in 0..GLOBAL_TASK_RESULT_IDS.len():
+        if GLOBAL_TASK_RESULT_IDS[i] != task_id:
+            result_ids = result_ids + [GLOBAL_TASK_RESULT_IDS[i]]
+            results = results + [GLOBAL_TASK_RESULTS[i]]
+    GLOBAL_TASK_RESULT_IDS = result_ids
+    GLOBAL_TASK_RESULTS = results
+
+    var done_ids: [usize] = []
+    for done_id in GLOBAL_TASK_DONE:
+        if done_id != task_id:
+            done_ids = done_ids + [done_id]
+    GLOBAL_TASK_DONE = done_ids
+
+    var pool_handle_ids: [usize] = []
+    var pool_handles: [MulticoreGreenHandle] = []
+    for i in 0..GLOBAL_TASK_POOL_HANDLE_IDS.len():
+        if GLOBAL_TASK_POOL_HANDLE_IDS[i] != task_id:
+            pool_handle_ids = pool_handle_ids + [GLOBAL_TASK_POOL_HANDLE_IDS[i]]
+            pool_handles = pool_handles + [GLOBAL_TASK_POOL_HANDLES[i]]
+    GLOBAL_TASK_POOL_HANDLE_IDS = pool_handle_ids
+    GLOBAL_TASK_POOL_HANDLES = pool_handles
+
 fn default_go_pool() -> ThreadPool:
     """Return the process-global pool used by go()."""
     if GLOBAL_DEFAULT_POOL_ID < 0:
@@ -386,7 +441,7 @@ fn task_spawn(closure: fn() -> i64) -> TaskHandle:
     val task_id = next_task_id()
     register_value_task_callback(task_id, closure)
     register_task_pool_handle(task_id, multicore_green_spawn(closure))
-    TaskHandle(task_id: task_id, native_handle: 0)
+    TaskHandle(task_id: task_id, native_handle: 0, joined: false, cached_result: 0)
 
 fn worker_loop_entry(pool_id: i64):
     """Worker thread entry point.

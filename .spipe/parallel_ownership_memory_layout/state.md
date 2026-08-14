@@ -819,3 +819,7 @@ in-progress
   ID instead of falling back to pool zero or creating a dummy authority. This
   prevents one stale worker from consuming another pool's queue; it does not
   admit the remaining `GLOBAL_*` registry model.
+- impl: Legacy `TaskHandle.join()` now caches its scalar result on the class
+  handle and releases its callback/result/done/runtime-handle registry rows.
+  This bounds joined-task retention while preserving repeat join values; the
+  unsynchronized global registry remains outside the admitted WP-18 API.
