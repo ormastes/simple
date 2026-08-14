@@ -1,0 +1,59 @@
+# @tag: rendering, web, drawir, vulkan, wm_compare, 8k80
+# @cover src/app/wm_compare/strict_semantic_vulkan_producer.spl 80%
+
+use app.wm_compare.strict_semantic_vulkan_producer.{strict_semantic_vulkan_receipt_values}
+use app.io.mod.{file_read_text}
+
+describe "strict semantic Vulkan producer receipt":
+    it "publishes every fail-closed A5 receipt field for completed changing revisions":
+        val receipt = strict_semantic_vulkan_receipt_values(
+            "pass", "pass", "vulkan", "device_readback", 71, 83,
+            10, 11, 101, 202, true, false, 1, 60, 4000, 6000, 0)
+        expect(receipt).to_contain("producer_receipt_status=pass")
+        expect(receipt).to_contain("producer_receipt_requested_backend=vulkan")
+        expect(receipt).to_contain("producer_receipt_selected_backend=vulkan")
+        expect(receipt).to_contain("producer_receipt_readback_source=device_readback")
+        expect(receipt).to_contain("producer_receipt_backend_handle=71")
+        expect(receipt).to_contain("producer_receipt_device_identity=83")
+        expect(receipt).to_contain("producer_receipt_revision_start=10")
+        expect(receipt).to_contain("producer_receipt_revision_end=11")
+        expect(receipt).to_contain("producer_receipt_checksum_start=101")
+        expect(receipt).to_contain("producer_receipt_checksum_end=202")
+        expect(receipt).to_contain("producer_receipt_completion_known=true")
+        expect(receipt).to_contain("producer_receipt_fallback_used=false")
+        expect(receipt).to_contain("producer_receipt_warmup_count=1")
+        expect(receipt).to_contain("producer_receipt_sample_count=60")
+        expect(receipt).to_contain("producer_receipt_p50_ns=4000")
+        expect(receipt).to_contain("producer_receipt_p95_ns=6000")
+        expect(receipt).to_contain("producer_receipt_timed_readback_bytes=0")
+
+    it "keeps unavailable Vulkan distinct from an accepted rendering receipt":
+        val receipt = strict_semantic_vulkan_receipt_values(
+            "blocked", "strict-vulkan-unavailable", "", "", 0, 0,
+            10, 11, 0, 0, false, false, 1, 60, 0, 0, 0)
+        expect(receipt).to_contain("producer_receipt_status=blocked")
+        expect(receipt).to_contain("producer_receipt_reason=strict-vulkan-unavailable")
+        expect(receipt).to_contain("producer_receipt_completion_known=false")
+        expect(receipt).to_contain("producer_receipt_backend_handle=0")
+
+    it "keeps warmup outside the sixty-frame timed percentile sample":
+        val source = file_read_text(
+            "src/app/wm_compare/strict_semantic_vulkan_producer.spl")
+        expect(source).to_contain("sample_count: i32 = 60")
+        expect(source).to_contain("while warmup < warmup_count:")
+        expect(source).to_contain("while sample < sample_count:")
+        expect(source).to_contain("if elapsed_us <= 0: return 0")
+        expect(source).to_contain("val elapsed_ns = _positive_elapsed_ns")
+        expect(source).to_contain("if elapsed_ns <= 0: evidence_valid = false")
+        expect(source).to_contain("engine2d_draw_ir_adv_strict_vulkan_submit_with_images")
+        expect(source).to_contain("engine2d_draw_ir_adv_strict_vulkan_readback")
+        val timed_push = source.index_of("samples.push(elapsed_ns)")
+        val final_readback = source.last_index_of(
+            "engine2d_draw_ir_adv_strict_vulkan_readback(result)")
+        expect(timed_push).to_be_greater_than(0)
+        expect(final_readback).to_be_greater_than(timed_push)
+        expect(source).to_contain("_percentile_nearest_rank(sorted, 50)")
+        expect(source).to_contain("_percentile_nearest_rank(sorted, 95)")
+        expect(source).to_contain("result.backend_handle != expected_handle")
+        expect(source).to_contain("checksum_end != checksum_start")
+        expect(source).to_contain("timed_readback_bytes == 0")

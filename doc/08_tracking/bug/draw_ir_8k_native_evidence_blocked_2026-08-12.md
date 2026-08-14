@@ -2,7 +2,7 @@
 
 The canonical retained-damage benchmark is
 `test/05_perf/graphics_2d/draw_ir_damage_8k_bench.spl`. It measures twenty
-7680x4320 CPU DrawIR frames with one changing 7680x43 damage rectangle, keeping
+7680x4320 CPU DrawIR frames with one changing 256x128 damage rectangle, keeping
 seed and final full readback outside timing.
 
 No production performance row is available on this host:

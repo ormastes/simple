@@ -1,0 +1,238 @@
+"""Strict Web semantic -> DrawIR -> Engine2D Vulkan evidence producer."""
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult, Engine2dDrawIrAdvSubmitResult, engine2d_draw_ir_adv_strict_vulkan_submit_with_images, engine2d_draw_ir_adv_strict_vulkan_readback}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DrawIrComposition}
+use std.common.ui.ui_frame_clock.{FrameClock}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
+use app.wm_compare_host.io_runtime.{get_args}
+use app.wm_compare_host.sffi_io.{file_write_text}
+
+fn _arg_value(args: [text], key: text, fallback: text) -> text:
+    var i = 0
+    while i + 1 < args.len():
+        if args[i] == key:
+            return args[i + 1]
+        i = i + 1
+    fallback
+
+fn _arg_i64(args: [text], key: text, fallback: i64) -> i64:
+    _arg_value(args, key, "").parse_int() ?? fallback
+
+fn _arg_i32(args: [text], key: text, fallback: i32) -> i32:
+    _arg_i64(args, key, fallback.to_i64()).to_i32()
+
+fn _bool_text(value: bool) -> text:
+    if value: return "true"
+    "false"
+
+fn _positive_elapsed_ns(start_us: i64, clock: FrameClock) -> i64:
+    val elapsed_us = clock.now_micros() - start_us
+    if elapsed_us <= 0: return 0
+    elapsed_us * 1000
+
+fn _sort_i64(values: [i64]) -> [i64]:
+    var out = values
+    var i = 0
+    while i < out.len():
+        var j = i + 1
+        while j < out.len():
+            if out[j] < out[i]:
+                val temporary = out[i]
+                out[i] = out[j]
+                out[j] = temporary
+            j = j + 1
+        i = i + 1
+    out
+
+fn _percentile_nearest_rank(sorted: [i64], pct: i32) -> i64:
+    if sorted.len() == 0: return 0
+    var rank = ((sorted.len() * pct + 99) / 100) - 1
+    if rank < 0: rank = 0
+    if rank >= sorted.len(): rank = sorted.len() - 1
+    sorted[rank]
+
+fn _semantic_html(revision: i64) -> text:
+    val color = if revision % 2 == 0: "#16324f" else: "#7c2d12"
+    "<html><body style='margin:0;background:" + color + "'></body></html>"
+
+fn _sample_revision(index: i32, sample_count: i32, revision_start: i64,
+                    revision_end: i64) -> i64:
+    if index == sample_count - 1: return revision_end
+    if index % 2 == 0: return revision_start
+    revision_end
+
+fn _vulkan_composition(revision: i64, width: i32, height: i32) -> DrawIrComposition:
+    var composition = simple_web_layout_render_html_draw_ir(
+        _semantic_html(revision), width, height)
+    composition.composition_id = "wm-compare-strict-vulkan-" + revision.to_string()
+    composition.scene_key = "wm-compare-strict-vulkan"
+    composition.backend_target = DRAW_IR_BACKEND_GPU
+    var i = 0
+    while i < composition.batches.len():
+        var batch = composition.batches[i]
+        batch.backend_target = DRAW_IR_BACKEND_GPU
+        composition.batches[i] = batch
+        i = i + 1
+    composition
+
+fn _strict_result_valid(result: Engine2dDrawIrAdvResult, width: i32, height: i32) -> bool:
+    (result.selected_backend == DRAW_IR_BACKEND_GPU and
+        not result.fallback_required and result.skipped_command_count == 0 and
+        result.rendered_command_count > 0 and
+        result.readback_source == "device_readback" and
+        result.backend_handle > 0 and result.device_identity > 0 and
+        result.pixels.len() == width.to_i64() * height.to_i64() and
+        result.readback_checksum != 0 and
+        result.device_submit_count == 1 and result.device_fence_count == 1)
+
+fn _strict_submit_valid(result: Engine2dDrawIrAdvSubmitResult) -> bool:
+    (result.selected_backend == "vulkan" and not result.fallback_required and
+        result.skipped_command_count == 0 and result.rendered_command_count > 0 and
+        result.backend_handle > 0 and result.device_identity > 0 and
+        result.device_submit_count == 1 and result.device_fence_count == 1 and
+        result.completion_known and result.no_readback and
+        result.readback_bytes == 0)
+
+pub fn strict_semantic_vulkan_receipt_values(
+    status: text, reason: text, selected_backend: text, readback_source: text,
+    backend_handle: i64, device_identity: i64, revision_start: i64,
+    revision_end: i64, checksum_start: i64, checksum_end: i64,
+    completion_known: bool, fallback_used: bool, warmup_count: i32,
+    sample_count: i32, p50_ns: i64, p95_ns: i64,
+    timed_readback_bytes: i64
+) -> text:
+    "producer_receipt_status=" + status + "\n" +
+        "producer_receipt_reason=" + reason + "\n" +
+        "producer_receipt_requested_backend=vulkan\n" +
+        "producer_receipt_selected_backend=" + selected_backend + "\n" +
+        "producer_receipt_readback_source=" + readback_source + "\n" +
+        "producer_receipt_backend_handle=" + backend_handle.to_string() + "\n" +
+        "producer_receipt_device_identity=" + device_identity.to_string() + "\n" +
+        "producer_receipt_revision_start=" + revision_start.to_string() + "\n" +
+        "producer_receipt_revision_end=" + revision_end.to_string() + "\n" +
+        "producer_receipt_checksum_start=" + checksum_start.to_string() + "\n" +
+        "producer_receipt_checksum_end=" + checksum_end.to_string() + "\n" +
+        "producer_receipt_completion_known=" + _bool_text(completion_known) + "\n" +
+        "producer_receipt_fallback_used=" + _bool_text(fallback_used) + "\n" +
+        "producer_receipt_warmup_count=" + warmup_count.to_string() + "\n" +
+        "producer_receipt_sample_count=" + sample_count.to_string() + "\n" +
+        "producer_receipt_p50_ns=" + p50_ns.to_string() + "\n" +
+        "producer_receipt_p95_ns=" + p95_ns.to_string() + "\n" +
+        "producer_receipt_timed_readback_bytes=" + timed_readback_bytes.to_string() + "\n"
+
+pub fn strict_semantic_vulkan_producer_receipt(
+    width: i32, height: i32, revision_start: i64, warmup_count: i32 = 1,
+    sample_count: i32 = 60,
+    clock: FrameClock? = nil
+) -> text:
+    val revision_end = revision_start + 1
+    if (width <= 0 or height <= 0 or revision_start < 0 or
+        warmup_count < 0 or sample_count < 2):
+        return strict_semantic_vulkan_receipt_values(
+            "failed", "invalid-workload", "", "", 0, 0,
+            revision_start, revision_end, 0, 0, false, false,
+            warmup_count, sample_count, 0, 0, 0)
+    val created = Engine2D.create_with_backend_strict(width, height, "vulkan")
+    if not created.is_ok():
+        return strict_semantic_vulkan_receipt_values(
+            "blocked", "strict-vulkan-unavailable", "", "", 0, 0,
+            revision_start, revision_end, 0, 0, false, false,
+            warmup_count, sample_count, 0, 0, 0)
+    var engine = created.unwrap()
+    val ck: FrameClock = if clock == nil: default_frame_clock() else: clock
+    var evidence_valid = true
+    var fallback_used = false
+    var expected_handle: i64 = 0
+    var expected_identity: i64 = 0
+    val start_submission = engine2d_draw_ir_adv_strict_vulkan_submit_with_images(
+        engine, _vulkan_composition(revision_start, width, height), [])
+    if not _strict_submit_valid(start_submission): evidence_valid = false
+    engine = start_submission.engine
+    val start_readback = engine2d_draw_ir_adv_strict_vulkan_readback(
+        start_submission)
+    if not _strict_result_valid(start_readback, width, height):
+        evidence_valid = false
+    var checksum_start = start_readback.readback_checksum
+    var checksum_end: i64 = 0
+    var readback_source = start_readback.readback_source
+    expected_handle = start_readback.backend_handle
+    expected_identity = start_readback.device_identity
+    fallback_used = fallback_used or start_readback.fallback_required
+    var warmup = 0
+    while warmup < warmup_count:
+        val warm_revision = if warmup % 2 == 0: revision_start else: revision_end
+        val warm_result = engine2d_draw_ir_adv_strict_vulkan_submit_with_images(
+            engine, _vulkan_composition(warm_revision, width, height), [])
+        if not _strict_submit_valid(warm_result): evidence_valid = false
+        fallback_used = fallback_used or warm_result.fallback_required
+        if (warm_result.backend_handle != expected_handle or
+            warm_result.device_identity != expected_identity):
+            evidence_valid = false
+        engine = warm_result.engine
+        warmup = warmup + 1
+    var samples: [i64] = []
+    var timed_readback_bytes: i64 = 0
+    var sample = 0
+    while sample < sample_count:
+        val sample_revision = _sample_revision(
+            sample, sample_count, revision_start, revision_end)
+        val sample_start = ck.now_micros()
+        val result = engine2d_draw_ir_adv_strict_vulkan_submit_with_images(
+            engine, _vulkan_composition(sample_revision, width, height), [])
+        val elapsed_ns = _positive_elapsed_ns(sample_start, ck)
+        samples.push(elapsed_ns)
+        if elapsed_ns <= 0: evidence_valid = false
+        if not _strict_submit_valid(result): evidence_valid = false
+        fallback_used = fallback_used or result.fallback_required
+        timed_readback_bytes = timed_readback_bytes + result.readback_bytes
+        if (result.backend_handle != expected_handle or
+            result.device_identity != expected_identity):
+            evidence_valid = false
+        engine = result.engine
+        if sample == sample_count - 1:
+            val end_readback = engine2d_draw_ir_adv_strict_vulkan_readback(result)
+            if not _strict_result_valid(end_readback, width, height):
+                evidence_valid = false
+            if (end_readback.backend_handle != expected_handle or
+                end_readback.device_identity != expected_identity):
+                evidence_valid = false
+            checksum_end = end_readback.readback_checksum
+            readback_source = end_readback.readback_source
+            fallback_used = fallback_used or end_readback.fallback_required
+        sample = sample + 1
+    val selected_backend = engine.backend_name()
+    engine.shutdown()
+    val revisions_changed = (revision_end > revision_start and
+        checksum_end != 0 and checksum_end != checksum_start)
+    val accepted = (selected_backend == "vulkan" and
+        evidence_valid and expected_handle > 0 and expected_identity > 0 and
+        revisions_changed and not fallback_used and timed_readback_bytes == 0)
+    val sorted = _sort_i64(samples)
+    val p50_ns = _percentile_nearest_rank(sorted, 50)
+    val p95_ns = _percentile_nearest_rank(sorted, 95)
+    val reason = if accepted: "pass" else: "strict-vulkan-evidence-rejected"
+    strict_semantic_vulkan_receipt_values(
+        if accepted: "pass" else: "failed", reason, selected_backend,
+        readback_source, expected_handle, expected_identity,
+        revision_start, revision_end, checksum_start, checksum_end, accepted,
+        fallback_used, warmup_count, sample_count, p50_ns, p95_ns,
+        timed_readback_bytes)
+
+fn main() -> i64:
+    val args = get_args()
+    val receipt = strict_semantic_vulkan_producer_receipt(
+        _arg_i32(args, "--width", 7680), _arg_i32(args, "--height", 4320),
+        _arg_i64(args, "--revision", 1),
+        _arg_i32(args, "--warmup-count", 1),
+        _arg_i32(args, "--sample-count", 60))
+    val out_path = _arg_value(args, "--out", "")
+    if out_path != "":
+        if file_write_text(out_path, receipt):
+            return 0
+        print "failed to write strict semantic Vulkan receipt: " + out_path
+        return 1
+    print(receipt)
+    if receipt.contains("producer_receipt_status=pass"): return 0
+    2

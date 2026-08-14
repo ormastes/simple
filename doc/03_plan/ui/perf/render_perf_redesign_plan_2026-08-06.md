@@ -16,6 +16,15 @@ This section supersedes the older resume ordering in §0-A for the physical
 8K80 evidence campaign.  Mechanism completion and isolated primitive timing
 remain useful, but neither is an end-to-end 8K80 claim.
 
+The current non-physical research and design baseline is
+`doc/01_research/local/render_8k80_container_gpu_completion.md`,
+`doc/01_research/domain/render_8k80_container_gpu_completion.md`,
+`doc/04_architecture/render_8k80_container_gpu_completion.md`, and
+`doc/05_design/render_8k80_container_gpu_completion.md`. It deliberately keeps
+A4 as a CPU-native DrawIR carrier, defines A5 as a separate strict Vulkan
+semantic-producer lane, and permits A7 to publish `blocked-physical` after its
+software inputs pass. Physical completion remains exclusively TODO684/TODO685.
+
 ### Acceptance items
 
 - [ ] **A1 — physical adapter attribution (PARTIAL):** current retained rows
@@ -31,27 +40,32 @@ remain useful, but neither is an end-to-end 8K80 claim.
   sample counts are explicit, p50/p95 use the 12.5 ms budget, and changed-pixel
   scope is recorded.  Full repaint remains a measured failure; retained damage
   is mandatory.
-- [ ] **A4 — production-native DrawIR frame:** a non-seed pure-Simple artifact
-  must execute the retained DrawIR workload with backend identity, considered
-  and culled command counts, p50/p95, max RSS, checksum, readback source/count,
-  and fail-closed fallback/completion fields.
-- [ ] **A5 — retained semantic producer frame:** Web, GUI, or WM must publish
-  the changed revision through canonical Draw IR and Engine2D; a C ABI probe or
-  direct compute benchmark cannot satisfy this item.
+- [ ] **A4 — production-native CPU DrawIR frame:** a non-seed pure-Simple
+  artifact must execute the retained CPU DrawIR workload with backend identity,
+  considered and culled command counts, p50/p95, max RSS, checksum, readback
+  source/count, and fail-closed fallback/completion fields.
+- [ ] **A5 — strict Vulkan semantic producer frame:** Web, GUI, or WM must
+  publish the changed revision through its canonical semantic owner, Draw IR,
+  and Engine2D Vulkan with device-origin readback and no software fallback; a
+  CUDA qualification, C ABI probe, or direct compute benchmark cannot satisfy
+  this item.
 - [ ] **A6 — physical presentation:** the same physical device must present a
   7680x4320 changed frame and a retained replay with zero timed host readback,
   native present mode, p50/p95, memory receipts, and device-origin or captured
   scanout parity.  Headless compute and Xvfb are explicitly inadmissible.
-- [ ] **A7 — 80 Hz promotion:** A4–A6 each pass p95 <= 12,500,000 ns with no
-  CPU/interpreter/stub fallback and no unknown completion.  Claims are scoped
-  to the measured damage class and named hardware.
+- [ ] **A7 — 80 Hz promotion:** the software aggregate must correlate A4 and
+  A5 receipts that each pass p95 <= 12,500,000 ns with no disallowed fallback
+  or unknown completion. It reports `blocked-physical`, not failure or PASS,
+  until correlated A6 evidence is supplied; only then may it promote the full
+  campaign. Claims are scoped to the measured damage class and named hardware.
 - [ ] **A8 — physical 80 Hz display evidence:** EDID/connector/mode evidence
   must identify an attached 7680x4320@80 display path.  If the host cannot
   expose that mode, the campaign ends WARN rather than fabricating scanout.
 
 ### Current blockers and next action
 
-1. **B1 — self-hosted artifact unavailable (blocks A4/A5).** The deployed
+1. **B1 — self-hosted artifact unavailable (blocks A4 and the native A5
+   producer).** The deployed
    non-seed launcher exits `missing command`; the bounded GUI native renderer
    build exceeds 30 seconds; `bin/simple_native` terminates before provenance.
    Fix or deploy the pure-Simple execution/native-build owner, then run the
@@ -78,6 +92,12 @@ environmental gate.  Do not start unrelated O/P/G expansion while A4–A6 are
 open.  Canonical evidence sources are the 2026-08-12 reports under
 `doc/09_report/` and their linked open bugs under `doc/08_tracking/bug/`.
 
+2026-08-14 container/GPU implementation review: research and design completed,
+but the final handoff was rejected after three fix cycles. TODO812 owns distinct
+A4/A5 workload correlation, exact A4 counters, and retained compiler/build/CUDA
+provenance. TODO813 owns observed Vulkan submit/fence counters and truthful
+producer CLI exit status. Source and fixture checks do not close A4/A5/A7.
+
 ### Implementation handoff — blocked rows remain active
 
 This is an implementation handoff, not feature completion.  Each row keeps its
@@ -88,10 +108,10 @@ fresh evidence produced by that command on the named capability.
 | Row | Missing prerequisite and exact resume command | Retained artifacts | Owner / final reviewer |
 |---|---|---|---|
 | **A1** | Preserve the stable device-identity hash emitted by the physical adapter probe in the durable report, then have the physical wrapper validate it as nonzero alongside the textual identity. The unavailable-hardware execution contract is owned by TODO685. | `build/check/engine2d-vulkan-window-8k/run.*/receipt.env`; `doc/09_report/engine2d_vulkan_clear_8k_evidence_2026-08-12.md` | Vulkan evidence owner / independent highest-capability Codex |
-| **A4** | Produce an admitted non-seed pure-Simple executable: `mkdir -p build/render_perf && SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 timeout 300 bin/simple native-build --source src/lib --source test/05_perf/graphics_2d --entry-closure --entry test/05_perf/graphics_2d/draw_ir_damage_8k_bench.spl --runtime-bundle core-c-bootstrap --backend cranelift --opt-level=aggressive --output build/render_perf/draw_ir_damage_8k_bench`; then execute it directly once: `SIMPLE_NO_STUB_FALLBACK=1 timeout 300 /usr/bin/time -v -o build/render_perf/draw_ir_damage_8k_bench.time build/render_perf/draw_ir_damage_8k_bench >build/render_perf/draw_ir_damage_8k_bench.stdout 2>build/render_perf/draw_ir_damage_8k_bench.stderr`. | `build/render_perf/draw_ir_damage_8k_bench*`; `doc/08_tracking/bug/draw_ir_8k_native_evidence_blocked_2026-08-12.md`; refresh `doc/09_report/drawir_sparse_dynamic_8k_attempt_2026-08-12.md` | pure-Simple native-build owner / independent highest-capability Codex |
-| **A5** | After an admitted non-seed compiler exists, run `BENCH_TIMEOUT_SECS=300 BUILD_DIR=build/render_perf/gui_8k80 REPORT_PATH=build/render_perf/gui_8k80/gui_8k80_semantic_producer.md bash tools/gui_perf_bench/run_all_benchmarks.shs --width 7680 --height 4320 --frames 60 --dpi 300`; require the `backend_measurement_software_export.native` route to publish the canonical semantic producer frame through Draw IR and Engine2D, with no interpreter or seed fallback. | `build/render_perf/gui_8k80/gui_8k80_semantic_producer.md` and sibling receipts; publish the accepted result to `doc/09_report/ui/perf/gui_8k80_semantic_producer_<date>.md` and refresh `doc/09_report/web_renderer_retained_damage_plan_evidence_2026-08-12.md` | UI render producer owner / independent highest-capability Codex |
+| **A4** | Follow the container/GPU research and design without changing this benchmark's CPU semantics. TODO686 owns native-build admission; TODO687 owns direct execution of the admitted cached carrier and its receipt; TODO688 owns its exact-runtime SSpec. CUDA/Vulkan availability is irrelevant to A4 admission. | TODO687 receipt and TODO688 verification evidence; refresh `doc/09_report/drawir_sparse_dynamic_8k_attempt_2026-08-12.md` | pure-Simple native-build and CPU DrawIR owner / independent highest-capability Codex |
+| **A5** | The strict Vulkan semantic producer, submit/readback split, 60-sample receipt, and focused spec are implemented. Build and execute them with the admitted runtime specified by TODO810; source/static evidence is not a live performance receipt. | TODO810 `producer_receipt`; publish the accepted result to `doc/09_report/ui/perf/gui_8k80_semantic_producer_<date>.md` | UI semantic-render and Engine2D Vulkan owner / independent highest-capability Codex |
 | **A6** | Physical hardware execution is tracked by canonical Todo DB item TODO684; this plan retains only the acceptance dependency. | TODO684 evidence | physical Vulkan/display operator / independent highest-capability Codex |
-| **A7** | After A4–A6 pass, implement the missing parent-authoritative `scripts/check/check-render-perf-8k80-completion.shs` aggregator tracked by `doc/08_tracking/bug/render_perf_8k80_completion_aggregator_missing_2026-08-14.md`, then run `BUILD_DIR=build/render_perf/8k80_completion sh scripts/check/check-render-perf-8k80-completion.shs --drawir build/render_perf/draw_ir_damage_8k_bench.stdout --producer build/render_perf/gui_8k80/gui_8k80_semantic_producer.md --physical build/check/engine2d-vulkan-window-8k/run.*/receipt.env --report doc/09_report/ui/perf/render_perf_8k80_completion_<date>.md`. It must require p95 `<=12500000 ns`, complete RSS/checksum/readback receipts, no CPU/interpreter/stub fallback, and known completion. | `doc/09_report/ui/perf/render_perf_8k80_completion_<date>.md` plus the exact A4–A6 receipts | root integration owner / independent highest-capability Codex |
+| **A7** | The parent-authoritative checker and its bounded positive/deliberate-red matrix are implemented. Run it against admitted TODO687/TODO810 receipts as specified by TODO811. It publishes valid software evidence as `blocked-physical` when A6 is absent and may publish full PASS only after fresh TODO684/TODO685 evidence. | TODO811 `aggregate_receipt` and self-test evidence; full promotion additionally requires TODO684/TODO685 receipts | root integration owner / independent highest-capability Codex |
 | **A8** | Physical connector, EDID, and scanout evidence is tracked by canonical Todo DB item TODO685; this plan retains only the acceptance dependency. | TODO685 evidence | physical display operator / independent highest-capability Codex |
 
 ### Cooperative review record
