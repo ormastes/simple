@@ -807,3 +807,7 @@ in-progress
   lifecycle, so detached completed entries remain unbounded. Tracked as
   `async_runtime_detached_completed_results_unbounded_2026-08-13.md`; do not
   add silent eviction before WP-14/WP-18 supplies explicit terminal outcomes.
+- doc: `parallel_apps.md` now explicitly excludes the separate `std.actors`
+  legacy runtime from the bounded `std.actor` contract. Its copied mailbox,
+  drop-oldest overflow, and unbounded reply store require migration rather
+  than compatibility claims.

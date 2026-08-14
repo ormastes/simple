@@ -46,6 +46,12 @@ retention. The actor FIFO uses a bounded head cursor and compacts only when a
 full backing buffer needs reuse; a native execution gate and typed public
 backpressure receipt remain open.
 
+This contract applies to `std.actor` only. The separate legacy `std.actors`
+runtime remains excluded: it copies mailbox state into actor references, drops
+oldest messages on overflow, and retains unbounded ask replies. Do not use it
+as a bounded or ownership-safe parallel boundary; its migration requires the
+typed mailbox and result-lifecycle work packages.
+
 The legacy actor mailbox now uses one class-backed state shared by copied
 `ActorRef` and scheduler values. This repairs the previous copied-queue split,
 and actor stop now closes that shared state before it discards queued work, so
