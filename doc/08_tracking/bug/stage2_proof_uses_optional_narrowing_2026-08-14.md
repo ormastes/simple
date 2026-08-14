@@ -220,3 +220,30 @@ segfaulted. Retained Stage-3 log SHA-256:
 `a394b134cd59355fee22b2f6f691e54459384082a809fe7c269f9c7aff7be5d7`.
 The three-cycle cap was exhausted; no Stage 4 artifact was deployed and no
 SSpec/docgen command was retried.
+
+## Restart12 QEMU continuation: streamed Stage 3 frontier
+
+A memory-capped diagnostic run proved the old non-streaming Stage 3 still
+crossed 6 GiB during phase-2 parsing, before HIR. The driver now admits the
+already-implemented transient per-file module-surface path for Stage 3 via
+`SIMPLE_STAGE3_STREAMING_SURFACES=1`. The selector also accepts the compiled
+CLI's authoritative `cli_mode_text == "aot"` transport, and the bootstrap
+producer binds the flag in both the command hash and actual transcript.
+
+The same continuation repaired the truncated declaration of
+`defer_unsupported_marker`, which otherwise left four unresolved calls at the
+Stage-2 link boundary. The final Stage-2 build reported `3 compiled, 855
+cached, 0 failed` and passed sanity. Its log SHA-256 is
+`e445456dea5a2577bd137880d9353c3984b1b3a6885a606961f030ac2fc9f292`.
+
+Stage 3 visibly entered streaming mode and emitted ten ordered
+`phase2:surface:file:released` receipts. `MALLOC_ARENA_MAX=2` and
+`MALLOC_TRIM_THRESHOLD_=0` reduced the ten-surface checkpoint from about 8 GiB
+to about 325 MiB, but RSS subsequently grew to 17 GiB without an eleventh
+release receipt. The final run was terminated under the three-cycle/runaway
+guard rather than waiting for host OOM. Its bounded log SHA-256 is
+`2715d4ed444d8e29732a99befe0ab2c914841426d98b2d9cfd23dab27843180f`.
+The remaining owner is therefore after physical surface 10 and before the next
+release receipt; retained telemetry cannot yet distinguish the next parse from
+surface publication/finalization. No Stage-4 artifact exists, and no SSpec or
+docgen command was run.

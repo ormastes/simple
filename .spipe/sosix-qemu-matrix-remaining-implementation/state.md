@@ -60,7 +60,15 @@ blocked
   `rt_env_set`; current source and its two-text ABI admission are correct. A
   full bootstrap now builds and sanity-checks Stage 2 after completing the
   missing typed parser-contract owner.
-- blocked: Stage 3 self-hosting grows beyond 25 GiB and segfaults before Stage
-  4 deployment. The capped continuation retained its logs and did not retry
-  SSpec/docgen with the unchanged stale release binary.
+- impl: Stage 3 now opts into the existing transient per-file surface pipeline;
+  its command hash and transcribed environment bind the opt-in, compiled-AOT
+  mode transport is admitted, and the successful lifecycle fixture covers two
+  physical sources plus one alias. A missing `defer_unsupported_marker`
+  declaration that blocked Stage 2 was also restored; Stage 2 rebuilt with
+  `3 compiled, 855 cached, 0 failed` and passed sanity.
+- blocked: The final Stage 3 cycle released ten physical surfaces, then grew
+  from about 325 MiB to 17 GiB without an eleventh release receipt. Glibc arena
+  and trim policy improved the early RSS checkpoint but did not bound this
+  later owner. The mandatory three-cycle cap was reached; no Stage 4 artifact
+  was deployed and SSpec/docgen were not retried with the stale release binary.
 - tracking: Todo DB rows 784-805 retain all shared, Linux, Windows, FreeBSD, and macOS owners.

@@ -52,7 +52,13 @@ through AC-6. They do not promote a matrix row without a source-matched admitted
 runtime, canonical producer bundle, executable SSpec, and generated manual.
 
 The current bootstrap continuation also completes the typed parser-contract
-owner and proves Stage 2 plus its sanity gate. Stage 3 remains the active local
-blocker: its self-host process grows beyond 25 GiB and segfaults before a Stage
-4 CLI can be deployed. Therefore the exact SSpec/docgen commands above remain
-pending and must not be run against the known-stale release binary.
+owner and proves Stage 2 plus its sanity gate. Stage 3 now selects the existing
+transient per-file module-surface owner, and its provenance hash and actual
+launch both bind that selection. This removes the former all-at-once 616-module
+parser-AST retention path, but does not yet close Stage 3: the final capped run
+released ten physical surfaces, then grew from about 325 MiB to 17 GiB without
+emitting an eleventh release receipt. Allocator trimming reduced the early
+checkpoint but did not prevent that later growth. The three-cycle cap was
+reached and the run was terminated rather than waiting for host OOM. No Stage
+4 CLI was deployed, so the exact SSpec/docgen commands above remain pending and
+must not be run against the known-stale release binary.
