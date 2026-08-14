@@ -1,0 +1,124 @@
+"""
+# Enterprise Store — idempotency keys, transactional outbox, audit chain
+
+Record-level services over `enterprise_store.store` (AC-5/AC-6 of
+`.spipe/simple_enterprise_suite`):
+
+- **Idempotency**: a (tenant, key) pair is recorded with its result; a replay
+  is detected BEFORE re-executing the command. Works on both backends via
+  read-check inside the unit of work; on real SQLite the table's uniqueness
+  can additionally be constraint-enforced when the backend honors it.
+- **Outbox**: integration events are appended in the SAME unit of work as
+  the domain mutation, so a commit carries both and a rollback carries
+  neither (atomicity requires an ACID backend — see store docstring).
+- **Audit**: append-only log where each record's `hash` is
+  sha256(prev_hash | tenant | actor | action | detail) — a real cryptographic
+  chain replacing the prototype's toy checksum. `audit_verify_chain`
+  recomputes the whole chain.
+
+All rows are tenant-scoped; readers filter by tenant in pure Simple.
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_rows, store_insert_row
+}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.common.crypto.sha256.{sha256_text}
+
+# =============================================================================
+# Idempotency keys
+# =============================================================================
+
+# idempotency_seen reports whether (tenant, key) was already recorded.
+fn idempotency_seen(store: EnterpriseStore, tenant_id: text, idem_key: text) -> bool:
+    val rows = store_rows(store, "idempotency_keys", "id, tenant_id, idem_key, result")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "idem_key") == idem_key:
+            return true
+    false
+
+# idempotency_result returns the recorded result for a replayed key ("" if unseen).
+fn idempotency_result(store: EnterpriseStore, tenant_id: text, idem_key: text) -> text:
+    val rows = store_rows(store, "idempotency_keys", "id, tenant_id, idem_key, result")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "idem_key") == idem_key:
+            return sqlite_row_get(row, "result")
+    ""
+
+# idempotency_record stores the key with its command result. Call inside the
+# same unit of work as the command's domain mutation.
+fn idempotency_record(store: EnterpriseStore, tenant_id: text, idem_key: text, result: text) -> bool:
+    store_insert_row(store,
+        "INSERT INTO idempotency_keys (tenant_id, idem_key, result) VALUES (?, ?, ?)",
+        [tenant_id, idem_key, result])
+
+# =============================================================================
+# Transactional outbox
+# =============================================================================
+
+# outbox_append records an integration event. Call inside the same unit of
+# work as the domain mutation it describes (AC-6 atomicity).
+fn outbox_append(store: EnterpriseStore, tenant_id: text, event_type: text, payload: text) -> bool:
+    store_insert_row(store,
+        "INSERT INTO outbox (tenant_id, event_type, payload) VALUES (?, ?, ?)",
+        [tenant_id, event_type, payload])
+
+# outbox_pending returns (event_type, payload) pairs for a tenant, in append order.
+fn outbox_pending(store: EnterpriseStore, tenant_id: text) -> [(text, text)]:
+    var out: [(text, text)] = []
+    val rows = store_rows(store, "outbox", "id, tenant_id, event_type, payload")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id:
+            out.push((sqlite_row_get(row, "event_type"), sqlite_row_get(row, "payload")))
+    out
+
+# =============================================================================
+# Audit chain (sha256)
+# =============================================================================
+
+# Note: `actor` is a reserved keyword in Simple — parameters use actor_id;
+# the audit_log column keeps the name "actor" (SQL string only).
+fn audit_hash(prev_hash: text, tenant_id: text, actor_id: text, action: text, detail: text) -> text:
+    sha256_text(prev_hash + "|" + tenant_id + "|" + actor_id + "|" + action + "|" + detail)
+
+# audit_last_hash returns the newest hash in the tenant's chain ("" for empty).
+fn audit_last_hash(store: EnterpriseStore, tenant_id: text) -> text:
+    var last = ""
+    val rows = store_rows(store, "audit_log", "id, tenant_id, actor, action, detail, prev_hash, hash")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id:
+            last = sqlite_row_get(row, "hash")
+    last
+
+# audit_append chains a new audit record onto the tenant's log.
+fn audit_append(store: EnterpriseStore, tenant_id: text, actor_id: text, action: text, detail: text) -> bool:
+    val prev = audit_last_hash(store, tenant_id)
+    val h = audit_hash(prev, tenant_id, actor_id, action, detail)
+    store_insert_row(store,
+        "INSERT INTO audit_log (tenant_id, actor, action, detail, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?)",
+        [tenant_id, actor_id, action, detail, prev, h])
+
+# audit_verify_chain recomputes every hash in the tenant's chain and checks
+# both linkage (prev_hash continuity) and content integrity.
+fn audit_verify_chain(store: EnterpriseStore, tenant_id: text) -> bool:
+    var expected_prev = ""
+    val rows = store_rows(store, "audit_log", "id, tenant_id, actor, action, detail, prev_hash, hash")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        if sqlite_row_get(row, "prev_hash") != expected_prev:
+            return false
+        val recomputed = audit_hash(
+            sqlite_row_get(row, "prev_hash"),
+            tenant_id,
+            sqlite_row_get(row, "actor"),
+            sqlite_row_get(row, "action"),
+            sqlite_row_get(row, "detail"))
+        if recomputed != sqlite_row_get(row, "hash"):
+            return false
+        expected_prev = sqlite_row_get(row, "hash")
+    true
+
+export idempotency_seen, idempotency_result, idempotency_record
+export outbox_append, outbox_pending
+export audit_hash, audit_last_hash, audit_append, audit_verify_chain

@@ -1,0 +1,194 @@
+"""
+# Enterprise Store — durable repository foundation (SQLite adapter)
+
+Durable persistence layer for the Simple Enterprise Suite
+(lane `.spipe/simple_enterprise_suite`, AC-5..AC-7; design:
+doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md §4).
+
+Provides: store open/close with pragmas, schema migrations with a version
+table, a unit-of-work (begin/commit/rollback), and a backend capability
+probe. Companion module `records.spl` layers idempotency keys, the
+transactional outbox, and the sha256-chained audit log on top.
+
+## Backend honesty
+
+The interpreter's `rt_sqlite_*` externs are a non-ACID emulation
+(transactions no-op, constraints unenforced, WHERE-equality ignored) — see
+doc/08_tracking/bug/interpreter_sqlite_externs_nonacid_emulation_2026-08-14.md.
+`store_open` therefore PROBES the backend (insert → rollback → count) and
+records `acid` honestly. Specs that need atomicity must require `acid=true`
+and classify themselves environment-blocked otherwise — never green-wash.
+
+To stay correct on BOTH backends this layer:
+- uses prepared-statement binds for every value (no inline literals);
+- keeps tables insert-only and filters rows in pure Simple
+  (the emulation ignores WHERE equality — filtering in SQL would silently
+  return other tenants' rows there);
+- avoids UPDATE/DELETE-with-WHERE (unsupported by the emulation).
+
+PostgreSQL remains the intended production system of record; this module is
+the frozen Repository/UnitOfWork surface a future PostgreSQL adapter must
+implement (no fake driver is provided — assessment AC-7).
+"""
+
+use std.nogc_sync_mut.io.sqlite_sffi.{
+    SqliteConnection, SqliteRow,
+    sqlite_open, sqlite_open_memory, sqlite_close,
+    sqlite_execute, sqlite_query_all, sqlite_query_value,
+    sqlite_begin, sqlite_commit, sqlite_rollback,
+    sqlite_prepare, sqlite_bind_text, sqlite_finalize,
+    sqlite_error_message, sqlite_row_get
+}
+use std.nogc_sync_mut.io.sqlite_sffi.{rt_sqlite_query_next}
+
+# =============================================================================
+# Store
+# =============================================================================
+
+struct EnterpriseStore:
+    conn: SqliteConnection
+    open_ok: bool
+    acid: bool
+
+# store_open opens (or creates) the enterprise database at `path`
+# (":memory:" for an in-memory store), applies durability pragmas, creates
+# the system tables, and probes backend transaction honesty.
+fn store_open(path: text) -> EnterpriseStore:
+    val conn = if path == ":memory:":
+        sqlite_open_memory()
+    else:
+        sqlite_open(path)
+    if not conn.is_valid:
+        return EnterpriseStore(conn: conn, open_ok: false, acid: false)
+
+    # Durability pragmas — honored by real SQLite, harmlessly rejected by the
+    # interpreter emulation (result deliberately ignored; the ACID probe below
+    # is the authoritative capability signal).
+    sqlite_execute(conn, "PRAGMA journal_mode=WAL")
+    sqlite_execute(conn, "PRAGMA busy_timeout=5000")
+    sqlite_execute(conn, "PRAGMA foreign_keys=ON")
+
+    # System tables (insert-only; see module docstring).
+    sqlite_execute(conn, "CREATE TABLE IF NOT EXISTS schema_migrations (id INTEGER PRIMARY KEY, name TEXT, applied_seq TEXT)")
+    sqlite_execute(conn, "CREATE TABLE IF NOT EXISTS idempotency_keys (id INTEGER PRIMARY KEY, tenant_id TEXT, idem_key TEXT, result TEXT)")
+    sqlite_execute(conn, "CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY, tenant_id TEXT, event_type TEXT, payload TEXT)")
+    sqlite_execute(conn, "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY, tenant_id TEXT, actor TEXT, action TEXT, detail TEXT, prev_hash TEXT, hash TEXT)")
+    sqlite_execute(conn, "CREATE TABLE IF NOT EXISTS acid_probe (id INTEGER PRIMARY KEY, marker TEXT)")
+
+    val acid = probe_backend_acid(conn)
+    EnterpriseStore(conn: conn, open_ok: true, acid: acid)
+
+# probe_backend_acid proves (or disproves) that begin/rollback actually
+# undo an insert on this backend. Fail closed: any anomaly reports false.
+fn probe_backend_acid(conn: SqliteConnection) -> bool:
+    val before = store_count_text(conn, "acid_probe")
+    if not sqlite_begin(conn):
+        return false
+    store_insert2(conn, "INSERT INTO acid_probe (marker) VALUES (?)", "probe", "")
+    if not sqlite_rollback(conn):
+        return false
+    val after = store_count_text(conn, "acid_probe")
+    before == after
+
+fn store_close(store: EnterpriseStore) -> bool:
+    if not store.open_ok:
+        return false
+    sqlite_close(store.conn)
+
+fn store_backend_acid(store: EnterpriseStore) -> bool:
+    store.acid
+
+fn store_error(store: EnterpriseStore) -> text:
+    sqlite_error_message(store.conn)
+
+# =============================================================================
+# Unit of work
+# =============================================================================
+
+fn uow_begin(store: EnterpriseStore) -> bool:
+    if not store.open_ok:
+        return false
+    sqlite_begin(store.conn)
+
+fn uow_commit(store: EnterpriseStore) -> bool:
+    if not store.open_ok:
+        return false
+    sqlite_commit(store.conn)
+
+fn uow_rollback(store: EnterpriseStore) -> bool:
+    if not store.open_ok:
+        return false
+    sqlite_rollback(store.conn)
+
+# =============================================================================
+# Migrations
+# =============================================================================
+
+# store_migration_applied reports whether a named migration already ran.
+fn store_migration_applied(store: EnterpriseStore, name: text) -> bool:
+    val rows = store_rows(store, "schema_migrations", "id, name, applied_seq")
+    for row in rows:
+        if sqlite_row_get(row, "name") == name:
+            return true
+    false
+
+# store_migrate applies `sql` once under `name`; re-running is a no-op.
+# Returns true when the migration is applied (now or previously).
+fn store_migrate(store: EnterpriseStore, name: text, sql: text) -> bool:
+    if not store.open_ok:
+        return false
+    if store_migration_applied(store, name):
+        return true
+    if not sqlite_execute(store.conn, sql):
+        return false
+    val seq = store_count_text(store.conn, "schema_migrations")
+    store_insert2(store.conn, "INSERT INTO schema_migrations (name, applied_seq) VALUES (?, ?)", name, seq)
+    true
+
+# =============================================================================
+# Low-level helpers (prepared binds, pure-Simple filtering)
+# =============================================================================
+
+# store_rows reads all rows of a table (named columns). Filtering happens in
+# pure Simple at the caller — see module docstring for why.
+fn store_rows(store: EnterpriseStore, table: text, columns: text) -> [SqliteRow]:
+    if not store.open_ok:
+        return []
+    sqlite_query_all(store.conn, "SELECT " + columns + " FROM " + table)
+
+fn store_count_text(conn: SqliteConnection, table: text) -> text:
+    sqlite_query_value(conn, "SELECT COUNT(*) FROM " + table)
+
+# store_insert2 runs a prepared INSERT with up to two text binds; pass ""
+# for an unused second slot when the SQL has a single placeholder.
+fn store_insert2(conn: SqliteConnection, sql: text, v1: text, v2: text) -> bool:
+    val stmt = sqlite_prepare(conn, sql)
+    if not stmt.is_valid:
+        return false
+    sqlite_bind_text(stmt, 1, v1)
+    if sql.contains("?, ?"):
+        sqlite_bind_text(stmt, 2, v2)
+    val ran = rt_sqlite_query_next(stmt.handle)
+    sqlite_finalize(stmt)
+    ran == 1 or ran == 0
+
+# store_insert_row runs a prepared INSERT binding each value in order.
+fn store_insert_row(store: EnterpriseStore, sql: text, values: [text]) -> bool:
+    if not store.open_ok:
+        return false
+    val stmt = sqlite_prepare(store.conn, sql)
+    if not stmt.is_valid:
+        return false
+    var i = 0
+    while i < values.len():
+        sqlite_bind_text(stmt, i + 1, values[i])
+        i = i + 1
+    val ran = rt_sqlite_query_next(stmt.handle)
+    sqlite_finalize(stmt)
+    ran == 1 or ran == 0
+
+export EnterpriseStore
+export store_open, store_close, store_backend_acid, store_error
+export uow_begin, uow_commit, uow_rollback
+export store_migrate, store_migration_applied
+export store_rows, store_insert_row
