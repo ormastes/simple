@@ -29,12 +29,12 @@ probe accounting, packed-byte interpreter behavior and foreign-call lifetime,
 cross-language provenance/checksum/timing/RSS contracts, focused compiler and
 MCP/LSP regression gates, documentation, and serialized integration.
 
-Out of scope: Stage 4 construction or execution in the current user-directed
-continuation, substituting the Rust seed or Stage 2/3 diagnostics for Stage 4
+Out of scope: substituting the Rust seed or Stage 2/3 diagnostics for Stage 4
 evidence, claiming
 filesystem syscall counts from facade counters, disabled-path assembly/cycle
-claims, changing public byte-array semantics, rebuilding Stage 4 in this plan
-lane, or absorbing unrelated GUI/web/2D files.
+claims, changing public byte-array semantics, or absorbing unrelated
+GUI/web/2D files. Stage 4 construction, admission, and deployment resume after
+Stage 3 admission.
 
 ## Authoritative artifacts
 
@@ -59,6 +59,18 @@ lane, or absorbing unrelated GUI/web/2D files.
 | C facade selfcheck | `scripts/check/check-file-exists-probe-c.shs` | Present |
 
 ## Build11 replacement lane A status (2026-08-14)
+
+Fresh execution receipt: `r4` stopped before Stage 2 admission because the
+formal-verification HIR consumer slice lacked its flat-AST contract producer.
+That coherent parser/AST/constructor slice is restored. The next `r5`
+source-frozen full bootstrap was the third and final fix cycle for this
+session. It admitted Stage 2 (`858 compiled, 0 cached, 0 failed`; sanity pass;
+SHA-256 `d2ed1d54673bc4cc848024ebbc229a873053dc315d8412613184bfdc5faec947`),
+but Stage 3 produced no candidate while RSS grew to about 19.8 GiB over 143
+seconds of single-core execution. It was terminated before host OOM. Stage 4,
+deployment, and admission-dependent feature evidence remain BLOCKED; the next
+session must localize the remaining Stage 3 allocation loop rather than repeat
+this command unchanged.
 
 This detached worktree is the fresh lane-A replacement. The previous Build11
 candidate did not reach performance admission: its strict Stage 2 bootstrap
@@ -149,10 +161,13 @@ Cycle 2 admitted Stage 2 and entered Stage 3, then rejected fourteen backend
 module constants whose bare-zero initializer could not safely determine a MIR
 type. The CUDA/ELF/Mach-O/x86/AArch64 zero constants now carry explicit `i64`
 annotations. Cycle 3 admitted Stage 2 again and cleared all fourteen errors,
-but the bounded Stage 3 native build terminated with exit 143 after source
-indices 0..2. No Stage 3 candidate, Stage 4 deployment, or live performance
-row exists. The three-cycle cap is exhausted; a fresh session must review the
-Stage 3 timeout/localization policy before using the retained resume command.
+but Stage 3 received an external SIGTERM (exit 143) after source indices 0..2.
+The canonical wrapper has no Stage 3 timeout. A fresh long-lived resume proved
+the process stayed CPU-bound while RSS grew from about 7.4 GiB to 20 GiB after
+source 2 `post-store`, without marker or I/O progress. The localized owner is
+aggregate-by-value linear surface lookup; the current repair uses scalar
+name/index lookup first and a scalar-prefiltered physical-identity fallback.
+No Stage 3 candidate, Stage 4 deployment, or live performance row exists yet.
 
 Four fixed-string, context-free `dtrace` canaries mark lowering entry, source
 map completion, and the before/after module-surface boundary. They are enabled

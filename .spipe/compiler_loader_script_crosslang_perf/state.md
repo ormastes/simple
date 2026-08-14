@@ -58,6 +58,16 @@ dev
 
 ## Log
 
+- 2026-08-14: fresh `r4` stopped before Stage 2 admission because the
+  formal-verification HIR consumer lacked its flat-AST contract producer. The
+  coherent parser/AST/constructor slice is restored for the final bounded,
+  source-frozen attempt; `r4` remains failed evidence.
+- 2026-08-14: final bounded `r5` admitted Stage 2 (`858/0/0`, sanity pass,
+  candidate SHA-256 `d2ed1d54673bc4cc848024ebbc229a873053dc315d8412613184bfdc5faec947`).
+  Stage 3 again produced no candidate while one core and RSS grew to about
+  19.8 GiB in 143 seconds. It was stopped before host OOM; Stage 4 and live
+  feature evidence remain BLOCKED. Three fix cycles are exhausted: WARN.
+
 - dev: Created state file with 7 acceptance criteria (type: todo).
 - plan: Merged lower-model plan/evidence and guide/wiki audits; at that historical revision research/requirements/architecture and packed-byte design/evidence were incomplete, and the deployed Stage 4 candidate plus manual docgen remained blocked.
 - review-1: Highest-capability reviewer rejected the draft; applying all six correction groups before the single re-review.
@@ -83,8 +93,14 @@ dev
 - lane-b-bootstrap-cycle-2: Stage 2 passed; Stage 3 rejected fourteen untyped
   bare-zero backend constants. Each now has an explicit `i64` annotation.
 - lane-b-bootstrap-cycle-3: Stage 2 passed and the fourteen errors cleared;
-  bounded Stage 3 ended with exit 143 after source indices 0..2. No candidate
-  or Stage 4 exists. The three-cycle cap is exhausted and status remains WARN.
+  Stage 3 received external SIGTERM (143) after source indices 0..2. The wrapper
+  has no Stage 3 timeout, so earlier bounded-timeout wording was unproved.
 - pbl03-atomic: Eight owners/23 raw-pointer uses migrated to typed family adapters plus scoped DynLib dispatch; native codegen retains RuntimeValue owners, compatibility definitions/callers are removed, and the old escape symbol has zero positive non-document references. Scoped tests pass 4/4; native-only readback dispatch and restored owner/escape ABI guards pass 1/1 each. A retained status-101 inverted guard proves old-symbol rejection. Apple-target checking stopped before this crate in the Linux host C toolchain, so Metal remains WARN and Stage 4 remains excluded.
 - pbl03-atomic-review: Highest-capability cycle 1 rejected clone-and-discard interpreter readback handlers. They were removed and explicitly kept native/JIT-only; cycle 2 ACCEPT found no remaining merge blocker and retained only the real-macOS compile WARN.
 - pbl03-integration: Atomic implementation `2249dc49ac4e2d8f6d63626432fc8d7be6a12966` was pushed under `/tmp/simple-main-restart12-push.lock` after rebasing onto fetched main and is reachable from refreshed `origin/main`. Final bookkeeping follows the same locked sequence; unrelated GUI reports remain excluded.
+- lane-b-stage3-long-resume: A detached resume stayed CPU-bound but grew from
+  about 7.4 GiB to 20 GiB RSS after source 2 post-store with no further marker
+  or I/O progress; it was stopped before host OOM. Localized the interval to
+  aggregate-by-value module-surface lookup and replaced its normal path with
+  scalar name/index resolution plus physical validation and a scalar-prefiltered
+  compatibility fallback. Stage 3/4 remain pending the fresh source-frozen run.

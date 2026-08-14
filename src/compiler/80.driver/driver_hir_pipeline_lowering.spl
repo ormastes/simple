@@ -8,7 +8,7 @@ use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir.*
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_reset}
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlowering_for_module_with_diagnostics, LoweringError, LoweringErrorKind}
-use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName, module_surface_source_matches, module_surfaces_from_modules}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName, module_surface_index_for_source, module_surfaces_from_modules}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.core.ast.{ast_reset}
@@ -49,17 +49,6 @@ fn _driver_collect_hir_errors(ctx: CompileContext, name: text, errors: [Lowering
             ctx.add_warning(_format_hir_lowering_error(name, err))
         else:
             ctx.add_error(_format_hir_lowering_error(name, err))
-
-fn _driver_module_surface_index_for_source(registry: ModuleSurfacesByName, source: SourceFile, source_index: i64) -> i64:
-    # Validate against physical source identity, not ParserModule.name. A
-    # parsed module can use a compatibility spelling that is intentionally not
-    # an indexed source alias in a full bootstrap closure.
-    var position = 0
-    while position < registry.surfaces.len():
-        if module_surface_source_matches(registry.surfaces[position], source, source_index):
-            return position
-        position = position + 1
-    -1
 
 # Concrete, NOT generic. The native build path has no monomorphization
 # (#158 Phase B, gated in hir_lowering/_Items/declaration_lowering.spl), so the
@@ -530,7 +519,7 @@ impl CompilerDriver:
             phase_hir_modules[name] = hir_module
             if source_idx < 3:
                 eprint("[bootstrap-error-count] source_idx={source_idx} point=post-store count={self.ctx.error_count_value}")
-            val validation_surface_index = _driver_module_surface_index_for_source(retained_module_surfaces, src, source_idx)
+            val validation_surface_index = module_surface_index_for_source(retained_module_surfaces, src, source_idx)
             if validation_surface_index < 0:
                 self.ctx.add_error("Missing module surface alias for {name}")
             else:

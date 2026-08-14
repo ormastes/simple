@@ -362,8 +362,101 @@ fn parse_extern_fn_stmt_inline() -> i64:
     decl_extern_fn(ef_name, ef_pnames, ef_ptypes, ef_ret, ef_tparams, 0)
     stmt_expr_stmt(expr_pass(0), 0)
 
+fn parse_contract_clause_expr_stmt() -> i64:
+    val start = lex_token_start_get()
+    val line = par_line_get()
+    val col = par_col_get()
+    val expression = parse_expr()
+    val span_id = flat_span_new(start, lex_token_start_get(), line, col)
+    expr_set_span(expression, span_id)
+    stmt_expr_stmt(expression, span_id)
+
+fn parse_contract_clause_body() -> [i64]:
+    var clauses: [i64] = []
+    if par_kind_get() == TOK_NEWLINE:
+        parser_skip_newlines()
+        parser_expect(TOK_INDENT)
+        while par_kind_get() != TOK_DEDENT and par_kind_get() != TOK_EOF:
+            parser_skip_newlines()
+            if par_kind_get() == TOK_DEDENT or par_kind_get() == TOK_EOF:
+                break
+            clauses.push(parse_contract_clause_expr_stmt())
+            parser_skip_newlines_and_semicolons()
+        parser_expect(TOK_DEDENT)
+        return clauses
+    clauses.push(parse_contract_clause_expr_stmt())
+    clauses
+
+fn try_parse_contract_stmt() -> i64:
+    val snap = lex_snapshot_save()
+    val (saved_nums, saved_text) = parser_tok_save()
+    val first_kind = par_kind_get()
+    val first_name = if first_kind == TOK_KW_IN: "in" else: par_text_get()
+    val recognized = first_name == "in" or first_name == "requires" or
+        first_name == "invariant" or first_name == "out" or
+        first_name == "ensures" or first_name == "out_err" or
+        first_name == "decreases" or first_name == "proof"
+    if not recognized:
+        return -1
+    parser_advance()
+    var binding = ""
+    if first_name == "proof":
+        if par_text_get() != "uses":
+            lex_snapshot_rollback(snap)
+            parser_tok_restore(saved_nums, saved_text)
+            return -1
+        parser_advance()
+        if par_kind_get() != TOK_COLON:
+            lex_snapshot_rollback(snap)
+            parser_tok_restore(saved_nums, saved_text)
+            return -1
+        parser_advance()
+        if par_kind_get() != TOK_IDENT:
+            lex_snapshot_rollback(snap)
+            parser_tok_restore(saved_nums, saved_text)
+            return -1
+        binding = par_text_get()
+        parser_advance()
+        return stmt_contract_clause(STMT_CONTRACT_PROOF_USES, binding, [], 0)
+    if first_name == "out" or first_name == "out_err":
+        if par_kind_get() != TOK_LPAREN:
+            lex_snapshot_rollback(snap)
+            parser_tok_restore(saved_nums, saved_text)
+            return -1
+        parser_advance()
+        if par_kind_get() == TOK_UNDERSCORE:
+            parser_advance()
+        elif par_kind_get() == TOK_IDENT:
+            binding = par_text_get()
+            parser_advance()
+        else:
+            lex_snapshot_rollback(snap)
+            parser_tok_restore(saved_nums, saved_text)
+            return -1
+        if par_kind_get() != TOK_RPAREN:
+            lex_snapshot_rollback(snap)
+            parser_tok_restore(saved_nums, saved_text)
+            return -1
+        parser_advance()
+    if par_kind_get() != TOK_COLON:
+        lex_snapshot_rollback(snap)
+        parser_tok_restore(saved_nums, saved_text)
+        return -1
+    parser_advance()
+    val body = parse_contract_clause_body()
+    var tag = STMT_CONTRACT_IN
+    if first_name == "invariant": tag = STMT_CONTRACT_INVARIANT
+    elif first_name == "out" or first_name == "ensures": tag = STMT_CONTRACT_OUT
+    elif first_name == "out_err": tag = STMT_CONTRACT_OUT_ERR
+    elif first_name == "decreases": tag = STMT_CONTRACT_DECREASES
+    stmt_contract_clause(tag, binding, body, 0)
+
 fn parse_statement() -> i64:
     var kind = par_kind_get()
+    val contract_stmt = try_parse_contract_stmt()
+    if contract_stmt >= 0:
+        return contract_stmt
+    kind = par_kind_get()
     if kind == 21:
         return parse_val_decl_stmt()
 

@@ -2,6 +2,22 @@
 
 ## Status
 
+The first fresh full-bootstrap repair attempt (`r4`) stopped during Stage 2 with
+an inferred-`ANY` `ContractBlock.decrease_measure` diagnostic. Audit found a
+partially present formal-verification slice: HIR consumers existed while the
+flat-AST contract nodes and producer were absent. The coherent parser, AST, and
+constructor slice is restored for the final source-frozen bootstrap attempt;
+`r4` produced no Stage 2 admission verdict.
+
+The final bounded `r5` attempt admitted Stage 2 (`858 compiled, 0 cached, 0
+failed`; sanity `status=pass`, SHA-256
+`d2ed1d54673bc4cc848024ebbc229a873053dc315d8412613184bfdc5faec947`).
+Stage 3 still made no candidate: it held one core while RSS grew to about
+19.8 GiB over 143 seconds, then was deliberately terminated before host OOM.
+The wrapper recorded exit 143 and correctly refused Stage 4/seed fallback.
+The session's three-cycle limit is exhausted; further localization is handed
+off rather than retried here.
+
 Open. This blocks an admitted self-hosted compiler deployment and therefore
 blocks the compiler/loader performance rows that reject Rust-seed evidence.
 The historical `build/restart12-build11-a-r2/output` lineage is absent from the
@@ -36,17 +52,25 @@ Stage 3, where MIR lowering rejected fourteen backend constants whose bare-zero
 initializers could not safely determine a type. The constants are the complete
 zero-valued CUDA/ELF/Mach-O/x86/AArch64 backend set in the Stage 3 closure; each
 now carries the explicit `i64` type demanded by that fail-closed boundary.
-The trace resume was retained but reached its bounded termination before a
-candidate and did not alter source. The next bootstrap is the third and final
-repair cycle.
+The trace resume was retained but received an external SIGTERM before a
+candidate and did not alter source. The canonical Stage 3 wrapper contains no
+timeout around the native-build command, so no timeout owner or duration is
+proved by that receipt.
 
 Cycle 3 admitted Stage 2 again and removed all fourteen module-constant type
-errors. Stage 3 then reached only source indices 0 through 2 before the bounded
-native-build process was terminated with exit 143. Its retained log is 883
-bytes and contains no compiler diagnostic or admitted candidate. The three-fix
-cap is exhausted: Stage 3 timeout/localization is the current blocker; Stage 4,
-deployment, and performance evidence remain unavailable until a fresh session
-extends or subdivides that bounded build with a reviewed timeout policy.
+errors. Stage 3 then reached only source indices 0 through 2 before receiving
+SIGTERM (exit 143). Its retained log is 883 bytes and contains no compiler
+diagnostic or admitted candidate.
+
+A fresh long-lived resume removed the external command-duration ambiguity. The
+admitted Stage 2 process remained runnable at about 100% CPU, but after source
+index 2 `post-store` its RSS grew from about 7.4 GiB to 20 GiB in four minutes
+without further log or I/O progress. It was terminated before host OOM. The
+exact interval is module-surface lookup: the old linear search passed each
+large `ModuleSurface` aggregate by value before rejecting a mismatched scalar
+source index. The repair first resolves through the registry's native-safe
+scalar name/index arrays, validates one candidate by physical identity, and
+retains a scalar-prefiltered fallback for compatibility spellings.
 
 ## Evidence
 
