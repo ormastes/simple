@@ -430,36 +430,36 @@ impl HirLowering:
             param_idx = param_idx + 1
         HirType(kind: HirTypeKind.Function(param_types, self.lower_type(callable.return_type), []), span: callable.span)
 
-    me imported_surface_type(type_: Type, imported_mod: ModuleSurface) -> HirType:
+    me imported_surface_type(type_: Type, imported_module_name: text) -> HirType:
         val source_name = parser_type_kind_named_name(type_.kind)
         if source_name != "":
             val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
-                imported_mod.module_name, source_name)
+                imported_module_name, source_name)
             if raw_symbol_id >= 0:
                 return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: type_.span)
         self.lower_type(type_)
 
-    me imported_surface_type_projected(type_: Type, type_name: text, array_element_name: text, imported_mod: ModuleSurface) -> HirType:
+    me imported_surface_type_projected(type_: Type, type_name: text, array_element_name: text, imported_module_name: text) -> HirType:
         # Prefer scalar projections captured before the parser Type crossed a
         # nested Dict/array boundary.  The retained Type remains the complete
         # fallback for shapes not yet affected by the staged-native ABI bug.
         if type_name != "":
             val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
-                imported_mod.module_name, type_name)
+                imported_module_name, type_name)
             if raw_symbol_id >= 0:
                 return HirType(kind: HirTypeKind.Named(SymbolId(id: raw_symbol_id), []), span: type_.span)
             return HirType(kind: self.lower_named_kind(type_name, [], type_.span), span: type_.span)
         if array_element_name != "":
             val raw_element_id = self.symbols.lookup_qualified_type_raw(
-                imported_mod.module_name, array_element_name)
+                imported_module_name, array_element_name)
             val element = if raw_element_id >= 0:
                 HirType(kind: HirTypeKind.Named(SymbolId(id: raw_element_id), []), span: type_.span)
             else:
                 HirType(kind: self.lower_named_kind(array_element_name, [], type_.span), span: type_.span)
             return HirType(kind: HirTypeKind.Array(element, nil), span: type_.span)
-        self.imported_surface_type(type_, imported_mod)
+        self.imported_surface_type(type_, imported_module_name)
 
-    me declared_imported_surface_callable_type(callable: ModuleSurfaceCallable, imported_mod: ModuleSurface, owner_symbol: SymbolId?) -> HirType?:
+    me declared_imported_surface_callable_type(callable: ModuleSurfaceCallable, imported_module_name: text, owner_symbol: SymbolId?) -> HirType?:
         if callable.type_params.len() > 0 or not callable.has_return_type:
             return nil
         var param_types: [HirType] = []
@@ -476,7 +476,7 @@ impl HirLowering:
                 return nil
             val param = callable.params[param_idx]
             param_types = param_types.push(self.imported_surface_type_projected(
-                param.type_, param.type_name, param.array_element_name, imported_mod))
+                param.type_, param.type_name, param.array_element_name, imported_module_name))
             param_idx = param_idx + 1
         HirType(
             kind: HirTypeKind.Function(
@@ -485,7 +485,7 @@ impl HirLowering:
                     callable.return_type,
                     callable.return_type_name,
                     callable.return_array_element_name,
-                    imported_mod),
+                    imported_module_name),
                 []),
             span: callable.span)
     me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
@@ -752,7 +752,7 @@ impl HirLowering:
             var imported_field_types: Dict<text, HirType> = {}
             for field in composite.fields:
                 imported_field_types[field.name] = self.imported_surface_type_projected(
-                    field.type_, field.type_name, field.array_element_name, imported_mod)
+                    field.type_, field.type_name, field.array_element_name, imported_mod.module_name)
             val canonical_composite_name = imported_mod.module_name + "." + imported_name
             self.struct_field_types_by_name[canonical_composite_name] = imported_field_types
             if not self.struct_field_types_by_name.has(imported_name):
@@ -862,8 +862,27 @@ impl HirLowering:
                 val imported_type = self.symbols.define(local_name, SymbolKind.TypeAlias, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
                 self.symbols.rename_symbol(imported_type, imported_name)
         elif imported_mod.callables.contains_key(imported_name):
+            # Repeated glob roots and physical module aliases can revisit the
+            # same local callable. Function symbols are not first-write-wins,
+            # so guard an exact repeat before define rather than accumulating
+            # duplicate rows. Do not suppress a different callable/module that
+            # intentionally competes for the same local alias.
+            val existing_id = self.symbols.lookup_or_invalid(local_name)
+            var exact_repeat = false
+            if existing_id.is_valid() and self.symbols.symbols.has(existing_id.id):
+                val existing: HirSymbol = self.symbols.symbols[existing_id.id]
+                var same_owner = false
+                if val existing_owner = existing.defining_module:
+                    same_owner = existing_owner == imported_mod.module_name
+                val qualified_name = imported_mod.module_name + "." + imported_name
+                val same_source_name = (existing.name == qualified_name or
+                    (imported_name == local_name and existing.name == local_name))
+                exact_repeat = (existing.kind == SymbolKind.Function and
+                    same_owner and same_source_name)
+            if exact_repeat:
+                return
             val fn_type = self.declared_imported_surface_callable_type(
-                imported_mod.callables[imported_name], imported_mod, nil)
+                imported_mod.callables[imported_name], imported_mod.module_name, nil)
             val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, fn_type, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             self.qualify_imported_function_symbol(imported_fn_sym, imported_mod.module_name, imported_name)
         elif imported_mod.constants.contains_key(imported_name):
@@ -1441,7 +1460,7 @@ impl HirLowering:
                     val kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
                     self.materialize_imported_callable_type_dependencies(imported_mod, imported_mod_name, method, import_span, materialize_enum)
                     val method_type = self.declared_imported_surface_callable_type(
-                        method, imported_mod, Some(local_owner))
+                        method, imported_mod.module_name, Some(local_owner))
                     self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
             if impl_.has_trait_:
                 val trait_name = parser_type_kind_named_name(impl_.trait_.kind)
@@ -1464,7 +1483,7 @@ impl HirLowering:
                                 val kind = if trait_method.is_static: SymbolKind.Function else: SymbolKind.Method
                                 self.materialize_imported_callable_type_dependencies(imported_mod, imported_mod_name, trait_method, import_span, materialize_enum)
                                 val method_type = self.declared_imported_surface_callable_type(
-                                    trait_method, imported_mod, Some(local_owner))
+                                    trait_method, imported_mod.module_name, Some(local_owner))
                                 self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, local_owner_defining_module)
 
     me qualify_imported_function_symbol(sym_id: SymbolId, imported_mod_name: text, imported_name: text):

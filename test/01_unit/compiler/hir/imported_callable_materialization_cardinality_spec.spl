@@ -1,0 +1,77 @@
+"""Repeated import roots materialize one callable symbol and one signature."""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirTypeKind, SymbolKind}
+
+fn callable_cardinality_surfaces(modules: Dict<text, Module>, sources: [SourceFile]) -> ModuleSurfacesByName:
+    match module_surfaces_from_modules(modules, sources):
+        case Ok(value): value
+        case Err(_):
+            assert_true(false)
+            ModuleSurfacesByName.empty()
+
+describe "imported callable materialization cardinality":
+    it "materializes one callable for repeated glob roots of one physical surface":
+        val logger = Logger(level: 0)
+        val owner_source = "pub struct Token:\n" +
+            "    value: i64\n" +
+            "pub fn materialize(a: Token, b: [Token], c: text, d: i64) -> Token:\n" +
+            "    a\n"
+        val owner = parse_full_frontend(
+            owner_source, "card.owner", "card.owner", logger)
+        val owner_alias = parse_full_frontend(
+            owner_source, "card.owner_alias", "card.owner_alias", logger)
+        var modules: Dict<text, Module> = {}
+        modules["card.owner"] = owner
+        modules["card.owner_alias"] = owner_alias
+        val surfaces = callable_cardinality_surfaces(modules, [
+            SourceFile(
+                path: "card/owner.spl", content: owner_source,
+                module_name: "card.owner"),
+            SourceFile(
+                path: "card\\owner.spl", content: owner_source,
+                module_name: "card.owner_alias")
+        ])
+        expect(surfaces.surfaces.len()).to_equal(1)
+        expect(surfaces.index_by_name["card.owner"]).to_equal(
+            surfaces.index_by_name["card.owner_alias"])
+
+        val consumer_source = "use card.owner.*\n" +
+            "use card.owner_alias.*\n" +
+            "use card.owner.*\n" +
+            "use card.owner_alias.*\n" +
+            "fn main() -> i64:\n" +
+            "    0\n"
+        val consumer = parse_full_frontend(
+            consumer_source, "card.consumer", "card.consumer", logger)
+        var lowering = hirlowering_for_module("card.consumer", surfaces)
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.errors.len()).to_equal(0)
+
+        val materialize_id = hir.symbols.lookup_or_invalid("materialize")
+        expect(materialize_id.is_valid()).to_equal(true)
+        var materialize_rows = 0
+        for symbol in hir.symbols.symbols.values():
+            if (symbol.kind == SymbolKind.Function and
+                    (symbol.name == "materialize" or
+                     symbol.name.ends_with(".materialize"))):
+                if val defining_module = symbol.defining_module:
+                    if (defining_module == "card.owner" or
+                            defining_module == "card.owner_alias"):
+                        materialize_rows = materialize_rows + 1
+        expect(materialize_rows).to_equal(1)
+
+        var signature_param_count = -1
+        if val materialize_symbol = hir.symbols.get_symbol_raw(materialize_id.id):
+            if val materialize_type = materialize_symbol.type_:
+                match materialize_type.kind:
+                    case HirTypeKind.Function(params, _, _):
+                        signature_param_count = params.len()
+                    case _: pass
+        expect(signature_param_count).to_equal(4)

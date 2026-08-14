@@ -2,7 +2,7 @@
 
 ## 2026-08-14 restart12 replacement lane (canonical active slice)
 
-Current source base: `69483b992f45e3aa7b69e501c9285f895058135d` plus the
+Current source base: `cea2293c8f2834fdde7f00e0061b62970cbaab3f` plus the
 pending Phase-3 constant/import continuation described below. This slice supersedes stale provenance
 claims below without rewriting the historical T1--T20 record. Operator guide:
 `doc/07_guide/ui/rendering/cached_render_entry_closure.md`; retained result:
@@ -22,16 +22,19 @@ receipt are absent. Direct `-c` and source-file probes exit 248 with
 artifact. Those variants are diagnostic attempts, not implementation fix
 cycles, and they prove neither binary lineage nor root cause.
 
-The latest continuation fixed desugared module-constant type selection and
-produced a sanity-checked diagnostic Stage 2 at
-`build/restart12-render-cli-pass2/stage2-cycle9/x86_64-unknown-linux-gnu/simple`
-(SHA-256 `e4bb648c42a5a2fcc60d5428938389d7c87ecd628f64d55a40aa338963a1da92`).
+The latest continuation fixed desugared module-constant type selection, removed
+the wide by-value `ModuleSurface` boundary from imported callable signature
+materialization, and deduplicated only exact repeated callable registrations.
+It produced a source-current, sanity-checked diagnostic Stage 2 at
+`build/restart12-render-cli-pass2/stage2-cycle10/x86_64-unknown-linux-gnu/simple`
+(SHA-256 `b6abe72ea7a6d7b102b83d116fc5b32d41c98bdf5d0e777a1602091699240e57`).
 It is not an admitted Stage 3 or full CLI. Fresh Phase-3 attempts did not
 re-reach the former MIR module-constant frontier, so closure of its fourteen
-errors remains unverified. Phase 3 still produced no executable: the normal run exited
-139, while the single debugger-bound reproduction advanced into glob-import
-callable-type registration and received SIGTERM in `rt_array_push_grow` from
-`declared_imported_surface_callable_type`. The three-cycle cap is exhausted;
+errors remains unverified. Phase 3 parsed all 616 inputs, then exited on signal
+11 with 25 accumulated HIR diagnostics and no executable. Peak RSS was
+8,700,496 KiB. The log identifies invalid field-type payloads for
+`CompiledUnit.entry_point` and `BackendError.span`, but did not flush the
+underlying diagnostics before the crash. The three-cycle cap is exhausted;
 Stage 4 and every downstream CLI/render gate remain blocked.
 
 ### Acceptance status
@@ -39,7 +42,7 @@ Stage 4 and every downstream CLI/render gate remain blocked.
 | AC | Status | Proof or remaining evidence |
 |---|---|---|
 | AC-1 current truth | PROVED | The active slice distinguishes the unadmitted artifact, missing receipts, and unproven root cause; historical redesign §1--§8 remains authoritative. |
-| AC-2 executable resume | BLOCKED | Diagnostic Stage 2 passed with the `has_type_` fix, but Phase 3 failed before re-verifying the former MIR frontier and stopped during imported callable-type registration after three cycles; a fresh lane must instrument/bound that owner and determine whether duplication exists before the canonical transaction below. |
+| AC-2 executable resume | BLOCKED | Source-current diagnostic Stage 2 passed once, but Phase 3 failed after all 616 parses with 25 accumulated HIR diagnostics, invalid field-type payloads, signal 11, and no executable. A fresh lane must retain the diagnostics before the canonical transaction below. |
 | AC-3 gate separation | PROVED | Candidate build, admission, deploy, deployed lineage, carrier build, and carrier run are independent. |
 | AC-4 sparse 8K contract | BLOCKED | This is a future receipt contract; the completed diagnostic row lacks admitted-native evidence. |
 | AC-5 parallel ownership | PROVED | Bounded matrix below; `/root` alone edits shared plan/knowledge files. |

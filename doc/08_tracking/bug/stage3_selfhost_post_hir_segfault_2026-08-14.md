@@ -260,6 +260,32 @@ owner exists, retain RSS and callable/import cardinalities, re-verify the former
 MIR constant frontier, and rerun Phase 3 in a new cache. Only the full
 wrapper-owned LLVM bootstrap transaction may admit a later Stage 3/4 result.
 
+### Source-current callable-boundary continuation
+
+The next bounded continuation replaced the wide by-value `ModuleSurface`
+argument used by imported callable signature materialization with its scalar
+module name and added exact-identity deduplication for repeated callable
+registrations. A focused source regression covers repeated glob roots while
+preserving different-owner collision behavior. It also restored the missing
+`defer_unsupported_marker` declaration required to link the diagnostic compiler.
+
+The resulting diagnostic Stage 2 completed 858 units with zero failures and
+passed version, unsupported-command, bootstrap-off/frontend,
+bootstrap-on/frontend, and unchanged-hash sanity once. Its binary is
+`build/restart12-render-cli-pass2/stage2-cycle10/x86_64-unknown-linux-gnu/simple`,
+SHA-256 `b6abe72ea7a6d7b102b83d116fc5b32d41c98bdf5d0e777a1602091699240e57`;
+the successful build-log SHA-256 is
+`ad462c5a4f3f7dda517377057c24358ac51d4547011e704365df53b797cfcfc6`.
+
+The source-current Phase-3 cycle parsed all 616 inputs, accumulated 25 HIR
+diagnostics by source index 2, printed invalid field-type payloads for
+`CompiledUnit.entry_point` and `BackendError.span`, and exited on signal 11.
+No executable was produced. `/usr/bin/time -v` recorded peak RSS 8,700,496 KiB.
+Because the diagnostics were not flushed before the crash and apport retained
+no accessible core, this does not prove a new root cause or close the former
+MIR frontier. The next fresh lane must make those diagnostics durable and
+repair their first common owner; repeating this exhausted command is not evidence.
+
 ## Restart12 primary repair lane (2026-08-14)
 
 The retained log proved that `MethodResolution.Unresolved` was selected by a
