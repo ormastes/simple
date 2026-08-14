@@ -201,3 +201,25 @@ helpers, and prove argv with a registry-sensitive pure-owner operation under
 the production whole-archive link policy. Non-GNU mixed-owner linkage remains
 a platform WARN. Only after a rebuilt CLI emits the mandatory receipt may a
 new source-frozen Stage-3 diagnostic run begin.
+
+### Private-owner follow-up result
+
+A fresh three-cycle session implemented the private-helper shape and exercised
+it under the production GNU whole-archive/multiple-definition policy. The
+deliberate-red archive correctly reached poisoned public array providers before
+the fix. After the fix, an empty argv plus direct private allocation/push was
+registry-valid, proving the private ownership path itself.
+
+Populated argv still failed: Stage 2 lowered both the fail-closed
+`push_owned(...) < 1` and `push_owned(...) == 0` conditions to an indirect
+`rt_native_eq` call, but the pure runtime archive did not define that symbol.
+The final executable therefore segfaulted at the unresolved GOT call after a
+successful private push. The fresh archive built all 18 parts with zero
+failures, so this is a runtime-closure/link defect rather than a parse/build
+failure. The prototype and tests were removed at the cycle cap.
+
+Next work must add and prove `rt_native_eq` in the actual pure runtime closure
+(or another fail-closed comparison primitive already admitted by that closure),
+then reapply the private-owner bridge and rerun the populated, registry-sensitive
+whole-archive test. Silently ignoring the push result is not an acceptable
+shortcut.
