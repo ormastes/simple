@@ -54,6 +54,11 @@
 - [ ] Coverage instrumentation supplies a complete static/zero-count decision
   inventory for every changed branch-bearing `.spl` file; executed-probe rows
   alone cannot establish the denominator or the 80% claim.
+  Three bounded implementation/review cycles on 2026-08-14 were rejected:
+  the final draft still confused declaration-owned IDs in trait-backed
+  `DECL_STRUCT` and `DECL_CLI` bodies with statement IDs. Resume by implementing
+  constructor-defined, tag-dispatched declaration traversal plus exact
+  manifest/runtime key-parity tests; do not scan generic arena arrays.
 - [ ] Changed `.spl` files pass lint, HWIR token duplication, and the seven-part
   `sspec-maintain scan`; the qualification receipt records at least 80% branch
   coverage or leaves the coverage contract blocked.

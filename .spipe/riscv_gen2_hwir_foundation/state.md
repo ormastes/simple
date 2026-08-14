@@ -1093,3 +1093,11 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   remain hash-only, product JSON binding is substring-based, parent symlink and
   final-destination rehash checks are incomplete, and executable runner/writer
   deliberate-reds are absent. These are active resume items, not exclusions.
+- review-blocked (2026-08-14, A14 inventory cycle 3): compiler-time semantic
+  inventory was attempted and fully reverted after highest-capability review
+  found declaration-arena aliasing: trait-backed `DECL_STRUCT` method bodies
+  and `DECL_CLI` subcommand bodies contain declaration IDs, not statement IDs.
+  Resume requires constructor-defined tag dispatch across declaration,
+  statement, and expression arenas; exact span-key parity with runtime probes;
+  reachable-vs-orphan regressions; and one admitted native compile marker.
+  The three-cycle cap is exhausted for this session, so A14 remains WARN.

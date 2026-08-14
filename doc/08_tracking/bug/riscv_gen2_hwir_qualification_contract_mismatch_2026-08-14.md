@@ -62,6 +62,13 @@ independent static denominator. Therefore a missing branch cannot earn PASS;
 the coverage producer must expose a complete zero-count decision inventory
 before the 80% gate can close.
 
+The 2026-08-14 compiler-inventory attempt exhausted three bounded fix cycles
+and was reverted. The last review found that trait-backed `DECL_STRUCT` bodies
+and `DECL_CLI` bodies store declaration IDs; a generic statement walk therefore
+pollutes or omits the denominator. Resume with tag-dispatched traversal derived
+from the flat-AST constructors, exact runtime-key parity, reachable/orphan
+regressions, and exactly-one compile-stdout marker evidence.
+
 Resume after the admitted runtime and complete decision inventory exist:
 
 `sh scripts/check/run-riscv-gen2-hwir-qualification.shs --stage4-cli <absolute-admitted-cli> --stage4-provenance <adjacent-provenance> --output-dir <absolute-fresh-run-dir>`
