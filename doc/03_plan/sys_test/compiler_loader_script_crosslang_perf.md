@@ -5,9 +5,9 @@
 Plan content accepted at `3fdfa0d3351` and the current operational reconciliation
 accepted by `/root/reconciled_plan_review`; `/root/final_nonstage4_review`
 accepted the current Stage-4-excluded continuation on bounded review cycle 3.
-Commit `0943ce963f05107046937456f8570b957aa939e5` was integrated under the
-lane lock and remains reachable from refreshed `origin/main`; the current
-atomic PBL-03 reconciliation is pending its own final commit and integration.
+Atomic implementation commit `2249dc49ac4e2d8f6d63626432fc8d7be6a12966`
+was integrated under the lane lock and remains reachable from refreshed
+`origin/main`; this final bookkeeping revision uses the same locked workflow.
 Feature verification remains blocked. This document is the canonical
 handoff for `compiler_loader_script_crosslang_perf`. It records what is already
 implemented, what current evidence proves, and the exact remaining gates. A
@@ -90,7 +90,7 @@ Current acceptance items, each to be verified once in this lane:
   pushed commit is reachable from a freshly fetched `origin/main`.
 - [x] Finish lane A with a clean tree and only then write
   `/tmp/restart12-compiler_perf_a.done` as `<commit> PASS` or `<commit> WARN`.
-  Receipt: `0943ce963f05107046937456f8570b957aa939e5 WARN`, reachable
+  Atomic implementation receipt: `2249dc49ac4e2d8f6d63626432fc8d7be6a12966 WARN`, reachable
   from refreshed `origin/main`. The tracked/lane-owned tree was clean; two
   unrelated GUI report files remained untracked and excluded.
 
@@ -177,7 +177,7 @@ selection flow produces the missing selected requirement documents.
 | CMP-01 | REQ-007, NFR-001/005/006 | Self-hosted compiler checks for `src/compiler`, `src/lib`, MCP, LSP, and MCP stdio smoke pass without seed fallback | Commands below | BLOCKED — deployed candidate exists but is not admitted |
 | PLN-01 | all | Canonical plan, guide, expert knowledge, blockers, and cooperative-review receipts are internally consistent and pass focused document gates | Document review and layout guard | PROVED — review accepted; SPipe wiring, spec-layout, and working/staged runtime guards pass. Global workspace-root strict audit remains WARN-blocked by 137 pre-existing unrelated manifest violations |
 | DOC-01 | all | Selected research/requirements, accepted architecture/detail design, and generated manual provenance exist | Artifact review and admitted docgen | BLOCKED — research/options/drafts now exist; user selection, post-selection acceptance, and admitted docgen provenance remain outstanding |
-| VCS-01 | all | Only intentional lane-A files are committed; locked integration reaches refreshed `origin/main`; tree and lane marker are truthful | Git receipts | PROVED through integrated baseline `0943ce963f05...`; the current receipt/PBL-03 documentation reconciliation requires a final commit/push and marker refresh; unrelated untracked GUI reports are excluded |
+| VCS-01 | all | Only intentional lane-A files are committed; locked integration reaches refreshed `origin/main`; tree and lane marker are truthful | Git receipts | PROVED — atomic implementation `2249dc49ac4...` is reachable; final bookkeeping uses the same locked push/reachability/marker sequence; unrelated untracked GUI reports are excluded |
 
 ## Manual-facing flow
 
@@ -375,7 +375,7 @@ corrected; `/root/reconciled_plan_review` (`gpt-5.6-sol`, high) then returned
 - [x] Fresh highest-capability review accepts this Stage-4-excluded continuation.
 - [x] Focused plan-quality gates pass; the global workspace-root strict audit
   truthfully remains WARN with 137 pre-existing unrelated manifest violations.
-- [ ] Current receipt/PBL-03 reconciliation is committed and integrated through
-  the lane lock. Baseline `0943ce963f05107046937456f8570b957aa939e5` remains
-  reachable with a matching WARN marker; two unrelated untracked GUI reports
-  are excluded.
+- [x] Current receipt/PBL-03 reconciliation is committed and integrated through
+  the lane lock. Atomic implementation `2249dc49ac4e2d8f6d63626432fc8d7be6a12966`
+  is reachable; the final lane marker is refreshed only after the bookkeeping
+  push is proved reachable. Two unrelated untracked GUI reports are excluded.
