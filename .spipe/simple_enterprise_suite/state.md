@@ -54,12 +54,18 @@ Wave B — db-server harden (durable persistence):
   `blocked/unavailable` row in evidence (no fake driver), per assessment §4.
 
 Wave C — foundation + goods-sale vertical:
-- AC-8: Foundation contracts frozen and implemented in the ERP module set:
-  TenantContext/ActorContext, Money/Quantity/typed IDs, CommandEnvelope/
-  CommandResult/ErrorCode, DomainEvent/OutboxRecord/AuditRecord; the existing
-  guarded-write gate (session → RBAC → validation → idempotency) is rewired to
-  run over the durable repository layer instead of in-memory arrays; existing
-  ERP kernel/lane specs still pass.
+- AC-8a: Foundation contracts frozen and implemented over the durable layer:
+  TenantContext/ActorContext/SessionContext, Money, CommandEnvelope/
+  CommandResult with a closed reason set; the guarded-write sequence
+  (session → RBAC → validation → idempotency → effects-in-one-UoW) is
+  implemented over the durable repository layer (std.enterprise_sale).
+- AC-8b (amended 2026-08-14, split from AC-8): the existing
+  examples/12_business/simple_erp lanes are rewired onto
+  std.enterprise_{store,sale} (replacing in-memory arrays/used_keys) and the
+  example's ubs_test suite still passes. Reason for split: the example is a
+  self-contained project with local imports and its own test harness; wiring
+  it is an independent, testable increment that must not gate the stdlib
+  vertical evidence.
 - AC-9: Goods-sale vertical passes end-to-end as a system spec: product/SKU +
   price snapshot → order with idempotency key → stock reservation (no negative
   available stock) → payment state transition → balanced journal posting →
@@ -200,7 +206,22 @@ implement (Wave A in progress)
   tenant isolation (AC-10) incl. cross-tenant session rejection; restart
   survival with post-restart replay guard. Spec landmine learned: interpreter
   sqlite caches per path in-process → one db path per scenario.
-  AC-8 partial: contracts frozen + guarded gate implemented over durable
-  repos in stdlib; REWIRING the examples/12_business/simple_erp lanes onto
-  std.enterprise_{store,sale} and re-running its ubs_test suite is the open
-  follow-up. Guides: doc/07_guide/lib/database/enterprise_store.md (+_tldr).
+  AC-8a done (contracts + guarded gate over durable repos in stdlib);
+  AC-8b (example-lane rewiring + ubs_test) split out and open — see amended
+  Acceptance Criteria. Guides: doc/07_guide/lib/database/enterprise_store.md
+  (+_tldr).
+- review fixes (2026-08-14, advisor pass): Money threaded through
+  sale_add_product (was exported-unused); journal-balance docstring aligned
+  with implementation (per-tenant check; per-order balance by construction
+  via post_journal pairs); protocol_handler_spec 7/8 attribution CONFIRMED
+  pre-existing (its imports are tls_handshake/tls_common/protocol_handler
+  only — none touched by this lane). Vertical spec re-run 7/7 after Money
+  change. LLM wiki entry created:
+  doc/00_llm_process/feature_expert/enterprise_suite/skill.md.
+- EVIDENCE STATUS (verify gate, do not close ACs on this alone): all spec
+  evidence this session is interpreter-mode on the Jul-25
+  bin/release/aarch64-apple-darwin binary (seed-banner caveat). Resume
+  condition for verify PASS: fresh stage4 self-hosted deploy, then re-run the
+  six verification commands in
+  doc/00_llm_process/feature_expert/enterprise_suite/skill.md; ACID rows
+  additionally need --mode=native with real SQLite. Owner: next lane session.

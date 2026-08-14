@@ -20,8 +20,9 @@ Storage model is insert-only + derive (compatible with both backends and
 with the assessment's immutable-ledger rule):
 - `stock_moves`: signed deltas; available stock = sum of a tenant's deltas.
 - `order_events`: order status is derived from its event stream.
-- `journal`: debit/credit postings; the vertical is balanced when total
-  debits equal total credits per tenant AND per order.
+- `journal`: debit/credit postings; `sale_journal_balanced` checks that a
+  tenant's total debits equal total credits (per-order balance follows from
+  postings only ever being written as debit/credit pairs via `post_journal`).
 """
 
 use std.nogc_sync_mut.enterprise_store.store.{
@@ -34,7 +35,7 @@ use std.nogc_sync_mut.enterprise_store.records.{
 }
 use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
 use std.nogc_sync_mut.enterprise_sale.foundation.{
-    TenantContext, ActorContext, SessionContext,
+    TenantContext, ActorContext, SessionContext, Money,
     CommandEnvelope, CommandResult,
     accepted, denied, session_valid, role_allows
 }
@@ -58,16 +59,16 @@ fn sale_setup(store: EnterpriseStore) -> bool:
 # Catalog and stock administration (admin-guarded)
 # =============================================================================
 
-fn sale_add_product(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, sku: text, name: text, price_cents: i64, currency: text) -> CommandResult:
+fn sale_add_product(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, sku: text, name: text, price: Money) -> CommandResult:
     if not session_valid(session, tenant, who):
         return denied("invalid-session", sku)
     if not role_allows(who.role, "sale.catalog.admin"):
         return denied("forbidden", sku)
-    if sku == "" or price_cents <= 0:
+    if sku == "" or price.amount_cents <= 0 or price.currency == "":
         return denied("invalid-record", sku)
     store_insert_row(store,
         "INSERT INTO products (tenant_id, sku, name, price_cents, currency) VALUES (?, ?, ?, ?, ?)",
-        [tenant.tenant_id, sku, name, "{price_cents}", currency])
+        [tenant.tenant_id, sku, name, "{price.amount_cents}", price.currency])
     audit_append(store, tenant.tenant_id, who.actor_id, "catalog.product.add", sku)
     accepted(sku)
 
