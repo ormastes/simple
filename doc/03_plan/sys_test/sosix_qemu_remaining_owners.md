@@ -50,3 +50,9 @@ evidence.
 These receipts close the source/lifecycle implementation blockers in AC-4
 through AC-6. They do not promote a matrix row without a source-matched admitted
 runtime, canonical producer bundle, executable SSpec, and generated manual.
+
+The current bootstrap continuation also completes the typed parser-contract
+owner and proves Stage 2 plus its sanity gate. Stage 3 remains the active local
+blocker: its self-host process grows beyond 25 GiB and segfaults before a Stage
+4 CLI can be deployed. Therefore the exact SSpec/docgen commands above remain
+pending and must not be run against the known-stale release binary.

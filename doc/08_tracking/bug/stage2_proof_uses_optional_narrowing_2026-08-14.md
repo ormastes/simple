@@ -198,3 +198,25 @@ Phase 3 in a new cache. Once that succeeds, the only supported admission route
 is the complete wrapper-owned LLVM transaction recorded in the canonical
 render-performance plan; the diagnostic Stage 2/3 artifacts cannot be promoted
 retroactively.
+
+## QEMU-matrix continuation: typed parser owner completed
+
+The restart12 QEMU continuation selectively ported the typed parser-contract
+surface identified above. `ParserFunction` now owns a canonical
+`ContractBlock`; `ContractClause` retains its typed expression and span; the
+flat AST has dedicated nodes for `in`, `invariant`, `out`, `out_err`,
+`decreases`, and `proof uses`; and every synthetic/desugared function
+constructor explicitly preserves or initializes the contract. The Rust parser
+AST uses the cross-language-safe field name `decrease_measure`, while the
+language token and Rust HIR continue to use `decreases`.
+
+The current authority built Stage 2 and passed its bootstrap compiler sanity
+gate. Retained Stage-2 log SHA-256:
+`b8e1976ffd5f9499d8dccec87e1429d2d2657837517961f95eeb2094843d04d4`.
+
+Stage 3 then reproduced the independent retention failure. After initially
+holding near 7.8 GiB, RSS climbed beyond 25 GiB and the self-host process
+segfaulted. Retained Stage-3 log SHA-256:
+`a394b134cd59355fee22b2f6f691e54459384082a809fe7c269f9c7aff7be5d7`.
+The three-cycle cap was exhausted; no Stage 4 artifact was deployed and no
+SSpec/docgen command was retried.

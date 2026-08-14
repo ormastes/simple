@@ -56,7 +56,7 @@ impl Parser<'_> {
         // This is not checked at runtime, only used for Lean termination_by
         if self.check(&TokenKind::Decreases) {
             self.advance();
-            contract.decreases = Some(self.parse_decreases_clause()?);
+            contract.decrease_measure = Some(self.parse_decreases_clause()?);
         }
 
         // Parse proof uses: theorem_name (VER-022: Proof Import/Reuse)
@@ -537,7 +537,7 @@ decreases:
 "#;
         let contract = parse_contract(source).unwrap();
         assert_eq!(contract.preconditions.len(), 1);
-        assert!(contract.decreases.is_some());
+        assert!(contract.decrease_measure.is_some());
         assert!(contract.has_decreases());
     }
 
@@ -550,7 +550,7 @@ decreases: n
 "#;
         let contract = parse_contract(source).unwrap();
         assert_eq!(contract.preconditions.len(), 1);
-        assert!(contract.decreases.is_some());
+        assert!(contract.decrease_measure.is_some());
     }
 
     #[test]
@@ -565,7 +565,7 @@ out(ret):
 "#;
         let contract = parse_contract(source).unwrap();
         assert_eq!(contract.preconditions.len(), 1);
-        assert!(contract.decreases.is_some());
+        assert!(contract.decrease_measure.is_some());
         assert_eq!(contract.postconditions.len(), 1);
     }
 

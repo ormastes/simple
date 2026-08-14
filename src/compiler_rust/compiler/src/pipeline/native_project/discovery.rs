@@ -500,7 +500,7 @@ pub(crate) fn visit_ast_nodes(nodes: &[simple_parser::ast::Node], visitor: &mut 
             .chain(&contract.invariants)
             .chain(&contract.postconditions)
             .chain(&contract.error_postconditions)
-            .chain(contract.decreases.iter())
+            .chain(contract.decrease_measure.iter())
         {
             visit_clause(clause, visitor);
         }

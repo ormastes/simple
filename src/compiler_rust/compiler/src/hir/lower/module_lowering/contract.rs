@@ -259,7 +259,7 @@ impl Lowerer {
 
         // Lower decreases clause (for Lean termination_by generation)
         // Note: This is NOT checked at runtime, only used for Lean output
-        if let Some(ref clause) = contract.decreases {
+        if let Some(ref clause) = contract.decrease_measure {
             let condition = self.lower_expr(&clause.condition, ctx)?;
             hir_contract.decreases = Some(HirContractClause {
                 condition,

@@ -56,4 +56,11 @@ blocked
   SSpec/docgen. Direct QEMU receipts cannot substitute for those owners.
 - impl: AC-7 source uses bounded process execution, typed command evidence, and an exact 24-row oracle (3 PASS, 15 BLOCKED, 6 POSTPONED); AC-8 and AC-9 Todo/document contracts are synchronized.
 - blocked: The available self-hosted runtime crashed with exit 139 when executing the modern SSpec, and its earlier `spipe-docgen` attempt also crashed with exit 139. Neither unchanged command will be retried this session; no handwritten manual substitutes for generated evidence.
+- impl: The stale runtime crash was traced to an obsolete two-argument
+  `rt_env_set`; current source and its two-text ABI admission are correct. A
+  full bootstrap now builds and sanity-checks Stage 2 after completing the
+  missing typed parser-contract owner.
+- blocked: Stage 3 self-hosting grows beyond 25 GiB and segfaults before Stage
+  4 deployment. The capped continuation retained its logs and did not retry
+  SSpec/docgen with the unchanged stale release binary.
 - tracking: Todo DB rows 784-805 retain all shared, Linux, Windows, FreeBSD, and macOS owners.
