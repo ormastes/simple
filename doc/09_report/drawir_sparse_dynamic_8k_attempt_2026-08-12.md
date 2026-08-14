@@ -105,3 +105,14 @@ required self-hosted 7680x4320 row.
 The admission and cached-carrier resume workflow is
 `doc/07_guide/ui/rendering/cached_render_entry_closure.md`; its canonical plan
 is `doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md`.
+
+## 2026-08-14 synced SSpec regression check
+
+After synchronizing to `7ac900316dd5266595d8e2d713493ed174f0c8e4`, the modern
+cached-entry-closure contract retained nine scenarios and passed its static
+traceability, stub, numbered-artifact, direct-env, and layout checks. The only
+available unadmitted release artifact was invoked once against the focused
+spec; it exited 139 with zero stdout before any scenario ran, while `timeout`
+reported a core dump. No expectation failure was observed and no seed was
+substituted. TODO688 remains blocked on an admitted self-hosted runtime and the
+exact test, maintenance, and docgen commands in the system-test plan.

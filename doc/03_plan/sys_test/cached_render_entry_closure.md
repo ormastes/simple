@@ -1,6 +1,14 @@
 # Cached Render Entry Closure System-Test Plan
 
-Status: **implemented, self-hosted execution blocked** (TODO688).
+Status: **static contract PASS; self-hosted execution blocked** (TODO688).
+
+On the GitHub-synced source revision
+`7ac900316dd5266595d8e2d713493ed174f0c8e4`, the nine-scenario structure,
+requirement traceability, stub exclusion, numbered-artifact, direct-env, and
+spec-layout checks passed once. The only available unadmitted `release/`
+artifact then segfaulted with exit 139 before any scenario executed, with zero
+stdout. That diagnostic is runtime-blocker evidence, not a failed expectation
+and not an admitted SSpec PASS.
 
 The executable modern SSpec is
 `test/03_system/check/cached_render_entry_closure_contract_spec.spl`.
