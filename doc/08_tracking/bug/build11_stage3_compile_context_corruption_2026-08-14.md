@@ -39,6 +39,19 @@ materializes recursively in the no-GC heap. It is replaced by the equivalent
 Verification of that final source change is deferred to the next session by the
 three-cycle guard; Stage 3/4 remain BLOCKED, not failed by the unrun repair.
 
+The subsequent three-cycle verification used a validated
+`//bootstrap:stage3|reason=self-host-convergence-check` receipt. The first run
+showed that removing the 97-arm ASCII chain alone did not clear parse progress
+128. The second added a future bounded 120..200 per-file progress window, but
+the admitted r5 executor necessarily retained its frozen 64-file cadence. The
+third flattened the 41-arm `convert_flat_expr` dispatcher into semantically
+equivalent early-return guards; it still stopped at parse progress 128 with
+about 6.4 GiB RSS after 61 seconds. Inventory proves this is a systemic
+recursive-if-chain cost: the admitted closure also contains chains of 52, 41,
+37, 33, 31, 31, 28, and 19 arms. The next repair must make if/elif parsing and
+FlatAstBridge conversion iterative/flat, then rebuild Stage 2 so the executor
+itself carries that fix. More leaf rewrites are not accepted as completion.
+
 Open. This blocks an admitted self-hosted compiler deployment and therefore
 blocks the compiler/loader performance rows that reject Rust-seed evidence.
 The historical `build/restart12-build11-a-r2/output` lineage is absent from the

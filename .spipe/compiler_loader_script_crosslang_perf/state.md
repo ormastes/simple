@@ -73,6 +73,11 @@ dev
   `convert_flat_stmt` recursion while parsing the 97-arm backend ASCII elif
   table. That table now uses the equivalent `char_code` range check, but the
   bounded-cycle guard defers its Stage 3 verification. Status remains WARN.
+- 2026-08-14 continuation 2: an authorized three-cycle r5 resume showed that
+  the ASCII rewrite and flattened 41-arm expression dispatcher do not clear
+  parse progress 128. The admitted closure contains at least nine other
+  19..52-arm chains; the durable owner is recursive if/elif parser/bridge
+  representation and requires a fresh Stage 2. Stage 3/4 remain BLOCKED/WARN.
 
 - dev: Created state file with 7 acceptance criteria (type: todo).
 - plan: Merged lower-model plan/evidence and guide/wiki audits; at that historical revision research/requirements/architecture and packed-byte design/evidence were incomplete, and the deployed Stage 4 candidate plus manual docgen remained blocked.

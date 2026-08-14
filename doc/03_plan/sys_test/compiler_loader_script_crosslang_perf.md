@@ -88,6 +88,20 @@ check. Because that finding arrived on cycle three, its cache-preserving Stage
 3 verification is the first action for the next session; Stage 4 and feature
 evidence remain BLOCKED until it passes.
 
+Latest verification receipt: a validated typed Stage 3 authorization was used,
+but three bounded resumes still stopped at parse progress 128. The ASCII leaf
+and the 41-arm expression dispatcher are no longer nested chains; closure
+inventory nevertheless found eight additional 19..52-arm chains. The next
+critical-path work is a systemic iterative if/elif representation in the flat
+parser/bridge followed by a fresh Stage 2 rebuild. The admitted r5 executor is
+frozen and cannot consume its own driver/parser implementation changes.
+
+Stage 4 orchestration is independently MISSING: the current Stage 3 resume
+exits after provenance admission, while the only `--deploy` path deletes and
+rebuilds Stage 2/3. Implement the fail-closed continuation specified in
+`doc/08_tracking/bug/stage4_resume_from_admitted_gap_2026-08-14.md` before
+claiming that an admitted resumed Stage 3 can flow canonically to deployment.
+
 This detached worktree is the fresh lane-A replacement. The previous Build11
 candidate did not reach performance admission: its strict Stage 2 bootstrap
 ended after about 52 minutes with 61 HIR field-inference failures (mostly
