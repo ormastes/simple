@@ -95,3 +95,31 @@ and then exited 139 later in Stage 3 MIR lowering. The retained log is
 `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`, SHA-256
 `2dceab3fd116533537826b09b49cc64acfb2bfaaad6f9e5bd4036d5dd10af263`.
 This lane exhausted its third attempt and stopped WARN.
+
+## Restart12 render/CLI repair lane
+
+Binary inspection proved the old `release/x86_64-unknown-linux-gnu/simple`
+artifact is source-mismatched: it still lowers the test-depth update through
+`.to_text()` and passes `0x11` to `rt_env_set`, while current full-CLI source
+uses literal `"1"`. The lightweight `src/app/cli/test_entry.spl` still carried
+the unsafe dynamic form and is corrected in this lane; its source-contract
+tests now require the literal and reject `.to_text()`.
+
+The Stage 3 frontier fix changes the aggregate-valued conditional that selects
+`unresolved_receiver_local` into explicit typed `LocalId` assignments. This
+preserves writeback/prelowered/fresh precedence and single evaluation while
+avoiding the exact self-host aggregate-expression edge that emitted the
+impossible receiver ID. A fresh isolated no-stub LLVM bootstrap is running at
+`build/restart12-render-cli-fix`; only its retained result may promote this
+from a hypothesis to a verified fix.
+
+The first restart12 build cycle stopped earlier in Stage 2 on two concrete
+optional-contract field reads: both `proof_uses` accesses were inferred from an
+`ANY` owner. A cache-preserving second cycle returned the byte-identical log
+immediately, proving stale native-cache reuse. The allowed fresh-cache third
+cycle recompiled 476+ objects and reproduced the type error, proving it was not
+only stale evidence. The next source revision routes each field read through a
+helper whose argument is concretely `HirContractBlock`; this follow-up is not
+build-verified in this exhausted cycle. Retained log:
+`build/restart12-render-cli-fix/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`,
+SHA-256 `cbdb55c0fce8d12780437ddab2d51529770e101c319db5af220dbd00fc097bf8`.
