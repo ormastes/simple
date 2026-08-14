@@ -1,6 +1,6 @@
 # RV64 Live SSH Login in QEMU Specification
 
-> This Step Base spec restores the RV64 live SSH gate. Static scenarios prove that `rv64-ssh` is a distinct QEMU lane with host port 2222 forwarded to guest port 22 and a production `SshDaemon` RV64 entry. The opt-in live scenario builds the RV64 SSH kernel, boots QEMU, waits for the daemon listening marker, then drives OpenSSH good-password auth/exec and wrong-password fail-closed checks through the shared host-side SSH contract.
+> Modern operator manual for the fail-closed RV64 Sv39/PID1/network/SSH/WM gate. Static source contracts do not admit the live row; only retained, ordered runtime evidence may produce `TEST PASSED`.
 
 <!-- sdn-diagram:id=rv64_ssh_live_login_in_qemu_spec.arch -->
 <details class="sdn-source">
@@ -28,14 +28,16 @@ rv64_ssh_live_login_in_qemu_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 5 | 0 | 1 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # RV64 Live SSH Login in QEMU Specification
 
-This Step Base spec restores the RV64 live SSH gate. Static scenarios prove that `rv64-ssh` is a distinct QEMU lane with host port 2222 forwarded to guest port 22 and a production `SshDaemon` RV64 entry. The opt-in live scenario builds the RV64 SSH kernel, boots QEMU, waits for the daemon listening marker, then drives OpenSSH good-password auth/exec and wrong-password fail-closed checks through the shared host-side SSH contract.
+This modern SSpec keeps static configuration regressions separate from the live
+admission claim. The live scenario stays red unless an admitted Stage 4 CLI
+builds the image and QEMU produces the complete ordered lifecycle transcript.
 
 ## At a Glance
 
@@ -43,49 +45,45 @@ This Step Base spec restores the RV64 live SSH gate. Static scenarios prove that
 |-------|-------|
 | Feature IDs | #simpleos-rv64-ssh-live #simpleos-ssh-live |
 | Category | System |
-| Status | Static PASS; live opt-in tracks remaining KEX/X25519 blocker |
-| Requirements | N/A |
+| Status | Static contract implemented; live lifecycle gate blocked by TODO806 |
+| Requirements | AC-3, AC-4, AC-5, AC-6, AC-7 |
 | Plan | doc/03_plan/sys_test/rv64_ssh_live_login_in_qemu.md |
 | Design | N/A |
 | Research | doc/08_tracking/feature/kv260_simple_rv64_network_verification_2026-05-29.md |
 | Source | `test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-14 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-This Step Base spec restores the RV64 live SSH gate. Static scenarios prove that
-`rv64-ssh` is a distinct QEMU lane with host port 2222 forwarded to guest port
-22 and a production `SshDaemon` RV64 entry. The opt-in live scenario builds the
-RV64 SSH kernel, boots QEMU, waits for the daemon listening marker, then drives
-OpenSSH good-password auth/exec and wrong-password fail-closed checks through
-the shared host-side SSH contract.
-
-Current live completion remains blocked by RV64 pure Simple X25519/KEX evidence.
+The dedicated QEMU lane forwards host port 2222 to guest port 2222. The live
+row is deliberately fail-closed: an unset opt-in is a blocker, not a passing
+skip. TODO806 owns implementation and execution; TODO807 owns regeneration and
+the seven-dimension SSpec-maintain review once the admitted Stage 4 CLI exists.
 
 ## Acceptance Criteria
 
 - The `rv64-ssh` scenario resolves and keeps host-forwarded SSH on port 2222.
 - The RV64 SSH target uses `examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl`.
 - The RV64 entry initializes the RV64 VirtIO network runtime through std facade
-  helpers and starts production `SshDaemon` on port 22.
+  helpers and starts production `SshDaemon` on port 2222.
+- The retained serial transcript proves Sv39, PID1, TX, RX, network readiness,
+  SSH accept readiness, and process-owned WM frame readiness exactly once and
+  in canonical order.
 - When `SIMPLEOS_RV64_SSH_LIVE=1` is set, QEMU emits the SSH listening marker,
   OpenSSH authenticates as `root` with password `simpleos`, `true` exec reaches
   the daemon, wrong-password auth fails closed, and the host contract prints
   `TEST PASSED`.
 
-## Step Base
+## Operator Steps
 
-1. Resolve the `rv64-ssh` scenario from the shared QEMU catalog.
-2. Verify the scenario carries QEMU user networking with `hostfwd=tcp::2222-:22`.
-3. Resolve the RV64 SSH target and verify it points at the RV64 SSH live entry.
-4. Build the expected QEMU command and verify it uses `qemu-system-riscv64`.
-5. Verify the RV64 entry starts network through std RV64 facade helpers and then
-   starts production `SshDaemon`.
-6. Verify the runner dispatches `rv64-ssh` through the RV64 single-connection OpenSSH host probe.
-7. In opt-in live mode, build the RV64 SSH guest and require OpenSSH auth/exec
-   plus wrong-password fail-closed evidence.
-8. Store static and live TUI captures under `doc/06_spec/tui/03_system/os/`.
+1. `Build admitted RV64 boot image` — record Stage 4, provenance, image, and build-log hashes.
+2. `Boot QEMU and capture ordered lifecycle receipts` — retain the complete serial log.
+3. `Prove OpenSSH login, exec, rejection, and accept-loop recovery` — use independent connections for each command and negative-auth probe.
+4. `Prove process-owned WM readiness` — correlate the live WM PID with the first presented frame.
+
+Any missing, reordered, or duplicate receipt; canned command output; passing
+disabled row; or uncorrelated WM marker fails the gate.
 
 ## Syntax
 
@@ -252,10 +250,13 @@ expect(contract.contains("extern fn rt_process_run_timeout")).to_equal(true)
 
 </details>
 
-#### boots RV64 QEMU and accepts OpenSSH password auth and exec when explicitly enabled
+#### proves the ordered RV64 lifecycle and remains red when live evidence is unavailable
 
-- print
-   - Expected: live_status equals `disabled`
+- Build admitted RV64 boot image
+- Boot QEMU and capture ordered lifecycle receipts
+- Prove OpenSSH login, exec, rejection, and accept-loop recovery
+- Prove process-owned WM readiness
+- Expected: `TEST PASSED`; unavailable live evidence remains blocked/red
 
 
 <details>
@@ -271,13 +272,15 @@ if _rv64_ssh_live_enabled():
     if not build_os(target):
         expect("build failed").to_equal("built")
         return
+    step("Boot QEMU and capture ordered lifecycle receipts")
     val ok = test_scenario(scenario, 900000u64)
+    step("Prove OpenSSH login, exec, rejection, and accept-loop recovery")
+    step("Prove process-owned WM readiness")
     val run_status = if ok: "TEST PASSED" else: "TEST FAILED"
     expect(run_status).to_equal("TEST PASSED")
 else:
-    print("SKIP: set SIMPLEOS_RV64_SSH_LIVE=1 to run the RV64 live SSH QEMU gate")
-    val live_status = if _rv64_ssh_live_enabled(): "enabled" else: "disabled"
-    expect(live_status).to_equal("disabled")
+    print("BLOCKED: admitted Stage 4 and retained QEMU evidence are required")
+    expect("blocked: live evidence unavailable").to_equal("TEST PASSED")
 ```
 
 </details>
@@ -286,8 +289,8 @@ else:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

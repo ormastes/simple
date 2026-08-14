@@ -5,8 +5,8 @@
 
 **Feature IDs:** #simpleos-rv64-ssh-live #simpleos-ssh-live
 **Category:** System
-**Status:** Static PASS; live opt-in tracks post-decrypt service-request boundary
-**Requirements:** N/A
+**Status:** Static contract implemented; live lifecycle gate is fail-closed
+**Requirements:** AC-3, AC-4, AC-5, AC-6, AC-7
 **Plan:** doc/03_plan/sys_test/rv64_ssh_live_login_in_qemu.md
 **Design:** N/A
 **Research:** doc/08_tracking/feature/kv260_simple_rv64_network_verification_2026-05-29.md
@@ -16,7 +16,7 @@
 
 ## Overview
 
-This Step Base spec restores the RV64 live SSH gate. Static scenarios prove that
+This modern SSpec defines the RV64 live SSH gate. Static scenarios prove that
 `rv64-ssh` is a distinct QEMU lane with host port 2222 forwarded to guest port
 2222 and a production `SshDaemon` RV64 entry. The opt-in live scenario builds the
 RV64 SSH kernel, boots QEMU, waits for the daemon accept-loop marker, then drives
@@ -177,7 +177,10 @@ fn _captured_openssh_ext_info_packet() -> [u8]:
      0x89u8, 0x79u8, 0x7du8, 0x7eu8]
 
 describe "RV64 production SSHD in QEMU":
+# @manual_section: Static RV64 boot and forwarding contract
+    # @req AC-3 AC-4
     it "registers the RV64 SSH scenario with host-forwarded SSH":
+        step("Resolve the dedicated RV64 SSH scenario")
         val scenario = scenario_rv64_ssh()
         expect(scenario.name).to_equal("rv64-ssh")
         expect(scenario.arch).to_equal(Architecture.Riscv64)
@@ -186,6 +189,7 @@ describe "RV64 production SSHD in QEMU":
         expect(scenario.description.contains("SSH daemon")).to_equal(true)
 
     it "resolves the RV64 SSH target and QEMU command":
+        step("Build the canonical RV64 QEMU command")
         expect(scenario_exists("rv64-ssh")).to_equal(true)
         val resolved = scenario_by_name_direct("rv64-ssh")
         expect(resolved.name).to_equal("rv64-ssh")
@@ -197,6 +201,7 @@ describe "RV64 production SSHD in QEMU":
         expect(cmd.contains("user,id=n0,hostfwd=tcp::2222-:2222")).to_equal(true)
 
     it "keeps the RV64 SSH entry on the production daemon path behind std RV64 facades":
+        step("Inspect the production RV64 entry and networking facade")
         val entry = rt_file_read_text("examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl")
         val full_networking_runtime = rt_file_read_text("examples/09_embedded/simple_os/arch/riscv64/boot/full_networking_runtime.c")
         expect(entry.contains("use os.rv64_probe.{")).to_equal(true)
@@ -212,6 +217,7 @@ describe "RV64 production SSHD in QEMU":
         expect(full_networking_runtime.contains("/home/ormastes/dev/pub/simple")).to_be(false)
 
     it "routes rv64-ssh through the shared OpenSSH host probe contract":
+        step("Inspect the host probe and production SSH daemon boundaries")
         val runner = rt_file_read_text("src/os/_QemuRunner/scenario_exec.spl")
         val contract = rt_file_read_text("src/os/ssh_qemu_contract.spl")
         val facade = rt_file_read_text("src/os/kernel/net/rt_net_socket_facade.spl")
@@ -313,6 +319,7 @@ describe "RV64 production SSHD in QEMU":
         expect(session).to_contain("return plain")
 
     it "decrypts the captured OpenSSH AES-256-GCM EXT_INFO packet with logged session keys":
+        step("Decrypt the retained OpenSSH AES-256-GCM packet")
         val payload = ssh_decrypt_packet_aes_gcm(
             _captured_openssh_ext_info_packet(),
             0u32,
@@ -331,17 +338,22 @@ describe "RV64 production SSHD in QEMU":
         expect(data[40]).to_equal(0x01u8)
         expect(data[41]).to_equal(0x30u8)
 
-    it "boots RV64 QEMU and accepts OpenSSH password auth and exec when explicitly enabled":
+# @manual_section: Live ordered lifecycle gate
+    # @req AC-3 AC-4 AC-5 AC-6 AC-7
+    it "proves the ordered RV64 lifecycle and remains red when live evidence is unavailable":
+        step("Build admitted RV64 boot image")
         if _rv64_ssh_live_enabled():
             val scenario = scenario_rv64_ssh()
             val target = get_riscv64_ssh_live_target()
             if not build_os(target):
                 expect("build failed").to_equal("built")
                 return
+            step("Boot QEMU and capture ordered lifecycle receipts")
             val ok = test_scenario(scenario, 900000u64)
+            step("Prove OpenSSH login, exec, rejection, and accept-loop recovery")
+            step("Prove process-owned WM readiness")
             val run_status = if ok: "TEST PASSED" else: "TEST FAILED"
             expect(run_status).to_equal("TEST PASSED")
         else:
-            print("SKIP: set SIMPLEOS_RV64_SSH_LIVE=1 to run the RV64 live SSH QEMU gate")
-            val live_status = if _rv64_ssh_live_enabled(): "enabled" else: "disabled"
-            expect(live_status).to_equal("disabled")
+            print("BLOCKED: set SIMPLEOS_RV64_SSH_LIVE=1 only with an admitted Stage 4 CLI and retained QEMU evidence")
+            expect("blocked: live evidence unavailable").to_equal("TEST PASSED")
