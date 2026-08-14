@@ -1,5 +1,24 @@
 # SOSIX parallel QEMU refactor plan
 
+## 2026-08-14 implementation status
+
+The host-independent L0 repairs are implemented: the collector now reports
+`pending` whenever any row is non-PASS, nonce media rejects resolved
+source/run aliases before mutation, and compiler-serial validation runs through
+the row's admitted `spec_runtime`.  Their focused self-test is
+`sh scripts/check/check-sosix-qemu-shared-owners.shs --self-test`.
+
+The umbrella remains incomplete.  Linux RV64 still requires admitted
+named/immediate inline-assembly lowering and a fresh producer bundle.  Linux
+x86_32 still lacks the strong `enter_user_first`/GDT/TSS/`esp0`/token/trap
+implementation.  Linux ARM32 still lacks the strong EL0/vector/SVC/token/result
+implementation.  Windows has preflight but no producer-backed guest runner;
+FreeBSD requires admitted native media/execution; macOS requires native Darwin
+execution.  The modern executable handoff spec is
+`test/03_system/os/qemu/sosix_qemu_remaining_owners_spec.spl`; its generated
+manual is blocked because the available self-hosted `spipe-docgen` crashed
+with exit 139, and no hand-written file may substitute for generated evidence.
+
 ## Objective
 
 Complete the four-host, six-guest SimpleOS filesystem-execution matrix without

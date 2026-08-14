@@ -123,6 +123,7 @@ printf '%s\n' 'sosix_qemu_matrix_manifest_version=2' 'sosix_qemu_matrix_row_coun
 seen=$stage/seen
 : > "$seen"
 row=0
+nonpass_rows=0
 while IFS= read -r env_file; do
     relative=${env_file#"$source_root"/}
     path_host=${relative%%/*}; tail=${relative#*/}; path_guest=${tail%%/*}
@@ -168,6 +169,7 @@ while IFS= read -r env_file; do
     [ -n "$owner" ] && [ -n "$reviewer" ] || die "$env_file: missing owner/reviewer"
     if [ "$status" != pass ]; then
         [ -n "$reason" ] && [ -n "$resume" ] || die "$env_file: nonpass requires reason and resume_command"
+        nonpass_rows=$((nonpass_rows + 1))
     fi
     run_nonce=$(field run_nonce "$env_file")
     compiler_in_filesystem=$(field compiler_in_filesystem "$env_file")
@@ -332,6 +334,13 @@ for host in linux windows macos freebsd; do
     done
 done
 
+if [ "$nonpass_rows" -eq 0 ]; then
+    echo 'sosix_qemu_matrix_promotion_status=pass' >> "$manifest"
+else
+    echo 'sosix_qemu_matrix_promotion_status=pending' >> "$manifest"
+fi
+echo "sosix_qemu_matrix_nonpass_row_count=$nonpass_rows" >> "$manifest"
+
 mkdir -p "$output"
 bundle_id=$(hash_file "$manifest" | cut -c1-16)
 echo "sosix_qemu_matrix_bundle_id=$bundle_id" >> "$manifest"
@@ -339,5 +348,10 @@ final=$output/matrix-v1-$bundle_id
 [ ! -e "$final" ] || die "destination already exists: $final"
 mv "$stage" "$final"
 trap 'rm -f "$list"' EXIT HUP INT TERM
-echo "sosix_qemu_evidence_status=pass"
+if [ "$nonpass_rows" -eq 0 ]; then
+    echo "sosix_qemu_evidence_status=pass"
+else
+    echo "sosix_qemu_evidence_status=pending"
+    echo "sosix_qemu_evidence_reason=nonpass-rows:$nonpass_rows"
+fi
 echo "sosix_qemu_evidence_manifest=$final/matrix.env"

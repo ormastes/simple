@@ -1,0 +1,68 @@
+"""
+# SOSIX QEMU remaining-owner handoff
+
+This manual verifies the fail-closed shared owners and keeps every incomplete
+guest or native-host row visible. It does not promote admission checks into
+live QEMU evidence: only producer-generated bundles can satisfy row IDs.
+
+**Plan:** `doc/03_plan/agent_tasks/sosix_parallel_qemu_refactor.md`
+**Tracking:** `doc/08_tracking/bug/sosix_qemu_matrix_remaining_owners_2026-08-14.md`
+"""
+
+# @tag: system, simpleos, qemu, sosix, provenance
+# @evidence-display: links
+
+use std.io_runtime.{file_read, process_run}
+use std.spec.*
+
+fn run_check(command: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", command])
+
+describe "SOSIX QEMU remaining-owner handoff":
+
+    # @req: REQ-SOSIX-QEMU-L0-001
+    # @req: REQ-SOSIX-QEMU-L0-002
+    # @req: REQ-SOSIX-QEMU-L0-003
+    it "should enforce all shared matrix ownership boundaries":
+        step("Validate matrix promotion")
+        val (stdout, stderr, code) = run_check("sh scripts/check/check-sosix-qemu-shared-owners.shs --self-test")
+        expect(code).to_equal(0)
+        expect(stderr).to_equal("")
+        expect(stdout).to_contain("sosix_qemu_shared_owner_collector_status=pass")
+        expect(stdout).to_contain("sosix_qemu_shared_owner_sabotage_status=pass")
+        step("Reject mutable source aliasing")
+        expect(stdout).to_contain("sosix_qemu_shared_owner_media_alias_status=pass")
+        step("Bind the admitted runtime")
+        expect(stdout).to_contain("sosix_qemu_shared_owner_admitted_runtime_status=pass")
+
+    # @req: REQ-SOSIX-QEMU-LINUX-OWNERS-001
+    it "should reject incomplete Linux lifecycle owners at strong admission":
+        step("Admit the Linux guest lifecycle")
+        val (x86_stdout, x86_stderr, x86_code) = run_check("sh scripts/check/check-x86-32-cpl3-lifecycle-contract.shs --admit")
+        expect(x86_code).to_be_greater_than(0)
+        expect(x86_stdout + x86_stderr).to_contain("not admitted")
+        val (arm_stdout, arm_stderr, arm_code) = run_check("sh scripts/check/check-arm32-user-lifecycle-contract.shs --admit")
+        expect(arm_code).to_be_greater_than(0)
+        expect(arm_stdout + arm_stderr).to_contain("not admitted")
+        val tracking = file_read("doc/08_tracking/bug/sosix_qemu_matrix_remaining_owners_2026-08-14.md")
+        expect(tracking).to_contain("RV64 compiler owner")
+
+    # @req: REQ-SOSIX-QEMU-EXTERNAL-001
+    it "should retain all unavailable native hosts as active acceptance rows":
+        step("Record unavailable native hosts")
+        val plan = file_read("doc/03_plan/agent_tasks/sosix_parallel_qemu_refactor.md")
+        expect(plan).to_contain("SOSIX-WINDOWS-X86_64")
+        expect(plan).to_contain("SOSIX-FREEBSD-X86_64")
+        expect(plan).to_contain("SOSIX-MACOS-X86_64")
+        expect(plan).to_contain("Implementation handoff — not feature completion")
+
+    # @req: REQ-SOSIX-QEMU-HANDOFF-001
+    it "should retain exact owners and unblock conditions for incomplete work":
+        step("Retain the implementation handoff")
+        val tracking = file_read("doc/08_tracking/bug/sosix_qemu_matrix_remaining_owners_2026-08-14.md")
+        expect(tracking).to_contain("RV64 compiler owner")
+        expect(tracking).to_contain("x86_32 kernel owner")
+        expect(tracking).to_contain("ARM32 kernel owner")
+        expect(tracking).to_contain("Windows operator")
+        expect(tracking).to_contain("FreeBSD operator")
+        expect(tracking).to_contain("macOS operator")

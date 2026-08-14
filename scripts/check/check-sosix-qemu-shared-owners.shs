@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+collector=$root/scripts/check/collect-sosix-qemu-evidence.shs
+media=$root/scripts/os/prepare_qemu_nonce_media.shs
+matrix=$root/scripts/check/check-sosix-qemu-matrix.shs
+
+fail() { echo "sosix-qemu-shared-owners: $*" >&2; exit 1; }
+[ "${1:-}" = --self-test ] || fail "usage: check-sosix-qemu-shared-owners.shs --self-test"
+
+grep -Fq 'sosix_qemu_matrix_promotion_status=pending' "$collector" || fail "collector pending promotion missing"
+grep -Fq 'sosix_qemu_matrix_nonpass_row_count=' "$collector" || fail "collector nonpass count missing"
+grep -Fq 'sosix_qemu_evidence_status=pending' "$collector" || fail "collector pending result missing"
+grep -Fq 'source and run image resolve to the same path' "$media" || fail "resolved media alias rejection missing"
+grep -Fq '"${spec_runtime}" run scripts/check/validate-sosix-qemu-compiler-serial.spl' "$matrix" || fail "admitted runtime invocation missing"
+if grep -Fq 'bin/simple run scripts/check/validate-sosix-qemu-compiler-serial.spl' "$matrix"; then
+    fail "hardcoded compiler validator runtime remains"
+fi
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/sosix-qemu-shared-owners.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+printf '%s\n' fixture > "$tmp/source.img"
+mkdir -p "$tmp/alias"
+if "$media" "$tmp/source.img" "$tmp/alias/../source.img" ROW_NONCE >"$tmp/alias.out" 2>"$tmp/alias.err"; then
+    fail "resolved source/run alias was accepted"
+fi
+grep -Fq 'source and run image resolve to the same path' "$tmp/alias.err" || fail "resolved alias diagnostic missing"
+[ "$(cat "$tmp/source.img")" = fixture ] || fail "source changed during alias rejection"
+
+sed '/sosix_qemu_matrix_promotion_status=pending/d' "$collector" > "$tmp/collector-sabotaged"
+if grep -Fq 'sosix_qemu_matrix_promotion_status=pending' "$tmp/collector-sabotaged"; then
+    fail "collector sabotage did not remove pending promotion"
+fi
+
+echo 'sosix_qemu_shared_owner_collector_status=pass'
+echo 'sosix_qemu_shared_owner_media_alias_status=pass'
+echo 'sosix_qemu_shared_owner_admitted_runtime_status=pass'
+echo 'sosix_qemu_shared_owner_sabotage_status=pass'
+echo 'sosix_qemu_shared_owners_status=pass'
