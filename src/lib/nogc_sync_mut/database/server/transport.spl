@@ -13,6 +13,8 @@
 # MemoryTransport is the BufferTransport-equivalent: no externs, no stdin, safe
 # in interpreter mode, which is where the specs run.
 
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+
 trait DbTransport:
     """One framed message channel between a client and the DB server.
 
@@ -25,6 +27,34 @@ trait DbTransport:
     fn write_message(msg: text)
 
     fn close()
+
+class TcpDbTransport with DbTransport:
+    stream: TcpStream
+    closed: bool
+
+    static fn from_stream(stream: TcpStream) -> TcpDbTransport:
+        TcpDbTransport(stream: stream, closed: false)
+
+    me read_message() -> text?:
+        if self.closed:
+            return nil
+        var stream = self.stream
+        val message = stream.read_line_nullable()
+        self.stream = stream
+        message
+
+    me write_message(msg: text):
+        if not self.closed:
+            var stream = self.stream
+            stream.write_text_status(msg + "\n")
+            self.stream = stream
+
+    me close():
+        if not self.closed:
+            var stream = self.stream
+            stream.close()
+            self.stream = stream
+            self.closed = true
 
 # ============================================================================
 # MemoryTransport — scripted inbound, captured outbound (specs + golden runs)

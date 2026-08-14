@@ -1,0 +1,39 @@
+# Secure Pure-Simple production web server (AC-1..AC-3).
+#
+# The operator vocabulary is frozen in
+# `.spipe/secure_pure_simple_servers/state.md`. These scenarios exercise the
+# production policy and the same parser/router/TLS owners used by the listener.
+
+use std.spec.*
+use std.nogc_sync_mut.http_server.parser.{headers_decision}
+use std.nogc_sync_mut.http_server.router.{path_is_safe}
+use std.nogc_sync_mut.http_server.server.{SecureServerPolicy, secure_server_policy_error}
+use std.nogc_sync_mut.http_server.tls_server.{tls_server_config_new, tls_server_config_error}
+
+fn secure_web_server_fixture() -> SecureServerPolicy:
+    SecureServerPolicy.production()
+
+fn expect_web_request_rejected(headers: [(text, text)], expected: text):
+    val decision = headers_decision(headers, 1024)
+    expect(decision.0).to_contain(expected)
+
+describe "Secure Pure-Simple production web routing":
+    it "AC-1 Bind the production listener":
+        val policy = secure_web_server_fixture()
+        expect(secure_server_policy_error(policy)).to_equal("")
+        expect(policy.plaintext_development).to_equal(false)
+        expect(policy.max_keep_alive_requests).to_equal(1)
+
+    it "AC-2 Reject an unsafe web request before dispatch":
+        expect(path_is_safe("/assets/%2e%2e/secrets.txt")).to_equal(false)
+        expect_web_request_rejected([("Content-Length", "3"), ("Content-Length", "4")], "Duplicate Content-Length")
+        expect_web_request_rejected([("Transfer-Encoding", "gzip")], "Transfer-Encoding is not supported")
+        expect_web_request_rejected([("Authorization", "one"), ("authorization", "two")], "Conflicting duplicate security header")
+
+    it "AC-3 refuses missing or invalid production TLS material":
+        val missing = tls_server_config_new("", "", ["http/1.1"])
+        expect(tls_server_config_error(missing)).to_contain("certificate material is missing")
+        val invalid = tls_server_config_new("00", "11", ["http/1.1"])
+        expect(tls_server_config_error(invalid)).to_contain("certificate material is invalid")
+        val dev = SecureServerPolicy.plaintext_dev()
+        expect(dev.plaintext_development).to_equal(true)

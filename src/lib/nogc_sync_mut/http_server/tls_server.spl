@@ -45,9 +45,9 @@
 #
 # This file provides:
 #   - TlsServerConfig — cert/key material holder
-#   - TlsServerConn  — represents an established TLS channel (may be a stub
-#                       pass-through when no native TLS is available)
-#   - tls_server_accept — composition entry point; transparent if no TLS
+#   - TlsServerConn  — represents an established TLS channel or a fail-closed
+#                       startup/handshake rejection
+#   - tls_server_accept — composition entry point; never falls through to HTTP
 #   - alpn_negotiate  — pure function: pick protocol from client list
 # =============================================================================
 
@@ -87,6 +87,30 @@ fn tls_server_config_insecure() -> TlsServerConfig:
         alpn_protocols: ["h2", "http/1.1"],
         tls_version: 769
     )
+
+fn tls_server_config_error(config: TlsServerConfig) -> text:
+    if config.cert_chain_hex.trim() == "":
+        return "TLS certificate material is missing"
+    if config.private_key_hex.trim() == "":
+        return "TLS private-key material is missing"
+    if not _tls_der_hex_valid(config.cert_chain_hex):
+        return "TLS certificate material is invalid"
+    if not _tls_der_hex_valid(config.private_key_hex):
+        return "TLS private-key material is invalid"
+    ""
+
+fn _tls_der_hex_valid(material: text) -> bool:
+    val value = material.trim()
+    if value.len() < 16 or value.len() % 2 != 0 or not value.starts_with("30"):
+        return false
+    val hex_digits = "0123456789abcdefABCDEF"
+    var idx = 0
+    while idx < value.len():
+        val ch = value[idx]
+        if not hex_digits.contains(ch):
+            return false
+        idx = idx + 1
+    true
 
 # =============================================================================
 # ALPN negotiation (pure function — testable without a socket)
@@ -182,25 +206,25 @@ fn tls_conn_is_http1(conn: TlsServerConn) -> bool:
     (p == "http/1.1" or p == "" or p == "http/1.0")
 
 # =============================================================================
-# tls_server_accept — attempt TLS handshake, fall through on missing support
+# tls_server_accept — attempt TLS handshake and fail closed on missing support
 #
 # GAP NOTE: Because the runtime lacks a TlsStream type (GAP-TLS-3) and the
 # tls/ library uses hex-text blobs rather than byte streams (GAP-TLS-3), a
 # real encrypted handshake is NOT possible here.  The function:
 #   - Reads the first 5 bytes (TLS record header) to detect a TLS ClientHello
 #   - If detected: attempts a text-level parse and returns error with gap note
-#   - If NOT detected: treats the stream as cleartext h1/h2 and proceeds
-# This is the correct honest composition — not a fake stub that claims success.
+#   - If encrypted transport is unavailable: returns tls_active=false plus an
+#     error; the caller must close the connection and must not dispatch HTTP.
 # =============================================================================
 
 fn tls_server_accept(tcp: TcpStream, config: TlsServerConfig) -> TlsServerConn:
-    # GAP-TLS-3: we cannot wrap tcp in a real TLS stream yet.
-    # Return a cleartext passthrough with documented reason.
+    val config_error = tls_server_config_error(config)
+    val reason = if config_error != "": config_error else: "TLS transport unavailable: GAP-TLS-3 native encrypted stream is required"
     TlsServerConn(
         tcp: tcp,
-        negotiated_protocol: "http/1.1",
+        negotiated_protocol: "",
         tls_active: false,
-        error: "GAP-TLS-3: no native TlsStream wrapper in runtime; cleartext passthrough"
+        error: reason
     )
 
 # =============================================================================
@@ -209,6 +233,7 @@ fn tls_server_accept(tcp: TcpStream, config: TlsServerConfig) -> TlsServerConn:
 
 export TlsServerConfig, TlsServerConn
 export tls_server_config_new, tls_server_config_insecure
+export tls_server_config_error
 export tls_server_accept
 export alpn_negotiate, alpn_from_extension_hex
 export tls_conn_is_h2, tls_conn_is_http1

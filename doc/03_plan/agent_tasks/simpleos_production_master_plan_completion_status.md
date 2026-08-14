@@ -75,11 +75,24 @@ implementation." Status values:
 
 #### Restart12 secure Pure-Simple server acceptance ledger (2026-08-14)
 
+Highest-capability review: **REJECTED (2026-08-14)**. The implementation is a
+partial hardening checkpoint, not an accepted handoff. Production TLS remains
+unreachable; web identity/security headers, constant-work DB authentication,
+shutdown/cancellation, principal-bound replay receipts, byte-bounded queries,
+and real-listener/runtime evidence remain blockers. All ledger items stay open.
+
 This detached replacement lane owns only the two Phase-6 server blockers. The
 accepted implementation boundary is Pure Simple: production entrypoints may
 use the repository's owned socket/file capability providers, but must not add
 new local `rt_*` declarations, raw-source launcher wrappers, or foreign server
 implementations.
+
+Canonical links: `.spipe/secure_pure_simple_servers/state.md`,
+`doc/02_requirements/feature/secure_pure_simple_servers.md`,
+`doc/02_requirements/nfr/secure_pure_simple_servers.md`,
+`doc/04_architecture/secure_pure_simple_servers.md`,
+`doc/05_design/secure_pure_simple_servers.md`, and
+`doc/07_guide/lib/pure_simple_servers.md`.
 
 - [ ] **WEB-1 production routing:** the canonical web-server entrypoint routes
   real accepted connections through the hardened parser/router/response path;
@@ -139,6 +152,25 @@ Stage 2 (`seed -> bootstrap_main.spl`) and was terminated after the final
 bounded wait. No feature acceptance test has therefore been credited. Resume
 by producing a healthy self-hosted CLI, then run the focused DB checks exactly
 once before continuing DB-1/3/4/5 and WEB-1/2/3.
+
+Implementation progress (2026-08-14, not yet credited as PASS):
+
+- Web parsing/listener policy now bounds reads and sizes, rejects ambiguous or
+  unsupported framing before dispatch, requires explicit plaintext-development
+  mode, and refuses invalid TLS configuration. Production HTTPS remains blocked
+  by GAP-TLS-3; the server fails closed instead of cleartext pass-through.
+- DB authentication, owned bounded TCP transport/listener lifecycle, sequential
+  state ownership, EOF session cleanup, durable row versions, durable commit-id
+  receipts, and bounded capability-checked batch/range operations are present
+  for verification.
+- Focused modern web and DB scenarios/manuals plus the requirements,
+  architecture, detail design, test plan, guide/TLDR, and expert knowledge are
+  present. `sspec-maintain`, docgen, focused runtime, and whole-suite evidence
+  remain uncredited until the admitted Stage-4 CLI blocker clears.
+- Open TLS blockers are tracked at
+  `doc/08_tracking/bug/gap_tls_server_alpn_missing_2026-06-15.md`,
+  `gap_tls_13_key_schedule_missing_2026-06-15.md`, and
+  `gap_tls_stream_wrapper_missing_2026-06-15.md`.
 
 ### Phase 7 — Desktop / browser — **blocked**
 - Browser renderer/network/GPU process split, origin/cookie/permission model,

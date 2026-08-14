@@ -65,7 +65,7 @@ use std.database.core.{ SdnTable, SdnDatabase }
 use std.database.atomic.{ file_exists, file_delete, file_write }
 use std.database.server.capability.{ CapabilityTable, capability_with, grant_key }
 use std.database.server.server.{ DbServerCapsule }
-use std.database.server.txn.{ begin_txn, txn_record, TxnWrite, TxnState, WRITE_PUT }
+use std.database.server.txn.{ begin_txn, txn_record, store_version, TxnWrite, TxnState, WRITE_PUT }
 use std.database.server.durability.{
     DurabilityPolicy, DurableOutcome, durable_commit,
     durability_on, durability_off, durability_crash_at,
@@ -467,3 +467,43 @@ describe "DB durability — the contract is explicit about what it did":
         assert_true(outcome.ok)
         assert_false(outcome.persisted)
         assert_false(file_exists(path))
+
+describe "DB durability — restart-safe versions and commit identity":
+
+    it "persists optimistic row versions across reopen":
+        val path = "build/dbdur_versions.sdn"
+        var first = DbServerCapsule.new(fresh_store(path), alice_policy())
+        first.handle_message("OPEN as=alice credential=alice-secret")
+        first.handle_message("BEGIN session=1")
+        first.handle_message("PUT session=1 tbl=users id=u1 name=one")
+        first.handle_message("COMMIT session=1 commit_id=version-1")
+        first.handle_message("BEGIN session=1")
+        first.handle_message("PUT session=1 tbl=users id=u1 name=two")
+        first.handle_message("COMMIT session=1 commit_id=version-2")
+        val reopened = SdnDatabase.load(path) ?? SdnDatabase.new("")
+        assert_equal(store_version(reopened, "users", "u1"), 1)
+
+    it "answers a reconnect retry from the durable commit receipt":
+        val path = "build/dbdur_commit_identity.sdn"
+        var first = DbServerCapsule.new(fresh_store(path), alice_policy())
+        first.handle_message("OPEN as=alice credential=alice-secret")
+        first.handle_message("BEGIN session=1")
+        first.handle_message("PUT session=1 tbl=users id=u1 name=once")
+        assert_equal(first.handle_message("COMMIT session=1 commit_id=stable-42"), "OK applied=1")
+        val reopened = SdnDatabase.load(path) ?? SdnDatabase.new("")
+        var retry = DbServerCapsule.new(reopened, alice_policy())
+        retry.handle_message("OPEN as=alice credential=alice-secret")
+        assert_equal(retry.handle_message("COMMIT session=1 commit_id=stable-42"), "OK applied=1")
+        assert_equal(on_disk(path, "u1"), "once")
+
+    it "rejects reuse of one commit id for different transaction content":
+        val path = "build/dbdur_commit_identity_conflict.sdn"
+        var server = DbServerCapsule.new(fresh_store(path), alice_policy())
+        server.handle_message("OPEN as=alice credential=alice-secret")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=first")
+        server.handle_message("COMMIT session=1 commit_id=stable-conflict")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u2 name=second")
+        assert_contains(server.handle_message("COMMIT session=1 commit_id=stable-conflict"), "code=conflict")
+        assert_equal(on_disk(path, "u2"), ABSENT)

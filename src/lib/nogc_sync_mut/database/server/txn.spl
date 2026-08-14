@@ -21,6 +21,9 @@
 # SdnTable/SdnDatabase API — there is no second storage engine here.
 
 use std.database.core.{ SdnRow, SdnTable, SdnDatabase }
+use std.convert (try_parse_int)
+
+val DURABLE_VERSION_COLUMN: text = "_db_server_version"
 
 # ============================================================================
 # Write records
@@ -122,6 +125,10 @@ fn store_version(store: SdnDatabase, table_name: text, key: text) -> i64:
             match typed.get_row(key):
                 Some(row):
                     val typed_row: SdnRow = row
+                    val durable = typed_row.get(DURABLE_VERSION_COLUMN) ?? ""
+                    val parsed = try_parse_int(durable)
+                    if parsed != nil:
+                        return parsed ?? 0
                     typed_row._version
                 nil:
                     -1
@@ -168,14 +175,26 @@ fn txn_apply(store: SdnDatabase, state: TxnState) -> CommitOutcome:
         match store.get_table_mut(typed.table):
             Some(table_value):
                 var table: SdnTable = table_value
+                if not table.columns.contains(DURABLE_VERSION_COLUMN):
+                    var columns = table.columns
+                    columns.push(DURABLE_VERSION_COLUMN)
+                    table.columns = columns
                 if typed.kind == WRITE_DEL:
-                    table.mark_deleted(typed.key)
+                    match table.get_row(typed.key):
+                        Some(existing):
+                            var deleted: SdnRow = existing
+                            deleted.set("valid", "false")
+                            deleted.set(DURABLE_VERSION_COLUMN, "{typed.base_version + 1}")
+                            table.update_row(typed.key, deleted)
+                        nil:
+                            pass_do_nothing("precheck already established delete target state")
                 else:
                     var row = SdnRow(fields: {}, _version: typed.base_version + 1)
                     for (column, value) in typed.fields:
                         row.set(column, value)
                     row.set("id", typed.key)
                     row.set("valid", "true")
+                    row.set(DURABLE_VERSION_COLUMN, "{typed.base_version + 1}")
                     if typed.base_version < 0:
                         table.add_row(row)
                     else:

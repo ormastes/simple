@@ -17,9 +17,9 @@ val ACCESS_WRITE: text = "write"
 # Map a protocol op onto the access it requires.
 # An op with no data reach ("" ) needs no table grant.
 fn op_access(op: text) -> text:
-    if op == "GET":
+    if op == "GET" or op == "BATCH_GET" or op == "RANGE_GET":
         return ACCESS_READ
-    if op == "PUT" or op == "DEL":
+    if op == "PUT" or op == "DEL" or op == "BATCH_PUT":
         return ACCESS_WRITE
     ""
 
@@ -103,12 +103,13 @@ class CapabilityTable:
         self.credentials = credentials
 
     fn authenticate(principal: text, candidate: text) -> bool:
-        """Compare credentials without content-dependent early return."""
-        if principal == "" or candidate == "":
-            return false
-        if not self.credentials.contains_key(principal):
-            return false
-        val expected: text = self.credentials[principal]
+        """Compare credentials without a content-mismatch early return.
+
+        Unknown and empty principals traverse the same comparison loop against
+        a non-secret dummy value; the final known-principal bit denies them.
+        """
+        val known = principal != "" and self.credentials.contains_key(principal)
+        val expected: text = if known: self.credentials[principal] else: "invalid-credential"
         val left = expected.chars()
         val right = candidate.chars()
         var different = left.len() ^ right.len()
@@ -119,7 +120,7 @@ class CapabilityTable:
             val b = if i < right.len(): right[i].to_int() else: 0
             different = different | (a ^ b)
             i = i + 1
-        different == 0
+        known and candidate != "" and different == 0
 
     fn lookup(principal: text) -> DbCapability?:
         if self.entries.contains_key(principal):

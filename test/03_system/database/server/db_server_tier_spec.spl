@@ -425,3 +425,31 @@ describe "DB server tier — capability-checked access is deny-wins":
         assert_true(capability_allows(widened, "users", "write"))
         # The policy table still holds the narrow capability.
         assert_false(capability_allows(policy.lookup_or_empty("bob"), "users", "write"))
+
+
+describe "DB server tier — bounded batch and range requests":
+
+    it "applies one capability and transaction boundary to a bounded batch":
+        var server = make_server()
+        server.handle_message("OPEN as=alice credential=alice-secret")
+        server.handle_message("BEGIN session=1")
+        assert_equal(server.handle_message("BATCH_PUT session=1 tbl=users ids=u1,u2 name=batched"), "OK queued=2")
+        assert_equal(server.handle_message("BATCH_GET session=1 tbl=users ids=u1,u2 col=name"), "OK values=batched,batched")
+        assert_equal(server.handle_message("COMMIT session=1 commit_id=batch-1"), "OK applied=2")
+
+    it "rejects an oversized batch before touching the transaction":
+        var server = make_server()
+        server.handle_message("OPEN as=alice credential=alice-secret")
+        server.handle_message("BEGIN session=1")
+        var ids: [text] = []
+        for i in 0..65:
+            ids.push("u{i}")
+        assert_contains(server.handle_message("BATCH_PUT session=1 tbl=users ids={ids.join(',')} name=x"), "code=limit")
+
+    it "returns a bounded ordered key range":
+        var server = make_server()
+        server.handle_message("OPEN as=alice credential=alice-secret")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("BATCH_PUT session=1 tbl=users ids=u3,u1,u2 name=x")
+        assert_equal(server.handle_message("RANGE_GET session=1 tbl=users start=u1 end=u3 limit=2"), "OK ids=u1,u2")
+        server.handle_message("COMMIT session=1 commit_id=range-seed")

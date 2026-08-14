@@ -1,0 +1,76 @@
+# @cover src/lib/nogc_sync_mut/database/server/server.spl 80%
+# @req REQ-005 REQ-006 REQ-007 REQ-008 REQ-009
+"""
+# Secure Pure-Simple database server
+
+These operator scenarios prove authentication, bounded query behavior,
+connection cleanup, durable commit identity, and restart-safe conflict tokens
+through the production database capsule interfaces.
+"""
+
+use std.spec.*
+use std.database.core.{SdnTable, SdnDatabase}
+use std.database.server.capability.{CapabilityTable, capability_with, grant_key}
+use std.database.server.server.{DbServerCapsule}
+use std.database.server.transport.{MemoryTransport}
+
+fn secure_db_server_fixture() -> DbServerCapsule:
+    var store = SdnDatabase.new("")
+    store.set_table("users", SdnTable.new("users", ["id", "name", "valid"]))
+    var policy = CapabilityTable.new()
+    policy.register_authenticated(capability_with("alice", [
+        grant_key("users", "read"), grant_key("users", "write")
+    ]), "alice-secret")
+    DbServerCapsule.new(store, policy)
+
+fn expect_db_auth_rejected(server: DbServerCapsule, request: text):
+    expect(server.handle_message(request)).to_contain("code=auth")
+
+fn expect_bounded_query(server: DbServerCapsule):
+    var ids: [text] = []
+    for i in 0..65:
+        ids.push("u{i}")
+    expect(server.handle_message(
+        "BATCH_PUT session=1 tbl=users ids={ids.join(',')} name=x"
+    )).to_contain("code=limit")
+
+describe "Secure Pure-Simple database server":
+
+    # @manual_section Authentication and lifecycle
+    it "Authenticate the database principal":
+        step("Authenticate the database principal")
+        var server = secure_db_server_fixture()
+        expect_db_auth_rejected(server, "OPEN as=alice")
+        expect_db_auth_rejected(server, "OPEN as=alice credential=wrong")
+        expect_db_auth_rejected(server, "OPEN as=unknown credential=alice-secret")
+        expect(server.handle_message(
+            "OPEN as=alice credential=alice-secret"
+        )).to_equal("OK session=1")
+
+    it "Shut down and release the connection":
+        step("Shut down and release the connection")
+        var server = secure_db_server_fixture()
+        val outcome = server.serve(MemoryTransport.with_messages([
+            "OPEN as=alice credential=alice-secret",
+            "BEGIN session=1",
+            "PUT session=1 tbl=users id=abandoned name=private"
+        ]))
+        expect(outcome.served).to_equal(3)
+        expect(server.registry.open_session_count()).to_equal(0)
+        expect(server.connection_capacity()).to_equal(1)
+
+    # @manual_section Bounded transaction queries
+    it "Bound a batch or range response":
+        step("Bound a batch or range response")
+        var server = secure_db_server_fixture()
+        expect(server.handle_message(
+            "OPEN as=alice credential=alice-secret"
+        )).to_equal("OK session=1")
+        expect(server.handle_message("BEGIN session=1")).to_equal("OK")
+        expect(server.handle_message(
+            "BATCH_PUT session=1 tbl=users ids=u3,u1,u2 name=bounded"
+        )).to_equal("OK queued=3")
+        expect(server.handle_message(
+            "RANGE_GET session=1 tbl=users start=u1 end=u3 limit=2"
+        )).to_equal("OK ids=u1,u2")
+        expect_bounded_query(server)

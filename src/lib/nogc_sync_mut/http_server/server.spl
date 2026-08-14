@@ -2,11 +2,11 @@
 #
 # Part of std.nogc_sync_mut.http_server
 # Full standalone example: examples/06_io/simple_web_server/
-# Design: doc/05_design/simple_web_server_lib_api.md
+# Design: doc/05_design/ui/web/simple_web_server_lib_api.md
 
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, HttpStatus}
-use std.nogc_sync_mut.http_server.parser.{parse_request, parse_request_with_limits, MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE}
+use std.nogc_sync_mut.http_server.parser.{parse_request_with_policy_limits, MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE}
 use std.nogc_sync_mut.http_server.response.{write_response, write_error}
 use std.nogc_sync_mut.http_server.router.{Router}
 use std.concurrent.thread.{thread_spawn_with_args}
@@ -17,21 +17,94 @@ use std.concurrent.thread.{thread_spawn_with_args}
 # normal requests while bounding worst-case handler occupation.
 val DEFAULT_MAX_READ_ITERS: i32 = 200
 
+class SecureServerPolicy:
+    max_request_line: i32
+    max_header_count: i32
+    max_header_line: i32
+    max_body: i32
+    max_read_iters: i32
+    read_timeout_ms: i64
+    write_timeout_ms: i64
+    max_keep_alive_requests: i32
+    plaintext_development: bool
+
+    static fn production() -> SecureServerPolicy:
+        SecureServerPolicy(
+            max_request_line: MAX_REQUEST_LINE,
+            max_header_count: MAX_HEADER_COUNT,
+            max_header_line: MAX_HEADER_LINE,
+            max_body: MAX_BODY_SIZE,
+            max_read_iters: DEFAULT_MAX_READ_ITERS,
+            read_timeout_ms: 5000,
+            write_timeout_ms: 5000,
+            max_keep_alive_requests: 1,
+            plaintext_development: false
+        )
+
+    static fn plaintext_dev() -> SecureServerPolicy:
+        var policy = SecureServerPolicy.production()
+        policy.plaintext_development = true
+        policy
+
+fn secure_server_policy_error(policy: SecureServerPolicy) -> text:
+    if policy.max_request_line <= 0:
+        return "max_request_line must be positive"
+    if policy.max_header_count <= 0:
+        return "max_header_count must be positive"
+    if policy.max_header_line <= 0:
+        return "max_header_line must be positive"
+    if policy.max_body < 0:
+        return "max_body must not be negative"
+    if policy.max_read_iters <= 0 or policy.max_read_iters < policy.max_header_count + 1:
+        return "max_read_iters must cover the bounded header set and terminator"
+    if policy.read_timeout_ms <= 0 or policy.write_timeout_ms <= 0:
+        return "socket timeouts must be positive"
+    if policy.max_keep_alive_requests != 1:
+        return "this connection-close server requires max_keep_alive_requests=1"
+    ""
+
+fn request_parse_error_status(message: text) -> HttpStatus:
+    if message.starts_with("413"):
+        return HttpStatus.PayloadTooLarge
+    if message.starts_with("431"):
+        return HttpStatus.RequestHeaderFieldsTooLarge
+    if message.starts_with("501"):
+        return HttpStatus.NotImplemented
+    if message.starts_with("408"):
+        return HttpStatus.BadRequest
+    HttpStatus.BadRequest
+
 class SimpleHttpServer:
     host: text
     port: i32
     router: Router
     running: bool
+    policy: SecureServerPolicy
 
     static fn new(host: text, port: i32, router: Router) -> SimpleHttpServer:
         SimpleHttpServer(
             host: host,
             port: port,
             router: router,
-            running: false
+            running: false,
+            policy: SecureServerPolicy.production()
         )
 
+    me with_policy(policy: SecureServerPolicy) -> SimpleHttpServer:
+        self.policy = policy
+        self
+
     me start():
+        if not self.policy.plaintext_development:
+            print "Error: production policy requires TLS; use an explicit TLS listener or SecureServerPolicy.plaintext_dev()"
+            return
+        self.start_plaintext()
+
+    me start_plaintext():
+        val policy_error = secure_server_policy_error(self.policy)
+        if policy_error != "":
+            print "Error: invalid secure server policy: {policy_error}"
+            return
         self.running = true
         val addr = "{self.host}:{self.port}"
         match TcpListener.bind(addr):
@@ -43,6 +116,13 @@ class SimpleHttpServer:
                 self.serve_loop(listener)
 
     me start_with_callback(on_ready: fn(text, i32)):
+        if not self.policy.plaintext_development:
+            print "Error: production policy requires TLS; plaintext listener refused"
+            return
+        val policy_error = secure_server_policy_error(self.policy)
+        if policy_error != "":
+            print "Error: invalid secure server policy: {policy_error}"
+            return
         self.running = true
         val addr = "{self.host}:{self.port}"
         match TcpListener.bind(addr):
@@ -76,14 +156,26 @@ class SimpleHttpServer:
         server.handle_connection(stream)
 
     me handle_connection(stream: TcpStream):
-        match parse_request(stream):
+        if not stream.set_read_timeout_status(self.policy.read_timeout_ms):
+            val _ = stream.close()
+            return
+        match stream.set_write_timeout(Some(self.policy.write_timeout_ms)):
+            Err(_):
+                val _ = stream.close()
+                return
+            Ok(_): pass
+        match parse_request_with_policy_limits(stream, self.policy.max_request_line,
+                self.policy.max_header_count, self.policy.max_header_line,
+                self.policy.max_body, self.policy.max_read_iters):
             Ok(req):
                 val resp = self.router.dispatch(req)
                 if not write_response(stream, resp):
                     val _ = stream.close()
                     return
             Err(e):
-                if not write_error(stream, HttpStatus.BadRequest, e):
+                if not write_error(stream, request_parse_error_status(e), e):
                     val _ = stream.close()
                     return
         val _ = stream.close()
+
+export SimpleHttpServer, SecureServerPolicy, secure_server_policy_error, request_parse_error_status

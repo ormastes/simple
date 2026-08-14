@@ -110,6 +110,7 @@
 use std.database.core.{ SdnRow, SdnTable, SdnDatabase }
 use std.database.atomic.{ file_write, file_exists }
 use std.database.server.txn.{ TxnState, TxnWrite, CommitOutcome, txn_precheck, txn_apply }
+use std.common.crypto.sha256.{ sha256_text }
 
 # ============================================================================
 # Fault-injection points
@@ -152,6 +153,74 @@ struct DurableOutcome:
     applied: i64
     conflict_key: text
     message: text
+
+val COMMIT_TABLE: text = "_db_server_commits"
+
+fn committed_retry(store: SdnDatabase, commit_id: text) -> i64:
+    if commit_id == "":
+        return -1
+    match store.get_table(COMMIT_TABLE):
+        Some(table):
+            val typed: SdnTable = table
+            match typed.get_row(commit_id):
+                Some(row):
+                    val applied = row.get_i64("applied")
+                    applied ?? 0
+                nil:
+                    -1
+        nil:
+            -1
+
+fn _identity_atom(value: text) -> text:
+    val size = value.chars().len()
+    "{size}:{value}"
+
+fn transaction_identity(state: TxnState) -> text:
+    var parts: [text] = []
+    for write in state.writes:
+        val typed: TxnWrite = write
+        var keys: [text] = []
+        for (key, _value) in typed.fields:
+            keys.push(key)
+        keys.sort()
+        var fields: [text] = []
+        for key in keys:
+            fields.push(_identity_atom(key) + _identity_atom(typed.fields[key]))
+        parts.push(
+            _identity_atom(typed.table) + _identity_atom(typed.key) +
+            _identity_atom(typed.kind) + _identity_atom("{typed.base_version}") +
+            _identity_atom(fields.join(""))
+        )
+    val write_count = state.writes.len()
+    # Persist only a fixed-size digest: commit receipts must not duplicate
+    # application keys or values in the internal metadata table.
+    sha256_text(_identity_atom("{write_count}") + parts.join(""))
+
+fn commit_identity_matches(store: SdnDatabase, commit_id: text, state: TxnState) -> bool:
+    match store.get_table(COMMIT_TABLE):
+        Some(table):
+            val typed: SdnTable = table
+            match typed.get_row(commit_id):
+                Some(row):
+                    (row.get("identity") ?? "") == transaction_identity(state)
+                nil:
+                    false
+        nil:
+            false
+
+fn record_commit(store: SdnDatabase, commit_id: text, applied: i64, state: TxnState):
+    if commit_id == "":
+        return
+    var table = match store.get_table(COMMIT_TABLE):
+        Some(existing): existing
+        nil: SdnTable.new(COMMIT_TABLE, ["id", "applied", "identity", "valid"])
+    val row = SdnRow(fields: {}, _version: 0)
+    row.set("id", commit_id)
+    row.set("applied", "{applied}")
+    row.set("identity", transaction_identity(state))
+    row.set("valid", "true")
+    table.add_row(row)
+    store.set_table(COMMIT_TABLE, table)
 
 fn durable_ok(applied: i64, persisted: bool, message: text) -> DurableOutcome:
     DurableOutcome(
@@ -265,7 +334,14 @@ fn temp_path_exists(path: text) -> bool:
 
 # Mutates `store` in place; callers use the extract -> mutate -> write back
 # pattern (`var s = self.store; durable_commit(s, ...); self.store = s`).
-fn durable_commit(store: SdnDatabase, state: TxnState, policy: DurabilityPolicy) -> DurableOutcome:
+fn durable_commit_identified(
+    store: SdnDatabase, state: TxnState, policy: DurabilityPolicy, commit_id: text
+) -> DurableOutcome:
+    val retry_applied = committed_retry(store, commit_id)
+    if retry_applied >= 0:
+        if state.open and not commit_identity_matches(store, commit_id, state):
+            return durable_err(commit_id, "commit id already belongs to a different transaction")
+        return durable_ok(retry_applied, store.path != "", "idempotent retry")
     if not state.open:
         return durable_err("", "no open transaction")
 
@@ -283,6 +359,7 @@ fn durable_commit(store: SdnDatabase, state: TxnState, policy: DurabilityPolicy)
         restore_undo(store, undo)
         return durable_err(applied_outcome.conflict_key, applied_outcome.message)
     val applied = applied_outcome.applied
+    record_commit(store, commit_id, applied, state)
 
     # A store with no path is an explicit in-memory model.  Say so; never
     # report it as durable.
@@ -306,6 +383,8 @@ fn durable_commit(store: SdnDatabase, state: TxnState, policy: DurabilityPolicy)
 
     if not persisted:
         restore_undo(store, undo)
+        if commit_id != "":
+            drop_row(store, COMMIT_TABLE, commit_id)
         return durable_err(
             "",
             "commit not persisted; in-memory store rolled back to its last durable state"
@@ -316,6 +395,9 @@ fn durable_commit(store: SdnDatabase, state: TxnState, policy: DurabilityPolicy)
 
     # ---- P5 ack ----------------------------------------------------------
     durable_ok(applied, true, "")
+
+fn durable_commit(store: SdnDatabase, state: TxnState, policy: DurabilityPolicy) -> DurableOutcome:
+    durable_commit_identified(store, state, policy, "")
 
 # ============================================================================
 # Durable-state oracle

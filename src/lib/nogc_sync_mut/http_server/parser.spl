@@ -44,7 +44,7 @@ fn line_truncated_by_runtime(raw: text) -> bool:
 # =============================================================================
 
 fn parse_request(stream: TcpStream) -> Result<HttpRequest, text>:
-    return parse_request_with_limits(stream, MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE)
+    return parse_request_with_policy_limits(stream, MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE, MAX_HEADER_COUNT + 1)
 
 # parse_request_with_limits parses an HTTP/1.x request from `stream` enforcing
 # caller-supplied limits.  Returns Err with a descriptive message on any
@@ -53,6 +53,9 @@ fn parse_request(stream: TcpStream) -> Result<HttpRequest, text>:
 # max_read_iters caps the number of header read_line calls so that a slow
 # client cannot hold the handler thread indefinitely (AC-4).
 fn parse_request_with_limits(stream: TcpStream, max_request_line: i32, max_header_count: i32, max_header_line: i32, max_body: i32) -> Result<HttpRequest, text>:
+    return parse_request_with_policy_limits(stream, max_request_line, max_header_count, max_header_line, max_body, max_header_count + 1)
+
+fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, max_header_count: i32, max_header_line: i32, max_body: i32, max_read_iters: i32) -> Result<HttpRequest, text>:
     match stream.read_line():
         Err(e):
             return Err("Failed to read request line: {e}")
@@ -74,8 +77,10 @@ fn parse_request_with_limits(stream: TcpStream, max_request_line: i32, max_heade
             val raw_path = parsed.1
             val version = parsed.2
 
-            if method_str == "" or raw_path == "":
+            if method_str == "" or raw_path == "" or not _method_supported(method_str):
                 return Err("Malformed request line: {trimmed}")
+            if version != "HTTP/1.1" and version != "HTTP/1.0":
+                return Err("Unsupported HTTP version: {version}")
 
             val method = http_method_from_text(method_str)
 
@@ -88,7 +93,11 @@ fn parse_request_with_limits(stream: TcpStream, max_request_line: i32, max_heade
 
             var headers: [(text, text)] = []
             var header_count: i32 = 0
+            var read_iters: i32 = 0
             loop:
+                read_iters = read_iters + 1
+                if read_iters > max_read_iters:
+                    return Err("408 Request header read iteration limit exceeded")
                 match stream.read_line():
                     Ok(header_line):
                         # Reject a runtime-truncated (no-newline, at-cap)
@@ -108,10 +117,13 @@ fn parse_request_with_limits(stream: TcpStream, max_request_line: i32, max_heade
                         if header_count > max_header_count:
                             return Err("431 Too many headers: {header_count}")
                         val colon = hl.index_of(":")
-                        if colon > 0:
-                            val name = hl.slice(0, colon).trim()
-                            val value = hl.slice(colon + 1, hl.len()).trim()
-                            headers.push((name, value))
+                        if colon <= 0:
+                            return Err("400 Malformed header line")
+                        val name = hl.slice(0, colon).trim()
+                        val value = hl.slice(colon + 1, hl.len()).trim()
+                        if name == "" or name.contains(" ") or name.contains("\t"):
+                            return Err("400 Invalid header name")
+                        headers.push((name, value))
                     Err(_):
                         break
 
@@ -124,9 +136,11 @@ fn parse_request_with_limits(stream: TcpStream, max_request_line: i32, max_heade
             if content_length > 0:
                 match stream.read_bytes(content_length):
                     Ok(data):
+                        if data.len() != content_length:
+                            return Err("400 Incomplete request body")
                         body = data
                     Err(_):
-                        pass
+                        return Err("400 Failed to read request body")
 
             return Ok(HttpRequest(
                 method: method,
@@ -150,6 +164,8 @@ fn parse_request_with_limits(stream: TcpStream, max_request_line: i32, max_heade
 fn headers_decision(headers: [(text, text)], max_body: i32) -> (text, i32):
     var content_length: i32 = 0
     var seen_content_length = false
+    var security_names: [text] = []
+    var security_values: [text] = []
     for h in headers:
         val lname = h.0.to_lower()
         if lname == "content-length":
@@ -163,9 +179,22 @@ fn headers_decision(headers: [(text, text)], max_body: i32) -> (text, i32):
                 return ("413 Content-Length too large: {parsed_len}", 0)
             content_length = parsed_len
         elif lname == "transfer-encoding":
-            if h.1.to_lower().contains("chunked"):
-                return ("501 Transfer-Encoding: chunked is not supported", 0)
+            return ("501 Transfer-Encoding is not supported", 0)
+        elif _is_singleton_security_header(lname):
+            var idx = 0
+            while idx < security_names.len():
+                if security_names[idx] == lname:
+                    if security_values[idx] != h.1:
+                        return ("400 Conflicting duplicate security header: {lname}", 0)
+                    return ("400 Duplicate security header: {lname}", 0)
+                idx = idx + 1
+            security_names.push(lname)
+            security_values.push(h.1)
     ("", content_length)
+
+fn _is_singleton_security_header(name: text) -> bool:
+    name == "host" or name == "authorization" or name == "origin" or
+        name == "x-forwarded-host" or name == "x-forwarded-proto"
 
 fn parse_request_line(line: text) -> (text, text, text):
     var method = ""
@@ -182,6 +211,11 @@ fn parse_request_line(line: text) -> (text, text, text):
             break
         idx = idx + 1
     return (method, path, version)
+
+fn _method_supported(method: text) -> bool:
+    method == "GET" or method == "POST" or method == "PUT" or
+        method == "DELETE" or method == "PATCH" or method == "HEAD" or
+        method == "OPTIONS"
 
 # content_length_from_text parses a Content-Length header value.
 # Returns the length as i32 on success, or -1 on any parse error
@@ -220,6 +254,6 @@ fn to_i32_safe(s: text) -> i32:
         return 0
     return v
 
-export parse_request, parse_request_with_limits, parse_request_line
+export parse_request, parse_request_with_limits, parse_request_with_policy_limits, parse_request_line
 export to_i32_safe, content_length_from_text, headers_decision
 export MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE
