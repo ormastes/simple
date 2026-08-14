@@ -77,3 +77,21 @@ Exact blockers:
    QRB2210 port/runtime.
 4. No real SimpleOS web/database/filesystem server was live for CPU/GPU
    comparison.
+
+## Final atomic serialized receipt — 2026-08-14T08:11:52Z
+
+The final producer parsed and validated the GPU runner's exact stdout fields,
+evidence class, and exit rather than assigning a predetermined result. Runner
+`scripts/check/run-unoq-qrb2210-native-2d-live.shs` hashes to
+`28974d6a31f186da8d77a0eb8415276fbb31cef23f8bcc32ebb6e1aa98e8b951`.
+It exited 2 with validated status `blocked`, reason
+`pure-simple-runtime-missing`, and evidence class `live-runner-owned`.
+GPU stdout SHA-256 is
+`9797668b837e5ca35a599447886ab8bb5821c79f0956a0bee73f6e76232a9e5b`;
+stderr is empty with SHA-256
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+The fail-closed runtime gate preceded provider execution. The final immutable
+receipt records `board_mutated=false`, `download_performed=false`,
+`boot_changed=false`, and `provider_executed=false`. GPU acceptance remains
+**BLOCKED**. Final receipt and manifest hashes are recorded in the CPU section.

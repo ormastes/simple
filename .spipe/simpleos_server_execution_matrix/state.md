@@ -235,3 +235,19 @@ implementation-active
   publishes a mode-0600 receipt only as the final atomic action. Negative-only
   self-tests cannot fabricate admission. No Stage-4 compiler exists yet, so no
   receipt or QEMU evidence was produced.
+- verify-blocked-unoq-final-20260814T081152Z: The canonical wrapper retained its
+  exact producer snapshot, acquired the UNO lock, captured every command stream
+  and exit, derived validated GPU fields, and atomically published the final
+  receipt. CPU runner `scripts/check/run-unoq-qrb2210-cpu-server-live.shs` is
+  absent (`test -x` exit 1); GPU exited 2 at `pure-simple-runtime-missing`.
+  Receipt SHA is `718ddcde...efdb93d`, manifest SHA is
+  `7bf25984...10bcbed`, and the single checksum verification passed all entries.
+  CPU/GPU remain BLOCKED; no provider execution, board mutation, download,
+  boot change, commit, or push occurred.
+- verify-blocked-qemu-20260814T080211Z: The canonical ARM server gate ran once
+  at HEAD `900f9188ac50182f8f95505639072e9b1d9f7e2e` with both compiler admission
+  variables explicitly unset. It exited 1 at the mandatory missing
+  `SIMPLE_BUILD_COMPILER` check before payload build, image creation, or QEMU.
+  Retained stdout/stderr/state hashes passed independent review. No Stage-2,
+  Rust-seed, stale-ELF, x86, or marker substitution occurred; AC-1..3 remain
+  open pending a provenance-admitted current-source Stage-4/full compiler.

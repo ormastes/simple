@@ -363,6 +363,13 @@ Retained-artifact and origin audits still find no eligible Stage-4 candidate;
 the prior bootstrap lane exhausted three failed build cycles. QEMU therefore
 remains unrun and all runtime rows stay open.
 
+Parallel verification on 2026-08-14 retained two independently reviewed
+fail-closed handoffs. The ARM gate exited before QEMU because the admitted
+Stage-4 compiler variables were absent. The serialized UNO Q receipt proved
+the physical Debian/aarch64 identity, an absent canonical CPU runner, and a GPU
+exit at `pure-simple-runtime-missing` before provider or board mutation. These
+are blocker receipts only: ARM AC-1..3 and UNO AC-4..8 remain unchecked.
+
 ## Wave 3 (2026-07-27) — board bring-up + convergence, all lanes landed
 
 ### BOARD: SimpleOS boots on Arduino UNO Q — **PASS** (first board boot of this stack)

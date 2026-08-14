@@ -123,3 +123,30 @@ Retained local evidence:
 
 Verification disposition: **STATUS: FAIL / BLOCKED-TARGET-RUNTIME**. Debian
 execution and Vulkan enumeration are explicitly not accepted as SimpleOS.
+
+## Final atomic serialized receipt — 2026-08-14T08:11:52Z
+
+The canonical producer acquired `/tmp/unoq-server-matrix.lock`, staged the
+complete receipt in a private temporary directory, and published it once by
+atomic rename. Its retained `producer.snapshot.shs` bytes and current producer
+both hash to
+`5a2f7e3aa68551461ecc5d8b63854f6a930965bf74072fcb456194de5d2a2c70`.
+
+The receipt binds HEAD `900f9188ac50182f8f95505639072e9b1d9f7e2e`, ADB serial
+`3655308719`, model `Arduino SA,Imola`, architecture `aarch64`, Debian GNU/Linux
+13 (trixie), and boot ID `e5bd8b78-9719-4a98-acba-11a0ef34980e`.
+
+CPU absence is proven by the exact retained command
+`test -x scripts/check/run-unoq-qrb2210-cpu-server-live.shs`, exit 1, command
+SHA-256 `c600080f47b50bc36aabc181c78011775967574f31ef8d8dc917e84541394d28`.
+CPU acceptance remains **BLOCKED**; no CPU runner or server command executed.
+
+Final receipt:
+`build/test-artifacts/simpleos-server-execution-matrix/uno-q/verify-20260814T081152Z/`.
+`status.env` SHA-256 is
+`718ddcde312abbdadb60556e0d455047fb0edc3620c7d2776af2eec00efdb93d`;
+`command-receipts.env` SHA-256 is
+`51f1f36628e4e81cd8c47326de4ebbbb1d281ec689dd6ec6ff716d2780d38682`;
+the manifest SHA-256 is
+`7bf25984e57dfb0fa3db2ebeb4cba9d75a9efa20a499127543205bb1510bcbed`.
+The one permitted checksum verification passed every entry.
