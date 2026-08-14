@@ -17,7 +17,8 @@ FreeBSD requires admitted native media/execution; macOS requires native Darwin
 execution.  The modern executable handoff spec is
 `test/03_system/os/qemu/sosix_qemu_remaining_owners_spec.spl`; its generated
 manual is blocked because the available self-hosted `spipe-docgen` crashed
-with exit 139, and no hand-written file may substitute for generated evidence.
+with exit 139; the same runtime also crashed with exit 139 when executing the
+modern SSpec. No hand-written file may substitute for generated evidence.
 
 ## Objective
 
@@ -76,29 +77,31 @@ The fixture emits a temporary direct-kernel bundle only; it never substitutes
 for host admission, real ordered guest evidence, or the real producer
 invocation performed by `check-sosix-qemu-matrix.shs` after a passing row.
 
-## Plan-level implementation blockers
+## Shared-owner implementation and verification status
 
 The detailed ownership/unblock record is
 [`sosix_qemu_matrix_remaining_owners_2026-08-14.md`](../../08_tracking/bug/sosix_qemu_matrix_remaining_owners_2026-08-14.md).
-In addition to the row blockers, L0 remains open for three fail-closed repairs:
+The three L0 fail-closed repairs are implemented in source:
 
-1. The collector must publish a pending/blocked promotion status whenever any
+1. The collector publishes a pending promotion status whenever any
    accepted row is `blocked` or `unsupported`; a file-validation PASS cannot be
    confused with 24-row matrix completion.
-2. Nonce-media preparation must reject identical resolved source and run-image
+2. Nonce-media preparation rejects identical resolved source and run-image
    paths before any copy/move operation.
-3. Compiler-in-filesystem validation must use the row's admitted runtime
+3. Compiler-in-filesystem validation uses the row's admitted runtime
    identity, never a hardcoded `bin/simple` or seed-adjacent substitute.
 
-These are implementation blockers, not permissions to weaken the 24-row
-contract. They keep L0 and the umbrella feature incomplete after this plan
-document is handed off.
+The focused behavioral gate is
+`sh scripts/check/check-sosix-qemu-shared-owners.shs --self-test`. L0 remains
+verification-open until that gate and the modern SSpec run on a source-matched,
+admitted full CLI and docgen produces a zero-stub manual. This verification
+state is not permission to weaken the 24-row contract or claim matrix PASS.
 
 ## Parallel lanes
 
 | Lane | Scope / exclusive owner files | Current state | Acceptance evidence | Sidecar | Merge owner | Final reviewer |
 | --- | --- | --- | --- | --- | --- | --- |
-| L0 shared matrix | settings, admission, producer, collector, matrix docs | plan complete; implementation blockers open; full-CLI verification WARN | self-tests; one pre-admitted bundle per changed schema; collector reject unless exactly 24 | N/A | root | root/high |
+| L0 shared matrix | settings, admission, producer, collector, matrix docs | source implemented; behavioral SSpec/docgen verification blocked on admitted full CLI | self-tests; one pre-admitted bundle per changed schema; collector reject unless exactly 24 | N/A | root | root/high |
 | L1 Linux x86_64 | x86_64 OVMF/GRUB fs-exec entry and boot artifacts | canonical PASS | OVMF→GRUB→guest-entry, real listing, mounted program stdout, exit37/reap/PASS | N/A | root | root/high |
 | L2 Linux ARM64 | ARM64 direct-kernel fs-exec entry, nonce reader and EL0 lifecycle | canonical PASS | direct-kernel v2 bundle, exact ordered serial lifecycle | N/A | root | root/high |
 | L3 Linux RV32 | RV32 direct-kernel trap lifecycle and nonce media | canonical PASS | direct-kernel v2 bundle, M-mode recovery and exact reap | N/A | root | root/high |
@@ -240,8 +243,9 @@ execution owner, merge owner, and final reviewer.
 - Review corrections: the ledger is a separate status authority rather than a
   sixth interface; Windows resumes with `-AllGuests -Preflight`, while `-Run`
   remains conditional on implementing producer-backed guest execution.
-- Generated-manual applicability: accepted as N/A because this plan-only lane
-  changes no executable SSpec or generated manual contract.
+- Generated-manual status: required by the executable handoff spec, but not yet
+  generated because the available self-hosted docgen exits 139. A handwritten
+  manual is not accepted as a substitute.
 
 ## Plan-document verification receipt — 2026-08-14
 

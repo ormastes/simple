@@ -44,7 +44,8 @@ blocked
 ## Log
 
 - dev: Refined the implementation request into ten acceptance criteria; external-host evidence remains active and cannot be completed locally.
-- impl: AC-1 through AC-3 implemented and the focused shared-owner self-test passed once.
+- impl: AC-1 through AC-3 now have behavioral proof: a real 24-row non-PASS collector fixture, physical/symlink alias rejection before mutation, and path/SHA/version-bound runtime admission with missing/seed/stale/identity-mismatch rejection. The integrated shared-owner self-test passed once.
 - blocked: AC-4 requires admitted RV64 named/immediate inline-asm lowering and fresh QEMU evidence; AC-5 requires real x86_32 CPL3/TSS/token/trap owners; AC-6 requires real ARM32 EL0/vector/SVC/token owners.
-- blocked: AC-7 executable SSpec exists, but the available self-hosted `spipe-docgen` crashed with exit 139; the unchanged command will not be retried this session.
+- impl: AC-7 source uses bounded process execution, typed command evidence, and an exact 24-row oracle (3 PASS, 15 BLOCKED, 6 POSTPONED); AC-8 and AC-9 Todo/document contracts are synchronized.
+- blocked: The available self-hosted runtime crashed with exit 139 when executing the modern SSpec, and its earlier `spipe-docgen` attempt also crashed with exit 139. Neither unchanged command will be retried this session; no handwritten manual substitutes for generated evidence.
 - tracking: Todo DB rows 784-805 retain all shared, Linux, Windows, FreeBSD, and macOS owners.

@@ -1,0 +1,157 @@
+#!/bin/sh
+# Bind the SOSIX QEMU spec runtime to a closed, SHA-256-backed receipt.
+set -eu
+
+fail() {
+    printf '%s\n' "sosix-qemu-runtime-admission: $1" >&2
+    exit 1
+}
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        fail 'missing-sha256-tool'
+    fi
+}
+
+canonical_file() {
+    [ -f "$1" ] || return 1
+    resolved=$(readlink -f -- "$1" 2>/dev/null || true)
+    if [ -z "$resolved" ]; then
+        leaf=$(basename -- "$1")
+        parent=$(dirname -- "$1")
+        resolved=$(CDPATH= cd -P -- "$parent" 2>/dev/null && printf '%s/%s' "$PWD" "$leaf") || return 1
+    fi
+    [ -f "$resolved" ] || return 1
+    printf '%s' "$resolved"
+}
+
+field() {
+    key=$1 receipt=$2
+    count=$(awk -F= -v k="$key" '$1 == k { n++ } END { print n+0 }' "$receipt")
+    [ "$count" -eq 1 ] || fail "receipt-field-count:${key}:${count}"
+    awk -F= -v k="$key" '$1 == k { print substr($0,index($0,"=")+1) }' "$receipt"
+}
+
+verify_runtime() {
+    runtime=$1 receipt=$2
+    [ -x "$runtime" ] || fail "missing-runtime:${runtime}"
+    [ -f "$receipt" ] || fail "missing-receipt:${receipt}"
+    if ! awk -F= '
+        /^[A-Za-z0-9_]+=/ {
+            if ($1 == "schema_version" || $1 == "runtime_path" ||
+                $1 == "runtime_sha256" || $1 == "runtime_version") next
+        }
+        { bad=1 }
+        END { exit bad }
+    ' "$receipt"; then
+        fail "receipt-open-or-malformed:${receipt}"
+    fi
+
+    [ "$(field schema_version "$receipt")" = 1 ] || fail 'receipt-schema-mismatch'
+    runtime_real=$(canonical_file "$runtime") || fail "runtime-canonicalization-failed:${runtime}"
+    receipt_path=$(field runtime_path "$receipt")
+    receipt_real=$(canonical_file "$receipt_path") || fail "receipt-runtime-missing:${receipt_path}"
+    [ "$runtime_real" = "$receipt_real" ] || fail 'runtime-identity-mismatch'
+    case "$runtime_real" in
+        */src/compiler_rust/target/bootstrap/simple) fail 'bootstrap-seed-path' ;;
+    esac
+
+    receipt_sha=$(field runtime_sha256 "$receipt")
+    case "$receipt_sha" in ''|*[!0-9a-f]*|?????????????????????????????????????????????????????????????????*)
+        fail 'receipt-sha256-invalid' ;;
+    esac
+    [ "${#receipt_sha}" -eq 64 ] || fail 'receipt-sha256-invalid'
+    runtime_sha=$(sha256_file "$runtime_real")
+    [ "$runtime_sha" = "$receipt_sha" ] || fail 'runtime-sha256-mismatch'
+
+    receipt_version=$(field runtime_version "$receipt")
+    [ -n "$receipt_version" ] || fail 'receipt-version-empty'
+    runtime_version=$($runtime_real --version 2>&1) || fail 'runtime-version-command-failed'
+    case "$runtime_version" in *'bootstrap seed only'*) fail 'bootstrap-seed-version' ;; esac
+    [ "$runtime_version" = "$receipt_version" ] || fail 'runtime-version-mismatch'
+
+    printf 'runtime_path=%s\n' "$runtime_real"
+    printf 'runtime_sha256=%s\n' "$runtime_sha"
+    printf 'runtime_version=%s\n' "$runtime_version"
+}
+
+write_receipt() {
+    runtime=$1 receipt=$2
+    runtime_real=$(canonical_file "$runtime") || fail "runtime-canonicalization-failed:${runtime}"
+    runtime_sha=$(sha256_file "$runtime_real")
+    runtime_version=$($runtime_real --version 2>&1) || fail 'runtime-version-command-failed'
+    cat > "$receipt" <<EOF
+schema_version=1
+runtime_path=$runtime_real
+runtime_sha256=$runtime_sha
+runtime_version=$runtime_version
+EOF
+}
+
+self_test() {
+    tmp=${TMPDIR:-/tmp}/sosix-runtime-admission.$$
+    trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+    mkdir -p "$tmp/release" "$tmp/src/compiler_rust/target/bootstrap"
+    runtime=$tmp/release/simple
+    cat > "$runtime" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'Simple self-hosted test'
+EOF
+    chmod +x "$runtime"
+    receipt=$tmp/runtime.env
+    write_receipt "$runtime" "$receipt"
+    verify_runtime "$runtime" "$receipt" >/dev/null
+
+    if "$0" --verify "$runtime" "$tmp/missing.env" >/dev/null 2>&1; then fail 'self-test-missing-receipt-accepted'; fi
+
+    if "$0" --verify "$tmp/release/missing-simple" "$receipt" >/dev/null 2>&1; then fail 'self-test-missing-runtime-accepted'; fi
+
+    seed=$tmp/src/compiler_rust/target/bootstrap/simple
+    cp "$runtime" "$seed"
+    chmod +x "$seed"
+    write_receipt "$seed" "$tmp/seed.env"
+    if "$0" --verify "$seed" "$tmp/seed.env" >/dev/null 2>&1; then fail 'self-test-seed-accepted'; fi
+
+    printf '%s\n' '# stale' >> "$runtime"
+    if "$0" --verify "$runtime" "$receipt" >/dev/null 2>&1; then fail 'self-test-stale-receipt-accepted'; fi
+    write_receipt "$runtime" "$receipt"
+
+    awk -F= '
+        $1 == "runtime_version" { print "runtime_version=Simple altered version"; next }
+        { print }
+    ' "$receipt" > "$tmp/version-mismatch.env"
+    if "$0" --verify "$runtime" "$tmp/version-mismatch.env" >/dev/null 2>&1; then fail 'self-test-version-mismatch-accepted'; fi
+
+    other=$tmp/release/other-simple
+    cp "$runtime" "$other"
+    chmod +x "$other"
+    if "$0" --verify "$other" "$receipt" >/dev/null 2>&1; then fail 'self-test-identity-mismatch-accepted'; fi
+
+    printf '%s\n' 'sosix_qemu_runtime_admission_missing_receipt=pass'
+    printf '%s\n' 'sosix_qemu_runtime_admission_missing_runtime=pass'
+    printf '%s\n' 'sosix_qemu_runtime_admission_seed_rejection=pass'
+    printf '%s\n' 'sosix_qemu_runtime_admission_stale_receipt=pass'
+    printf '%s\n' 'sosix_qemu_runtime_admission_version_mismatch=pass'
+    printf '%s\n' 'sosix_qemu_runtime_admission_identity_mismatch=pass'
+    printf '%s\n' 'sosix_qemu_runtime_admission_self_test=pass'
+}
+
+case "${1:-}" in
+    --verify)
+        [ "$#" -eq 3 ] || fail 'usage: --verify RUNTIME RECEIPT'
+        verify_runtime "$2" "$3"
+        ;;
+    --write-receipt)
+        [ "$#" -eq 3 ] || fail 'usage: --write-receipt RUNTIME RECEIPT'
+        write_receipt "$2" "$3"
+        ;;
+    --self-test)
+        [ "$#" -eq 1 ] || fail 'usage: --self-test'
+        self_test
+        ;;
+    *) fail 'usage: --verify RUNTIME RECEIPT | --write-receipt RUNTIME RECEIPT | --self-test' ;;
+esac

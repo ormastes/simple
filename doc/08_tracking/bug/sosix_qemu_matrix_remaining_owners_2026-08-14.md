@@ -22,13 +22,14 @@ Canonical plan:
 | FreeBSD operator | Checksum-admitted FreeBSD 14.4 media and native execution are unavailable. | `sh scripts/qemu/simple-freebsd-media.shs --check` | Run all six rows on FreeBSD with admitted media and retain producer bundles. |
 | macOS operator | No prepared Darwin executor has generated the six required bundles. | `SIMPLE_QEMU_ACCELERATOR=tcg sh scripts/check/check-sosix-qemu-matrix.shs --host macos --all-guests --run --parallel` | Generate six Darwin-host bundles; TCG remains correctness-only and cannot prove native timing. |
 
-## Shared-owner blockers
+## Shared-owner implementation / verification
 
 | Owner/source | Gap | Unblock condition |
 | --- | --- | --- |
-| Collector: `scripts/check/collect-sosix-qemu-evidence.shs` | A structurally accepted set containing `blocked`/`unsupported` rows can end with a generic `sosix_qemu_evidence_status=pass`, which can be misread as matrix promotion. | Emit pending/blocked promotion status whenever any row is non-PASS; reserve matrix PASS for 24 real passing bundles. |
-| Media: `scripts/os/prepare_qemu_nonce_media.shs` | Immutable-source policy lacks an explicit resolved `source_image == run_image` rejection. | Reject same-path media before copy/move and cover it in the self-test. |
-| Matrix: `scripts/check/check-sosix-qemu-matrix.shs` | Compiler-in-filesystem validation invokes hardcoded `bin/simple run` rather than the row's admitted runtime identity. | Thread and hash-bind the admitted runtime through validation; reject seed/stale/missing substitutions. |
+| Collector: `scripts/check/collect-sosix-qemu-evidence.shs` | Source repair implemented: any non-PASS row produces pending promotion. | Run the behavioral shared-owner gate and modern SSpec once on the admitted full CLI. |
+| Media: `scripts/os/prepare_qemu_nonce_media.shs` | Source repair implemented: resolved source/run aliases are rejected before mutation. | Run direct, normalized, and symlink-alias behavioral fixtures once. |
+| Matrix: `scripts/check/check-sosix-qemu-matrix.shs` | Source repair implemented: compiler validation receives the admitted runtime. | Prove path/SHA identity and pre/post runtime immutability in the behavioral gate. |
+| System-test/docgen owner | The executable typed 24-row SSpec exists, but the deployed self-hosted runtime exits 139 both executing that spec and running docgen. | With a repaired source-matched admitted full CLI, run `release/x86_64-unknown-linux-gnu/simple test test/03_system/os/qemu/sosix_qemu_remaining_owners_spec.spl --mode=interpreter`, then `release/x86_64-unknown-linux-gnu/simple spipe-docgen test/03_system/os/qemu/sosix_qemu_remaining_owners_spec.spl --output doc/06_spec --no-index`; require PASS and zero stubs. |
 
 All rows retain stable acceptance IDs in the canonical plan. This record may be
 closed only after the matching implementation and canonical evidence land; a

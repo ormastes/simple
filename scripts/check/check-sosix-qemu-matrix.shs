@@ -5,6 +5,8 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "${repo_root}"
 spec_runtime=${SIMPLE_QEMU_RUNTIME:-bin/simple}
+runtime_admission_cmd=scripts/check/check-sosix-qemu-runtime-admission.shs
+spec_runtime_receipt=${SIMPLE_QEMU_RUNTIME_RECEIPT:-${spec_runtime}.sosix-admission.env}
 
 host_override=
 guest_filter=
@@ -95,6 +97,7 @@ accelerator_for() {
 }
 
 if [ "${mode}" = self-test ]; then
+    "${runtime_admission_cmd}" --self-test >/dev/null
     scripts/check/check-x86-32-cpl3-lifecycle-contract.shs --self-test >/dev/null
     scripts/check/check-arm32-user-lifecycle-contract.shs --self-test >/dev/null
     [ "$(SIMPLE_QEMU_HOST=windows SIMPLE_QEMU_ACCELERATOR=whpx "${settings_cmd}" --print | sed -n 's/^simple_qemu_host=//p')" = windows ]
@@ -272,6 +275,21 @@ if ! simple_compiler_usable "${spec_runtime}"; then
     exit 1
 fi
 
+if ! runtime_identity=$("${runtime_admission_cmd}" --verify "${spec_runtime}" "${spec_runtime_receipt}" 2>&1); then
+    emit 'sosix_qemu_matrix_status=blocked'
+    emit "sosix_qemu_matrix_reason=spec-runtime-admission-failed:${runtime_identity}"
+    exit 1
+fi
+runtime_path=$(printf '%s\n' "${runtime_identity}" | sed -n 's/^runtime_path=//p')
+runtime_sha256=$(printf '%s\n' "${runtime_identity}" | sed -n 's/^runtime_sha256=//p')
+emit "sosix_qemu_matrix_spec_runtime_path=${runtime_path}"
+emit "sosix_qemu_matrix_spec_runtime_sha256=${runtime_sha256}"
+
+require_runtime_identity() {
+    identity_now=$("${runtime_admission_cmd}" --verify "${spec_runtime}" "${spec_runtime_receipt}" 2>&1) || return 1
+    [ "${identity_now}" = "${runtime_identity}" ]
+}
+
 if [ "${mode}" = preflight ]; then
     if [ "${blocked}" -ne 0 ]; then
         emit 'sosix_qemu_matrix_status=blocked'
@@ -324,11 +342,19 @@ run_spec_checked() {
             printf '%s\n' "missing-compiler-serial:${serial_path}" > "${reason_file}"
             return 1
         fi
+        if ! require_runtime_identity; then
+            printf '%s\n' "spec-runtime-identity-changed-before-compiler-validation:${guest}" > "${reason_file}"
+            return 1
+        fi
         if ! "${spec_runtime}" run scripts/check/validate-sosix-qemu-compiler-serial.spl -- \
             "${serial_path}" "${host}" "${guest}" "${nonce}" "${compiler_path}" \
             "${compiler_version}" "${source_path}" "${executable_path}" \
             "${expected_stdout}" "${version_artifact}" "${hello_artifact}" >>"${log}" 2>&1; then
             printf '%s\n' "compiler-serial-invalid:${guest}" > "${reason_file}"
+            return 1
+        fi
+        if ! require_runtime_identity; then
+            printf '%s\n' "spec-runtime-identity-changed-after-compiler-validation:${guest}" > "${reason_file}"
             return 1
         fi
         [ -s "${version_artifact}" ] && [ -s "${hello_artifact}" ] || {

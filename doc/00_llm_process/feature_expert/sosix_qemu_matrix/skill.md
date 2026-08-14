@@ -20,6 +20,12 @@ The manual flow and shared script names are frozen in the plan. Producer
 `--self-test` proves fixture closure only. Windows preflight, TCG correctness,
 cached transcripts, and host-side execution are not row evidence.
 
+The L0 collector/media/runtime repairs are implemented in source. Do not call
+L0 verified until the bounded typed SSpec passes on a source-matched admitted
+full CLI and `spipe-docgen` produces a zero-stub manual. The SSpec's expected
+3 PASS / 15 BLOCKED / 6 POSTPONED oracle proves honest handoff state, not live
+matrix completion.
+
 ## Update rule
 
 Refresh this expert, the plan, ledger, and guide together whenever a row state,

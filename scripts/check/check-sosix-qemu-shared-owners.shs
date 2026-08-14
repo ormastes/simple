@@ -5,36 +5,141 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 collector=$root/scripts/check/collect-sosix-qemu-evidence.shs
 media=$root/scripts/os/prepare_qemu_nonce_media.shs
 matrix=$root/scripts/check/check-sosix-qemu-matrix.shs
+runtime_admission=$root/scripts/check/check-sosix-qemu-runtime-admission.shs
 
 fail() { echo "sosix-qemu-shared-owners: $*" >&2; exit 1; }
 [ "${1:-}" = --self-test ] || fail "usage: check-sosix-qemu-shared-owners.shs --self-test"
 
-grep -Fq 'sosix_qemu_matrix_promotion_status=pending' "$collector" || fail "collector pending promotion missing"
-grep -Fq 'sosix_qemu_matrix_nonpass_row_count=' "$collector" || fail "collector nonpass count missing"
-grep -Fq 'sosix_qemu_evidence_status=pending' "$collector" || fail "collector pending result missing"
 grep -Fq 'source and run image resolve to the same path' "$media" || fail "resolved media alias rejection missing"
 grep -Fq '"${spec_runtime}" run scripts/check/validate-sosix-qemu-compiler-serial.spl' "$matrix" || fail "admitted runtime invocation missing"
 if grep -Fq 'bin/simple run scripts/check/validate-sosix-qemu-compiler-serial.spl' "$matrix"; then
     fail "hardcoded compiler validator runtime remains"
 fi
+runtime_admission_out=$($runtime_admission --self-test)
+printf '%s\n' "$runtime_admission_out" | grep -Fxq 'sosix_qemu_runtime_admission_self_test=pass' \
+    || fail "runtime admission behavioral self-test failed"
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/sosix-qemu-shared-owners.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 printf '%s\n' fixture > "$tmp/source.img"
 mkdir -p "$tmp/alias"
-if "$media" "$tmp/source.img" "$tmp/alias/../source.img" ROW_NONCE >"$tmp/alias.out" 2>"$tmp/alias.err"; then
-    fail "resolved source/run alias was accepted"
+ln -s "$tmp/source.img" "$tmp/alias/source-link.img"
+if "$media" "$tmp/source.img" "$tmp/alias/source-link.img" ROW_NONCE >"$tmp/alias.out" 2>"$tmp/alias.err"; then
+    fail "symlink source/run alias was accepted"
 fi
 grep -Fq 'source and run image resolve to the same path' "$tmp/alias.err" || fail "resolved alias diagnostic missing"
 [ "$(cat "$tmp/source.img")" = fixture ] || fail "source changed during alias rejection"
 
-sed '/sosix_qemu_matrix_promotion_status=pending/d' "$collector" > "$tmp/collector-sabotaged"
-if grep -Fq 'sosix_qemu_matrix_promotion_status=pending' "$tmp/collector-sabotaged"; then
-    fail "collector sabotage did not remove pending promotion"
+make_nonce_media_fixture() {
+    fixture_path=$1
+    load_extent=$2
+    perl - "$fixture_path" "$load_extent" <<'PERL'
+use strict;
+use warnings;
+my ($path, $extent) = @ARGV;
+my $ident = "\x7fELF" . pack("C*", 2, 1, 1, 0) . ("\0" x 8);
+my $ehdr = $ident . pack("vvVQ<Q<Q<Vvvvvvv",
+    2, 62, 1, 0, 64, 0, 0, 64, 56, 1, 0, 0, 0);
+my $phdr = pack("VVQ<Q<Q<Q<Q<Q<", 1, 0, 0, 0, 0, $extent, $extent, 4096);
+my $image = $ehdr . $phdr . ("\0" x (1024 - length($ehdr) - length($phdr)));
+substr($image, 144, length("SIMPLEOS_QEMU_NONCE=__SIMPLEOS_QEMU_NONCE_SLOT_V1__")) =
+    "SIMPLEOS_QEMU_NONCE=__SIMPLEOS_QEMU_NONCE_SLOT_V1__";
+substr($image, 400, length("__SIMPLEOS_FS_EXEC_NONCE_SLOT_V1__")) =
+    "__SIMPLEOS_FS_EXEC_NONCE_SLOT_V1__";
+open my $out, ">", $path or die "open fixture: $!\n";
+binmode $out;
+print {$out} $image or die "write fixture: $!\n";
+close $out or die "close fixture: $!\n";
+PERL
+}
+
+valid_source=$tmp/valid-source.img
+valid_run=$tmp/valid-run.img
+make_nonce_media_fixture "$valid_source" 1024
+valid_source_sha=$(sha256sum "$valid_source" | awk '{print $1}')
+valid_output=$("$media" "$valid_source" "$valid_run" VALID_NONCE)
+[ "$valid_output" = "$valid_run" ] || fail "valid media did not report run path"
+[ "$(sha256sum "$valid_source" | awk '{print $1}')" = "$valid_source_sha" ] ||
+    fail "valid media preparation changed source"
+[ "$(sha256sum "$valid_run" | awk '{print $1}')" != "$valid_source_sha" ] ||
+    fail "valid media run copy was not mutated"
+grep -aFq 'SIMPLEOS_QEMU_NONCE=VALID_NONCE' "$valid_run" || fail "run image nonce mutation missing"
+grep -Fq 'readback=pass' "$valid_run.fs-exec-receipt" || fail "valid media readback receipt missing"
+
+corrupt_source=$tmp/corrupt-source.img
+corrupt_run=$tmp/corrupt-run.img
+make_nonce_media_fixture "$corrupt_source" 256
+corrupt_source_sha=$(sha256sum "$corrupt_source" | awk '{print $1}')
+if "$media" "$corrupt_source" "$corrupt_run" CORRUPT_NONCE >"$tmp/corrupt.out" 2>"$tmp/corrupt.err"; then
+    fail "corrupt media with payload outside PT_LOAD was accepted"
+fi
+grep -Fq 'cannot patch/read back nonce slots or extract fs-exec ELF' "$tmp/corrupt.err" ||
+    fail "corrupt media failure diagnostic missing"
+[ "$(sha256sum "$corrupt_source" | awk '{print $1}')" = "$corrupt_source_sha" ] ||
+    fail "corrupt media failure changed source"
+[ ! -e "$corrupt_run" ] && [ ! -e "$corrupt_run.fs-exec-receipt" ] ||
+    fail "corrupt media failure published a run artifact"
+
+source_root=$tmp/evidence
+output_root=$tmp/imported
+artifact_sha=$(printf 'blocked evidence\n' | sha256sum | awk '{print $1}')
+for host in linux windows macos freebsd; do
+    for guest in x86_32 x86_64 arm32 arm64 riscv32 riscv64; do
+        bundle=$source_root/$host/$guest/fixture
+        mkdir -p "$bundle"
+        printf 'blocked evidence\n' > "$bundle/artifact.txt"
+        cat > "$bundle/evidence.env" <<EOF
+schema_version=2
+host=$host
+guest=$guest
+status=blocked
+reason=behavioral fixture
+owner=fixture-owner
+reviewer=fixture-reviewer
+resume_command=fixture-resume-$host-$guest
+source_identity=git:0123456789012345678901234567890123456789:tree:abcdefabcdefabcdefabcdefabcdefabcdefabcd:clean
+compiler_identity=compiler:none
+kernel_identity=kernel:none
+image_identity=image:none
+qemu_identity=qemu:none
+qemu_argv=none
+accelerator_identity=accelerator:none
+firmware_identity=firmware:none
+firmware_mode=direct-kernel
+run_nonce=fixture-$host-$guest
+firmware_path=none
+firmware_version=version:none
+firmware_sha256=none
+firmware_stage_markers=guest-entry
+transcript_identity=transcript:none
+program_identity=program:none
+compiler_in_filesystem=false
+compiler_version_evidence_path=
+compiler_hello_evidence_path=
+artifact_count=1
+artifact_1_path=artifact.txt
+artifact_1_sha256=$artifact_sha
+EOF
+    done
+done
+"$collector" --source-root "$source_root" --output "$output_root" > "$tmp/collector.out"
+grep -Fxq 'sosix_qemu_evidence_status=pending' "$tmp/collector.out" || fail "collector did not report pending"
+grep -Fxq 'sosix_qemu_evidence_reason=nonpass-rows:24' "$tmp/collector.out" || fail "collector nonpass reason is not 24"
+if grep -Fxq 'sosix_qemu_evidence_status=pass' "$tmp/collector.out"; then
+    fail "collector reported PASS for non-PASS matrix"
+fi
+manifest=$(awk -F= '$1 == "sosix_qemu_evidence_manifest" { print substr($0, index($0, "=") + 1) }' "$tmp/collector.out")
+[ -f "$manifest" ] || fail "collector manifest missing"
+grep -Fxq 'sosix_qemu_matrix_promotion_status=pending' "$manifest" || fail "manifest promotion is not pending"
+grep -Fxq 'sosix_qemu_matrix_nonpass_row_count=24' "$manifest" || fail "manifest nonpass count is not 24"
+if grep -Fxq 'sosix_qemu_matrix_promotion_status=pass' "$manifest"; then
+    fail "manifest promoted non-PASS matrix"
 fi
 
 echo 'sosix_qemu_shared_owner_collector_status=pass'
 echo 'sosix_qemu_shared_owner_media_alias_status=pass'
+echo 'sosix_qemu_shared_owner_media_copy_status=pass'
+echo 'sosix_qemu_shared_owner_media_corruption_status=pass'
 echo 'sosix_qemu_shared_owner_admitted_runtime_status=pass'
-echo 'sosix_qemu_shared_owner_sabotage_status=pass'
+echo 'sosix_qemu_shared_owner_behavioral_fixture_status=pass'
 echo 'sosix_qemu_shared_owners_status=pass'

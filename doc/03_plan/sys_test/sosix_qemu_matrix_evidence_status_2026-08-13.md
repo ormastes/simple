@@ -69,7 +69,8 @@ state does not supersede the immutable ARM64 and RV32 PASS bundles above.
 4. After each new bundle, invoke the collector once with the full source root;
    it must remain blocked until all 24 valid rows exist.
 
-Open implementation ownership, including collector promotion wording,
-same-path nonce-media rejection, admitted-runtime threading, the three Linux
-guest blockers, and the external-host prerequisites, is tracked in
+Shared collector promotion, resolved nonce-media alias rejection, and
+admitted-runtime threading are implemented in source but remain open for the
+admitted-full-CLI SSpec/docgen verification gate. The three Linux guest
+blockers and external-host prerequisites remain implementation-open and are tracked in
 [`sosix_qemu_matrix_remaining_owners_2026-08-14.md`](../../08_tracking/bug/sosix_qemu_matrix_remaining_owners_2026-08-14.md).

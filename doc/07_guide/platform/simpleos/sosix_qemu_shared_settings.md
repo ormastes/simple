@@ -80,6 +80,10 @@ ordered evidence. The parent-only
 `scripts/check/collect-sosix-qemu-evidence.shs` accepts exactly 24 valid row
 bundles; all unavailable rows stay visible as blocked or postponed in
 the [SOSIX QEMU evidence ledger](../../../03_plan/sys_test/sosix_qemu_matrix_evidence_status_2026-08-13.md).
+The shared collector/media/runtime source repairs are implemented and covered
+by `scripts/check/check-sosix-qemu-shared-owners.shs --self-test`; their modern
+typed 24-row SSpec still requires a source-matched admitted full CLI and a
+zero-stub generated manual before L0 verification closes.
 
 ## Host status
 
