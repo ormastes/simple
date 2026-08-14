@@ -221,3 +221,26 @@ PID1 must come from the process owner before network or service readiness; a
 later SSH/WM marker cannot imply either prerequisite. The lane remains blocked
 until a provenance-admitted Stage 4 CLI exists and every ordered receipt passes
 the shared fail-closed checker.
+Source integration includes the IPC/VFS lifecycle wave: syscall-18
+owner-checked port destruction, unique named VFS discovery, copied request/raw
+reply framing, public FS binary methods, manager-owned mutation routing, and
+FD READ/WRITE/SEEK/close. Resume after TODO667 with the focused SSpec and
+the exact TODO806 live command. Retain `build/os/rv64-ssh-live.serial.log`, the
+gate verdict, image/provenance hashes, and independent OpenSSH outcomes. Do not
+turn the Stage 4 evidence blocker into another source-only completion claim.
+
+Terra terminal-only checks of `ssh_live_entry.spl` and the WM-resource spec
+returned exit 0, while the system SSpec checker load segfaulted. The newer
+five-fixture compiler probe also fails its two baseline controls at build rc
+139. Treat all of these as bounded diagnostics, retain the next outputs under
+the canonical roots, and do not promote them to a Stage 4 or QEMU result.
+
+P1c freezes the copied-service ABI at
+`IPC_COPIED_SERVICE_TAG = 0xFFFFFFFFFFFFFFFFu64`; no port-ID/payload heuristic
+may select it, and legacy zero-length sends stay legacy. Syscall 18 is
+owner-only destruction. VFS close uses a monotonic issued-handle watermark for
+bounded idempotent terminal knowledge; a lost reply leaves the final local FD
+retryable. SOSIX I/O now shares named VFS READ/WRITE/SEEK rather than fixed
+endpoint routing. After TODO667 retain one focused IPC-handoff, destroy-port, VFS-wire,
+FD-route, and SOSIX-I/O log for root and the normal/highest-capability Codex
+reviewer; those logs remain source-contract evidence, not a live gate result.

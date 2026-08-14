@@ -1,0 +1,34 @@
+use std.spec.{describe, it, expect}
+use os.kernel.arch.riscv64.syscall.{rv64_syscall_handler_state}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.syscall_types.{SyscallArgs}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilitySet}
+
+fn destroy_port_args(port_id: u64) -> SyscallArgs:
+    SyscallArgs(id: 18u64, arg0: port_id, arg1: 0u64, arg2: 0u64, arg3: 0u64, arg4: 0u64, arg5: 0u64)
+
+describe "RV64 IpcDestroyPort":
+    it "allows a deny-all caller to self-revoke its anonymous reply port":
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val current = scheduler.get_current()
+        ipc.cap_manager.init_task(current, CapabilitySet.empty())
+        val port = ipc.create_port(current, "")
+
+        val destroyed = rv64_syscall_handler_state(destroy_port_args(port.id), scheduler, ipc, KernelLog.new(8))
+        expect(destroyed.result.value).to_equal(0)
+        expect(destroyed.ipc.port_owner_task_id(port.id)).to_equal(0u64)
+
+    it "rejects a wrong owner and missing port through the arch dispatcher":
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val port = ipc.create_port(TaskId(id: 99), "foreign-rv64-port")
+
+        val foreign = rv64_syscall_handler_state(destroy_port_args(port.id), scheduler, ipc, KernelLog.new(8))
+        expect(foreign.result.value).to_equal(-1)
+        expect(foreign.ipc.connect("foreign-rv64-port") != nil).to_equal(true)
+        val missing = rv64_syscall_handler_state(destroy_port_args(999999u64), scheduler, foreign.ipc, KernelLog.new(8))
+        expect(missing.result.value).to_equal(-1)

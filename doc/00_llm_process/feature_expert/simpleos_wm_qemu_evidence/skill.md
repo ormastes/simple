@@ -212,3 +212,20 @@ string-only GUI stub, serial WM marker, or nonblank QMP image alone is
 diagnostic. PASS requires a live process-owner PID/liveness receipt correlated
 to the compositor's first presented frame after Sv39, PID1, network, and
 production SSH readiness. Final manual/evidence review remains root-owned.
+The producer and boot wiring, including byte-zero WM/Window IPC framing over
+the owned copied transport, are source-integrated. TODO809 remains open only
+for admitted focused/live execution: retain authenticated sender PID,
+PID/liveness, scene and presented revision, positive scanout generation, and
+QMP framebuffer metadata/hashes, then compose that evidence through TODO806.
+The terminal-only WM resource checks are source diagnostics, not a retained
+PID/frame receipt. The checker-loaded system SSpec currently segfaults before
+its scenario result, so rerun the focused WM ledger only after TODO667 and
+retain its outputs with the Stage 4 provenance.
+
+P1c IPC service transport is shared with the WM path: copied traffic is
+selected only by `IPC_COPIED_SERVICE_TAG`, and syscall 18 permits the recorded
+owner alone to revoke an endpoint. The VFS close watermark and SOSIX named-VFS
+convergence are kernel/service details, but they must be included in B's
+post-TODO667 focused retained ledger before WM consumes IPC evidence. They do
+not substitute for authenticated sender PID, PID/liveness, revision, scanout,
+or QMP evidence, and TODO806 remains the combined runtime blocker.

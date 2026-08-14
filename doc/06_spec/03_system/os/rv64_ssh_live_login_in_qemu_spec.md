@@ -48,7 +48,7 @@ builds the image and QEMU produces the complete ordered lifecycle transcript.
 | Status | Static contract implemented; live lifecycle gate blocked by TODO806 |
 | Requirements | AC-3, AC-4, AC-5, AC-6, AC-7 |
 | Plan | doc/03_plan/sys_test/rv64_ssh_live_login_in_qemu.md |
-| Design | N/A |
+| Design | `doc/05_design/rv64_sv39_pid1_network_ssh_wm_boot.md` |
 | Research | doc/08_tracking/feature/kv260_simple_rv64_network_verification_2026-05-29.md |
 | Source | `test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl` |
 | Updated | 2026-08-14 |
@@ -58,8 +58,51 @@ builds the image and QEMU produces the complete ordered lifecycle transcript.
 
 The dedicated QEMU lane forwards host port 2222 to guest port 2222. The live
 row is deliberately fail-closed: an unset opt-in is a blocker, not a passing
-skip. TODO806 owns implementation and execution; TODO807 owns regeneration and
+skip. The source lanes are integrated. TODO806 owns admitted combined execution;
+TODO808 and TODO809 own focused SSH/WM evidence; TODO807 owns regeneration and
 the seven-dimension SSpec-maintain review once the admitted Stage 4 CLI exists.
+
+## Terra Diagnostic Boundary (2026-08-14)
+
+Terminal-only focused checks reported `Checking...`/exit 0 for
+`release/x86_64-unknown-linux-gnu/simple check examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl`
+and `release/x86_64-unknown-linux-gnu/simple check test/01_unit/os/rv64_wm_boot_resources_spec.spl`.
+The matching WM-resource interpreter invocation exited 0 with empty output.
+The IPC handoff focused run was also reported PASS. No canonical current-wave
+test-artifact files were retained for those observations, so they are useful
+diagnostics only and cannot admit TODO806, TODO808, or TODO809.
+
+Conversely, `release/x86_64-unknown-linux-gnu/simple check
+test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl` printed `Checking...`
+then segfaulted during checker load; no core or log was retained. It proves no
+scenario or manual result. The hash-bound compiler probes remain blocked:
+the three-probe receipt is `FAIL-FAIL-FAIL` and the newer five-probe baseline
+expansion is all build-SIGSEGV/139. Rerun the focused SSpec, maintain scan, and
+docgen only after TODO667 provides the admitted Stage 4; retain output and
+provenance before calling this mirror generated or reviewed.
+
+## Integrated source boundary
+
+The current source wave adds syscall-18 owned port destruction, unique named
+VFS discovery, copied service request/reply framing, public binary FS methods,
+VFS-manager mutation routing, POSIX FD VFS READ/WRITE/SEEK/close behavior, and
+byte-zero WM/Window framing. SSH remains backed by real filesystem execution
+and attempt-local bounded stdout/status capture. These are source contracts,
+not a claim that the checker or guest ran. After TODO667, retain the exact
+focused destroy, IPC, VFS, FD, SSH, WM, and system-spec logs under
+`build/os/rv64-ssh-live/focused/` before either this manual or the live row is
+called verified.
+
+P1c makes the ABI and retirement rules explicit: only
+`IPC_COPIED_SERVICE_TAG` selects copied service traffic, so legacy zero-length
+sends remain legacy; syscall 18 accepts destruction only by the recorded port
+owner; and VFS records terminal closes with a monotonic issued-handle watermark
+rather than an unbounded retired-handle list. A received close result retires
+the final FD, while a lost transport reply leaves it retryable. SOSIX I/O now
+uses the same named copied VFS request owner and READ/WRITE/SEEK formats as the
+kernel FD path. These contracts require the post-TODO667 focused IPC handoff,
+destroy-port, VFS wire, `fd_io_route`, and `sosix/io` rows before any live
+lifecycle conclusion; TODO806 remains the sole combined runtime gate.
 
 ## Acceptance Criteria
 
@@ -128,7 +171,7 @@ bin/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=in
 Generate the manual:
 
 ```bash
-bin/simple spipe-docgen test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --output doc/06_spec
+bin/simple spipe-docgen test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --output doc/06_spec --no-index
 ```
 
 ## Evidence Model

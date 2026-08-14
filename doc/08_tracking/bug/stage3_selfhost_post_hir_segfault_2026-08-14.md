@@ -53,11 +53,12 @@ authority and do not re-run the three exhausted cycles from this lane.
 
 ## Focused regression scaffold
 
-The candidate-bound diagnostic scaffold is now:
+The retained candidate-bound diagnostic scaffold initially used one combined
+entry closure:
 
 - `test/02_integration/compiler/stage3_aggregate_receiver_native_main.spl`
   executes the exact `CompileContext.error_count()` receiver before and after
-  `add_error`, plus an adjacent array-of-aggregate `push` and field projection.
+  `add_error`.
 - `test/02_integration/compiler/stage3_aggregate_receiver_spec.spl` mirrors the
   two source contracts for normal focused test execution after Stage 4 exists.
 - `scripts/check/check-stage3-aggregate-receiver-native.shs` requires an
@@ -77,6 +78,96 @@ symbolized backtrace. This is a bounded exact reproducer, not a selected or
 proved compiler fix. The three focused cycles are exhausted; AC-1 still
 requires localization, a pure-Simple repair, and passing exact plus adjacent
 native regressions in a fresh lane.
+
+### Fresh-lane three-probe result
+
+The exit-139 receipt does not prove that
+`method_calls_literals.spl` owns the fault: both the exact receiver and its
+large compiler entry closure were compiled in one invocation, and the receipt
+has no internal trace. Therefore no speculative lowering change is admissible
+yet. The next checker revision separates three entry closures and retains an
+independent result for every one:
+
+1. `stage3_compile_context_scalar_control_native_main.spl` imports and creates
+   the same `CompileContext`, calls `add_error`, but replaces only
+   `error_count()` with a direct `error_count_value` read.
+2. `stage3_aggregate_receiver_native_main.spl` adds only the exact
+   `error_count()` receiver behavior to that compiler closure.
+3. `stage3_aggregate_push_control_native_main.spl` contains the adjacent
+   array-of-aggregate push/projection shape without importing the compiler.
+
+The checker records `error_count_receiver_candidate` only when scalar control
+passes, the exact receiver fails, and adjacent push passes. If both
+compiler-importing probes fail while adjacent push passes, it records
+`compile_context_closure_or_add_error_candidate`. All eight PASS/FAIL tuples
+have distinct labels, so an adjacent failure cannot overwrite evidence of a
+second failure. Each probe also records whether failure occurred during build,
+from build SIGSEGV specifically, from a missing executable, during execution,
+or only in the output contract. These labels localize a boundary; none alone
+closes AC-1. A source fix still requires uniquely proved ownership and all
+bounded controls plus the three named regressions must pass afterward.
+
+The single permitted run of this three-probe identity retained
+`build/bootstrap/probes/stage3-aggregate-receiver/0476f625056fc990-054ce576790256e0-25383b77-1ed81de7-f44536be-93ec88d0`.
+The candidate SHA-256 is
+`0476f625056fc990d3fb45259285b7cbe433aaa8d3df2eae294001cf77589cf4`, the
+runtime receipt SHA-256 is
+`25383b7757608d90bb818599ac029826515ec90c2a97be082fa65a796bcda8d7`, and
+the checker SHA-256 is
+`054ce576790256e07bc71664bd38a021845a601cc158028bfc1f82b57f1d5bbe`.
+Every probe had `build_rc=139`, `run_rc=125`, `build_sigsegv`, and no output
+artifact; aggregate `result.env` records `FAIL-FAIL-FAIL`,
+`localization=shared_or_multiple_failures`, and the same candidate hash before
+and after. It remains non-localizing because the compiler-free adjacent push
+also crashed during the build phase.
+
+The exact run used the explicitly admitted Stage 2 and runtime authority:
+
+```sh
+SIMPLE_ADMITTED_COMPILER_SHA256=0476f625056fc990d3fb45259285b7cbe433aaa8d3df2eae294001cf77589cf4 \
+SIMPLE_ADMITTED_RUNTIME_PATH="$PWD/build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-runtime-authority" \
+SIMPLE_ADMITTED_RUNTIME_RECEIPT="$PWD/build/bootstrap/stage3/x86_64-unknown-linux-gnu/runtime-admitted.txt" \
+SIMPLE_ADMITTED_RUNTIME_RECEIPT_SHA256=25383b7757608d90bb818599ac029826515ec90c2a97be082fa65a796bcda8d7 \
+sh scripts/check/check-stage3-aggregate-receiver-native.shs \
+  "$PWD/build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple"
+```
+
+Do not replay this checker/fixture identity. The artifact directory is
+bound to the candidate, checker, runtime-admission receipt, and each fixture
+hash prefix. Retain all full hashes, all per-probe build/run logs and results,
+aggregate `result.env`, and the unchanged before/after candidate hash.
+
+### Fresh-lane scalar baseline result
+
+The next distinct identity added a compiler-free scalar-only baseline and one
+struct-without-push control before the retained three probes. The scalar fixture
+contains only scalar arithmetic, comparison, and `print`: no compiler import,
+struct, array, or method receiver. The struct control adds only construction
+and direct field projection: no compiler import, array, `push`, or method
+receiver. It was run exactly once against the same admitted candidate/runtime
+receipt and retained
+`build/bootstrap/probes/stage3-aggregate-receiver/0476f625056fc990-5c722174dfee3cf8-25383b77-dd975615-26b60e80-1ed81de7-f44536be-93ec88d0`.
+
+Its immutable inputs are candidate
+`0476f625056fc990d3fb45259285b7cbe433aaa8d3df2eae294001cf77589cf4`, runtime
+receipt `25383b7757608d90bb818599ac029826515ec90c2a97be082fa65a796bcda8d7`,
+checker `5c722174dfee3cf885a8b402fcd6def5fd74c4184cb7d04c7790a2556bdeeacf`,
+scalar baseline fixture
+`dd975615117ec2be27e61c0864a18f7952bad8d31840ff9622c0f6e169eca8f2`, struct
+control fixture `26b60e805edcdcf6e8ddae19fafef9a61c224d6d22d8c53c3a4afa63da02f8b6`,
+and the retained scalar/exact/adjacent fixture hashes
+`1ed81de77b7b137bd1538bc481b4839a5526a9b11fde2ad7500d7af377202377`,
+`f44536bed9fe53d4496d718f8c8c035d9d37f0d15d5bf8a277298972588ec0c6`, and
+`93ec88d090d9ef20e425af8ce34d3ac062b691b32594fc474b3e082cf290a778`.
+
+All five probes produced `build_rc=139`, `run_rc=125`, `build_sigsegv`, and
+no output executable. Aggregate `result.env` records
+`probe_outcome=FAIL-FAIL-FAIL-FAIL-FAIL`,
+`localization=general_native_build_candidate`, and unchanged candidate hashes.
+The scalar-only build-phase failure determines that this receipt cannot support
+an aggregate/shared-lowering attribution: the admitted candidate fails in the
+general native-build path before any struct, array, or receiver shape is
+required. It is not a source-owner fix selection and must not be replayed.
 
 The separate record
 `stage3_selfhost_exit_139_2026-08-14.md` describes an earlier infrastructure
@@ -157,3 +248,41 @@ unchanged cache-preserving Stage 3 completion, then admit provenance and run a
 real Stage4-from-admitted continuation (without rebuilding an already-green
 Stage 3).  Retained evidence remains
 `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`.
+
+## Terra evidence expansion (2026-08-14)
+
+The retained candidate-bound three-probe diagnostic is now explicit evidence,
+not a receiver-localization result.  With the admitted Stage 2 candidate
+`0476f625056fc990d3fb45259285b7cbe433aaa8d3df2eae294001cf77589cf4`, run:
+
+```sh
+SIMPLE_ADMITTED_COMPILER_SHA256=0476f625056fc990d3fb45259285b7cbe433aaa8d3df2eae294001cf77589cf4 \
+SIMPLE_ADMITTED_RUNTIME_PATH="$PWD/build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-runtime-authority" \
+SIMPLE_ADMITTED_RUNTIME_RECEIPT="$PWD/build/bootstrap/stage3/x86_64-unknown-linux-gnu/runtime-admitted.txt" \
+SIMPLE_ADMITTED_RUNTIME_RECEIPT_SHA256=25383b7757608d90bb818599ac029826515ec90c2a97be082fa65a796bcda8d7 \
+sh scripts/check/check-stage3-aggregate-receiver-native.shs \
+  "$PWD/build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple"
+```
+
+The three-fixture receipt at
+`build/bootstrap/probes/stage3-aggregate-receiver/0476f625056fc990-054ce576790256e0-25383b77-1ed81de7-f44536be-93ec88d0/result.env`
+records `FAIL-FAIL-FAIL`: scalar control, exact receiver, and adjacent push
+each fail in the *build* with SIGSEGV; the candidate hash is unchanged. Its
+`shared_or_multiple_failures` label therefore excludes a receiver-specific
+root-cause claim.
+
+A newer expanded receipt at
+`build/bootstrap/probes/stage3-aggregate-receiver/0476f625056fc990-5c722174dfee3cf8-25383b77-dd975615-26b60e80-1ed81de7-f44536be-93ec88d0/result.env`
+adds plain-scalar baseline and plain-struct controls. It records
+`FAIL-FAIL-FAIL-FAIL-FAIL`, all `build_sigsegv` with build rc `139`, and the
+same before/after candidate hash. The retained per-probe result files and
+stderr logs are in that directory. This is a general native-build candidate
+failure, not proof that any diagnostic fixture, MIR receiver path, or proposed
+source edit is the root cause.
+
+No newer retained Stage 3 success, Stage 4 executable, deployment lineage, or
+essential-tools receipt was present during this inspection. Diagnostic focused
+OS PASS observations do not change that admission boundary. The compiler
+owner must take a fresh symbolized/backtrace-capable lane from this exact
+provenance, preserve the probe artifacts, and hand the result to the
+highest-capability reviewer before any Stage 4 claim.

@@ -45,7 +45,7 @@ verifies the port waiter list is empty after the send.
 """
 
 use std.spec.{describe, it, expect, step}
-use os.kernel.ipc.syscall_ipc.{_handle_ipc_send_state, _handle_ipc_recv_state}
+use os.kernel.ipc.syscall_ipc.{_handle_ipc_send_state, _handle_ipc_recv_state, IPC_COPIED_SERVICE_TAG}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.types.syscall_types.{SyscallArgs}
@@ -83,20 +83,21 @@ describe "IPC syscall handoff":
             val task_id = waiter
             expect(task_id.id).to_equal(receiver.id)
 
-    it "send unblocks the first waiting receiver and consumes one waiter":
+    it "legacy zero-length send remains legacy when arg1 names a caller-owned port":
         step("Create a scheduler, IPC manager, and a waiting receiver")
         var scheduler = Scheduler.new()
         var ipc = IpcManager.new()
         val receiver = TaskId(id: 99)
         val port = ipc.create_port(receiver, "ipc_send_wake")
+        val source = ipc.create_port(TaskId(id: 0), "ipc_send_source")
         ipc.add_waiter(port, receiver)
 
-        step("Send a message to the receiver-owned port")
+        step("Send a zero-length legacy message to the receiver-owned port")
         val state = _handle_ipc_send_state(
             SyscallArgs(
                 id: 20,
                 arg0: port.id,
-                arg1: 7,
+                arg1: source.id,
                 arg2: 0,
                 arg3: 0,
                 arg4: 0,
@@ -106,6 +107,42 @@ describe "IPC syscall handoff":
             ipc
         )
 
-        step("Verify the send succeeds and consumes exactly one waiter")
+        step("Verify the send succeeds, consumes one waiter, and retains legacy metadata")
         expect(state.result.value).to_equal(0)
         expect(state.ipc.get_first_waiter(port.id)).to_equal(nil)
+        val delivered = state.ipc.recv_owned(receiver, port)
+        expect(delivered.payload.len()).to_equal(0)
+        val header = delivered.header.unwrap()
+        expect(header.src_port).to_equal(0u64)
+        expect(header.method).to_equal(source.id.to_u32())
+
+    it "frozen arg4 tag selects copied service traffic":
+        step("Create a caller-owned named source and a receiving port")
+        var scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val receiver = TaskId(id: 99)
+        val port = ipc.create_port(receiver, "ipc_tagged_destination")
+        val source = ipc.create_port(TaskId(id: 0), "ipc_tagged_source")
+
+        step("Send an empty copied reply with the frozen tag")
+        val state = _handle_ipc_send_state(
+            SyscallArgs(
+                id: 20,
+                arg0: port.id,
+                arg1: source.id,
+                arg2: 0,
+                arg3: 0,
+                arg4: IPC_COPIED_SERVICE_TAG,
+                arg5: 0
+            ),
+            scheduler,
+            ipc
+        )
+
+        step("Verify the copied ABI preserves the claimed source port")
+        expect(state.result.value).to_equal(0)
+        val delivered = state.ipc.recv_owned(receiver, port)
+        expect(delivered.payload.len()).to_equal(0)
+        val header = delivered.header.unwrap()
+        expect(header.src_port).to_equal(source.id)
+        expect(header.method).to_equal(0u32)

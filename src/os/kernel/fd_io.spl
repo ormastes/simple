@@ -2,23 +2,33 @@
 #
 # These functions provide the standard POSIX file I/O API.
 # Internally they use async_io.spl for non-blocking IPC to the VFS service.
-# posix_open sends an IPC request to the VFS service (port 1) to open files.
+# posix_open sends a copied, method-prefixed IPC request to the named VFS
+# service.  Each transaction owns its anonymous reply port; replies are raw
+# status-prefixed bytes, never legacy metadata on the service port.
 # FDs 0-2 are reserved for stdin/stdout/stderr (serial on baremetal).
 
 use os.kernel.errno.{ENOENT, ENOSYS, EMFILE}
-use os.kernel.fd_table.{fd_is_valid, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2, fd_get_offset, fd_set_offset, fd_activate_task, fd_current_task, fd_release_task, fd_task_context_exists, fd_get_type, fd_get_status_flags, fd_get_backend_handle}
+use os.kernel.fd_table.{fd_is_valid, fd_alloc, fd_set, fd_close, fd_dup, fd_dup2, fd_get_offset, fd_set_offset, fd_activate_task, fd_current_task, fd_release_task, fd_task_context_exists, fd_get_type, fd_get_status_flags, fd_get_backend_handle, fd_get_refcount}
 use os.kernel.async_io_rw.{sync_read, sync_write}
 use os.kernel.pipe_compat.{pipe_read, pipe_write, pipe_close_read, pipe_close_write}
 use os.kernel.socket_compat.{posix_close_socket}
 use os.userlib.syscall_raw.{syscall}
-# Well-known VFS service IPC port
-val _VFS_PORT: u64 = 1
+val _VFS_SERVICE_NAME: text = "vfs"
 val VFS_OPEN: u32 = 1
+val VFS_READ: u32 = 2
+val VFS_WRITE: u32 = 3
 val VFS_CLOSE: u32 = 4
+val VFS_SEEK: u32 = 11
 
 # Syscall numbers for IPC
 val _SYS_IPC_SEND: u64 = 20
 val _SYS_IPC_RECV: u64 = 21
+val _SYS_IPC_CREATE_PORT: u64 = 22
+val _SYS_IPC_CONNECT: u64 = 23
+val _SYS_IPC_DESTROY_PORT: u64 = 18
+val _VFS_IPC_REQUEST_FRAME_MAX: u64 = 4100
+val _VFS_IPC_BYTE_ARRAY_HEADER_BYTES: u64 = 16
+val _IPC_COPIED_SERVICE_TAG: u64 = 0xFFFFFFFFFFFFFFFFu64
 
 extern fn unsafe_addr_of(ref: any) -> u64
 
@@ -28,8 +38,11 @@ val FD_IO_ROUTE_SERIAL: u8 = 2
 val FD_IO_ROUTE_PIPE: u8 = 3
 val FD_IO_ROUTE_SOCKET: u8 = 4
 val POSIX_PREAD_EXACT_CHUNK_MAX: u64 = 4084
+val _VFS_READ_CHUNK_MAX: u64 = 4092
+val _VFS_WRITE_CHUNK_MAX: u64 = 4088
 val _FD_IO_O_ACCMODE: u32 = 3u32
 val _FD_IO_O_WRONLY: u32 = 1u32
+val _FD_IO_O_RDONLY: u32 = 0u32
 val _FD_IO_MAX_FDS: u64 = 256
 val _FD_IO_SEEK_SET: u32 = 0
 val _FD_IO_SEEK_CUR: u32 = 1
@@ -117,10 +130,81 @@ fn fd_io_close_route(fd_type: u8) -> u8:
         return FD_IO_ROUTE_SOCKET
     FD_IO_ROUTE_INVALID
 
+struct VfsIpcReply:
+    status: i32
+    payload: [u8]
+    transport_failed: bool
+
+fn _vfs_ipc_error(status: i32) -> VfsIpcReply:
+    """Return a failure for which no VFS close receipt was observed."""
+    VfsIpcReply(status: status, payload: [], transport_failed: true)
+
+# The last remote cleanup outcome is observable for callers such as dup2 that
+# must finish their POSIX local replacement even when target cleanup failed.
+var g_posix_vfs_cleanup_failure: i32 = 0
+
+fn posix_vfs_cleanup_failure() -> i32:
+    """Return the last observed VFS close cleanup failure, or zero."""
+    g_posix_vfs_cleanup_failure
+
+fn _record_posix_vfs_cleanup_failure(status: i32):
+    g_posix_vfs_cleanup_failure = status
+
+fn _vfs_destroy_reply_port(reply_port: i64):
+    syscall(_SYS_IPC_DESTROY_PORT, reply_port.to_u64(), 0, 0, 0, 0)
+
+fn _vfs_ipc_request(method: u32, payload: [u8]) -> VfsIpcReply:
+    """Issue one copied VFS request through a caller-owned reply port.
+
+    The anonymous source port makes the kernel interpret the first four bytes
+    as the request method.  VFS's named service port makes the response raw,
+    so the returned serialized IpcMessage carries status(i32)|payload bytes.
+    """
+    if payload.len().to_u64() > _VFS_IPC_REQUEST_FRAME_MAX - 4u64:
+        return _vfs_ipc_error(-5)
+    val reply_port = syscall(_SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
+    if reply_port < 0:
+        return _vfs_ipc_error(-5)
+    val service_port = syscall(_SYS_IPC_CONNECT, unsafe_addr_of(_VFS_SERVICE_NAME), _VFS_SERVICE_NAME.len(), 0, 0, 0)
+    if service_port < 0:
+        _vfs_destroy_reply_port(reply_port)
+        return _vfs_ipc_error(-5)
+
+    var request: [u8] = []
+    _push_u32(request, method)
+    var request_index: u64 = 0
+    while request_index < payload.len():
+        request.push(payload[request_index])
+        request_index = request_index + 1u64
+    val request_bytes = unsafe_addr_of(request) + _VFS_IPC_BYTE_ARRAY_HEADER_BYTES
+    val send_result = syscall(_SYS_IPC_SEND, service_port.to_u64(), reply_port.to_u64(), request_bytes, request.len(), _IPC_COPIED_SERVICE_TAG)
+    if send_result < 0:
+        _vfs_destroy_reply_port(reply_port)
+        return _vfs_ipc_error(-5)
+
+    val message_raw = syscall(_SYS_IPC_RECV, reply_port.to_u64(), 0xFFFFFFFFFFFFFFFFu64, 0, 0, 0)
+    if message_raw <= 0:
+        _vfs_destroy_reply_port(reply_port)
+        return _vfs_ipc_error(-5)
+    val message_addr = message_raw.to_u64()
+    val payload_len = _read_u32_at(message_addr + 24u64).to_u64()
+    if payload_len < 4u64 or payload_len > 4096u64:
+        _vfs_destroy_reply_port(reply_port)
+        return _vfs_ipc_error(-5)
+    val payload_addr = message_addr + 32u64
+    val status = _read_i32_at(payload_addr)
+    var response: [u8] = []
+    var response_index: u64 = 4u64
+    while response_index < payload_len:
+        response.push(_read_u8_at(payload_addr + response_index))
+        response_index = response_index + 1u64
+    _vfs_destroy_reply_port(reply_port)
+    VfsIpcReply(status: status, payload: response, transport_failed: false)
+
 fn posix_open(path: text, flags: u32, mode: u32) -> i32:
     """Open a file via VFS IPC service. Returns FD on success, -errno on error.
 
-    Sends an IPC message to the VFS service (port 1) with VFS_OPEN method.
+    Sends a copied IPC request to the named VFS service with VFS_OPEN method.
     The VFS service returns a handle which we map to a local FD.
     """
     # Allocate a local FD
@@ -128,45 +212,29 @@ fn posix_open(path: text, flags: u32, mode: u32) -> i32:
     if fd < 0:
         return fd  # -EMFILE
 
-    # Build IPC payload: method(u32) | flags(u32) | mode(u32) | path(bytes)
+    # VFS OPEN payload: path(bytes) | NUL | flags(u32).  The request method is
+    # the copied-frame prefix added by _vfs_ipc_request, not legacy arg1.
     var payload: [u8] = []
-    _push_u32(payload, VFS_OPEN)
-    _push_u32(payload, flags)
-    _push_u32(payload, mode)
     var pi: u64 = 0
     while pi < path.len():
         payload.push(path.byte_at(pi))
         pi = pi + 1
+    payload.push(0u8)
+    _push_u32(payload, flags)
 
-    # Send IPC to VFS service
-    val payload_ptr = unsafe_addr_of(payload)
-    val payload_len = payload.len()
-    val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_OPEN as u64, 0, payload_ptr, payload_len)
-    if send_result < 0:
+    val reply = _vfs_ipc_request(VFS_OPEN, payload)
+    if reply.status < 0:
+        return reply.status
+    if reply.payload.len() != 8u64:
         return -5
-
-    # Receive reply from VFS
-    var reply_buf: [u8; 64] = [0; 64]
-    val reply_ptr = unsafe_addr_of(reply_buf)
-    val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 64, 0, 0)
-    if recv_result < 0:
-        return -5
-
-    # Parse reply: status(i32) | vfs_handle(u64)
-    val status = _read_i32(reply_buf, 0)
-    if status < 0:
-        return status  # VFS returned an error
-
-    val vfs_handle = _read_u64(reply_buf, 4)
+    val vfs_handle = _read_u64(reply.payload, 0)
 
     # Set up the FD entry
     val set_result = fd_set(fd, 1, flags, vfs_handle)
     if set_result < 0:
         var close_payload: [u8] = []
-        _push_u32(close_payload, VFS_CLOSE)
         _push_u64(close_payload, vfs_handle)
-        val close_payload_ptr = unsafe_addr_of(close_payload)
-        syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_CLOSE as u64, 0, close_payload_ptr, close_payload.len())
+        _vfs_ipc_request(VFS_CLOSE, close_payload)
         return set_result
     fd
 
@@ -197,11 +265,76 @@ fn posix_read(fd: i32, buf: u64, count: u64) -> i64:
     if route != FD_IO_ROUTE_FILE:
         return -9
 
-    # File reads are owned by async_io; POSIX blocks on its completion.
-    sync_read(fd, buf, count)
+    if _fd_io_is_write_only(fd_get_status_flags(fd)):
+        return -9
+    if count == 0:
+        return 0
+
+    # VFS READ is handle(u64)|size(u64) and returns raw data after status.
+    # Copy each bounded reply directly to the caller's raw buffer and advance
+    # the shared offset by the actual reply byte count only.
+    val vfs_handle = fd_get_backend_handle(fd)
+    var total: u64 = 0
+    while total < count:
+        var chunk_len = count - total
+        if chunk_len > _VFS_READ_CHUNK_MAX:
+            chunk_len = _VFS_READ_CHUNK_MAX
+        var payload: [u8] = []
+        _push_u64(payload, vfs_handle)
+        _push_u64(payload, chunk_len)
+        val reply = _vfs_ipc_request(VFS_READ, payload)
+        if reply.status < 0:
+            if total > 0:
+                return total as i64
+            return reply.status as i64
+        val actual = reply.payload.len().to_u64()
+        if actual > chunk_len:
+            if total > 0:
+                return total as i64
+            return -5
+        var i: u64 = 0
+        while i < actual:
+            mmio_write8(buf + total + i, reply.payload[i])
+            i = i + 1
+        fd_set_offset(fd, fd_get_offset(fd) + actual)
+        total = total + actual
+        if actual < chunk_len:
+            return total as i64
+    total as i64
 
 fn _fd_io_is_write_only(flags: u32) -> bool:
     (flags & _FD_IO_O_ACCMODE) == _FD_IO_O_WRONLY
+
+fn _fd_io_is_read_only(flags: u32) -> bool:
+    (flags & _FD_IO_O_ACCMODE) == _FD_IO_O_RDONLY
+
+fn _vfs_seek_file(handle: u64, offset: i64, whence: u32) -> VfsIpcReply:
+    """Seek an opened VFS handle using its copied handle-based frame."""
+    var payload: [u8] = []
+    _push_u64(payload, handle)
+    _push_u64(payload, offset as u64)
+    payload.push(whence as u8)
+    _vfs_ipc_request(VFS_SEEK, payload)
+
+fn _vfs_seek_fd_and_set_offset(fd: i32, offset: u64) -> i64:
+    """Set both VFS's handle cursor and the shared local descriptor offset."""
+    val reply = _vfs_seek_file(fd_get_backend_handle(fd), offset as i64, _FD_IO_SEEK_SET)
+    if reply.status < 0:
+        return reply.status as i64
+    if reply.payload.len() != 8u64:
+        return -5
+    fd_set_offset(fd, _read_u64(reply.payload, 0))
+    0
+
+fn _posix_pread_exact_after_restore(fd: i32, original_offset: u64, result: PosixPreadExactBytes) -> PosixPreadExactBytes:
+    """Restore the remote and local cursors before returning a pread result."""
+    val restore_result = _vfs_seek_fd_and_set_offset(fd, original_offset)
+    # Keep the local open-file-description semantics stable even if an
+    # interrupted remote restoration reports an error to the caller.
+    fd_set_offset(fd, original_offset)
+    if restore_result < 0:
+        return _posix_pread_exact_error(restore_result)
+    result
 
 fn _posix_pread_exact_error(status: i64) -> PosixPreadExactBytes:
     PosixPreadExactBytes(status: status, len: 0, data: [])
@@ -224,11 +357,15 @@ fn posix_pread_exact_bytes(fd: i32, offset: u64, len: u64) -> PosixPreadExactByt
     if synthetic != nil:
         return synthetic.unwrap()
 
-    val original_offset = fd_get_offset(fd)
-    fd_set_offset(fd, offset)
     if len == 0:
-        fd_set_offset(fd, original_offset)
         return PosixPreadExactBytes(status: 0, len: 0, data: [])
+    val original_offset = fd_get_offset(fd)
+    val seek_result = _vfs_seek_fd_and_set_offset(fd, offset)
+    if seek_result < 0:
+        # A failed seek may still have reached the remote VFS after the local
+        # transaction lost its reply.  Attempt the same explicit SET restore
+        # used by every later pread terminal path before reporting the error.
+        return _posix_pread_exact_after_restore(fd, original_offset, _posix_pread_exact_error(seek_result))
 
     var data: [u8] = []
     var total: u64 = 0
@@ -243,22 +380,20 @@ fn posix_pread_exact_bytes(fd: i32, offset: u64, len: u64) -> PosixPreadExactByt
             chunk.push(0u8)
             zi = zi + 1
 
-        val chunk_addr = unsafe_addr_of(chunk)
+        # A Simple byte array starts with its 16-byte runtime header; the VFS
+        # read must write into the first data byte, not that header.
+        val chunk_addr = unsafe_addr_of(chunk) + _VFS_IPC_BYTE_ARRAY_HEADER_BYTES
         val read_result = posix_read(fd, buf: chunk_addr, count: chunk_len)
         if read_result < 0:
-            fd_set_offset(fd, original_offset)
-            return _posix_pread_exact_error(read_result)
+            return _posix_pread_exact_after_restore(fd, original_offset, _posix_pread_exact_error(read_result))
         if read_result == 0:
-            fd_set_offset(fd, original_offset)
-            return _posix_pread_exact_error(-5)
+            return _posix_pread_exact_after_restore(fd, original_offset, _posix_pread_exact_error(-5))
 
         val bytes_read = read_result as u64
         if bytes_read > chunk_len:
-            fd_set_offset(fd, original_offset)
-            return _posix_pread_exact_error(-5)
+            return _posix_pread_exact_after_restore(fd, original_offset, _posix_pread_exact_error(-5))
         if bytes_read < chunk_len:
-            fd_set_offset(fd, original_offset)
-            return _posix_pread_exact_error(-5)
+            return _posix_pread_exact_after_restore(fd, original_offset, _posix_pread_exact_error(-5))
 
         var ci: u64 = 0
         while ci < bytes_read:
@@ -266,8 +401,7 @@ fn posix_pread_exact_bytes(fd: i32, offset: u64, len: u64) -> PosixPreadExactByt
             ci = ci + 1
         total = total + bytes_read
 
-    fd_set_offset(fd, original_offset)
-    PosixPreadExactBytes(status: total as i64, len: total, data: data)
+    _posix_pread_exact_after_restore(fd, original_offset, PosixPreadExactBytes(status: total as i64, len: total, data: data))
 
 fn posix_write(fd: i32, buf: u64, count: u64) -> i64:
     """Write to a file descriptor. Returns bytes written or -errno.
@@ -296,8 +430,44 @@ fn posix_write(fd: i32, buf: u64, count: u64) -> i64:
     if route != FD_IO_ROUTE_FILE:
         return -9
 
-    # File writes are owned by async_io; POSIX blocks on its completion.
-    sync_write(fd, buf, count)
+    if _fd_io_is_read_only(fd_get_status_flags(fd)):
+        return -9
+    if count == 0:
+        return 0
+
+    # VFS WRITE is handle(u64)|raw bytes and replies with a u64 byte count.
+    # Request data is copied from the caller's raw buffer in bounded frames.
+    val vfs_handle = fd_get_backend_handle(fd)
+    var total: u64 = 0
+    while total < count:
+        var chunk_len = count - total
+        if chunk_len > _VFS_WRITE_CHUNK_MAX:
+            chunk_len = _VFS_WRITE_CHUNK_MAX
+        var payload: [u8] = []
+        _push_u64(payload, vfs_handle)
+        var i: u64 = 0
+        while i < chunk_len:
+            payload.push(mmio_read8(buf + total + i))
+            i = i + 1
+        val reply = _vfs_ipc_request(VFS_WRITE, payload)
+        if reply.status < 0:
+            if total > 0:
+                return total as i64
+            return reply.status as i64
+        if reply.payload.len() != 8u64:
+            if total > 0:
+                return total as i64
+            return -5
+        val actual = _read_u64(reply.payload, 0)
+        if actual > chunk_len:
+            if total > 0:
+                return total as i64
+            return -5
+        fd_set_offset(fd, fd_get_offset(fd) + actual)
+        total = total + actual
+        if actual < chunk_len:
+            return total as i64
+    total as i64
 
 fn posix_close(fd: i32) -> i32:
     """Close a file descriptor.
@@ -307,6 +477,7 @@ fn posix_close(fd: i32) -> i32:
     """
     if not fd_is_valid(fd):
         return -9
+    _record_posix_vfs_cleanup_failure(0)
     val idx: u64 = fd as u64
     val fd_type = fd_get_type(fd)
     val route = fd_io_close_route(fd_type)
@@ -318,15 +489,35 @@ fn posix_close(fd: i32) -> i32:
     if route == FD_IO_ROUTE_SOCKET:
         return posix_close_socket(fd) as i32
 
-    # Send VFS_CLOSE for file FDs
+    # A duplicate shares one VFS open-file description. Only the final local
+    # alias may release that remote handle.
     if route == FD_IO_ROUTE_FILE:
+        if fd_get_refcount(fd) > 1u32:
+            return fd_close(fd)
         val vfs_handle = fd_get_backend_handle(fd)
         var payload: [u8] = []
-        _push_u32(payload, VFS_CLOSE)
         _push_u64(payload, vfs_handle)
-        val payload_ptr = unsafe_addr_of(payload)
-        syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_CLOSE as u64, 0, payload_ptr, payload.len())
-        # Best-effort close: ignore IPC errors
+        val close_reply = _vfs_ipc_request(VFS_CLOSE, payload)
+        # No reply means the service may not have processed CLOSE.  Preserve
+        # the final local reference so the exact handle remains retryable.
+        if close_reply.transport_failed:
+            _record_posix_vfs_cleanup_failure(close_reply.status)
+            return close_reply.status
+        # A received VFS reply is a terminal driver outcome.  VfsManager
+        # retires the handle for both driver success and error, so retire the
+        # final local alias and surface that confirmed outcome to the caller.
+        if close_reply.status < 0:
+            fd_close(fd)
+            _record_posix_vfs_cleanup_failure(close_reply.status)
+            return close_reply.status
+        if close_reply.payload.len() != 8u64:
+            fd_close(fd)
+            _record_posix_vfs_cleanup_failure(-5)
+            return -5
+        if _read_u64(close_reply.payload, 0) != 1u64:
+            fd_close(fd)
+            _record_posix_vfs_cleanup_failure(-5)
+            return -5
 
     fd_close(fd)
 
@@ -336,8 +527,8 @@ fn posix_close_all_fds_with_backends() -> u32:
     var i: u64 = 0
     while i < _FD_IO_MAX_FDS:
         if fd_is_valid(i as i32):
-            posix_close(i as i32)
-            closed = closed + 1u32
+            if posix_close(i as i32) == 0:
+                closed = closed + 1u32
         i = i + 1
     closed
 
@@ -348,7 +539,16 @@ fn posix_close_task_fds_with_backends(owner: u64) -> u32:
     val previous_owner = fd_current_task()
     fd_activate_task(owner)
     val closed = posix_close_all_fds_with_backends()
-    fd_release_task(owner)
+    # Do not discard a task context that still owns a VFS handle after a
+    # terminal close failure; keeping it active makes the failure retryable.
+    var has_live_fd = false
+    var i: u64 = 0
+    while i < _FD_IO_MAX_FDS:
+        if fd_is_valid(i as i32):
+            has_live_fd = true
+        i = i + 1
+    if not has_live_fd:
+        fd_release_task(owner)
     if previous_owner != owner:
         fd_activate_task(previous_owner)
     closed
@@ -358,32 +558,22 @@ fn posix_lseek(fd: i32, offset: i64, whence: u32) -> i64:
     if not fd_is_valid(fd):
         return -9
     val idx: u64 = fd as u64
+    if whence != _FD_IO_SEEK_SET and whence != _FD_IO_SEEK_CUR and whence != _FD_IO_SEEK_END:
+        return -22
+    if fd_io_read_route(fd_get_type(fd)) == FD_IO_ROUTE_FILE:
+        # VFS owns every file cursor. SET/CUR must cross the same boundary as
+        # END so later READ/WRITE and pread restoration stay coherent.
+        val reply = _vfs_seek_file(fd_get_backend_handle(fd), offset, whence)
+        if reply.status < 0:
+            return reply.status as i64
+        if reply.payload.len() != 8u64:
+            return -5
+        fd_set_offset(fd, _read_u64(reply.payload, 0))
+        return fd_get_offset(fd) as i64
     if whence == _FD_IO_SEEK_SET:
         fd_set_offset(fd, offset as u64)
     elif whence == _FD_IO_SEEK_CUR:
         fd_set_offset(fd, (fd_get_offset(fd) as i64 + offset) as u64)
-    elif whence == _FD_IO_SEEK_END:
-        # Query VFS for file size
-        val vfs_handle = fd_get_backend_handle(fd)
-        var payload: [u8] = []
-        _push_u32(payload, 5)  # VFS_STAT
-        _push_u64(payload, vfs_handle)
-        val payload_ptr = unsafe_addr_of(payload)
-        val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, 5, 0, payload_ptr, payload.len())
-        if send_result < 0:
-            return -5
-        var reply_buf: [u8; 16] = [0; 16]
-        val reply_ptr = unsafe_addr_of(reply_buf)
-        val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 16, 0, 0)
-        if recv_result < 0:
-            return -5
-        val status = _read_i32(reply_buf, 0)
-        if status < 0:
-            return status as i64
-        val file_size = _read_u64(reply_buf, 4)
-        fd_set_offset(fd, (file_size as i64 + offset) as u64)
-    else:
-        return -22
     fd_get_offset(fd) as i64
 
 fn posix_dup(fd: i32) -> i32:
@@ -399,9 +589,17 @@ fn posix_dup2(old_fd: i32, new_fd: i32) -> i32:
     if old_fd == new_fd:
         return new_fd
     if fd_is_valid(new_fd):
-        # POSIX dup2 ignores close errors, but backend side effects such as
-        # pipe HUP/EOF and VFS handle release must still run.
+        # POSIX requires local replacement even when target cleanup fails.
+        # Preserve that cleanup outcome for inspection, but do not let it
+        # prevent new_fd from becoming an alias of old_fd.
         posix_close(new_fd)
+        val duplicated = fd_dup2(old_fd, new_fd)
+        if duplicated < 0:
+            return duplicated
+        # `posix_close` recorded any target-cleanup failure.  dup2 itself
+        # reports its mandated local replacement result, so callers can use
+        # the receipt accessor without losing POSIX target replacement.
+        return duplicated
     fd_dup2(old_fd, new_fd)
 
 # ============================================================================
@@ -433,3 +631,16 @@ fn _read_u64(buf: [u8], offset: u64) -> u64:
     val lo = _read_i32(buf, offset) as u64 & 0xFFFFFFFF
     val hi = _read_i32(buf, offset + 4) as u64 & 0xFFFFFFFF
     lo | (hi << 32)
+
+extern fn mmio_read8(addr: u64) -> u8
+extern fn mmio_write8(addr: u64, val_: u8)
+extern fn mmio_read32(addr: u64) -> u32
+
+fn _read_u8_at(addr: u64) -> u8:
+    mmio_read8(addr)
+
+fn _read_u32_at(addr: u64) -> u32:
+    mmio_read32(addr)
+
+fn _read_i32_at(addr: u64) -> i32:
+    _read_u32_at(addr).to_i32()

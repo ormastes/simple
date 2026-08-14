@@ -14,8 +14,16 @@ esac
 [ -x "$candidate" ] || { echo "error=candidate_not_executable:$candidate" >&2; exit 2; }
 [ -n "${SIMPLE_ADMITTED_COMPILER_SHA256:-}" ] || { echo "error=SIMPLE_ADMITTED_COMPILER_SHA256_required" >&2; exit 2; }
 [ -n "${SIMPLE_ADMITTED_RUNTIME_PATH:-}" ] || { echo "error=SIMPLE_ADMITTED_RUNTIME_PATH_required" >&2; exit 2; }
+[ -n "${SIMPLE_ADMITTED_RUNTIME_RECEIPT:-}" ] || { echo "error=SIMPLE_ADMITTED_RUNTIME_RECEIPT_required" >&2; exit 2; }
+[ -n "${SIMPLE_ADMITTED_RUNTIME_RECEIPT_SHA256:-}" ] || { echo "error=SIMPLE_ADMITTED_RUNTIME_RECEIPT_SHA256_required" >&2; exit 2; }
 runtime_path=$SIMPLE_ADMITTED_RUNTIME_PATH
 [ -d "$runtime_path" ] || { echo "error=admitted_runtime_path_missing:$runtime_path" >&2; exit 2; }
+runtime_receipt=$SIMPLE_ADMITTED_RUNTIME_RECEIPT
+case "$runtime_receipt" in
+    /*) ;;
+    *) echo "error=runtime_receipt_path_must_be_absolute" >&2; exit 2 ;;
+esac
+[ -f "$runtime_receipt" ] || { echo "error=admitted_runtime_receipt_missing:$runtime_receipt" >&2; exit 2; }
 
 digest_file() {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -30,6 +38,25 @@ digest_file() {
 
 candidate_hash_before=$(digest_file "$candidate")
 [ "$candidate_hash_before" = "$SIMPLE_ADMITTED_COMPILER_SHA256" ] || { echo "error=admitted_candidate_hash_mismatch" >&2; exit 2; }
+runtime_receipt_hash=$(digest_file "$runtime_receipt")
+[ "$runtime_receipt_hash" = "$SIMPLE_ADMITTED_RUNTIME_RECEIPT_SHA256" ] || { echo "error=admitted_runtime_receipt_hash_mismatch" >&2; exit 2; }
+verify_runtime_receipt_file() {
+    relative_path=$1
+    path_hex=$2
+    executable_flag=$3
+    runtime_file="$runtime_path/$relative_path"
+    [ -f "$runtime_file" ] || { echo "error=admitted_runtime_file_missing:$runtime_file" >&2; return 2; }
+    runtime_file_hash=$(digest_file "$runtime_file")
+    grep -Fxq "file-hex:$path_hex:$executable_flag:$runtime_file_hash" "$runtime_receipt" || {
+        echo "error=runtime_file_not_bound_by_receipt:$relative_path" >&2
+        return 2
+    }
+}
+verify_runtime_receipt_file 'deps/libsimple_runtime.a' '646570732f6c696273696d706c655f72756e74696d652e61' 0
+verify_runtime_receipt_file 'libsimple_compiler_backfill.a' '6c696273696d706c655f636f6d70696c65725f6261636b66696c6c2e61' 0
+verify_runtime_receipt_file 'libsimple_native_all.a' '6c696273696d706c655f6e61746976655f616c6c2e61' 0
+verify_runtime_receipt_file 'simple.inputs.sha256' '73696d706c652e696e707574732e736861323536' 0
+verify_runtime_receipt_file 'simple' '73696d706c65' 1
 set +e
 candidate_identity=$(timeout -k 5s 30s env SIMPLE_BOOTSTRAP= SIMPLE_RUST_SEED_WARNING= "$candidate" --version 2>&1)
 identity_rc=$?
@@ -42,56 +69,154 @@ esac
 hash_prefix=$(printf '%s' "$candidate_hash_before" | cut -c1-16)
 checker_hash=$(digest_file "$0")
 checker_prefix=$(printf '%s' "$checker_hash" | cut -c1-16)
-artifact_dir="$repo_root/build/bootstrap/probes/stage3-aggregate-receiver/$hash_prefix-$checker_prefix"
-[ ! -e "$artifact_dir/result.env" ] || { echo "error=unchanged_candidate_already_probed:$artifact_dir" >&2; exit 2; }
+scalar_fixture="$repo_root/test/02_integration/compiler/stage3_compile_context_scalar_control_native_main.spl"
+exact_fixture="$repo_root/test/02_integration/compiler/stage3_aggregate_receiver_native_main.spl"
+adjacent_fixture="$repo_root/test/02_integration/compiler/stage3_aggregate_push_control_native_main.spl"
+baseline_fixture="$repo_root/test/02_integration/compiler/stage3_plain_scalar_native_baseline_main.spl"
+struct_fixture="$repo_root/test/02_integration/compiler/stage3_plain_struct_native_control_main.spl"
+scalar_fixture_hash=$(digest_file "$scalar_fixture")
+exact_fixture_hash=$(digest_file "$exact_fixture")
+adjacent_fixture_hash=$(digest_file "$adjacent_fixture")
+baseline_fixture_hash=$(digest_file "$baseline_fixture")
+struct_fixture_hash=$(digest_file "$struct_fixture")
+scalar_prefix=$(printf '%s' "$scalar_fixture_hash" | cut -c1-8)
+exact_prefix=$(printf '%s' "$exact_fixture_hash" | cut -c1-8)
+adjacent_prefix=$(printf '%s' "$adjacent_fixture_hash" | cut -c1-8)
+baseline_prefix=$(printf '%s' "$baseline_fixture_hash" | cut -c1-8)
+struct_prefix=$(printf '%s' "$struct_fixture_hash" | cut -c1-8)
+fixture_identity="$baseline_prefix-$struct_prefix-$scalar_prefix-$exact_prefix-$adjacent_prefix"
+runtime_receipt_prefix=$(printf '%s' "$runtime_receipt_hash" | cut -c1-8)
+artifact_dir="$repo_root/build/bootstrap/probes/stage3-aggregate-receiver/$hash_prefix-$checker_prefix-$runtime_receipt_prefix-$fixture_identity"
+[ ! -e "$artifact_dir/result.env" ] || { echo "error=unchanged_candidate_checker_fixtures_already_probed:$artifact_dir" >&2; exit 2; }
 mkdir -p "$artifact_dir"
-fixture="$repo_root/test/02_integration/compiler/stage3_aggregate_receiver_native_main.spl"
-output="$artifact_dir/stage3_aggregate_receiver_native"
 {
     echo "candidate_path=$candidate"
     echo "candidate_sha256=$candidate_hash_before"
     echo "candidate_identity=$candidate_identity"
     echo "runtime_path=$runtime_path"
+    echo "runtime_receipt=$runtime_receipt"
+    echo "runtime_receipt_sha256=$runtime_receipt_hash"
     echo "checker_sha256=$checker_hash"
-    echo "fixture=$fixture"
-    echo "output=$output"
+    echo "baseline_fixture=$baseline_fixture"
+    echo "baseline_fixture_sha256=$baseline_fixture_hash"
+    echo "struct_fixture=$struct_fixture"
+    echo "struct_fixture_sha256=$struct_fixture_hash"
+    echo "scalar_fixture=$scalar_fixture"
+    echo "scalar_fixture_sha256=$scalar_fixture_hash"
+    echo "exact_fixture=$exact_fixture"
+    echo "exact_fixture_sha256=$exact_fixture_hash"
+    echo "adjacent_fixture=$adjacent_fixture"
+    echo "adjacent_fixture_sha256=$adjacent_fixture_hash"
 } >"$artifact_dir/candidate.env"
 
-set +e
-timeout -k 10s 300s env SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$runtime_path" SIMPLE_LIB="$repo_root/src" \
-    SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_NATIVE_ARENA_DECLS=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_FRONTEND_DELEGATED=1 \
-    "$candidate" native-build --target x86_64-unknown-linux-gnu --backend cranelift --runtime-bundle core-c-bootstrap \
-    --runtime-path "$runtime_path" --mode dynload --threads 1 --entry-closure --output "$output" "$fixture" \
-    >"$artifact_dir/build.stdout.log" 2>"$artifact_dir/build.stderr.log"
-build_rc=$?
-set -e
-run_rc=125
-if [ "$build_rc" -eq 0 ] && [ -x "$output" ]; then
+run_probe() {
+    probe_name=$1
+    fixture=$2
+    expected_line=$3
+    output="$artifact_dir/$probe_name"
     set +e
-    timeout -k 5s 30s "$output" >"$artifact_dir/run.stdout.log" 2>"$artifact_dir/run.stderr.log"
-    run_rc=$?
+    timeout -k 10s 300s env SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$runtime_path" SIMPLE_LIB="$repo_root/src" \
+        SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap SIMPLE_NATIVE_ARENA_DECLS=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_FRONTEND_DELEGATED=1 \
+        "$candidate" native-build --target x86_64-unknown-linux-gnu --backend cranelift --runtime-bundle core-c-bootstrap \
+        --runtime-path "$runtime_path" --mode dynload --threads 1 --entry-closure --output "$output" "$fixture" \
+        >"$artifact_dir/$probe_name.build.stdout.log" 2>"$artifact_dir/$probe_name.build.stderr.log"
+    build_rc=$?
     set -e
+    run_rc=125
+    if [ "$build_rc" -eq 0 ] && [ -x "$output" ]; then
+        set +e
+        timeout -k 5s 30s "$output" >"$artifact_dir/$probe_name.run.stdout.log" 2>"$artifact_dir/$probe_name.run.stderr.log"
+        run_rc=$?
+        set -e
+    else
+        : >"$artifact_dir/$probe_name.run.stdout.log"
+        : >"$artifact_dir/$probe_name.run.stderr.log"
+    fi
+    output_hash=""
+    [ ! -f "$output" ] || output_hash=$(digest_file "$output")
+    probe_status=FAIL
+    probe_failure_kind=none
+    if [ "$build_rc" -eq 0 ] && [ "$run_rc" -eq 0 ] && grep -Fxq "$expected_line" "$artifact_dir/$probe_name.run.stdout.log"; then
+        probe_status=PASS
+    elif [ "$build_rc" -eq 139 ]; then
+        probe_failure_kind=build_sigsegv
+    elif [ "$build_rc" -ne 0 ]; then
+        probe_failure_kind=build_failed
+    elif [ ! -x "$output" ]; then
+        probe_failure_kind=build_missing_executable
+    elif [ "$run_rc" -gt 128 ]; then
+        probe_failure_kind=runtime_signal
+    elif [ "$run_rc" -ne 0 ]; then
+        probe_failure_kind=runtime_failed
+    else
+        probe_failure_kind=output_contract_failed
+    fi
+    {
+        echo "${probe_name}_status=$probe_status"
+        echo "${probe_name}_build_rc=$build_rc"
+        echo "${probe_name}_run_rc=$run_rc"
+        echo "${probe_name}_failure_kind=$probe_failure_kind"
+        echo "${probe_name}_output_sha256=$output_hash"
+    } >"$artifact_dir/$probe_name.result.env"
+}
+
+# Ordering is diagnostic: a plain scalar baseline, a struct-without-push
+# control, then the pre-existing compiler closure/add_error and aggregate
+# probes. Each receipt remains useful even when an earlier probe faults.
+run_probe plain_scalar_baseline "$baseline_fixture" 'stage3_plain_scalar_native_baseline=true'
+run_probe plain_struct_control "$struct_fixture" 'stage3_plain_struct_native_control=true'
+run_probe scalar_control "$scalar_fixture" 'stage3_compile_context_scalar_control=true'
+run_probe exact_receiver "$exact_fixture" 'stage3_aggregate_receiver_exact=true'
+run_probe adjacent_push "$adjacent_fixture" 'stage3_aggregate_receiver_adjacent=true'
+
+. "$artifact_dir/plain_scalar_baseline.result.env"
+. "$artifact_dir/plain_struct_control.result.env"
+. "$artifact_dir/scalar_control.result.env"
+. "$artifact_dir/exact_receiver.result.env"
+. "$artifact_dir/adjacent_push.result.env"
+
+outcome="${plain_scalar_baseline_status}-${plain_struct_control_status}-${scalar_control_status}-${exact_receiver_status}-${adjacent_push_status}"
+if [ "$plain_scalar_baseline_status" != PASS ]; then
+    localization=general_native_build_candidate
+elif [ "$plain_struct_control_status" != PASS ]; then
+    localization=aggregate_without_push_candidate
 else
-    : >"$artifact_dir/run.stdout.log"
-    : >"$artifact_dir/run.stderr.log"
+    case "${scalar_control_status}-${exact_receiver_status}-${adjacent_push_status}" in
+        PASS-PASS-PASS) localization=all_probes_pass ;;
+        PASS-FAIL-PASS) localization=error_count_receiver_candidate ;;
+        FAIL-FAIL-PASS) localization=compile_context_closure_or_add_error_candidate ;;
+        PASS-PASS-FAIL) localization=aggregate_push_candidate ;;
+        FAIL-PASS-PASS) localization=scalar_control_only_failure ;;
+        PASS-FAIL-FAIL) localization=error_count_and_aggregate_push_failures ;;
+        FAIL-PASS-FAIL) localization=scalar_control_and_aggregate_push_failures ;;
+        FAIL-FAIL-FAIL) localization=shared_or_multiple_failures ;;
+        *) localization=invalid_probe_outcome ;;
+    esac
 fi
 
 candidate_hash_after=$(digest_file "$candidate")
-output_hash=""
-[ ! -f "$output" ] || output_hash=$(digest_file "$output")
 status=FAIL
-if [ "$build_rc" -eq 0 ] && [ "$run_rc" -eq 0 ] && [ "$candidate_hash_before" = "$candidate_hash_after" ] && \
-        grep -Fxq 'stage3_aggregate_receiver_exact=true' "$artifact_dir/run.stdout.log" && \
-        grep -Fxq 'stage3_aggregate_receiver_adjacent=true' "$artifact_dir/run.stdout.log"; then
+if [ "$plain_scalar_baseline_status" = PASS ] && [ "$plain_struct_control_status" = PASS ] && \
+        [ "$scalar_control_status" = PASS ] && [ "$exact_receiver_status" = PASS ] && \
+        [ "$adjacent_push_status" = PASS ] && [ "$candidate_hash_before" = "$candidate_hash_after" ]; then
     status=PASS
 fi
 {
     echo "stage3_aggregate_receiver_status=$status"
-    echo "build_rc=$build_rc"
-    echo "run_rc=$run_rc"
+    echo "localization=$localization"
+    echo "probe_outcome=$outcome"
+    echo "plain_scalar_baseline_status=$plain_scalar_baseline_status"
+    echo "plain_scalar_baseline_failure_kind=$plain_scalar_baseline_failure_kind"
+    echo "plain_struct_control_status=$plain_struct_control_status"
+    echo "plain_struct_control_failure_kind=$plain_struct_control_failure_kind"
+    echo "scalar_control_status=$scalar_control_status"
+    echo "scalar_control_failure_kind=$scalar_control_failure_kind"
+    echo "exact_receiver_status=$exact_receiver_status"
+    echo "exact_receiver_failure_kind=$exact_receiver_failure_kind"
+    echo "adjacent_push_status=$adjacent_push_status"
+    echo "adjacent_push_failure_kind=$adjacent_push_failure_kind"
     echo "candidate_sha256_before=$candidate_hash_before"
     echo "candidate_sha256_after=$candidate_hash_after"
-    echo "output_sha256=$output_hash"
     echo "artifact_dir=$artifact_dir"
 } >"$artifact_dir/result.env"
 cat "$artifact_dir/result.env"

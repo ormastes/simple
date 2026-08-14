@@ -74,6 +74,9 @@ class VfsManager:
     next_fd: i32
     ai_cli_manifest: AiCliManifest?
     handles: VfsHandleTable
+    # Close replays use VfsHandleTable's monotonic issue range.  A handle is
+    # never reused, so an issued-but-no-longer-open handle is terminal without
+    # retaining one entry per prior close.
     # The container namespace this manager resolves lookups on behalf of.
     # `nil` == HOST context: every lookup behaves exactly as it did before
     # container enforcement existed. Never omit this field at construction —
@@ -207,7 +210,7 @@ impl VfsManager:
         var i: i32 = 0
         while i < self.mounts.len():
             val prefix = self.mounts[i].point.path
-            if path.starts_with(prefix) and prefix.len() > best_len:
+            if self.path_is_on_mount(path, prefix) and prefix.len() > best_len:
                 best = i
                 best_len = prefix.len()
             i = i + 1
@@ -223,10 +226,30 @@ impl VfsManager:
 
         for entry in self.mounts:
             val prefix = entry.point.path
-            if path.starts_with(prefix) and prefix.len() > best_len:
+            if self.path_is_on_mount(path, prefix) and prefix.len() > best_len:
                 best = entry
                 best_len = prefix.len()
         best
+
+    fn path_is_on_mount(path: text, mount_path: text) -> bool:
+        """True when `path` is the mount root or one of its descendants.
+
+        Prefix matching alone would make `/alpha` own `/alphabet`, then slice
+        the latter into a malformed driver-relative path.  A mount boundary is
+        a slash (except for the root mount and explicitly slash-terminated
+        legacy mount paths).
+        """
+        if mount_path == "/":
+            return path.starts_with("/")
+        if path == mount_path:
+            return true
+        if not path.starts_with(mount_path):
+            return false
+        if mount_path.ends_with("/"):
+            return true
+        if path.len() <= mount_path.len():
+            return false
+        path.slice(mount_path.len(), mount_path.len() + 1) == "/"
 
     fn strip_mount_prefix(path: text, mount_path: text) -> text:
         """Remove mount prefix from path to get fs-relative path."""
@@ -325,6 +348,20 @@ impl VfsManager:
             return entry.fs.rmdir(relative)
         Err("no filesystem mounted for path: {path}")
 
+    fn chmod(path: text, mode: u16) -> Result<bool, text>:
+        """Change file permissions on a writable mounted filesystem."""
+        val grant_result = self.enforce_lookup_grants("chmod", path)
+        if grant_result.is_err():
+            return Err(grant_result.unwrap_err())
+        val mount = self.resolve_mount(path)
+        if mount.?:
+            val entry = mount
+            if entry.point.read_only:
+                return Err("filesystem is read-only")
+            val relative = self.strip_mount_prefix(path, entry.point.path)
+            return entry.fs.chmod(relative, mode)
+        Err("no filesystem mounted for path: {path}")
+
     # === Write Operations ===
 
     fn _route(vfs_handle: u64) -> Result<i32, text>:
@@ -378,15 +415,20 @@ impl VfsManager:
         val new_grant = self.enforce_lookup_grants("rename", new_path)
         if new_grant.is_err():
             return Err(new_grant.unwrap_err())
-        val mount = self.resolve_mount(old_path)
-        if mount.?:
-            val entry = mount
-            if entry.point.read_only:
-                return Err("filesystem is read-only")
-            val rel_old = self.strip_mount_prefix(old_path, entry.point.path)
-            val rel_new = self.strip_mount_prefix(new_path, entry.point.path)
-            return entry.fs.rename(rel_old, rel_new)
-        Err("no filesystem mounted for path: {old_path}")
+        val old_mount_index = self.resolve_mount_index(old_path)
+        if old_mount_index == VFS_HANDLE_NO_MOUNT:
+            return Err("no filesystem mounted for path: {old_path}")
+        val new_mount_index = self.resolve_mount_index(new_path)
+        if new_mount_index == VFS_HANDLE_NO_MOUNT:
+            return Err("no filesystem mounted for path: {new_path}")
+        if old_mount_index != new_mount_index:
+            return Err("cross-mount rename is not supported")
+        val entry = self.mounts[old_mount_index]
+        if entry.point.read_only:
+            return Err("filesystem is read-only")
+        val rel_old = self.strip_mount_prefix(old_path, entry.point.path)
+        val rel_new = self.strip_mount_prefix(new_path, entry.point.path)
+        entry.fs.rename(rel_old, rel_new)
 
     me symlink(target: text, link_path: text) -> Result<bool, text>:
         """Create a symbolic link at link_path pointing to target."""
@@ -405,18 +447,40 @@ impl VfsManager:
             return entry.fs.symlink(target, rel_link)
         Err("no filesystem mounted for path: {link_path}")
 
-    me close(handle: u64) -> Result<bool, text>:
-        """Close an open file handle and retire it from the handle table."""
-        val routed = self._route(handle)
-        if routed.is_err():
-            return Err(routed.unwrap_err())
-        val mount = self.mounts[routed.unwrap()]
-        val result = mount.fs.close(self.handles.driver_handle_of(handle))
-        # Retire the description even on driver error: the VFS handle must not
-        # stay routable once close has been attempted.
+    fn _was_issued_handle(handle: u64) -> bool:
+        """True for a nonzero VFS handle issued by this never-reusing table.
+
+        This is a bounded close-receipt representation: `next_handle` is the
+        sole watermark instead of an unbounded retired-handle list.  Handles
+        released by a close or by a successful unmount are terminal; zero and
+        future values were never valid and must still fail closed.
+        """
+        handle != 0u64 and handle < self.handles.next_handle
+
+    me _retire_handle(handle: u64):
+        """Make one completed driver-close attempt permanently idempotent."""
         var table = self.handles
         table.release(handle)
         self.handles = table
+
+    me close(handle: u64) -> Result<bool, text>:
+        """Close one VFS handle with a stable terminal receipt.
+
+        A driver result, including an error, is a confirmed close attempt and
+        retires the VFS handle.  A retry after a lost reply therefore succeeds
+        without calling the driver again.  The monotonic issue watermark keeps
+        that receipt bounded while zero and future handles still fail.
+        """
+        val found = self.handles.lookup(handle)
+        if not found.found:
+            if self._was_issued_handle(handle):
+                return Ok(true)
+            return Err("unknown VFS handle: {handle}")
+        val mount = self.mounts[found.mount_index]
+        val result = mount.fs.close(found.driver_handle)
+        # Driver execution is the terminal boundary.  Retire before returning
+        # either outcome so an observed error cannot be replayed to a driver.
+        self._retire_handle(handle)
         result
 
     me read(handle: u64, size: u64) -> Result<[u8], text>:

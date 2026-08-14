@@ -1,35 +1,22 @@
 # Filesystem mount operations via raw syscalls and VFS IPC.
 
-use std.nogc_sync_mut.binary_io.{bytes_to_string}
 use os.userlib.syscall_raw
 use os.userlib.ipc_protocol(VFS_MOUNT_LIST)
+use os.userlib.fs.{vfs_ipc_request_bytes}
 
 extern fn unsafe_addr_of(ref: any) -> u64
 
-val _VFS_PORT: u64 = 1
-
 fn _vfs_mount_request(method: u32, payload: text) -> Result<text, text>:
-    val port_result = syscall(50, _VFS_PORT, 0, 0, 0, 0)
-    if port_result < 0:
-        return Err("failed to connect to VFS service")
-    val conn = port_result as u64
-
-    val msg = "{method}:{payload}"
-    val send_result = syscall(51, conn, unsafe_addr_of(msg), msg.len() as u64, 0, 0)
-    if send_result < 0:
-        return Err("VFS send failed with code {send_result}")
-
-    var response_buf: [u8] = [0; 4096]
-    val recv_result = syscall(52, conn, unsafe_addr_of(response_buf), 4096, 0, 0)
-    if recv_result < 0:
-        return Err("VFS recv failed with code {recv_result}")
-
-    syscall(53, conn, 0, 0, 0, 0)
-
-    val response = bytes_to_string(response_buf.slice(0, recv_result as u64))
-    if response.starts_with("ERR:"):
-        return Err(response.slice(4, response.len()))
-    Ok(response)
+    var bytes: [u8] = []
+    var index: u64 = 0u64
+    while index < payload.len():
+        bytes.push(payload.byte_at(index))
+        index = index + 1u64
+    val response = vfs_ipc_request_bytes(method, bytes)?
+    var text_value = ""
+    for byte in response:
+        text_value = text_value + byte.to_char()
+    Ok(text_value)
 
 fn mount(device: text, mount_path: text, fs_type: text) -> Result<bool, text>:
     val payload = "{device}\0{mount_path}\0{fs_type}"

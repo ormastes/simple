@@ -3,14 +3,12 @@
 use std.nogc_sync_mut.binary_io.{bytes_to_string}
 use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use os.userlib.syscall_raw
-use os.userlib.ipc_protocol(VFS_READ, VFS_WRITE, VFS_STAT, VFS_MKDIR, VFS_READDIR, VFS_REMOVE, VFS_RENAME, VFS_MOUNT_LIST)
+use os.userlib.ipc_protocol(VFS_OPEN, VFS_READ, VFS_WRITE, VFS_CLOSE, VFS_STAT, VFS_MKDIR, VFS_READDIR, VFS_REMOVE, VFS_RENAME, VFS_MOUNT_LIST, VFS_OPEN_O_RDONLY, VFS_OPEN_O_WRONLY, VFS_OPEN_O_CREAT, VFS_OPEN_O_TRUNC)
 use os.kernel.types.fs_types(DirEntry, FsNode, FsNodeKind)
 use os.kernel.types.ipc_types(IpcPort, IpcMessage)
 
 extern fn unsafe_addr_of(ref: any) -> u64
 
-# Well-known VFS service port
-val _VFS_PORT: u64 = 1
 val _DIRECT_FILE_MAX_BYTES: u64 = 1048576
 
 # Direct file-descriptor facade for filesystem-launched SimpleOS programs.
@@ -75,41 +73,182 @@ fn read_file_bytes_direct(path: text, max_len: u64) -> Result<[u8], text>:
             val _closed = file_close_direct(fd)
             result
 
-fn _vfs_request(method: u32, payload: text) -> Result<text, text>:
-    # Connect to VFS service port
-    val port_result = syscall(50, _VFS_PORT, 0, 0, 0, 0)
-    if port_result < 0:
+# VFS's named service endpoint and the copied IPC syscall ABI.
+val _VFS_SERVICE_NAME: text = "vfs"
+val _SYS_IPC_SEND: u64 = 20
+val _SYS_IPC_RECV: u64 = 21
+val _SYS_IPC_CREATE_PORT: u64 = 22
+val _SYS_IPC_CONNECT: u64 = 23
+val _SYS_IPC_DESTROY_PORT: u64 = 18
+val _VFS_IPC_REQUEST_FRAME_MAX: u64 = 4100u64
+val _VFS_IPC_REPLY_MAX: u64 = 4096u64
+val _VFS_IPC_BYTE_ARRAY_HEADER_BYTES: u64 = 16u64
+val _IPC_COPIED_SERVICE_TAG: u64 = 0xFFFFFFFFFFFFFFFFu64
+val _VFS_OPEN_READ: u32 = VFS_OPEN_O_RDONLY
+val _VFS_OPEN_WRITE_CREATE_TRUNCATE: u32 = VFS_OPEN_O_WRONLY | VFS_OPEN_O_CREAT | VFS_OPEN_O_TRUNC
+
+extern fn mmio_read8(addr: u64) -> u8
+extern fn mmio_read32(addr: u64) -> u32
+
+fn _vfs_read_u32_at(addr: u64) -> u32:
+    mmio_read32(addr)
+
+fn _vfs_read_i32_at(addr: u64) -> i32:
+    _vfs_read_u32_at(addr).to_i32()
+
+fn _vfs_destroy_reply_port(reply_port: i64):
+    # Frozen IpcDestroyPort consumer interface: syscall 18 takes the caller's
+    # port id and rejects missing or foreign ports in the kernel owner.
+    syscall(_SYS_IPC_DESTROY_PORT, reply_port.to_u64(), 0, 0, 0, 0)
+
+fn _vfs_push_u32(bytes: [u8], value: u32):
+    bytes.push((value & 0xFFu32).to_u8())
+    bytes.push(((value >> 8u32) & 0xFFu32).to_u8())
+    bytes.push(((value >> 16u32) & 0xFFu32).to_u8())
+    bytes.push(((value >> 24u32) & 0xFFu32).to_u8())
+
+fn _vfs_push_u64(bytes: [u8], value: u64):
+    _vfs_push_u32(bytes, (value & 0xFFFFFFFFu64).to_u32())
+    _vfs_push_u32(bytes, ((value >> 32u64) & 0xFFFFFFFFu64).to_u32())
+
+fn _vfs_read_u16(bytes: [u8], offset: u64) -> u16:
+    bytes[offset].to_u16() | (bytes[offset + 1u64].to_u16() << 8u16)
+
+fn _vfs_read_u64(bytes: [u8], offset: u64) -> u64:
+    var value: u64 = 0u64
+    var index: u64 = 0u64
+    while index < 8u64:
+        value = value | (bytes[offset + index].to_u64() << (index * 8u64))
+        index = index + 1u64
+    value
+
+fn _vfs_text_bytes(value: text) -> [u8]:
+    var bytes: [u8] = []
+    var index: u64 = 0u64
+    while index < value.len():
+        bytes.push(value.byte_at(index))
+        index = index + 1u64
+    bytes
+
+pub fn vfs_ipc_request_bytes(method: u32, payload: [u8]) -> Result<[u8], text>:
+    """Send one bounded method-prefixed VFS request and return raw reply bytes.
+
+    An anonymous reply port belongs to the calling task.  The named ``vfs``
+    source port then makes the server response a raw copied status frame.
+    """
+    if payload.len().to_u64() > _VFS_IPC_REQUEST_FRAME_MAX - 4u64:
+        return Err("VFS request exceeds IPC bound")
+    val reply_port = syscall(_SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
+    if reply_port < 0:
+        return Err("failed to create VFS reply port")
+    val service_port = syscall(_SYS_IPC_CONNECT, unsafe_addr_of(_VFS_SERVICE_NAME), _VFS_SERVICE_NAME.len(), 0, 0, 0)
+    if service_port < 0:
+        _vfs_destroy_reply_port(reply_port)
         return Err("failed to connect to VFS service")
-    val conn = port_result as u64
 
-    # Encode method + payload into message
-    val msg = "{method}:{payload}"
-    val send_result = syscall(51, conn, unsafe_addr_of(msg), msg.len() as u64, 0, 0)
-    if send_result < 0:
-        return Err("VFS send failed with code {send_result}")
+    var request: [u8] = []
+    _vfs_push_u32(request, method)
+    var request_index: u64 = 0u64
+    while request_index < payload.len():
+        request.push(payload[request_index])
+        request_index = request_index + 1u64
+    val request_bytes = unsafe_addr_of(request) + _VFS_IPC_BYTE_ARRAY_HEADER_BYTES
+    val sent = syscall(_SYS_IPC_SEND, service_port.to_u64(), reply_port.to_u64(), request_bytes, request.len(), _IPC_COPIED_SERVICE_TAG)
+    if sent < 0:
+        _vfs_destroy_reply_port(reply_port)
+        return Err("VFS send failed with code {sent}")
 
-    # Receive response
-    var buf_size: u64 = 4096
-    var response_buf: [u8] = [0; 4096]
-    val recv_result = syscall(52, conn, unsafe_addr_of(response_buf), buf_size, 0, 0)
-    if recv_result < 0:
-        return Err("VFS recv failed with code {recv_result}")
+    val message_raw = syscall(_SYS_IPC_RECV, reply_port.to_u64(), 0xFFFFFFFFFFFFFFFFu64, 0, 0, 0)
+    if message_raw <= 0:
+        _vfs_destroy_reply_port(reply_port)
+        return Err("VFS recv failed with code {message_raw}")
+    val message_addr = message_raw.to_u64()
+    val frame_len = _vfs_read_u32_at(message_addr + 24u64).to_u64()
+    if frame_len < 4u64 or frame_len > _VFS_IPC_REPLY_MAX:
+        _vfs_destroy_reply_port(reply_port)
+        return Err("malformed VFS reply")
+    val reply_addr = message_addr + 32u64
+    val status = _vfs_read_i32_at(reply_addr)
+    var bytes: [u8] = []
+    var reply_index: u64 = 4u64
+    while reply_index < frame_len:
+        bytes.push(mmio_read8(reply_addr + reply_index))
+        reply_index = reply_index + 1u64
+    if status < 0:
+        _vfs_destroy_reply_port(reply_port)
+        return Err(bytes_to_string(bytes))
+    _vfs_destroy_reply_port(reply_port)
+    Ok(bytes)
 
-    # Close connection
-    syscall(53, conn, 0, 0, 0, 0)
+fn _vfs_request(method: u32, payload: text) -> Result<text, text>:
+    val response = vfs_ipc_request_bytes(method, _vfs_text_bytes(payload))?
+    Ok(bytes_to_string(response))
 
-    val response = bytes_to_string(response_buf.slice(0, recv_result as u64))
-    if response.starts_with("ERR:"):
-        return Err(response.slice(4, response.len()))
-    Ok(response)
+fn _vfs_open(path: text, flags: u32) -> Result<u64, text>:
+    var payload = _vfs_text_bytes(path)
+    payload.push(0u8)
+    _vfs_push_u32(payload, flags)
+    val response = vfs_ipc_request_bytes(VFS_OPEN, payload)?
+    if response.len() != 8u64:
+        return Err("malformed VFS open reply")
+    Ok(_vfs_read_u64(response, 0u64))
+
+fn _vfs_close(handle: u64) -> Result<bool, text>:
+    var payload: [u8] = []
+    _vfs_push_u64(payload, handle)
+    val response = vfs_ipc_request_bytes(VFS_CLOSE, payload)?
+    if response.len() != 8u64:
+        return Err("malformed VFS close reply")
+    Ok(_vfs_read_u64(response, 0u64) == 1u64)
 
 fn read_text(path: text) -> Result<text, text>:
-    _vfs_request(VFS_READ, path)
+    # READ requires an opened handle and an explicit u64 byte count.  Stat
+    # first so the client neither guesses a size nor asks the bounded service
+    # for more than one reply frame can carry.
+    val node = stat(path)?
+    if node.size > _VFS_IPC_REPLY_MAX - 4u64:
+        return Err("VFS read exceeds IPC reply bound")
+    val handle = _vfs_open(path, _VFS_OPEN_READ)?
+    var read_payload: [u8] = []
+    _vfs_push_u64(read_payload, handle)
+    _vfs_push_u64(read_payload, node.size)
+    val read_result = vfs_ipc_request_bytes(VFS_READ, read_payload)
+    val close_result = _vfs_close(handle)
+    match read_result:
+        Result.Err(error): return Err(error)
+        Result.Ok(bytes):
+            match close_result:
+                Result.Err(error): return Err(error)
+                Result.Ok(closed):
+                    if not closed:
+                        return Err("VFS close rejected read handle")
+                    Ok(bytes_to_string(bytes))
 
 fn write_text(path: text, content: text) -> Result<bool, text>:
-    val payload = "{path}\0{content}"
-    val resp = _vfs_request(VFS_WRITE, payload)?
-    Ok(true)
+    val content_bytes = _vfs_text_bytes(content)
+    if content_bytes.len() > _VFS_IPC_REQUEST_FRAME_MAX - 12u64:
+        return Err("VFS write exceeds IPC request bound")
+    val handle = _vfs_open(path, _VFS_OPEN_WRITE_CREATE_TRUNCATE)?
+    var write_payload: [u8] = []
+    _vfs_push_u64(write_payload, handle)
+    for byte in content_bytes:
+        write_payload.push(byte)
+    val write_result = vfs_ipc_request_bytes(VFS_WRITE, write_payload)
+    val close_result = _vfs_close(handle)
+    match write_result:
+        Result.Err(error): return Err(error)
+        Result.Ok(reply):
+            if reply.len() != 8u64:
+                return Err("malformed VFS write reply")
+            val written = _vfs_read_u64(reply, 0u64)
+            match close_result:
+                Result.Err(error): return Err(error)
+                Result.Ok(closed):
+                    if not closed:
+                        return Err("VFS close rejected write handle")
+                    if written != content_bytes.len():
+                        return Err("short VFS write")
+                    Ok(true)
 
 fn _fs_node_kind_from_u8(v: u8) -> FsNodeKind:
     """Map a VFS wire kind byte to FsNodeKind, in declaration order.
@@ -127,19 +266,19 @@ fn _fs_node_kind_from_u8(v: u8) -> FsNodeKind:
     FsNodeKind.File
 
 fn stat(path: text) -> Result<FsNode, text>:
-    val resp = _vfs_request(VFS_STAT, path)?
-    # Parse response into FsNode
-    # Response format: "kind:size:name"
-    val parts = resp.split(":")
-    if parts.len() < 3:
+    val response = vfs_ipc_request_bytes(VFS_STAT, _vfs_text_bytes(path))?
+    # STAT reply: kind(u8) | size(u64 LE) | permissions(u16 LE).
+    if response.len() != 11u64:
         return Err("malformed stat response")
-    val kind_val = parts[0].parse_u8()
-    val size_val = parts[1].parse_u64()
-    val name_val = parts[2]
     Ok(FsNode(
-        kind: _fs_node_kind_from_u8(kind_val),
-        size: size_val,
-        name: name_val
+        id: 0u64,
+        kind: _fs_node_kind_from_u8(response[0u64]),
+        size: _vfs_read_u64(response, 1u64),
+        permissions: _vfs_read_u16(response, 9u64),
+        owner: 0u32,
+        group: 0u32,
+        created_ns: 0u64,
+        modified_ns: 0u64
     ))
 
 fn mkdir(path: text) -> Result<bool, text>:
@@ -147,7 +286,12 @@ fn mkdir(path: text) -> Result<bool, text>:
     Ok(true)
 
 fn readdir(path: text) -> Result<[DirEntry], text>:
-    val resp = _vfs_request(VFS_READDIR, path)?
+    val response = vfs_ipc_request_bytes(VFS_READDIR, _vfs_text_bytes(path))?
+    # The current VFS service serializes each directory entry as
+    # `kind:u8-as-decimal:name`, separated by newlines.  The enclosing IPC
+    # frame remains binary status(i32)|payload; only this service payload is
+    # textual until the service owner publishes a different READDIR format.
+    val resp = bytes_to_string(response)
     var entries: [DirEntry] = []
     if resp.len() == 0:
         return Ok(entries)
@@ -156,13 +300,25 @@ fn readdir(path: text) -> Result<[DirEntry], text>:
     while i < lines.len() as u64:
         val line = lines[i as i64]
         if line.len() > 0:
-            val parts = line.split(":")
-            if parts.len() >= 2:
-                val kind_val = parts[0].parse_u8()
-                val name_val = parts[1]
+            # The service emits `kind:name`.  A Unix filename may itself
+            # contain `:`, so only the first delimiter belongs to the wire
+            # envelope; everything after it is the exact entry name.
+            val separator = line.index_of(":")
+            if separator > 0:
+                val kind_val = line.slice(0, separator).parse_u8()
+                val name_val = line.slice(separator + 1, line.len())
                 entries.push(DirEntry(
-                    kind: _fs_node_kind_from_u8(kind_val),
-                    name: name_val
+                    name: name_val,
+                    node: FsNode(
+                        id: 0u64,
+                        kind: _fs_node_kind_from_u8(kind_val),
+                        size: 0u64,
+                        permissions: 0u16,
+                        owner: 0u32,
+                        group: 0u32,
+                        created_ns: 0u64,
+                        modified_ns: 0u64
+                    )
                 ))
         i = i + 1
     Ok(entries)

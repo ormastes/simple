@@ -50,6 +50,11 @@ extern fn rt_boot_tcp_send_newkeys_fixed(fd: i64) -> i64
 extern fn rt_boot_tcp_send_plain_payload(fd: i64, data: [u8]) -> i64
 extern fn serial_println(msg: text)
 
+# A bounded deferred capture must not be reported successful when SSH channel
+# flow control prevented every captured byte from reaching the peer.  Proper
+# buffering across WINDOW_ADJUST is a separate asynchronous state machine.
+val SSH_EXIT_REMOTE_WINDOW_EXHAUSTED: u32 = 125u32
+
 fn _live_openssh_client_version_bytes() -> [u8]:
     serial_println("[sshd-session] version builder start")
     var out: [u8] = []
@@ -1104,12 +1109,19 @@ impl SshSession:
         if self.pending_ring3_exec:
             val remote_id = self.pending_ring3_exec_remote_id
             val local_id = self.pending_ring3_exec_local_id
-            val exit_code = self.pending_ring3_exec_exit_code.to_u32()
-            serial_println("[sshd] sending real exit-status rc={exit_code} remote_id={remote_id}")
+            var exit_code = self.pending_ring3_exec_exit_code.to_u32()
             if self.pending_ring3_exec_stdout.len() > 0:
-                self.send_packet(_build_channel_data_stable(remote_id, self.pending_ring3_exec_stdout))
+                if self.channels.consume_remote_window(local_id, self.pending_ring3_exec_stdout.len().to_u32()):
+                    self.send_packet(_build_channel_data_stable(remote_id, self.pending_ring3_exec_stdout))
+                else:
+                    # Do not silently drop a real child result and then report
+                    # success. This bounded one-shot response has no retained
+                    # window-adjust buffer, so fail closed before EOF/CLOSE.
+                    exit_code = SSH_EXIT_REMOTE_WINDOW_EXHAUSTED
+                    serial_println("[sshd] deferred exec stdout blocked by remote window; reporting rc={exit_code} bytes={self.pending_ring3_exec_stdout.len()}")
             if self.pending_ring3_exec_stdout_truncated:
                 serial_println("[sshd] deferred exec stdout truncated bytes={self.pending_ring3_exec_stdout.len()}")
+            serial_println("[sshd] sending deferred exit-status rc={exit_code} remote_id={remote_id}")
             self.send_packet(_build_channel_exit_status_stable(remote_id, exit_code))
             self.send_packet(_build_channel_eof_stable(remote_id))
             self.send_packet(_build_channel_close_stable(remote_id))

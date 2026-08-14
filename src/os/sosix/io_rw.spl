@@ -1,7 +1,8 @@
 # SOSIX async read/write operations.
 
 use os.kernel.fd_table.{fd_is_valid, fd_get_offset, fd_set_offset, fd_get_type, fd_get_backend_handle}
-use os.userlib.syscall_raw.{syscall}
+use os.userlib.fs.{vfs_ipc_request_bytes}
+use os.userlib.ipc_protocol.{VFS_READ, VFS_WRITE, VFS_SEEK}
 use os.sosix.io_state.{
     sosix_io_backend_for_fd_type
 }
@@ -9,21 +10,14 @@ use os.sosix.io_state.{
 extern fn rt_port_inb(port: u16) -> u8
 extern fn mmio_write8(addr: u64, value: u8)
 extern fn mmio_read8(addr: u64) -> u8
-extern fn unsafe_addr_of(ref: any) -> u64
-
-val _VFS_PORT: u64 = 1
-
-val _SYS_IPC_SEND: u64 = 20
-val _SYS_IPC_RECV: u64 = 21
-
 val _SOSIX_ASYNC_FREE: u8 = 0
 val _SOSIX_ASYNC_PENDING: u8 = 1
 val _SOSIX_ASYNC_COMPLETE: u8 = 2
 val _SOSIX_ASYNC_ERROR: u8 = 3
 val _SOSIX_MAX_ASYNC_REQUESTS: u64 = 128
 
-val VFS_READ: u32 = 2
-val VFS_WRITE: u32 = 3
+val _SOSIX_VFS_READ_MAX: u64 = 4092
+val _SOSIX_VFS_WRITE_MAX: u64 = 4088
 
 var _sosix_rw_req_states: [u8; 128] = [0; 128]
 var _sosix_rw_req_results: [i64; 128] = [0; 128]
@@ -33,6 +27,14 @@ fn sosix_async_read(fd: i32, buf_addr: u64, count: u64) -> u64:
     if not fd_is_valid(fd):
         return _SOSIX_MAX_ASYNC_REQUESTS
     val fd_type = fd_get_type(fd)
+
+    # POSIX-compatible zero-length I/O is complete without touching a serial
+    # device or requiring a remote VFS handle.
+    if count == 0:
+        val req = _sosix_rw_alloc_request()
+        if req < _SOSIX_MAX_ASYNC_REQUESTS:
+            _sosix_rw_finish_request(req, _SOSIX_ASYNC_COMPLETE, 0)
+        return req
 
     if fd_type == 6:
         val req = _sosix_rw_alloc_request()
@@ -48,35 +50,46 @@ fn sosix_async_read(fd: i32, buf_addr: u64, count: u64) -> u64:
     val req = _sosix_rw_alloc_request()
     if req < _SOSIX_MAX_ASYNC_REQUESTS:
         val vfs_handle = fd_get_backend_handle(fd)
-        val offset = fd_get_offset(fd)
-        var payload: [u8] = []
-        _sosix_async_push_u32(payload, VFS_READ)
-        _sosix_async_push_u64(payload, vfs_handle)
-        _sosix_async_push_u64(payload, offset)
-        _sosix_async_push_u64(payload, count)
-
-        val payload_ptr = unsafe_addr_of(payload)
-        val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_READ as u64, 0, payload_ptr, payload.len())
-        if send_result < 0:
-            _sosix_rw_finish_request(req, _SOSIX_ASYNC_ERROR, -5)
-        else:
-            var reply_buf: [u8; 4096] = [0; 4096]
-            val reply_ptr = unsafe_addr_of(reply_buf)
-            val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 4096, 0, 0)
-            if recv_result < 0:
-                _sosix_rw_finish_request(req, _SOSIX_ASYNC_ERROR, -5)
-            else:
-                val status = _sosix_async_read_i32(reply_buf, 0)
-                if status < 0:
-                    _sosix_rw_finish_request(req, _SOSIX_ASYNC_ERROR, status as i64)
+        var seek_payload: [u8] = []
+        _sosix_async_push_u64(seek_payload, vfs_handle)
+        _sosix_async_push_u64(seek_payload, fd_get_offset(fd))
+        seek_payload.push(0u8)
+        match vfs_ipc_request_bytes(VFS_SEEK, seek_payload):
+            Result.Err(_error): _sosix_rw_finish_request(req, _SOSIX_ASYNC_ERROR, -5)
+            Result.Ok(seek_reply):
+                if seek_reply.len() != 8u64:
+                    _sosix_rw_finish_request(req, _SOSIX_ASYNC_ERROR, -5)
                 else:
-                    val bytes_read = _sosix_async_read_u64(reply_buf, 4)
-                    var ci: u64 = 0
-                    while ci < bytes_read and ci < count:
-                        mmio_write8(buf_addr + ci, reply_buf[12 + ci])
-                        ci = ci + 1
-                    fd_set_offset(fd, fd_get_offset(fd) + bytes_read)
-                    _sosix_rw_finish_request(req, _SOSIX_ASYNC_COMPLETE, bytes_read as i64)
+                    fd_set_offset(fd, _sosix_async_read_u64(seek_reply, 0))
+                    var total: u64 = 0
+                    var failed = false
+                    var eof = false
+                    while total < count and not failed and not eof:
+                        var chunk = count - total
+                        if chunk > _SOSIX_VFS_READ_MAX:
+                            chunk = _SOSIX_VFS_READ_MAX
+                        var payload: [u8] = []
+                        _sosix_async_push_u64(payload, vfs_handle)
+                        _sosix_async_push_u64(payload, chunk)
+                        match vfs_ipc_request_bytes(VFS_READ, payload):
+                            Result.Err(_error): failed = true
+                            Result.Ok(reply):
+                                val actual = reply.len().to_u64()
+                                if actual > chunk:
+                                    failed = true
+                                else:
+                                    var ci: u64 = 0
+                                    while ci < actual:
+                                        mmio_write8(buf_addr + total + ci, reply[ci])
+                                        ci = ci + 1
+                                    fd_set_offset(fd, fd_get_offset(fd) + actual)
+                                    total = total + actual
+                                    if actual < chunk:
+                                        eof = true
+                    if failed and total == 0:
+                        _sosix_rw_finish_request(req, _SOSIX_ASYNC_ERROR, -5)
+                    else:
+                        _sosix_rw_finish_request(req, _SOSIX_ASYNC_COMPLETE, total as i64)
     req
 
 fn sosix_async_write(fd: i32, buf_addr: u64, count: u64) -> u64:
@@ -84,6 +97,14 @@ fn sosix_async_write(fd: i32, buf_addr: u64, count: u64) -> u64:
     if not fd_is_valid(fd):
         return _SOSIX_MAX_ASYNC_REQUESTS
     val fd_type = fd_get_type(fd)
+
+    # POSIX-compatible zero-length I/O is complete without touching the
+    # selected backend or changing the shared offset.
+    if count == 0:
+        val req = _sosix_rw_alloc_request()
+        if req < _SOSIX_MAX_ASYNC_REQUESTS:
+            _sosix_rw_finish_request(req, _SOSIX_ASYNC_COMPLETE, 0)
+        return req
 
     if fd_type == 6:
         val req = _sosix_rw_alloc_request()
@@ -97,36 +118,48 @@ fn sosix_async_write(fd: i32, buf_addr: u64, count: u64) -> u64:
     val req = _sosix_rw_alloc_request()
     if req < _SOSIX_MAX_ASYNC_REQUESTS:
         val vfs_handle = fd_get_backend_handle(fd)
-        val offset = fd_get_offset(fd)
-        var payload: [u8] = []
-        _sosix_async_push_u32(payload, VFS_WRITE)
-        _sosix_async_push_u64(payload, vfs_handle)
-        _sosix_async_push_u64(payload, offset)
-        _sosix_async_push_u64(payload, count)
-
-        var ci: u64 = 0
-        while ci < count:
-            payload.push(mmio_read8(buf_addr + ci))
-            ci = ci + 1
-
-        val payload_ptr = unsafe_addr_of(payload)
-        val send_result = syscall(_SYS_IPC_SEND, _VFS_PORT, VFS_WRITE as u64, 0, payload_ptr, payload.len())
-        if send_result < 0:
-            _sosix_rw_finish_request(req, _SOSIX_ASYNC_ERROR, -5)
-        else:
-            var reply_buf: [u8; 16] = [0; 16]
-            val reply_ptr = unsafe_addr_of(reply_buf)
-            val recv_result = syscall(_SYS_IPC_RECV, _VFS_PORT, reply_ptr, 16, 0, 0)
-            if recv_result < 0:
-                _sosix_rw_finish_request(req, _SOSIX_ASYNC_ERROR, -5)
-            else:
-                val status = _sosix_async_read_i32(reply_buf, 0)
-                if status < 0:
-                    _sosix_rw_finish_request(req, _SOSIX_ASYNC_ERROR, status as i64)
+        var seek_payload: [u8] = []
+        _sosix_async_push_u64(seek_payload, vfs_handle)
+        _sosix_async_push_u64(seek_payload, fd_get_offset(fd))
+        seek_payload.push(0u8)
+        match vfs_ipc_request_bytes(VFS_SEEK, seek_payload):
+            Result.Err(_error): _sosix_rw_finish_request(req, _SOSIX_ASYNC_ERROR, -5)
+            Result.Ok(seek_reply):
+                if seek_reply.len() != 8u64:
+                    _sosix_rw_finish_request(req, _SOSIX_ASYNC_ERROR, -5)
                 else:
-                    val bytes_written = _sosix_async_read_u64(reply_buf, 4)
-                    fd_set_offset(fd, fd_get_offset(fd) + bytes_written)
-                    _sosix_rw_finish_request(req, _SOSIX_ASYNC_COMPLETE, bytes_written as i64)
+                    fd_set_offset(fd, _sosix_async_read_u64(seek_reply, 0))
+                    var total: u64 = 0
+                    var failed = false
+                    var short_write = false
+                    while total < count and not failed and not short_write:
+                        var chunk = count - total
+                        if chunk > _SOSIX_VFS_WRITE_MAX:
+                            chunk = _SOSIX_VFS_WRITE_MAX
+                        var payload: [u8] = []
+                        _sosix_async_push_u64(payload, vfs_handle)
+                        var ci: u64 = 0
+                        while ci < chunk:
+                            payload.push(mmio_read8(buf_addr + total + ci))
+                            ci = ci + 1
+                        match vfs_ipc_request_bytes(VFS_WRITE, payload):
+                            Result.Err(_error): failed = true
+                            Result.Ok(reply):
+                                if reply.len() != 8u64:
+                                    failed = true
+                                else:
+                                    val actual = _sosix_async_read_u64(reply, 0)
+                                    if actual > chunk:
+                                        failed = true
+                                    else:
+                                        fd_set_offset(fd, fd_get_offset(fd) + actual)
+                                        total = total + actual
+                                        if actual < chunk:
+                                            short_write = true
+                    if failed and total == 0:
+                        _sosix_rw_finish_request(req, _SOSIX_ASYNC_ERROR, -5)
+                    else:
+                        _sosix_rw_finish_request(req, _SOSIX_ASYNC_COMPLETE, total as i64)
     req
 
 fn sosix_sync_read(fd: i32, buf_addr: u64, count: u64) -> i64:
@@ -186,28 +219,18 @@ fn _sosix_rw_get_result(req: u64) -> i64:
         return -5
     _sosix_rw_req_results[req]
 
-fn _sosix_async_push_u32(buf: [u8], val_: u32):
-    """Push a u32 in little-endian byte order."""
-    buf.push((val_ & 0xFF) as u8)
-    buf.push(((val_ >> 8) & 0xFF) as u8)
-    buf.push(((val_ >> 16) & 0xFF) as u8)
-    buf.push(((val_ >> 24) & 0xFF) as u8)
-
 fn _sosix_async_push_u64(buf: [u8], val_: u64):
     """Push a u64 in little-endian byte order."""
-    _sosix_async_push_u32(buf, (val_ & 0xFFFFFFFF) as u32)
-    _sosix_async_push_u32(buf, ((val_ >> 32) & 0xFFFFFFFF) as u32)
-
-fn _sosix_async_read_i32(buf: [u8], offset: u64) -> i32:
-    """Read a little-endian i32 from a byte buffer."""
-    val b0 = buf[offset] as u32
-    val b1 = buf[offset + 1] as u32
-    val b2 = buf[offset + 2] as u32
-    val b3 = buf[offset + 3] as u32
-    (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) as i32
+    var i: u64 = 0
+    while i < 8:
+        buf.push(((val_ >> (i * 8)) & 0xFF) as u8)
+        i = i + 1
 
 fn _sosix_async_read_u64(buf: [u8], offset: u64) -> u64:
     """Read a little-endian u64 from a byte buffer."""
-    val lo = _sosix_async_read_i32(buf, offset) as u64 & 0xFFFFFFFF
-    val hi = _sosix_async_read_i32(buf, offset + 4) as u64 & 0xFFFFFFFF
-    lo | (hi << 32)
+    var value: u64 = 0
+    var i: u64 = 0
+    while i < 8:
+        value = value | ((buf[offset + i] as u64) << (i * 8))
+        i = i + 1
+    value

@@ -63,7 +63,7 @@ use os.kernel.ipc.syscall_spm
 
 # Re-export handlers from sub-modules so external callers (syscall_shim.spl)
 # that use `use os.kernel.ipc.syscall.{_handle_*}` still resolve.
-use os.kernel.ipc.syscall_ipc.{IpcSyscallState, _handle_ipc_send, _handle_ipc_recv, _handle_ipc_create_port, _handle_ipc_connect, _handle_ipc_port_owner, _handle_ipc_send_state, _handle_ipc_recv_state, _handle_ipc_create_port_state, _handle_ipc_connect_state}
+use os.kernel.ipc.syscall_ipc.{IpcSyscallState, _handle_ipc_send, _handle_ipc_recv, _handle_ipc_create_port, _handle_ipc_destroy_port, _handle_ipc_connect, _handle_ipc_port_owner, _handle_ipc_send_state, _handle_ipc_recv_state, _handle_ipc_create_port_state, _handle_ipc_destroy_port_state, _handle_ipc_connect_state}
 use os.kernel.ipc.syscall_security_debug.{_handle_pledge, _handle_unveil, _handle_cap_grant, _handle_cap_revoke, _handle_debug_write}
 use os.kernel.ipc.syscall_process.{_handle_exit, _handle_exit_state, _handle_yield, _handle_yield_state, _handle_spawn, _handle_spawn_state, _handle_wait, _handle_wait_state, _handle_fork, _handle_fork_state, _handle_exec, _handle_exec_state, _handle_waitpid, _handle_waitpid_state, _handle_pipe, _handle_dup2, _handle_dup, _handle_dlopen, _handle_dlsym, _handle_dlclose, _handle_poll, _handle_fcntl, _handle_getpid, _handle_spawn_binary, _handle_spawn_binary_state, dispatch_spawn_binary_direct, dispatch_spawn_binary_direct_state, SpawnBinaryDirectState}
 use os.kernel.ipc.syscall_proc_ext.{_handle_list_tasks, _handle_get_task_info, _handle_signal, _handle_set_priority, _handle_schedule, _handle_schedctl, _handle_get_parent_pid, _handle_mount, _handle_unmount}
@@ -332,6 +332,12 @@ fn syscall_handler_ipc_state(args: SyscallArgs, scheduler: Scheduler, ipc: IpcMa
                 return IpcSyscallState(result: SyscallResult(value: SYSCALL_EPERM), scheduler: scheduler, ipc: ipc)
             val st = _handle_spawn_binary_state(args, scheduler, klog)
             IpcSyscallState(result: st.result, scheduler: st.scheduler, ipc: ipc)
+        case 18:    # IpcDestroyPort
+            # Closing a caller-owned endpoint is self-revocation, not service
+            # admission. _handle_ipc_destroy_port_state authenticates the
+            # current task against the live port owner; unlike 20-23 this must
+            # remain usable by an anonymous reply-port owner without IpcListen.
+            _handle_ipc_destroy_port_state(args, scheduler, ipc)
         case 20:
             if not _cap_check(ipc, caller, CapabilityKind.IpcConnect(port_name: "")):
                 return IpcSyscallState(result: SyscallResult(value: SYSCALL_EPERM), scheduler: scheduler, ipc: ipc)
@@ -416,6 +422,9 @@ fn syscall_handler(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager, klo
             _handle_memory_protect(args, scheduler)
 
         # -- IPC -------------------------------------------------------------
+        case 18:    # IpcDestroyPort
+            # Owner-checked self-revocation; see the state-preserving path.
+            _handle_ipc_destroy_port(args, scheduler, ipc)
         case 20:    # IpcSend
             if not _cap_check(ipc, caller, CapabilityKind.IpcConnect(port_name: "")):
                 return SyscallResult(value: SYSCALL_EPERM)

@@ -303,3 +303,25 @@ paging (Sv39 SATP readback), PM/scheduler (PID1 create+liveness), VirtIO
 (PID-correlated present). It must not synthesize these facts from later
 markers. The shared ordering and negative-test plan is
 `doc/03_plan/sys_test/rv64_ssh_live_login_in_qemu.md`.
+RV64 SSH execution now uses attempt-local bounded stdout/status capture,
+including empty output, nonzero status, and truncation; a pre-launch failure
+must reset prior capture. Source is complete, but TODO808 remains open until an
+admitted Stage 4 runner executes the focused cases and TODO806 retains the
+independent live OpenSSH outcomes. Canned output and stale global capture are
+never evidence.
+The source transport now owns syscall-18 destroy, live named-service discovery,
+anonymous reply-port teardown, bounded byte-zero VFS frames, public FS binary
+decoding, manager-routed mutations, and FD VFS READ/WRITE/SEEK/close. The Terra IPC handoff focused PASS is terminal-only and therefore diagnostic;
+it does not close TODO809 or establish a source-matched runtime. The next
+focused IPC command must retain output and Stage 4 provenance before handoff to
+the root reviewer.
+
+P1c freezes `IPC_COPIED_SERVICE_TAG` as the only copied-send discriminator;
+all non-tag traffic, including zero-length sends, remains legacy. Syscall 18
+may destroy only a live caller-owned port. The VFS close owner uses a monotonic
+issued-handle watermark for bounded idempotence: a terminal close/replay
+succeeds, but a lost reply keeps the final FD available for retry; `dup2`
+records remote cleanup failure while preserving local replacement. SOSIX I/O
+uses the shared named VFS READ/WRITE/SEEK path. Run and retain the plan's five
+P1c focused rows only after TODO667; they are not a substitute for TODO806's
+source-matched QEMU/OpenSSH evidence.

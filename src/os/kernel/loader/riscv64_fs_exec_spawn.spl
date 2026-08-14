@@ -4,6 +4,8 @@ use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.arch.user_entry_bridge.{dispatch_fs_exec_user_handoff}
 use os.kernel.loader.fs_exec_spawn.{fs_exec_prepare_spawn}
 use os.kernel.arch.riscv64.process_stdout_capture.{Rv64ProcessStdoutResult, rv64_process_stdout_begin, rv64_process_stdout_finish}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.scheduler.scheduler.{wait_collect_result_error, wait_collect_result_status}
 
 extern fn serial_println(msg: text)
 
@@ -23,5 +25,13 @@ pub fn riscv64_fs_exec_spawn_capture(path: text, argv: [text], envp: [text]) -> 
     if prepared.pid <= 0:
         return rv64_process_stdout_finish(prepared.pid)
     serial_println("[fs-exec] spawn:pid={prepared.pid} path={path}")
-    val exit_code = dispatch_fs_exec_user_handoff(Architecture.Riscv64, prepared.pid as u64, prepared.scheduler)
+    val child = TaskId(id: prepared.pid as u64)
+    val exit_code = dispatch_fs_exec_user_handoff(Architecture.Riscv64, child.id, prepared.scheduler)
+    var scheduler = prepared.scheduler
+    scheduler.exit_task_by_id(child, exit_code as i32)
+    val collected = scheduler.wait_for_collect(TaskId(id: 0), child, false)
+    if wait_collect_result_error(collected) != 0:
+        return rv64_process_stdout_finish(-10)
+    if wait_collect_result_status(collected) != exit_code as i32:
+        return rv64_process_stdout_finish(-10)
     rv64_process_stdout_finish(exit_code)

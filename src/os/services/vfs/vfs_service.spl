@@ -1,11 +1,12 @@
 # VFS IPC Service -- User-space filesystem service
 #
 # MDSOC: feature dimension, vfs layer
-# Listens on IPC port 1 for filesystem requests from applications.
+# Listens on the named VFS IPC service port for filesystem requests from applications.
 # Dispatches to mounted Filesystem implementations via VfsManager.
 #
 # Wire protocol:
-#   Request:  method (u32) | flags (u32) | payload (bytes)
+#   Request:  method (u32) | payload (bytes), sent from a caller-owned
+#             anonymous reply port
 #   Response: status (i32) | payload (bytes)
 #
 # Payload encoding per method:
@@ -23,13 +24,14 @@
 #   CHMOD:  path (text) \0 mode (u16)
 #   SYMLINK: target (text) \0 link_path (text)
 
-use os.services.vfs.vfs.{VfsManager, Filesystem, SeekWhence, VfsMountEntry}
+use os.services.vfs.vfs.{VfsManager, SeekWhence}
 use os.kernel.types.fs_types.{FileDescriptor, FileFlags, FsNode, FsNodeKind, DirEntry}
 use os.kernel.types.ipc_types.{IpcMessage}
 use os.async.os_executor.{OsExecutor}
 
 use os.kernel.log.klog_api.{log_raw_println}
 extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
+extern fn unsafe_addr_of(ref: any) -> u64
 
 # VFS IPC method constants
 val VFS_OPEN: u32 = 1
@@ -47,6 +49,14 @@ val VFS_CHMOD: u32 = 12
 val VFS_SYMLINK: u32 = 13
 val VFS_RMDIR: u32 = 14
 
+# VFS_OPEN carries the kernel's POSIX O_* bit layout, never a service-private
+# flag encoding.  Keep this decoding boundary aligned with os.kernel.fd_table.
+val VFS_OPEN_O_ACCMODE: u32 = 3u32
+val VFS_OPEN_O_WRONLY: u32 = 1u32
+val VFS_OPEN_O_CREAT: u32 = 64u32
+val VFS_OPEN_O_TRUNC: u32 = 512u32
+val VFS_OPEN_O_APPEND: u32 = 1024u32
+
 # Syscall numbers — canonical values from src/os/kernel/ipc/syscall.spl
 # dispatcher cases 20..23. Keep in sync with test/01_unit/os/kernel/ipc/
 # syscall_number_consistency_spec.spl.
@@ -54,6 +64,16 @@ val SYS_IPC_SEND: u64 = 20
 val SYS_IPC_RECV: u64 = 21
 val SYS_IPC_CREATE_PORT: u64 = 22
 val SYS_IPC_CONNECT: u64 = 23
+
+# The kernel's copied service ABI accepts a 4096-byte raw reply and a request
+# frame of method(u32) + at most 4096 payload bytes.  Keep the VFS boundary
+# explicit so a driver result cannot make the service attempt an oversized
+# userspace copy.
+val VFS_SERVICE_NAME: text = "vfs"
+val VFS_IPC_REQUEST_PAYLOAD_MAX: u32 = 4096u32
+val VFS_IPC_REPLY_PAYLOAD_MAX: u64 = 4092u64
+val VFS_IPC_BYTE_ARRAY_HEADER_BYTES: u64 = 16u64
+val IPC_COPIED_SERVICE_TAG: u64 = 0xFFFFFFFFFFFFFFFFu64
 
 # Response status codes
 val STATUS_OK: i32 = 0
@@ -67,14 +87,14 @@ val STATUS_READ_ONLY: i32 = -4
 # ============================================================================
 
 class VfsService:
-    """VFS IPC service -- listens on port 1, dispatches to VfsManager.
+    """VFS IPC service -- listens on its named service port, dispatches to VfsManager.
 
     The service runs as a cooperative async task within the OS executor.
     Each incoming IPC message is decoded, dispatched to the appropriate
     VfsManager method, and a reply is sent back via IPC.
     """
     vfs: VfsManager
-    port_id: u64        # IPC port (1)
+    port_id: u64        # Named "vfs" IPC service port
     running: bool
     executor: OsExecutor
     request_count: u64
@@ -83,7 +103,7 @@ impl VfsService:
     static fn new(vfs: VfsManager) -> VfsService:
         VfsService(
             vfs: vfs,
-            port_id: 1,
+            port_id: 0,
             running: false,
             executor: OsExecutor.new(),
             request_count: 0
@@ -93,7 +113,7 @@ impl VfsService:
         """Create with an externally-provided executor for integration."""
         VfsService(
             vfs: vfs,
-            port_id: 1,
+            port_id: 0,
             running: false,
             executor: executor,
             request_count: 0
@@ -110,13 +130,14 @@ impl VfsService:
         Call this instead of start() when using cooperative scheduling
         (os_main calls poll_once() in a shared main loop).
         """
-        val port = syscall(SYS_IPC_CREATE_PORT, 0, 0, 0, 0, 0)
+        val name_ptr = unsafe_addr_of(VFS_SERVICE_NAME)
+        val port = syscall(SYS_IPC_CREATE_PORT, name_ptr, VFS_SERVICE_NAME.len(), 0, 0, 0)
         if port < 0:
             log_raw_println("[vfs-service] Failed to create IPC port (error {port})")
             return
         self.port_id = port.to_u64()
         self.running = true
-        log_raw_println("[vfs-service] Listening on IPC port {self.port_id}")
+        log_raw_println("[vfs-service] Listening on named IPC port {self.port_id}")
 
     me run_loop():
         """Main service loop: blocking receive, dispatch, reply. Blocks forever.
@@ -154,12 +175,20 @@ impl VfsService:
         The IPC message is an IpcMessage struct at msg_addr. We read
         the method field to determine which handler to invoke.
         """
-        # Read IpcMessage fields from memory
+        # Read IpcMessage fields from memory.  The kernel has already removed
+        # the method prefix from copied request bytes and placed it in header.
         # IpcMessage layout: src_port(8) | dst_port(8) | method(4) | flags(4) | payload_len(4) | cap_count(4)
         val src_port = _read_u64(msg_addr)
         val method = _read_u32(msg_addr + 16)
         val payload_len = _read_u32(msg_addr + 24)
         val payload_addr = msg_addr + 32  # Payload starts after header
+
+        if payload_len > VFS_IPC_REQUEST_PAYLOAD_MAX:
+            self.send_error_reply(src_port, STATUS_INVALID, "VFS request exceeds IPC bound")
+            return
+        if not _vfs_request_payload_is_valid(method, payload_addr, payload_len):
+            self.send_error_reply(src_port, STATUS_INVALID, "malformed VFS request")
+            return
 
         match method:
             VFS_OPEN: self.dispatch_open(src_port, payload_addr, payload_len)
@@ -190,11 +219,11 @@ impl VfsService:
         if flags_offset + 4 <= payload_len:
             flags_raw = _read_u32(payload_addr + flags_offset.to_u64())
         val flags = FileFlags(
-            read: true,
-            write: (flags_raw & 0x02) != 0,
-            create: (flags_raw & 0x04) != 0,
-            append: (flags_raw & 0x08) != 0,
-            truncate: (flags_raw & 0x10) != 0,
+            read: (flags_raw & VFS_OPEN_O_ACCMODE) != VFS_OPEN_O_WRONLY,
+            write: (flags_raw & VFS_OPEN_O_ACCMODE) != 0u32,
+            create: (flags_raw & VFS_OPEN_O_CREAT) != 0u32,
+            append: (flags_raw & VFS_OPEN_O_APPEND) != 0u32,
+            truncate: (flags_raw & VFS_OPEN_O_TRUNC) != 0u32,
             directory: false
         )
         var mgr = self.vfs
@@ -311,32 +340,20 @@ impl VfsService:
     me dispatch_unlink(src_port: u64, payload_addr: u64, payload_len: u32):
         """Parse UNLINK request: path(text)."""
         val path = _read_text(payload_addr, payload_len)
-        val mount: VfsMountEntry? = self.vfs.resolve_mount(path)
-        if mount.?:
-            val entry = mount.unwrap()
-            val relative = self.vfs.strip_mount_prefix(path, entry.point.path)
-            match entry.fs.unlink(relative):
-                Result.Ok(v):
-                    self.send_u64_reply(src_port, STATUS_OK, 1)
-                Result.Err(e):
-                    self.send_error_reply(src_port, STATUS_ERR, e)
-        else:
-            self.send_error_reply(src_port, STATUS_NOT_FOUND, "no filesystem for path")
+        match self.vfs.unlink(path):
+            Result.Ok(v):
+                self.send_u64_reply(src_port, STATUS_OK, 1)
+            Result.Err(e):
+                self.send_error_reply(src_port, STATUS_ERR, e)
 
     me dispatch_rmdir(src_port: u64, payload_addr: u64, payload_len: u32):
         """Parse RMDIR request: path(text)."""
         val path = _read_text(payload_addr, payload_len)
-        val mount: VfsMountEntry? = self.vfs.resolve_mount(path)
-        if mount.?:
-            val entry = mount.unwrap()
-            val relative = self.vfs.strip_mount_prefix(path, entry.point.path)
-            match entry.fs.rmdir(relative):
-                Result.Ok(v):
-                    self.send_u64_reply(src_port, STATUS_OK, 1)
-                Result.Err(e):
-                    self.send_error_reply(src_port, STATUS_ERR, e)
-        else:
-            self.send_error_reply(src_port, STATUS_NOT_FOUND, "no filesystem for path")
+        match self.vfs.rmdir(path):
+            Result.Ok(v):
+                self.send_u64_reply(src_port, STATUS_OK, 1)
+            Result.Err(e):
+                self.send_error_reply(src_port, STATUS_ERR, e)
 
     me dispatch_rename(src_port: u64, payload_addr: u64, payload_len: u32):
         """Parse RENAME request: old_path\0new_path."""
@@ -344,18 +361,11 @@ impl VfsService:
         val new_offset = old_path.len().to_u32() + 1
         val remaining = payload_len - new_offset
         val new_path = _read_text(payload_addr + new_offset.to_u64(), remaining)
-        val mount: VfsMountEntry? = self.vfs.resolve_mount(old_path)
-        if mount.?:
-            val entry = mount.unwrap()
-            val rel_old = self.vfs.strip_mount_prefix(old_path, entry.point.path)
-            val rel_new = self.vfs.strip_mount_prefix(new_path, entry.point.path)
-            match entry.fs.rename(rel_old, rel_new):
-                Result.Ok(v):
-                    self.send_u64_reply(src_port, STATUS_OK, 1)
-                Result.Err(e):
-                    self.send_error_reply(src_port, STATUS_ERR, e)
-        else:
-            self.send_error_reply(src_port, STATUS_NOT_FOUND, "no filesystem for path")
+        match self.vfs.rename(old_path, new_path):
+            Result.Ok(v):
+                self.send_u64_reply(src_port, STATUS_OK, 1)
+            Result.Err(e):
+                self.send_error_reply(src_port, STATUS_ERR, e)
 
     me dispatch_chmod(src_port: u64, payload_addr: u64, payload_len: u32):
         """Parse CHMOD request: path\0mode(u16)."""
@@ -364,17 +374,11 @@ impl VfsService:
         var mode: u16 = 0
         if mode_offset + 2 <= payload_len:
             mode = _read_u16(payload_addr + mode_offset.to_u64())
-        val mount: VfsMountEntry? = self.vfs.resolve_mount(path)
-        if mount.?:
-            val entry = mount.unwrap()
-            val relative = self.vfs.strip_mount_prefix(path, entry.point.path)
-            match entry.fs.chmod(relative, mode):
-                Result.Ok(v):
-                    self.send_u64_reply(src_port, STATUS_OK, 1)
-                Result.Err(e):
-                    self.send_error_reply(src_port, STATUS_ERR, e)
-        else:
-            self.send_error_reply(src_port, STATUS_NOT_FOUND, "no filesystem for path")
+        match self.vfs.chmod(path, mode):
+            Result.Ok(v):
+                self.send_u64_reply(src_port, STATUS_OK, 1)
+            Result.Err(e):
+                self.send_error_reply(src_port, STATUS_ERR, e)
 
     me dispatch_symlink(src_port: u64, payload_addr: u64, payload_len: u32):
         """Parse SYMLINK request: target\0link_path."""
@@ -382,17 +386,11 @@ impl VfsService:
         val link_offset = target.len().to_u32() + 1
         val remaining = payload_len - link_offset
         val link_path = _read_text(payload_addr + link_offset.to_u64(), remaining)
-        val mount: VfsMountEntry? = self.vfs.resolve_mount(link_path)
-        if mount.?:
-            val entry = mount.unwrap()
-            val rel_link = self.vfs.strip_mount_prefix(link_path, entry.point.path)
-            match entry.fs.symlink(target, rel_link):
-                Result.Ok(v):
-                    self.send_u64_reply(src_port, STATUS_OK, 1)
-                Result.Err(e):
-                    self.send_error_reply(src_port, STATUS_ERR, e)
-        else:
-            self.send_error_reply(src_port, STATUS_NOT_FOUND, "no filesystem for path")
+        match self.vfs.symlink(target, link_path):
+            Result.Ok(v):
+                self.send_u64_reply(src_port, STATUS_OK, 1)
+            Result.Err(e):
+                self.send_error_reply(src_port, STATUS_ERR, e)
 
     me dispatch_mount_list(src_port: u64):
         """Return list of mount points."""
@@ -438,6 +436,9 @@ impl VfsService:
 
     fn send_bytes_reply(dst_port: u64, status: i32, data: [u8]):
         """Send a reply with status + raw bytes."""
+        if data.len().to_u64() > VFS_IPC_REPLY_PAYLOAD_MAX:
+            self.send_error_reply(dst_port, STATUS_INVALID, "VFS reply exceeds IPC bound")
+            return
         var buf: [u8] = []
         _push_i32(buf, status)
         var i = 0
@@ -448,6 +449,9 @@ impl VfsService:
 
     fn send_text_reply(dst_port: u64, status: i32, text_val: text):
         """Send a reply with status + text payload."""
+        if text_val.len().to_u64() > VFS_IPC_REPLY_PAYLOAD_MAX:
+            self.send_error_reply(dst_port, STATUS_INVALID, "VFS reply exceeds IPC bound")
+            return
         var buf: [u8] = []
         _push_i32(buf, status)
         for ch in text_val:
@@ -458,8 +462,10 @@ impl VfsService:
         """Send an error reply with status + error message."""
         var buf: [u8] = []
         _push_i32(buf, status)
-        for ch in msg:
-            buf.push(ch.to_u8())
+        var index: u64 = 0u64
+        while index < msg.len() and index < VFS_IPC_REPLY_PAYLOAD_MAX:
+            buf.push(msg.byte_at(index))
+            index = index + 1u64
         _ipc_send(dst_port, self.port_id, buf)
 
     me stop():
@@ -497,6 +503,63 @@ fn _read_u64(addr: u64) -> u64:
 
 fn _read_i64(addr: u64) -> i64:
     mmio_read64(addr).to_i64()
+
+fn _vfs_has_nonempty_plain_path(addr: u64, payload_len: u32) -> bool:
+    """Accept one nonempty, un-delimited path occupying the whole payload."""
+    if payload_len == 0u32:
+        return false
+    var index: u32 = 0u32
+    while index < payload_len:
+        if _read_u8(addr + index.to_u64()) == 0u8:
+            return false
+        index = index + 1u32
+    true
+
+fn _vfs_has_exact_path_before_trailer(addr: u64, payload_len: u32, trailer_len: u32) -> bool:
+    """Require one nonempty path and its NUL delimiter immediately before a fixed trailer."""
+    if payload_len <= trailer_len + 1u32:
+        return false
+    val nul_offset = payload_len - trailer_len - 1u32
+    var index: u32 = 0u32
+    while index < nul_offset:
+        if _read_u8(addr + index.to_u64()) == 0u8:
+            return false
+        index = index + 1u32
+    _read_u8(addr + nul_offset.to_u64()) == 0u8
+
+fn _vfs_has_exact_two_nonempty_nul_paths(addr: u64, payload_len: u32) -> bool:
+    """Require exactly path\\0path, with neither empty segment nor trailing bytes."""
+    if payload_len < 3u32:
+        return false
+    var delimiter_seen = false
+    var index: u32 = 0u32
+    while index < payload_len:
+        val byte = _read_u8(addr + index.to_u64())
+        if byte == 0u8:
+            if delimiter_seen or index == 0u32 or index + 1u32 == payload_len:
+                return false
+            delimiter_seen = true
+        index = index + 1u32
+    delimiter_seen
+
+fn _vfs_request_payload_is_valid(method: u32, addr: u64, payload_len: u32) -> bool:
+    """Reject malformed fixed and delimited VFS payloads before dispatch."""
+    match method:
+        VFS_OPEN: _vfs_has_exact_path_before_trailer(addr, payload_len, 4u32)
+        VFS_READ: payload_len == 16u32
+        VFS_WRITE: payload_len >= 8u32
+        VFS_CLOSE: payload_len == 8u32
+        VFS_STAT: _vfs_has_nonempty_plain_path(addr, payload_len)
+        VFS_READDIR: _vfs_has_nonempty_plain_path(addr, payload_len)
+        VFS_MKDIR: _vfs_has_nonempty_plain_path(addr, payload_len)
+        VFS_UNLINK: _vfs_has_nonempty_plain_path(addr, payload_len)
+        VFS_RENAME: _vfs_has_exact_two_nonempty_nul_paths(addr, payload_len)
+        VFS_MOUNT_LIST: payload_len == 0u32
+        VFS_SEEK: payload_len == 17u32
+        VFS_CHMOD: _vfs_has_exact_path_before_trailer(addr, payload_len, 2u32)
+        VFS_SYMLINK: _vfs_has_exact_two_nonempty_nul_paths(addr, payload_len)
+        VFS_RMDIR: _vfs_has_nonempty_plain_path(addr, payload_len)
+        _: true
 
 fn _read_text(addr: u64, len: u32) -> text:
     """Read a text string from memory."""
@@ -557,9 +620,11 @@ fn _ipc_send(dst_port: u64, src_port: u64, data: [u8]):
     Encodes the data into a buffer and issues SYS_IPC_SEND = 20
     (kernel dispatcher case 20, _handle_ipc_send).
     """
-    # SYS_IPC_SEND = 20: (dst_port, src_port, data_ptr, data_len, 0).
+    # SYS_IPC_SEND = 20: (dst_port, src_port, data_ptr, data_len, TAG).
     # The kernel copies data from the caller's buffer to the receiver's buffer.
     extern fn unsafe_addr_of(ref: any) -> u64
-    val data_ptr = unsafe_addr_of(data)
+    # `unsafe_addr_of([u8])` addresses the Simple array header.  The copied
+    # syscall ABI consumes byte zero, so skip that 16-byte header.
+    val data_ptr = unsafe_addr_of(data) + VFS_IPC_BYTE_ARRAY_HEADER_BYTES
     val data_len = data.len().to_u64()
-    syscall(SYS_IPC_SEND, dst_port, src_port, data_ptr, data_len, 0)
+    syscall(SYS_IPC_SEND, dst_port, src_port, data_ptr, data_len, IPC_COPIED_SERVICE_TAG)

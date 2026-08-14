@@ -202,6 +202,19 @@ impl IpcManager:
 
         Returns the new port. Returns a port with id=0 if table is full.
         """
+        # Service discovery must have one unambiguous destination.  Anonymous
+        # reply ports remain freely allocatable, but a second live named port
+        # would make connect(name) silently select whichever table slot happens
+        # to be visited first.
+        if name != "":
+            var existing_index = 0
+            while existing_index < MAX_PORTS:
+                val existing = self.ports[existing_index]
+                if existing != nil:
+                    val live = existing
+                    if live.name == name:
+                        return IpcPort(id: 0, owner: owner.id)
+                existing_index = existing_index + 1
         val slot = self._find_empty_port_slot()
         if slot < 0:
             return IpcPort(id: 0, owner: owner.id)
@@ -218,6 +231,28 @@ impl IpcManager:
         )
         self.ports[slot] = port_state
         port
+
+    me destroy_port_owned(task: TaskId, port_id: u64) -> bool:
+        """Destroy one live port only when `task` is its recorded owner.
+
+        Queue payload references and receive-waiter references are released
+        before the table slot is returned to the allocator.  Port IDs remain
+        monotonic, so a stale endpoint can never address a newly allocated
+        port through slot reuse.
+        """
+        val slot = self._find_port_by_id(port_id)
+        if slot < 0:
+            return false
+        val state = self.ports[slot]
+        if state == nil:
+            return false
+        var live = state
+        if live.port.owner != task.id:
+            return false
+        live.queue.clear()
+        live.waiters = []
+        self.ports[slot] = nil
+        true
 
     me connect(name: text) -> IpcPort?:
         """Look up a port by name for service discovery.
@@ -249,6 +284,28 @@ impl IpcManager:
             return 0
         val live = state
         live.port.owner
+
+    fn port_has_service_name(port_id: u64) -> bool:
+        """Return whether a live port was registered for service discovery."""
+        val slot = self._find_port_by_id(port_id)
+        if slot < 0:
+            return false
+        val state = self.ports[slot]
+        if state == nil:
+            return false
+        val live = state
+        live.name != ""
+
+    fn port_is_owned_by(port_id: u64, owner_id: u64) -> bool:
+        """Check a live port owner without overloading owner ID zero as absence."""
+        val slot = self._find_port_by_id(port_id)
+        if slot < 0:
+            return false
+        val state = self.ports[slot]
+        if state == nil:
+            return false
+        val live = state
+        live.port.owner == owner_id
 
     # -- Message Passing -----------------------------------------------------
 
@@ -283,14 +340,7 @@ impl IpcManager:
         if claimed_source_port == 0u64 or header.src_port != claimed_source_port:
             return IPC_OWNED_SOURCE_OWNER_MISMATCH
 
-        val source_slot = self._find_port_by_id(claimed_source_port)
-        if source_slot < 0:
-            return IPC_OWNED_SOURCE_OWNER_MISMATCH
-        val source_state = self.ports[source_slot]
-        if source_state == nil:
-            return IPC_OWNED_SOURCE_OWNER_MISMATCH
-        val claimed_source = source_state
-        if claimed_source.port.owner != sender_task.id:
+        if not self.port_is_owned_by(claimed_source_port, sender_task.id):
             return IPC_OWNED_SOURCE_OWNER_MISMATCH
 
         val destination_slot = self._find_port_by_id(header.dst_port)
@@ -516,9 +566,7 @@ impl IpcManager:
             if ps != nil:
                 val port_state = ps
                 if port_state.port.owner == task_id.id:
-                    var draining = port_state
-                    draining.queue.clear()
-                    self.ports[i] = nil
+                    self.destroy_port_owned(task_id, port_state.port.id)
             i = i + 1
 
     fn queued_message_count(port_id: u64) -> i32:

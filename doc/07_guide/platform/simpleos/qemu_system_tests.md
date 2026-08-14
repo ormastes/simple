@@ -32,8 +32,9 @@ checker (`Rv64BootGateState`, `rv64_boot_gate_advance`, and
 observations. The host evidence owner emits the sole terminal `TEST PASSED`.
 
 OpenSSH evidence uses separate real sessions for `true`, `simple --version`,
-and `simple.smf --version`, followed by bad-password rejection and another
-accept receipt. A fixed combined command, canned stdout, banner-only socket,
+and `simple.smf --version`, followed by bad-password rejection and a later
+successful connection. Every completed or rejected session must have its own
+accept-resumed correlation receipt. A fixed combined command, canned stdout, banner-only socket,
 marker-only PID1, or fixed rectangle/string WM fixture is not production boot
 evidence.
 
@@ -43,6 +44,39 @@ in pure-Simple MIR method-call lowering after HIR; see
 `doc/08_tracking/bug/stage3_selfhost_post_hir_segfault_2026-08-14.md`. Resume
 with the exact WP-A commands in the canonical plan, then run each focused and
 live criterion once. Do not substitute the Rust seed or Stage 2 artifact.
+The current source lanes B-F are integrated; this statement blocks executable
+evidence only, not additional speculative source rewrites. In particular, the
+IPC/VFS wave has syscall-18 owner-only destruction, named-service discovery,
+anonymous reply ports, bounded copied frames, public FS binary decoding,
+manager-owned mutations, POSIX access-mode flags and FD READ/WRITE/SEEK/close; WM/Window send item-zero
+bytes and SSH filesystem-exec lifecycle are integrated too. TODO808 retains
+the bounded stdout/status cases, TODO809 retains PID/frame evidence, TODO806
+owns the combined live row, and TODO807 owns maintain/docgen/manual review.
+
+P1c fixes the service boundary without creating a second wire protocol:
+`IPC_COPIED_SERVICE_TAG` is the sole copied-message discriminator and all
+other values retain the legacy send ABI; `IpcDestroyPort` permits only the
+recorded owner to revoke a live port. VFS close remembers terminal handles by
+a monotonic issue watermark, so repeated confirmed closes are idempotent
+without an unbounded tombstone list; a lost close reply preserves the final
+local FD for retry. SOSIX `io.spl` and `io_rw.spl` converge on the shared named
+VFS owner and the current READ/WRITE/SEEK frames. After TODO667, execute once
+the canonical IPC-handoff, destroy-port, VFS-wire, `fd_io_route`, and
+`sosix/io` rows from the plan, retain their output and Stage 4 provenance, and
+hand them to the primary RV64 merge owner and normal/highest-capability Codex
+reviewer. They are focused source-contract evidence only; TODO806 is still the
+remaining combined QEMU runtime blocker.
+
+Terra's 2026-08-14 terminal-only diagnostics do not relax this rule. The
+release binary checked `ssh_live_entry.spl` and the WM-resource spec with exit
+0, and the WM-resource interpreter spec exited 0 with empty output; the IPC
+handoff focused run was reported PASS. Those outputs were not retained under
+the canonical artifact root, so they are not Stage 4, system, or QEMU receipts.
+The release binary then printed `Checking...` and segfaulted while loading
+`rv64_ssh_live_login_in_qemu_spec.spl`; no core/log was retained. Preserve the
+next attempt's terminal output and provenance, run it only after TODO667, and
+never represent either the narrow PASS diagnostics or the checker crash as a
+live lifecycle verdict.
 
 ## Engine2D Exact-Oracle Gate
 

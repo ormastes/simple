@@ -1,0 +1,33 @@
+use std.spec
+use app.io.mod.{file_read}
+
+describe "WM and Window IPC wire contract":
+    it "sends WM replies and Window requests from byte zero, not array metadata":
+        val wm_codec = file_read("src/os/services/wm/wm_codec.spl")
+        val window_helpers = file_read("src/os/userlib/_Window/ipc_helpers.spl")
+        val window_client = file_read("src/os/userlib/_Window/client.spl")
+        expect(wm_codec).to_contain("val data_ptr = unsafe_addr_of(data) + 16u64")
+        expect(window_helpers).to_contain("val data_ptr = unsafe_addr_of(data) + 16u64")
+        expect(wm_codec).to_contain("data_len, IPC_COPIED_SERVICE_TAG")
+        expect(window_helpers).to_contain("data_len, IPC_COPIED_SERVICE_TAG")
+        expect(window_client).to_contain("val IPC_COPIED_SERVICE_TAG: u64 = 0xFFFFFFFFFFFFFFFFu64")
+        expect(wm_codec).to_contain("SYS_IPC_SEND copies from the first encoded wire byte")
+        expect(window_helpers).to_contain("SYS_IPC_SEND copies from the first encoded wire byte")
+
+    it "keeps method-prefixed requests and raw status replies on the existing path":
+        val client_methods = file_read("src/os/userlib/_Window/client_methods.spl")
+        val request_start = client_methods.index_of("me _send_request(method: u32, payload: [u8]):")
+        val request_end = client_methods.index_of("me _send_window_id_request(method: u32, window_id: u64):")
+        val reply_start = client_methods.index_of("fn _recv_reply() -> [u8]:")
+        val reply_end = client_methods.index_of("fn _parse_incoming_event(msg_addr: u64)")
+        expect(request_start).to_be_greater_than(-1)
+        expect(request_end).to_be_greater_than(request_start)
+        expect(reply_start).to_be_greater_than(request_end)
+        expect(reply_end).to_be_greater_than(reply_start)
+        val request = client_methods.slice(request_start, request_end)
+        val reply = client_methods.slice(reply_start, reply_end)
+        expect(request).to_contain("_push_u32(msg, method)")
+        expect(request).to_contain("_ipc_send(self.compositor_port, self.app_port, msg)")
+        expect(reply).to_contain("Returns the raw reply bytes")
+        expect(reply).to_contain("val payload_addr = msg_addr + 32")
+        expect(reply).to_contain("result.push(_read_u8_at(payload_addr + i.to_u64()))")

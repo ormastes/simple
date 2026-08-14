@@ -1,0 +1,96 @@
+use std.spec.{describe, it, expect}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.ipc.syscall.{syscall_handler_ipc_state}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.types.ipc_types.{IpcMessage}
+use os.kernel.types.syscall_types.{SyscallArgs}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilitySet}
+
+describe "IpcDestroyPort lifecycle":
+    it "releases a queued message and allows a fresh port allocation":
+        var ipc = IpcManager.new()
+        val owner = TaskId(id: 7)
+        val sender = TaskId(id: 8)
+        val destination = ipc.create_port(owner, "reply-port")
+        val source = ipc.create_port(sender, "client-port")
+        val message = IpcMessage(src_port: source.id, dst_port: destination.id, method: 4u32, flags: 0u32, payload_len: 0u32, cap_count: 0u32)
+
+        expect(ipc.send(message)).to_equal(0)
+        expect(ipc.queued_message_count(destination.id)).to_equal(1)
+        val received = ipc.recv(destination, 0)
+        expect(received != nil).to_equal(true)
+        expect(ipc.send(message)).to_equal(0)
+        ipc.add_waiter(destination, TaskId(id: 99))
+        expect(ipc.destroy_port_owned(owner, destination.id)).to_equal(true)
+        expect(ipc.queued_message_count(destination.id)).to_equal(0)
+        expect(ipc.get_first_waiter(destination.id)).to_equal(nil)
+        expect(ipc.connect("reply-port")).to_equal(nil)
+
+        val replacement = ipc.create_port(owner, "reply-port")
+        expect(replacement.id).to_be_greater_than(destination.id)
+        expect(ipc.connect("reply-port") != nil).to_equal(true)
+
+    it "rejects a wrong owner and an absent port without consuming either":
+        var ipc = IpcManager.new()
+        val owner = TaskId(id: 41)
+        val other = TaskId(id: 42)
+        val port = ipc.create_port(owner, "owned-reply-port")
+
+        expect(ipc.destroy_port_owned(other, port.id)).to_equal(false)
+        expect(ipc.port_owner_task_id(port.id)).to_equal(owner.id)
+        expect(ipc.destroy_port_owned(owner, 999999u64)).to_equal(false)
+        expect(ipc.destroy_port_owned(owner, port.id)).to_equal(true)
+        expect(ipc.destroy_port_owned(owner, port.id)).to_equal(false)
+
+    it "lets a deny-all task close only its own anonymous reply port through the generic dispatcher":
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        val current = scheduler.get_current()
+        # Reply-port destruction is owner-authorized self-revocation. No
+        # IpcListen capability is issued to ordinary anonymous-port clients.
+        ipc.cap_manager.init_task(current, CapabilitySet.empty())
+        val port = ipc.create_port(current, "")
+        val state = syscall_handler_ipc_state(
+            SyscallArgs(id: 18u64, arg0: port.id, arg1: 0u64, arg2: 0u64, arg3: 0u64, arg4: 0u64, arg5: 0u64),
+            scheduler, ipc, KernelLog.new(8)
+        )
+
+        expect(state.result.value).to_equal(0)
+        expect(state.ipc.port_owner_task_id(port.id)).to_equal(0u64)
+
+        var after_destroy = state.ipc
+        val foreign_port = after_destroy.create_port(TaskId(id: 99), "")
+        val foreign = syscall_handler_ipc_state(
+            SyscallArgs(id: 18u64, arg0: foreign_port.id, arg1: 0u64, arg2: 0u64, arg3: 0u64, arg4: 0u64, arg5: 0u64),
+            state.scheduler, after_destroy, KernelLog.new(8)
+        )
+        expect(foreign.result.value).to_equal(-1)
+        expect(foreign.ipc.port_owner_task_id(foreign_port.id)).to_equal(99u64)
+
+    it "keeps IPC operations 20 through 23 capability-gated":
+        val scheduler = Scheduler.new()
+        var ipc = IpcManager.new()
+        ipc.cap_manager.init_task(scheduler.get_current(), CapabilitySet.empty())
+
+        val send = syscall_handler_ipc_state(
+            SyscallArgs(id: 20u64, arg0: 0u64, arg1: 0u64, arg2: 0u64, arg3: 0u64, arg4: 0u64, arg5: 0u64),
+            scheduler, ipc, KernelLog.new(8)
+        )
+        expect(send.result.value).to_equal(-1)
+        val recv = syscall_handler_ipc_state(
+            SyscallArgs(id: 21u64, arg0: 0u64, arg1: 0u64, arg2: 0u64, arg3: 0u64, arg4: 0u64, arg5: 0u64),
+            scheduler, send.ipc, KernelLog.new(8)
+        )
+        expect(recv.result.value).to_equal(-1)
+        val created = syscall_handler_ipc_state(
+            SyscallArgs(id: 22u64, arg0: 0u64, arg1: 0u64, arg2: 0u64, arg3: 0u64, arg4: 0u64, arg5: 0u64),
+            scheduler, recv.ipc, KernelLog.new(8)
+        )
+        expect(created.result.value).to_equal(-1)
+        val connected = syscall_handler_ipc_state(
+            SyscallArgs(id: 23u64, arg0: 0u64, arg1: 0u64, arg2: 0u64, arg3: 0u64, arg4: 0u64, arg5: 0u64),
+            scheduler, created.ipc, KernelLog.new(8)
+        )
+        expect(connected.result.value).to_equal(-1)
