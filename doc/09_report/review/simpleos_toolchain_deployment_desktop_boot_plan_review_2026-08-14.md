@@ -5,7 +5,10 @@ Scope: plan-document completion only
 Canonical plan:
 `doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`
 Baseline inspected: `683e2d1009e16a3db6ed59d547eeb1592a851b88`
-Reviewed plan commit: `986b9590e9e3c025c954a074c72cf3b330b234e1`
+Reviewed and merged plan commit: `f9d91bbc2c14e94c6fcec73879054a64a4afc2d1`
+Integration lineage: the receipt-record commit and final synchronized HEAD are
+descendants of this reviewed plan commit; `/tmp/restart12-simpleos.done` owns
+the final reachable HEAD because a commit cannot contain its own hash.
 Verdict: PASS — plan contract only; implementation WARN/BLOCKED
 
 ## Parallel findings merged
