@@ -8,6 +8,10 @@ claims below without rewriting the historical T1--T20 record. Operator guide:
 `doc/07_guide/ui/rendering/cached_render_entry_closure.md`; retained result:
 `doc/09_report/drawir_sparse_dynamic_8k_attempt_2026-08-12.md`; blocker:
 `doc/08_tracking/bug/self_hosted_cli_native_build_silent_no_artifact_2026-08-14.md`.
+The executable contract is
+`test/03_system/check/cached_render_entry_closure_contract_spec.spl`; TODO686,
+TODO687, and TODO688 own the CLI fix, admitted 8K carrier, and self-hosted
+SSpec/maintenance/docgen evidence.
 
 The only available artifact is
 `release/x86_64-unknown-linux-gnu/simple`. It is an **unadmitted purported

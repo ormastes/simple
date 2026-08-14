@@ -35,3 +35,9 @@ Retained report:
 `doc/09_report/drawir_sparse_dynamic_8k_attempt_2026-08-12.md`.
 Open blocker:
 `doc/08_tracking/bug/self_hosted_cli_native_build_silent_no_artifact_2026-08-14.md`.
+
+Modern contract coverage:
+`test/03_system/check/cached_render_entry_closure_contract_spec.spl`, with its
+operator plan at `doc/03_plan/sys_test/cached_render_entry_closure.md`. TODO686
+owns the CLI fix, TODO687 owns native 8K evidence, and TODO688 owns admitted
+self-hosted SSpec, maintenance, and docgen evidence.
