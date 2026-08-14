@@ -1,6 +1,6 @@
 # Mission-Critical Infrastructure Hardening V2 — Parallel Agent Plan
 
-**Status:** contract frozen for implementation
+**Status:** implementation WARN — Stage 3 self-host blocker active
 **Merge owner:** root Codex
 **Final reviewer:** a separate normal/highest-capability Codex (or equivalent
 highest-capability model), not a lane author
@@ -19,6 +19,36 @@ Lower-model sidecars may inventory or draft lane-local cases, but their output
 is not accepted until reviewed by a normal/highest-capability model. Only the
 merge owner integrates. Only the independent final reviewer may sign the final
 review receipt.
+
+## Restart12 review record — 2026-08-14
+
+- Merge owner: root Codex in detached `restart12-infra`.
+- Acceptance/traceability sidecar: `/root/acceptance_audit`, read-only; findings
+  merged into the canonical sys-test plan.
+- Guide/doc-wiki sidecar: `/root/guide_audit`, read-only; stale blocker,
+  cross-link, manual, and reviewer-record findings merged.
+- Higher-capability internal reviewer: `/root/higher_model_review`,
+  `gpt-5.6-sol` xhigh, 2026-08-14. Initial verdict: FAIL with seven mandatory
+  truthfulness/freshness corrections. Corrections were merged and submitted
+  for follow-up review. Follow-up verdict: FAIL with three remaining exactness
+  corrections (allocation/verification commands, unretained static status, and
+  canonical external artifact paths); those corrections were merged for final
+  re-review. Second follow-up verdict: FAIL on one ambiguous R12-03 command
+  reference; the exact DomainArena command was inserted. Final verdict: PASS
+  for truthful resumable plan-document completeness. This internal review does
+  not imply feature verification or release readiness and does not replace the external
+  independently signed release reviewer.
+- Current integrated implementation baseline:
+  `f26936914d9833a000044757f6475bc7fd6e62cb`.
+- Owned blocker: fresh Stage 2 passes sanity, then Stage 3 self-host exits 139;
+  see `doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md`.
+- Canonical status, evidence, resume commands, artifacts, and reviewer fields:
+  `doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md`.
+
+No sidecar may mark REQ/NFR rows complete. Contract-only evidence remains
+BLOCKED for release, and the higher-capability reviewer must reject any plan
+row lacking an exact evidence path, blocker, resume command, owner, and final
+reviewer.
 
 ## Wave 0 — shared contract lock (root Codex)
 

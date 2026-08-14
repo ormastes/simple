@@ -1,5 +1,9 @@
 # Layer Expert: Mission-Critical Memory
 
+The selected relaxed-allocation profile, fault-injection evidence, and blocked
+release rows are tracked by
+`doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md`.
+
 Owner surfaces:
 
 - `src/lib/nogc_sync_mut/mission_critical/domain_arena_v1.spl`

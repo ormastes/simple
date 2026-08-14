@@ -16,6 +16,8 @@ Preserve these invariants:
 - missing, stale, skipped, synthetic, cached-only, or external-host-unavailable
   evidence blocks the applicable claim.
 
-Do not edit another session's conflicted files or promote the Rust bootstrap
-seed into release evidence. Focused tests are currently blocked by the
-`runtime_compiler.spl` merge conflict until its owner resolves it.
+Do not promote the Rust bootstrap seed or Stage 2 into release evidence. The
+old `runtime_compiler.spl` conflict is resolved. Current-head focused execution
+is blocked by Stage 3 self-host exit 139 after fresh Stage 2 sanity; use
+`doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md` and the canonical
+ledger in `doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md`.

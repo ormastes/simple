@@ -1,47 +1,51 @@
 # Mission-Critical Infrastructure Hardening V2 — System Test Plan
 
-**Status:** implementation-ready plan
+**Status:** implementation incomplete — WARN handoff
 **Selection:** `C1 + O1 + R2 + M2 + N2`
 **Executable spec target:** `test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl`
 **Generated operator manual:** `doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md`
 
-## Restart12 infrastructure lane status (2026-08-14)
+## Authoritative current state (2026-08-14)
 
 This is the canonical execution plan for the fresh detached `restart12-infra`
 lane.  The lane owns the host-independent compiler, SimpleOS-manifest, packed
 rendering, allocation, process, and aggregate-contract hardening needed before
 the release-facing evidence producers may be trusted.
 
-Current acceptance inventory at `origin/main` (`034b7466c8a`):
+Current integrated baseline is `f26936914d9833a000044757f6475bc7fd6e62cb`,
+reachable from `origin/main`. The phase is `impl-in-progress`; the last bounded
+bootstrap attempt completed Stage 2 and its sanity check, then the exact fresh
+Stage 2 binary segfaulted during Stage 3 self-hosting. This is an owned FAIL,
+not an external-host warning and not a verification PASS.
 
-- [ ] Compiler admission fixtures use supported whole-value reconstruction;
-  tamper tests distinguish pre-hash rejection from correctly re-hashed later
-  validation failures.
-- [ ] Draw IR generation admission persists active/retired state, fails closed
-  at capacity and terminal generation, and recovers only through explicit
-  abort/retire transitions.
-- [ ] Relaxed allocation profile identity is canonical SHA-256 and the
-  fault-injection telemetry/rollback ledger is stable.
-- [ ] The certified SimpleOS manifest has canonical content identity, binds
-  every payload and stress receipt, and rejects PASS-like evidence on
-  unselected cells.
-- [ ] DrawIR-v3 owns fixed packed slots, encoding cursor/content hashes,
-  immutable sealed publication, a bounded queue, Engine2D consumption
-  verification, and retirement.
-- [ ] Aggregate receipt lookup guards absence before indexing and all focused
-  compiler/rendering/allocation/SimpleOS/aggregate tests pass once.
-- [ ] Verification gates for changed compiler/core/lib and rendering scope pass
-  once, with no executable specs under `doc/06_spec` and no new runtime/env
-  facade bypass.
+### Restart12 owned acceptance ledger
+
+| Item | Current classification | Exact source/evidence paths | Exact resume command | Owner | Final reviewer |
+|---|---|---|---|---|---|
+| R12-01 compiler receipt reconstruction | source implemented; current-head execution BLOCKED | `src/compiler/00.common/mission_critical/compiler_admission.spl`; `test/01_unit/compiler/mission_critical/compiler_admission_spec.spl` | `bin/simple test test/01_unit/compiler/mission_critical/compiler_admission_spec.spl --mode=interpreter` after Stage 4 admission | compiler lane | highest-capability Codex |
+| R12-02 Draw IR admission lifecycle | source implemented; prior focused contract only; current-head BLOCKED | `src/lib/common/mission_critical/draw_ir_generation_arena_v3.spl`; `test/01_unit/lib/common/mission_critical/draw_ir_generation_arena_v3_spec.spl` | `bin/simple test test/01_unit/lib/common/mission_critical/draw_ir_generation_arena_v3_spec.spl --mode=interpreter` | rendering lane | highest-capability Codex |
+| R12-03 allocation SHA-256 and rollback | source implemented; contract-only | `src/lib/nogc_sync_mut/mission_critical/domain_arena_v1.spl`; `test/01_unit/lib/nogc_sync_mut/mission_critical/domain_arena_v1_spec.spl` | `bin/simple test test/01_unit/lib/nogc_sync_mut/mission_critical/domain_arena_v1_spec.spl --mode=interpreter`, then Resume A1 below | memory lane | highest-capability Codex |
+| R12-04 SimpleOS manifest identity | source implemented; contract-only | `src/os/sosix/mission_critical/certified_manifest.spl`; `test/01_unit/os/sosix/certified_manifest_spec.spl` | `bin/simple test test/01_unit/os/sosix/certified_manifest_spec.spl --mode=interpreter` then Resume O1 | SimpleOS lane | highest-capability Codex |
+| R12-05 packed DrawIR/Engine2D handoff | source implemented; owner contract only; no device proof | `src/lib/common/mission_critical/draw_ir_packed_generation_store_v3.spl`; `src/lib/gc_async_mut/gpu/engine2d/draw_ir_packed_owner_v3.spl`; matching specs under `test/01_unit/lib/common/mission_critical/` and `test/01_unit/lib/gc_async_mut/gpu/engine2d/` | `bin/simple test test/01_unit/lib/common/mission_critical/draw_ir_packed_generation_store_v3_spec.spl --mode=interpreter` then `bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_packed_owner_v3_spec.spl --mode=interpreter` | rendering lane | highest-capability Codex |
+| R12-06 guarded aggregate indexing | source implemented; collector contract only | `src/lib/nogc_sync_mut/mission_critical/mci_evidence_manifest_v1.spl`; `test/01_unit/lib/nogc_sync_mut/mission_critical/mci_evidence_manifest_v1_spec.spl`; `test/01_unit/scripts/mci_v2_aggregate_contract_test.shs` | `bin/simple test test/01_unit/lib/nogc_sync_mut/mission_critical/mci_evidence_manifest_v1_spec.spl --mode=interpreter` then `sh test/01_unit/scripts/mci_v2_aggregate_contract_test.shs` | aggregate merge owner | independent release reviewer |
+| R12-07 final verification | static results were observed PASS but no hashed receipt was retained; treat as unretained and rerun once after final edits; runtime gates unexecuted | `scripts/audit/direct-env-runtime-guard.shs`; `scripts/audit/numbered-artifact-guard.shs`; `scripts/check/check-rendering-source-coupling.shs` | Resume V1 below after Stage 4 admission | merge owner | highest-capability Codex |
+
+Contract implementation is not release evidence. REQ-MCI-001..011 and
+NFR-MCI-001..009 remain BLOCKED unless their row has a fresh, signed, exact-run
+producer receipt and executable scenario evidence. The current three broad
+SSpec examples are umbrella contract checks; they do not prove all 20 planned
+requirement/NFR scenarios individually.
 
 Known release blockers outside this isolated implementation lane remain
 fail-closed: independently signed peer compiler evidence, live trust-key
 provisioning, current QEMU/hardware and browser/RenderDoc/Vulkan evidence, a
 provenanced target-native SimpleOS compiler payload, platform-specific Metal
 evidence, and the 24-hour stress run.  These prevent a mission-critical release
-PASS but do not excuse failures in the host-independent contracts above.  This
-lane reports `WARN` after a reachable push when only those external evidence
-rows remain blocked; any owned acceptance failure prevents integration.
+PASS and do not excuse failures in the host-independent contracts above. The
+already-integrated restart12 implementation handoff is WARN because the owned
+Stage 3 failure remains open; it is not a claim that only external rows remain.
+
+### Bootstrap verification-once ledger
 
 Bootstrap cycle 1 exposed an owned compiler blocker before acceptance testing:
 Stage 2 rejected an unparenthesized multiline `if` continuation in the typed
@@ -62,9 +66,139 @@ exhausted.  Therefore the host-independent focused specs and compiler/core/MCP
 runtime gates remain unexecuted rather than being rerun through the stale
 release compiler or substituted with bootstrap-seed evidence.  Integration is
 `WARN`, with this owned Stage 3 crash still open; it is not a mission-critical
-verification PASS.
+verification PASS. Retained evidence:
 
-**Stale-evidence recovery:** The authoritative producer, prerequisites, and
+- Stage 2 binary:
+  `build/restart12-bootstrap/stage2/x86_64-unknown-linux-gnu/simple`, SHA-256
+  `7617c924d6848928f3f7495e3d6691d908505fb677d19b9f07f9697ebf9aaec5`.
+- Cycle-3 progress log: `build/restart12-bootstrap/progress-cycle3.log`,
+  SHA-256 `d59a1256be2afbe50476919803aca20993ca58e45e7e7a98ee3edd1e07707322`.
+- Stage-3 child log is empty because the process died before diagnostic output;
+  its empty SHA-256 is not affirmative evidence. Exit 139 was observed on the
+  live driver console but no terminal receipt retained it, so the signal result
+  is an unretained observation pending the next fresh reproduction.
+- Tracking record:
+  `doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md`.
+- Exact resume command, in a fresh session because this session exhausted the
+  three-cycle cap:
+  `sh scripts/bootstrap/bootstrap-from-scratch.sh --pure-simple --full-cli --no-mcp --diagnostics=test --diagnostic-child-compiler=/mnt/data/worktrees/restart12-infra/build/restart12-bootstrap/stage2/x86_64-unknown-linux-gnu/simple --output=build/restart12-bootstrap --jobs=full --progress=build/restart12-bootstrap/progress-resume.log`.
+
+### External host and authority blockers
+
+| Row | Missing prerequisite | Exact resume command | Retained/canonical artifacts | Owner | Final reviewer |
+|---|---|---|---|---|---|
+| peer compiler + trust | pinned live key and independently signed peer build | Resume C1 below | `build/evidence/mci-v2/compiler/artifacts/compiler.evidence`; `build/evidence/mci-v2/compiler/receipts/compiler.cross-host-comparison.unsigned.template` | compiler operator | independent release reviewer |
+| target-native SimpleOS | admitted compiler, bootable current image, QEMU/native host | Resume O1 below | `build/evidence/mci-v2/simpleos/artifacts/simpleos.evidence`; `build/evidence/mci-v2/simpleos/receipts/simpleos.receipt.unsigned.template`; collector artifacts named by the 24-row manifest | SimpleOS operator | independent release reviewer |
+| browser/RenderDoc/Vulkan | prepared Vulkan/RenderDoc browser host and real RDOC captures | Resume G1 below | `build/evidence/mci-v2/rendering`, signed rendering manifest, and valid `.rdc` files | rendering operator | independent release reviewer |
+| macOS Metal | prepared native macOS Metal host | Resume M1 below | `build/production_gui_web_renderer_parity_evidence_*` and dated parity report | macOS rendering operator | independent release reviewer |
+| 24-hour stress | selected certified cells and uninterrupted bounded run | Resume S1 below | `build/evidence/mci-v2/stress/artifacts/stress.evidence`; `build/evidence/mci-v2/stress/receipts/stress.receipt.unsigned.template`; input campaign at `$STRESS_INPUT_DIR` | platform operators | independent release reviewer |
+| real independent review | complete content-addressed producer graph and separate reviewer key | Resume R1 below | `build/evidence/mci-v2/reviewer-generation.current`; `build/evidence/mci-v2/reviewer-generations/$CANDIDATE/reviewer.receipt`; `reviewer.sig`; `complete.env` | independent reviewer | release authority |
+
+The external resume commands use explicit operator-provisioned variables; an
+unset variable is a visible prerequisite, not permission to invent evidence:
+
+```sh
+# Resume C1 — compiler producer
+sh scripts/check/check-mci-v2-compiler-admission.shs --mode live \
+  --evidence build/evidence/mci-v2/compiler --run-id "$RUN_ID" \
+  --compiler "$COMPILER" --provenance "$PROVENANCE" \
+  --provenance-signature "$PROVENANCE_SIGNATURE" --trust-key "$TRUST_KEY" \
+  --parent-receipt "$PARENT_RECEIPT" --parent-signature "$PARENT_SIGNATURE" \
+  --parent-trust-key "$PARENT_TRUST_KEY" --captured-at-utc-ns "$CAPTURED_NS" \
+  --valid-until-utc-ns "$VALID_NS" --now-utc-ns "$NOW_NS"
+
+# Resume O1 — SimpleOS producer
+sh scripts/check/check-mci-v2-simpleos-manifest.shs \
+  --evidence build/evidence/mci-v2/simpleos --manifest "$PLATFORM_MANIFEST" \
+  --configuration-manifest "$CONFIG_MANIFEST" --run-id "$RUN_ID" \
+  --source-hash "$SOURCE_HASH" --configuration-hash "$CONFIG_HASH" \
+  --compiler-receipt-hash "$COMPILER_RECEIPT_HASH" \
+  --captured-at-utc-ns "$CAPTURED_NS" --valid-until-utc-ns "$VALID_NS" \
+  --now-utc-ns "$NOW_NS" --trusted-key-id "$TRUSTED_KEY_ID" \
+  --collector-trust-key "$COLLECTOR_KEY" --collector-key-id "$COLLECTOR_KEY_ID"
+
+# Resume A1 — allocation and fault-injection producer
+sh scripts/check/check-mci-v2-allocation.shs \
+  --evidence build/evidence/mci-v2 --run-id "$RUN_ID" \
+  --source-hash "$SOURCE_HASH" --configuration-hash "$CONFIG_HASH" \
+  --captured-at-utc-ns "$CAPTURED_NS" --valid-until-utc-ns "$VALID_NS" \
+  --compiler-launcher "$COMPILER_LAUNCHER" \
+  --compiler-launcher-receipt "$COMPILER_LAUNCHER_RECEIPT" \
+  --compiler-launcher-signature "$COMPILER_LAUNCHER_SIGNATURE" \
+  --launcher-trust-policy "$LAUNCHER_TRUST_POLICY" --simple-bin "$ADMITTED_STAGE4"
+
+# Resume S1 — stress producer after a genuine 24-hour input campaign
+sh scripts/check/check-mci-v2-stress.shs --evidence build/evidence/mci-v2/stress \
+  --input-dir "$STRESS_INPUT_DIR" --run-id "$RUN_ID" \
+  --source-hash "$SOURCE_HASH" --configuration-hash "$CONFIG_HASH" \
+  --trusted-key "$TRUST_KEY" --trusted-key-id "$TRUSTED_KEY_ID"
+
+# Resume G1 — capture live Simple/Chrome/Electron RDOC evidence, then admit it
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc
+sh scripts/check/check-mci-v2-rendering.shs \
+  --evidence build/evidence/mci-v2 --manifest "$RENDER_MANIFEST" \
+  --manifest-signature "$RENDER_SIGNATURE" --collector-key "$COLLECTOR_KEY" \
+  --collector-key-id "$COLLECTOR_KEY_ID" --collector-trust-policy "$RENDER_POLICY" \
+  --run-id "$RUN_ID" --source-hash "$SOURCE_HASH" \
+  --configuration-hash "$CONFIG_HASH" --captured-at-utc-ns "$CAPTURED_NS" \
+  --valid-until-utc-ns "$VALID_NS" --now-utc-ns "$NOW_NS"
+
+# Resume M1 — native macOS Metal/readback production parity producer
+SIMPLE_BIN="$ADMITTED_STAGE4" \
+BUILD_ROOT="build/production_gui_web_renderer_parity_evidence_$(date -u +%Y%m%d)" \
+REPORT_PATH="doc/09_report/production_gui_web_renderer_parity_evidence_$(date -u +%F).md" \
+sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
+
+# Resume R1 — independently administered reviewer
+sh scripts/check/check-mci-v2-independent-review.shs \
+  --evidence build/evidence/mci-v2 --aggregate-report "$AGGREGATE_REPORT" \
+  --candidate-graph "$CANDIDATE_GRAPH" --decision "$REVIEW_DECISION" \
+  --decision-signature "$REVIEW_SIGNATURE" --reviewer-key "$REVIEWER_KEY" \
+  --reviewer-key-id "$REVIEWER_KEY_ID" --reviewer-trust-policy "$REVIEW_POLICY" \
+  --producer-key "$PRODUCER_KEY" --producer-key-id "$PRODUCER_KEY_ID" \
+  --now-utc-ns "$NOW_NS"
+
+# Resume V1 — final changed-file/static and compiler/core/MCP gates, once each
+sh scripts/audit/numbered-artifact-guard.shs --working
+sh scripts/audit/direct-env-runtime-guard.shs --working
+sh scripts/check/check-rendering-source-coupling.shs
+test "$(find doc/06_spec -name '*_spec.spl' | wc -l | tr -d ' ')" = 0
+bin/simple check src/compiler
+bin/simple check src/lib
+bin/simple check src/app/mcp
+bin/simple check src/app/simple_lsp_mcp
+SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
+sh scripts/audit/numbered-artifact-guard.shs --staged
+sh scripts/audit/direct-env-runtime-guard.shs --staged
+git diff --cached --check
+```
+
+### SPipe and documentation completion gap
+
+The current manual is hand-maintained and has no current pure-Simple docgen
+receipt. `MCI-DOC-001/002` remain BLOCKED until an admitted Stage 4 CLI runs
+the canonical `bin/simple spipe-docgen ...` command below with `0 stubs`, after
+the executable spec has one real scenario owner for every planned ID. The
+internal parallel plan/guide audits completed on 2026-08-14; their findings are
+merged here. Internal model review is process quality control and does not
+replace the independently signed release-review receipt required by
+NFR-MCI-009.
+
+### Implementation handoff and resume order
+
+1. Diagnose and fix the Stage 3 exit-139 owner path in a fresh capped session.
+2. Produce and admit an exact-current Stage 4 full CLI; run the essential-tools
+   smoke gate against that exact binary.
+3. Run each focused compiler/rendering/allocation/SimpleOS/aggregate spec once.
+4. Expand the SSpec from three umbrella examples to executable ownership for
+   all planned scenario IDs, then run docgen once and review the manual.
+5. Run live producer rows, external-host rows, the independent reviewer, and
+   finally the release aggregate. Only `release_blockers=none` permits PASS.
+
+**Stale-evidence recovery:** The authoritative baseline is
+`/tmp/mci-v2-hardening-matrix-20260811.log`, SHA-256
+`cd982a1142beb3cc1a51eb022d7a0d1eb4b849f265813c4a68d51b681280eb38`.
+The authoritative producer, prerequisites, and
 exact resume command for every report rejected by the 2026-08-11 baseline are
 maintained in
 `doc/08_tracking/bug/mission_critical_infra_hardening_v2_wave1_red_2026-08-11.md`.

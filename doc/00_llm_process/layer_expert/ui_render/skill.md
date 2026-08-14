@@ -1,5 +1,8 @@
 # UI Render Layer Expert
 
+Mission-critical DrawIR/Engine2D and external RenderDoc/Vulkan evidence rows
+are tracked by `doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md`.
+
 ## Role
 
 Own layer-specific process knowledge for the shared UI render layer —

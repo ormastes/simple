@@ -41,6 +41,40 @@ Harden the production Simple compiler/tooling, SimpleOS, and Simple rendering st
 ## Phase
 impl-in-progress
 
+## Current handoff (2026-08-14)
+
+- Integrated baseline: `f26936914d9833a000044757f6475bc7fd6e62cb`, reachable
+  from `origin/main`.
+- Stage 2 multiline continuation compatibility was repaired with explicit
+  grouping and tracked in
+  `doc/08_tracking/bug/stage2_multiline_if_continuation_2026-08-14.md`.
+- Bootstrap cycles 1-2 found the same parser divergence at two predicates.
+  Cycle 3 passed both predicates, completed Stage 2 and sanity, then Stage 3
+  self-host exited 139. The three-cycle cap is exhausted; retained evidence and
+  fresh-session resume command are in
+  `doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md`.
+- Parallel SPipe audits completed: `/root/acceptance_audit` checked
+  requirement/evidence traceability and `/root/guide_audit` checked guide,
+  manual, state, and process-doc freshness. Root Codex merged their findings.
+- Higher-capability internal review `/root/higher_model_review`
+  (`gpt-5.6-sol`, xhigh) required three correction rounds and ended PASS for
+  truthful resumable plan-document completeness. It explicitly did not pass
+  feature verification, release readiness, or external independent review.
+- Final traceability verification initially found a manual/source metadata
+  mismatch for `MCI-DOC-001/002`; after exact owner/reason/resume alignment,
+  `sh test/01_unit/scripts/mci_v2_traceability_contract_test.shs` PASSed. The
+  higher-capability reviewer rechecked the final mirror and preserved PASS.
+- Frozen scenario vocabulary is the eight `step("...")` strings and helper list
+  in the canonical sys-test plan; the provisional helper list above is
+  historical only.
+- Doc/wiki refactor inventory: updated the canonical sys-test plan, agent plan,
+  operator guide, SPipe state, generated/manual blocker text, Stage 3 bug
+  record, feature expert, and compiler-driver/memory/UI-render layer experts.
+  No workflow/tool API changed, so process skill/agent/command trees are N/A.
+- Current classification remains implementation WARN, not verify PASS. External
+  producer rows, docgen provenance, independently signed review, and
+  `release_blockers=none` remain active.
+
 ## Log
 - dev: Created state file with 12 acceptance criteria (type: code-quality); preserved the completed legacy `.spipe/mission_critical_harden` lane and isolated this broader Simple/SimpleOS/rendering/allocation goal as V2.
 - research: User selected C1/O1/R2/M2/N2; final feature and NFR requirements written and option drafts removed.
@@ -53,7 +87,7 @@ impl-in-progress
 - focused evidence: SimpleOS manifest PASS 11/11; compiler admission FAIL 6/10; DrawIR arena FAIL 3/8. Third verify/fix cycle cap reached; remaining failures and resume commands recorded in `doc/08_tracking/bug/mission_critical_infra_hardening_v2_wave1_red_2026-08-11.md`.
 - impl wave 3: Compiler admission PASS 10/10, DrawIR admission PASS 8/8, aggregate evidence PASS 7/7, bounded process policy PASS 12/12, and certified SimpleOS manifest PASS 13/13. The umbrella system scenario remained RED and full Engine2D/backend integration remained unclaimed.
 - impl wave 4: Added allocate-once packed DrawIR-v3 slot storage with SHA-256 generation identity, bounded FIFO publication, queue saturation/retry, and completion-gated reuse. Added deterministic DomainArena pre-cursor/pre-publication fault injection; focused evidence reached 8/9 with telemetry persistence still RED.
-- canonical baseline 2026-08-11: `scripts/check/check-simpleos-hardening-evidence-matrix.shs` failed closed with 9 stale reports (37-43 days old); retained log `/tmp/mci-v2-hardening-matrix-20260811.log`. No timestamp-only refresh or synthetic replacement was performed.
+- canonical baseline 2026-08-11: `scripts/check/check-simpleos-hardening-evidence-matrix.shs` failed closed with 9 stale reports (37-43 days old); retained log `/tmp/mci-v2-hardening-matrix-20260811.log`, SHA-256 `cd982a1142beb3cc1a51eb022d7a0d1eb4b849f265813c4a68d51b681280eb38`. The distinct `/tmp/simpleos-hardening-v2-baseline.out` is derived diagnostic output. No timestamp-only refresh or synthetic replacement was performed.
 - impl wave 5: DomainArena deterministic fault telemetry PASS 9/9 after replacing an interpreter-broken `< u64::MAX` saturation guard with an equality-based non-wrapping sentinel check. Added canonical packed-generation Engine2D owner preflight/consume/release with durable-field identity binding; first focused run exposed a geometry/paint hash omission (1/2), fixed afterward without overclaiming GPU evidence. Split the umbrella system scenario into three owner-specific examples after three source-location-free runner failures; the next fresh focused run can identify the remaining owner by example title.
 - authoritative prerequisites 2026-08-11: `check-simpleos-mission-critical-prereqs.shs` PASS (`sby`, `yosys`, and SMT solver ready). Compiler provenance `--probe` FAIL: deployed `bin/simple` is HYBRID/Rust-seed lineage, stage3 is missing, and `build/redeploy_out/simple_stage2` fails 3/9 current-source marker checks. Retained log `/tmp/mci-v2-compiler-provenance-20260811.log`.
 - impl wave 6: Packed DrawIR Engine2D owner focused spec PASS 2/2 and source check PASS; evidence is CPU owner identity/consume/release only. Routed all 9 stale reports to exact producers/prerequisites; the safe GUI/RenderDoc producer regenerated a current FAIL report (`missing-behavior-evidence`), and the LLVM dossier still lacks a canonical producer. Umbrella test launch did not reach execution in 3 bounded attempts because whole-repo bootstrap-seed compilation exceeded the command bridge window; 3 examples declared, 0 executed, so no assertion was weakened or subsystem marked PASS.

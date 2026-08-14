@@ -1,5 +1,9 @@
 # Compiler Driver Layer Expert
 
+Mission-critical V2 bootstrap/admission status is owned by
+`doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md`; its active owner
+failure is `doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md`.
+
 ## Role
 
 Own source discovery, import closure, phase orchestration, execution-mode

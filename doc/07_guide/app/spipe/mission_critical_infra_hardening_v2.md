@@ -57,18 +57,33 @@ producer's independent cross-host prerequisite remains an explicit BLOCKED and
 prevents signing when it cannot produce an unsigned template. `--contract-fixture` is only
 for the focused shell contract and always reports `CONTRACT_ONLY`, never PASS.
 
-1. Resolve the existing conflict in
-   `src/compiler/70.backend/backend/runtime_compiler.spl` under its owning
-   session. Until then, every Simple spec is blocked at `TripleLt` parsing.
-2. Build and deploy an exact-current pure-Simple compiler; do not use the Rust
+1. Resume the Stage 3 self-host crash from the exact evidence and fresh-session
+   command in
+   `doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md`. The old
+   `runtime_compiler.spl`/`TripleLt` conflict is resolved and is not the current
+   blocker. The last bounded cycle built and sanity-checked Stage 2, then
+   `stage3-native-build` exited 139.
+2. Build and admit an exact-current Stage 4 pure-Simple compiler; do not use the Rust
    seed or a hybrid artifact as production evidence.
-3. Refresh the nine stale reports named by the retained baseline
-   `/tmp/simpleos-hardening-v2-baseline.out` through their canonical owner gates.
+3. Refresh the nine stale reports named by the authoritative retained baseline
+   `/tmp/mci-v2-hardening-matrix-20260811.log` (SHA-256
+   `cd982a1142beb3cc1a51eb022d7a0d1eb4b849f265813c4a68d51b681280eb38`)
+   through their canonical owner gates. The distinct
+   `/tmp/simpleos-hardening-v2-baseline.out` is a derived diagnostic, not the
+   canonical baseline.
 4. Execute focused admission specs once, then the planned lane gates once.
 5. Collect real selected-host SimpleOS and rendering provenance; unavailable
    rows remain visible blockers to broader claims.
 6. Run the final aggregate and `$verify`; do not release from source inspection
    or static receipts alone.
+
+The authoritative status/acceptance/blocker ledger is
+`doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md`. Parallel work is
+owned by `doc/03_plan/agent_tasks/mission_critical_infra_hardening_v2.md`; phase
+history is `.spipe/mission_critical_infra_hardening_v2/state.md`. Reusable
+knowledge is linked from the mission-critical V2 feature expert and the
+compiler-driver, mission-critical-memory, and UI-render layer experts under
+`doc/00_llm_process/`.
 
 ### Compiler admission producer
 

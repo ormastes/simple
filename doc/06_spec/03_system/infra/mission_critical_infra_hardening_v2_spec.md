@@ -2,12 +2,17 @@
 
 **Evidence class:** executable pure-policy validation plus explicit release blockers
 **Executable source:** `test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl`
-**Executable source SHA-256:** `58c24ea2d717bee9e4c2b09622702e41df7c2d5c02b90648526e87f221ce6d7b`
-**Generation status:** hand-maintained mirror; SPipe doc generation is blocked by the known compiler conflict in `src/compiler/70.backend/backend/runtime_compiler.spl` and was not run.
+**Executable source SHA-256:** `1123d47c505873e0206f2b9b9131f4b494bf8c9ee959c3480c4bd523e9e265b1`
+**Generation status:** hand-maintained mirror; current-head SPipe doc generation is blocked by the Stage 3 self-host exit-139 tracked in `doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md` and was not run.
 
 ## Claim boundary
 
-This flow proves deterministic behavior of the implemented pure-Simple policies and the controlled producer contracts named below. An `evidence-contract` row records only that narrower contract coverage; it does **not** claim that live external tooling ran, that a real guest or graphics device was exercised, that a real RenderDoc capture was validated, or that any platform completed the required 24-hour stress campaign. Those missing live evidence classes keep every affected release scenario blocked.
+The executable source defines deterministic checks for the implemented
+pure-Simple policies, and prior focused contract runs are recorded in the lane
+state. Current-head execution is BLOCKED by the Stage 3 compiler failure. An
+`evidence-contract` row records only narrower contract coverage; it does **not**
+claim that live external tooling, a real guest or graphics device, RenderDoc,
+or a 24-hour stress campaign ran.
 
 ## Operator flow
 
@@ -27,7 +32,7 @@ This flow proves deterministic behavior of the implemented pure-Simple policies 
    canonical serialization and a SHA-256 content hash. Unselected cells carry
    no present/passing receipt state; selected cells bind four guest payload
    artifact hashes and a correlated 24-hour stress receipt.
-   correlated, fresh, hash-bound cells and 22 explicitly unselected cells.
+   fresh, hash-bound cells and 22 explicitly unselected cells.
    Require `certified-subset-pass`, exactly 24 visible rows, and
    `umbrella_all_platforms = false`. This is not guest/QEMU execution evidence.
 
@@ -64,10 +69,10 @@ This flow proves deterministic behavior of the implemented pure-Simple policies 
 
 | Requirement | Executable evidence in this scenario | Current classification |
 |---|---|---|
-| REQ-MCI-001 | Exact-current admission plus stale negative control | Exercised |
-| REQ-MCI-003, REQ-MCI-004 | Certified subset, 24 visible cells, canonical payload fields, no umbrella claim | Policy exercised; real guest execution blocked |
-| REQ-MCI-005 | Exact-capacity DrawIR plan/admit/seal/retire and +1 rejection with identity | Exercised |
-| REQ-MCI-007, REQ-MCI-008 | Sealed quota, forbidden ISR context, quota exhaustion, rollback, telemetry | Exercised |
+| REQ-MCI-001 | Exact-current admission plus stale negative control | Source-defined; prior focused contract evidence only; current-head BLOCKED |
+| REQ-MCI-003, REQ-MCI-004 | Certified subset, 24 visible cells, canonical payload fields, no umbrella claim | Source-defined; real guest execution and current-head run BLOCKED |
+| REQ-MCI-005 | Exact-capacity DrawIR plan/admit/seal/retire and +1 rejection with identity | Source-defined; prior focused contract evidence only; current-head BLOCKED |
+| REQ-MCI-007, REQ-MCI-008 | Sealed quota, forbidden ISR context, quota exhaustion, rollback, telemetry | Source-defined; prior focused contract evidence only; current-head BLOCKED |
 | REQ-MCI-009 policy subset | PID, queue, distinct in-flight, capture, timeout, cancellation, terminal, and invalid-transition boundaries | Policy exercised here; the native provider's registered mutex/slot and spawn/process-group/pidfd signal/reap integration has focused C selfchecks. Release evidence remains **BLOCKED** because the synchronous Simple facade exposes no public cancel/terminate operation, the interpreter fails closed, and no admitted exact-current native Simple receipt exercises the source-matched ABI. |
 | REQ-MCI-010 | Focused policy aggregate blocks on a missing external receipt. Collector mechanics `MCI-AGG-001/002/003` are owned by and linked to `test/01_unit/scripts/mci_v2_aggregate_contract_test.shs`. | Collector contract PASS; release aggregate **BLOCKED** |
 | REQ-MCI-011 | Executable source and this operator mirror | Present; generated-doc freshness receipt blocked |
@@ -94,9 +99,9 @@ contract evidence; `blocked` names the missing release-grade owner or evidence.
 | MCI-COMP-001 | evidence-contract | `test/01_unit/scripts/mci_v2_compiler_admission_contract_test.shs` | `fixed-compiler-fixture-contract-only` | `run-authenticated-current-compiler-producer` |
 | MCI-COMP-002 | blocked | `scripts/check/check-mci-v2-compiler-admission.shs` | `cross-host-signed-peer-missing` | `run-independent-host-and-sign-peer-receipt` |
 | MCI-COMP-003 | blocked | `scripts/check/check-mci-v2-compiler-admission.shs` | `live-negative-campaign-not-admitted` | `run-current-live-negative-campaign` |
-| MCI-DOC-001 | blocked | `bin/simple-spipe-docgen` | `docgen-receipt-absent` | `resolve-runtime-compiler-conflict-and-run-docgen-once` |
-| MCI-DOC-002 | blocked | `bin/simple-spipe-docgen` | `generated-helper-visibility-unverified` | `resolve-runtime-compiler-conflict-and-run-docgen-once` |
-| MCI-DOC-003 | evidence-contract | `test/01_unit/scripts/mci_v2_traceability_contract_test.shs` | `negative-traceability-contract-only` | `run-docgen-after-compiler-conflict-resolves` |
+| MCI-DOC-001 | blocked | `bin/simple` | `stage3-selfhost-exit-139-docgen-receipt-absent` | `repair-stage3-admit-stage4-and-run-docgen-once` |
+| MCI-DOC-002 | blocked | `bin/simple` | `generated-helper-visibility-unverified` | `repair-stage3-admit-stage4-and-run-docgen-once` |
+| MCI-DOC-003 | evidence-contract | `test/01_unit/scripts/mci_v2_traceability_contract_test.shs` | `negative-traceability-contract-only` | `repair-stage3-admit-stage4-and-run-docgen-once` |
 | MCI-NFR-001 | evidence-contract | `test/01_unit/scripts/mci_v2_aggregate_contract_test.shs` | `freshness-contract-only` | `collect-current-signed-lane-receipts` |
 | MCI-NFR-002 | evidence-contract | `test/01_unit/scripts/mci_v2_aggregate_contract_test.shs` | `identity-contract-only` | `collect-current-signed-lane-receipts` |
 | MCI-NFR-003 | blocked | `scripts/check/check-mci-v2-compiler-admission.shs` | `cross-host-signed-peer-missing` | `run-independent-host-and-sign-peer-receipt` |
@@ -136,4 +141,10 @@ contract evidence; `blocked` names the missing release-grade owner or evidence.
 
 ## Required follow-up gates
 
-After the compiler conflict is resolved, run docgen once against `test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl` and retain its zero-stub receipt. The aggregate shell contract may report collector-contract PASS for `MCI-AGG-001/002/003`; that is not release admission. Its ephemeral distinct reviewer keys prove only that valid separately signed decisions pass and missing/self-issued/stale/replayed decisions fail. Release remains BLOCKED pending external tooling, SimpleOS guest, real rendering/RenderDoc, allocation fault-injection, process execution, performance, 24-hour stress, and a receipt from the independently operated reviewer producer. Do not promote the focused fixture to a real review claim.
+After Stage 3 is repaired and an exact-current Stage 4 CLI is admitted, run
+docgen once against `test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl`
+and retain its zero-stub receipt. The aggregate shell contract may report
+collector-contract PASS for `MCI-AGG-001/002/003`; that is not release
+admission. Release remains BLOCKED pending external tooling, SimpleOS guest,
+real rendering/RenderDoc, allocation fault-injection, process execution,
+performance, 24-hour stress, and an independently operated reviewer receipt.
