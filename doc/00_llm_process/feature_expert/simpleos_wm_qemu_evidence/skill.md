@@ -203,3 +203,12 @@ detection changes, refresh this skill with new configuration knobs and validatio
 paths.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
+
+## RV64 process-owned WM gate (2026-08-14)
+
+The admitted RV64 gate is defined by
+`doc/03_plan/sys_test/rv64_ssh_live_login_in_qemu.md`. A fixed rectangle scene,
+string-only GUI stub, serial WM marker, or nonblank QMP image alone is
+diagnostic. PASS requires a live process-owner PID/liveness receipt correlated
+to the compositor's first presented frame after Sv39, PID1, network, and
+production SSH readiness. Final manual/evidence review remains root-owned.

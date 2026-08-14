@@ -17,6 +17,33 @@ cannot resolve a valid current self-hosted compiler, record the compiler blocker
 and stop; do not point `SIMPLE_BOOTSTRAP_DRIVER` at `simple_seed` to turn a
 blocked system-test row into apparent evidence.
 
+## RV64 Ordered Boot-Gate Lane
+
+The canonical completion contract for Sv39, PID1, network, production SSH, and
+process-owned WM is
+`doc/03_plan/sys_test/rv64_ssh_live_login_in_qemu.md`. It supersedes any claim
+based only on the older banner/probe/rectangle desktop-service fixture.
+
+The admitted serial order is Sv39 readback, live PID 1, VirtIO TX, VirtIO RX,
+network service, production SSH bind/listen, correlated session completion and
+accept recovery, then a PID-correlated WM presented frame. The shared pure
+checker (`Rv64BootGateState`, `rv64_boot_gate_advance`, and
+`rv64_boot_gate_verdict`) must reject missing, duplicate, or reordered
+observations. The host evidence owner emits the sole terminal `TEST PASSED`.
+
+OpenSSH evidence uses separate real sessions for `true`, `simple --version`,
+and `simple.smf --version`, followed by bad-password rejection and another
+accept receipt. A fixed combined command, canned stdout, banner-only socket,
+marker-only PID1, or fixed rectangle/string WM fixture is not production boot
+evidence.
+
+As of 2026-08-14 this lane is blocked before QEMU verification: no
+provenance-admitted Stage 4 full CLI exists. The retained Stage 3 failure ends
+in pure-Simple MIR method-call lowering after HIR; see
+`doc/08_tracking/bug/stage3_selfhost_post_hir_segfault_2026-08-14.md`. Resume
+with the exact WP-A commands in the canonical plan, then run each focused and
+live criterion once. Do not substitute the Rust seed or Stage 2 artifact.
+
 ## Engine2D Exact-Oracle Gate
 
 TODO529 is governed by

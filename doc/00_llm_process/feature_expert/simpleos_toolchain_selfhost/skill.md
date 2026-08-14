@@ -433,3 +433,12 @@ staging result being read as a self-host result, and a stale status line on this
 page is worse than none.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
+
+## Restart12 Stage 4 prerequisite (2026-08-14)
+
+The RV64 ordered boot gate cannot run on the Rust seed or Stage 2 compiler.
+`doc/08_tracking/bug/stage3_selfhost_post_hir_segfault_2026-08-14.md` records
+the current post-HIR Stage 3 crash; the log now reaches MIR method-call
+lowering with a corrupt receiver local, so the earlier `error_count_value`
+change is an avoidance, not a proved root fix. Resume through WP-A in the
+canonical RV64 plan and require the fresh Stage 4 essential-tools smoke.

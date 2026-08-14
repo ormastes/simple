@@ -39,3 +39,14 @@ complete MIR/storage identity before and after codegen, bind object bytes and
 size in the result receipt, and publish cache checkpoints only through the
 parent completion hook. Do not call this real concurrency: the current
 builder branch batches sequentially, and process workers need a complete codec.
+
+## Stage 3 MIR receiver corruption handoff (2026-08-14)
+
+The current RV64 prerequisite bootstrap reaches HIR with zero errors, then its
+Stage 3 log ends in MIR method-call lowering with an impossible receiver local
+ID. Inspect `method_calls_literals.spl` receiver resolution/writeback and the
+`value_struct_layout.spl` push-heavy caller shapes. Do not claim the direct
+`CompileContext.error_count_value` reads fixed the root cause; require an exact
+native reproducer, adjacent aggregate/method-call regression, and a fresh
+Stage 4 essential-tools receipt. Tracking:
+`doc/08_tracking/bug/stage3_selfhost_post_hir_segfault_2026-08-14.md`.

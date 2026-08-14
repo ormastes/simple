@@ -212,3 +212,12 @@ BRAM lane remains a CPU-local recovery/boot check, not host NVMe transport.
 - Also this session: `idt.spl _halt()` target-gated so the riscv64 kernel
   closure clears the C-asm stage (`1874c7a8bd8`); `runtime_legacy_core` added
   to the riscv64 sysroot C runtime build (`d0ff4e834b3`).
+
+## RV64 SimpleOS ordered boot gate (2026-08-14)
+
+Use `doc/03_plan/sys_test/rv64_ssh_live_login_in_qemu.md` for the current
+Sv39/PID1/network/SSH/WM QEMU contract. Sv39 must be read back from SATP and
+PID1 must come from the process owner before network or service readiness; a
+later SSH/WM marker cannot imply either prerequisite. The lane remains blocked
+until a provenance-admitted Stage 4 CLI exists and every ordered receipt passes
+the shared fail-closed checker.

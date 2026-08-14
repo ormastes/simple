@@ -294,3 +294,12 @@ change *invalidates* — several are corrections of earlier claims, and a stale
 fact here is worse than none.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
+
+## RV64 boot ownership contract (2026-08-14)
+
+For `rv64-ssh`, the boot orchestrator must consume runtime facts owned by
+paging (Sv39 SATP readback), PM/scheduler (PID1 create+liveness), VirtIO
+(TX/RX/service), SSHD (bind/listen and accept recovery), and compositor
+(PID-correlated present). It must not synthesize these facts from later
+markers. The shared ordering and negative-test plan is
+`doc/03_plan/sys_test/rv64_ssh_live_login_in_qemu.md`.

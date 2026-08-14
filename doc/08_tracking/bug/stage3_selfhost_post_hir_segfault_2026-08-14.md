@@ -24,9 +24,29 @@ scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --backend=cranelift
 - Cycle 3 still ended with exit 139 later in Stage 3. The bounded build log is
   `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`.
 
+Higher-model review of the retained cycle-3 log narrows the last observable
+frontier to pure-Simple MIR method-call lowering. The log ends while resolving
+`push` with impossible receiver local ID `103079215111`; it contains no final
+signal marker or backtrace, so this is a frontier, not a proved crash site.
+Inspect receiver writeback/resolution at
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:2366-2403`,
+`:2542-2695`, and the push specialization at `:2961+`. The source shape active
+near the frontier is the pending/visited aggregate walk at
+`src/compiler/35.semantics/value_struct_layout.spl:78-117`; adjacent semantic
+coverage exists at
+`test/01_unit/compiler/semantics/value_struct_layout_spec.spl:172-309`.
+
+The direct scalar reads added in
+`src/compiler/80.driver/driver_hir_pipeline_lowering.spl:353-357,449,489,505,526`
+avoid the earlier invalid `CompileContext.error_count()` receiver. They do not
+prove or repair the general receiver-corruption root cause. No exact native
+aggregate-receiver regression exists yet.
+
 ## Required follow-up
 
 Capture the next post-HIR backtrace in a fresh lane, fix the pure-Simple owner,
-and prove a provenance-verified Stage 3 compiler before resuming the RV64
-Sv39/PID1/network/SSH/WM live gates. Do not substitute the Rust seed as test
+add an exact native receiver regression plus one adjacent value-struct/push
+case, then prove a provenance-verified Stage 4 full CLI with
+`scripts/check/check-bootstrap-essential-tools-smoke.shs`. Stage 3 is a
+prerequisite, not test admission. Do not substitute the Rust seed as test
 authority and do not re-run the three exhausted cycles from this lane.
