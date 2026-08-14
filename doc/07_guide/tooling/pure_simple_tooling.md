@@ -157,6 +157,16 @@ nonzero child exit fails closed.
 
 ## Stage 4 essential-tools gate
 
+Render benchmarks that require a cached native entry closure must also follow
+[`cached_render_entry_closure.md`](../ui/rendering/cached_render_entry_closure.md).
+Candidate admission, deployment lineage, carrier construction, and carrier
+execution are separate gates; an exit-0 native-build with no artifact fails.
+
+As of 2026-08-14 this route is blocked: the only available purported non-seed
+artifact is not provenance-admitted, direct execution exits 248, and bounded
+native-build variants return zero without an artifact. This is a qualification
+snapshot, not evidence that cached entry closure is operational.
+
 Every bootstrap route that produces a Stage 4 full CLI runs
 `scripts/check/check-bootstrap-essential-tools-smoke.shs` with the exact fresh
 binary. From a temporary non-repository working directory it checks real

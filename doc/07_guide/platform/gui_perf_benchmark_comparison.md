@@ -91,6 +91,11 @@ Node Canvas/Cairo; the open blocker is
 
 ## Running Benchmarks
 
+For the production sparse DrawIR carrier, first follow
+[`cached_render_entry_closure.md`](../ui/rendering/cached_render_entry_closure.md).
+That path is admission-gated and currently blocked; the raw `bin/simple run`
+examples below are not substitutes for a cached native carrier or 8K/80 proof.
+
 ```bash
 # Full comparison (needs Xvfb for GTK/tkinter):
 Xvfb :99 -screen 0 7680x4320x24 &

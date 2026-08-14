@@ -82,22 +82,26 @@ be promoted to a Simple 8K/80 result.
 
 ## 2026-08-14 restart12 cached-entry-closure attempt
 
-Status remains **FAIL / 8K80 UNPROVEN**. The deployed pure-Simple CLI still
+Status remains **FAIL / 8K80 UNPROVEN**. The unadmitted candidate artifact still
 exits 248 with `missing command` for both direct `-c` and source-file execution.
 The production-wrapper alternative was then attempted: build the benchmark as
 a cached native artifact with `native-build --entry-closure` and execute that
 artifact directly.
 
-Three bounded build/fix cycles all returned exit 0 in roughly 1.4 seconds with
-no stdout/stderr and no artifact. Cycle 2 created the output directory; cycle 3
+Three bounded command variants all returned exit 0 in roughly 1.4 seconds with
+no stdout/stderr and no artifact. Variant 2 created the output directory; variant 3
 explicitly selected LLVM and verbose mode. Neither changed the result. Current
-source contains missing-artifact fail-closed guards, so the deployed CLI is
-stale or miscompiled relative to its own native-build dispatcher. The concrete
-blocker is recorded in
+source contains missing-artifact fail-closed guards, so stale or miscompiled
+dispatch is a hypothesis, not a proved root cause. The concrete blocker is recorded in
 `doc/08_tracking/bug/self_hosted_cli_native_build_silent_no_artifact_2026-08-14.md`.
 
-Because execution never reached the benchmark, p50/p95, checksum/readback,
-backend/fallback, and frame receipts are unavailable. The direct-source outer
-RSS receipt was 7,424 KiB and represents launcher failure only. No smaller
+Because execution never reached the benchmark, p50/p95, checksum, numeric
+readback, selected backend, fallback value, binary/source hashes, and frame
+receipts are unavailable. The direct-source maximum RSS receipt was 7,424 KiB
+and represents launcher failure only. No smaller
 viewport, seed interpreter, or native-C-only result is substituted for the
 required self-hosted 7680x4320 row.
+
+The admission and cached-carrier resume workflow is
+`doc/07_guide/ui/rendering/cached_render_entry_closure.md`; its canonical plan
+is `doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md`.

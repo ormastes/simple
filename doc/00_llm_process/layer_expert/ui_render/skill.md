@@ -16,12 +16,11 @@ This layer is what the four SimpleOS screen targets are being unified onto — s
 
 ## Pipeline Links
 
-- [research](../../skill_command/skills/pipe/research/skill.md)
-- [design](../../skill_command/skills/pipe/design/skill.md)
-- [impl](../../skill_command/skills/pipe/impl/skill.md)
-- [verify](../../skill_command/skills/pipe/verify/skill.md)
-- [release](../../skill_command/skills/pipe/release/skill.md)
-- [pipeline next step plan](../../pipeline_next_step_plan.md)
+- [research](../../../../.claude/skills/research.md)
+- [design](../../../../.claude/skills/design.md)
+- [impl](../../../../.claude/skills/impl.md)
+- [verify](../../../../.claude/skills/verify.md)
+- [release](../../../../.claude/skills/release.md)
 
 ## Layer Links
 
@@ -205,6 +204,18 @@ additive so a later agent does not read them as renames.
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
 
 ## Primitive-lane handoff (2026-08-08)
+
+### Cached sparse DrawIR evidence (2026-08-14)
+
+Use `CachedRenderEntryClosureV1`; see
+`doc/07_guide/ui/rendering/cached_render_entry_closure.md`, the canonical
+`doc/03_plan/ui/perf/render_perf_replan_parallel_teams_2026-08-07.md`, and
+`doc/09_report/drawir_sparse_dynamic_8k_attempt_2026-08-12.md`. Acceptance
+requires an admitted cached carrier, 7680x4320/20-frame execution, one 256x128
+changing rectangle, two considered/512 culled commands per frame, nonzero
+readback, zero mismatches, stable checksum, backend/fallback and mode,
+p50/p95 <= 12.5 ms, max RSS, and binary/source identity. This is executor-only
+evidence; it does not prove presentation or physical scanout.
 
 For host-first button, window-drag, CSS/layout, scroll, and font work, use
 `doc/07_guide/app/llm/simple2d_primitive_lane_inventory.md` and the linked

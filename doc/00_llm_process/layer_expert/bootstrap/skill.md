@@ -15,18 +15,18 @@ usable" (Stage 4) are distinct milestones — a Stage-3-only binary answers
 `compile`/`native-build` but has no `run`/`test`/`duplicate-check`, by design.
 This layer also owns the JIT Cranelift backend stability track (stage2 uses
 LLVM llc by default; JIT is opt-in via `SIMPLE_BOOTSTRAP_REAL_LLVM` env var).
-Tracks redeploy gate (`scripts/bootstrap/redeploy_gate.sh`), smoke-matrix
+Tracks redeploy gate (`scripts/check/cert/redeploy_gate/redeploy_gate.shs`), smoke-matrix
 verification, and all bootstrap-blocking regressions.
 
 ## Pipeline Links
 
-- [verify skill](../../../../.claude/skills/verify/SKILL.md)
-- [impl skill](../../../../.claude/skills/impl/IMPL.md)
+- [verify skill](../../../../.claude/skills/verify.md)
+- [impl skill](../../../../.claude/skills/impl.md)
 
 ## Layer Links
 
 - Driver: [src/compiler/80.driver/driver_bootstrap.spl](../../../../src/compiler/80.driver/driver_bootstrap.spl)
-- Gate: [scripts/bootstrap/redeploy_gate.sh](../../../../scripts/bootstrap/redeploy_gate.sh)
+- Gate: [redeploy_gate.shs](../../../../scripts/check/cert/redeploy_gate/redeploy_gate.shs)
   (smoke-matrix fixture verification before any forward push).
 - Bootstrap stages plan:
   [doc/03_plan/compiler/bootstrap/redeploy_stage4_plan_2026-07-09.md](../../../../doc/03_plan/compiler/bootstrap/redeploy_stage4_plan_2026-07-09.md).
@@ -149,7 +149,7 @@ the env var points to the correct seed target.
    `SIMPLE_BOOTSTRAP=1` without `SIMPLE_BOOTSTRAP_REAL_LLVM`). Cranelift gate
    tests are manual. Do not force JIT as default without smoke-matrix sign-off.
 2. **Redeploy gate enforces smoke matrix:** any forward push must pass
-   `scripts/bootstrap/redeploy_gate.sh` (compiler lint/fmt/check + bootstrap
+   `scripts/check/cert/redeploy_gate/redeploy_gate.shs` (compiler lint/fmt/check + bootstrap
    stage2/stage3 round-trip + test subset). Gate failures are hard stops.
 3. **stage2 binary is ephemeral:** only used during bootstrap. After stage3
    succeeds, discard it — no production reliance on stage2 artifacts.
@@ -261,6 +261,17 @@ warning banner). Use it, not `bin/simple`, when asking "what is the correct
 behaviour?" during bootstrap work.
 
 ## 2026-08-06 Stage 3 blocker family — several fixed, one still OPEN
+
+### Cached render carrier handoff (2026-08-14)
+
+Follow `doc/07_guide/ui/rendering/cached_render_entry_closure.md`. A purported
+non-seed artifact under `release/` returns `missing command` for direct source
+execution and exit 0/no output for native-build, while current source owns
+fail-closed output checks. This is a blocker and possible stale/miscompiled
+dispatcher, not proof of root cause or deployed Stage 4 lineage. Require exact
+candidate, essential-smoke, provenance, deploy, and rollback receipts before
+the render carrier build. Bug:
+`doc/08_tracking/bug/self_hosted_cli_native_build_silent_no_artifact_2026-08-14.md`.
 
 A dense sequence of Stage-3 self-host blockers were root-caused and fixed this
 session (chronological, each superseding the previous hypothesis where noted):

@@ -95,3 +95,16 @@ After native-build defects, closure-discovery changes, or cache logic shifts, re
 this skill with new open-bug links and concrete gotchas.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/feature_skill.md`
+
+## Cached render entry closure blocker (2026-08-14)
+
+The sparse DrawIR 8K carrier uses the admission-gated
+`CachedRenderEntryClosureV1` workflow in
+`doc/07_guide/ui/rendering/cached_render_entry_closure.md`. Keep Stage 4
+candidate construction, candidate admission, deployment, deployed hash lineage,
+carrier build, and carrier execution separate. An exit-0 native-build with no
+fresh artifact is failure, even when current source contains a missing-output
+guard. The unadmitted `release/.../simple` artifact currently exhibits that
+failure; do not call it deployed pure-Simple without provenance, essential-smoke,
+and deploy receipts. Open bug:
+`doc/08_tracking/bug/self_hosted_cli_native_build_silent_no_artifact_2026-08-14.md`.

@@ -2,53 +2,146 @@
 
 ## 2026-08-14 restart12 replacement lane (canonical active slice)
 
-This bounded lane supersedes the stale binary-provenance and bootstrap-blocker
-statements below for the remaining sparse DrawIR performance work.  It does not
-rewrite the historical T1--T20 record.
+Current plan revision: `90f8945f11289576847d67c8aea2ba92768979c1` plus the
+pending SPipe plan-completion change. This slice supersedes stale provenance
+claims below without rewriting the historical T1--T20 record. Operator guide:
+`doc/07_guide/ui/rendering/cached_render_entry_closure.md`; retained result:
+`doc/09_report/drawir_sparse_dynamic_8k_attempt_2026-08-12.md`; blocker:
+`doc/08_tracking/bug/self_hosted_cli_native_build_silent_no_artifact_2026-08-14.md`.
 
-Current starting point: `release/x86_64-unknown-linux-gnu/simple` is a deployed
-pure-Simple CLI and advertises direct `simple <file.spl>` and `simple -c`
-execution.  The retained 2026-08-13 report predates this artifact and records
-both forms failing with `missing command`; that result must be revalidated once,
-not assumed current.  The native operation harness already proves a 1% retained
-damage primitive p95 below 12.5 ms, while full-frame CPU repaint remains outside
-budget.  The missing evidence is the self-hosted sparse DrawIR entry closure.
+The only available artifact is
+`release/x86_64-unknown-linux-gnu/simple`. It is an **unadmitted purported
+non-seed candidate**, not a proven deployed pure-Simple CLI: the canonical
+`bin/release/<triple>/simple`, provenance, essential-smoke receipt, and deploy
+receipt are absent. Direct `-c` and source-file probes exit 248 with
+`missing command`; three native-build command variants exit 0 with no output
+artifact. Those variants are diagnostic attempts, not implementation fix
+cycles, and they prove neither binary lineage nor root cause.
 
-Acceptance items for this lane:
+### Acceptance status
 
-- [x] WARN: the deployed self-hosted CLI was tested once; minimal `-c` and the
-  canonical entry both exit 248 before compiler receipts, without seed fallback.
-- [ ] BLOCKED: the benchmark cannot start because source execution exits 248
-  and cached native-build exits 0 without an artifact. It must still complete
-  its 20-frame 7680x4320, 256x128 dynamic-damage
-  corpus and emits backend, revision, considered/culled, readback, checksum,
-  p50/p95, and receipt-validity fields.
-- [ ] BLOCKED: correctness receipts must prove two considered and 512 culled commands per
-  frame, nonzero readback, zero full-frame mismatches, and stable checksum.
-- [ ] BLOCKED: executor p95 must be at most 12.5 ms and outer maximum RSS retained. This
-  is an executor-only result and must not be described as presentation or
-  physical-scanout proof.
-- [x] N/A: no `.spl` files were changed, so no touched source requires the O3
-  optimizer inspection; documentation and direct-env guards still run once.
-- [x] WARN: the final report names binary/source revision, attempted mode, viewport,
-  readback mode, fallback state, p50/p95, RSS, and checksum proof.
-- [ ] Intentional changes are committed, rebased under
-  `/tmp/simple-main-restart12-push.lock`, pushed as `HEAD:main` without token
-  environment overrides, and proven reachable from the refreshed origin/main.
+| AC | Status | Proof or remaining evidence |
+|---|---|---|
+| AC-1 current truth | PROVED | The active slice distinguishes the unadmitted artifact, missing receipts, and unproven root cause; historical redesign §1--§8 remains authoritative. |
+| AC-2 executable resume | BLOCKED | The commands are frozen below; execution awaits an admitted Stage 4 CLI and reviewed rollback receipt. |
+| AC-3 gate separation | PROVED | Candidate build, admission, deploy, deployed lineage, carrier build, and carrier run are independent. |
+| AC-4 sparse 8K contract | BLOCKED | This is a future receipt contract; the completed diagnostic row lacks admitted-native evidence. |
+| AC-5 parallel ownership | PROVED | Bounded matrix below; `/root` alone edits shared plan/knowledge files. |
+| AC-6 higher review | PROVED | Two read-only highest-capability passes completed; both returned FAIL and their unresolved dispositions remain explicit. |
+| AC-7 knowledge | BLOCKED | Guide/expert discovery is updated; Stage-3 and rollback-producer ownership remain missing knowledge blockers. |
+| AC-8 workflow docs | N/A | No SPipe runner, evidence wrapper, skill, agent, or command behavior changes. |
+| AC-9 future scenario vocabulary | PROVED | `CachedRenderEntryClosureV1` and frozen helper/step names are below. |
+| AC-10 verify/integrate | MISSING | Guard and serialized integration evidence is recorded only after it runs. |
 
-Current blockers and allowed terminal verdicts:
+### Six fail-closed gates
 
-- A self-hosted dispatcher/entry-closure failure is an implementation blocker,
-  not render timing; fix it within three verify/fix cycles or finish WARN with a
-  concrete tracking record and retained failing command evidence.
-- Host OOM/watchdog before receipts is WARN and keeps 8K/80 unproven.  A smaller
-  viewport, bootstrap interpreter, native C-only harness, cached replay, or
-  software-fallback substitution cannot satisfy this slice.
-- Full-frame CPU repaint is already measured outside budget and is not rerun by
-  this lane; the accepted workload is exact sparse retained damage.
+1. **Construct Stage 4 candidate.** Owner:
+   `scripts/bootstrap/bootstrap-from-scratch.sh` and the pure-Simple compiler.
+   Run `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-cli`; retain the
+   exact Stage 3 admission manifest, `build/bootstrap/full/<platform>/simple`,
+   its `.provenance.env`, and
+   `build/bootstrap/logs/<platform>/stage4-native-build.log`. Do not deploy yet.
+2. **Admit exact candidate.** Require candidate arithmetic/source sanity,
+   `scripts/check/cert/redeploy_gate/redeploy_gate.shs <candidate>`, and
+   `sh scripts/check/check-bootstrap-essential-tools-smoke.shs <candidate>`.
+   Test-runner, lint, duplicate-check, and aggregate markers must all pass.
+   A seed, stale artifact, missing log, missing output, or help-only command
+   fails closed.
+3. **Deploy with rollback.** Only after Gate 2, rerun the canonical bootstrap
+   route with `--deploy`. Require atomic install of the CLI and sibling seed,
+   post-swap arithmetic smoke, reviewed rollback, and
+   `bin/release/<platform>/bootstrap-deploy-receipt.env`. Bootstrap does not
+   emit the handoff rollback receipt: a reviewed rollback exercise must create
+   `build/bootstrap/handoff/rollback.receipt.env`, or Gate 4 stays blocked.
+4. **Validate deployed lineage.** Run
+   `sh scripts/check/check-bootstrap-platform-handoff-readiness.shs` only with
+   every required `BOOTSTRAP_HANDOFF_*` artifact path bound, including all host
+   receipts. For this Linux slice inspect, but do not promote, the CLI subset:
+   `bootstrap_handoff_stage3_candidate_status`, `stage4_candidate_status`,
+   `essential_smoke_receipt_status`, each
+   `essential_{test_runner,lint,duplicate_checker,aggregate}_smoke_status`, and
+   `deploy_receipt_status` and `rollback_receipt_status` all `ready`. Do not
+   claim umbrella `bootstrap_handoff_readiness_status=ready`,
+   `remaining_gate_count=0`, or `remaining_gate_list=none` from this subset.
+5. **Build `CachedRenderEntryClosureV1`.** Pure-Simple owners are
+   `src/app/cli/_CliMain/main_and_help.spl`,
+   `src/app/io/_CliCommands/run_commands.spl`,
+   `src/app/io/_CliCompile/compile_targets.spl`, and
+   `src/app/cli/native_build_main.spl`. First build and run a minimal carrier
+   using the exact admitted CLI with `native-build --backend llvm
+   --runtime-bundle core-c-bootstrap --mode one-binary --entry-closure`, a
+   fresh cache/output, and explicit `src/compiler`, `src/app`, and `src/lib`
+   sources. Require executable+metadata, output, and a negative regression
+   where driver Success without staged output returns nonzero with the exact
+   diagnostic. Then build the benchmark entry with the same contract.
+6. **Run the cached carrier directly.** Execute the compiled benchmark under
+   `/usr/bin/time`; never use raw-source execution, seed interpretation, or
+   cached replay as native evidence. Retain binary/source hashes, actual mode,
+   backend and fallback, viewport `7680x4320`, 20 frames, one `256x128` dynamic
+   rectangle, two considered and 512 culled commands per frame, nonzero
+   readback, zero full-frame mismatches, stable checksum, receipt validity,
+   executor p50 and p95 each at most 12.5 ms, and max RSS. This proves only the
+   sparse executor, not presentation, Web/GUI/WM end-to-end work, scanout, or
+   full-frame CPU 8K/80.
 
-Verification is single-pass per acceptance item, with at most three total
-fix cycles.  Convergence ends the lane.
+Every gate is verified once after a change. Cap each implementation lane at
+three distinct fix/verify cycles; never repeat an unchanged failed command.
+Host OOM/watchdog or missing admission remains BLOCKED and keeps 8K/80
+unproven. Full-frame CPU repaint is already outside budget and is not rerun.
+
+### Parallel ownership and frozen scenario vocabulary
+
+| Lane | Scope | Depends on | Collision rule |
+|---|---|---|---|
+| A plan/status audit | AC reconciliation and historical contradictions | none | read-only; message to merge owner |
+| B CLI ownership audit | dispatcher/native-build owners and Gate 1--5 evidence | none | read-only; no failed-command reruns |
+| C knowledge audit | guide, report, bug, feature/layer expert freshness | none | read-only; no shared edits |
+| `/root` merge | canonical plan and knowledge artifacts | A+B+C | sole editor and merge owner |
+| highest-capability review | AC-1--AC-10, done/exclusion/manual-quality review | merged draft | read-only findings; `/root` applies dispositions |
+
+Shared interface: `CachedRenderEntryClosureV1`. Future manual steps are
+`Admit the exact Stage 4 CLI`, `Build the cached sparse DrawIR carrier`,
+`Execute the retained 8K damage corpus`, and
+`Validate identity, correctness, and budget receipts`. Helpers are
+`setup_cached_render_entry_closure` and `check_cached_render_entry_closure`.
+Any scaffold placeholder must call
+`fail("cached render entry closure not implemented")`.
+
+### Highest-capability review findings and dispositions
+
+| Finding | Class | Disposition |
+|---|---|---|
+| Artifact lineage was overstated | blocker | Corrected to unadmitted purported candidate; root cause remains a hypothesis. |
+| Gate evidence and handoff semantics were incomplete | blocker | Added canonical Stage 4/log/deploy/rollback paths and separated Linux inspection from umbrella readiness. |
+| Completed report implied missing fields | evidence | Numeric readback, fallback, RSS, and identity fields are now explicitly unavailable. |
+| Knowledge links/terminology were stale | documentation | Corrected redeploy/skill links, variant wording, planned-workflow wording, and plan links. |
+| Generated-manual review | exclusion | N/A: no SSpec or generated manual changed. |
+| Workflow/skill contracts | exclusion | N/A: no SPipe workflow, command, agent, or skill behavior changed. |
+
+Reviewer: `gpt-5.6-sol`, `xhigh`, read-only. Initial and corrected-draft
+verdicts: **FAIL**. AC-3/4/5/8/9 passed; AC-1/2/6/7/10 findings remain blocked
+or pending integration. This is accepted as honest plan status, not feature
+completion.
+
+### Focused guard evidence
+
+Each criterion was exercised once on 2026-08-14:
+
+| Guard | Result | Evidence |
+|---|---|---|
+| `git diff --check` | PASS (0) | working diff has no whitespace errors |
+| `sh scripts/audit/direct-env-runtime-guard.shs --working` | PASS (0) | `STATUS: PASS direct-env-runtime-guard` |
+| `sh scripts/audit/direct-env-runtime-guard.shs --staged` | PASS (0) | `STATUS: PASS direct-env-runtime-guard` |
+| `find doc/06_spec -name '*_spec.spl' \| wc -l` | PASS (0) | count was `0` |
+
+Integration reachability and clean-tree proof remain missing until the
+serialized commit/rebase/push completes.
+
+### Historical record boundary
+
+Everything after this heading is the 2026-08-07 campaign record. Its binary,
+shared-tree, `[E!]`, scheduling, and Stage-3 statements are historical evidence,
+not current restart12 instructions.
 
 Supersedes the scheduling half of
 `doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md` §9/§11 (the
