@@ -22,21 +22,30 @@ START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 RUN_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 FINAL_DIR=$OUT_ROOT/verify-$RUN_STAMP
 TMP_DIR=$OUT_ROOT/.verify-$RUN_STAMP-$$.tmp
-mkdir -p "$OUT_ROOT" "$TMP_DIR"
+mkdir -p "$OUT_ROOT"
+[ ! -e "$FINAL_DIR" ] || { echo "collector publication collision" >&2; exit 1; }
+[ ! -e "$TMP_DIR" ] || { echo "collector staging collision" >&2; exit 1; }
+mkdir "$TMP_DIR"
 chmod 700 "$TMP_DIR"
 cleanup() { [ ! -d "$TMP_DIR" ] || rm -rf "$TMP_DIR"; }
 trap cleanup EXIT HUP INT TERM
 
-cp "$PRODUCER" "$TMP_DIR/producer.snapshot.shs"
-PRODUCER_SHA=$(sha256sum "$PRODUCER" | awk '{print $1}')
-SNAPSHOT_SHA=$(sha256sum "$TMP_DIR/producer.snapshot.shs" | awk '{print $1}')
-[ "$PRODUCER_SHA" = "$SNAPSHOT_SHA" ] || { echo "producer snapshot mismatch" >&2; exit 1; }
-
 exec 9>"$LOCK_PATH"
 flock -n 9 || { echo "unoq receipt lock busy" >&2; exit 3; }
 LOCK_OWNER_PID=$$
+cp "$PRODUCER" "$TMP_DIR/producer.snapshot.shs"
+cp "$CPU_RUNNER" "$TMP_DIR/cpu-runner.snapshot.shs"
+cp "$GPU_RUNNER" "$TMP_DIR/gpu-runner.snapshot.shs"
+PRODUCER_SHA=$(sha256sum "$PRODUCER" | awk '{print $1}')
+SNAPSHOT_SHA=$(sha256sum "$TMP_DIR/producer.snapshot.shs" | awk '{print $1}')
+[ "$PRODUCER_SHA" = "$SNAPSHOT_SHA" ] || { echo "producer snapshot mismatch" >&2; exit 1; }
 HEAD=$(git -C "$ROOT" rev-parse HEAD)
 GPU_RUNNER_SHA=$(sha256sum "$GPU_RUNNER" | awk '{print $1}')
+GPU_RUNNER_SNAPSHOT_SHA=$(sha256sum "$TMP_DIR/gpu-runner.snapshot.shs" | awk '{print $1}')
+[ "$GPU_RUNNER_SHA" = "$GPU_RUNNER_SNAPSHOT_SHA" ] || { echo "GPU runner snapshot mismatch" >&2; exit 1; }
+CPU_RUNNER_SHA=$(sha256sum "$CPU_RUNNER" | awk '{print $1}')
+CPU_RUNNER_SNAPSHOT_SHA=$(sha256sum "$TMP_DIR/cpu-runner.snapshot.shs" | awk '{print $1}')
+[ "$CPU_RUNNER_SHA" = "$CPU_RUNNER_SNAPSHOT_SHA" ] || { echo "CPU runner snapshot mismatch" >&2; exit 1; }
 
 run_capture() {
     name=$1
@@ -72,6 +81,11 @@ if [ "$cpu_probe_rc" -eq 0 ]; then
     cpu_status=$(cpu_field unoq_cpu_server_status)
     cpu_reason=$(cpu_field unoq_cpu_server_reason)
     cpu_evidence_class=$(cpu_field unoq_cpu_server_evidence_class)
+    cpu_phase=$(cpu_field unoq_cpu_server_phase)
+    cpu_board_mutated=$(cpu_field unoq_cpu_server_board_mutated)
+    cpu_cleanup_status=$(cpu_field unoq_cpu_server_cleanup_status)
+    case "$cpu_reason:$cpu_phase" in *[!A-Za-z0-9._:-]*) echo "unsafe CPU terminal metadata" >&2; exit 1 ;; esac
+    case "$cpu_board_mutated:$cpu_cleanup_status" in false:not-required|false:pass|true:pass) ;; *) echo "invalid CPU mutation/cleanup metadata" >&2; exit 1 ;; esac
     [ "$cpu_evidence_class" = live-runner-owned ] || { echo "invalid CPU evidence class" >&2; exit 1; }
     case "$cpu_status:$cpu_rc" in blocked:2|fail:1|pass:0) ;; *) echo "CPU status/exit mismatch" >&2; exit 1 ;; esac
 else
@@ -79,6 +93,9 @@ else
     cpu_status=blocked
     cpu_reason=canonical-runner-not-executable
     cpu_evidence_class=collector-owned-absence
+    cpu_phase=collector-preflight
+    cpu_board_mutated=false
+    cpu_cleanup_status=not-required
 fi
 
 GPU_RUNNER_PATH=scripts/check/run-unoq-qrb2210-native-2d-live.shs
@@ -105,7 +122,8 @@ os_name=$(sed -n 's/^PRETTY_NAME=//p' "$TMP_DIR/board_os_release.stdout" | head 
 boot_id=$(tr -d '\r\n' <"$TMP_DIR/board_boot_id.stdout")
 
 : >"$TMP_DIR/command-receipts.env"
-for name in adb_devices board_model board_arch board_os_release board_boot_id cpu_runner_executable gpu_preflight; do
+for name in adb_devices board_model board_arch board_os_release board_boot_id cpu_runner_executable cpu_preflight gpu_preflight; do
+    [ -e "$TMP_DIR/$name.command" ] || continue
     command_sha=$(sha256sum "$TMP_DIR/$name.command" | awk '{print $1}')
     stdout_sha=$(sha256sum "$TMP_DIR/$name.stdout" | awk '{print $1}')
     stderr_sha=$(sha256sum "$TMP_DIR/$name.stderr" | awk '{print $1}')
@@ -120,19 +138,13 @@ for name in adb_devices board_model board_arch board_os_release board_boot_id cp
         echo "${name}_exit=$exit_value"
     } >>"$TMP_DIR/command-receipts.env"
 done
-if [ "$cpu_probe_rc" -eq 0 ]; then
-    for suffix in command stdout stderr exit; do
-        sha=$(sha256sum "$TMP_DIR/cpu_preflight.$suffix" | awk '{print $1}')
-        echo "cpu_preflight_${suffix}_path=cpu_preflight.$suffix" >>"$TMP_DIR/command-receipts.env"
-        echo "cpu_preflight_${suffix}_sha256=$sha" >>"$TMP_DIR/command-receipts.env"
-    done
-fi
 
 FINISH_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-case "$cpu_status" in
-    pass) mutation_boundary=bounded-db-and-fresh-reboot; board_mutated=true; boot_changed=true; provider_executed=true ;;
-    blocked) mutation_boundary=identity-and-fail-closed-preflight; board_mutated=false; boot_changed=false; provider_executed=false ;;
-    *) mutation_boundary=failed-live-campaign-see-command-receipts; board_mutated=unknown; boot_changed=unknown; provider_executed=unknown ;;
+case "$cpu_status:$cpu_board_mutated" in
+    pass:true) mutation_boundary=bounded-db-and-fresh-reboot; board_mutated=true; boot_changed=true; provider_executed=true ;;
+    blocked:false) mutation_boundary=identity-and-fail-closed-preflight; board_mutated=false; boot_changed=false; provider_executed=false ;;
+    blocked:true) mutation_boundary=blocked-after-board-mutation-see-cpu-phase; board_mutated=true; boot_changed=unknown; provider_executed=unknown ;;
+    *) mutation_boundary=failed-live-campaign-see-command-receipts; board_mutated=$cpu_board_mutated; boot_changed=unknown; provider_executed=unknown ;;
 esac
 cat >"$TMP_DIR/status.env" <<EOF
 schema=simpleos-unoq-server-verification-receipt-v1
@@ -145,6 +157,8 @@ producer_sha256=$PRODUCER_SHA
 producer_snapshot_sha256=$SNAPSHOT_SHA
 gpu_runner_path=$GPU_RUNNER_PATH
 gpu_runner_sha256=$GPU_RUNNER_SHA
+gpu_runner_snapshot_path=gpu-runner.snapshot.shs
+gpu_runner_snapshot_sha256=$GPU_RUNNER_SNAPSHOT_SHA
 lock_path=$LOCK_PATH
 lock_owner_pid=$LOCK_OWNER_PID
 lock_acquired=true
@@ -154,11 +168,17 @@ board_arch=$arch
 board_os=$os_name
 board_boot_id=$boot_id
 cpu_expected_runner_path=$CPU_EXPECTED_PATH
+cpu_runner_sha256=$CPU_RUNNER_SHA
+cpu_runner_snapshot_path=cpu-runner.snapshot.shs
+cpu_runner_snapshot_sha256=$CPU_RUNNER_SNAPSHOT_SHA
 cpu_runner_executable_exit=$cpu_probe_rc
 cpu_status=$cpu_status
 cpu_reason=$cpu_reason
 cpu_evidence_class=$cpu_evidence_class
 cpu_exit=$cpu_rc
+cpu_phase=$cpu_phase
+cpu_board_mutated=$cpu_board_mutated
+cpu_cleanup_status=$cpu_cleanup_status
 gpu_status=$gpu_status
 gpu_reason=$gpu_reason
 gpu_evidence_class=$gpu_evidence_class
@@ -170,8 +190,17 @@ boot_changed=$boot_changed
 provider_executed=$provider_executed
 EOF
 
-(cd "$TMP_DIR" && sha256sum producer.snapshot.shs *.command *.stdout *.stderr *.exit command-receipts.env status.env >SHA256SUMS)
+[ "$(sha256sum "$PRODUCER" | awk '{print $1}')" = "$PRODUCER_SHA" ] || { echo "producer changed during collection" >&2; exit 1; }
+[ "$(sha256sum "$CPU_RUNNER" | awk '{print $1}')" = "$CPU_RUNNER_SHA" ] || { echo "CPU runner changed during collection" >&2; exit 1; }
+[ "$(sha256sum "$GPU_RUNNER" | awk '{print $1}')" = "$GPU_RUNNER_SHA" ] || { echo "GPU runner changed during collection" >&2; exit 1; }
+(cd "$TMP_DIR" && sha256sum producer.snapshot.shs cpu-runner.snapshot.shs gpu-runner.snapshot.shs *.command *.stdout *.stderr *.exit command-receipts.env status.env >SHA256SUMS)
+[ ! -e "$FINAL_DIR" ] || { echo "collector publication collision" >&2; exit 1; }
 mv "$TMP_DIR" "$FINAL_DIR"
 trap - EXIT HUP INT TERM
 printf '%s\n' "$FINAL_DIR"
-exit "$gpu_rc"
+case "$cpu_status:$gpu_status" in
+    fail:*|*:fail) exit 1 ;;
+    blocked:*|*:blocked) exit 2 ;;
+    pass:pass) exit 0 ;;
+    *) exit 1 ;;
+esac

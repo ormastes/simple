@@ -32,3 +32,14 @@ The host sends the HTTP request, compares independently observed filesystem and
 body bytes, and performs authenticated DB write/read plus post-reboot read.
 Credential bytes come from host entropy, are scanned for retention, removed on
 both sides, and covered by failure/signal cleanup.
+
+The host owns a bounded credential byte scan over the declared evidence,
+server-state, and temporary-directory roots and binds its
+hash. Terminal output carries phase, mutation, and checked-cleanup state;
+cleanup failure overrides the original result while scrubbed diagnostics are
+retained. HTTP requires exact 200 status, unique numeric length, and byte-exact
+body/hash. DB requires exact authenticated grammar, generation, commit hash,
+value hash, and post-reboot equality. Boot identity must match a detached
+signature verified under the repository-pinned local trust root. The collector
+snapshots/hashes the CPU runner, retains its exit, propagates combined CPU/GPU
+outcome, and refuses collisions. Protocol sabotage executes without ADB.

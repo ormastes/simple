@@ -40,6 +40,13 @@ publication, CPU-runner producer/exit binding, and executable negative cases.
 Do not run it against the board or credit an acceptance row until those defects
 are resolved in a fresh bounded lane.
 
+The bounded source-fix lane implements those contracts: phase/mutation terminal
+metadata, cleanup override with scrubbed diagnostics, host-owned bounded
+credential scanning, strict HTTP/DB grammar and hashes, a signed manifest under
+the pinned local boot trust root, CPU-runner snapshot/exit binding, aggregate
+exit propagation, collision refusal, and executable sabotage. No board run or
+acceptance credit occurred.
+
 The canonical CPU runner is
 `scripts/check/run-unoq-qrb2210-cpu-server-live.shs`. Its `--self-test` is
 negative-only and must not access ADB. Physical PASS requires SimpleOS identity

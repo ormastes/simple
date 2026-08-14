@@ -45,12 +45,26 @@ compatibility loop and replaced the reset's extracted `Scope` value with a
 persistent root-symbol dictionary owner. Nested field/type maps are cleared at
 their outer owner and repopulated in the two-module sabotage test, exercising
 logical COW detachment without copying them through reset locals. No truthful
-host-runtime total-allocation or allocator-byte high-water counter is exported
-to this Simple test surface: `rt_heap_registry_count` measures registry slots,
-not allocated bytes, so that earlier proxy oracle was removed. Allocation/RSS
-boundedness therefore remains explicitly UNPROVEN until the future profiled
-Stage3 transaction; the static contract proves only that neither HIR loop nor
-`begin_module` reconstructs a lowerer or copies retained surface/trait owners.
+byte proof was retained in that cycle: `rt_heap_registry_count` measures
+registry slots, not allocated bytes, so that earlier proxy oracle was removed.
+Allocation/RSS boundedness therefore remained explicitly UNPROVEN pending a
+real byte-counter lifecycle oracle or the future profiled Stage3 transaction;
+the static contract proved only that neither HIR loop nor `begin_module`
+reconstructs a lowerer or copies retained surface/trait owners.
+
+Cycle-4 review rejected a proposed synthetic populate/reset plateau oracle.
+Although `rt_heap_live_bytes` measures registered runtime-value header/inline
+bytes and `rt_heap_aux_live_bytes` measures collection backing buffers, both
+are process-global. Reads around an SSpec scenario cannot attribute changes to
+one `HirLowering`, exclude runner/matcher allocation, cover uninstrumented raw
+allocations, or establish the production `lower_module` lifecycle. Exact
+equality would therefore be a fragile diagnostic checkpoint, not an owner
+proof. The oracle and its proof claim were removed rather than weakening the
+P0 gate. An acceptable focused proof still requires either an attributable
+HirLowering arena/generation owner covering nested backing/raw allocations and
+real `lower_module`, or an isolated native lifecycle probe using the exact
+Stage3 runtime. Neither exists in this lane, so memory boundedness and RSS
+termination remain **EVIDENCE FAIL**.
 
 A no-stub, one-worker Cranelift mini-build of
 `module_surface_physical_alias_native_probe.spl` was attempted with the retained

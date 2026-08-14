@@ -201,3 +201,13 @@ and authenticated DB response grammar are not validated exactly; boot
 provenance is not bound to a locally trusted signed manifest; and collector
 producer, exit, and collision evidence is incomplete. The three-cycle cap is
 exhausted. No live invocation is authorized and no AC is credited.
+
+## Source-only blocker repair
+
+A fresh bounded lane implemented the rejected runner/collector contracts:
+phase-aware mutation records, checked cleanup with scrubbed diagnostic
+retention, bounded host-owned credential scanning, strict HTTP and authenticated
+DB transcript hashes, signed locally pinned boot-manifest trust, CPU-runner
+snapshot/exit binding, aggregate exit propagation, and collision refusal. Its
+negative sabotage is ADB-free. No board was accessed and the historical
+FAIL/BLOCKED acceptance disposition remains unchanged.

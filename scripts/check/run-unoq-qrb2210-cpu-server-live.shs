@@ -14,9 +14,70 @@ REMOTE_BOOT_IDENTITY=/etc/simpleos-qrb2210-boot.env
 REMOTE_CREDENTIAL=/run/simpleos/evidence/unoq-cpu.credential
 REMOTE_CREDENTIAL_SCAN=/run/simpleos/evidence/unoq-cpu-credential-scan.bin
 MAX_RECEIPT_BYTES=65536
+PHASE=host-preflight
+BOARD_MUTATED=false
+RUN_DIR=
+PUBLISHED=false
+CLEANUP_STATUS=not-required
 
-blocked() { echo "unoq_cpu_server_status=blocked"; echo "unoq_cpu_server_reason=$1"; echo "unoq_cpu_server_evidence_class=live-runner-owned"; exit 2; }
-failed() { echo "unoq_cpu_server_status=fail"; echo "unoq_cpu_server_reason=$1"; echo "unoq_cpu_server_evidence_class=live-runner-owned"; exit 1; }
+checked_cleanup() {
+    cleanup_ok=true
+    if [ "$BOARD_MUTATED" = true ]; then
+        adb -s "$DEVICE" shell rm -f "$REMOTE_RECEIPT" "$REMOTE_CREDENTIAL" "$REMOTE_CREDENTIAL_SCAN" >/dev/null 2>&1 || cleanup_ok=false
+        adb -s "$DEVICE" shell pkill -f simpleos-unoq-cpu-server-evidence >/dev/null 2>&1 || :
+        set +e
+        adb -s "$DEVICE" shell pgrep -f simpleos-unoq-cpu-server-evidence >/dev/null 2>&1
+        pgrep_rc=$?
+        set -e
+        [ "$pgrep_rc" -eq 1 ] || cleanup_ok=false
+        for cleanup_pid in ${server_pid:-} ${post_server_pid:-}; do
+            [ -z "$cleanup_pid" ] || adb -s "$DEVICE" shell test ! -e "/proc/$cleanup_pid" >/dev/null 2>&1 || cleanup_ok=false
+        done
+        forward_list=${RUN_DIR:-$OUT_DIR}/cleanup-forward-list
+        adb forward --list >"$forward_list" 2>/dev/null || cleanup_ok=false
+        for cleanup_port in 18080 15433; do
+            if grep -E "^$DEVICE[[:space:]]+tcp:$cleanup_port[[:space:]]" "$forward_list" >/dev/null; then
+                adb -s "$DEVICE" forward --remove "tcp:$cleanup_port" >/dev/null 2>&1 || cleanup_ok=false
+            fi
+        done
+        adb forward --list >"$forward_list.after" 2>/dev/null || cleanup_ok=false
+        if grep -E "^$DEVICE[[:space:]]+tcp:(18080|15433)[[:space:]]" "$forward_list.after" >/dev/null; then cleanup_ok=false; fi
+        for cleanup_file in "$REMOTE_RECEIPT" "$REMOTE_CREDENTIAL" "$REMOTE_CREDENTIAL_SCAN"; do
+            adb -s "$DEVICE" shell test ! -e "$cleanup_file" >/dev/null 2>&1 || cleanup_ok=false
+        done
+    fi
+    credential=
+    if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ] && [ "$PUBLISHED" = false ]; then
+        rm -f "$RUN_DIR/credential" || cleanup_ok=false
+        [ ! -e "$RUN_DIR/credential" ] || cleanup_ok=false
+        diagnostic_dir="$OUT_DIR/unoq-cpu-${requested_status:-terminal}-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+        if [ -e "$diagnostic_dir" ]; then cleanup_ok=false
+        else mv "$RUN_DIR" "$diagnostic_dir" || cleanup_ok=false; RUN_DIR=; fi
+    fi
+    if [ "$cleanup_ok" = true ]; then CLEANUP_STATUS=pass; return 0; fi
+    CLEANUP_STATUS=fail
+    return 1
+}
+
+terminal() {
+    requested_status=$1; requested_reason=$2; requested_exit=$3
+    trap - EXIT HUP INT TERM
+    if ! checked_cleanup; then
+        requested_status=fail
+        requested_reason=checked-cleanup-failed
+        requested_exit=1
+    fi
+    printf '%s\n' \
+        "unoq_cpu_server_status=$requested_status" \
+        "unoq_cpu_server_reason=$requested_reason" \
+        "unoq_cpu_server_evidence_class=live-runner-owned" \
+        "unoq_cpu_server_phase=$PHASE" \
+        "unoq_cpu_server_board_mutated=$BOARD_MUTATED" \
+        "unoq_cpu_server_cleanup_status=$CLEANUP_STATUS"
+    exit "$requested_exit"
+}
+blocked() { terminal blocked "$1" 2; }
+failed() { terminal fail "$1" 1; }
 
 receipt_value() {
     receipt=$1; key=$2
@@ -48,8 +109,7 @@ validate_receipt() {
     for hash_key in server_sha256 provenance_sha256 provider_sha256 bundle_sha256 \
         source_manifest_sha256 compiler_admission_sha256 command_sha256 \
         http_expected_sha256 http_body_sha256 db_commit_sha256 \
-        db_read_before_reboot_sha256 db_read_after_reboot_sha256 maps_sha256 \
-        credential_scan_sha256; do
+        db_read_before_reboot_sha256 db_read_after_reboot_sha256 maps_sha256; do
         hash_value=$(receipt_value "$receipt" "$hash_key") || return 1
         is_sha256 "$hash_value" || return 1
     done
@@ -89,6 +149,57 @@ validate_receipt() {
     [ "$(receipt_value "$receipt" credential_bytes_retained)" = false ] || return 1
     [ "$(receipt_value "$receipt" credential_live_matches)" = 0 ] || return 1
     [ "$(receipt_value "$receipt" blocker)" = none ] || return 1
+}
+
+parse_http_200() {
+    response=$1; headers=$2; body=$3
+    # Require a CRLF-delimited HTTP/1.1 response, exact 200 status, one numeric
+    # Content-Length, and a body whose byte count is exactly that declaration.
+    LC_ALL=C sed -n '1,/^\r$/p' "$response" | tr -d '\r' >"$headers"
+    [ -s "$headers" ] || return 1
+    grep -q '^$' "$headers" || return 1
+    [ "$(sed -n '1p' "$headers")" = 'HTTP/1.1 200 OK' ] || return 1
+    length_count=$(sed -n 's/^Content-Length: \([0-9][0-9]*\)$/\1/p' "$headers" | wc -l | tr -d ' ')
+    [ "$length_count" -eq 1 ] || return 1
+    declared_length=$(sed -n 's/^Content-Length: \([0-9][0-9]*\)$/\1/p' "$headers")
+    LC_ALL=C sed '1,/^\r$/d' "$response" >"$body"
+    [ "$(wc -c <"$body" | tr -d ' ')" -eq "$declared_length" ] || return 1
+}
+
+parse_db_before() {
+    response=$1; expected_value=$2
+    [ "$(wc -l <"$response" | tr -d ' ')" -eq 3 ] || return 1
+    [ "$(sed -n '1p' "$response")" = 'AUTH operator OK' ] || return 1
+    commit_line=$(sed -n '2p' "$response")
+    case "$commit_line" in 'WRITE records unoq-accept OK generation='*' commit_sha256='*) ;; *) return 1 ;; esac
+    generation=${commit_line#* generation=}; generation=${generation%% *}
+    commit_sha=${commit_line##* commit_sha256=}
+    case "$generation" in ''|*[!0-9]*|0) return 1 ;; esac
+    is_sha256 "$commit_sha" || return 1
+    value_sha=$(printf '%s' "$expected_value" | sha256sum | awk '{print $1}')
+    [ "$(sed -n '3p' "$response")" = "READ records unoq-accept OK value=$expected_value value_sha256=$value_sha" ] || return 1
+    DB_GENERATION=$generation; DB_COMMIT_SHA=$commit_sha; DB_VALUE_SHA=$value_sha
+}
+
+parse_db_after() {
+    response=$1; expected_value=$2; expected_sha=$3
+    [ "$(wc -l <"$response" | tr -d ' ')" -eq 2 ] || return 1
+    [ "$(sed -n '1p' "$response")" = 'AUTH operator OK' ] || return 1
+    [ "$(sed -n '2p' "$response")" = "READ records unoq-accept OK value=$expected_value value_sha256=$expected_sha" ] || return 1
+}
+
+internal_terminal_test() {
+    [ "${UNOQ_CPU_INTERNAL_SELF_TEST:-}" = 1 ] || exit 1
+    DEVICE=fake-board
+    OUT_DIR=$1
+    RUN_DIR=$OUT_DIR/.terminal.tmp
+    mkdir -p "$RUN_DIR"
+    printf secret >"$RUN_DIR/credential"
+    BOARD_MUTATED=true
+    PHASE=credential-push-attempted
+    server_pid=41
+    post_server_pid=42
+    blocked injected-post-mutation-blocker
 }
 
 self_test() {
@@ -165,8 +276,50 @@ self_test() {
     if validate_receipt "$dir/duplicate.env" test-board test-boot \
         aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
         bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; then exit 1; fi
+    printf 'HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n' >"$dir/http-404"
+    if parse_http_200 "$dir/http-404" "$dir/http.headers" "$dir/http.body"; then exit 1; fi
+    printf 'HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\ntest' >"$dir/http-duplicate-length"
+    if parse_http_200 "$dir/http-duplicate-length" "$dir/http.headers" "$dir/http.body"; then exit 1; fi
+    printf 'test' >"$dir/http.want"
+    printf 'HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ntest' >"$dir/http-valid"
+    parse_http_200 "$dir/http-valid" "$dir/http.headers" "$dir/http.body" || exit 1
+    cmp "$dir/http.want" "$dir/http.body" >/dev/null || exit 1
+    printf 'HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ntest' >"$dir/http-wrong-length"
+    if parse_http_200 "$dir/http-wrong-length" "$dir/http.headers" "$dir/http.body"; then exit 1; fi
+    printf 'AUTH operator OK\nWRITE records unoq-accept OK generation=1 commit_sha256=%064d\nREAD records unoq-accept OK value=wrong value_sha256=%064d\n' 0 0 >"$dir/db-wrong"
+    if parse_db_before "$dir/db-wrong" expected; then exit 1; fi
+    printf 'AUTH operator OK\nREAD records unoq-accept OK value=wrong value_sha256=%064d\n' 0 >"$dir/db-after-wrong"
+    if parse_db_after "$dir/db-after-wrong" expected aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; then exit 1; fi
+    expected_sha=$(printf '%s' expected | sha256sum | awk '{print $1}')
+    printf 'AUTH operator OK\nWRITE records unoq-accept OK generation=7 commit_sha256=%s\nREAD records unoq-accept OK value=expected value_sha256=%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$expected_sha" >"$dir/db-valid"
+    parse_db_before "$dir/db-valid" expected || exit 1
+    printf 'AUTH operator OK\nREAD records unoq-accept OK value=expected value_sha256=%s\n' "$expected_sha" >"$dir/db-after-valid"
+    parse_db_after "$dir/db-after-valid" expected "$expected_sha" || exit 1
+    sed 's/generation=7/generation=0/' "$dir/db-valid" >"$dir/db-generation-zero"
+    if parse_db_before "$dir/db-generation-zero" expected; then exit 1; fi
+    sed 's/commit_sha256=a/commit_sha256=z/' "$dir/db-valid" >"$dir/db-bad-commit"
+    if parse_db_before "$dir/db-bad-commit" expected; then exit 1; fi
+    mkdir "$dir/fake-bin" "$dir/terminal-ok" "$dir/terminal-fail"
+    printf '%s\n' '#!/bin/sh' \
+        'if [ "${FAKE_ADB_CLEANUP_FAIL:-}" = 1 ]; then exit 7; fi' \
+        'case "$*" in *"shell pgrep "*) exit 1 ;; *"forward --list"*) exit 0 ;; esac' \
+        'exit 0' >"$dir/fake-bin/adb"
+    chmod +x "$dir/fake-bin/adb"
+    set +e
+    PATH="$dir/fake-bin:$PATH" UNOQ_CPU_INTERNAL_SELF_TEST=1 sh "$0" --internal-terminal-test "$dir/terminal-ok" >"$dir/terminal-ok.out"
+    terminal_ok_rc=$?
+    PATH="$dir/fake-bin:$PATH" FAKE_ADB_CLEANUP_FAIL=1 UNOQ_CPU_INTERNAL_SELF_TEST=1 sh "$0" --internal-terminal-test "$dir/terminal-fail" >"$dir/terminal-fail.out"
+    terminal_fail_rc=$?
+    set -e
+    [ "$terminal_ok_rc" -eq 2 ] || exit 1
+    grep -Fqx 'unoq_cpu_server_board_mutated=true' "$dir/terminal-ok.out" || exit 1
+    grep -Fqx 'unoq_cpu_server_cleanup_status=pass' "$dir/terminal-ok.out" || exit 1
+    [ "$terminal_fail_rc" -eq 1 ] || exit 1
+    grep -Fqx 'unoq_cpu_server_reason=checked-cleanup-failed' "$dir/terminal-fail.out" || exit 1
+    grep -Fqx 'unoq_cpu_server_cleanup_status=fail' "$dir/terminal-fail.out" || exit 1
+    find "$dir/terminal-fail" -type f ! -name credential | grep -q . || exit 1
     echo "unoq_cpu_server_self_test_status=pass"
-    echo "unoq_cpu_server_self_test_evidence=negative-only-no-adb"
+    echo "unoq_cpu_server_self_test_evidence=host-protocol-and-negative-no-real-adb"
     exit 0
 }
 
@@ -175,6 +328,7 @@ while [ "$#" -gt 0 ]; do
         --device) shift; DEVICE=${1:-} ;;
         --output-dir) shift; OUT_DIR=${1:-} ;;
         --self-test) self_test ;;
+        --internal-terminal-test) shift; internal_terminal_test "${1:-}" ;;
         *) failed "unknown-argument" ;;
     esac
     shift
@@ -203,9 +357,18 @@ command -v od >/dev/null 2>&1 || blocked "od-missing"
 LOCAL_SERVER_ELF=${UNOQ_CPU_SERVER_ELF:-}
 LOCAL_COMPILER_ADMISSION=${UNOQ_CPU_COMPILER_ADMISSION:-}
 LOCAL_SOURCE_MANIFEST=${UNOQ_CPU_SOURCE_MANIFEST:-}
+LOCAL_TRUSTED_BOOT_MANIFEST=${UNOQ_CPU_TRUSTED_BOOT_MANIFEST:-}
+LOCAL_TRUSTED_BOOT_SIGNATURE=${UNOQ_CPU_TRUSTED_BOOT_SIGNATURE:-}
+LOCAL_BOOT_TRUST_ROOT=$ROOT/config/security/simpleos-qrb2210-boot-trust-root.pem
 [ -n "$LOCAL_SERVER_ELF" ] && [ -f "$LOCAL_SERVER_ELF" ] && [ ! -L "$LOCAL_SERVER_ELF" ] || blocked "admitted-current-source-aarch64-server-elf-missing"
 [ -n "$LOCAL_COMPILER_ADMISSION" ] && [ -f "$LOCAL_COMPILER_ADMISSION" ] && [ ! -L "$LOCAL_COMPILER_ADMISSION" ] || blocked "compiler-admission-receipt-missing"
 [ -n "$LOCAL_SOURCE_MANIFEST" ] && [ -f "$LOCAL_SOURCE_MANIFEST" ] && [ ! -L "$LOCAL_SOURCE_MANIFEST" ] || blocked "source-manifest-missing"
+[ -n "$LOCAL_TRUSTED_BOOT_MANIFEST" ] && [ -f "$LOCAL_TRUSTED_BOOT_MANIFEST" ] && [ ! -L "$LOCAL_TRUSTED_BOOT_MANIFEST" ] || blocked "locally-trusted-boot-manifest-missing"
+[ -n "$LOCAL_TRUSTED_BOOT_SIGNATURE" ] && [ -f "$LOCAL_TRUSTED_BOOT_SIGNATURE" ] && [ ! -L "$LOCAL_TRUSTED_BOOT_SIGNATURE" ] || blocked "trusted-boot-manifest-signature-missing"
+[ -f "$LOCAL_BOOT_TRUST_ROOT" ] && [ ! -L "$LOCAL_BOOT_TRUST_ROOT" ] || blocked "pinned-boot-trust-root-missing"
+command -v openssl >/dev/null 2>&1 || blocked "openssl-missing"
+openssl dgst -sha256 -verify "$LOCAL_BOOT_TRUST_ROOT" -signature "$LOCAL_TRUSTED_BOOT_SIGNATURE" "$LOCAL_TRUSTED_BOOT_MANIFEST" >/dev/null 2>&1 || blocked "trusted-boot-manifest-signature-invalid"
+grep -Fqx 'schema=simpleos-qrb2210-trusted-boot-manifest-v1' "$LOCAL_TRUSTED_BOOT_MANIFEST" || blocked "locally-trusted-boot-manifest-invalid"
 grep -Fqx 'schema=simpleos-arm64-current-source-compiler-admission-v1' "$LOCAL_COMPILER_ADMISSION" || blocked "compiler-admission-schema-invalid"
 local_server_sha=$(sha256sum "$LOCAL_SERVER_ELF" | awk '{print $1}')
 local_manifest_sha=$(sha256sum "$LOCAL_SOURCE_MANIFEST" | awk '{print $1}')
@@ -232,6 +395,12 @@ boot_id=$(adb_run shell cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d 
 [ -n "$boot_id" ] || blocked "boot-identity-missing"
 bundle_sha=$(adb_run shell sed -n 's/^bundle_sha256=//p' "$REMOTE_BOOT_IDENTITY" | tr -d '\r\n')
 is_sha256 "$bundle_sha" || blocked "simpleos-signed-boot-bundle-hash-invalid"
+recovery_sha=$(adb_run shell sed -n 's/^recovery_sha256=//p' "$REMOTE_BOOT_IDENTITY" | tr -d '\r\n')
+is_sha256 "$recovery_sha" || blocked "simpleos-recovery-hash-invalid"
+grep -Fqx "board_id=qrb2210-uno-q" "$LOCAL_TRUSTED_BOOT_MANIFEST" || blocked "trusted-boot-board-mismatch"
+grep -Fqx "bundle_sha256=$bundle_sha" "$LOCAL_TRUSTED_BOOT_MANIFEST" || blocked "trusted-boot-bundle-mismatch"
+grep -Fqx "recovery_sha256=$recovery_sha" "$LOCAL_TRUSTED_BOOT_MANIFEST" || blocked "trusted-boot-recovery-mismatch"
+trusted_boot_manifest_sha=$(sha256sum "$LOCAL_TRUSTED_BOOT_MANIFEST" | awk '{print $1}')
 
 adb_run shell test -x "$REMOTE_PROVIDER" >/dev/null 2>&1 || blocked "cpu-server-evidence-provider-missing"
 adb_run shell test -x "$REMOTE_SERVER" >/dev/null 2>&1 || blocked "filesystem-server-executable-missing"
@@ -251,22 +420,17 @@ case "$canonical_output" in "$ROOT"/build/test-artifacts/*) ;; *) blocked "unsaf
 [ ! -L "$OUT_DIR" ] || blocked "output-directory-symlink-forbidden"
 mkdir -p "$OUT_DIR"
 run_dir=$(mktemp -d "$OUT_DIR/.unoq-cpu-live-XXXXXX.tmp")
+RUN_DIR=$run_dir
 chmod 700 "$run_dir"
-cleanup_live() {
-    set +e
-    adb -s "$DEVICE" shell rm -f "$REMOTE_RECEIPT" "$REMOTE_CREDENTIAL" "$REMOTE_CREDENTIAL_SCAN" >/dev/null 2>&1
-    adb -s "$DEVICE" shell pkill -f simpleos-unoq-cpu-server-evidence >/dev/null 2>&1
-    adb -s "$DEVICE" forward --remove tcp:18080 >/dev/null 2>&1
-    adb -s "$DEVICE" forward --remove tcp:15433 >/dev/null 2>&1
-    credential=
-    rm -rf "$run_dir"
-}
-trap cleanup_live EXIT HUP INT TERM
+trap 'PHASE=signal-cleanup; terminal fail interrupted 1' HUP INT TERM
+trap 'terminal fail unexpected-exit 1' EXIT
 credential=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
 is_sha256 "$credential" || failed "ephemeral-credential-generation-failed"
 printf '%s' "$credential" >"$run_dir/credential"
 chmod 600 "$run_dir/credential"
+BOARD_MUTATED=true
 adb -s "$DEVICE" push "$run_dir/credential" "$REMOTE_CREDENTIAL" >"$run_dir/credential-push.stdout" 2>"$run_dir/credential-push.stderr" || blocked "ephemeral-credential-transfer-failed"
+PHASE=before-reboot-provider
 adb_run shell chmod 600 "$REMOTE_CREDENTIAL" >/dev/null 2>&1 || blocked "ephemeral-credential-permissions-failed"
 provider_sha=$(adb_run shell sha256sum "$REMOTE_PROVIDER" | awk '{print $1}')
 adb_run shell "$REMOTE_PROVIDER" --cpu-only --phase before-reboot --credential-file "$REMOTE_CREDENTIAL" --receipt "$REMOTE_RECEIPT" >"$run_dir/provider-before.stdout" 2>"$run_dir/provider-before.stderr" || blocked "cpu-server-before-reboot-provider-failed"
@@ -289,17 +453,19 @@ before_boot_id=$boot_id
 adb -s "$DEVICE" forward tcp:18080 tcp:8080 >/dev/null || blocked "http-forward-failed"
 adb -s "$DEVICE" exec-out cat /SYS/README.TXT >"$run_dir/http.expected" || blocked "http-expected-file-read-failed"
 printf 'GET /files/README.TXT HTTP/1.1\r\nHost: uno-q\r\nConnection: close\r\n\r\n' | nc -w 10 127.0.0.1 18080 >"$run_dir/http.response" || failed "host-http-request-failed"
-sed '1,/^\r$/d' "$run_dir/http.response" >"$run_dir/http.body"
+parse_http_200 "$run_dir/http.response" "$run_dir/http.headers" "$run_dir/http.body" || failed "host-http-response-grammar-invalid"
 [ "$(sha256sum "$run_dir/http.expected" | awk '{print $1}')" = "$(sha256sum "$run_dir/http.body" | awk '{print $1}')" ] || failed "host-http-filesystem-bytes-mismatch"
 adb -s "$DEVICE" forward tcp:15433 tcp:5433 >/dev/null || blocked "db-forward-failed"
 db_value="unoq-$before_boot_id"
 printf 'OPEN operator %s\nWRITE records unoq-accept %s\nREAD records unoq-accept\n' "$credential" "$db_value" | nc -w 10 127.0.0.1 15433 >"$run_dir/db-before.response" || failed "host-db-before-reboot-failed"
-grep -Fq "$db_value" "$run_dir/db-before.response" || failed "host-db-before-value-missing"
+parse_db_before "$run_dir/db-before.response" "$db_value" || failed "host-db-before-response-grammar-invalid"
+PHASE=reboot-requested
 adb_run shell sync >/dev/null 2>&1 || blocked "pre-reboot-sync-failed"
 adb_run shell reboot >/dev/null 2>&1 || blocked "fresh-reboot-request-failed"
 timeout 120 adb -s "$DEVICE" wait-for-device >/dev/null 2>&1 || blocked "fresh-reboot-device-timeout"
 after_boot_id=$(adb_run shell cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n')
 [ "$after_boot_id" != "$before_boot_id" ] || failed "fresh-reboot-not-observed"
+PHASE=after-reboot-provider
 adb -s "$DEVICE" push "$run_dir/credential" "$REMOTE_CREDENTIAL" >"$run_dir/credential-repush.stdout" 2>"$run_dir/credential-repush.stderr" || blocked "post-reboot-credential-transfer-failed"
 adb_run shell chmod 600 "$REMOTE_CREDENTIAL" >/dev/null 2>&1 || blocked "post-reboot-credential-permissions-failed"
 adb_run shell "$REMOTE_PROVIDER" --cpu-only --phase after-reboot --before-boot-id "$before_boot_id" --credential-file "$REMOTE_CREDENTIAL" --receipt "$REMOTE_RECEIPT" >"$run_dir/provider-after.stdout" 2>"$run_dir/provider-after.stderr" || blocked "cpu-server-after-reboot-provider-failed"
@@ -317,7 +483,7 @@ adb_run shell ls -l "/proc/$post_server_pid/fd" >"$run_dir/server-after.fds" || 
 if grep -Eqi 'vulkan|cuda|adreno|libOpenCL|libGL|/dev/dri|kgsl|renderD' "$run_dir/server-after.maps" "$run_dir/server-after.fds"; then failed "post-reboot-accelerator-observed"; fi
 adb -s "$DEVICE" forward tcp:15433 tcp:5433 >/dev/null || blocked "post-reboot-db-forward-failed"
 printf 'OPEN operator %s\nREAD records unoq-accept\n' "$credential" | nc -w 10 127.0.0.1 15433 >"$run_dir/db-after.response" || failed "host-db-after-reboot-failed"
-grep -Fq "$db_value" "$run_dir/db-after.response" || failed "host-db-after-value-missing"
+parse_db_after "$run_dir/db-after.response" "$db_value" "$DB_VALUE_SHA" || failed "host-db-after-response-grammar-invalid"
 [ "$(wc -c <"$run_dir/receipt.env")" -le "$MAX_RECEIPT_BYTES" ] || failed "cpu-server-receipt-too-large"
 validate_receipt "$run_dir/receipt.env" "$DEVICE" "$after_boot_id" "$server_sha" "$provenance_sha" || failed "cpu-server-receipt-rejected"
 [ "$(receipt_value "$run_dir/receipt.env" source_revision)" = "$source_revision" ] || failed "receipt-source-revision-mismatch"
@@ -325,15 +491,31 @@ validate_receipt "$run_dir/receipt.env" "$DEVICE" "$after_boot_id" "$server_sha"
 [ "$(receipt_value "$run_dir/receipt.env" compiler_admission_sha256)" = "$compiler_admission_sha" ] || failed "receipt-compiler-admission-mismatch"
 [ "$(receipt_value "$run_dir/receipt.env" provider_sha256)" = "$provider_sha" ] || failed "receipt-provider-hash-mismatch"
 [ "$(receipt_value "$run_dir/receipt.env" bundle_sha256)" = "$bundle_sha" ] || failed "receipt-bundle-hash-mismatch"
+[ "$(receipt_value "$run_dir/receipt.env" trusted_boot_manifest_sha256)" = "$trusted_boot_manifest_sha" ] || failed "receipt-trusted-boot-manifest-mismatch"
+[ "$(receipt_value "$run_dir/receipt.env" db_commit_sha256)" = "$DB_COMMIT_SHA" ] || failed "receipt-db-commit-hash-mismatch"
+[ "$(receipt_value "$run_dir/receipt.env" db_read_before_reboot_sha256)" = "$DB_VALUE_SHA" ] || failed "receipt-db-before-hash-mismatch"
+[ "$(receipt_value "$run_dir/receipt.env" db_read_after_reboot_sha256)" = "$DB_VALUE_SHA" ] || failed "receipt-db-after-hash-mismatch"
+[ "$(receipt_value "$run_dir/receipt.env" db_generation)" = "$DB_GENERATION" ] || failed "receipt-db-generation-mismatch"
 maps_sha=$(sha256sum "$run_dir/server-before.maps" | awk '{print $1}')
 [ "$(receipt_value "$run_dir/receipt.env" maps_sha256)" = "$maps_sha" ] || failed "maps-receipt-hash-mismatch"
 post_server_sha=$(adb_run shell sha256sum "$REMOTE_SERVER" | awk '{print $1}')
 [ "$post_server_sha" = "$server_sha" ] || failed "server-changed-during-reboot-campaign"
 post_provider_sha=$(adb_run shell sha256sum "$REMOTE_PROVIDER" | awk '{print $1}')
 [ "$post_provider_sha" = "$provider_sha" ] || failed "provider-changed-during-reboot-campaign"
-adb_run exec-out cat "$REMOTE_CREDENTIAL_SCAN" >"$run_dir/credential-scan.bin" || blocked "credential-scan-acquisition-failed"
-if grep -Fq "$credential" "$run_dir/credential-scan.bin"; then failed "credential-bytes-retained"; fi
+# The host chooses the bounded scan scope and creates the scan transcript; the
+# provider cannot select or redact the bytes searched for credential retention.
+PHASE=credential-cleanup-and-scan
 adb_run shell rm -f "$REMOTE_RECEIPT" "$REMOTE_CREDENTIAL" "$REMOTE_CREDENTIAL_SCAN" >/dev/null 2>&1 || failed "remote-cleanup-failed"
+adb_run exec-out sh -c "find /run/simpleos/evidence /var/lib/simpleos/servers /tmp -xdev -type f -print0 2>/dev/null" >"$run_dir/credential-scan.paths0" || blocked "host-owned-credential-scan-inventory-failed"
+scan_file_count=$(tr -cd '\000' <"$run_dir/credential-scan.paths0" | wc -c | tr -d ' ')
+[ "$scan_file_count" -le 256 ] || blocked "host-owned-credential-scan-file-bound-exceeded"
+adb_run shell "xargs -0 -r stat -c %s" <"$run_dir/credential-scan.paths0" | tr -d '\r' >"$run_dir/credential-scan.sizes" || blocked "host-owned-credential-scan-size-acquisition-failed"
+[ "$(wc -l <"$run_dir/credential-scan.sizes" | tr -d ' ')" -eq "$scan_file_count" ] || blocked "host-owned-credential-scan-inventory-size-mismatch"
+awk 'BEGIN { total=0 } $1 !~ /^[0-9]+$/ || $1 > 1048576 { exit 1 } { total += $1 } END { if (total > 16777216) exit 1 }' "$run_dir/credential-scan.sizes" || blocked "host-owned-credential-scan-size-bound-exceeded"
+adb_run exec-out sh -c "xargs -0 -r cat" <"$run_dir/credential-scan.paths0" >"$run_dir/credential-scan.bin" || blocked "host-owned-credential-scan-acquisition-failed"
+[ "$(wc -c <"$run_dir/credential-scan.bin" | tr -d ' ')" -eq "$(awk '{s += $1} END {print s + 0}' "$run_dir/credential-scan.sizes")" ] || blocked "host-owned-credential-scan-stream-size-mismatch"
+credential_scan_sha=$(sha256sum "$run_dir/credential-scan.bin" | awk '{print $1}')
+if grep -Fq "$credential" "$run_dir/credential-scan.bin"; then failed "credential-bytes-retained"; fi
 for remote_file in "$REMOTE_RECEIPT" "$REMOTE_CREDENTIAL" "$REMOTE_CREDENTIAL_SCAN"; do
     if adb_run shell test -e "$remote_file" >/dev/null 2>&1; then failed "remote-cleanup-unverified"; fi
 done
@@ -342,7 +524,12 @@ rm -f "$run_dir/credential"
 [ ! -e "$run_dir/credential" ] || failed "local-credential-cleanup-unverified"
 receipt_sha=$(sha256sum "$run_dir/receipt.env" | awk '{print $1}')
 final_dir=$OUT_DIR/unoq-cpu-live-$(date -u +%Y%m%dT%H%M%SZ)
+[ ! -e "$final_dir" ] || failed "publication-collision"
 mv "$run_dir" "$final_dir"
+PUBLISHED=true
+RUN_DIR=
+CLEANUP_STATUS=pass
+PHASE=published
 trap - EXIT HUP INT TERM
 printf '%s\n' \
     "unoq_cpu_server_status=pass" \
@@ -350,4 +537,8 @@ printf '%s\n' \
     "unoq_cpu_server_evidence_class=live-runner-owned" \
     "unoq_cpu_server_receipt=$final_dir/receipt.env" \
     "unoq_cpu_server_receipt_sha256=$receipt_sha" \
-    "unoq_cpu_server_provider_sha256=$provider_sha"
+    "unoq_cpu_server_provider_sha256=$provider_sha" \
+    "unoq_cpu_server_host_credential_scan_sha256=$credential_scan_sha" \
+    "unoq_cpu_server_phase=$PHASE" \
+    "unoq_cpu_server_board_mutated=$BOARD_MUTATED" \
+    "unoq_cpu_server_cleanup_status=$CLEANUP_STATUS"
