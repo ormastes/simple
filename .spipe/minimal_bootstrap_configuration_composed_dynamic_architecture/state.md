@@ -207,3 +207,10 @@ implementation-in-progress
   unique live pins, replayed release fails, and close refuses pinned sessions.
   Naked evidence remains fail closed. A real provider artifact and admitted
   B2/B3 run are still required before deployed activation is claimed.
+- CLI invocation wire follow-up: the public command contract now owns fixed
+  28-byte request and 20-byte result headers plus canonical bounded arenas for
+  command UTF-8, counted length-prefixed arguments, output, and diagnostics.
+  Decoders reject noncanonical offsets, truncation, trailing bytes, invalid
+  operations, excessive counts, and absent output capacity. This removes
+  language-private strings/arrays from the next dynamic invocation boundary;
+  the exact invoke runtime call and real provider execution remain pending.

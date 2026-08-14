@@ -64,6 +64,14 @@ Reader algorithm validates the header and directory completely before decoding a
 
 `SimpleCliCommandV1` uses coarse calls for description, argument validation, execution, and completion. SCI duplicates only stable summary/option-schema identity needed for root help. `SimpleAppLaunchV1` accepts an immutable launch request with app/artifact/action IDs and bounded arguments, and returns a stable status plus opaque process/activation identity.
 
+Cross-binary CLI invocation uses canonical arenas, not Simple strings or
+collections. The request begins with a fixed 28-byte header followed by the
+command UTF-8 bytes and a counted sequence of length-prefixed UTF-8 arguments.
+The response begins with a fixed 20-byte header followed by output and
+diagnostic UTF-8 bytes. All offsets are arena-relative; decoders require
+canonical contiguous ordering, exact terminal bounds, bounded argument counts,
+and an explicit output capacity.
+
 Host allocation owns cross-boundary output memory unless a descriptor explicitly states caller storage. Provider exceptions/unwinding cannot cross the boundary. Every operation returns a stable status and writes diagnostics through an explicit sink.
 
 ## Provider activation state
