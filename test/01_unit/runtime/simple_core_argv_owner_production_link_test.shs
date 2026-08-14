@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)"
+cd "$ROOT_DIR"
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-build/restart12-build11-a-r2/output/stage2/x86_64-unknown-linux-gnu/simple}"
+BUILD_DIR="${BUILD_DIR:-build/test-artifacts/01_unit/runtime/simple_core_argv_owner_production_link}"
+CORE_DIR="$BUILD_DIR/simple_core"
+CORE_ARCHIVE="${CORE_ARCHIVE:-$CORE_DIR/libsimple_runtime.a}"
+RUNTIME_OBJ="$BUILD_DIR/runtime_native.o"
+TEST_OBJ="$BUILD_DIR/argv_owner_test.o"
+TEST_BIN="$BUILD_DIR/argv_owner_test"
+
+case "$(uname -s)" in
+    Linux) ;;
+    *) echo "SKIP: ELF production-link regression requires Linux"; exit 0 ;;
+esac
+
+test -x "$SIMPLE_BINARY"
+mkdir -p "$BUILD_DIR"
+
+if [ ! -f "$CORE_ARCHIVE" ]; then
+    SIMPLE_BINARY="$SIMPLE_BINARY" SIMPLE_CORE_BACKEND=cranelift \
+        sh scripts/os/simpleos-core-archive.shs \
+            --target x86_64-unknown-linux-gnu \
+            --backend cranelift \
+            --out-dir "$CORE_DIR"
+fi
+
+cc -std=c11 -D_GNU_SOURCE -O0 -ffunction-sections -fdata-sections \
+    -Isrc/runtime -c src/runtime/runtime_native.c -o "$RUNTIME_OBJ"
+cc -std=c11 -D_GNU_SOURCE -O0 -ffunction-sections -fdata-sections \
+    -Isrc/runtime \
+    -c test/01_unit/runtime/simple_core_argv_owner_production_link_test.c \
+    -o "$TEST_OBJ"
+
+# Ordering is intentional: the test poison owns only the duplicate public
+# array entry points; the pure archive owns the selected runtime ABI; hosted C
+# supplies remaining platform services.  Undefined calls are never admitted.
+cc "$TEST_OBJ" \
+    -Wl,--allow-multiple-definition \
+    -Wl,-z,defs \
+    -Wl,-u,rt_native_eq \
+    -Wl,--whole-archive "$CORE_ARCHIVE" "$RUNTIME_OBJ" \
+    -Wl,--no-whole-archive \
+    -Wl,--gc-sections \
+    -lm -ldl -lpthread \
+    -o "$TEST_BIN"
+
+native_eq_defs=$(nm -g --defined-only "$TEST_BIN" | awk '$NF == "rt_native_eq" { count++ } END { print count + 0 }')
+test "$native_eq_defs" -eq 1
+if readelf -Ws "$TEST_BIN" | awk '$7 == "UND" && $8 == "rt_native_eq" { found=1 } END { exit !found }'; then
+    echo "FAIL: rt_native_eq remains undefined" >&2
+    exit 1
+fi
+if readelf -rW "$TEST_BIN" | grep -q 'rt_native_eq'; then
+    echo "FAIL: rt_native_eq retains a dynamic relocation" >&2
+    exit 1
+fi
+objdump -d "$TEST_BIN" | grep -q '<rt_native_eq>:'
+
+"$TEST_BIN"
+echo "PASS: populated argv uses the selected pure owner with rooted rt_native_eq"

@@ -217,7 +217,7 @@ the production whole-archive link policy. Non-GNU mixed-owner linkage remains
 a platform WARN. Only after a rebuilt CLI emits the mandatory receipt may a
 new source-frozen Stage-3 diagnostic run begin.
 
-### Private-owner follow-up result
+### Historical private-owner follow-up result (superseded below)
 
 A fresh three-cycle session implemented the private-helper shape and exercised
 it under the production GNU whole-archive/multiple-definition policy. The
@@ -238,3 +238,36 @@ Next work must add and prove `rt_native_eq` in the actual pure runtime closure
 then reapply the private-owner bridge and rerun the populated, registry-sensitive
 whole-archive test. Silently ignoring the push result is not an acceptable
 shortcut.
+
+### Argv closure proved; planner link moves forward
+
+The next fresh session proved the apparent equality gap was linker retention:
+the archive already contained one strong `rt_native_eq`, but the permissive
+diagnostic link discarded its provider and zero-filled an unresolved GOT slot.
+The corrected ELF regression uses `-z defs`, explicitly roots
+`rt_native_eq`, and retains the whole pure archive. It proves one defined
+provider, no unresolved/dynamic equality relocation, populated
+`simple/build/bootstrap` strings, a pure registry-owned argv array, and zero
+calls to poisoned public `rt_array_new`/`rt_array_push` providers.
+
+The accepted implementation gives the pure owner private, non-interposable
+argv allocation/push helpers and makes the competing hosted C argv group weak.
+Pure `spl_arg_count`, `spl_get_arg`, `rt_get_argc`, count/at, and all array
+aliases share one state. A fresh archive built all 18 parts with zero failures
+and the expanded regression passed. macOS/Windows behavior remains WARN.
+
+A bounded current-planner build then advanced through all 856 closure files.
+Cycle 1 fixed one Stage-2-parser-incompatible mixed inline/multiline conditional
+without changing semantics. Cycle 2 timed out at 600 seconds and retained 370
+cached artifacts. Cycle 3 resumed that cache with two threads, compiled the
+full closure, and failed only at link: four references from
+`convert_nodes.spl` target `defer_unsupported_marker`, but no definition exists
+anywhere in the source tree. No planner binary or receipt was produced.
+
+Inspection traced the missing symbol to commit `19336b529055`, which appended
+the function signature to the preceding comment and left the body orphaned.
+The exact `fn defer_unsupported_marker(span: Span) -> Stmt:` header is restored.
+Because the three planner-build cycles were already exhausted, that final
+repair is source-reviewed but not link-verified. The next fresh session must
+add/run a focused closure/link guard and rebuild from the retained 856-entry
+cache. Only after the planner emits the mandatory receipt may Stage 3 start.

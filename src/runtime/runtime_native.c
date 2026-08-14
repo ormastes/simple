@@ -5073,15 +5073,15 @@ __attribute__((weak)) const char* spl_get_arg(int64_t idx) {
     return rt_core_argv && rt_core_argv[idx] ? rt_core_argv[idx] : "";
 }
 
-void rt_set_args(int argc, char** argv) {
+__attribute__((weak)) void rt_set_args(int argc, char** argv) {
     spl_init_args(argc, argv);
 }
 
-int32_t rt_get_argc(void) {
+__attribute__((weak)) int32_t rt_get_argc(void) {
     return (int32_t)spl_arg_count();
 }
 
-SplArray* rt_get_args(void) {
+__attribute__((weak)) SplArray* rt_get_args(void) {
     return rt_cli_get_args();
 }
 
@@ -5089,11 +5089,11 @@ SplArray* rt_get_args(void) {
  * interpreter registers it on every lane). No native C definition existed, so
  * entry-closure binaries linked it as a silent 0-returning stub and
  * get_args() saw an empty array (native_sys_get_args_missing 2026-07-23). */
-SplArray* sys_get_args(void) {
+__attribute__((weak)) SplArray* sys_get_args(void) {
     return rt_cli_get_args();
 }
 
-SplArray* rt_cli_get_args(void) {
+__attribute__((weak)) SplArray* rt_cli_get_args(void) {
     int64_t argc = spl_arg_count();
     SplArray* args = rt_array_new(argc);
     if (!args) return (SplArray*)rt_core_nil();
@@ -5105,11 +5105,11 @@ SplArray* rt_cli_get_args(void) {
     return args;
 }
 
-int64_t rt_cli_arg_count(void) {
+__attribute__((weak)) int64_t rt_cli_arg_count(void) {
     return spl_arg_count();
 }
 
-int64_t rt_cli_arg_at(int64_t index) {
+__attribute__((weak)) int64_t rt_cli_arg_at(int64_t index) {
     if (index < 0 || index >= spl_arg_count()) {
         return rt_string_new(NULL, 0);
     }
