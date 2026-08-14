@@ -22,6 +22,8 @@ extern int64_t rt_heap_registry_count(void);
 extern int64_t rt_heap_live_bytes(void);
 extern int64_t rt_heap_peak_bytes(void);
 extern int64_t rt_string_len(int64_t value);
+extern int64_t rt_string_concat(int64_t left, int64_t right);
+extern int64_t rt_push(int64_t receiver, int64_t value);
 extern void spl_memtrack_record(void* ptr, int64_t size, const char* tag);
 extern void spl_memtrack_unrecord(void* ptr);
 
@@ -51,6 +53,13 @@ int main(void) {
           "tracked peak bytes retain high water");
     spl_memtrack_unrecord(&tracked_probe);
     check(rt_heap_live_bytes() == live_before, "tracked live bytes return to baseline");
+
+    int64_t push_left = mkstr("core push ");
+    int64_t push_right = mkstr("provider");
+    int64_t pushed_text = rt_push(push_left, push_right);
+    int64_t expected_text = rt_string_concat(push_left, push_right);
+    check(pushed_text != 3 && rt_string_len(pushed_text) == rt_string_len(expected_text),
+          "receiver-dispatched text push returns concatenated text");
 
     /* 1. an ordinary heap string is reclaimed, and the registry shrinks */
     int64_t before = rt_heap_registry_count();

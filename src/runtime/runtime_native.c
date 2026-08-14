@@ -6561,6 +6561,19 @@ int8_t rt_array_push(SplArray* a, int64_t val) {
     return 1;
 }
 
+/* Receiver-dispatched push parity with the hosted RuntimeValue provider.
+ * Arrays mutate in place and return their receiver; text remains immutable and
+ * returns the concatenated value. Other receiver kinds fail closed to nil. */
+int64_t rt_push(int64_t receiver, int64_t value) {
+    SplArray* array = (SplArray*)(uintptr_t)receiver;
+    if (rt_core_array_ptr(array)) {
+        if (!rt_array_push(array, value)) return rt_core_nil();
+        return receiver;
+    }
+    if (rt_core_as_string(receiver)) return rt_string_concat(receiver, value);
+    return rt_core_nil();
+}
+
 int8_t rt_array_clear(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;

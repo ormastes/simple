@@ -865,6 +865,7 @@ int64_t     rt_process_rss_kib(void);
 int64_t     rt_process_hwm_kib(void);
 int64_t     rt_heap_live_bytes(void);
 int64_t     rt_heap_peak_bytes(void);
+int64_t     rt_push(int64_t receiver, int64_t value);
 int64_t     rt_file_stat(const uint8_t* path_ptr, uint64_t path_len);
 const char* rt_shell_output(const char* cmd);
 SplArray*   rt_cli_get_args(void);
