@@ -5,10 +5,9 @@
 Plan content accepted at `3fdfa0d3351` and the current operational reconciliation
 accepted by `/root/reconciled_plan_review`; `/root/final_nonstage4_review`
 accepted the current Stage-4-excluded continuation on bounded review cycle 3.
-Prior atomic implementation/bookkeeping commit
-`56448da2b25bbe90523ad672b25db2abaef74a67` was integrated under the lane lock
-and remains reachable from refreshed `origin/main`; the post-integration
-SimpleOS syscall extension requires the same locked workflow.
+The SimpleOS syscall extension commit
+`aef64fb1951136fbb98521ce1a67643207752a26` was integrated under the lane lock
+and proved reachable from refreshed `origin/main`.
 Feature verification remains blocked. This document is the canonical
 handoff for `compiler_loader_script_crosslang_perf`. It records what is already
 implemented, what current evidence proves, and the exact remaining gates. A
@@ -193,7 +192,7 @@ selection flow produces the missing selected requirement documents.
 | CMP-01 | REQ-007, NFR-001/005/006 | Self-hosted compiler checks for `src/compiler`, `src/lib`, MCP, LSP, and MCP stdio smoke pass without seed fallback | Commands below | BLOCKED — deployed candidate exists but is not admitted |
 | PLN-01 | all | Canonical plan, guide, expert knowledge, blockers, and cooperative-review receipts are internally consistent and pass focused document gates | Document review and layout guard | PROVED — review accepted; SPipe wiring, spec-layout, and working/staged runtime guards pass. Global workspace-root strict audit remains WARN-blocked by 137 pre-existing unrelated manifest violations |
 | DOC-01 | all | Selected research/requirements, accepted architecture/detail design, and generated manual provenance exist | Artifact review and admitted docgen | BLOCKED — research/options/drafts now exist; user selection and post-selection acceptance remain outstanding. One Stage-2 docgen attempt failed immediately with `unknown command 'spipe-docgen'`; admitted docgen remains Phase-4-dependent |
-| VCS-01 | all | Only intentional lane-A files are committed; locked integration reaches refreshed `origin/main`; tree and lane marker are truthful | Git receipts | PROVED for prior baseline `56448da2b25...`; the SimpleOS extension is pending final locked push/marker refresh; unrelated untracked GUI reports are excluded |
+| VCS-01 | all | Only intentional lane-A files are committed; locked integration reaches refreshed `origin/main`; tree and lane marker are truthful | Git receipts | PROVED at `aef64fb1951136fbb98521ce1a67643207752a26`; final bookkeeping follows the same locked sequence and unrelated untracked GUI reports are excluded |
 
 ## Manual-facing flow
 
@@ -406,8 +405,7 @@ corrected; `/root/reconciled_plan_review` (`gpt-5.6-sol`, high) then returned
 - [x] Fresh highest-capability review accepts this Stage-4-excluded continuation.
 - [x] Focused plan-quality gates pass; the global workspace-root strict audit
   truthfully remains WARN with 137 pre-existing unrelated manifest violations.
-- [ ] The post-integration SimpleOS PBL-03 extension is committed and integrated
-  through the lane lock. Prior baseline
-  `56448da2b25bbe90523ad672b25db2abaef74a67` remains reachable; refresh the
-  final lane marker only after the new push is proved reachable. Two unrelated
-  untracked GUI reports are excluded.
+- [x] The post-integration SimpleOS PBL-03 extension is committed at
+  `aef64fb1951136fbb98521ce1a67643207752a26`, integrated through the lane lock,
+  and reachable from refreshed `origin/main`. Final bookkeeping and the WARN
+  marker follow the same locked sequence; unrelated GUI reports are excluded.
