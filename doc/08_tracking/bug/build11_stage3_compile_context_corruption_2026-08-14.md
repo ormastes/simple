@@ -18,6 +18,27 @@ The wrapper recorded exit 143 and correctly refused Stage 4/seed fallback.
 The session's three-cycle limit is exhausted; further localization is handed
 off rather than retried here.
 
+Follow-up history audit found the allocation owner: `ModuleSurfacesByName` had
+regressed from the reference-owned class established by `866559f16e0` to a
+value struct. The post-store validation call consequently copied the complete
+858-surface declaration graph before entering its scalar lookup. The class
+invariant is restored with a source-contract regression; the admitted r5 Stage
+2 remains the authority for the next cache-preserving Stage 3 resume.
+
+The next bounded three-cycle audit disproved the post-store attribution. Making
+the registry reference-owned and then inlining its scalar lookup did not change
+the early RSS slope, and no HIR phase-profile sink was created. A third
+trace-enabled run under GDB located the live stack in Phase 2 parsing:
+`register_heap_ptr -> rt_enum_new -> convert_flat_stmt`, with 60 alternating
+`convert_flat_stmt`/`convert_flat_stmt_in_list` frames below
+`convert_decl_fn`. Build progress was between parse rows 128 and 192. The owner
+is the 97-arm elif chain in
+`src/compiler/70.backend/backend/common/ascii_utils.spl`, which the bridge
+materializes recursively in the no-GC heap. It is replaced by the equivalent
+`char_code` range check (printable ASCII plus tab/newline; `?` otherwise).
+Verification of that final source change is deferred to the next session by the
+three-cycle guard; Stage 3/4 remain BLOCKED, not failed by the unrun repair.
+
 Open. This blocks an admitted self-hosted compiler deployment and therefore
 blocks the compiler/loader performance rows that reject Rust-seed evidence.
 The historical `build/restart12-build11-a-r2/output` lineage is absent from the

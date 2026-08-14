@@ -8,7 +8,7 @@ use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir.*
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_reset}
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlowering_for_module_with_diagnostics, LoweringError, LoweringErrorKind}
-use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName, module_surface_index_for_source, module_surfaces_from_modules}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName, module_surfaces_from_modules}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.core.ast.{ast_reset}
@@ -519,16 +519,36 @@ impl CompilerDriver:
             phase_hir_modules[name] = hir_module
             if source_idx < 3:
                 eprint("[bootstrap-error-count] source_idx={source_idx} point=post-store count={self.ctx.error_count_value}")
-            val validation_surface_index = module_surface_index_for_source(retained_module_surfaces, src, source_idx)
+            if source_idx < 4:
+                log_phase("phase3:hir:validation:lookup:start index={source_idx}")
+            # Keep the retained graph, SourceFile content, and ModuleSurface
+            # declarations on this frame. Passing any of them through a value
+            # parameter duplicates the no-GC Stage-3 ownership graph.
+            var validation_surface_index: i64 = -1
+            var validation_alias_index: i64 = 0
+            while validation_alias_index < retained_module_surfaces.ordered_names.len() and
+                  validation_alias_index < retained_module_surfaces.ordered_indices.len():
+                if retained_module_surfaces.ordered_names[validation_alias_index] == name:
+                    validation_surface_index = retained_module_surfaces.ordered_indices[validation_alias_index]
+                    break
+                validation_alias_index = validation_alias_index + 1
+            if source_idx < 4:
+                log_phase("phase3:hir:validation:lookup:done index={source_idx}")
             if validation_surface_index < 0:
                 self.ctx.add_error("Missing module surface alias for {name}")
             else:
                 if validation_surface_index < 0 or validation_surface_index >= retained_module_surfaces.surfaces.len():
                     self.ctx.add_error("Invalid module surface index for {name}: {validation_surface_index}")
                 else:
-                    val validation_surface: ModuleSurface = retained_module_surfaces.surfaces[validation_surface_index]
-                    validation_module_keys = validation_module_keys.push(validation_surface.logical_name)
+                    if source_idx < 4:
+                        log_phase("phase3:hir:validation:key-push:start index={source_idx}")
+                    validation_module_keys = validation_module_keys.push(
+                        retained_module_surfaces.surfaces[validation_surface_index].logical_name)
+                    if source_idx < 4:
+                        log_phase("phase3:hir:validation:key-push:done index={source_idx}")
                     validation_module_values = validation_module_values.push(hir_module)
+                    if source_idx < 4:
+                        log_phase("phase3:hir:validation:value-push:done index={source_idx}")
             if focused_future_driver_diag:
                 eprint("[driver-hir] stored")
             if is_requested_bootstrap_entry:

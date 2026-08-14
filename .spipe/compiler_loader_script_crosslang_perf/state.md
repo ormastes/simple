@@ -67,6 +67,12 @@ dev
   Stage 3 again produced no candidate while one core and RSS grew to about
   19.8 GiB in 143 seconds. It was stopped before host OOM; Stage 4 and live
   feature evidence remain BLOCKED. Three fix cycles are exhausted: WARN.
+- 2026-08-14 continuation: three distinct Stage 3 diagnostics showed the
+  surface-registry class restoration and inline scalar lookup did not change
+  the pre-HIR allocation slope. The final GDB sample proved a growing
+  `convert_flat_stmt` recursion while parsing the 97-arm backend ASCII elif
+  table. That table now uses the equivalent `char_code` range check, but the
+  bounded-cycle guard defers its Stage 3 verification. Status remains WARN.
 
 - dev: Created state file with 7 acceptance criteria (type: todo).
 - plan: Merged lower-model plan/evidence and guide/wiki audits; at that historical revision research/requirements/architecture and packed-byte design/evidence were incomplete, and the deployed Stage 4 candidate plus manual docgen remained blocked.

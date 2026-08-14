@@ -72,6 +72,22 @@ deployment, and admission-dependent feature evidence remain BLOCKED; the next
 session must localize the remaining Stage 3 allocation loop rather than repeat
 this command unchanged.
 
+Next-cycle localization identified a historical ownership regression: commit
+`866559f16e0` made `ModuleSurfacesByName` reference-owned after proving that a
+value boundary duplicated the full retained surface graph, but the restored
+lineage had changed it back to a struct. The exact class invariant and a
+source-contract regression are restored before the cache-preserving r5 Stage 3
+resume; this is a distinct fix, not an unchanged rerun.
+
+Continuation receipt: the class restoration and inline scalar lookup did not
+change the early allocation slope. The third diagnostic ran the admitted Stage
+2 executable under GDB and proved the live pre-HIR owner was recursive
+flat-statement conversion of the 97-arm `char_to_ascii` elif table (60 bridge
+frames at the later sample). The table is now an equivalent `char_code` range
+check. Because that finding arrived on cycle three, its cache-preserving Stage
+3 verification is the first action for the next session; Stage 4 and feature
+evidence remain BLOCKED until it passes.
+
 This detached worktree is the fresh lane-A replacement. The previous Build11
 candidate did not reach performance admission: its strict Stage 2 bootstrap
 ended after about 52 minutes with 61 HIR field-inference failures (mostly
