@@ -161,3 +161,15 @@
     output names, resource/accounting mismatches, state, and nontransparent
     latency. The disabled path returns the composition verbatim. The weave hash
     sorts attachment identities, so discovery order cannot change provenance.
+22. A standalone or child-bound `HwSequentialModuleDef` may include a typed
+    combinational datapath that feeds guards, assignments, or outputs. Its
+    value namespace includes input ports, registers, child output pins,
+    declared signals, and typed constants; output ports are write-only. Every
+    signal has one driver, operand/result widths are checked per operation, and
+    unsupported operations fail before rendering. The backend emits constants
+    and signals in the architecture declaration area, then typed datapath
+    assignments before sequential output/process logic. `LsuConfig` keeps bus
+    and byte-mask geometry explicit product data rather than deriving it from
+    XLEN. The focused mixed-datapath specification covers positive lowering,
+    unsigned predicates, invalid sources/operations/drivers, LSU geometry, and
+    graph-hash drift.

@@ -195,6 +195,17 @@ stateful routes; an empty source closure never bypasses provenance validation.
 
 ## First typed sequential Gen2 boundary
 
+The standalone sequential boundary also owns an optional typed combinational
+datapath. `HwSequentialModuleDef` carries signals, integer and bit-vector
+constants, combinational operations, comparisons, selects, bit extracts, and
+fixed slices beside its `HwSequentialPlan`. Validation resolves input,
+register, child-output, signal, and constant widths, rejects public outputs as
+readable sources, and requires exactly one driver for every datapath signal.
+The VHDL backend serializes only that validated IR before output equations and
+the clocked process; callers cannot inject raw VHDL. The module structural hash
+commits the complete datapath and uses the versioned v3 schema so old
+state-only receipts cannot alias mixed combinational/sequential products.
+
 `HwParcelFrontendInterface` and `HwParcelFrontendDef` freeze the intended
 clocked Gen2 contract without making the whole generic HWIR falsely appear
 complete. The intended fixed product has one synchronous active-high reset domain and

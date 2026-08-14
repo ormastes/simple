@@ -1,6 +1,10 @@
+# codex-system-test
+# @manual_section Mixed sequential HWIR datapath
+
 use std.spec.*
-use compiler.mir.hwir.types.{CoreConfig, HwCombOp, HwCompareOp, HwConstant,
-    HwNodeId, HwOrigin, HwPort, HwSelectOp, HwSignal}
+use compiler.mir.hwir.types.{CoreConfig, HwBitExtractOp, HwCombOp, HwCompareOp,
+    HwConstant, HwFixedSliceOp, HwNodeId, HwOrigin, HwPort, HwSelectOp, HwSignal}
+use compiler.mir.hwir.bit_vector_constant.{HwBitVectorConstant}
 use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard,
     HwSeqOutputBinding, HwSeqRule, HwSeqValue, HwSequentialModuleDef,
     HwSequentialPlan, HwStateRegister}
@@ -30,15 +34,18 @@ fn mixed_module() -> HwSequentialModuleDef:
             node_id: HwNodeId.child(name, "mixed"), source_name: "hwir.mixed.test")],
         ports: ports, datapath_signals: [HwSignal.comb("sum", "Bits", 32),
             HwSignal.comb("low_byte", "Bits", 8), HwSignal.comb("signed_byte", "Bits", 32),
-            HwSignal.comb("equal_value", "Bits", 1), HwSignal.comb("selected", "Bits", 32)],
-        datapath_constants: [HwConstant.bits("zero32", 32, 0)], datapath_bit_vector_constants: [],
+            HwSignal.comb("equal_value", "Bits", 1), HwSignal.comb("selected", "Bits", 32),
+            HwSignal.comb("sum_bit", "Bits", 1), HwSignal.comb("sum_high", "Bits", 8)],
+        datapath_constants: [HwConstant.bits("zero32", 32, 0)],
+        datapath_bit_vector_constants: [HwBitVectorConstant.binary("ones8", 8, "11111111")],
         datapath_comb_ops: [HwCombOp.binary("add", "sum", "lhs", "rhs", 32),
             HwCombOp.unary("trunc", "low_byte", "sum", 8),
             HwCombOp.unary("sext", "signed_byte", "low_byte", 32)],
         datapath_compare_ops: [HwCompareOp.equal("equal_value", "lhs", "rhs", 32)],
         datapath_select_ops: [HwSelectOp.mux("selected", "equal_value",
-            "signed_byte", "zero32", 32)], datapath_bit_extract_ops: [],
-        datapath_fixed_slice_ops: [], plan: plan,
+            "signed_byte", "zero32", 32)],
+        datapath_bit_extract_ops: [HwBitExtractOp.fixed("sum_bit", "sum", 0)],
+        datapath_fixed_slice_ops: [HwFixedSliceOp.fixed("sum_high", "sum", 31, 24)], plan: plan,
         child_entity: "", child_graph_sha256: "")
 
 fn rebuilt_mixed_module(comb_ops: [HwCombOp], constants: [HwConstant]) -> HwSequentialModuleDef:
@@ -69,8 +76,25 @@ fn unsigned_predicate_module() -> HwSequentialModuleDef:
         datapath_fixed_slice_ops: base.datapath_fixed_slice_ops, plan: base.plan,
         child_entity: base.child_entity, child_graph_sha256: base.child_graph_sha256)
 
+fn rebuilt_mixed_module_with_ports(ports: [HwPort]) -> HwSequentialModuleDef:
+    val base = mixed_module()
+    HwSequentialModuleDef(node_id: base.node_id, entity_name: base.entity_name,
+        config: base.config, origins: base.origins, ports: ports,
+        datapath_signals: base.datapath_signals,
+        datapath_constants: base.datapath_constants,
+        datapath_bit_vector_constants: base.datapath_bit_vector_constants,
+        datapath_comb_ops: base.datapath_comb_ops,
+        datapath_compare_ops: base.datapath_compare_ops,
+        datapath_select_ops: base.datapath_select_ops,
+        datapath_bit_extract_ops: base.datapath_bit_extract_ops,
+        datapath_fixed_slice_ops: base.datapath_fixed_slice_ops, plan: base.plan,
+        child_entity: base.child_entity, child_graph_sha256: base.child_graph_sha256)
+
 describe "mixed sequential HWIR datapath and explicit LSU geometry":
+    # @req REQ-G2-004
+    # @req NFR-G2-011
     it "should render typed add truncate sign extension compare and select before state":
+        step("Construct a typed combinational datapath feeding guarded sequential state")
         val module = mixed_module()
         expect(module.diagnostic()).to_equal("")
         val emitted = render_strict_sequential_hwir(module, "hwir-mixed-sequential-v1")
@@ -80,16 +104,27 @@ describe "mixed sequential HWIR datapath and explicit LSU geometry":
         expect(emitted.vhdl).to_contain("signed_byte <= std_logic_vector(resize(signed(low_byte), 32));")
         expect(emitted.vhdl).to_contain("equal_value <= '1' when lhs = rhs else '0';")
         expect(emitted.vhdl).to_contain("selected <= signed_byte when equal_value = '1' else zero32;")
+        expect(emitted.vhdl).to_contain("constant ones8 : std_logic_vector(7 downto 0) := \"11111111\";")
+        expect(emitted.vhdl).to_contain("sum_bit <= sum(0);")
+        expect(emitted.vhdl).to_contain("sum_high <= sum(31 downto 24);")
         expect(emitted.vhdl).to_contain("value_reg <= selected;")
+        val datapath_index = emitted.vhdl.index_of("sum <=") ?? -1
+        val process_index = emitted.vhdl.index_of("process(clk)") ?? -1
+        expect(datapath_index).to_be_greater_than(-1)
+        expect(process_index).to_be_greater_than(datapath_index)
 
+    # @req NFR-G2-003
     it "should validate LSU bus and mask widths independently of core widths":
+        step("Validate explicit LSU transport geometry without inferring it from XLEN")
         expect(LsuConfig.explicit(64, 8).is_ok()).to_equal(true)
         expect(LsuConfig.explicit(64, 4).is_err()).to_equal(true)
         expect(LsuConfig.explicit(48, 6).is_err()).to_equal(true)
         expect(LsuConfig.rv32_product_default().bus_data_bits).to_equal(32)
         expect(LsuConfig.rv64_product_default().bus_data_bits).to_equal(64)
 
+    # @req REQ-G2-004
     it "should accept an XLEN unsigned predicate with a one-bit result":
+        step("Render an XLEN-wide unsigned predicate into a one-bit VHDL result")
         val module = unsigned_predicate_module()
         expect(module.diagnostic()).to_equal("")
         val emitted = render_strict_sequential_hwir(module,
@@ -98,7 +133,9 @@ describe "mixed sequential HWIR datapath and explicit LSU geometry":
         expect(emitted.vhdl).to_contain(
             "lhs_uge_rhs <= '1' when unsigned(lhs) >= unsigned(rhs) else '0';")
 
+    # @req REQ-G2-004
     it "should reject unsupported unreadable and duplicate datapath drivers":
+        step("Reject unsupported operations, unreadable values, and multiple drivers")
         val unsupported = rebuilt_mixed_module([
             HwCombOp.binary("unsupported", "sum", "lhs", "rhs", 32),
             HwCombOp.unary("trunc", "low_byte", "sum", 8),
@@ -126,7 +163,55 @@ describe "mixed sequential HWIR datapath and explicit LSU geometry":
         expect(duplicate.diagnostic()).to_equal(
             "HWIR-E-SEQUENTIAL-DATAPATH-DRIVER: datapath values require one driver")
 
+        val invalid_resize = rebuilt_mixed_module([
+            HwCombOp.binary("add", "sum", "lhs", "rhs", 32),
+            HwCombOp.unary("trunc", "low_byte", "sum_bit", 8),
+            HwCombOp.unary("sext", "signed_byte", "low_byte", 32)],
+            [HwConstant.bits("zero32", 32, 0)])
+        expect(invalid_resize.diagnostic()).to_equal(
+            "HWIR-E-SEQUENTIAL-DATAPATH-COMB: combinational operation requires typed readable operands and signal result")
+
+        val invalid_destination = rebuilt_mixed_module([
+            HwCombOp.binary("add", "value_reg", "lhs", "rhs", 32),
+            HwCombOp.unary("trunc", "low_byte", "sum", 8),
+            HwCombOp.unary("sext", "signed_byte", "low_byte", 32)],
+            [HwConstant.bits("zero32", 32, 0)])
+        expect(invalid_destination.diagnostic()).to_equal(
+            "HWIR-E-SEQUENTIAL-DATAPATH-COMB: combinational operation requires typed readable operands and signal result")
+
+        val base = mixed_module()
+        var injected_ports = base.ports
+        injected_ports[2] = HwPort(name: "capture", direction: "in); end entity; --",
+            type_name: "Bits", bit_width: 1, clock_domain: "default")
+        expect(rebuilt_mixed_module_with_ports(injected_ports).diagnostic()).to_equal(
+            "HWIR-E-SEQUENTIAL-MODULE-PORT: sequential ports require unique default-domain Bits values")
+
+        val colliding_plan = HwSequentialPlan(owner_id: base.plan.owner_id,
+            registers: [HwStateRegister(name: "LHS", bit_width: 1,
+                    clock_domain: "default", reset_value: 0),
+                base.plan.registers[1]], rules: base.plan.rules,
+            outputs: base.plan.outputs, decoder_pins: base.plan.decoder_pins)
+        val colliding = HwSequentialModuleDef(node_id: base.node_id,
+            entity_name: base.entity_name, config: base.config, origins: base.origins,
+            ports: base.ports, datapath_signals: base.datapath_signals,
+            datapath_constants: base.datapath_constants,
+            datapath_bit_vector_constants: base.datapath_bit_vector_constants,
+            datapath_comb_ops: base.datapath_comb_ops,
+            datapath_compare_ops: base.datapath_compare_ops,
+            datapath_select_ops: base.datapath_select_ops,
+            datapath_bit_extract_ops: base.datapath_bit_extract_ops,
+            datapath_fixed_slice_ops: base.datapath_fixed_slice_ops,
+            plan: colliding_plan, child_entity: "", child_graph_sha256: "")
+        expect(colliding.diagnostic()).to_equal(
+            "HWIR-E-SEQUENTIAL-DATAPATH-NAMESPACE: ports, registers, child outputs, signals, and constants must be distinct")
+
+        expect(render_strict_sequential_hwir(base,
+            "unsafe\nend architecture").diagnostic).to_equal(
+            "HWIR-E-SEQUENTIAL-ROUTE: strict sequential route must be an explicit safe label")
+
+    # @req NFR-G2-001
     it "should commit the typed datapath into the structural hash and VHDL receipt":
+        step("Change a datapath constant and compare structural and emitted graph receipts")
         val baseline = mixed_module()
         val changed = rebuilt_mixed_module([
             HwCombOp.binary("add", "sum", "lhs", "rhs", 32),

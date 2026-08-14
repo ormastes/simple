@@ -23,6 +23,8 @@ byte-identity — always run the probe gate, not just your own family's probe.
 
 - [verify skill](../../../../.claude/skills/verify.md)
 - [impl skill](../../../../.claude/skills/impl.md)
+- [compiler HWIR layer](../compiler_hwir/skill.md) — the separate compiler-side
+  typed combinational/sequential IR and strict VHDL lowering boundary.
 
 ## Layer Links
 

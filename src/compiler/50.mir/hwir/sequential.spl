@@ -276,6 +276,11 @@ pub class HwSequentialModuleDef:
             if constant.name == name: return constant.bit_width
         -1
 
+    me datapath_signal_width(name: text) -> i32:
+        for signal in self.datapath_signals:
+            if signal.name == name: return signal.bit_width
+        -1
+
     me datapath_readable_width(name: text) -> i32:
         for port in self.ports:
             if port.name == name and port.direction == "in": return port.bit_width
@@ -294,9 +299,17 @@ pub class HwSequentialModuleDef:
     me datapath_diagnostic() -> text:
         var names: [text] = []
         for port in self.ports: names.push(port.name.lower())
-        for register in self.plan.registers: names.push(register.name.lower())
+        for register in self.plan.registers:
+            val folded = register.name.lower()
+            if names.contains(folded):
+                return "HWIR-E-SEQUENTIAL-DATAPATH-NAMESPACE: ports, registers, child outputs, signals, and constants must be distinct"
+            names.push(folded)
         for pin in self.plan.decoder_pins:
-            if pin.direction == "out": names.push(pin.signal_name.lower())
+            if pin.direction == "out":
+                val folded = pin.signal_name.lower()
+                if names.contains(folded):
+                    return "HWIR-E-SEQUENTIAL-DATAPATH-NAMESPACE: ports, registers, child outputs, signals, and constants must be distinct"
+                names.push(folded)
         for signal in self.datapath_signals:
             val folded = signal.name.lower()
             if not hwir_vhdl_identifier(signal.name) or signal.bit_width < 1 or
@@ -325,28 +338,30 @@ pub class HwSequentialModuleDef:
                 op.op != "uge" and op.op != "passthrough" and op.op != "zext" and
                 op.op != "trunc" and op.op != "sext":
                 return "HWIR-E-SEQUENTIAL-DATAPATH-COMB: unsupported combinational operation"
-            val result_width = self.datapath_width(op.result)
+            val result_width = self.datapath_signal_width(op.result)
             val lhs_width = self.datapath_readable_width(op.lhs)
             val rhs_width = if op.rhs == "": -1 else: self.datapath_readable_width(op.rhs)
             val unary = op.op == "passthrough" or op.op == "zext" or op.op == "trunc" or op.op == "sext"
             val predicate = op.op == "eq" or op.op == "ne" or op.op == "slt" or
                 op.op == "sge" or op.op == "ult" or op.op == "uge"
+            val invalid_resize = (op.op == "zext" or op.op == "sext") and lhs_width >= op.bit_width or
+                op.op == "trunc" and lhs_width <= op.bit_width
             if (if predicate: result_width != 1 else: result_width != op.bit_width) or lhs_width < 1 or
                 (not unary and (lhs_width != op.bit_width or rhs_width != op.bit_width)) or
-                (op.op == "passthrough" and lhs_width != op.bit_width):
+                (op.op == "passthrough" and lhs_width != op.bit_width) or invalid_resize:
                 return "HWIR-E-SEQUENTIAL-DATAPATH-COMB: combinational operation requires typed readable operands and signal result"
             val driver = op.result.lower()
             if drivers.contains(driver): return "HWIR-E-SEQUENTIAL-DATAPATH-DRIVER: datapath values require one driver"
             drivers.push(driver)
         for op in self.datapath_compare_ops:
-            if self.datapath_width(op.result) != 1 or self.datapath_readable_width(op.lhs) != op.bit_width or
+            if self.datapath_signal_width(op.result) != 1 or self.datapath_readable_width(op.lhs) != op.bit_width or
                 self.datapath_readable_width(op.rhs) != op.bit_width:
                 return "HWIR-E-SEQUENTIAL-DATAPATH-COMPARE: comparison requires typed operands and one-bit signal result"
             val driver = op.result.lower()
             if drivers.contains(driver): return "HWIR-E-SEQUENTIAL-DATAPATH-DRIVER: datapath values require one driver"
             drivers.push(driver)
         for op in self.datapath_select_ops:
-            if self.datapath_width(op.result) != op.bit_width or self.datapath_readable_width(op.condition) != 1 or
+            if self.datapath_signal_width(op.result) != op.bit_width or self.datapath_readable_width(op.condition) != 1 or
                 self.datapath_readable_width(op.when_true) != op.bit_width or
                 self.datapath_readable_width(op.when_false) != op.bit_width:
                 return "HWIR-E-SEQUENTIAL-DATAPATH-SELECT: select requires typed condition, alternatives, and signal result"
@@ -355,7 +370,7 @@ pub class HwSequentialModuleDef:
             drivers.push(driver)
         for op in self.datapath_bit_extract_ops:
             val source_width = self.datapath_readable_width(op.source)
-            if self.datapath_width(op.result) != 1 or source_width < 1 or
+            if self.datapath_signal_width(op.result) != 1 or source_width < 1 or
                 op.bit_index < 0 or op.bit_index >= source_width:
                 return "HWIR-E-SEQUENTIAL-DATAPATH-BIT-EXTRACT: fixed bit extract requires a readable source, in-range index, and one-bit signal result"
             val driver = op.result.lower()
@@ -364,7 +379,7 @@ pub class HwSequentialModuleDef:
         for op in self.datapath_fixed_slice_ops:
             val source_width = self.datapath_readable_width(op.source)
             val result_width = op.high_bit - op.low_bit + 1
-            if self.datapath_width(op.result) != result_width or source_width < 1 or
+            if self.datapath_signal_width(op.result) != result_width or source_width < 1 or
                 op.low_bit < 0 or op.high_bit <= op.low_bit or op.high_bit >= source_width:
                 return "HWIR-E-SEQUENTIAL-DATAPATH-FIXED-SLICE: fixed slice requires a readable source, ordered in-range bounds, and matching signal result"
             val driver = op.result.lower()
@@ -387,7 +402,8 @@ pub class HwSequentialModuleDef:
         var has_rst = false
         for port in self.ports:
             val folded = port.name.lower()
-            if not hwir_vhdl_identifier(port.name) or port.type_name != "Bits" or
+            if not hwir_vhdl_identifier(port.name) or
+                (port.direction != "in" and port.direction != "out") or port.type_name != "Bits" or
                 port.bit_width < 1 or port.clock_domain != "default" or port_names.contains(folded):
                 return "HWIR-E-SEQUENTIAL-MODULE-PORT: sequential ports require unique default-domain Bits values"
             if port.name == "clk" and port.direction == "in" and port.bit_width == 1: has_clk = true

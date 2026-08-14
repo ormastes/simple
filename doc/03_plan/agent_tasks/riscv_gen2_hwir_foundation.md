@@ -12,10 +12,11 @@
 | A7 | Declarative ISA capability seed / critical manifest linkage | `/root` | compressed subset truth remains non-advertising/non-release-claimable; scalar I/M/RV64-word schema seed exists, but provider/decoder/toolchain consumers remain pending |
 | A8 | Composed-front-end equivalence | `/root` | typed migrating and trap one-entry compositions plus RV32/RV64 GHDL protocol scenarios are implemented; a prepared strict-HWIR host oracle exhausts all 65,536 parcels for each target-trap product, while independent RTL equivalence and the self-hosted receipt remain pending |
 | A9 | Stateful HWIR and architectural effects | `/root` | bounded single-outstanding capture/dispatch/retire/effect plan is implemented; a verification-only reset-coupled loopback checks one-entry receipt transport, while a typed architectural commit/effect owner remains required before retirement integration or additional compressed-form admission |
-| A10 | Release-toolchain evidence | unassigned | deploy the self-hosted runtime, rerun critical CLI/GHDL product scenarios, then record deterministic manifest hashes |
+| A10 | Release-toolchain evidence | compiler/bootstrap owner; final reviewer `/root` | blocked: deploy an admitted self-hosted runtime, align the qualification producer/composer contract, rerun critical CLI/GHDL product scenarios, then record deterministic manifest hashes |
 | A11 | Shared scalar semantic database | `/root` | first I/M/RV64-word/shift declarative schema, RV32/RV64 specialization, and concrete I/IM multiply/divide provider selection exist; complete scalar table, HWIR resource binding, generated decoder/toolchain metadata remain pending |
 | A12 | Typed HWIR aspect packs | `/root` | hash-pinned manifest/application plan, typed exact-set lock contract, first fail-closed observational output graph weave, and Gen2 VHDL manifest lock provenance exist; lockfile discovery, proof execution, and all timing/state/provider advice remain pending |
-| A13 | Typed VHDL sequential HWIR migration and evidence | `/root` | implemented and integrated with source/static evidence; executable qualification remains WARN-blocked on the admitted self-hosted CLI and independent RTL receipt |
+| A13 | Typed VHDL sequential HWIR migration and evidence | `/root` | standalone/retirement module boundary implemented with source/static evidence; parcel/trap migration, executable qualification, and independent RTL receipt remain open |
+| A14 | Qualification producer/composer alignment | compiler evidence owner; final reviewer `/root` | blocked: the wrapper invokes unsupported `--emit-evidence`/`--compose-receipt` modes and expects a receipt schema/shape different from the in-tree Simple composer; implement and test one canonical two-phase contract before A10 can run |
 
 ## Current replacement-lane acceptance (2026-08-14)
 
@@ -31,6 +32,23 @@
   predicate lowering, LSU geometry, rejection paths, and graph-hash drift.
 - [ ] Focused checks, compiler/core regression checks, artifact/runtime guards,
   and SPipe layout/quality gates pass once on the final implementation.
+- [ ] An admitted self-hosted CLI runs the focused mixed sequential spec plus
+  compiler/lib/MCP/LSP checks without ABI-probe failure, signal, or seed
+  substitution.
+- [ ] Generated VHDL is analyzed, elaborated, and behaviorally simulated with
+  GHDL for datapath-before-state capture, reset, guard-false, and guard-true
+  cycles; source-text assertions alone do not close this item.
+- [ ] Parcel/trap stateful products migrate from the plan-only private renderer
+  to the canonical `HwSequentialModuleDef` boundary, or an accepted design
+  explicitly proves why they remain a separate typed owner without duplicated
+  sequential semantics.
+- [ ] Changed `.spl` files pass lint, HWIR token duplication, and the seven-part
+  `sspec-maintain scan`; the qualification receipt records at least 80% branch
+  coverage or leaves the coverage contract blocked.
+- [x] Existing selected requirements, architecture, detail design, system-test
+  plan, SPipe state, guide, feature/layer expert knowledge, executable steps,
+  and manual evidence describe the same bounded A13 boundary. No new
+  requirement option was auto-selected.
 - [x] All intentional changes are committed, rebased under the integration
   lock, pushed without force, reachable from `origin/main`, and leave a clean
   detached worktree.
@@ -43,6 +61,22 @@ The canonical wrapper currently fails its bounded test-ABI probe, while direct
 use of the deployed self-hosted executable exits by signal 11 during both the
 focused test and `check`; this blocks executable acceptance evidence without
 authorizing a Rust-seed fallback.
+The exact resume commands and owner are recorded in
+`.spipe/riscv_gen2_hwir_foundation/state.md`; the tracked runtime blocker is
+`doc/08_tracking/bug/riscv_gen2_sequential_hwir_selfhost_runtime_blocker_2026-08-14.md`.
+The qualification-contract mismatch is tracked separately in
+`doc/08_tracking/bug/riscv_gen2_hwir_qualification_contract_mismatch_2026-08-14.md`;
+runtime deployment alone cannot make the current wrapper runnable.
+This is an implementation handoff. It does not mark A10, independent RTL
+equivalence, or the Gen2 umbrella complete.
+
+Parallel completion review (2026-08-14): `hwir_code_audit` reviewed typed
+ownership and found/fixed the signal-destination and unary resize validation
+holes; `hwir_docs_spipe` identified stale SPipe/requirements/guide/wiki
+artifacts; `hwir_high_review` accepted the corrected source/static
+implementation handoff after adversarial port-direction, route-label, and
+cross-namespace collision coverage. Merge owner and final acceptance owner:
+`/root`.
 
 The C.J/C.BEQZ/C.BNEZ control rows now have aggregate strict-MIR contracts and
 explicit row-level target evidence. Their typed redirect fields and operand

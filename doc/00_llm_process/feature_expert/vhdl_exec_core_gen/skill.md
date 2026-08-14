@@ -143,3 +143,13 @@ Claim precisely: "the fpga_riscv RTL set is generated", never "all RTL".
 After any change to the generator, the aspect, the goldens, or the pin manifest,
 refresh this skill with the new gate output and evidence links — and re-run
 `check-vhdl-golden-match.shs --require-generated` before claiming parity.
+
+## Compiler HWIR boundary
+
+This feature expert owns `src/lib/hardware/vhdl_gen`, not compiler Gen2 HWIR.
+The typed mixed sequential compiler boundary is documented by
+[`layer_expert/compiler_hwir`](../../layer_expert/compiler_hwir/skill.md),
+`doc/07_guide/hardware/riscv/vhdl_exec_core_generator.md`, and
+`.spipe/riscv_gen2_hwir_foundation/state.md`. Do not copy its typed datapath or
+sequential validation into this generator, and do not use golden-text parity as
+a substitute for its self-hosted and generated-VHDL/GHDL receipts.

@@ -1017,3 +1017,35 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   priority, and stale-receipt erasure. It has an explicit production rejection
   and no emitter/product API; it does not replace the real architectural commit
   owner or resolve the retirement-lineage tracking issue.
+- impl (2026-08-14): Migrated standalone sequential VHDL emission to one typed
+  mixed combinational/sequential HWIR owner. `HwSequentialModuleDef` now owns
+  typed datapath values and operations, validates readable sources, widths,
+  names, and exactly-one-driver semantics, renders the datapath before state,
+  and commits it to the v3 structural hash. Added explicit `LsuConfig` product
+  geometry and restored the five-case executable/manual pair.
+- refactor (2026-08-14): Refreshed architecture, detail design, the RISC-V VHDL
+  guide, executable step/requirement annotations, generated/manual companion,
+  and canonical agent plan. Added the compiler-HWIR layer expert and linked the
+  existing VHDL generator/hardware-RTL experts so the distinct backend owners
+  are explicit; the private overlay wiki has no separate page for this slice.
+- verify-blocked (2026-08-14): Static numbered-artifact and direct-runtime
+  guards pass, the spec layout count is zero, and the changed files contain no
+  placeholder assertions or stubs. The canonical wrapper rejects its deployed
+  runtime ABI and direct self-hosted `check`/focused-test execution exits by
+  signal 11. Resume exactly once after an admitted self-hosted CLI is deployed:
+  `bin/simple test test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl --mode=interpreter`,
+  `bin/simple check src/compiler`, `bin/simple check src/lib`,
+  `bin/simple check src/app/mcp`, `bin/simple check src/app/simple_lsp_mcp`,
+  `SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter`,
+  `bin/simple lint src/compiler/50.mir/hwir/riscv_lsu_config.spl src/compiler/50.mir/hwir/riscv_scalar_retirement_owner.spl src/compiler/50.mir/hwir/sequential.spl src/compiler/70.backend/backend/hwir_to_vhdl.spl test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl`,
+  `bin/simple duplicate-check src/compiler/50.mir/hwir --mode token --min-lines 5`,
+  and `bin/simple sspec-maintain scan test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl`.
+  This is an implementation handoff, not verify PASS or Gen2 umbrella
+  completion. Owner and final reviewer remain `/root`.
+- review-blocked (2026-08-14): Independent highest-capability review found the
+  qualification wrapper/composer contract is internally inconsistent before
+  runtime execution: the wrapper requests unsupported `--emit-evidence` and
+  `--compose-receipt` modes and validates a different schema/field layout from
+  `src/app/test/riscv_gen2_qualification_receipt.spl`. This is tracked in
+  `doc/08_tracking/bug/riscv_gen2_hwir_qualification_contract_mismatch_2026-08-14.md`.
+  A deployed runtime alone does not unblock qualification.

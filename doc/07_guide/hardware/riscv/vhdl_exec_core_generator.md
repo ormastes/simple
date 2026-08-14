@@ -23,6 +23,22 @@ already-silicon-tested RTL, so the RTL cannot drift while it becomes generated.
 
 ### Compiler Gen2 strict-HWIR development route
 
+Typed sequential modules can now include a combinational HWIR datapath before
+their guarded state transition plan. Construct that datapath with `HwSignal`,
+`HwConstant`/`HwBitVectorConstant`, `HwCombOp`, `HwCompareOp`, `HwSelectOp`,
+`HwBitExtractOp`, and `HwFixedSliceOp`; do not supply VHDL fragments. The
+module validator rejects unreadable output operands, width drift, unsupported
+operations, duplicate names, undriven signals, and multiple drivers. The v3
+module structural hash covers every datapath field, and
+`render_strict_sequential_hwir` emits declarations and combinational
+assignments before output bindings and the synchronous process.
+
+The focused contract is
+`test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl`, with
+its operator-readable mirror under `doc/06_spec/01_unit/compiler/50.mir/`.
+Executable qualification still requires the provenance-admitted self-hosted
+CLI; a bootstrap seed or a crashing deployed binary is diagnostic only.
+
 The compiler lane now has a bounded, development-stage critical route for one
 `@hardware` source function:
 
