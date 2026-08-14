@@ -54,10 +54,16 @@ by digests. Build and smoke each record their OS-observed child PID, exit
 status, timeout status, stdout, stderr, combined log and hashes. Output is
 size-bounded and a timeout is mandatory.
 
-Positive completion requires exit zero, a non-empty planner, the exact native
-build completion marker with a positive compiled count, no fallback, stub,
-TODO, unresolved-symbol, or zero-output marker, and an exact authorization leaf
-derived by the producer. The planner never authors the admission envelope.
+Positive completion requires exit zero and a newly created, regular,
+non-symlink, non-empty executable whose post-build hash is bound after all
+frozen authorities are rechecked. The canonical pure-Simple in-process
+`native-build` path is silent on success; `Build complete: N compiled` and
+`Linked ... via clang` are Rust-seed/fallback markers and MUST NOT be required
+or accepted as positive proof. Build output must contain no fallback, stub,
+TODO, unresolved-symbol, zero-output, Rust-seed build-completion, or
+clang-link marker. Positive semantic proof instead comes from two isolated
+planner smoke executions that reproduce the exact producer-derived
+authorization leaf. The planner never authors the admission envelope.
 Smoke is replayed in a fresh isolated directory with the same semantic argv,
 environment and cwd and must produce the identical authorization while leaving
 the candidate, producer, sealed evidence, and canonical destination unchanged.
