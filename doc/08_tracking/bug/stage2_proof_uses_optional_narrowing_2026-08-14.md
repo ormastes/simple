@@ -1,7 +1,7 @@
 # Stage 2 loses `HirContractBlock` type at optional narrowing
 
 Date: 2026-08-14
-Status: ROOT-CAUSE AND BOUNDED ALIAS FIX IMPLEMENTED; next-session verification pending
+Status: ROOT-CAUSE AND BOUNDED ALIAS FIX IMPLEMENTED; render-CLI cycle 3 pending
 Owner: canonical HIR definitions / driver entry-closure ownership
 Source authority: implementation commit `cc30abb73ddc4652d8324bfa28768eda1cf4efeb`
 
@@ -32,7 +32,18 @@ contract through MIR optimization constructors. The explicit payload bindings
 remain as defensive type boundaries. No Rust/runtime fallback implements this
 behavior.
 
+The render-CLI continuation independently confirmed the boundary: an isolated
+cycle-2 build moved the same diagnostic into a helper whose parameter was
+explicitly `HirContractBlock`, proving that local narrowing was not the owner.
+Cycle 3 therefore consumes the canonical definition and alias fixes integrated
+through `cc30abb73ddc4652d8324bfa28768eda1cf4efeb`, rather than retaining the
+disproven helper workaround.
+
 ## Retained evidence
+
+- Restart12 render-CLI cycle 1 Stage 2 log:
+  `build/restart12-render-cli-pass2/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`,
+  SHA-256 `cbdb55c0fce8d12780437ddab2d51529770e101c319db5af220dbd00fc097bf8`
 
 - Driver: `build/restart13-bootstrap/driver-cycle3.log`, SHA-256
   `ba5ffd0e101a8e40e0613b04e2d6ef84dd9cd3ffbb82330e12137d8d6f108f90`
