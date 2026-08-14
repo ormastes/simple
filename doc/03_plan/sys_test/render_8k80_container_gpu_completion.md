@@ -13,6 +13,8 @@
 | REQ-R8KC-005 | seed/interpreter/stub/fallback/unknown | aggregate `failed` |
 | NFR-R8KC-001 | p95 above 12.5 ms | aggregate `failed` |
 | NFR-R8KC-006 | CUDA-only or headless claimed physical | aggregate `failed` |
+| REQ-R8KC-008 | NVIDIA container exposes CUDA plus Vulkan | retained inventory, CUDA submit/readback, and distinct strict Vulkan receipt |
+| REQ-R8KC-008 | CUDA or Vulkan enumeration without Vulkan submission | blocked; never A5 pass |
 
 The bounded parser/self-test runs without GPU hardware. The live scenario runs
 only when container GPU admission succeeds and reports `blocked`, not skipped,

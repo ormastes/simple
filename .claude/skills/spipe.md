@@ -939,6 +939,16 @@ When a feature claims work is offloaded to the GPU (or that an effect like
 transparency/blend is applied), the spec must *discriminate the claim*, not just
 observe a pass:
 
+- **CUDA and Vulkan on one NVIDIA container remain distinct lanes.** Expose
+  `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics` and retain
+  `nvidia-smi` plus `vulkaninfo --summary` as inventory, but never accept that
+  inventory as execution. CUDA requires its own submit/readback receipt;
+  Vulkan requires a separate selected-Vulkan submit/fence/device-readback
+  receipt with no fallback. Neither headless result proves physical scanout.
+  For the 8K80 workflow use
+  `scripts/check/check-render-perf-8k80-container.shs` and the feature wiki at
+  `doc/00_llm_process/feature_expert/render_8k80/skill.md`.
+
 - **Legacy font payload bridge.** The checksum-verified
   `{CUDA,ROCM,HIP,OPENCL}_{VECTOR,BITMAP}_FONT_*` environment transport proves
   only the legacy payload bridge, not direct native dispatch. Its compatibility

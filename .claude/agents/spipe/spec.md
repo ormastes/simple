@@ -243,3 +243,10 @@ spec-done
 - arch: Designed N modules, N decisions, no circular deps
 - spec: Created N spec files and N generated manuals, 0 doc stubs, 100% AC coverage, manual shape defined
 ```
+# NVIDIA CUDA/Vulkan evidence
+
+When CUDA and Vulkan share an NVIDIA container, model them as separate evidence
+lanes. Inventory (`nvidia-smi`, `vulkaninfo`) is not execution; require actual
+CUDA submit/readback and separate strict Vulkan submit/fence/device-readback.
+Headless evidence cannot be promoted to physical scanout. The canonical 8K80
+contract is `doc/00_llm_process/feature_expert/render_8k80/skill.md`.

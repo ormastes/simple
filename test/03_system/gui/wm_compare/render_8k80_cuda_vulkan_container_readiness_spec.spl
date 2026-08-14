@@ -1,0 +1,53 @@
+# @tag: rendering, cuda, vulkan, container, 8k80
+# @req REQ-R8KC-008
+
+use app.io.mod.{file_read_text}
+use std.io_runtime.{process_run_bounded}
+
+describe "8K80 CUDA and Vulkan container readiness":
+    it "requests the NVIDIA capabilities needed by both APIs":
+        step("Execute the hardware-free parent-authoritative contract matrix")
+        val (out, err, code) = process_run_bounded(
+            "sh",
+            ["test/05_perf/profile_scripts/render_perf_8k80_container_contract_test.shs"],
+            30000, 1048576)
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("render_perf_8k80_container_contract=true")
+        step("Inspect the bounded GPU container contract")
+        val source = file_read_text(
+            "scripts/check/check-render-perf-8k80-container.shs")
+        expect(source).to_contain(
+            "NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics")
+        expect(source).to_contain("--gpus \"$gpu_flag\"")
+        expect(source).to_contain("--network=none")
+        expect(source).to_contain("--cap-drop=ALL")
+        expect(source).to_contain("--security-opt=no-new-privileges")
+
+    it "keeps CUDA and Vulkan execution evidence distinct":
+        step("Require CUDA submit and readback qualification")
+        val source = file_read_text(
+            "scripts/check/check-render-perf-8k80-container.shs")
+        expect(source).to_contain(
+            "sh scripts/check/check-cuda-generated-2d-readback.shs")
+        expect(source).to_contain("validate_cuda_qualification")
+        step("Require a separate strict Vulkan semantic receipt")
+        expect(source).to_contain(
+            "producer_receipt_requested_backend)\" = vulkan")
+        expect(source).to_contain(
+            "producer_receipt_selected_backend)\" = vulkan")
+        expect(source).to_contain(
+            "producer_receipt_readback_source)\" = device_readback")
+
+    it "retains inventory without treating enumeration as execution":
+        step("Retain CUDA and Vulkan device inventory")
+        val source = file_read_text(
+            "scripts/check/check-render-perf-8k80-container.shs")
+        expect(source).to_contain("vulkaninfo --summary")
+        expect(source).to_contain("gpu-inventory/cuda-vulkan.txt")
+        expect(source).to_contain(
+            "cp -R \"$run/gpu-inventory\" \"$run/publish/gpu-inventory\"")
+        step("Keep strict submission and device readback as the Vulkan oracle")
+        expect(source).to_contain("producer-container-execution")
+        expect(source).to_contain("producer_receipt_completion_known")
+        expect(source).to_contain("producer_receipt_device_submit_count")

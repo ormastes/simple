@@ -350,6 +350,14 @@ evidence.
   and computed style.
 - Environmental tests should capture command/API/protocol/binary/log evidence
   when that is more meaningful than a screenshot.
+- NVIDIA container specs that cover both CUDA and Vulkan must keep the APIs as
+  separate evidence lanes. Request `compute,utility,graphics`, retain container
+  image plus `nvidia-smi`/`vulkaninfo` inventory, then require an actual CUDA
+  submit/readback and a separate strict Vulkan submit/fence/device-readback.
+  Enumeration is never execution, CUDA success is never Vulkan success, and
+  headless GPU success is never physical scanout evidence. The canonical 8K80
+  contract is documented in
+  `doc/00_llm_process/feature_expert/render_8k80/skill.md`.
 - MCP command-line server specs should use a reusable helper that launches the
   actual wrapper command, sends `initialize`, `notifications/initialized`, and
   `tools/list`, and asserts readiness JSON, exit code, elapsed time, JSON-RPC

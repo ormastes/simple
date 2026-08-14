@@ -53,3 +53,14 @@ DISPLAY=:0 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
 Exit 2 is the expected blocked result when the EDID-bearing 8K80 path is absent.
 Full PASS additionally requires a same-run physical receipt accepted by
 `scripts/check/check-render-perf-8k80-container.shs --aggregate`.
+
+## CUDA/Vulkan container preparation update
+
+The runner now explicitly exposes NVIDIA compute, utility, and graphics
+capabilities and retains `nvidia-smi` plus `vulkaninfo --summary` inventory.
+CUDA is admitted only by its generated submit/readback checker. Vulkan is
+admitted separately by the strict A5 semantic producer with selected backend
+`vulkan`, known completion, device readback, no fallback, zero timed readback,
+and p95 at most 12.5 ms. The bounded contract rejects over-budget A4 and A5
+receipts. Live performance remains blocked on the admitted Stage4 compiler;
+the deployed runtime failed its bounded ABI probe before loading the new SSpec.

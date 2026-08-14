@@ -111,6 +111,12 @@ is explicitly inadmissible as scanout parity. The exact
 implemented/unavailable matrix and optimization exclusions are retained in
 `doc/09_report/ui/perf/render_8k80_a4_a8_implementation_readiness_2026-08-14.md`.
 
+The NVIDIA container path explicitly requests `compute,utility,graphics`,
+retains CUDA/Vulkan inventory, and requires separate CUDA and Vulkan
+submit/readback evidence. `nvidia-smi` and `vulkaninfo` remain inventory only;
+neither replaces the strict A5 receipt or physical A6/A8 scanout. The modern
+readiness SSpec and manual are linked by the render-8K80 feature expert wiki.
+
 ### Implementation handoff — blocked rows remain active
 
 This is an implementation handoff, not feature completion.  Each row keeps its

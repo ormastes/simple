@@ -490,6 +490,29 @@ inputs under `build/render_perf/physical_8k80/runs/<id>/`. A PASS is reported
 only after that directory is manifest-hashed, renamed atomically, made
 read-only, and selected by an atomic physical `current` symlink.
 
+### CUDA and Vulkan in an NVIDIA container
+
+Vulkan can use the same NVIDIA GPU that also supports CUDA, but Vulkan does not
+run on CUDA. The APIs must be admitted independently. Prepare an image with
+`nvidia-smi`, `vulkaninfo`, `/usr/bin/time`, and the native producer's runtime
+libraries, then run:
+
+```sh
+sh scripts/check/check-render-perf-8k80-container.shs --self-test
+sh scripts/check/check-render-perf-8k80-container.shs --run \
+  --compiler /absolute/path/to/bin/release/<triple>/simple \
+  --compiler-provenance /absolute/path/to/compiler-provenance.env \
+  --container-image <image@sha256-or-local-id> --gpu all
+```
+
+The live runner explicitly exposes NVIDIA `compute,utility,graphics`
+capabilities. It retains `nvidia-smi` and `vulkaninfo --summary` inventory,
+executes the generated CUDA submit/readback qualification, and separately
+executes the native strict Vulkan semantic producer. Inventory never counts as
+execution: A5 requires selected backend `vulkan`, known submit/fence completion,
+device-origin readback, changing nonzero checksums, and no fallback. A headless
+container still cannot satisfy physical A6/A8 scanout.
+
 TODO684 and TODO685 in `doc/08_tracking/todo/todo_db.sdn` own this unavailable-
 hardware work and its exact resume contract; the render plan only retains the
 acceptance dependencies. Before a physical campaign, run

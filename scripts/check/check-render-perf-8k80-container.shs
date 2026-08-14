@@ -299,6 +299,8 @@ self_test() {
     done
     cp "$t/draw" "$t/bad"; sed -i 's/p95_ns=2000000/p95_ns=13000000/' "$t/bad"
     ! validate_drawir "$t/bad" || die selftest-over-budget-accepted
+    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_p95_ns=2000000/producer_receipt_p95_ns=13000000/' "$t/bad"
+    ! validate_producer "$t/bad" || die selftest-producer-over-budget-accepted
     cp "$t/producer" "$t/bad"; echo unknown_key=x >> "$t/bad"
     ! validate_producer "$t/bad" || die selftest-unknown-key-accepted
     cp "$t/producer" "$t/bad"; sed -i 's/captured_at_utc=.*/captured_at_utc=1/' "$t/bad"
@@ -324,6 +326,9 @@ self_test() {
     grep -Fq 'native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/wm_compare/strict_semantic_vulkan_window_producer.spl' "$0" || die selftest-window-producer-build-command-contract
     grep -Fq -- '--cache-dir "$native_cache"' "$0" || die selftest-shared-native-cache-contract
     grep -Fq 'sh scripts/check/check-cuda-generated-2d-readback.shs' "$0" || die selftest-cuda-command-contract
+    grep -Fq 'NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics' "$0" || die selftest-nvidia-vulkan-capabilities-contract
+    grep -Fq 'vulkaninfo --summary' "$0" || die selftest-vulkan-inventory-contract
+    grep -Fq 'producer_receipt_selected_backend' "$0" || die selftest-vulkan-submit-readback-contract
     echo render_perf_8k80_container_selftest=pass
 }
 
@@ -388,13 +393,16 @@ run_artifacts() {
     container_hash=${image_id#sha256:}; is_hash "$container_hash" || die invalid-container-image-id
     printf '%s\n' "image_reference=$image" "image_id=$image_id" "image_hash=$container_hash" > "$run/container-image.env"
     if [ "$gpu" = all ]; then gpu_flag=all; else gpu_flag="device=$gpu"; fi
+    mkdir -p "$run/gpu-inventory"
+    timeout "${RUN_TIMEOUT_SECS:-300}" docker run --rm --gpus "$gpu_flag" --network=none --memory="${CONTAINER_MEMORY:-4g}" --cpus="${CONTAINER_CPUS:-2}" --cap-drop=ALL --security-opt=no-new-privileges -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics --entrypoint /bin/sh "$image" -lc 'set -eu; command -v nvidia-smi >/dev/null; command -v vulkaninfo >/dev/null; nvidia-smi --query-gpu=name,uuid,driver_version --format=csv,noheader; vulkaninfo --summary' >"$run/gpu-inventory/cuda-vulkan.txt" 2>"$run/gpu-inventory/cuda-vulkan.err" || blocked cuda-vulkan-container-inventory-unavailable
+    grep -Eq 'deviceName[[:space:]]*=.*NVIDIA' "$run/gpu-inventory/cuda-vulkan.txt" || blocked nvidia-vulkan-device-inventory-empty
     mkdir -p "$run/cuda"
     cuda_rc=0
-    timeout "${RUN_TIMEOUT_SECS:-300}" docker run --rm --gpus "$gpu_flag" --network=none --memory="${CONTAINER_MEMORY:-4g}" --cpus="${CONTAINER_CPUS:-2}" --cap-drop=ALL --security-opt=no-new-privileges -v "$ROOT:/repo:ro" -v "$run:/receipt:rw" -w /repo --entrypoint /bin/sh "$image" -lc 'BUILD_DIR=/receipt/cuda REPORT_PATH=/receipt/cuda/report.md sh scripts/check/check-cuda-generated-2d-readback.shs' >"$run/cuda.out" 2>"$run/cuda.err" || cuda_rc=$?
+    timeout "${RUN_TIMEOUT_SECS:-300}" docker run --rm --gpus "$gpu_flag" --network=none --memory="${CONTAINER_MEMORY:-4g}" --cpus="${CONTAINER_CPUS:-2}" --cap-drop=ALL --security-opt=no-new-privileges -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics -v "$ROOT:/repo:ro" -v "$run:/receipt:rw" -w /repo --entrypoint /bin/sh "$image" -lc 'BUILD_DIR=/receipt/cuda REPORT_PATH=/receipt/cuda/report.md sh scripts/check/check-cuda-generated-2d-readback.shs' >"$run/cuda.out" 2>"$run/cuda.err" || cuda_rc=$?
     [ "$cuda_rc" -eq 0 ] && validate_cuda_qualification "$run/cuda/evidence.env" || blocked cuda-submit-readback-qualification-unavailable
-    timeout "${RUN_TIMEOUT_SECS:-300}" docker run --rm --gpus "$gpu_flag" --network=none --entrypoint /bin/sh "$image" -lc 'printf "kernel=%s\n" "$(uname -sr)"; command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=name,driver_version --format=csv,noheader' >"$run/cuda/toolchain.txt" 2>"$run/cuda/toolchain.err" || blocked cuda-toolchain-identity-unavailable
+    timeout "${RUN_TIMEOUT_SECS:-300}" docker run --rm --gpus "$gpu_flag" --network=none --memory="${CONTAINER_MEMORY:-4g}" --cpus="${CONTAINER_CPUS:-2}" --cap-drop=ALL --security-opt=no-new-privileges -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics --entrypoint /bin/sh "$image" -lc 'printf "kernel=%s\n" "$(uname -sr)"; command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=name,driver_version --format=csv,noheader' >"$run/cuda/toolchain.txt" 2>"$run/cuda/toolchain.err" || blocked cuda-toolchain-identity-unavailable
     producer_rc=0
-    timeout "${RUN_TIMEOUT_SECS:-300}" docker run --rm --gpus "$gpu_flag" --network=none --memory="${CONTAINER_MEMORY:-4g}" --cpus="${CONTAINER_CPUS:-2}" --cap-drop=ALL --security-opt=no-new-privileges -v "$producer_bin:/work/producer:ro" -v "$run:/receipt:rw" --entrypoint /usr/bin/time "$image" -f %M -o /receipt/producer.time /work/producer > "$run/producer.out" 2> "$run/producer.err" || producer_rc=$?
+    timeout "${RUN_TIMEOUT_SECS:-300}" docker run --rm --gpus "$gpu_flag" --network=none --memory="${CONTAINER_MEMORY:-4g}" --cpus="${CONTAINER_CPUS:-2}" --cap-drop=ALL --security-opt=no-new-privileges -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics -v "$producer_bin:/work/producer:ro" -v "$run:/receipt:rw" --entrypoint /usr/bin/time "$image" -f %M -o /receipt/producer.time /work/producer > "$run/producer.out" 2> "$run/producer.err" || producer_rc=$?
     [ "$producer_rc" -ne 2 ] || blocked producer-prerequisite-unavailable
     [ "$producer_rc" -eq 0 ] || die producer-container-execution
     for f in "$run/draw.out" "$run/producer.out"; do awk -F= 'NF != 2 || seen[$1]++ { exit 1 }' "$f" || die malformed-artifact-stdout; done
@@ -426,6 +434,7 @@ run_artifacts() {
     cp "$window_producer_bin" "$run/publish/strict_semantic_vulkan_window_producer"
     (cd "$run/publish" && sha256sum strict_semantic_vulkan_window_producer > strict_semantic_vulkan_window_producer.sha256)
     cp -R "$run/cuda" "$run/publish/cuda"
+    cp -R "$run/gpu-inventory" "$run/publish/gpu-inventory"
     PUBLISH_EVIDENCE_DIR="$run/publish"; export PUBLISH_EVIDENCE_DIR
     aggregate "$run/draw.receipt" "$run/producer.receipt" "$physical"
     rm -rf "$run"; trap - EXIT HUP INT TERM

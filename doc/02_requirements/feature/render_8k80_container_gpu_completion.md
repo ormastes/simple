@@ -25,3 +25,8 @@ GPU production. Physical display work remains separately tracked.
   owner, time no host readback, and retain an untimed device checksum oracle.
   Its receipt must say device-window presentation is not physical scanout
   capture; A6 promotion still requires independent same-run capture/readback.
+- **REQ-R8KC-008:** An NVIDIA container run must explicitly expose compute,
+  utility, and graphics capabilities; retain CUDA and Vulkan device inventory;
+  qualify CUDA with its own submit/readback; and qualify Vulkan separately
+  through the strict A5 submit/fence/device-readback receipt. CUDA availability,
+  `nvidia-smi`, or `vulkaninfo` enumeration alone is never Vulkan execution.
