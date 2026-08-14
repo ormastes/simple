@@ -18,9 +18,11 @@ remain useful, but neither is an end-to-end 8K80 claim.
 
 ### Acceptance items
 
-- [x] **A1 — physical adapter attribution:** every hardware row records the
-  selected device, device type, driver/API identity, and a stable identity
-  hash.  Current retained-compute evidence names the NVIDIA RTX A6000.
+- [ ] **A1 — physical adapter attribution (PARTIAL):** current retained rows
+  name the NVIDIA RTX A6000 and record device type plus vendor/device/driver/API
+  identity, but the retained report set does not preserve the wrapper's stable
+  device-identity hash.  Promote only after that hash is present in the durable
+  report, not merely transient stdout.
 - [x] **A2 — exact retained primitive oracle:** the timed interval has zero
   readback, while an untimed device-origin oracle records mismatches and a
   nonzero checksum.  The 1% clear row and mixed retained batch satisfy this
@@ -75,6 +77,36 @@ The lane must address B1 and B2 in software before treating B3 as the terminal
 environmental gate.  Do not start unrelated O/P/G expansion while A4–A6 are
 open.  Canonical evidence sources are the 2026-08-12 reports under
 `doc/09_report/` and their linked open bugs under `doc/08_tracking/bug/`.
+
+### Implementation handoff — blocked rows remain active
+
+This is an implementation handoff, not feature completion.  Each row keeps its
+acceptance ID, missing prerequisite, exact resume command, retained artifact,
+owner, and independent final reviewer.  A future run may update a row only from
+fresh evidence produced by that command on the named capability.
+
+| Row | Missing prerequisite and exact resume command | Retained artifacts | Owner / final reviewer |
+|---|---|---|---|
+| **A1** | Preserve the stable device-identity hash emitted by the physical adapter probe in the durable report, then have the physical wrapper validate it as nonzero alongside the textual identity. Resume through the A6 command below. | `build/check/engine2d-vulkan-window-8k/run.*/receipt.env`; `doc/09_report/engine2d_vulkan_clear_8k_evidence_2026-08-12.md` | Vulkan evidence owner / independent highest-capability Codex |
+| **A4** | Produce an admitted non-seed pure-Simple executable: `mkdir -p build/render_perf && SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 timeout 300 bin/simple native-build --source src/lib --source test/05_perf/graphics_2d --entry-closure --entry test/05_perf/graphics_2d/draw_ir_damage_8k_bench.spl --runtime-bundle core-c-bootstrap --backend cranelift --opt-level=aggressive --output build/render_perf/draw_ir_damage_8k_bench`; then execute it directly once: `SIMPLE_NO_STUB_FALLBACK=1 timeout 300 /usr/bin/time -v -o build/render_perf/draw_ir_damage_8k_bench.time build/render_perf/draw_ir_damage_8k_bench >build/render_perf/draw_ir_damage_8k_bench.stdout 2>build/render_perf/draw_ir_damage_8k_bench.stderr`. | `build/render_perf/draw_ir_damage_8k_bench*`; `doc/08_tracking/bug/draw_ir_8k_native_evidence_blocked_2026-08-12.md`; refresh `doc/09_report/drawir_sparse_dynamic_8k_attempt_2026-08-12.md` | pure-Simple native-build owner / independent highest-capability Codex |
+| **A5** | After an admitted non-seed compiler exists, run `BENCH_TIMEOUT_SECS=300 BUILD_DIR=build/render_perf/gui_8k80 REPORT_PATH=build/render_perf/gui_8k80/gui_8k80_semantic_producer.md bash tools/gui_perf_bench/run_all_benchmarks.shs --width 7680 --height 4320 --frames 60 --dpi 300`; require the `backend_measurement_software_export.native` route to publish the canonical semantic producer frame through Draw IR and Engine2D, with no interpreter or seed fallback. | `build/render_perf/gui_8k80/gui_8k80_semantic_producer.md` and sibling receipts; publish the accepted result to `doc/09_report/ui/perf/gui_8k80_semantic_producer_<date>.md` and refresh `doc/09_report/web_renderer_retained_damage_plan_evidence_2026-08-12.md` | UI render producer owner / independent highest-capability Codex |
+| **A6** | Attach a direct-display WSI path and run `DISPLAY=:0 ENGINE2D_VULKAN_PHYSICAL=1 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json sh scripts/check/check-engine2d-vulkan-window-8k.shs`. Admission requires EDID-bearing active X11 output correlation; Xvfb is inadmissible. | `build/check/engine2d-vulkan-window-8k/run.*/receipt.env`; `doc/08_tracking/bug/engine2d_vulkan_physical_display_8k_gate_2026-08-12.md` | physical Vulkan/display operator / independent highest-capability Codex |
+| **A7** | After A4–A6 pass, implement the missing parent-authoritative `scripts/check/check-render-perf-8k80-completion.shs` aggregator tracked by `doc/08_tracking/bug/render_perf_8k80_completion_aggregator_missing_2026-08-14.md`, then run `BUILD_DIR=build/render_perf/8k80_completion sh scripts/check/check-render-perf-8k80-completion.shs --drawir build/render_perf/draw_ir_damage_8k_bench.stdout --producer build/render_perf/gui_8k80/gui_8k80_semantic_producer.md --physical build/check/engine2d-vulkan-window-8k/run.*/receipt.env --report doc/09_report/ui/perf/render_perf_8k80_completion_<date>.md`. It must require p95 `<=12500000 ns`, complete RSS/checksum/readback receipts, no CPU/interpreter/stub fallback, and known completion. | `doc/09_report/ui/perf/render_perf_8k80_completion_<date>.md` plus the exact A4–A6 receipts | root integration owner / independent highest-capability Codex |
+| **A8** | Retain connector evidence fail-closed with `bash -o pipefail -c 'set -eu; mkdir -p build/render_perf/physical_display_inventory; { DISPLAY=:0 xrandr --props; for p in /sys/class/drm/*/edid; do if [ -s "$p" ]; then echo "EDID=$p"; edid-decode "$p"; fi; done; } | tee build/render_perf/physical_display_inventory/inventory.txt'`, then run A6. | `build/render_perf/physical_display_inventory/inventory.txt`; A6 receipt | physical display operator / independent highest-capability Codex |
+
+### Cooperative review record
+
+- SPipe state: `.spipe/rendering_physical_8k80_plan_completion/state.md`.
+- Lower-model ledger sidecar: audited A1–A8 and found the former A1 durable-
+  hash overclaim; the correction above is load-bearing.
+- Lower-model guide/wiki sidecar: refreshed the feature and layer expert pages
+  named below with the canonical wrapper and blocked-row resume contract.
+- Merge owner: root Codex lane in the isolated `restart12-render_8k` worktree.
+- Generated-manual review: N/A — this handoff changes no executable SSpec or
+  generated manual; `doc/06_spec` layout remains a verification gate.
+- Final acceptance owner: separate highest-capability Codex reviewer must
+  accept ledger truthfulness, guide/wiki freshness, exclusions, retained
+  blockers, and all done marks before this handoff can land.
 
 ## 0-A. STATUS OVERLAY (added 2026-08-09, revised 2026-08-09) — historical baseline
 

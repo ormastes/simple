@@ -3,11 +3,13 @@
 Status: open
 
 The canonical wrapper now has a fail-closed physical admission mode:
-`DISPLAY=<physical-x11> ENGINE2D_VULKAN_PHYSICAL=1 sh
+`DISPLAY=:0 ENGINE2D_VULKAN_PHYSICAL=1 sh
 scripts/check/check-engine2d-vulkan-window-8k.shs`.  Unlike its default Xvfb
-lane, physical mode requires an already-active 7680x4320 mode at 80 Hz or
-faster and validates the p95, RSS, checksum, completion, fallback, adapter,
-and timed-readback receipt fields.  This closes the evidence-wrapper ambiguity;
+lane, physical mode requires an EDID-bearing connected X11 output with an
+already-active 7680x4320 mode at 80 Hz or faster and validates the p95, RSS,
+checksum, completion, fallback, adapter, and timed-readback receipt fields.
+The EDID correlation rejects an externally managed Xvfb display instead of
+trusting only its synthetic mode.  This closes the evidence-wrapper ambiguity;
 it does not close the hardware blocker.
 
 The same-device visible-window path reaches an NVIDIA RTX A6000 with

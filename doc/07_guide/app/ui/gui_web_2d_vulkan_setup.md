@@ -471,9 +471,15 @@ VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
 ```
 
 Physical mode never starts Xvfb.  It fails closed unless the existing X11
-display has an active 7680x4320 mode at 80 Hz or faster, the selected adapter
+display has an EDID-bearing connected output with an active 7680x4320 mode at
+80 Hz or faster, the selected adapter
 is discrete, the one-percent-damage receipt has zero timed readback and known
 completion, p95 is at most 12.5 ms, and RSS/checksum are nonzero.  A passing
 window receipt is still presentation evidence rather than captured-scanout
 parity; promotion also requires the device-origin/captured scanout oracle in
 the canonical render performance plan.
+
+Before a physical campaign, run
+`sh scripts/check/check-engine2d-vulkan-window-8k.shs --self-test`.  The bounded
+self-test accepts an EDID-bearing active 8K80 fixture and rejects both a
+synthetic no-EDID Xvfb shape and an EDID-bearing 60 Hz mode.

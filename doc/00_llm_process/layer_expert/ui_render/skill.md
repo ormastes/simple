@@ -65,6 +65,31 @@ This layer is what the four SimpleOS screen targets are being unified onto — s
 - **No `HalInput` trait exists**; `hal_current.spl:36` is x86_64-hardwired.
   **`InputBackend` remains the input abstraction** — do not add a parallel one.
 
+## Physical 8K80 Admission (2026-08-14)
+
+All physical-display evidence goes through the canonical
+[`check-engine2d-vulkan-window-8k.shs`](../../../../scripts/check/check-engine2d-vulkan-window-8k.shs)
+wrapper. `ENGINE2D_VULKAN_PHYSICAL=1` uses an existing X11 display and refuses
+unless `xrandr` reports an EDID-bearing active `7680x4320` mode at `>=80 Hz`; it also checks
+adapter identity, timing, RSS, checksum, timed-readback bytes, completion, and
+fallback. The default Xvfb mode is a non-physical device-present proxy and is
+never an A6-A8 result.
+
+Keep the [canonical render plan](../../../03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md),
+[operator guide](../../../07_guide/app/ui/gui_web_2d_vulkan_setup.md), and
+[open physical-display bug](../../../08_tracking/bug/engine2d_vulkan_physical_display_8k_gate_2026-08-12.md)
+in agreement. A4-A8 remain BLOCKED on the current host and must resume only as
+follows (owner: root Codex merge lane; final reviewer: separate
+highest-capability Codex):
+
+| Row | Resume condition and command | Retained record |
+|---|---|---|
+| A4 | Build the admitted non-seed artifact with the canonical plan command, then execute `SIMPLE_NO_STUB_FALLBACK=1 timeout 300 /usr/bin/time -v -o build/render_perf/draw_ir_damage_8k_bench.time build/render_perf/draw_ir_damage_8k_bench >build/render_perf/draw_ir_damage_8k_bench.stdout 2>build/render_perf/draw_ir_damage_8k_bench.stderr` directly. | [sparse DrawIR report](../../../09_report/drawir_sparse_dynamic_8k_attempt_2026-08-12.md) and `doc/08_tracking/bug/self_hosted_cli_native_build_silent_no_artifact_2026-08-14.md`. |
+| A5 | Run `BENCH_TIMEOUT_SECS=300 BUILD_DIR=build/render_perf/gui_8k80 REPORT_PATH=build/render_perf/gui_8k80/gui_8k80_semantic_producer.md bash tools/gui_perf_bench/run_all_benchmarks.shs --width 7680 --height 4320 --frames 60 --dpi 300` with that admitted compiler and require native canonical producer receipts. | `build/render_perf/gui_8k80/gui_8k80_semantic_producer.md` and sibling receipts; [retained Web report](../../../09_report/web_renderer_retained_damage_plan_evidence_2026-08-12.md). |
+| A6 | Attach a direct-display WSI path, then run `DISPLAY=:0 ENGINE2D_VULKAN_PHYSICAL=1 sh scripts/check/check-engine2d-vulkan-window-8k.shs`; Xvfb cannot unblock it. | [physical-display bug](../../../08_tracking/bug/engine2d_vulkan_physical_display_8k_gate_2026-08-12.md) and `build/check/engine2d-vulkan-window-8k/`. |
+| A7 | Only after A4-A6 pass, rerun their canonical rows once and require p95 `<=12500000 ns`, no fallback, known completion, and complete receipts. | [render plan](../../../03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md). |
+| A8 | Attach a connector with EDID/mode `7680x4320@80`, run the plan's inventory-and-tee command, then rerun A6. | [physical-display bug](../../../08_tracking/bug/engine2d_vulkan_physical_display_8k_gate_2026-08-12.md). |
+
 ## Pixel/Perf Reality (WS-D; read before any SIMD work)
 
 - **Pixels are boxed `int64_t`**, via `engine2d_box_pixel` / `engine2d_unbox_pixel`

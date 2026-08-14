@@ -39,6 +39,35 @@ implementation landing across five workstreams.**
   - WS-D 2D perf/SIMD — [ws_d_2d_perf_detail.md](../../../03_plan/os/simpleos/screens/ws_d_2d_perf_detail.md)
   - WS-E Vulkan/Venus — [ws_e_vulkan_detail.md](../../../03_plan/os/simpleos/screens/ws_e_vulkan_detail.md)
 
+## Physical 8K80 Evidence Handoff (2026-08-14)
+
+The canonical window wrapper is
+[`check-engine2d-vulkan-window-8k.shs`](../../../../scripts/check/check-engine2d-vulkan-window-8k.shs).
+`ENGINE2D_VULKAN_PHYSICAL=1` is fail-closed: it uses the already-visible X11
+display, requires an EDID-bearing active `7680x4320` mode at `>=80 Hz`, and validates the
+backend/device identity, p95, RSS, checksum, timed-readback bytes,
+completion, and fallback fields. The default wrapper starts Xvfb and is only a
+device-present proxy; it is explicitly non-physical and cannot satisfy A6-A8.
+
+The authoritative ledger is the
+[render-performance plan](../../../03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md),
+with operator instructions in the
+[GUI/Web/2D Vulkan guide](../../../07_guide/app/ui/gui_web_2d_vulkan_setup.md)
+and the open [physical-display bug](../../../08_tracking/bug/engine2d_vulkan_physical_display_8k_gate_2026-08-12.md).
+The current host has no attached 8K80 mode, so A4-A8 remain active BLOCKED
+rows, not exclusions:
+
+| Row | Missing prerequisite and exact resume command | Retained record | Owner / final reviewer |
+|---|---|---|---|
+| A4 | Build the non-seed pure-Simple artifact with the exact command in the canonical plan, then execute `SIMPLE_NO_STUB_FALLBACK=1 timeout 300 /usr/bin/time -v -o build/render_perf/draw_ir_damage_8k_bench.time build/render_perf/draw_ir_damage_8k_bench >build/render_perf/draw_ir_damage_8k_bench.stdout 2>build/render_perf/draw_ir_damage_8k_bench.stderr` directly. | [sparse DrawIR report](../../../09_report/drawir_sparse_dynamic_8k_attempt_2026-08-12.md) and `doc/08_tracking/bug/self_hosted_cli_native_build_silent_no_artifact_2026-08-14.md` | pure-Simple native-build owner / separate highest-capability Codex reviewer |
+| A5 | With the admitted compiler, run `BENCH_TIMEOUT_SECS=300 BUILD_DIR=build/render_perf/gui_8k80 REPORT_PATH=build/render_perf/gui_8k80/gui_8k80_semantic_producer.md bash tools/gui_perf_bench/run_all_benchmarks.shs --width 7680 --height 4320 --frames 60 --dpi 300`; require the native semantic producer route with no seed/interpreter fallback. | `build/render_perf/gui_8k80/gui_8k80_semantic_producer.md` and sibling receipts; [retained Web report](../../../09_report/web_renderer_retained_damage_plan_evidence_2026-08-12.md) | UI render producer owner / separate highest-capability Codex reviewer |
+| A6 | Attach a direct-display WSI path and pass `DISPLAY=:0 ENGINE2D_VULKAN_PHYSICAL=1 sh scripts/check/check-engine2d-vulkan-window-8k.shs`; Xvfb is not a substitute. | [physical-display bug](../../../08_tracking/bug/engine2d_vulkan_physical_display_8k_gate_2026-08-12.md) and `build/check/engine2d-vulkan-window-8k/` | physical display operator / separate highest-capability Codex reviewer |
+| A7 | After A4-A6 are admitted, rerun each canonical row once and require p95 `<=12500000 ns`, no CPU/interpreter/stub fallback, known completion, and complete receipts. | [render-performance plan](../../../03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md) | root Codex merge owner / separate highest-capability Codex reviewer |
+| A8 | Attach a connector exposing `7680x4320@80`; run the exact inventory-and-tee command in the canonical plan, then rerun A6. | [physical-display bug](../../../08_tracking/bug/engine2d_vulkan_physical_display_8k_gate_2026-08-12.md) | physical display operator / separate highest-capability Codex reviewer |
+
+The Xvfb receipt remains useful only as a regression check and must be labeled
+`scope=xvfb-device-present-proxy`; it cannot promote the umbrella 8K80 feature.
+
 ## Affected Layers
 
 - [layer_expert/ui_render](../../layer_expert/ui_render/skill.md) — `DrawIrV3Scene`,

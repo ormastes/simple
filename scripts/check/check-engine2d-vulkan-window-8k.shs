@@ -15,6 +15,73 @@ RUN_DIR=""
 DISPLAY_LOCK=""
 XVFB_PID=""
 
+physical_xrandr_has_8k80() {
+    awk '
+        function finish_output() {
+            if (connected && active_8k80 && edid_bytes > 0) found = 1
+        }
+        /^[^[:space:]]+[[:space:]]+connected([[:space:]]|$)/ {
+            finish_output()
+            connected = 1
+            active_8k80 = 0
+            edid_bytes = 0
+            reading_edid = 0
+            next
+        }
+        /^[^[:space:]]+[[:space:]]+disconnected([[:space:]]|$)/ {
+            finish_output()
+            connected = 0
+            reading_edid = 0
+            next
+        }
+        connected && /^[[:space:]]+EDID:[[:space:]]*$/ {
+            reading_edid = 1
+            next
+        }
+        connected && reading_edid && $1 ~ /^[0-9a-fA-F]+$/ && length($1) == 32 {
+            edid_bytes += 16
+            next
+        }
+        reading_edid { reading_edid = 0 }
+        connected && $1 == "7680x4320" {
+            for (i = 2; i <= NF; i++) {
+                rate = $i
+                active = index(rate, "*") > 0
+                gsub(/[^0-9.]/, "", rate)
+                if (active && (rate + 0) >= 80) active_8k80 = 1
+            }
+        }
+        END {
+            finish_output()
+            exit(found ? 0 : 1)
+        }
+    '
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    positive='DP-0 connected primary 7680x4320+0+0
+    EDID:
+        00ffffffffffff0010ac123456789abc
+    7680x4320     80.00*+ 60.00'
+    no_edid='screen connected primary 7680x4320+0+0
+    7680x4320     80.00*+'
+    slow_mode='DP-0 connected primary 7680x4320+0+0
+    EDID:
+        00ffffffffffff0010ac123456789abc
+    7680x4320     60.00*+'
+    printf '%s\n' "$positive" | physical_xrandr_has_8k80
+    if printf '%s\n' "$no_edid" | physical_xrandr_has_8k80; then
+        echo "engine2d_vulkan_window_8k_selftest=failed reason=accepted-missing-edid"
+        exit 1
+    fi
+    if printf '%s\n' "$slow_mode" | physical_xrandr_has_8k80; then
+        echo "engine2d_vulkan_window_8k_selftest=failed reason=accepted-slow-mode"
+        exit 1
+    fi
+    echo "engine2d_vulkan_window_8k_selftest=pass"
+    exit 0
+fi
+
 mkdir -p "$BUILD_DIR"
 if [ ! -f "$ICD" ]; then
     echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=missing-icd"
@@ -49,18 +116,8 @@ if [ "$PHYSICAL" = "1" ]; then
         echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=physical-display-unreachable"
         exit 2
     fi
-    if ! xrandr --current | awk '
-        $1 == "7680x4320" {
-            for (i = 2; i <= NF; i++) {
-                rate = $i
-                active = index(rate, "*") > 0
-                gsub(/[^0-9.]/, "", rate)
-                if (active && (rate + 0) >= 80) found = 1
-            }
-        }
-        END { exit(found ? 0 : 1) }
-    '; then
-        echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=physical-8k80-mode-not-active"
+    if ! xrandr --props | physical_xrandr_has_8k80; then
+        echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=physical-edid-8k80-mode-not-active"
         exit 2
     fi
 elif [ -n "${ENGINE2D_VULKAN_X11_DISPLAY:-}" ]; then
