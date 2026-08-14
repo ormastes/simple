@@ -47,7 +47,7 @@ The frozen helpers are `setup_fv2_fixture`, `check_fv2_gate`, and
 | 1 — canonical VIR and typed MIR evidence | REQ-FV2-003, REQ-FV2-005, REQ-FV2-011, REQ-FV2-012, REQ-FV2-018 | frontend/MIR owners; `src/compiler/20.hir/`, `src/compiler/50.mir/` | focused MIR plus canonical-program/VIR cases | **Implemented; executable admission blocked** |
 | 2 — exact proof frontend | REQ-FV2-004, REQ-FV2-006, REQ-FV2-007, REQ-FV2-008 | Lean/contract owners; MIR verification modules and `src/compiler/70.backend/backend/lean_*` | existing formal specs plus execution-linked adversarial system cases | **Implemented; Lean/tool execution blocked** |
 | 3 — receipts, replay, compiler relation | REQ-FV2-009, REQ-FV2-010, REQ-FV2-013, REQ-FV2-016, REQ-FV2-017 | verifier/replay and selected backend owners; `src/compiler/90.tools/verify/`, selected `src/compiler/60.mir_opt/` and `70.backend/` files | forged/stale receipt, unsound transform, mutation, replay cases | **Implemented; external replay blocked** |
-| 4 — SimpleOS vertical slice | REQ-FV2-014 | SimpleOS formal owners; bounded `src/verification/` and OS adapter scopes selected by reviewed design | capability/lifecycle/IPC/mapping/storage scenarios plus stable Lean entry points | **Implemented bounded slices; product proof execution blocked** |
+| 4 — SimpleOS vertical slice | REQ-FV2-014 | SimpleOS formal owners; bounded `src/verification/` and OS adapter scopes selected by reviewed design | capability/lifecycle/IPC/mapping/storage scenarios plus stable Lean entry points | **Explicitly excluded from this completion run by user direction; existing bounded slices remain unchanged** |
 | 5 — RISC-V product chain | REQ-FV2-015 | hardware formal owner; generated RTL/RVFI sidecars, manual Lean/BYL proof owners, formal wrappers | `check-riscv-formal-dual-track.shs`, strict SBY and mission-critical gates | **Blocked:** readiness cannot substitute for executed RVFI/SBY, oracle, refinement, equivalence, and artifact evidence |
 | 6 — independent release closure | REQ-FV2-001, REQ-FV2-009, REQ-FV2-010, REQ-FV2-016, REQ-FV2-019, REQ-FV2-020 | release evidence owner; no production repairs in release | fresh Lean replay, independent checker, full regression and release gates | **Blocked:** predecessor waves and canonical self-hosted runtime are incomplete |
 
@@ -55,29 +55,30 @@ The frozen helpers are `setup_fv2_fixture`, `check_fv2_gate`, and
 
 | NFR | Wave / owner | Required evidence | Status |
 |---|---|---|---|
-| NFR-FV2-001 reproducibility | 1, 3 / VIR and receipt owners | repeated semantic/certificate/receipt hashes from pinned inputs | Blocked |
-| NFR-FV2-002 sound failure | all / each lane owner | malformed, stale, timeout, unknown, missing-tool negatives | Partial: MIR admission and unlowered consumers |
-| NFR-FV2-003 bounded trust | 3, 6 / trust owner | complete transitive trust manifest and axiom audit | Blocked |
-| NFR-FV2-004 incrementality | 1, 3 / cache owner | SymbolId/SCC invalidation and formatting-only reuse | Blocked |
-| NFR-FV2-005 determinism | 1–3 / producer owners | byte-stable VIR, Lean IR, weave, receipts | Partial: MIR JSON only |
+| NFR-FV2-001 reproducibility | 1, 3 / VIR and receipt owners | repeated semantic/certificate/receipt hashes from pinned inputs | Source/tests implemented; execution pending |
+| NFR-FV2-002 sound failure | all / each lane owner | malformed, stale, timeout, unknown, missing-tool negatives | Source/tests implemented; execution pending |
+| NFR-FV2-003 bounded trust | 3, 6 / trust owner | complete transitive trust manifest and axiom audit | Source/tests implemented; external audit pending |
+| NFR-FV2-004 incrementality | 1, 3 / cache owner | SymbolId/SCC invalidation and formatting-only reuse | Source/tests implemented; metrics pending |
+| NFR-FV2-005 determinism | 1–3 / producer owners | byte-stable VIR, Lean IR, weave, receipts | Source/tests implemented; repeat-run evidence pending |
 | NFR-FV2-006 performance | 3, 6 / tooling owner | warm latency, cache metrics, max RSS, no repeated scans | Blocked by unavailable self-hosted CLI |
-| NFR-FV2-007 diagnostics | all / lane owners | source/SymbolId/value/effect/signal mapping | Partial: distinct MIR admission diagnostics |
-| NFR-FV2-008 evolvability | all / interface owner | V1 migration and stale-cache tests | Names frozen; tests blocked |
+| NFR-FV2-007 diagnostics | all / lane owners | source/SymbolId/value/effect/signal mapping | Source/tests implemented; execution pending |
+| NFR-FV2-008 evolvability | all / interface owner | V1 migration and stale-cache tests | V1 interfaces implemented; migration execution pending |
 | NFR-FV2-009 independence | 3, 5, 6 / replay and hardware owners | fresh Lean plus independent checker/oracle | Blocked |
 | NFR-FV2-010 scalability | 3 / scheduler owner | bounded parallel DAG execution metrics | Blocked |
 
 ## Current-main acceptance inventory
 
-- **Implemented, pending authoritative execution:** MIR probe variants and
-  operand contracts; deterministic JSON; fail-closed shape diagnostics;
-  optimizer, visitor, SSA, inline, DCE, transitive and compatibility liveness;
-  focused unit spec and mirrored manual.
-- **In progress:** explicit fail-closed coverage of every interpreter/backend.
-  A wildcard that emits a NOP, comment, or successful artifact is a failure.
-- **Not complete:** HIR-to-MIR probe insertion, admitted runtime lowering,
-  zero-count manifest publication, typed VIR/contracts, trust/replay closure,
-  compiler certificates, SimpleOS product refinement, RISC-V product proof,
-  performance evidence, and final release verification.
+- **Implemented, pending authoritative execution:** MIR probe variants,
+  insertion/identity, operand contracts, deterministic JSON, fail-closed
+  admission/backends, typed VIR/contracts/coverage, obligation closure,
+  receipts, trust/replay reducers, compiler certificates, release adapters,
+  modern unit/system specs, and RISC-V formal runners.
+- **Execution work for this run:** restore the canonical Stage 4 runtime; run
+  focused and system SSpec/docgen; run Lean trust/replay and RISC-V gates;
+  collect applicable NFR evidence; close waves 0–3, 5, and 6.
+- **Explicit exclusion:** wave 4 SimpleOS product closure is not a predecessor
+  for this bounded completion run and must not be promoted or silently marked
+  PASS.
 - **Already integrated:** the first bounded MIR bridge commits were serialized,
   pushed, refetched, and proven reachable. This does not complete FV2.
 
@@ -125,6 +126,12 @@ disjoint documentation ownership, executable command ledger, and Lean links.
 
 - `bin/simple` and the canonical deployed self-hosted binary are absent in this
   worktree. A stale/noncanonical ELF failure or Rust-seed success is not PASS.
+- The bounded two-job recovery reached the Rust seed build but was stopped
+  before memory-heavy Stage 3 when unrelated concurrent work reduced available
+  memory to about 48 GB with no swap, below the recorded ~55 GB Stage 3 peak.
+  Resume only after host memory quiesces, using the isolated recovery command
+  recorded in the verification handoff; this is an environment blocker, not an
+  approved fallback.
 - Research, requirements, architecture, and design artifacts are committed.
   The system spec and manual mirror are present; authoritative SSpec/docgen
   execution remains blocked by the missing Stage 4 runtime.
