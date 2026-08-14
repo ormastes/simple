@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+wrapper="$root/scripts/bootstrap/bootstrap-from-scratch.sh"
+helper="$root/scripts/bootstrap/resume-stage4-from-admitted.sh"
+provenance="$root/scripts/check/lib/stage4-candidate-provenance.shs"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+sh -n "$wrapper" "$helper" "$provenance" || fail "shell syntax"
+grep -Fq -- '--resume-stage4-from-admitted=' "$wrapper" || fail "option missing"
+grep -Fq "bootstrap_receipt_target='//bootstrap:stage4'" "$wrapper" || fail "planner target missing"
+grep -Fq 'bootstrap_stage3_verify_manifest "$manifest" "$root" "$candidate"' "$helper" || fail "Stage 3 admission missing"
+grep -Fq '[ ! -e "$full" ] && [ ! -L "$full" ]' "$helper" || fail "collision/symlink guard missing"
+grep -Fq 'portable_lock_handle_is_owned "$lock"' "$helper" || fail "parent-owned continuation lock missing"
+grep -Fq 'resume_stage4_snapshot "$resume_stage4_before"' "$helper" || fail "before snapshot missing"
+grep -Fq 'cmp -s "$resume_stage4_before" "$after"' "$helper" || fail "immutable after gate missing"
+grep -Fq 'STAGE4_CONTINUATION_RECEIPT' "$provenance" || fail "provenance continuation binding missing"
+grep -Fq 'resume_stage4_finalize || exit 1' "$wrapper" || fail "terminal receipt gate missing"
+grep -Fq 'immutable_status=pass' "$helper" || fail "terminal immutable receipt missing"
+grep -Fq '[ -z "${resume_stage4_output}" ]' "$wrapper" || fail "resume seed suppression missing"
+if grep -Eq 'compiler_rust/target|cargo |rust seed|fallback' "$helper"; then
+  fail "resume helper contains Rust/fallback authority"
+fi
+grep -Fq 'stage4-redeploy-gate' "$wrapper" || fail "redeploy gate missing"
+grep -Fq 'stage4-essential-tools-smoke' "$wrapper" || fail "essential tools gate missing"
+
+# Executable sabotage: even with the expensive provenance verifier replaced by
+# a successful fixture boundary, a pre-existing Stage 4 output must stop before
+# the continuation lock or receipt is created.
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/out/stage2/p" "$tmp/out/stage3/p" "$tmp/out/full/p"
+printf x >"$tmp/out/stage3/p/provenance.env"
+printf x >"$tmp/out/stage3/p/simple"
+printf collision >"$tmp/out/full/p/simple"
+printf receipt >"$tmp/planner.env"
+if ROOT="$root" OUT="$tmp/out" PLAN="$tmp/planner.env" sh -c '
+  set -eu
+  bootstrap_stage3_canonical_path() { CDPATH= cd -- "$1" 2>/dev/null && pwd -P || printf "%s\n" "$1"; }
+  bootstrap_stage3_canonical_file() { d=$(dirname -- "$1"); b=$(basename -- "$1"); printf "%s/%s\n" "$(CDPATH= cd -- "$d" && pwd -P)" "$b"; }
+  bootstrap_stage3_verify_manifest() { return 0; }
+  bootstrap_stage3_manifest_value() { case "$1" in backend) echo cranelift;; mode) echo dynload;; runtime_path) echo "$OUT/stage3/p";; esac; }
+  bootstrap_stage3_hash_file() { echo 0000000000000000000000000000000000000000000000000000000000000000; }
+  bootstrap_stage3_directory_snapshot() { : >"$1"; }
+  backend=cranelift bootstrap_mode=dynload
+  . "$ROOT/scripts/bootstrap/resume-stage4-from-admitted.sh"
+  resume_stage4_prepare "$OUT" "$ROOT" p "$PLAN"
+' >/dev/null 2>&1; then
+  fail "pre-existing Stage 4 output was admitted"
+fi
+[ ! -e "$tmp/out/stage4-continuation.env" ] || fail "collision path published receipt"
+printf '%s\n' 'PASS: admitted Stage 4 resume is planner-bound, locked, immutable, collision-safe, and uses existing gates'

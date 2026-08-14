@@ -71,6 +71,9 @@ Options:
   --resume-stage3-from-admitted=<output>
                      Resume only Stage 3 from OUTPUT's frozen admitted Stage 2
                      using a new one-thread recovery transcript/evidence lane.
+  --resume-stage4-from-admitted=<output>
+                     Continue at Stage 4 from OUTPUT's provenance-admitted
+                     Stage 3 without rebuilding or mutating Stage 2/3.
   --pure-simple      Compatibility alias for the default no-Rust rebuild mode.
   --mode=<name>      Pure-Simple build mode: dynload or one-binary
                      (default: dynload; env: SIMPLE_BOOTSTRAP_MODE)
@@ -128,6 +131,7 @@ jobs=""
 pure_simple=0
 full_bootstrap=0
 resume_stage3_output=""
+resume_stage4_output=""
 full_cli=0
 fresh_cache=0
 release_tests=0
@@ -178,6 +182,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --resume-stage3-from-admitted=*)
       resume_stage3_output=${1#*=}
+      ;;
+    --resume-stage4-from-admitted=*)
+      resume_stage4_output=${1#*=}
       ;;
     --pure-simple)
       pure_simple=1
@@ -354,6 +361,19 @@ if [ -n "${resume_stage3_output}" ]; then
   exec "$(dirname -- "$0")/resume-stage3-from-admitted.sh" "${resume_stage3_output}"
 fi
 
+if [ -n "${resume_stage4_output}" ]; then
+  [ -z "${resume_stage3_output}" ] && [ "${full_bootstrap}" -eq 0 ] &&
+    [ "${fresh_cache}" -eq 0 ] && [ "${release_tests}" -eq 0 ] &&
+    [ "${diagnostic_sweep}" -eq 0 ] && [ "${diagnostics_mode}" = off ] &&
+    [ "${deploy}" -eq 1 ] || {
+    echo "error: Stage 4 resume requires --deploy and excludes rebuild/release/diagnostic options" >&2
+    exit 1
+  }
+  case "${jobs}" in ''|1) jobs=1 ;; *) echo "error: Stage 4 resume permits only --jobs=1" >&2; exit 1 ;; esac
+  output_dir=${resume_stage4_output}
+  full_cli=1
+fi
+
 case "${diagnostics_mode}" in
   off) ;;
   test)
@@ -415,6 +435,9 @@ STAGE4_PROVENANCE_HELPER_PATH=\
 "${repo_root}/scripts/check/lib/stage4-candidate-provenance.shs"
 export STAGE4_PROVENANCE_HELPER_PATH
 . "${STAGE4_PROVENANCE_HELPER_PATH}"
+RESUME_STAGE4_HELPER_PATH=\
+"${repo_root}/scripts/bootstrap/resume-stage4-from-admitted.sh"
+. "${RESUME_STAGE4_HELPER_PATH}"
 stage4_provenance_helper_sha256_before=$(
   bootstrap_stage3_hash_file "${STAGE4_PROVENANCE_HELPER_PATH}"
 )
@@ -484,6 +507,7 @@ bootstrap_cleanup() {
   bootstrap_status=${1:-$?}
   trap - EXIT HUP INT QUIT TERM
   set +e
+  resume_stage4_release_continuation_lock
   if [ -n "${progress_log}" ] && [ -n "${bootstrap_progress_state}" ]; then
     bootstrap_progress_mark "exit-${bootstrap_status}" ""
   fi
@@ -1153,12 +1177,15 @@ fi
 # Content-hash staleness gate (see seed_inputs_hash above). Runs here so the
 # backend/features are final before they enter the fingerprint. If the seed or
 # runtime library is missing, the cargo branch below rebuilds regardless.
-bootstrap_progress_mark fingerprint ""
-seed_inputs_fingerprint=$(seed_inputs_hash pre) || {
-  echo "error: failed to fingerprint Rust seed inputs" >&2
-  exit 1
-}
-if [ -x "${seed_bin}" ] && [ -f "${native_all_lib}" ]; then
+seed_inputs_fingerprint=not-used-by-admitted-stage4-resume
+if [ -z "${resume_stage4_output}" ]; then
+  bootstrap_progress_mark fingerprint ""
+  seed_inputs_fingerprint=$(seed_inputs_hash pre) || {
+    echo "error: failed to fingerprint Rust seed inputs" >&2
+    exit 1
+  }
+fi
+if [ -z "${resume_stage4_output}" ] && [ -x "${seed_bin}" ] && [ -f "${native_all_lib}" ]; then
   if ! bootstrap_stage3_verify_seed_stamp "${seed_stamp}" \
     "${seed_inputs_fingerprint}" "${seed_bin}" "${native_all_lib}" \
     "${compiler_backfill_lib}"; then
@@ -1367,7 +1394,7 @@ run_rust_authority_cargo() {
   fi
 }
 
-if [ "${full_bootstrap}" -eq 0 ]; then
+if [ "${full_bootstrap}" -eq 0 ] && [ -z "${resume_stage4_output}" ]; then
   # Default/pure-Simple rebuild: reuse the existing Rust seed and runtime
   # library, never invoke cargo. Whether the existing seed CAN build the changed
   # pure-Simple is proven by Stage 2 below: if the new .spl needs a Rust feature
@@ -1392,7 +1419,7 @@ if [ "${full_bootstrap}" -eq 0 ]; then
     echo "WARNING: Rust sources changed; reusing the existing seed because --full-bootstrap was not given."
   fi
   echo "Pure-Simple mode: ${bootstrap_mode}; reusing Rust seed, rebuilding only pure-Simple stages."
-elif bootstrap_stage3_rust_tuple_requires_complete_rebuild \
+elif [ "${full_bootstrap}" -eq 1 ] && bootstrap_stage3_rust_tuple_requires_complete_rebuild \
   "${seed_bin}" "${native_all_lib}" "${compiler_backfill_lib}" \
   "${seed_stale}"; then
   echo "Building Rust seed compiler + runtime library..."
@@ -1506,7 +1533,16 @@ else
   echo "  rust:     seed/runtime reuse only; cargo disabled"
 fi
 
-if [ "${can_full_bootstrap}" -eq 1 ]; then
+if [ -n "${resume_stage4_output}" ]; then
+  echo "  mode:     admitted Stage 3 → Stage 4 continuation"
+  stage3_provenance_dir="${output_dir}/stage3/${PLATFORM}"
+  stage3_provenance_manifest="${stage3_provenance_dir}/provenance.env"
+  resume_stage4_prepare "${output_dir}" "${repo_root}" "${PLATFORM}" \
+    "${bootstrap_receipt_path}" || exit 1
+  stage2="${output_dir}/stage2/${PLATFORM}/simple${exe_suffix}"
+  stage3="${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}"
+  stage3_ok=1
+elif [ "${can_full_bootstrap}" -eq 1 ]; then
   # Full CLI available — use high-level staged bootstrap
   echo "  mode:     full CLI (build bootstrap)"
   RUST_LOG="${RUST_LOG:-error}" \
@@ -2265,7 +2301,9 @@ if [ ! -x "${full_bin}" ]; then
 fi
 
 bootstrap_progress_mark stage4-smoke "$(absolute_path "${log_dir}/stage4-native-build.log")"
-install -m755 "${seed_bin}" "${full_dir}/simple_seed${exe_suffix}"
+if [ -z "${resume_stage4_output}" ]; then
+  install -m755 "${seed_bin}" "${full_dir}/simple_seed${exe_suffix}"
+fi
 
 stage4_smoke="$(run_timeout 30 "${full_bin}" -c 'print(1+1)' 2>/dev/null)"
 if [ "${stage4_smoke}" != "2" ]; then
@@ -2413,6 +2451,7 @@ fi
 # Deploy
 # ===========================================================================
 
+resume_stage4_verify_immutable || exit 1
 if [ "${deploy}" -eq 1 ]; then
   bootstrap_progress_mark deploy ""
   deploy_dir="bin/release/${PLATFORM}"
@@ -2442,14 +2481,16 @@ if [ "${deploy}" -eq 1 ]; then
     out="$(run_timeout 30 "$1" -c 'print(1+1)' 2>/dev/null)" || return 1
     [ "${out}" = "2" ]
   }
-  seed_delegate="${deploy_dir}/simple_seed${exe_suffix}"
-  seed_src="${full_dir}/simple_seed${exe_suffix}"
-  if ! seed_probe "${seed_src}"; then
-    echo "ERROR: deploy refused — current seed driver failed smoke test: ${seed_src}." >&2
-    exit 1
+  if [ -z "${resume_stage4_output}" ]; then
+    seed_delegate="${deploy_dir}/simple_seed${exe_suffix}"
+    seed_src="${full_dir}/simple_seed${exe_suffix}"
+    if ! seed_probe "${seed_src}"; then
+      echo "ERROR: deploy refused — current seed driver failed smoke test: ${seed_src}." >&2
+      exit 1
+    fi
+    install -m755 "${seed_src}" "${seed_delegate}"
+    echo "Installed current seed delegate: ${seed_src} -> ${seed_delegate}"
   fi
-  install -m755 "${seed_src}" "${seed_delegate}"
-  echo "Installed current seed delegate: ${seed_src} -> ${seed_delegate}"
 
   # Identity gate: bin/simple MUST be the pure-Simple self-hosted compiler and
   # never the Rust seed/driver (default tooling rule, .claude/rules/bootstrap.md).
@@ -2580,6 +2621,8 @@ if [ "${deploy}" -eq 1 ]; then
     run_logged stage6-whole-tests "${deployed_bin}" test test --whole --mode=interpreter
   fi
 fi
+
+resume_stage4_finalize || exit 1
 
 echo "Final binary: ${full_bin}"
 

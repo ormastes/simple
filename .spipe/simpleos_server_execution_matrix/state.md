@@ -291,3 +291,17 @@ implementation-active
   rerun after its final anchor correction, and no current full CLI can execute
   the behavioral spec. Nested collection backing allocation, no-GC retention,
   and representative Stage3 RSS remain unproved; the P0 bug stays OPEN.
+- dev-stage4-resume-source-checkpoint: Added a planner-bound
+  `--resume-stage4-from-admitted` source path with admitted Stage3 manifest,
+  candidate, and runtime authority verification; parent-owned locking;
+  Stage2/3 before/pre-deploy/terminal immutability checks; Rust seed/fallback
+  suppression; existing Stage4 smoke/provenance/deploy gates; and an atomic
+  terminal continuation receipt. Focused source/contract checks pass, but no
+  admitted Stage3 exists to execute it. The Stage4 gap remains OPEN and no
+  compiler, QEMU, UNO, or release acceptance row is credited.
+- verify-blocked-unoq-trust-authority: Official Arduino and Qualcomm sources
+  provide factory recovery tooling/checksums and generic secure-boot
+  descriptions, but no independently authenticated UNO Q custom-OS signing
+  root, fuse/rollback policy, signed SimpleOS manifest, or redistribution and
+  recovery authorization. The pinned trust file remains intentionally absent;
+  physical mutation and AC-4..8 stay blocked.

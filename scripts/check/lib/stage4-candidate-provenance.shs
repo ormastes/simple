@@ -93,11 +93,27 @@ stage4_write_candidate_provenance() (
 
   [ "$provenance" = "${binary}.provenance.env" ] || exit 1
   bootstrap_stage3_verify_manifest "$stage3_manifest" "$root" "$parent_compiler" || exit 1
-  [ "$bootstrap_lock" = "$(bootstrap_stage3_manifest_value bootstrap_lock_path "$stage3_manifest")" ] || exit 1
-  [ -d "$bootstrap_lock" ] && [ ! -L "$bootstrap_lock" ] || exit 1
-  recorded_pid="$(bootstrap_stage3_manifest_value bootstrap_lock_owner_pid "$stage3_manifest")" || exit 1
+  if [ -n "${STAGE4_CONTINUATION_RECEIPT:-}" ]; then
+    [ -f "$bootstrap_lock" ] && [ ! -L "$bootstrap_lock" ] &&
+      portable_lock_handle_is_owned "$bootstrap_lock" || exit 1
+    continuation="$(bootstrap_stage3_canonical_file "$STAGE4_CONTINUATION_RECEIPT")" || exit 1
+    [ "$(bootstrap_stage3_manifest_value schema "$continuation")" = simple-bootstrap-stage4-continuation-v1 ] || exit 1
+    [ "$(bootstrap_stage3_manifest_value status "$continuation")" = prepared ] || exit 1
+    [ "$(bootstrap_stage3_manifest_value stage3_provenance_path "$continuation")" = "$stage3_manifest" ] || exit 1
+    [ "$(bootstrap_stage3_manifest_value stage3_provenance_sha256 "$continuation")" = "$(bootstrap_stage3_hash_file "$stage3_manifest")" ] || exit 1
+    [ "$(bootstrap_stage3_manifest_value parent_compiler_path "$continuation")" = "$parent_compiler" ] || exit 1
+    [ "$(bootstrap_stage3_manifest_value parent_compiler_sha256 "$continuation")" = "$(bootstrap_stage3_hash_file "$parent_compiler")" ] || exit 1
+    [ "$(bootstrap_stage3_manifest_value bootstrap_lock_path "$continuation")" = "$bootstrap_lock" ] || exit 1
+    recorded_pid="$(bootstrap_stage3_manifest_value bootstrap_lock_owner_pid "$continuation")" || exit 1
+  else
+    [ "$bootstrap_lock" = "$(bootstrap_stage3_manifest_value bootstrap_lock_path "$stage3_manifest")" ] || exit 1
+    recorded_pid="$(bootstrap_stage3_manifest_value bootstrap_lock_owner_pid "$stage3_manifest")" || exit 1
+  fi
   [ "$recorded_pid" = "$$" ] || exit 1
-  [ "$(tr -d '[:space:]' <"$bootstrap_lock/pid")" = "$recorded_pid" ] || exit 1
+  if [ -z "${STAGE4_CONTINUATION_RECEIPT:-}" ]; then
+    [ -d "$bootstrap_lock" ] && [ ! -L "$bootstrap_lock" ] || exit 1
+    [ "$(tr -d '[:space:]' <"$bootstrap_lock/pid")" = "$recorded_pid" ] || exit 1
+  fi
   stage4_validate_candidate_lane "$binary" "$stage3_manifest" "$root" "$build_log" "$smoke_log" || exit 1
   source_after="$(stage4_source_revision "$root")" || exit 1
   [ "$source_after" = "$source_before" ] || exit 1
