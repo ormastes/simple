@@ -7,6 +7,8 @@
 use std.nogc_sync_mut.http_server.types.{
     HttpRequest, HttpResponse, HttpMethod, HttpStatus, http_method_to_text
 }
+# Shared protocol core — path safety is common to sync and async servers.
+export use std.common.net.http_core.{path_is_safe}
 
 # =============================================================================
 # Route Definition
@@ -147,64 +149,6 @@ fn default_not_found(req: HttpRequest) -> HttpResponse:
 # =============================================================================
 # Path Safety (AC-3)
 # =============================================================================
-
-# path_is_safe returns false when the path contains traversal sequences that
-# could escape the document root.  Checked patterns:
-#   - ".." as a path segment (/../, /..%2f, etc.)
-#   - URL-encoded dot sequences (%2e%2e)
-#   - Double slash (//)
-#   - Absolute path injection (scheme: or \\ on Windows-style paths)
-#
-# This is a defence-in-depth guard.  Callers should also normalise paths
-# before serving files from disk.
-fn _decode_traversal_escapes(lower: text) -> text:
-    # Decode only the escapes relevant to traversal so encoded forms like
-    # "..%2f", "%2e%2e/", ".%2e\" are checked in their effective shape.
-    var out = lower.replace("%2e", ".")
-    out = out.replace("%2f", "/")
-    out = out.replace("%5c", "\\")
-    out
-
-fn _has_dotdot_segment(p: text) -> bool:
-    # ".." as a full path segment (slash or backslash separated)
-    if p.contains("/../"):
-        return true
-    if p.ends_with("/.."):
-        return true
-    if p.starts_with("../"):
-        return true
-    if p == "..":
-        return true
-    if p.contains("\\.."):
-        return true
-    if p.contains("..\\"):
-        return true
-    false
-
-fn path_is_safe(path: text) -> bool:
-    val lower = path.to_lower()
-    # Check both the raw path and its traversal-decoded form, so "..%2f",
-    # "%2f..", and fully/partially encoded dot-dot segments all fail closed
-    # while legitimate names like "file..txt" or "/foo.%2ebar" stay allowed.
-    val decoded = _decode_traversal_escapes(lower)
-
-    if _has_dotdot_segment(lower):
-        return false
-    if _has_dotdot_segment(decoded):
-        return false
-
-    # Double slash — often used to bypass naive prefix checks
-    if lower.contains("//"):
-        return false
-    if decoded.contains("//"):
-        return false
-
-    # Null byte injection
-    if lower.contains("\0"):
-        return false
-    if lower.contains("%00"):
-        return false
-
-    return true
-
-export path_is_safe
+# path_is_safe now lives in the shared protocol core
+# (src/lib/common/net/http_core.spl) and is re-exported above so existing
+# importers of this module keep working.

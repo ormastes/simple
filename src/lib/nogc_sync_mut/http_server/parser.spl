@@ -8,22 +8,14 @@ use std.nogc_sync_mut.io.tcp.{TcpStream}
 use std.nogc_sync_mut.http_server.types.{
     HttpRequest, HttpMethod, http_method_from_text
 }
-
-# =============================================================================
-# Request size limits
-# =============================================================================
-
-# Maximum length (bytes) of the request line (method + path + version).
-val MAX_REQUEST_LINE: i32 = 8192
-
-# Maximum number of request headers accepted per request.
-val MAX_HEADER_COUNT: i32 = 100
-
-# Maximum length (bytes) of a single header line (name + colon + value).
-val MAX_HEADER_LINE: i32 = 8192
-
-# Maximum body size (bytes) accepted via Content-Length.  10 MiB default.
-val MAX_BODY_SIZE: i32 = 10485760
+# Shared protocol core — single source of truth for limits and header policy
+# across the sync and async servers (see src/lib/common/net/http_core.spl).
+# `export use` so existing importers of this module keep seeing the limit
+# constants and content_length_from_text at their historical path.
+export use std.common.net.http_core.{
+    MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE,
+    content_length_from_text, body_decision
+}
 
 # The native `read_line` API uses a 4096-byte buffer (4095 payload bytes plus
 # its terminator). It stops at that boundary even
@@ -166,46 +158,11 @@ fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, ma
 # headers_decision inspects parsed headers and decides how the body must be
 # handled. Returns (err, content_length): err is "" when the request is
 # acceptable, otherwise a status-prefixed message (400/413/501).
-# Pure function over parsed headers — fully unit-testable without a socket.
-# Enforced here (fail closed):
-#   - duplicate Content-Length is a request-smuggling vector -> 400
-#   - invalid (negative/non-numeric/overflow) Content-Length -> 400
-#   - Content-Length above max_body -> 413
-#   - Transfer-Encoding: chunked is unsupported -> 501, never misparsed
+# Delegates to the shared http_core body_decision with chunked disallowed —
+# the sync server does not decode chunked bodies, so it fails closed (501).
 fn headers_decision(headers: [(text, text)], max_body: i32) -> (text, i32):
-    var content_length: i32 = 0
-    var seen_content_length = false
-    var security_names: [text] = []
-    var security_values: [text] = []
-    for h in headers:
-        val lname = h.0.to_lower()
-        if lname == "content-length":
-            if seen_content_length:
-                return ("400 Duplicate Content-Length header", 0)
-            seen_content_length = true
-            val parsed_len = content_length_from_text(h.1)
-            if parsed_len < 0:
-                return ("400 Invalid Content-Length: {h.1}", 0)
-            if parsed_len > max_body:
-                return ("413 Content-Length too large: {parsed_len}", 0)
-            content_length = parsed_len
-        elif lname == "transfer-encoding":
-            return ("501 Transfer-Encoding is not supported", 0)
-        elif _is_singleton_security_header(lname):
-            var idx = 0
-            while idx < security_names.len():
-                if security_names[idx] == lname:
-                    if security_values[idx] != h.1:
-                        return ("400 Conflicting duplicate security header: {lname}", 0)
-                    return ("400 Duplicate security header: {lname}", 0)
-                idx = idx + 1
-            security_names.push(lname)
-            security_values.push(h.1)
-    ("", content_length)
-
-fn _is_singleton_security_header(name: text) -> bool:
-    (name == "host" or name == "authorization" or name == "origin" or
-        name == "x-forwarded-host" or name == "x-forwarded-proto")
+    val d = body_decision(headers, max_body, false)
+    (d.0, d.1)
 
 fn parse_request_line(line: text) -> (text, text, text):
     # HTTP/1 request-line is exactly method SP request-target SP version.
@@ -230,34 +187,7 @@ fn _method_supported(method: text) -> bool:
         method == "DELETE" or method == "PATCH" or method == "HEAD" or
         method == "OPTIONS")
 
-# content_length_from_text parses a Content-Length header value.
-# Returns the length as i32 on success, or -1 on any parse error
-# (negative value, non-numeric characters, or overflow beyond i32 max).
-fn content_length_from_text(s: text) -> i32:
-    val trimmed = s.trim()
-    val n = trimmed.len()
-    if n == 0:
-        return -1
-    # Reject explicit negative sign — Content-Length must be non-negative.
-    if trimmed.char_at(0) == "-":
-        return -1
-    # Verify every character is an ASCII digit using char equality.
-    # Note: char_at().to_i64() returns a platform-dependent encoding in the
-    # interpreter, so we use char == "N" comparisons instead of arithmetic.
-    var i = 0
-    while i < n:
-        val c = trimmed.char_at(i)
-        val is_digit = (c == "0") or (c == "1") or (c == "2") or (c == "3") or (c == "4") or (c == "5") or (c == "6") or (c == "7") or (c == "8") or (c == "9")
-        if not is_digit:
-            return -1
-        i = i + 1
-    # All characters are digits.  Use text.to_i64() for the actual numeric value.
-    # i32 max = 2147483647; use i64 to detect overflow.
-    val i32_max: i64 = 2147483647
-    val result = trimmed.to_i64()
-    if result > i32_max:
-        return -1
-    return result.to_i32()
+# content_length_from_text is re-exported from the shared http_core.
 
 # to_i32_safe is kept for backward compatibility.  New callers should prefer
 # content_length_from_text which returns -1 on error instead of 0.
@@ -269,6 +199,5 @@ fn to_i32_safe(s: text) -> i32:
 
 export parse_request, parse_request_with_limits, parse_request_with_policy_limits, parse_request_line
 export request_line_without_terminator
-export to_i32_safe, content_length_from_text, headers_decision
-export MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE
+export to_i32_safe, headers_decision
 export RUNTIME_READ_LINE_CAP

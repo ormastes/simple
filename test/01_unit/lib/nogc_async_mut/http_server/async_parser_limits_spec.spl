@@ -1,0 +1,180 @@
+"""
+# Async HTTP Parser — request limits enforced during parsing
+
+The async server's incremental parser must enforce the same request limits as
+the sync server (shared `std.common.net.http_core` policy), and it must do so
+DURING parsing — before buffer growth — so a hostile client cannot exhaust
+memory with an endless request line, oversized headers, or an oversized body.
+
+Each limit is proven at the boundary (accepted) and boundary+1 (rejected),
+using `HttpRequestParser.with_limits` so the fixtures stay small.
+
+Lane: .spipe/simple_enterprise_suite (Wave A, AC-2).
+"""
+
+use std.spec.*
+use std.http_server.parser.{HttpRequestParser}
+
+# repeat_char builds a string of n copies of ch (no text.repeat builtin).
+fn repeat_char(ch: text, n: i32) -> text:
+    var out = ""
+    var i = 0
+    while i < n:
+        out = out + ch
+        i = i + 1
+    out
+
+# feed_ok feeds data and returns true when the parser accepted it (Ok).
+fn feed_ok(parser: HttpRequestParser, data: text) -> bool:
+    val r = parser.feed(data)
+    match r:
+        Ok(_): true
+        Err(_): false
+
+describe "async parser — request line limit":
+    it "accepts a request line exactly at the limit":
+        step("Open a parser with a 64-byte request-line limit")
+        var p = HttpRequestParser.with_limits(64, 100, 8192, 10485760)
+        # "GET " + path + " HTTP/1.1" == 4 + 51 + 9 == exactly 64 bytes
+        val path = "/" + repeat_char("a", 50)
+        val line = "GET " + path + " HTTP/1.1"
+        expect(line.len()).to_equal(64)
+
+        step("Feed the boundary-length request line")
+        expect(feed_ok(p, line + "\r\n")).to_be(true)
+        expect(p.has_error()).to_be(false)
+
+    it "rejects a request line one byte over the limit with 431":
+        var p = HttpRequestParser.with_limits(64, 100, 8192, 10485760)
+        val path = "/" + repeat_char("a", 51)
+        val line = "GET " + path + " HTTP/1.1"
+        expect(line.len()).to_equal(65)
+
+        step("Feed the over-limit request line")
+        expect(feed_ok(p, line + "\r\n")).to_be(false)
+        expect(p.has_error()).to_be(true)
+        expect(p.error_message.starts_with("431")).to_be(true)
+
+    it "cuts off an endless request line before buffering it all":
+        step("Stream request-line bytes with no CRLF terminator")
+        var p = HttpRequestParser.with_limits(64, 100, 8192, 10485760)
+        expect(feed_ok(p, repeat_char("a", 80))).to_be(false)
+        expect(p.error_message.starts_with("431")).to_be(true)
+
+describe "async parser — header line limit":
+    it "accepts a header line exactly at the limit":
+        var p = HttpRequestParser.with_limits(8192, 100, 32, 10485760)
+        step("Feed the request line, then a boundary-length header line")
+        expect(feed_ok(p, "GET / HTTP/1.1\r\n")).to_be(true)
+        # "X-A: " (5) + 27 = exactly 32 bytes
+        val hline = "X-A: " + repeat_char("b", 27)
+        expect(hline.len()).to_equal(32)
+        expect(feed_ok(p, hline + "\r\n")).to_be(true)
+        expect(p.has_error()).to_be(false)
+
+    it "rejects a header line one byte over the limit with 431":
+        var p = HttpRequestParser.with_limits(8192, 100, 32, 10485760)
+        expect(feed_ok(p, "GET / HTTP/1.1\r\n")).to_be(true)
+        val hline = "X-A: " + repeat_char("b", 28)
+        expect(hline.len()).to_equal(33)
+        expect(feed_ok(p, hline + "\r\n")).to_be(false)
+        expect(p.error_message.starts_with("431")).to_be(true)
+
+    it "cuts off an endless header line before buffering it all":
+        var p = HttpRequestParser.with_limits(8192, 100, 32, 10485760)
+        expect(feed_ok(p, "GET / HTTP/1.1\r\n")).to_be(true)
+        step("Stream header bytes with no CRLF terminator")
+        expect(feed_ok(p, repeat_char("c", 40))).to_be(false)
+        expect(p.error_message.starts_with("431")).to_be(true)
+
+describe "async parser — header count limit":
+    it "accepts exactly the maximum number of headers":
+        var p = HttpRequestParser.with_limits(8192, 3, 8192, 10485760)
+        step("Feed a request with exactly 3 headers")
+        expect(feed_ok(p, "GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\nC: 3\r\n\r\n")).to_be(true)
+        expect(p.is_complete()).to_be(true)
+
+    it "rejects one header beyond the maximum with 431":
+        var p = HttpRequestParser.with_limits(8192, 3, 8192, 10485760)
+        step("Feed a request with 4 headers")
+        expect(feed_ok(p, "GET / HTTP/1.1\r\nA: 1\r\nB: 2\r\nC: 3\r\nD: 4\r\n\r\n")).to_be(false)
+        expect(p.error_message.starts_with("431")).to_be(true)
+
+describe "async parser — body size limit":
+    it "accepts a Content-Length body exactly at the limit":
+        var p = HttpRequestParser.with_limits(8192, 100, 8192, 16)
+        step("POST a body of exactly 16 bytes")
+        val body = repeat_char("d", 16)
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nContent-Length: 16\r\n\r\n" + body)).to_be(true)
+        expect(p.is_complete()).to_be(true)
+        val req = p.to_request("127.0.0.1")
+        expect(req.body.len()).to_equal(16)
+
+    it "rejects a declared body one byte over the limit with 413":
+        var p = HttpRequestParser.with_limits(8192, 100, 8192, 16)
+        step("Declare Content-Length 17 against a 16-byte limit")
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nContent-Length: 17\r\n\r\n")).to_be(false)
+        expect(p.error_message.starts_with("413")).to_be(true)
+
+    it "rejects the declared body BEFORE any body bytes arrive":
+        var p = HttpRequestParser.with_limits(8192, 100, 8192, 16)
+        step("Send only the headers of an oversized POST")
+        val accepted = feed_ok(p, "POST / HTTP/1.1\r\nContent-Length: 9999\r\n\r\n")
+        expect(accepted).to_be(false)
+        step("Verify no body bytes were ever buffered")
+        expect(p.body.len()).to_equal(0)
+
+describe "async parser — header policy parity with the shared core":
+    it "rejects duplicate Content-Length with 400":
+        var p = HttpRequestParser.new()
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nContent-Length: 4\r\nContent-Length: 4\r\n\r\n")).to_be(false)
+        expect(p.error_message.starts_with("400")).to_be(true)
+
+    it "rejects invalid Content-Length with 400":
+        var p = HttpRequestParser.new()
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nContent-Length: abc\r\n\r\n")).to_be(false)
+        expect(p.error_message.starts_with("400")).to_be(true)
+
+    it "rejects Content-Length combined with chunked as smuggling ambiguity":
+        var p = HttpRequestParser.new()
+        step("Send BOTH Content-Length and Transfer-Encoding: chunked")
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n")).to_be(false)
+        expect(p.error_message.starts_with("400")).to_be(true)
+
+describe "async parser — chunked bodies stay bounded":
+    it "decodes a small chunked body normally":
+        var p = HttpRequestParser.new()
+        step("Send a well-formed 4-byte chunked body")
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n0\r\n\r\n")).to_be(true)
+        expect(p.is_complete()).to_be(true)
+        val req = p.to_request("127.0.0.1")
+        expect(req.body).to_equal("Wiki")
+
+    it "cuts off unbounded chunked accumulation with 413":
+        var p = HttpRequestParser.with_limits(8192, 100, 8192, 16)
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n")).to_be(true)
+        step("Stream chunk bytes past the accumulation bound with no terminator")
+        # Raw accumulation bound is max_body + max_header_line (16 + 8192).
+        expect(feed_ok(p, repeat_char("e", 8300))).to_be(false)
+        expect(p.error_message.starts_with("413")).to_be(true)
+
+    it "rejects a decoded chunked body over the limit with 413":
+        var p = HttpRequestParser.with_limits(8192, 100, 8192, 4)
+        expect(feed_ok(p, "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n")).to_be(true)
+        step("Send a well-formed chunked body decoding to 5 bytes against a 4-byte limit")
+        expect(feed_ok(p, "5\r\nWikis\r\n0\r\n\r\n")).to_be(false)
+        expect(p.error_message.starts_with("413")).to_be(true)
+
+describe "async parser — well-formed requests still parse":
+    it "parses a complete GET request end to end":
+        var p = HttpRequestParser.new()
+        step("Feed a complete request in two fragments")
+        expect(feed_ok(p, "GET /hello?x=1 HTTP/1.1\r\nHost: example.com\r\n")).to_be(true)
+        expect(feed_ok(p, "\r\n")).to_be(true)
+        step("Verify the parsed request fields")
+        expect(p.is_complete()).to_be(true)
+        val req = p.to_request("127.0.0.1")
+        expect(req.method).to_equal("GET")
+        expect(req.path).to_equal("/hello")
+        expect(req.query).to_equal("x=1")
+        expect(req.headers.len()).to_equal(1)

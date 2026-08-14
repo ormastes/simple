@@ -113,7 +113,7 @@ Cross-cutting:
 - Generated-manual review owner: final reviewer (same as above).
 
 ## Phase
-dev-done
+implement (Wave A in progress)
 
 ## Log
 - dev (2026-08-14): Lane created from the enterprise-suite assessment
@@ -124,3 +124,29 @@ dev-done
   contracts, and the goods-sale proving vertical. Booking/restaurant/channels/
   HCM and PostgreSQL driver explicitly deferred to follow-up lanes. Next phase:
   research → arch (contract freeze) → spec → implement → verify.
+- implement Wave A slice 1 (2026-08-14): Shared protocol core landed at
+  src/lib/common/net/http_core.spl (limits, content_length_from_text,
+  body_decision(allow_chunked) incl. CL+TE-chunked 400 smuggling-ambiguity
+  rejection, path_is_safe, NEW bounded decode_chunked_bounded/hex_chunk_size).
+  Sync parser/router now delegate via `export use` (66/66 sync spec cases
+  green: chunked 13, parser_limits 23, path_safety 30). Async parser enforces
+  limits DURING parse (request-line/header-line/header-count growth bounds,
+  body 413 pre-buffer, chunked raw-accumulation + decoded-size bounds) via
+  HttpRequestParser.with_limits; dropped dependency on std.http.headers
+  decode_chunked (its `index_of as common_index_of` alias is unresolvable on
+  the deployed interpreter — pre-existing defect, routed around via core
+  decoder). Async router rejects unsafe paths pre-matching (ParseError 400);
+  worker maps that to send_error 400 and inline_static_handler has a
+  defence-in-depth path_is_safe guard before root+path concatenation.
+  New specs green: http_core_spec 23/23, async_parser_limits_spec 18/18,
+  async_path_safety_spec 8/8. Regression: worker_static_file 4/4,
+  phase_result_headers 16/16; protocol_handler_spec 7/8 — the 1 failure is a
+  PRE-EXISTING string-vs-integer semantic mismatch in that spec's own case
+  (file untouched by this lane). Runner: bin/release/aarch64-apple-darwin/simple
+  (Jul-25 stage4 full CLI; the macho-dir binary is currently a bootstrap-only
+  build without `test`). Follow-ups: (a) async router still duplicates
+  match_route_pattern/extract_route_params from sync — fold into core with
+  parity specs; (b) std.http.{limits,path_security} tier-copied modules overlap
+  this policy and appear unwired into the async request path — unify onto
+  http_core; (c) AC-4 dynamic dispatch wiring in worker.process_request still
+  calls inline_static_handler unconditionally (assessment P0-D) — next slice.

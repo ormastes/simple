@@ -1,0 +1,323 @@
+# Shared HTTP protocol core — pure, tier-neutral.
+#
+# Single source of truth for request limits, Content-Length/Transfer-Encoding
+# policy, and path traversal safety, consumed by BOTH transports:
+#   - std.nogc_sync_mut.http_server (blocking, thread-per-connection)
+#   - std.nogc_async_mut.http_server (event-driven workers)
+#
+# Lane: .spipe/simple_enterprise_suite (Wave A, AC-1..AC-4).
+# Origin: extracted from nogc_sync_mut/http_server/{parser,router}.spl
+# (webserver_harden lane) so the async server cannot drift from the sync
+# hardening. Pure functions only — no sockets, no I/O.
+
+# =============================================================================
+# Request size limits (defaults)
+# =============================================================================
+
+# Maximum length (bytes) of the request line (method + path + version).
+val MAX_REQUEST_LINE: i32 = 8192
+
+# Maximum number of request headers accepted per request.
+val MAX_HEADER_COUNT: i32 = 100
+
+# Maximum length (bytes) of a single header line (name + colon + value).
+val MAX_HEADER_LINE: i32 = 8192
+
+# Maximum body size (bytes) accepted via Content-Length.  10 MiB default.
+val MAX_BODY_SIZE: i32 = 10485760
+
+# =============================================================================
+# Content-Length parsing
+# =============================================================================
+
+# content_length_from_text parses a Content-Length header value.
+# Returns the length as i32 on success, or -1 on any parse error
+# (negative value, non-numeric characters, or overflow beyond i32 max).
+fn content_length_from_text(s: text) -> i32:
+    val trimmed = s.trim()
+    val n = trimmed.len()
+    if n == 0:
+        return -1
+    # Reject explicit negative sign — Content-Length must be non-negative.
+    if trimmed.char_at(0) == "-":
+        return -1
+    # Verify every character is an ASCII digit using char equality.
+    # Note: char_at().to_i64() returns a platform-dependent encoding in the
+    # interpreter, so we use char == "N" comparisons instead of arithmetic.
+    var i = 0
+    while i < n:
+        val c = trimmed.char_at(i)
+        val is_digit = (c == "0") or (c == "1") or (c == "2") or (c == "3") or (c == "4") or (c == "5") or (c == "6") or (c == "7") or (c == "8") or (c == "9")
+        if not is_digit:
+            return -1
+        i = i + 1
+    # All characters are digits.  Use text.to_i64() for the actual numeric value.
+    # i32 max = 2147483647; use i64 to detect overflow.
+    val i32_max: i64 = 2147483647
+    val result = trimmed.to_i64()
+    if result > i32_max:
+        return -1
+    return result.to_i32()
+
+# =============================================================================
+# Header/body policy decision
+# =============================================================================
+
+# body_decision inspects parsed headers and decides how the body must be
+# handled. Returns (err, content_length, is_chunked): err is "" when the
+# request is acceptable, otherwise a status-prefixed message (400/413/501).
+# Pure function over parsed headers — fully unit-testable without a socket.
+#
+# Enforced here (fail closed):
+#   - duplicate Content-Length is a request-smuggling vector -> 400
+#   - invalid (negative/non-numeric/overflow) Content-Length -> 400
+#   - Content-Length above max_body -> 413
+#   - Transfer-Encoding: chunked when allow_chunked=false -> 501, never misparsed
+#   - Content-Length together with chunked (smuggling ambiguity) -> 400
+#   - duplicate singleton security headers (Host, Authorization, Origin,
+#     X-Forwarded-Host, X-Forwarded-Proto) -> 400 (header-smuggling vector)
+fn _is_singleton_security_header(name: text) -> bool:
+    (name == "host" or name == "authorization" or name == "origin" or
+        name == "x-forwarded-host" or name == "x-forwarded-proto")
+
+fn body_decision(headers: [(text, text)], max_body: i32, allow_chunked: bool) -> (text, i32, bool):
+    var content_length: i32 = 0
+    var seen_content_length = false
+    var chunked = false
+    var security_names: [text] = []
+    var security_values: [text] = []
+    for h in headers:
+        val lname = h.0.to_lower()
+        if _is_singleton_security_header(lname):
+            var idx = 0
+            while idx < security_names.len():
+                if security_names[idx] == lname:
+                    if security_values[idx] != h.1:
+                        return ("400 Conflicting duplicate security header: {lname}", 0, false)
+                    return ("400 Duplicate security header: {lname}", 0, false)
+                idx = idx + 1
+            security_names.push(lname)
+            security_values.push(h.1)
+        if lname == "content-length":
+            if seen_content_length:
+                return ("400 Duplicate Content-Length header", 0, false)
+            seen_content_length = true
+            val parsed_len = content_length_from_text(h.1)
+            if parsed_len < 0:
+                return ("400 Invalid Content-Length: {h.1}", 0, false)
+            if parsed_len > max_body:
+                return ("413 Content-Length too large: {parsed_len}", 0, false)
+            content_length = parsed_len
+        elif lname == "transfer-encoding":
+            if h.1.to_lower().contains("chunked"):
+                if not allow_chunked:
+                    return ("501 Transfer-Encoding: chunked is not supported", 0, false)
+                chunked = true
+    # RFC 7230 §3.3.3: a message carrying both Content-Length and chunked
+    # Transfer-Encoding is a request-smuggling vector — reject outright.
+    if chunked and seen_content_length:
+        return ("400 Content-Length conflicts with Transfer-Encoding: chunked", 0, false)
+    ("", content_length, chunked)
+
+# =============================================================================
+# Chunked transfer decoding (bounded)
+# =============================================================================
+
+fn _hex_digit_value(c: text) -> i32:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    if c == "a" or c == "A": return 10
+    if c == "b" or c == "B": return 11
+    if c == "c" or c == "C": return 12
+    if c == "d" or c == "D": return 13
+    if c == "e" or c == "E": return 14
+    if c == "f" or c == "F": return 15
+    -1
+
+# hex_chunk_size parses a chunk-size hex field. Returns -1 on any invalid
+# character, empty input, or a value beyond a sane chunk bound (2^27 bytes).
+fn hex_chunk_size(s: text) -> i32:
+    val n = s.len()
+    if n == 0:
+        return -1
+    var value: i32 = 0
+    var i = 0
+    while i < n:
+        val d = _hex_digit_value(s.char_at(i))
+        if d < 0:
+            return -1
+        value = value * 16 + d
+        # 2^27 = 134217728 — any larger single chunk is hostile.
+        if value > 134217728:
+            return -1
+        i = i + 1
+    value
+
+# _crlf_from finds the next "\r\n" at or after `from` by char scan (index_of
+# on a slice-derived receiver has a known interpreter defect for non-zero
+# match positions, so boundary scanning never relies on it).
+fn _crlf_from(s: text, from: i64) -> i64:
+    var i = from
+    val n = s.len()
+    while i + 1 < n:
+        if s.char_at(i) == "\r" and s.char_at(i + 1) == "\n":
+            return i
+        i = i + 1
+    -1
+
+fn _char_pos(s: text, ch: text) -> i64:
+    var i = 0
+    val n = s.len()
+    while i < n:
+        if s.char_at(i) == ch:
+            return i
+        i = i + 1
+    -1
+
+# chunked_body_end_scan walks chunk-size headers so a "0\r\n\r\n" inside
+# chunk DATA is never taken as the terminal 0-size chunk. Returns the end
+# offset of the chunked body (after the trailer section's empty line), -1
+# when the framing is incomplete (need more bytes), or -2 when the framing
+# is provably invalid.
+fn chunked_body_end_scan(buffer: text) -> i64:
+    var pos: i64 = 0
+    while true:
+        val size_end = _crlf_from(buffer, pos)
+        if size_end < 0:
+            # chunk-size line not fully received yet
+            return -1
+        var size_line = buffer.slice(pos, size_end)
+        val semi = _char_pos(size_line, ";")
+        if semi >= 0:
+            size_line = size_line.slice(0, semi)
+        val chunk_size = hex_chunk_size(size_line.trim())
+        if chunk_size < 0:
+            return -2
+        if chunk_size == 0:
+            # last-chunk: skip optional trailer section, ends at an empty line
+            var p = size_end + 2
+            while true:
+                val line_end = _crlf_from(buffer, p)
+                if line_end < 0:
+                    return -1
+                if line_end == p:
+                    return line_end + 2
+                p = line_end + 2
+        val data_end = size_end + 2 + chunk_size
+        if data_end + 2 > buffer.len():
+            return -1
+        if buffer.char_at(data_end) != "\r" or buffer.char_at(data_end + 1) != "\n":
+            return -2
+        pos = data_end + 2
+    -2
+
+# decode_chunked_bounded decodes a complete chunked-encoded body while
+# enforcing max_body on the DECODED size. Returns (err, body): err is "" on
+# success, otherwise a status-prefixed message (400 malformed / 413 too
+# large). Trailers after the terminating 0-chunk are ignored.
+fn decode_chunked_bounded(encoded: text, max_body: i32) -> (text, text):
+    var rest = encoded
+    var body = ""
+    while true:
+        val nl = rest.index_of("\r\n")
+        if nl < 0:
+            return ("400 Malformed chunked body: missing size line", "")
+        var size_line = rest.slice(0, nl)
+        # Strip any chunk extension (";name=value")
+        val semi = size_line.index_of(";")
+        if semi >= 0:
+            size_line = size_line.slice(0, semi)
+        val size = hex_chunk_size(size_line.trim())
+        if size < 0:
+            return ("400 Malformed chunked body: bad chunk size", "")
+        rest = rest.slice(nl + 2, rest.len())
+        if size == 0:
+            return ("", body)
+        if rest.len() < size:
+            return ("400 Malformed chunked body: truncated chunk", "")
+        body = body + rest.slice(0, size)
+        if body.len() > max_body:
+            return ("413 Chunked body too large: {body.len()} bytes", "")
+        rest = rest.slice(size, rest.len())
+        if rest.len() < 2:
+            return ("400 Malformed chunked body: missing chunk terminator", "")
+        if rest.slice(0, 2) != "\r\n":
+            return ("400 Malformed chunked body: missing chunk terminator", "")
+        rest = rest.slice(2, rest.len())
+    ("", body)
+
+# =============================================================================
+# Path safety
+# =============================================================================
+
+# path_is_safe returns false when the path contains traversal sequences that
+# could escape the document root.  Checked patterns:
+#   - ".." as a path segment (/../, /..%2f, etc.)
+#   - URL-encoded dot sequences (%2e%2e)
+#   - Double slash (//)
+#   - Backslash traversal (Windows-style separators)
+#   - Null byte injection (raw or %00)
+#
+# This is a defence-in-depth guard.  Callers should also normalise paths
+# before serving files from disk.
+fn _decode_traversal_escapes(lower: text) -> text:
+    # Decode only the escapes relevant to traversal so encoded forms like
+    # "..%2f", "%2e%2e/", ".%2e\" are checked in their effective shape.
+    var out = lower.replace("%2e", ".")
+    out = out.replace("%2f", "/")
+    out = out.replace("%5c", "\\")
+    out
+
+fn _has_dotdot_segment(p: text) -> bool:
+    # ".." as a full path segment (slash or backslash separated)
+    if p.contains("/../"):
+        return true
+    if p.ends_with("/.."):
+        return true
+    if p.starts_with("../"):
+        return true
+    if p == "..":
+        return true
+    if p.contains("\\.."):
+        return true
+    if p.contains("..\\"):
+        return true
+    false
+
+fn path_is_safe(path: text) -> bool:
+    val lower = path.to_lower()
+    # Check both the raw path and its traversal-decoded form, so "..%2f",
+    # "%2f..", and fully/partially encoded dot-dot segments all fail closed
+    # while legitimate names like "file..txt" or "/foo.%2ebar" stay allowed.
+    val decoded = _decode_traversal_escapes(lower)
+
+    if _has_dotdot_segment(lower):
+        return false
+    if _has_dotdot_segment(decoded):
+        return false
+
+    # Double slash — often used to bypass naive prefix checks
+    if lower.contains("//"):
+        return false
+    if decoded.contains("//"):
+        return false
+
+    # Null byte injection
+    if lower.contains("\0"):
+        return false
+    if lower.contains("%00"):
+        return false
+
+    return true
+
+export MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE
+export content_length_from_text, body_decision, path_is_safe
+export hex_chunk_size, decode_chunked_bounded, chunked_body_end_scan

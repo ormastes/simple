@@ -58,6 +58,7 @@ use std.http_server.response.{
 }
 use std.http_server.handler.{HandlerRegistry}
 use std.http_server.error.{HttpServerError}
+use std.common.net.http_core.{path_is_safe}
 use std.http_server.security_context.{dispatch_with_task_remote_security_context}
 use std.async_host.task_identity.{allocate_scheduler_task_id, current_unified_task_key, enter_scheduler_task_id, exit_scheduler_task_id}
 use std.nogc_async_mut.io.tls.{TlsConfig}
@@ -669,7 +670,12 @@ class Worker:
                 self.send_response(fd, resp, now)
 
             Err(e):
-                self.send_response(fd, build_not_found(), now)
+                match e:
+                    HttpServerError.ParseError(msg):
+                        # AC-3: unsafe path rejected by the router guard.
+                        self.send_error(fd, 400, msg, now)
+                    _:
+                        self.send_response(fd, build_not_found(), now)
 
         # Run log phase
         self.pipeline.run_log_phase(request, self.config)
@@ -677,6 +683,12 @@ class Worker:
     me inline_static_handler(location: LocationConfig, request: HttpRequestData) -> HttpResponseData:
         val root = location.root
         val path = request.path
+        # AC-3 defence in depth: never build a filesystem path from an unsafe
+        # request path, even if a caller bypassed the router guard.
+        if not path_is_safe(path):
+            var bad = default_response_data(400, "Bad Request", "unsafe path")
+            bad.headers = [("Content-Type", "text/plain"), ("Server", "SimpleServer")]
+            return bad
         val full_path = root + path
         if not file_exists(full_path):
             return build_not_found()

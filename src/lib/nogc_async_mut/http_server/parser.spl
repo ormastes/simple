@@ -18,9 +18,20 @@ if parser.is_complete():
 ```
 """
 
-use std.http.headers.{get_content_length, is_chunked, decode_chunked, chunked_body_end}
 use std.http_server.types.{HttpRequestData}
 use std.http_server.error.{HttpServerError}
+# Shared protocol core — same limits and header policy as the sync server
+# (src/lib/common/net/http_core.spl). Enforced DURING parsing, before buffer
+# growth, so an oversized request line/header/body cannot exhaust memory.
+# Chunked framing detection and decoding also come from the core so the
+# decoded size stays bounded and a "0\r\n\r\n" inside chunk DATA is never
+# taken as the terminal chunk (the std.http.headers helpers are not used:
+# their `index_of as common_index_of` aliased import is unresolvable on the
+# deployed interpreter).
+use std.common.net.http_core.{
+    MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE,
+    body_decision, decode_chunked_bounded, chunked_body_end_scan
+}
 
 # ============================================================================
 # Parse State
@@ -56,9 +67,17 @@ class HttpRequestParser:
     content_length: i64
     is_chunked_encoding: bool
     error_message: text
+    max_request_line: i32
+    max_header_count: i32
+    max_header_line: i32
+    max_body: i32
 
     static fn new() -> HttpRequestParser:
-        """Create a new parser ready to receive data."""
+        """Create a new parser ready to receive data (shared default limits)."""
+        HttpRequestParser.with_limits(MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE)
+
+    static fn with_limits(max_request_line: i32, max_header_count: i32, max_header_line: i32, max_body: i32) -> HttpRequestParser:
+        """Create a parser enforcing caller-supplied request limits."""
         HttpRequestParser(
             state: ParseState.RequestLine,
             buffer: "",
@@ -70,7 +89,11 @@ class HttpRequestParser:
             body: "",
             content_length: 0,
             is_chunked_encoding: false,
-            error_message: ""
+            error_message: "",
+            max_request_line: max_request_line,
+            max_header_count: max_header_count,
+            max_header_line: max_header_line,
+            max_body: max_body
         )
 
     me feed(data: text) -> Result<i64, HttpServerError>:
@@ -93,6 +116,9 @@ class HttpRequestParser:
                     val line_end = self.buffer.index_of("\r\n")
                     # `.?` on an i64 is truthiness, so it wrongly rejected 0.
                     if line_end >= 0:
+                        # AC-2: enforce request-line length BEFORE parsing it.
+                        if line_end > self.max_request_line:
+                            return Err(self.fail("431 Request line too long: {line_end} bytes"))
                         val line = self.buffer.slice(0, line_end)
                         self.buffer = self.buffer.slice(line_end + 2, self.buffer.len())
                         consumed = consumed + line_end + 2
@@ -100,6 +126,10 @@ class HttpRequestParser:
                             return Err(HttpServerError.ParseError(self.error_message))
                         self.state = ParseState.Headers
                     else:
+                        # AC-2: bound buffer growth while waiting for CRLF — a
+                        # client streaming an endless request line is cut off.
+                        if self.buffer.len() > self.max_request_line + 2:
+                            return Err(self.fail("431 Request line too long: {self.buffer.len()} bytes"))
                         return Ok(consumed)
 
                 ParseState.Headers:
@@ -110,17 +140,27 @@ class HttpRequestParser:
                             # Empty line = end of headers
                             self.buffer = self.buffer.slice(2, self.buffer.len())
                             consumed = consumed + 2
-                            self.finalize_headers()
+                            if not self.finalize_headers():
+                                return Err(self.finalize_error())
                             if self.content_length > 0 or self.is_chunked_encoding:
                                 self.state = ParseState.Body
                             else:
                                 self.state = ParseState.Complete
                         else:
+                            # AC-2: per-header line length limit
+                            if line_end > self.max_header_line:
+                                return Err(self.fail("431 Header line too long: {line_end} bytes"))
+                            # AC-2: header count limit
+                            if self.headers.len() >= self.max_header_count:
+                                return Err(self.fail("431 Too many headers"))
                             val line = self.buffer.slice(0, line_end)
                             self.buffer = self.buffer.slice(line_end + 2, self.buffer.len())
                             consumed = consumed + line_end + 2
                             self.parse_header_line(line)
                     else:
+                        # AC-2: bound buffer growth on a partial header line.
+                        if self.buffer.len() > self.max_header_line + 2:
+                            return Err(self.fail("431 Header line too long: {self.buffer.len()} bytes"))
                         return Ok(consumed)
 
                 ParseState.Body:
@@ -128,34 +168,30 @@ class HttpRequestParser:
                         # Boundary-aware: walk chunk-size headers so "0\r\n\r\n"
                         # inside chunk DATA is never taken as the terminal
                         # 0-size chunk (a flat index_of scan truncated there).
-                        val term = chunked_body_end(self.buffer)
+                        val term = chunked_body_end_scan(self.buffer)
                         if term >= 0:
                             val raw = self.buffer.slice(0, term)
                             # RFC 7230 §4.1/§3.3.3: an invalid chunk-size line
-                            # is a framing error, not an empty body. Rejecting
-                            # keeps this server's message boundary from
-                            # diverging from an upstream proxy's.
-                            match decode_chunked(raw):
-                                case Ok(decoded):
-                                    self.body = decoded
-                                case Err(reason):
-                                    self.error_message = "chunked framing error: " + reason
-                                    self.state = ParseState.Error
-                                    return Err(HttpServerError.ParseError(self.error_message))
+                            # is a framing error, not an empty body (400), and
+                            # the DECODED body must respect max_body (413).
+                            val dec = decode_chunked_bounded(raw, self.max_body)
+                            if dec.0 != "":
+                                if dec.0.starts_with("413"):
+                                    return Err(self.fail_body_too_large(dec.0))
+                                return Err(self.fail(dec.0))
+                            self.body = dec.1
                             consumed = consumed + term
                             self.buffer = self.buffer.slice(term, self.buffer.len())
                             self.state = ParseState.Complete
                         else:
                             if term == -2:
-                                # Framing already provably invalid — surface the
-                                # specific reason via the strict decoder.
-                                match decode_chunked(self.buffer):
-                                    case Ok(_):
-                                        self.error_message = "chunked framing error: invalid chunk boundary"
-                                    case Err(reason):
-                                        self.error_message = "chunked framing error: " + reason
-                                self.state = ParseState.Error
-                                return Err(HttpServerError.ParseError(self.error_message))
+                                # Framing already provably invalid.
+                                return Err(self.fail("400 Malformed chunked body: invalid chunk framing"))
+                            # AC-2: bound raw chunked accumulation. Chunk framing
+                            # overhead is small; max_body + max_header_line slack
+                            # covers the worst legitimate case.
+                            if self.buffer.len() > self.max_body + self.max_header_line:
+                                return Err(self.fail_body_too_large("413 Chunked body too large: {self.buffer.len()} bytes"))
                             return Ok(consumed)
                     else:
                         val remaining = self.content_length - self.body.len()
@@ -261,10 +297,37 @@ class HttpRequestParser:
             val value = line.slice(colon + 1, line.len()).trim()
             self.headers.push((name, value))
 
-    me finalize_headers():
-        """Extract content-length and transfer-encoding after all headers parsed."""
-        val cl = get_content_length(self.headers)
-        if cl.?:
-            self.content_length = cl
+    me finalize_headers() -> bool:
+        """Apply the shared header/body policy after all headers are parsed.
 
-        self.is_chunked_encoding = is_chunked(self.headers)
+        Delegates to http_core body_decision (chunked allowed on this
+        transport): rejects duplicate/invalid Content-Length (400), oversized
+        bodies (413), and Content-Length combined with chunked (400 smuggling
+        ambiguity). Returns false and enters Error state on rejection.
+        """
+        val d = body_decision(self.headers, self.max_body, true)
+        if d.0 != "":
+            self.error_message = d.0
+            self.state = ParseState.Error
+            return false
+        self.content_length = d.1.to_i64()
+        self.is_chunked_encoding = d.2
+        true
+
+    me fail(msg: text) -> HttpServerError:
+        """Record a limit violation and return the matching parse error."""
+        self.error_message = msg
+        self.state = ParseState.Error
+        HttpServerError.ParseError(msg)
+
+    me fail_body_too_large(msg: text) -> HttpServerError:
+        """Record an oversized-body violation (maps to 413)."""
+        self.error_message = msg
+        self.state = ParseState.Error
+        HttpServerError.BodyTooLarge(msg)
+
+    me finalize_error() -> HttpServerError:
+        """Map the recorded finalize_headers rejection to an error variant."""
+        if self.error_message.starts_with("413"):
+            return HttpServerError.BodyTooLarge(self.error_message)
+        HttpServerError.ParseError(self.error_message)

@@ -1,0 +1,92 @@
+"""
+# Async HTTP Router — path traversal rejected before any handler
+
+The async router must reject traversal/escape paths BEFORE location matching,
+so neither the inline static handler nor any dynamic handler ever sees an
+unsafe path. The guard is the shared `std.common.net.http_core.path_is_safe`
+— the same one the sync router uses — so the two transports cannot drift.
+
+Lane: .spipe/simple_enterprise_suite (Wave A, AC-3).
+"""
+
+use std.spec.*
+use std.http_server.router.{AsyncRouter}
+use std.http_server.types.{HttpRequestData, LocationConfig}
+use std.http_server.error.{HttpServerError}
+
+fn make_request(path: text) -> HttpRequestData:
+    HttpRequestData(
+        method: "GET",
+        path: path,
+        query: "",
+        version: "HTTP/1.1",
+        headers: [],
+        body: "",
+        params: {},
+        peer_addr: "127.0.0.1"
+    )
+
+fn make_static_root() -> LocationConfig:
+    LocationConfig(
+        pattern: "/",
+        match_type: "prefix",
+        handler_type: "static",
+        root: "/var/www",
+        proxy_pass: "",
+        middlewares: []
+    )
+
+# route_rejected returns true when the router refused the path with an error.
+fn route_rejected(router: AsyncRouter, path: text) -> bool:
+    val r = router.route(make_request(path))
+    match r:
+        Ok(_): false
+        Err(_): true
+
+describe "async router — unsafe paths never reach a handler":
+    it "routes a normal path to the static location":
+        step("Configure a catch-all static location")
+        val router = AsyncRouter.new([make_static_root()])
+        step("Route a safe document path")
+        expect(route_rejected(router, "/index.html")).to_be(false)
+
+    it "rejects a dot-dot traversal path":
+        val router = AsyncRouter.new([make_static_root()])
+        step("Route a traversal path aimed below the document root")
+        expect(route_rejected(router, "/static/../etc/passwd")).to_be(true)
+
+    it "rejects an encoded dot-dot traversal path":
+        val router = AsyncRouter.new([make_static_root()])
+        expect(route_rejected(router, "/static/%2e%2e/secret")).to_be(true)
+
+    it "rejects an encoded-slash traversal path":
+        val router = AsyncRouter.new([make_static_root()])
+        expect(route_rejected(router, "/..%2fsecret")).to_be(true)
+
+    it "rejects a double-slash bypass path":
+        val router = AsyncRouter.new([make_static_root()])
+        expect(route_rejected(router, "//etc/passwd")).to_be(true)
+
+    it "rejects a null-byte injection path":
+        val router = AsyncRouter.new([make_static_root()])
+        expect(route_rejected(router, "/index.html%00.png")).to_be(true)
+
+    it "rejects the unsafe path even when a matching location exists":
+        step("Verify rejection happens BEFORE location matching")
+        # The catch-all "/" prefix would match "/../x" if matching ran first;
+        # the guard must fire before any location is considered.
+        val router = AsyncRouter.new([make_static_root()])
+        val r = router.route(make_request("/../x"))
+        match r:
+            Ok(_):
+                fail("unsafe path was routed to a location")
+            Err(e):
+                match e:
+                    HttpServerError.ParseError(msg):
+                        expect(msg.starts_with("400")).to_be(true)
+                    _:
+                        fail("expected ParseError(400 ...) for unsafe path")
+
+    it "still allows dots inside legitimate filenames":
+        val router = AsyncRouter.new([make_static_root()])
+        expect(route_rejected(router, "/release..notes.txt")).to_be(false)
