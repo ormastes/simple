@@ -5,15 +5,16 @@
 
 - `SecureServerPolicy`: immutable web limits, timeout/read budgets, TLS-required
   flag, and explicit plaintext-development constructor.
-- `DbListener`: `accept() -> DbTransport?`, `shutdown()`, capacity accounting;
-  owns the socket facade and rejects accepts after shutdown or at capacity.
+- `DbListener` / `TcpDbListener`: concrete listener port and production owner;
+  `DbServerCapsule.listen/stop_listening` composes lifecycle and capacity.
 - `DbTransport`: bounded framed `read`, bounded `write`, idempotent `close`.
+- `TcpDbTransport`: concrete production adapter implementing `DbTransport`.
 - `AuthenticatedPrincipal`: non-secret principal identity produced only by the
   credential verifier; capability lookup accepts this type, not claimed text.
-- `CommitIdentity`: validated bounded client identifier plus deterministic
-  transaction fingerprint.
-- `BoundedQuery`: normalized operation, table(s), stable range endpoints,
-  item/result byte limits, and requested ordering.
+- `CommitIdentity`: validated bounded ID and authenticated principal; durable
+  receipts additionally retain the exact transaction fingerprint.
+- `BoundedQuery`: item, encoded-response-byte, and scan-work limits used by
+  batch/range handlers.
 
 ## Web flow (REQ-001..003)
 
@@ -45,7 +46,7 @@ that boundary from optimistic precheck through in-memory apply, durable atomic
 save, row-version/commit-record persistence, and response outcome creation.
 Failure restores the prior in-memory state before releasing the boundary.
 
-On `COMMIT id=<CommitIdentity>`, lookup precedes apply. A matching durable
+On `COMMIT commit_id=<validated text>`, lookup precedes apply. A matching durable
 fingerprint returns its recorded applied count; a different fingerprint using
 the same ID conflicts. This record and row versions reopen with the database.
 
@@ -54,6 +55,8 @@ conflict expectations, then add the complete batch to the transaction overlay.
 Range reads merge committed rows with the caller's overlay, filter by endpoints,
 sort by stable key, and stop before exceeding item or response-byte limits.
 Overflow returns one error and publishes no partial response or mutation.
+The production `serve_tcp` and scripted adapters both route through
+`bounded_message_response`; runtime TCP proof remains required.
 
 ## Errors and shutdown
 

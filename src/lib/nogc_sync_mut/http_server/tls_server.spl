@@ -52,8 +52,6 @@
 # =============================================================================
 
 use std.nogc_sync_mut.io.tcp.{TcpStream}
-use std.nogc_sync_mut.tls.handshake.{parse_extensions_hex}
-use std.nogc_sync_mut.tls.record.{build_tls_record_hex, parse_tls_record_hex}
 
 # =============================================================================
 # TLS server configuration
@@ -99,6 +97,11 @@ fn tls_server_config_error(config: TlsServerConfig) -> text:
         return "TLS private-key material is invalid"
     ""
 
+# This is only a DER-envelope/hex sanity check. The existing certificate owner
+# parses PEM X.509 but has no API that verifies a hex-DER private key or proves
+# that the public certificate and private key correspond. Even structurally
+# accepted material must not be described as production-valid until that owner
+# exposes typed DER key parsing and key-pair verification.
 fn _tls_der_hex_valid(material: text) -> bool:
     val value = material.trim()
     if value.len() < 16 or value.len() % 2 != 0 or not value.starts_with("30"):
@@ -203,23 +206,26 @@ fn tls_conn_is_h2(conn: TlsServerConn) -> bool:
 
 fn tls_conn_is_http1(conn: TlsServerConn) -> bool:
     val p = conn.negotiated_protocol
-    (p == "http/1.1" or p == "" or p == "http/1.0")
+    (conn.tls_active and conn.error == "" and
+        (p == "http/1.1" or p == "http/1.0"))
 
 # =============================================================================
 # tls_server_accept — attempt TLS handshake and fail closed on missing support
 #
 # GAP NOTE: Because the runtime lacks a TlsStream type (GAP-TLS-3) and the
 # tls/ library uses hex-text blobs rather than byte streams (GAP-TLS-3), a
-# real encrypted handshake is NOT possible here.  The function:
-#   - Reads the first 5 bytes (TLS record header) to detect a TLS ClientHello
-#   - If detected: attempts a text-level parse and returns error with gap note
-#   - If encrypted transport is unavailable: returns tls_active=false plus an
-#     error; the caller must close the connection and must not dispatch HTTP.
+# real encrypted handshake is NOT possible here. The function does not read or
+# parse client bytes: it returns tls_active=false plus an error and closes its
+# owned connection. No caller may dispatch HTTP through the returned object.
 # =============================================================================
 
 fn tls_server_accept(tcp: TcpStream, config: TlsServerConfig) -> TlsServerConn:
     val config_error = tls_server_config_error(config)
     val reason = if config_error != "": config_error else: "TLS transport unavailable: GAP-TLS-3 native encrypted stream is required"
+    # Ownership transfers to this function. Every failure closes before the
+    # unusable connection is returned, so callers cannot accidentally dispatch
+    # plaintext bytes through the failed TLS path.
+    val _ = tcp.close()
     TlsServerConn(
         tcp: tcp,
         negotiated_protocol: "",

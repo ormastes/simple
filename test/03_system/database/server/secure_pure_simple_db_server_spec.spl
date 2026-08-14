@@ -9,10 +9,14 @@ through the production database capsule interfaces.
 """
 
 use std.spec.*
-use std.database.core.{SdnTable, SdnDatabase}
-use std.database.server.capability.{CapabilityTable, capability_with, grant_key}
+use std.database.core.{SdnRow, SdnTable, SdnDatabase}
+use std.database.server.capability.{CapabilityTable, capability_with, grant_key, empty_capability}
 use std.database.server.server.{DbServerCapsule}
 use std.database.server.transport.{MemoryTransport}
+use std.database.server.protocol.{
+    CommitIdentity, BoundedQuery, validated_commit_identity, server_query_bounds,
+    MAX_RESPONSE_BYTES
+}
 
 fn secure_db_server_fixture() -> DbServerCapsule:
     var store = SdnDatabase.new("")
@@ -22,9 +26,6 @@ fn secure_db_server_fixture() -> DbServerCapsule:
         grant_key("users", "read"), grant_key("users", "write")
     ]), "alice-secret")
     DbServerCapsule.new(store, policy)
-
-fn expect_db_auth_rejected(server: DbServerCapsule, request: text):
-    expect(server.handle_message(request)).to_contain("code=auth")
 
 fn expect_bounded_query(server: DbServerCapsule):
     var ids: [text] = []
@@ -40,9 +41,11 @@ describe "Secure Pure-Simple database server":
     it "Authenticate the database principal":
         step("Authenticate the database principal")
         var server = secure_db_server_fixture()
-        expect_db_auth_rejected(server, "OPEN as=alice")
-        expect_db_auth_rejected(server, "OPEN as=alice credential=wrong")
-        expect_db_auth_rejected(server, "OPEN as=unknown credential=alice-secret")
+        val expected = 'ERR code=auth msg="authentication failed"'
+        expect(server.handle_message("OPEN")).to_equal(expected)
+        expect(server.handle_message("OPEN as=alice")).to_equal(expected)
+        expect(server.handle_message("OPEN as=alice credential=wrong")).to_equal(expected)
+        expect(server.handle_message("OPEN as=unknown credential=alice-secret")).to_equal(expected)
         expect(server.handle_message(
             "OPEN as=alice credential=alice-secret"
         )).to_equal("OK session=1")
@@ -59,6 +62,15 @@ describe "Secure Pure-Simple database server":
         expect(server.registry.open_session_count()).to_equal(0)
         expect(server.connection_capacity()).to_equal(1)
 
+    it "Reject a listener configuration with no connection capacity":
+        step("Bind the production listener")
+        var server = secure_db_server_fixture()
+        match server.listen("127.0.0.1", 0, 0):
+            Ok(_): expect(false).to_equal(true)
+            Err(error): expect(error.message).to_contain("max_connections must be positive")
+        expect(server.connection_count()).to_equal(0)
+        expect(server.listener_running).to_equal(false)
+
     # @manual_section Bounded transaction queries
     it "Bound a batch or range response":
         step("Bound a batch or range response")
@@ -74,3 +86,48 @@ describe "Secure Pure-Simple database server":
             "RANGE_GET session=1 tbl=users start=u1 end=u3 limit=2"
         )).to_equal("OK ids=u1,u2")
         expect_bounded_query(server)
+
+    it "Use canonical commit identity and bounded query contracts":
+        step("Bound a batch or range response")
+        val identity = validated_commit_identity("commit-1", "alice")
+        expect(identity.?).to_equal(true)
+        val typed: CommitIdentity = identity ?? CommitIdentity(value: "", principal: "")
+        expect(typed.principal).to_equal("alice")
+        val bounds: BoundedQuery = server_query_bounds()
+        expect(bounds.max_response_bytes).to_equal(MAX_RESPONSE_BYTES)
+
+    it "Apply the encoded response bound on the production dispatch path":
+        step("Bound a batch or range response")
+        var store = SdnDatabase.new("")
+        var users = SdnTable.new("users", ["id", "name", "valid"])
+        val huge = ["x"; 8190].join("")
+        users.add_row(SdnRow(fields: {"id": "u1", "name": huge, "valid": "true"}, _version: 0))
+        store.set_table("users", users)
+        var policy = CapabilityTable.new()
+        policy.register_authenticated(capability_with("alice", [grant_key("users", "read")]), "alice-secret")
+        var server = DbServerCapsule.new(store, policy)
+        server.handle_message("OPEN as=alice credential=alice-secret")
+        expect(server.bounded_message_response(
+            "GET session=1 tbl=users id=u1 col=name"
+        )).to_contain("code=limit")
+
+    # @manual_section Capability denial matrix
+    it "Deny every ungranted table and operation combination":
+        step("Authenticate the database principal")
+        var store = SdnDatabase.new("")
+        store.set_table("users", SdnTable.new("users", ["id", "name", "valid"]))
+        store.set_table("audit", SdnTable.new("audit", ["id", "event", "valid"]))
+        var policy = CapabilityTable.new()
+        policy.register_authenticated(capability_with("reader", [
+            grant_key("users", "read")
+        ]), "reader-secret")
+        policy.register_authenticated(empty_capability("none"), "none-secret")
+        var server = DbServerCapsule.new(store, policy)
+        expect(server.handle_message("OPEN as=reader credential=reader-secret")).to_equal("OK session=1")
+        expect(server.handle_message("BEGIN session=1")).to_equal("OK")
+        expect(server.handle_message("PUT session=1 tbl=users id=u1 name=x")).to_contain("code=denied")
+        expect(server.handle_message("GET session=1 tbl=audit id=a1 col=event")).to_contain("code=denied")
+        expect(server.handle_message("OPEN as=none credential=none-secret")).to_equal("OK session=2")
+        expect(server.handle_message("BEGIN session=2")).to_equal("OK")
+        expect(server.handle_message("GET session=2 tbl=users id=u1 col=name")).to_contain("code=denied")
+        expect(server.handle_message("DEL session=2 tbl=users id=u1")).to_contain("code=denied")

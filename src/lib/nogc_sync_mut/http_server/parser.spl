@@ -25,8 +25,8 @@ val MAX_HEADER_LINE: i32 = 8192
 # Maximum body size (bytes) accepted via Content-Length.  10 MiB default.
 val MAX_BODY_SIZE: i32 = 10485760
 
-# The native runtime line reader (read_line_chunked,
-# src/compiler_rust/runtime/src/value/net_tcp.rs) stops at 8192 bytes even
+# The native `read_line` API uses a 4096-byte buffer (4095 payload bytes plus
+# its terminator). It stops at that boundary even
 # when no newline was found, silently returning a truncated line that is
 # indistinguishable from a short one by length alone — so a `> max` length
 # check can never fire for such input (see
@@ -34,10 +34,10 @@ val MAX_BODY_SIZE: i32 = 10485760
 # The truncation signature IS detectable here: `read_line()` returns the line
 # INCLUDING its terminating newline, so a raw line that is >= the runtime cap
 # and does NOT end in "\n" was cut mid-line and must be rejected, not parsed.
-val RUNTIME_READ_LINE_CAP: i32 = 8192
+val RUNTIME_READ_LINE_CAP: i32 = 4096
 
 fn line_truncated_by_runtime(raw: text) -> bool:
-    raw.len() >= RUNTIME_READ_LINE_CAP and not raw.ends_with("\n")
+    (raw.len() >= RUNTIME_READ_LINE_CAP - 1 and not raw.ends_with("\n"))
 
 # =============================================================================
 # Public API
@@ -64,21 +64,24 @@ fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, ma
             # the `> max_request_line` check below can never see it.
             if line_truncated_by_runtime(request_line):
                 return Err("431 Request line too long: truncated at {RUNTIME_READ_LINE_CAP} bytes without a newline")
-            val trimmed = request_line.trim()
-            if trimmed == "":
+            if not request_line.ends_with("\n"):
+                return Err("400 Incomplete request line")
+            val line = request_line_without_terminator(request_line)
+            if line == "":
                 return Err("Empty request line")
 
-            # AC-1 / finding 2: enforce request-line length
-            if trimmed.len() > max_request_line:
-                return Err("431 Request line too long: {trimmed.len()} bytes")
+            # Count the request-line payload exactly. Trimming first would let
+            # leading/trailing whitespace evade the configured byte bound.
+            if line.len() > max_request_line:
+                return Err("431 Request line too long: {line.len()} bytes")
 
-            val parsed = parse_request_line(trimmed)
+            val parsed = parse_request_line(line)
             val method_str = parsed.0
             val raw_path = parsed.1
             val version = parsed.2
 
             if method_str == "" or raw_path == "" or not _method_supported(method_str):
-                return Err("Malformed request line: {trimmed}")
+                return Err("Malformed request line: {line}")
             if version != "HTTP/1.1" and version != "HTTP/1.0":
                 return Err("Unsupported HTTP version: {version}")
 
@@ -106,12 +109,18 @@ fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, ma
                         # cut the line to exactly the cap).
                         if line_truncated_by_runtime(header_line):
                             return Err("431 Header line too long: truncated at {RUNTIME_READ_LINE_CAP} bytes without a newline")
-                        val hl = header_line.trim()
-                        if hl == "":
+                        if not header_line.ends_with("\n"):
+                            return Err("400 Incomplete request headers")
+                        val header_payload = request_line_without_terminator(header_line)
+                        if header_payload.len() > max_header_line:
+                            return Err("431 Header line too long: {header_payload.len()} bytes")
+                        if header_payload == "":
                             break
-                        # AC-1 / finding 2: per-header line length
-                        if hl.len() > max_header_line:
-                            return Err("431 Header line too long: {hl.len()} bytes")
+                        if header_payload.starts_with(" ") or header_payload.starts_with("\t"):
+                            return Err("400 Obsolete folded header is not supported")
+                        val hl = header_payload.trim()
+                        if hl == "":
+                            return Err("400 Malformed whitespace-only header line")
                         # AC-1 / finding 2: header count limit
                         header_count = header_count + 1
                         if header_count > max_header_count:
@@ -125,7 +134,9 @@ fn parse_request_with_policy_limits(stream: TcpStream, max_request_line: i32, ma
                             return Err("400 Invalid header name")
                         headers.push((name, value))
                     Err(_):
-                        break
+                        # EOF before the empty header terminator is incomplete
+                        # framing, not an implicit end-of-headers marker.
+                        return Err("400 Incomplete request headers")
 
             val decision = headers_decision(headers, max_body)
             if decision.0 != "":
@@ -193,29 +204,31 @@ fn headers_decision(headers: [(text, text)], max_body: i32) -> (text, i32):
     ("", content_length)
 
 fn _is_singleton_security_header(name: text) -> bool:
-    name == "host" or name == "authorization" or name == "origin" or
-        name == "x-forwarded-host" or name == "x-forwarded-proto"
+    (name == "host" or name == "authorization" or name == "origin" or
+        name == "x-forwarded-host" or name == "x-forwarded-proto")
 
 fn parse_request_line(line: text) -> (text, text, text):
-    var method = ""
-    var path = ""
-    var version = ""
-    var idx = 0
-    for part in line.split(" "):
-        if idx == 0:
-            method = part
-        elif idx == 1:
-            path = part
-        elif idx == 2:
-            version = part
-            break
-        idx = idx + 1
-    return (method, path, version)
+    # HTTP/1 request-line is exactly method SP request-target SP version.
+    # Empty components, tabs, leading/trailing SP, and extra tokens reject.
+    if line.contains("\t") or line.starts_with(" ") or line.ends_with(" "):
+        return ("", "", "")
+    val parts = line.split(" ")
+    if parts.len() != 3 or parts[0] == "" or parts[1] == "" or parts[2] == "":
+        return ("", "", "")
+    (parts[0], parts[1], parts[2])
+
+fn request_line_without_terminator(raw: text) -> text:
+    if raw == "":
+        return ""
+    var end = raw.len() - 1
+    if end > 0 and raw.char_at(end - 1) == "\r":
+        end = end - 1
+    raw.slice(0, end)
 
 fn _method_supported(method: text) -> bool:
-    method == "GET" or method == "POST" or method == "PUT" or
+    (method == "GET" or method == "POST" or method == "PUT" or
         method == "DELETE" or method == "PATCH" or method == "HEAD" or
-        method == "OPTIONS"
+        method == "OPTIONS")
 
 # content_length_from_text parses a Content-Length header value.
 # Returns the length as i32 on success, or -1 on any parse error
@@ -255,5 +268,7 @@ fn to_i32_safe(s: text) -> i32:
     return v
 
 export parse_request, parse_request_with_limits, parse_request_with_policy_limits, parse_request_line
+export request_line_without_terminator
 export to_i32_safe, content_length_from_text, headers_decision
 export MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE
+export RUNTIME_READ_LINE_CAP

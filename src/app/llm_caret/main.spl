@@ -32,7 +32,8 @@
 use app.io.mod.{env_get, file_exists, current_time_ms, process_spawn_async,
     process_spawn_async_env}
 use std.nogc_sync_mut.cli.cli_util.{get_cli_args}
-use std.nogc_sync_mut.http_server.{SimpleHttpServer, Router, HttpRequest, HttpResponse,
+use std.nogc_sync_mut.http_server.{SimpleHttpServer, SecureServerPolicy,
+    plaintext_development_capability, Router, HttpRequest, HttpResponse,
     HttpStatus, http_method_to_text}
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use std.log.{info as log_info}
@@ -530,7 +531,7 @@ fn _http_handle(req: HttpRequest) -> HttpResponse:
         body: body
     )
 
-fn run_server(port: i64):
+fn run_server(port: i64) -> Result<(), text>:
     var router = Router.new()
     router.mount("/v1", _http_handle)
     router.set_not_found(_http_handle)
@@ -538,7 +539,10 @@ fn run_server(port: i64):
     if required_token() != "":
         print "  auth: bearer token required (LLM_CARET_TOKEN set)"
     var server = SimpleHttpServer.new("127.0.0.1", port.to_i32(), router)
-    server.start()
+    val capability = plaintext_development_capability(
+        "llm_caret loopback-only authenticated HTTP proxy")?
+    server.with_policy(SecureServerPolicy.plaintext_dev(capability))
+    server.start_plaintext(capability)
 
 # ============================================================================
 # Browser GUI (--gui)
@@ -900,8 +904,11 @@ fn run_main_args(raw_args: [text]) -> i64:
         val base_url = _effective_base_url(provider)
         val cli_path = _effective_cli_path(provider)
         main_configure(provider, model, api_key, base_url, cli_path, args.system_prompt, "", 0)
-        run_server(_effective_port(args))
-        return 0
+        match run_server(_effective_port(args)):
+            Err(e):
+                print "Error: HTTP proxy startup failed: {e}"
+                return 2
+            Ok(_): return 0
 
     var active_session_id = gen_session_id()
     var provider_session_id = ""

@@ -77,9 +77,11 @@ implementation." Status values:
 
 Highest-capability review: **REJECTED (2026-08-14)**. The implementation is a
 partial hardening checkpoint, not an accepted handoff. Production TLS remains
-unreachable; web identity/security headers, constant-work DB authentication,
-shutdown/cancellation, principal-bound replay receipts, byte-bounded queries,
-and real-listener/runtime evidence remain blockers. All ledger items stay open.
+unreachable and real-listener/runtime evidence remains unavailable. The third
+and final fix cycle subsequently added shared DB stop control, TCP write-status
+cleanup, and bounded atomic web admission; these changes passed static gates
+but are unexecuted. The mandatory three-cycle cap is reached, so all ledger
+items stay open and delivery is a blocked WARN checkpoint, not Phase-6 done.
 
 This detached replacement lane owns only the two Phase-6 server blockers. The
 accepted implementation boundary is Pure Simple: production entrypoints may
@@ -127,21 +129,29 @@ Canonical links: `.spipe/secure_pure_simple_servers/state.md`,
   `/tmp/simple-main-restart12-push.lock`, pushed without force to `main`, and
   the pushed commit is proven reachable from the refetched `origin/main`.
 
-Current blockers at lane start:
+Current blockers after highest-capability review:
 
-1. The DB `serve()` path drains one `MemoryTransport`; no owned socket listener
-   or accept loop exists.
-2. `OPEN as=<principal>` trusts the claimed name, allowing impersonation of a
-   configured principal.
-3. Session registry and store mutation are single-threaded assumptions; the
-   durable commit contract documents an observable P3/P4 window once real
-   concurrent connections exist.
-4. Row versions are not durable and commit retry identifiers are not recorded.
-5. DB operations are single-row only; bounded batch/range protocol and response
-   limits are absent.
-6. The web implementation has hardening units and benchmark fixtures, but the
-   umbrella plan has no retained proof that a production listener traverses the
-   same secure dispatch path.
+1. Production HTTPS lacks an encrypted accepted-stream owner and certificate /
+   key parse-and-match path. Plaintext now requires an audited capability and
+   all synchronous callers handle typed startup failure, but this is not a
+   substitute for GAP-TLS-3.
+2. The accepted HTTP path now attaches peer identity, adds baseline security
+   headers, and rejects premature EOF/surplus request-line tokens. Its remaining
+   static blocker is bounded connection admission/backpressure and cleanup.
+3. DB authentication now returns `AuthenticatedPrincipal?`, hashes every
+   candidate, compares 64 digest characters, and has exact missing/wrong/unknown
+   response-equality coverage. Runtime timing evidence remains unavailable.
+4. DB accept/read/write/shutdown behavior does not yet expose a usable control
+   owner that can stop an idle synchronous accept and prove close/rebind; TCP
+   write failure also needs to terminate and clean up the connection.
+5. Durable retry receipts are capped, schema-validated, principal-bound, and
+   transaction-fingerprinted; restart/lost-ACK execution evidence is still
+   unavailable.
+6. Batch/range handlers and `serve_tcp` now share the final encoded response
+   bound through `bounded_message_response`; bounded-work/range-scan runtime
+   evidence remains unavailable.
+7. Real-listener, concurrent P3/P4, lost-ack retry, capability-denial, docgen,
+   `sspec-maintain`, and deliberate-red evidence is missing.
 
 Lane execution blocker (2026-08-14): the deployed Pure-Simple CLI at
 `release/x86_64-unknown-linux-gnu/simple` identifies as Simple v1.0.0-beta but

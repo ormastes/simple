@@ -26,10 +26,9 @@
 # store has been returned to its last durable state (see §4).
 #
 # EXPLICIT NON-GUARANTEES (do not read more into this than is written):
-#   * `SdnRow._version` is NOT durable.  `SdnTable.to_sdn()` serializes the
-#     declared columns only, so versions restart at 0 after a reload.  The
-#     optimistic-version check therefore protects a single process lifetime,
-#     not a restart.  Filed as a follow-up in .spipe/db_durability/state.md.
+#   * The server does not rely on transient `SdnRow._version`: txn replay adds
+#     the declared `_db_server_version` column and persists it with each row,
+#     so optimistic conflicts remain meaningful after reopen.
 #   * A field whose column is not in `SdnTable.columns` is NOT durable — it
 #     lives in memory and is dropped by `to_sdn()`.  Callers must declare
 #     their columns.  This is a store property, not a server-tier one.
@@ -155,16 +154,52 @@ struct DurableOutcome:
     message: text
 
 val COMMIT_TABLE: text = "_db_server_commits"
+# Receipts are retained for the lifetime of the database file. There is no
+# automatic pruning because deleting a receipt can make an old retry execute
+# twice. At the hard cap, unseen commit IDs fail closed; existing IDs remain
+# replayable. An operator must checkpoint/migrate receipts with an application-
+# specific retry-age guarantee before admitting more IDs.
+val MAX_COMMIT_RECEIPTS: i64 = 4096
 
-fn committed_retry(store: SdnDatabase, commit_id: text) -> i64:
+fn _lower_hex_digest(value: text) -> bool:
+    val bytes = value.bytes()
+    if bytes.len() != 64:
+        return false
+    for byte in bytes:
+        if not (byte >= 48 and byte <= 57) and not (byte >= 97 and byte <= 102):
+            return false
+    true
+
+fn commit_receipt_capacity_available(store: SdnDatabase) -> bool:
+    match store.get_table(COMMIT_TABLE):
+        Some(table):
+            val typed: SdnTable = table
+            typed.rows.len() < MAX_COMMIT_RECEIPTS
+        nil:
+            true
+
+fn committed_retry(store: SdnDatabase, commit_id: text, principal: text) -> i64:
     if commit_id == "":
         return -1
     match store.get_table(COMMIT_TABLE):
         Some(table):
             val typed: SdnTable = table
+            if (not typed.columns.contains("id") or
+                not typed.columns.contains("principal") or
+                not typed.columns.contains("applied") or
+                not typed.columns.contains("identity") or
+                not typed.columns.contains("valid")):
+                return -3
             match typed.get_row(commit_id):
                 Some(row):
+                    if row.get("valid") != Some("true"):
+                        return -3
+                    if (row.get("principal") ?? "") != principal:
+                        return -2
                     val applied = row.get_i64("applied")
+                    val identity = row.get("identity") ?? ""
+                    if applied == nil or (applied ?? -1) < 0 or not _lower_hex_digest(identity):
+                        return -3
                     applied ?? 0
                 nil:
                     -1
@@ -208,14 +243,15 @@ fn commit_identity_matches(store: SdnDatabase, commit_id: text, state: TxnState)
         nil:
             false
 
-fn record_commit(store: SdnDatabase, commit_id: text, applied: i64, state: TxnState):
+fn record_commit(store: SdnDatabase, commit_id: text, applied: i64, state: TxnState, principal: text):
     if commit_id == "":
         return
     var table = match store.get_table(COMMIT_TABLE):
         Some(existing): existing
-        nil: SdnTable.new(COMMIT_TABLE, ["id", "applied", "identity", "valid"])
+        nil: SdnTable.new(COMMIT_TABLE, ["id", "principal", "applied", "identity", "valid"])
     val row = SdnRow(fields: {}, _version: 0)
     row.set("id", commit_id)
+    row.set("principal", principal)
     row.set("applied", "{applied}")
     row.set("identity", transaction_identity(state))
     row.set("valid", "true")
@@ -337,13 +373,25 @@ fn temp_path_exists(path: text) -> bool:
 fn durable_commit_identified(
     store: SdnDatabase, state: TxnState, policy: DurabilityPolicy, commit_id: text
 ) -> DurableOutcome:
-    val retry_applied = committed_retry(store, commit_id)
+    durable_commit_for_principal(store, state, policy, commit_id, "")
+
+fn durable_commit_for_principal(
+    store: SdnDatabase, state: TxnState, policy: DurabilityPolicy,
+    commit_id: text, principal: text
+) -> DurableOutcome:
+    val retry_applied = committed_retry(store, commit_id, principal)
+    if retry_applied == -2:
+        return durable_err(commit_id, "commit id belongs to a different principal")
+    if retry_applied == -3:
+        return durable_err(commit_id, "commit receipt schema is invalid")
     if retry_applied >= 0:
         if state.open and not commit_identity_matches(store, commit_id, state):
             return durable_err(commit_id, "commit id already belongs to a different transaction")
         return durable_ok(retry_applied, store.path != "", "idempotent retry")
     if not state.open:
         return durable_err("", "no open transaction")
+    if commit_id != "" and not commit_receipt_capacity_available(store):
+        return durable_err(commit_id, "commit receipt capacity {MAX_COMMIT_RECEIPTS} reached")
 
     # ---- P1 precheck ----------------------------------------------------
     val pre: CommitOutcome = txn_precheck(store, state)
@@ -359,7 +407,7 @@ fn durable_commit_identified(
         restore_undo(store, undo)
         return durable_err(applied_outcome.conflict_key, applied_outcome.message)
     val applied = applied_outcome.applied
-    record_commit(store, commit_id, applied, state)
+    record_commit(store, commit_id, applied, state, principal)
 
     # A store with no path is an explicit in-memory model.  Say so; never
     # report it as durable.

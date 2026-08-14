@@ -9,7 +9,7 @@ admitted Stage-4 self-hosted CLI.
 
 | Surface | Canonical owner | Current reachability |
 |---|---|---|
-| Synchronous HTTP listener and routing | `src/lib/nogc_sync_mut/http_server/{server,parser,router,response,static_file}.spl` | The explicit plaintext-development listener binds, accepts, performs bounded parsing, dispatches, writes, and closes; runtime evidence remains blocked. |
+| Synchronous HTTP listener and routing | `src/lib/nogc_sync_mut/http_server/{server,parser,router,response,static_file}.spl` | The capability-gated plaintext-development listener binds, accepts, obtains peer identity, performs bounded parsing, dispatches, adds default security headers, writes, and closes; runtime evidence remains blocked. |
 | Asynchronous HTTP stack | `src/lib/nogc_async_mut/http_server/` | Separate stack; do not use its benchmark fixtures as proof for the synchronous production entrypoint. |
 | HTTPS composition | `src/lib/nogc_sync_mut/http_server/tls_server.spl` | **Not production reachable:** missing/invalid material and absent encrypted transport fail closed; GAP-TLS-3 still blocks HTTPS. |
 | Database protocol and capsule | `src/lib/nogc_sync_mut/database/server/` | Pure-Simple bounded TCP + memory transports, authenticated sessions, sequential state owner, capability/transaction/durability tier, and bounded batch/range surface; runtime evidence remains blocked. |
@@ -29,10 +29,41 @@ connection path. TLS startup must fail closed when certificate/key material is
 missing or invalid. Until the TLS gaps named in `tls_server.spl` are repaired,
 the guide must not describe HTTPS as production-ready.
 
+Plaintext requires both `SecureServerPolicy.plaintext_dev(capability)` and
+`start_plaintext(capability)`, where the capability is minted from a non-empty
+audit reason. `start()` never opens plaintext. Request lines are measured before
+whitespace normalization and must have exactly three SP-separated components;
+EOF before the request-line/header terminator rejects as incomplete framing.
+Failure to obtain the socket peer address also closes before dispatch. Default
+CSP, nosniff, frame-denial, and referrer headers are applied before writing;
+HSTS is reserved for a genuinely encrypted connection.
+
+`SecureServerPolicy.max_connections` is positive and defaults to 128. A shared
+`ConnectionAdmission` atomic handle claims a slot before thread spawn, closes
+boundary+1 immediately, and releases after either threaded or synchronous handler
+completion. Worker copies retain the atomic handle, not a copied counter.
+The handler wrapper registers release with `defer` before application dispatch,
+so early return or unwinding cannot strand capacity.
+
+The present TLS configuration check recognizes only a hex-DER envelope. The
+existing certificate owner can parse PEM X.509, but exposes no typed parser for
+the configured hex-DER private key and no certificate/private-key correspondence
+check. Alongside GAP-TLS-3, that exact validation gap blocks production TLS.
+`tls_server_accept` closes its owned TCP stream on every current failure.
+
+All synchronous `SimpleHttpServer` startup APIs return `Result<(), text>`.
+The example and loopback-only LLM Caret callers handle that result explicitly;
+non-loopback messaging hosts preserve production intent by calling `start()`
+and receiving the TLS-required error rather than minting plaintext authority.
+The native line-reader boundary exposed to this parser is a 4096-byte buffer
+(4095 payload bytes plus terminator), so the truncation detector uses that
+boundary even though configured logical maxima may be higher.
+
 Database `OPEN` requires both `as=<principal>` and `credential=<secret>`.
 `CapabilityTable.register_authenticated` refuses empty credentials, and
-`authenticate` performs a full padded comparison; failures use the stable
-`auth` response and must not echo or log secrets. All later operations are
+`authenticate_principal` hashes the candidate and compares all 64 digest
+characters; missing, wrong, and unknown credentials use the exact stable
+`ERR code=auth msg=authentication failed` response and must not echo or log secrets. All later operations are
 session-scoped and deny by default unless the captured capability explicitly
 grants the table/access pair.
 
@@ -42,6 +73,13 @@ sequential capacity-one mutation owner, persists row-version fields and commit
 receipts in the same atomic save, and bounds batch/range requests and responses.
 These claims remain implementation-handoff status until focused scenarios
 execute on an admitted Stage-4 CLI.
+
+The concrete DB surface includes `DbServerCapsule`, `DbTransport`,
+`DbListener`, `TcpDbTransport`, `TcpDbListener`, `DbListenerControl`,
+`DbStopControl`, `AuthenticatedPrincipal`,
+`CommitIdentity`, and `BoundedQuery`. Production and scripted drains share
+`bounded_message_response`, so neither structurally bypasses the final encoded
+response-byte check; runtime TCP proof remains uncredited.
 
 ## Evidence Map
 

@@ -47,6 +47,40 @@ val MAX_REQUEST_BYTES: i64 = 8192
 val MAX_REQUEST_ARGS: i64 = 64
 val MAX_BATCH_ITEMS: i64 = 64
 val MAX_RESPONSE_BYTES: i64 = 8192
+val MAX_COMMIT_ID_BYTES: i64 = 128
+val MAX_RANGE_SCAN_ROWS: i64 = 4096
+
+struct CommitIdentity:
+    value: text
+    principal: text
+
+struct BoundedQuery:
+    max_items: i64
+    max_response_bytes: i64
+    max_scan_rows: i64
+
+fn server_query_bounds() -> BoundedQuery:
+    BoundedQuery(
+        max_items: MAX_BATCH_ITEMS,
+        max_response_bytes: MAX_RESPONSE_BYTES,
+        max_scan_rows: MAX_RANGE_SCAN_ROWS
+    )
+
+fn valid_commit_id(value: text) -> bool:
+    val bytes = value.bytes()
+    if bytes.len() == 0 or bytes.len() > MAX_COMMIT_ID_BYTES:
+        return false
+    for byte in bytes:
+        val alpha = (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122)
+        val digit = byte >= 48 and byte <= 57
+        if not alpha and not digit and byte != 45 and byte != 46 and byte != 95:
+            return false
+    true
+
+fn validated_commit_identity(value: text, principal: text) -> CommitIdentity?:
+    if principal == "" or not valid_commit_id(value):
+        return nil
+    Some(CommitIdentity(value: value, principal: principal))
 
 # ============================================================================
 # Op vocabulary — closed set.  Anything else is rejected.
@@ -141,7 +175,7 @@ fn tokenize(line: text) -> Result<[text], text>:
 # ============================================================================
 
 fn parse_request(line: text) -> Result<DbRequest, text>:
-    if line.chars().len() > MAX_REQUEST_BYTES:
+    if line.bytes().len() > MAX_REQUEST_BYTES:
         return Err("request exceeds {MAX_REQUEST_BYTES} bytes")
     val trimmed = line.trim()
     if trimmed == "":

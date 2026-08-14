@@ -25,7 +25,8 @@ use std.database.server.protocol.{
     ERR_MALFORMED, ERR_UNKNOWN_OP, ERR_MISSING_ARG, ERR_NO_SESSION,
     ERR_DENIED, ERR_NO_TXN, ERR_TXN_OPEN, ERR_CONFLICT, ERR_NO_TABLE,
     ERR_NOT_FOUND, ERR_DURABILITY, ERR_CRASHED, ERR_SERVE_BOUND, ERR_AUTH, ERR_LIMIT,
-    MAX_BATCH_ITEMS, MAX_RESPONSE_BYTES
+    MAX_RESPONSE_BYTES, CommitIdentity, BoundedQuery,
+    server_query_bounds, validated_commit_identity
 }
 
 # Bounded-wait guard for serve(): a connection drain that stops making progress
@@ -49,10 +50,10 @@ class ServeOutcome:
         val ch = self.channel
         ch.all_sent()
 use std.database.server.durability.{
-    DurabilityPolicy, DurableOutcome, durable_commit_identified, durability_on
+    DurabilityPolicy, DurableOutcome, durable_commit_for_principal, durability_on
 }
 use std.database.server.capability.{
-    DbCapability, CapabilityTable, capability_allows_op, op_access,
+    DbCapability, CapabilityTable, AuthenticatedPrincipal, capability_allows_op, op_access,
     ACCESS_READ, ACCESS_WRITE
 }
 use std.database.server.session.{ SessionRegistry, SessionIdentity }
@@ -62,9 +63,10 @@ use std.database.server.txn.{
     store_read, store_version,
     WRITE_PUT, WRITE_DEL
 }
-use std.database.server.transport.{ DbTransport, MemoryTransport, TcpDbTransport }
-use std.nogc_sync_mut.io.tcp.{TcpListener}
-use std.io.types.{IoError}
+use std.database.server.transport.{
+    DbTransport, MemoryTransport, TcpDbTransport, DbListenerControl
+}
+use std.io.types.{IoError, IoErrorKind}
 
 val LISTENER_ACCEPT_TIMEOUT_MS: i64 = 250
 val LISTENER_MAX_CONNECTIONS: i64 = 1024
@@ -109,14 +111,15 @@ class DbServerCapsule:
 
     me sys_open(request: DbRequest) -> DbResponse:
         val principal = request.arg("as") ?? ""
-        if principal == "":
-            return err_response(ERR_MISSING_ARG, "OPEN requires as=<principal>")
         val credential = request.arg("credential") ?? ""
-        if not self.policy.authenticate(principal, credential):
+        val authenticated = self.policy.authenticate_principal(principal, credential)
+        if authenticated == nil:
             return err_response(ERR_AUTH, "authentication failed")
-        val capability = self.policy.lookup_or_empty(principal)
+        val proof: AuthenticatedPrincipal = authenticated ?? AuthenticatedPrincipal(
+            principal: "", capability: self.policy.lookup_or_empty(""))
+        val capability = proof.capability
         var registry = self.registry
-        val id = registry.open_session(principal, capability)
+        val id = registry.open_session(proof.principal, capability)
         self.registry = registry
         ok_with("session", "{id}")
 
@@ -149,24 +152,39 @@ class DbServerCapsule:
     # contract — this method must never be reordered to acknowledge first.
     me sys_commit(session_id: i64, request: DbRequest) -> DbResponse:
         val commit_id = request.arg("commit_id") ?? ""
+        var principal = ""
+        match self.registry.identity(session_id):
+            Some(identity): principal = identity.principal
+            nil: pass_do_nothing("dispatch already proved the session exists")
+        var identity: CommitIdentity? = nil
+        var effective_commit_id = ""
+        if commit_id != "":
+            identity = validated_commit_identity(commit_id, principal)
+            if identity == nil:
+                return err_response(ERR_MALFORMED, "invalid commit_id")
+            effective_commit_id = (identity ?? CommitIdentity(value: "", principal: "")).value
         if not self.registry.has_open_txn(session_id):
-            # durable_commit_identified checks the receipt before txn state, so
+            # The principal-bound durable receipt is checked before txn state, so
             # a reconnect may safely retry an acknowledged-or-lost response.
             if commit_id != "":
                 var retry_store = self.store
-                val retry = durable_commit_identified(
-                    retry_store, closed_txn(), self.durability, commit_id)
+                val retry = durable_commit_for_principal(
+                    retry_store, closed_txn(), self.durability,
+                    effective_commit_id, principal)
                 self.store = retry_store
                 if retry.ok:
                     return ok_with("applied", "{retry.applied}")
+                if retry.conflict_key != "":
+                    return err_response(ERR_CONFLICT, retry.message)
             return err_response(ERR_NO_TXN, "no open transaction")
         val state = self.registry.txn_of(session_id)
         # Extract -> mutate -> write back: durable_commit mutates the store and
         # may roll it back, and a mutating call through 2+ field hops loses the
         # write on the interpreter.
         var store = self.store
-        val outcome: DurableOutcome = durable_commit_identified(
-            store, state, self.durability, commit_id)
+        val outcome: DurableOutcome = durable_commit_for_principal(
+            store, state, self.durability,
+            effective_commit_id, principal)
         self.store = store
         var registry = self.registry
         registry.clear_txn(session_id)
@@ -259,10 +277,11 @@ class DbServerCapsule:
                 err_response(ERR_NOT_FOUND, "{table}/{key} not found")
 
     me sys_batch_put(session_id: i64, request: DbRequest) -> DbResponse:
+        val bounds: BoundedQuery = server_query_bounds()
         val ids_text = request.arg("ids") ?? ""
         val ids = ids_text.split(",")
-        if ids_text == "" or ids.len() > MAX_BATCH_ITEMS:
-            return err_response(ERR_LIMIT, "BATCH_PUT requires 1..{MAX_BATCH_ITEMS} ids")
+        if ids_text == "" or ids.len() > bounds.max_items:
+            return err_response(ERR_LIMIT, "BATCH_PUT requires 1..{bounds.max_items} ids")
         for id in ids:
             if id == "":
                 return err_response(ERR_MALFORMED, "empty batch id")
@@ -278,10 +297,11 @@ class DbServerCapsule:
         ok_with("queued", "{ids.len()}")
 
     fn sys_batch_get(session_id: i64, request: DbRequest) -> DbResponse:
+        val bounds: BoundedQuery = server_query_bounds()
         val ids_text = request.arg("ids") ?? ""
         val ids = ids_text.split(",")
-        if ids_text == "" or ids.len() > MAX_BATCH_ITEMS:
-            return err_response(ERR_LIMIT, "BATCH_GET requires 1..{MAX_BATCH_ITEMS} ids")
+        if ids_text == "" or ids.len() > bounds.max_items:
+            return err_response(ERR_LIMIT, "BATCH_GET requires 1..{bounds.max_items} ids")
         var values: [text] = []
         for id in ids:
             var args: Dict<text, text> = {}
@@ -292,37 +312,53 @@ class DbServerCapsule:
             val item = self.sys_read(session_id, DbRequest(op: "GET", args: args))
             if not item.ok:
                 return item
+            var value = ""
             if item.fields.contains_key("value"):
-                values.push(item.fields["value"])
+                value = item.fields["value"]
             elif item.fields.contains_key("id"):
-                values.push(item.fields["id"])
+                value = item.fields["id"]
             else:
                 return err_response(ERR_MALFORMED, "batch item has no value or id")
+            var prospective = values
+            prospective.push(value)
+            if encode_response(ok_with("values", prospective.join(","))).bytes().len() > bounds.max_response_bytes:
+                return err_response(ERR_LIMIT, "batch response exceeds {bounds.max_response_bytes} bytes")
+            values = prospective
         val joined = values.join(",")
-        if joined.chars().len() > MAX_RESPONSE_BYTES:
+        if encode_response(ok_with("values", joined)).bytes().len() > MAX_RESPONSE_BYTES:
             return err_response(ERR_LIMIT, "batch response exceeds {MAX_RESPONSE_BYTES} bytes")
         ok_with("values", joined)
 
     fn sys_range_get(session_id: i64, request: DbRequest) -> DbResponse:
+        val bounds: BoundedQuery = server_query_bounds()
         val table_name = request.arg("tbl") ?? ""
         val start = request.arg("start") ?? ""
         val end = request.arg("end") ?? ""
         val parsed_limit = try_parse_int(request.arg("limit") ?? "64")
         val limit = parsed_limit ?? 0
-        if limit <= 0 or limit > MAX_BATCH_ITEMS:
-            return err_response(ERR_LIMIT, "range limit must be 1..{MAX_BATCH_ITEMS}")
+        if limit <= 0 or limit > bounds.max_items:
+            return err_response(ERR_LIMIT, "range limit must be 1..{bounds.max_items}")
         var candidates: Dict<text, bool> = {}
         match self.store.get_table(table_name):
             Some(table):
                 val typed: SdnTable = table
-                for row in typed.valid_rows():
+                var scanned = 0
+                for row in typed.rows:
+                    scanned = scanned + 1
+                    if scanned > bounds.max_scan_rows:
+                        return err_response(ERR_LIMIT, "range scan exceeds {bounds.max_scan_rows} rows")
                     val id = row.get("id") ?? ""
-                    candidates[id] = true
+                    if row.get("valid") != Some("false"):
+                        candidates[id] = true
             nil:
                 return err_response(ERR_NO_TABLE, "no such table: {table_name}")
         val state = self.registry.txn_of(session_id)
         if state.open:
+            var overlay_scanned = 0
             for write in state.writes:
+                overlay_scanned = overlay_scanned + 1
+                if overlay_scanned > bounds.max_scan_rows:
+                    return err_response(ERR_LIMIT, "range overlay exceeds {bounds.max_scan_rows} writes")
                 val typed_write: TxnWrite = write
                 if typed_write.table == table_name:
                     candidates[typed_write.key] = typed_write.kind != WRITE_DEL
@@ -334,10 +370,14 @@ class DbServerCapsule:
         var bounded_ids: [text] = []
         var index = 0
         while index < ids.len() and index < limit:
-            bounded_ids.push(ids[index])
+            var prospective = bounded_ids
+            prospective.push(ids[index])
+            if encode_response(ok_with("ids", prospective.join(","))).bytes().len() > bounds.max_response_bytes:
+                return err_response(ERR_LIMIT, "range response exceeds {bounds.max_response_bytes} bytes")
+            bounded_ids = prospective
             index = index + 1
         val joined = bounded_ids.join(",")
-        if joined.chars().len() > MAX_RESPONSE_BYTES:
+        if encode_response(ok_with("ids", joined)).bytes().len() > MAX_RESPONSE_BYTES:
             return err_response(ERR_LIMIT, "range response exceeds {MAX_RESPONSE_BYTES} bytes")
         ok_with("ids", joined)
 
@@ -411,9 +451,17 @@ class DbServerCapsule:
         val parsed = parse_request(line)
         match parsed:
             Ok(request):
-                encode_response(self.handle_request(request))
+                val encoded = encode_response(self.handle_request(request))
+                if encoded.bytes().len() > MAX_RESPONSE_BYTES:
+                    return encode_response(err_response(ERR_LIMIT, "response exceeds byte bound"))
+                encoded
             Err(message):
                 encode_response(err_response(ERR_MALFORMED, message))
+
+    fn bounded_message_response(line: text) -> text:
+        # Shared by scripted and production transports so neither can bypass
+        # the encoded-byte response ceiling.
+        self.handle_message(line)
 
     # ------------------------------------------------------------------
     # Connection lifecycle over a transport port
@@ -452,9 +500,11 @@ class DbServerCapsule:
             val message = channel.read_message()
             match message:
                 Some(line):
-                    val reply = self.handle_message(line)
-                    channel.write_message(reply)
-                    served = served + 1
+                    val reply = self.bounded_message_response(line)
+                    if channel.write_message(reply):
+                        served = served + 1
+                    else:
+                        running = false
                 nil:
                     running = false
         var registry = self.registry
@@ -474,14 +524,10 @@ class DbServerCapsule:
         while running and served < SERVE_MAX_MESSAGES:
             match channel.read_message():
                 Some(line):
-                    val parsed = parse_request(line)
-                    match parsed:
-                        Ok(request):
-                            val response = self.handle_request(request)
-                            channel.write_message(encode_response(response))
-                        Err(message):
-                            channel.write_message(encode_response(err_response(ERR_MALFORMED, message)))
-                    served = served + 1
+                    if channel.write_message(self.bounded_message_response(line)):
+                        served = served + 1
+                    else:
+                        running = false
                 nil:
                     running = false
         if served >= SERVE_MAX_MESSAGES:
@@ -491,9 +537,6 @@ class DbServerCapsule:
         self.registry = registry
         channel.close()
         served
-
-    me stop_listening():
-        self.listener_running = false
 
     fn connection_capacity() -> i64:
         1
@@ -505,28 +548,42 @@ class DbServerCapsule:
     # the synchronization boundary for store+registry state and supplies
     # capacity-one backpressure without exposing the P3/P4 commit window.
     me listen(host: text, port: i64, max_connections: i64) -> Result<i64, IoError>:
+        if max_connections <= 0:
+            return Err(IoError(kind: IoErrorKind.InvalidInput, message: "max_connections must be positive", source: nil))
         val bounded = if max_connections > LISTENER_MAX_CONNECTIONS: LISTENER_MAX_CONNECTIONS else: max_connections
-        self.listener_running = true
-        val listener_result = TcpListener.bind("{host}:{port}")
+        val listener_result = DbListenerControl.bind("{host}:{port}")
         match listener_result:
             Err(error):
                 self.listener_running = false
                 Err(error)
             Ok(listener_value):
-                var listener = listener_value
-                var accepted = 0
-                while self.listener_running and accepted < bounded:
-                    match listener.accept_timeout(LISTENER_ACCEPT_TIMEOUT_MS):
-                        Err(_timeout):
-                            break
-                        Ok(stream):
-                            self.active_connections = 1
-                            self.serve_tcp(TcpDbTransport.from_stream(stream))
-                            self.active_connections = 0
-                            accepted = accepted + 1
-                listener.close()
-                self.listener_running = false
-                Ok(accepted)
+                self.serve_listener(listener_value, bounded)
+
+    # The caller may retain a copy of `control` and call request_stop() from
+    # another owner. DbStopControl is a shared mutex-backed token, while
+    # request_stop also closes the listener fd to interrupt an idle accept.
+    me serve_listener(control: DbListenerControl, max_connections: i64) -> Result<i64, IoError>:
+        var listener = control
+        self.listener_running = true
+        var accepted = 0
+        while not listener.is_stopped() and accepted < max_connections:
+            match listener.accept_timeout(LISTENER_ACCEPT_TIMEOUT_MS):
+                Err(accept_error):
+                    if listener.is_stopped() or accept_error.kind == IoErrorKind.Interrupted:
+                        break
+                    if accept_error.kind == IoErrorKind.TimedOut:
+                        continue
+                    listener.close()
+                    self.listener_running = false
+                    return Err(accept_error)
+                Ok(transport):
+                    self.active_connections = 1
+                    self.serve_tcp(transport)
+                    self.active_connections = 0
+                    accepted = accepted + 1
+        listener.close()
+        self.listener_running = false
+        Ok(accepted)
 
 # ============================================================================
 # Convenience constructors

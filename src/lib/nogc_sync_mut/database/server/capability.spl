@@ -7,6 +7,10 @@
 # The check is a pure function of (capability, table, op) — no I/O, no store
 # access — so it is trivially testable and cannot be raced.
 
+use std.common.crypto.sha256.{sha256_text}
+
+val UNKNOWN_PRINCIPAL_DIGEST: text = sha256_text("db-server-unknown-principal")
+
 # ============================================================================
 # Access kinds
 # ============================================================================
@@ -32,6 +36,10 @@ struct DbCapability:
     # key = "<table>:<access>" -> "1".  A Dict is used rather than a list so the
     # check is O(1) and cannot be defeated by grant-list ordering.
     grants: Dict<text, text>
+
+struct AuthenticatedPrincipal:
+    principal: text
+    capability: DbCapability
 
 fn grant_key(table: text, access: text) -> text:
     table + ":" + access
@@ -77,10 +85,10 @@ fn capability_allows_op(capability: DbCapability, op: text, table: text) -> bool
 
 class CapabilityTable:
     entries: Dict<text, DbCapability>
-    credentials: Dict<text, text>
+    credential_digests: Dict<text, text>
 
     static fn new() -> CapabilityTable:
-        CapabilityTable(entries: {}, credentials: {})
+        CapabilityTable(entries: {}, credential_digests: {})
 
     me register(capability: DbCapability):
         # Extract -> mutate -> write back: never a mutating call through two
@@ -98,29 +106,30 @@ class CapabilityTable:
         if credential == "":
             return
         self.register(capability)
-        var credentials = self.credentials
-        credentials[capability.principal] = credential
-        self.credentials = credentials
+        var digests = self.credential_digests
+        digests[capability.principal] = sha256_text(credential)
+        self.credential_digests = digests
 
-    fn authenticate(principal: text, candidate: text) -> bool:
-        """Compare credentials without a content-mismatch early return.
-
-        Unknown and empty principals traverse the same comparison loop against
-        a non-secret dummy value; the final known-principal bit denies them.
-        """
-        val known = principal != "" and self.credentials.contains_key(principal)
-        val expected: text = if known: self.credentials[principal] else: "invalid-credential"
+    fn authenticate_principal(principal: text, candidate: text) -> AuthenticatedPrincipal?:
+        """Hash then compare exactly 64 digest characters for every attempt."""
+        val known = principal != "" and self.credential_digests.contains_key(principal) and self.entries.contains_key(principal)
+        val expected: text = if known: self.credential_digests[principal] else: UNKNOWN_PRINCIPAL_DIGEST
+        val candidate_digest = sha256_text(candidate)
         val left = expected.chars()
-        val right = candidate.chars()
-        var different = left.len() ^ right.len()
-        val count = if left.len() > right.len(): left.len() else: right.len()
+        val right = candidate_digest.chars()
+        var different = 0
         var i = 0
-        while i < count:
-            val a = if i < left.len(): left[i].to_int() else: 0
-            val b = if i < right.len(): right[i].to_int() else: 0
+        while i < 64:
+            val a = left[i].to_int()
+            val b = right[i].to_int()
             different = different | (a ^ b)
             i = i + 1
-        known and candidate != "" and different == 0
+        if known and candidate != "" and different == 0:
+            return Some(AuthenticatedPrincipal(principal: principal, capability: self.entries[principal]))
+        nil
+
+    fn authenticate(principal: text, candidate: text) -> bool:
+        self.authenticate_principal(principal, candidate).?
 
     fn lookup(principal: text) -> DbCapability?:
         if self.entries.contains_key(principal):

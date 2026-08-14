@@ -84,8 +84,10 @@ requests, with durable transaction semantics and retained SPipe evidence.
 - Sidecar DOC owns AC-9..12 documentation, manual, and verification inventory.
 - Merge owner: root Codex agent in this detached worktree.
 - Final reviewer: a fresh highest-capability Codex reviewer after integration.
-- Shared interfaces: `SecureServerPolicy`, `DbTransport`, `DbListener`,
-  `AuthenticatedPrincipal`, `CommitIdentity`, `BoundedQuery`.
+- Concrete shared interfaces after cycle-2 DB correction:
+  `SecureServerPolicy`, `DbTransport`, `DbListener`, `TcpDbTransport`,
+  `TcpDbListener`, `AuthenticatedPrincipal`, `CommitIdentity`, `BoundedQuery`,
+  and `DbServerCapsule`.
 - Manual flow steps: `Bind the production listener`; `Reject an unsafe web
   request before dispatch`; `Authenticate the database principal`; `Commit and
   recover one durable transaction`; `Retry one commit id without reapplying`;
@@ -124,3 +126,34 @@ dev-blocked
   request identity/security-header flow, distinguishable variable-work DB auth,
   unsafe listener shutdown, principal-unbound replay receipts, non-byte-bounded
   range work, and missing real-listener/runtime evidence. No AC was promoted.
+  This is the historical cycle-1 verdict; later source corrections narrow but
+  do not erase it, and require fresh review rather than rewriting provenance.
+- evidence-followup: Authored deterministic pre-bind invalid-capacity teardown
+  coverage over the real `listen` entry point, a capability denial matrix, and
+  mirrored manuals for the changed DB durability/tier specs. A proposed
+  no-client loopback listener scenario was rejected during root audit: accepting
+  any bind error was vacuous, while a shutdown-polling accept may wait forever
+  without a concurrent connector. Live bind/accept/client/EOF/stop evidence is
+  therefore explicitly RED/BLOCKED pending a concurrent fixture and admitted
+  runtime; no listener PASS is claimed.
+  Existing durability coverage binds the P3/P4 crash matrix and lost-ack retry
+  to fresh-disk and principal-bound receipt oracles. Static review found no
+  placeholder assertions in these additions. The unhealthy admitted Stage-4
+  CLI still prevents execution, `sspec-maintain`, `spipe-docgen`, runtime
+  coverage, socket transcripts, and genuine deliberate-red fail/restore
+  provenance; AC-9/10/12/13 remain open and no runtime PASS is claimed. Exact
+  inventory: `doc/09_report/secure_pure_simple_servers_evidence_status.md`.
+- cycle2-contract-audit: Reconciled architecture/design/guide/plan names with
+  post-rebase source. Exact auth-frame equality is asserted for missing, wrong,
+  and unknown credentials. Production `serve_tcp` now shares
+  `bounded_message_response` with the scripted adapter, structurally closing
+  the bypass; runtime TCP evidence remains blocked by CLI admission.
+- cycle3-high-review: Highest-capability review again rejected handoff and
+  completion, identifying unusable idle-listener shutdown ownership, ignored
+  TCP write failure, unbounded web connection spawning, and stale plan prose.
+- cycle3-final-fix: Added shared stop control that closes the DB listener,
+  propagated transport write status into connection/session cleanup, added
+  shared atomic web admission with bounded rejection and guaranteed release,
+  and reconciled the plan. Final static gates pass. The three-cycle cap is
+  reached; production TLS and admitted runtime/live-socket evidence remain
+  blockers, so no AC or ledger row is promoted.

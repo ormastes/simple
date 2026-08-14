@@ -1,6 +1,8 @@
 """Primitive HTTP/SSE listener adapter for canonical messaging."""
 
-use std.nogc_sync_mut.http_server.{SimpleHttpServer, Router, HttpRequest, HttpResponse, HttpStatus, http_method_to_text}
+use std.nogc_sync_mut.http_server.{SimpleHttpServer, SecureServerPolicy,
+    plaintext_development_capability, Router, HttpRequest, HttpResponse,
+    HttpStatus, http_method_to_text}
 use app.io.mod.{current_time_ms}
 use app.llm_caret.messaging.adapter.server.auth.{AuthPrincipal, bearer_token}
 use app.llm_caret.messaging.adapter.server.primitive_dispatch.{PrimitiveRequest, PrimitiveMessagingApplication}
@@ -54,12 +56,17 @@ fn configure_primitive_http_server(database_path: text, token: text, identity_id
     PRIMITIVE_HTTP_SCOPES = scopes
     PRIMITIVE_HTTP_EXPIRES_AT = expires_at
 
-fn run_primitive_http_server(host: text, port: i64):
+fn run_primitive_http_server(host: text, port: i64) -> Result<(), text>:
     var router = Router.new()
     router.mount("/v1", primitive_http_handle)
     router.set_not_found(primitive_http_handle)
     print "llm-caret messaging listening on " + host + ":" + port.to_text()
     var server = SimpleHttpServer.new(host, port.to_i32(), router)
-    server.start()
+    if host != "127.0.0.1" and host != "::1" and host != "localhost":
+        return server.start()
+    val capability = plaintext_development_capability(
+        "llm-caret messaging loopback listener")?
+    server.with_policy(SecureServerPolicy.plaintext_dev(capability))
+    server.start_plaintext(capability)
 
 export configure_primitive_http_server, run_primitive_http_server

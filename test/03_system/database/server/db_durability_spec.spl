@@ -49,8 +49,10 @@ file body carries a crc32 header, so a torn file that somehow did reach
 
 A crash after P4 but before P5 leaves the data permanently stored while the
 client is told nothing. The client cannot distinguish that from a crash before
-P4. This tier is therefore **at-least-once** at the connection level: after a
-dropped connection a client must re-read, and must not assume a retry is free.
+P4. A legacy COMMIT without \`commit_id\` is therefore **at-least-once** at the
+connection level. A validated \`commit_id\` records a principal-bound durable
+receipt, so the same authenticated principal may safely retry after reconnect;
+another principal or different transaction content is rejected as a conflict.
 
 ## Related Specifications
 
@@ -61,13 +63,16 @@ dropped connection a client must re-read, and must not assume a retry is free.
 """
 
 use std.spec
-use std.database.core.{ SdnTable, SdnDatabase }
+use std.database.core.{ SdnRow, SdnTable, SdnDatabase }
 use std.database.atomic.{ file_exists, file_delete, file_write }
 use std.database.server.capability.{ CapabilityTable, capability_with, grant_key }
 use std.database.server.server.{ DbServerCapsule }
-use std.database.server.txn.{ begin_txn, txn_record, store_version, TxnWrite, TxnState, WRITE_PUT }
+use std.database.server.txn.{
+    begin_txn, txn_record, store_version, TxnWrite, TxnState, WRITE_PUT,
+    DURABLE_VERSION_COLUMN, INVALID_PERSISTED_VERSION
+}
 use std.database.server.durability.{
-    DurabilityPolicy, DurableOutcome, durable_commit,
+    DurabilityPolicy, DurableOutcome, durable_commit, COMMIT_TABLE, MAX_COMMIT_RECEIPTS,
     durability_on, durability_off, durability_crash_at,
     durable_value, durable_file_loads, temp_path_exists,
     CRASH_BEFORE_PERSIST, CRASH_MID_PERSIST, CRASH_AFTER_PERSIST,
@@ -454,6 +459,59 @@ describe "DB durability — the contract is explicit about what it did":
 
 describe "DB durability — restart-safe versions and commit identity":
 
+    it "fails closed on missing or invalid declared persisted versions":
+        for persisted in ["", "not-a-version", "-1"]:
+            var db = SdnDatabase.new("")
+            var users = SdnTable.new("users", ["id", "name", "valid", DURABLE_VERSION_COLUMN])
+            var fields: Dict<text, text> = {"id": "u1", "name": "old", "valid": "true"}
+            if persisted != "":
+                fields[DURABLE_VERSION_COLUMN] = persisted
+            users.add_row(SdnRow(fields: fields, _version: 0))
+            db.set_table("users", users)
+            assert_equal(store_version(db, "users", "u1"), INVALID_PERSISTED_VERSION)
+            var server = DbServerCapsule.new(db, alice_policy())
+            server.handle_message("OPEN as=alice credential=alice-secret")
+            server.handle_message("BEGIN session=1")
+            server.handle_message("PUT session=1 tbl=users id=u1 name=new")
+            assert_contains(server.handle_message("COMMIT session=1 commit_id=invalid-version"), "code=conflict")
+
+    it "rejects a malformed durable receipt schema on replay":
+        val path = "build/dbdur_bad_receipt.sdn"
+        var db = fresh_store(path)
+        var receipts = SdnTable.new(COMMIT_TABLE, ["id", "principal", "applied", "identity", "valid"])
+        val bad = SdnRow(fields: {
+            "id": "bad-receipt", "principal": "alice", "applied": "not-a-number",
+            "identity": "short", "valid": "true"
+        }, _version: 0)
+        receipts.add_row(bad)
+        db.set_table(COMMIT_TABLE, receipts)
+        assert_true(db.save())
+        val reopened = SdnDatabase.load(path) ?? SdnDatabase.new("")
+        var server = DbServerCapsule.new(reopened, alice_policy())
+        server.handle_message("OPEN as=alice credential=alice-secret")
+        assert_contains(server.handle_message("COMMIT session=1 commit_id=bad-receipt"), "code=conflict")
+
+    it "rejects a new commit id when durable receipt retention is full":
+        val path = "build/dbdur_receipt_capacity.sdn"
+        var db = fresh_store(path)
+        val filler = SdnRow(fields: {
+            "id": "filler", "principal": "alice", "applied": "1",
+            "identity": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "valid": "true"
+        }, _version: 0)
+        val full = SdnTable(
+            name: COMMIT_TABLE,
+            columns: ["id", "principal", "applied", "identity", "valid"],
+            rows: [filler; MAX_COMMIT_RECEIPTS], index: {}
+        )
+        db.set_table(COMMIT_TABLE, full)
+        var server = DbServerCapsule.new(db, alice_policy())
+        server.handle_message("OPEN as=alice credential=alice-secret")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("PUT session=1 tbl=users id=u1 name=blocked")
+        assert_contains(server.handle_message("COMMIT session=1 commit_id=over-cap"), "code=conflict")
+        assert_equal(on_disk(path, "u1"), ABSENT)
+
     it "persists optimistic row versions across reopen":
         val path = "build/dbdur_versions.sdn"
         var first = DbServerCapsule.new(fresh_store(path), alice_policy())
@@ -479,6 +537,11 @@ describe "DB durability — restart-safe versions and commit identity":
         retry.handle_message("OPEN as=alice credential=alice-secret")
         assert_equal(retry.handle_message("COMMIT session=1 commit_id=stable-42"), "OK applied=1")
         assert_equal(on_disk(path, "u1"), "once")
+        var cross_policy = alice_policy()
+        cross_policy.register_authenticated(capability_with("bob", [grant_key("users", "read")]), "bob-secret")
+        var cross = DbServerCapsule.new(reopened, cross_policy)
+        cross.handle_message("OPEN as=bob credential=bob-secret")
+        assert_contains(cross.handle_message("COMMIT session=1 commit_id=stable-42"), "code=conflict")
 
     it "rejects reuse of one commit id for different transaction content":
         val path = "build/dbdur_commit_identity_conflict.sdn"

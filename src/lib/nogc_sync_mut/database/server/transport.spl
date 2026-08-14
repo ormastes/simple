@@ -13,41 +13,63 @@
 # MemoryTransport is the BufferTransport-equivalent: no externs, no stdin, safe
 # in interpreter mode, which is where the specs run.
 
-use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.io.types.{IoError, IoErrorKind}
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
 
 trait DbTransport:
     """One framed message channel between a client and the DB server.
 
     read_message() blocks until a message arrives; returns nil on EOF/closed.
-    write_message() must not return until the message has been handed off.
+    write_message() must not return until the message has been handed off;
+    false means delivery failed and the connection owner must terminate.
     """
 
     fn read_message() -> text?
 
-    fn write_message(msg: text)
+    fn write_message(msg: text) -> bool
 
     fn close()
+
+trait DbListener:
+    fn accept_timeout(ms: i64) -> Result<TcpDbTransport, IoError>
+    fn close() -> Result<(), IoError>
 
 class TcpDbTransport with DbTransport:
     stream: TcpStream
     closed: bool
+    timeout_ready: bool
 
     static fn from_stream(stream: TcpStream) -> TcpDbTransport:
-        TcpDbTransport(stream: stream, closed: false)
+        var bounded = stream
+        val read_ready = bounded.set_read_timeout_status(5000)
+        var write_ready = false
+        match bounded.set_write_timeout(Some(5000)):
+            Ok(_): write_ready = true
+            Err(_): write_ready = false
+        val ready = read_ready and write_ready
+        if not ready:
+            bounded.close()
+        TcpDbTransport(stream: bounded, closed: not ready, timeout_ready: ready)
+
+    fn is_ready() -> bool:
+        self.timeout_ready and not self.closed
 
     me read_message() -> text?:
-        if self.closed:
+        if self.closed or not self.timeout_ready:
             return nil
         var stream = self.stream
         val message = stream.read_line_nullable()
         self.stream = stream
         message
 
-    me write_message(msg: text):
-        if not self.closed:
+    me write_message(msg: text) -> bool:
+        if not self.closed and self.timeout_ready:
             var stream = self.stream
-            stream.write_text_status(msg + "\n")
+            val written = stream.write_text_status(msg + "\n")
             self.stream = stream
+            return written
+        false
 
     me close():
         if not self.closed:
@@ -55,6 +77,69 @@ class TcpDbTransport with DbTransport:
             stream.close()
             self.stream = stream
             self.closed = true
+
+class TcpDbListener with DbListener:
+    listener: TcpListener
+
+    static fn bind(addr: text) -> Result<TcpDbListener, IoError>:
+        match TcpListener.bind(addr):
+            Ok(listener): Ok(TcpDbListener(listener: listener))
+            Err(error): Err(error)
+
+    me accept_timeout(ms: i64) -> Result<TcpDbTransport, IoError>:
+        match self.listener.accept_timeout(ms):
+            Err(error): Err(error)
+            Ok(stream):
+                val transport = TcpDbTransport.from_stream(stream)
+                if not transport.is_ready():
+                    return Err(IoError(
+                        kind: IoErrorKind.Other,
+                        message: "connection timeout setup failed", source: nil))
+                Ok(transport)
+
+    me close() -> Result<(), IoError>:
+        self.listener.close()
+
+class DbStopControl:
+    stop_gate: Mutex
+
+    static fn new() -> DbStopControl:
+        DbStopControl(stop_gate: mutex_new(false))
+
+    fn is_stopped() -> bool:
+        val stopped: bool = mutex_lock(self.stop_gate)
+        mutex_unlock(self.stop_gate, stopped)
+        stopped
+
+    me request_stop():
+        val _previous: bool = mutex_lock(self.stop_gate)
+        mutex_unlock(self.stop_gate, true)
+
+class DbListenerControl with DbListener:
+    listener: TcpDbListener
+    stop: DbStopControl
+
+    static fn bind(addr: text) -> Result<DbListenerControl, IoError>:
+        match TcpDbListener.bind(addr):
+            Ok(listener): Ok(DbListenerControl(listener: listener, stop: DbStopControl.new()))
+            Err(error): Err(error)
+
+    fn is_stopped() -> bool:
+        self.stop.is_stopped()
+
+    me request_stop() -> Result<(), IoError>:
+        var stop = self.stop
+        stop.request_stop()
+        self.stop = stop
+        self.listener.close()
+
+    me accept_timeout(ms: i64) -> Result<TcpDbTransport, IoError>:
+        if self.is_stopped():
+            return Err(IoError(kind: IoErrorKind.Interrupted, message: "database listener stopped", source: nil))
+        self.listener.accept_timeout(ms)
+
+    me close() -> Result<(), IoError>:
+        self.request_stop()
 
 # ============================================================================
 # MemoryTransport — scripted inbound, captured outbound (specs + golden runs)
@@ -64,12 +149,16 @@ class MemoryTransport with DbTransport:
     inbound: [text]
     sent: [text]
     closed: bool
+    fail_writes: bool
 
     static fn new() -> MemoryTransport:
-        MemoryTransport(inbound: [], sent: [], closed: false)
+        MemoryTransport(inbound: [], sent: [], closed: false, fail_writes: false)
 
     static fn with_messages(messages: [text]) -> MemoryTransport:
-        MemoryTransport(inbound: messages, sent: [], closed: false)
+        MemoryTransport(inbound: messages, sent: [], closed: false, fail_writes: false)
+
+    static fn with_failed_writes(messages: [text]) -> MemoryTransport:
+        MemoryTransport(inbound: messages, sent: [], closed: false, fail_writes: true)
 
     me push_inbound(msg: text):
         var inbound = self.inbound
@@ -90,12 +179,13 @@ class MemoryTransport with DbTransport:
         self.inbound = rest
         Some(first)
 
-    me write_message(msg: text):
-        if self.closed:
-            return
+    me write_message(msg: text) -> bool:
+        if self.closed or self.fail_writes:
+            return false
         var sent = self.sent
         sent.push(msg)
         self.sent = sent
+        true
 
     me close():
         self.closed = true

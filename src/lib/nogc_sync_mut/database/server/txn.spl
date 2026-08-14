@@ -24,6 +24,7 @@ use std.database.core.{ SdnRow, SdnTable, SdnDatabase }
 use std.convert (try_parse_int)
 
 val DURABLE_VERSION_COLUMN: text = "_db_server_version"
+val INVALID_PERSISTED_VERSION: i64 = -2
 
 # ============================================================================
 # Write records
@@ -126,8 +127,10 @@ fn store_version(store: SdnDatabase, table_name: text, key: text) -> i64:
                 Some(row):
                     val typed_row: SdnRow = row
                     val durable = typed_row.get(DURABLE_VERSION_COLUMN) ?? ""
-                    val parsed = try_parse_int(durable)
-                    if parsed != nil:
+                    if typed.columns.contains(DURABLE_VERSION_COLUMN):
+                        val parsed = try_parse_int(durable)
+                        if parsed == nil or (parsed ?? -1) < 0:
+                            return INVALID_PERSISTED_VERSION
                         return parsed ?? 0
                     typed_row._version
                 nil:
@@ -157,6 +160,8 @@ fn txn_precheck(store: SdnDatabase, state: TxnState) -> CommitOutcome:
     for write in state.writes:
         val typed: TxnWrite = write
         val current = store_version(store, typed.table, typed.key)
+        if current == INVALID_PERSISTED_VERSION or typed.base_version == INVALID_PERSISTED_VERSION:
+            return commit_conflict(typed.key, "missing or invalid persisted version for {typed.table}/{typed.key}")
         if current != typed.base_version:
             return commit_conflict(
                 typed.key,

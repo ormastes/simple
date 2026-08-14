@@ -42,13 +42,13 @@ use std.database.server.protocol.{
     parse_request, encode_response, tokenize, err_response, ok_with
 }
 use std.database.server.capability.{
-    CapabilityTable, DbCapability, capability_with, capability_allows,
+    CapabilityTable, DbCapability, AuthenticatedPrincipal, capability_with, capability_allows,
     empty_capability, grant_key, op_access
 }
 use std.database.server.session.{ SessionRegistry }
 use std.database.server.txn.{ store_read, store_version }
 use std.database.server.server.{ DbServerCapsule }
-use std.database.server.transport.{ MemoryTransport }
+use std.database.server.transport.{ MemoryTransport, DbStopControl }
 
 # ============================================================================
 # Fixtures
@@ -108,12 +108,35 @@ describe "DB server tier — connection lifecycle":
         var server = make_server()
         assert_contains(server.handle_message("OPEN as=alice credential=bob-secret"), "code=auth")
 
+    it "stores only a fixed digest and returns an authenticated principal proof":
+        val policy = make_policy()
+        assert_equal(policy.credential_digests["alice"].chars().len(), 64)
+        assert_false(policy.credential_digests["alice"] == "alice-secret")
+        val proof = policy.authenticate_principal("alice", "alice-secret")
+        assert_true(proof.?)
+        assert_equal((proof ?? AuthenticatedPrincipal(principal: "", capability: empty_capability(""))).principal, "alice")
+
     it "gives each client its own session id":
         var server = make_server("gives_each_client_its_own_session_id")
         val first = server.handle_message("OPEN as=alice credential=alice-secret")
         val second = server.handle_message("OPEN as=bob credential=bob-secret")
         assert_equal(first, "OK session=1")
         assert_equal(second, "OK session=2")
+
+    it "polls accept timeouts until explicit shutdown becomes observable":
+        var owner = DbStopControl.new()
+        val accept_owner = owner
+        assert_false(accept_owner.is_stopped())
+        owner.request_stop()
+        assert_true(accept_owner.is_stopped())
+
+    it "terminates the connection and cleans sessions after a write failure":
+        var server = make_server("write_failure_cleanup")
+        val outcome = server.serve(MemoryTransport.with_failed_writes([
+            "OPEN as=alice credential=alice-secret", "PING session=1"
+        ]))
+        assert_equal(outcome.served, 0)
+        assert_equal(server.registry.open_session_count(), 0)
 
     it "refuses to work for a session that was never opened":
         var server = make_server("refuses_to_work_for_a_session_that_was_n")
@@ -447,6 +470,19 @@ describe "DB server tier — capability-checked access is deny-wins":
 
 
 describe "DB server tier — bounded batch and range requests":
+
+    it "accounts for multibyte UTF-8 values in encoded responses":
+        var server = make_server("utf8_batch_response")
+        server.handle_message("OPEN as=alice credential=alice-secret")
+        server.handle_message("BEGIN session=1")
+        server.handle_message("BATCH_PUT session=1 tbl=users ids=u1,u2 name=猫")
+        assert_equal(server.handle_message("BATCH_GET session=1 tbl=users ids=u1,u2 col=name"), "OK values=猫,猫")
+
+    it "rejects an invalid commit identity before durability work":
+        var server = make_server("invalid_commit_identity")
+        server.handle_message("OPEN as=alice credential=alice-secret")
+        server.handle_message("BEGIN session=1")
+        assert_contains(server.handle_message("COMMIT session=1 commit_id=bad/id"), "code=malformed")
 
     it "applies one capability and transaction boundary to a bounded batch":
         var server = make_server("batch_success")

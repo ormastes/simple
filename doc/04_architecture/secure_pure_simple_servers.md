@@ -11,16 +11,16 @@ through stable ports; it does not introduce a second protocol implementation.
 
 Use runtime composition, not a compile-time feature transform. Security policy
 is cross-cutting, but it must remain visible at concrete I/O boundaries.
-`SecureServerPolicy`, `DbTransport`, `DbListener`,
-`AuthenticatedPrincipal`, `CommitIdentity`, and `BoundedQuery` are the shared
-interface names. The web and DB capsules remain siblings and share only owned
+The concrete shared types are `SecureServerPolicy`, `DbTransport`,
+`DbListener`, `TcpDbTransport`, `TcpDbListener`, `AuthenticatedPrincipal`,
+`CommitIdentity`, `BoundedQuery`, and `DbServerCapsule`. The web and DB capsules remain siblings and share only owned
 socket/file providers; neither reaches into the other's private modules.
 
 ```text
 owned socket facade
   ├─ web listener -> encrypted stream [BLOCKED: GAP-TLS-3]
   │   -> bounded parser -> request identity/security -> router -> writer
-  └─ DbListener -> DbTransport -> frame bounds -> OPEN authentication
+  └─ DbListener/TcpDbListener -> TcpDbTransport -> frame bounds -> OPEN authentication
       -> capability -> authoritative mutation owner
       -> overlay/precheck -> durable commit + CommitIdentity -> response bound
 ```
@@ -44,8 +44,9 @@ without plaintext fallback.
 
 ## Database capsule
 
-`DbListener` owns bind/accept/shutdown and produces bounded `DbTransport`
-instances. Each connection has one session identity and cleanup path. Frame,
+`DbListener` owns bind/accept/shutdown; `TcpDbListener` and
+`DbServerCapsule.listen/stop_listening` compose it with `TcpDbTransport`.
+Each connection has one session identity and cleanup path. Frame,
 message, connection, batch/range, and response limits are checked before
 allocation or mutation. `OPEN` resolves credentials to an
 `AuthenticatedPrincipal`; only then may the capability table be consulted.
@@ -58,7 +59,7 @@ Durable row versions and the commit-identity record are stored in the same
 atomic persistence unit. A repeated identity returns the recorded result only
 when its transaction fingerprint matches; reuse for different work rejects.
 
-`BoundedQuery` normalizes batch/range input before execution. It authorizes
+`BoundedQuery` carries item, encoded-response-byte, and scan-work ceilings. The handlers authorize
 each table/operation, reads through the session overlay, sorts by stable key,
 and assembles into a bounded response before publishing. A write batch is
 validated completely before adding any overlay entries.
