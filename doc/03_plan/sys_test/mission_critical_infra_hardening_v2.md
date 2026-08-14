@@ -12,7 +12,7 @@ lane.  The lane owns the host-independent compiler, SimpleOS-manifest, packed
 rendering, allocation, process, and aggregate-contract hardening needed before
 the release-facing evidence producers may be trusted.
 
-Current frozen source candidate is `a0b0480ce9708bd58bc9387fc7358cd3d619047a`;
+Current frozen source candidate is `f9d35a3f14e085377a398d8398ec392787c86011`;
 the docs-only handoff commit follows it. The owning alias/HIR repair
 originated at `cc30abb73ddc4652d8324bfa28768eda1cf4efeb`. Integration
 `f8f10b7af40` additionally restores the typed parser `decrease_measure` owner
@@ -162,7 +162,7 @@ its canonical record is
 `doc/08_tracking/bug/build11_stage3_compile_context_corruption_2026-08-14.md`.
 
 The published authority is now stale: the current LLVM seed-input fingerprint
-is `813207318695c52e44c05a342fddff72e3b543805ed30eba7e37d4f30b34fb84`,
+is `60a87e35c0d9ed30a506afe1d777c59c78b9aac1dc8e3869fccc1429729a2c91`,
 while the published stamp is
 `69872b0a70dbefe456b99b8273d9d2747748a7457f65029b6e9e8e8b051b12bd`.
 Therefore `--pure-simple --full-cli` is forbidden: it deterministically refuses

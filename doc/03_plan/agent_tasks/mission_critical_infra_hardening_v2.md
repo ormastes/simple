@@ -39,7 +39,7 @@ review receipt.
   not imply feature verification or release readiness and does not replace the external
   independently signed release reviewer.
 - Current frozen source candidate:
-  `a0b0480ce9708bd58bc9387fc7358cd3d619047a`; the docs-only handoff commit
+  `f9d35a3f14e085377a398d8398ec392787c86011`; the docs-only handoff commit
   follows it. Parser/lookup repair is `f8f10b7af40`; alias/HIR origin is
   `cc30abb73dd`.
 - Owned blocker: parser/HIR owners and scalar-prefilter lookup are restored but

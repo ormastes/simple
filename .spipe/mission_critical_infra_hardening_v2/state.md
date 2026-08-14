@@ -43,7 +43,7 @@ impl-in-progress
 
 ## Current handoff (2026-08-14)
 
-- Frozen source candidate: `a0b0480ce9708bd58bc9387fc7358cd3d619047a`;
+- Frozen source candidate: `f9d35a3f14e085377a398d8398ec392787c86011`;
   parser/lookup repair `f8f10b7af40`, alias/HIR origin `cc30abb73dd`.
 - Stage 2 multiline continuation compatibility was repaired with explicit
   grouping and tracked in

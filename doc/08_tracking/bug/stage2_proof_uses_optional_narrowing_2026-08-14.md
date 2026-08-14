@@ -120,9 +120,9 @@ current authority before promoting an admitted Stage 4 compiler.
 
 ## Current authority prerequisite
 
-For frozen source `a0b0480ce9708bd58bc9387fc7358cd3d619047a`, the current LLVM
+For frozen source `f9d35a3f14e085377a398d8398ec392787c86011`, the current LLVM
 seed-input fingerprint is
-`813207318695c52e44c05a342fddff72e3b543805ed30eba7e37d4f30b34fb84`;
+`60a87e35c0d9ed30a506afe1d777c59c78b9aac1dc8e3869fccc1429729a2c91`;
 the published stamp remains
 `69872b0a70dbefe456b99b8273d9d2747748a7457f65029b6e9e8e8b051b12bd`.
 A `--pure-simple --full-cli` continuation therefore fails closed on stale
