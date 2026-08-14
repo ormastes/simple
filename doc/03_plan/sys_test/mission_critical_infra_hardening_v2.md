@@ -15,7 +15,11 @@ the release-facing evidence producers may be trusted.
 Current integrated baseline is `f26936914d9833a000044757f6475bc7fd6e62cb`,
 reachable from `origin/main`. The phase is `impl-in-progress`; the last bounded
 bootstrap attempt completed Stage 2 and its sanity check, then the exact fresh
-Stage 2 binary segfaulted during Stage 3 self-hosting. This is an owned FAIL,
+The prior Stage 2 binary segfaulted during Stage 3 self-hosting. A fresh
+current-head full bootstrap on 2026-08-14 now fails earlier in Stage 2 because
+optional `HirContractBlock` narrowing loses its type and exposes `proof_uses`
+through `ANY`; the explicit-binding fix is implemented but unverified because
+the session's three-cycle cap is exhausted. This is an owned FAIL,
 not an external-host warning and not a verification PASS.
 
 ### Completion audit — plan objective versus feature objective
@@ -39,7 +43,7 @@ review, and complete this resumable plan document. Evidence for that objective:
 
 That completion does **not** complete the mission-critical feature, verify
 phase, or release. The umbrella feature remains `impl-in-progress` and BLOCKED
-by the owned Stage 3 self-host failure, unexecuted current-head runtime gates,
+by the owned Stage 2/Stage 3 bootstrap failures, unexecuted current-head runtime gates,
 missing per-scenario executable ownership/docgen provenance, external
 QEMU/GPU/RenderDoc/Metal/24-hour evidence, the real independently signed
 reviewer receipt, and a final aggregate with `release_blockers=none`. No agent
@@ -90,13 +94,13 @@ confirming the divergence applies generally rather than only to tuple-derived
 conditions.  That predicate now uses the same explicit grouping.  Cycle 3 is
 the final permitted bootstrap/fix attempt for this lane.
 
-Cycle 3 passed both corrected predicates and completed the Stage 2 build and
+Restart12 cycle 3 passed both corrected predicates and completed the Stage 2 build and
 sanity gate, then the fresh pure-Simple Stage 2 compiler segfaulted while
 self-hosting Stage 3 (`stage3-native-build`, exit 139).  The three-cycle cap is
 exhausted.  Therefore the host-independent focused specs and compiler/core/MCP
 runtime gates remain unexecuted rather than being rerun through the stale
 release compiler or substituted with bootstrap-seed evidence.  Integration is
-`WARN`, with this owned Stage 3 crash still open; it is not a mission-critical
+`WARN`, with this historical Stage 3 crash still open; it is not a mission-critical
 verification PASS. Retained evidence:
 
 - Stage 2 binary:
@@ -113,6 +117,13 @@ verification PASS. Retained evidence:
 - Exact resume command, in a fresh session because this session exhausted the
   three-cycle cap:
   `sh scripts/bootstrap/bootstrap-from-scratch.sh --pure-simple --full-cli --no-mcp --diagnostics=test --diagnostic-child-compiler=/mnt/data/worktrees/restart12-infra/build/restart12-bootstrap/stage2/x86_64-unknown-linux-gnu/simple --output=build/restart12-bootstrap --jobs=full --progress=build/restart12-bootstrap/progress-resume.log`.
+
+Restart13 superseding current-head evidence: a fresh full-bootstrap published
+the stale Rust bootstrap tuple, then Stage 2 failed on two `proof_uses` reads
+whose narrowed optional receiver was inferred as `ANY`. The explicit
+`HirContractBlock` binding fix is implemented in both owners. Verification is
+pending a fresh capped session; retained paths and SHA-256 values are recorded
+in `doc/08_tracking/bug/stage2_proof_uses_optional_narrowing_2026-08-14.md`.
 
 ### External host and authority blockers
 
@@ -217,7 +228,9 @@ NFR-MCI-009.
 
 ### Implementation handoff and resume order
 
-1. Diagnose and fix the Stage 3 exit-139 owner path in a fresh capped session.
+1. Verify the Stage 2 explicit optional-payload bindings in a fresh capped
+   cache-preserving bootstrap; if Stage 3 then reproduces exit 139, capture its
+   symbolized owner path before editing.
 2. Produce and admit an exact-current Stage 4 full CLI; run the essential-tools
    smoke gate against that exact binary.
 3. Run each focused compiler/rendering/allocation/SimpleOS/aggregate spec once.

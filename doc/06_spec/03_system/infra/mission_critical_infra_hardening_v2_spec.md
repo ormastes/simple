@@ -2,14 +2,14 @@
 
 **Evidence class:** executable pure-policy validation plus explicit release blockers
 **Executable source:** `test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl`
-**Executable source SHA-256:** `6cee37138f9becde3947ce7c0fb42b43fd9f963a0e0ce477c1be132bfeba3bfc`
-**Generation status:** hand-maintained mirror; current-head SPipe doc generation is blocked by the Stage 3 self-host exit-139 tracked in `doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md` and was not run.
+**Executable source SHA-256:** `5f9aa4a33e57495684ec02518b42b0decb527a4bec0a9b84efc999a265fd437e`
+**Generation status:** hand-maintained mirror; current-head SPipe doc generation is blocked by the Stage 2 `proof_uses` optional-narrowing failure tracked in `doc/08_tracking/bug/stage2_proof_uses_optional_narrowing_2026-08-14.md` and was not run.
 
 ## Claim boundary
 
 The executable source defines deterministic checks for the implemented
 pure-Simple policies, and prior focused contract runs are recorded in the lane
-state. Current-head execution is BLOCKED by the Stage 3 compiler failure. An
+state. Current-head execution is BLOCKED by the Stage 2 compiler failure. An
 `evidence-contract` row records only narrower contract coverage; it does **not**
 claim that live external tooling, a real guest or graphics device, RenderDoc,
 or a 24-hour stress campaign ran.

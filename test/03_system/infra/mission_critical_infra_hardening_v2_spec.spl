@@ -156,22 +156,22 @@ fn mci_relaxed_profile() -> RelaxedAllocationProfileV1:
     )
 
 describe "mission-critical infrastructure hardening V2":
-    describe "REQ-MCI-003 and REQ-MCI-004: certified SimpleOS evidence":
+    describe "REQ-MCI-003 and REQ-MCI-004 policy subset: certified SimpleOS evidence":
         it "should admit a selected certified guest subset":
-            step("Validate selected guests against the canonical 24-cell catalog")
+            step("Exercise the certified SimpleOS platform manifest")
             val result = certified_simpleos_manifest_validate(mci_subset_manifest())
             expect(result.status).to_equal("pass")
             expect(result.selected_cell_count).to_equal(2u32)
             expect(result.visible_cell_count).to_equal(24u32)
 
         it "should retain unselected platform rows without an umbrella claim":
-            step("Inspect the bounded subset result")
+            step("Exercise the certified SimpleOS platform manifest")
             val result = certified_simpleos_manifest_validate(mci_subset_manifest())
             expect(result.umbrella_all_platforms).to_be(false)
             expect(result.visible_cell_count).to_equal(24u32)
 
         it "should reject a guest receipt with mismatched host identity":
-            step("Corrupt one selected guest receipt and recompute its manifest hash")
+            step("Exercise the certified SimpleOS platform manifest")
             var manifest = mci_subset_manifest()
             var row = manifest.cells[0]
             var boot = row.boot
@@ -181,9 +181,9 @@ describe "mission-critical infrastructure hardening V2":
             manifest.manifest_hash = certified_simpleos_manifest_hash_v1(manifest)
             expect(certified_simpleos_manifest_validate(manifest).reason).to_equal("receipt-correlation-mismatch:linux:x86_32")
 
-    describe "REQ-MCI-005 and NFR-MCI-006: bounded Draw IR generations":
+    describe "REQ-MCI-005 and NFR-MCI-006 count subset: bounded Draw IR generations":
         it "should admit an exactly sized packed generation":
-            step("Plan and admit an exact-capacity Draw IR generation")
+            step("Exercise packed rendering and backend provenance")
             val counts = draw_ir_generation_count_v3(2u32, 1u32, 1u32, 1u32, 1u32, 2u32)
             val outcome = draw_ir_generation_plan_v3(41u64, 1u64, counts, 8u64, 64u64, 8u64)
             var arena = DrawIrGenerationArenaV3.bounded(41u64, 64u64, 8u64)
@@ -194,12 +194,12 @@ describe "mission-critical infrastructure hardening V2":
                             expect(admitted.total_bytes).to_equal(64u64)
                             expect(admitted.generation).to_equal(1u64)
                         DrawIrAdmissionOutcomeV3.Refused(receipt):
-                            expect(receipt.reason).to_equal(0u16)
+                            fail("unexpected Draw IR admission refusal")
                 DrawIrPlanOutcomeV3.Refused(receipt):
-                    expect(receipt.reason).to_equal(0u16)
+                    fail("unexpected Draw IR planning refusal")
 
         it "should seal and retire a published generation":
-            step("Publish only the exact admitted byte and row counts")
+            step("Exercise packed rendering and backend provenance")
             val counts = draw_ir_generation_count_v3(2u32, 1u32, 1u32, 1u32, 1u32, 2u32)
             val outcome = draw_ir_generation_plan_v3(42u64, 1u64, counts, 8u64, 64u64, 8u64)
             var arena = DrawIrGenerationArenaV3.bounded(42u64, 64u64, 8u64)
@@ -209,14 +209,14 @@ describe "mission-critical infrastructure hardening V2":
                         DrawIrAdmissionOutcomeV3.Admitted(admitted):
                             expect(admitted.arena_id).to_equal(42u64)
                         DrawIrAdmissionOutcomeV3.Refused(receipt):
-                            expect(receipt.reason).to_equal(0u16)
+                            fail("unexpected Draw IR admission refusal")
                 DrawIrPlanOutcomeV3.Refused(receipt):
-                    expect(receipt.reason).to_equal(0u16)
+                    fail("unexpected Draw IR planning refusal")
             expect(arena.seal(64u64, 8u64)).to_be_nil()
             expect(arena.retire()).to_be(true)
 
         it "should refuse row overflow before admission":
-            step("Plan one row beyond the fixed generation capacity")
+            step("Exercise packed rendering and backend provenance")
             val outcome = draw_ir_generation_plan_v3(
                 43u64, 1u64,
                 draw_ir_generation_count_v3(9u32, 0u32, 0u32, 0u32, 0u32, 0u32),
@@ -225,21 +225,21 @@ describe "mission-critical infrastructure hardening V2":
                 DrawIrPlanOutcomeV3.Refused(receipt):
                     expect(receipt.reason).to_equal(DRAW_IR_OVERFLOW_COUNT)
                 DrawIrPlanOutcomeV3.Planned(plan):
-                    expect(plan.total_rows).to_equal(8u64)
+                    fail("Draw IR overflow was clamped instead of refused")
 
-    describe "REQ-MCI-007 and REQ-MCI-008: sealed domain allocation":
+    describe "REQ-MCI-007 and REQ-MCI-008 policy subset: sealed domain allocation":
         it "should allocate exactly the sealed domain quota":
-            step("Allocate the complete normal-context quota")
+            step("Exercise strict and relaxed allocation profiles")
             var arena = DomainArenaV1.from_sealed_profile(51u64, mci_relaxed_profile())
             match arena.try_allocate(64u64, ARENA_CONTEXT_NORMAL):
                 DomainArenaAllocationV1.Allocated(reference):
                     expect(reference.size_bytes).to_equal(64u64)
                     expect(arena.high_water_bytes).to_equal(64u64)
                 DomainArenaAllocationV1.Exhausted(receipt):
-                    expect(receipt.reason).to_equal(0u16)
+                    fail("unexpected exact-quota allocation exhaustion")
 
         it "should return typed exhaustion without advancing publication":
-            step("Exhaust a sealed arena by one byte")
+            step("Exercise strict and relaxed allocation profiles")
             var arena = DomainArenaV1.from_sealed_profile(52u64, mci_relaxed_profile())
             val checkpoint = arena.checkpoint()
             val admitted = arena.try_allocate(64u64, ARENA_CONTEXT_NORMAL)
@@ -247,28 +247,28 @@ describe "mission-critical infrastructure hardening V2":
                 DomainArenaAllocationV1.Allocated(reference):
                     expect(reference.size_bytes).to_equal(64u64)
                 DomainArenaAllocationV1.Exhausted(receipt):
-                    expect(receipt.reason).to_equal(0u16)
+                    fail("unexpected exact-quota allocation exhaustion")
             match arena.try_allocate(1u64, ARENA_CONTEXT_NORMAL):
                 DomainArenaAllocationV1.Exhausted(receipt):
                     expect(receipt.reason).to_equal(ARENA_EXHAUSTION_QUOTA)
                 DomainArenaAllocationV1.Allocated(reference):
-                    expect(reference.size_bytes).to_equal(0u64)
+                    fail("quota overflow allocation was unexpectedly admitted")
             expect(arena.rollback(checkpoint)).to_be(true)
             expect(arena.cursor_bytes).to_equal(0u64)
 
         it "should reject allocation in an ISR context":
-            step("Request memory from a forbidden critical context")
+            step("Exercise strict and relaxed allocation profiles")
             var arena = DomainArenaV1.from_sealed_profile(53u64, mci_relaxed_profile())
             match arena.try_allocate(8u64, ARENA_CONTEXT_ISR):
                 DomainArenaAllocationV1.Exhausted(receipt):
                     expect(receipt.reason).to_equal(ARENA_EXHAUSTION_FORBIDDEN_CONTEXT)
                 DomainArenaAllocationV1.Allocated(reference):
-                    expect(reference.size_bytes).to_equal(0u64)
+                    fail("forbidden-context allocation was unexpectedly admitted")
             expect(arena.cursor_bytes).to_equal(0u64)
 
-    describe "REQ-MCI-009 and NFR-MCI-003: bounded process policy":
+    describe "REQ-MCI-009 and NFR-MCI-003 policy subset: bounded process policy":
         it "should admit exact bounded capture and available work":
-            step("Admit requests at their declared bounds")
+            step("Exercise bounded concurrency and process failure paths")
             val capture = admit_bounded_capture(BoundedProcessCaptureV1(
                 max_stdout_bytes: 16, max_stderr_bytes: 8,
                 stdout_bytes: 16, stderr_bytes: 8))
@@ -279,7 +279,7 @@ describe "mission-critical infrastructure hardening V2":
             expect(work.accepted).to_be(true)
 
         it "should reject saturated work and overflowing output":
-            step("Exceed queue and capture capacity independently")
+            step("Exercise bounded concurrency and process failure paths")
             val work = admit_bounded_work(BoundedWorkPoolV1(
                 max_workers: 2, max_pending: 1,
                 active_workers: 2, pending_work: 1))
@@ -290,13 +290,13 @@ describe "mission-critical infrastructure hardening V2":
             expect(capture.accepted).to_be(false)
 
         it "should reject nonpositive process identities":
-            step("Validate kill and wait identities before syscall ownership")
+            step("Exercise bounded concurrency and process failure paths")
             expect(validate_process_signal_pid(-1).accepted).to_be(false)
             expect(validate_process_signal_pid(0).accepted).to_be(false)
 
-    describe "REQ-MCI-010 and NFR-MCI-009: fail-closed aggregation":
+    describe "REQ-MCI-010 evidence-correlation subset: fail-closed aggregation":
         it "should block an aggregate with a missing required receipt":
-            step("Aggregate one of two required checks")
+            step("Review the fail-closed aggregate evidence manifest")
             val hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             val policy = MciEvidencePolicyV1(
                 schema_version: 1u16, run_id: "mci-system-run",
@@ -313,7 +313,7 @@ describe "mission-critical infrastructure hardening V2":
             expect(result.matrix.blockers.len()).to_be_greater_than(0)
 
         it "should reject a receipt from another run":
-            step("Bind evidence to a different run identity")
+            step("Review the fail-closed aggregate evidence manifest")
             val hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             val policy = MciEvidencePolicyV1(
                 schema_version: 1u16, run_id: "mci-system-run",
@@ -328,7 +328,7 @@ describe "mission-critical infrastructure hardening V2":
             expect(aggregate_mci_evidence_v1(policy, [receipt]).matrix.result).to_equal(MCI_EVIDENCE_BLOCKED)
 
         it "should reject expired evidence":
-            step("Aggregate a receipt whose validity ended before admission")
+            step("Review the fail-closed aggregate evidence manifest")
             val hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             val policy = MciEvidencePolicyV1(
                 schema_version: 1u16, run_id: "mci-system-run",
@@ -423,9 +423,9 @@ describe "mission-critical infrastructure hardening V2":
                         expect(admitted.generation).to_equal(1u64)
                         expect(admitted.total_bytes).to_equal(64u64)
                     DrawIrAdmissionOutcomeV3.Refused(receipt):
-                        expect(receipt.reason).to_equal(0u16)
+                        fail("unexpected Draw IR admission refusal")
             DrawIrPlanOutcomeV3.Refused(receipt):
-                expect(receipt.reason).to_equal(0u16)
+                fail("unexpected Draw IR planning refusal")
         expect(draw_arena.seal(64u64, 8u64)).to_be_nil()
         expect(if draw_arena.retire(): 301 else: -301).to_equal(301)
         val plus_one = draw_ir_generation_plan_v3(
@@ -436,7 +436,7 @@ describe "mission-critical infrastructure hardening V2":
             DrawIrPlanOutcomeV3.Refused(receipt):
                 expect(receipt.reason).to_equal(DRAW_IR_OVERFLOW_COUNT)
             DrawIrPlanOutcomeV3.Planned(plan):
-                expect(plan.total_rows).to_equal(8u64)
+                fail("Draw IR overflow was clamped instead of refused")
 
         step("Exercise strict and relaxed allocation profiles")
         var domain_arena = DomainArenaV1.from_sealed_profile(51u64, mci_relaxed_profile())
@@ -445,12 +445,12 @@ describe "mission-critical infrastructure hardening V2":
             DomainArenaAllocationV1.Allocated(reference):
                 expect(reference.size_bytes).to_equal(64u64)
             DomainArenaAllocationV1.Exhausted(receipt):
-                expect(receipt.reason).to_equal(0u16)
+                fail("unexpected exact-quota allocation exhaustion")
         match domain_arena.try_allocate(1u64, ARENA_CONTEXT_NORMAL):
             DomainArenaAllocationV1.Exhausted(receipt):
                 expect(receipt.reason).to_equal(ARENA_EXHAUSTION_QUOTA)
             DomainArenaAllocationV1.Allocated(reference):
-                expect(reference.size_bytes).to_equal(0u64)
+                fail("quota overflow allocation was unexpectedly admitted")
         expect(if domain_arena.rollback(checkpoint): 401 else: -401).to_equal(401)
         expect(domain_arena.cursor_bytes).to_equal(0u64)
         val forbidden_checkpoint = domain_arena.checkpoint()
@@ -458,7 +458,7 @@ describe "mission-critical infrastructure hardening V2":
             DomainArenaAllocationV1.Exhausted(receipt):
                 expect(receipt.reason).to_equal(ARENA_EXHAUSTION_FORBIDDEN_CONTEXT)
             DomainArenaAllocationV1.Allocated(reference):
-                expect(reference.size_bytes).to_equal(0u64)
+                fail("forbidden-context allocation was unexpectedly admitted")
         expect(if domain_arena.rollback(forbidden_checkpoint): 402 else: -402).to_equal(402)
 
         step("Exercise bounded concurrency and process failure paths")
