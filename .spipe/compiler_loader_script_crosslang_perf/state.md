@@ -18,13 +18,13 @@ Complete the canonical compiler-loader packed-byte performance plan so every acc
 - AC-2: Every packed-byte boundary, mutator write-back, foreign-capability, loader negative-cache, provenance/mode, checksum/timing/RSS, compiler/core/lib, MCP/LSP, integration, and clean-sync item is classified as proved, contradicted, missing, or blocked from current evidence; no unchecked box is presented as completed.
 - AC-3: Every unavailable gate retains its acceptance IDs plus prerequisite, exact resume command, expected retained artifact, owner, and final reviewer; unavailable self-hosted tooling is never replaced with the Rust seed.
 - AC-4: The plan names the existing manual-facing `step("...")` phrases and canonical setup/checker helpers, requires any temporary placeholder to use `assert(false)` or `fail(...)`, and records generated-manual review ownership.
-- AC-5: The plan gives every knowledge artifact an honest current disposition and blocker handoff: missing research, user-selected requirements, architecture, incomplete design, and generated-manual evidence remain blocked rather than being called current; the system plan, guide, feature/layer expert knowledge, and concrete `doc/08_tracking/bug/` records identify exact owners, file/line anchors, and unblock conditions. Workflow skill/agent/command trees are `N/A` because this planning lane does not change their contract.
+- AC-5: The plan gives every knowledge artifact an honest current disposition and blocker handoff: research/options and decision-ready architecture/design drafts are present; user-selected requirements, post-selection acceptance, and generated-manual evidence remain blocked rather than being called current. The system plan, guide, feature/layer expert knowledge, and concrete `doc/08_tracking/bug/` records identify exact owners, file/line anchors, and unblock conditions. Workflow skill/agent/command trees are `N/A` because this planning lane does not change their contract.
 - AC-6: Parallel lower-model audits cover plan/evidence and guide/wiki freshness; the merge owner resolves their findings; a separate highest-capability reviewer accepts the merged plan, generated-manual disposition, exclusions, blockers, and done-state honesty.
 - AC-7: Focused plan-quality checks, generated-spec layout guard, and direct-env runtime guards run once; only intentional lane files are committed and unrelated concurrent files remain untouched.
 
 ## Scope Exclusions
 
-This planning lane does not claim missing runtime performance evidence, rebuild a Stage 4 compiler, rerun a capped failed mutator gate, release, or absorb unrelated GUI/web/2D work. It may correct plan/state/guide/wiki/manual metadata required to make the plan operational and honest.
+The current continuation explicitly excludes Stage 4 construction/execution and does not substitute Stage 2/3 or Rust-seed evidence for it. It does not claim missing runtime performance evidence, release, or absorb unrelated GUI/web/2D work. It may complete Rust-level semantic coverage and plan/research/design/manual metadata while retaining all deployed-CLI gates as blocked.
 
 ## Cooperative Review
 
@@ -54,16 +54,18 @@ host-matrix correction.
 
 ## Phase
 
-dev-done
+dev
 
 ## Log
 
 - dev: Created state file with 7 acceptance criteria (type: todo).
-- plan: Merged lower-model plan/evidence and guide/wiki audits; retained missing research/requirements/architecture, partial packed-byte design/evidence, unusable deployed Stage 4 candidate, and manual-docgen gaps as blockers.
+- plan: Merged lower-model plan/evidence and guide/wiki audits; at that historical revision research/requirements/architecture and packed-byte design/evidence were incomplete, and the deployed Stage 4 candidate plus manual docgen remained blocked.
 - review-1: Highest-capability reviewer rejected the draft; applying all six correction groups before the single re-review.
 - review-2: Highest-capability reviewer found four residual exactness gaps; corrected them and requested the final bounded cycle-3 review.
 - review-3: Highest-capability reviewer accepted the corrected plan; operational gates, commit, and integration remain.
 - reconcile: Fresh parallel audits identified the lane-A/lane-B receipt error, missing Build11 Stage3 resume row, projected-place command gap, and conflated failure frontiers; all were corrected before final review.
 - reconcile-review: Command/receipt check accepted; status check's one historical-wording finding was fixed; higher-capability review accepted the current reconciliation after the runnable Linux row required both GNU time and `timeout`.
 - gates: SPipe wiring, `doc/06_spec` layout, and working/staged direct-env guards passed once. Workspace-root strict audit reported 137 pre-existing unrelated manifest violations; retained as WARN without broadening scope.
-- post-sync-regression: Rebasing onto `7ac900316dd5` exposed a red packed-byte semantic test. Bare mutable packed bytes no longer enter the empty-projection place route, and the driver cases now use the direct interpreter rather than the SMF `run_code` path. Fresh focused results are 1/1 and 4/4; missing concat/clone/equality, projected-place, foreign-lifetime, and self-hosted gates remain blocked.
+- post-sync-regression: Rebasing onto `7ac900316dd5` exposed a red packed-byte semantic test. Bare mutable packed bytes no longer enter the empty-projection place route, and the driver cases now use the direct interpreter rather than the SMF `run_code` path. At that point focused results were 1/1 and 4/4 while concat/clone/equality, projected-place, foreign-lifetime, and self-hosted gates remained blocked; the next log entry supersedes the first two gaps.
+- stage4-excluded-continuation: PBL-01 now passes 4/4 plus a 1/1 representation test; its oracle-mutation run failed as intended but the identifying assertion/status output was not retained. PBL-02 projected-place evidence passes 1/1; its red attempt never ran because concurrent bootstrap Cargo locks held the shared target, so the queued mutation was terminated and reverted. Both remain evidence-process BLOCKED. PBL-03 remains blocked by the pointer-returning foreign ABI. Research/options, an architecture draft, task breakdown, and expanded design/manual mapping exist; user selection and admitted docgen remain mandatory blockers. Three bounded Stage 3 recovery cycles still ended at exit 139 without an observed lowering-entry canary.
+- continuation-review: Highest-capability review cycles 1-2 rejected missing red receipts and stale/factually inconsistent status text. Cycle 3 accepted the corrected continuation with PBL-01/02 evidence-process BLOCKED, PBL-03/DOC/Stage3/deployed-CLI blockers explicit, and no Stage 2/3 substitution for excluded Stage 4.

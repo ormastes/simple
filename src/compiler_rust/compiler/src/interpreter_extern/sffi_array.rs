@@ -112,6 +112,13 @@ pub fn rt_array_concat_fn(args: &[Value]) -> Result<Value, CompileError> {
         )
     })?;
 
+    if let (Some(left_bytes), Some(right_bytes)) = (left.byte_array_view(), right.byte_array_view()) {
+        let mut bytes = Vec::with_capacity(left_bytes.len() + right_bytes.len());
+        bytes.extend_from_slice(left_bytes);
+        bytes.extend_from_slice(right_bytes);
+        return Ok(Value::byte_array(bytes));
+    }
+
     let mut items = match left {
         Value::Array(values) | Value::FrozenArray(values) => values.as_ref().clone(),
         Value::ByteArray(values) | Value::FrozenByteArray(values) => Value::byte_array_values(values),
@@ -859,6 +866,14 @@ mod tests {
                 Value::UInt { value: 2, width: 8 },
             ])
         );
+    }
+
+    #[test]
+    fn rt_array_concat_preserves_packed_storage() {
+        let result = rt_array_concat_fn(&[Value::byte_array(vec![1, 2]), Value::frozen_byte_array(vec![3, 4])])
+            .expect("packed array concat should succeed");
+        assert!(matches!(result, Value::ByteArray(_)));
+        assert_eq!(result.byte_array_view(), Some([1, 2, 3, 4].as_slice()));
     }
 
     #[test]

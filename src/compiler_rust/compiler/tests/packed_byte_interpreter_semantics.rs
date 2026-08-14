@@ -1,6 +1,8 @@
 use simple_compiler::interpreter;
+use simple_compiler::value::Value;
 use std::collections::HashSet;
 use std::fs;
+use std::sync::Arc;
 use tempfile::tempdir;
 
 fn run_program(source: &str) -> Result<i32, String> {
@@ -57,4 +59,53 @@ fn main() -> i32:
 "#;
     let error = run_program(frozen_mutation).expect_err("frozen packed bytes must reject mutation");
     assert!(error.contains("frozen byte array"), "unexpected error: {error}");
+}
+
+#[test]
+fn packed_byte_concat_preserves_storage() {
+    let source = r#"
+extern fn rt_byte_array_new(len: i64) -> [u8]
+extern fn rt_array_concat(left: [u8], right: [u8]) -> [u8]
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+fn main() -> i32:
+    var left = rt_byte_array_new(0)
+    var right = rt_byte_array_new(0)
+    left.push(1u8)
+    left.push(2u8)
+    right.push(3u8)
+    right.push(4u8)
+    val joined = rt_array_concat(left, right)
+    return (joined.len() * 1000 + rt_bytes_u8_at(joined, 0) * 100 + rt_bytes_u8_at(joined, 3)).to_i32()
+"#;
+    assert_eq!(run_program(source), Ok(4104));
+}
+
+#[test]
+fn packed_byte_clone_preserves_cow_storage() {
+    let original = Value::byte_array(vec![5, 6, 7]);
+    let mut cloned = original.clone();
+    let (Value::ByteArray(original_bytes), Value::ByteArray(cloned_bytes)) = (&original, &mut cloned) else {
+        panic!("packed byte clone changed representation")
+    };
+
+    assert!(Arc::ptr_eq(original_bytes, cloned_bytes));
+    Arc::make_mut(cloned_bytes)[1] = 9;
+    assert_eq!(original.byte_array_view(), Some([5, 6, 7].as_slice()));
+    assert_eq!(cloned.byte_array_view(), Some([5, 9, 7].as_slice()));
+}
+
+#[test]
+fn packed_byte_equality_is_value_based() {
+    let packed = Value::byte_array(vec![0, 127, 255]);
+    let distinct_packed = Value::byte_array(vec![0, 127, 255]);
+    let generic = Value::array(vec![
+        Value::Int(0),
+        Value::UInt { value: 127, width: 8 },
+        Value::Int(255),
+    ]);
+
+    assert_eq!(packed, distinct_packed);
+    assert_eq!(packed, generic);
+    assert_ne!(packed, Value::byte_array(vec![0, 127, 254]));
 }

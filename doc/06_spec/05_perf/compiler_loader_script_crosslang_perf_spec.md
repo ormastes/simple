@@ -72,3 +72,18 @@ Stage 4 admission.
 The focused C selfcheck is separate from the Simple SSpec: it compiles and runs
 the test-only counter-seed harness against both C providers. Its PID-scoped
 fixture must already be absent and is never deleted.
+
+## Provisional requirement mapping
+
+The executable `@req` identifiers are provisional until the user selects the
+feature and NFR option documents. The facade lifecycle and admission scenarios
+cover REQ-001/003; cross-language equivalence and retained rows cover
+REQ-001/002; cache reuse/reset/probe reduction cover REQ-004..REQ-007; and the
+byte fixture plus packed-boundary audit cover REQ-008. NFR-001/002 cover
+latency/cache effectiveness, NFR-003 packed storage and capability safety,
+NFR-004 RSS/cross-language comparability, NFR-005 provenance, and NFR-006
+fail-closed bounded evidence.
+
+This mapping improves operator traceability but is not docgen provenance. The
+manual stays blocked until an admitted generator records scenario sections,
+source hash, and `0 stubs`, followed by a readability review.

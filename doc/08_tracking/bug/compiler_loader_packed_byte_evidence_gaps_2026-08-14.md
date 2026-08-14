@@ -34,3 +34,40 @@ Fresh evidence: `packed_byte_interpreter_semantics` passed 1/1 and the four
 `interpreter_byte_array_identifier_mutators` cases passed 4/4. PBL-01 remains
 open for concat/clone/equality and PBL-02 remains open for projected-place
 coverage; this repair does not promote either row.
+
+## 2026-08-14 PBL-01/PBL-02 closure
+
+The remaining Rust-interpreter boundary cases are now implemented. Packed plus
+packed `rt_array_concat` returns `Value::ByteArray`; the semantic suite covers
+concat, COW clone, and value equality and passes 4/4. The representation-level
+concat unit passes 1/1. The direct-interpreter projected-place mutation case
+passes 1/1, in addition to the previously retained 4/4 identifier cases.
+The implementations and final Rust-interpreter behavior are green, but PBL-01
+and PBL-02 remain evidence-process BLOCKED until their required semantic
+deliberate-red receipts are retained. The PBL-01 oracle mutation ran to the
+intended nonzero result, but warning truncation prevented retaining the named
+assertion/status receipt. The PBL-02 mutation never ran because concurrent
+bootstrap Cargo processes held the shared lock; its queued process was
+terminated and reverted. Neither outcome satisfies the evidence contract, and
+lock contention is not negative-test evidence.
+These results are not Stage 4 or deployed-CLI evidence.
+
+## 2026-08-14 PBL-03 ABI blocker review
+
+There is no genuine scoped integration that preserves the current interpreter
+ABI. `rt_array_data_ptr_u8` returns a pointer encoded as an `i64`; the producer
+call ends before a later foreign call consumes that integer, so neither the
+adapter nor Rust's lifetime system can bound its use. A callback wrapper is not
+enough: once it exposes `as_ptr()`, safe code can return the raw pointer or its
+integer address even when the wrapper descriptor itself is lifetime-bound.
+
+The production interpreter registration still leaks the materialized byte
+buffer for process lifetime, and dynamic SFFI string marshalling retains the
+same leak pattern. PBL-03 therefore needs an explicit ABI migration: either
+pass packed bytes directly into a typed one-call foreign adapter, or mint an
+opaque descriptor token that the sole foreign-dispatch owner resolves and
+revokes during that call. Both require migrating callers; treating a token as
+the existing raw pointer would break native consumers. The three named tests
+must target that production route, include compile-fail or equivalent escape
+enforcement, and retain a deliberate-red receipt before PBL-03 can move to
+PROVED.

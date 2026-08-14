@@ -52,3 +52,21 @@ Produce one admitted Stage 3 candidate that passes provenance and frontend
 sanity, deploy the full pure-Simple CLI, then run the focused loader SPipe gate,
 C provider self-check, optimizer audit, and retained failed-probe/latency/RSS
 measurement exactly once.
+
+## Bounded lane-A localization result
+
+Three recovery cycles were consumed without producing an admitted candidate.
+The first reproduced exit 139. The second enabled `SIMPLE_INTERP_TRACE=1`, but
+the provenance wrapper intentionally reconstructs the Stage 3 environment and
+did not admit that variable. The final cycle used unconditional primitive-only
+entry, post-source-map, pre-surface, and post-surface canaries in
+`lower_and_check_impl`; Stage 3 again exited 139 and its retained native-build
+log remained empty. The diagnostic canaries were removed after the run.
+
+This result does **not** prove that `module_surfaces_from_modules` is the active
+frontier: no `lower_and_check_impl` entry canary was observed. Resume work must
+first establish whether control reaches that method under a trace-preserving
+provenance command or debugger breakpoint, then inspect the aggregate call only
+if the entry/source-map canaries execute. The three-cycle cap is exhausted for
+this lane; do not repeat the same recovery command without a new instrumented
+or debugger-backed localization strategy.

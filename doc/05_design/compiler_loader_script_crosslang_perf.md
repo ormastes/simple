@@ -55,3 +55,35 @@ if it already exists; the contract does not delete paths to manufacture a miss.
 Pure-Simple default compiler routes mirror the i64 probe ABI in the text-extern
 registry, LLVM declaration emitter and library translator, minimal SFFI, and
 interpreter-call router.
+
+## Packed-byte collection and capability design
+
+Packed byte arrays are a representation specialization of the language array
+contract, not a separate public collection. Index, slice, iteration, concat,
+clone, equality, freeze, and byte-valued mutation retain packed storage.
+Mutation is routed through the receiver/place owner: bare identifiers preserve
+copy-on-write aliases, projected places rebuild and write back the root, and
+frozen receivers reject mutation. A non-byte insertion widens exactly once to
+the generic array representation.
+
+The foreign boundary accepts packed bytes only through a descriptor carrying a
+base pointer, byte length, and input-only access. The adapter holds the backing
+value alive for the duration of the foreign call, validates offset/length before
+exposure, scopes nested adapters independently, and invalidates the capability
+when the call returns. No raw pointer is returned as a Simple value or stored in
+process-lifetime state. Writable/output behavior requires a separate explicit
+contract and is outside the current design.
+
+## Module interactions and errors
+
+The resolver owns cache keys and invalidation; `rt_file_exists` owns probe
+accounting; collection/place owners own language mutation; the SFFI adapter
+owns capability lifetime; the harness owns admission and measurement. Negative
+probe results, frozen mutation, invalid descriptors, stale probe generations,
+timeouts, provenance mismatch, checksum mismatch, and malformed samples all
+fail closed at their owning boundary.
+
+The architecture common to the requirement options is recorded in
+`doc/04_architecture/compiler_loader_script_crosslang_perf.md`. It remains
+decision-ready rather than accepted until the mandatory feature and NFR option
+selection occurs.

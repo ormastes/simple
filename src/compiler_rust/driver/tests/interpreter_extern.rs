@@ -269,4 +269,30 @@ fn main() -> i32:
     );
 }
 
+#[test]
+fn interpreter_byte_array_projected_place_mutators_write_back() {
+    let projected = run_interpreted_code(
+        r#"
+extern fn rt_byte_array_new(len: i64) -> [u8]
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+struct ByteHolder:
+    bytes: [u8]
+
+fn main() -> i32:
+    var holder = ByteHolder(bytes: rt_byte_array_new(0))
+    holder.bytes.push(0x11u8)
+    holder.bytes.insert(0, 0x07u8)
+    val removed = holder.bytes.pop()
+    return (removed.to_i64() * 100 + holder.bytes.len() * 10 + rt_bytes_u8_at(holder.bytes, 0)).to_i32()
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        projected.exit_code, 1717,
+        "mutators on a projected packed-byte place must rebuild and write back the root"
+    );
+}
+
 // ============ Context Blocks (#35) ============

@@ -3,7 +3,9 @@
 ## Plan status
 
 Plan content accepted at `3fdfa0d3351` and the current operational reconciliation
-accepted by `/root/reconciled_plan_review`; focused gates and commit remain.
+accepted by `/root/reconciled_plan_review`; `/root/final_nonstage4_review`
+accepted the current Stage-4-excluded continuation on bounded review cycle 3.
+Commit and integration remain.
 Feature verification remains blocked. This document is the canonical
 handoff for `compiler_loader_script_crosslang_perf`. It records what is already
 implemented, what current evidence proves, and the exact remaining gates. A
@@ -25,7 +27,9 @@ probe accounting, packed-byte interpreter behavior and foreign-call lifetime,
 cross-language provenance/checksum/timing/RSS contracts, focused compiler and
 MCP/LSP regression gates, documentation, and serialized integration.
 
-Out of scope: substituting the Rust seed for Stage 4 evidence, claiming
+Out of scope: Stage 4 construction or execution in the current user-directed
+continuation, substituting the Rust seed or Stage 2/3 diagnostics for Stage 4
+evidence, claiming
 filesystem syscall counts from facade counters, disabled-path assembly/cycle
 claims, changing public byte-array semantics, rebuilding Stage 4 in this plan
 lane, or absorbing unrelated GUI/web/2D files.
@@ -37,13 +41,16 @@ lane, or absorbing unrelated GUI/web/2D files.
 | SPipe state | `.spipe/compiler_loader_script_crosslang_perf/state.md` | Current planning acceptance and review contract |
 | Executable SSpec | `test/05_perf/compiler_loader_script_crosslang_perf_spec.spl` | Present; declares REQ-001..008 and NFR-001..006 |
 | Scenario manual | `doc/06_spec/05_perf/compiler_loader_script_crosslang_perf_spec.md` | Present summary with operator flow; generated scenario sections/hash/docgen provenance remain blocked |
-| Detail design | `doc/05_design/compiler_loader_script_crosslang_perf.md` | Partial: resolver/probe/RSS design present; packed storage/write-back/foreign capability design missing |
+| Local/domain research | `doc/01_research/{local,domain}/compiler_loader_script_crosslang_perf.md` | Present; domain synthesis awaits optional live-source refresh when the mandated context-mode fetcher is available |
+| Requirement options | `doc/02_requirements/{feature,nfr}/compiler_loader_script_crosslang_perf_options.md` | Present; no option selected; explicit user choice is mandatory |
+| Architecture | `doc/04_architecture/compiler_loader_script_crosslang_perf.md` | Decision-ready draft; acceptance waits for selected requirements |
+| Detail design | `doc/05_design/compiler_loader_script_crosslang_perf.md` | Expanded for resolver/probe/RSS and packed storage/write-back/foreign capability; final acceptance waits for selected requirements |
 | Compiler performance guide | `doc/07_guide/compiler/check_perf.md` | Must identify this plan and its blocked self-hosted lane |
 | Feature expert | `doc/00_llm_process/feature_expert/compiler_loader_script_crosslang_perf/skill.md` | Required knowledge handoff |
 | Compiler layer expert | `doc/00_llm_process/layer_expert/compiler_driver/skill.md` | Must link this lane |
 | Loader blocker | `doc/08_tracking/bug/module_loader_negative_cache_stat_storm_2026-08-11.md` | Open verification condition retained |
 | Packed-byte history | `doc/08_tracking/bug/interpreter_byte_array_len_widening_spin_2026-08-13.md` | Fixed historical boundary/performance defect |
-| Packed-byte evidence gaps | `doc/08_tracking/bug/compiler_loader_packed_byte_evidence_gaps_2026-08-14.md` | Open PBL-01/02/03 test names, anchors, and unblock commands |
+| Packed-byte evidence gaps | `doc/08_tracking/bug/compiler_loader_packed_byte_evidence_gaps_2026-08-14.md` | PBL-01/02 green implementation results with open deliberate-red receipt gaps, plus the open PBL-03 ABI migration contract |
 | Build11 Stage 3 blocker | `doc/08_tracking/bug/build11_stage3_compile_context_corruption_2026-08-14.md` | Open fresh-lane corruption frontier after a clean 603-file parse |
 | Retained harness | `scripts/check/check-cross-language-perf.shs` | Present |
 | C facade selfcheck | `scripts/check/check-file-exists-probe-c.shs` | Present |
@@ -118,13 +125,12 @@ remains because it is independently proven by both later cycles. Admitted
 self-hosted loader probe/latency/RSS rows, optimizer execution, and deployed
 focused SPipe execution remain WARN-blocked by the Stage 3 context corruption.
 
-Artifact gaps are explicit: local research, domain research, selected feature
-requirements, selected NFR requirements, and architecture are **MISSING**;
-packed-byte detail design is **PARTIAL**. Their absence blocks feature/verify
-completion and prevents the `@req` identifiers from being treated as fully
-traced. This planning lane does not invent or auto-select requirements; a
-future `$research` selection turn owns requirement choice and `$design` owns
-architecture/detail-design completion.
+Artifact gaps are explicit: local/domain research, option sets, a decision-ready
+architecture draft, an agent-task breakdown, and expanded detail design now
+exist. Selected feature and NFR requirements remain **MISSING** until the user
+chooses one option from each set; architecture/design acceptance and formal
+`@req` traceability wait for that choice. The manual still lacks admitted
+self-hosted docgen provenance.
 
 ## Acceptance matrix
 
@@ -134,9 +140,9 @@ selection flow produces the missing selected requirement documents.
 
 | ID | Provisional requirement coverage | Acceptance condition | Authoritative evidence | Current state |
 |---|---|---|---|---|
-| PBL-01 | REQ-008, NFR-003 | Index, slice, iteration, concat, clone, equality, freeze, and byte-valued mutation preserve packed storage; non-byte insertion widens once | `packed_byte_interpreter_semantics` plus focused driver mutator tests | BLOCKED — post-sync bare-identifier regression repaired and focused semantic test passes 1/1; concat/clone/equality tests remain missing |
-| PBL-02 | REQ-008, NFR-003 | Identifier and projected-place mutators write back, preserve COW aliases, return removed elements, reject immutable/frozen receivers | `src/compiler_rust/driver/tests/interpreter_extern.rs` focused tests | BLOCKED — direct-interpreter identifier/COW/removed/frozen cases pass 4/4; projected-place evidence remains missing |
-| PBL-03 | REQ-008, NFR-003/006 | Foreign packed-byte pointers are input-only, descriptor-bounded, nested adapters are scoped, and capabilities cannot escape a call | Focused `simple-compiler` unit tests at the byte-boundary/SFFI owner | MISSING: current tree has byte adapter tests but no complete capability lifetime/escape evidence set |
+| PBL-01 | REQ-008, NFR-003 | Index, slice, iteration, concat, clone, equality, freeze, and byte-valued mutation preserve packed storage; non-byte insertion widens once | `packed_byte_interpreter_semantics`, representation-level concat test, and focused driver mutator tests | BLOCKED on evidence process — implementation and final tests pass 4/4 plus representation concat 1/1 and identifier cases 4/4; an oracle-mutation run failed as intended, but its identifying assertion/status output was not retained |
+| PBL-02 | REQ-008, NFR-003 | Identifier and projected-place mutators write back, preserve COW aliases, return removed elements, reject immutable/frozen receivers | `src/compiler_rust/driver/tests/interpreter_extern.rs` focused tests | BLOCKED on evidence process — final identifier/COW/removed/frozen cases pass 4/4 and projected-place write-back passes 1/1, but the required deliberate-red receipt is not retained |
+| PBL-03 | REQ-008, NFR-003/006 | Foreign packed-byte pointers are input-only, descriptor-bounded, nested adapters are scoped, and capabilities cannot escape a call | Production foreign-dispatch route plus compile-fail/equivalent escape enforcement | BLOCKED — current `rt_array_data_ptr_u8 -> i64` ABI outlives its producer call and leaks materialized bytes; a typed one-call adapter or owner-revoked opaque token migration is required |
 | LDR-01 | REQ-004/005/006/007, NFR-002 | Exact repeated miss caches once; adjacent callers remain distinct; reset invalidates; resolution result is unchanged | Focused SSpec and resolver unit coverage | BLOCKED — implementation is present; fresh admitted self-hosted execution is unavailable |
 | LDR-02 | REQ-004/005, NFR-001/002/006 | 100 reset-per-request resolutions versus 1000 retained requests produce identical results, uncached counts 100/1, positive failed-probe baseline, and cached probes at most 10% | SSpec plus C facade selfcheck | BLOCKED — contracts are present; fresh admitted self-hosted measurement is unavailable |
 | PRV-01 | REQ-001/003, NFR-005 | Exact executable path/hash and actual mode are admitted; seed, stale hash, requested/actual mismatch, and fallback are rejected before timing | SSpec and retained harness contract tests | CONTRADICTED — the deployed candidate exists but exit 139 on its test/help ABI path disproves admission |
@@ -144,7 +150,7 @@ selection flow produces the missing selected requirement documents.
 | XLG-01 | REQ-001/002, NFR-004 | C/Rust/Go/Python/Bun/Simple workloads have equivalent checksums, including `fib(35)=9227465`; unavailable peers remain unavailable | Retained schema/provenance/byte contract scripts | BLOCKED — contracts exist; fresh report requires an admitted candidate |
 | CMP-01 | REQ-007, NFR-001/005/006 | Self-hosted compiler checks for `src/compiler`, `src/lib`, MCP, LSP, and MCP stdio smoke pass without seed fallback | Commands below | BLOCKED — deployed candidate exists but is not admitted |
 | PLN-01 | all | Canonical plan, guide, expert knowledge, blockers, and cooperative-review receipts are internally consistent and pass focused document gates | Document review and layout guard | PROVED — review accepted; SPipe wiring, spec-layout, and working/staged runtime guards pass. Global workspace-root strict audit remains WARN-blocked by 137 pre-existing unrelated manifest violations |
-| DOC-01 | all | Selected research/requirements, architecture, complete detail design, and generated manual provenance exist | Artifact review and admitted docgen | BLOCKED — research, user-selected requirements, architecture, complete design, and generated manual provenance remain outstanding |
+| DOC-01 | all | Selected research/requirements, accepted architecture/detail design, and generated manual provenance exist | Artifact review and admitted docgen | BLOCKED — research/options/drafts now exist; user selection, post-selection acceptance, and admitted docgen provenance remain outstanding |
 | VCS-01 | all | Only intentional lane-A files are committed; locked integration reaches refreshed `origin/main`; tree and lane marker are truthful | Git receipts | PROVED for lane A — `adae82f3a50...` is reachable and `/tmp/restart12-compiler_perf_a.done` records `WARN`; this documentation reconciliation requires its own commit after review |
 
 ## Manual-facing flow
@@ -232,12 +238,11 @@ the same correctness/performance baseline before and after.
 
 | Blocked IDs | Missing prerequisite | Exact resume command | Retained artifacts | Owner | Final reviewer |
 |---|---|---|---|---|---|
-| PBL-01 | Fresh session after the previous three-cycle cap; tests named in `doc/08_tracking/bug/compiler_loader_packed_byte_evidence_gaps_2026-08-14.md` landed | `cd src/compiler_rust && cargo test -p simple-compiler --test packed_byte_interpreter_semantics && cargo test -p simple-driver --test interpreter_extern interpreter_byte_array_identifier_mutators -- --test-threads=1` | Full test logs, deliberate-red receipt, and commit SHA | compiler-interpreter owner | highest-capability reviewer |
-| PBL-02 | Projected-place mutator regression named in the packed-byte tracking record is landed | `cd src/compiler_rust && cargo test -p simple-driver --test interpreter_extern interpreter_byte_array_projected_place_mutators_write_back -- --test-threads=1` | Focused deliberate-red and reverted-green logs plus commit SHA | compiler-interpreter owner | highest-capability reviewer |
-| PBL-03 | `src/compiler_rust/compiler/tests/packed_byte_foreign_capability_lifetime.rs` exists with the three named tests in the tracking record | `cd src/compiler_rust && cargo test -p simple-compiler --test packed_byte_foreign_capability_lifetime` | Test source, verdict, deliberate-red receipt | interpreter SFFI owner | highest-capability reviewer |
+| PBL-03 | Replace the pointer-returning interpreter ABI with a typed one-call adapter or foreign-dispatch-owned opaque token that is revoked before return | Run the production-route suite named in the packed-byte tracking record, including compile-fail or equivalent escape enforcement | Production caller migration, three focused tests, deliberate-red and green receipts | interpreter SFFI owner | highest-capability reviewer |
+| PBL-01/02 evidence | No other lane holds Cargo's shared build lock | Temporarily mutate only each named oracle, run its exact focused command to a semantic nonzero result, restore the oracle, and retain the already-authoritative final green results without re-running them | Exact mutation, command, named failing assertion, nonzero status, reversion proof | compiler-interpreter owner | highest-capability reviewer |
 | LDR-01/02, PRV-01, BYT-01, XLG-01, CMP-01 | Repair/redeploy an admitted self-hosted Stage 4 CLI per the linked repair plan/TODO | `test -x release/x86_64-unknown-linux-gnu/simple && release/x86_64-unknown-linux-gnu/simple --version && release/x86_64-unknown-linux-gnu/simple test --help && sh scripts/check/check-file-exists-probe-c.shs && release/x86_64-unknown-linux-gnu/simple test test/05_perf/compiler_loader_script_crosslang_perf_spec.spl --mode=interpreter --no-session-daemon && RUN_TIMEOUT=30 SIMPLE_BINARY="$PWD/release/x86_64-unknown-linux-gnu/simple" REPORT_PATH="$PWD/build/test-artifacts/05_perf/compiler_loader_script_crosslang_perf/cross_language_perf.md" sh scripts/check/check-cross-language-perf.shs && release/x86_64-unknown-linux-gnu/simple check src/compiler && release/x86_64-unknown-linux-gnu/simple check src/lib && release/x86_64-unknown-linux-gnu/simple check src/app/mcp && release/x86_64-unknown-linux-gnu/simple check src/app/simple_lsp_mcp && SIMPLE_LIB=src release/x86_64-unknown-linux-gnu/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter` | Binary path/hash, version/help logs, checker/spec logs, retained profile report, RSS receipts | compiler-loader performance owner | highest-capability reviewer |
 | LDR-01/02, PRV-01, BYT-01, XLG-01, CMP-01 — Build11 prerequisite | Repair the fresh Stage 3 corruption using the preserved admitted Stage 2 lineage | `sh scripts/bootstrap/resume-stage3-from-admitted.sh build/restart12-build11-a-r2/output` | `build/restart12-build11-a-r2/output/logs/x86_64-unknown-linux-gnu/{stage2,stage3}-native-build.log`, Stage 2/3 transcripts and sanity/provenance manifests, GDB backtrace, candidate hash | pure-Simple compiler-driver owner | highest-capability reviewer |
-| DOC-01 traceability | User-selected feature/NFR requirements plus missing research and architecture artifacts | Invoke `$research compiler_loader_script_crosslang_perf`; stop for mandatory explicit user selection; delete unchosen options; then invoke `$design compiler_loader_script_crosslang_perf`. Required outputs are `doc/01_research/local/compiler_loader_script_crosslang_perf.md`, `doc/01_research/domain/compiler_loader_script_crosslang_perf.md`, `doc/02_requirements/feature/compiler_loader_script_crosslang_perf.md`, `doc/02_requirements/nfr/compiler_loader_script_crosslang_perf.md`, `doc/04_architecture/compiler_loader_script_crosslang_perf.md`, and completed `doc/05_design/compiler_loader_script_crosslang_perf.md` | Local/domain research, selected requirement/NFR docs with no lingering options, architecture, completed detail design | research/design owner | user selection + highest-capability reviewer |
+| DOC-01 traceability | Explicit user choice from the present feature/NFR option sets, then post-selection architecture/design acceptance | Delete unchosen options; write `doc/02_requirements/feature/compiler_loader_script_crosslang_perf.md` and `doc/02_requirements/nfr/compiler_loader_script_crosslang_perf.md`; reconcile and accept the existing architecture/detail design | Selected requirement/NFR docs with no lingering options, accepted architecture and detail design | research/design owner | user selection + highest-capability reviewer |
 | DOC-01 manual | Working admitted self-hosted docgen | `release/x86_64-unknown-linux-gnu/simple spipe-docgen test/05_perf/compiler_loader_script_crosslang_perf_spec.spl --output doc/06_spec --no-index` | Generated scenario sections, source hash/provenance, `0 stubs`, final readability review receipt | SPipe manual owner | highest-capability reviewer |
 | VCS-01 reconciliation | Intentional plan files committed; no tracked changes; separately owned files untouched | `flock /tmp/simple-main-restart12-push.lock bash -c 'env -u GH_TOKEN -u GITHUB_TOKEN git fetch origin main && git rebase origin/main && env -u GH_TOKEN -u GITHUB_TOKEN git push origin HEAD:main && env -u GH_TOKEN -u GITHUB_TOKEN git fetch origin main && git merge-base --is-ancestor HEAD origin/main && git diff --quiet && git diff --cached --quiet'` followed by `git status --short` and, only after reachability succeeds, `printf '%s WARN\n' "$(git rev-parse HEAD)" > /tmp/restart12-compiler_perf_a.done` | Commit hash, fetch/rebase/push output, reachability exit 0, clean status, updated lane-A WARN marker | merge owner | highest-capability reviewer |
 
@@ -296,6 +301,14 @@ corrected; `/root/reconciled_plan_review` (`gpt-5.6-sol`, high) then returned
 - The same reviewer, cycle 3: `ACCEPT`. It accepted plan completeness and
   done-state honesty while feature/manual/research/design/live gates remain
   explicitly BLOCKED.
+- `/root/final_nonstage4_review`, current Stage-4-excluded continuation, cycles
+  1-2: `REJECT` on missing deliberate-red receipts and stale/factually
+  inconsistent dispositions. All findings were corrected without weakening
+  the evidence contract.
+- The same reviewer, cycle 3: `ACCEPT`. PBL-01/02 remain honestly BLOCKED on
+  their missing retained red receipts despite green implementation tests;
+  PBL-03, selection/manual, Stage 3, deployed-CLI, and VCS blockers remain
+  explicit, with no Stage 2/3 substitution for Stage 4.
 - At historical revision `3fdfa0d3351`, only the future generated-manual
   readability review remained assigned after admitted docgen. The generated
   manual remains BLOCKED; the reconciled plan's done-state review is pending the
@@ -313,7 +326,7 @@ corrected; `/root/reconciled_plan_review` (`gpt-5.6-sol`, high) then returned
 - [x] Manual step and checker vocabulary is frozen.
 - [x] Lower-model audits are merged.
 - [x] Guide/wiki and plan-facing manual summary/dispositions are updated; generated manual completion remains BLOCKED.
-- [x] Fresh highest-capability review accepts this reconciled revision.
+- [x] Fresh highest-capability review accepts this Stage-4-excluded continuation.
 - [x] Focused plan-quality gates pass; the global workspace-root strict audit
   truthfully remains WARN with 137 pre-existing unrelated manifest violations.
 - [ ] Intentional files are committed and integrated through the lane lock.
