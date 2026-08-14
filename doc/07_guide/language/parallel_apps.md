@@ -67,11 +67,16 @@ ready IDs. It reclaims a half-consumed large prefix in bounded batches rather
 than slicing the front after every dispatch; this is an amortized scheduling
 storage repair, not evidence of multi-threaded actor execution.
 The scheduler itself is a class-backed authority. Every `ActorRef` retains the
-scheduler that admitted it, so `spawn_on(custom_scheduler, ...)` send/ask/run
-operations cannot fall back to the ambient global scheduler. References copied
-from that actor retain the same routing authority. `ActorRef.stop()` uses that
-same scheduler to drain queued asks and release their reply reservations before
-the actor closes.
+scheduler that admitted it, so `ask` and `stop` do not fall back to the ambient
+global scheduler. References copied from that actor retain the same routing
+identity. However, current `ActorRef.send()` calls the shared mailbox directly
+and only then mutates the scheduler ready queue. The scheduler registry, ready
+queue, and reply store are intentionally single-threaded and have no admission
+mutex. Therefore copied refs are not a proven cross-thread public API: a
+completion lane must route send/ask/stop through one checked scheduler-domain
+ingress (or explicitly constrain refs to that domain) before claiming one
+scheduler authority. `ActorRef.stop()` already uses the admitting scheduler to
+drain queued asks and release their reply reservations before the actor closes.
 Each `Actor` is likewise class-backed: lifecycle state and error/dispatch
 counters remain with the scheduler’s actor handle instead of disappearing in
 value-array iteration.
@@ -140,19 +145,24 @@ Closing the reader clears any partial line and makes later stdout chunks fail
 at the reader boundary; a closed inbox alone is not used as a reason to retain
 more child output.
 
-This is still not an application process API or an implicit retry queue. Child
-launch, stdin request protocol, cancellation, exit cleanup, and native
-backpressure evidence remain application/runtime work. A frame is consumed
+This is still not a complete application process API or an implicit retry
+queue. `ParentCommitPipedProcessSessionV1` now owns one piped child launch and
+reader, but stdin request protocol, parent-issued session freshness,
+cancellation, natural-exit reap/cleanup, and native backpressure evidence remain
+application/runtime work. A frame is consumed
 once the parent drains it; a stale or conflicting batch remains rejected and
 the application must produce a new result against a new snapshot. The local
-runner currently exposes only a Rust bootstrap seed, so native child delivery,
-backpressure, and cleanup execution evidence remain required before using this
-internal path as a production process transport.
+deployed self-hosted runner currently fails its bounded `test --help` ABI probe
+with status 139, so native child delivery, backpressure, and cleanup execution
+evidence remain required before using this internal path as production
+transport.
 
 For a real piped child, construct the inbox with
 `parent_commit_frame_inbox_v1_for_generation(capacity, generation)` and pass it
 to `parent_commit_piped_process_session_v1`. The generation must match or the
-child is not spawned. Within that finite session, the parent rejects frames
+child is not spawned. The generation is still caller-selected rather than
+issued by a freshness authority, so this is a bounded replay namespace, not yet
+PID-reuse/cancellation-safe session identity. Within that finite session, the parent rejects frames
 from another generation and repeated region IDs before retention. Poll only
 through the session owner and call `close()` when the child is terminal; close
 is idempotent and the status receipt reports the one recorded close result.

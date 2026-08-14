@@ -90,3 +90,20 @@ separate-process evidence rather than public process-transfer completion.
 The P0 remains open for registered graph/schema codecs, ObjectRef transport,
 production spawn/piped integration, ownership-token lifecycle, cancellation
 rollback, close/free concurrency hardening, and admitted self-hosted evidence.
+
+## 2026-08-14 parent-ingress progress and remaining actor boundary
+
+The Simple runtime now connects one bounded `SPRF1` piped stdout reader to a
+copied `SPRS` parent inbox. `ParentCommitPipedProcessSessionV1` owns one child
+handle; the paired inbox rejects generation mismatch and repeated region IDs,
+and explicit close is idempotent. This resolves the previously listed absence
+of any spawn/piped result ingress, but it does not close the P0.
+
+`ActorRef.send()` still admits directly through its mailbox and native
+`rt_actor_send` discards full/closed failure. The scheduler is single-threaded,
+so mailbox locking cannot establish safe copied-ref cross-thread admission.
+Typed graph/ObjectRef transport, a checked scheduler-owned actor ingress,
+policy-selected capacity, cancellation/terminal receipts, and admitted Stage 4
+evidence remain required. Session freshness and replay lifecycle details are
+tracked separately in
+`process_transfer_session_replay_identity_2026-08-12.md`.

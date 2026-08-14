@@ -56,48 +56,88 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 4. WP-30/WP-33: route the frozen transfer/layout/commit policy through one real MDSOC process pilot, where a bypass fails before publication and cancellation/cleanup are observable.
 5. WP-20/WP-22: preserve MIR access paths into typed AoS/SoA reference parity before SIMD/GPU lowering.
 
-## Restart12 actor/process replacement lane acceptance (2026-08-14)
+## Restart12 actor/process SPipe completion plan (2026-08-14)
 
 Owner: detached `/mnt/data/worktrees/restart12-actors` lane. Integration owner:
-`/root`, serialized by `/tmp/simple-main-restart12-push.lock`. Sidecars: `N/A`
-for this narrow runtime-boundary repair. Final reviewer: the primary
-normal/highest-capability verifier before integration.
+`/root`, serialized by `/tmp/simple-main-restart12-push.lock`. SPipe state:
+`.spipe/parent_authoritative_actor_process/state.md`. Parallel review lanes:
+`actor_audit` (actor/channel authority and lifecycle) and `process_audit`
+(framing, replay, parent commit, and SPipe/manual evidence). Final reviewer: a
+separate highest-capability reviewer after merge, before accepting done marks.
 
-- [ ] Actor/channel public sends retain one scheduler/mailbox authority, reject
-  admission after close through every copied handle, and never transport an
-  unchecked heap `Value` or child-local pointer.
-- [x] Process results use the canonical bounded `SPRF1`/`SPRS` encoded-copy
-  frame path through the shipped piped-process facade; partial reads, malformed
-  frames, non-ASCII output, oversize lines, and full frame/byte budgets fail
-  closed without unbounded retention.
-- [ ] `ParentCommitOwnerV1` remains the sole mutable root owner: children create
-  result envelopes, the parent validates and deterministically orders the whole
-  batch, and publication occurs once only after validation succeeds.
-- [x] Rejected, stale, cancelled, or failed child results are not reinserted or
-  implicitly retried; close wakes/terminates the transport lifecycle and all
-  accepted process handles are closed exactly once.
-- [ ] Focused unit/integration evidence covers copied-frame isolation,
-  backpressure, close behavior, split/coalesced stdout reads, failure rollback,
-  deterministic parent commit, and real separate-process delivery.
-- [ ] The focused system spec passes once with the deployed self-hosted runtime
-  in native mode, followed by the required compiler/lib/MCP/LSP regression and
-  runtime-facade audit gates for changed core/lib surfaces.
-- [ ] Verification reports `STATUS: PASS`; intentional changes are committed,
-  rebased onto fetched `origin/main`, pushed without token environment
-  overrides while holding the integration lock, and proven reachable from the
-  freshly fetched `origin/main` with a clean tree.
+### Acceptance and evidence matrix
 
-Current blocker: the deployed self-hosted CLI still crashes
-during its bounded `test --help` discovery probe, so native process evidence is
-not yet admitted. This lane has now added explicit child-generation/replay
-binding and a parent-observable terminal lifecycle receipt; their executable
-verdict remains WARN until that prerequisite is repaired.
+| AC | State | Current evidence | Required completion evidence |
+|---|---|---|---|
+| AC-1 actor authority and safe payload | **incomplete** | `ActorMailboxState`, `Actor`, and `ActorScheduler` are shared class authorities; copied mailbox close is covered. Native packet admission rejects heap/reserved values. | Route `ActorRef.send`, `ask`, and `stop` through one scheduler-owned checked admission port instead of direct mailbox mutation; either constrain copied refs to the scheduler domain or synchronize cross-thread admission. Return native full/closed failure instead of discarding it. Prove admission-time payload isolation and pointer/heap rejection through the public surface. |
+| AC-2 bounded framed process result | **implemented, execution blocked** | `SPRF1` reader and `SPRS` inbox implement partial/coalesced input, non-ASCII, oversize lines, frame/byte budgets, generation mismatch, replay, decode, and copied retention. Focused units cover every rejection/budget case listed here except mutation-after-offer copied isolation. | Add the copied-isolation assertion, then run the focused hostile-stream and real-child cases with the admitted Stage 4 runtime; retain the file verdict. No source-only done mark. |
+| AC-3 sole parent apply/verify/publish | **incomplete** | `ParentCommitOwnerV1` validates all submissions, canonicalizes the batch, and assigns revision/token state once on success; common tests prove stale/conflict state preservation. | Add an application-owned candidate-root apply/verify adapter and mutation receipt inside the serialized validate-then-publish transaction. Prove mixed valid+malformed and conflicting batches leave both canonical root and application payload unchanged. Audit that no application mutation bypasses this owner. |
+| AC-4 lifecycle, cancellation, no resurrection | **partial** | Drained frames are never reinserted; session generation/replay rejects are terminal; explicit `close()` calls the native close path at most once and reports its result. Scheduler stop drains asks and releases reservations. | Add explicit actor/process cancellation and a terminal reap/close-on-natural-exit receipt; prove close wakeup/join semantics, concurrent copied-ref stop behavior, and that stale/failed/cancelled results never appear later. |
+| AC-5 focused executable evidence | **incomplete** | Unit specs cover mailbox capacity/close, reply credit, process framing/inbox, and ordering. The real-child system spec contains the intended successful double-close assertion, but its unavailable/spawn-failure early returns mean that assertion has no admitted verdict. | Replace vacuous actor dispatch examples with behavioral public-surface assertions. Add unit-level successful close-once instrumentation, AC/REQ traceability, actor copied-ref close/backpressure/isolation, mixed-batch rollback, separate-process stale/replay/backpressure/cancel cases, and forbid a skip/early-return path from counting as PASS. |
+| AC-6 SPipe manual and maintenance | **missing** | No mirrored `doc/06_spec/03_system/feature/language/parent_commit_piped_result_spec.md`; no accepted `sspec-maintain` scorecard. | Author the exact five frozen `step(...)` flows from the SPipe state, attach typed process/lifecycle evidence, generate through pure-Simple `spipe-docgen` with `0 stubs`, review as an operator manual, and run `sspec-maintain scan` once with all seven scores, blocker=0, mirror PASS, traceability PASS. |
+| AC-7 production verification | **blocked** | Runtime-facade, numbered-artifact, keyword, stub, layout, and diff guards passed in the 2026-08-14 lane. | Repair and redeploy an admitted self-hosted Stage 4 CLI, then run the focused native spec once plus required compiler/lib/MCP/LSP, lint, duplication, audits, and a concurrency/resource-model gate. The current status-139 runner is not evidence. |
+| AC-8 guide and expert knowledge | **complete for planning** | This plan, `parallel_apps.md`, detail design, parallel-ownership feature expert, runtime-transfer expert, parallel-commit expert, and both open bug records now use the same landed/open classifications and resume scope. Workflow/skill/command trees are `N/A` because this documentation lane did not change their contracts. | Reopen this AC whenever implementation changes an interface, evidence wrapper, or completion classification. |
+| AC-9 cooperative review | **complete for planning** | `actor_audit` and `process_audit` completed read-only source/evidence audits. A separate highest-capability reviewer returned `ACCEPT` after correcting dependency order, receipt-codec status, replay-bug links, binary availability, and test-coverage overclaims. | Repeat highest-capability review after implementation/manual evidence lands; this acceptance covers the plan/document classifications only. |
+
+### Frozen implementation and manual vocabulary
+
+- Interfaces: `ActorMailbox`, `ActorScheduler`, `ActorRef`,
+  `TransferEnvelopeV1`, `ProcessTransferFrameV1`,
+  `ParentCommitFrameInboxV1`, `ParentCommitPipedProcessSessionV1`, and
+  `ParentCommitOwnerV1`.
+- Manual steps: `Create a bounded parent-owned process session`; `Receive a
+  fragmented encoded child result`; `Reject stale or replayed child output`;
+  `Commit one validated batch at the parent`; `Close the child transport
+  exactly once`.
+- Setup/checker helpers: `child_result_line`,
+  `parent_commit_frame_inbox_v1_for_generation`,
+  `parent_commit_piped_process_session_v1`, and
+  `drain_process_result_batch`. Any not-yet-wired helper must fail explicitly
+  with `assert(false)` or `fail(...)`.
+
+### Ordered implementation lanes
+
+1. **Actor admission owner (AC-1/4/5):** choose the scheduler-domain contract,
+   land one checked admission port, remove direct `ActorRef` mailbox mutation,
+   surface native backpressure, and add public behavioral evidence.
+2. **Parent application commit (AC-3/5):** add candidate-root apply/verify and
+   mutation receipts, then atomic mixed-batch rollback evidence.
+3. **Process lifecycle (AC-2/4/5):** add parent-issued session freshness,
+   cancel/reap/close-once receipts, and real-child hostile-stream evidence.
+4. **Stage 4 prerequisite repair (AC-7):** repair and redeploy the tracked
+   self-hosted runtime blocker; admit its bounded `test --help` probe before
+   asking that binary to run SPipe or docgen.
+5. **SPipe/manual and production gates (AC-5/6/7):** author the frozen five-step
+   scenario, generate its mirrored manual, clear the seven-score maintenance
+   gate, and execute each remaining production check once, with at most three
+   fix cycles.
+6. **Knowledge and review (AC-8/9):** refresh guide/design/experts/bugs, then
+   require separate highest-capability acceptance before marking any remaining
+   item complete.
+
+### Active blockers and resume commands
+
+- Stage 4 runtime: `bin/release/simple test --help` fails its bounded ABI probe
+  with status 139. Resume after the tracked redeploy fix with
+  `SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl --mode=native`.
+- SPipe manual: docgen/maintenance cannot be admitted with the crashing Stage 4
+  runtime. Resume with `bin/release/simple spipe-docgen
+  test/03_system/feature/language/parent_commit_piped_result_spec.spl --output
+  doc/06_spec --no-index`, then `bin/release/simple sspec-maintain scan` on the
+  same spec via `bin/release/simple sspec-maintain scan
+  test/03_system/feature/language/parent_commit_piped_result_spec.spl`.
+- Raw actor value transport remains tracked by
+  `parallel_runtime_raw_value_transport_2026-08-12.md`; session freshness,
+  cancellation revocation, PID reuse, and terminal child cleanup are tracked
+  separately by
+  `process_transfer_session_replay_identity_2026-08-12.md`. Both records remain
+  open until executable proof lands.
 
 ## Mandatory handoff record
 
-The available `bin/simple` identifies itself as a bootstrap seed. The deployed
-`bin/release/simple` wrapper identifies a self-hosted beta runtime, but rejects
-tests because its bounded `test --help` ABI probe currently segfaults. The
+This worktree has no `bin/simple`. The repo-managed `bin/release/simple`
+wrapper resolves the deployed self-hosted beta runtime, but rejects tests
+because its bounded `test --help` ABI probe currently segfaults. The
 source guard is already tracked; its fresh redeploy is blocked by the documented
 stage-4 parse-memory balloon in
 [native_selfhosted_run_segfault_startup_normalize_2026-07-24.md](../../08_tracking/bug/native_selfhosted_run_segfault_startup_normalize_2026-07-24.md).

@@ -50,10 +50,19 @@ not a graph serializer or authenticated remote protocol. V1 admits only
 - Raw channel close/free ownership still needs synchronized quiescence before
   concurrent lifecycle safety can be claimed.
 - A real forked test proves encoded parent-to-process and process-to-parent
-  framing, but production spawn/piped wiring, codec/schema registration,
-  ObjectRef transport, cancellation rollback, and critical receipts remain.
+  framing. The Simple runtime now has bounded `SPRF1` piped stdout ingress,
+  generation/replay admission, and a one-handle session with idempotent explicit
+  close. Stdin request framing, parent-issued freshness, codec/schema
+  registration, ObjectRef transport, cancellation revocation, natural-exit
+  reap, and critical receipts remain.
+- `ActorRef.send()` still bypasses scheduler admission, and native
+  `rt_actor_send` discards full/closed failure. Mailbox locking does not make
+  the single-threaded scheduler ready/reply state safe across copied refs.
 - No graph codec or ownership registry exists yet.
 - See `doc/08_tracking/bug/parallel_runtime_raw_value_transport_2026-08-12.md`.
+- Session freshness, PID reuse, cancellation revocation, and terminal child
+  cleanup are tracked in
+  `doc/08_tracking/bug/process_transfer_session_replay_identity_2026-08-12.md`.
 
 Update this page together with the common transfer contract, native packet
 schema, actor/channel queue semantics, public concurrency guide, and the active

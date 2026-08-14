@@ -32,21 +32,29 @@ implementation and receipt storage is O(n).
    successful non-empty batch;
 6. produce the same receipt order for every completion permutation.
 
-The function returns a proposed next value. It is not a synchronization
-primitive: a runtime/MDSOC owner adapter must serialize or compare-and-swap it
-against the live `(revision, snapshot_token)` before claiming atomic publish.
+The function returns a proposed next value. `ParentCommitOwnerV1` is the landed
+mutex-serialized local adapter for live `(revision, snapshot_token)`
+publication; other runtime/MDSOC owners must serialize or compare-and-swap the
+same transition before claiming atomic publish.
 
 ## Still incomplete
 
 - The application owner must build and verify the candidate snapshot before
   passing its token; payload application is not implemented by the common
   envelope engine.
-- Serialized/CAS owner publication, candidate-root capability validation,
-  mutation-receipt adaptation, canonical receipt hashing/wire encoding,
-  access-range summaries, fixed-tree reduction application, and a runtime/MDSOC
-  adapter remain WP-15/WP-30 gates.
-- The focused spec currently passes only through a Rust bootstrap seed. Repeat
-  it with an admitted Stage 4 self-hosted CLI before production acceptance.
+- CAS publication for other owners, candidate-root capability validation,
+  mutation-receipt adaptation, access-range summaries, fixed-tree reduction
+  application, and additional runtime/MDSOC adapters remain WP-15/WP-30 gates.
+  Canonical receipt wire encoding, equality, SHA-256 identity, and malformed
+  input checks are landed in `commit_receipt_codec.spl`; do not list them as
+  future work.
+- The process path validates and decodes the complete frame batch before
+  calling the owner transition, but no application-owned candidate payload is
+  applied or verified yet. Mixed valid+malformed/conflicting rollback must prove
+  both revision/token and application root remain unchanged.
+- The focused native system spec is not admitted because the deployed Stage 4
+  CLI fails its bounded `test --help` probe with status 139. Repeat it only
+  after a fresh admitted redeploy; never substitute the Rust seed.
 
 Update this skill together with the parent-commit contract, guide, execution
 status plan, and focused spec.

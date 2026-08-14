@@ -29,4 +29,22 @@ The planner resolves ABI constraints first, then assurance/profile overrides, de
 | REQ-PAR-008/009 | randomized completion yields one ordered parent receipt; stale/conflict rejects atomically |
 | REQ-MEM-001..003 | AoS/SoA parity, ABI rejection, stale-view rejection |
 
-Required future SSpec flow helpers are `step_create_parent_snapshot`, `step_send_child_result`, `step_commit_results_in_order`, and `check_no_raw_pointer_transport`. Unwired scaffolds fail with `fail("parallel ownership contract not wired")`.
+The actor/process completion SSpec freezes these operator-visible steps:
+
+1. `Create a bounded parent-owned process session`.
+2. `Receive a fragmented encoded child result`.
+3. `Reject stale or replayed child output`.
+4. `Commit one validated batch at the parent`.
+5. `Close the child transport exactly once`.
+
+The frozen setup/checker helpers are `child_result_line`,
+`parent_commit_frame_inbox_v1_for_generation`,
+`parent_commit_piped_process_session_v1`, and `drain_process_result_batch`.
+Unwired scaffolds fail with `fail("parallel ownership contract not wired")`.
+
+Actor admission is not yet a cross-thread contract. `ActorScheduler` is a
+single-threaded owner, while current `ActorRef.send()` directly enqueues and
+then touches the ready queue. The implementation phase must choose exactly one
+of two falsifiable designs: constrain all reference operations to the scheduler
+execution domain, or add one scheduler-owned synchronized command ingress.
+Mailbox locking alone cannot justify concurrent copied-reference safety.
