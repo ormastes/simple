@@ -31,6 +31,10 @@ use std.nogc_sync_mut.composition.provider_contract.{
     SimpleProviderQueryV1, SimpleProviderQueryResultV1,
     simple_provider_query_error_v1
 }
+use std.nogc_sync_mut.composition.cli_command_wire.{
+    CliCommandResultViewV1, encode_cli_command_request_v1,
+    decode_cli_command_result_v1, cli_command_result_used_length_v1
+}
 
 # --- Scalar runtime externs ---
 
@@ -42,6 +46,9 @@ extern fn rt_dyncall_4(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64, arg3: i64) 
 extern fn rt_dyncall_5(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64, arg3: i64, arg4: i64) -> i64
 extern fn rt_dyncall_6(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64, arg3: i64, arg4: i64, arg5: i64) -> i64
 extern fn rt_provider_query_v1_call(fn_ptr: i64, request_ptr: i64, result_ptr: i64) -> i32
+extern fn rt_cli_command_v1_call(fn_ptr: i64, interface_handle: i64,
+    provider_context: i64, request_ptr: i64, request_len: i64,
+    result_ptr: i64, result_capacity: i64) -> i32
 extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64)
 extern fn rt_memset(dest: i64, value: i64, len: i64) -> i64
@@ -52,6 +59,12 @@ class ProviderQueryCallV1:
     ok: bool
     call_status: i32
     result: SimpleProviderQueryResultV1
+    diagnostic: text
+
+class CliCommandCallV1:
+    ok: bool
+    call_status: i32
+    result: CliCommandResultViewV1
     diagnostic: text
 
 fn _provider_query_call_error(status: i32, diagnostic: text) -> ProviderQueryCallV1:
@@ -93,6 +106,56 @@ fn call_provider_query_v1(fn_ptr: i64, request: SimpleProviderQueryV1) -> Provid
     if decoded.value.status != status:
         return _provider_query_call_error(status, "provider-query-status-mismatch")
     ProviderQueryCallV1(ok: true, call_status: status, result: decoded.value, diagnostic: "")
+
+fn _cli_command_call_error(status: i32, diagnostic: text) -> CliCommandCallV1:
+    CliCommandCallV1(
+        ok: false,
+        call_status: status,
+        result: CliCommandResultViewV1(false, status, "", "", diagnostic),
+        diagnostic: diagnostic
+    )
+
+fn call_cli_command_v1(fn_ptr: i64, interface_handle: u64, provider_context: u64,
+        command: text, args: [text], operation: u32, output_capacity: u32) -> CliCommandCallV1:
+    if fn_ptr <= 0 or interface_handle == 0:
+        return _cli_command_call_error(-1, "cli-command-pointer-invalid")
+    if output_capacity < 20 or output_capacity > 16777216:
+        return _cli_command_call_error(-1, "cli-command-capacity-invalid")
+    val encoded = encode_cli_command_request_v1(operation, command, args, output_capacity)
+    if not encoded.ok:
+        return _cli_command_call_error(-1, encoded.diagnostic)
+    val request_ptr = rt_alloc(encoded.bytes.len())
+    if request_ptr <= 0:
+        return _cli_command_call_error(-1, "cli-command-request-allocation-failed")
+    val result_ptr = rt_alloc(output_capacity as i64)
+    if result_ptr <= 0:
+        rt_free(request_ptr)
+        return _cli_command_call_error(-1, "cli-command-result-allocation-failed")
+    var i = 0
+    while i < encoded.bytes.len():
+        rt_ptr_write_u8(request_ptr, i, encoded.bytes[i] as i64)
+        i = i + 1
+    rt_memset(result_ptr, 0, output_capacity as i64)
+    val status = rt_cli_command_v1_call(fn_ptr, interface_handle as i64,
+        provider_context as i64, request_ptr, encoded.bytes.len(),
+        result_ptr, output_capacity as i64)
+    val capacity_bytes = rt_bytes_from_raw(result_ptr, output_capacity as i64)
+    rt_free(result_ptr)
+    rt_free(request_ptr)
+    val used = cli_command_result_used_length_v1(capacity_bytes)
+    if used < 0:
+        return _cli_command_call_error(status, "cli-command-result-bounds-invalid")
+    var result_bytes: [u8] = []
+    i = 0
+    while i < used:
+        result_bytes.push(capacity_bytes[i])
+        i = i + 1
+    val decoded = decode_cli_command_result_v1(result_bytes)
+    if not decoded.ok:
+        return _cli_command_call_error(status, decoded.diagnostic)
+    if decoded.status != status:
+        return _cli_command_call_error(status, "cli-command-status-mismatch")
+    CliCommandCallV1(true, status, decoded, "")
 
 # --- Safe wrappers: resolve symbol by name, then call ---
 
@@ -146,3 +209,4 @@ fn dynlib_call_6(lib: DynLibKind, name: text, arg0: i64, arg1: i64, arg2: i64, a
     rt_dyncall_6(ptr, arg0, arg1, arg2, arg3, arg4, arg5)
 
 export ProviderQueryCallV1, call_provider_query_v1
+export CliCommandCallV1, call_cli_command_v1

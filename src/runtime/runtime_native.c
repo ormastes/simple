@@ -10157,6 +10157,22 @@ int32_t rt_provider_query_v1_call(int64_t fn_ptr, int64_t request_ptr, int64_t r
     return query((const uint8_t*)(uintptr_t)request_ptr, (uint8_t*)(uintptr_t)result_ptr);
 }
 
+/* Exact SimpleCliCommandV1 invocation call. */
+int32_t rt_cli_command_v1_call(int64_t fn_ptr, int64_t interface_handle,
+        int64_t provider_context, int64_t request_ptr, int64_t request_len,
+        int64_t result_ptr, int64_t result_capacity) {
+    typedef int32_t (*simple_cli_command_v1_fn)(uint64_t, uint64_t,
+        const uint8_t*, uint32_t, uint8_t*, uint32_t);
+    if (fn_ptr <= 0 || interface_handle <= 0 || request_ptr <= 0 ||
+            result_ptr <= 0 || request_len <= 0 || result_capacity <= 0 ||
+            (uint64_t)request_len > UINT32_MAX ||
+            (uint64_t)result_capacity > UINT32_MAX) return -1;
+    simple_cli_command_v1_fn call = (simple_cli_command_v1_fn)(uintptr_t)fn_ptr;
+    return call((uint64_t)interface_handle, (uint64_t)provider_context,
+        (const uint8_t*)(uintptr_t)request_ptr, (uint32_t)request_len,
+        (uint8_t*)(uintptr_t)result_ptr, (uint32_t)result_capacity);
+}
+
 /* ================================================================
  * Error Handling
  * ================================================================ */

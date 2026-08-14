@@ -9,16 +9,21 @@ use os.posix.dynlib.{
     DynLibKind, dynlib_open, dynlib_symbol, dynlib_symbol_is_process_callable,
     dynlib_close, dynlib_is_valid
 }
-use os.posix.dynlib_sffi.{ProviderQueryCallV1, call_provider_query_v1}
+use os.posix.dynlib_sffi.{
+    ProviderQueryCallV1, call_provider_query_v1,
+    CliCommandCallV1, call_cli_command_v1
+}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.nogc_sync_mut.composition.provider_contract.{
     SIMPLE_PROVIDER_OK, SimpleProviderQueryV1, simple_provider_query_error_v1
 }
+use std.nogc_sync_mut.composition.cli_command_wire.{CliCommandResultViewV1}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_bytes(path: text) -> [u8]
 
 val SIMPLE_PROVIDER_QUERY_V1_SYMBOL: text = "simple_provider_query_v1"
+val SIMPLE_CLI_COMMAND_INVOKE_V1_SYMBOL: text = "simple_cli_command_invoke_v1"
 
 val PROVIDER_ADMISSION_OK: i32 = 0
 val PROVIDER_ADMISSION_PATH_DENIED: i32 = 1
@@ -37,6 +42,8 @@ val PROVIDER_SESSION_QUERY_FAILED: i32 = 2
 val PROVIDER_SESSION_PIN_UNKNOWN: i32 = 3
 val PROVIDER_SESSION_CLOSE_PINNED: i32 = 4
 val PROVIDER_SESSION_CLOSE_FAILED: i32 = 5
+val PROVIDER_SESSION_CLI_SYMBOL_MISSING: i32 = 6
+val PROVIDER_SESSION_CLI_CALL_FAILED: i32 = 7
 
 class ProviderAdmissionRequestV1:
     artifact_path: text
@@ -72,6 +79,8 @@ class ProviderLoaderSessionV1:
     var open: bool
     var next_pin_id: u64
     var live_pins: [u64]
+    cli_invoke_symbol_address: i64
+    cli_invoke_process_callable: bool
 
 class ProviderDynamicAdmissionV1:
     admission: ProviderAdmissionResultV1
@@ -81,6 +90,12 @@ class ProviderSessionQueryV1:
     status: i32
     pin_id: u64
     call: ProviderQueryCallV1
+    reason: text
+
+class ProviderSessionCliInvokeV1:
+    status: i32
+    pin_id: u64
+    call: CliCommandCallV1
     reason: text
 
 fn _provider_admission_result(status: i32, address: i64, digest: text, callable: bool, reason: text) -> ProviderAdmissionResultV1:
@@ -139,6 +154,7 @@ fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderDyn
         return ProviderDynamicAdmissionV1(admission: missing, session: _closed_provider_session(missing))
     val library = dynlib_open(request.artifact_path, 2)
     val address = dynlib_symbol(library, SIMPLE_PROVIDER_QUERY_V1_SYMBOL)
+    val cli_address = dynlib_symbol(library, SIMPLE_CLI_COMMAND_INVOKE_V1_SYMBOL)
     val admission = provider_admit_evidence_v1(request, ProviderCallableEvidenceV1(
         artifact_exists: true,
         artifact_digest: digest,
@@ -157,7 +173,9 @@ fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderDyn
             admission: admission,
             open: true,
             next_pin_id: 1,
-            live_pins: []
+            live_pins: [],
+            cli_invoke_symbol_address: cli_address,
+            cli_invoke_process_callable: dynlib_symbol_is_process_callable(library, SIMPLE_CLI_COMMAND_INVOKE_V1_SYMBOL)
         )
     )
 
@@ -167,7 +185,9 @@ fn _closed_provider_session(admission: ProviderAdmissionResultV1) -> ProviderLoa
         admission: admission,
         open: false,
         next_pin_id: 1,
-        live_pins: []
+        live_pins: [],
+        cli_invoke_symbol_address: 0,
+        cli_invoke_process_callable: false
     )
 
 fn _provider_session_query_error(status: i32, reason: text) -> ProviderSessionQueryV1:
@@ -213,6 +233,43 @@ fn provider_session_release_v1(session: ProviderLoaderSessionV1, pin_id: u64) ->
     session.live_pins = retained
     PROVIDER_SESSION_OK
 
+fn _provider_session_has_pin_v1(session: ProviderLoaderSessionV1, pin_id: u64) -> bool:
+    var i = 0
+    while i < session.live_pins.len():
+        if session.live_pins[i] == pin_id:
+            return true
+        i = i + 1
+    false
+
+fn _provider_session_cli_error(status: i32, pin_id: u64, reason: text) -> ProviderSessionCliInvokeV1:
+    ProviderSessionCliInvokeV1(
+        status: status,
+        pin_id: pin_id,
+        call: CliCommandCallV1(
+            ok: false,
+            call_status: -1,
+            result: CliCommandResultViewV1(false, -1, "", "", reason),
+            diagnostic: reason
+        ),
+        reason: reason
+    )
+
+fn provider_session_invoke_cli_v1(session: ProviderLoaderSessionV1,
+        query: ProviderSessionQueryV1, command: text, args: [text],
+        operation: u32, output_capacity: u32) -> ProviderSessionCliInvokeV1:
+    if not session.open or query.status != PROVIDER_SESSION_OK:
+        return _provider_session_cli_error(PROVIDER_SESSION_NOT_OPEN, query.pin_id, "provider-session-not-open")
+    if query.pin_id == 0 or not _provider_session_has_pin_v1(session, query.pin_id):
+        return _provider_session_cli_error(PROVIDER_SESSION_PIN_UNKNOWN, query.pin_id, "provider-session-pin-unknown")
+    if session.cli_invoke_symbol_address <= 0 or not session.cli_invoke_process_callable:
+        return _provider_session_cli_error(PROVIDER_SESSION_CLI_SYMBOL_MISSING, query.pin_id, "provider-cli-symbol-not-process-callable")
+    val call = call_cli_command_v1(session.cli_invoke_symbol_address,
+        query.call.result.interface_handle, query.call.result.provider_context,
+        command, args, operation, output_capacity)
+    if not call.ok:
+        return ProviderSessionCliInvokeV1(PROVIDER_SESSION_CLI_CALL_FAILED, query.pin_id, call, call.diagnostic)
+    ProviderSessionCliInvokeV1(PROVIDER_SESSION_OK, query.pin_id, call, "invoked")
+
 fn provider_session_close_v1(session: ProviderLoaderSessionV1) -> i32:
     if not session.open:
         return PROVIDER_SESSION_NOT_OPEN
@@ -231,14 +288,16 @@ fn _provider_library_valid(library: DynLibKind) -> bool:
         DynLibKind.Smf(_): true
         DynLibKind.Pe(_): true
 
-export SIMPLE_PROVIDER_QUERY_V1_SYMBOL
+export SIMPLE_PROVIDER_QUERY_V1_SYMBOL, SIMPLE_CLI_COMMAND_INVOKE_V1_SYMBOL
 export PROVIDER_ADMISSION_OK, PROVIDER_ADMISSION_PATH_DENIED, PROVIDER_ADMISSION_ARTIFACT_MISSING
 export PROVIDER_ADMISSION_DIGEST_MISMATCH, PROVIDER_ADMISSION_CAPABILITY_DENIED
 export PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED, PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED
 export PROVIDER_ADMISSION_LOAD_FAILED, PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING, PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE
 export PROVIDER_SESSION_OK, PROVIDER_SESSION_NOT_OPEN, PROVIDER_SESSION_QUERY_FAILED
 export PROVIDER_SESSION_PIN_UNKNOWN, PROVIDER_SESSION_CLOSE_PINNED, PROVIDER_SESSION_CLOSE_FAILED
+export PROVIDER_SESSION_CLI_SYMBOL_MISSING, PROVIDER_SESSION_CLI_CALL_FAILED
 export ProviderAdmissionRequestV1, ProviderCallableEvidenceV1, ProviderAdmissionResultV1
-export ProviderLoaderSessionV1, ProviderDynamicAdmissionV1, ProviderSessionQueryV1
+export ProviderLoaderSessionV1, ProviderDynamicAdmissionV1, ProviderSessionQueryV1, ProviderSessionCliInvokeV1
 export provider_artifact_digest_v1, provider_artifact_path_allowed_v1, provider_admit_evidence_v1, provider_admit_dynamic_v1
 export provider_session_query_v1, provider_session_release_v1, provider_session_close_v1
+export provider_session_invoke_cli_v1

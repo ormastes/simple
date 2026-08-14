@@ -56,6 +56,41 @@ pub extern "C" fn rt_provider_query_v1_call(fn_ptr: i64, request_ptr: i64, resul
     func(request_ptr as usize as *const u8, result_ptr as usize as *mut u8)
 }
 
+/// Call the exact SimpleCliCommandV1 invocation ABI.
+#[no_mangle]
+pub extern "C" fn rt_cli_command_v1_call(
+    fn_ptr: i64,
+    interface_handle: i64,
+    provider_context: i64,
+    request_ptr: i64,
+    request_len: i64,
+    result_ptr: i64,
+    result_capacity: i64,
+) -> i32 {
+    let Some(ptr) = valid_fn_ptr(fn_ptr) else {
+        return -1;
+    };
+    if interface_handle <= 0
+        || request_ptr <= 0
+        || result_ptr <= 0
+        || request_len <= 0
+        || result_capacity <= 0
+        || request_len > u32::MAX as i64
+        || result_capacity > u32::MAX as i64
+    {
+        return -1;
+    }
+    let func: extern "C" fn(u64, u64, *const u8, u32, *mut u8, u32) -> i32 = unsafe { std::mem::transmute(ptr) };
+    func(
+        interface_handle as u64,
+        provider_context as u64,
+        request_ptr as usize as *const u8,
+        request_len as u32,
+        result_ptr as usize as *mut u8,
+        result_capacity as u32,
+    )
+}
+
 #[no_mangle]
 pub extern "C" fn rt_dyncall_3(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64) -> i64 {
     let Some(ptr) = valid_fn_ptr(fn_ptr) else {
@@ -114,6 +149,29 @@ mod tests {
         7
     }
 
+    extern "C" fn cli_command(
+        handle: u64,
+        context: u64,
+        request: *const u8,
+        request_len: u32,
+        result: *mut u8,
+        result_capacity: u32,
+    ) -> i32 {
+        if handle != 17
+            || context != 23
+            || request.is_null()
+            || result.is_null()
+            || request_len != 4
+            || result_capacity < 4
+        {
+            return -9;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(request, result, 4);
+        }
+        6
+    }
+
     extern "C" fn sum6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {
         a + b + c + d + e + f
     }
@@ -149,6 +207,30 @@ mod tests {
         assert_eq!(result[0], 41);
         assert_eq!(rt_provider_query_v1_call(0, 1, 1), -1);
         assert_eq!(rt_provider_query_v1_call(provider_query as usize as i64, 0, 1), -1);
+    }
+
+    #[test]
+    fn calls_exact_cli_command_signature() {
+        let request = [1u8, 2, 3, 4];
+        let mut result = [0u8; 8];
+        assert_eq!(
+            rt_cli_command_v1_call(
+                cli_command as usize as i64,
+                17,
+                23,
+                request.as_ptr() as usize as i64,
+                request.len() as i64,
+                result.as_mut_ptr() as usize as i64,
+                result.len() as i64,
+            ),
+            6
+        );
+        assert_eq!(&result[..4], &request);
+        assert_eq!(rt_cli_command_v1_call(0, 17, 23, 1, 4, 1, 4), -1);
+        assert_eq!(
+            rt_cli_command_v1_call(cli_command as usize as i64, 0, 23, 1, 4, 1, 4),
+            -1
+        );
     }
 
     #[test]

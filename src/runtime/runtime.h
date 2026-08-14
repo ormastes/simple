@@ -310,6 +310,9 @@ int8_t   rt_struct_receiver_valid(int64_t receiver, int64_t byte_offset, int64_t
 void*    rt_realloc(void* ptr, int64_t size);
 void     rt_free(void* ptr);
 int32_t  rt_provider_query_v1_call(int64_t fn_ptr, int64_t request_ptr, int64_t result_ptr);
+int32_t  rt_cli_command_v1_call(int64_t fn_ptr, int64_t interface_handle,
+        int64_t provider_context, int64_t request_ptr, int64_t request_len,
+        int64_t result_ptr, int64_t result_capacity);
 void*    rt_memcpy(void* dst, const void* src, int64_t n);
 void*    copy_mem(void* dst, const void* src, int64_t n);
 void*    rt_memset(void* dst, int8_t val, int64_t n);

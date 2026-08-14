@@ -260,6 +260,18 @@ fn rt_browser_http_job_bool_stub(_args: &[Value]) -> Result<Value, CompileError>
     Ok(Value::Bool(false))
 }
 
+fn rt_cli_command_v1_call_interpreter(args: &[Value]) -> Result<Value, CompileError> {
+    let [Value::Int(fn_ptr), Value::Int(interface_handle), Value::Int(provider_context),
+        Value::Int(request_ptr), Value::Int(request_len), Value::Int(result_ptr),
+        Value::Int(result_capacity)] = args else {
+        return Ok(Value::Int(-1));
+    };
+    Ok(Value::Int(simple_runtime::value::sffi::rt_cli_command_v1_call(
+        *fn_ptr, *interface_handle, *provider_context, *request_ptr, *request_len,
+        *result_ptr, *result_capacity,
+    ) as i64))
+}
+
 /// Build the dispatch table mapping extern function names to their implementations.
 /// Only includes "simple" functions that take `&[Value]` and return `Result<Value, CompileError>`.
 /// Complex functions (needing env, functions, classes, etc.) remain in the match fallback.
@@ -2306,6 +2318,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_fonts_call_init_path", dynamic_sffi::spl_fonts_call_init_path_fn);
     insert_simple!("spl_fonts_call_layout_text", dynamic_sffi::spl_fonts_call_layout_text_fn);
     insert_simple!("rt_provider_query_v1_call", dynamic_sffi::rt_provider_query_v1_call_fn);
+    insert_simple!("rt_cli_command_v1_call", rt_cli_command_v1_call_interpreter);
     insert_simple!("sqrt", math::sqrt);
     insert_simple!("stderr_flush", io::stderr_flush);
     insert_simple!("stderr_write", io::stderr_write);
