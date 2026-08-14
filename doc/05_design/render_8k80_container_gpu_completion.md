@@ -73,6 +73,10 @@ returned by strict submission and returns a new owner-result envelope. It
 requires completed `window-swapchain`, device-present, known completion, zero
 readback, and positive framebuffer/device/swapchain identities. These fields do
 not assert scanout pixels; A7 still requires an independent physical receipt.
+Its receipt binds the same semantic owner, DrawIR owner, sparse damage geometry,
+seed mode, adjacent revisions, and end checksum as A5. The hardware wrapper
+also requires A5's independent full-Vulkan oracle parity before admitting the
+window evidence.
 
 The A4/A5 build shares one source-matched native cache across its three native
 entries and retains the semantic-window artifact plus build log/hash in the

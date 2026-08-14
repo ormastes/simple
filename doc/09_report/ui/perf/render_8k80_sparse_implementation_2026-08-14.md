@@ -21,6 +21,11 @@ Status: **WARN — software implementation advanced; live performance and physic
   sparse-semantic-A5 workload hashes, exact damage/owner/API fields, and
   checksum-oracle parity. Deliberate-red fixtures reject damage drift and false
   parity.
+- **A6/A8 source correlation:** the visible-window receipt now binds A5's exact
+  semantic and DrawIR owners, sparse damage geometry, seed mode, adjacent
+  revisions, and independently full-rendered Vulkan oracle checksum. The
+  physical wrapper rejects stale workload, geometry, or oracle evidence. This
+  remains presentation readiness, not scanout evidence.
 - **Container readiness:** a digest-only NVIDIA CUDA image recipe and setup
   checker install `vulkan-tools` and `/usr/bin/time`, forbid Mesa ICD
   substitution, require `compute,utility,graphics`, bound CPU/RSS/PIDs and

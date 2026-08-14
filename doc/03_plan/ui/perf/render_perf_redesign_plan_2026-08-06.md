@@ -135,6 +135,10 @@ binds those workload changes. Details and exclusions are in
 `doc/09_report/ui/perf/render_8k80_sparse_implementation_2026-08-14.md`.
 These changes are implementation/optimization only: no new p50/p95 result is
 claimed, and A4/A5/A7 remain unchecked until admitted Stage4 execution.
+The A6 window receipt now binds the same campaign-v3 semantic/DrawIR owners,
+damage geometry, seed mode, adjacent revisions, and A5 independent-oracle
+checksum. Hardware-free deliberate-red checks reject workload, geometry, and
+oracle drift; this strengthens source readiness only and does not check A6/A8.
 
 2026-08-14 container/GPU implementation review: research and design completed.
 Fresh scoped TODO812/TODO813 work corrected the rejected handoff: A4 and A5 now

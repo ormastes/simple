@@ -6,6 +6,7 @@
 | REQ-R8KC-003 | strict changing semantic Vulkan producer | device receipt passes |
 | REQ-R8KC-007 | strict changing semantic visible-window producer | one-owner presentation receipt passes and explicitly excludes scanout capture |
 | REQ-R8KC-007 | unavailable/suboptimal/fallback window presentation | producer blocks or fails closed |
+| REQ-R8KC-007 | stale A6 workload, damage geometry, or A5 oracle | physical wrapper deliberate-red correlation fails |
 | REQ-R8KC-004/005 | correlated A4+A5, no physical | `blocked-physical` |
 | REQ-R8KC-004/006 | correlated A4+A5+A6/A8 | aggregate `pass` |
 | REQ-R8KC-005 | missing/malformed/duplicate key | aggregate `failed` |
