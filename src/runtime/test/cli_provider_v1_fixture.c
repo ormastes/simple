@@ -18,7 +18,9 @@ static void wr64(uint8_t *p, uint64_t v) {
     for (unsigned i = 0; i < 8; ++i) p[i] = (uint8_t)(v >> (8 * i));
 }
 
-int32_t simple_provider_query_v1(const uint8_t *request, uint8_t *result) {
+int32_t simple_provider_query_v1(uint64_t request_address, uint64_t result_address) {
+    const uint8_t *request = (const uint8_t *)(uintptr_t)request_address;
+    uint8_t *result = (uint8_t *)(uintptr_t)result_address;
     const uint64_t cli_interface = UINT64_C(5999723006133093425);
     if (!request || !result || rd32(request) != 44 ||
             rd64(request + 4) != cli_interface || rd32(request + 12) != 1 ||
@@ -37,8 +39,10 @@ int32_t simple_provider_query_v1(const uint8_t *request, uint8_t *result) {
 }
 
 int32_t simple_cli_command_invoke_v1(uint64_t interface_handle,
-        uint64_t provider_context, const uint8_t *request,
-        uint32_t request_len, uint8_t *result, uint32_t result_capacity) {
+        uint64_t provider_context, uint64_t request_address,
+        uint32_t request_len, uint64_t result_address, uint32_t result_capacity) {
+    const uint8_t *request = (const uint8_t *)(uintptr_t)request_address;
+    uint8_t *result = (uint8_t *)(uintptr_t)result_address;
     static const char output[] = "native-provider-ok";
     if (interface_handle != UINT64_C(0x434c4931) ||
             provider_context != UINT64_C(0x50525631) || !request || !result ||

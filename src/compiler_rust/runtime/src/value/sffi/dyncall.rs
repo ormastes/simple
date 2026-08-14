@@ -41,7 +41,7 @@ pub extern "C" fn rt_dyncall_2(fn_ptr: i64, arg0: i64, arg1: i64) -> i64 {
 /// Call the exact SimpleProviderQueryV1 discovery ABI.
 ///
 /// This must remain separate from `rt_dyncall_2`: provider discovery returns
-/// `int32_t` and accepts pointers to packed request/result buffers. Calling it
+/// `int32_t` and accepts scalar addresses of packed request/result buffers. Calling it
 /// through the generic `fn(i64, i64) -> i64` type is incompatible-function-
 /// type undefined behaviour even on targets where it appears to work.
 #[no_mangle]
@@ -52,8 +52,8 @@ pub extern "C" fn rt_provider_query_v1_call(fn_ptr: i64, request_ptr: i64, resul
     if request_ptr <= 0 || result_ptr <= 0 {
         return -1;
     }
-    let func: extern "C" fn(*const u8, *mut u8) -> i32 = unsafe { std::mem::transmute(ptr) };
-    func(request_ptr as usize as *const u8, result_ptr as usize as *mut u8)
+    let func: extern "C" fn(u64, u64) -> i32 = unsafe { std::mem::transmute(ptr) };
+    func(request_ptr as u64, result_ptr as u64)
 }
 
 /// Call the exact SimpleCliCommandV1 invocation ABI.
@@ -80,13 +80,13 @@ pub extern "C" fn rt_cli_command_v1_call(
     {
         return -1;
     }
-    let func: extern "C" fn(u64, u64, *const u8, u32, *mut u8, u32) -> i32 = unsafe { std::mem::transmute(ptr) };
+    let func: extern "C" fn(u64, u64, u64, u32, u64, u32) -> i32 = unsafe { std::mem::transmute(ptr) };
     func(
         interface_handle as u64,
         provider_context as u64,
-        request_ptr as usize as *const u8,
+        request_ptr as u64,
         request_len as u32,
-        result_ptr as usize as *mut u8,
+        result_ptr as u64,
         result_capacity as u32,
     )
 }
@@ -139,12 +139,12 @@ mod tests {
         a + b
     }
 
-    extern "C" fn provider_query(request: *const u8, result: *mut u8) -> i32 {
-        if request.is_null() || result.is_null() {
+    extern "C" fn provider_query(request: u64, result: u64) -> i32 {
+        if request == 0 || result == 0 {
             return -9;
         }
         unsafe {
-            *result = *request;
+            *(result as usize as *mut u8) = *(request as usize as *const u8);
         }
         7
     }
@@ -152,22 +152,16 @@ mod tests {
     extern "C" fn cli_command(
         handle: u64,
         context: u64,
-        request: *const u8,
+        request: u64,
         request_len: u32,
-        result: *mut u8,
+        result: u64,
         result_capacity: u32,
     ) -> i32 {
-        if handle != 17
-            || context != 23
-            || request.is_null()
-            || result.is_null()
-            || request_len != 4
-            || result_capacity < 4
-        {
+        if handle != 17 || context != 23 || request == 0 || result == 0 || request_len != 4 || result_capacity < 4 {
             return -9;
         }
         unsafe {
-            std::ptr::copy_nonoverlapping(request, result, 4);
+            std::ptr::copy_nonoverlapping(request as usize as *const u8, result as usize as *mut u8, 4);
         }
         6
     }

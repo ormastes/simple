@@ -1,0 +1,107 @@
+# Pure Simple implementation of the stable provider query and CLI command ABI.
+# Exported boundaries contain only fixed-width scalars. Packed byte arenas own
+# all variable-length data; no Simple object layout crosses the boundary.
+
+use os.smf.provider_query_wire.{
+    decode_provider_query_request_v1, encode_provider_query_result_v1
+}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_OK, SIMPLE_PROVIDER_INTERFACE_UNKNOWN,
+    SIMPLE_PROVIDER_MAJOR_UNSUPPORTED, SIMPLE_PROVIDER_MINOR_UNSUPPORTED,
+    SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT, SIMPLE_PROVIDER_CAPABILITY_DENIED,
+    SIMPLE_CLI_COMMAND_V1_INTERFACE, SIMPLE_CLI_COMMAND_V1_MAJOR,
+    SIMPLE_CLI_COMMAND_V1_MINOR, SIMPLE_CLI_COMMAND_REQUEST_V1_SIZE,
+    SIMPLE_CLI_RUN, SIMPLE_CLI_OK, SIMPLE_CLI_INVALID_ARGS,
+    SimpleProviderQueryResultV1
+}
+use std.nogc_sync_mut.composition.cli_command_wire.{
+    decode_cli_command_request_v1, encode_cli_command_result_v1
+}
+
+extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
+
+val PURE_SIMPLE_CLI_INTERFACE_HANDLE: u64 = 1129072945
+val PURE_SIMPLE_CLI_PROVIDER_CONTEXT: u64 = 1347573297
+val PURE_SIMPLE_CLI_REQUIRED_CAPABILITIES: u64 = 0
+
+fn _copy_to_raw(address: i64, bytes: [u8]):
+    var i = 0
+    while i < bytes.len():
+        rt_ptr_write_u8(address, i, bytes[i] as i64)
+        i = i + 1
+
+fn _query_error(status: i32, result_address: i64) -> i32:
+    val encoded = encode_provider_query_result_v1(SimpleProviderQueryResultV1(
+        status: status, provided_major: 0, provided_minor: 0,
+        descriptor_size: 0, interface_handle: 0, provider_context: 0,
+        provider_identity_digest: 0, implementation_digest: 0, abi_digest: 0,
+    ))
+    if not encoded.ok:
+        return status
+    _copy_to_raw(result_address, encoded.bytes)
+    status
+
+@export("C", name: "simple_provider_query_v1")
+fn pure_simple_provider_query_v1(request_address: i64, result_address: i64) -> i32:
+    if request_address <= 0 or result_address <= 0:
+        return SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT
+    val decoded = decode_provider_query_request_v1(rt_bytes_from_raw(request_address, 44))
+    if not decoded.ok:
+        return _query_error(SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT, result_address)
+    val request = decoded.value
+    if request.interface_id != SIMPLE_CLI_COMMAND_V1_INTERFACE:
+        return _query_error(SIMPLE_PROVIDER_INTERFACE_UNKNOWN, result_address)
+    if request.minimum_major != SIMPLE_CLI_COMMAND_V1_MAJOR:
+        return _query_error(SIMPLE_PROVIDER_MAJOR_UNSUPPORTED, result_address)
+    if request.minimum_minor > SIMPLE_CLI_COMMAND_V1_MINOR:
+        return _query_error(SIMPLE_PROVIDER_MINOR_UNSUPPORTED, result_address)
+    if (request.requested_capability_bits & PURE_SIMPLE_CLI_REQUIRED_CAPABILITIES) !=
+            PURE_SIMPLE_CLI_REQUIRED_CAPABILITIES:
+        return _query_error(SIMPLE_PROVIDER_CAPABILITY_DENIED, result_address)
+    val encoded = encode_provider_query_result_v1(SimpleProviderQueryResultV1(
+        status: SIMPLE_PROVIDER_OK,
+        provided_major: SIMPLE_CLI_COMMAND_V1_MAJOR,
+        provided_minor: SIMPLE_CLI_COMMAND_V1_MINOR,
+        descriptor_size: 28,
+        interface_handle: PURE_SIMPLE_CLI_INTERFACE_HANDLE,
+        provider_context: PURE_SIMPLE_CLI_PROVIDER_CONTEXT,
+        provider_identity_digest: 4369,
+        implementation_digest: 8738,
+        abi_digest: 13107,
+    ))
+    if not encoded.ok:
+        return SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT
+    _copy_to_raw(result_address, encoded.bytes)
+    SIMPLE_PROVIDER_OK
+
+@export("C", name: "simple_cli_command_invoke_v1")
+fn pure_simple_cli_command_invoke_v1(
+    interface_handle: i64,
+    provider_context: i64,
+    request_address: i64,
+    request_length: i64,
+    result_address: i64,
+    result_capacity: i64,
+) -> i32:
+    if interface_handle != PURE_SIMPLE_CLI_INTERFACE_HANDLE as i64 or
+            provider_context != PURE_SIMPLE_CLI_PROVIDER_CONTEXT as i64 or
+            request_address <= 0 or result_address <= 0 or
+            request_length < SIMPLE_CLI_COMMAND_REQUEST_V1_SIZE as i64 or
+            result_capacity < 20:
+        return SIMPLE_CLI_INVALID_ARGS
+    val request = decode_cli_command_request_v1(
+        rt_bytes_from_raw(request_address, request_length)
+    )
+    if not request.ok or request.operation != SIMPLE_CLI_RUN or
+            request.command != "fmt":
+        return SIMPLE_CLI_INVALID_ARGS
+    val encoded = encode_cli_command_result_v1(
+        SIMPLE_CLI_OK, "pure-simple-provider-ok", ""
+    )
+    if not encoded.ok or encoded.bytes.len() > result_capacity:
+        return SIMPLE_CLI_INVALID_ARGS
+    _copy_to_raw(result_address, encoded.bytes)
+    SIMPLE_CLI_OK
+
+export pure_simple_provider_query_v1, pure_simple_cli_command_invoke_v1

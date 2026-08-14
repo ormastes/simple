@@ -1,0 +1,67 @@
+use std.spec.{describe, it, expect}
+use app.provider_cli.native_provider_v1.{
+    pure_simple_provider_query_v1, pure_simple_cli_command_invoke_v1
+}
+use os.smf.provider_query_wire.{
+    encode_provider_query_request_v1, decode_provider_query_result_v1
+}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_QUERY_V1_SIZE, SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE,
+    SIMPLE_CLI_COMMAND_V1_INTERFACE, SIMPLE_CLI_RUN, SIMPLE_PROVIDER_OK,
+    SimpleProviderQueryV1
+}
+use std.nogc_sync_mut.composition.cli_command_wire.{
+    encode_cli_command_request_v1, decode_cli_command_result_v1,
+    cli_command_result_used_length_v1
+}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64)
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)
+extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
+
+fn copy_to_raw(address: i64, bytes: [u8]):
+    var i = 0
+    while i < bytes.len():
+        rt_ptr_write_u8(address, i, bytes[i] as i64)
+        i = i + 1
+
+describe "Pure Simple native CLI provider":
+    it "queries and invokes through canonical packed arenas":
+        val request = encode_provider_query_request_v1(SimpleProviderQueryV1(
+            descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+            interface_id: SIMPLE_CLI_COMMAND_V1_INTERFACE,
+            minimum_major: 1, minimum_minor: 0, host_abi: 1,
+            target_offset: 0, target_length: 0, requested_capability_bits: 0,
+        ))
+        val request_ptr = rt_alloc(request.bytes.len())
+        val query_result_ptr = rt_alloc(SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE as i64)
+        copy_to_raw(request_ptr, request.bytes)
+        expect(pure_simple_provider_query_v1(request_ptr, query_result_ptr)).to_equal(SIMPLE_PROVIDER_OK)
+        val query = decode_provider_query_result_v1(
+            rt_bytes_from_raw(query_result_ptr, SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE as i64)
+        )
+        expect(query.ok).to_equal(true)
+
+        val command = encode_cli_command_request_v1(SIMPLE_CLI_RUN, "fmt", ["file.spl"], 128)
+        val command_ptr = rt_alloc(command.bytes.len())
+        val command_result_ptr = rt_alloc(128)
+        copy_to_raw(command_ptr, command.bytes)
+        expect(pure_simple_cli_command_invoke_v1(
+            query.value.interface_handle as i64, query.value.provider_context as i64,
+            command_ptr, command.bytes.len(), command_result_ptr, 128,
+        )).to_equal(0)
+        val padded = rt_bytes_from_raw(command_result_ptr, 128)
+        val used = cli_command_result_used_length_v1(padded)
+        var exact: [u8] = []
+        var i = 0
+        while i < used:
+            exact.push(padded[i])
+            i = i + 1
+        val result = decode_cli_command_result_v1(exact)
+        expect(result.ok).to_equal(true)
+        expect(result.output).to_equal("pure-simple-provider-ok")
+        rt_free(command_result_ptr)
+        rt_free(command_ptr)
+        rt_free(query_result_ptr)
+        rt_free(request_ptr)
