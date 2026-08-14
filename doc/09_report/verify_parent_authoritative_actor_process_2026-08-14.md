@@ -33,6 +33,13 @@ the canonical architecture, guide, expert knowledge, and plans.
   cleared, completed HIR for all 616 closure files and then reported fourteen
   remaining folded module constants without explicit types during MIR lowering.
   The cap forbids another diagnostic/build cycle in this session.
+- WARN: the next recovery pass proved the retained Stage-2 authority predates
+  current `mir_folded_const_type` and cannot rebuild itself through the full
+  planner: a four-module planner crashed, a two-module planner rejected three
+  folded constants, and a one-module planner rejected exactly its three typed
+  module constants. A pure-Simple recovery planner with no module constants is
+  now prepared, but its three-cycle mini-build cap was exhausted before an
+  executable verdict. No receipt or replacement Stage 2 was manufactured.
 - WARN: the remaining Stage-2 system scenarios exposed aggregate/`Option`
   corruption: fragmented real-child delivery, atomic rollback, and cancellation
   did not produce valid executable verdicts. Assertions were retained.

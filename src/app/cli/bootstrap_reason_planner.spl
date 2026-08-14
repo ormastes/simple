@@ -1,0 +1,66 @@
+# Minimal pure-Simple bootstrap authorization planner.
+#
+# This entrypoint deliberately imports only the typed policy and canonical file
+# facade. It lets an admitted Stage-2 compiler produce the policy receipt needed
+# to rebuild a stale Stage-2 authority without pulling the full CLI/compiler
+# closure into the planner itself.
+
+extern fn rt_get_args() -> [text]
+# Bootstrap recovery boundary: the stale Stage-2 compiler cannot lower the
+# current general file facade because that module contains the folded constants
+# this planner exists to replace. Keep the two canonical runtime operations
+# local and bounded; no process execution or arbitrary file reads are exposed.
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
+
+fn planner_reason_allowed(reason: text) -> bool:
+    reason == "seed-missing" or
+        reason == "seed-corrupt" or
+        reason == "seed-target-unsupported" or
+        reason == "seed-cannot-parse-required-language-feature" or
+        reason == "seed-cannot-lower-required-compiler-feature" or
+        reason == "bootstrap-runtime-abi-major-changed" or
+        reason == "bootstrap-artifact-format-major-changed" or
+        reason == "bootstrap-core-interface-major-changed" or
+        reason == "self-host-convergence-check" or
+        reason == "release-trust-verification" or
+        reason == "diverse-double-compilation"
+
+fn planner_arg_value(args: [text], prefix: text) -> text:
+    var i = 0
+    while i < args.len():
+        if args[i].starts_with(prefix):
+            return args[i].substring(prefix.len())
+        i = i + 1
+    ""
+
+fn planner_file_write(path: text, content: text) -> bool:
+    rt_file_delete(path)
+    rt_file_write_text_at(path, 0, content) >= 0
+
+fn main() -> i64:
+    val args = rt_get_args()
+    val reason_name = planner_arg_value(args, "--bootstrap-reason=")
+    val receipt_path = planner_arg_value(args, "--bootstrap-receipt=")
+    var target = planner_arg_value(args, "--bootstrap-target=")
+    if target.len() == 0:
+        target = "//bootstrap:stage4"
+    if not planner_reason_allowed(reason_name):
+        print("bootstrap-policy-error: typed-reason-required")
+        return 2
+    if receipt_path.trim().len() == 0:
+        print("bootstrap-policy-error: receipt-path-required")
+        return 2
+    if not target.starts_with("//bootstrap:") and
+            not target.starts_with("//release:"):
+        print("bootstrap-policy-error: target-required")
+        return 2
+    val receipt = "simple-bootstrap-receipt-v1" +
+        "|producer=simple-build-planner-v1" +
+        "|target=" + target + "|reason=" + reason_name
+    if not planner_file_write(receipt_path, receipt + "\n"):
+        print("bootstrap-policy-error: receipt-write-failed: " + receipt_path)
+        return 2
+    print("bootstrap-plan: execution=not-attempted receipt=" + receipt_path +
+        " reason=" + reason_name)
+    0

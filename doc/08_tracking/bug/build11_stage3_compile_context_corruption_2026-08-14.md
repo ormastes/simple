@@ -33,6 +33,18 @@ value` diagnostics. No candidate was produced and the three-cycle cap is
 exhausted. A fresh lane must first make the Stage-2 diagnostic print the
 constant name/span; another blind annotation sweep is not admitted.
 
+The next actor/process recovery pass found that current main already owns the
+actual fix: `mir_folded_const_type` classifies the original HIR expression
+before matching the native payload enum. The retained admitted Stage 2 predates
+that implementation, explaining why repeated Stage-3 runs could not consume
+it. Three bounded attempts reduced a pure-Simple bootstrap-receipt planner from
+four modules to one. The final stale-Stage-2 verdict rejected exactly the
+planner's three explicitly typed module constants, confirming the old lowering
+boundary rather than the constant owners. The prepared planner now has zero
+module constants and no process runner; its next build is intentionally
+deferred by the three-cycle cap. If it builds, use its typed receipt for a fresh
+current-source Stage-2 transaction rather than resuming the obsolete authority.
+
 Follow-up history audit found the allocation owner: `ModuleSurfacesByName` had
 regressed from the reference-owned class established by `866559f16e0` to a
 value struct. The post-store validation call consequently copied the complete
