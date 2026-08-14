@@ -56,3 +56,20 @@ Also reject a rename implementation that only creates a second directory
 entry and later unlinks the first, or that fails whenever the destination
 already exists. Both shapes violate the atomic replacement commit point even
 when the underlying sector writes eventually succeed.
+
+## 2026-08-14 capability preflight correction
+
+The offline ARM64 gate previously called the adapter helper with only the
+runtime ABI bitset. That helper implicitly read FAT32 mounted-state globals,
+which are correctly unpublished in a host-side process, so the gate reported
+`ready=false` before QEMU could mount and recover the image.
+
+The adapter projection now takes explicit typed FAT32 evidence. Production
+still supplies `fat32_atomic_replace_caps()` and therefore remains fail-closed
+until mount/recovery publishes truth. The offline structural gate calls
+`fat32_atomic_replace_caps_probe` with the canonical Simple SARD descriptor and
+the harness's exact 256 MiB/512-byte-sector/32-reserved-sector geometry. The
+descriptor constructor mirrors the `make_os_disk.c` provisioner fields and
+CRC32C. Focused coverage rejects corrupt CRC, journal start/count, and sector
+size. The gate neither publishes mount globals nor manufactures a production
+capability.

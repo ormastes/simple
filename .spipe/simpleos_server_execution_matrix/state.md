@@ -215,3 +215,15 @@ implementation-active
   stops before QEMU. The crash-marker matcher is also not line-anchored, and
   target immutable-text zeroization remains unproved. The three-fix-cycle cap
   is exhausted: no ARM/UNO acceptance row or release gate is credited.
+- dev: The next continuation corrected the pre-QEMU capability boundary. The
+  offline structural check now validates the exact 512-byte SARD descriptor,
+  256 MiB geometry, reserved-sector extent, and CRC/field corruption cases;
+  production continues to consume only mount/recovery-published FAT truth.
+  Independent highest-capability static review passed this boundary. QEMU is
+  still blocked because no current-source Stage-4/full compiler or matching
+  `simpleos-arm64-current-source-compiler-admission-v1` receipt exists.
+- verify-blocked: A fresh read-only UNO Q audit finds the Arduino Imola device
+  connected but still running vendor Debian, with no authoritative QRB2210
+  signed SimpleOS bundle, partition/download and rollback manifest, recovery
+  procedure, rootfs/runtime, or evidence provider. CPU and GPU acceptance rows
+  remain open; the board was not mutated.

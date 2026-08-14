@@ -6,7 +6,11 @@
 # with only "write then close" is not a degraded durability mode: it is
 # unavailable and must fail before a database listener is published.
 
-use os.kernel.fs.fat32_atomic_replace.{AtomicReplaceRecoveryLevel, fat32_atomic_replace_caps}
+use os.kernel.fs.fat32_atomic_replace.{
+    AtomicReplaceRecoveryCaps,
+    AtomicReplaceRecoveryLevel,
+    fat32_atomic_replace_caps
+}
 
 extern fn rt_simpleos_file_atomic_caps() -> i64
 
@@ -28,8 +32,14 @@ struct SimpleOsDatabasePersistenceCaps:
     atomic_replace_rename: bool
     crash_recovery: bool
 
-fn simpleos_database_persistence_caps_for(runtime: i64) -> SimpleOsDatabasePersistenceCaps:
-    val replace = fat32_atomic_replace_caps()
+fn simpleos_database_persistence_caps_for(runtime: i64, replace: AtomicReplaceRecoveryCaps) -> SimpleOsDatabasePersistenceCaps:
+    """Pure projection used by structural probes and focused tests.
+
+    The caller must supply the FAT32 evidence it actually owns. Production
+    passes mounted state; an offline structural probe may pass only the result
+    of its own pure FAT32 probe. This function never reads or publishes mount
+    globals.
+    """
     val recoverable = replace.level == AtomicReplaceRecoveryLevel.RecoverableReplaceV1 and
         replace.durable_flush and replace.mount_recovery_complete
     SimpleOsDatabasePersistenceCaps(
@@ -49,7 +59,9 @@ fn simpleos_database_persistence_caps_for(runtime: i64) -> SimpleOsDatabasePersi
     )
 
 fn simpleos_database_persistence_caps() -> SimpleOsDatabasePersistenceCaps:
-    simpleos_database_persistence_caps_for(rt_simpleos_file_atomic_caps())
+    # Production truth is published only by FAT32 mount/recovery.
+    simpleos_database_persistence_caps_for(
+        rt_simpleos_file_atomic_caps(), fat32_atomic_replace_caps())
 
 fn simpleos_database_persistence_ready(caps: SimpleOsDatabasePersistenceCaps) -> bool:
     caps.exclusive_create and

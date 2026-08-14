@@ -344,6 +344,16 @@ QEMU. The marker grep is not exact-line anchored and target immutable-text
 zeroization remains unproved. The three-cycle cap is exhausted; none of these
 rows or the release gate is closed.
 
+Continuation update: the deterministic capability-probe failure is fixed
+statically and independently reviewed. The structural gate now validates the
+actual provisioned SARD descriptor and negative corruptions, while mounted
+production truth remains fail-closed. Do not run the QEMU matrix until a fresh
+current-source full CLI and an exact
+`simpleos-arm64-current-source-compiler-admission-v1` receipt exist. A retained
+artifact audit found neither. UNO Q remains blocked on vendor-authoritative
+signed boot/download/recovery inputs and an admitted SimpleOS QRB2210 runtime;
+Debian CPU/Vulkan enumeration receives no acceptance credit.
+
 ## Wave 3 (2026-07-27) — board bring-up + convergence, all lanes landed
 
 ### BOARD: SimpleOS boots on Arduino UNO Q — **PASS** (first board boot of this stack)

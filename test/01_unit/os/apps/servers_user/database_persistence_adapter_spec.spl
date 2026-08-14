@@ -7,10 +7,36 @@ use os.apps.servers_user.database_persistence_adapter.{
     simpleos_database_persistence_blocker,
     simpleos_database_persistence_rename_blocker
 }
+use os.kernel.fs.fat32_atomic_replace.{
+    AtomicReplaceRecoveryLevel,
+    fat32_atomic_replace_caps,
+    fat32_atomic_replace_caps_probe,
+    fat32_atomic_replace_provisioned_descriptor
+}
+use os.crypto.crc32.{crc32c}
+
+fn _put_u32_le(bytes: [u8], offset: i64, value: u32) -> [u8]:
+    var out = bytes
+    out[offset] = (value & 0xFFu32).to_u8()
+    out[offset + 1] = ((value >> 8u32) & 0xFFu32).to_u8()
+    out[offset + 2] = ((value >> 16u32) & 0xFFu32).to_u8()
+    out[offset + 3] = ((value >> 24u32) & 0xFFu32).to_u8()
+    out
+
+fn _descriptor_with_field(offset: i64, value: u32) -> [u8]:
+    var descriptor = fat32_atomic_replace_provisioned_descriptor()
+    descriptor = _put_u32_le(descriptor, offset, value)
+    descriptor = _put_u32_le(descriptor, 20, 0u32)
+    _put_u32_le(descriptor, 20, crc32c(descriptor))
+
+fn _structural_replace_caps():
+    fat32_atomic_replace_caps_probe(
+        fat32_atomic_replace_provisioned_descriptor(), 524288u32, 32u32,
+        true, true)
 
 describe "SimpleOS database persistence adapter":
     it "admits linked runtime and RecoverableReplaceV1 capabilities together":
-        val caps = simpleos_database_persistence_caps_for(31)
+        val caps = simpleos_database_persistence_caps_for(31, _structural_replace_caps())
         expect(simpleos_database_persistence_ready(caps)).to_equal(true)
         expect(simpleos_database_persistence_blocker(caps)).to_equal("")
 
@@ -41,7 +67,7 @@ describe "SimpleOS database persistence adapter":
             "atomic-replace-rename-unavailable")
 
     it "distinguishes an unlinked runtime symbol from FAT32 replace semantics":
-        val caps = simpleos_database_persistence_caps_for(31)
+        val caps = simpleos_database_persistence_caps_for(31, _structural_replace_caps())
         expect(simpleos_database_persistence_rename_blocker(caps)).to_equal("")
 
         val unlinked = SimpleOsDatabasePersistenceCaps(
@@ -55,6 +81,37 @@ describe "SimpleOS database persistence adapter":
         )
         expect(simpleos_database_persistence_rename_blocker(unlinked)).to_equal(
             "runtime-rename-owner-unlinked")
+
+    it "keeps unpublished mounted truth distinct from a pure structural projection":
+        val mounted = simpleos_database_persistence_caps_for(31, fat32_atomic_replace_caps())
+        expect(simpleos_database_persistence_ready(mounted)).to_equal(false)
+        expect(simpleos_database_persistence_blocker(mounted)).to_equal(
+            "durable-file-sync-unavailable")
+
+        val structural = simpleos_database_persistence_caps_for(31, _structural_replace_caps())
+        expect(simpleos_database_persistence_ready(structural)).to_equal(true)
+
+    it "validates the exact provisioner descriptor and rejects malformed fields":
+        val descriptor = fat32_atomic_replace_provisioned_descriptor()
+        expect(descriptor.len()).to_equal(512)
+        expect(fat32_atomic_replace_caps_probe(
+            descriptor, 524288u32, 32u32, true, true).level).to_equal(
+                AtomicReplaceRecoveryLevel.RecoverableReplaceV1)
+
+        var corrupt_crc = descriptor
+        corrupt_crc[20] = corrupt_crc[20] ^ 1u8
+        expect(fat32_atomic_replace_caps_probe(
+            corrupt_crc, 524288u32, 32u32, true, true).level).to_equal(
+                AtomicReplaceRecoveryLevel.Unsupported)
+        expect(fat32_atomic_replace_caps_probe(
+            _descriptor_with_field(8, 15u32), 524288u32, 32u32,
+            true, true).level).to_equal(AtomicReplaceRecoveryLevel.Unsupported)
+        expect(fat32_atomic_replace_caps_probe(
+            _descriptor_with_field(12, 15u32), 524288u32, 32u32,
+            true, true).level).to_equal(AtomicReplaceRecoveryLevel.Unsupported)
+        expect(fat32_atomic_replace_caps_probe(
+            _descriptor_with_field(16, 4096u32), 524288u32, 32u32,
+            true, true).level).to_equal(AtomicReplaceRecoveryLevel.Unsupported)
 
     it "maps the exact database route through sync then RecoverableReplaceV1":
         val atomic = file_read("src/lib/nogc_sync_mut/database/atomic.spl")

@@ -6,9 +6,12 @@ The execution matrix is under active implementation and has no production
 PASS. ARM source now contains the filesystem payload, VirtIO-MMIO NIC queue,
 bounded user-copy/direct socket dispatch, FAT32 metadata-sync, and VirtIO block
 FLUSH prerequisites. The latest mandatory preflight confirms both the 5 GiB
-storage floor and QEMU executable. That is source progress only: atomic
-database persistence and the current-source ARM compiler, sysroot, and runtime
-artifacts remain blocked. The connected UNO Q still boots Debian and has neither
+storage floor and QEMU executable. The ARM sysroot/runtime, filesystem payload,
+RecoverableReplaceV1 source, and provisioned-descriptor capability projection
+now exist. The structural projection validates the exact SARD bytes and does
+not replace the production mount/recovery-published truth. Live execution is
+still blocked by the missing current-source Stage-4/full compiler and matching
+server admission receipt. The connected UNO Q still boots Debian and has neither
 the physical SimpleOS runtime/provider nor a filesystem server executable.
 
 ## Required operator flow
@@ -62,5 +65,5 @@ authored mirror is
 `doc/06_spec/03_system/os/server/simpleos_server_execution_matrix_spec.md`.
 All missing live helpers fail explicitly and every ARM, UNO, and Linux row
 remains uncredited. SPipe/docgen and runtime execution have not been run because
-the current-source ARM compiler/sysroot/runtime blockers remain; do not describe
+the current-source Stage-4 compiler/admission blocker remains; do not describe
 the authored mirror as generated evidence.
