@@ -2,6 +2,14 @@
 
 Status: open
 
+The canonical wrapper now has a fail-closed physical admission mode:
+`DISPLAY=<physical-x11> ENGINE2D_VULKAN_PHYSICAL=1 sh
+scripts/check/check-engine2d-vulkan-window-8k.shs`.  Unlike its default Xvfb
+lane, physical mode requires an already-active 7680x4320 mode at 80 Hz or
+faster and validates the p95, RSS, checksum, completion, fallback, adapter,
+and timed-readback receipt fields.  This closes the evidence-wrapper ambiguity;
+it does not close the hardware blocker.
+
 The same-device visible-window path reaches an NVIDIA RTX A6000 with
 `IMMEDIATE` presentation, zero host readback, and no CPU fallback. Under Xvfb,
 however, changed and retained 8K frames measure 78.768 ms and 70.120 ms p95.
@@ -14,3 +22,15 @@ this gate only with an attached display/direct-display surface that records
 RSS/device memory, transfer/readback bytes, fallback and completion state, plus
 a device-origin readback or captured scanout checksum. Cached retained replay
 and changed-revision frames must be reported separately.
+
+The 2026-08-14 host inventory has one connected HDMI connector whose advertised
+modes top out at 1920x1080; the NVIDIA DisplayPort connectors are disconnected.
+The physical wrapper therefore correctly reports a blocked admission on this
+host.  Do not synthesize an 8K Xvfb mode to bypass this condition.
+
+The same revision's one allowed proxy regression completed on the RTX A6000
+with IMMEDIATE presentation, `readback_bytes=0`, known completion, no fallback,
+checksum `14177648258271307651`, and max RSS 486812 KiB.  Its 20-frame p50/p95
+were 185865702/193681044 ns.  This confirms the wrapper still functions after
+physical-mode hardening and independently confirms that Xvfb is far outside
+the 12.5 ms budget; it is not a physical-display result.

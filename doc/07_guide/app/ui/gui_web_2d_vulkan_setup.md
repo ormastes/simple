@@ -457,3 +457,23 @@ not execute them.
 Use `--renderdoc-simple` or `--renderdoc` only on a prepared RenderDoc host.
 Do not run broad Simple checks while a runaway `bin/simple` process tree is
 present; record setup readiness and defer runtime evidence instead.
+
+## Physical 8K80 window admission
+
+The normal `check-engine2d-vulkan-window-8k.shs` run owns a disposable Xvfb
+surface and proves only a device-present proxy.  It must not be cited as
+physical scanout or 8K80 evidence.  On a host with an attached display, use:
+
+```sh
+DISPLAY=:0 ENGINE2D_VULKAN_PHYSICAL=1 \
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+  sh scripts/check/check-engine2d-vulkan-window-8k.shs
+```
+
+Physical mode never starts Xvfb.  It fails closed unless the existing X11
+display has an active 7680x4320 mode at 80 Hz or faster, the selected adapter
+is discrete, the one-percent-damage receipt has zero timed readback and known
+completion, p95 is at most 12.5 ms, and RSS/checksum are nonzero.  A passing
+window receipt is still presentation evidence rather than captured-scanout
+parity; promotion also requires the device-origin/captured scanout oracle in
+the canonical render performance plan.

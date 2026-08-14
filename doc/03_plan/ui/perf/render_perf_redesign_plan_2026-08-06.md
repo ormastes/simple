@@ -10,7 +10,73 @@ Relationship to existing plans:
   basis. This plan is **additive V2 repair**, not a new scene architecture.
   No GuiIR/WebIR (standing rejected decision).
 
-## 0-A. STATUS OVERLAY (added 2026-08-09, revised 2026-08-09) — read this first
+## 0-B. 8K80 HARDENING ACCEPTANCE (2026-08-14) — current execution contract
+
+This section supersedes the older resume ordering in §0-A for the physical
+8K80 evidence campaign.  Mechanism completion and isolated primitive timing
+remain useful, but neither is an end-to-end 8K80 claim.
+
+### Acceptance items
+
+- [x] **A1 — physical adapter attribution:** every hardware row records the
+  selected device, device type, driver/API identity, and a stable identity
+  hash.  Current retained-compute evidence names the NVIDIA RTX A6000.
+- [x] **A2 — exact retained primitive oracle:** the timed interval has zero
+  readback, while an untimed device-origin oracle records mismatches and a
+  nonzero checksum.  The 1% clear row and mixed retained batch satisfy this
+  only at primitive/batch scope.
+- [x] **A3 — bounded 8K workload:** viewport is exactly 7680x4320, warmup and
+  sample counts are explicit, p50/p95 use the 12.5 ms budget, and changed-pixel
+  scope is recorded.  Full repaint remains a measured failure; retained damage
+  is mandatory.
+- [ ] **A4 — production-native DrawIR frame:** a non-seed pure-Simple artifact
+  must execute the retained DrawIR workload with backend identity, considered
+  and culled command counts, p50/p95, max RSS, checksum, readback source/count,
+  and fail-closed fallback/completion fields.
+- [ ] **A5 — retained semantic producer frame:** Web, GUI, or WM must publish
+  the changed revision through canonical Draw IR and Engine2D; a C ABI probe or
+  direct compute benchmark cannot satisfy this item.
+- [ ] **A6 — physical presentation:** the same physical device must present a
+  7680x4320 changed frame and a retained replay with zero timed host readback,
+  native present mode, p50/p95, memory receipts, and device-origin or captured
+  scanout parity.  Headless compute and Xvfb are explicitly inadmissible.
+- [ ] **A7 — 80 Hz promotion:** A4–A6 each pass p95 <= 12,500,000 ns with no
+  CPU/interpreter/stub fallback and no unknown completion.  Claims are scoped
+  to the measured damage class and named hardware.
+- [ ] **A8 — physical 80 Hz display evidence:** EDID/connector/mode evidence
+  must identify an attached 7680x4320@80 display path.  If the host cannot
+  expose that mode, the campaign ends WARN rather than fabricating scanout.
+
+### Current blockers and next action
+
+1. **B1 — self-hosted artifact unavailable (blocks A4/A5).** The deployed
+   non-seed launcher exits `missing command`; the bounded GUI native renderer
+   build exceeds 30 seconds; `bin/simple_native` terminates before provenance.
+   Fix or deploy the pure-Simple execution/native-build owner, then run the
+   canonical sparse DrawIR receipt once.
+2. **B2 — retained Vulkan JIT proof invalid (blocks promotion of an otherwise
+   1.54 ms p95 row).** The composed runner recorded RSS as zero and checksum as
+   zero, then SIGSEGVed when exact retained samples were enabled.  Fix the
+   host-buffer sampling/lifetime boundary; timing alone is not admissible.
+3. **B3 — no physical scanout path (blocks A6/A8).** The RTX A6000 lacks
+   `VK_EXT_headless_surface`; Xvfb presentation measures 70–79 ms and is not a
+   direct-display proxy.  Admission requires a visible/direct-display WSI
+   surface and an attached 8K80 mode.  Preserve this as an environmental WARN
+   if no connector exposes the mode.
+
+2026-08-14 fresh-lane result: the hardened physical admission returned
+`blocked:missing-physical-display`; sysfs exposes only one connected HDMI path,
+with modes no larger than 1920x1080.  The one permitted Xvfb regression passed
+its device-present proxy contract on the RTX A6000 but measured 193.681044 ms
+p95, so it remains inadmissible for A6–A8.  A physical 8K80 result is therefore
+**WARN / hardware-blocked**, not PASS.
+
+The lane must address B1 and B2 in software before treating B3 as the terminal
+environmental gate.  Do not start unrelated O/P/G expansion while A4–A6 are
+open.  Canonical evidence sources are the 2026-08-12 reports under
+`doc/09_report/` and their linked open bugs under `doc/08_tracking/bug/`.
+
+## 0-A. STATUS OVERLAY (added 2026-08-09, revised 2026-08-09) — historical baseline
 
 This overlay was added because the plan below carried almost no status markers
 while a large part of its surface had already been built, **some of it out of

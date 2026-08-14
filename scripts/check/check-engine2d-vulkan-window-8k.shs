@@ -1,7 +1,8 @@
 #!/bin/sh
-# Run the physical-adapter X11 swapchain damage receipt under a disposable Xvfb
-# surface.  This is evidence collection, not an 8K/80 pass gate: it verifies
-# device ownership, exact partial-copy accounting, and no device-to-host copy.
+# Run the physical-adapter X11 swapchain damage receipt.  The default disposable
+# Xvfb lane is evidence collection, not an 8K/80 pass gate.  Set
+# ENGINE2D_VULKAN_PHYSICAL=1 to require an existing physical 7680x4320@80 X11
+# mode and enforce the complete timing/provenance receipt.
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -9,16 +10,18 @@ BUILD_DIR="${BUILD_DIR:-$ROOT/build/check/engine2d-vulkan-window-8k}"
 ICD="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/nvidia_icd.json}"
 DISPLAY_NUMBER="${ENGINE2D_VULKAN_X11_DISPLAY:-97}"
 DEVICE_TYPE="${ENGINE2D_VULKAN_DEVICE_TYPE:-discrete}"
+PHYSICAL="${ENGINE2D_VULKAN_PHYSICAL:-0}"
 RUN_DIR=""
 DISPLAY_LOCK=""
+XVFB_PID=""
 
 mkdir -p "$BUILD_DIR"
 if [ ! -f "$ICD" ]; then
     echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=missing-icd"
     exit 2
 fi
-if ! command -v Xvfb >/dev/null 2>&1 || ! command -v xdpyinfo >/dev/null 2>&1; then
-    echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=missing-xvfb"
+if ! command -v xdpyinfo >/dev/null 2>&1; then
+    echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=missing-xdpyinfo"
     exit 2
 fi
 
@@ -33,7 +36,34 @@ claim_display() {
     return 1
 }
 
-if [ -n "${ENGINE2D_VULKAN_X11_DISPLAY:-}" ]; then
+if [ "$PHYSICAL" = "1" ]; then
+    if [ -z "${DISPLAY:-}" ]; then
+        echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=missing-physical-display"
+        exit 2
+    fi
+    if ! command -v xrandr >/dev/null 2>&1; then
+        echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=missing-xrandr"
+        exit 2
+    fi
+    if ! xdpyinfo >/dev/null 2>&1; then
+        echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=physical-display-unreachable"
+        exit 2
+    fi
+    if ! xrandr --current | awk '
+        $1 == "7680x4320" {
+            for (i = 2; i <= NF; i++) {
+                rate = $i
+                active = index(rate, "*") > 0
+                gsub(/[^0-9.]/, "", rate)
+                if (active && (rate + 0) >= 80) found = 1
+            }
+        }
+        END { exit(found ? 0 : 1) }
+    '; then
+        echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=physical-8k80-mode-not-active"
+        exit 2
+    fi
+elif [ -n "${ENGINE2D_VULKAN_X11_DISPLAY:-}" ]; then
     if ! claim_display "$DISPLAY_NUMBER"; then
         echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=x11-display-already-claimed"
         exit 2
@@ -56,41 +86,57 @@ fi
 
 RUN_DIR="$(mktemp -d "$BUILD_DIR/run.XXXXXX")"
 RECEIPT="$RUN_DIR/receipt.env"
-Xvfb ":$DISPLAY_NUMBER" -screen 0 7680x4320x24 -nolisten tcp \
-    >"$RUN_DIR/xvfb.log" 2>&1 &
-XVFB_PID=$!
 cleanup() {
-    kill "$XVFB_PID" 2>/dev/null || true
-    wait "$XVFB_PID" 2>/dev/null || true
-    rmdir "$DISPLAY_LOCK" 2>/dev/null || true
+    if [ -n "$XVFB_PID" ]; then
+        kill "$XVFB_PID" 2>/dev/null || true
+        wait "$XVFB_PID" 2>/dev/null || true
+    fi
+    if [ -n "$DISPLAY_LOCK" ]; then
+        rmdir "$DISPLAY_LOCK" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT INT TERM
 
-ready=0
-attempt=0
-while [ "$attempt" -lt 10 ]; do
-    if ! kill -0 "$XVFB_PID" 2>/dev/null; then
-        break
+if [ "$PHYSICAL" != "1" ]; then
+    if ! command -v Xvfb >/dev/null 2>&1; then
+        echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=missing-xvfb"
+        exit 2
     fi
-    if DISPLAY=":$DISPLAY_NUMBER" xdpyinfo >/dev/null 2>&1 &&
-       kill -0 "$XVFB_PID" 2>/dev/null; then
-        ready=1
-        break
+    Xvfb ":$DISPLAY_NUMBER" -screen 0 7680x4320x24 -nolisten tcp \
+        >"$RUN_DIR/xvfb.log" 2>&1 &
+    XVFB_PID=$!
+    ready=0
+    attempt=0
+    while [ "$attempt" -lt 10 ]; do
+        if ! kill -0 "$XVFB_PID" 2>/dev/null; then
+            break
+        fi
+        if DISPLAY=":$DISPLAY_NUMBER" xdpyinfo >/dev/null 2>&1 &&
+           kill -0 "$XVFB_PID" 2>/dev/null; then
+            ready=1
+            break
+        fi
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    if [ "$ready" -ne 1 ]; then
+        echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=xvfb-not-ready"
+        exit 2
     fi
-    attempt=$((attempt + 1))
-    sleep 1
-done
-if [ "$ready" -ne 1 ]; then
-    echo "engine2d_vulkan_window_8k_evidence_status=blocked reason=xvfb-not-ready"
-    exit 2
 fi
 
 if ! (
     cd "$ROOT/src/compiler_rust"
-    DISPLAY=":$DISPLAY_NUMBER" VK_ICD_FILENAMES="$ICD" \
+    if [ "$PHYSICAL" = "1" ]; then
+        VK_ICD_FILENAMES="$ICD" cargo test -p simple-runtime --release --features vulkan \
+            vulkan_graphics_runtime::vulkan_graphics_runtime_swapchain::tests::bench_window_swapchain_present_8k_one_percent_damage \
+            -- --ignored --exact --nocapture
+    else
+        DISPLAY=":$DISPLAY_NUMBER" VK_ICD_FILENAMES="$ICD" \
         cargo test -p simple-runtime --release --features vulkan \
         vulkan_graphics_runtime::vulkan_graphics_runtime_swapchain::tests::bench_window_swapchain_present_8k_one_percent_damage \
         -- --ignored --exact --nocapture
+    fi
 ) >"$RECEIPT" 2>&1; then
     sed -n '1,160p' "$RECEIPT"
     echo "engine2d_vulkan_window_8k_evidence_status=failed reason=cargo-test"
@@ -103,4 +149,25 @@ grep -q 'damage_bytes=1320960 source_update_bytes=1320960 dynamic_content=true d
 grep -q 'readback_bytes=0 fallback=false completion_known=true ' "$RECEIPT"
 grep -q 'present_mode=window-swapchain ' "$RECEIPT"
 grep -q "device_type=$DEVICE_TYPE " "$RECEIPT"
-echo "engine2d_vulkan_window_8k_evidence_status=pass"
+if [ "$PHYSICAL" = "1" ]; then
+    awk '
+        /^window_present_damage / {
+            for (i = 1; i <= NF; i++) {
+                split($i, pair, "=")
+                value[pair[1]] = pair[2]
+            }
+            found = 1
+        }
+        END {
+            ok = found && (value["p95_ns"] + 0) <= 12500000 &&
+                (value["rss_kib"] + 0) > 0 && (value["checksum"] + 0) > 0
+            exit(ok ? 0 : 1)
+        }
+    ' "$RECEIPT" || {
+        echo "engine2d_vulkan_window_8k_evidence_status=failed reason=physical-receipt-incomplete-or-over-budget"
+        exit 1
+    }
+    echo "engine2d_vulkan_window_8k_evidence_status=pass scope=physical-8k80-window-present"
+else
+    echo "engine2d_vulkan_window_8k_evidence_status=pass scope=xvfb-device-present-proxy"
+fi
