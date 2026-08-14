@@ -1,5 +1,16 @@
 # Secure Pure-Simple Web and Database Servers
 
+## Linux peer comparison
+
+The current nginx, SQLite, PostgreSQL, CPU-only and CUDA comparison status is
+documented in
+`doc/09_report/perf/linux_secure_server_compare_2026-08-14.md`. Status is WARN:
+the available temporary native artifacts fail correctness/readiness before a
+fair benchmark can begin. No GPU acceleration claim is made for socket or
+storage protocol work. Optional GPU compute must remain dynamically selected,
+must not load in CPU-only mode, and may return only a validated bounded result
+receipt to the CPU owner of server/database/filesystem state.
+
 This guide is the canonical operator/developer map for the Phase-6 server
 lane. It describes current repository state, not an advertised production
 claim. The lane remains blocked until its executable evidence passes on an

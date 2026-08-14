@@ -96,6 +96,60 @@ Canonical links: `.spipe/secure_pure_simple_servers/state.md`,
 `doc/05_design/secure_pure_simple_servers.md`, and
 `doc/07_guide/lib/pure_simple_servers.md`.
 
+#### ARM QEMU + UNO Q executable server matrix (2026-08-14)
+
+Canonical state: `.spipe/simpleos_server_execution_matrix/state.md`. Evidence
+uses `SimpleOsServerExecutionReceiptV1` and must bind current source commit,
+executable/image hashes, target identity, filesystem provenance, HTTP/DB wire
+transcripts, and execution mode. Host simulations, marker-only boots, and
+QEMU graphics transport cannot satisfy physical UNO Q rows.
+
+- [ ] **ARM-SRV-1:** ARM64 QEMU boots current SimpleOS and launches a real
+  filesystem-resolved web/DB server executable.
+- [ ] **ARM-SRV-2:** Host-visible HTTP health/file probes and DB write/read pass;
+  the DB value survives a fresh QEMU boot using the same filesystem image.
+- [ ] **UNO-SRV-1:** Physical QRB2210 identity and filesystem are proven, then
+  the UNO Q launches the current web/DB server executable from that filesystem.
+- [ ] **UNO-SRV-2:** Real HTTP file and DB write/read/restart probes pass against
+  the board process, with retained executable and transcript hashes.
+- [ ] **UNO-CPU:** A forced CPU-only run passes with GPU selection disabled.
+- [ ] **UNO-GPU:** A distinct Adreno/Vulkan run proves device selection, submit,
+  completion/fence and device-readback while server probes remain live.
+- [ ] **MATRIX-DOC:** Requirements, architecture/design, agent/test plans, guide,
+  executable specs/manuals and receipt schema trace every matrix cell.
+- [ ] **MATRIX-GATE:** Static/runtime gates and highest-capability review pass;
+  delivery is committed, locked, pushed and reachable from `origin/main`.
+- [ ] **LINUX-BENCH-1:** Compare Simple HTTP/DB with nginx, PostgreSQL, and
+  SQLite under equivalent CPU, concurrency, durability, dataset, latency,
+  throughput, and RSS controls.
+- [ ] **LINUX-BENCH-2:** Publish distinct CPU-only and legitimate
+  CUDA-assisted compute rows; never attribute socket/storage acceleration to
+  the GPU.
+- [ ] **LINUX-BENCH-3:** Keep CUDA behind optional dynload and prove the
+  CPU-only executable/path does not load or require it.
+- [ ] **LINUX-PERF:** If Simple misses semantic parity or performance targets,
+  complete at most three correctness-preserving Pure-Simple optimization
+  cycles, or retain the measured blocking owner/compiler/runtime defect.
+
+Initial blockers: the retained combined server QEMU gate is x86_64, ARM fs-exec
+gates do not launch servers, and the UNO Q full-stack script currently reports
+the SimpleOS QRB2210 runtime evidence runner unavailable. The connected board
+and `/dev/kvm` must be probed rather than assumed to clear those gaps.
+
+Current evidence: ARM64 mounted ELFs have no file/network syscall implementation
+and ARM `rt_net_*` remains stubbed, so ARM-SRV-1/2 require a substantive
+virtio-net/TCP plus durable FAT32 implementation. The physical board identifies
+as Arduino Imola/aarch64 Debian 13 with Adreno 702/Turnip, but its canonical
+gate stops at `pure-simple-runtime-missing` and the SimpleOS evidence executable
+is absent. These are blockers, not acceptance credit.
+
+The CPU/server board lane also found no SimpleOS server executable; web
+cross-build stops in HIR and DB cross-link lacks target compression/terminal
+libraries. The fresh Linux benchmark is blocked because the HTTP artifact does
+not bind after readiness and DB insertion hits an invalid-array-handle ABI.
+Consequently no parity, optimization, or CUDA row closes; the retained reports
+and bug record are diagnostic WARN evidence only.
+
 - [ ] **WEB-1 production routing:** the canonical web-server entrypoint routes
   real accepted connections through the hardened parser/router/response path;
   benchmark-only and in-memory transports are not production evidence.

@@ -2,6 +2,13 @@
 
 ## Current Evidence
 
+The latest Linux comparison is
+`doc/09_report/perf/linux_secure_server_compare_2026-08-14.md`. It is WARN:
+the temporary Stage-2 native process announced readiness without installing a
+listener, so no nginx parity row is admitted. CUDA is intentionally absent
+from the socket/static-file path because it provides no legitimate amortized
+compute stage; CPU-only mode must not load CUDA libraries.
+
 `http_hot_path.spl` measures parser and serializer hot-path cost inside Simple.
 `async_driver_native_smoke.spl` verifies the native async driver syscall backend.
 These are regression checks, not live webserver throughput results.
