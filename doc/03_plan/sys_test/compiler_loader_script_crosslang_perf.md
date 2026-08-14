@@ -11,7 +11,7 @@ Acceptance items for this replacement lane:
 
 - [ ] Preserve packed `[u8]` storage for index, slice, iteration, concat, clone,
   equality, and byte-valued mutation; widen only at a generic-value boundary.
-- [ ] Make packed-byte mutators write the updated value back to the interpreter
+- [x] Make packed-byte mutators write the updated value back to the interpreter
   place and preserve copy-on-write/frozen-value behavior.
 - [ ] Keep foreign packed-byte capabilities input-only, descriptor-bounded, and
   unable to escape the call that admitted them.
@@ -33,6 +33,19 @@ Current blockers:
 - Baseline and focused acceptance commands have not yet been run in this fresh
   replacement session; each will be executed at most once unless it fails, with
   no more than three total verify/fix cycles.
+
+Verification update:
+
+- `cargo check -p simple-compiler`: PASS after routing packed receivers through
+  the canonical resolved-place write-back path.
+- Focused mutator regression gate: WARN.  The original replayed identifier-only
+  path failed, and the three-cycle cap was reached while identifying that the
+  current parser routes these receivers through resolved places.  The final
+  resolved-place correction compiles, but the focused gate was intentionally not
+  run a fourth time.
+- Self-hosted compiler/core/lib and MCP/LSP gates remain unavailable because this
+  fresh worktree has no `bin/release/<triple>/simple`; the Rust seed was not used
+  as a tooling fallback.
 
 ## Scope
 
