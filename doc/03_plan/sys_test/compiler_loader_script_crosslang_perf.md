@@ -1,5 +1,39 @@
 # Compiler, loader, script, and cross-language performance test plan
 
+## Replacement lane B status (2026-08-14)
+
+This detached worktree owns only the compiler-loader packed-byte lane B.  The
+current `origin/main` ancestry already contains the original loader/cache and
+packed-byte optimization, but it does not contain the later lane-B interpreter
+boundary hardening commits.
+
+Acceptance items for this replacement lane:
+
+- [ ] Preserve packed `[u8]` storage for index, slice, iteration, concat, clone,
+  equality, and byte-valued mutation; widen only at a generic-value boundary.
+- [ ] Make packed-byte mutators write the updated value back to the interpreter
+  place and preserve copy-on-write/frozen-value behavior.
+- [ ] Keep foreign packed-byte capabilities input-only, descriptor-bounded, and
+  unable to escape the call that admitted them.
+- [ ] Retain loader negative-cache caller sensitivity, invalidation, and the
+  measured failed-probe reduction contract.
+- [ ] Pass focused packed-byte semantics, loader resolver, RSS-contract, and
+  cross-language retained-contract gates exactly once on the integrated source.
+- [ ] Pass compiler/core/lib and MCP/LSP smoke checks required for compiler
+  language-surface changes, plus optimizer review of touched `.spl` files.
+- [ ] Commit only intentional lane-B files, rebase under the integration lock,
+  push `HEAD:main`, prove reachability from refreshed `origin/main`, and leave a
+  clean worktree.
+
+Current blockers:
+
+- The later lane-B work exists only on detached historical commits based on a
+  divergent repository snapshot, so it cannot be merged wholesale.  Remaining
+  changes must be replayed selectively against current `origin/main`.
+- Baseline and focused acceptance commands have not yet been run in this fresh
+  replacement session; each will be executed at most once unless it fails, with
+  no more than three total verify/fix cycles.
+
 ## Scope
 
 `test/05_perf/compiler_loader_script_crosslang_perf_spec.spl` is the focused
