@@ -811,3 +811,7 @@ in-progress
   legacy runtime from the bounded `std.actor` contract. Its copied mailbox,
   drop-oldest overflow, and unbounded reply store require migration rather
   than compatibility claims.
+- plan: WP-18 now has an explicit runtime-internal handoff sequence: tagged
+  lifetime-pinned handles, bounded scalar credit/results, provider parity,
+  native Simple callback evidence, then a typed public migration. The legacy
+  `ThreadPool` global registries are not an incremental migration target.

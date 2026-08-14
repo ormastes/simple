@@ -27,3 +27,25 @@ P2 currently has no sidecar write authority. Its public pool facade and native S
 are retained only as uncommitted evidence candidates after the prior test-runner
 timeout; they must not be folded into a transport or storage change without the
 native callback gate above.
+
+## WP-18 bounded pool handoff sequence
+
+The current `src/lib/nogc_async_mut/thread_pool.spl` is not a migration
+target: it copies `ThreadPool` values through `GLOBAL_POOLS`, retains global
+callback/result arrays, and resolves invalid pool IDs by fallback. Do not
+incrementally decorate that authority with a new API. The first admitted pool
+slice is runtime-internal and scalar-only: a function pointer plus inline
+`i64` input/result, never a captured closure or heap graph.
+
+| Step | Owner and scope | Required result | Fail-closed gate |
+|---|---|---|---|
+| 18.1 | runtime pool providers and registration surfaces | Generation- and kind-tagged state/task handles; registry acquisition pins lifetime. | Stale, forged, cross-kind, release/destroy-race handles return Invalid without dereference. |
+| 18.2 | same runtime owner | `try_submit_i64(state, entry, input)` reserves one credit through completed-but-unreleased state; completion publishes result before idle. | Full, Closed, Invalid, and success are distinct; schedule failure rolls back handle and counters. |
+| 18.3 | both shipped C provider lanes plus Rust/interpreter/ELF symbol maps | One ABI/status-vector contract; interpreter is explicitly unsupported rather than a success stub. | Provider-parity tests exercise the same vectors, including zero payload and 100k sequential reuse. |
+| 18.4 | private Simple owner leaf | `PoolStateV1` wraps only the opaque state handle; task receipt has checked terminal status plus scalar result and release. | Native Simple callback proves descriptor ABI, Full-until-release, close/idle/destroy, and no `GLOBAL_*` fallback. |
+| 18.5 | public migration | Replace/deprecate legacy `ThreadPool` only after typed transfer envelopes admit a result class beyond `i64`. | Real OS-thread stress, bounded high-water/RSS counters, cancellation, and two-pool isolation. |
+
+Sidecar lanes: **N/A until 18.1 names and status codes are frozen**. Merge owner
+defines the ABI names, test `step("...")` labels, and failure messages before
+any lower-model implementation review. Final review must verify that no
+runtime pointer or caller-owned closure descriptor crosses the pool boundary.
