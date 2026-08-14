@@ -1,0 +1,86 @@
+use std.spec
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_QUERY_V1_SIZE,
+    SIMPLE_PROVIDER_OK,
+    SimpleProviderQueryV1,
+    SimpleProviderQueryResultV1
+}
+use os.smf.provider_query_wire.{
+    encode_provider_query_request_v1,
+    decode_provider_query_request_v1,
+    encode_provider_query_result_v1,
+    decode_provider_query_result_v1
+}
+
+fn _request() -> SimpleProviderQueryV1:
+    SimpleProviderQueryV1(
+        descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+        interface_id: 0x1122334455667788,
+        minimum_major: 1,
+        minimum_minor: 2,
+        host_abi: 0x0102030405060708,
+        target_offset: 0,
+        target_length: 0,
+        requested_capability_bits: 0x0877665544332211
+    )
+
+describe "provider query canonical wire codec":
+    it "encodes the exact packed request offsets and round trips":
+        val encoded = encode_provider_query_request_v1(_request())
+        expect(encoded.ok).to_equal(true)
+        expect(encoded.bytes.len()).to_equal(44)
+        expect(encoded.bytes[0]).to_equal(44)
+        expect(encoded.bytes[4]).to_equal(0x88)
+        expect(encoded.bytes[11]).to_equal(0x11)
+        expect(encoded.bytes[20]).to_equal(0x08)
+        expect(encoded.bytes[43]).to_equal(0x08)
+        val decoded = decode_provider_query_request_v1(encoded.bytes)
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.value.interface_id).to_equal(0x1122334455667788)
+        expect(decoded.value.requested_capability_bits).to_equal(0x0877665544332211)
+
+    it "rejects truncated trailing and out-of-bounds target request records":
+        expect(decode_provider_query_request_v1([0u8; 43]).diagnostic).to_equal("request-wire-size-invalid")
+        expect(decode_provider_query_request_v1([0u8; 45]).diagnostic).to_equal("request-wire-size-invalid")
+        var request = _request()
+        request.target_offset = 44
+        request.target_length = 1
+        expect(encode_provider_query_request_v1(request).diagnostic).to_equal("request-target-out-of-bounds")
+
+    it "encodes and decodes the exact 60-byte result":
+        val result = SimpleProviderQueryResultV1(
+            status: SIMPLE_PROVIDER_OK,
+            provided_major: 1,
+            provided_minor: 3,
+            descriptor_size: 32,
+            interface_handle: 0x0102030405060708,
+            provider_context: 9,
+            provider_identity_digest: 10,
+            implementation_digest: 11,
+            abi_digest: 0x1122334455667788
+        )
+        val encoded = encode_provider_query_result_v1(result)
+        expect(encoded.ok).to_equal(true)
+        expect(encoded.bytes.len()).to_equal(60)
+        expect(encoded.bytes[16]).to_equal(0x08)
+        expect(encoded.bytes[55]).to_equal(0x11)
+        expect(encoded.bytes[56]).to_equal(0)
+        expect(encoded.bytes[59]).to_equal(0)
+        val decoded = decode_provider_query_result_v1(encoded.bytes)
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.value.provided_minor).to_equal(3)
+        expect(decoded.value.abi_digest).to_equal(0x1122334455667788)
+
+    it "rejects invalid status versions handles and result bounds":
+        expect(decode_provider_query_result_v1([0u8; 59]).diagnostic).to_equal("result-wire-size-invalid")
+        var invalid = [0u8; 60]
+        invalid[0] = 99
+        expect(decode_provider_query_result_v1(invalid).diagnostic).to_equal("result-status-invalid")
+        invalid = [0u8; 60]
+        invalid[0] = 1
+        invalid[16] = 1
+        expect(decode_provider_query_result_v1(invalid).diagnostic).to_equal("result-error-handle-not-zero")
+
+        invalid = [0u8; 60]
+        invalid[56] = 1
+        expect(decode_provider_query_result_v1(invalid).diagnostic).to_equal("result-reserved-not-zero")

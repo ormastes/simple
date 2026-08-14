@@ -39,6 +39,16 @@ symlinked, seed, and unreceipted inputs, preserves strict no-stub guards, and
 does not initiate any bootstrap stage. The product receipt is target evidence
 only, never a Stage 4 deploy, SPipe runner, or release substitute.
 
+For general feature-build selection, provider/SCI projections, compatibility
+receipts, and typed bootstrap reasons, use
+`doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`. A path
+under `src/compiler/**` does not independently require bootstrap.
+That guide also permits explicitly admitted Stage 2/3 binaries for focused
+compiler/interpreter/loader work. Admission records path/hash/stage/provenance
+and supported commands, uses isolated output/cache, and fails closed. Keep the
+result stage-scoped; it is not a Stage 4, general SPipe/docgen/test, release,
+convergence, DDC, or cross-host claim.
+
 ## Known open defects (2026-07-26)
 | Bug | Scope | Link |
 |---|---|---|

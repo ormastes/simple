@@ -1,0 +1,50 @@
+use app.build.targets.build_explain.{BootstrapReason}
+use app.build.targets.bootstrap_policy.{
+    BOOTSTRAP_STAGE4_TARGET_V1, bootstrap_reason_from_name,
+    bootstrap_reason_is_explicit, bootstrap_authorization_receipt_v1,
+    bootstrap_authorization_error_v1
+}
+
+describe "typed bootstrap authorization policy":
+    it "rejects None and unknown reason names":
+        expect(bootstrap_reason_is_explicit(BootstrapReason.None)).to_be(false)
+        expect(bootstrap_reason_from_name("none") == BootstrapReason.None).to_be(true)
+        expect(bootstrap_reason_from_name("provider-private-change") == BootstrapReason.None).to_be(true)
+
+    it "emits and admits one canonical planner receipt":
+        val receipt = bootstrap_authorization_receipt_v1(
+            BOOTSTRAP_STAGE4_TARGET_V1, BootstrapReason.BootstrapCoreInterfaceMajorChanged
+        )
+        expect(receipt).to_equal(
+            "simple-bootstrap-receipt-v1|producer=simple-build-planner-v1|target=//bootstrap:stage4|reason=bootstrap-core-interface-major-changed"
+        )
+        expect(bootstrap_authorization_error_v1(receipt, BOOTSTRAP_STAGE4_TARGET_V1)).to_equal("")
+
+    it "preserves explicit convergence release trust and DDC reasons":
+        expect(bootstrap_authorization_receipt_v1(
+            BOOTSTRAP_STAGE4_TARGET_V1, BootstrapReason.SelfHostConvergenceCheck
+        )).to_end_with("reason=self-host-convergence-check")
+        expect(bootstrap_authorization_receipt_v1(
+            BOOTSTRAP_STAGE4_TARGET_V1, BootstrapReason.ReleaseTrustVerification
+        )).to_end_with("reason=release-trust-verification")
+        expect(bootstrap_authorization_receipt_v1(
+            BOOTSTRAP_STAGE4_TARGET_V1, BootstrapReason.DiverseDoubleCompilation
+        )).to_end_with("reason=diverse-double-compilation")
+        expect(bootstrap_authorization_receipt_v1(
+            "//bootstrap:stage2", BootstrapReason.SeedMissing
+        )).to_contain("target=//bootstrap:stage2")
+
+    it "fails closed for missing malformed None and mismatched receipts":
+        expect(bootstrap_authorization_error_v1("", BOOTSTRAP_STAGE4_TARGET_V1)).to_equal(
+            "bootstrap-policy-error: reason-receipt-required"
+        )
+        expect(bootstrap_authorization_error_v1(
+            "simple-bootstrap-receipt-v1|producer=simple-build-planner-v1|target=//bootstrap:stage4|reason=none",
+            BOOTSTRAP_STAGE4_TARGET_V1
+        )).to_equal("bootstrap-policy-error: typed-reason-required")
+        val valid = bootstrap_authorization_receipt_v1(
+            BOOTSTRAP_STAGE4_TARGET_V1, BootstrapReason.SeedCorrupt
+        )
+        expect(bootstrap_authorization_error_v1(valid, "//release:trust")).to_equal(
+            "bootstrap-policy-error: receipt-target-mismatch"
+        )

@@ -1,0 +1,288 @@
+# Build-explain v1: deterministic typed-edge rebuild decisions.
+#
+# This module is deliberately pure. It does not execute actions or claim CAS
+# hits. It derives the smallest conservative rebuild closure from declared
+# target dependencies and the digest identity relevant to each edge.
+
+enum CompatibilityResult:
+    Exact
+    Compatible
+    Unknown
+    Incompatible
+
+enum BootstrapReason:
+    None
+    SeedMissing
+    SeedCorrupt
+    SeedTargetUnsupported
+    SeedCannotParseRequiredLanguageFeature
+    SeedCannotLowerRequiredCompilerFeature
+    BootstrapRuntimeAbiMajorChanged
+    BootstrapArtifactFormatMajorChanged
+    BootstrapCoreInterfaceMajorChanged
+    SelfHostConvergenceCheck
+    ReleaseTrustVerification
+    DiverseDoubleCompilation
+
+enum DependencyIdentityV1:
+    Implementation
+    CompileInterface
+    Abi
+    CompileSemantic
+    Link
+    Runtime
+    ToolBehavior
+    Configuration
+
+struct DigestDeltaV1:
+    identity_kind: text
+    subject: text
+    before_digest: text
+    after_digest: text
+
+struct TargetDigestV1:
+    target: text
+    identity: DependencyIdentityV1
+    before_digest: text
+    after_digest: text
+
+struct TypedTargetEdgeV1:
+    consumer: text
+    provider: text
+    identity: DependencyIdentityV1
+
+struct BuildExplainInputV1:
+    requested_target: text
+    targets: [text]
+    edges: [TypedTargetEdgeV1]
+    digests: [TargetDigestV1]
+    bootstrap_reason: BootstrapReason
+    admitted_producer_identity: text
+    changed_interface_groups: [text]
+
+struct BuildExplainDecisionV1:
+    requested_target: text
+    selected_rebuild_closure: [text]
+    compatibility: CompatibilityResult
+    bootstrap_required: bool
+    bootstrap_reason: BootstrapReason
+    admitted_producer_identity: text
+    changed_interface_groups: [text]
+    relevant_digest_deltas: [DigestDeltaV1]
+    cache_reused_count: i64
+    cache_rebuilt_count: i64
+    cache_evidence_available: bool
+    errors: [text]
+
+fn digest_delta_changed(delta: DigestDeltaV1) -> bool:
+    delta.before_digest != delta.after_digest
+
+fn compatibility_allows_reuse(result: CompatibilityResult) -> bool:
+    result == CompatibilityResult.Exact or result == CompatibilityResult.Compatible
+
+fn compatibility_requires_smallest_rebuild(result: CompatibilityResult) -> bool:
+    result == CompatibilityResult.Unknown or result == CompatibilityResult.Incompatible
+
+fn bootstrap_reason_name(reason: BootstrapReason) -> text:
+    match reason:
+        case BootstrapReason.None: "none"
+        case BootstrapReason.SeedMissing: "seed-missing"
+        case BootstrapReason.SeedCorrupt: "seed-corrupt"
+        case BootstrapReason.SeedTargetUnsupported: "seed-target-unsupported"
+        case BootstrapReason.SeedCannotParseRequiredLanguageFeature: "seed-cannot-parse-required-language-feature"
+        case BootstrapReason.SeedCannotLowerRequiredCompilerFeature: "seed-cannot-lower-required-compiler-feature"
+        case BootstrapReason.BootstrapRuntimeAbiMajorChanged: "bootstrap-runtime-abi-major-changed"
+        case BootstrapReason.BootstrapArtifactFormatMajorChanged: "bootstrap-artifact-format-major-changed"
+        case BootstrapReason.BootstrapCoreInterfaceMajorChanged: "bootstrap-core-interface-major-changed"
+        case BootstrapReason.SelfHostConvergenceCheck: "self-host-convergence-check"
+        case BootstrapReason.ReleaseTrustVerification: "release-trust-verification"
+        case BootstrapReason.DiverseDoubleCompilation: "diverse-double-compilation"
+
+fn _contains(values: [text], value: text) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == value:
+            return true
+        i = i + 1
+    false
+
+fn _sorted(values: [text]) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < values.len():
+        val value = values[i]
+        if not _contains(out, value):
+            var pos = 0
+            while pos < out.len() and out[pos] < value:
+                pos = pos + 1
+            var next: [text] = []
+            var j = 0
+            while j < out.len():
+                if j == pos:
+                    next.push(value)
+                next.push(out[j])
+                j = j + 1
+            if pos == out.len():
+                next.push(value)
+            out = next
+        i = i + 1
+    out
+
+fn _is_explicit_bootstrap_target(target: text) -> bool:
+    target.starts_with("//bootstrap:") or target.starts_with("//release:")
+
+fn _digest_state(input: BuildExplainInputV1, target: text, identity: DependencyIdentityV1) -> i64:
+    """0 unchanged, 1 changed, 2 unknown. Duplicate declarations are unknown."""
+    var found = false
+    var state: i64 = 2
+    var i = 0
+    while i < input.digests.len():
+        val d = input.digests[i]
+        if d.target == target and d.identity == identity:
+            if found:
+                return 2
+            found = true
+            if d.before_digest.len() == 0 or d.after_digest.len() == 0:
+                state = 2
+            elif d.before_digest == d.after_digest:
+                state = 0
+            else:
+                state = 1
+        i = i + 1
+    state
+
+fn _requested_dependency_closure(input: BuildExplainInputV1) -> [text]:
+    var closure: [text] = [input.requested_target]
+    var cursor = 0
+    while cursor < closure.len():
+        val consumer = closure[cursor]
+        var i = 0
+        while i < input.edges.len():
+            val edge = input.edges[i]
+            if edge.consumer == consumer and not _contains(closure, edge.provider):
+                closure.push(edge.provider)
+            i = i + 1
+        cursor = cursor + 1
+    closure
+
+fn decide_build_explain(input: BuildExplainInputV1) -> BuildExplainDecisionV1:
+    """Compute the smallest conservative closure. Unknown digest evidence rebuilds."""
+    var errors: [text] = []
+    if input.requested_target.trim().len() == 0:
+        errors.push("build-explain-error: missing-requested-target")
+    elif not _contains(input.targets, input.requested_target):
+        errors.push("build-explain-error: unknown-requested-target: " + input.requested_target)
+
+    val explicit_bootstrap = _is_explicit_bootstrap_target(input.requested_target)
+    if explicit_bootstrap and input.bootstrap_reason == BootstrapReason.None:
+        errors.push("build-explain-error: bootstrap-reason-required")
+    if not explicit_bootstrap and input.bootstrap_reason != BootstrapReason.None:
+        errors.push("build-explain-error: bootstrap-reason-for-non-bootstrap-target")
+
+    val requested = _requested_dependency_closure(input)
+    var rebuilt: [text] = []
+    var relevant_deltas: [DigestDeltaV1] = []
+    var saw_unknown = false
+
+    # A target is directly dirty when any declared digest changed or is unknown.
+    var i = 0
+    while i < input.digests.len():
+        val d = input.digests[i]
+        if _contains(requested, d.target):
+            relevant_deltas.push(DigestDeltaV1(
+                identity_kind: _dependency_identity_name(d.identity),
+                subject: d.target,
+                before_digest: d.before_digest,
+                after_digest: d.after_digest
+            ))
+            val state = _digest_state(input, d.target, d.identity)
+            if state != 0 and not _contains(rebuilt, d.target):
+                rebuilt.push(d.target)
+            if state == 2:
+                saw_unknown = true
+        i = i + 1
+
+    # Propagate provider changes only across the identity named by each edge.
+    # Missing evidence is Unknown and therefore propagates conservatively.
+    var changed = true
+    while changed:
+        changed = false
+        var e = 0
+        while e < input.edges.len():
+            val edge = input.edges[e]
+            if (_contains(requested, edge.consumer) and
+                _contains(rebuilt, edge.provider) and
+                not _contains(rebuilt, edge.consumer)):
+                val state = _digest_state(input, edge.provider, edge.identity)
+                if state != 0:
+                    rebuilt.push(edge.consumer)
+                    changed = true
+                if state == 2:
+                    saw_unknown = true
+            e = e + 1
+
+    val compatibility = if saw_unknown:
+        CompatibilityResult.Unknown
+    elif rebuilt.len() > 0:
+        CompatibilityResult.Incompatible
+    else:
+        CompatibilityResult.Exact
+
+    BuildExplainDecisionV1(
+        input.requested_target,
+        _sorted(rebuilt),
+        compatibility,
+        explicit_bootstrap,
+        input.bootstrap_reason,
+        input.admitted_producer_identity,
+        _sorted(input.changed_interface_groups),
+        relevant_deltas,
+        0,
+        rebuilt.len(),
+        false,
+        errors
+    )
+
+fn _dependency_identity_name(identity: DependencyIdentityV1) -> text:
+    match identity:
+        case DependencyIdentityV1.Implementation: "implementation"
+        case DependencyIdentityV1.CompileInterface: "compile-interface"
+        case DependencyIdentityV1.Abi: "abi"
+        case DependencyIdentityV1.CompileSemantic: "compile-semantic"
+        case DependencyIdentityV1.Link: "link"
+        case DependencyIdentityV1.Runtime: "runtime"
+        case DependencyIdentityV1.ToolBehavior: "tool-behavior"
+        case DependencyIdentityV1.Configuration: "configuration"
+
+fn _format_text_list(values: [text]) -> text:
+    var out = ""
+    var i = 0
+    while i < values.len():
+        out = if i == 0: values[i] else: out + ", " + values[i]
+        i = i + 1
+    out
+
+fn format_build_explain(decision: BuildExplainDecisionV1) -> text:
+    val closure = _format_text_list(decision.selected_rebuild_closure)
+    val groups = _format_text_list(decision.changed_interface_groups)
+    "build-explain: target=" + decision.requested_target +
+        " compatibility=" + (match decision.compatibility:
+            case CompatibilityResult.Exact: "exact"
+            case CompatibilityResult.Compatible: "compatible"
+            case CompatibilityResult.Unknown: "unknown"
+            case CompatibilityResult.Incompatible: "incompatible") +
+        " interface-groups=[" + groups + "]" +
+        " digest-deltas=" + decision.relevant_digest_deltas.len().to_text() +
+        " rebuild=[" + closure + "]" +
+        " cache-reused=" + decision.cache_reused_count.to_text() +
+        " cache-rebuilt=" + decision.cache_rebuilt_count.to_text() +
+        " cache-evidence=" + (if decision.cache_evidence_available: "available" else: "unavailable") +
+        " bootstrap-required=" + decision.bootstrap_required.to_text() +
+        " bootstrap=" + bootstrap_reason_name(decision.bootstrap_reason)
+
+export CompatibilityResult, BootstrapReason, DependencyIdentityV1
+export DigestDeltaV1, TargetDigestV1, TypedTargetEdgeV1
+export BuildExplainInputV1, BuildExplainDecisionV1
+export digest_delta_changed, compatibility_allows_reuse
+export compatibility_requires_smallest_rebuild, bootstrap_reason_name
+export decide_build_explain, format_build_explain

@@ -51,6 +51,11 @@ doc/wiki/process links. Its job is documentation hygiene, not product behavior.
    `.spipe/00_llm_process/` references to the wiki current. Edit raw docs and
    wiki, never `.spipe/core/` (vendored read-only snapshot; refresh it by
    re-running `add_spipe_core`, not by hand-editing).
+11. For feature-build selection and bootstrap containment, keep the normative
+    policy in
+    `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`.
+    Skills, agents, commands, and expert pages should link to it instead of
+    copying path-based bootstrap rules.
 
 ## Guardrails
 

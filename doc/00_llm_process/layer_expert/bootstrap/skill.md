@@ -36,6 +36,16 @@ verification, and all bootstrap-blocking regressions.
 
 ## Cranelift Bootstrap Path & LLVM Redeploy Status (2026-07-18)
 
+### Stage-scoped development admission
+
+Focused pure-Simple compiler/interpreter/loader work may use an explicitly
+admitted Stage 2 or Stage 3 binary according to
+`doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`. Record
+its absolute path, hash, stage, provenance, and supported commands; isolate
+output/cache and fail closed. Such evidence proves only the named stage and
+command. It is not Stage 4, general SPipe/docgen/test, release, convergence,
+DDC, or cross-host evidence, and it must never hide a Rust-seed fallback.
+
 **Cranelift Path Working:** `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=cranelift` completes stages 2–3 reliably. Full-CLI requires `--full-bootstrap` to avoid driver stale-backfill rejection. See [doc/07_guide/compiler/build.md § Cranelift Bootstrap Path](../../../../doc/07_guide/compiler/build.md).
 
 **LLVM Path Blocked:** Stage 2 link has 62 residual undefined symbols (method lowering gap). See [doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md](../../../../doc/08_tracking/bug/seed_stage2_llvm_method_symbol_lowering_2026-07-17.md).
@@ -58,8 +68,11 @@ no build; `--selftest` proves the PASS branch without a real redeploy).
 Process doc:
 [doc/07_guide/compiler/lint_binary_redeploy_process.md](../../../../doc/07_guide/compiler/lint_binary_redeploy_process.md).
 
-Redeploy itself (T3 full bootstrap, required because the changed source is
-under `src/compiler`) is **blocked**, not merely slow: a same-day full
+The historical lane chose T3 because the changed source was under
+`src/compiler`; that path-based rule is obsolete. Current work must use
+[minimal-bootstrap feature development](../../../07_guide/compiler/minimal_bootstrap_configuration_composition.md)
+and escalate only from compatibility evidence or an explicit release/trust
+target. The attempted full
 `--full-bootstrap --deploy` run reached Stage 3 and SIGSEGV'd during
 `phase=monomorphize` / MIR lowering (exit 139, ~394s wall, 10.7 GB peak RSS,
 no diagnostic). See

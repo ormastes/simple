@@ -1,0 +1,91 @@
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.composition.types.{
+    SimpleCompositionImageV1,
+    SimpleInterfaceGroupRecordV1,
+    SimpleProviderRecordV1,
+    SimpleBindingRecordV1,
+    SimpleCliCommandRecordV1,
+    CompositionReadResultV1,
+    composition_diagnostic_v1,
+    empty_composition_image_v1,
+}
+use app.simple_core.router.{
+    SIMPLE_CORE_ROUTE_CORE,
+    SIMPLE_CORE_ROUTE_PROVIDER,
+    SIMPLE_CORE_ROUTE_REJECTED,
+    simple_core_route_v1,
+}
+
+fn routed_config() -> CompositionReadResultV1:
+    val empty = empty_composition_image_v1()
+    val image = SimpleCompositionImageV1(
+        schema: empty.schema,
+        profile: "dev",
+        apps: [],
+        interface_groups: [SimpleInterfaceGroupRecordV1(
+            group_id: "cli.command",
+            major: 1,
+            minor: 0,
+            abi_digest: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )],
+        providers: [SimpleProviderRecordV1(
+            provider_id: "formatter",
+            artifact_path: "build/providers/fmt.smf",
+            artifact_kind: "smf",
+            artifact_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            interface_groups: ["cli.command"],
+            required_capability_bits: 4,
+        )],
+        bindings: [SimpleBindingRecordV1(
+            service_id: "cli.formatter",
+            interface_group_id: "cli.command",
+            provider_id: "formatter",
+        )],
+        commands: [SimpleCliCommandRecordV1(
+            command_name: "fmt",
+            aliases: ["format"],
+            summary: "format Simple source",
+            binding_service_id: "cli.formatter",
+            interface_group_id: "cli.command",
+        )],
+        bytes: [],
+        composition_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+    CompositionReadResultV1(
+        ok: true,
+        image: image,
+        diagnostic: composition_diagnostic_v1("SCI_OK", "image", "accepted"),
+    )
+
+describe "simple-core SCI provider router":
+    it "keeps CLI-0 static and routes fmt as provider data":
+        val help = simple_core_route_v1(["--help"], routed_config(), "1.2.3")
+        expect(help.kind).to_equal(SIMPLE_CORE_ROUTE_CORE)
+        expect(help.core.command_id).to_equal("help")
+
+        val fmt = simple_core_route_v1(["fmt", "--check", "file.spl"], routed_config(), "1.2.3")
+        expect(fmt.kind).to_equal(SIMPLE_CORE_ROUTE_PROVIDER)
+        expect(fmt.core.command_id).to_equal("")
+        expect(fmt.activation.ok).to_equal(true)
+        expect(fmt.activation.canonical_command).to_equal("fmt")
+        expect(fmt.activation.provider_id).to_equal("formatter")
+        expect(fmt.activation.args).to_equal(["--check", "file.spl"])
+
+    it "resolves a command alias through the same immutable activation plan":
+        val alias = simple_core_route_v1(["format", "file.spl"], routed_config(), "1.2.3")
+        expect(alias.kind).to_equal(SIMPLE_CORE_ROUTE_PROVIDER)
+        expect(alias.activation.requested_command).to_equal("format")
+        expect(alias.activation.canonical_command).to_equal("fmt")
+        expect(alias.activation.provider_artifact_path).to_equal("build/providers/fmt.smf")
+
+    it "rejects provider routing when the SCI reader failed":
+        val invalid = CompositionReadResultV1(
+            ok: false,
+            image: empty_composition_image_v1(),
+            diagnostic: composition_diagnostic_v1("SCI_COMPOSITION_DIGEST", "header", "digest mismatch"),
+        )
+        val route = simple_core_route_v1(["fmt", "file.spl"], invalid, "1.2.3")
+        expect(route.kind).to_equal(SIMPLE_CORE_ROUTE_REJECTED)
+        expect(route.activation.ok).to_equal(false)
+        expect(route.activation.diagnostic_code).to_equal("SCI_COMPOSITION_DIGEST")
+        expect(route.activation.requested_command).to_equal("fmt")

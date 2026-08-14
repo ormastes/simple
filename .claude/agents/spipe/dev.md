@@ -137,6 +137,15 @@ dev-done
 
 ## Bootstrap readiness handoff tasks
 
+For ordinary feature development, first apply
+`doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`: name
+the smallest target/provider/SCI projection and expected receipt. Do not create
+a bootstrap-readiness lane merely because a file is under `src/compiler/**`.
+If focused compiler/interpreter/loader criteria use Stage 2 or 3, require the
+canonical admission fields, isolated output/cache, supported-command check, and
+stage-scoped evidence. Explicitly exclude Rust-seed fallback and promotion to
+Stage 4, general SPipe/docgen/test, release, convergence, or cross-host proof.
+
 When the raw request concerns bootstrap/platform readiness, refine the state
 file around the canonical checker
 `sh scripts/check/check-bootstrap-platform-handoff-readiness.shs`

@@ -1,0 +1,524 @@
+# Canonical SCI v1 application-section codec.
+# All integers are explicit little-endian values; no native structs or pointers
+# are serialized. The reader validates the complete directory before decoding.
+
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.crypto.types.{bytes_to_hex, bytes_to_text}
+use std.nogc_sync_mut.composition.types.{SimpleAppRecordV1, SimpleInterfaceGroupRecordV1, SimpleProviderRecordV1, SimpleBindingRecordV1, SimpleCliCommandRecordV1, SimpleCompositionImageV1, CompositionReadResultV1, composition_diagnostic_v1, composition_read_error_v1}
+
+val SCI_HEADER_SIZE_V1: i64 = 96
+val SCI_DIRECTORY_ENTRY_SIZE_V1: i64 = 48
+val SCI_SECTION_APPS_V1: i64 = 8
+val SCI_SECTION_PROVIDER_CLI_V1: i64 = 9
+val SCI_SECTION_REQUIRED_V1: i64 = 1
+
+fn _push_u16(out: [u8], value: i64):
+    out.push((value & 255) as u8)
+    out.push(((value >> 8) & 255) as u8)
+
+fn _push_u32(out: [u8], value: i64):
+    out.push((value & 255) as u8)
+    out.push(((value >> 8) & 255) as u8)
+    out.push(((value >> 16) & 255) as u8)
+    out.push(((value >> 24) & 255) as u8)
+
+fn _push_u64(out: [u8], value: i64):
+    var i = 0
+    while i < 8:
+        out.push(((value >> (i * 8)) & 255) as u8)
+        i = i + 1
+
+fn _read_u16(data: [u8], offset: i64) -> i64:
+    data[offset] as i64 | ((data[offset + 1] as i64) << 8)
+
+fn _read_u32(data: [u8], offset: i64) -> i64:
+    (data[offset] as i64) |
+        ((data[offset + 1] as i64) << 8) |
+        ((data[offset + 2] as i64) << 16) |
+        ((data[offset + 3] as i64) << 24)
+
+fn _read_u64(data: [u8], offset: i64) -> i64:
+    var out = 0
+    var i = 0
+    while i < 8:
+        out = out | ((data[offset + i] as i64) << (i * 8))
+        i = i + 1
+    out
+
+fn _digest(data: [u8]) -> [u8]:
+    var wide: [i64] = []
+    var i = 0
+    while i < data.len():
+        wide.push(data[i] as i64)
+        i = i + 1
+    val raw = sha256_bytes(wide)
+    var out: [u8] = []
+    i = 0
+    while i < raw.len():
+        out.push(raw[i] as u8)
+        i = i + 1
+    out
+
+fn _digest_hex(data: [u8]) -> text:
+    var wide: [i64] = []
+    val raw = _digest(data)
+    var i = 0
+    while i < raw.len():
+        wide.push(raw[i] as i64)
+        i = i + 1
+    bytes_to_hex(wide)
+
+fn _append_digest(out: [u8], digest: [u8]):
+    var i = 0
+    while i < 32:
+        out.push(digest[i])
+        i = i + 1
+
+fn _digest_matches(data: [u8], expected: [u8]) -> bool:
+    if expected.len() != 32:
+        return false
+    val actual = _digest(data)
+    var i = 0
+    while i < 32:
+        if actual[i] != expected[i]:
+            return false
+        i = i + 1
+    true
+
+fn _text_bytes(value: text) -> [u8]:
+    value.to_bytes()
+
+fn _push_text(out: [u8], value: text):
+    val raw = _text_bytes(value)
+    _push_u32(out, raw.len())
+    var i = 0
+    while i < raw.len():
+        out.push(raw[i])
+        i = i + 1
+
+fn _push_text_array(out: [u8], values: [text]):
+    _push_u32(out, values.len())
+    var i = 0
+    while i < values.len():
+        _push_text(out, values[i])
+        i = i + 1
+
+fn _encode_apps(image: SimpleCompositionImageV1) -> [u8]:
+    var out: [u8] = []
+    _push_text(out, image.schema)
+    _push_text(out, image.profile)
+    _push_u32(out, image.apps.len())
+    var i = 0
+    while i < image.apps.len():
+        val app = image.apps[i]
+        _push_text(out, app.app_id)
+        _push_text(out, app.display_name)
+        _push_text(out, app.artifact_path)
+        _push_text(out, app.icon)
+        _push_text(out, app.shortcut)
+        _push_text_array(out, app.associations)
+        _push_text_array(out, app.capabilities)
+        i = i + 1
+    out
+
+fn _encode_provider_cli(image: SimpleCompositionImageV1) -> [u8]:
+    var out: [u8] = []
+    _push_u32(out, image.interface_groups.len())
+    var i = 0
+    while i < image.interface_groups.len():
+        val group = image.interface_groups[i]
+        _push_text(out, group.group_id)
+        _push_u32(out, group.major)
+        _push_u32(out, group.minor)
+        _push_text(out, group.abi_digest)
+        i = i + 1
+    _push_u32(out, image.providers.len())
+    i = 0
+    while i < image.providers.len():
+        val provider = image.providers[i]
+        _push_text(out, provider.provider_id)
+        _push_text(out, provider.artifact_path)
+        _push_text(out, provider.artifact_kind)
+        _push_text(out, provider.artifact_digest)
+        _push_text_array(out, provider.interface_groups)
+        _push_u64(out, provider.required_capability_bits)
+        i = i + 1
+    _push_u32(out, image.bindings.len())
+    i = 0
+    while i < image.bindings.len():
+        _push_text(out, image.bindings[i].service_id)
+        _push_text(out, image.bindings[i].interface_group_id)
+        _push_text(out, image.bindings[i].provider_id)
+        i = i + 1
+    _push_u32(out, image.commands.len())
+    i = 0
+    while i < image.commands.len():
+        _push_text(out, image.commands[i].command_name)
+        _push_text_array(out, image.commands[i].aliases)
+        _push_text(out, image.commands[i].summary)
+        _push_text(out, image.commands[i].binding_service_id)
+        _push_text(out, image.commands[i].interface_group_id)
+        i = i + 1
+    out
+
+fn _append_bytes(out: [u8], data: [u8]):
+    var i = 0
+    while i < data.len():
+        out.push(data[i])
+        i = i + 1
+
+fn _push_directory(out: [u8], section_type: i64, offset: i64, payload: [u8]):
+    _push_u32(out, section_type)
+    _push_u16(out, 1)
+    _push_u16(out, SCI_SECTION_REQUIRED_V1)
+    _push_u32(out, offset)
+    _push_u32(out, payload.len())
+    _append_digest(out, _digest(payload))
+
+fn encode_composition_image_v1(image: SimpleCompositionImageV1) -> [u8]:
+    val payload = _encode_apps(image)
+    val provider_cli = _encode_provider_cli(image)
+    val has_provider_cli = image.interface_groups.len() > 0 or image.providers.len() > 0 or image.bindings.len() > 0 or image.commands.len() > 0
+    val section_count = if has_provider_cli: 2 else: 1
+    val schema_digest = _digest(_text_bytes("simple.composition/1"))
+    val payload_offset = SCI_HEADER_SIZE_V1 + section_count * SCI_DIRECTORY_ENTRY_SIZE_V1
+    val provider_cli_offset = payload_offset + payload.len()
+    val total_size = provider_cli_offset + (if has_provider_cli: provider_cli.len() else: 0)
+    var directories: [u8] = []
+    _push_directory(directories, SCI_SECTION_APPS_V1, payload_offset, payload)
+    if has_provider_cli: _push_directory(directories, SCI_SECTION_PROVIDER_CLI_V1, provider_cli_offset, provider_cli)
+    var composition: [u8] = []
+    if has_provider_cli: _append_bytes(composition, directories)
+    _append_bytes(composition, payload)
+    if has_provider_cli: _append_bytes(composition, provider_cli)
+    val payload_digest = _digest(composition)
+    var out: [u8] = []
+    out.push(83)
+    out.push(67)
+    out.push(73)
+    out.push(0)
+    _push_u16(out, 1)
+    out.push(1)
+    out.push(0)
+    _push_u32(out, total_size)
+    _push_u32(out, SCI_HEADER_SIZE_V1)
+    _push_u16(out, section_count)
+    _push_u16(out, 0)
+    _push_u32(out, 0)
+    _append_digest(out, schema_digest)
+    _append_digest(out, payload_digest)
+    _push_u32(out, 0)
+    _push_u32(out, 0)
+    _append_bytes(out, directories)
+    _append_bytes(out, payload)
+    if has_provider_cli: _append_bytes(out, provider_cli)
+    out
+
+class _SciCursorV1:
+    data: [u8]
+    pos: i64
+    end: i64
+    error: text
+
+fn _cursor_text(cur: _SciCursorV1) -> text:
+    if cur.error != "":
+        return ""
+    if cur.pos < 0 or cur.pos + 4 > cur.end:
+        cur.error = "composition-error: malformed-section: truncated text length"
+        return ""
+    val length = _read_u32(cur.data, cur.pos)
+    cur.pos = cur.pos + 4
+    if length < 0 or length > cur.end - cur.pos:
+        cur.error = "composition-error: malformed-section: text out of bounds"
+        return ""
+    var raw: [u8] = []
+    var i = 0
+    while i < length:
+        raw.push(cur.data[cur.pos + i])
+        i = i + 1
+    cur.pos = cur.pos + length
+    var wide: [i64] = []
+    i = 0
+    while i < raw.len():
+        wide.push(raw[i] as i64)
+        i = i + 1
+    bytes_to_text(wide)
+
+fn _cursor_text_array(cur: _SciCursorV1) -> [text]:
+    var out: [text] = []
+    if cur.error != "" or cur.pos + 4 > cur.end:
+        cur.error = "composition-error: malformed-section: truncated array length"
+        return out
+    val count = _read_u32(cur.data, cur.pos)
+    cur.pos = cur.pos + 4
+    if count < 0 or count > 65536:
+        cur.error = "composition-error: malformed-section: unreasonable array count"
+        return out
+    var i = 0
+    while i < count and cur.error == "":
+        out.push(_cursor_text(cur))
+        i = i + 1
+    out
+
+fn _cursor_u32(cur: _SciCursorV1) -> i64:
+    if cur.error != "" or cur.pos + 4 > cur.end:
+        cur.error = "composition-error: malformed-section: truncated integer"
+        return 0
+    val out = _read_u32(cur.data, cur.pos)
+    cur.pos = cur.pos + 4
+    out
+
+fn _cursor_u64(cur: _SciCursorV1) -> i64:
+    if cur.error != "" or cur.pos + 8 > cur.end:
+        cur.error = "composition-error: malformed-section: truncated capability bits"
+        return 0
+    val out = _read_u64(cur.data, cur.pos)
+    cur.pos = cur.pos + 8
+    out
+
+fn _text_in(values: [text], wanted: text) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == wanted: return true
+        i = i + 1
+    false
+
+fn _is_hex_digest(value: text) -> bool:
+    if value.len() != 64: return false
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+        i = i + 1
+    true
+
+fn _safe_provider_path(value: text) -> bool:
+    val approved = value.starts_with("build/providers/") or value.starts_with("/sys/providers/") or value.starts_with("/usr/lib/simple/providers/")
+    approved and not value.contains("/../") and not value.ends_with("/..") and not value.contains("//") and not value.contains("\\")
+
+fn _decode_provider_cli(image: SimpleCompositionImageV1, data: [u8], offset: i64, length: i64) -> Result<SimpleCompositionImageV1, text>:
+    val cur = _SciCursorV1(data: data, pos: offset, end: offset + length, error: "")
+    var group_ids: [text] = []
+    var groups: [SimpleInterfaceGroupRecordV1] = []
+    val group_count = _cursor_u32(cur)
+    if group_count > 4096: return Err("composition-error: malformed-section: unreasonable interface group count")
+    var i = 0
+    while i < group_count:
+        val id = _cursor_text(cur)
+        val major = _cursor_u32(cur)
+        val minor = _cursor_u32(cur)
+        val abi = _cursor_text(cur)
+        if cur.error != "": return Err(cur.error)
+        if id == "" or _text_in(group_ids, id): return Err("composition-error: duplicate-interface-group: " + id)
+        if major < 1 or not _is_hex_digest(abi): return Err("composition-error: invalid-interface-group: " + id)
+        group_ids.push(id)
+        groups.push(SimpleInterfaceGroupRecordV1(group_id: id, major: major, minor: minor, abi_digest: abi))
+        i = i + 1
+    var provider_ids: [text] = []
+    var providers: [SimpleProviderRecordV1] = []
+    val provider_count = _cursor_u32(cur)
+    if provider_count > 4096: return Err("composition-error: malformed-section: unreasonable provider count")
+    i = 0
+    while i < provider_count:
+        val id = _cursor_text(cur)
+        val path = _cursor_text(cur)
+        val kind = _cursor_text(cur)
+        val digest = _cursor_text(cur)
+        val implements = _cursor_text_array(cur)
+        val bits = _cursor_u64(cur)
+        if cur.error != "": return Err(cur.error)
+        if id == "" or _text_in(provider_ids, id): return Err("composition-error: duplicate-provider-id: " + id)
+        if not _safe_provider_path(path): return Err("composition-error: unsafe-provider-path: " + path)
+        if kind != "smf" and kind != "so" and kind != "dylib" and kind != "dll": return Err("composition-error: invalid-artifact-kind: " + kind)
+        if not _is_hex_digest(digest) or bits < 0: return Err("composition-error: invalid-provider: " + id)
+        var j = 0
+        while j < implements.len():
+            if not _text_in(group_ids, implements[j]): return Err("composition-error: unknown-interface-group: " + implements[j])
+            j = j + 1
+        provider_ids.push(id)
+        providers.push(SimpleProviderRecordV1(provider_id: id, artifact_path: path, artifact_kind: kind, artifact_digest: digest, interface_groups: implements, required_capability_bits: bits))
+        i = i + 1
+    var binding_services: [text] = []
+    var binding_groups: [text] = []
+    var bindings: [SimpleBindingRecordV1] = []
+    val binding_count = _cursor_u32(cur)
+    if binding_count > 4096: return Err("composition-error: malformed-section: unreasonable binding count")
+    i = 0
+    while i < binding_count:
+        val service = _cursor_text(cur)
+        val group = _cursor_text(cur)
+        val provider = _cursor_text(cur)
+        if cur.error != "": return Err(cur.error)
+        if _text_in(binding_services, service) or _text_in(binding_groups, group): return Err("composition-error: duplicate-binding: " + service)
+        if not _text_in(provider_ids, provider): return Err("composition-error: unknown-provider: " + provider)
+        var resolved = false
+        var j = 0
+        while j < providers.len():
+            if providers[j].provider_id == provider and _text_in(providers[j].interface_groups, group): resolved = true
+            j = j + 1
+        if not resolved: return Err("composition-error: unresolved-required-interface: " + group)
+        binding_services.push(service)
+        binding_groups.push(group)
+        bindings.push(SimpleBindingRecordV1(service_id: service, interface_group_id: group, provider_id: provider))
+        i = i + 1
+    var command_names: [text] = []
+    var commands: [SimpleCliCommandRecordV1] = []
+    val command_count = _cursor_u32(cur)
+    if command_count > 4096: return Err("composition-error: malformed-section: unreasonable command count")
+    i = 0
+    while i < command_count:
+        val name = _cursor_text(cur)
+        val aliases = _cursor_text_array(cur)
+        val summary = _cursor_text(cur)
+        val binding = _cursor_text(cur)
+        val group = _cursor_text(cur)
+        if cur.error != "": return Err(cur.error)
+        if name == "" or _text_in(command_names, name): return Err("composition-error: duplicate-command: " + name)
+        command_names.push(name)
+        var j = 0
+        while j < aliases.len():
+            if aliases[j] == "" or _text_in(command_names, aliases[j]): return Err("composition-error: duplicate-command-alias: " + aliases[j])
+            command_names.push(aliases[j])
+            j = j + 1
+        var resolved = false
+        j = 0
+        while j < bindings.len():
+            if bindings[j].service_id == binding and bindings[j].interface_group_id == group: resolved = true
+            j = j + 1
+        if not resolved: return Err("composition-error: unresolved-command-binding: " + binding)
+        commands.push(SimpleCliCommandRecordV1(command_name: name, aliases: aliases, summary: summary, binding_service_id: binding, interface_group_id: group))
+        i = i + 1
+    if cur.pos != cur.end: return Err("composition-error: malformed-section: trailing bytes")
+    Ok(SimpleCompositionImageV1(schema: image.schema, profile: image.profile, apps: image.apps, interface_groups: groups, providers: providers, bindings: bindings, commands: commands, bytes: data, composition_digest: image.composition_digest))
+
+fn _decode_apps(data: [u8], offset: i64, length: i64) -> Result<SimpleCompositionImageV1, text>:
+    val cur = _SciCursorV1(data: data, pos: offset, end: offset + length, error: "")
+    val schema = _cursor_text(cur)
+    val profile = _cursor_text(cur)
+    if cur.error != "": return Err(cur.error)
+    if schema != "simple.composition/1": return Err("composition-error: unsupported-schema: " + schema)
+    if cur.pos + 4 > cur.end: return Err("composition-error: malformed-section: missing app count")
+    val count = _read_u32(data, cur.pos)
+    cur.pos = cur.pos + 4
+    if count < 0 or count > 4096: return Err("composition-error: malformed-section: unreasonable app count")
+    var apps: [SimpleAppRecordV1] = []
+    var i = 0
+    while i < count:
+        val app_id = _cursor_text(cur)
+        val name = _cursor_text(cur)
+        val artifact = _cursor_text(cur)
+        val icon = _cursor_text(cur)
+        val shortcut = _cursor_text(cur)
+        val associations = _cursor_text_array(cur)
+        val capabilities = _cursor_text_array(cur)
+        if cur.error != "": return Err(cur.error)
+        if app_id == "": return Err("composition-error: invalid-app-id: empty")
+        var j = 0
+        while j < apps.len():
+            if apps[j].app_id == app_id: return Err("composition-error: duplicate-app-id: " + app_id)
+            j = j + 1
+        if not artifact.starts_with("/") or artifact.contains("/../") or artifact.ends_with("/..") or artifact.contains("//"):
+            return Err("composition-error: unsafe-artifact-path: " + artifact)
+        apps.push(SimpleAppRecordV1(app_id: app_id, display_name: name, artifact_path: artifact, icon: icon, shortcut: shortcut, associations: associations, capabilities: capabilities))
+        i = i + 1
+    if cur.pos != cur.end: return Err("composition-error: malformed-section: trailing bytes")
+    Ok(SimpleCompositionImageV1(schema: schema, profile: profile, apps: apps, interface_groups: [], providers: [], bindings: [], commands: [], bytes: data, composition_digest: _digest_hex(_copy_range(data, offset, length))))
+
+fn _copy_range(data: [u8], offset: i64, length: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < length:
+        out.push(data[offset + i])
+        i = i + 1
+    out
+
+fn decode_composition_image_v1(data: [u8]) -> CompositionReadResultV1:
+    if data.len() < SCI_HEADER_SIZE_V1:
+        return composition_read_error_v1("SCI_TRUNCATED", "header", "composition image is shorter than the v1 header")
+    if data[0] != 83 or data[1] != 67 or data[2] != 73 or data[3] != 0:
+        return composition_read_error_v1("SCI_MAGIC", "header", "invalid SCI magic")
+    if _read_u16(data, 4) != 1:
+        return composition_read_error_v1("SCI_VERSION", "header", "unsupported SCI major version")
+    if data[6] != 1:
+        return composition_read_error_v1("SCI_ENDIAN", "header", "unsupported byte order")
+    if data[7] != 0 or _read_u16(data, 18) != 0 or _read_u32(data, 20) != 0 or _read_u32(data, 88) != 0 or _read_u32(data, 92) != 0:
+        return composition_read_error_v1("SCI_NON_CANONICAL", "header", "reserved header bytes must be zero")
+    if not _digest_matches(_text_bytes("simple.composition/1"), _copy_range(data, 24, 32)):
+        return composition_read_error_v1("SCI_SCHEMA_DIGEST", "header", "schema digest mismatch")
+    val total_size = _read_u32(data, 8)
+    val directory_offset = _read_u32(data, 12)
+    val section_count = _read_u16(data, 16)
+    if total_size != data.len():
+        return composition_read_error_v1("SCI_BOUNDS", "header", "declared total length does not match input")
+    if directory_offset < SCI_HEADER_SIZE_V1 or section_count < 1 or section_count > 256:
+        return composition_read_error_v1("SCI_DIRECTORY", "header", "invalid section directory")
+    val directory_length = section_count * SCI_DIRECTORY_ENTRY_SIZE_V1
+    if directory_offset > data.len() or directory_length > data.len() - directory_offset:
+        return composition_read_error_v1("SCI_BOUNDS", "directory", "section directory is out of bounds")
+    var app_offset = -1
+    var app_length = -1
+    var provider_cli_offset = -1
+    var provider_cli_length = -1
+    var composition_bytes: [u8] = []
+    var has_unknown_optional = false
+    var i = 0
+    while i < section_count:
+        val base = directory_offset + i * SCI_DIRECTORY_ENTRY_SIZE_V1
+        val section_type = _read_u32(data, base)
+        val section_version = _read_u16(data, base + 4)
+        val flags = _read_u16(data, base + 6)
+        val offset = _read_u32(data, base + 8)
+        val length = _read_u32(data, base + 12)
+        if offset < directory_offset + directory_length or offset > data.len() or length > data.len() - offset:
+            return composition_read_error_v1("SCI_BOUNDS", section_type.to_text(), "section is out of bounds")
+        var j = 0
+        while j < i:
+            val other = directory_offset + j * SCI_DIRECTORY_ENTRY_SIZE_V1
+            val other_offset = _read_u32(data, other + 8)
+            val other_length = _read_u32(data, other + 12)
+            if offset < other_offset + other_length and other_offset < offset + length:
+                return composition_read_error_v1("SCI_OVERLAP", section_type.to_text(), "sections overlap")
+            j = j + 1
+        val section = _copy_range(data, offset, length)
+        if not _digest_matches(section, _copy_range(data, base + 16, 32)):
+            return composition_read_error_v1("SCI_DIGEST", section_type.to_text(), "section content digest mismatch")
+        _append_bytes(composition_bytes, section)
+        if section_type == SCI_SECTION_APPS_V1:
+            if section_version != 1: return composition_read_error_v1("SCI_SECTION_VERSION", "apps", "unsupported app section version")
+            if app_offset >= 0: return composition_read_error_v1("SCI_DUPLICATE_SECTION", "apps", "duplicate app section")
+            app_offset = offset
+            app_length = length
+        elif section_type == SCI_SECTION_PROVIDER_CLI_V1:
+            if section_version != 1: return composition_read_error_v1("SCI_SECTION_VERSION", "provider-cli", "unsupported provider/CLI section version")
+            if provider_cli_offset >= 0: return composition_read_error_v1("SCI_DUPLICATE_SECTION", "provider-cli", "duplicate provider/CLI section")
+            provider_cli_offset = offset
+            provider_cli_length = length
+        elif (flags & SCI_SECTION_REQUIRED_V1) != 0:
+            return composition_read_error_v1("SCI_REQUIRED_SECTION", section_type.to_text(), "unsupported required section")
+        else:
+            has_unknown_optional = true
+        i = i + 1
+    if app_offset < 0:
+        return composition_read_error_v1("SCI_REQUIRED_SECTION", "apps", "required app section is missing")
+    var authenticated: [u8] = []
+    if section_count > 1: _append_bytes(authenticated, _copy_range(data, directory_offset, directory_length))
+    _append_bytes(authenticated, composition_bytes)
+    if not _digest_matches(authenticated, _copy_range(data, 56, 32)):
+        return composition_read_error_v1("SCI_COMPOSITION_DIGEST", "header", "composition digest mismatch")
+    match _decode_apps(data, app_offset, app_length):
+        case Err(e): composition_read_error_v1("SCI_APP_SECTION", "apps", e)
+        case Ok(image):
+            var decoded = image
+            if provider_cli_offset >= 0:
+                match _decode_provider_cli(image, data, provider_cli_offset, provider_cli_length):
+                    case Err(e): return composition_read_error_v1("SCI_PROVIDER_CLI_SECTION", "provider-cli", e)
+                    case Ok(value): decoded = value
+            if _encode_apps(decoded) != _copy_range(data, app_offset, app_length):
+                return composition_read_error_v1("SCI_NON_CANONICAL", "apps", "application section is not canonical")
+            if provider_cli_offset >= 0 and _encode_provider_cli(decoded) != _copy_range(data, provider_cli_offset, provider_cli_length):
+                return composition_read_error_v1("SCI_NON_CANONICAL", "provider-cli", "provider/CLI section is not canonical")
+            if not has_unknown_optional and encode_composition_image_v1(decoded) != data:
+                return composition_read_error_v1("SCI_NON_CANONICAL", "image", "composition image is valid but not canonically encoded")
+            val accepted = SimpleCompositionImageV1(schema: decoded.schema, profile: decoded.profile, apps: decoded.apps, interface_groups: decoded.interface_groups, providers: decoded.providers, bindings: decoded.bindings, commands: decoded.commands, bytes: data, composition_digest: _digest_hex(authenticated))
+            CompositionReadResultV1(ok: true, image: accepted, diagnostic: composition_diagnostic_v1("SCI_OK", "image", "composition image accepted"))

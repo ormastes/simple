@@ -1,0 +1,55 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-reason-guard.XXXXXX")
+trap 'rm -rf -- "${scratch}"' EXIT HUP INT TERM
+
+missing_log=${scratch}/missing.log
+if sh "${root}/scripts/bootstrap/bootstrap-from-scratch.sh" \
+    --output="${scratch}/out" >"${missing_log}" 2>&1; then
+  echo "FAIL: bootstrap accepted a missing typed-reason receipt" >&2
+  exit 1
+fi
+grep -Fq "bootstrap-policy-error: reason-receipt-required" "${missing_log}" || {
+  echo "FAIL: missing receipt did not return the canonical diagnostic" >&2
+  exit 1
+}
+[ ! -e "${scratch}/out" ] || {
+  echo "FAIL: missing receipt produced bootstrap output before refusal" >&2
+  exit 1
+}
+
+none_receipt=${scratch}/none.receipt
+printf '%s\n' 'simple-bootstrap-receipt-v1|producer=simple-build-planner-v1|target=//bootstrap:stage4|reason=none' >"${none_receipt}"
+none_log=${scratch}/none.log
+if sh "${root}/scripts/bootstrap/bootstrap-from-scratch.sh" \
+    --bootstrap-receipt="${none_receipt}" --output="${scratch}/out" >"${none_log}" 2>&1; then
+  echo "FAIL: bootstrap accepted BootstrapReason.None" >&2
+  exit 1
+fi
+grep -Fq "bootstrap-policy-error: typed-reason-required" "${none_log}" || {
+  echo "FAIL: None receipt did not return the canonical diagnostic" >&2
+  exit 1
+}
+[ ! -e "${scratch}/out" ] || {
+  echo "FAIL: None receipt produced bootstrap output before refusal" >&2
+  exit 1
+}
+
+valid_receipt=${scratch}/valid.receipt
+printf '%s\n' 'simple-bootstrap-receipt-v1|producer=simple-build-planner-v1|target=//bootstrap:stage4|reason=self-host-convergence-check' >"${valid_receipt}"
+valid_log=${scratch}/valid.log
+sh "${root}/scripts/bootstrap/bootstrap-from-scratch.sh" \
+  --bootstrap-receipt="${valid_receipt}" --validate-bootstrap-receipt \
+  --output="${scratch}/out" >"${valid_log}" 2>&1
+grep -Fq "receipt-valid target=//bootstrap:stage4 reason=self-host-convergence-check execution=not-attempted" "${valid_log}" || {
+  echo "FAIL: allowed receipt did not validate without execution" >&2
+  exit 1
+}
+[ ! -e "${scratch}/out" ] || {
+  echo "FAIL: receipt validation started bootstrap work" >&2
+  exit 1
+}
+
+echo "PASS: staged bootstrap rejects missing/None receipts and validates an allowed receipt without execution"

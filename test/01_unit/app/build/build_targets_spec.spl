@@ -9,7 +9,15 @@ use app.build.targets.build_targets.{
     parse_targets_text, validate_targets, find_cycle, find_target, is_valid_kind
 }
 use app.build.targets.target_resolve.{resolve_target, format_target_plan}
-use app.build.targets.targets_cli.{target_arg, looks_like_platform_triple}
+use app.build.targets.targets_cli.{
+    target_arg, looks_like_platform_triple, build_explain_requested,
+    target_explain_evidence, target_explain_plan_evidence
+}
+use app.build.targets.target_executor.{
+    target_action, target_action_args, target_output_path, target_cache_dir,
+    target_action_reusable, planned_target_actions, target_name_valid,
+    target_storage_component, target_candidate_output_path, target_output_collision
+}
 use std.io_runtime.{file_write, dir_create_all}
 
 val FIXTURE_ROOT = "/tmp/claude-1000/-home-ormastes-dev-pub-simple/2e5c44bf-497b-4593-9694-2de011cb8404/scratchpad/build_targets_fixture"
@@ -142,3 +150,100 @@ describe "build targets: CLI flag":
         var a4: [text] = ["bootstrap", "--release"]
         expect(target_arg(a4)).to_equal("")
         expect(find_target(parse_targets_text(GOOD), "app")).to_equal(2)
+
+    it "recognizes explicit build explain forms":
+        expect(build_explain_requested(["explain", "--target", "app"])).to_equal(true)
+        expect(build_explain_requested(["--target=app", "--explain"])).to_equal(true)
+        expect(build_explain_requested(["--target=app"])).to_equal(false)
+
+    it "labels explain provenance and unavailable digest evidence":
+        val evidence = target_explain_evidence("app")
+        expect(evidence).to_contain("provenance=declared-target-graph")
+        expect(evidence).to_contain("closure-digest=unknown")
+        expect(evidence).to_contain("execution=not-attempted")
+        expect(evidence).to_contain("bootstrap-required=false")
+
+    it "reports the conservative selected closure and honest cache counts":
+        val plan = resolve_target(parse_targets_text(GOOD), "app")
+        val evidence = target_explain_plan_evidence("app", plan)
+        expect(evidence).to_contain("selected-rebuild=[lib,util,app]")
+        expect(evidence).to_contain("cache-reused=0")
+        expect(evidence).to_contain("cache-rebuilt=3")
+
+describe "build targets: scoped actions":
+    it "accepts canonical labels and rejects malformed label traversal":
+        expect(target_name_valid("//config:configc")).to_equal(true)
+        expect(target_name_valid("//app/providers:provider_cli")).to_equal(true)
+        expect(target_name_valid("legacy_name")).to_equal(true)
+        expect(target_name_valid("//../config:configc")).to_equal(false)
+        expect(target_name_valid("//config/:configc")).to_equal(false)
+        expect(target_name_valid("//config:bad/name")).to_equal(false)
+
+    it "maps canonical labels to stable safe distinct storage components":
+        val a = target_storage_component("//config:configc")
+        val b = target_storage_component("//provider:provider_cli")
+        expect(a).to_start_with("label-")
+        expect(a).to_equal(target_storage_component("//config:configc"))
+        expect(a == b).to_equal(false)
+        expect(a.contains("/")).to_equal(false)
+        expect(a.contains(":" )).to_equal(false)
+
+    it "derives contained stable output and cache paths":
+        expect(_setup()).to_equal(true)
+        val ts = parse_targets_text(GOOD)
+        val target = ts.targets[0]
+        expect(target_output_path(FIXTURE_ROOT, target)).to_equal(FIXTURE_ROOT + "/build/targets/lib/lib.a")
+        expect(target_cache_dir(FIXTURE_ROOT, target)).to_equal(FIXTURE_ROOT + "/build/target_cache/lib")
+
+    it "maps one library target to one entry-closure archive action":
+        expect(_setup()).to_equal(true)
+        val ts = parse_targets_text(GOOD)
+        val action = target_action(FIXTURE_ROOT, ts, ts.targets[0])
+        val args = target_action_args(FIXTURE_ROOT, action)
+        expect(args).to_contain("--entry-closure")
+        expect(args).to_contain("--emit-archive")
+        expect(args).to_contain(FIXTURE_ROOT + "/src/lib.spl")
+        expect(args).to_contain(FIXTURE_ROOT + "/build/targets/lib/lib.a")
+
+    it "treats absent artifact and receipt evidence as non-reusable":
+        expect(_setup()).to_equal(true)
+        val ts = parse_targets_text(GOOD)
+        val action = target_action(FIXTURE_ROOT, ts, ts.targets[0])
+        expect(target_action_reusable(FIXTURE_ROOT, ts.targets[0], action)).to_equal(false)
+
+    it "publishes through a process-qualified candidate instead of stale output":
+        val output = FIXTURE_ROOT + "/build/targets/app/app"
+        expect(target_candidate_output_path(output, 4123)).to_equal(output + ".candidate-4123")
+        expect(target_candidate_output_path(output, 4123) == output).to_equal(false)
+
+    it "plans only the requested closure and excludes an unrelated target":
+        expect(_setup()).to_equal(true)
+        val src = GOOD + "\ntarget unrelated:\n    kind: binary\n    entry: src/main.spl\n"
+        val actions = planned_target_actions(FIXTURE_ROOT, parse_targets_text(src), "app")
+        expect(actions.len()).to_equal(3)
+        expect(actions[0].target).to_equal("lib")
+        expect(actions[1].target).to_equal("util")
+        expect(actions[2].target).to_equal("app")
+
+    it "rejects absolute and parent-traversing output declarations":
+        val absolute = "target a:\n    kind: binary\n    entry: src/main.spl\n    output: /tmp/a\n"
+        val traversal = "target a:\n    kind: binary\n    entry: src/main.spl\n    output: build/../a\n"
+        expect(_has(validate_targets(parse_targets_text(absolute), FIXTURE_ROOT), "unsafe-output: a")).to_equal(true)
+        expect(_has(validate_targets(parse_targets_text(traversal), FIXTURE_ROOT), "unsafe-output: a")).to_equal(true)
+
+    it "plans canonical-label dependencies in deterministic order":
+        val src = "target //config:configc:\n    kind: binary\n    entry: src/main.spl\n    output: build/configc\n\ntarget //provider:provider_cli:\n    kind: binary\n    entry: src/util.spl\n    output: build/provider_cli\n    depends: //config:configc\n"
+        val plan = resolve_target(parse_targets_text(src), "//provider:provider_cli")
+        expect(plan.error).to_equal("")
+        expect(plan.order[0]).to_equal("//config:configc")
+        expect(plan.order[1]).to_equal("//provider:provider_cli")
+
+    it "rejects duplicate explicit publication paths":
+        val src = "target a:\n    kind: binary\n    entry: src/main.spl\n    output: build/shared\n\ntarget b:\n    kind: binary\n    entry: src/util.spl\n    output: build/shared\n"
+        val collision = target_output_collision(FIXTURE_ROOT, parse_targets_text(src))
+        expect(collision).to_contain("output-collision: a <-> b")
+        expect(collision).to_contain(FIXTURE_ROOT + "/build/shared")
+
+    it "keeps default publication paths distinct":
+        val src = "target a:\n    kind: binary\n    entry: src/main.spl\n\ntarget //pkg:a:\n    kind: binary\n    entry: src/util.spl\n"
+        expect(target_output_collision(FIXTURE_ROOT, parse_targets_text(src))).to_equal("")

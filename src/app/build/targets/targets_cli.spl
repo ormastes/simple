@@ -1,8 +1,8 @@
 # `simple build --target <name>` — named-target CLI surface (first slice).
 #
-# Resolution and reporting only: the resolved closure is PRINTED and the build
-# then continues exactly as before. Absent `--target`, nothing here runs and
-# behavior is byte-for-byte unchanged.
+# Explain prints declared evidence without execution. A named build executes
+# the resolved closure through the scoped executor and never falls through to
+# the broad default native build.
 #
 # `--target <triple>` keeps its existing platform meaning: a value that looks
 # like a platform triple (two or more '-') is passed straight through and this
@@ -10,6 +10,8 @@
 
 use app.build.targets.build_targets.{TargetSet, load_targets_file, validate_targets}
 use app.build.targets.target_resolve.{resolve_target, format_target_plan}
+use app.build.targets.target_executor.{execute_target_plan, format_target_execution}
+use app.build.targets.change_classifier.{ChangeDecisionV1, format_change_decision}
 use std.io_runtime.{file_exists}
 
 fn looks_like_platform_triple(v: text) -> bool:
@@ -33,6 +35,39 @@ fn target_arg(args: [text]) -> text:
             return v
         i = i + 1
     ""
+
+fn build_explain_requested(args: [text]) -> bool:
+    """True for `build explain --target NAME` or `build --explain --target NAME`."""
+    if args.len() > 0 and args[0] == "explain":
+        return true
+    var i = 0
+    while i < args.len():
+        if args[i] == "--explain":
+            return true
+        i = i + 1
+    false
+
+fn target_explain_evidence(name: text) -> text:
+    """Honest provenance: digest inputs may be missing and therefore Unknown."""
+    "build-explain: target=" + name +
+        " provenance=declared-target-graph changed-interface-groups=[]" +
+        " digest-deltas=[] closure-digest=unknown cache-evidence=unavailable" +
+        " bootstrap-required=false bootstrap-reason=none execution=not-attempted"
+
+fn target_explain_plan_evidence(name: text, plan: ResolvePlan) -> text:
+    """Conservative receipt for the selected declaration closure."""
+    var closure = ""
+    var i = 0
+    while i < plan.order.len():
+        closure = if i == 0: plan.order[i] else: closure + "," + plan.order[i]
+        i = i + 1
+    target_explain_evidence(name) +
+        " compatibility=unknown selected-rebuild=[" + closure + "]" +
+        " cache-reused=0 cache-rebuilt=" + plan.order.len().to_text()
+
+fn format_target_change_explain(decision: ChangeDecisionV1) -> text:
+    """Render classifier evidence without upgrading planned work to execution."""
+    format_change_decision(decision)
 
 fn targets_file_path(repo_root: text) -> text:
     """`build.sdn` first, then `targets.sdn`; "" when neither exists."""
@@ -67,4 +102,51 @@ fn run_target_plan(repo_root: text, name: text) -> i64:
         print(plan.error)
         return 2
     print(format_target_plan(name, plan))
+    0
+
+fn run_target_explain(repo_root: text, name: text) -> i64:
+    """Validate and print the declared closure without claiming execution."""
+    val path = targets_file_path(repo_root)
+    if path.len() == 0:
+        print("target-error: no build.sdn or targets.sdn declaring build targets")
+        return 2
+    val ts = load_targets_file(path, repo_root)
+    val errors = validate_targets(ts, repo_root)
+    if errors.len() > 0:
+        var e = 0
+        while e < errors.len():
+            print(errors[e])
+            e = e + 1
+        return 2
+    val plan = resolve_target(ts, name)
+    if plan.error.len() > 0:
+        print(plan.error)
+        return 2
+    print(format_target_plan(name, plan))
+    print(target_explain_plan_evidence(name, plan))
+    0
+
+fn run_target_execution(repo_root: text, name: text) -> i64:
+    """Execute only the validated dependency closure and report actual counts."""
+    val path = targets_file_path(repo_root)
+    if path.len() == 0:
+        print("target-error: no build.sdn or targets.sdn declaring build targets")
+        return 2
+    val ts = load_targets_file(path, repo_root)
+    val errors = validate_targets(ts, repo_root)
+    if errors.len() > 0:
+        var i = 0
+        while i < errors.len():
+            print(errors[i])
+            i = i + 1
+        return 2
+    val plan = resolve_target(ts, name)
+    if plan.error.len() > 0:
+        print(plan.error)
+        return 2
+    val summary = execute_target_plan(repo_root, ts, name)
+    print(format_target_execution(name, plan, summary))
+    if summary.error.len() > 0:
+        print(summary.error)
+        return 3
     0

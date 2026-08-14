@@ -1,0 +1,83 @@
+use std.nogc_sync_mut.composition.{parse_composition_source_v1, encode_composition_image_v1, decode_composition_image_v1}
+use os.services.launcher.launcher.{launcher_init}
+use os.services.launcher.launcher_composition.{launcher_load_composition_bytes_v1, composition_app_ids_v1}
+use os.services.launcher.launcher_registry.{app_count, _app_index_by_name, _app_path, _app_key, _app_mod, MOD_META, MOD_CTRL}
+
+fn _image(source: text):
+    match parse_composition_source_v1(source):
+        case Err(_): decode_composition_image_v1([]).image
+        case Ok(parsed): decode_composition_image_v1(encode_composition_image_v1(parsed)).image
+
+describe "launcher SCI application projection":
+    it "REQ-008 projects renamed application metadata into one launcher process":
+        val first = _image("schema: simple.composition/1\napps:\n  - id: notes\n    name: Notes\n    artifact: /sys/apps/notes.smf\n")
+        val second = _image("schema: simple.composition/1\napps:\n  - id: notes\n    name: Knowledge Notes\n    artifact: /sys/apps/notes.smf\n")
+
+        launcher_init()
+        val before_count = app_count
+        val first_load = launcher_load_composition_bytes_v1(first.bytes)
+        val second_load = launcher_load_composition_bytes_v1(second.bytes)
+
+        expect(first_load.ok).to_equal(true)
+        expect(first_load.code).to_equal("SCI_LAUNCHER_OK")
+        expect(second_load.ok).to_equal(true)
+        expect(app_count).to_equal(before_count + 1)
+        expect(_app_index_by_name("Notes")).to_equal(-1)
+        val renamed = _app_index_by_name("Knowledge Notes")
+        expect(renamed >= 0).to_equal(true)
+        expect(_app_path(renamed)).to_equal("/sys/apps/notes.smf")
+        expect(composition_app_ids_v1[0]).to_equal("notes")
+
+    it "REQ-008 removes an application omitted by the replacement image":
+        val first = _image("schema: simple.composition/1\napps:\n  - id: notes\n    name: Notes Removal Fixture\n    artifact: /sys/apps/notes_remove.smf\n  - id: tasks\n    name: Tasks Retained Fixture\n    artifact: /sys/apps/tasks_retain.smf\n")
+        val second = _image("schema: simple.composition/1\napps:\n  - id: tasks\n    name: Tasks Retained Fixture\n    artifact: /sys/apps/tasks_retain.smf\n")
+
+        launcher_init()
+        val before_count = app_count
+        val first_load = launcher_load_composition_bytes_v1(first.bytes)
+        val second_load = launcher_load_composition_bytes_v1(second.bytes)
+
+        expect(first_load.ok).to_equal(true)
+        expect(second_load.ok).to_equal(true)
+        expect(_app_index_by_name("Notes Removal Fixture")).to_equal(-1)
+        expect(_app_index_by_name("Tasks Retained Fixture") >= 0).to_equal(true)
+        expect(app_count).to_equal(before_count + 1)
+        expect(composition_app_ids_v1.len()).to_equal(1)
+        expect(composition_app_ids_v1[0]).to_equal("tasks")
+
+    it "REQ-003 projects a validated shortcut through the launcher owner API":
+        val shortcut_image = _image("schema: simple.composition/1\napps:\n  - id: editor-shortcut\n    name: Shortcut Editor\n    artifact: /sys/apps/shortcut_editor.smf\n    shortcut: Ctrl+Meta+E\n")
+        launcher_init()
+        val result = launcher_load_composition_bytes_v1(shortcut_image.bytes)
+        val index = _app_index_by_name("Shortcut Editor")
+        expect(result.ok).to_equal(true)
+        expect(index >= 0).to_equal(true)
+        expect(_app_key(index.to_u64())).to_equal(69u32)
+        expect(_app_mod(index.to_u64())).to_equal(MOD_CTRL | MOD_META)
+
+    it "REQ-003 rejects malformed shortcuts before changing the registry":
+        val shortcut_image = _image("schema: simple.composition/1\napps:\n  - id: bad-shortcut\n    name: Bad Shortcut\n    artifact: /sys/apps/bad_shortcut.smf\n    shortcut: Meta+Enter\n")
+        launcher_init()
+        val before_count = app_count
+        val result = launcher_load_composition_bytes_v1(shortcut_image.bytes)
+        expect(result.ok).to_equal(false)
+        expect(result.code).to_equal("SCI_LAUNCHER_SHORTCUT_INVALID")
+        expect(app_count).to_equal(before_count)
+
+    it "REQ-003 fails closed when manifest capability projection is unavailable":
+        val policy_image = _image("schema: simple.composition/1\napps:\n  - id: editor-policy\n    name: Policy Editor\n    artifact: /sys/apps/policy_editor.smf\n    capabilities: [FileRead(/)]\n")
+        launcher_init()
+        val before_count = app_count
+        val result = launcher_load_composition_bytes_v1(policy_image.bytes)
+        expect(result.ok).to_equal(false)
+        expect(result.code).to_equal("SCI_LAUNCHER_MANIFEST_CAPABILITY_PROJECTION_REQUIRED")
+        expect(app_count).to_equal(before_count)
+
+    it "REQ-008 fails closed when the association owner has no projection API":
+        val association_image = _image("schema: simple.composition/1\napps:\n  - id: notes-association\n    name: Associated Notes\n    artifact: /sys/apps/associated_notes.smf\n    associations: [.notes]\n")
+        launcher_init()
+        val before_count = app_count
+        val result = launcher_load_composition_bytes_v1(association_image.bytes)
+        expect(result.ok).to_equal(false)
+        expect(result.code).to_equal("SCI_LAUNCHER_ASSOCIATION_PROJECTION_REQUIRED")
+        expect(app_count).to_equal(before_count)

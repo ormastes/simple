@@ -75,6 +75,8 @@ If a refactoring risks breaking behavior, skip it and note in state file.
 - [ ] All specs still pass: `bin/simple test <spec_file>` green for each
 - [ ] Doc/wiki refactor pass recorded in state file
 - [ ] Process docs/skills/agent instructions refreshed or explicitly `N/A`
+- [ ] Compiled-feature guidance points to the canonical minimal-bootstrap guide;
+      no duplicate path-based escalation rule was introduced
 - [ ] Before/after structural diagram included when module boundaries changed (see `.claude/skills/lib/spipe_diagrams.md`)
 - [ ] Numbered artifact guard passes
 - [ ] State file updated: `phase: refactor` marked complete

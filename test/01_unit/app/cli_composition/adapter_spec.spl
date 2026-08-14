@@ -1,0 +1,75 @@
+use app.cli_composition.{resolve_cli_activation_v1, project_cli_help_v1}
+use app.build.targets.change_classifier.{
+    ChangeClassifierInputV1,
+    classify_change
+}
+use app.build.targets.build_explain.{CompatibilityResult, BootstrapReason}
+use std.nogc_sync_mut.composition.{parse_composition_source_v1}
+
+val DIGEST = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val ABI = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val SOURCE = "schema: simple.composition/1\nprofile: dev\ninterface_groups:\n  - id: cli.command\n    major: 1\n    minor: 0\n    abi_digest: " + ABI + "\nproviders:\n  - id: cli.formatter\n    artifact: /sys/providers/fmt.smf\n    kind: smf\n    artifact_digest: " + DIGEST + "\n    interface_groups: [cli.command]\n    required_capability_bits: 4\nbindings:\n  - service: cli.format\n    interface_group: cli.command\n    provider: cli.formatter\ncommands:\n  - name: fmt\n    aliases: [format]\n    summary: Format Simple source\n    binding: cli.format\n    interface_group: cli.command\n"
+
+fn _image():
+    # Parsing is part of the proof: an invalid fixture must fail the example
+    # instead of silently substituting a different composition image.
+    parse_composition_source_v1(SOURCE).unwrap()
+
+describe "SCI CLI composition adapter":
+    it "resolves a canonical command to one typed provider activation request":
+        val request = resolve_cli_activation_v1(_image(), "fmt", ["--check", "main.spl"])
+        expect(request.ok).to_equal(true)
+        expect(request.canonical_command).to_equal("fmt")
+        expect(request.provider_id).to_equal("cli.formatter")
+        expect(request.provider_artifact_path).to_equal("/sys/providers/fmt.smf")
+        expect(request.provider_artifact_digest).to_equal(DIGEST)
+        expect(request.interface_group_id).to_equal("cli.command")
+        expect(request.interface_major).to_equal(1)
+        expect(request.requested_capability_bits).to_equal(4)
+        expect(request.args).to_equal(["--check", "main.spl"])
+
+    it "canonicalizes an alias without loading or importing its provider implementation":
+        val request = resolve_cli_activation_v1(_image(), "format", ["main.spl"])
+        expect(request.ok).to_equal(true)
+        expect(request.requested_command).to_equal("format")
+        expect(request.canonical_command).to_equal("fmt")
+        expect(request.provider_artifact_kind).to_equal("smf")
+
+    it "projects alias-aware help entirely from SCI data":
+        val help = project_cli_help_v1(_image(), "format")
+        expect(help.ok).to_equal(true)
+        expect(help.canonical_command).to_equal("fmt")
+        expect(help.aliases).to_equal(["format"])
+        expect(help.summary).to_equal("Format Simple source")
+
+    it "fails closed for unknown commands before provider activation":
+        val request = resolve_cli_activation_v1(_image(), "office", [])
+        expect(request.ok).to_equal(false)
+        expect(request.diagnostic_code).to_equal("CLI_COMMAND_UNKNOWN")
+        expect(request.provider_artifact_path).to_equal("")
+
+    it "records zero compile and link work for a command-section-only projection":
+        val decision = classify_change(ChangeClassifierInputV1(
+            requested_target: "//product:simple_cli",
+            changed_files: ["config/cli.sdn"],
+            changed_config_sections: ["cli-command-table"],
+            implementation_changed: false,
+            compile_interface_changed: false,
+            abi_changed: false,
+            compile_semantic_changed: false,
+            tool_behavior_changed: false,
+            core_abi_changed: false,
+            admitted_compiler_compatibility: CompatibilityResult.Compatible,
+            explicit_trust_reason: BootstrapReason.None,
+            provider_target: "//provider:none",
+            core_target: "//product:simple_core",
+            sci_target: "//config:simple_sci"
+        ))
+        expect(decision.affected_targets).to_equal(["//config:simple_sci"])
+        expect(decision.planned_work.modules_parsed).to_equal(0)
+        expect(decision.planned_work.modules_typed).to_equal(0)
+        expect(decision.planned_work.modules_lowered).to_equal(0)
+        expect(decision.planned_work.objects_generated).to_equal(0)
+        expect(decision.planned_work.links_performed).to_equal(0)
+        expect(decision.planned_work.sci_sections_regenerated).to_equal(1)
+        expect(decision.bootstrap_required).to_equal(false)

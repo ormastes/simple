@@ -1,0 +1,145 @@
+# In-process implementation of the coarse CompilerDriverV1 handle contract.
+# Dynamic/native/SMF activation must use the same contract, but is deliberately
+# not simulated here: loader admission has to prove a process-callable query.
+
+use compiler.driver.driver_provider_contract_v1.{
+    SimpleCompilerHandleResultV1, SimpleCompilerResultSummaryV1,
+    SIMPLE_COMPILER_PROVIDER_OK, SIMPLE_COMPILER_PROVIDER_INVALID_SESSION,
+    SIMPLE_COMPILER_PROVIDER_INVALID_REQUEST, SIMPLE_COMPILER_PROVIDER_INVALID_RESULT,
+    SIMPLE_COMPILER_PROVIDER_REQUEST_ALREADY_RUN, SIMPLE_COMPILER_PROVIDER_SESSION_BUSY,
+    SIMPLE_COMPILER_PROVIDER_COMPILE_FAILED
+}
+use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
+use compiler.common.driver_core_types.{CompileOptions, compile_result_is_success, compile_result_errors}
+
+struct CompilerProviderSessionStateV1:
+    options: CompileOptions
+    active: bool
+    open_request_count: i64
+
+struct CompilerProviderRequestStateV1:
+    session_handle: u64
+    active: bool
+    was_run: bool
+
+struct CompilerProviderResultStateV1:
+    active: bool
+    compile_status: i32
+    diagnostic_count: u32
+
+class CompilerDriverProviderInProcessV1:
+    sessions: [CompilerProviderSessionStateV1]
+    requests: [CompilerProviderRequestStateV1]
+    results: [CompilerProviderResultStateV1]
+
+    static fn create() -> CompilerDriverProviderInProcessV1:
+        CompilerDriverProviderInProcessV1(sessions: [], requests: [], results: [])
+
+    me create_session(options: CompileOptions) -> SimpleCompilerHandleResultV1:
+        self.sessions.push(CompilerProviderSessionStateV1(
+            options: options,
+            active: true,
+            open_request_count: 0
+        ))
+        SimpleCompilerHandleResultV1(status: SIMPLE_COMPILER_PROVIDER_OK, handle: self.sessions.len() as u64)
+
+    fn session_valid(handle: u64) -> bool:
+        if handle == 0 or handle > self.sessions.len() as u64:
+            return false
+        self.sessions[(handle - 1) as i64].active
+
+    fn request_valid(handle: u64) -> bool:
+        if handle == 0 or handle > self.requests.len() as u64:
+            return false
+        self.requests[(handle - 1) as i64].active
+
+    fn result_valid(handle: u64) -> bool:
+        if handle == 0 or handle > self.results.len() as u64:
+            return false
+        self.results[(handle - 1) as i64].active
+
+    me create_request(session_handle: u64) -> SimpleCompilerHandleResultV1:
+        if not self.session_valid(session_handle):
+            return SimpleCompilerHandleResultV1(status: SIMPLE_COMPILER_PROVIDER_INVALID_SESSION, handle: 0)
+        val session_index = (session_handle - 1) as i64
+        var session = self.sessions[session_index]
+        session.open_request_count = session.open_request_count + 1
+        self.sessions[session_index] = session
+        self.requests.push(CompilerProviderRequestStateV1(
+            session_handle: session_handle,
+            active: true,
+            was_run: false
+        ))
+        SimpleCompilerHandleResultV1(status: SIMPLE_COMPILER_PROVIDER_OK, handle: self.requests.len() as u64)
+
+    me run_request(request_handle: u64) -> SimpleCompilerHandleResultV1:
+        if not self.request_valid(request_handle):
+            return SimpleCompilerHandleResultV1(status: SIMPLE_COMPILER_PROVIDER_INVALID_REQUEST, handle: 0)
+        val request_index = (request_handle - 1) as i64
+        var request = self.requests[request_index]
+        if request.was_run:
+            return SimpleCompilerHandleResultV1(status: SIMPLE_COMPILER_PROVIDER_REQUEST_ALREADY_RUN, handle: 0)
+        if not self.session_valid(request.session_handle):
+            return SimpleCompilerHandleResultV1(status: SIMPLE_COMPILER_PROVIDER_INVALID_SESSION, handle: 0)
+
+        val session_index = (request.session_handle - 1) as i64
+        val driver = compiler_driver_create(self.sessions[session_index].options)
+        val compile_result = compiler_driver_run_compile(driver)
+        val succeeded = compile_result_is_success(compile_result)
+        val errors = compile_result_errors(compile_result)
+        val compile_status = if succeeded: SIMPLE_COMPILER_PROVIDER_OK else: SIMPLE_COMPILER_PROVIDER_COMPILE_FAILED
+        self.results.push(CompilerProviderResultStateV1(
+            active: true,
+            compile_status: compile_status,
+            diagnostic_count: errors.len() as u32
+        ))
+        request.was_run = true
+        self.requests[request_index] = request
+        SimpleCompilerHandleResultV1(status: SIMPLE_COMPILER_PROVIDER_OK, handle: self.results.len() as u64)
+
+    fn inspect_result(result_handle: u64) -> SimpleCompilerResultSummaryV1:
+        if not self.result_valid(result_handle):
+            return SimpleCompilerResultSummaryV1(
+                status: SIMPLE_COMPILER_PROVIDER_INVALID_RESULT,
+                compile_status: SIMPLE_COMPILER_PROVIDER_INVALID_RESULT,
+                diagnostic_count: 0
+            )
+        val result = self.results[(result_handle - 1) as i64]
+        SimpleCompilerResultSummaryV1(
+            status: SIMPLE_COMPILER_PROVIDER_OK,
+            compile_status: result.compile_status,
+            diagnostic_count: result.diagnostic_count
+        )
+
+    me release_result(result_handle: u64) -> i32:
+        if not self.result_valid(result_handle):
+            return SIMPLE_COMPILER_PROVIDER_INVALID_RESULT
+        val index = (result_handle - 1) as i64
+        var result = self.results[index]
+        result.active = false
+        self.results[index] = result
+        SIMPLE_COMPILER_PROVIDER_OK
+
+    me release_request(request_handle: u64) -> i32:
+        if not self.request_valid(request_handle):
+            return SIMPLE_COMPILER_PROVIDER_INVALID_REQUEST
+        val index = (request_handle - 1) as i64
+        var request = self.requests[index]
+        val session_index = (request.session_handle - 1) as i64
+        var session = self.sessions[session_index]
+        session.open_request_count = session.open_request_count - 1
+        self.sessions[session_index] = session
+        request.active = false
+        self.requests[index] = request
+        SIMPLE_COMPILER_PROVIDER_OK
+
+    me release_session(session_handle: u64) -> i32:
+        if not self.session_valid(session_handle):
+            return SIMPLE_COMPILER_PROVIDER_INVALID_SESSION
+        val index = (session_handle - 1) as i64
+        var session = self.sessions[index]
+        if session.open_request_count > 0:
+            return SIMPLE_COMPILER_PROVIDER_SESSION_BUSY
+        session.active = false
+        self.sessions[index] = session
+        SIMPLE_COMPILER_PROVIDER_OK

@@ -1,6 +1,7 @@
-# /dev
+# /dev (compatibility alias)
 
-Development command for quick iteration and testing.
+`/dev` is no longer a separate lightweight workflow. Route requests to
+`/sp_dev` and follow `.claude/skills/spipe.md`.
 
 ## Usage
 ```
@@ -8,15 +9,12 @@ Development command for quick iteration and testing.
 ```
 
 ## Purpose
-Fast development loop for incremental changes without full pipeline overhead.
-
-## When to use
-- Small bug fixes
-- Quick feature iterations
-- Experimental changes
+Compatibility only. It must not lower evidence, documentation, or verification
+requirements relative to `/sp_dev`.
 
 ## Notes
-This is a lightweight development shortcut. For production work, use the full pipeline: /research → /design → /impl → /verify → /release
+This alias runs the same SPipe phases and completion gates as `/sp_dev`; it is
+not a reduced-evidence shortcut.
 
 "Lightweight" means fewer PHASES, not a lower bar for landing. Anything that
 reaches `main` carries the same knowledge and evidence obligations as work that

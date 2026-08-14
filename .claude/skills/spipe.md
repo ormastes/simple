@@ -1147,9 +1147,13 @@ wrapper, Rust seed, or stale binary is not evidence. This sanity does not
 replace release `--whole` or repository-wide policy checks, and it must not be
 copied into compiler Stages 2 or 3.
 
-A temporarily deployed Stage 2 compiler may unblock native artifact builds,
-but it is not Stage 4 evidence and cannot qualify `run`, `test`, SPipe docgen,
-or release. Record its exact path, hash, supported commands, and rollback path.
+An explicitly admitted Stage 2 or Stage 3 Simple binary may run focused
+pure-Simple compiler/interpreter/loader work under
+`doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`. Record
+path/hash/stage/provenance/commands, isolate output/cache, fail closed on
+unsupported commands, and label evidence by stage. It does not substitute for
+deployed Stage 4, general `run`/`test`/SPipe/docgen, release, convergence, or
+cross-host evidence; never silently fall back to the Rust seed.
 If a direct lexer probe and parser-facing token stream disagree, capture both
 streams plus continuation state in one compiled probe. After three distinct
 fix/probe cycles, update the tracked bug and lane state and stop; do not rewrite
@@ -2201,14 +2205,12 @@ NVMe DMA phys=0 guard, interpreter stack overflow, i64 print truncation.
 
 ## Verification tiering (build infra)
 
-Match the verification gate to the size of the change — a small pure-Simple lib
-edit is NOT a full bootstrap. See `.claude/rules/bootstrap.md` § "Verification
-tiering": T0 hosted seed probe (seconds) for logic changes; T1 incremental kernel
-build with `SIMPLE_NATIVE_INCREMENTAL=1` + a stable `--cache-dir` for small lib
-changes (reuses per-module objects; link + discovery still run); T2 full kernel
-rebuild for structural changes (new modules, type/trait layout, entry-closure set,
-linker/flag changes); T3 full bootstrap ONLY when the compiler itself
-(`src/compiler_rust` or `src/compiler`) changed or as the final pre-goal gate.
+Use the compatibility-driven policy in
+`doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`: start
+with the smallest named target/provider/SCI projection, require a build receipt,
+and full-bootstrap only for a typed incompatibility or explicit release/trust
+target. A compiler path is not a bootstrap reason; `Unknown` rebuilds the
+smallest relevant closure and never authorizes reuse.
 
 ## Log-retention convention (debug/perf instrumentation)
 

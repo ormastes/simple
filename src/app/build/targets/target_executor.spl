@@ -1,0 +1,233 @@
+# Named-target action execution.
+#
+# Each validated target becomes exactly one native-build action. The resolver's
+# deterministic dependency-first order is preserved, outputs and cache
+# namespaces are target-local, and no action falls through to a broad build or
+# clears shared caches.
+
+use app.build.targets.build_targets.{BuildTarget, TargetSet, find_target, validate_targets}
+use app.build.targets.target_resolve.{ResolvePlan, resolve_target, format_target_plan}
+use app.io.cli_compile.{cli_native_build}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_exists}
+use app.io.mod.{file_delete, file_hash_sha256, file_size_raw, getpid, rt_file_rename}
+
+struct TargetAction:
+    target: text
+    entry: text
+    output: text
+    cache_dir: text
+    emit_archive: bool
+    action_digest: text
+
+struct TargetExecutionSummary:
+    selected_count: i64
+    executed_count: i64
+    rebuilt_count: i64
+    reused_count: i64
+    unknown_digest_count: i64
+    failed_target: text
+    error: text
+
+fn _legacy_target_name_valid(name: text) -> bool:
+    if name.len() == 0 or name == "." or name == "..":
+        return false
+    var i = 0
+    while i < name.len():
+        val c = name[i:i + 1]
+        if not ((c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+                (c >= "0" and c <= "9") or c == "_" or c == "-" or c == "."):
+            return false
+        i = i + 1
+    true
+
+fn _canonical_target_label_valid(name: text) -> bool:
+    """Validate `//package[/sub]:target` without accepting path traversal."""
+    if not name.starts_with("//") or name.len() < 5:
+        return false
+    val body = name[2:]
+    val parts = body.split(":")
+    if parts.len() != 2 or parts[0].len() == 0 or parts[1].len() == 0:
+        return false
+    if parts[0].starts_with("/") or parts[0].ends_with("/") or parts[0].contains("//"):
+        return false
+    val segments = parts[0].split("/")
+    var i = 0
+    while i < segments.len():
+        if not _legacy_target_name_valid(segments[i]):
+            return false
+        i = i + 1
+    _legacy_target_name_valid(parts[1])
+
+fn target_name_valid(name: text) -> bool:
+    _legacy_target_name_valid(name) or _canonical_target_label_valid(name)
+
+fn target_storage_component(name: text) -> text:
+    """Collision-resistant filesystem-safe identity; legacy names stay readable."""
+    if _legacy_target_name_valid(name):
+        return name
+    if _canonical_target_label_valid(name):
+        return "label-" + sha256_text(name)
+    ""
+
+fn target_output_path(repo_root: text, target: BuildTarget) -> text:
+    if target.output.len() > 0:
+        return repo_root + "/" + target.output
+    val component = target_storage_component(target.name)
+    val suffix = if target.kind == "library": ".a" else: ""
+    repo_root + "/build/targets/" + component + "/" + component + suffix
+
+fn target_cache_dir(repo_root: text, target: BuildTarget) -> text:
+    repo_root + "/build/target_cache/" + target_storage_component(target.name)
+
+fn target_candidate_output_path(output: text, process_id: i64) -> text:
+    """Process-qualified unpublished output used for fail-closed publication."""
+    output + ".candidate-" + process_id.to_text()
+
+fn _target_action_digest(repo_root: text, ts: TargetSet, target: BuildTarget) -> text:
+    """Unknown until the compiler exposes an authoritative imported-closure digest.
+
+    Entry/tool/dependency-artifact hashes are insufficient: a private imported
+    source can change without changing any of those identities before action
+    execution. Fail closed by returning Unknown (empty), never a guessed key."""
+    ""
+
+fn target_action(repo_root: text, ts: TargetSet, target: BuildTarget) -> TargetAction:
+    TargetAction(
+        target.name,
+        if target.entry.starts_with("/"): target.entry else: repo_root + "/" + target.entry,
+        target_output_path(repo_root, target),
+        target_cache_dir(repo_root, target),
+        target.kind == "library",
+        _target_action_digest(repo_root, ts, target)
+    )
+
+fn target_action_args(repo_root: text, action: TargetAction) -> [text]:
+    var args: [text] = [
+        "native-build", "--entry", action.entry, "--entry-closure",
+        "--source", repo_root + "/src", "--output", action.output,
+        "--cache-dir", action.cache_dir
+    ]
+    if action.emit_archive:
+        args.push("--emit-archive")
+    args
+
+fn target_action_reusable(repo_root: text, target: BuildTarget, action: TargetAction) -> bool:
+    """Executor-level reuse is disabled until closure digest evidence exists."""
+    false
+
+fn planned_target_actions(repo_root: text, ts: TargetSet, name: text) -> [TargetAction]:
+    """Declared actions for exactly the resolved closure, dependency-first."""
+    var actions: [TargetAction] = []
+    val plan = resolve_target(ts, name)
+    if plan.error.len() > 0:
+        return actions
+    var i = 0
+    while i < plan.order.len():
+        val index = find_target(ts, plan.order[i])
+        if index < 0:
+            var empty: [TargetAction] = []
+            return empty
+        actions.push(target_action(repo_root, ts, ts.targets[index]))
+        i = i + 1
+    actions
+
+fn target_output_collision(repo_root: text, ts: TargetSet) -> text:
+    """First pair publishing the same effective artifact path, or empty."""
+    var i = 0
+    while i < ts.targets.len():
+        val left = target_output_path(repo_root, ts.targets[i])
+        var j = i + 1
+        while j < ts.targets.len():
+            if left == target_output_path(repo_root, ts.targets[j]):
+                return "target-error: output-collision: " + ts.targets[i].name +
+                    " <-> " + ts.targets[j].name + ": " + left
+            j = j + 1
+        i = i + 1
+    ""
+
+fn execute_target_plan(repo_root: text, ts: TargetSet, name: text) -> TargetExecutionSummary:
+    val validation = validate_targets(ts, repo_root)
+    if validation.len() > 0:
+        return TargetExecutionSummary(0, 0, 0, 0, 0, "", validation[0])
+    val collision = target_output_collision(repo_root, ts)
+    if collision.len() > 0:
+        return TargetExecutionSummary(0, 0, 0, 0, 0, "", collision)
+    val plan = resolve_target(ts, name)
+    if plan.error.len() > 0:
+        return TargetExecutionSummary(0, 0, 0, 0, 0, "", plan.error)
+    # Preflight the entire selected closure before any side effect. Native-build
+    # cannot consume a declared archive/object/manifest input; merely ordering a
+    # dependency and ignoring its artifact is unsound.
+    var preflight = 0
+    while preflight < plan.order.len():
+        val preflight_index = find_target(ts, plan.order[preflight])
+        if preflight_index >= 0 and ts.targets[preflight_index].deps.len() > 0:
+            val blocked = ts.targets[preflight_index]
+            return TargetExecutionSummary(plan.order.len(), 0, 0, 0, 0, blocked.name,
+                "target-error: dependency-input-unsupported: " + blocked.name +
+                ": native-build has no --input-manifest contract")
+        preflight = preflight + 1
+
+    var executed: i64 = 0
+    var rebuilt: i64 = 0
+    var reused: i64 = 0
+    var unknown: i64 = 0
+    var i = 0
+    while i < plan.order.len():
+        val index = find_target(ts, plan.order[i])
+        if index < 0:
+            return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, plan.order[i],
+                "target-error: unknown-target-in-plan: " + plan.order[i])
+        val target = ts.targets[index]
+        if not target_name_valid(target.name):
+            return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, target.name,
+                "target-error: unsafe-name: " + target.name)
+        val action = target_action(repo_root, ts, target)
+        if action.action_digest.len() == 0:
+            unknown = unknown + 1
+        if target_action_reusable(repo_root, target, action):
+            reused = reused + 1
+            i = i + 1
+            continue
+        # Empty means Unknown evidence. It must rebuild, never count as reuse.
+        # Build to a freshly removed, process-qualified candidate so a stale
+        # declared output can never masquerade as this invocation's result.
+        val candidate_path = target_candidate_output_path(action.output, getpid())
+        file_delete(candidate_path)
+        val candidate_action = TargetAction(
+            target: action.target,
+            entry: action.entry,
+            output: candidate_path,
+            cache_dir: action.cache_dir,
+            emit_archive: action.emit_archive,
+            action_digest: action.action_digest
+        )
+        val rc = cli_native_build(target_action_args(repo_root, candidate_action))
+        executed = executed + 1
+        rebuilt = rebuilt + 1
+        if rc != 0:
+            file_delete(candidate_path)
+            return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, target.name,
+                "target-error: action-failed: " + target.name + ": exit=" + rc.to_text())
+        # A successful action without a fresh nonempty candidate and SHA-256
+        # identity is not success. Publish only after these checks pass.
+        if not file_exists(candidate_path) or file_size_raw(candidate_path) <= 0 or file_hash_sha256(candidate_path).len() != 64:
+            file_delete(candidate_path)
+            return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, target.name,
+                "target-error: fresh-output-invalid: " + target.name + ": " + candidate_path)
+        if not rt_file_rename(candidate_path, action.output):
+            file_delete(candidate_path)
+            return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, target.name,
+                "target-error: output-publish-failed: " + target.name + ": " + action.output)
+        i = i + 1
+    TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, "", "")
+
+fn format_target_execution(name: text, plan: ResolvePlan, summary: TargetExecutionSummary) -> text:
+    format_target_plan(name, plan) + "\n" +
+        "target-actions: selected=" + summary.selected_count.to_text() +
+        " executed=" + summary.executed_count.to_text() +
+        " rebuilt=" + summary.rebuilt_count.to_text() +
+        " reused=" + summary.reused_count.to_text() +
+        " unknown-digests=" + summary.unknown_digest_count.to_text() +
+        " closure-digest=unknown executor-reuse=disabled bootstrap=none"

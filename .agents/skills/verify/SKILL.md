@@ -212,6 +212,14 @@ not create, rewrite, or weaken SPipe after verification.
   shape, embedded SQLite facade boundary, and explicit absence statuses. Run
   `scripts/check/check-llm-tooling-public-absence-rendering.shs`.
 - Do not mark PASS for compiler/core/lib or MCP/LSP work unless the matching smoke checks passed
+- For compiled feature work, verify the receipt described by
+  `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`.
+  `Unknown` may cause the smallest conservative rebuild but never reuse; a full
+  bootstrap without a typed reason is FAIL.
+- Accept admitted Stage 2/3 evidence only for explicitly stage-scoped
+  compiler/interpreter/loader criteria. Verify path/hash/stage/provenance,
+  supported command, and isolated output/cache; reject Rust-seed fallback or
+  promotion to Stage 4, general SPipe/docgen/test, release, or cross-host proof.
 
 ## SSpec maintenance verification
 

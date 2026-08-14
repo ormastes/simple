@@ -1,0 +1,75 @@
+use std.nogc_sync_mut.composition.provider_contract.*
+use std.nogc_sync_mut.composition.cli_registry.*
+
+fn _provider() -> InProcessCliProviderV1:
+    InProcessCliProviderV1(
+        provider_handle: 41,
+        context_handle: 7,
+        provider_identity_digest: 0x101,
+        implementation_digest: 0x202,
+        abi_digest: 0x303,
+        required_capability_bits: 4,
+        command_name: "fmt-leaf",
+        summary: "formatted"
+    )
+
+fn _request(interface_id: u64, major: u32, capabilities: u64) -> SimpleProviderQueryV1:
+    SimpleProviderQueryV1(
+        descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+        interface_id: interface_id,
+        minimum_major: major,
+        minimum_minor: 0,
+        host_abi: 1,
+        target_offset: 0,
+        target_length: 0,
+        requested_capability_bits: capabilities
+    )
+
+describe "SimpleProviderQueryV1 in-process leaf CLI proof":
+    it "REQ-005 REQ-007 queries and dispatches a coarse CLI provider through numeric handles":
+        var registry = SimpleCliRegistryV1.create()
+        registry.register_in_process(_provider())
+        val result = simple_cli_dispatch_in_process_v1(
+            registry,
+            41,
+            _request(SIMPLE_CLI_COMMAND_V1_INTERFACE, 1, 4),
+            "fmt-leaf",
+            ["alpha.spl", "beta.spl"]
+        )
+        expect(result.status).to_equal(SIMPLE_CLI_OK)
+        expect(result.query_status).to_equal(SIMPLE_PROVIDER_OK)
+        expect(result.provider_mode).to_equal(SIMPLE_PROVIDER_MODE_IN_PROCESS)
+        expect(result.provider_identity_digest).to_equal(0x101)
+        expect(text.from_bytes(result.output)).to_equal("formatted:alpha.spl,beta.spl")
+
+    it "REQ-014 rejects an unsupported interface major before dispatch":
+        var registry = SimpleCliRegistryV1.create()
+        registry.register_in_process(_provider())
+        val result = simple_cli_dispatch_in_process_v1(
+            registry, 41, _request(SIMPLE_CLI_COMMAND_V1_INTERFACE, 2, 4),
+            "fmt-leaf", ["alpha.spl"]
+        )
+        expect(result.status).to_equal(SIMPLE_CLI_PROVIDER_MISSING)
+        expect(result.query_status).to_equal(SIMPLE_PROVIDER_MAJOR_UNSUPPORTED)
+
+    it "REQ-005 enforces declared capability bits":
+        var registry = SimpleCliRegistryV1.create()
+        registry.register_in_process(_provider())
+        val queried = simple_provider_query_in_process_v1(
+            registry, 41, _request(SIMPLE_CLI_COMMAND_V1_INTERFACE, 1, 0)
+        )
+        expect(queried.status).to_equal(SIMPLE_PROVIDER_CAPABILITY_DENIED)
+
+    it "REQ-014 rejects short query descriptors":
+        var registry = SimpleCliRegistryV1.create()
+        registry.register_in_process(_provider())
+        var request = _request(SIMPLE_CLI_COMMAND_V1_INTERFACE, 1, 4)
+        request.descriptor_size = 8
+        val queried = simple_provider_query_in_process_v1(registry, 41, request)
+        expect(queried.status).to_equal(SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT)
+
+    it "REQ-015 fails closed for native and SMF modes without a callable loader":
+        val native_result = simple_provider_query_dynamic_v1(SIMPLE_PROVIDER_MODE_NATIVE)
+        val smf_result = simple_provider_query_dynamic_v1(SIMPLE_PROVIDER_MODE_SMF)
+        expect(native_result.status).to_equal(SIMPLE_PROVIDER_NOT_PROCESS_CALLABLE)
+        expect(smf_result.status).to_equal(SIMPLE_PROVIDER_NOT_PROCESS_CALLABLE)

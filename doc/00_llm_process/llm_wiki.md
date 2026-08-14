@@ -517,6 +517,16 @@ improve preview/conflict/reparse/write diagnostics to stderr; machine report
 stdout stays serialization-only. Do not infer documentation-quality acceptance
 from timing output or a zero-stub count alone.
 
+## Minimal-bootstrap feature development
+
+Normal feature work starts with the smallest named target, provider artifact,
+and composition-image projection. A compiler source path is not itself a full
+bootstrap reason. Compatibility receipts control reuse and escalation;
+`Unknown` rebuilds conservatively and never authorizes reuse. Full self-host
+convergence and DDC remain explicit release/trust targets. Canonical guide:
+`doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`; expert:
+`doc/00_llm_process/feature_expert/minimal_bootstrap_configuration_composed_dynamic_architecture/skill.md`.
+
 ## Post-bootstrap Stage 4 SSpec acceptance
 
 - Canonical spec: `test/03_system/check/post_bootstrap_stage4_acceptance_spec.spl`.

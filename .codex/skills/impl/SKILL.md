@@ -202,6 +202,16 @@ Before declaring implementation complete, verify:
 - Use `Result<T, E>` + `?` for error handling (no try/catch/throw)
 - Reserved keywords: `gen`, `val`, `def`, `exists`, `actor`, `assert`, `join`, `pass_todo`, `pass_do_nothing`, `pass_dn`
 - NEVER over-engineer — only make requested changes
+- For compiled feature work, follow
+  `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`: build
+  the smallest named target/provider/SCI projection, retain its compatibility
+  receipt, and reserve full bootstrap for typed incompatibility or explicit
+  release/trust targets.
+- Focused pure-Simple compiler/interpreter/loader work may use an admitted Stage
+  2 or 3 binary exactly as that guide permits: record path/hash/stage/provenance
+  and commands, isolate output/cache, fail closed on unsupported commands, and
+  keep all evidence stage-scoped. It is never an implicit Rust-seed fallback or
+  a substitute for Stage 4, general SPipe/docgen/test, release, or cross-host proof.
 - NEVER add unused code — delete completely
 - NEVER convert TODO/FIXME to NOTE — implement or delete
 - Production MCP or LSP wrappers must execute cached compiled artifacts, not raw source entrypoints

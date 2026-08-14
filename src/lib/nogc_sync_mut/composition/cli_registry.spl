@@ -1,0 +1,152 @@
+# In-process executable proof for SimpleProviderQueryV1 + SimpleCliCommandV1.
+#
+# This adapter proves query/version/capability/dispatch semantics without
+# claiming that a native or SMF address is process-callable. Dynamic modes fail
+# closed until their loaders can produce the same numeric handles honestly.
+
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_CLI_COMMAND_V1_INTERFACE,
+    SIMPLE_CLI_COMMAND_V1_MAJOR,
+    SIMPLE_CLI_COMMAND_V1_MINOR,
+    SIMPLE_PROVIDER_OK,
+    SIMPLE_PROVIDER_INTERFACE_UNKNOWN,
+    SIMPLE_PROVIDER_MAJOR_UNSUPPORTED,
+    SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT,
+    SIMPLE_PROVIDER_NOT_PROCESS_CALLABLE,
+    SIMPLE_PROVIDER_CAPABILITY_DENIED,
+    SIMPLE_PROVIDER_NOT_REGISTERED,
+    SIMPLE_PROVIDER_MINOR_UNSUPPORTED,
+    SIMPLE_PROVIDER_QUERY_V1_SIZE,
+    SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE,
+    SIMPLE_CLI_OK,
+    SIMPLE_CLI_INVALID_ARGS,
+    SIMPLE_CLI_PROVIDER_MISSING,
+    SimpleProviderQueryV1,
+    SimpleProviderQueryResultV1,
+    simple_provider_query_error_v1
+}
+
+val SIMPLE_PROVIDER_MODE_IN_PROCESS: u32 = 1
+val SIMPLE_PROVIDER_MODE_NATIVE: u32 = 2
+val SIMPLE_PROVIDER_MODE_SMF: u32 = 3
+
+class InProcessCliProviderV1:
+    provider_handle: u64
+    context_handle: u64
+    provider_identity_digest: u64
+    implementation_digest: u64
+    abi_digest: u64
+    required_capability_bits: u64
+    command_name: text
+    summary: text
+
+class SimpleCliRegistryV1:
+    var providers: [InProcessCliProviderV1]
+
+    static fn create() -> SimpleCliRegistryV1:
+        SimpleCliRegistryV1(providers: [])
+
+    me register_in_process(provider: InProcessCliProviderV1):
+        self.providers.push(provider)
+
+class SimpleCliDispatchReceiptV1:
+    status: i32
+    query_status: i32
+    provider_mode: u32
+    provider_identity_digest: u64
+    output: [u8]
+    diagnostic: [u8]
+
+fn _provider_for_handle(registry: SimpleCliRegistryV1, handle: u64) -> InProcessCliProviderV1:
+    var i = 0
+    while i < registry.providers.len():
+        if registry.providers[i].provider_handle == handle:
+            return registry.providers[i]
+        i = i + 1
+    InProcessCliProviderV1(
+        provider_handle: 0,
+        context_handle: 0,
+        provider_identity_digest: 0,
+        implementation_digest: 0,
+        abi_digest: 0,
+        required_capability_bits: 0,
+        command_name: "",
+        summary: ""
+    )
+
+fn simple_provider_query_in_process_v1(
+    registry: SimpleCliRegistryV1,
+    provider_handle: u64,
+    request: SimpleProviderQueryV1
+) -> SimpleProviderQueryResultV1:
+    if request.descriptor_size < SIMPLE_PROVIDER_QUERY_V1_SIZE:
+        return simple_provider_query_error_v1(SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT)
+    if request.interface_id != SIMPLE_CLI_COMMAND_V1_INTERFACE:
+        return simple_provider_query_error_v1(SIMPLE_PROVIDER_INTERFACE_UNKNOWN)
+    if request.minimum_major != SIMPLE_CLI_COMMAND_V1_MAJOR:
+        return simple_provider_query_error_v1(SIMPLE_PROVIDER_MAJOR_UNSUPPORTED)
+    if request.minimum_minor > SIMPLE_CLI_COMMAND_V1_MINOR:
+        return simple_provider_query_error_v1(SIMPLE_PROVIDER_MINOR_UNSUPPORTED)
+    val provider = _provider_for_handle(registry, provider_handle)
+    if provider.provider_handle == 0:
+        return simple_provider_query_error_v1(SIMPLE_PROVIDER_NOT_REGISTERED)
+    if (request.requested_capability_bits & provider.required_capability_bits) != provider.required_capability_bits:
+        return simple_provider_query_error_v1(SIMPLE_PROVIDER_CAPABILITY_DENIED)
+    SimpleProviderQueryResultV1(
+        status: SIMPLE_PROVIDER_OK,
+        provided_major: SIMPLE_CLI_COMMAND_V1_MAJOR,
+        provided_minor: SIMPLE_CLI_COMMAND_V1_MINOR,
+        descriptor_size: SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE,
+        interface_handle: provider.provider_handle,
+        provider_context: provider.context_handle,
+        provider_identity_digest: provider.provider_identity_digest,
+        implementation_digest: provider.implementation_digest,
+        abi_digest: provider.abi_digest
+    )
+
+fn simple_provider_query_dynamic_v1(mode: u32) -> SimpleProviderQueryResultV1:
+    # Native and SMF loaders must prove executable address admission first.
+    if mode == SIMPLE_PROVIDER_MODE_NATIVE or mode == SIMPLE_PROVIDER_MODE_SMF:
+        return simple_provider_query_error_v1(SIMPLE_PROVIDER_NOT_PROCESS_CALLABLE)
+    simple_provider_query_error_v1(SIMPLE_PROVIDER_INTERFACE_UNKNOWN)
+
+fn _cli_receipt(
+    status: i32,
+    query_status: i32,
+    provider_mode: u32,
+    identity: u64,
+    output: text,
+    diagnostic: text
+) -> SimpleCliDispatchReceiptV1:
+    SimpleCliDispatchReceiptV1(
+        status: status,
+        query_status: query_status,
+        provider_mode: provider_mode,
+        provider_identity_digest: identity,
+        output: output.to_bytes(),
+        diagnostic: diagnostic.to_bytes()
+    )
+
+fn simple_cli_dispatch_in_process_v1(
+    registry: SimpleCliRegistryV1,
+    provider_handle: u64,
+    request: SimpleProviderQueryV1,
+    command: text,
+    args: [text]
+) -> SimpleCliDispatchReceiptV1:
+    val queried = simple_provider_query_in_process_v1(registry, provider_handle, request)
+    if queried.status != SIMPLE_PROVIDER_OK:
+        return _cli_receipt(SIMPLE_CLI_PROVIDER_MISSING, queried.status, SIMPLE_PROVIDER_MODE_IN_PROCESS, 0, "", "provider-query-failed")
+    val provider = _provider_for_handle(registry, queried.interface_handle)
+    if command != provider.command_name:
+        return _cli_receipt(SIMPLE_CLI_PROVIDER_MISSING, queried.status, SIMPLE_PROVIDER_MODE_IN_PROCESS, queried.provider_identity_digest, "", "command-not-provided")
+    if args.len() == 0:
+        return _cli_receipt(SIMPLE_CLI_INVALID_ARGS, queried.status, SIMPLE_PROVIDER_MODE_IN_PROCESS, queried.provider_identity_digest, "", "expected-one-or-more-arguments")
+    var output = provider.summary + ":"
+    var i = 0
+    while i < args.len():
+        if i > 0:
+            output = output + ","
+        output = output + args[i]
+        i = i + 1
+    _cli_receipt(SIMPLE_CLI_OK, queried.status, SIMPLE_PROVIDER_MODE_IN_PROCESS, queried.provider_identity_digest, output, "")

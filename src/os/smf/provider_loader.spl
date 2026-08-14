@@ -1,0 +1,131 @@
+# Process-callable admission for the stable SimpleProviderQueryV1 entry point.
+#
+# This module deliberately does not parse either historical SMF header layout.
+# The platform loader owns mapping/format validation; this boundary admits a
+# provider only after artifact identity, policy, version, symbol, and executable
+# address evidence all agree.  A dynSMF registry offset is never sufficient.
+
+use os.posix.dynlib.{DynLibKind, dynlib_open, dynlib_symbol, dynlib_symbol_is_process_callable}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+val SIMPLE_PROVIDER_QUERY_V1_SYMBOL: text = "simple_provider_query_v1"
+
+val PROVIDER_ADMISSION_OK: i32 = 0
+val PROVIDER_ADMISSION_PATH_DENIED: i32 = 1
+val PROVIDER_ADMISSION_ARTIFACT_MISSING: i32 = 2
+val PROVIDER_ADMISSION_DIGEST_MISMATCH: i32 = 3
+val PROVIDER_ADMISSION_CAPABILITY_DENIED: i32 = 4
+val PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED: i32 = 5
+val PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED: i32 = 6
+val PROVIDER_ADMISSION_LOAD_FAILED: i32 = 7
+val PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING: i32 = 8
+val PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE: i32 = 9
+
+class ProviderAdmissionRequestV1:
+    artifact_path: text
+    artifact_kind: text
+    expected_artifact_digest: text
+    granted_capability_bits: u64
+    required_capability_bits: u64
+    host_abi: u64
+    minimum_host_abi: u64
+    maximum_host_abi: u64
+    requested_interface_major: u32
+    requested_interface_minor: u32
+    provided_interface_major: u32
+    provided_interface_minor: u32
+
+class ProviderCallableEvidenceV1:
+    artifact_exists: bool
+    artifact_digest: text
+    loader_valid: bool
+    query_symbol_address: i64
+    query_symbol_process_callable: bool
+
+class ProviderAdmissionResultV1:
+    status: i32
+    query_symbol_address: i64
+    artifact_digest: text
+    process_callable: bool
+    reason: text
+
+fn _provider_admission_result(status: i32, address: i64, digest: text, callable: bool, reason: text) -> ProviderAdmissionResultV1:
+    ProviderAdmissionResultV1(
+        status: status,
+        query_symbol_address: address,
+        artifact_digest: digest,
+        process_callable: callable,
+        reason: reason
+    )
+
+fn provider_artifact_digest_v1(bytes: [u8]) -> text:
+    sha256_u8_hex(bytes)
+
+fn provider_artifact_path_allowed_v1(path: text, kind: text) -> bool:
+    if path == "" or path.contains("..") or path.contains("//") or path.contains("\\"):
+        return false
+    val approved_root = path.starts_with("build/providers/") or
+        path.starts_with("/sys/providers/") or
+        path.starts_with("/usr/lib/simple/providers/")
+    if not approved_root:
+        return false
+    if kind == "smf":
+        return path.ends_with(".smf")
+    if kind == "native":
+        return path.ends_with(".so") or path.ends_with(".dylib") or path.ends_with(".dll")
+    false
+
+fn provider_admit_evidence_v1(request: ProviderAdmissionRequestV1, evidence: ProviderCallableEvidenceV1) -> ProviderAdmissionResultV1:
+    if not provider_artifact_path_allowed_v1(request.artifact_path, request.artifact_kind):
+        return _provider_admission_result(PROVIDER_ADMISSION_PATH_DENIED, 0, evidence.artifact_digest, false, "path-denied")
+    if not evidence.artifact_exists:
+        return _provider_admission_result(PROVIDER_ADMISSION_ARTIFACT_MISSING, 0, "", false, "artifact-missing")
+    if request.expected_artifact_digest.len() != 64 or evidence.artifact_digest != request.expected_artifact_digest:
+        return _provider_admission_result(PROVIDER_ADMISSION_DIGEST_MISMATCH, 0, evidence.artifact_digest, false, "artifact-digest-mismatch")
+    if (request.granted_capability_bits & request.required_capability_bits) != request.required_capability_bits:
+        return _provider_admission_result(PROVIDER_ADMISSION_CAPABILITY_DENIED, 0, evidence.artifact_digest, false, "capability-denied")
+    if request.host_abi < request.minimum_host_abi or request.host_abi > request.maximum_host_abi:
+        return _provider_admission_result(PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED, 0, evidence.artifact_digest, false, "host-abi-unsupported")
+    if request.requested_interface_major != request.provided_interface_major or request.requested_interface_minor > request.provided_interface_minor:
+        return _provider_admission_result(PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED, 0, evidence.artifact_digest, false, "interface-version-unsupported")
+    if not evidence.loader_valid:
+        return _provider_admission_result(PROVIDER_ADMISSION_LOAD_FAILED, 0, evidence.artifact_digest, false, "loader-failed")
+    if evidence.query_symbol_address <= 0:
+        return _provider_admission_result(PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING, 0, evidence.artifact_digest, false, "query-symbol-missing")
+    if not evidence.query_symbol_process_callable:
+        return _provider_admission_result(PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE, 0, evidence.artifact_digest, false, "query-symbol-not-process-callable")
+    _provider_admission_result(PROVIDER_ADMISSION_OK, evidence.query_symbol_address, evidence.artifact_digest, true, "admitted")
+
+fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderAdmissionResultV1:
+    val exists = rt_file_exists(request.artifact_path)
+    val bytes = if exists: rt_file_read_bytes(request.artifact_path) ?? [] else: []
+    val digest = provider_artifact_digest_v1(bytes)
+    if not exists:
+        return provider_admit_evidence_v1(request, ProviderCallableEvidenceV1(artifact_exists: false, artifact_digest: "", loader_valid: false, query_symbol_address: 0, query_symbol_process_callable: false))
+    val library = dynlib_open(request.artifact_path, 2)
+    val address = dynlib_symbol(library, SIMPLE_PROVIDER_QUERY_V1_SYMBOL)
+    provider_admit_evidence_v1(request, ProviderCallableEvidenceV1(
+        artifact_exists: true,
+        artifact_digest: digest,
+        loader_valid: _provider_library_valid(library),
+        query_symbol_address: address,
+        query_symbol_process_callable: dynlib_symbol_is_process_callable(library, SIMPLE_PROVIDER_QUERY_V1_SYMBOL)
+    ))
+
+fn _provider_library_valid(library: DynLibKind) -> bool:
+    match library:
+        DynLibKind.Invalid: false
+        DynLibKind.Elf(_): true
+        DynLibKind.Smf(_): true
+        DynLibKind.Pe(_): true
+
+export SIMPLE_PROVIDER_QUERY_V1_SYMBOL
+export PROVIDER_ADMISSION_OK, PROVIDER_ADMISSION_PATH_DENIED, PROVIDER_ADMISSION_ARTIFACT_MISSING
+export PROVIDER_ADMISSION_DIGEST_MISMATCH, PROVIDER_ADMISSION_CAPABILITY_DENIED
+export PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED, PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED
+export PROVIDER_ADMISSION_LOAD_FAILED, PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING, PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE
+export ProviderAdmissionRequestV1, ProviderCallableEvidenceV1, ProviderAdmissionResultV1
+export provider_artifact_digest_v1, provider_artifact_path_allowed_v1, provider_admit_evidence_v1, provider_admit_dynamic_v1

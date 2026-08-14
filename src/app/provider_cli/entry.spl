@@ -1,0 +1,83 @@
+# Separately targetable production entry for the first CLI provider contract.
+#
+# This is deliberately reached through `simple run src/app/provider_cli/main.spl`
+# while the root CLI remains unchanged. The built-in leaf is an honest
+# in-process provider; `native` and `smf` modes remain fail-closed.
+
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_CLI_COMMAND_V1_INTERFACE,
+    SIMPLE_PROVIDER_QUERY_V1_SIZE,
+    SIMPLE_CLI_OK,
+    SIMPLE_PROVIDER_OK,
+    SIMPLE_PROVIDER_NOT_PROCESS_CALLABLE,
+    SimpleProviderQueryV1
+}
+use std.nogc_sync_mut.composition.cli_registry.{
+    SIMPLE_PROVIDER_MODE_IN_PROCESS,
+    SIMPLE_PROVIDER_MODE_NATIVE,
+    SIMPLE_PROVIDER_MODE_SMF,
+    InProcessCliProviderV1,
+    SimpleCliRegistryV1,
+    simple_cli_dispatch_in_process_v1,
+    simple_provider_query_dynamic_v1
+}
+
+class ProviderCliEntryResultV1:
+    exit_code: i64
+    output: text
+    diagnostic: text
+
+fn _leaf_provider_v1() -> InProcessCliProviderV1:
+    InProcessCliProviderV1(
+        provider_handle: 41,
+        context_handle: 7,
+        provider_identity_digest: 257,
+        implementation_digest: 514,
+        abi_digest: 771,
+        required_capability_bits: 4,
+        command_name: "fmt-leaf",
+        summary: "formatted"
+    )
+
+fn _leaf_query_v1() -> SimpleProviderQueryV1:
+    SimpleProviderQueryV1(
+        descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+        interface_id: SIMPLE_CLI_COMMAND_V1_INTERFACE,
+        minimum_major: 1,
+        minimum_minor: 0,
+        host_abi: 1,
+        target_offset: 0,
+        target_length: 0,
+        requested_capability_bits: 4
+    )
+
+fn _entry_result(exit_code: i64, output: text, diagnostic: text) -> ProviderCliEntryResultV1:
+    ProviderCliEntryResultV1(exit_code: exit_code, output: output, diagnostic: diagnostic)
+
+fn provider_cli_execute_v1(args: [text]) -> ProviderCliEntryResultV1:
+    if args.len() == 0 or args[0] == "help" or args[0] == "--help":
+        return _entry_result(0, "provider-cli: metadata | run fmt-leaf <paths> | query native|smf", "")
+    if args[0] == "metadata":
+        # Summary data is available without loading or invoking provider code.
+        return _entry_result(0, "fmt-leaf|SimpleCliCommandV1/1|provider=257|abi=771", "")
+    if args[0] == "query" and args.len() == 2:
+        val mode = if args[1] == "native": SIMPLE_PROVIDER_MODE_NATIVE else: SIMPLE_PROVIDER_MODE_SMF
+        val queried = simple_provider_query_dynamic_v1(mode)
+        if queried.status == SIMPLE_PROVIDER_NOT_PROCESS_CALLABLE:
+            return _entry_result(3, "", "provider-not-process-callable:" + args[1])
+        return _entry_result(2, "", "unsupported-provider-mode")
+    if args[0] != "run" or args.len() < 3:
+        return _entry_result(2, "", "usage-error")
+    var command_args: [text] = []
+    var i = 2
+    while i < args.len():
+        command_args.push(args[i])
+        i = i + 1
+    var registry = SimpleCliRegistryV1.create()
+    registry.register_in_process(_leaf_provider_v1())
+    val receipt = simple_cli_dispatch_in_process_v1(
+        registry, 41, _leaf_query_v1(), args[1], command_args
+    )
+    if receipt.query_status != SIMPLE_PROVIDER_OK or receipt.status != SIMPLE_CLI_OK:
+        return _entry_result(3, "", text.from_bytes(receipt.diagnostic))
+    _entry_result(0, text.from_bytes(receipt.output), "")

@@ -103,6 +103,9 @@
 - **Report must exist:** Do not skip the completion report
 - **Push must succeed:** Verify push completes without errors
 - **State file is source of truth:** Everything in the report comes from state
+- **No bootstrap repair in ship:** Ship consumes compatibility/build receipts;
+  self-host convergence or DDC runs only when the requested release/trust target
+  explicitly includes it.
 
 ## Boil a Small Lake
 

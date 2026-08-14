@@ -1,0 +1,59 @@
+use std.spec.*
+use compiler.driver.driver_provider_contract_v1.*
+use compiler.driver.driver_provider_in_process_v1.{CompilerDriverProviderInProcessV1}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SimpleProviderQueryV1, SIMPLE_PROVIDER_OK, SIMPLE_PROVIDER_INTERFACE_UNKNOWN,
+    SIMPLE_PROVIDER_MAJOR_UNSUPPORTED, SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT
+}
+
+fn provider_query(interface_id: u64, major: u32, size: u32) -> SimpleProviderQueryV1:
+    SimpleProviderQueryV1(
+        descriptor_size: size,
+        interface_id: interface_id,
+        minimum_major: major,
+        minimum_minor: 0,
+        host_abi: 0,
+        target_offset: 0,
+        target_length: 0,
+        requested_capability_bits: 0
+    )
+
+describe "CompilerDriverV1 coarse provider boundary":
+    it "queries the stable scalar-only descriptor":
+        val result = simple_compiler_driver_query_v1(provider_query(SIMPLE_COMPILER_DRIVER_V1_INTERFACE, 1, 44))
+        expect(result.status).to_equal(SIMPLE_PROVIDER_OK)
+        expect(result.provided_major).to_equal(1)
+        expect(result.descriptor_size).to_equal(SIMPLE_COMPILER_DRIVER_V1_DESCRIPTOR_SIZE)
+        expect(result.interface_handle).to_be_greater_than(0)
+
+    it "fails closed for unknown interfaces, majors, and short requests":
+        expect(simple_compiler_driver_query_v1(provider_query(99, 1, 44)).status).to_equal(SIMPLE_PROVIDER_INTERFACE_UNKNOWN)
+        expect(simple_compiler_driver_query_v1(provider_query(SIMPLE_COMPILER_DRIVER_V1_INTERFACE, 2, 44)).status).to_equal(SIMPLE_PROVIDER_MAJOR_UNSUPPORTED)
+        expect(simple_compiler_driver_query_v1(provider_query(SIMPLE_COMPILER_DRIVER_V1_INTERFACE, 1, 8)).status).to_equal(SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT)
+
+    it "owns sessions, requests, and results behind numeric handles":
+        var provider = CompilerDriverProviderInProcessV1.create()
+        val session = provider.create_session(driver_core_compile_options_default())
+        expect(session.status).to_equal(SIMPLE_COMPILER_PROVIDER_OK)
+        expect(session.handle).to_be_greater_than(0)
+        val request = provider.create_request(session.handle)
+        expect(request.status).to_equal(SIMPLE_COMPILER_PROVIDER_OK)
+        expect(provider.release_session(session.handle)).to_equal(SIMPLE_COMPILER_PROVIDER_SESSION_BUSY)
+        val result = provider.run_request(request.handle)
+        expect(result.status).to_equal(SIMPLE_COMPILER_PROVIDER_OK)
+        val summary = provider.inspect_result(result.handle)
+        expect(summary.status).to_equal(SIMPLE_COMPILER_PROVIDER_OK)
+        expect(summary.compile_status).to_equal(SIMPLE_COMPILER_PROVIDER_COMPILE_FAILED)
+        expect(summary.diagnostic_count).to_be_greater_than(0)
+        expect(provider.run_request(request.handle).status).to_equal(SIMPLE_COMPILER_PROVIDER_REQUEST_ALREADY_RUN)
+        expect(provider.release_result(result.handle)).to_equal(SIMPLE_COMPILER_PROVIDER_OK)
+        expect(provider.inspect_result(result.handle).status).to_equal(SIMPLE_COMPILER_PROVIDER_INVALID_RESULT)
+        expect(provider.release_request(request.handle)).to_equal(SIMPLE_COMPILER_PROVIDER_OK)
+        expect(provider.release_session(session.handle)).to_equal(SIMPLE_COMPILER_PROVIDER_OK)
+
+    it "rejects zero and stale handles":
+        var provider = CompilerDriverProviderInProcessV1.create()
+        expect(provider.create_request(0).status).to_equal(SIMPLE_COMPILER_PROVIDER_INVALID_SESSION)
+        expect(provider.run_request(0).status).to_equal(SIMPLE_COMPILER_PROVIDER_INVALID_REQUEST)
+        expect(provider.inspect_result(0).status).to_equal(SIMPLE_COMPILER_PROVIDER_INVALID_RESULT)

@@ -1,0 +1,122 @@
+use os.smf.provider_loader.{
+    PROVIDER_ADMISSION_OK,
+    PROVIDER_ADMISSION_PATH_DENIED,
+    PROVIDER_ADMISSION_DIGEST_MISMATCH,
+    PROVIDER_ADMISSION_CAPABILITY_DENIED,
+    PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED,
+    PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED,
+    PROVIDER_ADMISSION_LOAD_FAILED,
+    PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING,
+    PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE,
+    ProviderAdmissionRequestV1,
+    ProviderCallableEvidenceV1,
+    provider_artifact_digest_v1,
+    provider_admit_evidence_v1
+}
+use os.smf.provider_activation.{
+    PROVIDER_ACTIVATION_NOT_ADMITTED,
+    PROVIDER_ACTIVATION_QUERY_BRIDGE_UNAVAILABLE,
+    PROVIDER_ACTIVATION_BLOCKER,
+    provider_activate_admitted_v1
+}
+
+fn request_v1() -> ProviderAdmissionRequestV1:
+    ProviderAdmissionRequestV1(
+        artifact_path: "build/providers/fmt_tool.smf",
+        artifact_kind: "smf",
+        expected_artifact_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        granted_capability_bits: 6,
+        required_capability_bits: 4,
+        host_abi: 2,
+        minimum_host_abi: 1,
+        maximum_host_abi: 3,
+        requested_interface_major: 1,
+        requested_interface_minor: 0,
+        provided_interface_major: 1,
+        provided_interface_minor: 1
+    )
+
+fn evidence_v1() -> ProviderCallableEvidenceV1:
+    ProviderCallableEvidenceV1(
+        artifact_exists: true,
+        artifact_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        loader_valid: true,
+        query_symbol_address: 4096,
+        query_symbol_process_callable: true
+    )
+
+describe "SimpleProviderQueryV1 loader admission":
+    it "admits native or SMF evidence only after all checks and callable proof":
+        val admitted = provider_admit_evidence_v1(request_v1(), evidence_v1())
+        expect(admitted.status).to_equal(PROVIDER_ADMISSION_OK)
+        expect(admitted.query_symbol_address).to_equal(4096)
+        expect(admitted.process_callable).to_equal(true)
+
+    it "fails closed for registry-only SMF symbol evidence":
+        var evidence = evidence_v1()
+        evidence.query_symbol_process_callable = false
+        val denied = provider_admit_evidence_v1(request_v1(), evidence)
+        expect(denied.status).to_equal(PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE)
+        expect(denied.query_symbol_address).to_equal(0)
+        expect(denied.process_callable).to_equal(false)
+
+    it "checks path artifact identity and capability ceiling before loading":
+        var unsafe_request = request_v1()
+        unsafe_request.artifact_path = "../fmt_tool.smf"
+        expect(provider_admit_evidence_v1(unsafe_request, evidence_v1()).status).to_equal(PROVIDER_ADMISSION_PATH_DENIED)
+        var wrong_digest = evidence_v1()
+        wrong_digest.artifact_digest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        expect(provider_admit_evidence_v1(request_v1(), wrong_digest).status).to_equal(PROVIDER_ADMISSION_DIGEST_MISMATCH)
+        var denied_caps = request_v1()
+        denied_caps.granted_capability_bits = 2
+        expect(provider_admit_evidence_v1(denied_caps, evidence_v1()).status).to_equal(PROVIDER_ADMISSION_CAPABILITY_DENIED)
+
+    it "shares the SCI provider artifact root policy":
+        var system = request_v1()
+        system.artifact_path = "/sys/providers/fmt_tool.smf"
+        expect(provider_admit_evidence_v1(system, evidence_v1()).status).to_equal(PROVIDER_ADMISSION_OK)
+        var installed = request_v1()
+        installed.artifact_path = "/usr/lib/simple/providers/fmt_tool.smf"
+        expect(provider_admit_evidence_v1(installed, evidence_v1()).status).to_equal(PROVIDER_ADMISSION_OK)
+        var escaped = request_v1()
+        escaped.artifact_path = "/tmp/fmt_tool.smf"
+        expect(provider_admit_evidence_v1(escaped, evidence_v1()).status).to_equal(PROVIDER_ADMISSION_PATH_DENIED)
+
+    it "rejects incompatible host and provider interface versions":
+        var host = request_v1()
+        host.host_abi = 4
+        expect(provider_admit_evidence_v1(host, evidence_v1()).status).to_equal(PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED)
+        var interface_request = request_v1()
+        interface_request.requested_interface_minor = 2
+        expect(provider_admit_evidence_v1(interface_request, evidence_v1()).status).to_equal(PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED)
+
+    it "distinguishes loader symbol and executable-address failures":
+        var unloaded = evidence_v1()
+        unloaded.loader_valid = false
+        expect(provider_admit_evidence_v1(request_v1(), unloaded).status).to_equal(PROVIDER_ADMISSION_LOAD_FAILED)
+        var missing = evidence_v1()
+        missing.query_symbol_address = 0
+        expect(provider_admit_evidence_v1(request_v1(), missing).status).to_equal(PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING)
+
+    it "uses deterministic nonzero artifact identity":
+        val bytes: [u8] = [83, 77, 70, 0, 1]
+        expect(provider_artifact_digest_v1(bytes)).to_equal(provider_artifact_digest_v1(bytes))
+        expect(provider_artifact_digest_v1(bytes).len()).to_equal(64)
+
+    it "does not mistake callable admission evidence for query activation":
+        val admission = provider_admit_evidence_v1(request_v1(), evidence_v1())
+        expect(admission.status).to_equal(PROVIDER_ADMISSION_OK)
+        val activation = provider_activate_admitted_v1(admission)
+        expect(activation.status).to_equal(PROVIDER_ACTIVATION_QUERY_BRIDGE_UNAVAILABLE)
+        expect(activation.activated).to_equal(false)
+        expect(activation.reason).to_equal(PROVIDER_ACTIVATION_BLOCKER)
+        expect(activation.blocker_owner.len()).to_be_greater_than(0)
+
+    it "rejects activation before admission without claiming a runtime blocker":
+        var evidence = evidence_v1()
+        evidence.query_symbol_process_callable = false
+        val admission = provider_admit_evidence_v1(request_v1(), evidence)
+        val activation = provider_activate_admitted_v1(admission)
+        expect(activation.status).to_equal(PROVIDER_ACTIVATION_NOT_ADMITTED)
+        expect(activation.activated).to_equal(false)
+        expect(activation.blocker_owner).to_equal("")

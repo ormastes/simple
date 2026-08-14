@@ -200,6 +200,11 @@ If a fix requires significant code changes, flag it for Phase 5 re-entry.
 - [ ] Cooperative review plan complete or explicitly `N/A`
 - [ ] Direct env runtime guard passes
 - [ ] Workflow/tool/evidence/verification contract docs reviewed and updated
+- [ ] Compiled-feature receipt selects the smallest compatible rebuild closure;
+      full bootstrap has a typed reason or explicit release/trust target
+- [ ] Any Stage 2/3 tool evidence is explicitly stage-scoped and has exact
+      path/hash/stage/provenance/commands plus isolated output/cache; it was not
+      promoted to Stage 4, general SPipe/docgen/test, release, or cross-host proof
 - [ ] No `pass_todo` stubs remain
 - [ ] Numbered artifact guard passes
 - [ ] Workspace root guard passes: `sh scripts/check-workspace-root-guard.shs audit --strict` clean

@@ -103,6 +103,14 @@ type metadata. `LLVM001` must stay clean in LLVM emitter files.
   completion.
 - Files > 800 lines must be split
 - Run $verify before VCS sync
+- For compiled feature work, follow
+  `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`: build
+  the smallest named target/provider/SCI projection, retain its compatibility
+  receipt, and never infer full bootstrap from a compiler path.
+- Focused compiler/interpreter/loader work may use an admitted Stage 2 or 3
+  binary per that guide. Record path/hash/stage/provenance/commands, isolate
+  output/cache, fail closed, and label evidence by stage; never promote it to
+  Stage 4, general SPipe/docgen/test, release, convergence, or cross-host proof.
 - If `src/compiler/**`, `src/lib/**`, `src/app/mcp/**`, `src/app/simple_lsp_mcp/**`, or MCP packaging files changed, finish with:
   - `<runtime> check src/compiler`
   - `<runtime> check src/lib`

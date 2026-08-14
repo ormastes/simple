@@ -1,0 +1,52 @@
+# Fail-closed activation boundary for SimpleProviderQueryV1.
+#
+# Loader admission proves artifact identity, capability policy, interface
+# compatibility, symbol presence, and process-callability.  It is deliberately
+# not equivalent to invoking the provider query ABI.
+#
+# The current runtime dynamic-call surface accepts scalar i64 arguments only.
+# SimpleProviderQueryV1 requires pointers to canonical packed 44-byte and
+# 60-byte descriptors, but no runtime-owned encoder/decoder and no owned
+# dynamic-library session are exposed to this layer.  Passing Simple object or
+# struct addresses would depend on private compiler layout and could outlive the
+# loader handle.  Activation therefore fails closed until those two facilities
+# are provided by their owners.
+
+use os.smf.provider_loader.{PROVIDER_ADMISSION_OK, ProviderAdmissionResultV1}
+
+val PROVIDER_ACTIVATION_OK: i32 = 0
+val PROVIDER_ACTIVATION_NOT_ADMITTED: i32 = 1
+val PROVIDER_ACTIVATION_QUERY_BRIDGE_UNAVAILABLE: i32 = 2
+
+val PROVIDER_ACTIVATION_BLOCKER_OWNER: text = "src/os/posix/dynlib_sffi.spl + runtime ABI"
+val PROVIDER_ACTIVATION_BLOCKER: text = "canonical-packed-provider-query-bridge-and-owned-loader-session-unavailable"
+
+class ProviderActivationResultV1:
+    status: i32
+    activated: bool
+    reason: text
+    blocker_owner: text
+
+fn provider_activate_admitted_v1(admission: ProviderAdmissionResultV1) -> ProviderActivationResultV1:
+    if admission.status != PROVIDER_ADMISSION_OK or not admission.process_callable or admission.query_symbol_address <= 0:
+        return ProviderActivationResultV1(
+            status: PROVIDER_ACTIVATION_NOT_ADMITTED,
+            activated: false,
+            reason: "provider-not-admitted",
+            blocker_owner: ""
+        )
+
+    # Do not call rt_dyncall_2 with addresses of language-private values.  The
+    # provider remains admitted but inactive, and the loader handle is left
+    # untouched rather than being closed behind a returned function address.
+    ProviderActivationResultV1(
+        status: PROVIDER_ACTIVATION_QUERY_BRIDGE_UNAVAILABLE,
+        activated: false,
+        reason: PROVIDER_ACTIVATION_BLOCKER,
+        blocker_owner: PROVIDER_ACTIVATION_BLOCKER_OWNER
+    )
+
+export PROVIDER_ACTIVATION_OK, PROVIDER_ACTIVATION_NOT_ADMITTED
+export PROVIDER_ACTIVATION_QUERY_BRIDGE_UNAVAILABLE
+export PROVIDER_ACTIVATION_BLOCKER_OWNER, PROVIDER_ACTIVATION_BLOCKER
+export ProviderActivationResultV1, provider_activate_admitted_v1

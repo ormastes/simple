@@ -1,0 +1,193 @@
+# SCI-driven CLI command resolution.
+#
+# This module is deliberately data-only: it imports composition records, not
+# command implementations, loaders, process APIs, or bootstrap machinery.  A
+# caller may hand the returned activation request to its admitted provider
+# loader after independently verifying the locked artifact identity.
+
+use std.nogc_sync_mut.composition.types.{
+    SimpleCompositionImageV1,
+    SimpleCliCommandRecordV1,
+    SimpleBindingRecordV1,
+    SimpleProviderRecordV1,
+    SimpleInterfaceGroupRecordV1
+}
+
+class CliActivationRequestV1:
+    ok: bool
+    diagnostic_code: text
+    diagnostic_subject: text
+    requested_command: text
+    canonical_command: text
+    summary: text
+    args: [text]
+    binding_service_id: text
+    interface_group_id: text
+    interface_major: i64
+    interface_minor: i64
+    interface_abi_digest: text
+    provider_id: text
+    provider_artifact_path: text
+    provider_artifact_kind: text
+    provider_artifact_digest: text
+    requested_capability_bits: i64
+
+class CliHelpProjectionV1:
+    ok: bool
+    diagnostic_code: text
+    requested_command: text
+    canonical_command: text
+    aliases: [text]
+    summary: text
+
+fn _empty_activation(code: text, subject: text, requested: text) -> CliActivationRequestV1:
+    CliActivationRequestV1(
+        ok: false,
+        diagnostic_code: code,
+        diagnostic_subject: subject,
+        requested_command: requested,
+        canonical_command: "",
+        summary: "",
+        args: [],
+        binding_service_id: "",
+        interface_group_id: "",
+        interface_major: 0,
+        interface_minor: 0,
+        interface_abi_digest: "",
+        provider_id: "",
+        provider_artifact_path: "",
+        provider_artifact_kind: "",
+        provider_artifact_digest: "",
+        requested_capability_bits: 0
+    )
+
+fn _command_matches(command: SimpleCliCommandRecordV1, token: text) -> bool:
+    if command.command_name == token:
+        return true
+    var i = 0
+    while i < command.aliases.len():
+        if command.aliases[i] == token:
+            return true
+        i = i + 1
+    false
+
+fn _find_command(image: SimpleCompositionImageV1, token: text) -> i64:
+    var found: i64 = -1
+    var i = 0
+    while i < image.commands.len():
+        if _command_matches(image.commands[i], token):
+            if found >= 0:
+                return -2
+            found = i
+        i = i + 1
+    found
+
+fn _find_binding(image: SimpleCompositionImageV1, service_id: text) -> i64:
+    var found: i64 = -1
+    var i = 0
+    while i < image.bindings.len():
+        if image.bindings[i].service_id == service_id:
+            if found >= 0:
+                return -2
+            found = i
+        i = i + 1
+    found
+
+fn _find_provider(image: SimpleCompositionImageV1, provider_id: text) -> i64:
+    var found: i64 = -1
+    var i = 0
+    while i < image.providers.len():
+        if image.providers[i].provider_id == provider_id:
+            if found >= 0:
+                return -2
+            found = i
+        i = i + 1
+    found
+
+fn _find_group(image: SimpleCompositionImageV1, group_id: text) -> i64:
+    var found: i64 = -1
+    var i = 0
+    while i < image.interface_groups.len():
+        if image.interface_groups[i].group_id == group_id:
+            if found >= 0:
+                return -2
+            found = i
+        i = i + 1
+    found
+
+fn _provider_implements(provider: SimpleProviderRecordV1, group_id: text) -> bool:
+    var i = 0
+    while i < provider.interface_groups.len():
+        if provider.interface_groups[i] == group_id:
+            return true
+        i = i + 1
+    false
+
+fn resolve_cli_activation_v1(
+    image: SimpleCompositionImageV1,
+    command_token: text,
+    args: [text]
+) -> CliActivationRequestV1:
+    if command_token.len() == 0:
+        return _empty_activation("CLI_COMMAND_EMPTY", command_token, command_token)
+
+    val command_index = _find_command(image, command_token)
+    if command_index == -2:
+        return _empty_activation("CLI_COMMAND_AMBIGUOUS", command_token, command_token)
+    if command_index < 0:
+        return _empty_activation("CLI_COMMAND_UNKNOWN", command_token, command_token)
+    val command = image.commands[command_index]
+
+    val binding_index = _find_binding(image, command.binding_service_id)
+    if binding_index == -2:
+        return _empty_activation("CLI_BINDING_AMBIGUOUS", command.binding_service_id, command_token)
+    if binding_index < 0:
+        return _empty_activation("CLI_BINDING_MISSING", command.binding_service_id, command_token)
+    val binding = image.bindings[binding_index]
+    if binding.interface_group_id != command.interface_group_id:
+        return _empty_activation("CLI_BINDING_GROUP_MISMATCH", binding.service_id, command_token)
+
+    val provider_index = _find_provider(image, binding.provider_id)
+    if provider_index == -2:
+        return _empty_activation("CLI_PROVIDER_AMBIGUOUS", binding.provider_id, command_token)
+    if provider_index < 0:
+        return _empty_activation("CLI_PROVIDER_MISSING", binding.provider_id, command_token)
+    val provider = image.providers[provider_index]
+    if not _provider_implements(provider, binding.interface_group_id):
+        return _empty_activation("CLI_PROVIDER_GROUP_MISSING", provider.provider_id, command_token)
+
+    val group_index = _find_group(image, binding.interface_group_id)
+    if group_index == -2:
+        return _empty_activation("CLI_INTERFACE_GROUP_AMBIGUOUS", binding.interface_group_id, command_token)
+    if group_index < 0:
+        return _empty_activation("CLI_INTERFACE_GROUP_MISSING", binding.interface_group_id, command_token)
+    val group = image.interface_groups[group_index]
+
+    CliActivationRequestV1(
+        ok: true,
+        diagnostic_code: "",
+        diagnostic_subject: "",
+        requested_command: command_token,
+        canonical_command: command.command_name,
+        summary: command.summary,
+        args: args,
+        binding_service_id: binding.service_id,
+        interface_group_id: group.group_id,
+        interface_major: group.major,
+        interface_minor: group.minor,
+        interface_abi_digest: group.abi_digest,
+        provider_id: provider.provider_id,
+        provider_artifact_path: provider.artifact_path,
+        provider_artifact_kind: provider.artifact_kind,
+        provider_artifact_digest: provider.artifact_digest,
+        requested_capability_bits: provider.required_capability_bits
+    )
+
+fn project_cli_help_v1(image: SimpleCompositionImageV1, command_token: text) -> CliHelpProjectionV1:
+    val command_index = _find_command(image, command_token)
+    if command_index == -2:
+        return CliHelpProjectionV1(false, "CLI_COMMAND_AMBIGUOUS", command_token, "", [], "")
+    if command_index < 0:
+        return CliHelpProjectionV1(false, "CLI_COMMAND_UNKNOWN", command_token, "", [], "")
+    val command = image.commands[command_index]
+    CliHelpProjectionV1(true, "", command_token, command.command_name, command.aliases, command.summary)

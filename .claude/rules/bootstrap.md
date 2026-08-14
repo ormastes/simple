@@ -120,11 +120,23 @@ scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
 
 ## Verification tiering — match the gate to the change
 
-Pick the cheapest tier that actually exercises what changed. Escalating to a full
-bootstrap for a one-line lib edit wastes ~2 minutes+ per iteration; skipping the
-right gate ships a stale binary. **A small change is NOT a full bootstrap.**
+The authoritative feature-development policy is
+`doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`. Start
+with the smallest named target, provider, and SCI projection. A compiler source
+path is not itself a bootstrap reason; escalate only when compatibility evidence
+requires a stage rebuild. Full bootstrap requires a typed incompatibility or an
+explicit release/trust target. Unknown compatibility rebuilds conservatively
+and never authorizes reuse.
 
 ### Standalone product targets are not compiler bootstrap
+
+Focused compiler/interpreter/loader work may use an explicitly admitted Stage
+2 or Stage 3 Simple binary under the rules in
+`doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`. Record
+path/hash/stage/provenance/commands, isolate output/cache, fail closed on an
+unsupported command, and label the evidence by stage. Never substitute it for
+Stage 4, general SPipe/docgen/test-runner, release, convergence, or cross-host
+evidence, and never fall back silently to the Rust seed.
 
 Office and other independently shipped target products must not rebuild the
 compiler merely because their source changed. When a target can be compiled by
@@ -210,9 +222,11 @@ substitute the Rust seed or start Stage 1/2/3.
   layout changes, entry-closure set changes, linker-script or flag/target/opt-level
   changes. (Under T1 these auto-trigger a full rebuild anyway; run T2 directly when
   you know the change is structural.)
-- **T3 — full bootstrap.** ONLY when the compiler itself changed
-  (`src/compiler_rust` seed or `src/compiler` pure-Simple), or as the final
-  pre-goal-complete gate. A seed change invalidates T1's cache, so T3 subsumes it.
+- **T3 — full bootstrap.** Only for a typed bootstrap incompatibility or an
+  explicit self-host convergence, release-trust, or DDC target. A change under
+  `src/compiler_rust` or `src/compiler` is insufficient by itself; rebuild the
+  smallest provider, consumer set, or compiler stage selected by compatibility
+  evidence.
 
 **Follow-up (not yet done):** `SIMPLE_NATIVE_INCREMENTAL` safe per-module reuse is
 implemented only in the Rust seed's native-build pipeline

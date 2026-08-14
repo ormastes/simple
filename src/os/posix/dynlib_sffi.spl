@@ -1,13 +1,39 @@
 # SFFI Dynamic Call Bridge — rt_dyncall extern declarations + safe wrappers
 #
 # Declares rt_dyncall_N externs for calling into loaded library functions
-# at the native ABI level. The runtime must provide these symbols.
+# at the native ABI level.  The Rust hosted runtime provides these scalar
+# symbols; a caller must not infer that an arbitrary pointer-bearing ABI is
+# therefore safe to call.
 # Safe wrappers resolve a named symbol from a DynLibKind, then dispatch.
+
+# Provider-query bridge blocker (2026-08-14)
+# ------------------------------------------
+# `simple_provider_query_v1` is NOT representable by rt_dyncall_2:
+#
+# * its C return type is int32_t, while rt_dyncall_2 casts the target to a
+#   function returning i64 (calling through an incompatible function type is
+#   undefined behaviour);
+# * its arguments point at canonical packed 44-byte/60-byte wire records, not
+#   Simple structs or objects;
+# * the successful result can contain interface/context handles whose lifetime
+#   is bounded by the open library generation.
+#
+# The minimal safe owner change is one exact runtime entry point
+#
+#   rt_provider_query_v1_call(fn_ptr, request_ptr, result_ptr) -> i32
+#
+# plus a loader-owned session/generation token returned by admission and pinned
+# by every successful interface result.  Request/result scratch memory must be
+# runtime allocated, byte-encoded, copied to scalar Simple records, and freed
+# before returning.  Closing must be refused while a generation is pinned.
+# `ProviderAdmissionResultV1` currently returns only a naked symbol address and
+# loses the DynLibKind handle, so this file cannot implement that ownership
+# rule without a coordinated provider-loader contract change.  Keep activation
+# fail-closed until those owners land together.
 
 use os.posix.dynlib.{DynLibKind, dynlib_symbol}
 
-# --- Forward-declared runtime externs (not yet implemented in runtime) ---
-# These are the contract for WS3/runtime to fulfill.
+# --- Scalar runtime externs ---
 
 extern fn rt_dyncall_0(fn_ptr: i64) -> i64
 extern fn rt_dyncall_1(fn_ptr: i64, arg0: i64) -> i64

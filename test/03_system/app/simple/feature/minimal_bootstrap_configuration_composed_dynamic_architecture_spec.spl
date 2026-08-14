@@ -1,0 +1,197 @@
+# codex-system-test
+# @req REQ-001 REQ-002 REQ-005 REQ-007 REQ-008 REQ-011 REQ-012 REQ-014 REQ-015 NFR-001 NFR-011
+
+use std.spec.*
+use std.nogc_sync_mut.composition.{parse_composition_source_v1, encode_composition_image_v1, decode_composition_image_v1, SimpleCompositionImageV1}
+use app.build.targets.build_explain.{CompatibilityResult, BootstrapReason, DependencyIdentityV1, TargetDigestV1, TypedTargetEdgeV1, BuildExplainInputV1, BuildExplainDecisionV1, compatibility_allows_reuse, decide_build_explain}
+use os.services.launcher.launcher.{launcher_init}
+use os.services.launcher.launcher_composition.{launcher_load_composition_bytes_v1}
+use os.services.launcher.launcher_registry.{app_count, _app_index_by_name, _app_key, _app_mod, MOD_META, MOD_CTRL}
+use std.nogc_sync_mut.composition.provider_contract.*
+use std.nogc_sync_mut.composition.cli_registry.*
+use std.nogc_sync_mut.composition.provider_generation.*
+
+fn setup_minimal_bootstrap_fixture(name: text) -> text:
+    "schema: simple.composition/1\nprofile: dev\napps:\n  - id: notes\n    name: {name}\n    artifact: /sys/apps/notes.smf\n"
+
+fn compile_composition(source: text) -> SimpleCompositionImageV1:
+    match parse_composition_source_v1(source):
+        case Err(_): decode_composition_image_v1([]).image
+        case Ok(parsed): decode_composition_image_v1(encode_composition_image_v1(parsed)).image
+
+fn check_composition_image(image: SimpleCompositionImageV1, expected_name: text) -> bool:
+    image.bytes.len() >= 144 and image.apps.len() == 1 and image.apps[0].display_name == expected_name
+
+fn check_cli_composition_section() -> bool:
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    val abi = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    val source = "schema: simple.composition/1\ninterface_groups:\n  - id: cli.command\n    major: 1\n    minor: 0\n    abi_digest: " + abi + "\nproviders:\n  - id: cli.formatter\n    artifact: build/providers/fmt.smf\n    kind: smf\n    artifact_digest: " + digest + "\n    interface_groups: [cli.command]\n    required_capability_bits: 4\nbindings:\n  - service: cli.format\n    interface_group: cli.command\n    provider: cli.formatter\ncommands:\n  - name: format\n    aliases: [fmt]\n    summary: Format source\n    binding: cli.format\n    interface_group: cli.command\n"
+    match parse_composition_source_v1(source):
+        case Err(_): false
+        case Ok(parsed):
+            val decoded = decode_composition_image_v1(encode_composition_image_v1(parsed))
+            decoded.ok and decoded.image.providers.len() == 1 and
+                decoded.image.bindings.len() == 1 and decoded.image.commands.len() == 1 and
+                decoded.image.commands[0].aliases[0] == "fmt" and
+                decoded.image.providers[0].artifact_digest == digest
+
+fn load_unchanged_core(first: SimpleCompositionImageV1, second: SimpleCompositionImageV1) -> bool:
+    launcher_init()
+    val first_result = launcher_load_composition_bytes_v1(first.bytes)
+    val second_result = launcher_load_composition_bytes_v1(second.bytes)
+    first_result.ok and second_result.ok
+
+fn check_launcher_policy_projection() -> bool:
+    val shortcut = compile_composition("schema: simple.composition/1\napps:\n  - id: editor-shortcut\n    name: System Shortcut Editor\n    artifact: /sys/apps/system_shortcut_editor.smf\n    shortcut: Ctrl+Meta+E\n")
+    launcher_init()
+    val shortcut_result = launcher_load_composition_bytes_v1(shortcut.bytes)
+    val index = _app_index_by_name("System Shortcut Editor")
+    if not shortcut_result.ok or index < 0:
+        return false
+    if _app_key(index.to_u64()) != 69u32 or _app_mod(index.to_u64()) != (MOD_CTRL | MOD_META):
+        return false
+
+    val capability = compile_composition("schema: simple.composition/1\napps:\n  - id: blocked-capability\n    name: Blocked Capability\n    artifact: /sys/apps/blocked_capability.smf\n    capabilities: [FileRead(/home)]\n")
+    val count_before_capability = app_count
+    val capability_result = launcher_load_composition_bytes_v1(capability.bytes)
+    if capability_result.ok or capability_result.code != "SCI_LAUNCHER_MANIFEST_CAPABILITY_PROJECTION_REQUIRED" or app_count != count_before_capability:
+        return false
+
+    val association = compile_composition("schema: simple.composition/1\napps:\n  - id: blocked-association\n    name: Blocked Association\n    artifact: /sys/apps/blocked_association.smf\n    associations: [.blocked]\n")
+    val count_before_association = app_count
+    val association_result = launcher_load_composition_bytes_v1(association.bytes)
+    not association_result.ok and association_result.code == "SCI_LAUNCHER_ASSOCIATION_PROJECTION_REQUIRED" and app_count == count_before_association
+
+fn explain_rebuild() -> BuildExplainDecisionV1:
+    decide_build_explain(BuildExplainInputV1(
+        requested_target: "//config:default_sci",
+        targets: ["//config:default_sci"],
+        edges: [],
+        digests: [TargetDigestV1(target: "//config:default_sci", identity: DependencyIdentityV1.Configuration, before_digest: "old", after_digest: "")],
+        bootstrap_reason: BootstrapReason.None,
+        admitted_producer_identity: "simple-configc:test",
+        changed_interface_groups: []
+    ))
+
+fn check_rebuild_receipt(receipt: BuildExplainDecisionV1) -> bool:
+    receipt.errors.len() == 0 and receipt.selected_rebuild_closure.len() == 1 and receipt.selected_rebuild_closure[0] == "//config:default_sci" and receipt.cache_reused_count == 0 and receipt.cache_rebuilt_count == 1 and not receipt.cache_evidence_available
+
+fn check_bootstrap_reason(receipt: BuildExplainDecisionV1) -> bool:
+    not receipt.bootstrap_required and receipt.bootstrap_reason == BootstrapReason.None
+
+fn dispatch_provider() -> SimpleCliDispatchReceiptV1:
+    var registry = SimpleCliRegistryV1.create()
+    registry.register_in_process(InProcessCliProviderV1(
+        provider_handle: 41,
+        context_handle: 7,
+        provider_identity_digest: 257,
+        implementation_digest: 514,
+        abi_digest: 771,
+        required_capability_bits: 4,
+        command_name: "fmt-leaf",
+        summary: "formatted"
+    ))
+    val request = SimpleProviderQueryV1(
+        descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+        interface_id: SIMPLE_CLI_COMMAND_V1_INTERFACE,
+        minimum_major: 1,
+        minimum_minor: 0,
+        host_abi: 1,
+        target_offset: 0,
+        target_length: 0,
+        requested_capability_bits: 4
+    )
+    simple_cli_dispatch_in_process_v1(registry, 41, request, "fmt-leaf", ["notes.spl"])
+
+fn check_provider_generation() -> bool:
+    val manager = ProviderGenerationManagerV1.create()
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    val first = provider_generation_activate_v1(manager, ProviderActivationCandidateV1(
+        provider_handle: 41, provider_identity_digest: 257,
+        implementation_digest: 514, abi_digest: 771,
+        expected_artifact_digest: digest, artifact_digest: digest,
+        query_symbol_address: 4096, admitted: true, process_callable: true
+    ))
+    val pin = provider_generation_pin_active_v1(manager, 41)
+    val second = provider_generation_activate_v1(manager, ProviderActivationCandidateV1(
+        provider_handle: 41, provider_identity_digest: 257,
+        implementation_digest: 515, abi_digest: 771,
+        expected_artifact_digest: digest, artifact_digest: digest,
+        query_symbol_address: 8192, admitted: true, process_callable: true
+    ))
+    if first.status != SIMPLE_GENERATION_OK or second.status != SIMPLE_GENERATION_OK:
+        return false
+    if not provider_generation_available_v1(manager, 41, first.generation):
+        return false
+    if provider_generation_sweep_v1(manager) != 0:
+        return false
+    if provider_generation_release_v1(manager, pin) != SIMPLE_GENERATION_OK:
+        return false
+    provider_generation_sweep_v1(manager) == 1 and not provider_generation_available_v1(manager, 41, first.generation) and provider_generation_available_v1(manager, 41, second.generation)
+
+describe "Minimal-bootstrap composition development":
+    # @manual_section: Compile and inspect one immutable composition image
+    # @req REQ-001 REQ-002 NFR-001
+    it "compiles canonical application configuration into validated SCI v1":
+        """An application-catalog edit is compiled as configuration data. The
+        reader validates the resulting image before any launcher state changes."""
+        step("compile_composition")
+        val image = compile_composition(setup_minimal_bootstrap_fixture("Notes"))
+        step("check_composition_image")
+        expect(check_composition_image(image, "Notes")).to_equal(true)
+
+    # @manual_section: Compile CLI command and provider selection as data
+    # @req REQ-001 REQ-002 REQ-005 REQ-007
+    it "round-trips interface provider binding and command metadata in SCI":
+        """Command names, aliases, summaries, locked artifacts, interface
+        versions, and binding selection are configuration records rather than
+        imports in this executable codec proof."""
+        step("compile_composition")
+        expect(check_cli_composition_section()).to_equal(true)
+
+    # @manual_section: Reload catalog data without replacing launcher code
+    # @req REQ-008
+    it "loads renamed application metadata in one unchanged launcher process":
+        """The proof currently holds the launcher process constant while two
+        independently validated SCI projections are loaded. Binary-hash
+        containment remains a later build-target acceptance row."""
+        val first = compile_composition(setup_minimal_bootstrap_fixture("Notes"))
+        val second = compile_composition(setup_minimal_bootstrap_fixture("Knowledge Notes"))
+        step("load_unchanged_core")
+        expect(load_unchanged_core(first, second)).to_equal(true)
+
+    # @manual_section: Project supported launcher policy and reject unsupported authority
+    # @req REQ-003 REQ-008
+    it "projects shortcuts and fails closed on capability or association owner gaps":
+        """Shortcut key/modifier data uses the existing launcher registration
+        owner. Scoped capabilities and associations reject before mutation;
+        their exact owner-API gaps are tracked in the linked bug record."""
+        step("check_launcher_policy_projection")
+        expect(check_launcher_policy_projection()).to_equal(true)
+
+    # @manual_section: Query and dispatch one leaf command provider
+    # @req REQ-005 REQ-007 REQ-014 REQ-015
+    it "dispatches an admitted in-process provider and keeps dynamic modes fail closed":
+        """The numeric provider descriptors are ABI-safe. This scenario proves
+        executable in-process query and command dispatch; native and SMF modes
+        remain rejected until their loaders prove a process-callable entry."""
+        step("dispatch_provider")
+        val receipt = dispatch_provider()
+        expect(receipt.status).to_equal(SIMPLE_CLI_OK)
+        expect(text.from_bytes(receipt.output)).to_equal("formatted:notes.spl")
+        expect(simple_provider_query_dynamic_v1(SIMPLE_PROVIDER_MODE_NATIVE).status).to_equal(SIMPLE_PROVIDER_NOT_PROCESS_CALLABLE)
+        expect(simple_provider_query_dynamic_v1(SIMPLE_PROVIDER_MODE_SMF).status).to_equal(SIMPLE_PROVIDER_NOT_PROCESS_CALLABLE)
+        expect(check_provider_generation()).to_equal(true)
+
+    # @manual_section: Explain conservative rebuild decisions
+    # @req REQ-011 REQ-012 NFR-011
+    it "never treats unknown compatibility as reusable":
+        """Unknown compatibility selects the smallest declared producer
+        rebuild and never becomes cache-reuse evidence."""
+        step("explain_rebuild")
+        val receipt = explain_rebuild()
+        expect(compatibility_allows_reuse(receipt.compatibility)).to_equal(false)
+        step("check_rebuild_receipt")
+        expect(check_rebuild_receipt(receipt)).to_equal(true)
+        step("check_bootstrap_reason")
+        expect(check_bootstrap_reason(receipt)).to_equal(true)

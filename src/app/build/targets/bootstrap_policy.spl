@@ -1,0 +1,54 @@
+# codex-impl
+# Pure typed bootstrap authorization policy and canonical planner receipt.
+
+use app.build.targets.build_explain.{BootstrapReason, bootstrap_reason_name}
+
+val BOOTSTRAP_RECEIPT_SCHEMA_V1 = "simple-bootstrap-receipt-v1"
+val BOOTSTRAP_RECEIPT_PRODUCER_V1 = "simple-build-planner-v1"
+val BOOTSTRAP_STAGE4_TARGET_V1 = "//bootstrap:stage4"
+
+fn bootstrap_reason_from_name(name: text) -> BootstrapReason:
+    match name:
+        case "seed-missing": BootstrapReason.SeedMissing
+        case "seed-corrupt": BootstrapReason.SeedCorrupt
+        case "seed-target-unsupported": BootstrapReason.SeedTargetUnsupported
+        case "seed-cannot-parse-required-language-feature": BootstrapReason.SeedCannotParseRequiredLanguageFeature
+        case "seed-cannot-lower-required-compiler-feature": BootstrapReason.SeedCannotLowerRequiredCompilerFeature
+        case "bootstrap-runtime-abi-major-changed": BootstrapReason.BootstrapRuntimeAbiMajorChanged
+        case "bootstrap-artifact-format-major-changed": BootstrapReason.BootstrapArtifactFormatMajorChanged
+        case "bootstrap-core-interface-major-changed": BootstrapReason.BootstrapCoreInterfaceMajorChanged
+        case "self-host-convergence-check": BootstrapReason.SelfHostConvergenceCheck
+        case "release-trust-verification": BootstrapReason.ReleaseTrustVerification
+        case "diverse-double-compilation": BootstrapReason.DiverseDoubleCompilation
+        case _: BootstrapReason.None
+
+fn bootstrap_reason_is_explicit(reason: BootstrapReason) -> bool:
+    reason != BootstrapReason.None
+
+fn bootstrap_authorization_receipt_v1(target: text, reason: BootstrapReason) -> text:
+    if (not target.starts_with("//bootstrap:") and not target.starts_with("//release:")) or
+            not bootstrap_reason_is_explicit(reason):
+        return ""
+    BOOTSTRAP_RECEIPT_SCHEMA_V1 +
+        "|producer=" + BOOTSTRAP_RECEIPT_PRODUCER_V1 +
+        "|target=" + target +
+        "|reason=" + bootstrap_reason_name(reason)
+
+fn bootstrap_authorization_error_v1(receipt: text, target: text) -> text:
+    if receipt.trim().len() == 0:
+        return "bootstrap-policy-error: reason-receipt-required"
+    val parts = receipt.trim().split("|")
+    if parts.len() != 4 or parts[0] != BOOTSTRAP_RECEIPT_SCHEMA_V1:
+        return "bootstrap-policy-error: malformed-receipt"
+    if parts[1] != "producer=" + BOOTSTRAP_RECEIPT_PRODUCER_V1:
+        return "bootstrap-policy-error: untrusted-receipt-producer"
+    if parts[2] != "target=" + target:
+        return "bootstrap-policy-error: receipt-target-mismatch"
+    if not parts[3].starts_with("reason="):
+        return "bootstrap-policy-error: malformed-reason"
+    val reason = bootstrap_reason_from_name(parts[3][7:])
+    if not bootstrap_reason_is_explicit(reason):
+        return "bootstrap-policy-error: typed-reason-required"
+    if receipt.trim() != bootstrap_authorization_receipt_v1(target, reason):
+        return "bootstrap-policy-error: non-canonical-receipt"
+    ""

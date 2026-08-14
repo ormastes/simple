@@ -1,0 +1,141 @@
+use std.nogc_sync_mut.composition.{parse_composition_source_v1, encode_composition_image_v1, decode_composition_image_v1}
+use std.common.crypto.sha256.{sha256_bytes}
+
+val SOURCE_AB = "schema: simple.composition/1\nprofile: dev\napps:\n  - id: beta\n    name: Beta\n    artifact: /sys/apps/beta.smf\n    icon: B\n    associations: [.beta]\n    capabilities: [FileRead(/)]\n  - id: alpha\n    name: Alpha\n    artifact: /sys/apps/alpha.smf\n    shortcut: Meta+A\n    associations: [.spl, text/simple]\n"
+val SOURCE_BA = "apps:\n  - artifact: /sys/apps/alpha.smf\n    associations: [.spl, text/simple]\n    shortcut: Meta+A\n    name: Alpha\n    id: alpha\n  - capabilities: [FileRead(/)]\n    icon: B\n    artifact: /sys/apps/beta.smf\n    name: Beta\n    id: beta\n    associations: [.beta]\nprofile: dev\nschema: simple.composition/1\n"
+val DIGEST_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val ABI_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val SOURCE_PROVIDER = "schema: simple.composition/1\nprofile: dev\ninterface_groups:\n  - id: cli.command\n    major: 1\n    minor: 0\n    abi_digest: " + ABI_B + "\nproviders:\n  - id: cli.formatter\n    artifact: /sys/providers/fmt.smf\n    kind: smf\n    artifact_digest: " + DIGEST_A + "\n    interface_groups: [cli.command]\n    required_capability_bits: 4\nbindings:\n  - service: cli.format\n    interface_group: cli.command\n    provider: cli.formatter\ncommands:\n  - name: fmt\n    aliases: [format]\n    summary: Format Simple source\n    binding: cli.format\n    interface_group: cli.command\n"
+
+fn _encoded(source: text) -> [u8]:
+    match parse_composition_source_v1(source):
+        case Ok(image): encode_composition_image_v1(image)
+        case Err(_): []
+
+fn _refresh_multi_section_digest(data: [u8]):
+    var authenticated: [i64] = []
+    var i = 96
+    while i < data.len():
+        authenticated.push(data[i] as i64)
+        i = i + 1
+    val digest = sha256_bytes(authenticated)
+    i = 0
+    while i < 32:
+        data[56 + i] = digest[i] as u8
+        i = i + 1
+
+describe "SimpleCompositionImageV1 source and codec":
+    it "REQ-001 canonicalizes semantically reordered application source":
+        val first = _encoded(SOURCE_AB)
+        val second = _encoded(SOURCE_BA)
+        expect(first.len() > 148).to_equal(true)
+        expect(first).to_equal(second)
+
+    it "REQ-001 round-trips the immutable application projection":
+        val encoded = _encoded(SOURCE_AB)
+        val decoded = decode_composition_image_v1(encoded)
+        expect(encoded[12]).to_equal(96)
+        expect(encoded[96]).to_equal(8)
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.image.schema).to_equal("simple.composition/1")
+        expect(decoded.image.profile).to_equal("dev")
+        expect(decoded.image.apps.len()).to_equal(2)
+        expect(decoded.image.apps[0].app_id).to_equal("alpha")
+        expect(decoded.image.apps[0].associations.len()).to_equal(2)
+        expect(decoded.image.composition_digest.len()).to_equal(64)
+
+    it "REQ-002 rejects an invalid magic":
+        var bad = _encoded(SOURCE_AB)
+        bad[0] = 0
+        val decoded = decode_composition_image_v1(bad)
+        expect(decoded.ok).to_equal(false)
+        expect(decoded.diagnostic.code).to_equal("SCI_MAGIC")
+
+    it "REQ-002 rejects a section whose bounds exceed the image":
+        var bad = _encoded(SOURCE_AB)
+        bad[104] = 255
+        bad[105] = 255
+        bad[106] = 255
+        bad[107] = 127
+        val decoded = decode_composition_image_v1(bad)
+        expect(decoded.ok).to_equal(false)
+        expect(decoded.diagnostic.code).to_equal("SCI_BOUNDS")
+
+    it "REQ-002 rejects a changed section payload digest":
+        var bad = _encoded(SOURCE_AB)
+        bad[bad.len() - 1] = bad[bad.len() - 1] ^ 1
+        val decoded = decode_composition_image_v1(bad)
+        expect(decoded.ok).to_equal(false)
+        expect(decoded.diagnostic.code).to_equal("SCI_DIGEST")
+
+    it "REQ-001 rejects non-canonical reserved header bytes":
+        var bad = _encoded(SOURCE_AB)
+        bad[92] = 1
+        val decoded = decode_composition_image_v1(bad)
+        expect(decoded.ok).to_equal(false)
+        expect(decoded.diagnostic.code).to_equal("SCI_NON_CANONICAL")
+
+    it "REQ-002 rejects duplicate application identities":
+        val source = "schema: simple.composition/1\napps:\n  - id: editor\n    name: Editor\n    artifact: /sys/apps/editor.smf\n  - id: editor\n    name: Other\n    artifact: /sys/apps/other.smf\n"
+        match parse_composition_source_v1(source):
+            case Err(e): expect(e).to_contain("duplicate-app-id: editor")
+            case Ok(_): expect(false).to_equal(true)
+
+    it "REQ-002 rejects unsafe artifact paths":
+        val source = "schema: simple.composition/1\napps:\n  - id: editor\n    name: Editor\n    artifact: ../editor.smf\n"
+        match parse_composition_source_v1(source):
+            case Err(e): expect(e).to_contain("unsafe-artifact-path")
+            case Ok(_): expect(false).to_equal(true)
+
+    it "REQ-003 round-trips provider binding and CLI command records":
+        val encoded = _encoded(SOURCE_PROVIDER)
+        val decoded = decode_composition_image_v1(encoded)
+        expect(decoded.ok).to_equal(true)
+        expect(encoded[16]).to_equal(2)
+        expect(decoded.image.interface_groups[0].group_id).to_equal("cli.command")
+        expect(decoded.image.providers[0].artifact_digest).to_equal(DIGEST_A)
+        expect(decoded.image.providers[0].required_capability_bits).to_equal(4)
+        expect(decoded.image.bindings[0].provider_id).to_equal("cli.formatter")
+        expect(decoded.image.commands[0].command_name).to_equal("fmt")
+        expect(decoded.image.commands[0].aliases[0]).to_equal("format")
+
+    it "REQ-003 rejects duplicate command aliases":
+        val source = SOURCE_PROVIDER + "  - name: format\n    aliases: []\n    summary: Duplicate alias\n    binding: cli.format\n    interface_group: cli.command\n"
+        match parse_composition_source_v1(source):
+            case Err(e): expect(e).to_contain("duplicate-command")
+            case Ok(_): expect(false).to_equal(true)
+
+    it "REQ-003 rejects unresolved provider interface groups":
+        val source = SOURCE_PROVIDER.replace("interface_groups: [cli.command]", "interface_groups: [cli.missing]")
+        match parse_composition_source_v1(source):
+            case Err(e): expect(e).to_contain("unknown-interface-group")
+            case Ok(_): expect(false).to_equal(true)
+
+    it "REQ-003 rejects unsafe provider artifacts and non-exact digests":
+        val unsafe_source = SOURCE_PROVIDER.replace("/sys/providers/fmt.smf", "../fmt.smf")
+        match parse_composition_source_v1(unsafe_source):
+            case Err(e): expect(e).to_contain("unsafe-provider-path")
+            case Ok(_): expect(false).to_equal(true)
+        val digest_source = SOURCE_PROVIDER.replace(DIGEST_A, "abcd")
+        match parse_composition_source_v1(digest_source):
+            case Err(e): expect(e).to_contain("invalid-artifact-digest")
+            case Ok(_): expect(false).to_equal(true)
+
+    it "REQ-003 skips unknown optional sections and rejects unknown required sections":
+        var optional = _encoded(SOURCE_PROVIDER)
+        optional[144] = 77
+        optional[145] = 0
+        optional[146] = 0
+        optional[147] = 0
+        optional[150] = 0
+        optional[151] = 0
+        _refresh_multi_section_digest(optional)
+        val skipped = decode_composition_image_v1(optional)
+        expect(skipped.ok).to_equal(true)
+        expect(skipped.image.apps.len()).to_equal(0)
+        var required = optional
+        required[150] = 1
+        _refresh_multi_section_digest(required)
+        val rejected = decode_composition_image_v1(required)
+        expect(rejected.ok).to_equal(false)
+        expect(rejected.diagnostic.code).to_equal("SCI_REQUIRED_SECTION")

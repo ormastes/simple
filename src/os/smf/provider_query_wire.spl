@@ -1,0 +1,198 @@
+# Canonical packed wire codec for SimpleProviderQueryV1.
+#
+# This module serializes fixed-width scalars only.  It never takes an address
+# of a Simple struct/object and does not invoke a provider function pointer.
+# V1 requests have no reserved bytes.  V1 results reserve bytes 56..59; they
+# are emitted as zero and rejected when nonzero.  Strict total-size checks also
+# reject undeclared trailing material.
+
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_QUERY_V1_SIZE,
+    SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE,
+    SIMPLE_PROVIDER_OK,
+    SIMPLE_PROVIDER_MINOR_UNSUPPORTED,
+    SimpleProviderQueryV1,
+    SimpleProviderQueryResultV1
+}
+
+val PROVIDER_QUERY_V1_DESCRIPTOR_SIZE_OFFSET: i64 = 0
+val PROVIDER_QUERY_V1_INTERFACE_ID_OFFSET: i64 = 4
+val PROVIDER_QUERY_V1_MINIMUM_MAJOR_OFFSET: i64 = 12
+val PROVIDER_QUERY_V1_MINIMUM_MINOR_OFFSET: i64 = 16
+val PROVIDER_QUERY_V1_HOST_ABI_OFFSET: i64 = 20
+val PROVIDER_QUERY_V1_TARGET_OFFSET_OFFSET: i64 = 28
+val PROVIDER_QUERY_V1_TARGET_LENGTH_OFFSET: i64 = 32
+val PROVIDER_QUERY_V1_CAPABILITIES_OFFSET: i64 = 36
+
+val PROVIDER_QUERY_RESULT_V1_STATUS_OFFSET: i64 = 0
+val PROVIDER_QUERY_RESULT_V1_PROVIDED_MAJOR_OFFSET: i64 = 4
+val PROVIDER_QUERY_RESULT_V1_PROVIDED_MINOR_OFFSET: i64 = 8
+val PROVIDER_QUERY_RESULT_V1_DESCRIPTOR_SIZE_OFFSET: i64 = 12
+val PROVIDER_QUERY_RESULT_V1_INTERFACE_HANDLE_OFFSET: i64 = 16
+val PROVIDER_QUERY_RESULT_V1_PROVIDER_CONTEXT_OFFSET: i64 = 24
+val PROVIDER_QUERY_RESULT_V1_IDENTITY_DIGEST_OFFSET: i64 = 32
+val PROVIDER_QUERY_RESULT_V1_IMPLEMENTATION_DIGEST_OFFSET: i64 = 40
+val PROVIDER_QUERY_RESULT_V1_ABI_DIGEST_OFFSET: i64 = 48
+val PROVIDER_QUERY_RESULT_V1_RESERVED_OFFSET: i64 = 56
+
+class ProviderQueryWireWriteV1:
+    ok: bool
+    bytes: [u8]
+    diagnostic: text
+
+class ProviderQueryWireRequestReadV1:
+    ok: bool
+    value: SimpleProviderQueryV1
+    diagnostic: text
+
+class ProviderQueryWireResultReadV1:
+    ok: bool
+    value: SimpleProviderQueryResultV1
+    diagnostic: text
+
+fn _push_u32_le(out: [u8], value: u32):
+    out.push((value & 255) as u8)
+    out.push(((value >> 8) & 255) as u8)
+    out.push(((value >> 16) & 255) as u8)
+    out.push(((value >> 24) & 255) as u8)
+
+fn _push_u64_le(out: [u8], value: u64):
+    var index = 0
+    while index < 8:
+        out.push(((value >> (index * 8)) & 255) as u8)
+        index = index + 1
+
+fn _read_u32_le(data: [u8], offset: i64) -> u32:
+    (data[offset] as u32) |
+        ((data[offset + 1] as u32) << 8) |
+        ((data[offset + 2] as u32) << 16) |
+        ((data[offset + 3] as u32) << 24)
+
+fn _read_u64_le(data: [u8], offset: i64) -> u64:
+    var value: u64 = 0
+    var index = 0
+    while index < 8:
+        value = value | ((data[offset + index] as u64) << (index * 8))
+        index = index + 1
+    value
+
+fn _empty_request() -> SimpleProviderQueryV1:
+    SimpleProviderQueryV1(
+        descriptor_size: 0,
+        interface_id: 0,
+        minimum_major: 0,
+        minimum_minor: 0,
+        host_abi: 0,
+        target_offset: 0,
+        target_length: 0,
+        requested_capability_bits: 0
+    )
+
+fn _empty_result() -> SimpleProviderQueryResultV1:
+    SimpleProviderQueryResultV1(
+        status: 0,
+        provided_major: 0,
+        provided_minor: 0,
+        descriptor_size: 0,
+        interface_handle: 0,
+        provider_context: 0,
+        provider_identity_digest: 0,
+        implementation_digest: 0,
+        abi_digest: 0
+    )
+
+fn _request_valid(value: SimpleProviderQueryV1) -> text:
+    if value.descriptor_size != SIMPLE_PROVIDER_QUERY_V1_SIZE:
+        return "request-descriptor-size-invalid"
+    if value.interface_id == 0 or value.minimum_major == 0 or value.host_abi == 0:
+        return "request-version-or-interface-invalid"
+    # The fixed 44-byte V1 descriptor has no trailing target arena.  A future
+    # descriptor version may define one, but V1 must fail closed rather than
+    # interpret offsets outside the canonical record.
+    if value.target_offset != 0 or value.target_length != 0:
+        return "request-target-out-of-bounds"
+    ""
+
+fn encode_provider_query_request_v1(value: SimpleProviderQueryV1) -> ProviderQueryWireWriteV1:
+    val diagnostic = _request_valid(value)
+    if diagnostic != "":
+        return ProviderQueryWireWriteV1(ok: false, bytes: [], diagnostic: diagnostic)
+    var out: [u8] = []
+    _push_u32_le(out, value.descriptor_size)
+    _push_u64_le(out, value.interface_id)
+    _push_u32_le(out, value.minimum_major)
+    _push_u32_le(out, value.minimum_minor)
+    _push_u64_le(out, value.host_abi)
+    _push_u32_le(out, value.target_offset)
+    _push_u32_le(out, value.target_length)
+    _push_u64_le(out, value.requested_capability_bits)
+    ProviderQueryWireWriteV1(ok: true, bytes: out, diagnostic: "")
+
+fn decode_provider_query_request_v1(data: [u8]) -> ProviderQueryWireRequestReadV1:
+    if data.len() != SIMPLE_PROVIDER_QUERY_V1_SIZE as i64:
+        return ProviderQueryWireRequestReadV1(ok: false, value: _empty_request(), diagnostic: "request-wire-size-invalid")
+    val value = SimpleProviderQueryV1(
+        descriptor_size: _read_u32_le(data, PROVIDER_QUERY_V1_DESCRIPTOR_SIZE_OFFSET),
+        interface_id: _read_u64_le(data, PROVIDER_QUERY_V1_INTERFACE_ID_OFFSET),
+        minimum_major: _read_u32_le(data, PROVIDER_QUERY_V1_MINIMUM_MAJOR_OFFSET),
+        minimum_minor: _read_u32_le(data, PROVIDER_QUERY_V1_MINIMUM_MINOR_OFFSET),
+        host_abi: _read_u64_le(data, PROVIDER_QUERY_V1_HOST_ABI_OFFSET),
+        target_offset: _read_u32_le(data, PROVIDER_QUERY_V1_TARGET_OFFSET_OFFSET),
+        target_length: _read_u32_le(data, PROVIDER_QUERY_V1_TARGET_LENGTH_OFFSET),
+        requested_capability_bits: _read_u64_le(data, PROVIDER_QUERY_V1_CAPABILITIES_OFFSET)
+    )
+    val diagnostic = _request_valid(value)
+    ProviderQueryWireRequestReadV1(ok: diagnostic == "", value: value, diagnostic: diagnostic)
+
+fn _result_valid(value: SimpleProviderQueryResultV1) -> text:
+    if value.status < SIMPLE_PROVIDER_OK or value.status > SIMPLE_PROVIDER_MINOR_UNSUPPORTED:
+        return "result-status-invalid"
+    if value.status == SIMPLE_PROVIDER_OK:
+        if value.provided_major == 0 or value.descriptor_size == 0 or value.interface_handle == 0:
+            return "result-version-or-interface-invalid"
+    else:
+        # Error results carry no live provider-owned handles.  Rejecting them
+        # prevents a caller from accidentally pinning untrusted output.
+        if value.interface_handle != 0 or value.provider_context != 0:
+            return "result-error-handle-not-zero"
+    ""
+
+fn encode_provider_query_result_v1(value: SimpleProviderQueryResultV1) -> ProviderQueryWireWriteV1:
+    val diagnostic = _result_valid(value)
+    if diagnostic != "":
+        return ProviderQueryWireWriteV1(ok: false, bytes: [], diagnostic: diagnostic)
+    var out: [u8] = []
+    _push_u32_le(out, value.status as u32)
+    _push_u32_le(out, value.provided_major)
+    _push_u32_le(out, value.provided_minor)
+    _push_u32_le(out, value.descriptor_size)
+    _push_u64_le(out, value.interface_handle)
+    _push_u64_le(out, value.provider_context)
+    _push_u64_le(out, value.provider_identity_digest)
+    _push_u64_le(out, value.implementation_digest)
+    _push_u64_le(out, value.abi_digest)
+    _push_u32_le(out, 0)
+    ProviderQueryWireWriteV1(ok: true, bytes: out, diagnostic: "")
+
+fn decode_provider_query_result_v1(data: [u8]) -> ProviderQueryWireResultReadV1:
+    if data.len() != SIMPLE_PROVIDER_QUERY_RESULT_V1_SIZE as i64:
+        return ProviderQueryWireResultReadV1(ok: false, value: _empty_result(), diagnostic: "result-wire-size-invalid")
+    if _read_u32_le(data, PROVIDER_QUERY_RESULT_V1_RESERVED_OFFSET) != 0:
+        return ProviderQueryWireResultReadV1(ok: false, value: _empty_result(), diagnostic: "result-reserved-not-zero")
+    val value = SimpleProviderQueryResultV1(
+        status: _read_u32_le(data, PROVIDER_QUERY_RESULT_V1_STATUS_OFFSET) as i32,
+        provided_major: _read_u32_le(data, PROVIDER_QUERY_RESULT_V1_PROVIDED_MAJOR_OFFSET),
+        provided_minor: _read_u32_le(data, PROVIDER_QUERY_RESULT_V1_PROVIDED_MINOR_OFFSET),
+        descriptor_size: _read_u32_le(data, PROVIDER_QUERY_RESULT_V1_DESCRIPTOR_SIZE_OFFSET),
+        interface_handle: _read_u64_le(data, PROVIDER_QUERY_RESULT_V1_INTERFACE_HANDLE_OFFSET),
+        provider_context: _read_u64_le(data, PROVIDER_QUERY_RESULT_V1_PROVIDER_CONTEXT_OFFSET),
+        provider_identity_digest: _read_u64_le(data, PROVIDER_QUERY_RESULT_V1_IDENTITY_DIGEST_OFFSET),
+        implementation_digest: _read_u64_le(data, PROVIDER_QUERY_RESULT_V1_IMPLEMENTATION_DIGEST_OFFSET),
+        abi_digest: _read_u64_le(data, PROVIDER_QUERY_RESULT_V1_ABI_DIGEST_OFFSET)
+    )
+    val diagnostic = _result_valid(value)
+    ProviderQueryWireResultReadV1(ok: diagnostic == "", value: value, diagnostic: diagnostic)
+
+export ProviderQueryWireWriteV1, ProviderQueryWireRequestReadV1, ProviderQueryWireResultReadV1
+export encode_provider_query_request_v1, decode_provider_query_request_v1
+export encode_provider_query_result_v1, decode_provider_query_result_v1

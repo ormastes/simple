@@ -1,0 +1,57 @@
+use std.spec.*
+use std.nogc_sync_mut.composition.provider_generation.*
+
+fn candidate_v1(implementation: u64 = 101) -> ProviderActivationCandidateV1:
+    ProviderActivationCandidateV1(
+        provider_handle: 41,
+        provider_identity_digest: 257,
+        implementation_digest: implementation,
+        abi_digest: 771,
+        expected_artifact_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        artifact_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        query_symbol_address: 4096,
+        admitted: true,
+        process_callable: true
+    )
+
+describe "provider generation activation":
+    it "validates before mutation and preserves the active generation on failure":
+        val manager = ProviderGenerationManagerV1.create()
+        val first = provider_generation_activate_v1(manager, candidate_v1())
+        expect(first.status).to_equal(SIMPLE_GENERATION_OK)
+        var denied = candidate_v1(202)
+        denied.artifact_digest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        val failed = provider_generation_activate_v1(manager, denied)
+        expect(failed.status).to_equal(SIMPLE_GENERATION_DIGEST_MISMATCH)
+        val pin = provider_generation_pin_active_v1(manager, 41)
+        expect(pin.generation).to_equal(first.generation)
+
+    it "keeps a retired generation available while its handle is pinned":
+        val manager = ProviderGenerationManagerV1.create()
+        val first = provider_generation_activate_v1(manager, candidate_v1())
+        val old_pin = provider_generation_pin_active_v1(manager, 41)
+        val second_old_pin = provider_generation_pin_active_v1(manager, 41)
+        expect(old_pin.pin_id == second_old_pin.pin_id).to_equal(false)
+        val second = provider_generation_activate_v1(manager, candidate_v1(202))
+        expect(second.previous_generation).to_equal(first.generation)
+        expect(second.generation == first.generation).to_equal(false)
+        expect(provider_generation_available_v1(manager, 41, first.generation)).to_equal(true)
+        expect(provider_generation_sweep_v1(manager)).to_equal(0)
+        expect(provider_generation_release_v1(manager, old_pin)).to_equal(SIMPLE_GENERATION_OK)
+        expect(provider_generation_sweep_v1(manager)).to_equal(0)
+        expect(provider_generation_release_v1(manager, second_old_pin)).to_equal(SIMPLE_GENERATION_OK)
+        expect(provider_generation_sweep_v1(manager)).to_equal(1)
+        expect(provider_generation_available_v1(manager, 41, first.generation)).to_equal(false)
+        expect(provider_generation_available_v1(manager, 41, second.generation)).to_equal(true)
+
+    it "rejects non-callable candidates and unknown or duplicate releases":
+        val manager = ProviderGenerationManagerV1.create()
+        var denied = candidate_v1()
+        denied.process_callable = false
+        expect(provider_generation_activate_v1(manager, denied).status).to_equal(SIMPLE_GENERATION_ADMISSION_REQUIRED)
+        expect(provider_generation_pin_active_v1(manager, 41).status).to_equal(SIMPLE_GENERATION_NOT_ACTIVE)
+        val active = provider_generation_activate_v1(manager, candidate_v1())
+        val pin = provider_generation_pin_active_v1(manager, 41)
+        expect(active.status).to_equal(SIMPLE_GENERATION_OK)
+        expect(provider_generation_release_v1(manager, pin)).to_equal(SIMPLE_GENERATION_OK)
+        expect(provider_generation_release_v1(manager, pin)).to_equal(SIMPLE_GENERATION_PIN_UNKNOWN)

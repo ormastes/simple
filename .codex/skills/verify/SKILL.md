@@ -312,6 +312,15 @@ STATUS: FAIL (3 failures, 1 warning)
   argument scripts still avoid unnecessary compile/JIT startup unless
   `SIMPLE_EXECUTION_MODE` is explicitly set.
 - Do not mark STATUS: PASS for compiler/core/lib or MCP/LSP work unless the matching runtime and MCP smoke checks passed
+- For compiled feature work, verify the receipt described by
+  `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`.
+  `Unknown` may cause the smallest conservative rebuild but never reuse; a full
+  bootstrap without a typed reason is FAIL.
+- Accept admitted Stage 2/3 evidence only for criteria explicitly scoped to that
+  stage and compiler/interpreter/loader command. Verify exact path, hash, stage,
+  provenance, supported command, and isolated output/cache. Reject silent Rust-
+  seed fallback and any use as Stage 4, general SPipe/docgen/test-runner,
+  release, convergence, DDC, or cross-host evidence.
 - Do not mark short grammar verification PASS when docs list a counterpart but executable tests only cover a longer equivalent form.
 
 ## SSpec maintenance verification

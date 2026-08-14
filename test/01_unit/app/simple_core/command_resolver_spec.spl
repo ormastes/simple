@@ -1,0 +1,110 @@
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.composition.types.{
+    SimpleCompositionImageV1,
+    SimpleProviderRecordV1,
+    CompositionReadResultV1,
+    composition_diagnostic_v1,
+    empty_composition_image_v1,
+}
+use app.simple_core.command_resolver.{
+    SIMPLE_CORE_OK,
+    SIMPLE_CORE_INVALID_COMMAND,
+    SIMPLE_CORE_CONFIG_INVALID,
+    SIMPLE_CORE_PROVIDER_NOT_FOUND,
+    simple_core_resolve_v1,
+}
+
+fn valid_core_image() -> SimpleCompositionImageV1:
+    val empty = empty_composition_image_v1()
+    SimpleCompositionImageV1(
+        schema: empty.schema,
+        profile: "dev",
+        apps: [],
+        interface_groups: [],
+        providers: [SimpleProviderRecordV1(
+            provider_id: "formatter",
+            artifact_path: "build/providers/fmt.smf",
+            artifact_kind: "smf",
+            artifact_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            interface_groups: ["cli.command"],
+            required_capability_bits: 0,
+        )],
+        bindings: [],
+        commands: [],
+        bytes: [],
+        composition_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    )
+
+fn valid_core_config() -> CompositionReadResultV1:
+    CompositionReadResultV1(
+        ok: true,
+        image: valid_core_image(),
+        diagnostic: composition_diagnostic_v1("SCI_OK", "image", "accepted"),
+    )
+
+describe "minimal simple-core command resolver":
+    it "exposes only the fixed CLI-0 command surface":
+        val default_help = simple_core_resolve_v1([], valid_core_config(), "1.2.3")
+        expect(default_help.status).to_equal(SIMPLE_CORE_OK)
+
+        val help = simple_core_resolve_v1(["--help"], valid_core_config(), "1.2.3")
+        expect(help.status).to_equal(SIMPLE_CORE_OK)
+        expect(help.output).to_contain("config verify")
+        expect(help.output).to_contain("provider inspect")
+        expect(help.output).to_contain("doctor")
+        expect(help.output.contains("compile")).to_equal(false)
+        expect(help.output.contains("office")).to_equal(false)
+
+        val version = simple_core_resolve_v1(["--version"], valid_core_config(), "1.2.3")
+        expect(version.status).to_equal(SIMPLE_CORE_OK)
+        expect(version.output).to_equal("simple-core 1.2.3")
+
+    it "verifies the decoded SCI result without reparsing source configuration":
+        val accepted = simple_core_resolve_v1(["config", "verify"], valid_core_config(), "1.2.3")
+        expect(accepted.status).to_equal(SIMPLE_CORE_OK)
+        expect(accepted.output).to_contain("SCI_OK")
+
+        val rejected = CompositionReadResultV1(
+            ok: false,
+            image: empty_composition_image_v1(),
+            diagnostic: composition_diagnostic_v1("SCI_COMPOSITION_DIGEST", "header", "digest mismatch"),
+        )
+        val result = simple_core_resolve_v1(["config", "verify"], rejected, "1.2.3")
+        expect(result.status).to_equal(SIMPLE_CORE_CONFIG_INVALID)
+        expect(result.diagnostic).to_contain("SCI_COMPOSITION_DIGEST")
+
+        val extra = simple_core_resolve_v1(["config", "verify", "unexpected"], valid_core_config(), "1.2.3")
+        expect(extra.diagnostic).to_contain("accepts no additional arguments")
+
+    it "inspects immutable provider declarations without activating code":
+        val found = simple_core_resolve_v1(["provider", "inspect", "formatter"], valid_core_config(), "1.2.3")
+        expect(found.status).to_equal(SIMPLE_CORE_OK)
+        expect(found.output).to_contain("build/providers/fmt.smf")
+        expect(found.output).to_contain("cli.command")
+
+        val missing = simple_core_resolve_v1(["provider", "inspect", "missing"], valid_core_config(), "1.2.3")
+        expect(missing.status).to_equal(SIMPLE_CORE_PROVIDER_NOT_FOUND)
+
+        val absent_id = simple_core_resolve_v1(["provider", "inspect"], valid_core_config(), "1.2.3")
+        expect(absent_id.diagnostic).to_contain("exactly one provider id")
+
+    it "fails closed for invalid config and commands outside CLI-0":
+        val rejected = CompositionReadResultV1(
+            ok: false,
+            image: empty_composition_image_v1(),
+            diagnostic: composition_diagnostic_v1("SCI_TRUNCATED", "header", "truncated"),
+        )
+        val doctor = simple_core_resolve_v1(["doctor"], rejected, "1.2.3")
+        expect(doctor.status).to_equal(SIMPLE_CORE_CONFIG_INVALID)
+        expect(doctor.diagnostic).to_contain("SCI_TRUNCATED")
+
+        val healthy = simple_core_resolve_v1(["doctor"], valid_core_config(), "1.2.3")
+        expect(healthy.status).to_equal(SIMPLE_CORE_OK)
+        expect(healthy.output).to_contain("providers=1")
+
+        val provider_rejected = simple_core_resolve_v1(["provider", "inspect", "formatter"], rejected, "1.2.3")
+        expect(provider_rejected.status).to_equal(SIMPLE_CORE_CONFIG_INVALID)
+
+        val extended = simple_core_resolve_v1(["compile"], valid_core_config(), "1.2.3")
+        expect(extended.status).to_equal(SIMPLE_CORE_INVALID_COMMAND)
+        expect(extended.diagnostic).to_contain("not a static simple-core command")

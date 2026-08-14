@@ -91,9 +91,12 @@ Use `bin/simple lint <changed .spl files>` and
 pure-Simple gates. `bin/simple build lint` and `build check` are Rust workspace
 clippy/rustfmt commands, not substitutes.
 
-A temporarily deployed Stage 2 compiler may unblock native artifact builds,
-but it is not Stage 4 evidence and cannot qualify `run`, `test`, SPipe docgen,
-or release. Record its exact path, hash, supported commands, and rollback path.
+An explicitly admitted Stage 2 or Stage 3 Simple binary may run focused
+pure-Simple compiler/interpreter/loader work under the canonical minimal-
+bootstrap guide. Record exact path, hash, stage, provenance, supported commands,
+isolated output/cache, and stage-scoped evidence; fail closed on unsupported
+commands and never fall back to the Rust seed. It is not deployed Stage 4,
+general `run`/`test`/SPipe/docgen, release, convergence, or cross-host evidence.
 If a direct lexer probe and parser-facing token stream disagree, capture both
 streams plus continuation state in one compiled probe. After three distinct
 fix/probe cycles, update the tracked bug and lane state and stop; do not rewrite
@@ -868,13 +871,11 @@ reference guide (in progress): doc/07_guide/os/baremetal_simple_codegen_landmine
 
 ## Verification tiering (build infra)
 
-Pick the cheapest gate that exercises the change; a small pure-Simple lib edit is
-NOT a full bootstrap. Per `.claude/rules/bootstrap.md` § "Verification tiering":
-T0 hosted seed probe (seconds) for logic changes; T1 incremental kernel build via
-`SIMPLE_NATIVE_INCREMENTAL=1` with a stable `--cache-dir` for small lib changes
-(reuses per-module objects — link + entry-closure discovery still run each build);
-T2 full kernel rebuild for structural changes; T3 full bootstrap only when
-`src/compiler_rust`/`src/compiler` changed or as the final pre-goal gate.
+Follow `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`.
+Start with the smallest named target, provider, and SCI projection and retain
+the build receipt. A compiler path is not a bootstrap reason. Unknown
+compatibility rebuilds the smallest relevant closure; full bootstrap is limited
+to a typed incompatibility or explicit release/trust target.
 
 ## Log-retention convention (debug/perf instrumentation)
 

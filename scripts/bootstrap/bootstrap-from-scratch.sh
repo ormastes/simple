@@ -60,6 +60,11 @@ Output: <output>/stage{1,2,3}/<arch>-<vendor>-<os>-<abi>/simple
 Options:
   --backend=<name>   Backend for stage2/stage3/stage4 (default: llvm; cranelift also supported)
   --output=<dir>     Output directory for bootstrap artifacts (default: build/bootstrap)
+  --bootstrap-receipt=<path>
+                     Canonical non-None typed-reason receipt emitted by
+                     `simple build bootstrap`; required before any stage starts
+  --validate-bootstrap-receipt
+                     Validate authorization and exit without starting a stage
   --full-bootstrap   Rebuild the Rust seed/runtime when missing or stale, then
                      rebuild the pure-Simple stages. Without this flag bootstrap
                      never runs cargo and reuses the existing Rust seed.
@@ -134,6 +139,8 @@ progress_log="${SIMPLE_BOOTSTRAP_PROGRESS_LOG:-}"
 progress_interval="${SIMPLE_BOOTSTRAP_PROGRESS_INTERVAL:-30}"
 execution_profile="${SIMPLE_BOOTSTRAP_EXECUTION_PROFILE:-incremental}"
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
+bootstrap_receipt_path="${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}"
+validate_bootstrap_receipt=0
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
   1|true|yes|on) strict_bootstrap=1 ;;
   *) strict_bootstrap=0 ;;
@@ -146,6 +153,12 @@ while [ "$#" -gt 0 ]; do
       ;;
     --output=*)
       output_dir=${1#*=}
+      ;;
+    --bootstrap-receipt=*)
+      bootstrap_receipt_path=${1#*=}
+      ;;
+    --validate-bootstrap-receipt)
+      validate_bootstrap_receipt=1
       ;;
     --target=*)
       target=${1#*=}
@@ -253,6 +266,50 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+# This is the common staged-bootstrap boundary, including Windows forwarding
+# and admitted Stage 3 resume. A direct/ad-hoc invocation cannot start even
+# Stage 1 without the canonical receipt produced by the pure-Simple planner.
+if [ -z "${bootstrap_receipt_path}" ] || [ ! -f "${bootstrap_receipt_path}" ]; then
+  echo "bootstrap-policy-error: reason-receipt-required; run 'simple build bootstrap --bootstrap-reason=<typed-reason> --bootstrap-receipt=<path>'" >&2
+  exit 64
+fi
+bootstrap_receipt=$(cat -- "${bootstrap_receipt_path}") || {
+  echo "bootstrap-policy-error: receipt-read-failed: ${bootstrap_receipt_path}" >&2
+  exit 64
+}
+bootstrap_receipt_target='//bootstrap:stage4'
+if [ -n "${resume_stage3_output}" ]; then
+  bootstrap_receipt_target='//bootstrap:stage3'
+fi
+bootstrap_receipt_prefix="simple-bootstrap-receipt-v1|producer=simple-build-planner-v1|target=${bootstrap_receipt_target}|reason="
+case "${bootstrap_receipt}" in
+  "${bootstrap_receipt_prefix}"*) bootstrap_reason=${bootstrap_receipt#"${bootstrap_receipt_prefix}"} ;;
+  *)
+    echo "bootstrap-policy-error: malformed-or-untrusted-receipt" >&2
+    exit 64
+    ;;
+esac
+case "${bootstrap_reason}" in
+  seed-missing|seed-corrupt|seed-target-unsupported|\
+  seed-cannot-parse-required-language-feature|\
+  seed-cannot-lower-required-compiler-feature|\
+  bootstrap-runtime-abi-major-changed|\
+  bootstrap-artifact-format-major-changed|\
+  bootstrap-core-interface-major-changed|\
+  self-host-convergence-check|release-trust-verification|diverse-double-compilation)
+    ;;
+  *)
+    echo "bootstrap-policy-error: typed-reason-required" >&2
+    exit 64
+    ;;
+esac
+SIMPLE_BOOTSTRAP_REASON_RECEIPT=${bootstrap_receipt_path}
+export SIMPLE_BOOTSTRAP_REASON_RECEIPT
+if [ "${validate_bootstrap_receipt}" -eq 1 ]; then
+  echo "bootstrap-policy: receipt-valid target=${bootstrap_receipt_target} reason=${bootstrap_reason} execution=not-attempted"
+  exit 0
+fi
 
 case "${progress_interval}" in
   ''|*[!0-9]*|0)
