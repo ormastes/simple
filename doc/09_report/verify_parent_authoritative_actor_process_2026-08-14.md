@@ -2,53 +2,49 @@
 
 ## Scope
 
-Changed the parent-owned process-result ingress, piped child lifecycle owner,
-focused unit/system evidence, canonical architecture/guide/test plan, execution
-status, and changelog. Existing actor mailbox/scheduler ownership remains the
-actor-channel authority; this lane did not introduce a second actor runtime.
+Changed actor admission/lifecycle, parent-owned process-result ingress, parent
+application commit, piped child lifecycle, focused unit/system evidence, and
+the canonical architecture, guide, expert knowledge, and plans.
 
 ## Results
 
-- PASS: generation-bound inbox rejects a mismatched generation before queue
-  retention.
-- PASS: generation-bound inbox rejects repeated region IDs and bounds its
-  lifetime replay table by the finite session capacity.
-- PASS: piped process session refuses an inbox/session generation mismatch,
-  owns one process handle, polls only through its paired reader, and records an
-  idempotent close result.
-- PASS: parent commit remains the only root publication path; rejected frames
-  are never reinserted.
-- PASS: working-tree direct runtime-facade audit, numbered-artifact audit,
-  keyword-binding guard, stub scan, `git diff --check`, and executable-spec
-  layout guard.
-- WARN: `bin/release/simple test --help` fails its bounded ABI probe. Direct
-  self-hosted `check` attempts for the two changed production modules and both
-  focused specs terminated with signal status 139 before a source verdict.
-  Therefore native system execution, SPipe maintenance/docgen, and the broader
-  compiler/lib/MCP/LSP regression gates are not admitted in this session.
-- WARN: after rebasing onto current `origin/main`, the repository pre-push hook
-  could not run its compiler-backed gates because `bin/simple` is absent and
-  also reported unrelated full-tree closure/native probes. The hook's printed
-  recovery contract permits `git push --no-verify` after review; integration
-  used that override without weakening or relabeling the verification status.
+- PASS: a full bootstrap admitted the pure-Simple Stage-2 binary at
+  `build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple` (856
+  compiled, 0 failed) and advanced to Stage 3.
+- PASS: the core C runtime capsule self-check passed all 33 checks after its
+  coverage fixture gained the required string constructor.
+- PASS: hosted Rust evidence passed checked actor invalid/heap/disconnected
+  rejection, finite-capacity backpressure (2 tests), cooperative stop wakeup
+  and single transition (1), hosted-symbol fallback (1), and common actor
+  backpressure (1).
+- PASS: Stage-2 execution proved mutation-after-offer process-frame isolation.
+- PASS by static inspection: actor operations route through the scheduler
+  owner; parent commit validates/applies/verifies before one publication;
+  cancellation revokes retained frames; the focused specs have real assertions,
+  five frozen system steps, and AC/REQ traceability.
+- PASS: `git diff --check`, the working-tree direct-environment runtime guard,
+  numbered-artifact guard, executable-spec layout guard, and focused
+  placeholder/step-count scan.
+- WARN: Stage 3 exhausted the permitted three fix cycles on module-constant
+  type derivation. Explicit types were added throughout the exact build closure,
+  but the cap forbids another run in this session.
+- WARN: the remaining Stage-2 system scenarios exposed aggregate/`Option`
+  corruption: fragmented real-child delivery, atomic rollback, and cancellation
+  did not produce valid executable verdicts. Assertions were retained.
+- WARN: the deployed Stage-4 wrapper still exits 139 at its bounded test ABI
+  probe. Consequently focused Simple tests, SPipe docgen/maintenance, and the
+  compiler/lib/MCP/LSP Stage-4 gates are not admitted.
+- REVIEW: the independent final audit's three source findings were resolved:
+  real-child flows use owner-issued identity, issuance is monotonic under the
+  sole parent mutex with zero/exhaustion rejected, and lock-failure receipts do
+  not read canonical state. The reviewer still correctly withheld ACCEPT
+  because the executable WARN gates above remain open.
 
 The blocker is the existing deployed-runtime failure tracked in
 `doc/08_tracking/bug/native_selfhosted_run_segfault_startup_normalize_2026-07-24.md`.
-No Rust-seed fallback was used.
+No Rust seed result was substituted for Simple acceptance evidence.
 
 STATUS: WARN
 
-## Synced regression recheck
-
-After rebasing onto `origin/main` at `7ac900316dd5266595d8e2d713493ed174f0c8e4`,
-the related native contract tests remained green:
-
-- runtime transfer codec: 7 passed, 0 failed;
-- actor inline-wire/heap rejection: 1 passed, 0 failed;
-- bounded native channels: 11 passed, 0 failed;
-- common actor-handle backpressure: 1 passed, 0 failed.
-
-The repo-managed `bin/release/simple` still rejects both `--version` and
-`test --help` because its deployed runtime fails the bounded test ABI probe.
-No Simple SSpec was counted as executed, no seed result was substituted, and
-`STATUS: WARN` therefore remains unchanged.
+Integration reachability and post-rebase tree state are recorded after the
+serialized push; they do not change `STATUS: WARN`.

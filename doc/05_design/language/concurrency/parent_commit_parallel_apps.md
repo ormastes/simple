@@ -15,6 +15,22 @@ Task group sequence:
 
 Failure drops uncommitted child-local output and revokes leases; no consumed parent binding reappears. Unknown `Any`, unclassified pointer arithmetic, and process-local resources reject in safe transport. Dynamic indices are overlapping unless proven disjoint by range/partition facts.
 
+For the scalar-text actor compatibility surface, `ActorScheduler` owns registry,
+mailbox admission, ready publication, reply reservations, and terminal removal.
+`ActorRef` is only the copyable `(actor_id, scheduler authority)` capability; it
+cannot address a mailbox independently. Send and ask copy text-array arguments
+into `ActorMessage` value storage. Full, closed, or unknown admission fails
+before readiness is published. Stop removes the actor, cancels abandoned ask
+reservations, closes the mailbox, and returns true only for the first terminal
+transition observed by any copied reference. This compatibility payload is
+narrower than a typed `TransferEnvelopeV1` actor endpoint and never authorizes
+unchecked heap values.
+The scheduler records its creator OS-thread identity. Registry, admission,
+reply, lifecycle, query, and dispatch entrypoints compare the caller identity
+and fail closed outside that domain. A copied reference is therefore a routing
+capability, not permission for concurrent mutation; cross-thread actor sends
+must use a future synchronized scheduler command ingress.
+
 ## Layout policy
 
 The planner resolves ABI constraints first, then assurance/profile overrides, declaration attributes, project/target policy, cost-model/PGO suggestions, and conservative fallback. Layout plan and source revision key cached views. AoS is the reference; SoA/AoSoA/grouped views lower logical field projections without exposing contiguous element assumptions.

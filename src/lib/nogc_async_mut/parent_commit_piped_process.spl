@@ -6,14 +6,15 @@
 # inbox.  It never treats stdout bytes or child-local addresses as values.
 
 use std.common.structural.transfer.process_frame_codec.{
-    PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES,
-    decode_process_transfer_text_line
+    decode_process_transfer_text_line,
+    process_transfer_text_max_line_bytes
 }
 use std.common.structural.transfer.transfer_contracts.{ParallelExecutionDomain}
 use std.nogc_async_mut.parent_commit_inbox.{ParentCommitFrameInboxV1}
 use std.nogc_async_mut.io.process_ops.{
     process_close_piped,
     process_is_piped_alive,
+    process_kill,
     process_read_stdout,
     process_spawn_piped
 }
@@ -31,6 +32,9 @@ struct ParentCommitPipedProcessStatusV1:
     alive: bool
     closed: bool
     close_succeeded: bool
+    close_attempts: i64
+    cancelled: bool
+    naturally_exited: bool
     accepted: i64
     rejected: i64
     terminal_reason: text
@@ -61,7 +65,7 @@ class ParentCommitPipedResultReaderV1:
 impl ParentCommitPipedResultReaderV1:
     static fn create(inbox: ParentCommitFrameInboxV1) -> ParentCommitPipedResultReaderV1:
         ParentCommitPipedResultReaderV1.create_with_line_budget(
-            inbox, PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES)
+            inbox, process_transfer_text_max_line_bytes())
 
     static fn create_with_line_budget(inbox: ParentCommitFrameInboxV1,
                                       requested_max_line_bytes: i64) -> ParentCommitPipedResultReaderV1:
@@ -72,8 +76,8 @@ impl ParentCommitPipedResultReaderV1:
         silently enlarge the process transport beyond that frozen limit.
         """
         var max_line_bytes = requested_max_line_bytes
-        if max_line_bytes <= 0 or max_line_bytes > PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES:
-            max_line_bytes = PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES
+        if max_line_bytes <= 0 or max_line_bytes > process_transfer_text_max_line_bytes():
+            max_line_bytes = process_transfer_text_max_line_bytes()
         ParentCommitPipedResultReaderV1(
             inbox: inbox,
             max_line_bytes: max_line_bytes,
@@ -169,6 +173,13 @@ impl ParentCommitPipedResultReaderV1:
         self.closed = true
         self.inbox.close()
 
+    me revoke():
+        """Cancel retained child ownership; no accepted frame may resurrect."""
+        self.pending = ""
+        self.dropping_oversize_line = false
+        self.closed = true
+        self.inbox.revoke()
+
     fn pending_byte_count() -> i64:
         self.pending.len()
 
@@ -201,6 +212,9 @@ class ParentCommitPipedProcessSessionV1:
     reader: ParentCommitPipedResultReaderV1
     closed: bool
     close_succeeded: bool
+    close_attempts: i64
+    cancelled: bool
+    naturally_exited: bool
     accepted: i64
     rejected: i64
     terminal_reason: text
@@ -208,8 +222,7 @@ class ParentCommitPipedProcessSessionV1:
 impl ParentCommitPipedProcessSessionV1:
     static fn spawn(command: text, args: [text], session_generation: i64,
                     inbox: ParentCommitFrameInboxV1) -> ParentCommitPipedProcessSessionV1:
-        val binding_ok = session_generation >= 0
-            and inbox.expected_generation == session_generation
+        val binding_ok = session_generation > 0 and inbox.expected_generation == session_generation
         val pid = if not binding_ok or command == "":
             -1
         else:
@@ -220,6 +233,9 @@ impl ParentCommitPipedProcessSessionV1:
             reader: parent_commit_piped_result_reader_v1(inbox),
             closed: false,
             close_succeeded: false,
+            close_attempts: 0,
+            cancelled: false,
+            naturally_exited: false,
             accepted: 0,
             rejected: 0,
             terminal_reason: if not binding_ok:
@@ -240,18 +256,57 @@ impl ParentCommitPipedProcessSessionV1:
         val result = self.reader.poll_process_stdout(self.process_handle, max_lines)
         self.accepted = self.accepted + result.accepted
         self.rejected = self.rejected + result.rejected
+        # A bounded line budget may leave a complete coalesced suffix in the
+        # reader after the child has exited. Drain already-retained input on a
+        # later poll before invoking the native alive probe, because hosted
+        # providers release the pipe slot when they observe exit.
+        if self.reader.pending_byte_count() == 0 and not process_is_piped_alive(self.process_handle):
+            self.finish_natural_exit()
         result
 
+    me finish_natural_exit():
+        """Record the terminal reap performed by the native alive probe.
+
+        On hosted providers `process_is_piped_alive` reaps the exited child and
+        releases its pipe slot when it returns false. Calling close afterward
+        would therefore manufacture a `close-failed` result for an already
+        completed cleanup. Treat that provider transition as the session's one
+        successful close/reap receipt.
+        """
+        if self.closed:
+            return
+        self.reader.close()
+        self.closed = true
+        self.close_succeeded = true
+        self.close_attempts = self.close_attempts + 1
+        self.naturally_exited = true
+        self.terminal_reason = "exited"
+
     me close() -> bool:
+        self.close_with_reason("closed")
+
+    me cancel() -> bool:
+        """Revoke this session and close its native handle exactly once."""
         if self.closed:
             return self.close_succeeded
-        self.reader.close()
+        self.cancelled = true
+        self.reader.revoke()
+        if self.process_handle > 0:
+            process_kill(self.process_handle)
+        self.close_with_reason("cancelled")
+
+    me close_with_reason(reason: text) -> bool:
+        if self.closed:
+            return self.close_succeeded
+        if not self.cancelled:
+            self.reader.close()
         self.closed = true
         if self.process_handle <= 0:
             return false
+        self.close_attempts = self.close_attempts + 1
         self.close_succeeded = process_close_piped(self.process_handle)
         self.terminal_reason = if self.close_succeeded:
-            "closed"
+            reason
         else:
             "close-failed"
         self.close_succeeded
@@ -264,6 +319,9 @@ impl ParentCommitPipedProcessSessionV1:
                 and process_is_piped_alive(self.process_handle),
             closed: self.closed,
             close_succeeded: self.close_succeeded,
+            close_attempts: self.close_attempts,
+            cancelled: self.cancelled,
+            naturally_exited: self.naturally_exited,
             accepted: self.accepted,
             rejected: self.rejected,
             terminal_reason: self.terminal_reason)

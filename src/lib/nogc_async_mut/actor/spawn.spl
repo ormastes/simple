@@ -19,7 +19,7 @@
 #   val result = worker.ask("double", ["5"])
 
 use std.actor.actor.{Actor, HandlerTable}
-use std.actor.mailbox.{ActorMailbox, ActorMessage}
+use std.actor.mailbox.{ActorMailbox}
 use std.actor.scheduler.{get_scheduler, run_all, ActorScheduler}
 
 # ================================================================
@@ -29,10 +29,11 @@ use std.actor.scheduler.{get_scheduler, run_all, ActorScheduler}
 struct ActorRef:
     """Lightweight handle for sending messages to an actor.
 
-    ActorRef holds the actor ID, mailbox, and the scheduler authority that
-    admitted the actor. It can be copied, but every copy routes through that
-    same scheduler; a reference returned by spawn_on() never falls back to the
-    ambient global scheduler.
+    ActorRef holds only the actor ID and the scheduler authority that admitted
+    the actor. It can be copied, but every operation routes through that same
+    scheduler; a reference returned by spawn_on() never falls back to the
+    ambient global scheduler. Keeping the mailbox out of the reference prevents
+    a copied handle from bypassing scheduler-owned admission and lifecycle.
 
     Example:
         val ref = spawn(handlers)
@@ -40,7 +41,6 @@ struct ActorRef:
         val reply_id = ref.ask("compute", ["42"])
     """
     actor_id: i64
-    _mailbox: ActorMailbox
     _scheduler: ActorScheduler
 
 impl ActorRef:
@@ -57,13 +57,7 @@ impl ActorRef:
             method: Name of the receive handler to invoke
             args: Arguments as text values
         """
-        val msg = ActorMessage.fire_and_forget(method, args)
-        val accepted = self._mailbox.enqueue(msg)
-        if accepted:
-            # Ensure actor is in the scheduler's ready queue only after the
-            # mailbox's single owner has admitted the message.
-            self._scheduler._enqueue_ready(self.actor_id)
-        accepted
+        self._scheduler.send_message(self.actor_id, method, args)
 
     fn ask(method: text, args: [text]) -> i64:
         """Send a message and get a reply ID for later retrieval.
@@ -125,7 +119,7 @@ impl ActorRef:
 
     fn has_messages() -> bool:
         """Check if the actor has pending messages."""
-        not self._mailbox.is_empty()
+        self._scheduler.actor_has_messages(self.actor_id)
 
     fn to_string() -> text:
         """Debug representation."""
@@ -150,11 +144,9 @@ fn spawn(handlers: HandlerTable) -> ActorRef:
         run_all()
     """
     val actor = Actor.new(handlers)
-    val mailbox = actor.mailbox
-    val aid = actor.id
     val scheduler = get_scheduler()
-    scheduler.register_actor(actor)
-    ActorRef(actor_id: aid, _mailbox: mailbox, _scheduler: scheduler)
+    val aid = scheduler.register_actor(actor)
+    ActorRef(actor_id: aid, _scheduler: scheduler)
 
 fn spawn_with_mailbox(handlers: HandlerTable, mailbox: ActorMailbox) -> ActorRef:
     """Spawn an actor with a custom mailbox configuration.
@@ -167,11 +159,9 @@ fn spawn_with_mailbox(handlers: HandlerTable, mailbox: ActorMailbox) -> ActorRef
         ActorRef handle to the new actor
     """
     val actor = Actor.with_mailbox(handlers, mailbox)
-    val mb = actor.mailbox
-    val aid = actor.id
     val scheduler = get_scheduler()
-    scheduler.register_actor(actor)
-    ActorRef(actor_id: aid, _mailbox: mb, _scheduler: scheduler)
+    val aid = scheduler.register_actor(actor)
+    ActorRef(actor_id: aid, _scheduler: scheduler)
 
 fn spawn_on(scheduler: ActorScheduler, handlers: HandlerTable) -> ActorRef:
     """Spawn an actor on a specific scheduler (not the global one).
@@ -184,10 +174,8 @@ fn spawn_on(scheduler: ActorScheduler, handlers: HandlerTable) -> ActorRef:
         ActorRef handle to the new actor
     """
     val actor = Actor.new(handlers)
-    val mailbox = actor.mailbox
-    val aid = actor.id
-    scheduler.register_actor(actor)
-    ActorRef(actor_id: aid, _mailbox: mailbox, _scheduler: scheduler)
+    val aid = scheduler.register_actor(actor)
+    ActorRef(actor_id: aid, _scheduler: scheduler)
 
 # ================================================================
 # Pool and Broadcast Utilities

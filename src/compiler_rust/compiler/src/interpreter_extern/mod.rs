@@ -2826,7 +2826,7 @@ mod tests {
 
     #[test]
     fn actor_hosted_symbols_keep_dynamic_fallback() {
-        for name in ["rt_actor_spawn", "rt_actor_send", "rt_actor_recv"] {
+        for name in ["rt_actor_spawn", "rt_actor_send", "rt_actor_stop", "rt_actor_try_send", "rt_actor_recv"] {
             assert!(simple_common::RUNTIME_SYMBOL_NAMES.contains(&name));
             assert!(!EXTERN_DISPATCH.contains_key(name));
         }

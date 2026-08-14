@@ -52,12 +52,21 @@ oldest messages on overflow, and retains unbounded ask replies. Do not use it
 as a bounded or ownership-safe parallel boundary; its migration requires the
 typed mailbox and result-lifecycle work packages.
 
-The legacy actor mailbox now uses one class-backed state shared by copied
-`ActorRef` and scheduler values. This repairs the previous copied-queue split,
+The legacy actor mailbox now uses one class-backed state owned through its
+scheduler. `ActorRef` retains only its actor ID and admitting scheduler, so
+public send, ask, pending-work queries, and stop cannot enqueue through a
+separate mailbox handle. This repairs the previous copied-queue split,
 and actor stop now closes that shared state before it discards queued work, so
-future sends are rejected through every copy. This is still not an
-ownership-safe actor transport: native send/ask routing, close wakeups,
-cancellation, and typed transfer envelopes remain required.
+future sends are rejected through every copy. Native actor send now has an
+additive checked ABI that reports accepted versus invalid/full/disconnected;
+the legacy void symbol delegates to it for generated-code compatibility. The
+hosted Rust provider also has additive cooperative `rt_actor_stop`: the first
+stop closes the retained senders, removes scheduler mailbox admission, wakes a
+blocked receive, keeps the worker joinable, and makes `rt_actor_is_alive`
+false; later stops report false. Simple native `ActorRef.stop()` uses that
+checked lifecycle boundary. There is no C actor provider yet, and native ask
+plus typed transfer envelopes remain required before this becomes a complete
+ownership-safe actor transport.
 Mailbox reads, fullness checks, and statistics now take the same state mutex as
 enqueue/dequeue, and the mailbox exposes a retained-message high-water count
 for bounded-memory evidence. That metric does not establish native actor
@@ -67,16 +76,16 @@ ready IDs. It reclaims a half-consumed large prefix in bounded batches rather
 than slicing the front after every dispatch; this is an amortized scheduling
 storage repair, not evidence of multi-threaded actor execution.
 The scheduler itself is a class-backed authority. Every `ActorRef` retains the
-scheduler that admitted it, so `ask` and `stop` do not fall back to the ambient
-global scheduler. References copied from that actor retain the same routing
-identity. However, current `ActorRef.send()` calls the shared mailbox directly
-and only then mutates the scheduler ready queue. The scheduler registry, ready
-queue, and reply store are intentionally single-threaded and have no admission
-mutex. Therefore copied refs are not a proven cross-thread public API: a
-completion lane must route send/ask/stop through one checked scheduler-domain
-ingress (or explicitly constrain refs to that domain) before claiming one
-scheduler authority. `ActorRef.stop()` already uses the admitting scheduler to
-drain queued asks and release their reply reservations before the actor closes.
+scheduler that admitted it, and send/ask/stop resolve the actor through that
+registry rather than falling back to the ambient global scheduler or calling a
+mailbox from the reference. References copied from that actor retain the same
+routing identity. The scheduler records its creator OS-thread identity and
+rejects registry, send, ask, stop, query, and dispatch operations from other
+threads. The registry, ready queue, and reply store therefore remain an
+enforced single-threaded execution domain; cross-thread producers need a future
+synchronized command ingress. `ActorRef.stop()` drains queued asks and releases their reservations
+before close. A second stop reports `false`, exposing exactly one successful
+terminal removal without recreating discarded work.
 Each `Actor` is likewise class-backed: lifecycle state and error/dispatch
 counters remain with the scheduler’s actor handle instead of disappearing in
 value-array iteration.
@@ -112,8 +121,10 @@ their own ownership and lifecycle contract.
 Parent commit order is independent of child completion order. The bounded
 commit engine uses stable merge ordering, so equal keys preserve their
 left-to-right input order while large result batches avoid quadratic selection
-work. Payload application and concurrent publication remain owner-runtime
-responsibilities.
+work. `ParentCommitOwnerV1` owns those responsibilities for its narrow
+payload-token application root: it applies canonical ordered tokens to an
+off-root candidate, verifies the complete candidate, and publishes that root
+with revision/token metadata under one mutex.
 
 `ParentCommitOwnerV1` is the current internal runtime owner for that root. It
 serializes the live revision/token with a mutex and commits only fully
@@ -146,10 +157,10 @@ at the reader boundary; a closed inbox alone is not used as a reason to retain
 more child output.
 
 This is still not a complete application process API or an implicit retry
-queue. `ParentCommitPipedProcessSessionV1` now owns one piped child launch and
-reader, but stdin request protocol, parent-issued session freshness,
-cancellation, natural-exit reap/cleanup, and native backpressure evidence remain
-application/runtime work. A frame is consumed
+queue. `ParentCommitPipedProcessSessionV1` owns one piped child launch, reader,
+cancellation, natural-exit cleanup, and at-most-once native close attempt. A
+structured stdin request protocol and admitted native backpressure evidence
+remain application/runtime work. A frame is consumed
 once the parent drains it; a stale or conflicting batch remains rejected and
 the application must produce a new result against a new snapshot. The local
 deployed self-hosted runner currently fails its bounded `test --help` ABI probe
@@ -157,15 +168,16 @@ with status 139, so native child delivery, backpressure, and cleanup execution
 evidence remain required before using this internal path as production
 transport.
 
-For a real piped child, construct the inbox with
-`parent_commit_frame_inbox_v1_for_generation(capacity, generation)` and pass it
-to `parent_commit_piped_process_session_v1`. The generation must match or the
-child is not spawned. The generation is still caller-selected rather than
-issued by a freshness authority, so this is a bounded replay namespace, not yet
-PID-reuse/cancellation-safe session identity. Within that finite session, the parent rejects frames
+Obtain the generation from the sole long-lived
+`ParentCommitOwnerV1.issue_process_session_generation()`, construct the inbox
+with `parent_commit_frame_inbox_v1_for_generation(capacity, generation)`, and
+pass both to `parent_commit_piped_process_session_v1`. The generation must
+match or the child is not spawned; allocator exhaustion fails closed.
+Within that finite session, the parent rejects frames
 from another generation and repeated region IDs before retention. Poll only
-through the session owner and call `close()` when the child is terminal; close
-is idempotent and the status receipt reports the one recorded close result.
+through the session owner and call `close()` or `cancel()` when appropriate;
+poll reaps an observed natural exit. Close is idempotent and the status receipt
+reports cancellation/natural-exit state and the native close-attempt count.
 
 WP-18 now has internal runtime groundwork for a deliberately narrow bounded
 scalar pool-state pilot. Capacity counts pending, running, and completed but

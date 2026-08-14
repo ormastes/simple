@@ -19,3 +19,12 @@ Status: selected from the user-provided 2026-08-12 architecture brief.
 | NFR-PAR-005 | reproducible benchmark/receipt harness |
 | NFR-PAR-006 | parity matrix with blocked rows retained |
 | NFR-PAR-007 | policy resolution and critical diagnostic tests |
+
+The focused executable
+`test/03_system/feature/language/parent_commit_piped_result_spec.spl` traces
+NFR-PAR-001, NFR-PAR-002, NFR-PAR-003, and NFR-PAR-006 through deterministic
+typed receipts, finite ingress/reader budgets, malformed/replay fail-closed
+behavior, and an explicit blocked native-tooling row. Its authored mirror is
+`doc/06_spec/03_system/feature/language/parent_commit_piped_result_spec.md`.
+These references become execution evidence only after an admitted pure-Simple
+native verdict and do not substitute for the full portability matrix.

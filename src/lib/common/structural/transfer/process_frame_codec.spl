@@ -12,19 +12,25 @@ use std.common.structural.transfer.transfer_contracts.{
     parallel_transfer_payload_to_u8
 }
 use std.common.structural.transfer.transfer_codec.{
-    TRANSFER_ENVELOPE_WIRE_LEN,
     decode_transfer_envelope,
     encode_transfer_envelope,
+    transfer_envelope_wire_len,
     transfer_envelope_zero
 }
 
-val PROCESS_TRANSFER_FRAME_HEADER_LEN: i64 = TRANSFER_ENVELOPE_WIRE_LEN + 16
+val PROCESS_TRANSFER_FRAME_HEADER_LEN: i64 = 56
 val MAX_PROCESS_TRANSFER_BYTES: i64 = 4 * 1024 * 1024
 val PROCESS_TRANSFER_FNV1A_OFFSET: i64 = -3750763034362895579
 val PROCESS_TRANSFER_FNV1A_PRIME: i64 = 1099511628211
 val PROCESS_TRANSFER_TEXT_PREFIX: text = "SPRF1 "
 val PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES: i64 = PROCESS_TRANSFER_TEXT_PREFIX.len()
     + (PROCESS_TRANSFER_FRAME_HEADER_LEN + MAX_PROCESS_TRANSFER_BYTES) * 2
+
+fn process_transfer_frame_header_len() -> i64:
+    transfer_envelope_wire_len() + 16
+
+fn process_transfer_text_max_line_bytes() -> i64:
+    PROCESS_TRANSFER_TEXT_PREFIX.len() + (process_transfer_frame_header_len() + MAX_PROCESS_TRANSFER_BYTES) * 2
 
 struct ProcessTransferFrameV1:
     envelope: TransferEnvelopeV1
@@ -109,7 +115,7 @@ fn decode_process_transfer_text_line(line: text,
         normalized = normalized.substring(0, normalized.len() - 1)
     if not normalized.starts_with(PROCESS_TRANSFER_TEXT_PREFIX):
         return process_transfer_text_line_result(false, [], "missing-text-prefix")
-    if normalized.len() > PROCESS_TRANSFER_TEXT_MAX_LINE_BYTES:
+    if normalized.len() > process_transfer_text_max_line_bytes():
         return process_transfer_text_line_result(false, [], "oversize-text-line")
     val hex_start = PROCESS_TRANSFER_TEXT_PREFIX.len()
     val hex_len = normalized.len() - hex_start
@@ -135,7 +141,7 @@ fn encode_process_transfer_frame(value: ProcessTransferFrameV1) -> [u8]:
         or value.payload.len() > MAX_PROCESS_TRANSFER_BYTES:
         return out
     val envelope = encode_transfer_envelope(value.envelope)
-    if envelope.len() != TRANSFER_ENVELOPE_WIRE_LEN:
+    if envelope.len() != transfer_envelope_wire_len():
         return out
     out = process_transfer_append(out, envelope)
     out = wire_put_u64(out, value.payload.len())
@@ -145,11 +151,11 @@ fn encode_process_transfer_frame(value: ProcessTransferFrameV1) -> [u8]:
 fn decode_process_transfer_frame(data: [u8],
                                  target: ParallelExecutionDomain) -> ProcessTransferFrameResult:
     val zero = process_transfer_frame_zero()
-    if data.len() < PROCESS_TRANSFER_FRAME_HEADER_LEN:
+    if data.len() < process_transfer_frame_header_len():
         return ProcessTransferFrameResult(ok: false, value: zero, reason: "truncated")
     var envelope_bytes: [u8] = []
     var i = 0
-    while i < TRANSFER_ENVELOPE_WIRE_LEN:
+    while i < transfer_envelope_wire_len():
         envelope_bytes.push(data[i])
         i = i + 1
     val decoded = decode_transfer_envelope(envelope_bytes)
@@ -158,17 +164,17 @@ fn decode_process_transfer_frame(data: [u8],
     if parallel_execution_domain_to_u8(decoded.value.target_domain)
         != parallel_execution_domain_to_u8(target):
         return ProcessTransferFrameResult(ok: false, value: zero, reason: "wrong-target")
-    val payload_len = wire_get_u64(data, TRANSFER_ENVELOPE_WIRE_LEN)
+    val payload_len = wire_get_u64(data, transfer_envelope_wire_len())
     if payload_len < 0 or payload_len > MAX_PROCESS_TRANSFER_BYTES:
         return ProcessTransferFrameResult(ok: false, value: zero, reason: "invalid-payload-length")
-    if data.len() - PROCESS_TRANSFER_FRAME_HEADER_LEN != payload_len:
+    if data.len() - process_transfer_frame_header_len() != payload_len:
         return ProcessTransferFrameResult(ok: false, value: zero, reason: "invalid-wire-length")
     var payload: [u8] = []
     i = 0
     while i < payload_len:
-        payload.push(data[PROCESS_TRANSFER_FRAME_HEADER_LEN + i])
+        payload.push(data[process_transfer_frame_header_len() + i])
         i = i + 1
-    val expected = wire_get_u64(data, TRANSFER_ENVELOPE_WIRE_LEN + 8)
+    val expected = wire_get_u64(data, transfer_envelope_wire_len() + 8)
     if process_transfer_payload_checksum(payload) != expected:
         return ProcessTransferFrameResult(ok: false, value: zero, reason: "checksum-mismatch")
     ProcessTransferFrameResult(ok: true,

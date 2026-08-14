@@ -1,10 +1,34 @@
-# Native-only Process→Parent delivery gate for the bounded parent commit path.
-#
-# It deliberately uses the shipped piped process facade, not an in-memory
-# chunk, so a self-hosted native run proves the child stdout reader boundary.
+# codex-system-test
+# @req REQ-PAR-002 REQ-PAR-003 REQ-PAR-005 REQ-PAR-006 REQ-PAR-008 REQ-PAR-009 NFR-PAR-001 NFR-PAR-002 NFR-PAR-003 NFR-PAR-006
 
-use std.spec
-use std.io.{file_delete, file_write, shell_output_trimmed}
+"""
+# Parent-authoritative piped child-result evidence
+
+This executable system specification exercises the real process-transfer path
+from a bounded parent-owned session through validation, application-root
+verification, and deterministic parent commit. It is written for language and
+runtime maintainers reviewing actor/process ownership guarantees.
+
+The primary scenario starts a real child process. The child emits one armored
+result in two fragments and then replays the same frame. The parent session
+must retain the incomplete suffix, admit the first complete frame, reject the
+replay, commit only the admitted frame, and close the native handle at most
+once. Supporting scenarios make copied frame retention and atomic rollback
+independently observable.
+
+Requirements: REQ-PAR-002, REQ-PAR-003, REQ-PAR-005, REQ-PAR-006,
+REQ-PAR-008, REQ-PAR-009, NFR-PAR-001, NFR-PAR-002, NFR-PAR-003,
+NFR-PAR-006.
+
+Run with the admitted pure-Simple runtime:
+
+    bin/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl --mode=native
+
+The Rust bootstrap seed is not acceptance evidence. See the mirrored operator
+manual and system-test plan for the current runner/doc-generation boundary.
+"""
+
+use std.spec.*
 use std.common.structural.parallel_commit.commit_contracts.{
     ParallelCommitOrder,
     ParallelConflictPolicy,
@@ -14,6 +38,7 @@ use std.common.structural.parallel_commit.commit_contracts.{
 use std.common.structural.parallel_commit.commit_engine.{parallel_commit_state_v1}
 use std.common.structural.parallel_commit.result_envelope_codec.{encode_result_envelope}
 use std.common.structural.transfer.process_frame_codec.{
+    encode_process_transfer_frame,
     process_transfer_frame_v1,
     process_transfer_text_line_encode
 }
@@ -24,30 +49,37 @@ use std.common.structural.transfer.transfer_contracts.{
     transfer_envelope_v1
 }
 use std.nogc_async_mut.parent_commit_inbox.{
+    ParentCommitFrameInboxV1,
     parent_commit_frame_inbox_v1_for_generation
 }
-use std.nogc_async_mut.parent_commit_owner.{parent_commit_owner_v1}
+use std.nogc_async_mut.parent_commit_owner.{
+    ParentCommitMutationOutcomeV1,
+    ParentCommitOwnerV1,
+    parent_commit_candidate_v1,
+    parent_commit_owner_v1
+}
 use std.nogc_async_mut.parent_commit_piped_process.{
     parent_commit_piped_process_session_v1
 }
-use std.nogc_sync_mut.io.process_ops.{
-    process_spawn_piped
-}
 use std.thread_sffi.{thread_sleep}
 
-fn piped_process_extern_available() -> bool:
-    """Avoid a seed-interpreter extern abort; native evidence stays mandatory."""
-    val probe_path = "/tmp/simple_parent_commit_pipe_probe.spl"
-    val probe_src = "use std.nogc_sync_mut.io.{process_spawn_piped}\n\nfn main():\n    val pid = process_spawn_piped(\"true\", [])\n    if pid > 0:\n        print \"PIPED_OK\"\n    else:\n        print \"PIPED_FAIL\"\n"
-    file_write(probe_path, probe_src)
-    val output = shell_output_trimmed("bin/simple run {probe_path} 2>/dev/null", "")
-    file_delete(probe_path)
-    output.contains("PIPED_OK")
+fn child_result_frame(task_id: i64, payload: i64,
+                      generation: i64) -> [u8]:
+    val result = result_envelope_v1(4, task_id, 0, task_id,
+        ParallelResultKind.Patch, payload, "child-{task_id}")
+    val envelope = transfer_envelope_v1(task_id, generation,
+        ParallelExecutionDomain.Process,
+        ParallelExecutionDomain.Parent,
+        ParallelTransferMode.Copy,
+        ParallelTransferPayload.EncodedCopy,
+        0, false)
+    encode_process_transfer_frame(process_transfer_frame_v1(
+        envelope, encode_result_envelope(result)))
 
-fn child_result_line() -> text:
+fn child_result_line(generation: i64) -> text:
     val result = result_envelope_v1(4, 7, 0, 7,
         ParallelResultKind.Patch, 707, "child-7")
-    val envelope = transfer_envelope_v1(7, 41,
+    val envelope = transfer_envelope_v1(7, generation,
         ParallelExecutionDomain.Process,
         ParallelExecutionDomain.Parent,
         ParallelTransferMode.Copy,
@@ -56,43 +88,175 @@ fn child_result_line() -> text:
     process_transfer_text_line_encode(process_transfer_frame_v1(
         envelope, encode_result_envelope(result))).trim()
 
-describe "native piped parent commit result delivery":
-    it "delivers one armored child frame through the real stdout pipe":
-        if not piped_process_extern_available():
-            print "SKIP: piped-process extern unavailable in this interpreter runtime; self-hosted native evidence remains required"
-            return
-        val inbox = parent_commit_frame_inbox_v1_for_generation(1, 41)
-        val line = child_result_line()
+fn fragmented_replay_child_script(line: text) -> text:
+    val split_at = line.len() / 2
+    val first = line.substring(0, split_at)
+    val second = line.substring(split_at, line.len())
+    "printf '%s' '" + first
+        + "'; sleep 0.10; printf '%s\\n' '" + second
+        + "'; printf '%s\\n' '" + line + "'; sleep 0.10"
+
+fn drain_process_result_batch(owner: ParentCommitOwnerV1,
+                              inbox: ParentCommitFrameInboxV1,
+                              candidate_snapshot_token: i64,
+                              candidate_application_root: [i64]) -> ParentCommitMutationOutcomeV1:
+    val received = inbox.receive()
+    val candidate = parent_commit_candidate_v1(
+        candidate_snapshot_token, candidate_application_root)
+    if not received.ok:
+        return owner.commit_process_result_frames_with_candidate([], candidate)
+    owner.commit_process_result_frames_with_candidate([received.frame], candidate)
+
+describe "parent-authoritative piped child results":
+    it "should validate, commit, and close one fragmented child result":
+        step("Create a bounded parent-owned process session")
+        val owner = parent_commit_owner_v1(
+            parallel_commit_state_v1(4, 400),
+            ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        val generation = owner.issue_process_session_generation()
+        expect(generation).to_be_greater_than(0)
+        val inbox = parent_commit_frame_inbox_v1_for_generation(4, generation)
+        val line = child_result_line(generation)
         val session = parent_commit_piped_process_session_v1(
-            "/bin/echo", [line], 41, inbox)
-        assert_true(session.status().process_handle > 0)
-        if session.status().process_handle <= 0:
-            return
-        var delivered = false
+            "/bin/sh",
+            ["-c", fragmented_replay_child_script(line)],
+            generation,
+            inbox)
+        val initial = session.status()
+        expect(initial.process_handle).to_be_greater_than(0)
+        expect(initial.closed).to_equal(false)
+
+        step("Receive a fragmented encoded child result")
+        var accepted_total = 0
+        var rejected_total = 0
+        var saw_fragment = false
         var polls = 0
-        while polls < 40 and not delivered:
-            val read = session.poll(1)
-            if read.accepted == 1:
-                delivered = true
-            elif read.rejected > 0:
-                assert_equal(read.reason, "")
+        while polls < 120:
+            if accepted_total >= 1 and rejected_total >= 1 and session.status().closed:
                 break
-            if not delivered and session.status().alive:
+            val read = session.poll(2)
+            if accepted_total == 0 and read.pending_bytes > 0:
+                saw_fragment = true
+            accepted_total = accepted_total + read.accepted
+            rejected_total = rejected_total + read.rejected
+            polls = polls + 1
+            if not session.status().closed:
+                thread_sleep(5)
+        expect(saw_fragment).to_equal(true)
+        expect(accepted_total).to_equal(1)
+        expect(inbox.depth()).to_equal(1)
+        expect(session.reader.pending_high_water_byte_count()).to_be_greater_than(0)
+
+        step("Reject stale or replayed child output")
+        expect(rejected_total).to_equal(1)
+        val intake_stats = inbox.stats()
+        expect(intake_stats.accepted_frames).to_equal(1)
+        expect(intake_stats.rejected_replay_frames).to_equal(1)
+        expect(intake_stats.rejected_session_frames).to_equal(0)
+
+        step("Commit one validated batch at the parent")
+        val outcome = drain_process_result_batch(owner, inbox, 401, [707])
+        expect(outcome.commit.receipt.ok).to_equal(true)
+        expect(outcome.commit.receipt.ordered_task_ids).to_equal([7])
+        expect(outcome.commit.receipt.ordered_payload_tokens).to_equal([707])
+        expect(outcome.mutation.ok).to_equal(true)
+        expect(outcome.mutation.before_revision).to_equal(4)
+        expect(outcome.mutation.after_revision).to_equal(5)
+        expect(outcome.mutation.before_application_payload_root).to_equal([])
+        expect(outcome.mutation.after_application_payload_root).to_equal([707])
+        expect(inbox.depth()).to_equal(0)
+        if val snapshot = owner.snapshot():
+            expect(snapshot.revision).to_equal(5)
+            expect(snapshot.snapshot_token).to_equal(401)
+        else:
+            fail("committed parent snapshot must remain available")
+        if val application_root = owner.snapshot_application_payload_root():
+            expect(application_root).to_equal([707])
+        else:
+            fail("verified parent application root must remain available")
+
+        step("Close the child transport exactly once")
+        expect(session.close()).to_equal(true)
+        expect(session.close()).to_equal(true)
+        val terminal = session.status()
+        expect(terminal.closed).to_equal(true)
+        expect(terminal.alive).to_equal(false)
+        expect(terminal.close_attempts).to_equal(1)
+        if terminal.naturally_exited:
+            expect(terminal.terminal_reason).to_equal("exited")
+        else:
+            expect(terminal.terminal_reason).to_equal("closed")
+
+    it "should retain an owned copy before the producer mutates its frame":
+        val inbox = parent_commit_frame_inbox_v1_for_generation(2, 41)
+        val expected = child_result_frame(9, 909, 41)
+        var offered = child_result_frame(9, 909, 41)
+
+        expect(inbox.offer_process_result_frame(offered)).to_equal(true)
+        offered[0] = 0
+
+        val received = inbox.receive()
+        expect(received.ok).to_equal(true)
+        expect(received.frame).to_equal(expected)
+
+    it "should roll back a mixed valid and malformed process batch":
+        val owner = parent_commit_owner_v1(
+            parallel_commit_state_v1(4, 800),
+            ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        val valid = child_result_frame(21, 2100, 51)
+
+        val outcome = owner.commit_process_result_frames_with_candidate(
+            [valid, [0, 1, 2]], parent_commit_candidate_v1(801, [2100]))
+
+        expect(outcome.commit.receipt.ok).to_equal(false)
+        expect(outcome.mutation.ok).to_equal(false)
+        expect(outcome.mutation.reason).to_equal("invalid-process-result-frame")
+        expect(outcome.mutation.before_revision).to_equal(4)
+        expect(outcome.mutation.after_revision).to_equal(4)
+        expect(outcome.mutation.before_application_payload_root).to_equal([])
+        expect(outcome.mutation.after_application_payload_root).to_equal([])
+        if val snapshot = owner.snapshot():
+            expect(snapshot.revision).to_equal(4)
+            expect(snapshot.snapshot_token).to_equal(800)
+        else:
+            fail("rejected process batch must preserve the parent snapshot")
+        if val application_root = owner.snapshot_application_payload_root():
+            expect(application_root).to_equal([])
+        else:
+            fail("rejected process batch must preserve the application root")
+
+    it "should cancel a live child and revoke its accepted result":
+        val lifecycle_owner = parent_commit_owner_v1(
+            parallel_commit_state_v1(1, 100),
+            ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        val generation = lifecycle_owner.issue_process_session_generation()
+        expect(generation).to_be_greater_than(0)
+        val inbox = parent_commit_frame_inbox_v1_for_generation(1, generation)
+        val line = child_result_line(generation)
+        val session = parent_commit_piped_process_session_v1(
+            "/bin/sh", ["-c", "printf '%s\\n' '" + line + "'; sleep 5"],
+            generation, inbox)
+        expect(session.status().process_handle).to_be_greater_than(0)
+        var accepted = 0
+        var polls = 0
+        while polls < 40 and accepted == 0:
+            val read = session.poll(1)
+            accepted = accepted + read.accepted
+            if accepted == 0:
                 thread_sleep(5)
             polls = polls + 1
-        assert_true(delivered)
-        if delivered:
-            assert_true(session.reader.pending_high_water_byte_count() > 0)
-            assert_true(session.reader.pending_high_water_byte_count() <= line.len())
-            val owner = parent_commit_owner_v1(
-                parallel_commit_state_v1(4, 400),
-                ParallelCommitOrder.TaskIdThenSequence,
-                ParallelConflictPolicy.Reject)
-            val committed = owner.commit_next_process_result(inbox, 401)
-            assert_true(committed.receipt.ok)
-            assert_equal(committed.receipt.ordered_task_ids[0], 7)
-            assert_equal(committed.receipt.ordered_payload_tokens[0], 707)
-        assert_true(session.close())
-        assert_true(session.close())
-        assert_true(session.status().closed)
-        assert_equal(session.status().terminal_reason, "closed")
+        expect(accepted).to_equal(1)
+        expect(inbox.depth()).to_equal(1)
+        expect(session.cancel()).to_equal(true)
+        expect(session.cancel()).to_equal(true)
+        val terminal = session.status()
+        expect(terminal.cancelled).to_equal(true)
+        expect(terminal.closed).to_equal(true)
+        expect(terminal.alive).to_equal(false)
+        expect(terminal.close_attempts).to_equal(1)
+        expect(terminal.terminal_reason).to_equal("cancelled")
+        expect(inbox.depth()).to_equal(0)
+        expect(inbox.receive().reason).to_equal("closed")

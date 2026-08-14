@@ -635,6 +635,8 @@ pub use value::{
     rt_actor_recv,
     rt_actor_send,
     rt_actor_spawn,
+    rt_actor_stop,
+    rt_actor_try_send,
     // Raw memory allocation (zero-cost struct support)
     rt_alloc,
     // Array operations

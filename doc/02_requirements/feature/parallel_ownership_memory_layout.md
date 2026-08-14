@@ -29,3 +29,16 @@ Status: selected from the user-provided 2026-08-12 architecture brief.
 | REQ-PAR-008..009 | WP-03, WP-15 | deterministic replay and atomic-publish tests |
 | REQ-PAR-010 | WP-30 | routed-stage receipt and bypass probe |
 | REQ-MEM-004 | WP-26..27 | writer-set/allocator evidence |
+
+## Focused parent-authoritative process traceability
+
+The executable source
+`test/03_system/feature/language/parent_commit_piped_result_spec.spl` and its
+manual mirror
+`doc/06_spec/03_system/feature/language/parent_commit_piped_result_spec.md`
+map REQ-PAR-002, REQ-PAR-003, REQ-PAR-005, REQ-PAR-006, REQ-PAR-008, and
+REQ-PAR-009 to real-child framing/replay, copied retention, typed parent
+apply/verify, deterministic receipt, and rollback assertions. The source is
+wired, but the mapping remains execution-blocked until an admitted pure-Simple
+native verdict is retained; it is not a completion claim for the broader actor,
+cancellation, or backpressure requirements.

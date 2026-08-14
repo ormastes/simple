@@ -259,7 +259,7 @@ pub use objects::{
 pub use objects::{rt_weak_free, rt_weak_is_valid, rt_weak_new, rt_weak_upgrade};
 
 // Re-export actor SFFI functions
-pub use actors::{rt_actor_id, rt_actor_is_alive, rt_actor_join, rt_actor_recv, rt_actor_send, rt_actor_spawn, rt_wait};
+pub use actors::{rt_actor_id, rt_actor_is_alive, rt_actor_join, rt_actor_recv, rt_actor_send, rt_actor_spawn, rt_actor_stop, rt_actor_try_send, rt_wait};
 
 // Re-export channel SFFI functions
 pub use channels::{

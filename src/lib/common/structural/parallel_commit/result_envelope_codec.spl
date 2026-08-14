@@ -11,6 +11,7 @@ use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.structural.wire.{
     WIRE_ENVELOPE_LEN,
     wire_check_envelope,
+    wire_envelope_len,
     wire_get_u16,
     wire_get_u64,
     wire_get_u8,
@@ -32,6 +33,10 @@ use std.common.structural.parallel_commit.commit_contracts.{
 
 val RESULT_ENVELOPE_WIRE_FIXED_LEN: i64 = WIRE_ENVELOPE_LEN + 48
 val RESULT_ENVELOPE_MAX_KEY_BYTES: i64 = 256
+
+fn result_envelope_wire_fixed_len() -> i64:
+    """Return the frozen fixed width without a cross-module global read."""
+    wire_envelope_len() + 48
 
 struct ResultEnvelopeDecodeResult:
     ok: bool
@@ -85,11 +90,11 @@ fn encode_result_envelope(value: ResultEnvelopeV1) -> [u8]:
 
 fn decode_result_envelope(data: [u8]) -> ResultEnvelopeDecodeResult:
     val zero = result_envelope_zero()
-    if data.len() < RESULT_ENVELOPE_WIRE_FIXED_LEN:
+    if data.len() < result_envelope_wire_fixed_len():
         return ResultEnvelopeDecodeResult(ok: false, value: zero, reason: "truncated")
     if not wire_check_envelope(data, 0, result_envelope_magic(), PARALLEL_COMMIT_SCHEMA_VERSION):
         return ResultEnvelopeDecodeResult(ok: false, value: zero, reason: "invalid-envelope")
-    val off = WIRE_ENVELOPE_LEN
+    val off = wire_envelope_len()
     val kind = wire_get_u8(data, off + 32)
     if kind < 0 or kind > 4:
         return ResultEnvelopeDecodeResult(ok: false, value: zero, reason: "invalid-kind")
@@ -99,12 +104,12 @@ fn decode_result_envelope(data: [u8]) -> ResultEnvelopeDecodeResult:
     val key_len = wire_get_u16(data, off + 44)
     if key_len <= 0 or key_len > RESULT_ENVELOPE_MAX_KEY_BYTES:
         return ResultEnvelopeDecodeResult(ok: false, value: zero, reason: "invalid-key-length")
-    if data.len() != RESULT_ENVELOPE_WIRE_FIXED_LEN + key_len:
+    if data.len() != result_envelope_wire_fixed_len() + key_len:
         return ResultEnvelopeDecodeResult(ok: false, value: zero, reason: "invalid-wire-length")
     var key_bytes: [u8] = []
     var i = 0
     while i < key_len:
-        key_bytes.push(data[RESULT_ENVELOPE_WIRE_FIXED_LEN + i])
+        key_bytes.push(data[result_envelope_wire_fixed_len() + i])
         i = i + 1
     val key = match validated_utf8_bytes_to_text_linear(key_bytes):
         Err(_): return ResultEnvelopeDecodeResult(ok: false, value: zero, reason: "invalid-key-utf8")

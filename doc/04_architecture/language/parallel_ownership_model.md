@@ -24,27 +24,63 @@ bounded transport --> owner validation/order/conflict/apply --> Snapshot N+1
 
 `Local(owner, generation)` may freeze, begin move, begin scoped loan, or free. A move enters `InTransit`; receipt creates `Local(destination, generation + 1)`. A loan returns only at structured scope join. Source access after move is invalid. Device and process boundaries carry a lease/codec/handle, never an ordinary host address.
 
+### Actor admission authority
+
+The scalar-text `std.actor` compatibility path has one scheduler authority per
+actor. `ActorRef` contains only the actor identifier and that admitting
+`ActorScheduler`; it does not retain a separately callable mailbox handle.
+Public send, ask, pending-work queries, and terminal stop therefore resolve
+through the same scheduler registry. The scheduler admits a value-copied
+`ActorMessage` into the shared bounded `ActorMailbox` and publishes readiness
+only after admission succeeds. Unknown, full, and closed actors reject without
+ready-queue publication; stop drains work, cancels abandoned reply reservations,
+closes admission, and returns true only for the first terminal transition.
+The scheduler captures its creating OS-thread identity and all registry,
+admission, reply, lifecycle, and dispatch entrypoints fail closed when invoked
+from another thread. This makes the intentionally single-threaded execution
+domain enforced rather than merely documented; cross-thread producers require
+a future synchronized command ingress.
+
+This scalar-text compatibility path cannot transport dynamic heap values.
+Native RuntimeValue actor transport remains restricted to validated fixed inline
+transfer packets; typed heap/frozen/owned payloads require a future
+`TransferEnvelopeV1`-bound endpoint. In the hosted Rust provider,
+`rt_actor_try_send` exposes bounded admission and cooperative `rt_actor_stop`
+closes the shared sender owners, removes scheduler mailbox admission, wakes a
+blocked receive, and preserves joinability. The first stop succeeds, later
+stops fail, and `rt_actor_is_alive` reports false afterward. Simple native
+`ActorRef.stop()` routes through this checked boundary. This lifecycle contract
+does not claim forceful interruption of an already-running handler, and no C
+actor provider currently supplies parity.
+
 ### Landed parent ingress boundary
 
 `ParentCommitOwnerV1` is the one mutable root authority currently available to
-runtime applications. It serializes revision/token publication and delegates
-validation, deterministic ordering, and conflict resolution to the common
-commit engine. `ParentCommitFrameInboxV1` is a separate bounded ingress owner:
+runtime applications. It serializes revision/token metadata together with the
+canonical application payload-token root. Candidate publication validates and
+orders the complete child batch, applies that payload order to an off-root copy,
+verifies the copy against the candidate, then assigns both roots once under the
+same mutex. Its mutation receipt records both before/after roots; malformed,
+conflicting, or candidate-mismatched batches leave both unchanged.
+`ParentCommitFrameInboxV1` is a separate bounded ingress owner:
 it validates a Process-to-Parent frame plus its pointer-free `SPRS` result
 payload before retaining an independent byte copy. Admission requires both a
 frame slot and byte budget; the queue uses a cursor and releases exact retained
 bytes on receive. The owner may drain a finite batch and submit it to one
 common-engine transition.
 
-This boundary intentionally stops short of process execution. An OS IPC
-adapter must still supply child lifecycle, cancellation, and close wakeups;
-the inbox consumes a drained frame and never recreates a failed/stale child
-result. That keeps retry ownership explicit and prevents a parent from
-resurrecting a child-owned update after failure.
+`ParentCommitPipedProcessSessionV1` supplies the bounded OS-process adapter for
+this ingress. It owns the child handle, polls only through its paired reader,
+and has terminal close, cancellation, and natural-exit paths that attempt
+native close at most once. The inbox consumes a drained frame and never
+recreates a failed/stale child result, so cancellation or rejection cannot
+resurrect child-owned work.
 
-A production piped child is paired with a generation-bound inbox. The parent
-selects the nonnegative session generation before spawn; the session refuses to
-spawn if that generation differs from the inbox binding. Admission rejects a
+A production piped child is paired with a generation-bound inbox. The sole
+long-lived `ParentCommitOwnerV1` issues positive generations under its existing
+mutex; exhaustion fails closed instead of wrapping. The session constructor
+accepts that owner-issued generation and refuses to spawn if it differs from
+the inbox binding. Admission rejects a
 different generation and rejects a repeated region ID for the lifetime of that
 finite session. The inbox capacity is also the session's replay-table ceiling,
 so replay defense cannot grow without bound after receives drain queue slots.

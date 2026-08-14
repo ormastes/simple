@@ -73,7 +73,7 @@ impl ActorLifecycle {
 #[derive(Debug, Clone)]
 pub struct ActorHandle {
     id: usize,
-    inbox: mpsc::SyncSender<Message>,
+    inbox: Arc<Mutex<Option<mpsc::SyncSender<Message>>>>,
     outbox: Arc<Mutex<mpsc::Receiver<Message>>>,
     /// Explicit lifecycle state (replaces Option<JoinHandle>)
     lifecycle: Arc<Mutex<ActorLifecycle>>,
@@ -99,7 +99,7 @@ impl ActorHandle {
         };
         Self {
             id,
-            inbox,
+            inbox: Arc::new(Mutex::new(Some(inbox))),
             outbox: Arc::new(Mutex::new(outbox)),
             lifecycle: Arc::new(Mutex::new(lifecycle)),
         }
@@ -112,7 +112,28 @@ impl ActorHandle {
 
     /// Send a message to this actor.
     pub fn send(&self, msg: Message) -> Result<(), String> {
-        self.inbox.try_send(msg).map_err(|e| format!("send failed: {e}"))
+        let inbox = self.inbox.lock().map_err(|_| "actor inbox lock poisoned".to_string())?;
+        inbox
+            .as_ref()
+            .ok_or_else(|| "send failed: actor stopped".to_string())?
+            .try_send(msg)
+            .map_err(|e| format!("send failed: {e}"))
+    }
+
+    /// Close this handle's shared sender exactly once.
+    ///
+    /// Scheduler-owned sender copies must also be removed before a blocked
+    /// receiver observes disconnect; runtime `stop_actor` performs both steps.
+    pub fn close_inbox(&self) -> bool {
+        self.inbox
+            .lock()
+            .map(|mut inbox| inbox.take().is_some())
+            .unwrap_or(false)
+    }
+
+    /// Whether checked admission is still open for this actor.
+    pub fn is_inbox_open(&self) -> bool {
+        self.inbox.lock().map(|inbox| inbox.is_some()).unwrap_or(false)
     }
 
     /// Receive a message from this actor (blocking).
@@ -163,8 +184,8 @@ impl ActorHandle {
     }
 
     /// Get the inbox sender for registering with scheduler.
-    pub fn inbox_sender(&self) -> mpsc::SyncSender<Message> {
-        self.inbox.clone()
+    pub fn inbox_sender(&self) -> Option<mpsc::SyncSender<Message>> {
+        self.inbox.lock().ok()?.as_ref().cloned()
     }
 }
 

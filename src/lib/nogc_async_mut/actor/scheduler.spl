@@ -28,6 +28,7 @@
 use std.actor.actor.{Actor, HandlerTable, ActorState}
 use std.actor.mailbox.{ActorMailbox, ActorMessage}
 use std.env.variables.{env_has}
+use std.thread_sffi.{thread_current_id}
 
 val ACTOR_READY_QUEUE_COMPACT_MIN_CONSUMED: i64 = 64
 val ACTOR_REPLY_STORE_DEFAULT_CAPACITY: i64 = 256
@@ -42,6 +43,11 @@ fn actor_scheduler_ready_queue_should_compact(consumed: i64, total: i64) -> bool
     # multiplication overflow at large scheduler queues.
     consumed >= ACTOR_READY_QUEUE_COMPACT_MIN_CONSUMED
         and consumed >= total - consumed
+
+fn actor_scheduler_thread_domain_allows(owner_thread_id: i64,
+                                        caller_thread_id: i64) -> bool:
+    """Fail closed unless an operation runs in its scheduler's OS-thread domain."""
+    owner_thread_id > 0 and caller_thread_id == owner_thread_id
 
 # ================================================================
 # Reply Store
@@ -165,6 +171,7 @@ class ActorScheduler:
     total_dispatched: i64
     total_errors: i64
     trace_enabled: bool   # W2-6: set once at construction from env; zero cost on happy path
+    owner_thread_id: i64
 
 impl ActorScheduler:
     static fn new() -> ActorScheduler:
@@ -185,8 +192,14 @@ impl ActorScheduler:
             replies: ReplyStore.with_capacity(reply_capacity),
             total_dispatched: 0,
             total_errors: 0,
-            trace_enabled: env_has("SIMPLE_ACTOR_TRACE")
+            trace_enabled: env_has("SIMPLE_ACTOR_TRACE"),
+            owner_thread_id: thread_current_id()
         )
+
+    fn caller_owns_domain() -> bool:
+        """Check the explicit single-thread scheduler execution-domain guard."""
+        actor_scheduler_thread_domain_allows(
+            self.owner_thread_id, thread_current_id())
 
     me register_actor(act: Actor) -> i64:
         """Register an actor with the scheduler.
@@ -200,6 +213,8 @@ impl ActorScheduler:
         Returns:
             Actor ID
         """
+        if not self.caller_owns_domain():
+            return -1
         act.start()
         val aid = act.id
         self.actors.push(act)
@@ -213,6 +228,8 @@ impl ActorScheduler:
         Stops the actor and removes it from all internal structures.
         Returns false when this scheduler does not own the actor.
         """
+        if not self.caller_owns_domain():
+            return false
         var new_actors: [Actor] = []
         var removed = false
         for act in self.actors:
@@ -232,16 +249,33 @@ impl ActorScheduler:
 
     fn get_actor(actor_id: i64) -> Actor?:
         """Look up an actor by ID."""
+        if not self.caller_owns_domain():
+            return nil
         for act in self.actors:
             if act.id == actor_id:
                 return Some(act)
         nil
 
+    fn actor_has_messages(actor_id: i64) -> bool:
+        """Query pending work through the scheduler that owns the actor."""
+        if not self.caller_owns_domain():
+            return false
+        for act in self.actors:
+            if act.id == actor_id:
+                return act.has_messages()
+        false
+
     me send_message(actor_id: i64, method: text, args: [text]) -> bool:
         """Send a fire-and-forget message to an actor.
 
-        Returns true if the message was enqueued successfully.
+        This is the sole public-reference admission path. It resolves the actor
+        in this scheduler, asks the actor's shared bounded mailbox to retain an
+        isolated value copy of the scalar-text message, and publishes readiness
+        only after admission succeeds. Returns false for unknown, full, or
+        closed actors.
         """
+        if not self.caller_owns_domain():
+            return false
         for act in self.actors:
             if act.id == actor_id:
                 val msg = ActorMessage.fire_and_forget(method, args)
@@ -257,6 +291,8 @@ impl ActorScheduler:
         The caller can later retrieve the reply via get_reply(reply_id).
         Returns the reply ID, or -1 if the actor was not found.
         """
+        if not self.caller_owns_domain():
+            return -1
         for act in self.actors:
             if act.id == actor_id:
                 val reply_id = self.replies.allocate_id()
@@ -310,6 +346,8 @@ impl ActorScheduler:
 
         Returns true if there are more messages to process.
         """
+        if not self.caller_owns_domain():
+            return false
         if self._ready_pending_count() <= 0:
             self._refresh_ready_queue()
             if self._ready_pending_count() <= 0:

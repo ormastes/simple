@@ -22,9 +22,17 @@
 - Bounded Parent-to-Process/Process-to-Parent encoded frames with a real
   exec-child round trip.
 - `ParentCommitFrameInboxV1` generation/replay admission and
-  `ParentCommitPipedProcessSessionV1` single-handle, idempotent-close ownership.
-- `ParentCommitOwnerV1` serialized revision/token publication after complete
-  transfer/result validation.
+  `ParentCommitPipedProcessSessionV1` parent-issued generation,
+  cancellation-revoke, natural-reap, and single-close-attempt receipts.
+- `ParentCommitOwnerV1` serialized revision/token plus application
+  payload-token-root publication after complete transfer/result/candidate
+  validation, with before/after mutation receipts and atomic rollback.
+- Simple `ActorRef` operations route through one admitting scheduler and fail
+  closed outside its explicit OS-thread domain. The Rust provider exposes
+  checked actor try-send plus cooperative, exactly-once stop: shared sender
+  close wakes blocked receive, scheduler admission is removed, the worker stays
+  joinable, and liveness becomes false. It retains a void send compatibility
+  ABI; no C actor provider currently supplies parity.
 - Common constant-size functional owner snapshot-root transition with stale/conflict/duplicate
   rejection and canonical-order batch receipts.
 - Conservative dynamic-index overlap in the live borrow checker.
@@ -35,8 +43,11 @@
 - Ownership-token registry, generation transitions, rollback, and receipts.
 - HIR/MIR transfer operations and source invalidation in every compiler mode.
 - Production-complete process/device transport, structured task groups, task
-  arenas, payload-aware commit apply/verify adapters,
+  arenas, arbitrary application-schema commit adapters,
   and AoS/SoA/AoSoA lowering.
+- C/interpreter checked actor try-send/stop parity, collision-resistant process
+  session identity/PID-reuse proof, stdin request framing, and graph/schema
+  codecs.
 - Admitted self-hosted and real process/device system evidence.
 
 ## Operational rules
@@ -48,14 +59,13 @@
    inline packet path.
 5. Require finite queues, visible failure/backpressure, deterministic commit,
    and receipt identity before critical-mode claims.
-6. Do not infer a single actor authority from mailbox locking: current
-   `ActorRef.send()` bypasses scheduler admission, and the scheduler is
-   single-threaded. Choose a scheduler-domain restriction or one synchronized
-   scheduler ingress before claiming copied-ref concurrency.
-7. A caller-selected process generation bounds replay bookkeeping but is not a
-   parent-issued freshness identity. Cancellation revocation, PID reuse, and
-   natural-exit reap remain open until terminal receipts prove them. Track the
-   work in
+6. `ActorRef` now uses one scheduler-owned admission/lifecycle route with an
+   explicit single-thread domain guard. Do not upgrade fail-closed copied refs
+   into a cross-thread concurrency claim; a synchronized ingress would still
+   be required for that contract.
+7. Parent-issued generation, cancellation revocation, and natural-exit reap
+   receipts are landed. Collision-resistant session identity, PID reuse, and
+   provider cleanup parity remain open. Track them in
    `doc/08_tracking/bug/process_transfer_session_replay_identity_2026-08-12.md`.
 
 ## Focused native evidence
@@ -74,8 +84,17 @@ The current self-hosted production gate is:
 SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl --mode=native
 ```
 
+The executable now has the frozen five-step process flow, copied-frame
+isolation, typed candidate-root mutation/rollback assertions, no SKIP path, and
+explicit natural-exit/close-once checks. Its authored operator mirror is
+`doc/06_spec/03_system/feature/language/parent_commit_piped_result_spec.md`;
+the exact evidence and resume gates are in
+`doc/03_plan/sys_test/parent_authoritative_actor_process.md`.
+
 Do not run it until `bin/release/simple test --help` passes its bounded ABI
-probe; status 139 is a deployment blocker, not a spec verdict.
+probe; status 139 is a deployment blocker, not a spec verdict. The authored
+mirror is not a generated-manual or `sspec-maintain` PASS until those commands
+run successfully on an admitted pure-Simple runtime.
 
 Current `origin/main` has an unrelated missing `rt_io_tcp_probe_peer` re-export;
 do not count a temporary isolated-worktree omission of that export as part of

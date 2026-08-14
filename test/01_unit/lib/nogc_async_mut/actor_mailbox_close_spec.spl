@@ -1,5 +1,20 @@
 use std.spec
 use std.nogc_async_mut.actor.mailbox.{ActorMailbox, ActorMessage}
+use std.nogc_async_mut.actor.actor.{Actor, HandlerTable}
+use std.nogc_async_mut.actor.scheduler.{ActorScheduler}
+use std.nogc_async_mut.actor.spawn.{ActorRef}
+
+fn actor_close_echo(args: [text]) -> text:
+    if args.is_empty():
+        return ""
+    args[0]
+
+fn actor_ref_with_capacity(scheduler: ActorScheduler, capacity: i64) -> ActorRef:
+    var handlers = HandlerTable.new()
+    handlers.register("echo", actor_close_echo)
+    val actor = Actor.with_mailbox(handlers, ActorMailbox.new(capacity))
+    val actor_id = scheduler.register_actor(actor)
+    ActorRef(actor_id: actor_id, _scheduler: scheduler)
 
 describe "ActorMailbox shared close admission":
     it "rejects new sends after close but drains accepted FIFO work":
@@ -36,3 +51,39 @@ describe "ActorMailbox shared close admission":
         assert_true(mailbox.dequeue() != nil)
         assert_equal(mailbox.len(), 1)
         assert_equal(mailbox.pending_high_water_count(), 2)
+
+describe "ActorRef scheduler-owned admission and close":
+    it "routes copied references through one bounded scheduler authority":
+        val scheduler = ActorScheduler.new()
+        val original = actor_ref_with_capacity(scheduler, 1)
+        val copied = original
+        assert_true(original.send("echo", ["first"]))
+        assert_false(copied.send("echo", ["full"]))
+        assert_true(original.has_messages())
+        scheduler.run_until_idle()
+        assert_false(copied.has_messages())
+
+    it "rejects send and ask through every copied reference after stop":
+        val scheduler = ActorScheduler.new()
+        val original = actor_ref_with_capacity(scheduler, 2)
+        val copied = original
+        assert_true(original.send("echo", ["accepted-before-stop"]))
+        assert_true(copied.stop())
+        assert_false(original.send("echo", ["late"]))
+        assert_equal(copied.ask("echo", ["late-ask"]), -1)
+        assert_false(original.has_messages())
+        assert_equal(scheduler.outstanding_reply_count(), 0)
+        assert_false(original.stop())
+
+    it "retains an admission-time copy of caller arguments":
+        val scheduler = ActorScheduler.new()
+        val actor_ref = actor_ref_with_capacity(scheduler, 1)
+        var args = ["before"]
+        val reply_id = actor_ref.ask("echo", args)
+        assert_true(reply_id > 0)
+        args[0] = "after"
+        scheduler.run_until_idle()
+        if val reply = scheduler.consume_reply(reply_id):
+            assert_equal(reply, "before")
+        else:
+            assert_true(false)

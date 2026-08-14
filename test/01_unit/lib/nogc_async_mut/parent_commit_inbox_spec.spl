@@ -74,6 +74,16 @@ describe "ParentCommitFrameInboxV1 bounded process ingress":
         assert_equal(inbox.stats().accepted_frames, 3)
         assert_equal(inbox.stats().rejected_frames, 1)
 
+    it "retains an isolated copy when the offered frame is later mutated":
+        val inbox = parent_commit_frame_inbox_v1(1)
+        var offered = child_process_result_frame(1, 101)
+        val expected = child_process_result_frame(1, 101)
+        assert_true(inbox.offer_process_result_frame(offered))
+        offered[0] = 0
+        val received = inbox.receive()
+        assert_true(received.ok)
+        assert_equal(received.frame, expected)
+
     it "bounds retained bytes independently of frame-count capacity":
         val first = child_process_result_frame(1, 101)
         val second = child_process_result_frame(2, 102)
@@ -97,6 +107,18 @@ describe "ParentCommitFrameInboxV1 bounded process ingress":
         assert_false(inbox.offer_process_result_frame(child_process_result_frame(2, 102)))
         assert_true(inbox.receive().ok)
         assert_equal(inbox.receive().reason, "closed")
+
+    it "revokes accepted frames on cancellation without resurrection":
+        val inbox = parent_commit_frame_inbox_v1(2)
+        assert_true(inbox.offer_process_result_frame(
+            child_process_result_frame(1, 101)))
+        assert_equal(inbox.depth(), 1)
+        inbox.revoke()
+        assert_equal(inbox.depth(), 0)
+        assert_equal(inbox.retained_byte_count(), 0)
+        assert_equal(inbox.receive().reason, "closed")
+        assert_false(inbox.offer_process_result_frame(
+            child_process_result_frame(2, 102)))
 
     it "drains one accepted frame into the serialized parent root":
         val inbox = parent_commit_frame_inbox_v1(1)

@@ -66,6 +66,13 @@ impl Scheduler {
             None => Err(format!("unknown actor id {id}")),
         }
     }
+
+    fn close_mailbox(&self, id: usize) -> bool {
+        self.mailboxes
+            .lock()
+            .map(|mut mailboxes| mailboxes.remove(&id).is_some())
+            .unwrap_or(false)
+    }
 }
 
 fn scheduler() -> &'static Scheduler {
@@ -105,7 +112,11 @@ where
     let handle = ActorHandle::new(id, in_tx.clone(), out_rx, Some(jh));
     // Register inbox sender + a handle clone (shared lifecycle) with the
     // scheduler so cross-actor dispatch AND join_actor(id) both work.
-    scheduler().register(id, handle.inbox_sender(), handle.clone());
+    scheduler().register(
+        id,
+        handle.inbox_sender().expect("new actor inbox must be open"),
+        handle.clone(),
+    );
     handle
 }
 
@@ -117,6 +128,11 @@ pub fn send_to(id: usize, msg: Message) -> Result<(), String> {
 /// Join an actor by id (scheduler join table).
 pub fn join_actor(id: usize) -> Result<(), String> {
     scheduler().join(id)
+}
+
+/// Remove the scheduler-owned sender so a stopped actor's blocked receive wakes.
+pub fn stop_actor(id: usize) -> bool {
+    scheduler().close_mailbox(id)
 }
 
 /// Actor spawner that registers with the global scheduler.

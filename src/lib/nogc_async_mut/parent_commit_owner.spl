@@ -26,11 +26,48 @@ use std.common.structural.transfer.process_frame_codec.{decode_process_transfer_
 use std.common.structural.parallel_commit.result_envelope_codec.{decode_result_envelope}
 use std.nogc_async_mut.parent_commit_inbox.{ParentCommitFrameInboxV1}
 use std.thread_sffi.{MutexHandle, mutex_create}
+use std.nogc_async_mut.io.{time_now_unix_micros}
 
 struct ParentCommitSubmissionV1:
     """One child-created result paired with its checked return boundary."""
     transfer: TransferEnvelopeV1
     result: ResultEnvelopeV1
+
+struct ParentCommitCandidateV1:
+    """Application-created candidate root offered for atomic publication.
+
+    `application_payload_root` is the complete proposed application token root.
+    The owner independently applies the canonical result order and compares its
+    computed root before changing either live field.
+    """
+    snapshot_token: i64
+    application_payload_root: [i64]
+
+struct ParentCommitMutationReceiptV1:
+    ok: bool
+    before_revision: i64
+    after_revision: i64
+    before_snapshot_token: i64
+    after_snapshot_token: i64
+    before_application_payload_root: [i64]
+    after_application_payload_root: [i64]
+    applied_payload_tokens: [i64]
+    reason: text
+
+struct ParentCommitMutationOutcomeV1:
+    commit: ParallelCommitOutcomeV1
+    mutation: ParentCommitMutationReceiptV1
+
+fn parent_commit_candidate_v1(snapshot_token: i64,
+                              application_payload_root: [i64]) -> ParentCommitCandidateV1:
+    ParentCommitCandidateV1(snapshot_token: snapshot_token,
+        application_payload_root: application_payload_root)
+
+fn parent_commit_payload_root_copy(source: [i64]) -> [i64]:
+    var result: [i64] = []
+    for token in source:
+        result.push(token)
+    result
 
 fn parent_commit_submission_v1(transfer: TransferEnvelopeV1,
                                result: ResultEnvelopeV1) -> ParentCommitSubmissionV1:
@@ -46,36 +83,65 @@ fn parent_commit_submission_v1_well_formed(value: ParentCommitSubmissionV1) -> b
     """
     if not transfer_envelope_v1_boundary_allowed(value.transfer):
         return false
-    if parallel_execution_domain_to_u8(value.transfer.target_domain)
-        != parallel_execution_domain_to_u8(ParallelExecutionDomain.Parent):
+    if parallel_execution_domain_to_u8(value.transfer.target_domain) != parallel_execution_domain_to_u8(ParallelExecutionDomain.Parent):
         return false
-    if parallel_execution_domain_to_u8(value.transfer.source_domain)
-        == parallel_execution_domain_to_u8(ParallelExecutionDomain.Parent):
+    if parallel_execution_domain_to_u8(value.transfer.source_domain) == parallel_execution_domain_to_u8(ParallelExecutionDomain.Parent):
         return false
     true
 
 class ParentCommitOwnerV1:
     """One mutex-serialized authority for a parent snapshot root.
 
-    The owner never retains child envelopes after `commit`; only the common
-    transition's constant-size revision/token state survives. A failed batch
-    leaves that root unchanged, including stale and conflicting child results.
+    The owner never retains child envelopes after `commit`. It owns both the
+    common revision/token state and the application payload-token root. A failed
+    batch leaves both unchanged, including stale and conflicting child results.
     """
     state: ParallelCommitStateV1
+    application_payload_root: [i64]
     order: ParallelCommitOrder
     conflict: ParallelConflictPolicy
     mutex: MutexHandle
+    next_process_session_generation: i64
 
 impl ParentCommitOwnerV1:
     static fn create(initial: ParallelCommitStateV1,
                      order: ParallelCommitOrder,
                      conflict: ParallelConflictPolicy) -> ParentCommitOwnerV1:
+        ParentCommitOwnerV1.create_with_application_root(
+            initial, [], order, conflict)
+
+    static fn create_with_application_root(
+        initial: ParallelCommitStateV1,
+        application_payload_root: [i64],
+        order: ParallelCommitOrder,
+        conflict: ParallelConflictPolicy
+    ) -> ParentCommitOwnerV1:
+        var generation_seed = time_now_unix_micros()
+        if generation_seed < 0:
+            generation_seed = 0 - generation_seed
+        if generation_seed == 0:
+            generation_seed = 1
         ParentCommitOwnerV1(
             state: initial,
+            application_payload_root: parent_commit_payload_root_copy(
+                application_payload_root),
             order: order,
             conflict: conflict,
-            mutex: mutex_create()
+            mutex: mutex_create(),
+            next_process_session_generation: generation_seed
         )
+
+    me issue_process_session_generation() -> i64:
+        """Issue session identity from the sole long-lived parent authority."""
+        if not self.mutex.lock():
+            return 0
+        val issued = self.next_process_session_generation
+        if issued == 9223372036854775807:
+            self.mutex.unlock()
+            return 0
+        self.next_process_session_generation = issued + 1
+        self.mutex.unlock()
+        issued
 
     fn snapshot() -> ParallelCommitStateV1?:
         """Read the currently published root under the owner's mutex.
@@ -88,6 +154,14 @@ impl ParentCommitOwnerV1:
         val snapshot = self.state
         self.mutex.unlock()
         Some(snapshot)
+
+    fn snapshot_application_payload_root() -> [i64]?:
+        """Copy the canonical application payload root under the owner lock."""
+        if not self.mutex.lock():
+            return nil
+        val result = parent_commit_payload_root_copy(self.application_payload_root)
+        self.mutex.unlock()
+        Some(result)
 
     me commit(results: [ResultEnvelopeV1], candidate_snapshot_token: i64) -> ParallelCommitOutcomeV1:
         """Validate, order, and atomically publish one child-result batch.
@@ -102,6 +176,8 @@ impl ParentCommitOwnerV1:
         val outcome = parallel_commit_publish_envelopes(
             current, results, candidate_snapshot_token, self.order, self.conflict)
         if outcome.receipt.ok:
+            for token in outcome.receipt.ordered_payload_tokens:
+                self.application_payload_root.push(token)
             self.state = outcome.state
         self.mutex.unlock()
         outcome
@@ -122,6 +198,8 @@ impl ParentCommitOwnerV1:
         val outcome = parallel_commit_publish_envelopes(
             current, results, candidate_snapshot_token, self.order, self.conflict)
         if outcome.receipt.ok:
+            for token in outcome.receipt.ordered_payload_tokens:
+                self.application_payload_root.push(token)
             self.state = outcome.state
         self.mutex.unlock()
         outcome
@@ -159,6 +237,130 @@ impl ParentCommitOwnerV1:
             submissions.push(parent_commit_submission_v1(
                 decoded_frame.value.envelope, decoded_result.value))
         self.commit_submissions(submissions, candidate_snapshot_token)
+
+    me commit_process_result_frames_with_candidate(
+        frames: [[u8]],
+        candidate: ParentCommitCandidateV1
+    ) -> ParentCommitMutationOutcomeV1:
+        """Publish only after complete decode, application apply, and verify.
+
+        The candidate is child-independent application state built off to the
+        side.  This method validates every frame and the complete candidate
+        receipt before the single assignment to `self.state`.  Every failure
+        returns the unchanged root and a negative mutation receipt.
+        """
+        if frames.len() == 0:
+            return self.reject_candidate("empty-process-result-batch")
+        var submissions: [ParentCommitSubmissionV1] = []
+        for frame in frames:
+            val decoded_frame = decode_process_transfer_frame(
+                frame, ParallelExecutionDomain.Parent)
+            if not decoded_frame.ok:
+                return self.reject_candidate("invalid-process-result-frame")
+            val decoded_result = decode_result_envelope(decoded_frame.value.payload)
+            if not decoded_result.ok:
+                return self.reject_candidate("invalid-process-result-frame")
+            val submission = parent_commit_submission_v1(
+                decoded_frame.value.envelope, decoded_result.value)
+            if not parent_commit_submission_v1_well_formed(submission):
+                return self.reject_candidate("invalid-child-result-transfer")
+            submissions.push(submission)
+        if not self.mutex.lock():
+            return self.reject_candidate_unlocked("commit-owner-lock-unavailable")
+        val current = self.state
+        val current_application_payload_root = parent_commit_payload_root_copy(
+            self.application_payload_root)
+        var results: [ResultEnvelopeV1] = []
+        for submission in submissions:
+            results.push(submission.result)
+        val proposed = parallel_commit_publish_envelopes(
+            current, results, candidate.snapshot_token, self.order, self.conflict)
+        if not proposed.receipt.ok:
+            val rejected = self.candidate_failure_locked(proposed, proposed.receipt.reason)
+            self.mutex.unlock()
+            return rejected
+        var applied_root: [i64] = []
+        for token in current_application_payload_root:
+            applied_root.push(token)
+        for token in proposed.receipt.ordered_payload_tokens:
+            applied_root.push(token)
+        if applied_root != candidate.application_payload_root:
+            val rejected = self.candidate_failure_locked(
+                proposed, "candidate-application-root-mismatch")
+            self.mutex.unlock()
+            return rejected
+        self.state = proposed.state
+        self.application_payload_root = applied_root
+        val accepted = ParentCommitMutationOutcomeV1(
+            commit: proposed,
+            mutation: ParentCommitMutationReceiptV1(
+                ok: true,
+                before_revision: current.revision,
+                after_revision: proposed.state.revision,
+                before_snapshot_token: current.snapshot_token,
+                after_snapshot_token: proposed.state.snapshot_token,
+                before_application_payload_root: parent_commit_payload_root_copy(
+                    current_application_payload_root),
+                after_application_payload_root: parent_commit_payload_root_copy(applied_root),
+                applied_payload_tokens: parent_commit_payload_root_copy(
+                    proposed.receipt.ordered_payload_tokens),
+                reason: ""))
+        self.mutex.unlock()
+        accepted
+
+    fn candidate_failure_locked(_proposed: ParallelCommitOutcomeV1,
+                                reason: text) -> ParentCommitMutationOutcomeV1:
+        val current = self.state
+        val current_application_payload_root = parent_commit_payload_root_copy(
+            self.application_payload_root)
+        ParentCommitMutationOutcomeV1(
+            commit: ParallelCommitOutcomeV1(
+                state: current,
+                receipt: parallel_commit_receipt(false,
+                    current.revision, current.revision,
+                    current.snapshot_token, current.snapshot_token,
+                    0, [], [], [], reason)),
+            mutation: ParentCommitMutationReceiptV1(
+                ok: false,
+                before_revision: current.revision,
+                after_revision: current.revision,
+                before_snapshot_token: current.snapshot_token,
+                after_snapshot_token: current.snapshot_token,
+                before_application_payload_root: current_application_payload_root,
+                after_application_payload_root: current_application_payload_root,
+                applied_payload_tokens: [],
+                reason: reason))
+
+    me reject_candidate(reason: text) -> ParentCommitMutationOutcomeV1:
+        if not self.mutex.lock():
+            return self.reject_candidate_unlocked("commit-owner-lock-unavailable")
+        val rejected = self.candidate_failure_locked(self.failure(reason), reason)
+        self.mutex.unlock()
+        rejected
+
+    fn reject_candidate_unlocked(reason: text) -> ParentCommitMutationOutcomeV1:
+        # Lock acquisition failed, so canonical fields are deliberately not
+        # observed. Sentinel state makes the unavailable snapshot explicit.
+        val current = ParallelCommitStateV1(revision: -1, snapshot_token: -1)
+        val current_application_payload_root: [i64] = []
+        val failed = ParallelCommitOutcomeV1(
+            state: current,
+            receipt: parallel_commit_receipt(false,
+                current.revision, current.revision,
+                current.snapshot_token, current.snapshot_token,
+                0, [], [], [], reason))
+        ParentCommitMutationOutcomeV1(
+            commit: failed,
+            mutation: ParentCommitMutationReceiptV1(
+                ok: false,
+                before_revision: current.revision,
+                after_revision: current.revision,
+                before_snapshot_token: current.snapshot_token,
+                after_snapshot_token: current.snapshot_token,
+                before_application_payload_root: current_application_payload_root,
+                after_application_payload_root: current_application_payload_root,
+                applied_payload_tokens: [],
+                reason: reason))
 
     me commit_next_process_result(inbox: ParentCommitFrameInboxV1,
                                   candidate_snapshot_token: i64) -> ParallelCommitOutcomeV1:
@@ -239,3 +441,12 @@ fn parent_commit_owner_v1(initial: ParallelCommitStateV1,
                           conflict: ParallelConflictPolicy) -> ParentCommitOwnerV1:
     """Construct the local parent authority after validating its root."""
     ParentCommitOwnerV1.create(initial, order, conflict)
+
+fn parent_commit_owner_v1_with_application_root(
+    initial: ParallelCommitStateV1,
+    application_payload_root: [i64],
+    order: ParallelCommitOrder,
+    conflict: ParallelConflictPolicy
+) -> ParentCommitOwnerV1:
+    ParentCommitOwnerV1.create_with_application_root(
+        initial, application_payload_root, order, conflict)

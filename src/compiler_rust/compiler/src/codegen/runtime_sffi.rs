@@ -730,6 +730,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_async_mark_done", &[I64], &[]),
     RuntimeFuncSpec::new("rt_actor_spawn", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_actor_send", &[I64, I64], &[]),
+    RuntimeFuncSpec::new("rt_actor_stop", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_actor_try_send", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_actor_recv", &[], &[I64]),
     RuntimeFuncSpec::new("rt_actor_join", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_actor_reply", &[I64], &[I64]),

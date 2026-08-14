@@ -109,10 +109,11 @@ pub extern "C" fn rt_actor_spawn(body_func: u64, ctx: RuntimeValue) -> RuntimeVa
     alloc_actor(actor_id)
 }
 
-/// Send an inline runtime value to an actor.
-/// Heap-backed values require a typed transfer envelope and are rejected.
+/// Try to send an inline runtime value to an actor.
+/// Returns 1 only when the bounded actor inbox accepted the packet. Invalid
+/// actors, heap/reserved values, full inboxes, and disconnected actors return 0.
 #[no_mangle]
-pub extern "C" fn rt_actor_send(actor: RuntimeValue, message: RuntimeValue) {
+pub extern "C" fn rt_actor_try_send(actor: RuntimeValue, message: RuntimeValue) -> i64 {
     if let Some(actor_ptr) = as_actor_ptr(actor) {
         unsafe {
             let actor_id = (*actor_ptr).actor_id;
@@ -123,11 +124,34 @@ pub extern "C" fn rt_actor_send(actor: RuntimeValue, message: RuntimeValue) {
                     TransferDomain::Parent
                 };
                 if let Some(payload) = encode_inline_actor_message(message, source_domain, TransferDomain::Actor) {
-                    let _ = handle.send(payload);
+                    return i64::from(handle.send(payload).is_ok());
                 }
             }
         }
     }
+    0
+}
+
+/// Legacy void send ABI retained for existing generated code.
+#[no_mangle]
+pub extern "C" fn rt_actor_send(actor: RuntimeValue, message: RuntimeValue) {
+    let _ = rt_actor_try_send(actor, message);
+}
+
+/// Cooperatively stop an actor exactly once while preserving joinability.
+/// Closing both retained sender owners wakes a blocked inbox receive; actor
+/// code already executing outside receive remains cooperative.
+#[no_mangle]
+pub extern "C" fn rt_actor_stop(actor: RuntimeValue) -> i64 {
+    if let Some(actor_ptr) = as_actor_ptr(actor) {
+        let actor_id = unsafe { (*actor_ptr).actor_id };
+        if let Some(handle) = get_actor_handle(actor_id) {
+            let first = handle.close_inbox();
+            let _ = crate::concurrency::stop_actor(actor_id);
+            return i64::from(first);
+        }
+    }
+    0
 }
 
 /// Receive a message from the current actor's inbox (blocking with timeout).
@@ -228,7 +252,7 @@ pub extern "C" fn rt_actor_is_alive(actor: RuntimeValue) -> i64 {
         unsafe {
             let actor_id = (*actor_ptr).actor_id;
             if let Some(handle) = get_actor_handle(actor_id) {
-                if handle.is_running() {
+                if handle.is_running() && handle.is_inbox_open() {
                     return 1;
                 }
             }

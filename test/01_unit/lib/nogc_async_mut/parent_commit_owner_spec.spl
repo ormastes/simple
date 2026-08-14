@@ -1,5 +1,9 @@
 use std.spec
-use std.nogc_async_mut.parent_commit_owner.{parent_commit_owner_v1}
+use std.nogc_async_mut.parent_commit_owner.{
+    parent_commit_candidate_v1,
+    parent_commit_owner_v1,
+    parent_commit_owner_v1_with_application_root
+}
 use std.common.structural.parallel_commit.commit_contracts.{
     ParallelCommitOrder,
     ParallelConflictPolicy,
@@ -21,6 +25,16 @@ use std.common.structural.transfer.process_frame_codec.{
 }
 
 describe "ParentCommitOwnerV1 serialized publication":
+    it "issues unique process generations from the sole parent authority":
+        val owner = parent_commit_owner_v1(
+            parallel_commit_state_v1(1, 100),
+            ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        val first = owner.issue_process_session_generation()
+        val second = owner.issue_process_session_generation()
+        assert_true(first > 0)
+        assert_equal(second, first + 1)
+
     it "publishes one deterministic child batch and exposes the new root":
         val owner = parent_commit_owner_v1(
             parallel_commit_state_v1(4, 400),
@@ -145,3 +159,73 @@ describe "ParentCommitOwnerV1 serialized publication":
         assert_true(committed.receipt.ok)
         assert_equal(committed.receipt.ordered_task_ids[0], 2)
         assert_equal(committed.receipt.ordered_payload_tokens[1], 709)
+
+    it "publishes one verified application candidate with a mutation receipt":
+        val owner = parent_commit_owner_v1(
+            parallel_commit_state_v1(4, 400),
+            ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        val late = result_envelope_v1(4, 9, 0, 19,
+            ParallelResultKind.Patch, 709, "late")
+        val early = result_envelope_v1(4, 2, 0, 12,
+            ParallelResultKind.Patch, 702, "early")
+        val late_envelope = transfer_envelope_v1(19, 0,
+            ParallelExecutionDomain.Process, ParallelExecutionDomain.Parent,
+            ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy, 0, false)
+        val early_envelope = transfer_envelope_v1(12, 0,
+            ParallelExecutionDomain.Process, ParallelExecutionDomain.Parent,
+            ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy, 0, false)
+        val outcome = owner.commit_process_result_frames_with_candidate([
+            encode_process_transfer_frame(process_transfer_frame_v1(
+                late_envelope, encode_result_envelope(late))),
+            encode_process_transfer_frame(process_transfer_frame_v1(
+                early_envelope, encode_result_envelope(early)))
+        ], parent_commit_candidate_v1(401, [702, 709]))
+        assert_true(outcome.commit.receipt.ok)
+        assert_true(outcome.mutation.ok)
+        assert_equal(outcome.mutation.before_revision, 4)
+        assert_equal(outcome.mutation.after_revision, 5)
+        assert_equal(outcome.mutation.applied_payload_tokens, [702, 709])
+        if val payload_root = owner.snapshot_application_payload_root():
+            assert_equal(payload_root, [702, 709])
+        else:
+            assert_false(true)
+
+    it "rolls back the complete batch when apply verify or one frame fails":
+        val owner = parent_commit_owner_v1_with_application_root(
+            parallel_commit_state_v1(4, 400),
+            [600],
+            ParallelCommitOrder.TaskIdThenSequence,
+            ParallelConflictPolicy.Reject)
+        val result = result_envelope_v1(4, 7, 0, 17,
+            ParallelResultKind.Patch, 707, "child")
+        val envelope = transfer_envelope_v1(17, 0,
+            ParallelExecutionDomain.Process, ParallelExecutionDomain.Parent,
+            ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy, 0, false)
+        val frame = encode_process_transfer_frame(process_transfer_frame_v1(
+            envelope, encode_result_envelope(result)))
+        val mismatched = owner.commit_process_result_frames_with_candidate(
+            [frame], parent_commit_candidate_v1(401, [600, 999]))
+        assert_equal(mismatched.mutation.reason, "candidate-application-root-mismatch")
+        val malformed = owner.commit_process_result_frames_with_candidate(
+            [frame, [0, 1, 2]], parent_commit_candidate_v1(401, [600, 707]))
+        assert_equal(malformed.mutation.reason, "invalid-process-result-frame")
+        val conflicting_result = result_envelope_v1(4, 7, 0, 18,
+            ParallelResultKind.Patch, 708, "conflict")
+        val conflicting_envelope = transfer_envelope_v1(18, 0,
+            ParallelExecutionDomain.Process, ParallelExecutionDomain.Parent,
+            ParallelTransferMode.Copy, ParallelTransferPayload.EncodedCopy, 0, false)
+        val conflicting_frame = encode_process_transfer_frame(process_transfer_frame_v1(
+            conflicting_envelope, encode_result_envelope(conflicting_result)))
+        val conflict = owner.commit_process_result_frames_with_candidate(
+            [frame, conflicting_frame], parent_commit_candidate_v1(401, [600, 707, 708]))
+        assert_false(conflict.mutation.ok)
+        if val snapshot = owner.snapshot():
+            assert_equal(snapshot.revision, 4)
+            assert_equal(snapshot.snapshot_token, 400)
+        else:
+            assert_false(true)
+        if val payload_root = owner.snapshot_application_payload_root():
+            assert_equal(payload_root, [600])
+        else:
+            assert_false(true)

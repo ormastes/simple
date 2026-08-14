@@ -28,6 +28,10 @@ are retained only as uncommitted evidence candidates after the prior test-runner
 timeout; they must not be folded into a transport or storage change without the
 native callback gate above.
 
+The focused parent-result AC-5/6 authoring and handoff are tracked separately in
+`doc/03_plan/agent_tasks/parent_authoritative_actor_process.md`; its source and
+manual existence do not change P2's blocked native-verdict gate.
+
 ## WP-18 bounded pool handoff sequence
 
 The current `src/lib/nogc_async_mut/thread_pool.spl` is not a migration

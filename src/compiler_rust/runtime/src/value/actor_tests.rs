@@ -5,7 +5,7 @@
 
 use super::{
     decode_inline_actor_message, encode_inline_actor_message, rt_actor_id, rt_actor_is_alive, rt_actor_join,
-    rt_actor_recv, rt_actor_send, rt_actor_spawn,
+    rt_actor_recv, rt_actor_send, rt_actor_spawn, rt_actor_stop, rt_actor_try_send,
 };
 use crate::value::RuntimeValue;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -14,6 +14,7 @@ use std::time::Duration;
 
 // Test helper: Actor that stores execution flag
 static ACTOR_RAN: AtomicBool = AtomicBool::new(false);
+static STOPPED_ACTOR_WOKE: AtomicBool = AtomicBool::new(false);
 
 #[test]
 fn actor_wire_accepts_inline_values_and_rejects_heap_addresses() {
@@ -36,6 +37,53 @@ fn actor_wire_accepts_inline_values_and_rejects_heap_addresses() {
         super::TransferDomain::Actor
     )
     .is_none());
+}
+
+#[test]
+fn checked_actor_send_rejects_invalid_and_heap_values() {
+    assert_eq!(
+        rt_actor_try_send(RuntimeValue::from_int(7), RuntimeValue::from_int(1)),
+        0
+    );
+
+    extern "C" fn waiting_actor(_ctx: *const u8) {
+        thread::sleep(Duration::from_millis(100));
+    }
+    let actor = rt_actor_spawn(waiting_actor as *const () as u64, RuntimeValue::NIL);
+    assert_eq!(rt_actor_try_send(actor, RuntimeValue::from_raw(0x1001)), 0);
+    assert_eq!(rt_actor_try_send(actor, RuntimeValue::from_raw(0x1004)), 0);
+    assert_eq!(rt_actor_join(actor), 1);
+    assert_eq!(rt_actor_try_send(actor, RuntimeValue::from_int(1)), 0);
+}
+
+#[test]
+fn checked_actor_send_exposes_bounded_backpressure() {
+    extern "C" fn delayed_actor(_ctx: *const u8) {
+        thread::sleep(Duration::from_millis(200));
+    }
+    let actor = rt_actor_spawn(delayed_actor as *const () as u64, RuntimeValue::NIL);
+    for value in 0..simple_common::actor::DEFAULT_ACTOR_MAILBOX_CAPACITY {
+        assert_eq!(rt_actor_try_send(actor, RuntimeValue::from_int(value as i64)), 1);
+    }
+    assert_eq!(rt_actor_try_send(actor, RuntimeValue::from_int(999)), 0);
+    assert_eq!(rt_actor_join(actor), 1);
+}
+
+#[test]
+fn actor_stop_wakes_receive_and_transitions_once() {
+    extern "C" fn receiving_actor(_ctx: *const u8) {
+        let _ = rt_actor_recv();
+        STOPPED_ACTOR_WOKE.store(true, Ordering::SeqCst);
+    }
+
+    STOPPED_ACTOR_WOKE.store(false, Ordering::SeqCst);
+    let actor = rt_actor_spawn(receiving_actor as *const () as u64, RuntimeValue::NIL);
+    assert_eq!(rt_actor_stop(actor), 1);
+    assert_eq!(rt_actor_stop(actor), 0);
+    assert_eq!(rt_actor_is_alive(actor), 0);
+    assert_eq!(rt_actor_try_send(actor, RuntimeValue::from_int(1)), 0);
+    assert_eq!(rt_actor_join(actor), 1);
+    assert!(STOPPED_ACTOR_WOKE.load(Ordering::SeqCst));
 }
 
 extern "C" fn flag_setting_actor(_ctx: *const u8) {

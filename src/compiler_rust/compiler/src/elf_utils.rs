@@ -652,6 +652,8 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_future_await" => simple_runtime::rt_future_await as *const () as usize,
         "rt_actor_spawn" => simple_runtime::rt_actor_spawn as *const () as usize,
         "rt_actor_send" => simple_runtime::rt_actor_send as *const () as usize,
+        "rt_actor_stop" => simple_runtime::rt_actor_stop as *const () as usize,
+        "rt_actor_try_send" => simple_runtime::rt_actor_try_send as *const () as usize,
         "rt_actor_recv" => simple_runtime::rt_actor_recv as *const () as usize,
         "rt_pool_submit" => simple_runtime::rt_pool_submit as *const () as usize,
         "rt_pool_join" => simple_runtime::rt_pool_join as *const () as usize,

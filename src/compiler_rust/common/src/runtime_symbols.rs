@@ -714,6 +714,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_store_barrier",
     "rt_actor_spawn",
     "rt_actor_send",
+    "rt_actor_stop",
+    "rt_actor_try_send",
     "rt_actor_recv",
     // Generator operations
     "rt_generator_new",
