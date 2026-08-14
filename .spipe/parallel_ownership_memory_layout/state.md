@@ -828,3 +828,9 @@ in-progress
   only, retain credit through join+release, and keep Full/Closed/Invalid/stale
   states explicit without `GLOBAL_*` task registries. Native callback evidence
   remains the admission gate before public export or legacy-pool replacement.
+- test: Added `test/03_system/feature/usage/pool_state_i64_native_spec.spl`.
+  Its native gate requires capacity 2 to reject a third unreleased task, then
+  admit it after release; it verifies 41/42/43 scalar results, close/idle,
+  completed=3, outstanding=0, and destroy. It remains pending because the
+  available host binary is a bootstrap wrapper rather than a self-hosted test
+  runner usable from the isolated worktree.

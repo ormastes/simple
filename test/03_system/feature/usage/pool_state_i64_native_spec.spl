@@ -1,0 +1,55 @@
+# Native PoolStateV1 acceptance gate.
+#
+# This spec exercises the compiler-private scalar wrapper through the native
+# runtime. It is deliberately not a replacement for the public ThreadPool
+# contract: only direct fn(i64)->i64 values and inline i64 inputs are admitted.
+
+use std.spec.*
+use std.nogc_async_mut.thread_pool_state.*
+
+fn plus_one(value: i64) -> i64:
+    value + 1
+
+fn require_accepted(submission: PoolSubmitI64V1) -> PoolTaskI64V1:
+    if not submission.accepted():
+        fail("expected PoolStateV1 submission to be accepted")
+    submission.task
+
+describe "PoolStateV1 native scalar ownership":
+    it "keeps admission credit until joined results are released":
+        var state = PoolStateV1.create(2)
+        if not state.is_valid():
+            fail("expected native PoolStateV1 state")
+
+        var first = require_accepted(state.try_submit_i64(plus_one, 40))
+        var second = require_accepted(state.try_submit_i64(plus_one, 41))
+        expect(state.outstanding_count()).to_equal(2)
+
+        val full = state.try_submit_i64(plus_one, 42)
+        expect(full.status).to_equal(POOL_SUBMIT_FULL_V1)
+        expect(full.accepted()).to_equal(false)
+
+        val first_joined = first.join()
+        if not first_joined.valid:
+            fail("expected first PoolStateV1 result")
+        expect(first_joined.value).to_equal(41)
+        expect(first.release()).to_equal(true)
+        expect(state.outstanding_count()).to_equal(1)
+
+        var third = require_accepted(state.try_submit_i64(plus_one, 42))
+        val second_joined = second.join()
+        if not second_joined.valid:
+            fail("expected second PoolStateV1 result")
+        expect(second_joined.value).to_equal(42)
+        expect(second.release()).to_equal(true)
+        val third_joined = third.join()
+        if not third_joined.valid:
+            fail("expected third PoolStateV1 result")
+        expect(third_joined.value).to_equal(43)
+        expect(third.release()).to_equal(true)
+
+        expect(state.close()).to_equal(true)
+        expect(state.join_idle()).to_equal(true)
+        expect(state.completed_count()).to_equal(3)
+        expect(state.outstanding_count()).to_equal(0)
+        expect(state.destroy()).to_equal(true)
