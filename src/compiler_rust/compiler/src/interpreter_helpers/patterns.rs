@@ -497,8 +497,7 @@ pub(crate) fn handle_method_call_with_self_update(
         if let Some(place) = super::super::place::resolve_place(receiver, env, functions, classes, enums, impl_methods)?
         {
             if super::super::place::place_is_live(env, &place)
-                && ( !place.projections.is_empty()
-                    || matches!(env.get(&place.root), Some(Value::ByteArray(_) | Value::FrozenByteArray(_))))
+                && (!place.projections.is_empty() || matches!(env.get(&place.root), Some(Value::FrozenByteArray(_))))
             {
                 if place.projections.is_empty()
                     && matches!(env.get(&place.root), Some(Value::FrozenByteArray(_)))
@@ -506,7 +505,10 @@ pub(crate) fn handle_method_call_with_self_update(
                 {
                     let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT);
                     return Err(CompileError::semantic_with_context(
-                        format!("cannot call mutating method '{}' on frozen byte array '{}'", method, place.root),
+                        format!(
+                            "cannot call mutating method '{}' on frozen byte array '{}'",
+                            method, place.root
+                        ),
                         ctx,
                     ));
                 }
@@ -516,7 +518,10 @@ pub(crate) fn handle_method_call_with_self_update(
                 {
                     let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT);
                     return Err(CompileError::semantic_with_context(
-                        format!("cannot call mutating method '{}' on immutable byte array '{}'", method, place.root),
+                        format!(
+                            "cannot call mutating method '{}' on immutable byte array '{}'",
+                            method, place.root
+                        ),
                         ctx,
                     ));
                 }

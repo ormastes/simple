@@ -1,6 +1,32 @@
 //! Interpreter tests - extern
 
 use simple_driver::interpreter::run_code;
+use std::collections::HashSet;
+use std::fs;
+use tempfile::tempdir;
+
+struct InterpretedResult {
+    exit_code: i32,
+}
+
+fn run_interpreted_code(source: &str) -> Result<InterpretedResult, String> {
+    let dir = tempdir().map_err(|error| error.to_string())?;
+    let main_path = dir.path().join("main.spl");
+    fs::write(&main_path, source).map_err(|error| error.to_string())?;
+    simple_compiler::interpreter::clear_module_cache();
+    simple_compiler::interpreter::clear_interpreter_state();
+    let module = simple_compiler::pipeline::module_loader::load_module_with_imports(
+        &main_path,
+        &mut HashSet::new(),
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    simple_compiler::interpreter::set_current_file(Some(main_path.clone()));
+    let result = simple_compiler::interpreter::evaluate_module(&module.items)
+        .map(|exit_code| InterpretedResult { exit_code })
+        .map_err(|error| format!("{error:?}"));
+    simple_compiler::interpreter::set_current_file(None);
+    result
+}
 
 #[test]
 fn interpreter_error_handling_syntax() {
@@ -89,7 +115,7 @@ fn main() -> i32:
 
 #[test]
 fn interpreter_byte_array_identifier_mutators_write_back_with_cow() {
-    let writeback = run_code(
+    let writeback = run_interpreted_code(
         r#"
 extern fn rt_byte_array_new(len: i64) -> [u8]
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
@@ -99,8 +125,6 @@ fn main() -> i32:
     bytes.push(0x2du8)
     return (bytes.len() * 10 + rt_bytes_u8_at(bytes, 0)).to_i32()
 "#,
-        &[],
-        "",
     )
     .unwrap();
     assert_eq!(
@@ -108,7 +132,7 @@ fn main() -> i32:
         "identifier receiver must be rebound after push"
     );
 
-    let cow = run_code(
+    let cow = run_interpreted_code(
         r#"
 extern fn rt_byte_array_new(len: i64) -> [u8]
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
@@ -119,8 +143,6 @@ fn main() -> i32:
     bytes.push(0x09u8)
     return (alias.len() * 100 + rt_bytes_u8_at(alias, 0) * 10 + rt_bytes_u8_at(bytes, 1)).to_i32()
 "#,
-        &[],
-        "",
     )
     .unwrap();
     assert_eq!(
@@ -128,7 +150,7 @@ fn main() -> i32:
         "mutating one packed-byte alias must preserve its content and length"
     );
 
-    let pop_writeback = run_code(
+    let pop_writeback = run_interpreted_code(
         r#"
 extern fn rt_byte_array_new(len: i64) -> [u8]
 
@@ -138,8 +160,6 @@ fn main() -> i32:
     val removed = bytes.pop()
     return (removed.to_i64() * 10 + bytes.len()).to_i32()
 "#,
-        &[],
-        "",
     )
     .unwrap();
     assert_eq!(
@@ -150,7 +170,7 @@ fn main() -> i32:
 
 #[test]
 fn interpreter_byte_array_identifier_mutators_cover_packed_extend_and_structural_updates() {
-    let packed_extend = run_code(
+    let packed_extend = run_interpreted_code(
         r#"
 extern fn rt_byte_array_new(len: i64) -> [u8]
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
@@ -164,8 +184,6 @@ fn main() -> i32:
     bytes.extend(more)
     return (bytes.len() * 10 + rt_bytes_u8_at(bytes, 2)).to_i32()
 "#,
-        &[],
-        "",
     )
     .unwrap();
     assert_eq!(
@@ -173,7 +191,7 @@ fn main() -> i32:
         "packed [u8] extend must retain packed receiver semantics"
     );
 
-    let structural_updates = run_code(
+    let structural_updates = run_interpreted_code(
         r#"
 extern fn rt_byte_array_new(len: i64) -> [u8]
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
@@ -188,8 +206,6 @@ fn main() -> i32:
     bytes.clear()
     return (score + bytes.len()).to_i32()
 "#,
-        &[],
-        "",
     )
     .unwrap();
     assert_eq!(
@@ -200,7 +216,7 @@ fn main() -> i32:
 
 #[test]
 fn interpreter_byte_array_identifier_mutators_widen_on_non_u8_elements() {
-    let widened = run_code(
+    let widened = run_interpreted_code(
         r#"
 extern fn rt_byte_array_new(len: i64) -> [u8]
 
@@ -211,8 +227,6 @@ fn main() -> i32:
     bytes.append(0x02u8)
     return bytes.len().to_i32()
 "#,
-        &[],
-        "",
     )
     .unwrap();
     assert_eq!(
@@ -223,7 +237,7 @@ fn main() -> i32:
 
 #[test]
 fn interpreter_byte_array_identifier_mutators_reject_immutable_receivers() {
-    let constant = run_code(
+    let constant = run_interpreted_code(
         r#"
 extern fn rt_byte_array_new(len: i64) -> [u8]
 
@@ -232,15 +246,13 @@ fn main() -> i32:
     bytes.push(0x01u8)
     return 0
 "#,
-        &[],
-        "",
     );
     assert!(
         constant.is_err(),
         "a val ByteArray must reject identifier-mutating methods"
     );
 
-    let frozen = run_code(
+    let frozen = run_interpreted_code(
         r#"
 extern fn rt_byte_array_new(len: i64) -> [u8]
 
@@ -250,8 +262,6 @@ fn main() -> i32:
     frozen.push(0x01u8)
     return 0
 "#,
-        &[],
-        "",
     );
     assert!(
         frozen.is_err(),

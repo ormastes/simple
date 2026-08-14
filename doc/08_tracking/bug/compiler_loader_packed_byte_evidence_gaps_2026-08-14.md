@@ -15,3 +15,22 @@ against a disabled/broken implementation, and pass once in a fresh session.
 Owner: compiler interpreter/SFFI owner. Final reviewer: highest-capability
 reviewer. The Rust seed may exercise these Rust tests but may not substitute for
 the separate self-hosted Stage 4 admission and performance gates.
+
+## 2026-08-14 post-sync regression repair
+
+After rebasing onto `7ac900316dd5`, the existing focused semantic test exposed
+that the general place route had started intercepting a bare mutable
+`ByteArray`. Its empty projection could not be rebuilt by `updated_root`, so
+`bytes.push(7u8)` returned the enlarged value while leaving the identifier at
+length four. Bare mutable packed bytes now fall through to the identifier/COW
+owner; projected places and bare frozen receivers retain the general place
+route.
+
+The driver tests named “interpreter” were also using `run_code`, which compiles
+and executes SMF through `Runner` and therefore did not exercise the Rust
+interpreter owner they claim to cover. Their packed-byte cases now use a focused
+direct-interpreter helper that clears module/interpreter state for each source.
+Fresh evidence: `packed_byte_interpreter_semantics` passed 1/1 and the four
+`interpreter_byte_array_identifier_mutators` cases passed 4/4. PBL-01 remains
+open for concat/clone/equality and PBL-02 remains open for projected-place
+coverage; this repair does not promote either row.
