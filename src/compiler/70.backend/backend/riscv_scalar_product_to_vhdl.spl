@@ -1,0 +1,283 @@
+# Closed strict-VHDL composition for the bounded scalar RISC-V product.
+#
+# All connections are derived from HwScalarProductComposition.bindings.  This
+# renderer never invents a second retirement schema and never falls back to a
+# textual CPU implementation when a typed child or binding is unsupported.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.hwir.types.{CoreConfig, HwPort, hwir_vhdl_identifier}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_lsu_projection.{strict_riscv_scalar_lsu_projection}
+use compiler.backend.backend.riscv_scalar_csr_owner_to_vhdl.{compile_strict_riscv_scalar_csr_owner}
+use compiler.backend.backend.riscv_scalar_fence_owner_to_vhdl.{compile_strict_riscv_scalar_fence_owner}
+use compiler.mir.hwir.riscv_scalar_product_composition.{HwScalarProductBinding,
+    HwScalarProductComposition, strict_riscv_scalar_product_composition,
+    weave_hwir_scalar_commit_retire_observations_locked}
+use compiler.mir.hwir.aspects.{HwAspectLock, HwAspectPlan, HwRetireObservation}
+use compiler.backend.backend.hwir_to_vhdl.{HwirStrictVhdlResult,
+    render_strict_hwir_vhdl, render_strict_sequential_hwir}
+
+fn scalar_vhdl_type(width: i32) -> text:
+    if width == 1: return "std_logic"
+    "std_logic_vector(" + (width - 1).to_text() + " downto 0)"
+
+fn scalar_binding_signal(binding: HwScalarProductBinding) -> text:
+    "wire_" + binding.destination_owner + "_" + binding.destination_port
+
+fn scalar_source_signal(owner: text, port: text) -> text:
+    "source_" + owner + "_" + port
+
+fn scalar_zero(width: i32) -> text:
+    if width == 1: return "'0'"
+    "(others => '0')"
+
+fn scalar_input_actual(composition: HwScalarProductComposition,
+    owner: text, port: HwPort) -> text:
+    for binding in composition.bindings:
+        if binding.destination_owner == owner and binding.destination_port == port.name:
+            return scalar_binding_signal(binding)
+    port.name
+
+fn scalar_output_actual(composition: HwScalarProductComposition,
+    owner: text, port: HwPort) -> text:
+    for binding in composition.bindings:
+        if binding.source_owner == owner and binding.source_port == port.name:
+            return scalar_source_signal(owner, port.name)
+    "open"
+
+fn scalar_child_map(composition: HwScalarProductComposition,
+    owner: text, ports: [HwPort]) -> text:
+    var result = ""
+    var index = 0
+    for port in ports:
+        if index > 0: result = result + ","
+        val actual = if port.direction == "in":
+            scalar_input_actual(composition, owner, port)
+        else:
+            scalar_output_actual(composition, owner, port)
+        result = result + port.name + "=>" + actual
+        index = index + 1
+    result
+
+fn scalar_top_ports(composition: HwScalarProductComposition) -> [HwPort]:
+    composition.top_ports
+
+fn scalar_render_ports(ports: [HwPort]) -> text:
+    var result = ""
+    var index = 0
+    for port in ports:
+        result = result + "        " + port.name + " : " + port.direction + " " +
+            scalar_vhdl_type(port.bit_width)
+        if index + 1 < ports.len(): result = result + ";"
+        result = result + "\n"
+        index = index + 1
+    result
+
+fn scalar_render_wires(composition: HwScalarProductComposition) -> text:
+    var result = ""
+    var sources: [text] = []
+    for binding in composition.bindings:
+        if binding.destination_owner != "composition":
+            val wire_type = scalar_vhdl_type(binding.bit_width)
+            result = result + "    signal " + scalar_binding_signal(binding) + " : " + wire_type + ";\n"
+        if binding.source_owner != "composition" and not binding.kind.starts_with("constant_"):
+            val source = scalar_source_signal(binding.source_owner, binding.source_port)
+            if not sources.contains(source.lower()):
+                result = result + "    signal " + source + " : " + scalar_vhdl_type(binding.bit_width) + ";\n"
+                sources.push(source.lower())
+    result
+
+fn scalar_binding_source(binding: HwScalarProductBinding) -> text:
+    if binding.kind == "constant_one_to_acceptance": return "'1'"
+    if binding.kind.starts_with("constant_"): return scalar_zero(binding.bit_width)
+    if binding.source_owner == "composition": return binding.source_port
+    scalar_source_signal(binding.source_owner, binding.source_port)
+
+fn scalar_render_assignments(composition: HwScalarProductComposition) -> text:
+    var result = ""
+    for binding in composition.bindings:
+        val destination = if binding.destination_owner == "composition":
+            binding.destination_port
+        else:
+            scalar_binding_signal(binding)
+        result = result + "    " + destination + " <= " + scalar_binding_source(binding) + ";\n"
+    result
+
+pub fn scalar_product_driver_closure_diagnostic(
+    composition: HwScalarProductComposition) -> text:
+    var destinations: [text] = []
+    var source_widths: [text] = []
+    for binding in composition.bindings:
+        val destination = if binding.destination_owner == "composition":
+            binding.destination_port
+        else:
+            scalar_binding_signal(binding)
+        if destinations.contains(destination.lower()):
+            return "HWIR-E-RISCV-SCALAR-VHDL-DRIVER: every binding destination requires exactly one concurrent driver"
+        destinations.push(destination.lower())
+        if binding.source_owner != "composition" and not binding.kind.starts_with("constant_"):
+            val source_key = scalar_source_signal(binding.source_owner, binding.source_port).lower()
+            val width_key = source_key + "|" + binding.bit_width.to_text()
+            for known in source_widths:
+                if known.starts_with(source_key + "|") and known != width_key:
+                    return "HWIR-E-RISCV-SCALAR-VHDL-SOURCE: child output fanout requires one width-consistent canonical signal"
+            if not source_widths.contains(width_key): source_widths.push(width_key)
+    for port in composition.top_ports:
+        if port.direction == "out" and not destinations.contains(port.name.lower()):
+            return "HWIR-E-RISCV-SCALAR-VHDL-TOP: every top output requires exactly one concurrent driver"
+    ""
+
+fn render_strict_riscv_scalar_product_vhdl(
+    composition: HwScalarProductComposition, route: text) -> HwirStrictVhdlResult:
+    val diagnostic = composition.diagnostic()
+    if diagnostic != "": return HwirStrictVhdlResult.rejected(diagnostic)
+    val closure_error = scalar_product_driver_closure_diagnostic(composition)
+    if closure_error != "": return HwirStrictVhdlResult.rejected(closure_error)
+    val provider = if val fence = composition.fence_provider:
+        compile_strict_riscv_scalar_fence_owner(fence.entity_name, composition.config,
+            composition.instruction)
+    elif val csr = composition.csr_provider:
+        compile_strict_riscv_scalar_csr_owner(csr.entity_name, composition.config,
+            composition.instruction)
+    elif val muldiv = composition.muldiv_provider:
+        render_strict_sequential_hwir(muldiv, "hwir-gen2-scalar-muldiv-owner-v1")
+    elif val lsu = composition.lsu_provider:
+        render_strict_sequential_hwir(lsu, "hwir-gen2-scalar-lsu-owner-v1")
+    elif val stateless = composition.provider:
+        render_strict_hwir_vhdl(stateless)
+    else:
+        return HwirStrictVhdlResult.rejected(
+            "HWIR-E-RISCV-SCALAR-COMPOSITION-PROVIDER: product provider is absent")
+    if not provider.is_success(): return provider
+    # The projection exists only for an LSU-backed product.  Keep this as a
+    # statement-level branch rather than a nested conditional expression: the
+    # latter is rejected by the current Simple parser in this compilation path.
+    var lsu_projection_vhdl = HwirStrictVhdlResult.rejected("")
+    if val lsu = composition.lsu_provider:
+        val lsu_projection = strict_riscv_scalar_lsu_projection(lsu.child_entity,
+            composition.config, composition.lsu_config, composition.instruction)
+        if lsu_projection.is_err():
+            return HwirStrictVhdlResult.rejected(lsu_projection.err().unwrap())
+        lsu_projection_vhdl = render_strict_hwir_vhdl(lsu_projection.ok().unwrap())
+    if composition.lsu_provider != nil:
+        if not lsu_projection_vhdl.is_success(): return lsu_projection_vhdl
+        if lsu_projection_vhdl.hwir_graph_sha256 != composition.lsu_provider.unwrap().child_graph_sha256:
+            return HwirStrictVhdlResult.rejected(
+                "HWIR-E-RISCV-SCALAR-LSU-PROJECTION-HASH: reconstructed access projection must match owner child graph")
+    val acceptance = if val owner = composition.acceptance_owner:
+        render_strict_hwir_vhdl(owner)
+    else: HwirStrictVhdlResult.rejected("")
+    if composition.acceptance_owner != nil and not acceptance.is_success(): return acceptance
+    val skid = if val completion_skid = composition.completion_skid:
+        render_strict_sequential_hwir(completion_skid, "hwir-gen2-scalar-completion-skid-v1")
+    else: HwirStrictVhdlResult.rejected("")
+    if composition.completion_skid != nil and not skid.is_success(): return skid
+    val trap = render_strict_hwir_vhdl(composition.trap)
+    if not trap.is_success(): return trap
+    val owner = render_strict_sequential_hwir(composition.retirement_owner,
+        "hwir-gen2-scalar-retirement-owner-v1")
+    if not owner.is_success(): return owner
+    val faults = render_strict_hwir_vhdl(composition.fault_aggregator)
+    if not faults.is_success(): return faults
+    # module_root retains `:module` for lineage; the child graph has already
+    # validated the corresponding basic VHDL identifier.
+    val entity = composition.node_id.value.split(":")[0]
+    if not hwir_vhdl_identifier(entity):
+        return HwirStrictVhdlResult.rejected(
+            "HWIR-E-RISCV-SCALAR-COMPOSITION-ENTITY: product requires a legal VHDL entity name")
+    val top = "library ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n" +
+        "-- simple-hwir route=" + route + " profile=" +
+        composition.config.profile + " graph=" + composition.structural_sha256() + "\n" +
+        (if composition.retire_observations.len() > 0:
+            "-- simple-hwir scalar-retire-observers=" +
+                composition.retire_observations.len().to_text() + "\n" +
+                "-- simple-hwir aspect-lock=" + composition.aspect_lock_sha256 + "\n" +
+                "-- simple-hwir aspect-weave=" + composition.aspect_weave_sha256 + "\n"
+            else: "") +
+        "-- simple-hwir child-provider=" + provider.hwir_graph_sha256 + "\n" +
+        (if composition.acceptance_owner != nil:
+            "-- simple-hwir child-acceptance=" + acceptance.hwir_graph_sha256 + "\n" else: "") +
+        (if composition.completion_skid != nil:
+            "-- simple-hwir child-completion-skid=" + skid.hwir_graph_sha256 + "\n" else: "") +
+        "-- simple-hwir child-trap=" + trap.hwir_graph_sha256 + "\n" +
+        "-- simple-hwir child-retirement-owner=" + owner.hwir_graph_sha256 + "\n" +
+        "-- simple-hwir child-fault-aggregator=" + faults.hwir_graph_sha256 + "\n" +
+        "entity " + entity + " is port(\n" + scalar_render_ports(scalar_top_ports(composition)) +
+        "    ); end entity;\narchitecture rtl of " + entity + " is\n" +
+        scalar_render_wires(composition) + "begin\n" + scalar_render_assignments(composition) +
+        "    provider: entity work." +
+        (if val fence = composition.fence_provider: fence.entity_name
+            elif val csr = composition.csr_provider: csr.entity_name
+            elif val muldiv = composition.muldiv_provider: muldiv.entity_name
+            elif val lsu = composition.lsu_provider: lsu.entity_name
+            else: composition.provider.unwrap().summary.name) + " port map(" +
+        scalar_child_map(composition, "provider",
+            if val fence = composition.fence_provider: fence.ports
+            elif val csr = composition.csr_provider: csr.ports
+            elif val muldiv = composition.muldiv_provider: muldiv.ports
+            elif val lsu = composition.lsu_provider: lsu.ports
+            else: composition.provider.unwrap().ports) + ");\n" +
+        (if val acceptance_owner = composition.acceptance_owner:
+            "    acceptance_owner: entity work." + acceptance_owner.summary.name + " port map(" +
+            scalar_child_map(composition, "acceptance_owner", acceptance_owner.ports) + ");\n"
+            else: "") +
+        (if val completion_skid = composition.completion_skid:
+            "    completion_skid: entity work." + completion_skid.entity_name + " port map(" +
+            scalar_child_map(composition, "completion_skid", completion_skid.ports) + ");\n"
+            else: "") +
+        "    trap: entity work." + composition.trap.summary.name + " port map(" +
+        scalar_child_map(composition, "trap", composition.trap.ports) + ");\n" +
+        "    retirement_owner: entity work." + composition.retirement_owner.entity_name +
+        " port map(" + scalar_child_map(composition, "retirement_owner",
+            composition.retirement_owner.ports) + ");\n" +
+        "    fault_aggregator: entity work." + composition.fault_aggregator.summary.name +
+        " port map(" + scalar_child_map(composition, "fault_aggregator",
+            composition.fault_aggregator.ports) + ");\nend architecture rtl;\n"
+    HwirStrictVhdlResult(success: true,
+        vhdl: (if composition.lsu_provider != nil: lsu_projection_vhdl.vhdl + "\n" else: "") +
+            provider.vhdl + "\n" +
+            (if composition.acceptance_owner != nil: acceptance.vhdl + "\n" else: "") +
+            (if composition.completion_skid != nil: skid.vhdl + "\n" else: "") +
+            trap.vhdl + "\n" + owner.vhdl + "\n" + faults.vhdl + "\n" + top,
+        diagnostic: "", route: route,
+        module_node_id: composition.node_id.value,
+        config_xlen: composition.config.xlen,
+        config_profile: composition.config.profile,
+        hwir_graph_sha256: composition.structural_sha256())
+
+pub fn compile_strict_riscv_scalar_product(module_name: text,
+    config: CoreConfig, instruction: u32, lsu_config: LsuConfig) -> HwirStrictVhdlResult:
+    val composition = strict_riscv_scalar_product_composition(
+        module_name, config, instruction, lsu_config)
+    if composition.is_err():
+        return HwirStrictVhdlResult.rejected(composition.err().unwrap())
+    render_strict_riscv_scalar_product_vhdl(
+        composition.ok().unwrap(), "hwir-gen2-scalar-product-v2")
+
+pub fn compile_strict_riscv_scalar_product_with_retire_observations(
+    module_name: text, config: CoreConfig, instruction: u32,
+    lsu_config: LsuConfig, plan: HwAspectPlan, lock: HwAspectLock,
+    observations: [HwRetireObservation]) -> HwirStrictVhdlResult:
+    val composition = strict_riscv_scalar_product_composition(
+        module_name, config, instruction, lsu_config)
+    if composition.is_err():
+        return HwirStrictVhdlResult.rejected(composition.err().unwrap())
+    val woven = weave_hwir_scalar_commit_retire_observations_locked(
+        composition.ok().unwrap(), plan, lock, observations)
+    if woven.is_err():
+        return HwirStrictVhdlResult.rejected(woven.err().unwrap())
+    val weave_result = woven.ok().unwrap()
+    val rendered = render_strict_riscv_scalar_product_vhdl(
+        weave_result.composition, "hwir-gen2-scalar-product-aspect-v1")
+    if not rendered.is_success(): return rendered
+    HwirStrictVhdlResult(success: true,
+        vhdl: rendered.vhdl,
+        diagnostic: "", route: "hwir-gen2-scalar-product-aspect-v1",
+        module_node_id: rendered.module_node_id,
+        config_xlen: rendered.config_xlen,
+        config_profile: rendered.config_profile,
+        hwir_graph_sha256: rendered.hwir_graph_sha256)
+
+pub fn strict_riscv_scalar_product_rtl_sha256(result: HwirStrictVhdlResult) -> text:
+    if not result.is_success(): return ""
+    sha256_text(result.vhdl)

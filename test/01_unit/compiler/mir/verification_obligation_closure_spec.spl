@@ -1,0 +1,234 @@
+use std.spec
+use compiler.common.assurance.flight_rules.{assurance_text_hash}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_interfaces.{ProofObligationKindV1,
+    ExpectedEvidenceClassV1, ProofObligationV1}
+use compiler.common.assurance.formal_receipt.{ProofReceiptV1, TrustManifestV1}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1,
+    ReplayOutcomeV1, ReplayCheckerReceiptV1, IndependentReplayClosureV1,
+    close_independent_replay_v1}
+use compiler.mir.verification_obligation_closure.{VerificationClosureAuthoritiesV1,
+    VerificationObligationClosureV1, ProofObligationDischargeV1,
+    ProofUsesClosureManifestV1,
+    generate_verification_obligation_closure_v1,
+    validate_verification_obligation_closure_v1,
+    validate_verification_obligation_evidence_closure_v1,
+    generate_proof_uses_closure_manifest_v1,
+    validate_proof_uses_evidence_bindings_v1}
+
+fn authority_hash(label: text) -> text:
+    assurance_text_hash("fv2-vc-authority|" + label)
+
+fn closure_authorities(symbol: text, changed_normal: bool = false
+) -> VerificationClosureAuthoritiesV1:
+    val normal_label = if changed_normal: "normal-v2" else: "normal-v1"
+    VerificationClosureAuthoritiesV1(symbol, "sample.spl:10", authority_hash("type"),
+        authority_hash("pre-sat"), authority_hash("termination"),
+        authority_hash("memory"), authority_hash("effect"),
+        authority_hash(normal_label), authority_hash("error"),
+        authority_hash("invariant-init"), authority_hash("invariant-preserve"),
+        authority_hash("calls"), authority_hash("non-vacuity"),
+        authority_hash("lowering"), authority_hash("trust"))
+
+fn theorem_root_for_obligation(closure: VerificationObligationClosureV1,
+    obligation_id: text) -> text:
+    for index in 0..closure.obligations.len():
+        if closure.obligations[index].obligation_id == obligation_id:
+            return "FV2VC.proof_" + index.to_string()
+    ""
+
+fn proof_replay(artifact: text) -> IndependentReplayClosureV1:
+    val fresh = ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1",
+        ReplayCheckerClassV1.FreshLeanKernel, "leanchecker", "pinned",
+        sha256_text("fresh-lean-binary"), "FV2VC", "FV2VC.root", artifact, sha256_text("fresh-policy"),
+        sha256_text("fresh-output"), ReplayOutcomeV1.Accepted, "")
+    val independent = ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1",
+        ReplayCheckerClassV1.IndependentKernel, "nanoda", "pinned",
+        sha256_text("independent-kernel-binary"), "FV2VC", "FV2VC.root", artifact, sha256_text("independent-policy"),
+        sha256_text("independent-output"), ReplayOutcomeV1.Accepted, "")
+    close_independent_replay_v1(fresh, independent)
+
+fn proof_discharges(closure: VerificationObligationClosureV1
+) -> [ProofObligationDischargeV1]:
+    var result: [ProofObligationDischargeV1] = []
+    for index in 0..closure.obligations.len():
+        val obligation = closure.obligations[index]
+        val root = theorem_root_for_obligation(closure,
+            obligation.obligation_id)
+        var dependencies = ["fv2-obligation:" + obligation.obligation_id,
+            "fv2-proposition:" + obligation.proposition_hash]
+        for dependency_id in obligation.dependency_ids:
+            dependencies.push(theorem_root_for_obligation(closure,
+                dependency_id))
+        val artifact = sha256_text("proof-artifact-" + index.to_string())
+        val trust = TrustManifestV1(["propext"], [], [], [], [], [])
+        val replay = proof_replay(artifact)
+        val receipt = ProofReceiptV1(root, FormalStatus.ModelProven,
+            "cache", artifact, dependencies, "axiom-audit",
+            sha256_text(trust.canonical_text()), "", replay.hash())
+        result.push(ProofObligationDischargeV1(obligation.obligation_id,
+            obligation.proposition_hash, root, closure.closure_hash, receipt,
+            trust, replay))
+    result
+
+fn proof_discharges_with_manifest(closure: VerificationObligationClosureV1,
+    manifest: ProofUsesClosureManifestV1) -> [ProofObligationDischargeV1]:
+    var result = proof_discharges(closure)
+    for index in 0..result.len():
+        val original = result[index]
+        var dependencies = original.proof_receipt.theorem_dependencies.copy()
+        dependencies.push(manifest.bindings[index].external_theorem)
+        val receipt = ProofReceiptV1(original.proof_receipt.proof_root,
+            original.proof_receipt.status,
+            original.proof_receipt.cache_key_hash,
+            original.proof_receipt.artifact_hash, dependencies,
+            original.proof_receipt.axiom_audit_hash,
+            original.proof_receipt.trust_manifest_hash,
+            original.proof_receipt.compiler_certificate_hash,
+            original.proof_receipt.independent_replay_hash)
+        result[index] = ProofObligationDischargeV1(original.obligation_id,
+            original.proposition_hash, original.theorem_root,
+            original.closure_hash, receipt, original.trust_manifest,
+            original.replay_closure)
+    result
+
+describe "Verification 2.0 proof-obligation closure":
+    it "generates the exact deterministic thirteen-kind closure":
+        val first = generate_verification_obligation_closure_v1(
+            closure_authorities("sample::checked"))
+        val second = generate_verification_obligation_closure_v1(
+            closure_authorities("sample::checked"))
+        expect(first.closed()).to_equal(true)
+        expect(first.obligations.len()).to_equal(13)
+        expect(first.root_obligation_id).to_end_with("::fv2::trust-closure")
+        expect(first.closure_hash).to_equal(second.closure_hash)
+
+    it "binds trust closure to semantic proof and backend evidence":
+        val closure = generate_verification_obligation_closure_v1(
+            closure_authorities("sample::checked"))
+        val dependencies = closure.obligations[12].dependency_ids
+        expect(dependencies).to_contain("sample::checked::fv2::normal-postcondition")
+        expect(dependencies).to_contain("sample::checked::fv2::error-postcondition")
+        expect(dependencies).to_contain("sample::checked::fv2::invariant-preservation")
+        expect(dependencies).to_contain("sample::checked::fv2::call-contract-compatibility")
+        expect(dependencies).to_contain("sample::checked::fv2::non-vacuity-witness")
+        expect(dependencies).to_contain("sample::checked::fv2::backend-lowering-coverage")
+
+    it "invalidates identity when a proposition authority changes":
+        val original = generate_verification_obligation_closure_v1(
+            closure_authorities("sample::checked"))
+        val changed = generate_verification_obligation_closure_v1(
+            closure_authorities("sample::checked", true))
+        expect(original.closure_hash == changed.closure_hash).to_equal(false)
+
+    it "fails closed on an absent proposition authority":
+        val a = closure_authorities("sample::checked")
+        val missing = VerificationClosureAuthoritiesV1(a.symbol_id, a.source_span,
+            a.type_representation_hash, a.precondition_satisfiability_hash,
+            a.termination_or_bound_hash, a.memory_ownership_hash,
+            a.effect_frame_hash, "", a.error_postcondition_hash,
+            a.invariant_initialization_hash, a.invariant_preservation_hash,
+            a.call_compatibility_hash, a.non_vacuity_hash,
+            a.backend_lowering_hash, a.trust_closure_hash)
+        val closure = generate_verification_obligation_closure_v1(missing)
+        expect(closure.closed()).to_equal(false)
+        expect(closure.diagnostic).to_contain("AUTHORITY")
+
+    it "rejects an external dependency and a non-final trust root":
+        val closure = generate_verification_obligation_closure_v1(
+            closure_authorities("sample::checked"))
+        val original = closure.obligations[0]
+        val forged = ProofObligationV1(original.obligation_id, original.symbol_id,
+            original.kind, original.proposition_hash, ["outside::proof"],
+            ExpectedEvidenceClassV1.KernelReplayedCertificate,
+            original.source_span)
+        var external = closure.obligations.copy()
+        external[0] = forged
+        val external_result = validate_verification_obligation_closure_v1(
+            external, closure.root_obligation_id)
+        expect(external_result.diagnostic).to_contain("DEPENDENCY")
+        val wrong_root = validate_verification_obligation_closure_v1(
+            closure.obligations, closure.obligations[11].obligation_id)
+        expect(wrong_root.diagnostic).to_contain("ROOT-KIND")
+
+    it "closes only when every exact VC theorem is replay-bound":
+        val closure = generate_verification_obligation_closure_v1(
+            closure_authorities("sample::checked"))
+        val evidence = validate_verification_obligation_evidence_closure_v1(
+            closure, proof_discharges(closure))
+        expect(evidence.model_proven()).to_equal(true)
+        expect(evidence.discharge_hashes.len()).to_equal(13)
+        expect(evidence.root_theorem).to_equal("FV2VC.proof_12")
+        expect(evidence.status.permits_verified_release()).to_equal(false)
+
+    it "rejects a proof receipt missing transitive theorem dependencies":
+        val closure = generate_verification_obligation_closure_v1(
+            closure_authorities("sample::checked"))
+        var discharges = proof_discharges(closure)
+        val original = discharges[12]
+        val obligation = closure.obligations[12]
+        val incomplete = ProofReceiptV1(original.theorem_root,
+            FormalStatus.ModelProven, "cache",
+            original.proof_receipt.artifact_hash, [
+                "fv2-obligation:" + obligation.obligation_id,
+                "fv2-proposition:" + obligation.proposition_hash],
+            "axiom-audit", original.proof_receipt.trust_manifest_hash, "",
+            original.proof_receipt.independent_replay_hash)
+        discharges[12] = ProofObligationDischargeV1(
+            original.obligation_id, original.proposition_hash,
+            original.theorem_root, original.closure_hash, incomplete,
+            original.trust_manifest, original.replay_closure)
+        val evidence = validate_verification_obligation_evidence_closure_v1(
+            closure, discharges)
+        expect(evidence.model_proven()).to_equal(false)
+        expect(evidence.diagnostic).to_contain("DEPENDENCY")
+
+    it "rejects proposition drift and an open discharge trust boundary":
+        val closure = generate_verification_obligation_closure_v1(
+            closure_authorities("sample::checked"))
+        var drifted = proof_discharges(closure)
+        val first = drifted[0]
+        drifted[0] = ProofObligationDischargeV1(first.obligation_id,
+            "forged-proposition", first.theorem_root, first.closure_hash,
+            first.proof_receipt, first.trust_manifest, first.replay_closure)
+        val drift_result = validate_verification_obligation_evidence_closure_v1(
+            closure, drifted)
+        expect(drift_result.diagnostic).to_contain("PROPOSITION")
+        var open = proof_discharges(closure)
+        val trusted = open[0]
+        val open_trust = TrustManifestV1(["propext"], ["Project.hidden"],
+            [], [], [], [])
+        open[0] = ProofObligationDischargeV1(trusted.obligation_id,
+            trusted.proposition_hash, trusted.theorem_root,
+            trusted.closure_hash, trusted.proof_receipt, open_trust,
+            trusted.replay_closure)
+        val trust_result = validate_verification_obligation_evidence_closure_v1(
+            closure, open)
+        expect(trust_result.diagnostic).to_contain("REPLAY")
+
+    it "maps existing proof uses into every exact VC dependency":
+        val closure = generate_verification_obligation_closure_v1(
+            closure_authorities("sample::checked"))
+        val manifest = generate_proof_uses_closure_manifest_v1(closure,
+            "SampleProof.checked")
+        expect(manifest.closed()).to_equal(true)
+        expect(manifest.bindings.len()).to_equal(13)
+        expect(manifest.bindings[5].external_theorem).to_equal(
+            "SampleProof.checked")
+        expect(manifest.bindings[12].external_theorem).to_equal(
+            "SampleProof.checked_trust_closure")
+        val discharges = proof_discharges_with_manifest(closure, manifest)
+        expect(validate_proof_uses_evidence_bindings_v1(closure, manifest,
+            discharges)).to_equal("")
+
+    it "rejects an invalid or omitted proof-uses dependency":
+        val closure = generate_verification_obligation_closure_v1(
+            closure_authorities("sample::checked"))
+        val invalid = generate_proof_uses_closure_manifest_v1(closure,
+            "bad root")
+        expect(invalid.diagnostic).to_contain("ROOT")
+        val manifest = generate_proof_uses_closure_manifest_v1(closure,
+            "SampleProof.checked")
+        expect(validate_proof_uses_evidence_bindings_v1(closure, manifest,
+            proof_discharges(closure))).to_contain("DEPENDENCY")

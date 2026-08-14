@@ -1,0 +1,288 @@
+# One-outstanding typed scalar LSU transaction owner around the access projection.
+use compiler.mir.hwir.types.{CoreConfig, HwCombOp, HwCompareOp, HwConstant,
+    HwNodeId, HwOrigin, HwPort, HwSelectOp, HwSignal}
+use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard, HwSeqInstancePin,
+    HwSeqOutputBinding, HwSeqRule, HwSeqValue, HwSequentialModuleDef,
+    HwSequentialPlan, HwStateRegister}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_lsu_projection.{strict_riscv_scalar_lsu_access_plan,
+    strict_riscv_scalar_lsu_projection}
+use compiler.mir.hwir.riscv_scalar_completion_interface.{strict_hw_scalar_completion_interface}
+use compiler.mir.hwir.riscv_scalar_lsu_completion_adapter.{strict_riscv_scalar_lsu_completion_adapter}
+
+fn owner_ports(config: CoreConfig, bus: LsuConfig) -> [HwPort]:
+    val x = config.xlen; val pa = config.physical_address_bits
+    [HwPort.input("clk", "Bits", 1), HwPort.input("rst", "Bits", 1),
+        HwPort.input("dispatch_valid", "Bits", 1),
+        HwPort.input("dispatch_lineage_valid", "Bits", 1),
+        HwPort.input("dispatch_event_id", "Bits", 64),
+        HwPort.input("decode_event_id", "Bits", 64),
+        HwPort.input("illegal_valid", "Bits", 1),
+        HwPort.input("dispatch_privilege", "Bits", 2),
+        HwPort.input("dispatch_original_instruction", "Bits", 32),
+        HwPort.input("dispatch_canonical_instruction", "Bits", 32),
+        HwPort.input("dispatch_instruction_length_bytes", "Bits", 3),
+        HwPort.input("dispatch_pc_before", "Bits", x), HwPort.input("dispatch_pc_after", "Bits", x),
+        HwPort.input("dispatch_rd", "Bits", 5),
+        HwPort.input("rs1_index", "Bits", 5),
+        HwPort.input("rs2_index", "Bits", 5),
+        HwPort.input("rs1_value", "Bits", x),
+        HwPort.input("rs2_value", "Bits", x), HwPort.input("request_ready", "Bits", 1), HwPort.input("response_valid", "Bits", 1),
+        HwPort.input("response_id", "Bits", 64), HwPort.input("response_data", "Bits", bus.bus_data_bits),
+        HwPort.input("response_fault", "Bits", 1), HwPort.input("response_cause", "Bits", x),
+        HwPort.input("response_tval", "Bits", x), HwPort.input("completion_ready", "Bits", 1),
+        HwPort.output("dispatch_ready", "Bits", 1), HwPort.output("request_valid", "Bits", 1),
+        HwPort.output("request_id", "Bits", 64), HwPort.output("request_address", "Bits", pa),
+        HwPort.output("request_write", "Bits", 1), HwPort.output("request_byte_mask", "Bits", bus.byte_mask_bits),
+        HwPort.output("request_write_data", "Bits", bus.bus_data_bits),
+        HwPort.output("response_ready", "Bits", 1),
+        HwPort.output("completion_valid", "Bits", 1),
+        HwPort.output("completion_event_id", "Bits", 64),
+        HwPort.output("completion_decode_event_id", "Bits", 64),
+        HwPort.output("completion_illegal_valid", "Bits", 1),
+        HwPort.output("privilege", "Bits", 2), HwPort.output("original_instruction", "Bits", 32),
+        HwPort.output("canonical_instruction", "Bits", 32), HwPort.output("instruction_length_bytes", "Bits", 3),
+        HwPort.output("pc_before", "Bits", x), HwPort.output("pc_after", "Bits", x),
+        HwPort.output("rd", "Bits", 5), HwPort.output("rd_write", "Bits", 1), HwPort.output("rd_value", "Bits", x),
+        HwPort.output("memory_address", "Bits", x), HwPort.output("memory_read_mask", "Bits", 32),
+        HwPort.output("memory_write_mask", "Bits", 32), HwPort.output("memory_read_data", "Bits", x),
+        HwPort.output("memory_write_data", "Bits", x),
+        HwPort.output("execute_trap_valid", "Bits", 1), HwPort.output("execute_trap_cause", "Bits", x),
+        HwPort.output("execute_trap_tval", "Bits", x), HwPort.output("memory_trap_valid", "Bits", 1),
+        HwPort.output("memory_trap_cause", "Bits", x), HwPort.output("memory_trap_tval", "Bits", x),
+        HwPort.output("redirect_valid", "Bits", 1), HwPort.output("redirect_target", "Bits", x),
+        HwPort.output("protocol_fault", "Bits", 1)]
+
+fn projection_pins(config: CoreConfig, bus: LsuConfig) -> [HwSeqInstancePin]:
+    val x = config.xlen; val pa = config.physical_address_bits
+    [HwSeqInstancePin(port_name: "rs1_value", signal_name: "selected_rs1_value", direction: "in", bit_width: x),
+        HwSeqInstancePin(port_name: "rs2_value", signal_name: "rs2_value", direction: "in", bit_width: x),
+        HwSeqInstancePin(port_name: "response_data", signal_name: "response_data", direction: "in", bit_width: bus.bus_data_bits),
+        HwSeqInstancePin(port_name: "effective_address", signal_name: "projected_address", direction: "out", bit_width: pa),
+        HwSeqInstancePin(port_name: "access_size_bytes", signal_name: "projected_size", direction: "out", bit_width: 4),
+        HwSeqInstancePin(port_name: "request_write", signal_name: "projected_write", direction: "out", bit_width: 1),
+        HwSeqInstancePin(port_name: "request_byte_mask", signal_name: "projected_mask", direction: "out", bit_width: bus.byte_mask_bits),
+        HwSeqInstancePin(port_name: "request_write_data", signal_name: "projected_write_data", direction: "out", bit_width: bus.bus_data_bits),
+        HwSeqInstancePin(port_name: "load_value", signal_name: "projected_load_value", direction: "out", bit_width: x),
+        HwSeqInstancePin(port_name: "local_fault", signal_name: "projected_local_fault", direction: "out", bit_width: 1),
+        HwSeqInstancePin(port_name: "local_cause", signal_name: "projected_local_cause", direction: "out", bit_width: x),
+        HwSeqInstancePin(port_name: "local_tval", signal_name: "projected_local_tval", direction: "out", bit_width: x)]
+
+fn completion_metadata_capture(x: i32) -> [HwSeqAssignment]:
+    [HwSeqAssignment(destination: "event_id_reg", value: HwSeqValue.copy("dispatch_event_id", 64)),
+        HwSeqAssignment(destination: "decode_event_id_reg", value: HwSeqValue.copy("decode_event_id", 64)),
+        HwSeqAssignment(destination: "illegal_valid_reg", value: HwSeqValue.copy("illegal_valid", 1)),
+        HwSeqAssignment(destination: "privilege_reg", value: HwSeqValue.copy("dispatch_privilege", 2)),
+        HwSeqAssignment(destination: "original_instruction_reg", value: HwSeqValue.copy("dispatch_original_instruction", 32)),
+        HwSeqAssignment(destination: "canonical_instruction_reg", value: HwSeqValue.copy("dispatch_canonical_instruction", 32)),
+        HwSeqAssignment(destination: "instruction_length_reg", value: HwSeqValue.copy("dispatch_instruction_length_bytes", 3)),
+        HwSeqAssignment(destination: "pc_before_reg", value: HwSeqValue.copy("dispatch_pc_before", x)),
+        HwSeqAssignment(destination: "pc_after_reg", value: HwSeqValue.copy("dispatch_pc_after", x)),
+        HwSeqAssignment(destination: "rd_reg", value: HwSeqValue.copy("dispatch_rd", 5)),
+        HwSeqAssignment(destination: "rd_write_reg", value: HwSeqValue.copy("adapter_rd_write", 1)),
+        HwSeqAssignment(destination: "memory_address_reg", value: HwSeqValue.copy("adapter_memory_address", x)),
+        HwSeqAssignment(destination: "memory_read_mask_reg", value: HwSeqValue.copy("adapter_read_mask", 32)),
+        HwSeqAssignment(destination: "memory_write_mask_reg", value: HwSeqValue.copy("adapter_write_mask", 32)),
+        HwSeqAssignment(destination: "memory_read_data_reg", value: HwSeqValue.zero(x)),
+        HwSeqAssignment(destination: "memory_write_data_reg", value: HwSeqValue.copy("adapter_write_data", x))]
+
+fn local_fault_assignments(x: i32) -> [HwSeqAssignment]:
+    var result = [HwSeqAssignment(destination: "retire_reg", value: HwSeqValue.copy("dispatch_valid", 1)),
+        HwSeqAssignment(destination: "id_reg", value: HwSeqValue.copy("next_id_reg", 64)),
+        HwSeqAssignment(destination: "trap_reg", value: HwSeqValue.copy("projected_local_fault", 1)),
+        HwSeqAssignment(destination: "cause_reg", value: HwSeqValue.copy("projected_local_cause", x)),
+        HwSeqAssignment(destination: "tval_reg", value: HwSeqValue.copy("projected_local_tval", x)),
+        HwSeqAssignment(destination: "next_id_reg", value: HwSeqValue.increment("next_id_reg", 64))]
+    for assignment in completion_metadata_capture(x): result.push(assignment)
+    result
+
+fn request_capture_assignments(x: i32, pa: i32, bus: LsuConfig) -> [HwSeqAssignment]:
+    var result = [HwSeqAssignment(destination: "pending_reg", value: HwSeqValue.copy("dispatch_valid", 1)),
+        HwSeqAssignment(destination: "issued_reg", value: HwSeqValue.zero(1)),
+        HwSeqAssignment(destination: "id_reg", value: HwSeqValue.copy("next_id_reg", 64)),
+        HwSeqAssignment(destination: "next_id_reg", value: HwSeqValue.increment("next_id_reg", 64)),
+        HwSeqAssignment(destination: "address_reg", value: HwSeqValue.copy("projected_address", pa)),
+        HwSeqAssignment(destination: "write_reg", value: HwSeqValue.copy("projected_write", 1)),
+        HwSeqAssignment(destination: "mask_reg", value: HwSeqValue.copy("projected_mask", bus.byte_mask_bits)),
+        HwSeqAssignment(destination: "write_data_reg", value: HwSeqValue.copy("projected_write_data", bus.bus_data_bits)),
+        HwSeqAssignment(destination: "rs1_reg", value: HwSeqValue.copy("rs1_value", x))]
+    for assignment in completion_metadata_capture(x): result.push(assignment)
+    result
+
+fn completion_outputs(x: i32, pa: i32, bus: LsuConfig) -> [HwSeqOutputBinding]:
+    val request_visible = [HwSeqGuard.high("pending_reg"), HwSeqGuard.low("issued_reg")]
+    val retiring = [HwSeqGuard.high("retire_reg")]
+    val successful = [HwSeqGuard.high("retire_reg"), HwSeqGuard.low("trap_reg")]
+    val trapped = [HwSeqGuard.high("retire_reg"), HwSeqGuard.high("trap_reg")]
+    [HwSeqOutputBinding.all("dispatch_ready", [HwSeqGuard.low("pending_reg"), HwSeqGuard.low("retire_reg"), HwSeqGuard.low("fault_reg"), HwSeqGuard.low("id_terminal")]),
+        HwSeqOutputBinding.all("request_valid", request_visible),
+        HwSeqOutputBinding.guarded("request_id", "id_reg", 64, request_visible),
+        HwSeqOutputBinding.guarded("request_address", "address_reg", pa, request_visible),
+        HwSeqOutputBinding.guarded("request_write", "write_reg", 1, request_visible),
+        HwSeqOutputBinding.guarded("request_byte_mask", "mask_reg", bus.byte_mask_bits, request_visible),
+        HwSeqOutputBinding.guarded("request_write_data", "write_data_reg", bus.bus_data_bits, request_visible),
+        HwSeqOutputBinding.all("response_ready", [HwSeqGuard.high("pending_reg"),
+            HwSeqGuard.high("issued_reg"), HwSeqGuard.low("retire_reg"), HwSeqGuard.low("fault_reg")]),
+        HwSeqOutputBinding.direct("completion_valid", "retire_reg", 1),
+        HwSeqOutputBinding.guarded("completion_event_id", "event_id_reg", 64, retiring),
+        HwSeqOutputBinding.guarded("completion_decode_event_id", "decode_event_id_reg", 64, retiring),
+        HwSeqOutputBinding.guarded("completion_illegal_valid", "illegal_valid_reg", 1, retiring),
+        HwSeqOutputBinding.guarded("privilege", "privilege_reg", 2, retiring),
+        HwSeqOutputBinding.guarded("original_instruction", "original_instruction_reg", 32, retiring),
+        HwSeqOutputBinding.guarded("canonical_instruction", "canonical_instruction_reg", 32, retiring),
+        HwSeqOutputBinding.guarded("instruction_length_bytes", "instruction_length_reg", 3, retiring),
+        HwSeqOutputBinding.guarded("pc_before", "pc_before_reg", x, retiring),
+        HwSeqOutputBinding.guarded("pc_after", "pc_after_reg", x, retiring),
+        HwSeqOutputBinding.guarded("rd", "rd_reg", 5, successful),
+        HwSeqOutputBinding.guarded("rd_write", "rd_write_reg", 1, successful),
+        HwSeqOutputBinding.guarded("rd_value", "value_reg", x, successful),
+        HwSeqOutputBinding.guarded("memory_address", "memory_address_reg", x, successful),
+        HwSeqOutputBinding.guarded("memory_read_mask", "memory_read_mask_reg", 32, successful),
+        HwSeqOutputBinding.guarded("memory_write_mask", "memory_write_mask_reg", 32, successful),
+        HwSeqOutputBinding.guarded("memory_read_data", "memory_read_data_reg", x, successful),
+        HwSeqOutputBinding.guarded("memory_write_data", "memory_write_data_reg", x, successful),
+        HwSeqOutputBinding.direct("execute_trap_valid", "zero1", 1),
+        HwSeqOutputBinding.direct("execute_trap_cause", "zero_xlen", x),
+        HwSeqOutputBinding.direct("execute_trap_tval", "zero_xlen", x),
+        HwSeqOutputBinding.guarded("memory_trap_valid", "trap_reg", 1, retiring),
+        HwSeqOutputBinding.guarded("memory_trap_cause", "cause_reg", x, trapped),
+        HwSeqOutputBinding.guarded("memory_trap_tval", "tval_reg", x, trapped),
+        HwSeqOutputBinding.direct("redirect_valid", "zero1", 1),
+        HwSeqOutputBinding.direct("redirect_target", "zero_xlen", x),
+        HwSeqOutputBinding.direct("protocol_fault", "fault_reg", 1)]
+
+pub fn strict_riscv_scalar_lsu_owner(name: text, config: CoreConfig,
+    bus: LsuConfig, instruction: u32) -> Result<HwSequentialModuleDef, text>:
+    if name == "": return Err("HWIR-E-LSU-OWNER-ID: LSU owner requires a module name")
+    val child_name = name + "_access_projection"
+    val projection = strict_riscv_scalar_lsu_projection(child_name, config, bus, instruction)?
+    val access = strict_riscv_scalar_lsu_access_plan(config, instruction)?
+    val completion_interface = strict_hw_scalar_completion_interface(config, bus)?
+    val completion_adapter = strict_riscv_scalar_lsu_completion_adapter(
+        name + "_completion_adapter", config, bus)?
+    val x = config.xlen; val pa = config.physical_address_bits
+    val registers = [HwStateRegister(name: "pending_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "issued_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "retire_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "fault_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "next_id_reg", bit_width: 64, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "id_reg", bit_width: 64, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "event_id_reg", bit_width: 64, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "decode_event_id_reg", bit_width: 64, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "illegal_valid_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "address_reg", bit_width: pa, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "write_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "mask_reg", bit_width: bus.byte_mask_bits, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "write_data_reg", bit_width: bus.bus_data_bits, clock_domain: "default", reset_value: 0),
+        # The projection uses address low bits to extract a returned load.  Hold
+        # the accepted base operand so later input activity cannot change the
+        # response lane while the request is outstanding.
+        HwStateRegister(name: "rs1_reg", bit_width: x, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "privilege_reg", bit_width: 2, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "original_instruction_reg", bit_width: 32, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "canonical_instruction_reg", bit_width: 32, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "instruction_length_reg", bit_width: 3, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "pc_before_reg", bit_width: x, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "pc_after_reg", bit_width: x, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "rd_reg", bit_width: 5, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "rd_write_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "memory_address_reg", bit_width: x, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "memory_read_mask_reg", bit_width: 32, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "memory_write_mask_reg", bit_width: 32, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "memory_read_data_reg", bit_width: x, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "memory_write_data_reg", bit_width: x, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "value_reg", bit_width: x, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "trap_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "cause_reg", bit_width: x, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "tval_reg", bit_width: x, clock_domain: "default", reset_value: 0)]
+    val rules = [HwSeqRule(name: "retire_consume", guards: [HwSeqGuard.high("completion_ready"), HwSeqGuard.high("retire_reg"), HwSeqGuard.high("response_absent")], assignments: [HwSeqAssignment(destination: "retire_reg", value: HwSeqValue.zero(1)), HwSeqAssignment(destination: "id_reg", value: HwSeqValue.zero(64)), HwSeqAssignment(destination: "value_reg", value: HwSeqValue.zero(x)), HwSeqAssignment(destination: "trap_reg", value: HwSeqValue.zero(1)), HwSeqAssignment(destination: "cause_reg", value: HwSeqValue.zero(x)), HwSeqAssignment(destination: "tval_reg", value: HwSeqValue.zero(x))]),
+        HwSeqRule(name: "response_match", guards: [HwSeqGuard.high("response_valid"), HwSeqGuard.high("pending_reg"), HwSeqGuard.high("issued_reg"), HwSeqGuard.high("response_id_match")], assignments: [HwSeqAssignment(destination: "pending_reg", value: HwSeqValue.zero(1)), HwSeqAssignment(destination: "issued_reg", value: HwSeqValue.zero(1)), HwSeqAssignment(destination: "retire_reg", value: HwSeqValue.copy("response_valid", 1)), HwSeqAssignment(destination: "value_reg", value: HwSeqValue.copy("normalized_response_value", x)), HwSeqAssignment(destination: "memory_read_data_reg", value: HwSeqValue.copy("normalized_response_value", x)), HwSeqAssignment(destination: "trap_reg", value: HwSeqValue.copy("response_fault", 1)), HwSeqAssignment(destination: "cause_reg", value: HwSeqValue.copy("normalized_response_cause", x)), HwSeqAssignment(destination: "tval_reg", value: HwSeqValue.copy("normalized_response_tval", x))]),
+        HwSeqRule(name: "response_mismatch", guards: [HwSeqGuard.high("response_valid")], assignments: [HwSeqAssignment(destination: "fault_reg", value: HwSeqValue.copy("response_valid", 1))]),
+        HwSeqRule(name: "request_accept", guards: [HwSeqGuard.high("request_ready"), HwSeqGuard.high("pending_reg"), HwSeqGuard.low("issued_reg")], assignments: [HwSeqAssignment(destination: "issued_reg", value: HwSeqValue.copy("request_ready", 1))]),
+        HwSeqRule(name: "dispatch_identity_mismatch", guards: [HwSeqGuard.high("dispatch_valid"), HwSeqGuard.high("dispatch_identity_mismatch"), HwSeqGuard.low("pending_reg"), HwSeqGuard.low("retire_reg"), HwSeqGuard.low("fault_reg")], assignments: [HwSeqAssignment(destination: "fault_reg", value: HwSeqValue.copy("dispatch_valid", 1))]),
+        HwSeqRule(name: "local_fault", guards: [HwSeqGuard.high("dispatch_valid"), HwSeqGuard.high("dispatch_identity_match"), HwSeqGuard.high("projected_local_fault"), HwSeqGuard.low("id_terminal"), HwSeqGuard.low("pending_reg"), HwSeqGuard.low("retire_reg"), HwSeqGuard.low("fault_reg")], assignments: local_fault_assignments(x)),
+        HwSeqRule(name: "id_exhaustion", guards: [HwSeqGuard.high("dispatch_valid"), HwSeqGuard.all_ones("next_id_reg"), HwSeqGuard.low("pending_reg"), HwSeqGuard.low("retire_reg"), HwSeqGuard.low("fault_reg")], assignments: [HwSeqAssignment(destination: "fault_reg", value: HwSeqValue.copy("dispatch_valid", 1))]),
+        HwSeqRule(name: "request_capture", guards: [HwSeqGuard.high("dispatch_valid"), HwSeqGuard.high("dispatch_identity_match"), HwSeqGuard.low("projected_local_fault"), HwSeqGuard.low("id_terminal"), HwSeqGuard.low("pending_reg"), HwSeqGuard.low("retire_reg"), HwSeqGuard.low("fault_reg")], assignments: request_capture_assignments(x, pa, bus))]
+    val outputs = completion_outputs(x, pa, bus)
+    val plan = HwSequentialPlan(owner_id: HwNodeId.child(name, "sequential"), registers: registers, rules: rules, outputs: outputs, decoder_pins: projection_pins(config, bus))
+    val module = HwSequentialModuleDef(node_id: HwNodeId.module_root(name), entity_name: name,
+        config: config, origins: [HwOrigin(node_id: HwNodeId.child(name, "transaction"),
+            source_name: "riscv.scalar.lsu.transaction-owner|completion=" +
+                completion_interface.structural_sha256() + "|adapter=" + completion_adapter.structural_sha256())],
+        ports: owner_ports(config, bus),
+        datapath_signals: [HwSignal.comb("response_id_match", "Bits", 1),
+            HwSignal.comb("response_absent", "Bits", 1), HwSignal.comb("id_terminal", "Bits", 1),
+            HwSignal.comb("dispatch_canonical_match", "Bits", 1),
+            HwSignal.comb("dispatch_rd_match", "Bits", 1),
+            HwSignal.comb("dispatch_rs1_match", "Bits", 1),
+            HwSignal.comb("dispatch_rs2_raw_match", "Bits", 1),
+            HwSignal.comb("dispatch_rs2_match", "Bits", 1),
+            HwSignal.comb("dispatch_identity_pair_match", "Bits", 1),
+            HwSignal.comb("dispatch_identity_indices_match", "Bits", 1),
+            HwSignal.comb("dispatch_identity_metadata_match", "Bits", 1),
+            HwSignal.comb("dispatch_event_ids_equal", "Bits", 1),
+            HwSignal.comb("dispatch_event_identity_match", "Bits", 1),
+            HwSignal.comb("dispatch_identity_match", "Bits", 1),
+            HwSignal.comb("dispatch_identity_mismatch", "Bits", 1),
+            HwSignal.comb("selected_rs1_value", "Bits", x),
+            HwSignal.comb("normalized_response_value", "Bits", x),
+            HwSignal.comb("normalized_response_cause", "Bits", x),
+            HwSignal.comb("normalized_response_tval", "Bits", x),
+            HwSignal.comb("adapter_memory_address", "Bits", x),
+            HwSignal.comb("adapter_offset_address", "Bits", bus.byte_mask_bits),
+            HwSignal.comb("adapter_offset", "Bits", bus.byte_mask_bits),
+            HwSignal.comb("adapter_mask_low", "Bits", bus.byte_mask_bits),
+            HwSignal.comb("adapter_mask32", "Bits", 32),
+            HwSignal.comb("adapter_rd_zero", "Bits", 1),
+            HwSignal.comb("adapter_rd_nonzero", "Bits", 1),
+            HwSignal.comb("adapter_is_load", "Bits", 1),
+            HwSignal.comb("adapter_rd_write", "Bits", 1),
+            HwSignal.comb("adapter_read_mask", "Bits", 32),
+            HwSignal.comb("adapter_write_mask", "Bits", 32),
+            HwSignal.comb("adapter_write_data", "Bits", x)],
+        datapath_constants: [HwConstant.bits("all_ids", 64, -1),
+            HwConstant.bits("zero1", 1, 0), HwConstant.bits("one1", 1, 1),
+            HwConstant.bits("zero5", 5, 0), HwConstant.bits("zero32", 32, 0),
+            HwConstant.bits("zero_xlen", x, 0),
+            HwConstant.bits("frozen_canonical_instruction", 32, access.canonical_instruction as i64),
+            HwConstant.bits("frozen_rd_index", 5, access.rd_index),
+            HwConstant.bits("frozen_rs1_index", 5, access.rs1_index),
+            HwConstant.bits("frozen_rs2_index", 5, access.rs2_index),
+            HwConstant.bits("ignore_rs2_match", 1, if access.requires_rs2: 0 else: 1),
+            HwConstant.bits("adapter_offset_mask", bus.byte_mask_bits, bus.byte_mask_bits - 1)],
+        datapath_bit_vector_constants: [],
+        datapath_comb_ops: [HwCombOp.unary("zext", "adapter_memory_address", "projected_address", x),
+            HwCombOp.unary("trunc", "adapter_offset_address", "projected_address", bus.byte_mask_bits),
+            HwCombOp.binary("and", "adapter_offset", "adapter_offset_address", "adapter_offset_mask", bus.byte_mask_bits),
+            HwCombOp.binary("shr", "adapter_mask_low", "projected_mask", "adapter_offset", bus.byte_mask_bits),
+            HwCombOp.unary("zext", "adapter_mask32", "adapter_mask_low", 32),
+            HwCombOp.binary("xor", "adapter_rd_nonzero", "adapter_rd_zero", "one1", 1),
+            HwCombOp.binary("xor", "adapter_is_load", "projected_write", "one1", 1),
+            HwCombOp.binary("and", "adapter_rd_write", "adapter_is_load", "adapter_rd_nonzero", 1),
+            HwCombOp.binary("or", "dispatch_rs2_match", "dispatch_rs2_raw_match", "ignore_rs2_match", 1),
+            HwCombOp.binary("and", "dispatch_identity_pair_match", "dispatch_canonical_match", "dispatch_rd_match", 1),
+            HwCombOp.binary("and", "dispatch_identity_indices_match", "dispatch_rs1_match", "dispatch_rs2_match", 1),
+            HwCombOp.binary("and", "dispatch_identity_metadata_match", "dispatch_identity_pair_match", "dispatch_identity_indices_match", 1),
+            HwCombOp.binary("and", "dispatch_event_identity_match", "dispatch_identity_metadata_match", "dispatch_event_ids_equal", 1),
+            HwCombOp.binary("and", "dispatch_identity_match", "dispatch_lineage_valid", "dispatch_event_identity_match", 1),
+            HwCombOp.binary("xor", "dispatch_identity_mismatch", "dispatch_identity_match", "one1", 1)],
+        datapath_compare_ops: [HwCompareOp.equal("response_id_match", "response_id", "id_reg", 64),
+            HwCompareOp.equal("response_absent", "response_valid", "zero1", 1),
+            HwCompareOp.equal("id_terminal", "next_id_reg", "all_ids", 64),
+            HwCompareOp.equal("adapter_rd_zero", "dispatch_rd", "zero5", 5),
+            HwCompareOp.equal("dispatch_canonical_match", "dispatch_canonical_instruction", "frozen_canonical_instruction", 32),
+            HwCompareOp.equal("dispatch_rd_match", "dispatch_rd", "frozen_rd_index", 5),
+            HwCompareOp.equal("dispatch_rs1_match", "rs1_index", "frozen_rs1_index", 5),
+            HwCompareOp.equal("dispatch_rs2_raw_match", "rs2_index", "frozen_rs2_index", 5),
+            HwCompareOp.equal("dispatch_event_ids_equal", "dispatch_event_id", "decode_event_id", 64)],
+        datapath_select_ops: [HwSelectOp.mux("selected_rs1_value", "pending_reg", "rs1_reg", "rs1_value", x),
+            HwSelectOp.mux("normalized_response_value", "response_fault", "zero_xlen", "projected_load_value", x),
+            HwSelectOp.mux("normalized_response_cause", "response_fault", "response_cause", "zero_xlen", x),
+            HwSelectOp.mux("normalized_response_tval", "response_fault", "response_tval", "zero_xlen", x),
+            HwSelectOp.mux("adapter_read_mask", "projected_write", "zero32", "adapter_mask32", 32),
+            HwSelectOp.mux("adapter_write_mask", "projected_write", "adapter_mask32", "zero32", 32),
+            HwSelectOp.mux("adapter_write_data", "projected_write", "rs2_value", "zero_xlen", x)],
+        datapath_bit_extract_ops: [], datapath_fixed_slice_ops: [],
+        plan: plan, child_entity: child_name, child_graph_sha256: projection.structural_sha256())
+    val error = module.diagnostic(); if error != "": return Err(error)
+    Ok(module)

@@ -1,0 +1,140 @@
+# Typed combinational scalar LSU access projection. No request ownership,
+# response identity, cache, MMIO, or retirement state is claimed here.
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwCompareOp,
+    HwConstant, HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort,
+    HwSelectOp, HwSignal}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_lookup_profile}
+
+pub class ScalarLsuAccessPlan:
+    entry_id: text
+    canonical_instruction: u32
+    rd_index: i32
+    rs1_index: i32
+    rs2_index: i32
+    requires_rs2: bool
+    load: bool
+    access_bytes: i32
+    signed_load: bool
+    immediate: i64
+
+fn lsu_sign12(raw: i64) -> i64:
+    if raw >= 2048: return raw - 4096
+    raw
+
+pub fn strict_riscv_scalar_lsu_access_plan(config: CoreConfig,
+    instruction: u32) -> Result<ScalarLsuAccessPlan, text>:
+    val entry = riscv_scalar_lookup_profile(instruction, config.isa_profile)?
+    if entry.execution_class != "load-store":
+        return Err("HWIR-E-LSU-PROJECTION-SCOPE: projection requires a declared base load or store")
+    val load = entry.memory_effect == "load"
+    val f3 = ((instruction >> 12) & 7) as i32
+    var bytes = 0
+    var signed = false
+    if f3 == 0:
+        bytes = 1
+        signed = load
+    elif f3 == 1:
+        bytes = 2
+        signed = load
+    elif f3 == 2:
+        bytes = 4
+        signed = load
+    elif f3 == 3 and config.xlen == 64:
+        bytes = 8
+        signed = load
+    elif f3 == 4 and load:
+        bytes = 1
+    elif f3 == 5 and load:
+        bytes = 2
+    elif f3 == 6 and load and config.xlen == 64:
+        bytes = 4
+    else:
+        return Err("HWIR-E-LSU-PROJECTION-ACCESS: unsupported or XLEN-illegal access")
+    var raw = ((instruction >> 20) & 4095) as i64
+    if not load:
+        raw = ((((instruction >> 25) & 127) << 5) | ((instruction >> 7) & 31)) as i64
+    val rd_index = if load: ((instruction >> 7) & 31) as i32 else: 0
+    val rs1_index = ((instruction >> 15) & 31) as i32
+    val rs2_index = if load: 0 else: ((instruction >> 20) & 31) as i32
+    Ok(ScalarLsuAccessPlan(entry_id: entry.id,
+        canonical_instruction: instruction,
+        rd_index: rd_index, rs1_index: rs1_index, rs2_index: rs2_index,
+        requires_rs2: not load, load: load, access_bytes: bytes,
+        signed_load: signed, immediate: lsu_sign12(raw)))
+
+fn log2_bytes(bytes: i32) -> i32:
+    if bytes == 4: return 2
+    if bytes == 8: return 3
+    4
+
+pub fn strict_riscv_scalar_lsu_projection(module_name: text, config: CoreConfig,
+    bus: LsuConfig, instruction: u32) -> Result<HwModuleDef, text>:
+    if module_name == "": return Err("HWIR-E-LSU-PROJECTION-ID: projection requires a module name")
+    val config_error = config.diagnostic(); if config_error != "": return Err(config_error)
+    val bus_error = bus.diagnostic(); if bus_error != "": return Err(bus_error)
+    val access = strict_riscv_scalar_lsu_access_plan(config, instruction)?
+    if access.access_bytes * 8 > bus.bus_data_bits:
+        return Err("HWIR-E-LSU-PROJECTION-BUS: access width exceeds explicit bus width")
+    val xlen = config.xlen; val pa = config.physical_address_bits
+    val offset_bits = log2_bytes(bus.byte_mask_bits)
+    val load_op = if access.signed_load: "sext" else: "zext"
+    val store_op = if bus.bus_data_bits >= xlen: "zext" else: "trunc"
+    val cause_misaligned = if access.load: 4 else: 6
+    val cause_access = if access.load: 5 else: 7
+    val store_result = if access.load: "zero_bus" else: "shifted_store"
+    val load_result = if access.load: "load_extended" else: "zero_xlen"
+    val ports = [HwPort.input("rs1_value", "Bits", xlen), HwPort.input("rs2_value", "Bits", xlen),
+        HwPort.input("response_data", "Bits", bus.bus_data_bits),
+        HwPort.output("effective_address", "Bits", pa), HwPort.output("access_size_bytes", "Bits", 4),
+        HwPort.output("request_write", "Bits", 1), HwPort.output("request_byte_mask", "Bits", bus.byte_mask_bits),
+        HwPort.output("request_write_data", "Bits", bus.bus_data_bits),
+        HwPort.output("load_value", "Bits", xlen), HwPort.output("local_fault", "Bits", 1),
+        HwPort.output("local_cause", "Bits", xlen), HwPort.output("local_tval", "Bits", xlen)]
+    val signals = [HwSignal.comb("sum_xlen", "Bits", xlen), HwSignal.comb("address_pa", "Bits", pa),
+        HwSignal.comb("address_roundtrip", "Bits", xlen), HwSignal.comb("address_fits", "Bits", 1),
+        HwSignal.comb("pa_overflow", "Bits", 1), HwSignal.comb("alignment_bits", "Bits", pa),
+        HwSignal.comb("aligned", "Bits", 1), HwSignal.comb("misaligned", "Bits", 1),
+        HwSignal.comb("fault_any", "Bits", 1), HwSignal.comb("byte_offset_pa", "Bits", pa),
+        HwSignal.comb("byte_offset", "Bits", offset_bits), HwSignal.comb("offset_extended", "Bits", offset_bits + 3), HwSignal.comb("shift_amount", "Bits", offset_bits + 3),
+        HwSignal.comb("shifted_mask", "Bits", bus.byte_mask_bits),
+        HwSignal.comb("store_bus", "Bits", bus.bus_data_bits), HwSignal.comb("shifted_store", "Bits", bus.bus_data_bits),
+        HwSignal.comb("shifted_response", "Bits", bus.bus_data_bits),
+        HwSignal.comb("load_narrow", "Bits", access.access_bytes * 8), HwSignal.comb("load_extended", "Bits", xlen),
+        HwSignal.comb("fault_cause", "Bits", xlen)]
+    val constants = [HwConstant.bits("immediate", xlen, access.immediate), HwConstant.bits("one1", 1, 1), HwConstant.bits("zero1", 1, 0), HwConstant.bits("zero_xlen", xlen, 0),
+        HwConstant.bits("zero_pa", pa, 0), HwConstant.bits("offset_mask_pa", pa, bus.byte_mask_bits - 1),
+        HwConstant.bits("align_mask_pa", pa, access.access_bytes - 1), HwConstant.bits("three_shift", offset_bits + 3, 3),
+        HwConstant.bits("base_mask", bus.byte_mask_bits, (1i64 << access.access_bytes) - 1),
+        HwConstant.bits("size_value", 4, access.access_bytes), HwConstant.bits("write_value", 1, if access.load: 0 else: 1),
+        HwConstant.bits("misaligned_cause", xlen, cause_misaligned), HwConstant.bits("access_cause", xlen, cause_access), HwConstant.bits("zero_size", 4, 0), HwConstant.bits("zero_mask", bus.byte_mask_bits, 0), HwConstant.bits("zero_bus", bus.bus_data_bits, 0)]
+    val ops = [HwCombOp.binary("add", "sum_xlen", "rs1_value", "immediate", xlen),
+        HwCombOp.unary("trunc", "address_pa", "sum_xlen", pa), HwCombOp.unary("zext", "address_roundtrip", "address_pa", xlen),
+        HwCombOp.binary("xor", "pa_overflow", "address_fits", "one1", 1),
+        HwCombOp.binary("and", "alignment_bits", "address_pa", "align_mask_pa", pa),
+        HwCombOp.binary("xor", "misaligned", "aligned", "one1", 1), HwCombOp.binary("or", "fault_any", "pa_overflow", "misaligned", 1),
+        HwCombOp.binary("and", "byte_offset_pa", "address_pa", "offset_mask_pa", pa),
+        HwCombOp.unary("trunc", "byte_offset", "byte_offset_pa", offset_bits),
+        HwCombOp.unary("zext", "offset_extended", "byte_offset", offset_bits + 3), HwCombOp.binary("shl", "shift_amount", "offset_extended", "three_shift", offset_bits + 3),
+        HwCombOp.binary("shl", "shifted_mask", "base_mask", "byte_offset", bus.byte_mask_bits),
+        HwCombOp.unary(store_op, "store_bus", "rs2_value", bus.bus_data_bits),
+        HwCombOp.binary("shl", "shifted_store", "store_bus", "shift_amount", bus.bus_data_bits),
+        HwCombOp.binary("shr", "shifted_response", "response_data", "shift_amount", bus.bus_data_bits),
+        HwCombOp.unary("trunc", "load_narrow", "shifted_response", access.access_bytes * 8),
+        HwCombOp.unary(load_op, "load_extended", "load_narrow", xlen)]
+    val compares = [HwCompareOp.equal("address_fits", "sum_xlen", "address_roundtrip", xlen),
+        HwCompareOp.equal("aligned", "alignment_bits", "zero_pa", pa)]
+    val selects = [HwSelectOp.mux("fault_cause", "misaligned", "misaligned_cause", "access_cause", xlen),
+        HwSelectOp.mux("effective_address", "fault_any", "zero_pa", "address_pa", pa),
+        HwSelectOp.mux("access_size_bytes", "fault_any", "zero_size", "size_value", 4),
+        HwSelectOp.mux("request_write", "fault_any", "zero1", "write_value", 1),
+        HwSelectOp.mux("request_byte_mask", "fault_any", "zero_mask", "shifted_mask", bus.byte_mask_bits),
+        HwSelectOp.mux("request_write_data", "fault_any", "zero_bus", store_result, bus.bus_data_bits),
+        HwSelectOp.mux("load_value", "fault_any", "zero_xlen", load_result, xlen),
+        HwSelectOp.mux("local_fault", "fault_any", "one1", "zero1", 1),
+        HwSelectOp.mux("local_cause", "fault_any", "fault_cause", "zero_xlen", xlen),
+        HwSelectOp.mux("local_tval", "fault_any", "sum_xlen", "zero_xlen", xlen)]
+    val summary = HwModule(name: module_name, profile: config.profile, port_count: ports.len(), signal_count: signals.len(), register_count: 0, memory_count: 0, comb_op_count: ops.len() + compares.len() + selects.len(), clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config, node_id: HwNodeId.module_root(module_name), origins: [HwOrigin(node_id: HwNodeId.child(module_name, "access"), source_name: "riscv.scalar.lsu." + access.entry_id)], ports: ports, signals: signals, constants: constants, comb_ops: ops, compare_ops: compares, select_ops: selects, clock_domains: [HwClockDomain.default_domain()])
+    val error = module.shape_diagnostic(); if error != "": return Err(error)
+    Ok(module)

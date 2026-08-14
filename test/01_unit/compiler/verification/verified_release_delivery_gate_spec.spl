@@ -1,0 +1,76 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.verified_release_gate.{ReleaseEvidenceOutcomeV1,
+    VerifiedReleaseEvidenceV1}
+use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryReceiptFileV1}
+use compiler.tools.verify.formal_product_gate_collectors.{
+    collect_verified_release_gate_v1}
+
+fn release_material(label: text) -> FormalDeliveryReceiptFileV1:
+    val content = "verified-release-material:" + label
+    FormalDeliveryReceiptFileV1(sha256_text(content), content)
+
+fn release_materials() -> [FormalDeliveryReceiptFileV1]:
+    [release_material("proof"), release_material("compiler"),
+        release_material("trust"), release_material("replay"),
+        release_material("mutation"), release_material("non-vacuity")]
+
+fn pre_manifest_release_evidence() -> VerifiedReleaseEvidenceV1:
+    val files = release_materials()
+    VerifiedReleaseEvidenceV1("verified", FormalStatus.ArtifactVerified,
+        [FormalStatus.ArtifactVerified], sha256_text("deployed-artifact"),
+        sha256_text("deployed-artifact"), [files[0].receipt_hash],
+        [files[1].receipt_hash], files[2].receipt_hash, "",
+        files[3].receipt_hash, files[4].receipt_hash, files[5].receipt_hash,
+        [ReleaseEvidenceOutcomeV1.ProvedWithCertificate,
+            ReleaseEvidenceOutcomeV1.CounterexampleExpected],
+        0, 0, 0, 0, "")
+
+describe "FV2 verified-release delivery gate collector":
+    it "seals a materialized artifact-verified closure before manifest signing":
+        val collection = collect_verified_release_gate_v1(
+            pre_manifest_release_evidence(), [release_materials()[1]],
+            [release_materials()[0], release_materials()[2],
+                release_materials()[3], release_materials()[4],
+                release_materials()[5]])
+        expect(collection.gate_evidence.status.name()).to_equal("passed")
+        expect(collection.gate_evidence.receipt_hashes.len()).to_equal(7)
+        expect(collection.receipt_files.len()).to_equal(7)
+        var predecessor_payload_bound = false
+        for file in collection.receipt_files:
+            expect(sha256_text(file.content)).to_equal(file.receipt_hash)
+            if file.content.contains("payload_sha256=" +
+                    release_materials()[1].receipt_hash + "\n"):
+                predecessor_payload_bound = true
+        expect(predecessor_payload_bound).to_equal(true)
+
+    it "rejects premature manifest sealing missing material and type confusion":
+        var sealed = pre_manifest_release_evidence()
+        sealed.delivery_gate_manifest_hash = sha256_text("already-sealed")
+        expect(collect_verified_release_gate_v1(sealed,
+            [], release_materials()).gate_evidence.diagnostic).to_contain(
+                "PREMANIFEST")
+        var missing = release_materials()
+        missing.pop()
+        expect(collect_verified_release_gate_v1(pre_manifest_release_evidence(),
+            [], missing).gate_evidence.diagnostic).to_contain("MATERIAL-COUNT")
+        var confused = pre_manifest_release_evidence()
+        confused.mutation_receipt_hash = confused.trust_manifest_hash
+        expect(collect_verified_release_gate_v1(confused,
+            [], release_materials()).gate_evidence.diagnostic).to_contain(
+                "TYPE-CONFUSION")
+
+    it "rejects timeout stale and non-artifact-verified release claims":
+        var timeout = pre_manifest_release_evidence()
+        timeout.tool_outcomes = [ReleaseEvidenceOutcomeV1.Timeout]
+        expect(collect_verified_release_gate_v1(timeout,
+            [], release_materials()).gate_evidence.status.name()).to_equal("failed")
+        var stale = pre_manifest_release_evidence()
+        stale.stale_evidence_count = 1
+        expect(collect_verified_release_gate_v1(stale,
+            [], release_materials()).gate_evidence.status.name()).to_equal("failed")
+        var model_only = pre_manifest_release_evidence()
+        model_only.artifact_status = FormalStatus.ModelProven
+        expect(collect_verified_release_gate_v1(model_only,
+            [], release_materials()).gate_evidence.status.name()).to_equal("failed")

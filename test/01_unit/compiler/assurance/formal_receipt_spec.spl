@@ -1,0 +1,158 @@
+use std.spec
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.policy_schema.{AssuranceStrictnessV2, ResolvedAssurancePolicyV2, AssuranceGrade, AssuranceConvention}
+use compiler.common.assurance.flight_rules.{assurance_text_hash}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_receipt.{TrustManifestV1, VerificationCacheKeyV1, ProofReceiptV1, permits_closed_verified_release}
+use compiler.common.assurance.formal_interfaces.{CompilerCertificateV1, CompilerRefinementRelationV1}
+use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1,
+    ReplayOutcomeV1, ReplayCheckerReceiptV1, IndependentReplayClosureV1,
+    close_independent_replay_v1}
+
+fn valid_compiler_certificate() -> CompilerCertificateV1:
+    val draft = CompilerCertificateV1("lower", "before", "after", CompilerRefinementRelationV1.BehaviorInclusion, "validator-v1", "", true)
+    CompilerCertificateV1(draft.pass_id, draft.before_semantic_hash, draft.after_semantic_hash, draft.relation, draft.validator_version, draft.expected_certificate_hash(), true)
+
+fn valid_replay_checker(class_: ReplayCheckerClassV1, artifact: text = sha256_text("artifact")) -> ReplayCheckerReceiptV1:
+    ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1", class_,
+        if class_ == ReplayCheckerClassV1.FreshLeanKernel: "leanchecker" else: "nanoda",
+        "pinned", sha256_text(if class_ == ReplayCheckerClassV1.FreshLeanKernel: "fresh-lean-binary" else: "independent-kernel-binary"), "Simple.safe", "Simple.safe.root", artifact, sha256_text("policy"), sha256_text("output"),
+        ReplayOutcomeV1.Accepted, "")
+
+fn valid_replay_closure(artifact: text = sha256_text("artifact")) -> IndependentReplayClosureV1:
+    close_independent_replay_v1(
+        valid_replay_checker(ReplayCheckerClassV1.FreshLeanKernel, artifact),
+        valid_replay_checker(ReplayCheckerClassV1.IndependentKernel, artifact))
+
+fn verified_cache_key() -> VerificationCacheKeyV1:
+    VerificationCacheKeyV1(sha256_text("vir"), sha256_text("contract"),
+        sha256_text("weave"), sha256_text("macro"), [sha256_text("dependency")],
+        "effects-v1", "compiler-v1", "riscv64", "4.33.0", sha256_text("mathlib-imports"),
+        ["z3-4.13.0"], sha256_text("tactics"), sha256_text("trust"), "verified")
+
+describe "Formal Verification 2.0 evidence receipts":
+    it "canonicalizes unordered cache inputs":
+        val left = VerificationCacheKeyV1("vir", "contract", "weave", "macro", ["b", "a"], "effects-v1", "compiler-v1", "riscv64", "4.33.0", "mathlib", ["z3", "kissat"], "tactics", "trust", "verified")
+        val right = VerificationCacheKeyV1("vir", "contract", "weave", "macro", ["a", "b"], "effects-v1", "compiler-v1", "riscv64", "4.33.0", "mathlib", ["kissat", "z3"], "tactics", "trust", "verified")
+        expect(left.diagnostic()).to_equal("")
+        expect(left.hash()).to_equal(right.hash())
+
+    it "invalidates a verified cache identity when a semantic dimension changes":
+        val left = VerificationCacheKeyV1("vir", "contract", "weave-a", "macro", [], "effects-v1", "compiler-v1", "riscv64", "4.33.0", "mathlib", [], "tactics", "trust", "verified")
+        val right = VerificationCacheKeyV1("vir", "contract", "weave-b", "macro", [], "effects-v1", "compiler-v1", "riscv64", "4.33.0", "mathlib", [], "tactics", "trust", "verified")
+        expect(left.hash() == right.hash()).to_equal(false)
+
+    it "does not release an artifact without compiler and replay evidence":
+        val incomplete = ProofReceiptV1("Simple.safe", FormalStatus.ArtifactVerified,
+            sha256_text("key"), sha256_text("artifact"), [], sha256_text("axioms"),
+            sha256_text("trust"), "", "")
+        expect(incomplete.permits_verified_release()).to_equal(false)
+        expect(incomplete.diagnostic()).to_contain("COMPILER")
+
+    it "binds every proof receipt evidence dimension into its hash":
+        val first = ProofReceiptV1("Simple.safe", FormalStatus.ModelProven,
+            "key", "artifact", ["dep"], "axioms", "trust", "", "replay-a")
+        val second = ProofReceiptV1("Simple.safe", FormalStatus.ModelProven,
+            "key", "artifact", ["dep"], "axioms", "trust", "", "replay-b")
+        expect(first.hash() == second.hash()).to_equal(false)
+        expect(first.canonical_text()).to_contain("ProofReceiptV1")
+
+    it "rejects a formerly valid artifact receipt after any cache-key edge changes":
+        val old_key = verified_cache_key()
+        val new_key = VerificationCacheKeyV1(old_key.vir_hash, old_key.contract_hash,
+            sha256_text("weave-b"), old_key.macro_expansion_hash, old_key.dependency_hashes,
+            old_key.effect_model_version, old_key.compiler_pass_version, old_key.target,
+            old_key.lean_version, old_key.mathlib_hash, old_key.solver_versions,
+            old_key.tactic_policy_hash, old_key.trust_policy_hash, "verified")
+        val artifact = sha256_text("artifact")
+        val certificate = valid_compiler_certificate()
+        val replay = valid_replay_closure(artifact)
+        val receipt = ProofReceiptV1("Simple.safe", FormalStatus.ArtifactVerified, old_key.hash(),
+            artifact, [], sha256_text("axioms"), sha256_text("trust"),
+            certificate.expected_certificate_hash(), replay.hash())
+        expect(receipt.reusable_for(old_key)).to_equal(true)
+        expect(receipt.reusable_for(new_key)).to_equal(false)
+
+    it "keeps bounded trust visible":
+        val manifest = TrustManifestV1(["propext"], [], [], [], [], ["timer monotonic"])
+        expect(manifest.is_closed()).to_equal(false)
+        expect(manifest.canonical_text()).to_contain("timer monotonic")
+
+    it "requires the verified profile and a closed matching trust manifest":
+        val key = verified_cache_key()
+        val closed = TrustManifestV1(["propext"], [], [], [], [], [])
+        val certificate = valid_compiler_certificate()
+        val artifact = sha256_text("artifact")
+        val replay = valid_replay_closure(artifact)
+        val receipt = ProofReceiptV1("Simple.safe", FormalStatus.ArtifactVerified, key.hash(), artifact,
+            [], sha256_text("axioms"), sha256_text(closed.canonical_text()),
+            certificate.expected_certificate_hash(), replay.hash())
+        val verified = ResolvedAssurancePolicyV2(AssuranceStrictnessV2.Verified, "nogc_async_mut_noalloc", AssuranceGrade.NoGrade, AssuranceConvention.NoConvention)
+        val critical = ResolvedAssurancePolicyV2(AssuranceStrictnessV2.Critical, "nogc_async_mut_noalloc", AssuranceGrade.NoGrade, AssuranceConvention.NoConvention)
+        expect(permits_closed_verified_release(verified, key, receipt, closed, certificate, replay)).to_equal(true)
+        expect(permits_closed_verified_release(critical, key, receipt, closed, certificate, replay)).to_equal(false)
+        expect(permits_closed_verified_release(
+            verified, key, receipt, closed, certificate,
+            valid_replay_closure(sha256_text("other-artifact")))).to_equal(false)
+
+    it "rejects a receipt whose compiler edge is not the checked certificate":
+        val key = verified_cache_key()
+        val closed = TrustManifestV1(["propext"], [], [], [], [], [])
+        val certificate = valid_compiler_certificate()
+        val artifact = sha256_text("artifact")
+        val replay = valid_replay_closure(artifact)
+        val receipt = ProofReceiptV1("Simple.safe", FormalStatus.ArtifactVerified, key.hash(), artifact,
+            [], sha256_text("axioms"), sha256_text(closed.canonical_text()),
+            sha256_text("another-edge"), replay.hash())
+        val verified = ResolvedAssurancePolicyV2(AssuranceStrictnessV2.Verified, "nogc_async_mut_noalloc", AssuranceGrade.NoGrade, AssuranceConvention.NoConvention)
+        expect(permits_closed_verified_release(verified, key, receipt, closed, certificate, replay)).to_equal(false)
+
+    it "rejects malformed semantic cache and receipt identities in the closed lane":
+        val malformed_key = VerificationCacheKeyV1("not-a-hash", sha256_text("contract"),
+            sha256_text("weave"), sha256_text("macro"), [], "effects-v1", "compiler-v1",
+            "riscv64", "4.33.0", sha256_text("mathlib"), [], sha256_text("tactics"),
+            sha256_text("trust"), "verified")
+        expect(malformed_key.verified_identity_diagnostic()).to_contain("VIR-HASH")
+        val duplicated = VerificationCacheKeyV1(sha256_text("vir"), sha256_text("contract"),
+            sha256_text("weave"), sha256_text("macro"), [sha256_text("dep"), sha256_text("dep")],
+            "effects-v1", "compiler-v1", "riscv64", "4.33.0", sha256_text("mathlib"), [],
+            sha256_text("tactics"), sha256_text("trust"), "verified")
+        expect(duplicated.verified_identity_diagnostic()).to_contain("DEPENDENCY-HASH")
+        val blank_solver = VerificationCacheKeyV1(sha256_text("vir"), sha256_text("contract"),
+            sha256_text("weave"), sha256_text("macro"), [], "effects-v1", "compiler-v1",
+            "riscv64", "4.33.0", sha256_text("mathlib"), [""], sha256_text("tactics"),
+            sha256_text("trust"), "verified")
+        expect(blank_solver.verified_identity_diagnostic()).to_contain("CACHE-SOLVERS")
+        val key = verified_cache_key()
+        val closed = TrustManifestV1(["propext"], [], [], [], [], [])
+        val certificate = valid_compiler_certificate()
+        val artifact = sha256_text("artifact")
+        val replay = valid_replay_closure(artifact)
+        val malformed = ProofReceiptV1("Simple.safe", FormalStatus.ArtifactVerified,
+            key.hash(), artifact, [], sha256_text("axioms"), sha256_text(closed.canonical_text()),
+            certificate.expected_certificate_hash(), "UPPERCASE")
+        expect(malformed.verified_identity_diagnostic()).to_contain("REPLAY-HASH")
+        expect(permits_closed_verified_release(
+            ResolvedAssurancePolicyV2(AssuranceStrictnessV2.Verified,
+                "nogc_async_mut_noalloc", AssuranceGrade.NoGrade, AssuranceConvention.NoConvention),
+            key, malformed, closed, certificate, replay)).to_equal(false)
+
+    it "rejects malformed or duplicated theorem dependency identities in an artifact receipt":
+        val key = verified_cache_key()
+        val closed = TrustManifestV1(["propext"], [], [], [], [], [])
+        val certificate = valid_compiler_certificate()
+        val artifact = sha256_text("artifact")
+        val replay = valid_replay_closure(artifact)
+        val malformed = ProofReceiptV1("Simple.safe", FormalStatus.ArtifactVerified,
+            key.hash(), artifact, ["not-a-hash"], sha256_text("axioms"),
+            sha256_text(closed.canonical_text()), certificate.expected_certificate_hash(), replay.hash())
+        expect(malformed.verified_identity_diagnostic()).to_contain("DEPENDENCY-HASH")
+        val dependency = sha256_text("theorem-dependency")
+        val duplicated = ProofReceiptV1("Simple.safe", FormalStatus.ArtifactVerified,
+            key.hash(), artifact, [dependency, dependency], sha256_text("axioms"),
+            sha256_text(closed.canonical_text()), certificate.expected_certificate_hash(), replay.hash())
+        expect(duplicated.verified_identity_diagnostic()).to_contain("DEPENDENCY-HASH")
+
+    it "rejects blank or duplicated trust declarations rather than normalizing them":
+        expect(TrustManifestV1(["propext", "propext"], [], [], [], [], []).is_closed()).to_equal(false)
+        expect(TrustManifestV1([], [], [""], [], [], []).diagnostic()).to_contain("OPERATIONS")

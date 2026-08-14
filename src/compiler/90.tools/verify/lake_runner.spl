@@ -3,7 +3,60 @@
 # Invokes Lean 4's Lake build system for verification projects.
 # Handles lake discovery, build, check, and clean operations.
 
-use app.io.mod.{shell, file_exists, ProcessResult}
+use app.io.mod.{shell, file_exists, file_read, file_write, file_delete, ProcessResult}
+
+# Lean root names are deliberately restricted to the portable identifier subset
+# before they become generated Lean source.  This is not a shell-escaping
+# mechanism: it prevents a malformed manifest from being interpreted as Lean
+# syntax at all.  A verified build must fail rather than attempt recovery.
+fn _is_lean_root_segment(segment: text) -> bool:
+    if segment == "": return false
+    val chars = segment.chars()
+    val first = chars[0]
+    val first_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_"
+    val rest_chars = first_chars + "0123456789'"
+    if not first_chars.contains(first):
+        return false
+    for char in chars:
+        if not rest_chars.contains(char):
+            return false
+    true
+
+fn _is_lean_proof_root(root: text) -> bool:
+    if root == "": return false
+    for segment in root.split("."):
+        if not _is_lean_root_segment(segment): return false
+    true
+
+# Extract only explicit, source-level audit declarations.  Comments and
+# strings can at worst add an extra requested root and make the gate fail;
+# they can never erase a required root or manufacture successful evidence.
+pub fn declared_axiom_roots(source: text) -> [text]:
+    val prefix = "#print axioms "
+    var roots: [text] = []
+    for line in source.lines():
+        val trimmed = line.trim()
+        if trimmed.starts_with(prefix):
+            val root = trimmed.substring(prefix.len()).trim()
+            if _is_lean_proof_root(root) and not roots.contains(root):
+                roots.push(root)
+    roots
+
+# Generate a temporary audit module from the exact Lean source that is being
+# checked.  The caller owns the temporary file lifecycle and retains the
+# resulting output in the proof receipt.  Invalid roots are rejected before
+# any process invocation, preventing a manifest from changing the command or
+# generated Lean program shape.
+pub fn lean_axiom_audit_source(source: text, roots: [text]) -> Result<text, text>:
+    if roots.is_empty():
+        return Err("no exported proof roots declared")
+    for root in roots:
+        if not _is_lean_proof_root(root):
+            return Err("invalid Lean proof root: " + root)
+    var commands: [text] = []
+    for root in roots:
+        commands.push("#print axioms " + root)
+    Ok(source + "\n\n" + commands.join("\n") + "\n")
 
 # ============================================================================
 # Lake Runner
@@ -49,9 +102,27 @@ impl LakeRunner:
         """Type-check a single Lean file."""
         if not self.is_available():
             return Err("Lake not found")
-        val result = shell("cd {self.project_dir} && {self.lake_path} env lean {path} 2>&1")
+        if not file_exists(path):
+            return Err("Lean file not found: " + path)
+        val source = file_read(path)
+        val roots = declared_axiom_roots(source)
+        val audit_source = lean_axiom_audit_source(source, roots)
+        val generated = match audit_source:
+            case Ok(value): value
+            case Err(message): return Err(message)
+        # This fixed sibling is safe because ProofChecker invokes this method
+        # serially.  Keeping imports relative to the original file also makes
+        # the audit module semantically identical to the checked artifact.
+        val audit_path = path + ".fv2_axiom_audit.lean"
+        if not file_write(audit_path, generated):
+            return Err("failed to create Lean axiom audit module")
+        val result = shell("cd {self.project_dir} && {self.lake_path} env lean {audit_path} 2>&1")
+        file_delete(audit_path)
         if result.exit_code == 0:
-            Ok("No errors")
+            # Retain theorem/audit output. The caller must inspect transitive
+            # `#print axioms` evidence rather than treating exit zero alone as
+            # a verification result.
+            Ok(result.stdout + result.stderr)
         else:
             Err(result.stdout + result.stderr)
 
@@ -68,4 +139,3 @@ impl LakeRunner:
 # ============================================================================
 # Exports
 # ============================================================================
-

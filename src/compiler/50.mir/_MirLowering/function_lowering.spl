@@ -43,6 +43,24 @@ use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_lowering_ml.*
 
 impl MirLowering:
+    fn mir_const_value_type(value: MirConstValue) -> MirType?:
+        """Recover a concrete MIR type when HIR left a const type inferred.
+
+        Module constants are lowered before the full expression-inference
+        result is available. Scalar-foldable expressions can therefore carry
+        `HirTypeKind.Infer` even though `lower_const_expr` has already proved
+        their concrete value. The folded value is authoritative here.
+        """
+        match value:
+            case Int(_): Some(MirType.i64())
+            case Float(_): Some(MirType.f64())
+            case Bool(_): Some(MirType(kind: MirTypeKind.Bool))
+            case Str(_): Some(MirType(kind: MirTypeKind.Opaque("str")))
+            # Zero and compound values have no self-describing scalar type.
+            # They require an explicit HIR annotation at this boundary.
+            case Zero: nil
+            case _: nil
+
     me reset_function_local_tracking():
         """Reset every table keyed by a per-function LocalId.
 
@@ -115,6 +133,21 @@ impl MirLowering:
                 self.lower_type(fn_.params[pmi].type_)
             params = params.push(lowered_param)
             pmi = pmi + 1
+
+        # Every non-static instance method has an ABI-visible receiver in
+        # parameter slot zero, including an immutable zero-argument `fn` such
+        # as `fn has_value() -> bool: self.value > 0`.  HIR declaration
+        # lowering synthesizes that slot from the enclosing owner context
+        # when a bootstrap parser dropped its method bit.  Keep this MIR
+        # boundary fail-closed as well: emitting a zero-parameter callee here
+        # would let native callers pass `self` into the first explicit slot
+        # (or silently discard it when there are no explicit arguments).
+        if fn_.is_method and not fn_.is_static:
+            if fn_.params.len() == 0 or (fn_.params[0].name != "self" and fn_.params[0].name != "me"):
+                self.error_fatal(
+                    "instance method '{fn_.name}' reached MIR without an ABI receiver parameter",
+                    Some(fn_.span)
+                )
 
         if trace_enabled:
             print "[mir-lower] lower_function:return-type-start {fn_.name}"
@@ -475,6 +508,7 @@ impl MirLowering:
             print "[mir-lower] real-lower:end {fn_.name}"
         var fn_result = bldr3.end_function()
         self.builder = bldr3
+        fn_result.verification_contract = fn_.verification_contract
         if bootstrap_trace:
             print "[mir-lower] real-lower:done {fn_.name}"
 
@@ -606,7 +640,18 @@ impl MirLowering:
             self.global_symbol_ids[sym_id_always] = true
             self.global_const_exprs[sym_id_always] = const_.value
         if val const_value = value:
-            val const_type = self.lower_type(const_.type_)
+            # Binary/bitwise module constants can legitimately retain an
+            # unresolved HIR inference variable. `const_value` is already
+            # folded and concrete, so derive the MIR type from it rather than
+            # turning valid source into an `[infer-arm]` crash.
+            val const_type = match const_.type_.kind:
+                case HirTypeKind.Infer(_, _):
+                    if val derived_type = self.mir_const_value_type(const_value):
+                        derived_type
+                    else:
+                        self.error_fatal("cannot derive module constant type from folded value; add an explicit annotation", Some(const_.value.span))
+                        MirType.i64()
+                case _: self.lower_type(const_.type_)
             val mir_const = MirConstant(
                 symbol: const_.symbol,
                 name: const_.name,
@@ -752,10 +797,8 @@ impl MirLowering:
                     MirType(kind: MirTypeKind.Bool),  # has_value
                     self.lower_type(inner)
                 ]))
-            case HirTypeKind.Result(_, _):
-                # Result is a tagged runtime handle; retain its generic HIR
-                # payload type separately in the local HIR-type table.
-                MirType.i64()
+            case HirTypeKind.Result(ok_type, err_type):
+                MirType.result(self.lower_type(ok_type), self.lower_type(err_type))
             case HirTypeKind.Union(members):
                 # Union is a tagged union: [discriminant (I64), ...member types]
                 # At the MIR level, store all member types for backend layout

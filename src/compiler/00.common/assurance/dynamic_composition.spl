@@ -1,0 +1,133 @@
+# Formal Verification 2.0 dynamic-component admission.
+#
+# A closed verified artifact may not acquire runtime behavior merely because a
+# library has a file signature. The exact component receipt, signer check,
+# interface/profile/compiler lineage, and composition obligations all close
+# before loading. An explicitly isolated component can instead be classified
+# as a bounded trusted boundary, but never as closed verification.
+
+use compiler.common.assurance.flight_rules.{assurance_text_hash}
+use compiler.common.assurance.formal_status.{FormalStatus}
+
+enum DynamicComponentKindV1:
+    Plugin
+    Aspect
+
+impl DynamicComponentKindV1:
+    fn name() -> text:
+        match self:
+            case Plugin: "plugin"
+            case Aspect: "aspect"
+
+struct DynamicComponentReceiptV1:
+    component_id: text
+    kind: DynamicComponentKindV1
+    artifact_hash: text
+    interface_hash: text
+    assurance_profile: text
+    compiler_lineage_hash: text
+    proof_receipt_hash: text
+    signer_id: text
+
+impl DynamicComponentReceiptV1:
+    fn diagnostic() -> text:
+        if self.component_id == "": return "FV2-E-DYNAMIC-ID: component identity is required"
+        if self.artifact_hash == "": return "FV2-E-DYNAMIC-ARTIFACT: artifact hash is required"
+        if self.interface_hash == "": return "FV2-E-DYNAMIC-INTERFACE: interface hash is required"
+        if self.assurance_profile == "": return "FV2-E-DYNAMIC-PROFILE: assurance profile is required"
+        if self.compiler_lineage_hash == "": return "FV2-E-DYNAMIC-COMPILER: compiler lineage is required"
+        if self.proof_receipt_hash == "": return "FV2-E-DYNAMIC-PROOF: proof receipt hash is required"
+        if self.signer_id == "": return "FV2-E-DYNAMIC-SIGNER: signer identity is required"
+        ""
+
+    fn canonical_text() -> text:
+        "DynamicComponentReceiptV1|id=" + self.component_id + "|kind=" + self.kind.name() +
+            "|artifact=" + self.artifact_hash + "|interface=" + self.interface_hash +
+            "|profile=" + self.assurance_profile + "|compiler=" + self.compiler_lineage_hash +
+            "|proof=" + self.proof_receipt_hash + "|signer=" + self.signer_id
+
+    fn hash() -> text:
+        assurance_text_hash(self.canonical_text())
+
+struct SignatureVerificationReceiptV1:
+    payload_hash: text
+    signer_id: text
+    verifier_id: text
+    verification_evidence_hash: text
+    verified: bool
+
+impl SignatureVerificationReceiptV1:
+    fn diagnostic() -> text:
+        if self.payload_hash == "": return "FV2-E-DYNAMIC-SIGNATURE-PAYLOAD: signed payload hash is required"
+        if self.signer_id == "": return "FV2-E-DYNAMIC-SIGNATURE-SIGNER: verified signer is required"
+        if self.verifier_id == "": return "FV2-E-DYNAMIC-SIGNATURE-VERIFIER: signature verifier identity is required"
+        if self.verification_evidence_hash == "": return "FV2-E-DYNAMIC-SIGNATURE-EVIDENCE: signature evidence is required"
+        if not self.verified: return "FV2-E-DYNAMIC-SIGNATURE: signature verification failed"
+        ""
+
+struct CompositionObligationV1:
+    obligation_id: text
+    proposition_hash: text
+    certificate_hash: text
+    discharged: bool
+
+impl CompositionObligationV1:
+    fn diagnostic() -> text:
+        if self.obligation_id == "": return "FV2-E-DYNAMIC-OBLIGATION-ID: composition obligation identity is required"
+        if self.proposition_hash == "": return "FV2-E-DYNAMIC-OBLIGATION-PROP: composition proposition hash is required"
+        if self.certificate_hash == "": return "FV2-E-DYNAMIC-OBLIGATION-CERT: composition certificate is required"
+        if not self.discharged: return "FV2-E-DYNAMIC-OBLIGATION: composition obligation is not discharged"
+        ""
+
+struct DynamicCompositionPolicyV1:
+    expected_interface_hash: text
+    required_profile: text
+    compiler_lineage_hash: text
+    approved_signer_ids: [text]
+
+struct DynamicCompositionDecisionV1:
+    admitted: bool
+    closed_verification: bool
+    status: FormalStatus
+    diagnostic: text
+
+fn _dynamic_signer_is_approved(signers: [text], signer_id: text) -> bool:
+    for signer in signers:
+        if signer == signer_id: return true
+    false
+
+fn verify_dynamic_composition_v1(
+    policy: DynamicCompositionPolicyV1,
+    component: DynamicComponentReceiptV1,
+    signature: SignatureVerificationReceiptV1,
+    obligations: [CompositionObligationV1]
+) -> DynamicCompositionDecisionV1:
+    val component_diagnostic = component.diagnostic()
+    if component_diagnostic != "": return DynamicCompositionDecisionV1(false, false, FormalStatus.Failed, component_diagnostic)
+    val signature_diagnostic = signature.diagnostic()
+    if signature_diagnostic != "": return DynamicCompositionDecisionV1(false, false, FormalStatus.Failed, signature_diagnostic)
+    if policy.expected_interface_hash == "" or policy.compiler_lineage_hash == "" or policy.required_profile == "":
+        return DynamicCompositionDecisionV1(false, false, FormalStatus.Failed, "FV2-E-DYNAMIC-POLICY: closed composition policy is incomplete")
+    if signature.payload_hash != component.hash() or signature.signer_id != component.signer_id:
+        return DynamicCompositionDecisionV1(false, false, FormalStatus.Failed, "FV2-E-DYNAMIC-SIGNATURE-BINDING: signature does not bind the exact component receipt")
+    if not _dynamic_signer_is_approved(policy.approved_signer_ids, signature.signer_id):
+        return DynamicCompositionDecisionV1(false, false, FormalStatus.Failed, "FV2-E-DYNAMIC-SIGNER-POLICY: signer is not approved")
+    if component.interface_hash != policy.expected_interface_hash:
+        return DynamicCompositionDecisionV1(false, false, FormalStatus.Failed, "FV2-E-DYNAMIC-INTERFACE-MISMATCH: component interface differs from the host")
+    if component.compiler_lineage_hash != policy.compiler_lineage_hash:
+        return DynamicCompositionDecisionV1(false, false, FormalStatus.Failed, "FV2-E-DYNAMIC-COMPILER-MISMATCH: compiler lineage differs from the host")
+    if policy.required_profile != "verified" or component.assurance_profile != "verified":
+        return DynamicCompositionDecisionV1(false, false, FormalStatus.Failed, "FV2-E-DYNAMIC-PROFILE-DOWNGRADE: closed composition requires verified on both sides")
+    if obligations.is_empty():
+        return DynamicCompositionDecisionV1(false, false, FormalStatus.Failed, "FV2-E-DYNAMIC-OBLIGATION-MISSING: explicit composition closure is required")
+    for obligation in obligations:
+        val obligation_diagnostic = obligation.diagnostic()
+        if obligation_diagnostic != "": return DynamicCompositionDecisionV1(false, false, FormalStatus.Failed, obligation_diagnostic)
+    DynamicCompositionDecisionV1(true, true, FormalStatus.ArtifactVerified, "")
+
+fn declare_dynamic_bounded_tcb_v1(component: DynamicComponentReceiptV1, trust_manifest_hash: text) -> DynamicCompositionDecisionV1:
+    val diagnostic = component.diagnostic()
+    if diagnostic != "": return DynamicCompositionDecisionV1(false, false, FormalStatus.Failed, diagnostic)
+    if trust_manifest_hash == "":
+        return DynamicCompositionDecisionV1(false, false, FormalStatus.Failed, "FV2-E-DYNAMIC-TCB: bounded trust manifest is required")
+    DynamicCompositionDecisionV1(true, false, FormalStatus.TrustedBoundary, "bounded TCB: " + trust_manifest_hash)

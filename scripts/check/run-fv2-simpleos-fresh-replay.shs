@@ -1,0 +1,135 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+checker=$(command -v leanchecker || true)
+lake_bin=$(command -v lake || true)
+lean_bin=""
+[ -n "$checker" ] && lean_bin="$(dirname "$checker")/lean"
+output="$root/build/verification/simpleos-fresh-replay"
+timeout_seconds=${FV2_FRESH_REPLAY_TIMEOUT_SECONDS:-600}
+identity_timeout_seconds=${FV2_FRESH_IDENTITY_TIMEOUT_SECONDS:-10}
+
+is_sha256() {
+    case "$1" in ""|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#1}" -eq 64 ]
+}
+
+resolve_elan_tool() {
+    fallback=$1 name=$2
+    if command -v elan >/dev/null 2>&1; then
+        resolved=$(elan which "$name" 2>/dev/null || true)
+        if [ -n "$resolved" ] && [ -x "$resolved" ]; then
+            printf '%s\n' "$resolved"
+            return
+        fi
+    fi
+    printf '%s\n' "$fallback"
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    is_sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    case "$timeout_seconds" in ""|*[!0-9]*) exit 1 ;; esac
+    [ "$timeout_seconds" -gt 0 ]
+    case "$identity_timeout_seconds" in ""|*[!0-9]*) exit 1 ;; esac
+    [ "$identity_timeout_seconds" -gt 0 ]
+    grep -Fq 'declaration_root=' "$0"
+    grep -Fq 'module_olean_sha256=' "$0"
+    grep -Fq 'checker_version_protocol=lean-sibling-version-v1' "$0"
+    echo "STATUS: PASS FV2 SimpleOS fresh replay self-test"
+    exit 0
+fi
+
+[ -n "$checker" ] && [ -x "$checker" ] || { echo "FAIL: Lean 4 leanchecker is missing" >&2; exit 1; }
+[ -n "$lake_bin" ] && [ -x "$lake_bin" ] || { echo "FAIL: Lake launcher is missing" >&2; exit 1; }
+checker=$(resolve_elan_tool "$checker" leanchecker)
+lake_bin=$(resolve_elan_tool "$lake_bin" lake)
+lean_bin=$(resolve_elan_tool "$lean_bin" lean)
+[ -x "$lean_bin" ] || { echo "FAIL: leanchecker sibling Lean binary is missing" >&2; exit 1; }
+case "$timeout_seconds" in ""|*[!0-9]*) echo "FAIL: invalid fresh replay timeout" >&2; exit 1 ;; esac
+[ "$timeout_seconds" -gt 0 ] || { echo "FAIL: fresh replay timeout must be positive" >&2; exit 1; }
+case "$identity_timeout_seconds" in ""|*[!0-9]*) echo "FAIL: invalid identity timeout" >&2; exit 1 ;; esac
+[ "$identity_timeout_seconds" -gt 0 ] || { echo "FAIL: identity timeout must be positive" >&2; exit 1; }
+mkdir -p "$output"
+rm -f "$output/receipt.sdn" "$output/rejected-partial.sdn"
+receipt_tmp="$output/.receipt.tmp.$$"
+trap 'rm -f "$receipt_tmp"' EXIT HUP INT TERM
+checker_sha=$(sha256sum "$checker" | awk '{print $1}')
+lean_version=$(timeout --foreground "$identity_timeout_seconds" "$lean_bin" --version 2>&1) || {
+    echo "FAIL: sibling Lean version query failed or timed out" >&2
+    exit 1
+}
+{
+    echo "schema=FV2SimpleOsFreshReplay-v1"
+    echo "leanchecker_sha256=$checker_sha"
+    echo "checker_version_protocol=lean-sibling-version-v1"
+    echo "lean_binary_sha256=$(sha256sum "$lean_bin" | awk '{print $1}')"
+    echo "lean_version_sha256=$(printf '%s' "$lean_version" | sha256sum | awk '{print $1}')"
+    echo "lake_sha256=$(sha256sum "$lake_bin" | awk '{print $1}')"
+} >"$receipt_tmp"
+failures=0
+
+run_root() {
+    label=$1 project=$2 module=$3 source=$4 theorem=$5
+    source_sha=$(sha256sum "$root/$source" | awk '{print $1}')
+    if ! "$lake_bin" -d "$root/$project" build "$module" >"$output/$label.lake.log" 2>&1; then
+        echo "FAIL: Lake build failed: $label" >&2
+        failures=$((failures + 1))
+        return
+    fi
+    module_rel=$(printf '%s' "$module" | tr '.' '/')
+    module_olean="$root/$project/.lake/build/lib/lean/$module_rel.olean"
+    if [ ! -f "$module_olean" ]; then
+        echo "FAIL: built module artifact is missing: $label" >&2
+        failures=$((failures + 1))
+        return
+    fi
+    module_olean_sha=$(sha256sum "$module_olean" | awk '{print $1}')
+    is_sha256 "$module_olean_sha" || { failures=$((failures + 1)); return; }
+    if ! timeout --foreground "$timeout_seconds" \
+        "$lake_bin" -d "$root/$project" env "$checker" --fresh "$module" \
+        >"$output/$label.checker.log" 2>&1; then
+        echo "FAIL: fresh Lean-kernel replay rejected or timed out: $label" >&2
+        failures=$((failures + 1))
+        return
+    fi
+    # leanchecker is silent on success. Retain the receipt owner's exact
+    # observed-success attestation rather than pretending checker output exists.
+    echo "FV2-FRESH-LEAN-KERNEL-ACCEPTED checker=$checker_sha module=$module declaration_root=$theorem artifact=$module_olean_sha exit=0" \
+        >"$output/$label.accepted.log"
+    {
+        echo "declaration_root=$theorem"
+        echo "project=$project"
+        echo "module=$module"
+        echo "source_sha256=$source_sha"
+        echo "module_olean_sha256=$module_olean_sha"
+        echo "lake_output_sha256=$(sha256sum "$output/$label.lake.log" | awk '{print $1}')"
+        echo "checker_output_sha256=$(sha256sum "$output/$label.checker.log" | awk '{print $1}')"
+        echo "attestation_sha256=$(sha256sum "$output/$label.accepted.log" | awk '{print $1}')"
+    } >>"$receipt_tmp"
+}
+
+run_root capability src/verification/kernel_capabilities KernelCapabilities.Theorems \
+    src/verification/kernel_capabilities/KernelCapabilities/Theorems.lean KernelCapabilities.rights_allow9_sound
+run_root scheduler src/verification/kernel_scheduler KernelScheduler.Theorems \
+    src/verification/kernel_scheduler/KernelScheduler/Theorems.lean KernelScheduler.complete_refinement_bundle
+run_root channel_close src/verification/actor_channel ActorChannel.GreenCloseExact \
+    src/verification/actor_channel/ActorChannel/GreenCloseExact.lean ActorChannel.GreenCloseExact.close_drain_refinement_bundle
+run_root shared_unmap src/verification/memory_capabilities SharedUnmapExact \
+    src/verification/memory_capabilities/src/SharedUnmapExact.lean MemoryCapabilities.SharedUnmapExact.shared_unmap_refinement_bundle
+run_root process_wait src/verification/process_lifecycle ProcessWaitExact \
+    src/verification/process_lifecycle/src/ProcessWaitExact.lean ProcessLifecycle.ProcessWaitExact.process_wait_refinement_bundle
+run_root process_queue src/verification/actor_channel ActorChannel.ProcessQueueExact \
+    src/verification/actor_channel/ActorChannel/ProcessQueueExact.lean ActorChannel.ProcessQueueExact.process_queue_refinement_bundle
+run_root dbfs_commit src/verification/db_storage DbStorage.TxnCommitExact \
+    src/verification/db_storage/DbStorage/TxnCommitExact.lean DbStorage.TxnCommitExact.commit_refinement_bundle
+
+if [ "$failures" -ne 0 ]; then
+    mv "$receipt_tmp" "$output/rejected-partial.sdn"
+    trap - EXIT HUP INT TERM
+    echo "STATUS: FAIL FV2 SimpleOS fresh replay rejected_roots=$failures" >&2
+    exit 1
+fi
+mv "$receipt_tmp" "$output/receipt.sdn"
+trap - EXIT HUP INT TERM
+echo "STATUS: PASS FV2 SimpleOS fresh replay receipt=$output/receipt.sdn"

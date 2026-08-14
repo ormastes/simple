@@ -1,0 +1,828 @@
+# Canonical bridge from retained typed HIR contracts to FV2 contract evidence.
+#
+# This owner never reparses source text and never accepts caller-supplied
+# predicate hashes. Unsupported expression/type shapes fail closed.
+
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirBinOp, HirUnaryOp, HirContractBlock, HirContractClauseKind, HirContractOutcome}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
+use compiler.mir.mir_instructions.{MirInstKind, MirOperand, MirOperandKind}
+use compiler.mir.mir_types.{MirConstValue, MirTypeKind}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_type, serialize_mir_inst_kind}
+use compiler.mir.verification_region_effects.{MirRegionAccessV1,
+    verification_region_effect_manifest_v1,
+    verification_region_effect_manifest_with_internal_calls_v1}
+use compiler.mir.verification_contract.{
+    VerificationContractOutcomeV1, VerificationContractClauseKindV1,
+    VerificationContractClauseV1, VerificationFunctionContractV1,
+    ExecutionContractSemanticContextV2, ExecutionContractObligationV2,
+    ExecutionContractObligationKindV1, ExecutionContractObligationSetV2,
+    generate_execution_contract_obligations_with_context_v2
+}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.formal_receipt.{ProofReceiptV1, TrustManifestV1,
+    VerificationCacheKeyV1}
+use compiler.common.assurance.replay_receipt.{IndependentReplayClosureV1}
+use compiler.common.assurance.trust_audit.{TrustAuditStatus,
+    audit_lean_axiom_report, canonical_trust_audit_hash_v1}
+
+fn fv2_hir_type_identity(type_: HirType) -> Result<text, text>:
+    match type_.kind:
+        case HirTypeKind.Int(bits, signed): Ok((if signed: "i" else: "u") + bits.to_string())
+        case HirTypeKind.Bool: Ok("bool")
+        case HirTypeKind.Char: Ok("char")
+        case HirTypeKind.Unit: Ok("unit")
+        case HirTypeKind.Tuple(elements):
+            var identities: [text] = []
+            for element in elements:
+                match fv2_hir_type_identity(element):
+                    case Ok(identity): identities.push(identity)
+                    case Err(message): return Err(message)
+            Ok("tuple<" + identities.join(",") + ">")
+        case HirTypeKind.Result(ok_type, err_type):
+            val ok_identity = match fv2_hir_type_identity(ok_type):
+                case Ok(identity): identity
+                case Err(message): return Err(message)
+            val err_identity = match fv2_hir_type_identity(err_type):
+                case Ok(identity): identity
+                case Err(message): return Err(message)
+            Ok("result<" + ok_identity + "," + err_identity + ">")
+        case HirTypeKind.Function(params, return_type, effects):
+            if effects.len() > 0:
+                return Err("FV2-E-CONTRACT-EFFECT: predicate call target must have an exact pure effect set")
+            var param_identities: [text] = []
+            for param in params:
+                match fv2_hir_type_identity(param):
+                    case Ok(identity): param_identities.push(identity)
+                    case Err(message): return Err(message)
+            val return_identity = match fv2_hir_type_identity(return_type):
+                case Ok(identity): identity
+                case Err(message): return Err(message)
+            Ok("fn<" + param_identities.join(",") + "->" + return_identity + ">")
+        case _:
+            Err("FV2-E-CONTRACT-TYPE-IDENTITY: HIR type lacks exact contract identity")
+
+fn fv2_hir_binop_name(op: HirBinOp) -> Result<text, text>:
+    match op:
+        case HirBinOp.Add: Ok("add")
+        case HirBinOp.Sub: Ok("sub")
+        case HirBinOp.Mul: Ok("mul")
+        case HirBinOp.Eq: Ok("eq")
+        case HirBinOp.NotEq: Ok("neq")
+        case HirBinOp.Lt: Ok("lt")
+        case HirBinOp.LtEq: Ok("lte")
+        case HirBinOp.Gt: Ok("gt")
+        case HirBinOp.GtEq: Ok("gte")
+        case HirBinOp.And: Ok("and")
+        case HirBinOp.Or: Ok("or")
+        case HirBinOp.BitAnd: Ok("bitand")
+        case HirBinOp.BitOr: Ok("bitor")
+        case HirBinOp.BitXor: Ok("bitxor")
+        case _:
+            Err("FV2-E-CONTRACT-OP: binary operator lacks exact canonical contract semantics")
+
+fn fv2_hir_unary_name(op: HirUnaryOp) -> Result<text, text>:
+    match op:
+        case HirUnaryOp.Neg: Ok("neg")
+        case HirUnaryOp.Not: Ok("not")
+        case HirUnaryOp.BitNot: Ok("bitnot")
+        case _:
+            Err("FV2-E-CONTRACT-OP: unary operator lacks exact canonical contract semantics")
+
+fn fv2_hir_contract_expr_canonical(expr: HirExpr) -> Result<text, text>:
+    if not expr.has_type_:
+        return Err("FV2-E-CONTRACT-UNTYPED: every retained contract expression requires an exact HIR type")
+    val type_identity = match fv2_hir_type_identity(expr.type_):
+        case Ok(identity): identity
+        case Err(message): return Err(message)
+    match expr.kind:
+        case HirExprKind.IntLit(value, _): Ok("int:" + type_identity + ":" + value.to_string())
+        case HirExprKind.BoolLit(value): Ok("bool:" + (if value: "true" else: "false"))
+        case HirExprKind.NamedVar(symbol, name): Ok("var:" + symbol.id.to_string() + ":" + name + ":" + type_identity)
+        case HirExprKind.Var(symbol): Ok("var:" + symbol.id.to_string() + "::" + type_identity)
+        case HirExprKind.Unary(op, operand):
+            val op_name = match fv2_hir_unary_name(op):
+                case Ok(name): name
+                case Err(message): return Err(message)
+            val inner = match fv2_hir_contract_expr_canonical(operand):
+                case Ok(canonical): canonical
+                case Err(message): return Err(message)
+            Ok("unary:" + op_name + "(" + inner + "):" + type_identity)
+        case HirExprKind.Binary(op, left, right):
+            val op_name = match fv2_hir_binop_name(op):
+                case Ok(name): name
+                case Err(message): return Err(message)
+            val left_canonical = match fv2_hir_contract_expr_canonical(left):
+                case Ok(canonical): canonical
+                case Err(message): return Err(message)
+            val right_canonical = match fv2_hir_contract_expr_canonical(right):
+                case Ok(canonical): canonical
+                case Err(message): return Err(message)
+            Ok("binary:" + op_name + "(" + left_canonical + "," + right_canonical + "):" + type_identity)
+        case HirExprKind.Call(callee, args, type_args):
+            match callee.kind:
+                case HirExprKind.NamedVar(_, callee_name):
+                    if callee_name == "old":
+                        return Err("FV2-E-CONTRACT-OLD: old(...) requires a captured pre-state semantic identity")
+                case _: pass
+            if type_args.len() > 0:
+                return Err("FV2-E-CONTRACT-GENERIC-CALL: generic predicate calls require elaborated type-argument evidence")
+            var canonical_args: [text] = []
+            for arg in args:
+                if arg.has_name:
+                    return Err("FV2-E-CONTRACT-NAMED-ARG: named predicate arguments require elaborated parameter mapping")
+                match fv2_hir_contract_expr_canonical(arg.value):
+                    case Ok(canonical): canonical_args.push(canonical)
+                    case Err(message): return Err(message)
+            val callee_canonical = match fv2_hir_contract_expr_canonical(callee):
+                case Ok(canonical): canonical
+                case Err(message): return Err(message)
+            Ok("call(" + callee_canonical + ";" + canonical_args.join(",") + "):" + type_identity)
+        case _:
+            Err("FV2-E-CONTRACT-EXPR: retained HIR expression kind is unsupported")
+
+fn fv2_hir_clause_kind(kind: HirContractClauseKind) -> VerificationContractClauseKindV1:
+    match kind:
+        case HirContractClauseKind.Requires: VerificationContractClauseKindV1.Requires
+        case HirContractClauseKind.StatePredicate: VerificationContractClauseKindV1.StatePredicate
+        case HirContractClauseKind.EnsuresNormal: VerificationContractClauseKindV1.EnsuresNormal
+        case HirContractClauseKind.EnsuresError: VerificationContractClauseKindV1.EnsuresError
+        case HirContractClauseKind.Decreases: VerificationContractClauseKindV1.Decreases
+
+fn fv2_contract_source_span(expr: HirExpr) -> Result<text, text>:
+    val span = expr.span
+    if span.file == "" or span.line <= 0 or span.col <= 0 or span.start < 0 or span.end < span.start:
+        return Err("FV2-E-CONTRACT-SPAN: exact predicate source provenance is required")
+    Ok("file=" + span.file + "|start=" + span.start.to_string() + "|end=" + span.end.to_string() +
+        "|line=" + span.line.to_string() + "|col=" + span.col.to_string())
+
+struct VerificationContractBridgeResultV1:
+    contract: VerificationFunctionContractV1?
+    execution_semantic_hash: text
+    diagnostic: text
+
+struct MirPureStateSemanticsV1:
+    schema: text
+    execution_semantic_hash: text
+    reachable_state_semantic_hash: text
+    transition_semantic_hash: text
+    frame_model_semantic_hash: text
+    diagnostic: text
+
+impl MirPureStateSemanticsV1:
+    fn closed() -> bool:
+        self.schema == "MirPureStateSemantics-v1" and self.diagnostic == "" and
+            self.execution_semantic_hash != "" and
+            self.reachable_state_semantic_hash != "" and
+            self.transition_semantic_hash != "" and
+            self.frame_model_semantic_hash != ""
+
+fn verification_pure_state_semantics_v1(func: MirFunction) -> MirPureStateSemanticsV1:
+    val execution_hash = sha256_text(serialize_mir_function(func))
+    val effect_manifest = verification_region_effect_manifest_v1(func)
+    if not effect_manifest.closed(): return MirPureStateSemanticsV1(
+        "MirPureStateSemantics-v1", execution_hash, "", "", "",
+        effect_manifest.diagnostic)
+    if not effect_manifest.effects.is_empty(): return MirPureStateSemanticsV1(
+        "MirPureStateSemantics-v1", execution_hash, "", "", "",
+        "FV2-E-CONTRACT-STATE-EFFECT: exact pure state semantics reject all region reads and writes")
+    val input_domain = verification_input_domain_semantic_hash_v2(func)
+    MirPureStateSemanticsV1(
+        "MirPureStateSemantics-v1", execution_hash,
+        sha256_text("mir-pure-reachable-state-v1|" + input_domain),
+        sha256_text("mir-pure-unit-transition-v1|" + execution_hash),
+        sha256_text("mir-pure-empty-frame-v1|unit-state"), "")
+
+struct MirRegionStateSemanticsV1:
+    schema: text
+    execution_semantic_hash: text
+    input_domain_semantic_hash: text
+    state_model_semantic_hash: text
+    reachable_state_semantic_hash: text
+    transition_semantic_hash: text
+    frame_model_semantic_hash: text
+    diagnostic: text
+
+impl MirRegionStateSemanticsV1:
+    fn closed() -> bool:
+        self.schema == "MirRegionStateSemantics-v1" and self.diagnostic == "" and
+            self.execution_semantic_hash != "" and
+            self.input_domain_semantic_hash != "" and
+            self.state_model_semantic_hash != "" and
+            self.reachable_state_semantic_hash != "" and
+            self.transition_semantic_hash != "" and
+            self.frame_model_semantic_hash != ""
+
+fn verification_region_state_semantics_v1(func: MirFunction) -> MirRegionStateSemanticsV1:
+    val execution_hash = sha256_text(serialize_mir_function(func))
+    val manifest = verification_region_effect_manifest_v1(func)
+    if not manifest.closed(): return MirRegionStateSemanticsV1(
+        "MirRegionStateSemantics-v1", execution_hash, "", "", "", "", "",
+        manifest.diagnostic)
+    if manifest.effects.is_empty(): return MirRegionStateSemanticsV1(
+        "MirRegionStateSemantics-v1", execution_hash, "", "", "", "", "",
+        "FV2-E-CONTRACT-REGION-STATE-PURE: region state semantics require at least one exact MIR region effect")
+    val input_domain = verification_input_domain_semantic_hash_v2(func)
+    val state_model = manifest.state_model_semantic_hash()
+    MirRegionStateSemanticsV1(
+        "MirRegionStateSemantics-v1", execution_hash, input_domain, state_model,
+        sha256_text("mir-open-global-initial-domain-v1|inputs=" +
+            input_domain + "|state=" + state_model),
+        manifest.transition_semantic_hash(), manifest.frame_model_semantic_hash, "")
+
+fn verification_contract_expected_state_context_v2(
+    func: MirFunction
+) -> Result<ExecutionContractSemanticContextV2, text>:
+    val manifest = verification_region_effect_manifest_v1(func)
+    if not manifest.closed(): return Err(manifest.diagnostic)
+    if manifest.effects.is_empty():
+        val pure = verification_pure_state_semantics_v1(func)
+        if not pure.closed(): return Err(pure.diagnostic)
+        return Ok(ExecutionContractSemanticContextV2(
+            pure.execution_semantic_hash, verification_input_domain_semantic_hash_v2(func),
+            pure.reachable_state_semantic_hash, pure.transition_semantic_hash,
+            pure.frame_model_semantic_hash, "", ""))
+    val region = verification_region_state_semantics_v1(func)
+    if not region.closed(): return Err(region.diagnostic)
+    Ok(ExecutionContractSemanticContextV2(
+        region.execution_semantic_hash, region.input_domain_semantic_hash,
+        region.reachable_state_semantic_hash, region.transition_semantic_hash,
+        region.frame_model_semantic_hash, "", ""))
+
+fn verification_contract_expected_module_state_context_v2(
+    func: MirFunction,
+    internal_call_names: [text]
+) -> Result<ExecutionContractSemanticContextV2, text>:
+    val manifest = verification_region_effect_manifest_with_internal_calls_v1(
+        func, internal_call_names)
+    if not manifest.closed(): return Err(manifest.diagnostic)
+    val execution_hash = sha256_text(serialize_mir_function(func))
+    val input_domain = verification_input_domain_semantic_hash_v2(func)
+    if manifest.effects.is_empty():
+        return Ok(ExecutionContractSemanticContextV2(execution_hash,
+            input_domain,
+            sha256_text("mir-pure-reachable-state-v1|" + input_domain),
+            sha256_text("mir-pure-unit-transition-v1|" + execution_hash),
+            sha256_text("mir-pure-empty-frame-v1|unit-state"), "", ""))
+    val state_model = manifest.state_model_semantic_hash()
+    Ok(ExecutionContractSemanticContextV2(execution_hash, input_domain,
+        sha256_text("mir-open-global-initial-domain-v1|inputs=" +
+            input_domain + "|state=" + state_model),
+        manifest.transition_semantic_hash(), manifest.frame_model_semantic_hash,
+        "", ""))
+
+struct StatePredicateBindingV1:
+    schema: text
+    owner_symbol_id: text
+    predicate_symbol_id: text
+    predicate_name: text
+    owner_execution_semantic_hash: text
+    predicate_execution_semantic_hash: text
+    predicate_region_manifest_hash: text
+    combined_state_semantic_hash: text
+    diagnostic: text
+
+impl StatePredicateBindingV1:
+    fn closed() -> bool:
+        self.schema == "StatePredicateBinding-v1" and self.diagnostic == "" and
+            self.owner_symbol_id != "" and self.predicate_symbol_id != "" and
+            self.predicate_name != "" and
+            self.owner_execution_semantic_hash != "" and
+            self.predicate_execution_semantic_hash != "" and
+            self.predicate_region_manifest_hash != "" and
+            self.combined_state_semantic_hash != ""
+
+    fn canonical_text() -> text:
+        self.schema + "|owner=" + self.owner_symbol_id + "|predicate=" +
+            self.predicate_symbol_id + ":" + self.predicate_name + "|owner_exec=" +
+            self.owner_execution_semantic_hash + "|predicate_exec=" +
+            self.predicate_execution_semantic_hash + "|regions=" +
+            self.predicate_region_manifest_hash + "|state=" +
+            self.combined_state_semantic_hash
+
+    fn hash() -> text:
+        if not self.closed(): return ""
+        sha256_text(self.canonical_text())
+
+struct StatePredicateBindingSetV1:
+    bindings: [StatePredicateBindingV1]
+    diagnostic: text
+
+fn verification_state_predicate_bindings_from_module_v1(
+    module: MirModule,
+    owner: MirFunction
+) -> StatePredicateBindingSetV1:
+    val owner_manifest = verification_region_effect_manifest_v1(owner)
+    if not owner_manifest.closed(): return StatePredicateBindingSetV1(
+        [], owner_manifest.diagnostic)
+    var bindings: [StatePredicateBindingV1] = []
+    if val contract = owner.verification_contract:
+        for clause in contract.clauses:
+            if clause.kind != HirContractClauseKind.StatePredicate: continue
+            val identity = match fv2_state_predicate_identity(clause.predicate):
+                case Ok(value): value
+                case Err(message): return StatePredicateBindingSetV1([], message)
+            var matches: [MirFunction] = []
+            for symbol in module.functions.keys():
+                val candidate = module.functions[symbol]
+                if candidate.symbol.id.to_string() == identity.0 and
+                        candidate.name == identity.1:
+                    matches.push(candidate)
+            if matches.len() != 1: return StatePredicateBindingSetV1([],
+                "FV2-E-STATE-PREDICATE-RESOLVE: retained SymbolId and name must resolve to one MIR function")
+            val predicate = matches[0]
+            if not predicate.signature.params.is_empty(): return StatePredicateBindingSetV1([],
+                "FV2-E-STATE-PREDICATE-PARAMS: state predicate must have no source parameters")
+            match predicate.signature.return_type.kind:
+                case MirTypeKind.Bool: pass
+                case _: return StatePredicateBindingSetV1([],
+                    "FV2-E-STATE-PREDICATE-TYPE: state predicate must return exact bool")
+            val predicate_manifest = verification_region_effect_manifest_v1(predicate)
+            if not predicate_manifest.closed(): return StatePredicateBindingSetV1([],
+                predicate_manifest.diagnostic)
+            if predicate_manifest.effects.is_empty(): return StatePredicateBindingSetV1([],
+                "FV2-E-STATE-PREDICATE-STATE: state predicate must read explicit typed state")
+            var region_atoms: [text] = []
+            var value_types: [text] = []
+            for effect in owner_manifest.effects:
+                val atom = effect.region_id + "@" + effect.value_type_identity
+                if not region_atoms.contains(atom): region_atoms.push(atom)
+                if not value_types.contains(effect.value_type_identity):
+                    value_types.push(effect.value_type_identity)
+            for effect in predicate_manifest.effects:
+                if effect.access == MirRegionAccessV1.Write:
+                    return StatePredicateBindingSetV1([],
+                        "FV2-E-STATE-PREDICATE-WRITE: state predicate must be observational and read-only")
+                val atom = effect.region_id + "@" + effect.value_type_identity
+                if not region_atoms.contains(atom): region_atoms.push(atom)
+                if not value_types.contains(effect.value_type_identity):
+                    value_types.push(effect.value_type_identity)
+            if value_types.len() != 1: return StatePredicateBindingSetV1([],
+                "FV2-E-STATE-PREDICATE-STATE-TYPE: owner and predicate require incompatible global-state value types")
+            region_atoms.sort()
+            val combined_state = sha256_text(
+                "mir-state-predicate-domain-v1|owner=" + owner_manifest.hash() +
+                "|predicate=" + predicate_manifest.hash() + "|regions=" +
+                region_atoms.join(","))
+            bindings.push(StatePredicateBindingV1(
+                "StatePredicateBinding-v1", owner.symbol.id.to_string(),
+                predicate.symbol.id.to_string(), predicate.name,
+                owner_manifest.execution_semantic_hash,
+                predicate_manifest.execution_semantic_hash,
+                predicate_manifest.hash(), combined_state, ""))
+    StatePredicateBindingSetV1(bindings, "")
+
+fn fv2_state_predicate_identity(expr: HirExpr) -> Result<(text, text), text>:
+    match expr.kind:
+        case HirExprKind.Call(callee, args, _):
+            if not args.is_empty(): return Err(
+                "FV2-E-STATE-PREDICATE-CALL: predicate must be one zero-argument ghost function call")
+            match callee.kind:
+                case HirExprKind.NamedVar(symbol, name):
+                    if name == "": return Err(
+                        "FV2-E-STATE-PREDICATE-NAME: predicate function name is required")
+                    Ok((symbol.id.to_string(), name))
+                case _: Err(
+                    "FV2-E-STATE-PREDICATE-CALLEE: predicate must name one exact function")
+        case _: Err(
+            "FV2-E-STATE-PREDICATE-BINDING: effectful invariant requires a zero-argument ghost predicate call")
+
+fn verification_contract_from_mir_v1(func: MirFunction, woven_function_hash: text) -> VerificationContractBridgeResultV1:
+    if woven_function_hash == "":
+        return VerificationContractBridgeResultV1(nil, "", "FV2-E-CONTRACT-WOVEN: woven function identity is required")
+    val execution_hash = sha256_text(serialize_mir_function(func))
+    if val retained = func.verification_contract:
+        var clauses: [VerificationContractClauseV1] = []
+        var index = 0
+        for clause in retained.clauses:
+            val canonical_result = fv2_hir_contract_expr_canonical(clause.predicate)
+            match canonical_result:
+                case Err(message): return VerificationContractBridgeResultV1(nil, execution_hash, message)
+                case Ok(canonical):
+                    val kind = fv2_hir_clause_kind(clause.kind)
+                    val clause_id = func.symbol.id.to_string() + ":" + index.to_string() + ":" + kind.name()
+                    val type_result = fv2_hir_type_identity(clause.predicate.type_)
+                    match type_result:
+                        case Err(message): return VerificationContractBridgeResultV1(nil, execution_hash, message)
+                        case Ok(type_identity):
+                            val source_span = match fv2_contract_source_span(clause.predicate):
+                                case Ok(span): span
+                                case Err(message): return VerificationContractBridgeResultV1(nil, execution_hash, message)
+                            clauses.push(VerificationContractClauseV1(
+                                clause_id: clause_id,
+                                kind: kind,
+                                predicate_semantic_hash: sha256_text(canonical),
+                                predicate_type_identity: type_identity,
+                                source_span: source_span,
+                                binding_name: clause.binding_name,
+                                old_capture_hashes: []
+                            ))
+            index = index + 1
+        var outcome = VerificationContractOutcomeV1.Plain
+        if retained.outcome == HirContractOutcome.Result:
+            outcome = VerificationContractOutcomeV1.Result
+        val contract = VerificationFunctionContractV1(
+            schema: "VerificationFunctionContract-v1",
+            symbol_id: func.symbol.id.to_string(),
+            woven_function_hash: woven_function_hash,
+            outcome: outcome,
+            clauses: clauses,
+            proof_root: retained.proof_uses
+        )
+        val diagnostic = contract.diagnostic()
+        if diagnostic != "": return VerificationContractBridgeResultV1(nil, execution_hash, diagnostic)
+        return VerificationContractBridgeResultV1(Some(contract), execution_hash, "")
+    VerificationContractBridgeResultV1(nil, execution_hash, "")
+
+fn verification_contract_obligations_from_mir_v2(
+    func: MirFunction,
+    woven_function_hash: text,
+    semantics: ExecutionContractSemanticContextV2
+) -> ExecutionContractObligationSetV2:
+    val bridge = verification_contract_from_mir_v1(func, woven_function_hash)
+    if bridge.diagnostic != "": return ExecutionContractObligationSetV2([], bridge.diagnostic)
+    if semantics.execution_semantic_hash != bridge.execution_semantic_hash:
+        return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-VC-EXEC-MISMATCH: semantic context does not name the canonical serialized MIR execution")
+    if val contract = bridge.contract:
+        for clause in contract.clauses:
+            if clause.kind == VerificationContractClauseKindV1.Requires:
+                val expected_domain = verification_input_domain_semantic_hash_v2(func)
+                if semantics.input_domain_semantic_hash != expected_domain:
+                    return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-VC-INPUT-DOMAIN-MISMATCH: context does not name the canonical MIR input domain")
+            if clause.kind == VerificationContractClauseKindV1.Decreases:
+                val expected_calls = verification_recursive_call_semantic_hash_v2(func)
+                if expected_calls == "":
+                    return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-VC-DECREASES-NONRECURSIVE: no exact direct recursive MIR call exists")
+                if semantics.recursive_call_semantic_hash != expected_calls:
+                    return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-VC-DECREASES-CALL-MISMATCH: context does not name the canonical recursive-call set")
+                val expected_order = verification_unsigned_measure_order_hash_v2(clause.predicate_type_identity)
+                if semantics.well_founded_order_semantic_hash != expected_order:
+                    return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-VC-DECREASES-ORDER-MISMATCH: context does not name the canonical unsigned well-founded order")
+            if clause.kind == VerificationContractClauseKindV1.StatePredicate:
+                val expected_state = match verification_contract_expected_state_context_v2(func):
+                    case Ok(value): value
+                    case Err(message): return ExecutionContractObligationSetV2([], message)
+                if semantics.reachable_state_semantic_hash != expected_state.reachable_state_semantic_hash:
+                    return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-VC-INVARIANT-REACHABLE-MISMATCH: context does not name canonical MIR reachable-state semantics")
+                if semantics.transition_semantic_hash != expected_state.transition_semantic_hash:
+                    return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-VC-INVARIANT-TRANSITION-MISMATCH: context does not name canonical MIR transition semantics")
+            if clause.kind == VerificationContractClauseKindV1.Frame:
+                val expected_state = match verification_contract_expected_state_context_v2(func):
+                    case Ok(value): value
+                    case Err(message): return ExecutionContractObligationSetV2([], message)
+                if semantics.transition_semantic_hash != expected_state.transition_semantic_hash:
+                    return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-VC-FRAME-TRANSITION-MISMATCH: context does not name canonical MIR transition semantics")
+                if semantics.frame_model_semantic_hash != expected_state.frame_model_semantic_hash:
+                    return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-VC-FRAME-MODEL-MISMATCH: context does not name canonical MIR frame semantics")
+        return generate_execution_contract_obligations_with_context_v2(contract, semantics)
+    ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-VC-MISSING: MIR function has no retained verification contract")
+
+fn verification_contract_obligations_from_canonical_mir_v2(
+    func: MirFunction,
+    woven_function_hash: text
+) -> ExecutionContractObligationSetV2:
+    verification_contract_obligations_from_canonical_mir_internal_v2(
+        func, woven_function_hash, false)
+
+fn verification_contract_obligations_from_canonical_mir_internal_v2(
+    func: MirFunction,
+    woven_function_hash: text,
+    allow_module_bound_state_predicates: bool
+) -> ExecutionContractObligationSetV2:
+    val bridge = verification_contract_from_mir_v1(func, woven_function_hash)
+    if bridge.diagnostic != "": return ExecutionContractObligationSetV2([], bridge.diagnostic)
+    val contract = match bridge.contract:
+        case Some(value): value
+        case _: return ExecutionContractObligationSetV2([],
+            "FV2-E-CONTRACT-VC-MISSING: MIR function has no retained verification contract")
+    val state_context = match verification_contract_expected_state_context_v2(func):
+        case Ok(value): value
+        case Err(message): return ExecutionContractObligationSetV2([], message)
+    if not allow_module_bound_state_predicates:
+        val manifest = verification_region_effect_manifest_v1(func)
+        if not manifest.closed(): return ExecutionContractObligationSetV2([],
+            manifest.diagnostic)
+        if not manifest.effects.is_empty():
+            for clause in contract.clauses:
+                if clause.kind == VerificationContractClauseKindV1.StatePredicate:
+                    return ExecutionContractObligationSetV2([],
+                        "FV2-E-CONTRACT-STATE-PREDICATE-MODULE: effectful invariant obligations require canonical module-level predicate binding")
+    var recursive_calls = ""
+    var well_founded_order = ""
+    for clause in contract.clauses:
+        if clause.kind == VerificationContractClauseKindV1.Decreases:
+            recursive_calls = verification_recursive_call_semantic_hash_v2(func)
+            if recursive_calls == "": return ExecutionContractObligationSetV2([],
+                "FV2-E-CONTRACT-VC-DECREASES-NONRECURSIVE: no exact direct recursive MIR call exists")
+            well_founded_order = verification_unsigned_measure_order_hash_v2(
+                clause.predicate_type_identity)
+    val canonical_context = ExecutionContractSemanticContextV2(
+        state_context.execution_semantic_hash,
+        state_context.input_domain_semantic_hash,
+        state_context.reachable_state_semantic_hash,
+        state_context.transition_semantic_hash,
+        state_context.frame_model_semantic_hash,
+        recursive_calls,
+        well_founded_order)
+    verification_contract_obligations_from_mir_v2(
+        func, woven_function_hash, canonical_context)
+
+fn verification_contract_obligations_from_canonical_module_v2(
+    module: MirModule,
+    owner_symbol_id: text,
+    woven_function_hash: text
+) -> ExecutionContractObligationSetV2:
+    var owners: [MirFunction] = []
+    for symbol in module.functions.keys():
+        val candidate = module.functions[symbol]
+        if candidate.symbol.id.to_string() == owner_symbol_id:
+            owners.push(candidate)
+    if owners.len() != 1: return ExecutionContractObligationSetV2([],
+        "FV2-E-CONTRACT-MODULE-OWNER: owner SymbolId must resolve to one MIR function")
+    val owner = owners[0]
+    var internal_names: [text] = []
+    for symbol in module.functions.keys():
+        val name = module.functions[symbol].name
+        if name == "" or internal_names.contains(name):
+            return ExecutionContractObligationSetV2([],
+                "FV2-E-CONTRACT-MODULE-NAME: internal function names must be nonempty and unique")
+        internal_names.push(name)
+    for block in owner.blocks:
+        for instruction in block.instructions:
+            val callee_name = verification_direct_call_name_v2(
+                instruction.kind)
+            if callee_name != "" and callee_name != owner.name:
+                var callees: [MirFunction] = []
+                for symbol in module.functions.keys():
+                    if module.functions[symbol].name == callee_name:
+                        callees.push(module.functions[symbol])
+                if callees.len() != 1: return ExecutionContractObligationSetV2([],
+                    "FV2-E-CONTRACT-MODULE-CALLEE: direct call must resolve to one internal function")
+                val callee_manifest = verification_region_effect_manifest_v1(
+                    callees[0])
+                if not callee_manifest.closed():
+                    return ExecutionContractObligationSetV2([],
+                        callee_manifest.diagnostic)
+                if not callee_manifest.effects.is_empty():
+                    return ExecutionContractObligationSetV2([],
+                        "FV2-E-CONTRACT-MODULE-CALLEE-EFFECT: initial contract composition admits only pure leaf callees")
+    val bridge = verification_contract_from_mir_v1(owner,
+        woven_function_hash)
+    if bridge.diagnostic != "": return ExecutionContractObligationSetV2([],
+        bridge.diagnostic)
+    val contract = match bridge.contract:
+        case Some(value): value
+        case _: return ExecutionContractObligationSetV2([],
+            "FV2-E-CONTRACT-VC-MISSING: MIR function has no retained verification contract")
+    val state_context = match verification_contract_expected_module_state_context_v2(
+            owner, internal_names):
+        case Ok(value): value
+        case Err(message): return ExecutionContractObligationSetV2([], message)
+    var recursive_calls = ""
+    var well_founded_order = ""
+    for clause in contract.clauses:
+        if clause.kind == VerificationContractClauseKindV1.Decreases:
+            recursive_calls = verification_recursive_call_semantic_hash_v2(owner)
+            if recursive_calls == "": return ExecutionContractObligationSetV2([],
+                "FV2-E-CONTRACT-VC-DECREASES-NONRECURSIVE: no exact direct recursive MIR call exists")
+            well_founded_order = verification_unsigned_measure_order_hash_v2(
+                clause.predicate_type_identity)
+    val base = generate_execution_contract_obligations_with_context_v2(
+        contract, ExecutionContractSemanticContextV2(
+            state_context.execution_semantic_hash,
+            state_context.input_domain_semantic_hash,
+            state_context.reachable_state_semantic_hash,
+            state_context.transition_semantic_hash,
+            state_context.frame_model_semantic_hash,
+            recursive_calls, well_founded_order))
+    if base.diagnostic != "": return base
+    val bindings = verification_state_predicate_bindings_from_module_v1(
+        module, owner)
+    if bindings.diagnostic != "": return ExecutionContractObligationSetV2([],
+        bindings.diagnostic)
+    var binding_hashes: [text] = []
+    for binding in bindings.bindings:
+        if not binding.closed(): return ExecutionContractObligationSetV2([],
+            "FV2-E-CONTRACT-STATE-PREDICATE-BINDING: predicate binding is not closed")
+        binding_hashes.push(binding.hash())
+    binding_hashes.sort()
+    var obligations: [ExecutionContractObligationV2] = []
+    for obligation in base.obligations:
+        var binds_state_predicate = false
+        if obligation.kind == ExecutionContractObligationKindV1.InvariantInitialization or
+                obligation.kind == ExecutionContractObligationKindV1.InvariantPreservation:
+            binds_state_predicate = true
+        if binds_state_predicate:
+            if binding_hashes.is_empty(): return ExecutionContractObligationSetV2([],
+                "FV2-E-CONTRACT-STATE-PREDICATE-AUTHORITY: invariant obligation lacks an exact predicate binding")
+            var authorities = obligation.semantic_authority_hashes
+            for binding_hash in binding_hashes: authorities.push(binding_hash)
+            obligations.push(ExecutionContractObligationV2(
+                obligation.schema, obligation.obligation_id,
+                obligation.symbol_id, obligation.kind,
+                obligation.execution_semantic_hash,
+                obligation.predicate_semantic_hash, authorities,
+                sha256_text(obligation.relation_semantic_hash +
+                    "|state-predicates=" + binding_hashes.join(",")),
+                obligation.actual_outcome_relation, obligation.source_span))
+        else:
+            obligations.push(obligation)
+    ExecutionContractObligationSetV2(obligations, "")
+
+struct ExecutionContractProofReceiptV2:
+    schema: text
+    obligation_hash: text
+    theorem_root: text
+    proof_receipt_hash: text
+    status: FormalStatus
+    diagnostic: text
+
+impl ExecutionContractProofReceiptV2:
+    fn accepted() -> bool:
+        self.schema == "ExecutionContractProofReceipt-v2" and
+            self.obligation_hash != "" and self.theorem_root != "" and
+            self.proof_receipt_hash != "" and
+            self.status == FormalStatus.SourceRefined and self.diagnostic == ""
+
+    fn canonical_text() -> text:
+        self.schema + "|obligation=" + self.obligation_hash + "|root=" +
+            self.theorem_root + "|proof=" + self.proof_receipt_hash +
+            "|status=" + self.status.name()
+
+    fn hash() -> text:
+        if not self.accepted(): return ""
+        sha256_text(self.canonical_text())
+
+struct ExecutionContractProofReceiptSetV2:
+    receipts: [ExecutionContractProofReceiptV2]
+    diagnostic: text
+
+fn issue_execution_contract_proof_receipts_from_canonical_module_v2(
+    module: MirModule,
+    owner_symbol_id: text,
+    woven_function_hash: text,
+    lean_namespace: text,
+    proof_receipts: [ProofReceiptV1],
+    verified_cache_keys: [VerificationCacheKeyV1],
+    trust_manifests: [TrustManifestV1],
+    retained_axiom_reports: [text],
+    replay_closures: [IndependentReplayClosureV1]
+) -> ExecutionContractProofReceiptSetV2:
+    if lean_namespace == "": return ExecutionContractProofReceiptSetV2([],
+        "FV2-E-CONTRACT-PROOF-NAMESPACE: exact generated Lean namespace is required")
+    var owners: [MirFunction] = []
+    for symbol in module.functions.keys():
+        val candidate = module.functions[symbol]
+        if candidate.symbol.id.to_string() == owner_symbol_id: owners.push(candidate)
+    if owners.len() != 1: return ExecutionContractProofReceiptSetV2([],
+        "FV2-E-CONTRACT-PROOF-OWNER: owner SymbolId must resolve exactly once")
+    val owner = owners[0]
+    val obligations = verification_contract_obligations_from_canonical_module_v2(
+        module, owner_symbol_id, woven_function_hash)
+    if obligations.diagnostic != "": return ExecutionContractProofReceiptSetV2([],
+        obligations.diagnostic)
+    var issued: [ExecutionContractProofReceiptV2] = []
+    for obligation in obligations.obligations:
+        val expected_root = verification_contract_generated_theorem_root_v2(
+            lean_namespace, owner.name, obligation.kind)
+        var matches: [ProofReceiptV1] = []
+        for proof in proof_receipts:
+            if proof.proof_root == expected_root: matches.push(proof)
+        if matches.len() != 1: return ExecutionContractProofReceiptSetV2([],
+            "FV2-E-CONTRACT-PROOF-ROOT: obligation requires exactly one receipt for " + expected_root)
+        val proof = matches[0]
+        if proof.diagnostic() != "" or proof.status != FormalStatus.ModelProven:
+            return ExecutionContractProofReceiptSetV2([],
+                "FV2-E-CONTRACT-PROOF-RECEIPT: theorem receipt must be closed model_proven evidence")
+        if proof.artifact_hash == "" or proof.trust_manifest_hash == "" or
+                proof.independent_replay_hash == "":
+            return ExecutionContractProofReceiptSetV2([],
+                "FV2-E-CONTRACT-PROOF-EVIDENCE: theorem artifact, trust, and independent replay identities are required")
+        var matching_trust_manifests: [TrustManifestV1] = []
+        for trust in trust_manifests:
+            if sha256_text(trust.canonical_text()) == proof.trust_manifest_hash:
+                matching_trust_manifests.push(trust)
+        if matching_trust_manifests.len() != 1 or
+                not matching_trust_manifests[0].is_closed():
+            return ExecutionContractProofReceiptSetV2([],
+                "FV2-E-CONTRACT-PROOF-TRUST: theorem receipt requires exactly one materialized closed trust manifest")
+        var matching_axiom_reports = 0
+        for retained_report in retained_axiom_reports:
+            val audit = audit_lean_axiom_report(retained_report,
+                [proof.proof_root], [])
+            if audit.status == TrustAuditStatus.Closed and
+                    audit.permits_closed_verification() and
+                    canonical_trust_audit_hash_v1(audit,
+                        proof.artifact_hash) == proof.axiom_audit_hash:
+                matching_axiom_reports = matching_axiom_reports + 1
+        if matching_axiom_reports != 1:
+            return ExecutionContractProofReceiptSetV2([],
+                "FV2-E-CONTRACT-PROOF-AXIOMS: theorem receipt requires exactly one retained closed transitive axiom report for its exact root and artifact")
+        var matching_cache_keys: [VerificationCacheKeyV1] = []
+        for key in verified_cache_keys:
+            if key.hash() == proof.cache_key_hash:
+                matching_cache_keys.push(key)
+        if matching_cache_keys.len() != 1:
+            return ExecutionContractProofReceiptSetV2([],
+                "FV2-E-CONTRACT-PROOF-CACHE: theorem receipt requires exactly one materialized verified cache key")
+        val cache_key = matching_cache_keys[0]
+        if cache_key.diagnostic() != "" or
+                cache_key.vir_hash != obligation.execution_semantic_hash or
+                cache_key.contract_hash != obligation.hash():
+            return ExecutionContractProofReceiptSetV2([],
+                "FV2-E-CONTRACT-PROOF-CACHE-BINDING: cache key does not bind the exact MIR execution and obligation")
+        var matching_replay_closures: [IndependentReplayClosureV1] = []
+        for closure in replay_closures:
+            if proof.binds_independent_replay(closure):
+                matching_replay_closures.push(closure)
+        if matching_replay_closures.len() != 1:
+            return ExecutionContractProofReceiptSetV2([],
+                "FV2-E-CONTRACT-PROOF-REPLAY: theorem receipt requires exactly one accepted typed replay closure over its exact artifact")
+        val obligation_dependency = "fv2-obligation:" + obligation.hash()
+        if not proof.theorem_dependencies.contains(obligation_dependency):
+            return ExecutionContractProofReceiptSetV2([],
+                "FV2-E-CONTRACT-PROOF-OBLIGATION: theorem receipt is not bound to the exact obligation hash")
+        val external_dependency = verification_contract_external_proof_dependency_v2(
+            owner, obligation.kind)
+        if external_dependency != "" and
+                not proof.theorem_dependencies.contains(external_dependency):
+            return ExecutionContractProofReceiptSetV2([],
+                "FV2-E-CONTRACT-PROOF-DEPENDENCY: generated root receipt omits the exact proof-uses dependency " + external_dependency)
+        issued.push(ExecutionContractProofReceiptV2(
+            "ExecutionContractProofReceipt-v2", obligation.hash(),
+            expected_root, proof.hash(), FormalStatus.SourceRefined, ""))
+    ExecutionContractProofReceiptSetV2(issued, "")
+
+fn verification_contract_generated_theorem_root_v2(
+    lean_namespace: text,
+    function_name: text,
+    kind: ExecutionContractObligationKindV1
+) -> text:
+    var suffix = "_spec"
+    match kind:
+        case ExecutionContractObligationKindV1.PreconditionsSatisfiable:
+            suffix = "_preconditions_satisfiable"
+        case ExecutionContractObligationKindV1.FramePreservation:
+            suffix = "_frame_preservation"
+        case ExecutionContractObligationKindV1.InvariantInitialization:
+            suffix = "_invariant_initialization"
+        case ExecutionContractObligationKindV1.InvariantPreservation:
+            suffix = "_invariant_preservation"
+        case ExecutionContractObligationKindV1.TerminationDecrease:
+            suffix = ""
+        case _: pass
+    lean_namespace + "." + function_name + suffix
+
+fn verification_contract_external_proof_dependency_v2(
+    owner: MirFunction,
+    kind: ExecutionContractObligationKindV1
+) -> text:
+    val contract = match owner.verification_contract:
+        case Some(value): value
+        case _: return ""
+    if contract.proof_uses == "": return ""
+    var suffix = ""
+    match kind:
+        case ExecutionContractObligationKindV1.PreconditionsSatisfiable:
+            suffix = "_preconditions_satisfiable"
+        case ExecutionContractObligationKindV1.InvariantInitialization:
+            suffix = "_invariant_initialization"
+        case ExecutionContractObligationKindV1.InvariantPreservation:
+            suffix = "_invariant_preservation"
+        case ExecutionContractObligationKindV1.TerminationDecrease:
+            suffix = "_termination"
+        case ExecutionContractObligationKindV1.FramePreservation:
+            return ""
+        case _: pass
+    contract.proof_uses + suffix
+
+fn verification_input_domain_semantic_hash_v2(func: MirFunction) -> text:
+    var parameter_types: [text] = []
+    for parameter_type in func.signature.params:
+        parameter_types.push(serialize_mir_type(parameter_type))
+    sha256_text("mir-input-domain-v2|symbol=" + func.symbol.id.to_string() +
+        "|params=" + parameter_types.join(",") +
+        "|variadic=" + (if func.signature.is_variadic: "true" else: "false"))
+
+fn verification_recursive_call_semantic_hash_v2(func: MirFunction) -> text:
+    # A Call callee is currently represented as a textual MirConstValue.Str.
+    # Textual equality cannot establish that it resolves to this function's
+    # SymbolId and exact signature: an imported or forged same-spelled target
+    # would otherwise be accepted as a recursive decrease edge.  Keep
+    # decreases verification fail-closed until MIR carries resolved direct-call
+    # identities through this boundary.
+    ""
+
+fn verification_unsigned_measure_order_hash_v2(measure_type_identity: text) -> text:
+    sha256_text("bitvec-unsigned-strict-order-well-founded-v2|" + measure_type_identity)
+
+fn verification_direct_call_name_v2(instruction: MirInstKind) -> text:
+    match instruction:
+        case MirInstKind.Call(_, callee, _): verification_direct_operand_name_v2(callee)
+        case _: ""
+
+fn verification_direct_operand_name_v2(callee: MirOperand) -> text:
+    match callee.kind:
+        case MirOperandKind.Const(MirConstValue.Str(name), _): name
+        case _: ""

@@ -17,10 +17,9 @@ promotion.
 
 The selected baselines are `REQ-FV2-001..020` and `NFR-FV2-001..010`.
 Research, requirements, architecture, and detail-design artifacts have been
-restored into the working tree from accepted historical input. They remain
-pending merge-owner review and commit; their presence is not implementation or
-verification evidence. The executable system spec and its generated manual are
-still missing.
+restored, reviewed, and committed. The FV2 implementation capsule, modern
+system spec, and manual mirror are present in this working tree; executable
+admission remains blocked by the missing canonical Stage 4 runtime.
 
 ## Frozen shared interfaces and manual vocabulary
 
@@ -44,11 +43,11 @@ The frozen helpers are `setup_fv2_fixture`, `check_fv2_gate`, and
 
 | Wave | Requirements | Owner and exclusive production scope | Executable evidence | Current status / blocker |
 |---|---|---|---|---|
-| 0 — truthful foundation | REQ-FV2-001, REQ-FV2-002, REQ-FV2-019, REQ-FV2-020 | assurance/profile and verification-report owners; `src/compiler/00.common/assurance/`, `src/compiler/90.tools/verify/` | planned FV2 system status/profile/failure matrix | **Blocked:** reviewed requirement/design artifacts await commit; system spec remains missing |
-| 1 — canonical VIR and typed MIR evidence | REQ-FV2-003, REQ-FV2-005, REQ-FV2-011, REQ-FV2-012, REQ-FV2-018 | frontend/MIR owners; `src/compiler/20.hir/`, `src/compiler/50.mir/` | `test/01_unit/compiler/mir/mir_coverage_opcode_admission_spec.spl`; planned canonical-program/VIR cases | **Partial:** typed probes, deterministic JSON, admission, visitor/SSA/inliner/DCE preservation exist; canonical producer/VIR/effect closure does not |
-| 2 — exact proof frontend | REQ-FV2-004, REQ-FV2-006, REQ-FV2-007, REQ-FV2-008 | Lean/contract owners; MIR verification modules and `src/compiler/70.backend/backend/lean_*` | existing `test/00_formal_verification/compiler/*`; planned execution-linked adversarial system cases | **Blocked:** no current-main FV2 contract/typed-VIR acceptance chain |
-| 3 — receipts, replay, compiler relation | REQ-FV2-009, REQ-FV2-010, REQ-FV2-013, REQ-FV2-016, REQ-FV2-017 | verifier/replay and selected backend owners; `src/compiler/90.tools/verify/`, selected `src/compiler/60.mir_opt/` and `70.backend/` files | planned forged/stale receipt, unsound transform, mutation, replay cases | **Partial:** MIR probe consumers are being closed backend-by-backend; independent artifact replay/certificates are absent |
-| 4 — SimpleOS vertical slice | REQ-FV2-014 | SimpleOS formal owners; bounded `src/verification/` and OS adapter scopes selected by reviewed design | planned capability/lifecycle/IPC/mapping/storage system scenarios plus stable Lean entry points | **Blocked:** historical proofs are not reachable current-main evidence and cannot be imported wholesale |
+| 0 — truthful foundation | REQ-FV2-001, REQ-FV2-002, REQ-FV2-019, REQ-FV2-020 | assurance/profile and verification-report owners; `src/compiler/00.common/assurance/`, `src/compiler/90.tools/verify/` | FV2 system status/profile/failure matrix | **Implemented; executable admission blocked** |
+| 1 — canonical VIR and typed MIR evidence | REQ-FV2-003, REQ-FV2-005, REQ-FV2-011, REQ-FV2-012, REQ-FV2-018 | frontend/MIR owners; `src/compiler/20.hir/`, `src/compiler/50.mir/` | focused MIR plus canonical-program/VIR cases | **Implemented; executable admission blocked** |
+| 2 — exact proof frontend | REQ-FV2-004, REQ-FV2-006, REQ-FV2-007, REQ-FV2-008 | Lean/contract owners; MIR verification modules and `src/compiler/70.backend/backend/lean_*` | existing formal specs plus execution-linked adversarial system cases | **Implemented; Lean/tool execution blocked** |
+| 3 — receipts, replay, compiler relation | REQ-FV2-009, REQ-FV2-010, REQ-FV2-013, REQ-FV2-016, REQ-FV2-017 | verifier/replay and selected backend owners; `src/compiler/90.tools/verify/`, selected `src/compiler/60.mir_opt/` and `70.backend/` files | forged/stale receipt, unsound transform, mutation, replay cases | **Implemented; external replay blocked** |
+| 4 — SimpleOS vertical slice | REQ-FV2-014 | SimpleOS formal owners; bounded `src/verification/` and OS adapter scopes selected by reviewed design | capability/lifecycle/IPC/mapping/storage scenarios plus stable Lean entry points | **Implemented bounded slices; product proof execution blocked** |
 | 5 — RISC-V product chain | REQ-FV2-015 | hardware formal owner; generated RTL/RVFI sidecars, manual Lean/BYL proof owners, formal wrappers | `check-riscv-formal-dual-track.shs`, strict SBY and mission-critical gates | **Blocked:** readiness cannot substitute for executed RVFI/SBY, oracle, refinement, equivalence, and artifact evidence |
 | 6 — independent release closure | REQ-FV2-001, REQ-FV2-009, REQ-FV2-010, REQ-FV2-016, REQ-FV2-019, REQ-FV2-020 | release evidence owner; no production repairs in release | fresh Lean replay, independent checker, full regression and release gates | **Blocked:** predecessor waves and canonical self-hosted runtime are incomplete |
 
@@ -88,8 +87,8 @@ The frozen helpers are `setup_fv2_fixture`, `check_fv2_gate`, and
 |---|---|---|
 | `test/01_unit/compiler/mir/mir_coverage_opcode_admission_spec.spl` | MIR evidence owner | Present; current focused foundation |
 | `doc/06_spec/01_unit/compiler/mir/mir_coverage_opcode_admission_spec.md` | MIR evidence owner + manual reviewer | Present; historical compatibility-liveness content from `8257fde9eb1` is accepted input |
-| `test/03_system/compiler/formal_verification_2_0_spec.spl` | system-test owner | Missing; must use frozen steps/helpers |
-| `doc/06_spec/03_system/compiler/formal_verification_2_0_spec.md` | docgen + merge owner | Missing; hand editing cannot substitute for zero-stub docgen |
+| `test/03_system/compiler/formal_verification_2_0_spec.spl` | system-test owner | Present; 20 REQs, 10 NFRs, frozen steps/helpers, 81 examples |
+| `doc/06_spec/03_system/compiler/formal_verification_2_0_spec.md` | docgen + merge owner | Present mirror; zero-stub regeneration blocked on Stage 4 runtime |
 | `doc/03_plan/sys_test/simple_formal_verification_2_0.md` | system-test owner | Present in this lane; planning evidence only |
 | research, requirements, architecture, detail design | research/design owners | Restored working-tree artifacts accepted by bounded high review; pending commit |
 
@@ -126,9 +125,9 @@ disjoint documentation ownership, executable command ledger, and Lean links.
 
 - `bin/simple` and the canonical deployed self-hosted binary are absent in this
   worktree. A stale/noncanonical ELF failure or Rust-seed success is not PASS.
-- Restored research, requirements, architecture, and design artifacts passed
-  merge-owner/high-review acceptance and remain pending commit. The system spec
-  and generated system manual remain missing.
+- Research, requirements, architecture, and design artifacts are committed.
+  The system spec and manual mirror are present; authoritative SSpec/docgen
+  execution remains blocked by the missing Stage 4 runtime.
 - Each acceptance command runs at most once after PASS. Each gate has at most
   three fix/verify cycles; identical results stop and are reported.
 - Final completion requires zero verification FAIL items, clean authoritative

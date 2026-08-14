@@ -1,0 +1,1162 @@
+# codex-system-test
+"""
+# Simple Formal Verification 2.0 — Foundation Gates
+
+These scenarios exercise the implemented truth, profile, semantic, trust,
+receipt, AOP-identity, and typed-Lean boundaries. They deliberately do not
+claim the remaining full SimpleOS or generated RISC-V refinement gates.
+
+Formal evidence commands and remaining product gates are listed in
+`doc/03_plan/sys_test/simple_formal_verification_2_0.md`.
+"""
+
+use std.spec.*
+use compiler.common.assurance.policy_names.{canonical_profile_names}
+use compiler.common.assurance.policy.{policy_for_profile_name, resolve_assurance_policy,
+    policy_for_profile_name_v2, resolve_assurance_policy_v2}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness, AssuranceStrictnessV2}
+use compiler.common.assurance.formal_status.{FormalStatus, formal_status_from_legacy_verified}
+use compiler.common.assurance.verified_release_gate.{ReleaseEvidenceOutcomeV1,
+    VerifiedReleaseEvidenceV1, SignedVerifiedReleaseBundleV1,
+    SignedVerifiedReleaseBundleDecisionV1, evaluate_verified_release_v1,
+    ApprovedReleaseSignerV1, ReleaseSignatureVerificationV1,
+    release_evidence_hash_v1, validate_signed_verified_release_bundle_v1}
+use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryGateV1,
+    FormalDeliveryGateStatusV1, FormalDeliveryGateEvidenceV1,
+    evaluate_formal_delivery_gates_v1, formal_delivery_manifest_hash_v1}
+use compiler.common.assurance.flight_rules.{assurance_text_hash}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_receipt.{TrustManifestV1, VerificationCacheKeyV1, ProofReceiptV1, permits_closed_verified_release}
+use compiler.common.assurance.formal_interfaces.{WeaveJoinPointV1, WeaveManifestV1, AspectEvidenceClassV1, AspectCertificateV1, CompilerCertificateV1, CompilerRefinementRelationV1}
+use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1,
+    ReplayOutcomeV1, ReplayCheckerReceiptV1, IndependentReplayClosureV1,
+    close_independent_replay_v1}
+use compiler.mir.mir_types.{MirBinOp, MirType, MirTypeKind, LocalId, LocalKind, MirConstValue, MirLocal, MirSignature}
+use compiler.mir.mir_instructions.{BlockId, MirBlock, MirFunction, MirInst, MirInstKind, MirModule, MirOperand, MirOperandKind, MirTerminator}
+use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirContractBlock,
+    HirContractClause, HirContractClauseKind, HirContractOutcome}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.mir.verification_ir.{SemanticClass, VerificationEffectNodeV1, verification_ir_type, resolve_verification_effect_closure, verification_ir_from_retained_contract, verification_ir_module_from_canonical_mir_v1, verification_ir_module_from_resolved_mir_v2}
+use compiler.mir.verification_call_identity.{ResolvedDirectCallBindingV1,
+    ResolvedDirectCallManifestV1, resolved_direct_call_module_hash_v1,
+    resolved_direct_call_site_hash_v1, validate_resolved_direct_call_manifest_v1}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_signature}
+use compiler.mir.verification_effects.{VerificationEffectV1}
+use compiler.mir.verification_region_effects.{verification_region_effect_manifest_v1}
+use compiler.mir.verification_obligation_closure.{VerificationClosureAuthoritiesV1,
+    generate_verification_obligation_closure_v1,
+    generate_verification_obligation_closure_from_canonical_mir_v1,
+    generate_proof_uses_closure_manifest_v1}
+use compiler.backend.backend.lean_ir.{LeanTypeIR, LeanBinaryOpIR, LeanBinderIR, LeanTermIR, LeanTheoremIR}
+use compiler.backend.backend.lean_mir_translate.{mir_type_to_lean, translate_binop}
+use compiler.backend.backend.lean_backend.{FunctionContract, LeanBuilder}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.mir.verification_contract.{VerificationContractOutcomeV1,
+    VerificationContractClauseKindV1, VerificationContractClauseV1,
+    VerificationFunctionContractV1, ExecutionContractObligationKindV1,
+    ExecutionContractSemanticContextV2,
+    generate_execution_contract_obligations_with_context_v2}
+use compiler.common.assurance.trust_audit.{TrustAuditStatus, audit_lean_axiom_report}
+use compiler.mir_opt.mir_opt.dce_translation_validation.{DceTvInstructionV1, DceTvProgramV1, dce_tv_optimize, validate_dce_translation_v1}
+use compiler.mir_opt.mir_opt.result_abi_translation_validation.{ResultSemanticOutcomeV1, ResultTaggedHandleProjectionV1, ResultAbiObservationV1, validate_result_abi_translation_v1}
+use compiler.common.assurance.dynamic_composition.{DynamicComponentKindV1, DynamicComponentReceiptV1, SignatureVerificationReceiptV1, CompositionObligationV1, DynamicCompositionPolicyV1, verify_dynamic_composition_v1, declare_dynamic_bounded_tcb_v1}
+use compiler.common.assurance.proof_dag.{ProofDagNodeV1, proof_dag_affected_symbols, build_proof_dag_schedule_v1}
+use verification.simpleos_capability_rights_refinement.{CAPABILITY_RIGHTS_CASE_COUNT_V1, capability_rights_verification_cache_key_v1, validate_simpleos_capability_rights_refinement_v1, promote_simpleos_capability_rights_refinement_v2}
+use verification.simpleos_green_task_complete_refinement.{
+    GREEN_TASK_COMPLETE_CASE_COUNT_V1,
+    green_task_complete_verification_cache_key_v1,
+    validate_simpleos_green_task_complete_refinement_v1,
+    promote_simpleos_green_task_complete_refinement_v2}
+use verification.simpleos_green_channel_close_refinement.{
+    GREEN_CHANNEL_CLOSE_CASE_COUNT_V1, green_channel_close_cache_key_v1,
+    validate_simpleos_green_channel_close_refinement_v1,
+    promote_simpleos_green_channel_close_refinement_v2}
+use verification.simpleos_dbfs_commit_refinement.{DBFS_COMMIT_CASE_COUNT_V1,
+    dbfs_commit_cache_key_v1, validate_simpleos_dbfs_commit_refinement_v1,
+    promote_simpleos_dbfs_commit_refinement_v2}
+use verification.simpleos_shared_unmap_refinement.{SHARED_UNMAP_CASE_COUNT_V1,
+    shared_unmap_cache_key_v1, validate_simpleos_shared_unmap_refinement_v1,
+    promote_simpleos_shared_unmap_refinement_v2}
+use verification.simpleos_process_wait_refinement.{PROCESS_WAIT_CASE_COUNT_V1,
+    process_wait_cache_key_v1, validate_simpleos_process_wait_refinement_v1,
+    promote_simpleos_process_wait_refinement_v2}
+use verification.simpleos_process_queue_refinement.{PROCESS_QUEUE_CASE_COUNT_V1,
+    process_queue_cache_key_v1, validate_simpleos_process_queue_refinement_v1,
+    promote_simpleos_process_queue_refinement_v2}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.backend.backend.riscv_scalar_product_to_vhdl.{compile_strict_riscv_scalar_product}
+use compiler.backend.backend.riscv_scalar_rvfi_to_vhdl.{compile_strict_rv32_add_rvfi_product}
+use compiler.backend.backend.riscv_scalar_rvfi_formal.{RiscvFormalJobStatusV1,
+    generate_rv32_add_formal_artifacts, reduce_rv32_add_formal_evidence,
+    riscv_formal_job_receipt_v1}
+use app.verify.options.{verify_option_error}
+
+fn fv2_simpleos_axiom_report() -> text:
+    "'KernelCapabilities.rights_allow9_sound' depends on axioms: [propext, Quot.sound]"
+
+fn fv2_capability_replay_checker(class_: ReplayCheckerClassV1) -> ReplayCheckerReceiptV1:
+    ReplayCheckerReceiptV1(
+        "ReplayCheckerReceipt-v1", class_,
+        if class_ == ReplayCheckerClassV1.FreshLeanKernel: "leanchecker" else: "nanoda",
+        "pinned", sha256_text(if class_ == ReplayCheckerClassV1.FreshLeanKernel: "fresh-lean-binary" else: "independent-kernel-binary"), "KernelCapabilities", "KernelCapabilities.rights_allow9_sound", sha256_text("kernel-capabilities-olean"),
+        sha256_text("policy"), sha256_text("output"), ReplayOutcomeV1.Accepted, "")
+
+fn fv2_shared_unmap_axiom_report() -> text:
+    "'MemoryCapabilities.SharedUnmapExact.shared_unmap_refinement_bundle' depends on axioms: [propext]"
+
+fn fv2_unmap_replay_checker(class_: ReplayCheckerClassV1) -> ReplayCheckerReceiptV1:
+    ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1", class_,
+        if class_ == ReplayCheckerClassV1.FreshLeanKernel: "leanchecker" else: "nanoda",
+        "pinned", sha256_text(if class_ == ReplayCheckerClassV1.FreshLeanKernel: "fresh-lean-binary" else: "independent-kernel-binary"), "MemoryCapabilities", "MemoryCapabilities.SharedUnmapExact.shared_unmap_refinement_bundle", sha256_text("unmap-olean"), sha256_text("policy"),
+        sha256_text("output"), ReplayOutcomeV1.Accepted, "")
+
+fn fv2_scheduler_axiom_report() -> text:
+    "'KernelScheduler.complete_refinement_bundle' depends on axioms: [propext]"
+
+fn fv2_scheduler_replay_checker(class_: ReplayCheckerClassV1) -> ReplayCheckerReceiptV1:
+    ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1", class_,
+        if class_ == ReplayCheckerClassV1.FreshLeanKernel: "leanchecker" else: "nanoda",
+        "pinned", sha256_text(if class_ == ReplayCheckerClassV1.FreshLeanKernel: "fresh-lean-binary" else: "independent-kernel-binary"), "KernelScheduler", "KernelScheduler.complete_refinement_bundle", sha256_text("scheduler-olean"), sha256_text("policy"),
+        sha256_text("output"), ReplayOutcomeV1.Accepted, "")
+
+fn fv2_channel_close_axiom_report() -> text:
+    "'ActorChannel.GreenCloseExact.close_drain_refinement_bundle' depends on axioms: [propext]"
+
+fn fv2_channel_replay_checker(class_: ReplayCheckerClassV1) -> ReplayCheckerReceiptV1:
+    ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1", class_,
+        if class_ == ReplayCheckerClassV1.FreshLeanKernel: "leanchecker" else: "nanoda",
+        "pinned", sha256_text(if class_ == ReplayCheckerClassV1.FreshLeanKernel: "fresh-lean-binary" else: "independent-kernel-binary"), "ActorChannel", "ActorChannel.GreenCloseExact.close_drain_refinement_bundle", sha256_text("channel-olean"), sha256_text("policy"),
+        sha256_text("output"), ReplayOutcomeV1.Accepted, "")
+
+fn fv2_dbfs_axiom_report() -> text:
+    "'DbStorage.TxnCommitExact.commit_refinement_bundle' depends on axioms: [propext]"
+
+fn fv2_dbfs_replay_checker(class_: ReplayCheckerClassV1) -> ReplayCheckerReceiptV1:
+    ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1", class_,
+        if class_ == ReplayCheckerClassV1.FreshLeanKernel: "leanchecker" else: "nanoda",
+        "pinned", sha256_text(if class_ == ReplayCheckerClassV1.FreshLeanKernel: "fresh-lean-binary" else: "independent-kernel-binary"), "DbStorage", "DbStorage.TxnCommitExact.commit_refinement_bundle", sha256_text("dbfs-olean"), sha256_text("policy"), sha256_text("output"),
+        ReplayOutcomeV1.Accepted, "")
+
+fn fv2_process_axiom_report() -> text:
+    "'ProcessLifecycle.ProcessWaitExact.process_wait_refinement_bundle' depends on axioms: [propext]"
+
+fn fv2_process_replay_checker(class_: ReplayCheckerClassV1) -> ReplayCheckerReceiptV1:
+    ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1", class_,
+        if class_ == ReplayCheckerClassV1.FreshLeanKernel: "leanchecker" else: "nanoda",
+        "pinned", sha256_text(if class_ == ReplayCheckerClassV1.FreshLeanKernel: "fresh-lean-binary" else: "independent-kernel-binary"), "ProcessWaitExact", "ProcessLifecycle.ProcessWaitExact.process_wait_refinement_bundle", sha256_text("process-olean"), sha256_text("policy"),
+        sha256_text("output"), ReplayOutcomeV1.Accepted, "")
+
+fn fv2_process_queue_axiom_report() -> text:
+    "'ActorChannel.ProcessQueueExact.process_queue_refinement_bundle' depends on axioms: [propext, Quot.sound]"
+
+fn fv2_process_queue_replay_checker(class_: ReplayCheckerClassV1) -> ReplayCheckerReceiptV1:
+    ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1", class_,
+        if class_ == ReplayCheckerClassV1.FreshLeanKernel: "leanchecker" else: "nanoda",
+        "pinned", sha256_text(if class_ == ReplayCheckerClassV1.FreshLeanKernel: "fresh-lean-binary" else: "independent-kernel-binary"), "ProcessQueueExact", "ActorChannel.ProcessQueueExact.process_queue_refinement_bundle", sha256_text("queue-olean"), sha256_text("policy"),
+        sha256_text("output"), ReplayOutcomeV1.Accepted, "")
+
+fn fv2_key(weave_hash: text) -> VerificationCacheKeyV1:
+    VerificationCacheKeyV1("vir", "contract", weave_hash, "macro", ["dep"], "effects-v1", "compiler-v1", "riscv64", "4.33.0", "mathlib", ["solver"], "tactics", "trust", "verified")
+
+fn fv2_compiler_certificate() -> CompilerCertificateV1:
+    val draft = CompilerCertificateV1("lower", "before", "after", CompilerRefinementRelationV1.BehaviorInclusion, "validator-v1", "", true)
+    CompilerCertificateV1(draft.pass_id, draft.before_semantic_hash, draft.after_semantic_hash, draft.relation, draft.validator_version, draft.expected_certificate_hash(), true)
+
+fn fv2_delivery_evidence(gate: FormalDeliveryGateV1,
+    passed: bool) -> FormalDeliveryGateEvidenceV1:
+    if passed: return FormalDeliveryGateEvidenceV1(gate,
+        FormalDeliveryGateStatusV1.Passed,
+        [sha256_text("receipt-" + gate.name())],
+        sha256_text("evidence-" + gate.name()), "")
+    FormalDeliveryGateEvidenceV1(gate, FormalDeliveryGateStatusV1.Blocked,
+        [], "", "executed evidence is not closed")
+
+fn fv2_delivery_plan(passed_count: i64) -> [FormalDeliveryGateEvidenceV1]:
+    val gates = [FormalDeliveryGateV1.VerificationTruthfulness,
+        FormalDeliveryGateV1.ExactCoreSemantics,
+        FormalDeliveryGateV1.VirCompilerRelation,
+        FormalDeliveryGateV1.AopMacroClosure,
+        FormalDeliveryGateV1.SimpleOsVerticalSlice,
+        FormalDeliveryGateV1.GeneratedRv32iEndToEnd,
+        FormalDeliveryGateV1.Rv64PrivilegeMmuLinux,
+        FormalDeliveryGateV1.VerifiedRelease]
+    var evidence: [FormalDeliveryGateEvidenceV1] = []
+    for index in 0..gates.len():
+        evidence.push(fv2_delivery_evidence(gates[index], index < passed_count))
+    evidence
+
+fn fv2_passed_release_bundle() -> SignedVerifiedReleaseBundleDecisionV1:
+    val delivery_manifest = formal_delivery_manifest_hash_v1(
+        fv2_delivery_plan(8))
+    val evidence = VerifiedReleaseEvidenceV1("verified",
+        FormalStatus.ArtifactVerified, [FormalStatus.ArtifactVerified],
+        sha256_text("artifact"), sha256_text("artifact"), [sha256_text("proof")],
+        [sha256_text("compiler")], sha256_text("trust"), "",
+        sha256_text("replay"), sha256_text("mutation"), sha256_text("non-vacuity"),
+        [ReleaseEvidenceOutcomeV1.ProvedWithCertificate], 0, 0, 0, 0,
+        delivery_manifest)
+    val payload = release_evidence_hash_v1(evidence)
+    val signature = SignatureVerificationReceiptV1(payload, "release-key",
+        "pure-ed25519-v1", sha256_text("signature-evidence"), true)
+    validate_signed_verified_release_bundle_v1(SignedVerifiedReleaseBundleV1(
+        evidence, payload, "release-key", ReleaseSignatureVerificationV1(
+            "release-key", sha256_text("public-key"), signature)), [
+            ApprovedReleaseSignerV1("release-key", sha256_text("public-key"))])
+
+fn fv2_render(term: LeanTermIR) -> text:
+    match term.render():
+        case Ok(value): value
+        case Err(_): ""
+
+fn fv2_dce_source() -> DceTvProgramV1:
+    DceTvProgramV1([
+        DceTvInstructionV1.Const(9, 404),
+        DceTvInstructionV1.Const(1, 20),
+        DceTvInstructionV1.Const(2, 22),
+        DceTvInstructionV1.Add(0, 1, 2)
+    ], 0)
+
+fn fv2_plugin() -> DynamicComponentReceiptV1:
+    DynamicComponentReceiptV1("monitor", DynamicComponentKindV1.Plugin, "artifact", "interface", "verified", "compiler", "proof", "release-key")
+
+fn fv2_global_writer() -> MirFunction:
+    val type_ = MirType.i64()
+    val local = MirLocal(id: LocalId(id: 0), name: nil, type_: type_,
+        kind: LocalKind.Temp, is_ghost: false)
+    val value = MirOperand(kind: MirOperandKind.Copy(LocalId(id: 0)))
+    val span = Span(start: 10, end: 14, line: 2, col: 5,
+        file: "fv2_global_writer.spl", length: 4)
+    MirFunction(
+        symbol: SymbolId(id: 8801), name: "global_writer",
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [local], blocks: [MirBlock(
+            id: BlockId(id: 0), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.StoreGlobal(
+                SymbolId(id: 77), value), span: Some(span))],
+            terminator: MirTerminator.Ret(nil))],
+        entry_block: BlockId(id: 0), span: span, generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false)
+
+fn fv2_canonical_vc_function() -> MirFunction:
+    var func = fv2_global_writer()
+    val span = Span(start: 30, end: 34, line: 6, col: 5,
+        file: "fv2_global_writer.spl", length: 4)
+    val bool_type = HirType(kind: HirTypeKind.Bool, span: span)
+    val predicate = HirExpr(kind: HirExprKind.BoolLit(true), has_type_: true,
+        type_: bool_type, span: span)
+    func.verification_contract = Some(HirContractBlock(clauses: [
+        HirContractClause(kind: HirContractClauseKind.Requires,
+            predicate: predicate, binding_name: "", span: span)],
+        proof_uses: "GlobalWriter.correct", outcome: HirContractOutcome.Plain))
+    func
+
+fn fv2_global_writer_caller() -> MirFunction:
+    val span = Span(start: 20, end: 26, line: 4, col: 5,
+        file: "fv2_global_writer.spl", length: 6)
+    val signature = MirSignature(params: [], return_type: MirType.unit(),
+        is_variadic: false)
+    val callee = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str("global_writer"),
+        MirType(kind: MirTypeKind.FuncPtr(signature))))
+    MirFunction(
+        symbol: SymbolId(id: 8802), name: "public_update",
+        signature: signature, locals: [], blocks: [MirBlock(
+            id: BlockId(id: 0), label: Some("entry"),
+            instructions: [MirInst(kind: MirInstKind.Call(nil, callee, []),
+                span: Some(span))], terminator: MirTerminator.Ret(nil))],
+        entry_block: BlockId(id: 0), span: span, generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false)
+
+fn fv2_resolved_global_writer_module() -> MirModule:
+    val caller = fv2_global_writer_caller()
+    val callee = fv2_canonical_vc_function()
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[caller.symbol] = caller
+    functions[callee.symbol] = callee
+    MirModule(name: "fv2_resolved_global_writer", functions: functions,
+        statics: {}, constants: {}, types: {})
+
+fn fv2_resolved_global_writer_manifest(module: MirModule) -> ResolvedDirectCallManifestV1:
+    val caller = module.functions[SymbolId(id: 8802)]
+    val callee = module.functions[SymbolId(id: 8801)]
+    val binding = ResolvedDirectCallBindingV1(
+        caller.symbol.id.to_string(),
+        resolved_direct_call_site_hash_v1(caller, 0, 0),
+        callee.symbol.id.to_string(),
+        sha256_text(serialize_mir_signature(callee.signature)),
+        sha256_text(serialize_mir_function(callee)))
+    ResolvedDirectCallManifestV1(resolved_direct_call_module_hash_v1(module),
+        sha256_text("fv2-system-resolver-receipt"), [binding])
+
+fn setup_fv2_fixture(passed_gate_count: i64) -> [FormalDeliveryGateEvidenceV1]:
+    fv2_delivery_plan(passed_gate_count)
+
+fn check_fv2_gate(
+    evidence: [FormalDeliveryGateEvidenceV1],
+    release: SignedVerifiedReleaseBundleDecisionV1?
+) -> FormalDeliveryDecisionV1:
+    evaluate_formal_delivery_gates_v1(evidence, release)
+
+fn check_fv2_replay(
+    fresh: ReplayCheckerReceiptV1,
+    independent: ReplayCheckerReceiptV1
+) -> IndependentReplayClosureV1:
+    close_independent_replay_v1(fresh, independent)
+
+describe "Simple Formal Verification 2.0 foundation gates":
+    describe "REQ-FV2-001 and NFR-FV2-002: truthful fail-closed formal status":
+        it "should classify Lean-only success as model-proven":
+            step("Audit the formal claim boundary")
+            val status = formal_status_from_legacy_verified(true)
+            expect(status).to_equal(FormalStatus.ModelProven)
+            expect(status.permits_verified_release()).to_equal(false)
+
+        it "should reserve release permission for artifact verification":
+            step("Compare model and artifact release states")
+            expect(FormalStatus.SourceRefined.permits_verified_release()).to_equal(false)
+            expect(FormalStatus.BackendRefined.permits_verified_release()).to_equal(false)
+            expect(FormalStatus.ArtifactVerified.permits_verified_release()).to_equal(true)
+
+        it "should reject a claimed artifact receipt with missing refinement evidence":
+            step("Validate an incomplete artifact receipt")
+            val receipt = ProofReceiptV1("root", FormalStatus.ArtifactVerified, "key", "artifact", [], "axioms", "trust", "", "")
+            expect(receipt.permits_verified_release()).to_equal(false)
+            expect(receipt.diagnostic()).to_contain("COMPILER")
+
+    describe "REQ-FV2-019 and NFR-FV2-003: fail-closed verified release decision":
+        it "should accept only complete artifact-bound executed evidence":
+            step("Evaluate exact artifact proof compiler trust replay mutation and cover identities")
+            val evidence = VerifiedReleaseEvidenceV1("verified",
+                FormalStatus.ArtifactVerified, [FormalStatus.ArtifactVerified],
+                sha256_text("artifact"), sha256_text("artifact"),
+                [sha256_text("proof")], [sha256_text("compiler")],
+                sha256_text("trust"), "", sha256_text("replay"),
+                sha256_text("mutation"), sha256_text("non-vacuity"),
+                [ReleaseEvidenceOutcomeV1.ProvedWithCertificate], 0, 0, 0, 0,
+                sha256_text("delivery-gates"))
+            expect(evaluate_verified_release_v1(evidence).passed()).to_equal(true)
+
+        it "should reject unknown timeout missing-tool stale unsupported and environment failures":
+            step("Reject stale or unsupported evidence")
+            val outcomes = [ReleaseEvidenceOutcomeV1.Unknown,
+                ReleaseEvidenceOutcomeV1.Timeout,
+                ReleaseEvidenceOutcomeV1.MissingTool,
+                ReleaseEvidenceOutcomeV1.ToolFailure,
+                ReleaseEvidenceOutcomeV1.EnvironmentFailure]
+            for outcome in outcomes:
+                val evidence = VerifiedReleaseEvidenceV1("verified",
+                    FormalStatus.ArtifactVerified, [FormalStatus.ArtifactVerified],
+                    sha256_text("artifact"), sha256_text("artifact"),
+                    [sha256_text("proof")], [sha256_text("compiler")],
+                    sha256_text("trust"), "", sha256_text("replay"),
+                    sha256_text("mutation"), sha256_text("non-vacuity"),
+                    [outcome], 1, 1, 0, 1, sha256_text("delivery-gates"))
+                expect(evaluate_verified_release_v1(evidence).passed()).to_equal(false)
+
+        it "should pin signer policy outside the caller-controlled CLI boundary":
+            step("Accept one bundle path and reject policy or status injection")
+            expect(verify_option_error(["release", "bundle.sdn"])).to_equal("")
+            expect(verify_option_error(["release", "bundle.sdn",
+                "attacker-policy.sdn"]) == "").to_equal(false)
+            expect(verify_option_error(["release", "--verified"]) == "").to_equal(false)
+
+    describe "REQ-FV2-020 and NFR-FV2-010: ordered formal delivery gates":
+        it "should preserve an honest partial plan without implying release readiness":
+            step("Pass truth semantics VIR and AOP then retain every product gate as blocked")
+            val decision = check_fv2_gate(setup_fv2_fixture(4), nil)
+            expect(decision.accepted_state).to_equal(true)
+            expect(decision.release_ready).to_equal(false)
+            expect(decision.highest_passed_gate).to_equal("aop_macro_closure")
+
+        it "should reject a product gate that jumps over an unmet predecessor":
+            step("Attempt SimpleOS promotion while VIR and AOP gates remain blocked")
+            var evidence = fv2_delivery_plan(2)
+            evidence[4] = fv2_delivery_evidence(
+                FormalDeliveryGateV1.SimpleOsVerticalSlice, true)
+            val decision = evaluate_formal_delivery_gates_v1(evidence, nil)
+            expect(decision.accepted_state).to_equal(false)
+            expect(decision.diagnostic).to_contain("PREMATURE")
+
+        it "should require the exact final release decision after all eight gates":
+            step("Close the ordered gate chain and bind its verified release decision")
+            val decision = evaluate_formal_delivery_gates_v1(
+                fv2_delivery_plan(8), Some(fv2_passed_release_bundle()))
+            expect(decision.release_ready).to_equal(true)
+            expect(decision.highest_passed_gate).to_equal("verified_release")
+
+    describe "REQ-FV2-004 and NFR-FV2-007: execution-linked contracts":
+        it "should retain source predicates outside the executable body":
+            step("Parse a function with entry and actual-result contracts")
+            val module = parse_and_build_module(
+                "fn increment(x: i64) -> i64:\n" +
+                "    in:\n        x >= 0\n" +
+                "    out(ret):\n        ret > x\n" +
+                "    x + 1\n", "fv2_system_contract.spl")
+            val fn_ = module.functions["increment"]
+            expect(fn_.contract.preconditions.len()).to_equal(1)
+            expect(fn_.contract.postconditions.len()).to_equal(1)
+            expect(fn_.body.stmts.len()).to_equal(1)
+            expect(fn_.contract.preconditions[0].span.file).to_equal("fv2_system_contract.spl")
+
+        it "should generate non-vacuity and actual-call theorem roots":
+            step("Render a contract over the emitted function execution")
+            var builder = LeanBuilder.create()
+            val contract = FunctionContract("increment", ["x = x"],
+                ["result = x + 1"], [], [], [], "", "Increment.correct")
+            contract.to_lean_spec(builder, [("x", "BitVec 64")], "BitVec 64")
+            val lean = builder.build()
+            expect(lean).to_contain("increment_preconditions_satisfiable")
+            expect(lean).to_contain("let result : BitVec 64 := increment x")
+            expect(lean).to_contain("Increment.correct_preconditions_satisfiable")
+            expect(lean.contains("∃ result")).to_equal(false)
+
+        it "should bind the exact proof root and source map into contract identity":
+            step("Compare two otherwise-identical retained contract snapshots")
+            val clause = VerificationContractClauseV1("requires",
+                VerificationContractClauseKindV1.Requires, "predicate", "bool",
+                "file=fv2.spl|start=1|end=2|line=1|col=1", "", [])
+            val first = VerificationFunctionContractV1(
+                "VerificationFunctionContract-v1", "42", "woven",
+                VerificationContractOutcomeV1.Plain, [clause], "Proof.first")
+            val second = VerificationFunctionContractV1(
+                "VerificationFunctionContract-v1", "42", "woven",
+                VerificationContractOutcomeV1.Plain, [clause], "Proof.second")
+            expect(first.hash() == second.hash()).to_equal(false)
+            val unmapped = VerificationContractClauseV1("requires",
+                VerificationContractClauseKindV1.Requires, "predicate", "bool", "", "", [])
+            expect(unmapped.diagnostic()).to_contain("SPAN")
+
+        it "should require exact state authorities for invariant frame and termination VCs":
+            step("Attempt invariant generation without reachable-state semantics")
+            val invariant = VerificationContractClauseV1("invariant",
+                VerificationContractClauseKindV1.StatePredicate, "predicate", "bool",
+                "file=fv2.spl|start=3|end=4|line=2|col=1", "", [])
+            val contract = VerificationFunctionContractV1(
+                "VerificationFunctionContract-v1", "43", "woven",
+                VerificationContractOutcomeV1.Plain, [invariant], "")
+            val incomplete = generate_execution_contract_obligations_with_context_v2(
+                contract, ExecutionContractSemanticContextV2("exec", "", "", "transition", "", "", ""))
+            expect(incomplete.diagnostic).to_contain("INVARIANT-REACHABLE")
+
+            step("Bind initialization and preservation to independent semantic identities")
+            val complete = generate_execution_contract_obligations_with_context_v2(
+                contract, ExecutionContractSemanticContextV2(
+                    "exec", "", "reachable", "transition", "", "", ""))
+            expect(complete.diagnostic).to_equal("")
+            expect(complete.obligations[0].kind).to_equal(ExecutionContractObligationKindV1.InvariantInitialization)
+            expect(complete.obligations[1].kind).to_equal(ExecutionContractObligationKindV1.InvariantPreservation)
+            expect(complete.obligations[0].relation_semantic_hash == complete.obligations[1].relation_semantic_hash).to_equal(false)
+
+    describe "REQ-FV2-002: verified assurance profile":
+        it "should expose verified as the strictest canonical rung":
+            step("Read the canonical assurance ladder")
+            expect(canonical_profile_names()).to_equal(["moderate", "strict", "robust", "critical", "verified"])
+            expect(AssuranceStrictnessV2.Verified.rank()).to_be_greater_than(AssuranceStrictnessV2.Critical.rank())
+
+        it "should inherit critical engineering restrictions":
+            step("Compare strictness through the typed resolver")
+            val policy = policy_for_profile_name_v2("verified")
+            expect(policy.strictness.at_least(AssuranceStrictnessV2.Critical)).to_equal(true)
+
+        it "should never let a lower CLI input weaken a verified project pin":
+            step("Resolve project and CLI inputs with raise-only precedence")
+            val policy = resolve_assurance_policy_v2("verified", "moderate", "", "nogc_async_mut_noalloc", "none", "none")
+            expect(policy.strictness).to_equal(AssuranceStrictnessV2.Verified)
+
+    describe "REQ-FV2-006 and NFR-FV2-008: exact and fail-closed semantics":
+        it "should preserve machine width and signed interpretation":
+            step("Lower signed and unsigned machine integers")
+            expect(verification_ir_type(MirType(kind: MirTypeKind.I32)).representation).to_equal("bitvec:32:signed")
+            expect(verification_ir_type(MirType(kind: MirTypeKind.U32)).representation).to_equal("bitvec:32:unsigned")
+
+        it "should reject floating-point semantics until IEEE behavior is exact":
+            step("Classify an unsupported floating-point type")
+            expect(verification_ir_type(MirType(kind: MirTypeKind.F64)).semantic_class).to_equal(SemanticClass.Unsupported)
+
+        it "should reject pointers without region and capability semantics":
+            step("Classify a raw mutable pointer")
+            val pointer = verification_ir_type(MirType(kind: MirTypeKind.Ptr(MirType.i64(), true)))
+            expect(pointer.closure_ready()).to_equal(false)
+            expect(pointer.diagnostic).to_contain("POINTER")
+
+        it "should make the canonical MIR backend emit exact-width BitVec types":
+            step("Inspect signed and unsigned canonical Lean backend types")
+            expect(mir_type_to_lean(MirType(kind: MirTypeKind.I32)).ok().unwrap()).to_equal("BitVec 32")
+            expect(mir_type_to_lean(MirType(kind: MirTypeKind.U64)).ok().unwrap()).to_equal("BitVec 64")
+
+        it "should retain exact Result payload types through MIR, VIR, and Lean":
+            step("Classify and print a machine-typed normal/error outcome")
+            val result_type = MirType.result(MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.U8))
+            expect(verification_ir_type(result_type).representation).to_equal("result<bitvec:32:signed,bitvec:8:unsigned>")
+            expect(mir_type_to_lean(result_type).ok().unwrap()).to_equal("Except (BitVec 8) (BitVec 32)")
+
+        it "should reject canonical backend operations needing missing exact semantics":
+            step("Attempt lossy float and signedness-ambiguous arithmetic lowering")
+            expect(mir_type_to_lean(MirType(kind: MirTypeKind.F64)).is_err()).to_equal(true)
+            expect(translate_binop(MirBinOp.Div).is_err()).to_equal(true)
+            expect(translate_binop(MirBinOp.Shr).is_err()).to_equal(true)
+
+    describe "REQ-FV2-007: typed Lean generation":
+        it "should print a typed execution-linked term deterministically":
+            step("Construct and render a typed Lean contract term")
+            val x = LeanBinderIR("x", LeanTypeIR.BitVec(32))
+            val call = LeanTermIR.Apply("increment", [LeanTermIR.Var("x")])
+            val post = LeanTermIR.Binary(LeanBinaryOpIR.Equal, LeanTermIR.Var("result"), LeanTermIR.Var("x"))
+            val term = LeanTermIR.Forall([x], LeanTermIR.Let(LeanBinderIR("result", LeanTypeIR.BitVec(32)), call, post))
+            expect(fv2_render(term)).to_contain("let result : BitVec 32 := increment x")
+
+        it "should reject invalid typed nodes before printing":
+            step("Validate an impossible bit-vector width")
+            val invalid = LeanTermIR.BitVecLiteral(0, 0)
+            expect(invalid.diagnostic()).to_contain("WIDTH")
+            expect(fv2_render(invalid)).to_equal("")
+
+        it "should require explicit proof ownership":
+            step("Validate a theorem without a proof reference")
+            val theorem = LeanTheoremIR("unsafe_claim", LeanTermIR.TrueProp, "")
+            expect(theorem.diagnostic()).to_contain("PROOF")
+
+    describe "REQ-FV2-003 REQ-FV2-005 REQ-FV2-008 and NFR-FV2-001 NFR-FV2-005: canonical verification evidence":
+        it "should require a resolver-bound direct-call manifest for V2 module VIR":
+            step("Construct canonical verification evidence")
+            val module = fv2_resolved_global_writer_module()
+            val manifest = fv2_resolved_global_writer_manifest(module)
+            expect(validate_resolved_direct_call_manifest_v1(module, manifest).closed()).to_equal(true)
+
+            step("Construct V2 VIR from the same resolver-bound snapshot")
+            val vir = verification_ir_module_from_resolved_mir_v2(module,
+                sha256_text("source"), sha256_text("expanded"),
+                sha256_text("woven"), sha256_text("policy"), manifest)
+            expect(vir.closure_ready()).to_equal(true)
+            expect(vir.resolved_call_manifest_hash).to_equal(manifest.hash())
+
+            step("Invalidate the V2 semantic identity when resolver evidence drifts")
+            var drifted_manifest = manifest
+            drifted_manifest.resolver_receipt_hash = sha256_text(
+                "fv2-system-resolver-receipt-drift")
+            val drifted = verification_ir_module_from_resolved_mir_v2(module,
+                sha256_text("source"), sha256_text("expanded"),
+                sha256_text("woven"), sha256_text("policy"), drifted_manifest)
+            expect(drifted.closure_ready()).to_equal(true)
+            expect(vir.semantic_hash == drifted.semantic_hash).to_equal(false)
+
+            step("Reject a missing call binding before effects or calls can close")
+            val absent = ResolvedDirectCallManifestV1(
+                resolved_direct_call_module_hash_v1(module),
+                sha256_text("fv2-system-resolver-receipt"), [])
+            val rejected = verification_ir_module_from_resolved_mir_v2(module,
+                sha256_text("source"), sha256_text("expanded"),
+                sha256_text("woven"), sha256_text("policy"), absent)
+            expect(rejected.closure_ready()).to_equal(false)
+            expect(rejected.diagnostic).to_contain("CALL-IDENTITY-MISSING")
+
+        it "should derive VC authorities from canonical MIR and retained contracts":
+            step("Derive type contract effect frame backend and trust identities without caller labels")
+            val trust = TrustManifestV1(["propext"], [], [], [], [], [])
+            val closure = generate_verification_obligation_closure_from_canonical_mir_v1(
+                fv2_canonical_vc_function(), "woven-global-writer", "lean4",
+                "lean-backend-v1", trust)
+            expect(closure.closed()).to_equal(true)
+            expect(closure.obligations.len()).to_equal(13)
+            expect(closure.root_obligation_id).to_equal(
+                "8801::fv2::trust-closure")
+
+        it "should generate one deterministic fail-closed thirteen-kind DAG":
+            step("Bind every required VC class into the final trust-closure root")
+            val authorities = VerificationClosureAuthoritiesV1(
+                "sample::verified", "sample.spl:10",
+                assurance_text_hash("type"), assurance_text_hash("pre"),
+                assurance_text_hash("termination"), assurance_text_hash("memory"),
+                assurance_text_hash("effect"), assurance_text_hash("normal"),
+                assurance_text_hash("error"), assurance_text_hash("invariant-init"),
+                assurance_text_hash("invariant-preserve"), assurance_text_hash("calls"),
+                assurance_text_hash("witness"), assurance_text_hash("lowering"),
+                assurance_text_hash("trust"))
+            val closure = generate_verification_obligation_closure_v1(authorities)
+            expect(closure.closed()).to_equal(true)
+            expect(closure.obligations.len()).to_equal(13)
+            expect(closure.root_obligation_id).to_end_with("::fv2::trust-closure")
+            expect(closure.obligations[12].dependency_ids).to_contain(
+                "sample::verified::fv2::backend-lowering-coverage")
+
+        it "should reject an absent typed proposition identity":
+            step("Remove one VC authority and require a closed diagnostic")
+            val authorities = VerificationClosureAuthoritiesV1(
+                "sample::verified", "sample.spl:10",
+                assurance_text_hash("type"), assurance_text_hash("pre"),
+                assurance_text_hash("termination"), assurance_text_hash("memory"),
+                assurance_text_hash("effect"), "", assurance_text_hash("error"),
+                assurance_text_hash("invariant-init"),
+                assurance_text_hash("invariant-preserve"), assurance_text_hash("calls"),
+                assurance_text_hash("witness"), assurance_text_hash("lowering"),
+                assurance_text_hash("trust"))
+            val closure = generate_verification_obligation_closure_v1(authorities)
+            expect(closure.closed()).to_equal(false)
+            expect(closure.diagnostic).to_contain("AUTHORITY")
+
+    describe "REQ-FV2-009 and NFR-FV2-009: transitive trust and independent replay":
+        it "should accept a complete report containing only Lean logic axioms":
+            step("Replay the shipped artifact independently")
+            val replay = check_fv2_replay(
+                fv2_capability_replay_checker(ReplayCheckerClassV1.FreshLeanKernel),
+                fv2_capability_replay_checker(ReplayCheckerClassV1.IndependentKernel))
+            expect(replay.accepted).to_equal(true)
+            val audit = audit_lean_axiom_report("declaration Safe.root depends on axioms: [propext, Quot.sound, Classical.choice]", ["Safe.root"], [])
+            expect(audit.status).to_equal(TrustAuditStatus.Closed)
+
+        it "should reject hidden project axioms and trusted native evaluation":
+            step("Audit forbidden transitive dependencies")
+            val audit = audit_lean_axiom_report("declaration Safe.root depends on axioms: [Board.hidden, Lean.trustCompiler]", ["Safe.root"], [])
+            expect(audit.status).to_equal(TrustAuditStatus.Rejected)
+            expect(audit.rejected_axioms).to_contain("Lean.trustCompiler")
+
+        it "should fail closed when a requested root has no report":
+            step("Request two roots from a one-root report")
+            val audit = audit_lean_axiom_report("declaration Safe.first depends on axioms: []", ["Safe.first", "Safe.second"], [])
+            expect(audit.status).to_equal(TrustAuditStatus.Missing)
+            expect(audit.audited_root_count).to_equal(1)
+
+        it "should reject a proof-root prefix collision":
+            step("Audit exact theorem identity")
+            val audit = audit_lean_axiom_report("declaration Safe.rootForged depends on axioms: []", ["Safe.root"], [])
+            expect(audit.status).to_equal(TrustAuditStatus.Missing)
+
+    describe "REQ-FV2-010 and NFR-FV2-004 NFR-FV2-006: evidence cache and scheduling identity":
+        it "should invalidate evidence when the weave identity changes":
+            step("Compare two semantic cache identities")
+            expect(fv2_key("weave-a").hash() == fv2_key("weave-b").hash()).to_equal(false)
+
+        it "should reject reuse under a stale cache key":
+            step("Bind an artifact receipt to the old semantic key")
+            val old_key = fv2_key("weave-a")
+            val receipt = ProofReceiptV1("Safe.root", FormalStatus.ArtifactVerified, old_key.hash(), "artifact", [], "axioms", "trust", "compiler", "replay")
+            expect(receipt.reusable_for(fv2_key("weave-b"))).to_equal(false)
+
+        it "should require a closed matching trust manifest for an unqualified release":
+            step("Evaluate closed-release policy with an environmental assumption")
+            val trust = TrustManifestV1(["propext"], [], [], [], [], ["timer monotonic"])
+            val key = fv2_key("weave")
+            val certificate = fv2_compiler_certificate()
+            val receipt = ProofReceiptV1("Safe.root", FormalStatus.ArtifactVerified, key.hash(), "artifact", [], "axioms", sha256_text(trust.canonical_text()), certificate.expected_certificate_hash(), "replay")
+            val replay = IndependentReplayClosureV1(
+                "IndependentReplayClosure-v1", "", "", "", false,
+                "environmental trust is not replay closure")
+            expect(permits_closed_verified_release(
+                policy_for_profile_name_v2("verified"), key, receipt, trust,
+                certificate, replay)).to_equal(false)
+
+        it "should schedule a recursive proof component after its dependencies":
+            step("Build the SymbolId SCC proof schedule")
+            val schedule = build_proof_dag_schedule_v1([
+                ProofDagNodeV1("api", ["even"], "api", 2),
+                ProofDagNodeV1("even", ["odd", "type"], "even", 3),
+                ProofDagNodeV1("odd", ["even"], "odd", 3),
+                ProofDagNodeV1("type", [], "type", 1)
+            ])
+            expect(schedule.diagnostic).to_equal("")
+            expect(schedule.ordered_components.len()).to_equal(3)
+            expect(schedule.ordered_components[0].symbol_ids[0]).to_equal("type")
+
+        it "should invalidate the reverse dependency closure but retain unrelated proofs":
+            step("Change one semantic SymbolId")
+            val affected = proof_dag_affected_symbols([
+                ProofDagNodeV1("api", ["logic"], "api", 1),
+                ProofDagNodeV1("logic", ["type"], "logic", 1),
+                ProofDagNodeV1("type", [], "type", 1),
+                ProofDagNodeV1("unrelated", [], "unrelated", 1)
+            ], ["type"])
+            expect(affected.join(",")).to_equal("api,logic,type")
+
+        it "should reject a proof graph whose private helper is outside closure":
+            step("Resolve a missing dependency")
+            val schedule = build_proof_dag_schedule_v1([
+                ProofDagNodeV1("api", ["unchecked-helper"], "api", 1)
+            ])
+            expect(schedule.diagnostic).to_contain("DEPENDENCY")
+
+    describe "REQ-FV2-011 and NFR-FV2-005: canonical AOP and macro closure":
+        it "should make advice order part of the weave hash":
+            step("Hash two opposite advice orders")
+            val first = WeaveManifestV1("base", "macro", [WeaveJoinPointV1("42", ["before", "after"])], [], "woven")
+            val second = WeaveManifestV1("base", "macro", [WeaveJoinPointV1("42", ["after", "before"])], [], "woven")
+            expect(first.hash() == second.hash()).to_equal(false)
+
+        it "should reject unstable join-point ordering":
+            step("Validate a manifest with descending SymbolIds")
+            val manifest = WeaveManifestV1("base", "macro", [WeaveJoinPointV1("9", []), WeaveJoinPointV1("2", [])], [], "woven")
+            expect(manifest.diagnostic()).to_contain("ORDER")
+
+        it "should reject behavior refinement without exactly-once proceed":
+            step("Validate an incomplete around-advice certificate")
+            val certificate = AspectCertificateV1("around", AspectEvidenceClassV1.BehaviorRefinement, "base", "woven", "proof", true, false)
+            expect(certificate.diagnostic()).to_contain("PROCEED")
+
+    describe "REQ-FV2-012: typed effects":
+        it "should propagate a generated helper effect into its public caller":
+            step("Resolve transitive typed effects")
+            val closure = resolve_verification_effect_closure([
+                VerificationEffectNodeV1("public", [VerificationEffectV1.Pure], ["generated"], []),
+                VerificationEffectNodeV1("generated", [VerificationEffectV1.Write("kernel.heap")], [], [])
+            ])
+            expect(closure.diagnostic).to_equal("")
+            val public_effects = closure.effects_for("public").unwrap()
+            expect(public_effects[0].canonical_text()).to_equal("write:kernel.heap")
+
+        it "should reject an unbound MMIO region":
+            step("Validate an incomplete MMIO effect")
+            expect(VerificationEffectV1.MMIO("").diagnostic()).to_contain("REGION")
+
+        it "should reject an unresolved indirect call target":
+            step("Resolve an incomplete call graph")
+            val closure = resolve_verification_effect_closure([
+                VerificationEffectNodeV1("public", [VerificationEffectV1.Pure], [], ["call@source:42"])
+            ])
+            expect(closure.diagnostic).to_contain("INDIRECT")
+
+        it "should derive global effects from MIR and reject a forged pure claim":
+            step("Derive an exact global write manifest")
+            val func = fv2_global_writer()
+            val manifest = verification_region_effect_manifest_v1(func)
+            expect(manifest.closed()).to_equal(true)
+            expect(manifest.effects[0].region_id).to_equal("global:77")
+            expect(manifest.effects[0].source_span).to_contain("fv2_global_writer.spl")
+
+            step("Attempt to replace the derived write with caller-supplied pure")
+            val vir = verification_ir_from_retained_contract(
+                func, "source", "expanded", "woven", "policy",
+                [VerificationEffectV1.Pure], [])
+            expect(vir.closure_ready()).to_equal(false)
+            expect(vir.diagnostic).to_contain("EFFECT-MISMATCH")
+
+        it "should bind transitive direct-call effects into canonical module VIR":
+            step("Build module VIR from exact internal SymbolIds")
+            val writer = fv2_global_writer()
+            val caller = fv2_global_writer_caller()
+            var functions: Dict<SymbolId, MirFunction> = {}
+            functions[caller.symbol] = caller
+            functions[writer.symbol] = writer
+            val module = MirModule(name: "effect_module", functions: functions,
+                statics: {}, constants: {}, types: {})
+            val vir = verification_ir_module_from_canonical_mir_v1(
+                module, "source", "expanded", "woven", "policy")
+            expect(vir.closure_ready()).to_equal(true)
+            expect(vir.functions[1].called_symbols).to_equal([
+                SymbolId(id: 8801)])
+            expect(vir.functions[1].effects).to_equal([
+                VerificationEffectV1.Write("global:77")])
+            expect(vir.effect_closure_hash == "").to_equal(false)
+
+    describe "REQ-FV2-013 REQ-FV2-016 and NFR-FV2-007: compiler validation and mutation rejection":
+        it "should bind exact Result variant and payload translation to the runtime artifact":
+            step("Validate logical Result outcomes against tagged runtime observations")
+            val result = validate_result_abi_translation_v1(7, "runtime-hash", [
+                ResultAbiObservationV1(ResultSemanticOutcomeV1.Normal(41),
+                    ResultTaggedHandleProjectionV1(7, 0, 41)),
+                ResultAbiObservationV1(ResultSemanticOutcomeV1.Error(-9),
+                    ResultTaggedHandleProjectionV1(7, 1, -9))
+            ], "ResultTaggedAbi.validate_sound", "axiom-audit-hash", true)
+            expect(result.accepted).to_equal(true)
+            expect(result.certificate.unwrap().matches_edge(
+                "result-tagged-abi-v1", result.source_semantic_hash,
+                result.target_semantic_hash)).to_equal(true)
+
+        it "should certificate an accepted DCE edge against its semantic identities":
+            step("Validate the proved straight-line DCE fragment")
+            val source = fv2_dce_source()
+            val target = dce_tv_optimize(source)
+            val result = validate_dce_translation_v1(source, target, "MirDceTv.validate_sound:propext")
+            expect(result.accepted).to_equal(true)
+            expect(result.certificate.unwrap().matches_edge("mir-dce-v1", source.semantic_hash(), target.semantic_hash())).to_equal(true)
+
+        it "should reject an intentionally unsound live-value rewrite":
+            step("Mutate an operand-producing constant")
+            val source = fv2_dce_source()
+            val mutant = DceTvProgramV1([
+                DceTvInstructionV1.Const(1, 20),
+                DceTvInstructionV1.Const(2, 23),
+                DceTvInstructionV1.Add(0, 1, 2)
+            ], 0)
+            val result = validate_dce_translation_v1(source, mutant, "MirDceTv.validate_sound:propext")
+            expect(result.accepted).to_equal(false)
+            expect(result.diagnostic).to_contain("REJECTED")
+
+        it "should reject compiler evidence without the theorem trust audit":
+            step("Remove the transitive axiom evidence")
+            val source = fv2_dce_source()
+            val result = validate_dce_translation_v1(source, dce_tv_optimize(source), "")
+            expect(result.accepted).to_equal(false)
+            expect(result.diagnostic).to_contain("AUDIT")
+
+    describe "REQ-FV2-017: dynamic verified composition":
+        it "should admit an exact signed component with closed obligations":
+            step("Validate plugin composition evidence")
+            val component = fv2_plugin()
+            val signature = SignatureVerificationReceiptV1(component.hash(), "release-key", "signature-checker", "evidence", true)
+            val policy = DynamicCompositionPolicyV1("interface", "verified", "compiler", ["release-key"])
+            val obligation = CompositionObligationV1("compose", "proposition", "certificate", true)
+            val decision = verify_dynamic_composition_v1(policy, component, signature, [obligation])
+            expect(decision.closed_verification).to_equal(true)
+            expect(decision.status).to_equal(FormalStatus.ArtifactVerified)
+
+        it "should reject a stale signed receipt or profile downgrade":
+            step("Mutate plugin identity and profile evidence")
+            val component = fv2_plugin()
+            val stale = SignatureVerificationReceiptV1("stale", "release-key", "signature-checker", "evidence", true)
+            val policy = DynamicCompositionPolicyV1("interface", "verified", "compiler", ["release-key"])
+            val obligation = CompositionObligationV1("compose", "proposition", "certificate", true)
+            val decision = verify_dynamic_composition_v1(policy, component, stale, [obligation])
+            expect(decision.admitted).to_equal(false)
+            expect(decision.diagnostic).to_contain("SIGNATURE-BINDING")
+
+        it "should keep an isolated unclosed plugin visible as bounded TCB":
+            step("Declare rather than conceal the trusted boundary")
+            val decision = declare_dynamic_bounded_tcb_v1(fv2_plugin(), "trust-manifest")
+            expect(decision.closed_verification).to_equal(false)
+            expect(decision.status).to_equal(FormalStatus.TrustedBoundary)
+
+    describe "REQ-FV2-018: existing external proof channel":
+        it "should expand one retained proof uses root over the exact VC closure":
+            step("Bind the existing proof channel to all thirteen canonical proposition identities")
+            val trust = TrustManifestV1(["propext"], [], [], [], [], [])
+            val closure = generate_verification_obligation_closure_from_canonical_mir_v1(
+                fv2_canonical_vc_function(), "woven-global-writer", "lean4",
+                "lean-backend-v1", trust)
+            val manifest = generate_proof_uses_closure_manifest_v1(closure,
+                "GlobalWriter.correct")
+            expect(manifest.closed()).to_equal(true)
+            expect(manifest.bindings.len()).to_equal(13)
+            expect(manifest.bindings[5].external_theorem).to_equal(
+                "GlobalWriter.correct")
+            expect(manifest.bindings[12].external_theorem).to_equal(
+                "GlobalWriter.correct_trust_closure")
+
+    describe "REQ-FV2-014: first SimpleOS implementation refinement slice":
+        it "should exhaust the complete capability-rights product domain":
+            step("Validate real SimpleOS rights enforcement against its independent specification")
+            val receipt = validate_simpleos_capability_rights_refinement_v1(fv2_simpleos_axiom_report())
+            expect(receipt.checked_case_count).to_equal(CAPABILITY_RIGHTS_CASE_COUNT_V1)
+            expect(receipt.counterexample_count).to_equal(0)
+            expect(receipt.status).to_equal(FormalStatus.ModelProven)
+
+        it "should demonstrate specification sensitivity with a non-equivalent mutant":
+            step("Inspect mutation counterexamples")
+            val receipt = validate_simpleos_capability_rights_refinement_v1(fv2_simpleos_axiom_report())
+            expect(receipt.mutant_counterexample_count).to_be_greater_than(0)
+
+        it "should require typed replay-bound proof evidence for source promotion":
+            step("Promote the model/product comparison through exact typed proof evidence")
+            val model = validate_simpleos_capability_rights_refinement_v1(fv2_simpleos_axiom_report())
+            val replay = close_independent_replay_v1(
+                fv2_capability_replay_checker(ReplayCheckerClassV1.FreshLeanKernel),
+                fv2_capability_replay_checker(ReplayCheckerClassV1.IndependentKernel))
+            val proof = ProofReceiptV1(
+                model.model_theorem_root, FormalStatus.ModelProven, "cache",
+                sha256_text("kernel-capabilities-olean"), [
+                    "fv2-simpleos-source-semantics:" + model.source_semantics_hash,
+                    "fv2-simpleos-model-semantics:" + model.model_semantics_hash],
+                assurance_text_hash(fv2_simpleos_axiom_report()),
+                model.trust_manifest_hash, "", replay.hash())
+            val receipt = promote_simpleos_capability_rights_refinement_v2(
+                model, proof, replay)
+            expect(receipt.permits_source_refinement(
+                capability_rights_verification_cache_key_v1())).to_be(true)
+            expect(receipt.status.permits_verified_release()).to_be(false)
+
+        it "should bind green-task completion to the real first-write-wins transition":
+            step("Check every declared lifecycle/result boundary case")
+            val receipt = validate_simpleos_green_task_complete_refinement_v1(
+                fv2_scheduler_axiom_report())
+            expect(receipt.checked_case_count).to_equal(
+                GREEN_TASK_COMPLETE_CASE_COUNT_V1)
+            expect(receipt.counterexample_count).to_equal(0)
+            expect(receipt.status).to_equal(FormalStatus.ModelProven)
+            expect(receipt.permits_model_evidence(
+                green_task_complete_verification_cache_key_v1())).to_be(true)
+            expect(receipt.permits_source_refinement(
+                green_task_complete_verification_cache_key_v1())).to_be(false)
+
+        it "should detect stale park metadata and double-complete overwrite mutants":
+            step("Mutate both terminal lifecycle guarantees")
+            val receipt = validate_simpleos_green_task_complete_refinement_v1(
+                fv2_scheduler_axiom_report())
+            expect(receipt.preserve_reason_mutant_counterexamples).to_be_greater_than(0)
+            expect(receipt.overwrite_done_mutant_counterexamples).to_be_greater_than(0)
+
+        it "should require the scheduler composite root and replay closure for source refinement":
+            step("Promote completion semantics through exact typed scheduler evidence")
+            val model = validate_simpleos_green_task_complete_refinement_v1(
+                fv2_scheduler_axiom_report())
+            val replay = close_independent_replay_v1(
+                fv2_scheduler_replay_checker(ReplayCheckerClassV1.FreshLeanKernel),
+                fv2_scheduler_replay_checker(ReplayCheckerClassV1.IndependentKernel))
+            val proof = ProofReceiptV1(model.theorem_roots[0],
+                FormalStatus.ModelProven, "cache", sha256_text("scheduler-olean"), [
+                    "fv2-simpleos-source-semantics:" + model.source_semantics_hash,
+                    "fv2-simpleos-model-semantics:" + model.model_semantics_hash],
+                assurance_text_hash(fv2_scheduler_axiom_report()),
+                model.trust_manifest_hash, "", replay.hash())
+            val receipt = promote_simpleos_green_task_complete_refinement_v2(
+                model, proof, replay)
+            expect(receipt.status).to_equal(FormalStatus.SourceRefined)
+            expect(receipt.permits_source_refinement(
+                green_task_complete_verification_cache_key_v1())).to_be(true)
+            expect(receipt.status.permits_verified_release()).to_be(false)
+
+        it "should keep the bounded scheduler slice below release verification":
+            step("Inspect the exact bounded SymbolId and status ceiling")
+            val receipt = validate_simpleos_green_task_complete_refinement_v1(
+                fv2_scheduler_axiom_report())
+            expect(receipt.symbol_id).to_contain("@bounded-state-result-v1")
+            expect(receipt.status.permits_verified_release()).to_be(false)
+
+        it "should close IPC while preserving buffers and waking exact waiters":
+            step("Validate the real green-channel close/drain transition")
+            val receipt = validate_simpleos_green_channel_close_refinement_v1(
+                fv2_channel_close_axiom_report())
+            expect(receipt.checked_case_count).to_equal(
+                GREEN_CHANNEL_CLOSE_CASE_COUNT_V1)
+            expect(receipt.counterexample_count).to_equal(0)
+            expect(receipt.idempotence_counterexamples).to_equal(0)
+            expect(receipt.permits_model_evidence(
+                green_channel_close_cache_key_v1())).to_be(true)
+            expect(receipt.permits_source_refinement(
+                green_channel_close_cache_key_v1())).to_be(false)
+
+        it "should detect lost buffered IPC and lost receiver wakeups":
+            step("Mutate both close/drain preservation guarantees")
+            val receipt = validate_simpleos_green_channel_close_refinement_v1(
+                fv2_channel_close_axiom_report())
+            expect(receipt.dropped_buffer_mutant_counterexamples).to_be_greater_than(0)
+            expect(receipt.dropped_waiter_mutant_counterexamples).to_be_greater_than(0)
+
+        it "should require the IPC composite root and replay closure for source refinement":
+            step("Promote close/drain semantics through exact typed IPC evidence")
+            val model = validate_simpleos_green_channel_close_refinement_v1(
+                fv2_channel_close_axiom_report())
+            val replay = close_independent_replay_v1(
+                fv2_channel_replay_checker(ReplayCheckerClassV1.FreshLeanKernel),
+                fv2_channel_replay_checker(ReplayCheckerClassV1.IndependentKernel))
+            val proof = ProofReceiptV1(model.theorem_roots[0],
+                FormalStatus.ModelProven, "cache", sha256_text("channel-olean"), [
+                    "fv2-simpleos-source-semantics:" + model.semantic_hash,
+                    "fv2-simpleos-model-semantics:" + model.model_semantics_hash],
+                assurance_text_hash(fv2_channel_close_axiom_report()),
+                model.trust_manifest_hash, "", replay.hash())
+            val receipt = promote_simpleos_green_channel_close_refinement_v2(
+                model, proof, replay)
+            expect(receipt.status).to_equal(FormalStatus.SourceRefined)
+            expect(receipt.permits_source_refinement(
+                green_channel_close_cache_key_v1())).to_be(true)
+            expect(receipt.status.permits_verified_release()).to_be(false)
+
+        it "should expose the IPC model boundary and status ceiling":
+            step("Keep the bounded exact bridge distinct from the older broad abstraction")
+            val receipt = validate_simpleos_green_channel_close_refinement_v1(
+                fv2_channel_close_axiom_report())
+            expect(receipt.symbol_id).to_contain("@bounded-v1")
+            expect(receipt.status).to_equal(FormalStatus.ModelProven)
+            expect(receipt.status.permits_verified_release()).to_be(false)
+
+        it "should make DBFS commit visibility conditional on durable WAL":
+            step("Execute the real commit boundary before and after WAL durability")
+            val receipt = validate_simpleos_dbfs_commit_refinement_v1(
+                fv2_dbfs_axiom_report())
+            expect(receipt.checked_case_count).to_equal(DBFS_COMMIT_CASE_COUNT_V1)
+            expect(receipt.counterexample_count).to_equal(0)
+            expect(receipt.permits_model_evidence(
+                dbfs_commit_cache_key_v1())).to_be(true)
+            expect(receipt.permits_source_refinement(
+                dbfs_commit_cache_key_v1())).to_be(false)
+
+        it "should detect a commit-before-flush crash-visibility mutant":
+            step("Make an unflushed transaction incorrectly recoverable")
+            val receipt = validate_simpleos_dbfs_commit_refinement_v1(
+                fv2_dbfs_axiom_report())
+            expect(receipt.early_commit_mutant_counterexamples).to_be_greater_than(0)
+
+        it "should keep bounded crash refinement below artifact verification":
+            step("Inspect the commit/crash SymbolId and status ceiling")
+            val receipt = validate_simpleos_dbfs_commit_refinement_v1(
+                fv2_dbfs_axiom_report())
+            expect(receipt.symbol_id).to_contain("@bounded-crash-v1")
+            expect(receipt.status).to_equal(FormalStatus.ModelProven)
+            expect(receipt.status.permits_verified_release()).to_be(false)
+
+        it "should require the DBFS composite root and replay closure for source refinement":
+            step("Promote commit/crash semantics through exact typed storage evidence")
+            val model = validate_simpleos_dbfs_commit_refinement_v1(
+                fv2_dbfs_axiom_report())
+            val replay = close_independent_replay_v1(
+                fv2_dbfs_replay_checker(ReplayCheckerClassV1.FreshLeanKernel),
+                fv2_dbfs_replay_checker(ReplayCheckerClassV1.IndependentKernel))
+            val proof = ProofReceiptV1(model.theorem_roots[0],
+                FormalStatus.ModelProven, "cache", sha256_text("dbfs-olean"), [
+                    "fv2-simpleos-source-semantics:" + model.semantic_hash,
+                    "fv2-simpleos-model-semantics:" + model.model_semantics_hash],
+                assurance_text_hash(fv2_dbfs_axiom_report()),
+                model.trust_manifest_hash, "", replay.hash())
+            val receipt = promote_simpleos_dbfs_commit_refinement_v2(
+                model, proof, replay)
+            expect(receipt.status).to_equal(FormalStatus.SourceRefined)
+            expect(receipt.permits_source_refinement(
+                dbfs_commit_cache_key_v1())).to_be(true)
+            expect(receipt.status.permits_verified_release()).to_be(false)
+
+        it "should refine real shared unmap reference and writeback transitions":
+            step("Execute survivor last-dirty repeated and private one-page unmaps")
+            val receipt = validate_simpleos_shared_unmap_refinement_v1(
+                fv2_shared_unmap_axiom_report())
+            expect(receipt.checked_case_count).to_equal(SHARED_UNMAP_CASE_COUNT_V1)
+            expect(receipt.counterexample_count).to_equal(0)
+            expect(receipt.killed_mutant_count).to_equal(4)
+            expect(receipt.permits_model_evidence(
+                shared_unmap_cache_key_v1())).to_be(true)
+            expect(receipt.permits_source_refinement(
+                shared_unmap_cache_key_v1())).to_be(false)
+
+        it "should keep bounded shared unmap evidence below artifact verification":
+            step("Inspect the one-page SymbolId and status ceiling")
+            val receipt = validate_simpleos_shared_unmap_refinement_v1(
+                fv2_shared_unmap_axiom_report())
+            expect(receipt.symbol_id).to_contain("@bounded-one-page-v1")
+            expect(receipt.status).to_equal(FormalStatus.ModelProven)
+            expect(receipt.status.permits_verified_release()).to_be(false)
+
+        it "should require the shared-unmap composite root and replay closure for source refinement":
+            step("Promote unmap semantics through exact typed memory evidence")
+            val model = validate_simpleos_shared_unmap_refinement_v1(
+                fv2_shared_unmap_axiom_report())
+            val replay = close_independent_replay_v1(
+                fv2_unmap_replay_checker(ReplayCheckerClassV1.FreshLeanKernel),
+                fv2_unmap_replay_checker(ReplayCheckerClassV1.IndependentKernel))
+            val proof = ProofReceiptV1(model.theorem_roots[0],
+                FormalStatus.ModelProven, "cache", sha256_text("unmap-olean"), [
+                    "fv2-simpleos-source-semantics:" + model.semantic_hash,
+                    "fv2-simpleos-model-semantics:" + model.model_semantics_hash],
+                assurance_text_hash(fv2_shared_unmap_axiom_report()),
+                model.trust_manifest_hash, "", replay.hash())
+            val receipt = promote_simpleos_shared_unmap_refinement_v2(
+                model, proof, replay)
+            expect(receipt.status).to_equal(FormalStatus.SourceRefined)
+            expect(receipt.permits_source_refinement(
+                shared_unmap_cache_key_v1())).to_be(true)
+            expect(receipt.status.permits_verified_release()).to_be(false)
+
+        it "should execute the scheduler-owned child wait exit and reap chain":
+            step("Validate live wait zombie publication exact status collection and no double reap")
+            val receipt = validate_simpleos_process_wait_refinement_v1(
+                fv2_process_axiom_report())
+            expect(receipt.checked_case_count).to_equal(PROCESS_WAIT_CASE_COUNT_V1)
+            expect(receipt.counterexample_count).to_equal(0)
+            expect(receipt.killed_mutant_count).to_equal(4)
+            expect(receipt.permits_model_evidence(
+                process_wait_cache_key_v1())).to_be(true)
+            expect(receipt.permits_source_refinement(
+                process_wait_cache_key_v1())).to_be(false)
+
+        it "should require exact process proof and replay closure for source refinement":
+            step("Promote the process chain through its exact composite theorem")
+            val model = validate_simpleos_process_wait_refinement_v1(
+                fv2_process_axiom_report())
+            val replay = close_independent_replay_v1(
+                fv2_process_replay_checker(ReplayCheckerClassV1.FreshLeanKernel),
+                fv2_process_replay_checker(ReplayCheckerClassV1.IndependentKernel))
+            val proof = ProofReceiptV1(model.theorem_root,
+                FormalStatus.ModelProven, "cache", sha256_text("process-olean"), [
+                    "fv2-simpleos-source-semantics:" + model.source_semantics_hash,
+                    "fv2-simpleos-model-semantics:" + model.model_semantics_hash],
+                assurance_text_hash(fv2_process_axiom_report()),
+                model.trust_manifest_hash, "", replay.hash())
+            val receipt = promote_simpleos_process_wait_refinement_v2(
+                model, proof, replay)
+            expect(receipt.status).to_equal(FormalStatus.SourceRefined)
+            expect(receipt.permits_source_refinement(
+                process_wait_cache_key_v1())).to_be(true)
+            expect(receipt.status.permits_verified_release()).to_be(false)
+
+        it "should refine the real bounded process queue send and receive path":
+            step("Execute FIFO handle transfer backpressure close drain EOF and stale generation rejection")
+            val receipt = validate_simpleos_process_queue_refinement_v1(
+                fv2_process_queue_axiom_report())
+            expect(receipt.checked_case_count).to_equal(PROCESS_QUEUE_CASE_COUNT_V1)
+            expect(receipt.counterexample_count).to_equal(0)
+            expect(receipt.killed_mutant_count).to_equal(4)
+            expect(receipt.permits_model_evidence(
+                process_queue_cache_key_v1())).to_be(true)
+
+        it "should require exact process-queue proof and replay closure for source refinement":
+            step("Promote process-queue semantics through its exact composite theorem")
+            val model = validate_simpleos_process_queue_refinement_v1(
+                fv2_process_queue_axiom_report())
+            val replay = close_independent_replay_v1(
+                fv2_process_queue_replay_checker(ReplayCheckerClassV1.FreshLeanKernel),
+                fv2_process_queue_replay_checker(ReplayCheckerClassV1.IndependentKernel))
+            val proof = ProofReceiptV1(model.theorem_root,
+                FormalStatus.ModelProven, "cache", sha256_text("queue-olean"), [
+                    "fv2-simpleos-source-semantics:" + model.source_semantics_hash,
+                    "fv2-simpleos-model-semantics:" + model.model_semantics_hash],
+                assurance_text_hash(fv2_process_queue_axiom_report()),
+                model.trust_manifest_hash, "", replay.hash())
+            val receipt = promote_simpleos_process_queue_refinement_v2(
+                model, proof, replay)
+            expect(receipt.status).to_equal(FormalStatus.SourceRefined)
+            expect(receipt.permits_source_refinement(
+                process_queue_cache_key_v1())).to_be(true)
+            expect(receipt.status.permits_verified_release()).to_be(false)
+
+    describe "REQ-FV2-015: first generated RV32I instruction slice":
+        it "should emit one closed ADD provider-to-retirement product from typed HWIR":
+            step("Generate the bounded RV32 ADD product through strict HWIR")
+            val product = compile_strict_rv32_add_rvfi_product(
+                "fv2_rv32_add", 0x002081B3)
+            expect(product.diagnostic()).to_equal("")
+            expect(product.emitted.vhdl).to_contain("provider: entity work.fv2_rv32_add_provider")
+            expect(product.emitted.vhdl).to_contain("retirement_owner: entity work.fv2_rv32_add_retirement")
+            expect(product.emitted.vhdl).to_contain("retire_original_instruction=>rvfi_insn")
+            expect(product.rvfi_contract_sha256.len()).to_equal(64)
+
+        it "should fail closed when the requested instruction needs the unimplemented LSU":
+            step("Attempt to generate a load through the disabled LSU seam")
+            val result = compile_strict_riscv_scalar_product("fv2_rv32_load",
+                CoreConfig.rv32_zca_mission_critical(), 0x00012083,
+                LsuConfig.rv32_product_default())
+            expect(result.is_success()).to_equal(false)
+            expect(result.diagnostic).to_contain("LSU remains a disabled seam")
+
+        it "should not turn typed RTL emission into a verified-release claim":
+            step("Keep proof, RVFI, synthesis, and netlist gates explicit")
+            val result = compile_strict_riscv_scalar_product("fv2_rv32_add_truth",
+                CoreConfig.rv32_zca_mission_critical(), 0x002081B3,
+                LsuConfig.rv32_product_default())
+            expect(result.uses_legacy_fallback()).to_equal(false)
+            expect(FormalStatus.ModelProven.permits_verified_release()).to_equal(false)
+
+        it "should keep constructed proof protocol receipts below executed evidence":
+            step("Validate exact job bindings without claiming external execution")
+            val artifacts = generate_rv32_add_formal_artifacts(
+                "fv2_rv32_add_evidence", 0x002081B3).ok().unwrap()
+            val prove = riscv_formal_job_receipt_v1("rv32i.add.prove",
+                artifacts.prove_sby, "PASS", "sby/yosys/boolector",
+                RiscvFormalJobStatusV1.Proved)
+            val cover = riscv_formal_job_receipt_v1("rv32i.add.cover",
+                artifacts.cover_sby, "PASS reached", "sby/yosys/boolector",
+                RiscvFormalJobStatusV1.Covered)
+            val mutant = riscv_formal_job_receipt_v1("rv32i.add.mutant",
+                artifacts.mutant_sby, "FAIL counterexample", "sby/yosys/boolector",
+                RiscvFormalJobStatusV1.Counterexample)
+            val receipt = reduce_rv32_add_formal_evidence(
+                artifacts, prove, cover, mutant)
+            expect(receipt.status).to_equal(FormalStatus.Specified)
+            expect(receipt.evidence_receipt_hashes.len()).to_equal(3)
+            expect(receipt.permits_verified_release()).to_equal(false)

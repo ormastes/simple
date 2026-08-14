@@ -50,7 +50,8 @@ use compiler.common.assurance.policy_names.{
 }
 use compiler.common.assurance.policy_schema.{
     AssuranceStrictness, AssuranceGrade, AssuranceConvention,
-    ResolvedAssurancePolicyV1
+    ResolvedAssurancePolicyV1, AssuranceStrictnessV2,
+    ResolvedAssurancePolicyV2
 }
 
 # Strictness for one configuration input. Unknown and empty are BOTH the
@@ -142,3 +143,43 @@ fn profile_name_is_at_least(raw: text, floor: text) -> bool:
     if not is_known_profile_name(floor):
         return false
     strictness_for_profile_name(raw).at_least(strictness_for_profile_name(floor))
+
+# FV2 policy resolver.  It is intentionally separate from V1 so legacy
+# commands cannot deserialize `verified` and accidentally weaken it to the
+# V1 default.  Callers that support verified releases must opt into this API.
+pub fn strictness_for_profile_name_v2(raw: text) -> AssuranceStrictnessV2:
+    AssuranceStrictnessV2.from_name(raw.lower())
+
+fn _max_strictness_v2(a: AssuranceStrictnessV2, b: AssuranceStrictnessV2) -> AssuranceStrictnessV2:
+    if a.at_least(b): return a
+    b
+
+pub fn policy_for_profile_name_v2(raw: text) -> ResolvedAssurancePolicyV2:
+    val base = ResolvedAssurancePolicyV2.default()
+    ResolvedAssurancePolicyV2(strictness_for_profile_name_v2(raw),
+        base.runtime_family, base.assurance_grade, base.convention)
+
+pub fn resolve_assurance_policy_v2(
+    project_profile: text,
+    cli_profile: text,
+    env_profile: text,
+    runtime_family: text,
+    grade: text,
+    convention: text
+) -> ResolvedAssurancePolicyV2:
+    val base = ResolvedAssurancePolicyV2.default()
+    var strictness = strictness_for_profile_name_v2(project_profile)
+    strictness = _max_strictness_v2(strictness,
+        strictness_for_profile_name_v2(cli_profile))
+    strictness = _max_strictness_v2(strictness,
+        strictness_for_profile_name_v2(env_profile))
+    val family = if runtime_family == "": base.runtime_family else: runtime_family
+    ResolvedAssurancePolicyV2(strictness, family,
+        _max_grade(base.assurance_grade, AssuranceGrade.from_name(grade)),
+        _max_convention(base.convention, AssuranceConvention.from_name(convention)))
+
+pub fn policy_env_value_v2(policy: ResolvedAssurancePolicyV2) -> text:
+    policy.strictness.name()
+
+pub fn policy_from_env_value_v2(raw: text) -> ResolvedAssurancePolicyV2:
+    policy_for_profile_name_v2(raw)

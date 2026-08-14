@@ -1,0 +1,62 @@
+# Typed, combinational normalization from the LSU transaction vocabulary to
+# the frozen scalar completion envelope.  This owns width conversion only;
+# state and temporal capture remain the LSU owner's responsibility.
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwCompareOp,
+    HwConstant, HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort,
+    HwSelectOp, HwSignal}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_completion_interface.{strict_hw_scalar_completion_interface}
+
+pub fn strict_riscv_scalar_lsu_completion_adapter(name: text, config: CoreConfig,
+    bus: LsuConfig) -> Result<HwModuleDef, text>:
+    if name == "": return Err("HWIR-E-LSU-COMPLETION-ID: adapter requires a module name")
+    val completion = strict_hw_scalar_completion_interface(config, bus)?
+    val x = config.xlen; val pa = config.physical_address_bits
+    if pa > x:
+        return Err("HWIR-E-LSU-COMPLETION-ADDRESS: frozen completion v1 requires PA width no greater than XLEN")
+    val ports = [HwPort.input("effective_address", "Bits", pa),
+        HwPort.input("request_write", "Bits", 1),
+        HwPort.input("request_byte_mask", "Bits", bus.byte_mask_bits),
+        HwPort.input("rd", "Bits", 5), HwPort.input("rs2_value", "Bits", x),
+        HwPort.input("load_value", "Bits", x),
+        HwPort.output("memory_address", "Bits", x),
+        HwPort.output("memory_read_mask", "Bits", 32),
+        HwPort.output("memory_write_mask", "Bits", 32),
+        HwPort.output("memory_read_data", "Bits", x),
+        HwPort.output("memory_write_data", "Bits", x),
+        HwPort.output("rd_write", "Bits", 1), HwPort.output("rd_value", "Bits", x)]
+    val signals = [HwSignal.comb("offset_address", "Bits", bus.byte_mask_bits),
+        HwSignal.comb("offset", "Bits", bus.byte_mask_bits),
+        HwSignal.comb("mask_low", "Bits", bus.byte_mask_bits),
+        HwSignal.comb("mask32", "Bits", 32), HwSignal.comb("rd_zero", "Bits", 1),
+        HwSignal.comb("rd_nonzero", "Bits", 1),
+        HwSignal.comb("is_load", "Bits", 1)]
+    val constants = [HwConstant.bits("offset_mask", bus.byte_mask_bits, bus.byte_mask_bits - 1),
+        HwConstant.bits("zero1", 1, 0), HwConstant.bits("one1", 1, 1), HwConstant.bits("zero5", 5, 0),
+        HwConstant.bits("zero32", 32, 0), HwConstant.bits("zero_xlen", x, 0)]
+    val ops = [HwCombOp.unary("zext", "memory_address", "effective_address", x),
+        HwCombOp.unary("trunc", "offset_address", "effective_address", bus.byte_mask_bits),
+        HwCombOp.binary("and", "offset", "offset_address", "offset_mask", bus.byte_mask_bits),
+        HwCombOp.binary("shr", "mask_low", "request_byte_mask", "offset", bus.byte_mask_bits),
+        HwCombOp.unary("zext", "mask32", "mask_low", 32),
+        HwCombOp.binary("xor", "rd_nonzero", "rd_zero", "one1", 1),
+        HwCombOp.binary("xor", "is_load", "request_write", "one1", 1),
+        HwCombOp.binary("and", "rd_write", "is_load", "rd_nonzero", 1)]
+    val compares = [HwCompareOp.equal("rd_zero", "rd", "zero5", 5)]
+    val selects = [HwSelectOp.mux("memory_read_mask", "request_write", "zero32", "mask32", 32),
+        HwSelectOp.mux("memory_write_mask", "request_write", "mask32", "zero32", 32),
+        HwSelectOp.mux("memory_read_data", "request_write", "zero_xlen", "load_value", x),
+        HwSelectOp.mux("memory_write_data", "request_write", "rs2_value", "zero_xlen", x),
+        HwSelectOp.mux("rd_value", "rd_write", "load_value", "zero_xlen", x)]
+    val summary = HwModule(name: name, profile: config.profile, port_count: ports.len(),
+        signal_count: signals.len(), register_count: 0,
+        comb_op_count: ops.len() + compares.len() + selects.len(), memory_count: 0,
+        clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config,
+        node_id: HwNodeId.module_root(name), ports: ports,
+        signals: signals, constants: constants,
+        comb_ops: ops, compare_ops: compares, select_ops: selects,
+        clock_domains: [HwClockDomain.default_domain()],
+        origins: [HwOrigin(node_id: HwNodeId.child(name, "completion-normalization"), source_name: "riscv.scalar.lsu.completion-adapter")])
+    val error = module.shape_diagnostic(); if error != "": return Err(error)
+    Ok(module)

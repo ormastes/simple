@@ -1,0 +1,207 @@
+# Receipt-owning FV2 proof replay runners.
+#
+# The fresh runner invokes Lean's bundled checker directly through Lake.  The
+# independent runner invokes a pinned adapter which must own the exact
+# lean4export -> nanoda pipeline.  Neither runner uses a shell or interprets
+# caller text as command syntax.
+
+use app.io.mod.{file_exists, file_hash_sha256, process_run_timeout}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1,
+    ReplayOutcomeV1, ReplayCheckerReceiptV1}
+
+struct ReplayRunnerConfigV1:
+    project_dir: text
+    module_name: text
+    declaration_root: text
+    artifact_path: text
+    artifact_hash: text
+    launcher_path: text
+    tool_path: text
+    tool_name: text
+    tool_version: text
+    timeout_ms: i64
+
+# The checker is only as trustworthy as the launcher that runs it.  Lake is a
+# semantic/trust boundary for fresh Lean replay, and the independent adapter
+# is the checker boundary for the second lane.  Keep both file hashes in the
+# one frozen receipt identity field rather than silently treating a mutable
+# launcher as an unrecorded environmental assumption.
+pub fn replay_executable_identity_hash_v1(
+    launcher_hash: text,
+    tool_hash: text
+) -> text:
+    # The V1 composite format intentionally remains frozen.  Its components
+    # are canonical SHA-256 identities, so the historical separators cannot
+    # be interpreted as part of either input domain.
+    if not sha256_lower_hex_valid(launcher_hash) or
+            not sha256_lower_hex_valid(tool_hash): return ""
+    sha256_text("FV2-Replay-Executable-Identity-v1|launcher=" +
+        launcher_hash + "|tool=" + tool_hash)
+
+fn replay_module_segment_is_safe_v1(segment: text) -> bool:
+    if segment == "": return false
+    var index = 0
+    while index < segment.len():
+        val code = segment.char_code_at(index)
+        val ascii_letter = (code >= 97 and code <= 122) or (code >= 65 and code <= 90)
+        val ascii_digit = code >= 48 and code <= 57
+        if index == 0:
+            if not (ascii_letter or code == 95): return false
+        elif not (ascii_letter or ascii_digit or code == 95):
+            return false
+        index = index + 1
+    true
+
+fn replay_module_name_is_safe_v1(name: text) -> bool:
+    if name == "": return false
+    for segment in name.split("."):
+        if not replay_module_segment_is_safe_v1(segment): return false
+    true
+
+fn replay_runner_config_error_v1(config: ReplayRunnerConfigV1) -> text:
+    if config.project_dir == "": return "FV2-E-REPLAY-PROJECT: project directory is empty"
+    if not replay_module_name_is_safe_v1(config.module_name):
+        return "FV2-E-REPLAY-MODULE-NAME: module name is not canonical"
+    if not replay_module_name_is_safe_v1(config.declaration_root):
+        return "FV2-E-REPLAY-DECLARATION-ROOT: proof root is not canonical"
+    if config.artifact_path == "": return "FV2-E-REPLAY-ARTIFACT-PATH: artifact path is empty"
+    if not sha256_lower_hex_valid(config.artifact_hash):
+        return "FV2-E-REPLAY-ARTIFACT: artifact hash is not canonical SHA-256"
+    if config.launcher_path == "": return "FV2-E-REPLAY-LAUNCHER: launcher path is empty"
+    if config.tool_path == "": return "FV2-E-REPLAY-TOOL: checker path is empty"
+    if config.tool_name == "" or config.tool_version == "":
+        return "FV2-E-REPLAY-IDENTITY: tool identity is incomplete"
+    if config.timeout_ms <= 0: return "FV2-E-REPLAY-TIMEOUT: timeout must be positive"
+    ""
+
+fn replay_failed_receipt_v1(
+    class_: ReplayCheckerClassV1,
+    config: ReplayRunnerConfigV1,
+    policy_hash: text,
+    outcome: ReplayOutcomeV1,
+    diagnostic: text
+) -> ReplayCheckerReceiptV1:
+    ReplayCheckerReceiptV1(
+        "ReplayCheckerReceipt-v1", class_, config.tool_name,
+        config.tool_version, "", config.module_name, config.declaration_root,
+        config.artifact_hash,
+        policy_hash, "", outcome, diagnostic)
+
+fn replay_run_v1(
+    class_: ReplayCheckerClassV1,
+    config: ReplayRunnerConfigV1,
+    command: text,
+    args: [text],
+    policy_material: text
+) -> ReplayCheckerReceiptV1:
+    val policy_hash = sha256_text(policy_material)
+    val config_error = replay_runner_config_error_v1(config)
+    if config_error != "":
+        return replay_failed_receipt_v1(
+            class_, config, policy_hash, ReplayOutcomeV1.ToolFailure,
+            config_error)
+    if not file_exists(config.tool_path):
+        return replay_failed_receipt_v1(
+            class_, config, policy_hash, ReplayOutcomeV1.MissingTool,
+            "FV2-E-REPLAY-MISSING-TOOL: configured checker does not exist")
+    if not file_exists(config.artifact_path):
+        return replay_failed_receipt_v1(
+            class_, config, policy_hash, ReplayOutcomeV1.ToolFailure,
+            "FV2-E-REPLAY-MISSING-ARTIFACT: checked artifact does not exist")
+    val observed_artifact_hash = file_hash_sha256(config.artifact_path)
+    if observed_artifact_hash == "" or
+            observed_artifact_hash != config.artifact_hash:
+        return replay_failed_receipt_v1(
+            class_, config, policy_hash, ReplayOutcomeV1.ToolFailure,
+            "FV2-E-REPLAY-ARTIFACT-IDENTITY: checked artifact hash does not match the receipt request")
+    if not file_exists(config.launcher_path):
+        return replay_failed_receipt_v1(
+            class_, config, policy_hash, ReplayOutcomeV1.MissingTool,
+            "FV2-E-REPLAY-MISSING-LAUNCHER: configured launcher does not exist")
+
+    val launcher_hash = file_hash_sha256(config.launcher_path)
+    if launcher_hash == "":
+        return replay_failed_receipt_v1(
+            class_, config, policy_hash, ReplayOutcomeV1.ToolFailure,
+            "FV2-E-REPLAY-LAUNCHER-HASH: launcher identity could not be hashed")
+    val tool_hash = file_hash_sha256(config.tool_path)
+    if tool_hash == "":
+        return replay_failed_receipt_v1(
+            class_, config, policy_hash, ReplayOutcomeV1.ToolFailure,
+            "FV2-E-REPLAY-BINARY-HASH: checker identity could not be hashed")
+    val binary_hash = replay_executable_identity_hash_v1(launcher_hash, tool_hash)
+    if binary_hash == "":
+        return replay_failed_receipt_v1(
+            class_, config, policy_hash, ReplayOutcomeV1.ToolFailure,
+            "FV2-E-REPLAY-EXECUTABLE-IDENTITY: replay executable identity is incomplete")
+
+    val (stdout, stderr, exit_code) = process_run_timeout(
+        command, args, config.timeout_ms)
+    val output = stdout + stderr
+    if exit_code == -1 and output.contains("[TIMEOUT:"):
+        return replay_failed_receipt_v1(
+            class_, config, policy_hash, ReplayOutcomeV1.Timeout,
+            "FV2-E-REPLAY-TIMEOUT: checker exceeded its bounded runtime")
+    if exit_code == -1:
+        return replay_failed_receipt_v1(
+            class_, config, policy_hash, ReplayOutcomeV1.ToolFailure,
+            "FV2-E-REPLAY-TOOL-FAILURE: checker could not be executed")
+    if exit_code != 0:
+        return replay_failed_receipt_v1(
+            class_, config, policy_hash, ReplayOutcomeV1.Rejected,
+            "FV2-E-REPLAY-REJECTED: checker exit code {exit_code}")
+    var retained_output = output
+    if retained_output.trim() == "":
+        # Lean 4.33 leanchecker is deliberately silent on a successful fresh
+        # replay. The receipt-owning runner may attest that observed exit, but
+        # only for the fresh Lean-kernel class and only after hashing the exact
+        # checker binary and checked artifact above. Independent checkers must
+        # continue to emit their own success evidence.
+        match class_:
+            case ReplayCheckerClassV1.FreshLeanKernel:
+                retained_output = "FV2-FRESH-LEAN-KERNEL-ACCEPTED|checker=" +
+                    binary_hash + "|module=" + config.module_name +
+                    "|artifact=" + config.artifact_hash + "|exit=0"
+            case _:
+                return replay_failed_receipt_v1(
+                    class_, config, policy_hash, ReplayOutcomeV1.MissingOutput,
+                    "FV2-E-REPLAY-MISSING-OUTPUT: successful independent checker emitted no retained evidence")
+    ReplayCheckerReceiptV1(
+        "ReplayCheckerReceipt-v1", class_, config.tool_name,
+        config.tool_version, binary_hash, config.module_name,
+        config.declaration_root, config.artifact_hash, policy_hash,
+        sha256_text(retained_output),
+        ReplayOutcomeV1.Accepted, "")
+
+fn run_fresh_leanchecker_v1(
+    config: ReplayRunnerConfigV1
+) -> ReplayCheckerReceiptV1:
+    # Lake -d selects the package without shell-level `cd`.
+    val args = ["-d", config.project_dir, "env", config.tool_path, "--fresh",
+        config.module_name]
+    replay_run_v1(
+        ReplayCheckerClassV1.FreshLeanKernel, config, config.launcher_path, args,
+        "fresh-leanchecker-v1|lake-d|env|leanchecker|fresh|root=" +
+            config.declaration_root + "|retained-output")
+
+fn run_independent_replay_adapter_v1(
+    config: ReplayRunnerConfigV1
+) -> ReplayCheckerReceiptV1:
+    # The pinned adapter accepts PROJECT_DIR MODULE ARTIFACT_PATH and must export the exact
+    # module with lean4export, invoke nanoda with sorryAx disabled, and retain
+    # a nonempty result record.  Its binary hash is part of this receipt.
+    if config.launcher_path != config.tool_path:
+        return replay_failed_receipt_v1(
+            ReplayCheckerClassV1.IndependentKernel, config,
+            sha256_text("independent-adapter-v1|identity"),
+            ReplayOutcomeV1.ToolFailure,
+            "FV2-E-REPLAY-ADAPTER-IDENTITY: independent adapter must be the exact hashed launcher")
+    replay_run_v1(
+        ReplayCheckerClassV1.IndependentKernel, config, config.launcher_path,
+        [config.project_dir, config.module_name, config.artifact_path,
+            config.artifact_hash,
+            config.declaration_root],
+        "independent-adapter-v1|lean4export-v2|nanoda|root=" +
+            config.declaration_root + "|deny-transitive-unpermitted-axioms|retained-output")

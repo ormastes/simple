@@ -1,6 +1,6 @@
 # Simple Formal Verification 2.0 — System Test Plan
 
-**Status:** Planned; executable system spec and generated manual are absent
+**Status:** Implemented modern SSpec and manual mirror; runtime execution blocked
 **Date:** 2026-08-14
 **Independent high-review:** **PASS (cycle 3, final)** for interface consistency,
 status truthfulness, ownership, executable command closure, and Lean links.
@@ -28,10 +28,10 @@ captures.
 
 | Scenario | Requirements | Oracle | Current state |
 |---|---|---|---|
-| Truthful claim boundary | REQ-FV2-001, REQ-FV2-002, REQ-FV2-019, REQ-FV2-020; NFR-FV2-002 | model/source/backend/artifact statuses remain distinct; missing tool, timeout, unknown, and unsupported reject | Missing system scenario |
+| Truthful claim boundary | REQ-FV2-001, REQ-FV2-002, REQ-FV2-019, REQ-FV2-020; NFR-FV2-002 | model/source/backend/artifact statuses remain distinct; missing tool, timeout, unknown, and unsupported reject | Implemented; runtime blocked |
 | Canonical evidence construction | REQ-FV2-003, REQ-FV2-005, REQ-FV2-010, REQ-FV2-011, REQ-FV2-012; NFR-FV2-001, NFR-FV2-005, NFR-FV2-008 | frozen identities bind expanded/woven source, typed VIR/MIR, effects, tools, and cache key deterministically | MIR JSON foundation only |
-| Execution-linked exact proof | REQ-FV2-004, REQ-FV2-006, REQ-FV2-007, REQ-FV2-008, REQ-FV2-018; NFR-FV2-007 | deliberately wrong body, width/overflow/shift mismatch, unsupported node, vacuity, and disconnected result reject | Missing |
-| Trust and compiler refinement | REQ-FV2-009, REQ-FV2-013, REQ-FV2-016, REQ-FV2-017; NFR-FV2-003, NFR-FV2-004 | hidden axiom, forged/stale receipt, unsound transform, mutation, and incompatible dynamic receipt reject | Missing |
+| Execution-linked exact proof | REQ-FV2-004, REQ-FV2-006, REQ-FV2-007, REQ-FV2-008, REQ-FV2-018; NFR-FV2-007 | deliberately wrong body, width/overflow/shift mismatch, unsupported node, vacuity, and disconnected result reject | Implemented; runtime blocked |
+| Trust and compiler refinement | REQ-FV2-009, REQ-FV2-013, REQ-FV2-016, REQ-FV2-017; NFR-FV2-003, NFR-FV2-004 | hidden axiom, forged/stale receipt, unsound transform, mutation, and incompatible dynamic receipt reject | Implemented; external replay blocked |
 | Incremental performance | REQ-FV2-010; NFR-FV2-006, NFR-FV2-010 | warm SymbolId/SCC checks retain timing, cache, scheduler, and max-RSS evidence without repeated full-tree scans | Blocked by unavailable self-hosted CLI |
 | SimpleOS vertical slice | REQ-FV2-014, REQ-FV2-020; NFR-FV2-009, NFR-FV2-010 | stable manual Lean roots plus product-linked receipts survive adversarial lifecycle/interleaving/crash cases | Blocked; no current-main accepted slice |
 | RISC-V dual track | REQ-FV2-015, REQ-FV2-020; NFR-FV2-009 | exact RVFI/SBY proof, independent ISA oracle, refinement/equivalence, and artifact identities agree | Blocked; readiness is not proof |
@@ -42,12 +42,15 @@ before PASS. Current zero-case rows are failures, not exclusions.
 
 ## Per-ID executable traceability
 
-In the trace table, `FV2SYS` labels the still-missing
+In the trace table, `FV2SYS` labels
 `test/03_system/compiler/formal_verification_2_0_spec.spl`; it is not a literal
 shell command. Every eventual system-test invocation uses the exact path shown
 in the one-pass ledger below. Scenario names are
 frozen acceptance names for its implementation. Unless a row names a narrower
 reviewer, the reviewer is the independent highest-capability FV2 reviewer.
+The blocker column records missing executable evidence, not missing source:
+the capsule and scenarios are present, but no row is admitted until its named
+runtime/tool command succeeds on the unchanged tree.
 
 | ID | Implementation artifact | Exact happy / boundary / rejection oracle or test | Blocker | Prerequisite / executable resume command | Expected marker or artifact | Owner / reviewer |
 |---|---|---|---|---|---|---|

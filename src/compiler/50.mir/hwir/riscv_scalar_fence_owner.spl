@@ -1,0 +1,201 @@
+# Stateful FENCE/FENCE.I owner with an explicit accepted-effect boundary.
+
+use compiler.mir.hwir.types.{CoreConfig, HwCombOp, HwConstant, HwNodeId,
+    HwOrigin, HwPort, HwSignal}
+use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard,
+    HwSeqOutputBinding, HwSeqRule, HwSeqValue, HwSequentialModuleDef,
+    HwSequentialPlan, HwStateRegister}
+use compiler.mir.hwir.riscv_scalar_core.{riscv_gen2_scalar_dispatch,
+    riscv_gen2_scalar_elaboration}
+
+fn fence_fields(x: i32) -> [(text, i32)]:
+    [("privilege", 2), ("original_instruction", 32),
+        ("canonical_instruction", 32), ("instruction_length_bytes", 3),
+        ("pc_before", x), ("pc_after", x), ("rd", 5), ("rd_write", 1),
+        ("rd_value", x), ("memory_address", x), ("memory_read_mask", 32),
+        ("memory_write_mask", 32), ("memory_read_data", x),
+        ("memory_write_data", x), ("execute_trap_valid", 1),
+        ("execute_trap_cause", x), ("execute_trap_tval", x),
+        ("memory_trap_valid", 1), ("memory_trap_cause", x),
+        ("memory_trap_tval", x), ("redirect_valid", 1),
+        ("redirect_target", x), ("event_id", 64),
+        ("decode_event_id", 64), ("illegal_valid", 1)]
+
+fn fence_ports(x: i32) -> [HwPort]:
+    var ports = [HwPort.input("clk", "Bits", 1), HwPort.input("rst", "Bits", 1),
+        HwPort.input("dispatch_valid", "Bits", 1),
+        HwPort.input("dispatch_lineage_valid", "Bits", 1),
+        HwPort.input("dispatch_event_id", "Bits", 64),
+        HwPort.input("decode_event_id", "Bits", 64), HwPort.input("illegal_valid", "Bits", 1),
+        HwPort.input("dispatch_privilege", "Bits", 2),
+        HwPort.input("dispatch_original_instruction", "Bits", 32),
+        HwPort.input("dispatch_canonical_instruction", "Bits", 32),
+        HwPort.input("dispatch_instruction_length_bytes", "Bits", 3),
+        HwPort.input("dispatch_pc_before", "Bits", x), HwPort.input("dispatch_pc_after", "Bits", x),
+        HwPort.input("dispatch_rd", "Bits", 5), HwPort.input("dispatch_rs1", "Bits", 5),
+        HwPort.input("fence_effect_ready", "Bits", 1),
+        HwPort.input("completion_ready", "Bits", 1),
+        HwPort.output("dispatch_ready", "Bits", 1), HwPort.output("dispatch_accept", "Bits", 1),
+        HwPort.output("fence_effect_valid", "Bits", 1),
+        HwPort.output("fence_effect_kind", "Bits", 2),
+        HwPort.output("fence_fm", "Bits", 4), HwPort.output("fence_pred", "Bits", 4),
+        HwPort.output("fence_succ", "Bits", 4),
+        HwPort.output("completion_valid", "Bits", 1),
+        HwPort.output("completion_decode_valid", "Bits", 1),
+        HwPort.output("protocol_fault", "Bits", 1)]
+    for field in fence_fields(x):
+        val output_name = if field[0] == "event_id" or field[0] == "decode_event_id" or
+            field[0] == "illegal_valid": "completion_" + field[0] else: field[0]
+        ports.push(HwPort.output(output_name, "Bits", field[1]))
+    ports
+
+fn fence_registers(x: i32) -> [HwStateRegister]:
+    var registers = [HwStateRegister(name: "pending_reg", bit_width: 1,
+            clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "full_reg", bit_width: 1,
+            clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "fault_reg", bit_width: 1,
+            clock_domain: "default", reset_value: 0)]
+    for field in fence_fields(x):
+        registers.push(HwStateRegister(name: field[0] + "_reg", bit_width: field[1],
+            clock_domain: "default", reset_value: 0))
+    registers
+
+fn fence_capture(x: i32, illegal_encoding: bool) -> [HwSeqAssignment]:
+    var assignments = [HwSeqAssignment(destination: "pending_reg",
+            value: if illegal_encoding: HwSeqValue.zero(1) else: HwSeqValue.copy("dispatch_valid", 1)),
+        HwSeqAssignment(destination: "full_reg",
+            value: if illegal_encoding: HwSeqValue.copy("dispatch_valid", 1) else: HwSeqValue.zero(1))]
+    for field in fence_fields(x):
+        var source = "dispatch_" + field[0]
+        var value = HwSeqValue.copy(source, field[1])
+        if field[0] == "event_id": value = HwSeqValue.copy("dispatch_event_id", 64)
+        elif field[0] == "decode_event_id": value = HwSeqValue.copy("decode_event_id", 64)
+        elif field[0] == "illegal_valid": value = HwSeqValue.copy("illegal_valid", 1)
+        elif field[0] == "rd" or field[0] == "rd_write" or field[0] == "rd_value" or
+            field[0].starts_with("memory_") or field[0].starts_with("redirect_"):
+            value = HwSeqValue.zero(field[1])
+        elif field[0] == "execute_trap_valid":
+            value = if illegal_encoding: HwSeqValue.copy("dispatch_valid", 1) else: HwSeqValue.zero(1)
+        elif field[0] == "execute_trap_cause":
+            value = if illegal_encoding: HwSeqValue.copy("cause_illegal", x) else: HwSeqValue.zero(x)
+        elif field[0] == "execute_trap_tval":
+            value = if illegal_encoding: HwSeqValue.copy("instruction_xlen", x) else: HwSeqValue.zero(x)
+        assignments.push(HwSeqAssignment(destination: field[0] + "_reg", value: value))
+    assignments
+
+fn fence_clear(x: i32) -> [HwSeqAssignment]:
+    var assignments = [HwSeqAssignment(destination: "full_reg", value: HwSeqValue.zero(1))]
+    for field in fence_fields(x):
+        assignments.push(HwSeqAssignment(destination: field[0] + "_reg",
+            value: HwSeqValue.zero(field[1])))
+    assignments
+
+fn fence_outputs(x: i32) -> [HwSeqOutputBinding]:
+    val idle = [HwSeqGuard.low("pending_reg"), HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg")]
+    val accepted = [HwSeqGuard.high("dispatch_valid"), HwSeqGuard.low("pending_reg"),
+        HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg"), HwSeqGuard.high("identity_ok")]
+    val pending = [HwSeqGuard.high("pending_reg")]
+    val full = [HwSeqGuard.high("full_reg")]
+    var outputs = [HwSeqOutputBinding.all("dispatch_ready", idle),
+        HwSeqOutputBinding.all("dispatch_accept", accepted),
+        HwSeqOutputBinding.direct("fence_effect_valid", "pending_reg", 1),
+        HwSeqOutputBinding.guarded("fence_effect_kind", "effect_kind", 2, pending),
+        HwSeqOutputBinding.guarded("fence_fm", "effect_fm", 4, pending),
+        HwSeqOutputBinding.guarded("fence_pred", "effect_pred", 4, pending),
+        HwSeqOutputBinding.guarded("fence_succ", "effect_succ", 4, pending),
+        HwSeqOutputBinding.direct("completion_valid", "full_reg", 1),
+        HwSeqOutputBinding.direct("completion_decode_valid", "full_reg", 1),
+        HwSeqOutputBinding.direct("protocol_fault", "fault_reg", 1)]
+    for field in fence_fields(x):
+        val output_name = if field[0] == "event_id" or field[0] == "decode_event_id" or
+            field[0] == "illegal_valid": "completion_" + field[0] else: field[0]
+        outputs.push(HwSeqOutputBinding.guarded(output_name, field[0] + "_reg",
+            field[1], full))
+    outputs
+
+pub fn strict_riscv_scalar_fence_owner(module_name: text, config: CoreConfig,
+    instruction: u32) -> Result<HwSequentialModuleDef, text>:
+    if module_name == "": return Err("HWIR-E-RISCV-FENCE-ID: fence owner requires a module name")
+    val dispatch = riscv_gen2_scalar_dispatch(riscv_gen2_scalar_elaboration(config, "none")?, instruction)?
+    if dispatch.entry.execution_class != "memory-order" or
+        (dispatch.entry.id != "rv.i.fence" and dispatch.entry.id != "rv.i.fence_i"):
+        return Err("HWIR-E-RISCV-FENCE-SCOPE: fence owner admits only FENCE or FENCE.I")
+    val is_fence_i = dispatch.entry.id == "rv.i.fence_i"
+    val fm = ((instruction >> 28) & 15) as i64
+    val pred = ((instruction >> 24) & 15) as i64
+    val succ = ((instruction >> 20) & 15) as i64
+    val encoded_rs1 = ((instruction >> 15) & 31) as i64
+    val encoded_rd = ((instruction >> 7) & 31) as i64
+    val immediate = ((instruction >> 20) & 4095) as i64
+    val illegal_encoding = encoded_rs1 != 0 or encoded_rd != 0 or fm != 0 or
+        (is_fence_i and immediate != 0)
+    val x = config.xlen
+    var rules = [
+            HwSeqRule(name: "consume", guards: [HwSeqGuard.high("completion_ready"),
+                    HwSeqGuard.high("full_reg")], assignments: fence_clear(x)),
+            HwSeqRule(name: "effect_accept", guards: [HwSeqGuard.high("fence_effect_ready"),
+                    HwSeqGuard.high("pending_reg")], assignments: [
+                    HwSeqAssignment(destination: "pending_reg", value: HwSeqValue.zero(1)),
+                    HwSeqAssignment(destination: "full_reg", value: HwSeqValue.copy("fence_effect_ready", 1))]),
+            HwSeqRule(name: "identity_fault", guards: [HwSeqGuard.high("dispatch_valid"),
+                    HwSeqGuard.low("pending_reg"), HwSeqGuard.low("full_reg"),
+                    HwSeqGuard.low("fault_reg"), HwSeqGuard.low("identity_ok")], assignments: [
+                    HwSeqAssignment(destination: "fault_reg", value: HwSeqValue.copy("dispatch_valid", 1))])]
+    if illegal_encoding:
+        rules.push(HwSeqRule(name: "capture_illegal_encoding", guards: [
+            HwSeqGuard.high("dispatch_valid"), HwSeqGuard.low("pending_reg"),
+            HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg"),
+            HwSeqGuard.high("identity_ok")],
+            assignments: fence_capture(x, true)))
+    else:
+        rules.push(HwSeqRule(name: "capture_illegal_decode", guards: [
+            HwSeqGuard.high("dispatch_valid"), HwSeqGuard.low("pending_reg"),
+            HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg"),
+            HwSeqGuard.high("identity_ok"), HwSeqGuard.high("illegal_valid")],
+            assignments: fence_capture(x, true)))
+        rules.push(HwSeqRule(name: "capture_effect", guards: [
+            HwSeqGuard.high("dispatch_valid"), HwSeqGuard.low("pending_reg"),
+            HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg"),
+            HwSeqGuard.high("identity_ok"), HwSeqGuard.low("illegal_valid")],
+            assignments: fence_capture(x, false)))
+    val plan = HwSequentialPlan(owner_id: HwNodeId.child(module_name, "sequential"),
+        registers: fence_registers(x), rules: rules,
+        outputs: fence_outputs(x), decoder_pins: [])
+    val constants = [HwConstant.bits("expected_instruction", 32, instruction as i64),
+        HwConstant.bits("expected_length", 3, 4), HwConstant.bits("expected_rd", 5, encoded_rd),
+        HwConstant.bits("expected_rs1", 5, encoded_rs1), HwConstant.bits("zero1", 1, 0),
+        HwConstant.bits("cause_illegal", x, 2), HwConstant.bits("instruction_xlen", x, instruction as i64),
+        HwConstant.bits("effect_kind", 2, if is_fence_i: 2 else: 1),
+        HwConstant.bits("effect_fm", 4, if is_fence_i: 0 else: fm),
+        HwConstant.bits("effect_pred", 4, if is_fence_i: 0 else: pred),
+        HwConstant.bits("effect_succ", 4, if is_fence_i: 0 else: succ)]
+    val signals = [HwSignal.comb("events_match", "Bits", 1),
+        HwSignal.comb("canonical_match", "Bits", 1), HwSignal.comb("original_match", "Bits", 1),
+        HwSignal.comb("length_match", "Bits", 1), HwSignal.comb("rd_match", "Bits", 1),
+        HwSignal.comb("rs1_match", "Bits", 1), HwSignal.comb("lineage_and_events", "Bits", 1),
+        HwSignal.comb("instructions_match", "Bits", 1), HwSignal.comb("indices_match", "Bits", 1),
+        HwSignal.comb("identity_left", "Bits", 1), HwSignal.comb("identity_right", "Bits", 1),
+        HwSignal.comb("identity_ok", "Bits", 1)]
+    val ops = [HwCombOp.binary("eq", "events_match", "dispatch_event_id", "decode_event_id", 64),
+        HwCombOp.binary("eq", "canonical_match", "dispatch_canonical_instruction", "expected_instruction", 32),
+        HwCombOp.binary("eq", "original_match", "dispatch_original_instruction", "expected_instruction", 32),
+        HwCombOp.binary("eq", "length_match", "dispatch_instruction_length_bytes", "expected_length", 3),
+        HwCombOp.binary("eq", "rd_match", "dispatch_rd", "expected_rd", 5),
+        HwCombOp.binary("eq", "rs1_match", "dispatch_rs1", "expected_rs1", 5),
+        HwCombOp.binary("and", "lineage_and_events", "dispatch_lineage_valid", "events_match", 1),
+        HwCombOp.binary("and", "instructions_match", "canonical_match", "original_match", 1),
+        HwCombOp.binary("and", "indices_match", "rd_match", "rs1_match", 1),
+        HwCombOp.binary("and", "identity_left", "lineage_and_events", "instructions_match", 1),
+        HwCombOp.binary("and", "identity_right", "length_match", "indices_match", 1),
+        HwCombOp.binary("and", "identity_ok", "identity_left", "identity_right", 1)]
+    val module = HwSequentialModuleDef(node_id: HwNodeId.module_root(module_name),
+        entity_name: module_name, config: config, origins: [HwOrigin(
+            node_id: HwNodeId.child(module_name, "accepted-effect"),
+            source_name: "riscv.scalar." + (if is_fence_i: "fence-i" else: "fence"))],
+        ports: fence_ports(x), datapath_signals: signals, datapath_constants: constants,
+        datapath_bit_vector_constants: [], datapath_comb_ops: ops,
+        datapath_compare_ops: [], datapath_select_ops: [], datapath_bit_extract_ops: [],
+        datapath_fixed_slice_ops: [], plan: plan, child_entity: "", child_graph_sha256: "")
+    val diagnostic = module.diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(module)

@@ -1,0 +1,150 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.assurance.formal_receipt.{TrustManifestV1}
+use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirContractBlock,
+    HirContractClause, HirContractClauseKind, HirContractOutcome}
+use compiler.mir.mir_instructions.{BlockId, MirBlock, MirFunction, MirInst,
+    MirInstKind, MirModule, MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{MirConstValue, MirSignature, MirType, MirTypeKind}
+use compiler.mir.verification_obligation_module.{
+    generate_verification_obligation_closure_from_canonical_module_v1,
+    generate_resolved_verification_obligation_closure_from_canonical_module_v2}
+use compiler.mir.verification_call_identity.{ResolvedDirectCallBindingV1,
+    ResolvedDirectCallManifestV1, resolved_direct_call_module_hash_v1,
+    resolved_direct_call_site_hash_v1}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_signature}
+
+fn module_span() -> Span:
+    Span(start: 10, end: 14, line: 2, col: 5,
+        file: "module_vc.spl", length: 4)
+
+fn module_contract() -> HirContractBlock:
+    val span = module_span()
+    val bool_type = HirType(kind: HirTypeKind.Bool, span: span)
+    val predicate = HirExpr(kind: HirExprKind.BoolLit(true), has_type_: true,
+        type_: bool_type, span: span)
+    HirContractBlock(clauses: [HirContractClause(
+        kind: HirContractClauseKind.Requires, predicate: predicate,
+        binding_name: "", span: span)], proof_uses: "ModuleProof.correct",
+        outcome: HirContractOutcome.Plain)
+
+fn module_call(name: text) -> MirInst:
+    val signature = MirSignature(params: [], return_type: MirType.unit(),
+        is_variadic: false)
+    val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(signature))))
+    MirInst(kind: MirInstKind.Call(nil, callee, []), span: Some(module_span()))
+
+fn module_function(id: i64, name: text, instructions: [MirInst],
+    retained_contract: bool = true) -> MirFunction:
+    var func = MirFunction(
+        symbol: SymbolId(id: id), name: name,
+        signature: MirSignature(params: [], return_type: MirType.unit(),
+            is_variadic: false),
+        locals: [], blocks: [MirBlock(id: BlockId(id: 0),
+            label: Some("entry"), instructions: instructions,
+            terminator: MirTerminator.Ret(nil))],
+        entry_block: BlockId(id: 0), span: module_span(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, is_export_c: false,
+        export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false)
+    if retained_contract: func.verification_contract = Some(module_contract())
+    func
+
+fn module_with(owner: MirFunction, callee: MirFunction) -> MirModule:
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[owner.symbol] = owner
+    functions[callee.symbol] = callee
+    MirModule(name: "module_vc", functions: functions, statics: {},
+        constants: {}, types: {})
+
+fn closed_module_trust() -> TrustManifestV1:
+    TrustManifestV1(["propext"], [], [], [], [], [])
+
+fn resolved_module_calls(module: MirModule, owner: MirFunction,
+    callee: MirFunction) -> ResolvedDirectCallManifestV1:
+    val binding = ResolvedDirectCallBindingV1(owner.symbol.id.to_string(),
+        resolved_direct_call_site_hash_v1(owner, 0, 0),
+        callee.symbol.id.to_string(),
+        sha256_text(serialize_mir_signature(callee.signature)),
+        sha256_text(serialize_mir_function(callee)))
+    ResolvedDirectCallManifestV1(resolved_direct_call_module_hash_v1(module),
+        sha256_text("resolver-receipt"), [binding])
+
+describe "Verification 2.0 canonical module obligation closure":
+    it "binds an exact pure leaf callee contract into the owner call VC":
+        val callee = module_function(7101, "leaf", [])
+        val owner = module_function(7102, "owner", [module_call("leaf")])
+        val closure = generate_verification_obligation_closure_from_canonical_module_v1(
+            module_with(owner, callee), "7102", "woven-module", "lean4",
+            "lean-backend-v1", closed_module_trust())
+        expect(closure.closed()).to_equal(true)
+        expect(closure.root_obligation_id).to_equal(
+            "7102::fv2::trust-closure")
+
+    it "requires a resolver-backed exact call manifest for the V2 handoff":
+        val callee = module_function(7101, "leaf", [])
+        val owner = module_function(7102, "owner", [module_call("leaf")])
+        val module = module_with(owner, callee)
+        val resolved = generate_resolved_verification_obligation_closure_from_canonical_module_v2(
+            module, "7102", "woven-module", "lean4", "lean-backend-v1",
+            closed_module_trust(), resolved_module_calls(module, owner, callee))
+        expect(resolved.closed()).to_equal(true)
+        expect(resolved.resolved_call_manifest_hash == "").to_equal(false)
+        expect(resolved.hash() == resolved.closure.closure_hash).to_equal(false)
+        var substituted_manifest = resolved_module_calls(module, owner, callee)
+        substituted_manifest.resolver_receipt_hash = sha256_text("other-resolver-receipt")
+        val substituted = generate_resolved_verification_obligation_closure_from_canonical_module_v2(
+            module, "7102", "woven-module", "lean4", "lean-backend-v1",
+            closed_module_trust(), substituted_manifest)
+        expect(substituted.closed()).to_equal(true)
+        expect(substituted.hash() == resolved.hash()).to_equal(false)
+        val missing = ResolvedDirectCallManifestV1(
+            resolved_direct_call_module_hash_v1(module), sha256_text("resolver-receipt"), [])
+        val rejected = generate_resolved_verification_obligation_closure_from_canonical_module_v2(
+            module, "7102", "woven-module", "lean4", "lean-backend-v1",
+            closed_module_trust(), missing)
+        expect(rejected.closed()).to_equal(false)
+        expect(rejected.diagnostic).to_contain("CALL-IDENTITY-MISSING")
+
+    it "invalidates the closure when the callee contract changes":
+        val callee = module_function(7101, "leaf", [])
+        val owner = module_function(7102, "owner", [module_call("leaf")])
+        val first = generate_verification_obligation_closure_from_canonical_module_v1(
+            module_with(owner, callee), "7102", "woven-module", "lean4",
+            "lean-backend-v1", closed_module_trust())
+        var changed = callee
+        val span = module_span()
+        val bool_type = HirType(kind: HirTypeKind.Bool, span: span)
+        val predicate = HirExpr(kind: HirExprKind.BoolLit(false), has_type_: true,
+            type_: bool_type, span: span)
+        changed.verification_contract = Some(HirContractBlock(clauses: [
+            HirContractClause(kind: HirContractClauseKind.Requires,
+                predicate: predicate, binding_name: "", span: span)],
+            proof_uses: "ModuleProof.correct", outcome: HirContractOutcome.Plain))
+        val second = generate_verification_obligation_closure_from_canonical_module_v1(
+            module_with(owner, changed), "7102", "woven-module", "lean4",
+            "lean-backend-v1", closed_module_trust())
+        expect(first.closure_hash == second.closure_hash).to_equal(false)
+
+    it "rejects missing contracts and effectful leaf calls":
+        val owner = module_function(7102, "owner", [module_call("leaf")])
+        val unchecked = module_function(7101, "leaf", [], false)
+        val missing = generate_verification_obligation_closure_from_canonical_module_v1(
+            module_with(owner, unchecked), "7102", "woven-module", "lean4",
+            "lean-backend-v1", closed_module_trust())
+        expect(missing.diagnostic).to_contain("CALL-CONTRACT")
+        val value = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Int(1), MirType.i64()))
+        val effectful = module_function(7101, "leaf", [MirInst(
+            kind: MirInstKind.StoreGlobal(SymbolId(id: 99), value),
+            span: Some(module_span()))])
+        val rejected = generate_verification_obligation_closure_from_canonical_module_v1(
+            module_with(owner, effectful), "7102", "woven-module", "lean4",
+            "lean-backend-v1", closed_module_trust())
+        expect(rejected.diagnostic).to_contain("CALL-EFFECT")

@@ -1,0 +1,106 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.formal_receipt.{ProofReceiptV1, TrustManifestV1,
+    VerificationCacheKeyV1}
+use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1,
+    ReplayOutcomeV1, ReplayCheckerReceiptV1, IndependentReplayClosureV1,
+    close_independent_replay_v1}
+use compiler.common.assurance.trust_audit.{audit_lean_axiom_report}
+use compiler.tools.verify.formal_gate_collectors.{trust_audit_hash_v1}
+use compiler.tools.verify.formal_os_hardware_gate_collectors.{
+    SimpleOsSubsystemKindV1, SimpleOsSubsystemEvidenceV1,
+    collect_simpleos_vertical_slice_gate_v1}
+
+fn os_kind(index: i64) -> SimpleOsSubsystemKindV1:
+    match index:
+        case 0: SimpleOsSubsystemKindV1.CapabilityAuthority
+        case 1: SimpleOsSubsystemKindV1.SchedulerLifecycle
+        case 2: SimpleOsSubsystemKindV1.BoundedIpc
+        case 3: SimpleOsSubsystemKindV1.SharedMemory
+        case 4: SimpleOsSubsystemKindV1.ProcessWait
+        case 5: SimpleOsSubsystemKindV1.ProcessQueue
+        case _: SimpleOsSubsystemKindV1.CrashSafeStorage
+
+fn os_replay(index: i64, artifact: text) -> IndependentReplayClosureV1:
+    val module_name = "SimpleOsProof" + index.to_string()
+    val root_name = "SimpleOsProof.root" + index.to_string()
+    val fresh = ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1",
+        ReplayCheckerClassV1.FreshLeanKernel, "lean4checker", "v1",
+        sha256_text("fresh-lean-binary"), module_name, root_name, artifact,
+        sha256_text("fresh-policy"), sha256_text("fresh-output"),
+        ReplayOutcomeV1.Accepted, "")
+    val independent = ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1",
+        ReplayCheckerClassV1.IndependentKernel, "nanoda", "v1",
+        sha256_text("independent-kernel-binary"), module_name, root_name, artifact,
+        sha256_text("independent-policy"), sha256_text("independent-output"),
+        ReplayOutcomeV1.Accepted, "")
+    close_independent_replay_v1(fresh, independent)
+
+fn os_item(index: i64) -> SimpleOsSubsystemEvidenceV1:
+    val root = "SimpleOsProof.root" + index.to_string()
+    val artifact = sha256_text("artifact-" + index.to_string())
+    val report = "'" + root + "' does not depend on any axioms"
+    val audit = audit_lean_axiom_report(report, [root], [])
+    val trust = TrustManifestV1(["propext"], [], [], [], [], [])
+    val replay = os_replay(index, artifact)
+    val key = VerificationCacheKeyV1(
+        sha256_text("source-" + index.to_string()),
+        sha256_text("model-" + index.to_string()), sha256_text("weave"),
+        sha256_text("macro"), [sha256_text("dependency")], "effects-v1",
+        "source-refinement-validator-v1", "simpleos", "4.33.0",
+        sha256_text("mathlib"), ["lean4checker-v1", "nanoda-v1"],
+        sha256_text("tactics"), sha256_text("trust-policy"), "verified")
+    val proof = ProofReceiptV1(root, FormalStatus.ModelProven, key.hash(),
+        artifact, [], trust_audit_hash_v1(audit, artifact),
+        sha256_text(trust.canonical_text()), "", replay.hash())
+    val source_content = "SimpleOsSourceReceipt-v1:" + index.to_string()
+    SimpleOsSubsystemEvidenceV1("SimpleOsSubsystemEvidence-v1", os_kind(index),
+        "simpleos.symbol." + index.to_string(), key.vir_hash,
+        key.contract_hash, source_content, sha256_text(source_content), proof,
+        key, report, artifact, trust, replay, FormalStatus.SourceRefined, "")
+
+fn complete_os_slice() -> [SimpleOsSubsystemEvidenceV1]:
+    var items: [SimpleOsSubsystemEvidenceV1] = []
+    for index in 0..7: items.push(os_item(index))
+    items
+
+describe "FV2 SimpleOS vertical-slice gate collector":
+    it "materializes seven source refinements and an aggregate receipt":
+        val collection = collect_simpleos_vertical_slice_gate_v1(
+            complete_os_slice())
+        expect(collection.gate_evidence.status.name()).to_equal("passed")
+        expect(collection.gate_evidence.receipt_hashes.len()).to_equal(15)
+        expect(collection.receipt_files.len()).to_equal(15)
+        for file in collection.receipt_files:
+            expect(sha256_text(file.content)).to_equal(file.receipt_hash)
+
+    it "rejects missing reordered or model-only subsystem evidence":
+        var missing = complete_os_slice()
+        missing.pop()
+        expect(collect_simpleos_vertical_slice_gate_v1(
+            missing).gate_evidence.diagnostic).to_contain("COUNT")
+        var reordered = complete_os_slice()
+        val temporary = reordered[0]
+        reordered[0] = reordered[1]
+        reordered[1] = temporary
+        expect(collect_simpleos_vertical_slice_gate_v1(
+            reordered).gate_evidence.diagnostic).to_contain("ORDER")
+        var model_only = complete_os_slice()
+        model_only[2].status = FormalStatus.ModelProven
+        expect(collect_simpleos_vertical_slice_gate_v1(
+            model_only).gate_evidence.diagnostic).to_contain("STATUS")
+
+    it "rejects stale source material artifact drift and duplicate proof roots":
+        var stale = complete_os_slice()
+        stale[3].source_receipt_content = "changed"
+        expect(collect_simpleos_vertical_slice_gate_v1(
+            stale).gate_evidence.diagnostic).to_contain("RECEIPT")
+        var drift = complete_os_slice()
+        drift[4].axiom_report_artifact_hash = sha256_text("other-artifact")
+        expect(collect_simpleos_vertical_slice_gate_v1(
+            drift).gate_evidence.diagnostic).to_contain("ARTIFACT")
+        var duplicate = complete_os_slice()
+        duplicate[6].proof.proof_root = duplicate[5].proof.proof_root
+        expect(collect_simpleos_vertical_slice_gate_v1(
+            duplicate).gate_evidence.status.name()).to_equal("failed")

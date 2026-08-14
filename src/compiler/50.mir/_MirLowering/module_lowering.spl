@@ -478,7 +478,8 @@ impl MirLowering:
                 vhdl_metadata: vhdl_hardware_metadata_default(),
                 has_doc_comment: false,
                 doc_comment: "",
-                span: Span.empty()
+                span: Span.empty(),
+                verification_contract: nil
             )
         for raw_fn in module.functions.values():
             val fn_: HirFunction = raw_fn
@@ -511,12 +512,13 @@ impl MirLowering:
             vhdl_metadata: vhdl_hardware_metadata_default(),
             has_doc_comment: false,
             doc_comment: "",
-            span: Span.empty()
+            span: Span.empty(),
+            verification_contract: nil
         )
 
     fn hir_function_is_extern(fn_: HirFunction) -> bool:
         match fn_:
-            case HirFunction(_, _, _, _, _, _, _, _, _, _, _, _, _, _, is_extern, _, _, _, _, _, _, _, _, _, _, _, _, _, _):
+            case HirFunction(_, _, _, _, _, _, _, _, _, _, _, _, _, _, is_extern, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _):
                 is_extern
 
     me bootstrap_function_signature(name: text) -> MirSignature:
@@ -1362,24 +1364,32 @@ impl MirLowering:
                 return
         elif not runtime_module_initializer_supported(const_):
             return
-        val static_type = match const_.value.kind:
-            case StringLit(_, interps):
-                if string_literal_has_runtime_interpolations(interps):
-                    MirType(kind: MirTypeKind.Opaque("str"))
-                else:
-                    self.lower_type(const_.type_)
-            # A non-folded Binary/MethodCall reaching the runtime-init path is a
-            # TEXT expression (integer Binary folds via lower_const_expr, so it
-            # never gets here), so its slot must be str -- not the i64 the weak
-            # flat-path Infer would otherwise pick (native_compound_module_val_
-            # runtime_init 2026-07-23).
-            case Binary(_, _, _): MirType(kind: MirTypeKind.Opaque("str"))
-            case MethodCall(_, _, _, _): MirType(kind: MirTypeKind.Opaque("str"))
-            case _:
+        val static_type = match folded:
+            case Some(const_value):
                 match const_.type_.kind:
-                    case Infer(_, _): MirType.i64()
-                    case Str: MirType(kind: MirTypeKind.Opaque("str"))
+                    case Infer(_, _):
+                        if val derived_type = self.mir_const_value_type(const_value):
+                            derived_type
+                        else:
+                            self.error_fatal("cannot derive module static type from folded value; add an explicit annotation", Some(const_.value.span))
+                            MirType.i64()
                     case _: self.lower_type(const_.type_)
+            case _:
+                match const_.value.kind:
+                    case StringLit(_, interps):
+                        if string_literal_has_runtime_interpolations(interps):
+                            MirType(kind: MirTypeKind.Opaque("str"))
+                        else:
+                            self.lower_type(const_.type_)
+                    case Binary(_, _, _): MirType(kind: MirTypeKind.Opaque("str"))
+                    case MethodCall(_, _, _, _): MirType(kind: MirTypeKind.Opaque("str"))
+                    case _:
+                        match const_.type_.kind:
+                            case Infer(_, _):
+                                self.error_fatal("cannot derive module static type from unresolved initializer; add an explicit annotation", Some(const_.value.span))
+                                MirType.i64()
+                            case Str: MirType(kind: MirTypeKind.Opaque("str"))
+                            case _: self.lower_type(const_.type_)
         val init_const: MirConstant? = match folded:
             case Some(const_value):
                 Some(MirConstant(

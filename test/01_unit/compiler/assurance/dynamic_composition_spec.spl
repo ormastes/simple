@@ -1,0 +1,50 @@
+use std.spec
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.dynamic_composition.{DynamicComponentKindV1, DynamicComponentReceiptV1, SignatureVerificationReceiptV1, CompositionObligationV1, DynamicCompositionPolicyV1, verify_dynamic_composition_v1, declare_dynamic_bounded_tcb_v1}
+
+fn plugin_receipt() -> DynamicComponentReceiptV1:
+    DynamicComponentReceiptV1("scheduler-observer", DynamicComponentKindV1.Plugin, "artifact", "kernel-api-v1", "verified", "compiler-lineage", "proof-receipt", "release-key")
+
+fn verified_signature(component: DynamicComponentReceiptV1) -> SignatureVerificationReceiptV1:
+    SignatureVerificationReceiptV1(component.hash(), component.signer_id, "ed25519-checker-v1", "signature-evidence", true)
+
+fn composition_policy() -> DynamicCompositionPolicyV1:
+    DynamicCompositionPolicyV1("kernel-api-v1", "verified", "compiler-lineage", ["release-key"])
+
+fn closed_obligation() -> CompositionObligationV1:
+    CompositionObligationV1("interface-refinement", "proposition", "certificate", true)
+
+describe "FV2 dynamic verified composition":
+    it "admits only a fully matching signed verified component":
+        val component = plugin_receipt()
+        val decision = verify_dynamic_composition_v1(composition_policy(), component, verified_signature(component), [closed_obligation()])
+        expect(decision.admitted).to_equal(true)
+        expect(decision.closed_verification).to_equal(true)
+        expect(decision.status).to_equal(FormalStatus.ArtifactVerified)
+
+    it "rejects interface lineage signer and profile mismatches":
+        val component = plugin_receipt()
+        val bad_policy = DynamicCompositionPolicyV1("different-api", "verified", "compiler-lineage", ["other-key"])
+        val decision = verify_dynamic_composition_v1(bad_policy, component, verified_signature(component), [closed_obligation()])
+        expect(decision.admitted).to_equal(false)
+        expect(decision.diagnostic).to_contain("SIGNER-POLICY")
+
+    it "rejects a signature over a stale component receipt":
+        val component = plugin_receipt()
+        val stale = SignatureVerificationReceiptV1("stale-hash", component.signer_id, "ed25519-checker-v1", "signature-evidence", true)
+        val decision = verify_dynamic_composition_v1(composition_policy(), component, stale, [closed_obligation()])
+        expect(decision.diagnostic).to_contain("SIGNATURE-BINDING")
+
+    it "rejects an absent or undischarged composition obligation":
+        val component = plugin_receipt()
+        val missing = verify_dynamic_composition_v1(composition_policy(), component, verified_signature(component), [])
+        expect(missing.diagnostic).to_contain("OBLIGATION-MISSING")
+        val open = CompositionObligationV1("interface-refinement", "proposition", "certificate", false)
+        val undischarged = verify_dynamic_composition_v1(composition_policy(), component, verified_signature(component), [open])
+        expect(undischarged.diagnostic).to_contain("OBLIGATION")
+
+    it "labels an explicitly isolated component as bounded TCB rather than closed":
+        val decision = declare_dynamic_bounded_tcb_v1(plugin_receipt(), "trust-manifest")
+        expect(decision.admitted).to_equal(true)
+        expect(decision.closed_verification).to_equal(false)
+        expect(decision.status).to_equal(FormalStatus.TrustedBoundary)

@@ -1,0 +1,180 @@
+# Formal Verification 2.0 symbol-level proof dependency graph.
+#
+# Scheduling is deterministic and SCC-aware: recursive proof roots share one
+# component, while every dependency component is emitted before its consumers.
+# Invalidation walks reverse edges so a changed semantic identity invalidates
+# every transitive dependent without rebuilding unrelated symbols.
+
+use compiler.common.assurance.flight_rules.{assurance_text_hash}
+
+struct ProofDagNodeV1:
+    symbol_id: text
+    dependency_ids: [text]
+    semantic_hash: text
+    estimated_cost_ms: i64
+
+struct ProofDagComponentV1:
+    component_id: text
+    symbol_ids: [text]
+    dependency_component_ids: [text]
+    estimated_cost_ms: i64
+    critical_path_ms: i64
+
+struct ProofDagScheduleV1:
+    ordered_components: [ProofDagComponentV1]
+    diagnostic: text
+    critical_path_ms: i64
+
+fn _proof_text_contains(values: [text], candidate: text) -> bool:
+    for value in values:
+        if value == candidate: return true
+    false
+
+fn _proof_text_push_unique(values: [text], candidate: text) -> [text]:
+    if _proof_text_contains(values, candidate): return values
+    var result = values
+    result = result.push(candidate)
+    result
+
+fn _proof_sorted_text(values: [text]) -> [text]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j] < result[i]:
+                val temporary = result[i]
+                result[i] = result[j]
+                result[j] = temporary
+            j = j + 1
+        i = i + 1
+    result
+
+fn _proof_node_index(nodes: [ProofDagNodeV1], symbol_id: text) -> i64:
+    for index in 0..nodes.len():
+        if nodes[index].symbol_id == symbol_id: return index
+    -1
+
+fn proof_dag_diagnostic(nodes: [ProofDagNodeV1]) -> text:
+    for index in 0..nodes.len():
+        val node = nodes[index]
+        if node.symbol_id == "": return "FV2-E-PROOF-DAG-SYMBOL: SymbolId is required"
+        if _proof_node_index(nodes, node.symbol_id) != index:
+            return "FV2-E-PROOF-DAG-DUPLICATE: duplicate SymbolId " + node.symbol_id
+        if node.semantic_hash == "": return "FV2-E-PROOF-DAG-HASH: semantic hash is required for " + node.symbol_id
+        if node.estimated_cost_ms < 0: return "FV2-E-PROOF-DAG-COST: estimated cost cannot be negative"
+        for dependency in node.dependency_ids:
+            if _proof_node_index(nodes, dependency) < 0:
+                return "FV2-E-PROOF-DAG-DEPENDENCY: missing dependency SymbolId " + dependency
+    ""
+
+fn _proof_reachable(nodes: [ProofDagNodeV1], source: text, target: text) -> bool:
+    var worklist: [text] = [source]
+    var seen: [text] = []
+    var cursor = 0
+    while cursor < worklist.len():
+        val current = worklist[cursor]
+        cursor = cursor + 1
+        if current == target: return true
+        if _proof_text_contains(seen, current): continue
+        seen = seen.push(current)
+        val index = _proof_node_index(nodes, current)
+        if index < 0: return false
+        for dependency in nodes[index].dependency_ids:
+            if not _proof_text_contains(seen, dependency): worklist = worklist.push(dependency)
+    false
+
+fn proof_dag_affected_symbols(nodes: [ProofDagNodeV1], changed_symbol_ids: [text]) -> [text]:
+    if proof_dag_diagnostic(nodes) != "": return []
+    var affected: [text] = []
+    for changed in changed_symbol_ids:
+        if _proof_node_index(nodes, changed) >= 0: affected = _proof_text_push_unique(affected, changed)
+    var changed = true
+    while changed:
+        changed = false
+        for node in nodes:
+            if _proof_text_contains(affected, node.symbol_id): continue
+            for dependency in node.dependency_ids:
+                if _proof_text_contains(affected, dependency):
+                    affected = affected.push(node.symbol_id)
+                    changed = true
+                    break
+    _proof_sorted_text(affected)
+
+fn _proof_component_index_for_symbol(components: [ProofDagComponentV1], symbol_id: text) -> i64:
+    for index in 0..components.len():
+        if _proof_text_contains(components[index].symbol_ids, symbol_id): return index
+    -1
+
+fn _proof_component_index(components: [ProofDagComponentV1], component_id: text) -> i64:
+    for index in 0..components.len():
+        if components[index].component_id == component_id: return index
+    -1
+
+fn build_proof_dag_schedule_v1(nodes: [ProofDagNodeV1]) -> ProofDagScheduleV1:
+    val diagnostic = proof_dag_diagnostic(nodes)
+    if diagnostic != "": return ProofDagScheduleV1([], diagnostic, 0)
+
+    var symbol_ids: [text] = []
+    for node in nodes: symbol_ids = symbol_ids.push(node.symbol_id)
+    symbol_ids = _proof_sorted_text(symbol_ids)
+    var assigned: [text] = []
+    var components: [ProofDagComponentV1] = []
+    for symbol_id in symbol_ids:
+        if _proof_text_contains(assigned, symbol_id): continue
+        var members: [text] = []
+        var cost = 0
+        for candidate in symbol_ids:
+            if _proof_reachable(nodes, symbol_id, candidate) and _proof_reachable(nodes, candidate, symbol_id):
+                members = members.push(candidate)
+                assigned = _proof_text_push_unique(assigned, candidate)
+                cost = cost + nodes[_proof_node_index(nodes, candidate)].estimated_cost_ms
+        members = _proof_sorted_text(members)
+        val component_id = assurance_text_hash("ProofDagSccV1|" + members.join(","))
+        components = components.push(ProofDagComponentV1(component_id, members, [], cost, 0))
+
+    # Collapse symbol dependencies onto SCC dependencies.
+    for component_index in 0..components.len():
+        var dependencies: [text] = []
+        for member in components[component_index].symbol_ids:
+            val node = nodes[_proof_node_index(nodes, member)]
+            for dependency in node.dependency_ids:
+                val dependency_component = _proof_component_index_for_symbol(components, dependency)
+                if dependency_component != component_index:
+                    dependencies = _proof_text_push_unique(dependencies, components[dependency_component].component_id)
+        components[component_index] = ProofDagComponentV1(
+            components[component_index].component_id, components[component_index].symbol_ids,
+            _proof_sorted_text(dependencies), components[component_index].estimated_cost_ms, 0
+        )
+
+    var ordered: [ProofDagComponentV1] = []
+    var scheduled_ids: [text] = []
+    while ordered.len() < components.len():
+        var selected = -1
+        for index in 0..components.len():
+            val component = components[index]
+            if _proof_text_contains(scheduled_ids, component.component_id): continue
+            var ready = true
+            for dependency in component.dependency_component_ids:
+                if not _proof_text_contains(scheduled_ids, dependency): ready = false
+            if ready and (selected < 0 or component.component_id < components[selected].component_id): selected = index
+        if selected < 0: return ProofDagScheduleV1([], "FV2-E-PROOF-DAG-SCHEDULE: SCC condensation did not converge", 0)
+
+        val selected_component = components[selected]
+        var dependency_path = 0
+        for dependency in selected_component.dependency_component_ids:
+            val dependency_index = _proof_component_index(ordered, dependency)
+            if dependency_index >= 0 and ordered[dependency_index].critical_path_ms > dependency_path:
+                dependency_path = ordered[dependency_index].critical_path_ms
+        val path = dependency_path + selected_component.estimated_cost_ms
+        val completed = ProofDagComponentV1(
+            selected_component.component_id, selected_component.symbol_ids,
+            selected_component.dependency_component_ids, selected_component.estimated_cost_ms, path
+        )
+        ordered = ordered.push(completed)
+        scheduled_ids = scheduled_ids.push(completed.component_id)
+
+    var critical_path = 0
+    for component in ordered:
+        if component.critical_path_ms > critical_path: critical_path = component.critical_path_ms
+    ProofDagScheduleV1(ordered, "", critical_path)

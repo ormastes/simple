@@ -1,0 +1,656 @@
+# Canonical engine-neutral Verification 2.0 proof-obligation DAG.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_interfaces.{ProofObligationKindV1,
+    ExpectedEvidenceClassV1, ProofObligationV1}
+use compiler.common.assurance.formal_receipt.{TrustManifestV1, ProofReceiptV1}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.replay_receipt.{IndependentReplayClosureV1}
+use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.mir_instructions.{BlockId, MirInstKind, MirOperandKind,
+    MirTerminator}
+use compiler.mir.mir_types.{MirConstValue}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_signature,
+    serialize_mir_inst_kind}
+use compiler.mir.verification_contract.{ExecutionContractObligationKindV1,
+    ExecutionContractObligationV2}
+use compiler.mir.verification_contract_bridge.{verification_contract_from_mir_v1,
+    verification_contract_obligations_from_canonical_mir_v2}
+use compiler.mir.verification_region_effects.{verification_region_effect_manifest_v1}
+use compiler.mir.verification_ir.{verification_ir_type}
+
+pub struct VerificationClosureAuthoritiesV1:
+    symbol_id: text
+    source_span: text
+    type_representation_hash: text
+    precondition_satisfiability_hash: text
+    termination_or_bound_hash: text
+    memory_ownership_hash: text
+    effect_frame_hash: text
+    normal_postcondition_hash: text
+    error_postcondition_hash: text
+    invariant_initialization_hash: text
+    invariant_preservation_hash: text
+    call_compatibility_hash: text
+    non_vacuity_hash: text
+    backend_lowering_hash: text
+    trust_closure_hash: text
+
+    fn diagnostic() -> text:
+        if self.symbol_id == "": return "FV2-E-VC-CLOSURE-SYMBOL: exact SymbolId is required"
+        if self.source_span == "": return "FV2-E-VC-CLOSURE-SPAN: source mapping is required"
+        val hashes = [self.type_representation_hash,
+            self.precondition_satisfiability_hash, self.termination_or_bound_hash,
+            self.memory_ownership_hash, self.effect_frame_hash,
+            self.normal_postcondition_hash, self.error_postcondition_hash,
+            self.invariant_initialization_hash, self.invariant_preservation_hash,
+            self.call_compatibility_hash, self.non_vacuity_hash,
+            self.backend_lowering_hash, self.trust_closure_hash]
+        for hash in hashes:
+            if hash == "": return "FV2-E-VC-CLOSURE-AUTHORITY: every obligation requires an exact typed proposition identity"
+        ""
+
+pub struct VerificationObligationClosureV1:
+    obligations: [ProofObligationV1]
+    root_obligation_id: text
+    closure_hash: text
+    diagnostic: text
+
+    fn closed() -> bool:
+        self.diagnostic == "" and self.obligations.len() == 13 and
+            self.root_obligation_id != "" and self.closure_hash != ""
+
+pub struct ProofObligationDischargeV1:
+    obligation_id: text
+    proposition_hash: text
+    theorem_root: text
+    closure_hash: text
+    proof_receipt: ProofReceiptV1
+    trust_manifest: TrustManifestV1
+    replay_closure: IndependentReplayClosureV1
+
+    fn canonical_text() -> text:
+        "ProofObligationDischarge-v1|obligation=" + self.obligation_id +
+            "|proposition=" + self.proposition_hash + "|root=" +
+            self.theorem_root + "|closure=" + self.closure_hash +
+            "|receipt=" + self.proof_receipt.hash() + "|trust=" +
+            sha256_text(self.trust_manifest.canonical_text()) +
+            "|replay=" + self.replay_closure.hash()
+
+pub struct VerificationObligationEvidenceClosureV1:
+    obligation_closure_hash: text
+    discharge_hashes: [text]
+    root_theorem: text
+    status: FormalStatus
+    evidence_hash: text
+    diagnostic: text
+
+    fn model_proven() -> bool:
+        self.status == FormalStatus.ModelProven and self.diagnostic == "" and
+            self.obligation_closure_hash != "" and
+            self.discharge_hashes.len() == 13 and self.root_theorem != "" and
+            self.evidence_hash != ""
+
+pub struct ProofUsesObligationBindingV1:
+    obligation_id: text
+    proposition_hash: text
+    external_theorem: text
+
+    fn canonical_text() -> text:
+        self.obligation_id + "|" + self.proposition_hash + "|" +
+            self.external_theorem
+
+pub struct ProofUsesClosureManifestV1:
+    base_proof_root: text
+    obligation_closure_hash: text
+    bindings: [ProofUsesObligationBindingV1]
+    manifest_hash: text
+    diagnostic: text
+
+    fn closed() -> bool:
+        self.base_proof_root != "" and self.obligation_closure_hash != "" and
+            self.bindings.len() == 13 and self.manifest_hash != "" and
+            self.diagnostic == ""
+
+fn vc_id_v1(symbol: text, suffix: text) -> text:
+    symbol + "::fv2::" + suffix
+
+fn fv2_exact_lean_name_v1(name: text) -> bool:
+    if name == "": return false
+    var previous_dot = true
+    for index in 0..name.len():
+        val code = name.char_code_at(index)
+        val alpha = (code >= 65 and code <= 90) or
+            (code >= 97 and code <= 122)
+        val digit = code >= 48 and code <= 57
+        val underscore = code == 95
+        val dot = code == 46
+        if not alpha and not digit and not underscore and not dot: return false
+        if index == 0 and digit: return false
+        if dot and previous_dot: return false
+        previous_dot = dot
+    not previous_dot
+
+fn proof_uses_suffix_v1(kind: ProofObligationKindV1) -> text:
+    match kind:
+        case TypeRepresentationWellFormed: "_type_representation"
+        case PreconditionsSatisfiable: "_preconditions_satisfiable"
+        case TerminationOrBoundedExecution: "_termination"
+        case MemoryOwnershipSafety: "_memory_ownership"
+        case EffectFrameCompliance: "_effect_frame"
+        case NormalPostcondition: ""
+        case ErrorPostcondition: ""
+        case InvariantInitialization: "_invariant_initialization"
+        case InvariantPreservation: "_invariant_preservation"
+        case CallContractCompatibility: "_call_contract_compatibility"
+        case NonVacuityWitness: "_non_vacuity"
+        case BackendLoweringCoverage: "_backend_lowering_coverage"
+        case TrustClosure: "_trust_closure"
+
+pub fn generate_proof_uses_closure_manifest_v1(
+    closure: VerificationObligationClosureV1,
+    base_proof_root: text
+) -> ProofUsesClosureManifestV1:
+    if not closure.closed(): return ProofUsesClosureManifestV1("", "", [], "",
+        "FV2-E-PROOF-USES-CLOSURE: obligation closure is not closed")
+    if not fv2_exact_lean_name_v1(base_proof_root):
+        return ProofUsesClosureManifestV1(base_proof_root,
+            closure.closure_hash, [], "",
+            "FV2-E-PROOF-USES-ROOT: proof uses must name one exact qualified Lean root")
+    var bindings: [ProofUsesObligationBindingV1] = []
+    var rows: [text] = []
+    for obligation in closure.obligations:
+        val binding = ProofUsesObligationBindingV1(obligation.obligation_id,
+            obligation.proposition_hash,
+            base_proof_root + proof_uses_suffix_v1(obligation.kind))
+        bindings.push(binding)
+        rows.push(binding.canonical_text())
+    ProofUsesClosureManifestV1(base_proof_root, closure.closure_hash, bindings,
+        sha256_text("ProofUsesClosureManifest-v1|closure=" +
+            closure.closure_hash + "|bindings=" + rows.join(";")), "")
+
+pub fn validate_proof_uses_evidence_bindings_v1(
+    closure: VerificationObligationClosureV1,
+    manifest: ProofUsesClosureManifestV1,
+    discharges: [ProofObligationDischargeV1]
+) -> text:
+    if not closure.closed() or not manifest.closed():
+        return "FV2-E-PROOF-USES-EVIDENCE: closure and proof-uses manifest must be closed"
+    if manifest.obligation_closure_hash != closure.closure_hash:
+        return "FV2-E-PROOF-USES-IDENTITY: proof-uses manifest names another obligation closure"
+    for obligation in closure.obligations:
+        var bindings: [ProofUsesObligationBindingV1] = []
+        for binding in manifest.bindings:
+            if binding.obligation_id == obligation.obligation_id:
+                bindings.push(binding)
+        if bindings.len() != 1 or
+                bindings[0].proposition_hash != obligation.proposition_hash:
+            return "FV2-E-PROOF-USES-BINDING: every exact proposition requires one external theorem binding"
+        val discharge = match proof_discharge_for_obligation_v1(
+                discharges, obligation.obligation_id):
+            case Some(value): value
+            case _: return "FV2-E-PROOF-USES-DISCHARGE: exact discharge is absent"
+        if not discharge.proof_receipt.theorem_dependencies.contains(
+                bindings[0].external_theorem):
+            return "FV2-E-PROOF-USES-DEPENDENCY: generated theorem receipt omits its proof-uses root"
+    ""
+
+fn vc_v1(authorities: VerificationClosureAuthoritiesV1, suffix: text,
+    kind: ProofObligationKindV1, proposition_hash: text,
+    dependencies: [text]) -> ProofObligationV1:
+    ProofObligationV1(vc_id_v1(authorities.symbol_id, suffix),
+        authorities.symbol_id, kind, proposition_hash, dependencies,
+        ExpectedEvidenceClassV1.KernelReplayedCertificate,
+        authorities.source_span)
+
+pub fn generate_verification_obligation_closure_v1(
+    a: VerificationClosureAuthoritiesV1) -> VerificationObligationClosureV1:
+    val error = a.diagnostic()
+    if error != "": return VerificationObligationClosureV1([], "", "", error)
+    val type_id = vc_id_v1(a.symbol_id, "type-representation")
+    val pre_id = vc_id_v1(a.symbol_id, "preconditions-satisfiable")
+    val term_id = vc_id_v1(a.symbol_id, "termination-or-bound")
+    val memory_id = vc_id_v1(a.symbol_id, "memory-ownership")
+    val effect_id = vc_id_v1(a.symbol_id, "effect-frame")
+    val normal_id = vc_id_v1(a.symbol_id, "normal-postcondition")
+    val error_id = vc_id_v1(a.symbol_id, "error-postcondition")
+    val init_id = vc_id_v1(a.symbol_id, "invariant-initialization")
+    val preserve_id = vc_id_v1(a.symbol_id, "invariant-preservation")
+    val call_id = vc_id_v1(a.symbol_id, "call-contract-compatibility")
+    val witness_id = vc_id_v1(a.symbol_id, "non-vacuity-witness")
+    val lowering_id = vc_id_v1(a.symbol_id, "backend-lowering-coverage")
+    val trust_id = vc_id_v1(a.symbol_id, "trust-closure")
+    val obligations = [
+        vc_v1(a, "type-representation", ProofObligationKindV1.TypeRepresentationWellFormed,
+            a.type_representation_hash, []),
+        vc_v1(a, "preconditions-satisfiable", ProofObligationKindV1.PreconditionsSatisfiable,
+            a.precondition_satisfiability_hash, [type_id]),
+        vc_v1(a, "termination-or-bound", ProofObligationKindV1.TerminationOrBoundedExecution,
+            a.termination_or_bound_hash, [type_id, pre_id]),
+        vc_v1(a, "memory-ownership", ProofObligationKindV1.MemoryOwnershipSafety,
+            a.memory_ownership_hash, [type_id]),
+        vc_v1(a, "effect-frame", ProofObligationKindV1.EffectFrameCompliance,
+            a.effect_frame_hash, [memory_id]),
+        vc_v1(a, "normal-postcondition", ProofObligationKindV1.NormalPostcondition,
+            a.normal_postcondition_hash, [pre_id, term_id, effect_id]),
+        vc_v1(a, "error-postcondition", ProofObligationKindV1.ErrorPostcondition,
+            a.error_postcondition_hash, [pre_id, term_id, effect_id]),
+        vc_v1(a, "invariant-initialization", ProofObligationKindV1.InvariantInitialization,
+            a.invariant_initialization_hash, [pre_id, memory_id]),
+        vc_v1(a, "invariant-preservation", ProofObligationKindV1.InvariantPreservation,
+            a.invariant_preservation_hash, [init_id, effect_id]),
+        vc_v1(a, "call-contract-compatibility", ProofObligationKindV1.CallContractCompatibility,
+            a.call_compatibility_hash, [pre_id, effect_id]),
+        vc_v1(a, "non-vacuity-witness", ProofObligationKindV1.NonVacuityWitness,
+            a.non_vacuity_hash, [pre_id, init_id]),
+        vc_v1(a, "backend-lowering-coverage", ProofObligationKindV1.BackendLoweringCoverage,
+            a.backend_lowering_hash, [type_id, memory_id, term_id]),
+        vc_v1(a, "trust-closure", ProofObligationKindV1.TrustClosure,
+            a.trust_closure_hash, [normal_id, error_id, preserve_id, call_id,
+                witness_id, lowering_id])]
+    validate_verification_obligation_closure_v1(obligations, trust_id)
+
+pub fn validate_verification_obligation_closure_v1(
+    obligations: [ProofObligationV1], root_id: text
+) -> VerificationObligationClosureV1:
+    if obligations.len() != 13:
+        return VerificationObligationClosureV1([], "", "", "FV2-E-VC-CLOSURE-COUNT: exact thirteen-kind closure is required")
+    var ids: [text] = []
+    var kind_names: [text] = []
+    var rows: [text] = []
+    for obligation in obligations:
+        val error = obligation.diagnostic()
+        if error != "": return VerificationObligationClosureV1([], "", "", error)
+        if ids.contains(obligation.obligation_id):
+            return VerificationObligationClosureV1([], "", "", "FV2-E-VC-CLOSURE-DUPLICATE: obligation IDs must be unique")
+        ids.push(obligation.obligation_id)
+        val kind_name = proof_obligation_kind_name_v1(obligation.kind)
+        if kind_names.contains(kind_name):
+            return VerificationObligationClosureV1([], "", "", "FV2-E-VC-CLOSURE-KIND: every required kind must occur exactly once")
+        kind_names.push(kind_name)
+    if not ids.contains(root_id):
+        return VerificationObligationClosureV1([], "", "", "FV2-E-VC-CLOSURE-ROOT: trust-closure root is absent")
+    var seen: [text] = []
+    for obligation in obligations:
+        val kind_name = proof_obligation_kind_name_v1(obligation.kind)
+        for dependency in obligation.dependency_ids:
+            if not ids.contains(dependency):
+                return VerificationObligationClosureV1([], "", "", "FV2-E-VC-CLOSURE-DEPENDENCY: dependency is outside the closure")
+            if not seen.contains(dependency):
+                return VerificationObligationClosureV1([], "", "", "FV2-E-VC-CLOSURE-ORDER: dependencies must precede consumers")
+        seen.push(obligation.obligation_id)
+        rows.push(obligation.obligation_id + "|" + kind_name +
+            "|" + obligation.proposition_hash + "|" +
+            obligation.dependency_ids.join(","))
+    if obligations[12].obligation_id != root_id or
+            proof_obligation_kind_name_v1(obligations[12].kind) != "trust_closure":
+        return VerificationObligationClosureV1([], "", "", "FV2-E-VC-CLOSURE-ROOT-KIND: final root must be trust closure")
+    VerificationObligationClosureV1(obligations, root_id,
+        sha256_text("VerificationObligationClosure-v1|" + rows.join(";")), "")
+
+fn proof_obligation_kind_name_v1(kind: ProofObligationKindV1) -> text:
+    match kind:
+        case TypeRepresentationWellFormed: "type_representation"
+        case PreconditionsSatisfiable: "preconditions_satisfiable"
+        case TerminationOrBoundedExecution: "termination_or_bound"
+        case MemoryOwnershipSafety: "memory_ownership"
+        case EffectFrameCompliance: "effect_frame"
+        case NormalPostcondition: "normal_postcondition"
+        case ErrorPostcondition: "error_postcondition"
+        case InvariantInitialization: "invariant_initialization"
+        case InvariantPreservation: "invariant_preservation"
+        case CallContractCompatibility: "call_contract_compatibility"
+        case NonVacuityWitness: "non_vacuity"
+        case BackendLoweringCoverage: "backend_lowering"
+        case TrustClosure: "trust_closure"
+
+fn proof_discharge_for_obligation_v1(
+    discharges: [ProofObligationDischargeV1], obligation_id: text
+) -> ProofObligationDischargeV1?:
+    var match_: ProofObligationDischargeV1? = nil
+    for discharge in discharges:
+        if discharge.obligation_id == obligation_id:
+            if match_ != nil: return nil
+            match_ = Some(discharge)
+    match_
+
+pub fn validate_verification_obligation_evidence_closure_v1(
+    closure: VerificationObligationClosureV1,
+    discharges: [ProofObligationDischargeV1]
+) -> VerificationObligationEvidenceClosureV1:
+    if not closure.closed(): return VerificationObligationEvidenceClosureV1(
+        "", [], "", FormalStatus.Failed, "",
+        "FV2-E-VC-EVIDENCE-CLOSURE: obligation closure is not closed")
+    if discharges.len() != closure.obligations.len():
+        return VerificationObligationEvidenceClosureV1(closure.closure_hash,
+            [], "", FormalStatus.Failed, "",
+            "FV2-E-VC-EVIDENCE-COUNT: every obligation requires exactly one discharge")
+    var discharge_hashes: [text] = []
+    var theorem_roots: [text] = []
+    for obligation in closure.obligations:
+        val discharge = match proof_discharge_for_obligation_v1(
+                discharges, obligation.obligation_id):
+            case Some(value): value
+            case _: return VerificationObligationEvidenceClosureV1(
+                closure.closure_hash, [], "", FormalStatus.Failed, "",
+                "FV2-E-VC-EVIDENCE-MATCH: missing or duplicate obligation discharge")
+        if discharge.proposition_hash != obligation.proposition_hash:
+            return VerificationObligationEvidenceClosureV1(closure.closure_hash,
+                [], "", FormalStatus.Failed, "",
+                "FV2-E-VC-EVIDENCE-PROPOSITION: discharge does not bind the exact proposition")
+        if discharge.closure_hash != closure.closure_hash:
+            return VerificationObligationEvidenceClosureV1(closure.closure_hash,
+                [], "", FormalStatus.Failed, "",
+                "FV2-E-VC-EVIDENCE-IDENTITY: discharge names a different closure")
+        if discharge.theorem_root == "" or
+                discharge.proof_receipt.proof_root != discharge.theorem_root:
+            return VerificationObligationEvidenceClosureV1(closure.closure_hash,
+                [], "", FormalStatus.Failed, "",
+                "FV2-E-VC-EVIDENCE-ROOT: proof receipt must bind the exact theorem root")
+        if discharge.proof_receipt.status != FormalStatus.ModelProven or
+                discharge.proof_receipt.diagnostic() != "":
+            return VerificationObligationEvidenceClosureV1(closure.closure_hash,
+                [], "", FormalStatus.Failed, "",
+                "FV2-E-VC-EVIDENCE-STATUS: each VC theorem requires a valid model-proven receipt")
+        val trust_hash = sha256_text(
+            discharge.trust_manifest.canonical_text())
+        val replay_hash = discharge.replay_closure.hash()
+        if not discharge.trust_manifest.is_closed() or replay_hash == "" or
+                discharge.proof_receipt.trust_manifest_hash != trust_hash or
+                discharge.proof_receipt.independent_replay_hash != replay_hash or
+                discharge.proof_receipt.artifact_hash == "" or
+                discharge.proof_receipt.artifact_hash !=
+                    discharge.replay_closure.artifact_hash:
+            return VerificationObligationEvidenceClosureV1(closure.closure_hash,
+                [], "", FormalStatus.Failed, "",
+                "FV2-E-VC-EVIDENCE-REPLAY: theorem artifact, trust, and independent replay identities are required")
+        val obligation_tag = "fv2-obligation:" + obligation.obligation_id
+        val proposition_tag = "fv2-proposition:" + obligation.proposition_hash
+        if not discharge.proof_receipt.theorem_dependencies.contains(
+                obligation_tag) or not discharge.proof_receipt.theorem_dependencies.contains(
+                proposition_tag):
+            return VerificationObligationEvidenceClosureV1(closure.closure_hash,
+                [], "", FormalStatus.Failed, "",
+                "FV2-E-VC-EVIDENCE-BINDING: receipt lacks exact obligation/proposition dependencies")
+        for dependency_id in obligation.dependency_ids:
+            val dependency = match proof_discharge_for_obligation_v1(
+                    discharges, dependency_id):
+                case Some(value): value
+                case _: return VerificationObligationEvidenceClosureV1(
+                    closure.closure_hash, [], "", FormalStatus.Failed, "",
+                    "FV2-E-VC-EVIDENCE-DEPENDENCY: dependency discharge is absent")
+            if not theorem_roots.contains(dependency.theorem_root) or
+                    not discharge.proof_receipt.theorem_dependencies.contains(
+                    dependency.theorem_root):
+                return VerificationObligationEvidenceClosureV1(
+                    closure.closure_hash, [], "", FormalStatus.Failed, "",
+                    "FV2-E-VC-EVIDENCE-DEPENDENCY: theorem dependency closure is incomplete")
+        theorem_roots.push(discharge.theorem_root)
+        discharge_hashes.push(sha256_text(discharge.canonical_text()))
+    val root = match proof_discharge_for_obligation_v1(discharges,
+            closure.root_obligation_id):
+        case Some(value): value
+        case _: return VerificationObligationEvidenceClosureV1(
+            closure.closure_hash, [], "", FormalStatus.Failed, "",
+            "FV2-E-VC-EVIDENCE-ROOT: trust theorem discharge is absent")
+    VerificationObligationEvidenceClosureV1(closure.closure_hash,
+        discharge_hashes, root.theorem_root, FormalStatus.ModelProven,
+        sha256_text("VerificationObligationEvidenceClosure-v1|closure=" +
+            closure.closure_hash + "|discharges=" + discharge_hashes.join(",") +
+            "|root=" + root.theorem_root), "")
+
+pub fn canonical_contract_kind_hash_v1(
+    obligations: [ExecutionContractObligationV2],
+    kind: ExecutionContractObligationKindV1,
+    absent_identity: text
+) -> text:
+    var hashes: [text] = []
+    for obligation in obligations:
+        if obligation.kind == kind: hashes.push(obligation.hash())
+    hashes.sort()
+    if hashes.is_empty():
+        return sha256_text("fv2-canonical-absent-contract-v1|" +
+            absent_identity)
+    sha256_text("fv2-canonical-contract-kind-v1|" + hashes.join(","))
+
+struct CanonicalMirCallClosureV1:
+    semantic_hash: text
+    recursive: bool
+    diagnostic: text
+
+fn canonical_mir_call_closure_v1(func: MirFunction,
+    contract_hash: text) -> CanonicalMirCallClosureV1:
+    var calls: [text] = []
+    var recursive = false
+    for block in func.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    val name = match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(value), _): value
+                        case _: return CanonicalMirCallClosureV1("", false,
+                            "FV2-E-VC-CALL-CALLEE: direct call lacks an exact SymbolId-compatible identity")
+                    if name != func.name:
+                        return CanonicalMirCallClosureV1("", false,
+                            "FV2-E-VC-CALL-CONTRACT: initial canonical closure admits only self calls with retained decreases evidence")
+                    # A string operand has no resolved callee SymbolId or
+                    # signature. It can name an import or forged target with
+                    # the same spelling, so it cannot establish recursion or
+                    # termination authority in the verified closure.
+                    return CanonicalMirCallClosureV1("", false,
+                        "FV2-E-VC-CALL-IDENTITY: textual self-call cannot prove resolved SymbolId recursion")
+                case MirInstKind.CallIndirect(_, _, _, _):
+                    return CanonicalMirCallClosureV1("", false,
+                        "FV2-E-VC-CALL-INDIRECT: unresolved indirect calls cannot enter verified closure")
+                case _:
+                    continue
+        val terminator_error = canonical_mir_call_terminator_diagnostic_v1(
+            block.terminator)
+        if terminator_error != "":
+            return CanonicalMirCallClosureV1("", false, terminator_error)
+    calls.sort()
+    CanonicalMirCallClosureV1(sha256_text(
+        "fv2-canonical-call-closure-v1|symbol=" + func.symbol.id.to_string() +
+        "|contract=" + contract_hash + "|calls=" + calls.join(",")),
+        recursive, "")
+
+fn canonical_mir_call_terminator_diagnostic_v1(
+    terminator: MirTerminator) -> text:
+    match terminator:
+        case MirTerminator.CallTerminator(_, _, _, _, _):
+            "FV2-E-VC-CALL-TERMINATOR: call terminators require module-level contract closure"
+        case _: ""
+
+pub fn canonical_mir_source_span_v1(
+    obligations: [ExecutionContractObligationV2]) -> text:
+    if obligations.is_empty(): return ""
+    obligations[0].source_span
+
+pub fn canonical_mir_type_representation_hash_v1(func: MirFunction
+) -> Result<text, text>:
+    if func.signature.is_variadic:
+        return Err("FV2-E-VC-TYPE-VARIADIC: variadic representation semantics are not closed")
+    var representations: [text] = []
+    for parameter in func.signature.params:
+        val vir_type = verification_ir_type(parameter)
+        if not vir_type.closure_ready(): return Err(vir_type.diagnostic)
+        representations.push(vir_type.representation)
+    val return_type = verification_ir_type(func.signature.return_type)
+    if not return_type.closure_ready(): return Err(return_type.diagnostic)
+    Ok(sha256_text("fv2-canonical-type-representation-v1|params=" +
+        representations.join(",") + "|return=" + return_type.representation))
+
+fn canonical_mir_block_index_v1(func: MirFunction, id: BlockId) -> i64:
+    for index in 0..func.blocks.len():
+        if func.blocks[index].id.id == id.id: return index
+    -1
+
+fn canonical_mir_cfg_successors_v1(terminator: MirTerminator
+) -> Result<[BlockId], text>:
+    match terminator:
+        case MirTerminator.Ret(_): Ok([])
+        case MirTerminator.Goto(target): Ok([target])
+        case MirTerminator.If(_, then_, else_):
+            if then_.id == else_.id: return Ok([then_])
+            Ok([then_, else_])
+        case MirTerminator.Switch(_, targets, default):
+            var result = [default]
+            for target in targets:
+                var found = false
+                for existing in result:
+                    if existing.id == target.target.id: found = true
+                if not found: result.push(target.target)
+            Ok(result)
+        case _:
+            Err("FV2-E-VC-TERMINATION-TERMINATOR: CFG contains an unsupported exit or unwind edge")
+
+fn canonical_mir_acyclic_cfg_hash_v1(func: MirFunction,
+    execution_hash: text) -> Result<text, text>:
+    if func.blocks.is_empty():
+        return Err("FV2-E-VC-TERMINATION-CFG: MIR function has no executable block")
+    var indegrees: [i64] = []
+    var processed: [bool] = []
+    for index in 0..func.blocks.len():
+        indegrees.push(0)
+        processed.push(false)
+        if canonical_mir_block_index_v1(func, func.blocks[index].id) != index:
+            return Err("FV2-E-VC-TERMINATION-CFG-ID: block identities must be unique")
+    for block in func.blocks:
+        val successors = match canonical_mir_cfg_successors_v1(block.terminator):
+            case Ok(value): value
+            case Err(message): return Err(message)
+        for successor in successors:
+            val target_index = canonical_mir_block_index_v1(func, successor)
+            if target_index < 0:
+                return Err("FV2-E-VC-TERMINATION-CFG-TARGET: branch target is outside the function")
+            indegrees[target_index] = indegrees[target_index] + 1
+    var processed_count = 0
+    var progress = true
+    while progress:
+        progress = false
+        for index in 0..func.blocks.len():
+            if not processed[index] and indegrees[index] == 0:
+                processed[index] = true
+                processed_count = processed_count + 1
+                progress = true
+                val successors = match canonical_mir_cfg_successors_v1(
+                        func.blocks[index].terminator):
+                    case Ok(value): value
+                    case Err(message): return Err(message)
+                for successor in successors:
+                    val target_index = canonical_mir_block_index_v1(func,
+                        successor)
+                    indegrees[target_index] = indegrees[target_index] - 1
+    if processed_count != func.blocks.len():
+        return Err("FV2-E-VC-TERMINATION-CYCLE: cyclic MIR requires a retained well-founded loop or recursion measure")
+    Ok(sha256_text("fv2-canonical-acyclic-bounded-execution-v1|" +
+        execution_hash + "|cfg=" + sha256_text(
+            serialize_mir_function(func))))
+
+pub fn canonical_mir_termination_hash_v1(func: MirFunction,
+    execution_hash: text, recursive: bool,
+    decreases_hash: text, has_decreases: bool) -> Result<text, text>:
+    if recursive:
+        if not has_decreases:
+            return Err("FV2-E-VC-TERMINATION-DECREASES: recursive MIR requires retained well-founded decreases evidence")
+        val cfg_hash = match canonical_mir_acyclic_cfg_hash_v1(func,
+                execution_hash):
+            case Ok(value): value
+            case Err(message): return Err(message)
+        return Ok(sha256_text("fv2-canonical-recursive-termination-v1|" +
+            execution_hash + "|cfg=" + cfg_hash + "|decreases=" +
+            decreases_hash))
+    canonical_mir_acyclic_cfg_hash_v1(func, execution_hash)
+
+# Derive every proposition identity from canonical MIR, retained typed
+# contracts, the exact region/effect manifest, backend policy, and closed trust.
+# This is intentionally narrower than the generic protocol above: unsupported
+# calls or cyclic CFGs fail rather than accepting caller-authored semantic labels.
+fn generate_verification_obligation_closure_from_canonical_mir_v1(
+    func: MirFunction,
+    woven_function_hash: text,
+    backend_target: text,
+    backend_semantics_hash: text,
+    trust: TrustManifestV1
+) -> VerificationObligationClosureV1:
+    if woven_function_hash == "": return VerificationObligationClosureV1([], "", "",
+        "FV2-E-VC-CANONICAL-WOVEN: exact woven function identity is required")
+    if backend_target == "" or backend_semantics_hash == "":
+        return VerificationObligationClosureV1([], "", "",
+            "FV2-E-VC-CANONICAL-BACKEND: target and lowering semantics identities are required")
+    if not trust.is_closed(): return VerificationObligationClosureV1([], "", "",
+        "FV2-E-VC-CANONICAL-TRUST: canonical verified closure requires a closed trust manifest")
+    val bridge = verification_contract_from_mir_v1(func, woven_function_hash)
+    if bridge.diagnostic != "": return VerificationObligationClosureV1([], "", "",
+        bridge.diagnostic)
+    val contract = match bridge.contract:
+        case Some(value): value
+        case _: return VerificationObligationClosureV1([], "", "",
+            "FV2-E-VC-CANONICAL-CONTRACT: retained typed contract is required")
+    val contracts = verification_contract_obligations_from_canonical_mir_v2(
+        func, woven_function_hash)
+    if contracts.diagnostic != "": return VerificationObligationClosureV1([], "", "",
+        contracts.diagnostic)
+    val source_span = canonical_mir_source_span_v1(contracts.obligations)
+    if source_span == "": return VerificationObligationClosureV1([], "", "",
+        "FV2-E-VC-CANONICAL-SPAN: at least one retained clause with exact source mapping is required")
+    val region = verification_region_effect_manifest_v1(func)
+    if not region.closed(): return VerificationObligationClosureV1([], "", "",
+        region.diagnostic)
+    val contract_hash = contract.hash()
+    val type_representation_hash = match canonical_mir_type_representation_hash_v1(func):
+        case Ok(value): value
+        case Err(message): return VerificationObligationClosureV1([], "", "", message)
+    val call_closure = canonical_mir_call_closure_v1(func, contract_hash)
+    if call_closure.diagnostic != "": return VerificationObligationClosureV1([], "", "",
+        call_closure.diagnostic)
+    val decreases_hash = canonical_contract_kind_hash_v1(contracts.obligations,
+        ExecutionContractObligationKindV1.TerminationDecrease,
+        contract_hash + "|no-decreases")
+    var has_decreases = false
+    for obligation in contracts.obligations:
+        if obligation.kind == ExecutionContractObligationKindV1.TerminationDecrease:
+            has_decreases = true
+    val termination_hash = match canonical_mir_termination_hash_v1(func,
+            bridge.execution_semantic_hash, call_closure.recursive,
+            decreases_hash, has_decreases):
+        case Ok(value): value
+        case Err(message): return VerificationObligationClosureV1([], "", "", message)
+    val normal_hash = canonical_contract_kind_hash_v1(contracts.obligations,
+        ExecutionContractObligationKindV1.ActualNormalOutcome,
+        contract_hash + "|no-normal-postcondition")
+    val error_hash = canonical_contract_kind_hash_v1(contracts.obligations,
+        ExecutionContractObligationKindV1.ActualErrorOutcome,
+        contract_hash + "|no-error-postcondition")
+    val init_hash = canonical_contract_kind_hash_v1(contracts.obligations,
+        ExecutionContractObligationKindV1.InvariantInitialization,
+        contract_hash + "|no-state-invariant")
+    val preserve_hash = canonical_contract_kind_hash_v1(contracts.obligations,
+        ExecutionContractObligationKindV1.InvariantPreservation,
+        contract_hash + "|no-state-invariant")
+    val pre_hash = canonical_contract_kind_hash_v1(contracts.obligations,
+        ExecutionContractObligationKindV1.PreconditionsSatisfiable,
+        contract_hash + "|unrestricted-input-domain")
+    val frame_contract_hash = canonical_contract_kind_hash_v1(
+        contracts.obligations,
+        ExecutionContractObligationKindV1.FramePreservation,
+        contract_hash + "|derived-frame-only")
+    val authorities = VerificationClosureAuthoritiesV1(
+        func.symbol.id.to_string(), source_span,
+        type_representation_hash,
+        pre_hash, termination_hash,
+        sha256_text("fv2-canonical-memory-ownership-v1|" + region.hash()),
+        sha256_text("fv2-canonical-effect-frame-v1|manifest=" +
+            region.hash() + "|contract=" + frame_contract_hash),
+        normal_hash, error_hash, init_hash, preserve_hash,
+        call_closure.semantic_hash,
+        sha256_text("fv2-canonical-non-vacuity-v1|contract=" +
+            contract_hash + "|pre=" + pre_hash + "|signature=" +
+            serialize_mir_signature(func.signature)),
+        sha256_text("fv2-canonical-backend-coverage-v1|target=" +
+            backend_target + "|backend=" + backend_semantics_hash + "|mir=" +
+            sha256_text(serialize_mir_function(func))),
+        sha256_text("fv2-canonical-trust-closure-v1|contract=" +
+            contract_hash + "|trust=" + trust.canonical_text() + "|woven=" +
+            woven_function_hash))
+    generate_verification_obligation_closure_v1(authorities)

@@ -1,0 +1,165 @@
+# Executed CLI boundary for FV2 signed release admission.
+
+use std.cli.cli_util.{get_cli_args}
+use app.io.mod.{file_exists, file_is_regular_no_follow, file_read,
+    file_hash_sha256}
+use app.verify.release_bundle_loader.{parse_release_bundle_sdn_v1,
+    parse_release_signers_sdn_v1, admit_loaded_release_delivery_v1,
+    required_release_receipt_hashes_v1, validate_release_artifact_identity_v1,
+    parse_release_bundle_sdn_v2, parse_release_signers_sdn_v2,
+    admit_loaded_release_delivery_v2}
+use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryReceiptFileV1}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+const FV2_APPROVED_RELEASE_SIGNERS_PATH =
+    "config/formal/verified_release_signers.sdn"
+const FV2_RELEASE_RECEIPT_ROOT = "build/verification/release-receipts"
+const FV2_RELEASE_ARTIFACT_ROOT = "build/verification/release-artifacts"
+
+fn admit_v2_bundle(
+    bundle_source: text,
+    policy_source: text
+) -> i64:
+    match parse_release_bundle_sdn_v2(bundle_source):
+        case Err(message):
+            eprint message
+            4
+        case Ok(bundle):
+            val artifact_hash = bundle.evidence.evidence.artifact_hash
+            if not sha256_lower_hex_valid(artifact_hash):
+                eprint "FV2-E-RELEASE-ARTIFACT-HASH-V2: signed artifact identity is not SHA-256"
+                return 6
+            val artifact_path = FV2_RELEASE_ARTIFACT_ROOT + "/" +
+                artifact_hash + ".artifact"
+            if not file_exists(artifact_path) or
+                    not file_is_regular_no_follow(artifact_path):
+                eprint "FV2-E-RELEASE-ARTIFACT-MISSING-V2: " + artifact_path
+                return 6
+            val artifact_diagnostic = validate_release_artifact_identity_v1(
+                bundle.evidence.evidence, file_hash_sha256(artifact_path))
+            if artifact_diagnostic != "":
+                eprint artifact_diagnostic
+                return 6
+            # V2 cannot consume the compatible V1 signer allow-list: the
+            # signer policy must bind the exact typed assurance policy hash.
+            match parse_release_signers_sdn_v2(policy_source):
+                case Err(message):
+                    eprint message
+                    5
+                case Ok(signers):
+                    val required = match required_release_receipt_hashes_v1(
+                            bundle.delivery_gates):
+                        case Err(message):
+                            eprint message
+                            return 6
+                        case Ok(values): values
+                    var receipts: [FormalDeliveryReceiptFileV1] = []
+                    for receipt_hash in required:
+                        val path = FV2_RELEASE_RECEIPT_ROOT + "/" +
+                            receipt_hash + ".receipt"
+                        if not file_exists(path) or
+                                not file_is_regular_no_follow(path):
+                            eprint "FV2-E-RELEASE-RECEIPT-MISSING-V2: " + path
+                            return 6
+                        receipts.push(FormalDeliveryReceiptFileV1(receipt_hash,
+                            file_read(path)))
+                    val admission = admit_loaded_release_delivery_v2(bundle,
+                        signers, receipts)
+                    if not admission.admitted():
+                        val diagnostic = if admission.diagnostic != "":
+                            admission.diagnostic
+                        elif admission.signed_bundle_decision.diagnostic != "":
+                            admission.signed_bundle_decision.diagnostic
+                        else:
+                            admission.delivery_decision.diagnostic
+                        eprint diagnostic
+                        6
+                    else:
+                        print "FV2-RELEASE-ADMITTED-V2 bundle=" +
+                            admission.signed_bundle_decision.bundle_hash +
+                            " decision=" +
+                            admission.signed_bundle_decision.release_decision.decision_hash +
+                            " delivery=" + admission.delivery_decision.plan_hash
+                        0
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() != 1:
+        eprint "Usage: release_gate_cli BUNDLE.sdn"
+        return 2
+    val bundle_path = args[0]
+    if bundle_path == "" or not file_exists(bundle_path):
+        eprint "FV2-E-RELEASE-INPUT: bundle file must exist"
+        return 3
+    if not file_exists(FV2_APPROVED_RELEASE_SIGNERS_PATH):
+        eprint "FV2-E-RELEASE-POLICY: repository signer policy is missing"
+        return 3
+    val bundle_source = file_read(bundle_path)
+    val policy_source = file_read(FV2_APPROVED_RELEASE_SIGNERS_PATH)
+    if bundle_source == "" or policy_source == "":
+        eprint "FV2-E-RELEASE-INPUT: bundle and signer-policy files must not be empty"
+        return 3
+    # Never fall a V2 document back to the V1 parser.  A lexical hint may
+    # conservatively reject an unusual V1 comment, but it cannot downgrade a
+    # typed verified release to the compatibility reducer.
+    if bundle_source.contains("simple.formal.release-bundle.v2"):
+        return admit_v2_bundle(bundle_source, policy_source)
+    match parse_release_bundle_sdn_v1(bundle_source):
+        case Err(message):
+            eprint message
+            4
+        case Ok(bundle):
+            val artifact_hash = bundle.evidence.artifact_hash
+            if not sha256_lower_hex_valid(artifact_hash):
+                eprint "FV2-E-RELEASE-ARTIFACT-HASH: signed artifact identity is not SHA-256"
+                return 6
+            val artifact_path = FV2_RELEASE_ARTIFACT_ROOT + "/" +
+                artifact_hash + ".artifact"
+            if not file_exists(artifact_path) or
+                    not file_is_regular_no_follow(artifact_path):
+                eprint "FV2-E-RELEASE-ARTIFACT-MISSING: " + artifact_path
+                return 6
+            val observed_artifact_hash = file_hash_sha256(artifact_path)
+            val artifact_diagnostic = validate_release_artifact_identity_v1(
+                bundle.evidence, observed_artifact_hash)
+            if artifact_diagnostic != "":
+                eprint artifact_diagnostic
+                return 6
+            match parse_release_signers_sdn_v1(policy_source):
+                case Err(message):
+                    eprint message
+                    5
+                case Ok(signers):
+                    val required = match required_release_receipt_hashes_v1(
+                            bundle.delivery_gates):
+                        case Err(message):
+                            eprint message
+                            return 6
+                        case Ok(values): values
+                    var receipts: [FormalDeliveryReceiptFileV1] = []
+                    for receipt_hash in required:
+                        val path = FV2_RELEASE_RECEIPT_ROOT + "/" +
+                            receipt_hash + ".receipt"
+                        if not file_exists(path) or
+                                not file_is_regular_no_follow(path):
+                            eprint "FV2-E-RELEASE-RECEIPT-MISSING: " + path
+                            return 6
+                        receipts.push(FormalDeliveryReceiptFileV1(receipt_hash,
+                            file_read(path)))
+                    val admission = admit_loaded_release_delivery_v1(bundle,
+                        signers, receipts)
+                    if not admission.admitted():
+                        val diagnostic = if admission.diagnostic != "":
+                            admission.diagnostic
+                        elif admission.signed_bundle_decision.diagnostic != "":
+                            admission.signed_bundle_decision.diagnostic
+                        else:
+                            admission.delivery_decision.diagnostic
+                        eprint diagnostic
+                        6
+                    else:
+                        print "FV2-RELEASE-ADMITTED bundle=" +
+                            admission.signed_bundle_decision.bundle_hash +
+                            " decision=" + admission.signed_bundle_decision.release_decision.decision_hash +
+                            " delivery=" + admission.delivery_decision.plan_hash
+                        0

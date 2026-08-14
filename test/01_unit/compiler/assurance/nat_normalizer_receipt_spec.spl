@@ -1,0 +1,48 @@
+use std.spec
+use compiler.common.assurance.nat_normalizer_receipt.{
+    BoundedNatNormalizerOutcomeV1, BoundedNatNormalizerReceiptV1,
+    nat_normalizer_cannot_close_replay_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn candidate() -> BoundedNatNormalizerReceiptV1:
+    BoundedNatNormalizerReceiptV1("BoundedNatNormalizerReceipt-v1",
+        "independent-nat-normalizer", "pinned-v1", sha256_text("normalizer-bin"),
+        sha256_text("export-before"), sha256_text("export-after"), "SimpleOS.ProcessQueue",
+        "SimpleOS.ProcessQueue.refines", 33, 4096, false,
+        BoundedNatNormalizerOutcomeV1.Normalized, "")
+
+describe "bounded Nat normalizer evidence":
+    it "binds the exact bounded candidate identity without calling it replay":
+        val receipt = candidate()
+        expect(receipt.is_candidate()).to_equal(true)
+        expect(receipt.hash() == "").to_equal(false)
+        expect(nat_normalizer_cannot_close_replay_v1(receipt)).to_contain(
+            "NONPROMOTING")
+
+    it "rejects native extensions even when an export was normalized":
+        val receipt = candidate()
+        receipt.native_extensions_enabled = true
+        expect(receipt.is_candidate()).to_equal(false)
+        expect(receipt.candidate_diagnostic()).to_contain("NATIVE")
+        expect(receipt.hash()).to_equal("")
+
+    it "rejects unbounded and nonexecuted candidate declarations":
+        val unbounded = candidate()
+        unbounded.max_rewrite_steps = 0
+        expect(unbounded.candidate_diagnostic()).to_contain("BOUNDS")
+        val not_run = candidate()
+        not_run.outcome = BoundedNatNormalizerOutcomeV1.NotRun
+        expect(not_run.candidate_diagnostic()).to_contain("OUTCOME")
+
+    it "rejects an identity transform":
+        val receipt = candidate()
+        receipt.normalized_export_hash = receipt.source_export_hash
+        expect(receipt.candidate_diagnostic()).to_contain("IDENTITY-TRANSFORM")
+
+    it "rejects malformed hashes instead of treating labels as artifact identities":
+        val binary = candidate()
+        binary.normalizer_binary_hash = "normalizer-bin"
+        expect(binary.candidate_diagnostic()).to_contain("IDENTITY")
+        val source = candidate()
+        source.source_export_hash = "export-before"
+        expect(source.candidate_diagnostic()).to_contain("EXPORT")

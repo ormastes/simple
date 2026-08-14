@@ -25,6 +25,14 @@ use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_boots
 use std.nogc_sync_mut.io.process_ops.{eprint}
 extern fn rt_exit(code: i64)
 extern fn rt_string_len(value: text) -> i64
+
+fn bootstrap_reject_fatal_mir_errors(lowering: MirLowering) -> bool:
+    var rejected = false
+    for err in lowering.errors:
+        if err.fatal:
+            rejected = true
+            eprint("error: bootstrap MIR lowering: {err.message}\n")
+    rejected
 use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
@@ -178,7 +186,7 @@ fn bootstrap_mir_functions_add(name: text, fn_: MirFunction, module_index: i64):
 
 fn bootstrap_mir_static_type_tag(type_: MirType) -> i64:
     match type_.kind:
-        case MirTypeKind.I64 | MirTypeKind.U64: 1
+        case MirTypeKind.I64 | MirTypeKind.U64 | MirTypeKind.Result(_, _): 1
         case MirTypeKind.I32 | MirTypeKind.U32 | MirTypeKind.Char: 2
         case MirTypeKind.I16 | MirTypeKind.U16: 3
         case MirTypeKind.I8 | MirTypeKind.U8: 4
@@ -322,6 +330,8 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     for const_ in constants:
         lowering.lower_const(const_)
         lowering.lower_static(const_)
+    if bootstrap_reject_fatal_mir_errors(lowering):
+        rt_exit(1)
     val mir_module_index = _bootstrap_mir_module_count_value
     lowering.lower_runtime_module_initializers_named(module_name, constants, mir_module_index)
 
@@ -696,6 +706,8 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
         for const_ in const_vals:
             lowering.lower_const(const_)
             lowering.lower_static(const_)
+        if bootstrap_reject_fatal_mir_errors(lowering):
+            rt_exit(1)
         lowering.lower_runtime_module_initializers(hir_module, const_vals, module_index)
         var lowered_module = lowering.builder.module
         lowered_module.name = hir_module.name
@@ -814,7 +826,16 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
     for const_ in const_vals:
         lowering.lower_const(const_)
         lowering.lower_static(const_)
+    # Match the entry and flat-module paths: a fatal constant/static lowering
+    # error must stop this closure helper before it can append placeholder MIR
+    # initializers or functions to the global object-emission accumulator.
+    if bootstrap_reject_fatal_mir_errors(lowering):
+        return -1
     lowering.lower_runtime_module_initializers(hir_module, const_vals, module_index)
+    # Dynamic initializer expressions lower after static registration and may
+    # fail independently; reject before an extern-only helper can return clean.
+    if bootstrap_reject_fatal_mir_errors(lowering):
+        return -1
     var lowered_module = lowering.builder.module
     lowered_module.name = hir_module.name
     if trace_enabled:
@@ -848,6 +869,10 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
         if fn_name != "" and not already_added:
             lowering.symbols = hir_module.symbols
             val mir_fn = lowering.lower_function(hir_fn)
+            # Function-body lowering can also record fatal errors. Reject it
+            # before its partial MIR reaches the shared closure accumulator.
+            if bootstrap_reject_fatal_mir_errors(lowering):
+                return -1
             bootstrap_mir_functions_add(qualified_fn_name, mir_fn, module_index)
             var bldr = lowering.builder
             lowered_module = bldr.module

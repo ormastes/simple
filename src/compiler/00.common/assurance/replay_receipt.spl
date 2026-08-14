@@ -1,0 +1,156 @@
+# Frozen typed fresh/independent proof replay evidence for FV2.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+fn _replay_frame_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+enum ReplayCheckerClassV1:
+    FreshLeanKernel
+    IndependentKernel
+
+impl ReplayCheckerClassV1:
+    fn name() -> text:
+        match self:
+            case FreshLeanKernel: "fresh_lean_kernel"
+            case IndependentKernel: "independent_kernel"
+
+enum ReplayOutcomeV1:
+    Accepted
+    Rejected
+    MissingTool
+    Timeout
+    ToolFailure
+    MissingOutput
+
+impl ReplayOutcomeV1:
+    fn name() -> text:
+        match self:
+            case Accepted: "accepted"
+            case Rejected: "rejected"
+            case MissingTool: "missing_tool"
+            case Timeout: "timeout"
+            case ToolFailure: "tool_failure"
+            case MissingOutput: "missing_output"
+
+# Receipt class labels are not caller authority.  The closed lane permits only
+# the provisioned checker families; exact binaries are separately bound by
+# `binary_hash` and the tool manifest/command-policy identity.
+fn replay_checker_identity_allowed_v1(
+    class_: ReplayCheckerClassV1,
+    tool_name: text
+) -> bool:
+    match class_:
+        case ReplayCheckerClassV1.FreshLeanKernel:
+            tool_name == "leanchecker" or tool_name == "lean4checker"
+        case ReplayCheckerClassV1.IndependentKernel:
+            tool_name == "nanoda" or tool_name == "nanoda-adapter"
+
+struct ReplayCheckerReceiptV1:
+    schema: text
+    checker_class: ReplayCheckerClassV1
+    tool_name: text
+    tool_version: text
+    binary_hash: text
+    module_name: text
+    declaration_root: text
+    artifact_hash: text
+    command_policy_hash: text
+    output_hash: text
+    outcome: ReplayOutcomeV1
+    diagnostic: text
+
+impl ReplayCheckerReceiptV1:
+    fn accepted() -> bool:
+        (self.schema == "ReplayCheckerReceipt-v1" and
+            self.tool_name != "" and self.tool_version != "" and
+            replay_checker_identity_allowed_v1(self.checker_class,
+                self.tool_name) and
+            sha256_lower_hex_valid(self.binary_hash) and self.module_name != "" and
+            self.declaration_root != "" and
+            sha256_lower_hex_valid(self.artifact_hash) and
+            sha256_lower_hex_valid(self.command_policy_hash) and
+            sha256_lower_hex_valid(self.output_hash) and
+            self.outcome == ReplayOutcomeV1.Accepted and self.diagnostic == "")
+
+    fn canonical_text() -> text:
+        "ReplayCheckerReceiptV1" + _replay_frame_v1(self.schema) +
+            _replay_frame_v1(self.checker_class.name()) +
+            _replay_frame_v1(self.tool_name) + _replay_frame_v1(self.tool_version) +
+            _replay_frame_v1(self.binary_hash) + _replay_frame_v1(self.module_name) +
+            _replay_frame_v1(self.declaration_root) +
+            _replay_frame_v1(self.artifact_hash) +
+            _replay_frame_v1(self.command_policy_hash) +
+            _replay_frame_v1(self.output_hash) +
+            _replay_frame_v1(self.outcome.name())
+
+    fn hash() -> text:
+        if not self.accepted(): return ""
+        sha256_text(self.canonical_text())
+
+struct IndependentReplayClosureV1:
+    schema: text
+    fresh_kernel_receipt_hash: text
+    independent_kernel_receipt_hash: text
+    artifact_hash: text
+    accepted: bool
+    diagnostic: text
+
+impl IndependentReplayClosureV1:
+    fn hash() -> text:
+        if (self.schema != "IndependentReplayClosure-v1" or
+                not self.accepted or self.diagnostic != "" or
+                not sha256_lower_hex_valid(self.fresh_kernel_receipt_hash) or
+                not sha256_lower_hex_valid(self.independent_kernel_receipt_hash) or
+                not sha256_lower_hex_valid(self.artifact_hash)): return ""
+        sha256_text("IndependentReplayClosureV1" + _replay_frame_v1(self.schema) +
+            _replay_frame_v1(self.fresh_kernel_receipt_hash) +
+            _replay_frame_v1(self.independent_kernel_receipt_hash) +
+            _replay_frame_v1(self.artifact_hash))
+
+fn close_independent_replay_v1(
+    fresh: ReplayCheckerReceiptV1,
+    independent: ReplayCheckerReceiptV1
+) -> IndependentReplayClosureV1:
+    if fresh.checker_class != ReplayCheckerClassV1.FreshLeanKernel:
+        return IndependentReplayClosureV1(
+            "IndependentReplayClosure-v1", "", "", "", false,
+            "FV2-E-REPLAY-FRESH-CLASS: fresh replay must use the Lean-kernel class")
+    if independent.checker_class != ReplayCheckerClassV1.IndependentKernel:
+        return IndependentReplayClosureV1(
+            "IndependentReplayClosure-v1", "", "", "", false,
+            "FV2-E-REPLAY-INDEPENDENT-CLASS: second replay must use an independent kernel implementation")
+    if not fresh.accepted(): return IndependentReplayClosureV1(
+        "IndependentReplayClosure-v1", "", "", fresh.artifact_hash, false,
+        "FV2-E-REPLAY-FRESH: fresh Lean-kernel replay is not accepted")
+    if not independent.accepted(): return IndependentReplayClosureV1(
+        "IndependentReplayClosure-v1", fresh.hash(), "", fresh.artifact_hash,
+        false, "FV2-E-REPLAY-INDEPENDENT: independent replay is not accepted")
+    if fresh.artifact_hash != independent.artifact_hash:
+        return IndependentReplayClosureV1(
+            "IndependentReplayClosure-v1", fresh.hash(), independent.hash(),
+            "", false, "FV2-E-REPLAY-ARTIFACT: replay tools checked different artifacts")
+    if fresh.binary_hash == independent.binary_hash:
+        return IndependentReplayClosureV1(
+            "IndependentReplayClosure-v1", fresh.hash(), independent.hash(),
+            fresh.artifact_hash, false,
+            "FV2-E-REPLAY-INDEPENDENCE: replay checker binaries are identical")
+    if fresh.tool_name == independent.tool_name:
+        return IndependentReplayClosureV1(
+            "IndependentReplayClosure-v1", fresh.hash(), independent.hash(),
+            fresh.artifact_hash, false,
+            "FV2-E-REPLAY-INDEPENDENCE: replay checker identities are identical")
+    if fresh.module_name != independent.module_name:
+        return IndependentReplayClosureV1(
+            "IndependentReplayClosure-v1", fresh.hash(), independent.hash(),
+            fresh.artifact_hash, false,
+            "FV2-E-REPLAY-MODULE: replay tools checked different modules")
+    if fresh.declaration_root != independent.declaration_root:
+        return IndependentReplayClosureV1(
+            "IndependentReplayClosure-v1", fresh.hash(), independent.hash(),
+            fresh.artifact_hash, false,
+            "FV2-E-REPLAY-ROOT: replay tools checked different declaration roots")
+    IndependentReplayClosureV1(
+        "IndependentReplayClosure-v1", fresh.hash(), independent.hash(),
+        fresh.artifact_hash, true, "")

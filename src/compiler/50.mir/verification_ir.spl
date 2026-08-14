@@ -1,0 +1,755 @@
+# VerificationIR v1 — canonical formal boundary over woven typed MIR.
+#
+# This module owns representation and provenance only. It does not guess a
+# semantics for an uncovered MIR type: unsupported nodes remain explicit and
+# block verified closure.
+
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_types.{MirType, MirTypeKind}
+use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
+use compiler.mir.mir_instructions.{MirInstKind, MirOperand, MirOperandKind}
+use compiler.mir.mir_types.{MirConstValue}
+use compiler.mir.mir_json.{serialize_mir_function}
+use compiler.mir.verification_contract_bridge.{verification_contract_from_mir_v1}
+use compiler.mir.verification_effects.{VerificationEffectV1}
+use compiler.mir.verification_region_effects.{verification_region_effect_manifest_v1, verification_region_effect_manifest_with_internal_calls_v1}
+use compiler.mir.verification_call_identity.{ResolvedDirectCallManifestV1,
+    validate_resolved_direct_call_manifest_v1,
+    resolved_direct_call_callee_symbol_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn _vir_frame_text_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn _vir_frame_texts_v1(values: [text]) -> text:
+    var framed: [text] = []
+    for value in values: framed.push(_vir_frame_text_v1(value))
+    values.len().to_string() + ":[" + framed.join("") + "]"
+
+enum SemanticClass:
+    Exact
+    AbstractedWithRefinement
+    ExternalWithContract
+    Unsupported
+
+impl SemanticClass:
+    fn name() -> text:
+        match self:
+            SemanticClass.Exact: "exact"
+            SemanticClass.AbstractedWithRefinement: "abstracted_with_refinement"
+            SemanticClass.ExternalWithContract: "external_with_contract"
+            SemanticClass.Unsupported: "unsupported"
+
+struct SemanticCoverageV1:
+    construct_variant: text
+    semantic_class: SemanticClass
+    lowering_owner: text
+    negative_test_owner: text
+
+impl SemanticCoverageV1:
+    fn diagnostic() -> text:
+        if self.construct_variant == "":
+            return "VIR-E-COVERAGE-VARIANT: construct variant is required"
+        if self.lowering_owner == "":
+            return "VIR-E-COVERAGE-LOWERING: lowering owner is required"
+        if self.negative_test_owner == "":
+            return "VIR-E-COVERAGE-NEGATIVE: negative-test owner is required"
+        ""
+
+    fn canonical_text() -> text:
+        "SemanticCoverageV1" + _vir_frame_text_v1(self.construct_variant) +
+            _vir_frame_text_v1(self.semantic_class.name()) +
+            _vir_frame_text_v1(self.lowering_owner) +
+            _vir_frame_text_v1(self.negative_test_owner)
+
+    fn hash() -> text:
+        if self.diagnostic() != "": return ""
+        sha256_text(self.canonical_text())
+
+fn _vir_effect_contains(effects: [VerificationEffectV1], candidate: VerificationEffectV1) -> bool:
+    val atom = candidate.canonical_text()
+    for effect in effects:
+        if effect.canonical_text() == atom: return true
+    false
+
+fn _vir_sort_effects(effects: [VerificationEffectV1]) -> [VerificationEffectV1]:
+    var result = effects
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j].canonical_text() < result[i].canonical_text():
+                val temporary = result[i]
+                result[i] = result[j]
+                result[j] = temporary
+            j = j + 1
+        i = i + 1
+    result
+
+fn _vir_normalize_effects(effects: [VerificationEffectV1]) -> [VerificationEffectV1]:
+    var result: [VerificationEffectV1] = []
+    var has_observable = false
+    for effect in effects:
+        if effect.canonical_text() != "pure": has_observable = true
+        if not _vir_effect_contains(result, effect): result = result.push(effect)
+    if has_observable:
+        var observable: [VerificationEffectV1] = []
+        for effect in result:
+            if effect.canonical_text() != "pure": observable = observable.push(effect)
+        return _vir_sort_effects(observable)
+    if result.is_empty(): return [VerificationEffectV1.Pure]
+    _vir_sort_effects(result)
+
+struct VerificationEffectNodeV1:
+    symbol_id: text
+    direct_effects: [VerificationEffectV1]
+    callee_symbol_ids: [text]
+    unresolved_call_sites: [text]
+
+struct VerificationEffectClosureNodeV1:
+    symbol_id: text
+    transitive_effects: [VerificationEffectV1]
+
+struct VerificationEffectClosureV1:
+    nodes: [VerificationEffectClosureNodeV1]
+    diagnostic: text
+
+impl VerificationEffectClosureV1:
+    fn effects_for(symbol_id: text) -> [VerificationEffectV1]?:
+        var index = 0
+        while index < self.nodes.len():
+            if self.nodes[index].symbol_id == symbol_id:
+                return Some(self.nodes[index].transitive_effects)
+            index = index + 1
+        nil
+
+    fn canonical_text() -> text:
+        var rows: [text] = []
+        var node_index = 0
+        while node_index < self.nodes.len():
+            val node = self.nodes[node_index]
+            var effects: [text] = []
+            var effect_index = 0
+            while effect_index < node.transitive_effects.len():
+                effects.push(node.transitive_effects[effect_index].canonical_text())
+                effect_index = effect_index + 1
+            effects = _vir_sorted_text(effects)
+            rows.push(node.symbol_id + "=" + effects.join(","))
+            node_index = node_index + 1
+        rows = _vir_sorted_text(rows)
+        "VerificationEffectClosure-v1" + _vir_frame_texts_v1(rows)
+
+    fn hash() -> text:
+        if self.diagnostic != "": return ""
+        sha256_text(self.canonical_text())
+
+fn _vir_effect_node_index(nodes: [VerificationEffectNodeV1], symbol_id: text) -> i64:
+    for index in 0..nodes.len():
+        if nodes[index].symbol_id == symbol_id: return index
+    -1
+
+fn _vir_effect_closure_index(nodes: [VerificationEffectClosureNodeV1], symbol_id: text) -> i64:
+    for index in 0..nodes.len():
+        if nodes[index].symbol_id == symbol_id: return index
+    -1
+
+fn resolve_verification_effect_closure(nodes: [VerificationEffectNodeV1]) -> VerificationEffectClosureV1:
+    var closure: [VerificationEffectClosureNodeV1] = []
+    for index in 0..nodes.len():
+        val node = nodes[index]
+        if node.symbol_id == "": return VerificationEffectClosureV1([], "VIR-E-EFFECT-SYMBOL: SymbolId is required")
+        if _vir_effect_node_index(nodes, node.symbol_id) != index:
+            return VerificationEffectClosureV1([], "VIR-E-EFFECT-DUPLICATE: duplicate SymbolId " + node.symbol_id)
+        if not node.unresolved_call_sites.is_empty():
+            return VerificationEffectClosureV1([], "VIR-E-EFFECT-INDIRECT: unresolved call targets at " + node.unresolved_call_sites.join(","))
+        for effect in node.direct_effects:
+            if effect.diagnostic() != "": return VerificationEffectClosureV1([], effect.diagnostic())
+        for callee in node.callee_symbol_ids:
+            if _vir_effect_node_index(nodes, callee) < 0:
+                return VerificationEffectClosureV1([], "VIR-E-EFFECT-CALLEE: missing callee SymbolId " + callee)
+        closure = closure.push(VerificationEffectClosureNodeV1(node.symbol_id, _vir_normalize_effects(node.direct_effects)))
+
+    # Monotone fixed point. Each iteration adds at least one of the finite
+    # effect atoms or terminates; the extra pass detects implementation drift.
+    var changed = true
+    var iteration = 0
+    val limit = nodes.len() * nodes.len() + 1
+    while changed and iteration < limit:
+        changed = false
+        iteration = iteration + 1
+        for node in nodes:
+            val owner_index = _vir_effect_closure_index(closure, node.symbol_id)
+            var combined = closure[owner_index].transitive_effects
+            for callee in node.callee_symbol_ids:
+                val callee_index = _vir_effect_closure_index(closure, callee)
+                for effect in closure[callee_index].transitive_effects:
+                    if not _vir_effect_contains(combined, effect):
+                        combined = combined.push(effect)
+                        changed = true
+            closure[owner_index] = VerificationEffectClosureNodeV1(node.symbol_id, _vir_normalize_effects(combined))
+    if changed: return VerificationEffectClosureV1([], "VIR-E-EFFECT-FIXPOINT: transitive effect closure did not converge")
+    VerificationEffectClosureV1(closure, "")
+
+struct VerificationEffectNodeExtractionV1:
+    nodes: [VerificationEffectNodeV1]
+    diagnostic: text
+
+fn verification_mir_functions_by_symbol_v1(module: MirModule) -> [MirFunction]:
+    var functions: [MirFunction] = []
+    for symbol in module.functions.keys():
+        functions.push(module.functions[symbol])
+    var i = 0
+    while i < functions.len():
+        var j = i + 1
+        while j < functions.len():
+            if functions[j].symbol.id < functions[i].symbol.id:
+                val temporary = functions[i]
+                functions[i] = functions[j]
+                functions[j] = temporary
+            j = j + 1
+        i = i + 1
+    functions
+
+fn verification_effect_nodes_from_mir_module_v1(
+    module: MirModule
+) -> VerificationEffectNodeExtractionV1:
+    val functions = verification_mir_functions_by_symbol_v1(module)
+    var internal_names: [text] = []
+    for function in functions:
+        val name = function.name
+        if internal_names.contains(name):
+            return VerificationEffectNodeExtractionV1([], "VIR-E-EFFECT-CALL-NAME: duplicate internal function name " + name)
+        internal_names.push(name)
+    internal_names.sort()
+    var nodes: [VerificationEffectNodeV1] = []
+    for function in functions:
+        val manifest = verification_region_effect_manifest_with_internal_calls_v1(
+            function, internal_names)
+        if not manifest.closed(): return VerificationEffectNodeExtractionV1([], manifest.diagnostic)
+        var callees: [text] = []
+        var unresolved: [text] = []
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        val name = verification_mir_direct_call_name_v1(callee)
+                        if (name != "" and name != "rt_enum_new" and
+                                name != "rt_enum_discriminant" and name != "rt_enum_payload"):
+                            val callee_symbol = verification_module_symbol_for_name_v1(module, name)
+                            if callee_symbol == "":
+                                unresolved.push("direct:" + name)
+                            elif not callees.contains(callee_symbol):
+                                callees.push(callee_symbol)
+                    case MirInstKind.CallIndirect(_, _, _, _):
+                        unresolved.push("indirect:" + function.symbol.id.to_string())
+                    case _: pass
+        callees.sort()
+        nodes.push(VerificationEffectNodeV1(
+            function.symbol.id.to_string(), manifest.verification_effects(),
+            callees, unresolved))
+    VerificationEffectNodeExtractionV1(nodes, "")
+
+fn verification_effect_closure_from_mir_module_v1(module: MirModule) -> VerificationEffectClosureV1:
+    val extracted = verification_effect_nodes_from_mir_module_v1(module)
+    if extracted.diagnostic != "": return VerificationEffectClosureV1([], extracted.diagnostic)
+    resolve_verification_effect_closure(extracted.nodes)
+
+# V2 consumes resolver-bound SymbolIds for every direct call. It deliberately
+# does not fall back to `verification_module_symbol_for_name_v1`: the legacy
+# name resolver is migration-only and cannot establish a verified call/effect
+# closure under aliases, imports, or same-spelled targets.
+pub fn verification_effect_closure_from_resolved_mir_module_v2(
+    module: MirModule, calls: ResolvedDirectCallManifestV1
+) -> VerificationEffectClosureV1:
+    val call_closure = validate_resolved_direct_call_manifest_v1(module, calls)
+    if not call_closure.closed():
+        return VerificationEffectClosureV1([], call_closure.diagnostic)
+    val functions = verification_mir_functions_by_symbol_v1(module)
+    var internal_names: [text] = []
+    for function in functions:
+        if internal_names.contains(function.name):
+            return VerificationEffectClosureV1([], "VIR-E-EFFECT-CALL-NAME: duplicate internal function name " + function.name)
+        internal_names.push(function.name)
+    internal_names.sort()
+    var nodes: [VerificationEffectNodeV1] = []
+    for function in functions:
+        val manifest = verification_region_effect_manifest_with_internal_calls_v1(
+            function, internal_names)
+        if not manifest.closed(): return VerificationEffectClosureV1([], manifest.diagnostic)
+        var callees: [text] = []
+        for block_index in 0..function.blocks.len():
+            val block = function.blocks[block_index]
+            for instruction_index in 0..block.instructions.len():
+                val instruction = block.instructions[instruction_index]
+                match instruction.kind:
+                    case MirInstKind.Call(_, _, _):
+                        val callee = match resolved_direct_call_callee_symbol_v1(
+                                module, calls, function, block_index,
+                                instruction_index):
+                            case Ok(symbol): symbol
+                            case Err(message): return VerificationEffectClosureV1([], message)
+                        if not callees.contains(callee): callees.push(callee)
+                    case MirInstKind.CallIndirect(_, _, _, _):
+                        return VerificationEffectClosureV1([], "VIR-E-EFFECT-INDIRECT: unresolved indirect calls cannot enter resolved closure")
+                    case _: continue
+        callees.sort()
+        nodes.push(VerificationEffectNodeV1(function.symbol.id.to_string(),
+            manifest.verification_effects(), callees, []))
+    resolve_verification_effect_closure(nodes)
+
+fn verification_mir_direct_call_name_v1(callee: MirOperand) -> text:
+    match callee.kind:
+        case MirOperandKind.Const(MirConstValue.Str(name), _): name
+        case _: ""
+
+fn verification_module_symbol_for_name_v1(module: MirModule, name: text) -> text:
+    for symbol in module.functions.keys():
+        val function = module.functions[symbol]
+        if function.name == name: return function.symbol.id.to_string()
+    ""
+
+struct VerificationIrType:
+    semantic_name: text
+    representation: text
+    semantic_class: SemanticClass
+    refinement_reference: text
+    diagnostic: text
+
+impl VerificationIrType:
+    fn closure_ready() -> bool:
+        match self.semantic_class:
+            case SemanticClass.Exact: true
+            case SemanticClass.AbstractedWithRefinement: self.refinement_reference != ""
+            case SemanticClass.ExternalWithContract: self.refinement_reference != ""
+            case SemanticClass.Unsupported: false
+
+    fn canonical_text() -> text:
+        "VerificationIrTypeV1" + _vir_frame_text_v1(self.semantic_name) +
+            _vir_frame_text_v1(self.representation) +
+            _vir_frame_text_v1(self.semantic_class.name()) +
+            _vir_frame_text_v1(self.refinement_reference) +
+            _vir_frame_text_v1(self.diagnostic)
+
+fn verification_ir_type(ty: MirType) -> VerificationIrType:
+    match ty.kind:
+        case I8: VerificationIrType("i8", "bitvec:8:signed", SemanticClass.Exact, "", "")
+        case I16: VerificationIrType("i16", "bitvec:16:signed", SemanticClass.Exact, "", "")
+        case I32: VerificationIrType("i32", "bitvec:32:signed", SemanticClass.Exact, "", "")
+        case I64: VerificationIrType("i64", "bitvec:64:signed", SemanticClass.Exact, "", "")
+        case U8: VerificationIrType("u8", "bitvec:8:unsigned", SemanticClass.Exact, "", "")
+        case U16: VerificationIrType("u16", "bitvec:16:unsigned", SemanticClass.Exact, "", "")
+        case U32: VerificationIrType("u32", "bitvec:32:unsigned", SemanticClass.Exact, "", "")
+        case U64: VerificationIrType("u64", "bitvec:64:unsigned", SemanticClass.Exact, "", "")
+        case Bits(width, signed):
+            if width <= 0:
+                return VerificationIrType("bits", "", SemanticClass.Unsupported, "", "VIR-E-TYPE-WIDTH: bit width must be positive")
+            val sign = if signed: "signed" else: "unsigned"
+            VerificationIrType("bits", "bitvec:{width}:{sign}", SemanticClass.Exact, "", "")
+        case Bool: VerificationIrType("bool", "bool", SemanticClass.Exact, "", "")
+        case Char: VerificationIrType("char", "unicode-scalar:u32", SemanticClass.Exact, "", "")
+        case Unit: VerificationIrType("unit", "unit", SemanticClass.Exact, "", "")
+        case Never: VerificationIrType("never", "empty", SemanticClass.Exact, "", "")
+        case Array(element, size):
+            if size < 0:
+                return VerificationIrType("array", "", SemanticClass.Unsupported, "", "VIR-E-ARRAY-SIZE: fixed array size cannot be negative")
+            val inner = verification_ir_type(element)
+            if not inner.closure_ready():
+                return VerificationIrType("array", "", SemanticClass.Unsupported, "", "VIR-E-ARRAY-ELEMENT: element semantics are not closed")
+            VerificationIrType("array", "array:{size}<" + inner.representation + ">", SemanticClass.Exact, "", "")
+        case Tuple(elements):
+            var reps: [text] = []
+            for element in elements:
+                val inner = verification_ir_type(element)
+                if not inner.closure_ready():
+                    return VerificationIrType("tuple", "", SemanticClass.Unsupported, "", "VIR-E-TUPLE-ELEMENT: tuple element semantics are not closed")
+                reps = reps.push(inner.representation)
+            VerificationIrType("tuple", "tuple<" + reps.join(",") + ">", SemanticClass.Exact, "", "")
+        case Result(ok_type, err_type):
+            val ok_ir = verification_ir_type(ok_type)
+            val err_ir = verification_ir_type(err_type)
+            if not ok_ir.closure_ready() or not err_ir.closure_ready():
+                return VerificationIrType("result", "", SemanticClass.Unsupported, "",
+                    "VIR-E-RESULT-PAYLOAD: normal and error payload semantics must both be closed")
+            VerificationIrType("result", "result<" + ok_ir.representation + "," + err_ir.representation + ">", SemanticClass.Exact, "", "")
+        case Struct(symbol):
+            VerificationIrType("struct", "struct:" + symbol.id.to_string(), SemanticClass.AbstractedWithRefinement, "", "VIR-E-REFINEMENT-MISSING: struct layout/value refinement is required")
+        case Enum(symbol):
+            VerificationIrType("enum", "enum:" + symbol.id.to_string(), SemanticClass.AbstractedWithRefinement, "", "VIR-E-REFINEMENT-MISSING: enum representation refinement is required")
+        case F32: VerificationIrType("f32", "ieee754:binary32", SemanticClass.Unsupported, "", "VIR-E-FP: exact rounding and exceptional-value semantics are not implemented")
+        case F64: VerificationIrType("f64", "ieee754:binary64", SemanticClass.Unsupported, "", "VIR-E-FP: exact rounding and exceptional-value semantics are not implemented")
+        case Ptr(_, _): VerificationIrType("ptr", "", SemanticClass.Unsupported, "", "VIR-E-POINTER: region/capability semantics are required")
+        case Ref(_, _): VerificationIrType("ref", "", SemanticClass.Unsupported, "", "VIR-E-REFERENCE: ownership/borrow semantics are required")
+        case Slice(_): VerificationIrType("slice", "", SemanticClass.Unsupported, "", "VIR-E-SLICE: length/capacity semantics are required")
+        case Dict(_, _): VerificationIrType("dict", "", SemanticClass.Unsupported, "", "VIR-E-DICT: map and allocation semantics are required")
+        case FuncPtr(_): VerificationIrType("func_ptr", "", SemanticClass.Unsupported, "", "VIR-E-FUNCTION-POINTER: call-target closure is required")
+        case Opaque(name): VerificationIrType(name, "opaque", SemanticClass.ExternalWithContract, "", "VIR-E-EXTERNAL-CONTRACT-MISSING: opaque type requires an approved contract")
+        case Vec4f: VerificationIrType("vec4f", "", SemanticClass.Unsupported, "", "VIR-E-SIMD-FP: exact vector floating-point semantics are not implemented")
+        case Vec8f: VerificationIrType("vec8f", "", SemanticClass.Unsupported, "", "VIR-E-SIMD-FP: exact vector floating-point semantics are not implemented")
+        case Vec4d: VerificationIrType("vec4d", "", SemanticClass.Unsupported, "", "VIR-E-SIMD-FP: exact vector floating-point semantics are not implemented")
+        case Vec4i: VerificationIrType("vec4i", "", SemanticClass.Unsupported, "", "VIR-E-SIMD: exact vector lane semantics are not implemented")
+        case Vec8i: VerificationIrType("vec8i", "", SemanticClass.Unsupported, "", "VIR-E-SIMD: exact vector lane semantics are not implemented")
+        case Union(_): VerificationIrType("union", "", SemanticClass.Unsupported, "", "VIR-E-UNION: discriminant and layout refinement are required")
+        case ScalableVec(_, _): VerificationIrType("scalable_vec", "", SemanticClass.Unsupported, "", "VIR-E-SCALABLE-VECTOR: runtime lane-count semantics are required")
+        case Promise(_): VerificationIrType("promise", "", SemanticClass.Unsupported, "", "VIR-E-PROMISE: async state-machine semantics are required")
+        case Generator(_, _): VerificationIrType("generator", "", SemanticClass.Unsupported, "", "VIR-E-GENERATOR: suspension and resumption semantics are required")
+        case ActorType(_): VerificationIrType("actor", "", SemanticClass.Unsupported, "", "VIR-E-ACTOR: mailbox and scheduling semantics are required")
+
+fn _vir_sorted_text(values: [text]) -> [text]:
+    # Explicit sorting keeps semantic hashes stable on bootstrap runtimes where
+    # the generic array sort has historically been a no-op.
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j] < result[i]:
+                val tmp = result[i]
+                result[i] = result[j]
+                result[j] = tmp
+            j = j + 1
+        i = i + 1
+    result
+
+fn _vir_symbol_ids(symbols: [SymbolId]) -> [text]:
+    var ids: [text] = []
+    for symbol in symbols:
+        ids = ids.push(symbol.id.to_string())
+    _vir_sorted_text(ids)
+
+struct VerificationIrProvenance:
+    source_hash: text
+    expanded_hash: text
+    woven_hash: text
+    mir_hash: text
+    contract_hash: text
+    policy_hash: text
+
+impl VerificationIrProvenance:
+    fn diagnostic() -> text:
+        if self.source_hash == "": return "VIR-E-PROVENANCE-SOURCE: source hash is required"
+        if self.expanded_hash == "": return "VIR-E-PROVENANCE-EXPANDED: macro-expanded hash is required"
+        if self.woven_hash == "": return "VIR-E-PROVENANCE-WOVEN: woven hash is required"
+        if self.mir_hash == "": return "VIR-E-PROVENANCE-MIR: MIR hash is required"
+        if self.contract_hash == "": return "VIR-E-PROVENANCE-CONTRACT: contract hash is required"
+        if self.policy_hash == "": return "VIR-E-PROVENANCE-POLICY: assurance policy hash is required"
+        ""
+
+    fn canonical_text() -> text:
+        "VerificationIrProvenanceV1" + _vir_frame_text_v1(self.source_hash) +
+            _vir_frame_text_v1(self.expanded_hash) +
+            _vir_frame_text_v1(self.woven_hash) +
+            _vir_frame_text_v1(self.mir_hash) +
+            _vir_frame_text_v1(self.contract_hash) +
+            _vir_frame_text_v1(self.policy_hash)
+
+struct VerificationIrFunction:
+    schema: text
+    symbol: SymbolId
+    name: text
+    parameters: [VerificationIrType]
+    return_type: VerificationIrType
+    effects: [VerificationEffectV1]
+    called_symbols: [SymbolId]
+    provenance: VerificationIrProvenance
+    semantic_hash: text
+    diagnostic: text
+
+impl VerificationIrFunction:
+    fn closure_ready() -> bool:
+        if self.diagnostic != "" or self.provenance.diagnostic() != "":
+            return false
+        if not self.return_type.closure_ready():
+            return false
+        var param_index = 0
+        while param_index < self.parameters.len():
+            if not self.parameters[param_index].closure_ready():
+                return false
+            param_index = param_index + 1
+        var effect_index = 0
+        while effect_index < self.effects.len():
+            if self.effects[effect_index].diagnostic() != "": return false
+            effect_index = effect_index + 1
+        true
+
+    fn canonical_text() -> text:
+        var parameters: [text] = []
+        var parameter_index = 0
+        while parameter_index < self.parameters.len():
+            parameters.push(self.parameters[parameter_index].canonical_text())
+            parameter_index = parameter_index + 1
+        var effects: [text] = []
+        var effect_index = 0
+        while effect_index < self.effects.len():
+            effects.push(self.effects[effect_index].canonical_text())
+            effect_index = effect_index + 1
+        effects = _vir_sorted_text(effects)
+        val calls = _vir_symbol_ids(self.called_symbols)
+        "VerificationIrFunctionV1" + _vir_frame_text_v1(self.schema) +
+            _vir_frame_text_v1(self.symbol.id.to_string()) +
+            _vir_frame_text_v1(self.name) + _vir_frame_texts_v1(parameters) +
+            _vir_frame_text_v1(self.return_type.canonical_text()) +
+            _vir_frame_texts_v1(effects) + _vir_frame_texts_v1(calls) +
+            _vir_frame_text_v1(self.provenance.canonical_text())
+
+    fn expected_semantic_hash() -> text:
+        sha256_text(self.canonical_text())
+
+    fn semantic_identity_valid() -> bool:
+        self.semantic_hash == self.expected_semantic_hash()
+
+fn _verification_ir_from_mir_with_derived_contract_hash(
+    function: MirFunction,
+    source_hash: text,
+    expanded_hash: text,
+    woven_hash: text,
+    contract_hash: text,
+    policy_hash: text,
+    effects: [VerificationEffectV1],
+    called_symbols: [SymbolId]
+) -> VerificationIrFunction:
+    val mir_text = serialize_mir_function(function)
+    val mir_hash = sha256_text(mir_text)
+    val provenance = VerificationIrProvenance(source_hash, expanded_hash, woven_hash, mir_hash, contract_hash, policy_hash)
+    var params: [VerificationIrType] = []
+    var diagnostic = provenance.diagnostic()
+    for param in function.signature.params:
+        val vir_type = verification_ir_type(param)
+        params = params.push(vir_type)
+        if diagnostic == "" and not vir_type.closure_ready():
+            diagnostic = vir_type.diagnostic
+    val return_type = verification_ir_type(function.signature.return_type)
+    if diagnostic == "" and not return_type.closure_ready():
+        diagnostic = return_type.diagnostic
+    for effect in effects:
+        if diagnostic == "" and effect.diagnostic() != "": diagnostic = effect.diagnostic()
+    val draft = VerificationIrFunction(
+        schema: "VerificationIR-v1", symbol: function.symbol, name: function.name,
+        parameters: params, return_type: return_type, effects: effects,
+        called_symbols: called_symbols, provenance: provenance,
+        semantic_hash: "", diagnostic: diagnostic
+    )
+    VerificationIrFunction(draft.schema, draft.symbol, draft.name,
+        draft.parameters, draft.return_type, draft.effects, draft.called_symbols,
+        draft.provenance, draft.expected_semantic_hash(), draft.diagnostic)
+
+fn verification_ir_from_retained_contract(
+    function: MirFunction,
+    source_hash: text,
+    expanded_hash: text,
+    woven_hash: text,
+    policy_hash: text,
+    effects: [VerificationEffectV1],
+    called_symbols: [SymbolId]
+) -> VerificationIrFunction:
+    val effect_manifest = verification_region_effect_manifest_v1(function)
+    val derived_effects = effect_manifest.verification_effects()
+    var result = verification_ir_from_canonical_effects_v1(
+        function, source_hash, expanded_hash, woven_hash, policy_hash,
+        derived_effects, called_symbols)
+    if not effect_manifest.closed():
+        result.diagnostic = effect_manifest.diagnostic
+    elif not _verification_effect_sets_equal_v1(effects, derived_effects):
+        result.diagnostic = "VIR-E-EFFECT-MISMATCH: caller effects disagree with canonical MIR-derived effects"
+    result
+
+fn verification_ir_from_canonical_effects_v1(
+    function: MirFunction,
+    source_hash: text,
+    expanded_hash: text,
+    woven_hash: text,
+    policy_hash: text,
+    canonical_effects: [VerificationEffectV1],
+    called_symbols: [SymbolId]
+) -> VerificationIrFunction:
+    val bridge = verification_contract_from_mir_v1(function, woven_hash)
+    var contract_hash = sha256_text("VerificationFunctionContractV1:none" +
+        _vir_frame_text_v1(function.symbol.id.to_string()))
+    if val contract = bridge.contract:
+        contract_hash = contract.hash()
+    var result = _verification_ir_from_mir_with_derived_contract_hash(
+        function, source_hash, expanded_hash, woven_hash,
+        contract_hash, policy_hash, canonical_effects, called_symbols)
+    if bridge.diagnostic != "":
+        result.diagnostic = bridge.diagnostic
+    elif bridge.execution_semantic_hash != result.provenance.mir_hash:
+        result.diagnostic = "VIR-E-CONTRACT-EXECUTION-IDENTITY: retained contract and VIR execution hashes disagree"
+    result
+
+fn verification_ir_from_canonical_mir(
+    function: MirFunction,
+    source_hash: text,
+    expanded_hash: text,
+    woven_hash: text,
+    policy_hash: text,
+    called_symbols: [SymbolId]
+) -> VerificationIrFunction:
+    val manifest = verification_region_effect_manifest_v1(function)
+    verification_ir_from_retained_contract(
+        function, source_hash, expanded_hash, woven_hash, policy_hash,
+        manifest.verification_effects(), called_symbols)
+
+struct VerificationIrModuleV1:
+    schema: text
+    module_name: text
+    effect_closure_hash: text
+    functions: [VerificationIrFunction]
+    semantic_hash: text
+    diagnostic: text
+
+# Frozen public schema spelling; the module record is the V1 verification IR.
+type VerificationIrV1 = VerificationIrModuleV1
+
+impl VerificationIrModuleV1:
+    fn closure_ready() -> bool:
+        if (self.schema != "VerificationIRModule-v1" or self.module_name == "" or
+                self.effect_closure_hash == "" or self.semantic_hash == "" or
+                self.diagnostic != "" or self.functions.is_empty()): return false
+        var function_index = 0
+        while function_index < self.functions.len():
+            if not self.functions[function_index].closure_ready() or
+                    not self.functions[function_index].semantic_identity_valid():
+                return false
+            function_index = function_index + 1
+        self.semantic_hash == self.expected_semantic_hash()
+
+    fn canonical_text() -> text:
+        var functions: [text] = []
+        var function_index = 0
+        while function_index < self.functions.len():
+            val function = self.functions[function_index]
+            functions.push(function.symbol.id.to_string() + ":" + function.semantic_hash)
+            function_index = function_index + 1
+        "VerificationIrModuleV1" + _vir_frame_text_v1(self.schema) +
+            _vir_frame_text_v1(self.module_name) +
+            _vir_frame_text_v1(self.effect_closure_hash) +
+            _vir_frame_texts_v1(functions)
+
+    fn expected_semantic_hash() -> text:
+        sha256_text(self.canonical_text())
+
+pub struct ResolvedVerificationIrModuleV2:
+    vir: VerificationIrModuleV1
+    resolved_call_manifest_hash: text
+    semantic_hash: text
+    diagnostic: text
+
+    fn closure_ready() -> bool:
+        self.vir.closure_ready() and self.resolved_call_manifest_hash != "" and
+            self.diagnostic == "" and self.semantic_hash ==
+                sha256_text("ResolvedVerificationIRModule-v2|vir=" +
+                    self.vir.semantic_hash + "|calls=" +
+                    self.resolved_call_manifest_hash)
+
+fn verification_ir_module_from_canonical_mir_v1(
+    module: MirModule,
+    source_hash: text,
+    expanded_hash: text,
+    woven_hash: text,
+    policy_hash: text
+) -> VerificationIrModuleV1:
+    val extracted = verification_effect_nodes_from_mir_module_v1(module)
+    if extracted.diagnostic != "": return VerificationIrModuleV1(
+        "VerificationIRModule-v1", module.name, "", [], "", extracted.diagnostic)
+    val closure = resolve_verification_effect_closure(extracted.nodes)
+    if closure.diagnostic != "": return VerificationIrModuleV1(
+        "VerificationIRModule-v1", module.name, "", [], "", closure.diagnostic)
+    var functions: [VerificationIrFunction] = []
+    val ordered_functions = verification_mir_functions_by_symbol_v1(module)
+    for index in 0..ordered_functions.len():
+        val function = ordered_functions[index]
+        val symbol_text = function.symbol.id.to_string()
+        val effects = match closure.effects_for(symbol_text):
+            case Some(value): value
+            case _: return VerificationIrModuleV1(
+                "VerificationIRModule-v1", module.name, closure.hash(), [], "",
+                "VIR-E-MODULE-EFFECTS: effect closure omitted SymbolId " + symbol_text)
+        val node_index = _vir_effect_node_index(extracted.nodes, symbol_text)
+        if node_index < 0: return VerificationIrModuleV1(
+            "VerificationIRModule-v1", module.name, closure.hash(), [], "",
+            "VIR-E-MODULE-CALLS: call closure omitted SymbolId " + symbol_text)
+        var called_symbols: [SymbolId] = []
+        for callee in extracted.nodes[node_index].callee_symbol_ids:
+            called_symbols.push(SymbolId(id: callee.to_i64()))
+        val vir_function = verification_ir_from_canonical_effects_v1(
+            function, source_hash, expanded_hash, woven_hash, policy_hash,
+            effects, called_symbols)
+        if not vir_function.closure_ready(): return VerificationIrModuleV1(
+            "VerificationIRModule-v1", module.name, closure.hash(), [], "",
+            vir_function.diagnostic)
+        functions.push(vir_function)
+    val draft = VerificationIrModuleV1("VerificationIRModule-v1", module.name,
+        closure.hash(), functions, "", "")
+    VerificationIrModuleV1(draft.schema, draft.module_name,
+        draft.effect_closure_hash, draft.functions,
+        draft.expected_semantic_hash(), draft.diagnostic)
+
+pub fn verification_ir_module_from_resolved_mir_v2(
+    module: MirModule,
+    source_hash: text,
+    expanded_hash: text,
+    woven_hash: text,
+    policy_hash: text,
+    calls: ResolvedDirectCallManifestV1
+) -> ResolvedVerificationIrModuleV2:
+    val call_closure = validate_resolved_direct_call_manifest_v1(module, calls)
+    if not call_closure.closed(): return ResolvedVerificationIrModuleV2(
+        VerificationIrModuleV1("VerificationIRModule-v1", module.name, "", [], "",
+            call_closure.diagnostic), "", "", call_closure.diagnostic)
+    val closure = verification_effect_closure_from_resolved_mir_module_v2(module,
+        calls)
+    if closure.diagnostic != "": return ResolvedVerificationIrModuleV2(
+        VerificationIrModuleV1("VerificationIRModule-v1", module.name, "", [], "",
+            closure.diagnostic), "", "", closure.diagnostic)
+    var functions: [VerificationIrFunction] = []
+    for function in verification_mir_functions_by_symbol_v1(module):
+        val symbol_text = function.symbol.id.to_string()
+        val effects = match closure.effects_for(symbol_text):
+            case Some(value): value
+            case _: return ResolvedVerificationIrModuleV2(
+                VerificationIrModuleV1("VerificationIRModule-v1", module.name,
+                    closure.hash(), [], "", "VIR-E-MODULE-EFFECTS: resolved closure omitted SymbolId " + symbol_text),
+                "", "", "VIR-E-MODULE-EFFECTS: resolved closure omitted SymbolId " + symbol_text)
+        var called_symbols: [SymbolId] = []
+        for block_index in 0..function.blocks.len():
+            val block = function.blocks[block_index]
+            for instruction_index in 0..block.instructions.len():
+                match block.instructions[instruction_index].kind:
+                    case MirInstKind.Call(_, _, _):
+                        val callee = match resolved_direct_call_callee_symbol_v1(
+                                module, calls, function, block_index, instruction_index):
+                            case Ok(value): value
+                            case Err(message): return ResolvedVerificationIrModuleV2(
+                                VerificationIrModuleV1("VerificationIRModule-v1", module.name,
+                                    closure.hash(), [], "", message), "", "", message)
+                        val symbol = SymbolId(id: callee.to_i64())
+                        if not called_symbols.contains(symbol): called_symbols.push(symbol)
+                    case _: continue
+        val vir_function = verification_ir_from_canonical_effects_v1(function,
+            source_hash, expanded_hash, woven_hash, policy_hash, effects,
+            called_symbols)
+        if not vir_function.closure_ready(): return ResolvedVerificationIrModuleV2(
+            VerificationIrModuleV1("VerificationIRModule-v1", module.name,
+                closure.hash(), [], "", vir_function.diagnostic), "", "",
+            vir_function.diagnostic)
+        functions.push(vir_function)
+    val draft = VerificationIrModuleV1("VerificationIRModule-v1", module.name,
+        closure.hash(), functions, "", "")
+    val vir = VerificationIrModuleV1(draft.schema, draft.module_name,
+        draft.effect_closure_hash, draft.functions, draft.expected_semantic_hash(), "")
+    val semantic_hash = sha256_text("ResolvedVerificationIRModule-v2|vir=" +
+        vir.semantic_hash + "|calls=" + calls.hash())
+    ResolvedVerificationIrModuleV2(vir, calls.hash(), semantic_hash, "")
+
+fn _verification_effect_sets_equal_v1(
+    left: [VerificationEffectV1],
+    right: [VerificationEffectV1]
+) -> bool:
+    val canonical_left = _vir_normalize_effects(left)
+    val canonical_right = _vir_normalize_effects(right)
+    if canonical_left.len() != canonical_right.len(): return false
+    var index = 0
+    while index < canonical_left.len():
+        if canonical_left[index].canonical_text() != canonical_right[index].canonical_text():
+            return false
+        index = index + 1
+    true

@@ -1,0 +1,125 @@
+# Pinned FV2 independent replay adapter.
+#
+# Contract: PROJECT_DIR MODULE ARTIFACT_PATH ARTIFACT_HASH DECLARATION_ROOT -> retained
+# success output.
+# Tool provisioning owns the two canonical build paths below. This adapter
+# exports the module through Lean's NDJSON exporter and checks it with nanoda
+# under the closed FV2 axiom policy.
+
+use std.cli.cli_util.{get_cli_args}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{file_delete, file_exists, file_write,
+    file_hash_sha256}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+const FV2_LEAN4EXPORT = "build/fv2-tools/lean4export"
+const FV2_NANODA = "build/fv2-tools/nanoda_bin"
+const FV2_REPLAY_DIR = "build/verification/independent-replay"
+const FV2_EXPORT_TIMEOUT_MS: i64 = 600000
+const FV2_NANODA_TIMEOUT_MS: i64 = 600000
+const FV2_PROCESS_MAX_OUTPUT_BYTES: i64 = 16777216
+
+fn adapter_token_is_safe(value: text) -> bool:
+    if value == "": return false
+    # Native pure-Simple text iteration currently corrupts the loop element;
+    # use the canonical scalar-code indexing path (module_path_naming.spl).
+    var index = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        val ascii_letter = (code >= 97 and code <= 122) or (code >= 65 and code <= 90)
+        val ascii_digit = code >= 48 and code <= 57
+        if not (ascii_letter or ascii_digit or code == 95 or code == 46 or code == 45):
+            return false
+        index = index + 1
+    true
+
+fn adapter_sha256_is_valid(value: text) -> bool:
+    if value.len() != 64: return false
+    var index = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        val decimal = code >= 48 and code <= 57
+        val lower_hex = code >= 97 and code <= 102
+        if not (decimal or lower_hex): return false
+        index = index + 1
+    true
+
+fn adapter_config(export_path: text) -> text:
+    "{\n" +
+        "  \"export_file_path\": \"" + export_path + "\",\n" +
+        "  \"use_stdin\": false,\n" +
+        "  \"permitted_axioms\": [\"propext\", \"Classical.choice\", \"Quot.sound\"],\n" +
+        # Ignore unpermitted declarations that are merely present in imported
+        # environments, but reject a checked root if it transitively uses one.
+        "  \"unpermitted_axiom_hard_error\": false,\n" +
+        "  \"nat_extension\": false,\n" +
+        "  \"string_extension\": false,\n" +
+        "  \"print_success_message\": true\n" +
+        "}\n"
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() != 5:
+        eprint "FV2-E-INDEPENDENT-ARGS: expected PROJECT_DIR MODULE ARTIFACT_PATH ARTIFACT_HASH DECLARATION_ROOT"
+        return 2
+    val project_dir = args[0]
+    val module_name = args[1]
+    val artifact_path = args[2]
+    val artifact_hash = args[3]
+    val declaration_root = args[4]
+    if project_dir == "" or not adapter_token_is_safe(module_name) or
+            artifact_path == "" or not adapter_sha256_is_valid(artifact_hash) or
+            not adapter_token_is_safe(declaration_root):
+        eprint "FV2-E-INDEPENDENT-IDENTITY: invalid replay identity"
+        return 2
+    val expected_artifact_path = project_dir + "/.lake/build/lib/lean/" +
+        module_name.replace(".", "/") + ".olean"
+    if artifact_path != expected_artifact_path:
+        eprint "FV2-E-INDEPENDENT-ARTIFACT-PATH: replay artifact is not the canonical built module path"
+        return 2
+    # Re-observe the exact .olean immediately before export.  The runner's
+    # earlier hash check is not sufficient because source/artifact state could
+    # change before this independent process consumes it.
+    if not file_exists(artifact_path) or file_hash_sha256(artifact_path) != artifact_hash:
+        eprint "FV2-E-INDEPENDENT-ARTIFACT-IDENTITY: exact replay artifact is missing or hash-mismatched"
+        return 2
+    if not file_exists(FV2_LEAN4EXPORT) or not file_exists(FV2_NANODA):
+        eprint "FV2-E-INDEPENDENT-TOOL: pinned lean4export/nanoda tools are missing"
+        return 3
+    if not dir_create_all(FV2_REPLAY_DIR):
+        eprint "FV2-E-INDEPENDENT-DIR: replay evidence directory could not be created"
+        return 4
+
+    # Distinct roots in the same compiled module must retain distinct exports.
+    # Omitting the root here would let a later replay overwrite the audit input
+    # of an earlier receipt even though their artifact hashes are identical.
+    val stem = module_name.replace(".", "_") + "_" +
+        declaration_root.replace(".", "_") + "_" + artifact_hash
+    val export_path = FV2_REPLAY_DIR + "/" + stem + ".export"
+    val config_path = FV2_REPLAY_DIR + "/" + stem + ".json"
+    val (exported, export_stderr, export_code) = process_run_bounded(
+        "lake", ["-d", project_dir, "env", FV2_LEAN4EXPORT, module_name,
+            "--", declaration_root],
+        FV2_EXPORT_TIMEOUT_MS, FV2_PROCESS_MAX_OUTPUT_BYTES)
+    if export_code != 0 or exported.trim() == "":
+        eprint "FV2-E-INDEPENDENT-EXPORT: lean4export failed ({export_code})\n" + export_stderr
+        return 5
+    if not file_write(export_path, exported) or
+            not file_write(config_path, adapter_config(export_path)):
+        eprint "FV2-E-INDEPENDENT-WRITE: replay inputs could not be retained"
+        return 6
+
+    val (checked, check_stderr, check_code) = process_run_bounded(
+        FV2_NANODA, [config_path], FV2_NANODA_TIMEOUT_MS,
+        FV2_PROCESS_MAX_OUTPUT_BYTES)
+    file_delete(config_path)
+    if check_code != 0:
+        eprint "FV2-E-INDEPENDENT-REJECTED: nanoda failed ({check_code})\n" + check_stderr
+        return 7
+    if checked.trim() == "":
+        eprint "FV2-E-INDEPENDENT-OUTPUT: nanoda emitted no success evidence"
+        return 8
+    print "FV2-INDEPENDENT-ACCEPTED module=" + module_name +
+        " declaration_root=" + declaration_root +
+        " artifact=" + artifact_hash + "\n" + checked
+    0

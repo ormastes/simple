@@ -1,0 +1,101 @@
+# Typed one-entry acceptance owner for combinational scalar ALU/control completion.
+
+use compiler.mir.hwir.types.{CoreConfig, HwNodeId, HwOrigin, HwPort}
+use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard,
+    HwSeqOutputBinding, HwSeqRule, HwSeqValue, HwSequentialModuleDef,
+    HwSequentialPlan, HwStateRegister}
+
+fn completion_payload_fields(xlen: i32) -> [(text, i32)]:
+    [("privilege", 2), ("original_instruction", 32),
+        ("canonical_instruction", 32), ("instruction_length_bytes", 3),
+        ("pc_before", xlen), ("pc_after", xlen), ("rd", 5),
+        ("rd_write", 1), ("rd_value", xlen), ("memory_address", xlen),
+        ("memory_read_mask", 32), ("memory_write_mask", 32),
+        ("memory_read_data", xlen), ("memory_write_data", xlen),
+        ("execute_trap_valid", 1), ("execute_trap_cause", xlen),
+        ("execute_trap_tval", xlen), ("memory_trap_valid", 1),
+        ("memory_trap_cause", xlen), ("memory_trap_tval", xlen),
+        ("redirect_valid", 1), ("redirect_target", xlen),
+        ("provider_event_id", 64), ("decode_event_id", 64),
+        ("illegal_valid", 1)]
+
+fn skid_ports(xlen: i32) -> [HwPort]:
+    var ports = [HwPort.input("clk", "Bits", 1), HwPort.input("rst", "Bits", 1),
+        HwPort.input("upstream_valid", "Bits", 1),
+        HwPort.input("downstream_ready", "Bits", 1),
+        HwPort.output("upstream_ready", "Bits", 1),
+        HwPort.output("upstream_accept", "Bits", 1),
+        HwPort.output("completion_valid", "Bits", 1),
+        HwPort.output("completion_decode_valid", "Bits", 1),
+        HwPort.output("protocol_fault", "Bits", 1)]
+    for field in completion_payload_fields(xlen):
+        ports.push(HwPort.input("upstream_" + field[0], "Bits", field[1]))
+        ports.push(HwPort.output("completion_" + field[0], "Bits", field[1]))
+    ports
+
+fn skid_registers(xlen: i32) -> [HwStateRegister]:
+    var registers = [HwStateRegister(name: "full_reg", bit_width: 1,
+            clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "fault_reg", bit_width: 1,
+            clock_domain: "default", reset_value: 0)]
+    for field in completion_payload_fields(xlen):
+        registers.push(HwStateRegister(name: field[0] + "_reg", bit_width: field[1],
+            clock_domain: "default", reset_value: 0))
+    registers
+
+fn capture_assignments(xlen: i32) -> [HwSeqAssignment]:
+    var assignments = [HwSeqAssignment(destination: "full_reg",
+        value: HwSeqValue.copy("upstream_valid", 1))]
+    for field in completion_payload_fields(xlen):
+        assignments.push(HwSeqAssignment(destination: field[0] + "_reg",
+            value: HwSeqValue.copy("upstream_" + field[0], field[1])))
+    assignments
+
+fn clear_assignments(xlen: i32) -> [HwSeqAssignment]:
+    var assignments = [HwSeqAssignment(destination: "full_reg", value: HwSeqValue.zero(1))]
+    for field in completion_payload_fields(xlen):
+        assignments.push(HwSeqAssignment(destination: field[0] + "_reg",
+            value: HwSeqValue.zero(field[1])))
+    assignments
+
+fn skid_outputs(xlen: i32) -> [HwSeqOutputBinding]:
+    val empty_healthy = [HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg")]
+    val accepted = [HwSeqGuard.high("upstream_valid"), HwSeqGuard.low("full_reg"),
+        HwSeqGuard.low("fault_reg")]
+    val occupied = [HwSeqGuard.high("full_reg")]
+    var outputs = [HwSeqOutputBinding.all("upstream_ready", empty_healthy),
+        HwSeqOutputBinding.all("upstream_accept", accepted),
+        HwSeqOutputBinding.direct("completion_valid", "full_reg", 1),
+        HwSeqOutputBinding.direct("completion_decode_valid", "full_reg", 1),
+        HwSeqOutputBinding.direct("protocol_fault", "fault_reg", 1)]
+    for field in completion_payload_fields(xlen):
+        outputs.push(HwSeqOutputBinding.guarded("completion_" + field[0],
+            field[0] + "_reg", field[1], occupied))
+    outputs
+
+pub fn strict_riscv_scalar_completion_skid(module_name: text,
+    config: CoreConfig) -> Result<HwSequentialModuleDef, text>:
+    if module_name == "":
+        return Err("HWIR-E-RISCV-COMPLETION-SKID-ID: completion skid requires a module name")
+    val config_error = config.diagnostic(); if config_error != "": return Err(config_error)
+    val plan = HwSequentialPlan(owner_id: HwNodeId.child(module_name, "sequential"),
+        registers: skid_registers(config.xlen), rules: [
+            HwSeqRule(name: "consume", guards: [HwSeqGuard.high("downstream_ready"),
+                    HwSeqGuard.high("full_reg")], assignments: clear_assignments(config.xlen)),
+            HwSeqRule(name: "capture", guards: [HwSeqGuard.high("upstream_valid"),
+                    HwSeqGuard.low("full_reg"), HwSeqGuard.low("fault_reg")],
+                assignments: capture_assignments(config.xlen))],
+        outputs: skid_outputs(config.xlen), decoder_pins: [])
+    val module = HwSequentialModuleDef(node_id: HwNodeId.module_root(module_name),
+        entity_name: module_name, config: config, origins: [
+            HwOrigin(node_id: HwNodeId.child(module_name, "accept"),
+                source_name: "riscv.scalar.completion-skid.accept"),
+            HwOrigin(node_id: HwNodeId.child(module_name, "payload"),
+                source_name: "riscv.scalar.completion-skid.atomic-payload")],
+        ports: skid_ports(config.xlen), datapath_signals: [], datapath_constants: [],
+        datapath_bit_vector_constants: [],
+        datapath_comb_ops: [], datapath_compare_ops: [], datapath_select_ops: [],
+        datapath_bit_extract_ops: [], datapath_fixed_slice_ops: [],
+        plan: plan, child_entity: "", child_graph_sha256: "")
+    val diagnostic = module.diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(module)

@@ -1,0 +1,76 @@
+# Optional SHA-512 integrity receipt for FV2 evidence material.
+#
+# SHA-256 remains the frozen identity algorithm for all V1/V2 receipt fields.
+# This receipt is deliberately additive: it binds a separately computed
+# SHA-512 digest to that existing SHA-256 identity and never substitutes a
+# 128-character digest where a frozen 64-character identity is expected.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.sha512.{sha512_text}
+
+fn _sha512_integrity_frame_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn _lower_hex_v1(value: text, expected_length: int) -> bool:
+    if value.len() != expected_length: return false
+    var index = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or
+                (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+struct OptionalSha512IntegrityReceiptV1:
+    # The existing immutable SHA-256 identity of exactly `subject_content`.
+    subject_sha256: text
+    # A defense-in-depth SHA-512 digest of the same exact UTF-8 text.
+    subject_sha512: text
+    subject_kind: text
+    subject_length: int
+
+impl OptionalSha512IntegrityReceiptV1:
+    fn diagnostic() -> text:
+        if self.subject_kind == "":
+            return "FV2-E-SHA512-RECEIPT-KIND: subject kind is required"
+        if self.subject_length < 0:
+            return "FV2-E-SHA512-RECEIPT-LENGTH: subject length must be non-negative"
+        if not _lower_hex_v1(self.subject_sha256, 64):
+            return "FV2-E-SHA512-RECEIPT-SHA256: frozen SHA-256 identity must be lowercase hex"
+        if not _lower_hex_v1(self.subject_sha512, 128):
+            return "FV2-E-SHA512-RECEIPT-SHA512: optional SHA-512 digest must be lowercase hex"
+        ""
+
+    fn canonical_text() -> text:
+        "OptionalSha512IntegrityReceiptV1" +
+            _sha512_integrity_frame_v1(self.subject_kind) +
+            _sha512_integrity_frame_v1(self.subject_length.to_string()) +
+            _sha512_integrity_frame_v1(self.subject_sha256) +
+            _sha512_integrity_frame_v1(self.subject_sha512)
+
+    # This remains a SHA-256 receipt identifier for compatibility.  The
+    # SHA-512 value is retained as an independently recomputable field.
+    fn receipt_hash() -> text:
+        if self.diagnostic() != "": return ""
+        sha256_text(self.canonical_text())
+
+    fn binds_content(subject_content: text) -> bool:
+        self.diagnostic() == "" and self.subject_length == subject_content.len() and
+            self.subject_sha256 == sha256_text(subject_content) and
+            self.subject_sha512 == sha512_text(subject_content)
+
+# Construct the optional receipt only when the supplied frozen SHA-256
+# identity already matches the exact content.  A mismatch returns an invalid
+# receipt; callers must keep their existing SHA-256 admission decision.
+fn materialize_optional_sha512_integrity_receipt_v1(
+    subject_kind: text,
+    subject_content: text,
+    expected_subject_sha256: text
+) -> OptionalSha512IntegrityReceiptV1:
+    val actual_sha256 = sha256_text(subject_content)
+    if subject_kind == "" or expected_subject_sha256 != actual_sha256:
+        return OptionalSha512IntegrityReceiptV1(expected_subject_sha256, "",
+            subject_kind, subject_content.len())
+    OptionalSha512IntegrityReceiptV1(actual_sha256, sha512_text(subject_content),
+        subject_kind, subject_content.len())

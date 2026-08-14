@@ -34,38 +34,38 @@ fn mir_type_to_lean(ty: MirType) -> Result<text, CompileError>:
     return an error naming the kind rather than a lossy placeholder.
     """
     match ty.kind:
-        case I8: Ok("Int8")
-        case I16: Ok("Int16")
-        case I32: Ok("Int32")
-        case I64: Ok("Int")
-        case U8: Ok("UInt8")
-        case U16: Ok("UInt16")
-        case U32: Ok("UInt32")
-        case U64: Ok("UInt64")
-        case F32: Ok("Float32")
-        case F64: Ok("Float")
+        case I8 | U8: Ok("BitVec 8")
+        case I16 | U16: Ok("BitVec 16")
+        case I32 | U32: Ok("BitVec 32")
+        case I64 | U64: Ok("BitVec 64")
+        case F32 | F64:
+            Err(lean_err("lean-backend: floating-point MIR requires an exact format/rounding/NaN model; refusing lossy Lean Float lowering"))
         case Bool: Ok("Bool")
         case Char: Ok("Char")
         case Unit: Ok("Unit")
         case Never: Ok("Empty")
-        case Ptr(inner, _):
-            val i = mir_type_to_lean(inner)?
-            Ok("Ptr ({i})")
+        case Ptr(_, _):
+            Err(lean_err("lean-backend: raw pointers require an explicit heap/capability semantics; refusing undeclared Ptr lowering"))
         case Array(elem, size):
             val e = mir_type_to_lean(elem)?
-            Ok("Array ({e}) {size}")
+            Ok("Vector ({e}) {size}")
         case Slice(elem):
             val e = mir_type_to_lean(elem)?
             Ok("Array ({e})")
         case Struct(id):
-            Ok("Struct{id}")
+            Err(lean_err("lean-backend: MIR struct `{id}` requires its exact emitted inductive/structure definition"))
         case Enum(id):
-            Ok("Enum{id}")
+            Err(lean_err("lean-backend: MIR enum `{id}` requires its exact emitted inductive definition"))
         case Tuple(elems):
             var parts: [text] = []
             for e in elems:
                 parts = parts.push(mir_type_to_lean(e)?)
-            Ok("({parts.join(\" x \")})")
+            if parts.len() == 0: Ok("Unit")
+            else: Ok("({parts.join(\" × \")})")
+        case Result(ok_type, err_type):
+            val ok_lean = mir_type_to_lean(ok_type)?
+            val err_lean = mir_type_to_lean(err_type)?
+            Ok("Except ({err_lean}) ({ok_lean})")
         case _:
             Err(lean_err("lean-backend: MIR type kind `{ty.kind}` has no faithful Lean 4 representation; refusing to emit an unsound placeholder"))
 
@@ -85,6 +85,18 @@ fn translate_mir_body(body: MirBody) -> Result<text, CompileError>:
     if body.blocks.is_empty():
         return Err(lean_err("lean-backend: function `{body.name}` has no MIR basic blocks; cannot emit a sound Lean term (refusing to emit `sorry`)"))
 
+    val structured_match = translate_exact_result_match_body(body)
+    match structured_match:
+        case Ok(Some(code)): return Ok(code)
+        case Err(error): return Err(error)
+        case Ok(nil): pass
+
+    val structured_try = translate_exact_result_try_body(body)
+    match structured_try:
+        case Ok(Some(code)): return Ok(code)
+        case Err(error): return Err(error)
+        case Ok(nil): pass
+
     var lines: [text] = []
     for block in body.blocks:
         val block_lines = translate_mir_block(block, body)?
@@ -96,6 +108,395 @@ fn translate_mir_body(body: MirBody) -> Result<text, CompileError>:
 
     Ok(lines.join("\n"))
 
+struct LeanGlobalStateBodyV1:
+    body: text
+    state_type: text
+    written_regions: [text]
+
+fn translate_mir_global_state_body_v1(body: MirBody) -> Result<LeanGlobalStateBodyV1, CompileError>:
+    if body.blocks.len() != 1:
+        return Err(lean_err("lean-backend: global-state semantics currently require one exact straight-line MIR block"))
+    val block = body.blocks[0]
+    var state_value_type = ""
+    var written_regions: [text] = []
+    for instruction in block.instructions:
+        match instruction.kind:
+            case LoadGlobal(dest, _):
+                val type_ = lean_body_local_type(body, dest)
+                if type_ == nil: return Err(lean_err("lean-backend: global load destination lacks an exact type"))
+                val lean_type = mir_type_to_lean(type_ ?? MirType.unit())?
+                if state_value_type != "" and state_value_type != lean_type:
+                    return Err(lean_err("lean-backend: global-state v1 requires one homogeneous exact value type"))
+                state_value_type = lean_type
+            case StoreGlobal(symbol, value):
+                val type_ = lean_operand_mir_type(body, value)
+                if type_ == nil: return Err(lean_err("lean-backend: global store value lacks an exact type"))
+                val lean_type = mir_type_to_lean(type_ ?? MirType.unit())?
+                if state_value_type != "" and state_value_type != lean_type:
+                    return Err(lean_err("lean-backend: global-state v1 requires one homogeneous exact value type"))
+                state_value_type = lean_type
+                val region = symbol.id.to_string()
+                if not written_regions.contains(region): written_regions.push(region)
+            case _: pass
+    if state_value_type == "":
+        return Err(lean_err("lean-backend: global-state lowering requires at least one exact global access"))
+    written_regions.sort()
+
+    var lines: [text] = ["let state := __fv2_pre_state"]
+    for instruction in block.instructions:
+        match instruction.kind:
+            case LoadGlobal(dest, symbol):
+                lines.push("let _l{dest.id} := state {symbol.id}")
+            case StoreGlobal(symbol, value):
+                val rendered = translate_operand_exact(body, value)?
+                lines.push("let state := fun region => if region = {symbol.id} then {rendered} else state region")
+            case _:
+                val rendered = translate_mir_inst(instruction, body)?
+                if rendered != "": lines.push(rendered)
+    match block.terminator:
+        case Ret(value):
+            var result = "()"
+            if val present = value:
+                result = translate_operand_exact(body, present)?
+            lines.push("({result}, state)")
+        case _:
+            return Err(lean_err("lean-backend: global-state v1 requires a direct return terminator"))
+    Ok(LeanGlobalStateBodyV1(
+        lines.join("\n"), "Nat → " + state_value_type, written_regions))
+
+fn lean_runtime_name(operand: MirOperand) -> text:
+    match operand.kind:
+        case Const(MirConstValue.Str(name), _): name
+        case _: ""
+
+fn lean_operand_local_id(operand: MirOperand) -> i64:
+    match operand.kind:
+        case Copy(local) | Move(local): local.id
+        case _: -1
+
+fn lean_find_block(body: MirBody, id: BlockId) -> MirBlock?:
+    for block in body.blocks:
+        if block.id.id == id.id: return Some(block)
+    nil
+
+fn lean_result_match_predecessor(
+    body: MirBody, arm_target: BlockId, expected_discriminant: i64
+) -> Result<(BlockId, BlockId, i64), CompileError>:
+    var found = false
+    var predecessor = BlockId(id: -1)
+    var fallthrough = BlockId(id: -1)
+    var discriminator_local = -1
+    for block in body.blocks:
+        match block.terminator:
+            case If(condition, then_target, else_target):
+                if then_target.id == arm_target.id:
+                    if found:
+                        return Err(lean_err("lean-backend: Result match arm has multiple conditional predecessors"))
+                    if block.instructions.len() < 2:
+                        return Err(lean_err("lean-backend: Result match predecessor lacks key/comparison instructions"))
+                    val key_index = block.instructions.len() - 2
+                    val compare_index = block.instructions.len() - 1
+                    var key_local = -1
+                    match block.instructions[key_index].kind:
+                        case Const(dest, MirConstValue.Int(value), _):
+                            if value != expected_discriminant:
+                                return Err(lean_err("lean-backend: Result match arm uses the wrong literal discriminant"))
+                            key_local = dest.id
+                        case _:
+                            return Err(lean_err("lean-backend: Result match arm key is not a literal"))
+                    match block.instructions[compare_index].kind:
+                        case BinOp(dest, MirBinOp.Eq, left, right):
+                            if lean_operand_local_id(condition) != dest.id:
+                                return Err(lean_err("lean-backend: Result match branch does not use its equality local"))
+                            val left_id = lean_operand_local_id(left)
+                            val right_id = lean_operand_local_id(right)
+                            if left_id == key_local: discriminator_local = right_id
+                            elif right_id == key_local: discriminator_local = left_id
+                            else:
+                                return Err(lean_err("lean-backend: Result match equality does not use its literal key"))
+                        case _:
+                            return Err(lean_err("lean-backend: Result match arm branch is not exact equality"))
+                    found = true
+                    predecessor = block.id
+                    fallthrough = else_target
+            case _: pass
+    if not found:
+        return Err(lean_err("lean-backend: Result match witness references an arm without a validated predecessor"))
+    Ok((predecessor, fallthrough, discriminator_local))
+
+fn translate_exact_result_match_arm(
+    body: MirBody, block: MirBlock, scrutinee: LocalId,
+    destination: LocalId, payload: LocalId, binder_name: text,
+    merge_block: BlockId
+) -> Result<text, CompileError>:
+    if block.instructions.len() < 2:
+        return Err(lean_err("lean-backend: Result match arm lacks payload extraction and result assignment"))
+    match block.instructions[0].kind:
+        case Call(Some(extracted), func, args):
+            if lean_runtime_name(func) != "rt_enum_payload" or args.len() != 1 or
+                    lean_operand_local_id(args[0]) != scrutinee.id or extracted.id != payload.id:
+                return Err(lean_err("lean-backend: Result match arm payload extraction disagrees with its witness"))
+        case _:
+            return Err(lean_err("lean-backend: Result match arm lacks canonical payload extraction"))
+    val last_index = block.instructions.len() - 1
+    var arm_value = -1
+    match block.instructions[last_index].kind:
+        case Copy(dest, source):
+            if dest.id != destination.id:
+                return Err(lean_err("lean-backend: Result match arm assigns a different merge destination"))
+            arm_value = source.id
+        case _:
+            return Err(lean_err("lean-backend: Result match arm does not end in its merge assignment"))
+    match block.terminator:
+        case Goto(target):
+            if target.id != merge_block.id:
+                return Err(lean_err("lean-backend: Result match arm does not continue to its witnessed merge"))
+        case _:
+            return Err(lean_err("lean-backend: Result match arm has a non-canonical terminator"))
+
+    var lines: [text] = ["let _l{payload.id} := {binder_name}"]
+    var index = 1
+    while index < last_index:
+        val line = translate_mir_inst(block.instructions[index], body)?
+        if line != "": lines = lines.push(line)
+        index = index + 1
+    lines = lines.push("_l{arm_value}")
+    Ok(lines.join("\n"))
+
+fn translate_exact_result_match_body(body: MirBody) -> Result<text?, CompileError>:
+    var witness_count = 0
+    var scrutinee = LocalId(id: -1)
+    var destination = LocalId(id: -1)
+    var ok_block_id = BlockId(id: -1)
+    var err_block_id = BlockId(id: -1)
+    var merge_block_id = BlockId(id: -1)
+    var ok_payload = LocalId(id: -1)
+    var err_payload = LocalId(id: -1)
+    for block in body.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case ResultMatchSemantic(s, d, ok, err, merge, ok_value, err_value):
+                    witness_count = witness_count + 1
+                    scrutinee = s
+                    destination = d
+                    ok_block_id = ok
+                    err_block_id = err
+                    merge_block_id = merge
+                    ok_payload = ok_value
+                    err_payload = err_value
+                case _: pass
+    if witness_count == 0: return Ok(nil)
+    if witness_count != 1:
+        return Err(lean_err("lean-backend: exactly one Result match witness is supported per bounded CFG"))
+    val scrutinee_type = lean_body_local_type(body, scrutinee)
+    if scrutinee_type == nil:
+        return Err(lean_err("lean-backend: Result match scrutinee lacks a retained MIR type"))
+    match (scrutinee_type ?? MirType.unit()).kind:
+        case Result(ok_type, err_type):
+            val ok_payload_type = lean_body_local_type(body, ok_payload)
+            val err_payload_type = lean_body_local_type(body, err_payload)
+            if ok_payload_type == nil or (ok_payload_type ?? MirType.unit()).kind != ok_type.kind:
+                return Err(lean_err("lean-backend: Result match Ok payload type disagrees with Result<T,E>"))
+            if err_payload_type == nil or (err_payload_type ?? MirType.unit()).kind != err_type.kind:
+                return Err(lean_err("lean-backend: Result match Err payload type disagrees with Result<T,E>"))
+        case _:
+            return Err(lean_err("lean-backend: Result match witness scrutinee is not Result<T,E>"))
+
+    val ok_predecessor = lean_result_match_predecessor(body, ok_block_id, 0)?
+    val err_predecessor = lean_result_match_predecessor(body, err_block_id, 1)?
+    if ok_predecessor.2 != err_predecessor.2:
+        return Err(lean_err("lean-backend: Result match arms do not share one discriminator local"))
+    var first_predecessor = BlockId(id: -1)
+    var second_predecessor = BlockId(id: -1)
+    var final_fallthrough = BlockId(id: -1)
+    if ok_predecessor.1.id == err_predecessor.0.id:
+        first_predecessor = ok_predecessor.0
+        second_predecessor = err_predecessor.0
+        final_fallthrough = err_predecessor.1
+    elif err_predecessor.1.id == ok_predecessor.0.id:
+        first_predecessor = err_predecessor.0
+        second_predecessor = ok_predecessor.0
+        final_fallthrough = ok_predecessor.1
+    else:
+        return Err(lean_err("lean-backend: Result match comparison blocks are not one connected exhaustive chain"))
+
+    val first_block = lean_find_block(body, first_predecessor) ?? body.blocks[0]
+    var discriminator_index = -1
+    for index in 0..first_block.instructions.len():
+        match first_block.instructions[index].kind:
+            case Call(Some(dest), func, args):
+                if dest.id == ok_predecessor.2 and lean_runtime_name(func) == "rt_enum_discriminant" and
+                        args.len() == 1 and lean_operand_local_id(args[0]) == scrutinee.id:
+                    discriminator_index = index
+            case _: pass
+    if discriminator_index < 0 or first_block.instructions.len() != discriminator_index + 3:
+        return Err(lean_err("lean-backend: Result match first predecessor has no exact discriminator/key/comparison suffix"))
+    val second_block = lean_find_block(body, second_predecessor) ?? body.blocks[0]
+    if second_block.instructions.len() != 2:
+        return Err(lean_err("lean-backend: Result match second predecessor contains unmodeled effects"))
+    val fallthrough_block = lean_find_block(body, final_fallthrough)
+    if fallthrough_block == nil:
+        return Err(lean_err("lean-backend: Result match final fallthrough block is missing"))
+    val impossible = fallthrough_block ?? body.blocks[0]
+    if not impossible.instructions.is_empty():
+        return Err(lean_err("lean-backend: Result match impossible fallthrough contains effects"))
+    match impossible.terminator:
+        case Goto(target):
+            if target.id != merge_block_id.id:
+                return Err(lean_err("lean-backend: Result match impossible fallthrough misses the merge"))
+        case _:
+            return Err(lean_err("lean-backend: Result match impossible fallthrough is not canonical"))
+
+    val ok_block = lean_find_block(body, ok_block_id) ?? body.blocks[0]
+    val err_block = lean_find_block(body, err_block_id) ?? body.blocks[0]
+    val ok_code = translate_exact_result_match_arm(body, ok_block, scrutinee,
+        destination, ok_payload, "ok_payload", merge_block_id)?
+    val err_code = translate_exact_result_match_arm(body, err_block, scrutinee,
+        destination, err_payload, "err_payload", merge_block_id)?
+    val merge_block = lean_find_block(body, merge_block_id)
+    if merge_block == nil:
+        return Err(lean_err("lean-backend: Result match witnessed merge block is missing"))
+    val merge = merge_block ?? body.blocks[0]
+    if merge.instructions.is_empty():
+        return Err(lean_err("lean-backend: Result match merge lacks its semantic witness"))
+    match merge.instructions[0].kind:
+        case ResultMatchSemantic(_, _, _, _, _, _, _): pass
+        case _:
+            return Err(lean_err("lean-backend: Result match witness is not first in its merge block"))
+
+    var lines: [text] = []
+    var prefix_index = 0
+    while prefix_index < discriminator_index:
+        val line = translate_mir_inst(first_block.instructions[prefix_index], body)?
+        if line != "": lines = lines.push(line)
+        prefix_index = prefix_index + 1
+    lines = lines.push("let _l{destination.id} := match _l{scrutinee.id} with")
+    lines = lines.push("| Except.ok ok_payload =>")
+    for line in ok_code.split("\n"): lines = lines.push("  " + line)
+    lines = lines.push("| Except.error err_payload =>")
+    for line in err_code.split("\n"): lines = lines.push("  " + line)
+    var merge_index = 1
+    while merge_index < merge.instructions.len():
+        val line = translate_mir_inst(merge.instructions[merge_index], body)?
+        if line != "": lines = lines.push(line)
+        merge_index = merge_index + 1
+    lines = lines.push(translate_mir_terminator(merge.terminator, body)?)
+    Ok(Some(lines.join("\n")))
+
+fn translate_exact_result_try_body(body: MirBody) -> Result<text?, CompileError>:
+    """Recognize the canonical pure Result `?` CFG and emit one exact match.
+
+    This intentionally accepts only the lowering-owned shape. Labels alone
+    never authorize translation: the discriminator call, literal Err key,
+    comparison local, branch edges, unchanged Err return, payload extraction,
+    and Result-typed source must all agree.
+    """
+    var branch_block: MirBlock? = nil
+    var err_target = BlockId(id: -1)
+    var ok_target = BlockId(id: -1)
+    for block in body.blocks:
+        match block.terminator:
+            case If(_, then_target, else_target):
+                val maybe_err = lean_find_block(body, then_target)
+                val maybe_ok = lean_find_block(body, else_target)
+                if maybe_err != nil and maybe_ok != nil:
+                    val err_block = maybe_err ?? block
+                    val ok_block = maybe_ok ?? block
+                    val err_label = err_block.label ?? ""
+                    val ok_label = ok_block.label ?? ""
+                    if err_label == "try_err" and ok_label == "try_ok":
+                        if branch_block != nil:
+                            return Err(lean_err("lean-backend: multiple Result try CFGs require general structured-CFG semantics"))
+                        branch_block = Some(block)
+                        err_target = then_target
+                        ok_target = else_target
+            case _: pass
+    if branch_block == nil: return Ok(nil)
+
+    val entry = branch_block ?? body.blocks[0]
+    if entry.instructions.len() < 3:
+        return Err(lean_err("lean-backend: malformed Result try CFG lacks discriminator/key/comparison instructions"))
+    val disc_index = entry.instructions.len() - 3
+    val key_index = entry.instructions.len() - 2
+    val cmp_index = entry.instructions.len() - 1
+    var result_local_id = -1
+    var disc_local_id = -1
+    match entry.instructions[disc_index].kind:
+        case Call(Some(dest), func, args):
+            if lean_runtime_name(func) != "rt_enum_discriminant" or args.len() != 1:
+                return Err(lean_err("lean-backend: malformed Result try discriminator operation"))
+            result_local_id = lean_operand_local_id(args[0])
+            disc_local_id = dest.id
+        case _:
+            return Err(lean_err("lean-backend: malformed Result try discriminator instruction"))
+    val result_type = lean_body_local_type(body, LocalId(id: result_local_id))
+    if result_type == nil:
+        return Err(lean_err("lean-backend: Result try source local has no retained MIR type"))
+    match (result_type ?? MirType.unit()).kind:
+        case Result(_, _): pass
+        case _: return Err(lean_err("lean-backend: Result try source is not an exact MIR Result type"))
+
+    var key_local_id = -1
+    match entry.instructions[key_index].kind:
+        case Const(dest, MirConstValue.Int(value), _):
+            if value != 1: return Err(lean_err("lean-backend: Result try Err discriminant must be literal 1"))
+            key_local_id = dest.id
+        case _: return Err(lean_err("lean-backend: Result try Err discriminant is not a literal"))
+    var cmp_local_id = -1
+    match entry.instructions[cmp_index].kind:
+        case BinOp(dest, MirBinOp.Eq, left, right):
+            val left_id = lean_operand_local_id(left)
+            val right_id = lean_operand_local_id(right)
+            if not ((left_id == disc_local_id and right_id == key_local_id) or
+                    (left_id == key_local_id and right_id == disc_local_id)):
+                return Err(lean_err("lean-backend: Result try comparison does not bind its discriminator and literal Err key"))
+            cmp_local_id = dest.id
+        case _: return Err(lean_err("lean-backend: Result try branch condition is not exact equality"))
+    match entry.terminator:
+        case If(condition, _, _):
+            if lean_operand_local_id(condition) != cmp_local_id:
+                return Err(lean_err("lean-backend: Result try branch does not use the validated comparison local"))
+        case _: return Err(lean_err("lean-backend: Result try owner lost its conditional terminator"))
+
+    val err_block = lean_find_block(body, err_target) ?? entry
+    if not err_block.instructions.is_empty():
+        return Err(lean_err("lean-backend: Result try Err edge has effects requiring state/resource semantics"))
+    match err_block.terminator:
+        case Ret(Some(value)):
+            if lean_operand_local_id(value) != result_local_id:
+                return Err(lean_err("lean-backend: Result try Err edge does not propagate the unchanged Result"))
+        case _: return Err(lean_err("lean-backend: Result try Err edge is not an unchanged early return"))
+
+    val ok_block = lean_find_block(body, ok_target) ?? entry
+    if ok_block.instructions.is_empty():
+        return Err(lean_err("lean-backend: Result try Ok edge lacks payload extraction"))
+    var payload_local_id = -1
+    match ok_block.instructions[0].kind:
+        case Call(Some(dest), func, args):
+            if lean_runtime_name(func) != "rt_enum_payload" or args.len() != 1 or lean_operand_local_id(args[0]) != result_local_id:
+                return Err(lean_err("lean-backend: Result try Ok edge does not extract the validated Result payload"))
+            payload_local_id = dest.id
+        case _: return Err(lean_err("lean-backend: Result try Ok edge lacks canonical payload extraction"))
+
+    var lines: [text] = []
+    var prefix_index = 0
+    while prefix_index < disc_index:
+        val line = translate_mir_inst(entry.instructions[prefix_index], body)?
+        if line != "": lines = lines.push(line)
+        prefix_index = prefix_index + 1
+    lines = lines.push("match _l{result_local_id} with")
+    lines = lines.push("| Except.error error => Except.error error")
+    lines = lines.push("| Except.ok result_payload =>")
+    lines = lines.push("  let _l{payload_local_id} := result_payload")
+    var ok_index = 1
+    while ok_index < ok_block.instructions.len():
+        val line = translate_mir_inst(ok_block.instructions[ok_index], body)?
+        if line != "": lines = lines.push("  " + line)
+        ok_index = ok_index + 1
+    val ok_term = translate_mir_terminator(ok_block.terminator, body)?
+    lines = lines.push("  " + ok_term)
+    Ok(Some(lines.join("\n")))
+
 fn translate_mir_block(block: MirBlock, body: MirBody) -> Result<[text], CompileError>:
     """Translate a single MIR basic block to Lean let-bindings."""
     var lines: [text] = []
@@ -106,18 +507,30 @@ fn translate_mir_block(block: MirBlock, body: MirBody) -> Result<[text], Compile
 
     # Translate each instruction
     for inst in block.instructions:
-        val translated = translate_mir_inst(inst)?
+        val translated = translate_mir_inst(inst, body)?
         if translated != "":
             lines = lines.push(translated)
 
     # Translate the terminator
-    val term_line = translate_mir_terminator(block.terminator)?
+    val term_line = translate_mir_terminator(block.terminator, body)?
     if term_line != "":
         lines = lines.push(term_line)
 
     Ok(lines)
 
-fn translate_mir_inst(inst: MirInst) -> Result<text, CompileError>:
+fn lean_body_local_type(body: MirBody, local: LocalId) -> MirType?:
+    """Resolve a local type from the same MIR body being translated."""
+    for candidate in body.locals:
+        if candidate.id.id == local.id:
+            return Some(candidate.type_)
+    nil
+
+fn lean_operand_mir_type(body: MirBody, operand: MirOperand) -> MirType?:
+    match operand.kind:
+        case Copy(local) | Move(local): lean_body_local_type(body, local)
+        case Const(_, type_): Some(type_)
+
+fn translate_mir_inst(inst: MirInst, body: MirBody) -> Result<text, CompileError>:
     """Translate a single MIR instruction to a Lean let-binding, or hard-fail.
 
     Any instruction kind without a sound Lean lowering returns an error
@@ -126,7 +539,12 @@ fn translate_mir_inst(inst: MirInst) -> Result<text, CompileError>:
     """
     match inst.kind:
         case Const(dest, value, type_):
-            val lean_val = translate_const_value(value)
+            val _lean_type = mir_type_to_lean(type_)?
+            match type_.kind:
+                case Array(_, _):
+                    return Err(lean_err("lean-backend: fixed-array constant requires an exact Vector constructor and length proof"))
+                case _: pass
+            val lean_val = translate_const_value_exact(value, type_)?
             Ok("let _l{dest.id} := {lean_val}")
 
         case Copy(dest, src):
@@ -137,68 +555,89 @@ fn translate_mir_inst(inst: MirInst) -> Result<text, CompileError>:
 
         case BinOp(dest, op, left, right):
             val lean_op = translate_binop(op)?
-            val l = translate_operand(left)
-            val r = translate_operand(right)
+            val l = translate_operand_exact(body, left)?
+            val r = translate_operand_exact(body, right)?
             Ok("let _l{dest.id} := {l} {lean_op} {r}")
 
         case UnaryOp(dest, op, operand):
-            val lean_op = translate_unaryop(op)
-            val o = translate_operand(operand)
+            val lean_op = translate_unaryop(op)?
+            val o = translate_operand_exact(body, operand)?
             Ok("let _l{dest.id} := {lean_op}{o}")
 
         case CheckedBinOp(dest, op, left, right):
-            val lean_op = translate_binop(op)?
-            val l = translate_operand(left)
-            val r = translate_operand(right)
-            Ok("let _l{dest.id} := {l} {lean_op} {r}  -- checked")
+            return Err(lean_err("lean-backend: checked binary operator `{op}` requires explicit value-plus-overflow Result semantics; refusing ordinary arithmetic lowering for _l{dest.id}"))
 
         case Alloc(dest, type_):
-            val lean_ty = mir_type_to_lean(type_)?
-            Ok("let _l{dest.id} : Ptr ({lean_ty}) := Ptr.alloc")
+            Err(lean_err("lean-backend: allocation requires explicit heap and ownership transition semantics"))
 
         case Load(dest, ptr):
-            val p = translate_operand(ptr)
-            Ok("let _l{dest.id} := Ptr.read {p}")
+            Err(lean_err("lean-backend: load requires explicit heap, location, and capability semantics"))
 
         case Store(ptr, value):
-            val p = translate_operand(ptr)
-            val v = translate_operand(value)
-            Ok("let _ := Ptr.write {p} {v}")
+            Err(lean_err("lean-backend: store requires explicit heap, frame, and capability semantics"))
 
         case GetElementPtr(dest, base, indices):
-            val b = translate_operand(base)
-            val idx_str = translate_operand_list(indices, " ")
-            Ok("let _l{dest.id} := Ptr.offset {b} {idx_str}")
+            Err(lean_err("lean-backend: pointer offset requires exact layout, bounds, and provenance semantics"))
 
         case Aggregate(dest, kind, operands):
-            val ops_str = translate_operand_list(operands, ", ")
+            val ops_str = translate_operand_list_exact(body, operands, ", ")?
             match kind:
                 case Tuple:
                     Ok("let _l{dest.id} := ({ops_str})")
                 case Array(_):
-                    Ok("let _l{dest.id} := #[{ops_str}]")
+                    Err(lean_err("lean-backend: fixed-array aggregate requires an exact Vector constructor and length proof"))
                 case Struct(sym):
-                    Ok("let _l{dest.id} := Struct.mk {ops_str}")
+                    Err(lean_err("lean-backend: struct aggregate `{sym}` requires its emitted exact definition"))
                 case Enum(sym, variant):
-                    Ok("let _l{dest.id} := Enum.variant{variant} {ops_str}")
+                    Err(lean_err("lean-backend: enum aggregate `{sym}` variant `{variant}` requires its emitted exact definition"))
 
         case GetField(dest, base, field):
-            val b = translate_operand(base)
-            Ok("let _l{dest.id} := {b}.{field}")
+            Err(lean_err("lean-backend: field projection `{field}` requires the exact emitted aggregate definition"))
 
         case SetField(base, field, value):
-            val b = translate_operand(base)
-            val v = translate_operand(value)
-            Ok("let _ := set_field {b} {field} {v}")
+            Err(lean_err("lean-backend: mutable field update `{field}` requires explicit state/frame semantics"))
 
         case Cast(dest, operand, target):
-            val o = translate_operand(operand)
-            val lean_ty = mir_type_to_lean(target)?
-            Ok("let _l{dest.id} : {lean_ty} := cast {o}")
+            Err(lean_err("lean-backend: cast to `{target.kind}` requires exact truncation/extension/reinterpretation semantics"))
 
         case Call(dest, func, args):
-            val f = translate_operand(func)
-            val args_str = translate_operand_list(args, " ")
+            # The canonical typed Result constructor is physically emitted as
+            # rt_enum_new for native targets, but its destination retains
+            # Result<T,E> and its discriminant is a literal. Translate that
+            # executed operation directly to the corresponding Except
+            # constructor; malformed or dynamically selected variants fail
+            # closed instead of becoming an uninterpreted Lean call.
+            match func.kind:
+                case Const(MirConstValue.Str(runtime_name), _):
+                    if runtime_name == "rt_enum_new" and dest != nil:
+                        val result_dest = dest ?? LocalId(id: -1)
+                        val result_type = lean_body_local_type(body, result_dest)
+                        if result_type != nil:
+                            match (result_type ?? MirType.i64()).kind:
+                                case Result(ok_type, err_type):
+                                    if args.len() != 3:
+                                        return Err(lean_err("lean-backend: typed Result constructor requires enum id, literal discriminant, and payload"))
+                                    var discriminant = -1
+                                    match args[1].kind:
+                                        case Const(MirConstValue.Int(value), _): discriminant = value
+                                        case _:
+                                            return Err(lean_err("lean-backend: typed Result constructor discriminant must be a literal"))
+                                    val payload = translate_operand_exact(body, args[2])?
+                                    if discriminant == 0:
+                                        val payload_type = lean_operand_mir_type(body, args[2])
+                                        if payload_type == nil or (payload_type ?? MirType.unit()).kind != ok_type.kind:
+                                            return Err(lean_err("lean-backend: Result Ok payload type does not match retained MIR Result type"))
+                                        return Ok("let _l{result_dest.id} := Except.ok {payload}")
+                                    if discriminant == 1:
+                                        val payload_type = lean_operand_mir_type(body, args[2])
+                                        if payload_type == nil or (payload_type ?? MirType.unit()).kind != err_type.kind:
+                                            return Err(lean_err("lean-backend: Result Err payload type does not match retained MIR Result type"))
+                                        return Ok("let _l{result_dest.id} := Except.error {payload}")
+                                    return Err(lean_err("lean-backend: typed Result constructor has unknown discriminant {discriminant}"))
+                                case _: pass
+                case _: pass
+            val f = translate_direct_call_callee(func)?
+            val args_str = translate_operand_list_exact(body, args, " ")?
             if dest.?:
                 val d = dest.unwrap()
                 Ok("let _l{d.id} := {f} {args_str}")
@@ -206,12 +645,7 @@ fn translate_mir_inst(inst: MirInst) -> Result<text, CompileError>:
                 Ok("let _ := {f} {args_str}")
 
         case Intrinsic(dest, name, args):
-            val args_str = translate_operand_list(args, " ")
-            if dest.?:
-                val d = dest.unwrap()
-                Ok("let _l{d.id} := intrinsic_{name} {args_str}")
-            else:
-                Ok("let _ := intrinsic_{name} {args_str}")
+            Err(lean_err("lean-backend: intrinsic `{name}` requires a registered exact semantic definition"))
 
         case DebugValue(local, name):
             Ok("-- debug: {name} = _l{local.id}")
@@ -222,14 +656,45 @@ fn translate_mir_inst(inst: MirInst) -> Result<text, CompileError>:
         case _:
             Err(lean_err("lean-backend: MIR instruction `{inst.kind}` has no sound Lean lowering; refusing to drop it from the model"))
 
-fn translate_operand_list(ops: [MirOperand], sep: text) -> text:
-    """Translate and join a list of operands (operands are total)."""
+fn translate_operand_list_exact(body: MirBody, ops: [MirOperand], sep: text) -> Result<text, CompileError>:
+    """Translate and join operands only after preserving their retained MIR type."""
     var parts: [text] = []
     for o in ops:
-        parts = parts.push(translate_operand(o))
-    parts.join(sep)
+        parts = parts.push(translate_operand_exact(body, o)?)
+    Ok(parts.join(sep))
 
-fn translate_mir_terminator(term: MirTerminator) -> Result<text, CompileError>:
+fn translate_direct_call_callee(operand: MirOperand) -> Result<text, CompileError>:
+    match operand.kind:
+        case Const(MirConstValue.Str(name), type_):
+            match type_.kind:
+                case FuncPtr(_):
+                    if not lean_qualified_identifier_valid(name):
+                        return Err(lean_err("lean-backend: direct call target `{name}` is not an exact Lean identifier"))
+                    Ok(name)
+                case _:
+                    Err(lean_err("lean-backend: direct call string `{name}` lacks an exact function-pointer type"))
+        case _:
+            Err(lean_err("lean-backend: non-constant direct call target requires CallIndirect semantics"))
+
+fn lean_qualified_identifier_valid(name: text) -> bool:
+    if name == "": return false
+    var previous_dot = true
+    var index = 0
+    while index < name.len():
+        val code = name.char_code_at(index)
+        val upper = code >= 65 and code <= 90
+        val lower = code >= 97 and code <= 122
+        val digit = code >= 48 and code <= 57
+        val underscore = code == 95
+        val dot = code == 46
+        if not upper and not lower and not digit and not underscore and not dot: return false
+        if index == 0 and digit: return false
+        if dot and previous_dot: return false
+        previous_dot = dot
+        index = index + 1
+    not previous_dot
+
+fn translate_mir_terminator(term: MirTerminator, body: MirBody) -> Result<text, CompileError>:
     """Translate a MIR terminator to a Lean expression, or hard-fail.
 
     The flat let-binding translator can only faithfully model a single
@@ -241,73 +706,85 @@ fn translate_mir_terminator(term: MirTerminator) -> Result<text, CompileError>:
     match term:
         case Ret(value):
             if value.?:
-                Ok(translate_operand(value.unwrap()))
+                Ok(translate_operand_exact(body, value.unwrap())?)
             else:
                 Ok("()")
         case Unreachable:
-            Ok("panic! \"unreachable\"")
+            Err(lean_err("lean-backend: unreachable terminator requires a proved-unreachable predecessor obligation"))
         case Abort(message):
-            Ok("panic! \"{message}\"")
+            Err(lean_err("lean-backend: abort terminator `{message}` requires explicit exceptional outcome semantics"))
         case Goto(target):
             Err(lean_err("lean-backend: unstructured control flow `goto block{target.id}` cannot be lowered to a Lean term by the flat translator; structured-CFG lowering is required"))
         case If(cond, then_, else_):
-            val c = translate_operand(cond)
+            val c = translate_operand_exact(body, cond)?
             Err(lean_err("lean-backend: conditional branch on `{c}` (then block{then_.id}, else block{else_.id}) requires structured-CFG lowering; refusing to emit a term referencing undefined block labels"))
         case Switch(value, targets, default):
-            val v = translate_operand(value)
+            val v = translate_operand_exact(body, value)?
             Err(lean_err("lean-backend: switch on `{v}` (default block{default.id}) requires structured-CFG lowering; refusing to emit a term that drops branch targets"))
         case CallTerminator(dest, func, args, normal, _):
-            val f = translate_operand(func)
+            val f = translate_operand_exact(body, func)?
             Err(lean_err("lean-backend: call terminator `{f}` continuing at block{normal.id} requires structured-CFG lowering; refusing to drop the successor edge"))
 
-fn translate_operand(op: MirOperand) -> text:
-    """Translate a MIR operand to a Lean term (total)."""
+fn translate_operand_exact(body: MirBody, op: MirOperand) -> Result<text, CompileError>:
+    """Translate an operand with its retained MIR representation intact.
+
+    A fixed-width MIR integer must never become a polymorphic Lean numeral:
+    Lean can infer Nat for a standalone let and lose wraparound semantics.
+    """
     match op.kind:
         case Copy(local):
-            "_l{local.id}"
+            if lean_body_local_type(body, local) == nil:
+                return Err(lean_err("lean-backend: copied local _l{local.id} lacks retained exact MIR type"))
+            Ok("_l{local.id}")
         case Move(local):
-            "_l{local.id}"
-        case Const(value, _):
-            translate_const_value(value)
+            if lean_body_local_type(body, local) == nil:
+                return Err(lean_err("lean-backend: moved local _l{local.id} lacks retained exact MIR type"))
+            Ok("_l{local.id}")
+        case Const(value, type_):
+            translate_const_value_exact(value, type_)
 
-fn translate_const_value(value: MirConstValue) -> text:
-    """Translate a MIR constant value to a Lean literal (total).
+fn translate_const_value_exact(value: MirConstValue, type_: MirType) -> Result<text, CompileError>:
+    """Translate a MIR constant under its exact retained representation.
 
-    Struct constants carry a name-keyed field dictionary; fields are emitted
-    in sorted key order (deterministic) with their values preserved, rather
-    than dropped as the previous `Struct.mk` placeholder did.
+    The Int MIR constant is an unbounded host payload, while I8 through U64
+    are machine values. A bare numeral lets Lean infer Nat; BitVec.ofInt fixes
+    both width and modulo interpretation.
     """
     match value:
         case Int(v):
-            "{v}"
+            match type_.kind:
+                case I8 | U8: Ok(lean_bitvec_of_int(8, v))
+                case I16 | U16: Ok(lean_bitvec_of_int(16, v))
+                case I32 | U32: Ok(lean_bitvec_of_int(32, v))
+                case I64 | U64: Ok(lean_bitvec_of_int(64, v))
+                case _:
+                    Err(lean_err("lean-backend: integer constant requires an exact fixed-width MIR integer type; refusing polymorphic numeral lowering"))
         case Float(v):
-            "{v}"
+            Err(lean_err("lean-backend: floating-point constant requires an exact IEEE format model"))
         case Bool(v):
-            if v: "true" else: "false"
+            match type_.kind:
+                case Bool: Ok(if v: "true" else: "false")
+                case _: Err(lean_err("lean-backend: boolean constant type does not match Bool"))
         case Str(v):
-            "\"{v}\""
+            Err(lean_err("lean-backend: text constant requires an exact UTF-8/runtime representation model"))
         case Array(elements):
-            var elems: [text] = []
-            for el in elements:
-                elems = elems.push(translate_const_value(el))
-            "#[{elems.join(\", \")}]"
+            Err(lean_err("lean-backend: array constant requires an exact Vector constructor and element representation proof"))
         case Tuple(elements):
-            var elems: [text] = []
-            for el in elements:
-                elems = elems.push(translate_const_value(el))
-            "({elems.join(\", \")})"
+            Err(lean_err("lean-backend: tuple constant requires exact component MIR types"))
         case Struct(fields):
-            var keys = fields.keys()
-            keys.sort()
-            if keys.len() == 0:
-                "Struct.mk"
-            else:
-                var parts: [text] = []
-                for k in keys:
-                    parts = parts.push("{k} := {translate_const_value(fields[k])}")
-                "{{ {parts.join(\", \")} }}"
+            Err(lean_err("lean-backend: struct constant requires its exact emitted aggregate definition"))
         case Zero:
-            "0"
+            match type_.kind:
+                case I8 | U8: Ok(lean_bitvec_of_int(8, 0))
+                case I16 | U16: Ok(lean_bitvec_of_int(16, 0))
+                case I32 | U32: Ok(lean_bitvec_of_int(32, 0))
+                case I64 | U64: Ok(lean_bitvec_of_int(64, 0))
+                case _: Err(lean_err("lean-backend: zero constant requires an exact fixed-width machine representation"))
+
+fn lean_bitvec_of_int(width: i64, value: i64) -> text:
+    """Render a width-pinned BitVec integer, parenthesizing a signed literal."""
+    val literal = if value < 0: "({value})" else: value.to_string()
+    "(BitVec.ofInt {width} {literal})"
 
 fn translate_binop(op: MirBinOp) -> Result<text, CompileError>:
     """Translate a MIR binary operation to a Lean operator, or hard-fail.
@@ -322,30 +799,30 @@ fn translate_binop(op: MirBinOp) -> Result<text, CompileError>:
         case Add: Ok("+")
         case Sub: Ok("-")
         case Mul: Ok("*")
-        case Div: Ok("/")
-        case Rem: Ok("%")
-        case Pow: Ok("^")
+        case Div | Rem:
+            Err(lean_err("lean-backend: binary operator `{op}` requires signedness-directed fixed-width semantics"))
+        case Pow:
+            Err(lean_err("lean-backend: binary operator `Pow` requires an explicit fixed-width exponent policy"))
         case Eq: Ok("==")
         case Ne: Ok("!=")
-        case Lt: Ok("<")
-        case Le: Ok("≤")
-        case Gt: Ok(">")
-        case Ge: Ok("≥")
+        case Lt | Le | Gt | Ge:
+            Err(lean_err("lean-backend: ordered comparison `{op}` requires signedness-directed BitVec semantics"))
         case BitAnd: Ok("&&&")
         case BitOr: Ok("|||")
         case BitXor: Ok("^^^")
-        case Shl: Ok("<<<")
-        case Shr: Ok(">>>")
+        case Shl | Shr:
+            Err(lean_err("lean-backend: shift `{op}` requires exact shift-count and signed-right-shift semantics"))
         case _:
             Err(lean_err("lean-backend: binary operator `{op}` has no faithful scalar Lean operator; refusing to substitute a wrong operator"))
 
-fn translate_unaryop(op: MirUnaryOp) -> text:
-    """Translate a MIR unary operation to a Lean operator (total)."""
+fn translate_unaryop(op: MirUnaryOp) -> Result<text, CompileError>:
+    """Translate only unary operations with exact scalar semantics."""
     match op:
-        case Neg: "-"
-        case Not: "!"
-        case BitNot: "~~~"
-        case Transpose: "ᵀ"
+        case Neg: Ok("-")
+        case Not: Ok("!")
+        case BitNot: Ok("~~~")
+        case Transpose:
+            Err(lean_err("lean-backend: transpose requires shape-directed matrix semantics"))
 
 # ============================================================================
 # Deterministic function ordering

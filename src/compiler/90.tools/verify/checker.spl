@@ -5,6 +5,7 @@
 
 use app.io.mod.{file_exists, file_read}
 use compiler.tools.verify.lake_runner.{LakeRunner}
+use compiler.common.assurance.trust_audit.{audit_lean_axiom_report}
 use verification.regenerate as regen
 
 # ============================================================================
@@ -13,7 +14,7 @@ use verification.regenerate as regen
 
 enum ProofStatus:
     """Status of a single verification artifact."""
-    Verified
+    ModelProven
     Failed
     Skipped
     Pending
@@ -21,14 +22,14 @@ enum ProofStatus:
 impl ProofStatus:
     fn to_text() -> text:
         match self:
-            case Verified: "verified"
+            case ModelProven: "model_proven"
             case Failed: "failed"
             case Skipped: "skipped"
             case Pending: "pending"
 
     fn is_success() -> bool:
         match self:
-            case Verified: true
+            case ModelProven: true
             case _: false
 
 # ============================================================================
@@ -62,10 +63,10 @@ struct CheckResult:
     file_results: [ProofResult]
 
 impl CheckResult:
-    fn verified_count() -> i64:
+    fn model_proven_count() -> i64:
         var count = 0
         for r in self.file_results:
-            if r.status == ProofStatus.Verified:
+            if r.status == ProofStatus.ModelProven:
                 count = count + 1
         count
 
@@ -104,7 +105,7 @@ impl CheckResult:
 
     fn summary() -> text:
         val total = self.file_results.len()
-        val verified = self.verified_count()
+        val model_proven = self.model_proven_count()
         val pending = self.pending_count()
         val failed = self.failure_count()
         val skipped = self.skipped_count()
@@ -114,7 +115,7 @@ impl CheckResult:
         lines = lines.push("Proof Check Summary")
         lines = lines.push("===================")
         lines = lines.push("Files checked: {total}")
-        lines = lines.push("  Verified:  {verified}")
+        lines = lines.push("  Model proven: {model_proven}")
         lines = lines.push("  Failed:    {failed}")
         lines = lines.push("  Pending:   {pending}")
         lines = lines.push("  Skipped:   {skipped}")
@@ -218,11 +219,41 @@ impl ProofChecker:
                 theorem_count: theorem_count
             )
 
+        val expected_roots = _extract_axiom_roots(content)
+        if expected_roots.is_empty():
+            return ProofResult(
+                file_path: path,
+                status: ProofStatus.Failed,
+                sorry_count: sorry_count,
+                error_message: "missing explicit #print axioms proof roots",
+                theorem_count: theorem_count)
+        val declared_theorems = _extract_declared_theorem_names(content)
+        for theorem_name in declared_theorems:
+            var covered = false
+            for root in expected_roots:
+                if root == theorem_name or root.ends_with("." + theorem_name):
+                    covered = true
+            if not covered:
+                return ProofResult(
+                    file_path: path,
+                    status: ProofStatus.Failed,
+                    sorry_count: sorry_count,
+                    error_message: "missing transitive axiom root for theorem " + theorem_name,
+                    theorem_count: theorem_count)
+
         match self.lake.check_file(path):
-            case Ok(_):
+            case Ok(output):
+                val audit = audit_lean_axiom_report(output, expected_roots, [])
+                if not audit.permits_closed_verification():
+                    return ProofResult(
+                        file_path: path,
+                        status: ProofStatus.Failed,
+                        sorry_count: sorry_count,
+                        error_message: "transitive axiom audit failed: " + audit.reason,
+                        theorem_count: theorem_count)
                 ProofResult(
                     file_path: path,
-                    status: ProofStatus.Verified,
+                    status: ProofStatus.ModelProven,
                     sorry_count: sorry_count,
                     error_message: "",
                     theorem_count: theorem_count
@@ -247,6 +278,37 @@ impl ProofChecker:
 # only a real proof hole when it is NOT surrounded by these (so `sorryless`,
 # `sorryAx`, `my_sorry` do not count).
 val _LEAN_IDENT_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_'"
+
+fn _extract_axiom_roots(content: text) -> [text]:
+    val code = _lean_code_chars(content).join("")
+    val prefix = "#print axioms "
+    var roots: [text] = []
+    for line in code.lines():
+        val trimmed = line.trim()
+        if trimmed.starts_with(prefix):
+            val root = trimmed.substring(prefix.len()).trim()
+            if root != "" and not roots.contains(root): roots.push(root)
+    roots
+
+fn _extract_declared_theorem_names(content: text) -> [text]:
+    val code = _lean_code_chars(content).join("")
+    var names: [text] = []
+    for line in code.lines():
+        val trimmed = line.trim()
+        var rest = ""
+        if trimmed.starts_with("theorem "):
+            rest = trimmed.substring(8).trim()
+        elif trimmed.starts_with("lemma "):
+            rest = trimmed.substring(6).trim()
+        if rest != "":
+            var name = ""
+            for char in rest.chars():
+                if _is_lean_ident_char(char) or char == ".":
+                    name = name + char
+                else:
+                    break
+            if name != "" and not names.contains(name): names.push(name)
+    names
 
 fn _is_lean_ident_char(c: text) -> bool:
     c != "" and _LEAN_IDENT_CHARS.contains(c)

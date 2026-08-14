@@ -1,0 +1,117 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.formal_receipt.{ProofReceiptV1, TrustManifestV1,
+    VerificationCacheKeyV1}
+use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1,
+    ReplayOutcomeV1, ReplayCheckerReceiptV1, IndependentReplayClosureV1,
+    close_independent_replay_v1}
+use compiler.common.assurance.trust_audit.{audit_lean_axiom_report}
+use compiler.tools.verify.formal_gate_collectors.{TruthfulnessProofEvidenceV1,
+    trust_audit_hash_v1, collect_verification_truthfulness_gate_v1}
+
+fn truth_replay(artifact: text = sha256_text("artifact")) -> IndependentReplayClosureV1:
+    val fresh = ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1",
+        ReplayCheckerClassV1.FreshLeanKernel, "lean4checker", "v1",
+        sha256_text("fresh-lean-binary"), "Proofs", "Proofs.safe", artifact,
+        sha256_text("fresh-policy"), sha256_text("fresh-output"),
+        ReplayOutcomeV1.Accepted, "")
+    val independent = ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1",
+        ReplayCheckerClassV1.IndependentKernel, "nanoda", "v1",
+        sha256_text("independent-kernel-binary"), "Proofs", "Proofs.safe", artifact,
+        sha256_text("independent-policy"), sha256_text("independent-output"),
+        ReplayOutcomeV1.Accepted, "")
+    close_independent_replay_v1(fresh, independent)
+
+fn truth_item(root: text = "Proofs.safe") -> TruthfulnessProofEvidenceV1:
+    val report = "'" + root + "' does not depend on any axioms"
+    val audit = audit_lean_axiom_report(report, [root], [])
+    val replay = truth_replay()
+    val trust = TrustManifestV1(["propext", "Classical.choice", "Quot.sound"],
+        [], [], [], [], [])
+    val key = VerificationCacheKeyV1(sha256_text("vir"), sha256_text("contract"),
+        sha256_text("weave"), sha256_text("macro"), [sha256_text("dependency")],
+        "effects-v1", "compiler-v1", "x86_64-unknown-linux-gnu", "4.33.0",
+        sha256_text("mathlib"), ["lean4checker-v1", "nanoda-v1"],
+        sha256_text("tactics"), sha256_text("trust-policy"), "verified")
+    val receipt = ProofReceiptV1(root, FormalStatus.ModelProven,
+        key.hash(), sha256_text("artifact"), [],
+        trust_audit_hash_v1(audit, sha256_text("artifact")),
+        sha256_text(trust.canonical_text()), "", replay.hash())
+    TruthfulnessProofEvidenceV1(receipt, key, report,
+        sha256_text("artifact"), trust, replay)
+
+describe "FV2 verification-truthfulness gate collector":
+    it "derives a passed gate and exact materialized receipt from closed evidence":
+        val collection = collect_verification_truthfulness_gate_v1([
+            truth_item()])
+        expect(collection.gate_evidence.status.name()).to_equal("passed")
+        expect(collection.gate_evidence.receipt_hashes.len()).to_equal(1)
+        expect(collection.receipt_files.len()).to_equal(1)
+        expect(sha256_text(collection.receipt_files[0].content)).to_equal(
+            collection.gate_evidence.receipt_hashes[0])
+        expect(collection.receipt_files[0].content).to_start_with(
+            "FormalDeliveryReceipt-v2\ngate=verification_truthfulness\n")
+        expect(collection.receipt_files[0].content).to_contain(
+            "semantic_evidence_hash=")
+
+    it "rejects a transitive sorry axiom rather than publishing passing evidence":
+        val root = "Proofs.unsafe"
+        val audit = audit_lean_axiom_report(
+            "'Proofs.unsafe' depends on axioms: [sorryAx]", [root], [])
+        val replay = truth_replay()
+        val trust = TrustManifestV1(["propext", "Classical.choice", "Quot.sound"],
+            [], [], [], [], [])
+        val key = VerificationCacheKeyV1(sha256_text("vir"), sha256_text("contract"),
+            sha256_text("weave"), sha256_text("macro"), [sha256_text("dependency")],
+            "effects-v1", "compiler-v1", "x86_64-unknown-linux-gnu", "4.33.0",
+            sha256_text("mathlib"), ["lean4checker-v1", "nanoda-v1"],
+            sha256_text("tactics"), sha256_text("trust-policy"), "verified")
+        val receipt = ProofReceiptV1(root, FormalStatus.ModelProven,
+            key.hash(), sha256_text("artifact"), [],
+            trust_audit_hash_v1(audit, sha256_text("artifact")),
+            sha256_text(trust.canonical_text()), "", replay.hash())
+        val collection = collect_verification_truthfulness_gate_v1([
+            TruthfulnessProofEvidenceV1(receipt, key,
+                "'Proofs.unsafe' depends on axioms: [sorryAx]",
+                sha256_text("artifact"), trust, replay)])
+        expect(collection.gate_evidence.status.name()).to_equal("failed")
+        expect(collection.gate_evidence.diagnostic).to_contain("AXIOMS")
+        expect(collection.receipt_files.is_empty()).to_equal(true)
+
+    it "rejects weak identities replay drift and duplicate roots":
+        var weak = truth_item()
+        weak.receipt.cache_key_hash = "polynomial-checksum"
+        expect(collect_verification_truthfulness_gate_v1([weak]).gate_evidence.diagnostic).to_contain("CACHE")
+        var drift = truth_item()
+        drift.receipt.independent_replay_hash = sha256_text("other-replay")
+        expect(collect_verification_truthfulness_gate_v1([drift]).gate_evidence.diagnostic).to_contain("REPLAY-BINDING")
+        expect(collect_verification_truthfulness_gate_v1([
+            truth_item(), truth_item()]).gate_evidence.diagnostic).to_contain(
+            "DUPLICATE")
+
+    it "rejects an axiom report for a different theorem root":
+        var substituted = truth_item("Proofs.claimed")
+        substituted.retained_axiom_report =
+            "'Proofs.other' does not depend on any axioms"
+        expect(collect_verification_truthfulness_gate_v1([
+            substituted]).gate_evidence.diagnostic).to_contain("AXIOMS")
+
+    it "rejects an axiom report retained for another artifact":
+        var substituted = truth_item()
+        substituted.axiom_report_artifact_hash = sha256_text("other-artifact")
+        expect(collect_verification_truthfulness_gate_v1([
+            substituted]).gate_evidence.diagnostic).to_contain("AXIOM-ARTIFACT")
+
+    it "rejects a hidden environmental trust assumption":
+        var open = truth_item()
+        open.trust_manifest = TrustManifestV1([], [], [], [], [],
+            ["device behaves correctly"])
+        expect(collect_verification_truthfulness_gate_v1([
+            open]).gate_evidence.diagnostic).to_contain("TRUST")
+
+    it "rejects cache or toolchain substitution":
+        var substituted = truth_item()
+        substituted.cache_key.lean_version = "different-lean"
+        expect(collect_verification_truthfulness_gate_v1([
+            substituted]).gate_evidence.diagnostic).to_contain("CACHE")

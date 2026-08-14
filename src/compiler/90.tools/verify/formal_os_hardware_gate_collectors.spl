@@ -1,0 +1,297 @@
+# SimpleOS and RV32 product collectors for FV2 Gates 4-5.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.formal_receipt.{ProofReceiptV1, TrustManifestV1,
+    VerificationCacheKeyV1}
+use compiler.common.assurance.replay_receipt.{IndependentReplayClosureV1}
+use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryGateV1,
+    FormalDeliveryGateStatusV1, FormalDeliveryGateEvidenceV1,
+    FormalDeliveryReceiptFileV1}
+use compiler.common.assurance.formal_interfaces.{HardwareProofReceiptV1,
+    CompilerCertificateV1}
+use compiler.tools.verify.formal_gate_collectors.{FormalGateCollectionV1,
+    TruthfulnessProofEvidenceV1, truthfulness_item_diagnostic_v1,
+    finalize_formal_gate_collection_v2}
+
+fn os_hw_gate_frame_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn os_hw_gate_sorted_v1(values: [text]) -> [text]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j] < result[i]:
+                val temporary = result[i]
+                result[i] = result[j]
+                result[j] = temporary
+            j = j + 1
+        i = i + 1
+    result
+
+fn os_hw_gate_frames_v1(values: [text]) -> text:
+    val sorted = os_hw_gate_sorted_v1(values)
+    var framed: [text] = []
+    for value in sorted: framed.push(os_hw_gate_frame_v1(value))
+    sorted.len().to_string() + ":[" + framed.join("") + "]"
+
+fn os_hw_append_unique_hashes_v1(target: [text], values: [text]) -> [text]:
+    var result = target
+    for value in values:
+        if not result.contains(value): result.push(value)
+    result
+
+pub enum SimpleOsSubsystemKindV1:
+    CapabilityAuthority
+    SchedulerLifecycle
+    BoundedIpc
+    SharedMemory
+    ProcessWait
+    ProcessQueue
+    CrashSafeStorage
+
+    fn name() -> text:
+        match self:
+            case CapabilityAuthority: "capability_authority"
+            case SchedulerLifecycle: "scheduler_lifecycle"
+            case BoundedIpc: "bounded_ipc"
+            case SharedMemory: "shared_memory"
+            case ProcessWait: "process_wait"
+            case ProcessQueue: "process_queue"
+            case CrashSafeStorage: "crash_safe_storage"
+
+pub struct SimpleOsSubsystemEvidenceV1:
+    schema: text
+    kind: SimpleOsSubsystemKindV1
+    symbol_id: text
+    source_semantics_hash: text
+    model_semantics_hash: text
+    source_receipt_content: text
+    source_receipt_hash: text
+    proof: ProofReceiptV1
+    cache_key: VerificationCacheKeyV1
+    retained_axiom_report: text
+    axiom_report_artifact_hash: text
+    trust_manifest: TrustManifestV1
+    replay: IndependentReplayClosureV1
+    status: FormalStatus
+    diagnostic: text
+
+fn failed_simpleos_collection_v1(diagnostic: text) -> FormalGateCollectionV1:
+    FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(
+        FormalDeliveryGateV1.SimpleOsVerticalSlice,
+        FormalDeliveryGateStatusV1.Failed, [], "", diagnostic), [])
+
+fn simpleos_kind_at_v1(index: i64) -> SimpleOsSubsystemKindV1:
+    match index:
+        case 0: SimpleOsSubsystemKindV1.CapabilityAuthority
+        case 1: SimpleOsSubsystemKindV1.SchedulerLifecycle
+        case 2: SimpleOsSubsystemKindV1.BoundedIpc
+        case 3: SimpleOsSubsystemKindV1.SharedMemory
+        case 4: SimpleOsSubsystemKindV1.ProcessWait
+        case 5: SimpleOsSubsystemKindV1.ProcessQueue
+        case _: SimpleOsSubsystemKindV1.CrashSafeStorage
+
+fn simpleos_item_diagnostic_v1(item: SimpleOsSubsystemEvidenceV1) -> text:
+    if item.schema != "SimpleOsSubsystemEvidence-v1":
+        return "FV2-E-SIMPLEOS-SCHEMA: subsystem evidence schema is not frozen v1"
+    if item.status != FormalStatus.SourceRefined or item.diagnostic != "":
+        return "FV2-E-SIMPLEOS-STATUS: every subsystem must be source_refined without diagnostics"
+    if item.symbol_id == "" or
+            not sha256_lower_hex_valid(item.source_semantics_hash) or
+            not sha256_lower_hex_valid(item.model_semantics_hash) or
+            not sha256_lower_hex_valid(item.source_receipt_hash) or
+            sha256_text(item.source_receipt_content) != item.source_receipt_hash:
+        return "FV2-E-SIMPLEOS-RECEIPT: subsystem source receipt is absent malformed or stale"
+    if item.proof.artifact_hash != item.axiom_report_artifact_hash or
+            item.replay.artifact_hash != item.proof.artifact_hash:
+        return "FV2-E-SIMPLEOS-ARTIFACT: proof audit and independent replay target different artifacts"
+    if item.proof.cache_key_hash != item.cache_key.hash() or
+            item.proof.trust_manifest_hash !=
+                sha256_text(item.trust_manifest.canonical_text()):
+        return "FV2-E-SIMPLEOS-CLOSURE: source refinement does not bind its exact cache key and trust manifest"
+    if item.source_semantics_hash != item.cache_key.vir_hash or
+            item.model_semantics_hash != item.cache_key.contract_hash:
+        return "FV2-E-SIMPLEOS-SEMANTICS: source and model identities differ from the verified cache key"
+    val truth = TruthfulnessProofEvidenceV1(item.proof, item.cache_key,
+        item.retained_axiom_report, item.axiom_report_artifact_hash,
+        item.trust_manifest, item.replay)
+    val truth_diagnostic = truthfulness_item_diagnostic_v1(truth)
+    if truth_diagnostic != "": return truth_diagnostic
+    ""
+
+pub fn collect_simpleos_vertical_slice_gate_v1(
+    subsystems: [SimpleOsSubsystemEvidenceV1]
+) -> FormalGateCollectionV1:
+    if subsystems.len() != 7:
+        return failed_simpleos_collection_v1(
+            "FV2-E-SIMPLEOS-COUNT: the frozen vertical slice requires exactly seven subsystems")
+    var symbols: [text] = []
+    var proof_roots: [text] = []
+    var files: [FormalDeliveryReceiptFileV1] = []
+    var receipt_hashes: [text] = []
+    for index in 0..subsystems.len():
+        val item = subsystems[index]
+        if item.kind != simpleos_kind_at_v1(index):
+            return failed_simpleos_collection_v1(
+                "FV2-E-SIMPLEOS-ORDER: subsystem evidence is missing reordered or substituted")
+        val diagnostic = simpleos_item_diagnostic_v1(item)
+        if diagnostic != "": return failed_simpleos_collection_v1(diagnostic)
+        if symbols.contains(item.symbol_id) or
+                proof_roots.contains(item.proof.proof_root):
+            return failed_simpleos_collection_v1(
+                "FV2-E-SIMPLEOS-DUPLICATE: symbols and proof roots must be unique across the slice")
+        symbols.push(item.symbol_id)
+        proof_roots.push(item.proof.proof_root)
+        files.push(FormalDeliveryReceiptFileV1(item.source_receipt_hash,
+            item.source_receipt_content))
+        receipt_hashes.push(item.source_receipt_hash)
+        val closure_content = "SimpleOsSubsystemClosure-v1" +
+            os_hw_gate_frame_v1(item.kind.name()) +
+            os_hw_gate_frame_v1(item.symbol_id) +
+            os_hw_gate_frame_v1(item.source_semantics_hash) +
+            os_hw_gate_frame_v1(item.model_semantics_hash) +
+            os_hw_gate_frame_v1(item.source_receipt_hash) +
+            os_hw_gate_frame_v1(item.proof.hash()) +
+            os_hw_gate_frame_v1(item.cache_key.hash()) +
+            os_hw_gate_frame_v1(sha256_text(
+                item.trust_manifest.canonical_text())) +
+            os_hw_gate_frame_v1(item.replay.hash())
+        val closure_hash = sha256_text(closure_content)
+        files.push(FormalDeliveryReceiptFileV1(closure_hash, closure_content))
+        receipt_hashes.push(closure_hash)
+    val aggregate_content = "SimpleOsVerticalSliceReceipt-v1" +
+        os_hw_gate_frames_v1(receipt_hashes)
+    val aggregate_hash = sha256_text(aggregate_content)
+    files.push(FormalDeliveryReceiptFileV1(aggregate_hash, aggregate_content))
+    receipt_hashes.push(aggregate_hash)
+    val evidence_hash = sha256_text("SimpleOsVerticalSliceGate-v1" +
+        os_hw_gate_frames_v1(receipt_hashes))
+    finalize_formal_gate_collection_v2(
+        FormalDeliveryGateV1.SimpleOsVerticalSlice, evidence_hash, files)
+
+fn failed_rv32i_collection_v1(diagnostic: text) -> FormalGateCollectionV1:
+    FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(
+        FormalDeliveryGateV1.GeneratedRv32iEndToEnd,
+        FormalDeliveryGateStatusV1.Failed, [], "", diagnostic), [])
+
+fn hardware_identity_diagnostic_v1(receipt: HardwareProofReceiptV1) -> text:
+    if receipt.diagnostic() != "" or
+            not sha256_lower_hex_valid(receipt.hwir_hash) or
+            not sha256_lower_hex_valid(receipt.rtl_hash) or
+            not sha256_lower_hex_valid(receipt.rvfi_contract_hash) or
+            not sha256_lower_hex_valid(receipt.assumption_manifest_hash):
+        return "FV2-E-RV32I-IDENTITY: hardware receipt is incomplete or contains a non-SHA identity"
+    for hash in receipt.evidence_receipt_hashes:
+        if not sha256_lower_hex_valid(hash):
+            return "FV2-E-RV32I-EVIDENCE-HASH: external evidence identity is not SHA-256"
+    ""
+
+fn os_hw_append_unique_hashes_v1(target: [text], values: [text]) -> [text]:
+    var result = target
+    for value in values:
+        if not result.contains(value): result.push(value)
+    result
+
+pub fn collect_generated_rv32i_end_to_end_gate_v1(
+    formal: HardwareProofReceiptV1,
+    equivalence: HardwareProofReceiptV1,
+    sail: HardwareProofReceiptV1,
+    hwir_to_rtl: CompilerCertificateV1,
+    materialized_external_evidence: [FormalDeliveryReceiptFileV1]
+) -> FormalGateCollectionV1:
+    val formal_diagnostic = hardware_identity_diagnostic_v1(formal)
+    if formal_diagnostic != "": return failed_rv32i_collection_v1(
+        formal_diagnostic)
+    val equivalence_diagnostic = hardware_identity_diagnostic_v1(equivalence)
+    if equivalence_diagnostic != "": return failed_rv32i_collection_v1(
+        equivalence_diagnostic)
+    val sail_diagnostic = hardware_identity_diagnostic_v1(sail)
+    if sail_diagnostic != "": return failed_rv32i_collection_v1(
+        sail_diagnostic)
+    if formal.status != FormalStatus.ModelProven or
+            equivalence.status != FormalStatus.BackendRefined or
+            sail.status != FormalStatus.ModelProven:
+        return failed_rv32i_collection_v1(
+            "FV2-E-RV32I-STATUS: formal Sail and RTL-netlist lanes lack their required refinement statuses")
+    if formal.hwir_hash != equivalence.hwir_hash or
+            formal.hwir_hash != sail.hwir_hash or
+            formal.rtl_hash != equivalence.rtl_hash or
+            formal.rtl_hash != sail.rtl_hash or
+            formal.rvfi_contract_hash != equivalence.rvfi_contract_hash or
+            formal.rvfi_contract_hash != sail.rvfi_contract_hash or
+            formal.assumption_manifest_hash != equivalence.assumption_manifest_hash or
+            formal.assumption_manifest_hash != sail.assumption_manifest_hash:
+        return failed_rv32i_collection_v1(
+            "FV2-E-RV32I-BINDING: SBY Sail and equivalence evidence target different generated products")
+    if not sha256_lower_hex_valid(equivalence.netlist_hash):
+        return failed_rv32i_collection_v1(
+            "FV2-E-RV32I-NETLIST: synthesized-netlist equivalence identity is required")
+    for formal_hash in formal.evidence_receipt_hashes:
+        if not equivalence.evidence_receipt_hashes.contains(formal_hash):
+            return failed_rv32i_collection_v1(
+                "FV2-E-RV32I-EQUIVALENCE-BASE: netlist evidence omits the accepted RTL formal receipt closure")
+    if hwir_to_rtl.diagnostic() != "" or
+            hwir_to_rtl.before_semantic_hash != formal.hwir_hash or
+            hwir_to_rtl.after_semantic_hash != formal.rtl_hash:
+        return failed_rv32i_collection_v1(
+            "FV2-E-RV32I-HWIR-RTL: independently checked HWIR-to-RTL refinement certificate is required")
+    if not formal.property_ids.contains("rv32i.add.result") or
+            not formal.property_ids.contains("rv32i.add.pc") or
+            not formal.property_ids.contains("rv32i.add.no-memory") or
+            not formal.cover_ids.contains("rv32i.add.retirement-reachable") or
+            not formal.mutation_ids.contains("rv32i.add.substitution-mutant"):
+        return failed_rv32i_collection_v1(
+            "FV2-E-RV32I-FORMAL-SCOPE: ADD semantics cover and killed-mutant evidence are incomplete")
+    if not sail.property_ids.contains("rv32i.add.sail-result-agreement") or
+            not sail.cover_ids.contains("rv32i.add.sail-retirement-witness") or
+            not sail.mutation_ids.contains("rv32i.add.sail-independent-oracle"):
+        return failed_rv32i_collection_v1(
+            "FV2-E-RV32I-SAIL-SCOPE: independent Sail agreement witness is incomplete")
+    var required_hashes: [text] = []
+    required_hashes = os_hw_append_unique_hashes_v1(required_hashes,
+        formal.evidence_receipt_hashes)
+    required_hashes = os_hw_append_unique_hashes_v1(required_hashes,
+        equivalence.evidence_receipt_hashes)
+    required_hashes = os_hw_append_unique_hashes_v1(required_hashes,
+        sail.evidence_receipt_hashes)
+    if materialized_external_evidence.len() != required_hashes.len():
+        return failed_rv32i_collection_v1(
+            "FV2-E-RV32I-MATERIAL-COUNT: every and only referenced external evidence file must be materialized")
+    var files: [FormalDeliveryReceiptFileV1] = []
+    for required_hash in required_hashes:
+        var matches = 0
+        for file in materialized_external_evidence:
+            if file.receipt_hash == required_hash and
+                    sha256_text(file.content) == required_hash:
+                matches = matches + 1
+        if matches != 1:
+            return failed_rv32i_collection_v1(
+                "FV2-E-RV32I-MATERIAL: referenced external evidence is missing duplicated or stale")
+    for file in materialized_external_evidence: files.push(file)
+    val compiler_content = hwir_to_rtl.evidence_payload()
+    if sha256_text(compiler_content) != hwir_to_rtl.certificate_hash:
+        return failed_rv32i_collection_v1(
+            "FV2-E-RV32I-HWIR-RTL-HASH: compiler certificate payload drifted")
+    files.push(FormalDeliveryReceiptFileV1(hwir_to_rtl.certificate_hash,
+        compiler_content))
+    val aggregate_content = "GeneratedRv32iEndToEndReceipt-v1" +
+        os_hw_gate_frame_v1(formal.hwir_hash) +
+        os_hw_gate_frame_v1(formal.rtl_hash) +
+        os_hw_gate_frame_v1(equivalence.netlist_hash) +
+        os_hw_gate_frame_v1(formal.rvfi_contract_hash) +
+        os_hw_gate_frame_v1(formal.assumption_manifest_hash) +
+        os_hw_gate_frame_v1(hwir_to_rtl.certificate_hash) +
+        os_hw_gate_frames_v1(required_hashes)
+    val aggregate_hash = sha256_text(aggregate_content)
+    files.push(FormalDeliveryReceiptFileV1(aggregate_hash, aggregate_content))
+    var receipt_hashes = required_hashes
+    receipt_hashes.push(hwir_to_rtl.certificate_hash)
+    receipt_hashes.push(aggregate_hash)
+    val evidence_hash = sha256_text("GeneratedRv32iEndToEndGate-v1" +
+        os_hw_gate_frames_v1(receipt_hashes))
+    finalize_formal_gate_collection_v2(
+        FormalDeliveryGateV1.GeneratedRv32iEndToEnd, evidence_hash, files)

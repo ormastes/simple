@@ -1,0 +1,123 @@
+# Formal Verification 2.0 translation validator for the currently proved DCE
+# fragment.  This deliberately mirrors `src/verification/mir_dce_tv`: a
+# straight-line list of constants, wrapping 64-bit adds, and copies, observed
+# through one result register.  Full MIR is unsupported, never guessed.
+
+use compiler.common.assurance.flight_rules.{assurance_text_hash}
+use compiler.common.assurance.formal_interfaces.{CompilerCertificateV1, CompilerRefinementRelationV1}
+
+enum DceTvInstructionV1:
+    Const(destination: i64, value_bits: i64)
+    Add(destination: i64, left: i64, right: i64)
+    Copy(destination: i64, source: i64)
+
+impl DceTvInstructionV1:
+    fn destination() -> i64:
+        match self:
+            case Const(destination, _): destination
+            case Add(destination, _, _): destination
+            case Copy(destination, _): destination
+
+    fn reads(register: i64) -> bool:
+        match self:
+            case Const(_, _): false
+            case Add(_, left, right): register == left or register == right
+            case Copy(_, source): register == source
+
+    fn same_as(other: DceTvInstructionV1) -> bool:
+        self.canonical_text() == other.canonical_text()
+
+    fn canonical_text() -> text:
+        match self:
+            case Const(destination, value_bits): "const:{destination}:{value_bits}"
+            case Add(destination, left, right): "add:{destination}:{left}:{right}"
+            case Copy(destination, source): "copy:{destination}:{source}"
+
+struct DceTvProgramV1:
+    instructions: [DceTvInstructionV1]
+    result_register: i64
+
+impl DceTvProgramV1:
+    fn diagnostic() -> text:
+        if self.result_register < 0: return "FV2-E-DCE-TV-RESULT: result register must be non-negative"
+        for instruction in self.instructions:
+            if instruction.destination() < 0: return "FV2-E-DCE-TV-REGISTER: register identifiers must be non-negative"
+        ""
+
+    fn canonical_text() -> text:
+        var rows: [text] = []
+        for instruction in self.instructions:
+            rows = rows.push(instruction.canonical_text())
+        "DceTvProgramV1|result={self.result_register}|instructions=" + rows.join(",")
+
+    fn semantic_hash() -> text:
+        assurance_text_hash(self.canonical_text())
+
+fn _dce_tv_live_in(instructions: [DceTvInstructionV1], start: i64, register: i64, result_register: i64) -> bool:
+    if start >= instructions.len():
+        return register == result_register
+    val instruction = instructions[start]
+    instruction.reads(register) or
+        (register != instruction.destination() and
+            _dce_tv_live_in(instructions, start + 1, register, result_register))
+
+fn dce_tv_instruction_is_dead(program: DceTvProgramV1, index: i64) -> bool:
+    if index < 0 or index >= program.instructions.len():
+        return false
+    val destination = program.instructions[index].destination()
+    not _dce_tv_live_in(program.instructions, index + 1, destination, program.result_register)
+
+fn dce_tv_optimize(source: DceTvProgramV1) -> DceTvProgramV1:
+    var target: [DceTvInstructionV1] = []
+    for index in 0..source.instructions.len():
+        if not dce_tv_instruction_is_dead(source, index):
+            target = target.push(source.instructions[index])
+    DceTvProgramV1(target, source.result_register)
+
+fn dce_tv_validate(source: DceTvProgramV1, target: DceTvProgramV1) -> bool:
+    if source.diagnostic() != "" or target.diagnostic() != "": return false
+    if source.result_register != target.result_register: return false
+    var source_index = 0
+    var target_index = 0
+    while source_index < source.instructions.len():
+        if dce_tv_instruction_is_dead(source, source_index):
+            source_index = source_index + 1
+            continue
+        if target_index >= target.instructions.len(): return false
+        if not source.instructions[source_index].same_as(target.instructions[target_index]): return false
+        source_index = source_index + 1
+        target_index = target_index + 1
+    target_index == target.instructions.len()
+
+struct DceTranslationValidationResultV1:
+    source_hash: text
+    target_hash: text
+    accepted: bool
+    diagnostic: text
+    certificate: CompilerCertificateV1?
+
+fn validate_dce_translation_v1(
+    source: DceTvProgramV1,
+    target: DceTvProgramV1,
+    axiom_audit_hash: text
+) -> DceTranslationValidationResultV1:
+    val source_hash = source.semantic_hash()
+    val target_hash = target.semantic_hash()
+    if axiom_audit_hash == "":
+        return DceTranslationValidationResultV1(source_hash, target_hash, false,
+            "FV2-E-DCE-TV-AUDIT: MirDceTv.validate_sound axiom audit is required", nil)
+    if not dce_tv_validate(source, target):
+        return DceTranslationValidationResultV1(source_hash, target_hash, false,
+            "FV2-E-DCE-TV-REJECTED: target is not an accepted DCE refinement", nil)
+
+    val validator_id = "mir-dce-tv-v1|MirDceTv.validate_sound|audit=" + axiom_audit_hash
+    val draft = CompilerCertificateV1(
+        "mir-dce-v1", source_hash, target_hash,
+        CompilerRefinementRelationV1.ObservationalEquivalence,
+        validator_id, "", true
+    )
+    val certificate = CompilerCertificateV1(
+        draft.pass_id, draft.before_semantic_hash, draft.after_semantic_hash,
+        draft.relation, draft.validator_version, draft.expected_certificate_hash(), true
+    )
+    DceTranslationValidationResultV1(source_hash, target_hash, true, "", Some(certificate))

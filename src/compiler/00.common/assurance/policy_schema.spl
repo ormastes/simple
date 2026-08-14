@@ -44,6 +44,11 @@ impl AssuranceStrictness:
     # today, so nothing silently escalates. Emitting the deprecation warning is
     # WP-3's job, not this schema's.
     static fn from_name(raw: text) -> AssuranceStrictness:
+        # V1 cannot represent the FV2 proof-closure tier.  Project it to the
+        # strongest V1 engineering restrictions rather than the permissive
+        # default; verified release admission is owned by PolicyV2.
+        if raw == "verified":
+            return AssuranceStrictness.Critical
         if raw == "critical" or raw == "mission-critical" or raw == "mission_critical":
             return AssuranceStrictness.Critical
         if raw == "robust" or raw == "reliable":
@@ -175,4 +180,85 @@ impl ResolvedAssurancePolicyV1:
             return false
         if self.assurance_grade.rank() < other.assurance_grade.rank():
             return false
+        self.convention.rank() >= other.convention.rank()
+
+# ============================================================================
+# ResolvedAssurancePolicyV2 — FV2 extension of the frozen V1 policy.
+#
+# `verified` is deliberately not added to AssuranceStrictness/V1: doing so
+# would alter the V1 hash and let an older compiler misread a newer policy.
+# V2 retains all V1 dimensions and adds only the fifth strictness value.
+# ============================================================================
+
+enum AssuranceStrictnessV2:
+    Moderate
+    Strict
+    Robust
+    Critical
+    Verified
+
+impl AssuranceStrictnessV2:
+    fn name() -> text:
+        match self:
+            AssuranceStrictnessV2.Moderate: "moderate"
+            AssuranceStrictnessV2.Strict: "strict"
+            AssuranceStrictnessV2.Robust: "robust"
+            AssuranceStrictnessV2.Critical: "critical"
+            AssuranceStrictnessV2.Verified: "verified"
+
+    static fn from_name(raw: text) -> AssuranceStrictnessV2:
+        if raw == "verified": return AssuranceStrictnessV2.Verified
+        if raw == "critical" or raw == "mission-critical" or raw == "mission_critical":
+            return AssuranceStrictnessV2.Critical
+        if raw == "robust" or raw == "reliable": return AssuranceStrictnessV2.Robust
+        if raw == "strict" or raw == "lib": return AssuranceStrictnessV2.Strict
+        AssuranceStrictnessV2.Moderate
+
+    fn rank() -> i64:
+        match self:
+            AssuranceStrictnessV2.Moderate: 0
+            AssuranceStrictnessV2.Strict: 1
+            AssuranceStrictnessV2.Robust: 2
+            AssuranceStrictnessV2.Critical: 3
+            AssuranceStrictnessV2.Verified: 4
+
+    fn at_least(other: AssuranceStrictnessV2) -> bool:
+        self.rank() >= other.rank()
+
+    static fn from_v1(value: AssuranceStrictness) -> AssuranceStrictnessV2:
+        match value:
+            AssuranceStrictness.Moderate: AssuranceStrictnessV2.Moderate
+            AssuranceStrictness.Strict: AssuranceStrictnessV2.Strict
+            AssuranceStrictness.Robust: AssuranceStrictnessV2.Robust
+            AssuranceStrictness.Critical: AssuranceStrictnessV2.Critical
+
+struct ResolvedAssurancePolicyV2:
+    strictness: AssuranceStrictnessV2
+    runtime_family: text
+    assurance_grade: AssuranceGrade
+    convention: AssuranceConvention
+
+impl ResolvedAssurancePolicyV2:
+    static fn default() -> ResolvedAssurancePolicyV2:
+        val v1 = ResolvedAssurancePolicyV1.default()
+        ResolvedAssurancePolicyV2(AssuranceStrictnessV2.from_v1(v1.strictness),
+            v1.runtime_family, v1.assurance_grade, v1.convention)
+
+    static fn upgrade_v1(policy: ResolvedAssurancePolicyV1) -> ResolvedAssurancePolicyV2:
+        ResolvedAssurancePolicyV2(AssuranceStrictnessV2.from_v1(policy.strictness),
+            policy.runtime_family, policy.assurance_grade, policy.convention)
+
+    fn canonical_text() -> text:
+        "ResolvedAssurancePolicyV2" + "|strictness=" + self.strictness.name() +
+            "|runtime_family=" + self.runtime_family +
+            "|assurance_grade=" + self.assurance_grade.name() +
+            "|convention=" + self.convention.name() +
+            "|rules=" + flight_rules_hash()
+
+    fn policy_hash() -> text:
+        "APOLV2-" + assurance_text_hash(self.canonical_text())
+
+    fn is_at_least_as_strict_as(other: ResolvedAssurancePolicyV2) -> bool:
+        if not self.strictness.at_least(other.strictness): return false
+        if self.assurance_grade.rank() < other.assurance_grade.rank(): return false
         self.convention.rank() >= other.convention.rank()

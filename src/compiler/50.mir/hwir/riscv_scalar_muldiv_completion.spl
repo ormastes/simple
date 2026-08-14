@@ -1,0 +1,105 @@
+# Frozen full-completion boundary shared by the iterative M/Zmmul engines.
+
+use compiler.mir.hwir.types.{HwPort}
+use compiler.mir.hwir.sequential.{HwSeqAssignment, HwSeqGuard,
+    HwSeqOutputBinding, HwSeqValue, HwStateRegister}
+
+pub fn riscv_scalar_muldiv_owner_ports(xlen: i32) -> [HwPort]:
+    [HwPort.input("clk", "Bits", 1), HwPort.input("rst", "Bits", 1),
+        HwPort.input("dispatch_valid", "Bits", 1),
+        HwPort.input("dispatch_lineage_valid", "Bits", 1),
+        HwPort.input("dispatch_event_id", "Bits", 64),
+        HwPort.input("decode_event_id", "Bits", 64),
+        HwPort.input("illegal_valid", "Bits", 1),
+        HwPort.input("dispatch_privilege", "Bits", 2),
+        HwPort.input("dispatch_original_instruction", "Bits", 32),
+        HwPort.input("dispatch_canonical_instruction", "Bits", 32),
+        HwPort.input("dispatch_instruction_length_bytes", "Bits", 3),
+        HwPort.input("dispatch_pc_before", "Bits", xlen),
+        HwPort.input("dispatch_pc_after", "Bits", xlen),
+        HwPort.input("dispatch_rd", "Bits", 5),
+        HwPort.input("rs1_index", "Bits", 5), HwPort.input("rs2_index", "Bits", 5),
+        HwPort.input("rs1_value", "Bits", xlen), HwPort.input("rs2_value", "Bits", xlen),
+        HwPort.input("completion_ready", "Bits", 1),
+        HwPort.output("dispatch_ready", "Bits", 1),
+        HwPort.output("completion_valid", "Bits", 1),
+        HwPort.output("completion_decode_valid", "Bits", 1),
+        HwPort.output("completion_event_id", "Bits", 64),
+        HwPort.output("completion_decode_event_id", "Bits", 64),
+        HwPort.output("completion_illegal_valid", "Bits", 1),
+        HwPort.output("privilege", "Bits", 2),
+        HwPort.output("original_instruction", "Bits", 32),
+        HwPort.output("canonical_instruction", "Bits", 32),
+        HwPort.output("instruction_length_bytes", "Bits", 3),
+        HwPort.output("pc_before", "Bits", xlen), HwPort.output("pc_after", "Bits", xlen),
+        HwPort.output("rd", "Bits", 5), HwPort.output("rd_write", "Bits", 1),
+        HwPort.output("rd_value", "Bits", xlen),
+        HwPort.output("memory_address", "Bits", xlen),
+        HwPort.output("memory_read_mask", "Bits", 32),
+        HwPort.output("memory_write_mask", "Bits", 32),
+        HwPort.output("memory_read_data", "Bits", xlen),
+        HwPort.output("memory_write_data", "Bits", xlen),
+        HwPort.output("execute_trap_valid", "Bits", 1),
+        HwPort.output("execute_trap_cause", "Bits", xlen),
+        HwPort.output("execute_trap_tval", "Bits", xlen),
+        HwPort.output("memory_trap_valid", "Bits", 1),
+        HwPort.output("memory_trap_cause", "Bits", xlen),
+        HwPort.output("memory_trap_tval", "Bits", xlen),
+        HwPort.output("redirect_valid", "Bits", 1),
+        HwPort.output("redirect_target", "Bits", xlen),
+        HwPort.output("protocol_fault", "Bits", 1)]
+
+pub fn riscv_scalar_muldiv_metadata_registers(xlen: i32) -> [HwStateRegister]:
+    [HwStateRegister(name: "illegal_valid_reg", bit_width: 1, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "privilege_reg", bit_width: 2, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "original_instruction_reg", bit_width: 32, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "canonical_instruction_reg", bit_width: 32, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "instruction_length_reg", bit_width: 3, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "pc_before_reg", bit_width: xlen, clock_domain: "default", reset_value: 0),
+        HwStateRegister(name: "pc_after_reg", bit_width: xlen, clock_domain: "default", reset_value: 0)]
+
+pub fn riscv_scalar_muldiv_metadata_capture(xlen: i32) -> [HwSeqAssignment]:
+    [HwSeqAssignment(destination: "illegal_valid_reg", value: HwSeqValue.copy("illegal_valid", 1)),
+        HwSeqAssignment(destination: "privilege_reg", value: HwSeqValue.copy("dispatch_privilege", 2)),
+        HwSeqAssignment(destination: "original_instruction_reg", value: HwSeqValue.copy("dispatch_original_instruction", 32)),
+        HwSeqAssignment(destination: "canonical_instruction_reg", value: HwSeqValue.copy("dispatch_canonical_instruction", 32)),
+        HwSeqAssignment(destination: "instruction_length_reg", value: HwSeqValue.copy("dispatch_instruction_length_bytes", 3)),
+        HwSeqAssignment(destination: "pc_before_reg", value: HwSeqValue.copy("dispatch_pc_before", xlen)),
+        HwSeqAssignment(destination: "pc_after_reg", value: HwSeqValue.copy("dispatch_pc_after", xlen))]
+
+fn held() -> [HwSeqGuard]:
+    [HwSeqGuard.high("result_valid_reg"), HwSeqGuard.low("fault_reg")]
+
+pub fn riscv_scalar_muldiv_completion_outputs(xlen: i32) -> [HwSeqOutputBinding]:
+    val visible = held()
+    [HwSeqOutputBinding.all("dispatch_ready", [HwSeqGuard.low("busy_reg"),
+            HwSeqGuard.low("result_valid_reg"), HwSeqGuard.low("fault_reg")]),
+        HwSeqOutputBinding.direct("completion_valid", "result_valid_reg", 1),
+        HwSeqOutputBinding.direct("completion_decode_valid", "result_valid_reg", 1),
+        HwSeqOutputBinding.guarded("completion_event_id", "event_id_reg", 64, visible),
+        HwSeqOutputBinding.guarded("completion_decode_event_id", "decode_event_id_reg", 64, visible),
+        HwSeqOutputBinding.guarded("completion_illegal_valid", "illegal_valid_reg", 1, visible),
+        HwSeqOutputBinding.guarded("privilege", "privilege_reg", 2, visible),
+        HwSeqOutputBinding.guarded("original_instruction", "original_instruction_reg", 32, visible),
+        HwSeqOutputBinding.guarded("canonical_instruction", "canonical_instruction_reg", 32, visible),
+        HwSeqOutputBinding.guarded("instruction_length_bytes", "instruction_length_reg", 3, visible),
+        HwSeqOutputBinding.guarded("pc_before", "pc_before_reg", xlen, visible),
+        HwSeqOutputBinding.guarded("pc_after", "pc_after_reg", xlen, visible),
+        HwSeqOutputBinding.guarded("rd", "rd_reg", 5, visible),
+        HwSeqOutputBinding.all("rd_write", [HwSeqGuard.high("result_valid_reg"),
+            HwSeqGuard.low("fault_reg"), HwSeqGuard.high("rd_nonzero")]),
+        HwSeqOutputBinding.guarded("rd_value", "result_reg", xlen, visible),
+        HwSeqOutputBinding.guarded("memory_address", "zero_xlen_owner", xlen, visible),
+        HwSeqOutputBinding.guarded("memory_read_mask", "zero32_owner", 32, visible),
+        HwSeqOutputBinding.guarded("memory_write_mask", "zero32_owner", 32, visible),
+        HwSeqOutputBinding.guarded("memory_read_data", "zero_xlen_owner", xlen, visible),
+        HwSeqOutputBinding.guarded("memory_write_data", "zero_xlen_owner", xlen, visible),
+        HwSeqOutputBinding.guarded("execute_trap_valid", "zero1_owner", 1, visible),
+        HwSeqOutputBinding.guarded("execute_trap_cause", "zero_xlen_owner", xlen, visible),
+        HwSeqOutputBinding.guarded("execute_trap_tval", "zero_xlen_owner", xlen, visible),
+        HwSeqOutputBinding.guarded("memory_trap_valid", "zero1_owner", 1, visible),
+        HwSeqOutputBinding.guarded("memory_trap_cause", "zero_xlen_owner", xlen, visible),
+        HwSeqOutputBinding.guarded("memory_trap_tval", "zero_xlen_owner", xlen, visible),
+        HwSeqOutputBinding.guarded("redirect_valid", "zero1_owner", 1, visible),
+        HwSeqOutputBinding.guarded("redirect_target", "zero_xlen_owner", xlen, visible),
+        HwSeqOutputBinding.direct("protocol_fault", "fault_reg", 1)]

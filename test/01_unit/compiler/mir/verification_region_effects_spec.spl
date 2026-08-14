@@ -1,0 +1,229 @@
+use std.spec
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.formal_receipt.{ProofReceiptV1}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instructions.{BlockId, MirBlock, MirFunction, MirInst, MirInstKind, MirModule, MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirLocal, MirSignature, MirType, MirTypeKind}
+use compiler.mir.verification_effects.{VerificationEffectV1}
+use compiler.mir.verification_ir.{verification_ir_from_retained_contract, verification_ir_from_canonical_mir, verification_effect_closure_from_mir_module_v1, verification_ir_module_from_canonical_mir_v1}
+use compiler.mir.verification_contract_bridge.{verification_region_state_semantics_v1, verification_contract_expected_state_context_v2}
+use compiler.mir.verification_region_effects.{MirRegionAccessV1, verification_region_effect_manifest_v1, verification_region_frame_obligation_v1, issue_region_frame_proof_receipt_v1}
+
+fn region_local(id: i64, type_: MirType) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: type_,
+        kind: LocalKind.Temp, is_ghost: false)
+
+fn region_function(name: text, locals: [MirLocal], instructions: [MirInst], terminator: MirTerminator) -> MirFunction:
+    MirFunction(
+        symbol: SymbolId(id: 7001), name: name,
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: locals,
+        blocks: [MirBlock(id: BlockId(id: 0), label: Some("entry"),
+            instructions: instructions, terminator: terminator)],
+        entry_block: BlockId(id: 0), span: Span.default(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false)
+
+fn region_copy(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(LocalId(id: id)))
+
+fn region_span() -> Span:
+    Span(start: 10, end: 14, line: 2, col: 5,
+        file: "region_fixture.spl", length: 4)
+
+fn region_direct_call(name: text) -> MirInst:
+    val signature = MirSignature(params: [], return_type: MirType.unit(),
+        is_variadic: false)
+    val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(signature))))
+    MirInst(kind: MirInstKind.Call(nil, callee, []), span: Some(region_span()))
+
+fn region_frame_proof_receipt(root: text, replay: text) -> ProofReceiptV1:
+    ProofReceiptV1(root, FormalStatus.ModelProven, "cache", "lean-artifact", [],
+        "axiom-audit", "closed-trust", "", replay)
+
+describe "FV2 typed MIR region effects":
+    it "derives exact read and write effects for one typed module global":
+        val i64_type = MirType.i64()
+        val func = region_function("global_step", [region_local(0, i64_type)], [
+            MirInst(kind: MirInstKind.LoadGlobal(LocalId(id: 0), SymbolId(id: 41)), span: Some(region_span())),
+            MirInst(kind: MirInstKind.StoreGlobal(SymbolId(id: 41), region_copy(0)), span: Some(region_span()))
+        ], MirTerminator.Ret(nil))
+        val manifest = verification_region_effect_manifest_v1(func)
+        expect(manifest.closed()).to_equal(true)
+        expect(manifest.effects.len()).to_equal(2)
+        expect(manifest.effects[0].access).to_equal(MirRegionAccessV1.Read)
+        expect(manifest.effects[1].access).to_equal(MirRegionAccessV1.Write)
+        expect(manifest.effects[0].region_id).to_equal("global:41")
+        expect(manifest.effects[0].value_type_identity).to_equal(manifest.effects[1].value_type_identity)
+        expect(manifest.state_model_semantic_hash() == "").to_equal(false)
+        expect(manifest.transition_semantic_hash() == manifest.frame_model_semantic_hash).to_equal(false)
+        expect(manifest.verification_effects()).to_equal([
+            VerificationEffectV1.Read("global:41"),
+            VerificationEffectV1.Write("global:41")])
+        val state = verification_region_state_semantics_v1(func)
+        expect(state.closed()).to_equal(true)
+        expect(state.execution_semantic_hash).to_equal(manifest.execution_semantic_hash)
+        expect(state.state_model_semantic_hash).to_equal(manifest.state_model_semantic_hash())
+        expect(state.transition_semantic_hash).to_equal(manifest.transition_semantic_hash())
+        expect(state.frame_model_semantic_hash).to_equal(manifest.frame_model_semantic_hash)
+        val contract_context = verification_contract_expected_state_context_v2(func).unwrap()
+        expect(contract_context.reachable_state_semantic_hash).to_equal(
+            state.reachable_state_semantic_hash)
+        expect(contract_context.transition_semantic_hash).to_equal(
+            state.transition_semantic_hash)
+        expect(contract_context.frame_model_semantic_hash).to_equal(
+            state.frame_model_semantic_hash)
+
+    it "binds the frame identity to the exact written region set":
+        val i64_type = MirType.i64()
+        val first = region_function("writer", [region_local(0, i64_type)], [
+            MirInst(kind: MirInstKind.StoreGlobal(SymbolId(id: 41), region_copy(0)), span: Some(region_span()))
+        ], MirTerminator.Ret(nil))
+        val second = region_function("writer", [region_local(0, i64_type)], [
+            MirInst(kind: MirInstKind.StoreGlobal(SymbolId(id: 42), region_copy(0)), span: Some(region_span()))
+        ], MirTerminator.Ret(nil))
+        val first_manifest = verification_region_effect_manifest_v1(first)
+        val second_manifest = verification_region_effect_manifest_v1(second)
+        expect(first_manifest.frame_model_semantic_hash == second_manifest.frame_model_semantic_hash).to_equal(false)
+        expect(first_manifest.hash() == second_manifest.hash()).to_equal(false)
+        val first_frame = verification_region_frame_obligation_v1(first)
+        val second_frame = verification_region_frame_obligation_v1(second)
+        expect(first_frame.closed()).to_equal(true)
+        expect(first_frame.written_region_atoms).to_equal([
+            "global:41@" + first_manifest.effects[0].value_type_identity])
+        expect(first_frame.hash() == second_frame.hash()).to_equal(false)
+
+        val receipt = issue_region_frame_proof_receipt_v1(
+            first, region_frame_proof_receipt(
+                "MirRegionFrame.run_frame", "independent-replay"))
+        expect(receipt.accepted()).to_equal(true)
+        expect(receipt.obligation_hash).to_equal(first_frame.hash())
+        val wrong_root = issue_region_frame_proof_receipt_v1(
+            first, region_frame_proof_receipt(
+                "MirRegionFrame.read_is_frame", "independent-replay"))
+        expect(wrong_root.accepted()).to_equal(false)
+        expect(wrong_root.diagnostic).to_contain("PROOF-ROOT")
+        val missing_replay = issue_region_frame_proof_receipt_v1(
+            first, region_frame_proof_receipt("MirRegionFrame.run_frame", ""))
+        expect(missing_replay.accepted()).to_equal(false)
+        expect(missing_replay.diagnostic).to_contain("REPLAY")
+
+    it "prevents caller-supplied effects from contradicting canonical VIR":
+        val i64_type = MirType.i64()
+        val func = region_function("writer", [region_local(0, i64_type)], [
+            MirInst(kind: MirInstKind.StoreGlobal(SymbolId(id: 41), region_copy(0)), span: Some(region_span()))
+        ], MirTerminator.Ret(nil))
+        val forged = verification_ir_from_retained_contract(
+            func, "source", "expanded", "woven", "policy",
+            [VerificationEffectV1.Pure], [])
+        expect(forged.closure_ready()).to_equal(false)
+        expect(forged.diagnostic).to_contain("EFFECT-MISMATCH")
+
+        val derived = verification_ir_from_canonical_mir(
+            func, "source", "expanded", "woven", "policy", [])
+        expect(derived.diagnostic).to_equal("")
+        expect(derived.effects).to_equal([VerificationEffectV1.Write("global:41")])
+
+    it "rejects inconsistent types for the same global region":
+        val func = region_function("bad_types", [
+            region_local(0, MirType.i64()),
+            region_local(1, MirType.bool())
+        ], [
+            MirInst(kind: MirInstKind.LoadGlobal(LocalId(id: 0), SymbolId(id: 41)), span: Some(region_span())),
+            MirInst(kind: MirInstKind.StoreGlobal(SymbolId(id: 41), region_copy(1)), span: Some(region_span()))
+        ], MirTerminator.Ret(nil))
+        val manifest = verification_region_effect_manifest_v1(func)
+        expect(manifest.closed()).to_equal(false)
+        expect(manifest.diagnostic).to_contain("TYPE-MISMATCH")
+
+    it "rejects a global effect without exact source provenance":
+        val func = region_function("unmapped", [region_local(0, MirType.i64())], [
+            MirInst(kind: MirInstKind.StoreGlobal(
+                SymbolId(id: 41), region_copy(0)), span: nil)
+        ], MirTerminator.Ret(nil))
+        expect(verification_region_effect_manifest_v1(func).diagnostic).to_contain("REGION-SPAN")
+
+    it "rejects pointer indirect-call and trap boundaries without typed owners":
+        val pointer = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Int(7), MirType(kind: MirTypeKind.Ptr(MirType.i64(), true))))
+        val heap = region_function("heap", [region_local(0, MirType.i64())], [
+            MirInst(kind: MirInstKind.Load(LocalId(id: 0), pointer), span: nil)
+        ], MirTerminator.Ret(nil))
+        expect(verification_region_effect_manifest_v1(heap).diagnostic).to_contain("REGION-POINTER")
+        expect(verification_region_frame_obligation_v1(heap).closed()).to_equal(false)
+
+        val trapped = region_function("trap", [], [], MirTerminator.Abort("fault"))
+        expect(verification_region_effect_manifest_v1(trapped).diagnostic).to_contain("REGION-TERMINATOR")
+
+    it "classifies local-only computation as exact pure effects":
+        val func = region_function("pure", [region_local(0, MirType.i64())], [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 0), MirConstValue.Int(3), MirType.i64()), span: nil)
+        ], MirTerminator.Ret(Some(region_copy(0))))
+        val manifest = verification_region_effect_manifest_v1(func)
+        expect(manifest.closed()).to_equal(true)
+        expect(manifest.effects.len()).to_equal(0)
+        expect(manifest.verification_effects()).to_equal([VerificationEffectV1.Pure])
+        expect(verification_region_state_semantics_v1(func).closed()).to_equal(false)
+        expect(verification_contract_expected_state_context_v2(func).is_ok()).to_equal(true)
+
+    it "extracts exact internal call SymbolIds and propagates MIR-derived effects":
+        val writer = region_function("writer", [region_local(0, MirType.i64())], [
+            MirInst(kind: MirInstKind.StoreGlobal(
+                SymbolId(id: 41), region_copy(0)), span: Some(region_span()))
+        ], MirTerminator.Ret(nil))
+        var caller = region_function("caller", [], [region_direct_call("writer")],
+            MirTerminator.Ret(nil))
+        caller.symbol = SymbolId(id: 7002)
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[writer.symbol] = writer
+        functions[caller.symbol] = caller
+        val module = MirModule(name: "effects", functions: functions,
+            statics: {}, constants: {}, types: {})
+        val closure = verification_effect_closure_from_mir_module_v1(module)
+        expect(closure.diagnostic).to_equal("")
+        expect(closure.nodes[0].symbol_id).to_equal("7001")
+        expect(closure.nodes[1].symbol_id).to_equal("7002")
+        expect(closure.effects_for("7002").unwrap()).to_equal([
+            VerificationEffectV1.Write("global:41")])
+
+        var reversed_functions: Dict<SymbolId, MirFunction> = {}
+        reversed_functions[caller.symbol] = caller
+        reversed_functions[writer.symbol] = writer
+        val reversed_module = MirModule(name: "effects", functions: reversed_functions,
+            statics: {}, constants: {}, types: {})
+        val reversed = verification_effect_closure_from_mir_module_v1(reversed_module)
+        expect(reversed.diagnostic).to_equal("")
+        expect(reversed.nodes[0].symbol_id).to_equal(closure.nodes[0].symbol_id)
+        expect(reversed.nodes[1].symbol_id).to_equal(closure.nodes[1].symbol_id)
+        expect(reversed.effects_for("7002").unwrap()).to_equal(
+            closure.effects_for("7002").unwrap())
+
+        val vir_module = verification_ir_module_from_canonical_mir_v1(
+            module, "source", "expanded", "woven", "policy")
+        val reversed_vir_module = verification_ir_module_from_canonical_mir_v1(
+            reversed_module, "source", "expanded", "woven", "policy")
+        expect(vir_module.closure_ready()).to_equal(true)
+        expect(vir_module.functions.len()).to_equal(2)
+        expect(vir_module.functions[0].symbol.id).to_equal(7001)
+        expect(vir_module.functions[1].symbol.id).to_equal(7002)
+        expect(vir_module.functions[1].called_symbols).to_equal([
+            SymbolId(id: 7001)])
+        expect(vir_module.functions[1].effects).to_equal([
+            VerificationEffectV1.Write("global:41")])
+        expect(vir_module.effect_closure_hash).to_equal(reversed_vir_module.effect_closure_hash)
+        expect(vir_module.semantic_hash).to_equal(reversed_vir_module.semantic_hash)
+
+    it "rejects an unknown direct MIR call during module effect extraction":
+        val caller = region_function("caller", [], [region_direct_call("missing")],
+            MirTerminator.Ret(nil))
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[caller.symbol] = caller
+        val module = MirModule(name: "effects", functions: functions,
+            statics: {}, constants: {}, types: {})
+        expect(verification_effect_closure_from_mir_module_v1(module).diagnostic).to_contain("REGION-CALL")

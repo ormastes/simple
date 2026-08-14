@@ -1,0 +1,699 @@
+# Typed executed-evidence collectors for Formal Verification 2.0 delivery gates.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.formal_receipt.{ProofReceiptV1, TrustManifestV1,
+    VerificationCacheKeyV1}
+use compiler.common.assurance.replay_receipt.{IndependentReplayClosureV1}
+use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryGateV1,
+    FormalDeliveryGateStatusV1, FormalDeliveryGateEvidenceV1,
+    FormalDeliveryReceiptFileV1}
+use compiler.common.assurance.trust_audit.{TrustAuditStatus, TrustAuditResult,
+    audit_lean_axiom_report, canonical_trust_audit_hash_v1}
+use compiler.mir.verification_ir.{SemanticClass, VerificationIrType,
+    VerificationIrModuleV1}
+use compiler.common.assurance.formal_interfaces.{CompilerCertificateV1,
+    WeaveManifestV1, AspectCertificateV1, AspectEvidenceClassV1,
+    RuntimeAssumptionMonitorReceiptV1}
+
+pub struct TruthfulnessProofEvidenceV1:
+    receipt: ProofReceiptV1
+    cache_key: VerificationCacheKeyV1
+    retained_axiom_report: text
+    axiom_report_artifact_hash: text
+    trust_manifest: TrustManifestV1
+    replay: IndependentReplayClosureV1
+
+pub struct FormalGateCollectionV1:
+    gate_evidence: FormalDeliveryGateEvidenceV1
+    receipt_files: [FormalDeliveryReceiptFileV1]
+
+pub enum ExactCoreCheckKindV1:
+    TypedLeanLowering
+    UnsupportedNegative
+    GeneratedFallbackScan
+    FixedWidthIntegerEdges
+    ResultOutcomeSeparation
+
+    fn name() -> text:
+        match self:
+            case TypedLeanLowering: "typed_lean_lowering"
+            case UnsupportedNegative: "unsupported_negative"
+            case GeneratedFallbackScan: "generated_fallback_scan"
+            case FixedWidthIntegerEdges: "fixed_width_integer_edges"
+            case ResultOutcomeSeparation: "result_outcome_separation"
+
+pub enum ExecutedCheckOutcomeV1:
+    Passed
+    Failed
+    MissingTool
+    Timeout
+    ToolFailure
+    MissingOutput
+
+    fn name() -> text:
+        match self:
+            case Passed: "passed"
+            case Failed: "failed"
+            case MissingTool: "missing_tool"
+            case Timeout: "timeout"
+            case ToolFailure: "tool_failure"
+            case MissingOutput: "missing_output"
+
+pub struct ExecutedExactCoreCheckV1:
+    schema: text
+    kind: ExactCoreCheckKindV1
+    vir_semantic_hash: text
+    tool_identity_hash: text
+    command_policy_hash: text
+    retained_output: text
+    outcome: ExecutedCheckOutcomeV1
+    diagnostic: text
+
+pub struct VirConstructionEvidenceV1:
+    schema: text
+    woven_program_hash: text
+    vir_semantic_hash: text
+    generator_identity_hash: text
+    command_policy_hash: text
+    retained_output: text
+    outcome: ExecutedCheckOutcomeV1
+    diagnostic: text
+
+pub struct CompilerCertificateValidationV1:
+    schema: text
+    certificate_hash: text
+    validator_identity_hash: text
+    command_policy_hash: text
+    retained_output: text
+    outcome: ExecutedCheckOutcomeV1
+    diagnostic: text
+
+pub struct ExecutedWeaveClosureV1:
+    schema: text
+    manifest_hash: text
+    vir_semantic_hash: text
+    weaver_identity_hash: text
+    command_policy_hash: text
+    introduced_symbol_closure_hash: text
+    # The canonical VIR is the last semantic transformation boundary.  A
+    # verified receipt can only attest the empty post-VIR transform sequence;
+    # later transformations must instead appear as a checked compiler edge.
+    post_vir_transform_count: i64
+    post_vir_transform_hash: text
+    dynamic_transform_lock_hash: text
+    retained_output: text
+    outcome: ExecutedCheckOutcomeV1
+    diagnostic: text
+
+
+fn fv2_gate_frame_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn fv2_gate_sorted_v1(values: [text]) -> [text]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j] < result[i]:
+                val temporary = result[i]
+                result[i] = result[j]
+                result[j] = temporary
+            j = j + 1
+        i = i + 1
+    result
+
+fn fv2_gate_frames_v1(values: [text]) -> text:
+    val sorted = fv2_gate_sorted_v1(values)
+    var framed: [text] = []
+    for value in sorted: framed.push(fv2_gate_frame_v1(value))
+    sorted.len().to_string() + ":[" + framed.join("") + "]"
+
+# Produce the one release-facing receipt representation.  Collector-local
+# `semantic_evidence_hash` remains in the envelope, while the gate row hashes
+# the final envelope bytes.  Keeping those two identities distinct avoids a
+# self-referential final-hash field in individual receipts.
+pub fn finalize_formal_gate_collection_v2(
+    gate: FormalDeliveryGateV1,
+    semantic_evidence_hash: text,
+    raw_files: [FormalDeliveryReceiptFileV1]
+) -> FormalGateCollectionV1:
+    if raw_files.is_empty() or not sha256_lower_hex_valid(semantic_evidence_hash):
+        return FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(gate,
+            FormalDeliveryGateStatusV1.Failed, [], "",
+            "FV2-E-RECEIPT-FINALIZE: gate requires nonempty SHA-256-bound raw evidence"), [])
+    var files: [FormalDeliveryReceiptFileV1] = []
+    var hashes: [text] = []
+    for raw in raw_files:
+        if not sha256_lower_hex_valid(raw.receipt_hash) or
+                sha256_text(raw.content) != raw.receipt_hash:
+            return FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(gate,
+                FormalDeliveryGateStatusV1.Failed, [], "",
+                "FV2-E-RECEIPT-FINALIZE: raw receipt identity is malformed or stale"), [])
+        val content = "FormalDeliveryReceipt-v2\n" +
+            "gate=" + gate.name() + "\n" +
+            "semantic_evidence_hash=" + semantic_evidence_hash + "\n" +
+            "payload_sha256=" + raw.receipt_hash + "\n\n" + raw.content
+        val receipt_hash = sha256_text(content)
+        if hashes.contains(receipt_hash):
+            return FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(gate,
+                FormalDeliveryGateStatusV1.Failed, [], "",
+                "FV2-E-RECEIPT-FINALIZE: duplicate final receipt content"), [])
+        hashes.push(receipt_hash)
+        files.push(FormalDeliveryReceiptFileV1(receipt_hash, content))
+    val evidence_hash = sha256_text("FormalDeliveryGateEvidence-v2|gate=" +
+        gate.name() + "|semantic=" + semantic_evidence_hash + "|receipts=" +
+        fv2_gate_frames_v1(hashes))
+    FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(gate,
+        FormalDeliveryGateStatusV1.Passed, hashes, evidence_hash, ""), files)
+
+pub fn trust_audit_hash_v1(audit: TrustAuditResult, artifact_hash: text) -> text:
+    canonical_trust_audit_hash_v1(audit, artifact_hash)
+
+fn truthfulness_status_accepted_v1(status: FormalStatus) -> bool:
+    status == FormalStatus.ModelProven or status == FormalStatus.SourceRefined or
+        status == FormalStatus.BackendRefined or
+        status == FormalStatus.ArtifactVerified
+
+pub fn truthfulness_item_diagnostic_v1(item: TruthfulnessProofEvidenceV1) -> text:
+    val receipt = item.receipt
+    val axiom_audit = audit_lean_axiom_report(item.retained_axiom_report,
+        [receipt.proof_root], [])
+    if not truthfulness_status_accepted_v1(receipt.status):
+        return "FV2-E-TRUTH-STATUS: proof evidence has no proven refinement status"
+    if receipt.proof_root == "":
+        return "FV2-E-TRUTH-ROOT: proof root is empty"
+    if item.cache_key.diagnostic() != "" or
+            receipt.cache_key_hash != item.cache_key.hash():
+        return "FV2-E-TRUTH-CACHE: receipt does not bind its exact verified toolchain and semantic cache key"
+    if receipt.diagnostic() != "":
+        return "FV2-E-TRUTH-RECEIPT: proof receipt is structurally incomplete"
+    if not sha256_lower_hex_valid(receipt.cache_key_hash) or
+            not sha256_lower_hex_valid(receipt.artifact_hash) or
+            not sha256_lower_hex_valid(receipt.axiom_audit_hash) or
+            not sha256_lower_hex_valid(receipt.trust_manifest_hash):
+        return "FV2-E-TRUTH-HASH: proof receipt contains a non-SHA-256 identity"
+    if item.axiom_report_artifact_hash != receipt.artifact_hash:
+        return "FV2-E-TRUTH-AXIOM-ARTIFACT: axiom report does not bind the receipt artifact"
+    if not item.trust_manifest.is_closed() or
+            receipt.trust_manifest_hash !=
+                sha256_text(item.trust_manifest.canonical_text()):
+        return "FV2-E-TRUTH-TRUST: proof receipt lacks an exact closed trust manifest"
+    if receipt.compiler_certificate_hash != "" and
+            not sha256_lower_hex_valid(receipt.compiler_certificate_hash):
+        return "FV2-E-TRUTH-COMPILER: compiler certificate identity is malformed"
+    if axiom_audit.status != TrustAuditStatus.Closed or
+            not axiom_audit.permits_closed_verification() or
+            axiom_audit.root_count != 1 or
+            axiom_audit.audited_root_count != 1:
+        return "FV2-E-TRUTH-AXIOMS: proof root lacks one closed transitive axiom audit"
+    if receipt.axiom_audit_hash != trust_audit_hash_v1(axiom_audit,
+            item.axiom_report_artifact_hash):
+        return "FV2-E-TRUTH-AXIOM-BINDING: receipt does not bind its exact axiom audit"
+    val replay_hash = item.replay.hash()
+    if not item.replay.accepted or item.replay.diagnostic != "" or
+            not sha256_lower_hex_valid(replay_hash):
+        return "FV2-E-TRUTH-REPLAY: independent replay closure is not accepted"
+    if receipt.independent_replay_hash != replay_hash or
+            receipt.artifact_hash != item.replay.artifact_hash:
+        return "FV2-E-TRUTH-REPLAY-BINDING: replay does not bind the receipt artifact"
+    ""
+
+fn failed_truthfulness_collection_v1(diagnostic: text) -> FormalGateCollectionV1:
+    FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(
+        FormalDeliveryGateV1.VerificationTruthfulness,
+        FormalDeliveryGateStatusV1.Failed, [], "", diagnostic), [])
+
+pub fn collect_verification_truthfulness_gate_v1(
+    items: [TruthfulnessProofEvidenceV1]
+) -> FormalGateCollectionV1:
+    if items.is_empty():
+        return failed_truthfulness_collection_v1(
+            "FV2-E-TRUTH-EMPTY: at least one executed proof root is required")
+    var roots: [text] = []
+    var receipt_hashes: [text] = []
+    var files: [FormalDeliveryReceiptFileV1] = []
+    for item in items:
+        val diagnostic = truthfulness_item_diagnostic_v1(item)
+        if diagnostic != "": return failed_truthfulness_collection_v1(diagnostic)
+        if roots.contains(item.receipt.proof_root):
+            return failed_truthfulness_collection_v1(
+                "FV2-E-TRUTH-DUPLICATE: proof root is duplicated")
+        roots.push(item.receipt.proof_root)
+        val axiom_audit = audit_lean_axiom_report(item.retained_axiom_report,
+            [item.receipt.proof_root], [])
+        val content = "VerificationTruthfulnessReceipt-v1" +
+            fv2_gate_frame_v1(item.receipt.canonical_text()) +
+            fv2_gate_frame_v1(item.cache_key.canonical_text()) +
+            fv2_gate_frame_v1(trust_audit_hash_v1(axiom_audit,
+                item.axiom_report_artifact_hash)) +
+            fv2_gate_frame_v1(sha256_text(
+                item.trust_manifest.canonical_text())) +
+            fv2_gate_frame_v1(item.replay.hash())
+        val receipt_hash = sha256_text(content)
+        receipt_hashes.push(receipt_hash)
+        files.push(FormalDeliveryReceiptFileV1(receipt_hash, content))
+    val evidence_hash = sha256_text("VerificationTruthfulnessGate-v1" +
+        fv2_gate_frames_v1(receipt_hashes))
+    finalize_formal_gate_collection_v2(
+        FormalDeliveryGateV1.VerificationTruthfulness, evidence_hash, files)
+
+fn exact_core_type_diagnostic_v1(type_: VerificationIrType) -> text:
+    if type_.semantic_class != SemanticClass.Exact or
+            not type_.closure_ready() or type_.diagnostic != "" or
+            type_.semantic_name == "" or type_.representation == "":
+        return "FV2-E-EXACT-TYPE: reachable VIR type lacks exact closed representation semantics"
+    ""
+
+fn exact_core_check_content_v1(check: ExecutedExactCoreCheckV1) -> text:
+    "ExecutedExactCoreCheck-v1" + fv2_gate_frame_v1(check.schema) +
+        fv2_gate_frame_v1(check.kind.name()) +
+        fv2_gate_frame_v1(check.vir_semantic_hash) +
+        fv2_gate_frame_v1(check.tool_identity_hash) +
+        fv2_gate_frame_v1(check.command_policy_hash) +
+        fv2_gate_frame_v1(sha256_text(check.retained_output)) +
+        fv2_gate_frame_v1(check.outcome.name()) +
+        fv2_gate_frame_v1(check.diagnostic)
+
+fn exact_core_check_diagnostic_v1(
+    check: ExecutedExactCoreCheckV1,
+    vir_hash: text
+) -> text:
+    if check.schema != "ExecutedExactCoreCheck-v1":
+        return "FV2-E-EXACT-SCHEMA: exact-core check schema mismatch"
+    if check.vir_semantic_hash != vir_hash:
+        return "FV2-E-EXACT-VIR-BINDING: check evidence targets another VIR module"
+    if not sha256_lower_hex_valid(check.tool_identity_hash) or
+            not sha256_lower_hex_valid(check.command_policy_hash):
+        return "FV2-E-EXACT-HASH: check tool/policy identity is not SHA-256"
+    if check.outcome != ExecutedCheckOutcomeV1.Passed:
+        return "FV2-E-EXACT-OUTCOME: exact-core check did not pass"
+    if check.retained_output.trim() == "":
+        return "FV2-E-EXACT-OUTPUT: exact-core check retained no output"
+    if check.diagnostic != "":
+        return "FV2-E-EXACT-DIAGNOSTIC: passed check contains a diagnostic"
+    ""
+
+fn failed_exact_core_collection_v1(diagnostic: text) -> FormalGateCollectionV1:
+    FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(
+        FormalDeliveryGateV1.ExactCoreSemantics,
+        FormalDeliveryGateStatusV1.Failed, [], "", diagnostic), [])
+
+pub fn collect_exact_core_semantics_gate_v1(
+    vir: VerificationIrModuleV1,
+    checks: [ExecutedExactCoreCheckV1]
+) -> FormalGateCollectionV1:
+    if not vir.closure_ready():
+        return failed_exact_core_collection_v1(
+            "FV2-E-EXACT-VIR: canonical VIR is not closed or self-consistent")
+    if not sha256_lower_hex_valid(vir.effect_closure_hash) or
+            not sha256_lower_hex_valid(vir.semantic_hash):
+        return failed_exact_core_collection_v1(
+            "FV2-E-EXACT-VIR-HASH: VIR identities are not SHA-256")
+    var symbols: [text] = []
+    for function in vir.functions:
+        val symbol = function.symbol.id.to_string()
+        if symbols.contains(symbol):
+            return failed_exact_core_collection_v1(
+                "FV2-E-EXACT-DUPLICATE: reachable VIR SymbolId is duplicated")
+        symbols.push(symbol)
+        if function.schema != "VerificationIR-v1" or
+                not function.semantic_identity_valid() or
+                not sha256_lower_hex_valid(function.semantic_hash):
+            return failed_exact_core_collection_v1(
+                "FV2-E-EXACT-FUNCTION: VIR function identity is not exact")
+        val provenance = function.provenance
+        val provenance_hashes = [provenance.source_hash,
+            provenance.expanded_hash, provenance.woven_hash,
+            provenance.mir_hash, provenance.contract_hash,
+            provenance.policy_hash]
+        for hash in provenance_hashes:
+            if not sha256_lower_hex_valid(hash):
+                return failed_exact_core_collection_v1(
+                    "FV2-E-EXACT-PROVENANCE: source-to-VIR identity is not SHA-256")
+        var type_error = exact_core_type_diagnostic_v1(function.return_type)
+        if type_error != "": return failed_exact_core_collection_v1(type_error)
+        for parameter in function.parameters:
+            type_error = exact_core_type_diagnostic_v1(parameter)
+            if type_error != "": return failed_exact_core_collection_v1(type_error)
+    if checks.len() != 5:
+        return failed_exact_core_collection_v1(
+            "FV2-E-EXACT-CHECK-COUNT: all five exact-core executed checks are required")
+    val expected_kinds = [ExactCoreCheckKindV1.TypedLeanLowering,
+        ExactCoreCheckKindV1.UnsupportedNegative,
+        ExactCoreCheckKindV1.GeneratedFallbackScan,
+        ExactCoreCheckKindV1.FixedWidthIntegerEdges,
+        ExactCoreCheckKindV1.ResultOutcomeSeparation]
+    var check_hashes: [text] = []
+    var files: [FormalDeliveryReceiptFileV1] = []
+    for index in 0..expected_kinds.len():
+        val check = checks[index]
+        if check.kind != expected_kinds[index]:
+            return failed_exact_core_collection_v1(
+                "FV2-E-EXACT-CHECK-ORDER: exact-core checks must use the frozen complete order")
+        val check_diagnostic = exact_core_check_diagnostic_v1(check,
+            vir.semantic_hash)
+        if check_diagnostic != "":
+            return failed_exact_core_collection_v1(check_diagnostic)
+        val check_content = exact_core_check_content_v1(check)
+        val check_hash = sha256_text(check_content)
+        check_hashes.push(check_hash)
+        files.push(FormalDeliveryReceiptFileV1(check_hash, check_content))
+    val content = "ExactCoreSemanticsReceipt-v1" +
+        fv2_gate_frame_v1(vir.canonical_text()) +
+        fv2_gate_frames_v1(check_hashes)
+    val receipt_hash = sha256_text(content)
+    files.push(FormalDeliveryReceiptFileV1(receipt_hash, content))
+    var all_receipt_hashes = check_hashes.copy()
+    all_receipt_hashes.push(receipt_hash)
+    val evidence_hash = sha256_text("ExactCoreSemanticsGate-v1" +
+        fv2_gate_frame_v1(receipt_hash) +
+        fv2_gate_frame_v1(vir.semantic_hash))
+    finalize_formal_gate_collection_v2(
+        FormalDeliveryGateV1.ExactCoreSemantics, evidence_hash, files)
+
+fn executed_relation_diagnostic_v1(
+    schema: text,
+    expected_schema: text,
+    identity_hash: text,
+    command_policy_hash: text,
+    retained_output: text,
+    outcome: ExecutedCheckOutcomeV1,
+    diagnostic: text
+) -> text:
+    if schema != expected_schema:
+        return "FV2-E-RELATION-SCHEMA: executed relation receipt schema mismatch"
+    if not sha256_lower_hex_valid(identity_hash) or
+            not sha256_lower_hex_valid(command_policy_hash):
+        return "FV2-E-RELATION-IDENTITY: validator/generator identity is not SHA-256"
+    if outcome != ExecutedCheckOutcomeV1.Passed:
+        return "FV2-E-RELATION-OUTCOME: transformation validation did not pass"
+    if retained_output.trim() == "":
+        return "FV2-E-RELATION-OUTPUT: transformation validation retained no output"
+    if diagnostic != "":
+        return "FV2-E-RELATION-DIAGNOSTIC: passed transformation validation has a diagnostic"
+    ""
+
+fn failed_vir_relation_collection_v1(diagnostic: text) -> FormalGateCollectionV1:
+    FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(
+        FormalDeliveryGateV1.VirCompilerRelation,
+        FormalDeliveryGateStatusV1.Failed, [], "", diagnostic), [])
+
+pub fn collect_vir_compiler_relation_gate_v1(
+    vir: VerificationIrModuleV1,
+    construction: VirConstructionEvidenceV1,
+    certificates: [CompilerCertificateV1],
+    validations: [CompilerCertificateValidationV1],
+    artifact_hash: text
+) -> FormalGateCollectionV1:
+    if not vir.closure_ready() or not sha256_lower_hex_valid(vir.semantic_hash):
+        return failed_vir_relation_collection_v1(
+            "FV2-E-RELATION-VIR: source VIR is not closed and self-consistent")
+    if not sha256_lower_hex_valid(artifact_hash):
+        return failed_vir_relation_collection_v1(
+            "FV2-E-RELATION-ARTIFACT: target artifact identity is not SHA-256")
+    if construction.vir_semantic_hash != vir.semantic_hash:
+        return failed_vir_relation_collection_v1(
+            "FV2-E-RELATION-CONSTRUCTION-VIR: construction receipt targets another VIR")
+    if not sha256_lower_hex_valid(construction.woven_program_hash):
+        return failed_vir_relation_collection_v1(
+            "FV2-E-RELATION-WOVEN: woven program identity is not SHA-256")
+    for function in vir.functions:
+        if function.provenance.woven_hash != construction.woven_program_hash:
+            return failed_vir_relation_collection_v1(
+                "FV2-E-RELATION-WOVEN-BINDING: VIR provenance disagrees with construction receipt")
+    val construction_diagnostic = executed_relation_diagnostic_v1(
+        construction.schema, "VirConstructionEvidence-v1",
+        construction.generator_identity_hash, construction.command_policy_hash,
+        construction.retained_output, construction.outcome,
+        construction.diagnostic)
+    if construction_diagnostic != "":
+        return failed_vir_relation_collection_v1(construction_diagnostic)
+    if certificates.is_empty() or certificates.len() != validations.len():
+        return failed_vir_relation_collection_v1(
+            "FV2-E-RELATION-COUNT: every compiler edge requires one executed validation")
+    var files: [FormalDeliveryReceiptFileV1] = []
+    var receipt_hashes: [text] = []
+    val construction_content = "VirConstructionEvidence-v1" +
+        fv2_gate_frame_v1(construction.woven_program_hash) +
+        fv2_gate_frame_v1(construction.vir_semantic_hash) +
+        fv2_gate_frame_v1(construction.generator_identity_hash) +
+        fv2_gate_frame_v1(construction.command_policy_hash) +
+        fv2_gate_frame_v1(sha256_text(construction.retained_output)) +
+        fv2_gate_frame_v1(construction.outcome.name())
+    val construction_hash = sha256_text(construction_content)
+    files.push(FormalDeliveryReceiptFileV1(construction_hash,
+        construction_content))
+    receipt_hashes.push(construction_hash)
+    var expected_before = vir.semantic_hash
+    for index in 0..certificates.len():
+        val certificate = certificates[index]
+        val validation = validations[index]
+        if certificate.diagnostic() != "" or
+                not sha256_lower_hex_valid(certificate.before_semantic_hash) or
+                not sha256_lower_hex_valid(certificate.after_semantic_hash) or
+                not sha256_lower_hex_valid(certificate.certificate_hash):
+            return failed_vir_relation_collection_v1(
+                "FV2-E-RELATION-CERTIFICATE: compiler certificate is incomplete or malformed")
+        if certificate.before_semantic_hash != expected_before:
+            return failed_vir_relation_collection_v1(
+                "FV2-E-RELATION-CHAIN: compiler certificate chain contains a gap or reorder")
+        if validation.certificate_hash != certificate.certificate_hash:
+            return failed_vir_relation_collection_v1(
+                "FV2-E-RELATION-VALIDATOR-BINDING: validator checked another certificate")
+        val validation_diagnostic = executed_relation_diagnostic_v1(
+            validation.schema, "CompilerCertificateValidation-v1",
+            validation.validator_identity_hash, validation.command_policy_hash,
+            validation.retained_output, validation.outcome,
+            validation.diagnostic)
+        if validation_diagnostic != "":
+            return failed_vir_relation_collection_v1(validation_diagnostic)
+        val certificate_content = certificate.evidence_payload()
+        if sha256_text(certificate_content) != certificate.certificate_hash:
+            return failed_vir_relation_collection_v1(
+                "FV2-E-RELATION-CERTIFICATE-HASH: compiler edge payload drifted")
+        files.push(FormalDeliveryReceiptFileV1(certificate.certificate_hash,
+            certificate_content))
+        receipt_hashes.push(certificate.certificate_hash)
+        val validation_content = "CompilerCertificateValidation-v1" +
+            fv2_gate_frame_v1(validation.certificate_hash) +
+            fv2_gate_frame_v1(validation.validator_identity_hash) +
+            fv2_gate_frame_v1(validation.command_policy_hash) +
+            fv2_gate_frame_v1(sha256_text(validation.retained_output)) +
+            fv2_gate_frame_v1(validation.outcome.name())
+        val validation_hash = sha256_text(validation_content)
+        files.push(FormalDeliveryReceiptFileV1(validation_hash,
+            validation_content))
+        receipt_hashes.push(validation_hash)
+        expected_before = certificate.after_semantic_hash
+    if expected_before != artifact_hash:
+        return failed_vir_relation_collection_v1(
+            "FV2-E-RELATION-TARGET: compiler chain does not terminate at the exact artifact")
+    val aggregate_content = "VirCompilerRelationReceipt-v1" +
+        fv2_gate_frame_v1(vir.semantic_hash) +
+        fv2_gate_frame_v1(artifact_hash) +
+        fv2_gate_frames_v1(receipt_hashes)
+    val aggregate_hash = sha256_text(aggregate_content)
+    files.push(FormalDeliveryReceiptFileV1(aggregate_hash, aggregate_content))
+    receipt_hashes.push(aggregate_hash)
+    val evidence_hash = sha256_text("VirCompilerRelationGate-v1" +
+        fv2_gate_frame_v1(vir.semantic_hash) +
+        fv2_gate_frame_v1(artifact_hash) +
+        fv2_gate_frames_v1(receipt_hashes))
+    finalize_formal_gate_collection_v2(
+        FormalDeliveryGateV1.VirCompilerRelation, evidence_hash, files)
+
+fn failed_aop_macro_collection_v1(diagnostic: text) -> FormalGateCollectionV1:
+    FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(
+        FormalDeliveryGateV1.AopMacroClosure,
+        FormalDeliveryGateStatusV1.Failed, [], "", diagnostic), [])
+
+# This is deliberately an adapter, not an AOP-gate promotion path. The frozen
+# v1 AOP collector has no final-artifact identity, so it cannot safely decide
+# whether a monitor receipt covers the executable being released. A runtime
+# producer must invoke this at artifact materialization time, then feed its
+# checked result into a later artifact-aware delivery gate.
+pub fn runtime_assumption_monitor_binding_diagnostic_v1(
+    receipt: RuntimeAssumptionMonitorReceiptV1,
+    vir_semantic_hash: text,
+    artifact_hash: text,
+    advice_id: text,
+    declared_assumption_ids: [text],
+    proof_material: [FormalDeliveryReceiptFileV1]
+) -> text:
+    if receipt.diagnostic() != "":
+        return "FV2-E-MONITOR-RECEIPT: runtime monitor receipt is incomplete or malformed"
+    if not sha256_lower_hex_valid(vir_semantic_hash) or
+            not sha256_lower_hex_valid(artifact_hash):
+        return "FV2-E-MONITOR-TARGET: exact VIR and artifact identities must be canonical SHA-256"
+    if advice_id == "" or receipt.advice_id != advice_id:
+        return "FV2-E-MONITOR-ADVICE: monitor receipt does not bind the expected woven advice"
+    if receipt.vir_semantic_hash != vir_semantic_hash or
+            receipt.artifact_hash != artifact_hash:
+        return "FV2-E-MONITOR-TARGET: monitor receipt targets another VIR or artifact"
+    if declared_assumption_ids.is_empty():
+        return "FV2-E-MONITOR-ASSUMPTION-SET: an artifact-aware caller must declare monitorable assumptions"
+    var previous = ""
+    var found_assumption = false
+    for assumption_id in declared_assumption_ids:
+        if assumption_id == "" or (previous != "" and assumption_id <= previous):
+            return "FV2-E-MONITOR-ASSUMPTION-SET: assumption identities must be unique and sorted"
+        if assumption_id == receipt.assumption_id:
+            found_assumption = true
+        previous = assumption_id
+    if not found_assumption:
+        return "FV2-E-MONITOR-ASSUMPTION: monitor receipt names an undeclared environmental assumption"
+    var proof_matches = 0
+    for proof in proof_material:
+        if proof.receipt_hash == receipt.proof_receipt_hash and
+                sha256_text(proof.content) == proof.receipt_hash:
+            proof_matches = proof_matches + 1
+    if proof_matches != 1:
+        return "FV2-E-MONITOR-PROOF-MATERIAL: monitor proof receipt is not materialized exactly once"
+    ""
+
+pub fn collect_aop_macro_closure_gate_v1(
+    vir: VerificationIrModuleV1,
+    manifest: WeaveManifestV1,
+    aspect_certificates: [AspectCertificateV1],
+    truthfulness_receipts: [FormalDeliveryReceiptFileV1],
+    execution: ExecutedWeaveClosureV1
+) -> FormalGateCollectionV1:
+    if not vir.closure_ready():
+        return failed_aop_macro_collection_v1(
+            "FV2-E-AOP-VIR: woven VIR is not closed and self-consistent")
+    if manifest.diagnostic() != "" or
+            not sha256_lower_hex_valid(manifest.base_program_hash) or
+            not sha256_lower_hex_valid(manifest.macro_expansion_hash) or
+            not sha256_lower_hex_valid(manifest.woven_program_hash):
+        return failed_aop_macro_collection_v1(
+            "FV2-E-AOP-MANIFEST: weave manifest is incomplete or malformed")
+    val manifest_hash = manifest.hash()
+    if execution.schema != "ExecutedWeaveClosure-v1" or
+            execution.manifest_hash != manifest_hash or
+            execution.vir_semantic_hash != vir.semantic_hash:
+        return failed_aop_macro_collection_v1(
+            "FV2-E-AOP-BINDING: executed weave evidence targets another manifest or VIR")
+    val execution_diagnostic = executed_relation_diagnostic_v1(
+        execution.schema, "ExecutedWeaveClosure-v1",
+        execution.weaver_identity_hash, execution.command_policy_hash,
+        execution.retained_output, execution.outcome, execution.diagnostic)
+    if execution_diagnostic != "":
+        return failed_aop_macro_collection_v1(execution_diagnostic)
+    var vir_symbols: [text] = []
+    for function in vir.functions:
+        vir_symbols.push(function.symbol.id.to_string())
+        if function.provenance.source_hash != manifest.base_program_hash or
+                function.provenance.expanded_hash !=
+                    manifest.macro_expansion_hash or
+                function.provenance.woven_hash != manifest.woven_program_hash:
+            return failed_aop_macro_collection_v1(
+                "FV2-E-AOP-PROVENANCE: VIR does not consume the exact expanded and woven program")
+    for point in manifest.join_points:
+        if not vir_symbols.contains(point.symbol_id):
+            return failed_aop_macro_collection_v1(
+                "FV2-E-AOP-JOIN-POINT: resolved join point is absent from woven VIR closure")
+    for symbol_id in manifest.introduced_symbol_ids:
+        if not vir_symbols.contains(symbol_id):
+            return failed_aop_macro_collection_v1(
+                "FV2-E-AOP-INTRODUCED-SYMBOL: introduced symbol is absent from woven VIR closure")
+    val expected_introduced = sha256_text("IntroducedSymbolClosure-v1" +
+        fv2_gate_frames_v1(manifest.introduced_symbol_ids) +
+        fv2_gate_frame_v1(vir.semantic_hash))
+    if execution.introduced_symbol_closure_hash != expected_introduced:
+        return failed_aop_macro_collection_v1(
+            "FV2-E-AOP-INTRODUCED: macro/aspect-introduced symbols are not in exact closure")
+    val expected_lock = sha256_text("DynamicTransformLock-v1" +
+        fv2_gate_frame_v1(manifest_hash) +
+        fv2_gate_frame_v1(vir.semantic_hash) +
+        fv2_gate_frame_v1(execution.weaver_identity_hash) +
+        fv2_gate_frame_v1(execution.command_policy_hash) +
+        fv2_gate_frame_v1(execution.post_vir_transform_hash) +
+        fv2_gate_frame_v1(sha256_text(execution.retained_output)))
+    val expected_post_vir_transform_hash = sha256_text(
+        "PostVirTransformSequence-v1" +
+        fv2_gate_frame_v1(manifest_hash) +
+        fv2_gate_frame_v1(vir.semantic_hash) +
+        fv2_gate_frame_v1("0"))
+    if execution.post_vir_transform_count != 0 or
+            execution.post_vir_transform_hash != expected_post_vir_transform_hash:
+        return failed_aop_macro_collection_v1(
+            "FV2-E-AOP-POST-VIR: transformations after canonical VIR are forbidden")
+    if execution.dynamic_transform_lock_hash != expected_lock:
+        return failed_aop_macro_collection_v1(
+            "FV2-E-AOP-DYNAMIC: post-proof transformation is not sealed")
+    var advice_ids: [text] = []
+    for point in manifest.join_points:
+        for advice_id in point.ordered_advice_ids:
+            if not advice_ids.contains(advice_id): advice_ids.push(advice_id)
+    if aspect_certificates.len() != advice_ids.len():
+        return failed_aop_macro_collection_v1(
+            "FV2-E-AOP-CERTIFICATE-COUNT: every resolved advice requires one certificate")
+    var certified_ids: [text] = []
+    var files: [FormalDeliveryReceiptFileV1] = []
+    var receipt_hashes: [text] = []
+    val manifest_content = manifest.canonical_text()
+    files.push(FormalDeliveryReceiptFileV1(manifest_hash, manifest_content))
+    receipt_hashes.push(manifest_hash)
+    for certificate in aspect_certificates:
+        if certificate.diagnostic() != "" or
+                not advice_ids.contains(certificate.advice_id) or
+                certified_ids.contains(certificate.advice_id):
+            return failed_aop_macro_collection_v1(
+                "FV2-E-AOP-CERTIFICATE: aspect certificate is invalid duplicated or unmatched")
+        if certificate.evidence_class == AspectEvidenceClassV1.BehaviorRefinement:
+            return failed_aop_macro_collection_v1(
+                "FV2-E-AOP-BEHAVIOR: behavior-changing aspects are outside verified v1")
+        # `AspectCertificateV1` predates the monitor-boundary schema.  Its
+        # bounded_runtime bit says nothing about which environmental predicate
+        # is checked, the target artifact, or the fail-stop action.  Treating
+        # it as a closed monitor would let an unrelated (or fail-open) advice
+        # discharge an environment assumption.  Until a monitor receipt binds
+        # all of those identities, the legacy certificate may not promote an
+        # AOP closure to verified evidence.
+        if certificate.evidence_class == AspectEvidenceClassV1.BoundedRuntimeMonitor:
+            return failed_aop_macro_collection_v1(
+                "FV2-E-AOP-MONITOR-BOUNDARY: legacy monitor certificate lacks assumption and fail-stop binding")
+        if certificate.base_program_hash != manifest.base_program_hash or
+                certificate.woven_program_hash != manifest.woven_program_hash or
+                not sha256_lower_hex_valid(certificate.proof_receipt_hash):
+            return failed_aop_macro_collection_v1(
+                "FV2-E-AOP-CERTIFICATE-BINDING: aspect proof targets another program")
+        var proof_matches = 0
+        for proof in truthfulness_receipts:
+            if proof.receipt_hash == certificate.proof_receipt_hash and
+                    sha256_text(proof.content) == proof.receipt_hash:
+                proof_matches = proof_matches + 1
+        if proof_matches != 1:
+            return failed_aop_macro_collection_v1(
+                "FV2-E-AOP-PROOF-MATERIAL: aspect proof receipt is not materialized exactly once")
+        certified_ids.push(certificate.advice_id)
+        val content = certificate.canonical_text()
+        val hash = certificate.hash()
+        files.push(FormalDeliveryReceiptFileV1(hash, content))
+        receipt_hashes.push(hash)
+    val execution_content = "ExecutedWeaveClosure-v1" +
+        fv2_gate_frame_v1(manifest_hash) +
+        fv2_gate_frame_v1(vir.semantic_hash) +
+        fv2_gate_frame_v1(execution.weaver_identity_hash) +
+        fv2_gate_frame_v1(execution.command_policy_hash) +
+        fv2_gate_frame_v1(execution.introduced_symbol_closure_hash) +
+        fv2_gate_frame_v1(execution.post_vir_transform_hash) +
+        fv2_gate_frame_v1(execution.dynamic_transform_lock_hash) +
+        fv2_gate_frame_v1(sha256_text(execution.retained_output)) +
+        fv2_gate_frame_v1(execution.outcome.name())
+    val execution_hash = sha256_text(execution_content)
+    files.push(FormalDeliveryReceiptFileV1(execution_hash, execution_content))
+    receipt_hashes.push(execution_hash)
+    val aggregate_content = "AopMacroClosureReceipt-v1" +
+        fv2_gate_frame_v1(vir.semantic_hash) +
+        fv2_gate_frames_v1(receipt_hashes)
+    val aggregate_hash = sha256_text(aggregate_content)
+    files.push(FormalDeliveryReceiptFileV1(aggregate_hash, aggregate_content))
+    receipt_hashes.push(aggregate_hash)
+    val evidence_hash = sha256_text("AopMacroClosureGate-v1" +
+        fv2_gate_frames_v1(receipt_hashes))
+    finalize_formal_gate_collection_v2(
+        FormalDeliveryGateV1.AopMacroClosure, evidence_hash, files)

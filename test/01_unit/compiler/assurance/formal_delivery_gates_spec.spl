@@ -1,0 +1,129 @@
+use std.spec
+use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryGateV1,
+    FormalDeliveryGateStatusV1, FormalDeliveryGateEvidenceV1,
+    evaluate_formal_delivery_gates_v1, evaluate_formal_delivery_gates_v2,
+    formal_delivery_manifest_hash_v1}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.verified_release_gate.{ReleaseEvidenceOutcomeV1,
+    VerifiedReleaseEvidenceV1, SignedVerifiedReleaseBundleV1,
+    SignedVerifiedReleaseBundleDecisionV1, release_evidence_hash_v1,
+    ApprovedReleaseSignerV1, ReleaseSignatureVerificationV1,
+    validate_signed_verified_release_bundle_v1, VerifiedReleaseEvidenceV2,
+    SignedVerifiedReleaseBundleV2, SignedVerifiedReleaseBundleDecisionV2,
+    evaluate_verified_release_v2, validate_signed_verified_release_bundle_v2}
+use compiler.common.assurance.policy_schema.{AssuranceStrictnessV2,
+    AssuranceGrade, AssuranceConvention, ResolvedAssurancePolicyV2}
+use compiler.common.assurance.dynamic_composition.{SignatureVerificationReceiptV1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn passed_gate(gate: FormalDeliveryGateV1) -> FormalDeliveryGateEvidenceV1:
+    FormalDeliveryGateEvidenceV1(gate, FormalDeliveryGateStatusV1.Passed,
+        [sha256_text("receipt-" + gate.name())],
+        sha256_text("evidence-" + gate.name()), "")
+
+fn blocked_gate(gate: FormalDeliveryGateV1) -> FormalDeliveryGateEvidenceV1:
+    FormalDeliveryGateEvidenceV1(gate, FormalDeliveryGateStatusV1.Blocked,
+        [], "", "missing executed evidence")
+
+fn ordered_delivery_gates(passed_count: i64
+) -> [FormalDeliveryGateEvidenceV1]:
+    val gates = [FormalDeliveryGateV1.VerificationTruthfulness,
+        FormalDeliveryGateV1.ExactCoreSemantics,
+        FormalDeliveryGateV1.VirCompilerRelation,
+        FormalDeliveryGateV1.AopMacroClosure,
+        FormalDeliveryGateV1.SimpleOsVerticalSlice,
+        FormalDeliveryGateV1.GeneratedRv32iEndToEnd,
+        FormalDeliveryGateV1.Rv64PrivilegeMmuLinux,
+        FormalDeliveryGateV1.VerifiedRelease]
+    var result: [FormalDeliveryGateEvidenceV1] = []
+    for index in 0..gates.len():
+        if index < passed_count: result.push(passed_gate(gates[index]))
+        else: result.push(blocked_gate(gates[index]))
+    result
+
+fn passed_release_bundle() -> SignedVerifiedReleaseBundleDecisionV1:
+    val delivery_manifest = formal_delivery_manifest_hash_v1(
+        ordered_delivery_gates(8))
+    val evidence = VerifiedReleaseEvidenceV1("verified",
+        FormalStatus.ArtifactVerified, [FormalStatus.ArtifactVerified],
+        sha256_text("artifact"), sha256_text("artifact"), [sha256_text("proof")],
+        [sha256_text("compiler")], sha256_text("trust"), "",
+        sha256_text("replay"), sha256_text("mutation"), sha256_text("non-vacuity"),
+        [ReleaseEvidenceOutcomeV1.ProvedWithCertificate], 0, 0, 0, 0,
+        delivery_manifest)
+    val payload = release_evidence_hash_v1(evidence)
+    val signature = SignatureVerificationReceiptV1(payload, "release-key",
+        "pure-ed25519-v1", sha256_text("signature-evidence"), true)
+    validate_signed_verified_release_bundle_v1(SignedVerifiedReleaseBundleV1(
+        evidence, payload, "release-key", ReleaseSignatureVerificationV1(
+            "release-key", sha256_text("public-key"), signature)), [
+            ApprovedReleaseSignerV1("release-key", sha256_text("public-key"))])
+
+fn passed_release_bundle_v2() -> SignedVerifiedReleaseBundleDecisionV2:
+    val base = VerifiedReleaseEvidenceV1("verified",
+        FormalStatus.ArtifactVerified, [FormalStatus.ArtifactVerified],
+        sha256_text("artifact"), sha256_text("artifact"), [sha256_text("proof")],
+        [sha256_text("compiler")], sha256_text("trust"), "",
+        sha256_text("replay"), sha256_text("mutation"), sha256_text("non-vacuity"),
+        [ReleaseEvidenceOutcomeV1.ProvedWithCertificate], 0, 0, 0, 0,
+        formal_delivery_manifest_hash_v1(ordered_delivery_gates(8)))
+    val evidence = VerifiedReleaseEvidenceV2(ResolvedAssurancePolicyV2(
+        AssuranceStrictnessV2.Verified, "nogc_async_mut",
+        AssuranceGrade.NoGrade, AssuranceConvention.NoConvention), base)
+    val payload = evaluate_verified_release_v2(evidence).evidence_hash
+    val signature = SignatureVerificationReceiptV1(payload, "release-key",
+        "pure-ed25519-v2", sha256_text("signature-evidence-v2"), true)
+    validate_signed_verified_release_bundle_v2(SignedVerifiedReleaseBundleV2(
+        evidence, payload, "release-key", ReleaseSignatureVerificationV1(
+            "release-key", sha256_text("public-key"), signature)), [
+            ApprovedReleaseSignerV1("release-key", sha256_text("public-key"))])
+
+describe "Formal Verification 2.0 staged delivery gates":
+    it "accepts an honest partial plan without release readiness":
+        val decision = evaluate_formal_delivery_gates_v1(
+            ordered_delivery_gates(4), nil)
+        expect(decision.accepted_state).to_equal(true)
+        expect(decision.release_ready).to_equal(false)
+        expect(decision.highest_passed_gate).to_equal("aop_macro_closure")
+
+    it "rejects a later pass after an earlier blocker":
+        var evidence = ordered_delivery_gates(2)
+        evidence[4] = passed_gate(FormalDeliveryGateV1.SimpleOsVerticalSlice)
+        val decision = evaluate_formal_delivery_gates_v1(evidence, nil)
+        expect(decision.accepted_state).to_equal(false)
+        expect(decision.diagnostic).to_contain("PREMATURE")
+
+    it "requires exact clean evidence for every passed gate":
+        var evidence = ordered_delivery_gates(3)
+        evidence[1] = FormalDeliveryGateEvidenceV1(
+            FormalDeliveryGateV1.ExactCoreSemantics,
+            FormalDeliveryGateStatusV1.Passed, [], "", "")
+        val decision = evaluate_formal_delivery_gates_v1(evidence, nil)
+        expect(decision.diagnostic).to_contain("EVIDENCE")
+
+    it "requires the final verified release decision only after all gates":
+        val missing = evaluate_formal_delivery_gates_v1(
+            ordered_delivery_gates(8), nil)
+        expect(missing.release_ready).to_equal(false)
+        expect(missing.diagnostic).to_contain("RELEASE-DECISION")
+        val ready = evaluate_formal_delivery_gates_v1(
+            ordered_delivery_gates(8), Some(passed_release_bundle()))
+        expect(ready.accepted_state).to_equal(true)
+        expect(ready.release_ready).to_equal(true)
+        expect(ready.highest_passed_gate).to_equal("verified_release")
+
+    it "rejects a premature release decision on a partial plan":
+        val decision = evaluate_formal_delivery_gates_v1(
+            ordered_delivery_gates(7), Some(passed_release_bundle()))
+        expect(decision.diagnostic).to_contain("RELEASE-PREMATURE")
+
+    it "requires a V2 policy-bound terminal decision for typed verified release":
+        val missing = evaluate_formal_delivery_gates_v2(
+            ordered_delivery_gates(8), nil)
+        expect(missing.release_ready).to_equal(false)
+        expect(missing.diagnostic).to_contain("RELEASE-DECISION-V2")
+        val ready = evaluate_formal_delivery_gates_v2(
+            ordered_delivery_gates(8), Some(passed_release_bundle_v2()))
+        expect(ready.accepted_state).to_equal(true)
+        expect(ready.release_ready).to_equal(true)
+        expect(ready.plan_hash == "").to_equal(false)

@@ -1,0 +1,807 @@
+# Strict on-disk ingestion for signed Formal Verification 2.0 release evidence.
+#
+# No boolean or status in either input file can directly admit a release.  The
+# loader reconstructs typed evidence, verifies the exact Ed25519 payload, then
+# delegates admission to the compiler-owned release reducer.
+
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.parser.{parse_with_issues}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.verified_release_gate.{ReleaseEvidenceOutcomeV1,
+    VerifiedReleaseEvidenceV1, SignedVerifiedReleaseBundleV1,
+    ApprovedReleaseSignerV1, SignedVerifiedReleaseBundleDecisionV1,
+    validate_signed_verified_release_bundle_v1, VerifiedReleaseEvidenceV2,
+    SignedVerifiedReleaseBundleV2, SignedVerifiedReleaseBundleDecisionV2,
+    validate_signed_verified_release_bundle_v2}
+use compiler.common.assurance.policy_schema.{AssuranceStrictnessV2,
+    AssuranceGrade, AssuranceConvention, ResolvedAssurancePolicyV2}
+use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryGateV1,
+    FormalDeliveryGateStatusV1, FormalDeliveryGateEvidenceV1,
+    FormalDeliveryDecisionV1, evaluate_formal_delivery_gates_v1,
+    FormalDeliveryDecisionV2, evaluate_formal_delivery_gates_v2,
+    formal_delivery_manifest_hash_v1, FormalDeliveryReceiptFileV1}
+use app.verify.release_signature.{verify_release_bundle_ed25519_v1,
+    verify_release_bundle_ed25519_v2}
+
+const FV2_RELEASE_BUNDLE_SCHEMA_V1 = "simple.formal.release-bundle.v1"
+const FV2_RELEASE_BUNDLE_SCHEMA_V2 = "simple.formal.release-bundle.v2"
+const FV2_RELEASE_SIGNERS_SCHEMA_V1 = "simple.formal.release-signers.v1"
+const FV2_RELEASE_SIGNERS_SCHEMA_V2 = "simple.formal.release-signers.v2"
+
+pub struct LoadedReleaseBundleV1:
+    evidence: VerifiedReleaseEvidenceV1
+    payload_hash: text
+    signer_id: text
+    public_key: [u8]
+    signature: [u8]
+    delivery_gates: [FormalDeliveryGateEvidenceV1]
+
+pub struct LoadedReleaseAdmissionV1:
+    signed_bundle_decision: SignedVerifiedReleaseBundleDecisionV1
+    delivery_decision: FormalDeliveryDecisionV1
+    diagnostic: text
+
+    fn admitted() -> bool:
+        self.signed_bundle_decision.admitted and
+            self.delivery_decision.accepted_state and
+            self.delivery_decision.release_ready and self.diagnostic == ""
+
+pub struct LoadedReleaseBundleV2:
+    evidence: VerifiedReleaseEvidenceV2
+    payload_hash: text
+    signer_id: text
+    public_key: [u8]
+    signature: [u8]
+    delivery_gates: [FormalDeliveryGateEvidenceV1]
+
+pub struct LoadedReleaseAdmissionV2:
+    signed_bundle_decision: SignedVerifiedReleaseBundleDecisionV2
+    delivery_decision: FormalDeliveryDecisionV2
+    diagnostic: text
+
+    fn admitted() -> bool:
+        self.signed_bundle_decision.admitted and
+            self.delivery_decision.accepted_state and
+            self.delivery_decision.release_ready and self.diagnostic == ""
+
+# The V2 signer policy is a separate schema because an unbound V1 allow-list
+# cannot authorize a policy-bound V2 release.  `policy_hash` is the canonical
+# ResolvedAssurancePolicyV2 identity, not a profile-name alias.
+pub struct ApprovedReleaseSignerPolicyV2:
+    policy_hash: text
+    signers: [ApprovedReleaseSignerV1]
+
+fn fv2_policy_hash_v2_valid(value: text) -> bool:
+    # PolicyV2 deliberately preserves the APOLV2 identity format from the
+    # frozen assurance resolver. It is not a raw cryptographic receipt hash.
+    if not value.starts_with("APOLV2-") or value.len() == "APOLV2-".len():
+        return false
+    for index in "APOLV2-".len()..value.len():
+        val code = value.char_code_at(index)
+        if code < 48 or code > 57: return false
+    true
+
+pub fn required_release_receipt_hashes_v1(
+    gates: [FormalDeliveryGateEvidenceV1]
+) -> Result<[text], text>:
+    var required: [text] = []
+    for gate in gates:
+        if gate.status == FormalDeliveryGateStatusV1.Passed:
+            for receipt_hash in gate.receipt_hashes:
+                if required.contains(receipt_hash):
+                    return Err("FV2-E-RELEASE-RECEIPT-DUPLICATE: passed gates must bind unique receipt files")
+                required.push(receipt_hash)
+    if required.is_empty():
+        return Err("FV2-E-RELEASE-RECEIPT-EMPTY: no passed-gate receipts are bound")
+    Ok(required)
+
+fn fv2_validate_materialized_receipts_v1(
+    gates: [FormalDeliveryGateEvidenceV1],
+    receipts: [FormalDeliveryReceiptFileV1]
+) -> text:
+    val required = match required_release_receipt_hashes_v1(gates):
+        case Err(message): return message
+        case Ok(values): values
+    if receipts.len() != required.len():
+        return "FV2-E-RELEASE-RECEIPT-COUNT: every signed receipt must be materialized exactly once"
+    var observed: [text] = []
+    for receipt in receipts:
+        if observed.contains(receipt.receipt_hash):
+            return "FV2-E-RELEASE-RECEIPT-DUPLICATE: materialized receipt identity is duplicated"
+        if not required.contains(receipt.receipt_hash):
+            return "FV2-E-RELEASE-RECEIPT-UNEXPECTED: materialized receipt is not signed by a delivery gate"
+        if sha256_text(receipt.content) != receipt.receipt_hash:
+            return "FV2-E-RELEASE-RECEIPT-HASH: materialized receipt content does not match its signed SHA-256"
+        observed.push(receipt.receipt_hash)
+    for receipt_hash in required:
+        if not observed.contains(receipt_hash):
+            return "FV2-E-RELEASE-RECEIPT-MISSING: signed receipt file is absent"
+    ""
+
+# V2 release admission cannot treat a hash-shaped opaque blob as formal gate
+# evidence. The signed receipt hash authenticates exact bytes. The envelope
+# parser binds those bytes to one gate and one collector semantic identity; the
+# gate evidence identity is then recomputed across all such envelopes. Do not
+# require the final gate evidence hash inside an individual receipt: that would
+# create a hash cycle.
+struct Fv2ReceiptEnvelopeV2:
+    gate_name: text
+    semantic_evidence_hash: text
+    payload_hash: text
+
+fn fv2_parse_receipt_envelope_v2(
+    receipt: FormalDeliveryReceiptFileV1
+) -> Result<Fv2ReceiptEnvelopeV2, text>:
+    val boundary = receipt.content.find("\n\n")
+    if boundary < 0:
+        return Err("FV2-E-RELEASE-RECEIPT-SCHEMA-V2: receipt lacks canonical envelope boundary")
+    val header = receipt.content.substring(0, boundary)
+    val body = receipt.content.substring(boundary + 2, receipt.content.len())
+    val lines = header.lines()
+    if lines.len() != 4 or lines[0] != "FormalDeliveryReceipt-v2" or
+            not lines[1].starts_with("gate=") or
+            not lines[2].starts_with("semantic_evidence_hash=") or
+            not lines[3].starts_with("payload_sha256="):
+        return Err("FV2-E-RELEASE-RECEIPT-SCHEMA-V2: receipt header is not canonical")
+    val gate_name = lines[1].substring("gate=".len(), lines[1].len())
+    val semantic_hash = lines[2].substring("semantic_evidence_hash=".len(),
+        lines[2].len())
+    val payload_hash = lines[3].substring("payload_sha256=".len(),
+        lines[3].len())
+    if gate_name == "" or not sha256_lower_hex_valid(semantic_hash) or
+            not sha256_lower_hex_valid(payload_hash) or sha256_text(body) != payload_hash:
+        return Err("FV2-E-RELEASE-RECEIPT-BINDING-V2: envelope gate semantic identity or raw payload is invalid")
+    Ok(Fv2ReceiptEnvelopeV2(gate_name, semantic_hash, payload_hash))
+
+fn fv2_sorted_receipt_hashes_v2(values: [text]) -> [text]:
+    var result = values
+    var index = 0
+    while index < result.len():
+        var next = index + 1
+        while next < result.len():
+            if result[next] < result[index]:
+                val temporary = result[index]
+                result[index] = result[next]
+                result[next] = temporary
+            next = next + 1
+        index = index + 1
+    result
+
+fn fv2_framed_receipt_hashes_v2(values: [text]) -> text:
+    val sorted = fv2_sorted_receipt_hashes_v2(values)
+    var frames: [text] = []
+    for value in sorted: frames.push(value.len().to_string() + ":" + value)
+    sorted.len().to_string() + ":[" + frames.join("") + "]"
+
+fn fv2_gate_evidence_hash_v2(gate: FormalDeliveryGateEvidenceV1,
+    semantic_evidence_hash: text, receipt_hashes: [text]
+) -> text:
+    sha256_text("FormalDeliveryGateEvidence-v2|gate=" + gate.gate.name() +
+        "|semantic=" + semantic_evidence_hash + "|receipts=" +
+        fv2_framed_receipt_hashes_v2(receipt_hashes))
+
+fn fv2_receipt_envelope_v2_matches(
+    receipt: FormalDeliveryReceiptFileV1,
+    gate: FormalDeliveryGateEvidenceV1
+) -> Result<Fv2ReceiptEnvelopeV2, text>:
+    val envelope = fv2_parse_receipt_envelope_v2(receipt)
+    match envelope:
+        case Ok(value):
+            if value.gate_name != gate.gate.name():
+                Err("FV2-E-RELEASE-RECEIPT-GATE-V2: receipt is bound to a different formal gate")
+            else:
+                Ok(value)
+        case Err(message): Err(message)
+
+fn fv2_validate_materialized_receipts_v2(
+    gates: [FormalDeliveryGateEvidenceV1],
+    receipts: [FormalDeliveryReceiptFileV1]
+) -> text:
+    val legacy = fv2_validate_materialized_receipts_v1(gates, receipts)
+    if legacy != "": return legacy
+    for gate in gates:
+        if gate.status != FormalDeliveryGateStatusV1.Passed: continue
+        var semantic_hash = ""
+        var receipt_hashes: [text] = []
+        for required_hash in gate.receipt_hashes:
+            var matching: FormalDeliveryReceiptFileV1? = nil
+            for receipt in receipts:
+                if receipt.receipt_hash == required_hash:
+                    matching = Some(receipt)
+            match matching:
+                case Some(receipt):
+                    match fv2_receipt_envelope_v2_matches(receipt, gate):
+                        case Err(message): return message
+                        case Ok(envelope):
+                            if semantic_hash == "":
+                                semantic_hash = envelope.semantic_evidence_hash
+                            elif semantic_hash != envelope.semantic_evidence_hash:
+                                return "FV2-E-RELEASE-RECEIPT-SEMANTIC-V2: one formal gate has conflicting semantic evidence identities"
+                            receipt_hashes.push(required_hash)
+                case _: return "FV2-E-RELEASE-RECEIPT-MISSING-V2: signed receipt file is absent"
+        if semantic_hash == "" or gate.evidence_hash !=
+                fv2_gate_evidence_hash_v2(gate, semantic_hash, receipt_hashes):
+            return "FV2-E-RELEASE-GATE-EVIDENCE-V2: gate evidence hash does not match materialized semantic envelopes"
+    ""
+
+fn fv2_loader_dict_v1(
+    value: SdnValue,
+    expected_keys: [text],
+    context: text
+) -> Result<Dict<text, SdnValue>, text>:
+    match value:
+        case Dict(fields):
+            for key in fields.keys():
+                if not expected_keys.contains(key):
+                    return Err("FV2-E-RELEASE-SCHEMA: unknown " + context +
+                        " field '" + key + "'")
+            for key in expected_keys:
+                if not fields.contains_key(key):
+                    return Err("FV2-E-RELEASE-SCHEMA: missing " + context +
+                        " field '" + key + "'")
+            Ok(fields)
+        case _:
+            Err("FV2-E-RELEASE-SCHEMA: " + context + " must be a dictionary")
+
+fn fv2_loader_text_v1(
+    fields: Dict<text, SdnValue>,
+    key: text,
+    context: text,
+    allow_empty: bool = false
+) -> Result<text, text>:
+    match fields[key]:
+        case String(value):
+            if not allow_empty and value == "":
+                Err("FV2-E-RELEASE-SCHEMA: " + context + "." + key +
+                    " must not be empty")
+            else:
+                Ok(value)
+        case _:
+            Err("FV2-E-RELEASE-SCHEMA: " + context + "." + key +
+                " must be text")
+
+fn fv2_loader_i64_v1(
+    fields: Dict<text, SdnValue>,
+    key: text,
+    context: text
+) -> Result<i64, text>:
+    match fields[key]:
+        case Int(value): Ok(value)
+        case _:
+            Err("FV2-E-RELEASE-SCHEMA: " + context + "." + key +
+                " must be an integer")
+
+fn fv2_loader_text_array_v1(
+    fields: Dict<text, SdnValue>,
+    key: text,
+    context: text,
+    allow_empty: bool = false
+) -> Result<[text], text>:
+    match fields[key]:
+        case Array(values):
+            if not allow_empty and values.is_empty():
+                return Err("FV2-E-RELEASE-SCHEMA: " + context + "." + key +
+                    " must not be empty")
+            var result: [text] = []
+            for value in values:
+                match value:
+                    case String(item):
+                        if item == "": return Err("FV2-E-RELEASE-SCHEMA: " +
+                            context + "." + key + " contains empty text")
+                        result.push(item)
+                    case _:
+                        return Err("FV2-E-RELEASE-SCHEMA: " + context + "." +
+                            key + " must contain only text")
+            Ok(result)
+        case _:
+            Err("FV2-E-RELEASE-SCHEMA: " + context + "." + key +
+                " must be an array")
+
+# All release evidence identities are canonical SHA-256 values.  Do this at
+# parse time, rather than leaving malformed/truncated identities to a later
+# equality comparison where two bad values could be substituted together.
+fn fv2_loader_sha256_v1(
+    value: text,
+    context: text,
+    allow_empty: bool = false
+) -> Result<text, text>:
+    if value == "" and allow_empty:
+        return Ok(value)
+    if not sha256_lower_hex_valid(value):
+        return Err("FV2-E-RELEASE-HASH-FORMAT: " + context +
+            " must be canonical lowercase SHA-256")
+    Ok(value)
+
+fn fv2_loader_sha256_array_v1(
+    values: [text],
+    context: text
+) -> Result<[text], text>:
+    var result: [text] = []
+    for value in values:
+        result.push(fv2_loader_sha256_v1(value, context)?)
+    Ok(result)
+
+fn fv2_loader_bytes_v1(
+    fields: Dict<text, SdnValue>,
+    key: text,
+    context: text,
+    exact_length: i64
+) -> Result<[u8], text>:
+    match fields[key]:
+        case Array(values):
+            if values.len() != exact_length:
+                return Err("FV2-E-RELEASE-SCHEMA: " + context + "." + key +
+                    " must contain exactly " + exact_length.to_string() +
+                    " bytes")
+            var result: [u8] = []
+            for value in values:
+                match value:
+                    case Int(byte):
+                        if byte < 0 or byte > 255:
+                            return Err("FV2-E-RELEASE-SCHEMA: " + context +
+                                "." + key + " contains an out-of-range byte")
+                        result.push(byte.to_u8())
+                    case _:
+                        return Err("FV2-E-RELEASE-SCHEMA: " + context + "." +
+                            key + " must contain only integer bytes")
+            Ok(result)
+        case _:
+            Err("FV2-E-RELEASE-SCHEMA: " + context + "." + key +
+                " must be an array")
+
+fn fv2_loader_status_v1(value: text) -> Result<FormalStatus, text>:
+    match value:
+        case "not_checked": Ok(FormalStatus.NotChecked)
+        case "specified": Ok(FormalStatus.Specified)
+        case "model_proven": Ok(FormalStatus.ModelProven)
+        case "source_refined": Ok(FormalStatus.SourceRefined)
+        case "backend_refined": Ok(FormalStatus.BackendRefined)
+        case "artifact_verified": Ok(FormalStatus.ArtifactVerified)
+        case "trusted_boundary": Ok(FormalStatus.TrustedBoundary)
+        case "admitted_development": Ok(FormalStatus.AdmittedDevelopment)
+        case "unsupported": Ok(FormalStatus.Unsupported)
+        case "failed": Ok(FormalStatus.Failed)
+        case "stale": Ok(FormalStatus.Stale)
+        case _:
+            Err("FV2-E-RELEASE-SCHEMA: unknown formal status '" + value + "'")
+
+fn fv2_loader_outcome_v1(value: text) -> Result<ReleaseEvidenceOutcomeV1, text>:
+    match value:
+        case "proved_with_certificate":
+            Ok(ReleaseEvidenceOutcomeV1.ProvedWithCertificate)
+        case "approved_external_tcb":
+            Ok(ReleaseEvidenceOutcomeV1.ApprovedExternalTcb)
+        case "counterexample_expected":
+            Ok(ReleaseEvidenceOutcomeV1.CounterexampleExpected)
+        case "unknown": Ok(ReleaseEvidenceOutcomeV1.Unknown)
+        case "timeout": Ok(ReleaseEvidenceOutcomeV1.Timeout)
+        case "missing_tool": Ok(ReleaseEvidenceOutcomeV1.MissingTool)
+        case "tool_failure": Ok(ReleaseEvidenceOutcomeV1.ToolFailure)
+        case "environment_failure":
+            Ok(ReleaseEvidenceOutcomeV1.EnvironmentFailure)
+        case _:
+            Err("FV2-E-RELEASE-SCHEMA: unknown tool outcome '" + value + "'")
+
+fn fv2_loader_gate_v1(value: text) -> Result<FormalDeliveryGateV1, text>:
+    match value:
+        case "verification_truthfulness":
+            Ok(FormalDeliveryGateV1.VerificationTruthfulness)
+        case "exact_core_semantics": Ok(FormalDeliveryGateV1.ExactCoreSemantics)
+        case "vir_compiler_relation": Ok(FormalDeliveryGateV1.VirCompilerRelation)
+        case "aop_macro_closure": Ok(FormalDeliveryGateV1.AopMacroClosure)
+        case "simpleos_vertical_slice": Ok(FormalDeliveryGateV1.SimpleOsVerticalSlice)
+        case "generated_rv32i_end_to_end":
+            Ok(FormalDeliveryGateV1.GeneratedRv32iEndToEnd)
+        case "rv64_privilege_mmu_linux":
+            Ok(FormalDeliveryGateV1.Rv64PrivilegeMmuLinux)
+        case "verified_release": Ok(FormalDeliveryGateV1.VerifiedRelease)
+        case _:
+            Err("FV2-E-RELEASE-SCHEMA: unknown delivery gate '" + value + "'")
+
+fn fv2_loader_gate_status_v1(
+    value: text
+) -> Result<FormalDeliveryGateStatusV1, text>:
+    match value:
+        case "passed": Ok(FormalDeliveryGateStatusV1.Passed)
+        case "failed": Ok(FormalDeliveryGateStatusV1.Failed)
+        case "blocked": Ok(FormalDeliveryGateStatusV1.Blocked)
+        case _:
+            Err("FV2-E-RELEASE-SCHEMA: unknown delivery status '" + value + "'")
+
+fn fv2_loader_delivery_gates_v1(
+    value: SdnValue
+) -> Result<[FormalDeliveryGateEvidenceV1], text>:
+    match value:
+        case Array(values):
+            var result: [FormalDeliveryGateEvidenceV1] = []
+            for value in values:
+                val fields = fv2_loader_dict_v1(value,
+                    ["gate", "status", "receipt_hashes", "evidence_hash",
+                        "diagnostic"], "delivery_gate")?
+                val gate_name = fv2_loader_text_v1(fields, "gate",
+                    "delivery_gate")?
+                val status_name = fv2_loader_text_v1(fields, "status",
+                    "delivery_gate")?
+                val receipts = fv2_loader_text_array_v1(fields,
+                    "receipt_hashes", "delivery_gate", true)?
+                val evidence_hash = fv2_loader_text_v1(fields,
+                    "evidence_hash", "delivery_gate", true)?
+                val diagnostic = fv2_loader_text_v1(fields, "diagnostic",
+                    "delivery_gate", true)?
+                val checked_receipts = fv2_loader_sha256_array_v1(receipts,
+                    "delivery_gate.receipt_hashes")?
+                val checked_evidence_hash = fv2_loader_sha256_v1(evidence_hash,
+                    "delivery_gate.evidence_hash", true)?
+                result.push(FormalDeliveryGateEvidenceV1(
+                    fv2_loader_gate_v1(gate_name)?,
+                    fv2_loader_gate_status_v1(status_name)?, checked_receipts,
+                    checked_evidence_hash, diagnostic))
+            Ok(result)
+        case _:
+            Err("FV2-E-RELEASE-SCHEMA: delivery_gates must be an array")
+
+fn fv2_loader_status_array_v1(
+    fields: Dict<text, SdnValue>,
+    key: text
+) -> Result<[FormalStatus], text>:
+    match fv2_loader_text_array_v1(fields, key, "evidence"):
+        case Err(message): Err(message)
+        case Ok(values):
+            var result: [FormalStatus] = []
+            for value in values:
+                match fv2_loader_status_v1(value):
+                    case Err(message): return Err(message)
+                    case Ok(status): result.push(status)
+            Ok(result)
+
+fn fv2_loader_outcome_array_v1(
+    fields: Dict<text, SdnValue>,
+    key: text
+) -> Result<[ReleaseEvidenceOutcomeV1], text>:
+    match fv2_loader_text_array_v1(fields, key, "evidence"):
+        case Err(message): Err(message)
+        case Ok(values):
+            var result: [ReleaseEvidenceOutcomeV1] = []
+            for value in values:
+                match fv2_loader_outcome_v1(value):
+                    case Err(message): return Err(message)
+                    case Ok(outcome): result.push(outcome)
+            Ok(result)
+
+fn fv2_parse_evidence_v1(value: SdnValue) -> Result<VerifiedReleaseEvidenceV1, text>:
+    val expected = ["assurance_profile", "artifact_status",
+        "reachable_symbol_statuses", "artifact_hash", "evidence_artifact_hash",
+        "proof_receipt_hashes", "compiler_certificate_hashes",
+        "trust_manifest_hash", "bounded_tcb_manifest_hash",
+        "independent_replay_hash", "mutation_receipt_hash",
+        "non_vacuity_receipt_hash", "tool_outcomes",
+        "unsupported_construct_count", "stale_evidence_count",
+        "warning_control_count", "environment_error_count",
+        "delivery_gate_manifest_hash"]
+    val fields = fv2_loader_dict_v1(value, expected, "evidence")?
+    val profile = fv2_loader_text_v1(fields, "assurance_profile", "evidence")?
+    val status_text = fv2_loader_text_v1(fields, "artifact_status", "evidence")?
+    val artifact_status = fv2_loader_status_v1(status_text)?
+    val reachable = fv2_loader_status_array_v1(fields,
+        "reachable_symbol_statuses")?
+    val artifact = fv2_loader_sha256_v1(fv2_loader_text_v1(fields,
+        "artifact_hash", "evidence")?, "evidence.artifact_hash")?
+    val evidence_artifact = fv2_loader_sha256_v1(fv2_loader_text_v1(fields,
+        "evidence_artifact_hash", "evidence")?, "evidence.evidence_artifact_hash")?
+    val proofs = fv2_loader_sha256_array_v1(fv2_loader_text_array_v1(fields,
+        "proof_receipt_hashes", "evidence")?, "evidence.proof_receipt_hashes")?
+    val certificates = fv2_loader_sha256_array_v1(fv2_loader_text_array_v1(fields,
+        "compiler_certificate_hashes", "evidence")?, "evidence.compiler_certificate_hashes")?
+    val trust = fv2_loader_sha256_v1(fv2_loader_text_v1(fields,
+        "trust_manifest_hash", "evidence")?, "evidence.trust_manifest_hash")?
+    val bounded_tcb = fv2_loader_sha256_v1(fv2_loader_text_v1(fields,
+        "bounded_tcb_manifest_hash", "evidence", true)?,
+        "evidence.bounded_tcb_manifest_hash", true)?
+    val replay = fv2_loader_sha256_v1(fv2_loader_text_v1(fields,
+        "independent_replay_hash", "evidence")?, "evidence.independent_replay_hash")?
+    val mutation = fv2_loader_sha256_v1(fv2_loader_text_v1(fields,
+        "mutation_receipt_hash", "evidence")?, "evidence.mutation_receipt_hash")?
+    val non_vacuity = fv2_loader_sha256_v1(fv2_loader_text_v1(fields,
+        "non_vacuity_receipt_hash", "evidence")?, "evidence.non_vacuity_receipt_hash")?
+    val outcomes = fv2_loader_outcome_array_v1(fields, "tool_outcomes")?
+    val unsupported = fv2_loader_i64_v1(fields,
+        "unsupported_construct_count", "evidence")?
+    val stale = fv2_loader_i64_v1(fields, "stale_evidence_count", "evidence")?
+    val warnings = fv2_loader_i64_v1(fields,
+        "warning_control_count", "evidence")?
+    val environment = fv2_loader_i64_v1(fields,
+        "environment_error_count", "evidence")?
+    val delivery_manifest = fv2_loader_sha256_v1(fv2_loader_text_v1(fields,
+        "delivery_gate_manifest_hash", "evidence")?, "evidence.delivery_gate_manifest_hash")?
+    Ok(VerifiedReleaseEvidenceV1(profile, artifact_status, reachable,
+        artifact, evidence_artifact, proofs, certificates, trust, bounded_tcb,
+        replay, mutation, non_vacuity, outcomes, unsupported, stale, warnings,
+        environment, delivery_manifest))
+
+fn fv2_parse_policy_v2(value: SdnValue) -> Result<ResolvedAssurancePolicyV2, text>:
+    val fields = fv2_loader_dict_v1(value, ["strictness", "runtime_family",
+        "assurance_grade", "convention"], "policy_v2")?
+    val strictness_text = fv2_loader_text_v1(fields, "strictness", "policy_v2")?
+    val runtime_family = fv2_loader_text_v1(fields, "runtime_family", "policy_v2")?
+    val grade_text = fv2_loader_text_v1(fields, "assurance_grade", "policy_v2")?
+    val convention_text = fv2_loader_text_v1(fields, "convention", "policy_v2")?
+    val strictness = AssuranceStrictnessV2.from_name(strictness_text)
+    val grade = AssuranceGrade.from_name(grade_text)
+    val convention = AssuranceConvention.from_name(convention_text)
+    # Input aliases are forbidden here.  The exact canonical policy spelling is
+    # part of the V2 payload identity and must not be normalized by a loader.
+    if strictness.name() != strictness_text:
+        return Err("FV2-E-RELEASE-POLICY-V2: noncanonical strictness")
+    if grade.name() != grade_text:
+        return Err("FV2-E-RELEASE-POLICY-V2: noncanonical assurance grade")
+    if convention.name() != convention_text:
+        return Err("FV2-E-RELEASE-POLICY-V2: noncanonical convention")
+    Ok(ResolvedAssurancePolicyV2(strictness, runtime_family, grade, convention))
+
+pub fn parse_release_bundle_sdn_v2(source: text) -> Result<LoadedReleaseBundleV2, text>:
+    match parse_with_issues(source):
+        case Err(message): Err("FV2-E-RELEASE-PARSE-V2: " + message)
+        case Ok((value, issues)):
+            if not issues.is_empty():
+                return Err("FV2-E-RELEASE-SCHEMA-V2: duplicate fields are forbidden")
+            val expected = ["schema", "payload_hash", "signer_id",
+                "public_key", "signature", "policy", "evidence", "delivery_gates"]
+            val fields = fv2_loader_dict_v1(value, expected, "bundle_v2")?
+            val schema = fv2_loader_text_v1(fields, "schema", "bundle_v2")?
+            if schema != FV2_RELEASE_BUNDLE_SCHEMA_V2:
+                return Err("FV2-E-RELEASE-SCHEMA-V2: unsupported bundle schema")
+            val payload = fv2_loader_sha256_v1(fv2_loader_text_v1(fields,
+                "payload_hash", "bundle_v2")?, "bundle_v2.payload_hash")?
+            val signer = fv2_loader_text_v1(fields, "signer_id", "bundle_v2")?
+            val public_key = fv2_loader_bytes_v1(fields, "public_key", "bundle_v2", 32)?
+            val signature = fv2_loader_bytes_v1(fields, "signature", "bundle_v2", 64)?
+            val policy = fv2_parse_policy_v2(fields["policy"])?
+            val base_evidence = fv2_parse_evidence_v1(fields["evidence"])?
+            val gates = fv2_loader_delivery_gates_v1(fields["delivery_gates"])?
+            Ok(LoadedReleaseBundleV2(VerifiedReleaseEvidenceV2(policy,
+                base_evidence), payload, signer, public_key, signature, gates))
+
+pub fn parse_release_bundle_sdn_v1(source: text) -> Result<LoadedReleaseBundleV1, text>:
+    match parse_with_issues(source):
+        case Err(message): Err("FV2-E-RELEASE-PARSE: " + message)
+        case Ok((value, issues)):
+            if not issues.is_empty():
+                return Err("FV2-E-RELEASE-SCHEMA: duplicate fields are forbidden")
+            val expected = ["schema", "payload_hash", "signer_id",
+                "public_key", "signature", "evidence", "delivery_gates"]
+            match fv2_loader_dict_v1(value, expected, "bundle"):
+                case Err(message): Err(message)
+                case Ok(fields):
+                    val schema = fv2_loader_text_v1(fields, "schema", "bundle")
+                    match schema:
+                        case Err(message): return Err(message)
+                        case Ok(schema_value):
+                            if schema_value != FV2_RELEASE_BUNDLE_SCHEMA_V1:
+                                return Err("FV2-E-RELEASE-SCHEMA: unsupported bundle schema")
+                    val payload_text = fv2_loader_text_v1(fields, "payload_hash", "bundle")
+                    val signer = fv2_loader_text_v1(fields, "signer_id", "bundle")
+                    val public_key = fv2_loader_bytes_v1(fields, "public_key",
+                        "bundle", 32)
+                    val signature = fv2_loader_bytes_v1(fields, "signature",
+                        "bundle", 64)
+                    val evidence = fv2_parse_evidence_v1(fields["evidence"])
+                    val delivery_gates = fv2_loader_delivery_gates_v1(
+                        fields["delivery_gates"])
+                    match payload_text:
+                        case Err(message): return Err(message)
+                        case Ok(payload_value):
+                            val payload = fv2_loader_sha256_v1(payload_value,
+                                "bundle.payload_hash")?
+                            match signer:
+                                case Err(message): return Err(message)
+                                case Ok(signer_value):
+                                    match public_key:
+                                        case Err(message): return Err(message)
+                                        case Ok(public_key_value):
+                                            match signature:
+                                                case Err(message): return Err(message)
+                                                case Ok(signature_value):
+                                                    match evidence:
+                                                        case Err(message): Err(message)
+                                                        case Ok(evidence_value):
+                                                            match delivery_gates:
+                                                                case Err(message): Err(message)
+                                                                case Ok(gates):
+                                                                    Ok(LoadedReleaseBundleV1(evidence_value,
+                                                                        payload, signer_value,
+                                                                        public_key_value, signature_value,
+                                                                        gates))
+
+pub fn parse_release_signers_sdn_v1(source: text) -> Result<[ApprovedReleaseSignerV1], text>:
+    match parse_with_issues(source):
+        case Err(message): Err("FV2-E-RELEASE-POLICY-PARSE: " + message)
+        case Ok((value, issues)):
+            if not issues.is_empty():
+                return Err("FV2-E-RELEASE-POLICY: duplicate fields are forbidden")
+            match fv2_loader_dict_v1(value, ["schema", "signers"], "policy"):
+                case Err(message): Err(message)
+                case Ok(fields):
+                    match fv2_loader_text_v1(fields, "schema", "policy"):
+                        case Err(message): return Err(message)
+                        case Ok(schema):
+                            if schema != FV2_RELEASE_SIGNERS_SCHEMA_V1:
+                                return Err("FV2-E-RELEASE-POLICY: unsupported signer policy schema")
+                    match fields["signers"]:
+                        case Array(values):
+                            if values.is_empty():
+                                return Err("FV2-E-RELEASE-POLICY: signer policy is empty")
+                            var signers: [ApprovedReleaseSignerV1] = []
+                            for value in values:
+                                match fv2_loader_dict_v1(value,
+                                        ["signer_id", "public_key_hash"], "signer"):
+                                    case Err(message): return Err(message)
+                                    case Ok(signer_fields):
+                                        val signer_id = fv2_loader_text_v1(signer_fields,
+                                            "signer_id", "signer")
+                                        val public_hash = fv2_loader_text_v1(signer_fields,
+                                            "public_key_hash", "signer")
+                                        match signer_id:
+                                            case Err(message): return Err(message)
+                                            case Ok(signer_value):
+                                                match public_hash:
+                                                    case Err(message): return Err(message)
+                                                    case Ok(hash_value):
+                                                        for existing in signers:
+                                                            if existing.signer_id == signer_value or existing.public_key_hash == hash_value:
+                                                                return Err("FV2-E-RELEASE-POLICY: signer identity and public key identity must both be unique")
+                                                        if not sha256_lower_hex_valid(hash_value):
+                                                            return Err("FV2-E-RELEASE-POLICY: signer public_key_hash must be canonical SHA-256")
+                                                        signers.push(ApprovedReleaseSignerV1(
+                                                            signer_value, hash_value))
+                            Ok(signers)
+                        case _:
+                            Err("FV2-E-RELEASE-POLICY: signers must be an array")
+
+pub fn parse_release_signers_sdn_v2(
+    source: text
+) -> Result<ApprovedReleaseSignerPolicyV2, text>:
+    match parse_with_issues(source):
+        case Err(message): Err("FV2-E-RELEASE-POLICY-PARSE-V2: " + message)
+        case Ok((value, issues)):
+            if not issues.is_empty():
+                return Err("FV2-E-RELEASE-POLICY-V2: duplicate fields are forbidden")
+            val fields = fv2_loader_dict_v1(value,
+                ["schema", "policy_hash", "signers"], "policy_v2")?
+            val schema = fv2_loader_text_v1(fields, "schema", "policy_v2")?
+            if schema != FV2_RELEASE_SIGNERS_SCHEMA_V2:
+                return Err("FV2-E-RELEASE-POLICY-V2: unsupported signer policy schema")
+            val policy_hash = fv2_loader_text_v1(fields, "policy_hash", "policy_v2")?
+            if not fv2_policy_hash_v2_valid(policy_hash):
+                return Err("FV2-E-RELEASE-POLICY-V2: policy_hash must be canonical APOLV2 identity")
+            match fields["signers"]:
+                case Array(values):
+                    if values.is_empty():
+                        return Err("FV2-E-RELEASE-POLICY-V2: signer policy is empty")
+                    var signers: [ApprovedReleaseSignerV1] = []
+                    for value in values:
+                        val signer_fields = fv2_loader_dict_v1(value,
+                            ["signer_id", "public_key_hash"], "signer_v2")?
+                        val signer_id = fv2_loader_text_v1(signer_fields,
+                            "signer_id", "signer_v2")?
+                        val public_hash = fv2_loader_text_v1(signer_fields,
+                            "public_key_hash", "signer_v2")?
+                        if not sha256_lower_hex_valid(public_hash):
+                            return Err("FV2-E-RELEASE-POLICY-V2: signer public_key_hash must be canonical SHA-256")
+                        for existing in signers:
+                            if existing.signer_id == signer_id or existing.public_key_hash == public_hash:
+                                return Err("FV2-E-RELEASE-POLICY-V2: signer identity and public key identity must both be unique")
+                        signers.push(ApprovedReleaseSignerV1(signer_id, public_hash))
+                    Ok(ApprovedReleaseSignerPolicyV2(policy_hash, signers))
+                case _:
+                    Err("FV2-E-RELEASE-POLICY-V2: signers must be an array")
+
+pub fn admit_loaded_release_bundle_v1(
+    loaded: LoadedReleaseBundleV1,
+    approved_signers: [ApprovedReleaseSignerV1]
+) -> SignedVerifiedReleaseBundleDecisionV1:
+    var matching: [ApprovedReleaseSignerV1] = []
+    for signer in approved_signers:
+        if signer.signer_id == loaded.signer_id: matching.push(signer)
+    if matching.len() != 1:
+        val rejected = validate_signed_verified_release_bundle_v1(
+            SignedVerifiedReleaseBundleV1(loaded.evidence, loaded.payload_hash,
+                loaded.signer_id, verify_release_bundle_ed25519_v1(
+                    loaded.evidence, ApprovedReleaseSignerV1("", ""),
+                    loaded.public_key, loaded.signature)), approved_signers)
+        return SignedVerifiedReleaseBundleDecisionV1(false,
+            rejected.release_decision, "",
+            "FV2-E-RELEASE-BUNDLE-POLICY: signer identity is not uniquely approved")
+    val verification = verify_release_bundle_ed25519_v1(loaded.evidence,
+        matching[0], loaded.public_key, loaded.signature)
+    validate_signed_verified_release_bundle_v1(SignedVerifiedReleaseBundleV1(
+        loaded.evidence, loaded.payload_hash, loaded.signer_id, verification),
+        approved_signers)
+
+pub fn admit_loaded_release_bundle_v2(
+    loaded: LoadedReleaseBundleV2,
+    signer_policy: ApprovedReleaseSignerPolicyV2
+) -> SignedVerifiedReleaseBundleDecisionV2:
+    val policy_hash = loaded.evidence.policy.policy_hash()
+    if signer_policy.policy_hash != policy_hash:
+        val rejected = validate_signed_verified_release_bundle_v2(
+            SignedVerifiedReleaseBundleV2(loaded.evidence, loaded.payload_hash,
+                loaded.signer_id, verify_release_bundle_ed25519_v2(
+                    loaded.evidence, ApprovedReleaseSignerV1("", ""),
+                    loaded.public_key, loaded.signature)), [])
+        return SignedVerifiedReleaseBundleDecisionV2(false,
+            rejected.release_decision, "",
+            "FV2-E-RELEASE-BUNDLE-POLICY-V2: signer policy is not bound to the exact V2 assurance policy")
+    var matching: [ApprovedReleaseSignerV1] = []
+    for signer in signer_policy.signers:
+        if signer.signer_id == loaded.signer_id: matching.push(signer)
+    if matching.len() != 1:
+        val rejected = validate_signed_verified_release_bundle_v2(
+            SignedVerifiedReleaseBundleV2(loaded.evidence, loaded.payload_hash,
+                loaded.signer_id, verify_release_bundle_ed25519_v2(
+                    loaded.evidence, ApprovedReleaseSignerV1("", ""),
+                    loaded.public_key, loaded.signature)), signer_policy.signers)
+        return SignedVerifiedReleaseBundleDecisionV2(false,
+            rejected.release_decision, "",
+            "FV2-E-RELEASE-BUNDLE-POLICY-V2: signer identity is not uniquely approved")
+    val verification = verify_release_bundle_ed25519_v2(loaded.evidence,
+        matching[0], loaded.public_key, loaded.signature)
+    validate_signed_verified_release_bundle_v2(SignedVerifiedReleaseBundleV2(
+        loaded.evidence, loaded.payload_hash, loaded.signer_id, verification),
+        signer_policy.signers)
+
+pub fn validate_release_artifact_identity_v1(
+    evidence: VerifiedReleaseEvidenceV1,
+    observed_artifact_hash: text
+) -> text:
+    if not sha256_lower_hex_valid(observed_artifact_hash):
+        return "FV2-E-RELEASE-ARTIFACT-HASH: observed artifact hash is not SHA-256"
+    if observed_artifact_hash != evidence.artifact_hash or
+            observed_artifact_hash != evidence.evidence_artifact_hash:
+        return "FV2-E-RELEASE-ARTIFACT-IDENTITY: deployed artifact bytes differ from signed evidence"
+    ""
+
+pub fn admit_loaded_release_delivery_v1(
+    loaded: LoadedReleaseBundleV1,
+    approved_signers: [ApprovedReleaseSignerV1],
+    materialized_receipts: [FormalDeliveryReceiptFileV1]
+) -> LoadedReleaseAdmissionV1:
+    val gates = loaded.delivery_gates
+    val claimed_manifest = loaded.evidence.delivery_gate_manifest_hash
+    val signed = admit_loaded_release_bundle_v1(loaded, approved_signers)
+    val delivery = evaluate_formal_delivery_gates_v1(gates, Some(signed))
+    val expected_manifest = formal_delivery_manifest_hash_v1(gates)
+    val receipt_diagnostic = fv2_validate_materialized_receipts_v1(gates,
+        materialized_receipts)
+    val diagnostic = if claimed_manifest != expected_manifest:
+        "FV2-E-RELEASE-DELIVERY-BINDING: signed evidence does not bind the exact delivery gates"
+    elif receipt_diagnostic != "":
+        receipt_diagnostic
+    else:
+        ""
+    LoadedReleaseAdmissionV1(signed, delivery, diagnostic)
+
+pub fn admit_loaded_release_delivery_v2(
+    loaded: LoadedReleaseBundleV2,
+    signer_policy: ApprovedReleaseSignerPolicyV2,
+    materialized_receipts: [FormalDeliveryReceiptFileV1]
+) -> LoadedReleaseAdmissionV2:
+    val gates = loaded.delivery_gates
+    val claimed_manifest = loaded.evidence.evidence.delivery_gate_manifest_hash
+    val signed = admit_loaded_release_bundle_v2(loaded, signer_policy)
+    # Gate ordering and receipt materialization are unchanged evidence rules;
+    # their signed manifest is nested in the policy-bound V2 payload.
+    val delivery = evaluate_formal_delivery_gates_v2(gates, Some(signed))
+    val expected_manifest = formal_delivery_manifest_hash_v1(gates)
+    val receipt_diagnostic = fv2_validate_materialized_receipts_v2(gates,
+        materialized_receipts)
+    val diagnostic = if receipt_diagnostic != "":
+        receipt_diagnostic
+    elif claimed_manifest != expected_manifest:
+        "FV2-E-RELEASE-DELIVERY-BINDING-V2: signed evidence does not bind the exact delivery gates"
+    elif not signed.admitted:
+        signed.diagnostic
+    else:
+        ""
+    LoadedReleaseAdmissionV2(signed, delivery, diagnostic)

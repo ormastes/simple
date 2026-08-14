@@ -1,0 +1,105 @@
+# Frozen state geometry for the real iterative RISC-V M/Zmmul owner.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.hwir.riscv_scalar_muldiv_projection.{RiscvScalarMulDivProjection}
+use compiler.mir.hwir.sequential.{HwStateRegister}
+use compiler.mir.hwir.riscv_scalar_muldiv_completion.{riscv_scalar_muldiv_metadata_registers}
+
+pub class RiscvScalarMulDivIterativeContract:
+    projection: RiscvScalarMulDivProjection
+    operand_width: i32
+    xlen: i32
+    count_width: i32
+    multiply_width: i32
+    remainder_width: i32
+    family: text
+    projection_sha256: text
+
+    me diagnostic() -> text:
+        val projection_error = self.projection.diagnostic()
+        if projection_error != "": return projection_error
+        if self.operand_width != self.projection.operand_width or
+            self.xlen != self.projection.xlen or self.multiply_width != self.operand_width * 2 or
+            self.remainder_width != self.operand_width + 1:
+            return "HWIR-E-RISCV-MULDIV-ITERATIVE-WIDTH: iterative state must match the frozen projection"
+        val expected_count = if self.operand_width == 32: 6 else: 7
+        if self.count_width != expected_count:
+            return "HWIR-E-RISCV-MULDIV-ITERATIVE-COUNT: iteration counter must represent zero through operand width"
+        val multiply = self.projection.operation.starts_with("multiply_")
+        val expected_family = if multiply: "multiply" else: "divide"
+        if self.family != expected_family:
+            return "HWIR-E-RISCV-MULDIV-ITERATIVE-FAMILY: state family must match the frozen operation"
+        if self.projection_sha256 != self.projection.structural_sha256():
+            return "HWIR-E-RISCV-MULDIV-ITERATIVE-INTEGRITY: iterative state requires the exact projection receipt"
+        ""
+
+    me registers() -> [HwStateRegister]:
+        var result = [HwStateRegister(name: "busy_reg", bit_width: 1,
+                clock_domain: "default", reset_value: 0),
+            HwStateRegister(name: "result_valid_reg", bit_width: 1,
+                clock_domain: "default", reset_value: 0),
+            HwStateRegister(name: "fault_reg", bit_width: 1,
+                clock_domain: "default", reset_value: 0),
+            HwStateRegister(name: "count_reg", bit_width: self.count_width,
+                clock_domain: "default", reset_value: 0),
+            HwStateRegister(name: "result_reg", bit_width: self.xlen,
+                clock_domain: "default", reset_value: 0),
+            HwStateRegister(name: "event_id_reg", bit_width: 64,
+                clock_domain: "default", reset_value: 0),
+            HwStateRegister(name: "decode_event_id_reg", bit_width: 64,
+                clock_domain: "default", reset_value: 0),
+            HwStateRegister(name: "rd_reg", bit_width: 5,
+                clock_domain: "default", reset_value: 0)]
+        if self.family == "multiply":
+            result.push(HwStateRegister(name: "acc_reg", bit_width: self.multiply_width,
+                clock_domain: "default", reset_value: 0))
+            result.push(HwStateRegister(name: "multiplicand_reg", bit_width: self.multiply_width,
+                clock_domain: "default", reset_value: 0))
+            result.push(HwStateRegister(name: "multiplier_reg", bit_width: self.operand_width,
+                clock_domain: "default", reset_value: 0))
+            result.push(HwStateRegister(name: "result_negate_reg", bit_width: 1,
+                clock_domain: "default", reset_value: 0))
+        else:
+            result.push(HwStateRegister(name: "remainder_reg", bit_width: self.remainder_width,
+                clock_domain: "default", reset_value: 0))
+            result.push(HwStateRegister(name: "divisor_reg", bit_width: self.remainder_width,
+                clock_domain: "default", reset_value: 0))
+            result.push(HwStateRegister(name: "dividend_reg", bit_width: self.operand_width,
+                clock_domain: "default", reset_value: 0))
+            result.push(HwStateRegister(name: "original_dividend_reg", bit_width: self.operand_width,
+                clock_domain: "default", reset_value: 0))
+            result.push(HwStateRegister(name: "quotient_reg", bit_width: self.operand_width,
+                clock_domain: "default", reset_value: 0))
+            result.push(HwStateRegister(name: "result_negate_reg", bit_width: 1,
+                clock_domain: "default", reset_value: 0))
+            result.push(HwStateRegister(name: "remainder_negate_reg", bit_width: 1,
+                clock_domain: "default", reset_value: 0))
+            result.push(HwStateRegister(name: "special_reg", bit_width: 2,
+                clock_domain: "default", reset_value: 0))
+        for register in riscv_scalar_muldiv_metadata_registers(self.xlen):
+            result.push(register)
+        result
+
+    me structural_sha256() -> text:
+        var rows = ["riscv-scalar-muldiv-iterative-contract-v1", self.projection_sha256,
+            self.family, self.operand_width.to_text(), self.xlen.to_text(),
+            self.count_width.to_text(), self.multiply_width.to_text(),
+            self.remainder_width.to_text()]
+        for register in self.registers():
+            rows.push(register.name + ":" + register.bit_width.to_text())
+        sha256_text(rows.join("\n"))
+
+pub fn strict_riscv_scalar_muldiv_iterative_contract(
+    projection: RiscvScalarMulDivProjection) -> Result<RiscvScalarMulDivIterativeContract, text>:
+    val projection_error = projection.diagnostic()
+    if projection_error != "": return Err(projection_error)
+    val contract = RiscvScalarMulDivIterativeContract(projection: projection,
+        operand_width: projection.operand_width, xlen: projection.xlen,
+        count_width: if projection.operand_width == 32: 6 else: 7,
+        multiply_width: projection.operand_width * 2,
+        remainder_width: projection.operand_width + 1,
+        family: if projection.operation.starts_with("multiply_"): "multiply" else: "divide",
+        projection_sha256: projection.structural_sha256())
+    val diagnostic = contract.diagnostic()
+    if diagnostic != "": return Err(diagnostic)
+    Ok(contract)

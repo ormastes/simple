@@ -1,0 +1,213 @@
+# Declarative Gen2 M/Zmmul operation projection and compiler-host evaluator.
+# This freezes operation identity and architectural arithmetic only. It does
+# not claim request ownership, latency, handshaking, or RTL composition.
+
+use compiler.mir.hwir.types.{CoreConfig, HwNodeId}
+use compiler.mir.hwir.riscv_scalar_core.{riscv_gen2_scalar_dispatch,
+    riscv_gen2_scalar_elaboration}
+use std.common.crypto.sha256.{sha256_text}
+
+pub class RiscvScalarMulDivProjection:
+    node_id: HwNodeId
+    config: CoreConfig
+    entry_id: text
+    provider: text
+    canonical_instruction: u32
+    xlen: i32
+    operand_width: i32
+    rd_index: i32
+    rs1_index: i32
+    rs2_index: i32
+    operation: text
+    word_result: bool
+    decoder_structural_sha256: text
+    dispatch_identity_sha256: text
+
+    me diagnostic() -> text:
+        val config_error = self.config.diagnostic()
+        if config_error != "": return config_error
+        if not self.node_id.is_valid() or self.entry_id == "" or self.provider == "":
+            return "HWIR-E-RISCV-MULDIV-IDENTITY: projection requires frozen decode and provider identity"
+        if self.xlen != 32 and self.xlen != 64:
+            return "HWIR-E-RISCV-MULDIV-XLEN: projection requires RV32 or RV64"
+        if self.operand_width != self.xlen and not (self.xlen == 64 and self.operand_width == 32):
+            return "HWIR-E-RISCV-MULDIV-WIDTH: operand width must be XLEN or an RV64 word"
+        if self.rd_index < 0 or self.rd_index > 31 or self.rs1_index < 0 or
+            self.rs1_index > 31 or self.rs2_index < 0 or self.rs2_index > 31:
+            return "HWIR-E-RISCV-MULDIV-REGISTER: projection indices must name architectural registers"
+        if not muldiv_operation_supported(self.operation):
+            return "HWIR-E-RISCV-MULDIV-OPERATION: projection requires a declared M operation"
+        if self.word_result != (self.xlen == 64 and self.operand_width == 32):
+            return "HWIR-E-RISCV-MULDIV-WORD: word-result identity must match an RV64 32-bit operation"
+        if self.word_result and (self.operation == "multiply_high_signed" or
+            self.operation == "multiply_high_signed_unsigned" or
+            self.operation == "multiply_high_unsigned"):
+            return "HWIR-E-RISCV-MULDIV-WORD-OP: RV64 word operations do not admit high-half multiply"
+        if self.word_result and self.entry_id != "rv64.m.mulw" and
+            self.entry_id != "rv64.m.divw" and self.entry_id != "rv64.m.divuw" and
+            self.entry_id != "rv64.m.remw" and self.entry_id != "rv64.m.remuw":
+            return "HWIR-E-RISCV-MULDIV-WORD-ENTRY: word mode requires an RV64 M word entry"
+        if self.dispatch_identity_sha256 != self.recomputed_identity_sha256():
+            return "HWIR-E-RISCV-MULDIV-INTEGRITY: projection identity does not match its frozen dispatch receipt"
+        val elaborated = riscv_gen2_scalar_elaboration(self.config, self.provider)
+        if elaborated.is_err():
+            return "HWIR-E-RISCV-MULDIV-INTEGRITY: projection provider is not admitted by its frozen configuration"
+        val descriptor = elaborated.unwrap()
+        if self.decoder_structural_sha256 != descriptor.decoder.structural_sha256():
+            return "HWIR-E-RISCV-MULDIV-DECODER-RECEIPT: projection decoder receipt does not match the frozen ISA database"
+        val dispatched = riscv_gen2_scalar_dispatch(descriptor, self.canonical_instruction)
+        if dispatched.is_err():
+            return "HWIR-E-RISCV-MULDIV-INTEGRITY: canonical instruction is not admitted by its frozen configuration"
+        val expected = dispatched.unwrap()
+        val expected_width = if expected.entry.operand_width_bits == 0: self.config.xlen else: expected.entry.operand_width_bits
+        val expected_node_id = HwNodeId.child(expected.node_id.value, "muldiv_projection")
+        if self.node_id.value != expected_node_id.value or
+            expected.entry.id != self.entry_id or expected.provider != self.provider or
+            expected.entry.semantic_operation != self.operation or expected_width != self.operand_width or
+            self.xlen != self.config.xlen or self.rd_index != ((self.canonical_instruction >> 7) & 31) as i32 or
+            self.rs1_index != ((self.canonical_instruction >> 15) & 31) as i32 or
+            self.rs2_index != ((self.canonical_instruction >> 20) & 31) as i32:
+            return "HWIR-E-RISCV-MULDIV-INTEGRITY: projection fields do not match the frozen declarative dispatch"
+        ""
+
+    me recomputed_identity_sha256() -> text:
+        sha256_text(["riscv-scalar-muldiv-projection-v2", self.node_id.value,
+            self.config.profile, self.config.isa_profile, self.config.compressed_decode_profile,
+            self.config.xlen.to_text(), self.config.physical_address_bits.to_text(),
+            self.config.register_count.to_text(),
+            self.entry_id, self.provider, self.canonical_instruction.to_text(),
+            self.xlen.to_text(), self.operand_width.to_text(), self.rd_index.to_text(),
+            self.rs1_index.to_text(), self.rs2_index.to_text(), self.operation,
+            self.word_result.to_text(), self.decoder_structural_sha256].join("\n"))
+
+    me structural_sha256() -> text:
+        self.recomputed_identity_sha256()
+
+pub class RiscvScalarMulDivHostResult:
+    projection: RiscvScalarMulDivProjection
+    rd_value: i64
+
+fn muldiv_operation_supported(operation: text) -> bool:
+    operation == "multiply_low" or operation == "multiply_high_signed" or
+        operation == "multiply_high_signed_unsigned" or operation == "multiply_high_unsigned" or
+        operation == "divide_signed" or operation == "divide_unsigned" or
+        operation == "remainder_signed" or operation == "remainder_unsigned"
+
+fn width_mask(width: i32) -> i64:
+    if width == 64: return -1
+    (1 << width) - 1
+
+fn width_value(value: i64, width: i32) -> i64:
+    value & width_mask(width)
+
+fn sign_value(value: i64, width: i32) -> i64:
+    val narrowed = width_value(value, width)
+    if width == 64: return narrowed
+    val sign = 1 << (width - 1)
+    if (narrowed & sign) == 0: narrowed else: narrowed | (-1 << width)
+
+fn negate_width(value: i64, width: i32) -> i64:
+    # Two's-complement negation without evaluating `-INT64_MIN` in the host.
+    width_value((~width_value(value, width)) + 1, width)
+
+fn unsigned_less(lhs: i64, rhs: i64, width: i32) -> bool:
+    val a = width_value(lhs, width); val b = width_value(rhs, width)
+    if width < 64: return a < b
+    val a_high = a < 0; val b_high = b < 0
+    if a_high != b_high: return not a_high
+    a < b
+
+fn unsigned_divrem(dividend: i64, divisor: i64, width: i32) -> [i64]:
+    val numerator = width_value(dividend, width); val denominator = width_value(divisor, width)
+    if denominator == 0: return [width_mask(width), numerator]
+    var quotient: i64 = 0; var remainder: i64 = 0
+    var index = width - 1
+    while index >= 0:
+        val bit = (numerator >> index) & 1
+        val threshold = width_value(denominator - remainder, width)
+        if unsigned_less(remainder, threshold, width):
+            val gap = width_value(threshold - remainder, width)
+            if gap == 1 and bit == 1:
+                quotient = quotient | (1 << index)
+                remainder = 0
+            else:
+                remainder = width_value((remainder << 1) | bit, width)
+        else:
+            quotient = quotient | (1 << index)
+            remainder = width_value((remainder - threshold) + bit, width)
+        index = index - 1
+    [width_value(quotient, width), width_value(remainder, width)]
+
+fn unsigned_multiply_halves(lhs: i64, rhs: i64, width: i32) -> [i64]:
+    var multiplier = width_value(rhs, width)
+    var add_low = width_value(lhs, width); var add_high: i64 = 0
+    var low: i64 = 0; var high: i64 = 0; var index = 0
+    while index < width:
+        if ((multiplier >> index) & 1) == 1:
+            val next_low = width_value(low + add_low, width)
+            val carry = if unsigned_less(next_low, low, width): 1 else: 0
+            low = next_low
+            high = width_value(high + add_high + carry, width)
+        add_high = width_value((add_high << 1) | ((add_low >> (width - 1)) & 1), width)
+        add_low = width_value(add_low << 1, width)
+        index = index + 1
+    [low, high]
+
+fn signed_divrem(lhs: i64, rhs: i64, width: i32) -> [i64]:
+    val a = sign_value(lhs, width); val b = sign_value(rhs, width)
+    if b == 0: return [width_mask(width), width_value(a, width)]
+    val minimum = if width == 64: -9223372036854775807 - 1 else: -2147483648
+    if a == minimum and b == -1: return [width_value(a, width), 0]
+    val a_abs = if a < 0: negate_width(a, width) else: a
+    val b_abs = if b < 0: negate_width(b, width) else: b
+    val unsigned = unsigned_divrem(a_abs, b_abs, width)
+    val quotient = if (a < 0) != (b < 0): negate_width(unsigned[0], width) else: unsigned[0]
+    val remainder = if a < 0: negate_width(unsigned[1], width) else: unsigned[1]
+    [quotient, remainder]
+
+fn muldiv_host_value(plan: RiscvScalarMulDivProjection, lhs: i64, rhs: i64) -> i64:
+    val width = plan.operand_width
+    val a = width_value(lhs, width); val b = width_value(rhs, width)
+    val product = unsigned_multiply_halves(a, b, width)
+    var result: i64 = 0
+    if plan.operation == "multiply_low": result = product[0]
+    elif plan.operation == "multiply_high_unsigned": result = product[1]
+    elif plan.operation == "multiply_high_signed":
+        result = width_value(product[1] - (if sign_value(a, width) < 0: b else: 0) -
+            (if sign_value(b, width) < 0: a else: 0), width)
+    elif plan.operation == "multiply_high_signed_unsigned":
+        result = width_value(product[1] - (if sign_value(a, width) < 0: b else: 0), width)
+    elif plan.operation == "divide_unsigned": result = unsigned_divrem(a, b, width)[0]
+    elif plan.operation == "remainder_unsigned": result = unsigned_divrem(a, b, width)[1]
+    elif plan.operation == "divide_signed": result = signed_divrem(a, b, width)[0]
+    else: result = signed_divrem(a, b, width)[1]
+    if plan.word_result: return sign_value(result, 32)
+    width_value(result, plan.xlen)
+
+pub fn strict_riscv_scalar_muldiv_projection(config: CoreConfig, provider: text,
+    instruction: u32) -> Result<RiscvScalarMulDivProjection, text>:
+    val dispatch = riscv_gen2_scalar_dispatch(
+        riscv_gen2_scalar_elaboration(config, provider)?, instruction)?
+    if dispatch.entry.execution_class != "multiply-divide" or
+        not muldiv_operation_supported(dispatch.entry.semantic_operation):
+        return Err("HWIR-E-RISCV-MULDIV-SCOPE: projection requires an M or Zmmul operation selected by the concrete profile")
+    val operand_width = if dispatch.entry.operand_width_bits == 0: config.xlen else: dispatch.entry.operand_width_bits
+    var plan = RiscvScalarMulDivProjection(node_id: HwNodeId.child(dispatch.node_id.value, "muldiv_projection"),
+        config: config,
+        entry_id: dispatch.entry.id, provider: dispatch.provider,
+        canonical_instruction: instruction, xlen: config.xlen, operand_width: operand_width,
+        rd_index: ((instruction >> 7) & 31) as i32,
+        rs1_index: ((instruction >> 15) & 31) as i32,
+        rs2_index: ((instruction >> 20) & 31) as i32,
+        operation: dispatch.entry.semantic_operation, word_result: operand_width != config.xlen,
+        decoder_structural_sha256: dispatch.elaboration.decoder.structural_sha256(),
+        dispatch_identity_sha256: "")
+    plan.dispatch_identity_sha256 = plan.recomputed_identity_sha256()
+    val diagnostic = plan.diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(plan)
+
+pub fn evaluate_riscv_scalar_muldiv(plan: RiscvScalarMulDivProjection,
+    rs1_value: i64, rs2_value: i64) -> Result<RiscvScalarMulDivHostResult, text>:
+    val diagnostic = plan.diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(RiscvScalarMulDivHostResult(projection: plan,
+        rd_value: muldiv_host_value(plan, rs1_value, rs2_value)))

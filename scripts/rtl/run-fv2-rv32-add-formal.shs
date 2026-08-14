@@ -1,0 +1,156 @@
+#!/usr/bin/env sh
+# Execute an already-generated FV2 RV32 ADD formal bundle and issue a hashed
+# external-engine receipt. Generation remains a separate, self-hosted step.
+set -eu
+
+classify_status() {
+    status_file="$1"
+    expected="$2"
+    [ -f "$status_file" ] || return 1
+    status="$(tr -d '\r\n[:space:]' <"$status_file")"
+    [ "$status" = "$expected" ]
+}
+
+is_sha256() {
+    value="$1"
+    case "$value" in
+        ""|*[!0-9a-fA-F]*) return 1 ;;
+    esac
+    [ "${#value}" -eq 64 ]
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    self_dir="$(mktemp -d)"
+    trap 'rm -rf "$self_dir"' EXIT
+    printf '%s\n' PASS >"$self_dir/pass.status"
+    printf '%s\n' FAIL >"$self_dir/fail.status"
+    classify_status "$self_dir/pass.status" PASS
+    classify_status "$self_dir/fail.status" FAIL
+    if classify_status "$self_dir/pass.status" FAIL; then
+        echo "STATUS: FAIL fv2-rv32-add-formal self-test accepted wrong status" >&2
+        exit 1
+    fi
+    if classify_status "$self_dir/missing.status" PASS; then
+        echo "STATUS: FAIL fv2-rv32-add-formal self-test accepted missing status" >&2
+        exit 1
+    fi
+    is_sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    if is_sha256 xyz; then
+        echo "STATUS: FAIL fv2-rv32-add-formal self-test accepted malformed hash" >&2
+        exit 1
+    fi
+    echo "STATUS: PASS fv2-rv32-add-formal self-test"
+    exit 0
+fi
+
+bundle_dir="${1:-}"
+module_name="${2:-fv2_rv32_add}"
+case "$module_name" in
+    *[!A-Za-z0-9_]*)
+        echo "FAIL: module name must contain only letters, digits, or underscore" >&2
+        exit 1
+        ;;
+esac
+[ -d "$bundle_dir" ] || { echo "FAIL: generated formal bundle directory is required" >&2; exit 1; }
+
+for tool in sby yosys ghdl boolector sha256sum; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "FAIL: required formal tool missing: $tool" >&2; exit 1; }
+done
+
+core="$module_name.vhd"
+harness="${module_name}_formal.vhd"
+mutant_harness="${module_name}_mutant_formal.vhd"
+prove_job="${module_name}_prove.sby"
+cover_job="${module_name}_cover.sby"
+mutant_job="${module_name}_mutant.sby"
+manifest="${module_name}_formal_manifest.sdn"
+
+for file in "$core" "$harness" "$mutant_harness" "$prove_job" "$cover_job" "$mutant_job"; do
+    [ -f "$bundle_dir/$file" ] || { echo "FAIL: missing generated artifact: $file" >&2; exit 1; }
+    [ -s "$bundle_dir/$file" ] || { echo "FAIL: empty generated artifact: $file" >&2; exit 1; }
+done
+[ -f "$bundle_dir/$manifest" ] || { echo "FAIL: missing generated artifact: $manifest" >&2; exit 1; }
+
+manifest_value() {
+    key="$1"
+    count="$(grep -c "^${key}=" "$bundle_dir/$manifest" || true)"
+    [ "$count" -eq 1 ] || { echo "FAIL: generated manifest key must occur exactly once: $key" >&2; exit 1; }
+    sed -n "s/^${key}=//p" "$bundle_dir/$manifest" | sed -n '1p'
+}
+hwir_hash="$(manifest_value hw_ir_sha256)"
+rtl_hash="$(manifest_value rtl_sha256)"
+rvfi_hash="$(manifest_value rvfi_contract_sha256)"
+assumption_hash="$(manifest_value assumption_manifest_sha256)"
+[ "$(manifest_value status)" = "model-proven-pending-external-jobs" ] || {
+    echo "FAIL: generated manifest status is not pending external execution" >&2
+    exit 1
+}
+[ "$(manifest_value executor)" = "scripts/rtl/run-fv2-rv32-add-formal.shs" ] || {
+    echo "FAIL: generated manifest selects a different executor" >&2
+    exit 1
+}
+[ "$(manifest_value expected_results)" = "prove:proved,cover:covered,mutant:counterexample" ] || {
+    echo "FAIL: generated manifest result policy differs" >&2
+    exit 1
+}
+for identity in "$hwir_hash" "$rtl_hash" "$rvfi_hash" "$assumption_hash"; do
+    is_sha256 "$identity" || { echo "FAIL: malformed generated semantic identity" >&2; exit 1; }
+done
+grep -Eq '^mode[[:space:]]+prove$' "$bundle_dir/$prove_job" || { echo "FAIL: prove job is not mode prove" >&2; exit 1; }
+grep -Eq '^mode[[:space:]]+cover$' "$bundle_dir/$cover_job" || { echo "FAIL: cover job is not mode cover" >&2; exit 1; }
+grep -Eq '^mode[[:space:]]+prove$' "$bundle_dir/$mutant_job" || { echo "FAIL: mutant job is not mode prove" >&2; exit 1; }
+if grep -Eq 'GENERATED_RTL_NOT_IMPLEMENTED|placeholder-core-no-semantic-rvfi' "$bundle_dir/$core"; then
+    echo "FAIL: placeholder RTL cannot enter FV2 formal execution" >&2
+    exit 1
+fi
+
+prove_out="${module_name}_prove_out"
+cover_out="${module_name}_cover_out"
+mutant_out="${module_name}_mutant_out"
+for out in "$prove_out" "$cover_out" "$mutant_out"; do
+    [ ! -L "$bundle_dir/$out" ] || { echo "FAIL: formal output directory must not be a symlink: $out" >&2; exit 1; }
+done
+
+(cd "$bundle_dir" && sby -f -d "$prove_out" "$prove_job" >"$prove_out.log" 2>&1)
+classify_status "$bundle_dir/$prove_out/status" PASS || { echo "FAIL: RV32 ADD proof did not pass" >&2; exit 1; }
+
+(cd "$bundle_dir" && sby -f -d "$cover_out" "$cover_job" >"$cover_out.log" 2>&1)
+classify_status "$bundle_dir/$cover_out/status" PASS || { echo "FAIL: RV32 ADD reachability cover did not pass" >&2; exit 1; }
+
+if (cd "$bundle_dir" && sby -f -d "$mutant_out" "$mutant_job" >"$mutant_out.log" 2>&1); then
+    echo "FAIL: subtraction mutant unexpectedly proved" >&2
+    exit 1
+fi
+classify_status "$bundle_dir/$mutant_out/status" FAIL || { echo "FAIL: mutant did not produce the required counterexample class" >&2; exit 1; }
+
+receipt_tmp="$(mktemp "$bundle_dir/.${module_name}.receipt.XXXXXX")"
+trap 'rm -f "$receipt_tmp"' EXIT
+{
+    echo "schema fv2-rv32-add-formal-receipt-v1"
+    echo "module $module_name"
+    echo "hwir_sha256 $hwir_hash"
+    echo "rtl_sha256 $rtl_hash"
+    echo "rvfi_contract_sha256 $rvfi_hash"
+    echo "assumption_manifest_sha256 $assumption_hash"
+    for file in "$core" "$harness" "$mutant_harness" "$prove_job" "$cover_job" "$mutant_job"; do
+        echo "input_sha256 $file $(sha256sum "$bundle_dir/$file" | cut -d ' ' -f 1)"
+    done
+    echo "prove_status proved"
+    echo "prove_output_sha256 $(sha256sum "$bundle_dir/$prove_out.log" | cut -d ' ' -f 1)"
+    echo "cover_status covered"
+    echo "cover_output_sha256 $(sha256sum "$bundle_dir/$cover_out.log" | cut -d ' ' -f 1)"
+    echo "mutant_status counterexample"
+    echo "mutant_output_sha256 $(sha256sum "$bundle_dir/$mutant_out.log" | cut -d ' ' -f 1)"
+    echo "sby_version_sha256 $(sby --version 2>&1 | sha256sum | cut -d ' ' -f 1)"
+    echo "yosys_version_sha256 $(yosys -V 2>&1 | sha256sum | cut -d ' ' -f 1)"
+    echo "ghdl_version_sha256 $(ghdl --version 2>&1 | sha256sum | cut -d ' ' -f 1)"
+    echo "boolector_version_sha256 $(boolector --version 2>&1 | sha256sum | cut -d ' ' -f 1)"
+    echo "sby_version_text $(sby --version 2>&1 | head -1)"
+    echo "yosys_version_text $(yosys -V 2>&1 | head -1)"
+    echo "ghdl_version_text $(ghdl --version 2>&1 | head -1)"
+    echo "boolector_version_text $(boolector --version 2>&1 | head -1)"
+} >"$receipt_tmp"
+mv "$receipt_tmp" "$bundle_dir/$manifest"
+trap - EXIT
+
+echo "STATUS: PASS fv2-rv32-add-formal receipt=$bundle_dir/$manifest"

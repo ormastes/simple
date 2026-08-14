@@ -1,0 +1,47 @@
+use std.spec
+use compiler.common.assurance.formal_status.{FormalStatus}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_interfaces.{WeaveJoinPointV1, WeaveManifestV1, AspectEvidenceClassV1, AspectCertificateV1, RuntimeMonitorFailStopV1, RuntimeAssumptionMonitorReceiptV1, CompilerRefinementRelationV1, CompilerCertificateV1, HardwareProofReceiptV1}
+
+describe "Formal Verification 2.0 frozen interfaces":
+    it "makes advice order part of the weave identity":
+        val first = WeaveManifestV1("base", "macro", [WeaveJoinPointV1("42", ["before", "around"])], [], "woven")
+        val second = WeaveManifestV1("base", "macro", [WeaveJoinPointV1("42", ["around", "before"])], [], "woven")
+        expect(first.diagnostic()).to_equal("")
+        expect(first.hash() == second.hash()).to_equal(false)
+
+    it "rejects unordered or duplicate join point identities":
+        val manifest = WeaveManifestV1("base", "macro", [WeaveJoinPointV1("9", []), WeaveJoinPointV1("2", [])], [], "woven")
+        expect(manifest.diagnostic()).to_contain("ORDER")
+
+    it "requires independently checked compiler certificates":
+        val unchecked = CompilerCertificateV1("lower", "before", "after", CompilerRefinementRelationV1.BehaviorInclusion, "validator-v1", "certificate", false)
+        expect(unchecked.diagnostic()).to_contain("CHECK")
+
+    it "rejects a forged compiler certificate hash":
+        val forged = CompilerCertificateV1("lower", "before", "after", CompilerRefinementRelationV1.BehaviorInclusion, "validator-v1", "forged", true)
+        expect(forged.diagnostic()).to_contain("HASH")
+
+    it "requires bounded monitors and exactly-once behavior refinement":
+        val monitor = AspectCertificateV1("monitor", AspectEvidenceClassV1.BoundedRuntimeMonitor, "base", "woven", "proof", false, false)
+        expect(monitor.diagnostic()).to_contain("BOUND")
+        val around = AspectCertificateV1("around", AspectEvidenceClassV1.BehaviorRefinement, "base", "woven", "proof", true, false)
+        expect(around.diagnostic()).to_contain("PROCEED")
+
+    it "binds a runtime monitor to one assumption VIR artifact and fail-stop policy":
+        val receipt = RuntimeAssumptionMonitorReceiptV1("monitor",
+            "timer_monotonic", sha256_text("vir"), sha256_text("artifact"),
+            sha256_text("monitor-binary"), sha256_text("monitor-proof"),
+            32, RuntimeMonitorFailStopV1.Trap)
+        expect(receipt.diagnostic()).to_equal("")
+        expect(receipt.hash() == "").to_equal(false)
+        val unbounded = RuntimeAssumptionMonitorReceiptV1("monitor",
+            "timer_monotonic", sha256_text("vir"), sha256_text("artifact"),
+            sha256_text("monitor-binary"), sha256_text("monitor-proof"),
+            0, RuntimeMonitorFailStopV1.Trap)
+        expect(unbounded.diagnostic()).to_contain("BOUND")
+
+    it "does not verify hardware without cover mutation and netlist evidence":
+        val incomplete = HardwareProofReceiptV1("hwir", "rtl", "", "rvfi", ["rv32i-add"], [], [], ["sby"], ["job-receipt"], "trust", FormalStatus.ArtifactVerified)
+        expect(incomplete.permits_verified_release()).to_equal(false)
+        expect(incomplete.diagnostic()).to_contain("COVER")

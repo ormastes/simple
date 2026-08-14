@@ -1,0 +1,88 @@
+use std.spec
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_types.{MirType, MirTypeKind}
+use compiler.mir.mir_json.{serialize_mir_type}
+use compiler.mir.verification_ir.{SemanticClass, SemanticCoverageV1,
+    VerificationEffectNodeV1, VerificationIrProvenance, verification_ir_type,
+    resolve_verification_effect_closure}
+use compiler.mir.verification_effects.{VerificationEffectV1}
+
+describe "VerificationIR v1 semantic coverage":
+    it "preserves width and signed interpretation in machine representations":
+        expect(verification_ir_type(MirType(kind: MirTypeKind.I32)).representation).to_equal("bitvec:32:signed")
+        expect(verification_ir_type(MirType(kind: MirTypeKind.U32)).representation).to_equal("bitvec:32:unsigned")
+        expect(verification_ir_type(MirType(kind: MirTypeKind.Bits(17, false))).representation).to_equal("bitvec:17:unsigned")
+
+    it "preserves both Result payload types across identity JSON VIR and physical ABI":
+        val first = MirType.result(MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.U8))
+        val changed_error = MirType.result(MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.U16))
+        expect(serialize_mir_type(first)).to_contain("\"Result\":{\"ok\":\"I32\",\"err\":\"U8\"}")
+        expect(serialize_mir_type(first) == serialize_mir_type(changed_error)).to_equal(false)
+        expect(verification_ir_type(first).representation).to_equal("result<bitvec:32:signed,bitvec:8:unsigned>")
+        expect(first.primitive_size()).to_equal(Some(8))
+
+    it "fails closed for machine semantics that v1 has not implemented":
+        expect(verification_ir_type(MirType(kind: MirTypeKind.F64)).semantic_class).to_equal(SemanticClass.Unsupported)
+        expect(verification_ir_type(MirType(kind: MirTypeKind.Ptr(MirType.i64(), true))).closure_ready()).to_equal(false)
+        expect(verification_ir_type(MirType(kind: MirTypeKind.Opaque("device"))).semantic_class).to_equal(SemanticClass.ExternalWithContract)
+
+    it "requires checked refinement before abstract aggregates enter closure":
+        val struct_type = verification_ir_type(MirType(kind: MirTypeKind.Struct(SymbolId(id: 42))))
+        expect(struct_type.semantic_class).to_equal(SemanticClass.AbstractedWithRefinement)
+        expect(struct_type.closure_ready()).to_equal(false)
+        expect(struct_type.diagnostic).to_contain("REFINEMENT-MISSING")
+
+    it "requires every provenance edge identity":
+        val incomplete = VerificationIrProvenance("source", "expanded", "", "mir", "contract", "policy")
+        expect(incomplete.diagnostic()).to_contain("WOVEN")
+        val complete = VerificationIrProvenance("source", "expanded", "woven", "mir", "contract", "policy")
+        expect(complete.diagnostic()).to_equal("")
+        expect(complete.canonical_text()).to_contain("VerificationIrProvenanceV1")
+
+    it "requires typed regions and capabilities for observable effects":
+        expect(VerificationEffectV1.Read("kernel.heap").canonical_text()).to_equal("read:kernel.heap")
+        expect(VerificationEffectV1.MMIO("").diagnostic()).to_contain("REGION")
+        expect(VerificationEffectV1.FFI("").diagnostic()).to_contain("CAPABILITY")
+
+    it "propagates effects through aliases methods generated helpers and cycles":
+        val closure = resolve_verification_effect_closure([
+            VerificationEffectNodeV1("public", [VerificationEffectV1.Pure], ["alias"], []),
+            VerificationEffectNodeV1("alias", [VerificationEffectV1.Pure], ["method"], []),
+            VerificationEffectNodeV1("method", [VerificationEffectV1.Read("queue")], ["generated"], []),
+            VerificationEffectNodeV1("generated", [VerificationEffectV1.FFI("device")], ["method"], [])
+        ])
+        expect(closure.diagnostic).to_equal("")
+        val effects = closure.effects_for("public").unwrap()
+        expect(effects.len()).to_equal(2)
+        expect(effects[0].canonical_text() + "," + effects[1].canonical_text()).to_contain("ffi:device")
+
+    it "fails closed for unresolved indirect calls":
+        val closure = resolve_verification_effect_closure([
+            VerificationEffectNodeV1("public", [VerificationEffectV1.Pure], [], ["call@source:42"])
+        ])
+        expect(closure.diagnostic).to_contain("INDIRECT")
+
+    it "fails closed when a transitive callee is absent from verification closure":
+        val closure = resolve_verification_effect_closure([
+            VerificationEffectNodeV1("public", [VerificationEffectV1.Pure], ["private_helper"], [])
+        ])
+        expect(closure.diagnostic).to_contain("CALLEE")
+
+    it "binds every supported construct to lowering and negative-test owners":
+        val coverage = SemanticCoverageV1("MirInstKind.Add", SemanticClass.Exact,
+            "compiler.mir.verification_ir", "verification_ir_spec")
+        expect(coverage.diagnostic()).to_equal("")
+        expect(coverage.canonical_text()).to_contain("MirInstKind.Add")
+        expect(coverage.hash().len()).to_equal(64)
+
+    it "retains unsupported constructs as explicit coverage rows":
+        val coverage = SemanticCoverageV1("MirInstKind.InlineAsm",
+            SemanticClass.Unsupported, "compiler.mir.verification_ir",
+            "verification_ir_spec")
+        expect(coverage.canonical_text()).to_contain("unsupported")
+        expect(coverage.hash().len()).to_equal(64)
+
+    it "rejects incomplete semantic coverage ownership":
+        val missing = SemanticCoverageV1("", SemanticClass.Exact, "", "")
+        expect(missing.diagnostic()).to_contain("VARIANT")
+        expect(missing.hash()).to_equal("")

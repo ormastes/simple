@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+
+if [ "${1:-}" = "--self-test" ]; then
+    test -f "$repo_root/src/app/verify/riscv_add_formal_bundle.spl"
+    sh "$repo_root/scripts/rtl/run-fv2-rv32-add-formal.shs" --self-test >/dev/null
+    sh "$repo_root/scripts/rtl/run-fv2-rv32-add-equivalence.shs" --self-test >/dev/null
+    sh "$repo_root/scripts/rtl/run-fv2-rv32-add-sail.shs" --self-test >/dev/null
+    echo "STATUS: PASS FV2 RV32 ADD end-to-end self-test"
+    exit 0
+fi
+
+. "$repo_root/scripts/check/lib/require-self-hosted.shs"
+require_self_hosted "${SIMPLE_BIN:-$repo_root/bin/simple}" "FV2 RV32 bundle compiler"
+
+module_name="${FV2_RV32_ADD_MODULE:-fv2_rv32_add}"
+case "$module_name" in
+    ""|*[!A-Za-z0-9_]*) echo "FAIL: invalid FV2 RV32 module name" >&2; exit 1 ;;
+esac
+
+bundle_dir="${FV2_RV32_ADD_BUNDLE_DIR:-$repo_root/build/verification/fv2-rv32-add}"
+generator="$repo_root/build/fv2-tools/riscv_add_formal_bundle"
+generator_tmp="$generator.tmp"
+generator_log="$repo_root/build/fv2-tools/riscv_add_formal_bundle.build.log"
+case "$bundle_dir" in
+    "$repo_root"/build/verification/*) ;;
+    *) echo "FAIL: FV2 bundle directory must remain under build/verification" >&2; exit 1 ;;
+esac
+mkdir -p "$bundle_dir" "$(dirname -- "$generator")"
+rm -f "$generator" "$generator_tmp"
+
+if ! SIMPLE_NO_STUB_FALLBACK=1 "$SELF_HOSTED_BIN" native-build \
+    --source "$repo_root/src/compiler" \
+    --source "$repo_root/src/app" \
+    --source "$repo_root/src/lib" \
+    --entry-closure \
+    --entry "$repo_root/src/app/verify/riscv_add_formal_bundle.spl" \
+    --strip \
+    --output "$generator_tmp" >"$generator_log" 2>&1; then
+    tail -80 "$generator_log" >&2
+    echo "FAIL: FV2 RV32 bundle generator build failed" >&2
+    exit 1
+fi
+if grep -Eiq 'runtime archive is STALE|Generating [0-9]+ stub functions|unresolved symbol preview|stub fallback' "$generator_log"; then
+    tail -80 "$generator_log" >&2
+    echo "FAIL: FV2 RV32 bundle generator used stale or stubbed material" >&2
+    exit 1
+fi
+[ -x "$generator_tmp" ] || { echo "FAIL: FV2 RV32 bundle generator is missing" >&2; exit 1; }
+mv "$generator_tmp" "$generator"
+
+"$generator" "$bundle_dir" "$module_name"
+sh "$repo_root/scripts/rtl/run-fv2-rv32-add-formal.shs" \
+    "$bundle_dir" "$module_name"
+sh "$repo_root/scripts/rtl/run-fv2-rv32-add-equivalence.shs" \
+    "$bundle_dir" "$module_name"
+sh "$repo_root/scripts/rtl/run-fv2-rv32-add-sail.shs" \
+    "$bundle_dir" "$module_name"
+
+receipt="$bundle_dir/${module_name}_formal_manifest.sdn"
+[ -s "$receipt" ] || { echo "FAIL: external formal receipt was not retained" >&2; exit 1; }
+echo "STATUS: PASS FV2 RV32 ADD end-to-end receipt=$receipt"

@@ -1,20 +1,21 @@
 <!-- codex-design -->
 # Simple Formal Verification 2.0 Architecture
 
-**Status:** Normative proposed architecture recovered on current main; only the MIR evidence bridge is implemented
+**Status:** Implemented FV2 capsule in this working tree; executable admission remains blocked
 **Date:** 2026-08-14
 **Requirements:** `doc/02_requirements/feature/simple_formal_verification_2_0.md`
 
 ## Normative scope and current-tree truth
 
-This document is the accepted **proposal** for FV2 boundaries. Normative verbs
+This document is the accepted FV2 architecture. Normative verbs
 (`must`, `requires`, `owns`, and `rejects`) specify the intended architecture;
 they do not assert that a named type, collector, reducer, runner, CLI, or script
 exists. An item is implemented only when the current-tree status tables below
-say so. All proposed V2 assurance/release types, VIR/obligation/evidence
-collectors, replay reducers/runners, and product proof runners remain blocked.
+say so. The restored capsule now supplies the frozen interfaces, VIR,
+obligations, collectors, replay/release adapters, and bounded product runners;
+their executable admission remains blocked on the canonical Stage 4 runtime.
 
-The sole implemented foundation in this scope is the typed MIR evidence bridge:
+The pre-existing typed MIR evidence bridge remains the execution foundation:
 `DecisionProbe` and `ConditionProbe`, JSON retention, optimizer/visitor
 preservation, fail-closed admission, and explicit interpreter/LLVM rejection.
 This bridge transports evidence identity and liveness; it neither lowers probes
@@ -39,8 +40,8 @@ near-equivalent records do not satisfy the boundary.
 | `FormalStatus v1` | `FormalStatusV1` |
 | `VerificationCacheKey v1` | `VerificationCacheKeyV1` |
 
-All ten identifiers are planned and absent on current main. A shape change
-requires a new version, migration, and stale-cache rejection evidence.
+All ten identifiers now exist in the working tree. A shape change requires a
+new version, migration, and stale-cache rejection evidence.
 
 The executable/manual flow is likewise frozen to these visible steps:
 
@@ -388,13 +389,13 @@ This architecture supersedes the six-state claim model in `doc/04_architecture/i
 | Optimizer, visitor, SSA, inline, DCE preservation | `compiler.mir_opt` | **Implemented foundation:** explicit probe handling; executable closure remains gated |
 | Interpreter and LLVM rejection | `compiler.interp`, LLVM backends | **Implemented foundation:** explicit fail-closed arms |
 | Non-LLVM backend probe closure | C/WASM/native/GPU/VHDL backends | **Blocked:** per-backend executable rejection evidence incomplete |
-| Ten frozen V1 interfaces | common assurance/VIR owners | **Planned/absent:** mapping is normative above |
-| V2 assurance policy and compile-context identity | common assurance + driver | **Planned/absent** |
-| VIR, obligation, coverage, and evidence collectors | compiler verification capsules | **Planned/absent** |
-| Release bundle parser/reducer and delivery gate | release assurance owner | **Planned/absent** |
-| Fresh and independent replay runners/reducers | proof replay owner | **Planned/absent** |
-| SimpleOS refinement/monitor receipt pipeline | SimpleOS verification capsule | **Planned/blocked** |
-| RISC-V ADD/Sail/SBY/equivalence runners | RISC-V verification capsule | **Planned/blocked; existing truthfulness gates remain authoritative** |
+| Ten frozen V1 interfaces | common assurance/VIR owners | **Implemented; runtime verification blocked** |
+| V2 assurance policy and compile-context identity | common assurance + driver | **Implemented; runtime verification blocked** |
+| VIR, obligation, coverage, and evidence collectors | compiler verification capsules | **Implemented; runtime verification blocked** |
+| Release bundle parser/reducer and delivery gate | release assurance owner | **Implemented; external evidence still required** |
+| Fresh and independent replay runners/reducers | proof replay owner | **Implemented; tool execution blocked** |
+| SimpleOS refinement/monitor receipt pipeline | SimpleOS verification capsule | **Implemented bounded slices; product closure blocked** |
+| RISC-V ADD/Sail/SBY/equivalence runners | RISC-V verification capsule | **Implemented runners; external proof tools/evidence blocked** |
 | Artifact-verified release | evidence/release capsule | **Blocked:** no end-to-end closure |
 
 ## Requirements-to-architecture traceability

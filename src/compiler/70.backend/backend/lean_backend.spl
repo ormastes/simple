@@ -19,8 +19,12 @@ use compiler.mir.mir_instructions.{MirModule, MirFunction}
 use compiler.backend.backend_api.*
 use compiler.backend.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.verification_codegen_types.{VerificationCodegen}
-use compiler.backend.backend.lean_mir_translate.{translate_mir_body, mir_type_to_lean, sort_mir_functions_by_name}
+use compiler.backend.backend.lean_mir_translate.{translate_mir_body, translate_mir_global_state_body_v1, mir_type_to_lean, sort_mir_functions_by_name}
 use compiler.backend.backend.backend_types.{BackendKind, compileerror_backend_error}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirBinOp, HirUnaryOp, HirContractBlock, HirContractClauseKind, HirContractOutcome}
+use compiler.hir.hir_types.{HirTypeKind}
+use compiler.mir.verification_contract_bridge.{verification_pure_state_semantics_v1, verification_state_predicate_bindings_from_module_v1}
+use compiler.mir.verification_region_effects.{verification_region_effect_manifest_v1}
 
 # ============================================================================
 # Verification Level
@@ -139,6 +143,22 @@ class LeanBuilder:
         self.emit(body)
         self.dedent()
 
+    me emit_def_with_termination(
+        name: text,
+        params: [(text, text)],
+        ret_type: text,
+        body: text,
+        measure: text,
+        termination_proof: text
+    ):
+        self.emit_def(name, params, ret_type, body)
+        self.emit("termination_by {measure}")
+        self.emit("decreasing_by")
+        self.indent()
+        self.emit("apply {termination_proof}")
+        self.emit("all_goals assumption")
+        self.dedent()
+
     me emit_theorem(name: text, statement: text):
         """Emit a theorem statement with tactic-based proof."""
         self.emit("theorem {name} : {statement} := by")
@@ -146,6 +166,12 @@ class LeanBuilder:
         val tactics = select_proof_tactics(statement)
         for tactic in tactics:
             self.emit(tactic)
+        self.dedent()
+
+    me emit_theorem_reference(name: text, statement: text, theorem_name: text):
+        self.emit("theorem {name} : {statement} := by")
+        self.indent()
+        self.emit("exact {theorem_name}")
         self.dedent()
 
     me emit_axiom(name: text, ty: text):
@@ -171,12 +197,24 @@ class LeanBuilder:
 # Contract Extraction
 # ============================================================================
 
+struct StateInvariantPredicateV1:
+    symbol_id: text
+    function_name: text
+
+impl StateInvariantPredicateV1:
+    fn canonical_text() -> text:
+        self.symbol_id + "|" + self.function_name
+
 struct FunctionContract:
     """Pre/post conditions for a function."""
     function_name: text
     preconditions: [text]
     postconditions: [text]
+    error_postconditions: [text]
     invariants: [text]
+    state_invariant_predicates: [StateInvariantPredicateV1]
+    decreases_measure: text
+    proof_reference: text
 
 impl FunctionContract:
     static fn empty(name: text) -> FunctionContract:
@@ -184,34 +222,404 @@ impl FunctionContract:
             function_name: name,
             preconditions: [],
             postconditions: [],
-            invariants: []
+            error_postconditions: [],
+            invariants: [],
+            state_invariant_predicates: [],
+            decreases_measure: "",
+            proof_reference: ""
         )
 
     fn has_contracts() -> bool:
-        not self.preconditions.is_empty() or not self.postconditions.is_empty()
+        (not self.preconditions.is_empty() or not self.postconditions.is_empty() or
+            not self.error_postconditions.is_empty())
+
+    fn has_any_contract_clause() -> bool:
+        (self.has_contracts() or not self.invariants.is_empty() or
+            self.decreases_measure != "")
 
     fn to_lean_spec(builder: LeanBuilder, params: [(text, text)], ret_type: text):
         """Generate Lean specification from contract."""
-        if self.preconditions.is_empty() and self.postconditions.is_empty():
+        if not self.has_contracts():
             return
 
-        # Generate specification type
-        var spec = ""
-
+        var prefix = ""
         if not self.preconditions.is_empty():
             val pre = self.preconditions.join(" ∧ ")
-            spec = "{pre} → "
+            prefix = "({pre}) → "
+            var satisfiable = pre
+            if params.len() > 0:
+                val existential_binders = params.map("({_.0} : {_.1})").join(" ")
+                satisfiable = "∃ {existential_binders}, {pre}"
+            if self.proof_reference != "":
+                builder.emit_theorem_reference(
+                    "{self.function_name}_preconditions_satisfiable",
+                    satisfiable,
+                    "{self.proof_reference}_preconditions_satisfiable")
+            else:
+                builder.emit_theorem("{self.function_name}_preconditions_satisfiable", satisfiable)
+            builder.emit_blank()
 
         val param_str = params.map(_.0).join(" ")
-        spec = "{spec}∃ (result : {ret_type}), "
-
-        if not self.postconditions.is_empty():
-            val post = self.postconditions.join(" ∧ ")
-            spec = "{spec}{post}"
+        var actual_call = self.function_name
+        if param_str != "": actual_call = "{self.function_name} {param_str}"
+        var normal = "True"
+        if not self.postconditions.is_empty(): normal = self.postconditions.join(" ∧ ")
+        var spec = ""
+        if self.error_postconditions.is_empty():
+            spec = "{prefix}(let result : {ret_type} := {actual_call}; {normal})"
         else:
-            spec = "{spec}True"
+            val error = self.error_postconditions.join(" ∧ ")
+            spec = "{prefix}(match {actual_call} with | Except.ok result => {normal} | Except.error error => {error})"
 
-        builder.emit_theorem("{self.function_name}_spec", spec)
+        if params.len() > 0:
+            val binders = params.map("({_.0} : {_.1})").join(" ")
+            spec = "∀ {binders}, {spec}"
+
+        if self.proof_reference != "":
+            builder.emit_theorem_reference("{self.function_name}_spec", spec, self.proof_reference)
+        else:
+            builder.emit_theorem("{self.function_name}_spec", spec)
+
+    fn to_lean_global_spec(
+        builder: LeanBuilder,
+        params: [(text, text)],
+        ret_type: text,
+        state_type: text
+    ):
+        if not self.has_contracts(): return
+        var implication = ""
+        if not self.preconditions.is_empty():
+            val pre = self.preconditions.join(" ∧ ")
+            implication = "({pre}) → "
+            var satisfiable = pre
+            if params.len() > 0:
+                val existential_binders = params.map("({_.0} : {_.1})").join(" ")
+                satisfiable = "∃ {existential_binders}, {pre}"
+            if self.proof_reference != "":
+                builder.emit_theorem_reference(
+                    "{self.function_name}_preconditions_satisfiable", satisfiable,
+                    "{self.proof_reference}_preconditions_satisfiable")
+            else:
+                builder.emit_theorem(
+                    "{self.function_name}_preconditions_satisfiable", satisfiable)
+            builder.emit_blank()
+
+        val param_names = params.map(_.0).join(" ")
+        var actual_call = self.function_name + " __fv2_pre_state"
+        if param_names != "": actual_call = actual_call + " " + param_names
+        var normal = "True"
+        if not self.postconditions.is_empty(): normal = self.postconditions.join(" ∧ ")
+        var outcome_spec = ""
+        if self.error_postconditions.is_empty():
+            outcome_spec = "(let execution : ({ret_type} × ({state_type})) := {actual_call}; " +
+                "let result : {ret_type} := execution.1; {normal})"
+        else:
+            val error = self.error_postconditions.join(" ∧ ")
+            outcome_spec = "(let execution := {actual_call}; match execution.1 with " +
+                "| Except.ok result => {normal} | Except.error error => {error})"
+        val binders = params.map("({_.0} : {_.1})").join(" ")
+        val quantified = if binders == "": "" else: "∀ {binders}, "
+        val spec = "∀ (__fv2_pre_state : {state_type}), {quantified}" +
+            implication + outcome_spec
+        if self.proof_reference != "":
+            builder.emit_theorem_reference("{self.function_name}_spec", spec,
+                self.proof_reference)
+        else:
+            builder.emit_theorem("{self.function_name}_spec", spec)
+
+    fn to_lean_global_state_spec(
+        builder: LeanBuilder,
+        params: [(text, text)],
+        state_type: text
+    ):
+        if self.state_invariant_predicates.is_empty(): return
+        val binders = params.map("({_.0} : {_.1})").join(" ")
+        val param_names = params.map(_.0).join(" ")
+        val quantified = if binders == "": "" else: "∀ {binders}, "
+        var pre_predicates: [text] = []
+        var post_predicates: [text] = []
+        for predicate in self.state_invariant_predicates:
+            pre_predicates.push("(({predicate.function_name} __fv2_pre_state).1 = true)")
+            post_predicates.push("(({predicate.function_name} execution.2).1 = true)")
+        val pre = pre_predicates.join(" ∧ ")
+        val post = post_predicates.join(" ∧ ")
+        var actual_call = self.function_name + " __fv2_pre_state"
+        if param_names != "": actual_call = actual_call + " " + param_names
+        builder.emit_theorem_reference(
+            "{self.function_name}_invariant_initialization",
+            "∀ (__fv2_pre_state : {state_type}), {quantified}{pre}",
+            "{self.proof_reference}_invariant_initialization")
+        builder.emit_blank()
+        builder.emit_theorem_reference(
+            "{self.function_name}_invariant_preservation",
+            "∀ (__fv2_pre_state : {state_type}), {quantified}({pre}) → " +
+                "(let execution := {actual_call}; {post})",
+            "{self.proof_reference}_invariant_preservation")
+        builder.emit_blank()
+
+    fn to_lean_pure_state_spec(builder: LeanBuilder, params: [(text, text)]):
+        if self.invariants.is_empty(): return
+        val binders = params.map("({_.0} : {_.1})").join(" ")
+        val param_names = params.map(_.0).join(" ")
+        var actual_call = self.function_name
+        if param_names != "": actual_call = "{self.function_name} {param_names}"
+        # `invariant` is a reserved contract keyword in the Rust/self-hosted
+        # lexer, so keep the generated predicate in a non-keyword binding.
+        val invariant_text = self.invariants.join(" ∧ ")
+        val quantified = if binders == "": "" else: "∀ {binders}, "
+        builder.emit_theorem_reference(
+            "{self.function_name}_invariant_initialization",
+            "{quantified}{invariant_text}",
+            "{self.proof_reference}_invariant_initialization")
+        builder.emit_blank()
+        val preservation = "{quantified}∀ pre_state : Unit, ({invariant_text}) → " +
+            "(let execution := ({actual_call}, pre_state); " +
+            "({invariant_text}) ∧ execution.2 = pre_state)"
+        builder.emit_theorem_reference(
+            "{self.function_name}_invariant_preservation", preservation,
+            "{self.proof_reference}_invariant_preservation")
+        builder.emit_blank()
+
+    fn to_lean_pure_frame_spec(builder: LeanBuilder, params: [(text, text)]):
+        val binders = params.map("({_.0} : {_.1})").join(" ")
+        val param_names = params.map(_.0).join(" ")
+        var actual_call = self.function_name
+        if param_names != "": actual_call = "{self.function_name} {param_names}"
+        val quantified = if binders == "": "" else: "∀ {binders}, "
+        val frame = "{quantified}∀ pre_state : Unit, " +
+            "(let execution := ({actual_call}, pre_state); execution.2 = pre_state)"
+        builder.emit("theorem {self.function_name}_frame_preservation : {frame} := by")
+        builder.indent()
+        builder.emit("intros")
+        builder.emit("rfl")
+        builder.dedent()
+
+    fn to_lean_global_frame_spec(
+        builder: LeanBuilder,
+        params: [(text, text)],
+        state_type: text,
+        written_regions: [text]
+    ):
+        val binders = params.map("({_.0} : {_.1})").join(" ")
+        val param_names = params.map(_.0).join(" ")
+        var actual_call = self.function_name + " __fv2_pre_state"
+        if param_names != "": actual_call = actual_call + " " + param_names
+        val prefix = if binders == "": "" else: "∀ {binders}, "
+        val writes = "[" + written_regions.join(", ") + "]"
+        val statement = "∀ (__fv2_pre_state : {state_type}), {prefix}" +
+            "∀ region : Nat, region ∉ {writes} → " +
+            "({actual_call}).2 region = __fv2_pre_state region"
+        builder.emit("theorem {self.function_name}_frame_preservation : {statement} := by")
+        builder.indent()
+        builder.emit("intro __fv2_pre_state")
+        for param in params: builder.emit("intro {param.0}")
+        builder.emit("intro region outside")
+        var outside_names: [text] = []
+        var region_index = 0
+        for written_region in written_regions:
+            val outside_name = "outside_{region_index}"
+            outside_names.push(outside_name)
+            builder.emit("have {outside_name} : region ≠ {written_region} := by")
+            builder.indent()
+            builder.emit("intro equal")
+            builder.emit("apply outside")
+            builder.emit("simp [equal]")
+            builder.dedent()
+            region_index = region_index + 1
+        val frame_facts = if outside_names.is_empty(): ""
+            else: ", " + outside_names.join(", ")
+        builder.emit("simp [{self.function_name}{frame_facts}]")
+        builder.dedent()
+
+fn hir_contract_expr_is_signed(expr: HirExpr) -> bool:
+    if expr.has_type_:
+        match expr.type_.kind:
+            case HirTypeKind.Int(_, signed): signed
+            case _: false
+    else:
+        false
+
+fn hir_contract_expr_to_lean(
+    expr: HirExpr,
+    binding_name: text,
+    lean_binding: text,
+    param_aliases: [(text, text)],
+    allow_global_name: bool
+) -> Result<text, CompileError>:
+    match expr.kind:
+        case HirExprKind.IntLit(value, _):
+            if not expr.has_type_:
+                return Err(compileerror_backend_error(BackendKind.Lean, "lean-backend: untyped integer in verification contract"))
+            match expr.type_.kind:
+                case HirTypeKind.Int(bits, _): Ok("BitVec.ofInt {bits} {value}")
+                case _: Err(compileerror_backend_error(BackendKind.Lean, "lean-backend: contract integer literal lacks exact machine width"))
+        case HirExprKind.BoolLit(value): Ok(if value: "true" else: "false")
+        case HirExprKind.NamedVar(_, name):
+            if binding_name != "" and name == binding_name:
+                return Ok(lean_binding)
+            for alias in param_aliases:
+                if alias.0 == name: return Ok(alias.1)
+            if allow_global_name:
+                return Ok(name)
+            Err(compileerror_backend_error(BackendKind.Lean,
+                "lean-backend: contract variable `{name}` has no exact MIR argument/outcome binding"))
+        case HirExprKind.Var(_):
+            Err(compileerror_backend_error(BackendKind.Lean, "lean-backend: unnamed contract variable cannot be bound to generated Lean parameters"))
+        case HirExprKind.Unary(op, operand):
+            val inner = hir_contract_expr_to_lean(operand, binding_name, lean_binding, param_aliases, false)?
+            match op:
+                case HirUnaryOp.Not: Ok("!({inner})")
+                case HirUnaryOp.Neg: Ok("-({inner})")
+                case HirUnaryOp.BitNot: Ok("~~~({inner})")
+                case _: Err(compileerror_backend_error(BackendKind.Lean, "lean-backend: unsupported contract unary operator `{op}`"))
+        case HirExprKind.Binary(op, left, right):
+            val lhs = hir_contract_expr_to_lean(left, binding_name, lean_binding, param_aliases, false)?
+            val rhs = hir_contract_expr_to_lean(right, binding_name, lean_binding, param_aliases, false)?
+            val signed = hir_contract_expr_is_signed(left)
+            match op:
+                case HirBinOp.Add: Ok("({lhs}) + ({rhs})")
+                case HirBinOp.Sub: Ok("({lhs}) - ({rhs})")
+                case HirBinOp.Mul: Ok("({lhs}) * ({rhs})")
+                case HirBinOp.BitAnd: Ok("({lhs}) &&& ({rhs})")
+                case HirBinOp.BitOr: Ok("({lhs}) ||| ({rhs})")
+                case HirBinOp.BitXor: Ok("({lhs}) ^^^ ({rhs})")
+                case HirBinOp.And: Ok("({lhs}) && ({rhs})")
+                case HirBinOp.Or: Ok("({lhs}) || ({rhs})")
+                case HirBinOp.Eq: Ok("decide (({lhs}) = ({rhs}))")
+                case HirBinOp.NotEq: Ok("decide (({lhs}) ≠ ({rhs}))")
+                case HirBinOp.Lt: Ok(if signed: "BitVec.slt ({lhs}) ({rhs})" else: "BitVec.ult ({lhs}) ({rhs})")
+                case HirBinOp.LtEq: Ok(if signed: "BitVec.sle ({lhs}) ({rhs})" else: "BitVec.ule ({lhs}) ({rhs})")
+                case HirBinOp.Gt: Ok(if signed: "BitVec.slt ({rhs}) ({lhs})" else: "BitVec.ult ({rhs}) ({lhs})")
+                case HirBinOp.GtEq: Ok(if signed: "BitVec.sle ({rhs}) ({lhs})" else: "BitVec.ule ({rhs}) ({lhs})")
+                case _: Err(compileerror_backend_error(BackendKind.Lean, "lean-backend: contract binary operator `{op}` lacks exact lowering"))
+        case HirExprKind.Call(callee, args, _):
+            match callee.kind:
+                case HirExprKind.NamedVar(_, callee_name):
+                    if callee_name == "old":
+                        return Err(compileerror_backend_error(BackendKind.Lean,
+                            "lean-backend: old(...) requires a captured pre-state identity; refusing an unbound call"))
+                case _: pass
+            val callee_text = hir_contract_expr_to_lean(callee, binding_name, lean_binding, param_aliases, true)?
+            var arg_texts: [text] = []
+            for arg in args:
+                if arg.has_name:
+                    return Err(compileerror_backend_error(BackendKind.Lean, "lean-backend: named contract call arguments require elaborated parameter mapping"))
+                arg_texts.push(hir_contract_expr_to_lean(arg.value, binding_name, lean_binding, param_aliases, false)?)
+            Ok(if arg_texts.len() == 0: callee_text else: "{callee_text} {arg_texts.join(" ")}")
+        case _:
+            Err(compileerror_backend_error(BackendKind.Lean, "lean-backend: contract expression kind `{expr.kind}` has no exact Lean lowering"))
+
+fn hir_contract_state_predicate(expr: HirExpr) -> Result<StateInvariantPredicateV1, CompileError>:
+    match expr.kind:
+        case HirExprKind.Call(callee, args, _):
+            if not args.is_empty(): return Err(compileerror_backend_error(
+                BackendKind.Lean,
+                "lean-backend: effectful invariant state predicate must be one zero-argument ghost function call"))
+            match callee.kind:
+                case HirExprKind.NamedVar(symbol, name):
+                    if not lean_exact_qualified_name_valid(name):
+                        return Err(compileerror_backend_error(BackendKind.Lean,
+                            "lean-backend: effectful invariant predicate must have one exact function identity"))
+                    Ok(StateInvariantPredicateV1(symbol.id.to_string(), name))
+                case _: Err(compileerror_backend_error(BackendKind.Lean,
+                    "lean-backend: effectful invariant predicate callee must be one exact named ghost function"))
+        case _: Err(compileerror_backend_error(BackendKind.Lean,
+            "lean-backend: effectful invariant requires a zero-argument ghost predicate call to bind explicit state"))
+
+fn function_contract_from_hir(name: text, contract: HirContractBlock?, param_aliases: [(text, text)]) -> Result<FunctionContract, CompileError>:
+    var result = FunctionContract.empty(name)
+    if val present = contract:
+        if present.proof_uses != "" and not lean_exact_qualified_name_valid(present.proof_uses):
+            return Err(compileerror_backend_error(BackendKind.Lean, "lean-backend: proof uses must name one exact qualified Lean theorem"))
+        # The backend may synthesize only definitionally trivial Boolean
+        # clauses.  A generated `simp`/`omega` attempt is not proof evidence
+        # for an arbitrary execution-linked contract and would make export
+        # success depend on unrecorded tactic behavior.  Require one audited
+        # external proof root for every nontrivial requires/ensures clause.
+        if present.proof_uses == "":
+            for clause in present.clauses:
+                match clause.kind:
+                    case HirContractClauseKind.Requires | HirContractClauseKind.EnsuresNormal | HirContractClauseKind.EnsuresError:
+                        match clause.predicate.kind:
+                            case HirExprKind.BoolLit(true): pass
+                            case _:
+                                return Err(compileerror_backend_error(BackendKind.Lean,
+                                    "lean-backend: nontrivial execution contract requires `proof uses` with an exact proof root"))
+                    case _: pass
+        result.proof_reference = present.proof_uses
+        for clause in present.clauses:
+            val lean_binding = if clause.kind == HirContractClauseKind.EnsuresError: "error" else: "result"
+            match clause.kind:
+                case HirContractClauseKind.Requires:
+                    val predicate = "({hir_contract_expr_to_lean(clause.predicate, clause.binding_name, lean_binding, param_aliases, false)?}) = true"
+                    result.preconditions.push(predicate)
+                case HirContractClauseKind.EnsuresNormal:
+                    val predicate = "({hir_contract_expr_to_lean(clause.predicate, clause.binding_name, lean_binding, param_aliases, false)?}) = true"
+                    result.postconditions.push(predicate)
+                case HirContractClauseKind.EnsuresError:
+                    val predicate = "({hir_contract_expr_to_lean(clause.predicate, clause.binding_name, lean_binding, param_aliases, false)?}) = true"
+                    result.error_postconditions.push(predicate)
+                case HirContractClauseKind.StatePredicate:
+                    if present.proof_uses == "":
+                        return Err(compileerror_backend_error(BackendKind.Lean, "lean-backend: invariant requires `proof uses` with initialization and preservation roots"))
+                    val predicate = "({hir_contract_expr_to_lean(clause.predicate, clause.binding_name, lean_binding, param_aliases, false)?}) = true"
+                    result.invariants.push(predicate)
+                    match hir_contract_state_predicate(clause.predicate):
+                        case Ok(predicate): result.state_invariant_predicates.push(predicate)
+                        case Err(_): pass
+                case HirContractClauseKind.Decreases:
+                    if result.decreases_measure != "":
+                        return Err(compileerror_backend_error(BackendKind.Lean, "lean-backend: at most one decreases measure is allowed"))
+                    if present.proof_uses == "":
+                        return Err(compileerror_backend_error(BackendKind.Lean, "lean-backend: decreases requires `proof uses` with an exact termination proof root"))
+                    match clause.predicate.type_.kind:
+                        case HirTypeKind.Int(_, false):
+                            val measure = hir_contract_expr_to_lean(clause.predicate, "", "", param_aliases, false)?
+                            result.decreases_measure = "({measure}).toNat"
+                        case _:
+                            return Err(compileerror_backend_error(BackendKind.Lean, "lean-backend: decreases requires an exact unsigned fixed-width measure"))
+    Ok(result)
+
+fn lean_exact_qualified_name_valid(name: text) -> bool:
+    if name == "": return false
+    var previous_dot = true
+    var index = 0
+    while index < name.len():
+        val code = name.char_code_at(index)
+        val upper = code >= 65 and code <= 90
+        val lower = code >= 97 and code <= 122
+        val digit = code >= 48 and code <= 57
+        val underscore = code == 95
+        val dot = code == 46
+        if not upper and not lower and not digit and not underscore and not dot: return false
+        if index == 0 and digit: return false
+        if dot and previous_dot: return false
+        previous_dot = dot
+        index = index + 1
+    not previous_dot
+
+fn lean_module_state_predicate_names(
+    module: MirModule
+) -> Result<[StateInvariantPredicateV1], CompileError>:
+    var approved: [StateInvariantPredicateV1] = []
+    for symbol in module.functions.keys():
+        val owner = module.functions[symbol]
+        val owner_manifest = verification_region_effect_manifest_v1(owner)
+        if not owner_manifest.closed(): continue
+        if owner_manifest.effects.is_empty(): continue
+        val bindings = verification_state_predicate_bindings_from_module_v1(
+            module, owner)
+        if bindings.diagnostic != "": return Err(compileerror_backend_error(
+            BackendKind.Lean, bindings.diagnostic))
+        for binding in bindings.bindings:
+            val predicate_identity = StateInvariantPredicateV1(
+                binding.predicate_symbol_id, binding.predicate_name)
+            var already_approved = false
+            for prior in approved:
+                if prior.canonical_text() == predicate_identity.canonical_text():
+                    already_approved = true
+            if not already_approved: approved.push(predicate_identity)
+    Ok(approved)
 
 # ============================================================================
 # Proof Obligation
@@ -291,6 +699,7 @@ class LeanBackend:
         # Add standard imports
         builder.add_import("Mathlib.Data.Int.Basic")
         builder.add_import("Mathlib.Data.Array.Basic")
+        builder.add_import("Init.Data.BitVec")
 
         # Begin namespace
         builder.begin_namespace("{self.module_prefix}.{module.name}")
@@ -299,18 +708,18 @@ class LeanBackend:
         self.export_types(builder, module)
 
         # Export functions in deterministic (name-sorted) order.
+        val state_predicates = lean_module_state_predicate_names(module)?
         var fns: [MirFunction] = []
         for symbol in module.functions.keys():
             fns = fns.push(module.functions[symbol])
         for mir_fn in sort_mir_functions_by_name(fns):
             val body = MirBody.from_function(mir_fn)
-            self.export_function(builder, mir_fn.name, body)?
+            self.export_function(builder, mir_fn, body, state_predicates)?
 
         # Generate proof obligations
         if self.generate_proofs:
             builder.emit_blank()
-            builder.emit_comment("Proof Obligations")
-            self.generate_proof_obligations(builder, module)
+            self.emit_proof_obligation_boundary_note(builder, module)
 
         builder.end_namespace("{self.module_prefix}.{module.name}")
 
@@ -328,14 +737,16 @@ class LeanBackend:
         builder.emit_comment("Keep manual constraints in the sibling Constraints module")
         builder.add_import("Mathlib.Data.Int.Basic")
         builder.add_import("Mathlib.Data.Array.Basic")
+        builder.add_import("Init.Data.BitVec")
         builder.begin_namespace("{self.module_prefix}.{module.name}")
         self.export_types(builder, module)
+        val state_predicates = lean_module_state_predicate_names(module)?
         var fns: [MirFunction] = []
         for symbol in module.functions.keys():
             fns = fns.push(module.functions[symbol])
         for mir_fn in sort_mir_functions_by_name(fns):
             val body = MirBody.from_function(mir_fn)
-            self.export_function(builder, mir_fn.name, body)?
+            self.export_function(builder, mir_fn, body, state_predicates)?
         builder.end_namespace("{self.module_prefix}.{module.name}")
         Ok(LeanExportResult(
             module_name: "{module.name}.Generated",
@@ -355,7 +766,12 @@ class LeanBackend:
 
         # Would iterate through module type definitions
 
-    fn export_function(builder: LeanBuilder, name: text, body: MirBody) -> Result<(), CompileError>:
+    fn export_function(
+        builder: LeanBuilder,
+        mir_fn: MirFunction,
+        body: MirBody,
+        approved_state_predicates: [StateInvariantPredicateV1] = []
+    ) -> Result<(), CompileError>:
         """Export a function definition.
 
         Parameter types are taken from the MIR argument locals (not assumed
@@ -363,10 +779,12 @@ class LeanBackend:
         is malformed MIR and hard-fails.
         """
         builder.emit_blank()
+        val name = mir_fn.name
         builder.emit_doc_comment("Function: {name}")
 
         # Build parameters from argument locals, preserving declared types.
         var params: [(text, text)] = []
+        var param_aliases: [(text, text)] = []
         for i in 0..body.arg_count:
             var found = false
             for local in body.locals:
@@ -374,7 +792,10 @@ class LeanBackend:
                     case Arg(index):
                         if index == i:
                             val lean_ty = mir_type_to_lean(local.type_)?
-                            params = params.push(("arg{i}", lean_ty))
+                            val lean_name = "_l{local.id.id}"
+                            if val source_name = local.name:
+                                if source_name != "": param_aliases.push((source_name, lean_name))
+                            params = params.push((lean_name, lean_ty))
                             found = true
                     case _:
                         pass
@@ -383,30 +804,93 @@ class LeanBackend:
                     "lean-backend: function `{name}` is malformed MIR: argument {i} of {body.arg_count} has no argument local; cannot type the Lean parameter"))
 
         val ret_type = mir_type_to_lean(body.return_ty)?
+        var contract = FunctionContract.empty(name)
+        val state_semantics = verification_pure_state_semantics_v1(mir_fn)
+        val region_manifest = verification_region_effect_manifest_v1(mir_fn)
+        val has_region_effects = (region_manifest.closed() and
+            not region_manifest.effects.is_empty())
+        var stateful_state_type = ""
+        if self.level.includes_contracts():
+            contract = function_contract_from_hir(name, mir_fn.verification_contract, param_aliases)?
+            if has_region_effects and not contract.invariants.is_empty():
+                if contract.state_invariant_predicates.len() != contract.invariants.len():
+                    return Err(compileerror_backend_error(BackendKind.Lean,
+                        "lean-backend: effectful invariant requires a zero-argument ghost predicate call to bind explicit state"))
+                for predicate in contract.state_invariant_predicates:
+                    var approved = false
+                    for candidate in approved_state_predicates:
+                        if candidate.canonical_text() == predicate.canonical_text():
+                            approved = true
+                    if not approved:
+                        return Err(compileerror_backend_error(BackendKind.Lean,
+                            "lean-backend: effectful invariant predicate `{predicate.function_name}` lacks exact SymbolId-bound read-only MIR approval"))
+            if has_region_effects and contract.decreases_measure != "":
+                return Err(compileerror_backend_error(BackendKind.Lean,
+                    "lean-backend: effectful recursion requires state-threaded termination lowering"))
+            if not contract.invariants.is_empty():
+                if not state_semantics.closed():
+                    return Err(compileerror_backend_error(BackendKind.Lean,
+                        "lean-backend: invariant requires exact pure state semantics: {state_semantics.diagnostic}"))
 
         # Generate function signature
         if self.level == VerificationLevel.Minimal:
+            if has_region_effects:
+                return Err(compileerror_backend_error(BackendKind.Lean,
+                    "lean-backend: Minimal axioms cannot represent explicit global-state execution semantics"))
             # Just emit axiom for function existence
             val param_types = params.map(_.1).join(" → ")
             val full_type = if param_types.len() == 0: ret_type else: "{param_types} → {ret_type}"
             builder.emit_axiom(name, full_type)
         else:
             # Generate full definition by translating MIR body
-            val lean_body = translate_mir_body(body)?
-            builder.emit_def(name, params, ret_type, lean_body)
+            if has_region_effects:
+                val stateful = translate_mir_global_state_body_v1(body)?
+                stateful_state_type = stateful.state_type
+                var stateful_params: [(text, text)] = [
+                    ("__fv2_pre_state", stateful.state_type)]
+                for param in params: stateful_params.push(param)
+                builder.emit_def(name, stateful_params,
+                    "({ret_type} × ({stateful.state_type}))", stateful.body)
+                contract.to_lean_global_frame_spec(
+                    builder, params, stateful.state_type, stateful.written_regions)
+            else:
+                val lean_body = translate_mir_body(body)?
+                if contract.decreases_measure != "":
+                    builder.emit_def_with_termination(
+                        name, params, ret_type, lean_body, contract.decreases_measure,
+                        contract.proof_reference + "_termination")
+                else:
+                    builder.emit_def(name, params, ret_type, lean_body)
 
         # Generate contracts if requested
         if self.level.includes_contracts():
-            val contract = FunctionContract.empty(name)
-            contract.to_lean_spec(builder, params, ret_type)
+            if has_region_effects:
+                contract.to_lean_global_spec(
+                    builder, params, ret_type, stateful_state_type)
+                contract.to_lean_global_state_spec(
+                    builder, params, stateful_state_type)
+            else:
+                contract.to_lean_spec(builder, params, ret_type)
+                if not contract.invariants.is_empty():
+                    contract.to_lean_pure_state_spec(builder, params)
+                if state_semantics.closed():
+                    contract.to_lean_pure_frame_spec(builder, params)
 
         Ok(())
 
-    fn generate_proof_obligations(builder: LeanBuilder, module: MirModule):
-        """Generate proof obligations for the module."""
-        # Would analyze MIR for potential safety issues
-        # and generate corresponding proof obligations
-        pass
+    fn emit_proof_obligation_boundary_note(builder: LeanBuilder, module: MirModule):
+        """Record why this export does not synthesize a module-level proof closure.
+
+        Function-local execution-linked contract propositions are emitted beside
+        their translated definitions.  A release-grade FV2 closure additionally
+        needs a canonical woven identity, backend semantics identity, and a
+        closed trust manifest; `MirModule` alone contains none of these.  The
+        old hook silently returned no obligations, so retain an explicit,
+        non-proof comment rather than pretending that absence is discharge.
+        """
+        builder.emit_comment("FV2 proof boundary: function contracts are execution-linked beside their definitions")
+        builder.emit_comment("FV2 proof closure is not synthesized from bare MirModule; use canonical-MIR typed obligation closure")
+        builder.emit_comment("FV2 module identity: " + module.name)
 
 struct LeanExportResult:
     """Result of Lean export."""
@@ -521,10 +1005,6 @@ fn generate_memory_safety_spec(builder: LeanBuilder, func_name: text):
     builder.emit_theorem("{func_name}_memory_safe",
         "∀ heap : Heap, valid_heap heap → valid_heap (run {func_name} heap)")
 
-fn generate_termination_proof(builder: LeanBuilder, func_name: text, measure: text):
-    """Generate termination proof structure."""
-    builder.emit("termination_by {func_name} => {measure}")
-
 fn generate_refinement_type(base_type: text, predicate: text) -> text:
     """Generate a refinement type."""
     "{{ x : {base_type} // {predicate} }}"
@@ -588,9 +1068,11 @@ impl VerificationCodegen for LeanBackend:
         val _ = name
         translate_mir_body(body)
 
-    fn generate_proof_obligations(module: MirModule) -> [text]:
-        val _ = module
-        []
+    fn generate_proof_obligations(module: MirModule) -> Result<[text], CompileError>:
+        Err(compileerror_backend_error(BackendKind.Lean,
+            "FV2-E-VC-LEGACY-STRING-OBLIGATIONS: bare MirModule '" +
+            module.name + "' lacks woven identity, target semantics, and closed trust; " +
+            "use the typed canonical-MIR obligation closure"))
 
     fn verification_level() -> text:
         self.level.to_text()

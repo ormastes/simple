@@ -2365,6 +2365,32 @@ impl MirLowering:
         val merge_block = b.new_block(Some("ematch_merge"))
         self.builder = b
         var result_defined = false
+        # Canonical verification witness state. It stays disabled unless the
+        # source match is exactly exhaustive Result.Ok/Result.Err with one
+        # shallow bound payload in each arm and no wildcard/default path.
+        var result_match_candidate = enum_name == "Result" and enum_discs.len() == 2 and not has_default
+        var result_ok_arm = BlockId(id: -1)
+        var result_err_arm = BlockId(id: -1)
+        var result_ok_payload = LocalId(id: -1)
+        var result_err_payload = LocalId(id: -1)
+        var result_ok_seen = false
+        var result_err_seen = false
+        if result_match_candidate:
+            var candidate_index = 0
+            while candidate_index < enum_variants.len():
+                val candidate_variant = enum_variants[candidate_index]
+                if enum_deep_flags[candidate_index] != 0 or enum_arities[candidate_index] != 1 or enum_binds[candidate_index].len() != 1:
+                    result_match_candidate = false
+                if candidate_variant == "Ok":
+                    if result_ok_seen or enum_discs[candidate_index] != 0: result_match_candidate = false
+                    result_ok_seen = true
+                elif candidate_variant == "Err":
+                    if result_err_seen or enum_discs[candidate_index] != 1: result_match_candidate = false
+                    result_err_seen = true
+                else:
+                    result_match_candidate = false
+                candidate_index = candidate_index + 1
+            if not result_ok_seen or not result_err_seen: result_match_candidate = false
         var ci = 0
         while ci < enum_discs.len():
             var b_cmp = self.builder
@@ -2372,6 +2398,9 @@ impl MirLowering:
             val cmp_local = b_cmp.emit_binop(MirBinOp.Eq, mir_operand_copy(disc_local), mir_operand_copy(key_local), MirType.bool())
             val arm_block = b_cmp.new_block(Some("ematch_arm"))
             val next_block = b_cmp.new_block(Some("ematch_next"))
+            if result_match_candidate:
+                if enum_variants[ci] == "Ok": result_ok_arm = arm_block
+                elif enum_variants[ci] == "Err": result_err_arm = arm_block
             # Nested Enum/Literal payload sub-patterns need their OWN runtime
             # tests (and nested binds) before this arm may fire; they used to
             # be silently treated as always-matching (bug doc
@@ -2481,6 +2510,9 @@ impl MirLowering:
                     val bound_payload = match payload_hir_type:
                         case Some(found_payload_type): self.enum_payload_value(pl, self.lower_type(found_payload_type))
                         case _: pl
+                    if result_match_candidate:
+                        if enum_variants[ci] == "Ok": result_ok_payload = bound_payload
+                        elif enum_variants[ci] == "Err": result_err_payload = bound_payload
                     self.local_map[bind_syms[0].id] = bound_payload
                     # 033d79338a1 switched identifier resolution to find_local
                     # (local_symbol_ids/values via bind_local); enum-match
@@ -2762,6 +2794,10 @@ impl MirLowering:
 
         var b_m = self.builder
         b_m.switch_to_block(merge_block)
+        if result_match_candidate and result_ok_arm.id >= 0 and result_err_arm.id >= 0 and result_ok_payload.id >= 0 and result_err_payload.id >= 0:
+            b_m.emit(MirInst(kind: MirInstKind.ResultMatchSemantic(
+                scrut_local, result, result_ok_arm, result_err_arm,
+                merge_block, result_ok_payload, result_err_payload), span: nil))
         if not result_defined:
             b_m.emit_const(result, MirConstValue.Int(0), MirType.i64())
         if inferred_known:
@@ -3280,6 +3316,71 @@ impl MirLowering:
                             span: found_enum_definition.span
                         ), 2, 0)
             return tagged
+        payload_local
+
+    me lower_result_construct_named(variant: text, args: [HirCallArg], result_hir_type: HirType) -> LocalId:
+        """Lower typed Ok/Err construction without erasing Result<T,E>.
+
+        The physical operation remains the established rt_enum_new tagged
+        handle call. Its MIR destination, however, carries the exact Result
+        payload types and the discriminant is a literal operand. This makes
+        the same executed operation independently recognizable by native and
+        verification backends without parsing a source spelling or guessing
+        from a later copy.
+        """
+        if args.len() != 1:
+            self.error_fatal("Result {variant} construction requires exactly one payload", Some(result_hir_type.span))
+            return self.builder.emit_const_int(0)
+
+        var result_mir_type = MirType.i64()
+        var normal_payload_type = MirType.unit()
+        var error_payload_type = MirType.unit()
+        match result_hir_type.kind:
+            case HirTypeKind.Result(ok_type, err_type):
+                normal_payload_type = self.lower_type(ok_type)
+                error_payload_type = self.lower_type(err_type)
+                result_mir_type = MirType.result(normal_payload_type, error_payload_type)
+            case _:
+                self.error_fatal("typed Result constructor has non-Result HIR type", Some(result_hir_type.span))
+                return self.builder.emit_const_int(0)
+
+        val disc = if variant == "Ok": 0 elif variant == "Err": 1 else: -1
+        if disc < 0:
+            self.error_fatal("unknown Result constructor '{variant}'", Some(result_hir_type.span))
+            return self.builder.emit_const_int(0)
+
+        var payload_local = self.lower_expr(args[0].value)
+        val payload_ty = self.local_mir_type_of(payload_local)
+        val expected_payload_type = if disc == 0: normal_payload_type else: error_payload_type
+        if payload_ty == nil or (payload_ty ?? MirType.unit()).kind != expected_payload_type.kind:
+            self.error_fatal("Result {variant} payload type does not match retained Result type", Some(args[0].span))
+            return self.builder.emit_const_int(0)
+        if payload_ty != nil and (payload_ty ?? MirType.i64()).kind == MirTypeKind.U64:
+            payload_local = self.box_u64_runtime_value(payload_local)
+
+        val func_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()],
+                return_type: result_mir_type,
+                is_variadic: false
+            )))
+        ))
+        val enum_id_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Int(self.enum_runtime_id("Result")),
+            MirType(kind: MirTypeKind.I32)
+        ))
+        val disc_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Int(disc),
+            MirType(kind: MirTypeKind.I32)
+        ))
+        var b = self.builder
+        val result = b.emit_call(func_operand, [enum_id_operand, disc_operand, mir_operand_copy(payload_local)], result_mir_type)
+        self.builder = b
+        if val typed_result = result:
+            self.mark_runtime_value_local(typed_result.id)
+            self.remember_local_hir_type(typed_result.id, result_hir_type, 2, 0)
+            return typed_result
         payload_local
 
     me lower_struct_construct(symbol: SymbolId, struct_name: text, args: [HirCallArg]) -> LocalId:

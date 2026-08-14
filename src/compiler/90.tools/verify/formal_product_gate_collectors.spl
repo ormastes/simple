@@ -1,0 +1,324 @@
+# RV64 and verified-release product collectors for FV2 Gates 6-7.
+
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryGateV1,
+    FormalDeliveryGateStatusV1, FormalDeliveryGateEvidenceV1,
+    FormalDeliveryReceiptFileV1}
+use compiler.common.assurance.verified_release_gate.{VerifiedReleaseEvidenceV1,
+    evaluate_verified_release_v1, release_evidence_hash_v1}
+use compiler.tools.verify.formal_gate_collectors.{FormalGateCollectionV1,
+    ExecutedCheckOutcomeV1, finalize_formal_gate_collection_v2}
+
+fn product_gate_frame_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn product_gate_sorted_v1(values: [text]) -> [text]:
+    var result = values
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j] < result[i]:
+                val temporary = result[i]
+                result[i] = result[j]
+                result[j] = temporary
+            j = j + 1
+        i = i + 1
+    result
+
+fn product_gate_frames_v1(values: [text]) -> text:
+    val sorted = product_gate_sorted_v1(values)
+    var framed: [text] = []
+    for value in sorted: framed.push(product_gate_frame_v1(value))
+    sorted.len().to_string() + ":[" + framed.join("") + "]"
+
+fn product_execution_diagnostic_v1(
+    schema: text,
+    expected_schema: text,
+    tool_identity_hash: text,
+    command_policy_hash: text,
+    retained_output: text,
+    outcome: ExecutedCheckOutcomeV1,
+    diagnostic: text
+) -> text:
+    if schema != expected_schema:
+        return "FV2-E-PRODUCT-SCHEMA: executed evidence schema differs from the frozen interface"
+    if not sha256_lower_hex_valid(tool_identity_hash) or
+            not sha256_lower_hex_valid(command_policy_hash):
+        return "FV2-E-PRODUCT-TOOL: exact SHA-256 tool and command-policy identities are required"
+    if retained_output == "":
+        return "FV2-E-PRODUCT-OUTPUT: retained executed output is required"
+    if outcome != ExecutedCheckOutcomeV1.Passed or diagnostic != "":
+        return "FV2-E-PRODUCT-OUTCOME: failed timeout unknown missing-tool and output-free results cannot pass"
+    ""
+
+fn product_append_unique_hashes_v1(target: [text], values: [text]) -> [text]:
+    var result = target
+    for value in values:
+        if not result.contains(value): result.push(value)
+    result
+
+pub struct Rv64ProductIdentityV1:
+    hwir_hash: text
+    rtl_hash: text
+    netlist_hash: text
+    os_image_hash: text
+    platform_profile_hash: text
+    assumption_manifest_hash: text
+
+    fn canonical_text() -> text:
+        "Rv64ProductIdentity-v1" + product_gate_frame_v1(self.hwir_hash) +
+            product_gate_frame_v1(self.rtl_hash) +
+            product_gate_frame_v1(self.netlist_hash) +
+            product_gate_frame_v1(self.os_image_hash) +
+            product_gate_frame_v1(self.platform_profile_hash) +
+            product_gate_frame_v1(self.assumption_manifest_hash)
+
+    fn hash() -> text:
+        sha256_text(self.canonical_text())
+
+pub enum Rv64ProductCheckKindV1:
+    SharedXlenRefinement
+    PrivilegeCsrProof
+    MmuPageWalkProof
+    PreciseTrapInterruptProof
+    PostSynthesisEquivalence
+    LinuxBootValidation
+    ArchitecturalCompatibilityValidation
+
+    fn name() -> text:
+        match self:
+            case SharedXlenRefinement: "shared_xlen_refinement"
+            case PrivilegeCsrProof: "privilege_csr_proof"
+            case MmuPageWalkProof: "mmu_page_walk_proof"
+            case PreciseTrapInterruptProof: "precise_trap_interrupt_proof"
+            case PostSynthesisEquivalence: "post_synthesis_equivalence"
+            case LinuxBootValidation: "linux_boot_validation"
+            case ArchitecturalCompatibilityValidation:
+                "architectural_compatibility_validation"
+
+pub enum Rv64EvidenceClassV1:
+    KernelReplayedProof
+    IndependentlyCheckedRefinement
+    ExecutedValidation
+
+    fn name() -> text:
+        match self:
+            case KernelReplayedProof: "kernel_replayed_proof"
+            case IndependentlyCheckedRefinement:
+                "independently_checked_refinement"
+            case ExecutedValidation: "executed_validation"
+
+pub struct ExecutedRv64ProductCheckV1:
+    schema: text
+    kind: Rv64ProductCheckKindV1
+    evidence_class: Rv64EvidenceClassV1
+    product_identity_hash: text
+    proof_or_certificate_hash: text
+    tool_identity_hash: text
+    command_policy_hash: text
+    retained_output: text
+    outcome: ExecutedCheckOutcomeV1
+    diagnostic: text
+fn failed_rv64_collection_v1(diagnostic: text) -> FormalGateCollectionV1:
+    FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(
+        FormalDeliveryGateV1.Rv64PrivilegeMmuLinux,
+        FormalDeliveryGateStatusV1.Failed, [], "", diagnostic), [])
+
+fn rv64_kind_at_v1(index: i64) -> Rv64ProductCheckKindV1:
+    match index:
+        case 0: Rv64ProductCheckKindV1.SharedXlenRefinement
+        case 1: Rv64ProductCheckKindV1.PrivilegeCsrProof
+        case 2: Rv64ProductCheckKindV1.MmuPageWalkProof
+        case 3: Rv64ProductCheckKindV1.PreciseTrapInterruptProof
+        case 4: Rv64ProductCheckKindV1.PostSynthesisEquivalence
+        case 5: Rv64ProductCheckKindV1.LinuxBootValidation
+        case _: Rv64ProductCheckKindV1.ArchitecturalCompatibilityValidation
+
+fn rv64_class_at_v1(index: i64) -> Rv64EvidenceClassV1:
+    if index == 4: return Rv64EvidenceClassV1.IndependentlyCheckedRefinement
+    if index >= 5: return Rv64EvidenceClassV1.ExecutedValidation
+    Rv64EvidenceClassV1.KernelReplayedProof
+
+pub fn collect_rv64_privilege_mmu_linux_gate_v1(
+    identity: Rv64ProductIdentityV1,
+    checks: [ExecutedRv64ProductCheckV1],
+    proof_and_certificate_material: [FormalDeliveryReceiptFileV1]
+) -> FormalGateCollectionV1:
+    val identity_hash = identity.hash()
+    if not sha256_lower_hex_valid(identity.hwir_hash) or
+            not sha256_lower_hex_valid(identity.rtl_hash) or
+            not sha256_lower_hex_valid(identity.netlist_hash) or
+            not sha256_lower_hex_valid(identity.os_image_hash) or
+            not sha256_lower_hex_valid(identity.platform_profile_hash) or
+            not sha256_lower_hex_valid(identity.assumption_manifest_hash) or
+            not sha256_lower_hex_valid(identity_hash):
+        return failed_rv64_collection_v1(
+            "FV2-E-RV64-IDENTITY: complete SHA-256 product netlist image platform and assumption identities are required")
+    if checks.len() != 7:
+        return failed_rv64_collection_v1(
+            "FV2-E-RV64-COUNT: the frozen RV64 product lane requires exactly seven checks")
+    var required_proof_hashes: [text] = []
+    var output_hashes: [text] = []
+    for index in 0..checks.len():
+        val check = checks[index]
+        if check.schema != "ExecutedRv64ProductCheck-v1" or
+                check.kind != rv64_kind_at_v1(index) or
+                check.evidence_class != rv64_class_at_v1(index):
+            return failed_rv64_collection_v1(
+                "FV2-E-RV64-ORDER: check kind or evidence class is missing reordered or substituted")
+        if check.product_identity_hash != identity_hash:
+            return failed_rv64_collection_v1(
+                "FV2-E-RV64-BINDING: executed check targets another product identity")
+        val execution_diagnostic = product_execution_diagnostic_v1(
+            check.schema, "ExecutedRv64ProductCheck-v1",
+            check.tool_identity_hash, check.command_policy_hash,
+            check.retained_output, check.outcome, check.diagnostic)
+        if execution_diagnostic != "": return failed_rv64_collection_v1(
+            execution_diagnostic)
+        val output_hash = sha256_text(check.retained_output)
+        if output_hashes.contains(output_hash):
+            return failed_rv64_collection_v1(
+                "FV2-E-RV64-OUTPUT-DUPLICATE: each product check requires distinct retained output")
+        output_hashes.push(output_hash)
+        if check.evidence_class == Rv64EvidenceClassV1.ExecutedValidation:
+            if check.proof_or_certificate_hash != "":
+                return failed_rv64_collection_v1(
+                    "FV2-E-RV64-VALIDATION-CLASS: validation witness cannot impersonate a proof certificate")
+        else:
+            if not sha256_lower_hex_valid(check.proof_or_certificate_hash) or
+                    required_proof_hashes.contains(
+                        check.proof_or_certificate_hash):
+                return failed_rv64_collection_v1(
+                    "FV2-E-RV64-PROOF: proof/certificate identity is absent weak or duplicated")
+            required_proof_hashes.push(check.proof_or_certificate_hash)
+    if proof_and_certificate_material.len() != required_proof_hashes.len():
+        return failed_rv64_collection_v1(
+            "FV2-E-RV64-PROOF-COUNT: every and only referenced proof/certificate must be materialized")
+    var files: [FormalDeliveryReceiptFileV1] = []
+    var receipt_hashes: [text] = []
+    for required_hash in required_proof_hashes:
+        var matches = 0
+        for file in proof_and_certificate_material:
+            if file.receipt_hash == required_hash and
+                    sha256_text(file.content) == required_hash:
+                matches = matches + 1
+        if matches != 1:
+            return failed_rv64_collection_v1(
+                "FV2-E-RV64-PROOF-MATERIAL: proof/certificate material is missing duplicated or stale")
+    for file in proof_and_certificate_material:
+        files.push(file)
+        receipt_hashes.push(file.receipt_hash)
+    val identity_content = identity.canonical_text()
+    files.push(FormalDeliveryReceiptFileV1(identity_hash, identity_content))
+    receipt_hashes.push(identity_hash)
+    for check in checks:
+        val output_hash = sha256_text(check.retained_output)
+        files.push(FormalDeliveryReceiptFileV1(output_hash,
+            check.retained_output))
+        receipt_hashes.push(output_hash)
+        val check_content = "ExecutedRv64ProductCheck-v1" +
+            product_gate_frame_v1(check.kind.name()) +
+            product_gate_frame_v1(check.evidence_class.name()) +
+            product_gate_frame_v1(check.product_identity_hash) +
+            product_gate_frame_v1(check.proof_or_certificate_hash) +
+            product_gate_frame_v1(check.tool_identity_hash) +
+            product_gate_frame_v1(check.command_policy_hash) +
+            product_gate_frame_v1(output_hash) +
+            product_gate_frame_v1(check.outcome.name())
+        val check_hash = sha256_text(check_content)
+        files.push(FormalDeliveryReceiptFileV1(check_hash, check_content))
+        receipt_hashes.push(check_hash)
+    val aggregate_content = "Rv64PrivilegeMmuLinuxReceipt-v1" +
+        product_gate_frame_v1(identity_hash) +
+        product_gate_frames_v1(receipt_hashes)
+    val aggregate_hash = sha256_text(aggregate_content)
+    files.push(FormalDeliveryReceiptFileV1(aggregate_hash, aggregate_content))
+    receipt_hashes.push(aggregate_hash)
+    val evidence_hash = sha256_text("Rv64PrivilegeMmuLinuxGate-v1" +
+        product_gate_frames_v1(receipt_hashes))
+    finalize_formal_gate_collection_v2(
+        FormalDeliveryGateV1.Rv64PrivilegeMmuLinux, evidence_hash, files)
+
+fn failed_verified_release_collection_v1(
+    diagnostic: text
+) -> FormalGateCollectionV1:
+    FormalGateCollectionV1(FormalDeliveryGateEvidenceV1(
+        FormalDeliveryGateV1.VerifiedRelease,
+        FormalDeliveryGateStatusV1.Failed, [], "", diagnostic), [])
+
+pub fn collect_verified_release_gate_v1(
+    pre_manifest_evidence: VerifiedReleaseEvidenceV1,
+    predecessor_receipts: [FormalDeliveryReceiptFileV1],
+    new_release_material: [FormalDeliveryReceiptFileV1]
+) -> FormalGateCollectionV1:
+    if pre_manifest_evidence.delivery_gate_manifest_hash != "":
+        return failed_verified_release_collection_v1(
+            "FV2-E-GATE7-PREMANIFEST: collection requires evidence before the eight-gate manifest is sealed")
+    var provisional = pre_manifest_evidence
+    provisional.delivery_gate_manifest_hash = sha256_text(
+        "fv2-eight-gate-manifest-pending-seal")
+    val decision = evaluate_verified_release_v1(provisional)
+    if not decision.passed():
+        return failed_verified_release_collection_v1(
+            "FV2-E-GATE7-EVIDENCE: release closure is not artifact_verified and fail-closed")
+    var required_hashes: [text] = []
+    required_hashes = product_append_unique_hashes_v1(required_hashes,
+        pre_manifest_evidence.proof_receipt_hashes)
+    required_hashes = product_append_unique_hashes_v1(required_hashes,
+        pre_manifest_evidence.compiler_certificate_hashes)
+    required_hashes = product_append_unique_hashes_v1(required_hashes,
+        [pre_manifest_evidence.trust_manifest_hash,
+            pre_manifest_evidence.independent_replay_hash,
+            pre_manifest_evidence.mutation_receipt_hash,
+            pre_manifest_evidence.non_vacuity_receipt_hash])
+    if pre_manifest_evidence.bounded_tcb_manifest_hash != "":
+        required_hashes = product_append_unique_hashes_v1(required_hashes,
+            [pre_manifest_evidence.bounded_tcb_manifest_hash])
+    val expected_count = pre_manifest_evidence.proof_receipt_hashes.len() +
+        pre_manifest_evidence.compiler_certificate_hashes.len() + 4 +
+        (if pre_manifest_evidence.bounded_tcb_manifest_hash == "": 0 else: 1)
+    if required_hashes.len() != expected_count:
+        return failed_verified_release_collection_v1(
+            "FV2-E-GATE7-TYPE-CONFUSION: release evidence identities must be unique across proof certificate trust replay mutation and non-vacuity classes")
+    if predecessor_receipts.len() + new_release_material.len() !=
+            required_hashes.len():
+        return failed_verified_release_collection_v1(
+            "FV2-E-GATE7-MATERIAL-COUNT: every and only release-closure receipt must be materialized")
+    var all_material = predecessor_receipts
+    for file in new_release_material: all_material.push(file)
+    for required_hash in required_hashes:
+        var matches = 0
+        for file in all_material:
+            if file.receipt_hash == required_hash and
+                    sha256_text(file.content) == required_hash:
+                matches = matches + 1
+        if matches != 1:
+            return failed_verified_release_collection_v1(
+                "FV2-E-GATE7-MATERIAL: release-closure receipt is missing duplicated or stale")
+    # Gate 7 must retain every closure receipt in the release-facing material,
+    # including predecessor-gate proof/certificate/trust evidence.  A hash in
+    # the summary closure is not a substitute for the exact bytes the V2
+    # loader rehashes and audits at final admission.
+    var files: [FormalDeliveryReceiptFileV1] = []
+    var receipt_hashes: [text] = []
+    for file in predecessor_receipts:
+        files.push(file)
+        receipt_hashes.push(file.receipt_hash)
+    for file in new_release_material:
+        files.push(file)
+        receipt_hashes.push(file.receipt_hash)
+    val pre_manifest_hash = release_evidence_hash_v1(pre_manifest_evidence)
+    val closure_content = "VerifiedReleasePreManifestReceipt-v1" +
+        product_gate_frame_v1(pre_manifest_hash) +
+        product_gate_frame_v1(pre_manifest_evidence.artifact_hash) +
+        product_gate_frames_v1(required_hashes)
+    val closure_hash = sha256_text(closure_content)
+    files.push(FormalDeliveryReceiptFileV1(closure_hash, closure_content))
+    receipt_hashes.push(closure_hash)
+    val evidence_hash = sha256_text("VerifiedReleaseGate-v1" +
+        product_gate_frame_v1(pre_manifest_hash) +
+        product_gate_frames_v1(receipt_hashes))
+    finalize_formal_gate_collection_v2(
+        FormalDeliveryGateV1.VerifiedRelease, evidence_hash, files)

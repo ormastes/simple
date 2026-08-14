@@ -1,0 +1,93 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryReceiptFileV1}
+use compiler.tools.verify.formal_gate_collectors.{ExecutedCheckOutcomeV1}
+use compiler.tools.verify.formal_product_gate_collectors.{
+    Rv64ProductIdentityV1, Rv64ProductCheckKindV1, Rv64EvidenceClassV1,
+    ExecutedRv64ProductCheckV1, collect_rv64_privilege_mmu_linux_gate_v1}
+
+fn rv64_identity() -> Rv64ProductIdentityV1:
+    Rv64ProductIdentityV1(sha256_text("rv64-hwir"), sha256_text("rv64-rtl"),
+        sha256_text("rv64-netlist"), sha256_text("simpleos-image"),
+        sha256_text("platform"), sha256_text("assumptions"))
+
+fn rv64_kind(index: i64) -> Rv64ProductCheckKindV1:
+    match index:
+        case 0: Rv64ProductCheckKindV1.SharedXlenRefinement
+        case 1: Rv64ProductCheckKindV1.PrivilegeCsrProof
+        case 2: Rv64ProductCheckKindV1.MmuPageWalkProof
+        case 3: Rv64ProductCheckKindV1.PreciseTrapInterruptProof
+        case 4: Rv64ProductCheckKindV1.PostSynthesisEquivalence
+        case 5: Rv64ProductCheckKindV1.LinuxBootValidation
+        case _: Rv64ProductCheckKindV1.ArchitecturalCompatibilityValidation
+
+fn rv64_class(index: i64) -> Rv64EvidenceClassV1:
+    if index == 4: return Rv64EvidenceClassV1.IndependentlyCheckedRefinement
+    if index >= 5: return Rv64EvidenceClassV1.ExecutedValidation
+    Rv64EvidenceClassV1.KernelReplayedProof
+
+fn rv64_proof_material() -> [FormalDeliveryReceiptFileV1]:
+    var files: [FormalDeliveryReceiptFileV1] = []
+    for index in 0..5:
+        val content = "rv64-proof-or-certificate-" + index.to_string()
+        files.push(FormalDeliveryReceiptFileV1(sha256_text(content), content))
+    files
+
+fn rv64_checks() -> [ExecutedRv64ProductCheckV1]:
+    val identity_hash = rv64_identity().hash()
+    val proofs = rv64_proof_material()
+    var checks: [ExecutedRv64ProductCheckV1] = []
+    for index in 0..7:
+        checks.push(ExecutedRv64ProductCheckV1(
+            "ExecutedRv64ProductCheck-v1", rv64_kind(index), rv64_class(index),
+            identity_hash, if index < 5: proofs[index].receipt_hash else: "",
+            sha256_text("tool-" + index.to_string()),
+            sha256_text("policy-" + index.to_string()),
+            "retained-rv64-output-" + index.to_string(),
+            ExecutedCheckOutcomeV1.Passed, ""))
+    checks
+
+describe "FV2 RV64 privilege MMU and Linux delivery gate":
+    it "keeps formal refinement and executed validation evidence distinct":
+        val collection = collect_rv64_privilege_mmu_linux_gate_v1(
+            rv64_identity(), rv64_checks(), rv64_proof_material())
+        expect(collection.gate_evidence.status.name()).to_equal("passed")
+        expect(collection.gate_evidence.receipt_hashes.len()).to_equal(21)
+        expect(collection.receipt_files.len()).to_equal(21)
+        for file in collection.receipt_files:
+            expect(sha256_text(file.content)).to_equal(file.receipt_hash)
+
+    it "rejects reorder product drift missing proof and validation impersonation":
+        var reordered = rv64_checks()
+        val temporary = reordered[0]
+        reordered[0] = reordered[1]
+        reordered[1] = temporary
+        expect(collect_rv64_privilege_mmu_linux_gate_v1(rv64_identity(),
+            reordered, rv64_proof_material()).gate_evidence.diagnostic).to_contain(
+                "ORDER")
+        var drift = rv64_checks()
+        drift[2].product_identity_hash = sha256_text("other-product")
+        expect(collect_rv64_privilege_mmu_linux_gate_v1(rv64_identity(), drift,
+            rv64_proof_material()).gate_evidence.diagnostic).to_contain("BINDING")
+        var missing = rv64_proof_material()
+        missing.pop()
+        expect(collect_rv64_privilege_mmu_linux_gate_v1(rv64_identity(),
+            rv64_checks(), missing).gate_evidence.diagnostic).to_contain(
+                "PROOF-COUNT")
+        var impersonated = rv64_checks()
+        impersonated[5].proof_or_certificate_hash = sha256_text("fake-proof")
+        expect(collect_rv64_privilege_mmu_linux_gate_v1(rv64_identity(),
+            impersonated, rv64_proof_material()).gate_evidence.diagnostic).to_contain(
+                "VALIDATION-CLASS")
+
+    it "rejects timeout and output substitution":
+        var timed_out = rv64_checks()
+        timed_out[6].outcome = ExecutedCheckOutcomeV1.Timeout
+        expect(collect_rv64_privilege_mmu_linux_gate_v1(rv64_identity(),
+            timed_out, rv64_proof_material()).gate_evidence.status.name()).to_equal(
+                "failed")
+        var duplicate_output = rv64_checks()
+        duplicate_output[6].retained_output = duplicate_output[5].retained_output
+        expect(collect_rv64_privilege_mmu_linux_gate_v1(rv64_identity(),
+            duplicate_output, rv64_proof_material()).gate_evidence.diagnostic).to_contain(
+                "OUTPUT-DUPLICATE")

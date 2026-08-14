@@ -1,0 +1,97 @@
+# Executed pure-Simple Ed25519 adapter for signed FV2 release evidence.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.dynamic_composition.{SignatureVerificationReceiptV1}
+use compiler.common.assurance.verified_release_gate.{VerifiedReleaseEvidenceV1,
+    ApprovedReleaseSignerV1, ReleaseSignatureVerificationV1,
+    release_evidence_hash_v1, VerifiedReleaseEvidenceV2,
+    evaluate_verified_release_v2}
+use lib.common.crypto.ed25519.{pure_ed25519_verify}
+
+fn fv2_release_text_bytes_v1(value: text) -> [u8]:
+    var result: [u8] = []
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if code < 0 or code > 127: return []
+        result.push(code.to_u8())
+    result
+
+fn fv2_release_bytes_identity_v1(values: [u8]) -> text:
+    var parts: [text] = []
+    for value in values: parts.push(value.to_i64().to_string())
+    sha256_text(values.len().to_string() + ":[" + parts.join(",") + "]")
+
+# The signer envelope is part of what is authorized.  Signing only an evidence
+# hash permits the same key to be relabelled under another approved signer ID.
+# Keep a framed, versioned ASCII wire message so the signing and verification
+# paths cannot disagree about its boundary.
+pub fn fv2_release_signature_message_v1(
+    schema: text,
+    payload_hash: text,
+    signer_id: text,
+    public_key_hash: text
+) -> [u8]:
+    fv2_release_text_bytes_v1(schema.len().to_string() + ":" + schema +
+        payload_hash.len().to_string() + ":" + payload_hash +
+        signer_id.len().to_string() + ":" + signer_id +
+        public_key_hash.len().to_string() + ":" + public_key_hash)
+
+fn verify_release_bundle_ed25519_v1(
+    evidence: VerifiedReleaseEvidenceV1,
+    approved_signer: ApprovedReleaseSignerV1,
+    public_key: [u8],
+    signature: [u8]
+) -> ReleaseSignatureVerificationV1:
+    val payload_hash = release_evidence_hash_v1(evidence)
+    val public_key_hash = fv2_release_bytes_identity_v1(public_key)
+    val message = fv2_release_signature_message_v1(
+        "FV2-RELEASE-SIGNATURE-v1", payload_hash,
+        approved_signer.signer_id, public_key_hash)
+    val lengths_valid = public_key.len() == 32 and signature.len() == 64 and
+        message.len() > 0 and approved_signer.signer_id != "" and
+        approved_signer.public_key_hash == public_key_hash
+    val verified = lengths_valid and pure_ed25519_verify(public_key, message,
+        signature)
+    val signature_hash = fv2_release_bytes_identity_v1(signature)
+    val receipt = SignatureVerificationReceiptV1(payload_hash,
+        approved_signer.signer_id,
+        "pure-simple-ed25519-rfc8032-v1",
+        sha256_text("fv2-release-ed25519-v1" +
+            payload_hash.len().to_string() + ":" + payload_hash +
+            approved_signer.signer_id.len().to_string() + ":" +
+            approved_signer.signer_id + public_key_hash.len().to_string() +
+            ":" + public_key_hash + signature_hash.len().to_string() + ":" +
+            signature_hash), verified)
+    ReleaseSignatureVerificationV1(approved_signer.signer_id,
+        public_key_hash, receipt)
+
+pub fn verify_release_bundle_ed25519_v2(
+    evidence: VerifiedReleaseEvidenceV2,
+    approved_signer: ApprovedReleaseSignerV1,
+    public_key: [u8],
+    signature: [u8]
+) -> ReleaseSignatureVerificationV1:
+    # V2 deliberately signs the policy-bound evidence identity, never the
+    # compatible V1 payload nested inside it.
+    val payload_hash = evaluate_verified_release_v2(evidence).evidence_hash
+    val public_key_hash = fv2_release_bytes_identity_v1(public_key)
+    val message = fv2_release_signature_message_v1(
+        "FV2-RELEASE-SIGNATURE-v2", payload_hash,
+        approved_signer.signer_id, public_key_hash)
+    val lengths_valid = public_key.len() == 32 and signature.len() == 64 and
+        message.len() > 0 and approved_signer.signer_id != "" and
+        approved_signer.public_key_hash == public_key_hash
+    val verified = lengths_valid and pure_ed25519_verify(public_key, message,
+        signature)
+    val signature_hash = fv2_release_bytes_identity_v1(signature)
+    val receipt = SignatureVerificationReceiptV1(payload_hash,
+        approved_signer.signer_id,
+        "pure-simple-ed25519-rfc8032-v2",
+        sha256_text("fv2-release-ed25519-v2" +
+            payload_hash.len().to_string() + ":" + payload_hash +
+            approved_signer.signer_id.len().to_string() + ":" +
+            approved_signer.signer_id + public_key_hash.len().to_string() +
+            ":" + public_key_hash + signature_hash.len().to_string() + ":" +
+            signature_hash), verified)
+    ReleaseSignatureVerificationV1(approved_signer.signer_id,
+        public_key_hash, receipt)

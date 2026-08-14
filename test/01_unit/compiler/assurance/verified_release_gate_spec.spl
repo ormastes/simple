@@ -1,0 +1,207 @@
+use std.spec
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.verified_release_gate.{ReleaseEvidenceOutcomeV1,
+    VerifiedReleaseEvidenceV1, SignedVerifiedReleaseBundleV1,
+    ApprovedReleaseSignerV1, ReleaseSignatureVerificationV1,
+    VerifiedReleaseEvidenceV2, evaluate_verified_release_v1,
+    SignedVerifiedReleaseBundleV2, evaluate_verified_release_v2,
+    release_evidence_hash_v1, validate_signed_verified_release_bundle_v1,
+    validate_signed_verified_release_bundle_v2}
+use compiler.common.assurance.dynamic_composition.{SignatureVerificationReceiptV1}
+use compiler.common.assurance.policy_schema.{AssuranceStrictnessV2,
+    ResolvedAssurancePolicyV2, AssuranceGrade, AssuranceConvention}
+use std.common.crypto.sha256.{sha256_text}
+
+fn release_evidence(
+    outcome: ReleaseEvidenceOutcomeV1 = ReleaseEvidenceOutcomeV1.ProvedWithCertificate,
+    artifact_status: FormalStatus = FormalStatus.ArtifactVerified,
+    reachable_status: FormalStatus = FormalStatus.ArtifactVerified,
+    profile: text = "verified",
+    evidence_artifact: text = "artifact",
+    bounded_tcb: text = "",
+    unsupported: i64 = 0,
+    stale: i64 = 0,
+    warnings: i64 = 0,
+    environment_errors: i64 = 0,
+    delivery_manifest: text = "delivery-gates"
+) -> VerifiedReleaseEvidenceV1:
+    VerifiedReleaseEvidenceV1(profile, artifact_status, [reachable_status],
+        sha256_text("artifact"), if evidence_artifact == "artifact":
+            sha256_text("artifact") else: evidence_artifact,
+        [sha256_text("proof-receipt")], [sha256_text("compiler-certificate")],
+        sha256_text("closed-trust"), bounded_tcb,
+        sha256_text("independent-replay"), sha256_text("mutation-receipt"),
+        sha256_text("non-vacuity-receipt"),
+        [outcome], unsupported, stale, warnings, environment_errors,
+        if delivery_manifest == "delivery-gates":
+            sha256_text(delivery_manifest) else: delivery_manifest)
+
+describe "Verification 2.0 fail-closed release gate":
+    it "requires a resolved V2 verified policy at the typed release boundary":
+        val verified = ResolvedAssurancePolicyV2(AssuranceStrictnessV2.Verified,
+            "nogc_async_mut_noalloc", AssuranceGrade.NoGrade,
+            AssuranceConvention.NoConvention)
+        val critical = ResolvedAssurancePolicyV2(AssuranceStrictnessV2.Critical,
+            "nogc_async_mut_noalloc", AssuranceGrade.NoGrade,
+            AssuranceConvention.NoConvention)
+        expect(evaluate_verified_release_v2(VerifiedReleaseEvidenceV2(
+            verified, release_evidence())).passed()).to_equal(true)
+        val downgraded = evaluate_verified_release_v2(VerifiedReleaseEvidenceV2(
+            critical, release_evidence()))
+        expect(downgraded.passed()).to_equal(false)
+        expect(downgraded.diagnostic_codes).to_contain("FV2-RELEASE-POLICY-V2")
+        val mismatched = evaluate_verified_release_v2(VerifiedReleaseEvidenceV2(
+            verified, release_evidence(profile: "critical")))
+        expect(mismatched.passed()).to_equal(false)
+        expect(mismatched.diagnostic_codes).to_contain("FV2-RELEASE-POLICY-BINDING")
+
+    it "signs the V2 policy identity together with the release evidence":
+        val policy = ResolvedAssurancePolicyV2(AssuranceStrictnessV2.Verified,
+            "nogc_async_mut_noalloc", AssuranceGrade.NoGrade,
+            AssuranceConvention.NoConvention)
+        val evidence = VerifiedReleaseEvidenceV2(policy, release_evidence())
+        val payload = evaluate_verified_release_v2(evidence).evidence_hash
+        val signature = SignatureVerificationReceiptV1(payload, "release-key",
+            "pure-ed25519-v1", sha256_text("signature-evidence"), true)
+        val accepted = validate_signed_verified_release_bundle_v2(
+            SignedVerifiedReleaseBundleV2(evidence, payload, "release-key",
+                ReleaseSignatureVerificationV1("release-key", sha256_text("public-key"),
+                    signature)), [ApprovedReleaseSignerV1("release-key",
+                    sha256_text("public-key"))])
+        expect(accepted.admitted).to_equal(true)
+        val changed_policy = ResolvedAssurancePolicyV2(AssuranceStrictnessV2.Verified,
+            "different-runtime", AssuranceGrade.NoGrade,
+            AssuranceConvention.NoConvention)
+        val drifted = validate_signed_verified_release_bundle_v2(
+            SignedVerifiedReleaseBundleV2(VerifiedReleaseEvidenceV2(changed_policy,
+                release_evidence()), payload, "release-key",
+                ReleaseSignatureVerificationV1("release-key", sha256_text("public-key"),
+                    signature)), [ApprovedReleaseSignerV1("release-key",
+                    sha256_text("public-key"))])
+        expect(drifted.admitted).to_equal(false)
+        expect(drifted.diagnostic).to_contain("PAYLOAD-V2")
+
+    it "passes only a complete exact artifact-verified evidence set":
+        val decision = evaluate_verified_release_v1(release_evidence())
+        expect(decision.passed()).to_equal(true)
+        expect(decision.diagnostic_codes.len()).to_equal(0)
+
+    it "uses unambiguous framing for list-valued evidence identities":
+        var left = release_evidence()
+        var right = release_evidence()
+        left.proof_receipt_hashes = [sha256_text("a,b"), sha256_text("c")]
+        right.proof_receipt_hashes = [sha256_text("a"), sha256_text("b,c")]
+        expect(release_evidence_hash_v1(left) ==
+            release_evidence_hash_v1(right)).to_equal(false)
+
+    it "rejects every non-proof external tool outcome":
+        val outcomes = [ReleaseEvidenceOutcomeV1.Unknown,
+            ReleaseEvidenceOutcomeV1.Timeout,
+            ReleaseEvidenceOutcomeV1.MissingTool,
+            ReleaseEvidenceOutcomeV1.ToolFailure,
+            ReleaseEvidenceOutcomeV1.EnvironmentFailure]
+        for outcome in outcomes:
+            val decision = evaluate_verified_release_v1(
+                release_evidence(outcome))
+            expect(decision.passed()).to_equal(false)
+        expect(evaluate_verified_release_v1(release_evidence(
+            ReleaseEvidenceOutcomeV1.Unknown)).diagnostic_codes).to_contain(
+            "FV2-RELEASE-UNKNOWN")
+        expect(evaluate_verified_release_v1(release_evidence(
+            ReleaseEvidenceOutcomeV1.Timeout)).diagnostic_codes).to_contain(
+            "FV2-RELEASE-TIMEOUT")
+        expect(evaluate_verified_release_v1(release_evidence(
+            ReleaseEvidenceOutcomeV1.MissingTool)).diagnostic_codes).to_contain(
+            "FV2-RELEASE-MISSING-TOOL")
+
+    it "rejects stale unsupported warning and environment counts":
+        expect(evaluate_verified_release_v1(release_evidence(
+            unsupported: 1)).diagnostic_codes).to_contain(
+            "FV2-RELEASE-UNSUPPORTED")
+        expect(evaluate_verified_release_v1(release_evidence(
+            stale: 1)).diagnostic_codes).to_contain("FV2-RELEASE-STALE")
+        expect(evaluate_verified_release_v1(release_evidence(
+            warnings: 1)).diagnostic_codes).to_contain(
+            "FV2-RELEASE-WARNING-CONTROL")
+        expect(evaluate_verified_release_v1(release_evidence(
+            environment_errors: 1)).diagnostic_codes).to_contain(
+            "FV2-RELEASE-ENVIRONMENT-COUNT")
+        expect(evaluate_verified_release_v1(release_evidence(
+            delivery_manifest: "")).diagnostic_codes).to_contain(
+            "FV2-RELEASE-DELIVERY-GATES")
+
+    it "rejects model-only status profile drift and artifact mismatch":
+        expect(evaluate_verified_release_v1(release_evidence(
+            artifact_status: FormalStatus.ModelProven)).diagnostic_codes).to_contain(
+            "FV2-RELEASE-ARTIFACT-STATUS")
+        expect(evaluate_verified_release_v1(release_evidence(
+            reachable_status: FormalStatus.Stale)).diagnostic_codes).to_contain(
+            "FV2-RELEASE-CLOSURE-STATUS")
+        expect(evaluate_verified_release_v1(release_evidence(
+            profile: "critical")).diagnostic_codes).to_contain(
+            "FV2-RELEASE-PROFILE")
+        expect(evaluate_verified_release_v1(release_evidence(
+            evidence_artifact: "other")).diagnostic_codes).to_contain(
+            "FV2-RELEASE-ARTIFACT-IDENTITY")
+
+    it "requires an explicit bounded TCB for trusted boundaries":
+        val missing = evaluate_verified_release_v1(release_evidence(
+            outcome: ReleaseEvidenceOutcomeV1.ApprovedExternalTcb,
+            reachable_status: FormalStatus.TrustedBoundary))
+        expect(missing.passed()).to_equal(false)
+        expect(missing.diagnostic_codes).to_contain("FV2-RELEASE-TCB-MANIFEST")
+        val bounded = evaluate_verified_release_v1(release_evidence(
+            outcome: ReleaseEvidenceOutcomeV1.ApprovedExternalTcb,
+            reachable_status: FormalStatus.TrustedBoundary,
+            bounded_tcb: sha256_text("bounded-tcb-manifest")))
+        expect(bounded.passed()).to_equal(true)
+
+    it "admits only a signature bound to exact release evidence and policy":
+        val evidence = release_evidence()
+        val payload = release_evidence_hash_v1(evidence)
+        val signature = SignatureVerificationReceiptV1(payload, "release-key",
+            "pure-ed25519-v1", sha256_text("signature-evidence"), true)
+        val bundle = SignedVerifiedReleaseBundleV1(evidence, payload,
+            "release-key", ReleaseSignatureVerificationV1("release-key",
+                sha256_text("public-key"), signature))
+        val accepted = validate_signed_verified_release_bundle_v1(bundle,
+            [ApprovedReleaseSignerV1("release-key", sha256_text("public-key"))])
+        expect(accepted.admitted).to_equal(true)
+        expect(accepted.release_decision.passed()).to_equal(true)
+        expect(accepted.bundle_hash == "").to_equal(false)
+
+    it "rejects payload drift failed signature and unapproved signer":
+        val evidence = release_evidence()
+        val payload = release_evidence_hash_v1(evidence)
+        val valid = SignatureVerificationReceiptV1(payload, "release-key",
+            "pure-ed25519-v1", sha256_text("signature-evidence"), true)
+        val drifted = validate_signed_verified_release_bundle_v1(
+            SignedVerifiedReleaseBundleV1(evidence, "other", "release-key",
+                ReleaseSignatureVerificationV1("release-key", sha256_text("public-key"),
+                    valid)), [ApprovedReleaseSignerV1("release-key", sha256_text("public-key"))])
+        expect(drifted.diagnostic).to_contain("PAYLOAD")
+        val failed = SignatureVerificationReceiptV1(payload, "release-key",
+            "pure-ed25519-v1", sha256_text("signature-evidence"), false)
+        expect(validate_signed_verified_release_bundle_v1(
+            SignedVerifiedReleaseBundleV1(evidence, payload, "release-key",
+                ReleaseSignatureVerificationV1("release-key", sha256_text("public-key"),
+                    failed)), [ApprovedReleaseSignerV1("release-key",
+                    sha256_text("public-key"))]).admitted).to_equal(false)
+        val unapproved = validate_signed_verified_release_bundle_v1(
+            SignedVerifiedReleaseBundleV1(evidence, payload, "release-key",
+                ReleaseSignatureVerificationV1("release-key", sha256_text("public-key"),
+                    valid)), [ApprovedReleaseSignerV1("other-key", sha256_text("public-key"))])
+        expect(unapproved.diagnostic).to_contain("POLICY")
+
+    it "rejects signer-name reuse with a different public key":
+        val evidence = release_evidence()
+        val payload = release_evidence_hash_v1(evidence)
+        val receipt = SignatureVerificationReceiptV1(payload, "release-key",
+            "pure-ed25519-v1", sha256_text("signature-evidence"), true)
+        val bundle = SignedVerifiedReleaseBundleV1(evidence, payload,
+            "release-key", ReleaseSignatureVerificationV1("release-key",
+                sha256_text("attacker-key"), receipt))
+        val decision = validate_signed_verified_release_bundle_v1(bundle,
+            [ApprovedReleaseSignerV1("release-key", sha256_text("approved-key"))])
+        expect(decision.admitted).to_equal(false)
+        expect(decision.diagnostic).to_contain("POLICY")

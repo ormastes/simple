@@ -1,0 +1,282 @@
+# Canonical module-call adapter for the Verification 2.0 obligation DAG.
+#
+# V1 admits an owner calling exact retained-contract leaf functions. It rejects
+# unresolved/indirect calls and recursive module components rather than treating
+# a name match as a call contract. Wider SCC composition can extend this owner.
+
+use compiler.common.assurance.flight_rules.{assurance_text_hash}
+use compiler.common.assurance.formal_receipt.{TrustManifestV1}
+use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
+use compiler.mir.mir_instructions.{MirInstKind, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{MirConstValue}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_signature,
+    serialize_mir_inst_kind}
+use compiler.mir.verification_contract.{ExecutionContractObligationKindV1}
+use compiler.mir.verification_contract_bridge.{verification_contract_from_mir_v1,
+    verification_contract_obligations_from_canonical_module_v2}
+use compiler.mir.verification_region_effects.{
+    verification_region_effect_manifest_v1,
+    verification_region_effect_manifest_with_internal_calls_v1}
+use compiler.mir.verification_obligation_closure.{
+    VerificationClosureAuthoritiesV1, VerificationObligationClosureV1,
+    canonical_contract_kind_hash_v1, canonical_mir_source_span_v1,
+    canonical_mir_type_representation_hash_v1,
+    canonical_mir_termination_hash_v1,
+    generate_verification_obligation_closure_v1}
+use compiler.mir.verification_call_identity.{ResolvedDirectCallManifestV1,
+    validate_resolved_direct_call_manifest_v1}
+
+# V2 handoff for a resolver-backed canonical module closure.  The contained
+# V1 obligation graph stays byte-compatible for existing consumers, while the
+# wrapper makes the independently validated call-identity manifest an
+# unavoidable part of any FV2 production handoff.
+pub struct ResolvedCanonicalModuleClosureV2:
+    closure: VerificationObligationClosureV1
+    resolved_call_manifest_hash: text
+    diagnostic: text
+
+    fn closed() -> bool:
+        self.closure.closed() and self.resolved_call_manifest_hash != "" and
+            self.diagnostic == ""
+
+    fn hash() -> text:
+        if not self.closed(): return ""
+        assurance_text_hash("ResolvedCanonicalModuleClosure-v2|closure=" +
+            self.closure.closure_hash + "|calls=" +
+            self.resolved_call_manifest_hash)
+
+struct CanonicalModuleCallClosureV1:
+    semantic_hash: text
+    recursive: bool
+    diagnostic: text
+
+fn module_woven_function_hash_v1(woven_module_hash: text,
+    func: MirFunction) -> text:
+    assurance_text_hash("fv2-woven-module-function-v1|module=" +
+        woven_module_hash + "|symbol=" + func.symbol.id.to_string() +
+        "|mir=" + assurance_text_hash(serialize_mir_function(func)))
+
+fn module_function_by_symbol_v1(module: MirModule,
+    symbol_id: text) -> Result<MirFunction, text>:
+    var matches: [MirFunction] = []
+    for symbol in module.functions.keys():
+        val candidate = module.functions[symbol]
+        if candidate.symbol.id.to_string() == symbol_id: matches.push(candidate)
+    if matches.len() != 1:
+        return Err("FV2-E-VC-MODULE-OWNER: SymbolId must resolve to one MIR function")
+    Ok(matches[0])
+
+fn module_function_by_name_v1(module: MirModule,
+    name: text) -> Result<MirFunction, text>:
+    var matches: [MirFunction] = []
+    for symbol in module.functions.keys():
+        val candidate = module.functions[symbol]
+        if candidate.name == name: matches.push(candidate)
+    if matches.len() != 1:
+        return Err("FV2-E-VC-MODULE-CALLEE: direct call name must resolve to one internal SymbolId")
+    Ok(matches[0])
+
+fn module_internal_names_v1(module: MirModule) -> Result<[text], text>:
+    var names: [text] = []
+    for symbol in module.functions.keys():
+        val name = module.functions[symbol].name
+        if name == "" or names.contains(name):
+            return Err("FV2-E-VC-MODULE-NAME: internal function names must be nonempty and unique")
+        names.push(name)
+    names.sort()
+    Ok(names)
+
+fn module_direct_call_name_v1(instruction: MirInstKind) -> text:
+    match instruction:
+        case MirInstKind.Call(_, callee, _):
+            match callee.kind:
+                case MirOperandKind.Const(MirConstValue.Str(name), _): name
+                case _: ""
+        case _: ""
+
+fn module_function_is_leaf_v1(func: MirFunction) -> bool:
+    for block in func.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, _, _) | MirInstKind.CallIndirect(_, _, _, _):
+                    return false
+                case _: continue
+        match block.terminator:
+            case MirTerminator.CallTerminator(_, _, _, _, _): return false
+            case _: continue
+    true
+
+fn canonical_module_call_closure_v1(module: MirModule, owner: MirFunction,
+    woven_module_hash: text, owner_contract_hash: text
+) -> CanonicalModuleCallClosureV1:
+    var rows: [text] = []
+    var recursive = false
+    for block in owner.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, _, _):
+                    val name = module_direct_call_name_v1(instruction.kind)
+                    if name == "": return CanonicalModuleCallClosureV1("", false,
+                        "FV2-E-VC-MODULE-CALL-IDENTITY: direct call lacks an exact name")
+                    if name == owner.name:
+                        return CanonicalModuleCallClosureV1("", false,
+                            "FV2-E-VC-MODULE-CALL-IDENTITY: textual self-call cannot prove resolved SymbolId recursion")
+                    val callee = match module_function_by_name_v1(module, name):
+                        case Ok(value): value
+                        case Err(message): return CanonicalModuleCallClosureV1(
+                            "", false, message)
+                    if not module_function_is_leaf_v1(callee):
+                        return CanonicalModuleCallClosureV1("", false,
+                            "FV2-E-VC-MODULE-CALL-SCC: initial module closure requires nonrecursive leaf callees")
+                    val callee_woven = module_woven_function_hash_v1(
+                        woven_module_hash, callee)
+                    val bridge = verification_contract_from_mir_v1(callee,
+                        callee_woven)
+                    if bridge.diagnostic != "": return CanonicalModuleCallClosureV1(
+                        "", false, bridge.diagnostic)
+                    val contract = match bridge.contract:
+                        case Some(value): value
+                        case _: return CanonicalModuleCallClosureV1("", false,
+                            "FV2-E-VC-MODULE-CALL-CONTRACT: every callee requires a retained typed contract")
+                    val callee_region = verification_region_effect_manifest_v1(
+                        callee)
+                    if not callee_region.closed():
+                        return CanonicalModuleCallClosureV1("", false,
+                            callee_region.diagnostic)
+                    if not callee_region.effects.is_empty():
+                        return CanonicalModuleCallClosureV1("", false,
+                            "FV2-E-VC-MODULE-CALL-EFFECT: initial module closure admits only exact pure leaf callees")
+                    rows.push(callee.symbol.id.to_string() + ":" + contract.hash() +
+                        ":" + assurance_text_hash(serialize_mir_function(callee)) +
+                        ":" + assurance_text_hash(serialize_mir_inst_kind(
+                            instruction.kind)))
+                case MirInstKind.CallIndirect(_, _, _, _):
+                    return CanonicalModuleCallClosureV1("", false,
+                        "FV2-E-VC-MODULE-CALL-INDIRECT: indirect call target closure is unresolved")
+                case _: continue
+        match block.terminator:
+            case MirTerminator.CallTerminator(_, _, _, _, _):
+                return CanonicalModuleCallClosureV1("", false,
+                    "FV2-E-VC-MODULE-CALL-TERMINATOR: call terminator contracts are unsupported")
+            case _: continue
+    rows.sort()
+    CanonicalModuleCallClosureV1(assurance_text_hash(
+        "fv2-canonical-module-call-closure-v1|owner=" +
+        owner.symbol.id.to_string() + "|contract=" + owner_contract_hash +
+        "|calls=" + rows.join(";")), recursive, "")
+
+fn generate_verification_obligation_closure_from_canonical_module_v1(
+    module: MirModule,
+    owner_symbol_id: text,
+    woven_module_hash: text,
+    backend_target: text,
+    backend_semantics_hash: text,
+    trust: TrustManifestV1
+) -> VerificationObligationClosureV1:
+    if woven_module_hash == "": return VerificationObligationClosureV1([], "", "",
+        "FV2-E-VC-MODULE-WOVEN: exact woven module identity is required")
+    if backend_target == "" or backend_semantics_hash == "":
+        return VerificationObligationClosureV1([], "", "",
+            "FV2-E-VC-MODULE-BACKEND: target and lowering identities are required")
+    if not trust.is_closed(): return VerificationObligationClosureV1([], "", "",
+        "FV2-E-VC-MODULE-TRUST: verified module closure requires closed trust")
+    val owner = match module_function_by_symbol_v1(module, owner_symbol_id):
+        case Ok(value): value
+        case Err(message): return VerificationObligationClosureV1([], "", "", message)
+    val names = match module_internal_names_v1(module):
+        case Ok(value): value
+        case Err(message): return VerificationObligationClosureV1([], "", "", message)
+    val owner_woven = module_woven_function_hash_v1(woven_module_hash, owner)
+    val bridge = verification_contract_from_mir_v1(owner, owner_woven)
+    if bridge.diagnostic != "": return VerificationObligationClosureV1([], "", "",
+        bridge.diagnostic)
+    val contract = match bridge.contract:
+        case Some(value): value
+        case _: return VerificationObligationClosureV1([], "", "",
+            "FV2-E-VC-MODULE-CONTRACT: owner retained typed contract is required")
+    val contracts = verification_contract_obligations_from_canonical_module_v2(
+        module, owner_symbol_id, owner_woven)
+    if contracts.diagnostic != "": return VerificationObligationClosureV1([], "", "",
+        contracts.diagnostic)
+    val source_span = canonical_mir_source_span_v1(contracts.obligations)
+    if source_span == "": return VerificationObligationClosureV1([], "", "",
+        "FV2-E-VC-MODULE-SPAN: at least one exact contract clause is required")
+    val region = verification_region_effect_manifest_with_internal_calls_v1(
+        owner, names)
+    if not region.closed(): return VerificationObligationClosureV1([], "", "",
+        region.diagnostic)
+    val call_closure = canonical_module_call_closure_v1(module, owner,
+        woven_module_hash, contract.hash())
+    if call_closure.diagnostic != "": return VerificationObligationClosureV1(
+        [], "", "", call_closure.diagnostic)
+    val decreases_hash = canonical_contract_kind_hash_v1(contracts.obligations,
+        ExecutionContractObligationKindV1.TerminationDecrease,
+        contract.hash() + "|no-decreases")
+    var has_decreases = false
+    for obligation in contracts.obligations:
+        if obligation.kind == ExecutionContractObligationKindV1.TerminationDecrease:
+            has_decreases = true
+    val termination_hash = match canonical_mir_termination_hash_v1(owner,
+            bridge.execution_semantic_hash, call_closure.recursive,
+            decreases_hash, has_decreases):
+        case Ok(value): value
+        case Err(message): return VerificationObligationClosureV1([], "", "", message)
+    val pre_hash = canonical_contract_kind_hash_v1(contracts.obligations,
+        ExecutionContractObligationKindV1.PreconditionsSatisfiable,
+        contract.hash() + "|unrestricted-input-domain")
+    val frame_hash = canonical_contract_kind_hash_v1(contracts.obligations,
+        ExecutionContractObligationKindV1.FramePreservation,
+        contract.hash() + "|derived-frame-only")
+    val type_hash = match canonical_mir_type_representation_hash_v1(owner):
+        case Ok(value): value
+        case Err(message): return VerificationObligationClosureV1([], "", "", message)
+    val authorities = VerificationClosureAuthoritiesV1(owner_symbol_id,
+        source_span, type_hash, pre_hash, termination_hash,
+        assurance_text_hash("fv2-module-memory-ownership-v1|" + region.hash()),
+        assurance_text_hash("fv2-module-effect-frame-v1|manifest=" +
+            region.hash() + "|contract=" + frame_hash),
+        canonical_contract_kind_hash_v1(contracts.obligations,
+            ExecutionContractObligationKindV1.ActualNormalOutcome,
+            contract.hash() + "|no-normal-postcondition"),
+        canonical_contract_kind_hash_v1(contracts.obligations,
+            ExecutionContractObligationKindV1.ActualErrorOutcome,
+            contract.hash() + "|no-error-postcondition"),
+        canonical_contract_kind_hash_v1(contracts.obligations,
+            ExecutionContractObligationKindV1.InvariantInitialization,
+            contract.hash() + "|no-state-invariant"),
+        canonical_contract_kind_hash_v1(contracts.obligations,
+            ExecutionContractObligationKindV1.InvariantPreservation,
+            contract.hash() + "|no-state-invariant"),
+        call_closure.semantic_hash,
+        assurance_text_hash("fv2-module-non-vacuity-v1|contract=" +
+            contract.hash() + "|pre=" + pre_hash + "|signature=" +
+            serialize_mir_signature(owner.signature)),
+        assurance_text_hash("fv2-module-backend-coverage-v1|target=" +
+            backend_target + "|backend=" + backend_semantics_hash +
+            "|module=" + woven_module_hash + "|owner=" +
+            assurance_text_hash(serialize_mir_function(owner))),
+        assurance_text_hash("fv2-module-trust-closure-v1|contract=" +
+            contract.hash() + "|trust=" + trust.canonical_text() +
+            "|woven=" + woven_module_hash))
+    generate_verification_obligation_closure_v1(authorities)
+
+pub fn generate_resolved_verification_obligation_closure_from_canonical_module_v2(
+    module: MirModule,
+    owner_symbol_id: text,
+    woven_module_hash: text,
+    backend_target: text,
+    backend_semantics_hash: text,
+    trust: TrustManifestV1,
+    calls: ResolvedDirectCallManifestV1
+) -> ResolvedCanonicalModuleClosureV2:
+    val call_closure = validate_resolved_direct_call_manifest_v1(module, calls)
+    if not call_closure.closed():
+        return ResolvedCanonicalModuleClosureV2(
+            VerificationObligationClosureV1([], "", "", call_closure.diagnostic),
+            "", call_closure.diagnostic)
+    val closure = generate_verification_obligation_closure_from_canonical_module_v1(
+        module, owner_symbol_id, woven_module_hash, backend_target,
+        backend_semantics_hash, trust)
+    if not closure.closed():
+        return ResolvedCanonicalModuleClosureV2(closure, "", closure.diagnostic)
+    ResolvedCanonicalModuleClosureV2(closure, calls.hash(), "")

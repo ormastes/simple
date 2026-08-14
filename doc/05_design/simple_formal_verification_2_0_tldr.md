@@ -1,15 +1,15 @@
 # Simple Formal Verification 2.0 Detail Design — TLDR
 
-This normative proposed design, recovered from historical work, would turn the
+This implemented design, reconciled from historical work, turns the
 frozen FV2 evidence interfaces into deterministic
 canonical lowering, obligation, replay, cache, product-gate, and release-gate
-flows. It does not claim absent current-main machinery exists. Every future
+flows. Every future
 promotion must be derived from typed evidence; callers cannot provide a success
 Boolean or substitute an opaque hash.
 
 ## Core Shape
 
-- Ten exact frozen display names map to proposed versioned Simple records; the
+- Ten exact frozen display names map to implemented versioned Simple records; the
   display names remain the public contract.
 - Canonical lowering resolves types/effects, expands and weaves before VIR,
   validates exhaustive semantic coverage, emits engine jobs, checks each
@@ -28,12 +28,12 @@ Boolean or substitute an opaque hash.
 - Scheduling: obligation work is ordered by `SymbolId` SCCs.
 - Cache/invalidation: exact `VerificationCacheKey v1` equality is mandatory;
   semantic, tool, policy, dependency, weave, target, or artifact drift misses.
-- Current tree: the bounded MIR coverage-probe bridge and focused specs are
-  present/partial; the V1 interface records and Gate 0–7 machinery are absent.
+- Current tree: the MIR coverage bridge, V1 records, Gate 0–7 reducers, replay,
+  release, and bounded product runners are present but not runtime-admitted.
 - Blockers: the canonical Stage 4 self-hosted CLI is unavailable/fails its ABI
   probe; native x86_64/AArch64/RV32/RV64 probe rejection lacks executable
-  closure; collectors, independent replay, release/signing, signer policy, and
-  RV32 product machinery are planned and absent. A seed, wrapper, NOP, or
+  closure; external replay, signing, and RV32 proof execution remain blocked.
+  A seed, wrapper, NOP, or
   static-only pass cannot satisfy those gates.
 
 ## Open Next

@@ -1,0 +1,341 @@
+# Fail-closed Formal Verification 2.0 release decision.
+#
+# This reducer consumes typed executed-evidence identities. It never infers an
+# artifact claim from Lean success, output text, or tool availability alone.
+
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.dynamic_composition.{SignatureVerificationReceiptV1}
+use compiler.common.assurance.policy_schema.{AssuranceStrictnessV2,
+    ResolvedAssurancePolicyV2}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.encoding.sha256_contract.{sha256_lower_hex_valid}
+
+pub enum ReleaseEvidenceOutcomeV1:
+    ProvedWithCertificate
+    ApprovedExternalTcb
+    CounterexampleExpected
+    Unknown
+    Timeout
+    MissingTool
+    ToolFailure
+    EnvironmentFailure
+
+    fn name() -> text:
+        match self:
+            case ProvedWithCertificate: "proved_with_certificate"
+            case ApprovedExternalTcb: "approved_external_tcb"
+            case CounterexampleExpected: "counterexample_expected"
+            case Unknown: "unknown"
+            case Timeout: "timeout"
+            case MissingTool: "missing_tool"
+            case ToolFailure: "tool_failure"
+            case EnvironmentFailure: "environment_failure"
+
+pub struct VerifiedReleaseEvidenceV1:
+    assurance_profile: text
+    artifact_status: FormalStatus
+    reachable_symbol_statuses: [FormalStatus]
+    artifact_hash: text
+    evidence_artifact_hash: text
+    proof_receipt_hashes: [text]
+    compiler_certificate_hashes: [text]
+    trust_manifest_hash: text
+    bounded_tcb_manifest_hash: text
+    independent_replay_hash: text
+    mutation_receipt_hash: text
+    non_vacuity_receipt_hash: text
+    tool_outcomes: [ReleaseEvidenceOutcomeV1]
+    unsupported_construct_count: i64
+    stale_evidence_count: i64
+    warning_control_count: i64
+    environment_error_count: i64
+    delivery_gate_manifest_hash: text
+
+pub enum VerifiedReleaseDecisionStatusV1:
+    Passed
+    Rejected
+
+pub struct VerifiedReleaseDecisionV1:
+    status: VerifiedReleaseDecisionStatusV1
+    diagnostic_codes: [text]
+    evidence_hash: text
+    decision_hash: text
+
+    fn passed() -> bool:
+        self.status == VerifiedReleaseDecisionStatusV1.Passed and
+            self.diagnostic_codes.is_empty() and self.evidence_hash != "" and
+            self.decision_hash != ""
+
+# V2 binds the release reducer to the typed assurance policy.  V1 remains the
+# frozen evidence payload used by existing artifact collectors; it must never
+# be treated as a substitute for the resolved PolicyV2 identity at the release
+# boundary.
+pub struct VerifiedReleaseEvidenceV2:
+    policy: ResolvedAssurancePolicyV2
+    evidence: VerifiedReleaseEvidenceV1
+
+pub struct VerifiedReleaseDecisionV2:
+    base_decision: VerifiedReleaseDecisionV1
+    policy_hash: text
+    evidence_hash: text
+    decision_hash: text
+    diagnostic_codes: [text]
+
+    fn passed() -> bool:
+        self.base_decision.status == VerifiedReleaseDecisionStatusV1.Passed and
+            self.diagnostic_codes.is_empty() and self.policy_hash != "" and
+            self.evidence_hash != "" and self.decision_hash != ""
+
+pub struct SignedVerifiedReleaseBundleV1:
+    evidence: VerifiedReleaseEvidenceV1
+    payload_hash: text
+    signer_id: text
+    signature_verification: ReleaseSignatureVerificationV1
+
+pub struct SignedVerifiedReleaseBundleV2:
+    evidence: VerifiedReleaseEvidenceV2
+    payload_hash: text
+    signer_id: text
+    signature_verification: ReleaseSignatureVerificationV1
+
+pub struct ApprovedReleaseSignerV1:
+    signer_id: text
+    public_key_hash: text
+
+pub struct ReleaseSignatureVerificationV1:
+    signer_id: text
+    public_key_hash: text
+    receipt: SignatureVerificationReceiptV1
+
+    fn accepted() -> bool:
+        self.signer_id != "" and sha256_lower_hex_valid(self.public_key_hash) and
+            sha256_lower_hex_valid(self.receipt.verification_evidence_hash) and
+            self.receipt.signer_id == self.signer_id and
+            self.receipt.diagnostic() == ""
+
+pub struct SignedVerifiedReleaseBundleDecisionV1:
+    admitted: bool
+    release_decision: VerifiedReleaseDecisionV1
+    bundle_hash: text
+    diagnostic: text
+
+pub struct SignedVerifiedReleaseBundleDecisionV2:
+    admitted: bool
+    release_decision: VerifiedReleaseDecisionV2
+    bundle_hash: text
+    diagnostic: text
+
+fn release_nonempty_unique_hashes_v1(values: [text]) -> bool:
+    if values.is_empty(): return false
+    var seen: [text] = []
+    for value in values:
+        if not sha256_lower_hex_valid(value) or seen.contains(value): return false
+        seen.push(value)
+    true
+
+fn release_frame_text_v1(value: text) -> text:
+    value.len().to_string() + ":" + value
+
+fn release_frame_texts_v1(values: [text]) -> text:
+    var framed: [text] = []
+    for value in values: framed.push(release_frame_text_v1(value))
+    values.len().to_string() + ":[" + framed.join("") + "]"
+
+pub fn release_evidence_hash_v1(evidence: VerifiedReleaseEvidenceV1) -> text:
+    var statuses: [text] = []
+    for status in evidence.reachable_symbol_statuses:
+        statuses.push(status.name())
+    var outcomes: [text] = []
+    for outcome in evidence.tool_outcomes: outcomes.push(outcome.name())
+    sha256_text("VerifiedReleaseEvidence-v1" +
+        release_frame_text_v1(evidence.assurance_profile) +
+        release_frame_text_v1(evidence.artifact_status.name()) +
+        release_frame_texts_v1(statuses) +
+        release_frame_text_v1(evidence.artifact_hash) +
+        release_frame_text_v1(evidence.evidence_artifact_hash) +
+        release_frame_texts_v1(evidence.proof_receipt_hashes) +
+        release_frame_texts_v1(evidence.compiler_certificate_hashes) +
+        release_frame_text_v1(evidence.trust_manifest_hash) +
+        release_frame_text_v1(evidence.bounded_tcb_manifest_hash) +
+        release_frame_text_v1(evidence.independent_replay_hash) +
+        release_frame_text_v1(evidence.mutation_receipt_hash) +
+        release_frame_text_v1(evidence.non_vacuity_receipt_hash) +
+        release_frame_texts_v1(outcomes) +
+        release_frame_text_v1(evidence.unsupported_construct_count.to_string()) +
+        release_frame_text_v1(evidence.stale_evidence_count.to_string()) +
+        release_frame_text_v1(evidence.warning_control_count.to_string()) +
+        release_frame_text_v1(evidence.environment_error_count.to_string()) +
+        release_frame_text_v1(evidence.delivery_gate_manifest_hash))
+
+pub fn evaluate_verified_release_v1(
+    evidence: VerifiedReleaseEvidenceV1
+) -> VerifiedReleaseDecisionV1:
+    var codes: [text] = []
+    if evidence.assurance_profile != "verified":
+        codes.push("FV2-RELEASE-PROFILE")
+    if evidence.artifact_status != FormalStatus.ArtifactVerified:
+        codes.push("FV2-RELEASE-ARTIFACT-STATUS")
+    if evidence.reachable_symbol_statuses.is_empty():
+        codes.push("FV2-RELEASE-CLOSURE-EMPTY")
+    var trusted_boundary_count = 0
+    for status in evidence.reachable_symbol_statuses:
+        if status == FormalStatus.TrustedBoundary:
+            trusted_boundary_count = trusted_boundary_count + 1
+        elif status != FormalStatus.ArtifactVerified:
+            codes.push("FV2-RELEASE-CLOSURE-STATUS")
+    if trusted_boundary_count > 0 and evidence.bounded_tcb_manifest_hash == "":
+        codes.push("FV2-RELEASE-TCB-MANIFEST")
+    if not sha256_lower_hex_valid(evidence.artifact_hash) or
+            evidence.evidence_artifact_hash != evidence.artifact_hash:
+        codes.push("FV2-RELEASE-ARTIFACT-IDENTITY")
+    if not release_nonempty_unique_hashes_v1(evidence.proof_receipt_hashes):
+        codes.push("FV2-RELEASE-PROOF-RECEIPTS")
+    if not release_nonempty_unique_hashes_v1(
+            evidence.compiler_certificate_hashes):
+        codes.push("FV2-RELEASE-COMPILER-CERTIFICATES")
+    if not sha256_lower_hex_valid(evidence.trust_manifest_hash):
+        codes.push("FV2-RELEASE-TRUST")
+    if not sha256_lower_hex_valid(evidence.independent_replay_hash):
+        codes.push("FV2-RELEASE-REPLAY")
+    if not sha256_lower_hex_valid(evidence.mutation_receipt_hash):
+        codes.push("FV2-RELEASE-MUTATION")
+    if not sha256_lower_hex_valid(evidence.non_vacuity_receipt_hash):
+        codes.push("FV2-RELEASE-NON-VACUITY")
+    if evidence.tool_outcomes.is_empty(): codes.push("FV2-RELEASE-TOOLS-EMPTY")
+    for outcome in evidence.tool_outcomes:
+        match outcome:
+            case ReleaseEvidenceOutcomeV1.ProvedWithCertificate | ReleaseEvidenceOutcomeV1.CounterexampleExpected:
+                continue
+            case ReleaseEvidenceOutcomeV1.ApprovedExternalTcb:
+                if evidence.bounded_tcb_manifest_hash == "":
+                    codes.push("FV2-RELEASE-EXTERNAL-TCB")
+            case ReleaseEvidenceOutcomeV1.Unknown:
+                codes.push("FV2-RELEASE-UNKNOWN")
+            case ReleaseEvidenceOutcomeV1.Timeout:
+                codes.push("FV2-RELEASE-TIMEOUT")
+            case ReleaseEvidenceOutcomeV1.MissingTool:
+                codes.push("FV2-RELEASE-MISSING-TOOL")
+            case ReleaseEvidenceOutcomeV1.ToolFailure:
+                codes.push("FV2-RELEASE-TOOL-FAILURE")
+            case ReleaseEvidenceOutcomeV1.EnvironmentFailure:
+                codes.push("FV2-RELEASE-ENVIRONMENT-FAILURE")
+    if evidence.unsupported_construct_count != 0:
+        codes.push("FV2-RELEASE-UNSUPPORTED")
+    if evidence.stale_evidence_count != 0: codes.push("FV2-RELEASE-STALE")
+    if evidence.warning_control_count != 0:
+        codes.push("FV2-RELEASE-WARNING-CONTROL")
+    if evidence.environment_error_count != 0:
+        codes.push("FV2-RELEASE-ENVIRONMENT-COUNT")
+    if evidence.bounded_tcb_manifest_hash != "" and
+            not sha256_lower_hex_valid(evidence.bounded_tcb_manifest_hash):
+        codes.push("FV2-RELEASE-TCB-MANIFEST")
+    if not sha256_lower_hex_valid(evidence.delivery_gate_manifest_hash):
+        codes.push("FV2-RELEASE-DELIVERY-GATES")
+    val evidence_hash = release_evidence_hash_v1(evidence)
+    val status = if codes.is_empty(): VerifiedReleaseDecisionStatusV1.Passed
+        else: VerifiedReleaseDecisionStatusV1.Rejected
+    VerifiedReleaseDecisionV1(status, codes, evidence_hash,
+        sha256_text("VerifiedReleaseDecision-v1" +
+            release_frame_text_v1(evidence_hash) +
+            release_frame_text_v1(
+                if status == VerifiedReleaseDecisionStatusV1.Passed:
+                    "passed" else: "rejected") +
+            release_frame_texts_v1(codes)))
+
+pub fn evaluate_verified_release_v2(
+    input: VerifiedReleaseEvidenceV2
+) -> VerifiedReleaseDecisionV2:
+    val base = evaluate_verified_release_v1(input.evidence)
+    val policy_hash = input.policy.policy_hash()
+    var codes = base.diagnostic_codes
+    if input.policy.strictness != AssuranceStrictnessV2.Verified:
+        codes.push("FV2-RELEASE-POLICY-V2")
+    if input.evidence.assurance_profile != input.policy.strictness.name():
+        codes.push("FV2-RELEASE-POLICY-BINDING")
+    val evidence_hash = sha256_text("VerifiedReleaseEvidence-v2" +
+        release_frame_text_v1(policy_hash) +
+        release_frame_text_v1(base.evidence_hash))
+    val status_name = if codes.is_empty(): "passed" else: "rejected"
+    VerifiedReleaseDecisionV2(base, policy_hash, evidence_hash,
+        sha256_text("VerifiedReleaseDecision-v2" +
+            release_frame_text_v1(evidence_hash) +
+            release_frame_text_v1(status_name) +
+            release_frame_texts_v1(codes)), codes)
+
+pub fn validate_signed_verified_release_bundle_v1(
+    bundle: SignedVerifiedReleaseBundleV1,
+    approved_signers: [ApprovedReleaseSignerV1]
+) -> SignedVerifiedReleaseBundleDecisionV1:
+    val decision = evaluate_verified_release_v1(bundle.evidence)
+    if not decision.passed(): return SignedVerifiedReleaseBundleDecisionV1(
+        false, decision, "",
+        "FV2-E-RELEASE-BUNDLE-EVIDENCE: embedded release evidence is rejected")
+    val expected_payload = release_evidence_hash_v1(bundle.evidence)
+    if bundle.payload_hash != expected_payload or
+            bundle.signature_verification.receipt.payload_hash != expected_payload:
+        return SignedVerifiedReleaseBundleDecisionV1(false, decision, "",
+            "FV2-E-RELEASE-BUNDLE-PAYLOAD: signature does not bind the exact evidence payload")
+    if bundle.signer_id == "" or
+            bundle.signature_verification.signer_id != bundle.signer_id:
+        return SignedVerifiedReleaseBundleDecisionV1(false, decision, "",
+            "FV2-E-RELEASE-BUNDLE-SIGNER: verified signer identity mismatch")
+    if not bundle.signature_verification.accepted():
+        return SignedVerifiedReleaseBundleDecisionV1(false, decision, "",
+            "FV2-E-RELEASE-BUNDLE-SIGNATURE: signature verification is not accepted")
+    var approved_matches = 0
+    for signer in approved_signers:
+        if signer.signer_id == bundle.signer_id and
+                signer.public_key_hash ==
+                    bundle.signature_verification.public_key_hash:
+            approved_matches = approved_matches + 1
+    if approved_matches != 1:
+        return SignedVerifiedReleaseBundleDecisionV1(false, decision, "",
+            "FV2-E-RELEASE-BUNDLE-POLICY: signer and exact public key are not uniquely approved")
+    val bundle_hash = sha256_text("SignedVerifiedReleaseBundle-v1" +
+        release_frame_text_v1(expected_payload) +
+        release_frame_text_v1(bundle.signer_id) +
+        release_frame_text_v1(
+            bundle.signature_verification.receipt.verifier_id) +
+        release_frame_text_v1(bundle.signature_verification.public_key_hash) +
+        release_frame_text_v1(bundle.signature_verification.receipt.verification_evidence_hash) +
+        release_frame_text_v1(decision.decision_hash))
+    SignedVerifiedReleaseBundleDecisionV1(true, decision, bundle_hash, "")
+
+pub fn validate_signed_verified_release_bundle_v2(
+    bundle: SignedVerifiedReleaseBundleV2,
+    approved_signers: [ApprovedReleaseSignerV1]
+) -> SignedVerifiedReleaseBundleDecisionV2:
+    val decision = evaluate_verified_release_v2(bundle.evidence)
+    if not decision.passed(): return SignedVerifiedReleaseBundleDecisionV2(
+        false, decision, "",
+        "FV2-E-RELEASE-BUNDLE-POLICY-V2: typed V2 release evidence is rejected")
+    val expected_payload = decision.evidence_hash
+    if bundle.payload_hash != expected_payload or
+            bundle.signature_verification.receipt.payload_hash != expected_payload:
+        return SignedVerifiedReleaseBundleDecisionV2(false, decision, "",
+            "FV2-E-RELEASE-BUNDLE-PAYLOAD-V2: signature does not bind typed V2 evidence")
+    if bundle.signer_id == "" or
+            bundle.signature_verification.signer_id != bundle.signer_id:
+        return SignedVerifiedReleaseBundleDecisionV2(false, decision, "",
+            "FV2-E-RELEASE-BUNDLE-SIGNER-V2: verified signer identity mismatch")
+    if not bundle.signature_verification.accepted():
+        return SignedVerifiedReleaseBundleDecisionV2(false, decision, "",
+            "FV2-E-RELEASE-BUNDLE-SIGNATURE-V2: signature verification is not accepted")
+    var approved_matches = 0
+    for signer in approved_signers:
+        if signer.signer_id == bundle.signer_id and
+                signer.public_key_hash ==
+                    bundle.signature_verification.public_key_hash:
+            approved_matches = approved_matches + 1
+    if approved_matches != 1:
+        return SignedVerifiedReleaseBundleDecisionV2(false, decision, "",
+            "FV2-E-RELEASE-BUNDLE-POLICY-V2: signer and exact public key are not uniquely approved")
+    val bundle_hash = sha256_text("SignedVerifiedReleaseBundle-v2" +
+        release_frame_text_v1(expected_payload) +
+        release_frame_text_v1(decision.policy_hash) +
+        release_frame_text_v1(bundle.signer_id) +
+        release_frame_text_v1(bundle.signature_verification.receipt.verifier_id) +
+        release_frame_text_v1(bundle.signature_verification.public_key_hash) +
+        release_frame_text_v1(bundle.signature_verification.receipt.verification_evidence_hash) +
+        release_frame_text_v1(decision.decision_hash))
+    SignedVerifiedReleaseBundleDecisionV2(true, decision, bundle_hash, "")

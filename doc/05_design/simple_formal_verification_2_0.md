@@ -1,7 +1,7 @@
 <!-- codex-design -->
 # Simple Formal Verification 2.0 Detail Design
 
-**Status:** Normative proposed design recovered from history; only the current-tree rows below are implemented
+**Status:** FV2 implementation restored and reconciled; executable admission blocked
 **Date:** 2026-08-14
 **Architecture:** `doc/04_architecture/simple_formal_verification_2_0.md`
 
@@ -13,22 +13,22 @@ the architecture: `VerificationIR`, `SemanticCoverage`, `ProofObligation`,
 `HardwareProofReceipt`, `FormalStatus`, and `VerificationCacheKey`. Changes to
 their canonical shape are version changes, not local refactors.
 
-The frozen display names map to proposed Simple symbols as follows. The display
-name is the public contract; spelling a proposed code symbol differently does
+The frozen display names map to implemented Simple symbols as follows. The display
+name is the public contract; spelling a code symbol differently does
 not rename or supersede it.
 
-| Frozen display name | Proposed Simple symbol/owner | Current main |
+| Frozen display name | Simple symbol/owner | Working tree |
 |---|---|---|
-| `VerificationIR v1` | `VerificationIrV1` in `src/compiler/50.mir/verification_ir.spl` | Absent; planned |
-| `SemanticCoverage v1` | `SemanticCoverageV1` owned by the VIR builder | Absent; planned |
-| `ProofObligation v1` | `ProofObligationV1` in common assurance | Absent; planned |
-| `ProofReceipt v1` | `ProofReceiptV1` in common assurance | Absent; planned |
-| `TrustManifest v1` | `TrustManifestV1` in common assurance | Absent; planned |
-| `WeaveManifest v1` | `WeaveManifestV1` in common assurance | Absent; planned |
-| `CompilerCertificate v1` | `CompilerCertificateV1` in common assurance | Absent; planned |
-| `HardwareProofReceipt v1` | `HardwareProofReceiptV1` in common assurance | Absent; planned |
-| `FormalStatus v1` | `FormalStatusV1` in common assurance | Absent; planned |
-| `VerificationCacheKey v1` | `VerificationCacheKeyV1` in common assurance | Absent; planned |
+| `VerificationIR v1` | `VerificationIrV1` in `src/compiler/50.mir/verification_ir.spl` | Implemented |
+| `SemanticCoverage v1` | `SemanticCoverageV1` owned by the VIR builder | Implemented |
+| `ProofObligation v1` | `ProofObligationV1` in common assurance | Implemented |
+| `ProofReceipt v1` | `ProofReceiptV1` in common assurance | Implemented |
+| `TrustManifest v1` | `TrustManifestV1` in common assurance | Implemented |
+| `WeaveManifest v1` | `WeaveManifestV1` in common assurance | Implemented |
+| `CompilerCertificate v1` | `CompilerCertificateV1` in common assurance | Implemented |
+| `HardwareProofReceipt v1` | `HardwareProofReceiptV1` in common assurance | Implemented |
+| `FormalStatus v1` | `FormalStatusV1` in common assurance | Implemented alias |
+| `VerificationCacheKey v1` | `VerificationCacheKeyV1` in common assurance | Implemented |
 
 The primary generated-manual flow uses exactly:
 
@@ -75,11 +75,11 @@ or product-proof flow below is a current-tree implementation claim.
 | Interpreter, LLVM, llvm-lib, WASM probe rejection | Present/partial | Static inspection and existing focused specs; runtime blocked |
 | Native x86_64/AArch64/RV32/RV64 probe rejection | Present in commit `27fa51e3ae0`; not executable evidence | Blocked on Stage 4 CLI and backend closure gate |
 | `test/01_unit/compiler/mir/mir_coverage_opcode_admission_spec.spl` | Present | Not rerun: authoritative runtime unavailable |
-| Frozen V1 interface implementation files | Absent from current main | Planned; no implementation claim |
-| Gate 0–7 collectors and finalizer | Absent from current main | Planned and blocked |
-| Fresh/independent FV2 replay scripts and pinned adapter | Absent from current main | Planned and blocked |
-| FV2 release CLI, signature adapter, signer policy | Absent from current main | Planned and blocked |
-| RV32 ADD end-to-end/equivalence/Sail machinery | Absent from current main | Planned and blocked |
+| Frozen V1 interface implementation files | Present in working tree | Static shape evidence; runtime blocked |
+| Gate 0–7 collectors and finalizer | Present in working tree | Runtime verification blocked |
+| Fresh/independent FV2 replay scripts and pinned adapter | Present in working tree | External tool execution blocked |
+| FV2 release CLI, signature adapter, signer policy | Present in working tree | Signed-bundle execution blocked |
+| RV32 ADD end-to-end/equivalence/Sail machinery | Present in working tree | External tool/product evidence blocked |
 
 ## Requirement-to-design traceability
 

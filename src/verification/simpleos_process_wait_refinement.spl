@@ -1,0 +1,159 @@
+# Bounded implementation-linked process wait/exit/reap refinement.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_receipt.{TrustManifestV1,
+    VerificationCacheKeyV1, ProofReceiptV1}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.replay_receipt.{IndependentReplayClosureV1}
+use compiler.common.assurance.trust_audit.{audit_lean_axiom_report}
+use os.kernel.types.task_types.{TaskState, TaskPriority}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.scheduler.scheduler.{Scheduler}
+
+pub val PROCESS_WAIT_CASE_COUNT_V1: i64 = 4
+
+pub struct SimpleOsProcessWaitReceiptV1:
+    symbol_id: text
+    source_semantics_hash: text
+    model_semantics_hash: text
+    theorem_root: text
+    axiom_audit_hash: text
+    cache_key_hash: text
+    trust_manifest_hash: text
+    proof_receipt_hash: text
+    replay_closure_hash: text
+    checked_case_count: i64
+    counterexample_count: i64
+    killed_mutant_count: i64
+    status: FormalStatus
+    diagnostic: text
+
+impl SimpleOsProcessWaitReceiptV1:
+    fn permits_model_evidence(key: VerificationCacheKeyV1) -> bool:
+        self.status == FormalStatus.ModelProven and self.diagnostic == "" and
+            key.diagnostic() == "" and self.cache_key_hash == key.hash() and
+            self.checked_case_count == PROCESS_WAIT_CASE_COUNT_V1 and
+            self.counterexample_count == 0 and self.killed_mutant_count == 4
+
+    pub fn permits_source_refinement(key: VerificationCacheKeyV1) -> bool:
+        self.status == FormalStatus.SourceRefined and self.diagnostic == "" and
+            key.diagnostic() == "" and self.cache_key_hash == key.hash() and
+            self.proof_receipt_hash != "" and self.replay_closure_hash != "" and
+            self.checked_case_count == PROCESS_WAIT_CASE_COUNT_V1 and
+            self.counterexample_count == 0 and self.killed_mutant_count == 4
+
+fn process_wait_source_hash_v1() -> text:
+    sha256_text("Scheduler.wait_for+exit_task_by_id+wait_for_collect/bounded-v1|live=block|exit=zombie+wake+status|collect=status+remove|repeat=ECHILD")
+
+fn process_wait_model_hash_v1() -> text:
+    sha256_text("ProcessLifecycle.ProcessWaitExact/v1|live=blocked|exit=zombie+wake|collect=reaped|second=no-child")
+
+fn process_wait_trust_v1() -> TrustManifestV1:
+    TrustManifestV1(["propext"], [], [], [], [], [])
+
+pub fn process_wait_cache_key_v1() -> VerificationCacheKeyV1:
+    val trust = process_wait_trust_v1()
+    VerificationCacheKeyV1(process_wait_source_hash_v1(),
+        process_wait_model_hash_v1(), sha256_text("canonical-weave:none"),
+        sha256_text("macro:none"),
+        [sha256_text("os.kernel.scheduler.Scheduler")],
+        "simple-effects-v1:scheduler-task-table", "source-refinement-validator-v1",
+        "simple-source:scheduler", "4.33.0", "", [],
+        sha256_text("lean-process-wait-case-split-v1"),
+        sha256_text(trust.canonical_text()), "verified")
+
+pub fn validate_simpleos_process_wait_refinement_v1(
+    axiom_report: text) -> SimpleOsProcessWaitReceiptV1:
+    val root = "ProcessLifecycle.ProcessWaitExact.process_wait_refinement_bundle"
+    val key = process_wait_cache_key_v1()
+    val trust_hash = sha256_text(process_wait_trust_v1().canonical_text())
+    val audit = audit_lean_axiom_report(axiom_report, [root], [])
+    if not audit.permits_closed_verification():
+        return process_wait_receipt_v1(root, key, trust_hash, "", 0, 0, 0,
+            FormalStatus.Failed,
+            "FV2-E-SIMPLEOS-PROCESS-AUDIT: exact lifecycle theorem audit is required")
+    var sched = Scheduler.new_bootstrap()
+    val parent = sched.create_task(0x1000, TaskPriority.Normal, CapabilitySet.full())
+    val child = sched.clone_task(parent)
+    var checked = 0
+    var failures = 0
+    var killed = 0
+    val live_wait = sched.wait_for(parent, child)
+    if live_wait != -11: failures = failures + 1 else: killed = killed + 1
+    checked = checked + 1
+    sched.exit_task_by_id(child, 37)
+    val child_after_exit = sched.get_task(child)
+    val parent_after_exit = sched.get_task(parent)
+    var exit_ok = false
+    if child_after_exit != nil and parent_after_exit != nil:
+        val exited = child_after_exit.unwrap()
+        val awakened = parent_after_exit.unwrap()
+        val child_zombie = match exited.state:
+            case TaskState.Zombie: true
+            case _: false
+        val parent_ready = match awakened.state:
+            case TaskState.Ready: true
+            case _: false
+        exit_ok = child_zombie and exited.exit_code == 37 and parent_ready
+    if not exit_ok: failures = failures + 1 else: killed = killed + 1
+    checked = checked + 1
+    val collected = sched.wait_for_collect(parent, child, true)
+    val collect_ok = collected.error == 0 and collected.pid == child.id and
+        collected.status == 37 and sched.get_task(child) == nil
+    if not collect_ok: failures = failures + 1 else: killed = killed + 1
+    checked = checked + 1
+    val second = sched.wait_for_collect(parent, child, false)
+    if second.error != -10: failures = failures + 1 else: killed = killed + 1
+    checked = checked + 1
+    val good = checked == PROCESS_WAIT_CASE_COUNT_V1 and failures == 0 and killed == 4
+    process_wait_receipt_v1(root, key, trust_hash,
+        sha256_text(axiom_report), checked, failures, killed,
+        if good: FormalStatus.ModelProven else: FormalStatus.Failed,
+        if good: "" else: "FV2-E-SIMPLEOS-PROCESS-REFINEMENT: lifecycle transition evidence failed")
+
+fn process_wait_receipt_v1(root: text, key: VerificationCacheKeyV1,
+    trust_hash: text, axiom_hash: text, checked: i64, failures: i64,
+    killed: i64, status: FormalStatus, diagnostic: text
+) -> SimpleOsProcessWaitReceiptV1:
+    SimpleOsProcessWaitReceiptV1(
+        "os.kernel.scheduler.Scheduler.wait-exit-collect@bounded-child-v1",
+        process_wait_source_hash_v1(), process_wait_model_hash_v1(), root,
+        axiom_hash, key.hash(), trust_hash, "", "", checked, failures, killed,
+        status, diagnostic)
+
+pub fn promote_simpleos_process_wait_refinement_v2(
+    model: SimpleOsProcessWaitReceiptV1, proof: ProofReceiptV1,
+    replay: IndependentReplayClosureV1) -> SimpleOsProcessWaitReceiptV1:
+    val key = process_wait_cache_key_v1()
+    if not model.permits_model_evidence(key):
+        return process_wait_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-PROCESS-MODEL: closed model evidence is required")
+    if proof.proof_root != model.theorem_root or
+            proof.status != FormalStatus.ModelProven or proof.diagnostic() != "":
+        return process_wait_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-PROCESS-PROOF: exact theorem receipt is required")
+    if proof.trust_manifest_hash != model.trust_manifest_hash:
+        return process_wait_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-PROCESS-TRUST: proof trust identity differs")
+    if not proof.binds_independent_replay(replay):
+        return process_wait_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-PROCESS-REPLAY: independent replay is required")
+    if not proof.theorem_dependencies.contains(
+            "fv2-simpleos-source-semantics:" + model.source_semantics_hash) or
+            not proof.theorem_dependencies.contains(
+                "fv2-simpleos-model-semantics:" + model.model_semantics_hash):
+        return process_wait_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-PROCESS-DEPENDENCY: semantic identities are required")
+    SimpleOsProcessWaitReceiptV1(model.symbol_id, model.source_semantics_hash,
+        model.model_semantics_hash, model.theorem_root, proof.axiom_audit_hash,
+        model.cache_key_hash, model.trust_manifest_hash, proof.hash(), replay.hash(),
+        model.checked_case_count, model.counterexample_count,
+        model.killed_mutant_count, FormalStatus.SourceRefined, "")
+
+fn process_wait_promotion_failure_v2(model: SimpleOsProcessWaitReceiptV1,
+    diagnostic: text) -> SimpleOsProcessWaitReceiptV1:
+    SimpleOsProcessWaitReceiptV1(model.symbol_id, model.source_semantics_hash,
+        model.model_semantics_hash, model.theorem_root, model.axiom_audit_hash,
+        model.cache_key_hash, model.trust_manifest_hash, "", "",
+        model.checked_case_count, model.counterexample_count,
+        model.killed_mutant_count, FormalStatus.Failed, diagnostic)

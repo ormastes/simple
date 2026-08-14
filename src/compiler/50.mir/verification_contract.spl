@@ -1,0 +1,319 @@
+# Verification contract snapshot retained at the woven typed-program boundary.
+#
+# The frontend supplies predicate semantic hashes only after type/effect
+# checking. This owner never reparses source text and never invents a predicate.
+# Generated obligations name actual execution outcomes, not existential values.
+
+use std.common.crypto.sha256.{sha256_text}
+
+enum VerificationContractOutcomeV1:
+    Plain
+    Result
+
+impl VerificationContractOutcomeV1:
+    fn name() -> text:
+        match self:
+            case Plain: "plain"
+            case Result: "result"
+
+enum VerificationContractClauseKindV1:
+    Requires
+    EnsuresNormal
+    EnsuresError
+    Frame
+    StatePredicate
+    Decreases
+
+impl VerificationContractClauseKindV1:
+    fn name() -> text:
+        match self:
+            case Requires: "requires"
+            case EnsuresNormal: "ensures_normal"
+            case EnsuresError: "ensures_error"
+            case Frame: "frame"
+            case StatePredicate: "invariant"
+            case Decreases: "decreases"
+
+struct VerificationContractClauseV1:
+    clause_id: text
+    kind: VerificationContractClauseKindV1
+    predicate_semantic_hash: text
+    predicate_type_identity: text
+    source_span: text
+    binding_name: text
+    old_capture_hashes: [text]
+
+impl VerificationContractClauseV1:
+    fn diagnostic() -> text:
+        if self.clause_id == "": return "FV2-E-CONTRACT-CLAUSE-ID: clause identity is required"
+        if self.predicate_semantic_hash == "": return "FV2-E-CONTRACT-PREDICATE: typed predicate semantic hash is required"
+        if self.kind == VerificationContractClauseKindV1.Decreases:
+            val valid_measure = (self.predicate_type_identity == "u8" or
+                self.predicate_type_identity == "u16" or
+                self.predicate_type_identity == "u32" or
+                self.predicate_type_identity == "u64" or
+                self.predicate_type_identity == "u128")
+            if not valid_measure:
+                return "FV2-E-CONTRACT-MEASURE-TYPE: decreases requires an exact unsigned fixed-width measure"
+        else:
+            if self.predicate_type_identity != "bool": return "FV2-E-CONTRACT-TYPE: logical contract predicate must have exact bool type"
+        if self.source_span == "": return "FV2-E-CONTRACT-SPAN: source mapping is required"
+        match self.kind:
+            case EnsuresNormal | EnsuresError:
+                if self.binding_name == "": return "FV2-E-CONTRACT-BINDING: outcome binding is required"
+            case _:
+                if self.binding_name != "": return "FV2-E-CONTRACT-BINDING-SCOPE: binding is only valid for outcome clauses"
+        ""
+
+    fn canonical_text() -> text:
+        "clause=" + self.clause_id + "|kind=" + self.kind.name() +
+            "|predicate=" + self.predicate_semantic_hash + "|type=" + self.predicate_type_identity +
+            "|span=" + self.source_span + "|binding=" + self.binding_name +
+            "|old=" + self.old_capture_hashes.join(",")
+
+struct VerificationFunctionContractV1:
+    schema: text
+    symbol_id: text
+    woven_function_hash: text
+    outcome: VerificationContractOutcomeV1
+    clauses: [VerificationContractClauseV1]
+    proof_root: text
+
+fn _verification_contract_proof_root_valid(root: text) -> bool:
+    if root == "": return true
+    var previous_dot = true
+    var i = 0
+    while i < root.len():
+        val code = root.char_code_at(i)
+        val is_upper = code >= 65 and code <= 90
+        val is_lower = code >= 97 and code <= 122
+        val is_digit = code >= 48 and code <= 57
+        val is_underscore = code == 95
+        val is_dot = code == 46
+        if not is_upper and not is_lower and not is_digit and not is_underscore and not is_dot:
+            return false
+        if i == 0 and is_digit: return false
+        if is_dot and previous_dot: return false
+        previous_dot = is_dot
+        i = i + 1
+    not previous_dot
+
+impl VerificationFunctionContractV1:
+    fn diagnostic() -> text:
+        if self.schema != "VerificationFunctionContract-v1": return "FV2-E-CONTRACT-SCHEMA: unsupported contract schema"
+        if self.symbol_id == "": return "FV2-E-CONTRACT-SYMBOL: SymbolId is required"
+        if self.woven_function_hash == "": return "FV2-E-CONTRACT-WOVEN: woven function identity is required"
+        if not _verification_contract_proof_root_valid(self.proof_root):
+            return "FV2-E-CONTRACT-PROOF-ROOT: proof root must be one exact qualified theorem identifier"
+        var clause_ids: [text] = []
+        var decreases_count = 0
+        for clause in self.clauses:
+            val clause_diagnostic = clause.diagnostic()
+            if clause_diagnostic != "": return clause_diagnostic
+            for existing in clause_ids:
+                if existing == clause.clause_id: return "FV2-E-CONTRACT-DUPLICATE: duplicate clause identity " + clause.clause_id
+            clause_ids = clause_ids.push(clause.clause_id)
+            if clause.kind == VerificationContractClauseKindV1.EnsuresError and self.outcome != VerificationContractOutcomeV1.Result:
+                return "FV2-E-CONTRACT-ERROR-OUTCOME: out_err requires Result outcome semantics"
+            if clause.kind == VerificationContractClauseKindV1.Decreases: decreases_count = decreases_count + 1
+        if decreases_count > 1: return "FV2-E-CONTRACT-DECREASES: at most one termination measure is allowed"
+        ""
+
+    fn canonical_text() -> text:
+        var rows: [text] = []
+        for clause in self.clauses: rows = rows.push(clause.canonical_text())
+        "VerificationFunctionContractV1|symbol=" + self.symbol_id +
+            "|woven=" + self.woven_function_hash + "|outcome=" + self.outcome.name() +
+            "|proof_root=" + self.proof_root + "|clauses=" + rows.join(";")
+
+    fn hash() -> text:
+        sha256_text(self.canonical_text())
+
+enum ExecutionContractObligationKindV1:
+    PreconditionsSatisfiable
+    ActualNormalOutcome
+    ActualErrorOutcome
+    FramePreservation
+    InvariantInitialization
+    InvariantPreservation
+    TerminationDecrease
+
+impl ExecutionContractObligationKindV1:
+    fn name() -> text:
+        match self:
+            case PreconditionsSatisfiable: "preconditions_satisfiable"
+            case ActualNormalOutcome: "actual_normal_outcome"
+            case ActualErrorOutcome: "actual_error_outcome"
+            case FramePreservation: "frame_preservation"
+            case InvariantInitialization: "invariant_initialization"
+            case InvariantPreservation: "invariant_preservation"
+            case TerminationDecrease: "termination_decrease"
+
+struct ExecutionContractObligationV1:
+    obligation_id: text
+    symbol_id: text
+    kind: ExecutionContractObligationKindV1
+    execution_semantic_hash: text
+    predicate_semantic_hash: text
+    actual_outcome_relation: text
+    source_span: text
+
+impl ExecutionContractObligationV1:
+    fn diagnostic() -> text:
+        if self.obligation_id == "": return "FV2-E-CONTRACT-VC-ID: obligation identity is required"
+        if self.symbol_id == "": return "FV2-E-CONTRACT-VC-SYMBOL: SymbolId is required"
+        if self.execution_semantic_hash == "": return "FV2-E-CONTRACT-VC-EXEC: execution semantic hash is required"
+        if self.predicate_semantic_hash == "": return "FV2-E-CONTRACT-VC-PREDICATE: predicate semantic hash is required"
+        if self.actual_outcome_relation == "": return "FV2-E-CONTRACT-VC-OUTCOME: actual execution relation is required"
+        if self.source_span == "": return "FV2-E-CONTRACT-VC-SPAN: source mapping is required"
+        ""
+
+struct ExecutionContractObligationSetV1:
+    obligations: [ExecutionContractObligationV1]
+    diagnostic: text
+
+struct ExecutionContractObligationV2:
+    schema: text
+    obligation_id: text
+    symbol_id: text
+    kind: ExecutionContractObligationKindV1
+    execution_semantic_hash: text
+    predicate_semantic_hash: text
+    semantic_authority_hashes: [text]
+    relation_semantic_hash: text
+    actual_outcome_relation: text
+    source_span: text
+
+impl ExecutionContractObligationV2:
+    fn diagnostic() -> text:
+        if self.schema != "ExecutionContractObligation-v2": return "FV2-E-CONTRACT-VC-SCHEMA: unsupported obligation schema"
+        if self.obligation_id == "": return "FV2-E-CONTRACT-VC-ID: obligation identity is required"
+        if self.symbol_id == "": return "FV2-E-CONTRACT-VC-SYMBOL: SymbolId is required"
+        if self.execution_semantic_hash == "": return "FV2-E-CONTRACT-VC-EXEC: execution semantic hash is required"
+        if self.predicate_semantic_hash == "": return "FV2-E-CONTRACT-VC-PREDICATE: predicate semantic hash is required"
+        if self.semantic_authority_hashes.is_empty(): return "FV2-E-CONTRACT-VC-AUTHORITY: semantic authority identities are required"
+        for authority_hash in self.semantic_authority_hashes:
+            if authority_hash == "": return "FV2-E-CONTRACT-VC-AUTHORITY: empty semantic authority identity"
+        if self.relation_semantic_hash == "": return "FV2-E-CONTRACT-VC-RELATION: typed relation semantic hash is required"
+        if self.actual_outcome_relation == "": return "FV2-E-CONTRACT-VC-OUTCOME: actual execution relation is required"
+        if self.source_span == "": return "FV2-E-CONTRACT-VC-SPAN: source mapping is required"
+        ""
+
+    fn canonical_text() -> text:
+        self.schema + "|id=" + self.obligation_id + "|symbol=" + self.symbol_id +
+            "|kind=" + self.kind.name() + "|exec=" + self.execution_semantic_hash +
+            "|predicate=" + self.predicate_semantic_hash + "|authorities=" +
+            self.semantic_authority_hashes.join(",") + "|relation=" +
+            self.relation_semantic_hash + "|span=" + self.source_span
+
+    fn hash() -> text:
+        sha256_text(self.canonical_text())
+
+struct ExecutionContractObligationSetV2:
+    obligations: [ExecutionContractObligationV2]
+    diagnostic: text
+
+# Exact semantic authorities required by stateful clauses.  Empty fields are
+# rejected when the corresponding clause is present; prose never substitutes
+# for one of these identities.
+struct ExecutionContractSemanticContextV2:
+    execution_semantic_hash: text
+    input_domain_semantic_hash: text
+    reachable_state_semantic_hash: text
+    transition_semantic_hash: text
+    frame_model_semantic_hash: text
+    recursive_call_semantic_hash: text
+    well_founded_order_semantic_hash: text
+
+fn _execution_contract_obligation_v2(
+    contract: VerificationFunctionContractV1,
+    clause: VerificationContractClauseV1,
+    execution_semantic_hash: text,
+    suffix: text,
+    kind: ExecutionContractObligationKindV1,
+    relation: text,
+    relation_semantic_hash: text,
+    semantic_authority_hashes: [text]
+) -> ExecutionContractObligationV2:
+    ExecutionContractObligationV2(
+        "ExecutionContractObligation-v2",
+        contract.symbol_id + ":" + clause.clause_id + ":" + suffix,
+        contract.symbol_id, kind, execution_semantic_hash,
+        clause.predicate_semantic_hash, semantic_authority_hashes,
+        relation_semantic_hash, relation, clause.source_span
+    )
+
+fn generate_execution_contract_obligations_with_context_v2(
+    contract: VerificationFunctionContractV1,
+    semantics: ExecutionContractSemanticContextV2
+) -> ExecutionContractObligationSetV2:
+    val contract_diagnostic = contract.diagnostic()
+    if contract_diagnostic != "": return ExecutionContractObligationSetV2([], contract_diagnostic)
+    if semantics.execution_semantic_hash == "": return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-EXECUTION: translated execution identity is required")
+    var obligations: [ExecutionContractObligationV2] = []
+    for clause in contract.clauses:
+        match clause.kind:
+            case Requires:
+                if semantics.input_domain_semantic_hash == "": return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-PRECONDITION-DOMAIN: satisfiability requires an exact input-domain semantic identity")
+                val relation_hash = sha256_text(semantics.input_domain_semantic_hash + "|reachable-precondition|" + clause.predicate_semantic_hash)
+                obligations = obligations.push(_execution_contract_obligation_v2(contract, clause, semantics.execution_semantic_hash, "sat", ExecutionContractObligationKindV1.PreconditionsSatisfiable, "exists reachable_initial_state satisfying Requires", relation_hash, [semantics.input_domain_semantic_hash]))
+            case EnsuresNormal:
+                val relation_hash = sha256_text(semantics.execution_semantic_hash + "|actual-normal|" + clause.predicate_semantic_hash)
+                obligations = obligations.push(_execution_contract_obligation_v2(contract, clause, semantics.execution_semantic_hash, "ok", ExecutionContractObligationKindV1.ActualNormalOutcome, "Exec(symbol, pre_state, args) = Ok(actual_result, post_state)", relation_hash, [semantics.execution_semantic_hash]))
+            case EnsuresError:
+                val relation_hash = sha256_text(semantics.execution_semantic_hash + "|actual-error|" + clause.predicate_semantic_hash)
+                obligations = obligations.push(_execution_contract_obligation_v2(contract, clause, semantics.execution_semantic_hash, "error", ExecutionContractObligationKindV1.ActualErrorOutcome, "Exec(symbol, pre_state, args) = Err(actual_error, post_state)", relation_hash, [semantics.execution_semantic_hash]))
+            case Frame:
+                if semantics.transition_semantic_hash == "": return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-FRAME-TRANSITION: frame VC requires an exact transition semantic identity")
+                if semantics.frame_model_semantic_hash == "": return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-FRAME-MODEL: frame VC requires an exact region/frame model identity")
+                val relation_hash = sha256_text(semantics.execution_semantic_hash + "|" + semantics.transition_semantic_hash + "|" + semantics.frame_model_semantic_hash + "|frame|" + clause.predicate_semantic_hash)
+                obligations = obligations.push(_execution_contract_obligation_v2(contract, clause, semantics.execution_semantic_hash, "frame", ExecutionContractObligationKindV1.FramePreservation, "Exec(symbol, pre_state, args) = actual_outcome with unchanged framed regions", relation_hash, [semantics.execution_semantic_hash, semantics.transition_semantic_hash, semantics.frame_model_semantic_hash]))
+            case StatePredicate:
+                if semantics.reachable_state_semantic_hash == "": return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-INVARIANT-REACHABLE: invariant initialization requires an exact reachable-state semantic identity")
+                if semantics.transition_semantic_hash == "": return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-INVARIANT-TRANSITION: invariant preservation requires an exact transition semantic identity")
+                val init_hash = sha256_text(semantics.reachable_state_semantic_hash + "|invariant-init|" + clause.predicate_semantic_hash)
+                val preserve_hash = sha256_text(semantics.transition_semantic_hash + "|invariant-preserve|" + clause.predicate_semantic_hash)
+                obligations = obligations.push(_execution_contract_obligation_v2(contract, clause, semantics.execution_semantic_hash, "init", ExecutionContractObligationKindV1.InvariantInitialization, "reachable initial state establishes invariant", init_hash, [semantics.reachable_state_semantic_hash]))
+                obligations = obligations.push(_execution_contract_obligation_v2(contract, clause, semantics.execution_semantic_hash, "preserve", ExecutionContractObligationKindV1.InvariantPreservation, "each actual Exec transition preserves invariant", preserve_hash, [semantics.transition_semantic_hash]))
+            case Decreases:
+                if semantics.recursive_call_semantic_hash == "": return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-DECREASES-CALL: termination VC requires an exact recursive-call semantic identity")
+                if semantics.well_founded_order_semantic_hash == "": return ExecutionContractObligationSetV2([], "FV2-E-CONTRACT-DECREASES-ORDER: termination VC requires an exact well-founded-order identity")
+                val relation_hash = sha256_text(semantics.recursive_call_semantic_hash + "|" + semantics.well_founded_order_semantic_hash + "|decreases|" + clause.predicate_semantic_hash)
+                obligations = obligations.push(_execution_contract_obligation_v2(contract, clause, semantics.execution_semantic_hash, "decrease", ExecutionContractObligationKindV1.TerminationDecrease, "each recursive actual Exec call decreases a well-founded measure", relation_hash, [semantics.recursive_call_semantic_hash, semantics.well_founded_order_semantic_hash]))
+    for obligation in obligations:
+        val obligation_diagnostic = obligation.diagnostic()
+        if obligation_diagnostic != "": return ExecutionContractObligationSetV2([], obligation_diagnostic)
+    ExecutionContractObligationSetV2(obligations, "")
+
+fn generate_execution_contract_obligations_v1(
+    contract: VerificationFunctionContractV1,
+    execution_semantic_hash: text
+) -> ExecutionContractObligationSetV1:
+    val contract_diagnostic = contract.diagnostic()
+    if contract_diagnostic != "": return ExecutionContractObligationSetV1([], contract_diagnostic)
+    if execution_semantic_hash == "": return ExecutionContractObligationSetV1([], "FV2-E-CONTRACT-EXECUTION: translated execution identity is required")
+    var obligations: [ExecutionContractObligationV1] = []
+    for clause in contract.clauses:
+        var kind = ExecutionContractObligationKindV1.ActualNormalOutcome
+        var suffix = "ok"
+        var relation = "Exec(symbol, pre_state, args) = Ok(actual_result, post_state)"
+        if clause.kind == VerificationContractClauseKindV1.Requires:
+            return ExecutionContractObligationSetV1([], "FV2-E-CONTRACT-PRECONDITION-DOMAIN: V1 lacks an input-domain semantic identity; use ExecutionContractObligation-v2")
+        if clause.kind == VerificationContractClauseKindV1.EnsuresError:
+            kind = ExecutionContractObligationKindV1.ActualErrorOutcome
+            suffix = "error"
+            relation = "Exec(symbol, pre_state, args) = Err(actual_error, post_state)"
+        if clause.kind == VerificationContractClauseKindV1.Frame:
+            return ExecutionContractObligationSetV1([], "FV2-E-CONTRACT-FRAME-MODEL: V1 lacks state/frame semantic identities; use ExecutionContractObligation-v2")
+        if clause.kind == VerificationContractClauseKindV1.StatePredicate:
+            return ExecutionContractObligationSetV1([], "FV2-E-CONTRACT-INVARIANT-REACHABLE: V1 lacks reachable-state/transition identities; use ExecutionContractObligation-v2")
+        if clause.kind == VerificationContractClauseKindV1.Decreases:
+            return ExecutionContractObligationSetV1([], "FV2-E-CONTRACT-DECREASES-ORDER: V1 lacks recursive-call/order identities; use ExecutionContractObligation-v2")
+        obligations = obligations.push(ExecutionContractObligationV1(
+            contract.symbol_id + ":" + clause.clause_id + ":" + suffix,
+            contract.symbol_id, kind, execution_semantic_hash,
+            clause.predicate_semantic_hash, relation, clause.source_span))
+    for obligation in obligations:
+        val obligation_diagnostic = obligation.diagnostic()
+        if obligation_diagnostic != "": return ExecutionContractObligationSetV1([], obligation_diagnostic)
+    ExecutionContractObligationSetV1(obligations, "")

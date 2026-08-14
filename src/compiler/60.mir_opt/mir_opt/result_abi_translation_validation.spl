@@ -1,0 +1,134 @@
+# Formal Verification 2.0 translation validator for logical Result values and
+# the deployed tagged runtime-handle projection.
+#
+# This validator does not assert that a runtime binary implements rt_enum_new;
+# that claim enters only through the separately audited proof root bound below.
+# It checks that the per-build observations/certificate preserve enum identity,
+# variant, and payload bits for both normal and error outcomes.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_interfaces.{CompilerCertificateV1, CompilerRefinementRelationV1}
+
+enum ResultSemanticOutcomeV1:
+    Normal(payload_bits: i64)
+    Error(payload_bits: i64)
+
+impl ResultSemanticOutcomeV1:
+    fn discriminant() -> i64:
+        match self:
+            case Normal(_): 0
+            case Error(_): 1
+
+    fn payload_bits() -> i64:
+        match self:
+            case Normal(bits) | Error(bits): bits
+
+    fn canonical_text() -> text:
+        match self:
+            case Normal(bits): "ok:{bits}"
+            case Error(bits): "err:{bits}"
+
+struct ResultTaggedHandleProjectionV1:
+    enum_runtime_id: i64
+    discriminant: i64
+    payload_bits: i64
+
+impl ResultTaggedHandleProjectionV1:
+    fn canonical_text() -> text:
+        "tagged:{self.enum_runtime_id}:{self.discriminant}:{self.payload_bits}"
+
+struct ResultAbiObservationV1:
+    source: ResultSemanticOutcomeV1
+    target: ResultTaggedHandleProjectionV1
+
+impl ResultAbiObservationV1:
+    fn canonical_text() -> text:
+        self.source.canonical_text() + "=>" + self.target.canonical_text()
+
+struct ResultAbiTranslationValidationV1:
+    source_semantic_hash: text
+    target_semantic_hash: text
+    accepted: bool
+    diagnostic: text
+    certificate: CompilerCertificateV1?
+
+fn _result_abi_rows(observations: [ResultAbiObservationV1], source_side: bool) -> text:
+    var rows: [text] = []
+    for observation in observations:
+        if source_side:
+            rows = rows.push(observation.source.canonical_text())
+        else:
+            rows = rows.push(observation.target.canonical_text())
+    var framed: [text] = []
+    for row in rows:
+        framed.push(row.len().to_string() + ":" + row)
+    rows.len().to_string() + ":[" + framed.join("") + "]"
+
+fn validate_result_abi_translation_v1(
+    result_enum_runtime_id: i64,
+    runtime_artifact_hash: text,
+    observations: [ResultAbiObservationV1],
+    runtime_refinement_proof_root: text,
+    axiom_audit_hash: text,
+    independently_checked: bool
+) -> ResultAbiTranslationValidationV1:
+    val source_rows = _result_abi_rows(observations, true)
+    val target_rows = _result_abi_rows(observations, false)
+    val source_hash = sha256_text("ResultSemanticV1" +
+        source_rows.len().to_string() + ":" + source_rows)
+    val enum_id = result_enum_runtime_id.to_string()
+    val target_hash = sha256_text("ResultTaggedAbiV1" +
+        runtime_artifact_hash.len().to_string() + ":" + runtime_artifact_hash +
+        enum_id.len().to_string() + ":" + enum_id +
+        target_rows.len().to_string() + ":" + target_rows)
+
+    if result_enum_runtime_id < 0:
+        return ResultAbiTranslationValidationV1(source_hash, target_hash, false,
+            "FV2-E-RESULT-ABI-ENUM: Result runtime enum identity must be non-negative", nil)
+    if runtime_artifact_hash == "":
+        return ResultAbiTranslationValidationV1(source_hash, target_hash, false,
+            "FV2-E-RESULT-ABI-ARTIFACT: runtime artifact hash is required", nil)
+    if observations.is_empty():
+        return ResultAbiTranslationValidationV1(source_hash, target_hash, false,
+            "FV2-E-RESULT-ABI-EMPTY: at least one normal and error observation is required", nil)
+    if runtime_refinement_proof_root == "" or axiom_audit_hash == "":
+        return ResultAbiTranslationValidationV1(source_hash, target_hash, false,
+            "FV2-E-RESULT-ABI-AUDIT: runtime refinement proof root and transitive axiom audit are required", nil)
+    if runtime_refinement_proof_root != "ResultTaggedAbi.validate_sound":
+        return ResultAbiTranslationValidationV1(source_hash, target_hash, false,
+            "FV2-E-RESULT-ABI-ROOT: exact ResultTaggedAbi.validate_sound theorem identity is required", nil)
+    if not independently_checked:
+        return ResultAbiTranslationValidationV1(source_hash, target_hash, false,
+            "FV2-E-RESULT-ABI-CHECK: independent proof/certificate checking is required", nil)
+
+    var has_normal = false
+    var has_error = false
+    for observation in observations:
+        match observation.source:
+            case ResultSemanticOutcomeV1.Normal(_): has_normal = true
+            case ResultSemanticOutcomeV1.Error(_): has_error = true
+        if observation.target.enum_runtime_id != result_enum_runtime_id:
+            return ResultAbiTranslationValidationV1(source_hash, target_hash, false,
+                "FV2-E-RESULT-ABI-ENUM: target observation uses a different enum identity", nil)
+        if observation.target.discriminant != observation.source.discriminant():
+            return ResultAbiTranslationValidationV1(source_hash, target_hash, false,
+                "FV2-E-RESULT-ABI-DISCRIMINANT: Ok/Err variant identity was not preserved", nil)
+        if observation.target.payload_bits != observation.source.payload_bits():
+            return ResultAbiTranslationValidationV1(source_hash, target_hash, false,
+                "FV2-E-RESULT-ABI-PAYLOAD: payload bits were not preserved", nil)
+    if not has_normal or not has_error:
+        return ResultAbiTranslationValidationV1(source_hash, target_hash, false,
+            "FV2-E-RESULT-ABI-COVERAGE: both normal and error outcomes must be observed", nil)
+
+    val validator_id = "result-tagged-abi-validator-v1|proof=" +
+        runtime_refinement_proof_root + "|audit=" + axiom_audit_hash +
+        "|artifact=" + runtime_artifact_hash
+    val draft = CompilerCertificateV1(
+        "result-tagged-abi-v1", source_hash, target_hash,
+        CompilerRefinementRelationV1.ObservationalEquivalence,
+        validator_id, "", independently_checked)
+    val certificate = CompilerCertificateV1(
+        draft.pass_id, draft.before_semantic_hash, draft.after_semantic_hash,
+        draft.relation, draft.validator_version,
+        draft.expected_certificate_hash(), independently_checked)
+    ResultAbiTranslationValidationV1(source_hash, target_hash, true, "", Some(certificate))

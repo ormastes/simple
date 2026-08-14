@@ -1,0 +1,296 @@
+# Typed MIR region/effect manifest for FV2 state and frame reasoning.
+#
+# V1 admits exact module-global accesses because their SymbolId and value type
+# are present in MIR. Pointer/heap/external operations remain unsupported until
+# they carry region/capability identities; no name-prefix inference is used.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.formal_receipt.{ProofReceiptV1}
+use compiler.mir.mir_instruction_graph.{MirFunction}
+use compiler.mir.mir_instructions.{MirInstKind, MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{LocalId, MirConstValue, MirType}
+use compiler.mir.mir_json.{serialize_mir_function, serialize_mir_inst_kind, serialize_mir_type}
+use compiler.mir.verification_effects.{VerificationEffectV1}
+
+enum MirRegionAccessV1:
+    Read
+    Write
+
+impl MirRegionAccessV1:
+    fn name() -> text:
+        match self:
+            case Read: "read"
+            case Write: "write"
+
+struct MirRegionEffectV1:
+    region_id: text
+    access: MirRegionAccessV1
+    value_type_identity: text
+    instruction_semantic_hash: text
+    source_span: text
+
+impl MirRegionEffectV1:
+    fn diagnostic() -> text:
+        if self.region_id == "": return "FV2-E-REGION-ID: exact region identity is required"
+        if self.value_type_identity == "": return "FV2-E-REGION-TYPE: exact region value type is required"
+        if self.instruction_semantic_hash == "": return "FV2-E-REGION-INSTRUCTION: instruction semantic identity is required"
+        if self.source_span == "": return "FV2-E-REGION-SPAN: exact source provenance is required"
+        ""
+
+    fn canonical_text() -> text:
+        self.access.name() + ":" + self.region_id + ":" +
+            self.value_type_identity + ":" + self.instruction_semantic_hash +
+            ":" + self.source_span
+
+struct MirRegionEffectManifestV1:
+    schema: text
+    symbol_id: text
+    execution_semantic_hash: text
+    effects: [MirRegionEffectV1]
+    frame_model_semantic_hash: text
+    diagnostic: text
+
+impl MirRegionEffectManifestV1:
+    fn closed() -> bool:
+        self.schema == "MirRegionEffectManifest-v1" and self.symbol_id != "" and
+            self.execution_semantic_hash != "" and
+            self.frame_model_semantic_hash != "" and self.diagnostic == ""
+
+    fn canonical_text() -> text:
+        var rows: [text] = []
+        for effect in self.effects: rows.push(effect.canonical_text())
+        self.schema + "|symbol=" + self.symbol_id + "|exec=" +
+            self.execution_semantic_hash + "|effects=" + rows.join(";") +
+            "|frame=" + self.frame_model_semantic_hash
+
+    fn hash() -> text:
+        sha256_text(self.canonical_text())
+
+    fn state_model_semantic_hash() -> text:
+        var atoms: [text] = []
+        for effect in self.effects:
+            val atom = effect.region_id + "@" + effect.value_type_identity
+            if not atoms.contains(atom): atoms.push(atom)
+        atoms.sort()
+        sha256_text("mir-open-global-state-v1|typed-regions=" + atoms.join(","))
+
+    fn transition_semantic_hash() -> text:
+        sha256_text("mir-region-transition-v1|exec=" +
+            self.execution_semantic_hash + "|manifest=" + self.hash())
+
+    fn verification_effects() -> [VerificationEffectV1]:
+        var result: [VerificationEffectV1] = []
+        for effect in self.effects:
+            var candidate = VerificationEffectV1.Write(effect.region_id)
+            if effect.access == MirRegionAccessV1.Read:
+                candidate = VerificationEffectV1.Read(effect.region_id)
+            if not result.contains(candidate): result.push(candidate)
+        if result.is_empty(): [VerificationEffectV1.Pure] else: result
+
+struct MirRegionFrameObligationV1:
+    schema: text
+    symbol_id: text
+    execution_semantic_hash: text
+    state_model_semantic_hash: text
+    transition_semantic_hash: text
+    frame_model_semantic_hash: text
+    written_region_atoms: [text]
+    diagnostic: text
+
+impl MirRegionFrameObligationV1:
+    fn closed() -> bool:
+        self.schema == "MirRegionFrameObligation-v1" and self.symbol_id != "" and
+            self.execution_semantic_hash != "" and
+            self.state_model_semantic_hash != "" and
+            self.transition_semantic_hash != "" and
+            self.frame_model_semantic_hash != "" and self.diagnostic == ""
+
+    fn canonical_text() -> text:
+        self.schema + "|symbol=" + self.symbol_id + "|exec=" +
+            self.execution_semantic_hash + "|state=" +
+            self.state_model_semantic_hash + "|transition=" +
+            self.transition_semantic_hash + "|frame=" +
+            self.frame_model_semantic_hash + "|writes=" +
+            self.written_region_atoms.join(",")
+
+    fn hash() -> text:
+        sha256_text(self.canonical_text())
+
+fn verification_region_frame_obligation_v1(func: MirFunction) -> MirRegionFrameObligationV1:
+    val manifest = verification_region_effect_manifest_v1(func)
+    if not manifest.closed(): return MirRegionFrameObligationV1(
+        "MirRegionFrameObligation-v1", func.symbol.id.to_string(),
+        manifest.execution_semantic_hash, "", "", "", [], manifest.diagnostic)
+    MirRegionFrameObligationV1(
+        "MirRegionFrameObligation-v1", func.symbol.id.to_string(),
+        manifest.execution_semantic_hash, manifest.state_model_semantic_hash(),
+        manifest.transition_semantic_hash(), manifest.frame_model_semantic_hash,
+        verification_written_region_atoms_v1(manifest.effects), "")
+
+struct MirRegionFrameProofReceiptV1:
+    schema: text
+    obligation_hash: text
+    theorem_root: text
+    proof_receipt_hash: text
+    status: FormalStatus
+    diagnostic: text
+
+impl MirRegionFrameProofReceiptV1:
+    fn accepted() -> bool:
+        self.schema == "MirRegionFrameProofReceipt-v1" and
+            self.obligation_hash != "" and
+            self.theorem_root == "MirRegionFrame.run_frame" and
+            self.proof_receipt_hash != "" and
+            self.status == FormalStatus.SourceRefined and self.diagnostic == ""
+
+    fn canonical_text() -> text:
+        self.schema + "|obligation=" + self.obligation_hash + "|root=" +
+            self.theorem_root + "|proof_receipt=" + self.proof_receipt_hash + "|status=" +
+            self.status.name()
+
+    fn hash() -> text:
+        sha256_text(self.canonical_text())
+
+fn issue_region_frame_proof_receipt_v1(
+    func: MirFunction,
+    proof_receipt: ProofReceiptV1
+) -> MirRegionFrameProofReceiptV1:
+    val obligation = verification_region_frame_obligation_v1(func)
+    if not obligation.closed(): return MirRegionFrameProofReceiptV1(
+        "MirRegionFrameProofReceipt-v1", "", proof_receipt.proof_root, "",
+        FormalStatus.Failed, obligation.diagnostic)
+    if proof_receipt.proof_root != "MirRegionFrame.run_frame": return MirRegionFrameProofReceiptV1(
+        "MirRegionFrameProofReceipt-v1", obligation.hash(), proof_receipt.proof_root,
+        proof_receipt.hash(), FormalStatus.Failed,
+        "FV2-E-REGION-PROOF-ROOT: exact generic frame theorem root is required")
+    if proof_receipt.diagnostic() != "" or proof_receipt.status != FormalStatus.ModelProven:
+        return MirRegionFrameProofReceiptV1(
+            "MirRegionFrameProofReceipt-v1", obligation.hash(), proof_receipt.proof_root,
+            proof_receipt.hash(), FormalStatus.Failed,
+            "FV2-E-REGION-PROOF-RECEIPT: generic theorem requires a valid model_proven receipt")
+    if proof_receipt.artifact_hash == "" or proof_receipt.trust_manifest_hash == "" or
+            proof_receipt.independent_replay_hash == "":
+        return MirRegionFrameProofReceiptV1(
+            "MirRegionFrameProofReceipt-v1", obligation.hash(), proof_receipt.proof_root,
+            proof_receipt.hash(), FormalStatus.Failed,
+            "FV2-E-REGION-PROOF-EVIDENCE: theorem artifact, trust, and independent replay identities are required")
+    MirRegionFrameProofReceiptV1(
+        "MirRegionFrameProofReceipt-v1", obligation.hash(), proof_receipt.proof_root,
+        proof_receipt.hash(), FormalStatus.SourceRefined, "")
+
+fn verification_region_effect_manifest_v1(func: MirFunction) -> MirRegionEffectManifestV1:
+    verification_region_effect_manifest_with_internal_calls_v1(func, [])
+
+fn verification_region_effect_manifest_with_internal_calls_v1(
+    func: MirFunction,
+    internal_call_names: [text]
+) -> MirRegionEffectManifestV1:
+    val execution_hash = sha256_text(serialize_mir_function(func))
+    var effects: [MirRegionEffectV1] = []
+    for block in func.blocks:
+        for instruction in block.instructions:
+            var source_span = ""
+            if val span = instruction.span:
+                if span.file != "" and span.line > 0 and span.col > 0 and
+                        span.start >= 0 and span.end >= span.start:
+                    source_span = "file=" + span.file + "|start=" +
+                        span.start.to_string() + "|end=" + span.end.to_string() +
+                        "|line=" + span.line.to_string() + "|col=" + span.col.to_string()
+            match verification_region_effect_from_instruction_v1(
+                    func, instruction.kind, source_span, internal_call_names):
+                case Err(message):
+                    return MirRegionEffectManifestV1(
+                        "MirRegionEffectManifest-v1", func.symbol.id.to_string(),
+                        execution_hash, [], "", message)
+                case Ok(effect):
+                    if val present = effect:
+                        val diagnostic = present.diagnostic()
+                        if diagnostic != "": return MirRegionEffectManifestV1(
+                            "MirRegionEffectManifest-v1", func.symbol.id.to_string(),
+                            execution_hash, [], "", diagnostic)
+                        for prior in effects:
+                            if prior.region_id == present.region_id and
+                                    prior.value_type_identity != present.value_type_identity:
+                                return MirRegionEffectManifestV1(
+                                    "MirRegionEffectManifest-v1", func.symbol.id.to_string(),
+                                    execution_hash, [], "",
+                                    "FV2-E-REGION-TYPE-MISMATCH: one region has inconsistent MIR value types")
+                        effects.push(present)
+        if not verification_region_terminator_supported_v1(block.terminator):
+            return MirRegionEffectManifestV1(
+                "MirRegionEffectManifest-v1", func.symbol.id.to_string(),
+                execution_hash, [], "",
+                "FV2-E-REGION-TERMINATOR: trap, abort, unwind, or call terminator lacks an admitted state transition")
+    val frame_hash = sha256_text(
+        "mir-region-frame-v1|symbol=" + func.symbol.id.to_string() +
+        "|writes=" + verification_written_region_atoms_v1(effects).join(","))
+    MirRegionEffectManifestV1(
+        "MirRegionEffectManifest-v1", func.symbol.id.to_string(), execution_hash,
+        effects, frame_hash, "")
+
+fn verification_region_effect_from_instruction_v1(
+    func: MirFunction,
+    instruction: MirInstKind,
+    source_span: text,
+    internal_call_names: [text]
+) -> Result<MirRegionEffectV1?, text>:
+    match instruction:
+        case MirInstKind.LoadGlobal(dest, symbol):
+            val type_identity = verification_local_type_identity_v1(func, dest)
+            if type_identity == "": return Err("FV2-E-REGION-LOAD-TYPE: global load destination has no exact MIR type")
+            if source_span == "": return Err("FV2-E-REGION-SPAN: global load requires exact source provenance")
+            Ok(Some(MirRegionEffectV1(
+                "global:" + symbol.id.to_string(), MirRegionAccessV1.Read,
+                type_identity, sha256_text(serialize_mir_inst_kind(instruction)), source_span)))
+        case MirInstKind.StoreGlobal(symbol, value):
+            val type_identity = verification_operand_type_identity_v1(func, value)
+            if type_identity == "": return Err("FV2-E-REGION-STORE-TYPE: global store value has no exact MIR type")
+            if source_span == "": return Err("FV2-E-REGION-SPAN: global store requires exact source provenance")
+            Ok(Some(MirRegionEffectV1(
+                "global:" + symbol.id.to_string(), MirRegionAccessV1.Write,
+                type_identity, sha256_text(serialize_mir_inst_kind(instruction)), source_span)))
+        case MirInstKind.Const(_, _, _) | MirInstKind.Copy(_, _) | MirInstKind.Move(_, _) | MirInstKind.BinOp(_, _, _, _) | MirInstKind.UnaryOp(_, _, _) | MirInstKind.CheckedBinOp(_, _, _, _) | MirInstKind.Aggregate(_, _, _) | MirInstKind.GetField(_, _, _) | MirInstKind.Cast(_, _, _) | MirInstKind.Bitcast(_, _, _) | MirInstKind.DebugValue(_, _) | MirInstKind.Nop | MirInstKind.ResultMatchSemantic(_, _, _, _, _, _, _): Ok(nil)
+        case MirInstKind.Call(_, callee, _):
+            val name = verification_region_direct_call_name_v1(callee)
+            if name == func.name or name == "rt_enum_new" or
+                    name == "rt_enum_discriminant" or name == "rt_enum_payload" or
+                    internal_call_names.contains(name):
+                return Ok(nil)
+            Err("FV2-E-REGION-CALL: call has no typed region/effect contract")
+        case MirInstKind.Load(_, _) | MirInstKind.Store(_, _) | MirInstKind.Alloc(_, _) | MirInstKind.GetElementPtr(_, _, _):
+            Err("FV2-E-REGION-POINTER: heap/pointer operation lacks an exact region and capability identity")
+        case MirInstKind.CallIndirect(_, _, _, _):
+            Err("FV2-E-REGION-INDIRECT: indirect call lacks a resolved typed effect closure")
+        case _:
+            Err("FV2-E-REGION-UNSUPPORTED: MIR instruction has unmodeled external, synchronization, device, or mutation effects")
+
+fn verification_local_type_identity_v1(func: MirFunction, local_id: LocalId) -> text:
+    for local in func.locals:
+        if local.id.id == local_id.id: return serialize_mir_type(local.type_)
+    ""
+
+fn verification_operand_type_identity_v1(func: MirFunction, operand: MirOperand) -> text:
+    match operand.kind:
+        case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+            verification_local_type_identity_v1(func, local)
+        case MirOperandKind.Const(_, type_): serialize_mir_type(type_)
+
+fn verification_region_direct_call_name_v1(callee: MirOperand) -> text:
+    match callee.kind:
+        case MirOperandKind.Const(MirConstValue.Str(name), _): name
+        case _: ""
+
+fn verification_written_region_atoms_v1(effects: [MirRegionEffectV1]) -> [text]:
+    var atoms: [text] = []
+    for effect in effects:
+        if effect.access == MirRegionAccessV1.Write:
+            val atom = effect.region_id + "@" + effect.value_type_identity
+            if not atoms.contains(atom): atoms.push(atom)
+    atoms.sort()
+    atoms
+
+fn verification_region_terminator_supported_v1(terminator: MirTerminator) -> bool:
+    match terminator:
+        case MirTerminator.Goto(_) | MirTerminator.Ret(_) | MirTerminator.If(_, _, _) | MirTerminator.Switch(_, _, _): true
+        case _: false

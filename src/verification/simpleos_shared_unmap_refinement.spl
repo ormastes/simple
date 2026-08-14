@@ -1,0 +1,195 @@
+# Bounded implementation-linked refinement for one-page shared-memory unmap.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_receipt.{TrustManifestV1,
+    VerificationCacheKeyV1, ProofReceiptV1}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.replay_receipt.{IndependentReplayClosureV1}
+use compiler.common.assurance.trust_audit.{audit_lean_axiom_report}
+use os.kernel.memory.vmm_shared.{SHM_OK, SHM_RIGHT_READ, SHM_RIGHT_WRITE,
+    vmm_shared_reset, vmm_shared_register_backing, vmm_shared_map,
+    vmm_shared_map_private, vmm_shared_unmap, vmm_shared_write_byte,
+    vmm_shared_page_map_count, vmm_shared_page_resident,
+    vmm_shared_file_bytes}
+
+pub val SHARED_UNMAP_CASE_COUNT_V1: i64 = 4
+
+val UNMAP_PAGE_V1: u64 = 4096
+val UNMAP_HANDLE_V1: u64 = 41
+val UNMAP_SPACE_A_V1: u64 = 7
+val UNMAP_SPACE_B_V1: u64 = 8
+val UNMAP_VA_A_V1: u64 = 0x4000
+val UNMAP_VA_B_V1: u64 = 0x8000
+val UNMAP_RW_V1: u32 = SHM_RIGHT_READ | SHM_RIGHT_WRITE
+
+fn unmap_image_v1() -> [u8]:
+    [0xA0 as u8, 0xA1 as u8, 0xA2 as u8, 0xA3 as u8,
+        0xA4 as u8, 0xA5 as u8, 0xA6 as u8, 0xA7 as u8]
+
+fn unmap_fresh_v1():
+    vmm_shared_reset()
+    _ = vmm_shared_register_backing(UNMAP_HANDLE_V1, unmap_image_v1(), UNMAP_RW_V1)
+
+fn survivor_case_v1() -> bool:
+    unmap_fresh_v1()
+    _ = vmm_shared_map(UNMAP_SPACE_A_V1, UNMAP_VA_A_V1, UNMAP_PAGE_V1,
+        UNMAP_HANDLE_V1, 0, UNMAP_RW_V1)
+    _ = vmm_shared_map(UNMAP_SPACE_B_V1, UNMAP_VA_B_V1, UNMAP_PAGE_V1,
+        UNMAP_HANDLE_V1, 0, UNMAP_RW_V1)
+    val result = vmm_shared_unmap(UNMAP_SPACE_A_V1, UNMAP_VA_A_V1, UNMAP_PAGE_V1)
+    result == SHM_OK and vmm_shared_page_map_count(UNMAP_HANDLE_V1, 0) == 1 and
+        vmm_shared_page_resident(UNMAP_HANDLE_V1, 0)
+
+fn last_dirty_case_v1() -> bool:
+    unmap_fresh_v1()
+    _ = vmm_shared_map(UNMAP_SPACE_A_V1, UNMAP_VA_A_V1, UNMAP_PAGE_V1,
+        UNMAP_HANDLE_V1, 0, UNMAP_RW_V1)
+    _ = vmm_shared_write_byte(UNMAP_SPACE_A_V1, UNMAP_VA_A_V1 + 5, 0x66 as u8)
+    val result = vmm_shared_unmap(UNMAP_SPACE_A_V1, UNMAP_VA_A_V1, UNMAP_PAGE_V1)
+    val image = vmm_shared_file_bytes(UNMAP_HANDLE_V1)
+    result == SHM_OK and vmm_shared_page_map_count(UNMAP_HANDLE_V1, 0) == 0 and
+        not vmm_shared_page_resident(UNMAP_HANDLE_V1, 0) and image[5] == 0x66 as u8
+
+fn repeated_case_v1() -> bool:
+    unmap_fresh_v1()
+    _ = vmm_shared_map(UNMAP_SPACE_A_V1, UNMAP_VA_A_V1, UNMAP_PAGE_V1,
+        UNMAP_HANDLE_V1, 0, UNMAP_RW_V1)
+    _ = vmm_shared_unmap(UNMAP_SPACE_A_V1, UNMAP_VA_A_V1, UNMAP_PAGE_V1)
+    val second = vmm_shared_unmap(UNMAP_SPACE_A_V1, UNMAP_VA_A_V1, UNMAP_PAGE_V1)
+    second == SHM_OK and vmm_shared_page_map_count(UNMAP_HANDLE_V1, 0) == 0
+
+fn private_case_v1() -> bool:
+    unmap_fresh_v1()
+    _ = vmm_shared_map_private(UNMAP_SPACE_A_V1, UNMAP_VA_A_V1, UNMAP_PAGE_V1,
+        UNMAP_HANDLE_V1, 0, UNMAP_RW_V1)
+    val before = vmm_shared_page_map_count(UNMAP_HANDLE_V1, 0)
+    val result = vmm_shared_unmap(UNMAP_SPACE_A_V1, UNMAP_VA_A_V1, UNMAP_PAGE_V1)
+    val image = vmm_shared_file_bytes(UNMAP_HANDLE_V1)
+    result == SHM_OK and before == 0 and
+        vmm_shared_page_map_count(UNMAP_HANDLE_V1, 0) == 0 and image[5] == 0xA5 as u8
+
+pub struct SimpleOsSharedUnmapReceiptV1:
+    symbol_id: text
+    semantic_hash: text
+    model_semantics_hash: text
+    theorem_roots: [text]
+    axiom_audit_hash: text
+    cache_key_hash: text
+    trust_manifest_hash: text
+    proof_receipt_hash: text
+    replay_closure_hash: text
+    checked_case_count: i64
+    counterexample_count: i64
+    killed_mutant_count: i64
+    status: FormalStatus
+    diagnostic: text
+
+impl SimpleOsSharedUnmapReceiptV1:
+    fn permits_model_evidence(key: VerificationCacheKeyV1) -> bool:
+        self.status == FormalStatus.ModelProven and self.diagnostic == "" and
+            key.diagnostic() == "" and self.cache_key_hash == key.hash() and
+            self.semantic_hash != "" and self.model_semantics_hash != "" and
+            self.axiom_audit_hash != "" and self.trust_manifest_hash != "" and
+            self.checked_case_count == SHARED_UNMAP_CASE_COUNT_V1 and
+            self.counterexample_count == 0 and self.killed_mutant_count == 4
+
+    pub fn permits_source_refinement(key: VerificationCacheKeyV1) -> bool:
+        self.status == FormalStatus.SourceRefined and self.diagnostic == "" and
+            key.diagnostic() == "" and self.cache_key_hash == key.hash() and
+            self.semantic_hash != "" and self.model_semantics_hash != "" and
+            self.axiom_audit_hash != "" and self.trust_manifest_hash != "" and
+            self.proof_receipt_hash != "" and self.replay_closure_hash != "" and
+            self.checked_case_count == SHARED_UNMAP_CASE_COUNT_V1 and
+            self.counterexample_count == 0 and self.killed_mutant_count == 4
+
+fn shared_unmap_roots_v1() -> [text]:
+    ["MemoryCapabilities.SharedUnmapExact.shared_unmap_refinement_bundle"]
+
+fn shared_unmap_trust_v1() -> TrustManifestV1:
+    TrustManifestV1(["propext"], [], [], [], [], [])
+
+fn shared_unmap_semantic_hash_v1() -> text:
+    sha256_text("vmm_shared_unmap/bounded-one-page-v1|survivor-ref|last-dirty-writeback-retire|private-frame|repeat-noop")
+
+fn shared_unmap_model_semantics_hash_v1() -> text:
+    sha256_text("MemoryCapabilities.SharedUnmapExact.unmap/v2|survivor-ref+resident|last-dirty=writeback+retire|private=frame-ref+backing|dead=noop")
+
+pub fn shared_unmap_cache_key_v1() -> VerificationCacheKeyV1:
+    val trust = shared_unmap_trust_v1()
+    VerificationCacheKeyV1(shared_unmap_semantic_hash_v1(),
+        shared_unmap_model_semantics_hash_v1(),
+        sha256_text("canonical-weave:none"), sha256_text("macro:none"),
+        [sha256_text("os.kernel.memory.vmm_shared.vmm_shared_unmap")],
+        "simple-effects-v1:global-shared-page-state", "source-refinement-validator-v1",
+        "simple-source:shared-memory", "4.33.0", "", [],
+        sha256_text("lean-shared-unmap-case-split-v1"),
+        sha256_text(trust.canonical_text()), "verified")
+
+pub fn validate_simpleos_shared_unmap_refinement_v1(
+    axiom_report: text) -> SimpleOsSharedUnmapReceiptV1:
+    val key = shared_unmap_cache_key_v1()
+    val roots = shared_unmap_roots_v1()
+    val trust_hash = sha256_text(shared_unmap_trust_v1().canonical_text())
+    val audit = audit_lean_axiom_report(axiom_report, roots, [])
+    if not audit.permits_closed_verification():
+        return SimpleOsSharedUnmapReceiptV1(
+            "os.kernel.memory.vmm_shared.vmm_shared_unmap@bounded-one-page-v1",
+            shared_unmap_semantic_hash_v1(), shared_unmap_model_semantics_hash_v1(),
+            roots, "", key.hash(), trust_hash, "", "", 0, 0, 0,
+            FormalStatus.Failed,
+            "FV2-E-SIMPLEOS-UNMAP-AUDIT: exact shared-unmap theorem audit is required")
+    val outcomes = [survivor_case_v1(), last_dirty_case_v1(), repeated_case_v1(), private_case_v1()]
+    var checked = 0
+    var counterexamples = 0
+    var killed = 0
+    for outcome in outcomes:
+        if not outcome: counterexamples = counterexamples + 1
+        else: killed = killed + 1
+        checked = checked + 1
+    val good = checked == SHARED_UNMAP_CASE_COUNT_V1 and counterexamples == 0 and killed == 4
+    SimpleOsSharedUnmapReceiptV1(
+        "os.kernel.memory.vmm_shared.vmm_shared_unmap@bounded-one-page-v1",
+        shared_unmap_semantic_hash_v1(), shared_unmap_model_semantics_hash_v1(),
+        roots, sha256_text(axiom_report), key.hash(), trust_hash, "", "",
+        checked, counterexamples, killed,
+        if good: FormalStatus.ModelProven else: FormalStatus.Failed,
+        if good: "" else: "FV2-E-SIMPLEOS-UNMAP-REFINEMENT: transition or mutation evidence failed")
+
+pub fn promote_simpleos_shared_unmap_refinement_v2(
+    model: SimpleOsSharedUnmapReceiptV1,
+    proof: ProofReceiptV1,
+    replay: IndependentReplayClosureV1
+) -> SimpleOsSharedUnmapReceiptV1:
+    val key = shared_unmap_cache_key_v1()
+    if not model.permits_model_evidence(key):
+        return shared_unmap_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-UNMAP-MODEL: closed model evidence is required")
+    if model.theorem_roots.len() != 1 or proof.proof_root != model.theorem_roots[0] or
+            proof.status != FormalStatus.ModelProven or proof.diagnostic() != "":
+        return shared_unmap_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-UNMAP-PROOF: exact composite theorem receipt is required")
+    if proof.trust_manifest_hash != model.trust_manifest_hash:
+        return shared_unmap_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-UNMAP-TRUST: proof trust identity differs")
+    if not proof.binds_independent_replay(replay):
+        return shared_unmap_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-UNMAP-REPLAY: exact independent replay is required")
+    if not proof.theorem_dependencies.contains(
+            "fv2-simpleos-source-semantics:" + model.semantic_hash) or
+            not proof.theorem_dependencies.contains(
+                "fv2-simpleos-model-semantics:" + model.model_semantics_hash):
+        return shared_unmap_promotion_failure_v2(model,
+            "FV2-E-SIMPLEOS-UNMAP-DEPENDENCY: exact semantic identities are required")
+    SimpleOsSharedUnmapReceiptV1(model.symbol_id, model.semantic_hash,
+        model.model_semantics_hash, model.theorem_roots, proof.axiom_audit_hash,
+        model.cache_key_hash, model.trust_manifest_hash, proof.hash(), replay.hash(),
+        model.checked_case_count, model.counterexample_count,
+        model.killed_mutant_count, FormalStatus.SourceRefined, "")
+
+fn shared_unmap_promotion_failure_v2(model: SimpleOsSharedUnmapReceiptV1,
+    diagnostic: text) -> SimpleOsSharedUnmapReceiptV1:
+    SimpleOsSharedUnmapReceiptV1(model.symbol_id, model.semantic_hash,
+        model.model_semantics_hash, model.theorem_roots, model.axiom_audit_hash,
+        model.cache_key_hash, model.trust_manifest_hash, "", "",
+        model.checked_case_count, model.counterexample_count,
+        model.killed_mutant_count, FormalStatus.Failed, diagnostic)

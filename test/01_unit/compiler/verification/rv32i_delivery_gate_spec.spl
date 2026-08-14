@@ -1,0 +1,101 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.assurance.formal_status.{FormalStatus}
+use compiler.common.assurance.formal_interfaces.{HardwareProofReceiptV1,
+    CompilerRefinementRelationV1, CompilerCertificateV1}
+use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryReceiptFileV1}
+use compiler.tools.verify.formal_os_hardware_gate_collectors.{
+    collect_generated_rv32i_end_to_end_gate_v1}
+
+fn rv32_material(index: i64) -> FormalDeliveryReceiptFileV1:
+    val content = "rv32-external-evidence-" + index.to_string()
+    FormalDeliveryReceiptFileV1(sha256_text(content), content)
+
+fn rv32_materials() -> [FormalDeliveryReceiptFileV1]:
+    var files: [FormalDeliveryReceiptFileV1] = []
+    for index in 0..10: files.push(rv32_material(index))
+    files
+
+fn rv32_formal() -> HardwareProofReceiptV1:
+    val files = rv32_materials()
+    HardwareProofReceiptV1(sha256_text("hwir"), sha256_text("rtl"), "",
+        sha256_text("rvfi"),
+        ["rv32i.add.result", "rv32i.add.pc", "rv32i.add.no-memory"],
+        ["rv32i.add.retirement-reachable"],
+        ["rv32i.add.substitution-mutant"], ["sby", "yosys", "ghdl"],
+        [files[0].receipt_hash, files[1].receipt_hash,
+            files[2].receipt_hash], sha256_text("assumptions"),
+        FormalStatus.ModelProven)
+
+fn rv32_equivalence() -> HardwareProofReceiptV1:
+    val files = rv32_materials()
+    HardwareProofReceiptV1(sha256_text("hwir"), sha256_text("rtl"),
+        sha256_text("netlist"), sha256_text("rvfi"),
+        ["rv32i.add.result", "rv32i.add.pc", "rv32i.add.no-memory"],
+        ["rv32i.add.retirement-reachable"],
+        ["rv32i.add.substitution-mutant"], ["yosys", "ghdl"],
+        [files[0].receipt_hash, files[1].receipt_hash,
+            files[2].receipt_hash, files[3].receipt_hash,
+            files[4].receipt_hash], sha256_text("assumptions"),
+        FormalStatus.BackendRefined)
+
+fn rv32_sail() -> HardwareProofReceiptV1:
+    val files = rv32_materials()
+    HardwareProofReceiptV1(sha256_text("hwir"), sha256_text("rtl"), "",
+        sha256_text("rvfi"), ["rv32i.add.sail-result-agreement"],
+        ["rv32i.add.sail-retirement-witness"],
+        ["rv32i.add.sail-independent-oracle"], ["sail-pinned"],
+        [files[5].receipt_hash, files[6].receipt_hash,
+            files[7].receipt_hash, files[8].receipt_hash,
+            files[9].receipt_hash], sha256_text("assumptions"),
+        FormalStatus.ModelProven)
+
+fn rv32_hwir_to_rtl() -> CompilerCertificateV1:
+    var certificate = CompilerCertificateV1("hwir-to-vhdl-v1",
+        sha256_text("hwir"), sha256_text("rtl"),
+        CompilerRefinementRelationV1.ObservationalEquivalence,
+        "independent-hwir-vhdl-validator-v1", "", true)
+    certificate.certificate_hash = certificate.expected_certificate_hash()
+    certificate
+
+describe "FV2 generated RV32I end-to-end gate collector":
+    it "binds formal cover mutation Sail and netlist equivalence evidence":
+        val collection = collect_generated_rv32i_end_to_end_gate_v1(
+            rv32_formal(), rv32_equivalence(), rv32_sail(),
+            rv32_hwir_to_rtl(), rv32_materials())
+        expect(collection.gate_evidence.status.name()).to_equal("passed")
+        expect(collection.gate_evidence.receipt_hashes.len()).to_equal(12)
+        expect(collection.receipt_files.len()).to_equal(12)
+        for file in collection.receipt_files:
+            expect(sha256_text(file.content)).to_equal(file.receipt_hash)
+
+    it "rejects missing material identity drift and incomplete formal scope":
+        var missing = rv32_materials()
+        missing.pop()
+        expect(collect_generated_rv32i_end_to_end_gate_v1(
+            rv32_formal(), rv32_equivalence(), rv32_sail(),
+            rv32_hwir_to_rtl(), missing).gate_evidence.diagnostic).to_contain(
+                "MATERIAL-COUNT")
+        var drift = rv32_sail()
+        drift.rtl_hash = sha256_text("other-rtl")
+        expect(collect_generated_rv32i_end_to_end_gate_v1(
+            rv32_formal(), rv32_equivalence(), drift,
+            rv32_hwir_to_rtl(), rv32_materials()).gate_evidence.diagnostic).to_contain("BINDING")
+        var weak = rv32_formal()
+        weak.property_ids = ["rv32i.add.result"]
+        expect(collect_generated_rv32i_end_to_end_gate_v1(
+            weak, rv32_equivalence(), rv32_sail(),
+            rv32_hwir_to_rtl(), rv32_materials()).gate_evidence.diagnostic).to_contain("FORMAL-SCOPE")
+        var wrong_edge = rv32_hwir_to_rtl()
+        wrong_edge.after_semantic_hash = sha256_text("other-rtl")
+        wrong_edge.certificate_hash = wrong_edge.expected_certificate_hash()
+        expect(collect_generated_rv32i_end_to_end_gate_v1(
+            rv32_formal(), rv32_equivalence(), rv32_sail(), wrong_edge,
+            rv32_materials()).gate_evidence.diagnostic).to_contain("HWIR-RTL")
+
+    it "does not confuse protocol-specified jobs with executed model evidence":
+        var specified = rv32_formal()
+        specified.status = FormalStatus.Specified
+        expect(collect_generated_rv32i_end_to_end_gate_v1(
+            specified, rv32_equivalence(), rv32_sail(),
+            rv32_hwir_to_rtl(), rv32_materials()).gate_evidence.diagnostic).to_contain("STATUS")

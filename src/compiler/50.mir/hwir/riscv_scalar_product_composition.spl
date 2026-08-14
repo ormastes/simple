@@ -1,0 +1,940 @@
+# Typed composition boundary for the shared scalar execution slice.
+#
+# ALU, control-flow, and memory rows select exactly one compile-time provider.
+# Memory rows use the stateful LSU owner and its frozen completion envelope;
+# there is no runtime provider lookup and no raw VHDL seam.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp,
+    HwCostModel, HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort, HwSignal}
+use compiler.mir.hwir.sequential.{HwSequentialModuleDef}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.mir.hwir.riscv_scalar_core.{riscv_gen2_scalar_dispatch,
+    riscv_gen2_scalar_elaboration}
+use compiler.mir.hwir.riscv_scalar_execution.{strict_riscv_scalar_alu_retire_projection_hwir}
+use compiler.mir.hwir.riscv_scalar_control_projection.{strict_riscv_scalar_control_projection_hwir}
+use compiler.mir.hwir.riscv_scalar_system_projection.{strict_riscv_scalar_system_projection_hwir}
+use compiler.mir.hwir.riscv_scalar_csr_owner.{strict_riscv_scalar_csr_owner}
+use compiler.mir.hwir.riscv_scalar_fence_owner.{strict_riscv_scalar_fence_owner}
+use compiler.mir.hwir.riscv_scalar_trap_projection.{strict_riscv_scalar_trap_projection_hwir}
+use compiler.mir.hwir.riscv_scalar_retirement_owner.{strict_riscv_scalar_retirement_owner}
+use compiler.mir.hwir.riscv_scalar_completion_skid.{strict_riscv_scalar_completion_skid}
+use compiler.mir.hwir.riscv_scalar_event_arbitration.{strict_riscv_scalar_event_arbitration_hwir}
+use compiler.mir.hwir.riscv_scalar_lsu_owner.{strict_riscv_scalar_lsu_owner}
+use compiler.mir.hwir.riscv_scalar_muldiv_projection.{strict_riscv_scalar_muldiv_projection}
+use compiler.mir.hwir.riscv_scalar_iterative_multiplier.{strict_riscv_scalar_iterative_multiplier}
+use compiler.mir.hwir.riscv_scalar_iterative_divider.{strict_riscv_scalar_iterative_divider}
+use compiler.mir.hwir.riscv_scalar_completion_interface.{HwScalarCompletionInterface,
+    strict_hw_scalar_completion_interface}
+use compiler.mir.hwir.aspects.{HwAspectLock, HwAspectManifest, HwAspectPlan,
+    HwRetireObservation, hwir_aspect_lock_sha256,
+    hwir_aspect_plan_lock_diagnostic}
+
+fn scalar_sha256_valid(value: text) -> bool:
+    if value.len() != 64: return false
+    for character in value:
+        if not ((character >= '0' and character <= '9') or
+            (character >= 'a' and character <= 'f')):
+            return false
+    true
+
+pub class HwScalarProductBinding:
+    kind: text
+    source_owner: text
+    source_port: text
+    destination_owner: text
+    destination_port: text
+    bit_width: i32
+
+pub class HwScalarOptionalLsuSeam:
+    enabled: bool
+    provider_id: text
+    request_owner: text
+    response_owner: text
+    bus_data_bits: i32
+    byte_mask_bits: i32
+
+    me diagnostic_for_kind(provider_kind: text) -> text:
+        val geometry = LsuConfig.explicit(self.bus_data_bits, self.byte_mask_bits)
+        if geometry.is_err(): return geometry.err().unwrap()
+        if provider_kind == "lsu":
+            if not self.enabled or self.provider_id == "" or
+                self.request_owner != "lsu_provider" or self.response_owner != "lsu_provider":
+                return "HWIR-E-RISCV-SCALAR-LSU-SEAM: memory rows require one closed typed LSU provider"
+        elif self.enabled or self.provider_id != "" or self.request_owner != "composition" or
+            self.response_owner != "composition":
+            return "HWIR-E-RISCV-SCALAR-LSU-SEAM: non-memory rows require a zero-cost disabled LSU seam"
+        ""
+
+fn scalar_record_fields(xlen: i32) -> [(text, i32)]:
+    [("privilege", 2), ("original_instruction", 32),
+        ("canonical_instruction", 32), ("instruction_length_bytes", 3),
+        ("pc_before", xlen), ("pc_after", xlen), ("rd", 5),
+        ("rd_write", 1), ("rd_value", xlen), ("memory_address", xlen),
+        ("memory_read_mask", 32), ("memory_write_mask", 32),
+        ("memory_read_data", xlen), ("memory_write_data", xlen),
+        ("trap", 1), ("interrupt", 1), ("cause", xlen), ("tval", xlen)]
+
+fn completion_payload_fields(xlen: i32) -> [(text, text, i32)]:
+    [("privilege", "in_privilege", 2),
+        ("original_instruction", "in_original_instruction", 32),
+        ("canonical_instruction", "in_canonical_instruction", 32),
+        ("instruction_length_bytes", "in_instruction_length_bytes", 3),
+        ("pc_before", "in_pc", xlen), ("pc_after", "in_pc_after", xlen),
+        ("rd", "in_rd", 5), ("rd_write", "in_rd_write", 1),
+        ("rd_value", "in_rd_value", xlen),
+        ("memory_address", "in_memory_address", xlen),
+        ("memory_read_mask", "in_memory_read_mask", 32),
+        ("memory_write_mask", "in_memory_write_mask", 32),
+        ("memory_read_data", "in_memory_read_data", xlen),
+        ("memory_write_data", "in_memory_write_data", xlen)]
+
+fn memory_top_ports(config: CoreConfig, bus: LsuConfig) -> [HwPort]:
+    val x = config.xlen; val pa = config.physical_address_bits
+    [HwPort.input("memory_request_ready", "Bits", 1),
+        HwPort.output("memory_request_valid", "Bits", 1),
+        HwPort.output("memory_request_id", "Bits", 64),
+        HwPort.output("memory_request_address", "Bits", pa),
+        HwPort.output("memory_request_write", "Bits", 1),
+        HwPort.output("memory_request_byte_mask", "Bits", bus.byte_mask_bits),
+        HwPort.output("memory_request_write_data", "Bits", bus.bus_data_bits),
+        HwPort.input("memory_response_valid", "Bits", 1),
+        HwPort.output("memory_response_ready", "Bits", 1),
+        HwPort.input("memory_response_id", "Bits", 64),
+        HwPort.input("memory_response_data", "Bits", bus.bus_data_bits),
+        HwPort.input("memory_response_fault", "Bits", 1),
+        HwPort.input("memory_response_cause", "Bits", x),
+        HwPort.input("memory_response_tval", "Bits", x)]
+
+fn strict_scalar_fault_aggregator(name: text, config: CoreConfig) -> Result<HwModuleDef, text>:
+    val ports = [HwPort.input("acceptance_fault", "Bits", 1),
+        HwPort.input("provider_fault", "Bits", 1),
+        HwPort.input("retirement_fault", "Bits", 1),
+        HwPort.output("protocol_fault", "Bits", 1)]
+    val signals = [HwSignal.comb("child_fault", "Bits", 1)]
+    val ops = [HwCombOp.binary("or", "child_fault", "acceptance_fault", "provider_fault", 1),
+        HwCombOp.binary("or", "protocol_fault", "child_fault", "retirement_fault", 1)]
+    val summary = HwModule(name: name, profile: config.profile, port_count: ports.len(),
+        signal_count: signals.len(), register_count: 0, comb_op_count: ops.len(),
+        memory_count: 0, clock_domain_count: 1, fallback_function: "", cost: HwCostModel.empty())
+    val module = HwModuleDef(summary: summary, config: config, node_id: HwNodeId.module_root(name),
+        ports: ports, signals: signals, constants: [], comb_ops: ops,
+        compare_ops: [], select_ops: [],
+        clock_domains: [HwClockDomain.default_domain()], origins: [
+            HwOrigin(node_id: HwNodeId.child(name, "fault-union"),
+                source_name: "riscv.scalar.product.protocol-fault-union")])
+    val error = module.shape_diagnostic(); if error != "": return Err(error)
+    Ok(module)
+
+fn scalar_top_ports(config: CoreConfig, bus: LsuConfig, provider_kind: text,
+    provider_ports: [HwPort], owner_ports: [HwPort],
+    retire_observations: [HwRetireObservation]) -> [HwPort]:
+    val x = config.xlen
+    var ports = [HwPort.input("clk", "Bits", 1), HwPort.input("rst", "Bits", 1),
+        HwPort.input("retire_ready", "Bits", 1),
+        HwPort.input("illegal_valid", "Bits", 1),
+        HwPort.input("interrupt_valid", "Bits", 1),
+        HwPort.input("interrupt_cause", "Bits", x),
+        HwPort.input("interrupt_event_id", "Bits", 64),
+        HwPort.input("provider_event_id", "Bits", 64),
+        HwPort.input("decode_event_id", "Bits", 64),
+        HwPort.input("interrupt_held", "Bits", 1),
+        HwPort.input("between_events", "Bits", 1)]
+    for port in provider_ports:
+        if port.direction == "in" and port.name != "clk" and port.name != "rst" and
+            port.name != "in_valid" and port.name != "completion_ready" and
+            port.name != "request_ready" and not port.name.starts_with("response_"):
+            if port.name != "dispatch_event_id" and port.name != "decode_event_id" and
+                port.name != "illegal_valid": ports.push(port)
+    if provider_kind == "alu" or provider_kind == "control" or provider_kind == "system":
+        ports.push(HwPort.input("in_valid", "Bits", 1))
+        ports.push(HwPort.output("in_ready", "Bits", 1))
+    elif provider_kind == "lsu":
+        ports.push(HwPort.output("in_ready", "Bits", 1))
+    elif provider_kind == "muldiv" or provider_kind == "csr" or provider_kind == "fence":
+        ports.push(HwPort.output("in_ready", "Bits", 1))
+    if provider_kind == "csr":
+        ports.push(HwPort.output("csr_access_read_enable", "Bits", 1))
+        ports.push(HwPort.output("csr_access_address", "Bits", 12))
+        ports.push(HwPort.output("csr_commit_valid", "Bits", 1))
+        ports.push(HwPort.output("csr_commit_address", "Bits", 12))
+        ports.push(HwPort.output("csr_commit_value", "Bits", x))
+    if provider_kind == "fence":
+        ports.push(HwPort.output("fence_effect_valid", "Bits", 1))
+        ports.push(HwPort.output("fence_effect_kind", "Bits", 2))
+        ports.push(HwPort.output("fence_fm", "Bits", 4))
+        ports.push(HwPort.output("fence_pred", "Bits", 4))
+        ports.push(HwPort.output("fence_succ", "Bits", 4))
+    if provider_kind == "control":
+        ports.push(HwPort.output("redirect_valid", "Bits", 1))
+        ports.push(HwPort.output("redirect_target", "Bits", x))
+    if provider_kind == "lsu":
+        for port in memory_top_ports(config, bus): ports.push(port)
+    for port in owner_ports:
+        if port.direction == "out" and port.name != "dispatch_ready": ports.push(port)
+    for observation in retire_observations:
+        ports.push(HwPort.output(observation.output_port, "Bits", observation.bit_width))
+    ports
+
+fn scalar_product_bindings(xlen: i32, pa: i32, bus: LsuConfig,
+    provider_kind: text, provider_ports: [HwPort], owner_ports: [HwPort],
+    retire_observations: [HwRetireObservation]) -> [HwScalarProductBinding]:
+    val stateful_provider = provider_kind == "lsu" or provider_kind == "muldiv" or
+        provider_kind == "csr" or provider_kind == "fence"
+    val completion_valid_port = if stateful_provider: "completion_valid" else: "retire_valid"
+    var bindings = [HwScalarProductBinding(kind: "acceptance_to_trap",
+        source_owner: "acceptance_owner", source_port: "normalized_accept",
+        destination_owner: "trap", destination_port: "in_valid", bit_width: 1)]
+    for field in completion_payload_fields(xlen):
+        bindings.push(HwScalarProductBinding(kind: if stateful_provider: "provider_to_trap" else: "skid_to_trap",
+            source_owner: if stateful_provider: "provider" else: "completion_skid",
+            source_port: if stateful_provider: field[0] else: "completion_" + field[0],
+            destination_owner: "trap", destination_port: field[1], bit_width: field[2]))
+    for name_width in [("interrupt_cause", xlen)]:
+        bindings.push(HwScalarProductBinding(kind: "composition_to_trap",
+            source_owner: "composition", source_port: name_width[0],
+            destination_owner: "trap", destination_port: name_width[0],
+            bit_width: name_width[1]))
+    for row in [("normalized_illegal", "illegal_valid"),
+            ("normalized_interrupt", "interrupt_valid")]:
+        bindings.push(HwScalarProductBinding(kind: "acceptance_to_trap",
+            source_owner: "acceptance_owner", source_port: row[0],
+            destination_owner: "trap", destination_port: row[1], bit_width: 1))
+    for trap_kind in ["execute", "memory"]:
+        for suffix_width in [("valid", 1), ("cause", xlen), ("tval", xlen)]:
+            val from_provider = stateful_provider
+            val from_skid = not stateful_provider
+            val source_port = if stateful_provider: trap_kind + "_trap_" + suffix_width[0]
+                elif not stateful_provider: "completion_" + trap_kind + "_trap_" + suffix_width[0]
+                else: "zero_" + suffix_width[0]
+            bindings.push(HwScalarProductBinding(
+                kind: if from_provider: "provider_to_trap" elif from_skid: "skid_to_trap" else: "constant_to_trap",
+                source_owner: if from_provider: "provider" elif from_skid: "completion_skid" else: "composition",
+                source_port: source_port, destination_owner: "trap",
+                destination_port: trap_kind + "_trap_" + suffix_width[0],
+                bit_width: suffix_width[1]))
+    if provider_kind == "control":
+        for suffix_width in [("valid", 1), ("target", xlen)]:
+            val accepted_valid = suffix_width[0] == "valid"
+            bindings.push(HwScalarProductBinding(kind: if accepted_valid:
+                    "acceptance_to_composition" else: "skid_to_composition",
+                source_owner: if accepted_valid: "acceptance_owner" else: "completion_skid",
+                source_port: if accepted_valid: "provider_accept" else:
+                    "completion_redirect_" + suffix_width[0],
+                destination_owner: "composition", destination_port: "redirect_" + suffix_width[0],
+                bit_width: suffix_width[1]))
+    for row in [("provider_event_id", "provider_event_id", 64),
+                ("decode_event_id", "decode_event_id", 64),
+                ("illegal_valid", "illegal_valid", 1),
+                ("interrupt_valid", "interrupt_valid", 1),
+                ("interrupt_event_id", "interrupt_event_id", 64),
+                ("interrupt_held", "interrupt_held", 1),
+                ("between_events", "between_events", 1)]:
+        val registered_metadata = row[0] == "provider_event_id" or row[0] == "decode_event_id" or row[0] == "illegal_valid"
+        bindings.push(HwScalarProductBinding(kind: if registered_metadata:
+                if stateful_provider: "provider_to_acceptance" else: "skid_to_acceptance"
+            else: "composition_to_acceptance",
+            source_owner: if registered_metadata:
+                if stateful_provider: "provider" else: "completion_skid"
+            else: "composition",
+            source_port: if registered_metadata:
+                if stateful_provider:
+                    if row[0] == "provider_event_id": "completion_event_id" else: "completion_" + row[0]
+                else: "completion_" + row[0]
+            else: row[0],
+            destination_owner: "acceptance_owner", destination_port: row[1], bit_width: row[2]))
+    bindings.push(HwScalarProductBinding(kind: if stateful_provider: "provider_to_acceptance" else: "skid_to_acceptance",
+        source_owner: if stateful_provider: "provider" else: "completion_skid",
+        source_port: if stateful_provider: completion_valid_port else: "completion_valid",
+        destination_owner: "acceptance_owner", destination_port: "provider_valid", bit_width: 1))
+    bindings.push(HwScalarProductBinding(kind: if provider_kind == "muldiv" or provider_kind == "csr" or provider_kind == "fence":
+            "provider_to_acceptance" elif provider_kind == "lsu": "composition_to_acceptance" else: "skid_to_acceptance",
+        source_owner: if provider_kind == "muldiv" or provider_kind == "csr" or provider_kind == "fence": "provider"
+            elif provider_kind == "lsu": "composition" else: "completion_skid",
+        source_port: if provider_kind == "muldiv" or provider_kind == "csr" or provider_kind == "fence": "completion_decode_valid"
+            elif provider_kind == "lsu": "dispatch_valid" else: "completion_decode_valid",
+        destination_owner: "acceptance_owner", destination_port: "decode_valid", bit_width: 1))
+    bindings.push(HwScalarProductBinding(kind: "constant_one_to_acceptance",
+        source_owner: "composition", source_port: "one1",
+        destination_owner: "acceptance_owner", destination_port: "provider_selected", bit_width: 1))
+    bindings.push(HwScalarProductBinding(
+        kind: if provider_kind == "lsu": "constant_one_to_acceptance" else: "constant_to_acceptance",
+        source_owner: "composition", source_port: if provider_kind == "lsu": "one1" else: "zero1",
+        destination_owner: "acceptance_owner", destination_port: "provider_is_lsu", bit_width: 1))
+    bindings.push(HwScalarProductBinding(kind: "owner_to_acceptance",
+        source_owner: "retirement_owner", source_port: "dispatch_ready",
+        destination_owner: "acceptance_owner", destination_port: "normalized_ready", bit_width: 1))
+    if provider_kind == "alu" or provider_kind == "control" or provider_kind == "system":
+        bindings.push(HwScalarProductBinding(kind: "acceptance_to_provider",
+            source_owner: "composition", source_port: "in_valid",
+            destination_owner: "provider", destination_port: "in_valid", bit_width: 1))
+        bindings.push(HwScalarProductBinding(kind: "skid_to_composition",
+            source_owner: "completion_skid", source_port: "upstream_ready",
+            destination_owner: "composition", destination_port: "in_ready", bit_width: 1))
+        bindings.push(HwScalarProductBinding(kind: "provider_to_skid", source_owner: "provider",
+            source_port: "retire_valid", destination_owner: "completion_skid",
+            destination_port: "upstream_valid", bit_width: 1))
+        bindings.push(HwScalarProductBinding(kind: "acceptance_to_skid", source_owner: "acceptance_owner",
+            source_port: "provider_accept", destination_owner: "completion_skid",
+            destination_port: "downstream_ready", bit_width: 1))
+        for row in [("clk", "clk", 1), ("rst", "rst", 1)]:
+            bindings.push(HwScalarProductBinding(kind: "composition_to_skid", source_owner: "composition",
+                source_port: row[0], destination_owner: "completion_skid", destination_port: row[1], bit_width: row[2]))
+        for field in completion_payload_fields(xlen):
+            bindings.push(HwScalarProductBinding(kind: "provider_to_skid", source_owner: "provider",
+                source_port: "retire_" + field[0], destination_owner: "completion_skid",
+                destination_port: "upstream_" + field[0], bit_width: field[2]))
+        for trap_kind in ["execute", "memory"]:
+            for suffix_width in [("valid", 1), ("cause", xlen), ("tval", xlen)]:
+                val real_execute = (provider_kind == "control" or provider_kind == "system") and
+                    trap_kind == "execute"
+                bindings.push(HwScalarProductBinding(kind: if real_execute: "provider_to_skid" else: "constant_to_skid",
+                    source_owner: if real_execute: "provider" else: "composition",
+                    source_port: if real_execute:
+                        if suffix_width[0] == "valid": "execute_exception" else: "retire_" + suffix_width[0]
+                    else: "zero_" + suffix_width[0], destination_owner: "completion_skid",
+                    destination_port: "upstream_" + trap_kind + "_trap_" + suffix_width[0], bit_width: suffix_width[1]))
+        for suffix_width in [("valid", 1), ("target", xlen)]:
+            bindings.push(HwScalarProductBinding(kind: if provider_kind == "control": "provider_to_skid" else: "constant_to_skid",
+                source_owner: if provider_kind == "control": "provider" else: "composition",
+                source_port: if provider_kind == "control": "redirect_" + suffix_width[0] else: "zero_" + suffix_width[0],
+                destination_owner: "completion_skid", destination_port: "upstream_redirect_" + suffix_width[0],
+                bit_width: suffix_width[1]))
+        bindings.push(HwScalarProductBinding(kind: "provider_to_skid", source_owner: "provider",
+            source_port: "retire_order", destination_owner: "completion_skid",
+            destination_port: "upstream_provider_event_id", bit_width: 64))
+        for row in [("decode_event_id", 64), ("illegal_valid", 1)]:
+            bindings.push(HwScalarProductBinding(kind: "composition_to_skid", source_owner: "composition",
+                source_port: row[0], destination_owner: "completion_skid",
+                destination_port: "upstream_" + row[0], bit_width: row[1]))
+    elif provider_kind == "lsu":
+        bindings.push(HwScalarProductBinding(kind: "acceptance_to_provider",
+            source_owner: "acceptance_owner", source_port: "provider_accept",
+            destination_owner: "provider", destination_port: "completion_ready", bit_width: 1))
+        for row in [("memory_request_ready", "request_ready", 1),
+                ("memory_response_valid", "response_valid", 1),
+                ("memory_response_id", "response_id", 64),
+                ("memory_response_data", "response_data", bus.bus_data_bits),
+                ("memory_response_fault", "response_fault", 1),
+                ("memory_response_cause", "response_cause", xlen),
+                ("memory_response_tval", "response_tval", xlen)]:
+            bindings.push(HwScalarProductBinding(kind: "composition_to_provider",
+                source_owner: "composition", source_port: row[0],
+                destination_owner: "provider", destination_port: row[1], bit_width: row[2]))
+        for row in [("request_valid", "memory_request_valid", 1),
+                ("request_id", "memory_request_id", 64),
+                ("request_address", "memory_request_address", pa),
+                ("request_write", "memory_request_write", 1),
+                ("request_byte_mask", "memory_request_byte_mask", bus.byte_mask_bits),
+                ("request_write_data", "memory_request_write_data", bus.bus_data_bits)]:
+            bindings.push(HwScalarProductBinding(kind: "provider_to_composition",
+                source_owner: "provider", source_port: row[0],
+                destination_owner: "composition", destination_port: row[1], bit_width: row[2]))
+        bindings.push(HwScalarProductBinding(kind: "provider_to_composition",
+            source_owner: "provider", source_port: "response_ready",
+            destination_owner: "composition", destination_port: "memory_response_ready", bit_width: 1))
+        bindings.push(HwScalarProductBinding(kind: "provider_to_composition",
+            source_owner: "provider", source_port: "dispatch_ready",
+            destination_owner: "composition", destination_port: "in_ready", bit_width: 1))
+        for row in [("provider_event_id", "dispatch_event_id", 64),
+                ("decode_event_id", "decode_event_id", 64),
+                ("illegal_valid", "illegal_valid", 1)]:
+            bindings.push(HwScalarProductBinding(kind: "composition_to_provider",
+                source_owner: "composition", source_port: row[0], destination_owner: "provider",
+                destination_port: row[1], bit_width: row[2]))
+    elif provider_kind == "muldiv" or provider_kind == "csr" or provider_kind == "fence":
+        bindings.push(HwScalarProductBinding(kind: "acceptance_to_provider",
+            source_owner: "acceptance_owner", source_port: "provider_accept",
+            destination_owner: "provider", destination_port: "completion_ready", bit_width: 1))
+        bindings.push(HwScalarProductBinding(kind: "provider_to_composition",
+            source_owner: "provider", source_port: "dispatch_ready",
+            destination_owner: "composition", destination_port: "in_ready", bit_width: 1))
+        for row in [("provider_event_id", "dispatch_event_id", 64),
+                ("decode_event_id", "decode_event_id", 64),
+                ("illegal_valid", "illegal_valid", 1)]:
+            bindings.push(HwScalarProductBinding(kind: "composition_to_provider",
+                source_owner: "composition", source_port: row[0], destination_owner: "provider",
+                destination_port: row[1], bit_width: row[2]))
+        if provider_kind == "csr":
+            for row in [("csr_access_read_enable", 1), ("csr_access_address", 12),
+                    ("csr_commit_valid", 1), ("csr_commit_address", 12),
+                    ("csr_commit_value", xlen)]:
+                bindings.push(HwScalarProductBinding(kind: "provider_to_composition",
+                    source_owner: "provider", source_port: row[0], destination_owner: "composition",
+                    destination_port: row[0], bit_width: row[1]))
+        if provider_kind == "fence":
+            for row in [("fence_effect_valid", 1), ("fence_effect_kind", 2),
+                    ("fence_fm", 4), ("fence_pred", 4), ("fence_succ", 4)]:
+                bindings.push(HwScalarProductBinding(kind: "provider_to_composition",
+                    source_owner: "provider", source_port: row[0], destination_owner: "composition",
+                    destination_port: row[0], bit_width: row[1]))
+    for port in provider_ports:
+        val reserved = port.name == "in_valid" or port.name == "completion_ready" or
+            port.name == "request_ready" or port.name.starts_with("response_") or
+            port.name == "dispatch_event_id" or port.name == "decode_event_id" or
+            port.name == "illegal_valid"
+        if port.direction == "in" and not reserved:
+            bindings.push(HwScalarProductBinding(kind: "composition_to_provider",
+                source_owner: "composition", source_port: port.name,
+                destination_owner: "provider", destination_port: port.name,
+                bit_width: port.bit_width))
+    for port in owner_ports:
+        if port.direction == "in" and port.name != "dispatch_valid" and
+            not port.name.starts_with("dispatch_"):
+            bindings.push(HwScalarProductBinding(kind: "composition_to_owner",
+                source_owner: "composition", source_port: port.name,
+                destination_owner: "retirement_owner", destination_port: port.name,
+                bit_width: port.bit_width))
+    bindings.push(HwScalarProductBinding(kind: "trap_to_owner", source_owner: "trap",
+        source_port: "dispatch_valid", destination_owner: "retirement_owner",
+        destination_port: "dispatch_valid", bit_width: 1))
+    for field in scalar_record_fields(xlen):
+        bindings.push(HwScalarProductBinding(kind: "trap_to_owner", source_owner: "trap",
+            source_port: "dispatch_" + field[0], destination_owner: "retirement_owner",
+            destination_port: "dispatch_" + field[0], bit_width: field[1]))
+    for port in owner_ports:
+        if port.direction == "out" and port.name != "dispatch_ready" and port.name != "protocol_fault":
+            bindings.push(HwScalarProductBinding(kind: "owner_to_composition",
+                source_owner: "retirement_owner", source_port: port.name,
+                destination_owner: "composition", destination_port: port.name,
+                bit_width: port.bit_width))
+    bindings.push(HwScalarProductBinding(kind: "acceptance_to_fault_aggregator",
+        source_owner: "acceptance_owner", source_port: "arbitration_fault",
+        destination_owner: "fault_aggregator", destination_port: "acceptance_fault", bit_width: 1))
+    bindings.push(HwScalarProductBinding(kind: "provider_to_fault_aggregator",
+        source_owner: if stateful_provider: "provider" else: "completion_skid",
+        source_port: "protocol_fault", destination_owner: "fault_aggregator",
+        destination_port: "provider_fault", bit_width: 1))
+    bindings.push(HwScalarProductBinding(kind: "retirement_to_fault_aggregator",
+        source_owner: "retirement_owner", source_port: "protocol_fault",
+        destination_owner: "fault_aggregator", destination_port: "retirement_fault", bit_width: 1))
+    bindings.push(HwScalarProductBinding(kind: "fault_aggregator_to_composition",
+        source_owner: "fault_aggregator", source_port: "protocol_fault",
+        destination_owner: "composition", destination_port: "protocol_fault", bit_width: 1))
+    for observation in retire_observations:
+        bindings.push(HwScalarProductBinding(kind: "retirement_aspect_to_composition",
+            source_owner: "retirement_owner", source_port: observation.receipt_value,
+            destination_owner: "composition", destination_port: observation.output_port,
+            bit_width: observation.bit_width))
+    bindings
+
+pub class HwScalarProductComposition:
+    node_id: HwNodeId
+    config: CoreConfig
+    lsu_config: LsuConfig
+    instruction: u32
+    provider_kind: text
+    provider_count: i32
+    redirect_owner_count: i32
+    retirement_owner_count: i32
+    provider: Option<HwModuleDef>
+    lsu_provider: Option<HwSequentialModuleDef>
+    muldiv_provider: Option<HwSequentialModuleDef>
+    csr_provider: Option<HwSequentialModuleDef>
+    fence_provider: Option<HwSequentialModuleDef>
+    completion_skid: Option<HwSequentialModuleDef>
+    acceptance_owner: Option<HwModuleDef>
+    trap: HwModuleDef
+    retirement_owner: HwSequentialModuleDef
+    fault_aggregator: HwModuleDef
+    completion_interface: HwScalarCompletionInterface
+    lsu_seam: HwScalarOptionalLsuSeam
+    top_ports: [HwPort]
+    bindings: [HwScalarProductBinding]
+    retire_observations: [HwRetireObservation]
+    aspect_lock_sha256: text
+    aspect_weave_sha256: text
+
+    me top_port_direction(name: text) -> text:
+        for port in self.top_ports:
+            if port.name == name: return port.direction
+        ""
+
+    me top_port_width(name: text) -> i32:
+        for port in self.top_ports:
+            if port.name == name: return port.bit_width
+        0
+
+    me provider_port_direction(name: text) -> text:
+        if val fence = self.fence_provider:
+            return fence.plan.port_direction(fence.ports, name)
+        if val csr = self.csr_provider:
+            return csr.plan.port_direction(csr.ports, name)
+        if val muldiv = self.muldiv_provider:
+            return muldiv.plan.port_direction(muldiv.ports, name)
+        if val lsu = self.lsu_provider:
+            return lsu.plan.port_direction(lsu.ports, name)
+        if val provider = self.provider: return provider.port_direction(name)
+        ""
+
+    me provider_port_width(name: text) -> i32:
+        if val fence = self.fence_provider:
+            return fence.plan.named_width(fence.ports, name)
+        if val csr = self.csr_provider:
+            return csr.plan.named_width(csr.ports, name)
+        if val muldiv = self.muldiv_provider:
+            return muldiv.plan.named_width(muldiv.ports, name)
+        if val lsu = self.lsu_provider:
+            return lsu.plan.named_width(lsu.ports, name)
+        if val provider = self.provider: return provider.port_width(name)
+        0
+
+    me binding_diagnostic() -> text:
+        val provider_ports = if val fence = self.fence_provider: fence.ports
+            elif val csr = self.csr_provider: csr.ports
+            elif val muldiv = self.muldiv_provider: muldiv.ports
+            elif val lsu = self.lsu_provider: lsu.ports
+            elif val provider = self.provider: provider.ports else: []
+        val expected = scalar_product_bindings(self.config.xlen,
+            self.config.physical_address_bits, self.lsu_config, self.provider_kind,
+            provider_ports, self.retirement_owner.ports, self.retire_observations)
+        if self.bindings.len() != expected.len():
+            return "HWIR-E-RISCV-SCALAR-COMPOSITION-BINDINGS: scalar product requires exact unique typed wiring"
+        var destinations: [text] = []
+        var index = 0
+        while index < expected.len():
+            val actual = self.bindings[index]; val required = expected[index]
+            if actual.kind != required.kind or actual.source_owner != required.source_owner or
+                actual.source_port != required.source_port or actual.destination_owner != required.destination_owner or
+                actual.destination_port != required.destination_port or actual.bit_width != required.bit_width:
+                return "HWIR-E-RISCV-SCALAR-COMPOSITION-BINDINGS: scalar product requires exact unique typed wiring"
+            val destination_key = actual.destination_owner.lower() + "." + actual.destination_port.lower()
+            if destinations.contains(destination_key):
+                return "HWIR-E-RISCV-SCALAR-COMPOSITION-DESTINATION: every destination requires one driver"
+            destinations.push(destination_key)
+            var source_direction = "out"; var source_width = actual.bit_width
+            if actual.source_owner == "provider":
+                source_direction = self.provider_port_direction(actual.source_port)
+                source_width = self.provider_port_width(actual.source_port)
+            elif actual.source_owner == "trap":
+                source_direction = self.trap.port_direction(actual.source_port)
+                source_width = self.trap.port_width(actual.source_port)
+            elif actual.source_owner == "retirement_owner":
+                source_direction = self.retirement_owner.plan.port_direction(
+                    self.retirement_owner.ports, actual.source_port)
+                source_width = self.retirement_owner.plan.named_width(
+                    self.retirement_owner.ports, actual.source_port)
+            elif actual.source_owner == "acceptance_owner":
+                if val acceptance = self.acceptance_owner:
+                    source_direction = acceptance.port_direction(actual.source_port)
+                    source_width = acceptance.port_width(actual.source_port)
+            elif actual.source_owner == "completion_skid":
+                if val skid = self.completion_skid:
+                    source_direction = skid.plan.port_direction(skid.ports, actual.source_port)
+                    source_width = skid.plan.named_width(skid.ports, actual.source_port)
+            elif actual.source_owner == "fault_aggregator":
+                source_direction = self.fault_aggregator.port_direction(actual.source_port)
+                source_width = self.fault_aggregator.port_width(actual.source_port)
+            elif not actual.kind.starts_with("constant_"):
+                source_direction = self.top_port_direction(actual.source_port)
+                source_width = self.top_port_width(actual.source_port)
+            var destination_direction = "in"; var destination_width = actual.bit_width
+            if actual.destination_owner == "provider":
+                destination_direction = self.provider_port_direction(actual.destination_port)
+                destination_width = self.provider_port_width(actual.destination_port)
+            elif actual.destination_owner == "trap":
+                destination_direction = self.trap.port_direction(actual.destination_port)
+                destination_width = self.trap.port_width(actual.destination_port)
+            elif actual.destination_owner == "retirement_owner":
+                destination_direction = self.retirement_owner.plan.port_direction(
+                    self.retirement_owner.ports, actual.destination_port)
+                destination_width = self.retirement_owner.plan.named_width(
+                    self.retirement_owner.ports, actual.destination_port)
+            elif actual.destination_owner == "acceptance_owner":
+                if val acceptance = self.acceptance_owner:
+                    destination_direction = acceptance.port_direction(actual.destination_port)
+                    destination_width = acceptance.port_width(actual.destination_port)
+            elif actual.destination_owner == "completion_skid":
+                if val skid = self.completion_skid:
+                    destination_direction = skid.plan.port_direction(skid.ports, actual.destination_port)
+                    destination_width = skid.plan.named_width(skid.ports, actual.destination_port)
+            elif actual.destination_owner == "fault_aggregator":
+                destination_direction = self.fault_aggregator.port_direction(actual.destination_port)
+                destination_width = self.fault_aggregator.port_width(actual.destination_port)
+            else:
+                destination_direction = self.top_port_direction(actual.destination_port)
+                destination_width = self.top_port_width(actual.destination_port)
+            if source_direction != "out" and source_direction != "in":
+                return "HWIR-E-RISCV-SCALAR-COMPOSITION-SOURCE: binding source must exist"
+            if actual.source_owner != "composition" and source_direction != "out":
+                return "HWIR-E-RISCV-SCALAR-COMPOSITION-SOURCE: child binding source requires an output"
+            if actual.source_owner == "composition" and not actual.kind.starts_with("constant_") and source_direction != "in":
+                return "HWIR-E-RISCV-SCALAR-COMPOSITION-SOURCE: top binding source requires an input"
+            if actual.destination_owner == "composition" and destination_direction != "out":
+                return "HWIR-E-RISCV-SCALAR-COMPOSITION-DESTINATION: top destination requires an output"
+            if actual.destination_owner != "composition" and destination_direction != "in":
+                return "HWIR-E-RISCV-SCALAR-COMPOSITION-DESTINATION: child destination requires an input"
+            if source_width != actual.bit_width or destination_width != actual.bit_width:
+                return "HWIR-E-RISCV-SCALAR-COMPOSITION-WIDTH: binding endpoints require the declared width"
+            index = index + 1
+        ""
+
+    me diagnostic() -> text:
+        val config_error = self.config.diagnostic(); if config_error != "": return config_error
+        val lsu_error = self.lsu_config.diagnostic(); if lsu_error != "": return lsu_error
+        if not self.node_id.is_valid():
+            return "HWIR-E-RISCV-SCALAR-COMPOSITION-ID: scalar product requires a stable identity"
+        if self.provider_kind != "alu" and self.provider_kind != "control" and
+            self.provider_kind != "system" and self.provider_kind != "lsu" and
+            self.provider_kind != "muldiv" and self.provider_kind != "csr" and
+            self.provider_kind != "fence":
+            return "HWIR-E-RISCV-SCALAR-COMPOSITION-PROVIDER: scalar product requires ALU, control, system, LSU, M/Zmmul, CSR, or fence"
+        val expected_redirects = if self.provider_kind == "control": 1 else: 0
+        if self.provider_count != 1 or self.redirect_owner_count != expected_redirects or
+            self.retirement_owner_count != 1:
+            return "HWIR-E-RISCV-SCALAR-COMPOSITION-OWNERS: scalar product requires one provider, at most one redirect owner, and one retirement owner"
+        if (self.provider_kind == "lsu" and (self.provider != nil or self.lsu_provider == nil or self.muldiv_provider != nil or self.csr_provider != nil or self.fence_provider != nil)) or
+            (self.provider_kind == "muldiv" and (self.provider != nil or self.lsu_provider != nil or self.muldiv_provider == nil or self.csr_provider != nil or self.fence_provider != nil)) or
+            (self.provider_kind == "csr" and (self.provider != nil or self.lsu_provider != nil or self.muldiv_provider != nil or self.csr_provider == nil or self.fence_provider != nil)) or
+            (self.provider_kind == "fence" and (self.provider != nil or self.lsu_provider != nil or self.muldiv_provider != nil or self.csr_provider != nil or self.fence_provider == nil)) or
+            ((self.provider_kind == "alu" or self.provider_kind == "control" or self.provider_kind == "system") and
+                (self.provider == nil or self.lsu_provider != nil or self.muldiv_provider != nil or self.csr_provider != nil or self.fence_provider != nil)):
+            return "HWIR-E-RISCV-SCALAR-COMPOSITION-EXCLUSIVITY: exactly one provider representation must exist"
+        if self.acceptance_owner == nil:
+            return "HWIR-E-RISCV-SCALAR-COMPOSITION-ACCEPTANCE: every provider requires one typed arbitration owner"
+        val stateful_provider = self.provider_kind == "lsu" or self.provider_kind == "muldiv" or
+            self.provider_kind == "csr" or self.provider_kind == "fence"
+        if (stateful_provider and self.completion_skid != nil) or
+            (not stateful_provider and self.completion_skid == nil):
+            return "HWIR-E-RISCV-SCALAR-COMPOSITION-SKID: ALU/control/system require one registered completion skid; LSU, M/Zmmul, and CSR are stateful"
+        if val provider = self.provider:
+            if provider.config.profile != self.config.profile or provider.config.xlen != self.config.xlen:
+                return "HWIR-E-RISCV-SCALAR-COMPOSITION-CONFIG: provider requires the concrete product configuration"
+            val provider_error = provider.shape_diagnostic(); if provider_error != "": return provider_error
+        if val lsu = self.lsu_provider:
+            if lsu.config.profile != self.config.profile or lsu.config.xlen != self.config.xlen:
+                return "HWIR-E-RISCV-SCALAR-COMPOSITION-CONFIG: LSU requires the concrete product configuration"
+            val provider_error = lsu.diagnostic(); if provider_error != "": return provider_error
+        if val muldiv = self.muldiv_provider:
+            if muldiv.config.profile != self.config.profile or muldiv.config.xlen != self.config.xlen:
+                return "HWIR-E-RISCV-SCALAR-COMPOSITION-CONFIG: M/Zmmul requires the concrete product configuration"
+            val provider_error = muldiv.diagnostic(); if provider_error != "": return provider_error
+        if val csr = self.csr_provider:
+            if csr.config.profile != self.config.profile or csr.config.xlen != self.config.xlen:
+                return "HWIR-E-RISCV-SCALAR-COMPOSITION-CONFIG: CSR requires the concrete product configuration"
+            val provider_error = csr.diagnostic(); if provider_error != "": return provider_error
+        if val fence = self.fence_provider:
+            if fence.config.profile != self.config.profile or fence.config.xlen != self.config.xlen:
+                return "HWIR-E-RISCV-SCALAR-COMPOSITION-CONFIG: fence requires the concrete product configuration"
+            val provider_error = fence.diagnostic(); if provider_error != "": return provider_error
+        if val acceptance = self.acceptance_owner:
+            val acceptance_error = acceptance.shape_diagnostic()
+            if acceptance_error != "": return acceptance_error
+        if val skid = self.completion_skid:
+            val skid_error = skid.diagnostic(); if skid_error != "": return skid_error
+        if self.trap.config.profile != self.config.profile or
+            self.retirement_owner.config.profile != self.config.profile or
+            self.trap.config.xlen != self.config.xlen or self.retirement_owner.config.xlen != self.config.xlen:
+            return "HWIR-E-RISCV-SCALAR-COMPOSITION-CONFIG: all scalar children require one concrete product configuration"
+        val trap_error = self.trap.shape_diagnostic(); if trap_error != "": return trap_error
+        val owner_error = self.retirement_owner.diagnostic(); if owner_error != "": return owner_error
+        val fault_error = self.fault_aggregator.shape_diagnostic(); if fault_error != "": return fault_error
+        val completion_error = self.completion_interface.diagnostic(); if completion_error != "": return completion_error
+        val seam_error = self.lsu_seam.diagnostic_for_kind(self.provider_kind)
+        if seam_error != "": return seam_error
+        if self.retire_observations.len() == 0:
+            if self.aspect_lock_sha256 != "" or self.aspect_weave_sha256 != "":
+                return "HWIR-E-ASPECT-SCALAR-RETIRE-RECEIPT: absent observations require zero aspect receipts"
+        else:
+            if not scalar_sha256_valid(self.aspect_lock_sha256) or
+                not scalar_sha256_valid(self.aspect_weave_sha256):
+                return "HWIR-E-ASPECT-SCALAR-RETIRE-RECEIPT: woven observations require exact lock and weave receipts"
+            var observation_ports: [text] = []
+            val retire_node = hwir_scalar_commit_retire_node_id(self)
+            for observation in self.retire_observations:
+                val observation_error = observation.diagnostic()
+                if observation_error != "": return observation_error
+                if observation.target_node_id.value != retire_node.value or
+                    observation_ports.contains(observation.output_port.lower()):
+                    return "HWIR-E-ASPECT-SCALAR-RETIRE-RECEIPT: observations require this product's unique commit.retire outputs"
+                observation_ports.push(observation.output_port.lower())
+        self.binding_diagnostic()
+
+    me structural_sha256() -> text:
+        val provider_hash = if val fence = self.fence_provider: fence.structural_sha256()
+            elif val csr = self.csr_provider: csr.structural_sha256()
+            elif val muldiv = self.muldiv_provider: muldiv.structural_sha256()
+            elif val lsu = self.lsu_provider: lsu.structural_sha256()
+            elif val provider = self.provider: provider.structural_sha256()
+            else: "missing"
+        var rows = ["simple-riscv-scalar-product-composition/v3", self.node_id.value,
+            self.config.profile, self.config.isa_profile, self.config.xlen.to_text(),
+            self.config.physical_address_bits.to_text(), self.config.register_count.to_text(),
+            self.lsu_config.bus_data_bits.to_text(), self.lsu_config.byte_mask_bits.to_text(),
+            self.instruction.to_text(), self.provider_kind, provider_hash,
+            if val acceptance = self.acceptance_owner: acceptance.structural_sha256() else: "none",
+            if val skid = self.completion_skid: skid.structural_sha256() else: "none",
+            self.completion_interface.structural_sha256(), self.trap.structural_sha256(),
+            self.retirement_owner.structural_sha256(), self.lsu_seam.enabled.to_text()]
+        rows.push(self.aspect_lock_sha256)
+        rows.push(self.aspect_weave_sha256)
+        rows.push(self.fault_aggregator.structural_sha256())
+        for port in self.top_ports:
+            rows.push([port.name, port.direction, port.bit_width.to_text()].join("|"))
+        for binding in self.bindings:
+            rows.push([binding.kind, binding.source_owner, binding.source_port,
+                binding.destination_owner, binding.destination_port,
+                binding.bit_width.to_text()].join("|"))
+        for observation in self.retire_observations:
+            rows.push(["retire-observation", observation.aspect_id,
+                observation.target_node_id.value, observation.receipt_value,
+                observation.output_port, observation.bit_width.to_text()].join("|"))
+        sha256_text(rows.join("\n"))
+
+pub fn strict_riscv_scalar_product_composition(module_name: text,
+    config: CoreConfig, instruction: u32,
+    lsu_config: LsuConfig) -> Result<HwScalarProductComposition, text>:
+    if module_name == "":
+        return Err("HWIR-E-RISCV-SCALAR-COMPOSITION-ID: scalar product requires a module name")
+    val has_muldiv = config.isa_profile == "rv32im" or config.isa_profile == "rv64im" or
+        config.isa_profile == "rv32i_zmmul" or config.isa_profile == "rv64i_zmmul"
+    val dispatch = riscv_gen2_scalar_dispatch(
+        riscv_gen2_scalar_elaboration(config, if has_muldiv: "iterative" else: "none")?, instruction)?
+    var provider_kind = ""
+    var provider: Option<HwModuleDef> = nil
+    var lsu_provider: Option<HwSequentialModuleDef> = nil
+    var muldiv_provider: Option<HwSequentialModuleDef> = nil
+    var csr_provider: Option<HwSequentialModuleDef> = nil
+    var fence_provider: Option<HwSequentialModuleDef> = nil
+    var acceptance_owner: Option<HwModuleDef> = nil
+    var completion_skid: Option<HwSequentialModuleDef> = nil
+    if dispatch.entry.memory_effect == "load" or dispatch.entry.memory_effect == "store":
+        provider_kind = "lsu"
+        lsu_provider = strict_riscv_scalar_lsu_owner(
+            module_name + "_provider", config, lsu_config, instruction)?
+    elif dispatch.entry.execution_class == "control-flow":
+        provider_kind = "control"
+        provider = strict_riscv_scalar_control_projection_hwir(
+            module_name + "_provider", config, instruction)?
+    elif (dispatch.entry.execution_class == "integer" or
+            dispatch.entry.execution_class == "integer-word") and
+        dispatch.entry.memory_effect == "none":
+        provider_kind = "alu"
+        provider = strict_riscv_scalar_alu_retire_projection_hwir(
+            module_name + "_provider", config, instruction)?
+    elif dispatch.entry.execution_class == "system":
+        provider_kind = "system"
+        provider = strict_riscv_scalar_system_projection_hwir(
+            module_name + "_provider", config, instruction)?
+    elif dispatch.entry.execution_class == "multiply-divide":
+        provider_kind = "muldiv"
+        val projection = strict_riscv_scalar_muldiv_projection(config, "iterative", instruction)?
+        if projection.operation.starts_with("multiply_"):
+            muldiv_provider = strict_riscv_scalar_iterative_multiplier(
+                module_name + "_provider", config, projection)?
+        else:
+            muldiv_provider = strict_riscv_scalar_iterative_divider(
+                module_name + "_provider", config, projection)?
+    elif dispatch.entry.execution_class == "csr":
+        provider_kind = "csr"
+        csr_provider = strict_riscv_scalar_csr_owner(
+            module_name + "_provider", config, instruction)?
+    elif dispatch.entry.execution_class == "memory-order":
+        provider_kind = "fence"
+        fence_provider = strict_riscv_scalar_fence_owner(
+            module_name + "_provider", config, instruction)?
+    else:
+        return Err("HWIR-E-RISCV-SCALAR-COMPOSITION-SCOPE: instruction has no admitted scalar provider")
+    acceptance_owner = strict_riscv_scalar_event_arbitration_hwir(
+        module_name + "_acceptance", config)?
+    if provider_kind == "alu" or provider_kind == "control" or provider_kind == "system":
+        completion_skid = strict_riscv_scalar_completion_skid(module_name + "_completion_skid", config)?
+    val selected_provider_ports = if val selected_fence = fence_provider:
+        selected_fence.ports
+    elif val selected_csr = csr_provider:
+        selected_csr.ports
+    elif val selected_muldiv = muldiv_provider:
+        selected_muldiv.ports
+    elif val selected_lsu = lsu_provider:
+        selected_lsu.ports
+    elif val selected_stateless = provider:
+        selected_stateless.ports
+    else:
+        return Err("HWIR-E-RISCV-SCALAR-COMPOSITION-PROVIDER: product provider is absent")
+    val trap = strict_riscv_scalar_trap_projection_hwir(module_name + "_trap", config)?
+    val owner = strict_riscv_scalar_retirement_owner(module_name + "_retirement", config)?
+    val fault_aggregator = strict_scalar_fault_aggregator(module_name + "_faults", config)?
+    val completion = strict_hw_scalar_completion_interface(config, lsu_config)?
+    val is_lsu = provider_kind == "lsu"
+    val seam = HwScalarOptionalLsuSeam(enabled: is_lsu,
+        provider_id: if is_lsu: module_name + "_provider" else: "",
+        request_owner: if is_lsu: "lsu_provider" else: "composition",
+        response_owner: if is_lsu: "lsu_provider" else: "composition",
+        bus_data_bits: lsu_config.bus_data_bits, byte_mask_bits: lsu_config.byte_mask_bits)
+    val retire_observations: [HwRetireObservation] = []
+    val composition = HwScalarProductComposition(node_id: HwNodeId.module_root(module_name),
+        config: config, lsu_config: lsu_config, instruction: instruction,
+        provider_kind: provider_kind, provider_count: 1,
+        redirect_owner_count: if provider_kind == "control": 1 else: 0,
+        retirement_owner_count: 1, provider: provider, lsu_provider: lsu_provider,
+        muldiv_provider: muldiv_provider, csr_provider: csr_provider,
+        fence_provider: fence_provider,
+        acceptance_owner: acceptance_owner, completion_skid: completion_skid,
+        trap: trap, retirement_owner: owner, fault_aggregator: fault_aggregator,
+        completion_interface: completion,
+        lsu_seam: seam,
+        top_ports: scalar_top_ports(config, lsu_config, provider_kind,
+            selected_provider_ports, owner.ports, retire_observations),
+        bindings: scalar_product_bindings(config.xlen, config.physical_address_bits,
+            lsu_config, provider_kind, selected_provider_ports, owner.ports,
+            retire_observations), retire_observations: retire_observations,
+        aspect_lock_sha256: "", aspect_weave_sha256: "")
+    val diagnostic = composition.diagnostic(); if diagnostic != "": return Err(diagnostic)
+    Ok(composition)
+
+pub fn hwir_scalar_commit_retire_node_id(
+    composition: HwScalarProductComposition) -> HwNodeId:
+    HwNodeId.child(composition.node_id.value, "commit.retire")
+
+pub class HwScalarRetireAspectWeaveResult:
+    composition: HwScalarProductComposition
+    added_port_count: i32
+    route: text
+    lock_sha256: text
+    weave_sha256: text
+
+    me is_unchanged() -> bool:
+        self.added_port_count == 0 and self.composition.retire_observations.len() == 0
+
+fn scalar_retire_manifest(plan: HwAspectPlan, aspect_id: text) -> HwAspectManifest?:
+    for manifest in plan.manifests:
+        if manifest.id == aspect_id: return Some(manifest)
+    nil
+
+fn scalar_retire_application_count(plan: HwAspectPlan, aspect_id: text,
+    node_id: HwNodeId) -> i32:
+    for application in plan.applications:
+        if application.aspect_id == aspect_id:
+            if application.matched_node_ids.len() != 1 or
+                application.matched_node_ids[0].value != node_id.value:
+                return -1
+            return application.woven_node_count
+    0
+
+fn scalar_retire_observation_key(observation: HwRetireObservation) -> text:
+    [observation.aspect_id.len().to_text() + ":" + observation.aspect_id,
+        observation.target_node_id.value.len().to_text() + ":" + observation.target_node_id.value,
+        observation.receipt_value.len().to_text() + ":" + observation.receipt_value,
+        observation.output_port.len().to_text() + ":" + observation.output_port,
+        observation.bit_width.to_text()].join("|")
+
+fn scalar_canonical_retire_observations(
+    observations: [HwRetireObservation]) -> [HwRetireObservation]:
+    var canonical: [HwRetireObservation] = []
+    for observation in observations: canonical.push(observation)
+    var index = 0
+    while index < canonical.len():
+        var next = index + 1
+        while next < canonical.len():
+            if scalar_retire_observation_key(canonical[next]) <
+                scalar_retire_observation_key(canonical[index]):
+                val temporary = canonical[index]
+                canonical[index] = canonical[next]
+                canonical[next] = temporary
+            next = next + 1
+        index = index + 1
+    canonical
+
+fn scalar_retire_weave_hash(composition: HwScalarProductComposition,
+    lock_sha256: text, observations: [HwRetireObservation]) -> text:
+    var rows: [text] = []
+    for observation in observations:
+        rows.push(scalar_retire_observation_key(observation))
+    var index = 0
+    while index < rows.len():
+        var next = index + 1
+        while next < rows.len():
+            if rows[next] < rows[index]:
+                val temporary = rows[index]; rows[index] = rows[next]; rows[next] = temporary
+            next = next + 1
+        index = index + 1
+    sha256_text(["simple-riscv-scalar-commit-retire-weave/v1",
+        composition.structural_sha256(), lock_sha256, rows.join("\n")].join("\n"))
+
+pub fn weave_hwir_scalar_commit_retire_observations_locked(
+    composition: HwScalarProductComposition, plan: HwAspectPlan,
+    lock: HwAspectLock, observations: [HwRetireObservation]
+) -> Result<HwScalarRetireAspectWeaveResult, text>:
+    val base_error = composition.diagnostic()
+    if base_error != "": return Err(base_error)
+    val lock_error = hwir_aspect_plan_lock_diagnostic(plan, lock)
+    if lock_error != "": return Err(lock_error)
+    val lock_hash = hwir_aspect_lock_sha256(lock)?
+    if plan.is_absent():
+        if observations.len() != 0:
+            return Err("HWIR-E-ASPECT-ABSENT: disabled scalar aspect plan cannot receive retirement observations")
+        return Ok(HwScalarRetireAspectWeaveResult(composition: composition,
+            added_port_count: 0, route: "hwir-aspect-absent",
+            lock_sha256: lock_hash,
+            weave_sha256: scalar_retire_weave_hash(composition, lock_hash, [])))
+    val retire_node = hwir_scalar_commit_retire_node_id(composition)
+    var output_names: [text] = []
+    for observation in observations:
+        val observation_error = observation.diagnostic()
+        if observation_error != "": return Err(observation_error)
+        if observation.target_node_id.value != retire_node.value:
+            return Err("HWIR-E-ASPECT-SCALAR-RETIRE-TARGET: observation requires this scalar product's commit.retire node")
+        val manifest = scalar_retire_manifest(plan, observation.aspect_id)
+        if manifest == nil:
+            return Err("HWIR-E-ASPECT-SCALAR-RETIRE-ASPECT: observation requires a planned aspect")
+        val selected = manifest.unwrap()
+        if selected.stage != "Architecture" or selected.advice_kind != "observe" or
+            selected.effect_class != "observational" or selected.added_state_count != 0 or
+            selected.latency_contract != "transparent" or
+            selected.join_point_selectors.len() != 1 or
+            selected.join_point_selectors[0] != "commit.retire":
+            return Err("HWIR-E-ASPECT-SCALAR-RETIRE-SCOPE: scalar retirement observers must be transparent state-free Architecture observations")
+        val width = composition.retirement_owner.plan.named_width(
+            composition.retirement_owner.ports, observation.receipt_value)
+        val direction = composition.retirement_owner.plan.port_direction(
+            composition.retirement_owner.ports, observation.receipt_value)
+        if width != observation.bit_width or direction != "out" or
+            not observation.receipt_value.starts_with("retire_"):
+            return Err("HWIR-E-ASPECT-SCALAR-RETIRE-TYPE: observation requires an exact typed retirement-owner output")
+        var collides_with_top = false
+        for port in composition.top_ports:
+            if port.name.lower() == observation.output_port.lower():
+                collides_with_top = true
+        if output_names.contains(observation.output_port.lower()) or collides_with_top:
+            return Err("HWIR-E-ASPECT-SCALAR-RETIRE-PORT: observer output names must be unique and new")
+        output_names.push(observation.output_port.lower())
+    for manifest in plan.manifests:
+        var count = 0
+        for observation in observations:
+            if observation.aspect_id == manifest.id: count = count + 1
+        if count != manifest.added_port_count or
+            scalar_retire_application_count(plan, manifest.id, retire_node) != count:
+            return Err("HWIR-E-ASPECT-SCALAR-RETIRE-ACCOUNTING: manifest ports and application weave count must equal typed observations")
+    val canonical_observations = scalar_canonical_retire_observations(observations)
+    var ports = composition.top_ports
+    for observation in canonical_observations:
+        ports.push(HwPort.output(observation.output_port, "Bits", observation.bit_width))
+    var bindings = composition.bindings
+    for observation in canonical_observations:
+        bindings.push(HwScalarProductBinding(kind: "retirement_aspect_to_composition",
+            source_owner: "retirement_owner", source_port: observation.receipt_value,
+            destination_owner: "composition", destination_port: observation.output_port,
+            bit_width: observation.bit_width))
+    val weave_hash = scalar_retire_weave_hash(composition, lock_hash, canonical_observations)
+    val woven = HwScalarProductComposition(node_id: composition.node_id,
+        config: composition.config, lsu_config: composition.lsu_config,
+        instruction: composition.instruction, provider_kind: composition.provider_kind,
+        provider_count: composition.provider_count,
+        redirect_owner_count: composition.redirect_owner_count,
+        retirement_owner_count: composition.retirement_owner_count,
+        provider: composition.provider, lsu_provider: composition.lsu_provider,
+        muldiv_provider: composition.muldiv_provider, csr_provider: composition.csr_provider,
+        fence_provider: composition.fence_provider,
+        completion_skid: composition.completion_skid,
+        acceptance_owner: composition.acceptance_owner, trap: composition.trap,
+        retirement_owner: composition.retirement_owner,
+        fault_aggregator: composition.fault_aggregator,
+        completion_interface: composition.completion_interface,
+        lsu_seam: composition.lsu_seam, top_ports: ports, bindings: bindings,
+        retire_observations: canonical_observations, aspect_lock_sha256: lock_hash,
+        aspect_weave_sha256: weave_hash)
+    val woven_error = woven.diagnostic(); if woven_error != "": return Err(woven_error)
+    Ok(HwScalarRetireAspectWeaveResult(composition: woven,
+        added_port_count: observations.len(), route: "hwir-aspect-scalar-commit-retire-observe",
+        lock_sha256: lock_hash,
+        weave_sha256: weave_hash))
