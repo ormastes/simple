@@ -46,6 +46,17 @@ fn _engine2d_compositor_packed_damage_reject(
         ok: false, reason: reason, rects: [], pixels: [],
         selected_backend: backend, rendered_command_count: 0)
 
+fn _engine2d_compositor_rects_equal(a: [i64], b: [i64]) -> bool:
+    """Compare packed damage tuples without aggregate identity semantics."""
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i += 1
+    true
+
 fn _engine2d_compositor_gpu_backend(selected: text) -> bool:
     selected != "software" and selected != "cpu" and selected != "cpu_simd"
 
@@ -642,23 +653,16 @@ class Engine2dCompositorBackend:
             composition, images, dirty_rects):
             return _engine2d_compositor_packed_damage_reject(
                 "retained-raster-rejected", selected)
-        val rects = self.cpu_damage_rects
-        val mirror = self.cpu_damage_pixels()
-        var packed: [u32] = []
-        var ri = 0
-        while ri < rects.len():
-            val x = rects[ri].to_i32()
-            val y = rects[ri + 1].to_i32()
-            val w = rects[ri + 2].to_i32()
-            val h = rects[ri + 3].to_i32()
-            var row = 0
-            while row < h:
-                var col = 0
-                while col < w:
-                    packed.push(mirror[(y + row) * self.w + x + col])
-                    col += 1
-                row += 1
-            ri += 4
+        val planned = self.cpu_damage_rects
+        # Software copies the requested rows directly from its framebuffer.
+        # Other backends reject this additive contract and take the existing
+        # full-frame route; never crop a hidden full read and call it sparse.
+        val packed = self.engine.read_pixels_regions_packed(planned)
+        if (not packed.valid or
+            not _engine2d_compositor_rects_equal(packed.rects, planned)):
+            self.abort_cpu_damage()
+            return _engine2d_compositor_packed_damage_reject(
+                "packed-region-readback-rejected", selected)
         self.present_cpu_damage()
         self.revision_cache_producer_generation = producer_generation
         self.revision_cache_composition_revision = composition_revision
@@ -671,7 +675,7 @@ class Engine2dCompositorBackend:
         # make a following NONE frame re-publish stale pixels.
         self.revision_cache_result = nil
         Engine2dCompositorPackedDamage(
-            ok: true, reason: "ok", rects: rects, pixels: packed,
+            ok: true, reason: "ok", rects: packed.rects, pixels: packed.pixels,
             selected_backend: selected,
             rendered_command_count: self.last_damage_ops_rendered)
 

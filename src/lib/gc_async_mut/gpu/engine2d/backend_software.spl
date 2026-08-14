@@ -12,7 +12,7 @@
 # Usage:
 #   use std.gpu.engine2d.backend_software.{SoftwareBackend}
 
-use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, ReadbackSource, readback_source_label}
+use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, Engine2DPackedRegions, engine2d_readback, ReadbackSource, readback_source_label}
 use std.gc_async_mut.gpu.engine2d.backend_capability.{BackendCapability, backend_capability_software}
 use std.gpu.engine2d.color.{color_a, color_r, color_g, color_b, rgba, blend}
 use std.gpu.engine2d.backend_emu_math.{_emu_overlay_ch}
@@ -1597,6 +1597,75 @@ impl SoftwareBackend:
                 row = row + 1
             r = r + 1
         self.mirror
+
+    me read_pixels_regions_packed(rects: [i64]) -> Engine2DPackedRegions:
+        """Copy only exact requested rows into one transport-owned payload.
+
+        This does not consult or clear dirty tiles. The retained DrawIR owner
+        already proved that `rects` covers the changed commands; keeping the
+        geometry argument explicit lets it publish the same plan it replayed.
+        Unsupported or malformed requests fail closed without allocating a
+        full mirror or partially returning a payload.
+        """
+        if not self.initialized or self.w <= 0 or self.h <= 0:
+            return Engine2DPackedRegions(valid: false, rects: [], pixels: [])
+        if rects.len() == 0 or rects.len() % 4 != 0:
+            return Engine2DPackedRegions(valid: false, rects: [], pixels: [])
+        val rect_count = rects.len() / 4
+        # The retained planner has the same 256-rect cap. Bounding validation
+        # here prevents a caller from turning overlap validation into an
+        # unbounded quadratic request path.
+        if rect_count > 256:
+            return Engine2DPackedRegions(valid: false, rects: [], pixels: [])
+        var total: i64 = 0
+        var r = 0
+        while r < rect_count:
+            val o = r * 4
+            val x = rects[o]
+            val y = rects[o + 1]
+            val width = rects[o + 2]
+            val height = rects[o + 3]
+            if (x < 0 or y < 0 or width <= 0 or height <= 0 or
+                x > self.w.to_i64() - width or y > self.h.to_i64() - height):
+                return Engine2DPackedRegions(valid: false, rects: [], pixels: [])
+            val area = width * height
+            if area > 2147483647 - total:
+                return Engine2DPackedRegions(valid: false, rects: [], pixels: [])
+            var prior = 0
+            while prior < r:
+                val po = prior * 4
+                val px = rects[po]
+                val py = rects[po + 1]
+                val pw = rects[po + 2]
+                val ph = rects[po + 3]
+                if (x < px + pw and px < x + width and
+                    y < py + ph and py < y + height):
+                    return Engine2DPackedRegions(valid: false, rects: [], pixels: [])
+                prior = prior + 1
+            total = total + area
+            r = r + 1
+        var pixels: [u32] = [0u32; total.to_i32()]
+        var write = 0
+        r = 0
+        while r < rect_count:
+            val o = r * 4
+            val x = rects[o].to_i32()
+            val y = rects[o + 1].to_i32()
+            val width = rects[o + 2].to_i32()
+            val height = rects[o + 3].to_i32()
+            var row = 0
+            while row < height:
+                val source = (y + row) * self.w + x
+                var col = 0
+                # cpu-lane-loop-ok: exact boxed-pixel region extraction; a
+                # Simple [u32] is not a packed memcpy source.
+                while col < width:
+                    pixels[write] = self.buf[source + col]
+                    write = write + 1
+                    col = col + 1
+                row = row + 1
+            r = r + 1
+        Engine2DPackedRegions(valid: true, rects: rects, pixels: pixels)
 
     me invalidate_mirror():
         """Drop the frame-persistent mirror; the next damaged read reseeds."""
