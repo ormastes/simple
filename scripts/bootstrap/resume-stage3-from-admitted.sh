@@ -157,6 +157,7 @@ seed_fingerprint=$(bootstrap_stage3_manifest_value inputs_fingerprint "$stamp")
 progress="$output/bootstrap-build-progress.events"
 memory_snapshot="$stage3/memory-snapshot-v1.$$.events"
 phase_profile="$stage3/phase-profile.$$.events"
+evidence_run_id="stage3-${platform}-$$"
 [ ! -e "$memory_snapshot" ] && [ ! -L "$memory_snapshot" ] || exit 1
 [ ! -e "$phase_profile" ] && [ ! -L "$phase_profile" ] || exit 1
 
@@ -182,6 +183,7 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_COMPILER_PHASE_PROFILE=1" \
   "SIMPLE_COMPILER_PHASE_PROFILE_FILE=$phase_profile" \
   "SIMPLE_MEM_SNAPSHOT_FILE=$memory_snapshot" \
+  "SIMPLE_EVIDENCE_RUN_ID=$evidence_run_id" \
   "LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1" \
   "SIMPLE_NATIVE_BUILD_TARGET=$platform" "SIMPLE_NATIVE_BUILD_THREADS=1" \
   "SIMPLE_NATIVE_BUILD_CACHE_DIR=$stage3_cache" "SIMPLE_RUNTIME_PATH=$runtime" \
@@ -201,6 +203,7 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   SIMPLE_COMPILER_PHASE_PROFILE=1 \
   SIMPLE_COMPILER_PHASE_PROFILE_FILE="$phase_profile" \
   SIMPLE_MEM_SNAPSHOT_FILE="$memory_snapshot" \
+  SIMPLE_EVIDENCE_RUN_ID="$evidence_run_id" \
   LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
   SIMPLE_NATIVE_BUILD_TARGET="$platform" SIMPLE_NATIVE_BUILD_THREADS=1 \
   SIMPLE_NATIVE_BUILD_CACHE_DIR="$stage3_cache" SIMPLE_RUNTIME_PATH="$runtime" \

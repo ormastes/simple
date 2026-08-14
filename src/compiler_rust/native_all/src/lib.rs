@@ -15,6 +15,11 @@ pub use simple_runtime;
 #[cfg(feature = "driver-compat")]
 pub use simple_driver;
 
+mod mem_snapshot_provider;
+pub use mem_snapshot_provider::{
+    rt_mem_snapshot_close, rt_mem_snapshot_open, rt_mem_snapshot_record, rt_phase_profile_record,
+};
+
 // Row 3 hosted-compositor SFFI bindings. This `extern crate` is the
 // load-bearing reference that forces rustc to link the staticlib's
 // object files into `libsimple_native_all.a`, exporting the

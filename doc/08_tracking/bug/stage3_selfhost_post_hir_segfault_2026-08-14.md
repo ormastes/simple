@@ -291,6 +291,27 @@ no accessible core, this does not prove a new root cause or close the former
 MIR frontier. The next fresh lane must make those diagnostics durable and
 repair their first common owner; repeating this exhausted command is not evidence.
 
+The subsequent source-current continuation repaired the first scalar surface
+alias lookup with full physical identity (source index, canonical path, module
+name, content length, and content hash) and added a descriptor-bound native
+process sampler plus secure run-id-correlated memory/phase providers. Diagnostic
+Stage 2 cycle 11 completed with 3 compiled, 856 cached, and 0 failed; its binary
+SHA-256 is `e4767459f9820a4ddce4b406f33957b02468f75861d5b04581744b870ef41592`
+and its build-log SHA-256 is
+`51addc7d4b2c67d34600d5d42dabbdb9616ff25ffe90caf96a5ecac4aa1a9d2a`.
+Version, unsupported-command, bootstrap-off/on frontend, and unchanged-hash
+sanity passed once.
+
+The sole fresh instrumented Phase-3 run loaded 898 logical sources / 617
+unique sources and terminated with exit 139 / signal 11 while starting the
+second parse (`src/compiler/driver/driver.spl`). Three 10-second native samples
+recorded a peak RSS of 221,208 KiB, so this occurrence is not the prior HIR RSS
+runaway. No candidate, secure memory stream, or secure phase stream was
+created. This narrows the next owner to the pre-HIR parser/provider boundary;
+it does not admit the new evidence path or close the former MIR frontier. The
+session's three-cycle cap is exhausted, so the failed command must not be
+repeated unchanged.
+
 ## Restart12 primary repair lane (2026-08-14)
 
 The retained log proved that `MethodResolution.Unresolved` was selected by a

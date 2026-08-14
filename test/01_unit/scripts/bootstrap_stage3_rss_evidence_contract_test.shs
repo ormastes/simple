@@ -1,0 +1,110 @@
+#!/bin/sh
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+cc -std=c11 -Wall -Wextra -Werror -O2 \
+  "$repo/scripts/check/lib/bootstrap-stage3-rss-evidence.c" -o "$tmp/sampler"
+
+run_id=contract-run-0001
+sample='sample run_id=contract-run-0001 mono_ns=10 root_pid=100 root_start=200 pid=100 start=200 ppid=1 vmrss_kb=30 vmhwm_kb=40 rssanon_kb=20 rssfile_kb=10'
+child='sample run_id=contract-run-0001 mono_ns=10 root_pid=100 root_start=200 pid=101 start=201 ppid=100 vmrss_kb=3 vmhwm_kb=4 rssanon_kb=2 rssfile_kb=1'
+terminal='terminal run_id=contract-run-0001 mono_ns=20 root_pid=100 root_start=200 exit_code=0 signal=0 interval_ms=10000'
+
+expect_reject() {
+  name=$1
+  shift
+  printf '%s\n' "$@" >"$tmp/$name.raw"
+  if "$tmp/sampler" validate --run-id "$run_id" "$tmp/$name.raw" >/dev/null 2>&1; then
+    echo "FAIL: accepted $name" >&2
+    exit 1
+  fi
+}
+
+printf '%s\n%s\n%s\n' "$sample" "$child" "$terminal" >"$tmp/good.raw"
+"$tmp/sampler" validate --run-id "$run_id" "$tmp/good.raw"
+
+expect_reject duplicate "${sample} vmrss_kb=31" "$terminal"
+expect_reject unknown "${sample} mystery=1" "$terminal"
+expect_reject leading_zero "${sample%% mono_ns=*} mono_ns=010 root_pid=100 root_start=200 pid=100 start=200 ppid=1 vmrss_kb=30 vmhwm_kb=40 rssanon_kb=20 rssfile_kb=10" "$terminal"
+expect_reject overflow "${sample%% vmrss_kb=*} vmrss_kb=18446744073709551616 vmhwm_kb=40 rssanon_kb=20 rssfile_kb=10" "$terminal"
+expect_reject negative "${sample%% rssanon_kb=*} rssanon_kb=-1 rssfile_kb=10" "$terminal"
+expect_reject root_mismatch "$sample" 'terminal run_id=contract-run-0001 mono_ns=20 root_pid=999 root_start=200 exit_code=0 signal=0 interval_ms=10000'
+expect_reject root_pid_reuse 'sample run_id=contract-run-0001 mono_ns=10 root_pid=100 root_start=200 pid=100 start=201 ppid=1 vmrss_kb=30 vmhwm_kb=40 rssanon_kb=20 rssfile_kb=10' "$terminal"
+expect_reject descendant_pid_reuse "$sample" "$child" 'sample run_id=contract-run-0001 mono_ns=11 root_pid=100 root_start=200 pid=101 start=999 ppid=100 vmrss_kb=3 vmhwm_kb=4 rssanon_kb=2 rssfile_kb=1' "$terminal"
+expect_reject missing_root "$child" "$terminal"
+expect_reject multiple_terminal "$sample" "$terminal" "$terminal"
+expect_reject sample_after_terminal "$sample" "$terminal" "$child"
+expect_reject run_id_mismatch 'sample run_id=wrong-run-0001 mono_ns=10 root_pid=100 root_start=200 pid=100 start=200 ppid=1 vmrss_kb=30 vmhwm_kb=40 rssanon_kb=20 rssfile_kb=10' "$terminal"
+expect_reject missing_terminal "$sample"
+expect_reject backward_time "$sample" 'terminal run_id=contract-run-0001 mono_ns=9 root_pid=100 root_start=200 exit_code=0 signal=0 interval_ms=10000'
+printf '%s' "$sample" >"$tmp/partial.raw"
+if "$tmp/sampler" validate --run-id "$run_id" "$tmp/partial.raw" >/dev/null 2>&1; then echo 'FAIL: accepted partial' >&2; exit 1; fi
+
+shell_exe=$(readlink -f /bin/sh)
+sha=$(sha256sum "$shell_exe" | awk '{print $1}')
+mkdir "$tmp/out"
+"$tmp/sampler" run --interval-ms 100 --raw "$tmp/out/live.raw" --sha256 "$sha" --run-id live-run-0001 -- "$shell_exe" -c 'sleep 0.25 & wait'
+"$tmp/sampler" validate --run-id live-run-0001 "$tmp/out/live.raw"
+if "$tmp/sampler" run --raw "$tmp/out/live.raw" --sha256 "$sha" --run-id live-run-0002 -- "$shell_exe" -c true >/dev/null 2>&1; then echo 'FAIL: replaced existing target' >&2; exit 1; fi
+ln -s "$tmp/escape" "$tmp/out/link.raw"
+if "$tmp/sampler" run --raw "$tmp/out/link.raw" --sha256 "$sha" --run-id live-run-0003 -- "$shell_exe" -c true >/dev/null 2>&1; then echo 'FAIL: followed leaf symlink' >&2; exit 1; fi
+mkdir "$tmp/real-parent"
+ln -s "$tmp/real-parent" "$tmp/link-parent"
+if "$tmp/sampler" run --raw "$tmp/link-parent/raw" --sha256 "$sha" --run-id live-run-0004 -- "$shell_exe" -c true >/dev/null 2>&1; then echo 'FAIL: followed parent symlink' >&2; exit 1; fi
+if "$tmp/sampler" run --raw "$tmp/out/hash.raw" --sha256 0000000000000000000000000000000000000000000000000000000000000000 --run-id live-run-0005 -- "$shell_exe" -c true >/dev/null 2>&1; then echo 'FAIL: accepted wrong executable hash' >&2; exit 1; fi
+
+aux_record() {
+  printf '%s\n' "schema=simple.compiler.mem_snapshot.v1 run_id=$1 seq=$2 pid=100 monotonic_ms=$3 event=$4 phase=$5 source_index=-1 source_path_kind=none source_path=- retained_modules=0 validation_keys=0 validation_values=0 shared_traits=0 hir_names=0 hir_symbols=0 hir_functions=0 hir_constants=0 hir_enums=0 hir_structs=0 hir_classes=0 heap_live_bytes=0 heap_peak_bytes=0 rss_kib=30 hwm_kib=40"
+}
+aux_record "$run_id" 0 10 open hir >"$tmp/memory.raw"
+aux_record "$run_id" 1 11 snapshot post-lowering >>"$tmp/memory.raw"
+aux_record "$run_id" 2 12 terminal hir-complete >>"$tmp/memory.raw"
+aux_record "$run_id" 0 10 phase compile-start >"$tmp/phase.raw"
+aux_record "$run_id" 1 12 phase compile-finish >>"$tmp/phase.raw"
+analyze_sample='sample run_id=contract-run-0001 mono_ns=10000000 root_pid=100 root_start=200 pid=100 start=200 ppid=1 vmrss_kb=30 vmhwm_kb=40 rssanon_kb=20 rssfile_kb=10'
+analyze_terminal='terminal run_id=contract-run-0001 mono_ns=20000000 root_pid=100 root_start=200 exit_code=0 signal=0 interval_ms=123'
+printf '%s\n%s\n' "$analyze_sample" "$analyze_terminal" >"$tmp/analyze-samples.raw"
+"$tmp/sampler" analyze --samples "$tmp/analyze-samples.raw" --memory "$tmp/memory.raw" --phase "$tmp/phase.raw" --run-id "$run_id" --output-dir "$tmp/evidence"
+test -f "$tmp/evidence/boundary.tsv"
+test -f "$tmp/evidence/delta.tsv"
+test -f "$tmp/evidence/summary.env"
+test -f "$tmp/evidence/receipt.env"
+grep -q '^receipt_schema=simple-bootstrap-stage3-rss-evidence-v1$' "$tmp/evidence/receipt.env"
+grep -q '^sample_interval_ms=123$' "$tmp/evidence/summary.env"
+if "$tmp/sampler" analyze --samples "$tmp/analyze-samples.raw" --memory "$tmp/memory.raw" --phase "$tmp/phase.raw" --run-id "$run_id" --output-dir "$tmp/evidence" >/dev/null 2>&1; then echo 'FAIL: replaced output generation' >&2; exit 1; fi
+ln -s "$tmp/nope" "$tmp/evidence-link"
+if "$tmp/sampler" analyze --samples "$tmp/analyze-samples.raw" --memory "$tmp/memory.raw" --phase "$tmp/phase.raw" --run-id "$run_id" --output-dir "$tmp/evidence-link" >/dev/null 2>&1; then echo 'FAIL: followed output symlink' >&2; exit 1; fi
+
+expect_analyze_reject() {
+  name=$1 memory=$2 phase_file=$3
+  if "$tmp/sampler" analyze --samples "$tmp/analyze-samples.raw" --memory "$memory" --phase "$phase_file" --run-id "$run_id" --output-dir "$tmp/$name-evidence" >/dev/null 2>&1; then echo "FAIL: analyzer accepted $name" >&2; exit 1; fi
+  test ! -e "$tmp/$name-evidence"
+  if find "$tmp" -maxdepth 1 -name ".$name-evidence.tmp.*" | grep -q .; then echo "FAIL: partial publication for $name" >&2; exit 1; fi
+}
+sed 's/run_id=contract-run-0001/run_id=wrong-run-0001/' "$tmp/memory.raw" >"$tmp/memory-run.raw"
+expect_analyze_reject aux_run_id "$tmp/memory-run.raw" "$tmp/phase.raw"
+sed '1s/ seq=/ mystery=1 seq=/' "$tmp/memory.raw" >"$tmp/memory-unknown.raw"
+expect_analyze_reject memory_unknown "$tmp/memory-unknown.raw" "$tmp/phase.raw"
+sed '1s/ seq=0/ seq=0 seq=0/' "$tmp/memory.raw" >"$tmp/memory-duplicate.raw"
+expect_analyze_reject memory_duplicate "$tmp/memory-duplicate.raw" "$tmp/phase.raw"
+sed '1s/ seq=/ mystery=1 seq=/' "$tmp/phase.raw" >"$tmp/phase-unknown.raw"
+expect_analyze_reject phase_unknown "$tmp/memory.raw" "$tmp/phase-unknown.raw"
+sed '1s/ seq=0/ seq=0 seq=0/' "$tmp/phase.raw" >"$tmp/phase-duplicate.raw"
+expect_analyze_reject phase_duplicate "$tmp/memory.raw" "$tmp/phase-duplicate.raw"
+sed '$d' "$tmp/memory.raw" >"$tmp/memory-missing-terminal.raw"
+expect_analyze_reject missing_memory_terminal "$tmp/memory-missing-terminal.raw" "$tmp/phase.raw"
+{ cat "$tmp/memory.raw"; tail -1 "$tmp/memory.raw"; } >"$tmp/memory-multiple-terminal.raw"
+expect_analyze_reject multiple_memory_terminal "$tmp/memory-multiple-terminal.raw" "$tmp/phase.raw"
+sed '2s/seq=1/seq=2/' "$tmp/memory.raw" >"$tmp/memory-gap.raw"
+expect_analyze_reject memory_sequence_gap "$tmp/memory-gap.raw" "$tmp/phase.raw"
+sed '2s/seq=1/seq=2/' "$tmp/phase.raw" >"$tmp/phase-gap.raw"
+expect_analyze_reject phase_sequence_gap "$tmp/memory.raw" "$tmp/phase-gap.raw"
+sed '2s/monotonic_ms=11/monotonic_ms=1000/' "$tmp/memory.raw" >"$tmp/memory-domain.raw"
+expect_analyze_reject monotonic_domain "$tmp/memory-domain.raw" "$tmp/phase.raw"
+sed 's/interval_ms=123/interval_ms=09/' "$tmp/analyze-samples.raw" >"$tmp/bad-interval-samples.raw"
+if "$tmp/sampler" analyze --samples "$tmp/bad-interval-samples.raw" --memory "$tmp/memory.raw" --phase "$tmp/phase.raw" --run-id "$run_id" --output-dir "$tmp/bad-interval-evidence" >/dev/null 2>&1; then echo 'FAIL: analyzer accepted noncanonical interval' >&2; exit 1; fi
+test ! -e "$tmp/bad-interval-evidence"
+
+echo 'PASS: bootstrap Stage-3 native RSS evidence contract'

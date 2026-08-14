@@ -43,9 +43,33 @@ use compiler.driver.driver_safety_severity.{SafetyPassSeverity, safety_pass_seve
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_hash_text(content: text) -> i64
+extern fn rt_path_absolute(path: text) -> text
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_heap_promote(value: Any) -> bool
+
+pub fn driver_stage3_surface_identity_matches(
+    surface_source_index: i64,
+    surface_canonical_path: text,
+    surface_module_name: text,
+    surface_content_length: i64,
+    surface_content_hash: i64,
+    source_index: i64,
+    source_path: text,
+    source_module_name: text,
+    source_content_length: i64,
+    source_content_hash: i64
+) -> bool:
+    val physical_path = rt_path_absolute(source_path)
+    val normalized_source_path = (
+        if physical_path != "": physical_path else: source_path
+    ).replace("\\", "/")
+    surface_source_index == source_index and
+        surface_canonical_path == normalized_source_path and
+        surface_module_name == source_module_name and
+        surface_content_length == source_content_length and
+        surface_content_hash == source_content_hash
 
 fn _driver_hir_mem_snapshot(
     boundary: text,
@@ -603,13 +627,45 @@ impl CompilerDriver:
             # declarations on this frame. Passing any of them through a value
             # parameter duplicates the no-GC Stage-3 ownership graph.
             var validation_surface_index: i64 = -1
+            val validation_content_length: i64 = src.content.len()
+            val validation_content_hash: i64 = rt_hash_text(src.content)
             var validation_alias_index: i64 = 0
             while validation_alias_index < retained_module_surfaces.ordered_names.len() and
                   validation_alias_index < retained_module_surfaces.ordered_indices.len():
                 if retained_module_surfaces.ordered_names[validation_alias_index] == name:
-                    validation_surface_index = retained_module_surfaces.ordered_indices[validation_alias_index]
+                    val candidate_index: i64 = retained_module_surfaces.ordered_indices[validation_alias_index]
+                    if candidate_index >= 0 and candidate_index < retained_module_surfaces.surfaces.len():
+                        if driver_stage3_surface_identity_matches(
+                            retained_module_surfaces.surfaces[candidate_index].source_index,
+                            retained_module_surfaces.surfaces[candidate_index].canonical_path,
+                            retained_module_surfaces.surfaces[candidate_index].module_name,
+                            retained_module_surfaces.surfaces[candidate_index].content_length,
+                            retained_module_surfaces.surfaces[candidate_index].content_hash,
+                            source_idx, src.path, name,
+                            validation_content_length, validation_content_hash):
+                            validation_surface_index = candidate_index
                     break
                 validation_alias_index = validation_alias_index + 1
+            # Compatibility spellings do not always have their own scalar
+            # alias. Resolve the already-frozen physical source in place,
+            # mirroring module_surface_index_for_source without passing the
+            # retained registry/source aggregates across a value boundary.
+            if validation_surface_index < 0:
+                var validation_physical_index: i64 = 0
+                while validation_physical_index < retained_module_surfaces.surfaces.len():
+                    val physical_source_index: i64 = retained_module_surfaces.surfaces[validation_physical_index].source_index
+                    if physical_source_index == source_idx:
+                        if driver_stage3_surface_identity_matches(
+                            physical_source_index,
+                            retained_module_surfaces.surfaces[validation_physical_index].canonical_path,
+                            retained_module_surfaces.surfaces[validation_physical_index].module_name,
+                            retained_module_surfaces.surfaces[validation_physical_index].content_length,
+                            retained_module_surfaces.surfaces[validation_physical_index].content_hash,
+                            source_idx, src.path, name,
+                            validation_content_length, validation_content_hash):
+                            validation_surface_index = validation_physical_index
+                            break
+                    validation_physical_index = validation_physical_index + 1
             if source_idx < 4:
                 log_phase("phase3:hir:validation:lookup:done index={source_idx}")
             if validation_surface_index < 0:

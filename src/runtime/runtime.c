@@ -1913,15 +1913,18 @@ int rt_mem_snapshot_record(int64_t fd, int64_t seq,
         int64_t shared_traits, int64_t hir_names, int64_t hir_symbols,
         int64_t hir_functions, int64_t hir_constants, int64_t hir_enums,
         int64_t hir_structs, int64_t hir_classes) {
-    char event_token[64], phase_token[128], path_token[4096], line[6144];
-    if (rt_mem_snapshot_token(event_token, sizeof(event_token), event, event_len) < 0 ||
+    char run_token[128], event_token[64], phase_token[4096], path_token[4096], line[9216];
+    const char* run_id = getenv("SIMPLE_EVIDENCE_RUN_ID");
+    if (!run_id || !*run_id) run_id = "none";
+    if (rt_mem_snapshot_token(run_token, sizeof(run_token), run_id, (int64_t)strlen(run_id)) < 0 ||
+        rt_mem_snapshot_token(event_token, sizeof(event_token), event, event_len) < 0 ||
         rt_mem_snapshot_token(phase_token, sizeof(phase_token), phase, phase_len) < 0 ||
         rt_mem_snapshot_token(path_token, sizeof(path_token), source_path, source_path_len) < 0) return 0;
     const char* path_kind = source_path_len > 0 ? "recorded" : "none";
     const char* emitted_path = source_path_len > 0 ? path_token : "-";
     int n = snprintf(line, sizeof(line),
-        "schema=simple.compiler.mem_snapshot.v1 seq=%lld pid=%lld monotonic_ms=%lld event=%s phase=%s source_index=%lld source_path_kind=%s source_path=%s retained_modules=%lld validation_keys=%lld validation_values=%lld shared_traits=%lld hir_names=%lld hir_symbols=%lld hir_functions=%lld hir_constants=%lld hir_enums=%lld hir_structs=%lld hir_classes=%lld heap_live_bytes=%lld heap_peak_bytes=%lld rss_kib=%lld hwm_kib=%lld\n",
-        (long long)seq, (long long)rt_getpid(), (long long)rt_time_now_monotonic_ms(),
+        "schema=simple.compiler.mem_snapshot.v1 run_id=%s seq=%lld pid=%lld monotonic_ms=%lld event=%s phase=%s source_index=%lld source_path_kind=%s source_path=%s retained_modules=%lld validation_keys=%lld validation_values=%lld shared_traits=%lld hir_names=%lld hir_symbols=%lld hir_functions=%lld hir_constants=%lld hir_enums=%lld hir_structs=%lld hir_classes=%lld heap_live_bytes=%lld heap_peak_bytes=%lld rss_kib=%lld hwm_kib=%lld\n",
+        run_token, (long long)seq, (long long)rt_getpid(), (long long)rt_time_now_monotonic_ms(),
         event_token, phase_token, (long long)source_index, path_kind, emitted_path,
         (long long)retained_modules, (long long)validation_keys,
         (long long)validation_values, (long long)shared_traits, (long long)hir_names,

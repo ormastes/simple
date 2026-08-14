@@ -2,8 +2,8 @@
 
 ## 2026-08-14 restart12 replacement lane (canonical active slice)
 
-Current source base: `cea2293c8f2834fdde7f00e0061b62970cbaab3f` plus the
-pending Phase-3 constant/import continuation described below. This slice supersedes stale provenance
+Current source base: `4b22c1d03c6041773b5b19218574a65ad29a3384` plus the
+pending Phase-3 surface-identity/evidence continuation described below. This slice supersedes stale provenance
 claims below without rewriting the historical T1--T20 record. Operator guide:
 `doc/07_guide/ui/rendering/cached_render_entry_closure.md`; retained result:
 `doc/09_report/drawir_sparse_dynamic_8k_attempt_2026-08-12.md`; blocker:
@@ -22,19 +22,20 @@ receipt are absent. Direct `-c` and source-file probes exit 248 with
 artifact. Those variants are diagnostic attempts, not implementation fix
 cycles, and they prove neither binary lineage nor root cause.
 
-The latest continuation fixed desugared module-constant type selection, removed
-the wide by-value `ModuleSurface` boundary from imported callable signature
-materialization, and deduplicated only exact repeated callable registrations.
-It produced a source-current, sanity-checked diagnostic Stage 2 at
-`build/restart12-render-cli-pass2/stage2-cycle10/x86_64-unknown-linux-gnu/simple`
-(SHA-256 `b6abe72ea7a6d7b102b83d116fc5b32d41c98bdf5d0e777a1602091699240e57`).
+The latest continuation additionally repaired Stage-3 surface lookup with a
+scalar physical-identity predicate and added native descriptor-bound RSS,
+memory, and phase evidence providers. It produced a source-current,
+sanity-checked diagnostic Stage 2 at
+`build/restart12-render-cli-pass2/stage2-cycle11/x86_64-unknown-linux-gnu/simple`
+(SHA-256 `e4767459f9820a4ddce4b406f33957b02468f75861d5b04581744b870ef41592`).
 It is not an admitted Stage 3 or full CLI. Fresh Phase-3 attempts did not
 re-reach the former MIR module-constant frontier, so closure of its fourteen
-errors remains unverified. Phase 3 parsed all 616 inputs, then exited on signal
-11 with 25 accumulated HIR diagnostics and no executable. Peak RSS was
-8,700,496 KiB. The log identifies invalid field-type payloads for
-`CompiledUnit.entry_point` and `BackendError.span`, but did not flush the
-underlying diagnostics before the crash. The three-cycle cap is exhausted;
+errors remains unverified. The one fresh instrumented Phase-3 run loaded 898
+logical sources / 617 unique sources and exited on signal 11 while starting
+the second parse (`src/compiler/driver/driver.spl`), with no executable. The
+native process sampler retained three samples, peak RSS 221,208 KiB, and an
+exit-139/signal-11 terminal. No memory or phase evidence file was created, so
+the provider/sink path is not admitted. The three-cycle build/fix cap is exhausted;
 Stage 4 and every downstream CLI/render gate remain blocked.
 
 ### Acceptance status
@@ -42,15 +43,26 @@ Stage 4 and every downstream CLI/render gate remain blocked.
 | AC | Status | Proof or remaining evidence |
 |---|---|---|
 | AC-1 current truth | PROVED | The active slice distinguishes the unadmitted artifact, missing receipts, and unproven root cause; historical redesign §1--§8 remains authoritative. |
-| AC-2 executable resume | BLOCKED | Source-current diagnostic Stage 2 passed once, but Phase 3 failed after all 616 parses with 25 accumulated HIR diagnostics, invalid field-type payloads, signal 11, and no executable. A fresh lane must retain the diagnostics before the canonical transaction below. |
+| AC-2 executable resume | BLOCKED | Source-current diagnostic Stage 2 passed sanity once, but the sole fresh instrumented Phase 3 failed during the second parse with signal 11, low RSS, absent secure memory/phase streams, and no executable. A fresh lane must debug the pre-HIR parser/provider boundary before the canonical transaction below. |
 | AC-3 gate separation | PROVED | Candidate build, admission, deploy, deployed lineage, carrier build, and carrier run are independent. |
 | AC-4 sparse 8K contract | BLOCKED | This is a future receipt contract; the completed diagnostic row lacks admitted-native evidence. |
 | AC-5 parallel ownership | PROVED | Bounded matrix below; `/root` alone edits shared plan/knowledge files. |
-| AC-6 higher review | PROVED | Two read-only highest-capability passes completed; both returned FAIL and their unresolved dispositions remain explicit. |
+| AC-6 higher review | PROVED | The final read-only highest-capability review returned FAIL; its five unresolved dispositions are recorded below. |
 | AC-7 knowledge | BLOCKED | Guide/expert discovery is updated; Stage-3 and rollback-producer ownership remain missing knowledge blockers. |
-| AC-8 workflow docs | N/A | No SPipe runner, evidence wrapper, skill, agent, or command behavior changes. |
+| AC-8 workflow docs | BLOCKED | Evidence components exist, but neither bootstrap path invokes the sampler/analyzer and no admitted workflow/spec guide documents a runnable receipt path. |
 | AC-9 future scenario vocabulary | PROVED | `CachedRenderEntryClosureV1` and frozen helper/step names are below. |
 | AC-10 verify/integrate | MISSING | Guard and serialized integration evidence is recorded only after it runs. |
+
+### Final reviewer dispositions
+
+The highest-capability review rejected completion. Before admission, a fresh
+lane must (1) integrate sampler execution and analysis into both Stage-3
+bootstrap paths, (2) make provider ABI/schema limits and missing-run-id values
+identical, (3) descriptor-bind analyzer validation and hashing to prevent
+input replacement, (4) remove a renamed generation if parent-directory fsync
+fails, and (5) replace source-string assertions with provider/analyzer
+compatibility behavior and current workflow documentation. AC-8 and AC-10
+remain open until those findings pass once.
 
 ### Six fail-closed gates
 

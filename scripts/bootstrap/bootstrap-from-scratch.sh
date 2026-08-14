@@ -1856,6 +1856,9 @@ else
       --runtime-path "${stage_runtime_absolute}" \
       -o "${stage2_bin}"
   )
+  stage3_evidence_run_id="stage3-${PLATFORM}-$$"
+  stage3_memory_snapshot="${stage3_provenance_dir}/memory-snapshot-v1.events"
+  stage3_phase_profile="${stage3_provenance_dir}/phase-profile-v1.events"
   stage3_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "RUST_LOG=${stage_build_rust_log}" \
@@ -1867,6 +1870,10 @@ else
       "SIMPLE_NATIVE_ARENA_DECLS=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
       "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
+      "SIMPLE_COMPILER_PHASE_PROFILE=1" \
+      "SIMPLE_COMPILER_PHASE_PROFILE_FILE=${stage3_phase_profile}" \
+      "SIMPLE_MEM_SNAPSHOT_FILE=${stage3_memory_snapshot}" \
+      "SIMPLE_EVIDENCE_RUN_ID=${stage3_evidence_run_id}" \
       "LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1" \
       "SIMPLE_NATIVE_BUILD_TARGET=${PLATFORM}" \
       "SIMPLE_NATIVE_BUILD_THREADS=${selfhost_jobs}" \
@@ -1999,6 +2006,8 @@ else
   # happens -- inside the self-hosted driver, which is the point of Stage 3.
   # Stage 2 above is a seed build by design and keeps its --entry/--source form.
   set +e
+  [ ! -e "${stage3_memory_snapshot}" ] && [ ! -L "${stage3_memory_snapshot}" ] || exit 1
+  [ ! -e "${stage3_phase_profile}" ] && [ ! -L "${stage3_phase_profile}" ] || exit 1
   [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ] && \
   bootstrap_stage3_run_transcribed \
     "$(absolute_path "${stage3_command_transcript}")" "${repo_root}" \
@@ -2015,6 +2024,10 @@ else
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
+    SIMPLE_COMPILER_PHASE_PROFILE=1 \
+    SIMPLE_COMPILER_PHASE_PROFILE_FILE="${stage3_phase_profile}" \
+    SIMPLE_MEM_SNAPSHOT_FILE="${stage3_memory_snapshot}" \
+    SIMPLE_EVIDENCE_RUN_ID="${stage3_evidence_run_id}" \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_NATIVE_BUILD_TARGET="${PLATFORM}" \
     SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}" \

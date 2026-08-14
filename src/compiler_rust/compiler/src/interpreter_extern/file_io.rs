@@ -10,7 +10,6 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{LazyLock, Mutex};
-use std::time::Instant;
 #[cfg(unix)]
 use std::ffi::CString;
 #[cfg(unix)]
@@ -23,7 +22,6 @@ static LOCK_HANDLES: Mutex<Option<LockState>> = Mutex::new(None);
 static SYMBOL_INTERNER: LazyLock<Mutex<SymbolInterner>> = LazyLock::new(|| Mutex::new(SymbolInterner::new()));
 static FILE_EXISTS_PROBE: LazyLock<Mutex<FileExistsProbeState>> =
     LazyLock::new(|| Mutex::new(FileExistsProbeState::new()));
-static MEM_SNAPSHOT_START: LazyLock<Instant> = LazyLock::new(Instant::now);
 static MEM_SNAPSHOT_FILES: LazyLock<Mutex<(i64, HashMap<i64, std::fs::File>)>> =
     LazyLock::new(|| Mutex::new((1, HashMap::new())));
 
@@ -497,6 +495,18 @@ fn process_status_kib(key: &str) -> i64 {
     }).unwrap_or(-1)
 }
 
+fn snapshot_monotonic_ms() -> i64 {
+    #[cfg(unix)]
+    unsafe {
+        let mut value: libc::timespec = std::mem::zeroed();
+        if libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut value) == 0 {
+            return value.tv_sec.saturating_mul(1000)
+                + value.tv_nsec.saturating_div(1_000_000);
+        }
+    }
+    -1
+}
+
 pub fn rt_mem_snapshot_record(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 17 { return Ok(Value::Bool(false)); }
     let handle = match snapshot_int(args, 0) { Some(v) => v, None => return Ok(Value::Bool(false)) };
@@ -511,8 +521,10 @@ pub fn rt_mem_snapshot_record(args: &[Value]) -> Result<Value, CompileError> {
     }
     let heap_live = simple_runtime::value::heap::rt_heap_live_bytes();
     let heap_peak = simple_runtime::value::heap::rt_heap_peak_bytes();
-    let line = format!("schema=simple.compiler.mem_snapshot.v1 seq={seq} pid={} monotonic_ms={} event={event} phase={phase} source_index={source_index} source_path_kind={} source_path={} retained_modules={} validation_keys={} validation_values={} shared_traits={} hir_names={} hir_symbols={} hir_functions={} hir_constants={} hir_enums={} hir_structs={} hir_classes={} heap_live_bytes={heap_live} heap_peak_bytes={heap_peak} rss_kib={} hwm_kib={}\n",
-        std::process::id(), MEM_SNAPSHOT_START.elapsed().as_millis(),
+    let run_id = snapshot_token(&std::env::var("SIMPLE_EVIDENCE_RUN_ID")
+        .unwrap_or_else(|_| "none".to_string()));
+    let line = format!("schema=simple.compiler.mem_snapshot.v1 run_id={run_id} seq={seq} pid={} monotonic_ms={} event={event} phase={phase} source_index={source_index} source_path_kind={} source_path={} retained_modules={} validation_keys={} validation_values={} shared_traits={} hir_names={} hir_symbols={} hir_functions={} hir_constants={} hir_enums={} hir_structs={} hir_classes={} heap_live_bytes={heap_live} heap_peak_bytes={heap_peak} rss_kib={} hwm_kib={}\n",
+        std::process::id(), snapshot_monotonic_ms(),
         if path.is_empty() { "none" } else { "recorded" }, if path.is_empty() { "-" } else { &path },
         counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7], counts[8], counts[9], counts[10],
         process_status_kib("VmRSS:"), process_status_kib("VmHWM:"));

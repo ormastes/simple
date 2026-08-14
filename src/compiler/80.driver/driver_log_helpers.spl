@@ -8,6 +8,14 @@ use std.nogc_sync_mut.io.file_ops.{file_append}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_time_now_monotonic_ms() -> i64
+extern fn rt_mem_snapshot_open(path: text) -> i64
+extern fn rt_mem_snapshot_record(
+    fd: i64, seq: i64, event: text, phase: text, source_index: i64,
+    source_path: text, retained_modules: i64, validation_keys: i64,
+    validation_values: i64, shared_traits: i64, hir_names: i64,
+    hir_symbols: i64, hir_functions: i64, hir_constants: i64,
+    hir_enums: i64, hir_structs: i64, hir_classes: i64
+) -> bool
 
 fn driver_phase_trace_enabled() -> bool:
     ((rt_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? "") == "1") or ((rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1")
@@ -21,6 +29,21 @@ var _g_phase_t0_ms: i64 = 0
 var _g_phase_t0_set: bool = false
 var _g_progress_path: text = ""
 var _g_progress_path_set: bool = false
+var _g_phase_profile_fd: i64 = -2
+var _g_phase_profile_seq: i64 = 0
+
+fn _append_phase_profile(msg: text):
+    if _g_phase_profile_fd == -2:
+        val sink = rt_env_get("SIMPLE_COMPILER_PHASE_PROFILE_FILE") ?? ""
+        _g_phase_profile_fd = if sink != "": rt_mem_snapshot_open(sink) else: -1
+    if _g_phase_profile_fd < 0:
+        return
+    if rt_mem_snapshot_record(
+        _g_phase_profile_fd, _g_phase_profile_seq, "phase", msg, -1, "",
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0):
+        _g_phase_profile_seq = _g_phase_profile_seq + 1
+    else:
+        _g_phase_profile_fd = -1
 
 fn _phase_elapsed_ms() -> i64:
     val now = rt_time_now_monotonic_ms()
@@ -77,12 +100,11 @@ pub fn log_phase(msg: text):
         # eprint above never reaches the user on the native-build path. Emit a
         # stdout twin so phase profiling works there too (stdout IS relayed).
         print line
-        # stdout is block-buffered under redirection and lost if the worker is
-        # killed mid-build (e.g. timeout during a ~1h stage-3 build). When a
-        # sink file is named, append each record durably as it is produced.
-        val sink = rt_env_get("SIMPLE_COMPILER_PHASE_PROFILE_FILE") ?? ""
-        if sink != "":
-            val _ = file_append(sink, line + "\n")
+        # The durable phase sink shares the descriptor-safe runtime writer,
+        # absolute monotonic clock, PID, and SIMPLE_EVIDENCE_RUN_ID used by
+        # HIR memory snapshots. This makes process/phase/boundary correlation
+        # explicit instead of relying on line order or approximate wall time.
+        _append_phase_profile(msg)
 
 fn _build_progress_path() -> text:
     if not _g_progress_path_set:
