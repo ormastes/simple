@@ -1,14 +1,58 @@
 # Lean Verification Workflow Guide
 
-**Status:** Active
-**Date:** 2026-04-04
-**Contract:** [doc/04_architecture/infra/misc/lean_verification_contract.md](../04_architecture/lean_verification_contract.md)
+**Status:** Legacy operational reference; Formal Verification 2.0 is proposed and partially implemented
+**Date:** 2026-08-14
+**Contract:** [Lean verification contract](../../04_architecture/infra/misc/lean_verification_contract.md)
 
-This guide describes how to use the Simple compiler's Lean 4 formal verification workflow. The workflow translates annotated Simple source code into Lean 4 proof obligations, checks them with the Lean toolchain, caches results incrementally, and reports verification status at multiple levels.
+This guide records the intended use of the Simple compiler's legacy Lean 4
+formal-verification workflow and the stricter evidence boundary proposed for
+Formal Verification 2.0. The legacy sections describe a bounded historical
+surface, not a claim that the commands are runnable or that arbitrary annotated
+Simple source is currently translated, cached, and verified end to end.
 
 ---
 
-## Quick Start
+## Formal Verification 2.0 claim and evidence boundary
+
+The canonical FV2 plan is
+`doc/03_plan/agent_tasks/simple_formal_verification_2_0.md`; its executable
+evidence plan is `doc/03_plan/sys_test/simple_formal_verification_2_0.md`.
+FV2 distinguishes `model_proven`, `source_refined`, `backend_refined`, and
+`artifact_verified`. A successful Lean theorem establishes only the modeled
+property until receipts also bind the exact canonical program, compiler
+refinement chain, trust closure, independent replay, and shipped artifact.
+
+The ten V1 evidence interfaces and the system-manual steps/helpers named in the
+canonical plan are frozen. Change their names only through a versioned
+migration with stale-cache coverage. Generated Lean/BYL is never a replacement
+for stable manual theorem files; after regeneration, run and cite the durable
+manual proof entry point.
+
+Current-main FV2 evidence is intentionally partial. Typed MIR decision and
+condition probes validate caller-supplied identities, serialize them
+deterministically, and have fail-closed admission plus
+optimizer-liveness coverage. HIR insertion, admitted runtime lowering,
+zero-count inventory publication, typed VIR/contracts, compiler certificates,
+product refinement, and final independent replay remain separate gates. A
+backend must lower an admitted probe or reject before producing successful
+output; ignoring it as metadata, a comment, or a NOP is failure.
+
+Use only the canonical deployed self-hosted `simple` for acceptance. A Rust
+seed, stale binary, missing tool, timeout, readiness result, `sorry`, `admit`,
+undeclared axiom, or generated-only artifact cannot be promoted to PASS. The
+current worktree lacks that canonical binary, so documented commands are resume
+instructions rather than executed evidence.
+
+---
+
+## Legacy model-proof workflow
+
+The commands below describe the legacy fixed-inventory/model-proof surface.
+They do not verify an arbitrary input file and do not produce FV2
+`source_refined`, `backend_refined`, or `artifact_verified` evidence. The
+currently deployed CLI is unavailable in this worktree, and the historical
+`gen-lean` CLI recursion bug below blocks the write path; treat these as resume
+commands after both blockers are repaired.
 
 ```bash
 # 1. Install Lean 4 (stable channel)
@@ -17,7 +61,7 @@ curl -sSf https://raw.githubusercontent.com/leanprover/elan/main/elan-init.sh | 
 # 2. Check toolchain readiness
 simple verify status
 
-# 3. Generate Lean proof obligations from your annotated code
+# 3. Generate the fixed-inventory Lean proof obligations
 simple gen-lean write
 
 # 4. Verify all generated proofs
@@ -41,7 +85,8 @@ fn factorial(n: i64) -> i64:
         n * factorial(n - 1)
 ```
 
-Running `simple gen-lean write` produces a Lean 4 file with:
+For an entry in the fixed regeneration inventory, `simple gen-lean write`
+produces a Lean 4 file with:
 - A `theorem factorial_pre_0` for the precondition `n >= 0`
 - A `theorem factorial_post_0` for the postcondition `ret > 0`
 - A `decreases` annotation for termination
@@ -52,7 +97,11 @@ Running `simple verify check` invokes Lean/Lake to check these theorems. Unprove
 
 ## Supported Verification Features
 
-The verification workflow supports a bounded subset of formal verification. All features below are tested and documented. Deferred features are listed in [Known Limitations](#known-limitations).
+This section is the legacy feature contract for the bounded fixed-inventory
+workflow. Its classifications describe the intended historical surface; they
+are not current-tree execution evidence and do not satisfy an FV2 refinement
+or artifact-verification gate. Deferred features are listed in
+[Known Limitations](#known-limitations).
 
 Maintain generated Lean separately from handwritten proof lemmas. Regeneration
 may replace generated declarations, but durable proof files should import those
@@ -304,7 +353,11 @@ evidence, not as a proof pass.
 
 ---
 
-## Verification States
+## Legacy verification states
+
+These six names belong to the legacy file-level model-proof workflow. Its
+`verified` state maps to FV2 `model_proven` at most. It must never be rendered
+or consumed as `source_refined`, `backend_refined`, or `artifact_verified`.
 
 Every proof unit (file-level for v1) has exactly one of six states:
 
@@ -335,7 +388,9 @@ When rolling up states from file level to project level, the most severe state w
 
 `failed` > `admitted` > `trusted` > `stale` > `not_checked` > `verified`
 
-A project reports `verified` only when **every** proof unit is individually `verified`.
+A legacy project reports `verified` only when **every** proof unit is
+individually `verified`; the FV2-facing claim remains `model_proven` until the
+refinement and artifact evidence chain is closed.
 
 ### Admitted and Trusted are Proof Debt
 
@@ -347,7 +402,12 @@ Reports always show admitted and trusted counts prominently. Neither state is ev
 
 ---
 
-## Cache and Incremental Verification
+## Legacy cache and incremental verification
+
+The cache described here is file/content based and does not satisfy
+NFR-FV2-004. FV2 requires SymbolId/SCC semantic dependency keys and evidence
+that formatting-only edits reuse proofs while meaning-changing ABI, effect,
+contract, weave, or accessor changes invalidate them.
 
 ### Cache Location
 
@@ -581,7 +641,7 @@ The status command reports Lean availability, version match against `lean-toolch
 
 ## Reference
 
-- **Contract:** [doc/04_architecture/infra/misc/lean_verification_contract.md](../04_architecture/lean_verification_contract.md) -- authoritative feature matrix and state model
+- **Legacy contract:** [doc/04_architecture/infra/misc/lean_verification_contract.md](../../04_architecture/infra/misc/lean_verification_contract.md) -- historical feature matrix and state model; FV2 artifacts follow the canonical FV2 architecture and plan
 - **Support matrix:** Section 5 of the contract document
 - **Verification checker rules:** V-UNSAFE, V-EFFECT, V-REFLECT, V-GHOST, V-TRUSTED, V-PARTIAL
 - **Cache directory:** `build/verification-cache/`
