@@ -25,7 +25,10 @@ static uint64_t rd64(const uint8_t *p) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 2) return 10;
+    if (argc < 2 || argc > 3) return 10;
+    const char *expected = argc == 3 ? argv[2] : "native-provider-ok";
+    size_t expected_len = strlen(expected);
+    if (expected_len == 0 || expected_len > 100) return 10;
     void *lib = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!lib) return 11;
     void *query_fn = dlsym(lib, "simple_provider_query_v1");
@@ -57,7 +60,8 @@ int main(int argc, char **argv) {
             (int64_t)(intptr_t)request, sizeof(request),
             (int64_t)(intptr_t)result, sizeof(result)) != 0) return 15;
     if (rd32(result) != 0 || rd32(result + 4) != 20 ||
-            rd32(result + 8) != 18 || memcmp(result + 20, "native-provider-ok", 18) != 0)
+            rd32(result + 8) != expected_len ||
+            memcmp(result + 20, expected, expected_len) != 0)
         return 16;
     if (dlclose(lib) != 0) return 17;
     puts("PASS cli_provider_v1_host_selfcheck");
