@@ -12,7 +12,7 @@ lane.  The lane owns the host-independent compiler, SimpleOS-manifest, packed
 rendering, allocation, process, and aggregate-contract hardening needed before
 the release-facing evidence producers may be trusted.
 
-Current integrated baseline is `c6e970bdf27bf7b5e18886e510f71166ae191d39`,
+Current implementation baseline is `cc30abb73ddc4652d8324bfa28768eda1cf4efeb`,
 reachable from `origin/main`. The phase is `impl-in-progress`. Fresh current-head
 work restored a half-landed canonical HIR contract type group and propagation,
 eliminating the Stage 2 `ANY proof_uses` failure. A bounded Stage 3 run exposed
@@ -27,8 +27,9 @@ not an external-host warning and not a verification PASS.
 
 ### Completion audit — plan objective versus feature objective
 
-Re-audited on synced `origin/main` at
-`d5e954141053728639f36882e706a1ee041b4a87`.
+The earlier plan-document completion audit was performed on
+`d5e954141053728639f36882e706a1ee041b4a87`; the authoritative implementation
+state is the current baseline above.
 
 The completed thread objective was narrowly and explicitly: run `$sp_dev` with
 parallel plan/guide audits, merge their findings, obtain higher-capability
@@ -121,8 +122,8 @@ verification PASS. Retained evidence:
   remains in that output root):
   `sh scripts/bootstrap/bootstrap-from-scratch.sh --pure-simple --full-cli --no-mcp --diagnostics=test --diagnostic-child-compiler=/mnt/data/worktrees/restart12-infra/build/restart12-bootstrap/stage2/x86_64-unknown-linux-gnu/simple --output=build/restart12-bootstrap --jobs=full --progress=build/restart12-bootstrap/progress-resume.log`.
 
-Restart13 superseding current-head evidence: a fresh full-bootstrap reused the
-published Rust bootstrap tuple. Restoring the missing canonical HIR contract
+Restart13 evidence superseding Restart12: a fresh full-bootstrap published the
+Rust bootstrap tuple. Restoring the missing canonical HIR contract
 definitions and propagation cleared both Stage 2 `ANY proof_uses` diagnostics.
 Stage 3 then identified bounded ParserModule alias-copy growth and, after a
 physical-source-only probe, the duplicate parser facade export. The final fix
@@ -131,24 +132,111 @@ Verification is deferred to a fresh capped session; exact evidence and hashes
 are recorded in
 `doc/08_tracking/bug/stage2_proof_uses_optional_narrowing_2026-08-14.md`.
 
-Exact Restart13 resume (run in Bash in a fresh session; one cache-preserving
-cycle, with unique receipts and immediate preservation of the generic child
-logs):
+The published authority is now stale: the current LLVM seed-input fingerprint
+is `b02cad2d9e6135010cf99a931ba816575d310c5b7fe4cb0be2ccd4fad8d281fb`,
+while the published stamp is
+`69872b0a70dbefe456b99b8273d9d2747748a7457f65029b6e9e8e8b051b12bd`.
+Therefore `--pure-simple --full-cli` is forbidden: it deterministically refuses
+the stale compiler backfill. A `--pure-simple` run without `--full-cli` would be
+diagnostic only and cannot produce admissible provenance. The exact authoritative
+Restart13 resume is a fresh, uncontended full-bootstrap/deploy transaction.
+Run this in Bash in a fresh verification session, with unique receipts and
+immediate preservation of every materialized generic child log:
 
 ```bash
 set -o pipefail
+recovery_dir=build/restart13-bootstrap/recovery-verify4
+fresh_marker=build/restart13-bootstrap/verify4-start.marker
+test ! -e "$recovery_dir" || { printf 'verify4 recovery path already exists\n' >&2; exit 124; }
+for unique in \
+  build/restart13-bootstrap/progress-verify4.log \
+  build/restart13-bootstrap/driver-verify4.log \
+  build/restart13-bootstrap/driver-verify4.exit \
+  "$fresh_marker"; do
+  test ! -e "$unique" || { printf 'verify4 unique path already exists: %s\n' "$unique" >&2; exit 124; }
+done
+: > "$fresh_marker" || exit 124
 SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh \
-  --pure-simple --full-cli --no-mcp --diagnostics=test \
+  --full-bootstrap --backend=llvm --mode=dynload --full-cli --deploy \
+  --no-mcp --diagnostics=test \
   --output=build/restart13-bootstrap --jobs=full \
   --progress=build/restart13-bootstrap/progress-verify4.log \
   2>&1 | tee build/restart13-bootstrap/driver-verify4.log
-verify_rc=${PIPESTATUS[0]}
-printf '%s\n' "$verify_rc" > build/restart13-bootstrap/driver-verify4.exit
-mkdir -p build/restart13-bootstrap/recovery-verify4
-cp build/restart13-bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log \
-  build/restart13-bootstrap/recovery-verify4/stage2-native-build.log
-cp build/restart13-bootstrap/logs/x86_64-unknown-linux-gnu/stage3-native-build.log \
-  build/restart13-bootstrap/recovery-verify4/stage3-native-build.log
+pipeline_status=("${PIPESTATUS[@]}")
+verify_rc=${pipeline_status[0]}
+tee_rc=${pipeline_status[1]}
+preserve_rc=0
+test "$tee_rc" -eq 0 || preserve_rc=1
+printf '%s\n' "$verify_rc" > build/restart13-bootstrap/driver-verify4.exit \
+  || preserve_rc=1
+mkdir "$recovery_dir" || preserve_rc=1
+for retained in \
+  logs/x86_64-unknown-linux-gnu/rust-seed-build.log \
+  logs/x86_64-unknown-linux-gnu/rust-native-all-build.log \
+  logs/x86_64-unknown-linux-gnu/rust-runtime-nolto-build.log \
+  logs/x86_64-unknown-linux-gnu/rust-compiler-backfill-build.log \
+  logs/x86_64-unknown-linux-gnu/stage2-native-build.log \
+  logs/x86_64-unknown-linux-gnu/stage3-native-build.log \
+  logs/x86_64-unknown-linux-gnu/stage2-capability.log \
+  logs/x86_64-unknown-linux-gnu/stage4-native-build.log \
+  logs/x86_64-unknown-linux-gnu/stage4-redeploy-gate.log \
+  logs/x86_64-unknown-linux-gnu/stage4-essential-tools-smoke.log \
+  logs/x86_64-unknown-linux-gnu/stage4b-ui-backend.log \
+  progress-verify4.log driver-verify4.log driver-verify4.exit \
+  stage3/x86_64-unknown-linux-gnu/stage2-command.transcript \
+  stage3/x86_64-unknown-linux-gnu/stage3-command.transcript \
+  stage3/x86_64-unknown-linux-gnu/git-state-before.env \
+  stage3/x86_64-unknown-linux-gnu/git-state-after.env \
+  stage3/x86_64-unknown-linux-gnu/source-inputs-before.txt \
+  stage3/x86_64-unknown-linux-gnu/source-inputs-after.txt \
+  stage3/x86_64-unknown-linux-gnu/stage2-sanity.env \
+  stage3/x86_64-unknown-linux-gnu/stage3-sanity.env \
+  stage3/x86_64-unknown-linux-gnu/provenance.env \
+  full/x86_64-unknown-linux-gnu/simple.provenance.env; do
+  if test -f "build/restart13-bootstrap/$retained" && \
+     test "build/restart13-bootstrap/$retained" -nt "$fresh_marker"; then
+    target=$(printf '%s' "$retained" | tr '/' '_')
+    cp "build/restart13-bootstrap/$retained" \
+      "$recovery_dir/$target" || preserve_rc=1
+  fi
+done
+deploy_receipt=bin/release/x86_64-unknown-linux-gnu/bootstrap-deploy-receipt.env
+if test -f "$deploy_receipt" && test "$deploy_receipt" -nt "$fresh_marker"; then
+  cp "$deploy_receipt" \
+    "$recovery_dir/bootstrap-deploy-receipt.env" \
+    || preserve_rc=1
+fi
+if test "$verify_rc" -eq 0; then
+  for required in \
+    build/restart13-bootstrap/progress-verify4.log \
+    build/restart13-bootstrap/driver-verify4.log \
+    build/restart13-bootstrap/driver-verify4.exit \
+    build/restart13-bootstrap/stage3/x86_64-unknown-linux-gnu/provenance.env \
+    build/restart13-bootstrap/full/x86_64-unknown-linux-gnu/simple.provenance.env \
+    "$deploy_receipt"; do
+    test -f "$required" && test "$required" -nt "$fresh_marker" \
+      || preserve_rc=1
+  done
+  for retained_required in \
+    "$recovery_dir/progress-verify4.log" \
+    "$recovery_dir/driver-verify4.log" \
+    "$recovery_dir/driver-verify4.exit" \
+    "$recovery_dir/stage3_x86_64-unknown-linux-gnu_provenance.env" \
+    "$recovery_dir/full_x86_64-unknown-linux-gnu_simple.provenance.env" \
+    "$recovery_dir/bootstrap-deploy-receipt.env"; do
+    test -f "$retained_required" || preserve_rc=1
+  done
+fi
+sums_tmp="$recovery_dir/.SHA256SUMS.tmp"
+(cd "$recovery_dir" && \
+  find . -type f ! -name SHA256SUMS ! -name .SHA256SUMS.tmp -print0 \
+    | sort -z | xargs -0 sha256sum) > "$sums_tmp" || preserve_rc=1
+mv "$sums_tmp" "$recovery_dir/SHA256SUMS" \
+  || preserve_rc=1
+if test "$verify_rc" -eq 0 && test "$preserve_rc" -ne 0; then
+  printf 'bootstrap passed but evidence preservation failed\n' >&2
+  exit 125
+fi
 exit "$verify_rc"
 ```
 
@@ -255,11 +343,12 @@ NFR-MCI-009.
 
 ### Implementation handoff and resume order
 
-1. In a fresh session, run one cache-preserving bootstrap to verify the restored
-   HIR contract propagation, compact entry-closure alias registry, and
-   single-origin parser facade. Require Stage 2 and Stage 3 sanity PASS.
-2. Produce and admit an exact-current Stage 4 full CLI; run the essential-tools
-   smoke gate against that exact binary.
+1. After unrelated high-RSS builds clear, run the exact full-bootstrap/deploy
+   transaction above in a fresh session. It must publish a current Rust tuple,
+   verify the restored HIR contract propagation, compact entry-closure alias
+   registry, and single-origin parser facade, and require Stage 2/3 sanity PASS.
+2. Admit its exact-current Stage 4 full CLI and run the essential-tools smoke
+   gate against that exact binary.
 3. Run each focused compiler/rendering/allocation/SimpleOS/aggregate spec once.
 4. The deterministic SSpec expansion is implemented (18 executable examples);
    after Stage 4 admission, run it and docgen once and review the manual. Add

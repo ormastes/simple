@@ -3,7 +3,7 @@
 Date: 2026-08-14
 Status: ROOT-CAUSE AND BOUNDED ALIAS FIX IMPLEMENTED; next-session verification pending
 Owner: canonical HIR definitions / driver entry-closure ownership
-Source authority: `c6e970bdf27bf7b5e18886e510f71166ae191d39` plus the exact intentional diff recorded by the final commit
+Source authority: implementation commit `cc30abb73ddc4652d8324bfa28768eda1cf4efeb`
 
 ## Failure
 
@@ -103,5 +103,19 @@ Retained evidence:
 - wrapper exit status `1` in `build/restart13-bootstrap/driver-verify3.exit`.
 
 The fresh continuation exhausted its three-cycle cap. The next verification
-must reuse the content-addressed caches, confirm the facade error is absent,
-complete Stage 3 sanity, and then promote an admitted Stage 4 compiler.
+must confirm the facade error is absent and complete Stage 2/3 sanity under a
+current authority before promoting an admitted Stage 4 compiler.
+
+## Current authority prerequisite
+
+After `cc30abb` rebased over Rust packed-byte changes, the current LLVM
+seed-input fingerprint became
+`b02cad2d9e6135010cf99a931ba816575d310c5b7fe4cb0be2ccd4fad8d281fb`;
+the published stamp remains
+`69872b0a70dbefe456b99b8273d9d2747748a7457f65029b6e9e8e8b051b12bd`.
+A `--pure-simple --full-cli` continuation therefore fails closed on stale
+compiler backfill before Stage 2. A pure-Simple Stage 2/3 probe without full CLI
+would remain diagnostic-only because provenance rejects the stale seed stamp.
+The exact authoritative resume is the fresh-session, uncontended
+`--full-bootstrap --full-cli --deploy` transaction recorded in the canonical
+system-test plan. No fourth bootstrap was run in the exhausted session.
