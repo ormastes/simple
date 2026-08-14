@@ -27,11 +27,24 @@ Source: `test/03_system/web/server/secure_pure_simple_web_server_spec.spl`
 
 ## Absolute oracles
 
+Runtime status: **WARN: spec runtime not executed; compilation attempted and
+failed.** The temporary staged bootstrap binary
+identified successfully but exposes neither `check` nor `test`; both one-time
+focused attempts have only an unverified operator observation of `unknown
+command`. Static scenarios below remain
+designed evidence, not credited runtime evidence.
+
+An unverified operator observation says the final one-shot LLVM `native-build`
+route also did not execute this spec: it stopped in HIR because the native compiler could not infer the `ANY` field
+`error?` used by Result assertions. It produced no executable, and no retry or
+flag variant was permitted. This is blocker evidence, not a passing oracle.
+
 - Production policy validation returns the empty error string and retains one
   request per connection with finite read/write bounds.
 - Unsafe traversal is `false`; malformed framing returns its exact rejection
   category; invalid TLS material returns a non-empty error.
-- No executable spec is stored under `doc/06_spec`; this manual has 0 stubs.
+- No executable spec is stored under `doc/06_spec`; a static author scan found
+  no placeholder stubs. No maintained-manual scorecard is claimed.
 - Plaintext startup requires both an explicit development policy and a
   non-empty `PlaintextDevelopmentCapability` audit reason.
 - The default production `start()` returns an error and never silently opens a

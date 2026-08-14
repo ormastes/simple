@@ -15,6 +15,8 @@
 - Durable versions/commit IDs and bounded capability-checked batch/range are implemented.
 - Final requirements/NFRs, architecture/design, plans, scenarios, and manuals exist.
 - Runtime evidence and `sspec-maintain`/docgen remain blocked by the unhealthy Stage-4 CLI.
+- The staged Stage-2 binary identifies successfully; unverified observations say `check`/`test` return `unknown command`.
+- An unverified observation says its one-shot native web-spec build stopped at HIR `ANY.error?`; no executable was produced.
 - DB exposes concrete `DbListener`/`TcpDbListener`, `CommitIdentity`, and
   `BoundedQuery` contracts; production and scripted response paths share the
   encoded-byte bound, with runtime TCP proof still open.

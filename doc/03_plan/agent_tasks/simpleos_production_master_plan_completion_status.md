@@ -163,6 +163,22 @@ bounded wait. No feature acceptance test has therefore been credited. Resume
 by producing a healthy self-hosted CLI, then run the focused DB checks exactly
 once before continuing DB-1/3/4/5 and WEB-1/2/3.
 
+Temporary verification follow-up (2026-08-14): the retained Stage-2 compiler
+identifies successfully. Unverified operator observations say its `check` and
+`test` probes returned `unknown command` and its bounded native-build routes
+failed before producing executables. User-authorized bootstrap-seed
+observations reached durability 22/0 and secure DB 7/0, while tier DB stopped at
+39/1 on UTF-8 batch round-trip after the third attempt. These are unreceipted
+bootstrap diagnostics, not admitted Stage-4 evidence, and close no ledger row.
+
+Temporary staged provenance does not clear this blocker. The strongest staged
+artifact is `build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple`, SHA-256
+`5883722a6cafd17006ecab001e714e9e43774014bf44b1af459a92bd142099f5`,
+version `simple-bootstrap 1.0.0-beta`. The adjacent stage2-command transcript
+records an LLVM/core-c-bootstrap build with no stub fallback, but the artifact
+has only an unverified operator observation of `unknown command` for `check`
+and `test`. It is not an admitted Stage-4 CLI and credits no ledger row.
+
 Implementation progress (2026-08-14, not yet credited as PASS):
 
 - Web parsing/listener policy now bounds reads and sizes, rejects ambiguous or

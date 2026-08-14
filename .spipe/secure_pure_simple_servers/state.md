@@ -157,3 +157,17 @@ dev-blocked
   and reconciled the plan. Final static gates pass. The three-cycle cap is
   reached; production TLS and admitted runtime/live-socket evidence remain
   blockers, so no AC or ledger row is promoted.
+- staged-runtime-provenance: Selected the current-source self-hosted Stage-2
+  artifact at `build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple`, SHA-256
+  `5883722a6cafd17006ecab001e714e9e43774014bf44b1af459a92bd142099f5`,
+  Build ID `9db2d66edbf77fc3fd0674f3cc21ae4062a2b6ec`. Its producer transcript records
+  LLVM/core-c-bootstrap, `SIMPLE_BOOTSTRAP=1`, and
+  `SIMPLE_NO_STUB_FALLBACK=1`. The artifact identifies as
+  `simple-bootstrap 1.0.0-beta`; an unverified operator observation says its
+  `check` and `test` probes returned `unknown command`. It is temporary
+  negative/provenance material only, never admitted Stage-4 or AC evidence.
+- temporary-seed-diagnostic: User-authorized bootstrap diagnostics observed
+  durability 22/0 and, after bounded test-only corrections, secure DB 7/0.
+  Tier DB ended 39/1 on UTF-8 batch round-trip after the third attempt, so the
+  iteration cap is exhausted. No immutable command receipt or admitted
+  Stage-4 runtime exists; these observations promote no AC or ledger row.

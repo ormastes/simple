@@ -105,6 +105,40 @@ response-byte check; runtime TCP proof remains uncredited.
 
 ## Focused Verification (Run Once After CLI Admission)
 
+Temporary staged-binary probe (2026-08-14):
+
+- Path: `build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple`
+- SHA-256: `5883722a6cafd17006ecab001e714e9e43774014bf44b1af459a92bd142099f5`
+- Version: `simple-bootstrap 1.0.0-beta`
+- Provenance: `build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-command.transcript`
+  records an LLVM `native-build` of `src/app/cli/bootstrap_main.spl` with
+  `SIMPLE_NO_STUB_FALLBACK=1`.
+- Unverified operator observation: the one HTTP `check` attempt and one focused
+  web `test` attempt each
+  returned `error: unknown command`; this bootstrap-stage command surface is
+  healthy enough to identify itself but is not an admitted verification CLI.
+  No acceptance criterion is credited and the deployed failing wrapper was not
+  re-probed.
+- Unverified operator observation from the final bounded native route: one
+  `native-build` used the transcript's
+  `x86_64-unknown-linux-gnu`, LLVM, `core-c-bootstrap`, compiler/app/lib source,
+  entry-closure, two-thread, dynload, runtime-authority, bootstrap, and
+  no-stub-fallback settings with entry
+  `test/03_system/web/server/secure_pure_simple_web_server_spec.spl` and output
+  `build/verify/secure-pure-simple-web-native/secure_pure_simple_web_server_spec`.
+  It exited 1 before linking: HIR could not infer the `ANY` field `error?` in
+  the focused spec. No executable was produced, so the conditional execution
+  step did not run. Per the single-route constraint, no flag variant or retry
+  was attempted and no runtime acceptance is credited.
+
+```sh
+env SIMPLE_BOOTSTRAP=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NO_STUB_FALLBACK=1 timeout 300 build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple native-build --target x86_64-unknown-linux-gnu --backend llvm --runtime-bundle core-c-bootstrap --source src/compiler --source src/app --source src/lib --entry-closure --threads 2 --cache-dir build/verify/secure-pure-simple-web-native/cache --mode dynload --entry test/03_system/web/server/secure_pure_simple_web_server_spec.spl --runtime-path build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-runtime-authority -o build/verify/secure-pure-simple-web-native/secure_pure_simple_web_server_spec
+```
+
+Observed result (no retained immutable command receipt): exit 1,
+`hir: Unsupported feature: cannot infer field type while
+lowering main: struct 'ANY' field 'error?'`.
+
 Use the admitted self-hosted binary, record its path and hash, and do not repeat
 an unchanged passing command. The focused evidence inventory is:
 
