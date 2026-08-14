@@ -727,6 +727,21 @@ fn strict_owned_bytes(value: &Value, name: &str) -> Result<Box<[u8]>, CompileErr
     Ok(bytes.into_boxed_slice())
 }
 
+/// Interpreter adapter for the provider-query v1 raw pointer ABI.
+pub fn rt_provider_query_v1_call_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::semantic(
+            "rt_provider_query_v1_call expects 3 arguments".to_string(),
+        ));
+    }
+    let status = simple_runtime::rt_provider_query_v1_call(
+        args[0].as_int()?,
+        args[1].as_int()?,
+        args[2].as_int()?,
+    );
+    Ok(Value::Int(i64::from(status)))
+}
+
 /// Interpreter owner for the one-call dynamic byte descriptor ABI.
 pub fn spl_wffi_call_i64_with_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
     if args.len() != 6 {

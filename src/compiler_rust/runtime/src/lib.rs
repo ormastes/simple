@@ -820,6 +820,7 @@ pub use value::{
 
 // Re-export RuntimeDict struct
 pub use value::RuntimeDict;
+pub use value::sffi::rt_provider_query_v1_call;
 pub use value::rt_raw_u64_to_string;
 pub use value::rt_raw_i64_to_string;
 pub use value::rt_opt_i64_to_string;

@@ -104,13 +104,28 @@ critical-path work is a systemic iterative if/elif representation in the flat
 parser/bridge followed by a fresh Stage 2 rebuild. The admitted r5 executor is
 frozen and cannot consume its own driver/parser implementation changes.
 
+Lane-B cycle receipt (2026-08-14): the historical string-literal interning fix
+is intact, so the retained GDB bridge stack remains the active owner evidence.
+`convert_flat_if_stmt` now walks singleton nested `STMT_IF` else arms
+iteratively, converts arms in source order, and reverse-folds the same public
+structured AST shape. A fresh r6 bootstrap then exposed two independent Rust
+authority integration gaps for `rt_provider_query_v1_call`; the crate-root
+export and typed three-argument interpreter adapter are restored. On bounded
+fix cycle 3, Rust seed/native/runtime/backfill authority completed and Stage 2
+started, but discovery stopped before compiling Simple sources at
+`src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl:626`: the current
+seed rejects a compact one-line `if` immediately followed by a multiline
+`elif`. No Stage-2 candidate or Stage-3 verdict exists for r6. The next session
+must normalize that exact pre-existing construct, then run one fresh r6
+bootstrap; this session may not retry because its three-cycle cap is exhausted.
+
 Stage 4 orchestration is independently MISSING: the current Stage 3 resume
 exits after provenance admission, while the only `--deploy` path deletes and
 rebuilds Stage 2/3. Implement the fail-closed continuation specified in
 `doc/08_tracking/bug/stage4_resume_from_admitted_gap_2026-08-14.md` before
 claiming that an admitted resumed Stage 3 can flow canonically to deployment.
 
-This detached worktree is the fresh lane-A replacement. The previous Build11
+This detached worktree is lane B. The previous Build11 lane-A
 candidate did not reach performance admission: its strict Stage 2 bootstrap
 ended after about 52 minutes with 61 HIR field-inference failures (mostly
 `struct 'ANY' field ...`), including `src/compiler/99.loader/module_loader.spl`.

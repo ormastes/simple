@@ -1485,6 +1485,66 @@ fn convert_flat_stmt_in_list(idx: i64, is_top_level: bool) -> [Stmt]:
     else:
         return [convert_flat_stmt(idx)]
 
+fn convert_flat_if_stmt(root_idx: i64) -> Stmt:
+    # Flat `elif`/`else if` chains are represented as a singleton STMT_IF in
+    # the preceding arm's else list.  Walk that representation instead of
+    # recursively alternating through convert_flat_stmt(_in_list): long
+    # compiler dispatch chains otherwise retain one native frame and its
+    # temporaries per arm in no-GC bootstrap builds.
+    var conditions: [Expr] = []
+    var then_blocks: [Block] = []
+    var arm_spans: [Span] = []
+    var current = root_idx
+    var terminal_else: [i64] = []
+    var walking = true
+    while walking:
+        val arm_span = make_span()
+        conditions.push(convert_flat_expr(stmt_get_expr(current)))
+        val then_stmts = stmt_get_body(current)
+        var then_body: [Stmt] = []
+        var ti = 0
+        while ti < then_stmts.len():
+            val expanded = convert_flat_stmt_in_list(then_stmts[ti], false)
+            var tk = 0
+            while tk < expanded.len():
+                then_body.push(expanded[tk])
+                tk = tk + 1
+            ti = ti + 1
+        then_blocks.push(Block(stmts: then_body, span: arm_span))
+        arm_spans.push(arm_span)
+
+        val else_stmts = elif_get_else(stmt_get_type(current))
+        if else_stmts.len() == 1 and stmt_get_tag(else_stmts[0]) == STMT_IF:
+            current = else_stmts[0]
+        else:
+            terminal_else = else_stmts
+            walking = false
+
+    var tail_present = terminal_else.len() > 0
+    var tail_block = Block(stmts: [], span: arm_spans[arm_spans.len() - 1])
+    if tail_present:
+        var converted_else: [Stmt] = []
+        var ei = 0
+        while ei < terminal_else.len():
+            val expanded = convert_flat_stmt_in_list(terminal_else[ei], false)
+            var ek = 0
+            while ek < expanded.len():
+                converted_else.push(expanded[ek])
+                ek = ek + 1
+            ei = ei + 1
+        tail_block = Block(stmts: converted_else, span: arm_spans[arm_spans.len() - 1])
+
+    var result = Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: arm_spans[0])), span: arm_spans[0])
+    var ai = conditions.len() - 1
+    while ai >= 0:
+        val else_block = if tail_present: tail_block else: nil
+        val arm_expr = Expr(kind: ExprKind.If(conditions[ai], then_blocks[ai], else_block), span: arm_spans[ai])
+        result = Stmt(kind: StmtKind.Expr(arm_expr), span: arm_spans[ai])
+        tail_block = Block(stmts: [result], span: arm_spans[ai])
+        tail_present = true
+        ai = ai - 1
+    result
+
 fn convert_flat_stmt(idx: i64) -> Stmt:
     if idx < 0:
         val nil_span = make_span()
@@ -1529,38 +1589,7 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
         val value = convert_flat_expr(body[0])
         return Stmt(kind: StmtKind.Assign(target, nil, value), span: span)
     elif tag == STMT_IF:
-        val cond = convert_flat_expr(stmt_get_expr(idx))
-        val then_stmts = stmt_get_body(idx)
-        var then_body: [Stmt] = []
-        var si = 0
-        while si < then_stmts.len():
-            val then_expanded = convert_flat_stmt_in_list(then_stmts[si], false)
-            var tk = 0
-            while tk < then_expanded.len():
-                then_body.push(then_expanded[tk])
-                tk = tk + 1
-            si = si + 1
-        val then_block = Block(stmts: then_body, span: span)
-        # else/elif fidelity: the parser stores the else body (or a nested
-        # if-stmt for `elif`/`else if` chains) in the elif arena, indexed by
-        # the stmt's TYPE field. elif chains are nested STMT_IF nodes inside
-        # else_stmts and convert recursively. Pass nil (not an empty Block)
-        # when there is no else, so codegen sees None vs Some(empty).
-        val if_elif_idx = stmt_get_type(idx)
-        val if_else_stmts = elif_get_else(if_elif_idx)
-        if if_else_stmts.len() > 0:
-            var if_else_body: [Stmt] = []
-            var ei = 0
-            while ei < if_else_stmts.len():
-                val else_expanded = convert_flat_stmt_in_list(if_else_stmts[ei], false)
-                var ek = 0
-                while ek < else_expanded.len():
-                    if_else_body.push(else_expanded[ek])
-                    ek = ek + 1
-                ei = ei + 1
-            val else_block = Block(stmts: if_else_body, span: span)
-            return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.If(cond, then_block, else_block), span: span)), span: span)
-        return Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.If(cond, then_block, nil), span: span)), span: span)
+        return convert_flat_if_stmt(idx)
     elif tag == STMT_WHILE:
         val cond = convert_flat_expr(stmt_get_expr(idx))
         val body_stmts = stmt_get_body(idx)
