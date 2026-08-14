@@ -10,6 +10,8 @@
 #include "runtime.h"
 
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -475,6 +477,118 @@ int rt_file_create_excl(const char* path, int64_t path_len,
     }
     free(path_copy);
     return 1;
+}
+
+#if !defined(_WIN32)
+static int rt_mem_snapshot_parent_fd(char* path, const char** leaf_out) {
+    char* leaf = strrchr(path, '/'); int parent_fd;
+    if (!leaf) { *leaf_out = path; return open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC); }
+    *leaf++ = '\0';
+    if (*leaf == '\0' || !strcmp(leaf, ".") || !strcmp(leaf, "..")) return -1;
+    *leaf_out = leaf;
+    parent_fd = open(path[0] == '\0' ? "/" : (path[0] == '/' ? "/" : "."), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (parent_fd < 0) return -1;
+    char* walk = path[0] == '/' ? path + 1 : path; char* save = NULL;
+    for (char* part = strtok_r(walk, "/", &save); part; part = strtok_r(NULL, "/", &save)) {
+        if (!strcmp(part, ".")) continue;
+        if (!strcmp(part, "..")) { close(parent_fd); return -1; }
+        int next = openat(parent_fd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (next < 0) { close(parent_fd); return -1; }
+        close(parent_fd); parent_fd = next;
+    }
+    return parent_fd;
+}
+#endif
+
+int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
+#if defined(_WIN32)
+    (void)path_ptr; (void)path_len; return -1;
+#else
+    char path[4096];
+    if (!path_ptr || path_len <= 0 || path_len >= (int64_t)sizeof(path) ||
+        memchr(path_ptr, '\0', (size_t)path_len)) return -1;
+    memcpy(path, path_ptr, (size_t)path_len); path[path_len] = '\0';
+    const char* leaf = NULL; int parent_fd = rt_mem_snapshot_parent_fd(path, &leaf);
+    if (parent_fd < 0) return -1;
+    int flags = O_WRONLY | O_CREAT | O_EXCL | O_APPEND;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    int fd = openat(parent_fd, leaf, flags, 0600); struct stat opened;
+    close(parent_fd);
+    if (fd < 0) return -1;
+    if (fstat(fd, &opened) != 0 || !S_ISREG(opened.st_mode)) { close(fd); return -1; }
+    return fd;
+#endif
+}
+
+static int rt_mem_snapshot_append_flush_raw(int64_t fd64, const char* record, int64_t len) {
+#if defined(_WIN32)
+    (void)fd64; (void)record; (void)len; return 0;
+#else
+    if (fd64 < 0 || fd64 > INT_MAX || !record || len <= 0 || record[len - 1] != '\n') return 0;
+    int64_t off = 0;
+    while (off < len) { ssize_t n = write((int)fd64, record + off, (size_t)(len - off)); if (n <= 0) return 0; off += n; }
+    return fsync((int)fd64) == 0;
+#endif
+}
+
+int rt_mem_snapshot_append_flush(int64_t fd, const char* record, int64_t len) {
+    return rt_mem_snapshot_append_flush_raw(fd, record, len);
+}
+
+static int rt_mem_snapshot_token(char* out, size_t cap, const char* in, int64_t len) {
+    size_t used = 0; static const char hex[] = "0123456789ABCDEF";
+    if (len < 0 || (len > 0 && !in)) return -1;
+    for (int64_t i = 0; i < len; ++i) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == '%' || c == ' ' || c == '=' || c == '\n' || c == '\r') {
+            if (used + 3 >= cap) return -1;
+            out[used++] = '%'; out[used++] = hex[c >> 4]; out[used++] = hex[c & 15];
+        } else { if (used + 1 >= cap) return -1; out[used++] = (char)c; }
+    }
+    out[used] = '\0'; return (int)used;
+}
+
+static int64_t rt_mem_snapshot_status_kib(const char* key) {
+    FILE* f = fopen("/proc/self/status", "r"); if (!f) return -1;
+    char line[256]; int64_t value = -1;
+    while (fgets(line, sizeof(line), f)) if (strncmp(line, key, strlen(key)) == 0) { value = strtoll(line + strlen(key), NULL, 10); break; }
+    fclose(f); return value;
+}
+int64_t rt_process_rss_kib(void) { return rt_mem_snapshot_status_kib("VmRSS:"); }
+int64_t rt_process_hwm_kib(void) { return rt_mem_snapshot_status_kib("VmHWM:"); }
+
+int rt_mem_snapshot_record(int64_t fd, int64_t seq,
+        const char* event, int64_t event_len, const char* phase, int64_t phase_len,
+        int64_t source_index, const char* path, int64_t path_len,
+        int64_t retained, int64_t keys, int64_t values, int64_t traits,
+        int64_t names, int64_t symbols, int64_t functions, int64_t constants,
+        int64_t enums, int64_t structs, int64_t classes) {
+    char e[64], p[128], sp[4096], line[6144];
+    if (rt_mem_snapshot_token(e, sizeof(e), event, event_len) < 0 ||
+        rt_mem_snapshot_token(p, sizeof(p), phase, phase_len) < 0 ||
+        rt_mem_snapshot_token(sp, sizeof(sp), path, path_len) < 0) return 0;
+    int n = snprintf(line, sizeof(line), "schema=simple.compiler.mem_snapshot.v1 seq=%lld pid=%lld monotonic_ms=%lld event=%s phase=%s source_index=%lld source_path_kind=%s source_path=%s retained_modules=%lld validation_keys=%lld validation_values=%lld shared_traits=%lld hir_names=%lld hir_symbols=%lld hir_functions=%lld hir_constants=%lld hir_enums=%lld hir_structs=%lld hir_classes=%lld heap_live_bytes=%lld heap_peak_bytes=%lld rss_kib=%lld hwm_kib=%lld\n",
+        (long long)seq, (long long)rt_getpid(), (long long)rt_time_now_monotonic_ms(), e, p,
+        (long long)source_index, path_len > 0 ? "recorded" : "none", path_len > 0 ? sp : "-",
+        (long long)retained, (long long)keys, (long long)values, (long long)traits,
+        (long long)names, (long long)symbols, (long long)functions, (long long)constants,
+        (long long)enums, (long long)structs, (long long)classes,
+        (long long)rt_heap_live_bytes(), (long long)rt_heap_peak_bytes(),
+        (long long)rt_process_rss_kib(), (long long)rt_process_hwm_kib());
+    return n > 0 && n < (int)sizeof(line) && rt_mem_snapshot_append_flush_raw(fd, line, n);
+}
+
+int rt_mem_snapshot_close(int64_t fd) {
+#if defined(_WIN32)
+    (void)fd; return 0;
+#else
+    return fd >= 0 && fd <= INT_MAX && close((int)fd) == 0;
+#endif
 }
 
 bool rt_is_dir(const char* path) {

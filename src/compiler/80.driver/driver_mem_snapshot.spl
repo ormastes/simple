@@ -1,0 +1,111 @@
+# Durable Stage-3 memory evidence owner.
+#
+# This module is the sole environment/configuration owner and the sole holder
+# of the append-only sink descriptor.  Driver call sites pass scalar
+# cardinalities; no HIR aggregate is copied or formatted for diagnostics.
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_mem_snapshot_open(path: text) -> i64
+extern fn rt_mem_snapshot_record(
+    fd: i64, seq: i64, event: text, phase: text, source_index: i64,
+    source_path: text, retained_modules: i64, validation_keys: i64,
+    validation_values: i64, shared_traits: i64, hir_names: i64,
+    hir_symbols: i64, hir_functions: i64, hir_constants: i64,
+    hir_enums: i64, hir_structs: i64, hir_classes: i64
+) -> bool
+extern fn rt_mem_snapshot_close(fd: i64) -> bool
+
+var _mem_snapshot_fd: i64 = -1
+var _mem_snapshot_seq: i64 = 0
+var _mem_snapshot_enabled: bool = false
+var _mem_snapshot_failed: bool = false
+
+fn _snapshot_append(
+    event: text, phase: text, source_index: i64, source_path: text,
+    retained_modules: i64, validation_keys: i64, validation_values: i64,
+    shared_traits: i64, hir_names: i64, hir_symbols: i64,
+    hir_functions: i64, hir_constants: i64, hir_enums: i64,
+    hir_structs: i64, hir_classes: i64
+) -> bool:
+    if not _mem_snapshot_enabled:
+        return true
+    if _mem_snapshot_failed or _mem_snapshot_fd < 0:
+        return false
+    # Formatting is deliberately runtime-owned and stack-bounded. Building an
+    # interpolated Simple text here would contaminate the no-GC heap counter
+    # this probe exists to measure.
+    if not rt_mem_snapshot_record(
+        _mem_snapshot_fd, _mem_snapshot_seq, event, phase, source_index,
+        source_path, retained_modules, validation_keys, validation_values,
+        shared_traits, hir_names, hir_symbols, hir_functions, hir_constants,
+        hir_enums, hir_structs, hir_classes):
+        _mem_snapshot_failed = true
+        return false
+    _mem_snapshot_seq = _mem_snapshot_seq + 1
+    true
+
+# Returns 0 when disabled, 1 when safely established, and -1 on fail-closed
+# setup failure.  The runtime owner validates every writable path component
+# without following symlinks and opens an absent regular target O_EXCL,
+# O_NOFOLLOW, O_APPEND and O_CLOEXEC.
+fn mem_snapshot_begin() -> i64:
+    if _mem_snapshot_fd >= 0:
+        return -1
+    val path = rt_env_get("SIMPLE_MEM_SNAPSHOT_FILE") ?? ""
+    if path == "":
+        _mem_snapshot_enabled = false
+        return 0
+    _mem_snapshot_enabled = true
+    _mem_snapshot_failed = false
+    _mem_snapshot_seq = 0
+    _mem_snapshot_fd = rt_mem_snapshot_open(path)
+    if _mem_snapshot_fd < 0:
+        _mem_snapshot_failed = true
+        return -1
+    if not _snapshot_append("open", "hir", -1, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0):
+        val _ = rt_mem_snapshot_close(_mem_snapshot_fd)
+        _mem_snapshot_fd = -1
+        return -1
+    1
+
+fn mem_snapshot_record(
+    boundary: text,
+    source_index: i64,
+    source_path: text,
+    retained_modules: i64,
+    validation_keys: i64,
+    validation_values: i64,
+    shared_traits: i64,
+    hir_names: i64,
+    hir_symbols: i64,
+    hir_functions: i64,
+    hir_constants: i64,
+    hir_enums: i64,
+    hir_structs: i64,
+    hir_classes: i64
+) -> bool:
+    _snapshot_append(
+        "snapshot", boundary, source_index, source_path, retained_modules,
+        validation_keys, validation_values, shared_traits, hir_names,
+        hir_symbols, hir_functions, hir_constants, hir_enums, hir_structs,
+        hir_classes)
+
+fn mem_snapshot_finish_with_outcome(outcome: text) -> bool:
+    if not _mem_snapshot_enabled:
+        return true
+    val appended = _snapshot_append("terminal", outcome, -1, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    val closed = if _mem_snapshot_fd >= 0: rt_mem_snapshot_close(_mem_snapshot_fd) else: false
+    _mem_snapshot_fd = -1
+    appended and closed and not _mem_snapshot_failed
+
+fn mem_snapshot_finish() -> bool:
+    mem_snapshot_finish_with_outcome("hir-complete")
+
+fn mem_snapshot_abort():
+    if _mem_snapshot_fd >= 0:
+        val _ = rt_mem_snapshot_close(_mem_snapshot_fd)
+    _mem_snapshot_fd = -1
+    _mem_snapshot_failed = true
+
+export mem_snapshot_begin, mem_snapshot_record, mem_snapshot_finish
+export mem_snapshot_finish_with_outcome, mem_snapshot_abort

@@ -1824,6 +1824,138 @@ int         rt_file_create_excl(const char* path, int64_t path_len,
     return 1;
 }
 
+#if !defined(_WIN32)
+static int rt_mem_snapshot_parent_fd(char* path, const char** leaf_out) {
+    char* leaf = strrchr(path, '/');
+    int parent_fd;
+    if (!leaf) { *leaf_out = path; return open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC); }
+    *leaf++ = '\0';
+    if (*leaf == '\0' || !strcmp(leaf, ".") || !strcmp(leaf, "..")) return -1;
+    *leaf_out = leaf;
+    parent_fd = open(path[0] == '\0' ? "/" : (path[0] == '/' ? "/" : "."), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (parent_fd < 0) return -1;
+    char* walk = path[0] == '/' ? path + 1 : path;
+    char* save = NULL;
+    for (char* part = strtok_r(walk, "/", &save); part; part = strtok_r(NULL, "/", &save)) {
+        if (!strcmp(part, ".")) continue;
+        if (!strcmp(part, "..")) { close(parent_fd); return -1; }
+        int next = openat(parent_fd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (next < 0) { close(parent_fd); return -1; }
+        close(parent_fd); parent_fd = next;
+    }
+    return parent_fd;
+}
+#endif
+
+int64_t rt_mem_snapshot_open(const char* path_ptr, int64_t path_len) {
+#if defined(_WIN32)
+    (void)path_ptr; (void)path_len; return -1;
+#else
+    char path[RT_TEXT_PATH_MAX];
+    if (!path_ptr || path_len <= 0 || (uint64_t)path_len >= sizeof(path) ||
+        memchr(path_ptr, '\0', (size_t)path_len)) return -1;
+    memcpy(path, path_ptr, (size_t)path_len); path[path_len] = '\0';
+    const char* leaf = NULL;
+    int parent_fd = rt_mem_snapshot_parent_fd(path, &leaf);
+    if (parent_fd < 0) return -1;
+    int flags = O_WRONLY | O_CREAT | O_EXCL | O_APPEND;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    int fd = openat(parent_fd, leaf, flags, 0600);
+    close(parent_fd);
+    if (fd < 0) return -1;
+    struct stat opened;
+    if (fstat(fd, &opened) != 0 || !S_ISREG(opened.st_mode)) { close(fd); return -1; }
+    return (int64_t)fd;
+#endif
+}
+
+int rt_mem_snapshot_append_flush(int64_t fd64, const char* record, int64_t record_len) {
+#if defined(_WIN32)
+    (void)fd64; (void)record; (void)record_len; return 0;
+#else
+    if (fd64 < 0 || fd64 > INT_MAX || !record || record_len <= 0 || record[record_len - 1] != '\n') return 0;
+    int fd = (int)fd64; int64_t off = 0;
+    while (off < record_len) {
+        ssize_t wrote = write(fd, record + off, (size_t)(record_len - off));
+        if (wrote <= 0) return 0;
+        off += (int64_t)wrote;
+    }
+    return fsync(fd) == 0;
+#endif
+}
+
+static int rt_mem_snapshot_token(char* out, size_t cap, const char* in, int64_t len) {
+    size_t used = 0;
+    if (len < 0 || (len > 0 && !in)) return -1;
+    for (int64_t i = 0; i < len; ++i) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == '%' || c == ' ' || c == '=' || c == '\n' || c == '\r') {
+            if (used + 3 >= cap) return -1;
+            static const char hex[] = "0123456789ABCDEF";
+            out[used++] = '%'; out[used++] = hex[c >> 4]; out[used++] = hex[c & 15];
+        } else {
+            if (used + 1 >= cap) return -1;
+            out[used++] = (char)c;
+        }
+    }
+    out[used] = '\0'; return (int)used;
+}
+
+int rt_mem_snapshot_record(int64_t fd, int64_t seq,
+        const char* event, int64_t event_len, const char* phase, int64_t phase_len,
+        int64_t source_index, const char* source_path, int64_t source_path_len,
+        int64_t retained_modules, int64_t validation_keys, int64_t validation_values,
+        int64_t shared_traits, int64_t hir_names, int64_t hir_symbols,
+        int64_t hir_functions, int64_t hir_constants, int64_t hir_enums,
+        int64_t hir_structs, int64_t hir_classes) {
+    char event_token[64], phase_token[128], path_token[4096], line[6144];
+    if (rt_mem_snapshot_token(event_token, sizeof(event_token), event, event_len) < 0 ||
+        rt_mem_snapshot_token(phase_token, sizeof(phase_token), phase, phase_len) < 0 ||
+        rt_mem_snapshot_token(path_token, sizeof(path_token), source_path, source_path_len) < 0) return 0;
+    const char* path_kind = source_path_len > 0 ? "recorded" : "none";
+    const char* emitted_path = source_path_len > 0 ? path_token : "-";
+    int n = snprintf(line, sizeof(line),
+        "schema=simple.compiler.mem_snapshot.v1 seq=%lld pid=%lld monotonic_ms=%lld event=%s phase=%s source_index=%lld source_path_kind=%s source_path=%s retained_modules=%lld validation_keys=%lld validation_values=%lld shared_traits=%lld hir_names=%lld hir_symbols=%lld hir_functions=%lld hir_constants=%lld hir_enums=%lld hir_structs=%lld hir_classes=%lld heap_live_bytes=%lld heap_peak_bytes=%lld rss_kib=%lld hwm_kib=%lld\n",
+        (long long)seq, (long long)rt_getpid(), (long long)rt_time_now_monotonic_ms(),
+        event_token, phase_token, (long long)source_index, path_kind, emitted_path,
+        (long long)retained_modules, (long long)validation_keys,
+        (long long)validation_values, (long long)shared_traits, (long long)hir_names,
+        (long long)hir_symbols, (long long)hir_functions, (long long)hir_constants,
+        (long long)hir_enums, (long long)hir_structs, (long long)hir_classes,
+        (long long)rt_heap_live_bytes(), (long long)rt_heap_peak_bytes(),
+        (long long)rt_process_rss_kib(), (long long)rt_process_hwm_kib());
+    return n > 0 && (size_t)n < sizeof(line) && rt_mem_snapshot_append_flush(fd, line, n);
+}
+
+int rt_mem_snapshot_close(int64_t fd) {
+#if defined(_WIN32)
+    (void)fd; return 0;
+#else
+    return fd >= 0 && fd <= INT_MAX && close((int)fd) == 0;
+#endif
+}
+
+static int64_t rt_process_status_kib(const char* key) {
+#if defined(_WIN32)
+    (void)key; return -1;
+#else
+    FILE* f = fopen("/proc/self/status", "r");
+    if (!f) return -1;
+    char line[256]; int64_t value = -1;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, key, strlen(key)) == 0) { value = strtoll(line + strlen(key), NULL, 10); break; }
+    }
+    fclose(f); return value;
+#endif
+}
+int64_t rt_process_rss_kib(void) { return rt_process_status_kib("VmRSS:"); }
+int64_t rt_process_hwm_kib(void) { return rt_process_status_kib("VmHWM:"); }
+
 int64_t rt_file_stat(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;

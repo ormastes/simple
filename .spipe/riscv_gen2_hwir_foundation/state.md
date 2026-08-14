@@ -1200,3 +1200,20 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   publishing that unique retained path; then run it with the admitted Stage-4
   CLI/provenance. This does not close the broader command-failure/mutation red
   matrix or change the WARN phase.
+- impl-review (2026-08-14, A14 runner-to-writer handoff): the runner now passes
+  its exact private manifest directly to the writer-red harness after owned
+  source revalidation and before exactly one positive composer invocation. It
+  validates the unique retained evidence path and every copy/publication
+  command, log, and hit marker, then revalidates owned sources. Each red command
+  record hash-binds the admitted CLI, adjacent provenance, and manifest; an
+  aggregate receipt written last binds all six retained artifacts. The harness
+  and runner fail closed if the executable, provenance, manifest, or harness
+  changes before, between, or after the reds. The separate writer-red receipt
+  is not embedded in the positive receipt; final runner output publishes its
+  exact path and SHA-256 beside the qualification receipt, eliminating glob or
+  manual discovery when that output is retained. Hostile same-user
+  mutation-and-restoration during the harness path execution window is outside
+  this local qualification threat model. The
+  focused shell contract passed once. No admitted Stage-4 execution was
+  available, so writer-red execution and all broader B5/B6 evidence remain
+  unchecked and phase remains `implementation-handoff` / WARN.

@@ -147,6 +147,10 @@ helper_sha_before=$(bootstrap_stage3_hash_file "$helper")
 helper_bundle_before=$(bootstrap_stage3_helper_bundle_fingerprint)
 seed_fingerprint=$(bootstrap_stage3_manifest_value inputs_fingerprint "$stamp")
 progress="$output/bootstrap-build-progress.events"
+memory_snapshot="$stage3/memory-snapshot-v1.$$.events"
+phase_profile="$stage3/phase-profile.$$.events"
+[ ! -e "$memory_snapshot" ] && [ ! -L "$memory_snapshot" ] || exit 1
+[ ! -e "$phase_profile" ] && [ ! -L "$phase_profile" ] || exit 1
 
 stage2_threads=$(sed -n '/^argv:[0-9][0-9]*:--threads$/{n;s/^argv:[0-9][0-9]*://p;q;}' "$stage2_transcript")
 case "$stage2_threads" in ''|*[!0-9]*) exit 1 ;; esac
@@ -165,6 +169,9 @@ stage3_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
   "SIMPLE_NATIVE_ARENA_DECLS=1" "SIMPLE_NO_STUB_FALLBACK=1" \
   "SIMPLE_BUILD_PROGRESS_EVENTS=$progress" \
+  "SIMPLE_COMPILER_PHASE_PROFILE=1" \
+  "SIMPLE_COMPILER_PHASE_PROFILE_FILE=$phase_profile" \
+  "SIMPLE_MEM_SNAPSHOT_FILE=$memory_snapshot" \
   "LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1" \
   "SIMPLE_NATIVE_BUILD_TARGET=$platform" "SIMPLE_NATIVE_BUILD_THREADS=1" \
   "SIMPLE_NATIVE_BUILD_CACHE_DIR=$stage3_cache" "SIMPLE_RUNTIME_PATH=$runtime" \
@@ -180,6 +187,9 @@ bootstrap_stage3_run_transcribed "$stage3_transcript" "$root" "$stage3_log" \
   SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=absent SIMPLE_BOOTSTRAP=1 \
   SIMPLE_NO_DEPRECATED_WARNINGS=1 SIMPLE_NATIVE_ARENA_DECLS=1 \
   SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BUILD_PROGRESS_EVENTS="$progress" \
+  SIMPLE_COMPILER_PHASE_PROFILE=1 \
+  SIMPLE_COMPILER_PHASE_PROFILE_FILE="$phase_profile" \
+  SIMPLE_MEM_SNAPSHOT_FILE="$memory_snapshot" \
   LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
   SIMPLE_NATIVE_BUILD_TARGET="$platform" SIMPLE_NATIVE_BUILD_THREADS=1 \
   SIMPLE_NATIVE_BUILD_CACHE_DIR="$stage3_cache" SIMPLE_RUNTIME_PATH="$runtime" \

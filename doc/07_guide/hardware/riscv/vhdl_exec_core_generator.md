@@ -640,14 +640,25 @@ copy/publication/cleanup deliberate-reds have not run under an admitted runtime.
 Those Simple writer reds and an admitted RV32/RV64 run remain open in the canonical
 [task plan](../../../03_plan/agent_tasks/riscv_gen2_hwir_foundation.md) and
 [qualification bug](../../../08_tracking/bug/riscv_gen2_hwir_qualification_contract_mismatch_2026-08-14.md).
-The source tree now includes a provenance-validating, test-only writer-red
-harness and deterministic host-native failpoint fixture for copy and final
-publication cleanup. The fixture is green, but this is not admitted writer
-evidence: the qualification runner retains its manifest at a PID-suffixed
-staging path without printing that unique path or invoking the harness. Wire
-the harness after manifest revalidation and before successful composition (or
-publish a unique retained-manifest receipt) before running these reds. Do not
-discover a manifest by an ambiguous glob or count the host fixture as A14 PASS.
+The qualification runner now passes its exact PID-private manifest directly to
+the provenance-validating, test-only writer-red harness after source/manifest
+revalidation and before its sole positive composer invocation. The harness
+uses unique red run ids, hash-binds the admitted CLI, adjacent provenance, and
+manifest in each command record, proves exact copy/publication failures and
+cleanup, and writes an aggregate receipt last that hash-binds every red log,
+hit marker, and command record. The unique evidence and receipt paths are
+returned directly to and validated by the runner, including post-execution
+harness and manifest hashes. The runner then
+revalidates sources before positive composition. Do not discover a manifest by
+an ambiguous glob, invoke the harness separately, or count the host fixture as
+A14 PASS. The writer-red receipt is a separate claim, not embedded in the
+positive qualification receipt; successful runner output publishes its exact
+absolute path and SHA-256 alongside the positive receipt path, so retain that
+output and never correlate the claims by scanning the writer-red root. The
+hash-before/after guards detect accidental concurrent workspace edits; hostile
+same-user mutation-and-restoration during the path execution window is outside
+this local qualification threat model. This source wiring remains WARN until
+the single qualification run executes it with an admitted Stage-4 CLI.
 
 The compiler-side inventory now walks only canonical, tag-dispatched flat-AST
 children, preserves source spans through parsing and placeholder desugaring,

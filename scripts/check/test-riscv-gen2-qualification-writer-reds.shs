@@ -50,6 +50,11 @@ stage4_verify_candidate_provenance "$provenance" "$simple" "$ROOT_DIR" ||
 manifest_canonical=$(bootstrap_stage3_canonical_file "$ROOT_DIR/$manifest") ||
     fail manifest-missing-symlinked-or-noncanonical
 [ "$manifest_canonical" = "$ROOT_DIR/$manifest" ] || fail manifest-path-not-canonical
+manifest_sha256=$(bootstrap_stage3_hash_file "$manifest_canonical") ||
+    fail manifest-hash-read-failed
+simple_sha256=$(bootstrap_stage3_hash_file "$simple") || fail stage4-cli-hash-read-failed
+provenance_sha256=$(bootstrap_stage3_hash_file "$provenance") ||
+    fail stage4-provenance-hash-read-failed
 [ -f "$FAILPOINT_SOURCE" ] && [ ! -L "$FAILPOINT_SOURCE" ] || fail failpoint-source-invalid
 command -v cc >/dev/null 2>&1 || fail c-compiler-unavailable
 command -v timeout >/dev/null 2>&1 || fail timeout-unavailable
@@ -100,12 +105,20 @@ run_red() {
     expected_path="build/evidence/riscv_gen2_hwir_foundation/$run_id$deny_suffix"
     [ "${#run_id}" -le 128 ] || fail "$mode-generated-run-id-too-long"
     [ ! -e "$run_dir" ] && [ ! -L "$run_dir" ] || fail "$mode-run-directory-exists"
+    [ "$(bootstrap_stage3_hash_file "$manifest_canonical")" = "$manifest_sha256" ] ||
+        fail "$mode-manifest-mutated"
+    [ "$(bootstrap_stage3_hash_file "$simple")" = "$simple_sha256" ] ||
+        fail "$mode-stage4-cli-mutated"
+    [ "$(bootstrap_stage3_hash_file "$provenance")" = "$provenance_sha256" ] ||
+        fail "$mode-stage4-provenance-mutated"
     {
         printf 'schema=riscv-gen2-writer-red-command-v1\n'
         printf 'mode=%s\nrun_id=%s\n' "$mode" "$run_id"
         printf 'stage4_cli=%s\nstage4_provenance=%s\n' "$simple" "$provenance"
+        printf 'stage4_cli_sha256=%s\nstage4_provenance_sha256=%s\n' \
+            "$simple_sha256" "$provenance_sha256"
         printf 'manifest=%s\nfailpoint_source=%s\n' "$manifest" "$FAILPOINT_SOURCE"
-        printf 'manifest_sha256=%s\n' "$(bootstrap_stage3_hash_file "$manifest_canonical")"
+        printf 'manifest_sha256=%s\n' "$manifest_sha256"
         printf 'failpoint_source_sha256=%s\n' "$(bootstrap_stage3_hash_file "$FAILPOINT_SOURCE")"
         printf 'harness_sha256=%s\n' "$(bootstrap_stage3_hash_file "$ROOT_DIR/scripts/check/test-riscv-gen2-qualification-writer-reds.shs")"
         printf 'deny_kind=%s\ndeny_suffix=%s\nexpected_path=%s\n' \
@@ -136,5 +149,41 @@ run_red copy "$evidence_id-copy" write "/rv64.run.log" \
     qualification-evidence-copy-failed
 run_red publication "$evidence_id-publication" rename "/qualification_receipt.json" \
     qualification-receipt-write-failed
+[ "$(bootstrap_stage3_hash_file "$manifest_canonical")" = "$manifest_sha256" ] ||
+    fail manifest-mutated-after-reds
+[ "$(bootstrap_stage3_hash_file "$simple")" = "$simple_sha256" ] ||
+    fail stage4-cli-mutated-after-reds
+[ "$(bootstrap_stage3_hash_file "$provenance")" = "$provenance_sha256" ] ||
+    fail stage4-provenance-mutated-after-reds
+receipt="$evidence_dir/writer-red-receipt.env"
+receipt_tmp="$evidence_dir/.writer-red-receipt.env.tmp.$$"
+{
+    printf '%s\n' 'schema=riscv-gen2-writer-red-receipt-v1'
+    printf 'stage4_cli=%s\nstage4_cli_sha256=%s\n' "$simple" "$simple_sha256"
+    printf 'stage4_provenance=%s\nstage4_provenance_sha256=%s\n' \
+        "$provenance" "$provenance_sha256"
+    printf 'manifest=%s\nmanifest_sha256=%s\n' "$manifest" "$manifest_sha256"
+    printf 'failpoint_source_sha256=%s\n' "$(bootstrap_stage3_hash_file "$FAILPOINT_SOURCE")"
+    printf 'harness_sha256=%s\n' "$(bootstrap_stage3_hash_file "$ROOT_DIR/scripts/check/test-riscv-gen2-qualification-writer-reds.shs")"
+    for receipt_mode in copy publication; do
+        for receipt_member in command.env composer.log hit; do
+            receipt_file="$evidence_dir/$receipt_mode.$receipt_member"
+            printf '%s_%s_sha256=%s\n' "$receipt_mode" \
+                "$(printf '%s' "$receipt_member" | tr '.' '_')" \
+                "$(bootstrap_stage3_hash_file "$receipt_file")"
+        done
+    done
+    printf '%s\n' 'status=passed'
+} >"$receipt_tmp" || fail writer-red-receipt-write-failed
+[ -s "$receipt_tmp" ] && [ ! -L "$receipt_tmp" ] || fail writer-red-receipt-write-failed
+mv -- "$receipt_tmp" "$receipt" || fail writer-red-receipt-publication-failed
+[ -s "$receipt" ] && [ ! -L "$receipt" ] || fail writer-red-receipt-write-failed
+[ "$(bootstrap_stage3_hash_file "$manifest_canonical")" = "$manifest_sha256" ] ||
+    fail manifest-mutated-during-receipt
+[ "$(bootstrap_stage3_hash_file "$simple")" = "$simple_sha256" ] ||
+    fail stage4-cli-mutated-during-receipt
+[ "$(bootstrap_stage3_hash_file "$provenance")" = "$provenance_sha256" ] ||
+    fail stage4-provenance-mutated-during-receipt
 printf 'riscv_gen2_writer_red_evidence=%s\n' "$evidence_dir"
+printf 'riscv_gen2_writer_red_receipt=%s\n' "$receipt"
 printf '%s\n' 'riscv_gen2_writer_red_status=pass'

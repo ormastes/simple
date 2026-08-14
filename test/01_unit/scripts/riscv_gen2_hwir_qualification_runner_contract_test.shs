@@ -6,12 +6,14 @@ RUNNER=$ROOT/scripts/check/run-riscv-gen2-hwir-qualification.shs
 COMPOSER=$ROOT/src/app/test/riscv_gen2_qualification_receipt.spl
 VALIDATION=$ROOT/scripts/check/lib/riscv-gen2-qualification-validation.shs
 POST_STAGE4=$ROOT/scripts/check/check-post-bootstrap-stage4-sspec.shs
+WRITER_REDS=$ROOT/scripts/check/test-riscv-gen2-qualification-writer-reds.shs
 fail() { printf '%s\n' "FAIL: $1" >&2; exit 1; }
 
 [ -x "$RUNNER" ] || fail 'runner is not executable'
 sh -n "$RUNNER" || fail 'runner shell syntax'
 sh -n "$VALIDATION" || fail 'validation helper shell syntax'
 sh -n "$POST_STAGE4" || fail 'post-bootstrap Stage 4 shell syntax'
+sh -n "$WRITER_REDS" || fail 'writer-red harness shell syntax'
 grep -F 'BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"' \
     "$POST_STAGE4" >/dev/null ||
     fail 'post-bootstrap Stage 4 gate does not load the canonical provenance facade'
@@ -24,6 +26,11 @@ for token in \
     'schema=riscv-gen2-hwir-qualification-run-v2' \
     'STAGING=$evidence_root/$run_id.staging.$$' \
     'final-path-created-before-composer' \
+    'test-riscv-gen2-qualification-writer-reds.shs' \
+    'writer-red-harness-failed:' 'writer-red-evidence-incomplete' \
+    'writer-red-harness-mutated' 'writer-red-manifest-mutated' \
+    'writer-red-receipt-invalid' \
+    '--manifest "$(rel "$MANIFEST")" --run-id-prefix "$run_id"' \
     'run "$COMPOSER_SOURCE" --manifest "$(rel "$MANIFEST")" --run-id "$run_id"' \
     'branch_coverage_command_path=' 'changed_file_count=' 'exclusion_count=4' \
     'testbench' 'product_exit_code=0' 'analyze_exit_code=0' \
@@ -66,6 +73,21 @@ fi
 if grep -E 'git diff-tree|git diff --name-only|QUALIFICATION_BASE_REVISION' "$RUNNER" >/dev/null; then
     fail 'qualification scope depends on repository history instead of its owned-file manifest'
 fi
+writer_red_line=$(grep -n 'test-riscv-gen2-qualification-writer-reds.shs' "$RUNNER" | tail -1 | cut -d: -f1)
+positive_composer_line=$(grep -n 'run "$COMPOSER_SOURCE" --manifest "$(rel "$MANIFEST")" --run-id "$run_id"' "$RUNNER" | tail -1 | cut -d: -f1)
+[ -n "$writer_red_line" ] && [ -n "$positive_composer_line" ] &&
+    [ "$writer_red_line" -lt "$positive_composer_line" ] ||
+    fail 'writer-red harness is not ordered before the sole positive composer'
+[ "$(grep -Fc 'run "$COMPOSER_SOURCE" --manifest "$(rel "$MANIFEST")" --run-id "$run_id"' "$RUNNER")" -eq 1 ] ||
+    fail 'runner does not contain exactly one positive composer invocation'
+for token in \
+    'stage4_cli_sha256=' 'stage4_provenance_sha256=' 'manifest_sha256=' \
+    'fail "$mode-manifest-mutated"' \
+    'manifest-mutated-after-reds' 'schema=riscv-gen2-writer-red-receipt-v1' \
+    'writer-red-receipt.env'; do
+    grep -F -- "$token" "$WRITER_REDS" >/dev/null ||
+        fail "writer-red provenance/mutation contract missing: $token"
+done
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-g2-runner-contract.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM

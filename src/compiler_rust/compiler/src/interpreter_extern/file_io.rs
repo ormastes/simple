@@ -10,12 +10,22 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::{LazyLock, Mutex};
+use std::time::Instant;
+#[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::io::FromRawFd;
 
 // Global lock handle counter and active locks
 static LOCK_HANDLES: Mutex<Option<LockState>> = Mutex::new(None);
 static SYMBOL_INTERNER: LazyLock<Mutex<SymbolInterner>> = LazyLock::new(|| Mutex::new(SymbolInterner::new()));
 static FILE_EXISTS_PROBE: LazyLock<Mutex<FileExistsProbeState>> =
     LazyLock::new(|| Mutex::new(FileExistsProbeState::new()));
+static MEM_SNAPSHOT_START: LazyLock<Instant> = LazyLock::new(Instant::now);
+static MEM_SNAPSHOT_FILES: LazyLock<Mutex<(i64, HashMap<i64, std::fs::File>)>> =
+    LazyLock::new(|| Mutex::new((1, HashMap::new())));
 
 struct LockState {
     next_id: i64,
@@ -416,6 +426,105 @@ pub fn rt_file_create_excl(args: &[Value]) -> Result<Value, CompileError> {
         }
         Err(_) => Ok(Value::Bool(false)),
     }
+}
+
+pub fn rt_mem_snapshot_open(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let target = Path::new(&path);
+    if target.as_os_str().is_empty() {
+        return Ok(Value::Int(-1));
+    }
+    #[cfg(not(unix))]
+    return Ok(Value::Int(-1));
+    #[cfg(unix)]
+    let file = {
+        let parent = match target.parent() { Some(value) => value, None => Path::new(".") };
+        let root = CString::new(if target.is_absolute() { "/" } else { "." }).expect("fixed path");
+        let mut parent_fd = unsafe { libc::open(root.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+        if parent_fd < 0 { return Ok(Value::Int(-1)); }
+        for component in parent.components() {
+            use std::path::Component;
+            let name = match component {
+                Component::RootDir | Component::CurDir => continue,
+                Component::Normal(value) => value,
+                Component::ParentDir | Component::Prefix(_) => { unsafe { libc::close(parent_fd) }; return Ok(Value::Int(-1)); }
+            };
+            let name = match CString::new(name.as_bytes()) { Ok(value) => value, Err(_) => { unsafe { libc::close(parent_fd) }; return Ok(Value::Int(-1)); } };
+            let next = unsafe { libc::openat(parent_fd, name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+            unsafe { libc::close(parent_fd) };
+            if next < 0 { return Ok(Value::Int(-1)); }
+            parent_fd = next;
+        }
+        let leaf = match target.file_name().and_then(|name| CString::new(name.as_bytes()).ok()) {
+            Some(value) => value,
+            None => { unsafe { libc::close(parent_fd) }; return Ok(Value::Int(-1)); }
+        };
+        let fd = unsafe { libc::openat(parent_fd, leaf.as_ptr(), libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) };
+        unsafe { libc::close(parent_fd) };
+        if fd < 0 { return Ok(Value::Int(-1)); }
+        unsafe { std::fs::File::from_raw_fd(fd) }
+    };
+    if !file.metadata().map(|m| m.is_file()).unwrap_or(false) {
+        return Ok(Value::Int(-1));
+    }
+    let mut files = MEM_SNAPSHOT_FILES.lock().expect("memory snapshot lock");
+    let handle = files.0;
+    files.0 += 1;
+    files.1.insert(handle, file);
+    Ok(Value::Int(handle))
+}
+
+fn snapshot_int(args: &[Value], index: usize) -> Option<i64> {
+    match args.get(index) { Some(Value::Int(value)) => Some(*value), _ => None }
+}
+
+fn snapshot_token(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'%' | b' ' | b'=' | b'\n' | b'\r' => out.push_str(&format!("%{byte:02X}")),
+            _ => out.push(byte as char),
+        }
+    }
+    out
+}
+
+fn process_status_kib(key: &str) -> i64 {
+    fs::read_to_string("/proc/self/status").ok().and_then(|status| {
+        status.lines().find(|line| line.starts_with(key))
+            .and_then(|line| line[key.len()..].split_whitespace().next())
+            .and_then(|value| value.parse::<i64>().ok())
+    }).unwrap_or(-1)
+}
+
+pub fn rt_mem_snapshot_record(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 17 { return Ok(Value::Bool(false)); }
+    let handle = match snapshot_int(args, 0) { Some(v) => v, None => return Ok(Value::Bool(false)) };
+    let seq = match snapshot_int(args, 1) { Some(v) => v, None => return Ok(Value::Bool(false)) };
+    let event = snapshot_token(&extract_content(args, 2)?);
+    let phase = snapshot_token(&extract_content(args, 3)?);
+    let source_index = match snapshot_int(args, 4) { Some(v) => v, None => return Ok(Value::Bool(false)) };
+    let path = snapshot_token(&extract_content(args, 5)?);
+    let mut counts = [0i64; 11];
+    for (slot, arg_index) in (6usize..17).enumerate() {
+        counts[slot] = match snapshot_int(args, arg_index) { Some(v) => v, None => return Ok(Value::Bool(false)) };
+    }
+    let heap_live = simple_runtime::value::heap::rt_heap_live_bytes();
+    let heap_peak = simple_runtime::value::heap::rt_heap_peak_bytes();
+    let line = format!("schema=simple.compiler.mem_snapshot.v1 seq={seq} pid={} monotonic_ms={} event={event} phase={phase} source_index={source_index} source_path_kind={} source_path={} retained_modules={} validation_keys={} validation_values={} shared_traits={} hir_names={} hir_symbols={} hir_functions={} hir_constants={} hir_enums={} hir_structs={} hir_classes={} heap_live_bytes={heap_live} heap_peak_bytes={heap_peak} rss_kib={} hwm_kib={}\n",
+        std::process::id(), MEM_SNAPSHOT_START.elapsed().as_millis(),
+        if path.is_empty() { "none" } else { "recorded" }, if path.is_empty() { "-" } else { &path },
+        counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7], counts[8], counts[9], counts[10],
+        process_status_kib("VmRSS:"), process_status_kib("VmHWM:"));
+    let mut files = MEM_SNAPSHOT_FILES.lock().expect("memory snapshot lock");
+    let ok = files.1.get_mut(&handle).map(|file| file.write_all(line.as_bytes()).is_ok() && file.sync_all().is_ok()).unwrap_or(false);
+    Ok(Value::Bool(ok))
+}
+
+pub fn rt_mem_snapshot_close(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = match snapshot_int(args, 0) { Some(v) => v, None => return Ok(Value::Bool(false)) };
+    let mut files = MEM_SNAPSHOT_FILES.lock().expect("memory snapshot lock");
+    Ok(Value::Bool(files.1.remove(&handle).is_some()))
 }
 
 /// Write text at an absolute byte offset without rewriting the full file.

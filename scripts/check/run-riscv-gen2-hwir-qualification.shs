@@ -10,6 +10,7 @@ PRODUCT=riscv-gen2-zca-trap-single-outstanding-v3
 SPEC=test/03_system/app/hardware/feature/riscv_gen2_hwir_foundation_spec.spl
 RECEIPT_SPEC=test/01_unit/app/riscv_gen2_qualification_receipt_spec.spl
 COMPOSER_SOURCE=src/app/test/riscv_gen2_qualification_receipt.spl
+WRITER_RED_HARNESS=$ROOT_DIR/scripts/check/test-riscv-gen2-qualification-writer-reds.shs
 STAGE4_CLI=
 STAGE4_PROVENANCE=
 OUT_DIR=
@@ -309,6 +310,73 @@ MANIFEST=$STAGING/run_manifest.env
 # composer, create it, copy validated inputs, and write the receipt last.
 [ ! -e "$resolved_out" ] && [ ! -L "$resolved_out" ] || fail final-path-created-before-composer
 revalidate_owned_sources
+
+# Exercise both destructive writer failure boundaries against this run's exact,
+# private manifest before the one successful composer invocation.  The harness
+# selects unique red run ids and retains its own provenance-bound evidence; the
+# runner passes the manifest path directly, never through a glob or discovery
+# convention.
+[ -f "$WRITER_RED_HARNESS" ] && [ ! -L "$WRITER_RED_HARNESS" ] &&
+    [ -x "$WRITER_RED_HARNESS" ] || fail writer-red-harness-invalid
+[ "$(bootstrap_stage3_canonical_file "$WRITER_RED_HARNESS")" = "$WRITER_RED_HARNESS" ] ||
+    fail writer-red-harness-noncanonical
+writer_red_harness_sha256=$(hash "$WRITER_RED_HARNESS")
+writer_red_manifest_sha256=$(hash "$MANIFEST")
+WRITER_RED_COMMAND=$STAGING/writer-red.command
+WRITER_RED_LOG=$STAGING/writer-red.log
+printf '%s\n' "$WRITER_RED_HARNESS --stage4-cli $simple --stage4-provenance $provenance --manifest $(rel "$MANIFEST") --run-id-prefix $run_id" >"$WRITER_RED_COMMAND" ||
+    fail writer-red-command-write-failed
+if timeout -k 30 "$TIMEOUT_SECS" "$WRITER_RED_HARNESS" \
+        --stage4-cli "$simple" --stage4-provenance "$provenance" \
+        --manifest "$(rel "$MANIFEST")" --run-id-prefix "$run_id" \
+        >"$WRITER_RED_LOG" 2>&1; then writer_red_status=0; else writer_red_status=$?; fi
+[ "$writer_red_status" -eq 0 ] || fail "writer-red-harness-failed:$writer_red_status"
+[ "$(hash "$WRITER_RED_HARNESS")" = "$writer_red_harness_sha256" ] ||
+    fail writer-red-harness-mutated
+[ "$(hash "$MANIFEST")" = "$writer_red_manifest_sha256" ] ||
+    fail writer-red-manifest-mutated
+for writer_red_line in writer_red_copy=pass writer_red_publication=pass riscv_gen2_writer_red_status=pass; do
+    [ "$(grep -Fxc "$writer_red_line" "$WRITER_RED_LOG" || :)" -eq 1 ] ||
+        fail writer-red-result-invalid
+done
+[ "$(grep -c '^riscv_gen2_writer_red_evidence=' "$WRITER_RED_LOG" || :)" -eq 1 ] ||
+    fail writer-red-evidence-path-invalid
+[ "$(grep -c '^riscv_gen2_writer_red_receipt=' "$WRITER_RED_LOG" || :)" -eq 1 ] ||
+    fail writer-red-receipt-path-invalid
+writer_red_evidence=$(sed -n 's/^riscv_gen2_writer_red_evidence=//p' "$WRITER_RED_LOG")
+writer_red_receipt=$(sed -n 's/^riscv_gen2_writer_red_receipt=//p' "$WRITER_RED_LOG")
+case "$writer_red_evidence" in "$ROOT_DIR/build/evidence/riscv_gen2_hwir_writer_reds/"*) ;; *) fail writer-red-evidence-path-invalid ;; esac
+[ -d "$writer_red_evidence" ] && [ ! -L "$writer_red_evidence" ] || fail writer-red-evidence-path-invalid
+[ "$(bootstrap_stage3_canonical_path "$writer_red_evidence")" = "$writer_red_evidence" ] ||
+    fail writer-red-evidence-path-invalid
+[ "$writer_red_receipt" = "$writer_red_evidence/writer-red-receipt.env" ] ||
+    fail writer-red-receipt-path-invalid
+[ -f "$writer_red_receipt" ] && [ ! -L "$writer_red_receipt" ] && [ -s "$writer_red_receipt" ] ||
+    fail writer-red-receipt-path-invalid
+[ "$(grep -Fxc 'schema=riscv-gen2-writer-red-receipt-v1' "$writer_red_receipt" || :)" -eq 1 ] ||
+    fail writer-red-receipt-invalid
+[ "$(grep -Fxc 'status=passed' "$writer_red_receipt" || :)" -eq 1 ] ||
+    fail writer-red-receipt-invalid
+[ "$(grep -Fxc "manifest_sha256=$writer_red_manifest_sha256" "$writer_red_receipt" || :)" -eq 1 ] ||
+    fail writer-red-receipt-invalid
+[ "$(grep -Fxc "harness_sha256=$writer_red_harness_sha256" "$writer_red_receipt" || :)" -eq 1 ] ||
+    fail writer-red-receipt-invalid
+[ "$(grep -Fxc "stage4_cli_sha256=$(hash "$simple")" "$writer_red_receipt" || :)" -eq 1 ] ||
+    fail writer-red-receipt-invalid
+[ "$(grep -Fxc "stage4_provenance_sha256=$(hash "$provenance")" "$writer_red_receipt" || :)" -eq 1 ] ||
+    fail writer-red-receipt-invalid
+for writer_red_mode in copy publication; do
+    for writer_red_member in command.env composer.log hit; do
+        writer_red_file=$writer_red_evidence/$writer_red_mode.$writer_red_member
+        [ -f "$writer_red_file" ] && [ ! -L "$writer_red_file" ] && [ -s "$writer_red_file" ] ||
+            fail writer-red-evidence-incomplete
+        writer_red_key=${writer_red_mode}_$(printf '%s' "$writer_red_member" | tr '.' '_')_sha256
+        [ "$(grep -Fxc "$writer_red_key=$(hash "$writer_red_file")" "$writer_red_receipt" || :)" -eq 1 ] ||
+            fail writer-red-receipt-invalid
+    done
+done
+[ "$(hash "$MANIFEST")" = "$writer_red_manifest_sha256" ] || fail writer-red-manifest-mutated
+revalidate_owned_sources
 RECEIPT=$resolved_out/qualification_receipt.json
 if (cd "$ROOT_DIR" && timeout -k 30 "$TIMEOUT_SECS" "$simple" run "$COMPOSER_SOURCE" --manifest "$(rel "$MANIFEST")" --run-id "$run_id") >"$STAGING/composer.log" 2>&1; then composer_status=0; else composer_status=$?; fi
 [ "$composer_status" -eq 0 ] || fail "receipt-composer-failed:$composer_status"
@@ -317,6 +385,8 @@ grep -F '"schema":"riscv-gen2-hwir-qualification-run-v2"' "$RECEIPT" >/dev/null 
 grep -F '"status":"passed"' "$RECEIPT" >/dev/null || fail composer-receipt-status-invalid
 
 printf '%s\n' 'riscv_gen2_hwir_qualification_status=pass'
+printf '%s\n' "riscv_gen2_hwir_writer_red_receipt=$writer_red_receipt"
+printf '%s\n' "riscv_gen2_hwir_writer_red_receipt_sha256=$(hash "$writer_red_receipt")"
 printf '%s\n' "riscv_gen2_hwir_qualification_receipt=$RECEIPT"
 
 exit 0

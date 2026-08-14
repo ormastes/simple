@@ -3,7 +3,7 @@
 - Status: OPEN
 - Date: 2026-08-14
 - Severity: P0 bootstrap blocker
-- Owner: pure-Simple compiler/bootstrap memory lifecycle
+- Owner: `/root/memory_sink_impl` — pure-Simple compiler/bootstrap memory lifecycle
 
 ## 2026-08-14 owner fix (pending one future canonical build)
 
@@ -210,3 +210,26 @@ This instrumentation makes one fresh build discriminating: a rising
 investigation, not an owner or leak until reproducer confirmation; flat heap counters with
 rising `RssAnon` select raw/native allocation; a new descendant selects process
 fan-out; and a bounded per-module sawtooth refutes unbounded retention.
+
+## Durable snapshot implementation (2026-08-14)
+
+The fresh-run prerequisite is implemented, but this lane did not start the
+canonical Stage-3 transaction. `compiler.driver.driver_mem_snapshot` is the
+single environment/config and descriptor owner. Runtime-owned bounded-stack
+formatting receives scalar fields, avoiding a Simple no-GC text-allocation
+slope. Runtime/core-C and hosted-interpreter owners descriptor-walk parents
+with `openat(O_DIRECTORY|O_NOFOLLOW)`, create the leaf with
+`O_EXCL|O_NOFOLLOW|O_APPEND`, retain one descriptor, and flush each record.
+
+Snapshots cover file start, post-lowering, post-diagnostics, and post-store.
+Retained-module and shared-trait counts are owner-maintained scalars; the probe
+does not materialize `Dict.keys()`. The Stage-3 resume wrapper now transcribes
+and forwards fresh retained phase-profile and memory-snapshot paths.
+
+The focused core-C contract covers complete/interrupted writers, existing and
+symlink targets/parents, token encoding, sequence continuity, and deliberate-red
+partial/gap fixtures. It passed with C and shell syntax checks. Rust compiler
+checking reached unrelated pre-existing missing
+`simple_runtime::rt_provider_query_v1_call` symbols and emitted no snapshot-file
+diagnostic. The three-cycle cap is exhausted; next is higher-capability source
+review and then the single instrumented Stage-3 transaction.

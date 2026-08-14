@@ -1314,6 +1314,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_copy", file_io::rt_file_copy);
     insert_simple!("rt_crc32_text", file_io::rt_crc32_text);
     insert_simple!("rt_file_create_excl", file_io::rt_file_create_excl);
+    insert_simple!("rt_mem_snapshot_open", file_io::rt_mem_snapshot_open);
+    insert_simple!("rt_mem_snapshot_record", file_io::rt_mem_snapshot_record);
+    insert_simple!("rt_mem_snapshot_close", file_io::rt_mem_snapshot_close);
     insert_simple!("rt_file_delete", native_sffi::rt_file_delete);
     insert_simple!("rt_file_exists", file_io::rt_file_exists);
     insert_simple!("rt_file_exists_probe_begin", file_io::rt_file_exists_probe_begin);

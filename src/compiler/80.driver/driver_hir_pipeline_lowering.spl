@@ -6,7 +6,16 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir.*
-use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_reset}
+use compiler.hir.hir_lowering.items.{
+    bootstrap_hir_modules_reset,
+    bootstrap_hir_module_names_outer_len,
+    bootstrap_hir_module_symbols_outer_len,
+    bootstrap_hir_module_functions_outer_len,
+    bootstrap_hir_module_constants_outer_len,
+    bootstrap_hir_module_enums_outer_len,
+    bootstrap_hir_module_structs_outer_len,
+    bootstrap_hir_module_classes_outer_len
+}
 use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module, hirlowering_for_module_with_diagnostics, LoweringError, LoweringErrorKind}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName, module_surfaces_from_modules}
 use compiler.frontend.frontend.{parse_full_frontend}
@@ -18,6 +27,7 @@ use compiler.driver.driver_source_pipeline_impl.{dtrace, driver_end_transient_pa
 use compiler.driver.driver_bootstrap.{bootstrap_entry_module_name, bootstrap_entry_source_index}
 use compiler.driver.driver_orchestration.{driver_streaming_surface_enabled}
 use compiler.driver.driver_log_helpers.{log_debug, log_trace, log_warn, log_error, log_phase, log_build_progress}
+use compiler.driver.driver_mem_snapshot.{mem_snapshot_begin, mem_snapshot_record, mem_snapshot_finish, mem_snapshot_finish_with_outcome, mem_snapshot_abort}
 use compiler.driver.driver_hir_pipeline_passes.{
     run_typecheck_warn_pass,
     run_safety_warn_pass
@@ -36,6 +46,26 @@ extern fn rt_env_get(key: text) -> text
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_heap_promote(value: Any) -> bool
+
+fn _driver_hir_mem_snapshot(
+    boundary: text,
+    source_index: i64,
+    source_path: text,
+    retained_modules: i64,
+    validation_keys: i64,
+    validation_values: i64,
+    shared_traits: i64
+) -> bool:
+    mem_snapshot_record(
+        boundary, source_index, source_path, retained_modules,
+        validation_keys, validation_values, shared_traits,
+        bootstrap_hir_module_names_outer_len(),
+        bootstrap_hir_module_symbols_outer_len(),
+        bootstrap_hir_module_functions_outer_len(),
+        bootstrap_hir_module_constants_outer_len(),
+        bootstrap_hir_module_enums_outer_len(),
+        bootstrap_hir_module_structs_outer_len(),
+        bootstrap_hir_module_classes_outer_len())
 
 fn _format_hir_lowering_error(name: text, err: LoweringError) -> text:
     if err.span.file != "":
@@ -142,6 +172,7 @@ impl CompilerDriver:
         var validation_module_keys: [text] = []
         var validation_module_values: [HirModule] = []
         var phase_entry_hir: HirModule? = nil
+        var streaming_hir_module_count: i64 = self.ctx.hir_module_count_value
         val entry_source_index = bootstrap_entry_source_index(self.ctx)
         var source_index = 0
         var progress_hir_done = 0
@@ -159,6 +190,8 @@ impl CompilerDriver:
 
             if lowered_by_surface.contains_key(surface_index):
                 val alias_hir = lowered_by_surface[surface_index]
+                if not phase_hir_modules.contains_key(source.module_name):
+                    streaming_hir_module_count = streaming_hir_module_count + 1
                 phase_hir_modules[source.module_name] = alias_hir
                 source_index = source_index + 1
                 continue
@@ -205,6 +238,8 @@ impl CompilerDriver:
                 continue
             lowered_by_surface[surface_index] = hir_module
             progress_hir_done = progress_hir_done + 1
+            if not phase_hir_modules.contains_key(source.module_name):
+                streaming_hir_module_count = streaming_hir_module_count + 1
             phase_hir_modules[source.module_name] = hir_module
             # An alias source reuses lowered_by_surface above and deliberately
             # does not create another value-layout graph node. The canonical
@@ -242,6 +277,7 @@ impl CompilerDriver:
 
         var phase_ctx: CompileContext = self.ctx
         phase_ctx.hir_modules = phase_hir_modules
+        phase_ctx.hir_module_count_value = streaming_hir_module_count
         phase_ctx.bootstrap_entry_hir = phase_entry_hir
         # Poisoned/error-bearing HIR is deliberately excluded from every
         # downstream aggregate pass. Validate layouts only for a clean phase.
@@ -328,6 +364,7 @@ impl CompilerDriver:
                 bootstrap_validation_module_values.push(folded_module)
             var bootstrap_ctx: CompileContext = self.ctx
             bootstrap_ctx.hir_modules = bootstrap_hir_modules
+            bootstrap_ctx.hir_module_count_value = bootstrap_validation_module_keys.len()
             val bootstrap_entry_module = bootstrap_hir_modules[bootstrap_entry_name]
             if bootstrap_entry_module != nil:
                 bootstrap_ctx.bootstrap_entry_hir = Some(bootstrap_entry_module)
@@ -338,6 +375,7 @@ impl CompilerDriver:
         var validation_module_keys: [text] = []
         var validation_module_values: [HirModule] = []
         var phase_entry_hir: HirModule? = nil
+        var retained_hir_module_count: i64 = self.ctx.hir_module_count_value
         val entry_source_index = bootstrap_entry_source_index(self.ctx)
         var source_idx = 0
         # Stage3 is a no-GC process. Constructing one HirLowering per source
@@ -353,6 +391,9 @@ impl CompilerDriver:
             module_lowering_diagnostic_messages,
             module_lowering_diagnostic_recovered)
         bootstrap_hir_modules_reset()
+        if mem_snapshot_begin() < 0:
+            self.ctx.add_error("SIMPLE_MEM_SNAPSHOT_FILE could not be established safely")
+            return (self.ctx, false)
         while source_idx < self.ctx.sources.len():
             val src = self.ctx.sources[source_idx]
             val name = src.module_name
@@ -364,6 +405,14 @@ impl CompilerDriver:
             if source_idx < 3:
                 eprint("[bootstrap-error-count] source_idx={source_idx} point=entry count={module_errors_before}")
             log_phase("phase3:hir:file:start {src.path} module={name}")
+            if not _driver_hir_mem_snapshot(
+                "hir-file-start", source_idx, src.path,
+                retained_hir_module_count,
+                validation_module_keys.len(), validation_module_values.len(),
+                lowering.lowered_trait_count_value):
+                self.ctx.add_error("durable memory snapshot write failed at hir-file-start")
+                mem_snapshot_abort()
+                return (self.ctx, false)
             log_trace("processing module")
 
             # Set per-module filename so Symbol.defining_module is populated
@@ -446,6 +495,14 @@ impl CompilerDriver:
                 )
             if source_idx < 3:
                 eprint("[bootstrap-error-count] source_idx={source_idx} point=post-lowering count={self.ctx.error_count_value}")
+            if not _driver_hir_mem_snapshot(
+                "hir-post-lowering", source_idx, src.path,
+                retained_hir_module_count,
+                validation_module_keys.len(), validation_module_values.len(),
+                lowering.lowered_trait_count_value):
+                self.ctx.add_error("durable memory snapshot write failed at hir-post-lowering")
+                mem_snapshot_abort()
+                return (self.ctx, false)
             val focused_future_driver_diag = src.path == "src/lib/nogc_async_mut/async/future.spl"
             if focused_future_driver_diag:
                 eprint("[driver-hir] returned future")
@@ -486,6 +543,14 @@ impl CompilerDriver:
                 eprint("[bootstrap-hir-module-fatal-count] source_idx={source_idx} path={src.path} count={module_fatal_error_count}")
             if source_idx < 3:
                 eprint("[bootstrap-error-count] source_idx={source_idx} point=post-diagnostics count={self.ctx.error_count_value}")
+            if not _driver_hir_mem_snapshot(
+                "hir-post-diagnostics", source_idx, src.path,
+                retained_hir_module_count,
+                validation_module_keys.len(), validation_module_values.len(),
+                lowering.lowered_trait_count_value):
+                self.ctx.add_error("durable memory snapshot write failed at hir-post-diagnostics")
+                mem_snapshot_abort()
+                return (self.ctx, false)
             if focused_future_driver_diag:
                 eprint("[driver-hir] errors done")
 
@@ -505,6 +570,8 @@ impl CompilerDriver:
                 val poison_ctx: CompileContext = self.ctx
                 poison_ctx.mark_module_poisoned(name)
                 if poison_ctx.poison_budget_exhausted():
+                    if not mem_snapshot_finish_with_outcome("hir-diagnostic"):
+                        self.ctx.add_error("durable memory snapshot diagnostic terminal publication failed")
                     return (self.ctx, false)
                 # Skip the shared-trait fold and the phase_hir_modules store
                 # below: neither may observe a poisoned module.
@@ -517,7 +584,17 @@ impl CompilerDriver:
 
             # Newly lowered traits remain on the loop-owned lowerer so later
             # modules resolve cross-module trait defaults without a Dict copy.
+            if not phase_hir_modules.contains_key(name):
+                retained_hir_module_count = retained_hir_module_count + 1
             phase_hir_modules[name] = hir_module
+            if not _driver_hir_mem_snapshot(
+                "hir-post-store", source_idx, src.path,
+                retained_hir_module_count,
+                validation_module_keys.len(), validation_module_values.len(),
+                lowering.lowered_trait_count_value):
+                self.ctx.add_error("durable memory snapshot write failed at hir-post-store")
+                mem_snapshot_abort()
+                return (self.ctx, false)
             if source_idx < 3:
                 eprint("[bootstrap-error-count] source_idx={source_idx} point=post-store count={self.ctx.error_count_value}")
             if source_idx < 4:
@@ -573,6 +650,10 @@ impl CompilerDriver:
 
         log_debug("HIR lowering complete")
 
+        if not mem_snapshot_finish():
+            self.ctx.add_error("durable memory snapshot terminal publication failed")
+            return (self.ctx, false)
+
         # Collect-all summary. This line is also the PROVENANCE MARKER for the
         # collect-all build: if a run reports errors without emitting it, the
         # binary predates this change and its error count is the old
@@ -593,6 +674,7 @@ impl CompilerDriver:
 
         var phase_ctx: CompileContext = self.ctx
         phase_ctx.hir_modules = phase_hir_modules
+        phase_ctx.hir_module_count_value = retained_hir_module_count
         phase_ctx.bootstrap_entry_hir = phase_entry_hir
         if phase_ctx.has_errors():
             return (phase_ctx, false)
@@ -680,5 +762,7 @@ impl CompilerDriver:
                 compatibility_lowering.module_filename = src_path2
             val hir_module: HirModule = compatibility_lowering.lower_module(module)
             _driver_collect_hir_errors(ctx, name, compatibility_lowering.errors)
+            if not ctx.hir_modules.contains_key(name):
+                ctx.hir_module_count_value = ctx.hir_module_count_value + 1
             ctx.hir_modules[name] = hir_module
         (ctx, not ctx.has_errors())

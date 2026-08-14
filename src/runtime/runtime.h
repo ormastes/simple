@@ -841,6 +841,22 @@ int         rt_file_sync(const uint8_t* path_ptr, uint64_t path_len);
 int64_t     rt_crc32_text(const char* text, int64_t text_len);
 int         rt_file_create_excl(const char* path, int64_t path_len,
                                 const char* content, int64_t content_len);
+int64_t     rt_mem_snapshot_open(const char* path, int64_t path_len);
+int         rt_mem_snapshot_append_flush(int64_t fd, const char* record, int64_t record_len);
+int         rt_mem_snapshot_record(int64_t fd, int64_t seq,
+                    const char* event, int64_t event_len,
+                    const char* phase, int64_t phase_len, int64_t source_index,
+                    const char* source_path, int64_t source_path_len,
+                    int64_t retained_modules, int64_t validation_keys,
+                    int64_t validation_values, int64_t shared_traits,
+                    int64_t hir_names, int64_t hir_symbols,
+                    int64_t hir_functions, int64_t hir_constants,
+                    int64_t hir_enums, int64_t hir_structs, int64_t hir_classes);
+int         rt_mem_snapshot_close(int64_t fd);
+int64_t     rt_process_rss_kib(void);
+int64_t     rt_process_hwm_kib(void);
+int64_t     rt_heap_live_bytes(void);
+int64_t     rt_heap_peak_bytes(void);
 int64_t     rt_file_stat(const uint8_t* path_ptr, uint64_t path_len);
 const char* rt_shell_output(const char* cmd);
 SplArray*   rt_cli_get_args(void);
