@@ -7,7 +7,10 @@ accepted by `/root/reconciled_plan_review`; `/root/final_nonstage4_review`
 accepted the current Stage-4-excluded continuation on bounded review cycle 3.
 The SimpleOS syscall extension commit
 `aef64fb1951136fbb98521ce1a67643207752a26` was integrated under the lane lock
-and proved reachable from refreshed `origin/main`.
+and proved reachable from refreshed `origin/main`. The later Stage-2 optimizer
+and Stage-3 planner-localization evidence is integrated at
+`30f4de92f04d9c7717db9c3678eaa9f1bd7b9334`, also reachable from refreshed
+`origin/main`.
 Feature verification remains blocked. This document is the canonical
 handoff for `compiler_loader_script_crosslang_perf`. It records what is already
 implemented, what current evidence proves, and the exact remaining gates. A
@@ -226,7 +229,7 @@ selection flow produces the missing selected requirement documents.
 | CMP-01 | REQ-007, NFR-001/005/006 | Self-hosted compiler checks for `src/compiler`, `src/lib`, MCP, LSP, and MCP stdio smoke pass without seed fallback | Commands below | BLOCKED — deployed candidate exists but is not admitted |
 | PLN-01 | all | Canonical plan, guide, expert knowledge, blockers, and cooperative-review receipts are internally consistent and pass focused document gates | Document review and layout guard | PROVED — review accepted; SPipe wiring, spec-layout, and working/staged runtime guards pass. Global workspace-root strict audit remains WARN-blocked by 137 pre-existing unrelated manifest violations |
 | DOC-01 | all | Selected research/requirements, accepted architecture/detail design, and generated manual provenance exist | Artifact review and admitted docgen | BLOCKED — research/options/drafts now exist; user selection and post-selection acceptance remain outstanding. One Stage-2 docgen attempt failed immediately with `unknown command 'spipe-docgen'`; admitted docgen remains Phase-4-dependent |
-| VCS-01 | all | Only intentional lane-A files are committed; locked integration reaches refreshed `origin/main`; tree and lane marker are truthful | Git receipts | PROVED at `aef64fb1951136fbb98521ce1a67643207752a26`; final bookkeeping follows the same locked sequence and unrelated untracked GUI reports are excluded |
+| VCS-01 | all | Only intentional lane-A files are committed; locked integration reaches refreshed `origin/main`; tree and lane marker are truthful | Git receipts | PROVED through `30f4de92f04d9c7717db9c3678eaa9f1bd7b9334`; final bookkeeping follows the same locked sequence and unrelated untracked GUI reports are excluded |
 
 ## Manual-facing flow
 
