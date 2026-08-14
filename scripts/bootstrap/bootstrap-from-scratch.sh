@@ -67,6 +67,11 @@ Options:
                      `simple build bootstrap`; required before any stage starts
   --validate-bootstrap-receipt
                      Validate authorization and exit without starting a stage
+  --stop-after-stage3
+                     Stop after producing and independently verifying the
+                     provenance-bound Stage 3 compiler. Requires a planner
+                     receipt targeting //bootstrap:stage3 and never starts
+                     Stage 4, deployment, release, or diagnostic lanes.
   --full-bootstrap   Rebuild the Rust seed/runtime when missing or stale, then
                      rebuild the pure-Simple stages. Without this flag bootstrap
                      never runs cargo and reuses the existing Rust seed.
@@ -147,6 +152,7 @@ execution_profile="${SIMPLE_BOOTSTRAP_EXECUTION_PROFILE:-incremental}"
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
 bootstrap_receipt_path="${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}"
 validate_bootstrap_receipt=0
+stop_after_stage3=0
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
   1|true|yes|on) strict_bootstrap=1 ;;
   *) strict_bootstrap=0 ;;
@@ -165,6 +171,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --validate-bootstrap-receipt)
       validate_bootstrap_receipt=1
+      ;;
+    --stop-after-stage3)
+      stop_after_stage3=1
       ;;
     --target=*)
       target=${1#*=}
@@ -276,6 +285,16 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
+if [ "${stop_after_stage3}" -eq 1 ]; then
+  [ -z "${resume_stage3_output}" ] && [ -z "${resume_stage4_output}" ] &&
+    [ "${full_cli}" -eq 0 ] && [ "${deploy}" -eq 0 ] &&
+    [ "${release_tests}" -eq 0 ] && [ "${diagnostic_sweep}" -eq 0 ] &&
+    [ "${diagnostics_mode}" = off ] && [ "${bootstrap_mode}" = dynload ] || {
+    echo "error: --stop-after-stage3 excludes resume/full-cli/deploy/release/diagnostic options and requires --mode=dynload" >&2
+    exit 1
+  }
+fi
+
 # This is the common staged-bootstrap boundary, including Windows forwarding
 # and admitted Stage 3 resume. A direct/ad-hoc invocation cannot start even
 # Stage 1 without the canonical receipt produced by the pure-Simple planner.
@@ -288,7 +307,7 @@ case "${bootstrap_receipt_path}" in
   *) bootstrap_receipt_path="${PWD}/${bootstrap_receipt_path}" ;;
 esac
 bootstrap_receipt_target='//bootstrap:stage4'
-if [ -n "${resume_stage3_output}" ]; then
+if [ -n "${resume_stage3_output}" ] || [ "${stop_after_stage3}" -eq 1 ]; then
   bootstrap_receipt_target='//bootstrap:stage3'
 fi
 bootstrap_planner_v2_verify "${bootstrap_receipt_path}" "${bootstrap_early_repo_root}" || {
@@ -2165,6 +2184,25 @@ else
       exit 1
     }
     echo "  Stage 3 provenance: ${stage3_provenance_manifest}"
+  fi
+
+  if [ "${stop_after_stage3}" -eq 1 ]; then
+    [ "${stage3_ok:-0}" -eq 1 ] && [ -x "${stage3_bin}" ] || {
+      echo "error: --stop-after-stage3 requires a successful Stage 3 compiler" >&2
+      exit 2
+    }
+    stage3_candidate="$(bootstrap_stage3_canonical_file "$(absolute_path "${stage3_bin}")")" || {
+      echo "error: Stage 3 stop candidate path is not canonical" >&2
+      exit 1
+    }
+    bootstrap_stage3_verify_manifest \
+      "$(absolute_path "${stage3_provenance_manifest}")" "${repo_root}" \
+      "${stage3_candidate}" || {
+      echo "error: --stop-after-stage3 refused unverified Stage 3 provenance" >&2
+      exit 1
+    }
+    echo "Stage 3 stop complete: provenance-verified compiler ${stage3_candidate}"
+    exit 0
   fi
 
   stage2_capability_ok=0

@@ -205,8 +205,9 @@ rebuilds Stage 2/3. Implement the fail-closed continuation specified in
 `doc/08_tracking/bug/stage4_resume_from_admitted_gap_2026-08-14.md` before
 claiming that an admitted resumed Stage 3 can flow canonically to deployment.
 
-This detached worktree is lane B. The previous Build11 lane-A
-candidate did not reach performance admission: its strict Stage 2 bootstrap
+This detached worktree is replacement lane A. The following paragraph records
+a historical lane-B attempt; it is not the identity of this worktree. That
+historical candidate did not reach performance admission: its strict Stage 2 bootstrap
 ended after about 52 minutes with 61 HIR field-inference failures (mostly
 `struct 'ANY' field ...`), including `src/compiler/99.loader/module_loader.spl`.
 Consequently there is no admissible self-hosted failed-probe, latency, or RSS
