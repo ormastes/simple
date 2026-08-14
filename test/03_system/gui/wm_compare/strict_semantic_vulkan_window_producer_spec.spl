@@ -1,0 +1,68 @@
+# @tag: rendering, web, drawir, vulkan, window, 8k80
+# @cover src/app/wm_compare/strict_semantic_vulkan_window_producer.spl 80%
+
+use app.wm_compare.strict_semantic_vulkan_window_producer.{strict_semantic_vulkan_window_receipt_values, strict_semantic_vulkan_window_receipt_exit_code}
+use app.io.mod.{file_read_text}
+
+describe "strict semantic Vulkan visible-window producer":
+    it "publishes presentation-only evidence without claiming scanout capture":
+        val receipt = strict_semantic_vulkan_window_receipt_values(
+            "pass", "pass", 7680, 4320, 71, 83, 97, 10, 11,
+            101, 202, 0, 1, 60, 4000, 6000, 0, 62, 62)
+        expect(receipt).to_contain("window_receipt_status=pass")
+        expect(receipt).to_contain(
+            "window_receipt_scope=device-window-present-not-scanout-capture")
+        expect(receipt).to_contain("window_receipt_selected_backend=vulkan")
+        expect(receipt).to_contain("window_receipt_present_mode=window-swapchain")
+        expect(receipt).to_contain("window_receipt_backend_handle=71")
+        expect(receipt).to_contain("window_receipt_device_identity=83")
+        expect(receipt).to_contain("window_receipt_swapchain_identity=97")
+        expect(receipt).to_contain(
+            "window_receipt_checksum_scope=device-readback-outside-timing")
+        expect(receipt).to_contain("window_receipt_surface_seed_count=0")
+        expect(receipt).to_contain("window_receipt_timed_readback_bytes=0")
+        expect(receipt).to_contain("window_receipt_device_submit_count=62")
+        expect(receipt).to_contain("window_receipt_device_fence_count=62")
+
+    it "does not label unavailable window Vulkan as selected or presented":
+        val receipt = strict_semantic_vulkan_window_receipt_values(
+            "blocked", "vulkan-window-unavailable", 7680, 4320,
+            0, 0, 0, 10, 11, 0, 0, 0, 1, 60, 0, 0, 0, 0, 0)
+        expect(receipt).to_contain("window_receipt_status=blocked")
+        expect(receipt).to_contain("window_receipt_selected_backend=\n")
+        expect(receipt).to_contain("window_receipt_present_mode=\n")
+        expect(receipt).to_contain("window_receipt_device_present=false")
+
+    it "preserves pass blocked and failed process status":
+        expect(strict_semantic_vulkan_window_receipt_exit_code(
+            "window_receipt_status=pass\n")).to_equal(0)
+        expect(strict_semantic_vulkan_window_receipt_exit_code(
+            "window_receipt_status=blocked\n")).to_equal(2)
+        expect(strict_semantic_vulkan_window_receipt_exit_code(
+            "window_receipt_status=failed\n")).to_equal(1)
+
+    it "keeps canonical semantic lowering inside each timed presentation":
+        val source = file_read_text(
+            "src/app/wm_compare/strict_semantic_vulkan_window_producer.spl")
+        expect(source).to_contain("Engine2D.create_vulkan_window_present")
+        expect(source).to_contain("strict_semantic_vulkan_composition(")
+        expect(source).to_contain(
+            "engine2d_draw_ir_adv_strict_vulkan_window_present_with_images(")
+        expect(source).to_contain("engine = result.submission.engine")
+        expect(source).to_contain("if sample == sample_count - 1:")
+        expect(source).to_contain("surface_seed_count < 16")
+        expect(source).to_contain("start.full_frame_fallback")
+        val timer = source.index_of("val sample_start = ck.now_micros()")
+        val present = source.index_of(
+            "val result = engine2d_draw_ir_adv_strict_vulkan_window_present_with_images(",
+            timer)
+        val elapsed = source.index_of("val elapsed_ns = _positive_elapsed_ns", present)
+        val readback = source.index_of(
+            "val end_readback = engine2d_draw_ir_adv_strict_vulkan_readback(",
+            elapsed)
+        expect(timer).to_be_greater_than(0)
+        expect(present).to_be_greater_than(timer)
+        expect(elapsed).to_be_greater_than(present)
+        expect(readback).to_be_greater_than(elapsed)
+        expect(source).to_contain("timed_readback_bytes == 0")
+        expect(source).to_contain("checksum_end != checksum_start")

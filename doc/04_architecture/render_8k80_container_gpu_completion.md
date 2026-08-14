@@ -33,6 +33,18 @@ through that returned owner and returns it again with the submission and window
 receipt. The pre-submit value is never reused across the GPU mutation boundary.
 This proves same-device window presentation, not physical scanout capture.
 
+The container build retains the native
+`strict_semantic_vulkan_window_producer`. The physical wrapper executes that
+cached artifact only after X11/EDID/8K80 admission, then asks the parent checker
+to correlate an independently produced scanout receipt with the exact A5
+producer receipt. Presentation and capture remain separate authorities.
+
+At hardware start the wrapper resolves `current` once to an immutable
+`runs/<id>` directory, validates the cached window binary and evidence-manifest
+hash, and never dereferences the mutable symlink again. Physical PASS is a new
+immutable publication containing copied inputs and a sorted hash manifest;
+`current` changes only through an atomic symlink swap after validation.
+
 ## Failure model
 
 - Missing admitted compiler/native artifact: `blocked`.

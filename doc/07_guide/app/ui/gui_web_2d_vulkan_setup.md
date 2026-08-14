@@ -465,24 +465,36 @@ surface and proves only a device-present proxy.  It must not be cited as
 physical scanout or 8K80 evidence.  On a host with an attached display, use:
 
 ```sh
-DISPLAY=:0 ENGINE2D_VULKAN_PHYSICAL=1 \
-VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+PHYSICAL_RECEIPT=/absolute/path/to/captured-scanout.env \
+DISPLAY=:0 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
   sh scripts/check/check-render-perf-physical-8k80-hardware.shs
 ```
 
-Physical mode never starts Xvfb.  It fails closed unless the existing X11
+First run the container campaign with an admitted Stage 4 compiler so
+`build/render_perf/8k80_container/current/evidence/` contains the cached native
+semantic-window producer and its exact A5 receipt. Physical mode never starts
+Xvfb. It fails closed unless the existing X11
 display has an EDID-bearing connected output with an active 7680x4320 mode at
-80 Hz or faster, the selected adapter
-is discrete, the one-percent-damage receipt has zero timed readback and known
-completion, p95 is at most 12.5 ms, and RSS/checksum are nonzero.  A passing
-window receipt is still presentation evidence rather than captured-scanout
-parity; promotion also requires the device-origin/captured scanout oracle in
-the canonical render performance plan.
+80 Hz or faster. It executes the cached same-semantic Web→DrawIR→strict-Vulkan
+window producer, requires stable device/window identities, 62 plus the explicit
+bounded untimed surface-seed count in observed submit/fence completions, zero
+timed readback, p95 at most 12.5 ms, nonzero RSS,
+and a final device checksum matching A5. A passing window receipt is still only
+presentation evidence. `PHYSICAL_RECEIPT` must independently attest captured or
+read-back scanout and the parent checker must correlate its source, run, device,
+and checksum with A5.
+
+The wrapper resolves the software `current` symlink once to an immutable run,
+verifies the retained producer hash/manifest, and publishes copied physical
+inputs under `build/render_perf/physical_8k80/runs/<id>/`. A PASS is reported
+only after that directory is manifest-hashed, renamed atomically, made
+read-only, and selected by an atomic physical `current` symlink.
 
 TODO684 and TODO685 in `doc/08_tracking/todo/todo_db.sdn` own this unavailable-
 hardware work and its exact resume contract; the render plan only retains the
 acceptance dependencies. Before a physical campaign, run
 `sh scripts/check/check-render-perf-physical-8k80-hardware.shs --self-test`.
 The bounded
-self-test accepts an EDID-bearing active 8K80 fixture and rejects both a
-synthetic no-EDID Xvfb shape and an EDID-bearing 60 Hz mode.
+self-test accepts an EDID-bearing active 8K80 fixture, rejects both a synthetic
+no-EDID Xvfb shape and an EDID-bearing 60 Hz mode, and deliberately rejects
+window/device checksum mismatches.

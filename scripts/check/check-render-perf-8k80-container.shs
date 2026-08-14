@@ -102,6 +102,16 @@ validate_physical() {
     [ -n "$(value "$f" connector)" ] && [ "$(value "$f" completion)" = known ] && [ "$(value "$f" fallback)" = none ] || return 1
 }
 
+validate_physical_for_producer() {
+    physical=$1 producer=$2
+    validate_producer "$producer" && validate_physical "$physical" || return 1
+    [ "$(value "$producer" source_hash)" = "$(value "$physical" source_hash)" ] || return 1
+    [ "$(value "$producer" run_id)" = "$(value "$physical" run_id)" ] || return 1
+    [ "$(value "$producer" campaign_contract_hash)" = "$(value "$physical" campaign_contract_hash)" ] || return 1
+    [ "$(value "$producer" device_hash)" = "$(value "$physical" device_hash)" ] || return 1
+    [ "$(value "$producer" producer_receipt_checksum_end)" = "$(value "$physical" scanout_checksum)" ] || return 1
+}
+
 aggregate() {
     draw=$1 producer=$2 physical=${3:-}
     validate_drawir "$draw" || die invalid-drawir-receipt
@@ -126,12 +136,7 @@ aggregate() {
     fi
     status=blocked-physical reason=missing-physical-receipt
     if [ -n "$physical" ]; then
-        validate_physical "$physical" || die invalid-physical-receipt
-        [ "$(value "$draw" source_hash)" = "$(value "$physical" source_hash)" ] || die source-hash-mismatch
-        [ "$(value "$draw" run_id)" = "$(value "$physical" run_id)" ] || die run-id-mismatch
-        [ "$(value "$draw" campaign_contract_hash)" = "$(value "$physical" campaign_contract_hash)" ] || die campaign-contract-hash-mismatch
-        [ "$(value "$producer" device_hash)" = "$(value "$physical" device_hash)" ] || die physical-device-mismatch
-        [ "$(value "$producer" producer_receipt_checksum_end)" = "$(value "$physical" scanout_checksum)" ] || die physical-checksum-mismatch
+        validate_physical_for_producer "$physical" "$producer" || die invalid-or-uncorrelated-physical-receipt
         cp "$physical" "$tmp/physical_receipt.env"
         status=pass reason=all-correlated-receipts-pass
     fi
@@ -316,6 +321,8 @@ self_test() {
     ! validate_compiler_provenance "$t/bad" "$t/compiler" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa || die selftest-unknown-provenance-accepted
     grep -Fq 'native-build --source src/compiler --source src/app --source src/lib --source test/05_perf/graphics_2d --entry-closure --entry test/05_perf/graphics_2d/draw_ir_damage_8k_bench.spl' "$0" || die selftest-draw-build-command-contract
     grep -Fq 'native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/wm_compare/strict_semantic_vulkan_producer.spl' "$0" || die selftest-producer-build-command-contract
+    grep -Fq 'native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/wm_compare/strict_semantic_vulkan_window_producer.spl' "$0" || die selftest-window-producer-build-command-contract
+    grep -Fq -- '--cache-dir "$native_cache"' "$0" || die selftest-shared-native-cache-contract
     grep -Fq 'sh scripts/check/check-cuda-generated-2d-readback.shs' "$0" || die selftest-cuda-command-contract
     echo render_perf_8k80_container_selftest=pass
 }
@@ -363,13 +370,17 @@ run_artifacts() {
     [ -n "$image" ] || blocked container-image-required
     mkdir -p "$BUILD_DIR"
     run="$BUILD_DIR/.run.$$"; mkdir -p "$run"; trap 'rm -rf "$run"' EXIT HUP INT TERM
+    native_cache="$run/native-cache"; mkdir -p "$native_cache"
     draw_bin="$run/draw_ir_damage_8k_bench"
     producer_bin="$run/strict_semantic_vulkan_producer"
+    window_producer_bin="$run/strict_semantic_vulkan_window_producer"
     printf '%s\n' 'entry=test/05_perf/graphics_2d/draw_ir_damage_8k_bench.spl' 'backend=cranelift' 'opt_level=aggressive' 'runtime_bundle=core-c-bootstrap' > "$run/draw.build.meta"
     printf '%s\n' 'entry=src/app/wm_compare/strict_semantic_vulkan_producer.spl' 'backend=cranelift' 'opt_level=aggressive' 'runtime_bundle=core-c-bootstrap' > "$run/producer.build.meta"
-    (cd "$ROOT" && timeout "${BUILD_TIMEOUT_SECS:-300}" /usr/bin/time -f 'elapsed=%e\nmax_rss_kib=%M\nexit=%x' -o "$run/draw.build.time" "$compiler" native-build --source src/compiler --source src/app --source src/lib --source test/05_perf/graphics_2d --entry-closure --entry test/05_perf/graphics_2d/draw_ir_damage_8k_bench.spl --runtime-bundle core-c-bootstrap --backend cranelift --opt-level=aggressive --output "$draw_bin") >"$run/draw.build.out" 2>"$run/draw.build.err" || blocked drawir-native-build-unavailable
-    (cd "$ROOT" && timeout "${BUILD_TIMEOUT_SECS:-300}" /usr/bin/time -f 'elapsed=%e\nmax_rss_kib=%M\nexit=%x' -o "$run/producer.build.time" "$compiler" native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/wm_compare/strict_semantic_vulkan_producer.spl --runtime-bundle core-c-bootstrap --backend cranelift --opt-level=aggressive --output "$producer_bin") >"$run/producer.build.out" 2>"$run/producer.build.err" || blocked producer-native-build-unavailable
-    [ -x "$draw_bin" ] && [ -x "$producer_bin" ] || blocked native-build-artifact-missing
+    printf '%s\n' 'entry=src/app/wm_compare/strict_semantic_vulkan_window_producer.spl' 'backend=cranelift' 'opt_level=aggressive' 'runtime_bundle=core-c-bootstrap' > "$run/window-producer.build.meta"
+    (cd "$ROOT" && timeout "${BUILD_TIMEOUT_SECS:-300}" /usr/bin/time -f 'elapsed=%e\nmax_rss_kib=%M\nexit=%x' -o "$run/draw.build.time" "$compiler" native-build --source src/compiler --source src/app --source src/lib --source test/05_perf/graphics_2d --entry-closure --entry test/05_perf/graphics_2d/draw_ir_damage_8k_bench.spl --runtime-bundle core-c-bootstrap --backend cranelift --opt-level=aggressive --cache-dir "$native_cache" --output "$draw_bin") >"$run/draw.build.out" 2>"$run/draw.build.err" || blocked drawir-native-build-unavailable
+    (cd "$ROOT" && timeout "${BUILD_TIMEOUT_SECS:-300}" /usr/bin/time -f 'elapsed=%e\nmax_rss_kib=%M\nexit=%x' -o "$run/producer.build.time" "$compiler" native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/wm_compare/strict_semantic_vulkan_producer.spl --runtime-bundle core-c-bootstrap --backend cranelift --opt-level=aggressive --cache-dir "$native_cache" --output "$producer_bin") >"$run/producer.build.out" 2>"$run/producer.build.err" || blocked producer-native-build-unavailable
+    (cd "$ROOT" && timeout "${BUILD_TIMEOUT_SECS:-300}" /usr/bin/time -f 'elapsed=%e\nmax_rss_kib=%M\nexit=%x' -o "$run/window-producer.build.time" "$compiler" native-build --source src/compiler --source src/app --source src/lib --entry-closure --entry src/app/wm_compare/strict_semantic_vulkan_window_producer.spl --runtime-bundle core-c-bootstrap --backend cranelift --opt-level=aggressive --cache-dir "$native_cache" --output "$window_producer_bin") >"$run/window-producer.build.out" 2>"$run/window-producer.build.err" || blocked window-producer-native-build-unavailable
+    [ -x "$draw_bin" ] && [ -x "$producer_bin" ] && [ -x "$window_producer_bin" ] || blocked native-build-artifact-missing
     timeout "${RUN_TIMEOUT_SECS:-300}" /usr/bin/time -f %M -o "$run/draw.time" "$draw_bin" > "$run/draw.out" 2> "$run/draw.err" || die drawir-native-execution
     execution_mode=direct-native-container
     command -v docker >/dev/null 2>&1 || blocked missing-container-runtime
@@ -411,7 +422,9 @@ run_artifacts() {
     mkdir "$run/publish"
     cp "$provenance" "$run/publish/compiler-provenance.env"
     printf '%s\n' "compiler_path=$compiler" "compiler_hash=$(sha256sum "$compiler" | awk '{print $1}')" "source_hash=$source_hash" > "$run/publish/compiler-identity.env"
-    cp "$run"/draw.build.out "$run"/draw.build.err "$run"/draw.build.time "$run"/draw.build.meta "$run"/producer.build.out "$run"/producer.build.err "$run"/producer.build.time "$run"/producer.build.meta "$run"/draw.out "$run"/draw.err "$run"/draw.time "$run"/producer.out "$run"/producer.err "$run"/producer.time "$run"/container-image.env "$run/publish/"
+    cp "$run"/draw.build.out "$run"/draw.build.err "$run"/draw.build.time "$run"/draw.build.meta "$run"/producer.build.out "$run"/producer.build.err "$run"/producer.build.time "$run"/producer.build.meta "$run"/window-producer.build.out "$run"/window-producer.build.err "$run"/window-producer.build.time "$run"/window-producer.build.meta "$run"/draw.out "$run"/draw.err "$run"/draw.time "$run"/producer.out "$run"/producer.err "$run"/producer.time "$run"/container-image.env "$run/publish/"
+    cp "$window_producer_bin" "$run/publish/strict_semantic_vulkan_window_producer"
+    (cd "$run/publish" && sha256sum strict_semantic_vulkan_window_producer > strict_semantic_vulkan_window_producer.sha256)
     cp -R "$run/cuda" "$run/publish/cuda"
     PUBLISH_EVIDENCE_DIR="$run/publish"; export PUBLISH_EVIDENCE_DIR
     aggregate "$run/draw.receipt" "$run/producer.receipt" "$physical"
@@ -425,6 +438,13 @@ case ${1:-} in
         while [ $# -gt 0 ]; do case $1 in --drawir) draw=$2; shift 2;; --producer) producer=$2; shift 2;; --physical) physical=$2; shift 2;; *) die unknown-argument;; esac; done
         [ -n "$draw" ] && [ -n "$producer" ] || die missing-required-receipt
         aggregate "$draw" "$producer" "$physical"
+        ;;
+    --validate-physical)
+        shift; producer= physical=
+        while [ $# -gt 0 ]; do case $1 in --producer) producer=$2; shift 2;; --physical) physical=$2; shift 2;; *) die unknown-argument;; esac; done
+        [ -n "$producer" ] && [ -n "$physical" ] || die missing-required-receipt
+        validate_physical_for_producer "$physical" "$producer" || die invalid-or-uncorrelated-physical-receipt
+        echo render_perf_8k80_physical_receipt_status=pass
         ;;
     --run)
         shift; compiler= provenance= physical= image= gpu=all

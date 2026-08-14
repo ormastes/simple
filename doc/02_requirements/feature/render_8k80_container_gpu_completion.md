@@ -20,3 +20,8 @@ GPU production. Physical display work remains separately tracked.
   zero-checksum, timed-readback, and over-budget evidence.
 - **REQ-R8KC-006:** Without a valid physical A6/A8 receipt, the aggregate must
   report `blocked-physical`, never campaign PASS. TODO684/TODO685 remain open.
+- **REQ-R8KC-007:** The A6 software producer must lower the same changing Web
+  semantics as A5, submit and visibly present through one returned Engine2D
+  owner, time no host readback, and retain an untimed device checksum oracle.
+  Its receipt must say device-window presentation is not physical scanout
+  capture; A6 promotion still requires independent same-run capture/readback.

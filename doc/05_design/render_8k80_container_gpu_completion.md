@@ -49,3 +49,19 @@ returned by strict submission and returns a new owner-result envelope. It
 requires completed `window-swapchain`, device-present, known completion, zero
 readback, and positive framebuffer/device/swapchain identities. These fields do
 not assert scanout pixels; A7 still requires an independent physical receipt.
+
+The A4/A5 build shares one source-matched native cache across its three native
+entries and retains the semantic-window artifact plus build log/hash in the
+immutable evidence manifest. This reduces repeated compilation only; it does
+not cache DrawIR/layout or change timed rendering work. The physical wrapper
+executes the cached artifact and validates the separate capture receipt through
+`--validate-physical` before reporting physical readiness.
+
+The admission-only display command reuses the canonical parser for a connected
+EDID-bearing output whose starred 7680x4320 mode is at least 80 Hz; it does not
+run the legacy Rust performance row. Before execution, resolve the software
+`current` link to one canonical immutable run and verify the retained window
+binary hash plus the aggregate-bound evidence manifest. On success, copy every
+physical input into a temporary publication, validate those copies, hash them,
+rename the set atomically, make it read-only, and swap the physical `current`
+link atomically.

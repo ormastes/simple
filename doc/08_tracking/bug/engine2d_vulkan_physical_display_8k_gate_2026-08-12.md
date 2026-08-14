@@ -2,6 +2,15 @@
 
 Status: open
 
+Source readiness update (2026-08-14): the container campaign now builds and
+retains a native `strict_semantic_vulkan_window_producer`. It lowers the same
+changing Web semantics as A5, carries one Engine2D owner through strict submit
+and visible-window presentation, and emits an explicitly presentation-only
+receipt with zero timed readback. The physical wrapper runs that cached native
+artifact after EDID/mode admission and validates an independent physical receipt
+against the exact A5 run through the parent checker. The remaining open state is
+hardware execution and captured/read-back scanout, not missing render source.
+
 The canonical wrapper now has a fail-closed physical admission mode:
 `DISPLAY=:0 ENGINE2D_VULKAN_PHYSICAL=1 sh
 scripts/check/check-engine2d-vulkan-window-8k.shs`.  Unlike its default Xvfb

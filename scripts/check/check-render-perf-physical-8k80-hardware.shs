@@ -5,11 +5,71 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 DISPLAY_VALUE="${DISPLAY:-:0}"
+ICD="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/nvidia_icd.json}"
 INVENTORY_DIR="${INVENTORY_DIR:-$ROOT/build/render_perf/physical_display_inventory}"
 WINDOW_CHECK="$ROOT/scripts/check/check-engine2d-vulkan-window-8k.shs"
+CAMPAIGN_CHECK="$ROOT/scripts/check/check-render-perf-8k80-container.shs"
+SOFTWARE_RUN_REQUESTED="${SOFTWARE_RUN_DIR:-$ROOT/build/render_perf/8k80_container/current}"
+PHYSICAL_BUILD_DIR="${PHYSICAL_BUILD_DIR:-$ROOT/build/render_perf/physical_8k80}"
+PHYSICAL_RECEIPT="${PHYSICAL_RECEIPT:-}"
+
+receipt_value() {
+    file=$1 key=$2
+    count=$(awk -F= -v k="$key" '$1 == k { n++ } END { print n + 0 }' "$file")
+    [ "$count" -eq 1 ] || return 1
+    awk -F= -v k="$key" '$1 == k { sub(/^[^=]*=/, ""); print }' "$file"
+}
+
+window_matches_producer() {
+    window=$1 producer=$2
+    [ "$(receipt_value "$window" window_receipt_status)" = pass ] || return 1
+    [ "$(receipt_value "$window" window_receipt_scope)" = device-window-present-not-scanout-capture ] || return 1
+    [ "$(receipt_value "$window" window_receipt_timed_readback_bytes)" = 0 ] || return 1
+    [ "$(receipt_value "$window" window_receipt_warmup_count)" = 1 ] || return 1
+    [ "$(receipt_value "$window" window_receipt_sample_count)" = 60 ] || return 1
+    seed_count=$(receipt_value "$window" window_receipt_surface_seed_count)
+    case $seed_count in ''|*[!0-9]*) return 1;; esac
+    [ "$seed_count" -le 16 ] || return 1
+    expected_device_count=$((62 + seed_count))
+    [ "$(receipt_value "$window" window_receipt_device_submit_count)" = "$expected_device_count" ] || return 1
+    [ "$(receipt_value "$window" window_receipt_device_fence_count)" = "$expected_device_count" ] || return 1
+    [ "$(receipt_value "$window" window_receipt_width)" = 7680 ] || return 1
+    [ "$(receipt_value "$window" window_receipt_height)" = 4320 ] || return 1
+    [ "$(receipt_value "$window" window_receipt_revision_start)" = "$(receipt_value "$producer" producer_receipt_revision_start)" ] || return 1
+    [ "$(receipt_value "$window" window_receipt_revision_end)" = "$(receipt_value "$producer" producer_receipt_revision_end)" ] || return 1
+    p95=$(receipt_value "$window" window_receipt_p95_ns)
+    case $p95 in ''|*[!0-9]*) return 1;; esac
+    [ "$p95" -gt 0 ] && [ "$p95" -le 12500000 ] || return 1
+    identity=$(receipt_value "$window" window_receipt_device_identity)
+    case $identity in ''|*[!0-9]*) return 1;; esac
+    [ "$identity" -gt 0 ] || return 1
+    identity_hash=$(printf '%s' "$identity" | sha256sum | awk '{print $1}')
+    [ "$identity_hash" = "$(receipt_value "$producer" device_hash)" ] || return 1
+    [ "$(receipt_value "$window" window_receipt_checksum_end)" = "$(receipt_value "$producer" producer_receipt_checksum_end)" ] || return 1
+}
 
 if [ "${1:-}" = "--self-test" ]; then
     sh "$WINDOW_CHECK" --self-test
+    grep -Fq 'window_receipt_scope=device-window-present-not-scanout-capture' \
+        "$ROOT/src/app/wm_compare/strict_semantic_vulkan_window_producer.spl"
+    grep -Fq -- '--validate-physical' "$CAMPAIGN_CHECK"
+    grep -Fq -- '--admit-physical-display' "$WINDOW_CHECK"
+    self_dir=$(mktemp -d)
+    trap 'rm -rf "$self_dir"' EXIT HUP INT TERM
+    self_identity=83
+    self_hash=$(printf '%s' "$self_identity" | sha256sum | awk '{print $1}')
+    printf '%s\n' "device_hash=$self_hash" 'producer_receipt_revision_start=10' 'producer_receipt_revision_end=11' 'producer_receipt_checksum_end=202' > "$self_dir/producer"
+    printf '%s\n' 'window_receipt_status=pass' 'window_receipt_scope=device-window-present-not-scanout-capture' 'window_receipt_timed_readback_bytes=0' 'window_receipt_surface_seed_count=2' 'window_receipt_warmup_count=1' 'window_receipt_sample_count=60' 'window_receipt_device_submit_count=64' 'window_receipt_device_fence_count=64' 'window_receipt_width=7680' 'window_receipt_height=4320' 'window_receipt_revision_start=10' 'window_receipt_revision_end=11' 'window_receipt_p95_ns=6000' "window_receipt_device_identity=$self_identity" 'window_receipt_checksum_end=202' > "$self_dir/window"
+    window_matches_producer "$self_dir/window" "$self_dir/producer"
+    sed 's/window_receipt_checksum_end=202/window_receipt_checksum_end=203/' "$self_dir/window" > "$self_dir/bad"
+    ! window_matches_producer "$self_dir/bad" "$self_dir/producer"
+    sed 's/window_receipt_device_identity=83/window_receipt_device_identity=84/' "$self_dir/window" > "$self_dir/bad"
+    ! window_matches_producer "$self_dir/bad" "$self_dir/producer"
+    sed 's/window_receipt_surface_seed_count=2/window_receipt_surface_seed_count=17/' "$self_dir/window" > "$self_dir/bad"
+    ! window_matches_producer "$self_dir/bad" "$self_dir/producer"
+    sed 's/window_receipt_device_submit_count=64/window_receipt_device_submit_count=63/' "$self_dir/window" > "$self_dir/bad"
+    ! window_matches_producer "$self_dir/bad" "$self_dir/producer"
+    rm -rf "$self_dir"; trap - EXIT HUP INT TERM
     echo "render_perf_physical_8k80_hardware_selftest=pass"
     exit 0
 fi
@@ -21,6 +81,10 @@ if ! command -v xrandr >/dev/null 2>&1 ||
 fi
 if ! command -v edid-decode >/dev/null 2>&1; then
     echo "render_perf_physical_8k80_hardware_status=blocked todo=TODO685 reason=missing-edid-decode"
+    exit 2
+fi
+if ! DISPLAY="$DISPLAY_VALUE" sh "$WINDOW_CHECK" --admit-physical-display; then
+    echo "render_perf_physical_8k80_hardware_status=blocked todo=TODO684 reason=physical-edid-8k80-mode-not-active"
     exit 2
 fi
 
@@ -42,6 +106,97 @@ mkdir -p "$INVENTORY_DIR"
     exit 2
 }
 
-DISPLAY="$DISPLAY_VALUE" ENGINE2D_VULKAN_PHYSICAL=1 \
-    sh "$WINDOW_CHECK"
-echo "render_perf_physical_8k80_hardware_status=pass todos=TODO684,TODO685"
+SOFTWARE_RUN_DIR=$(CDPATH= cd -- "$SOFTWARE_RUN_REQUESTED" 2>/dev/null && pwd -P) || {
+    echo "render_perf_physical_8k80_hardware_status=blocked todo=TODO684 reason=missing-immutable-software-run"
+    exit 2
+}
+case "$SOFTWARE_RUN_DIR" in
+    "$ROOT"/build/render_perf/8k80_container/runs/*) ;;
+    *) echo "render_perf_physical_8k80_hardware_status=failed todo=TODO684 reason=software-run-not-immutable"; exit 1 ;;
+esac
+WINDOW_PRODUCER_BIN="$SOFTWARE_RUN_DIR/evidence/strict_semantic_vulkan_window_producer"
+[ -f "$SOFTWARE_RUN_DIR/evidence/strict_semantic_vulkan_window_producer.sha256" ] &&
+    (cd "$SOFTWARE_RUN_DIR/evidence" && sha256sum -c strict_semantic_vulkan_window_producer.sha256 >/dev/null 2>&1) || {
+    echo "render_perf_physical_8k80_hardware_status=failed todo=TODO684 reason=semantic-window-producer-hash-mismatch"
+    exit 1
+}
+[ -f "$SOFTWARE_RUN_DIR/evidence_manifest.sha256" ] &&
+    grep -Fq 'strict_semantic_vulkan_window_producer' "$SOFTWARE_RUN_DIR/evidence_manifest.sha256" || {
+    echo "render_perf_physical_8k80_hardware_status=failed todo=TODO684 reason=semantic-window-producer-manifest-missing"
+    exit 1
+}
+[ "$(sha256sum "$SOFTWARE_RUN_DIR/evidence_manifest.sha256" | awk '{print $1}')" = "$(receipt_value "$SOFTWARE_RUN_DIR/aggregate_receipt.env" evidence_manifest_hash)" ] || {
+    echo "render_perf_physical_8k80_hardware_status=failed todo=TODO684 reason=software-evidence-manifest-hash-mismatch"
+    exit 1
+}
+
+[ -x "$WINDOW_PRODUCER_BIN" ] || {
+    echo "render_perf_physical_8k80_hardware_status=blocked todo=TODO684 reason=missing-admitted-semantic-window-producer"
+    exit 2
+}
+[ -f "$SOFTWARE_RUN_DIR/producer_receipt.env" ] || {
+    echo "render_perf_physical_8k80_hardware_status=blocked todo=TODO684 reason=missing-correlated-software-producer-receipt"
+    exit 2
+}
+WINDOW_RECEIPT="$INVENTORY_DIR/window_semantic_receipt.env"
+WINDOW_RSS="$INVENTORY_DIR/window_semantic_max_rss_kib.txt"
+WINDOW_REVISION=$(receipt_value "$SOFTWARE_RUN_DIR/producer_receipt.env" producer_receipt_revision_start)
+window_rc=0
+DISPLAY="$DISPLAY_VALUE" VK_ICD_FILENAMES="$ICD" \
+    timeout "${WINDOW_TIMEOUT_SECS:-300}" /usr/bin/time -f %M -o "$WINDOW_RSS" \
+    "$WINDOW_PRODUCER_BIN" --width 7680 --height 4320 \
+    --revision "$WINDOW_REVISION" --warmup-count 1 --sample-count 60 \
+    --out "$WINDOW_RECEIPT" || window_rc=$?
+[ "$window_rc" -ne 2 ] || {
+    echo "render_perf_physical_8k80_hardware_status=blocked todo=TODO684 reason=semantic-window-producer-unavailable"
+    exit 2
+}
+[ "$window_rc" -eq 0 ] || {
+    echo "render_perf_physical_8k80_hardware_status=failed todo=TODO684 reason=semantic-window-producer-failed"
+    exit 1
+}
+window_matches_producer "$WINDOW_RECEIPT" "$SOFTWARE_RUN_DIR/producer_receipt.env" || {
+    echo "render_perf_physical_8k80_hardware_status=failed todo=TODO684 reason=semantic-window-receipt-mismatch"
+    exit 1
+}
+awk '$1 + 0 > 0 { ok=1 } END { exit(ok ? 0 : 1) }' "$WINDOW_RSS"
+
+[ -n "$PHYSICAL_RECEIPT" ] && [ -f "$PHYSICAL_RECEIPT" ] || {
+    echo "render_perf_physical_8k80_hardware_status=blocked todo=TODO685 reason=physical-scanout-capture-receipt-required"
+    exit 2
+}
+mkdir -p "$PHYSICAL_BUILD_DIR/runs"
+run_id=$(receipt_value "$SOFTWARE_RUN_DIR/producer_receipt.env" run_id)
+publish_id="$run_id-physical-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+publish_tmp="$PHYSICAL_BUILD_DIR/runs/.$publish_id"
+publish_final="$PHYSICAL_BUILD_DIR/runs/$publish_id"
+mkdir "$publish_tmp" || exit 1
+trap 'rm -rf "$publish_tmp"' EXIT HUP INT TERM
+cp "$INVENTORY_DIR/inventory.txt" "$publish_tmp/inventory.txt"
+cp "$WINDOW_RECEIPT" "$publish_tmp/window_semantic_receipt.env"
+cp "$WINDOW_RSS" "$publish_tmp/window_semantic_max_rss_kib.txt"
+cp "$SOFTWARE_RUN_DIR/producer_receipt.env" "$publish_tmp/producer_receipt.env"
+cp "$SOFTWARE_RUN_DIR/evidence/strict_semantic_vulkan_window_producer.sha256" "$publish_tmp/window_producer.sha256"
+cp "$PHYSICAL_RECEIPT" "$publish_tmp/physical_receipt.env"
+sh "$CAMPAIGN_CHECK" --validate-physical \
+    --producer "$publish_tmp/producer_receipt.env" \
+    --physical "$publish_tmp/physical_receipt.env"
+(cd "$publish_tmp" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$publish_tmp/evidence_manifest.sha256"
+{
+    echo receipt_schema=render-perf-8k80-physical-publication-v1
+    echo status=pass
+    echo run_id="$run_id"
+    echo publication_id="$publish_id"
+    echo captured_at_utc="$(date -u +%s)"
+    echo source_software_run="$SOFTWARE_RUN_DIR"
+    echo evidence_manifest_hash="$(sha256sum "$publish_tmp/evidence_manifest.sha256" | awk '{print $1}')"
+    echo physical_receipt_hash="$(sha256sum "$publish_tmp/physical_receipt.env" | awk '{print $1}')"
+    echo window_receipt_hash="$(sha256sum "$publish_tmp/window_semantic_receipt.env" | awk '{print $1}')"
+} > "$publish_tmp/publication_receipt.env"
+mv "$publish_tmp" "$publish_final"
+chmod -R a-w "$publish_final"
+current_tmp="$PHYSICAL_BUILD_DIR/.current.$$"
+ln -s "runs/$publish_id" "$current_tmp"
+mv -Tf "$current_tmp" "$PHYSICAL_BUILD_DIR/current"
+trap - EXIT HUP INT TERM
+echo "render_perf_physical_8k80_hardware_status=pass todos=TODO684,TODO685 evidence=$PHYSICAL_BUILD_DIR/current/publication_receipt.env"

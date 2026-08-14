@@ -102,10 +102,12 @@ review accepted this implementation handoff as **WARN**. Source and fixture
 checks still do not close live A4/A5/A7 evidence.
 
 2026-08-14 A4–A8 implementation-readiness audit: A4, A5, and A7 have complete
-software paths; A8 has fail-closed inventory/admission; A6 has physical mode
-admission and primitive window presentation but still lacks a same-A5-semantic
-physical scanout capture producer. The source-buffer checksum printed by the
-Rust window benchmark is explicitly inadmissible as scanout parity. The exact
+software paths; A8 has fail-closed inventory/admission. A6 now has a native
+same-semantic Web→DrawIR→strict-Vulkan visible-window producer, a sole-owner
+submit/present boundary, retained artifact/build provenance, and correlated
+physical-receipt validation. Independent physical scanout capture remains a
+hardware input; the source-buffer checksum printed by the Rust window benchmark
+is explicitly inadmissible as scanout parity. The exact
 implemented/unavailable matrix and optimization exclusions are retained in
 `doc/09_report/ui/perf/render_8k80_a4_a8_implementation_readiness_2026-08-14.md`.
 
@@ -121,9 +123,9 @@ fresh evidence produced by that command on the named capability.
 | **A1** | Preserve the stable device-identity hash emitted by the physical adapter probe in the durable report, then have the physical wrapper validate it as nonzero alongside the textual identity. The unavailable-hardware execution contract is owned by TODO685. | `build/check/engine2d-vulkan-window-8k/run.*/receipt.env`; `doc/09_report/engine2d_vulkan_clear_8k_evidence_2026-08-12.md` | Vulkan evidence owner / independent highest-capability Codex |
 | **A4** | Follow the container/GPU research and design without changing this benchmark's CPU semantics. TODO686 owns native-build admission; TODO687 owns direct execution of the admitted cached carrier and its receipt; TODO688 owns its exact-runtime SSpec. CUDA/Vulkan availability is irrelevant to A4 admission. | TODO687 receipt and TODO688 verification evidence; refresh `doc/09_report/drawir_sparse_dynamic_8k_attempt_2026-08-12.md` | pure-Simple native-build and CPU DrawIR owner / independent highest-capability Codex |
 | **A5** | The strict Vulkan semantic producer, submit/readback split, 60-sample receipt, and focused spec are implemented. Build and execute them with the admitted runtime specified by TODO810; source/static evidence is not a live performance receipt. | TODO810 `producer_receipt`; publish the accepted result to `doc/09_report/ui/perf/gui_8k80_semantic_producer_<date>.md` | UI semantic-render and Engine2D Vulkan owner / independent highest-capability Codex |
-| **A6** | Physical hardware execution is tracked by canonical Todo DB item TODO684; this plan retains only the acceptance dependency. | TODO684 evidence | physical Vulkan/display operator / independent highest-capability Codex |
+| **A6** | The native semantic window producer is retained by the A4/A5 container build. On qualifying hardware run `PHYSICAL_RECEIPT=<captured-scanout.env> DISPLAY=:0 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json sh scripts/check/check-render-perf-physical-8k80-hardware.shs`; without an independent capture receipt it exits blocked after device-window evidence rather than overclaiming scanout. | `build/render_perf/8k80_container/current/evidence/strict_semantic_vulkan_window_producer`, `build/render_perf/physical_display_inventory/window_semantic_receipt.env`, TODO684/TODO685 capture evidence | physical Vulkan/display operator / independent highest-capability Codex |
 | **A7** | The parent-authoritative checker and its bounded positive/deliberate-red matrix are implemented. Run it against admitted TODO687/TODO810 receipts as specified by TODO811. It publishes valid software evidence as `blocked-physical` when A6 is absent and may publish full PASS only after fresh TODO684/TODO685 evidence. | TODO811 `aggregate_receipt` and self-test evidence; full promotion additionally requires TODO684/TODO685 receipts | root integration owner / independent highest-capability Codex |
-| **A8** | Physical connector, EDID, and scanout evidence is tracked by canonical Todo DB item TODO685; this plan retains only the acceptance dependency. | TODO685 evidence | physical display operator / independent highest-capability Codex |
+| **A8** | The wrapper retains fail-closed xrandr/EDID inventory and validates a fresh physical receipt against the exact software run. Attach qualifying hardware and use the A6 command above. | `build/render_perf/physical_display_inventory/inventory.txt`, correlated TODO685 physical receipt | physical display operator / independent highest-capability Codex |
 
 ### Cooperative review record
 
