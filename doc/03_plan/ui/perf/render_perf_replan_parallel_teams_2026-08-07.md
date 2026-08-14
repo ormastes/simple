@@ -1,5 +1,55 @@
 # Render-Perf / WM Hardening — Replan for Parallel Agent Teams (2026-08-07)
 
+## 2026-08-14 restart12 replacement lane (canonical active slice)
+
+This bounded lane supersedes the stale binary-provenance and bootstrap-blocker
+statements below for the remaining sparse DrawIR performance work.  It does not
+rewrite the historical T1--T20 record.
+
+Current starting point: `release/x86_64-unknown-linux-gnu/simple` is a deployed
+pure-Simple CLI and advertises direct `simple <file.spl>` and `simple -c`
+execution.  The retained 2026-08-13 report predates this artifact and records
+both forms failing with `missing command`; that result must be revalidated once,
+not assumed current.  The native operation harness already proves a 1% retained
+damage primitive p95 below 12.5 ms, while full-frame CPU repaint remains outside
+budget.  The missing evidence is the self-hosted sparse DrawIR entry closure.
+
+Acceptance items for this lane:
+
+- [x] WARN: the deployed self-hosted CLI was tested once; minimal `-c` and the
+  canonical entry both exit 248 before compiler receipts, without seed fallback.
+- [ ] BLOCKED: the benchmark cannot start because source execution exits 248
+  and cached native-build exits 0 without an artifact. It must still complete
+  its 20-frame 7680x4320, 256x128 dynamic-damage
+  corpus and emits backend, revision, considered/culled, readback, checksum,
+  p50/p95, and receipt-validity fields.
+- [ ] BLOCKED: correctness receipts must prove two considered and 512 culled commands per
+  frame, nonzero readback, zero full-frame mismatches, and stable checksum.
+- [ ] BLOCKED: executor p95 must be at most 12.5 ms and outer maximum RSS retained. This
+  is an executor-only result and must not be described as presentation or
+  physical-scanout proof.
+- [x] N/A: no `.spl` files were changed, so no touched source requires the O3
+  optimizer inspection; documentation and direct-env guards still run once.
+- [x] WARN: the final report names binary/source revision, attempted mode, viewport,
+  readback mode, fallback state, p50/p95, RSS, and checksum proof.
+- [ ] Intentional changes are committed, rebased under
+  `/tmp/simple-main-restart12-push.lock`, pushed as `HEAD:main` without token
+  environment overrides, and proven reachable from the refreshed origin/main.
+
+Current blockers and allowed terminal verdicts:
+
+- A self-hosted dispatcher/entry-closure failure is an implementation blocker,
+  not render timing; fix it within three verify/fix cycles or finish WARN with a
+  concrete tracking record and retained failing command evidence.
+- Host OOM/watchdog before receipts is WARN and keeps 8K/80 unproven.  A smaller
+  viewport, bootstrap interpreter, native C-only harness, cached replay, or
+  software-fallback substitution cannot satisfy this slice.
+- Full-frame CPU repaint is already measured outside budget and is not rerun by
+  this lane; the accepted workload is exact sparse retained damage.
+
+Verification is single-pass per acceptance item, with at most three total
+fix cycles.  Convergence ends the lane.
+
 Supersedes the scheduling half of
 `doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md` §9/§11 (the
 architecture in §1–§8 of that plan stands unchanged). Supersedes the status
