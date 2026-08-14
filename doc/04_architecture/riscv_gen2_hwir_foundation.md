@@ -572,3 +572,19 @@ binding, and isolated GHDL phases. The pure-Simple composer owns phase two. It
 accepts an exact-key v2 manifest, rehashes and copies every command/artifact,
 creates the previously absent final run, and writes the receipt last. Neither
 component may infer PASS from source tokens, filenames, or a GHDL marker.
+
+## Related artifacts
+
+- Feature and NFR requirements:
+  `doc/02_requirements/feature/riscv_gen2_hwir_foundation.md` and
+  `doc/02_requirements/nfr/riscv_gen2_hwir_foundation.md`
+- Parallel execution and qualification plans:
+  `doc/03_plan/agent_tasks/riscv_gen2_hwir_foundation.md` and
+  `doc/03_plan/sys_test/riscv_gen2_hwir_foundation.md`
+- Detail design: `doc/05_design/riscv_gen2_hwir_foundation.md`
+- System-scenario and receipt manuals:
+  `doc/06_spec/03_system/app/hardware/feature/riscv_gen2_hwir_foundation_spec.md`
+  and `doc/06_spec/01_unit/app/riscv_gen2_qualification_receipt_spec.md`
+- Current Stage-3 memory-lifecycle blocker:
+  `doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`
+- SPipe state: `.spipe/riscv_gen2_hwir_foundation/state.md`

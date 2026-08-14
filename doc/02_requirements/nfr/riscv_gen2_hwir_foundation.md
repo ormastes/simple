@@ -72,3 +72,14 @@ formal-verification, SimpleOS, database, web, and integration-lane files even
 when they share Git history with A13/A14. It includes the complete typed
 sequential/parcel/trap dependency closure, qualification composer, compiler
 coverage inventory path, and their directly executed focused specifications.
+
+## Related artifacts
+
+- Feature requirements: `doc/02_requirements/feature/riscv_gen2_hwir_foundation.md`
+- Qualification test plan: `doc/03_plan/sys_test/riscv_gen2_hwir_foundation.md`
+- Parallel execution plan: `doc/03_plan/agent_tasks/riscv_gen2_hwir_foundation.md`
+- Architecture: `doc/04_architecture/riscv_gen2_hwir_foundation.md`
+- Detail design: `doc/05_design/riscv_gen2_hwir_foundation.md`
+- Qualification receipt manual:
+  `doc/06_spec/01_unit/app/riscv_gen2_qualification_receipt_spec.md`
+- SPipe state: `.spipe/riscv_gen2_hwir_foundation/state.md`

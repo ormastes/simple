@@ -187,3 +187,18 @@
     traversal records only reachable semantic decisions, uses span-derived
     decision/condition keys and runtime-compatible escaping, rejects conflicts
     or row-cap overflow, and emits exactly one marked zero-count block.
+
+## Related artifacts
+
+- Feature and NFR requirements:
+  `doc/02_requirements/feature/riscv_gen2_hwir_foundation.md` and
+  `doc/02_requirements/nfr/riscv_gen2_hwir_foundation.md`
+- Parallel execution and qualification plans:
+  `doc/03_plan/agent_tasks/riscv_gen2_hwir_foundation.md` and
+  `doc/03_plan/sys_test/riscv_gen2_hwir_foundation.md`
+- Architecture: `doc/04_architecture/riscv_gen2_hwir_foundation.md`
+- System-scenario and receipt manuals:
+  `doc/06_spec/03_system/app/hardware/feature/riscv_gen2_hwir_foundation_spec.md`
+  and `doc/06_spec/01_unit/app/riscv_gen2_qualification_receipt_spec.md`
+- Operator guide: `doc/07_guide/hardware/riscv/vhdl_exec_core_generator.md`
+- SPipe state: `.spipe/riscv_gen2_hwir_foundation/state.md`

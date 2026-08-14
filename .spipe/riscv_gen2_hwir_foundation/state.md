@@ -1085,8 +1085,8 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   compiler after complete parsing without expanding runtime ABI. Acceptance
   still requires an admitted self-hosted end-to-end receipt; a seed or crashing
   Stage-3 fixture is not evidence. Phase remains `implementation-handoff` / WARN.
-- review-blocked (2026-08-14, A14 receipt authority): the runner's current
-  `base..HEAD` scope includes unrelated later `.spl` changes. Exact command,
+- review-history (2026-08-14, A14 receipt authority, superseded): the runner's
+  then-current `base..HEAD` scope included unrelated later `.spl` changes. Exact command,
   duplicate-safe JSON, parent canonicality, and destination rehash are now
   implemented at source level, but executable runner/writer deliberate-reds
   remain absent. These are active resume items, not exclusions.
@@ -1106,8 +1106,10 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   values, and ordinary versus assembler match arms. Parser and placeholder
   desugar now preserve source spans; compiler inventory emits bounded,
   deterministic, deduplicated zero-count rows with runtime-identical keys and
-  escaping. Highest-capability static review is green. Executable acceptance
-  remains WARN because the authorized Stage-3 command exits 139.
+  escaping. Highest-capability static review is green. At that historical
+  candidate frontier, executable acceptance remained WARN because the
+  authorized stale Stage-3 command exited 139; the current blocker is the
+  current-source cycle-3 termination recorded below.
 - verify-blocked (2026-08-14, user-authorized Stage 3): the only local candidate
   is `bootstrap/stage3/simple`, SHA-256 `905ce03696a4726e41e410e0531d39f84df2d26d1588e2a23206ede3c177793b`.
   It exposes only `compile`/`native-build`, is byte-identical to Stage 1/2, and
@@ -1126,8 +1128,10 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   function field, constructor initialization, and semantic preservation are
   restored. Evidence: `build/native_probe/stage3-fresh/build.log`; bug:
   `doc/08_tracking/bug/stage3_hir_contract_model_partial_integration_2026-08-14.md`.
-  The cache-preserving rebuild must finish and produce a provenance-bound
-  Stage 3 before any A13/A14 executable checkbox changes.
+  At this historical cycle-1 frontier, the cache-preserving rebuild still had
+  to finish and produce a provenance-bound Stage 3 before any A13/A14
+  executable checkbox could change. Cycles 2 and 3 below supersede that resume
+  instruction.
 - verify-blocked (2026-08-14, current-source Stage 3 cycle 2): the preserved-
   cache retry did not reproduce the missing HIR contract-name diagnostic and
   was observed externally terminated. Its log proves only that no compiler
@@ -1143,3 +1147,36 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   `doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`.
   The three-cycle cap is exhausted. No unchanged bootstrap command may be run
   again in this session; all self-hosted and RTL acceptance remains WARN/open.
+- resume-contract (2026-08-14, exact owners): `/root` owns compiler/bootstrap
+  recovery, A13/A14 execution, evidence integration, and merge; final review is
+  `/root`, with highest-capability plan review by `/root/plan_truth_audit`.
+  In a fresh scoped session, fix and test the retained HIR memory-lifecycle
+  owner, then resume one canonical Stage-3 transaction with
+  `scripts/bootstrap/bootstrap-from-scratch.sh
+  --resume-stage3-from-admitted=OUTPUT --jobs=1`, where `OUTPUT` is the
+  repo-relative bootstrap output root containing the frozen admitted Stage 2.
+  That recovery yields an admitted Stage 3 only; it does not build or admit
+  Stage 4. Next, from the repo root, build and internally admit the full CLI with
+  `scripts/bootstrap/bootstrap-from-scratch.sh --output=OUTPUT --mode=dynload
+  --full-cli --jobs=1`. The canonical output is
+  `OUTPUT/full/<triple>/simple` with adjacent `simple.provenance.env`. Run its
+  post-bootstrap acceptance exactly once using the command documented in
+  `doc/06_spec/03_system/check/post_bootstrap_stage4_acceptance_spec.md`, with
+  `STAGE4_POST_BOOTSTRAP_BINARY` and `STAGE4_POST_BOOTSTRAP_PROVENANCE` set to
+  the absolute canonical in-workspace candidate and adjacent provenance paths.
+  Only after that admission passes, run A14 exactly once with
+  `scripts/check/run-riscv-gen2-hwir-qualification.shs --stage4-cli
+  /mnt/data/worktrees/restart12-vhdl/OUTPUT/full/TRIPLE/simple
+  --stage4-provenance
+  /mnt/data/worktrees/restart12-vhdl/OUTPUT/full/TRIPLE/simple.provenance.env
+  --output-dir
+  /mnt/data/worktrees/restart12-vhdl/build/evidence/riscv_gen2_hwir_foundation/RESTART12_RUN_ID`.
+  The output directory must be an absent direct child of the evidence root; the
+  host must be Linux with GHDL and GNU `timeout`/`sha256sum`; the CLI and its
+  adjacent admitted provenance must be absolute canonical paths inside this
+  workspace. Success produces
+  the immutable v2 `qualification_receipt.json` last and retains its bound
+  RV32/RV64 VHDL, manifests, testbenches, isolated GHDL commands/logs/exits, and
+  measured >=8000-bp coverage. A red retains diagnostics but no claim-bearing
+  receipt. Until this and the A13 commands at lines 1035-1042 pass, phase stays
+  `implementation-handoff` / WARN and every executable gate remains unchecked.

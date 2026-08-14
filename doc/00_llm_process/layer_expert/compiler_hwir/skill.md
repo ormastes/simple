@@ -24,6 +24,12 @@ an input capability.
 ## Evidence and boundaries
 
 - Plan: `doc/03_plan/agent_tasks/riscv_gen2_hwir_foundation.md` A13.
+- Qualification plan: `doc/03_plan/sys_test/riscv_gen2_hwir_foundation.md`.
+- Feature/NFR requirements:
+  `doc/02_requirements/feature/riscv_gen2_hwir_foundation.md` and
+  `doc/02_requirements/nfr/riscv_gen2_hwir_foundation.md`.
+- Architecture/design: `doc/04_architecture/riscv_gen2_hwir_foundation.md` and
+  `doc/05_design/riscv_gen2_hwir_foundation.md`.
 - SPipe state: `.spipe/riscv_gen2_hwir_foundation/state.md`.
 - Focused spec:
   `test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl`.
@@ -31,6 +37,12 @@ an input capability.
   `doc/06_spec/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.md`.
 - User/developer guide:
   `doc/07_guide/hardware/riscv/vhdl_exec_core_generator.md`.
+- Qualification receipt manual:
+  `doc/06_spec/01_unit/app/riscv_gen2_qualification_receipt_spec.md`.
+- Current Stage-3 blockers:
+  `doc/08_tracking/bug/stage3_hir_contract_model_partial_integration_2026-08-14.md`
+  and
+  `doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`.
 
 Source-text checks prove serializer shape only. Qualification requires an
 admitted self-hosted CLI, lint/duplication/SSpec maintenance, measured branch

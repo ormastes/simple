@@ -631,19 +631,26 @@ zero-count decisions, deduplicate runtime outcomes, and use exactly four
 exclusions: generated VHDL, testbench literals, legacy v1 generators, and the
 separate retirement producer. Missing GHDL is a blocker, not an exclusion.
 
-This is currently a WARN/source handoff. Exact command grammar, duplicate-safe
-product JSON, canonical parent handling, and destination rehash are implemented
-at source level but remain unverified; deliberate-red writer coverage and an
-admitted RV32/RV64 run remain open in the canonical
+This is currently a WARN/source handoff. Executed shell deliberate-reds cover
+the owned-source ledger grammar, missing/empty/symlink/mutation cases, and
+canonical parent/symlink rejection. Exact-key manifest parsing,
+duplicate-safe product JSON, canonical parent handling, and destination rehash
+are implemented in the Simple composer, but its writer-level
+copy/publication/cleanup deliberate-reds have not run under an admitted runtime.
+Those Simple writer reds and an admitted RV32/RV64 run remain open in the canonical
 [task plan](../../../03_plan/agent_tasks/riscv_gen2_hwir_foundation.md) and
 [qualification bug](../../../08_tracking/bug/riscv_gen2_hwir_qualification_contract_mismatch_2026-08-14.md).
 
 The compiler-side inventory now walks only canonical, tag-dispatched flat-AST
 children, preserves source spans through parsing and placeholder desugaring,
 and emits bounded zero-count rows whose keys/escaping match runtime probes.
-This source is highest-capability static-review green; the tracked Stage-3
-bootstrap artifact exits 139 on its focused native build, so no executable
-coverage or Stage-4 qualification is claimed.
+This source is highest-capability static-review green. The stale tracked Stage-3
+bootstrap artifact exits 139 on its focused native build, but the current-source
+rebuild moved the frontier and exhausted its third bounded cycle under signal 15
+after 12m52s at 24,839,624 KiB maximum RSS without producing a candidate or
+provenance. Resume through
+`doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`;
+no executable coverage or Stage-4 qualification is claimed.
 
 **`expected Fn, found FString` when running the spec.** Pre-existing, not a
 regression in this lane: the deployed seed's `simple test` cannot parse the
@@ -700,3 +707,18 @@ copies of new sources until they land.
   `doc/01_research/hardware/riscv/simple_grammar_vhdl_edsl_sufficiency_2026-07-26.md`
 - Campaign state and silicon evidence: `.spipe/vhdl-gen-backend/state.md`
 - Golden manifest: `doc/08_tracking/hardware/golden_vhdl_manifest_2026-07-26.txt`
+- Gen2 feature/NFR requirements:
+  `doc/02_requirements/feature/riscv_gen2_hwir_foundation.md` and
+  `doc/02_requirements/nfr/riscv_gen2_hwir_foundation.md`
+- Gen2 architecture and detail design:
+  `doc/04_architecture/riscv_gen2_hwir_foundation.md` and
+  `doc/05_design/riscv_gen2_hwir_foundation.md`
+- Gen2 parallel and qualification plans:
+  `doc/03_plan/agent_tasks/riscv_gen2_hwir_foundation.md` and
+  `doc/03_plan/sys_test/riscv_gen2_hwir_foundation.md`
+- Gen2 system-scenario and receipt manuals:
+  `doc/06_spec/03_system/app/hardware/feature/riscv_gen2_hwir_foundation_spec.md`
+  and `doc/06_spec/01_unit/app/riscv_gen2_qualification_receipt_spec.md`
+- Gen2 SPipe state and current Stage-3 blocker:
+  `.spipe/riscv_gen2_hwir_foundation/state.md` and
+  `doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`

@@ -2,12 +2,14 @@
 
 ## Evidence status
 
-The strict HWIR, compressed-row, provenance, and stateful frontend paths are
-implemented with executable unit and SSpec coverage. The currently deployed
-`bin/simple` identifies as a Rust bootstrap seed, so its test and GHDL activity
-is diagnostic only. No row, stateful protocol, or compiler-product result is a
-self-hosted qualification proof until the exact commands in **Current-host
-evidence and resume** execute with a provenance-admitted self-hosted CLI.
+The strict HWIR, compressed-row, provenance, and stateful frontend paths have
+executable unit and SSpec source artifacts, and their source-level checks are
+implemented. The currently deployed `bin/simple` identifies as a Rust bootstrap
+seed, so its test and GHDL activity is diagnostic only; the executable specs
+have not run as admitted qualification evidence. No row, stateful protocol, or
+compiler-product result is a self-hosted qualification proof until the exact
+commands in **Current-host evidence and resume** execute with a
+provenance-admitted self-hosted CLI.
 
 The stateful product is deliberately development-stage: its 64-bit lineage
 requires a reset-coupled retirement producer. A terminal matching retirement

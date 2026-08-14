@@ -39,3 +39,14 @@ Selected by user request on 2026-08-11.
 
 Out of scope: scalar pipeline, complete ISA/Zc decode, aspect execution, PPA
 rewrites, MMU/Linux, Debug 1.0, trace, vector, dual issue, and OoO.
+
+## Related artifacts
+
+- NFR requirements: `doc/02_requirements/nfr/riscv_gen2_hwir_foundation.md`
+- Parallel execution plan: `doc/03_plan/agent_tasks/riscv_gen2_hwir_foundation.md`
+- Qualification test plan: `doc/03_plan/sys_test/riscv_gen2_hwir_foundation.md`
+- Architecture: `doc/04_architecture/riscv_gen2_hwir_foundation.md`
+- Detail design: `doc/05_design/riscv_gen2_hwir_foundation.md`
+- System-scenario manual:
+  `doc/06_spec/03_system/app/hardware/feature/riscv_gen2_hwir_foundation_spec.md`
+- SPipe state: `.spipe/riscv_gen2_hwir_foundation/state.md`

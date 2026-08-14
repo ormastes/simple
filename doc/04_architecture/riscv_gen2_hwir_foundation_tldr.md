@@ -109,8 +109,14 @@ non-production, so bootstrap-seed output is not release evidence.
   exact/duplicate-safe evidence validation, writer deliberate reds, an admitted Stage-4 CLI, and independent
   RV32/RV64 GHDL receipts.
   The inventory source is implemented with canonical tag-dispatched flat-AST
-  ownership and span-preserving parser/desugar keys; the available Stage-3
-  bootstrap artifact exits 139 on both focused native and SMF compile probes.
+  ownership and span-preserving parser/desugar keys. The stale tracked Stage-3
+  bootstrap artifact exits 139 on focused native and SMF compile probes, but
+  that is only an older diagnostic frontier. The current-source rebuild cleared
+  that diagnostic and exhausted its third bounded cycle under signal 15 after
+  12m52s at 24,839,624 KiB maximum RSS without producing a candidate or
+  provenance. Resume through
+  `doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`;
+  do not repeat the exhausted build cycle unchanged.
 
 - [Architecture](riscv_gen2_hwir_foundation.md)
 - [Predecode interface](../../src/compiler/50.mir/hwir/predecode.spl)

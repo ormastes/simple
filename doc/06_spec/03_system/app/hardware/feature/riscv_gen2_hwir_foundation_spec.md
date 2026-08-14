@@ -134,20 +134,22 @@ required planned qualification scenario, not completed self-hosted evidence.
 - NFR-G2-008: the mission-critical C.EBREAK graph uses fixed-width typed
   values, rejects an invalid predicate before emission, and has no legacy
   decoder path.
-- REQ-G2-003/004: C.J redirect behavior is target-simulated through the frozen
-  predecode interface and admitted only through its aggregate real-MIR shape.
-  It is row-level capability evidence, not a full-Zca or release claim.
+- REQ-G2-003/004: the C.J scenario specifies target simulation through the
+  frozen predecode interface; source/spec evidence also checks admission only
+  through its aggregate real-MIR shape. A retained self-hosted GHDL receipt is
+  still required before this becomes row-level target capability evidence.
 - REQ-G2-003/004: C.BEQZ/C.BNEZ target vectors use the frozen branch-predecode
   interface and its explicit `rs1_index: Bits[5]` plus `rs1_value: Bits[XLEN]`
   binding. This scenario
-  proves RV32/RV64 taken, untaken, `+2`, `-2`, sign-sensitive `-256`, and
-  cross-row and mismatched-index fail-closed behavior. It is row-level target capability evidence,
-  not a full-Zca or release claim.
+  is specified to prove RV32/RV64 taken, untaken, `+2`, `-2`, sign-sensitive
+  `-256`, and cross-row and mismatched-index fail-closed behavior. Until its
+  receipt exists, these are planned target vectors, not row-level target
+  capability, full-Zca, or release evidence.
 - REQ-G2-003/004: the public control-predecode product emits one flattened
   module for RV32 and RV64 and reports strict route/node/profile/XLEN
-  provenance before target simulation. It remains a stateless three-row
-  control slice—not a full frontend, parcel buffer, dispatch channel, or
-  retirement proof.
+  provenance before the planned target simulation. Source/spec evidence covers
+  the bounded stateless three-row shape; it is not target evidence, a full
+  frontend, parcel buffer, dispatch channel, or retirement proof.
 - REQ-G2-006: a noncritical `--riscv-gen2-target` request is rejected before it
   can take the legacy route or replace a pre-existing artifact.
 - NFR-G2-006: compiler-owned Gen2 artifacts retain the canonical critical
@@ -162,17 +164,19 @@ required planned qualification scenario, not completed self-hosted evidence.
   sequential plan: registers, reset values, priority guards, assignments,
   decoder pins, and output bindings. Both RV32 and RV64 record a nonempty
   decoder-closure graph hash and have no legacy fallback.
-- REQ-G2-010/NFR-G2-011: generated RV32 and RV64 trap-frontends are exercised
-  for precise C.EBREAK visibility, issued-entry backpressure, two consecutive
+- REQ-G2-010/NFR-G2-011: the RV32 and RV64 trap-frontend scenarios require
+  precise C.EBREAK visibility, issued-entry backpressure, two consecutive
   matching transactions with incrementing 64-bit lineage,
   early/stale/mismatched/repeated-retirement sticky-fault containment, fetch
   refusal while faulted, suppressed stale trap effects, and reset-only recovery
-  including same-edge reset/retirement priority. The terminal lineage rule is
-  unit-verified because reaching `2^64-1` is not a practical simulation vector.
+  including same-edge reset/retirement priority. Source/unit specifications
+  cover the terminal lineage rule because reaching `2^64-1` is not a practical
+  simulation vector; admitted runtime evidence remains pending.
 - REQ-G2-011/NFR-G2-012: normal-row outcomes use explicit classifier/reserved
-  predicates and fixed predecode metadata. GHDL covers C.ADDI4SPN, C.LW,
-  C.SW, and C.LWSP; the unit contract covers the whole admitted tranche. Rows
-  with reserved, redirect, or trap semantics remain outside composition.
+  predicates and fixed predecode metadata. Planned GHDL vectors cover
+  C.ADDI4SPN, C.LW, C.SW, and C.LWSP, while the unit specification describes
+  the whole admitted tranche. Rows with reserved, redirect, or trap semantics
+  remain outside composition; neither source artifact is a retained receipt.
 - REQ-G2-010/NFR-G2-011: the versioned C.EBREAK trap product is emitted through the
   same typed sequential plan and records a nonempty compiler-product graph
   hash. The v1 decoder ISA composition remains unchanged; stateful products
@@ -181,19 +185,20 @@ required planned qualification scenario, not completed self-hosted evidence.
 - REQ-G2-011: frontend admission is closed against the declarative capability
   table. This is a structural provenance guard, not full generated-RTL
   equivalence.
-- REQ-G2-011: RV32 C.JAL has strict-row/GHDL evidence, an explicit common
-  profile rejection, and a separate RV32-only migrating product. It remains
-  outside the shared RV32/RV64 capability claim.
-- NFR-G2-012: RV64 C.ADDIW has the reciprocal strict-row/GHDL evidence and a
-  separate `rv64i_zca` product closure. It is not evidence of a complete RV64
-  scalar core or profile compliance.
+- REQ-G2-011: the RV32 C.JAL specification has a strict-row contract, planned
+  GHDL vectors, an explicit common-profile rejection, and a separate RV32-only
+  migrating product. It remains outside the shared RV32/RV64 capability claim,
+  and target evidence awaits the retained receipt.
+- NFR-G2-012: RV64 C.ADDIW has the reciprocal source/spec contract, planned
+  GHDL vectors, and a separate `rv64i_zca` product closure. It is not target
+  evidence or evidence of a complete RV64 scalar core or profile compliance.
 - REQ-G2-011/NFR-G2-012: the migrating v1 predecode composes the admitted
   outcome tranche with the branch-control slice using explicit `legal` priority
   only. It remains bounded and does not claim full-table equivalence.
 
 ## Scope note
 
-This executable scenario exercises strict VHDL CLI gates, bounded stateless
+This executable scenario defines strict VHDL CLI gates, bounded stateless
 control composition, and development-stage typed stateful C.EBREAK handling.
 It is not a full Gen2 frontend, complete trap controller, or protected-core
 equivalence claim. The current self-hosted `simple-vhdl` must still run the
