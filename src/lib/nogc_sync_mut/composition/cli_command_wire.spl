@@ -9,23 +9,15 @@ use std.nogc_sync_mut.composition.provider_contract.{
     SIMPLE_CLI_COMMAND_RESULT_V1_SIZE,
     SIMPLE_CLI_DESCRIBE, SIMPLE_CLI_VALIDATE_ARGS, SIMPLE_CLI_RUN, SIMPLE_CLI_COMPLETE
 }
+use std.nogc_sync_mut.composition.cli_provider_wire.{
+    CliCommandRequestViewV1, CliCommandResultArenaV1,
+    decode_cli_command_request_v1, cli_command_result_lengths_valid_v1,
+    encode_cli_command_result_bytes_v1
+}
 
 extern fn rt_bytes_to_text(data: [u8]) -> text
 
 class CliCommandRequestArenaV1:
-    ok: bool
-    bytes: [u8]
-    diagnostic: text
-
-class CliCommandRequestViewV1:
-    ok: bool
-    operation: u32
-    command: text
-    args: [text]
-    output_capacity: u32
-    diagnostic: text
-
-class CliCommandResultArenaV1:
     ok: bool
     bytes: [u8]
     diagnostic: text
@@ -106,57 +98,8 @@ fn encode_cli_command_request_v1(
     _append(out, args_bytes)
     CliCommandRequestArenaV1(true, out, "")
 
-fn decode_cli_command_request_v1(data: [u8]) -> CliCommandRequestViewV1:
-    if data.len() < SIMPLE_CLI_COMMAND_REQUEST_V1_SIZE as i64:
-        return CliCommandRequestViewV1(false, 0, "", [], 0, "cli-request-truncated")
-    if _read_u32(data, 0) != SIMPLE_CLI_COMMAND_REQUEST_V1_SIZE:
-        return CliCommandRequestViewV1(false, 0, "", [], 0, "cli-request-descriptor-invalid")
-    val operation = _read_u32(data, 4)
-    if not _operation_valid(operation):
-        return CliCommandRequestViewV1(false, operation, "", [], 0, "cli-operation-invalid")
-    val command_offset = _read_u32(data, 8) as i64
-    val command_length = _read_u32(data, 12) as i64
-    val args_offset = _read_u32(data, 16) as i64
-    val args_length = _read_u32(data, 20) as i64
-    val output_capacity = _read_u32(data, 24)
-    if command_offset != SIMPLE_CLI_COMMAND_REQUEST_V1_SIZE as i64 or
-            command_length <= 0 or args_offset != command_offset + command_length or
-            args_length < 4 or args_offset + args_length != data.len() or output_capacity == 0:
-        return CliCommandRequestViewV1(false, operation, "", [], output_capacity, "cli-request-bounds-invalid")
-    val count = _read_u32(data, args_offset) as i64
-    if count > 4096:
-        return CliCommandRequestViewV1(false, operation, "", [], output_capacity, "cli-argument-count-invalid")
-    var args: [text] = []
-    var cursor = args_offset + 4
-    var i = 0
-    while i < count:
-        if cursor + 4 > data.len():
-            return CliCommandRequestViewV1(false, operation, "", [], output_capacity, "cli-argument-truncated")
-        val length = _read_u32(data, cursor) as i64
-        cursor = cursor + 4
-        if length > data.len() - cursor:
-            return CliCommandRequestViewV1(false, operation, "", [], output_capacity, "cli-argument-bounds-invalid")
-        args.push(_text(data, cursor, length))
-        cursor = cursor + length
-        i = i + 1
-    if cursor != data.len():
-        return CliCommandRequestViewV1(false, operation, "", [], output_capacity, "cli-argument-trailing-bytes")
-    CliCommandRequestViewV1(true, operation, _text(data, command_offset, command_length), args, output_capacity, "")
-
 fn encode_cli_command_result_v1(status: i32, output: text, diagnostic_text: text) -> CliCommandResultArenaV1:
-    val output_bytes = output.to_bytes()
-    val diagnostic_bytes = diagnostic_text.to_bytes()
-    val output_offset = SIMPLE_CLI_COMMAND_RESULT_V1_SIZE
-    val diagnostic_offset = output_offset + output_bytes.len() as u32
-    var out: [u8] = []
-    _push_u32(out, status as u32)
-    _push_u32(out, output_offset)
-    _push_u32(out, output_bytes.len() as u32)
-    _push_u32(out, diagnostic_offset)
-    _push_u32(out, diagnostic_bytes.len() as u32)
-    _append(out, output_bytes)
-    _append(out, diagnostic_bytes)
-    CliCommandResultArenaV1(true, out, "")
+    encode_cli_command_result_bytes_v1(status, output.to_bytes(), diagnostic_text.to_bytes())
 
 fn decode_cli_command_result_v1(data: [u8]) -> CliCommandResultViewV1:
     if data.len() < SIMPLE_CLI_COMMAND_RESULT_V1_SIZE as i64:
@@ -197,5 +140,5 @@ fn cli_command_result_used_length_v1(data: [u8]) -> i64:
 export CliCommandRequestArenaV1, CliCommandRequestViewV1
 export CliCommandResultArenaV1, CliCommandResultViewV1
 export encode_cli_command_request_v1, decode_cli_command_request_v1
-export encode_cli_command_result_v1, decode_cli_command_result_v1
-export cli_command_result_used_length_v1
+export encode_cli_command_result_bytes_v1, encode_cli_command_result_v1, decode_cli_command_result_v1
+export cli_command_result_lengths_valid_v1, cli_command_result_used_length_v1

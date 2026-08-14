@@ -31,6 +31,8 @@ Simple.
 Rust compiler/runtime source checks, C syntax checking, the environment-runtime
 audit, and diff checks pass. The already-started end-to-end criterion exhausted
 the mandatory three-cycle cap while revealing a second provider dependency on
-`str.to_bytes`; the provider now emits its fixed response as explicit bytes.
+`str.to_bytes`; the provider now uses the canonical Pure Simple byte-native CLI
+result encoder. Its size predicate is tested without allocating a megabyte-size
+fixture, avoiding an interpreter-performance regression in the regression test.
 Do not claim invocation PASS until a fresh bounded session rebuilds the provider
 and runner once with the admitted Pure Simple Stage 2/3 tool.
