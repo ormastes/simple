@@ -68,9 +68,12 @@ session. It admitted Stage 2 (`858 compiled, 0 cached, 0 failed`; sanity pass;
 SHA-256 `d2ed1d54673bc4cc848024ebbc229a873053dc315d8412613184bfdc5faec947`),
 but Stage 3 produced no candidate while RSS grew to about 19.8 GiB over 143
 seconds of single-core execution. It was terminated before host OOM. Stage 4,
-deployment, and admission-dependent feature evidence remain BLOCKED; the next
-session must localize the remaining Stage 3 allocation loop rather than repeat
-this command unchanged.
+deployment, and admission-dependent feature evidence remain BLOCKED. Before
+another Stage-3 localization run, the next fresh session must repair the now
+localized cross-registry argv ingress with private non-interposable pure-owner
+helpers, prove it under the production link policy, and emit the mandatory
+bootstrap receipt. Only then may it localize the remaining Stage-3 allocation
+loop; the old receipt-less command must not be repeated.
 
 Next-cycle localization identified a historical ownership regression: commit
 `866559f16e0` made `ModuleSurfacesByName` reference-owned after proving that a
@@ -116,7 +119,7 @@ Current acceptance items, each to be verified once in this lane:
 - [ ] Remove the remaining in-scope Build11 compiler/loader/script blocker
   without seed fallback, disabled checks, reduced workload, or fabricated
   evidence.
-- [ ] Run the optimizer audit on each touched `.spl` implementation file and
+- [x] Run the optimizer audit on each touched `.spl` implementation file and
   address or explicitly disposition its findings.
 - [x] Pass the independent C provider lifecycle/self-check gate with real assertions.
 - [ ] Pass the focused SPipe performance specification with real assertions.
@@ -168,8 +171,9 @@ with zero failures but exited 139 before the first HIR progress row. Direct
 scalar access did not clear the corruption, so that unproven workaround was
 removed. The bounded lane stops here per the three-cycle cap. The grammar fix
 remains because it is independently proven by both later cycles. Admitted
-self-hosted loader probe/latency/RSS rows, optimizer execution, and deployed
-focused SPipe execution remain WARN-blocked by the Stage 3 context corruption.
+self-hosted loader probe/latency/RSS rows and deployed focused SPipe execution
+remain WARN-blocked by the Stage 3 context corruption. The later reduced-entry
+Stage-2 optimizer audit supersedes the historical optimizer blocker.
 
 Artifact gaps are explicit: local/domain research, option sets, a decision-ready
 architecture draft, an agent-task breakdown, and expanded detail design now
@@ -315,10 +319,12 @@ most three distinct fix/verify cycles; never repeat an identical failed command.
    `find doc/06_spec -name '*_spec.spl' | wc -l` (must be `0`), and
    `sh scripts/audit/direct-env-runtime-guard.shs --working` plus `--staged`.
 
-No optimizer command is required for this documentation-only plan completion;
-future `.spl` implementation changes must run
-`bin/simple run src/app/optimize/main.spl <file> --full --level=O3` and compare
-the same correctness/performance baseline before and after.
+The distinct Stage-2 optimizer audit is retained in
+`doc/09_report/compiler_loader_stage2_optimizer_audit_2026-08-14.md`. Its real
+`optimize_full_analyze` entry closure built 55 files with zero failures and
+analyzed all four touched `.spl` files once; all findings were explicitly
+dispositioned without an unsafe source rewrite. Future `.spl` changes require
+a fresh audit and correctness/performance comparison.
 
 ## Blocker and resume ledger
 
@@ -326,7 +332,7 @@ the same correctness/performance baseline before and after.
 |---|---|---|---|---|---|
 | PBL-03 platform WARN | Compile the scoped Metal metallib adapter on a real Apple toolchain | `cd src/compiler_rust && cargo check -p simple-runtime --target aarch64-apple-darwin` on macOS with the Apple SDK/toolchain | macOS compile log plus existing scoped-call and removed-symbol receipts | runtime SFFI owner | highest-capability reviewer |
 | LDR-01/02, PRV-01, BYT-01, XLG-01, CMP-01 | Repair/redeploy an admitted self-hosted Stage 4 CLI per the linked repair plan/TODO | `test -x release/x86_64-unknown-linux-gnu/simple && release/x86_64-unknown-linux-gnu/simple --version && release/x86_64-unknown-linux-gnu/simple test --help && sh scripts/check/check-file-exists-probe-c.shs && release/x86_64-unknown-linux-gnu/simple test test/05_perf/compiler_loader_script_crosslang_perf_spec.spl --mode=interpreter --no-session-daemon && RUN_TIMEOUT=30 SIMPLE_BINARY="$PWD/release/x86_64-unknown-linux-gnu/simple" REPORT_PATH="$PWD/build/test-artifacts/05_perf/compiler_loader_script_crosslang_perf/cross_language_perf.md" sh scripts/check/check-cross-language-perf.shs && release/x86_64-unknown-linux-gnu/simple check src/compiler && release/x86_64-unknown-linux-gnu/simple check src/lib && release/x86_64-unknown-linux-gnu/simple check src/app/mcp && release/x86_64-unknown-linux-gnu/simple check src/app/simple_lsp_mcp && SIMPLE_LIB=src release/x86_64-unknown-linux-gnu/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter` | Binary path/hash, version/help logs, checker/spec logs, retained profile report, RSS receipts | compiler-loader performance owner | highest-capability reviewer |
-| LDR-01/02, PRV-01, BYT-01, XLG-01, CMP-01 — Build11 prerequisite | Localize the fresh Stage 3 timeout in a new reviewed session; the three-cycle cap is exhausted here | `env BOOTSTRAP_NATIVE_CACHE_TTL_DAYS=0 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy --backend=cranelift --output=build/restart12-build11-a-r3/output` | `build/restart12-build11-a-r3/output/logs/x86_64-unknown-linux-gnu/{stage2,stage3}-native-build.log`, Stage 2/3 transcripts and sanity/provenance manifests, canary/trace receipts, candidate hash | pure-Simple compiler-driver owner | highest-capability reviewer |
+| LDR-01/02, PRV-01, BYT-01, XLG-01, CMP-01 — Build11 prerequisite | Repair the localized cross-registry argv ingress with private non-interposable pure-owner allocation/push helpers and a registry-sensitive production-link test; rebuild the CLI and produce the mandatory receipt; then run one source-frozen debugger-backed Stage-3 diagnostic cycle | First run `<current capable pure-Simple CLI> build bootstrap --bootstrap-reason=self-host-convergence-check --bootstrap-receipt=$PWD/build/restart12-build11-a-r3/reason.receipt`; only after that succeeds run `env BOOTSTRAP_NATIVE_CACHE_TTL_DAYS=0 SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt="$PWD/build/restart12-build11-a-r3/reason.receipt" --full-bootstrap --deploy --backend=cranelift --output=build/restart12-build11-a-r3/output` | GDB `handle_build+703`/nil-3 receipt, registry-sensitive whole-archive test, planner-produced receipt, Stage 2/3 logs and provenance manifests, candidate hash | pure-Simple compiler-driver owner | highest-capability reviewer |
 | DOC-01 traceability | Explicit user choice from the present feature/NFR option sets, then post-selection architecture/design acceptance | Delete unchosen options; write `doc/02_requirements/feature/compiler_loader_script_crosslang_perf.md` and `doc/02_requirements/nfr/compiler_loader_script_crosslang_perf.md`; reconcile and accept the existing architecture/detail design | Selected requirement/NFR docs with no lingering options, accepted architecture and detail design | research/design owner | user selection + highest-capability reviewer |
 | DOC-01 manual | Working admitted self-hosted docgen | `release/x86_64-unknown-linux-gnu/simple spipe-docgen test/05_perf/compiler_loader_script_crosslang_perf_spec.spl --output doc/06_spec --no-index` | Generated scenario sections, source hash/provenance, `0 stubs`, final readability review receipt | SPipe manual owner | highest-capability reviewer |
 | VCS-01 reconciliation | Intentional plan files committed; no tracked changes; separately owned files untouched | `flock /tmp/simple-main-restart12-push.lock bash -c 'env -u GH_TOKEN -u GITHUB_TOKEN git fetch origin main && git rebase origin/main && env -u GH_TOKEN -u GITHUB_TOKEN git push origin HEAD:main && env -u GH_TOKEN -u GITHUB_TOKEN git fetch origin main && git merge-base --is-ancestor HEAD origin/main && git diff --quiet && git diff --cached --quiet'` followed by `git status --short` and, only after reachability succeeds, `printf '%s WARN\n' "$(git rev-parse HEAD)" > /tmp/restart12-compiler_perf_a.done` | Commit hash, fetch/rebase/push output, reachability exit 0, clean status, updated lane-A WARN marker | merge owner | highest-capability reviewer |
@@ -411,9 +417,9 @@ corrected; `/root/reconciled_plan_review` (`gpt-5.6-sol`, high) then returned
   HashSet indexing/clear, unchanged asymptotic complexity, non-vacuous focused
   coverage, the 8-owner/23-use/1-stored-address live inventory, absence of the
   reverted PBL-03A/B prototypes, and the compile-only Stage-2 evidence limit.
-- The same reviewer, narrow cycle 2: `ACCEPT` on the single 180-second
-  Stage-2 optimizer-build timeout and continued BLOCKED optimizer/performance
-  disposition.
+- The same reviewer, narrow cycle 2: `ACCEPT` on the historical single
+  180-second Stage-2 optimizer-build timeout. The later reduced-entry audit
+  supersedes that optimizer-audit blocker without claiming performance proof.
 - `/root/pbl03_atomic_review`, atomic merge cycles 1-2: cycle 1 `REJECT` found
   three clone-and-discard interpreter Vulkan readback handlers; they were
   removed and kept native/JIT-only. Cycle 2 `ACCEPT` found no merge blocker and

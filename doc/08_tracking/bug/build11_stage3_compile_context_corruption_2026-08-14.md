@@ -127,14 +127,16 @@ fixed with required parentheses around a multiline boolean. Both subsequent
 cycles parsed all 603 files, so this context corruption is the remaining
 blocker.
 
-## Unblock condition
+## Historical unblock condition (superseded)
 
-Create a fresh cache-preserving lineage with:
+The former receipt-less command was:
 
 `env BOOTSTRAP_NATIVE_CACHE_TTL_DAYS=0 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy --backend=cranelift --output=build/restart12-build11-a-r3/output`
 
-Do not set `--fresh-cache`. The Rust seed may build Stage 2 only; admitted Stage
-2 must build Stage 3, and admitted Stage 3 must build Stage 4.
+Do not run it as written. Current policy requires the planner-produced receipt
+described below. After that prerequisite is repaired, do not set
+`--fresh-cache`: the Rust seed may build Stage 2 only; admitted Stage 2 must
+build Stage 3, and admitted Stage 3 must build Stage 4.
 
 Retain the Stage2/Stage3/Stage4 build logs, command transcripts, sanity/provenance
 manifests, candidate hashes, and the focused GDB backtrace. Add fixed-string,
@@ -175,3 +177,27 @@ provenance command or debugger breakpoint, then inspect the aggregate call only
 if the entry/source-map canaries execute. The three-cycle cap is exhausted for
 this lane; do not repeat the same recovery command without a new instrumented
 or debugger-backed localization strategy.
+
+## Bootstrap-receipt planner prerequisite
+
+Current bootstrap policy requires a planner-produced authorization receipt.
+The available release ELF (SHA-256 prefix `04a38e...`) exits 139 before planner
+entry. GDB localized the failure to `handle_build+703`: C `rt_cli_get_args`
+creates argv in the hosted runtime's private array registry, selected
+pure-Simple `rt_slice(args[1:])` rejects that owner and returns nil sentinel
+`3`, and the caller dereferences it.
+
+A selected-owner bridge prototype proved atomic hook selection, exact argv
+content, empty/failure handling, and whole-archive symbol retention. Final
+review rejected it because its strong bridge bodies still called duplicate
+global `rt_array_new`/`rt_array_push` symbols. Under
+`--whole-archive --allow-multiple-definition`, those relocations can bind back
+to the C owner, while the archive test was not registry-discriminating. The
+prototype was removed after the third bounded fix cycle.
+
+The next fresh session must factor private, non-interposable pure-Simple
+allocation/push helpers, make the selected-owner bridge call only those
+helpers, and prove argv with a registry-sensitive pure-owner operation under
+the production whole-archive link policy. Non-GNU mixed-owner linkage remains
+a platform WARN. Only after a rebuilt CLI emits the mandatory receipt may a
+new source-frozen Stage-3 diagnostic run begin.

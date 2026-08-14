@@ -182,13 +182,17 @@ peers and codegen owner-liveness lowering, retaining either would leave an
 unused interpreter-only API or uncompilable callers. Their design findings are
 captured above; no partial escape route was added.
 
-The required optimizer audit could not be executed from Stage 2. One bounded
-attempt used the admitted Stage-2 compiler to native-build
+The initial full optimizer-entry attempt could not execute from Stage 2. One
+bounded attempt used the admitted Stage-2 compiler to native-build
 `src/app/optimize/main.spl` with compiler/app/lib sources, an isolated
 `/tmp/pbl03c-optimizer-cache`, and a 180-second timeout; it produced no output
-or candidate and exited 124. It was not retried. Stage 2 compile evidence for
-the focused HashSet spec remains valid, but optimizer findings and runtime
-performance remain blocked rather than inferred.
+or candidate and exited 124. It was not retried. A later, materially distinct
+reduced entry closure built the real `optimize_full_analyze` path (55 compiled,
+zero failed) and analyzed all four touched Simple files once with status 0.
+The findings are dispositioned in
+`doc/09_report/compiler_loader_stage2_optimizer_audit_2026-08-14.md`; optimizer
+audit is now proved, while runtime performance remains blocked rather than
+inferred.
 
 ## 2026-08-14 atomic PBL-03 closure
 
