@@ -26,6 +26,13 @@ separate `engine2d_draw_ir_adv_strict_vulkan_readback` call owns the untimed
 device-origin checksum oracle. The legacy strict API composes these owners, so
 there is no private parallel rendering or font path.
 
+Visible presentation follows the same owner-result rule. The strict submit
+returns the mutated `Engine2D`;
+`engine2d_draw_ir_adv_strict_vulkan_window_present_with_images` presents
+through that returned owner and returns it again with the submission and window
+receipt. The pre-submit value is never reused across the GPU mutation boundary.
+This proves same-device window presentation, not physical scanout capture.
+
 ## Failure model
 
 - Missing admitted compiler/native artifact: `blocked`.

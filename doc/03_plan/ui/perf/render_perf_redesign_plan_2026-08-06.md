@@ -101,6 +101,14 @@ preserves pass/blocked/failed process status. Independent highest-capability
 review accepted this implementation handoff as **WARN**. Source and fixture
 checks still do not close live A4/A5/A7 evidence.
 
+2026-08-14 A4–A8 implementation-readiness audit: A4, A5, and A7 have complete
+software paths; A8 has fail-closed inventory/admission; A6 has physical mode
+admission and primitive window presentation but still lacks a same-A5-semantic
+physical scanout capture producer. The source-buffer checksum printed by the
+Rust window benchmark is explicitly inadmissible as scanout parity. The exact
+implemented/unavailable matrix and optimization exclusions are retained in
+`doc/09_report/ui/perf/render_8k80_a4_a8_implementation_readiness_2026-08-14.md`.
+
 ### Implementation handoff — blocked rows remain active
 
 This is an implementation handoff, not feature completion.  Each row keeps its

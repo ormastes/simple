@@ -43,3 +43,9 @@ correlate source/artifact/workload/device hashes, then publish atomically. Its
 self-test covers valid software receipts yielding `blocked-physical`, complete
 physical promotion, missing/malformed input, hash/workload mismatch, fallback,
 unknown completion, zero metrics, timed readback, and p95 over budget.
+
+For A6 source readiness, strict window presentation consumes the Engine2D owner
+returned by strict submission and returns a new owner-result envelope. It
+requires completed `window-swapchain`, device-present, known completion, zero
+readback, and positive framebuffer/device/swapchain identities. These fields do
+not assert scanout pixels; A7 still requires an independent physical receipt.

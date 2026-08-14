@@ -149,6 +149,35 @@ struct Engine2dDrawIrAdvSubmitResult:
     readback_bytes: i64
     font_evidence_valid: bool
 
+# Owner-result boundary for strict DrawIR followed by visible presentation.
+# The returned Engine2D is the sole mutable owner after both operations; callers
+# must continue with it rather than the pre-submit value copy.
+struct Engine2dDrawIrWindowPresentOwnerResult:
+    submission: Engine2dDrawIrAdvSubmitResult
+    present_completed: bool
+    present_mode: text
+    device_present: bool
+    completion_known: bool
+    no_readback: bool
+    backend_handle: i64
+    device_identity: i64
+    swapchain_identity: i64
+    full_frame_fallback: bool
+    cpu_fallback_used: bool
+    fallback_reason: text
+
+fn engine2d_vulkan_window_present_fields_valid(
+    present_completed: bool, present_mode: text, device_present: bool,
+    completion_known: bool, no_readback: bool, backend_handle: i64,
+    device_identity: i64, swapchain_identity: i64,
+    full_frame_fallback: bool, cpu_fallback_used: bool, fallback_reason: text
+) -> bool:
+    """Validate visible presentation without treating source pixels as scanout."""
+    (present_completed and present_mode == "window-swapchain" and
+        device_present and completion_known and no_readback and
+        backend_handle > 0 and device_identity > 0 and swapchain_identity > 0 and
+        not full_frame_fallback and not cpu_fallback_used and fallback_reason == "")
+
 struct Engine2dVulkanObservedDelta:
     submit_count: i64
     fence_count: i64
@@ -2955,6 +2984,62 @@ fn engine2d_draw_ir_adv_strict_vulkan_submit_with_images(engine: Engine2D, compo
     result.readback_bytes = 0
     result
 
+fn engine2d_draw_ir_adv_strict_vulkan_window_present_with_images(
+    engine: Engine2D, composition: DrawIrComposition,
+    images: [Engine2dResolvedDrawIrImage]
+) -> Engine2dDrawIrWindowPresentOwnerResult:
+    """Submit strict DrawIR and present through the same returned Vulkan owner.
+
+    This proves visible same-device presentation with no timed host readback.
+    It deliberately does not claim physical scanout capture or checksum parity.
+    """
+    var submission = engine2d_draw_ir_adv_strict_vulkan_submit_with_images(
+        engine, composition, images)
+    var eng = submission.engine
+    var present_completed = false
+    var present_mode = ""
+    var device_present = false
+    var completion_known = false
+    var no_readback = false
+    var backend_handle: i64 = 0
+    var device_identity: i64 = 0
+    var swapchain_identity: i64 = 0
+    var full_frame_fallback = false
+    var cpu_fallback_used = false
+    var fallback_reason = ""
+    if (not submission.fallback_required and submission.completion_known and
+        submission.no_readback):
+        present_completed = eng.present_window_device()
+        if val Some(frame) = eng.latest_vulkan_frame_receipt():
+            present_mode = frame.present_mode
+            device_present = frame.device_present
+            completion_known = frame.completion_known
+            no_readback = frame.no_readback and frame.readback_bytes == 0
+            backend_handle = frame.backend_handle
+            device_identity = frame.device_identity
+            swapchain_identity = frame.swapchain_identity
+            full_frame_fallback = frame.full_frame_fallback
+            cpu_fallback_used = frame.cpu_fallback_used
+            fallback_reason = frame.fallback_reason
+    val accepted = engine2d_vulkan_window_present_fields_valid(
+        present_completed, present_mode, device_present, completion_known,
+        no_readback, backend_handle, device_identity, swapchain_identity,
+        full_frame_fallback, cpu_fallback_used, fallback_reason)
+    if not accepted:
+        submission.fallback_required = true
+        submission.fallback_reason = "strict-vulkan-window-presentation-evidence-required"
+        submission.completion_known = false
+    submission.engine = eng
+    Engine2dDrawIrWindowPresentOwnerResult(
+        submission: submission,
+        present_completed: accepted, present_mode: present_mode,
+        device_present: device_present, completion_known: completion_known,
+        no_readback: no_readback, backend_handle: backend_handle,
+        device_identity: device_identity, swapchain_identity: swapchain_identity,
+        full_frame_fallback: full_frame_fallback,
+        cpu_fallback_used: cpu_fallback_used,
+        fallback_reason: fallback_reason)
+
 fn engine2d_draw_ir_adv_strict_vulkan_readback(submission: Engine2dDrawIrAdvSubmitResult) -> Engine2dDrawIrAdvResult:
     """Read back one successful strict submission without replaying DrawIR."""
     if submission.fallback_required or not submission.completion_known:
@@ -3627,8 +3712,10 @@ fn engine2d_draw_ir_render_tiled(
 
 export Engine2dDrawIrAdvResult
 export Engine2dDrawIrAdvSubmitResult
+export Engine2dDrawIrWindowPresentOwnerResult
 export Engine2dVulkanObservedDelta
 export engine2d_vulkan_observed_delta
+export engine2d_vulkan_window_present_fields_valid
 export Engine2dDrawIrTileOutcome
 export Engine2dMetalGlassReceipt
 export Engine2dResolvedDrawIrImage
@@ -3643,6 +3730,7 @@ export engine2d_draw_ir_retained_idle
 export engine2d_draw_ir_retained_rejected
 export engine2d_draw_ir_adv_strict_vulkan_primitives_with_images
 export engine2d_draw_ir_adv_strict_vulkan_submit_with_images
+export engine2d_draw_ir_adv_strict_vulkan_window_present_with_images
 export engine2d_draw_ir_adv_strict_vulkan_readback
 export engine2d_draw_ir_command_samples_parent
 export engine2d_draw_ir_render_tiled
