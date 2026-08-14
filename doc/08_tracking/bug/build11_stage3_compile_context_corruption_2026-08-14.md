@@ -283,3 +283,27 @@ Because the three planner-build cycles were already exhausted, that final
 repair is source-reviewed but not link-verified. The next fresh session must
 add/run a focused closure/link guard and rebuild from the retained 856-entry
 cache. Only after the planner emits the mandatory receipt may Stage 3 start.
+
+### Restored-header follow-up: runtime-authority incompatibility
+
+The next bounded session advanced past the former four-reference failure.
+Cycle 1 populated a refreshed cache but timed out without a compiler error.
+Cycle 2 reached link and exposed three missing real providers in the retained
+Rust bootstrap authority: `rt_mem_snapshot_open`, `rt_mem_snapshot_record`,
+and `rt_mem_snapshot_close`. The Rust bootstrap runtime now implements the same
+snapshot contract as `runtime.c` on Linux; its focused create/write/exclusive-open test
+passes, and an isolated bootstrap archive exports all three symbols.
+
+Cycle 3 used that archive and advanced to a single link failure: the retained
+r2 Stage-2 compiler lowered current `write_elf_bytes_to_file` to
+`rt_array_data_ptr_u8`. That unsafe ABI was intentionally removed, so restoring
+it as a stub or compatibility escape is forbidden. No planner executable or
+receipt was produced, and Stage 3 did not start. The three-cycle cap is
+exhausted.
+
+Next action is a fresh coherent-authority build: compiler lowering, runtime
+archive, and sources must share one revision. Prove the planner link has the
+three snapshot definitions and zero undefined old-pointer ABI, then emit the
+typed `//bootstrap:stage3` receipt. Because the normal wrapper continues into
+excluded Stage 4 and admitted resume cannot rebuild current Stage 2, add and
+review a fail-closed `--stop-after-stage3` route (or equivalent) first.
