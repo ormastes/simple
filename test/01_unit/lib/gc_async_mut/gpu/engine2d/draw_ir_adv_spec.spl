@@ -56,7 +56,7 @@ use common.ui.draw_ir.{
     draw_ir_text_shaped_font,
     draw_ir_style_prop
 }
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_batch_with_images, engine2d_draw_ir_adv_composition, engine2d_draw_ir_adv_composition_with_images, engine2d_draw_ir_adv_composition_present_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images, engine2d_draw_ir_adv_strict_vulkan_primitives_with_images, engine2d_draw_ir_coalesce_plain_fills, engine2d_draw_ir_render_damaged, engine2d_draw_ir_render_composition_damaged, engine2d_draw_ir_render_composition_damaged_deferred_cpu_with_images, engine2d_draw_ir_render_composition_damaged_with_images, engine2d_draw_ir_render_tiled, engine2d_resolved_draw_ir_image}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_draw_ir_adv_batch, engine2d_draw_ir_adv_batch_with_images, engine2d_draw_ir_adv_composition, engine2d_draw_ir_adv_composition_with_images, engine2d_draw_ir_adv_composition_present_with_images, engine2d_draw_ir_adv_fresh_device_composition_with_images, engine2d_draw_ir_adv_strict_vulkan_primitives_with_images, engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images, engine2d_draw_ir_coalesce_plain_fills, engine2d_draw_ir_prepare_damage_plan, engine2d_draw_ir_render_damaged, engine2d_draw_ir_render_composition_damaged, engine2d_draw_ir_render_composition_damaged_deferred_cpu_with_images, engine2d_draw_ir_render_composition_damaged_with_images, engine2d_draw_ir_render_prepared_damage_plan_with_images, engine2d_draw_ir_render_tiled, engine2d_resolved_draw_ir_image}
 use std.gc_async_mut.gpu.engine2d.draw_ir_runtime_adv.{engine2d_draw_ir_adv_batch_runtime_queue}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{engine2d_host_gpu_runtime_queue_with_backend_handle, engine2d_host_gpu_runtime_reset}
@@ -113,6 +113,31 @@ fn _css_background_result(style: [DrawIrStyleProp], command_x: i32, command_y: i
     result
 
 describe "Engine2D advanced Draw IR executor":
+
+    it "rejects strict retained damage when the mutable owner is not Vulkan":
+        var engine = Engine2D.create_with_backend(16, 16, "cpu")
+        val batch = draw_ir_batch(
+            "strict-damage", DRAW_IR_BACKEND_GPU,
+            draw_ir_embedding_config(
+                "surface", "root", 0, 0, 16, 16, 0, 1000, false),
+            [draw_ir_rect("patch", 2, 3, 4, 5, RED)])
+        val composition = draw_ir_composition(
+            "strict-damage", "strict-damage", DRAW_IR_BACKEND_GPU, [batch])
+        var images: [Engine2dResolvedDrawIrImage] = []
+
+        step("Submit retained damage through the strict shared Vulkan API")
+        val result = engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images(
+            engine, composition, images, [2i64, 3i64, 4i64, 5i64])
+
+        step("Reject before submission, fencing, or readback")
+        expect(result.fallback_required).to_equal(true)
+        expect(result.fallback_reason).to_equal("strict-vulkan-backend-required")
+        expect(result.completion_known).to_equal(false)
+        expect(result.no_readback).to_equal(false)
+        expect(result.device_submit_count).to_equal(0)
+        expect(result.device_fence_count).to_equal(0)
+        expect(result.readback_bytes).to_equal(0)
+        result.engine.shutdown()
 
     it "reuses tile command scratch without replaying a prior tile":
         var engine = Engine2D.create_with_backend(4, 1, "cpu")
@@ -189,6 +214,7 @@ describe "Engine2D advanced Draw IR executor":
         expect(outcome.unsupported_kinds).to_equal("none")
         expect(outcome.ops_rendered).to_equal(2)
         expect(outcome.ops_skipped).to_equal(1)
+        expect(outcome.ops_culled_by_damage).to_equal(1)
         expect(outcome.commands_considered).to_equal(2)
         expect(outcome.commands_culled_by_damage).to_equal(1)
         expect(outcome.readback.pixels[0]).to_equal(BG)
@@ -212,6 +238,7 @@ describe "Engine2D advanced Draw IR executor":
         engine = outcome.engine
         expect(outcome.ops_rendered).to_equal(2)
         expect(outcome.ops_skipped).to_equal(1)
+        expect(outcome.ops_culled_by_damage).to_equal(1)
         expect(outcome.commands_considered).to_equal(1)
         expect(outcome.commands_culled_by_damage).to_equal(1)
         # Exact source-over result for HALF_RED over BG. If the cross-cell
@@ -255,6 +282,94 @@ describe "Engine2D advanced Draw IR executor":
         expect(outcome.unsupported_kinds).to_equal("none")
         expect(outcome.readback.pixels[2 * 8 + 4]).to_equal(GREEN)
         expect(outcome.readback.pixels[0]).to_equal(BG)
+        engine.shutdown()
+
+    it "prepares exact sparse damage receipts without caching Engine2D":
+        var commands: [DrawIrCommand] = [
+            draw_ir_rect("background", 0, 0, 1024, 4, BG)]
+        var index = 0
+        while index < 512:
+            commands.push(draw_ir_rect(
+                "outside-" + index.to_text(), 512, 2, 1, 1, BLUE))
+            index += 1
+        commands.push(draw_ir_rect("damage", 0, 0, 2, 1, RED))
+        val batch = draw_ir_batch(
+            "prepared", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "prepared", "prepared", 0, 0, 1024, 4,
+                0, 1000, false), commands)
+        val composition = draw_ir_composition(
+            "prepared", "prepared-a", DRAW_IR_BACKEND_CPU, [batch])
+
+        step("Prepare an immutable content-bound owner result")
+        val prepared = engine2d_draw_ir_prepare_damage_plan(
+            composition, [0i64, 0i64, 2i64, 1i64],
+            1024, 4, "revision-a")
+        expect(prepared.valid).to_equal(true)
+        expect(prepared.commands_considered).to_equal(2)
+        expect(prepared.commands_culled_by_damage).to_equal(512)
+
+        step("Render through the separately owned mutable Engine2D")
+        var engine = Engine2D.create_with_backend(1024, 4, "cpu")
+        engine.clear(BG)
+        val outcome = engine2d_draw_ir_render_prepared_damage_plan_with_images(
+            engine, prepared, [], "revision-a", true)
+        engine = outcome.engine
+        expect(outcome.unsupported_kinds).to_equal("none")
+        expect(outcome.commands_considered).to_equal(2)
+        expect(outcome.commands_culled_by_damage).to_equal(512)
+        expect(outcome.ops_rendered).to_equal(2)
+        expect(outcome.ops_skipped).to_equal(512)
+        expect(outcome.ops_culled_by_damage).to_equal(512)
+        expect(outcome.readback.pixels[0]).to_equal(RED)
+        expect(outcome.readback.pixels[511]).to_equal(BG)
+        engine.shutdown()
+
+    it "rejects a prepared plan under a different content revision":
+        val batch = draw_ir_batch(
+            "prepared-stale", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "prepared", "prepared", 0, 0, 8, 4,
+                0, 1000, false),
+            [draw_ir_rect("revision-a", 0, 0, 8, 4, RED)])
+        val composition = draw_ir_composition(
+            "prepared-stale", "revision-a", DRAW_IR_BACKEND_CPU, [batch])
+        val prepared = engine2d_draw_ir_prepare_damage_plan(
+            composition, [0i64, 0i64, 2i64, 1i64], 8, 4, "revision-a")
+        var engine = Engine2D.create_with_backend(8, 4, "cpu")
+        engine.clear(BG)
+
+        step("Present the other revision identity as a deliberate red case")
+        val rejected = engine2d_draw_ir_render_prepared_damage_plan_with_images(
+            engine, prepared, [], "revision-b", false)
+        engine = rejected.engine
+        expect(rejected.unsupported_kinds).to_equal(
+            "prepared-damage-stale-content-identity")
+        expect(rejected.ops_rendered).to_equal(0)
+        expect(rejected.ops_skipped).to_equal(0)
+        expect(engine.read_pixels()[0]).to_equal(BG)
+        engine.shutdown()
+
+    it "rejects a prepared plan on stale target dimensions":
+        val batch = draw_ir_batch(
+            "prepared-size", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "prepared", "prepared", 0, 0, 8, 4,
+                0, 1000, false),
+            [draw_ir_rect("revision-a", 0, 0, 8, 4, RED)])
+        val composition = draw_ir_composition(
+            "prepared-size", "revision-a", DRAW_IR_BACKEND_CPU, [batch])
+        val prepared = engine2d_draw_ir_prepare_damage_plan(
+            composition, [0i64, 0i64, 2i64, 1i64], 8, 4, "revision-a")
+        var engine = Engine2D.create_with_backend(7, 4, "cpu")
+        engine.clear(BG)
+        val rejected = engine2d_draw_ir_render_prepared_damage_plan_with_images(
+            engine, prepared, [], "revision-a", false)
+        engine = rejected.engine
+        expect(rejected.unsupported_kinds).to_equal(
+            "prepared-damage-stale-dimensions")
+        expect(rejected.ops_rendered).to_equal(0)
+        expect(engine.read_pixels()[0]).to_equal(BG)
         engine.shutdown()
 
     it "leaves CPU dirty state intact until the retained region presenter consumes it":

@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+setup="$ROOT/scripts/setup/prepare-render-perf-8k80-container.shs"
+dockerfile="$ROOT/tools/docker/Dockerfile.render-8k80-nvidia"
+
+[ "$(sh "$setup" --check-contract)" = render_8k80_image_contract=pass ]
+grep -Fq 'vulkan-tools' "$dockerfile"
+grep -Fq 'command -v /usr/bin/time' "$dockerfile"
+grep -Fq 'NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics' "$setup"
+grep -Fq 'base-image-must-use-sha256-digest' "$setup"
+grep -Fq "image inspect --format '{{.Id}}'" "$setup"
+grep -Fq 'mesa-vulkan-drivers' "$setup"
+! grep -Eq 'apt-get install[^#]*(mesa-vulkan-drivers|mesa-utils)' "$dockerfile"
+[ "$(grep -Fc -- '--memory="${CONTAINER_MEMORY:-4g}" --cpus="${CONTAINER_CPUS:-2}"' "$setup")" -eq 2 ]
+[ "$(grep -Fc -- '--pids-limit="${CONTAINER_PIDS_LIMIT:-256}"' "$setup")" -eq 2 ]
+
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/render-8k80-image-contract.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fake="$tmp/docker"; mkdir "$fake"
+cat > "$fake/docker" <<'EOF'
+#!/bin/sh
+case $1 in
+  image) printf '%s\n' sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+  run) exit 0 ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$fake/docker"
+
+# Deliberate-red probes: neither a mutable base nor a tool-deficient image
+# definition may reach Docker successfully.
+if PATH="$fake:$PATH" sh "$setup" --build \
+    --base-image nvidia/cuda:mutable --tag fixture >/dev/null 2>&1; then
+    echo mutable-base-deliberate-red-failed >&2
+    exit 1
+fi
+sed 's/ vulkan-tools / vulkan-helpers /' "$dockerfile" > "$tmp/bad.Dockerfile"
+if RENDER_8K80_DOCKERFILE="$tmp/bad.Dockerfile" \
+    sh "$setup" --check-contract >/dev/null 2>&1; then
+    echo missing-vulkan-tools-deliberate-red-failed >&2
+    exit 1
+fi
+
+PATH="$fake:$PATH" sh "$setup" --check-image fixture --receipt "$tmp/receipt.env" >/dev/null
+grep -Fxq image_id=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$tmp/receipt.env"
+grep -Fxq image_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "$tmp/receipt.env"
+grep -Fxq nvidia_driver_capabilities=compute,utility,graphics "$tmp/receipt.env"
+grep -Fxq mesa_icd=absent "$tmp/receipt.env"
+echo render_perf_8k80_container_image_contract=true

@@ -5,10 +5,10 @@ set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 BUILD_DIR="${BUILD_DIR:-$ROOT/build/render_perf/8k80_container}"
 BUDGET_NS=12500000
-CAMPAIGN_CONTRACT_ID=render-perf-8k80-container-v2
-CAMPAIGN_CONTRACT_HASH="$(printf '%s' 'render-perf-8k80-container-v2;7680x4320;budget_ns=12500000;a4=drawir-retained-damage;a5=semantic-vulkan' | sha256sum | awk '{print $1}')"
-A4_DRAWIR_WORKLOAD_HASH="$(printf '%s' 'a4;drawir;7680x4320;frames=20;damage=128,128,256,128;commands=514;considered=2;culled=512;rendered=2;skipped=512' | sha256sum | awk '{print $1}')"
-A5_SEMANTIC_WORKLOAD_HASH="$(printf '%s' 'a5;semantic-vulkan;7680x4320;warmup=1;samples=60;device-readback;timed-readback-bytes=0' | sha256sum | awk '{print $1}')"
+CAMPAIGN_CONTRACT_ID=render-perf-8k80-container-v3
+CAMPAIGN_CONTRACT_HASH="$(printf '%s' 'render-perf-8k80-container-v3;7680x4320;budget_ns=12500000;a4=drawir-prepared-retained-damage;a5=web-semantic-vulkan-retained-damage' | sha256sum | awk '{print $1}')"
+A4_DRAWIR_WORKLOAD_HASH="$(printf '%s' 'a4;drawir-prepared-content-bound-damage;7680x4320;frames=20;damage=128,128,256,128;commands=514;considered=2;culled=512;rendered=2;skipped=512' | sha256sum | awk '{print $1}')"
+A5_SEMANTIC_WORKLOAD_HASH="$(printf '%s' 'a5;web-semantic-vulkan-retained-damage-v1;7680x4320;damage=128,128,256,128;warmup=1;samples=60;full-seed-before-timing;device-readback-oracle;timed-readback-bytes=0' | sha256sum | awk '{print $1}')"
 
 die() { echo "render_perf_8k80_container_status=failed reason=$1" >&2; exit 1; }
 blocked() { echo "render_perf_8k80_container_status=blocked reason=$1" >&2; exit 2; }
@@ -67,7 +67,7 @@ validate_drawir() {
 
 validate_producer() {
     f=$1
-    allowed='receipt_schema receipt_kind status source_hash artifact_hash workload_hash campaign_contract_id campaign_contract_hash captured_at_utc run_id compiler_kind execution_mode width height max_rss_kib device_hash container_image_hash container_gpu_admission producer_receipt_status producer_receipt_reason producer_receipt_requested_backend producer_receipt_selected_backend producer_receipt_readback_source producer_receipt_backend_handle producer_receipt_device_identity producer_receipt_revision_start producer_receipt_revision_end producer_receipt_checksum_start producer_receipt_checksum_end producer_receipt_completion_known producer_receipt_fallback_used producer_receipt_warmup_count producer_receipt_sample_count producer_receipt_device_submit_count producer_receipt_device_fence_count producer_receipt_p50_ns producer_receipt_p95_ns producer_receipt_timed_readback_bytes'
+    allowed='receipt_schema receipt_kind status source_hash artifact_hash workload_hash campaign_contract_id campaign_contract_hash captured_at_utc run_id compiler_kind execution_mode width height max_rss_kib device_hash container_image_hash container_gpu_admission producer_receipt_status producer_receipt_reason producer_receipt_requested_backend producer_receipt_selected_backend producer_receipt_readback_source producer_receipt_workload_identity producer_receipt_semantic_owner producer_receipt_draw_ir_owner producer_receipt_surface_width producer_receipt_surface_height producer_receipt_damage_x producer_receipt_damage_y producer_receipt_damage_width producer_receipt_damage_height producer_receipt_seed_mode producer_receipt_timed_submit_api producer_receipt_backend_handle producer_receipt_device_identity producer_receipt_revision_start producer_receipt_revision_end producer_receipt_checksum_start producer_receipt_checksum_end producer_receipt_checksum_oracle producer_receipt_checksum_parity producer_receipt_completion_known producer_receipt_fallback_used producer_receipt_warmup_count producer_receipt_sample_count producer_receipt_device_submit_count producer_receipt_device_fence_count producer_receipt_p50_ns producer_receipt_p95_ns producer_receipt_timed_readback_bytes'
     reject_unknown "$f" "$allowed" && validate_common "$f" producer "$A5_SEMANTIC_WORKLOAD_HASH" || return 1
     [ "$(value "$f" compiler_kind)" = pure-simple-stage4 ] || return 1
     [ "$(value "$f" execution_mode)" = direct-native-container ] || return 1
@@ -76,9 +76,19 @@ validate_producer() {
     [ "$(value "$f" producer_receipt_requested_backend)" = vulkan ] && [ "$(value "$f" producer_receipt_selected_backend)" = vulkan ] || return 1
     [ "$(value "$f" container_gpu_admission)" = submit-readback-pass ] || return 1
     [ "$(value "$f" producer_receipt_readback_source)" = device_readback ] || return 1
-    for k in producer_receipt_backend_handle producer_receipt_revision_end producer_receipt_checksum_end producer_receipt_p50_ns producer_receipt_p95_ns max_rss_kib; do v=$(value "$f" "$k") || return 1; is_uint "$v" && [ "$v" -gt 0 ] || return 1; done
-    start=$(value "$f" producer_receipt_revision_start); end=$(value "$f" producer_receipt_revision_end); is_uint "$start" && [ "$end" -gt "$start" ] || return 1
-    cstart=$(value "$f" producer_receipt_checksum_start); cend=$(value "$f" producer_receipt_checksum_end); is_uint "$cstart" && [ "$cend" != "$cstart" ] || return 1
+    [ "$(value "$f" producer_receipt_workload_identity)" = web-semantic-retained-damage-v1 ] || return 1
+    [ "$(value "$f" producer_receipt_semantic_owner)" = simple-web-layout ] || return 1
+    [ "$(value "$f" producer_receipt_draw_ir_owner)" = engine2d-shared ] || return 1
+    [ "$(value "$f" producer_receipt_surface_width)" = 7680 ] && [ "$(value "$f" producer_receipt_surface_height)" = 4320 ] || return 1
+    [ "$(value "$f" producer_receipt_damage_x)" = 128 ] && [ "$(value "$f" producer_receipt_damage_y)" = 128 ] || return 1
+    [ "$(value "$f" producer_receipt_damage_width)" = 256 ] && [ "$(value "$f" producer_receipt_damage_height)" = 128 ] || return 1
+    [ "$(value "$f" producer_receipt_seed_mode)" = full-frame-before-timing ] || return 1
+    [ "$(value "$f" producer_receipt_timed_submit_api)" = engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images ] || return 1
+    for k in producer_receipt_backend_handle producer_receipt_device_identity producer_receipt_revision_start producer_receipt_revision_end producer_receipt_checksum_start producer_receipt_checksum_end producer_receipt_p50_ns producer_receipt_p95_ns max_rss_kib; do v=$(value "$f" "$k") || return 1; is_uint "$v" && [ "$v" -gt 0 ] || return 1; done
+    start=$(value "$f" producer_receipt_revision_start); end=$(value "$f" producer_receipt_revision_end); [ "$end" -eq $((start + 1)) ] || return 1
+    cstart=$(value "$f" producer_receipt_checksum_start); cend=$(value "$f" producer_receipt_checksum_end); [ "$cend" != "$cstart" ] || return 1
+    oracle=$(value "$f" producer_receipt_checksum_oracle); is_uint "$oracle" && [ "$oracle" -gt 0 ] && [ "$oracle" = "$cend" ] || return 1
+    [ "$(value "$f" producer_receipt_checksum_parity)" = true ] || return 1
     [ "$(value "$f" producer_receipt_p95_ns)" -le "$BUDGET_NS" ] || return 1
     [ "$(value "$f" producer_receipt_completion_known)" = true ] && [ "$(value "$f" producer_receipt_fallback_used)" = false ] && [ "$(value "$f" producer_receipt_timed_readback_bytes)" = 0 ] || return 1
     [ "$(value "$f" producer_receipt_warmup_count)" = 1 ] && [ "$(value "$f" producer_receipt_sample_count)" = 60 ] || return 1
@@ -216,12 +226,25 @@ producer_receipt_reason=complete
 producer_receipt_requested_backend=vulkan
 producer_receipt_selected_backend=vulkan
 producer_receipt_readback_source=device_readback
+producer_receipt_workload_identity=web-semantic-retained-damage-v1
+producer_receipt_semantic_owner=simple-web-layout
+producer_receipt_draw_ir_owner=engine2d-shared
+producer_receipt_surface_width=7680
+producer_receipt_surface_height=4320
+producer_receipt_damage_x=128
+producer_receipt_damage_y=128
+producer_receipt_damage_width=256
+producer_receipt_damage_height=128
+producer_receipt_seed_mode=full-frame-before-timing
+producer_receipt_timed_submit_api=engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images
 producer_receipt_backend_handle=7
 producer_receipt_device_identity=42
 producer_receipt_revision_start=1
-producer_receipt_revision_end=20
+producer_receipt_revision_end=2
 producer_receipt_checksum_start=123
 producer_receipt_checksum_end=789
+producer_receipt_checksum_oracle=789
+producer_receipt_checksum_parity=true
 producer_receipt_completion_known=true
 producer_receipt_fallback_used=false
 producer_receipt_warmup_count=1
@@ -301,6 +324,16 @@ self_test() {
     ! validate_drawir "$t/bad" || die selftest-over-budget-accepted
     cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_p95_ns=2000000/producer_receipt_p95_ns=13000000/' "$t/bad"
     ! validate_producer "$t/bad" || die selftest-producer-over-budget-accepted
+    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_damage_width=256/producer_receipt_damage_width=257/' "$t/bad"
+    ! validate_producer "$t/bad" || die selftest-producer-damage-drift-accepted
+    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_checksum_parity=true/producer_receipt_checksum_parity=false/' "$t/bad"
+    ! validate_producer "$t/bad" || die selftest-producer-checksum-mismatch-accepted
+    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_revision_end=2/producer_receipt_revision_end=3/' "$t/bad"
+    ! validate_producer "$t/bad" || die selftest-producer-nonadjacent-revision-accepted
+    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_device_identity=42/producer_receipt_device_identity=0/' "$t/bad"
+    ! validate_producer "$t/bad" || die selftest-producer-zero-device-accepted
+    cp "$t/producer" "$t/bad"; sed -i 's/producer_receipt_checksum_start=123/producer_receipt_checksum_start=0/' "$t/bad"
+    ! validate_producer "$t/bad" || die selftest-producer-zero-start-checksum-accepted
     cp "$t/producer" "$t/bad"; echo unknown_key=x >> "$t/bad"
     ! validate_producer "$t/bad" || die selftest-unknown-key-accepted
     cp "$t/producer" "$t/bad"; sed -i 's/captured_at_utc=.*/captured_at_utc=1/' "$t/bad"
@@ -425,7 +458,7 @@ run_artifacts() {
       echo compiler_kind=pure-simple-stage4; echo execution_mode="$execution_mode"; echo width=7680; echo height=4320; echo max_rss_kib="$(cat "$run/producer.time")"
       echo device_hash="$(printf '%s' "$(raw_value "$run/producer.out" producer_receipt_device_identity)" | sha256sum | awk '{print $1}')"
       echo container_image_hash="$container_hash"; echo container_gpu_admission=submit-readback-pass
-      for k in status reason requested_backend selected_backend readback_source backend_handle device_identity revision_start revision_end checksum_start checksum_end completion_known fallback_used warmup_count sample_count device_submit_count device_fence_count p50_ns p95_ns timed_readback_bytes; do echo "producer_receipt_$k=$(raw_value "$run/producer.out" "producer_receipt_$k")"; done
+      for k in status reason requested_backend selected_backend readback_source workload_identity semantic_owner draw_ir_owner surface_width surface_height damage_x damage_y damage_width damage_height seed_mode timed_submit_api backend_handle device_identity revision_start revision_end checksum_start checksum_end checksum_oracle checksum_parity completion_known fallback_used warmup_count sample_count device_submit_count device_fence_count p50_ns p95_ns timed_readback_bytes; do echo "producer_receipt_$k=$(raw_value "$run/producer.out" "producer_receipt_$k")"; done
     } | sed "s/^source_hash=.*/source_hash=$source_hash/;s/^artifact_hash=.*/artifact_hash=$(sha256sum "$producer_bin" | awk '{print $1}')/;s/^run_id=.*/run_id=$actual_run_id/" > "$run/producer.receipt"
     mkdir "$run/publish"
     cp "$provenance" "$run/publish/compiler-provenance.env"

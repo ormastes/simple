@@ -945,7 +945,12 @@ observe a pass:
   inventory as execution. CUDA requires its own submit/readback receipt;
   Vulkan requires a separate selected-Vulkan submit/fence/device-readback
   receipt with no fallback. Neither headless result proves physical scanout.
-  For the 8K80 workflow use
+  Prepare the campaign image with
+  `scripts/setup/prepare-render-perf-8k80-container.shs`: the base is an NVIDIA
+  CUDA devel digest, packages use the pinned snapshot, `vulkan-tools` and
+  `/usr/bin/time` are mandatory, and `mesa-vulkan-drivers` is forbidden.
+  Record Docker's immutable image ID and require NVIDIA Toolkit injection;
+  never use Mesa Vulkan enumeration as NVIDIA evidence. For execution use
   `scripts/check/check-render-perf-8k80-container.shs` and the feature wiki at
   `doc/00_llm_process/feature_expert/render_8k80/skill.md`.
 

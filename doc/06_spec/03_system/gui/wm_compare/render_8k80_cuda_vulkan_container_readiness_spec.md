@@ -12,19 +12,25 @@ through the CUDA programming API.
 ## Preconditions
 
 - NVIDIA Container Toolkit and Docker GPU support
-- an image containing `nvidia-smi`, `vulkaninfo`, `/usr/bin/time`, and the
-  runtime libraries needed by the native producer
+- an image built by the dedicated preparation wrapper from a digest-pinned
+  NVIDIA CUDA devel base, containing `vulkaninfo`, `/usr/bin/time`, and the
+  runtime libraries needed by the native producer, but no Mesa Vulkan ICD
 - an admitted source-matched Stage4 compiler and provenance receipt
 
 ## Operator workflow
 
-1. Run the checker self-test without hardware. The executable SSpec invokes
+1. Run the image contract test without hardware. It proves the digest-only
+   base, immutable package snapshot, required tools, Mesa rejection, exact
+   NVIDIA capability set, and immutable image-ID receipt behavior.
+2. Build/check the image by following
+   `doc/07_guide/app/ui/render_8k80_nvidia_container.md`.
+3. Run the checker self-test without hardware. The executable SSpec invokes
    this contract matrix through the bounded process facade and requires exit 0.
-2. Invoke `--run` with the admitted compiler, provenance receipt, container
+4. Invoke `--run` with the admitted compiler, provenance receipt, container
    image, and GPU selector.
-3. Inspect retained `gpu-inventory/cuda-vulkan.txt`.
-4. Accept CUDA only from its generated submit/readback receipt.
-5. Accept Vulkan only from the separate strict semantic producer receipt with
+5. Inspect retained `gpu-inventory/cuda-vulkan.txt`.
+6. Accept CUDA only from its generated submit/readback receipt.
+7. Accept Vulkan only from the separate strict semantic producer receipt with
    selected backend `vulkan`, known completion, device readback, and no fallback.
 
 ## Expected outcomes
@@ -37,3 +43,4 @@ through the CUDA programming API.
 
 Enumeration from `nvidia-smi` or `vulkaninfo` is inventory only. It cannot
 substitute for either API's submit/readback and cannot prove physical scanout.
+Likewise, a Mesa software/host ICD must never be used to claim NVIDIA Vulkan.

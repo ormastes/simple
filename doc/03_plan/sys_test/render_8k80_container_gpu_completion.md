@@ -15,6 +15,8 @@
 | NFR-R8KC-006 | CUDA-only or headless claimed physical | aggregate `failed` |
 | REQ-R8KC-008 | NVIDIA container exposes CUDA plus Vulkan | retained inventory, CUDA submit/readback, and distinct strict Vulkan receipt |
 | REQ-R8KC-008 | CUDA or Vulkan enumeration without Vulkan submission | blocked; never A5 pass |
+| REQ-R8KC-008 / NFR-R8KC-002/005 | hardware-free campaign image contract | digest-only CUDA base, snapshot packages, `vulkan-tools`, `/usr/bin/time`, immutable image-ID receipt, and no Mesa ICD |
+| REQ-R8KC-008 | live image injection check | `compute,utility,graphics` and NVIDIA-named Vulkan device required; unavailable hardware is blocked |
 
 The bounded parser/self-test runs without GPU hardware. The live scenario runs
 only when container GPU admission succeeds and reports `blocked`, not skipped,

@@ -1998,7 +1998,7 @@ fn _engine2d_draw_ir_select_damage_indexed(
 # offset_x/offset_y are 0 since the surface origin IS the batch origin).
 # Engine2D is value-copied across this free-function boundary (see
 # _engine2d_draw_ir_render_box), so callers reassign the typed outcome engine.
-fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2dDrawIrCommandPlan, offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64) -> Engine2dDrawIrRenderOutcome:
+fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2dDrawIrCommandPlan, offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64, prove_occlusion: bool = true) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
     # Surface dimensions read ONCE at loop entry and threaded down to the
     # glass-material bounds check; deep re-reads of eng.width()/height()
@@ -2035,7 +2035,7 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
         val exact_bounds = _engine2d_draw_ir_exact_plain_bounds(
             command, offset_x, offset_y, active_clip,
             surface_fb_w, surface_fb_h)
-        if exact_bounds.present:
+        if prove_occlusion and exact_bounds.present:
             val proof = _engine2d_draw_ir_prove_rect_covered(
                 command_plan.commands, current_index + 1, exact_bounds,
                 offset_x, offset_y, active_clip,
@@ -3288,6 +3288,33 @@ struct Engine2dDrawIrTileOutcome:
     # unsupported and otherwise skipped commands are still considered.
     commands_considered: i32 = 0
     commands_culled_by_damage: i32 = 0
+    # Logical operations skipped solely because their exact bounds do not
+    # intersect caller-owned damage. This is separate from physical command
+    # culling because coalescing can give one command a logical weight > 1.
+    ops_culled_by_damage: i32 = 0
+
+# Immutable caller-owned result of retained-damage planning. It deliberately
+# lives beside the executor rather than on Engine2D: the renderer remains the
+# sole mutable surface owner and never caches display-list payload. A plan
+# binds the complete composition payload and an exact caller content identity;
+# callers that alternate revisions prepare one plan per revision.
+struct PreparedDrawIrDamageEntry:
+    clip: DrawIrRect
+    offset_x: i32
+    offset_y: i32
+    selection: Engine2dDrawIrDamageSelection
+
+struct PreparedDrawIrDamagePlan:
+    valid: bool
+    rejection_reason: text
+    width: i32
+    height: i32
+    content_identity: text
+    composition: DrawIrComposition
+    damage_rects: [i64]
+    entries: [PreparedDrawIrDamageEntry]
+    commands_considered: i32
+    commands_culled_by_damage: i32
 
 fn _engine2d_draw_ir_damage_rects_valid(rects: [i64], width: i32, height: i32) -> bool:
     if rects.len() % 4 != 0 or rects.len() > 4096:
@@ -3315,6 +3342,85 @@ fn _engine2d_draw_ir_damage_rects_valid(rects: [i64], width: i32, height: i32) -
             j += 4
         i += 4
     true
+
+fn _engine2d_draw_ir_invalid_prepared_damage_plan(
+    composition: DrawIrComposition, damage_rects: [i64],
+    width: i32, height: i32, content_identity: text, reason: text
+) -> PreparedDrawIrDamagePlan:
+    PreparedDrawIrDamagePlan(
+        valid: false, rejection_reason: reason,
+        width: width, height: height, content_identity: content_identity,
+        composition: composition, damage_rects: damage_rects, entries: [],
+        commands_considered: 0, commands_culled_by_damage: 0)
+
+fn engine2d_draw_ir_prepare_damage_plan(
+    composition: DrawIrComposition, damage_rects: [i64],
+    width: i32, height: i32, content_identity: text
+) -> PreparedDrawIrDamagePlan:
+    """Prepare immutable damage selections for one exact content revision.
+
+    The returned owner-result contains the selected command payload, so its
+    identity must describe the complete revision rather than geometry alone.
+    No Engine2D state is read, retained, or cached by this operation.
+    """
+    if content_identity == "":
+        return _engine2d_draw_ir_invalid_prepared_damage_plan(
+            composition, damage_rects, width, height, content_identity,
+            "prepared-damage-content-identity-required")
+    if not _engine2d_draw_ir_damage_rects_valid(damage_rects, width, height):
+        return _engine2d_draw_ir_invalid_prepared_damage_plan(
+            composition, damage_rects, width, height, content_identity,
+            "invalid-damage-plan")
+    var command_plans: [Engine2dDrawIrCommandPlan] = []
+    var spatial_indexes: [Engine2dDrawIrSpatialIndex] = []
+    for batch in composition.batches:
+        val embedding = batch.embedding
+        if (embedding.width <= 0 or embedding.height <= 0 or
+            embedding.opacity_milli != 1000 or
+            _engine2d_draw_ir_batch_samples_parent(batch)):
+            return _engine2d_draw_ir_invalid_prepared_damage_plan(
+                composition, damage_rects, width, height, content_identity,
+                "retained-composition-unsafe-embedding")
+        val command_plan = engine2d_draw_ir_coalesce_plain_fills(batch.commands)
+        command_plans.push(command_plan)
+        spatial_indexes.push(_engine2d_draw_ir_build_spatial_index(
+            command_plan, embedding.width, embedding.height))
+    var entries: [PreparedDrawIrDamageEntry] = []
+    var commands_considered = 0
+    var commands_culled_by_damage = 0
+    var damage_index = 0
+    while damage_index < damage_rects.len():
+        val damage = draw_ir_rect_bounds(
+            damage_rects[damage_index].to_i32(),
+            damage_rects[damage_index + 1].to_i32(),
+            damage_rects[damage_index + 2].to_i32(),
+            damage_rects[damage_index + 3].to_i32())
+        var batch_index = 0
+        while batch_index < composition.batches.len():
+            val embedding = composition.batches[batch_index].embedding
+            val bounds = draw_ir_rect_bounds(
+                embedding.x, embedding.y, embedding.width, embedding.height)
+            val clip = draw_ir_rect_intersection(damage, bounds)
+            if clip.width > 0 and clip.height > 0:
+                val local_clip = draw_ir_rect_bounds(
+                    clip.x - embedding.x, clip.y - embedding.y,
+                    clip.width, clip.height)
+                val selection = _engine2d_draw_ir_select_damage_indexed(
+                    command_plans[batch_index], spatial_indexes[batch_index],
+                    local_clip)
+                entries.push(PreparedDrawIrDamageEntry(
+                    clip: clip, offset_x: embedding.x, offset_y: embedding.y,
+                    selection: selection))
+                commands_considered += selection.plan.commands.len().to_i32()
+                commands_culled_by_damage += selection.culled_command_count
+            batch_index += 1
+        damage_index += 4
+    PreparedDrawIrDamagePlan(
+        valid: true, rejection_reason: "", width: width, height: height,
+        content_identity: content_identity, composition: composition,
+        damage_rects: damage_rects, entries: entries,
+        commands_considered: commands_considered,
+        commands_culled_by_damage: commands_culled_by_damage)
 
 fn engine2d_draw_ir_render_damaged_with_images(
     engine: Engine2D,
@@ -3350,6 +3456,7 @@ fn engine2d_draw_ir_render_damaged_with_images(
     var skipped = 0
     var commands_considered = 0
     var commands_culled_by_damage = 0
+    var ops_culled_by_damage = 0
     var unsupported = ""
     val budget = eng.width().to_i64() * eng.height().to_i64()
     # Coalescing depends only on the immutable display list, not on the active
@@ -3373,6 +3480,7 @@ fn engine2d_draw_ir_render_damaged_with_images(
         eng.clear_clip()
         rendered += outcome.rendered
         skipped += outcome.skipped + selection.culled_logical_count
+        ops_culled_by_damage += selection.culled_logical_count
         commands_considered += selection.plan.commands.len().to_i32()
         commands_culled_by_damage += selection.culled_command_count
         if unsupported == "" and outcome.unsupported_kinds != "" and outcome.unsupported_kinds != "none":
@@ -3402,7 +3510,8 @@ fn engine2d_draw_ir_render_damaged_with_images(
         unsupported_kinds: unsupported,
         readback: readback,
         commands_considered: commands_considered,
-        commands_culled_by_damage: commands_culled_by_damage)
+        commands_culled_by_damage: commands_culled_by_damage,
+        ops_culled_by_damage: ops_culled_by_damage)
 
 fn engine2d_draw_ir_render_damaged(
     engine: Engine2D,
@@ -3441,6 +3550,94 @@ fn engine2d_draw_ir_retained_rejected(
         ops_rendered: 0, ops_skipped: 0,
         unsupported_kinds: reason,
         readback: engine2d_readback([], "preflight_rejected"))
+
+fn _engine2d_draw_ir_render_prepared_damage_plan_with_images(
+    engine: Engine2D,
+    prepared: PreparedDrawIrDamagePlan,
+    images: [Engine2dResolvedDrawIrImage],
+    content_identity: text,
+    readback_frame: bool,
+    defer_cpu_present: bool
+) -> Engine2dDrawIrTileOutcome:
+    if (defer_cpu_present and engine.backend_name() != "cpu" and
+        engine.backend_name() != "cpu_simd" and
+        engine.backend_name() != "software"):
+        return engine2d_draw_ir_retained_rejected(
+            engine, "retained-cpu-present-defer-requires-cpu")
+    if not prepared.valid:
+        return engine2d_draw_ir_retained_rejected(
+            engine, prepared.rejection_reason)
+    if (engine.width() != prepared.width or
+        engine.height() != prepared.height):
+        return engine2d_draw_ir_retained_rejected(
+            engine, "prepared-damage-stale-dimensions")
+    if (content_identity == "" or
+        content_identity != prepared.content_identity):
+        return engine2d_draw_ir_retained_rejected(
+            engine, "prepared-damage-stale-content-identity")
+    val preflight_reason = _engine2d_draw_ir_fresh_device_reason(
+        prepared.composition, images, prepared.width, prepared.height)
+    if preflight_reason != "":
+        return engine2d_draw_ir_retained_rejected(engine, preflight_reason)
+    if (engine.backend_name() == "vulkan" and
+        not engine.stage_present_damage(prepared.damage_rects)):
+        return engine2d_draw_ir_retained_rejected(
+            engine, "vulkan-damage-stage-rejected")
+    var eng = engine
+    var rendered = 0
+    var skipped = 0
+    var ops_culled_by_damage = 0
+    var unsupported = ""
+    var css_background_pixel_work_remaining = (
+        eng.width().to_i64() * eng.height().to_i64())
+    for entry in prepared.entries:
+        eng.set_clip(
+            entry.clip.x, entry.clip.y, entry.clip.width, entry.clip.height)
+        val outcome = _engine2d_draw_ir_render_command_plan(
+            eng, entry.selection.plan, entry.offset_x, entry.offset_y, images,
+            true, false, entry.clip, css_background_pixel_work_remaining,
+            false)
+        eng = outcome.engine
+        eng.clear_clip()
+        if outcome.css_background_pixel_work_remaining >= 0:
+            css_background_pixel_work_remaining = (
+                outcome.css_background_pixel_work_remaining)
+        rendered += outcome.rendered
+        skipped += outcome.skipped + entry.selection.culled_logical_count
+        ops_culled_by_damage += entry.selection.culled_logical_count
+        if (outcome.unsupported_kinds != "" and
+            outcome.unsupported_kinds != "none"):
+            if unsupported != "": unsupported = unsupported + ","
+            unsupported = unsupported + outcome.unsupported_kinds
+    if unsupported == "": unsupported = "none"
+    eng.submit_batch()
+    var readback = engine2d_readback([], "not_requested")
+    if readback_frame:
+        eng.present()
+        readback = eng.read_pixels_with_source()
+    else:
+        if not defer_cpu_present:
+            if not eng.finalize_compute_frame_no_readback(): eng.present()
+    Engine2dDrawIrTileOutcome(
+        engine: eng,
+        tiles_total: prepared.damage_rects.len().to_i32() / 4,
+        tiles_rendered: prepared.damage_rects.len().to_i32() / 4,
+        tiles_skipped: 0, ops_rendered: rendered, ops_skipped: skipped,
+        unsupported_kinds: unsupported, readback: readback,
+        commands_considered: prepared.commands_considered,
+        commands_culled_by_damage: prepared.commands_culled_by_damage,
+        ops_culled_by_damage: ops_culled_by_damage)
+
+fn engine2d_draw_ir_render_prepared_damage_plan_with_images(
+    engine: Engine2D,
+    prepared: PreparedDrawIrDamagePlan,
+    images: [Engine2dResolvedDrawIrImage],
+    content_identity: text,
+    readback_frame: bool
+) -> Engine2dDrawIrTileOutcome:
+    """Render one immutable, identity-bound prepared damage owner-result."""
+    _engine2d_draw_ir_render_prepared_damage_plan_with_images(
+        engine, prepared, images, content_identity, readback_frame, false)
 
 fn _engine2d_draw_ir_render_composition_damaged_with_images(
     engine: Engine2D,
@@ -3496,6 +3693,7 @@ fn _engine2d_draw_ir_render_composition_damaged_with_images(
     var skipped = 0
     var commands_considered = 0
     var commands_culled_by_damage = 0
+    var ops_culled_by_damage = 0
     var unsupported = ""
     var css_background_pixel_work_remaining = (
         eng.width().to_i64() * eng.height().to_i64())
@@ -3557,6 +3755,7 @@ fn _engine2d_draw_ir_render_composition_damaged_with_images(
                         outcome.css_background_pixel_work_remaining)
                 rendered += outcome.rendered
                 skipped += outcome.skipped + selection.culled_logical_count
+                ops_culled_by_damage += selection.culled_logical_count
                 commands_considered += selection.plan.commands.len().to_i32()
                 commands_culled_by_damage += selection.culled_command_count
                 if (outcome.unsupported_kinds != "" and
@@ -3584,7 +3783,8 @@ fn _engine2d_draw_ir_render_composition_damaged_with_images(
         unsupported_kinds: unsupported,
         readback: readback,
         commands_considered: commands_considered,
-        commands_culled_by_damage: commands_culled_by_damage)
+        commands_culled_by_damage: commands_culled_by_damage,
+        ops_culled_by_damage: ops_culled_by_damage)
 
 fn engine2d_draw_ir_render_composition_damaged_with_images(
     engine: Engine2D,
@@ -3595,6 +3795,93 @@ fn engine2d_draw_ir_render_composition_damaged_with_images(
 ) -> Engine2dDrawIrTileOutcome:
     _engine2d_draw_ir_render_composition_damaged_with_images(
         engine, composition, images, damage_rects, readback_frame, false)
+
+fn engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images(
+    engine: Engine2D,
+    composition: DrawIrComposition,
+    images: [Engine2dResolvedDrawIrImage],
+    damage_rects: [i64]
+) -> Engine2dDrawIrAdvSubmitResult:
+    """Submit one retained DrawIR damage revision and fence without readback.
+
+    The caller must seed the complete surface before using this API. Damage is
+    authoritative out-of-band state owned by the caller; it never becomes
+    DrawIR payload. The returned Engine2D is the sole mutable owner for the
+    next revision. Any unsupported command, invalid damage, fallback, missing
+    device observation, or host readback rejects the whole submission.
+    """
+    if engine.backend_name() != "vulkan":
+        return _engine2d_draw_ir_strict_vulkan_submit_rejected(
+            engine, composition, "strict-vulkan-backend-required")
+    if not _engine2d_draw_ir_damage_rects_valid(
+        damage_rects, engine.width(), engine.height()):
+        return _engine2d_draw_ir_strict_vulkan_submit_rejected(
+            engine, composition, "invalid-damage-plan")
+    val reason = _engine2d_draw_ir_strict_vulkan_primitive_reason(
+        engine, composition, images)
+    if reason != "":
+        return _engine2d_draw_ir_strict_vulkan_submit_rejected(
+            engine, composition, reason)
+    val prepared = _engine2d_draw_ir_prepare_fresh_device_text(
+        engine, composition, engine.width(), engine.height())
+    if prepared.1 != "":
+        return _engine2d_draw_ir_strict_vulkan_submit_rejected(
+            engine, composition, prepared.1)
+    var eng = prepared.0
+    val receipt_before = eng.latest_vulkan_frame_receipt()
+    var submit_before: i64 = 0
+    var fence_before: i64 = 0
+    if val Some(frame) = receipt_before:
+        submit_before = frame.device_submit_count
+        fence_before = frame.device_fence_count
+    val outcome = engine2d_draw_ir_render_composition_damaged_with_images(
+        eng, composition, images, damage_rects, false)
+    eng = outcome.engine
+    val receipt_after = eng.latest_vulkan_frame_receipt()
+    var backend_handle: i64 = 0
+    var device_identity: i64 = 0
+    var completion_known = false
+    var no_readback = false
+    var readback_bytes: i64 = 0
+    var observed = engine2d_vulkan_observed_delta(
+        submit_before, fence_before, submit_before, fence_before)
+    if val Some(frame) = receipt_after:
+        backend_handle = frame.backend_handle
+        device_identity = frame.device_identity
+        completion_known = frame.completion_known
+        no_readback = frame.no_readback
+        readback_bytes = frame.readback_bytes
+        observed = engine2d_vulkan_observed_delta(
+            submit_before, fence_before,
+            frame.device_submit_count, frame.device_fence_count)
+    val font_required = _engine2d_draw_ir_composition_has_text(composition)
+    val target_font = eng.draw_ir_font_evidence()
+    var font_valid = not font_required
+    if val Some(evidence) = target_font:
+        font_valid = (not font_required or
+            (eng.font_execution_target() == "vulkan" and
+                evidence.device_executed and evidence.promotion_ready and
+                evidence.readback_source == "device_readback"))
+    val completed = (
+        outcome.unsupported_kinds == "none" and outcome.ops_rendered > 0 and
+        outcome.ops_skipped == outcome.ops_culled_by_damage and
+        observed.valid and completion_known and no_readback and
+        readback_bytes == 0 and backend_handle > 0 and device_identity > 0 and
+        font_valid)
+    Engine2dDrawIrAdvSubmitResult(
+        engine: eng, composition: composition,
+        selected_backend: eng.backend_name(),
+        fallback_required: not completed,
+        fallback_reason: if completed: "none" else: "strict-vulkan-damage-evidence-required",
+        rendered_command_count: if completed: outcome.ops_rendered else: 0,
+        skipped_command_count: if completed: 0 else: 1,
+        backend_handle: if completed: backend_handle else: 0,
+        device_identity: if completed: device_identity else: 0,
+        device_submit_count: if completed: observed.submit_count else: 0,
+        device_fence_count: if completed: observed.fence_count else: 0,
+        completion_known: completed, no_readback: completed,
+        readback_bytes: if completed: 0 else: readback_bytes,
+        font_evidence_valid: font_valid)
 
 fn engine2d_draw_ir_render_composition_damaged_deferred_cpu_with_images(
     engine: Engine2D,
@@ -3717,6 +4004,7 @@ export Engine2dVulkanObservedDelta
 export engine2d_vulkan_observed_delta
 export engine2d_vulkan_window_present_fields_valid
 export Engine2dDrawIrTileOutcome
+export PreparedDrawIrDamagePlan
 export Engine2dMetalGlassReceipt
 export Engine2dResolvedDrawIrImage
 export engine2d_draw_ir_adv_batch
@@ -3730,12 +4018,15 @@ export engine2d_draw_ir_retained_idle
 export engine2d_draw_ir_retained_rejected
 export engine2d_draw_ir_adv_strict_vulkan_primitives_with_images
 export engine2d_draw_ir_adv_strict_vulkan_submit_with_images
+export engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images
 export engine2d_draw_ir_adv_strict_vulkan_window_present_with_images
 export engine2d_draw_ir_adv_strict_vulkan_readback
 export engine2d_draw_ir_command_samples_parent
 export engine2d_draw_ir_render_tiled
 export engine2d_draw_ir_render_damaged
 export engine2d_draw_ir_render_damaged_with_images
+export engine2d_draw_ir_prepare_damage_plan
+export engine2d_draw_ir_render_prepared_damage_plan_with_images
 export engine2d_draw_ir_render_composition_damaged
 export engine2d_draw_ir_render_composition_damaged_with_images
 export engine2d_draw_ir_render_composition_damaged_deferred_cpu_with_images

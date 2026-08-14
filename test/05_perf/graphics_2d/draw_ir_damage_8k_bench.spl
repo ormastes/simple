@@ -14,7 +14,8 @@ use common.ui.draw_ir.{
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dResolvedDrawIrImage,
     engine2d_draw_ir_adv_composition_present_with_images,
-    engine2d_draw_ir_render_composition_damaged_with_images,
+    engine2d_draw_ir_prepare_damage_plan,
+    engine2d_draw_ir_render_prepared_damage_plan_with_images,
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 
@@ -31,6 +32,8 @@ val FRAMES: i32 = 20
 val BG: u32 = 0xff102030u32
 val A: u32 = 0xff315783u32
 val B: u32 = 0xff8a4b29u32
+val CONTENT_A: text = "draw-ir-damage-8k-revision-a"
+val CONTENT_B: text = "draw-ir-damage-8k-revision-b"
 
 fn sort_i64(values: [i64]) -> [i64]:
     var result = values
@@ -88,6 +91,34 @@ fn main():
 
     var samples: [i64] = []
     val selected_backend = engine.backend_name()
+    val damage_rects = [
+        DAMAGE_X.to_i64(), DAMAGE_Y.to_i64(),
+        DAMAGE_WIDTH.to_i64(), DAMAGE_HEIGHT.to_i64()]
+    # Preparation is deliberately outside the timed frame region. Each full
+    # content revision owns a distinct immutable plan; alternating colors can
+    # never reuse stale command payload under a geometry-only token.
+    val plan_a = engine2d_draw_ir_prepare_damage_plan(
+        composition_for(A), damage_rects, WIDTH, HEIGHT, CONTENT_A)
+    val plan_b = engine2d_draw_ir_prepare_damage_plan(
+        composition_for(B), damage_rects, WIDTH, HEIGHT, CONTENT_B)
+    if (not plan_a.valid or not plan_b.valid or
+        plan_a.commands_considered != 2 or
+        plan_b.commands_considered != 2 or
+        plan_a.commands_culled_by_damage != OFF_DAMAGE_COMMANDS or
+        plan_b.commands_culled_by_damage != OFF_DAMAGE_COMMANDS):
+        print "draw_ir_damage_8k_status=prepare-failed"
+        engine.shutdown()
+        return
+    # Deliberate-red guard: the other revision's identity must fail closed
+    # before Engine2D submission or command replay.
+    val stale = engine2d_draw_ir_render_prepared_damage_plan_with_images(
+        engine, plan_a, images, CONTENT_B, false)
+    if (stale.unsupported_kinds !=
+            "prepared-damage-stale-content-identity" or
+        stale.ops_rendered != 0 or stale.ops_skipped != 0):
+        print "draw_ir_damage_8k_status=stale-identity-accepted"
+        engine.shutdown()
+        return
     var frame = 0
     var valid = true
     var considered_total = 0
@@ -95,18 +126,17 @@ fn main():
     var rendered_total = 0
     var skipped_total = 0
     while frame < FRAMES:
-        val composition = composition_for(if frame % 2 == 0: B else: A)
+        val use_b = frame % 2 == 0
+        val prepared = if use_b: plan_b else: plan_a
+        val content_identity = if use_b: CONTENT_B else: CONTENT_A
         val started = rt_time_now_nanos()
-        val outcome = engine2d_draw_ir_render_composition_damaged_with_images(
-            engine, composition, images,
-            [DAMAGE_X.to_i64(), DAMAGE_Y.to_i64(),
-             DAMAGE_WIDTH.to_i64(), DAMAGE_HEIGHT.to_i64()], false)
+        val outcome = engine2d_draw_ir_render_prepared_damage_plan_with_images(
+            engine, prepared, images, content_identity, false)
         val finished = rt_time_now_nanos()
         engine = outcome.engine
         if (outcome.unsupported_kinds != "none" or
-            outcome.ops_rendered < 1 or
-            outcome.ops_rendered > 2 or
-            outcome.ops_skipped < OFF_DAMAGE_COMMANDS or
+            outcome.ops_rendered != 2 or
+            outcome.ops_skipped != OFF_DAMAGE_COMMANDS or
             outcome.commands_considered != 2 or
             outcome.commands_culled_by_damage != OFF_DAMAGE_COMMANDS or
             outcome.commands_considered + outcome.commands_culled_by_damage != OFF_DAMAGE_COMMANDS + 2):
@@ -150,7 +180,7 @@ fn main():
     print "draw_ir_damage_8k_viewport={WIDTH}x{HEIGHT}"
     print "draw_ir_damage_8k_backend=cpu"
     print "draw_ir_damage_8k_selected_backend={selected_backend}"
-    print "draw_ir_damage_8k_scope=executor-only-prebuilt-dynamic-composition"
+    print "draw_ir_damage_8k_scope=executor-only-prepared-content-bound-damage-plan"
     print "draw_ir_damage_8k_revision_mode=synthetic-color-frame"
     print "draw_ir_damage_8k_revision_count={FRAMES}"
     print "draw_ir_damage_8k_final_frame_revision={FRAMES - 1}"

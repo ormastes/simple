@@ -1,24 +1,38 @@
 # @tag: rendering, web, drawir, vulkan, wm_compare, 8k80
 # @cover src/app/wm_compare/strict_semantic_vulkan_producer.spl 80%
 
-use app.wm_compare.strict_semantic_vulkan_producer.{strict_semantic_vulkan_receipt_values, strict_semantic_vulkan_receipt_exit_code}
+use app.wm_compare.strict_semantic_vulkan_producer.{strict_semantic_vulkan_composition, strict_semantic_vulkan_receipt_values, strict_semantic_vulkan_receipt_exit_code, STRICT_SEMANTIC_VULKAN_WORKLOAD, STRICT_SEMANTIC_VULKAN_DAMAGE_X, STRICT_SEMANTIC_VULKAN_DAMAGE_Y, STRICT_SEMANTIC_VULKAN_DAMAGE_WIDTH, STRICT_SEMANTIC_VULKAN_DAMAGE_HEIGHT}
 use app.io.mod.{file_read_text}
 
 describe "strict semantic Vulkan producer receipt":
     it "publishes every fail-closed A5 receipt field for completed changing revisions":
         val receipt = strict_semantic_vulkan_receipt_values(
-            "pass", "pass", "vulkan", "device_readback", 71, 83,
-            10, 11, 101, 202, true, false, 1, 60, 4000, 6000, 0, 62, 62)
+            "pass", "pass", "vulkan", "device_readback", 7680, 4320, 71, 83,
+            10, 11, 101, 202, 202, true, true, false,
+            1, 60, 4000, 6000, 0, 62, 62)
         expect(receipt).to_contain("producer_receipt_status=pass")
         expect(receipt).to_contain("producer_receipt_requested_backend=vulkan")
         expect(receipt).to_contain("producer_receipt_selected_backend=vulkan")
         expect(receipt).to_contain("producer_receipt_readback_source=device_readback")
+        expect(receipt).to_contain("producer_receipt_workload_identity=web-semantic-retained-damage-v1")
+        expect(receipt).to_contain("producer_receipt_semantic_owner=simple-web-layout")
+        expect(receipt).to_contain("producer_receipt_draw_ir_owner=engine2d-shared")
+        expect(receipt).to_contain("producer_receipt_surface_width=7680")
+        expect(receipt).to_contain("producer_receipt_surface_height=4320")
+        expect(receipt).to_contain("producer_receipt_damage_x=128")
+        expect(receipt).to_contain("producer_receipt_damage_y=128")
+        expect(receipt).to_contain("producer_receipt_damage_width=256")
+        expect(receipt).to_contain("producer_receipt_damage_height=128")
+        expect(receipt).to_contain("producer_receipt_seed_mode=full-frame-before-timing")
+        expect(receipt).to_contain("producer_receipt_timed_submit_api=engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images")
         expect(receipt).to_contain("producer_receipt_backend_handle=71")
         expect(receipt).to_contain("producer_receipt_device_identity=83")
         expect(receipt).to_contain("producer_receipt_revision_start=10")
         expect(receipt).to_contain("producer_receipt_revision_end=11")
         expect(receipt).to_contain("producer_receipt_checksum_start=101")
         expect(receipt).to_contain("producer_receipt_checksum_end=202")
+        expect(receipt).to_contain("producer_receipt_checksum_oracle=202")
+        expect(receipt).to_contain("producer_receipt_checksum_parity=true")
         expect(receipt).to_contain("producer_receipt_completion_known=true")
         expect(receipt).to_contain("producer_receipt_fallback_used=false")
         expect(receipt).to_contain("producer_receipt_warmup_count=1")
@@ -31,12 +45,48 @@ describe "strict semantic Vulkan producer receipt":
 
     it "keeps unavailable Vulkan distinct from an accepted rendering receipt":
         val receipt = strict_semantic_vulkan_receipt_values(
-            "blocked", "strict-vulkan-unavailable", "", "", 0, 0,
-            10, 11, 0, 0, false, false, 1, 60, 0, 0, 0, 0, 0)
+            "blocked", "strict-vulkan-unavailable", "", "", 7680, 4320, 0, 0,
+            10, 11, 0, 0, 0, false, false, false,
+            1, 60, 0, 0, 0, 0, 0)
         expect(receipt).to_contain("producer_receipt_status=blocked")
         expect(receipt).to_contain("producer_receipt_reason=strict-vulkan-unavailable")
         expect(receipt).to_contain("producer_receipt_completion_known=false")
         expect(receipt).to_contain("producer_receipt_backend_handle=0")
+
+    it "keeps the full Web background stable and changes only the 256x128 semantic patch":
+        step("Lower two semantic revisions through the canonical Web layout owner")
+        val before = strict_semantic_vulkan_composition(10, 768, 432)
+        val after = strict_semantic_vulkan_composition(11, 768, 432)
+        var before_background: u32 = 0u32
+        var after_background: u32 = 0u32
+        var before_patch: u32 = 0u32
+        var after_patch: u32 = 0u32
+        for batch in before.batches:
+            for command in batch.commands:
+                if command.width == 768 and command.height == 432:
+                    before_background = command.color
+                if (command.x == STRICT_SEMANTIC_VULKAN_DAMAGE_X and
+                    command.y == STRICT_SEMANTIC_VULKAN_DAMAGE_Y and
+                    command.width == STRICT_SEMANTIC_VULKAN_DAMAGE_WIDTH and
+                    command.height == STRICT_SEMANTIC_VULKAN_DAMAGE_HEIGHT):
+                    before_patch = command.color
+        for batch in after.batches:
+            for command in batch.commands:
+                if command.width == 768 and command.height == 432:
+                    after_background = command.color
+                if (command.x == STRICT_SEMANTIC_VULKAN_DAMAGE_X and
+                    command.y == STRICT_SEMANTIC_VULKAN_DAMAGE_Y and
+                    command.width == STRICT_SEMANTIC_VULKAN_DAMAGE_WIDTH and
+                    command.height == STRICT_SEMANTIC_VULKAN_DAMAGE_HEIGHT):
+                    after_patch = command.color
+        step("Check stable full-frame semantics and exact changed geometry")
+        expect(STRICT_SEMANTIC_VULKAN_WORKLOAD).to_equal(
+            "web-semantic-retained-damage-v1")
+        expect(before_background).to_equal(after_background)
+        expect(before_background).to_be_greater_than(0u32)
+        expect(before_patch).to_be_greater_than(0u32)
+        expect(after_patch).to_be_greater_than(0u32)
+        expect(before_patch == after_patch).to_equal(false)
 
     it "preserves pass blocked and failed status in process exits after write":
         expect(strict_semantic_vulkan_receipt_exit_code(
@@ -55,7 +105,7 @@ describe "strict semantic Vulkan producer receipt":
         expect(source).to_contain("if elapsed_us <= 0: return 0")
         expect(source).to_contain("val elapsed_ns = _positive_elapsed_ns")
         expect(source).to_contain("if elapsed_ns <= 0: evidence_valid = false")
-        expect(source).to_contain("engine2d_draw_ir_adv_strict_vulkan_submit_with_images")
+        expect(source).to_contain("engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images")
         expect(source).to_contain("engine2d_draw_ir_adv_strict_vulkan_readback")
         val timed_push = source.index_of("samples.push(elapsed_ns)")
         val final_readback = source.last_index_of(
@@ -66,4 +116,5 @@ describe "strict semantic Vulkan producer receipt":
         expect(source).to_contain("_percentile_nearest_rank(sorted, 95)")
         expect(source).to_contain("result.backend_handle != expected_handle")
         expect(source).to_contain("checksum_end != checksum_start")
+        expect(source).to_contain("checksum_parity = checksum_end == checksum_oracle")
         expect(source).to_contain("timed_readback_bytes == 0")

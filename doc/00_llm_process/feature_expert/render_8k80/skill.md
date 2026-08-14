@@ -9,6 +9,13 @@ separate APIs and separate evidence lanes.
 ## Canonical runner
 
 ```sh
+sh scripts/setup/prepare-render-perf-8k80-container.shs --check-contract
+sh scripts/setup/prepare-render-perf-8k80-container.shs --build \
+  --base-image nvidia/cuda:<devel-tag>@sha256:<approved-digest> \
+  --tag simple-render-8k80-nvidia:local \
+  --receipt "$PWD/build/render_perf/8k80-container-image.env"
+sh scripts/setup/prepare-render-perf-8k80-container.shs --check-gpu \
+  simple-render-8k80-nvidia:local --gpu all
 sh scripts/check/check-render-perf-8k80-container.shs --self-test
 sh scripts/check/check-render-perf-8k80-container.shs --run \
   --compiler /absolute/path/to/bin/release/<triple>/simple \
@@ -16,7 +23,10 @@ sh scripts/check/check-render-perf-8k80-container.shs --run \
   --container-image <image@sha256-or-local-id> --gpu all
 ```
 
-The image must contain `nvidia-smi`, `vulkaninfo`, and `/usr/bin/time`. The
+The base must be an NVIDIA CUDA devel image pinned by digest. The dedicated
+Dockerfile uses a dated Ubuntu snapshot, installs `vulkan-tools` and
+`/usr/bin/time`, rejects `mesa-vulkan-drivers`, and records Docker's immutable
+image ID. NVIDIA Container Toolkit must inject the NVIDIA Vulkan ICD. The
 runner requests `NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics`, disables
 networking, drops capabilities, bounds CPU/RSS, and retains the image identity,
 CUDA/Vulkan inventory, build logs, executable hashes, and API receipts.
@@ -44,7 +54,9 @@ CUDA/Vulkan inventory, build logs, executable hashes, and API receipts.
   `test/03_system/gui/wm_compare/strict_semantic_vulkan_window_producer_spec.spl`
 - Shell contract:
   `test/05_perf/profile_scripts/render_perf_8k80_container_contract_test.shs`
-- Operator guide: `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md`
+- Image contract:
+  `test/05_perf/profile_scripts/render_perf_8k80_container_image_contract_test.shs`
+- Operator guide: `doc/07_guide/app/ui/render_8k80_nvidia_container.md`
 
 Unavailable prerequisites are `blocked`, invalid evidence is `failed`, and the
 campaign remains `blocked-physical` until fresh correlated A6/A8 evidence exists.

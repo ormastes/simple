@@ -2,7 +2,7 @@
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult, Engine2dDrawIrAdvSubmitResult, engine2d_draw_ir_adv_strict_vulkan_submit_with_images, engine2d_draw_ir_adv_strict_vulkan_readback}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult, Engine2dDrawIrAdvSubmitResult, engine2d_draw_ir_adv_strict_vulkan_submit_with_images, engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images, engine2d_draw_ir_adv_strict_vulkan_readback}
 use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DrawIrComposition}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
@@ -53,9 +53,18 @@ fn _percentile_nearest_rank(sorted: [i64], pct: i32) -> i64:
     if rank >= sorted.len(): rank = sorted.len() - 1
     sorted[rank]
 
+pub val STRICT_SEMANTIC_VULKAN_WORKLOAD: text = "web-semantic-retained-damage-v1"
+pub val STRICT_SEMANTIC_VULKAN_DAMAGE_X: i32 = 128
+pub val STRICT_SEMANTIC_VULKAN_DAMAGE_Y: i32 = 128
+pub val STRICT_SEMANTIC_VULKAN_DAMAGE_WIDTH: i32 = 256
+pub val STRICT_SEMANTIC_VULKAN_DAMAGE_HEIGHT: i32 = 128
+
 fn _semantic_html(revision: i64) -> text:
     val color = if revision % 2 == 0: "#16324f" else: "#7c2d12"
-    "<html><body style='margin:0;background:" + color + "'></body></html>"
+    "<html><body style='margin:0;background:#0b1220'>" +
+        "<div id='revision-patch' style='position:absolute;left:128px;top:128px;" +
+        "width:256px;height:128px;background:" + color + "'></div>" +
+        "</body></html>"
 
 pub fn strict_semantic_vulkan_sample_revision(
     index: i32, sample_count: i32, revision_start: i64,
@@ -101,8 +110,10 @@ fn _strict_submit_valid(result: Engine2dDrawIrAdvSubmitResult) -> bool:
 
 pub fn strict_semantic_vulkan_receipt_values(
     status: text, reason: text, selected_backend: text, readback_source: text,
+    width: i32, height: i32,
     backend_handle: i64, device_identity: i64, revision_start: i64,
     revision_end: i64, checksum_start: i64, checksum_end: i64,
+    checksum_oracle: i64, checksum_parity: bool,
     completion_known: bool, fallback_used: bool, warmup_count: i32,
     sample_count: i32, p50_ns: i64, p95_ns: i64,
     timed_readback_bytes: i64, device_submit_count: i64,
@@ -113,12 +124,25 @@ pub fn strict_semantic_vulkan_receipt_values(
         "producer_receipt_requested_backend=vulkan\n" +
         "producer_receipt_selected_backend=" + selected_backend + "\n" +
         "producer_receipt_readback_source=" + readback_source + "\n" +
+        "producer_receipt_workload_identity=" + STRICT_SEMANTIC_VULKAN_WORKLOAD + "\n" +
+        "producer_receipt_semantic_owner=simple-web-layout\n" +
+        "producer_receipt_draw_ir_owner=engine2d-shared\n" +
+        "producer_receipt_surface_width=" + width.to_string() + "\n" +
+        "producer_receipt_surface_height=" + height.to_string() + "\n" +
+        "producer_receipt_damage_x=" + STRICT_SEMANTIC_VULKAN_DAMAGE_X.to_string() + "\n" +
+        "producer_receipt_damage_y=" + STRICT_SEMANTIC_VULKAN_DAMAGE_Y.to_string() + "\n" +
+        "producer_receipt_damage_width=" + STRICT_SEMANTIC_VULKAN_DAMAGE_WIDTH.to_string() + "\n" +
+        "producer_receipt_damage_height=" + STRICT_SEMANTIC_VULKAN_DAMAGE_HEIGHT.to_string() + "\n" +
+        "producer_receipt_seed_mode=full-frame-before-timing\n" +
+        "producer_receipt_timed_submit_api=engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images\n" +
         "producer_receipt_backend_handle=" + backend_handle.to_string() + "\n" +
         "producer_receipt_device_identity=" + device_identity.to_string() + "\n" +
         "producer_receipt_revision_start=" + revision_start.to_string() + "\n" +
         "producer_receipt_revision_end=" + revision_end.to_string() + "\n" +
         "producer_receipt_checksum_start=" + checksum_start.to_string() + "\n" +
         "producer_receipt_checksum_end=" + checksum_end.to_string() + "\n" +
+        "producer_receipt_checksum_oracle=" + checksum_oracle.to_string() + "\n" +
+        "producer_receipt_checksum_parity=" + _bool_text(checksum_parity) + "\n" +
         "producer_receipt_completion_known=" + _bool_text(completion_known) + "\n" +
         "producer_receipt_fallback_used=" + _bool_text(fallback_used) + "\n" +
         "producer_receipt_warmup_count=" + warmup_count.to_string() + "\n" +
@@ -135,17 +159,18 @@ pub fn strict_semantic_vulkan_producer_receipt(
     clock: FrameClock? = nil
 ) -> text:
     val revision_end = revision_start + 1
-    if (width <= 0 or height <= 0 or revision_start < 0 or
-        warmup_count < 0 or sample_count < 2):
+    if (width < STRICT_SEMANTIC_VULKAN_DAMAGE_X + STRICT_SEMANTIC_VULKAN_DAMAGE_WIDTH or
+        height < STRICT_SEMANTIC_VULKAN_DAMAGE_Y + STRICT_SEMANTIC_VULKAN_DAMAGE_HEIGHT or
+        revision_start < 0 or warmup_count != 1 or sample_count != 60):
         return strict_semantic_vulkan_receipt_values(
-            "failed", "invalid-workload", "", "", 0, 0,
-            revision_start, revision_end, 0, 0, false, false,
+            "failed", "invalid-workload", "", "", width, height, 0, 0,
+            revision_start, revision_end, 0, 0, 0, false, false, false,
             warmup_count, sample_count, 0, 0, 0, 0, 0)
     val created = Engine2D.create_with_backend_strict(width, height, "vulkan")
     if not created.is_ok():
         return strict_semantic_vulkan_receipt_values(
-            "blocked", "strict-vulkan-unavailable", "", "", 0, 0,
-            revision_start, revision_end, 0, 0, false, false,
+            "blocked", "strict-vulkan-unavailable", "", "", width, height, 0, 0,
+            revision_start, revision_end, 0, 0, 0, false, false, false,
             warmup_count, sample_count, 0, 0, 0, 0, 0)
     var engine = created.unwrap()
     val ck: FrameClock = if clock == nil: default_frame_clock() else: clock
@@ -170,12 +195,18 @@ pub fn strict_semantic_vulkan_producer_receipt(
     expected_handle = start_readback.backend_handle
     expected_identity = start_readback.device_identity
     fallback_used = fallback_used or start_readback.fallback_required
+    val damage_rects = [
+        STRICT_SEMANTIC_VULKAN_DAMAGE_X.to_i64(),
+        STRICT_SEMANTIC_VULKAN_DAMAGE_Y.to_i64(),
+        STRICT_SEMANTIC_VULKAN_DAMAGE_WIDTH.to_i64(),
+        STRICT_SEMANTIC_VULKAN_DAMAGE_HEIGHT.to_i64()]
+    var current_revision = revision_start
     var warmup = 0
     while warmup < warmup_count:
-        val warm_revision = if warmup % 2 == 0: revision_start else: revision_end
-        val warm_result = engine2d_draw_ir_adv_strict_vulkan_submit_with_images(
+        val warm_revision = if current_revision == revision_start: revision_end else: revision_start
+        val warm_result = engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images(
             engine, strict_semantic_vulkan_composition(
-                warm_revision, width, height), [])
+                warm_revision, width, height), [], damage_rects)
         if not _strict_submit_valid(warm_result): evidence_valid = false
         device_submit_count = device_submit_count + warm_result.device_submit_count
         device_fence_count = device_fence_count + warm_result.device_fence_count
@@ -184,17 +215,17 @@ pub fn strict_semantic_vulkan_producer_receipt(
             warm_result.device_identity != expected_identity):
             evidence_valid = false
         engine = warm_result.engine
+        current_revision = warm_revision
         warmup = warmup + 1
     var samples: [i64] = []
     var timed_readback_bytes: i64 = 0
     var sample = 0
     while sample < sample_count:
-        val sample_revision = strict_semantic_vulkan_sample_revision(
-            sample, sample_count, revision_start, revision_end)
+        val sample_revision = if current_revision == revision_start: revision_end else: revision_start
         val sample_start = ck.now_micros()
-        val result = engine2d_draw_ir_adv_strict_vulkan_submit_with_images(
+        val result = engine2d_draw_ir_adv_strict_vulkan_submit_damage_with_images(
             engine, strict_semantic_vulkan_composition(
-                sample_revision, width, height), [])
+                sample_revision, width, height), [], damage_rects)
         val elapsed_ns = _positive_elapsed_ns(sample_start, ck)
         samples.push(elapsed_ns)
         if elapsed_ns <= 0: evidence_valid = false
@@ -207,6 +238,7 @@ pub fn strict_semantic_vulkan_producer_receipt(
             result.device_identity != expected_identity):
             evidence_valid = false
         engine = result.engine
+        current_revision = sample_revision
         if sample == sample_count - 1:
             val end_readback = engine2d_draw_ir_adv_strict_vulkan_readback(result)
             if not _strict_result_valid(end_readback, width, height):
@@ -218,6 +250,28 @@ pub fn strict_semantic_vulkan_producer_receipt(
             readback_source = end_readback.readback_source
             fallback_used = fallback_used or end_readback.fallback_required
         sample = sample + 1
+    var checksum_oracle: i64 = 0
+    var checksum_parity = false
+    val oracle_created = Engine2D.create_with_backend_strict(width, height, "vulkan")
+    if oracle_created.is_ok():
+        var oracle_engine = oracle_created.unwrap()
+        val oracle_submission = engine2d_draw_ir_adv_strict_vulkan_submit_with_images(
+            oracle_engine, strict_semantic_vulkan_composition(
+                revision_end, width, height), [])
+        oracle_engine = oracle_submission.engine
+        val oracle_readback = engine2d_draw_ir_adv_strict_vulkan_readback(
+            oracle_submission)
+        if (_strict_submit_valid(oracle_submission) and
+            _strict_result_valid(oracle_readback, width, height)):
+            checksum_oracle = oracle_readback.readback_checksum
+            checksum_parity = checksum_end == checksum_oracle
+        else:
+            evidence_valid = false
+        fallback_used = fallback_used or oracle_submission.fallback_required
+        fallback_used = fallback_used or oracle_readback.fallback_required
+        oracle_engine.shutdown()
+    else:
+        evidence_valid = false
     val selected_backend = engine.backend_name()
     engine.shutdown()
     val revisions_changed = (revision_end > revision_start and
@@ -225,7 +279,8 @@ pub fn strict_semantic_vulkan_producer_receipt(
     val expected_device_count = 1 + warmup_count.to_i64() + sample_count.to_i64()
     val accepted = (selected_backend == "vulkan" and
         evidence_valid and expected_handle > 0 and expected_identity > 0 and
-        revisions_changed and not fallback_used and timed_readback_bytes == 0 and
+        revisions_changed and checksum_parity and not fallback_used and
+        timed_readback_bytes == 0 and current_revision == revision_end and
         device_submit_count == expected_device_count and
         device_fence_count == expected_device_count)
     val sorted = _sort_i64(samples)
@@ -234,9 +289,10 @@ pub fn strict_semantic_vulkan_producer_receipt(
     val reason = if accepted: "pass" else: "strict-vulkan-evidence-rejected"
     strict_semantic_vulkan_receipt_values(
         if accepted: "pass" else: "failed", reason, selected_backend,
-        readback_source, expected_handle, expected_identity,
-        revision_start, revision_end, checksum_start, checksum_end, accepted,
-        fallback_used, warmup_count, sample_count, p50_ns, p95_ns,
+        readback_source, width, height, expected_handle, expected_identity,
+        revision_start, revision_end, checksum_start, checksum_end,
+        checksum_oracle, checksum_parity, accepted, fallback_used,
+        warmup_count, sample_count, p50_ns, p95_ns,
         timed_readback_bytes, device_submit_count, device_fence_count)
 
 pub fn strict_semantic_vulkan_receipt_exit_code(receipt: text) -> i64:

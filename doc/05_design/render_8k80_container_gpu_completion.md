@@ -19,6 +19,12 @@ and translate stdout plus max RSS into `drawir_receipt`. Validate the benchmark
 source constants, including 256x128 damage, so stale prose cannot redefine the
 workload.
 
+Build the two immutable prepared damage plans before the timed loop. Bind each
+plan to the complete composition payload, 7680x4320 dimensions, exact damage,
+and its revision content identity. The prepared executor must reject a crossed
+identity or dimensions before mutating Engine2D and retain the exact per-frame
+2 considered / 512 culled / 2 rendered / 512 skipped counters.
+
 ## A5
 
 Add a strict semantic-producer entry that renders a changing revision through
@@ -29,12 +35,30 @@ It emits `producer_receipt_warmup_count=1` and
 `producer_receipt_sample_count=60`; p50/p95 are calculated over those 60 timed
 changing revisions, never over the warmup.
 
+The selected workload is `web-semantic-retained-damage-v1`: a stable full
+background plus one changing semantic element at (128,128), 256x128. Perform a
+full-frame strict Vulkan seed before timing. Each timed revision includes the
+canonical Web layout-to-DrawIR lowering and only the retained-damage submit and
+fence; readback stays outside timing. Accept only when the final retained
+device readback equals an independently full-rendered strict Vulkan checksum
+oracle, with stable device/handle, exact submit/fence counts, and no fallback.
+
 ## Container owner
 
 Use explicit GPU selection and driver capabilities, bounded timeout/memory/CPU,
 `--cap-drop=ALL`, and `no-new-privileges`. Qualify CUDA with actual submit/
 readback and Vulkan with actual device-origin readback. Build artifacts once;
 execute cached artifacts directly.
+
+Prepare the campaign image with the dedicated setup wrapper. It rejects a
+mutable CUDA base reference, builds from `NAME@sha256:...`, checks
+`vulkaninfo` and `/usr/bin/time`, rejects an installed Mesa Vulkan ICD, and can
+write an atomic image receipt containing the immutable Docker image ID. Its
+hardware-free contract mode is suitable for ordinary CI. The separate GPU mode
+requires NVIDIA Toolkit injection with exactly the superset
+`compute,utility,graphics`; Mesa enumeration cannot satisfy that check.
+Both image and live-GPU checks bound memory, CPU, and process count in addition
+to disabling networking, dropping capabilities, and enabling no-new-privileges.
 
 ## Aggregator
 
@@ -52,8 +76,10 @@ not assert scanout pixels; A7 still requires an independent physical receipt.
 
 The A4/A5 build shares one source-matched native cache across its three native
 entries and retains the semantic-window artifact plus build log/hash in the
-immutable evidence manifest. This reduces repeated compilation only; it does
-not cache DrawIR/layout or change timed rendering work. The physical wrapper
+immutable evidence manifest. This reduces repeated compilation only. A4
+separately caches immutable prepared DrawIR planning outside timing; A5
+deliberately keeps semantic layout inside every timed revision. Neither caches
+mutable Engine2D state. The physical wrapper
 executes the cached artifact and validates the separate capture receipt through
 `--validate-physical` before reporting physical readiness.
 

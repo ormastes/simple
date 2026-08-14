@@ -241,6 +241,12 @@ a valid `.rdc` with `RDOC` magic.
 Do not accept `--in-process-gpu` as a Linux Chromium/Vulkan workaround unless a
 fresh run proves Vulkan remains enabled and emits valid browser `.rdc` evidence;
 current Electron/Chrome diagnostics show that mode is unsupported or crashes.
+For the NVIDIA 8K80 container campaign, prepare/check the image with
+`scripts/setup/prepare-render-perf-8k80-container.shs`. Require a digest-pinned
+NVIDIA CUDA devel base, the checked-in package snapshot, `vulkan-tools`,
+`/usr/bin/time`, no `mesa-vulkan-drivers`, and an immutable image-ID receipt.
+The live check must request `compute,utility,graphics` and name an NVIDIA
+Vulkan device; inventory still does not replace strict submit/readback proof.
 On Windows, first read `doc/07_guide/app/ui/gui_web_2d_vulkan_setup.md`.
 `vulkaninfo --summary` plus Chrome/Electron installation proves host readiness
 only; it does not prove Chrome or Electron are Vulkan-backed. The Vulkan SDK

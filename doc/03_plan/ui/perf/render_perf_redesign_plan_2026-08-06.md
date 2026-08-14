@@ -125,6 +125,17 @@ This focused diagnostic executable is not canonical Stage 4 admission. A4 and
 A5 remain unchecked until the wrapper-owned transaction publishes and admits
 the requested executable and provenance.
 
+2026-08-14 sparse optimization handoff: A4 now prepares immutable,
+content-bound A/B damage plans outside timing and fails closed unless every
+frame reports the exact 2/512/2/512 command contract. A5 now retains a stable
+full Web background, changes only a canonical 256x128 semantic element, seeds
+the Vulkan surface before timing, uses the shared strict retained-damage API,
+and requires untimed full-frame oracle parity. The campaign-v3 parent schema
+binds those workload changes. Details and exclusions are in
+`doc/09_report/ui/perf/render_8k80_sparse_implementation_2026-08-14.md`.
+These changes are implementation/optimization only: no new p50/p95 result is
+claimed, and A4/A5/A7 remain unchecked until admitted Stage4 execution.
+
 2026-08-14 container/GPU implementation review: research and design completed.
 Fresh scoped TODO812/TODO813 work corrected the rejected handoff: A4 and A5 now
 use distinct workload hashes under one campaign contract, A4 validates every
