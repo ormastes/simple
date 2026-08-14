@@ -185,7 +185,11 @@ impl CompilerDriver:
             log_phase("phase3:hir:file:start {source.path} module={source.module_name}")
             # Baseline for the per-module poison check: pre-existing errors
             # belong to EARLIER modules and must not poison this one.
-            val module_errors_before: i64 = self.ctx.error_count()
+            # Stage-2 self-host codegen has a known aggregate-receiver hazard
+            # for this trivial accessor under full entry-closure pressure.
+            # Read the owned scalar directly; this is the same field mutated by
+            # add_error and avoids fabricating an invalid CompileContext `self`.
+            val module_errors_before: i64 = self.ctx.error_count_value
             val lower_result = self.lower_streaming_surface_source(lowering, source, is_requested_bootstrap_entry)
             if lower_result.is_err():
                 # No HIR aggregate exists for this unit (parse/ownership
@@ -200,7 +204,7 @@ impl CompilerDriver:
                 continue
             val hir_module = lower_result.unwrap()
             _driver_collect_hir_errors(self.ctx, source.module_name, lowering.errors)
-            if self.ctx.error_count() > module_errors_before:
+            if self.ctx.error_count_value > module_errors_before:
                 # Drop the partially-lowered aggregate (never store it) and
                 # keep checking the remaining modules. See the non-streaming
                 # loop below for the full rationale.
@@ -237,7 +241,7 @@ impl CompilerDriver:
         val poisoned_count = summary_ctx.poisoned_module_count_value
         if poisoned_count > 0:
             eprint("[collect-all] {poisoned_count} module(s) poisoned, "
-                + "{summary_ctx.error_count()} error(s) collected across "
+                + "{summary_ctx.error_count_value} error(s) collected across "
                 + "{summary_ctx.sources.len()} source(s) in phase 3 (streaming HIR).")
             eprint("[collect-all] Poisoned modules are DROPPED; downstream passes do not run. "
                 + "Diagnostics below are ROOT causes, not a cascade. "
@@ -348,7 +352,9 @@ impl CompilerDriver:
             val name = src.module_name
             # Baseline for the per-module poison check below. Errors already in
             # the list belong to EARLIER modules and must not poison this one.
-            val module_errors_before: i64 = self.ctx.error_count()
+            # Avoid the staged aggregate-receiver accessor hazard; add_error
+            # owns and updates this scalar directly.
+            val module_errors_before: i64 = self.ctx.error_count_value
             if source_idx < 3:
                 eprint("[bootstrap-error-count] source_idx={source_idx} point=entry count={module_errors_before}")
             log_phase("phase3:hir:file:start {src.path} module={name}")
@@ -440,7 +446,7 @@ impl CompilerDriver:
                     types: []
                 )
             if source_idx < 3:
-                eprint("[bootstrap-error-count] source_idx={source_idx} point=post-lowering count={self.ctx.error_count()}")
+                eprint("[bootstrap-error-count] source_idx={source_idx} point=post-lowering count={self.ctx.error_count_value}")
             val focused_future_driver_diag = src.path == "src/lib/nogc_async_mut/async/future.spl"
             if focused_future_driver_diag:
                 eprint("[driver-hir] returned future")
@@ -480,7 +486,7 @@ impl CompilerDriver:
             if bootstrap_diag and module_fatal_error_count > 0:
                 eprint("[bootstrap-hir-module-fatal-count] source_idx={source_idx} path={src.path} count={module_fatal_error_count}")
             if source_idx < 3:
-                eprint("[bootstrap-error-count] source_idx={source_idx} point=post-diagnostics count={self.ctx.error_count()}")
+                eprint("[bootstrap-error-count] source_idx={source_idx} point=post-diagnostics count={self.ctx.error_count_value}")
             if focused_future_driver_diag:
                 eprint("[driver-hir] errors done")
 
@@ -496,7 +502,7 @@ impl CompilerDriver:
             # The comparison is a DELTA against the count taken before this
             # module was lowered. A global `errors.len() > 0` would report
             # every module after the first failure as poisoned too.
-            if self.ctx.error_count() > module_errors_before:
+            if self.ctx.error_count_value > module_errors_before:
                 val poison_ctx: CompileContext = self.ctx
                 poison_ctx.mark_module_poisoned(name)
                 if poison_ctx.poison_budget_exhausted():
@@ -517,7 +523,7 @@ impl CompilerDriver:
 
             phase_hir_modules[name] = hir_module
             if source_idx < 3:
-                eprint("[bootstrap-error-count] source_idx={source_idx} point=post-store count={self.ctx.error_count()}")
+                eprint("[bootstrap-error-count] source_idx={source_idx} point=post-store count={self.ctx.error_count_value}")
             val validation_surface_index = _driver_module_surface_index_for_source(retained_module_surfaces, src, source_idx)
             if validation_surface_index < 0:
                 self.ctx.add_error("Missing module surface alias for {name}")
@@ -559,7 +565,7 @@ impl CompilerDriver:
         val poisoned_count = summary_ctx.poisoned_module_count_value
         if poisoned_count > 0:
             eprint("[collect-all] {poisoned_count} module(s) poisoned, "
-                + "{summary_ctx.error_count()} error(s) collected across "
+                + "{summary_ctx.error_count_value} error(s) collected across "
                 + "{summary_ctx.sources.len()} source(s) in phase 3 (HIR lowering).")
             eprint("[collect-all] Poisoned modules are DROPPED; downstream passes do not run. "
                 + "Diagnostics below are ROOT causes, not a cascade. "
