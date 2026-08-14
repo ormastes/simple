@@ -449,6 +449,12 @@ int64_t  rt_array_data_ptr_text(SplArray* array);
  * array is genuinely BYTES-backed. */
 int64_t  rt_array_bytes_basis_len(SplArray* array);
 int64_t  rt_array_bytes_basis_ptr(SplArray* array);
+/* Checked call-scoped byte transfer for owner-preserving foreign adapters.
+ * Generic arrays must contain tagged integers in 0..255; packed byte arrays
+ * are copied directly. Invalid owners and values return -22. */
+int64_t  rt_array_bytes_validate(int64_t value);
+int64_t  rt_array_bytes_copy_checked(int64_t value, uint8_t* out, int64_t capacity);
+int64_t  rt_array_bytes_store_checked(int64_t value, const uint8_t* bytes, int64_t length);
 int64_t  rt_array_header_ptr(SplArray* array);
 int8_t   rt_array_set_len_known(int64_t header_ptr, int64_t len);
 int8_t   rt_array_set_len_known_text(int64_t header_ptr, int64_t len);
@@ -496,6 +502,17 @@ int64_t  rt_bytes_u8_at(SplArray* array, int64_t idx);
 int64_t  rt_bytes_u32_le_at(SplArray* array, int64_t idx);
 int64_t  rt_bytes_u64_le_at(SplArray* array, int64_t idx);
 int8_t   rt_bytes_u8_set(SplArray* array, int64_t idx, int64_t value);
+
+/* SimpleOS user-runtime syscall adapters. Byte-array owners stay live while
+ * bounded temporary storage crosses the raw kernel syscall ABI. */
+int64_t rt_simpleos_file_open_bytes(int64_t path, uint64_t flags);
+int64_t rt_simpleos_file_read_bytes(uint64_t fd, int64_t out, uint64_t max_len);
+int64_t rt_simpleos_file_write_bytes(uint64_t fd, int64_t data);
+int64_t rt_simpleos_file_rename_bytes(int64_t old_path, int64_t new_path);
+int64_t rt_simpleos_socket_bind_bytes(uint64_t fd, int64_t sockaddr);
+int64_t rt_simpleos_socket_connect_bytes(uint64_t fd, int64_t sockaddr);
+int64_t rt_simpleos_socket_send_bytes(uint64_t fd, int64_t data);
+int64_t rt_simpleos_socket_recv_bytes(uint64_t fd, int64_t out, uint64_t max_len);
 int8_t   rt_typed_bytes_u8_push(SplArray* array, int64_t value);
 int64_t  rt_typed_bytes_u8_unchecked(SplArray* array, int64_t idx);
 int64_t  rt_typed_bytes_u32_le_at(SplArray* array, int64_t idx);

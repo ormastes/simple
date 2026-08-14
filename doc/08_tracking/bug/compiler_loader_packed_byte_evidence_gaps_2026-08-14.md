@@ -221,3 +221,55 @@ stopped in `libmimalloc-sys` because the Linux host `cc` rejected Apple `-arch`
 and deployment flags before the runtime crate compiled. Real macOS compilation
 therefore remains WARN. None of this evidence is Stage 4 performance or
 deployed-CLI evidence.
+
+### Post-integration SimpleOS syscall closure
+
+A refreshed-origin audit found one positive legacy reference outside the
+original inventory: `src/os/userlib/syscall_raw.spl` still returned
+`rt_array_data_ptr_u8` for filesystem and socket syscalls. That route is now
+migrated to eight operation-specific adapters for open/read/write/rename and
+bind/connect/send/recv. Each Simple signature passes `[u8]` owners, never an
+address; rename retains both path owners, while read/recv retain the mutable
+output owner through validated copyback.
+
+`src/runtime/runtime_simpleos_syscall_adapters.c` validates paths at 1..4096,
+sockaddr payloads at exactly 16 bytes, and I/O at no more than 1 MiB. It
+uses production registered RuntimeValue validation, accepts packed bytes or
+generic tagged integers only in 0..255, materializes call-scoped storage, and
+frees all temporary storage on every exit. Readback validates the whole owner
+before the syscall and commits with one non-failing representation-aware store,
+so an error cannot expose a partial prefix. The shared provider is listed in
+the x86_64, AArch64, and RISC-V SimpleOS sysroot builds. Its focused stubbed C
+contract proves allocation/free parity, injected allocation failures, bounds,
+readback, and dual-owner rename; a second production-runtime-linked test proves
+packed/generic decoding, malformed/invalid rejection, and real copyback.
+Compiler/common ABI guards for all eight symbols pass 1/1 each. The final
+Stage-2 native-build of the Simple source contract completed with 1 compiled,
+42 cached, and zero failures. An earlier intermediate artifact ended at the
+known duck-typed native dispatch bug with status 132, so Stage-2 evidence is
+retained as compile-only rather than execution proof.
+
+The selected pure-Simple array owner now exports strong versions of the three
+checked byte-transfer helpers; the hosted C runtime keeps weak fallbacks for
+its own registered arrays. Both reject tuple and packed-u64 representations.
+Stage 2 built all 18 parts of the x86_64 pure-Simple core archive, and a
+host-target link that selected that archive's strong owner passed the same
+packed/generic/invalid/copyback runtime test. This proves the selected-owner
+link contract, not a SimpleOS target link or execution.
+
+Exact final Stage-2 command:
+
+`timeout 180 build/restart12-build11-a-r2/output/stage2/x86_64-unknown-linux-gnu/simple native-build --target x86_64-unknown-linux-gnu --backend cranelift --runtime-bundle core-c-bootstrap --source src --entry-closure --threads 1 --cache-dir /tmp/restart12-simpleos-syscall-stage2-cache --mode dynload --entry test/01_unit/os/apps/servers_user/arm64_payload_symbol_contract_spec.spl --runtime-path build/restart12-build11-a-r2/output/stage3/x86_64-unknown-linux-gnu/stage2-runtime-authority -o /tmp/restart12-simpleos-syscall-contract-stage2-reviewed`
+
+After this extension the global non-document census contains only explicit
+negative assertions against `rt_array_data_ptr_u8`; there is no positive
+definition, declaration, or caller. These receipts prove the SimpleOS source,
+ABI, and provider contract, not a target sysroot archive/link or target runtime
+execution. Those target gates, the macOS Metal compile, and Stage 4 remain WARN
+or excluded rather than inferred.
+
+The broad archive emitted by the retained Stage-2 compiler still contains
+undefined `rt_array_data_ptr_u8` references in discarded module sections even
+though the current source census is clean. The focused selected-owner link
+succeeds with section garbage collection. A fresh compiler and actual payload
+archive/link remain required before promoting the target WARN.

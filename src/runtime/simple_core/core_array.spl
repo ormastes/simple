@@ -156,6 +156,58 @@ pub fn rt_array_len_safe(array: i64) -> i64:
         return 0
     return array_len_value(array)
 
+# Strong target-owner implementations override runtime_native.c's weak hosted
+# fallbacks when SimpleOS links the pure-Simple core archive.
+pub fn rt_array_bytes_validate(value: i64) -> i64:
+    if array_is_valid(value) < 1:
+        return -22
+    val flags = array_flags(value)
+    if flags != 0 and flags != 8:
+        return -22
+    val len = array_len_value(value)
+    if flags == 8:
+        return len
+    val items = array_items(value)
+    var i = 0
+    while i < len:
+        val item = spl_load_i64(items, i * 8)
+        if (item & 7) != 0:
+            return -22
+        val byte = item >> 3
+        if byte < 0 or byte > 255:
+            return -22
+        i = i + 1
+    len
+
+pub fn rt_array_bytes_copy_checked(value: i64, out: i64, capacity: i64) -> i64:
+    val len = rt_array_bytes_validate(value)
+    if len < 0 or capacity < len or (len > 0 and out < 1):
+        return -22
+    val items = array_items(value)
+    val packed = array_flags(value) == 8
+    var i = 0
+    while i < len:
+        val byte = if packed: spl_load_u8(items, i) else: spl_load_i64(items, i * 8) >> 3
+        spl_store_u8(out, i, byte)
+        i = i + 1
+    len
+
+pub fn rt_array_bytes_store_checked(value: i64, bytes: i64, len: i64) -> i64:
+    val capacity = rt_array_bytes_validate(value)
+    if capacity < 0 or len < 0 or len > capacity or (len > 0 and bytes < 1):
+        return -22
+    val items = array_items(value)
+    val packed = array_flags(value) == 8
+    var i = 0
+    while i < len:
+        val byte = spl_load_u8(bytes, i)
+        if packed:
+            spl_store_u8(items, i, byte)
+        else:
+            spl_store_i64(items, i * 8, byte << 3)
+        i = i + 1
+    len
+
 fn array_get_raw(array: i64, idx: i64) -> i64:
     if array_is_valid(array) < 1:
         return 3

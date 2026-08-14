@@ -6452,6 +6452,59 @@ int64_t rt_array_bytes_basis_ptr(SplArray* a) {
     return (int64_t)(uintptr_t)array->data;
 }
 
+#if defined(__GNUC__) || defined(__clang__)
+#define SPL_ARRAY_OWNER_WEAK __attribute__((weak))
+#else
+#define SPL_ARRAY_OWNER_WEAK
+#endif
+
+SPL_ARRAY_OWNER_WEAK int64_t rt_array_bytes_validate(int64_t value) {
+    RtCoreArray* array = rt_core_as_registered_array(value);
+    if (!array || array->len < 0) return -22;
+    if (array->flags & (RT_CORE_ARRAY_FLAG_U64_PACKED | RT_CORE_ARRAY_FLAG_TUPLE)) return -22;
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) return array->len;
+    int64_t* items = (int64_t*)array->data;
+    if (array->len > 0 && !items) return -22;
+    for (int64_t i = 0; i < array->len; ++i) {
+        if (!rt_core_is_int(items[i])) return -22;
+        int64_t byte = rt_core_as_int(items[i]);
+        if (byte < 0 || byte > 255) return -22;
+    }
+    return array->len;
+}
+
+SPL_ARRAY_OWNER_WEAK int64_t rt_array_bytes_copy_checked(int64_t value, uint8_t* out, int64_t capacity) {
+    int64_t length = rt_array_bytes_validate(value);
+    if (length < 0 || capacity < length || (length > 0 && !out)) return -22;
+    RtCoreArray* array = rt_core_as_registered_array(value);
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        if (length > 0) memcpy(out, array->data, (size_t)length);
+        return length;
+    }
+    int64_t* items = (int64_t*)array->data;
+    for (int64_t i = 0; i < length; ++i) {
+        out[i] = (uint8_t)rt_core_as_int(items[i]);
+    }
+    return length;
+}
+
+SPL_ARRAY_OWNER_WEAK int64_t rt_array_bytes_store_checked(int64_t value, const uint8_t* bytes, int64_t length) {
+    int64_t capacity = rt_array_bytes_validate(value);
+    if (capacity < 0 || length < 0 || length > capacity || (length > 0 && !bytes)) return -22;
+    RtCoreArray* array = rt_core_as_registered_array(value);
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        if (length > 0) memcpy(array->data, bytes, (size_t)length);
+        return length;
+    }
+    int64_t* items = (int64_t*)array->data;
+    for (int64_t i = 0; i < length; ++i) {
+        items[i] = rt_value_int(bytes[i]);
+    }
+    return length;
+}
+
+#undef SPL_ARRAY_OWNER_WEAK
+
 int64_t rt_array_get(SplArray* a, int64_t idx) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 3;

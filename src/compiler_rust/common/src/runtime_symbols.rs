@@ -2181,6 +2181,17 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_font_load_array",
     "rt_file_write_bytes_array",
     "rt_metal_load_library_array",
+    // SimpleOS syscall adapters consume owning RuntimeValues.  Byte backing is
+    // projected only inside the target runtime provider; these names must not
+    // be replaced with a raw array-data pointer escape.
+    "rt_simpleos_file_open_bytes",
+    "rt_simpleos_file_read_bytes",
+    "rt_simpleos_file_write_bytes",
+    "rt_simpleos_file_rename_bytes",
+    "rt_simpleos_socket_bind_bytes",
+    "rt_simpleos_socket_connect_bytes",
+    "rt_simpleos_socket_send_bytes",
+    "rt_simpleos_socket_recv_bytes",
     "spl_wffi_call_i64_with_bytes",
     "spl_fonts_call_init_blob",
     "spl_fonts_call_init_path",
@@ -2350,6 +2361,25 @@ mod tests {
             assert!(
                 RUNTIME_SYMBOL_NAMES.contains(&name),
                 "missing JIT runtime symbol: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn simpleos_syscall_byte_adapters_are_codegen_visible() {
+        for name in [
+            "rt_simpleos_file_open_bytes",
+            "rt_simpleos_file_read_bytes",
+            "rt_simpleos_file_write_bytes",
+            "rt_simpleos_file_rename_bytes",
+            "rt_simpleos_socket_bind_bytes",
+            "rt_simpleos_socket_connect_bytes",
+            "rt_simpleos_socket_send_bytes",
+            "rt_simpleos_socket_recv_bytes",
+        ] {
+            assert!(
+                RUNTIME_SYMBOL_NAMES.contains(&name),
+                "missing SimpleOS owner-preserving syscall adapter: {name}"
             );
         }
     }

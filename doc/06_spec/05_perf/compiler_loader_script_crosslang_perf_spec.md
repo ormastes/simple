@@ -1,4 +1,4 @@
-# Compiler, loader, script, and cross-language performance B+B
+# Compiler, loader, script, and cross-language performance
 
 Status: focused source contract; retained runtime timing remains open. Failed
 existence-probe evidence is now an executable deterministic gate, not syscall

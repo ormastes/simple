@@ -5,9 +5,10 @@
 Plan content accepted at `3fdfa0d3351` and the current operational reconciliation
 accepted by `/root/reconciled_plan_review`; `/root/final_nonstage4_review`
 accepted the current Stage-4-excluded continuation on bounded review cycle 3.
-Atomic implementation commit `2249dc49ac4e2d8f6d63626432fc8d7be6a12966`
-was integrated under the lane lock and remains reachable from refreshed
-`origin/main`; this final bookkeeping revision uses the same locked workflow.
+Prior atomic implementation/bookkeeping commit
+`56448da2b25bbe90523ad672b25db2abaef74a67` was integrated under the lane lock
+and remains reachable from refreshed `origin/main`; the post-integration
+SimpleOS syscall extension requires the same locked workflow.
 Feature verification remains blocked. This document is the canonical
 handoff for `compiler_loader_script_crosslang_perf`. It records what is already
 implemented, what current evidence proves, and the exact remaining gates. A
@@ -102,7 +103,7 @@ Current acceptance items, each to be verified once in this lane:
   pushed commit is reachable from a freshly fetched `origin/main`.
 - [x] Finish lane A with a clean tree and only then write
   `/tmp/restart12-compiler_perf_a.done` as `<commit> PASS` or `<commit> WARN`.
-  Atomic implementation receipt: `2249dc49ac4e2d8f6d63626432fc8d7be6a12966 WARN`, reachable
+  Prior integration receipt: `56448da2b25bbe90523ad672b25db2abaef74a67 WARN`, reachable
   from refreshed `origin/main`. The tracked/lane-owned tree was clean; two
   unrelated GUI report files remained untracked and excluded.
 
@@ -183,7 +184,7 @@ selection flow produces the missing selected requirement documents.
 |---|---|---|---|---|
 | PBL-01 | REQ-008, NFR-003 | Index, slice, iteration, concat, clone, equality, freeze, and byte-valued mutation preserve packed storage; non-byte insertion widens once | Green focused tests plus `doc/09_report/compiler_loader_packed_byte_deliberate_red_evidence_2026-08-14.md` | PROVED at Rust interpreter boundary — final suites pass 4/4, 1/1 representation concat, and 4/4 identifier cases; named deliberate-red fails status 101 and is reverted |
 | PBL-02 | REQ-008, NFR-003 | Identifier and projected-place mutators write back, preserve COW aliases, return removed elements, reject immutable/frozen receivers | Green focused tests plus `doc/09_report/compiler_loader_packed_byte_deliberate_red_evidence_2026-08-14.md` | PROVED at Rust interpreter boundary — final identifier cases pass 4/4 and projected-place write-back 1/1; named deliberate-red fails status 101 and is reverted |
-| PBL-03 | REQ-008, NFR-003/006 | Foreign packed-byte pointers are input-only, descriptor-bounded, nested adapters are scoped, and capabilities cannot escape a call | Production foreign-dispatch route plus compile-fail/equivalent escape enforcement | PROVED WITH PLATFORM WARN at Rust/native boundary — eight owners/23 uses migrated to typed adapters plus scoped DynLib dispatch; old symbol removed; scoped tests 4/4, native-only mutation guard 1/1, and restored owner/escape guard 1/1. Real macOS Metal compilation remains unproved; no Stage-4 claim |
+| PBL-03 | REQ-008, NFR-003/006 | Foreign packed-byte pointers are input-only, descriptor-bounded, nested adapters are scoped, and capabilities cannot escape a call | Production foreign-dispatch route plus compile-fail/equivalent escape enforcement | PROVED WITH TARGET WARN — the original Rust/native route is proved. The refreshed-origin SimpleOS extension is source/ABI/provider-contract proved: typed callers, production RuntimeValue decoding, atomic readback, bounds/cleanup tests, and zero positive old-symbol references. A real SimpleOS target archive/link/runtime and real macOS Metal compile remain unproved; no Stage-4 claim |
 | LDR-01 | REQ-004/005/006/007, NFR-002 | Exact repeated miss caches once; adjacent callers remain distinct; reset invalidates; resolution result is unchanged | Focused SSpec and resolver unit coverage | BLOCKED — implementation is present; fresh admitted self-hosted execution is unavailable |
 | LDR-02 | REQ-004/005, NFR-001/002/006 | 100 reset-per-request resolutions versus 1000 retained requests produce identical results, uncached counts 100/1, positive failed-probe baseline, and cached probes at most 10% | SSpec plus C facade selfcheck | BLOCKED — contracts are present; fresh admitted self-hosted measurement is unavailable |
 | PRV-01 | REQ-001/003, NFR-005 | Exact executable path/hash and actual mode are admitted; seed, stale hash, requested/actual mismatch, and fallback are rejected before timing | SSpec and retained harness contract tests | CONTRADICTED — the deployed candidate exists but exit 139 on its test/help ABI path disproves admission |
@@ -191,8 +192,8 @@ selection flow produces the missing selected requirement documents.
 | XLG-01 | REQ-001/002, NFR-004 | C/Rust/Go/Python/Bun/Simple workloads have equivalent checksums, including `fib(35)=9227465`; unavailable peers remain unavailable | Retained schema/provenance/byte contract scripts | BLOCKED — contracts exist; fresh report requires an admitted candidate |
 | CMP-01 | REQ-007, NFR-001/005/006 | Self-hosted compiler checks for `src/compiler`, `src/lib`, MCP, LSP, and MCP stdio smoke pass without seed fallback | Commands below | BLOCKED — deployed candidate exists but is not admitted |
 | PLN-01 | all | Canonical plan, guide, expert knowledge, blockers, and cooperative-review receipts are internally consistent and pass focused document gates | Document review and layout guard | PROVED — review accepted; SPipe wiring, spec-layout, and working/staged runtime guards pass. Global workspace-root strict audit remains WARN-blocked by 137 pre-existing unrelated manifest violations |
-| DOC-01 | all | Selected research/requirements, accepted architecture/detail design, and generated manual provenance exist | Artifact review and admitted docgen | BLOCKED — research/options/drafts now exist; user selection, post-selection acceptance, and admitted docgen provenance remain outstanding |
-| VCS-01 | all | Only intentional lane-A files are committed; locked integration reaches refreshed `origin/main`; tree and lane marker are truthful | Git receipts | PROVED — atomic implementation `2249dc49ac4...` is reachable; final bookkeeping uses the same locked push/reachability/marker sequence; unrelated untracked GUI reports are excluded |
+| DOC-01 | all | Selected research/requirements, accepted architecture/detail design, and generated manual provenance exist | Artifact review and admitted docgen | BLOCKED — research/options/drafts now exist; user selection and post-selection acceptance remain outstanding. One Stage-2 docgen attempt failed immediately with `unknown command 'spipe-docgen'`; admitted docgen remains Phase-4-dependent |
+| VCS-01 | all | Only intentional lane-A files are committed; locked integration reaches refreshed `origin/main`; tree and lane marker are truthful | Git receipts | PROVED for prior baseline `56448da2b25...`; the SimpleOS extension is pending final locked push/marker refresh; unrelated untracked GUI reports are excluded |
 
 ## Manual-facing flow
 
@@ -243,6 +244,21 @@ most three distinct fix/verify cycles; never repeat an identical failed command.
    `cargo test -p simple-compiler interpreter_extern::sffi_array` and
    `cargo test -p simple-compiler --test packed_byte_foreign_capability_lifetime`.
    The latter fixed file and test names are specified in the tracking record.
+   The post-integration SimpleOS extension has these independent one-pass gates:
+   `cc -std=c11 -Wall -Wextra -Werror -Isrc/runtime src/runtime/runtime_simpleos_syscall_adapters.c test/01_unit/runtime/simpleos_syscall_byte_adapters_test.c -o /tmp/restart12-simpleos-syscall-adapters-test && /tmp/restart12-simpleos-syscall-adapters-test`;
+   `cc -std=c11 -D_GNU_SOURCE -O0 -ffunction-sections -fdata-sections -Isrc/runtime src/runtime/runtime_native.c src/runtime/runtime_simpleos_syscall_adapters.c test/01_unit/runtime/simpleos_syscall_byte_adapters_runtime_test.c -Wl,--gc-sections -lm -ldl -lpthread -o /tmp/restart12-simpleos-syscall-runtime-test && /tmp/restart12-simpleos-syscall-runtime-test`;
+   `cargo test -p simple-compiler simpleos_syscall --lib` and
+   `cargo test -p simple-runtime-abi simpleos_syscall_byte_adapters_are_codegen_visible --lib`
+   from `src/compiler_rust`; and
+   `rg -n 'rt_array_data_ptr_u8' --glob '!doc/**' .`, whose results must all be
+   explicit negative assertions. Stage-2 compile-only evidence uses the exact
+   source-contract native-build command retained in the packed-byte tracking
+   record. The selected-owner test builds the pure-Simple archive with
+   `SIMPLE_BINARY="$PWD/build/restart12-build11-a-r2/output/stage2/x86_64-unknown-linux-gnu/simple" SIMPLE_CORE_BACKEND=cranelift sh scripts/os/simpleos-core-archive.shs --target x86_64-unknown-linux-gnu --out-dir /tmp/restart12-simple-core-owner --backend cranelift`,
+   then links/runs
+   `cc -std=c11 -D_GNU_SOURCE -O0 -ffunction-sections -fdata-sections -Isrc/runtime src/runtime/runtime_simpleos_syscall_adapters.c test/01_unit/runtime/simpleos_syscall_byte_adapters_runtime_test.c /tmp/restart12-simple-core-owner/libsimple_runtime.a -Wl,--gc-sections -lm -ldl -lpthread -o /tmp/restart12-simpleos-syscall-simple-core-test && /tmp/restart12-simpleos-syscall-simple-core-test`.
+   Actual SimpleOS-target archive/link/runtime proof remains WARN rather than
+   inferred.
 4. Resolver/facade evidence: the C selfcheck is independent and may run once
    even when Stage 4 admission fails: `sh scripts/check/check-file-exists-probe-c.shs`.
    The following SPipe command is admission-dependent and must stop after a
@@ -279,9 +295,9 @@ the same correctness/performance baseline before and after.
 
 | Blocked IDs | Missing prerequisite | Exact resume command | Retained artifacts | Owner | Final reviewer |
 |---|---|---|---|---|---|
-| PBL-03 | Replace the pointer-returning interpreter ABI with a typed one-call adapter or foreign-dispatch-owned opaque token that is revoked before return | Run the production-route suite named in the packed-byte tracking record, including compile-fail or equivalent escape enforcement | Production caller migration, three focused tests, deliberate-red and green receipts | interpreter SFFI owner | highest-capability reviewer |
+| PBL-03 platform WARN | Compile the scoped Metal metallib adapter on a real Apple toolchain | `cd src/compiler_rust && cargo check -p simple-runtime --target aarch64-apple-darwin` on macOS with the Apple SDK/toolchain | macOS compile log plus existing scoped-call and removed-symbol receipts | runtime SFFI owner | highest-capability reviewer |
 | LDR-01/02, PRV-01, BYT-01, XLG-01, CMP-01 | Repair/redeploy an admitted self-hosted Stage 4 CLI per the linked repair plan/TODO | `test -x release/x86_64-unknown-linux-gnu/simple && release/x86_64-unknown-linux-gnu/simple --version && release/x86_64-unknown-linux-gnu/simple test --help && sh scripts/check/check-file-exists-probe-c.shs && release/x86_64-unknown-linux-gnu/simple test test/05_perf/compiler_loader_script_crosslang_perf_spec.spl --mode=interpreter --no-session-daemon && RUN_TIMEOUT=30 SIMPLE_BINARY="$PWD/release/x86_64-unknown-linux-gnu/simple" REPORT_PATH="$PWD/build/test-artifacts/05_perf/compiler_loader_script_crosslang_perf/cross_language_perf.md" sh scripts/check/check-cross-language-perf.shs && release/x86_64-unknown-linux-gnu/simple check src/compiler && release/x86_64-unknown-linux-gnu/simple check src/lib && release/x86_64-unknown-linux-gnu/simple check src/app/mcp && release/x86_64-unknown-linux-gnu/simple check src/app/simple_lsp_mcp && SIMPLE_LIB=src release/x86_64-unknown-linux-gnu/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter` | Binary path/hash, version/help logs, checker/spec logs, retained profile report, RSS receipts | compiler-loader performance owner | highest-capability reviewer |
-| LDR-01/02, PRV-01, BYT-01, XLG-01, CMP-01 — Build11 prerequisite | Repair the fresh Stage 3 corruption using the preserved admitted Stage 2 lineage | `sh scripts/bootstrap/resume-stage3-from-admitted.sh build/restart12-build11-a-r2/output` | `build/restart12-build11-a-r2/output/logs/x86_64-unknown-linux-gnu/{stage2,stage3}-native-build.log`, Stage 2/3 transcripts and sanity/provenance manifests, GDB backtrace, candidate hash | pure-Simple compiler-driver owner | highest-capability reviewer |
+| LDR-01/02, PRV-01, BYT-01, XLG-01, CMP-01 — Build11 prerequisite | Localize the fresh Stage 3 timeout in a new reviewed session; the three-cycle cap is exhausted here | `env BOOTSTRAP_NATIVE_CACHE_TTL_DAYS=0 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy --backend=cranelift --output=build/restart12-build11-a-r3/output` | `build/restart12-build11-a-r3/output/logs/x86_64-unknown-linux-gnu/{stage2,stage3}-native-build.log`, Stage 2/3 transcripts and sanity/provenance manifests, canary/trace receipts, candidate hash | pure-Simple compiler-driver owner | highest-capability reviewer |
 | DOC-01 traceability | Explicit user choice from the present feature/NFR option sets, then post-selection architecture/design acceptance | Delete unchosen options; write `doc/02_requirements/feature/compiler_loader_script_crosslang_perf.md` and `doc/02_requirements/nfr/compiler_loader_script_crosslang_perf.md`; reconcile and accept the existing architecture/detail design | Selected requirement/NFR docs with no lingering options, accepted architecture and detail design | research/design owner | user selection + highest-capability reviewer |
 | DOC-01 manual | Working admitted self-hosted docgen | `release/x86_64-unknown-linux-gnu/simple spipe-docgen test/05_perf/compiler_loader_script_crosslang_perf_spec.spl --output doc/06_spec --no-index` | Generated scenario sections, source hash/provenance, `0 stubs`, final readability review receipt | SPipe manual owner | highest-capability reviewer |
 | VCS-01 reconciliation | Intentional plan files committed; no tracked changes; separately owned files untouched | `flock /tmp/simple-main-restart12-push.lock bash -c 'env -u GH_TOKEN -u GITHUB_TOKEN git fetch origin main && git rebase origin/main && env -u GH_TOKEN -u GITHUB_TOKEN git push origin HEAD:main && env -u GH_TOKEN -u GITHUB_TOKEN git fetch origin main && git merge-base --is-ancestor HEAD origin/main && git diff --quiet && git diff --cached --quiet'` followed by `git status --short` and, only after reachability succeeds, `printf '%s WARN\n' "$(git rev-parse HEAD)" > /tmp/restart12-compiler_perf_a.done` | Commit hash, fetch/rebase/push output, reachability exit 0, clean status, updated lane-A WARN marker | merge owner | highest-capability reviewer |
@@ -390,7 +406,8 @@ corrected; `/root/reconciled_plan_review` (`gpt-5.6-sol`, high) then returned
 - [x] Fresh highest-capability review accepts this Stage-4-excluded continuation.
 - [x] Focused plan-quality gates pass; the global workspace-root strict audit
   truthfully remains WARN with 137 pre-existing unrelated manifest violations.
-- [x] Current receipt/PBL-03 reconciliation is committed and integrated through
-  the lane lock. Atomic implementation `2249dc49ac4e2d8f6d63626432fc8d7be6a12966`
-  is reachable; the final lane marker is refreshed only after the bookkeeping
-  push is proved reachable. Two unrelated untracked GUI reports are excluded.
+- [ ] The post-integration SimpleOS PBL-03 extension is committed and integrated
+  through the lane lock. Prior baseline
+  `56448da2b25bbe90523ad672b25db2abaef74a67` remains reachable; refresh the
+  final lane marker only after the new push is proved reachable. Two unrelated
+  untracked GUI reports are excluded.

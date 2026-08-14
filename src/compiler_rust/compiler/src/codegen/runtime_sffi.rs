@@ -1831,6 +1831,18 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     ), // ptr, capacity, row bytes, values, source stride/x/y, width/height -> copied pixels
     RuntimeFuncSpec::new("rt_file_write_bytes", &[I64, I64, I64, I64], &[I8]), // path, bytes -> bool
     RuntimeFuncSpec::new("rt_file_write_bytes_array", &[I64, I64], &[I8]), // path/data RuntimeValues -> bool
+    // SimpleOS syscall byte adapters. Every array occupies one RuntimeValue
+    // slot so its owner stays live through the consuming runtime call. In
+    // particular, rename retains both path owners and read/recv retain their
+    // mutable output owner for provider-side validated copyback.
+    RuntimeFuncSpec::new("rt_simpleos_file_open_bytes", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_simpleos_file_read_bytes", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_simpleos_file_write_bytes", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_simpleos_file_rename_bytes", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_simpleos_socket_bind_bytes", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_simpleos_socket_connect_bytes", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_simpleos_socket_send_bytes", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_simpleos_socket_recv_bytes", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_file_wrap_smf_dynlib", &[I64, I64, I64, I64, I64], &[I8]), // input, output, arch -> bool
     RuntimeFuncSpec::new("rt_file_extract_smf_dynlib", &[I64, I64, I64, I64], &[I8]), // input, output -> bool
     RuntimeFuncSpec::new("rt_file_move", &[I64, I64, I64, I64], &[I8]),        // src, dest -> bool
@@ -2212,6 +2224,29 @@ mod tests {
         let file_write = spec_for("rt_file_write_bytes_array").expect("scoped file-write byte adapter ABI");
         assert_eq!(file_write.params, [I64, I64]);
         assert_eq!(file_write.returns, [I8]);
+    }
+
+    #[test]
+    fn simpleos_syscall_adapters_keep_array_owners_in_the_call_abi() {
+        let expected: &[(&str, &[cranelift_codegen::ir::Type])] = &[
+            ("rt_simpleos_file_open_bytes", &[I64, I64]),
+            ("rt_simpleos_file_read_bytes", &[I64, I64, I64]),
+            ("rt_simpleos_file_write_bytes", &[I64, I64]),
+            ("rt_simpleos_file_rename_bytes", &[I64, I64]),
+            ("rt_simpleos_socket_bind_bytes", &[I64, I64]),
+            ("rt_simpleos_socket_connect_bytes", &[I64, I64]),
+            ("rt_simpleos_socket_send_bytes", &[I64, I64]),
+            ("rt_simpleos_socket_recv_bytes", &[I64, I64, I64]),
+        ];
+
+        for &(name, params) in expected {
+            let spec = spec_for(name).unwrap_or_else(|| panic!("missing SimpleOS syscall adapter ABI: {name}"));
+            assert_eq!(spec.params, params, "wrong owner-preserving parameters for {name}");
+            assert_eq!(spec.returns, [I64], "wrong syscall result ABI for {name}");
+        }
+
+        let rename = spec_for("rt_simpleos_file_rename_bytes").unwrap();
+        assert_eq!(rename.params, [I64, I64], "rename must retain both array owners");
     }
 
     #[test]
