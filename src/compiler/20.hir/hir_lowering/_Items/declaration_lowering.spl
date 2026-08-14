@@ -75,6 +75,62 @@ fn declaration_span_for(decl_idx: i64) -> Span:
     Span(start: s, end: e, line: span_line(span_id), col: span_col(span_id), file: "", length: e - s)
 
 impl HirLowering:
+    me lower_verification_contract_clause(
+        parser_clause: ContractClause,
+        kind: HirContractClauseKind,
+        binding_name: text,
+        binding_type: HirType,
+        require_bool: bool
+    ) -> HirContractClause:
+        self.symbols.push_scope(ScopeKind.Block)
+        if binding_name != "":
+            self.symbols.define(binding_name, SymbolKind.Variable, Some(binding_type), parser_clause.span, Visibility.Private, false, nil)
+        val predicate = self.lower_hir_expr(parser_clause.expr)
+        self.symbols.pop_scope()
+        if require_bool:
+            var predicate_is_bool = false
+            if predicate.has_type_:
+                match predicate.type_.kind:
+                    case HirTypeKind.Bool: predicate_is_bool = true
+                    case _: pass
+            if not predicate_is_bool:
+                self.error("FV2-E-CONTRACT-TYPE: contract predicate must have exact bool type", parser_clause.span)
+        HirContractClause(kind: kind, predicate: predicate, binding_name: binding_name, span: parser_clause.span)
+
+    me lower_verification_contract(contract: ContractBlock, return_type: HirType) -> HirContractBlock?:
+        var has_decreases = false
+        if val _measure = contract.decrease_measure:
+            has_decreases = true
+        val has_contract = contract.preconditions.len() > 0 or contract.invariants.len() > 0 or
+            contract.postconditions.len() > 0 or contract.error_postconditions.len() > 0 or
+            contract.proof_uses != "" or has_decreases
+        if not has_contract:
+            return nil
+        var normal_type = return_type
+        var error_type = HirType(kind: HirTypeKind.Unit, span: return_type.span)
+        var result_outcome = false
+        match return_type.kind:
+            case HirTypeKind.Result(ok_type, err_type):
+                normal_type = ok_type
+                error_type = err_type
+                result_outcome = true
+            case _: pass
+        if contract.error_postconditions.len() > 0 and not result_outcome:
+            self.error("FV2-E-CONTRACT-ERROR-OUTCOME: out_err requires Result return semantics", return_type.span)
+        var clauses: [HirContractClause] = []
+        for clause in contract.preconditions:
+            clauses.push(self.lower_verification_contract_clause(clause, HirContractClauseKind.Requires, "", return_type, true))
+        for clause in contract.invariants:
+            clauses.push(self.lower_verification_contract_clause(clause, HirContractClauseKind.StatePredicate, "", return_type, true))
+        for clause in contract.postconditions:
+            clauses.push(self.lower_verification_contract_clause(clause, HirContractClauseKind.EnsuresNormal, contract.postcondition_binding, normal_type, true))
+        for clause in contract.error_postconditions:
+            clauses.push(self.lower_verification_contract_clause(clause, HirContractClauseKind.EnsuresError, contract.error_binding, error_type, true))
+        if val measure = contract.decrease_measure:
+            clauses.push(self.lower_verification_contract_clause(measure, HirContractClauseKind.Decreases, "", return_type, false))
+        val outcome = if result_outcome: HirContractOutcome.Result else: HirContractOutcome.Plain
+        Some(HirContractBlock(clauses: clauses, proof_uses: contract.proof_uses, outcome: outcome))
+
     me lower_bootstrap_flat_function(decl_idx: i64) -> HirFunction:
         # Was Span.empty(), which made every bootstrap-path function report
         # line 0 downstream (DWARF decl_line, MIR instruction spans,
@@ -134,7 +190,8 @@ impl HirLowering:
             span: span,
             is_gpu_kernel: func_attr.is_gpu_kernel,
             gpu_target: func_attr.gpu_target,
-            gpu_backend_order: func_attr.gpu_backends
+            gpu_backend_order: func_attr.gpu_backends,
+            verification_contract: nil
         )
 
     me lower_function(fn_: ParserFunction) -> HirFunction:
@@ -422,6 +479,11 @@ impl HirLowering:
                     case _:
                         pass
 
+        # Contract predicates are lowered after return inference but while the
+        # function parameter scope is still active. Outcome bindings receive
+        # their exact normal/error type and never enter the executable body.
+        val verification_contract = self.lower_verification_contract(fn_.contract, return_type)
+
         # NOTE(#133): pop unconditionally, matching the unconditional push above.
         self.symbols.pop_scope()
         self.current_function = nil
@@ -494,7 +556,8 @@ impl HirLowering:
             span: fn_.span,
             is_gpu_kernel: fa.is_gpu_kernel,
             gpu_target: fa.gpu_target,
-            gpu_backend_order: fa.gpu_backends
+            gpu_backend_order: fa.gpu_backends,
+            verification_contract: verification_contract
         )
 
         # Validate async functions

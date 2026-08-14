@@ -1,9 +1,32 @@
 use std.spec.{describe, it, expect}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
-use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfaceBuilder, module_surfaces_from_modules}
 
 describe "module surfaces":
+    it "retains canonical and compiler aliases as scalar names on one physical surface":
+        val body = "pub fn shared_tick() -> i64:\n    1\n"
+        val module = parse_and_build_module(body, "src/compiler/10.frontend/core/shared.spl")
+        val canonical = SourceFile(
+            path: "src/compiler/10.frontend/core/shared.spl",
+            content: body,
+            module_name: "compiler.frontend.core.shared")
+        val compiler_core_alias = SourceFile(
+            path: "src/compiler/10.frontend/core/shared.spl",
+            content: body,
+            module_name: "compiler.core.shared")
+        var builder = ModuleSurfaceBuilder.new()
+        expect(builder.add_parsed(module, canonical, 0).is_ok()).to_equal(true)
+        expect(builder.add_alias(compiler_core_alias).is_ok()).to_equal(true)
+        expect(builder.resolve_export_origins().is_ok()).to_equal(true)
+        val result = builder.finish()
+        expect(result.is_ok()).to_equal(true)
+        val surfaces = result.unwrap()
+        expect(surfaces.surfaces.len()).to_equal(1)
+        expect(surfaces.index_by_name["compiler.frontend.core.shared"]).to_equal(0)
+        expect(surfaces.index_by_name["compiler.core.shared"]).to_equal(0)
+        expect(surfaces.ordered_indices).to_equal([0, 0])
+
     it "keeps a second physical source alias at index one":
         val first = parse_and_build_module("fn first() -> i64:\n    1\n", "first.spl")
         val second = parse_and_build_module("fn second() -> i64:\n    2\n", "second.spl")

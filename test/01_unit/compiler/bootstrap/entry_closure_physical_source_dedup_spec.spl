@@ -147,6 +147,27 @@ describe "entry-closure physical source deduplication":
         # `entry_modules.set(k, v)` while explaining why it is NOT used.
         expect(driver).to_not_contain("entry_modules = entry_modules.set(source.module_name")
         expect(driver).to_contain("entry_ctx.sources = unique_entry_sources")
+        # Parser modules are retained once per physical source, while every
+        # resolver spelling remains available through the compact surface map.
+        expect(driver).to_contain("var entry_surface_builder = ModuleSurfaceBuilder.new()")
+        expect(driver).to_contain("for source in unique_entry_sources:")
+        expect(driver).to_contain("for alias_source in entry_sources:")
+        expect(driver).to_contain("if alias_is_poisoned:")
+        expect(driver).to_contain("A poisoned\n                    # physical source intentionally has no surface to alias")
+        expect(driver).to_contain("entry_surface_builder.add_alias(alias_source)")
+        expect(driver).to_contain("entry_surface_builder.resolve_export_origins()")
+        expect(driver).to_contain("entry_ctx.module_surfaces = Some(entry_surfaces_result.unwrap())")
+        val origins_at = driver.find("entry_surface_builder.resolve_export_origins()") ?? -1
+        val finish_at = driver.find("entry_surface_builder.finish()") ?? -1
+        expect(origins_at).to_be_greater_than(-1)
+        expect(finish_at).to_be_greater_than(origins_at)
+        val hir_driver = rt_file_read_text("src/compiler/80.driver/driver_hir_pipeline_lowering.spl") ?? ""
+        expect(hir_driver).to_contain("if self.ctx.module_surfaces != nil:")
+        expect(hir_driver).to_contain("self.ctx.module_surfaces.unwrap()")
+        val retained_at = hir_driver.find("if self.ctx.module_surfaces != nil:") ?? -1
+        val fallback_at = hir_driver.find("elif self.ctx.sources.len() > 0:") ?? -1
+        expect(retained_at).to_be_greater_than(-1)
+        expect(fallback_at).to_be_greater_than(retained_at)
         expect(driver).to_contain(r"phase2:parse:closure:sources collected={entry_sources.len()} unique={unique_entry_sources.len()}")
 
     it "uses bucket sets for every phase-one closure membership role":

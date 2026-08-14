@@ -249,7 +249,16 @@ impl CompilerDriver:
                     log_build_progress("parse", "files", progress_parse_done,
                         unique_entry_sources.len(), source.path,
                         1, 6, 0, 0, "running")
-            for source in entry_sources:
+            # The returned context retains only unique_entry_sources below.
+            # Publishing every resolver alias here copied the large
+            # ParserModule value once per alias under staged-native codegen,
+            # growing Stage 3 RSS by roughly 1.5 GiB every 30 seconds after
+            # parse completion. Module-surface alias ownership is already
+            # preserved separately; materialize only the modules whose source
+            # rows survive in the returned context.
+            var entry_surface_builder = ModuleSurfaceBuilder.new()
+            var entry_surface_source_index: i64 = 0
+            for source in unique_entry_sources:
                 val physical_key = _driver_physical_source_key(source.path)
                 var parsed_idx: i64 = -1
                 var parsed_slot = _driver_text_bucket_index(
@@ -290,9 +299,48 @@ impl CompilerDriver:
                         "internal entry-closure parsed module box missing for {source.path}")
                     return (self.ctx, false)
                 entry_modules[source.module_name] = parsed_box.value
+                val surface_result = entry_surface_builder.add_parsed(
+                    parsed_box.value, source, entry_surface_source_index)
+                if surface_result.is_err():
+                    self.ctx.add_error(
+                        "entry-closure module surface error: {surface_result.unwrap_err()}")
+                    return (self.ctx, false)
+                entry_surface_source_index = entry_surface_source_index + 1
+            # Keep every resolver spelling as a scalar name -> surface index.
+            # ParserModule values remain physical-source unique; copying those
+            # large values once per alias caused the Stage3 RSS runaway.
+            for alias_source in entry_sources:
+                val alias_physical_key = _driver_physical_source_key(alias_source.path)
+                var alias_is_poisoned = false
+                var alias_poisoned_idx = 0
+                while alias_poisoned_idx < poisoned_physical_keys.len():
+                    if poisoned_physical_keys[alias_poisoned_idx] == alias_physical_key:
+                        alias_is_poisoned = true
+                        break
+                    alias_poisoned_idx = alias_poisoned_idx + 1
+                if alias_is_poisoned:
+                    # Preserve the collected parser diagnostic. A poisoned
+                    # physical source intentionally has no surface to alias.
+                    continue
+                val alias_result = entry_surface_builder.add_alias(alias_source)
+                if alias_result.is_err():
+                    self.ctx.add_error(
+                        "entry-closure module alias error: {alias_result.unwrap_err()}")
+                    return (self.ctx, false)
+            val entry_origins_result = entry_surface_builder.resolve_export_origins()
+            if entry_origins_result.is_err():
+                self.ctx.add_error(
+                    "entry-closure export origin error: {entry_origins_result.unwrap_err()}")
+                return (self.ctx, false)
+            val entry_surfaces_result = entry_surface_builder.finish()
+            if entry_surfaces_result.is_err():
+                self.ctx.add_error(
+                    "entry-closure module surface freeze error: {entry_surfaces_result.unwrap_err()}")
+                return (self.ctx, false)
             var entry_ctx: CompileContext = self.ctx
             entry_ctx.modules = entry_modules
             entry_ctx.sources = unique_entry_sources
+            entry_ctx.module_surfaces = Some(entry_surfaces_result.unwrap())
             if entry_sources.len() == 0:
                 entry_ctx.add_error(
                     "native entry source not found: {native_entry}")
