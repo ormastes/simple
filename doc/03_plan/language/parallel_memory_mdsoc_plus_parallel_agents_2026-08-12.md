@@ -85,7 +85,7 @@ separately instead of silently substituting the Rust seed.
 | AC-4 lifecycle, cancellation, no resurrection | **implemented; mixed evidence** | Actor stop is observable once, drains asks, and hosted native stop wakes receive. Process cancel revokes retained frames; natural exit/cancel/close record one terminal lifecycle receipt and one close attempt. | Obtain admitted Simple copied-ref and real-child cancellation/reap verdicts. |
 | AC-5 focused executable evidence | **partial** | Focused actor/process units and the five-step system spec contain non-vacuous assertions and AC/REQ traceability. Hosted actor tests pass; Stage-2 copied-frame isolation passes. Three Stage-2 system scenarios fail due aggregate/`Option` corruption, so no overall PASS is claimed. | Repair the compiler/runtime blocker and run the Simple specs once. |
 | AC-6 SPipe manual and maintenance | **authored; generation blocked** | The exact five frozen steps and matching operator manual exist with traceability and no skip-success path. | Stage-4 `spipe-docgen` and seven-score `sspec-maintain` remain unavailable; the authored manual is not labeled generated PASS. |
-| AC-7 production verification | **WARN / blocked** | An admitted Stage-2 compiler was produced; core C capsule self-check passed 33 checks. Hosted actor gates pass. Stage-3 exhausted three fix cycles on module-constant typing, and Stage-4 still exits 139. | Complete a fresh Stage-3/4 build, then run compiler/lib/MCP/LSP, focused Simple, lint, duplication, and SPipe gates. |
+| AC-7 production verification | **WARN / blocked** | An admitted Stage-2 compiler was produced; core C capsule self-check passed 33 checks. Hosted actor gates pass. A resumed Stage-3 lane repaired a corrupted defer-marker declaration and reached complete HIR across 616 files, but its third/final cycle still found fourteen untyped folded module constants in MIR lowering. Stage-4 still exits 139. | In a fresh bounded lane, make the Stage-2 diagnostic identify each remaining constant name/span before changing owners; then complete Stage 3/4 and run compiler/lib/MCP/LSP, focused Simple, lint, duplication, and SPipe gates. |
 | AC-8 guide and expert knowledge | **complete** | Architecture, detail design, guide, feature/layer experts, test plans, and blocker classifications reflect the landed actor/process contracts and current evidence. | Reopen if final review finds an overclaim or an interface changes. |
 | AC-9 cooperative review | **review complete; acceptance withheld** | A separate highest-capability reviewer inspected the merged diff. Three source findings were fixed and re-reviewed; the reviewer correctly withheld ACCEPT because AC-5..7 executable evidence remains WARN. | Repeat final acceptance after the staged/Stage-4 and SPipe blockers pass. |
 
@@ -150,8 +150,9 @@ separately instead of silently substituting the Rust seed.
 
 This lane produced the admitted pure-Simple Stage-2 binary at
 `build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple`.
-Stage-3 compilation was stopped after the mandatory three fix cycles; the last
-verdict remained module-constant type derivation failure. The repo-managed
+Stage-3 compilation was stopped after the mandatory three resumed cycles. It
+now completes HIR across the 616-file closure, but the final MIR verdict remains
+fourteen unnamed module-constant type derivation failures. The repo-managed
 Stage-4 wrapper still rejects tests because its bounded `test --help` ABI probe
 segfaults. The source guard is tracked by
 [native_selfhosted_run_segfault_startup_normalize_2026-07-24.md](../../08_tracking/bug/native_selfhosted_run_segfault_startup_normalize_2026-07-24.md).

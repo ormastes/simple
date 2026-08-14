@@ -18,6 +18,21 @@ The wrapper recorded exit 143 and correctly refused Stage 4/seed fallback.
 The session's three-cycle limit is exhausted; further localization is handed
 off rather than retried here.
 
+### Restart12 actor/process continuation
+
+The detached actor/process lane resumed the admitted Stage-2 artifact against
+the 616-file rebased closure. Cycle 1 completed HIR and found that commit
+`19336b52905` had concatenated the
+`fn defer_unsupported_marker(span: Span) -> Stmt:` header into its preceding
+comment; restoring the declaration removed all six unresolved-name errors.
+Cycle 2 received external SIGTERM 143 while four unrelated staged builders had
+reduced host free memory below 2 GiB, so it yielded no compiler verdict. Cycle
+3 ran after those builders exited, completed HIR, and reached MIR lowering, but
+again emitted fourteen unnamed `cannot derive module constant type from folded
+value` diagnostics. No candidate was produced and the three-cycle cap is
+exhausted. A fresh lane must first make the Stage-2 diagnostic print the
+constant name/span; another blind annotation sweep is not admitted.
+
 Follow-up history audit found the allocation owner: `ModuleSurfacesByName` had
 regressed from the reference-owned class established by `866559f16e0` to a
 value struct. The post-store validation call consequently copied the complete

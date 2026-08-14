@@ -25,9 +25,14 @@ the canonical architecture, guide, expert knowledge, and plans.
 - PASS: `git diff --check`, the working-tree direct-environment runtime guard,
   numbered-artifact guard, executable-spec layout guard, and focused
   placeholder/step-count scan.
-- WARN: Stage 3 exhausted the permitted three fix cycles on module-constant
-  type derivation. Explicit types were added throughout the exact build closure,
-  but the cap forbids another run in this session.
+- WARN: a resumed three-cycle Stage-3 pass on the rebased source first reached
+  complete HIR and exposed an upstream-corrupted
+  `defer_unsupported_marker` declaration. The declaration and focused
+  regression were repaired. Cycle 2 was externally terminated under concurrent
+  host memory pressure before a compiler verdict. Cycle 3, run after contention
+  cleared, completed HIR for all 616 closure files and then reported fourteen
+  remaining folded module constants without explicit types during MIR lowering.
+  The cap forbids another diagnostic/build cycle in this session.
 - WARN: the remaining Stage-2 system scenarios exposed aggregate/`Option`
   corruption: fragmented real-child delivery, atomic rollback, and cancellation
   did not produce valid executable verdicts. Assertions were retained.
