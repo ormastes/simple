@@ -2,7 +2,9 @@
 
 ## Plan status
 
-Plan complete; feature verification blocked. This document is the canonical
+Plan content accepted at `3fdfa0d3351` and the current operational reconciliation
+accepted by `/root/reconciled_plan_review`; focused gates and commit remain.
+Feature verification remains blocked. This document is the canonical
 handoff for `compiler_loader_script_crosslang_perf`. It records what is already
 implemented, what current evidence proves, and the exact remaining gates. A
 checked planning item means the handoff is specified, not that the underlying
@@ -42,6 +44,7 @@ lane, or absorbing unrelated GUI/web/2D files.
 | Loader blocker | `doc/08_tracking/bug/module_loader_negative_cache_stat_storm_2026-08-11.md` | Open verification condition retained |
 | Packed-byte history | `doc/08_tracking/bug/interpreter_byte_array_len_widening_spin_2026-08-13.md` | Fixed historical boundary/performance defect |
 | Packed-byte evidence gaps | `doc/08_tracking/bug/compiler_loader_packed_byte_evidence_gaps_2026-08-14.md` | Open PBL-01/02/03 test names, anchors, and unblock commands |
+| Build11 Stage 3 blocker | `doc/08_tracking/bug/build11_stage3_compile_context_corruption_2026-08-14.md` | Open fresh-lane corruption frontier after a clean 603-file parse |
 | Retained harness | `scripts/check/check-cross-language-perf.shs` | Present |
 | C facade selfcheck | `scripts/check/check-file-exists-probe-c.shs` | Present |
 
@@ -63,20 +66,22 @@ Current acceptance items, each to be verified once in this lane:
   evidence.
 - [ ] Run the optimizer audit on each touched `.spl` implementation file and
   address or explicitly disposition its findings.
-- [ ] Pass the focused SPipe performance specification and C provider
-  lifecycle/self-check gate with real assertions.
+- [x] Pass the independent C provider lifecycle/self-check gate with real assertions.
+- [ ] Pass the focused SPipe performance specification with real assertions.
 - [ ] Pass the compiler/core/lib and MCP/LSP checks required for compiler or
   library changes, including the core-runtime and MCP native smoke gates when
   the language/startup surface is affected.
 - [x] Record admitted self-hosted failed-probe reduction, warm latency, and
   maximum RSS evidence, or retain a concrete WARN blocker if bootstrap remains
   independently blocked after at most three fix cycles.
-- [ ] Commit all intentional changes, serialize integration with
+- [x] Commit the lane-A implementation change, serialize integration with
   `/tmp/simple-main-restart12-push.lock`, rebase onto fetched `origin/main`, push
   detached `HEAD:main` without token environment overrides, and prove the
   pushed commit is reachable from a freshly fetched `origin/main`.
-- [ ] Finish with a clean tree and only then write
+- [x] Finish lane A with a clean tree and only then write
   `/tmp/restart12-compiler_perf_a.done` as `<commit> PASS` or `<commit> WARN`.
+  Receipt: `adae82f3a50fca1ef700c187e4ad27fd7bbc8ddc WARN`, reachable
+  from the refreshed `origin/main` at lane close.
 
 Known blocker at lane start: prior Build11 Stage 2 could not type the compiler
 tree, so the admitted performance rows are pending. This lane first determines
@@ -123,7 +128,11 @@ architecture/detail-design completion.
 
 ## Acceptance matrix
 
-| ID | Requirement coverage | Acceptance condition | Authoritative evidence | Current state |
+REQ/NFR identifiers below are provisional identifiers declared by the executable
+spec. They become formal traceability only after the mandatory research and user
+selection flow produces the missing selected requirement documents.
+
+| ID | Provisional requirement coverage | Acceptance condition | Authoritative evidence | Current state |
 |---|---|---|---|---|
 | PBL-01 | REQ-008, NFR-003 | Index, slice, iteration, concat, clone, equality, freeze, and byte-valued mutation preserve packed storage; non-byte insertion widens once | `packed_byte_interpreter_semantics` plus focused driver mutator tests | BLOCKED — existing tests cover index/slice/iteration/mutators/widening/freeze; concat/clone/equality tests are missing and the prior session exhausted its three-cycle cap |
 | PBL-02 | REQ-008, NFR-003 | Identifier and projected-place mutators write back, preserve COW aliases, return removed elements, reject immutable/frozen receivers | `src/compiler_rust/driver/tests/interpreter_extern.rs` focused tests | BLOCKED — identifier/COW/removed/frozen tests exist; projected-place evidence is missing and the focused lane is capped |
@@ -134,8 +143,9 @@ architecture/detail-design completion.
 | BYT-01 | REQ-001/002/008, NFR-003/004 | Native byte fixture validates 1/4/32 MiB length, boundaries, checksum, fixture timing, and RSS at no more than four times payload before admitting a row | SSpec, retained byte contract, and cross-language harness | BLOCKED — contract exists; live retained row requires an admitted candidate |
 | XLG-01 | REQ-001/002, NFR-004 | C/Rust/Go/Python/Bun/Simple workloads have equivalent checksums, including `fib(35)=9227465`; unavailable peers remain unavailable | Retained schema/provenance/byte contract scripts | BLOCKED — contracts exist; fresh report requires an admitted candidate |
 | CMP-01 | REQ-007, NFR-001/005/006 | Self-hosted compiler checks for `src/compiler`, `src/lib`, MCP, LSP, and MCP stdio smoke pass without seed fallback | Commands below | BLOCKED — deployed candidate exists but is not admitted |
-| DOC-01 | all | Plan-facing summary, guide, feature/layer expert knowledge, blockers, and cooperative review are current; generated manual and traceability gaps stay explicit | Document review and layout guard | BLOCKED — plan-facing disposition and review are complete; generated manual, research, selected requirements, architecture, and live evidence remain outstanding |
-| VCS-01 | all | Only intentional files are committed; integration uses `/tmp/simple-main-restart12-push.lock`; refreshed `origin/main` contains HEAD; tree is clean except separately owned concurrent files | Git receipts | BLOCKED — plan commit and serialized integration remain pending |
+| PLN-01 | all | Canonical plan, guide, expert knowledge, blockers, and cooperative-review receipts are internally consistent and pass focused document gates | Document review and layout guard | PROVED — review accepted; SPipe wiring, spec-layout, and working/staged runtime guards pass. Global workspace-root strict audit remains WARN-blocked by 137 pre-existing unrelated manifest violations |
+| DOC-01 | all | Selected research/requirements, architecture, complete detail design, and generated manual provenance exist | Artifact review and admitted docgen | BLOCKED — research, user-selected requirements, architecture, complete design, and generated manual provenance remain outstanding |
+| VCS-01 | all | Only intentional lane-A files are committed; locked integration reaches refreshed `origin/main`; tree and lane marker are truthful | Git receipts | PROVED for lane A — `adae82f3a50...` is reachable and `/tmp/restart12-compiler_perf_a.done` records `WARN`; this documentation reconciliation requires its own commit after review |
 
 ## Manual-facing flow
 
@@ -186,18 +196,22 @@ most three distinct fix/verify cycles; never repeat an identical failed command.
    `cargo test -p simple-compiler interpreter_extern::sffi_array` and
    `cargo test -p simple-compiler --test packed_byte_foreign_capability_lifetime`.
    The latter fixed file and test names are specified in the tracking record.
-4. Resolver/facade evidence:
-   `sh scripts/check/check-file-exists-probe-c.shs`, then
+4. Resolver/facade evidence: the C selfcheck is independent and may run once
+   even when Stage 4 admission fails: `sh scripts/check/check-file-exists-probe-c.shs`.
+   The following SPipe command is admission-dependent and must stop after a
+   failed step 1:
    `release/x86_64-unknown-linux-gnu/simple test test/05_perf/compiler_loader_script_crosslang_perf_spec.spl
    --mode=interpreter --no-session-daemon` and require the authoritative file
    verdict with no dropped examples.
-5. Retained harness contracts:
+5. Retained harness source contracts may run once independently:
    `sh test/05_perf/profile_scripts/cross_language_compile_failure_contract_test.shs`;
    `sh test/05_perf/profile_scripts/cross_language_compiler_provenance_contract_test.shs`;
    `sh test/05_perf/profile_scripts/cross_language_byte_retained_contract_test.shs`;
    `sh test/05_perf/profile_scripts/cross_language_retained_schema_contract_test.shs`;
-   then `RUN_TIMEOUT=30 SIMPLE_BINARY="$PWD/release/x86_64-unknown-linux-gnu/simple" REPORT_PATH="$PWD/build/test-artifacts/05_perf/compiler_loader_script_crosslang_perf/cross_language_perf.md" sh scripts/check/check-cross-language-perf.shs`.
-6. Compiler/tool-server surface:
+   The live harness is admission-dependent and must stop after a failed step 1:
+   `RUN_TIMEOUT=30 SIMPLE_BINARY="$PWD/release/x86_64-unknown-linux-gnu/simple" REPORT_PATH="$PWD/build/test-artifacts/05_perf/compiler_loader_script_crosslang_perf/cross_language_perf.md" sh scripts/check/check-cross-language-perf.shs`.
+6. Compiler/tool-server surface (entirely admission-dependent; stop after a
+   failed step 1):
    `release/x86_64-unknown-linux-gnu/simple check src/compiler`;
    `release/x86_64-unknown-linux-gnu/simple check src/lib`;
    `release/x86_64-unknown-linux-gnu/simple check src/app/mcp`;
@@ -218,17 +232,29 @@ the same correctness/performance baseline before and after.
 
 | Blocked IDs | Missing prerequisite | Exact resume command | Retained artifacts | Owner | Final reviewer |
 |---|---|---|---|---|---|
-| PBL-01/02 | Fresh session after the previous three-cycle cap; tests named in `doc/08_tracking/bug/compiler_loader_packed_byte_evidence_gaps_2026-08-14.md` landed | `cd src/compiler_rust && cargo test -p simple-compiler --test packed_byte_interpreter_semantics && cargo test -p simple-driver --test interpreter_extern interpreter_byte_array_identifier_mutators -- --test-threads=1` | Full test logs and commit SHA | compiler-interpreter owner | highest-capability reviewer |
+| PBL-01 | Fresh session after the previous three-cycle cap; tests named in `doc/08_tracking/bug/compiler_loader_packed_byte_evidence_gaps_2026-08-14.md` landed | `cd src/compiler_rust && cargo test -p simple-compiler --test packed_byte_interpreter_semantics && cargo test -p simple-driver --test interpreter_extern interpreter_byte_array_identifier_mutators -- --test-threads=1` | Full test logs, deliberate-red receipt, and commit SHA | compiler-interpreter owner | highest-capability reviewer |
+| PBL-02 | Projected-place mutator regression named in the packed-byte tracking record is landed | `cd src/compiler_rust && cargo test -p simple-driver --test interpreter_extern interpreter_byte_array_projected_place_mutators_write_back -- --test-threads=1` | Focused deliberate-red and reverted-green logs plus commit SHA | compiler-interpreter owner | highest-capability reviewer |
 | PBL-03 | `src/compiler_rust/compiler/tests/packed_byte_foreign_capability_lifetime.rs` exists with the three named tests in the tracking record | `cd src/compiler_rust && cargo test -p simple-compiler --test packed_byte_foreign_capability_lifetime` | Test source, verdict, deliberate-red receipt | interpreter SFFI owner | highest-capability reviewer |
 | LDR-01/02, PRV-01, BYT-01, XLG-01, CMP-01 | Repair/redeploy an admitted self-hosted Stage 4 CLI per the linked repair plan/TODO | `test -x release/x86_64-unknown-linux-gnu/simple && release/x86_64-unknown-linux-gnu/simple --version && release/x86_64-unknown-linux-gnu/simple test --help && sh scripts/check/check-file-exists-probe-c.shs && release/x86_64-unknown-linux-gnu/simple test test/05_perf/compiler_loader_script_crosslang_perf_spec.spl --mode=interpreter --no-session-daemon && RUN_TIMEOUT=30 SIMPLE_BINARY="$PWD/release/x86_64-unknown-linux-gnu/simple" REPORT_PATH="$PWD/build/test-artifacts/05_perf/compiler_loader_script_crosslang_perf/cross_language_perf.md" sh scripts/check/check-cross-language-perf.shs && release/x86_64-unknown-linux-gnu/simple check src/compiler && release/x86_64-unknown-linux-gnu/simple check src/lib && release/x86_64-unknown-linux-gnu/simple check src/app/mcp && release/x86_64-unknown-linux-gnu/simple check src/app/simple_lsp_mcp && SIMPLE_LIB=src release/x86_64-unknown-linux-gnu/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter` | Binary path/hash, version/help logs, checker/spec logs, retained profile report, RSS receipts | compiler-loader performance owner | highest-capability reviewer |
+| LDR-01/02, PRV-01, BYT-01, XLG-01, CMP-01 — Build11 prerequisite | Repair the fresh Stage 3 corruption using the preserved admitted Stage 2 lineage | `sh scripts/bootstrap/resume-stage3-from-admitted.sh build/restart12-build11-a-r2/output` | `build/restart12-build11-a-r2/output/logs/x86_64-unknown-linux-gnu/{stage2,stage3}-native-build.log`, Stage 2/3 transcripts and sanity/provenance manifests, GDB backtrace, candidate hash | pure-Simple compiler-driver owner | highest-capability reviewer |
 | DOC-01 traceability | User-selected feature/NFR requirements plus missing research and architecture artifacts | Invoke `$research compiler_loader_script_crosslang_perf`; stop for mandatory explicit user selection; delete unchosen options; then invoke `$design compiler_loader_script_crosslang_perf`. Required outputs are `doc/01_research/local/compiler_loader_script_crosslang_perf.md`, `doc/01_research/domain/compiler_loader_script_crosslang_perf.md`, `doc/02_requirements/feature/compiler_loader_script_crosslang_perf.md`, `doc/02_requirements/nfr/compiler_loader_script_crosslang_perf.md`, `doc/04_architecture/compiler_loader_script_crosslang_perf.md`, and completed `doc/05_design/compiler_loader_script_crosslang_perf.md` | Local/domain research, selected requirement/NFR docs with no lingering options, architecture, completed detail design | research/design owner | user selection + highest-capability reviewer |
 | DOC-01 manual | Working admitted self-hosted docgen | `release/x86_64-unknown-linux-gnu/simple spipe-docgen test/05_perf/compiler_loader_script_crosslang_perf_spec.spl --output doc/06_spec --no-index` | Generated scenario sections, source hash/provenance, `0 stubs`, final readability review receipt | SPipe manual owner | highest-capability reviewer |
-| VCS-01 | Intentional plan files committed; no tracked changes; separately owned GUI reports left untouched | `flock /tmp/simple-main-restart12-push.lock bash -c 'env -u GH_TOKEN -u GITHUB_TOKEN git fetch origin main && git rebase origin/main && env -u GH_TOKEN -u GITHUB_TOKEN git push origin HEAD:main && env -u GH_TOKEN -u GITHUB_TOKEN git fetch origin main && git merge-base --is-ancestor HEAD origin/main && git diff --quiet && git diff --cached --quiet'` followed by `git status --short` and, only after reachability succeeds, `printf '%s PASS\n' "$(git rev-parse HEAD)" > /tmp/restart12-compiler_perf_b.done` | Commit hash, fetch/rebase/push output, reachability exit 0, status showing only separately owned files, `/tmp/restart12-compiler_perf_b.done` | merge owner | highest-capability reviewer |
+| VCS-01 reconciliation | Intentional plan files committed; no tracked changes; separately owned files untouched | `flock /tmp/simple-main-restart12-push.lock bash -c 'env -u GH_TOKEN -u GITHUB_TOKEN git fetch origin main && git rebase origin/main && env -u GH_TOKEN -u GITHUB_TOKEN git push origin HEAD:main && env -u GH_TOKEN -u GITHUB_TOKEN git fetch origin main && git merge-base --is-ancestor HEAD origin/main && git diff --quiet && git diff --cached --quiet'` followed by `git status --short` and, only after reachability succeeds, `printf '%s WARN\n' "$(git rev-parse HEAD)" > /tmp/restart12-compiler_perf_a.done` | Commit hash, fetch/rebase/push output, reachability exit 0, clean status, updated lane-A WARN marker | merge owner | highest-capability reviewer |
 
 The implementation handoff remains WARN/BLOCKED, never verify PASS or release.
 No unavailable row is excluded or converted to `skip()`.
 
 ## Evidence semantics
+
+### Host matrix
+
+| Host | Disposition |
+|---|---|
+| Linux with GNU `/usr/bin/time` and `timeout` | Runnable after candidate admission; retain OS/kernel/CPU/memory/tool versions with every sample |
+| macOS, FreeBSD, Windows, or Linux without GNU time or `timeout` | UNAVAILABLE until a host-specific command and equivalent RSS/timing contract are selected and reviewed |
+
+Never aggregate or compare samples collected on different hosts as one
+performance row. Cross-host results remain separate capability rows.
 
 The canonical counter is at the `rt_file_exists` facade and counts failed
 existence probes, not syscalls. Native C/Rust providers admit a lease before the
@@ -243,6 +269,16 @@ the payload, and keeps fixture timing separate from host p50/p95 wall samples.
 Unsupported hosts remain unavailable.
 
 ## Cooperative review
+
+The receipts below through cycle 3 are historical and bind revision
+`3fdfa0d3351`. The present reconciliation has fresh parallel audits from
+`/root/traceability_audit` and `/root/operator_audit`; their findings are merged
+here and require a new higher-capability acceptance receipt before `PLN-01` is
+proved. `/root/command_receipt_check` accepted all new commands and receipts;
+`/root/status_consistency_check` found one stale historical statement, which was
+corrected; `/root/reconciled_plan_review` (`gpt-5.6-sol`, high) then returned
+`ACCEPT` after the Linux host row was made consistent with the GNU time plus
+`timeout` requirement.
 
 - `/root/plan_evidence_audit` (`gpt-5.6-luna`, high), read-only evidence scope:
   found Stage 4 admission, packed coverage, traceability, and manual-provenance
@@ -260,14 +296,16 @@ Unsupported hosts remain unavailable.
 - The same reviewer, cycle 3: `ACCEPT`. It accepted plan completeness and
   done-state honesty while feature/manual/research/design/live gates remain
   explicitly BLOCKED.
-- Only the future generated-manual readability review remains assigned to the
-  highest-capability reviewer after admitted docgen. The generated manual itself
-  is BLOCKED; plan done-state review is accepted.
+- At historical revision `3fdfa0d3351`, only the future generated-manual
+  readability review remained assigned after admitted docgen. The generated
+  manual remains BLOCKED; the reconciled plan's done-state review is pending the
+  fresh receipt recorded above.
 
 ## Plan completion checklist
 
 - [x] Scope and non-goals are explicit.
-- [x] Every feature requirement surface has an acceptance row and owner.
+- [x] Every provisional spec requirement surface has an acceptance row; blocked
+  ownership is supplied by the matching ledger row.
 - [x] Current evidence is separated from pending live verification.
 - [x] Missing artifacts/helpers are called out instead of inferred.
 - [x] Every blocker has a prerequisite, resume command, retained artifact,
@@ -275,5 +313,7 @@ Unsupported hosts remain unavailable.
 - [x] Manual step and checker vocabulary is frozen.
 - [x] Lower-model audits are merged.
 - [x] Guide/wiki and plan-facing manual summary/dispositions are updated; generated manual completion remains BLOCKED.
-- [x] Highest-capability review accepts the merged plan.
-- [ ] Focused plan-quality gates pass and intentional files are committed.
+- [x] Fresh highest-capability review accepts this reconciled revision.
+- [x] Focused plan-quality gates pass; the global workspace-root strict audit
+  truthfully remains WARN with 137 pre-existing unrelated manifest violations.
+- [ ] Intentional files are committed and integrated through the lane lock.

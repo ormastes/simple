@@ -39,6 +39,13 @@ This planning lane does not claim missing runtime performance evidence, rebuild 
 
 ### Review receipts
 
+The receipts through cycle 3 bind historical revision `3fdfa0d3351`. Fresh
+parallel audits by `/root/traceability_audit` and `/root/operator_audit` found
+post-review operational drift. Their findings were reconciled, two narrow
+parallel checks accepted the command/status corrections, and
+`/root/reconciled_plan_review` (`gpt-5.6-sol`, high) returned `ACCEPT` after one
+host-matrix correction.
+
 - `/root/plan_evidence_audit` (`gpt-5.6-luna`, high): read-only acceptance/evidence audit. Verdict: gaps found in Stage 4 admission, packed-byte coverage, traceability, and generated-manual provenance. Disposition: merged into the matrix and blocker ledger.
 - `/root/guide_wiki_audit` (`gpt-5.6-luna`, high): read-only guide/wiki/manual audit. Verdict: stale completion language and incomplete manual status. Disposition: merged into the operator documents.
 - `/root/high_model_plan_review` (`gpt-5.6-sol`, xhigh), cycle 1: `REJECT`. Required normalized evidence verdicts, literal commands, concrete tracking records, review receipts, and non-premature completion/manual wording. Disposition: corrections in progress; one bounded re-review required.
@@ -56,3 +63,6 @@ dev-done
 - review-1: Highest-capability reviewer rejected the draft; applying all six correction groups before the single re-review.
 - review-2: Highest-capability reviewer found four residual exactness gaps; corrected them and requested the final bounded cycle-3 review.
 - review-3: Highest-capability reviewer accepted the corrected plan; operational gates, commit, and integration remain.
+- reconcile: Fresh parallel audits identified the lane-A/lane-B receipt error, missing Build11 Stage3 resume row, projected-place command gap, and conflated failure frontiers; all were corrected before final review.
+- reconcile-review: Command/receipt check accepted; status check's one historical-wording finding was fixed; higher-capability review accepted the current reconciliation after the runnable Linux row required both GNU time and `timeout`.
+- gates: SPipe wiring, `doc/06_spec` layout, and working/staged direct-env guards passed once. Workspace-root strict audit reported 137 pre-existing unrelated manifest violations; retained as WARN without broadening scope.

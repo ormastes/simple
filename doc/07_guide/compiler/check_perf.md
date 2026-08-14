@@ -21,10 +21,15 @@ source contract is
 operator manual is
 `doc/06_spec/05_perf/compiler_loader_script_crosslang_perf_spec.md`.
 
-Current status is **plan complete, feature verification blocked**. The tree has
-the resolver negative-cache and packed-byte write-back changes. A deployed
-candidate exists at `release/x86_64-unknown-linux-gnu/simple`, but its wrapper
-ABI/help probe segfaults and it is not admitted Stage 4 evidence. Do not use
+Current status is **plan content accepted; operational reconciliation pending;
+feature verification blocked**. The tree has the resolver negative-cache and
+packed-byte write-back changes. The older deployed candidate exists at
+`release/x86_64-unknown-linux-gnu/simple`, but its wrapper ABI/help probe
+segfaults and it is not admitted Stage 4 evidence. Separately, fresh Build11
+Stage2 parses all 603 Stage3 files and exits 139 before the first HIR progress
+row; follow
+`doc/08_tracking/bug/build11_stage3_compile_context_corruption_2026-08-14.md`.
+Do not use
 the Rust bootstrap seed to replace loader, timing, RSS, compiler, MCP, LSP, or
 SPipe evidence. Two checker names found in detached historical work —
 `check-compiler-loader-perf.shs` and

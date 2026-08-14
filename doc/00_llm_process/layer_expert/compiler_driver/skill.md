@@ -27,14 +27,16 @@ to it. Keep the interpret exclusion explicit in
 ## Performance evidence
 
 The compiler-loader negative-cache and packed-byte performance handoff lives at
-`doc/03_plan/sys_test/compiler_loader_script_crosslang_perf.md` (plan complete;
-feature verification blocked). Preserve its
+`doc/03_plan/sys_test/compiler_loader_script_crosslang_perf.md` (plan content
+accepted; operational reconciliation pending; feature verification blocked).
+Preserve its
 distinction between facade failed-existence probes and filesystem syscalls, its
 caller-sensitive cache key and reset generation, and its admitted-self-hosted
-evidence rule. The plan is complete, but live feature verification remains
-blocked until the deployed candidate's segfaulting admission probe is repaired
-and an admitted Stage 4 CLI can rerun the capped packed-byte mutator lane in a
-fresh session.
+evidence rule. Live feature verification remains blocked by two distinct
+prerequisites: the older deployed candidate's wrapper/help admission segfault,
+and fresh Build11 Stage3 context corruption after a clean 603-file parse but
+before its first HIR progress row. The latter is tracked at
+`doc/08_tracking/bug/build11_stage3_compile_context_corruption_2026-08-14.md`.
 
 For a one-file interpreted entry, measure wall time and max RSS through the
 normal `bin/simple` command. A run that never reaches user code is source-loader
@@ -54,9 +56,10 @@ size in the result receipt, and publish cache checkpoints only through the
 parent completion hook. Do not call this real concurrency: the current
 builder branch batches sequentially, and process workers need a complete codec.
 
-## Stage 3 MIR receiver corruption handoff (2026-08-14)
+## Separate RV64 Stage 3 MIR receiver corruption handoff (2026-08-14)
 
-The current RV64 prerequisite bootstrap reaches HIR with zero errors, then its
+This is not the Build11 compiler-loader frontier above. The RV64 prerequisite
+bootstrap reaches HIR with zero errors, then its
 Stage 3 log ends in MIR method-call lowering with an impossible receiver local
 ID. Inspect `method_calls_literals.spl` receiver resolution/writeback and the
 `value_struct_layout.spl` push-heavy caller shapes. Do not claim the direct
