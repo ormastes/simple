@@ -1,6 +1,6 @@
 # Bootstrap planner v1 unbound authorization
 
-Status: OPEN — v2 source contract is fail-closed; no admitted producer exists
+Status: OPEN — v3 design is frozen; producer and consumer are absent
 
 The version-1 planner receipt authorized any target with a bootstrap or release
 prefix and bound only a typed reason. It did not identify the admitted parent
@@ -28,5 +28,50 @@ Focused negative evidence is
 pure-Simple source boundary is covered by
 `test/01_unit/compiler/bootstrap_reason_planner_admission_source_contract_spec.spl`.
 Neither test builds or runs a planner. Operational closure still requires an
-admitted parent, a built planner, a real smoke receipt, and a resulting v2
+admitted parent, a built planner, a real smoke receipt, and a resulting v3
 admission before any bootstrap stage starts.
+
+## Planner admission v3 frozen contract
+
+Version 2 is permanently legacy because hashes without their canonical
+transcripts cannot be semantically replayed. Version 3 admits only an envelope
+published by `scripts/check/produce-bootstrap-planner-admission.shs`, whose
+canonical path and pre/post SHA-256 are bound. The producer requires a
+parent compiler whose `stage2-admitted` and sanity identities are semantically
+anchored by verified Stage3 provenance-v3. It freezes that parent binary,
+provenance, sanity evidence, runtime, source closure, git state, and a fixed
+trusted-tool snapshot before creating any output. A fresh search found no
+currently usable immutable lineage satisfying that prerequisite.
+
+The producer owns the output lock and a private sibling staging directory. Its
+sealed evidence directory is read-only during child execution; build and smoke
+children receive distinct bounded writable directories. Paths, arguments and
+environment values containing line, tab, equals, carriage-return, or NUL
+delimiters are rejected. Exact cwd, argv and allow-listed environment
+transcripts are stored as canonical files and hash-bound, not represented only
+by digests. Build and smoke each record their OS-observed child PID, exit
+status, timeout status, stdout, stderr, combined log and hashes. Output is
+size-bounded and a timeout is mandatory.
+
+Positive completion requires exit zero, a non-empty planner, the exact native
+build completion marker with a positive compiled count, no fallback, stub,
+TODO, unresolved-symbol, or zero-output marker, and an exact authorization leaf
+derived by the producer. The planner never authors the admission envelope.
+Smoke is replayed in a fresh isolated directory with the same semantic argv,
+environment and cwd and must produce the identical authorization while leaving
+the candidate, producer, sealed evidence, and canonical destination unchanged.
+
+Before execution the producer rejects non-canonical, symlinked, existing, or
+out-of-root outputs. It rechecks all frozen identities and its own hash after
+both children, publishes the complete evidence tree and ordered receipt by one
+atomic sibling rename, and cleans staging and lock state on every signal or
+failure. Partial publication and overwrite are forbidden. A future public
+consumer must accept v3 only and replay every hash, transcript, semantic
+authorization, terminal record, bound, containment and immutability assertion.
+No v3 producer or consumer is implemented today. V1, v2,
+orphan, fixture, fallback, partial and structurally forged receipts fail.
+
+The boundary protects against accidental or child-process evidence mutation.
+A hostile same-UID process can still chmod a 0500 directory; cryptographic
+protection against that threat requires an external signing/credential owner
+and is outside this local bootstrap evidence boundary.
