@@ -1,0 +1,132 @@
+"""
+# Async HTTP Worker — dynamic handlers dispatch through the registry
+
+## Overview
+
+A matched location with a non-static handler_type must reach the REGISTERED
+handler through the handler registry, under a server-established security
+context — never the inline static file handler (assessment finding P0-D:
+the worker previously invoked the inline static handler for EVERY matched
+location, so registered application handlers were unreachable).
+
+This manual proves the worker's dispatch decision (`is_dynamic_handler`) and
+the registry invocation chain the worker now uses
+(`dispatch_with_task_remote_security_context`): the registered handler runs,
+it observes the transport-established security identity while running, the
+context is cleared after dispatch returns, and an unregistered type answers
+501 instead of silently falling back to static file serving.
+
+## Dispatch decision
+
+| location.handler_type | Path taken |
+|-----------------------|------------|
+| `"static"` or `""` | inline static fast path (with path-safety guard) |
+| anything else (`app`, `proxy`, ...) | handler registry under task security context |
+
+## Examples
+
+```simple
+var registry = HandlerRegistry.new()
+registry.register("app", my_api_handler)
+val resp = dispatch_with_task_remote_security_context(registry, task_id, location, request)
+# my_api_handler ran with current_task_security_context(task_id) established
+```
+
+## Troubleshooting
+
+- A 501 "No handler registered" means the location's handler_type has no
+  registry entry — register one or change the location config.
+- A handler observing an anonymous context is expected: the transport
+  boundary never trusts client-supplied permission headers as authority;
+  authentication is layered on via the validated-token dispatch variants.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/simple_erp.md
+**Design:** N/A
+**Research:** doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md
+
+Lane: .spipe/simple_enterprise_suite (Wave A, AC-4).
+"""
+
+use std.spec.*
+use std.http_server.worker.{is_dynamic_handler}
+use std.http_server.handler.{HandlerRegistry}
+use std.http_server.security_context.{dispatch_with_task_remote_security_context}
+use std.http_server.types.{HttpRequestData, HttpResponseData, LocationConfig, default_response_data}
+use std.security.auth.context_propagation.{current_task_security_context}
+
+fn api_location() -> LocationConfig:
+    LocationConfig(
+        pattern: "/api",
+        match_type: "prefix",
+        handler_type: "app",
+        root: "",
+        proxy_pass: "",
+        middlewares: []
+    )
+
+fn api_request() -> HttpRequestData:
+    HttpRequestData(
+        method: "GET",
+        path: "/api/orders",
+        query: "",
+        version: "HTTP/1.1",
+        headers: [("X-Simple-Session-Id", "session-dispatch")],
+        body: "",
+        params: {},
+        peer_addr: "203.0.113.9"
+    )
+
+# The registered handler proves BOTH that it ran (marker body) and that a
+# server-established task security context was active while it ran.
+fn marker_api_handler(request: HttpRequestData, location: LocationConfig) -> HttpResponseData:
+    val ctx = current_task_security_context("task-dispatch-spec")
+    default_response_data(200, "OK", "api-handler-ran|" + ctx.peer_addr + "|" + request.path)
+
+describe "async worker — dispatch decision":
+    it "routes static locations to the inline fast path":
+        step("Classify the built-in static handler type")
+        expect(is_dynamic_handler("static")).to_be(false)
+        expect(is_dynamic_handler("")).to_be(false)
+
+    it "routes app/proxy handler types through the registry":
+        step("Classify dynamic handler types")
+        expect(is_dynamic_handler("app")).to_be(true)
+        expect(is_dynamic_handler("proxy")).to_be(true)
+        expect(is_dynamic_handler("observe-security")).to_be(true)
+
+describe "async worker — registered handler runs under security context":
+    it "invokes the registered dynamic handler, not the static handler":
+        step("Register an 'app' handler in the registry")
+        var registry = HandlerRegistry.new()
+        registry.register("app", marker_api_handler)
+
+        step("Dispatch a matched /api request the way the worker does")
+        val resp = dispatch_with_task_remote_security_context(registry, "task-dispatch-spec", api_location(), api_request())
+
+        step("Verify the REGISTERED handler produced the response")
+        expect(resp.status).to_equal(200)
+        expect(resp.body.starts_with("api-handler-ran")).to_be(true)
+        expect(resp.body.contains("/api/orders")).to_be(true)
+
+    it "establishes the request's transport identity in the handler's context":
+        var registry = HandlerRegistry.new()
+        registry.register("app", marker_api_handler)
+        step("Dispatch and read the peer address the handler observed")
+        val resp = dispatch_with_task_remote_security_context(registry, "task-dispatch-spec", api_location(), api_request())
+        expect(resp.body.contains("203.0.113.9")).to_be(true)
+
+    it "clears the task security context after dispatch returns":
+        var registry = HandlerRegistry.new()
+        registry.register("app", marker_api_handler)
+        val resp = dispatch_with_task_remote_security_context(registry, "task-dispatch-spec", api_location(), api_request())
+        expect(resp.status).to_equal(200)
+        step("Verify no residual authenticated context remains")
+        val after = current_task_security_context("task-dispatch-spec")
+        expect(after.is_authenticated()).to_be(false)
+
+    it "answers 501 when no handler is registered for the type":
+        step("Dispatch against an EMPTY registry")
+        val registry = HandlerRegistry.new()
+        val resp = dispatch_with_task_remote_security_context(registry, "task-dispatch-spec", api_location(), api_request())
+        expect(resp.status).to_equal(501)

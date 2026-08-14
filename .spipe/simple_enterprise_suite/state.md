@@ -150,3 +150,23 @@ implement (Wave A in progress)
   this policy and appear unwired into the async request path — unify onto
   http_core; (c) AC-4 dynamic dispatch wiring in worker.process_request still
   calls inline_static_handler unconditionally (assessment P0-D) — next slice.
+- implement Wave A slice 2 (2026-08-14): AC-4 dispatch wired — worker
+  process_request now routes non-static handler_type through
+  execute_handler_with_remote_security_context (registry + task security
+  context); pure is_dynamic_handler decision fn added. AC-1 routing dedup —
+  match_route_pattern/extract_route_params moved into http_core; sync router
+  re-exports, async router imports (its former local copies deleted). New
+  spec async_dynamic_dispatch_spec 6/6 (registered handler runs, observes
+  transport identity, context cleared after dispatch, empty registry → 501).
+  Re-runs green: async_path_safety 8/8, sync path_safety 30/30,
+  parser_limits 23/23, http_core 23/23, async_parser_limits 18/18.
+  Docgen: manuals generated for all 4 new specs (http_core manual OK at 104
+  doc lines; async three WARN <100 lines; the only "stub" counted is the
+  docgen tool's own AUTO `main` doc — pre-existing quirk, not lane specs).
+  New guide doc/07_guide/lib/networking/http_server_hardening.md (+_tldr).
+  EVIDENCE CAVEAT: runner bin/release/aarch64-apple-darwin/simple prints the
+  Rust-seed banner on some commands — spec evidence is interpreter-mode
+  diagnostic; re-verify on a fresh stage4 self-hosted deploy (the current
+  macho-dir deploy is bootstrap-only, no `test`) before release claims.
+  Remaining for Wave A verify: live-socket system spec for dynamic dispatch;
+  unify std.http.{limits,path_security} tier copies onto http_core.

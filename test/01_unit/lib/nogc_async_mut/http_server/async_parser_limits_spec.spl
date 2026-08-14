@@ -1,13 +1,49 @@
 """
 # Async HTTP Parser — request limits enforced during parsing
 
+## Overview
+
 The async server's incremental parser must enforce the same request limits as
 the sync server (shared `std.common.net.http_core` policy), and it must do so
 DURING parsing — before buffer growth — so a hostile client cannot exhaust
 memory with an endless request line, oversized headers, or an oversized body.
 
 Each limit is proven at the boundary (accepted) and boundary+1 (rejected),
-using `HttpRequestParser.with_limits` so the fixtures stay small.
+using `HttpRequestParser.with_limits` so the fixtures stay small. The
+"endless" cases additionally prove the parser cuts a client off while the
+terminator has NOT yet arrived — the memory-exhaustion scenario an
+after-the-fact check cannot catch.
+
+## Limit matrix proven here
+
+| Limit | Boundary case | Over-limit case | Streaming case |
+|-------|---------------|-----------------|----------------|
+| Request line | exact length accepted | +1 byte → 431 | endless line cut off |
+| Header line | exact length accepted | +1 byte → 431 | endless header cut off |
+| Header count | exact count accepted | +1 header → 431 | — |
+| Body (Content-Length) | exact size accepted | declared +1 → 413 pre-buffer | rejected before body bytes |
+| Body (chunked) | small body decoded | decoded over limit → 413 | raw accumulation cut off → 413 |
+
+## Examples
+
+```simple
+var p = HttpRequestParser.with_limits(64, 100, 8192, 10485760)
+val r = p.feed("GET /" + long_path + " HTTP/1.1\r\n")
+# Err(ParseError("431 Request line too long: ...")) once the limit is crossed
+```
+
+## Troubleshooting
+
+- `431` in `error_message` — a line/header limit fired during parsing.
+- `413` — the declared or decoded body exceeds `max_body`; note the
+  rejection happens BEFORE body bytes are buffered.
+- `400` — duplicate/invalid Content-Length or Content-Length combined with
+  chunked (smuggling ambiguity), decided by the shared core.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/simple_erp.md
+**Design:** N/A
+**Research:** doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md
 
 Lane: .spipe/simple_enterprise_suite (Wave A, AC-2).
 """

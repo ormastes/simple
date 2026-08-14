@@ -1,10 +1,49 @@
 """
 # Async HTTP Router — path traversal rejected before any handler
 
+## Overview
+
 The async router must reject traversal/escape paths BEFORE location matching,
 so neither the inline static handler nor any dynamic handler ever sees an
 unsafe path. The guard is the shared `std.common.net.http_core.path_is_safe`
 — the same one the sync router uses — so the two transports cannot drift.
+The worker additionally re-checks the path in its inline static handler
+before concatenating `root + path` (defence in depth), and maps a router
+rejection to a 400 response rather than a 404.
+
+## Rejected path shapes
+
+| Shape | Example |
+|-------|---------|
+| Dot-dot segment | `/static/../etc/passwd` |
+| Encoded dot-dot | `/static/%2e%2e/secret` |
+| Encoded-slash traversal | `/..%2fsecret` |
+| Double-slash bypass | `//etc/passwd` |
+| Null-byte injection | `/index.html%00.png` |
+
+Legitimate names that merely contain dots (`/release..notes.txt`) stay
+routable.
+
+## Examples
+
+```simple
+val router = AsyncRouter.new([static_root_location])
+val r = router.route(request_for("/../x"))
+# Err(ParseError("400 Bad Request: unsafe path")) — no location was matched
+```
+
+## Troubleshooting
+
+- A 400 with "unsafe path" means the traversal guard fired at the router;
+  the request never reached location matching or any handler.
+- If a path you consider legitimate is rejected, check it against the
+  shared `path_is_safe` corpus in `http_core_spec` — the rule set is
+  deliberately identical across transports.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/simple_erp.md
+**Design:** N/A
+**Research:** doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md
 
 Lane: .spipe/simple_enterprise_suite (Wave A, AC-3).
 """

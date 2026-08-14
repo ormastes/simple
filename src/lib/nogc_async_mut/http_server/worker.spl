@@ -665,7 +665,13 @@ class Worker:
         val route_result = self.router.route(request)
         match route_result:
             Ok((location, params)):
-                var resp = self.inline_static_handler(location, request)
+                # AC-4 (assessment P0-D): dynamic handler types dispatch through
+                # the handler registry under a server-established security
+                # context; only static locations use the inline fast path.
+                var resp = if is_dynamic_handler(location.handler_type):
+                    self.execute_handler_with_remote_security_context(location, request)
+                else:
+                    self.inline_static_handler(location, request)
                 resp = compress_response(request, resp)
                 self.send_response(fd, resp, now)
 
@@ -1058,6 +1064,12 @@ class Worker:
 
         for fd in h2_to_close:
             self.close_h2_connection(fd)
+
+# is_dynamic_handler decides whether a matched location dispatches through the
+# handler registry (under a server-established security context) or the inline
+# static fast path. Pure — unit-tested by async_dynamic_dispatch_spec (AC-4).
+fn is_dynamic_handler(handler_type: text) -> bool:
+    handler_type != "static" and handler_type != ""
 
 fn worker_static_file_route(caps: NetBackendCapabilities, resp: HttpResponseData) -> text:
     """Return the worker route for a response body."""
