@@ -1,6 +1,8 @@
 use std.nogc_sync_mut.src.collections.hashset.{hashset_with_capacity}
 use std.nogc_sync_mut.src.collections.hashmap.{hashmap_with_capacity}
 
+extern fn rt_file_read_text(path: text) -> text
+
 describe "nogc_sync_mut HashSet":
     it "preserves membership after removal from preallocated table":
         var set = hashset_with_capacity(3)
@@ -41,3 +43,25 @@ describe "nogc_sync_mut HashSet":
         expect(set.contains("module/1000")).to_equal(false)
         expect(cache.get("module/999") ?? "").to_equal("path/999")
         expect(cache.get("module/1000")).to_be_nil()
+
+    it "uses bounded occupancy operations for known-new insert and retained clear":
+        var set = hashset_with_capacity(4)
+        expect(set.insert_known_new_no_resize("alpha")).to_equal(true)
+        expect(set.insert_known_new_no_resize("beta")).to_equal(true)
+        expect(set.contains("alpha")).to_equal(true)
+        expect(set.contains("beta")).to_equal(true)
+
+        set.clear_retaining_storage()
+        expect(set.len()).to_equal(0)
+        expect(set.contains("alpha")).to_equal(false)
+        expect(set.contains("beta")).to_equal(false)
+
+        expect(set.insert_known_new("gamma")).to_equal(true)
+        expect(set.len()).to_equal(1)
+        expect(set.contains("gamma")).to_equal(true)
+
+    it "does not export packed occupancy storage as a raw address":
+        val source = rt_file_read_text("src/lib/nogc_sync_mut/src/collections/hashset.spl")
+        expect(source.index_of("rt_array_data_ptr_u8")).to_equal(-1)
+        expect(source).to_contain("while self.slot_used[slot] != 0u8:")
+        expect(source).to_contain("self.slot_used[i] = 0u8")

@@ -146,7 +146,7 @@ selection flow produces the missing selected requirement documents.
 |---|---|---|---|---|
 | PBL-01 | REQ-008, NFR-003 | Index, slice, iteration, concat, clone, equality, freeze, and byte-valued mutation preserve packed storage; non-byte insertion widens once | Green focused tests plus `doc/09_report/compiler_loader_packed_byte_deliberate_red_evidence_2026-08-14.md` | PROVED at Rust interpreter boundary — final suites pass 4/4, 1/1 representation concat, and 4/4 identifier cases; named deliberate-red fails status 101 and is reverted |
 | PBL-02 | REQ-008, NFR-003 | Identifier and projected-place mutators write back, preserve COW aliases, return removed elements, reject immutable/frozen receivers | Green focused tests plus `doc/09_report/compiler_loader_packed_byte_deliberate_red_evidence_2026-08-14.md` | PROVED at Rust interpreter boundary — final identifier cases pass 4/4 and projected-place write-back 1/1; named deliberate-red fails status 101 and is reverted |
-| PBL-03 | REQ-008, NFR-003/006 | Foreign packed-byte pointers are input-only, descriptor-bounded, nested adapters are scoped, and capabilities cannot escape a call | Production foreign-dispatch route plus compile-fail/equivalent escape enforcement | BLOCKED — current `rt_array_data_ptr_u8 -> i64` ABI outlives its producer call and leaks materialized bytes; a typed one-call adapter or owner-revoked opaque token migration is required |
+| PBL-03 | REQ-008, NFR-003/006 | Foreign packed-byte pointers are input-only, descriptor-bounded, nested adapters are scoped, and capabilities cannot escape a call | Production foreign-dispatch route plus compile-fail/equivalent escape enforcement | BLOCKED — HashSet's three stored raw addresses are migrated to bounded indexing (Stage-2 compile evidence); eight owners and 23 uses remain. The pointer-returning ABI still requires an atomic 15-wrapper interpreter/native/codegen cutover and final symbol removal. A single Stage-2 optimizer-build attempt timed out at 180 seconds with no candidate |
 | LDR-01 | REQ-004/005/006/007, NFR-002 | Exact repeated miss caches once; adjacent callers remain distinct; reset invalidates; resolution result is unchanged | Focused SSpec and resolver unit coverage | BLOCKED — implementation is present; fresh admitted self-hosted execution is unavailable |
 | LDR-02 | REQ-004/005, NFR-001/002/006 | 100 reset-per-request resolutions versus 1000 retained requests produce identical results, uncached counts 100/1, positive failed-probe baseline, and cached probes at most 10% | SSpec plus C facade selfcheck | BLOCKED — contracts are present; fresh admitted self-hosted measurement is unavailable |
 | PRV-01 | REQ-001/003, NFR-005 | Exact executable path/hash and actual mode are admitted; seed, stale hash, requested/actual mismatch, and fallback are rejected before timing | SSpec and retained harness contract tests | CONTRADICTED — the deployed candidate exists but exit 139 on its test/help ABI path disproves admission |
@@ -325,6 +325,13 @@ corrected; `/root/reconciled_plan_review` (`gpt-5.6-sol`, high) then returned
   interpreter boundary, PBL-03 remains open with an atomic migration contract,
   Stage 4 remains excluded, and current VCS integration is operationally
   pending as recorded below.
+- `/root/pbl03c_review`, cycle 1: `ACCEPT`. It independently confirmed bounded
+  HashSet indexing/clear, unchanged asymptotic complexity, non-vacuous focused
+  coverage, the 8-owner/23-use/1-stored-address live inventory, absence of the
+  reverted PBL-03A/B prototypes, and the compile-only Stage-2 evidence limit.
+- The same reviewer, narrow cycle 2: `ACCEPT` on the single 180-second
+  Stage-2 optimizer-build timeout and continued BLOCKED optimizer/performance
+  disposition.
 
 ## Plan completion checklist
 

@@ -73,9 +73,11 @@ PROVED.
 
 ### Complete caller inventory and migration decision
 
-The bounded review found **nine production Simple files, nine declarations,
-and 26 call sites** (the declaration is counted separately). Four call sites
-store the returned address in a local before a later call. The inventory is:
+The bounded review initially found **nine production Simple files, nine
+declarations, and 26 call sites** (the declaration is counted separately),
+including four stored addresses. PBL-03C then removed all three HashSet uses.
+The remaining live inventory is **eight files, eight declarations, 23 call
+sites, and one stored address**:
 
 | Owner | Uses | Stored address | Migration family |
 |---|---:|---:|---|
@@ -87,7 +89,7 @@ store the returned address in a local before a later call. The inventory is:
 | `src/lib/nogc_sync_mut/io/vulkan_sffi.spl` | 1 | 0 | typed Vulkan byte-input wrapper |
 | `src/lib/nogc_sync_mut/sffi/spl_fonts.spl` | 4 | 0 | typed font/shaping byte-input wrappers |
 | `src/lib/nogc_sync_mut/spec/evidence/counterpart/dynlib_provider.spl` | 1 | 1 | generic dynamic-library one-call byte argument |
-| `src/lib/nogc_sync_mut/src/collections/hashset.spl` | 3 | 3 | bounded array operations; no FFI pointer |
+| `src/lib/nogc_sync_mut/src/collections/hashset.spl` | 0 | 0 | MIGRATED — bounded `[u8]` indexing and retained clear |
 
 Runtime and compiler owners that must migrate with those callers are
 `src/compiler_rust/runtime/src/value/collections.rs`,
@@ -155,3 +157,34 @@ arbitrary foreign code.
 These lanes must merge atomically or behind a temporary internal-only build
 flag. Landing a public token, a second raw-pointer spelling, or an unused typed
 adapter is explicitly not progress on PBL-03.
+
+### PBL-03C bounded HashSet progress
+
+`src/lib/nogc_sync_mut/src/collections/hashset.spl` no longer declares or uses
+`rt_array_data_ptr_u8`, `spl_load_u8`, `spl_store_u8`, or raw `memset` for its
+occupancy bytes. Known-new insertion reads/writes `slot_used[slot]` directly;
+retained clear performs a bounded O(capacity) loop. The focused spec covers
+both known-new paths, clear/reuse behavior, and a source contract rejecting the
+raw symbol. The admitted Stage-2 compiler native-built the focused spec with
+`3 compiled, 0 failed` using:
+
+`mkdir -p /tmp/pbl03c-stage2-cache && timeout 180 build/restart12-build11-a-r2/output/stage2/x86_64-unknown-linux-gnu/simple native-build --target x86_64-unknown-linux-gnu --backend cranelift --runtime-bundle core-c-bootstrap --source src/lib --entry-closure --threads 1 --cache-dir /tmp/pbl03c-stage2-cache --mode dynload --entry test/01_unit/lib/nogc_sync_mut/hashset_probe_spec.spl --runtime-path build/restart12-build11-a-r2/output/stage3/x86_64-unknown-linux-gnu/stage2-runtime-authority -o /tmp/pbl03c-hashset-spec-stage2`
+
+The artifact was 6928 KB, but its unresolved `expect` stub means this is
+compile evidence only. Stage 2 has no `test` command and the single direct SMF
+execution attempt ended at the known exit 139, so execution remains blocked
+rather than inferred.
+
+PBL-03A's scoped interpreter prototype (7 focused Rust tests) and PBL-03B's
+15 typed wrapper names were deliberately reverted: without their native/Simple
+peers and codegen owner-liveness lowering, retaining either would leave an
+unused interpreter-only API or uncompilable callers. Their design findings are
+captured above; no partial escape route was added.
+
+The required optimizer audit could not be executed from Stage 2. One bounded
+attempt used the admitted Stage-2 compiler to native-build
+`src/app/optimize/main.spl` with compiler/app/lib sources, an isolated
+`/tmp/pbl03c-optimizer-cache`, and a 180-second timeout; it produced no output
+or candidate and exited 124. It was not retried. Stage 2 compile evidence for
+the focused HashSet spec remains valid, but optimizer findings and runtime
+performance remain blocked rather than inferred.
