@@ -1227,3 +1227,16 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   sampler cycles are exhausted. Resume only from the redesign contract in
   `doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`;
   do not run Stage 3 until that source is independently accepted.
+- verify-blocked (2026-08-14, Stage-3 C sampler/analyzer): the follow-up
+  non-Python implementation was rejected and fully reverted at its third fix
+  cycle; Stage 3 did not start. Although the draft added bounded run identity,
+  descriptor-bound command execution, explicit caps, strict `/proc` fields,
+  and a child-setup handshake, it could not prove identity-safe bounded
+  zero-survivor cleanup. PID/process-group reuse, subreaper-adopted and
+  `setsid` descendants, terminal truth, and bounded reaping remained unsafe.
+  Its analyzer also lacked one compatible exact schema with distinct sampler,
+  analyzer, and command identities, complete-only raw terminal semantics, and
+  strict phase/path/time correlation. The session cap is exhausted. Resume in
+  a fresh scoped lane from the jointly frozen producer/consumer contract in
+  the current-source RSS bug; keep provenance v3 unchanged and do not start
+  Stage 3 before independent source review passes.

@@ -261,3 +261,34 @@ targets, flushed, hashed, and atomically admitted as one bound set. A failure
 must leave only explicitly interrupted raw evidence, never a partial derived
 set that resembles a completed analysis. Add deliberate-red coverage for each
 rule before authorizing the one fresh Stage-3 transaction.
+
+## Rejected C sampler/analyzer cycle and next boundary (2026-08-14)
+
+A subsequent non-Python C sampler/analyzer attempt was also rejected and fully
+reverted after its third permitted fix cycle. Stage 3 did not start. The draft
+had added a bounded run identity, explicit storage/time caps, strict `/proc`
+field handling, descriptor-bound ELF execution, and a child-setup handshake,
+but those improvements did not make its termination evidence safe.
+
+The sampler could still publish a terminal record after a fixed kill window
+with live survivors, could block indefinitely while reaping, signalled PIDs
+without rechecking their recorded start identity, and could signal a reused
+process group after its root was reaped. Its discovery logic also missed
+subreaper-adopted and `setsid` descendants. The next implementation must use
+identity-checked signalling and bounded reaping, discover adopted and detached
+descendants, and prove zero survivors. Otherwise it must publish only an
+interrupted/failure raw receipt and must never claim a completed tree exit.
+
+The paired analyzer must freeze one compatible strict record contract before
+implementation. It needs distinct sampler, analyzer, and measured-command
+device/inode/SHA-256 identities; the same safe run ID with a 64-byte maximum;
+exact open/sample/terminal variants including command identity; complete-only
+terminal semantics; analyzer identity in its receipt; and exact phase,
+source-path, and monotonic-time correlation. Missing raw terminals and
+`sampler-stopped` are not complete analyses. The separate derived receipt must
+remain `simple-stage3-memory-evidence-v1`; provenance v3 remains unchanged.
+
+The session's three-cycle cap is exhausted. Do not make a fourth sampler or
+analyzer attempt, and do not start Stage 3, in this session. Resume in a fresh
+scoped lane from this jointly frozen producer/consumer and zero-survivor
+boundary.
