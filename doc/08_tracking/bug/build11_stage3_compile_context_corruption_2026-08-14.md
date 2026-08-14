@@ -321,3 +321,53 @@ three snapshot definitions and zero undefined old-pointer ABI, then emit the
 typed `//bootstrap:stage3` receipt. Because the normal wrapper continues into
 excluded Stage 4 and admitted resume cannot rebuild current Stage 2, add and
 review a fail-closed `--stop-after-stage3` route (or equivalent) first.
+
+### Coherent authority and pre-IfChain Stage-3 evidence
+
+A current-revision Rust seed/runtime pair and minimal pure-Simple planner now
+close the authority prerequisite. The archive defines
+`rt_mem_snapshot_open/record/close`, contains no retired pointer ABI, and the
+planner emitted the exact `//bootstrap:stage3` convergence receipt. The
+structurally reviewed `--stop-after-stage3` path places Stage-3 provenance
+verification and exit before every capability probe and Stage-4 decision.
+Positive execution remains blocked on canonical admission v2.
+
+The first receipt-bound run admitted current Stage 2 (859 compiled, zero
+failed; sanity PASS) and entered Stage 3. Parse progress reached 200/617, then
+RSS rose 7.9 -> 12.5 -> 17.0 -> 21.9 GiB and the 24 GiB address-space guard
+ended the process at exit 139 (max RSS 25,145,584 KiB). A second canonical
+admitted resume enabled per-file phase profiling and reproduced exit 139 at
+25,141,504 KiB. Its last start event is
+`src/compiler/60.mir_opt/mir_opt/pattern_dispatch.spl`, whose 28-arm chain
+matches the known value-semantic reverse-fold defect. The coarse
+`current=ast_stmt.spl` row is only completion 200, not the active owner.
+
+Upstream `98cab679d49` replaces the nested aggregate reconstruction with flat
+`IfChain` through AST, HIR, semantics, and MIR. A focused seed-run of the
+128-arm spec timed out in the broad 120-second test-daemon closure, so it is
+not green evidence. The last allowed cycle is a fresh current-source Stage
+2/3-only bootstrap on that systemic repair; do not rewrite the 28-arm leaf.
+
+### Admission-v2 blocker before the final current-source cycle
+
+After rebasing, the bootstrap policy correctly rejected the earlier v1 receipt
+before either stage started. The final Stage-3 cycle was therefore not spent.
+The public v2 verifier intentionally remains fail-closed because no canonical
+producer yet proves that an alleged admitted Stage-2 binary was actually the
+output of its recorded build.
+
+A bounded producer/replay prototype passed its focused shell contract but was
+rejected by independent security review. It trusted a layout-named Stage-2
+transcript plus replayable sanity, did not bind the binary to a canonical
+Stage-2 manifest, and froze only the planner entry rather than the complete
+build closure. Those gaps permit forged parent authority and build-time source
+replacement. The prototype was removed and must not be used to manufacture or
+bypass admission evidence.
+
+The next implementation must emit a dedicated Stage-2 admission manifest
+immediately after Stage-2 sanity. Its independent verifier must bind the seed,
+complete source/runtime/helper snapshots, exact build transcript and status,
+Stage-2 artifact hash, and one owned immutable build scope. Planner production
+must then build from that admitted artifact and independently replay under the
+same lock while rehashing inputs before and after. Only after that verifier
+passes may the one remaining current flat-IfChain Stage-3 cycle run.
