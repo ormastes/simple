@@ -150,3 +150,54 @@ Final receipt:
 the manifest SHA-256 is
 `7bf25984e57dfb0fa3db2ebeb4cba9d75a9efa20a499127543205bb1510bcbed`.
 The one permitted checksum verification passed every entry.
+
+## Canonical CPU runner source completion
+
+`scripts/check/run-unoq-qrb2210-cpu-server-live.shs` now exists. The preceding
+receipt's executable-absence result remains historically correct for its frozen
+HEAD/time, but no longer describes the working tree.
+
+The new runner fails before board access unless it receives an admitted
+current-source AArch64 server ELF, the exact
+`simpleos-arm64-current-source-compiler-admission-v1` receipt, and its bound
+source manifest. Physical execution additionally requires authoritative
+SimpleOS QRB2210 boot/bundle/recovery identity; Debian is rejected. PASS demands
+forced CPU selection with accelerator providers/libraries, GPU submission, and
+device readback explicitly false, plus HTTP filesystem-byte equality and an
+authenticated DB commit/read/fresh-reboot/read receipt. Credential material is
+ephemeral and must be reported destroyed with no retained bytes.
+
+Only the negative self-test ran. It passed without ADB access. No live CPU
+runner, board command, deployment, download, reboot, or acceptance was run or
+claimed. CPU status remains **BLOCKED** pending admitted artifacts and an
+authorized physical SimpleOS boot.
+
+Cycle-2 review aligned the runner with the actual compiler admission fields:
+`native_smoke_output_sha256`, `source_revision`, source-manifest hash,
+`native_smoke_status=pass`, and `stub_fallback=forbidden`. Remote provenance
+must bind that source revision, manifest, compiler-admission hash, signed bundle,
+and provider hash. All security hashes are unique lowercase 64-hex values.
+
+The host now observes live process maps and file descriptors, rejects loaded
+accelerator libraries and device nodes, verifies distinct pre/post reboot boot
+IDs, compares HTTP expected/body hashes and DB before/after hashes with a
+positive generation, rehashes server/provider bytes after reboot, and proves
+remote receipt cleanup. Collector lock handoff uses a validated inherited file
+descriptor, not an environment boolean. Expanded synthetic sabotage remains
+negative-only. No physical runner was invoked.
+
+Cycle 3 makes collector status and mutation fields derived from validated runner
+stdout/exit, validates and retains the inherited flock FD, binds both phase PIDs
+through executable/cmdline/maps/fds, and moves HTTP, DB, reboot, and credential
+observations to the host. Output escape/symlink checks precede directory
+creation, and failure/signal cleanup covers processes, receipts, forwards, and
+credential material. This remains source/negative evidence only.
+
+Independent final review status: **FAIL**. The source improvements above do not
+yet constitute host-authoritative acceptance evidence. Blocked post-mutation
+exits can still be summarized as non-mutating; cleanup is not complete and
+checked on every terminal path; credential scanning is provider-selected; HTTP
+and authenticated DB response grammar are not validated exactly; boot
+provenance is not bound to a locally trusted signed manifest; and collector
+producer, exit, and collision evidence is incomplete. The three-cycle cap is
+exhausted. No live invocation is authorized and no AC is credited.

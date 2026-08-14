@@ -244,6 +244,26 @@ implementation-active
   `7bf25984...10bcbed`, and the single checksum verification passed all entries.
   CPU/GPU remain BLOCKED; no provider execution, board mutation, download,
   boot change, commit, or push occurred.
+- dev-unoq-cpu-runner: Added the missing canonical CPU live runner and focused
+  negative-only shell contract/manual. The runner gates all board access on the
+  current-source compiler admission, source manifest, and exact AArch64 ELF;
+  rejects Debian; requires signed boot/recovery identity; and validates forced
+  CPU, accelerator non-selection, HTTP bytes, authenticated DB fresh-reboot
+  persistence, credential destruction, and parent-authoritative pointer-free
+  receipt fields. The negative self-test passed once and did not access ADB.
+  No live board run, mutation, download, commit, or push occurred; CPU remains
+  BLOCKED pending admitted artifacts and physical SimpleOS QRB2210 boot.
+- dev-unoq-cpu-runner-cycle2: Aligned admission parsing with emitted
+  `native_smoke_output_sha256`/`source_revision` semantics; bound remote
+  provenance, signed bundle, provider, and compiler-admission hashes; enforced
+  lowercase SHA-256 and cross-field HTTP/DB equality; required distinct reboot
+  IDs; and added host-observed maps/fds, pre/post binary hashes, cleanup, atomic
+  output, and validated inherited-lock-FD ownership. Negative sabotage covers
+  Debian, GPU selection, malformed/mismatched hashes, duplicate fields, missing
+  reboot, and retained credential matches. The focused negative contract passed
+  once before the final lock/maps hardening; those final source-only additions
+  were not rerun to avoid repeating the session's one static contract. No ADB,
+  board, commit, or push action occurred.
 - verify-blocked-qemu-20260814T080211Z: The canonical ARM server gate ran once
   at HEAD `900f9188ac50182f8f95505639072e9b1d9f7e2e` with both compiler admission
   variables explicitly unset. It exited 1 at the mandatory missing
@@ -251,3 +271,23 @@ implementation-active
   Retained stdout/stderr/state hashes passed independent review. No Stage-2,
   Rust-seed, stale-ELF, x86, or marker substitution occurred; AC-1..3 remain
   open pending a provenance-admitted current-source Stage-4/full compiler.
+- dev-unoq-cpu-runner-cycle3: Collector summaries now derive from validated
+  runner output; inherited FD9 retains the real flock; pre/post PIDs bind exe,
+  forced-CPU cmdline, maps, and fds; and host-owned HTTP, DB/reboot, credential,
+  cleanup, and atomic-output observations replace provider self-assertions.
+  Static cycle 1 failed only on a stale cleanup marker, diagnostic cycle 2
+  localized it, and final cycle 3 passed. No ADB/live board, mutation, download,
+  commit, or push occurred.
+- verify-blocked-unoq-cpu-runner-cycle3: Independent final review rejected the
+  runner as acceptance evidence. Blocked exits can still publish false
+  no-mutation summaries; cleanup is incomplete; credential scanning is
+  provider-selected; HTTP and DB responses are not parsed exactly; signed-boot
+  identity lacks a locally trusted manifest; and collector producer, exit, and
+  collision evidence remain incomplete. The three-cycle cap is exhausted, so
+  AC-4..8 remain open and no physical run is authorized.
+- build-blocked-stage3-lifecycle-cycle3: Reused HirLowering ownership and
+  in-place transient reset are present across the known module loops, and the
+  false runtime-object-count memory oracle was removed. The static gate was not
+  rerun after its final anchor correction, and no current full CLI can execute
+  the behavioral spec. Nested collection backing allocation, no-GC retention,
+  and representative Stage3 RSS remain unproved; the P0 bug stays OPEN.

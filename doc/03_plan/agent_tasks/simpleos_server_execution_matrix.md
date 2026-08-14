@@ -31,3 +31,19 @@ source-only downloader is implementable from the present evidence.
 
 UNO lanes serialize device access with `/tmp/unoq-server-matrix.lock`. The merge
 owner alone edits canonical state and master plan. No lane commits.
+
+Final cycle-3 review rejects the current CPU runner for acceptance. It still
+needs phase-aware mutation reporting for blocked exits, checked cleanup on every
+terminal path, host-owned credential scanning, exact HTTP and authenticated DB
+protocol parsing, locally trusted signed-boot provenance, collision-safe
+publication, CPU-runner producer/exit binding, and executable negative cases.
+Do not run it against the board or credit an acceptance row until those defects
+are resolved in a fresh bounded lane.
+
+The canonical CPU runner is
+`scripts/check/run-unoq-qrb2210-cpu-server-live.shs`. Its `--self-test` is
+negative-only and must not access ADB. Physical PASS requires SimpleOS identity
+(Debian is rejected), exact filesystem server/provider provenance, explicit
+CPU-only selection with GPU libraries/provider unselected, HTTP filesystem-byte
+equality, and authenticated DB write/restart/read persistence in the bounded
+parent-authoritative `SimpleOsUnoQCpuServerReceiptV1` receipt.

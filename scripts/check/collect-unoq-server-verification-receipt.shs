@@ -11,7 +11,12 @@ GPU_RUNNER=$ROOT/scripts/check/run-unoq-qrb2210-native-2d-live.shs
 CPU_RUNNER=$ROOT/scripts/check/run-unoq-qrb2210-cpu-server-live.shs
 
 case "$DEVICE" in ''|*[!A-Za-z0-9._:-]*) echo "invalid UNOQ_DEVICE" >&2; exit 1 ;; esac
-for tool in adb flock sha256sum; do command -v "$tool" >/dev/null 2>&1 || { echo "$tool missing" >&2; exit 2; }; done
+for tool in adb flock sha256sum realpath; do command -v "$tool" >/dev/null 2>&1 || { echo "$tool missing" >&2; exit 2; }; done
+
+canonical_out=$(realpath -m "$OUT_ROOT")
+case "$canonical_out" in "$ROOT"/build/test-artifacts/*) ;; *) echo "escaped collector output" >&2; exit 1 ;; esac
+[ "$canonical_out" = "$OUT_ROOT" ] || { echo "collector output is not canonical" >&2; exit 1; }
+[ ! -L "$OUT_ROOT" ] || { echo "collector output symlink forbidden" >&2; exit 1; }
 
 START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 RUN_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
@@ -55,13 +60,25 @@ CPU_EXPECTED_PATH=scripts/check/run-unoq-qrb2210-cpu-server-live.shs
 run_capture cpu_runner_executable "test -x $CPU_EXPECTED_PATH" test -x "$CPU_RUNNER"
 cpu_probe_rc=$(tr -d '\r\n' <"$TMP_DIR/cpu_runner_executable.exit")
 if [ "$cpu_probe_rc" -eq 0 ]; then
-    CPU_COMMAND="sh $CPU_EXPECTED_PATH --device $DEVICE --output-dir build/test-artifacts/simpleos-server-execution-matrix/uno-q/cpu"
-    run_capture cpu_preflight "$CPU_COMMAND" sh "$CPU_RUNNER" --device "$DEVICE" --output-dir "$OUT_ROOT/cpu"
-    cpu_status=executed
-    cpu_reason=canonical-runner-present-see-command-receipt
+    CPU_COMMAND="env UNOQ_SERVER_MATRIX_LOCK_FD=9 sh $CPU_EXPECTED_PATH --device $DEVICE --output-dir build/test-artifacts/simpleos-server-execution-matrix/uno-q/cpu"
+    run_capture cpu_preflight "$CPU_COMMAND" env UNOQ_SERVER_MATRIX_LOCK_FD=9 sh "$CPU_RUNNER" --device "$DEVICE" --output-dir "$OUT_ROOT/cpu"
+    cpu_rc=$(tr -d '\r\n' <"$TMP_DIR/cpu_preflight.exit")
+    cpu_field() {
+        cpu_key=$1
+        cpu_count=$(sed -n "s/^$cpu_key=//p" "$TMP_DIR/cpu_preflight.stdout" | wc -l | tr -d ' ')
+        [ "$cpu_count" -eq 1 ] || { echo "CPU field $cpu_key missing or duplicate" >&2; exit 1; }
+        sed -n "s/^$cpu_key=//p" "$TMP_DIR/cpu_preflight.stdout"
+    }
+    cpu_status=$(cpu_field unoq_cpu_server_status)
+    cpu_reason=$(cpu_field unoq_cpu_server_reason)
+    cpu_evidence_class=$(cpu_field unoq_cpu_server_evidence_class)
+    [ "$cpu_evidence_class" = live-runner-owned ] || { echo "invalid CPU evidence class" >&2; exit 1; }
+    case "$cpu_status:$cpu_rc" in blocked:2|fail:1|pass:0) ;; *) echo "CPU status/exit mismatch" >&2; exit 1 ;; esac
 else
+    cpu_rc=2
     cpu_status=blocked
     cpu_reason=canonical-runner-not-executable
+    cpu_evidence_class=collector-owned-absence
 fi
 
 GPU_RUNNER_PATH=scripts/check/run-unoq-qrb2210-native-2d-live.shs
@@ -112,6 +129,11 @@ if [ "$cpu_probe_rc" -eq 0 ]; then
 fi
 
 FINISH_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+case "$cpu_status" in
+    pass) mutation_boundary=bounded-db-and-fresh-reboot; board_mutated=true; boot_changed=true; provider_executed=true ;;
+    blocked) mutation_boundary=identity-and-fail-closed-preflight; board_mutated=false; boot_changed=false; provider_executed=false ;;
+    *) mutation_boundary=failed-live-campaign-see-command-receipts; board_mutated=unknown; boot_changed=unknown; provider_executed=unknown ;;
+esac
 cat >"$TMP_DIR/status.env" <<EOF
 schema=simpleos-unoq-server-verification-receipt-v1
 start_utc=$START_UTC
@@ -135,15 +157,17 @@ cpu_expected_runner_path=$CPU_EXPECTED_PATH
 cpu_runner_executable_exit=$cpu_probe_rc
 cpu_status=$cpu_status
 cpu_reason=$cpu_reason
+cpu_evidence_class=$cpu_evidence_class
+cpu_exit=$cpu_rc
 gpu_status=$gpu_status
 gpu_reason=$gpu_reason
 gpu_evidence_class=$gpu_evidence_class
 gpu_exit=$gpu_rc
-mutation_boundary=identity-reads-and-fail-closed-preflight-only
-board_mutated=false
+mutation_boundary=$mutation_boundary
+board_mutated=$board_mutated
 download_performed=false
-boot_changed=false
-provider_executed=false
+boot_changed=$boot_changed
+provider_executed=$provider_executed
 EOF
 
 (cd "$TMP_DIR" && sha256sum producer.snapshot.shs *.command *.stdout *.stderr *.exit command-receipts.env status.env >SHA256SUMS)

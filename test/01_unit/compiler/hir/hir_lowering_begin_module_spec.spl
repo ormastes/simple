@@ -1,6 +1,11 @@
 use std.spec.{describe, it, expect}
 use compiler.common.config.{TypeInferenceConfig}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.parser_types.{ParserEnum, ParserTrait}
+use compiler.hir.hir_definitions.{HirTrait}
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_types.{HirType, ScopeKind, SymbolId}
 use compiler.hir.hir_lowering.module_surface.{ModuleSurface, ModuleSurfacesByName}
 
 describe "HirLowering.begin_module":
@@ -9,6 +14,30 @@ describe "HirLowering.begin_module":
             [ModuleSurface.empty("first")], {"first": 0}, ["first"], [0])
         val surfaces = surfaces_result.unwrap()
         var lowering = hirlowering_for_module("first.spl", surfaces)
+        val retained_trait = HirTrait(
+            symbol: SymbolId(id: 41), name: "Retained", type_params: [],
+            methods: [], supertraits: [], defaults: [], where_clause: [],
+            assoc_types: [], visibility: Visibility.Public, is_public: true,
+            has_doc_comment: false, doc_comment: "", span: Span.empty(),
+            is_generic_template: false, has_specialization_of: false,
+            specialization_of: "", type_bindings: {})
+        val imported_trait = ParserTrait(
+            name: "ImportedTrait", type_params: [], super_traits: [],
+            where_clause: [], methods: [], assoc_types: [],
+            visibility: Visibility.Public, is_public: true,
+            has_doc_comment: false, doc_comment: "", span: Span.empty())
+        val imported_enum = ParserEnum(
+            name: "ImportedEnum", type_params: [], variants: [],
+            visibility: Visibility.Public, is_public: true,
+            has_doc_comment: false, doc_comment: "", span: Span.empty())
+        lowering.lowered_traits["Retained"] = retained_trait
+        lowering.imported_traits["ImportedTrait"] = imported_trait
+        lowering.imported_enums["ImportedEnum"] = imported_enum
+        lowering.current_function = Some(SymbolId(id: 19))
+        lowering.current_method_self_type = Some(HirType.named("OldSelf"))
+        lowering.current_method_self_symbol_id = 20
+        lowering.reexport_walk_complete = false
+        lowering.reexport_walk_valid = false
         lowering.set_type_inference_config(TypeInferenceConfig.strict())
         lowering.symbols.next_symbol_id = 7
         lowering.loop_depth = 3
@@ -18,3 +47,63 @@ describe "HirLowering.begin_module":
         expect(lowering.loop_depth).to_equal(0)
         expect(lowering.module_surfaces.index_by_name.contains_key("first")).to_equal(true)
         expect(lowering.type_inference_config.unwrap().strict_empty_collections).to_equal(true)
+
+    it "clears two-module transient state without leaking imports locals or glob visits":
+        val surfaces = ModuleSurfacesByName.from_parts(
+            [ModuleSurface.empty("first")], {"first": 0}, ["first"], [0]).unwrap()
+        var lowering = hirlowering_for_module("first.spl", surfaces)
+        lowering.symbols.next_symbol_id = 9
+        lowering.symbols.exact_symbols["old"] = 8
+        lowering.symbols.qualified_functions["old.fn"] = 8
+        lowering.symbols.push_scope(ScopeKind.Function)
+        lowering.loaded_modules.push("old.module")
+        lowering.imported_enum_owners["Old"] = "owner"
+        lowering.materialized_payload_origins["old"] = true
+        lowering.materialized_payload_bindings["Old"] = "old"
+        lowering.local_struct_types[7] = "OldStruct"
+        lowering.struct_field_types_by_name["OldStruct"] = {
+            "field": HirType.named("i64")}
+        lowering.struct_field_order_by_name["OldStruct"] = ["field"]
+        lowering.local_tuple_types[8] = [HirType.named("text")]
+        lowering.fn_tuple_returns["old_fn"] = [HirType.named("i64")]
+        lowering.enum_variant_names["OldVariant"] = true
+        lowering.glob_expand_memo["old.module"] = 3
+        lowering.reexport_visit_surface_indices.push(4)
+        lowering.reexport_visit_wanted.push("Old")
+        lowering.reexport_visit_depths.push(2)
+        lowering.registering_import_symbols = true
+        lowering.diagnostic_messages.push("old diagnostic")
+        lowering.diagnostic_recovered.push(true)
+
+        lowering.begin_module("second.spl")
+        expect(lowering.symbols.next_symbol_id).to_equal(0)
+        expect(lowering.symbols.exact_symbols.keys().len()).to_equal(0)
+        expect(lowering.symbols.qualified_functions.keys().len()).to_equal(0)
+        expect(lowering.symbols.scopes.keys().len()).to_equal(1)
+        expect(lowering.symbols.current_scope.id).to_equal(0)
+        expect(lowering.loaded_modules.len()).to_equal(0)
+        expect(lowering.imported_traits.keys().len()).to_equal(0)
+        expect(lowering.imported_enums.keys().len()).to_equal(0)
+        expect(lowering.imported_enum_owners.keys().len()).to_equal(0)
+        expect(lowering.materialized_payload_origins.keys().len()).to_equal(0)
+        expect(lowering.materialized_payload_bindings.keys().len()).to_equal(0)
+        expect(lowering.local_struct_types.keys().len()).to_equal(0)
+        expect(lowering.struct_field_types_by_name.keys().len()).to_equal(0)
+        expect(lowering.struct_field_order_by_name.keys().len()).to_equal(0)
+        expect(lowering.local_tuple_types.keys().len()).to_equal(0)
+        expect(lowering.fn_tuple_returns.keys().len()).to_equal(0)
+        expect(lowering.enum_variant_names.keys().len()).to_equal(0)
+        expect(lowering.glob_expand_memo.keys().len()).to_equal(0)
+        expect(lowering.reexport_visit_surface_indices.len()).to_equal(0)
+        expect(lowering.reexport_visit_wanted.len()).to_equal(0)
+        expect(lowering.reexport_visit_depths.len()).to_equal(0)
+        expect(lowering.registering_import_symbols).to_equal(false)
+        expect(lowering.current_function).to_be_nil()
+        expect(lowering.current_method_self_type).to_be_nil()
+        expect(lowering.current_method_self_symbol_id).to_equal(-1)
+        expect(lowering.reexport_walk_complete).to_equal(true)
+        expect(lowering.reexport_walk_valid).to_equal(true)
+        expect(lowering.diagnostic_messages.len()).to_equal(0)
+        expect(lowering.diagnostic_recovered.len()).to_equal(0)
+        expect(lowering.module_surfaces.index_by_name.contains_key("first")).to_equal(true)
+        expect(lowering.lowered_traits.contains_key("Retained")).to_equal(true)

@@ -203,6 +203,9 @@ class SymbolTable:
     qualified_functions: Dict<text, i64>
     qualified_types: Dict<text, i64>
     exact_symbols: Dict<text, i64>
+    # Persistent root owner reused by reset_module. The Scope row is a small
+    # routing value; its symbol backing never crosses reset by value.
+    root_scope_symbols: Dict<text, i64>
 
 fn _hir_symbol_owner_module(path: text) -> text:
     if path.starts_with("../"):
@@ -213,6 +216,7 @@ fn _hir_symbol_owner_module(path: text) -> text:
 
 impl SymbolTable:
     static fn new() -> SymbolTable:
+        var root_scope_symbols: Dict<text, i64> = {}
         var table = SymbolTable(
             symbols: {},
             scopes: {},
@@ -223,16 +227,34 @@ impl SymbolTable:
             gpu_function_backend_orders: {},
             qualified_functions: {},
             qualified_types: {},
-            exact_symbols: {}
+            exact_symbols: {},
+            root_scope_symbols: root_scope_symbols
         )
         # Create root scope (direct mutation avoids copy-modify-reassign bug)
         table.scopes[0] = Scope(
             id: ScopeId(id: 0),
             parent: nil,
             kind: ScopeKind.Module,
-            symbols: {}
+            symbols: root_scope_symbols
         )
         table
+
+    me reset_module():
+        """Reset module-local symbol state without replacing this table."""
+        self.root_scope_symbols.clear()
+        self.symbols.clear()
+        self.scopes.clear()
+        self.gpu_function_targets.clear()
+        self.gpu_function_backend_orders.clear()
+        self.qualified_functions.clear()
+        self.qualified_types.clear()
+        self.exact_symbols.clear()
+        self.current_scope = ScopeId(id: 0)
+        self.next_symbol_id = 0
+        self.next_scope_id = 1
+        self.scopes[0] = Scope(
+            id: ScopeId(id: 0), parent: nil,
+            kind: ScopeKind.Module, symbols: self.root_scope_symbols)
 
     me register_gpu_function_metadata(name: text, target: text, backend_order: text):
         self.gpu_function_targets[name] = target

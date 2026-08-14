@@ -5,6 +5,63 @@
 - Severity: P0 bootstrap blocker
 - Owner: pure-Simple compiler/bootstrap memory lifecycle
 
+## 2026-08-14 owner fix (pending one future canonical build)
+
+Static localization found a retained aggregate boundary after the earlier
+scalar surface-index repair: the non-streaming Stage3 HIR loop constructed a
+fresh `HirLowering` for every source and passed the complete frozen
+`ModuleSurfacesByName` into every constructor. In the no-GC Stage3 process,
+that made the closure-sized registry a per-module retained value. The shared
+owner now constructs one explicitly typed lowerer before the loop and calls
+its existing `begin_module` reset for each source. That reset preserves the
+single frozen surface registry, accumulated traits, and stable diagnostic
+owners while replacing transient module state.
+
+Focused contracts are
+`test/01_unit/compiler/driver/stage3_hir_lowerer_reuse_contract_spec.spl` and
+the existing behavioral `hir_lowering_begin_module_spec.spl`. This source fix
+does not close the bug: the required next evidence is one cache-preserving
+canonical Stage3 transaction under the selected RSS budget, followed by
+candidate provenance and sanity. No full bootstrap was run in this repair
+lane.
+
+Cycle-2 review found that outer reuse alone was incomplete because
+`begin_module` still called `hirlowering_new()` and copied the retained surface,
+trait, configuration, and re-export aggregates through locals on every source.
+The reset now operates entirely in place: `SymbolTable.reset_module` clears and
+reuses its root owner; module-local diagnostics, imports, implementation maps,
+materialization maps, local type maps, glob memo, and re-export visit workspaces
+are cleared; scalar state is reset directly. The frozen surface registry,
+accumulated traits, inference configuration, and re-export root cache are left
+untouched. The driver also no longer copies the accumulated trait dictionary
+through a second local each iteration. Behavioral coverage now includes two
+module transitions, transient-state sabotage/no-leak assertions, retained
+surface/config checks, and a 64-reset heap-registry plateau oracle. The bug
+remains OPEN pending executable evidence from a current full CLI and the single
+future canonical Stage3 transaction.
+
+Cycle-3 removed the same constructor/trait-copy pattern from the source-less
+compatibility loop and replaced the reset's extracted `Scope` value with a
+persistent root-symbol dictionary owner. Nested field/type maps are cleared at
+their outer owner and repopulated in the two-module sabotage test, exercising
+logical COW detachment without copying them through reset locals. No truthful
+host-runtime total-allocation or allocator-byte high-water counter is exported
+to this Simple test surface: `rt_heap_registry_count` measures registry slots,
+not allocated bytes, so that earlier proxy oracle was removed. Allocation/RSS
+boundedness therefore remains explicitly UNPROVEN until the future profiled
+Stage3 transaction; the static contract proves only that neither HIR loop nor
+`begin_module` reconstructs a lowerer or copies retained surface/trait owners.
+
+A no-stub, one-worker Cranelift mini-build of
+`module_surface_physical_alias_native_probe.spl` was attempted with the retained
+Stage2 and an isolated `build/mini_cache_stage3_hir_owner` cache. It stopped
+during discovery on the current frontend's newer `convert_nodes.spl` grammar
+(`626:43`, newline where that older compiler expected an expression), before
+the changed HIR owner was compiled. The retained diagnostic is
+`build/mini_builds/stage3-hir-owner/build.log`; it is neither a failed owner
+test nor acceptance evidence. The bootstrap-only Stage2 also has no `test`
+command, so focused SSpec execution awaits the future full CLI.
+
 ## Reproduction
 
 A single-writer, cache-preserving pure-Simple Stage-3 build used the

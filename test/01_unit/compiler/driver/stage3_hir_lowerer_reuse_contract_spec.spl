@@ -1,0 +1,72 @@
+use std.io.{file_read}
+use std.spec.{describe, it, expect}
+
+val DRIVER = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+val LOWERING = "src/compiler/20.hir/hir_lowering/types.spl"
+
+describe "Stage3 HIR lowerer retained-owner lifecycle":
+    it "constructs the registry-bearing lowerer once outside the source loop":
+        val source = file_read(DRIVER)
+        # Anchor after the non-streaming entry: the streaming implementation has
+        # its own earlier phase_hir_modules declaration and is a different owner.
+        val impl_start = source.index_of("me lower_and_check_impl()")
+        val owner_start = source.index_of(
+            "var phase_hir_modules: Dict<text, HirModule>", impl_start)
+        val owner = source.substring(owner_start, source.index_of(
+            "# Step 3b: ParserTrait coherence checking", owner_start))
+        val loop = owner.index_of("while source_idx < self.ctx.sources.len():")
+        val constructor = owner.index_of(
+            "var lowering: HirLowering = hirlowering_for_module_with_diagnostics(")
+        expect(constructor).to_be_greater_than(0)
+        expect(loop).to_be_greater_than(constructor)
+        val loop_body = owner.substring(loop, owner.len())
+        expect(loop_body).to_contain("lowering.begin_module(src_path ?? \"\")")
+        expect(loop_body.contains(
+            "hirlowering_for_module_with_diagnostics(")).to_equal(false)
+        expect(loop_body.contains(
+            "lowering.lowered_traits = shared_lowered_traits")).to_equal(false)
+        expect(loop_body.contains(
+            "shared_lowered_traits = lowering.lowered_traits")).to_equal(false)
+
+    it "resets transient owners while preserving the frozen registry and traits":
+        val source = file_read(LOWERING)
+        val start = source.index_of("me begin_module(filename: text):")
+        val end = source.index_of("static fn new() -> HirLowering:")
+        val body = source.substring(start, end)
+        expect(body.contains("hirlowering_new()")).to_equal(false)
+        expect(body.contains("val preserved_surfaces")).to_equal(false)
+        expect(body.contains("val preserved_traits")).to_equal(false)
+        expect(body).to_contain("self.errors.clear()")
+        expect(body).to_contain("self.diagnostic_messages.clear()")
+        expect(body).to_contain("self.symbols.reset_module()")
+        expect(body.contains("self.module_surfaces =")).to_equal(false)
+        expect(body.contains("self.lowered_traits =")).to_equal(false)
+        for reset in [
+            "self.lowered_impl_functions.clear()",
+            "self.imported_traits.clear()",
+            "self.imported_enums.clear()",
+            "self.struct_field_types_by_name.clear()",
+            "self.struct_field_order_by_name.clear()",
+            "self.local_tuple_types.clear()",
+            "self.fn_tuple_returns.clear()",
+            "self.module_resolver = nil",
+            "self.current_function = nil",
+            "self.current_method_self_type = nil",
+            "self.reexport_walk_complete = true",
+            "self.reexport_walk_valid = true"
+        ]:
+            expect(body).to_contain(reset)
+
+    it "reuses one lowerer in the source-less compatibility loop too":
+        val source = file_read(DRIVER)
+        val start = source.index_of("if self.ctx.sources.len() <= 0:")
+        val end = source.index_of("var phase_hir_modules: Dict<text, HirModule>", start)
+        val body = source.substring(start, end)
+        val constructor = body.index_of(
+            "var bootstrap_lowering: HirLowering = hirlowering_for_module_with_diagnostics(")
+        val loop = body.index_of("for module in self.ctx.modules.values():")
+        expect(constructor).to_be_greater_than(0)
+        expect(loop).to_be_greater_than(constructor)
+        val loop_body = body.substring(loop, body.len())
+        expect(loop_body).to_contain("bootstrap_lowering.begin_module(name)")
+        expect(loop_body.contains("hirlowering_for_module(")).to_equal(false)

@@ -277,13 +277,8 @@ impl CompilerDriver:
 
         log_debug("lowering modules to HIR")
         dtrace("[DRV] lac-entry sources.len={self.ctx.sources.len()} modules.len={self.ctx.modules.keys().len()}")
-        # Shared trait registry (task #55): each module gets a FRESH HirLowering
-        # instance, but lowered_traits must survive across modules so an impl
-        # module lowered AFTER its trait's defining module can still see the
-        # trait's default methods (lower_impl in trait_impl_lowering.spl reads
-        # self.lowered_traits). Seed each new lowering from the accumulated
-        # registry and fold its result back in after lowering completes.
-        var shared_lowered_traits: Dict<text, HirTrait> = {}
+        # One lowerer owns the shared trait registry across every module; impls
+        # lowered after their defining trait observe the same dictionary handle.
         # Allocate the diagnostics array before the long HIR loop and reuse its
         # registered handle for every module. In the no-GC bootstrap runtime,
         # creating a fresh array near the terminal module can fail registry
@@ -306,17 +301,21 @@ impl CompilerDriver:
             var bootstrap_validation_module_keys: [text] = []
             var bootstrap_validation_module_values: [HirModule] = []
             val bootstrap_entry_name = bootstrap_entry_module_name(self.ctx)
+            var bootstrap_lowering_errors: [LoweringError] = []
+            var bootstrap_lowering_messages: [text] = []
+            var bootstrap_lowering_recovered: [bool] = []
+            var bootstrap_lowering: HirLowering = hirlowering_for_module_with_diagnostics(
+                "", retained_module_surfaces, bootstrap_lowering_errors,
+                bootstrap_lowering_messages, bootstrap_lowering_recovered)
             for module in self.ctx.modules.values():
                 val name = module.name
                 log_trace("processing module")
                 if module == nil:
                     log_error("module is nil")
                     continue
-                var lowering: HirLowering = hirlowering_for_module("", retained_module_surfaces)
-                lowering.lowered_traits = shared_lowered_traits
-                val hir_module: HirModule = lowering.lower_module(module)
-                shared_lowered_traits = lowering.lowered_traits
-                _driver_collect_hir_errors(self.ctx, name, lowering.errors)
+                bootstrap_lowering.begin_module(name)
+                val hir_module: HirModule = bootstrap_lowering.lower_module(module)
+                _driver_collect_hir_errors(self.ctx, name, bootstrap_lowering.errors)
                 val (resolved_module, resolve_errors) = resolve_methods(hir_module)
                 var err_idx = 0
                 while err_idx < resolve_errors.len():
@@ -341,6 +340,18 @@ impl CompilerDriver:
         var phase_entry_hir: HirModule? = nil
         val entry_source_index = bootstrap_entry_source_index(self.ctx)
         var source_idx = 0
+        # Stage3 is a no-GC process. Constructing one HirLowering per source
+        # copied the full retained ModuleSurfacesByName aggregate across the
+        # constructor boundary hundreds of times and retained those copies.
+        # begin_module already resets transient module state while preserving
+        # this frozen registry, shared traits, and stable diagnostic owners.
+        var module_lowering_errors: [LoweringError] = []
+        var module_lowering_diagnostic_messages: [text] = []
+        var module_lowering_diagnostic_recovered: [bool] = []
+        var lowering: HirLowering = hirlowering_for_module_with_diagnostics(
+            "", retained_module_surfaces, module_lowering_errors,
+            module_lowering_diagnostic_messages,
+            module_lowering_diagnostic_recovered)
         bootstrap_hir_modules_reset()
         while source_idx < self.ctx.sources.len():
             val src = self.ctx.sources[source_idx]
@@ -358,21 +369,14 @@ impl CompilerDriver:
             # Set per-module filename so Symbol.defining_module is populated
             # correctly and effective_visibility() matches against the right file.
             val src_path = source_path_map[name]
-            # TYPED local required: an untyped `var lowering = ...` is ANY-erased
-            # on the stage4 binary, so method calls on it (lower_module /
-            # lower_parser_module_unstub) mis-dispatch and the HIR lowering body
-            # never runs (iteration 17; same family as the iteration 9 Dict-ANY
-            # field hazard).
-            # A fresh lowerer needs fresh diagnostic owners. Reusing these arrays
-            # across modules lets recovered diagnostics from an earlier source
-            # replay through staged value/COW semantics even after clear().
-            var module_lowering_errors: [LoweringError] = []
-            var module_lowering_diagnostic_messages: [text] = []
-            var module_lowering_diagnostic_recovered: [bool] = []
-            var lowering: HirLowering = hirlowering_for_module_with_diagnostics(src_path ?? "", retained_module_surfaces, module_lowering_errors, module_lowering_diagnostic_messages, module_lowering_diagnostic_recovered)
+            # Reuse the explicitly typed owner. begin_module clears diagnostics
+            # in place and resets all per-module state without recopying the
+            # retained registry across a constructor call.
+            lowering.begin_module(src_path ?? "")
             if src_path != nil:
                 lowering.module_filename = src_path
-            lowering.lowered_traits = shared_lowered_traits
+            # This loop-owned lowerer is the trait registry owner. Do not copy
+            # the closure-sized dictionary through a second local each module.
 
             # Step 1: Lower to HIR
             # Real single-file HIR lowering is the default; SIMPLE_STUB_HIR=1 is the
@@ -511,11 +515,8 @@ impl CompilerDriver:
             if focused_future_driver_diag:
                 eprint("[driver-hir] functions={hir_function_count}")
 
-            # Fold this module's newly-lowered traits back into the shared
-            # registry so later modules (which get their own fresh HirLowering
-            # instance) can still resolve cross-module trait default methods.
-            shared_lowered_traits = lowering.lowered_traits
-
+            # Newly lowered traits remain on the loop-owned lowerer so later
+            # modules resolve cross-module trait defaults without a Dict copy.
             phase_hir_modules[name] = hir_module
             if source_idx < 3:
                 eprint("[bootstrap-error-count] source_idx={source_idx} point=post-store count={self.ctx.error_count_value}")
@@ -668,14 +669,16 @@ impl CompilerDriver:
         for src in ctx.sources:
             source_path_map2[src.module_name] = src.path
 
+        var compatibility_lowering: HirLowering = hirlowering_for_module(
+            "", retained_module_surfaces)
         for src2 in ctx.sources:
             val name = src2.module_name
             val module = ctx.modules[name]
             val src_path2 = source_path_map2[name]
-            var lowering: HirLowering = hirlowering_for_module(src_path2 ?? "", retained_module_surfaces)
+            compatibility_lowering.begin_module(src_path2 ?? "")
             if src_path2 != nil:
-                lowering.module_filename = src_path2
-            val hir_module: HirModule = lowering.lower_module(module)
-            _driver_collect_hir_errors(ctx, name, lowering.errors)
+                compatibility_lowering.module_filename = src_path2
+            val hir_module: HirModule = compatibility_lowering.lower_module(module)
+            _driver_collect_hir_errors(ctx, name, compatibility_lowering.errors)
             ctx.hir_modules[name] = hir_module
         (ctx, not ctx.has_errors())
