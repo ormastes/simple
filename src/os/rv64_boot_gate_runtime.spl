@@ -49,7 +49,11 @@ pub class Rv64BootGateRuntime:
         true
 
     pub me observe_sv39(result: Rv64Sv39ActivationResult) -> bool:
-        if not result.active or result.satp_mode != 8 or result.root_phys == 0:
+        if (not result.active or result.satp_mode != 8 or result.root_phys == 0 or
+            result.root_phys % 4096u64 != 0u64 or
+            result.satp_root_ppn != result.root_phys / 4096u64 or
+            (result.satp_value >> 60u64) != result.satp_mode or
+            (result.satp_value & 0x00000FFFFFFFFFFFu64) != result.satp_root_ppn):
             return self.fail_closed("sv39-readback-unproven")
         self.advance(Rv64BootGateObservation.Sv39Active)
 
@@ -75,7 +79,20 @@ pub class Rv64BootGateRuntime:
         self.advance(Rv64BootGateObservation.SshdReady)
 
     pub me observe_ssh_progress(result: SshDaemonAcceptResult) -> bool:
+        if self.failed:
+            return false
         if self.ssh_progress_observed:
+            # The ordered boot gate records the first recovered session only,
+            # but the production daemon remains live for the rest of the host
+            # acceptance sequence.  Every later accepted session must still
+            # prove terminal handling and return to the accept owner; do not
+            # let the first receipt mask a later broken recovery.
+            if not result.accepted:
+                return false
+            if not result.session_complete:
+                return self.fail_closed("sshd-later-session-incomplete")
+            if not result.accept_resumed:
+                return self.fail_closed("sshd-later-accept-not-resumed")
             return true
         if not result.accepted:
             return false

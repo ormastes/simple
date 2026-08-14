@@ -357,3 +357,109 @@ OS PASS observations do not change that admission boundary. The compiler
 owner must take a fresh symbolized/backtrace-capable lane from this exact
 provenance, preserve the probe artifacts, and hand the result to the
 highest-capability reviewer before any Stage 4 claim.
+
+## Restart12 provenance-sensitive resume (2026-08-14 08:01 UTC)
+
+One fresh, cache-preserving recovery was run after the native
+`MethodResolution` classification fix was present in the current source tree:
+
+```sh
+env SIMPLE_NO_STUB_FALLBACK=1 \
+  sh scripts/bootstrap/bootstrap-from-scratch.sh \
+    --resume-stage3-from-admitted=build/bootstrap --jobs=1
+```
+
+The immutable parent remained the admitted Stage 2 binary SHA-256
+`0476f625056fc990d3fb45259285b7cbe433aaa8d3df2eae294001cf77589cf4`;
+the runtime admission receipt remained
+`25383b7757608d90bb818599ac029826515ec90c2a97be082fa65a796bcda8d7`.
+The recovery bound Git HEAD
+`bc32e19f4fec692d13a759bd127372b5c270113c`, dirty fingerprint
+`efc8d127fbc7c7fe9010743150f475cb252711cb57a20bc89157422c71fc71f6`,
+and source snapshot SHA-256
+`cce9a38a951f935d33cb332fcc263846ea51d3cba4d16e349bbf623cce78c6fc`.
+It ran CPU-bound for several minutes, then exited 139 without a Stage 3 output
+or manifest. The retained transcript SHA-256 is
+`8cfe1e38dcce97813caaed8d0b8b8dc7c466f9c52204851d55dbdab734b63068`;
+the new log SHA-256 is
+`ec0d43f028b9aee70c489af26bf079d4d63e98a200f0c72fa5b349734bcf1cce`.
+No local core or symbolized backtrace was retained because the host routes
+cores to unavailable Apport handling.
+
+This run proves why repeating the old Stage 2 cannot promote the landed source
+fix. `strings` on the admitted parent contains the obsolete diagnostic literal
+`resolution-enter method= disc= unresolved=`, and the new log still emits
+`disc=1851930204`. Current
+`method_calls_literals.spl` SHA-256
+`3e69e156daea2dde23a46817937dd9d7b1253be47c7feb223a5172734ba7b919`
+contains the exhaustive native language `match` and no
+`rt_enum_discriminant(resolution)` call or `disc=` diagnostic. The crash is in
+the already-compiled parent owner while that parent is trying to build the
+fixed child. A source edit cannot alter the executing parent, and replaying the
+same resume is inadmissible.
+
+The hash-bound receipt is
+`build/bootstrap/probes/stage3-resume/0476f625056fc990-cce9a38a951f935d-8cfe1e38dcce9781-ec0d43f028b9aee7/result.env`.
+This historical resume proved only that the admitted parent could not compile
+its own repair. Its former conclusion that a separately authorized bootstrap
+authority was required is superseded by the current same-worktree full-
+bootstrap transaction below. It must not be used as the present dispatch
+blocker. AC-2 was not run in this historical lane: without an admitted Stage 3,
+a Stage 4 full CLI or essential-tools invocation would be a forbidden
+seed/substitute claim.
+
+## Restart12 current-source full transaction (cycles 1--3)
+
+Cycle 1 ran the canonical no-stub full-bootstrap/full-CLI/deploy transaction
+under `build/restart12-riscv-current` and stopped normally at the multiline
+`convert_nodes.spl:616:43` grammar frontier. That frontier is repaired.
+
+Cycle 2 reran the same transaction and advanced into Stage 2 HIR lowering. It
+exited 1, without a signal, with this exact diagnostic:
+
+```text
+declaration_lowering.spl: hir: Unsupported feature: cannot infer field type
+while lowering HirLowering.lower_verification_contract: struct 'ANY' field
+'decrease_measure'
+```
+
+The retained log is
+`build/restart12-riscv-current/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`,
+SHA-256
+`7f50a19470adec9fa508caf4427e159f9dcf150e6ae6e814f0204cd806320f16`.
+No Stage 2/3/4 artifact, essential-tools smoke, deployment, or rollback was
+published. This is a concrete current-source type-owner failure, not a repeat
+of the historical Stage 3 receiver crash and not an external-authority block.
+
+Final cycle 3 is active/pending: restore a concrete verification-contract owner
+before reading `decrease_measure`, then rerun the exact same top-level
+transaction once. Accept only same-lineage Stage 2/3/4 manifests and hashes.
+If cycle 3 fails, preserve its first trustworthy boundary and stop under the
+three-cycle cap; do not replay an identical transaction.
+
+## Final cycle-3 reconciliation (authoritative)
+
+The earlier pending/failure wording in this historical record is superseded by
+the following retained boundary:
+
+- Cycle 3 repaired the grammar and verification-contract owner frontiers.
+- Stage 2 passed with 858 compiled and 0 failed. The binary is
+  `build/restart12-riscv-current/stage2/x86_64-unknown-linux-gnu/simple`,
+  SHA-256 `e383d2c6ea86e63ba6805cf3478f723cecd673c2e141be86b3cf1150d14e9378`.
+  The Stage 2 log SHA-256 is
+  `db7907064858b472ffadf3cc9527f73acfaf4e80a5f3156d203ba84b924fb167`.
+- At 09:52:45 host `earlyoom` sent the Stage 3 `simple` process SIGTERM when it
+  reached 41,394 MiB RSS on a no-swap host with less than 10% free memory. The
+  process exited 143 after 5.4 seconds. The Stage 3 log is empty, SHA-256
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`,
+  and no Stage 3 executable was produced.
+- Cycle 2's Stage 2 log hash was observed as
+  `7f50a19470adec9fa508caf4427e159f9dcf150e6ae6e814f0204cd806320f16`,
+  but cycle 3 reused that path; the cycle-2 bytes are no longer retained.
+
+This is an external host-memory termination, not a new compiler diagnostic and
+not proof of the historical post-HIR SIGSEGV. The three source-fix cycles and
+identical resume attempts are exhausted. TODO666 now owns one unchanged resume
+from the admitted Stage 2 on a new host/supervisor window with enough memory or
+swap. Stage 4, essential-tools smoke, deployment, downstream evidence, and
+rollback remain gated by TODO667.

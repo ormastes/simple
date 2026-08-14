@@ -31,6 +31,7 @@ use os.desktop.font_bootstrap.{simpleos_desktop_register_selected_fonts_from_vfs
 use os.services.vfs.vfs_init.{vfs_boot_init_riscv64_virtio_fat32, g_vfs_read_file_text}
 use os.services.launcher.launcher_path_helpers.{launcher_path_exists}
 use os.services.wm.rv64_production_wm_producer.{Rv64ProductionWmProducer}
+use os.services.wm.rv64_production_wm_adapter.{rv64_wm_process_liveness}
 use os.rv64_wm_boot_resources.{
     RV64_WM_BOOT_BINARY_PATH,
     RV64_WM_BOOT_MAX_PUMP_ATTEMPTS,
@@ -179,14 +180,21 @@ fn spl_start():
                 return
             serial_println("[sshd] accept loop start")
             var wm_pump_attempts: i64 = 0
+            var wm_gate_complete = false
+            var wm_last_scene_revision: i64 = 0
+            var wm_last_taskbar_revision: i64 = 0
+            var wm_last_scanout_generation: i64 = 0
             while true:
                 val progress = daemon.accept_and_handle_once_result()
                 if progress.accepted:
                     if not gate.observe_ssh_progress(progress):
                         serial_println("[FATAL] SSH session/accept recovery gate failed")
                         return
+                # The accept owner and WM owner each perform at most one unit of
+                # work per service-loop turn.  Snapshot only after the action is
+                # committed so render inputs describe one stable compositor
+                # revision owned by the launched WM PID.
                 val _pumped = wm_producer.pump_one_published_action(shell)
-                wm_pump_attempts = wm_pump_attempts + 1
                 val snapshot = wm_producer.snapshot_published_scene(shell)
                 val snapshot_ready = rv64_wm_snapshot_facts_ready(
                     wm_producer.process_id,
@@ -197,25 +205,84 @@ fn spl_start():
                     snapshot.render_inputs.content_frames.len(),
                     snapshot.render_inputs.taskbar_revision
                 )
-                if gate.ssh_progress_observed and snapshot_ready:
-                    val wm_result = wm_producer.present_snapshot(executor, snapshot)
-                    if wm_result.failed or not wm_result.ready:
-                        gate.observe_wm(wm_result)
-                        return
-                    if not riscv64_display_present():
-                        serial_println("[FATAL] RV64 WM scanout present failed")
+                if not wm_gate_complete:
+                    wm_pump_attempts = wm_pump_attempts + 1
+                    if gate.ssh_progress_observed and snapshot_ready:
+                        val wm_result = wm_producer.present_snapshot(executor, snapshot)
+                        if wm_result.failed or not wm_result.ready:
+                            serial_println("[FATAL] RV64 WM first frame presentation failed")
+                            gate.block_missing_wm_producer()
+                            return
+                        if not riscv64_display_present():
+                            serial_println("[FATAL] RV64 WM scanout present failed")
+                            gate.block_missing_wm_producer()
+                            return
+                        val scanout_generation = riscv64_display_generation()
+                        if scanout_generation <= 0:
+                            serial_println("[FATAL] RV64 WM scanout generation missing")
+                            gate.block_missing_wm_producer()
+                            return
+                        if not gate.observe_wm(wm_result):
+                            serial_println("[FATAL] RV64 WM ordered receipt rejected")
+                            return
+                        val terminal_verdict = gate.verdict()
+                        if terminal_verdict != "PASS":
+                            serial_println("[FATAL] RV64 boot gate did not reach terminal PASS")
+                            return
+                        wm_last_scene_revision = snapshot.owned_scene.scene_revision
+                        wm_last_taskbar_revision = snapshot.render_inputs.taskbar_revision
+                        wm_last_scanout_generation = scanout_generation
+                        wm_gate_complete = true
+                        serial_println("[rv64-boot-gate] verdict=" + terminal_verdict + "; sshd remains accepting")
+                    elif wm_producer.verdict().failed or (not snapshot_ready and wm_pump_attempts >= RV64_WM_BOOT_MAX_PUMP_ATTEMPTS):
+                        serial_println("[FATAL] RV64 WM publication pump exhausted")
                         gate.block_missing_wm_producer()
                         return
-                    if riscv64_display_generation() <= 0:
-                        serial_println("[FATAL] RV64 WM scanout generation missing")
+                else:
+                    val producer_live = rv64_wm_process_liveness(wm_producer.process_id)
+                    if (wm_producer.verdict().failed or not producer_live.queried or
+                        not producer_live.alive or producer_live.process_id != wm_producer.process_id):
+                        serial_println("[FATAL] RV64 WM producer continuity failed")
                         gate.block_missing_wm_producer()
                         return
-                    gate.observe_wm(wm_result)
-                    return
-                if wm_producer.verdict().failed or wm_pump_attempts >= RV64_WM_BOOT_MAX_PUMP_ATTEMPTS:
-                    serial_println("[FATAL] RV64 WM publication pump exhausted")
-                    gate.block_missing_wm_producer()
-                    return
+                    if not snapshot_ready:
+                        serial_println("[FATAL] RV64 WM consistent PID-owned snapshot lost")
+                        gate.block_missing_wm_producer()
+                        return
+                    if snapshot.owned_scene.scene_revision < wm_last_scene_revision:
+                        serial_println("[FATAL] RV64 WM scene revision regressed")
+                        gate.block_missing_wm_producer()
+                        return
+                    val frame_changed = (
+                        snapshot.owned_scene.scene_revision != wm_last_scene_revision or
+                        snapshot.render_inputs.taskbar_revision != wm_last_taskbar_revision
+                    )
+                    if frame_changed:
+                        val presented_revision = executor.render(
+                            snapshot.owned_scene.scene,
+                            snapshot.render_inputs.taskbar,
+                            snapshot.render_inputs.content_frames,
+                            snapshot.owned_scene.scene_revision,
+                            snapshot.render_inputs.taskbar_revision,
+                            snapshot.render_inputs.clock_label
+                        )
+                        if (presented_revision <= 0 or
+                            presented_revision != snapshot.owned_scene.scene_revision):
+                            serial_println("[FATAL] RV64 WM continuity frame presentation failed")
+                            gate.block_missing_wm_producer()
+                            return
+                        if not riscv64_display_present():
+                            serial_println("[FATAL] RV64 WM continuity scanout present failed")
+                            gate.block_missing_wm_producer()
+                            return
+                        val next_scanout_generation = riscv64_display_generation()
+                        if next_scanout_generation <= wm_last_scanout_generation:
+                            serial_println("[FATAL] RV64 WM continuity scanout generation stalled")
+                            gate.block_missing_wm_producer()
+                            return
+                        wm_last_scene_revision = snapshot.owned_scene.scene_revision
+                        wm_last_taskbar_revision = snapshot.render_inputs.taskbar_revision
+                        wm_last_scanout_generation = next_scanout_generation
         Err(err):
             gate.observe_sshd_ready(false)
             serial_println("[FATAL] SSH daemon bind/listen failed: {err}")

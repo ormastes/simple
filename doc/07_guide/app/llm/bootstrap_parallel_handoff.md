@@ -32,7 +32,21 @@ The merge owner freezes the candidate and is the only agent that publishes the
 combined readiness result. A final reviewer checks the frozen receipts before a
 release or platform claim.
 
-## Exact Gate 1-6 sequence
+## Current x86 transaction status (2026-08-14)
+
+Final cycle 3 repaired both source frontiers and published current-source Stage
+2, binary SHA-256
+`e383d2c6ea86e63ba6805cf3478f723cecd673c2e141be86b3cf1150d14e9378`,
+log SHA-256
+`db7907064858b472ffadf3cc9527f73acfaf4e80a5f3156d203ba84b924fb167`.
+At 09:52:45 host `earlyoom` sent Stage 3 SIGTERM at 41,394 MiB RSS with less
+than 10% free memory and no swap; exit 143 followed 5.4 seconds later. The
+empty log hashes to
+`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+The three fix cycles are exhausted. TODO666 requires one unchanged resume on a
+new host/supervisor with enough memory or swap; TODO667 remains gated.
+
+## Exact Gate 1-7 sequence
 
 Run and record these in order. Do not skip a gate or restart with a different
 candidate between gates.
@@ -45,24 +59,30 @@ candidate between gates.
 3. **Gate 3, candidate sanity/hash:** freeze the candidate path and SHA-256;
    record identity, provenance, no-stub/no-failure scan, sanity output, and
    unsupported-command behavior.
-4. **Gate 4, essential-tools smoke:** run
-   `sh scripts/check/check-bootstrap-essential-tools-smoke.shs /absolute/path/to/stage4/simple`
-   and retain all four markers: test runner, lint, duplicate checker, and
-   aggregate bootstrap smoke.
-5. **Gate 5, deployment and rollback:** deploy only that candidate, retain the
-   pre/post identities, then run the manual rollback procedure (no
-   `rollback-bootstrap-deploy.shs` script exists yet: redeploy the retained
-   `bin/release/<canonical-triple>/simple.pre_deploy` over the newly-deployed
-   binary). Retain the rollback command, exit status, receipt path, restored
-   hash, and post-rollback arithmetic smoke.
+4. **Gate 4, essential-tools smoke:** the canonical transaction invokes
+   `check-bootstrap-essential-tools-smoke.shs` internally exactly once. Retain
+   `stage4-essential-tools-smoke.log` and all four markers; do not repeat a
+   standalone smoke against the same candidate.
+5. **Gate 5, deployment:** deploy only that candidate and retain the pre/post
+   identities. Keep this source-matched authority deployed through Gate 6
+   unless TODO667 publishes an isolated immutable bundle that downstream rows
+   execute directly.
 6. **Gate 6, platform acceptance/handoff:** the platform owner runs the exact
    native, QEMU, target, or scoped matrix command for the selected row and
    returns host identity, toolchain, source/compiler hashes, artifact hashes,
    logs, sanity, and essential-marker receipts.
+7. **Gate 7, rollback:** only after all selected Gate 6 evidence, run
+   `sh scripts/bootstrap/rollback-bootstrap-deploy.shs <canonical-triple>`.
+   Retain the command, exit status, receipt path, restored hash, and
+   post-rollback arithmetic smoke. An earlier rollback is valid only when
+   Gate 6 ran from TODO667's isolated immutable bundle. Publication of that
+   bundle binding candidate, deploy receipt, pre-deploy binary, rollback
+   script/receipt, downstream receipts, and hashes remains the TODO667 gap.
 
-After Gate 5, invoke the helper step named exactly
+After Gate 7, invoke the helper step named exactly
 `step_bootstrap_platform_handoff_readiness`. It invokes the canonical checker,
-selects the Gate 6 row, and records the handoff status. It cannot waive Gate 1-5.
+selects the Gate 6 row, and records the handoff status. It cannot waive or
+reorder Gates 1--7.
 
 ## External native-host handoffs
 

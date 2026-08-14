@@ -221,6 +221,15 @@ PID1 must come from the process owner before network or service readiness; a
 later SSH/WM marker cannot imply either prerequisite. The lane remains blocked
 until a provenance-admitted Stage 4 CLI exists and every ordered receipt passes
 the shared fail-closed checker.
+Final cycle 3 supersedes earlier bootstrap diagnostics. Current-source Stage 2
+passed (binary SHA-256
+`e383d2c6ea86e63ba6805cf3478f723cecd673c2e141be86b3cf1150d14e9378`,
+log SHA-256
+`db7907064858b472ffadf3cc9527f73acfaf4e80a5f3156d203ba84b924fb167`).
+Host `earlyoom` then sent Stage 3 SIGTERM at 41,394 MiB RSS on a no-swap host
+with less than 10% free memory; exit 143 followed 5.4 seconds later. TODO666
+owns one unchanged resume on a sufficiently memory-provisioned host. TODO667/A2
+remains gated; no Stage 3/4, essential smoke, deploy, or rollback exists.
 Source integration includes the IPC/VFS lifecycle wave: syscall-18
 owner-checked port destruction, unique named VFS discovery, copied request/raw
 reply framing, public FS binary methods, manager-owned mutation routing, and
@@ -244,3 +253,14 @@ retryable. SOSIX I/O now shares named VFS READ/WRITE/SEEK rather than fixed
 endpoint routing. After TODO667 retain one focused IPC-handoff, destroy-port, VFS-wire,
 FD-route, and SOSIX-I/O log for root and the normal/highest-capability Codex
 reviewer; those logs remain source-contract evidence, not a live gate result.
+
+The current source additionally cross-checks SATP mode/root PPN against the
+activated Sv39 root and keeps the SSH accept owner live after WM admission;
+later accepted sessions must again prove terminal handling and accept recovery.
+These changes strengthen AC-3/AC-4/AC-6 source status but are not runtime PASS.
+
+After Stage 4 admission, boot-owner, IPC/VFS, SSH, WM, and SSpec/manual focused
+rows run in parallel with disjoint log names. The combined QEMU row is serial
+because it owns host port 2222 and the canonical serial/OpenSSH/QMP artifacts.
+AC-8/AC-9 documentation review has no runtime dependency; the prior reachable
+WARN push is not final AC-10 evidence.

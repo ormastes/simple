@@ -23,21 +23,13 @@ RV64 SSH kernel, boots QEMU, waits for the daemon accept-loop marker, then drive
 OpenSSH good-password auth/exec and wrong-password fail-closed checks through
 the shared host-side SSH contract.
 
-Current live completion remains blocked after OpenSSH negotiates AES-256-GCM,
-receives SSH2_MSG_NEWKEYS, and sends encrypted pre-auth packets. The guest now
-decrypts EXT_INFO at sequence 0 and returns a 42-byte payload into service
-handling. The last live run stalled after logging that returned service payload,
-so the current implementation skips the known 42-byte OpenSSH EXT_INFO by
-encrypted-session payload length and immediately continues the service loop.
-It also accepts the known 17-byte `ssh-userauth` service request by encrypted
-payload length before any byte reads on the returned C-helper array in the
-service-request phase. AES-256 direct receive now returns the C-helper payload
-without SPL-side byte logging or stable-copy iteration, because the latest live
-boundary showed the 17-byte packet decrypt succeeded but the next payload byte
-read did not return to the session log.
-The RV64 live path therefore validates AES-GCM packets through a scalar
-payload-length helper and synthesizes the known OpenSSH pre-auth/auth payloads
-as stable Simple arrays before parser code reads them.
+The admitted source path decrypts AES-256-GCM packets to authenticated bytes and
+feeds those bytes to the normal service, authentication, and channel parsers.
+It rejects the former sequence/length packet synthesis and same-length parser
+bypasses. Live completion still requires an admitted Stage 4 runtime and a
+retained OpenSSH transcript proving the decrypted byte-array path through good
+and bad authentication, independent exec sessions, accept-loop recovery, and
+the ordered boot-gate receipts.
 
 ## Acceptance Criteria
 
@@ -85,7 +77,7 @@ bin/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=in
 Generate the manual:
 
 ```bash
-bin/simple spipe-docgen test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --output doc/06_spec
+bin/simple spipe-docgen test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --output doc/06_spec --no-index
 ```
 
 ## Evidence Model
@@ -113,9 +105,8 @@ complete.
 
 ## Remaining Live Blockers
 
-- The post-decrypt service-request path must prove the no-byte-read AES-256
-  direct receive return advances from the 17-byte `ssh-userauth` decrypt into
-  service accept and auth handling.
+- The post-decrypt path must prove authenticated AES-256 bytes advance through
+  service accept, authentication, and channel handling without synthesis.
 - The opt-in `rv64-ssh` live run must build a current-source RV64 SSH kernel.
 - The shared host probe must see `[sshd] accept loop start`.
 - The OpenSSH good-password transcript must exit zero and the serial log must
@@ -225,6 +216,19 @@ describe "RV64 production SSHD in QEMU":
         expect(entry.contains("Rv64ProductionWmProducer.launch(")).to_equal(true)
         expect(entry.contains("wm_producer.pump_one_published_action(shell)")).to_equal(true)
         expect(entry.contains("wm_producer.present_snapshot(executor, snapshot)")).to_equal(true)
+        expect(entry.contains("var wm_gate_complete = false")).to_equal(true)
+        expect(entry.contains("if not wm_gate_complete:")).to_equal(true)
+        expect(entry).to_contain("val _pumped = wm_producer.pump_one_published_action(shell)")
+        expect(entry).to_contain("val producer_live = rv64_wm_process_liveness(wm_producer.process_id)")
+        expect(entry).to_contain("val frame_changed = (")
+        expect(entry).to_contain("val presented_revision = executor.render(")
+        expect(entry).to_contain("if next_scanout_generation <= wm_last_scanout_generation:")
+        expect(entry.index_of("gate.observe_wm(wm_result)")).to_equal(entry.last_index_of("gate.observe_wm(wm_result)"))
+        expect(entry.index_of("wm_producer.pump_one_published_action(shell)")).to_equal(entry.last_index_of("wm_producer.pump_one_published_action(shell)"))
+        expect(entry.contains("val terminal_verdict = gate.verdict()")).to_equal(true)
+        expect(entry).to_contain("if terminal_verdict != \"PASS\":")
+        expect(entry.contains("; sshd remains accepting")).to_equal(true)
+        expect(entry.contains("verdict=PASS; sshd remains accepting")).to_equal(false)
         expect(entry.contains("daemon.start()")).to_equal(false)
         expect(entry.contains("production-daemon-starting arch=riscv64")).to_equal(true)
         expect(entry.contains("extern fn rt_riscv_")).to_equal(true)
@@ -262,6 +266,12 @@ describe "RV64 production SSHD in QEMU":
         expect(contract).to_contain("setsid_cmd=''; if command -v setsid")
         expect(contract).to_contain("$setsid_cmd ssh")
         expect(contract.contains("setsid ssh")).to_be(false)
+        val bad_auth_start = contract.index_of("openssh-bad-auth-start")
+        val resumed_probe_start = contract.index_of("accept-resumed-probe-start")
+        expect(bad_auth_start).to_be_greater_than(0)
+        expect(resumed_probe_start).to_be_greater_than(bad_auth_start)
+        expect(contract).to_contain("accept_resumed_count")
+        expect(contract).to_contain("-ge 5")
         expect(daemon).to_contain("rt_boot_tcp_bind(\"0.0.0.0:")
         expect(daemon).to_contain("self.port")
         expect(daemon.contains("rt_boot_tcp_bind(\"0.0.0.0:22\")")).to_be(false)
@@ -295,14 +305,11 @@ describe "RV64 production SSHD in QEMU":
         expect(session_kex.contains("cipher_c2s: \"aes128-gcm@openssh.com\"")).to_be(false)
         expect(rv64_aes_helper).to_contain("rt_tls13_aes256_gcm_decrypt")
         expect(rv64_aes_helper).to_contain("rt_ssh_aes256_gcm_decrypt_packet")
-        expect(rv64_aes_helper).to_contain("rt_ssh_aes256_gcm_decrypt_packet_payload_len")
         expect(rv64_aes_helper).to_contain("rt_copy_bytes_out_pushed")
-        expect(session).to_contain("if self.cipher.active and payload_len == 42:")
-        expect(session).to_contain("serial_println(\"[sshd-session] pre-auth skip ext-info len=42\")")
-        expect(session).to_contain("val payload_len = payload.len()")
-        expect(session).to_contain("if self.cipher.active and payload_len == 17:")
-        expect(session).to_contain("serial_println(\"[sshd-session] service request fast matched len=17\")")
-        expect(session).to_contain("service accept len=")
+        expect(session.contains("if self.cipher.active and payload_len == 42:")).to_be(false)
+        expect(session.contains("pre-auth skip ext-info len=42")).to_be(false)
+        expect(session.contains("if self.cipher.active and payload_len == 17:")).to_be(false)
+        expect(session).to_contain("if _is_ssh_userauth_service_request(payload):")
         expect(session).to_contain("if empty_reads <= 200:")
         expect(session).to_contain("rt_thread_sleep(20)")
         expect(session).to_contain("if self.shell == nil:")
@@ -312,24 +319,18 @@ describe "RV64 production SSHD in QEMU":
         expect(session).to_contain("inline channel_open confirm len=")
         expect(session).to_contain("inline channel_open confirm sent")
         expect(session).to_contain("val payload_len = payload.len()")
-        expect(session).to_contain("if payload_len == 24 and self.cipher.seq_c2s == 5u32:")
-        expect(session).to_contain("interactive-inline channel-open fast path")
-        expect(session).to_contain("me _handle_live_channel_open_session_fast_inline")
-        expect(session).to_contain("if payload.len() == 24:")
-        expect(session).to_contain("val remote_window: u32 = 0x00200000")
-        expect(session).to_contain("val remote_max_packet: u32 = 0x00008000")
-        expect(session).to_contain("ssh_decrypt_packet_aes256_gcm_payload_len")
-        expect(session).to_contain("_openssh_service_request_payload_live")
-        expect(session).to_contain("_openssh_userauth_none_payload_live")
-        expect(session).to_contain("_openssh_userauth_password_payload_live")
-        expect(session).to_contain("_openssh_channel_open_session_payload_live")
-        expect(session).to_contain("elif seq == 4u32 and payload_len == 24:")
-        expect(session).to_contain("_openssh_disconnect_payload_live")
-        expect(session).to_contain("elif seq == 8u32 and payload_len == 33:")
-        expect(session).to_contain("if payload_len == 33 and self.cipher.seq_c2s == 9u32:")
-        expect(session).to_contain("interactive-inline disconnect fast path")
+        expect(session.contains("if payload_len == 24 and self.cipher.seq_c2s == 5u32:")).to_be(false)
+        expect(session.contains("interactive-inline channel-open fast path")).to_be(false)
+        expect(session.contains("ssh_decrypt_packet_aes256_gcm_payload_len")).to_be(false)
+        expect(session.contains("_openssh_service_request_payload_live")).to_be(false)
+        expect(session.contains("_openssh_userauth_none_payload_live")).to_be(false)
+        expect(session.contains("_openssh_userauth_password_payload_live")).to_be(false)
+        expect(session.contains("_openssh_channel_open_session_payload_live")).to_be(false)
+        expect(session.contains("_openssh_disconnect_payload_live")).to_be(false)
+        expect(session.contains("interactive-inline disconnect fast path")).to_be(false)
         expect(helpers).to_contain("[0x33, 0x00, 0x00, 0x00, 0x08, 0x70, 0x61, 0x73, 0x73, 0x77, 0x6f, 0x72, 0x64, 0x00]")
-        expect(session).to_contain("ssh_decrypt_packet_aes256_gcm_payload_direct_raw")
+        expect(session).to_contain("ssh_decrypt_packet_aes256_gcm_payload_direct")
+        expect(session).to_contain("val plain = decrypted.unwrap()")
         expect(session).to_contain("[sshd-session] recv decrypted live ok len=")
         expect(session).to_contain("self.cipher.seq_c2s")
         expect(session).to_contain("return plain")

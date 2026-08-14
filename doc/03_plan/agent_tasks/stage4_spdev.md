@@ -1,10 +1,27 @@
 # Stage 4 SPipe agent tasks
 
-## Current status after `f47e3916` (2026-08-08)
+## Current status after final cycle 3 (2026-08-14)
 
 This is the current status. The historical snapshot below is retained for
 diagnostic context and is explicitly stale; it must not be used as current
 admission evidence.
+
+- Final cycle 3 repaired both source frontiers and published current-source
+  Stage 2 at `build/restart12-riscv-current/stage2/x86_64-unknown-linux-gnu/simple`.
+  Its binary SHA-256 is
+  `e383d2c6ea86e63ba6805cf3478f723cecd673c2e141be86b3cf1150d14e9378`;
+  the Stage 2 log SHA-256 is
+  `db7907064858b472ffadf3cc9527f73acfaf4e80a5f3156d203ba84b924fb167`.
+- Stage 3 was terminated by host `earlyoom` at 09:52:45 with SIGTERM/143 when
+  the `simple` process reached 41,394 MiB RSS and the no-swap host had less than
+  10% free memory. It exited 5.4 seconds later. The empty Stage 3 log SHA-256 is
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`;
+  no Stage 3 executable was produced.
+- This is an **EXTERNAL HOST-MEMORY BLOCKER**, not another compiler diagnostic.
+  The three fix cycles and identical resume attempts are exhausted. Resume the
+  unchanged admitted Stage 2 only in a new host/supervisor window with enough
+  memory (or swap) to finish Stage 3. A2 remains gated; no Stage 4,
+  essential-smoke, deploy, or rollback evidence exists.
 
 - SDK contract preparation is implemented, frontier-reviewed, and statically
   gated. It defines `BootstrapSdkManifest`, `BootstrapSdkModuleInterface`,
@@ -19,7 +36,7 @@ admission evidence.
   symlink rejection, receipt revalidation, atomic publication, serial
   watermarks, RAMFB checksum correlation, and signal exit behavior are covered,
   but no image, QMP, hosted bootstrap, or board PASS is claimed.
-- Stage 3 remains excluded and unadmitted. It is the hard gate for every x86
+- Stage 3 remains unadmitted. It is the hard gate for every x86
   Stage 4 and downstream platform acceptance claim. The SDK, FreeBSD, and
   SimpleOS preparation changes do not waive that gate.
 - Linux AArch64 and macOS require their respective external native hosts.
@@ -33,7 +50,7 @@ admission evidence.
 Every platform lane, including QEMU, cross-target, and external-native-host
 lanes, is blocked until this exact sequence completes on x86_64 Linux:
 
-`Stage 3 admission -> x86 Stage 4 -> candidate sanity/hash -> all four essential smoke markers -> deployment and rollback evidence -> platform acceptance`
+`Stage 3 admission -> x86 Stage 4 -> candidate sanity/hash -> all four essential smoke markers -> deployment -> source-matched platform/feature acceptance -> rollback`
 
 Preparation, static gates, frontier review, cross compilation, and retained
 historical artifacts cannot skip or reorder a gate. Run a platform command only
@@ -42,12 +59,11 @@ source and candidate lineage.
 
 | Order | Gate / lane | Canonical command or authoritative owner evidence | Required result |
 |---|---|---|---|
-| 1 | Stage 3 admission | Start the single canonical Gate 1-through-5 transaction with `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-cli --deploy`. The session plan publishes no separate Stage 3 command. The wrapper must build `src/app/cli/bootstrap_main.spl` with the canonical authority; merge owner retains `SIMPLE_NO_STUB_FALLBACK=1`, admitted Stage 2/runtime authority, Stage 3 build log, exact `simple-bootstrap 1.0.0-beta` identity, the verbatim rejection probe `run scripts/check/cert/redeploy_gate/fixtures/p2_add.spl`, frontend admission, and stable SHA-256. | Admitted pure-Simple Stage 3; executable existence or zero failed files alone is insufficient |
-| 2 | x86_64 Linux Stage 4 | Continue the same invocation, `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-cli --deploy`; do not start a second invocation. The session plan publishes no separate Stage 4 command. Merge owner retains `stage4-native-build.log`, `progress-bitcode.log`, `bootstrap-build-progress.events`, progress/RSS receipt, source identity, cache identity, and candidate lineage. | Fresh non-stub pure-Simple Stage 4 candidate from the Gate 1 Stage 3 lineage |
-| 3 | Candidate sanity and hash | Continue the same invocation, `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-cli --deploy`; do not start a second invocation. The session plan states that this wrapper runs candidate sanity and provenance checks but publishes no standalone sanity/hash command. Merge owner records exact path and SHA-256, pure-Simple identity/version/hash, no-stub/no-failure scan, unsupported-command behavior, sanity output, and unchanged candidate bytes. | One frozen candidate admitted for smoke |
-| 4 | Essential-tools smoke | `sh scripts/check/check-bootstrap-essential-tools-smoke.shs /absolute/path/to/stage4/simple` | The same candidate emits all four required markers: `essential_test_runner_smoke=true`, `essential_lint_smoke=true`, `essential_duplicate_checker_smoke=true`, and `bootstrap_essential_tools_smoke=true` |
-| 5 | Deployment | Continue the same invocation, `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-cli --deploy`; do not start a second invocation. | Install only after Gates 1 through 4 pass against the same lineage; retain deployed hash, pre/post-swap identity, `bin/release/<platform>/simple.pre_deploy`, and post-swap `-c 'print(1+1)'` output |
-| 5R | Explicit rollback execution | No `rollback-bootstrap-deploy.shs` script exists yet (planned). Run the manual rollback procedure after recording the reviewed candidate and deployed identities: prove `bin/release/<canonical-triple>/simple.pre_deploy` exists, redeploy it over the newly-deployed binary, run the same arithmetic smoke, and retain the command/output, exit status, restored SHA-256, and rollback receipt. | Distinct executable rollback receipt is mandatory before Gate 5 is accepted; automatic restoration on failed post-swap smoke is retained separately |
+| 1 | Stage 2/3 admission | Preserve the admitted cycle-3 Stage 2 and resume it once only in a new host/supervisor window with enough memory or swap. Retain Stage 2/3 logs, host-memory/supervisor evidence, authority/runtime identities, manifests, and hashes from one lineage. | Admitted pure-Simple Stage 2 and Stage 3; cycle-3 Stage 2 is current authority and its earlyoom boundary is blocker evidence |
+| 2 | x86_64 Linux Stage 4 | Continue the admitted lineage from Gate 1; do not substitute another worktree's candidate. Retain `stage4-native-build.log`, progress events/RSS, source identity, cache identity, and candidate lineage. | Fresh non-stub pure-Simple Stage 4 candidate from the Gate 1 Stage 3 lineage |
+| 3 | Candidate sanity and hash | Continue the same lineage. Record exact path/SHA-256, identity/version/hash, no-stub/no-failure scan, unsupported-command behavior, sanity output, and unchanged candidate bytes. | One frozen candidate admitted for smoke |
+| 4 | Essential-tools smoke | Continue the same transaction; it invokes the checker internally exactly once. Do not start a standalone duplicate smoke. | `stage4-essential-tools-smoke.log` from the same candidate emits all four required markers |
+| 5 | Deployment | Continue the exact cycle-3 transaction; do not start a second invocation. | Install only after Gates 1 through 4 pass against the same lineage; retain deployed hash, pre/post-swap identity, `bin/release/<platform>/simple.pre_deploy`, and post-swap `-c 'print(1+1)'` output. Keep it deployed through source-matched Gate 6 evidence unless an isolated immutable bundle is published. |
 | 6 | Linux AArch64 native acceptance | `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --full-cli --jobs=2` on native AArch64 Linux | Retain `build/bootstrap/stage3/aarch64-unknown-linux-gnu/simple`, `build/bootstrap/full/aarch64-unknown-linux-gnu/simple`, hashes, logs, sanity, and all essential markers |
 | 6 | macOS x86_64/AArch64 native acceptance | `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --full-cli --jobs=2` on macOS | Retain matching `stage3/<triple>/simple` and `full/<triple>/simple`, hashes, logs, sanity, and all essential markers |
 | 6 | Windows x86_64 native acceptance | `bash scripts/bootstrap/bootstrap-windows.sh --msvc --backend=llvm --mode=dynload --full-bootstrap --no-mcp --jobs=2` in Git Bash/MSYS2 | Retain `build/bootstrap/stage3/x86_64-pc-windows-msvc/simple.exe`, hash, logs, and scoped wrapper evidence; do not add unsupported full-CLI/deploy claims |
@@ -57,6 +73,7 @@ source and candidate lineage.
 | 6b | SimpleOS AArch64 QMP input | `sh scripts/check/check-simpleos-arm64-qmp-input-evidence.shs` after 6a | Retain atomic evidence manifest, QMP/serial logs, watermarks, captures, and guest/capture checksum equality; QEMU input evidence only |
 | 6 | RISC-V64 scoped cross/QEMU acceptance | `sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs` | Retain matrix evidence; scoped cross execution/SIMD evidence only, not hosted bootstrap PASS |
 | 6 | RISC-V32 bare-metal object acceptance | No exact command is published in the session plan. Platform sidecar owns the repository architecture-gate receipt for `riscv32-unknown-none-elf`, including ELF32/RISC-V attributes, toolchain identity, command transcript, hashes, and logs. | Bare-metal object acceptance only; never claim `riscv32-unknown-linux-gnu` or hosted bootstrap PASS |
+| 7 | Explicit rollback execution | After all selected source-matched Gate 6 evidence, run `sh scripts/bootstrap/rollback-bootstrap-deploy.shs <canonical-triple>`. Earlier rollback is allowed only when TODO667 has published an isolated immutable bundle from which every selected Gate 6 row runs. | Distinct executable rollback receipt is mandatory and cannot predate evidence from the only deployed source-matched authority. TODO667 retains the immutable deploy+rollback bundle-publisher gap; do not create a duplicate Todo. |
 
 ### Canonical readiness checker and handoff helper
 
@@ -69,14 +86,15 @@ sh scripts/check/check-bootstrap-platform-handoff-readiness.shs
 It is fail-closed and evaluates the retained receipts for the exact source and
 candidate lineage. It must not rebuild, substitute the Rust seed, accept a stale
 artifact, infer a marker from a log fragment, or turn an unavailable host into a
-PASS. A result is `PASS` only when Gates 1 through 5, including executable
-rollback, are evidenced and the selected Gate 6 native/platform handoff is
-complete. Otherwise the result is `OPEN` or `BLOCKED`, with the first missing
+PASS. A result is `PASS` only when Gates 1 through 5, the selected Gate 6
+native/platform handoff, and Gate 7 executable rollback are evidenced in that
+order (or Gate 6 is bound to TODO667's isolated immutable bundle). Otherwise
+the result is `OPEN` or `BLOCKED`, with the first missing
 gate named.
 
 Plans and generated operator manuals use the helper step name
 `step_bootstrap_platform_handoff_readiness`. The helper invokes the canonical
-checker after Gate 5R, binds the handoff to `<canonical-triple>`, and publishes
+checker after Gate 7 rollback, binds the handoff to `<canonical-triple>`, and publishes
 the Gate 6 handoff receipt. It is a readiness check, not permission to skip a
 gate or to claim platform success.
 

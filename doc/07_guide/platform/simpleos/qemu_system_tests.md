@@ -38,12 +38,16 @@ accept-resumed correlation receipt. A fixed combined command, canned stdout, ban
 marker-only PID1, or fixed rectangle/string WM fixture is not production boot
 evidence.
 
-As of 2026-08-14 this lane is blocked before QEMU verification: no
-provenance-admitted Stage 4 full CLI exists. The retained Stage 3 failure ends
-in pure-Simple MIR method-call lowering after HIR; see
-`doc/08_tracking/bug/stage3_selfhost_post_hir_segfault_2026-08-14.md`. Resume
-with the exact WP-A commands in the canonical plan, then run each focused and
-live criterion once. Do not substitute the Rust seed or Stage 2 artifact.
+As of 2026-08-14 this lane has no provenance-admitted Stage 4 full CLI. Final
+cycle 3 published current-source Stage 2 (binary SHA-256
+`e383d2c6ea86e63ba6805cf3478f723cecd673c2e141be86b3cf1150d14e9378`,
+log SHA-256
+`db7907064858b472ffadf3cc9527f73acfaf4e80a5f3156d203ba84b924fb167`).
+Host `earlyoom` then sent Stage 3 SIGTERM at 41,394 MiB RSS on a no-swap host
+with less than 10% free memory; exit 143 followed 5.4 seconds later. No Stage
+3/4, deployment, rollback, or essential smoke occurred. TODO666 now owns one
+unchanged resume on a sufficiently memory-provisioned host; TODO667/A2 remains
+gated. Earlier cycles and probe rows are superseded diagnostics.
 The current source lanes B-F are integrated; this statement blocks executable
 evidence only, not additional speculative source rewrites. In particular, the
 IPC/VFS wave has syscall-18 owner-only destruction, named-service discovery,
@@ -67,6 +71,11 @@ hand them to the primary RV64 merge owner and normal/highest-capability Codex
 reviewer. They are focused source-contract evidence only; TODO806 is still the
 remaining combined QEMU runtime blocker.
 
+The boot owner also validates SATP mode and root PPN against the activated
+Sv39 root, keeps the daemon accepting after the first WM frame, and validates
+terminal handling plus accept recovery for every later accepted session. These
+strengthen AC-3/AC-4/AC-6 source status but remain unexecuted obligations.
+
 Terra's 2026-08-14 terminal-only diagnostics do not relax this rule. The
 release binary checked `ssh_live_entry.spl` and the WM-resource spec with exit
 0, and the WM-resource interpreter spec exited 0 with empty output; the IPC
@@ -77,6 +86,23 @@ The release binary then printed `Checking...` and segfaulted while loading
 next attempt's terminal output and provenance, run it only after TODO667, and
 never represent either the narrow PASS diagnostics or the checker crash as a
 live lifecycle verdict.
+
+The successful cycle-3 transaction runs the canonical essential-tools smoke
+internally exactly once and retains `stage4-essential-tools-smoke.log`; do not
+repeat it as a standalone smoke. Keep that deployment active through the
+source-matched focused/live rows; only afterward use the existing
+`sh scripts/bootstrap/rollback-bootstrap-deploy.shs x86_64-unknown-linux-gnu`
+and retain its rollback receipt. Earlier rollback requires TODO667's isolated
+immutable bundle and all downstream rows must execute from that bundle.
+
+The remaining execution wave is deliberately parallel after Stage 4
+admission: IPC/VFS/SOSIX, boot-owner, SSH, WM, and SSpec/manual owners write
+disjoint focused logs. The combined QEMU/OpenSSH/QMP run is then serial because
+it owns fixed port 2222 and the canonical live artifact paths. AC-8/AC-9
+documentation review can proceed while TODO666's local typed-owner fix runs and must not be
+misclassified as runtime-blocked. The earlier reachable `WARN` receipt proves
+only the source handoff; final AC-10 still requires a post-acceptance `PASS`
+receipt.
 
 ## Engine2D Exact-Oracle Gate
 

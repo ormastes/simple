@@ -222,6 +222,25 @@ PID/frame receipt. The checker-loaded system SSpec currently segfaults before
 its scenario result, so rerun the focused WM ledger only after TODO667 and
 retain its outputs with the Stage 4 provenance.
 
+The authoritative redo plan assigns WM four exclusive focused logs and starts
+it only after the admitted Stage 4 and accepted IPC/VFS receipts exist. It may
+run alongside boot-owner, SSH, and manual rows, but it must not start a second
+live guest: the primary RV64 owner alone runs the combined port-2222/QMP row.
+The earlier reachable WARN integration is a source handoff, not AC-5 or AC-10.
+The production entry now keeps the accept/WM loop alive after the first
+presented frame instead of returning from the daemon, and later accepted SSH
+sessions remain subject to terminal and accept-resumed validation. This is a
+source correction only until the admitted focused and live rows pass.
+
+Final cycle 3 completed current-source Stage 2 (binary SHA-256
+`e383d2c6ea86e63ba6805cf3478f723cecd673c2e141be86b3cf1150d14e9378`,
+log SHA-256
+`db7907064858b472ffadf3cc9527f73acfaf4e80a5f3156d203ba84b924fb167`).
+Host `earlyoom` then terminated Stage 3 at 41,394 MiB RSS on a no-swap host
+with less than 10% free memory; exit 143 followed 5.4 seconds later. TODO666
+owns one unchanged resume on a host with enough memory or swap. TODO667/A2
+remains gated; no Stage 3/4, deploy, essential-smoke, or rollback evidence exists.
+
 P1c IPC service transport is shared with the WM path: copied traffic is
 selected only by `IPC_COPIED_SERVICE_TAG`, and syscall 18 permits the recorded
 owner alone to revoke an endpoint. The VFS close watermark and SOSIX named-VFS
