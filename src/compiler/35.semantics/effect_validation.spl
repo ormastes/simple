@@ -212,6 +212,16 @@ fn effect_expr_grows(expr: HirExpr) -> bool:
                     effect_block_grows(eb)
                 nil:
                     false
+        case HirExprKind.IfChain(arms, else_):
+            for arm in arms:
+                val typed_arm: HirIfArm = arm
+                if effect_expr_grows(typed_arm.cond):
+                    return true
+                if effect_block_grows(typed_arm.then_):
+                    return true
+            match else_:
+                Some(eb): effect_block_grows(eb)
+                nil: false
         case HirExprKind.MatchCase(scrutinee, arms):
             if effect_expr_grows(scrutinee):
                 return true
@@ -305,6 +315,19 @@ fn effect_expr_loops(expr: HirExpr) -> [LoopSite]:
                         out.push(lp)
                 nil:
                     pass_do_nothing("if expression has no else block")
+        case HirExprKind.IfChain(arms, else_):
+            for arm in arms:
+                val typed_arm: HirIfArm = arm
+                for lp in effect_expr_loops(typed_arm.cond):
+                    out.push(lp)
+                for lp in effect_block_loops(typed_arm.then_):
+                    out.push(lp)
+            match else_:
+                Some(eb):
+                    for lp in effect_block_loops(eb):
+                        out.push(lp)
+                nil:
+                    pass_do_nothing("if chain has no else block")
         case HirExprKind.MatchCase(scrutinee, arms):
             for lp in effect_expr_loops(scrutinee):
                 out.push(lp)
@@ -422,6 +445,19 @@ fn effect_expr_copies(expr: HirExpr, sizes: Dict<i64, i64>) -> [CopySite]:
                         out.push(c)
                 nil:
                     pass_do_nothing("if expression has no else block")
+        case HirExprKind.IfChain(arms, else_):
+            for arm in arms:
+                val typed_arm: HirIfArm = arm
+                for c in effect_expr_copies(typed_arm.cond, sizes):
+                    out.push(c)
+                for c in effect_block_copies(typed_arm.then_, sizes):
+                    out.push(c)
+            match else_:
+                Some(eb):
+                    for c in effect_block_copies(eb, sizes):
+                        out.push(c)
+                nil:
+                    pass_do_nothing("if chain has no else block")
         case HirExprKind.MatchCase(_, arms):
             for arm in arms:
                 val a: HirMatchArm = arm
@@ -512,6 +548,19 @@ fn effect_expr_callees(expr: HirExpr, fn_names: Dict<i64, text>) -> [text]:
                         out.push(n)
                 nil:
                     pass_do_nothing("if expression has no else block")
+        case HirExprKind.IfChain(arms, else_):
+            for arm in arms:
+                val typed_arm: HirIfArm = arm
+                for n in effect_expr_callees(typed_arm.cond, fn_names):
+                    out.push(n)
+                for n in effect_block_callees(typed_arm.then_, fn_names):
+                    out.push(n)
+            match else_:
+                Some(eb):
+                    for n in effect_block_callees(eb, fn_names):
+                        out.push(n)
+                nil:
+                    pass_do_nothing("if chain has no else block")
         case HirExprKind.MatchCase(scrutinee, arms):
             for n in effect_expr_callees(scrutinee, fn_names):
                 out.push(n)

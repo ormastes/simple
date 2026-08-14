@@ -299,6 +299,15 @@ fn extract_callees_from_expr(expr: Expr) -> [text]:
             if else_e != nil:
                 for c in extract_callees_from_expr(else_e):
                     callees.push(c)
+        case ExprKind.IfChain(arms, else_):
+            for arm in arms:
+                for c in extract_callees_from_expr(arm.cond):
+                    callees.push(c)
+                for c in extract_callees_from_block(arm.then_):
+                    callees.push(c)
+            if val else_block = else_:
+                for c in extract_callees_from_block(else_block):
+                    callees.push(c)
         case ExprKind.Block(block):
             for c in extract_callees_from_block(block):
                 callees.push(c)
@@ -477,6 +486,27 @@ fn scan_expr_for_spawns(expr: Expr, caller: text, seen_await: bool) -> ScanResul
                 sites.push(s)
             if rr.found_await:
                 found_await = true
+
+        case ExprKind.IfChain(arms, else_):
+            for arm in arms:
+                val cond_result = scan_expr_for_spawns(arm.cond, caller, found_await)
+                for site in cond_result.sites:
+                    sites.push(site)
+                if cond_result.found_await:
+                    found_await = true
+                for stmt in arm.then_.stmts:
+                    val body_result = scan_stmt_for_spawns(stmt, caller, found_await)
+                    for site in body_result.sites:
+                        sites.push(site)
+                    if body_result.found_await:
+                        found_await = true
+            if val else_block = else_:
+                for stmt in else_block.stmts:
+                    val else_result = scan_stmt_for_spawns(stmt, caller, found_await)
+                    for site in else_result.sites:
+                        sites.push(site)
+                    if else_result.found_await:
+                        found_await = true
 
         case ExprKind.Block(block):
             val br = scan_block_for_spawns(block, caller)
@@ -743,5 +773,3 @@ fn format_spawn_verify_result(result: SpawnVerifyResult) -> text:
 # ================================================================
 # Exports
 # ================================================================
-
-

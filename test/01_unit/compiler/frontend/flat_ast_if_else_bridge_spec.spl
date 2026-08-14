@@ -24,11 +24,97 @@ fn if_else_else_count(src: text, fname: text) -> i64:
                         if else_ != nil:
                             return else_.stmts.len()
                         return -2
+                    case ExprKind.IfChain(arms, else_):
+                        if else_ != nil:
+                            return else_.stmts.len()
+                        return -2
                     case _:
                         pass
             case _:
                 pass
     return -1
+
+# Counts flattened IfChain arms and requires the terminal else to remain a
+# one-statement block. Negative results identify malformed bridge output.
+fn bridged_if_chain_depth(block: Block) -> i64:
+    if block.stmts.len() != 1:
+        return -1
+    match block.stmts[0].kind:
+        case StmtKind.Expr(e):
+            match e.kind:
+                case ExprKind.IfChain(arms, else_):
+                    if val else_block = else_:
+                        if else_block.stmts.len() != 1:
+                            return -2
+                        return arms.len()
+                    return -3
+                case _:
+                    return -4
+        case _:
+            return -5
+
+fn parsed_if_chain_depth(src: text, fname: text) -> i64:
+    val m = parse_and_build_module(src, fname + ".spl")
+    val fn_ = m.functions[fname] ?? panic("missing fn " + fname)
+    bridged_if_chain_depth(fn_.body)
+
+fn long_elif_source(arm_count: i64) -> text:
+    var src = "fn long_chain(n: i64) -> i64:\n"
+    var i = 0
+    while i < arm_count:
+        if i == 0:
+            src = src + "    if n == {i}:\n        return {i}\n"
+        else:
+            src = src + "    elif n == {i}:\n        return {i}\n"
+        i = i + 1
+    src + "    else:\n        return -1\n"
+
+var if_chain_probe_calls = 0
+
+fn if_chain_probe(value: i64, wanted: i64) -> bool:
+    if_chain_probe_calls = if_chain_probe_calls + 1
+    value == wanted
+
+fn executable_if_chain(value: i64) -> i64:
+    if if_chain_probe(value, 0):
+        return 10
+    elif if_chain_probe(value, 1):
+        return 20
+    else:
+        return 30
+
+fn executable_if_chain_no_else(value: i64) -> i64:
+    var result = 7
+    if value == 0:
+        result = 10
+    elif value == 1:
+        result = 20
+    result
+
+fn executable_if_val_chain(first: i64?, second: i64?) -> i64:
+    if val first_value = first:
+        return first_value
+    elif val second_value = second:
+        return second_value
+    else:
+        return -1
+
+fn executable_else_if_chain(value: i64) -> i64:
+    if value == 0:
+        return 10
+    else if value == 1:
+        return 20
+    else:
+        return 30
+
+fn value_position_if_chain(value: i64) -> i64:
+    val result = if value == 0:
+        10
+    elif value == 1:
+        20
+    else:
+        30
+    result
 
 describe "Flat AST bridge if/else fidelity (M12 item 6)":
     it "attaches the else block for if/else":
@@ -42,3 +128,34 @@ describe "Flat AST bridge if/else fidelity (M12 item 6)":
     it "attaches the else chain for if/elif/else":
         val src = "fn h(n: i64) -> i64:\n    if n > 90:\n        return 1\n    elif n > 50:\n        return 2\n    else:\n        return 3\n"
         expect(if_else_else_count(src, "h")).to_equal(1)
+
+    it "preserves every link in a long elif chain and its terminal else":
+        val src = long_elif_source(128)
+        expect(parsed_if_chain_depth(src, "long_chain")).to_equal(128)
+
+    it "executes selected arms in order and short-circuits later conditions":
+        if_chain_probe_calls = 0
+        expect(executable_if_chain(1)).to_equal(20)
+        expect(if_chain_probe_calls).to_equal(2)
+        expect(executable_if_chain(9)).to_equal(30)
+        expect(if_chain_probe_calls).to_equal(4)
+
+    it "preserves no-else and terminal-else results":
+        expect(executable_if_chain_no_else(0)).to_equal(10)
+        expect(executable_if_chain_no_else(9)).to_equal(7)
+        expect(executable_if_chain(9)).to_equal(30)
+
+    it "preserves if-val narrowing across elif arms":
+        expect(executable_if_val_chain(nil, 42)).to_equal(42)
+        expect(executable_if_val_chain(7, 42)).to_equal(7)
+        expect(executable_if_val_chain(nil, nil)).to_equal(-1)
+
+    it "preserves else-if spelling":
+        expect(executable_else_if_chain(0)).to_equal(10)
+        expect(executable_else_if_chain(1)).to_equal(20)
+        expect(executable_else_if_chain(9)).to_equal(30)
+
+    it "merges value-position expression arms":
+        expect(value_position_if_chain(0)).to_equal(10)
+        expect(value_position_if_chain(1)).to_equal(20)
+        expect(value_position_if_chain(9)).to_equal(30)

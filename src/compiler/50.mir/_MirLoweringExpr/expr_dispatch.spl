@@ -2871,6 +2871,7 @@ impl MirLowering:
             val d_cast = rt_enum_discriminant(HirExprKind.Cast(nil_expr, ex_type))
             val d_block = rt_enum_discriminant(HirExprKind.Block(ex_block))
             val d_if = rt_enum_discriminant(HirExprKind.If(nil_expr, ex_block, nil))
+            val d_if_chain = rt_enum_discriminant(HirExprKind.IfChain([], nil))
             val d_while = rt_enum_discriminant(HirExprKind.While(nil_expr, ex_block, nil))
             val d_loop = rt_enum_discriminant(HirExprKind.Loop(ex_block, nil))
             val d_matchcase = rt_enum_discriminant(HirExprKind.MatchCase(nil_expr, []))
@@ -2889,7 +2890,7 @@ impl MirLowering:
             eprint("[mir-lower-expr] disc-table ArrayLit={d_arraylit} TupleLit={d_tuplelit} SetLit={d_setlit} Index={d_index} TupleIndex={d_tupleindex}\n")
             eprint("[mir-lower-expr] disc-table Field={d_field} OptionalChain={d_optchain} NullCoalesce={d_nullcoalesce} ExistsCheck={d_existscheck} Unwrap={d_unwrap}\n")
             eprint("[mir-lower-expr] disc-table Binary={d_binary} Unary={d_unary} Call={d_call} Cast={d_cast} Block={d_block}\n")
-            eprint("[mir-lower-expr] disc-table If={d_if} While={d_while} Loop={d_loop} MatchCase={d_matchcase} Return={d_return}\n")
+            eprint("[mir-lower-expr] disc-table If={d_if} IfChain={d_if_chain} While={d_while} Loop={d_loop} MatchCase={d_matchcase} Return={d_return}\n")
             eprint("[mir-lower-expr] disc-table Try={d_try} Await={d_await} Throw={d_throw} Yield={d_yield} Range={d_range}\n")
             eprint("[mir-lower-expr] disc-table Var={d_var} NamedVar={d_namedvar} ArrayRepeat={d_arrayrepeat} Break={d_break} Continue={d_continue}\n")
         val expr_disc = rt_enum_discriminant(expr_value.kind)
@@ -2928,6 +2929,26 @@ impl MirLowering:
                 return bad_if
             val expected_if_type: HirType? = if expr_value.has_type_ and expr_value.type_ != nil: expr_value.type_ else: nil
             return self.lower_if(if_cond, if_then, if_else, expected_if_type)
+        # IfChain is intentionally decoded before pattern dispatch.  Its tuple
+        # payload contains an array of value aggregates, and staged native
+        # multi-field enum matches have previously misbound such payloads.
+        val if_chain_disc = rt_enum_discriminant(HirExprKind.IfChain([], nil))
+        if expr_disc == if_chain_disc:
+            val if_chain_payload = rt_enum_payload(expr_value.kind)
+            val if_chain_arms: [HirIfArm] = rt_tuple_get(if_chain_payload, 0)
+            val if_chain_else: HirBlock? = rt_tuple_get(if_chain_payload, 1)
+            if if_chain_arms == nil or if_chain_arms.len() == 0:
+                self.error_fatal("empty HIR IfChain payload", Some(expr_value.span))
+                var b_bad_if_chain = self.builder
+                val bad_if_chain = b_bad_if_chain.new_temp(MirType.unit())
+                self.builder = b_bad_if_chain
+                return bad_if_chain
+            var if_chain_index = 0
+            while if_chain_index < if_chain_arms.len():
+                val if_chain_arm = if_chain_arms[if_chain_index]
+                if_chain_index = if_chain_index + 1
+            val expected_if_chain_type: HirType? = if expr_value.has_type_ and expr_value.type_ != nil: expr_value.type_ else: nil
+            return self.lower_if_chain(if_chain_arms, if_chain_else, expected_if_chain_type)
         val field_disc = rt_enum_discriminant(HirExprKind.Field(nil_expr, "", nil))
         if expr_disc == field_disc:
             match expr_value.kind:
@@ -3439,6 +3460,9 @@ impl MirLowering:
             case If(cond, then_, else_):
                 val expected_if_type: HirType? = if expr.has_type_ and expr.type_ != nil: expr.type_ else: nil
                 self.lower_if(cond, then_, else_, expected_if_type)
+            case IfChain(arms, else_):
+                val expected_if_chain_type: HirType? = if expr_value.has_type_ and expr_value.type_ != nil: expr_value.type_ else: nil
+                self.lower_if_chain(arms, else_, expected_if_chain_type)
 
             case MethodCall(receiver, method, args, resolution):
                 eprint("[mir-lower-expr] method-dispatch-before method={method}\n")

@@ -1,5 +1,19 @@
 # Build11 Stage 3 CompileContext corruption after clean parse
 
+## Lane-B IfChain continuation (2026-08-14)
+
+Fresh r6 evidence supersedes the earlier pre-HIR owner hypothesis. Stage 2
+compiled and sanity-admitted the initial flat AST/HIR `IfChain` revision with
+direct iterative MIR lowering. Stage 3 still reached about 7.9 GiB RSS after
+61 seconds and was stopped before OOM. Consumer-side recursive aggregate
+reconstruction was removed in that revision, while `parse_if_stmt` and
+`parse_if_expr` remain recursive for long elif/else-if chains; those producers
+are the next suspect, not yet the uniquely profiled owner. The next repair must
+verify the present IfChain semantic/test review corrections and instrument or make parser
+arm production iterative while preserving binding-pattern desugaring,
+terminal else, source order, and spans. This lane's three bootstrap cycles are
+exhausted; no additional run is admissible until a fresh continuation.
+
 ## Status
 
 The first fresh full-bootstrap repair attempt (`r4`) stopped during Stage 2 with

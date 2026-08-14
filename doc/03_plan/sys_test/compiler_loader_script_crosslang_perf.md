@@ -125,6 +125,48 @@ seed rejects a compact one-line `if` immediately followed by a multiline
 must normalize that exact pre-existing construct, then run one fresh r6
 bootstrap; this session may not retry because its three-cycle cap is exhausted.
 
+Lane-B continuation: the exact Stage-2 discovery construct at
+`convert_nodes.spl:625` is now normalized to a multiline body without semantic
+change. A focused bridge regression generates 128 arms, runs them through
+`parse_and_build_module`, requires all 128 flattened `IfChain` arms, and
+requires the terminal else. The next acceptance action is one source-frozen,
+cache-preserving r6 bootstrap using the already-built Rust authority; its first
+fresh Stage-2/Stage-3 result is authoritative for this continuation.
+
+Fresh continuation cycles: cycle 1 compiled all 856 Stage-2 objects with
+bounded RSS, proving the former recursive bridge allocation frontier cleared,
+then link failed on a tree-restoration corruption that had erased the
+`defer_unsupported_marker` declaration. Cycle 2 restored that exact historical
+owner, admitted Stage 2, and reached Stage 3, where the compiler PID grew to
+about 11.5 GiB in 85 seconds. This disproved call-stack iteration alone: the
+reverse fold still copied the growing value-semantic nested `ExprKind.If`
+aggregate. The cycle-3 repair therefore introduces one ordered `IfChain`
+representation through AST and HIR, updates every semantic consumer, and lowers
+the chain directly to iterative MIR CFG. Class-converting `Expr` is explicitly
+rejected because native structs are already pointer represented and optional
+class fields have a documented seed/JIT divergence. Cycle 3 is the final
+source-frozen bootstrap attempt for this continuation.
+
+Cycle-3 receipt: Stage 2 compiled and passed sanity with the initial IfChain
+slice, proving that revision was accepted by the seed and produced a
+self-hosted compiler. Stage 3 nevertheless reached about 7.9 GiB RSS after 61
+seconds and was stopped before host OOM. The still-recursive
+`parse_if_stmt`/`parse_if_expr` producer is the next evidence-backed suspect,
+not a uniquely localized owner; fresh profiling must confirm it. The next
+continuation must verify the present IfChain semantic/test corrections,
+instrument or make both parser owners iterative, preserve mixed `elif
+val`/constructor/`else if` semantics and spans, then run one cache-preserving
+bootstrap. No fourth run is permitted in this continuation.
+
+Highest-capability IfChain review receipts: cycle 1 rejected missing cumulative
+narrowing, no-else MIR definition, and executable semantic coverage; those were
+corrected. Cycle 2 rejected narrowing-scope cleanup and missing value-position
+coverage; those were corrected. Cycle 3 rejected condition-fact ordering; its
+exact ordering correction is present (prior-arm false facts scope condition
+typing, current-arm true facts apply only after successful typing), but the
+bounded review and build limits are exhausted. The final correction therefore
+remains explicitly unreviewed and unexecuted until the next continuation.
+
 Stage 4 orchestration is independently MISSING: the current Stage 3 resume
 exits after provenance admission, while the only `--deploy` path deletes and
 rebuilds Stage 2/3. Implement the fail-closed continuation specified in

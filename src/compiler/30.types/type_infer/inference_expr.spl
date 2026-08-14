@@ -162,6 +162,63 @@ impl HmInferContext:
                             case Err(e): Err(e)
                     case Err(e): Err(e)
 
+            case IfChain(arms, else_):
+                val bool_ty = HirType(kind: HirTypeKind.Bool, span: span)
+                var false_facts: [NarrowingFact] = []
+                var surviving_paths: [[NarrowingFact]] = []
+                var arm_idx = 0
+                while arm_idx < arms.len():
+                    val typed_arm: HirIfArm = arms[arm_idx]
+                    var arm_facts: [NarrowingFact] = []
+                    self.narrowing.push_scope()
+                    self._add_immutable_facts(false_facts)
+                    val arm_result = match self.synthesize_expr(typed_arm.cond):
+                        case Ok(cond_ty):
+                            match self.unify(cond_ty, bool_ty):
+                                case Ok(_):
+                                    arm_facts = analyze_condition(typed_arm.cond, self._lookup_symbol_type(_1))
+                                    self._add_immutable_facts(arm_facts)
+                                    self.infer_block(typed_arm.then_)
+                                case Err(e): Err(e)
+                        case Err(e): Err(e)
+                    val arm_terminates = definitely_terminates(typed_arm.then_)
+                    self.narrowing.pop_scope()
+                    val arm_ty = match arm_result:
+                        case Ok(found_arm_ty): found_arm_ty
+                        case Err(e): return Err(e)
+                    self.subsume(arm_ty, expected)?
+                    if not arm_terminates:
+                        var arm_path: [NarrowingFact] = []
+                        for fact in false_facts:
+                            arm_path.push(fact)
+                        for fact in arm_facts:
+                            arm_path.push(fact)
+                        surviving_paths.push(arm_path)
+                    val negated_arm_facts = negate_facts(arm_facts)
+                    for fact in negated_arm_facts:
+                        false_facts.push(fact)
+                    arm_idx = arm_idx + 1
+                if else_.?:
+                    val else_block = else_.unwrap()
+                    self.narrowing.push_scope()
+                    self._add_immutable_facts(false_facts)
+                    val else_result = self.infer_block(else_block)
+                    val else_terminates = definitely_terminates(else_block)
+                    self.narrowing.pop_scope()
+                    val else_ty = match else_result:
+                        case Ok(found_else_ty): found_else_ty
+                        case Err(e): return Err(e)
+                    self.subsume(else_ty, expected)?
+                    if not else_terminates:
+                        surviving_paths.push(false_facts)
+                else:
+                    surviving_paths.push(false_facts)
+                    val unit_ty = HirType(kind: HirTypeKind.Unit, span: span)
+                    self.subsume(unit_ty, expected)?
+                if surviving_paths.len() == 1:
+                    self._add_immutable_facts(surviving_paths[0])
+                Ok(())
+
             # Match expression: propagate expected type into arms
             case MatchCase(scrutinee, arms):
                 match self.infer_expr(scrutinee, InferMode.Synthesize):
@@ -627,6 +684,74 @@ impl HmInferContext:
                                     Ok(self.resolve(then_ty))
                             case Err(e): Err(e)
                     case Err(e): Err(e)
+
+            case IfChain(arms, else_):
+                val bool_ty = HirType(kind: HirTypeKind.Bool, span: span)
+                var result_ty = self.fresh_var(span)
+                var has_result = false
+                var false_facts: [NarrowingFact] = []
+                var surviving_paths: [[NarrowingFact]] = []
+                var arm_idx = 0
+                while arm_idx < arms.len():
+                    val typed_arm: HirIfArm = arms[arm_idx]
+                    var arm_facts: [NarrowingFact] = []
+                    self.narrowing.push_scope()
+                    self._add_immutable_facts(false_facts)
+                    val arm_result = match self.synthesize_expr(typed_arm.cond):
+                        case Ok(cond_ty):
+                            match self.unify(cond_ty, bool_ty):
+                                case Ok(_):
+                                    arm_facts = analyze_condition(typed_arm.cond, self._lookup_symbol_type(_1))
+                                    self._add_immutable_facts(arm_facts)
+                                    self.infer_block(typed_arm.then_)
+                                case Err(e): Err(e)
+                        case Err(e): Err(e)
+                    val arm_terminates = definitely_terminates(typed_arm.then_)
+                    self.narrowing.pop_scope()
+                    val arm_ty = match arm_result:
+                        case Ok(found_arm_ty): found_arm_ty
+                        case Err(e): return Err(e)
+                    if has_result:
+                        self.unify(result_ty, arm_ty)?
+                    else:
+                        result_ty = arm_ty
+                        has_result = true
+                    if not arm_terminates:
+                        var arm_path: [NarrowingFact] = []
+                        for fact in false_facts:
+                            arm_path.push(fact)
+                        for fact in arm_facts:
+                            arm_path.push(fact)
+                        surviving_paths.push(arm_path)
+                    val negated_arm_facts = negate_facts(arm_facts)
+                    for fact in negated_arm_facts:
+                        false_facts.push(fact)
+                    arm_idx = arm_idx + 1
+                if else_.?:
+                    val else_block = else_.unwrap()
+                    self.narrowing.push_scope()
+                    self._add_immutable_facts(false_facts)
+                    val else_result = self.infer_block(else_block)
+                    val else_terminates = definitely_terminates(else_block)
+                    self.narrowing.pop_scope()
+                    val else_ty = match else_result:
+                        case Ok(found_else_ty): found_else_ty
+                        case Err(e): return Err(e)
+                    if has_result:
+                        self.unify(result_ty, else_ty)?
+                    else:
+                        result_ty = else_ty
+                        has_result = true
+                    if not else_terminates:
+                        surviving_paths.push(false_facts)
+                    if surviving_paths.len() == 1:
+                        self._add_immutable_facts(surviving_paths[0])
+                    Ok(self.resolve(result_ty))
+                else:
+                    surviving_paths.push(false_facts)
+                    if surviving_paths.len() == 1:
+                        self._add_immutable_facts(surviving_paths[0])
+                    Ok(HirType(kind: HirTypeKind.Unit, span: span))
 
             # Lambda (closure) - synthesis mode
             # `Closure` is not a HirExprKind variant — the closure variant

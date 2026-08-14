@@ -2054,6 +2054,151 @@ impl MirLowering:
 
         result
 
+    me lower_if_chain(arms: [HirIfArm], else_: HirBlock?, expected_type: HirType?) -> LocalId:
+        """Lower a flat ordered if/elif chain to one CFG merge.
+
+        Each condition is emitted only after every preceding condition has
+        branched false.  Unlike rebuilding nested HirExprKind.If values, this
+        keeps both lowering and the generated CFG iterative while retaining a
+        single result local and terminal merge.
+        """
+        if arms == nil or arms.len() == 0:
+            self.error_fatal("empty HIR IfChain arms payload", nil)
+            var b_empty_chain = self.builder
+            val empty_chain = b_empty_chain.new_temp(MirType.unit())
+            self.builder = b_empty_chain
+            return empty_chain
+
+        var b = self.builder
+        val merge_block = b.new_block(Some("if_chain_merge"))
+        val chain_has_else = else_.?
+        val result_type = if chain_has_else: self.match_result_mir_type(expected_type) else: MirType.unit()
+        val result = b.new_temp(result_type)
+        self.builder = b
+        var result_defined = false
+        var inferred_known = false
+        var inferred_ty = MirType.i64()
+        var arm_index = 0
+
+        while arm_index < arms.len():
+            val arm = arms[arm_index]
+            # The current block is either the chain entry or the false edge of
+            # the previous arm.  Lowering here preserves source-order and
+            # short-circuit behavior for condition side effects.
+            val cond_local = self.lower_cond_expr(arm.cond)
+
+            # Preserve `if val`'s raw optional-float binding contract for each
+            # arm.  The condition compares the encoded value with nil; only
+            # the selected arm may temporarily see its decoded float payload.
+            var if_val_symbol_id = -1
+            var if_val_raw_local = LocalId(id: 0)
+            var if_val_payload_type = MirType.i64()
+            var has_if_val_float_binding = false
+            match arm.cond.kind:
+                case HirExprKind.Binary(HirBinOp.NotEq, left, right):
+                    var right_is_nil = false
+                    match right.kind:
+                        case HirExprKind.NilLit:
+                            right_is_nil = true
+                        case _:
+                            ()
+                    if right_is_nil:
+                        match left.kind:
+                            case HirExprKind.Var(symbol) | HirExprKind.NamedVar(symbol, _):
+                                val candidate = self.find_local(symbol.id)
+                                if candidate.id >= 0:
+                                    if val candidate_type = self.local_mir_type_of(candidate):
+                                        match candidate_type.kind:
+                                            case MirTypeKind.I64:
+                                                if val semantic_type = self.find_local_hir_type(candidate.id):
+                                                    match semantic_type.kind:
+                                                        case HirTypeKind.Float(_):
+                                                            if_val_symbol_id = symbol.id
+                                                            if_val_raw_local = candidate
+                                                            if_val_payload_type = self.lower_type(semantic_type)
+                                                            has_if_val_float_binding = true
+                                                        case _:
+                                                            ()
+                                            case _:
+                                                ()
+                            case _:
+                                ()
+                case _:
+                    ()
+            var b_cond = self.builder
+            val then_block = b_cond.new_block(Some("if_chain_then"))
+            val false_block = b_cond.new_block(Some("if_chain_next"))
+            b_cond.terminate_if(mir_operand_copy(cond_local), then_block, false_block)
+            b_cond.switch_to_block(then_block)
+            self.builder = b_cond
+
+            if has_if_val_float_binding:
+                val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)
+                self.bind_local(if_val_symbol_id, decoded_if_val)
+            val arm_result = self.lower_block_expected(arm.then_, expected_type)
+            if has_if_val_float_binding:
+                self.bind_local(if_val_symbol_id, if_val_raw_local)
+            var b_then = self.builder
+            if not b_then.current_block_has_explicit_terminator():
+                if arm_result.?:
+                    val arm_fallback = LocalId(id: 0)
+                    val arm_local = arm_result ?? arm_fallback
+                    if chain_has_else and not self.local_is_unit(arm_local):
+                        b_then.emit_copy(result, arm_local)
+                        result_defined = true
+                        if not inferred_known:
+                            if val arm_ty = self.local_mir_type_of(arm_local):
+                                inferred_known = true
+                                inferred_ty = arm_ty
+                b_then.terminate_goto(merge_block)
+            b_then.switch_to_block(false_block)
+            self.builder = b_then
+            arm_index = arm_index + 1
+
+        # The final false edge owns the optional terminal else.  With no else,
+        # it simply reaches the shared merge without defining a value.
+        if val terminal_else = else_:
+            val else_result = self.lower_block_expected(terminal_else, expected_type)
+            var b_else = self.builder
+            if not b_else.current_block_has_explicit_terminator():
+                if else_result.?:
+                    val else_fallback = LocalId(id: 0)
+                    val else_local = else_result ?? else_fallback
+                    if not self.local_is_unit(else_local):
+                        b_else.emit_copy(result, else_local)
+                        result_defined = true
+                        if not inferred_known:
+                            if val else_ty = self.local_mir_type_of(else_local):
+                                inferred_known = true
+                                inferred_ty = else_ty
+                b_else.terminate_goto(merge_block)
+            self.builder = b_else
+        else:
+            var b_no_else = self.builder
+            # A no-else chain is Unit-typed. Its false edge reaches the merge
+            # with the unit local, which has no runtime payload to define.
+            result_defined = true
+            b_no_else.terminate_goto(merge_block)
+            self.builder = b_no_else
+
+        var b_merge = self.builder
+        b_merge.switch_to_block(merge_block)
+        if not result_defined:
+            b_merge.emit_const(result, MirConstValue.Int(0), MirType.i64())
+        if inferred_known and chain_has_else:
+            b_merge.set_local_type(result, inferred_ty)
+        self.builder = b_merge
+
+        if val found_expected = expected_type:
+            self.remember_local_hir_type(result.id, found_expected, 0, 0)
+            match found_expected.kind:
+                case HirTypeKind.Optional(_):
+                    self.option_value_locals[result.id] = true
+                    self.mark_runtime_value_local(result.id)
+                case _:
+                    ()
+        result
+
     me lower_loop(body: HirBlock) -> LocalId:
         """Lower loop expression."""
         var b = self.builder

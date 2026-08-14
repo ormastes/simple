@@ -941,17 +941,29 @@ fn convert_flat_expr(idx: i64) -> Expr:
             ii = ii + 1
         return Expr(kind: ExprKind.StringLit(expr_get_str(idx), interpolations), span: span)
     if tag == EXPR_IF:
-        # Expression-form if: parser stores cond in LEFT, the then-branch in
-        # RIGHT and the else-branch in EXTRA (each an EXPR_BLOCK or bare expr;
-        # EXTRA is EXPR_UNIT (tag 33) when there is no else). elif/`else if`
-        # chains arrive as a nested EXPR_IF in EXTRA and recurse naturally.
-        val cond = convert_flat_expr(expr_get_left(idx))
-        val then_block = flat_if_branch_block(expr_get_right(idx), span)
-        val if_else_idx = expr_get_extra(idx)
-        if if_else_idx >= 0 and expr_get_tag(if_else_idx) != 33:
-            val else_block = flat_if_branch_block(if_else_idx, span)
-            return Expr(kind: ExprKind.If(cond, then_block, else_block), span: span)
-        return Expr(kind: ExprKind.If(cond, then_block, nil), span: span)
+        # Keep expression-form elif chains flat as well. Reconstructing nested
+        # value-semantic ExprKind.If payloads copies the growing tail in no-GC
+        # bootstrap builds even when the source walk itself is iterative.
+        var arms: [IfArm] = []
+        var current = idx
+        var terminal_else_idx = -1
+        var walking = true
+        while walking:
+            val arm_span = make_span()
+            arms.push(IfArm(
+                cond: convert_flat_expr(expr_get_left(current)),
+                then_: flat_if_branch_block(expr_get_right(current), arm_span),
+                span: arm_span
+            ))
+            val next_idx = expr_get_extra(current)
+            if next_idx >= 0 and expr_get_tag(next_idx) == EXPR_IF:
+                current = next_idx
+            else:
+                terminal_else_idx = next_idx
+                walking = false
+        if terminal_else_idx >= 0 and expr_get_tag(terminal_else_idx) != 33:
+            return Expr(kind: ExprKind.IfChain(arms, flat_if_branch_block(terminal_else_idx, span)), span: span)
+        return Expr(kind: ExprKind.IfChain(arms, nil), span: span)
     if tag == EXPR_MATCH:
         # `match` used as a VALUE, e.g. `val r = match n: case 1: 10 case _:
         # 99`. Mirrors the STMT_MATCH conversion below (same arm-id/pattern/
@@ -1495,15 +1507,13 @@ fn convert_flat_if_stmt(root_idx: i64) -> Stmt:
     # recursively alternating through convert_flat_stmt(_in_list): long
     # compiler dispatch chains otherwise retain one native frame and its
     # temporaries per arm in no-GC bootstrap builds.
-    var conditions: [Expr] = []
-    var then_blocks: [Block] = []
-    var arm_spans: [Span] = []
+    var arms: [IfArm] = []
     var current = root_idx
     var terminal_else: [i64] = []
     var walking = true
     while walking:
         val arm_span = make_span()
-        conditions.push(convert_flat_expr(stmt_get_expr(current)))
+        val condition = convert_flat_expr(stmt_get_expr(current))
         val then_stmts = stmt_get_body(current)
         var then_body: [Stmt] = []
         var ti = 0
@@ -1514,8 +1524,7 @@ fn convert_flat_if_stmt(root_idx: i64) -> Stmt:
                 then_body.push(expanded[tk])
                 tk = tk + 1
             ti = ti + 1
-        then_blocks.push(Block(stmts: then_body, span: arm_span))
-        arm_spans.push(arm_span)
+        arms.push(IfArm(cond: condition, then_: Block(stmts: then_body, span: arm_span), span: arm_span))
 
         val else_stmts = elif_get_else(stmt_get_type(current))
         if else_stmts.len() == 1 and stmt_get_tag(else_stmts[0]) == STMT_IF:
@@ -1524,9 +1533,7 @@ fn convert_flat_if_stmt(root_idx: i64) -> Stmt:
             terminal_else = else_stmts
             walking = false
 
-    var tail_present = terminal_else.len() > 0
-    var tail_block = Block(stmts: [], span: arm_spans[arm_spans.len() - 1])
-    if tail_present:
+    if terminal_else.len() > 0:
         var converted_else: [Stmt] = []
         var ei = 0
         while ei < terminal_else.len():
@@ -1536,18 +1543,11 @@ fn convert_flat_if_stmt(root_idx: i64) -> Stmt:
                 converted_else.push(expanded[ek])
                 ek = ek + 1
             ei = ei + 1
-        tail_block = Block(stmts: converted_else, span: arm_spans[arm_spans.len() - 1])
-
-    var result = Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: arm_spans[0])), span: arm_spans[0])
-    var ai = conditions.len() - 1
-    while ai >= 0:
-        val else_block = if tail_present: tail_block else: nil
-        val arm_expr = Expr(kind: ExprKind.If(conditions[ai], then_blocks[ai], else_block), span: arm_spans[ai])
-        result = Stmt(kind: StmtKind.Expr(arm_expr), span: arm_spans[ai])
-        tail_block = Block(stmts: [result], span: arm_spans[ai])
-        tail_present = true
-        ai = ai - 1
-    result
+        val else_block = Block(stmts: converted_else, span: arms[arms.len() - 1].span)
+        val chain_expr = Expr(kind: ExprKind.IfChain(arms, else_block), span: arms[0].span)
+        return Stmt(kind: StmtKind.Expr(chain_expr), span: arms[0].span)
+    val chain_expr = Expr(kind: ExprKind.IfChain(arms, nil), span: arms[0].span)
+    Stmt(kind: StmtKind.Expr(chain_expr), span: arms[0].span)
 
 fn convert_flat_stmt(idx: i64) -> Stmt:
     if idx < 0:
