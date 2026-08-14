@@ -244,24 +244,21 @@ fn register_pool(pool: ThreadPool) -> i64:
     GLOBAL_POOLS = GLOBAL_POOLS.push(pool)
     pool_id
 
-fn get_pool(pool_id: i64) -> ThreadPool:
+fn get_pool(pool_id: i64) -> ThreadPool?:
     """Get pool by ID.
 
     Args:
         pool_id: Pool identifier
 
     Returns:
-        Pool instance (or first pool if ID invalid)
+        Exact pool instance, or nil when the authority is absent.
     """
     if pool_id >= 0 and pool_id < GLOBAL_POOLS.len():
-        GLOBAL_POOLS[pool_id]
+        Some(GLOBAL_POOLS[pool_id])
     else:
-        # Fallback - return first pool
-        if GLOBAL_POOLS.len() > 0:
-            GLOBAL_POOLS[0]
-        else:
-            # Should never happen - create dummy pool
-            ThreadPool.default()
+        # Never route an invalid worker ID to an unrelated pool. The caller
+        # must fail closed or create its own explicit default authority.
+        nil
 
 var GLOBAL_TASK_CALLBACKS: Dict<usize, fn()> = {}
 var GLOBAL_TASK_VALUE_IDS: [usize] = []
@@ -376,7 +373,13 @@ fn default_go_pool() -> ThreadPool:
         val pool = ThreadPool.default()
         GLOBAL_DEFAULT_POOL_ID = GLOBAL_POOL_ID_COUNTER - 1
         return pool
-    get_pool(GLOBAL_DEFAULT_POOL_ID)
+    match get_pool(GLOBAL_DEFAULT_POOL_ID):
+        Some(pool): pool
+        nil:
+            # A stale default ID must not select another pool. Recreate only
+            # the explicit process default authority.
+            GLOBAL_DEFAULT_POOL_ID = -1
+            default_go_pool()
 
 fn task_spawn(closure: fn() -> i64) -> TaskHandle:
     """Submit a closure to the shared pool-backed task facade."""
@@ -394,26 +397,30 @@ fn worker_loop_entry(pool_id: i64):
     Args:
         pool_id: Pool identifier
     """
-    var pool = get_pool(pool_id)
+    match get_pool(pool_id):
+        Some(pool):
+            # Worker loop - run until shutdown
+            while not pool.shutdown_requested:
+                # Try to get a task (with timeout to check shutdown)
+                val task_id = pool.task_queue.pop_blocking(100)
 
-    # Worker loop - run until shutdown
-    while not pool.shutdown_requested:
-        # Try to get a task (with timeout to check shutdown)
-        val task_id = pool.task_queue.pop_blocking(100)
-
-        if task_id != 0:
-            val value_callback = get_value_task_callback(task_id)
-            match value_callback:
-                case Some(cb):
-                    mark_task_done(task_id, cb())
-                case nil:
-                    val callback = get_task_callback(task_id)
-                    match callback:
+                if task_id != 0:
+                    val value_callback = get_value_task_callback(task_id)
+                    match value_callback:
                         case Some(cb):
-                            cb()
+                            mark_task_done(task_id, cb())
                         case nil:
-                            pass
-            pool.tasks_completed = pool.tasks_completed + 1
+                            val callback = get_task_callback(task_id)
+                            match callback:
+                                case Some(cb):
+                                    cb()
+                                case nil:
+                                    pass
+                    pool.tasks_completed = pool.tasks_completed + 1
+        nil:
+            # Spawned with stale/forged pool identity: exit without touching
+            # any other pool's queue or task state.
+            return
 
     # Worker exiting
 

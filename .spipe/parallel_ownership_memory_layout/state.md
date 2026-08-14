@@ -815,3 +815,7 @@ in-progress
   lifetime-pinned handles, bounded scalar credit/results, provider parity,
   native Simple callback evidence, then a typed public migration. The legacy
   `ThreadPool` global registries are not an incremental migration target.
+- impl: Legacy `ThreadPool` worker lookup now fails closed on an absent pool
+  ID instead of falling back to pool zero or creating a dummy authority. This
+  prevents one stale worker from consuming another pool's queue; it does not
+  admit the remaining `GLOBAL_*` registry model.
