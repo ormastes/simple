@@ -167,6 +167,26 @@ typing, current-arm true facts apply only after successful typing), but the
 bounded review and build limits are exhausted. The final correction therefore
 remains explicitly unreviewed and unexecuted until the next continuation.
 
+Fresh continuation preparation: a highest-capability read-only audit now
+accepts the final IfChain narrowing/MIR/test correction while explicitly
+distinguishing it from the older retained Stage-2 binary. Both producer owners
+are now iterative in source: `parse_if_stmt` collects ordinary, identifier
+binding, constructor binding, `elif`, and `else if` arms before reverse-building
+the compatible flat arena; `parse_if_expr` does the same across colon, brace,
+`then`, binding, `elif`, and `else if` forms. All self-recursive calls are
+removed. These parser edits and the final IfChain corrections remain pending a
+fresh source-frozen Stage-2/Stage-3 bootstrap and focused spec execution.
+
+Iterative-parser review receipts: cycle 1 rejected two fidelity gaps (invalid
+statement-pattern recovery and constructor-expression span allocation) plus
+focused coverage. Both owners were corrected without changing valid syntax.
+Cycle 2 `ACCEPT` confirms colon/brace/`then`, `elif`/`else if`, identifier and
+constructor reverse-fold fidelity and absence of direct self-recursion. The
+focused spec now includes exact 128-arm statement and value-position bridge
+oracles plus executable mixed constructor-to-identifier fallback outcomes.
+Long brace/`then` stress and exact span-coordinate assertions are nonblocking
+coverage gaps; fresh bootstrap and runtime verdicts remain pending.
+
 Stage 4 orchestration is independently MISSING: the current Stage 3 resume
 exits after provenance admission, while the only `--deploy` path deletes and
 rebuilds Stage 2/3. Implement the fail-closed continuation specified in

@@ -1162,104 +1162,112 @@ fn var_no_init_default_expr(type_tag: i64, type_looks_named: bool) -> i64:
 # ===== Control Flow Statements =====
 
 fn parse_if_stmt() -> i64:
-    val decision_start = lex_token_start_get()
-    val decision_line = par_line_get()
-    val decision_col = par_col_get()
-    parser_advance()
+    # Parse every arm in one forward pass.  The former implementation called
+    # parse_if_stmt recursively for each `elif` / `else if`, making parser
+    # stack and transient no-GC allocation proportional to chain length.
+    # arm_kind: 0 = ordinary condition, 1 = identifier binding,
+    # 2 = constructor-pattern binding.
+    var arm_kind: [i64] = []
+    var arm_head: [i64] = []
+    var arm_init: [i64] = []
+    var arm_body: [[i64]] = []
+    var arm_start: [i64] = []
+    var arm_line: [i64] = []
+    var arm_col: [i64] = []
+    var terminal_else: [i64] = []
+    var collecting = true
 
-    # G19: if val NAME = EXPR: body  (pattern-binding / nil-check form)
-    # Also handles: if var NAME = EXPR: body
-    # Also handles: if val Ctor(NAME, ...) = EXPR: body  (constructor-pattern
-    # binding, e.g. `if val Some(x) = opt:`). The binding pattern is parsed
-    # with the same `parse_expr()` used by `match` arm patterns, so a
-    # constructor pattern here parses identically to `match EXPR: Ctor(...):`.
-    if par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR:
-        parser_advance()  # consume val/var
-        # Parse the binding pattern below assignment precedence (parse_or):
-        # `x` stays an ident and `Some(v)` a call, and the `=` that follows
-        # is left for the explicit expect below instead of being swallowed
-        # as an assignment expression.
-        val pattern_idx = parse_or()
-        if expr_get_tag(pattern_idx) != EXPR_CALL and expr_get_tag(pattern_idx) != EXPR_METHOD_CALL and expr_get_tag(pattern_idx) != EXPR_IDENT:
-            parser_error("expected identifier or constructor pattern after if val/var")
-        parser_expect(100)  # consume =
-        val init_expr = parse_expr()
-        parser_expect(161)  # consume :
-        val then_body = parse_block()
+    while collecting:
+        arm_start.push(lex_token_start_get())
+        arm_line.push(par_line_get())
+        arm_col.push(par_col_get())
+        parser_advance()  # consume if/elif
 
-        # Handle elif/else after the binding if-body
-        parser_skip_newlines()
-        var else_body: [i64] = []
-        if par_kind_get() == 42:
-            val nested_if = parse_if_stmt()
-            else_body.push(nested_if)
-        elif par_kind_get() == 41:
-            parser_advance()  # consume else
-            if par_kind_get() == 40:  # G47: `else if` -> nested if as else chain
-                else_body.push(parse_if_stmt())
+        if par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR:
+            parser_advance()
+            val pattern_idx = parse_or()
+            val pattern_tag = expr_get_tag(pattern_idx)
+            if pattern_tag != EXPR_CALL and pattern_tag != EXPR_METHOD_CALL and pattern_tag != EXPR_IDENT:
+                parser_error("expected identifier or constructor pattern after if val/var")
+            parser_expect(TOK_ASSIGN)
+            val init_expr = parse_expr()
+            parser_expect(TOK_COLON)
+            val then_body = parse_block()
+            if pattern_tag == EXPR_CALL or pattern_tag == EXPR_METHOD_CALL:
+                arm_kind.push(2)
             else:
-                parser_expect(161)
-                else_body = parse_block()
+                # Preserve historical error recovery: after reporting an
+                # invalid pattern tag, the old path still used identifier
+                # binding desugaring rather than constructor-match lowering.
+                arm_kind.push(1)
+            arm_head.push(pattern_idx)
+            arm_init.push(init_expr)
+            arm_body.push(then_body)
+        else:
+            val cond = parse_expr()
+            parser_expect(TOK_COLON)
+            val then_body = parse_block()
+            arm_kind.push(0)
+            arm_head.push(cond)
+            arm_init.push(-1)
+            arm_body.push(then_body)
 
-        if expr_get_tag(pattern_idx) == EXPR_CALL or expr_get_tag(pattern_idx) == EXPR_METHOD_CALL:
-            # Constructor-pattern binding: desugar to the equivalent match
-            # statement, reusing the exact arm-construction machinery that
-            # `match EXPR: Ctor(...): then_body  _: else_body` uses, so
-            # matching/binding semantics stay identical to `match`.
+        parser_skip_newlines()
+        if par_kind_get() == TOK_KW_ELIF:
+            # Leave the keyword current; the next iteration consumes it.
+            collecting = true
+        elif par_kind_get() == TOK_KW_ELSE:
+            parser_advance()
+            if par_kind_get() == TOK_KW_IF:
+                # G47: `else if` is another arm in the same collected chain.
+                collecting = true
+            else:
+                parser_expect(TOK_COLON)
+                terminal_else = parse_block()
+                collecting = false
+        else:
+            collecting = false
+
+    # Rebuild the historical nested flat-AST representation from the tail.
+    # This keeps every existing consumer compatible while removing parser
+    # recursion.  Each arm retains its own decision start and the original
+    # whole-chain end span used by recursive construction.
+    val decision_end = lex_token_start_get()
+    var tail = terminal_else
+    var ai = arm_kind.len() - 1
+    while ai >= 0:
+        val decision_span = flat_span_new(arm_start[ai], decision_end, arm_line[ai], arm_col[ai])
+        var current_stmt = -1
+        if arm_kind[ai] == 0:
+            val cond = arm_head[ai]
+            val elif_idx = elif_new(cond, arm_body[ai], tail)
+            current_stmt = stmt_if_stmt(cond, arm_body[ai], elif_idx, decision_span)
+        elif arm_kind[ai] == 1:
+            val bind_name = expr_get_str(arm_head[ai])
+            val bind_stmt = stmt_if_val_decl(bind_name, arm_init[ai], 0)
+            val cond_expr = expr_binary(TOK_NEQ, expr_ident(bind_name, 0), expr_nil_lit(0), 0)
+            expr_set_span(cond_expr, decision_span)
+            val elif_idx = elif_new(cond_expr, arm_body[ai], tail)
+            val if_stmt = stmt_if_stmt(cond_expr, arm_body[ai], elif_idx, decision_span)
+            var block_stmts: [i64] = []
+            block_stmts.push(bind_stmt)
+            block_stmts.push(if_stmt)
+            current_stmt = stmt_block_stmt(block_stmts, 0)
+        else:
+            val pattern_idx = arm_head[ai]
             val rationale = extract_wildcard_rationale(pattern_idx)
             val stored_pattern = normalize_wildcard_pattern(pattern_idx)
             var arm_indices: [i64] = []
-            arm_indices.push(arm_new_with_binding_and_rationale(stored_pattern, -1, then_body, "", rationale))
-            val wildcard_pattern = expr_ident("_", 0)
-            # match arms produced by parse_block always have >=1 stmt; keep
-            # that invariant when there is no else branch.
-            var wildcard_body = else_body
+            arm_indices.push(arm_new_with_binding_and_rationale(stored_pattern, -1, arm_body[ai], "", rationale))
+            var wildcard_body = tail
             if wildcard_body.len() == 0:
                 wildcard_body.push(stmt_expr_stmt(expr_unit(0), 0))
-            arm_indices.push(arm_new_with_binding_and_rationale(wildcard_pattern, -1, wildcard_body, "", ""))
-            return stmt_match_stmt(init_expr, arm_indices, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))
-
-        # Plain identifier binding.
-        # Mark the synthetic binding so the interpreter unwraps Option only.
-        val bind_name = expr_get_str(pattern_idx)
-        val bind_stmt = stmt_if_val_decl(bind_name, init_expr, 0)
-        val name_expr = expr_ident(bind_name, 0)
-        val nil_expr = expr_nil_lit(0)
-        val cond_expr = expr_binary(TOK_NEQ, name_expr, nil_expr, 0)
-        val binding_decision_span = flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col)
-        expr_set_span(cond_expr, binding_decision_span)
-        val elif_idx = elif_new(cond_expr, then_body, else_body)
-        val if_stmt = stmt_if_stmt(cond_expr, then_body, elif_idx, binding_decision_span)
-        var block_stmts: [i64] = []
-        block_stmts.push(bind_stmt)
-        block_stmts.push(if_stmt)
-        return stmt_block_stmt(block_stmts, 0)
-
-    val cond = parse_expr()
-    parser_expect(161)
-    val then_body = parse_block()
-
-    # Handle elif/else
-    parser_skip_newlines()
-    var else_body: [i64] = []
-
-    if par_kind_get() == 42:
-        # Elif is parsed as nested if in else
-        val nested_if = parse_if_stmt()
-        else_body.push(nested_if)
-    elif par_kind_get() == 41:
-        parser_advance()  # consume else
-        # G47: `else if` (C-style elif, 1001 sites in src/lib): an `if` after
-        # `else` starts a nested if that becomes this if's else chain.
-        if par_kind_get() == 40:
-            else_body.push(parse_if_stmt())
-        else:
-            parser_expect(161)
-            else_body = parse_block()
-
-    # Store elif chain using elif arena
-    val elif_idx = elif_new(cond, then_body, else_body)
-    stmt_if_stmt(cond, then_body, elif_idx, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))
+            arm_indices.push(arm_new_with_binding_and_rationale(expr_ident("_", 0), -1, wildcard_body, "", ""))
+            current_stmt = stmt_match_stmt(arm_init[ai], arm_indices, decision_span)
+        tail = []
+        tail.push(current_stmt)
+        ai = ai - 1
+    tail[0]
 
 fn parse_for_binding_name() -> text:
     # G26/G40: plain identifiers must preserve their token text; keyword and
@@ -1766,160 +1774,166 @@ fn parse_bind_stmt() -> i64:
 # ===== Expression-Level Control Flow (for module-level statements) =====
 
 fn parse_if_expr() -> i64:
-    val decision_start = lex_token_start_get()
-    val decision_line = par_line_get()
-    val decision_col = par_col_get()
-    parser_advance()
+    # Parse every `elif` / `else if` arm without recursively re-entering this
+    # function.  Keep the flat AST wire format unchanged by folding the arms
+    # back into the historical nested EXPR_IF representation below.
+    var arm_patterns: [i64] = []
+    var arm_inits: [i64] = []
+    var arm_conds: [i64] = []
+    var arm_thens: [i64] = []
+    var arm_starts: [i64] = []
+    var arm_lines: [i64] = []
+    var arm_cols: [i64] = []
+    var arm_continued_indents: [i64] = []
+    var terminal_else = expr_unit(0)
+    var parsing_arms = true
 
-    # G_ifval_expr: `if val/var NAME = EXPR: body [elif/else]` in EXPRESSION
-    # position (e.g. `val r = if val Some(x) = o: a else: b`). Mirrors
-    # parse_if_stmt's G19 desugar (statement position, fixed 2026-07-02) but
-    # expression-flavored: both branches must be *values*, not statement
-    # blocks executed for effect. Plain-ident binding desugars to a block
-    # value (bind + if-expr on `!= nil`); a constructor pattern desugars to
-    # an expr-level match (expr_match_expr, evaluated by eval_match_expr)
-    # instead of a match statement, reusing the same arm-construction
-    # machinery as the statement form so matching semantics stay identical.
-    if par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR:
-        parser_advance()  # consume val/var
-        # Parse the binding pattern below assignment precedence (parse_or),
-        # same as parse_if_stmt: `x` stays an ident and `Some(v)` a call.
-        val pattern_idx = parse_or()
-        if expr_get_tag(pattern_idx) != EXPR_CALL and expr_get_tag(pattern_idx) != EXPR_METHOD_CALL and expr_get_tag(pattern_idx) != EXPR_IDENT:
-            parser_error("expected identifier or constructor pattern after if val/var")
-        parser_expect(100)  # consume =
-        val init_expr = parse_expr()
-        parser_expect(161)  # consume :
-        val inline_then = par_kind_get() != TOK_NEWLINE
-        val then_body = parse_block()
-        val then_expr = expr_block(then_body, -1, 0)
+    while parsing_arms:
+        val decision_start = lex_token_start_get()
+        val decision_line = par_line_get()
+        val decision_col = par_col_get()
+        parser_advance()  # consume if or elif
 
-        parser_skip_newlines()
-        var continued_indent = false
-        if inline_then and par_kind_get() == TOK_INDENT:
+        var pattern_idx: i64 = -1
+        var init_expr: i64 = -1
+        var cond: i64 = -1
+        var then_expr: i64 = -1
+        var form = 0  # 0 colon block, 1 brace, 2 then, 3 if-val/var
+        var continued_indent = 0
+
+        if par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR:
+            form = 3
             parser_advance()
-            continued_indent = true
-        var else_expr: i64 = expr_unit(0)
-        if par_kind_get() == 42:
-            else_expr = parse_if_expr()
-        elif par_kind_get() == 41:
-            parser_advance()  # consume else
-            if par_kind_get() == 161:
+            pattern_idx = parse_or()
+            val pattern_tag = expr_get_tag(pattern_idx)
+            if pattern_tag != EXPR_CALL and pattern_tag != EXPR_METHOD_CALL and pattern_tag != EXPR_IDENT:
+                parser_error("expected identifier or constructor pattern after if val/var")
+            parser_expect(100)
+            init_expr = parse_expr()
+            parser_expect(161)
+            val inline_then = par_kind_get() != TOK_NEWLINE
+            val then_body = parse_block()
+            then_expr = expr_block(then_body, -1, 0)
+            parser_skip_newlines()
+            if inline_then and par_kind_get() == TOK_INDENT:
                 parser_advance()
-                val else_body = parse_block()
-                else_expr = expr_block(else_body, -1, 0)
-            elif par_kind_get() == 40:
-                else_expr = parse_if_expr()
+                continued_indent = 1
+        else:
+            cond = parse_expr()
+            if par_kind_get() == 142:
+                form = 1
+                parser_advance()
+                then_expr = parse_expr()
+                parser_expect(143)
+            elif par_kind_get() == 6:
+                form = 2
+                parser_advance()
+                if par_kind_get() == 161:
+                    parser_advance()
+                then_expr = parse_expr()
             else:
-                else_expr = parse_expr()
-        if continued_indent:
+                parser_expect(161)
+                val inline_then = par_kind_get() != TOK_NEWLINE
+                val then_body = parse_block()
+                then_expr = expr_block(then_body, -1, 0)
+                parser_skip_newlines()
+                if inline_then and par_kind_get() == TOK_INDENT:
+                    parser_advance()
+                    continued_indent = 1
+
+        arm_patterns.push(pattern_idx)
+        arm_inits.push(init_expr)
+        arm_conds.push(cond)
+        arm_thens.push(then_expr)
+        arm_starts.push(decision_start)
+        arm_lines.push(decision_line)
+        arm_cols.push(decision_col)
+        arm_continued_indents.push(continued_indent)
+
+        if par_kind_get() == 42:
+            # The loop consumes the elif token as the next arm's opener.
+            parsing_arms = true
+        elif par_kind_get() == 41:
+            parser_advance()
+            if par_kind_get() == 40:
+                # The loop consumes the `if` after `else` as the next opener.
+                parsing_arms = true
+            else:
+                if form == 1 and par_kind_get() == 142:
+                    parser_advance()
+                    terminal_else = parse_expr()
+                    parser_expect(143)
+                elif form == 3 and par_kind_get() == 161:
+                    parser_advance()
+                    val else_body = parse_block()
+                    terminal_else = expr_block(else_body, -1, 0)
+                elif form == 2:
+                    if par_kind_get() == 161:
+                        parser_advance()
+                    terminal_else = parse_expr()
+                elif form == 0 and par_kind_get() == 161:
+                    parser_advance()
+                    val else_body = parse_block()
+                    terminal_else = expr_block(else_body, -1, 0)
+                else:
+                    terminal_else = parse_expr()
+                parsing_arms = false
+        else:
+            parsing_arms = false
+
+    # Recursive parsing used to close each inline-continuation indent while
+    # unwinding.  Close them in the same inner-to-outer order and retain the
+    # per-arm end offsets so diagnostic spans remain byte-for-byte equivalent.
+    var arm_ends: [i64] = []
+    var end_i = 0
+    while end_i < arm_conds.len():
+        arm_ends.push(0)
+        end_i = end_i + 1
+    var unwind_i = arm_conds.len()
+    while unwind_i > 0:
+        unwind_i = unwind_i - 1
+        if arm_continued_indents[unwind_i] == 1:
             parser_skip_newlines()
             if par_kind_get() == TOK_DEDENT:
                 parser_advance()
+        arm_ends[unwind_i] = lex_token_start_get()
 
-        if expr_get_tag(pattern_idx) == EXPR_CALL or expr_get_tag(pattern_idx) == EXPR_METHOD_CALL:
-            # Constructor-pattern binding: desugar to an expr-level match.
-            val rationale = extract_wildcard_rationale(pattern_idx)
-            val stored_pattern = normalize_wildcard_pattern(pattern_idx)
-            var arm_indices: [i64] = []
-            var then_arm_body: [i64] = []
-            then_arm_body.push(stmt_expr_stmt(then_expr, 0))
-            arm_indices.push(arm_new_with_binding_and_rationale(stored_pattern, -1, then_arm_body, "", rationale))
-            val wildcard_pattern = expr_ident("_", 0)
-            var wildcard_body: [i64] = []
-            wildcard_body.push(stmt_expr_stmt(else_expr, 0))
-            arm_indices.push(arm_new_with_binding_and_rationale(wildcard_pattern, -1, wildcard_body, "", ""))
-            return expr_match_expr(init_expr, arm_indices, 0)
-
-        # Plain identifier binding.
-        # Mark the synthetic binding so the interpreter unwraps Option only.
-        val bind_name = expr_get_str(pattern_idx)
-        val bind_stmt = stmt_if_val_decl(bind_name, init_expr, 0)
-        val name_expr = expr_ident(bind_name, 0)
-        val nil_expr = expr_nil_lit(0)
-        val cond_expr = expr_binary(TOK_NEQ, name_expr, nil_expr, 0)
-        val if_val_span = flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col)
-        expr_set_span(cond_expr, if_val_span)
-        val if_val_expr = expr_if_expr(cond_expr, then_expr, else_expr, if_val_span)
-        var block_stmts: [i64] = []
-        block_stmts.push(bind_stmt)
-        block_stmts.push(stmt_expr_stmt(if_val_expr, 0))
-        return expr_block(block_stmts, -1, 0)
-
-    val cond = parse_expr()
-    # G42: ternary expression form `if cond then X else Y`.
-    # `then` is not a keyword — it arrives as Ident (kind 6). In the block
-    # form the token after the cond is always `:` (161), never an Ident, so
-    # an Ident here can only be `then`. We detect on kind alone: par_text_get
-    # returns "" for this token under the interpreter (offset-based retrieval),
-    # so a text == "then" check would silently never fire there.
-    # `else` is keyword kind 41 (same as block form); parse_expr for the cond
-    # stops at `then` (Ident, not an operator) and the then-branch stops at
-    # `else` (kw 41). Bridge else/elif fidelity is tracked under M12.
-    # Brace-form if expression: `if cond { X } else { Y }` (Rust-style braces).
-    if par_kind_get() == 142:
-        parser_advance()
-        val br_then = parse_expr()
-        parser_expect(143)
-        var br_else: i64 = expr_unit(0)
-        if par_kind_get() == 41:
-            parser_advance()
-            if par_kind_get() == 40:
-                br_else = parse_if_expr()
-            elif par_kind_get() == 142:
-                parser_advance()
-                br_else = parse_expr()
-                parser_expect(143)
+    var result = terminal_else
+    var ai = arm_conds.len()
+    while ai > 0:
+        ai = ai - 1
+        val pattern_idx = arm_patterns[ai]
+        if pattern_idx >= 0:
+            val pattern_tag = expr_get_tag(pattern_idx)
+            if pattern_tag == EXPR_CALL or pattern_tag == EXPR_METHOD_CALL:
+                val rationale = extract_wildcard_rationale(pattern_idx)
+                val stored_pattern = normalize_wildcard_pattern(pattern_idx)
+                var arm_indices: [i64] = []
+                var then_arm_body: [i64] = []
+                then_arm_body.push(stmt_expr_stmt(arm_thens[ai], 0))
+                arm_indices.push(arm_new_with_binding_and_rationale(stored_pattern, -1, then_arm_body, "", rationale))
+                val wildcard_pattern = expr_ident("_", 0)
+                var wildcard_body: [i64] = []
+                wildcard_body.push(stmt_expr_stmt(result, 0))
+                arm_indices.push(arm_new_with_binding_and_rationale(wildcard_pattern, -1, wildcard_body, "", ""))
+                result = expr_match_expr(arm_inits[ai], arm_indices, 0)
             else:
-                br_else = parse_expr()
-        return expr_if_expr(cond, br_then, br_else, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))
-    if par_kind_get() == 6:
-        parser_advance()
-        # G45: optional `:` after `then` (`then: X` variant)
-        if par_kind_get() == 161:
-            parser_advance()
-        val tern_then = parse_expr()
-        var tern_else: i64 = expr_unit(0)
-        if par_kind_get() == 42:
-            tern_else = parse_if_expr()
-        elif par_kind_get() == 41:
-            parser_advance()
-            # G45: colon-ternary `... else: X` — more common (154 sites) than
-            # the plain `... else X` form (54). Consume the optional `:`.
-            if par_kind_get() == 161:
-                parser_advance()
-            tern_else = parse_expr()
-        return expr_if_expr(cond, tern_then, tern_else, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))
-    parser_expect(161)
-    val inline_then = par_kind_get() != TOK_NEWLINE
-    val then_body = parse_block()
-    val then_expr = expr_block(then_body, -1, 0)
-    parser_skip_newlines()
-    var continued_indent = false
-    if inline_then and par_kind_get() == TOK_INDENT:
-        parser_advance()
-        continued_indent = true
-    var else_expr: i64 = expr_unit(0)
-    if par_kind_get() == 42:
-        else_expr = parse_if_expr()
-    elif par_kind_get() == 41:
-        parser_advance()  # consume else
-        # G48: colon-form inline ternary `if C: T else E` (~29 sites in src/lib):
-        # the else branch is an inline expression, not a block. Distinguish from
-        # the block `else:` (161) and the `else if` chain (40).
-        if par_kind_get() == 161:
-            parser_advance()
-            val else_body = parse_block()
-            else_expr = expr_block(else_body, -1, 0)
-        elif par_kind_get() == 40:
-            else_expr = parse_if_expr()
+                val span_id = flat_span_new(arm_starts[ai], arm_ends[ai], arm_lines[ai], arm_cols[ai])
+                val bind_name = expr_get_str(pattern_idx)
+                val bind_stmt = stmt_if_val_decl(bind_name, arm_inits[ai], 0)
+                val name_expr = expr_ident(bind_name, 0)
+                val nil_expr = expr_nil_lit(0)
+                val bind_cond = expr_binary(TOK_NEQ, name_expr, nil_expr, 0)
+                expr_set_span(bind_cond, span_id)
+                val if_val_expr = expr_if_expr(bind_cond, arm_thens[ai], result, span_id)
+                var block_stmts: [i64] = []
+                block_stmts.push(bind_stmt)
+                block_stmts.push(stmt_expr_stmt(if_val_expr, 0))
+                result = expr_block(block_stmts, -1, 0)
         else:
-            else_expr = parse_expr()
-    if continued_indent:
-        parser_skip_newlines()
-        if par_kind_get() == TOK_DEDENT:
-            parser_advance()
-    expr_if_expr(cond, then_expr, else_expr, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))
+            val span_id = flat_span_new(arm_starts[ai], arm_ends[ai], arm_lines[ai], arm_cols[ai])
+            result = expr_if_expr(arm_conds[ai], arm_thens[ai], result, span_id)
+    result
 
 fn parse_for_expr() -> i64:
     parser_advance()

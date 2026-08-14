@@ -69,6 +69,31 @@ fn long_elif_source(arm_count: i64) -> text:
         i = i + 1
     src + "    else:\n        return -1\n"
 
+fn long_value_elif_source(arm_count: i64) -> text:
+    var src = "fn long_value_chain(n: i64) -> i64:\n    val result = if n == 0:\n        0\n"
+    var i = 1
+    while i < arm_count:
+        src = src + "    elif n == {i}:\n        {i}\n"
+        i = i + 1
+    src + "    else:\n        -1\n    result\n"
+
+fn parsed_value_if_chain_depth(src: text, fname: text) -> i64:
+    val m = parse_and_build_module(src, fname + ".spl")
+    val fn_ = m.functions[fname] ?? panic("missing fn " + fname)
+    for stmt in fn_.body.stmts:
+        match stmt.kind:
+            case StmtKind.Val(_, _, init):
+                match init.kind:
+                    case ExprKind.IfChain(arms, else_):
+                        if else_ != nil:
+                            return arms.len()
+                        return -2
+                    case _:
+                        pass
+            case _:
+                pass
+    -1
+
 var if_chain_probe_calls = 0
 
 fn if_chain_probe(value: i64, wanted: i64) -> bool:
@@ -93,6 +118,14 @@ fn executable_if_chain_no_else(value: i64) -> i64:
 
 fn executable_if_val_chain(first: i64?, second: i64?) -> i64:
     if val first_value = first:
+        return first_value
+    elif val second_value = second:
+        return second_value
+    else:
+        return -1
+
+fn executable_mixed_if_val_chain(first: i64?, second: i64?) -> i64:
+    if val Some(first_value) = first:
         return first_value
     elif val second_value = second:
         return second_value
@@ -133,6 +166,10 @@ describe "Flat AST bridge if/else fidelity (M12 item 6)":
         val src = long_elif_source(128)
         expect(parsed_if_chain_depth(src, "long_chain")).to_equal(128)
 
+    it "preserves every value-position arm in a long elif chain":
+        val src = long_value_elif_source(128)
+        expect(parsed_value_if_chain_depth(src, "long_value_chain")).to_equal(128)
+
     it "executes selected arms in order and short-circuits later conditions":
         if_chain_probe_calls = 0
         expect(executable_if_chain(1)).to_equal(20)
@@ -149,6 +186,11 @@ describe "Flat AST bridge if/else fidelity (M12 item 6)":
         expect(executable_if_val_chain(nil, 42)).to_equal(42)
         expect(executable_if_val_chain(7, 42)).to_equal(7)
         expect(executable_if_val_chain(nil, nil)).to_equal(-1)
+
+    it "preserves mixed constructor and identifier if-val arms":
+        expect(executable_mixed_if_val_chain(7, 42)).to_equal(7)
+        expect(executable_mixed_if_val_chain(nil, 42)).to_equal(42)
+        expect(executable_mixed_if_val_chain(nil, nil)).to_equal(-1)
 
     it "preserves else-if spelling":
         expect(executable_else_if_chain(0)).to_equal(10)
