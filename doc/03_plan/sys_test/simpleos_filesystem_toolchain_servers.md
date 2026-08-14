@@ -12,4 +12,13 @@
 
 All scenarios fail closed; no `skip`, readiness-only marker, or host compile is
 accepted as requirement evidence.
+## Restart12 deployment SSpec addendum (2026-08-14)
 
+The exact executable target is
+`test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl`; its
+Markdown operator manual is
+`doc/06_spec/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.md`.
+Both are B-SPEC until implemented/generated. The frozen steps/checkers,
+REQ-SOS-TD-001..004 traceability, all-seven-score `sspec-maintain` review, zero
+stubs, and zero executable specs under `doc/06_spec` are required by
+`doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`.

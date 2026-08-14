@@ -28,3 +28,13 @@
 Every build/boot/check wrapper returns nonzero for missing media, stale build
 stamp, target mismatch, short reads, malformed ELF/query, timeout, guest fault,
 unexpected preload use, or missing response.
+## Restart12 deployment detail-design addendum (2026-08-14)
+
+The planned owner is `scripts/check/check-simpleos-toolchain-desktop-boot.shs`.
+It consumes an admitted image, validates the embedded/pre-boot image records,
+launches OVMF CODE plus per-run VARS and GRUB EFI, selects
+`gui_entry_desktop.spl`, captures desktop/scanout/framebuffer evidence, then
+runs the literal guest version/emit-object/link/execute flow before shutdown and
+emits the separate desktop/guest receipt. The frozen commands, helper names,
+aliases, receipt fields, and fail-closed policy live in the canonical x86_64
+plan; the wrapper remains B-DESKTOP-LIVE until implemented.

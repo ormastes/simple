@@ -214,3 +214,24 @@ Use this checklist before marking a board as supported:
 8. At least one SPipe or script check passes on the current host.
 
 Do not mark a board as verified from source files alone. Use **source-present** until the build/download/boot path has been run and recorded.
+## Restart12 toolchain-image admission (2026-08-14)
+
+The x86_64 deployment lane requires two records. Embedded
+`/SYS/SIMPLETOOL.SDN` (`simpleos_toolchain_deployment_manifest`) binds the
+admitted target payload, genuine guest-static `/usr/bin/ld.lld`,
+`/usr/lib/SIMAIN.O`, `/HELLO.SPL`, kernel, and byte-identical canonical Simple
+aliases. The pre-boot external `simpleos_toolchain_image_admission_receipt`
+binds the closed image hash to the embedded-manifest and canonical
+production-kernel hashes. Post-boot
+`simpleos_toolchain_desktop_guest_receipt` separately binds firmware/QEMU argv,
+desktop markers, framebuffer, serial/SSH, output ELF, exact output, and rc to
+that admitted image/kernel. Pre-boot admission never depends on future boot
+evidence.
+
+QEMU acceptance uses one production `gui_entry_desktop.spl` OVMF/GRUB lifetime
+for desktop, scanout/framebuffer, and guest compile/run evidence. `-kernel`,
+fixed-command SSH fixtures, host compilation, and historical transcripts are
+not substitutes. Physical-board PASS additionally needs the named board,
+reviewed stable media path, boot/download route, and fresh serial or SSH
+transcript. Canonical contract:
+`doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`.

@@ -21,4 +21,12 @@ host cross-Clang output is not evidence that Clang itself runs in SimpleOS.
 - Preserve argv/env, exit status, and filesystem provenance across launch.
 - A service readiness string is not a protocol oracle: HTTP needs a response;
   DB needs create/write/read state observed through the socket.
+## Restart12 deployment/desktop update (2026-08-14)
 
+Deployment admission now separates an embedded component manifest from a
+pre-boot external final-image receipt so the image hash is not self-referential.
+A third post-boot desktop/guest receipt binds one OVMF/GRUB lifetime,
+scanout/framebuffer evidence and guest toolchain commands to those admitted
+kernel and image identities.
+The frozen schemas, aliases, commands, and blocked capabilities are in
+`doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`.

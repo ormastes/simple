@@ -325,3 +325,14 @@ records remote cleanup failure while preserving local replacement. SOSIX I/O
 uses the shared named VFS READ/WRITE/SEEK path. Run and retain the plan's five
 P1c focused rows only after TODO667; they are not a substitute for TODO806's
 source-matched QEMU/OpenSSH evidence.
+## Restart12 image/exec contract (2026-08-14)
+
+The current image owner must emit embedded
+`simpleos_toolchain_deployment_manifest` component identity and a separate
+external `simpleos_toolchain_image_admission_receipt` after the image closes.
+The planned combined desktop/toolchain wrapper is
+`scripts/check/check-simpleos-toolchain-desktop-boot.shs`; it remains absent and
+B-DESKTOP-LIVE. One OVMF/GRUB `gui_entry_desktop.spl` lifetime must bind
+desktop/scanout/framebuffer and mounted-filesystem toolchain execution to the
+same kernel/image hashes. Canonical details and blocker truth:
+`doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`.

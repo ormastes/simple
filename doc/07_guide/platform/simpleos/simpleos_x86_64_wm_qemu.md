@@ -461,3 +461,14 @@ and
 - `simpleos_arm64_wm_qemu.md` — the ARM64 `virt`/`ramfb` sibling lane.
 - `simpleos_dev_guide.md` §8.6 Entry Points, §8.7 QEMU Configuration.
 - `.claude/rules/board-runnable.md` — why the real-firmware proxy is mandatory.
+## Toolchain deployment desktop gate (planned, 2026-08-14)
+
+The planned combined owner is
+`scripts/check/check-simpleos-toolchain-desktop-boot.shs`; it does not exist
+yet and remains B-DESKTOP-LIVE. After implementation it must preserve one
+canonical `gui_entry_desktop.spl` OVMF CODE/per-run VARS/GRUB QEMU lifetime,
+bind `[desktop-gui]`, `[production-readiness]`, `[scanout-evidence]`, and
+framebuffer proof to the admitted kernel/image, then run the embedded toolchain
+version/compile/link/execute commands in that same guest. The exact manifest,
+receipt, command, transcript and failure contract is authoritative in
+`doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`.

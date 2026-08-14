@@ -1,5 +1,11 @@
 # SimpleOS Toolchain Self-Host (clang + Simple migration) Feature Expert
 
+> **Restart12 authority (2026-08-14):** the artifact/DONE table below is
+> historical unless a current receipt revalidates it. The canonical current
+> plan is `doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`;
+> Stage 2 is bootstrap-only, while Stage 3/4, payload, guest-static lld, image,
+> wrapper, SSpec/manual and live receipts remain BLOCKED/WARN.
+
 ## Role
 
 Own feature-specific process knowledge for the **clang + Simple migration onto

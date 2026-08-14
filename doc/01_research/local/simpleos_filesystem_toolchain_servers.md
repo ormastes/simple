@@ -40,4 +40,14 @@ Date: 2026-07-11
 2. Mounted executable range reads and per-`PT_LOAD` streaming are missing.
 3. Real Clang/Simple payloads are not in a sufficiently large install image.
 4. No guest DB service handles a real create/write/read request.
+## Restart12 deployment/desktop update (2026-08-14)
 
+The current x86_64 deployment-image and production-desktop lane is owned by
+`doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`. Current
+filesystem inspection finds only a bootstrap-only Stage 2 compiler; the Stage
+3/4 CLI, target payload, guest-static linker, admitted image, combined wrapper,
+frozen SSpec/manual, and live receipts are absent. The authoritative blocker
+matrix is
+`doc/08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md`.
+Historical payload/image/QEMU paths in this research are context, not restart12
+PASS evidence.

@@ -1,5 +1,13 @@
 # SimpleOS LLVM/Clang Toolchain — Where It Lives & How To Build Hello World
 
+> **Restart12 status (2026-08-14):** any 2026-08-06 paths or boot proofs below
+> are historical and do not establish current deployment acceptance. This
+> worktree has no current `build/os/clang_static/bin/lld_static` or cross-tree
+> `bin/ld.lld`. A host cross linker is not the required guest tool:
+> B-GUEST-LLD closes only on a validated static x86_64 SimpleOS ELF with
+> hash/dependency receipts. Current authority:
+> `doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`.
+
 For the related pure-Simple POSIX, startup argv, host mmap, and SimpleOS VFS
 provider map, see
 [`simpleos_posix_host_interface_index.md`](../app/llm/simpleos_posix_host_interface_index.md).

@@ -9,7 +9,7 @@ Owner plan:
 
 | ID | Owner location | Exact gap | Unblock condition |
 |---|---|---|---|
-| B-HOST-CLI | `doc/08_tracking/bug/stage3_selfhost_post_hir_segfault_2026-08-14.md:66` | The native enum/static-receiver defect is repaired and Stage 2 is green, but two Stage 3 executions were externally terminated with exit 143 before producing an admission artifact | Run one cache-preserving Stage 3 completion under a sufficiently long supervisor, continue Stage 4 from that admitted artifact without rebuilding green Stage 3, and pass essential-tools smoke |
+| B-HOST-CLI | `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:1000`; detail: `stage3_runtime_error_static_owner_receiver_corruption_2026-08-14.md` | Stage 2 and sanity pass; the folded-constant failure is repaired, but Stage 3 reaches `runtime_error`, produces impossible receiver local `103079215111`, and exits 139 before admission | In a fresh lane, obtain a symbolized backtrace or exact candidate-bound reproducer, fix the pure-Simple owner, then run one materially changed strict Stage 3/4 build and essential-tools smoke |
 | B-TARGET-SIMPLE | `scripts/os/simpleos-native-build.shs:1` | No fresh target payload built by an admitted pure-Simple Stage 4 CLI | Strict build produces target-native static ELF and provenance receipt with fallback disabled |
 | B-GUEST-LLD | `src/os/port/llvm/build.spl:1` | No genuine guest-static x86_64 SimpleOS `ld.lld` in this worktree | Pinned-fork build produces a validated static target ELF and dependency/hash receipts |
 | B-IMAGE | `src/os/installer/image_builder.spl:1` | No versioned embedded component manifest plus external image admission receipt | Image builder emits both non-self-referential records and validates every canonical alias byte-for-byte |
@@ -17,12 +17,18 @@ Owner plan:
 | B-SPEC | `test/03_system/os/simpleos_guest_toolchain_live_spec.spl:1` | Existing live scenario permits non-execution green and uses a noncanonical boot/tool flow | Replacement frozen scenario/manual fails closed and passes its one-time quality/traceability gates |
 | B-PHYSICAL | `doc/03_plan/os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi.md:38` | Board not acquired/identified and physical NIC driver/live transcript absent | Named board plus stable by-id media path, reviewed image write, boot/download path, and fresh serial or SSH transcript |
 
-## Attempt ledger
+## Historical/superseded attempt ledger
+
+These hashes describe earlier attempts. Their original mutable
+`build/bootstrap/logs/...` paths were later overwritten by newer cycles, so the
+old bytes are no longer retained at those paths and cannot be re-hashed as
+current evidence. They remain chronology only; the latest authority is the
+separately hashed section below.
 
 - Attempt 1: strict bootstrap produced admitted Stage 2 SHA-256
   `c7dfde4387f172af527bb37eb3740c1aed9eeeaa20648c0f653e3a6897003c7c`,
-  then failed at B-HOST-CLI. Retained log:
-  `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`.
+  then failed at B-HOST-CLI. Its mutable Stage 3 log path was subsequently
+  overwritten and is no longer retained as immutable evidence.
 - Attempt 2: nested-guard source SHA-256
   `3c300aaa0e6f5094647dcea2f3aedc129150845647a254acbf816e67a558239e`
   used the planned `--full-cli` command and failed closed before compilation
@@ -31,14 +37,17 @@ Owner plan:
   rebuilt the Rust authority tuple, produced admitted Stage 2 SHA-256
   `9c8757a5a31d5605b8765267789e0a2d1a882523ec84c523b740ed8ed3c55d10`,
   passed the former multiline parse frontier, then exited 139 later in Stage 3.
-  Retained Stage 3 log SHA-256:
+  Historical Stage 3 log SHA-256 (bytes no longer retained at the mutable path):
   `2dceab3fd116533537826b09b49cc64acfb2bfaaad6f9e5bd4036d5dd10af263`.
 - All three feature attempts are exhausted. Status is WARN; no additional
   fix/retry is permitted in this lane. The Rust-seed interpreter diagnostic for
   `typed_storage_view_producer_spec.spl` passed 5/5, but is not self-host
   admission evidence.
 
-### Fresh primary-repair lane
+### Historical/superseded primary-repair lane
+
+The exit-143 observations below predate the latest exit-139 reproduction and
+must not drive the current resume command.
 
 - Repair attempt 1 reached Stage 2 compilation and exposed missing canonical
   formal-verification HIR contract definitions. Concurrent `origin/main` now
@@ -50,3 +59,22 @@ Owner plan:
   output and was again externally terminated with exit 143. No Stage 3 or
   Stage 4 admission artifact exists. The fresh lane therefore stops WARN under
   the shared three-cycle cap.
+
+### Current authoritative bounded compiler-repair evidence
+
+- Attempt 1 exposed the missing typed parser verification-contract owner during
+  Stage 2.
+- Attempt 2 passed Stage 2 and its sanity gate, then Stage 3 failed on fourteen
+  inferred folded-constant type recoveries.
+- Attempt 3 changed folded-constant typing to recover from the original HIR
+  expression. Stage 2 and sanity passed and none of the fourteen errors
+  recurred. Stage 3 later exited 139 at the distinct `runtime_error`
+  static-owner receiver frontier.
+- Current Stage 2 SHA-256:
+  `f879f1bd1116cb8ac8fe04fdeff278a5dbc01821b993ace5bce3b16b96167218`.
+  Stage 2 log SHA-256:
+  `1dfe959161d18cc16146825d69f9b5f64240c6917e67ab28718ddd339252bf8f`.
+  Stage 3 log SHA-256:
+  `bfa17aa9b5ea1b4d7f58eb4b92049a808ee15586384d02fdba47bd06de841a19`.
+- These latest results supersede the earlier exit-143 resume suggestion. The
+  global three-cycle cap is exhausted; no unchanged command may rerun here.

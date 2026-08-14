@@ -997,3 +997,13 @@ the current environment is postponed under
 Every row remains required and manual-visible. Resume only with the
 prerequisites, exact commands, artifact paths, owner, and final reviewer listed
 in the extension plan.
+## Restart12 toolchain deployment row (2026-08-14)
+
+The x86_64 production-desktop/toolchain row remains BLOCKED. Its future SSpec
+is `test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl` with
+the mirrored operator manual under `doc/06_spec/03_system/os/`. It must fail
+closed when the admitted image, OVMF/GRUB desktop receipt, framebuffer proof,
+or guest compile/run receipt is absent; it may never `skip()` or green on a
+readiness-only/fixed-command path. Use the frozen helper/step vocabulary and
+same-run evidence contract in
+`doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`.

@@ -101,7 +101,9 @@ World inside the guest.
 - Merge owner: Codex root lane in this isolated worktree.
 - Final reviewer: separate higher-capability Codex model after merge.
 - Shared interfaces: `simpleos_toolchain_deployment_manifest` and
-  `simpleos_toolchain_image_admission_receipt`.
+  `simpleos_toolchain_image_admission_receipt`; the implementation-ready plan
+  additionally freezes post-boot `simpleos_toolchain_desktop_guest_receipt` to
+  keep pre-boot image admission non-circular.
 - Manual steps: `step_prepare_toolchain_deployment_image`,
   `step_boot_simpleos_desktop`, `step_compile_and_run_guest_hello`.
 - Exact visible step text: `Prepare the toolchain deployment image`,
@@ -120,8 +122,17 @@ dev-done
 ## Log
 
 - dev: Created state file with 12 acceptance criteria (type: feature).
-- review: Sidecar acceptance and guide/traceability findings merged; independent
-  higher-capability review PASS on 2026-08-14 for plan completion only.
+- review: Sidecar acceptance and guide/traceability PASS findings merged;
+  independent `higher_model_review` PASS on 2026-08-14 for plan completion
+  only. Implementation remains WARN/BLOCKED.
 - impl: WARN after three attempts. The nested-guard fix passed the old Stage 3
   parser frontier and its Rust-seed diagnostic unit spec passed 5/5, but strict
   self-host Stage 3 later exited 139; downstream deployment ACs remain BLOCKED.
+- refactor: Consolidated the restart12 contract into
+  `doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`; the
+  broader self-host plan now points to it. Refreshed local/domain research,
+  selected feature/NFR requirements, architecture, design, sys-test plan,
+  agent-task plan, LLVM/desktop/QEMU/board guides, feature/layer expert pages,
+  and the umbrella blocker ledger. Workflow skills/commands are N/A because no
+  SPipe/tool behavior changed. Generated deployment manual remains B-SPEC and
+  mandatory after its executable spec exists.

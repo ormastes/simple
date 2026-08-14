@@ -27,3 +27,14 @@ presented as the full historical `simple_db` product.
 
 GOT residency remains an explicit bare-metal optimization. Hosted SimpleOS,
 Clang, Simple compiler, interpreter, and loader all use filesystem provenance.
+## Restart12 deployment admission boundary (2026-08-14)
+
+The x86_64 lane has two non-circular admission records: the image-embedded
+`simpleos_toolchain_deployment_manifest` owns component identity, while the
+pre-boot external `simpleos_toolchain_image_admission_receipt` owns the closed
+image and kernel hashes. Post-boot
+`simpleos_toolchain_desktop_guest_receipt` owns firmware, boot argv, desktop,
+framebuffer and guest execution evidence. The combined owner keeps one
+`gui_entry_desktop.spl` QEMU lifetime through desktop evidence and guest
+toolchain execution. Exact schemas and boundaries are frozen in
+`doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`.

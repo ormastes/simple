@@ -165,3 +165,13 @@ both the value here and the `git ls-remote` verification note — a pin that
 merely *looks* current has drifted before.
 
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
+## Restart12 guest-linker status (2026-08-14)
+
+Any “AC-2 DONE” or current-artifact statement below refers to historical build
+output, not restart12 acceptance. The current worktree lacks both
+`build/os/clang_static/bin/lld_static` and the cross-tree `bin/ld.lld`.
+B-GUEST-LLD requires a genuine validated static x86_64 SimpleOS ELF plus
+compiler, dependency, readelf and hash receipts; a host executable is not
+equivalent. Use
+`doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md` and
+`doc/08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md`.

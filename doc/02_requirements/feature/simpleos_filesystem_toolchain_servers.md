@@ -16,4 +16,19 @@ The user request directly selects these outcomes; no option document is pending.
   GOT residency is restricted to explicit bare-metal launch metadata.
 - REQ-007: Marker apps, fixed command responses, boot-preloaded substitution,
   host compiles, skipped scenarios, and fake payloads shall fail verification.
+## Restart12 selected deployment requirements (2026-08-14)
 
+- REQ-SOS-TD-001: only an admitted pure-Simple Stage 4 host CLI may produce the
+  strict `x86_64-unknown-simpleos` payload; fallback is disabled and the Rust
+  seed is bootstrap-only.
+- REQ-SOS-TD-002: `/SYS/SIMPLETOOL.SDN` binds the target payload, genuine
+  guest-static `ld.lld`, `/usr/lib/SIMAIN.O`, `/HELLO.SPL`, kernel, and every
+  canonical Simple alias; a pre-boot external receipt separately binds the
+  final image, and a post-boot desktop/guest receipt binds live evidence to it.
+- REQ-SOS-TD-003: one canonical `gui_entry_desktop.spl` OVMF/GRUB run proves
+  desktop readiness, scanout/framebuffer evidence, `/usr/bin/simple --version`,
+  guest-native compile/link, mounted-filesystem execution, exact `Hello World`,
+  and rc=0.
+- REQ-SOS-TD-004: the executable/manual interface and fail-closed helper names
+  are frozen by
+  `doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`.

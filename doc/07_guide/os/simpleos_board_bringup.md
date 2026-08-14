@@ -104,3 +104,11 @@ identity (device tree path, real UART MMIO base distinct from the QEMU
 - `src/os/machine_profile.spl`'s `qemu_serial_base` — documented as the QEMU
   `virt`/`mps2-an505` machine's MMIO address; a real board's UART base is a
   different, board-specific constant that this profile has no field for yet.
+## Restart12 physical-board status (2026-08-14)
+
+The toolchain deployment lane is B-PHYSICAL: no acquired/identified x86_64
+mini-PC, physical NIC path, reviewed stable media device, or live serial/SSH
+receipt exists. QEMU evidence cannot satisfy this row. The exact safe
+post-acquisition build/check/write/boot sequence, retained artifacts, owner and
+final reviewer are recorded in
+`doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`.

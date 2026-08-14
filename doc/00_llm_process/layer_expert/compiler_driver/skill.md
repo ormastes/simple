@@ -69,3 +69,13 @@ ID. Inspect `method_calls_literals.spl` receiver resolution/writeback and the
 native reproducer, adjacent aggregate/method-call regression, and a fresh
 Stage 4 essential-tools receipt. Tracking:
 `doc/08_tracking/bug/stage3_selfhost_post_hir_segfault_2026-08-14.md`.
+## Restart12 bootstrap/deployment status (2026-08-14)
+
+The current Stage 2 compiler is bootstrap-only. The latest strict cycle passed
+Stage 2 and removed fourteen folded-constant errors, then Stage 3 exited 139 at
+the `runtime_error` static-owner receiver frontier. Do not advertise Stage 3,
+Stage 4, SPipe, deployment, or release admission from that artifact. The exact
+log hashes, three-cycle stop, pure-Simple owner, and fresh-lane unblock condition
+are in
+`doc/08_tracking/bug/stage3_runtime_error_static_owner_receiver_corruption_2026-08-14.md`
+and the canonical deployment plan.
