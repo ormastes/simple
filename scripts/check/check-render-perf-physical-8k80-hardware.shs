@@ -1,0 +1,47 @@
+#!/bin/sh
+# Hardware-aware owner for the physical 8K80 render gates.  An unavailable
+# display is a retained Todo blocker (exit 2), never a skipped or synthetic pass.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+DISPLAY_VALUE="${DISPLAY:-:0}"
+INVENTORY_DIR="${INVENTORY_DIR:-$ROOT/build/render_perf/physical_display_inventory}"
+WINDOW_CHECK="$ROOT/scripts/check/check-engine2d-vulkan-window-8k.shs"
+
+if [ "${1:-}" = "--self-test" ]; then
+    sh "$WINDOW_CHECK" --self-test
+    echo "render_perf_physical_8k80_hardware_selftest=pass"
+    exit 0
+fi
+
+if ! command -v xrandr >/dev/null 2>&1 ||
+   ! DISPLAY="$DISPLAY_VALUE" xrandr --query >/dev/null 2>&1; then
+    echo "render_perf_physical_8k80_hardware_status=blocked todo=TODO684 reason=physical-x11-display-unreachable"
+    exit 2
+fi
+if ! command -v edid-decode >/dev/null 2>&1; then
+    echo "render_perf_physical_8k80_hardware_status=blocked todo=TODO685 reason=missing-edid-decode"
+    exit 2
+fi
+
+mkdir -p "$INVENTORY_DIR"
+(
+    set -eu
+    DISPLAY="$DISPLAY_VALUE" xrandr --props
+    found=0
+    for path in /sys/class/drm/*/edid; do
+        if [ -s "$path" ]; then
+            found=1
+            echo "EDID=$path"
+            edid-decode "$path"
+        fi
+    done
+    [ "$found" -eq 1 ]
+) >"$INVENTORY_DIR/inventory.txt" || {
+    echo "render_perf_physical_8k80_hardware_status=blocked todo=TODO685 reason=no-readable-connector-edid"
+    exit 2
+}
+
+DISPLAY="$DISPLAY_VALUE" ENGINE2D_VULKAN_PHYSICAL=1 \
+    sh "$WINDOW_CHECK"
+echo "render_perf_physical_8k80_hardware_status=pass todos=TODO684,TODO685"

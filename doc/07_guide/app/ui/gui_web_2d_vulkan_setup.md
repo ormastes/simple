@@ -467,7 +467,7 @@ physical scanout or 8K80 evidence.  On a host with an attached display, use:
 ```sh
 DISPLAY=:0 ENGINE2D_VULKAN_PHYSICAL=1 \
 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
-  sh scripts/check/check-engine2d-vulkan-window-8k.shs
+  sh scripts/check/check-render-perf-physical-8k80-hardware.shs
 ```
 
 Physical mode never starts Xvfb.  It fails closed unless the existing X11
@@ -479,7 +479,10 @@ window receipt is still presentation evidence rather than captured-scanout
 parity; promotion also requires the device-origin/captured scanout oracle in
 the canonical render performance plan.
 
-Before a physical campaign, run
-`sh scripts/check/check-engine2d-vulkan-window-8k.shs --self-test`.  The bounded
+TODO684 and TODO685 in `doc/08_tracking/todo/todo_db.sdn` own this unavailable-
+hardware work and its exact resume contract; the render plan only retains the
+acceptance dependencies. Before a physical campaign, run
+`sh scripts/check/check-render-perf-physical-8k80-hardware.shs --self-test`.
+The bounded
 self-test accepts an EDID-bearing active 8K80 fixture and rejects both a
 synthetic no-EDID Xvfb shape and an EDID-bearing 60 Hz mode.
