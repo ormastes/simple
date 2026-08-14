@@ -158,3 +158,47 @@ Require the `decrease_measure` frontier to clear, a produced Stage 2 executable,
 and its sanity receipt before continuing to Stage 3. Do not replace the missing
 typed parser owner with `Any`, drop verification contracts, or reuse a stale
 cached object.
+
+## Fresh continuation: typed parser owner restored, Phase 3 still blocked
+
+The next bounded continuation selectively restored the typed parser-contract
+surface and propagation from `5958de7d4c7` onto current main. It also restored
+the contract statement tags and parser recognition rather than treating
+contract clauses as executable body statements. A fresh Stage 2 build then
+completed 858 compiled units with zero failures. Its diagnostic compiler is:
+
+- path:
+  `build/restart12-render-cli-pass2/stage2-cycle5/x86_64-unknown-linux-gnu/simple`
+- SHA-256:
+  `e3ae9475088ed2fe8edceb4e14f8b2db336ad8db8920d516d3dc8f99c6cf3dfc`
+- sanity: version, bootstrap frontend smoke with bootstrap disabled, and the
+  same smoke with bootstrap enabled all exited zero; the hash stayed stable.
+
+That artifact is diagnostic only. It has no wrapper-owned admission manifest
+or provenance and must not be copied into a canonical Stage 3 location.
+
+The first Phase-3 attempt proved the former `ANY` and contract-tag declaration
+failures absent, then reported fourteen instances of:
+
+`bootstrap MIR lowering: cannot derive module constant type from folded value;
+add an explicit annotation`
+
+Adding explicit `i64` annotations to all six new cross-module contract statement
+tags was insufficient: the fresh-cache Phase-3 retry reached the same normalized
+failure and emitted no executable. Retained evidence:
+
+- log: `build/restart12-render-cli-pass2/stage3-cycle6.log`
+- log SHA-256:
+  `a23ef0832fcd1644943897a72708004c2022a8b98da250f92f65442791fbcb05`
+- output assertion:
+  `build/restart12-render-cli-pass2/stage3-cycle6/x86_64-unknown-linux-gnu/simple`
+  absent
+
+The continuation exhausted its three-cycle cap. A fresh lane must first enhance
+or otherwise inspect `MirLowering.lower_constants` in
+`src/compiler/50.mir/_MirLowering/function_lowering.spl` so the diagnostic
+identifies each constant name/span, then type the actual owners and rerun only
+Phase 3 in a new cache. Once that succeeds, the only supported admission route
+is the complete wrapper-owned LLVM transaction recorded in the canonical
+render-performance plan; the diagnostic Stage 2/3 artifacts cannot be promoted
+retroactively.

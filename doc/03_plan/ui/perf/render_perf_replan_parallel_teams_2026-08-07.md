@@ -2,8 +2,8 @@
 
 ## 2026-08-14 restart12 replacement lane (canonical active slice)
 
-Current plan revision: `90f8945f11289576847d67c8aea2ba92768979c1` plus the
-pending SPipe plan-completion change. This slice supersedes stale provenance
+Current source base: `fe01e7575c0fabe79c5a6859c60e28fa3189d6ce` plus the
+pending typed parser-contract continuation described below. This slice supersedes stale provenance
 claims below without rewriting the historical T1--T20 record. Operator guide:
 `doc/07_guide/ui/rendering/cached_render_entry_closure.md`; retained result:
 `doc/09_report/drawir_sparse_dynamic_8k_attempt_2026-08-12.md`; blocker:
@@ -13,7 +13,7 @@ The executable contract is
 TODO687, and TODO688 own the CLI fix, admitted 8K carrier, and self-hosted
 SSpec/maintenance/docgen evidence.
 
-The only available artifact is
+The only full-CLI-shaped artifact is
 `release/x86_64-unknown-linux-gnu/simple`. It is an **unadmitted purported
 non-seed candidate**, not a proven deployed pure-Simple CLI: the canonical
 `bin/release/<triple>/simple`, provenance, essential-smoke receipt, and deploy
@@ -22,12 +22,23 @@ receipt are absent. Direct `-c` and source-file probes exit 248 with
 artifact. Those variants are diagnostic attempts, not implementation fix
 cycles, and they prove neither binary lineage nor root cause.
 
+The continuation produced and sanity-checked a diagnostic Stage 2 compiler at
+`build/restart12-render-cli-pass2/stage2-cycle5/x86_64-unknown-linux-gnu/simple`
+(SHA-256 `e3ae9475088ed2fe8edceb4e14f8b2db336ad8db8920d516d3dc8f99c6cf3dfc`).
+It is not an admitted Stage 3 or full CLI. A fresh Phase-3 attempt cleared the
+`proof_uses`, `decrease_measure`, and undeclared contract-tag frontiers, but
+failed without an output on module-constant type derivation. Its retained log
+is `build/restart12-render-cli-pass2/stage3-cycle6.log` (SHA-256
+`a23ef0832fcd1644943897a72708004c2022a8b98da250f92f65442791fbcb05`).
+The three-cycle cap is exhausted; Stage 4 and every downstream CLI/render gate
+remain blocked.
+
 ### Acceptance status
 
 | AC | Status | Proof or remaining evidence |
 |---|---|---|
 | AC-1 current truth | PROVED | The active slice distinguishes the unadmitted artifact, missing receipts, and unproven root cause; historical redesign §1--§8 remains authoritative. |
-| AC-2 executable resume | BLOCKED | The commands are frozen below; execution awaits an admitted Stage 4 CLI and reviewed rollback receipt. |
+| AC-2 executable resume | BLOCKED | Diagnostic Stage 2 passed, but Phase 3 failed on module-constant typing after three cycles; a fresh lane must identify the named constants before the canonical transaction below. |
 | AC-3 gate separation | PROVED | Candidate build, admission, deploy, deployed lineage, carrier build, and carrier run are independent. |
 | AC-4 sparse 8K contract | BLOCKED | This is a future receipt contract; the completed diagnostic row lacks admitted-native evidence. |
 | AC-5 parallel ownership | PROVED | Bounded matrix below; `/root` alone edits shared plan/knowledge files. |
@@ -41,7 +52,7 @@ cycles, and they prove neither binary lineage nor root cause.
 
 1. **Construct Stage 4 candidate.** Owner:
    `scripts/bootstrap/bootstrap-from-scratch.sh` and the pure-Simple compiler.
-   Run `sh scripts/bootstrap/bootstrap-from-scratch.sh --full-cli`; retain the
+   After the Phase-3 blocker is fixed, run `env SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --full-cli --deploy --no-mcp --backend=llvm --jobs=min --output=build/restart12-render-cli-pass2`; retain the
    exact Stage 3 admission manifest, `build/bootstrap/full/<platform>/simple`,
    its `.provenance.env`, and
    `build/bootstrap/logs/<platform>/stage4-native-build.log`. Do not deploy yet.
@@ -51,8 +62,9 @@ cycles, and they prove neither binary lineage nor root cause.
    Test-runner, lint, duplicate-check, and aggregate markers must all pass.
    A seed, stale artifact, missing log, missing output, or help-only command
    fails closed.
-3. **Deploy with rollback.** Only after Gate 2, rerun the canonical bootstrap
-   route with `--deploy`. Require atomic install of the CLI and sibling seed,
+3. **Deploy with rollback.** Gate 1's canonical transaction requests deploy,
+   but deployment may occur only after its internal candidate gates pass.
+   Require atomic install of the CLI and sibling seed,
    post-swap arithmetic smoke, reviewed rollback, and
    `bin/release/<platform>/bootstrap-deploy-receipt.env`. Bootstrap does not
    emit the handoff rollback receipt: a reviewed rollback exercise must create

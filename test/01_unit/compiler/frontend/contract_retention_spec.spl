@@ -1,0 +1,92 @@
+"""FV2: source contracts survive the canonical pure-Simple parser bridge."""
+
+use std.spec
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+
+describe "FV2 source contract retention":
+    it "retains every contract class without executing clauses as body statements":
+        val source = "fn guarded(x: i64) -> Result<i64, text>:\n" +
+            "    in:\n" +
+            "        x >= 0\n" +
+            "        x < 100\n" +
+            "    invariant:\n" +
+            "        x >= 0\n" +
+            "    decreases: x\n" +
+            "    out(ret):\n" +
+            "        ret >= x\n" +
+            "        ret < 101\n" +
+            "    out_err(err):\n" +
+            "        err != \"\"\n" +
+            "        err.len() > 0\n" +
+            "    proof uses: guarded_refinement\n" +
+            "    Ok(x)\n"
+        val module = parse_and_build_module(source, "fv2_contract_retention.spl")
+        expect(module.functions.contains("guarded")).to_equal(true)
+        val fn_ = module.functions["guarded"]
+        expect(fn_.contract.preconditions.len()).to_equal(2)
+        expect(fn_.contract.invariants.len()).to_equal(1)
+        expect(fn_.contract.postconditions.len()).to_equal(2)
+        expect(fn_.contract.error_postconditions.len()).to_equal(2)
+        expect(fn_.contract.postcondition_binding).to_equal("ret")
+        expect(fn_.contract.error_binding).to_equal("err")
+        expect(fn_.contract.proof_uses).to_equal("guarded_refinement")
+        expect(fn_.contract.preconditions[0].span.file).to_equal(
+            "fv2_contract_retention.spl")
+        expect(fn_.contract.preconditions[0].span.line).to_be_greater_than(0)
+        expect(fn_.contract.preconditions[0].span.col).to_be_greater_than(0)
+        var has_decreases = false
+        if val _measure = fn_.contract.decrease_measure:
+            has_decreases = true
+        expect(has_decreases).to_equal(true)
+        expect(fn_.body.stmts.len()).to_equal(1)
+
+    it "keeps contract state isolated from adjacent plain functions":
+        val source = "fn guarded(x: i64) -> i64:\n" +
+            "    in:\n" +
+            "        x >= 0\n" +
+            "    x\n" +
+            "fn identity(x: i64) -> i64:\n" +
+            "    x\n" +
+            "fn fill(out: [i64]) -> i64:\n" +
+            "    out.push(1)\n" +
+            "    out.len()\n"
+        val module = parse_and_build_module(source, "fv2_contract_adjacency.spl")
+        expect(module.functions.contains("identity")).to_equal(true)
+        val identity = module.functions["identity"]
+        expect(identity.contract.preconditions.len()).to_equal(0)
+        expect(identity.contract.invariants.len()).to_equal(0)
+        expect(identity.contract.postconditions.len()).to_equal(0)
+        expect(identity.contract.error_postconditions.len()).to_equal(0)
+        expect(identity.contract.postcondition_binding).to_equal("")
+        expect(identity.contract.error_binding).to_equal("")
+        expect(identity.contract.proof_uses).to_equal("")
+        var identity_has_decreases = false
+        if val _measure = identity.contract.decrease_measure:
+            identity_has_decreases = true
+        expect(identity_has_decreases).to_equal(false)
+        expect(identity.body.stmts.len()).to_equal(1)
+        expect(module.functions.contains("fill")).to_equal(true)
+        val fill = module.functions["fill"]
+        expect(fill.contract.preconditions.len()).to_equal(0)
+        expect(fill.contract.invariants.len()).to_equal(0)
+        expect(fill.contract.postconditions.len()).to_equal(0)
+        expect(fill.contract.error_postconditions.len()).to_equal(0)
+        expect(fill.contract.postcondition_binding).to_equal("")
+        expect(fill.contract.error_binding).to_equal("")
+        expect(fill.contract.proof_uses).to_equal("")
+        var fill_has_decreases = false
+        if val _measure = fill.contract.decrease_measure:
+            fill_has_decreases = true
+        expect(fill_has_decreases).to_equal(false)
+        expect(fill.body.stmts.len()).to_equal(2)
+
+    it "preserves a typed contract through the parser bridge":
+        val source = "fn sample(x: i64) -> i64:\n" +
+            "    proof uses: sample_refinement\n" +
+            "    x\n"
+        val module = parse_and_build_module(source, "fv2_contract_constructor.spl")
+        expect(module.functions.contains("sample")).to_equal(true)
+        val sample = module.functions["sample"]
+        expect(sample.contract.proof_uses).to_equal("sample_refinement")
+        expect(sample.contract.preconditions.len()).to_equal(0)
+        expect(sample.body.stmts.len()).to_equal(1)
