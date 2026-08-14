@@ -1930,7 +1930,7 @@ fn test_runtime_bundle_auto_prefers_core_c_for_compiler_entry() {
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[test]
-fn test_runtime_path_cli_archive_does_not_require_optional_lifecycle_hooks() {
+fn test_source_checkout_core_lane_rejects_partial_runtime_path_archive() {
     let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("runtime.c");
@@ -1976,9 +1976,22 @@ void rt_process_run(void) {}
     builder.entry_file = Some(PathBuf::from("/project/src/app/cli/main.spl"));
 
     let (selected, is_native_all) = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
-    assert_eq!(selected, runtime);
+    assert_ne!(selected, runtime);
     assert!(!is_native_all);
     assert!(runtime_archive_has_bootstrap_cli_symbols(&selected));
+    let symbols = archive_defined_symbols(&selected).unwrap();
+    for required in [
+        "spl_mutex_create",
+        "spl_mutex_lock",
+        "spl_mutex_unlock",
+        "spl_thread_sleep",
+        "rt_process_spawn_piped",
+        "rt_process_read_stdout",
+        "rt_process_is_alive",
+        "rt_process_close_piped",
+    ] {
+        assert!(symbols.contains(required), "missing core-C provider {required}");
+    }
 }
 
 #[test]

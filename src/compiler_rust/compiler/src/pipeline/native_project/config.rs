@@ -296,6 +296,25 @@ impl NativeProjectBuilder {
             return Ok(Some((provider, false)));
         }
 
+        // A source checkout is authoritative for the explicit core-C lane.
+        // A runtime path beside a staged compiler may contain the Rust hosted
+        // `libsimple_runtime.a`; its small bootstrap-CLI symbol prefix is not
+        // proof that it provides mutex, thread, or piped-process entry points
+        // required by an arbitrary application closure. Build the complete
+        // core-C archive from the checked-out sources before considering a
+        // prebuilt fallback. Deployed compilers without `src/runtime` retain
+        // the fallback path below.
+        if lane == NativeRuntimeLane::CoreCBootstrap && find_core_c_runtime_source_root().is_some() {
+            let core_c_dir = temp_dir.join("core_c_runtime");
+            let runtime = build_core_c_runtime_library(&core_c_dir).ok_or_else(|| {
+                format!(
+                    "native-build could not build the core-C runtime archive in {}",
+                    core_c_dir.display()
+                )
+            })?;
+            return Ok(Some((runtime, false)));
+        }
+
         let mut saw_core_c_runtime_path_archive = false;
         let mut push_runtime_candidates = |dir: &Path| {
             let runtime_deps = dir.join("deps").join(runtime_name);
