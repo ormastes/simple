@@ -7,14 +7,17 @@
 bug
 
 ## Refined Goal
-> Fix the bootstrap Stage 3 SEGFAULT (exit code 139) caused by duplicate LLVM CLI option registration when static LLVM objects in libsimple_native_all.a register options at load time, conflicting with the Stage 2 compiler's own LLVM instance. The fix should allow Stage 3 to complete successfully (exit 0) so the bootstrap pipeline no longer treats it as non-fatal/optional.
+> Preserve the historical LIM-010 duplicate-LLVM-constructor repair, while
+> requiring a fresh canonically receipted Stage 3 to prove that the current
+> bootstrap compiler completes and can compile a program. LIM-010 is not a
+> blanket explanation for later exit-139 failures.
 
 ## Acceptance Criteria
 - [x] AC-1: Root cause confirmed — identify the exact LLVM constructor conflict path in Stage 3 native-build
 - [x] AC-2: LLVM constructor stripping works reliably — strip_llvm_constructors() removes .init_array/.ctors from all relevant .cpp.o files before linking
-- [x] AC-3: Stage 3 exits 0 — bootstrap-from-scratch.sh Stage 3 completes without SEGFAULT *(requires integration test)* (deferred)
-- [x] AC-4: Stage 3 output binary is functional — the Stage 3 compiler can compile a test program *(requires integration test)* (deferred)
-- [x] AC-5: No regression — Stages 2, 4, 5 still pass after the fix
+- [ ] AC-3: Stage 3 exits 0 — canonical bootstrap produces a Stage 3 candidate and `provenance.env` with `status=pass`
+- [ ] AC-4: Stage 3 output binary is functional — the exact receipted candidate passes bootstrap sanity and compiles/runs `p2_add.spl`
+- [ ] AC-5: No regression — current canonical Stages 2, 4, and 5 pass after the fix; historical Rust/static checks alone do not close this
 - [x] AC-6: Stage 3 non-fatal workaround removed — exit code 2 fallback no longer needed
 
 ## Cooperative Providers
@@ -28,8 +31,8 @@ bug
 - [x] 4-spec (QA Lead) — 2026-05-19
 - [x] 5-implement (Engineer) — 2026-05-19
 - [x] 6-refactor (Tech Lead) — 2026-05-19
-- [x] 7-verify (QA) — 2026-05-19
-- [x] 8-ship (Release Mgr) — 2026-05-19
+- [ ] 7-verify (QA) — reopened 2026-08-14; current native acceptance pending
+- [ ] 8-ship (Release Mgr) — historical shipment revoked; no current candidate
 
 ## Phase Outputs
 
@@ -250,7 +253,7 @@ spec-done
 
 **Note:** Spec line 120 checks `expect(content).to_contain("warn!")` but config.rs uses `eprintln!`, not the `warn!` macro. This is a pre-existing spec inaccuracy from phase 4, not a refactor regression. The spec passes in interpreter mode because `it` block bodies are not fully executed.
 
-### 7-verify
+### 7-verify — historical verification record; current phase reopened
 
 **Status:** done — 2026-05-19
 
@@ -277,7 +280,7 @@ spec-done
    - Spec line 120 checks `to_contain("warn!")` but config.rs uses `eprintln!`, not `warn!` macro. Pre-existing spec inaccuracy from phase 4 (does not affect runtime behavior — the fix correctly uses `eprintln!` which is always available without a logging framework).
    - AC-3 and AC-4 require a full bootstrap run to verify end-to-end. Recommend running `scripts/bootstrap/bootstrap-from-scratch.sh --deploy` in phase 8-ship or as a manual integration test.
 
-### 8-ship
+### 8-ship — historical shipment record; current acceptance revoked
 
 **Status:** done — 2026-05-19
 
@@ -296,4 +299,35 @@ spec-done
 - spec: Created 1 spec file with 15 total specs, 100% AC coverage. AC-3/4/5 are integration-level (manual bootstrap run in phase 7). 13 specs use text-grep on Rust source; 2 pass now (.init_array/.ctors already in code), 11 will fail until implementation.
 - verify: cargo check passes (no new errors). All 3 modified files confirmed with expected changes. AC-1/2/5/6 verified. AC-3/4 require full bootstrap integration test (deferred to phase 8-ship).
 
-## Pipeline Status: CLOSED — verified Wave 16-8
+## Pipeline Status: REOPENED — current Stage 3 acceptance is unproved
+
+### 2026-08-14 truth correction
+
+The May LIM-010 implementation and its Rust source checks are historical
+evidence only. They establish constructor stripping and an exit-139 diagnostic;
+they do not establish AC-3 or AC-4. Those two criteria were explicitly deferred
+in phase 7 and then incorrectly represented as complete by the phase checklist,
+ship record, and former `CLOSED` label.
+
+Current evidence contradicts closure:
+
+- `bootstrap/stage1/simple`, `bootstrap/stage2/simple`,
+  `bootstrap/stage3/simple`, and
+  `bootstrap/stage3/x86_64-unknown-linux-gnu/simple` are byte-identical at
+  SHA-256 `905ce03696a4726e41e410e0531d39f84df2d26d1588e2a23206ede3c177793b`.
+- `bootstrap/stage3/simple native-build` crashes on a minimal hello-world
+  module at the independently tracked tagged-value/list boundary described in
+  `doc/08_tracking/bug/stage3_native_build_segv_two_distinct_faults_tagged_value_seam_2026-08-11.md`.
+- The focused flat-AST ownership spec reaches a separate baked direct-call-zero
+  defect described in
+  `doc/08_tracking/bug/stage3_selfhost_segv_in_flat_ast_to_module_2026-08-09.md`.
+- No matching canonical `build/bootstrap/stage3/<triple>/provenance.env` exists
+  for the tracked artifact. Executable existence, `--version`, Rust-source
+  checks, or historical LIM-010 evidence cannot substitute for that receipt.
+
+Canonical closure requires one successful
+`sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --full-cli --no-mcp`
+transaction, followed by verification of the emitted Stage 3 manifest through
+`bootstrap_stage3_verify_manifest`, its sanity evidence, stable candidate hash,
+and the Stage 4 full-CLI/essential-tools gates. Until then this lane remains
+open even if a concurrent build is still running.

@@ -55,5 +55,20 @@ generators, and the separate architectural-retirement producer are the exact
 four exclusions; unavailable GHDL tooling is a blocker, never an exclusion. The
 qualification receipt records the coverage command, report location, measured
 percentage, an authoritative source-hash-bound owned-file list (including
-explicit empty/deleted-file handling), and each exclusion. A bootstrap-seed
-test run does not satisfy this contract.
+explicit empty/deleted-file handling), and each exclusion. The authoritative
+list is an ordered, duplicate-free part of the admitted runner source revision;
+it is never inferred from a Git revision range. A retained canonical
+`sha256<two spaces>path` manifest binds every source independently, and all
+paths and hashes are revalidated immediately before the receipt composer runs.
+Every listed path must remain a nonempty, regular, non-symlinked `.spl` file. A
+missing, deleted, empty, symlinked, or changed entry blocks qualification until
+ownership and this requirement are reviewed together; it cannot become an
+implicit exclusion. A bootstrap-seed test run does not satisfy this contract.
+Qualification runs on Linux with GNU
+Coreutils `sha256sum` and `timeout`; another host requires a separately selected
+and tested portability contract rather than silently changing hashing, timeout,
+or canonical-path semantics. The scope excludes unrelated scalar-core,
+formal-verification, SimpleOS, database, web, and integration-lane files even
+when they share Git history with A13/A14. It includes the complete typed
+sequential/parcel/trap dependency closure, qualification composer, compiler
+coverage inventory path, and their directly executed focused specifications.

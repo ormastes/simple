@@ -1056,7 +1056,7 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   hash schema were removed; decoder VHDL is prepended exactly once. The public
   hash recomputation helper remains as a compatibility API but constructs the
   canonical v3 typed graph, so drivers and manifests share one hash owner.
-- design-frozen (2026-08-14, A14): The qualification runner is the phase-one
+- design-frozen (2026-08-14, A14, historical/superseded source state): The qualification runner is the phase-one
   command/evidence owner; the admitted Simple receipt app is the sole
   phase-two validator/copier and writes the receipt last. The final directory
   remains absent during staging. Schema v2 must hash-bind the coverage command,
@@ -1090,6 +1090,16 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   duplicate-safe JSON, parent canonicality, and destination rehash are now
   implemented at source level, but executable runner/writer deliberate-reds
   remain absent. These are active resume items, not exclusions.
+- impl (2026-08-14, A14 owned evidence authority): replaced the historical
+  `base..HEAD` scope with a reviewed sorted A13/A14 set and canonical
+  `sha256  path` ledger. The runner rejects missing, empty, symlinked,
+  noncanonical, reordered, duplicated, or mutated sources; it revalidates the
+  ledger immediately before composition. The composer exact-key binds,
+  retains, and pre-receipt rechecks the list and ledger identities. Executable
+  shell deliberate reds cover the ledger and parent-symlink validator. The
+  Simple writer-level copy/publication/cleanup reds remain unchecked because
+  the proposed production fault arm was rejected and removed rather than
+  shipping a qualification bypass.
 - impl (2026-08-14, A14 inventory continuation): added constructor-defined,
   tag-dispatched flat-AST ownership for declaration/statement/expression/arm
   overloads, including trait and CLI declaration bodies, dict/struct/lambda
@@ -1108,3 +1118,28 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   The distinct advertised `compile ... --format=smf` route was attempted once
   after the static-green source handoff and also exited 139; its log is
   `/tmp/restart12-flat-ast-ownership-stage3-smf.log`.
+- verify-blocked (2026-08-14, current-source Stage 3 cycle 1): a provenance-
+  retained pure-Simple Stage-2 parent parsed all 616 current sources, then
+  failed closed in HIR lowering because `HirContractClauseKind` and
+  `HirContractOutcome` were referenced by verification MIR/backend consumers
+  but absent from the canonical HIR model. The typed HIR model, optional
+  function field, constructor initialization, and semantic preservation are
+  restored. Evidence: `build/native_probe/stage3-fresh/build.log`; bug:
+  `doc/08_tracking/bug/stage3_hir_contract_model_partial_integration_2026-08-14.md`.
+  The cache-preserving rebuild must finish and produce a provenance-bound
+  Stage 3 before any A13/A14 executable checkbox changes.
+- verify-blocked (2026-08-14, current-source Stage 3 cycle 2): the preserved-
+  cache retry did not reproduce the missing HIR contract-name diagnostic and
+  was observed externally terminated. Its log proves only that no compiler
+  diagnostic or candidate was emitted; it does not retain the exit code or
+  sampled RSS. One final retry remained under the bounded three-cycle plan at
+  this historical point.
+- verify-blocked (2026-08-14, current-source Stage 3 cycle 3 / stop): GNU time
+  retained signal 15, 12m52s, and 24,839,624 KiB maximum RSS, but not a
+  reliable outer-wrapper exit status. The build emitted no compiler error,
+  object, candidate, provenance, or
+  sanity receipt. Evidence:
+  `build/native_probe/stage3-fresh/build-cycle3.log`; blocker:
+  `doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`.
+  The three-cycle cap is exhausted. No unchanged bootstrap command may be run
+  again in this session; all self-hosted and RTL acceptance remains WARN/open.

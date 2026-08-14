@@ -71,6 +71,9 @@ class RiscvGen2QualificationManifest:
     branch_coverage_log_path: text
     branch_coverage_log_sha256: text
     branch_coverage_basis_points: i64
+    owned_file_list_sha256: text
+    owned_file_manifest_path: text
+    owned_file_manifest_sha256: text
     changed_files: [text]
     exclusions: [text]
     rows: [RiscvGen2QualificationRow]
@@ -167,6 +170,35 @@ fn _g2_counted_values(fields: Dict<text, text>, count_key: text,
         index = index + 1
     Ok(values)
 
+fn _g2_owned_file_list_text(changed_files: [text]) -> text:
+    var encoded = ""
+    for changed_file in changed_files:
+        encoded = encoded + changed_file + "\n"
+    encoded
+
+fn _g2_owned_file_list_sha256(changed_files: [text]) -> text:
+    sha256_text(_g2_owned_file_list_text(changed_files))
+
+fn riscv_gen2_owned_file_manifest_matches(encoded: text,
+        changed_files: [text]) -> bool:
+    if not encoded.ends_with("\n") or encoded.ends_with("\n\n"):
+        return false
+    val rows = encoded.trim().split("\n")
+    if rows.len() != changed_files.len(): return false
+    var index: i64 = 0
+    while index < rows.len():
+        val row = rows[index]
+        if row.len() < 67 or row[64:66] != "  ": return false
+        val digest = row[0:64]
+        val path = row[66:]
+        if (not _g2_hex64(digest) or path != changed_files[index] or
+                not _g2_safe_relative_path(path) or
+                not file_is_regular_no_follow(path) or
+                file_hash_sha256(path) != digest):
+            return false
+        index = index + 1
+    true
+
 fn _g2_row_from_fields(fields: Dict<text, text>, index: i64,
         architecture: text) -> Result<RiscvGen2QualificationRow, text>:
     val prefix = "row_" + index.to_text() + "_"
@@ -259,7 +291,8 @@ fn riscv_gen2_parse_qualification_manifest(
         "schema", "status", "cli_path", "cli_sha256", "cli_provenance_path",
         "cli_provenance_sha256", "source_revision", "coverage_kind",
         "branch_coverage_command_path", "branch_coverage_command_sha256",
-        "changed_file_count", "exclusion_count",
+        "owned_file_list_sha256", "owned_file_manifest_path",
+        "owned_file_manifest_sha256", "changed_file_count", "exclusion_count",
         "branch_coverage_threshold_basis_points", "branch_coverage_basis_points",
         "branch_coverage_log_path", "branch_coverage_log_sha256"]
     val changed_files = _g2_counted_values(
@@ -303,6 +336,19 @@ fn riscv_gen2_parse_qualification_manifest(
     if threshold != RISCV_GEN2_BRANCH_COVERAGE_THRESHOLD_BP or coverage < threshold or
             coverage > 10000:
         return Err("qualification-manifest-branch-coverage-invalid")
+    val owned_file_list_sha = _g2_required(fields, "owned_file_list_sha256")?
+    if not _g2_hex64(owned_file_list_sha):
+        return Err("qualification-manifest-owned-file-list-sha256-invalid")
+    if owned_file_list_sha != _g2_owned_file_list_sha256(changed_files):
+        return Err("qualification-manifest-owned-file-list-sha256-mismatch")
+    val owned_file_manifest_path = _g2_required(
+        fields, "owned_file_manifest_path")?
+    val owned_file_manifest_sha = _g2_required(
+        fields, "owned_file_manifest_sha256")?
+    if not _g2_safe_relative_path(owned_file_manifest_path):
+        return Err("qualification-manifest-owned-file-manifest-path-invalid")
+    if not _g2_hex64(owned_file_manifest_sha):
+        return Err("qualification-manifest-owned-file-manifest-sha256-invalid")
     val cli_path = _g2_required(fields, "cli_path")?
     val cli_provenance_path = _g2_required(fields, "cli_provenance_path")?
     val coverage_log_path = _g2_required(fields, "branch_coverage_log_path")?
@@ -311,6 +357,11 @@ fn riscv_gen2_parse_qualification_manifest(
     for changed_file in changed_files:
         if not _g2_safe_relative_path(changed_file):
             return Err("qualification-manifest-changed-file-invalid")
+    var changed_index: i64 = 1
+    while changed_index < changed_files.len():
+        if changed_files[changed_index] <= changed_files[changed_index - 1]:
+            return Err("qualification-manifest-changed-file-order-invalid")
+        changed_index = changed_index + 1
     for path in [cli_path, cli_provenance_path, coverage_command_path,
                  coverage_log_path]:
         if not _g2_safe_relative_path(path):
@@ -335,7 +386,11 @@ fn riscv_gen2_parse_qualification_manifest(
         branch_coverage_command_sha256: coverage_command_sha,
         branch_coverage_log_path: coverage_log_path,
         branch_coverage_log_sha256: coverage_log_sha,
-        branch_coverage_basis_points: coverage, changed_files: changed_files,
+        branch_coverage_basis_points: coverage,
+        owned_file_list_sha256: owned_file_list_sha,
+        owned_file_manifest_path: owned_file_manifest_path,
+        owned_file_manifest_sha256: owned_file_manifest_sha,
+        changed_files: changed_files,
         exclusions: exclusions, rows: [rv32, rv64]))
 
 fn _g2_bound_file(path: text, expected_sha256: text) -> bool:
@@ -490,6 +545,9 @@ fn _g2_coverage_report_matches(encoded: text,
     if _g2_report_uint(encoded, "changed_file_count") !=
             manifest.changed_files.len():
         return false
+    if _g2_report_text(encoded, "owned_file_list_sha256") !=
+            manifest.owned_file_list_sha256:
+        return false
     var index: i64 = 0
     while index < manifest.changed_files.len():
         if _g2_report_text(encoded, "changed_file_" +
@@ -510,8 +568,16 @@ fn _g2_inputs_bound(manifest: RiscvGen2QualificationManifest) -> bool:
                 manifest.cli_provenance_sha256) or
             not _g2_bound_file(manifest.branch_coverage_command_path,
                 manifest.branch_coverage_command_sha256) or
+            not _g2_bound_file(manifest.owned_file_manifest_path,
+                manifest.owned_file_manifest_sha256) or
             not _g2_bound_file(manifest.branch_coverage_log_path,
                 manifest.branch_coverage_log_sha256)):
+        return false
+    if (not riscv_gen2_owned_file_manifest_matches(
+                file_read(manifest.owned_file_manifest_path),
+                manifest.changed_files) or
+            file_hash_sha256(manifest.owned_file_manifest_path) !=
+                manifest.owned_file_manifest_sha256):
         return false
     if not _g2_coverage_report_matches(file_read(
             manifest.branch_coverage_log_path), manifest):
@@ -568,8 +634,16 @@ fn _g2_retained_inputs_bound(run_dir: text, manifest_path: text,
                 manifest.cli_provenance_sha256) or
             not _g2_bound_file(run_dir + "/branch_coverage.command",
                 manifest.branch_coverage_command_sha256) or
+            not _g2_bound_file(run_dir + "/owned-files.list",
+                manifest.owned_file_manifest_sha256) or
             not _g2_bound_file(run_dir + "/branch_coverage.log",
                 manifest.branch_coverage_log_sha256)):
+        return false
+    if (not riscv_gen2_owned_file_manifest_matches(
+                file_read(run_dir + "/owned-files.list"),
+                manifest.changed_files) or
+            file_hash_sha256(run_dir + "/owned-files.list") !=
+                manifest.owned_file_manifest_sha256):
         return false
     var index: i64 = 0
     while index < manifest.rows.len():
@@ -627,6 +701,8 @@ fn riscv_gen2_render_qualification_receipt(
     "  \"cli\":{\"source_path\":\"{_g2_json_escape(manifest.cli_path)}\",\"sha256\":\"{manifest.cli_sha256}\",\"retained_path\":\"compiler.bin\"},\n" +
     "  \"cli_provenance\":{\"source_path\":\"{_g2_json_escape(manifest.cli_provenance_path)}\",\"sha256\":\"{manifest.cli_provenance_sha256}\",\"retained_path\":\"compiler.provenance.env\"},\n" +
     "  \"source_revision\":\"{manifest.source_revision}\",\n" +
+    "  \"owned_file_list_sha256\":\"{manifest.owned_file_list_sha256}\",\n" +
+    "  \"owned_file_manifest\":{\"source_path\":\"{_g2_json_escape(manifest.owned_file_manifest_path)}\",\"sha256\":\"{manifest.owned_file_manifest_sha256}\",\"retained_path\":\"owned-files.list\"},\n" +
     "  \"branch_coverage\":{\"kind\":\"branch\",\"command\":{\"source_path\":\"{_g2_json_escape(manifest.branch_coverage_command_path)}\",\"sha256\":\"{manifest.branch_coverage_command_sha256}\",\"retained_path\":\"branch_coverage.command\"},\"threshold_basis_points\":8000,\"basis_points\":{manifest.branch_coverage_basis_points},\"changed_files\":" + _g2_render_text_array(manifest.changed_files) + ",\"exclusions\":" + _g2_render_text_array(manifest.exclusions) + ",\"log\":{\"source_path\":\"{_g2_json_escape(manifest.branch_coverage_log_path)}\",\"sha256\":\"{manifest.branch_coverage_log_sha256}\",\"retained_path\":\"branch_coverage.log\"}},\n" +
     "  \"rows\":[\n" + _g2_render_row(manifest.rows[0], "rv32") + ",\n" +
     _g2_render_row(manifest.rows[1], "rv64") + "\n  ]\n}\n"
@@ -671,6 +747,9 @@ fn riscv_gen2_write_qualification_receipt(
             not _g2_copy_bound(manifest.branch_coverage_command_path,
                 manifest.branch_coverage_command_sha256,
                 run_dir + "/branch_coverage.command") or
+            not _g2_copy_bound(manifest.owned_file_manifest_path,
+                manifest.owned_file_manifest_sha256,
+                run_dir + "/owned-files.list") or
             not _g2_copy_bound(manifest.branch_coverage_log_path,
                 manifest.branch_coverage_log_sha256, run_dir + "/branch_coverage.log")):
         if not dir_remove(run_dir, true):

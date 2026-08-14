@@ -1,6 +1,27 @@
-# stage3 `native-build` SIGSEGV — TWO distinct faults, on a tagged-value representation seam
+# stage3 `native-build` SIGSEGV — historical stripped-artifact diagnosis
 
-- **Status:** OPEN — diagnosed, not fixed. **Re-measured 2026-08-11 after the mid-merge state cleared: the SIGSEGV survives, so the "half-landed merge" hypothesis below is REFUTED.** The blocking prerequisite is now `runtime_native_c_uncompilable_unsigned_box_never_implemented_2026-08-11.md` — fix that first (it restores a compile path and hence an unstripped stage3).
+> **2026-08-14 correction:** the `si_addr=0x118` caller has since been mapped
+> with a symbolized same-lineage build to `BorrowChecker.check_function`
+> iterating `NLLChecker.errors`. The producer stores that field at slot 4, but
+> the consumer was lowered with collided `MirLowering.errors` slot 11. The
+> compiler owner is `MirLowering.resolve_field_index`, not the runtime iterable
+> helper. Current source already prefers the module-qualified composite layout
+> before the module-local numeric `field_map`; see
+> `stage3_native_build_segv_generic_codegen_link_path_2026-08-06.md` and
+> `test/01_unit/compiler/mir/struct_field_order_module_qualified_spec.spl`.
+> The tracked Stage 1/2/3 binary remains stale and byte-identical, so its crash
+> is retained diagnostic evidence, not evidence that the current source fix is
+> absent. The direct baked `call 0` fault is independent and remains open.
+
+- **Status:** SOURCE CORRECTION IMPLEMENTED; FRESH NATIVE VERIFICATION OPEN.
+  The tracked stripped artifact still reproduces the 2026-08-11 SIGSEGV, but
+  it predates the module-qualified field-layout correction and cannot establish
+  current-source failure. The current prerequisite is completion of the fresh
+  pure-Simple Stage 3 build tracked by
+  `stage3_hir_contract_model_partial_integration_2026-08-14.md`, followed by
+  the hello and module-qualified field-layout probes. The older
+  `runtime_native_c_uncompilable_unsigned_box_never_implemented_2026-08-11.md`
+  prerequisite is historical and no longer describes the active frontier.
 - **Date:** 2026-08-11
 - **Signal:** exit **139** / `SIGSEGV` / `SEGV_MAPERR` (confirmed via `strace`: `si_addr=0x118`, `killed by SIGSEGV (core dumped)`). **Not** 143, **not** 124.
 - **Binary under test:** `bootstrap/stage3/simple`, md5 `2244f18ce2e694fb7ca395e9916404c3`, mtime `2026-08-10 12:09`, **stripped** (`nm` → 0 symbols).

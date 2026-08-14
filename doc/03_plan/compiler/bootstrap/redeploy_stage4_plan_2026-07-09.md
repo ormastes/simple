@@ -228,3 +228,23 @@ is materialized and dominance holds. Distinct next task; the alloca work stands.
   deployed**. The next session must fix typed Copy/Move/phi emission, rerun the
   clean-cache Stage 2/3 pipeline once, then run the extended smoke matrix before
   deployment.
+
+## Status correction 2026-08-14 — LIM-010 is historical, Stage 3 remains open
+
+The duplicate-LLVM-constructor fix above remains valid historical work, but it
+does not close current Stage 3 acceptance. The tracked Stage 1/2/3 bootstrap
+binaries are byte-identical (SHA-256
+`905ce03696a4726e41e410e0531d39f84df2d26d1588e2a23206ede3c177793b`),
+have no matching canonical Stage 3 provenance manifest, and the Stage 3 path
+still crashes on minimal and focused inputs for defects distinct from LIM-010:
+
+- tagged-value/list field collision:
+  `doc/08_tracking/bug/stage3_native_build_segv_two_distinct_faults_tagged_value_seam_2026-08-11.md`;
+- baked direct-call-zero sites:
+  `doc/08_tracking/bug/stage3_selfhost_segv_in_flat_ast_to_module_2026-08-09.md`.
+
+Do not close or deploy from `--version`, executable existence, a Rust-source
+check, a still-running build, or the historical LIM-010 scenarios. Resume with
+the canonical full-bootstrap/full-CLI command, then require the emitted
+`provenance.env`, Stage 3 sanity receipt, stable hash, `p2_add.spl` execution,
+Stage 4 candidate admission, and essential-tools smoke before deployment.

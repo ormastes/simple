@@ -222,6 +222,18 @@ is unavailable, the wrapper reports incomplete pure-Simple evidence and exits
 before producing a Stage 4 full CLI; it does not publish a seed fallback as a
 self-hosted result.
 
+As of 2026-08-14, do not infer Stage 3 admission from the historical LIM-010
+duplicate-LLVM-constructor repair. The tracked `bootstrap/stage{1,2,3}` files
+are byte-identical and the Stage 3 file has no canonical provenance receipt;
+it also retains independently tracked tagged-value/list and direct-call-zero
+crashes. See
+`../../08_tracking/bug/stage3_native_build_segv_two_distinct_faults_tagged_value_seam_2026-08-11.md`
+and
+`../../08_tracking/bug/stage3_selfhost_segv_in_flat_ast_to_module_2026-08-09.md`.
+A current PASS requires the exact candidate, manifest, sanity evidence, source
+snapshot, command transcript, build log, and stable hashes emitted by the
+canonical bootstrap transaction. A live process is pending evidence, not PASS.
+
 ### Standalone target builds (Office and similar products)
 
 A target product is not a compiler rebuild. Reuse the last **admitted Phase 3

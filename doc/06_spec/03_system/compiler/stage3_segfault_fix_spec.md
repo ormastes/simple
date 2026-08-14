@@ -1,6 +1,8 @@
 # Stage 3 SEGFAULT Fix (LIM-010) Specification
 
-> Verifies the fix for bootstrap Stage 3 SEGFAULT (exit 139) caused by duplicate LLVM CLI option registration. The fix changes strip_llvm_constructors() to return Result, replaces silent unwrap_or fallbacks with explicit warn!(), adds verify_stripped_archive() post-condition, and adds exit-139 detection in compile_stage().
+> Historical LIM-010 scenarios verify duplicate-LLVM-constructor hardening.
+> They do not prove that the current Stage 3 completes or is functional; live
+> Stage 3 admission is reopened pending canonical provenance and sanity evidence.
 
 <!-- sdn-diagram:id=stage3_segfault_fix_spec.arch -->
 <details class="sdn-source">
@@ -34,7 +36,9 @@ stage3_segfault_fix_spec -> std
 
 # Stage 3 SEGFAULT Fix (LIM-010) Specification
 
-Verifies the fix for bootstrap Stage 3 SEGFAULT (exit 139) caused by duplicate LLVM CLI option registration. The fix changes strip_llvm_constructors() to return Result, replaces silent unwrap_or fallbacks with explicit warn!(), adds verify_stripped_archive() post-condition, and adds exit-139 detection in compile_stage().
+Historically verifies source structure for the LIM-010 duplicate LLVM CLI
+option repair. It does not execute or qualify the current Stage 3, whose native
+bootstrap acceptance remains reopened.
 
 ## At a Glance
 
@@ -43,22 +47,41 @@ Verifies the fix for bootstrap Stage 3 SEGFAULT (exit 139) caused by duplicate L
 | Feature IDs | LIM-010 |
 | Category | Infrastructure |
 | Difficulty | 3/5 |
-| Status | In Progress |
+| Status | Reopened — historical LIM-010 checks pass; live Stage 3 admission blocked |
 | Requirements | N/A |
 | Plan | N/A |
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/compiler/stage3_segfault_fix_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-14 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
 
-Verifies the fix for bootstrap Stage 3 SEGFAULT (exit 139) caused by duplicate
+Historically verifies the source contract for the LIM-010 Stage 3 SEGFAULT caused by duplicate
 LLVM CLI option registration. The fix changes strip_llvm_constructors() to return
 Result, replaces silent unwrap_or fallbacks with explicit warn!(), adds
 verify_stripped_archive() post-condition, and adds exit-139 detection in
 compile_stage().
+
+### Scope correction (2026-08-14)
+
+This generated/manual document covers the historical LIM-010 constructor
+conflict contract only. Its source-structure assertions cannot satisfy the two
+integration criteria that the earlier verification explicitly deferred:
+
+- Stage 3 must exit zero in the canonical bootstrap transaction and emit a
+  verified `build/bootstrap/stage3/<triple>/provenance.env`.
+- That exact hashed candidate must pass bootstrap sanity and compile/run
+  `scripts/check/cert/redeploy_gate/fixtures/p2_add.spl` without fallback.
+
+The tracked `bootstrap/stage3/simple` does neither: it is byte-identical to the
+tracked Stage 1/2 artifacts and crashes in two later, independently documented
+defect families. See
+`doc/08_tracking/bug/stage3_native_build_segv_two_distinct_faults_tagged_value_seam_2026-08-11.md`
+and
+`doc/08_tracking/bug/stage3_selfhost_segv_in_flat_ast_to_module_2026-08-09.md`.
+Therefore this manual must not be cited as current Stage 3 PASS evidence.
 
 ## Key Concepts
 

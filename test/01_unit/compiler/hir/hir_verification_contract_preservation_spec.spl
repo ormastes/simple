@@ -1,0 +1,80 @@
+# @tag: unit, compiler, hir, mir, verification
+
+use std.spec.{describe, expect, it, step}
+use compiler.common.attributes.{FunctionAttr, vhdl_hardware_metadata_default}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirBlock, HirContractBlock,
+    HirContractClause, HirContractClauseKind, HirContractOutcome, HirExpr,
+    HirExprKind, HirFunction}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.semantics.resolve.{MethodResolver}
+
+fn contract_span() -> Span:
+    Span(start: 10, end: 14, line: 2, col: 5,
+        file: "hir_contract.spl", length: 4)
+
+fn unit_type() -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: contract_span())
+
+fn unit_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.UnitLit, has_type_: true, type_: unit_type(),
+        span: contract_span())
+
+fn verification_contract() -> HirContractBlock:
+    val bool_type = HirType(kind: HirTypeKind.Bool, span: contract_span())
+    val predicate = HirExpr(kind: HirExprKind.BoolLit(true), has_type_: true,
+        type_: bool_type, span: contract_span())
+    HirContractBlock(clauses: [HirContractClause(
+        kind: HirContractClauseKind.Requires, predicate: predicate,
+        binding_name: "", span: contract_span())],
+        proof_uses: "ContractProof.valid",
+        outcome: HirContractOutcome.Plain)
+
+fn hir_function(name: text, contract: HirContractBlock?) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: 401), name: name, type_params: [], params: [],
+        return_type: unit_type(),
+        body: HirBlock(stmts: [], has: true, value: unit_expr(),
+            span: contract_span()),
+        effects: [], visibility: Visibility.Private, is_async: false,
+        is_static: false, is_public: false, is_method: false,
+        is_mutable: false, is_const: false, is_extern: false,
+        func_attr: FunctionAttr.default(), has_export_attr: false,
+        export_attr: nil, has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_doc_comment: false, doc_comment: "", span: contract_span(),
+        is_gpu_kernel: false, gpu_target: "", gpu_backend_order: "",
+        verification_contract: contract)
+
+describe "HIR verification contract preservation":
+    it "keeps the ordinary constructor path explicitly contract-free":
+        step("Construct an ordinary function with the canonical nil field")
+        val ordinary = hir_function("ordinary", nil)
+        expect(ordinary.verification_contract.?).to_equal(false)
+
+    it "preserves a non-nil contract through semantic resolution":
+        step("Resolve a function without dropping its typed contract model")
+        val original = hir_function("resolved", Some(verification_contract()))
+        var resolver = MethodResolver.new(SymbolTable.new())
+        val resolved = resolver.resolve_function(original)
+        expect(resolved.verification_contract.?).to_equal(true)
+        val retained = resolved.verification_contract ?? verification_contract()
+        expect(retained.clauses.len()).to_equal(1)
+        expect(retained.proof_uses).to_equal("ContractProof.valid")
+        expect(retained.outcome == HirContractOutcome.Plain).to_equal(true)
+
+    it "retains the resolved contract on the lowered MIR function":
+        step("Lower the resolved HIR function through the public MIR boundary")
+        val original = hir_function("lowered", Some(verification_contract()))
+        var resolver = MethodResolver.new(SymbolTable.new())
+        val resolved = resolver.resolve_function(original)
+        var lowering = MirLowering.new(SymbolTable.new())
+        val mir_function = lowering.lower_function(resolved)
+        expect(mir_function.verification_contract.?).to_equal(true)
+        val retained = mir_function.verification_contract ?? verification_contract()
+        expect(retained.clauses.len()).to_equal(1)
+        expect(retained.proof_uses).to_equal("ContractProof.valid")

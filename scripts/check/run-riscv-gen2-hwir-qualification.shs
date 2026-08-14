@@ -7,7 +7,6 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 EVIDENCE_ROOT=$ROOT_DIR/build/evidence/riscv_gen2_hwir_foundation
 TIMEOUT_SECS=${RISCV_GEN2_QUALIFICATION_TIMEOUT_SECS:-1800}
 PRODUCT=riscv-gen2-zca-trap-single-outstanding-v3
-QUALIFICATION_BASE_REVISION=7c2fd4b375643b98b210008947cfefd10bf36c17
 SPEC=test/03_system/app/hardware/feature/riscv_gen2_hwir_foundation_spec.spl
 RECEIPT_SPEC=test/01_unit/app/riscv_gen2_qualification_receipt_spec.spl
 COMPOSER_SOURCE=src/app/test/riscv_gen2_qualification_receipt.spl
@@ -43,9 +42,11 @@ done
 
 BOOTSTRAP_STAGE3_FACADE_PATH=$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs
 STAGE4_PROVENANCE_HELPER_PATH=$ROOT_DIR/scripts/check/lib/stage4-candidate-provenance.shs
-export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+RISCV_GEN2_VALIDATION_HELPER_PATH=$ROOT_DIR/scripts/check/lib/riscv-gen2-qualification-validation.shs
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH RISCV_GEN2_VALIDATION_HELPER_PATH
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
 . "$STAGE4_PROVENANCE_HELPER_PATH"
+. "$RISCV_GEN2_VALIDATION_HELPER_PATH"
 
 simple=$(bootstrap_stage3_canonical_file "$STAGE4_CLI") || fail stage4-cli-missing-symlinked-or-noncanonical
 [ -x "$simple" ] || fail stage4-cli-not-executable
@@ -58,8 +59,12 @@ command -v ghdl >/dev/null 2>&1 || fail ghdl-missing
 command -v timeout >/dev/null 2>&1 || fail timeout-missing
 command -v git >/dev/null 2>&1 || fail git-missing
 command -v sha256sum >/dev/null 2>&1 || fail sha256sum-missing
+[ "$(uname -s 2>/dev/null || :)" = Linux ] || fail unsupported-host-requires-linux
+sha256sum --version 2>/dev/null | grep -F 'GNU coreutils' >/dev/null || fail unsupported-sha256sum-requires-gnu-coreutils
+timeout --version 2>/dev/null | grep -F 'GNU coreutils' >/dev/null || fail unsupported-timeout-requires-gnu-coreutils
 
 mkdir -p "$EVIDENCE_ROOT" || fail evidence-root-create-failed
+riscv_gen2_validate_output_path "$EVIDENCE_ROOT" "$OUT_DIR" || fail output-path-validation-failed
 evidence_root=$(bootstrap_stage3_canonical_path "$EVIDENCE_ROOT") || fail evidence-root-noncanonical
 [ "$evidence_root" = "$EVIDENCE_ROOT" ] || fail evidence-root-symlinked
 resolved_out=$(bootstrap_stage3_canonical_path "$OUT_DIR") || fail output-directory-parent-missing-or-noncanonical
@@ -92,26 +97,69 @@ run_logged_in_staging() {
     [ -f "$log_file" ] && [ ! -L "$log_file" ] || fail "$phase-log-missing"
 }
 
+# Reviewed A13/A14 coverage ownership. This list is part of the admitted source
+# revision, so changing its membership changes the provenance-bound source
+# identity. It deliberately does not infer ownership from integration history:
+# base..HEAD can contain unrelated lanes and can omit an owned file unchanged
+# in a later merge. Entries stay sorted to make duplicates and review drift
+# fail closed. A deleted or empty owned file is not silently excluded; removal
+# requires a reviewed update to this list and the qualification requirements.
+qualification_owned_files() {
+    sed -n '/^__RISCV_GEN2_OWNED_FILES__$/,/^__END_RISCV_GEN2_OWNED_FILES__$/p' "$0" |
+        sed '1d;$d'
+}
+
 # Candidate admission precedes every command that can become evidence.
 run_logged stage4-post-bootstrap-sspec "$ROOT_DIR/scripts/check/check-post-bootstrap-stage4-sspec.shs" "$simple" "$provenance"
 
 changed=$STAGING/changed-files.list
+OWNED_FILE_MANIFEST=$STAGING/owned-files.sha256
 source_revision=$(bootstrap_stage3_manifest_value source_revision "$provenance")
 [ "$(stage4_source_revision "$ROOT_DIR")" = "$source_revision" ] || fail source-revision-not-current-workspace
 (cd "$ROOT_DIR" && git diff --quiet && git diff --cached --quiet) || fail tracked-worktree-not-clean
-(cd "$ROOT_DIR" && git merge-base --is-ancestor "$QUALIFICATION_BASE_REVISION" HEAD) || fail qualification-base-not-ancestor
-(cd "$ROOT_DIR" && git diff --name-only "$QUALIFICATION_BASE_REVISION" HEAD -- '*.spl') >"$changed" || fail changed-file-discovery-failed
+qualification_owned_files >"$changed" || fail owned-file-list-write-failed
+[ -s "$changed" ] || fail owned-file-set-empty
+[ "$(LC_ALL=C sort -u "$changed" | sha256sum | awk '{print $1}')" = "$(sha256sum "$changed" | awk '{print $1}')" ] || fail owned-file-order-or-duplicate
+owned_file_list_sha256=$(hash "$changed")
+case "$owned_file_list_sha256" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) fail owned-file-list-hash-invalid ;;
+esac
 while IFS= read -r coverage_file; do
-    [ -f "$ROOT_DIR/$coverage_file" ] && [ ! -L "$ROOT_DIR/$coverage_file" ] || fail coverage-scope-file-invalid
+    case "$coverage_file" in
+        src/*.spl|test/*.spl) ;;
+        *) fail "owned-file-path-invalid:$coverage_file" ;;
+    esac
+    case "$coverage_file" in *'..'*|/*|*'//'*) fail "owned-file-path-invalid:$coverage_file" ;; esac
+    [ -f "$ROOT_DIR/$coverage_file" ] && [ ! -L "$ROOT_DIR/$coverage_file" ] && [ -s "$ROOT_DIR/$coverage_file" ] ||
+        fail "owned-file-missing-deleted-empty-or-symlinked:$coverage_file"
+    canonical_owned=$(bootstrap_stage3_canonical_file "$ROOT_DIR/$coverage_file") || fail "owned-file-parent-symlinked-or-noncanonical:$coverage_file"
+    [ "$canonical_owned" = "$ROOT_DIR/$coverage_file" ] || fail "owned-file-parent-symlinked-or-noncanonical:$coverage_file"
+    printf '%s  %s\n' "$(hash "$canonical_owned")" "$coverage_file" >>"$OWNED_FILE_MANIFEST" || fail owned-file-manifest-write-failed
 done <"$changed"
 changed_count=$(awk 'NF { n++ } END { print n + 0 }' "$changed")
-[ "$changed_count" -gt 0 ] || fail changed-file-set-empty
+[ "$changed_count" -gt 0 ] || fail owned-file-set-empty
+owned_file_manifest_sha256=$(hash "$OWNED_FILE_MANIFEST")
+printf '%s\n' "$owned_file_manifest_sha256" | grep -Eq '^[0-9a-f]{64}$' || fail owned-file-manifest-hash-invalid
+riscv_gen2_validate_owned_manifest "$ROOT_DIR" "$OWNED_FILE_MANIFEST" || fail owned-file-manifest-validation-failed
+
+revalidate_owned_sources() {
+    riscv_gen2_revalidate_owned_manifest "$ROOT_DIR" "$OWNED_FILE_MANIFEST" || fail owned-file-manifest-revalidation-failed
+    [ "$(hash "$changed")" = "$owned_file_list_sha256" ] || fail owned-file-list-mutated
+    [ "$(hash "$OWNED_FILE_MANIFEST")" = "$owned_file_manifest_sha256" ] || fail owned-file-manifest-mutated
+    while read -r expected_sha coverage_file; do
+        printf '%s\n' "$expected_sha" | grep -Eq '^[0-9a-f]{64}$' || fail "owned-file-entry-hash-invalid:$coverage_file"
+        canonical_owned=$(bootstrap_stage3_canonical_file "$ROOT_DIR/$coverage_file") || fail "owned-file-mutated-or-noncanonical:$coverage_file"
+        [ "$canonical_owned" = "$ROOT_DIR/$coverage_file" ] || fail "owned-file-mutated-or-noncanonical:$coverage_file"
+        [ -s "$canonical_owned" ] && [ "$(hash "$canonical_owned")" = "$expected_sha" ] || fail "owned-file-mutated:$coverage_file"
+    done <"$OWNED_FILE_MANIFEST"
+}
 
 COVERAGE_RAW=$STAGING/branch-coverage.sdn
 COVERAGE=$STAGING/branch-coverage.report
 COVERAGE_COMMAND=$STAGING/branch-coverage.command
-printf '%s\n' "RISCV_GEN2_ADMITTED_SIMPLE=$simple SIMPLE_SAFETY_PROFILE=critical SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=$(rel "$COVERAGE_RAW") $simple test $SPEC $RECEIPT_SPEC test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl test/01_unit/compiler/50.mir/hwir_predecode_contract_spec.spl --coverage --no-cache" >"$COVERAGE_COMMAND"
-if (cd "$ROOT_DIR" && RISCV_GEN2_ADMITTED_SIMPLE="$simple" SIMPLE_SAFETY_PROFILE=critical SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT="$(rel "$COVERAGE_RAW")" timeout -k 30 "$TIMEOUT_SECS" "$simple" test "$SPEC" "$RECEIPT_SPEC" test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl test/01_unit/compiler/50.mir/hwir_predecode_contract_spec.spl --coverage --no-cache) >"$STAGING/branch-coverage.log" 2>&1; then coverage_status=0; else coverage_status=$?; fi
+printf '%s\n' "RISCV_GEN2_ADMITTED_SIMPLE=$simple SIMPLE_SAFETY_PROFILE=critical SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=$(rel "$COVERAGE_RAW") $simple test $SPEC $RECEIPT_SPEC test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl test/01_unit/compiler/50.mir/hwir_predecode_contract_spec.spl test/03_system/app/hardware/feature/riscv_gen2_product_provenance_spec.spl --coverage --no-cache" >"$COVERAGE_COMMAND"
+if (cd "$ROOT_DIR" && RISCV_GEN2_ADMITTED_SIMPLE="$simple" SIMPLE_SAFETY_PROFILE=critical SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT="$(rel "$COVERAGE_RAW")" timeout -k 30 "$TIMEOUT_SECS" "$simple" test "$SPEC" "$RECEIPT_SPEC" test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl test/01_unit/compiler/50.mir/hwir_predecode_contract_spec.spl test/03_system/app/hardware/feature/riscv_gen2_product_provenance_spec.spl --coverage --no-cache) >"$STAGING/branch-coverage.log" 2>&1; then coverage_status=0; else coverage_status=$?; fi
 [ "$coverage_status" -eq 0 ] || fail "branch-coverage-command-failed:$coverage_status"
 [ -f "$COVERAGE_RAW" ] && [ ! -L "$COVERAGE_RAW" ] && [ -s "$COVERAGE_RAW" ] || fail branch-coverage-artifact-missing
 while IFS= read -r coverage_file; do
@@ -145,6 +193,8 @@ set -- $coverage_counts
 coverage_covered=$1 coverage_total=$2 coverage_bp=$3
 {
     printf 'branch_coverage_basis_points=%s\nbranch_outcomes_covered=%s\nbranch_outcomes_total=%s\n' "$coverage_bp" "$coverage_covered" "$coverage_total"
+    [ "$(hash "$changed")" = "$owned_file_list_sha256" ] || fail owned-file-list-mutated
+    printf 'owned_file_list_sha256=%s\n' "$owned_file_list_sha256"
     printf 'changed_file_count=%s\n' "$changed_count"
     index=1; while IFS= read -r file; do printf 'changed_file_%s=%s\n' "$index" "$file"; index=$((index + 1)); done <"$changed"
     sed -n '1,$p' "$COVERAGE_RAW"
@@ -202,6 +252,7 @@ MANIFEST=$STAGING/run_manifest.env
     printf 'cli_provenance_path=%s\ncli_provenance_sha256=%s\nsource_revision=%s\n' "$(rel "$provenance")" "$(hash "$provenance")" "$source_revision"
     printf 'coverage_kind=branch\nbranch_coverage_threshold_basis_points=8000\nbranch_coverage_basis_points=%s\n' "$coverage_bp"
     printf 'branch_coverage_command_path=%s\nbranch_coverage_command_sha256=%s\nbranch_coverage_log_path=%s\nbranch_coverage_log_sha256=%s\n' "$(rel "$COVERAGE_COMMAND")" "$(hash "$COVERAGE_COMMAND")" "$(rel "$COVERAGE")" "$(hash "$COVERAGE")"
+    printf 'owned_file_list_sha256=%s\nowned_file_manifest_path=%s\nowned_file_manifest_sha256=%s\n' "$owned_file_list_sha256" "$(rel "$OWNED_FILE_MANIFEST")" "$owned_file_manifest_sha256"
     printf 'changed_file_count=%s\n' "$changed_count"
     index=1; while IFS= read -r file; do [ -n "$file" ] || continue; printf 'changed_file_%s=%s\n' "$index" "$file"; index=$((index + 1)); done <"$changed"
     printf '%s\n' 'exclusion_count=4' \
@@ -257,6 +308,7 @@ MANIFEST=$STAGING/run_manifest.env
 # The final path is still absent. Only the admitted CLI may invoke the fixed
 # composer, create it, copy validated inputs, and write the receipt last.
 [ ! -e "$resolved_out" ] && [ ! -L "$resolved_out" ] || fail final-path-created-before-composer
+revalidate_owned_sources
 RECEIPT=$resolved_out/qualification_receipt.json
 if (cd "$ROOT_DIR" && timeout -k 30 "$TIMEOUT_SECS" "$simple" run "$COMPOSER_SOURCE" --manifest "$(rel "$MANIFEST")" --run-id "$run_id") >"$STAGING/composer.log" 2>&1; then composer_status=0; else composer_status=$?; fi
 [ "$composer_status" -eq 0 ] || fail "receipt-composer-failed:$composer_status"
@@ -266,3 +318,45 @@ grep -F '"status":"passed"' "$RECEIPT" >/dev/null || fail composer-receipt-statu
 
 printf '%s\n' 'riscv_gen2_hwir_qualification_status=pass'
 printf '%s\n' "riscv_gen2_hwir_qualification_receipt=$RECEIPT"
+
+exit 0
+
+__RISCV_GEN2_OWNED_FILES__
+src/app/test/riscv_gen2_qualification_receipt.spl
+src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl
+src/compiler/10.frontend/core/_AstExpr/accessors.spl
+src/compiler/10.frontend/core/_AstExpr/nodes.spl
+src/compiler/10.frontend/core/ast_coverage_inventory.spl
+src/compiler/10.frontend/core/ast_traversal.spl
+src/compiler/10.frontend/core/interpreter/eval.spl
+src/compiler/10.frontend/core/interpreter/eval_stmts.spl
+src/compiler/10.frontend/core/parser_expr.spl
+src/compiler/10.frontend/core/parser_stmts.spl
+src/compiler/10.frontend/desugar/placeholder_lambda.spl
+src/compiler/50.mir/hwir/bit_vector_constant.spl
+src/compiler/50.mir/hwir/branch_predecode.spl
+src/compiler/50.mir/hwir/frontend.spl
+src/compiler/50.mir/hwir/mir_to_hwir.spl
+src/compiler/50.mir/hwir/predecode.spl
+src/compiler/50.mir/hwir/retirement_composition.spl
+src/compiler/50.mir/hwir/riscv_lsu_config.spl
+src/compiler/50.mir/hwir/sequential.spl
+src/compiler/50.mir/hwir/stateful_frontend.spl
+src/compiler/50.mir/hwir/trap_frontend.spl
+src/compiler/50.mir/hwir/trap_predecode.spl
+src/compiler/50.mir/hwir/types.spl
+src/compiler/50.mir/hwir/zca_outcomes.spl
+src/compiler/50.mir/hwir/zca_rows.spl
+src/compiler/50.mir/hwir/zca_rv64_contract.spl
+src/compiler/50.mir/hwir/zca_rv64_ld_sd_rows.spl
+src/compiler/50.mir/hwir/zca_rv64_rows.spl
+src/compiler/50.mir/hwir/zca_rv64_stack_memory_rows.spl
+src/compiler/70.backend/backend/hwir_to_vhdl.spl
+src/compiler/80.driver/driver_orchestration.spl
+test/01_unit/app/riscv_gen2_qualification_receipt_spec.spl
+test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl
+test/01_unit/compiler/50.mir/hwir_predecode_contract_spec.spl
+test/01_unit/compiler/frontend/flat_ast_child_ownership_spec.spl
+test/03_system/app/hardware/feature/riscv_gen2_hwir_foundation_spec.spl
+test/03_system/app/hardware/feature/riscv_gen2_product_provenance_spec.spl
+__END_RISCV_GEN2_OWNED_FILES__

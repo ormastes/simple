@@ -12,11 +12,36 @@
 | A7 | Declarative ISA capability seed / critical manifest linkage | `/root` | compressed subset truth remains non-advertising/non-release-claimable; scalar I/M/RV64-word schema seed exists, but provider/decoder/toolchain consumers remain pending |
 | A8 | Composed-front-end equivalence | `/root` | typed migrating and trap one-entry compositions plus RV32/RV64 GHDL protocol scenarios are implemented; a prepared strict-HWIR host oracle exhausts all 65,536 parcels for each target-trap product, while independent RTL equivalence and the self-hosted receipt remain pending |
 | A9 | Stateful HWIR and architectural effects | `/root` | bounded single-outstanding capture/dispatch/retire/effect plan is implemented; a verification-only reset-coupled loopback checks one-entry receipt transport, while a typed architectural commit/effect owner remains required before retirement integration or additional compressed-form admission |
-| A10 | Release-toolchain evidence | compiler/bootstrap owner; final reviewer `/root` | blocked: deploy an admitted self-hosted runtime, align the qualification producer/composer contract, rerun critical CLI/GHDL product scenarios, then record deterministic manifest hashes |
+| A10 | Release-toolchain evidence | compiler/bootstrap owner; final reviewer `/root` | blocked: repair the Stage-3 memory lifecycle, produce an admitted self-hosted runtime, execute writer deliberate reds and critical CLI/GHDL scenarios, then retain deterministic receipt hashes |
 | A11 | Shared scalar semantic database | `/root` | first I/M/RV64-word/shift declarative schema, RV32/RV64 specialization, and concrete I/IM multiply/divide provider selection exist; complete scalar table, HWIR resource binding, generated decoder/toolchain metadata remain pending |
 | A12 | Typed HWIR aspect packs | `/root` | hash-pinned manifest/application plan, typed exact-set lock contract, first fail-closed observational output graph weave, and Gen2 VHDL manifest lock provenance exist; lockfile discovery, proof execution, and all timing/state/provider advice remain pending |
 | A13 | Typed VHDL sequential HWIR migration and evidence | `/root` | standalone/retirement plus parcel/trap emission now use the canonical sequential renderer/hash boundary; executable qualification and independent RTL receipt remain open |
-| A14 | Qualification producer/composer alignment | compiler evidence owner; final reviewer `/root` | v2 runner/composer source implemented; executable positive/deliberate-red acceptance and a retained admitted receipt remain blocked by the self-hosted runtime |
+| A14 | Qualification producer/composer alignment | compiler evidence owner; final reviewer `/root` | v2 source and shell validator reds implemented; admitted composer execution, writer copy/publication reds, and a retained receipt remain open behind Stage-3 recovery |
+
+## Restart-12 execution plan (2026-08-14)
+
+All lanes share the frozen interfaces
+`owned_file_list_sha256`, `owned_file_manifest_path`, and
+`owned_file_manifest_sha256`. The owned-source ledger format is exactly
+`64-lowercase-hex`, two spaces, repo-relative `.spl` path, newline. Agents do
+not rename these fields, broaden their file ownership, write the shared
+bootstrap cache, commit, rebase, or push. `/root` is the only merge/cache/SCM
+owner.
+
+| Order | Lane / owner | Frozen file ownership | Required deliverable | One-shot proof and stop condition |
+| --- | --- | --- | --- | --- |
+| 1 | B1 Stage-3 recovery / `/root` | `src/compiler/20.hir/**`, narrowly implicated compiler owner, new Stage-3 bug record | Produce a current-source pure-Simple Stage 3 with `SIMPLE_NO_STUB_FALLBACK=1`; on failure fix only the first root plus exact/adjacent regression | One preserved-cache build per source fix; maximum three fix cycles. Stop on a provenance-bound executable or after the third distinct red with the exact frontier recorded. |
+| 1 | B2 owned evidence / `inventory_arch` | qualification runner, NFR, validator helper, shell contract | Exact reviewed A13/A14 source set; initial and pre-compose no-follow SHA validation; Linux/GNU host contract | `sh -n`, executable shell contract, literal list sort/uniqueness, `git diff --check`, each once. Stop after independent review accepts source semantics. |
+| 1 | B3 receipt authority / `stage3_admission` | Simple composer and its focused unit spec | Parse, bind, retain, and pre-receipt revalidate the path-list digest and per-source SHA ledger; exact-key rejection | Admitted focused Simple spec once. If runtime unavailable, retain static review as WARN and leave executable checkbox open. |
+| 1 | B4 deliberate-reds / `ast_contract` | sourceable qualification validator and shell contract tests | Executable reds for malformed ledger rows, missing/empty/symlink files, mutation, and parent-symlink escape; outside target remains untouched | Shell syntax + executable contract once. Grep/token presence cannot close a behavioral item. |
+| 2 | B5 A13 executable / `/root` after B1 | no new source unless a focused red identifies it | Run mixed sequential, predecode/provenance, compiler/lib/MCP/LSP checks and maintenance gates with the admitted binary | Each acceptance command once. Source-text checks never substitute for execution. |
+| 2 | B6 RTL qualification / `/root` after B1-B4 | evidence staging only | Two fixed critical product rows; isolated GHDL analyze/elaborate/run vectors; measured >=8000-bp coverage; immutable v2 receipt written last | Run the qualification wrapper once. Any red retains staging diagnostics and no claim-bearing receipt. |
+| 3 | B7 knowledge reconciliation / guide reviewer + `/root` | plan/state/requirements/architecture/design/guide/manual/expert/bugs | Every checkmark matches retained evidence; historical Stage-3 closure is reopened; resume commands and exact blockers agree | Highest-capability read-only audit once; resolve only concrete mismatches. Phase stays WARN while B5/B6 lack receipts. |
+| 4 | B8 integration / `/root` | intentional reviewed delta only | Commit; lock; fetch; rebase; push `HEAD:main` without token env; refetch; prove reachability; clean tree; done receipt | Never force or create a branch. Do not stage the two unrelated `doc/09_report/gui_web_2d_*` files. |
+
+Dependency graph: B1 gates B5/B6. B2+B3+B4 gate B6. B5+B6 gate any
+executable acceptance checkmark. B7 gates commit. B8 is last and cannot convert
+a WARN evidence state into PASS.
 
 ## Current replacement-lane acceptance (2026-08-14)
 
@@ -80,7 +105,7 @@
   and manual evidence describe the same bounded A13/A14 boundary. Recheck this
   after exact A14 command, inventory, and receipt-authority sources land; no new
   requirement option may be auto-selected.
-- [ ] All intentional changes are committed, rebased under the integration
+- [x] All intentional changes are committed, rebased under the integration
   lock, pushed without force, reachable from `origin/main`, and leave a clean
   detached worktree.
 
@@ -95,9 +120,26 @@ authorizing a Rust-seed fallback.
 The exact resume commands and owner are recorded in
 `.spipe/riscv_gen2_hwir_foundation/state.md`; the tracked runtime blocker is
 `doc/08_tracking/bug/riscv_gen2_sequential_hwir_selfhost_runtime_blocker_2026-08-14.md`.
+The first current-source pure-Simple Stage-3 rebuild reached all 616 parsed
+sources and failed closed in HIR lowering because verification-contract MIR
+consumers had no canonical HIR contract model.  The typed model restoration is
+tracked in
+`doc/08_tracking/bug/stage3_hir_contract_model_partial_integration_2026-08-14.md`.
+Its first retry cleared that diagnostic but was observed externally terminated;
+the retained log proves only that no compiler diagnostic or candidate was
+emitted, not its exit code or peak RSS.
+A final non-contended retry was reserved under the three-cycle cap rather than
+mislabeling that termination as a compiler regression.
+That final retry retained signal 15, 12m52s, and 24,839,624 KiB max RSS
+through GNU time, but not a reliable wrapper exit status; it emitted no
+compiler diagnostic or candidate. The B1
+three-cycle cap is exhausted. Resume only through the memory-lifecycle blocker
+`doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`;
+B5/B6 remain unavailable and unchecked.
 The qualification-contract mismatch is tracked separately in
 `doc/08_tracking/bug/riscv_gen2_hwir_qualification_contract_mismatch_2026-08-14.md`;
-runtime deployment alone cannot make the current wrapper runnable.
+its original producer/schema mismatch is superseded by v2 source alignment,
+while executable writer reds and a retained receipt keep the record open.
 The accepted A14 contract removes the fictitious composer producer modes,
 keeps the final run directory absent during staging, and advances the receipt
 to v2 so coverage command/files/exclusions plus each testbench and GHDL command
@@ -112,10 +154,13 @@ denominator. Rust-seed-only
 coverage is explicitly not qualification evidence. Resume after restoring the
 admitted Stage-4 CLI with the A14 qualification command recorded in the tracked
 runtime blocker; retain the resulting v2 receipt and GHDL artifacts.
-The resume must also replace the broad `base..HEAD` changed-file scope with an
-authoritative owned-file set, validate exact command grammar and duplicate-safe
-product JSON, reject parent symlinks, rehash retained destinations before
-receipt publication, and execute the missing runner/writer deliberate reds.
+The broad `base..HEAD` scope is now replaced by an exact reviewed source set,
+with an independently hashed per-source ledger, parent-symlink rejection, and
+pre-compose revalidation. Exact command grammar, duplicate-safe product JSON,
+and destination rehash are implemented at source level. Resume still requires
+an admitted execution of the Simple composer and its missing writer-level
+copy/publication/cleanup deliberate reds; shell validator reds alone cannot
+close that item.
 This is an implementation handoff. It does not mark A10, independent RTL
 equivalence, or the Gen2 umbrella complete.
 

@@ -5,12 +5,19 @@
 use std.spec.{describe, expect, it, step}
 use app.test.riscv_gen2_qualification_receipt.{
     RISCV_GEN2_QUALIFICATION_SCHEMA,
+    riscv_gen2_owned_file_manifest_matches,
     riscv_gen2_parse_qualification_manifest,
     riscv_gen2_render_qualification_receipt,
     riscv_gen2_qualification_product_manifest_matches}
-use app.io.mod.{cwd}
+use app.io.mod.{cwd, file_hash_sha256}
+use std.common.crypto.sha256.{sha256_text}
 
 val _HASH = "a" * 64
+
+fn _owned_file_list_sha256() -> text:
+    sha256_text(
+        "src/compiler/50.mir/hwir/types.spl\n" +
+        "src/compiler/70.backend/backend/hwir_to_vhdl.spl\n")
 
 fn _row(index: i64, architecture: text) -> text:
     val prefix = "row_{index}_"
@@ -63,6 +70,9 @@ fn _manifest() -> text:
     "branch_coverage_command_sha256={_HASH}\n" +
     "branch_coverage_log_path=evidence/branch_coverage.log\n" +
     "branch_coverage_log_sha256={_HASH}\n" +
+    "owned_file_list_sha256={_owned_file_list_sha256()}\n" +
+    "owned_file_manifest_path=evidence/owned-files.list\n" +
+    "owned_file_manifest_sha256={_HASH}\n" +
     "changed_file_count=2\n" +
     "changed_file_1=src/compiler/50.mir/hwir/types.spl\n" +
     "changed_file_2=src/compiler/70.backend/backend/hwir_to_vhdl.spl\n" +
@@ -86,6 +96,10 @@ describe "RISC-V Gen2 qualification receipt contract":
         expect(manifest.rows[1].profile).to_equal(
             "riscv-gen2-rv64-zca-addiw-critical")
         expect(manifest.branch_coverage_basis_points).to_equal(8000)
+        expect(manifest.owned_file_list_sha256).to_equal(
+            _owned_file_list_sha256())
+        expect(manifest.owned_file_manifest_path).to_equal(
+            "evidence/owned-files.list")
         expect(manifest.changed_files.len()).to_equal(2)
         expect(manifest.exclusions.len()).to_equal(4)
 
@@ -131,6 +145,51 @@ describe "RISC-V Gen2 qualification receipt contract":
             _manifest() + "row_1_run_exit_code=0\n"
         ).is_err()).to_be(true)
 
+    it "should reject missing, malformed, duplicate, or mismatched owned file list identity":
+        step("Bind the exact newline-terminated owned file list into one v2 digest")
+        val owned_line = "owned_file_list_sha256={_owned_file_list_sha256()}\n"
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest().replace(owned_line, "")
+        ).is_err()).to_be(true)
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest().replace(_owned_file_list_sha256(), "bad")
+        ).is_err()).to_be(true)
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest() + owned_line
+        ).is_err()).to_be(true)
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest().replace(_owned_file_list_sha256(), "b" * 64)
+        ).is_err()).to_be(true)
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest().replace(
+                "owned_file_manifest_path=evidence/owned-files.list\n", "")
+        ).is_err()).to_be(true)
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest().replace(
+                "owned_file_manifest_sha256={_HASH}",
+                "owned_file_manifest_sha256=bad")
+        ).is_err()).to_be(true)
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest() +
+                "owned_file_manifest_path=evidence/owned-files.list\n"
+        ).is_err()).to_be(true)
+    it "should bind canonical owned hash rows to ordered changed files and current source":
+        step("Require 64hex two-space path rows with current file hashes")
+        val paths = [
+            "src/app/test/riscv_gen2_qualification_receipt.spl",
+            "test/01_unit/app/riscv_gen2_qualification_receipt_spec.spl"]
+        val rows = file_hash_sha256(paths[0]) + "  " + paths[0] + "\n" +
+            file_hash_sha256(paths[1]) + "  " + paths[1] + "\n"
+        expect(riscv_gen2_owned_file_manifest_matches(rows, paths)).to_be(true)
+        expect(riscv_gen2_owned_file_manifest_matches(
+            rows.replace(file_hash_sha256(paths[0]), "b" * 64), paths
+        )).to_be(false)
+        expect(riscv_gen2_owned_file_manifest_matches(
+            rows.replace("  " + paths[0], " " + paths[0]), paths
+        )).to_be(false)
+        expect(riscv_gen2_owned_file_manifest_matches(
+            rows, [paths[1], paths[0]])).to_be(false)
+
     it "should render only bound command and retained evidence identities":
         step("Render the nested receipt from validated v2 identities")
         val manifest = riscv_gen2_parse_qualification_manifest(_manifest()).unwrap()
@@ -149,6 +208,10 @@ describe "RISC-V Gen2 qualification receipt contract":
         expect(rendered).to_contain("\"retained_path\":\"rv32.tb.vhd\"")
         expect(rendered).to_contain("\"retained_path\":\"rv64.run.command\"")
         expect(rendered).to_contain("\"changed_files\":[")
+        expect(rendered).to_contain(
+            "\"owned_file_list_sha256\":\"{_owned_file_list_sha256()}\"")
+        expect(rendered).to_contain(
+            "\"retained_path\":\"owned-files.list\"")
         expect(rendered).to_contain("\"exclusions\":[")
 
     it "should reject duplicate or mismatched product-manifest authority":

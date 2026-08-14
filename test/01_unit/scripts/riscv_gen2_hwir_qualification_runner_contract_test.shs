@@ -3,10 +3,14 @@
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 RUNNER=$ROOT/scripts/check/run-riscv-gen2-hwir-qualification.shs
+COMPOSER=$ROOT/src/app/test/riscv_gen2_qualification_receipt.spl
+VALIDATION=$ROOT/scripts/check/lib/riscv-gen2-qualification-validation.shs
 fail() { printf '%s\n' "FAIL: $1" >&2; exit 1; }
 
 [ -x "$RUNNER" ] || fail 'runner is not executable'
 sh -n "$RUNNER" || fail 'runner shell syntax'
+sh -n "$VALIDATION" || fail 'validation helper shell syntax'
+. "$VALIDATION"
 for token in \
     'schema=riscv-gen2-hwir-qualification-run-v2' \
     'STAGING=$evidence_root/$run_id.staging.$$' \
@@ -22,11 +26,36 @@ for token in \
     'riscv_gen2_trap_identity_rv64_tb.vhd'; do
     grep -F -- "$token" "$RUNNER" >/dev/null || fail "missing contract token: $token"
 done
+for token in \
+    'owned-file-path-invalid' \
+    'owned-file-order-or-duplicate' \
+    'owned-file-missing-deleted-empty-or-symlinked' \
+    'owned-file-list-hash-invalid' \
+    'staging-directory-create-failed' \
+    'staging-directory-permissions-failed' \
+    'command-write-failed' \
+    'phase-failed:' \
+    'manifest-write-failed'; do
+    grep -F -- "$token" "$RUNNER" >/dev/null ||
+        fail "missing deliberate-red failure token: $token"
+done
+for token in \
+    'qualification-evidence-root-noncanonical' \
+    'qualification-run-directory-exists' \
+    'qualification-run-directory-noncanonical' \
+    'qualification-evidence-copy-failed' \
+    'qualification-input-mutated-during-retention' \
+    'qualification-receipt-write-failed' \
+    'qualification-receipt-postwrite-invalid' \
+    'qualification-partial-run-cleanup-failed'; do
+    grep -F -- "$token" "$COMPOSER" >/dev/null ||
+        fail "missing composer cleanup failure token: $token"
+done
 if grep -E -- '--emit-evidence|--compose-receipt|--composer' "$RUNNER" >/dev/null; then
     fail 'fictitious or caller-selected composer mode remains'
 fi
-if grep -F 'git diff-tree' "$RUNNER" >/dev/null; then
-    fail 'content source revision was incorrectly treated as a Git object'
+if grep -E 'git diff-tree|git diff --name-only|QUALIFICATION_BASE_REVISION' "$RUNNER" >/dev/null; then
+    fail 'qualification scope depends on repository history instead of its owned-file manifest'
 fi
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-g2-runner-contract.XXXXXX")
@@ -39,6 +68,73 @@ if sh "$RUNNER" --stage4-cli "$tmp/no-cli" --stage4-provenance "$tmp/no-prov" --
     fail 'preexisting final path accepted'
 fi
 grep -q 'reason=output-directory-preexists$' "$tmp/preexisting.out" || fail 'preexisting path was not rejected before admission'
+
+ln -s "$tmp/preexisting" "$tmp/symlink-output"
+if sh "$RUNNER" --stage4-cli "$tmp/no-cli" --stage4-provenance "$tmp/no-prov" --output-dir "$tmp/symlink-output" >"$tmp/symlink-output.out" 2>&1; then
+    fail 'symlinked final path accepted'
+fi
+grep -q 'reason=output-directory-preexists$' "$tmp/symlink-output.out" ||
+    fail 'symlinked final path was not rejected before admission'
+[ -d "$tmp/preexisting" ] || fail 'symlink rejection mutated its target directory'
+
+mkdir -p "$tmp/workspace/src/compiler" "$tmp/workspace/test/unit"
+printf '%s\n' source >"$tmp/workspace/src/compiler/a.spl"
+printf '%s\n' source >"$tmp/workspace/src/compiler/b.spl"
+printf '%s\n' source >"$tmp/workspace/test/unit/a.spl"
+owned_row() { printf '%s  %s\n' "$(sha256sum "$tmp/workspace/$1" | awk '{print $1}')" "$1"; }
+valid_list=$tmp/valid.manifest
+{ owned_row src/compiler/a.spl; owned_row src/compiler/b.spl; owned_row test/unit/a.spl; } >"$valid_list"
+riscv_gen2_validate_owned_manifest "$tmp/workspace" "$valid_list" >/dev/null ||
+    fail 'valid reviewed owned-file list rejected'
+riscv_gen2_revalidate_owned_manifest "$tmp/workspace" "$valid_list" >/dev/null ||
+    fail 'unchanged reviewed owned-file manifest failed revalidation'
+
+assert_owned_red() {
+    expected=$1; list=$2
+    if reason=$(riscv_gen2_validate_owned_manifest "$tmp/workspace" "$list" 2>&1); then
+        fail "owned-file validator accepted deliberate red: $expected"
+    fi
+    [ "$reason" = "$expected" ] ||
+        fail "owned-file validator reason mismatch: expected $expected, got $reason"
+}
+: >"$tmp/empty.list"
+assert_owned_red owned-file-set-empty "$tmp/empty.list"
+{ owned_row src/compiler/b.spl; owned_row src/compiler/a.spl; } >"$tmp/unsorted.list"
+assert_owned_red owned-file-order-or-duplicate "$tmp/unsorted.list"
+{ owned_row src/compiler/a.spl; owned_row src/compiler/a.spl; } >"$tmp/duplicate.list"
+assert_owned_red owned-file-order-or-duplicate "$tmp/duplicate.list"
+printf '%s  %s\n' "$(printf x | sha256sum | awk '{print $1}')" /tmp/absolute.spl >"$tmp/absolute.list"
+assert_owned_red owned-file-path-invalid:/tmp/absolute.spl "$tmp/absolute.list"
+printf '%s  %s\n' "$(printf x | sha256sum | awk '{print $1}')" src/../escape.spl >"$tmp/traversal.list"
+assert_owned_red owned-file-path-invalid:src/../escape.spl "$tmp/traversal.list"
+printf '%s  %s\n' "$(printf x | sha256sum | awk '{print $1}')" src/compiler/missing.spl >"$tmp/missing.list"
+assert_owned_red owned-file-missing-deleted-empty-or-symlinked:src/compiler/missing.spl "$tmp/missing.list"
+: >"$tmp/workspace/src/compiler/empty.spl"
+printf '%s  %s\n' "$(printf '' | sha256sum | awk '{print $1}')" src/compiler/empty.spl >"$tmp/empty-file.list"
+assert_owned_red owned-file-missing-deleted-empty-or-symlinked:src/compiler/empty.spl "$tmp/empty-file.list"
+ln -s a.spl "$tmp/workspace/src/compiler/link.spl"
+printf '%s  %s\n' "$(sha256sum "$tmp/workspace/src/compiler/a.spl" | awk '{print $1}')" src/compiler/link.spl >"$tmp/symlink-file.list"
+assert_owned_red owned-file-missing-deleted-empty-or-symlinked:src/compiler/link.spl "$tmp/symlink-file.list"
+
+cp "$valid_list" "$tmp/mutation.manifest"
+printf '%s\n' changed >>"$tmp/workspace/src/compiler/a.spl"
+if mutation_reason=$(riscv_gen2_revalidate_owned_manifest "$tmp/workspace" "$tmp/mutation.manifest" 2>&1); then
+    fail 'owned source mutation passed revalidation'
+fi
+[ "$mutation_reason" = owned-file-content-mutated:src/compiler/a.spl ] ||
+    fail "owned source mutation reason mismatch: $mutation_reason"
+
+mkdir -p "$tmp/evidence" "$tmp/outside"
+riscv_gen2_validate_output_path "$tmp/evidence" "$tmp/evidence/good_run" >/dev/null ||
+    fail 'canonical direct output child rejected'
+ln -s "$tmp/outside" "$tmp/evidence/redirect"
+if parent_reason=$(riscv_gen2_validate_output_path "$tmp/evidence" "$tmp/evidence/redirect/run" 2>&1); then
+    fail 'symlinked output parent accepted'
+fi
+[ "$parent_reason" = output-directory-parent-missing-or-noncanonical ] ||
+    fail "symlinked parent reason mismatch: $parent_reason"
+[ -d "$tmp/outside" ] && [ -z "$(find "$tmp/outside" -mindepth 1 -print -quit)" ] ||
+    fail 'symlinked parent validation mutated outside target'
 
 # A fake executable is permitted only to probe failure ordering. It can never
 # produce admitted provenance and therefore can never reach or print PASS.
