@@ -2,8 +2,8 @@
 
 ## 2026-08-14 restart12 replacement lane (canonical active slice)
 
-Current source base: `fe01e7575c0fabe79c5a6859c60e28fa3189d6ce` plus the
-pending typed parser-contract continuation described below. This slice supersedes stale provenance
+Current source base: `69483b992f45e3aa7b69e501c9285f895058135d` plus the
+pending Phase-3 constant/import continuation described below. This slice supersedes stale provenance
 claims below without rewriting the historical T1--T20 record. Operator guide:
 `doc/07_guide/ui/rendering/cached_render_entry_closure.md`; retained result:
 `doc/09_report/drawir_sparse_dynamic_8k_attempt_2026-08-12.md`; blocker:
@@ -22,23 +22,24 @@ receipt are absent. Direct `-c` and source-file probes exit 248 with
 artifact. Those variants are diagnostic attempts, not implementation fix
 cycles, and they prove neither binary lineage nor root cause.
 
-The continuation produced and sanity-checked a diagnostic Stage 2 compiler at
-`build/restart12-render-cli-pass2/stage2-cycle5/x86_64-unknown-linux-gnu/simple`
-(SHA-256 `e3ae9475088ed2fe8edceb4e14f8b2db336ad8db8920d516d3dc8f99c6cf3dfc`).
-It is not an admitted Stage 3 or full CLI. A fresh Phase-3 attempt cleared the
-`proof_uses`, `decrease_measure`, and undeclared contract-tag frontiers, but
-failed without an output on module-constant type derivation. Its retained log
-is `build/restart12-render-cli-pass2/stage3-cycle6.log` (SHA-256
-`a23ef0832fcd1644943897a72708004c2022a8b98da250f92f65442791fbcb05`).
-The three-cycle cap is exhausted; Stage 4 and every downstream CLI/render gate
-remain blocked.
+The latest continuation fixed desugared module-constant type selection and
+produced a sanity-checked diagnostic Stage 2 at
+`build/restart12-render-cli-pass2/stage2-cycle9/x86_64-unknown-linux-gnu/simple`
+(SHA-256 `e4bb648c42a5a2fcc60d5428938389d7c87ecd628f64d55a40aa338963a1da92`).
+It is not an admitted Stage 3 or full CLI. Fresh Phase-3 attempts did not
+re-reach the former MIR module-constant frontier, so closure of its fourteen
+errors remains unverified. Phase 3 still produced no executable: the normal run exited
+139, while the single debugger-bound reproduction advanced into glob-import
+callable-type registration and received SIGTERM in `rt_array_push_grow` from
+`declared_imported_surface_callable_type`. The three-cycle cap is exhausted;
+Stage 4 and every downstream CLI/render gate remain blocked.
 
 ### Acceptance status
 
 | AC | Status | Proof or remaining evidence |
 |---|---|---|
 | AC-1 current truth | PROVED | The active slice distinguishes the unadmitted artifact, missing receipts, and unproven root cause; historical redesign §1--§8 remains authoritative. |
-| AC-2 executable resume | BLOCKED | Diagnostic Stage 2 passed, but Phase 3 failed on module-constant typing after three cycles; a fresh lane must identify the named constants before the canonical transaction below. |
+| AC-2 executable resume | BLOCKED | Diagnostic Stage 2 passed with the `has_type_` fix, but Phase 3 failed before re-verifying the former MIR frontier and stopped during imported callable-type registration after three cycles; a fresh lane must instrument/bound that owner and determine whether duplication exists before the canonical transaction below. |
 | AC-3 gate separation | PROVED | Candidate build, admission, deploy, deployed lineage, carrier build, and carrier run are independent. |
 | AC-4 sparse 8K contract | BLOCKED | This is a future receipt contract; the completed diagnostic row lacks admitted-native evidence. |
 | AC-5 parallel ownership | PROVED | Bounded matrix below; `/root` alone edits shared plan/knowledge files. |

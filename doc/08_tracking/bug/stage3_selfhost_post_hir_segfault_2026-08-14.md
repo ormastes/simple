@@ -215,6 +215,51 @@ build-verified in this exhausted cycle. Retained log:
 `build/restart12-render-cli-fix/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`,
 SHA-256 `cbdb55c0fce8d12780437ddab2d51529770e101c319db5af220dbd00fc097bf8`.
 
+### Fresh render/CLI constant-type continuation
+
+A fresh capped lane fixed `HirLowering.lower_hir_const_decl` to consult the
+desugared `ParserConst.has_type_` flag. The former `const_.type_.?` probe treated
+the nonoptional placeholder payload as an annotation instead of selecting
+literal inference. This is the source owner indicated by the prior failures,
+but the fresh Phase-3 attempts did not re-reach the former MIR frontier, so
+closure of all fourteen errors remains unverified. The lane also repaired the
+current-main inline-asm bridge shape whose
+one-line `if` followed by multiline `elif` failed bootstrap discovery.
+
+The resulting diagnostic Stage 2 completed 858 units with zero failures and
+passed version, unsupported-command, bootstrap-off frontend, bootstrap-on
+frontend, and unchanged-hash sanity once:
+
+- binary:
+  `build/restart12-render-cli-pass2/stage2-cycle9/x86_64-unknown-linux-gnu/simple`
+- binary SHA-256:
+  `e4bb648c42a5a2fcc60d5428938389d7c87ecd628f64d55a40aa338963a1da92`
+- build log SHA-256:
+  `6d4d5f2db4a47956a4fc45ae3ae3075b3213c68be3946e6bfb1c321f939505eb`
+
+The first Phase-3 invocation exited 139 after completing source closure and
+entering parse, with no child log or output. One debugger-bound reproduction
+advanced through parse and the first three clean HIR modules, then received
+SIGTERM while executing `rt_array_push_grow` from
+`HirLowering.declared_imported_surface_callable_type` during glob-import symbol
+registration. This is the first symbolized frontier; SIGTERM is not a proved
+segfault site and the earlier exit 139 is not promoted to the same cause.
+
+Retained evidence:
+
+- progress events SHA-256:
+  `0b6221210cb675b6cd9a4735cec8176007532463ce369474204f0406029ded52`
+- debugger log SHA-256:
+  `c7b5f8a923e78e6720765808ee3ff41f76f13aa196582a4e5892f12c23782ea6`
+- both Phase-3 output paths absent
+
+This fresh lane exhausted three cycles. The next lane must instrument and bound
+callable-type materialization/import registration around
+`module_lowering.spl:462`, determine whether duplication or a different growth
+owner exists, retain RSS and callable/import cardinalities, re-verify the former
+MIR constant frontier, and rerun Phase 3 in a new cache. Only the full
+wrapper-owned LLVM bootstrap transaction may admit a later Stage 3/4 result.
+
 ## Restart12 primary repair lane (2026-08-14)
 
 The retained log proved that `MethodResolution.Unresolved` was selected by a

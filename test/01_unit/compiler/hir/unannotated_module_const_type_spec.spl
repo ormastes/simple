@@ -1,0 +1,52 @@
+"""HIR infers literal module-constant types only when no annotation exists."""
+
+use std.spec
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.{HirTypeKind}
+
+describe "unannotated module constant type inference":
+    it "uses ParserConst.has_type_ and preserves core scalar literal types":
+        val source = "const LABEL = \"phase3\"\n" +
+            "const COUNT = 0\n" +
+            "const RATIO = 1.5\n" +
+            "const ENABLED = true\n" +
+            "const EXPLICIT: i32 = 1\n"
+        val parsed = parse_and_build_module(source, "module_const_types.spl")
+        var lowering = HirLowering.with_filename("module_const_types.spl")
+        val hir = lowering.lower_module(parsed)
+
+        var saw_label = false
+        var saw_count = false
+        var saw_ratio = false
+        var saw_enabled = false
+        var saw_explicit = false
+        for const_ in hir.constants.values():
+            if const_.name == "LABEL":
+                match const_.type_.kind:
+                    case HirTypeKind.Str: saw_label = true
+                    case _: pass
+            elif const_.name == "COUNT":
+                match const_.type_.kind:
+                    case HirTypeKind.Int(bits, signed):
+                        saw_count = bits == 64 and signed
+                    case _: pass
+            elif const_.name == "RATIO":
+                match const_.type_.kind:
+                    case HirTypeKind.Float(bits): saw_ratio = bits == 64
+                    case _: pass
+            elif const_.name == "ENABLED":
+                match const_.type_.kind:
+                    case HirTypeKind.Bool: saw_enabled = true
+                    case _: pass
+            elif const_.name == "EXPLICIT":
+                match const_.type_.kind:
+                    case HirTypeKind.Int(bits, signed):
+                        saw_explicit = bits == 32 and signed
+                    case _: pass
+
+        expect(saw_label).to_equal(true)
+        expect(saw_count).to_equal(true)
+        expect(saw_ratio).to_equal(true)
+        expect(saw_enabled).to_equal(true)
+        expect(saw_explicit).to_equal(true)
