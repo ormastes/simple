@@ -218,6 +218,25 @@ implement (Wave A in progress)
   only — none touched by this lane). Vertical spec re-run 7/7 after Money
   change. LLM wiki entry created:
   doc/00_llm_process/feature_expert/enterprise_suite/skill.md.
+- rebase merge (2026-08-14 late): origin main was force-rewritten by parallel
+  sessions; chain rebased with a two-sided hand-merge at the root per vcs.md
+  (diff both directions). Kept from origin's parallel `wip(servers)` work:
+  RUNTIME_READ_LINE_CAP truncation detection, parse_request_with_policy_limits
+  (read-iteration cap), strict request-line grammar, _method_supported 501,
+  singleton-security-header dedup (MOVED into http_core body_decision so async
+  gets it too), and the boundary-aware chunked terminator ALGORITHM (ported
+  into http_core as chunked_body_end_scan — origin's chunked_body_end/
+  decode_chunked in std.http.headers remain unusable on the deployed
+  interpreter: `index_of as common_index_of` alias unresolvable; verified by
+  fresh probe). Kept from this lane: core delegation, async during-parse
+  limits, bounded decode. DELIBERATE DEVIATION from origin: headers_decision
+  rejects chunked TE with 501 but accepts non-chunked TE values (origin's
+  any-TE-501 contradicts its own still-green chunked_rejection_spec case
+  "accepts non-chunked transfer-encoding values"). Async chunked framing now
+  fails closed: invalid framing 400 via scan -2 / strict bounded decode.
+  Full post-rebase sweep green: http_core 23, sync chunked 13 +
+  parser_limits 23 + path_safety 30, async parser 18 + path 8 + dispatch 6,
+  enterprise_store 10, goods_sale_vertical 7 (138 cases).
 - EVIDENCE STATUS (verify gate, do not close ACs on this alone): all spec
   evidence this session is interpreter-mode on the Jul-25
   bin/release/aarch64-apple-darwin binary (seed-banner caveat). Resume
