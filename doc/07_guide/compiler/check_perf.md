@@ -25,9 +25,12 @@ Current status is **plan content accepted; operational reconciliation pending;
 feature verification blocked**. The tree has the resolver negative-cache and
 packed-byte write-back changes. The older deployed candidate exists at
 `release/x86_64-unknown-linux-gnu/simple`, but its wrapper ABI/help probe
-segfaults and it is not admitted Stage 4 evidence. Separately, fresh Build11
-Stage2 parses all 603 Stage3 files and exits 139 before the first HIR progress
-row; follow
+segfaults and it is not admitted Stage 4 evidence. Separately, historical
+lane-A Build11 evidence parsed all 603 Stage3 files and exited 139 before the
+first HIR progress row. The first r3 process was intentionally stopped before
+Stage 2 admission so review corrections could be source-frozen; its partial
+output is not authority and no verdict/cycle was consumed;
+follow
 `doc/08_tracking/bug/build11_stage3_compile_context_corruption_2026-08-14.md`.
 Do not use
 the Rust bootstrap seed to replace loader, timing, RSS, compiler, MCP, LSP, or

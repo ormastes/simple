@@ -136,6 +136,28 @@ chooses one option from each set; architecture/design acceptance and formal
 `@req` traceability wait for that choice. The manual still lacks admitted
 self-hosted docgen provenance.
 
+### Lane-B fresh Stage 2 -> Stage 3 handoff
+
+The fresh lane-B source-frozen bootstrap used the canonical cache-preserving
+`--full-bootstrap --deploy` command. Cycle 1 stopped in Stage 2 because the
+retained-contract HIR declarations/producers had been partially removed while
+MIR/Lean consumers remained. The current upstream reconciliation contains the
+complete producer and resolver behavior; this lane retains only compatible
+consumer typing and the shared HIR declarations where not already present.
+
+Cycle 2 admitted Stage 2 and entered Stage 3, then rejected fourteen backend
+module constants whose bare-zero initializer could not safely determine a MIR
+type. The CUDA/ELF/Mach-O/x86/AArch64 zero constants now carry explicit `i64`
+annotations. Cycle 3 admitted Stage 2 again and cleared all fourteen errors,
+but the bounded Stage 3 native build terminated with exit 143 after source
+indices 0..2. No Stage 3 candidate, Stage 4 deployment, or live performance
+row exists. The three-cycle cap is exhausted; a fresh session must review the
+Stage 3 timeout/localization policy before using the retained resume command.
+
+Four fixed-string, context-free `dtrace` canaries mark lowering entry, source
+map completion, and the before/after module-surface boundary. They are enabled
+only with `SIMPLE_INTERP_TRACE=1` and are diagnostic, not acceptance evidence.
+
 ## Acceptance matrix
 
 REQ/NFR identifiers below are provisional identifiers declared by the executable

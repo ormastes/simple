@@ -1,0 +1,46 @@
+# Native regression for the Stage 3 driver aggregate-return boundary.
+#
+# This mirrors CompilerDriver.lower_and_check_impl(): a mutable class context
+# crosses a `(Context, bool)` return, the caller destructures and installs that
+# context, then reads the same scalar both directly and through a trivial
+# getter.  Either a bad aggregate copy or a fabricated method receiver makes
+# the probe fail (or crash) instead of emitting the pass receipt.
+
+class Stage3ProbeContext:
+    error_count_value: i64
+
+    static fn create() -> Stage3ProbeContext:
+        Stage3ProbeContext(error_count_value: 0)
+
+    me add_error():
+        self.error_count_value = self.error_count_value + 1
+
+    fn error_count() -> i64:
+        self.error_count_value
+
+class Stage3ProbeDriver:
+    ctx: Stage3ProbeContext
+
+    static fn create() -> Stage3ProbeDriver:
+        Stage3ProbeDriver(ctx: Stage3ProbeContext.create())
+
+    me lower_and_check_impl() -> (Stage3ProbeContext, bool):
+        self.ctx.add_error()
+        (self.ctx, true)
+
+    me compile() -> bool:
+        val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()
+        self.ctx = analyzed_ctx
+        val direct_count = self.ctx.error_count_value
+        val getter_count = self.ctx.error_count()
+        analyze_ok and direct_count == 1 and getter_count == 1
+
+fn main() -> i32:
+    val driver = Stage3ProbeDriver.create()
+    val passed = driver.compile()
+    print("stage3_context_tuple_return_direct_count={driver.ctx.error_count_value}")
+    print("stage3_context_tuple_return_getter_count={driver.ctx.error_count()}")
+    print("stage3_context_tuple_return_status={if passed: \"pass\" else: \"fail\"}")
+    if passed:
+        return 0
+    1

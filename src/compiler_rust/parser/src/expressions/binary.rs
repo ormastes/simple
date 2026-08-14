@@ -638,6 +638,17 @@ mod comparison_continuation_tests {
         assert!(parses("fn i(a: bool, b: bool) -> bool:\n    if a or\n       b:\n        return true\n    false\n"));
     }
 
+    /// Keep the bootstrap parser aligned with the pure-Simple G27b leading
+    /// operator rule.  Stage 2 once ended the condition at `first` and
+    /// reported `expected :, got Newline` before reaching the leading `and`.
+    #[test]
+    fn leading_logical_if_continuation_and_grouped_control_parse() {
+        let leading = "fn f(first: bool, second: bool) -> bool:\n    if first\n        and second:\n        return true\n    false\n";
+        let grouped = "fn f(first: bool, second: bool) -> bool:\n    if (first\n        and second):\n        return true\n    false\n";
+        assert!(parses(leading), "leading `and` condition continuation must parse");
+        assert!(parses(grouped), "parenthesized recovery form must parse");
+    }
+
     /// `elif`'s own statement-level indent bookkeeping was fixed (see
     /// `elif_condition_continuation_parses` below): `parse_if`'s `elif`/`else
     /// if` loops in `control_flow.rs` were missing the

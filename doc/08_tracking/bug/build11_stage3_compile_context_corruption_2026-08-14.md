@@ -4,16 +4,49 @@
 
 Open. This blocks an admitted self-hosted compiler deployment and therefore
 blocks the compiler/loader performance rows that reject Rust-seed evidence.
+The historical `build/restart12-build11-a-r2/output` lineage is absent from the
+current lane-B worktree, so its hashes cannot be reauthenticated or resumed
+locally. The first r3 process was intentionally stopped before Stage 2 admission
+so review corrections could be source-frozen. Its partial output is not
+authority; it produced no Stage 2/3 verdict and consumes no acceptance/fix
+cycle. The next source-frozen command rebuilds Stage 2 first.
 
 ## Reproduction
 
-From a strict, provenance-recorded Build11 bootstrap, Stage 2 reports:
+Historical lane-A evidence from a strict, provenance-recorded Build11 bootstrap
+reported:
 
 `Build complete: 845 compiled, 0 cached, 0 failed`
 
-The admitted Stage 2 compiler then parses all 603 Stage 3 closure files with
-zero failures and exits 139 before the first HIR progress row. The canonical
-recovery command reproduces the same terminal result.
+That admitted Stage 2 compiler then parsed all 603 Stage 3 closure files with
+zero failures and exited 139 before the first HIR progress row. The fresh r3
+lane's first source-frozen acceptance run produced an earlier Stage 2 verdict:
+Rust authority compiled, then Stage 2 rejected `verification_contract_bridge.spl`
+and `lean_backend.spl` because `proof_uses` was selected from `ANY`. Stage 3 and
+Stage 4 were therefore not attempted by an admitted compiler.
+
+The shared cause was an incomplete retained-contract HIR slice: MIR and Lean
+consumers referenced `HirContractBlock`, while `hir_definitions.spl` lacked the
+type, `HirFunction.verification_contract`, and constructor propagation. The
+repair restores the type/field, initializes the currently unsupported parser
+producer to `nil`, preserves the field through semantic resolution, and keeps
+explicit unwrap typing at optional consumer boundaries. This is repair cycle 1;
+the next source-frozen bootstrap was cycle 2. It admitted Stage 2 and entered
+Stage 3, where MIR lowering rejected fourteen backend constants whose bare-zero
+initializers could not safely determine a type. The constants are the complete
+zero-valued CUDA/ELF/Mach-O/x86/AArch64 backend set in the Stage 3 closure; each
+now carries the explicit `i64` type demanded by that fail-closed boundary.
+The trace resume was retained but reached its bounded termination before a
+candidate and did not alter source. The next bootstrap is the third and final
+repair cycle.
+
+Cycle 3 admitted Stage 2 again and removed all fourteen module-constant type
+errors. Stage 3 then reached only source indices 0 through 2 before the bounded
+native-build process was terminated with exit 143. Its retained log is 883
+bytes and contains no compiler diagnostic or admitted candidate. The three-fix
+cap is exhausted: Stage 3 timeout/localization is the current blocker; Stage 4,
+deployment, and performance evidence remain unavailable until a fresh session
+extends or subdivides that bounded build with a reviewed timeout policy.
 
 ## Evidence
 
@@ -21,13 +54,14 @@ GDB resolves the crash to:
 
 `CompileContext.error_count -> CompilerDriver.lower_and_check_impl -> CompilerDriver.compile`
 
-The Stage 3 log is empty and the diagnostic immediately after the first
-`self.ctx.error_count()` call never prints. In this fresh lane, replacing getter
-calls in the driver with direct `error_count_value` reads did not change the
-terminal result, so that unproven workaround was removed. This does not
+The historical lane-A Stage 3 log was empty and the diagnostic immediately
+after the first `self.ctx.error_count()` call never printed. In that lane,
+replacing getter calls in the driver with direct `error_count_value` reads did
+not change the terminal result, so that unproven workaround was removed. This does not
 invalidate the earlier `3c26d1b9c2f` observation that direct scalar reads
-advanced a different Stage3 run into HIR; the current failure frontier is
-earlier and must be localized independently.
+advanced a different Stage3 run into HIR; the historical lane-A failure
+frontier was earlier. The fresh r3 frontier is unknown until the corrected run
+exits and its manifests verify.
 
 An earlier parser blocker in
 `compiler/60.mir_opt/mir_opt/typed_storage_view_producer.spl` was independently
@@ -37,16 +71,29 @@ blocker.
 
 ## Unblock condition
 
-Resume the preserved admitted lineage with:
+Create a fresh cache-preserving lineage with:
 
-`sh scripts/bootstrap/resume-stage3-from-admitted.sh build/restart12-build11-a-r2/output`
+`env BOOTSTRAP_NATIVE_CACHE_TTL_DAYS=0 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy --backend=cranelift --output=build/restart12-build11-a-r3/output`
 
-Retain the Stage2/Stage3 build logs, command transcripts, sanity/provenance
-manifests, candidate hashes, and the focused GDB backtrace. Add primitive-only
+Do not set `--fresh-cache`. The Rust seed may build Stage 2 only; admitted Stage
+2 must build Stage 3, and admitted Stage 3 must build Stage 4.
+
+Retain the Stage2/Stage3/Stage4 build logs, command transcripts, sanity/provenance
+manifests, candidate hashes, and the focused GDB backtrace. Add fixed-string,
+context-free
 canaries at `lower_and_check_impl` entry, after the `source_path_map` loop, and
 immediately before/after `module_surfaces_from_modules`; if corruption crosses
 that call, capture its MIR/native IR and add an adjacent aggregate-return/copy
 regression. Do not retry getter-only edits without new localization evidence.
+
+Current localization surfaces are four fixed-string `dtrace` canaries in
+`src/compiler/80.driver/driver_hir_pipeline_lowering.spl`: entry, after the
+source-path map, and immediately before/after module-surface extraction. The
+adjacent deterministic boundary probe is
+`test/02_integration/compiler/stage3_context_tuple_return_native_probe.spl`;
+it returns `(Context, bool)`, reinstalls the context, and checks both direct
+scalar and trivial-getter reads. Neither is acceptance evidence until executed
+by an admitted native compiler with `SIMPLE_NO_STUB_FALLBACK=1`.
 
 Produce one admitted Stage 3 candidate that passes provenance and frontend
 sanity, deploy the full pure-Simple CLI, then run the focused loader SPipe gate,

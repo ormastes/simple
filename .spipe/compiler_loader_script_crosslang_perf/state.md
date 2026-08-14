@@ -77,3 +77,11 @@ dev
 - pbl03c-review: Highest-capability cycle 1 accepted bounded semantics/complexity, non-vacuous coverage, compile-only Stage-2 wording, the 8-owner/23-use/1-stored-address inventory, and absence of reverted PBL-03A/B prototypes.
 - pbl03c-optimizer: One admitted Stage-2 attempt to native-build `src/app/optimize/main.spl` with isolated cache timed out at 180 seconds (exit 124), producing no candidate/output. It was not retried; optimizer/performance evidence remains blocked.
 - pbl03c-optimizer-review: Highest-capability narrow cycle 2 accepted the timeout receipt and continued BLOCKED optimizer/performance disposition.
+- lane-b-bootstrap-cycle-1: Fresh Rust authority completed, but Stage 2 exposed
+  a partially removed retained-contract HIR producer/type slice. The rebase
+  reconciles with upstream's complete producer and resolver behavior.
+- lane-b-bootstrap-cycle-2: Stage 2 passed; Stage 3 rejected fourteen untyped
+  bare-zero backend constants. Each now has an explicit `i64` annotation.
+- lane-b-bootstrap-cycle-3: Stage 2 passed and the fourteen errors cleared;
+  bounded Stage 3 ended with exit 143 after source indices 0..2. No candidate
+  or Stage 4 exists. The three-cycle cap is exhausted and status remains WARN.

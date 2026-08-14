@@ -34,8 +34,10 @@ distinction between facade failed-existence probes and filesystem syscalls, its
 caller-sensitive cache key and reset generation, and its admitted-self-hosted
 evidence rule. Live feature verification remains blocked by two distinct
 prerequisites: the older deployed candidate's wrapper/help admission segfault,
-and fresh Build11 Stage3 context corruption after a clean 603-file parse but
-before its first HIR progress row. The latter is tracked at
+and historical lane-A Stage3 context corruption after a clean 603-file parse.
+Fresh r3 remains unproved: its first process was intentionally stopped before
+Stage 2 admission so review corrections could be source-frozen; partial output
+is not authority and no verdict/cycle was consumed. The latter is tracked at
 `doc/08_tracking/bug/build11_stage3_compile_context_corruption_2026-08-14.md`.
 
 For a one-file interpreted entry, measure wall time and max RSS through the

@@ -32,8 +32,11 @@ contracts described by
 The plan content was accepted at `3fdfa0d3351`; operational reconciliation is
 pending while feature verification remains blocked. The older deployed candidate
 under `release/x86_64-unknown-linux-gnu/` is not admitted because its wrapper
-ABI/help probe segfaults. Separately, fresh Build11 Stage2 parses the full Stage3
-closure and exits 139 before the first HIR progress row; use
+ABI/help probe segfaults. Separately, historical lane-A Build11 evidence parsed
+the full Stage3 closure and exited 139 before the first HIR progress row. Fresh
+r3 remains unproved: its first process was intentionally stopped before Stage 2
+admission so review corrections could be source-frozen; partial output is not
+authority and no verdict/cycle was consumed. Use
 `doc/08_tracking/bug/build11_stage3_compile_context_corruption_2026-08-14.md`.
 Follow the plan's one-pass order and
 blocker/resume ledger; do not resurrect absent detached-tree helper names or
