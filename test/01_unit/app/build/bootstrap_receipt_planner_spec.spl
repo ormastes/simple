@@ -1,0 +1,57 @@
+use std.spec.{describe, it, expect}
+use std.io.{file_read, file_delete, time_now_unix_micros}
+use std.env.platform.{get_temp_dir}
+use app.build.bootstrap_receipt_planner.{
+    normalize_bootstrap_receipt_args, plan_bootstrap_authorization
+}
+
+extern fn rt_getpid() -> i64
+
+describe("bootstrap receipt planner arguments"):
+    it("strips the exact seed runner entry path"):
+        val args = normalize_bootstrap_receipt_args([
+            "src/app/build/bootstrap_receipt_main.spl",
+            "--bootstrap-reason=post-source-change"
+        ])
+        expect(args.len()).to_equal(1)
+        expect(args[0]).to_equal("--bootstrap-reason=post-source-change")
+
+    it("preserves normal planner arguments"):
+        val args = normalize_bootstrap_receipt_args([
+            "--bootstrap-reason=post-source-change"
+        ])
+        expect(args.len()).to_equal(1)
+        expect(args[0]).to_equal("--bootstrap-reason=post-source-change")
+
+    it("strips the exact Windows seed runner entry path"):
+        val args = normalize_bootstrap_receipt_args([
+            "src\\app\\build\\bootstrap_receipt_main.spl",
+            "--bootstrap-reason=post-source-change"
+        ])
+        expect(args.len()).to_equal(1)
+        expect(args[0]).to_equal("--bootstrap-reason=post-source-change")
+
+    it("does not strip an unrelated source path"):
+        val args = normalize_bootstrap_receipt_args([
+            "src/app/build/other_main.spl"
+        ])
+        expect(args.len()).to_equal(1)
+        expect(args[0]).to_equal("src/app/build/other_main.spl")
+
+    it("writes one canonical typed receipt and rejects unknown arguments"):
+        val path = get_temp_dir() + "/simple_bootstrap_receipt_{rt_getpid()}_{time_now_unix_micros()}.env"
+        val hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val status = plan_bootstrap_authorization([
+            "--bootstrap-reason=self-host-convergence-check",
+            "--parent-compiler-sha256=" + hash,
+            "--runtime-snapshot-sha256=" + hash,
+            "--planner-source-closure-sha256=" + hash,
+            "--planner-sha256=" + hash,
+            "--bootstrap-receipt=" + path
+        ])
+        expect(status).to_equal(0)
+        expect(file_read(path)).to_equal(
+            "simple-bootstrap-authorization-v2|producer=simple-build-planner-v2|target=//bootstrap:stage4|reason=self-host-convergence-check|parent_sha256=" + hash + "|runtime_sha256=" + hash + "|source_closure_sha256=" + hash + "|planner_sha256=" + hash + "\n"
+        )
+        expect(file_delete(path)).to_equal(true)
+        expect(plan_bootstrap_authorization(["--unsupported"])).to_equal(2)

@@ -195,6 +195,24 @@ Stage 3 target is `--bootstrap-target=//bootstrap:stage3`; Stage 4 is
 `--bootstrap-target=//bootstrap:stage4`. Missing receipts still fail earlier
 with `reason-receipt-required`.
 
+For recovery diagnostics, a sanctioned Rust bootstrap seed may interpret only
+the extracted minimal planner leaf, with the same four SHA-256 arguments shown
+above:
+
+```text
+src/compiler_rust/target/<triple>/bootstrap/simple run \
+  src/app/build/bootstrap_receipt_main.spl \
+  --bootstrap-reason=self-host-convergence-check \
+  --bootstrap-target=//bootstrap:stage4 \
+  <the-four-sha256-bindings> \
+  --bootstrap-receipt=build/bootstrap/authorization.receipt
+```
+
+This delegates to the same planner implementation as `simple build bootstrap`,
+but the seed-produced leaf is non-authoritative and cannot satisfy planner
+admission v2. It is never stage, self-hosted compiler, native-build, render, or
+performance evidence.
+
 ## Expected containment
 
 | Mutation | Rebuild |

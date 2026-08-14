@@ -92,6 +92,39 @@ environmental gate.  Do not start unrelated O/P/G expansion while A4–A6 are
 open.  Canonical evidence sources are the 2026-08-12 reports under
 `doc/09_report/` and their linked open bugs under `doc/08_tracking/bug/`.
 
+#### 2026-08-14 bounded Stage 4 recovery attempt
+
+The fresh Restart12 lane extracted bootstrap authorization into the dedicated
+minimal `src/app/build/bootstrap_receipt_planner.spl` owner and the
+`src/app/build/bootstrap_receipt_main.spl` recovery entry. Normal
+`simple build bootstrap` routing delegates to that same owner. The sanctioned
+Rust bootstrap seed may interpret the minimal entry only to issue a typed,
+receipt-only authorization; it does not build a stage and is not runtime,
+native-build, A4, or A5 evidence. The retained receipt is
+`build/restart12-render-8k-stage4/reason-v3.receipt` (SHA-256
+`f758587b214fcc8cd6000a5f3f1cf19879cafd710ccb86f4f6989edf1df31219`).
+That retained v1 receipt is historical diagnostic evidence only: current main
+requires the non-circular 29-field planner-admission v2 producer, which remains
+unimplemented and rejects seed-authored leaves.
+
+The first authorized canonical attempt failed Stage 2 discovery at
+`convert_nodes.spl:626:43` (`stage2-native-build.log` SHA-256
+`06e97f722f185340deb7f4953279bb4530119fb79b125b80d7d789e833785c2b`).
+The source correction expanded the ambiguous one-line conditional bodies. A
+subsequent cache-preserving attempt reached the linker and exposed that the
+`defer_unsupported_marker` declaration had lost its function signature
+(`stage2-fix2.log` SHA-256
+`03dbb93e5e2d5e64e0a2d01fcfd4d6c3aa2b22e96168bf7eb6d0df9d9da29bd7`);
+the declaration is restored in current source. The bounded fix-3 focused
+diagnostic passed: it compiled 858 modules with zero failures and produced
+`stage2/x86_64-unknown-linux-gnu/simple-fix3` (SHA-256
+`f4a22fcb2fec824ac1e6b4dbdb19a3e160be7d45777b48a582ae7da6a8f98371`);
+the retained `stage2-fix3.log` SHA-256 is
+`c615bfc18de64c980fffb5c8f8636ac1a949139e907d8294fc72ca3b9157d762`.
+This focused diagnostic executable is not canonical Stage 4 admission. A4 and
+A5 remain unchecked until the wrapper-owned transaction publishes and admits
+the requested executable and provenance.
+
 2026-08-14 container/GPU implementation review: research and design completed.
 Fresh scoped TODO812/TODO813 work corrected the rejected handoff: A4 and A5 now
 use distinct workload hashes under one campaign contract, A4 validates every
