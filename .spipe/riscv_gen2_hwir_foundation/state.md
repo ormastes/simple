@@ -1080,3 +1080,16 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   zero-count decision inventory plus executable writer-level deliberate reds
   for command grammar, duplicate-safe artifact parsing, destination rehash,
   canonical parents, mutation, and cleanup. Until then A14 is WARN, not PASS.
+- review-blocked (2026-08-14, A14 coverage inventory): zero-count semantic
+  decision inventory is not accepted yet. Highest-capability review found that
+  the draft runtime externs are not registered through every interpreter,
+  loader, codegen, and native symbol closure, and wrapper-time emission cannot
+  satisfy the native runner's compile-stdout manifest contract. Acceptance
+  requires compiler-time marked-manifest emission plus an admitted self-hosted
+  end-to-end receipt; a Rust-seed fixture is not evidence. Phase remains
+  `implementation-handoff` / WARN.
+- review-blocked (2026-08-14, A14 receipt authority): the runner's current
+  `base..HEAD` scope includes unrelated later `.spl` changes, command records
+  remain hash-only, product JSON binding is substring-based, parent symlink and
+  final-destination rehash checks are incomplete, and executable runner/writer
+  deliberate-reds are absent. These are active resume items, not exclusions.

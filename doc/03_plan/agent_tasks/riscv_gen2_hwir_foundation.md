@@ -84,6 +84,19 @@ keeps the final run directory absent during staging, and advances the receipt
 to v2 so coverage command/files/exclusions plus each testbench and GHDL command
   are hash-bound. The source contract is implemented, but accepting it without
   executable deliberate-red coverage would be a shortcut, so A14 remains open.
+
+2026-08-14 coverage-inventory review: A14 also remains open until the compiler
+emits the canonical zero-count decision manifest during compilation (including
+native `--coverage`), every new runtime symbol is registered across interpreter,
+loader, codegen, and native closures, and the admitted self-hosted end-to-end
+test proves never-executed decisions remain in the denominator. Rust-seed-only
+coverage is explicitly not qualification evidence. Resume after restoring the
+admitted Stage-4 CLI with the A14 qualification command recorded in the tracked
+runtime blocker; retain the resulting v2 receipt and GHDL artifacts.
+The resume must also replace the broad `base..HEAD` changed-file scope with an
+authoritative owned-file set, validate exact command grammar and duplicate-safe
+product JSON, reject parent symlinks, rehash retained destinations before
+receipt publication, and execute the missing runner/writer deliberate reds.
 This is an implementation handoff. It does not mark A10, independent RTL
 equivalence, or the Gen2 umbrella complete.
 
