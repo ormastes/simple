@@ -170,3 +170,37 @@ implement (Wave A in progress)
   macho-dir deploy is bootstrap-only, no `test`) before release claims.
   Remaining for Wave A verify: live-socket system spec for dynamic dispatch;
   unify std.http.{limits,path_security} tier copies onto http_core.
+- implement Wave B (2026-08-14): std.enterprise_store landed
+  (src/lib/nogc_sync_mut/enterprise_store/{store,records}.spl + async-tier
+  wrapper): store_open with WAL/busy-timeout/FK pragmas + system tables,
+  HONEST backend ACID probe (insert→rollback→count), uow_begin/commit/
+  rollback, named migrations (re-run no-op), idempotency keys, transactional
+  outbox, sha256-chained audit log (replaces toy checksum; AC-6). Spec
+  enterprise_store_spec 10/10 incl. tamper detection, tenant scoping,
+  restart survival. CRITICAL FINDING filed: interpreter rt_sqlite externs are
+  a NON-ACID emulation (begin/commit/rollback return 1 ignoring args;
+  constraints unenforced; WHERE-equality ignored; UPDATE unsupported; per-path
+  in-process db cache) —
+  doc/08_tracking/bug/interpreter_sqlite_externs_nonacid_emulation_2026-08-14.md.
+  Store design routes around it (insert-only tables, pure-Simple filtering,
+  prepared binds); ACID atomicity evidence (AC-5/AC-6 atomic commit half)
+  is environment-blocked on the interpreter — resume: run the same specs
+  --mode=native with real SQLite once the native lane is unblocked. AC-7
+  honored: PostgreSQL = frozen interface documented in store.spl docstring +
+  guide; no fake driver.
+- implement Wave C slice 1 (2026-08-14): std.enterprise_sale landed
+  (foundation.spl frozen contracts: TenantContext/ActorContext/SessionContext/
+  Money/CommandEnvelope/CommandResult + closed reason set; goods_sale.spl:
+  catalog, insert-only stock ledger, order event stream, double-entry journal,
+  guarded sale_place_order/sale_pay_order/sale_refund_order with the frozen
+  sequence session→rbac→validation→idempotency→effects-in-one-UoW).
+  System spec goods_sale_vertical_spec 7/7: full sell→pay→refund with
+  balanced journal + audit chain; all four guard rungs denied with exact
+  reasons; idempotent replay = exactly one effect (stock+outbox unchanged);
+  tenant isolation (AC-10) incl. cross-tenant session rejection; restart
+  survival with post-restart replay guard. Spec landmine learned: interpreter
+  sqlite caches per path in-process → one db path per scenario.
+  AC-8 partial: contracts frozen + guarded gate implemented over durable
+  repos in stdlib; REWIRING the examples/12_business/simple_erp lanes onto
+  std.enterprise_{store,sale} and re-running its ubs_test suite is the open
+  follow-up. Guides: doc/07_guide/lib/database/enterprise_store.md (+_tldr).

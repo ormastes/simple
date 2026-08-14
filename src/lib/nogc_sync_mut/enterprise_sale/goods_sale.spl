@@ -1,0 +1,255 @@
+"""
+# Goods-Sale Vertical — catalog, stock ledger, guarded orders, journal
+
+The first proving vertical of the Simple Enterprise Suite (lane
+`.spipe/simple_enterprise_suite`, AC-9/AC-10; assessment §7.1):
+
+    catalog -> stock -> guarded order -> payment -> balanced journal -> refund
+
+Every write runs the frozen guarded sequence over the durable store:
+
+    session -> rbac -> domain validation -> idempotency -> effects in one UoW
+
+Effects committed together in the unit of work: the domain event, the stock
+movement, the balanced journal postings, the outbox event, the audit record,
+and the idempotency key — so a replayed command produces exactly one effect
+and a rollback carries none (atomicity on ACID backends; see the store's
+backend-honesty docstring).
+
+Storage model is insert-only + derive (compatible with both backends and
+with the assessment's immutable-ledger rule):
+- `stock_moves`: signed deltas; available stock = sum of a tenant's deltas.
+- `order_events`: order status is derived from its event stream.
+- `journal`: debit/credit postings; the vertical is balanced when total
+  debits equal total credits per tenant AND per order.
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_rows, store_insert_row,
+    uow_begin, uow_commit, uow_rollback
+}
+use std.nogc_sync_mut.enterprise_store.records.{
+    idempotency_seen, idempotency_result, idempotency_record,
+    outbox_append, audit_append
+}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext,
+    CommandEnvelope, CommandResult,
+    accepted, denied, session_valid, role_allows
+}
+
+# =============================================================================
+# Schema
+# =============================================================================
+
+fn sale_setup(store: EnterpriseStore) -> bool:
+    var ok = store_migrate(store, "sale_001_products",
+        "CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY, tenant_id TEXT, sku TEXT, name TEXT, price_cents TEXT, currency TEXT)")
+    ok = ok and store_migrate(store, "sale_002_stock_moves",
+        "CREATE TABLE IF NOT EXISTS stock_moves (id INTEGER PRIMARY KEY, tenant_id TEXT, sku TEXT, delta TEXT, reason TEXT, order_id TEXT)")
+    ok = ok and store_migrate(store, "sale_003_order_events",
+        "CREATE TABLE IF NOT EXISTS order_events (id INTEGER PRIMARY KEY, tenant_id TEXT, order_id TEXT, event TEXT, detail TEXT)")
+    ok = ok and store_migrate(store, "sale_004_journal",
+        "CREATE TABLE IF NOT EXISTS journal (id INTEGER PRIMARY KEY, tenant_id TEXT, order_id TEXT, account TEXT, side TEXT, amount_cents TEXT)")
+    ok
+
+# =============================================================================
+# Catalog and stock administration (admin-guarded)
+# =============================================================================
+
+fn sale_add_product(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, sku: text, name: text, price_cents: i64, currency: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", sku)
+    if not role_allows(who.role, "sale.catalog.admin"):
+        return denied("forbidden", sku)
+    if sku == "" or price_cents <= 0:
+        return denied("invalid-record", sku)
+    store_insert_row(store,
+        "INSERT INTO products (tenant_id, sku, name, price_cents, currency) VALUES (?, ?, ?, ?, ?)",
+        [tenant.tenant_id, sku, name, "{price_cents}", currency])
+    audit_append(store, tenant.tenant_id, who.actor_id, "catalog.product.add", sku)
+    accepted(sku)
+
+fn sale_receive_stock(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, sku: text, qty: i64) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", sku)
+    if not role_allows(who.role, "sale.stock.admin"):
+        return denied("forbidden", sku)
+    if qty <= 0:
+        return denied("invalid-record", sku)
+    store_insert_row(store,
+        "INSERT INTO stock_moves (tenant_id, sku, delta, reason, order_id) VALUES (?, ?, ?, ?, ?)",
+        [tenant.tenant_id, sku, "{qty}", "receive", ""])
+    audit_append(store, tenant.tenant_id, who.actor_id, "stock.receive", sku + ":{qty}")
+    accepted(sku)
+
+# =============================================================================
+# Derived reads (pure-Simple filtering; see store docstring)
+# =============================================================================
+
+fn sale_product_price(store: EnterpriseStore, tenant_id: text, sku: text) -> i64:
+    val rows = store_rows(store, "products", "id, tenant_id, sku, name, price_cents, currency")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "sku") == sku:
+            return int(sqlite_row_get(row, "price_cents"))
+    -1
+
+fn sale_available_stock(store: EnterpriseStore, tenant_id: text, sku: text) -> i64:
+    var total: i64 = 0
+    val rows = store_rows(store, "stock_moves", "id, tenant_id, sku, delta, reason, order_id")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "sku") == sku:
+            total = total + int(sqlite_row_get(row, "delta"))
+    total
+
+# sale_order_status derives the order's current status from its event stream:
+# "" (unknown) -> created -> paid -> refunded
+fn sale_order_status(store: EnterpriseStore, tenant_id: text, order_id: text) -> text:
+    var status = ""
+    val rows = store_rows(store, "order_events", "id, tenant_id, order_id, event, detail")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "order_id") == order_id:
+            status = sqlite_row_get(row, "event")
+    status
+
+# sale_journal_balanced verifies total debits equal total credits for the
+# tenant — the ledger-balance invariant (assessment: zero unbalanced journals).
+fn sale_journal_balanced(store: EnterpriseStore, tenant_id: text) -> bool:
+    var debits: i64 = 0
+    var credits: i64 = 0
+    val rows = store_rows(store, "journal", "id, tenant_id, order_id, account, side, amount_cents")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        val amount = int(sqlite_row_get(row, "amount_cents"))
+        if sqlite_row_get(row, "side") == "debit":
+            debits = debits + amount
+        else:
+            credits = credits + amount
+    debits == credits
+
+# =============================================================================
+# Guarded order commands
+# =============================================================================
+
+fn post_journal(store: EnterpriseStore, tenant_id: text, order_id: text, debit_account: text, credit_account: text, amount_cents: i64):
+    store_insert_row(store,
+        "INSERT INTO journal (tenant_id, order_id, account, side, amount_cents) VALUES (?, ?, ?, ?, ?)",
+        [tenant_id, order_id, debit_account, "debit", "{amount_cents}"])
+    store_insert_row(store,
+        "INSERT INTO journal (tenant_id, order_id, account, side, amount_cents) VALUES (?, ?, ?, ?, ?)",
+        [tenant_id, order_id, credit_account, "credit", "{amount_cents}"])
+
+# sale_place_order executes the guarded sequence for a new order of `qty`
+# units of `sku`. Replaying the same idempotency key returns the recorded
+# result WITHOUT a second effect.
+fn sale_place_order(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, order_id: text, sku: text, qty: i64) -> CommandResult:
+    # 1. session
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", order_id)
+    # 2. rbac
+    if not role_allows(who.role, "sale.order.place"):
+        return denied("forbidden", order_id)
+    # 3. domain validation
+    if qty <= 0 or order_id == "":
+        return denied("invalid-record", order_id)
+    val price = sale_product_price(store, tenant.tenant_id, sku)
+    if price < 0:
+        return denied("not-found", sku)
+    if sale_available_stock(store, tenant.tenant_id, sku) < qty:
+        return denied("insufficient-stock", sku)
+    # 4. idempotency — a replay returns the recorded outcome, no new effect
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    # 5. effects — one unit of work
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO order_events (tenant_id, order_id, event, detail) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, order_id, "created", sku + ":{qty}"])
+    store_insert_row(store,
+        "INSERT INTO stock_moves (tenant_id, sku, delta, reason, order_id) VALUES (?, ?, ?, ?, ?)",
+        [tenant.tenant_id, sku, "{0 - qty}", "reserve", order_id])
+    post_journal(store, tenant.tenant_id, order_id, "accounts_receivable", "sales_revenue", price * qty)
+    outbox_append(store, tenant.tenant_id, "sales.order.created", order_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "order.create", order_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, order_id)
+    uow_commit(store)
+    accepted(order_id)
+
+# sale_pay_order marks payment received: cash debit clears the receivable.
+fn sale_pay_order(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, order_id: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", order_id)
+    if not role_allows(who.role, "sale.order.pay"):
+        return denied("forbidden", order_id)
+    if sale_order_status(store, tenant.tenant_id, order_id) != "created":
+        return denied("invalid-record", order_id)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val amount = order_amount(store, tenant.tenant_id, order_id)
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO order_events (tenant_id, order_id, event, detail) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, order_id, "paid", ""])
+    post_journal(store, tenant.tenant_id, order_id, "cash", "accounts_receivable", amount)
+    outbox_append(store, tenant.tenant_id, "payment.captured", order_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "order.pay", order_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, order_id)
+    uow_commit(store)
+    accepted(order_id)
+
+# sale_refund_order reverses a paid order: stock returns, revenue and cash
+# reverse — the journal stays balanced.
+fn sale_refund_order(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, order_id: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", order_id)
+    if not role_allows(who.role, "sale.order.refund"):
+        return denied("forbidden", order_id)
+    if sale_order_status(store, tenant.tenant_id, order_id) != "paid":
+        return denied("invalid-record", order_id)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val amount = order_amount(store, tenant.tenant_id, order_id)
+    val order_sku = order_sku_qty(store, tenant.tenant_id, order_id)
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO order_events (tenant_id, order_id, event, detail) VALUES (?, ?, ?, ?)",
+        [tenant.tenant_id, order_id, "refunded", ""])
+    store_insert_row(store,
+        "INSERT INTO stock_moves (tenant_id, sku, delta, reason, order_id) VALUES (?, ?, ?, ?, ?)",
+        [tenant.tenant_id, order_sku.0, "{order_sku.1}", "refund-return", order_id])
+    post_journal(store, tenant.tenant_id, order_id, "sales_revenue", "cash", amount)
+    outbox_append(store, tenant.tenant_id, "sales.order.refunded", order_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "order.refund", order_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, order_id)
+    uow_commit(store)
+    accepted(order_id)
+
+# =============================================================================
+# Internal derivations
+# =============================================================================
+
+# order_amount derives the order's revenue amount from its journal postings
+# (the sales_revenue credit recorded at creation).
+fn order_amount(store: EnterpriseStore, tenant_id: text, order_id: text) -> i64:
+    val rows = store_rows(store, "journal", "id, tenant_id, order_id, account, side, amount_cents")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "order_id") == order_id:
+            if sqlite_row_get(row, "account") == "sales_revenue" and sqlite_row_get(row, "side") == "credit":
+                return int(sqlite_row_get(row, "amount_cents"))
+    0
+
+# order_sku_qty derives (sku, qty) from the order's reserve stock movement.
+fn order_sku_qty(store: EnterpriseStore, tenant_id: text, order_id: text) -> (text, i64):
+    val rows = store_rows(store, "stock_moves", "id, tenant_id, sku, delta, reason, order_id")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "order_id") == order_id:
+            if sqlite_row_get(row, "reason") == "reserve":
+                return (sqlite_row_get(row, "sku"), 0 - int(sqlite_row_get(row, "delta")))
+    ("", 0)
+
+export sale_setup
+export sale_add_product, sale_receive_stock
+export sale_product_price, sale_available_stock, sale_order_status, sale_journal_balanced
+export sale_place_order, sale_pay_order, sale_refund_order

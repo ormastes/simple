@@ -1,0 +1,74 @@
+"""
+# Enterprise Foundation Contracts — tenant, actor, command envelope
+
+Frozen shared contracts for the Simple Enterprise Suite (lane
+`.spipe/simple_enterprise_suite`, AC-8; assessment §10.1 contract freeze).
+Every business module consumes these; none redefines them. Changes require
+an ADR + compatibility review per the lane's cooperative-review plan.
+
+- `TenantContext` / `ActorContext` / `SessionContext` — identity and tenancy.
+  The tenant on the SESSION is authority; a tenant id inside a payload is
+  never trusted (assessment §9.1).
+- `CommandEnvelope` — every external mutation: request id, idempotency key,
+  actor, tenant, action name, opaque payload.
+- `CommandResult` — explicit accepted/denied outcome with a closed-set
+  machine-readable reason:
+  accepted | invalid-session | forbidden | invalid-record | duplicate-key |
+  insufficient-stock | not-found | store-error
+- `Money` — integer minor units (cents) + currency code. Never floats.
+"""
+
+struct TenantContext:
+    tenant_id: text
+    name: text
+
+struct ActorContext:
+    actor_id: text
+    role: text
+
+struct SessionContext:
+    token: text
+    actor_id: text
+    tenant_id: text
+    active: bool
+
+struct Money:
+    amount_cents: i64
+    currency: text
+
+struct CommandEnvelope:
+    request_id: text
+    idempotency_key: text
+    action: text
+    payload: text
+
+struct CommandResult:
+    ok: bool
+    reason: text
+    detail: text
+
+fn accepted(detail: text) -> CommandResult:
+    CommandResult(ok: true, reason: "accepted", detail: detail)
+
+fn denied(reason: text, detail: text) -> CommandResult:
+    CommandResult(ok: false, reason: reason, detail: detail)
+
+# session_valid is the first rung of every guarded write: an active session
+# whose actor matches and whose tenant is the authoritative tenant.
+fn session_valid(session: SessionContext, tenant: TenantContext, who: ActorContext) -> bool:
+    session.active and session.tenant_id == tenant.tenant_id and session.actor_id == who.actor_id and session.token.len() > 0
+
+# role_allows is the minimal role policy for the goods-sale vertical.
+# Registry-driven RBAC (per-lane action registration) replaces this when the
+# ERP lane registry is rewired onto the durable store — the SEQUENCE
+# (session -> rbac -> validation -> idempotency) is the frozen contract.
+fn role_allows(role: text, action: text) -> bool:
+    if role == "admin":
+        return true
+    if role == "sales":
+        return action == "sale.order.place" or action == "sale.order.pay" or action == "sale.order.refund"
+    false
+
+export TenantContext, ActorContext, SessionContext, Money
+export CommandEnvelope, CommandResult
+export accepted, denied, session_valid, role_allows
