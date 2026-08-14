@@ -43,16 +43,22 @@ impl-in-progress
 
 ## Current handoff (2026-08-14)
 
-- Integrated baseline: `f26936914d9833a000044757f6475bc7fd6e62cb`, reachable
-  from `origin/main`.
+- Frozen source candidate: `a0b0480ce9708bd58bc9387fc7358cd3d619047a`;
+  parser/lookup repair `f8f10b7af40`, alias/HIR origin `cc30abb73dd`.
 - Stage 2 multiline continuation compatibility was repaired with explicit
   grouping and tracked in
   `doc/08_tracking/bug/stage2_multiline_if_continuation_2026-08-14.md`.
 - Bootstrap cycles 1-2 found the same parser divergence at two predicates.
-  Cycle 3 passed both predicates, completed Stage 2 and sanity, then Stage 3
-  self-host exited 139. The three-cycle cap is exhausted; retained evidence and
-  fresh-session resume command are in
-  `doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md`.
+  Historical Restart12 cycle 3 passed both predicates, completed Stage 2 and
+  sanity, then observed an unretained Stage 3 exit 139. Later pre-f8 runs
+  terminated after high RSS without a candidate. Current source restores the
+  typed parser/HIR contract owners and scalar-prefilter lookup; post-f8
+  Stage 2/3/4 verification remains pending. The current source also replaces
+  the GDB-localized recursive 97-arm `char_to_ascii` FlatAstBridge allocation
+  with an unverified range check. The exact typed-receipt bootstrap
+  command is in the canonical sys-test plan. Current blocker records are
+  `doc/08_tracking/bug/stage2_proof_uses_optional_narrowing_2026-08-14.md` and
+  `doc/08_tracking/bug/build11_stage3_compile_context_corruption_2026-08-14.md`.
 - Parallel SPipe audits completed: `/root/acceptance_audit` checked
   requirement/evidence traceability and `/root/guide_audit` checked guide,
   manual, state, and process-doc freshness. Root Codex merged their findings.

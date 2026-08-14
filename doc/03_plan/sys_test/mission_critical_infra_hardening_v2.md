@@ -12,8 +12,13 @@ lane.  The lane owns the host-independent compiler, SimpleOS-manifest, packed
 rendering, allocation, process, and aggregate-contract hardening needed before
 the release-facing evidence producers may be trusted.
 
-Current implementation baseline is `cc30abb73ddc4652d8324bfa28768eda1cf4efeb`,
-reachable from `origin/main`. The phase is `impl-in-progress`. Fresh current-head
+Current frozen source candidate is `a0b0480ce9708bd58bc9387fc7358cd3d619047a`;
+the docs-only handoff commit follows it. The owning alias/HIR repair
+originated at `cc30abb73ddc4652d8324bfa28768eda1cf4efeb`. Integration
+`f8f10b7af40` additionally restores the typed parser `decrease_measure` owner
+and scalar-prefiltered module-surface lookup. Neither repair has a complete,
+admitted post-`f8f10b7` bootstrap PASS. The phase is
+`impl-in-progress`. Fresh current-head
 work restored a half-landed canonical HIR contract type group and propagation,
 eliminating the Stage 2 `ANY proof_uses` failure. A bounded Stage 3 run exposed
 ParserModule duplication across resolver aliases: peak retained RSS was 22.74
@@ -132,14 +137,42 @@ Verification is deferred to a fresh capped session; exact evidence and hashes
 are recorded in
 `doc/08_tracking/bug/stage2_proof_uses_optional_narrowing_2026-08-14.md`.
 
+Two pre-`f8f10b7` runs remain unresolved negative evidence, not verification of
+the current repair. Build11 r5 admitted Stage 2, then Stage 3 held about one
+core and reached about 19.8 GiB RSS over 143 seconds before deliberate SIGTERM;
+the wrapper recorded exit 143 and produced no candidate. A separate retained
+`/usr/bin/time -v` run ended after 12:51.93 with signal 15 and max RSS
+24,839,624 KiB (about 23.69 GiB, or 24.84 GB decimal), with no candidate,
+compiler diagnostic, or reliable outer-wrapper exit receipt. Neither result
+proves kernel OOM, a common retained owner, or regression of `cc30abb`'s
+alias-specific fix. Both predate `f8f10b7`'s scalar-prefilter lookup, so overall
+Stage 3 HIR memory remains unverified.
+
+A later render-CLI diagnostic continuation produced a sanity-clean but
+non-admitted Stage 2, then stopped at fourteen explicit-annotation failures in
+`MirLowering.lower_const`; its originating-lane cycle-6 report is recorded in
+`doc/08_tracking/bug/stage2_proof_uses_optional_narrowing_2026-08-14.md`.
+Those artifacts are absent and therefore unretained in this worktree; they are
+not verification of the rebased candidate and cannot be promoted. A newer
+independent Build11 GDB run located live allocation in recursive FlatAstBridge
+conversion of the 97-arm `char_to_ascii` chain during Phase 2 parsing. Source
+`a0b0480` replaces that chain with a range check, but the repair is unverified
+because its lane exhausted three cycles. This is the current source frontier;
+its canonical record is
+`doc/08_tracking/bug/build11_stage3_compile_context_corruption_2026-08-14.md`.
+
 The published authority is now stale: the current LLVM seed-input fingerprint
-is `b02cad2d9e6135010cf99a931ba816575d310c5b7fe4cb0be2ccd4fad8d281fb`,
+is `813207318695c52e44c05a342fddff72e3b543805ed30eba7e37d4f30b34fb84`,
 while the published stamp is
 `69872b0a70dbefe456b99b8273d9d2747748a7457f65029b6e9e8e8b051b12bd`.
 Therefore `--pure-simple --full-cli` is forbidden: it deterministically refuses
 the stale compiler backfill. A `--pure-simple` run without `--full-cli` would be
 diagnostic only and cannot produce admissible provenance. The exact authoritative
 Restart13 resume is a fresh, uncontended full-bootstrap/deploy transaction.
+The stale seed below is used only as the bootstrap interpreter for the current
+receipt-only planner. The v1 receipt is a non-cryptographic bootstrap-policy
+marker, not compiler provenance or release evidence; the newly published tuple
+and Stage 2/3/4 provenance establish authority.
 Run this in Bash in a fresh verification session, with unique receipts and
 immediate preservation of every materialized generic child log:
 
@@ -147,16 +180,56 @@ immediate preservation of every materialized generic child log:
 set -o pipefail
 recovery_dir=build/restart13-bootstrap/recovery-verify4
 fresh_marker=build/restart13-bootstrap/verify4-start.marker
+reason_receipt=build/restart13-bootstrap/verify4-bootstrap-reason.receipt
+reason_log=build/restart13-bootstrap/verify4-bootstrap-reason.log
+reason_exit=build/restart13-bootstrap/verify4-bootstrap-reason.exit
+authorization_exit=build/restart13-bootstrap/verify4-bootstrap-authorization.exit
 test ! -e "$recovery_dir" || { printf 'verify4 recovery path already exists\n' >&2; exit 124; }
 for unique in \
   build/restart13-bootstrap/progress-verify4.log \
   build/restart13-bootstrap/driver-verify4.log \
   build/restart13-bootstrap/driver-verify4.exit \
+  "$reason_receipt" "$reason_log" "$reason_exit" "$authorization_exit" \
   "$fresh_marker"; do
   test ! -e "$unique" || { printf 'verify4 unique path already exists: %s\n' "$unique" >&2; exit 124; }
 done
 : > "$fresh_marker" || exit 124
+SIMPLE_NO_STUB_FALLBACK=1 src/compiler_rust/target/bootstrap/simple \
+  run src/app/cli/main.spl build bootstrap \
+  --bootstrap-reason=self-host-convergence-check \
+  --bootstrap-receipt="$reason_receipt" \
+  > "$reason_log" 2>&1
+reason_rc=$?
+printf '%s\n' "$reason_rc" > "$reason_exit" || exit 125
+authorization_rc=0
+test "$reason_rc" -eq 0 || authorization_rc=$reason_rc
+expected_reason='simple-bootstrap-receipt-v1|producer=simple-build-planner-v1|target=//bootstrap:stage4|reason=self-host-convergence-check'
+if test "$authorization_rc" -eq 0; then
+  test "$(cat "$reason_receipt")" = "$expected_reason" || authorization_rc=125
+fi
+if test "$authorization_rc" -eq 0; then
+  sh scripts/bootstrap/bootstrap-from-scratch.sh \
+    --bootstrap-receipt="$reason_receipt" --validate-bootstrap-receipt \
+    >> "$reason_log" 2>&1 || authorization_rc=125
+fi
+printf '%s\n' "$authorization_rc" > "$authorization_exit" || exit 125
+mkdir "$recovery_dir" || exit 125
+for authorization_file in \
+  "$reason_receipt" "$reason_log" "$reason_exit" "$authorization_exit"; do
+  if test -f "$authorization_file" && test "$authorization_file" -nt "$fresh_marker"; then
+    cp "$authorization_file" "$recovery_dir/$(basename "$authorization_file")" || exit 125
+  fi
+done
+if test "$authorization_rc" -ne 0; then
+  sums_tmp="$recovery_dir/.SHA256SUMS.tmp"
+  (cd "$recovery_dir" && \
+    find . -type f ! -name SHA256SUMS ! -name .SHA256SUMS.tmp -print0 \
+      | sort -z | xargs -0 sha256sum) > "$sums_tmp" || exit 125
+  mv "$sums_tmp" "$recovery_dir/SHA256SUMS" || exit 125
+  exit "$authorization_rc"
+fi
 SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --bootstrap-receipt="$reason_receipt" \
   --full-bootstrap --backend=llvm --mode=dynload --full-cli --deploy \
   --no-mcp --diagnostics=test \
   --output=build/restart13-bootstrap --jobs=full \
@@ -169,7 +242,7 @@ preserve_rc=0
 test "$tee_rc" -eq 0 || preserve_rc=1
 printf '%s\n' "$verify_rc" > build/restart13-bootstrap/driver-verify4.exit \
   || preserve_rc=1
-mkdir "$recovery_dir" || preserve_rc=1
+test -d "$recovery_dir" || preserve_rc=1
 for retained in \
   logs/x86_64-unknown-linux-gnu/rust-seed-build.log \
   logs/x86_64-unknown-linux-gnu/rust-native-all-build.log \
@@ -183,6 +256,8 @@ for retained in \
   logs/x86_64-unknown-linux-gnu/stage4-essential-tools-smoke.log \
   logs/x86_64-unknown-linux-gnu/stage4b-ui-backend.log \
   progress-verify4.log driver-verify4.log driver-verify4.exit \
+  verify4-bootstrap-reason.receipt verify4-bootstrap-reason.log \
+  verify4-bootstrap-reason.exit verify4-bootstrap-authorization.exit \
   stage3/x86_64-unknown-linux-gnu/stage2-command.transcript \
   stage3/x86_64-unknown-linux-gnu/stage3-command.transcript \
   stage3/x86_64-unknown-linux-gnu/git-state-before.env \
@@ -211,6 +286,7 @@ if test "$verify_rc" -eq 0; then
     build/restart13-bootstrap/progress-verify4.log \
     build/restart13-bootstrap/driver-verify4.log \
     build/restart13-bootstrap/driver-verify4.exit \
+    "$reason_receipt" "$reason_log" "$reason_exit" "$authorization_exit" \
     build/restart13-bootstrap/stage3/x86_64-unknown-linux-gnu/provenance.env \
     build/restart13-bootstrap/full/x86_64-unknown-linux-gnu/simple.provenance.env \
     "$deploy_receipt"; do
@@ -221,6 +297,10 @@ if test "$verify_rc" -eq 0; then
     "$recovery_dir/progress-verify4.log" \
     "$recovery_dir/driver-verify4.log" \
     "$recovery_dir/driver-verify4.exit" \
+    "$recovery_dir/verify4-bootstrap-reason.receipt" \
+    "$recovery_dir/verify4-bootstrap-reason.log" \
+    "$recovery_dir/verify4-bootstrap-reason.exit" \
+    "$recovery_dir/verify4-bootstrap-authorization.exit" \
     "$recovery_dir/stage3_x86_64-unknown-linux-gnu_provenance.env" \
     "$recovery_dir/full_x86_64-unknown-linux-gnu_simple.provenance.env" \
     "$recovery_dir/bootstrap-deploy-receipt.env"; do

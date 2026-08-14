@@ -57,10 +57,11 @@ disproven helper workaround.
 
 ## Unblock condition
 
-In a fresh capped verification session, reuse the published bootstrap tuple and
-cache, rebuild Stage 2 once, and require both owner files to lower without an
-`ANY proof_uses` diagnostic. Continue through provenance-verified Stage 3 and
-Stage 4 before executing mission-critical SSpec or docgen.
+Historical instruction (superseded): the earlier continuation reused the
+published tuple and cache. Current authority is seed-stale, so the only valid
+resume is the canonical typed-receipt `--full-bootstrap --full-cli --deploy`
+transaction in the mission-critical system-test plan. It must publish a fresh
+tuple and complete provenance-verified Stage 2/3/4 before SSpec or docgen.
 
 ## Cycle-2 follow-up: Stage 3 alias publication RSS growth
 
@@ -119,9 +120,9 @@ current authority before promoting an admitted Stage 4 compiler.
 
 ## Current authority prerequisite
 
-After `cc30abb` rebased over Rust packed-byte changes, the current LLVM
-seed-input fingerprint became
-`b02cad2d9e6135010cf99a931ba816575d310c5b7fe4cb0be2ccd4fad8d281fb`;
+For frozen source `a0b0480ce9708bd58bc9387fc7358cd3d619047a`, the current LLVM
+seed-input fingerprint is
+`813207318695c52e44c05a342fddff72e3b543805ed30eba7e37d4f30b34fb84`;
 the published stamp remains
 `69872b0a70dbefe456b99b8273d9d2747748a7457f65029b6e9e8e8b051b12bd`.
 A `--pure-simple --full-cli` continuation therefore fails closed on stale
@@ -131,7 +132,7 @@ The exact authoritative resume is the fresh-session, uncontended
 `--full-bootstrap --full-cli --deploy` transaction recorded in the canonical
 system-test plan. No fourth bootstrap was run in the exhausted session.
 
-## Render-CLI continuation: parser contract frontier
+## Historical Render-CLI continuation: parser contract frontier (superseded)
 
 The isolated render-CLI cycle 3 consumed the canonical HIR contract definition
 and cleared both `proof_uses` diagnostics. Stage 2 then failed on one later,
@@ -143,31 +144,25 @@ HirLowering.lower_verification_contract: struct 'ANY' field
 'decrease_measure'`
 
 Inspection proved `ParserFunction.contract`, `ContractBlock`, and
-`ContractClause` are consumed by current HIR lowering but are absent from the
+`ContractClause` were consumed by HIR lowering but were absent from the then-
 canonical `src/compiler/10.frontend/parser_types.spl`. Historical integration
-commit `5958de7d4c7` contains the complete intended typed-AST contract surface,
-flat-AST contract extraction, and constructor propagation; it must be ported
-selectively onto current main rather than cherry-picking that broad historical
-WIP commit or suppressing contract lowering.
+commit `5958de7d4c7` contained the intended typed-AST surface; the required slice
+has since been restored. This subsection's cache resume is superseded by the
+canonical full-bootstrap transaction.
 
 The render-CLI session exhausted its three verification/fix cycles after this
-diagnostic. Exact next verification is the retained Stage 2 command transcript
-with a new isolated cache rooted beside
-`build/restart12-render-cli-pass2/stage3/x86_64-unknown-linux-gnu/stage2-native-cache-cycle3`.
-Require the `decrease_measure` frontier to clear, a produced Stage 2 executable,
-and its sanity receipt before continuing to Stage 3. Do not replace the missing
-typed parser owner with `Any`, drop verification contracts, or reuse a stale
-cached object.
+diagnostic. Its old isolated-cache command must not be resumed. Use the current
+typed-receipt full-bootstrap command in the canonical mission-critical plan.
 
 ## Fresh continuation: typed parser owner restored, Phase 3 still blocked
 
-The next bounded continuation selectively restored the typed parser-contract
+The next bounded originating-lane continuation selectively restored the typed parser-contract
 surface and propagation from `5958de7d4c7` onto current main. It also restored
 the contract statement tags and parser recognition rather than treating
 contract clauses as executable body statements. A fresh Stage 2 build then
 completed 858 compiled units with zero failures. Its diagnostic compiler is:
 
-- path:
+- originating-lane path (absent and unretained in this worktree):
   `build/restart12-render-cli-pass2/stage2-cycle5/x86_64-unknown-linux-gnu/simple`
 - SHA-256:
   `e3ae9475088ed2fe8edceb4e14f8b2db336ad8db8920d516d3dc8f99c6cf3dfc`
@@ -177,7 +172,7 @@ completed 858 compiled units with zero failures. Its diagnostic compiler is:
 That artifact is diagnostic only. It has no wrapper-owned admission manifest
 or provenance and must not be copied into a canonical Stage 3 location.
 
-The first Phase-3 attempt proved the former `ANY` and contract-tag declaration
+The originating lane's first Phase-3 attempt proved the former `ANY` and contract-tag declaration
 failures absent, then reported fourteen instances of:
 
 `bootstrap MIR lowering: cannot derive module constant type from folded value;
@@ -185,7 +180,8 @@ add an explicit annotation`
 
 Adding explicit `i64` annotations to all six new cross-module contract statement
 tags was insufficient: the fresh-cache Phase-3 retry reached the same normalized
-failure and emitted no executable. Retained evidence:
+failure and emitted no executable. Originating-lane reported evidence (absent
+and unretained in this worktree):
 
 - log: `build/restart12-render-cli-pass2/stage3-cycle6.log`
 - log SHA-256:
@@ -195,7 +191,7 @@ failure and emitted no executable. Retained evidence:
   absent
 
 The continuation exhausted its three-cycle cap. A fresh lane must first enhance
-or otherwise inspect `MirLowering.lower_constants` in
+or otherwise inspect `MirLowering.lower_const` in
 `src/compiler/50.mir/_MirLowering/function_lowering.spl` so the diagnostic
 identifies each constant name/span, then type the actual owners and rerun only
 Phase 3 in a new cache. Once that succeeds, the only supported admission route

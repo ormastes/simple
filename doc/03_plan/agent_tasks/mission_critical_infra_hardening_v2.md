@@ -1,6 +1,6 @@
 # Mission-Critical Infrastructure Hardening V2 — Parallel Agent Plan
 
-**Status:** implementation WARN — Stage 3 self-host blocker active
+**Status:** implementation WARN — post-`f8f10b7` Stage 3 verification pending
 **Merge owner:** root Codex
 **Final reviewer:** a separate normal/highest-capability Codex (or equivalent
 highest-capability model), not a lane author
@@ -38,10 +38,17 @@ review receipt.
   for truthful resumable plan-document completeness. This internal review does
   not imply feature verification or release readiness and does not replace the external
   independently signed release reviewer.
-- Current integrated implementation baseline:
-  `f26936914d9833a000044757f6475bc7fd6e62cb`.
-- Owned blocker: fresh Stage 2 passes sanity, then Stage 3 self-host exits 139;
-  see `doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md`.
+- Current frozen source candidate:
+  `a0b0480ce9708bd58bc9387fc7358cd3d619047a`; the docs-only handoff commit
+  follows it. Parser/lookup repair is `f8f10b7af40`; alias/HIR origin is
+  `cc30abb73dd`.
+- Owned blocker: parser/HIR owners and scalar-prefilter lookup are restored but
+  have no complete, admitted post-`f8f10b7` bootstrap PASS. Two pre-f8 Stage 3 runs terminated
+  after high RSS without a candidate; neither proves regression of the alias
+  fix. A later GDB run localized recursive FlatAstBridge allocation in the
+  97-arm `char_to_ascii` chain; `a0b0480` replaces it with a range check, also
+  unverified. Current bootstrap requires the typed reason receipt recorded in
+  the canonical sys-test plan.
 - Canonical status, evidence, resume commands, artifacts, and reviewer fields:
   `doc/03_plan/sys_test/mission_critical_infra_hardening_v2.md`.
 
