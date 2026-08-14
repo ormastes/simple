@@ -42,8 +42,8 @@ for a host admission or a row's real evidence.
 | L2 Linux ARM64 | ARM64 direct-kernel fs-exec entry, nonce reader and EL0 lifecycle | canonical PASS | direct-kernel v2 bundle, exact ordered serial lifecycle | N/A | root | root/high |
 | L3 Linux RV32 | RV32 direct-kernel trap lifecycle and nonce media | canonical PASS | direct-kernel v2 bundle, M-mode recovery and exact reap | N/A | root | root/high |
 | L4 Linux RV64 | RV64 compiler operand transport, then live fs-exec | blocked | admitted compiler must lower named/immediate asm operands; fresh rebuild then canonical run | N/A | compiler owner | root/high |
-| L5 Linux x86_32 | x86_32 GDT/TSS, CPL3 trap/token/stack and mounted ELF staging | blocked | live iret/int80/exit37 continuation plus exact scheduler reap | N/A | x86_32 kernel owner | root/high |
-| L6 Linux ARM32 | ARM32 vector/SVC, token auth, staging and mounted ELF entry | blocked | real vector/TTBR lifecycle, target listing/program and exact reap | N/A | ARM32 kernel owner | root/high |
+| L5 Linux x86_32 | First establish an i686 CPL3 build profile that includes the parent SimpleOS tree, `src/os`, and `src/lib`; then own GDT/TSS/`esp0`, authenticated token, `enter_user_first`, trap return, and mounted ELF staging | blocked | i386 link gate proves strong entry/TSS/token symbols before any QEMU; then live iret/int80/exit37 continuation plus exact scheduler reap | N/A | x86_32 kernel owner | root/high |
+| L6 Linux ARM32 | Own real `enter_user_first.s`, exception-vector/SVC entry, token/result lifecycle in baremetal C, scheduler binding, and mounted ELF staging | blocked | ARM link gate proves vector + EL0 entry symbols; then real vector/TTBR lifecycle, target listing/program and exact reap | N/A | ARM32 kernel owner | root/high |
 | L7 Windows | PowerShell matrix execution and native producer | blocked external host | actual Windows admission plus all six bundles; no Linux relabeling | N/A | Windows operator | root/high |
 | L8 FreeBSD | image/bootstrap and native FreeBSD matrix execution | blocked external host | checksum-pinned image/bootstrap, then all six FreeBSD bundles | N/A | FreeBSD operator | root/high |
 | L9 macOS | Darwin QEMU/firmware/native execution | postponed external host | prepared Darwin host, actual admission and six bundles | N/A | macOS operator | root/high |
@@ -84,7 +84,10 @@ L0 settings/admission/media/evidence
 2. L4 first requires a clean admitted compiler that transports named and
    immediate inline-asm constraints; the bootstrap seed's debug spelling is not
    an acceptable workaround.
-3. L5 and L6 proceed only through their frozen scalar trap ABIs; do not add
-   untrusted user token pointers, weak dispatch bridges, or host test doubles.
+3. L5 first replaces the legacy CPL0 initrd probe entry and proves its i686
+   source-root/link closure; L6 first replaces the NVFS/SMF probe with a real
+   EL0/SVC owner. Both then proceed only through their frozen scalar trap ABIs;
+   do not add untrusted user token pointers, weak dispatch bridges, or host
+   test doubles.
 4. L7–L9 retain their acceptance IDs as blocked/postponed, with the exact
    target-host commands in the status ledger.
