@@ -1217,3 +1217,13 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   focused shell contract passed once. No admitted Stage-4 execution was
   available, so writer-red execution and all broader B5/B6 evidence remain
   unchecked and phase remains `implementation-handoff` / WARN.
+- verify-blocked (2026-08-14, Stage-3 process sampler): the repo-local admitted
+  output `build/restart12-stage3-admitted` is prepared and reverified, but the
+  canonical run did not start. Final review rejected and removed the proposed
+  Python/v4 sampler because it violated the no-Python tooling rule, broke v3
+  consumers, did not safely terminate/reap the full descendant group, retained
+  executable/analyzer pathname TOCTOU, accepted weak record forms, and did not
+  bind strict phase/process correlation or atomic derived evidence. The three
+  sampler cycles are exhausted. Resume only from the redesign contract in
+  `doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`;
+  do not run Stage 3 until that source is independently accepted.

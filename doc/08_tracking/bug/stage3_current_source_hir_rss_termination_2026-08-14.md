@@ -233,3 +233,31 @@ checking reached unrelated pre-existing missing
 `simple_runtime::rt_provider_query_v1_call` symbols and emitted no snapshot-file
 diagnostic. The three-cycle cap is exhausted; next is higher-capability source
 review and then the single instrumented Stage-3 transaction.
+
+## Rejected process-sampler design and required redesign (2026-08-14)
+
+A proposed wrapper-owned Python sampler/analyzer was rejected after final
+review and removed before any Stage-3 run. Python is not an admitted dependency
+for this bootstrap evidence path, and changing the established provenance-v3
+manifest would invalidate existing consumers. The redesign must remain within
+the current v3 compatibility contract, or introduce a separately versioned and
+explicitly migrated evidence receipt without silently widening v3.
+
+The next implementation must launch the measured compiler in an isolated
+process group, retain stable identities for the root and every discovered
+descendant, and terminate/reap the entire group on normal exit, interruption,
+or sampler failure. It must bind the executable by an opened descriptor and
+verified device/inode/hash so path replacement between validation and exec
+cannot change the measured authority. Record parsing must reject duplicate or
+unknown keys, non-canonical numeric forms, overflow, negative values where
+forbidden, inconsistent root PID/start identity, PID reuse, missing root
+samples, and multiple or invalid terminal records.
+
+Memory boundaries, process samples, and phase-profile records need a shared
+run identity plus comparable monotonic timestamps; line order or approximate
+wall time is not sufficient correlation. Derived boundary/delta/summary files
+must be produced from descriptor-bound inputs into absent descriptor-walked
+targets, flushed, hashed, and atomically admitted as one bound set. A failure
+must leave only explicitly interrupted raw evidence, never a partial derived
+set that resembles a completed analysis. Add deliberate-red coverage for each
+rule before authorizing the one fresh Stage-3 transaction.
