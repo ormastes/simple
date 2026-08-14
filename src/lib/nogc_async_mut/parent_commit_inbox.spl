@@ -28,6 +28,8 @@ struct ParentCommitFrameInboxStatsV1:
     rejected_frames: i64
     high_water_frames: i64
     high_water_bytes: i64
+    rejected_session_frames: i64
+    rejected_replay_frames: i64
 
 fn parent_commit_frame_copy(source: [u8]) -> [u8]:
     var result: [u8] = []
@@ -52,33 +54,54 @@ class ParentCommitFrameInboxV1:
     """
     capacity: i64
     byte_capacity: i64
+    expected_generation: i64
     frames: [[u8]]
+    admitted_region_ids: [i64]
     head: i64
     retained_bytes: i64
     accepted_frames: i64
     rejected_frames: i64
     high_water_frames: i64
     high_water_bytes: i64
+    rejected_session_frames: i64
+    rejected_replay_frames: i64
     closed: bool
     mutex: MutexHandle
 
 impl ParentCommitFrameInboxV1:
     static fn create(capacity: i64) -> ParentCommitFrameInboxV1:
-        ParentCommitFrameInboxV1.create_with_byte_budget(
-            capacity, PARENT_COMMIT_INBOX_DEFAULT_MAX_BYTES)
+        ParentCommitFrameInboxV1.create_for_generation_with_byte_budget(
+            capacity, PARENT_COMMIT_INBOX_DEFAULT_MAX_BYTES, -1)
 
     static fn create_with_byte_budget(capacity: i64,
                                       byte_capacity: i64) -> ParentCommitFrameInboxV1:
+        ParentCommitFrameInboxV1.create_for_generation_with_byte_budget(
+            capacity, byte_capacity, -1)
+
+    static fn create_for_generation(capacity: i64,
+                                    expected_generation: i64) -> ParentCommitFrameInboxV1:
+        ParentCommitFrameInboxV1.create_for_generation_with_byte_budget(
+            capacity, PARENT_COMMIT_INBOX_DEFAULT_MAX_BYTES, expected_generation)
+
+    static fn create_for_generation_with_byte_budget(
+        capacity: i64,
+        byte_capacity: i64,
+        expected_generation: i64
+    ) -> ParentCommitFrameInboxV1:
         ParentCommitFrameInboxV1(
             capacity: capacity,
             byte_capacity: byte_capacity,
+            expected_generation: expected_generation,
             frames: [],
+            admitted_region_ids: [],
             head: 0,
             retained_bytes: 0,
             accepted_frames: 0,
             rejected_frames: 0,
             high_water_frames: 0,
             high_water_bytes: 0,
+            rejected_session_frames: 0,
+            rejected_replay_frames: 0,
             closed: false,
             mutex: mutex_create()
         )
@@ -98,6 +121,27 @@ impl ParentCommitFrameInboxV1:
             return false
         if not self.mutex.lock():
             return false
+        if self.expected_generation >= 0
+            and decoded_frame.value.envelope.generation != self.expected_generation:
+            self.rejected_frames = self.rejected_frames + 1
+            self.rejected_session_frames = self.rejected_session_frames + 1
+            self.mutex.unlock()
+            return false
+        if self.expected_generation >= 0:
+            for region_id in self.admitted_region_ids:
+                if region_id == decoded_frame.value.envelope.region_id:
+                    self.rejected_frames = self.rejected_frames + 1
+                    self.rejected_replay_frames = self.rejected_replay_frames + 1
+                    self.mutex.unlock()
+                    return false
+            # A generation-bound inbox is one finite child session. Its frame
+            # capacity is also the lifetime replay-table budget, so replay
+            # protection cannot become an unbounded history after draining.
+            if self.admitted_region_ids.len() >= self.capacity:
+                self.rejected_frames = self.rejected_frames + 1
+                self.rejected_replay_frames = self.rejected_replay_frames + 1
+                self.mutex.unlock()
+                return false
         if self.closed or self.capacity <= 0 or self.byte_capacity <= 0
             or self.frames.len() - self.head >= self.capacity
             or frame.len() > self.byte_capacity - self.retained_bytes:
@@ -105,6 +149,8 @@ impl ParentCommitFrameInboxV1:
             self.mutex.unlock()
             return false
         self.frames.push(parent_commit_frame_copy(frame))
+        if self.expected_generation >= 0:
+            self.admitted_region_ids.push(decoded_frame.value.envelope.region_id)
         self.retained_bytes = self.retained_bytes + frame.len()
         self.accepted_frames = self.accepted_frames + 1
         val depth = self.frames.len() - self.head
@@ -161,14 +207,17 @@ impl ParentCommitFrameInboxV1:
             return ParentCommitFrameInboxStatsV1(
                 depth: -1, retained_bytes: -1, accepted_frames: -1,
                 rejected_frames: -1, high_water_frames: -1,
-                high_water_bytes: -1)
+                high_water_bytes: -1, rejected_session_frames: -1,
+                rejected_replay_frames: -1)
         val result = ParentCommitFrameInboxStatsV1(
             depth: self.frames.len() - self.head,
             retained_bytes: self.retained_bytes,
             accepted_frames: self.accepted_frames,
             rejected_frames: self.rejected_frames,
             high_water_frames: self.high_water_frames,
-            high_water_bytes: self.high_water_bytes)
+            high_water_bytes: self.high_water_bytes,
+            rejected_session_frames: self.rejected_session_frames,
+            rejected_replay_frames: self.rejected_replay_frames)
         self.mutex.unlock()
         result
 
@@ -191,3 +240,9 @@ fn parent_commit_frame_inbox_v1(capacity: i64) -> ParentCommitFrameInboxV1:
 fn parent_commit_frame_inbox_v1_with_byte_budget(capacity: i64,
                                                   byte_capacity: i64) -> ParentCommitFrameInboxV1:
     ParentCommitFrameInboxV1.create_with_byte_budget(capacity, byte_capacity)
+
+fn parent_commit_frame_inbox_v1_for_generation(
+    capacity: i64,
+    expected_generation: i64
+) -> ParentCommitFrameInboxV1:
+    ParentCommitFrameInboxV1.create_for_generation(capacity, expected_generation)

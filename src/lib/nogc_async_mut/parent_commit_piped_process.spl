@@ -11,7 +11,12 @@ use std.common.structural.transfer.process_frame_codec.{
 }
 use std.common.structural.transfer.transfer_contracts.{ParallelExecutionDomain}
 use std.nogc_async_mut.parent_commit_inbox.{ParentCommitFrameInboxV1}
-use std.nogc_async_mut.io.process_ops.{process_read_stdout}
+use std.nogc_async_mut.io.process_ops.{
+    process_close_piped,
+    process_is_piped_alive,
+    process_read_stdout,
+    process_spawn_piped
+}
 
 struct ParentCommitPipedReadResultV1:
     ok: bool
@@ -19,6 +24,16 @@ struct ParentCommitPipedReadResultV1:
     rejected: i64
     pending_bytes: i64
     reason: text
+
+struct ParentCommitPipedProcessStatusV1:
+    session_generation: i64
+    process_handle: i64
+    alive: bool
+    closed: bool
+    close_succeeded: bool
+    accepted: i64
+    rejected: i64
+    terminal_reason: text
 
 fn parent_commit_piped_read_result_v1(ok: bool, accepted: i64, rejected: i64,
                                       pending_bytes: i64, reason: text) -> ParentCommitPipedReadResultV1:
@@ -172,3 +187,92 @@ fn parent_commit_piped_result_reader_v1_with_line_budget(
     max_line_bytes: i64
 ) -> ParentCommitPipedResultReaderV1:
     ParentCommitPipedResultReaderV1.create_with_line_budget(inbox, max_line_bytes)
+
+class ParentCommitPipedProcessSessionV1:
+    """Parent-owned lifecycle for one generation-bound piped child.
+
+    The process handle never leaves this owner after construction. Polling can
+    only feed its paired reader, and close is idempotent so the native handle is
+    released at most once. The inbox independently enforces generation and
+    replay admission before parent publication.
+    """
+    session_generation: i64
+    process_handle: i64
+    reader: ParentCommitPipedResultReaderV1
+    closed: bool
+    close_succeeded: bool
+    accepted: i64
+    rejected: i64
+    terminal_reason: text
+
+impl ParentCommitPipedProcessSessionV1:
+    static fn spawn(command: text, args: [text], session_generation: i64,
+                    inbox: ParentCommitFrameInboxV1) -> ParentCommitPipedProcessSessionV1:
+        val binding_ok = session_generation >= 0
+            and inbox.expected_generation == session_generation
+        val pid = if not binding_ok or command == "":
+            -1
+        else:
+            process_spawn_piped(command, args)
+        ParentCommitPipedProcessSessionV1(
+            session_generation: session_generation,
+            process_handle: pid,
+            reader: parent_commit_piped_result_reader_v1(inbox),
+            closed: false,
+            close_succeeded: false,
+            accepted: 0,
+            rejected: 0,
+            terminal_reason: if not binding_ok:
+                "generation-binding-mismatch"
+            elif pid > 0:
+                ""
+            else:
+                "spawn-failed"
+        )
+
+    me poll(max_lines: i64) -> ParentCommitPipedReadResultV1:
+        if self.closed:
+            return parent_commit_piped_read_result_v1(false, 0, 0, 0,
+                "session-closed")
+        if self.process_handle <= 0:
+            return parent_commit_piped_read_result_v1(false, 0, 0, 0,
+                self.terminal_reason)
+        val result = self.reader.poll_process_stdout(self.process_handle, max_lines)
+        self.accepted = self.accepted + result.accepted
+        self.rejected = self.rejected + result.rejected
+        result
+
+    me close() -> bool:
+        if self.closed:
+            return self.close_succeeded
+        self.reader.close()
+        self.closed = true
+        if self.process_handle <= 0:
+            return false
+        self.close_succeeded = process_close_piped(self.process_handle)
+        self.terminal_reason = if self.close_succeeded:
+            "closed"
+        else:
+            "close-failed"
+        self.close_succeeded
+
+    fn status() -> ParentCommitPipedProcessStatusV1:
+        ParentCommitPipedProcessStatusV1(
+            session_generation: self.session_generation,
+            process_handle: self.process_handle,
+            alive: self.process_handle > 0 and not self.closed
+                and process_is_piped_alive(self.process_handle),
+            closed: self.closed,
+            close_succeeded: self.close_succeeded,
+            accepted: self.accepted,
+            rejected: self.rejected,
+            terminal_reason: self.terminal_reason)
+
+fn parent_commit_piped_process_session_v1(
+    command: text,
+    args: [text],
+    session_generation: i64,
+    inbox: ParentCommitFrameInboxV1
+) -> ParentCommitPipedProcessSessionV1:
+    ParentCommitPipedProcessSessionV1.spawn(
+        command, args, session_generation, inbox)

@@ -149,6 +149,14 @@ runner currently exposes only a Rust bootstrap seed, so native child delivery,
 backpressure, and cleanup execution evidence remain required before using this
 internal path as a production process transport.
 
+For a real piped child, construct the inbox with
+`parent_commit_frame_inbox_v1_for_generation(capacity, generation)` and pass it
+to `parent_commit_piped_process_session_v1`. The generation must match or the
+child is not spawned. Within that finite session, the parent rejects frames
+from another generation and repeated region IDs before retention. Poll only
+through the session owner and call `close()` when the child is terminal; close
+is idempotent and the status receipt reports the one recorded close result.
+
 WP-18 now has internal runtime groundwork for a deliberately narrow bounded
 scalar pool-state pilot. Capacity counts pending, running, and completed but
 unreleased tasks; credit returns only on release. Tagged generation handles are

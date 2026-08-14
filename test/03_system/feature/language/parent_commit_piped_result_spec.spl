@@ -23,14 +23,14 @@ use std.common.structural.transfer.transfer_contracts.{
     ParallelTransferPayload,
     transfer_envelope_v1
 }
-use std.nogc_async_mut.parent_commit_inbox.{parent_commit_frame_inbox_v1}
+use std.nogc_async_mut.parent_commit_inbox.{
+    parent_commit_frame_inbox_v1_for_generation
+}
 use std.nogc_async_mut.parent_commit_owner.{parent_commit_owner_v1}
 use std.nogc_async_mut.parent_commit_piped_process.{
-    parent_commit_piped_result_reader_v1
+    parent_commit_piped_process_session_v1
 }
 use std.nogc_sync_mut.io.process_ops.{
-    process_close_piped,
-    process_is_piped_alive,
     process_spawn_piped
 }
 use std.thread_sffi.{thread_sleep}
@@ -47,7 +47,7 @@ fn piped_process_extern_available() -> bool:
 fn child_result_line() -> text:
     val result = result_envelope_v1(4, 7, 0, 7,
         ParallelResultKind.Patch, 707, "child-7")
-    val envelope = transfer_envelope_v1(7, 0,
+    val envelope = transfer_envelope_v1(7, 41,
         ParallelExecutionDomain.Process,
         ParallelExecutionDomain.Parent,
         ParallelTransferMode.Copy,
@@ -61,29 +61,29 @@ describe "native piped parent commit result delivery":
         if not piped_process_extern_available():
             print "SKIP: piped-process extern unavailable in this interpreter runtime; self-hosted native evidence remains required"
             return
-        val inbox = parent_commit_frame_inbox_v1(1)
-        val reader = parent_commit_piped_result_reader_v1(inbox)
+        val inbox = parent_commit_frame_inbox_v1_for_generation(1, 41)
         val line = child_result_line()
-        val pid = process_spawn_piped("/bin/echo", [line])
-        assert_true(pid > 0)
-        if pid <= 0:
+        val session = parent_commit_piped_process_session_v1(
+            "/bin/echo", [line], 41, inbox)
+        assert_true(session.status().process_handle > 0)
+        if session.status().process_handle <= 0:
             return
         var delivered = false
         var polls = 0
         while polls < 40 and not delivered:
-            val read = reader.poll_process_stdout(pid, 1)
+            val read = session.poll(1)
             if read.accepted == 1:
                 delivered = true
             elif read.rejected > 0:
                 assert_equal(read.reason, "")
                 break
-            if not delivered and process_is_piped_alive(pid):
+            if not delivered and session.status().alive:
                 thread_sleep(5)
             polls = polls + 1
         assert_true(delivered)
         if delivered:
-            assert_true(reader.pending_high_water_byte_count() > 0)
-            assert_true(reader.pending_high_water_byte_count() <= line.len())
+            assert_true(session.reader.pending_high_water_byte_count() > 0)
+            assert_true(session.reader.pending_high_water_byte_count() <= line.len())
             val owner = parent_commit_owner_v1(
                 parallel_commit_state_v1(4, 400),
                 ParallelCommitOrder.TaskIdThenSequence,
@@ -92,4 +92,7 @@ describe "native piped parent commit result delivery":
             assert_true(committed.receipt.ok)
             assert_equal(committed.receipt.ordered_task_ids[0], 7)
             assert_equal(committed.receipt.ordered_payload_tokens[0], 707)
-        assert_true(process_close_piped(pid))
+        assert_true(session.close())
+        assert_true(session.close())
+        assert_true(session.status().closed)
+        assert_equal(session.status().terminal_reason, "closed")

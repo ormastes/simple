@@ -19,14 +19,19 @@ use std.common.structural.transfer.transfer_contracts.{
 }
 use std.nogc_async_mut.parent_commit_inbox.{
     parent_commit_frame_inbox_v1,
-    parent_commit_frame_inbox_v1_with_byte_budget
+    parent_commit_frame_inbox_v1_with_byte_budget,
+    parent_commit_frame_inbox_v1_for_generation
 }
 use std.nogc_async_mut.parent_commit_owner.{parent_commit_owner_v1}
 
 fn child_process_result_frame(task_id: i64, payload: i64) -> [u8]:
+    child_process_result_frame_for_generation(task_id, payload, 0)
+
+fn child_process_result_frame_for_generation(task_id: i64, payload: i64,
+                                              generation: i64) -> [u8]:
     val result = result_envelope_v1(4, task_id, 0, task_id,
         ParallelResultKind.Patch, payload, "child-{task_id}")
-    val envelope = transfer_envelope_v1(task_id, 0,
+    val envelope = transfer_envelope_v1(task_id, generation,
         ParallelExecutionDomain.Process,
         ParallelExecutionDomain.Parent,
         ParallelTransferMode.Copy,
@@ -36,6 +41,17 @@ fn child_process_result_frame(task_id: i64, payload: i64) -> [u8]:
         process_transfer_frame_v1(envelope, encode_result_envelope(result)))
 
 describe "ParentCommitFrameInboxV1 bounded process ingress":
+    it "binds admission to one child generation and rejects replay":
+        val inbox = parent_commit_frame_inbox_v1_for_generation(2, 41)
+        val accepted = child_process_result_frame_for_generation(7, 707, 41)
+        assert_false(inbox.offer_process_result_frame(
+            child_process_result_frame_for_generation(8, 708, 40)))
+        assert_true(inbox.offer_process_result_frame(accepted))
+        assert_false(inbox.offer_process_result_frame(accepted))
+        assert_equal(inbox.depth(), 1)
+        assert_equal(inbox.stats().rejected_session_frames, 1)
+        assert_equal(inbox.stats().rejected_replay_frames, 1)
+
     it "enforces bounded acceptance and FIFO delivery":
         val inbox = parent_commit_frame_inbox_v1(2)
         val first = child_process_result_frame(1, 101)

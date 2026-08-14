@@ -27,7 +27,7 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 | WP-14 bounded mailbox | partial implementation | native compatibility channel and actor/common inbox/outbox queues have finite capacity 256; `ActorMailbox.new(0)`/negative resolve to the finite default, close now rejects future sends through every shared handle, and its head-cursor FIFO compacts only when capacity reuse needs it. The older priority mailbox now normalizes zero/negative or forged configuration to its finite default, including its legacy `unbounded()` spelling. Process parent ingress additionally has frame-count plus copied-byte ceilings. Real self-hosted FIFO/backpressure/close-wakeup execution, policy-selected capacities, and checked public actor send remain |
 | WP-15 commit engine | partial implementation | common functional owner transition validates the whole batch before one revision/snapshot-token root assignment and emits canonical-order receipts; bounded result ordering uses stable O(n log n) merge passes. `ParentCommitOwnerV1` mutex-serializes local publication and drains a bounded framed Process-to-Parent batch through the common transition. Payload apply/verify, a production CAS path, and admitted Stage 4 evidence remain |
 | WP-16 actor/channel migration | partial implementation | native safe paths carry route-validated inline packets, actor reply provenance is explicit, and heap actor context is rejected. Actor, scheduler, and mailbox are class-backed shared authorities; each `ActorRef` retains its admitting scheduler so `spawn_on` cannot route through the global scheduler, mailbox closure prevents post-stop admission through copies, scheduler ready IDs use cursor storage, and legacy `ask()` reserves bounded reply capacity through completion until consume/cancel. Typed heap/owned payloads, native lifecycle execution, and public API migration remain |
-| WP-17 process transport | partial implementation | common/native bounded encoded-copy frames share a complete golden vector and a real exec-child round trip. `ParentCommitPipedResultReaderV1` now reassembles bounded `SPRF1` ASCII-armored stdout into the parent frame inbox. The native system gate is present, but the deployed self-hosted CLI currently segfaults on `test --help` before discovery; child request protocol, session/replay binding, schema registry, ObjectRef, rollback, and admitted native process evidence remain |
+| WP-17 process transport | partial implementation | common/native bounded encoded-copy frames share a complete golden vector and a real exec-child round trip. `ParentCommitPipedProcessSessionV1` now owns one child handle and bounded `SPRF1` reader, pairs it with a generation-bound/replay-rejecting inbox, and records an idempotent terminal close result. The native system gate is present, but the deployed self-hosted CLI currently segfaults on `test --help` before discovery; child request input protocol, schema registry, ObjectRef, application payload rollback, and admitted native process evidence remain |
 | WP-18 thread pool | in progress | internal `rt_pool_state_*_v1` groundwork bounds accepted unreleased scalar tasks, uses tagged generation handles with lifetime pins, rejects stale/wrong-kind handles, reclaims task state on release, and normalizes tagged direct-function values before task-owned descriptor copy; Rust runtime gates pass, but the only native Simple facade run timed out at the runner before an assertion verdict, so its uncommitted facade is not admitted. A bounded self-hosted native callback/Full→release/close→idle/destroy gate, alternate-provider execution, legacy generic-global migration, cancellation, blocking admission, and heap transfer remain |
 | WP-20 access analysis | partial implementation | compiler MIR analysis preserves constant partition ranges through record loads into field paths, retains conservative public Load+GetField legality facts, derives address-observation/unknown-access summaries, and separately classifies terminal field events for layout advice; terminator and non-field uses prevent structural-load elision; authoritative CFG/noalias, partition ownership, PGO, and frequency evidence remain |
 | WP-21 layout planner | partial implementation | a compiler advisory derives the existing planner request from complete, sparse typed field observations without parsing projection text. The memory-policy adapter pins address-observed data and suppresses automatic conversion under a deny-conversion profile while binding policy identity into the request hash; empty, dynamic, unknown, co-accessed, and all-fields-used cases retain AoS/reference. The full cost model, driver/SDN policy loading, landed-layout filtering, typed receipts, and PGO inputs remain |
@@ -55,6 +55,43 @@ Do not redefine them in runtime, MDSOC, backend, or application lanes.
 3. WP-15/WP-17: keep `ParentCommitOwnerV1` as the serialized local root and add application-owned payload apply/verify plus mutation receipts. Repair the deployed self-hosted `test --help` crash first, then run `SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl --mode=native` once for an admitted framed child-result delivery verdict.
 4. WP-30/WP-33: route the frozen transfer/layout/commit policy through one real MDSOC process pilot, where a bypass fails before publication and cancellation/cleanup are observable.
 5. WP-20/WP-22: preserve MIR access paths into typed AoS/SoA reference parity before SIMD/GPU lowering.
+
+## Restart12 actor/process replacement lane acceptance (2026-08-14)
+
+Owner: detached `/mnt/data/worktrees/restart12-actors` lane. Integration owner:
+`/root`, serialized by `/tmp/simple-main-restart12-push.lock`. Sidecars: `N/A`
+for this narrow runtime-boundary repair. Final reviewer: the primary
+normal/highest-capability verifier before integration.
+
+- [ ] Actor/channel public sends retain one scheduler/mailbox authority, reject
+  admission after close through every copied handle, and never transport an
+  unchecked heap `Value` or child-local pointer.
+- [x] Process results use the canonical bounded `SPRF1`/`SPRS` encoded-copy
+  frame path through the shipped piped-process facade; partial reads, malformed
+  frames, non-ASCII output, oversize lines, and full frame/byte budgets fail
+  closed without unbounded retention.
+- [ ] `ParentCommitOwnerV1` remains the sole mutable root owner: children create
+  result envelopes, the parent validates and deterministically orders the whole
+  batch, and publication occurs once only after validation succeeds.
+- [x] Rejected, stale, cancelled, or failed child results are not reinserted or
+  implicitly retried; close wakes/terminates the transport lifecycle and all
+  accepted process handles are closed exactly once.
+- [ ] Focused unit/integration evidence covers copied-frame isolation,
+  backpressure, close behavior, split/coalesced stdout reads, failure rollback,
+  deterministic parent commit, and real separate-process delivery.
+- [ ] The focused system spec passes once with the deployed self-hosted runtime
+  in native mode, followed by the required compiler/lib/MCP/LSP regression and
+  runtime-facade audit gates for changed core/lib surfaces.
+- [ ] Verification reports `STATUS: PASS`; intentional changes are committed,
+  rebased onto fetched `origin/main`, pushed without token environment
+  overrides while holding the integration lock, and proven reachable from the
+  freshly fetched `origin/main` with a clean tree.
+
+Current blocker: the deployed self-hosted CLI still crashes
+during its bounded `test --help` discovery probe, so native process evidence is
+not yet admitted. This lane has now added explicit child-generation/replay
+binding and a parent-observable terminal lifecycle receipt; their executable
+verdict remains WARN until that prerequisite is repaired.
 
 ## Mandatory handoff record
 

@@ -42,6 +42,20 @@ the inbox consumes a drained frame and never recreates a failed/stale child
 result. That keeps retry ownership explicit and prevents a parent from
 resurrecting a child-owned update after failure.
 
+A production piped child is paired with a generation-bound inbox. The parent
+selects the nonnegative session generation before spawn; the session refuses to
+spawn if that generation differs from the inbox binding. Admission rejects a
+different generation and rejects a repeated region ID for the lifetime of that
+finite session. The inbox capacity is also the session's replay-table ceiling,
+so replay defense cannot grow without bound after receives drain queue slots.
+Legacy unbound inbox constructors retain reusable queue behavior but are not a
+session/replay proof.
+
+`ParentCommitPipedProcessSessionV1` owns one native piped-process handle and its
+reader. Callers poll through that owner rather than passing the handle around.
+Its close transition closes ingress and releases the native handle at most once;
+later closes return the recorded result and expose the same terminal receipt.
+
 ## Tree encapsulation and visibility
 
 | Raw layer | Common tree node | Public to parent | Public to next-layer sibling |
