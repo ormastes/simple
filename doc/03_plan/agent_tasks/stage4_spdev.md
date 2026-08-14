@@ -20,9 +20,12 @@ the cycle-3 Stage 2 below must not be used as current admission evidence.
   no Stage 3 executable was produced.
 - The 41,394 MiB reading is an interrupted high-water mark, not a proved root
   cause, completion budget, or remedy. That Stage 2 predates the complete
-  snapshot provider. TODO666 first owns admission-grade phase publication,
-  full-bootstrap evidence wiring, process/RSS/signal supervision, and compatible
-  provenance verification; a fresh current-HEAD Stage 2 then runs one
+  snapshot provider. TODO666 first owns non-circular independently verified
+  Stage2-tuple planner admission, admission-grade phase publication,
+  full-bootstrap evidence wiring, hard-bounded zero-survivor process-tree
+  supervision, strict analyzer publication, and compatible provenance
+  verification. The latest four component drafts were rejected and reverted at
+  their individual three-cycle boundaries; a fresh current-HEAD Stage 2 then runs one
   instrumented Stage 3 in a fresh session. A2 remains gated; no Stage 4,
   essential-smoke, deploy, or rollback evidence exists.
 
@@ -62,8 +65,8 @@ source and candidate lineage.
 
 | Order | Gate / lane | Canonical command or authoritative owner evidence | Required result |
 |---|---|---|---|
-| 1 | Stage 2/3 admission | After TODO666's M0 evidence owners are accepted, run `env SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --backend=cranelift --mode=dynload --output=build/restart12-riscv-current-head --jobs=1` in a fresh session and absent output. Because `--full-cli`/`--deploy` is absent, this invocation stops after admitted Stage 3. Retain phase/memory/process/RSS evidence, Stage 2/3 logs, authority identities, manifests, and hashes. | Fresh current-HEAD admitted pure-Simple Stage 2 and instrumented Stage 3; historical `e383...` is diagnostic only |
-| 2 | x86_64 Linux Stage 4 | Run `env SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-stage4-from-admitted=build/restart12-riscv-current-head --deploy --jobs=1`. Keep the deployment active through source-matched Gate 6 evidence. | Fresh non-stub pure-Simple Stage 4 candidate from Gate 1, internal essential smoke exactly once, and deployment receipt |
+| 1 | Stage 2/3 admission | After TODO666 publishes the accepted planner receipt at `build/bootstrap/planner-admission/restart12-riscv-current-head/admission.env` and accepts the M0 evidence owners, run `env SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=build/bootstrap/planner-admission/restart12-riscv-current-head/admission.env --full-bootstrap --backend=cranelift --mode=dynload --output=build/restart12-riscv-current-head --jobs=1` in a fresh session and absent output. Because `--full-cli`/`--deploy` is absent, this invocation stops after admitted Stage 3. Retain planner, phase, memory, process/RSS evidence, Stage 2/3 logs, authority identities, manifests, and hashes. | Fresh current-HEAD admitted pure-Simple Stage 2 and instrumented Stage 3; historical `e383...` is diagnostic only |
+| 2 | x86_64 Linux Stage 4 | Run `env SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=build/bootstrap/planner-admission/restart12-riscv-current-head/admission.env --resume-stage4-from-admitted=build/restart12-riscv-current-head --deploy --jobs=1`. Keep the deployment active through source-matched Gate 6 evidence. | Fresh non-stub pure-Simple Stage 4 candidate from Gate 1, internal essential smoke exactly once, and deployment receipt |
 | 3 | Candidate sanity and hash | Continue the same lineage. Record exact path/SHA-256, identity/version/hash, no-stub/no-failure scan, unsupported-command behavior, sanity output, and unchanged candidate bytes. | One frozen candidate admitted for smoke |
 | 4 | Essential-tools smoke | Continue the same transaction; it invokes the checker internally exactly once. Do not start a standalone duplicate smoke. | `stage4-essential-tools-smoke.log` from the same candidate emits all four required markers |
 | 5 | Deployment | Gate 2's exact resume invocation owns Stage 4, the internal smoke, and deployment without rebuilding Stage 2/3. | Install only after Gates 1 through 4 pass against the same lineage; retain deployed hash, pre/post-swap identity, `bin/release/<platform>/simple.pre_deploy`, and post-swap `-c 'print(1+1)'` output. Keep it deployed through source-matched Gate 6 evidence unless an isolated immutable bundle is published. |

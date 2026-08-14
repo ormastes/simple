@@ -1,6 +1,6 @@
 # Bootstrap planner v1 unbound authorization
 
-Status: OPEN — v3 design is frozen; producer and consumer are absent
+Status: OPEN — v3 design is frozen; non-circular producer cycle exhausted and reverted
 
 The version-1 planner receipt authorized any target with a bootstrap or release
 prefix and bound only a typed reason. It did not identify the admitted parent
@@ -36,12 +36,13 @@ admission before any bootstrap stage starts.
 Version 2 is permanently legacy because hashes without their canonical
 transcripts cannot be semantically replayed. Version 3 admits only an envelope
 published by `scripts/check/produce-bootstrap-planner-admission.shs`, whose
-canonical path and pre/post SHA-256 are bound. The producer requires a
-parent compiler whose `stage2-admitted` and sanity identities are semantically
-anchored by verified Stage3 provenance-v3. It freezes that parent binary,
-provenance, sanity evidence, runtime, source closure, git state, and a fixed
-trusted-tool snapshot before creating any output. A fresh search found no
-currently usable immutable lineage satisfying that prerequisite.
+canonical path and pre/post SHA-256 are bound. The producer requires an
+independently verified Stage2 tuple: identical origin/admitted compiler hashes,
+replayed sanity, canonical transcript/log, frozen runtime snapshots,
+source/tool snapshots, and git state. Completed Stage3 provenance cannot be a
+prerequisite because it is an output of the operation being authorized. The
+producer freezes the parent tuple, runtime, source closure, git state, and a
+fixed trusted-tool snapshot before creating any output.
 
 The producer owns the output lock and a private sibling staging directory. Its
 sealed evidence directory is read-only during child execution; build and smoke
@@ -75,3 +76,17 @@ The boundary protects against accidental or child-process evidence mutation.
 A hostile same-UID process can still chmod a 0500 directory; cryptographic
 protection against that threat requires an external signing/credential owner
 and is outside this local bootstrap evidence boundary.
+
+## Restart12 non-circular producer attempt
+
+Completed Stage3 provenance cannot authorize starting Stage3. The admissible
+parent is instead an independently verified Stage2 tuple: identical
+origin/admitted compiler hashes, replayed sanity, canonical transcript/log,
+frozen runtime snapshots, source/tool snapshots, and git state. A three-cycle v3
+producer/consumer draft implemented that shape and its consumer positive and
+deliberate-red contracts passed. The producer's incomplete-tuple negative still
+exited before emitting the canonical `incomplete-stage2-tuple` diagnostic, so
+the reason guard was not reached. The entire draft was reverted at the cap; v2
+therefore remains fail-closed. TODO666 retains the producer, atomic envelope,
+consumer/bootstrap switch, reason guard, and deliberate-red closure as one
+indivisible future lane.

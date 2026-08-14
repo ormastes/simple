@@ -342,3 +342,19 @@ total cleanup from fork through exit, hard caps, zero-survivor termination,
 strict analyzer/correlation, safe phase publication, full/resume wiring parity,
 provenance migration, and the missing adversarial tests. This is a source/evidence
 implementation blocker, not authorization for another Stage-3 run here.
+
+## Restart12 phase/analyzer redo terminal review
+
+Two further disjoint three-cycle drafts were rejected and reverted without a
+Stage3 run. The phase publisher converged on descriptor-owned records, a shared
+absolute `CLOCK_MONOTONIC` millisecond epoch, exact memory/phase timestamps,
+explicit identities, terminal closure, and legacy-mode isolation. Final review
+found that bootstrap-main's projected core-C capsule did not retain the three
+new runtime providers, so the Simple driver could carry unresolved externs. The
+strict analyzer converged on the actual memory/phase schemas, identity and clock
+correlation, zero-survivor terminals, bounded records, descriptor-walked inputs,
+and atomic no-replace publication. Final review found that a successful final
+hard link followed by temp-unlink or directory-fsync failure could leave a
+completed-looking receipt even though the analyzer returned failure. Both
+drafts and their tests were reverted. TODO666 retains the exact capsule and
+post-link rollback owners; no partial admission claim was made.

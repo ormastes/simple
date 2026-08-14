@@ -79,7 +79,7 @@ borrow another row's files or create an alternate interface.
 
 | Wave | Parallel rows | Start condition | Convergence |
 |---|---|---|---|
-| R0 | M0 memory evidence design/implementation; H documentation/root review | immediate, disjoint source/docs scopes | M0 remains actionable but the cycle-3 supervisor draft was rejected and reverted: post-fork failures could orphan the child, the deadline could abandon survivors, and evidence bounds were soft. Safe phase publication, total-cleanup hard-bounded supervision, full-bootstrap sinks, analyzer, and provenance migration remain TODO666; H closes AC-8/9. |
+| R0 | M0 memory evidence design/implementation; H documentation/root review | immediate, disjoint source/docs scopes | M0 remains actionable, but three bounded component lanes were rejected and reverted: supervisor cleanup/survivor bounds, phase-provider bootstrap-capsule projection, and analyzer post-link failure cleanup. The planner v3 producer also stopped at its third cycle because incomplete tuples exited before the canonical diagnostic. Safe phase publication, total-cleanup hard-bounded supervision, analyzer publication, non-circular planner producer, full-bootstrap sinks, and provenance migration remain TODO666; H closes AC-8/9. |
 | R1 | A1 fresh current Stage 2 plus one instrumented Stage 3 | M0 accepted; fresh unique output available | one current-source transaction with phase/memory/process/RSS evidence; no blind retry and no fourth run this session. |
 | R1b | A2 Stage 4 admission | A1 accepted | source-matched Stage 4, essential-tools, and deploy receipts. This row is serial because it owns the deployment transaction; rollback waits until B--F/Q finish unless an immutable isolated evidence bundle is used. |
 | R2 | B boot/IPC/VFS; C paging/PID1/network; D SSH; E WM; F SSpec/manual | A2 admitted Stage 4 and froze hash/provenance | Each row runs its exact focused commands once and writes only its disjoint artifact subtree. No row claims live QEMU PASS. |
@@ -226,10 +226,12 @@ Exact commands:
 ```sh
 # A1: run only in a fresh session after M0 acceptance; the output must be absent.
 env SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --bootstrap-receipt=build/bootstrap/planner-admission/restart12-riscv-current-head/admission.env \
   --full-bootstrap --backend=cranelift --mode=dynload \
   --output=build/restart12-riscv-current-head --jobs=1
 # A2: only after A1 admits Stage 3 from that same output.
 env SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --bootstrap-receipt=build/bootstrap/planner-admission/restart12-riscv-current-head/admission.env \
   --resume-stage4-from-admitted=build/restart12-riscv-current-head --deploy --jobs=1
 # after B--F/Q, unless they used TODO667's isolated immutable bundle:
 sh scripts/bootstrap/rollback-bootstrap-deploy.shs x86_64-unknown-linux-gnu
@@ -315,7 +317,7 @@ Live artifacts (the runner's current canonical paths):
 
 | Lane | Scope | Status |
 |---|---|---|
-| compiler memory/bootstrap owners | AC-1/2 sampling/sink review, fresh current Stage 2, instrumented Stage 3, Stage 4 admission/deploy/deferred rollback | **M0 ACTIONABLE / TODO666:** the bounded supervisor draft fixed descriptor publication, outer-PGID identity, durable records, and several adversarial cases, but was reverted after independent review found non-total post-fork cleanup, possible survivors, and soft bounds. Safe phase publication, hard-bounded zero-survivor supervision, full-bootstrap sinks, analyzer, provenance migration, and parse-vs-HIR ownership remain; no fourth run this session |
+| compiler memory/bootstrap owners | AC-1/2 sampling/sink review, fresh current Stage 2, instrumented Stage 3, Stage 4 admission/deploy/deferred rollback | **M0 ACTIONABLE / TODO666:** supervisor, phase publisher, analyzer, and planner producer drafts each stopped at their own three-cycle boundary and were reverted. Exact owners are total post-fork cleanup/zero survivors/hard caps; bootstrap capsule projection for the new phase runtime providers; removal of a linked final analyzer receipt on later durability failure; and canonical incomplete-Stage2-tuple diagnostics in the non-circular planner producer. Full-bootstrap/resume parity, provenance migration, and parse-vs-HIR ownership remain; no Stage3 retry in this session |
 | RV64 gate sidecar | AC-3/6 state, runtime owners, IPC/VFS wire integration, and serial entry integration | boot-gate source exists; wire review and focused/live execution blocked by TODO667 |
 | docs/SPipe sidecar | AC-7 SSpec/manual tooling plus AC-8/9 plan/guide/wiki consistency | AC-8/9 accepted by H0/root static review; only AC-7 execution/docgen/maintain evidence is blocked by TODO667/807 |
 | merge owner | root Codex agent in this detached worktree | active |
