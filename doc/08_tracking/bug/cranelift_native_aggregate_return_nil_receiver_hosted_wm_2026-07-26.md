@@ -11,6 +11,21 @@
   site is inside the web render artifact pipeline, where aggregates are
   passed pervasively — chasing further sites is the wrong fix.
 
+## Parent-authoritative process repro (2026-08-14)
+
+The admitted current-source Stage-2 compiler reproduces the same systemic ABI
+class in `parent_commit_piped_result_spec.spl`. Focused scalarized executables
+pass 8/8 inbox, 9/9 owner, and 6/6 piped-session examples. In the broader
+real-child executable, nested `ParentCommitPipedReadResultV1` returns corrupt
+small counters into large values (for example `accepted=1398034993`) while
+adjacent scalar lifecycle state remains coherent. Three fresh-cache bounded
+cycles retained the failure; the third-cycle cap stopped further retries.
+
+The inbox and owner mutex fields were safely reduced to opaque scalar handles,
+which fixed a deterministic `MutexHandle.unlock` crash and admitted all focused
+tests. The remaining compiler fix must make nested aggregate returns ABI-stable;
+consumer-site scalarization is not acceptance for the five-step system flow.
+
 ## Shape of the defect
 
 A function returning a struct aggregate (`ResolvedThemePackage`,

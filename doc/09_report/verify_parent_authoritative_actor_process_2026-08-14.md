@@ -27,6 +27,11 @@ the canonical architecture, guide, expert knowledge, and plans.
   and single transition (1), hosted-symbol fallback (1), and common actor
   backpressure (1).
 - PASS: Stage-2 execution proved mutation-after-offer process-frame isolation.
+- PASS: admitted Stage-2 focused process executables passed 8/8 inbox, 9/9
+  owner, and 6/6 piped-session examples. This includes hostile/replay/budget
+  ingress, copied retention, revoke/no-resurrection, deterministic drain,
+  candidate apply/verify, mutation receipts, rollback, generation rejection,
+  and close behavior.
 - PASS by static inspection: actor operations route through the scheduler
   owner; parent commit validates/applies/verifies before one publication;
   cancellation revokes retained frames; the focused specs have real assertions,
@@ -49,13 +54,16 @@ the canonical architecture, guide, expert knowledge, and plans.
   grew monotonically to 29,019,120 KiB RSS and was terminated with status 143
   before a compiler diagnostic or candidate. The retained progress receipt is
   `build/bootstrap-restart12-current/bootstrap-retry-progress.log`.
+- PASS: the source-checkout runtime selector now rejects an incomplete staged
+  Rust archive in favor of the complete core-C source capsule. The capsule
+  passed 33 checks, linked the focused native specs without stub fallback, and
+  includes checked heap counters plus receiver-dispatched `rt_push`.
 - WARN: the replacement Stage 2 supports only `compile` and `native-build`, not
-  the Stage-4 `test`/SPipe commands. Its focused process-system native build
-  reached link, then failed closed because the general core-C lane did not
-  retain mutex/thread-sleep/piped-process providers. No stub fallback was used.
-- WARN: the remaining Stage-2 system scenarios exposed aggregate/`Option`
-  corruption: fragmented real-child delivery, atomic rollback, and cancellation
-  did not produce valid executable verdicts. Assertions were retained.
+  the Stage-4 `test`/SPipe commands. The focused system executable linked and
+  ran, but 3/4 scenarios failed. Its final bounded run proved nested aggregate
+  return corruption directly: scalar lifecycle fields were coherent while
+  returned `accepted` counters became invalid large values. The focused scalar
+  owner/inbox/session shards remain PASS; the system assertions remain intact.
 - WARN: the deployed Stage-4 wrapper still exits 139 at its bounded test ABI
   probe. Consequently focused Simple tests, SPipe docgen/maintenance, and the
   compiler/lib/MCP/LSP Stage-4 gates are not admitted.
@@ -65,7 +73,7 @@ the canonical architecture, guide, expert knowledge, and plans.
   not read canonical state. The reviewer still correctly withheld ACCEPT
   because the executable WARN gates above remain open.
 
-The blockers are the Stage-3 RSS termination tracked in
+The blockers are Stage-2 nested aggregate-return corruption, the Stage-3 RSS termination tracked in
 `doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`
 and the existing deployed-runtime failure tracked in
 `doc/08_tracking/bug/native_selfhosted_run_segfault_startup_normalize_2026-07-24.md`.

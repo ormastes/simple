@@ -12,7 +12,7 @@ use std.common.structural.transfer.process_frame_codec.{
     decode_process_transfer_frame
 }
 use std.common.structural.transfer.transfer_contracts.{ParallelExecutionDomain}
-use std.thread_sffi.{MutexHandle, mutex_create}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 
 val PARENT_COMMIT_INBOX_DEFAULT_MAX_BYTES: i64 = 16 * 1024 * 1024
 
@@ -66,7 +66,7 @@ class ParentCommitFrameInboxV1:
     rejected_session_frames: i64
     rejected_replay_frames: i64
     closed: bool
-    mutex: MutexHandle
+    mutex_handle: i64
 
 impl ParentCommitFrameInboxV1:
     static fn create(capacity: i64) -> ParentCommitFrameInboxV1:
@@ -103,7 +103,7 @@ impl ParentCommitFrameInboxV1:
             rejected_session_frames: 0,
             rejected_replay_frames: 0,
             closed: false,
-            mutex: mutex_create()
+            mutex_handle: mutex_raw_create()
         )
 
     me offer_process_result_frame(frame: [u8]) -> bool:
@@ -119,19 +119,19 @@ impl ParentCommitFrameInboxV1:
         if not decode_result_envelope(decoded_frame.value.payload).ok:
             self.record_rejection()
             return false
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return false
         if self.expected_generation >= 0 and decoded_frame.value.envelope.generation != self.expected_generation:
             self.rejected_frames = self.rejected_frames + 1
             self.rejected_session_frames = self.rejected_session_frames + 1
-            self.mutex.unlock()
+            mutex_raw_unlock(self.mutex_handle)
             return false
         if self.expected_generation >= 0:
             for region_id in self.admitted_region_ids:
                 if region_id == decoded_frame.value.envelope.region_id:
                     self.rejected_frames = self.rejected_frames + 1
                     self.rejected_replay_frames = self.rejected_replay_frames + 1
-                    self.mutex.unlock()
+                    mutex_raw_unlock(self.mutex_handle)
                     return false
             # A generation-bound inbox is one finite child session. Its frame
             # capacity is also the lifetime replay-table budget, so replay
@@ -139,11 +139,11 @@ impl ParentCommitFrameInboxV1:
             if self.admitted_region_ids.len() >= self.capacity:
                 self.rejected_frames = self.rejected_frames + 1
                 self.rejected_replay_frames = self.rejected_replay_frames + 1
-                self.mutex.unlock()
+                mutex_raw_unlock(self.mutex_handle)
                 return false
         if self.closed or self.capacity <= 0 or self.byte_capacity <= 0 or self.frames.len() - self.head >= self.capacity or frame.len() > self.byte_capacity - self.retained_bytes:
             self.rejected_frames = self.rejected_frames + 1
-            self.mutex.unlock()
+            mutex_raw_unlock(self.mutex_handle)
             return false
         self.frames.push(parent_commit_frame_copy(frame))
         if self.expected_generation >= 0:
@@ -155,16 +155,16 @@ impl ParentCommitFrameInboxV1:
             self.high_water_frames = depth
         if self.retained_bytes > self.high_water_bytes:
             self.high_water_bytes = self.retained_bytes
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
         true
 
     me receive() -> ParentCommitFrameReceiveV1:
         """Remove the oldest accepted frame without front-slicing the buffer."""
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return parent_commit_frame_receive_v1(false, [], "lock-unavailable")
         if self.head >= self.frames.len():
             val reason = if self.closed: "closed" else: "empty"
-            self.mutex.unlock()
+            mutex_raw_unlock(self.mutex_handle)
             return parent_commit_frame_receive_v1(false, [], reason)
         val frame = parent_commit_frame_copy(self.frames[self.head])
         self.retained_bytes = self.retained_bytes - self.frames[self.head].len()
@@ -172,46 +172,46 @@ impl ParentCommitFrameInboxV1:
         if self.head == self.frames.len():
             self.frames = []
             self.head = 0
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
         parent_commit_frame_receive_v1(true, frame, "")
 
     me close():
         """Reject future frames while allowing already accepted frames to drain."""
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return
         self.closed = true
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
 
     me revoke():
         """Cancel the session and destroy every accepted, uncommitted frame."""
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return
         self.frames = []
         self.admitted_region_ids = []
         self.head = 0
         self.retained_bytes = 0
         self.closed = true
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
 
     fn depth() -> i64:
         """Return the current bounded occupancy, or -1 if locking fails."""
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return -1
         val result = self.frames.len() - self.head
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
         result
 
     fn retained_byte_count() -> i64:
         """Return copied frame bytes retained by this queue, or -1 on lock failure."""
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return -1
         val result = self.retained_bytes
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
         result
 
     fn stats() -> ParentCommitFrameInboxStatsV1:
         """Return deterministic bounded-memory counters under one lock."""
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return ParentCommitFrameInboxStatsV1(
                 depth: -1, retained_bytes: -1, accepted_frames: -1,
                 rejected_frames: -1, high_water_frames: -1,
@@ -226,21 +226,21 @@ impl ParentCommitFrameInboxV1:
             high_water_bytes: self.high_water_bytes,
             rejected_session_frames: self.rejected_session_frames,
             rejected_replay_frames: self.rejected_replay_frames)
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
         result
 
     fn is_closed() -> bool:
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return true
         val result = self.closed
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
         result
 
     me record_rejection():
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return
         self.rejected_frames = self.rejected_frames + 1
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
 
 fn parent_commit_frame_inbox_v1(capacity: i64) -> ParentCommitFrameInboxV1:
     ParentCommitFrameInboxV1.create(capacity)

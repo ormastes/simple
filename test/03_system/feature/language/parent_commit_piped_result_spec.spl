@@ -56,7 +56,8 @@ use std.nogc_async_mut.parent_commit_owner.{
     ParentCommitMutationOutcomeV1,
     ParentCommitOwnerV1,
     parent_commit_candidate_v1,
-    parent_commit_owner_v1
+    parent_commit_owner_v1,
+    parent_commit_owner_v1_with_application_root
 }
 use std.nogc_async_mut.parent_commit_piped_process.{
     parent_commit_piped_process_session_v1
@@ -143,6 +144,7 @@ describe "parent-authoritative piped child results":
             polls = polls + 1
             if not session.status().closed:
                 thread_sleep(5)
+        print "fragmented evidence accepted={accepted_total} rejected={rejected_total} depth={inbox.depth()} fragment={saw_fragment} closed={session.status().closed}"
         expect(saw_fragment).to_equal(true)
         expect(accepted_total).to_equal(1)
         expect(inbox.depth()).to_equal(1)
@@ -201,29 +203,32 @@ describe "parent-authoritative piped child results":
         expect(received.frame).to_equal(expected)
 
     it "should roll back a mixed valid and malformed process batch":
-        val owner = parent_commit_owner_v1(
+        val owner = parent_commit_owner_v1_with_application_root(
             parallel_commit_state_v1(4, 800),
+            [600],
             ParallelCommitOrder.TaskIdThenSequence,
             ParallelConflictPolicy.Reject)
         val valid = child_result_frame(21, 2100, 51)
 
         val outcome = owner.commit_process_result_frames_with_candidate(
-            [valid, [0, 1, 2]], parent_commit_candidate_v1(801, [2100]))
+            [valid, [0, 1, 2]], parent_commit_candidate_v1(801, [600, 2100]))
+
+        print "rollback evidence ok={outcome.mutation.ok} reason={outcome.mutation.reason} before={outcome.mutation.before_revision} after={outcome.mutation.after_revision}"
 
         expect(outcome.commit.receipt.ok).to_equal(false)
         expect(outcome.mutation.ok).to_equal(false)
         expect(outcome.mutation.reason).to_equal("invalid-process-result-frame")
         expect(outcome.mutation.before_revision).to_equal(4)
         expect(outcome.mutation.after_revision).to_equal(4)
-        expect(outcome.mutation.before_application_payload_root).to_equal([])
-        expect(outcome.mutation.after_application_payload_root).to_equal([])
+        expect(outcome.mutation.before_application_payload_root).to_equal([600])
+        expect(outcome.mutation.after_application_payload_root).to_equal([600])
         if val snapshot = owner.snapshot():
             expect(snapshot.revision).to_equal(4)
             expect(snapshot.snapshot_token).to_equal(800)
         else:
             fail("rejected process batch must preserve the parent snapshot")
         if val application_root = owner.snapshot_application_payload_root():
-            expect(application_root).to_equal([])
+            expect(application_root).to_equal([600])
         else:
             fail("rejected process batch must preserve the application root")
 
@@ -253,6 +258,7 @@ describe "parent-authoritative piped child results":
         expect(session.cancel()).to_equal(true)
         expect(session.cancel()).to_equal(true)
         val terminal = session.status()
+        print "cancel evidence accepted={accepted} depth={inbox.depth()} cancelled={terminal.cancelled} closed={terminal.closed} alive={terminal.alive} attempts={terminal.close_attempts} reason={terminal.terminal_reason}"
         expect(terminal.cancelled).to_equal(true)
         expect(terminal.closed).to_equal(true)
         expect(terminal.alive).to_equal(false)

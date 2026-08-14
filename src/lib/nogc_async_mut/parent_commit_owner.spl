@@ -25,7 +25,7 @@ use std.common.structural.transfer.transfer_contracts.{
 use std.common.structural.transfer.process_frame_codec.{decode_process_transfer_frame}
 use std.common.structural.parallel_commit.result_envelope_codec.{decode_result_envelope}
 use std.nogc_async_mut.parent_commit_inbox.{ParentCommitFrameInboxV1}
-use std.thread_sffi.{MutexHandle, mutex_create}
+use std.thread_sffi.{mutex_raw_create, mutex_raw_lock, mutex_raw_unlock}
 use std.nogc_async_mut.io.{time_now_unix_micros}
 
 struct ParentCommitSubmissionV1:
@@ -100,7 +100,7 @@ class ParentCommitOwnerV1:
     application_payload_root: [i64]
     order: ParallelCommitOrder
     conflict: ParallelConflictPolicy
-    mutex: MutexHandle
+    mutex_handle: i64
     next_process_session_generation: i64
 
 impl ParentCommitOwnerV1:
@@ -127,20 +127,20 @@ impl ParentCommitOwnerV1:
                 application_payload_root),
             order: order,
             conflict: conflict,
-            mutex: mutex_create(),
+            mutex_handle: mutex_raw_create(),
             next_process_session_generation: generation_seed
         )
 
     me issue_process_session_generation() -> i64:
         """Issue session identity from the sole long-lived parent authority."""
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return 0
         val issued = self.next_process_session_generation
         if issued == 9223372036854775807:
-            self.mutex.unlock()
+            mutex_raw_unlock(self.mutex_handle)
             return 0
         self.next_process_session_generation = issued + 1
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
         issued
 
     fn snapshot() -> ParallelCommitStateV1?:
@@ -149,18 +149,18 @@ impl ParentCommitOwnerV1:
         `nil` is deliberate fail-closed behavior for a broken runtime mutex;
         callers must not infer a snapshot from an unsynchronized field read.
         """
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return nil
         val snapshot = self.state
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
         Some(snapshot)
 
     fn snapshot_application_payload_root() -> [i64]?:
         """Copy the canonical application payload root under the owner lock."""
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return nil
         val result = parent_commit_payload_root_copy(self.application_payload_root)
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
         Some(result)
 
     me commit(results: [ResultEnvelopeV1], candidate_snapshot_token: i64) -> ParallelCommitOutcomeV1:
@@ -170,7 +170,7 @@ impl ParentCommitOwnerV1:
         so a second child batch observes the revision written by the first.
         No result history or mutable child payload is stored in this owner.
         """
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return self.lock_failure()
         val current = self.state
         val outcome = parallel_commit_publish_envelopes(
@@ -179,19 +179,19 @@ impl ParentCommitOwnerV1:
             for token in outcome.receipt.ordered_payload_tokens:
                 self.application_payload_root.push(token)
             self.state = outcome.state
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
         outcome
 
     me commit_submissions(submissions: [ParentCommitSubmissionV1],
                           candidate_snapshot_token: i64) -> ParallelCommitOutcomeV1:
         """Commit only child-created results with an admitted parent boundary."""
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return self.lock_failure()
         var results: [ResultEnvelopeV1] = []
         for submission in submissions:
             if not parent_commit_submission_v1_well_formed(submission):
                 val rejected = self.failure("invalid-child-result-transfer")
-                self.mutex.unlock()
+                mutex_raw_unlock(self.mutex_handle)
                 return rejected
             results.push(submission.result)
         val current = self.state
@@ -201,7 +201,7 @@ impl ParentCommitOwnerV1:
             for token in outcome.receipt.ordered_payload_tokens:
                 self.application_payload_root.push(token)
             self.state = outcome.state
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
         outcome
 
     me commit_process_result_frame(frame: [u8],
@@ -265,7 +265,7 @@ impl ParentCommitOwnerV1:
             if not parent_commit_submission_v1_well_formed(submission):
                 return self.reject_candidate("invalid-child-result-transfer")
             submissions.push(submission)
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return self.reject_candidate_unlocked("commit-owner-lock-unavailable")
         val current = self.state
         val current_application_payload_root = parent_commit_payload_root_copy(
@@ -277,7 +277,7 @@ impl ParentCommitOwnerV1:
             current, results, candidate.snapshot_token, self.order, self.conflict)
         if not proposed.receipt.ok:
             val rejected = self.candidate_failure_locked(proposed, proposed.receipt.reason)
-            self.mutex.unlock()
+            mutex_raw_unlock(self.mutex_handle)
             return rejected
         var applied_root: [i64] = []
         for token in current_application_payload_root:
@@ -287,7 +287,7 @@ impl ParentCommitOwnerV1:
         if applied_root != candidate.application_payload_root:
             val rejected = self.candidate_failure_locked(
                 proposed, "candidate-application-root-mismatch")
-            self.mutex.unlock()
+            mutex_raw_unlock(self.mutex_handle)
             return rejected
         self.state = proposed.state
         self.application_payload_root = applied_root
@@ -305,7 +305,7 @@ impl ParentCommitOwnerV1:
                 applied_payload_tokens: parent_commit_payload_root_copy(
                     proposed.receipt.ordered_payload_tokens),
                 reason: ""))
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
         accepted
 
     fn candidate_failure_locked(_proposed: ParallelCommitOutcomeV1,
@@ -332,10 +332,10 @@ impl ParentCommitOwnerV1:
                 reason: reason))
 
     me reject_candidate(reason: text) -> ParentCommitMutationOutcomeV1:
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return self.reject_candidate_unlocked("commit-owner-lock-unavailable")
         val rejected = self.candidate_failure_locked(self.failure(reason), reason)
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
         rejected
 
     fn reject_candidate_unlocked(reason: text) -> ParentCommitMutationOutcomeV1:
@@ -406,17 +406,17 @@ impl ParentCommitOwnerV1:
         self.failure("commit-owner-lock-unavailable")
 
     me reject_process_frame() -> ParallelCommitOutcomeV1:
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return self.lock_failure()
         val rejected = self.failure("invalid-process-result-frame")
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
         rejected
 
     me inbox_failure(reason: text) -> ParallelCommitOutcomeV1:
-        if not self.mutex.lock():
+        if not mutex_raw_lock(self.mutex_handle):
             return self.lock_failure()
         val rejected = self.failure("process-result-inbox-" + reason)
-        self.mutex.unlock()
+        mutex_raw_unlock(self.mutex_handle)
         rejected
 
     fn failure(reason: text) -> ParallelCommitOutcomeV1:
