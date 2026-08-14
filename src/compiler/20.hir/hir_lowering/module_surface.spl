@@ -366,14 +366,28 @@ impl ModuleSurfaceBuilder:
             return Err("module surface builder is frozen")
         if self.index_by_path.contains_key(canonical_path):
             return Err("module surface already exists for physical source: {canonical_path}")
+        val surface_result = module_surface_from_module(module, source, source_index)
+        if surface_result.is_err():
+            return Err(surface_result.unwrap_err())
+        self.add_surface_canonical(
+            surface_result.unwrap(), source, canonical_path)
+
+    # Commit an already-built surface to the persistent registry.  Streaming
+    # parsing builds the compact surface while the parse arena is still
+    # transient, promotes that surface, and only then calls this method.  This
+    # keeps construction temporaries out of the process-lifetime heap.
+    me add_surface_canonical(
+        surface: ModuleSurface, source: SourceFile, canonical_path: text
+    ) -> Result<(), text>:
+        if self.frozen:
+            return Err("module surface builder is frozen")
+        if self.index_by_path.contains_key(canonical_path):
+            return Err("module surface already exists for physical source: {canonical_path}")
         val surface_index = self.surfaces.len()
         val name_result = self.add_indexed_name(source.module_name, surface_index)
         if name_result.is_err():
             return Err(name_result.unwrap_err())
-        val surface_result = module_surface_from_module(module, source, source_index)
-        if surface_result.is_err():
-            return Err(surface_result.unwrap_err())
-        self.surfaces = self.surfaces.push(surface_result.unwrap())
+        self.surfaces = self.surfaces.push(surface)
         self.index_by_path[canonical_path] = surface_index
         Ok(())
 
@@ -1461,6 +1475,41 @@ fn module_surface_callable_from_function(function_: ParserFunction) -> ModuleSur
         span: function_.span
     )
 
+fn module_surface_callable_from_header(
+    header: ParserFunctionHeader
+) -> ModuleSurfaceCallable:
+    var params: [ModuleSurfaceParam] = []
+    for param in header.params:
+        params = params.push(ModuleSurfaceParam(
+            name: param.name,
+            has_type_: param.has_type_,
+            type_: param.type_,
+            type_name: parser_type_kind_named_name(param.type_.kind),
+            array_element_name: parser_type_kind_array_element_name(param.type_.kind),
+            has_default: false,
+            is_mutable: param.is_mutable,
+            span: param.span
+        ))
+    ModuleSurfaceCallable(
+        name: header.name,
+        type_params: header.type_params,
+        params: params,
+        has_return_type: header.has_return_type,
+        return_type: header.return_type,
+        return_type_name: parser_type_kind_named_name(header.return_type.kind),
+        return_array_element_name: parser_type_kind_array_element_name(header.return_type.kind),
+        visibility: header.visibility,
+        is_async: header.is_async,
+        is_static: header.is_static,
+        is_public: header.is_public,
+        is_method: header.is_method,
+        is_mutable: header.is_mutable,
+        is_const: header.is_const,
+        is_kernel: header.is_kernel,
+        is_extern: header.is_extern,
+        span: header.span
+    )
+
 fn module_surface_trait_from_trait(trait_: ParserTrait) -> ModuleSurfaceTrait:
     var methods: [ModuleSurfaceCallable] = []
     var default_methods: [ParserFunction] = []
@@ -1533,16 +1582,29 @@ fn module_surface_export_origin_hints(
             owner_file = ""
     Ok(true)
 
-fn module_surface_from_module(
-    module: ParserModule, source: SourceFile, source_index: i64
+class ModuleSurfaceParserOwner:
+    value: ParserModule
+
+    static fn new(value: ParserModule) -> ModuleSurfaceParserOwner:
+        ModuleSurfaceParserOwner(value: value)
+
+fn module_surface_from_owner(
+    owner: ModuleSurfaceParserOwner, source: SourceFile, source_index: i64
 ) -> Result<ModuleSurface, text>:
     var callables: Dict<text, ModuleSurfaceCallable> = {}
-    for name in module.functions.keys():
-        callables[name] = module_surface_callable_from_function(module.functions[name])
+    for name in owner.value.functions.keys():
+        if owner.value.function_headers.contains_key(name):
+            callables[name] = module_surface_callable_from_header(
+                owner.value.function_headers[name])
+        else:
+            # Compatibility for parser producers that have not populated the
+            # compact header index.
+            callables[name] = module_surface_callable_from_function(
+                owner.value.functions[name])
 
     var composites: Dict<text, ModuleSurfaceComposite> = {}
-    for name in module.classes.keys():
-        val class_ = module.classes[name]
+    for name in owner.value.classes.keys():
+        val class_ = owner.value.classes[name]
         var fields: [ModuleSurfaceField] = []
         for field in class_.fields:
             fields = fields.push(ModuleSurfaceField(
@@ -1551,8 +1613,8 @@ fn module_surface_from_module(
                 type_name: parser_type_kind_named_name(field.type_.kind),
                 array_element_name: parser_type_kind_array_element_name(field.type_.kind)))
         composites[name] = ModuleSurfaceComposite(name: class_.name, kind: "class", type_params: class_.type_params, fields: fields, visibility: class_.visibility, is_public: class_.is_public, span: class_.span)
-    for name in module.actors.keys():
-        val actor = module.actors[name]
+    for name in owner.value.actors.keys():
+        val actor = owner.value.actors[name]
         var fields: [ModuleSurfaceField] = []
         for field in actor.fields:
             fields = fields.push(ModuleSurfaceField(
@@ -1561,8 +1623,8 @@ fn module_surface_from_module(
                 type_name: parser_type_kind_named_name(field.type_.kind),
                 array_element_name: parser_type_kind_array_element_name(field.type_.kind)))
         composites[name] = ModuleSurfaceComposite(name: actor.name, kind: "actor", type_params: actor.type_params, fields: fields, visibility: actor.visibility, is_public: actor.is_public, span: actor.span)
-    for name in module.structs.keys():
-        val struct_ = module.structs[name]
+    for name in owner.value.structs.keys():
+        val struct_ = owner.value.structs[name]
         var fields: [ModuleSurfaceField] = []
         for field in struct_.fields:
             fields = fields.push(ModuleSurfaceField(
@@ -1573,21 +1635,21 @@ fn module_surface_from_module(
         composites[name] = ModuleSurfaceComposite(name: struct_.name, kind: "struct", type_params: struct_.type_params, fields: fields, visibility: struct_.visibility, is_public: struct_.is_public, span: struct_.span)
 
     var enums: Dict<text, ModuleSurfaceEnum> = {}
-    for name in module.enums.keys():
-        val enum_ = module.enums[name]
+    for name in owner.value.enums.keys():
+        val enum_ = owner.value.enums[name]
         enums[name] = ModuleSurfaceEnum(name: enum_.name, type_params: enum_.type_params, variants: enum_.variants, visibility: enum_.visibility, is_public: enum_.is_public, span: enum_.span)
 
     var traits: Dict<text, ModuleSurfaceTrait> = {}
-    for name in module.traits.keys():
-        traits[name] = module_surface_trait_from_trait(module.traits[name])
+    for name in owner.value.traits.keys():
+        traits[name] = module_surface_trait_from_trait(owner.value.traits[name])
 
     var impls: [ModuleSurfaceImpl] = []
-    for impl_ in module.impls:
+    for impl_ in owner.value.impls:
         impls = impls.push(module_surface_impl_from_impl(impl_))
 
     var type_aliases: Dict<text, ModuleSurfaceTypeAlias> = {}
-    for name in module.type_aliases.keys():
-        val alias = module.type_aliases[name]
+    for name in owner.value.type_aliases.keys():
+        val alias = owner.value.type_aliases[name]
         type_aliases[name] = ModuleSurfaceTypeAlias(
             name: alias.name,
             type_params: alias.type_params,
@@ -1598,8 +1660,8 @@ fn module_surface_from_module(
         )
 
     var constants: Dict<text, ModuleSurfaceConst> = {}
-    for name in module.constants.keys():
-        val constant = module.constants[name]
+    for name in owner.value.constants.keys():
+        val constant = owner.value.constants[name]
         constants[name] = ModuleSurfaceConst(
             name: constant.name,
             has_type_: constant.has_type_,
@@ -1640,8 +1702,8 @@ fn module_surface_from_module(
         preferred_registry_name: "",
         content_length: source.content.len(),
         content_hash: rt_hash_text(source.content),
-        imports: module.imports,
-        exports: module.exports,
+        imports: owner.value.imports,
+        exports: owner.value.exports,
         import_target_indices: [],
         import_target_names: [],
         export_route_sources: [],
@@ -1665,6 +1727,12 @@ fn module_surface_from_module(
         export_origins: origin_hints.origins,
         export_origin_index: origin_hints
     ))
+
+fn module_surface_from_module(
+    module: ParserModule, source: SourceFile, source_index: i64
+) -> Result<ModuleSurface, text>:
+    val owner = ModuleSurfaceParserOwner.new(module)
+    module_surface_from_owner(owner, source, source_index)
 
 fn module_surface_source_matches(surface: ModuleSurface, source: SourceFile, index: i64) -> bool:
     surface.source_index == index and

@@ -10,7 +10,9 @@ use compiler.core.parser.{par_had_error_get}
 use compiler.frontend.parser_types.*
 use compiler.hir.hir_lowering.module_surface.{
     ModuleSurfaceBuilder,
+    ModuleSurfaceParserOwner,
     module_surface_canonical_path,
+    module_surface_from_owner,
     module_surface_promote
 }
 use compiler.driver.driver_source_loading.{
@@ -23,6 +25,7 @@ use compiler.driver.driver_log_helpers.{
     log_debug,
     log_phase,
     log_module_surface_released,
+    log_module_surface_stage,
     log_build_progress
 }
 use compiler.driver.driver_orchestration.{driver_streaming_surface_enabled}
@@ -76,27 +79,46 @@ impl CompilerDriver:
         source_index: i64,
         canonical_path: text
     ) -> Result<ModuleSurfaceBuilder, text>:
+        if builder.frozen:
+            return Err("module surface builder is frozen")
+        if builder.index_by_path.contains_key(canonical_path):
+            return Err("module surface already exists for physical source: {canonical_path}")
         if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
+        log_module_surface_stage(source.path, "parse-start")
         val module = parse_full_frontend(
             source.content, source.path, source.module_name, self.ctx.logger)
         if par_had_error_get():
             val _ended = driver_end_transient_parse_scope()
             return Err("parse error in {source.path} (see [parser_error] output above)")
+        log_module_surface_stage(source.path, "parse-done")
+        # Build the compact projection before pausing so all intermediate
+        # arrays/dictionaries remain owned by the per-file transient scope.
+        # Only the reachable surface graph is promoted below.
+        # Box the rich parser aggregate while allocation tracking is active.
+        # Surface extraction then crosses the module boundary by class
+        # reference instead of copying every executable body by value.
+        val module_owner = ModuleSurfaceParserOwner.new(module)
+        val surface_result = module_surface_from_owner(
+            module_owner, source, source_index)
+        if surface_result.is_err():
+            val _ended = driver_end_transient_parse_scope()
+            return Err(surface_result.unwrap_err())
+        val surface = surface_result.unwrap()
+        log_module_surface_stage(source.path, "surface-done")
         if not rt_transient_array_scope_pause():
             val _ended = driver_end_transient_parse_scope()
             return Err("transient parser scope pause failed for {source.path}")
-        val add_result = builder.add_parsed_canonical(
-            module, source, source_index, canonical_path)
+        if not module_surface_promote(surface):
+            val _ended = driver_end_transient_parse_scope()
+            return Err("module surface promotion failed for {source.path}")
+        log_module_surface_stage(source.path, "promote-done")
+        val add_result = builder.add_surface_canonical(
+            surface, source, canonical_path)
         if add_result.is_err():
             val _ended = driver_end_transient_parse_scope()
             return Err(add_result.unwrap_err())
-        val surface_index = builder.surfaces.len() - 1
-        if surface_index < 0 or not module_surface_promote(
-            builder.surfaces[surface_index]
-        ):
-            val _ended = driver_end_transient_parse_scope()
-            return Err("module surface promotion failed for {source.path}")
+        log_module_surface_stage(source.path, "commit-done")
         if not driver_end_transient_parse_scope():
             return Err("transient parser scope end failed for {source.path}")
         Ok(builder)

@@ -2,6 +2,12 @@ use std.io.{file_read}
 use std.spec.{describe, it, expect}
 
 val SURFACE = "src/compiler/20.hir/hir_lowering/module_surface.spl"
+val PARSER_TYPES = "src/compiler/10.frontend/parser_types.spl"
+val MODULE_ASSEMBLY = "src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl"
+val DESUGAR_ASYNC = "src/compiler/10.frontend/desugar/desugar_async.spl"
+val SOURCE_11 = "src/compiler/70.backend/backend/interpreter.spl"
+val SOURCE_11_EXPR = "src/compiler/70.backend/backend/interpreter_expr.spl"
+val SOURCE_11_BINOP = "src/compiler/70.backend/backend/interpreter_binop.spl"
 val LOWERING = "src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl"
 val ORCHESTRATION = "src/compiler/80.driver/driver_orchestration.spl"
 val SOURCE_PARSING = "src/compiler/80.driver/driver_source_pipeline_parsing.spl"
@@ -18,11 +24,42 @@ describe "Stage4 streaming surface ownership":
         expect(surface).to_contain("class ModuleSurfacesByName:")
         expect(surface.contains("struct ModuleSurfacesByName:")).to_equal(false)
 
+    it "bounds source 11 and projects it through compact headers and a reference owner":
+        val parser_types = file_read(PARSER_TYPES)
+        val assembly = file_read(MODULE_ASSEMBLY)
+        val desugar = file_read(DESUGAR_ASYNC)
+        val surface = file_read(SURFACE)
+        val driver = file_read(SOURCE_PARSING)
+        val source_11 = file_read(SOURCE_11)
+        val source_11_expr = file_read(SOURCE_11_EXPR)
+        val source_11_binop = file_read(SOURCE_11_BINOP)
+        expect(source_11.len()).to_be_less_than(35000)
+        expect(source_11_expr.len()).to_be_less_than(30000)
+        expect(source_11_binop.len()).to_be_less_than(20000)
+        expect(source_11.contains("fn eval_expr(")).to_equal(false)
+        expect(source_11.contains("fn eval_binop(")).to_equal(false)
+        expect(source_11).to_contain("use compiler.backend.backend.interpreter_expr.*")
+        expect(source_11).to_contain("use compiler.backend.backend.interpreter_binop.*")
+        expect(source_11_expr).to_contain("fn eval_expr(")
+        expect(source_11_binop).to_contain("fn eval_binop(")
+        expect(parser_types).to_contain("function_headers: Dict<text, ParserFunctionHeader>")
+        expect(parser_types).to_contain("fn parser_function_header(function_: ParserFunction)")
+        expect(assembly).to_contain("function_headers[fn_.name] = parser_function_header(fn_)")
+        expect(assembly).to_contain("built_module.function_headers = function_headers")
+        expect(desugar).to_contain("function_headers: desugared_function_headers")
+        expect(surface).to_contain("class ModuleSurfaceParserOwner:")
+        expect(surface).to_contain("owner: ModuleSurfaceParserOwner")
+        expect(surface).to_contain("owner.value.function_headers.contains_key(name)")
+        expect(driver).to_contain("val module_owner = ModuleSurfaceParserOwner.new(module)")
+        expect(driver).to_contain("module_surface_from_owner(")
+        expect(driver).to_contain("log_module_surface_stage(source.path, \"parse-start\")")
+        expect(driver).to_contain("log_module_surface_stage(source.path, \"surface-done\")")
+
     it "retains type aliases and required declaration carriers":
         val surface = file_read(SURFACE)
         val lowering = file_read(LOWERING)
         expect(surface).to_contain("type_aliases: Dict<text, ModuleSurfaceTypeAlias>")
-        expect(surface).to_contain("for name in module.type_aliases.keys():")
+        expect(surface).to_contain("for name in owner.value.type_aliases.keys():")
         expect(surface).to_contain("default_methods: [Function]")
         expect(surface).to_contain("variants: [Variant]")
         expect(lowering).to_contain("if m.type_aliases.contains_key(name):")
@@ -99,16 +136,22 @@ describe "Stage4 streaming surface ownership":
         val body = driver.substring(start, end)
         val begin = body.index_of("rt_transient_array_scope_begin()")
         val parse = body.index_of("parse_full_frontend(")
+        val owner = body.index_of("ModuleSurfaceParserOwner.new(module)")
+        val build = body.index_of("module_surface_from_owner(")
+        val surface_unwrap = body.index_of("surface_result.unwrap()")
         val pause = body.index_of("rt_transient_array_scope_pause()")
-        val add = body.index_of("builder.add_parsed(")
         val promote = body.index_of("module_surface_promote(")
+        val publish = body.index_of("builder.add_surface_canonical(")
         val reclaim = body.last_index_of("driver_end_transient_parse_scope()")
         expect(begin).to_be_greater_than(0)
         expect(parse).to_be_greater_than(begin)
-        expect(pause).to_be_greater_than(parse)
-        expect(add).to_be_greater_than(pause)
-        expect(promote).to_be_greater_than(add)
-        expect(reclaim).to_be_greater_than(promote)
+        expect(owner).to_be_greater_than(parse)
+        expect(build).to_be_greater_than(owner)
+        expect(surface_unwrap).to_be_greater_than(build)
+        expect(pause).to_be_greater_than(surface_unwrap)
+        expect(promote).to_be_greater_than(pause)
+        expect(publish).to_be_greater_than(promote)
+        expect(reclaim).to_be_greater_than(publish)
         expect(body.contains("rt_transient_heap_promote(module)")).to_equal(false)
 
     it "walks retained graphs through raw struct allocations":

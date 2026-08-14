@@ -1,0 +1,238 @@
+# Interpreter Backend - binary operator evaluation extension
+#
+# Split from interpreter.spl to bound the largest physical parser surface.
+
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.backend.backend_types.*
+use compiler.backend.backend.interpreter.{
+    InterpreterBackendImpl,
+    interp_int_to_f64,
+    itrace
+}
+use compiler.backend.backend.interpreter_calls.{interp_binop_disc}
+
+impl InterpreterBackendImpl:
+    fn eval_binop(op: HirBinOp, left: Value, right: Value, span: Span, left_unsigned: bool, right_unsigned: bool) -> Result<Value, BackendError>:
+        itrace("[EBO] eval_binop enter")
+        var op_t: HirBinOp = op
+        if op_t == nil:
+            return Err(BackendError(
+                message: "internal: missing HIR binary operator",
+                span: Some(span),
+                kind: BackendErrorKind.Internal
+            ))
+        itrace("[EBO] op non-nil path disc={interp_binop_disc(op_t)}")
+        match op_t:
+            case HirBinOp.Add:
+                itrace("[EBO] Add arm")
+                match left:
+                    case Value.Int(l):
+                        itrace("[EBO] Add left=Int {l}")
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Int(l + r))
+                            case Value.Float(r):
+                                Ok(Value.Float(interp_int_to_f64(l, left_unsigned) + r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for +", Some(span)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Float(l + r))
+                            case Value.Int(r):
+                                Ok(Value.Float(l + interp_int_to_f64(r, right_unsigned)))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for +", Some(span)))
+                    case Value.String(l):
+                        match right:
+                            case Value.String(r):
+                                Ok(Value.String(l + r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for +", Some(span)))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for +", Some(span)))
+
+            case HirBinOp.Sub:
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Int(l - r))
+                            case Value.Float(r):
+                                Ok(Value.Float(interp_int_to_f64(l, left_unsigned) - r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for -", Some(span)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Float(l - r))
+                            case Value.Int(r):
+                                Ok(Value.Float(l - interp_int_to_f64(r, right_unsigned)))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for -", Some(span)))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for -", Some(span)))
+
+            case HirBinOp.Mul:
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Int(l * r))
+                            case Value.Float(r):
+                                Ok(Value.Float(interp_int_to_f64(l, left_unsigned) * r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for *", Some(span)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Float(l * r))
+                            case Value.Int(r):
+                                Ok(Value.Float(l * interp_int_to_f64(r, right_unsigned)))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for *", Some(span)))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for *", Some(span)))
+
+            case HirBinOp.Div:
+                if left.is_int() or left.is_float():
+                    match right:
+                        case Value.Int(r):
+                            if r == 0:
+                                return Err(BackendError.runtime_error("division by zero", Some(span)))
+                        case Value.Float(r):
+                            if r == 0.0:
+                                return Err(BackendError.runtime_error("division by zero", Some(span)))
+                        case _: ()
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Int(l / r))
+                            case Value.Float(r):
+                                Ok(Value.Float(interp_int_to_f64(l, left_unsigned) / r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for /", Some(span)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Float(l / r))
+                            case Value.Int(r):
+                                Ok(Value.Float(l / interp_int_to_f64(r, right_unsigned)))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for /", Some(span)))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for /", Some(span)))
+
+            case HirBinOp.Mod:
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                if r == 0:
+                                    Err(BackendError.runtime_error("modulo by zero", Some(span)))
+                                else:
+                                    Ok(Value.Int(l % r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for %", Some(span)))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for %", Some(span)))
+
+            case HirBinOp.Eq:
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Bool(l == r))
+                            case _:
+                                Ok(Value.Bool(self.values_equal(left, right)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Bool(l == r))
+                            case _:
+                                Ok(Value.Bool(self.values_equal(left, right)))
+                    case _:
+                        Ok(Value.Bool(self.values_equal(left, right)))
+
+            case HirBinOp.NotEq:
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Bool(l != r))
+                            case _:
+                                Ok(Value.Bool(not self.values_equal(left, right)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Bool(l != r))
+                            case _:
+                                Ok(Value.Bool(not self.values_equal(left, right)))
+                    case _:
+                        Ok(Value.Bool(not self.values_equal(left, right)))
+
+            case HirBinOp.Lt:
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Bool(l < r))
+                            case Value.Float(r):
+                                Ok(Value.Bool(interp_int_to_f64(l, left_unsigned) < r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for <", Some(span)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Bool(l < r))
+                            case Value.Int(r):
+                                Ok(Value.Bool(l < interp_int_to_f64(r, right_unsigned)))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for <", Some(span)))
+                    case Value.String(l):
+                        match right:
+                            case Value.String(r):
+                                Ok(Value.Bool(l < r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for <", Some(span)))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for <", Some(span)))
+
+            case HirBinOp.LtEq:
+                match left:
+                    case Value.Int(l):
+                        match right:
+                            case Value.Int(r):
+                                Ok(Value.Bool(l <= r))
+                            case Value.Float(r):
+                                Ok(Value.Bool(interp_int_to_f64(l, left_unsigned) <= r))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for <=", Some(span)))
+                    case Value.Float(l):
+                        match right:
+                            case Value.Float(r):
+                                Ok(Value.Bool(l <= r))
+                            case Value.Int(r):
+                                Ok(Value.Bool(l <= interp_int_to_f64(r, right_unsigned)))
+                            case _:
+                                Err(BackendError.type_error("invalid operands for <=", Some(span)))
+                    case _:
+                        Err(BackendError.type_error("invalid operands for <=", Some(span)))
+
+            case HirBinOp.Gt:
+                self.eval_gt(left, right, span, left_unsigned, right_unsigned)
+            case HirBinOp.GtEq:
+                self.eval_gteq(left, right, span, left_unsigned, right_unsigned)
+
+            case HirBinOp.And:
+                Ok(Value.Bool(left.is_truthy() and right.is_truthy()))
+
+            case HirBinOp.Or:
+                Ok(Value.Bool(left.is_truthy() or right.is_truthy()))
+
+            case _:
+                Err(BackendError.not_implemented("binary operator not implemented"))
+
+
