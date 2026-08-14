@@ -557,3 +557,12 @@ typed port factories. After validation, emission constructs a child-bound
 decoder's actual structural hash. The sole sequential serializer and graph
 owner is `render_strict_sequential_hwir`; decoder VHDL is prepended exactly
 once. The former stateful serializer/hash schema is not an alternate layer.
+
+## Qualification evidence ownership
+
+The POSIX runner owns only phase-one execution in a private staging directory:
+admitted CLI checks, measured coverage, fixed product generation, testbench
+binding, and isolated GHDL phases. The pure-Simple composer owns phase two. It
+accepts an exact-key v2 manifest, rehashes and copies every command/artifact,
+creates the previously absent final run, and writes the receipt last. Neither
+component may infer PASS from source tokens, filenames, or a GHDL marker.

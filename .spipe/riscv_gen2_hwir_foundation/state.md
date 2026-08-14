@@ -1063,3 +1063,20 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   changed files, exclusions, testbench, and each GHDL command/log/exit. The
   current contradictory runner is not accepted and remains WARN-blocked until
   this contract and its deliberate-red tests execute on the repaired runtime.
+- impl (2026-08-14, A14): Replaced the contradictory runner modes with a
+  runner-owned private staging phase and an admitted-CLI invocation of the
+  fixed Simple composer. Schema v2 exact-key binds measured coverage command
+  and report, changed files, explicit exclusions, both product commands,
+  generated VHDL/manifests/testbenches, separate GHDL commands/exits/logs, and
+  source/config/graph identities. The composer rehashes and copies every bound
+  file and writes the receipt last. Static shell/source checks are development
+  evidence only; the positive and deliberate-red Simple suite plus a real
+  admitted RV32/RV64 receipt remain blocked by the deployed runtime ABI/SIG11.
+- review-blocked (2026-08-14, A14): Parallel adversarial review corrected the
+  content-SHA/Git-revision mismatch, critical-policy omission, workspace-CLI
+  child leakage, shared GHDL work library, missing reuse/identity vectors,
+  partial-final cleanup, real `riscv32`/`riscv64` artifact target binding, and
+  coverage scalar/list cross-checks. Remaining acceptance requires a complete
+  zero-count decision inventory plus executable writer-level deliberate reds
+  for command grammar, duplicate-safe artifact parsing, destination rehash,
+  canonical parents, mutation, and cleanup. Until then A14 is WARN, not PASS.

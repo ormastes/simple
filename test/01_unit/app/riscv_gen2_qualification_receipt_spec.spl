@@ -1,7 +1,8 @@
 # @tag: unit, app, riscv, hwir, qualification, receipt
-# @req REQ-G2-004 NFR-G2-001 NFR-G2-006
+# @manual_section Qualification receipt v2
+# @req REQ-G2-004 REQ-G2-006 REQ-G2-009 REQ-G2-010 NFR-G2-001 NFR-G2-002 NFR-G2-006 NFR-G2-009 NFR-G2-010 NFR-G2-011
 
-use std.spec.{describe, expect, it}
+use std.spec.{describe, expect, it, step}
 use app.test.riscv_gen2_qualification_receipt.{
     RISCV_GEN2_QUALIFICATION_SCHEMA,
     riscv_gen2_parse_qualification_manifest,
@@ -20,16 +21,28 @@ fn _row(index: i64, architecture: text) -> text:
     prefix + "architecture={architecture}\n" +
     prefix + "product_id=riscv-gen2-zca-trap-single-outstanding-v3\n" +
     prefix + "target={target}\n" + prefix + "profile={profile}\n" +
-    prefix + "command=ghdl -a --std=08 {architecture}.vhd && ghdl -e --std=08 gen2_{architecture} && ghdl -r --std=08 gen2_{architecture}\n" +
-    prefix + "exit_code=0\n" +
+    prefix + "product_command_path=evidence/{architecture}.product.command\n" +
+    prefix + "product_command_sha256={_HASH}\n" +
+    prefix + "product_exit_code=0\n" +
     prefix + "manifest_path=evidence/{architecture}.manifest.json\n" +
     prefix + "manifest_sha256={_HASH}\n" +
     prefix + "vhdl_path=evidence/{architecture}.vhd\n" +
     prefix + "vhdl_sha256={_HASH}\n" +
+    prefix + "testbench_path=evidence/{architecture}.tb.vhd\n" +
+    prefix + "testbench_sha256={_HASH}\n" +
+    prefix + "analyze_command_path=evidence/{architecture}.analyze.command\n" +
+    prefix + "analyze_command_sha256={_HASH}\n" +
+    prefix + "analyze_exit_code=0\n" +
     prefix + "analyze_log_path=evidence/{architecture}.analyze.log\n" +
     prefix + "analyze_log_sha256={_HASH}\n" +
+    prefix + "elaborate_command_path=evidence/{architecture}.elaborate.command\n" +
+    prefix + "elaborate_command_sha256={_HASH}\n" +
+    prefix + "elaborate_exit_code=0\n" +
     prefix + "elaborate_log_path=evidence/{architecture}.elaborate.log\n" +
     prefix + "elaborate_log_sha256={_HASH}\n" +
+    prefix + "run_command_path=evidence/{architecture}.run.command\n" +
+    prefix + "run_command_sha256={_HASH}\n" +
+    prefix + "run_exit_code=0\n" +
     prefix + "run_log_path=evidence/{architecture}.run.log\n" +
     prefix + "run_log_sha256={_HASH}\n" +
     prefix + "source_identity_sha256={_HASH}\n" +
@@ -44,11 +57,20 @@ fn _manifest() -> text:
     "cli_provenance_sha256={_HASH}\nsource_revision={_HASH}\n" +
     "coverage_kind=branch\nbranch_coverage_threshold_basis_points=8000\n" +
     "branch_coverage_basis_points=8000\n" +
+    "branch_coverage_command_path=evidence/branch_coverage.command\n" +
+    "branch_coverage_command_sha256={_HASH}\n" +
     "branch_coverage_log_path=evidence/branch_coverage.log\n" +
-    "branch_coverage_log_sha256={_HASH}\n" + _row(1, "rv32") + _row(2, "rv64")
+    "branch_coverage_log_sha256={_HASH}\n" +
+    "changed_file_count=2\n" +
+    "changed_file_1=src/compiler/50.mir/hwir/types.spl\n" +
+    "changed_file_2=src/compiler/70.backend/backend/hwir_to_vhdl.spl\n" +
+    "exclusion_count=2\n" +
+    "exclusion_1=generated-vhdl\n" +
+    "exclusion_2=testbench-literals\n" + _row(1, "rv32") + _row(2, "rv64")
 
 describe "RISC-V Gen2 qualification receipt contract":
     it "should accept the fixed RV32 and RV64 measured branch manifest":
+        step("Parse the exact v2 two-row qualification manifest")
         val parsed = riscv_gen2_parse_qualification_manifest(_manifest())
         expect(parsed.is_ok()).to_be(true)
         val manifest = parsed.unwrap()
@@ -59,13 +81,17 @@ describe "RISC-V Gen2 qualification receipt contract":
         expect(manifest.rows[1].profile).to_equal(
             "riscv-gen2-rv64-zca-addiw-critical")
         expect(manifest.branch_coverage_basis_points).to_equal(8000)
+        expect(manifest.changed_files.len()).to_equal(2)
+        expect(manifest.exclusions.len()).to_equal(2)
 
     it "should reject missing rows, nonzero exits, and subcanonical branch coverage":
+        step("Reject incomplete rows, failed product commands, swapped targets, and low coverage")
         expect(riscv_gen2_parse_qualification_manifest(
             _manifest().replace("row_2_architecture=rv64\n", "")
         ).is_err()).to_be(true)
         expect(riscv_gen2_parse_qualification_manifest(
-            _manifest().replace("row_1_exit_code=0", "row_1_exit_code=1")
+            _manifest().replace("row_1_product_exit_code=0",
+                "row_1_product_exit_code=1")
         ).is_err()).to_be(true)
         expect(riscv_gen2_parse_qualification_manifest(
             _manifest().replace("row_2_target=rv64-zca-addiw-critical",
@@ -76,7 +102,32 @@ describe "RISC-V Gen2 qualification receipt contract":
                 "branch_coverage_basis_points=7999")
         ).is_err()).to_be(true)
 
+    it "should reject incomplete command, testbench, coverage, and list bindings":
+        step("Reject missing or duplicate command, testbench, coverage, and list bindings")
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest().replace("row_1_testbench_sha256={_HASH}\n", "")
+        ).is_err()).to_be(true)
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest().replace("row_2_analyze_exit_code=0",
+                "row_2_analyze_exit_code=1")
+        ).is_err()).to_be(true)
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest().replace("branch_coverage_command_sha256={_HASH}",
+                "branch_coverage_command_sha256=bad")
+        ).is_err()).to_be(true)
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest().replace("changed_file_count=2", "changed_file_count=0")
+        ).is_err()).to_be(true)
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest().replace("exclusion_2=testbench-literals",
+                "exclusion_2=generated-vhdl")
+        ).is_err()).to_be(true)
+        expect(riscv_gen2_parse_qualification_manifest(
+            _manifest() + "row_1_run_exit_code=0\n"
+        ).is_err()).to_be(true)
+
     it "should render only bound command and retained evidence identities":
+        step("Render the nested receipt from validated v2 identities")
         val manifest = riscv_gen2_parse_qualification_manifest(_manifest()).unwrap()
         val rendered = riscv_gen2_render_qualification_receipt(
             manifest, "qualified-run-001", _HASH)
@@ -89,4 +140,8 @@ describe "RISC-V Gen2 qualification receipt contract":
             "\"product_id\":\"riscv-gen2-zca-trap-single-outstanding-v3\"")
         expect(rendered).to_contain(
             "\"retained_path\":\"rv32.manifest.json\"")
-        expect(rendered).to_contain("\"exit_code\":0")
+        expect(rendered).to_contain("\"product_exit_code\":0")
+        expect(rendered).to_contain("\"retained_path\":\"rv32.tb.vhd\"")
+        expect(rendered).to_contain("\"retained_path\":\"rv64.run.command\"")
+        expect(rendered).to_contain("\"changed_files\":[")
+        expect(rendered).to_contain("\"exclusions\":[")

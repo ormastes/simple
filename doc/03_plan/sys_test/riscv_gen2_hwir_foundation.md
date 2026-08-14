@@ -243,3 +243,12 @@ required self-hosted compiler. Qualification also requires a reset-coupled
 retirement producer. This remains
 bounded frontend evidence and does not claim protected-core integration, a full
 trap controller, or Zca closure.
+
+## Qualification v2 evidence matrix
+
+| Contract | Executable evidence required | Why source/static evidence is insufficient |
+| --- | --- | --- |
+| NFR-G2 coverage | An admitted run reports at least 8000 branch basis points and the composer cross-checks the retained report, command, changed files, and four explicit exclusions. | A manifest number or test count does not measure branches. |
+| RV32/RV64 rows | Each fixed critical target retains its product command, `.gen.json`, VHDL, and source/config/graph identities. | Textual target names do not prove the admitted compiler emitted the artifact. |
+| RTL behavior | Fresh isolated GHDL analyze, elaborate, and run commands/exits/logs execute each bound testbench. | VHDL source assertions and availability markers do not execute RTL. |
+| Receipt authority | The final directory is absent during staging; the admitted Simple composer rehashes/copies all evidence and writes the v2 receipt last. | Shell-written or partial receipts are not claim-bearing. |

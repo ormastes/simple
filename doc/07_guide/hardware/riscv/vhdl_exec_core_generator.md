@@ -614,6 +614,11 @@ once. Source rendering is not qualification: the admitted two-phase runner
 must retain measured coverage and independent GHDL analyze/elaborate/run
 evidence before PASS.
 
+The v2 receipt retains the measured coverage command/report, changed files and
+explicit exclusions, each RV32/RV64 product command and `.gen.json`, generated
+VHDL and testbench, and separate GHDL analyze/elaborate/run commands, exits, and
+logs. The runner cannot select another composer or write the receipt itself.
+
 **`expected Fn, found FString` when running the spec.** Pre-existing, not a
 regression in this lane: the deployed seed's `simple test` cannot parse the
 `@step "..."` decorator form. HEAD fails identically. The spec in this lane is

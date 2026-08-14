@@ -1,73 +1,53 @@
 #!/bin/sh
-# Static contract for the bounded, composer-owned Gen2 qualification envelope.
+# Contract and deliberate-red checks for the runner-owned staging boundary.
 set -eu
-
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 RUNNER=$ROOT/scripts/check/run-riscv-gen2-hwir-qualification.shs
-
 fail() { printf '%s\n' "FAIL: $1" >&2; exit 1; }
 
-[ -x "$RUNNER" ] || fail 'qualification runner is not executable'
-sh -n "$RUNNER" || fail 'qualification runner shell syntax'
-
+[ -x "$RUNNER" ] || fail 'runner is not executable'
+sh -n "$RUNNER" || fail 'runner shell syntax'
 for token in \
+    'schema=riscv-gen2-hwir-qualification-run-v2' \
+    'STAGING=$evidence_root/$run_id.staging.$$' \
+    'final-path-created-before-composer' \
+    'run "$COMPOSER_SOURCE" --manifest "$(rel "$MANIFEST")" --run-id "$run_id"' \
+    'branch_coverage_command_path=' 'changed_file_count=' 'exclusion_count=4' \
+    'testbench' 'product_exit_code=0' 'analyze_exit_code=0' \
+    'elaborate_exit_code=0' 'run_exit_code=0' \
     'stage4_verify_candidate_provenance "$provenance" "$simple" "$ROOT_DIR"' \
-    'check-post-bootstrap-stage4-sspec.shs' \
-    '[ "$provenance" = "${simple}.provenance.env" ]' \
-    'command -v ghdl >/dev/null 2>&1 || fail '\''ghdl-missing'\''' \
-    'command -v timeout >/dev/null 2>&1 || fail '\''timeout-missing'\''' \
-    'output-directory-preexists' \
-    'mkdir "$resolved_out" || fail '\''output-directory-create-failed'\''' \
-    'QUALIFICATION_PRODUCT=riscv-gen2-zca-trap-single-outstanding-v3' \
-    'RV32_ROW=rv32-zca-cjal-critical' \
-    'RV64_ROW=rv64-zca-addiw-critical' \
-    '--emit-evidence' \
-    '--compose-receipt' \
-    'receipt-forbidden-before-evidence-validation' \
-    'rv32_row_gate rv64_row_gate' \
-    'rv32_coverage_gate rv64_coverage_gate' \
-    'rv32_ghdl_analyze rv32_ghdl_elaborate rv32_ghdl_run' \
-    'rv64_ghdl_analyze rv64_ghdl_elaborate rv64_ghdl_run' \
-    'qualification_receipt.json' \
-    'composer-receipt-missing-or-symlinked' \
-    'cleanup_partial_receipt' \
-    'rv32_vhdl_manifest_sha256' \
-    'rv64_vhdl_manifest_sha256' \
-    'rv32_ghdl_analyze_command_sha256' \
-    'rv64_ghdl_run_command_sha256' \
-    'ghdl-command-missing:' \
-    'ghdl-log-hash-mismatch:' \
-    'composer-may-not-recurse-to-runner'; do
-    grep -F -- "$token" "$RUNNER" >/dev/null || fail "missing fail-closed token: $token"
+    'branch-coverage-below-threshold' 'receipt-composer-failed:' \
+    'env SIMPLE_SAFETY_PROFILE=critical' '--workdir="$workdir"' \
+    'riscv_gen2_trap_stateful_rv32_tb.vhd' \
+    'riscv_gen2_trap_identity_rv64_tb.vhd'; do
+    grep -F -- "$token" "$RUNNER" >/dev/null || fail "missing contract token: $token"
 done
-
-# Receipt production belongs to the admitted composer.  The shell envelope may
-# redirect its composer log but must not create, append, touch, move, or copy
-# the qualification receipt itself.
-if grep -E '^[^#]*(>|>>|touch|mv|cp)[^#]*(qualification_receipt\.json|\$RECEIPT)' "$RUNNER" |
-    grep -Fv 'rm -f -- "$RECEIPT"' >/dev/null; then
-    fail 'runner forges or moves the composer-owned receipt'
+if grep -E -- '--emit-evidence|--compose-receipt|--composer' "$RUNNER" >/dev/null; then
+    fail 'fictitious or caller-selected composer mode remains'
+fi
+if grep -F 'git diff-tree' "$RUNNER" >/dev/null; then
+    fail 'content source revision was incorrectly treated as a Git object'
 fi
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-riscv-gen2-qualification-contract.XXXXXX")
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-g2-runner-contract.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
-if sh "$RUNNER" --unknown >"$tmp/unknown.out" 2>&1; then
-    fail 'unknown argument accepted'
-fi
-grep -q '^riscv_gen2_hwir_qualification_reason=unknown-argument:--unknown$' \
-    "$tmp/unknown.out" || {
-    fail 'unknown argument did not fail closed'
-}
+if sh "$RUNNER" --unknown >"$tmp/unknown.out" 2>&1; then fail 'unknown argument accepted'; fi
+grep -q 'reason=unknown-argument:--unknown$' "$tmp/unknown.out" || fail 'unknown argument reason'
 
-mkdir "$tmp/preexisting-run"
-if sh "$RUNNER" \
-    --stage4-cli "$tmp/missing-cli" \
-    --stage4-provenance "$tmp/missing-provenance" \
-    --composer "$tmp/missing-composer" \
-    --output-dir "$tmp/preexisting-run" >"$tmp/preexisting.out" 2>&1; then
-    fail 'preexisting output directory accepted'
+mkdir "$tmp/preexisting"
+if sh "$RUNNER" --stage4-cli "$tmp/no-cli" --stage4-provenance "$tmp/no-prov" --output-dir "$tmp/preexisting" >"$tmp/preexisting.out" 2>&1; then
+    fail 'preexisting final path accepted'
 fi
-grep -q '^riscv_gen2_hwir_qualification_reason=output-directory-preexists$' \
-    "$tmp/preexisting.out" || fail 'preexisting output directory did not fail before admission or execution'
+grep -q 'reason=output-directory-preexists$' "$tmp/preexisting.out" || fail 'preexisting path was not rejected before admission'
 
-printf '%s\n' 'PASS: Gen2 HWIR qualification runner requires admitted Stage4, fresh evidence, GHDL, and fixed RV32/RV64 gates'
+# A fake executable is permitted only to probe failure ordering. It can never
+# produce admitted provenance and therefore can never reach or print PASS.
+printf '%s\n' '#!/bin/sh' 'exit 0' >"$tmp/fake-simple"
+chmod +x "$tmp/fake-simple"
+: >"$tmp/fake-simple.provenance.env"
+if sh "$RUNNER" --stage4-cli "$tmp/fake-simple" --stage4-provenance "$tmp/fake-simple.provenance.env" --output-dir "$ROOT/build/evidence/riscv_gen2_hwir_foundation/contract-fake-$$" >"$tmp/fake.out" 2>&1; then
+    fail 'fake executable qualified'
+fi
+grep -q '^riscv_gen2_hwir_qualification_status=pass$' "$tmp/fake.out" && fail 'fake executable printed PASS'
+
+printf '%s\n' 'PASS: runner owns staging and commands, invokes only the admitted CLI composer, and cannot qualify contract fakes'

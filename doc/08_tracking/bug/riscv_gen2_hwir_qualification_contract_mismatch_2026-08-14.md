@@ -1,6 +1,6 @@
 # RISC-V Gen2 HWIR Qualification Contract Mismatch
 
-Status: open
+Status: implementation handoff; executable acceptance open
 
 Owner: compiler evidence owner; final reviewer `/root`.
 
@@ -42,6 +42,25 @@ coverage for phase order, symlinks/preexisting paths, malformed/duplicate keys,
 low coverage, each command failure, artifact mutation, composer failure, and
 partial-receipt cleanup. Then execute it with an admitted Stage-4 CLI and retain
 the receipt directory.
+
+The v2 source implementation now follows the selected contract and removes the
+fictitious switches. This record remains open because the deployed runtime
+cannot execute the Simple positive/deliberate-red suite or produce the admitted
+RV32/RV64 GHDL receipt; static token checks are not closure evidence.
+
+Highest-capability adversarial review additionally requires writer-level tests
+for exact command content, duplicate-safe product-manifest parsing,
+destination-side rehashing, canonical parent/no-symlink handling, and partial
+run cleanup. Coverage now fails closed when any changed `.spl` file has no
+decision inventory row and cross-checks the retained aggregate/list, but the
+current runtime coverage format reports executed probes rather than an
+independent static denominator. Therefore a missing branch cannot earn PASS;
+the coverage producer must expose a complete zero-count decision inventory
+before the 80% gate can close.
+
+Resume after the admitted runtime and complete decision inventory exist:
+
+`sh scripts/check/run-riscv-gen2-hwir-qualification.shs --stage4-cli <absolute-admitted-cli> --stage4-provenance <adjacent-provenance> --output-dir <absolute-fresh-run-dir>`
 
 Relevant files:
 
