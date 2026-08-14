@@ -934,7 +934,7 @@ impl MirLowering:
         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, push_recv)
         push_recv
 
-    me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution) -> LocalId:
+    me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution, static_receiver_name_hint: text, static_receiver_symbol_hint: i64) -> LocalId:
         """Lower method call based on resolution.
 
         UFCS: For FreeFunction resolution, receiver becomes first argument.
@@ -1035,8 +1035,9 @@ impl MirLowering:
         # Resolve a type-valued receiver once. The Unresolved arm below uses
         # this for static custom methods; predicate fallbacks also need it
         # before they consider lowering the receiver as a text value.
-        var static_receiver_name = ""
-        if resolution_is_unresolved:
+        val static_receiver_kind_disc = rt_enum_discriminant(receiver.kind)
+        var static_receiver_name = static_receiver_name_hint
+        if resolution_is_unresolved and static_receiver_name == "":
             match receiver.kind:
                 case NamedVar(static_symbol, static_name):
                     val static_def = self.symbols.get_symbol_raw(static_symbol.id)
@@ -2575,12 +2576,16 @@ impl MirLowering:
                 # previously re-lowered it) to avoid double-evaluating a
                 # side-effecting receiver expression.
                 val static_method_key = "static::{static_receiver_name}::{method}"
-                val static_receiver_symbol: SymbolId? = match receiver.kind:
-                    case NamedVar(static_symbol, _): Some(static_symbol)
-                    case Var(static_symbol): Some(static_symbol)
-                    case _: nil
-                val static_method_id: SymbolId? = if static_receiver_name != "" and self.struct_method_syms.contains(static_method_key):
-                    Some(self.struct_method_syms[static_method_key])
+                val static_receiver_symbol: SymbolId? = if static_receiver_symbol_hint >= 0:
+                    Some(SymbolId(id: static_receiver_symbol_hint))
+                else:
+                    match receiver.kind:
+                        case NamedVar(static_symbol, _): Some(static_symbol)
+                        case Var(static_symbol): Some(static_symbol)
+                        case _: nil
+                var static_method_id: SymbolId? = nil
+                if static_receiver_name != "" and self.struct_method_syms.contains(static_method_key):
+                    static_method_id = Some(self.struct_method_syms[static_method_key])
                 elif static_receiver_name != "":
                     match static_receiver_symbol:
                         case Some(static_symbol):
@@ -2589,13 +2594,17 @@ impl MirLowering:
                                     match self.symbols.get_symbol_raw(static_candidate_id.id):
                                         case Some(static_candidate_symbol):
                                             match static_candidate_symbol.kind:
-                                                case Function: Some(static_candidate_id)
-                                                case _: nil
-                                        case _: nil
-                                case _: nil
-                        case _: nil
-                else:
-                    nil
+                                                case Function: static_method_id = Some(static_candidate_id)
+                                                case _: ()
+                                        case _: ()
+                                case _: ()
+                        case _: ()
+                # The receiver aggregate is already corrupt on the failing
+                # self-host lane, so a second match cannot recover its owner.
+                # Use the symbol table's exact owner-qualified index only when
+                # the method leaf identifies one unique static Function.
+                if static_method_id == nil and static_receiver_kind_disc < 0:
+                    static_method_id = self.symbols.lookup_unique_static_method(method)
                 eprint("[mir-method-call] unresolved-static method={method}\n")
                 if static_method_id != nil:
                     val resolved_static_method_id = static_method_id ?? SymbolId(id: -1)

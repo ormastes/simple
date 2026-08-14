@@ -3466,7 +3466,33 @@ impl MirLowering:
 
             case MethodCall(receiver, method, args, resolution):
                 eprint("[mir-lower-expr] method-dispatch-before method={method}\n")
-                val method_result = self.lower_method_call(receiver, method, args, resolution)
+                # Keep the type-valued receiver identity scalar across the
+                # native call boundary.  Stage 2 can corrupt a nested HirExpr
+                # enum payload when lower_method_call receives the aggregate
+                # by value; the source-side name/id are still intact here.
+                var static_receiver_name_hint = ""
+                var static_receiver_symbol_hint: i64 = -1
+                match receiver.kind:
+                    case NamedVar(static_symbol, static_name):
+                        val static_def = self.symbols.get_symbol_raw(static_symbol.id)
+                        if static_def != nil:
+                            match static_def.kind:
+                                case Class | Struct | Enum | Import:
+                                    static_receiver_name_hint = static_def.name
+                                    static_receiver_symbol_hint = static_symbol.id
+                                case _: ()
+                    case Var(static_symbol):
+                        val static_def = self.symbols.get_symbol_raw(static_symbol.id)
+                        if static_def != nil:
+                            match static_def.kind:
+                                case Class | Struct | Enum | Import:
+                                    static_receiver_name_hint = static_def.name
+                                    static_receiver_symbol_hint = static_symbol.id
+                                case _: ()
+                    case _: ()
+                val method_result = self.lower_method_call(
+                    receiver, method, args, resolution,
+                    static_receiver_name_hint, static_receiver_symbol_hint)
                 eprint("[mir-lower-expr] method-dispatch-after method={method} id={method_result.id}\n")
                 method_result
 

@@ -51,14 +51,17 @@ later sections remain non-PASS.
 | Frozen executable/manual | `test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl`; `doc/06_spec/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.md` | ABSENT / B-SPEC |
 | Same-run live evidence | manifest, QEMU argv, serial, SSH, framebuffer/readback, guest output receipts | ABSENT / B-DESKTOP-LIVE |
 
-The final bounded bootstrap cycle passed Stage 2 and its sanity gate, and the
-previous fourteen folded-constant type errors did not recur. Stage 3 then
-exited 139 after reaching `runtime_error` static-owner lowering with impossible
-receiver local `103079215111`. Retained logs are
+The fresh static-owner repair lane fixed the `runtime_error` receiver
+corruption with scalar owner hints plus a fail-closed unique-static-symbol
+fallback guarded by the observed negative receiver discriminant. Its final
+Stage 3 trace has zero `runtime_error`, impossible receiver, and unsupported
+expression rows. Stage 3 remains absent because the downstream high-memory
+build exits 139 at a varying later frontier (`file_copy` in Cycle 2,
+`eval_binop` in final Cycle 3). Retained logs are
 `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`
 (SHA-256 `1dfe959161d18cc16146825d69f9b5f64240c6917e67ab28718ddd339252bf8f`)
 and `stage3-native-build.log`
-(SHA-256 `bfa17aa9b5ea1b4d7f58eb4b92049a808ee15586384d02fdba47bd06de841a19`).
+(SHA-256 `51877e1e469e9504934b68097db3a8250bbf85f666247aa652e3e1c676606a5b`).
 Stage 2 is bootstrap-only, never a Stage 4 CLI, SPipe runner, deployment
 payload, or acceptance authority.
 
@@ -69,11 +72,10 @@ The umbrella ledger is
 It supplies the owner file/line and unblock condition for every row below.
 
 1. **B-HOST-CLI:** no admitted Stage 3 and Stage 4 pure-Simple host CLI. The
-   final cycle passed Stage 2 and eliminated the folded-constant errors, then
-   exited 139 at the `runtime_error` static-owner receiver frontier. Resume only
-   in a fresh bounded lane after capturing a symbolized backtrace or exact
-   candidate-bound reproducer and fixing the pure-Simple owner named in
-   `stage3_runtime_error_static_owner_receiver_corruption_2026-08-14.md`.
+   `runtime_error` static-owner defect is fixed and regression-covered. The
+   remaining build exits 139 at varying later high-memory frontiers. Resume
+   only in a fresh bounded lane after the symbolized/RSS reduction required by
+   `stage3_post_file_copy_exit139_2026-08-14.md`.
 2. **B-TARGET-SIMPLE:** no fresh strict
    `x86_64-unknown-simpleos/simple`. Resume after B-HOST-CLI with the AC-2
    command below.
@@ -224,7 +226,7 @@ artifact; WARN is never verify PASS, release, or feature completion.
 
 | Row | State | Missing prerequisite | Exact resume command | Retained artifacts | Owner | Final reviewer |
 |---|---|---|---|---|---|---|
-| Linux x86_64 Stage 3/4 admission | BLOCKED ([B-HOST-CLI](../../../../08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md)) | `runtime_error` static-owner receiver corruption after green Stage 2; Stage 3/4 absent | In a fresh authorized lane, first capture/fix the owner per `stage3_runtime_error_static_owner_receiver_corruption_2026-08-14.md`; only after that material change run `env SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --full-cli --no-mcp --backend=llvm --jobs=min --diagnostics=debug`, then the essential-tools and handoff-readiness gates | `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage{2,3}-native-build.log`; future candidate/provenance/admission/handoff receipts | bootstrap owner | higher-capability reviewer |
+| Linux x86_64 Stage 3/4 admission | BLOCKED ([B-HOST-CLI](../../../../08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md)) | static-owner bug fixed; downstream high-memory exit 139 at varying later function frontier; Stage 3/4 absent | In a fresh authorized lane, capture the symbolized/RSS reduction required by `stage3_post_file_copy_exit139_2026-08-14.md`; only after a material owner fix resume the admitted Stage 3 cache, then run Stage 4 plus essential-tools and handoff-readiness gates | `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage{2,3}-native-build.log`; static-factory unit/integration/system evidence; future candidate/provenance/admission/handoff receipts | bootstrap owner | higher-capability reviewer |
 | Linux x86_64 OVMF+GRUB production desktop + guest toolchain | BLOCKED ([B-DESKTOP-LIVE](../../../../08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md)) | payload, guest linker, two-record image admission, frozen combined wrapper | After wrapper implementation: `SIMPLE_BIN=<admitted-stage4> SIMPLEOS_TOOLCHAIN_IMAGE=<admitted-image> SIMPLEOS_WM_READINESS_TIMEOUT_MS=900000 sh scripts/check/check-simpleos-toolchain-desktop-boot.shs` | embedded manifest, external receipt, QEMU argv, serial, framebuffer/readback, SSH transcript, output ELF | root/QEMU+desktop owner | higher-capability reviewer |
 | Physical x86_64 board | BLOCKED ([B-PHYSICAL](../../../../08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md)) | board acquisition/identity, physical NIC driver, boot/download route | Build/check: `sh scripts/os/build-simpleos-x86_64-board-usb.shs && sh scripts/check/check-simpleos-x86_64-board-usb-image.shs`. Only after board acquisition and reviewed stable by-id recording: `SIMPLEOS_BOARD_DEVICE=/dev/disk/by-id/<reviewed-id>; test -b "$SIMPLEOS_BOARD_DEVICE"; sudo dd if=build/os/x86_64_board_usb/board-usb.img of="$SIMPLEOS_BOARD_DEVICE" bs=4M conv=fsync status=progress`; boot the named mini-PC and capture the selected evidence channel | board identity, image receipt, download log, serial or SSH transcript | board owner | higher-capability reviewer |
 
@@ -245,6 +247,13 @@ The feature has one shared maximum of three fix/verify cycles.
   inventory and umbrella blocker ledger.
 - The lane stopped with WARN after attempt 3. Every unresolved implementation
   AC remains BLOCKED, and no blocker gains an additional retry budget.
+
+The user explicitly authorized one fresh repair lane for the primary
+`runtime_error` blocker. Its three materially distinct cycles are also fully
+consumed: scalar owner hint (insufficient), unique exact-symbol fallback
+(primary frontier cleared), and negative-discriminant ambiguity guard (primary
+frontier remained cleared; downstream exit 139 remained). No fourth retry is
+permitted in this session.
 
 Never rerun an unchanged green criterion or an identical failed command.
 
