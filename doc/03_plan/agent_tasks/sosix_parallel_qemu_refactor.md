@@ -8,6 +8,25 @@ list real `/SYS/APPS`, run a mounted filesystem program, return exit 37, reap
 the exact task, and publish a canonical evidence bundle. macOS is postponed
 only until a Darwin executor is available.
 
+## Replacement-lane acceptance status — 2026-08-14
+
+The detached replacement lane recovered the complete linear implementation
+series onto current `origin/main`. The following acceptance gates passed once
+in the replacement worktree: shared settings self-test, matrix self-test,
+native producer self-test, direct-kernel v2 schema, RV64 inline-asm transport
+guard, x86_32 and ARM32 fail-closed lifecycle self-tests, numbered-artifact and
+direct-runtime-env guards, `doc/06_spec` layout, changed-line stub scan, and
+shell syntax.
+
+Final pure-Simple source checks are currently blocked by the deployed
+`release/x86_64-unknown-linux-gnu/simple` executable: both `check src/compiler`
+and focused interpreter `test` invocations terminate with signal 11 (exit 139).
+The admitted Stage 3 bootstrap artifact reports
+`simple-bootstrap 1.0.0-beta` but does not implement the full CLI `check`
+command, so it is not used as a substitute. This is a verification WARN until
+a full admitted pure-Simple CLI can execute the remaining compiler/lib/MCP and
+focused specs; the Rust seed is not an acceptable fallback.
+
 ## Shared contract — owned by root
 
 The following are immutable shared interfaces. Architecture/host lanes consume
@@ -37,7 +56,7 @@ for a host admission or a row's real evidence.
 
 | Lane | Scope / exclusive owner files | Current state | Acceptance evidence | Sidecar | Merge owner | Final reviewer |
 | --- | --- | --- | --- | --- | --- | --- |
-| L0 shared matrix | settings, admission, producer, collector, matrix docs | active | self-tests; one pre-admitted bundle per changed schema; collector reject unless exactly 24 | N/A | root | root/high |
+| L0 shared matrix | settings, admission, producer, collector, matrix docs | implemented; static/self-test gates PASS, full-CLI verification WARN | self-tests; one pre-admitted bundle per changed schema; collector reject unless exactly 24 | N/A | root | root/high |
 | L1 Linux x86_64 | x86_64 OVMF/GRUB fs-exec entry and boot artifacts | canonical PASS | OVMF→GRUB→guest-entry, real listing, mounted program stdout, exit37/reap/PASS | N/A | root | root/high |
 | L2 Linux ARM64 | ARM64 direct-kernel fs-exec entry, nonce reader and EL0 lifecycle | canonical PASS | direct-kernel v2 bundle, exact ordered serial lifecycle | N/A | root | root/high |
 | L3 Linux RV32 | RV32 direct-kernel trap lifecycle and nonce media | canonical PASS | direct-kernel v2 bundle, M-mode recovery and exact reap | N/A | root | root/high |
