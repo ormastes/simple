@@ -37,10 +37,10 @@ named in this state file are recorded.
   each, including `SIMPLE_SAFETY_PROFILE=critical`; no modified source or test
   may contain a stub/no-op implementation. Bootstrap-seed activity is
   diagnostic only.
-- AC-6: Knowledge artifacts are updated: `doc/01_research/`,
+- AC-6: Knowledge artifacts are updated and mutually consistent: `doc/01_research/`,
   `doc/03_plan/`, `doc/04_architecture/`, and `doc/05_design/` for this slice;
-  `doc/07_guide/` is N/A unless a user-facing compiler command becomes
-  reachable; `doc/00_llm_process/feature_expert/` and
+  `doc/07_guide/` documents the operator-facing A14 runner and honest WARN
+  boundary; `doc/00_llm_process/feature_expert/` and
   `doc/00_llm_process/layer_expert/` are updated or marked with the exact
   missing owner path; every found but unfixed gap receives a
   `doc/08_tracking/bug/` record with file:line and unblock condition.

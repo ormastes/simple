@@ -124,9 +124,22 @@ coverage_counts=$(awk -F', *' -v root="$ROOT_DIR/" '
     decisions && NF >= 6 {
         file=$2; sub(/^[[:space:]]+/, "", file); sub(/[[:space:]]+$/, "", file)
         if (index(file, root) == 1) file=substr(file, length(root) + 1)
-        if (changed[file]) { total += 2; if ($5 + 0 > 0) covered++; if ($6 + 0 > 0) covered++ }
+        if (changed[file]) {
+            key=$1 SUBSEP file SUBSEP $3 SUBSEP $4
+            decisions_by_key[key]=1
+            if ($5 + 0 > 0) true_by_key[key]=1
+            if ($6 + 0 > 0) false_by_key[key]=1
+        }
     }
-    END { if (total == 0) exit 1; print covered, total, int(covered * 10000 / total) }
+    END {
+        for (key in decisions_by_key) {
+            total += 2
+            if (true_by_key[key]) covered++
+            if (false_by_key[key]) covered++
+        }
+        if (total == 0) exit 1
+        print covered, total, int(covered * 10000 / total)
+    }
 ' "$changed" "$COVERAGE_RAW") || fail changed-file-branch-coverage-empty
 set -- $coverage_counts
 coverage_covered=$1 coverage_total=$2 coverage_bp=$3
@@ -162,6 +175,13 @@ stage_row() {
     run_logged_in_staging "$arch-ghdl-elaborate" sh -c "ghdl -e --std=08 --workdir='$workdir' '$protocol_entity' && ghdl -e --std=08 --workdir='$workdir' '$reuse_entity' && ghdl -e --std=08 --workdir='$workdir' '$identity_entity'"
     run_logged_in_staging "$arch-ghdl-run" sh -c "ghdl -r --std=08 --workdir='$workdir' '$protocol_entity' --assert-level=error && ghdl -r --std=08 --workdir='$workdir' '$reuse_entity' --assert-level=error && ghdl -r --std=08 --workdir='$workdir' '$identity_entity' --assert-level=error"
     eval "${arch}_target=\$target ${arch}_profile=\$profile ${arch}_entity=\$entity"
+}
+
+manifest_hex_once() {
+    manifest_file=$1 manifest_key=$2
+    matches=$(grep -o "\"$manifest_key\"[[:space:]]*:[[:space:]]*\"[0-9a-f]\{64\}\"" "$manifest_file" || :)
+    [ "$(printf '%s\n' "$matches" | awk 'NF { n++ } END { print n + 0 }')" -eq 1 ] || return 1
+    printf '%s\n' "$matches" | sed 's/.*"\([0-9a-f]\{64\}\)"$/\1/'
 }
 
 # The covered system specification creates these fixed behavioral benches; the
@@ -214,7 +234,6 @@ MANIFEST=$STAGING/run_manifest.env
         done
         printf 'row_%s_product_exit_code=0\nrow_%s_analyze_exit_code=0\nrow_%s_elaborate_exit_code=0\nrow_%s_run_exit_code=0\n' "$index" "$index" "$index" "$index"
         # Product manifests are the authoritative identity projection.
-        compact=$(tr -d '[:space:]' <"$STAGING/$arch.vhd.gen.json")
         for identity in source config graph; do
             case "$identity" in
                 source) manifest_key=source_closure_sha256 ;;
@@ -226,7 +245,7 @@ MANIFEST=$STAGING/run_manifest.env
                 graph) manifest_key=graph_sha256 ;;
             esac
             if [ -n "$manifest_key" ]; then
-                value=$(printf '%s\n' "$compact" | sed -n "s/.*\"${manifest_key}\":\"\([0-9a-f][0-9a-f]*\)\".*/\1/p")
+                value=$(manifest_hex_once "$STAGING/$arch.vhd.gen.json" "$manifest_key") || fail "$arch-$identity-identity-duplicate-or-missing"
             fi
             [ "${#value}" -eq 64 ] || fail "$arch-$identity-identity-missing"
             printf 'row_%s_%s_identity_sha256=%s\n' "$index" "$identity" "$value"

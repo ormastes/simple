@@ -47,9 +47,13 @@ maintenance gates recorded in the system test plan.
 
 For compiler-owned Gen2 HWIR/product/provenance changes, the qualified
 self-hosted run must report at least **80% branch coverage** across the changed
-owned `.spl` modules and their directly corresponding focused tests. Generated
-VHDL, testbench literals, legacy V1 generators, unavailable GHDL tooling, and
-the separate architectural-retirement producer are explicit exclusions. The
+owned `.spl` modules and their directly corresponding focused tests. The
+denominator comes from a compiler-time, zero-count semantic decision inventory;
+runtime outcomes are left-joined by stable file/span identity, so an unexecuted
+decision cannot disappear. Generated VHDL, testbench literals, legacy V1
+generators, and the separate architectural-retirement producer are the exact
+four exclusions; unavailable GHDL tooling is a blocker, never an exclusion. The
 qualification receipt records the coverage command, report location, measured
-percentage, changed-file list, and each exclusion. A bootstrap-seed test run
-does not satisfy this contract.
+percentage, an authoritative source-hash-bound owned-file list (including
+explicit empty/deleted-file handling), and each exclusion. A bootstrap-seed
+test run does not satisfy this contract.

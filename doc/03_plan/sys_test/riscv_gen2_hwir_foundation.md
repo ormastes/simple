@@ -134,7 +134,8 @@ self-hosted CLI reruns the commands recorded in
 
 ## Qualification receipt-retention policy
 
-No Gen2 qualification receipt is retained today. The planned qualification
+No Gen2 qualification receipt is retained today. The v2 writer/composer exists
+at source level; it is not admitted execution evidence. The qualification
 writer is the provenance-admitted self-hosted CLI, after it executes the RV32
 and RV64 generated-VHDL/GHDL routes. It must write one immutable run directory
 under `build/evidence/riscv_gen2_hwir_foundation/<run-id>/`, headed by
@@ -145,9 +146,11 @@ must fail closed if any identity, log, or RV32/RV64 row is absent.
 
 This is a tracked retention policy, not an artifact: this lane creates no
 `build/` files and does not call a seed run, a scenario result, or a manually
-edited document a receipt. Until that self-hosted writer exists and completes a
-run, manuals must say “planned qualification receipt”, never “retained
-receipt”.
+edited document a receipt. Until that composer executes under an admitted
+self-host and completes a run, manuals must say “source-level v2 composer” or “planned qualification
+receipt”, never “retained receipt”. Coverage must use compiler-time zero-count
+inventory and deduplicate runtime outcomes by stable decision identity before
+computing the denominator.
 
 ## Critical-profile boundary
 

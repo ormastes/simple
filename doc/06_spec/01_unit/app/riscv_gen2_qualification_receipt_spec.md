@@ -39,4 +39,7 @@ The executable companion verifies exact v2 parsing, fixed row ordering,
 coverage/list bindings, command/testbench/GHDL exits, duplicate and missing
 fields, and nested receipt rendering. It remains source-level acceptance until
 the admitted runtime executes it; mocked GHDL or a static shell-token scan does
-not produce qualification evidence.
+not produce qualification evidence. Writer-level acceptance is still pending
+for exact command grammar, duplicate-safe product JSON, canonical parent and
+no-symlink handling, complete retained-destination rehash, source/destination
+mutation, and failure cleanup. Parser-only examples do not prove those claims.

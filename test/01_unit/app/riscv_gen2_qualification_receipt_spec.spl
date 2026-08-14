@@ -6,7 +6,9 @@ use std.spec.{describe, expect, it, step}
 use app.test.riscv_gen2_qualification_receipt.{
     RISCV_GEN2_QUALIFICATION_SCHEMA,
     riscv_gen2_parse_qualification_manifest,
-    riscv_gen2_render_qualification_receipt}
+    riscv_gen2_render_qualification_receipt,
+    riscv_gen2_qualification_product_manifest_matches}
+use app.io.mod.{cwd}
 
 val _HASH = "a" * 64
 
@@ -64,9 +66,12 @@ fn _manifest() -> text:
     "changed_file_count=2\n" +
     "changed_file_1=src/compiler/50.mir/hwir/types.spl\n" +
     "changed_file_2=src/compiler/70.backend/backend/hwir_to_vhdl.spl\n" +
-    "exclusion_count=2\n" +
-    "exclusion_1=generated-vhdl\n" +
-    "exclusion_2=testbench-literals\n" + _row(1, "rv32") + _row(2, "rv64")
+    "exclusion_count=4\n" +
+    "exclusion_1=generated VHDL artifacts\n" +
+    "exclusion_2=generated VHDL testbench literals\n" +
+    "exclusion_3=legacy V1 generators\n" +
+    "exclusion_4=separate architectural retirement producer\n" +
+    _row(1, "rv32") + _row(2, "rv64")
 
 describe "RISC-V Gen2 qualification receipt contract":
     it "should accept the fixed RV32 and RV64 measured branch manifest":
@@ -82,7 +87,7 @@ describe "RISC-V Gen2 qualification receipt contract":
             "riscv-gen2-rv64-zca-addiw-critical")
         expect(manifest.branch_coverage_basis_points).to_equal(8000)
         expect(manifest.changed_files.len()).to_equal(2)
-        expect(manifest.exclusions.len()).to_equal(2)
+        expect(manifest.exclusions.len()).to_equal(4)
 
     it "should reject missing rows, nonzero exits, and subcanonical branch coverage":
         step("Reject incomplete rows, failed product commands, swapped targets, and low coverage")
@@ -119,8 +124,8 @@ describe "RISC-V Gen2 qualification receipt contract":
             _manifest().replace("changed_file_count=2", "changed_file_count=0")
         ).is_err()).to_be(true)
         expect(riscv_gen2_parse_qualification_manifest(
-            _manifest().replace("exclusion_2=testbench-literals",
-                "exclusion_2=generated-vhdl")
+            _manifest().replace("exclusion_2=generated VHDL testbench literals",
+                "exclusion_2=generated VHDL artifacts")
         ).is_err()).to_be(true)
         expect(riscv_gen2_parse_qualification_manifest(
             _manifest() + "row_1_run_exit_code=0\n"
@@ -145,3 +150,23 @@ describe "RISC-V Gen2 qualification receipt contract":
         expect(rendered).to_contain("\"retained_path\":\"rv64.run.command\"")
         expect(rendered).to_contain("\"changed_files\":[")
         expect(rendered).to_contain("\"exclusions\":[")
+
+    it "should reject duplicate or mismatched product-manifest authority":
+        step("Bind the producer JSON structurally and reject duplicate authority keys")
+        val row = riscv_gen2_parse_qualification_manifest(_manifest()).unwrap().rows[0]
+        val product_manifest = "{" +
+            "\"entry_entity\":\"riscv_gen2_zca_rv32_cjal_trap_single_outstanding_frontend\"," +
+            "\"source_closure_sha256\":\"{_HASH}\"," +
+            "\"vhdl\":{\"path\":\"{cwd()}/evidence/rv32.vhd\",\"sha256\":\"{_HASH}\"}," +
+            "\"generation_route\":\"hwir-gen2-trap-stateful-product-v3\"," +
+            "\"hwir\":{\"config_profile\":\"riscv-gen2-rv32-zca-cjal-critical\",\"graph_sha256\":\"{_HASH}\"}," +
+            "\"assurance_policy\":{\"strictness\":\"critical\"}," +
+            "\"target\":{\"name\":\"riscv32\",\"xlen\":32,\"profile\":\"riscv-gen2-rv32-zca-cjal-critical\"}}"
+        expect(riscv_gen2_qualification_product_manifest_matches(
+            product_manifest, row)).to_be(true)
+        expect(riscv_gen2_qualification_product_manifest_matches(
+            "{\"entry_entity\":\"shadow\"," + product_manifest[1:],
+            row)).to_be(false)
+        expect(riscv_gen2_qualification_product_manifest_matches(
+            product_manifest.replace("\"graph_sha256\":\"{_HASH}\"",
+                "\"graph_sha256\":\"" + ("b" * 64) + "\""), row)).to_be(false)

@@ -25,7 +25,13 @@ non-production, so bootstrap-seed output is not release evidence.
 - `HwBranchPredecodeInterface` adds an explicit `rs1_value: Bits[XLEN]` input;
   conditional branch constructors cannot perform a decoder-side provider lookup
   or runtime width selection.
-- `HwParcelFrontendDef` is the first typed sequential boundary: a synchronous,
+- `HwSequentialModuleDef` is the canonical mixed sequential boundary. It owns
+  typed signals/constants, combinational operations, comparisons, selections,
+  extracts/slices, state plan, child binding, and complete structural hash;
+  strict VHDL renders declarations then datapath then process. Parcel and trap
+  products now construct this same boundary while retaining their fixed
+  product validators and prepending the decoder exactly once.
+- The parcel frontend is a synchronous,
   one-entry parcel/PC/branch-read capture with a concrete 64-bit monotonically
   incrementing transaction lineage. It
   preserves payload under dispatch stall, waits for one matching 64-bit-lineage
@@ -96,6 +102,12 @@ non-production, so bootstrap-seed output is not release evidence.
   remains pending.
 
 ## Open Next
+
+- Qualification v2 is source-level only. It separates command-producing
+  staging from the Simple receipt composer, but PASS still requires
+  compiler-time zero-count coverage inventory, exact/duplicate-safe evidence
+  validation, writer deliberate reds, an admitted Stage-4 CLI, and independent
+  RV32/RV64 GHDL receipts.
 
 - [Architecture](riscv_gen2_hwir_foundation.md)
 - [Predecode interface](../../src/compiler/50.mir/hwir/predecode.spl)

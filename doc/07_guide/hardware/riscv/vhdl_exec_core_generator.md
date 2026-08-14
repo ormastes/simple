@@ -619,6 +619,25 @@ explicit exclusions, each RV32/RV64 product command and `.gen.json`, generated
 VHDL and testbench, and separate GHDL analyze/elaborate/run commands, exits, and
 logs. The runner cannot select another composer or write the receipt itself.
 
+### Gen2 qualification v2 operator boundary
+
+Run `scripts/check/run-riscv-gen2-hwir-qualification.shs` only with an absolute,
+provenance-admitted Stage-4 CLI, its adjacent provenance file, and an absolute
+fresh output directory. Phase one owns compiler coverage, both critical product
+commands, fixed testbenches, and isolated GHDL analyze/elaborate/run commands;
+the admitted Simple composer alone publishes the final receipt last. Coverage
+must bind an authoritative owned-file inventory, include compiler-time
+zero-count decisions, deduplicate runtime outcomes, and use exactly four
+exclusions: generated VHDL, testbench literals, legacy v1 generators, and the
+separate retirement producer. Missing GHDL is a blocker, not an exclusion.
+
+This is currently a WARN/source handoff. Exact command grammar, duplicate-safe
+product JSON, canonical parent handling, and destination rehash are implemented
+at source level but remain unverified; deliberate-red writer coverage and an
+admitted RV32/RV64 run remain open in the canonical
+[task plan](../../../03_plan/agent_tasks/riscv_gen2_hwir_foundation.md) and
+[qualification bug](../../../08_tracking/bug/riscv_gen2_hwir_qualification_contract_mismatch_2026-08-14.md).
+
 **`expected Fn, found FString` when running the spec.** Pre-existing, not a
 regression in this lane: the deployed seed's `simple test` cannot parse the
 `@step "..."` decorator form. HEAD fails identically. The spec in this lane is

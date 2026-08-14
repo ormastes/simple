@@ -57,11 +57,12 @@
 - [ ] Changed `.spl` files pass lint, HWIR token duplication, and the seven-part
   `sspec-maintain scan`; the qualification receipt records at least 80% branch
   coverage or leaves the coverage contract blocked.
-- [x] Existing selected requirements, architecture, detail design, system-test
+- [ ] Existing selected requirements, architecture, detail design, system-test
   plan, SPipe state, guide, feature/layer expert knowledge, executable steps,
-  and manual evidence describe the same bounded A13 boundary. No new
-  requirement option was auto-selected.
-- [x] All intentional changes are committed, rebased under the integration
+  and manual evidence describe the same bounded A13/A14 boundary. Recheck this
+  after exact A14 command, inventory, and receipt-authority sources land; no new
+  requirement option may be auto-selected.
+- [ ] All intentional changes are committed, rebased under the integration
   lock, pushed without force, reachable from `origin/main`, and leave a clean
   detached worktree.
 

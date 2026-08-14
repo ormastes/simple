@@ -4,9 +4,9 @@ Status: implementation handoff; executable acceptance open
 
 Owner: compiler evidence owner; final reviewer `/root`.
 
-## Failure
+## Historical failure (superseded at source level)
 
-`scripts/check/run-riscv-gen2-hwir-qualification.shs` invokes its composer with
+The original `scripts/check/run-riscv-gen2-hwir-qualification.shs` invoked its composer with
 `--emit-evidence` and `--compose-receipt`, and validates final schema
 `simple-riscv-gen2-hwir-qualification-v1` with flat `status=pass` gate fields.
 The in-tree Simple composer at
@@ -16,9 +16,13 @@ The in-tree Simple composer at
 receipt structure. Its source explicitly states that it has no
 `--emit-evidence` mode.
 
+That v1 mismatch has been removed by the source-level v2 contract. This bug
+remains open for the unverified authority and coverage gaps below, not because
+the removed switches are still present.
+
 The static runner token contract test confirms only that the wrapper contains
-the planned tokens; it cannot prove either phase is executable. No admitted
-self-hosted runtime can satisfy this inconsistent command/schema contract.
+the planned tokens; it cannot prove either phase is executable. The current v2
+source is aligned, but remains unexecuted and has the open authority gaps below.
 
 ## Selected contract (2026-08-14)
 
