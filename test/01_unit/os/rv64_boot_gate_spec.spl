@@ -1,0 +1,96 @@
+"""Pure fail-closed RV64 boot lifecycle admission."""
+
+use std.spec.*
+use os.rv64_boot_gate.{
+    Rv64BootGateObservation,
+    RV64_BOOT_GATE_RECEIPT_PREFIX,
+    RV64_BOOT_GATE_SV39_ACTIVE,
+    RV64_BOOT_GATE_PID1_LIVE,
+    RV64_BOOT_GATE_NETWORK_TX_READY,
+    RV64_BOOT_GATE_NETWORK_RX_READY,
+    RV64_BOOT_GATE_NETWORK_SERVICE_READY,
+    RV64_BOOT_GATE_SSHD_READY,
+    RV64_BOOT_GATE_SSHD_SESSION_COMPLETE,
+    RV64_BOOT_GATE_SSHD_ACCEPT_RESUMED,
+    RV64_BOOT_GATE_WM_PROCESS_OWNED_FRAME_READY,
+    rv64_boot_gate_new,
+    rv64_boot_gate_advance,
+    rv64_boot_gate_verdict,
+    prepare_rv64_boot_gate_fixture,
+    check_rv64_boot_gate_transcript
+}
+
+fn advance_happy_path():
+    var state = rv64_boot_gate_new()
+    state = rv64_boot_gate_advance(state, Rv64BootGateObservation.Sv39Active)
+    state = rv64_boot_gate_advance(state, Rv64BootGateObservation.Pid1Live)
+    state = rv64_boot_gate_advance(state, Rv64BootGateObservation.NetworkTxReady)
+    state = rv64_boot_gate_advance(state, Rv64BootGateObservation.NetworkRxReady)
+    state = rv64_boot_gate_advance(state, Rv64BootGateObservation.NetworkServiceReady)
+    state = rv64_boot_gate_advance(state, Rv64BootGateObservation.SshdReady)
+    state = rv64_boot_gate_advance(state, Rv64BootGateObservation.SshdSessionComplete)
+    state = rv64_boot_gate_advance(state, Rv64BootGateObservation.SshdAcceptResumed)
+    state = rv64_boot_gate_advance(state, Rv64BootGateObservation.WmProcessOwnedFrameReady)
+    state
+
+describe "RV64 boot gate state machine":
+    it "accepts the exact ordered lifecycle":
+        val state = advance_happy_path()
+        expect(rv64_boot_gate_verdict(state)).to_equal("PASS")
+        expect(state.accepted_count).to_equal(9)
+        expect(state.terminal).to_be(true)
+
+    it "reports the first missing lifecycle observation":
+        var state = rv64_boot_gate_new()
+        state = rv64_boot_gate_advance(state, Rv64BootGateObservation.Sv39Active)
+        state = rv64_boot_gate_advance(state, Rv64BootGateObservation.Pid1Live)
+        expect(rv64_boot_gate_verdict(state)).to_equal("INCOMPLETE:missing=network-tx-ready")
+
+    it "rejects a reordered observation and retains that first error":
+        var state = rv64_boot_gate_new()
+        state = rv64_boot_gate_advance(state, Rv64BootGateObservation.Sv39Active)
+        state = rv64_boot_gate_advance(state, Rv64BootGateObservation.NetworkTxReady)
+        val first = rv64_boot_gate_verdict(state)
+        state = rv64_boot_gate_advance(state, Rv64BootGateObservation.Pid1Live)
+        expect(first).to_equal("FAIL:reordered:expected=pid1-live:observed=network-tx-ready")
+        expect(rv64_boot_gate_verdict(state)).to_equal(first)
+
+    it "rejects a duplicate observation and retains that first error":
+        var state = rv64_boot_gate_new()
+        state = rv64_boot_gate_advance(state, Rv64BootGateObservation.Sv39Active)
+        state = rv64_boot_gate_advance(state, Rv64BootGateObservation.Sv39Active)
+        val first = rv64_boot_gate_verdict(state)
+        state = rv64_boot_gate_advance(state, Rv64BootGateObservation.Pid1Live)
+        expect(first).to_equal("FAIL:duplicate-or-replayed:sv39-active")
+        expect(rv64_boot_gate_verdict(state)).to_equal(first)
+
+    it "rejects observations after the terminal lifecycle receipt":
+        var state = advance_happy_path()
+        state = rv64_boot_gate_advance(state, Rv64BootGateObservation.WmProcessOwnedFrameReady)
+        expect(rv64_boot_gate_verdict(state)).to_equal("FAIL:post-terminal:wm-process-owned-frame-ready")
+
+describe "RV64 boot gate transcript checker":
+    it "accepts canonical receipts while ignoring unrelated serial lines":
+        var lines: [text] = ["OpenSBI v1", "MEM OK"]
+        for receipt in prepare_rv64_boot_gate_fixture():
+            lines.push(receipt)
+        lines.push("OS IDLE")
+        expect(check_rv64_boot_gate_transcript(lines)).to_equal("PASS")
+
+    it "fails closed for a missing canonical receipt":
+        val lines = [
+            RV64_BOOT_GATE_RECEIPT_PREFIX + RV64_BOOT_GATE_SV39_ACTIVE,
+            RV64_BOOT_GATE_RECEIPT_PREFIX + RV64_BOOT_GATE_PID1_LIVE
+        ]
+        expect(check_rv64_boot_gate_transcript(lines)).to_equal("INCOMPLETE:missing=network-tx-ready")
+
+    it "rejects duplicate canonical receipts":
+        val lines = [
+            RV64_BOOT_GATE_RECEIPT_PREFIX + RV64_BOOT_GATE_SV39_ACTIVE,
+            RV64_BOOT_GATE_RECEIPT_PREFIX + RV64_BOOT_GATE_SV39_ACTIVE
+        ]
+        expect(check_rv64_boot_gate_transcript(lines)).to_equal("FAIL:duplicate-or-replayed:sv39-active")
+
+    it "rejects an unknown canonical receipt token":
+        val lines = [RV64_BOOT_GATE_RECEIPT_PREFIX + "network-probably-ready"]
+        expect(check_rv64_boot_gate_transcript(lines)).to_equal("FAIL:unknown-observation:network-probably-ready")

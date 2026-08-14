@@ -16,11 +16,11 @@ Canonical plan: `doc/03_plan/sys_test/rv64_ssh_live_login_in_qemu.md`
 | Lane | ACs | Owned paths | Deliverables | Depends on | Status |
 |---|---|---|---|---|---|
 | A — bootstrap | AC-1, AC-2 | `src/compiler/**`, focused compiler specs, Stage 3 bug | root-cause fix, exact+adjacent native regressions, admitted Stage 4 receipt | none | audit complete; implementation open |
-| B — boot state | AC-3, AC-6 | new focused `src/os/` contract and specs | pure ordered/exactly-once state machine and negative cases | admitted Stage 4 for final tests | open |
-| C — paging/process/network | AC-3 | RV64 paging, PM/scheduler, boot orchestration, VirtIO integration | runtime-derived Sv39, PID1, TX/RX/network observations | Lane B interfaces | open |
-| D — SSH | AC-4 | SSH channel/session and QEMU host contract | filesystem-backed commands, real outputs/status, bad auth, accept recovery | B/C | open |
-| E — WM | AC-5 | PM/scheduler and canonical compositor/Engine2D RV64 path | PID-correlated first presented frame | B/C | open |
-| F — SPipe/docs | AC-7..AC-9 | SSpec/manual, plan, guide, expert wikis, bug docs | reviewed manual, traceability, current knowledge | frozen vocabulary; implementation receipts for final generation | plan pass in progress; final manual blocked |
+| B — boot state | AC-3, AC-6 | `src/os/rv64_boot_gate.spl`, `test/01_unit/os/rv64_boot_gate_spec.spl` | pure ordered/exactly-once state machine, checker, and happy/missing/reordered/duplicate/post-terminal cases | Stage 4 for execution evidence and later SSpec import | source implemented; execution blocked |
+| C — paging/process/network | AC-3 | paging owner, exclusive `pm_service.spl`, new PID1 boot facade, `riscv_services.spl`, `rv64_probe.spl` | runtime-derived Sv39, PID1, TX/RX/network observations | frozen observation contract; coordinate entrypoint patch through merge owner | redo now |
+| D — SSH | AC-4 | SSH channel/session and QEMU host contract | filesystem-backed commands, real outputs/status, bad auth, accept recovery | frozen receipt contract; live proof waits for A | redo now |
+| E — WM | AC-5 | new RV64 WM adapter and canonical compositor/Engine2D path; no `pm_service.spl` edits | PID-correlated first presented frame | consumes C's PID1 facade; live proof waits for A | redo now |
+| F — SPipe/docs | AC-7..AC-9 | SSpec/manual, plan, guide, expert wikis, bug docs | manual-first source, traceability, current knowledge | implementation receipts only for final regeneration | redo now; docgen evidence blocked |
 | G — verification/integration | AC-10 | no exclusive source ownership | one-run ledger, review, commit/rebase/push/reachability/clean receipt | A-F | blocked |
 
 ## Sidecar Audit Receipts (2026-08-14)
@@ -41,8 +41,26 @@ Canonical plan: `doc/03_plan/sys_test/rv64_ssh_live_login_in_qemu.md`
   regeneration.
 - Sidecars may propose findings and code but may not accept broad done marks,
   exclusions, manual quality, or release evidence.
-- Parallel implementation begins only after Lane A admits Stage 4 and the
-  merge owner confirms disjoint file ownership for B-E.
+- Parallel implementation begins immediately with the frozen interfaces above.
+  Stage 4 gates execution evidence, not source implementation. The merge owner
+  confirms any cross-lane adapter patch before it is edited.
+
+## Parallel Redo Dispatch
+
+| Task | Owned files | Must not edit | Source-complete handoff | Evidence blocker |
+|---|---|---|---|---|
+| A1 | compiler owners and focused compiler specs | `src/os/**` | root fix plus exact/adjacent regression source | TODO666/667 |
+| B1 | new boot-gate state/checker files and focused specs | paging, SSH, WM implementation | deterministic happy and four negative transitions | TODO806 runtime execution |
+| C1 | paging, PM query adapter, boot orchestrator, VirtIO observation adapter | SSH channel and compositor | typed owner results wired to B contract | TODO806 live receipts |
+| D1 | SSH channel/session and host probe | paging/PM/compositor | real filesystem execution and five independent sessions | TODO806 OpenSSH transcript |
+| E1 | WM launch adapter and compositor-present correlation | SSH and paging | PID-owned correlated frame; fail-before-ready | TODO806 live frame/QMP evidence |
+| F1 | SSpec/manual/guide/wikis | production implementation | consistent manual-first source and exact resume commands | TODO807 docgen/maintain review |
+| G1 | integration metadata only | all exclusive implementation paths | review ledger, clean intentional commit set | TODO806/807 and reachable push |
+
+The serial integration owner alone edits
+`examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl` after B-E APIs
+settle. This prevents paging, PID1, SSH, and WM agents from racing on the one
+convergence file. Legacy desktop rectangle/banner fixtures remain excluded.
 
 ## Handoff Rule
 

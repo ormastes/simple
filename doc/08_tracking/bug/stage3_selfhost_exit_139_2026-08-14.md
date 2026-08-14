@@ -16,6 +16,14 @@ the progress log ends at an alive Stage-3 sample. Therefore exit 139 is an
 unretained observation pending the next diagnostic reproduction, not a
 hash-bound receipt.
 
+This record is distinct from
+`stage3_selfhost_post_hir_segfault_2026-08-14.md`. That restart12 lane retained
+a nonempty `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`
+and narrowed only the last observable frontier to MIR method-call lowering.
+The two runs used different source authorities, output directories, candidate
+hashes, and evidence retention. Neither log proves a crash site, and evidence
+from one run must not be attributed to the other.
+
 Command:
 
 ```sh
@@ -43,3 +51,17 @@ compiler/codegen owner, and complete Stage 3 plus Stage 4 and the bounded
 essential-tools smoke gate. Do not use the Rust seed, stale release binary, or
 Stage 2 as SPipe/release evidence. The prior session exhausted its three-cycle
 cap and must not rerun unchanged commands.
+
+Before another full bootstrap, an independently admitted pure-Simple candidate
+may run the bounded exact/adjacent diagnostic with:
+
+```sh
+SIMPLE_ADMITTED_COMPILER_SHA256=<admitted-sha256> \
+  sh scripts/check/check-stage3-aggregate-receiver-native.shs \
+  /absolute/path/to/admitted/pure-simple/compiler
+```
+
+The checker retains candidate identity and before/after hashes, build/run logs,
+exit codes, and output hash. A passing focused probe does not itself admit
+Stage 3 or Stage 4 and does not replace the symbolized full-bootstrap failure
+capture required above.

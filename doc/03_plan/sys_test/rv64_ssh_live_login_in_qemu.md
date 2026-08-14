@@ -57,7 +57,7 @@ stale artifacts are diagnostics, never PASS evidence.
 | Actual PID1 owner is disconnected | `src/os/services/pm_service.spl:264-271` | Boot orchestrator calls the process owner and consumes its liveness result |
 | RV64 SSH probe uses fixed-command behavior | `src/os/ssh_qemu_contract.spl:74-120`; canned combined command at `src/os/apps/sshd/ssh_session_channel.spl:244-250`; fixed outputs at `ssh_session.spl:325-331` | Separate real OpenSSH commands execute target filesystem payloads and stream actual stdout/status |
 | Desktop proof is a fixture/shim | Fixed rectangles at `desktop_service_entry.spl:43-81`, string-only GUI stub at `boot/baremetal_stubs.c:790-803`, banner shim at `desktop_service_entry.spl:176-183`, unconditional ready/PASS at `:210-220` | PID-owned WM process plus correlated compositor presentation; failures return before readiness |
-| SSpec/manual are legacy and stale | Spec `:179-347` lacks state-machine negatives/manual steps; manual says guest port 22 while source asserts 2222 and reports stale KEX-only status | Rewrite manual-first SSpec, generate one canonical mirror, review all seven maintain scores and traceability |
+| SSpec/manual source is only partially modernized | Four steps and fail-closed live row exist, but frozen interfaces and behavioral negatives are absent; the live blocker uses a matcher mismatch instead of `fail(...)`; a stale duplicate manual and port-22 fragments remain | Implement behavioral scenarios, use the frozen failure scaffold, reconcile port 2222, remove/redirect duplicate, then generate one canonical mirror and review all seven maintain scores |
 
 ## Acceptance and Evidence Matrix
 
@@ -67,16 +67,45 @@ No row is complete until the Evidence cell contains one fresh passing result.
 |---|---|---|---|---|---|
 | AC-1 | Claim/reproduce Stage 3 failure; pure-Simple root fix; exact + adjacent native regression | BLOCKED | bug record, bounded diagnostic log, backtrace, two regression outputs | bootstrap sidecar | root highest-capability review |
 | AC-2 | Provenance Stage 4 CLI and essential test/lint/duplicate/aggregate markers | BLOCKED | Stage 3/4 manifests, hashes, build logs, essential-tools env/log | bootstrap sidecar | root |
-| AC-3 | Ordered Sv39/PID1/TX/RX/network/SSHD/WM state machine; missing/reordered/duplicate negatives | NOT IMPLEMENTED | focused unit/system result and transcript checker output | RV64 gate sidecar | root |
+| AC-3 | Ordered Sv39/PID1/TX/RX/network/SSHD/WM state machine; missing/reordered/duplicate negatives | STATE SOURCE IMPLEMENTED; runtime owners/open execution | `src/os/rv64_boot_gate.spl`, focused unit source; executable result pending | RV64 gate sidecar | root |
 | AC-4 | Real OpenSSH good auth; `true`; `simple --version`; `simple.smf --version`; bad auth; accept resumes after each session | NOT IMPLEMENTED | host transcript, per-command rc/stdout, serial log, correlation IDs | SSH owner | root |
 | AC-5 | Live process-owned WM plus correlated presented frame | NOT IMPLEMENTED | PID/liveness receipt, compositor receipt, QMP capture metadata | PM/scheduler + compositor owners | root |
-| AC-6 | Shared interfaces and exact/adjacent fail-closed SSpec coverage | NOT IMPLEMENTED | focused SSpec result | RV64 gate sidecar | root |
-| AC-7 | Manual-first steps, zero stubs, seven-score maintain review, mirror and requirement traceability | STALE | scan output, preview/rollback record, generated manual | docs/SPipe sidecar | root manual reviewer |
+| AC-6 | Shared interfaces and exact/adjacent fail-closed SSpec coverage | INTERFACES + UNIT SOURCE IMPLEMENTED; SSpec integration/execution open | focused unit and SSpec results | RV64 gate sidecar | root |
+| AC-7 | Manual-first steps, zero stubs, seven-score maintain review, mirror and requirement traceability | SOURCE PARTIAL; execution review BLOCKED | scan output, preview/rollback record, generated manual | docs/SPipe sidecar | root manual reviewer |
 | AC-8 | This plan and dedicated agent-task breakdown complete | PLANNED | plan and `doc/03_plan/agent_tasks/rv64_sv39_pid1_network_ssh_wm_boot.md` | merge owner | root |
 | AC-9 | Guide, feature/layer expert wikis, architecture/design and bug records current | IN PROGRESS | changed-doc inventory in `.spipe/.../state.md` | docs sidecar | root |
 | AC-10 | Focused/release guards, locked integration, reachability, clean tree, done receipt | BLOCKED on AC-1..9 | command ledger, commit, ancestry proof, done file | merge owner | root |
 
 ## Work Packages
+
+### Parallel redo policy
+
+Implementation is not serialized behind Stage 4. The frozen interfaces and
+receipt vocabulary above are sufficient for disjoint agents to implement
+WP-B through WP-F concurrently while WP-A repairs bootstrap. Stage 4 is an
+execution/admission dependency only. Each lane commits only its owned paths,
+records source-level evidence, and leaves runtime-only claims blocked until the
+admitted CLI exists.
+
+| Wave | Parallel lane | Exclusive ownership | Can finish before Stage 4 | Runtime-only handoff |
+|---|---|---|---|---|
+| 1 | A — compiler/bootstrap | `src/compiler/**`, focused compiler regressions, Stage 3 bug | root localization/fix and source regressions | native regression, Stage 3/4 build and essential-tools receipt |
+| 1 | B — boot-state contract | `src/os/rv64_boot_gate.spl`, `test/01_unit/os/rv64_boot_gate_spec.spl` | state machine, checker, happy/missing/reordered/duplicate/post-terminal cases | execute focused specs with admitted CLI |
+| 1 | C — paging/PID1/network | `paging.spl`, exclusive `pm_service.spl`, new PID1 boot facade, `riscv_services.spl`, `rv64_probe.spl` | typed observations and owner integration | QEMU SATP/PID1/TX/RX receipts |
+| 1 | D — SSH execution | SSH channel/session and host contract | remove canned path; filesystem execution and five-session oracle | real OpenSSH transcript and accept-loop receipts |
+| 1 | E — WM ownership | new RV64 WM adapter plus compositor/WM services; consumes PID1 facade and does not edit `pm_service.spl` | PID/frame correlation and failure propagation | live WM/QMP frame evidence |
+| 1 | F — SSpec/docs | executable SSpec, manual source, guide/wikis | manual-first scenarios, AC trace, blocker/runbook updates | docgen, seven-score review, live manual evidence |
+| 2 | G — integration | no exclusive implementation paths | review and source-only guards | full focused/release/live ledger and reachable push |
+
+Agents must not edit another lane's exclusive paths. Cross-lane changes go
+through the merge owner as a small interface patch. A lane that cannot produce
+its runtime evidence updates its existing Todo row with the exact candidate,
+command, hashes/logs required, owner, and final reviewer; it does not create a
+duplicate Todo or mark the source implementation complete as a runtime PASS.
+`ssh_live_entry.spl` is frozen during the parallel wave and belongs solely to
+the later serial integration owner after B-E publish stable APIs. Legacy
+`desktop_service_entry.spl` and `baremetal_stubs.c` stay diagnostic and outside
+the admitted target rather than becoming shared edit hotspots.
 
 ### WP-A — Stage 3 root cause and Stage 4 admission
 
@@ -177,6 +206,23 @@ Live artifacts:
 | docs/SPipe sidecar | AC-7..10 audit and documentation | audit complete; docs in progress |
 | merge owner | root Codex agent in this detached worktree | active |
 | final reviewer | root normal/highest-capability review | plan findings accepted; no implementation done marks accepted |
+
+### Redo dispatch and completion boundary
+
+| Agent task | Immediate completion definition | Blocked evidence Todo |
+|---|---|---|
+| A1 compiler diagnosis/fix | corrupt receiver root cause repaired; exact and adjacent tests committed | TODO666, then TODO667 for admitted builds |
+| B1 boot-state owner | frozen interfaces implemented with deterministic negative verdicts | TODO806 only for admitted execution/live transcript |
+| C1 runtime ownership | Sv39 readback, PID1 liveness, and existing VirtIO results feed typed observations | TODO806 |
+| D1 SSH owner | no admitted canned command branch; independent command/auth/recovery contract implemented | TODO806 |
+| E1 WM owner | WM PID/liveness and compositor-present identity are correlated; failures stop readiness | TODO806 |
+| F1 SSpec/docs owner | modern scenarios/manual/guide/wiki sources are consistent and fail closed | TODO807 for docgen/maintain evidence |
+| G1 merge/reviewer | all disjoint commits reviewed, one-run ledger enforced, no unrelated files absorbed | TODO806/807 until runtime evidence exists |
+
+There is no physical-hardware dependency for this QEMU goal. Lock contention is
+an operational retry condition, not a feature Todo. The only accepted external
+handoff is an admitted source-matched Stage 4 executable/provenance artifact;
+all implementation work above remains locally actionable.
 
 The final reviewer must inspect source and retained evidence, not sidecar
 summaries alone. Broad PASS, exclusions, generated-manual quality, and done

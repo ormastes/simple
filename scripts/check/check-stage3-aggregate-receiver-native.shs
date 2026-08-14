@@ -1,0 +1,90 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+if [ "$#" -ne 1 ]; then
+    echo "usage: $0 /absolute/path/to/admitted-pure-simple-compiler" >&2
+    exit 2
+fi
+candidate=$1
+case "$candidate" in
+    /*) ;;
+    *) echo "error=candidate_path_must_be_absolute" >&2; exit 2 ;;
+esac
+[ -x "$candidate" ] || { echo "error=candidate_not_executable:$candidate" >&2; exit 2; }
+[ -n "${SIMPLE_ADMITTED_COMPILER_SHA256:-}" ] || { echo "error=SIMPLE_ADMITTED_COMPILER_SHA256_required" >&2; exit 2; }
+
+digest_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo "error=sha256_tool_missing" >&2
+        return 127
+    fi
+}
+
+candidate_hash_before=$(digest_file "$candidate")
+[ "$candidate_hash_before" = "$SIMPLE_ADMITTED_COMPILER_SHA256" ] || { echo "error=admitted_candidate_hash_mismatch" >&2; exit 2; }
+set +e
+candidate_identity=$(timeout -k 5s 30s env SIMPLE_BOOTSTRAP= SIMPLE_RUST_SEED_WARNING= "$candidate" --version 2>&1)
+identity_rc=$?
+set -e
+[ "$identity_rc" -eq 0 ] && [ -n "$candidate_identity" ] || { echo "error=candidate_identity_failed" >&2; exit 2; }
+case "$candidate_identity" in
+    *"bootstrap seed only"*|*"Rust-built"*) echo "error=rust_seed_candidate_rejected" >&2; exit 2 ;;
+esac
+
+hash_prefix=$(printf '%s' "$candidate_hash_before" | cut -c1-16)
+artifact_dir="$repo_root/build/bootstrap/probes/stage3-aggregate-receiver/$hash_prefix"
+[ ! -e "$artifact_dir/result.env" ] || { echo "error=unchanged_candidate_already_probed:$artifact_dir" >&2; exit 2; }
+mkdir -p "$artifact_dir"
+fixture="$repo_root/test/02_integration/compiler/stage3_aggregate_receiver_native_main.spl"
+output="$artifact_dir/stage3_aggregate_receiver_native"
+{
+    echo "candidate_path=$candidate"
+    echo "candidate_sha256=$candidate_hash_before"
+    echo "candidate_identity=$candidate_identity"
+    echo "fixture=$fixture"
+    echo "output=$output"
+} >"$artifact_dir/candidate.env"
+
+set +e
+timeout -k 10s 300s env SIMPLE_BOOTSTRAP= SIMPLE_RUNTIME_PATH= SIMPLE_LIB="$repo_root/src" SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_FRONTEND_DELEGATED=1 \
+    "$candidate" native-build --source "$repo_root/src/compiler" --source "$repo_root/src/lib" \
+    --source "$repo_root/test/02_integration/compiler" --entry-closure --entry "$fixture" --output "$output" \
+    >"$artifact_dir/build.stdout.log" 2>"$artifact_dir/build.stderr.log"
+build_rc=$?
+set -e
+run_rc=125
+if [ "$build_rc" -eq 0 ] && [ -x "$output" ]; then
+    set +e
+    timeout -k 5s 30s "$output" >"$artifact_dir/run.stdout.log" 2>"$artifact_dir/run.stderr.log"
+    run_rc=$?
+    set -e
+else
+    : >"$artifact_dir/run.stdout.log"
+    : >"$artifact_dir/run.stderr.log"
+fi
+
+candidate_hash_after=$(digest_file "$candidate")
+output_hash=""
+[ ! -f "$output" ] || output_hash=$(digest_file "$output")
+status=FAIL
+if [ "$build_rc" -eq 0 ] && [ "$run_rc" -eq 0 ] && [ "$candidate_hash_before" = "$candidate_hash_after" ] && \
+        grep -Fxq 'stage3_aggregate_receiver_exact=true' "$artifact_dir/run.stdout.log" && \
+        grep -Fxq 'stage3_aggregate_receiver_adjacent=true' "$artifact_dir/run.stdout.log"; then
+    status=PASS
+fi
+{
+    echo "stage3_aggregate_receiver_status=$status"
+    echo "build_rc=$build_rc"
+    echo "run_rc=$run_rc"
+    echo "candidate_sha256_before=$candidate_hash_before"
+    echo "candidate_sha256_after=$candidate_hash_after"
+    echo "output_sha256=$output_hash"
+    echo "artifact_dir=$artifact_dir"
+} >"$artifact_dir/result.env"
+cat "$artifact_dir/result.env"
+[ "$status" = PASS ]

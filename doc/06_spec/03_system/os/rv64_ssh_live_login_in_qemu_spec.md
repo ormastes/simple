@@ -52,7 +52,7 @@ builds the image and QEMU produces the complete ordered lifecycle transcript.
 | Research | doc/08_tracking/feature/kv260_simple_rv64_network_verification_2026-05-29.md |
 | Source | `test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl` |
 | Updated | 2026-08-14 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Generator | Pending admitted-CLI regeneration and seven-dimension review (TODO807) |
 
 ## Overview
 
@@ -138,7 +138,7 @@ complete.
 - Pure Simple RV64 X25519/KEX completion must produce nonzero,
   OpenSSH-compatible shared secret and exchange hash evidence.
 - The opt-in `rv64-ssh` live run must build a current-source RV64 SSH kernel.
-- The shared host probe must see `[sshd] SSH daemon listening on port 22`.
+- The shared host probe must see `[sshd] SSH daemon listening on port 2222`.
 - The OpenSSH good-password transcript must exit zero and the serial log must
   include `[sshd-session] auth ok user=root method=password`.
 - The OpenSSH exec transcript must include `[sshd-session] exec command=true`.
@@ -172,7 +172,7 @@ Reproduction: this block contains the complete executable scenario source.
 val scenario = scenario_rv64_ssh()
 expect(scenario.name).to_equal("rv64-ssh")
 expect(scenario.arch).to_equal(Architecture.Riscv64)
-expect(scenario.qemu_extra.contains("user,id=n0,hostfwd=tcp::2222-:22")).to_equal(true)
+expect(scenario.qemu_extra.contains("user,id=n0,hostfwd=tcp::2222-:2222")).to_equal(true)
 expect(scenario.qemu_extra.contains("virtio-net-pci,netdev=n0,disable-modern=on,disable-legacy=off")).to_equal(true)
 expect(scenario.description.contains("SSH daemon")).to_equal(true)
 ```
@@ -196,7 +196,7 @@ expect(target.entry).to_equal("examples/09_embedded/simple_os/arch/riscv64/ssh_l
 expect(target.output).to_equal("build/os/simpleos_riscv64_ssh_live.elf")
 val cmd = build_scenario_command(scenario_rv64_ssh(), target.output)
 expect(cmd[0]).to_equal("qemu-system-riscv64")
-expect(cmd.contains("user,id=n0,hostfwd=tcp::2222-:22")).to_equal(true)
+expect(cmd.contains("user,id=n0,hostfwd=tcp::2222-:2222")).to_equal(true)
 ```
 
 </details>
@@ -215,7 +215,7 @@ expect(entry.contains("use os.rv64_probe.{")).to_equal(true)
 expect(entry.contains("rv64_network_init")).to_equal(true)
 expect(entry.contains("fn spl_start()")).to_equal(true)
 expect(entry.contains("rv64_network_init()")).to_equal(true)
-expect(entry.contains("SshDaemon.new(22)")).to_equal(true)
+expect(entry.contains("SshDaemon.new(2222)")).to_equal(true)
 expect(entry.contains("daemon.start()")).to_equal(true)
 expect(entry.contains("production-daemon-starting arch=riscv64")).to_equal(true)
 expect(entry.contains("extern fn rt_riscv_")).to_equal(true)
@@ -262,25 +262,26 @@ expect(contract.contains("extern fn rt_process_run_timeout")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Build admitted RV64 boot image")
+step("Boot QEMU and capture ordered lifecycle receipts")
+step("Prove OpenSSH login, exec, rejection, and accept-loop recovery")
+step("Prove process-owned WM readiness")
 if _rv64_ssh_live_enabled():
     val scenario = scenario_rv64_ssh()
     val target = get_riscv64_ssh_live_target()
     if not build_os(target):
-        expect("build failed").to_equal("built")
+        fail("blocked: admitted RV64 boot image build failed")
         return
-    step("Boot QEMU and capture ordered lifecycle receipts")
     val ok = test_scenario(scenario, 900000u64)
-    step("Prove OpenSSH login, exec, rejection, and accept-loop recovery")
-    step("Prove process-owned WM readiness")
     val run_status = if ok: "TEST PASSED" else: "TEST FAILED"
     expect(run_status).to_equal("TEST PASSED")
 else:
     print("BLOCKED: admitted Stage 4 and retained QEMU evidence are required")
-    expect("blocked: live evidence unavailable").to_equal("TEST PASSED")
+    fail("blocked: live evidence unavailable")
 ```
 
 </details>
@@ -290,10 +291,10 @@ else:
 | Metric | Count |
 |--------|------:|
 | Total scenarios | 6 |
-| Active scenarios | 6 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
-| Pending scenarios | 0 |
+| Pending scenarios | 1 |
 
 
 ## Related Documentation

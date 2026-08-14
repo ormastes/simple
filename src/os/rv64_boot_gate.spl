@@ -1,0 +1,162 @@
+# Pure RV64 Sv39/PID1/network/SSH/WM lifecycle admission.
+#
+# Hardware, process, QEMU, filesystem, and serial owners produce observations;
+# this module only validates their order and cardinality.  Keeping the contract
+# pure lets unit tests exercise every fail-closed branch without fabricated
+# runtime markers.
+
+pub val RV64_BOOT_GATE_RECEIPT_PREFIX: text = "[rv64-boot-gate] receipt="
+
+pub val RV64_BOOT_GATE_SV39_ACTIVE: text = "sv39-active"
+pub val RV64_BOOT_GATE_PID1_LIVE: text = "pid1-live"
+pub val RV64_BOOT_GATE_NETWORK_TX_READY: text = "network-tx-ready"
+pub val RV64_BOOT_GATE_NETWORK_RX_READY: text = "network-rx-ready"
+pub val RV64_BOOT_GATE_NETWORK_SERVICE_READY: text = "network-service-ready"
+pub val RV64_BOOT_GATE_SSHD_READY: text = "sshd-ready"
+pub val RV64_BOOT_GATE_SSHD_SESSION_COMPLETE: text = "sshd-session-complete"
+pub val RV64_BOOT_GATE_SSHD_ACCEPT_RESUMED: text = "sshd-accept-resumed"
+pub val RV64_BOOT_GATE_WM_PROCESS_OWNED_FRAME_READY: text = "wm-process-owned-frame-ready"
+
+pub enum Rv64BootGateObservation:
+    Sv39Active
+    Pid1Live
+    NetworkTxReady
+    NetworkRxReady
+    NetworkServiceReady
+    SshdReady
+    SshdSessionComplete
+    SshdAcceptResumed
+    WmProcessOwnedFrameReady
+
+pub struct Rv64BootGateState:
+    next_index: i32
+    accepted_count: i32
+    terminal: bool
+    failed: bool
+    first_error: text
+
+pub fn rv64_boot_gate_new() -> Rv64BootGateState:
+    Rv64BootGateState(
+        next_index: 0,
+        accepted_count: 0,
+        terminal: false,
+        failed: false,
+        first_error: ""
+    )
+
+fn _rv64_boot_gate_required_count() -> i32:
+    9
+
+fn _rv64_boot_gate_observation_name(observation: Rv64BootGateObservation) -> text:
+    match observation:
+        Rv64BootGateObservation.Sv39Active: RV64_BOOT_GATE_SV39_ACTIVE
+        Rv64BootGateObservation.Pid1Live: RV64_BOOT_GATE_PID1_LIVE
+        Rv64BootGateObservation.NetworkTxReady: RV64_BOOT_GATE_NETWORK_TX_READY
+        Rv64BootGateObservation.NetworkRxReady: RV64_BOOT_GATE_NETWORK_RX_READY
+        Rv64BootGateObservation.NetworkServiceReady: RV64_BOOT_GATE_NETWORK_SERVICE_READY
+        Rv64BootGateObservation.SshdReady: RV64_BOOT_GATE_SSHD_READY
+        Rv64BootGateObservation.SshdSessionComplete: RV64_BOOT_GATE_SSHD_SESSION_COMPLETE
+        Rv64BootGateObservation.SshdAcceptResumed: RV64_BOOT_GATE_SSHD_ACCEPT_RESUMED
+        Rv64BootGateObservation.WmProcessOwnedFrameReady: RV64_BOOT_GATE_WM_PROCESS_OWNED_FRAME_READY
+
+fn _rv64_boot_gate_observation_at(index: i32) -> Rv64BootGateObservation:
+    if index == 0: return Rv64BootGateObservation.Sv39Active
+    if index == 1: return Rv64BootGateObservation.Pid1Live
+    if index == 2: return Rv64BootGateObservation.NetworkTxReady
+    if index == 3: return Rv64BootGateObservation.NetworkRxReady
+    if index == 4: return Rv64BootGateObservation.NetworkServiceReady
+    if index == 5: return Rv64BootGateObservation.SshdReady
+    if index == 6: return Rv64BootGateObservation.SshdSessionComplete
+    if index == 7: return Rv64BootGateObservation.SshdAcceptResumed
+    Rv64BootGateObservation.WmProcessOwnedFrameReady
+
+fn _rv64_boot_gate_observation_index(observation: Rv64BootGateObservation) -> i32:
+    match observation:
+        Rv64BootGateObservation.Sv39Active: 0
+        Rv64BootGateObservation.Pid1Live: 1
+        Rv64BootGateObservation.NetworkTxReady: 2
+        Rv64BootGateObservation.NetworkRxReady: 3
+        Rv64BootGateObservation.NetworkServiceReady: 4
+        Rv64BootGateObservation.SshdReady: 5
+        Rv64BootGateObservation.SshdSessionComplete: 6
+        Rv64BootGateObservation.SshdAcceptResumed: 7
+        Rv64BootGateObservation.WmProcessOwnedFrameReady: 8
+
+fn _rv64_boot_gate_parse_observation(token: text) -> Rv64BootGateObservation?:
+    if token == RV64_BOOT_GATE_SV39_ACTIVE: return Some(Rv64BootGateObservation.Sv39Active)
+    if token == RV64_BOOT_GATE_PID1_LIVE: return Some(Rv64BootGateObservation.Pid1Live)
+    if token == RV64_BOOT_GATE_NETWORK_TX_READY: return Some(Rv64BootGateObservation.NetworkTxReady)
+    if token == RV64_BOOT_GATE_NETWORK_RX_READY: return Some(Rv64BootGateObservation.NetworkRxReady)
+    if token == RV64_BOOT_GATE_NETWORK_SERVICE_READY: return Some(Rv64BootGateObservation.NetworkServiceReady)
+    if token == RV64_BOOT_GATE_SSHD_READY: return Some(Rv64BootGateObservation.SshdReady)
+    if token == RV64_BOOT_GATE_SSHD_SESSION_COMPLETE: return Some(Rv64BootGateObservation.SshdSessionComplete)
+    if token == RV64_BOOT_GATE_SSHD_ACCEPT_RESUMED: return Some(Rv64BootGateObservation.SshdAcceptResumed)
+    if token == RV64_BOOT_GATE_WM_PROCESS_OWNED_FRAME_READY: return Some(Rv64BootGateObservation.WmProcessOwnedFrameReady)
+    nil
+
+fn _rv64_boot_gate_failed(state: Rv64BootGateState, reason: text) -> Rv64BootGateState:
+    # The first error is authoritative. Later input must not obscure the
+    # original ordering/cardinality defect.
+    if state.failed:
+        return state
+    Rv64BootGateState(
+        next_index: state.next_index,
+        accepted_count: state.accepted_count,
+        terminal: state.terminal,
+        failed: true,
+        first_error: reason
+    )
+
+pub fn rv64_boot_gate_advance(state: Rv64BootGateState, observation: Rv64BootGateObservation) -> Rv64BootGateState:
+    val observation_name = _rv64_boot_gate_observation_name(observation)
+    if state.failed:
+        return state
+    if state.terminal:
+        return _rv64_boot_gate_failed(state, "post-terminal:" + observation_name)
+
+    val observed_index = _rv64_boot_gate_observation_index(observation)
+    if observed_index < state.next_index:
+        return _rv64_boot_gate_failed(state, "duplicate-or-replayed:" + observation_name)
+    if observed_index > state.next_index:
+        val expected = _rv64_boot_gate_observation_name(_rv64_boot_gate_observation_at(state.next_index))
+        return _rv64_boot_gate_failed(state, "reordered:expected=" + expected + ":observed=" + observation_name)
+
+    val next_index = state.next_index + 1
+    Rv64BootGateState(
+        next_index: next_index,
+        accepted_count: state.accepted_count + 1,
+        terminal: next_index == _rv64_boot_gate_required_count(),
+        failed: false,
+        first_error: ""
+    )
+
+pub fn rv64_boot_gate_verdict(state: Rv64BootGateState) -> text:
+    if state.failed:
+        return "FAIL:" + state.first_error
+    if state.terminal and state.accepted_count == _rv64_boot_gate_required_count():
+        return "PASS"
+    "INCOMPLETE:missing=" + _rv64_boot_gate_observation_name(_rv64_boot_gate_observation_at(state.next_index))
+
+pub fn prepare_rv64_boot_gate_fixture() -> [text]:
+    [
+        RV64_BOOT_GATE_RECEIPT_PREFIX + RV64_BOOT_GATE_SV39_ACTIVE,
+        RV64_BOOT_GATE_RECEIPT_PREFIX + RV64_BOOT_GATE_PID1_LIVE,
+        RV64_BOOT_GATE_RECEIPT_PREFIX + RV64_BOOT_GATE_NETWORK_TX_READY,
+        RV64_BOOT_GATE_RECEIPT_PREFIX + RV64_BOOT_GATE_NETWORK_RX_READY,
+        RV64_BOOT_GATE_RECEIPT_PREFIX + RV64_BOOT_GATE_NETWORK_SERVICE_READY,
+        RV64_BOOT_GATE_RECEIPT_PREFIX + RV64_BOOT_GATE_SSHD_READY,
+        RV64_BOOT_GATE_RECEIPT_PREFIX + RV64_BOOT_GATE_SSHD_SESSION_COMPLETE,
+        RV64_BOOT_GATE_RECEIPT_PREFIX + RV64_BOOT_GATE_SSHD_ACCEPT_RESUMED,
+        RV64_BOOT_GATE_RECEIPT_PREFIX + RV64_BOOT_GATE_WM_PROCESS_OWNED_FRAME_READY
+    ]
+
+pub fn check_rv64_boot_gate_transcript(lines: [text]) -> text:
+    var state = rv64_boot_gate_new()
+    for line in lines:
+        if line.starts_with(RV64_BOOT_GATE_RECEIPT_PREFIX):
+            val token = line.slice(RV64_BOOT_GATE_RECEIPT_PREFIX.len(), line.len())
+            if val observation = _rv64_boot_gate_parse_observation(token):
+                state = rv64_boot_gate_advance(state, observation)
+            else:
+                state = _rv64_boot_gate_failed(state, "unknown-observation:" + token)
+    rv64_boot_gate_verdict(state)
