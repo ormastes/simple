@@ -26,6 +26,16 @@ to it. Keep the interpret exclusion explicit in
 
 ## Performance evidence
 
+The compiler-loader negative-cache and packed-byte performance handoff lives at
+`doc/03_plan/sys_test/compiler_loader_script_crosslang_perf.md` (plan complete;
+feature verification blocked). Preserve its
+distinction between facade failed-existence probes and filesystem syscalls, its
+caller-sensitive cache key and reset generation, and its admitted-self-hosted
+evidence rule. The plan is complete, but live feature verification remains
+blocked until the deployed candidate's segfaulting admission probe is repaired
+and an admitted Stage 4 CLI can rerun the capped packed-byte mutator lane in a
+fresh session.
+
 For a one-file interpreted entry, measure wall time and max RSS through the
 normal `bin/simple` command. A run that never reaches user code is source-loader
 cost, not workload cost. Preserve the normal CPU guard; raising it is diagnostic

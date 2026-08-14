@@ -6,6 +6,44 @@ evidence.
 
 Executable source: `test/05_perf/compiler_loader_script_crosslang_perf_spec.spl`.
 
+## Operator flow
+
+Run the scenarios through the admitted self-hosted CLI and follow the manual
+steps in this order:
+
+1. Check two deterministic missing facade calls.
+2. Prepare equivalent performance fixtures.
+3. Verify optimized paths preserve behavior and budgets.
+4. Measure failed existence probes at the file-exists facade.
+5. Audit C, Rust, and interpreter-provider probe contracts.
+6. Reject a preexisting fixture without deleting any path.
+7. Admit executable identity and execution modes.
+8. Compare cross-language semantic parity.
+9. Measure compiler loader and script rows.
+
+The canonical plan contains exact commands and the blocker/resume ledger:
+`doc/03_plan/sys_test/compiler_loader_script_crosslang_perf.md`. A source-only
+contract pass does not close retained timing/RSS, foreign capability lifetime,
+compiler/MCP/LSP, or Stage 4 identity gates.
+
+Only this plan-facing summary/disposition is updated. The generated mirror/manual
+remains **BLOCKED**: this file is not a fresh docgen artifact and does
+not yet carry generated per-scenario sections, source hash/provenance, folded
+executable source, or a `0 stubs` receipt. Regenerate it only after an admitted
+self-hosted CLI is available, then have the final reviewer read the generated
+manual again for final readability before calling it complete.
+
+## Troubleshooting
+
+- Missing `bin/release/<triple>/simple`: record the Stage 4 prerequisite and
+  stop; never substitute `src/compiler_rust/target/bootstrap/simple`.
+- Missing `check-compiler-loader-perf.shs` or
+  `check-interpreter-packed-byte-rss.shs`: those historical helpers are absent
+  on current `main`; use the existing checker paths in the canonical plan.
+- A focused failure after three distinct fix/verify cycles: retain the log,
+  update the blocker ledger, and stop instead of rerunning the same command.
+- A counter result is facade evidence only; do not label it a syscall count.
+
 The spec proves exact repeated negative-cache reuse, caller-sensitive cache-key
 separation, and reset invalidation through `module_resolve_uncached_count()`.
 It also audits the retained profile for self-hosted provenance, bounded

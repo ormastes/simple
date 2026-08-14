@@ -10,6 +10,31 @@ modes, compared against bun, python, go, erlang, java, and C.
 - **Cross-language evidence:** [Cross-Language Benchmark](#cross-language-benchmark)
 - **Result interpretation:** [Reading the Results](#reading-the-results)
 - **Simple optimization:** [Optimizing Simple Code](#optimizing-simple-code)
+- **Loader and packed bytes:** [Compiler-loader packed-byte lane](#compiler-loader-packed-byte-lane)
+
+## Compiler-loader packed-byte lane
+
+The canonical implementation and verification handoff is
+`doc/03_plan/sys_test/compiler_loader_script_crosslang_perf.md`. The focused
+source contract is
+`test/05_perf/compiler_loader_script_crosslang_perf_spec.spl`; its mirrored
+operator manual is
+`doc/06_spec/05_perf/compiler_loader_script_crosslang_perf_spec.md`.
+
+Current status is **plan complete, feature verification blocked**. The tree has
+the resolver negative-cache and packed-byte write-back changes. A deployed
+candidate exists at `release/x86_64-unknown-linux-gnu/simple`, but its wrapper
+ABI/help probe segfaults and it is not admitted Stage 4 evidence. Do not use
+the Rust bootstrap seed to replace loader, timing, RSS, compiler, MCP, LSP, or
+SPipe evidence. Two checker names found in detached historical work —
+`check-compiler-loader-perf.shs` and
+`check-interpreter-packed-byte-rss.shs` — are not present on current `main` and
+are not operator commands. Use only the existing checker paths enumerated by
+the canonical plan.
+
+The facade counter measures failed existence probes, not kernel syscalls. Live
+performance claims require admitted executable identity, exact semantic
+receipts, a retained report, and the p95/RSS budgets in the plan.
 
 ## Execution Modes
 
@@ -17,7 +42,7 @@ Simple programs can run in three modes:
 
 | Mode | Flag | What happens | Tradeoff |
 |------|------|-------------|----------|
-| **Interpreter** | (default) | Tree-walk evaluation by the Simple interpreter in the bootstrap binary | Fastest startup, slowest throughput |
+| **Interpreter** | (default) | Tree-walk evaluation by the admitted self-hosted Simple CLI | Fastest startup, slowest throughput |
 | **SMF Loader** | `.smf` file | Compile to `.smf` bytecode, then execute via bytecode VM | Medium startup, ~2-5x faster dispatch |
 | **Native** | `--native` | AOT compile via LLVM or Cranelift, standalone ELF/PE | Slowest compile step, fastest throughput |
 

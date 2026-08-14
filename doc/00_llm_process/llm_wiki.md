@@ -165,6 +165,22 @@ externs reading as `connected=false`). A digest/hash/checksum comparison that
 Add a compact entry here when repeated ambiguity causes an agent to choose the
 wrong repository subsystem. Link detailed guides instead of duplicating them.
 
+## Compiler loader and packed-byte performance
+
+- **Canonical plan:** `doc/03_plan/sys_test/compiler_loader_script_crosslang_perf.md`.
+- **Executable/manual:** `test/05_perf/compiler_loader_script_crosslang_perf_spec.spl`
+  and `doc/06_spec/05_perf/compiler_loader_script_crosslang_perf_spec.md`.
+- **Feature/layer knowledge:**
+  `doc/00_llm_process/feature_expert/compiler_loader_script_crosslang_perf/skill.md`
+  and `doc/00_llm_process/layer_expert/compiler_driver/skill.md`.
+- **Open verification records:**
+  `doc/08_tracking/bug/module_loader_negative_cache_stat_storm_2026-08-11.md`
+  and packed-byte history in
+  `doc/08_tracking/bug/interpreter_byte_array_len_widening_spin_2026-08-13.md`.
+- **Status:** plan complete, feature verification blocked. The deployed
+  self-hosted candidate currently fails its wrapper ABI/help probe; never
+  substitute the Rust seed or detached-tree helper names.
+
 ## Simple 2D primitive lane / host-first UI work
 
 - **Canonical map:** `doc/07_guide/app/llm/simple2d_primitive_lane_inventory.md`.
