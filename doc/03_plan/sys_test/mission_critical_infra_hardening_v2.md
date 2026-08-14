@@ -5,6 +5,65 @@
 **Executable spec target:** `test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl`
 **Generated operator manual:** `doc/06_spec/03_system/infra/mission_critical_infra_hardening_v2_spec.md`
 
+## Restart12 infrastructure lane status (2026-08-14)
+
+This is the canonical execution plan for the fresh detached `restart12-infra`
+lane.  The lane owns the host-independent compiler, SimpleOS-manifest, packed
+rendering, allocation, process, and aggregate-contract hardening needed before
+the release-facing evidence producers may be trusted.
+
+Current acceptance inventory at `origin/main` (`034b7466c8a`):
+
+- [ ] Compiler admission fixtures use supported whole-value reconstruction;
+  tamper tests distinguish pre-hash rejection from correctly re-hashed later
+  validation failures.
+- [ ] Draw IR generation admission persists active/retired state, fails closed
+  at capacity and terminal generation, and recovers only through explicit
+  abort/retire transitions.
+- [ ] Relaxed allocation profile identity is canonical SHA-256 and the
+  fault-injection telemetry/rollback ledger is stable.
+- [ ] The certified SimpleOS manifest has canonical content identity, binds
+  every payload and stress receipt, and rejects PASS-like evidence on
+  unselected cells.
+- [ ] DrawIR-v3 owns fixed packed slots, encoding cursor/content hashes,
+  immutable sealed publication, a bounded queue, Engine2D consumption
+  verification, and retirement.
+- [ ] Aggregate receipt lookup guards absence before indexing and all focused
+  compiler/rendering/allocation/SimpleOS/aggregate tests pass once.
+- [ ] Verification gates for changed compiler/core/lib and rendering scope pass
+  once, with no executable specs under `doc/06_spec` and no new runtime/env
+  facade bypass.
+
+Known release blockers outside this isolated implementation lane remain
+fail-closed: independently signed peer compiler evidence, live trust-key
+provisioning, current QEMU/hardware and browser/RenderDoc/Vulkan evidence, a
+provenanced target-native SimpleOS compiler payload, platform-specific Metal
+evidence, and the 24-hour stress run.  These prevent a mission-critical release
+PASS but do not excuse failures in the host-independent contracts above.  This
+lane reports `WARN` after a reachable push when only those external evidence
+rows remain blocked; any owned acceptance failure prevents integration.
+
+Bootstrap cycle 1 exposed an owned compiler blocker before acceptance testing:
+Stage 2 rejected an unparenthesized multiline `if` continuation in the typed
+storage view producer.  The bootstrap-safe grouping fix is in this lane and the
+language divergence is tracked in
+`doc/08_tracking/bug/stage2_multiline_if_continuation_2026-08-14.md`; the next
+bootstrap cycle must advance beyond this parse point.
+
+Cycle 2 advanced to the same producer's earlier multiline admission predicate,
+confirming the divergence applies generally rather than only to tuple-derived
+conditions.  That predicate now uses the same explicit grouping.  Cycle 3 is
+the final permitted bootstrap/fix attempt for this lane.
+
+Cycle 3 passed both corrected predicates and completed the Stage 2 build and
+sanity gate, then the fresh pure-Simple Stage 2 compiler segfaulted while
+self-hosting Stage 3 (`stage3-native-build`, exit 139).  The three-cycle cap is
+exhausted.  Therefore the host-independent focused specs and compiler/core/MCP
+runtime gates remain unexecuted rather than being rerun through the stale
+release compiler or substituted with bootstrap-seed evidence.  Integration is
+`WARN`, with this owned Stage 3 crash still open; it is not a mission-critical
+verification PASS.
+
 **Stale-evidence recovery:** The authoritative producer, prerequisites, and
 exact resume command for every report rejected by the 2026-08-11 baseline are
 maintained in
