@@ -413,6 +413,26 @@ pub extern "C" fn rt_vulkan_push_constants_raw(_cmd: i64, _pipe: i64, _data_ptr:
     0
 }
 
+/// Call-scoped push-constant prefix. The explicit count must fit the owner.
+#[no_mangle]
+pub extern "C" fn rt_vulkan_push_constants_array(
+    cmd: i64,
+    pipeline_handle: i64,
+    data: RuntimeValue,
+    byte_count: i64,
+) -> i64 {
+    let Some(bytes) = byte_array_bytes(data) else {
+        return 0;
+    };
+    let Ok(byte_count) = usize::try_from(byte_count) else {
+        return 0;
+    };
+    if byte_count > bytes.len() {
+        return 0;
+    }
+    rt_vulkan_push_constants_raw(cmd, pipeline_handle, bytes.as_ptr() as i64, byte_count as i64)
+}
+
 #[cfg(all(test, feature = "vulkan"))]
 mod raw_guard_tests {
     use super::rt_vulkan_push_constants_raw;
@@ -797,3 +817,4 @@ pub extern "C" fn rt_vulkan_wait_idle() -> i64 {
 pub extern "C" fn rt_vulkan_wait_idle() -> i64 {
     0
 }
+use crate::value::{byte_array_bytes, RuntimeValue};

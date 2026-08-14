@@ -12,7 +12,8 @@
 # the already-existing generic dlopen/dlsym SFFI
 # (src/lib/nogc_sync_mut/sffi/dynamic.spl, `DynLib`) plus the raw-memory
 # helpers already exported for the LLVM and font FFI surfaces
-# (rt_alloc/rt_free/rt_text_to_bytes/rt_array_data_ptr_u8/rt_bytes_from_raw)
+# (rt_alloc/rt_free/rt_text_to_bytes/rt_bytes_from_raw) and the scoped
+# byte-call adapter
 # to call an arbitrary plain C function by symbol name — exactly the shape a
 # fixed-arity C function like `unsigned char *SHA256(const unsigned char *d,
 # size_t n, unsigned char *md)` has. No SFFI binding or C adapter needed to be
@@ -44,9 +45,9 @@ use std.common.spec.evidence.counterpart.model.{
 extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64)
 extern fn rt_text_to_bytes(s: text) -> [u8]
-extern fn rt_array_data_ptr_u8(bytes: [u8]) -> i64
 extern fn rt_bytes_from_raw(ptr: i64, len: i64) -> [u8]
 extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn spl_wffi_call_i64_with_bytes(fptr: i64, prefix_args: [i64], bytes: [u8], offset: i64, length: i64, suffix_args: [i64]) -> i64
 
 pub val DYNLIB_SHA256_LEN: i64 = 32
 
@@ -77,12 +78,15 @@ pub fn dynlib_call_digest3(lib: DynLib, symbol: text, input_bytes: [u8], out_len
     val out_ptr = rt_alloc(out_len)
     if out_ptr == 0:
         return ""
-    val in_ptr = rt_array_data_ptr_u8(input_bytes)
-    var args: [i64] = []
-    args.push(in_ptr)
-    args.push(input_bytes.len())
-    args.push(out_ptr)
-    val ret = lib.call_n(symbol, args)
+    val fptr = lib.sym(symbol)
+    if fptr == 0:
+        rt_free(out_ptr)
+        return ""
+    var prefix_args: [i64] = []
+    var suffix_args: [i64] = []
+    suffix_args.push(out_ptr)
+    val ret = spl_wffi_call_i64_with_bytes(
+        fptr, prefix_args, input_bytes, 0, input_bytes.len(), suffix_args)
     if ret == 0:
         rt_free(out_ptr)
         return ""

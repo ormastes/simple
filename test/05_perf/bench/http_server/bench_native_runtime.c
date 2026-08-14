@@ -135,10 +135,6 @@ void rt_array_set_len_known_text(RtVal arr, int64_t len) {
     if (a) a->len = len;
 }
 
-int64_t* rt_array_data_ptr_u8(RtVal arr) {
-    RuntimeArray* a = (RuntimeArray*)GET_HEAP(arr);
-    return a ? (int64_t*)a->data : NULL;
-}
 int64_t* rt_array_data_ptr_text(RtVal arr) {
     RuntimeArray* a = (RuntimeArray*)GET_HEAP(arr);
     return a ? (int64_t*)a->data : NULL;

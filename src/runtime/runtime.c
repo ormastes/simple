@@ -3310,7 +3310,7 @@ int64_t rt_bytes_to_text(int64_t bytes_value) {
     int64_t len = rt_array_len_safe(bytes_value);
     if (bytes_value == 0 || len <= 0) return rt_string_new(NULL, 0);
     const uint8_t* data =
-        (const uint8_t*)(uintptr_t)rt_array_data_ptr_u8((SplArray*)(uintptr_t)bytes_value);
+        (const uint8_t*)(uintptr_t)rt_array_data_ptr((SplArray*)(uintptr_t)bytes_value);
     if (!data) return rt_string_new(NULL, 0);
     return rt_string_new(data, (uint64_t)len);
 }

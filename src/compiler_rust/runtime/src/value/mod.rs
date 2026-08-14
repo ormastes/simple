@@ -130,7 +130,7 @@ pub use channels::RuntimeChannel;
 
 // Re-export collection SFFI functions
 pub use collections::{
-    rt_array_clear, rt_array_data_ptr, rt_array_data_ptr_text, rt_array_data_ptr_u8, rt_array_extend_i64,
+    rt_array_clear, rt_array_data_ptr, rt_array_data_ptr_text, rt_array_extend_i64,
     rt_array_free, rt_array_free_deep, rt_array_first, rt_array_get, rt_array_get_i64_raw, rt_array_get_text, rt_array_header_ptr,
     rt_array_len, rt_array_len_safe, rt_array_new, rt_array_new_with_cap_u64, rt_array_pop, rt_array_push,
     rt_array_push_i64_raw, rt_array_set, rt_array_set_len_known, rt_array_set_len_known_text, rt_array_set_text,
@@ -393,7 +393,10 @@ pub use cli_sffi::{
 
 // Re-export dynamic-loading / WFFI SFFI functions.
 #[cfg(any(unix, windows))]
-pub use wsffi_native::{spl_dlclose, spl_dlopen, spl_dlsym, spl_wffi_call_f64, spl_wffi_call_i64};
+pub use wsffi_native::{
+    spl_dlclose, spl_dlopen, spl_dlsym, spl_fonts_call_init_blob, spl_fonts_call_init_path,
+    spl_fonts_call_layout_text, spl_wffi_call_f64, spl_wffi_call_i64, spl_wffi_call_i64_with_bytes,
+};
 
 // Re-export file I/O SFFI functions
 pub use sffi::{
@@ -443,6 +446,7 @@ pub use sffi::{
     rt_bytes_to_text,
     rt_text_to_bytes,
     rt_file_write_bytes,
+    rt_file_write_bytes_array,
     rt_file_wrap_smf_dynlib,
     rt_file_extract_smf_dynlib,
     rt_file_move,

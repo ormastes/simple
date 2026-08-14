@@ -23,7 +23,7 @@ extern RuntimeValue rt_browser_http_job_take_response(int64_t handle);
 extern RuntimeValue rt_browser_http_job_take_error(int64_t handle);
 extern bool rt_browser_http_job_free(int64_t handle);
 extern int64_t rt_array_len(RuntimeValue array);
-extern int64_t rt_array_data_ptr_u8(RuntimeValue array);
+extern int64_t rt_bytes_u8_at(RuntimeValue array, int64_t index);
 extern int64_t rt_string_len(RuntimeValue string);
 extern const uint8_t *rt_string_data(RuntimeValue string);
 
@@ -72,7 +72,6 @@ static int run_case(const char *host, int expect_certificate_error) {
     RuntimeValue response;
     RuntimeValue error;
     int64_t response_length;
-    const uint8_t *response_data;
     int result = 2;
     if (written < 0 || (size_t)written >= sizeof(request)) return 2;
     started = monotonic_ms();
@@ -108,10 +107,14 @@ static int run_case(const char *host, int expect_certificate_error) {
     response = rt_browser_http_job_take_response(handle);
     error = rt_browser_http_job_take_error(handle);
     response_length = rt_array_len(response);
-    response_data = (const uint8_t *)(intptr_t)rt_array_data_ptr_u8(response);
     if (!expect_certificate_error) {
-        if (response_length >= 5 && response_data &&
-            memcmp(response_data, "HTTP/", 5) == 0 && rt_string_len(error) == 0) {
+        if (response_length >= 5 &&
+            rt_bytes_u8_at(response, 0) == 'H' &&
+            rt_bytes_u8_at(response, 1) == 'T' &&
+            rt_bytes_u8_at(response, 2) == 'T' &&
+            rt_bytes_u8_at(response, 3) == 'P' &&
+            rt_bytes_u8_at(response, 4) == '/' &&
+            rt_string_len(error) == 0) {
             result = 0;
         } else {
             fprintf(stderr,

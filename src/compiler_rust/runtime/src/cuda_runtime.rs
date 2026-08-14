@@ -42,6 +42,8 @@ use std::os::raw::{c_int, c_uint, c_void};
 use std::ptr;
 use std::sync::OnceLock;
 
+use crate::value::{byte_array_bytes, RuntimeValue};
+
 /// CUDA error codes (subset)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1643,6 +1645,21 @@ pub extern "C" fn rt_cuda_memcpy_htod(_dst: i64, _src: i64, _size: i64) -> i64 {
     -3
 }
 
+/// Call-scoped packed-byte upload. The backing address never crosses this ABI.
+#[no_mangle]
+pub extern "C" fn rt_cuda_memcpy_htod_array(dst: i64, data: RuntimeValue, byte_count: i64) -> i64 {
+    let Some(bytes) = byte_array_bytes(data) else {
+        return -1;
+    };
+    let Ok(byte_count) = usize::try_from(byte_count) else {
+        return -1;
+    };
+    if byte_count > bytes.len() {
+        return -1;
+    }
+    rt_cuda_memcpy_htod(dst, bytes.as_ptr() as i64, byte_count as i64)
+}
+
 /// Copy device to host
 #[no_mangle]
 #[cfg(feature = "cuda")]
@@ -2433,6 +2450,18 @@ pub extern "C" fn rt_cuda_module_load_data(_ptx_ptr: *const u8, _ptx_len: u64) -
     -3
 }
 
+/// Call-scoped PTX/cubin input. The owned copy remains live through dispatch.
+#[no_mangle]
+pub extern "C" fn rt_cuda_module_load_data_array(data: RuntimeValue) -> i64 {
+    let Some(bytes) = byte_array_bytes(data) else {
+        return -1;
+    };
+    if bytes.is_empty() {
+        return -1;
+    }
+    rt_cuda_module_load_data_bytes(bytes.as_ptr() as i64, bytes.len() as i64)
+}
+
 /// Unload CUDA module
 #[no_mangle]
 #[cfg(feature = "cuda")]
@@ -2583,6 +2612,39 @@ pub extern "C" fn rt_cuda_launch_kernel_name(
     _args_ptr: i64,
 ) -> i64 {
     -3
+}
+
+/// Call-scoped kernel-name input. Embedded NUL is rejected by the raw owner.
+#[no_mangle]
+pub extern "C" fn rt_cuda_launch_kernel_name_array(
+    module: i64,
+    name: RuntimeValue,
+    grid_x: i64,
+    grid_y: i64,
+    grid_z: i64,
+    block_x: i64,
+    block_y: i64,
+    block_z: i64,
+    args_ptr: i64,
+) -> i64 {
+    let Some(bytes) = byte_array_bytes(name) else {
+        return -1;
+    };
+    if bytes.is_empty() || bytes.contains(&0) {
+        return -1;
+    }
+    rt_cuda_launch_kernel_name(
+        module,
+        bytes.as_ptr() as i64,
+        bytes.len() as i64,
+        grid_x,
+        grid_y,
+        grid_z,
+        block_x,
+        block_y,
+        block_z,
+        args_ptr,
+    )
 }
 
 #[no_mangle]

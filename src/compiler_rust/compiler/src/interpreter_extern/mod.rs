@@ -565,7 +565,6 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_alloc", memory::rt_alloc);
     insert_simple!("rt_array_clear", sffi_array::rt_array_clear_fn);
     insert_simple!("rt_array_concat", sffi_array::rt_array_concat_fn);
-    insert_simple!("rt_array_data_ptr_u8", sffi_array::rt_array_data_ptr_u8_fn);
     insert_simple!("rt_array_extend_i64", sffi_array::rt_array_extend_i64_fn);
     insert_simple!("rt_array_free", sffi_array::rt_array_free_fn);
     insert_simple!("rt_array_free_deep", sffi_array::rt_array_free_deep_fn);
@@ -959,12 +958,15 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cuda_memcpy_dtod", gpu::rt_cuda_memcpy_dtod_fn);
     insert_simple!("rt_cuda_memcpy_dtoh", gpu::rt_cuda_memcpy_dtoh_fn);
     insert_simple!("rt_cuda_memcpy_htod", gpu::rt_cuda_memcpy_htod_fn);
+    insert_simple!("rt_cuda_memcpy_htod_array", gpu::rt_cuda_memcpy_htod_array_fn);
     insert_simple!("rt_cuda_mem_free", gpu::rt_cuda_mem_free_fn);
     insert_simple!("rt_cuda_memset", gpu::rt_cuda_memset_fn);
     insert_simple!("rt_cuda_memset_d32", gpu::rt_cuda_memset_d32_fn);
     insert_simple!("rt_cuda_module_get_function", gpu::rt_cuda_module_get_function_fn);
     insert_simple!("rt_cuda_module_load_data", gpu::rt_cuda_module_load_data_fn);
+    insert_simple!("rt_cuda_module_load_data_array", gpu::rt_cuda_module_load_data_array_fn);
     insert_simple!("rt_cuda_module_load_data_bytes", gpu::rt_cuda_module_load_data_bytes_fn);
+    insert_simple!("rt_cuda_launch_kernel_name_array", gpu::rt_cuda_launch_kernel_name_array_fn);
     insert_simple!("rt_cuda_module_load", gpu::rt_cuda_module_load_fn);
     insert_simple!("rt_cuda_module_unload", gpu::rt_cuda_module_unload_fn);
     insert_simple!("rt_cuda_sync", gpu::rt_cuda_sync_fn);
@@ -988,6 +990,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_metal_buffer_upload", gpu::rt_metal_buffer_upload_fn);
     insert_simple!("rt_metal_commit_command_buffer", gpu::rt_metal_commit_command_buffer_fn);
     insert_simple!("rt_metal_compile_shader", gpu::rt_metal_compile_shader_fn);
+    insert_simple!("rt_metal_load_library_array", gpu::rt_metal_load_library_array_fn);
+    insert_simple!("rt_font_load_array", gpu::rt_font_load_array_fn);
     insert_simple!("rt_metal_create_command_buffer", gpu::rt_metal_create_command_buffer_fn);
     insert_simple!(
         "rt_metal_destroy_command_buffer",
@@ -1345,6 +1349,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_truncate", file_io::rt_file_truncate);
     insert_simple!("rt_file_unlock", file_io::rt_file_unlock);
     insert_simple!("rt_file_write_bytes", file_io::rt_file_write_bytes);
+    insert_simple!("rt_file_write_bytes_array", file_io::rt_file_write_bytes);
     insert_simple!("rt_file_wrap_smf_dynlib", file_io::rt_file_wrap_smf_dynlib);
     insert_simple!("rt_file_extract_smf_dynlib", file_io::rt_file_extract_smf_dynlib);
     insert_simple!("rt_file_write_text_at", file_io::rt_file_write_text_at);
@@ -2032,6 +2037,11 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_bind_descriptors", gpu::rt_vulkan_bind_descriptors_fn);
     insert_simple!("rt_vulkan_bind_pipeline", gpu::rt_vulkan_bind_pipeline_fn);
     insert_simple!("rt_vulkan_copy_to_buffer", gpu::rt_vulkan_copy_to_buffer_fn);
+    insert_simple!("rt_vulkan_copy_to_buffer_array", gpu::rt_vulkan_copy_to_buffer_array_fn);
+    // Vulkan readback mutates its destination array. The interpreter extern
+    // ABI receives cloned Values and cannot write that mutation back to the
+    // caller's place, so these three owner-preserving adapters are native/JIT
+    // only. Registering clone-and-discard handlers would report false success.
     insert_simple!("rt_vulkan_copy_to_image", gpu::rt_vulkan_copy_to_image_fn);
     insert_simple!("rt_vulkan_copy_from_image", gpu::rt_vulkan_copy_from_image_fn);
     insert_simple!("rt_vulkan_create_render_pass", gpu::rt_vulkan_graphics_unavailable_fn);
@@ -2074,6 +2084,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_vulkan_draw_indexed", gpu::rt_vulkan_graphics_unavailable_fn);
     insert_simple!("rt_vulkan_compile_glsl", gpu::rt_vulkan_compile_glsl_fn);
     insert_simple!("rt_vulkan_compile_spirv", gpu::rt_vulkan_compile_spirv_fn);
+    insert_simple!("rt_vulkan_compile_spirv_array", gpu::rt_vulkan_compile_spirv_array_fn);
     insert_simple!("rt_vulkan_read_buffer_bytes", gpu::rt_vulkan_read_buffer_bytes_fn);
     insert_simple!(
         "rt_vulkan_fence_submission_supported",
@@ -2171,6 +2182,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         gpu::rt_vulkan_dependency_quarantine_unlock_fn
     );
     insert_simple!("rt_vulkan_push_constants", gpu::rt_vulkan_push_constants_fn);
+    insert_simple!("rt_vulkan_push_constants_array", gpu::rt_vulkan_push_constants_array_fn);
+    insert_simple!("rt_vulkan_present_buffer_regions", gpu::rt_vulkan_present_buffer_regions_fn);
     insert_simple!("rt_vulkan_select_device", gpu::rt_vulkan_select_device_fn);
     insert_simple!("rt_vulkan_shutdown", gpu::rt_vulkan_shutdown_fn);
     insert_simple!("rt_vulkan_submit_and_wait", gpu::rt_vulkan_submit_and_wait_fn);
@@ -2288,6 +2301,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("spl_str_ptr", wsffi::spl_str_ptr);
     insert_simple!("spl_wffi_call_f64", wsffi::spl_wffi_call_f64);
     insert_simple!("spl_wffi_call_i64", wsffi::spl_wffi_call_i64);
+    insert_simple!("spl_wffi_call_i64_with_bytes", dynamic_sffi::spl_wffi_call_i64_with_bytes_fn);
+    insert_simple!("spl_fonts_call_init_blob", dynamic_sffi::spl_fonts_call_init_blob_fn);
+    insert_simple!("spl_fonts_call_init_path", dynamic_sffi::spl_fonts_call_init_path_fn);
+    insert_simple!("spl_fonts_call_layout_text", dynamic_sffi::spl_fonts_call_layout_text_fn);
     insert_simple!("sqrt", math::sqrt);
     insert_simple!("stderr_flush", io::stderr_flush);
     insert_simple!("stderr_write", io::stderr_write);
@@ -3092,5 +3109,19 @@ mod tests {
         let enums = HashMap::new();
         let impl_methods = HashMap::new();
         assert!(handler(&[], &mut env, &mut functions, &mut classes, &enums, &impl_methods).is_err());
+    }
+
+    #[test]
+    fn mutating_vulkan_readback_adapters_are_native_only() {
+        for symbol in [
+            "rt_vulkan_copy_from_buffer_array",
+            "rt_vulkan_copy_from_buffer_regions",
+            "rt_vulkan_copy_from_buffer_strided",
+        ] {
+            assert!(
+                !EXTERN_DISPATCH.contains_key(symbol),
+                "{symbol} cannot be registered until interpreter place writeback is supported"
+            );
+        }
     }
 }

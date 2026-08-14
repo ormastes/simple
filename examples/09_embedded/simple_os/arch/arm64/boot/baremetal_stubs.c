@@ -883,10 +883,6 @@ RuntimeValue rt_array_data_ptr_text(RuntimeValue arr)
     if (!a || a->hdr.type != HEAP_ARRAY) return ENCODE_INT(0);
     return ENCODE_INT((int64_t)(uintptr_t)a->items);
 }
-RuntimeValue rt_array_data_ptr_u8(RuntimeValue arr)
-{
-    return rt_array_data_ptr_text(arr);
-}
 RuntimeValue rt_array_set_len_known_text(RuntimeValue arr, RuntimeValue len)
 {
     if (!IS_HEAP(arr)) return FALSE_VALUE;

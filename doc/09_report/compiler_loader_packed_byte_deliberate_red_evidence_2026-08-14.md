@@ -54,3 +54,20 @@ final-behavior evidence; it was not rerun in this receipt session.
 `PBL-01 deliberate-red: PASS`
 
 `PBL-02 deliberate-red: PASS`
+
+## PBL-03 removed-symbol escape receipt
+
+The codegen ABI guard was temporarily inverted from
+`spec_for("rt_array_data_ptr_u8").is_none()` to `.is_some()`. The exact focused
+command was:
+
+`cd src/compiler_rust && cargo test -p simple-compiler packed_byte_foreign_adapters_keep_array_owners_in_the_call_abi --lib`
+
+It failed with status 101 in the named test and the assertion “the removed
+raw-pointer escape ABI must not be registerable” (0 passed, 1 failed, 3729
+filtered). The mutation was restored to `.is_none()`; the same focused command
+then passed 1/1. The complete red terminal receipt is retained at
+`/tmp/restart12-pbl03-deliberate-red.log`. This is equivalent compile-fail
+enforcement at the native codegen registry boundary, not Stage-4 evidence.
+
+`PBL-03 deliberate-red: PASS`

@@ -290,6 +290,32 @@ pub extern "C" fn rt_vulkan_present_buffer(_sc: i64, _buffer: i64, _w: i64, _h: 
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_present_buffer_regions_raw(_sc: i64, _buffer: i64, _w: i64, _h: i64, _revision: i64, _rects: i64, _len: i64) -> i64 { 0 }
+
+/// Call-scoped rectangle descriptors. Public `[i64]` fields are encoded here.
+#[no_mangle]
+pub extern "C" fn rt_vulkan_present_buffer_regions(
+    sc: i64,
+    buffer: i64,
+    w: i64,
+    h: i64,
+    revision: i64,
+    rects: crate::value::RuntimeValue,
+) -> i64 {
+    use crate::value::{rt_array_get, rt_array_len};
+    let Ok(len) = usize::try_from(rt_array_len(rects)) else { return 0 };
+    if len == 0 || len % 4 != 0 || len / 4 > 1024 {
+        return 0;
+    }
+    let mut bytes = Vec::with_capacity(len * 8);
+    for index in 0..len {
+        let value = rt_array_get(rects, index as i64).as_int();
+        if value < 0 || value > u32::MAX as i64 {
+            return 0;
+        }
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    rt_vulkan_present_buffer_regions_raw(sc, buffer, w, h, revision, bytes.as_ptr() as i64, bytes.len() as i64)
+}
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_last_present_copy_bytes(_sc: i64) -> i64 { -1 }

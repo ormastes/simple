@@ -25,7 +25,6 @@ use simple_simd::{clear_host_cpu_config_cache, detect_profile, host_cpu_config, 
 use simple_simd::HostCpuConfigError;
 
 thread_local! {
-    static U8_ARRAY_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static TRANSIENT_HEAP_SCOPE: RefCell<Option<TransientHeapScope>> = const { RefCell::new(None) };
 }
 
@@ -871,31 +870,6 @@ pub extern "C" fn rt_array_data_ptr(array: RuntimeValue) -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_array_data_ptr_text(array: RuntimeValue) -> i64 {
     rt_array_data_ptr(array)
-}
-
-#[no_mangle]
-pub extern "C" fn rt_array_data_ptr_u8(array: RuntimeValue) -> i64 {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
-    unsafe {
-        if (*arr).is_byte_packed() {
-            return (*arr).data as i64;
-        }
-        let len = (*arr).len as usize;
-        let slice = (*arr).as_slice();
-        U8_ARRAY_SCRATCH.with(|scratch| {
-            let mut bytes = scratch.borrow_mut();
-            bytes.clear();
-            bytes.reserve(len);
-            for value in slice.iter().take(len) {
-                if value.is_int() {
-                    bytes.push((value.as_int() & 0xff) as u8);
-                } else {
-                    bytes.push((value.to_raw() & 0xff) as u8);
-                }
-            }
-            bytes.as_ptr() as i64
-        })
-    }
 }
 
 /// Return the stable array header pointer for proven native fast paths.

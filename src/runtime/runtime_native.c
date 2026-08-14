@@ -6437,12 +6437,7 @@ int64_t rt_array_len_safe(int64_t value) {
 
 /* Bytes-basis accessors for runtime_packed_span.c (SimplePackedSpanV1, F2).
  * They live here because RtCoreArray is private to this translation unit.
- *
- * They are deliberately STRICTER than rt_array_data_ptr_u8, which falls back
- * to a thread-local scratch COPY for non-bytes arrays: for a packed-span base
- * pointer that fallback would be a plausible-looking pointer into memory the
- * caller does not own, i.e. exactly the fail-open the span ABI forbids. Here a
- * non-bytes array is reported as "not a basis" (-1) and refused. */
+ * A non-bytes array is reported as "not a basis" (-1) and refused. */
 int64_t rt_array_bytes_basis_len(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return -1;
@@ -6635,29 +6630,6 @@ int64_t rt_array_data_ptr(SplArray* a) {
 
 int64_t rt_array_data_ptr_text(SplArray* a) {
     return rt_array_data_ptr(a);
-}
-
-int64_t rt_array_data_ptr_u8(SplArray* a) {
-    static _Thread_local uint8_t* scratch;
-    static _Thread_local size_t scratch_cap;
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array || !array->data) return 0;
-    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
-        return (int64_t)(uintptr_t)array->data;
-    }
-    if (array->len <= 0) return 0;
-    size_t len = (size_t)array->len;
-    if (scratch_cap < len) {
-        uint8_t* grown = (uint8_t*)realloc(scratch, len);
-        if (!grown) return 0;
-        scratch = grown;
-        scratch_cap = len;
-    }
-    int64_t* values = (int64_t*)array->data;
-    for (size_t i = 0; i < len; i++) {
-        scratch[i] = (uint8_t)(rt_core_as_int(values[i]) & 0xff);
-    }
-    return (int64_t)(uintptr_t)scratch;
 }
 
 #if !defined(SIMPLE_RUNTIME_DYNLOAD_OWNER)

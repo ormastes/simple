@@ -5,13 +5,10 @@ extern fn rt_array_set_len_known(array: [u8], len: i64) -> i8
 extern fn rt_hash_text(value: text) -> i64
 extern fn rt_array_data_ptr(array: [u64]) -> i64
 extern fn rt_array_data_ptr_text(array: [text]) -> i64
-extern fn rt_array_data_ptr_u8(array: [u8]) -> i64
 extern fn rt_numeric_xor_sum_u64_data(items: i64, length: i64, xor_value: u64) -> u64
 extern fn rt_numeric_xor_sum_u64_repeated_data(items: i64, length: i64, iters: i64) -> u64
 extern fn spl_load_i64(ptr: i64, offset: i64) -> i64
-extern fn spl_load_u8(ptr: i64, offset: i64) -> i64
 extern fn spl_store_i64(ptr: i64, offset: i64, value: i64)
-extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
 
 use std.nogc_sync_mut.src.collections.hashset.{HashSet, hashset_with_capacity}
 
@@ -149,20 +146,15 @@ fn make_set_bitmap() -> [u8]:
     val length = set_size()
     var bits = rt_byte_array_new(set_bitmap_cap())
     rt_array_set_len_known(bits, set_bitmap_cap())
-    val bits_ptr = rt_array_data_ptr_u8(bits)
     var i = 0u64
     while i < length:
         val key = ((i * 131u64 + 7u64) | 1u64).to_i64()
-        spl_store_u8(bits_ptr, key, 1)
+        bits[key] = 1u8
         i = i + 1u64
     bits
 
-fn set_bitmap_contains(bits_ptr: i64, key: u64) -> bool:
-    spl_load_u8(bits_ptr, key.to_i64()) != 0
-
 fn bench_set_contains():
     val keys = make_set_bitmap()
-    val keys_data = rt_array_data_ptr_u8(keys)
     var checksum = 0u64
     val start = rt_time_now_unix_micros()
     var iter = 0u64
@@ -172,7 +164,7 @@ fn bench_set_contains():
         var i = 0u64
         while i < length:
             val key = (i * 131u64 + 7u64) | 1u64
-            if set_bitmap_contains(keys_data, key):
+            if keys[key.to_i64()] != 0u8:
                 checksum = checksum + (key ^ iter)
             i = i + 1u64
         iter = iter + 1u64
@@ -225,7 +217,6 @@ fn bench_hashset_contains():
     val set = make_text_set()
     val keys = make_text_keys_from_set(set)
     val set_keys_ptr = rt_array_data_ptr_text(set.slot_keys)
-    val set_used_ptr = rt_array_data_ptr_u8(set.slot_used)
     val probe_keys_ptr = rt_array_data_ptr_text(keys)
     val mask = set.capacity - 1
     var checksum = 0u64
@@ -240,7 +231,7 @@ fn bench_hashset_contains():
             val key = spl_load_i64(probe_keys_ptr, i.to_i64() * 8)
             var slot = rt_hash_text(key) & mask
             var found = false
-            while spl_load_u8(set_used_ptr, slot) != 0:
+            while set.slot_used[slot] != 0u8:
                 if spl_load_i64(set_keys_ptr, slot * 8) == key:
                     found = true
                     break
@@ -264,17 +255,16 @@ fn bench_hashset_insert():
     val probe_keys_ptr = rt_array_data_ptr_text(keys)
     val probe_hashes_ptr = rt_array_data_ptr(hashes)
     val keys_ptr = rt_array_data_ptr_text(set.slot_keys)
-    val used_ptr = rt_array_data_ptr_u8(set.slot_used)
     while iter < iters:
         set.clear_retaining_storage()
         var i = 0u64
         while i < length:
             val key = spl_load_i64(probe_keys_ptr, i.to_i64() * 8)
             var slot = spl_load_i64(probe_hashes_ptr, i.to_i64() * 8)
-            while spl_load_u8(used_ptr, slot) != 0:
+            while set.slot_used[slot] != 0u8:
                 slot = (slot + 1) & mask
             spl_store_i64(keys_ptr, slot * 8, key)
-            spl_store_u8(used_ptr, slot, 1)
+            set.slot_used[slot] = 1u8
             checksum = checksum + (((i * 131u64 + 7u64) | 1u64) ^ iter)
             i = i + 1u64
         iter = iter + 1u64

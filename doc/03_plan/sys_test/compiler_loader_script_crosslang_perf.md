@@ -7,7 +7,7 @@ accepted by `/root/reconciled_plan_review`; `/root/final_nonstage4_review`
 accepted the current Stage-4-excluded continuation on bounded review cycle 3.
 Commit `0943ce963f05107046937456f8570b957aa939e5` was integrated under the
 lane lock and remains reachable from refreshed `origin/main`; the current
-receipt/PBL-03 reconciliation is pending its own final commit and integration.
+atomic PBL-03 reconciliation is pending its own final commit and integration.
 Feature verification remains blocked. This document is the canonical
 handoff for `compiler_loader_script_crosslang_perf`. It records what is already
 implemented, what current evidence proves, and the exact remaining gates. A
@@ -52,7 +52,7 @@ lane, or absorbing unrelated GUI/web/2D files.
 | Compiler layer expert | `doc/00_llm_process/layer_expert/compiler_driver/skill.md` | Must link this lane |
 | Loader blocker | `doc/08_tracking/bug/module_loader_negative_cache_stat_storm_2026-08-11.md` | Open verification condition retained |
 | Packed-byte history | `doc/08_tracking/bug/interpreter_byte_array_len_widening_spin_2026-08-13.md` | Fixed historical boundary/performance defect |
-| Packed-byte evidence gaps | `doc/08_tracking/bug/compiler_loader_packed_byte_evidence_gaps_2026-08-14.md` | PBL-01/02 closure and open PBL-03 atomic ABI migration contract |
+| Packed-byte evidence gaps | `doc/08_tracking/bug/compiler_loader_packed_byte_evidence_gaps_2026-08-14.md` | PBL-01/02 closure and PBL-03 atomic cutover with an explicit macOS WARN |
 | Packed-byte deliberate-red evidence | `doc/09_report/compiler_loader_packed_byte_deliberate_red_evidence_2026-08-14.md` | PBL-01/02 named status-101 failures and exact reversion receipts |
 | Build11 Stage 3 blocker | `doc/08_tracking/bug/build11_stage3_compile_context_corruption_2026-08-14.md` | Open fresh-lane corruption frontier after a clean 603-file parse |
 | Retained harness | `scripts/check/check-cross-language-perf.shs` | Present |
@@ -168,7 +168,7 @@ selection flow produces the missing selected requirement documents.
 |---|---|---|---|---|
 | PBL-01 | REQ-008, NFR-003 | Index, slice, iteration, concat, clone, equality, freeze, and byte-valued mutation preserve packed storage; non-byte insertion widens once | Green focused tests plus `doc/09_report/compiler_loader_packed_byte_deliberate_red_evidence_2026-08-14.md` | PROVED at Rust interpreter boundary — final suites pass 4/4, 1/1 representation concat, and 4/4 identifier cases; named deliberate-red fails status 101 and is reverted |
 | PBL-02 | REQ-008, NFR-003 | Identifier and projected-place mutators write back, preserve COW aliases, return removed elements, reject immutable/frozen receivers | Green focused tests plus `doc/09_report/compiler_loader_packed_byte_deliberate_red_evidence_2026-08-14.md` | PROVED at Rust interpreter boundary — final identifier cases pass 4/4 and projected-place write-back 1/1; named deliberate-red fails status 101 and is reverted |
-| PBL-03 | REQ-008, NFR-003/006 | Foreign packed-byte pointers are input-only, descriptor-bounded, nested adapters are scoped, and capabilities cannot escape a call | Production foreign-dispatch route plus compile-fail/equivalent escape enforcement | BLOCKED — HashSet's three stored raw addresses are migrated to bounded indexing (Stage-2 compile evidence); eight owners and 23 uses remain. The pointer-returning ABI still requires an atomic 15-wrapper interpreter/native/codegen cutover and final symbol removal. A single Stage-2 optimizer-build attempt timed out at 180 seconds with no candidate |
+| PBL-03 | REQ-008, NFR-003/006 | Foreign packed-byte pointers are input-only, descriptor-bounded, nested adapters are scoped, and capabilities cannot escape a call | Production foreign-dispatch route plus compile-fail/equivalent escape enforcement | PROVED WITH PLATFORM WARN at Rust/native boundary — eight owners/23 uses migrated to typed adapters plus scoped DynLib dispatch; old symbol removed; scoped tests 4/4, native-only mutation guard 1/1, and restored owner/escape guard 1/1. Real macOS Metal compilation remains unproved; no Stage-4 claim |
 | LDR-01 | REQ-004/005/006/007, NFR-002 | Exact repeated miss caches once; adjacent callers remain distinct; reset invalidates; resolution result is unchanged | Focused SSpec and resolver unit coverage | BLOCKED — implementation is present; fresh admitted self-hosted execution is unavailable |
 | LDR-02 | REQ-004/005, NFR-001/002/006 | 100 reset-per-request resolutions versus 1000 retained requests produce identical results, uncached counts 100/1, positive failed-probe baseline, and cached probes at most 10% | SSpec plus C facade selfcheck | BLOCKED — contracts are present; fresh admitted self-hosted measurement is unavailable |
 | PRV-01 | REQ-001/003, NFR-005 | Exact executable path/hash and actual mode are admitted; seed, stale hash, requested/actual mismatch, and fallback are rejected before timing | SSpec and retained harness contract tests | CONTRADICTED — the deployed candidate exists but exit 139 on its test/help ABI path disproves admission |
@@ -333,7 +333,7 @@ corrected; `/root/reconciled_plan_review` (`gpt-5.6-sol`, high) then returned
 - The same reviewer, cycle 3: `ACCEPT`. At that reviewed revision PBL-01/02
   remained honestly BLOCKED on missing red receipts despite green tests. The
   later receipt session supersedes that historical disposition and proves both
-  at the Rust interpreter boundary; PBL-03, selection/manual, Stage 3, and
+  at the Rust interpreter boundary; at that revision PBL-03, selection/manual, Stage 3, and
   deployed-CLI blockers remain explicit, with no Stage 2/3 substitution for
   Stage 4.
 - At historical revision `3fdfa0d3351`, only the future generated-manual
@@ -344,7 +344,7 @@ corrected; `/root/reconciled_plan_review` (`gpt-5.6-sol`, high) then returned
   `REJECT` on stale historical PBL and premature current-VCS wording. All
   findings were corrected without broadening the evidence claims.
 - The same reviewer, cycle 2: `ACCEPT`. PBL-01/02 are proved only at the Rust
-  interpreter boundary, PBL-03 remains open with an atomic migration contract,
+  interpreter boundary, and at that revision PBL-03 remained open with an atomic migration contract,
   Stage 4 remains excluded, and current VCS integration is operationally
   pending as recorded below.
 - `/root/pbl03c_review`, cycle 1: `ACCEPT`. It independently confirmed bounded
@@ -354,6 +354,11 @@ corrected; `/root/reconciled_plan_review` (`gpt-5.6-sol`, high) then returned
 - The same reviewer, narrow cycle 2: `ACCEPT` on the single 180-second
   Stage-2 optimizer-build timeout and continued BLOCKED optimizer/performance
   disposition.
+- `/root/pbl03_atomic_review`, atomic merge cycles 1-2: cycle 1 `REJECT` found
+  three clone-and-discard interpreter Vulkan readback handlers; they were
+  removed and kept native/JIT-only. Cycle 2 `ACCEPT` found no merge blocker and
+  retained a real-macOS compile WARN after the Linux cross-check stopped in the
+  host C toolchain before compiling this crate.
 
 ## Plan completion checklist
 

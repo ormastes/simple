@@ -27,7 +27,7 @@ extern fn rt_vulkan_init_headless_present(width: i64, height: i64, vsync: i64) -
 extern fn rt_vulkan_init_window_present(width: i64, height: i64, vsync: i64) -> i64
 extern fn rt_vulkan_init_external_window_present(kind: i64, display: i64, window: i64, width: i64, height: i64, vsync: i64) -> i64
 extern fn rt_vulkan_present_buffer(swapchain: i64, buffer: i64, width: i64, height: i64, content_revision: i64) -> i64
-extern fn rt_vulkan_present_buffer_regions_raw(swapchain: i64, buffer: i64, width: i64, height: i64, content_revision: i64, rects_ptr: i64, rects_len: i64) -> i64
+extern fn rt_vulkan_present_buffer_regions(swapchain: i64, buffer: i64, width: i64, height: i64, content_revision: i64, rects: [i64]) -> i64
 extern fn rt_vulkan_last_present_copy_bytes(swapchain: i64) -> i64
 extern fn rt_vulkan_last_present_copy_rects(swapchain: i64) -> i64
 extern fn rt_vulkan_destroy_swapchain(swapchain: i64) -> bool
@@ -44,16 +44,15 @@ extern fn rt_vulkan_selected_device_driver_identity_hash() -> i64
 extern fn rt_vulkan_alloc_buffer(size: i64, usage: i64) -> i64
 extern fn rt_vulkan_free_buffer(handle: i64) -> bool
 extern fn rt_vulkan_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool
-extern fn rt_vulkan_copy_to_buffer_raw(handle: i64, data_ptr: i64, byte_count: i64, offset: i64) -> bool
+extern fn rt_vulkan_copy_to_buffer_array(handle: i64, data: [u8], byte_count: i64, offset: i64) -> bool
 extern fn rt_vulkan_copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool
-extern fn rt_vulkan_copy_from_buffer_raw(data_ptr: i64, byte_count: i64, handle: i64, offset: i64) -> bool
-extern fn rt_vulkan_copy_from_buffer_regions_raw(data_ptr: i64, data_len: i64, handle: i64, regions_ptr: i64, regions_len: i64) -> bool
-extern fn rt_vulkan_copy_from_buffer_strided_raw(data_ptr: i64, data_len: i64, handle: i64, src_offset: i64, row_bytes: i64, row_count: i64, src_stride: i64) -> bool
+extern fn rt_vulkan_copy_from_buffer_array(data: [u8], byte_count: i64, handle: i64, offset: i64) -> bool
+extern fn rt_vulkan_copy_from_buffer_regions(data: [u8], handle: i64, regions: [i64]) -> bool
+extern fn rt_vulkan_copy_from_buffer_strided(data: [u8], handle: i64, src_offset: i64, row_bytes: i64, row_count: i64, src_stride: i64) -> bool
 extern fn rt_vulkan_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> [u8]
 extern fn rt_byte_array_new_len(len: i64) -> [u8]
 extern fn rt_vulkan_compile_spirv(spirv_bytes: [u8]) -> i64
-extern fn rt_vulkan_compile_spirv_raw(data_ptr: i64, byte_count: i64) -> i64
-extern fn rt_array_data_ptr_u8(bytes: [u8]) -> i64
+extern fn rt_vulkan_compile_spirv_array(bytes: [u8]) -> i64
 extern fn rt_vulkan_compile_glsl(glsl_source: text) -> i64
 extern fn rt_vulkan_destroy_shader(module: i64) -> bool
 extern fn rt_vulkan_create_compute_pipeline(shader_module: i64, entry_point: text, push_constant_size: i64) -> i64
@@ -65,7 +64,7 @@ extern fn rt_vulkan_begin_compute() -> i64
 extern fn rt_vulkan_bind_pipeline(cmd: i64, pipe: i64) -> bool
 extern fn rt_vulkan_bind_descriptors(cmd: i64, descriptor_set: i64) -> bool
 extern fn rt_vulkan_push_constants(cmd: i64, pipe: i64, data: [u8]) -> bool
-extern fn rt_vulkan_push_constants_raw(cmd: i64, pipe: i64, data_ptr: i64, byte_count: i64) -> bool
+extern fn rt_vulkan_push_constants_array(cmd: i64, pipe: i64, data: [u8], byte_count: i64) -> bool
 extern fn rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool
 extern fn rt_vulkan_end_compute(cmd: i64) -> bool
 extern fn rt_vulkan_discard_command(cmd: i64) -> bool
@@ -83,20 +82,17 @@ extern fn rt_vulkan_dependency_quarantine_unlock() -> bool
 fn _vulkan_copy_to_buffer_abi(handle: i64, data: [u8], offset: i64) -> bool:
     if gpu_sffi_uses_interpreter_array_abi():
         return rt_vulkan_copy_to_buffer(handle, data, offset)
-    rt_vulkan_copy_to_buffer_raw(
-        handle, rt_array_data_ptr_u8(data), data.len().to_i64(), offset)
+    rt_vulkan_copy_to_buffer_array(handle, data, data.len().to_i64(), offset)
 
 fn _vulkan_compile_spirv_abi(spirv_bytes: [u8]) -> i64:
     if gpu_sffi_uses_interpreter_array_abi():
         return rt_vulkan_compile_spirv(spirv_bytes)
-    rt_vulkan_compile_spirv_raw(
-        rt_array_data_ptr_u8(spirv_bytes), spirv_bytes.len().to_i64())
+    rt_vulkan_compile_spirv_array(spirv_bytes)
 
 fn _vulkan_push_constants_abi(cmd: i64, pipe: i64, data: [u8]) -> bool:
     if gpu_sffi_uses_interpreter_array_abi():
         return rt_vulkan_push_constants(cmd, pipe, data)
-    rt_vulkan_push_constants_raw(
-        cmd, pipe, rt_array_data_ptr_u8(data), data.len().to_i64())
+    rt_vulkan_push_constants_array(cmd, pipe, data, data.len().to_i64())
 
 fn _vulkan_read_buffer_bytes_abi(handle: i64, byte_count: i64, offset: i64) -> [u8]:
     if byte_count <= 0:
@@ -104,8 +100,7 @@ fn _vulkan_read_buffer_bytes_abi(handle: i64, byte_count: i64, offset: i64) -> [
     if gpu_sffi_uses_interpreter_array_abi():
         return rt_vulkan_read_buffer_bytes(handle, byte_count, offset)
     val bytes = rt_byte_array_new_len(byte_count)
-    if not rt_vulkan_copy_from_buffer_raw(
-        rt_array_data_ptr_u8(bytes), byte_count, handle, offset):
+    if not rt_vulkan_copy_from_buffer_array(bytes, byte_count, handle, offset):
         return []
     bytes
 
@@ -135,8 +130,8 @@ fn _vulkan_read_buffer_strided_bytes_abi(handle: i64, src_offset: i64, row_bytes
             row += 1
         return packed
     val packed = rt_byte_array_new_len(byte_count)
-    if not rt_vulkan_copy_from_buffer_strided_raw(
-        rt_array_data_ptr_u8(packed), byte_count, handle, src_offset,
+    if not rt_vulkan_copy_from_buffer_strided(
+        packed, handle, src_offset,
         row_bytes, row_count, src_stride):
         return []
     packed
@@ -179,22 +174,8 @@ fn _vulkan_read_buffer_regions_bytes_abi(handle: i64, regions: [i64]) -> [u8]:
                 b += 1
             i += 4
         return packed
-    var descriptor_bytes: [u8] = []
-    i = 0
-    while i < regions.len():
-        var field = 0
-        while field < 4:
-            val value = regions[i + field]
-            var byte = 0
-            while byte < 8:
-                descriptor_bytes.push(((value >> (byte * 8)) & 255).to_u8())
-                byte += 1
-            field += 1
-        i += 4
     val packed = rt_byte_array_new_len(total_bytes)
-    if not rt_vulkan_copy_from_buffer_regions_raw(
-        rt_array_data_ptr_u8(packed), total_bytes, handle,
-        rt_array_data_ptr_u8(descriptor_bytes), descriptor_bytes.len().to_i64()):
+    if not rt_vulkan_copy_from_buffer_regions(packed, handle, regions):
         return []
     packed
 
@@ -345,8 +326,8 @@ impl FfiDispatchBase for VulkanFfi:
             case Static:
                 if gpu_sffi_uses_interpreter_array_abi():
                     return false
-                rt_vulkan_copy_from_buffer_raw(
-                    rt_array_data_ptr_u8(data), data.len().to_i64(), handle, offset)
+                rt_vulkan_copy_from_buffer_array(
+                    data, data.len().to_i64(), handle, offset)
             case Dynamic: false
 
     me compile_glsl(source: text) -> i64:
@@ -736,8 +717,8 @@ fn vulkan_sffi_selected_device_driver_identity_hash() -> i64:
 fn vulkan_sffi_copy_from_buffer(data: [u8], handle: i64, offset: i64) -> bool:
     if gpu_sffi_uses_interpreter_array_abi():
         return false
-    rt_vulkan_copy_from_buffer_raw(
-        rt_array_data_ptr_u8(data), data.len().to_i64(), handle, offset)
+    rt_vulkan_copy_from_buffer_array(
+        data, data.len().to_i64(), handle, offset)
 
 fn vulkan_sffi_read_buffer_bytes(handle: i64, byte_count: i64, offset: i64) -> [u8]:
     _vulkan_read_buffer_bytes_abi(handle, byte_count, offset)
@@ -777,23 +758,13 @@ fn vulkan_sffi_present_buffer_regions(swapchain: i64, buffer: i64, width: i64, h
     if gpu_sffi_uses_interpreter_array_abi():
         return rt_vulkan_present_buffer(
             swapchain, buffer, width, height, content_revision)
-    var descriptor_bytes: [u8] = []
     var i = 0
     while i < rects.len():
-        var field = 0
-        while field < 4:
-            val value = rects[i + field]
-            if value < 0:
-                return 0
-            var byte = 0
-            while byte < 8:
-                descriptor_bytes.push(((value >> (byte * 8)) & 255).to_u8())
-                byte += 1
-            field += 1
+        if rects[i] < 0 or rects[i + 1] < 0 or rects[i + 2] < 0 or rects[i + 3] < 0:
+            return 0
         i += 4
-    rt_vulkan_present_buffer_regions_raw(
-        swapchain, buffer, width, height, content_revision,
-        rt_array_data_ptr_u8(descriptor_bytes), descriptor_bytes.len().to_i64())
+    rt_vulkan_present_buffer_regions(
+        swapchain, buffer, width, height, content_revision, rects)
 
 fn vulkan_sffi_last_present_copy_bytes(swapchain: i64) -> i64:
     rt_vulkan_last_present_copy_bytes(swapchain)

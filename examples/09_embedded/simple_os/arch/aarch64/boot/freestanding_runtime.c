@@ -711,10 +711,6 @@ spl_i64 rt_array_data_ptr_text(spl_i64 collection) {
     return rt_array_data_ptr(collection);
 }
 
-spl_i64 rt_array_data_ptr_u8(spl_i64 collection) {
-    return rt_array_data_ptr(collection);
-}
-
 spl_i64 rt_array_set_len_known_text(spl_i64 collection, spl_i64 len_value) {
     RtArray *array = rt_as_array(collection);
     spl_i64 len = rt_index_arg(len_value);
@@ -1971,4 +1967,3 @@ spl_u64 rt_limine_hhdm_response(void) {
 spl_u64 rt_limine_kernel_addr_response(void) {
     return (spl_u64)g_limine_kernel_addr_request.response;
 }
-

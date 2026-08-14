@@ -349,17 +349,18 @@ int main(void) {
     assert(rt_typed_bytes_u64_le_set(generic_bytes, 4, 0x0102030405060708LL));
     assert(rt_bytes_u64_le_at(generic_bytes, 4) == 0x0102030405060708LL);
     assert(rt_typed_bytes_u64_le_unchecked(generic_bytes, 4) == 0x0102030405060708LL);
-    const uint8_t* generic_bytes_ptr =
-        (const uint8_t*)(uintptr_t)rt_array_data_ptr_u8(generic_bytes);
     const uint8_t generic_bytes_expected[] = {
         20, 21, 22, 23, 8, 7, 6, 5, 4, 3, 2, 1
     };
-    assert(generic_bytes_ptr != NULL);
-    assert(memcmp(generic_bytes_ptr, generic_bytes_expected,
-                  sizeof(generic_bytes_expected)) == 0);
+    assert(rt_array_bytes_basis_len(generic_bytes) == -1);
+    assert(rt_array_bytes_basis_ptr(generic_bytes) == 0);
+    for (int64_t i = 0; i < (int64_t)sizeof(generic_bytes_expected); i++) {
+        assert(rt_bytes_u8_at(generic_bytes, i) == generic_bytes_expected[i]);
+    }
     const uint8_t* allocated_ptr =
-        (const uint8_t*)(uintptr_t)rt_array_data_ptr_u8(allocated);
+        (const uint8_t*)(uintptr_t)rt_array_bytes_basis_ptr(allocated);
     assert(allocated_ptr != NULL);
+    assert(rt_array_bytes_basis_len(allocated) == rt_array_len(allocated));
     assert(allocated_ptr == (const uint8_t*)(uintptr_t)rt_array_data_ptr(allocated));
     assert(rt_bytes_u8_at(allocated, 0) == 0);
     SplArray* packed_bytes_equal = rt_byte_array_new(1);

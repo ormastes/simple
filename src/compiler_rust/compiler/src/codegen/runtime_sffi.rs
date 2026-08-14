@@ -656,7 +656,6 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_dma_bytes_to_array", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_data_ptr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_data_ptr_text", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_array_data_ptr_u8", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_header_ptr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_set_len_known", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_set_len_known_text", &[I64, I64], &[I8]),
@@ -1616,11 +1615,22 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_vulkan_free_buffer", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_copy_to_buffer", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_copy_to_buffer_raw", &[I64, I64, I64, I64], &[I64]),
+    // Packed-array adapters keep the RuntimeValue owner live for the complete
+    // consuming call.  The runtime validates packed storage and projects the
+    // transient pointer inside the provider stack frame; codegen must not
+    // split these back into pointer-producing and pointer-consuming calls.
+    RuntimeFuncSpec::new("rt_vulkan_copy_to_buffer_array", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_copy_from_buffer", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_copy_from_buffer_raw", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_vulkan_copy_from_buffer_array", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new(
         "rt_vulkan_present_buffer_regions_raw",
         &[I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new(
+        "rt_vulkan_present_buffer_regions",
+        &[I64, I64, I64, I64, I64, I64],
         &[I64],
     ),
     RuntimeFuncSpec::new("rt_vulkan_last_present_copy_bytes", &[I64], &[I64]),
@@ -1630,16 +1640,24 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
         &[I64, I64, I64, I64, I64],
         &[I64],
     ),
+    RuntimeFuncSpec::new("rt_vulkan_copy_from_buffer_regions", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new(
         "rt_vulkan_copy_from_buffer_strided_raw",
         &[I64, I64, I64, I64, I64, I64, I64],
         &[I64],
     ),
+    RuntimeFuncSpec::new(
+        "rt_vulkan_copy_from_buffer_strided",
+        &[I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
     RuntimeFuncSpec::new("rt_vulkan_read_buffer_bytes", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_compile_spirv", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_compile_spirv_raw", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_vulkan_compile_spirv_array", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_push_constants", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_push_constants_raw", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_vulkan_push_constants_array", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_destroy_shader", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_begin_compute", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_begin_graphics", &[], &[I64]),
@@ -1693,8 +1711,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cuda_mem_free", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_memset", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_memcpy_dtoh", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cuda_memcpy_htod_array", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_module_load_data", &[I64, I64], &[I64]), // ptx_ptr, ptx_len -> module
     RuntimeFuncSpec::new("rt_cuda_module_load_data_bytes", &[I64, I64], &[I64]), // ptx_ptr, ptx_len -> module
+    RuntimeFuncSpec::new("rt_cuda_module_load_data_array", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_module_unload", &[I64], &[I64]),
     RuntimeFuncSpec::new(
         "rt_cuda_launch_kernel",
@@ -1706,6 +1726,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
         &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
         &[I64],
     ), // module, name_ptr, name_len, grid_xyz, block_xyz, args_ptr
+    RuntimeFuncSpec::new(
+        "rt_cuda_launch_kernel_name_array",
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ), // module, packed name, grid_xyz, block_xyz, args_ptr
     RuntimeFuncSpec::new("rt_cuda_sync", &[], &[I64]),
     // =========================================================================
     // Bootstrap Self-Hosting SFFI
@@ -1805,6 +1830,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
         &[I64],
     ), // ptr, capacity, row bytes, values, source stride/x/y, width/height -> copied pixels
     RuntimeFuncSpec::new("rt_file_write_bytes", &[I64, I64, I64, I64], &[I8]), // path, bytes -> bool
+    RuntimeFuncSpec::new("rt_file_write_bytes_array", &[I64, I64], &[I8]), // path/data RuntimeValues -> bool
     RuntimeFuncSpec::new("rt_file_wrap_smf_dynlib", &[I64, I64, I64, I64, I64], &[I8]), // input, output, arch -> bool
     RuntimeFuncSpec::new("rt_file_extract_smf_dynlib", &[I64, I64, I64, I64], &[I8]), // input, output -> bool
     RuntimeFuncSpec::new("rt_file_move", &[I64, I64, I64, I64], &[I8]),        // src, dest -> bool
@@ -1890,7 +1916,18 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("spl_dlsym", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_dlclose", &[I64], &[I64]),
     RuntimeFuncSpec::new("spl_wffi_call_i64", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "spl_wffi_call_i64_with_bytes",
+        &[I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
     RuntimeFuncSpec::new("spl_wffi_call_f64", &[I64, I64, I64], &[F64]),
+    // Call-scoped packed-byte adapters for optional GPU/font providers.
+    RuntimeFuncSpec::new("rt_font_load_array", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_metal_load_library_array", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_fonts_call_init_blob", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_fonts_call_init_path", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_fonts_call_layout_text", &[I64, I64, I64, I64], &[I64]),
     // Restored 2026-08-11: entries dropped by the stale-snapshot half of 6e2f613d302.
     RuntimeFuncSpec::new("rt_array_each", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_free_deep", &[I64], &[I64]),
@@ -2127,6 +2164,54 @@ mod tests {
         let spec = spec_for("rt_process_run_owned_bounded_value").expect("owned process runtime spec");
         assert_eq!(spec.params, [I64, I64, I64, I64, I64]);
         assert_eq!(spec.returns, [I64]);
+    }
+
+    #[test]
+    fn packed_byte_foreign_adapters_keep_array_owners_in_the_call_abi() {
+        assert!(
+            spec_for("rt_array_data_ptr_u8").is_none(),
+            "the removed raw-pointer escape ABI must not be registerable"
+        );
+        let expected: &[(&str, &[cranelift_codegen::ir::Type])] = &[
+            ("rt_cuda_module_load_data_array", &[I64]),
+            (
+                "rt_cuda_launch_kernel_name_array",
+                &[I64, I64, I64, I64, I64, I64, I64, I64, I64],
+            ),
+            ("rt_cuda_memcpy_htod_array", &[I64, I64, I64]),
+            ("rt_font_load_array", &[I64]),
+            ("rt_metal_load_library_array", &[I64, I64]),
+            ("rt_vulkan_copy_to_buffer_array", &[I64, I64, I64, I64]),
+            ("rt_vulkan_copy_from_buffer_array", &[I64, I64, I64, I64]),
+            ("rt_vulkan_copy_from_buffer_regions", &[I64, I64, I64]),
+            (
+                "rt_vulkan_copy_from_buffer_strided",
+                &[I64, I64, I64, I64, I64, I64],
+            ),
+            ("rt_vulkan_compile_spirv_array", &[I64]),
+            ("rt_vulkan_push_constants_array", &[I64, I64, I64, I64]),
+            (
+                "rt_vulkan_present_buffer_regions",
+                &[I64, I64, I64, I64, I64, I64],
+            ),
+            ("spl_fonts_call_init_blob", &[I64, I64, I64]),
+            ("spl_fonts_call_init_path", &[I64, I64]),
+            ("spl_fonts_call_layout_text", &[I64, I64, I64, I64]),
+            (
+                "spl_wffi_call_i64_with_bytes",
+                &[I64, I64, I64, I64, I64, I64],
+            ),
+        ];
+
+        for &(name, params) in expected {
+            let spec = spec_for(name).unwrap_or_else(|| panic!("missing packed-byte adapter ABI: {name}"));
+            assert_eq!(spec.params, params, "wrong packed-byte adapter parameters for {name}");
+            assert_eq!(spec.returns, [I64], "wrong packed-byte adapter result for {name}");
+        }
+
+        let file_write = spec_for("rt_file_write_bytes_array").expect("scoped file-write byte adapter ABI");
+        assert_eq!(file_write.params, [I64, I64]);
+        assert_eq!(file_write.returns, [I8]);
     }
 
     #[test]

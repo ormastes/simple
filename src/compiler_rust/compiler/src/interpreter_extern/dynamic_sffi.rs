@@ -689,6 +689,127 @@ fn i64_to_value(v: i64) -> Value {
     Value::Int(v)
 }
 
+fn strict_i64_array(value: &Value, name: &str) -> Result<Vec<i64>, CompileError> {
+    let items = match value {
+        Value::Array(items) | Value::FrozenArray(items) => items.as_ref(),
+        Value::FixedSizeArray { data, .. } => data.as_ref(),
+        other => {
+            return Err(CompileError::semantic(format!(
+                "{name} requires an [i64] argument, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    items.iter().map(Value::as_int).collect()
+}
+
+fn strict_owned_bytes(value: &Value, name: &str) -> Result<Box<[u8]>, CompileError> {
+    if let Some(bytes) = value.byte_array_view() {
+        return Ok(bytes.to_vec().into_boxed_slice());
+    }
+    let items = match value {
+        Value::Array(items) | Value::FrozenArray(items) => items.as_ref(),
+        Value::FixedSizeArray { data, .. } => data.as_ref(),
+        other => {
+            return Err(CompileError::semantic(format!(
+                "{name} requires a packed-byte array, got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let mut bytes = Vec::with_capacity(items.len());
+    for item in items {
+        let value = item.as_int()?;
+        let byte = u8::try_from(value)
+            .map_err(|_| CompileError::semantic(format!("{name} byte value {value} is out of bounds")))?;
+        bytes.push(byte);
+    }
+    Ok(bytes.into_boxed_slice())
+}
+
+/// Interpreter owner for the one-call dynamic byte descriptor ABI.
+pub fn spl_wffi_call_i64_with_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 6 {
+        return Err(CompileError::semantic(
+            "spl_wffi_call_i64_with_bytes expects 6 arguments".to_string(),
+        ));
+    }
+    let fptr = args[0].as_int()?;
+    if fptr == 0 {
+        return Ok(Value::Int(0));
+    }
+    let mut raw_args = strict_i64_array(&args[1], "spl_wffi_call_i64_with_bytes prefix")?;
+    let owner = strict_owned_bytes(&args[2], "spl_wffi_call_i64_with_bytes")?;
+    let offset = usize::try_from(args[3].as_int()?)
+        .map_err(|_| CompileError::semantic("byte offset must be non-negative".to_string()))?;
+    let length = usize::try_from(args[4].as_int()?)
+        .map_err(|_| CompileError::semantic("byte length must be non-negative".to_string()))?;
+    let end = offset
+        .checked_add(length)
+        .filter(|end| *end <= owner.len())
+        .ok_or_else(|| CompileError::semantic("byte descriptor is out of bounds".to_string()))?;
+    let suffix = strict_i64_array(&args[5], "spl_wffi_call_i64_with_bytes suffix")?;
+    if raw_args.len() + suffix.len() + 2 > 8 {
+        return Err(CompileError::semantic(
+            "spl_wffi_call_i64_with_bytes supports at most 8 foreign arguments".to_string(),
+        ));
+    }
+    let ptr = if length == 0 { 0 } else { owner[offset..end].as_ptr() as i64 };
+    raw_args.push(ptr);
+    raw_args.push(length as i64);
+    raw_args.extend(suffix);
+    let values: Vec<Value> = raw_args.into_iter().map(Value::Int).collect();
+    call_fptr(fptr as usize, "spl_wffi_call_i64_with_bytes", &values)
+        .unwrap_or_else(|| Ok(Value::Int(0)))
+}
+
+pub fn spl_fonts_call_init_blob_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 3 {
+        return Err(CompileError::semantic("spl_fonts_call_init_blob expects 3 arguments".to_string()));
+    }
+    let fptr = args[0].as_int()?;
+    let blob = strict_owned_bytes(&args[1], "spl_fonts_call_init_blob blob")?;
+    let digest = strict_owned_bytes(&args[2], "spl_fonts_call_init_blob digest")?;
+    if fptr == 0 {
+        return Ok(Value::Int(0));
+    }
+    type Init = unsafe extern "C" fn(i64, i64, i64, i64) -> i64;
+    let function = unsafe { std::mem::transmute::<usize, Init>(fptr as usize) };
+    Ok(Value::Int(unsafe {
+        function(blob.as_ptr() as i64, blob.len() as i64, digest.as_ptr() as i64, digest.len() as i64)
+    }))
+}
+
+pub fn spl_fonts_call_init_path_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 2 {
+        return Err(CompileError::semantic("spl_fonts_call_init_path expects 2 arguments".to_string()));
+    }
+    let fptr = args[0].as_int()?;
+    let path = strict_owned_bytes(&args[1], "spl_fonts_call_init_path path")?;
+    if fptr == 0 {
+        return Ok(Value::Int(0));
+    }
+    type Init = unsafe extern "C" fn(i64, i64) -> i64;
+    let function = unsafe { std::mem::transmute::<usize, Init>(fptr as usize) };
+    Ok(Value::Int(unsafe { function(path.as_ptr() as i64, path.len() as i64) }))
+}
+
+pub fn spl_fonts_call_layout_text_fn(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 4 {
+        return Err(CompileError::semantic("spl_fonts_call_layout_text expects 4 arguments".to_string()));
+    }
+    let fptr = args[0].as_int()?;
+    let text = strict_owned_bytes(&args[1], "spl_fonts_call_layout_text text")?;
+    let size = args[2].as_int()?;
+    let max_width = args[3].as_int()?;
+    if fptr == 0 {
+        return Ok(Value::Int(0));
+    }
+    type Layout = unsafe extern "C" fn(i64, i64, i64, i64) -> i64;
+    let function = unsafe { std::mem::transmute::<usize, Layout>(fptr as usize) };
+    Ok(Value::Int(unsafe { function(text.as_ptr() as i64, text.len() as i64, size, max_width) }))
+}
+
 /// Marshal arguments and call a resolved function pointer.
 ///
 /// This is the shared call path used by both the main runtime dispatch and
@@ -869,6 +990,62 @@ pub fn try_call_dynamic(name: &str, evaluated_args: &[Value]) -> Option<Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    unsafe extern "C" fn inspect_bytes(tag: i64, ptr: i64, len: i64, suffix: i64) -> i64 {
+        if tag != 7 || suffix != 9 || ptr == 0 || len != 3 {
+            return -1;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
+        bytes.iter().map(|value| i64::from(*value)).sum()
+    }
+
+    fn ints(values: &[i64]) -> Value {
+        Value::array(values.iter().copied().map(Value::Int).collect())
+    }
+
+    #[test]
+    fn packed_byte_foreign_capability_is_input_only() {
+        let result = spl_wffi_call_i64_with_bytes_fn(&[
+            Value::Int(inspect_bytes as usize as i64),
+            ints(&[7]),
+            Value::byte_array(vec![1, 2, 3]),
+            Value::Int(0),
+            Value::Int(3),
+            ints(&[9]),
+        ])
+        .expect("scoped dispatch should succeed");
+        assert_eq!(result, Value::Int(6));
+    }
+
+    #[test]
+    fn packed_byte_foreign_descriptor_rejects_out_of_bounds() {
+        let error = spl_wffi_call_i64_with_bytes_fn(&[
+            Value::Int(inspect_bytes as usize as i64),
+            ints(&[7]),
+            Value::byte_array(vec![1, 2, 3]),
+            Value::Int(2),
+            Value::Int(2),
+            ints(&[9]),
+        ])
+        .expect_err("out-of-bounds descriptor must fail closed");
+        assert!(error.to_string().contains("out of bounds"));
+    }
+
+    #[test]
+    fn packed_byte_foreign_capability_cannot_escape_call() {
+        let input = Value::frozen_byte_array(vec![4, 5, 6]);
+        let result = spl_wffi_call_i64_with_bytes_fn(&[
+            Value::Int(inspect_bytes as usize as i64),
+            ints(&[7]),
+            input.clone(),
+            Value::Int(0),
+            Value::Int(3),
+            ints(&[9]),
+        ])
+        .expect("scoped dispatch should succeed");
+        assert_eq!(result, Value::Int(15));
+        assert_eq!(input.byte_array_view(), Some([4, 5, 6].as_slice()));
+    }
 
     #[test]
     fn runtime_candidates_try_variants_before_scalar() {

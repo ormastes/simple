@@ -305,12 +305,6 @@ RuntimeValue rt_value_to_ptr(RuntimeValue v) {
     return (RuntimeValue)v;
 }
 
-RuntimeValue rt_array_data_ptr_u8(RuntimeValue arr) {
-    RuntimeArray *a = _decode_arr(arr);
-    if (!a) return ENCODE_INT(0);
-    return ENCODE_INT((int64_t)(uintptr_t)a->items);
-}
-
 RuntimeValue rt_string_to_int_lenient(RuntimeValue value) {
     RuntimeString *s = _decode_str(value);
     if (!s) return ENCODE_INT(0);

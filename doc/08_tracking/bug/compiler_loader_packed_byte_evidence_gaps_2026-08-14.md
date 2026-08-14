@@ -1,16 +1,17 @@
 # Compiler loader packed-byte evidence gaps
 
-Status: OPEN
+Status: CLOSED WITH PLATFORM WARN
 
 This record began as a missing-evidence inventory, not a claim that the
 implementation was incorrect. PBL-01 and PBL-02 are now closed by the green
-and deliberate-red receipts below; PBL-03 remains open.
+and deliberate-red receipts below. PBL-03 is closed at the admitted Rust/native
+boundary; real macOS compilation remains WARN and Stage 4 remains excluded.
 
 | ID | Code anchor | Initial required test | Current disposition |
 |---|---|---|---|
 | PBL-01 | `src/compiler_rust/compiler/src/interpreter_extern/sffi_array.rs:101`, `src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs:175`, and the clone/equality owners `src/compiler_rust/compiler/src/value_pointers.rs:236` and `src/compiler_rust/compiler/src/value_pointers.rs:362` | Add `packed_byte_concat_preserves_storage`, `packed_byte_clone_preserves_cow_storage`, and `packed_byte_equality_is_value_based` to `src/compiler_rust/compiler/tests/packed_byte_interpreter_semantics.rs` | CLOSED — green suite plus retained status-101 oracle receipt |
 | PBL-02 | `src/compiler_rust/compiler/src/interpreter/place.rs:169` and `src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs:485` | Add `interpreter_byte_array_projected_place_mutators_write_back` to `src/compiler_rust/driver/tests/interpreter_extern.rs` | CLOSED — green focused test plus retained status-101 oracle receipt |
-| PBL-03 | The process-lifetime leaked byte boundary at `src/compiler_rust/compiler/src/interpreter_extern/sffi_array.rs:708` and the raw dynamic fallback at `src/compiler_rust/compiler/src/interpreter_extern/dynamic_sffi.rs:654` | Create `src/compiler_rust/compiler/tests/packed_byte_foreign_capability_lifetime.rs` with `packed_byte_foreign_capability_is_input_only`, `packed_byte_foreign_descriptor_rejects_out_of_bounds`, and `packed_byte_foreign_capability_cannot_escape_call` | `cd src/compiler_rust && cargo test -p simple-compiler --test packed_byte_foreign_capability_lifetime` passes after a retained deliberate-red receipt |
+| PBL-03 | Historical process-lifetime leaked pointer boundary and raw dynamic fallback | Prove input-only scoped dispatch, bounds rejection, non-escape, owner ABI, and removed-symbol enforcement | CLOSED WITH WARN — focused Rust tests and retained status-101 removed-symbol receipt pass; Apple-target compilation was blocked before this crate by the Linux host C toolchain |
 
 Owner: compiler interpreter/SFFI owner. Final reviewer: highest-capability
 reviewer. The Rust seed may exercise these Rust tests but may not substitute for
@@ -188,3 +189,35 @@ attempt used the admitted Stage-2 compiler to native-build
 or candidate and exited 124. It was not retried. Stage 2 compile evidence for
 the focused HashSet spec remains valid, but optimizer findings and runtime
 performance remain blocked rather than inferred.
+
+## 2026-08-14 atomic PBL-03 closure
+
+The eight remaining Simple owners were migrated atomically to 15 typed
+array-taking family adapters plus `spl_wffi_call_i64_with_bytes`. Both native
+codegens now retain the RuntimeValue owner through each provider call;
+`rt_file_write_bytes` similarly lowers to `rt_file_write_bytes_array`. Native
+and interpreter providers validate descriptors, own temporary material for the
+call only, and never return a byte address.
+
+All positive non-document references, registrations, headers, definitions, and
+callers of `rt_array_data_ptr_u8` were removed. The only non-document occurrence
+is the intentional negative HashSet source-contract assertion. The retained
+status-101 receipt in
+`doc/09_report/compiler_loader_packed_byte_deliberate_red_evidence_2026-08-14.md`
+proves the native registry rejects restoration of the raw escape ABI; the
+restored focused command passes 1/1. Scoped foreign tests pass 4/4, and
+`cargo check -p simple-runtime -p simple-compiler` passed once.
+
+Three Vulkan readback adapters remain native/JIT-only because interpreter
+extern arguments are cloned Values and cannot commit destination mutation to
+the caller place. They are deliberately absent from interpreter dispatch; a
+focused non-vacuous registry test passes 1/1. The existing interpreter-specific
+array ABI remains the interpreter path.
+
+The Metal metallib adapter uses `DispatchData::from_bytes`, whose vendored
+implementation copies the input, and enables the matching `objc2-metal`
+`dispatch2` surface. An `aarch64-apple-darwin` check was attempted once but
+stopped in `libmimalloc-sys` because the Linux host `cc` rejected Apple `-arch`
+and deployment flags before the runtime crate compiled. Real macOS compilation
+therefore remains WARN. None of this evidence is Stage 4 performance or
+deployed-CLI evidence.

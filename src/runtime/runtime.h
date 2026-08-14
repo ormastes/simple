@@ -444,10 +444,9 @@ SplArray* rt_array_copy(SplArray* a);
 SplArray* rt_array_repeat(int64_t value, int64_t count);
 int64_t  rt_array_data_ptr(SplArray* array);
 int64_t  rt_array_data_ptr_text(SplArray* array);
-int64_t  rt_array_data_ptr_u8(SplArray* array);
 /* Strict bytes-basis accessors for the SimplePackedSpanV1 resolve (F2).
- * Unlike rt_array_data_ptr_u8 these NEVER fall back to a scratch copy:
- * len is -1 and ptr is 0 unless the array is genuinely BYTES-backed. */
+ * These never fall back to a scratch copy: len is -1 and ptr is 0 unless the
+ * array is genuinely BYTES-backed. */
 int64_t  rt_array_bytes_basis_len(SplArray* array);
 int64_t  rt_array_bytes_basis_ptr(SplArray* array);
 int64_t  rt_array_header_ptr(SplArray* array);

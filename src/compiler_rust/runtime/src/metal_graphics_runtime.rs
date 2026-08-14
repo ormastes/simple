@@ -7,6 +7,7 @@
 
 use std::ffi::CString;
 use std::os::raw::c_char;
+use crate::value::{byte_array_bytes, RuntimeValue};
 
 fn empty_cstr() -> *const c_char {
     let s = CString::new("").unwrap();
@@ -35,6 +36,7 @@ mod metal_impl {
         MTLComputeCommandEncoder, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice, MTLFunction,
         MTLLibrary, MTLResourceOptions, MTLSize,
     };
+    use dispatch2::DispatchData;
 
     // Link the required Apple frameworks.
     #[link(name = "Metal", kind = "framework")]
@@ -467,6 +469,30 @@ mod metal_impl {
             }
             None => {
                 set_last_error("compile_shader: invalid device handle");
+                0
+            }
+        }
+    }
+
+    pub fn load_library_bytes(device_handle: i64, bytes: &[u8]) -> i64 {
+        let dev = with_devices(|m| m.get(&device_handle).map(|w| w.0.clone()));
+        let Some(dev) = dev else {
+            set_last_error("load_library_bytes: invalid device handle");
+            return 0;
+        };
+        if bytes.is_empty() {
+            set_last_error("load_library_bytes: empty metallib");
+            return 0;
+        }
+        let data = DispatchData::from_bytes(bytes);
+        match dev.newLibraryWithData_error(&data) {
+            Ok(lib) => {
+                let id = next_id();
+                with_libraries(|m| m.insert(id, MetalSend(lib)));
+                id
+            }
+            Err(error) => {
+                set_last_error(&error.to_string());
                 0
             }
         }
@@ -1027,6 +1053,23 @@ pub extern "C" fn rt_metal_compile_shader(_device: i64, _source: i64) -> i64 {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        0
+    }
+}
+
+/// Call-scoped Metal source/library bytes. No raw address is exported.
+#[no_mangle]
+pub extern "C" fn rt_metal_load_library_array(device: i64, data: RuntimeValue) -> i64 {
+    let Some(bytes) = byte_array_bytes(data) else {
+        return 0;
+    };
+    #[cfg(target_os = "macos")]
+    {
+        return metal_impl::load_library_bytes(device, &bytes);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (device, bytes);
         0
     }
 }

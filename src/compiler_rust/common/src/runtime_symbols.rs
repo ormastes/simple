@@ -140,7 +140,6 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_array_get_text",
     "rt_array_last",
     "rt_array_data_ptr_text",
-    "rt_array_data_ptr_u8",
     "rt_array_set",
     "rt_array_set_text",
     "rt_array_set_len_known_text",
@@ -410,7 +409,6 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_array_at",
     "rt_at",
     "rt_array_data_ptr_text",
-    "rt_array_data_ptr_u8",
     "rt_array_set",
     "rt_array_set_text",
     "rt_array_set_len_known_text",
@@ -2082,16 +2080,22 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_compile_glsl",
     "rt_vulkan_compile_spirv",
     "rt_vulkan_compile_spirv_raw",
+    "rt_vulkan_compile_spirv_array",
     "rt_vulkan_copy_buffer",
     "rt_vulkan_copy_from_buffer",
     "rt_vulkan_copy_from_buffer_raw",
+    "rt_vulkan_copy_from_buffer_array",
     "rt_vulkan_copy_from_buffer_regions_raw",
+    "rt_vulkan_copy_from_buffer_regions",
     "rt_vulkan_copy_from_buffer_strided_raw",
+    "rt_vulkan_copy_from_buffer_strided",
     "rt_vulkan_present_buffer_regions_raw",
+    "rt_vulkan_present_buffer_regions",
     "rt_vulkan_last_present_copy_bytes",
     "rt_vulkan_last_present_copy_rects",
     "rt_vulkan_copy_to_buffer",
     "rt_vulkan_copy_to_buffer_raw",
+    "rt_vulkan_copy_to_buffer_array",
     "rt_vulkan_create_compute_pipeline",
     "rt_vulkan_create_descriptor_set",
     "rt_vulkan_create_fence",
@@ -2134,6 +2138,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_present",
     "rt_vulkan_push_constants",
     "rt_vulkan_push_constants_raw",
+    "rt_vulkan_push_constants_array",
     "rt_vulkan_read_buffer_bytes",
     "rt_vulkan_reset_fence",
     "rt_vulkan_selected_device_driver_identity",
@@ -2169,7 +2174,17 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // Auto-registered batch 2: lib/app extern fns + dynamic rt_opt_* (JIT NULL-jump fix 2026-07-24).
     "rt_array_push_i64_raw",
     "rt_cuda_launch_kernel_name",
+    "rt_cuda_launch_kernel_name_array",
     "rt_cuda_module_load_data_bytes",
+    "rt_cuda_module_load_data_array",
+    "rt_cuda_memcpy_htod_array",
+    "rt_font_load_array",
+    "rt_file_write_bytes_array",
+    "rt_metal_load_library_array",
+    "spl_wffi_call_i64_with_bytes",
+    "spl_fonts_call_init_blob",
+    "spl_fonts_call_init_path",
+    "spl_fonts_call_layout_text",
     "rt_dict_get_i64_raw",
     "rt_dict_set_i64_raw",
     "rt_exec",
@@ -2307,6 +2322,36 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_value_println"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"SCOPE_LEVELS_dot_has"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"stdin_read_char"));
+    }
+
+    #[test]
+    fn packed_byte_foreign_adapters_are_jit_visible() {
+        let adapters = [
+            "rt_cuda_module_load_data_array",
+            "rt_cuda_launch_kernel_name_array",
+            "rt_cuda_memcpy_htod_array",
+            "rt_font_load_array",
+            "rt_file_write_bytes_array",
+            "rt_metal_load_library_array",
+            "rt_vulkan_copy_to_buffer_array",
+            "rt_vulkan_copy_from_buffer_array",
+            "rt_vulkan_copy_from_buffer_regions",
+            "rt_vulkan_copy_from_buffer_strided",
+            "rt_vulkan_compile_spirv_array",
+            "rt_vulkan_push_constants_array",
+            "rt_vulkan_present_buffer_regions",
+            "spl_fonts_call_init_blob",
+            "spl_fonts_call_init_path",
+            "spl_fonts_call_layout_text",
+            "spl_wffi_call_i64_with_bytes",
+        ];
+
+        for name in adapters {
+            assert!(
+                RUNTIME_SYMBOL_NAMES.contains(&name),
+                "missing JIT runtime symbol: {name}"
+            );
+        }
     }
 
     #[test]

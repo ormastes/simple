@@ -6,7 +6,7 @@
 //! between the Simple extern fn declarations and the C ABI.
 
 use super::core::RuntimeValue;
-use super::collections::{rt_string_data, rt_string_len, rt_array_get};
+use super::collections::{byte_array_bytes, rt_array_get, rt_array_len, rt_string_data, rt_string_len};
 
 /// spl_dlopen(path: text) -> i64
 ///
@@ -181,6 +181,120 @@ pub extern "C" fn spl_wffi_call_i64(fptr: i64, args_rv: RuntimeValue, nargs: i64
             _ => 0,
         }
     }
+}
+
+unsafe fn call_i64_raw(fptr: i64, args: &[i64]) -> i64 {
+    type Fn0 = unsafe extern "C" fn() -> i64;
+    type Fn1 = unsafe extern "C" fn(i64) -> i64;
+    type Fn2 = unsafe extern "C" fn(i64, i64) -> i64;
+    type Fn3 = unsafe extern "C" fn(i64, i64, i64) -> i64;
+    type Fn4 = unsafe extern "C" fn(i64, i64, i64, i64) -> i64;
+    type Fn5 = unsafe extern "C" fn(i64, i64, i64, i64, i64) -> i64;
+    type Fn6 = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64;
+    type Fn7 = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64;
+    type Fn8 = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64;
+    match args {
+        [] => std::mem::transmute::<usize, Fn0>(fptr as usize)(),
+        [a] => std::mem::transmute::<usize, Fn1>(fptr as usize)(*a),
+        [a, b] => std::mem::transmute::<usize, Fn2>(fptr as usize)(*a, *b),
+        [a, b, c] => std::mem::transmute::<usize, Fn3>(fptr as usize)(*a, *b, *c),
+        [a, b, c, d] => std::mem::transmute::<usize, Fn4>(fptr as usize)(*a, *b, *c, *d),
+        [a, b, c, d, e] => std::mem::transmute::<usize, Fn5>(fptr as usize)(*a, *b, *c, *d, *e),
+        [a, b, c, d, e, f] => std::mem::transmute::<usize, Fn6>(fptr as usize)(*a, *b, *c, *d, *e, *f),
+        [a, b, c, d, e, f, g] => std::mem::transmute::<usize, Fn7>(fptr as usize)(*a, *b, *c, *d, *e, *f, *g),
+        [a, b, c, d, e, f, g, h] => {
+            std::mem::transmute::<usize, Fn8>(fptr as usize)(*a, *b, *c, *d, *e, *f, *g, *h)
+        }
+        _ => 0,
+    }
+}
+
+fn runtime_i64_values(value: RuntimeValue) -> Option<Vec<i64>> {
+    let len = usize::try_from(rt_array_len(value)).ok()?;
+    if len > 6 {
+        return None;
+    }
+    Some((0..len).map(|index| rt_array_get(value, index as i64).as_int()).collect())
+}
+
+/// One-call dynamic dispatch with a byte descriptor inserted between scalar
+/// prefix and suffix arguments. The byte address exists only in this frame.
+#[no_mangle]
+pub extern "C" fn spl_wffi_call_i64_with_bytes(
+    fptr: i64,
+    prefix_args: RuntimeValue,
+    bytes: RuntimeValue,
+    offset: i64,
+    length: i64,
+    suffix_args: RuntimeValue,
+) -> i64 {
+    if fptr == 0 {
+        return 0;
+    }
+    let Some(owner) = byte_array_bytes(bytes) else {
+        return 0;
+    };
+    let (Ok(offset), Ok(length)) = (usize::try_from(offset), usize::try_from(length)) else {
+        return 0;
+    };
+    let Some(end) = offset.checked_add(length) else {
+        return 0;
+    };
+    if end > owner.len() {
+        return 0;
+    }
+    let (Some(mut args), Some(suffix)) = (runtime_i64_values(prefix_args), runtime_i64_values(suffix_args)) else {
+        return 0;
+    };
+    if args.len() + 2 + suffix.len() > 8 {
+        return 0;
+    }
+    let ptr = if length == 0 { 0 } else { owner[offset..end].as_ptr() as i64 };
+    args.push(ptr);
+    args.push(length as i64);
+    args.extend_from_slice(&suffix);
+    unsafe { call_i64_raw(fptr, &args) }
+}
+
+#[no_mangle]
+pub extern "C" fn spl_fonts_call_init_blob(fptr: i64, blob: RuntimeValue, digest: RuntimeValue) -> i64 {
+    if fptr == 0 {
+        return 0;
+    }
+    let (Some(blob), Some(digest)) = (byte_array_bytes(blob), byte_array_bytes(digest)) else {
+        return 0;
+    };
+    let args = [blob.as_ptr() as i64, blob.len() as i64, digest.as_ptr() as i64, digest.len() as i64];
+    unsafe { call_i64_raw(fptr, &args) }
+}
+
+#[no_mangle]
+pub extern "C" fn spl_fonts_call_init_path(fptr: i64, path: RuntimeValue) -> i64 {
+    if fptr == 0 {
+        return 0;
+    }
+    let Some(path) = byte_array_bytes(path) else {
+        return 0;
+    };
+    let args = [path.as_ptr() as i64, path.len() as i64];
+    unsafe { call_i64_raw(fptr, &args) }
+}
+
+#[no_mangle]
+pub extern "C" fn spl_fonts_call_layout_text(
+    fptr: i64,
+    text: RuntimeValue,
+    size_px: i64,
+    max_width: i64,
+) -> i64 {
+    if fptr == 0 {
+        return 0;
+    }
+    let Some(text) = byte_array_bytes(text) else {
+        return 0;
+    };
+    let args = [text.as_ptr() as i64, text.len() as i64, size_px, max_width];
+    unsafe { call_i64_raw(fptr, &args) }
 }
 
 /// spl_wffi_call_f64(fptr: i64, args: RuntimeValue_array, nargs: i64) -> f64

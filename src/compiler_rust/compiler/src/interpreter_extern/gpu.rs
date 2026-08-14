@@ -605,6 +605,167 @@ pub(super) fn arg_bytes_ptr(
     }
 }
 
+fn strict_owned_bytes(args: &[Value], index: usize, name: &str, expected: usize) -> Result<Box<[u8]>, CompileError> {
+    let value = args.get(index).ok_or_else(|| {
+        CompileError::semantic(format!("{name} expects {expected} arguments"))
+    })?;
+    if let Some(bytes) = value.byte_array_view() {
+        return Ok(bytes.to_vec().into_boxed_slice());
+    }
+    let items = match value {
+        Value::Array(items) | Value::FrozenArray(items) => items.as_ref(),
+        Value::FixedSizeArray { data, .. } => data.as_ref(),
+        other => {
+            return Err(CompileError::semantic(format!(
+                "{name} argument {index} must be [u8], got {}",
+                other.type_name()
+            )))
+        }
+    };
+    let mut bytes = Vec::with_capacity(items.len());
+    for item in items {
+        let raw = item.as_int()?;
+        bytes.push(u8::try_from(raw).map_err(|_| {
+            CompileError::semantic(format!("{name} byte value {raw} is out of bounds"))
+        })?);
+    }
+    Ok(bytes.into_boxed_slice())
+}
+
+fn runtime_byte_owner(bytes: &[u8]) -> simple_runtime::value::RuntimeValue {
+    use simple_runtime::value::{rt_byte_array_new_len, rt_bytes_u8_set};
+    let owner = rt_byte_array_new_len(bytes.len() as u64);
+    for (index, byte) in bytes.iter().enumerate() {
+        if !rt_bytes_u8_set(owner, index as i64, i64::from(*byte)) {
+            release_runtime_owner(owner);
+            return simple_runtime::value::RuntimeValue::NIL;
+        }
+    }
+    owner
+}
+
+fn release_runtime_owner(owner: simple_runtime::value::RuntimeValue) {
+    if !owner.is_nil() {
+        simple_runtime::value::rt_array_free(owner);
+    }
+}
+
+fn strict_i64_values(args: &[Value], index: usize, name: &str, expected: usize) -> Result<Vec<i64>, CompileError> {
+    let value = args.get(index).ok_or_else(|| CompileError::semantic(format!("{name} expects {expected} arguments")))?;
+    let items = match value {
+        Value::Array(items) | Value::FrozenArray(items) => items.as_ref(),
+        Value::FixedSizeArray { data, .. } => data.as_ref(),
+        other => return Err(CompileError::semantic(format!("{name} argument {index} must be [i64], got {}", other.type_name()))),
+    };
+    items.iter().map(Value::as_int).collect()
+}
+
+fn runtime_i64_owner(values: &[i64]) -> simple_runtime::value::RuntimeValue {
+    use simple_runtime::value::{rt_array_new, rt_array_push, RuntimeValue};
+    let owner = rt_array_new(values.len() as u64);
+    for value in values {
+        if !rt_array_push(owner, RuntimeValue::from_int(*value)) {
+            release_runtime_owner(owner);
+            return RuntimeValue::NIL;
+        }
+    }
+    owner
+}
+
+pub fn rt_cuda_module_load_data_array_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let bytes = strict_owned_bytes(args, 0, "rt_cuda_module_load_data_array", 1)?;
+    let owner = runtime_byte_owner(&bytes);
+    let result = simple_runtime::cuda_runtime::rt_cuda_module_load_data_array(owner);
+    release_runtime_owner(owner);
+    Ok(Value::Int(result))
+}
+
+pub fn rt_cuda_memcpy_htod_array_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let dst = arg_i64(args, 0, "rt_cuda_memcpy_htod_array", 3)?;
+    let bytes = strict_owned_bytes(args, 1, "rt_cuda_memcpy_htod_array", 3)?;
+    let count = arg_i64(args, 2, "rt_cuda_memcpy_htod_array", 3)?;
+    let owner = runtime_byte_owner(&bytes);
+    let result = simple_runtime::cuda_runtime::rt_cuda_memcpy_htod_array(dst, owner, count);
+    release_runtime_owner(owner);
+    Ok(Value::Int(result))
+}
+
+pub fn rt_cuda_launch_kernel_name_array_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let module = arg_i64(args, 0, "rt_cuda_launch_kernel_name_array", 9)?;
+    let bytes = strict_owned_bytes(args, 1, "rt_cuda_launch_kernel_name_array", 9)?;
+    let mut scalar = [0i64; 7];
+    for (slot, index) in scalar.iter_mut().zip(2..9) {
+        *slot = arg_i64(args, index, "rt_cuda_launch_kernel_name_array", 9)?;
+    }
+    let owner = runtime_byte_owner(&bytes);
+    let result = simple_runtime::cuda_runtime::rt_cuda_launch_kernel_name_array(
+        module, owner, scalar[0], scalar[1], scalar[2], scalar[3], scalar[4], scalar[5], scalar[6],
+    );
+    release_runtime_owner(owner);
+    Ok(Value::Int(result))
+}
+
+pub fn rt_font_load_array_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let bytes = strict_owned_bytes(args, 0, "rt_font_load_array", 1)?;
+    let owner = runtime_byte_owner(&bytes);
+    let result = simple_runtime::packed_byte_adapters::rt_font_load_array(owner);
+    release_runtime_owner(owner);
+    Ok(Value::Int(result))
+}
+
+pub fn rt_metal_load_library_array_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let device = arg_i64(args, 0, "rt_metal_load_library_array", 2)?;
+    let bytes = strict_owned_bytes(args, 1, "rt_metal_load_library_array", 2)?;
+    let owner = runtime_byte_owner(&bytes);
+    let result = simple_runtime::metal_graphics_runtime::rt_metal_load_library_array(device, owner);
+    release_runtime_owner(owner);
+    Ok(Value::Int(result))
+}
+
+pub fn rt_vulkan_copy_to_buffer_array_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let handle = arg_i64(args, 0, "rt_vulkan_copy_to_buffer_array", 4)?;
+    let bytes = strict_owned_bytes(args, 1, "rt_vulkan_copy_to_buffer_array", 4)?;
+    let count = arg_i64(args, 2, "rt_vulkan_copy_to_buffer_array", 4)?;
+    let offset = arg_i64(args, 3, "rt_vulkan_copy_to_buffer_array", 4)?;
+    let owner = runtime_byte_owner(&bytes);
+    let result = simple_runtime::vulkan_graphics_runtime::rt_vulkan_copy_to_buffer_array(handle, owner, count, offset);
+    release_runtime_owner(owner);
+    Ok(Value::Bool(result != 0))
+}
+
+pub fn rt_vulkan_compile_spirv_array_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let bytes = strict_owned_bytes(args, 0, "rt_vulkan_compile_spirv_array", 1)?;
+    let owner = runtime_byte_owner(&bytes);
+    let result = simple_runtime::vulkan_graphics_runtime::rt_vulkan_compile_spirv_array(owner);
+    release_runtime_owner(owner);
+    Ok(Value::Int(result))
+}
+
+pub fn rt_vulkan_push_constants_array_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let cmd = arg_i64(args, 0, "rt_vulkan_push_constants_array", 4)?;
+    let pipe = arg_i64(args, 1, "rt_vulkan_push_constants_array", 4)?;
+    let bytes = strict_owned_bytes(args, 2, "rt_vulkan_push_constants_array", 4)?;
+    let count = arg_i64(args, 3, "rt_vulkan_push_constants_array", 4)?;
+    let owner = runtime_byte_owner(&bytes);
+    let result = simple_runtime::vulkan_graphics_runtime::rt_vulkan_push_constants_array(cmd, pipe, owner, count);
+    release_runtime_owner(owner);
+    Ok(Value::Bool(result != 0))
+}
+
+pub fn rt_vulkan_present_buffer_regions_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let mut scalar = [0i64; 5];
+    for (slot, index) in scalar.iter_mut().zip(0..5) {
+        *slot = arg_i64(args, index, "rt_vulkan_present_buffer_regions", 6)?;
+    }
+    let rects = strict_i64_values(args, 5, "rt_vulkan_present_buffer_regions", 6)?;
+    let owner = runtime_i64_owner(&rects);
+    let result = simple_runtime::vulkan_graphics_runtime::rt_vulkan_present_buffer_regions(
+        scalar[0], scalar[1], scalar[2], scalar[3], scalar[4], owner,
+    );
+    release_runtime_owner(owner);
+    Ok(Value::Int(result))
+}
+
 pub(super) fn arg_u32_bytes_ptr(
     args: &[Value],
     index: usize,
@@ -1704,8 +1865,8 @@ pub fn rt_cuda_module_load_data_fn(args: &[Value]) -> Result<Value, CompileError
 /// `rt_cuda_module_load_data` (which takes a `text` PTX source and is
 /// ABI-expanded to `(ptr,len)` by codegen), `_bytes` takes an explicit raw
 /// `(ptr,len)` pair pointing at an already-materialized byte buffer (e.g. a
-/// cubin binary obtained via `rt_array_data_ptr_u8`), so the interpreter
-/// args here are two `Value::Int`s, not a `Value::Str`.
+/// cubin binary supplied through the legacy raw ABI), so the interpreter args
+/// here are two `Value::Int`s, not a `Value::Str`.
 pub fn rt_cuda_module_load_data_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
     let ptx_ptr = arg_i64(args, 0, "rt_cuda_module_load_data_bytes", 2)?;
     let ptx_len = arg_i64(args, 1, "rt_cuda_module_load_data_bytes", 2)?;

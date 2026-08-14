@@ -67,6 +67,7 @@ fn register_static_runtime_symbols_with_abi() {
     register_static_runtime_symbols();
 }
 pub mod parallel;
+pub mod packed_byte_adapters;
 pub mod sandbox;
 pub mod security_runtime;
 /// UTF-8 slice-boundary audit (counting mode). See the module docs: this is
@@ -641,7 +642,6 @@ pub use value::{
     rt_array_any,
     rt_array_data_ptr,
     rt_array_data_ptr_text,
-    rt_array_data_ptr_u8,
     rt_array_each,
     rt_array_filter,
     rt_array_find,

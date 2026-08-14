@@ -28,7 +28,7 @@ extern fn rt_alloc(size: i64) -> i64
 extern fn rt_free(ptr: i64)
 extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
 extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64) -> i64
-extern fn rt_array_data_ptr_u8(bytes: [u8]) -> i64
+extern fn rt_cuda_memcpy_htod_array(dst: i64, data: [u8], byte_count: i64) -> i64
 
 # One canary byte value on both sides of the arena. Chosen to be neither
 # 0x00 (the zero-filled arena default) nor either GMB-1 sentinel byte, so a
@@ -194,9 +194,8 @@ class CudaLaneSession:
         self.arena_ptr = self.combined_ptr + self.guard_bytes
         val guard = canary_bytes(self.guard_bytes)
         val init_bytes = guard + zero_bytes(self.arena_capacity) + guard
-        val upload_rc = self.session.upload(
-            self.combined_ptr, rt_array_data_ptr_u8(init_bytes),
-            self.combined_capacity)
+        val upload_rc = rt_cuda_memcpy_htod_array(
+            self.combined_ptr, init_bytes, self.combined_capacity)
         if upload_rc != CUDA_SUCCESS:
             self.session.free(self.combined_ptr)
             self.combined_ptr = 0
@@ -232,8 +231,8 @@ class CudaLaneSession:
             return false
         if data.len().to_i64() > self.arena_capacity:
             return false
-        val rc = self.session.upload(
-            self.arena_ptr, rt_array_data_ptr_u8(data), data.len().to_i64())
+        val rc = rt_cuda_memcpy_htod_array(
+            self.arena_ptr, data, data.len().to_i64())
         if rc != CUDA_SUCCESS:
             val _e = self._fail("cuda-lane-arena-upload-failed")
             return false

@@ -2,7 +2,7 @@
 use super::vulkan_graphics_runtime_core::{alloc_handle, BufferUsage, VulkanBuffer, STATE};
 #[cfg(feature = "vulkan")]
 use std::sync::Arc;
-use crate::value::{byte_array_bytes, byte_array_write, rt_byte_array_new, rt_byte_array_new_len, RuntimeValue};
+use crate::value::{byte_array_bytes, byte_array_write, rt_array_get, rt_array_len, rt_byte_array_new, rt_byte_array_new_len, RuntimeValue};
 
 // A tightly packed 8K ARGB framebuffer is 132,710,400 bytes. Keep the raw ABI
 // bounded while allowing one complete 8K seed/upload.
@@ -198,6 +198,26 @@ pub extern "C" fn rt_vulkan_copy_to_buffer_raw(_handle: i64, _data_ptr: i64, _by
     0
 }
 
+/// Call-scoped packed-byte upload with an explicit bounded prefix.
+#[no_mangle]
+pub extern "C" fn rt_vulkan_copy_to_buffer_array(
+    handle: i64,
+    data: RuntimeValue,
+    byte_count: i64,
+    offset: i64,
+) -> i64 {
+    let Some(bytes) = byte_array_bytes(data) else {
+        return 0;
+    };
+    let Ok(byte_count) = usize::try_from(byte_count) else {
+        return 0;
+    };
+    if byte_count > bytes.len() {
+        return 0;
+    }
+    rt_vulkan_copy_to_buffer_raw(handle, bytes.as_ptr() as i64, byte_count as i64, offset)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Download bytes from a Vulkan buffer to `data_ptr` (host memory).
@@ -373,6 +393,104 @@ pub extern "C" fn rt_vulkan_copy_from_buffer_strided_raw(
     _src_stride: i64,
 ) -> i64 {
     0
+}
+
+
+fn runtime_i64_array_bytes(values: RuntimeValue, fields_per_record: usize) -> Option<Vec<u8>> {
+    let len = usize::try_from(rt_array_len(values)).ok()?;
+    if len == 0 || len % fields_per_record != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(len.checked_mul(8)?);
+    for index in 0..len {
+        bytes.extend_from_slice(&rt_array_get(values, index as i64).as_int().to_le_bytes());
+    }
+    Some(bytes)
+}
+
+/// Call-scoped packed-byte download. Results are committed only after success.
+#[no_mangle]
+pub extern "C" fn rt_vulkan_copy_from_buffer_array(
+    data: RuntimeValue,
+    byte_count: i64,
+    handle: i64,
+    offset: i64,
+) -> i64 {
+    let Some(mut bytes) = byte_array_bytes(data) else {
+        return 0;
+    };
+    let Ok(byte_count) = usize::try_from(byte_count) else {
+        return 0;
+    };
+    if byte_count > bytes.len() {
+        return 0;
+    }
+    let status = rt_vulkan_copy_from_buffer_raw(bytes.as_mut_ptr() as i64, byte_count as i64, handle, offset);
+    if status == 0 || !byte_array_write(data, &bytes) {
+        return 0;
+    }
+    status
+}
+
+#[no_mangle]
+pub extern "C" fn rt_vulkan_copy_from_buffer_strided(
+    data: RuntimeValue,
+    handle: i64,
+    src_offset: i64,
+    row_bytes: i64,
+    row_count: i64,
+    src_stride: i64,
+) -> i64 {
+    let Some(mut bytes) = byte_array_bytes(data) else {
+        return 0;
+    };
+    let Ok(data_len) = i64::try_from(bytes.len()) else {
+        return 0;
+    };
+    let status = rt_vulkan_copy_from_buffer_strided_raw(
+        bytes.as_mut_ptr() as i64,
+        data_len,
+        handle,
+        src_offset,
+        row_bytes,
+        row_count,
+        src_stride,
+    );
+    if status == 0 || !byte_array_write(data, &bytes) {
+        return 0;
+    }
+    status
+}
+
+#[no_mangle]
+pub extern "C" fn rt_vulkan_copy_from_buffer_regions(
+    data: RuntimeValue,
+    handle: i64,
+    regions: RuntimeValue,
+) -> i64 {
+    let Some(mut bytes) = byte_array_bytes(data) else {
+        return 0;
+    };
+    let Some(region_bytes) = runtime_i64_array_bytes(regions, 4) else {
+        return 0;
+    };
+    let Ok(data_len) = i64::try_from(bytes.len()) else {
+        return 0;
+    };
+    let Ok(regions_len) = i64::try_from(region_bytes.len()) else {
+        return 0;
+    };
+    let status = rt_vulkan_copy_from_buffer_regions_raw(
+        bytes.as_mut_ptr() as i64,
+        data_len,
+        handle,
+        region_bytes.as_ptr() as i64,
+        regions_len,
+    );
+    if status == 0 || !byte_array_write(data, &bytes) {
+        return 0;
+    }
+    status
 }
 
 #[no_mangle]

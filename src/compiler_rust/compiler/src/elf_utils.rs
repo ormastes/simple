@@ -457,7 +457,6 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_bytes_u8_set" => value::rt_bytes_u8_set as *const () as usize,
         "rt_array_data_ptr" => value::rt_array_data_ptr as *const () as usize,
         "rt_array_data_ptr_text" => value::rt_array_data_ptr_text as *const () as usize,
-        "rt_array_data_ptr_u8" => value::rt_array_data_ptr_u8 as *const () as usize,
         "rt_array_header_ptr" => value::rt_array_header_ptr as *const () as usize,
         "rt_array_set_len_known" => value::rt_array_set_len_known as *const () as usize,
         "rt_array_set_len_known_text" => value::rt_array_set_len_known_text as *const () as usize,
@@ -550,6 +549,43 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "spl_dlsym" => value::spl_dlsym as *const () as usize,
         "spl_dlclose" => value::spl_dlclose as *const () as usize,
         "spl_wffi_call_i64" => value::spl_wffi_call_i64 as *const () as usize,
+        "spl_wffi_call_i64_with_bytes" => value::spl_wffi_call_i64_with_bytes as *const () as usize,
+        "spl_fonts_call_init_blob" => value::spl_fonts_call_init_blob as *const () as usize,
+        "spl_fonts_call_init_path" => value::spl_fonts_call_init_path as *const () as usize,
+        "spl_fonts_call_layout_text" => value::spl_fonts_call_layout_text as *const () as usize,
+        "rt_file_write_bytes_array" => value::rt_file_write_bytes_array as *const () as usize,
+        "rt_font_load_array" => simple_runtime::packed_byte_adapters::rt_font_load_array as *const () as usize,
+        "rt_metal_load_library_array" => {
+            simple_runtime::metal_graphics_runtime::rt_metal_load_library_array as *const () as usize
+        }
+        "rt_cuda_module_load_data_array" => {
+            simple_runtime::cuda_runtime::rt_cuda_module_load_data_array as *const () as usize
+        }
+        "rt_cuda_launch_kernel_name_array" => {
+            simple_runtime::cuda_runtime::rt_cuda_launch_kernel_name_array as *const () as usize
+        }
+        "rt_cuda_memcpy_htod_array" => simple_runtime::cuda_runtime::rt_cuda_memcpy_htod_array as *const () as usize,
+        "rt_vulkan_copy_to_buffer_array" => {
+            simple_runtime::vulkan_graphics_runtime::rt_vulkan_copy_to_buffer_array as *const () as usize
+        }
+        "rt_vulkan_copy_from_buffer_array" => {
+            simple_runtime::vulkan_graphics_runtime::rt_vulkan_copy_from_buffer_array as *const () as usize
+        }
+        "rt_vulkan_copy_from_buffer_regions" => {
+            simple_runtime::vulkan_graphics_runtime::rt_vulkan_copy_from_buffer_regions as *const () as usize
+        }
+        "rt_vulkan_copy_from_buffer_strided" => {
+            simple_runtime::vulkan_graphics_runtime::rt_vulkan_copy_from_buffer_strided as *const () as usize
+        }
+        "rt_vulkan_compile_spirv_array" => {
+            simple_runtime::vulkan_graphics_runtime::rt_vulkan_compile_spirv_array as *const () as usize
+        }
+        "rt_vulkan_push_constants_array" => {
+            simple_runtime::vulkan_graphics_runtime::rt_vulkan_push_constants_array as *const () as usize
+        }
+        "rt_vulkan_present_buffer_regions" => {
+            simple_runtime::vulkan_graphics_runtime::rt_vulkan_present_buffer_regions as *const () as usize
+        }
         "rt_process_is_running" => value::rt_process_is_running as *const () as usize,
         "rt_process_wait" => value::rt_process_wait as *const () as usize,
         "rt_process_kill" => value::rt_process_kill as *const () as usize,
@@ -885,6 +921,31 @@ mod tests {
     #[test]
     fn resolves_array_free_runtime_symbol() {
         assert!(resolve_runtime_symbol("rt_array_free").unwrap_or(0) != 0);
+    }
+
+    #[test]
+    fn resolves_call_scoped_packed_byte_runtime_symbols() {
+        for symbol in [
+            "rt_cuda_module_load_data_array",
+            "rt_cuda_launch_kernel_name_array",
+            "rt_cuda_memcpy_htod_array",
+            "rt_font_load_array",
+            "rt_file_write_bytes_array",
+            "rt_metal_load_library_array",
+            "rt_vulkan_copy_to_buffer_array",
+            "rt_vulkan_copy_from_buffer_array",
+            "rt_vulkan_copy_from_buffer_regions",
+            "rt_vulkan_copy_from_buffer_strided",
+            "rt_vulkan_compile_spirv_array",
+            "rt_vulkan_push_constants_array",
+            "rt_vulkan_present_buffer_regions",
+            "spl_fonts_call_init_blob",
+            "spl_fonts_call_init_path",
+            "spl_fonts_call_layout_text",
+            "spl_wffi_call_i64_with_bytes",
+        ] {
+            assert!(resolve_runtime_symbol(symbol).unwrap_or(0) != 0, "{symbol}");
+        }
     }
 
     #[test]

@@ -1245,6 +1245,21 @@ pub unsafe extern "C" fn rt_file_write_bytes(
     std::fs::write(path_str, data).is_ok()
 }
 
+/// Owner-preserving file write. Both UTF-8 path and packed data remain owned
+/// by this frame for the complete filesystem call.
+#[no_mangle]
+pub extern "C" fn rt_file_write_bytes_array(path: RuntimeValue, data: RuntimeValue) -> bool {
+    let path_ptr = rt_string_data(path);
+    let path_len = rt_string_len(path);
+    if path_ptr.is_null() || path_len < 0 {
+        return false;
+    }
+    let Some(bytes) = crate::value::collections::byte_array_bytes(data) else {
+        return false;
+    };
+    unsafe { rt_file_write_bytes(path_ptr, path_len as u64, bytes.as_ptr(), bytes.len() as u64) }
+}
+
 /// Wrap a host native shared library in a role-2 SMF envelope.
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_wrap_smf_dynlib(

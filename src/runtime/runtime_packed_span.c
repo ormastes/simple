@@ -25,9 +25,8 @@
  * exactly such a build. When they are absent the resolve fails CLOSED with
  * SIMPLE_PACKED_SPAN_NO_BASE rather than failing to link or, worse, guessing.
  *
- * Deliberately NOT rt_array_data_ptr_u8: that function falls back to a
- * thread-local SCRATCH COPY for non-bytes arrays, which is precisely the
- * "plausible-looking pointer" this ABI must never hand out.
+ * A non-bytes array must fail closed rather than expose a plausible-looking
+ * pointer into copied scratch storage.
  * ------------------------------------------------------------------ */
 #if defined(__GNUC__) || defined(__clang__)
 #define SIMPLE_PACKED_SPAN_WEAK __attribute__((weak))

@@ -18,11 +18,15 @@ static void check_digest(const uint8_t* input, size_t input_len,
     }
     int64_t digest_value = rt_tls13_sha256((int64_t)(uintptr_t)bytes);
     SplArray* digest = (SplArray*)(uintptr_t)digest_value;
-    const uint8_t* digest_data =
-        (const uint8_t*)(uintptr_t)rt_array_data_ptr_u8(digest);
-    if (rt_array_len(digest) != 32 || !digest_data ||
-            memcmp(digest_data, expected, 32) != 0) {
+    if (rt_array_len(digest) != 32) {
         failures++;
+        return;
+    }
+    for (int64_t i = 0; i < 32; i++) {
+        if (rt_bytes_u8_at(digest, i) != expected[i]) {
+            failures++;
+            return;
+        }
     }
 }
 

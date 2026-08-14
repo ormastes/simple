@@ -173,6 +173,10 @@ mod tests {
         assert_eq!(sffi_alias_target("to_string"), Some("rt_to_string"));
         assert_eq!(sffi_alias_target("to_text"), Some("rt_to_string"));
         assert_eq!(sffi_alias_target("rt_file_delete"), Some("rt_file_remove"));
+        assert_eq!(
+            sffi_alias_target("rt_file_write_bytes"),
+            Some("rt_file_write_bytes_array")
+        );
         assert_eq!(sffi_alias_target("dealloc"), Some("rt_free"));
     }
 
@@ -2889,36 +2893,6 @@ fn expand_process_c_runtime_args<M: Module>(
     expand_text_args(ctx, builder, arg_vals, cstr_indices)
 }
 
-fn expand_file_write_bytes_args<M: Module>(
-    ctx: &mut InstrContext<'_, M>,
-    builder: &mut FunctionBuilder,
-    arg_vals: &[cranelift_codegen::ir::Value],
-) -> Option<Vec<cranelift_codegen::ir::Value>> {
-    if arg_vals.len() != 2 {
-        return None;
-    }
-
-    let string_data_id = ctx.runtime_funcs["rt_string_data"];
-    let string_len_id = ctx.runtime_funcs["rt_string_len"];
-    let string_data_ref = ctx.module.declare_func_in_func(string_data_id, builder.func);
-    let string_len_ref = ctx.module.declare_func_in_func(string_len_id, builder.func);
-
-    let path_ptr_call = adapted_call(builder, string_data_ref, &[arg_vals[0]]);
-    let path_ptr = builder.inst_results(path_ptr_call)[0];
-    let path_len_call = adapted_call(builder, string_len_ref, &[arg_vals[0]]);
-    let path_len = builder.inst_results(path_len_call)[0];
-    let array_data_id = ctx.runtime_funcs["rt_array_data_ptr_u8"];
-    let array_len_id = ctx.runtime_funcs["rt_array_len"];
-    let array_data_ref = ctx.module.declare_func_in_func(array_data_id, builder.func);
-    let array_len_ref = ctx.module.declare_func_in_func(array_len_id, builder.func);
-    let data_ptr_call = adapted_call(builder, array_data_ref, &[arg_vals[1]]);
-    let data_ptr = builder.inst_results(data_ptr_call)[0];
-    let data_len_call = adapted_call(builder, array_len_ref, &[arg_vals[1]]);
-    let data_len = builder.inst_results(data_len_call)[0];
-
-    Some(vec![path_ptr, path_len, data_ptr, data_len])
-}
-
 /// Adapt argument values to match a function's expected signature.
 /// Handles count mismatches (padding/truncating) and type mismatches (casting).
 ///
@@ -3049,6 +3023,7 @@ pub fn sffi_alias_target(name: &str) -> Option<&'static str> {
         "sys_get_args" => Some("rt_get_args"),
         "sys_exit" => Some("rt_exit"),
         "rt_file_read_text" => Some("rt_file_read_text_rv"),
+        "rt_file_write_bytes" => Some("rt_file_write_bytes_array"),
         "rt_file_delete" => Some("rt_file_remove"),
         "rt_string_contains" => Some("rt_contains"),
         "rt_dict_insert" => Some("rt_dict_set"),
@@ -3381,9 +3356,7 @@ pub fn compile_call<M: Module>(
 
         // Expand text RuntimeValue arguments for C-ABI SFFI calls.
         // Two modes: (ptr, len) for Rust-style APIs, or ptr-only for C-string APIs.
-        let arg_vals = if sffi_name == "rt_file_write_bytes" {
-            expand_file_write_bytes_args(ctx, builder, &arg_vals).unwrap_or(arg_vals)
-        } else if let Some((cstr_indices, array_indices)) = process_c_runtime_arg_indices(sffi_name) {
+        let arg_vals = if let Some((cstr_indices, array_indices)) = process_c_runtime_arg_indices(sffi_name) {
             expand_process_c_runtime_args(ctx, builder, &arg_vals, cstr_indices, array_indices)
         } else if let Some(text_indices) = boxed_text_arg_indices(sffi_name) {
             box_text_args(ctx, builder, &arg_vals, text_indices)

@@ -115,6 +115,15 @@ pub extern "C" fn rt_vulkan_compile_spirv_raw(_data_ptr: i64, _byte_count: i64) 
     0
 }
 
+/// Call-scoped packed SPIR-V input; no address is returned to Simple.
+#[no_mangle]
+pub extern "C" fn rt_vulkan_compile_spirv_array(data: RuntimeValue) -> i64 {
+    let Some(bytes) = byte_array_bytes(data) else {
+        return 0;
+    };
+    rt_vulkan_compile_spirv_raw(bytes.as_ptr() as i64, bytes.len() as i64)
+}
+
 #[cfg(all(test, feature = "vulkan"))]
 mod raw_guard_tests {
     use super::{
@@ -298,3 +307,4 @@ pub extern "C" fn rt_vulkan_destroy_pipeline(pipe: i64) -> i64 {
 pub extern "C" fn rt_vulkan_destroy_pipeline(_pipe: i64) -> i64 {
     0
 }
+use crate::value::{byte_array_bytes, RuntimeValue};
