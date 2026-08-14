@@ -59,10 +59,11 @@ without a fresh focused reproducer.
 
 ## Current blockers
 
-1. **B-HOST-CLI:** no admitted Stage 3 and Stage 4 pure-Simple host CLI. Resume
-   by fixing the recorded Stage 3 parser/source incompatibility at its owner,
-   continuing the strict bootstrap, and running candidate admission plus the
-   Stage 4 essential-tools smoke once.
+1. **B-HOST-CLI:** no admitted Stage 3 and Stage 4 pure-Simple host CLI. The
+   nested-guard fix passed the former Stage 3 parser frontier, but attempt 3
+   exited 139 later during MIR lowering. Resume only in a fresh bounded lane by
+   capturing the backtrace and fixing the pure-Simple owner named in
+   `stage3_selfhost_post_hir_segfault_2026-08-14.md`.
 2. **B-TARGET-SIMPLE:** no fresh strict
    `x86_64-unknown-simpleos/simple`. Resume after B-HOST-CLI with the AC-2
    command below.
@@ -147,7 +148,8 @@ are allowed only where shown:
 
 ## AC-1..AC-12 acceptance and evidence ledger
 
-No row is fresh PASS today.
+Overall status is **WARN** after the three-attempt cap. Only AC-9 is fresh PASS;
+every implementation/evidence row remains BLOCKED.
 
 | AC | Status | Authoritative evidence | Blocker / exact resume | Owner | Final reviewer |
 |---|---|---|---|---|---|
@@ -159,7 +161,7 @@ No row is fresh PASS today.
 | AC-6 frozen SSpec flow | BLOCKED | `test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl` with all frozen names and fail-closed helpers | Implement after wrapper/manifest contract lands | root/spec owner | higher-capability reviewer |
 | AC-7 operator manual and traceability | BLOCKED | Mirror at `doc/06_spec/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.md`; AC/REQ matrix; seven `sspec-maintain` scores; zero stubs/layout bugs | Generate from executable spec and review as a manual | root/doc owner | higher-capability reviewer |
 | AC-8 host/capability honesty | BLOCKED | Host matrix below with receipt or linked blocker for every row | Complete Linux QEMU row; retain physical row BLOCKED | root | higher-capability reviewer |
-| AC-9 bounded convergence | BLOCKED | Cycle ledger below; no repeated green or identical failed command | Stop on convergence or third distinct failed fix/verify cycle | root | higher-capability reviewer |
+| AC-9 bounded convergence | PASS | Three-attempt ledger below; no unchanged-green bootstrap rerun; stopped after attempt 3 | N/A; convergence guard satisfied | root | higher-capability reviewer |
 | AC-10 knowledge freshness | BLOCKED | Checklist below plus blocker records with file/line/unblock condition | Update affected artifacts with implementation | root/doc owner | higher-capability reviewer |
 | AC-11 cooperative review | BLOCKED | Both sidecar receipts plus separate final review receipt/verdict | Run final review after this merge | root merge owner | separate higher-capability reviewer |
 | AC-12 integration lifecycle | BLOCKED | Commit, lock/fetch/rebase/push/fetch/ancestor proof, clean tree, done receipt | Execute only after plan review acceptance | root | user-authorized push lifecycle |
@@ -173,7 +175,7 @@ is not a done, verify PASS, release, or feature-completion claim.
 
 | Row | State | Missing prerequisite | Resume command | Retained artifacts | Owner / reviewer |
 |---|---|---|---|---|---|
-| Linux x86_64 Stage 3/4 admission | BLOCKED ([B-HOST-CLI](../../../../08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md)) | Stage 3 parser/source compatibility and Stage 4 CLI | After a source fix, use the single materially changed attempt `env SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-cli --no-mcp --backend=llvm --jobs=min`; it builds and admits Stage 3, then continues through Stage 4 without a separate unchanged-green Stage 3 rerun. Then run `sh scripts/check/check-bootstrap-platform-handoff-readiness.shs` with Gate 1-5 receipts | bootstrap logs, candidate/provenance/admission/handoff receipts | bootstrap owner / higher-capability reviewer |
+| Linux x86_64 Stage 3/4 admission | BLOCKED ([B-HOST-CLI](../../../../08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md)) | Post-HIR/MIR-lowering Stage 3 segfault and absent Stage 4 CLI | Attempts are exhausted here. In a fresh bounded lane, capture/fix `stage3_selfhost_post_hir_segfault_2026-08-14.md`, then run one materially changed `env SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --full-cli --no-mcp --backend=llvm --jobs=min` and the handoff-readiness gate | Stage 2/3 build logs and hashes; future candidate/provenance/admission/handoff receipts | bootstrap owner / higher-capability reviewer |
 | Linux x86_64 OVMF+GRUB production desktop + guest toolchain | BLOCKED ([B-DESKTOP-LIVE](../../../../08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md)) | payload, guest linker, two-record image admission, frozen combined wrapper | `SIMPLE_BIN=<admitted-stage4> SIMPLEOS_TOOLCHAIN_IMAGE=<admitted-image> SIMPLEOS_WM_READINESS_TIMEOUT_MS=900000 sh scripts/check/check-simpleos-toolchain-desktop-boot.shs`; the wrapper owns one `gui_entry_desktop.spl` QEMU lifetime from boot through guest receipt | embedded manifest, external receipt, QEMU argv, serial, framebuffer/readback, SSH transcript, output ELF | root / higher-capability reviewer |
 | Physical x86_64 board | BLOCKED ([B-PHYSICAL](../../../../08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md)) | board acquisition/identity, physical NIC driver, boot/download route | Build/check: `sh scripts/os/build-simpleos-x86_64-board-usb.shs && sh scripts/check/check-simpleos-x86_64-board-usb-image.shs`. After recording the exact stable by-id path, require `SIMPLEOS_BOARD_DEVICE=/dev/disk/by-id/<reviewed-id>; test -b "$SIMPLEOS_BOARD_DEVICE"; sudo dd if=build/os/x86_64_board_usb/board-usb.img of="$SIMPLEOS_BOARD_DEVICE" bs=4M conv=fsync status=progress`; boot the named mini-PC and capture the selected evidence channel | board identity, image receipt, download log, serial or SSH transcript | board owner / higher-capability reviewer |
 
@@ -186,12 +188,13 @@ The feature has one shared maximum of three fix/verify cycles.
 
 - **Feature attempt 1 (used):** strict bootstrap produced admitted Stage 2,
   then failed at the named Stage 3 parse frontier.
-- **Feature attempts 2-3 (reserved):** only materially changed fixes may use
-  these attempts, with changed command/input hash recorded in the blocker
-  record. A downstream first execution is ordinary work, but any downstream
-  fix-and-retry consumes one of these same two remaining attempts.
-- After feature attempt 3, stop with WARN and retain every unresolved AC as
-  BLOCKED. No blocker gains its own additional retry budget.
+- **Feature attempt 2 (used):** nested-guard source changed, but `--full-cli`
+  failed closed because the compiler source made the seed/backfill stale.
+- **Feature attempt 3 (used):** `--full-bootstrap --full-cli` rebuilt the Rust
+  tuple and Stage 2, passed the former parse frontier, then exited 139 during
+  later Stage 3 MIR lowering. The exact hashes are in the blocker ledger.
+- The lane stopped with WARN after attempt 3. Every unresolved implementation
+  AC remains BLOCKED, and no blocker gains an additional retry budget.
 
 Never rerun an unchanged green criterion or an identical failed command.
 

@@ -122,3 +122,6 @@ dev-done
 - dev: Created state file with 12 acceptance criteria (type: feature).
 - review: Sidecar acceptance and guide/traceability findings merged; independent
   higher-capability review PASS on 2026-08-14 for plan completion only.
+- impl: WARN after three attempts. The nested-guard fix passed the old Stage 3
+  parser frontier and its Rust-seed diagnostic unit spec passed 5/5, but strict
+  self-host Stage 3 later exited 139; downstream deployment ACs remain BLOCKED.

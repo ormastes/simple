@@ -50,3 +50,15 @@ case, then prove a provenance-verified Stage 4 full CLI with
 `scripts/check/check-bootstrap-essential-tools-smoke.shs`. Stage 3 is a
 prerequisite, not test admission. Do not substitute the Rust seed as test
 authority and do not re-run the three exhausted cycles from this lane.
+
+## Restart12 SimpleOS evidence
+
+The nested-guard change in
+`src/compiler/60.mir_opt/mir_opt/typed_storage_view_producer.spl` passed the
+former multiline parse frontier. A strict LLVM
+`--full-bootstrap --full-cli --no-mcp --jobs=min` run produced admitted Stage 2
+SHA-256 `9c8757a5a31d5605b8765267789e0a2d1a882523ec84c523b740ed8ed3c55d10`
+and then exited 139 later in Stage 3 MIR lowering. The retained log is
+`build/bootstrap/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`, SHA-256
+`2dceab3fd116533537826b09b49cc64acfb2bfaaad6f9e5bd4036d5dd10af263`.
+This lane exhausted its third attempt and stopped WARN.
