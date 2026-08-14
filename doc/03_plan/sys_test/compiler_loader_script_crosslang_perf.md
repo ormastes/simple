@@ -5,7 +5,9 @@
 Plan content accepted at `3fdfa0d3351` and the current operational reconciliation
 accepted by `/root/reconciled_plan_review`; `/root/final_nonstage4_review`
 accepted the current Stage-4-excluded continuation on bounded review cycle 3.
-Commit and integration remain.
+Commit `0943ce963f05107046937456f8570b957aa939e5` was integrated under the
+lane lock and remains reachable from refreshed `origin/main`; the current
+receipt/PBL-03 reconciliation is pending its own final commit and integration.
 Feature verification remains blocked. This document is the canonical
 handoff for `compiler_loader_script_crosslang_perf`. It records what is already
 implemented, what current evidence proves, and the exact remaining gates. A
@@ -50,7 +52,8 @@ lane, or absorbing unrelated GUI/web/2D files.
 | Compiler layer expert | `doc/00_llm_process/layer_expert/compiler_driver/skill.md` | Must link this lane |
 | Loader blocker | `doc/08_tracking/bug/module_loader_negative_cache_stat_storm_2026-08-11.md` | Open verification condition retained |
 | Packed-byte history | `doc/08_tracking/bug/interpreter_byte_array_len_widening_spin_2026-08-13.md` | Fixed historical boundary/performance defect |
-| Packed-byte evidence gaps | `doc/08_tracking/bug/compiler_loader_packed_byte_evidence_gaps_2026-08-14.md` | PBL-01/02 green implementation results with open deliberate-red receipt gaps, plus the open PBL-03 ABI migration contract |
+| Packed-byte evidence gaps | `doc/08_tracking/bug/compiler_loader_packed_byte_evidence_gaps_2026-08-14.md` | PBL-01/02 closure and open PBL-03 atomic ABI migration contract |
+| Packed-byte deliberate-red evidence | `doc/09_report/compiler_loader_packed_byte_deliberate_red_evidence_2026-08-14.md` | PBL-01/02 named status-101 failures and exact reversion receipts |
 | Build11 Stage 3 blocker | `doc/08_tracking/bug/build11_stage3_compile_context_corruption_2026-08-14.md` | Open fresh-lane corruption frontier after a clean 603-file parse |
 | Retained harness | `scripts/check/check-cross-language-perf.shs` | Present |
 | C facade selfcheck | `scripts/check/check-file-exists-probe-c.shs` | Present |
@@ -87,8 +90,9 @@ Current acceptance items, each to be verified once in this lane:
   pushed commit is reachable from a freshly fetched `origin/main`.
 - [x] Finish lane A with a clean tree and only then write
   `/tmp/restart12-compiler_perf_a.done` as `<commit> PASS` or `<commit> WARN`.
-  Receipt: `adae82f3a50fca1ef700c187e4ad27fd7bbc8ddc WARN`, reachable
-  from the refreshed `origin/main` at lane close.
+  Receipt: `0943ce963f05107046937456f8570b957aa939e5 WARN`, reachable
+  from refreshed `origin/main`. The tracked/lane-owned tree was clean; two
+  unrelated GUI report files remained untracked and excluded.
 
 Known blocker at lane start: prior Build11 Stage 2 could not type the compiler
 tree, so the admitted performance rows are pending. This lane first determines
@@ -140,8 +144,8 @@ selection flow produces the missing selected requirement documents.
 
 | ID | Provisional requirement coverage | Acceptance condition | Authoritative evidence | Current state |
 |---|---|---|---|---|
-| PBL-01 | REQ-008, NFR-003 | Index, slice, iteration, concat, clone, equality, freeze, and byte-valued mutation preserve packed storage; non-byte insertion widens once | `packed_byte_interpreter_semantics`, representation-level concat test, and focused driver mutator tests | BLOCKED on evidence process — implementation and final tests pass 4/4 plus representation concat 1/1 and identifier cases 4/4; an oracle-mutation run failed as intended, but its identifying assertion/status output was not retained |
-| PBL-02 | REQ-008, NFR-003 | Identifier and projected-place mutators write back, preserve COW aliases, return removed elements, reject immutable/frozen receivers | `src/compiler_rust/driver/tests/interpreter_extern.rs` focused tests | BLOCKED on evidence process — final identifier/COW/removed/frozen cases pass 4/4 and projected-place write-back passes 1/1, but the required deliberate-red receipt is not retained |
+| PBL-01 | REQ-008, NFR-003 | Index, slice, iteration, concat, clone, equality, freeze, and byte-valued mutation preserve packed storage; non-byte insertion widens once | Green focused tests plus `doc/09_report/compiler_loader_packed_byte_deliberate_red_evidence_2026-08-14.md` | PROVED at Rust interpreter boundary — final suites pass 4/4, 1/1 representation concat, and 4/4 identifier cases; named deliberate-red fails status 101 and is reverted |
+| PBL-02 | REQ-008, NFR-003 | Identifier and projected-place mutators write back, preserve COW aliases, return removed elements, reject immutable/frozen receivers | Green focused tests plus `doc/09_report/compiler_loader_packed_byte_deliberate_red_evidence_2026-08-14.md` | PROVED at Rust interpreter boundary — final identifier cases pass 4/4 and projected-place write-back 1/1; named deliberate-red fails status 101 and is reverted |
 | PBL-03 | REQ-008, NFR-003/006 | Foreign packed-byte pointers are input-only, descriptor-bounded, nested adapters are scoped, and capabilities cannot escape a call | Production foreign-dispatch route plus compile-fail/equivalent escape enforcement | BLOCKED — current `rt_array_data_ptr_u8 -> i64` ABI outlives its producer call and leaks materialized bytes; a typed one-call adapter or owner-revoked opaque token migration is required |
 | LDR-01 | REQ-004/005/006/007, NFR-002 | Exact repeated miss caches once; adjacent callers remain distinct; reset invalidates; resolution result is unchanged | Focused SSpec and resolver unit coverage | BLOCKED — implementation is present; fresh admitted self-hosted execution is unavailable |
 | LDR-02 | REQ-004/005, NFR-001/002/006 | 100 reset-per-request resolutions versus 1000 retained requests produce identical results, uncached counts 100/1, positive failed-probe baseline, and cached probes at most 10% | SSpec plus C facade selfcheck | BLOCKED — contracts are present; fresh admitted self-hosted measurement is unavailable |
@@ -151,7 +155,7 @@ selection flow produces the missing selected requirement documents.
 | CMP-01 | REQ-007, NFR-001/005/006 | Self-hosted compiler checks for `src/compiler`, `src/lib`, MCP, LSP, and MCP stdio smoke pass without seed fallback | Commands below | BLOCKED — deployed candidate exists but is not admitted |
 | PLN-01 | all | Canonical plan, guide, expert knowledge, blockers, and cooperative-review receipts are internally consistent and pass focused document gates | Document review and layout guard | PROVED — review accepted; SPipe wiring, spec-layout, and working/staged runtime guards pass. Global workspace-root strict audit remains WARN-blocked by 137 pre-existing unrelated manifest violations |
 | DOC-01 | all | Selected research/requirements, accepted architecture/detail design, and generated manual provenance exist | Artifact review and admitted docgen | BLOCKED — research/options/drafts now exist; user selection, post-selection acceptance, and admitted docgen provenance remain outstanding |
-| VCS-01 | all | Only intentional lane-A files are committed; locked integration reaches refreshed `origin/main`; tree and lane marker are truthful | Git receipts | PROVED for lane A — `adae82f3a50...` is reachable and `/tmp/restart12-compiler_perf_a.done` records `WARN`; this documentation reconciliation requires its own commit after review |
+| VCS-01 | all | Only intentional lane-A files are committed; locked integration reaches refreshed `origin/main`; tree and lane marker are truthful | Git receipts | PROVED through integrated baseline `0943ce963f05...`; the current receipt/PBL-03 documentation reconciliation requires a final commit/push and marker refresh; unrelated untracked GUI reports are excluded |
 
 ## Manual-facing flow
 
@@ -239,7 +243,6 @@ the same correctness/performance baseline before and after.
 | Blocked IDs | Missing prerequisite | Exact resume command | Retained artifacts | Owner | Final reviewer |
 |---|---|---|---|---|---|
 | PBL-03 | Replace the pointer-returning interpreter ABI with a typed one-call adapter or foreign-dispatch-owned opaque token that is revoked before return | Run the production-route suite named in the packed-byte tracking record, including compile-fail or equivalent escape enforcement | Production caller migration, three focused tests, deliberate-red and green receipts | interpreter SFFI owner | highest-capability reviewer |
-| PBL-01/02 evidence | No other lane holds Cargo's shared build lock | Temporarily mutate only each named oracle, run its exact focused command to a semantic nonzero result, restore the oracle, and retain the already-authoritative final green results without re-running them | Exact mutation, command, named failing assertion, nonzero status, reversion proof | compiler-interpreter owner | highest-capability reviewer |
 | LDR-01/02, PRV-01, BYT-01, XLG-01, CMP-01 | Repair/redeploy an admitted self-hosted Stage 4 CLI per the linked repair plan/TODO | `test -x release/x86_64-unknown-linux-gnu/simple && release/x86_64-unknown-linux-gnu/simple --version && release/x86_64-unknown-linux-gnu/simple test --help && sh scripts/check/check-file-exists-probe-c.shs && release/x86_64-unknown-linux-gnu/simple test test/05_perf/compiler_loader_script_crosslang_perf_spec.spl --mode=interpreter --no-session-daemon && RUN_TIMEOUT=30 SIMPLE_BINARY="$PWD/release/x86_64-unknown-linux-gnu/simple" REPORT_PATH="$PWD/build/test-artifacts/05_perf/compiler_loader_script_crosslang_perf/cross_language_perf.md" sh scripts/check/check-cross-language-perf.shs && release/x86_64-unknown-linux-gnu/simple check src/compiler && release/x86_64-unknown-linux-gnu/simple check src/lib && release/x86_64-unknown-linux-gnu/simple check src/app/mcp && release/x86_64-unknown-linux-gnu/simple check src/app/simple_lsp_mcp && SIMPLE_LIB=src release/x86_64-unknown-linux-gnu/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter` | Binary path/hash, version/help logs, checker/spec logs, retained profile report, RSS receipts | compiler-loader performance owner | highest-capability reviewer |
 | LDR-01/02, PRV-01, BYT-01, XLG-01, CMP-01 — Build11 prerequisite | Repair the fresh Stage 3 corruption using the preserved admitted Stage 2 lineage | `sh scripts/bootstrap/resume-stage3-from-admitted.sh build/restart12-build11-a-r2/output` | `build/restart12-build11-a-r2/output/logs/x86_64-unknown-linux-gnu/{stage2,stage3}-native-build.log`, Stage 2/3 transcripts and sanity/provenance manifests, GDB backtrace, candidate hash | pure-Simple compiler-driver owner | highest-capability reviewer |
 | DOC-01 traceability | Explicit user choice from the present feature/NFR option sets, then post-selection architecture/design acceptance | Delete unchosen options; write `doc/02_requirements/feature/compiler_loader_script_crosslang_perf.md` and `doc/02_requirements/nfr/compiler_loader_script_crosslang_perf.md`; reconcile and accept the existing architecture/detail design | Selected requirement/NFR docs with no lingering options, accepted architecture and detail design | research/design owner | user selection + highest-capability reviewer |
@@ -305,14 +308,23 @@ corrected; `/root/reconciled_plan_review` (`gpt-5.6-sol`, high) then returned
   1-2: `REJECT` on missing deliberate-red receipts and stale/factually
   inconsistent dispositions. All findings were corrected without weakening
   the evidence contract.
-- The same reviewer, cycle 3: `ACCEPT`. PBL-01/02 remain honestly BLOCKED on
-  their missing retained red receipts despite green implementation tests;
-  PBL-03, selection/manual, Stage 3, deployed-CLI, and VCS blockers remain
-  explicit, with no Stage 2/3 substitution for Stage 4.
+- The same reviewer, cycle 3: `ACCEPT`. At that reviewed revision PBL-01/02
+  remained honestly BLOCKED on missing red receipts despite green tests. The
+  later receipt session supersedes that historical disposition and proves both
+  at the Rust interpreter boundary; PBL-03, selection/manual, Stage 3, and
+  deployed-CLI blockers remain explicit, with no Stage 2/3 substitution for
+  Stage 4.
 - At historical revision `3fdfa0d3351`, only the future generated-manual
   readability review remained assigned after admitted docgen. The generated
-  manual remains BLOCKED; the reconciled plan's done-state review is pending the
-  fresh receipt recorded above.
+  manual remains BLOCKED; the fresh cycle-3 receipt accepted the current
+  Stage-4-excluded done-state honesty.
+- `/root/receipt_reconcile_review`, receipt/PBL-03 reconciliation cycle 1:
+  `REJECT` on stale historical PBL and premature current-VCS wording. All
+  findings were corrected without broadening the evidence claims.
+- The same reviewer, cycle 2: `ACCEPT`. PBL-01/02 are proved only at the Rust
+  interpreter boundary, PBL-03 remains open with an atomic migration contract,
+  Stage 4 remains excluded, and current VCS integration is operationally
+  pending as recorded below.
 
 ## Plan completion checklist
 
@@ -329,4 +341,7 @@ corrected; `/root/reconciled_plan_review` (`gpt-5.6-sol`, high) then returned
 - [x] Fresh highest-capability review accepts this Stage-4-excluded continuation.
 - [x] Focused plan-quality gates pass; the global workspace-root strict audit
   truthfully remains WARN with 137 pre-existing unrelated manifest violations.
-- [ ] Intentional files are committed and integrated through the lane lock.
+- [ ] Current receipt/PBL-03 reconciliation is committed and integrated through
+  the lane lock. Baseline `0943ce963f05107046937456f8570b957aa939e5` remains
+  reachable with a matching WARN marker; two unrelated untracked GUI reports
+  are excluded.
