@@ -15,7 +15,7 @@
 | A10 | Release-toolchain evidence | unassigned | deploy the self-hosted runtime, rerun critical CLI/GHDL product scenarios, then record deterministic manifest hashes |
 | A11 | Shared scalar semantic database | `/root` | first I/M/RV64-word/shift declarative schema, RV32/RV64 specialization, and concrete I/IM multiply/divide provider selection exist; complete scalar table, HWIR resource binding, generated decoder/toolchain metadata remain pending |
 | A12 | Typed HWIR aspect packs | `/root` | hash-pinned manifest/application plan, typed exact-set lock contract, first fail-closed observational output graph weave, and Gen2 VHDL manifest lock provenance exist; lockfile discovery, proof execution, and all timing/state/provider advice remain pending |
-| A13 | Typed VHDL sequential HWIR migration and evidence | `/root` | active replacement lane: extend `HwSequentialModuleDef` with typed combinational datapath ownership, validate readable values/single drivers/widths, serialize the datapath before state, restore the executable mixed-datapath spec/manual pairing, and retain structural-hash evidence; qualification remains blocked on the admitted self-hosted CLI and independent RTL receipt |
+| A13 | Typed VHDL sequential HWIR migration and evidence | `/root` | implemented and integrated with source/static evidence; executable qualification remains WARN-blocked on the admitted self-hosted CLI and independent RTL receipt |
 
 ## Current replacement-lane acceptance (2026-08-14)
 
@@ -31,7 +31,7 @@
   predicate lowering, LSU geometry, rejection paths, and graph-hash drift.
 - [ ] Focused checks, compiler/core regression checks, artifact/runtime guards,
   and SPipe layout/quality gates pass once on the final implementation.
-- [ ] All intentional changes are committed, rebased under the integration
+- [x] All intentional changes are committed, rebased under the integration
   lock, pushed without force, reachable from `origin/main`, and leave a clean
   detached worktree.
 
