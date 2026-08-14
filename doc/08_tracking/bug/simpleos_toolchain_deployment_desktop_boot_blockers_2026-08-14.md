@@ -9,7 +9,7 @@ Owner plan:
 
 | ID | Owner location | Exact gap | Unblock condition |
 |---|---|---|---|
-| B-HOST-CLI | `doc/08_tracking/bug/stage3_selfhost_post_hir_segfault_2026-08-14.md:25` | The nested-guard source fix passes the former Stage 3 parse frontier, but the admitted Stage 2 compiler later exits 139 during MIR lowering | In a fresh bounded lane, capture the post-HIR backtrace, fix the pure-Simple owner, produce/admit Stage 3 and Stage 4, and pass essential-tools smoke |
+| B-HOST-CLI | `doc/08_tracking/bug/stage3_selfhost_post_hir_segfault_2026-08-14.md:66` | The native enum/static-receiver defect is repaired and Stage 2 is green, but two Stage 3 executions were externally terminated with exit 143 before producing an admission artifact | Run one cache-preserving Stage 3 completion under a sufficiently long supervisor, continue Stage 4 from that admitted artifact without rebuilding green Stage 3, and pass essential-tools smoke |
 | B-TARGET-SIMPLE | `scripts/os/simpleos-native-build.shs:1` | No fresh target payload built by an admitted pure-Simple Stage 4 CLI | Strict build produces target-native static ELF and provenance receipt with fallback disabled |
 | B-GUEST-LLD | `src/os/port/llvm/build.spl:1` | No genuine guest-static x86_64 SimpleOS `ld.lld` in this worktree | Pinned-fork build produces a validated static target ELF and dependency/hash receipts |
 | B-IMAGE | `src/os/installer/image_builder.spl:1` | No versioned embedded component manifest plus external image admission receipt | Image builder emits both non-self-referential records and validates every canonical alias byte-for-byte |
@@ -37,3 +37,16 @@ Owner plan:
   fix/retry is permitted in this lane. The Rust-seed interpreter diagnostic for
   `typed_storage_view_producer_spec.spl` passed 5/5, but is not self-host
   admission evidence.
+
+### Fresh primary-repair lane
+
+- Repair attempt 1 reached Stage 2 compilation and exposed missing canonical
+  formal-verification HIR contract definitions. Concurrent `origin/main` now
+  owns those definitions and propagation; this rebase retained that owner.
+- Repair attempt 2 passed Stage 2 and advanced Stage 3 beyond the former
+  impossible method receiver. The aggregate command was externally terminated
+  with exit 143; no compiler error or backtrace was emitted.
+- Repair attempt 3 resumed only Stage 3 from the admitted `build/bootstrap`
+  output and was again externally terminated with exit 143. No Stage 3 or
+  Stage 4 admission artifact exists. The fresh lane therefore stops WARN under
+  the shared three-cycle cap.

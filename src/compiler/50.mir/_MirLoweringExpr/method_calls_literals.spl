@@ -1005,11 +1005,23 @@ impl MirLowering:
                         self.error_fatal("mut method '" + method + "' called through a shared ('*R') resource receiver -- '*R' does not grant exclusive/mut methods (design doc section 8, invariant 7)", receiver.span)
                 case _:
                     ()
-        val resolution_disc = rt_enum_discriminant(resolution)
-        val resolution_is_unresolved = resolution_disc == rt_enum_discriminant(MethodResolution.Unresolved)
-        val resolution_is_free_function = resolution_disc == rt_enum_discriminant(MethodResolution.FreeFunction(SymbolId(id: -1)))
-        val resolution_is_instance_method = resolution_disc == rt_enum_discriminant(MethodResolution.InstanceMethod(SymbolId(id: -1), SymbolId(id: -1)))
-        val resolution_is_static_method = resolution_disc == rt_enum_discriminant(MethodResolution.StaticMethod(SymbolId(id: -1), SymbolId(id: -1)))
+        # The self-hosted native representation of payload enums is not the
+        # runtime interpreter's tagged Any representation. Asking
+        # rt_enum_discriminant for MethodResolution therefore reads payload
+        # bytes as a tag (observed 1851930204 for Unresolved), while native
+        # pattern matching selects the correct arm. Classify once with the
+        # language match so static-owner recovery does not lower a type name
+        # as a value and fabricate an impossible receiver local.
+        var resolution_is_unresolved = false
+        var resolution_is_free_function = false
+        var resolution_is_instance_method = false
+        var resolution_is_static_method = false
+        match resolution:
+            case Unresolved: resolution_is_unresolved = true
+            case FreeFunction(_): resolution_is_free_function = true
+            case InstanceMethod(_, _): resolution_is_instance_method = true
+            case StaticMethod(_, _): resolution_is_static_method = true
+            case TraitMethod(_, _): ()
         val result_ok_type: HirType? = if method == "unwrap" or method == "unwrap_or":
             self.result_ok_hir_type(receiver)
         else:
@@ -2400,7 +2412,7 @@ impl MirLowering:
                 case _: ()
         eprint("[mir-method-call] writeback-done method={method} kind={wb_kind}\n")
 
-        eprint("[mir-method-call] resolution-enter method={method} disc={resolution_disc} unresolved={resolution_is_unresolved}\n")
+        eprint("[mir-method-call] resolution-enter method={method} unresolved={resolution_is_unresolved}\n")
         match resolution:
             case InstanceMethod(type_id, method_id):
                 eprint("[mir-method-call] resolution-arm=instance method={method}\n")

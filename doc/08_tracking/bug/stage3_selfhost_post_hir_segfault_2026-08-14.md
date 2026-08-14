@@ -123,3 +123,37 @@ helper whose argument is concretely `HirContractBlock`; this follow-up is not
 build-verified in this exhausted cycle. Retained log:
 `build/restart12-render-cli-fix/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`,
 SHA-256 `cbdb55c0fce8d12780437ddab2d51529770e101c319db5af220dbd00fc097bf8`.
+
+## Restart12 primary repair lane (2026-08-14)
+
+The retained log proved that `MethodResolution.Unresolved` was selected by a
+native `match`, while `rt_enum_discriminant(resolution)` returned the garbage
+value `1851930204`.  That runtime helper expects the interpreter's tagged-Any
+representation and must not inspect a self-host-native payload enum.  The
+method-call lowerer now classifies `MethodResolution` through one exhaustive
+language `match`; the source-contract regression is
+`test/01_unit/compiler/driver/mir_method_enum_receiver_nil_guard_spec.spl`.
+That focused spec passed 1/1 with the bootstrap seed as a diagnostic runner;
+it is not self-host admission evidence.
+
+The first rebuild also exposed an independently half-landed formal-verification
+boundary: MIR consumers referenced `HirContractBlock` and
+`HirFunction.verification_contract`, but canonical HIR defined neither in the
+pre-rebase tree.  The concurrently landed `origin/main` now owns the complete
+shared HIR types and propagation.  A strict cached rebuild subsequently
+completed Stage 2 and entered Stage 3; the rebase retained upstream's canonical
+definitions and dropped this lane's duplicate version.
+
+The original impossible receiver/static-owner failure did not recur.  However,
+the combined run was externally terminated with exit 143 during the quiet
+Stage 3 build, and a cache-preserving
+`--resume-stage3-from-admitted=build/bootstrap --jobs=1` was likewise terminated
+with exit 143 after about ten minutes.  Neither retained log contains a compiler
+error, signal backtrace, or completed Stage 3 artifact, so the correct status is
+still **OPEN / BLOCKED**, not a compiler-crash claim and not PASS.
+
+Resume condition: provide a supervisor window long enough for one materially
+unchanged cache-preserving Stage 3 completion, then admit provenance and run a
+real Stage4-from-admitted continuation (without rebuilding an already-green
+Stage 3).  Retained evidence remains
+`build/bootstrap/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`.
