@@ -15,6 +15,34 @@
 | A10 | Release-toolchain evidence | unassigned | deploy the self-hosted runtime, rerun critical CLI/GHDL product scenarios, then record deterministic manifest hashes |
 | A11 | Shared scalar semantic database | `/root` | first I/M/RV64-word/shift declarative schema, RV32/RV64 specialization, and concrete I/IM multiply/divide provider selection exist; complete scalar table, HWIR resource binding, generated decoder/toolchain metadata remain pending |
 | A12 | Typed HWIR aspect packs | `/root` | hash-pinned manifest/application plan, typed exact-set lock contract, first fail-closed observational output graph weave, and Gen2 VHDL manifest lock provenance exist; lockfile discovery, proof execution, and all timing/state/provider advice remain pending |
+| A13 | Typed VHDL sequential HWIR migration and evidence | `/root` | active replacement lane: extend `HwSequentialModuleDef` with typed combinational datapath ownership, validate readable values/single drivers/widths, serialize the datapath before state, restore the executable mixed-datapath spec/manual pairing, and retain structural-hash evidence; qualification remains blocked on the admitted self-hosted CLI and independent RTL receipt |
+
+## Current replacement-lane acceptance (2026-08-14)
+
+- [x] The canonical sequential module owns typed signals, constants, bit-vector
+  constants, combinational operations, comparisons, selects, extracts, and
+  fixed slices; it does not accept raw VHDL fragments.
+- [x] Validation fails closed for unsupported operations, unreadable operands,
+  width drift, duplicate names, and multiple datapath drivers before emission.
+- [x] Strict VHDL renders the validated combinational datapath before guarded
+  state/output logic and commits every datapath field into the structural hash.
+- [x] The mixed sequential executable spec and generated/manual mirror agree and
+  cover add, truncate, sign extension, comparison, selection, unsigned
+  predicate lowering, LSU geometry, rejection paths, and graph-hash drift.
+- [ ] Focused checks, compiler/core regression checks, artifact/runtime guards,
+  and SPipe layout/quality gates pass once on the final implementation.
+- [ ] All intentional changes are committed, rebased under the integration
+  lock, pushed without force, reachable from `origin/main`, and leave a clean
+  detached worktree.
+
+Current blockers: qualification authority is still unavailable while the
+deployed runtime identifies as a bootstrap seed; therefore this lane may earn
+source-level and focused target evidence but must not claim the independent
+self-hosted qualification receipt or full RTL equivalence.
+The canonical wrapper currently fails its bounded test-ABI probe, while direct
+use of the deployed self-hosted executable exits by signal 11 during both the
+focused test and `check`; this blocks executable acceptance evidence without
+authorizing a Rust-seed fallback.
 
 The C.J/C.BEQZ/C.BNEZ control rows now have aggregate strict-MIR contracts and
 explicit row-level target evidence. Their typed redirect fields and operand

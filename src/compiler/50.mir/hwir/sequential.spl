@@ -1,7 +1,10 @@
 # Typed sequential-HWIR primitives for bounded Gen2 products.
 
 use std.common.crypto.sha256.{sha256_text}
-use compiler.mir.hwir.types.{CoreConfig, HwNodeId, HwOrigin, HwPort, hwir_hash_fields, hwir_vhdl_identifier}
+use compiler.mir.hwir.types.{CoreConfig, HwBitExtractOp, HwCombOp, HwCompareOp,
+    HwConstant, HwFixedSliceOp, HwNodeId, HwOrigin, HwPort, HwSelectOp, HwSignal,
+    hwir_hash_fields, hwir_vhdl_identifier}
+use compiler.mir.hwir.bit_vector_constant.{HwBitVectorConstant}
 
 pub class HwStateRegister:
     name: text
@@ -246,9 +249,130 @@ pub class HwSequentialModuleDef:
     config: CoreConfig
     origins: [HwOrigin]
     ports: [HwPort]
+    datapath_signals: [HwSignal]
+    datapath_constants: [HwConstant]
+    datapath_bit_vector_constants: [HwBitVectorConstant]
+    datapath_comb_ops: [HwCombOp]
+    datapath_compare_ops: [HwCompareOp]
+    datapath_select_ops: [HwSelectOp]
+    datapath_bit_extract_ops: [HwBitExtractOp]
+    datapath_fixed_slice_ops: [HwFixedSliceOp]
     plan: HwSequentialPlan
     child_entity: text
     child_graph_sha256: text
+
+    me datapath_width(name: text) -> i32:
+        for port in self.ports:
+            if port.name == name: return port.bit_width
+        for register in self.plan.registers:
+            if register.name == name: return register.bit_width
+        for pin in self.plan.decoder_pins:
+            if pin.direction == "out" and pin.signal_name == name: return pin.bit_width
+        for signal in self.datapath_signals:
+            if signal.name == name: return signal.bit_width
+        for constant in self.datapath_constants:
+            if constant.name == name: return constant.bit_width
+        for constant in self.datapath_bit_vector_constants:
+            if constant.name == name: return constant.bit_width
+        -1
+
+    me datapath_readable_width(name: text) -> i32:
+        for port in self.ports:
+            if port.name == name and port.direction == "in": return port.bit_width
+        for register in self.plan.registers:
+            if register.name == name: return register.bit_width
+        for pin in self.plan.decoder_pins:
+            if pin.direction == "out" and pin.signal_name == name: return pin.bit_width
+        for signal in self.datapath_signals:
+            if signal.name == name: return signal.bit_width
+        for constant in self.datapath_constants:
+            if constant.name == name: return constant.bit_width
+        for constant in self.datapath_bit_vector_constants:
+            if constant.name == name: return constant.bit_width
+        -1
+
+    me datapath_diagnostic() -> text:
+        var names: [text] = []
+        for port in self.ports: names.push(port.name.lower())
+        for register in self.plan.registers: names.push(register.name.lower())
+        for pin in self.plan.decoder_pins:
+            if pin.direction == "out": names.push(pin.signal_name.lower())
+        for signal in self.datapath_signals:
+            val folded = signal.name.lower()
+            if not hwir_vhdl_identifier(signal.name) or signal.bit_width < 1 or
+                signal.type_name != "Bits" or signal.driver_count > 1 or names.contains(folded):
+                return "HWIR-E-SEQUENTIAL-DATAPATH-SIGNAL: datapath signals require unique typed combinational values"
+            names.push(folded)
+        for constant in self.datapath_constants:
+            val folded = constant.name.lower()
+            if not hwir_vhdl_identifier(constant.name) or constant.bit_width < 1 or names.contains(folded):
+                return "HWIR-E-SEQUENTIAL-DATAPATH-CONSTANT: datapath constants require unique typed values"
+            if constant.bit_width == 1 and constant.value != 0 and constant.value != 1:
+                return "HWIR-E-SEQUENTIAL-DATAPATH-CONSTANT: one-bit constants must be zero or one"
+            names.push(folded)
+        for constant in self.datapath_bit_vector_constants:
+            val folded = constant.name.lower()
+            if not hwir_vhdl_identifier(constant.name) or names.contains(folded):
+                return "HWIR-E-SEQUENTIAL-DATAPATH-BIT-CONSTANT: bit-vector constants require unique VHDL identifiers"
+            val bits_error = constant.bits_diagnostic()
+            if bits_error != "": return bits_error
+            names.push(folded)
+        var drivers: [text] = []
+        for op in self.datapath_comb_ops:
+            if op.op != "and" and op.op != "or" and op.op != "xor" and op.op != "add" and
+                op.op != "sub" and op.op != "shl" and op.op != "shr" and op.op != "sar" and op.op != "eq" and
+                op.op != "ne" and op.op != "slt" and op.op != "sge" and op.op != "ult" and
+                op.op != "uge" and op.op != "passthrough" and op.op != "zext" and
+                op.op != "trunc" and op.op != "sext":
+                return "HWIR-E-SEQUENTIAL-DATAPATH-COMB: unsupported combinational operation"
+            val result_width = self.datapath_width(op.result)
+            val lhs_width = self.datapath_readable_width(op.lhs)
+            val rhs_width = if op.rhs == "": -1 else: self.datapath_readable_width(op.rhs)
+            val unary = op.op == "passthrough" or op.op == "zext" or op.op == "trunc" or op.op == "sext"
+            val predicate = op.op == "eq" or op.op == "ne" or op.op == "slt" or
+                op.op == "sge" or op.op == "ult" or op.op == "uge"
+            if (if predicate: result_width != 1 else: result_width != op.bit_width) or lhs_width < 1 or
+                (not unary and (lhs_width != op.bit_width or rhs_width != op.bit_width)) or
+                (op.op == "passthrough" and lhs_width != op.bit_width):
+                return "HWIR-E-SEQUENTIAL-DATAPATH-COMB: combinational operation requires typed readable operands and signal result"
+            val driver = op.result.lower()
+            if drivers.contains(driver): return "HWIR-E-SEQUENTIAL-DATAPATH-DRIVER: datapath values require one driver"
+            drivers.push(driver)
+        for op in self.datapath_compare_ops:
+            if self.datapath_width(op.result) != 1 or self.datapath_readable_width(op.lhs) != op.bit_width or
+                self.datapath_readable_width(op.rhs) != op.bit_width:
+                return "HWIR-E-SEQUENTIAL-DATAPATH-COMPARE: comparison requires typed operands and one-bit signal result"
+            val driver = op.result.lower()
+            if drivers.contains(driver): return "HWIR-E-SEQUENTIAL-DATAPATH-DRIVER: datapath values require one driver"
+            drivers.push(driver)
+        for op in self.datapath_select_ops:
+            if self.datapath_width(op.result) != op.bit_width or self.datapath_readable_width(op.condition) != 1 or
+                self.datapath_readable_width(op.when_true) != op.bit_width or
+                self.datapath_readable_width(op.when_false) != op.bit_width:
+                return "HWIR-E-SEQUENTIAL-DATAPATH-SELECT: select requires typed condition, alternatives, and signal result"
+            val driver = op.result.lower()
+            if drivers.contains(driver): return "HWIR-E-SEQUENTIAL-DATAPATH-DRIVER: datapath values require one driver"
+            drivers.push(driver)
+        for op in self.datapath_bit_extract_ops:
+            val source_width = self.datapath_readable_width(op.source)
+            if self.datapath_width(op.result) != 1 or source_width < 1 or
+                op.bit_index < 0 or op.bit_index >= source_width:
+                return "HWIR-E-SEQUENTIAL-DATAPATH-BIT-EXTRACT: fixed bit extract requires a readable source, in-range index, and one-bit signal result"
+            val driver = op.result.lower()
+            if drivers.contains(driver): return "HWIR-E-SEQUENTIAL-DATAPATH-DRIVER: datapath values require one driver"
+            drivers.push(driver)
+        for op in self.datapath_fixed_slice_ops:
+            val source_width = self.datapath_readable_width(op.source)
+            val result_width = op.high_bit - op.low_bit + 1
+            if self.datapath_width(op.result) != result_width or source_width < 1 or
+                op.low_bit < 0 or op.high_bit <= op.low_bit or op.high_bit >= source_width:
+                return "HWIR-E-SEQUENTIAL-DATAPATH-FIXED-SLICE: fixed slice requires a readable source, ordered in-range bounds, and matching signal result"
+            val driver = op.result.lower()
+            if drivers.contains(driver): return "HWIR-E-SEQUENTIAL-DATAPATH-DRIVER: datapath values require one driver"
+            drivers.push(driver)
+        if drivers.len() != self.datapath_signals.len():
+            return "HWIR-E-SEQUENTIAL-DATAPATH-DRIVER: every datapath signal requires one driver"
+        ""
 
     me diagnostic() -> text:
         val config_error = self.config.diagnostic()
@@ -277,7 +401,16 @@ pub class HwSequentialModuleDef:
                 origin.node_id.value == self.node_id.value or origin_ids.contains(origin.node_id.value):
                 return "HWIR-E-SEQUENTIAL-MODULE-ORIGIN: sequential origins must be distinct and valid"
             origin_ids.push(origin.node_id.value)
-        val plan_error = self.plan.diagnostic_for_ports(self.ports)
+        val datapath_error = self.datapath_diagnostic()
+        if datapath_error != "": return datapath_error
+        var validation_ports = self.ports
+        for signal in self.datapath_signals:
+            validation_ports.push(HwPort.input(signal.name, "Bits", signal.bit_width))
+        for constant in self.datapath_constants:
+            validation_ports.push(HwPort.input(constant.name, "Bits", constant.bit_width))
+        for constant in self.datapath_bit_vector_constants:
+            validation_ports.push(HwPort.input(constant.name, "Bits", constant.bit_width))
+        val plan_error = self.plan.diagnostic_for_ports(validation_ports)
         if plan_error != "": return plan_error
         if self.child_entity == "":
             if self.child_graph_sha256 != "" or self.plan.decoder_pins.len() != 0:
@@ -289,7 +422,7 @@ pub class HwSequentialModuleDef:
         ""
 
     me canonical_text() -> text:
-        var fields = ["simple-hwir-sequential-module/v1", self.node_id.value, self.entity_name,
+        var fields = ["simple-hwir-sequential-module/v3", self.node_id.value, self.entity_name,
             self.config.xlen.to_text(), self.config.physical_address_bits.to_text(),
             self.config.register_count.to_text(), self.config.profile,
             self.config.isa_profile, self.config.compressed_decode_profile]
@@ -304,6 +437,30 @@ pub class HwSequentialModuleDef:
             fields.push(port.type_name)
             fields.push(port.bit_width.to_text())
             fields.push(port.clock_domain)
+        for signal in self.datapath_signals:
+            fields.push(hwir_hash_fields(["datapath_signal", signal.name, signal.type_name,
+                signal.bit_width.to_text(), signal.driver_count.to_text(), signal.source_id]))
+        for constant in self.datapath_constants:
+            fields.push(hwir_hash_fields(["datapath_constant", constant.name,
+                constant.bit_width.to_text(), constant.value.to_text()]))
+        for constant in self.datapath_bit_vector_constants:
+            fields.push(hwir_hash_fields(["datapath_bit_vector_constant", constant.name,
+                constant.bit_width.to_text(), constant.canonical_bits]))
+        for op in self.datapath_comb_ops:
+            fields.push(hwir_hash_fields(["datapath_comb", op.op, op.result, op.lhs,
+                op.rhs, op.bit_width.to_text()]))
+        for op in self.datapath_compare_ops:
+            fields.push(hwir_hash_fields(["datapath_compare", op.result, op.lhs,
+                op.rhs, op.bit_width.to_text()]))
+        for op in self.datapath_select_ops:
+            fields.push(hwir_hash_fields(["datapath_select", op.result, op.condition,
+                op.when_true, op.when_false, op.bit_width.to_text()]))
+        for op in self.datapath_bit_extract_ops:
+            fields.push(hwir_hash_fields(["datapath_bit_extract", op.result, op.source,
+                op.bit_index.to_text()]))
+        for op in self.datapath_fixed_slice_ops:
+            fields.push(hwir_hash_fields(["datapath_fixed_slice", op.result, op.source,
+                op.high_bit.to_text(), op.low_bit.to_text()]))
         fields.push("plan")
         fields.push(self.plan.canonical_text())
         fields.push("child")

@@ -21,6 +21,13 @@ the RV32/RV64 product defaults expose their respective bus widths.
 2. Admit explicit 64-bit/8-byte LSU geometry, reject incompatible 64-bit/4-byte
    and 48-bit/6-byte geometry, and inspect the RV32 and RV64 product-default
    bus widths of 32 and 64 bits.
+3. Add an XLEN-wide unsigned-greater-or-equal operation whose result is a
+   one-bit signal and verify its typed `unsigned(lhs) >= unsigned(rhs)` VHDL.
+4. Reject an unsupported operation, an output-only operand used as readable
+   input, and a datapath signal with two drivers; rejected modules produce no
+   successful strict-VHDL result.
+5. Change a typed datapath constant and verify that the module structural hash,
+   emitted graph receipt, and VHDL provenance all track the change.
 
 ## Requirement traceability
 
@@ -35,6 +42,8 @@ the RV32/RV64 product defaults expose their respective bus widths.
   state/register widths and a named synchronous reset domain. This scenario
   constructs the two typed registers and their guarded bindings, but it does
   not simulate reset or stalled-payload behavior.
+- NFR-G2-001 — deterministic structural identity includes the complete typed
+  datapath; a changed constant cannot retain the prior graph receipt.
 
 ## Evidence boundary
 
