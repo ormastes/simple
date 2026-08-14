@@ -57,7 +57,9 @@ the canonical architecture, guide, expert knowledge, and plans.
 - PASS: the source-checkout runtime selector now rejects an incomplete staged
   Rust archive in favor of the complete core-C source capsule. The capsule
   passed 33 checks, linked the focused native specs without stub fallback, and
-  includes checked heap counters plus receiver-dispatched `rt_push`.
+  includes checked opt-in SPL memtrack compatibility counters plus
+  receiver-dispatched `rt_push`. Those counters do not cover core-C
+  RuntimeValue allocations and are not Stage-3 heap-domain evidence.
 - WARN: the replacement Stage 2 supports only `compile` and `native-build`, not
   the Stage-4 `test`/SPipe commands. The focused system executable linked and
   ran, but 3/4 scenarios failed. Its final bounded run proved nested aggregate

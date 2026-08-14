@@ -53,9 +53,11 @@ the static contract proved only that neither HIR loop nor `begin_module`
 reconstructs a lowerer or copies retained surface/trait owners.
 
 Cycle-4 review rejected a proposed synthetic populate/reset plateau oracle.
-Although `rt_heap_live_bytes` measures registered runtime-value header/inline
-bytes and `rt_heap_aux_live_bytes` measures collection backing buffers, both
-are process-global. Reads around an SSpec scenario cannot attribute changes to
+The Rust hosted `rt_heap_live_bytes` counter measures registered runtime-value
+header/inline bytes and `rt_heap_aux_live_bytes` measures collection backing
+buffers, but both are process-global. The core-C compatibility provider with
+the same first name reports only opt-in/manual SPL memtrack entries and does
+not cover `runtime_native.c` RuntimeValue allocations. Reads around an SSpec scenario cannot attribute changes to
 one `HirLowering`, exclude runner/matcher allocation, cover uninstrumented raw
 allocations, or establish the production `lower_module` lifecycle. Exact
 equality would therefore be a fragile diagnostic checkpoint, not an owner
@@ -196,8 +198,9 @@ the **same** run before any source fix is selected:
    post-lowering, post-diagnostics, and post-store.  Add deliberate-red tests
    for symlink parent/target, pre-existing target, partial record, sequence gap,
    and killed-writer retention before accepting its measurements.  The heap
-   counters then distinguish retained runtime-value heap from untracked/raw
-   RSS without depending on stderr delivery.
+   counters distinguish retained runtime-value heap from untracked/raw RSS only
+   when the selected provider is proven to cover RuntimeValue allocation and
+   registry lifecycle. The current core-C provider does not.
 3. Sample the compiler PID and its descendants from `/proc` at ten-second
    intervals, retaining `VmRSS`, `VmHWM`, `RssAnon`, `RssFile`, PID, PPID, and
    argv.  These samples establish process-tree hygiene and coarse RSS shape;
@@ -213,18 +216,21 @@ the **same** run before any source fix is selected:
    `_bootstrap_hir_module_classes`.  Do not stringify or copy HIR aggregates
    for diagnostics.
 5. No numeric per-module limit is selected by current requirements or retained
-   evidence.  Attribute the first boundary with a monotonic positive jump in
-   RSS or `rt_heap_live_bytes` that is not reclaimed at the next completed
+   evidence. Attribute the first boundary with a monotonic positive jump in
+   RSS; use `rt_heap_live_bytes` only with a provider whose RuntimeValue
+   coverage is proven and whose value is not reclaimed at the next completed
    module boundary, then confirm the same owner/phase shape in the exact
    reproducer before calling it retention.  If growth is reclaimed or moves to
    a different owner, the run has not identified the root.  Only after that
    confirmation add the adjacent multi-module retention regression and
    implement the narrow owner-side fix.
 
-This instrumentation makes one fresh build discriminating: a rising
-`heap_live_bytes` selects the runtime-value allocation/retention domain for
-investigation, not an owner or leak until reproducer confirmation; flat heap counters with
-rising `RssAnon` select raw/native allocation; a new descendant selects process
+This instrumentation makes one fresh build partially discriminating. On the
+Rust hosted provider a rising `heap_live_bytes` selects the runtime-value
+allocation/retention domain for investigation, not an owner or leak until
+reproducer confirmation. On current core-C it is only an opt-in/manual SPL
+memtrack total and cannot select or exclude that domain. Rising `RssAnon`
+remains coarse raw/native evidence; a new descendant selects process
 fan-out; and a bounded per-module sawtooth refutes unbounded retention.
 
 ## Durable snapshot implementation (2026-08-14)

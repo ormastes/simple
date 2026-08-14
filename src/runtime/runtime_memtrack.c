@@ -244,9 +244,10 @@ int64_t spl_memtrack_live_bytes(void) {
     return g_live_bytes;
 }
 
-/* Core-C provider parity for the durable compiler snapshot boundary. These
- * counters intentionally describe allocations admitted through memtrack; the
- * Rust hosted runtime provides the corresponding RuntimeValue heap counters. */
+/* ABI compatibility for callers that request the hosted heap-counter names.
+ * In core-C these are only opt-in/manual SPL memtrack totals. runtime_native.c
+ * RuntimeValue allocations use raw allocation paths and are not covered.
+ * These values must not classify production heap growth. */
 int64_t rt_heap_live_bytes(void) {
     return g_live_bytes;
 }
