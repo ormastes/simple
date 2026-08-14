@@ -9,3 +9,6 @@ SARD capability probe are present, but the missing admitted current-source
 Stage-4/full compiler prevents execution credit. UNO Q has identity-only
 Debian evidence, not a SimpleOS run. The executable SSpec and authored mirror
 keep every missing row explicitly red; neither runtime nor docgen was run.
+Once a full CLI exists, admit it with
+`scripts/check/admit-simpleos-arm64-server-compiler.shs`; Stage 2 and the Rust
+seed cannot substitute for that receipt.

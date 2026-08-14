@@ -1,0 +1,218 @@
+#!/bin/sh
+# Admit an undeployed, provenance-verified Stage4 CLI for the ARM64 server gate.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$ROOT"
+
+. scripts/check/lib/qemu-frozen-source-admission.shs
+BOOTSTRAP_STAGE3_FACADE_PATH="$ROOT/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$ROOT/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+
+SCHEMA=simpleos-arm64-current-source-compiler-admission-v1
+ROOTS='src/compiler|src/lib|src/os|examples/09_embedded/simple_os|scripts/check/check-simpleos-arm64-servers-qemu.shs|scripts/check/simpleos-arm64-server-cap-status.spl|scripts/os/build_arm64_servers_payload.shs|scripts/os/make_os_disk.shs|scripts/os/make_os_disk.c|config/simpleos_arm64_servers_weak_undefined_allowlist.sdn'
+compiler=
+provenance=
+output=build/test-artifacts/simpleos-arm64-server-compiler-admission/receipt.env
+work=
+tmp=
+published=0
+output_cleanup=
+essential_published=
+native_published=
+
+cleanup() {
+    [ -z "$tmp" ] || rm -f "$tmp"
+    if [ "$published" -eq 0 ]; then
+        [ -z "$output_cleanup" ] || rm -f "$output_cleanup"
+        [ -z "$essential_published" ] || rm -f "$essential_published"
+        [ -z "$native_published" ] || rm -f "$native_published"
+    fi
+    [ -z "$work" ] || rm -rf "$work"
+}
+trap cleanup EXIT HUP INT TERM
+fail() { printf 'simpleos-arm64-compiler-admission: FAIL: %s\n' "$*" >&2; exit 1; }
+hash() { qemu_admission_sha256 "$1"; }
+canon_file() { bootstrap_stage3_canonical_file "$1"; }
+field() {
+    awk -F= -v key="$1" '$1 == key { n++; v=substr($0,length(key)+2) } END { if (n == 1 && v != "") print v; else exit 1 }' "$2"
+}
+snapshot() {
+    qemu_admission_source_snapshot \
+        src/compiler src/lib src/os examples/09_embedded/simple_os \
+        scripts/check/check-simpleos-arm64-servers-qemu.shs \
+        scripts/check/simpleos-arm64-server-cap-status.spl \
+        scripts/os/build_arm64_servers_payload.shs \
+        scripts/os/make_os_disk.shs scripts/os/make_os_disk.c \
+        config/simpleos_arm64_servers_weak_undefined_allowlist.sdn
+}
+
+self_test() {
+    self_test_root="$ROOT/build/test-artifacts"
+    [ -d "$self_test_root" ] && [ ! -L "$self_test_root" ] || fail "self-test artifact root unavailable"
+    work=$(mktemp -d "$self_test_root/.simpleos-arm64-admission-self-test.XXXXXX") || exit 1
+    fake="$work/simple"
+    fake_provenance="$work/simple.provenance.env"
+    fake_receipt="$work/receipt.env"
+    printf '#!/bin/sh\nprintf "Simple synthetic fixture\\n"\n' >"$fake"
+    chmod 700 "$fake"
+    printf 'schema=synthetic-not-stage4\nstatus=pass\n' >"$fake_provenance"
+    if "$0" --compiler "$fake" --provenance "$fake_provenance" --output "$fake_receipt" >/dev/null 2>&1; then
+        fail "synthetic malformed provenance was admitted"
+    fi
+    [ ! -e "$fake_receipt" ] || fail "failed admission published a receipt"
+    [ -z "$(find "$work" -name 'receipt.env.tmp.*' -print -quit)" ] || fail "failed admission left a staged receipt"
+    mkdir "$work/real-parent"
+    ln -s "$work/real-parent" "$work/link-parent"
+    if "$0" --compiler "$fake" --provenance "$fake_provenance" \
+        --output "$work/link-parent/receipt.env" >/dev/null 2>&1; then
+        fail "symlink output parent was accepted"
+    fi
+    [ ! -e "$work/real-parent/receipt.env" ] || fail "symlink-parent refusal mutated its target"
+    escaped_dir="$ROOT/build/.simpleos-arm64-admission-escape.$$"
+    if "$0" --compiler "$fake" --provenance "$fake_provenance" \
+        --output "$ROOT/build/test-artifacts/../$(basename -- "$escaped_dir")/receipt.env" \
+        >/dev/null 2>&1; then
+        fail "absolute parent traversal was accepted"
+    fi
+    [ ! -e "$escaped_dir" ] || fail "absolute traversal created an escaped directory"
+    echo "PASS simpleos ARM64 compiler admission self-test (negative-only)"
+}
+
+if [ "${1:-}" = --self-test ]; then
+    [ "$#" -eq 1 ] || fail "--self-test accepts no other arguments"
+    self_test
+    exit 0
+fi
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --compiler) [ "$#" -ge 2 ] || fail "missing --compiler value"; compiler=$2; shift 2 ;;
+        --provenance) [ "$#" -ge 2 ] || fail "missing --provenance value"; provenance=$2; shift 2 ;;
+        --output) [ "$#" -ge 2 ] || fail "missing --output value"; output=$2; shift 2 ;;
+        *) fail "unknown argument: $1" ;;
+    esac
+done
+[ -n "$compiler" ] && [ -n "$provenance" ] || fail "--compiler and --provenance are required"
+compiler=$(canon_file "$compiler") || fail "compiler must be an existing canonical file"
+provenance=$(canon_file "$provenance") || fail "provenance must be an existing canonical file"
+[ -x "$compiler" ] && [ ! -L "$compiler" ] || fail "compiler must be executable and not a symlink"
+[ "$provenance" = "${compiler}.provenance.env" ] || fail "provenance is not the compiler sibling"
+
+case "/$output/" in
+    */../*) fail "output may not contain parent traversal" ;;
+esac
+case "$output" in
+    /*) raw_output=$output ;;
+    *) raw_output="$ROOT/$output" ;;
+esac
+base="$ROOT/build/test-artifacts"
+[ -d "$base" ] && [ ! -L "$base" ] || fail "canonical build/test-artifacts root is required"
+case "$raw_output" in "$base"/*) ;; *) fail "output must stay under canonical build/test-artifacts" ;; esac
+output_parent=$(dirname -- "$raw_output")
+probe=$output_parent
+while [ "$probe" != "$base" ]; do
+    [ ! -L "$probe" ] || fail "output parent contains a symlink"
+    probe=$(dirname -- "$probe")
+done
+[ ! -e "$raw_output" ] || fail "refusing to overwrite an existing receipt"
+mkdir -p "$output_parent"
+output_parent=$(CDPATH= cd -- "$output_parent" && pwd -P) || fail "output parent canonicalization failed"
+case "$output_parent" in "$base"|"$base"/*) ;; *) fail "canonical output parent escapes build/test-artifacts" ;; esac
+output="$output_parent/$(basename -- "$raw_output")"
+output_cleanup=$output
+chmod 700 "$output_parent"
+stage4_verify_candidate_provenance "$provenance" "$compiler" "$ROOT" || fail "canonical Stage4 provenance rejected"
+
+work=$(mktemp -d "$(dirname -- "$output")/.compiler-admission.XXXXXX") || fail "temporary directory creation failed"
+chmod 700 "$work"
+essential_log="$work/essential-tools.log"
+native_log="$work/arm-target-native-smoke.log"
+
+head_before=$(git rev-parse --verify HEAD) || fail "HEAD unavailable"
+snapshot || fail "source snapshot failed"
+manifest_before=$QEMU_ADMISSION_SOURCE_FINGERPRINT
+manifest_files=$QEMU_ADMISSION_SOURCE_FILE_COUNT
+compiler_sha=$(hash "$compiler") || fail "compiler hash failed"
+provenance_sha=$(hash "$provenance") || fail "provenance hash failed"
+version=$("$compiler" --version 2>/dev/null) || fail "compiler version failed"
+[ -n "$version" ] && [ "$(printf '%s' "$version" | wc -l)" -eq 0 ] || fail "compiler version must be one line"
+
+env -u SIMPLE_BOOTSTRAP SIMPLE_BINARY="$compiler" \
+    sh scripts/check/check-bootstrap-essential-tools-smoke.shs "$compiler" \
+    >"$essential_log" 2>&1 || fail "essential-tools smoke failed"
+grep -Fqx 'bootstrap_essential_tools_smoke=true' "$essential_log" || fail "essential-tools pass marker absent"
+
+env -u SIMPLE_BOOTSTRAP SIMPLE_BUILD_COMPILER="$compiler" \
+    SIMPLE_NATIVE_BACKEND=cranelift SIMPLE_NO_STUB_FALLBACK=1 \
+    sh scripts/os/build_arm64_servers_payload.shs >"$native_log" 2>&1 \
+    || fail "strict ARM64 SimpleOS target payload smoke failed"
+arm_payload="$ROOT/build/os/arm64_servers/servers.elf"
+[ -s "$arm_payload" ] || fail "ARM target smoke produced no payload"
+readelf -h "$arm_payload" | grep -Eq 'Machine:[[:space:]]+AArch64' \
+    || fail "ARM target smoke output is not AArch64"
+grep -Fqx 'target=aarch64-unknown-simpleos' "$native_log" \
+    || fail "ARM target smoke target marker absent"
+! grep -Eiq 'fabricated stub|stub fallback' "$native_log" || fail "ARM target smoke reported a fabricated stub"
+arm_payload_sha=$(hash "$arm_payload") || fail "ARM target payload hash failed"
+
+[ "$(git rev-parse --verify HEAD)" = "$head_before" ] || fail "HEAD changed during admission"
+snapshot || fail "post-smoke source snapshot failed"
+[ "$QEMU_ADMISSION_SOURCE_FINGERPRINT" = "$manifest_before" ] || fail "source manifest changed during admission"
+[ "$(hash "$compiler")" = "$compiler_sha" ] || fail "compiler changed during admission"
+[ "$(hash "$provenance")" = "$provenance_sha" ] || fail "provenance changed during admission"
+[ "$("$compiler" --version 2>/dev/null)" = "$version" ] || fail "compiler version changed during admission"
+
+essential_sha=$(hash "$essential_log")
+native_sha=$(hash "$native_log")
+build_log=$(canon_file "$(field build_log_path "$provenance")") || fail "Stage4 build log missing"
+stage4_smoke_log=$(canon_file "$(field essential_tools_log_path "$provenance")") || fail "Stage4 smoke log missing"
+essential_published="${output}.essential-tools.log"
+native_published="${output}.arm-target-native-smoke.log"
+essential_stage="${essential_published}.tmp.$$"
+native_stage="${native_published}.tmp.$$"
+cp "$essential_log" "$essential_stage"
+cp "$native_log" "$native_stage"
+chmod 600 "$essential_stage" "$native_stage"
+mv "$essential_stage" "$essential_published"
+mv "$native_stage" "$native_published"
+tmp="${output}.tmp.$$"
+umask 077
+{
+    echo "schema=$SCHEMA"
+    echo "status=pass"
+    echo "compiler_path=$compiler"
+    echo "compiler_version=$version"
+    echo "compiler_sha256=$compiler_sha"
+    echo "compiler_provenance_path=$provenance"
+    echo "compiler_provenance_sha256=$provenance_sha"
+    echo "stage4_build_log_sha256=$(hash "$build_log")"
+    echo "stage4_provenance_smoke_log_sha256=$(hash "$stage4_smoke_log")"
+    echo "essential_tools_log_path=$essential_published"
+    echo "essential_tools_log_sha256=$essential_sha"
+    echo "native_smoke_log_path=$native_published"
+    echo "native_smoke_log_sha256=$native_sha"
+    echo "native_smoke_target=aarch64-unknown-simpleos"
+    echo "native_smoke_output_path=$arm_payload"
+    echo "native_smoke_output_sha256=$arm_payload_sha"
+    echo "native_smoke_status=pass"
+    echo "stub_fallback=forbidden"
+    echo "fabricated_stub_status=none"
+    echo "source_revision=$head_before"
+    echo "source_manifest_roots=$ROOTS"
+    echo "source_manifest_sha256=$manifest_before"
+    echo "source_manifest_file_count=$manifest_files"
+} >"$tmp" || fail "receipt staging failed"
+chmod 600 "$tmp"
+[ "$(git rev-parse --verify HEAD)" = "$head_before" ] || { rm -f "$output"; fail "HEAD changed before publication"; }
+snapshot || { rm -f "$output"; fail "final source snapshot failed"; }
+[ "$QEMU_ADMISSION_SOURCE_FINGERPRINT" = "$manifest_before" ] || { rm -f "$output"; fail "source changed before publication"; }
+[ "$(hash "$compiler")" = "$compiler_sha" ] || { rm -f "$output"; fail "compiler changed before publication"; }
+[ "$(hash "$provenance")" = "$provenance_sha" ] || { rm -f "$output"; fail "provenance changed before publication"; }
+[ "$(stat -c %a "$tmp" 2>/dev/null || stat -f %Lp "$tmp")" = 600 ] || fail "staged receipt mode is not 0600"
+mv "$tmp" "$output"
+tmp=
+published=1
+printf 'simpleos-arm64-compiler-admission: PASS: %s\n' "$output"

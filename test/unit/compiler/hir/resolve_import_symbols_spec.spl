@@ -688,6 +688,56 @@ describe "resolve_import_symbols 2-pass import resolver":
                     case _:
                         assert_true(false)
 
+    it "binds a relative mod namespace before lowering its qualified member":
+        # Reproduces the native-build failures from file_system/*.spl: `mod`
+        # is a module-only import, and an absent namespace must not pass
+        # through the staged Option<SymbolId> lookup guard as if present.
+        val log = make_logger()
+        val provider_source = "pub fn exists(path: text) -> bool:\n    path != \"\""
+        val consumer_source = "mod file_system.file_ops\nfn probe(path: text) -> bool:\n    file_ops.exists(path)"
+        val provider = parse_full_frontend(
+            provider_source, "pkg.file_system.file_ops",
+            "pkg/file_system/file_ops.spl", log)
+        val consumer = parse_full_frontend(
+            consumer_source, "pkg.file_system.metadata",
+            "pkg/file_system/metadata.spl", log)
+
+        var modules: Dict<text, Module> = {}
+        modules["pkg.file_system.file_ops"] = provider
+        val sources = [SourceFile(
+            path: "pkg/file_system/file_ops.spl", content: provider_source,
+            module_name: "pkg.file_system.file_ops")]
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+        var lowering = hirlowering_for_module("pkg.file_system.metadata", surfaces)
+        val hir = lowering.lower_module(consumer)
+
+        expect(lowering.errors.len()).to_equal(0)
+        val namespace = hir.symbols.lookup_or_invalid("file_ops")
+        expect(namespace.is_valid()).to_equal(true)
+        if val namespace_symbol = hir.symbols.get_symbol_raw(namespace.id):
+            expect(namespace_symbol.defining_module.unwrap()).to_equal("pkg.file_system.file_ops")
+        else:
+            assert_true(false)
+
+        var probe_found = false
+        for fn_ in hir.functions.values():
+            if fn_.name == "probe":
+                probe_found = true
+                expect(fn_.body.has).to_equal(true)
+                match fn_.body.value.kind:
+                    case HirExprKind.Call(callee, _, _):
+                        match callee.kind:
+                            case HirExprKind.NamedVar(symbol, _):
+                                if val callable = hir.symbols.get_symbol_raw(symbol.id):
+                                    expect(callable.defining_module.unwrap()).to_equal("pkg.file_system.file_ops")
+                                else:
+                                    assert_true(false)
+                            case _:
+                                assert_true(false)
+                    case _:
+                        assert_true(false)
+        expect(probe_found).to_equal(true)
+
     it "keeps private named imports out of directory siblings while sharing declarations":
         val log = make_logger()
         val hidden_source = "struct NestedPayload:\n    value: i64\nenum PrivateEvent:\n    Wrapped(NestedPayload)\nenum PublicSignal:\n    Ready\nstruct UserGlobVisible:\n    value: i64"

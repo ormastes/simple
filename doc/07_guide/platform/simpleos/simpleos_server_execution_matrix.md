@@ -16,7 +16,14 @@ the physical SimpleOS runtime/provider nor a filesystem server executable.
 
 ## Required operator flow
 
-1. Build from current source and retain the source revision and executable hash.
+1. Produce an undeployed current-source Stage-4/full CLI with canonical sibling
+   provenance. Admit it with
+   `sh scripts/check/admit-simpleos-arm64-server-compiler.shs --compiler <path> --provenance <path>.provenance.env --output build/test-artifacts/simpleos-arm64-server-compiler-admission/receipt.env`.
+   This reruns essential-tool checks, builds the real ARM payload with the
+   target sysroot/runtime/linker and no-stub policy, and binds the exact dirty
+   source manifest. A missing compiler/provenance is a blocker, not permission
+   to use Stage 2 or the Rust seed.
+2. Build from current source and retain the source revision and executable hash.
    Record the credential-bearing image SHA-256 for provenance; the hash may be
    retained, but the image itself is never public/distributable evidence.
    Supply `SIMPLEOS_SERVER_DB_CREDENTIAL_FILE` as a non-empty file of at most
@@ -25,15 +32,15 @@ the physical SimpleOS runtime/provider nor a filesystem server executable.
    Keep the generated image ephemeral and access-restricted, then securely
    destroy it after the same-image reboot probe. Exclude it from caches,
    uploads, release artifacts, and evidence bundles.
-2. Boot the target through its canonical firmware/image path.
-3. List and resolve the server executable from the target filesystem.
-4. Probe HTTP health and a filesystem document from the host.
-5. Write/read a DB value, stop the target, restart against the same media, and
+3. Boot the target through its canonical firmware/image path.
+4. List and resolve the server executable from the target filesystem.
+5. Probe HTTP health and a filesystem document from the host.
+6. Write/read a DB value, stop the target, restart against the same media, and
    read the committed value again.
-6. On UNO Q, run once with GPU unselected, then separately require the physical
+7. On UNO Q, run once with GPU unselected, then separately require the physical
    Adreno/Vulkan device, submit, completion/fence and device-origin readback
    while an HTTP probe proves the parent server remains live.
-7. Emit `SimpleOsServerExecutionReceiptV1` and retain raw transcripts, with
+8. Emit `SimpleOsServerExecutionReceiptV1` and retain raw transcripts, with
    database credential bytes excluded/redacted from receipts, logs, and protocol
    evidence.
 

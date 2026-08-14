@@ -354,6 +354,15 @@ artifact audit found neither. UNO Q remains blocked on vendor-authoritative
 signed boot/download/recovery inputs and an admitted SimpleOS QRB2210 runtime;
 Debian CPU/Vulkan enumeration receives no acceptance credit.
 
+The missing admission workflow is now implemented at
+`scripts/check/admit-simpleos-arm64-server-compiler.shs` and passed final
+highest-capability source review. It requires a real undeployed Stage-4/full
+CLI, canonical sibling provenance, essential-tool PASS, and a real no-stub
+ARM payload build before atomically publishing the exact consumer receipt.
+Retained-artifact and origin audits still find no eligible Stage-4 candidate;
+the prior bootstrap lane exhausted three failed build cycles. QEMU therefore
+remains unrun and all runtime rows stay open.
+
 ## Wave 3 (2026-07-27) — board bring-up + convergence, all lanes landed
 
 ### BOARD: SimpleOS boots on Arduino UNO Q — **PASS** (first board boot of this stack)

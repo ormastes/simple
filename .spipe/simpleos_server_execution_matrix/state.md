@@ -227,3 +227,11 @@ implementation-active
   signed SimpleOS bundle, partition/download and rollback manifest, recovery
   procedure, rootfs/runtime, or evidence provider. CPU and GPU acceptance rows
   remain open; the board was not mutated.
+- dev: Added and highest-capability-reviewed the fail-closed Stage-4 compiler
+  admission producer `scripts/check/admit-simpleos-arm64-server-compiler.shs`.
+  It verifies canonical provenance and essential tools, builds and hashes the
+  real ARM payload with target sysroot/runtime/linker/no-stub policy, binds the
+  exact dirty-inclusive QEMU manifest, rejects traversal/symlink outputs, and
+  publishes a mode-0600 receipt only as the final atomic action. Negative-only
+  self-tests cannot fabricate admission. No Stage-4 compiler exists yet, so no
+  receipt or QEMU evidence was produced.
