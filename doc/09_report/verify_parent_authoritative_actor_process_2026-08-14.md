@@ -37,3 +37,18 @@ The blocker is the existing deployed-runtime failure tracked in
 No Rust-seed fallback was used.
 
 STATUS: WARN
+
+## Synced regression recheck
+
+After rebasing onto `origin/main` at `7ac900316dd5266595d8e2d713493ed174f0c8e4`,
+the related native contract tests remained green:
+
+- runtime transfer codec: 7 passed, 0 failed;
+- actor inline-wire/heap rejection: 1 passed, 0 failed;
+- bounded native channels: 11 passed, 0 failed;
+- common actor-handle backpressure: 1 passed, 0 failed.
+
+The repo-managed `bin/release/simple` still rejects both `--version` and
+`test --help` because its deployed runtime fails the bounded test ABI probe.
+No Simple SSpec was counted as executed, no seed result was substituted, and
+`STATUS: WARN` therefore remains unchanged.
