@@ -135,7 +135,7 @@ fn cli_native_build_option_error(args: [text]) -> text:
         if arg == "--help" or arg == "-h" or arg == "--list-optimizations":
             i = i + 1
             continue
-        if arg == "--entry-closure" or arg == "--low-memory" or arg == "--verbose" or arg == "-v" or arg == "--strip" or arg == "--emit-smf" or arg == "--emit-object" or arg == "--emit-archive" or arg == "--release" or arg == "--release-optimized" or arg == "--no-borrow-check" or arg == "--no-mangle" or arg == "--no-incremental" or arg == "--clean" or arg == "--fail-fast":
+        if arg == "--entry-closure" or arg == "--low-memory" or arg == "--verbose" or arg == "-v" or arg == "--strip" or arg == "--emit-smf" or arg == "--emit-object" or arg == "--emit-archive" or arg == "--emit-shared" or arg == "--release" or arg == "--release-optimized" or arg == "--no-borrow-check" or arg == "--no-mangle" or arg == "--no-incremental" or arg == "--clean" or arg == "--fail-fast":
             i = i + 1
             continue
         if arg == "--log":
@@ -718,6 +718,7 @@ fn cli_native_build(args: [text]) -> i64:
             print "  --strip              Strip symbols from output"
             print "  --emit-object        Emit relocatable object output instead of linking executable"
             print "  --emit-archive       Emit a static archive instead of linking executable"
+            print "  --emit-shared        Emit a native shared library with no entry shim"
             print "  --no-mangle          Preserve declared function symbol names"
             print "  --runtime-bundle <mode> Runtime lane: auto, simple-core, core-c-bootstrap"
             print "  --cpu <policy>       CPU policy: default, native, or x86-64-v1..v4"
@@ -807,6 +808,7 @@ fn cli_native_build(args: [text]) -> i64:
         var emit_smf = false
         var emit_object = false
         var emit_archive = false
+        var emit_shared = false
         var source_dirs: [text] = []
         var entry_closure = false
         var release = true
@@ -879,6 +881,8 @@ fn cli_native_build(args: [text]) -> i64:
                 emit_object = true
             elif a == "--emit-archive":
                 emit_archive = true
+            elif a == "--emit-shared":
+                emit_shared = true
             elif a == "--threads" or a == "--jobs" or a == "-j":
                 if j + 1 >= args.len():
                     _cli_eprint("Error: {a} requires a positive integer")
@@ -1041,8 +1045,10 @@ fn cli_native_build(args: [text]) -> i64:
             _cli_eprint("Error: invalid --mode '{build_mode}' (expected dynload or one-binary)")
             return 1
 
-        if emit_object and emit_archive:
-            _cli_eprint("Error: --emit-object and --emit-archive are mutually exclusive")
+        val emit_mode_count = (if emit_object: 1 else: 0) +
+            (if emit_archive: 1 else: 0) + (if emit_shared: 1 else: 0)
+        if emit_mode_count > 1:
+            _cli_eprint("Error: --emit-object, --emit-archive, and --emit-shared are mutually exclusive")
             return 1
 
         if entry_point == "":
@@ -1107,7 +1113,7 @@ fn cli_native_build(args: [text]) -> i64:
             env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
             _cli_eprint("Error: could not create native-build cache directory {cache_dir}")
             return 1
-        val native_output_mode = if emit_archive: "archive" elif emit_object: "1" else: ""
+        val native_output_mode = if emit_shared: "shared" elif emit_archive: "archive" elif emit_object: "1" else: ""
         env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", native_output_mode)
         env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", if no_mangle: "1" else: "")
         if not env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", cache_dir):
@@ -1141,7 +1147,7 @@ fn cli_native_build(args: [text]) -> i64:
             env_set("SIMPLE_NATIVE_CPU", native_cpu)
         # Keep the pre-closure flag clear. The driver must register logical
         # aliases for the physical closure inputs before it marks the walk done.
-        val effective_entry_closure = entry_closure or emit_object or emit_archive
+        val effective_entry_closure = entry_closure or emit_object or emit_archive or emit_shared
         env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
         if runtime_bundle_explicit:
             env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", runtime_bundle)
@@ -1209,7 +1215,7 @@ fn cli_native_build(args: [text]) -> i64:
             options.mode = CompileMode.Aot
             options.cli_mode_text = "aot"
             options.output_file = Some(staged_output)
-            if build_mode == "dynload" and not emit_object and not emit_archive:
+            if build_mode == "dynload" and not emit_object and not emit_archive and not emit_shared:
                 options.output_format = driver_output_format_both()
             else:
                 options.output_format = driver_output_format_native()
@@ -1280,7 +1286,7 @@ fn cli_native_build(args: [text]) -> i64:
                     _cli_eprint("error: native-build produced staging output but could not publish it: {output}")
                     return 1
                 val metadata_path = launch_metadata_sidecar_path(output)
-                val non_launchable_output = emit_object or emit_archive
+                val non_launchable_output = emit_object or emit_archive or emit_shared
                 var metadata_ok = true
                 if non_launchable_output:
                     if _cli_file_exists_impl(metadata_path):
