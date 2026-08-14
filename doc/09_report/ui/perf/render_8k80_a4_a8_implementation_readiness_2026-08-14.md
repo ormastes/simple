@@ -64,3 +64,30 @@ admitted separately by the strict A5 semantic producer with selected backend
 and p95 at most 12.5 ms. The bounded contract rejects over-budget A4 and A5
 receipts. Live performance remains blocked on the admitted Stage4 compiler;
 the deployed runtime failed its bounded ABI probe before loading the new SSpec.
+
+## 2026-08-14 live go attempt
+
+The prepared campaign command was invoked with the only repository launcher,
+the expected provenance path, `ubuntu:24.04`, and GPU 0. It exited 2 with
+`reason=compiler-not-self-hosted-release`: `bin/release/simple` is a wrapper
+whose deployed runtime fails its bounded ABI probe, and no admitted Stage4
+provenance receipt exists. The container runtime did successfully expose the
+RTX A6000 through `nvidia-smi`; host `vulkaninfo` enumerated the RTX A6000 and
+TITAN RTX through NVIDIA driver 580.126.16. The stock Ubuntu image lacks
+`vulkaninfo`, so it is not the prepared live campaign image described above.
+
+A separate diagnostic—not A4/A5 acceptance—ran the production-independent
+full-frame Vulkan buffer-fill checker on the physical RTX A6000:
+
+```sh
+VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json \
+BUILD_DIR=build/render_perf/supplemental-vulkan-8k-fill \
+  sh scripts/check/check-vulkan-8k-buffer-fill.shs
+```
+
+At 7680x4320 over 31 iterations it produced p50 `42,859,719 ns`, p95
+`43,116,812 ns`, zero mismatches, zero timed readback bytes, a nonzero exact
+readback checksum, and `submit_fence_within_80fps_budget=false`. This proves
+real Vulkan device execution and shows that naïve full-frame fill misses 80 Hz;
+it does not exercise A4 sparse damage, A5 Web semantics, presentation, or
+physical scanout and therefore cannot promote or reject those acceptance rows.
