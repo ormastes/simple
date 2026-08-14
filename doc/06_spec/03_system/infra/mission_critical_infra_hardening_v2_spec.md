@@ -2,7 +2,7 @@
 
 **Evidence class:** executable pure-policy validation plus explicit release blockers
 **Executable source:** `test/03_system/infra/mission_critical_infra_hardening_v2_spec.spl`
-**Executable source SHA-256:** `1123d47c505873e0206f2b9b9131f4b494bf8c9ee959c3480c4bd523e9e265b1`
+**Executable source SHA-256:** `6cee37138f9becde3947ce7c0fb42b43fd9f963a0e0ce477c1be132bfeba3bfc`
 **Generation status:** hand-maintained mirror; current-head SPipe doc generation is blocked by the Stage 3 self-host exit-139 tracked in `doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md` and was not run.
 
 ## Claim boundary
@@ -13,6 +13,12 @@ state. Current-head execution is BLOCKED by the Stage 3 compiler failure. An
 `evidence-contract` row records only narrower contract coverage; it does **not**
 claim that live external tooling, a real guest or graphics device, RenderDoc,
 or a 24-hour stress campaign ran.
+
+The source now contains 18 executable examples. The deterministic integration
+owners use separate happy-path, capacity-edge, and rejection scenarios for the
+SimpleOS manifest, Draw IR generations, sealed allocation, bounded process
+policy, and fail-closed evidence aggregation. External production rows remain
+blocked and are not converted into synthetic passing examples.
 
 ## Operator flow
 

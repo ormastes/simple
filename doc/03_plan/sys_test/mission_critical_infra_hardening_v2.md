@@ -60,9 +60,12 @@ rows passed.
 
 Contract implementation is not release evidence. REQ-MCI-001..011 and
 NFR-MCI-001..009 remain BLOCKED unless their row has a fresh, signed, exact-run
-producer receipt and executable scenario evidence. The current three broad
-SSpec examples are umbrella contract checks; they do not prove all 20 planned
-requirement/NFR scenarios individually.
+producer receipt and executable scenario evidence. The current 18 SSpec
+examples include separate happy-path, capacity-edge, and rejection scenarios
+for the deterministic SimpleOS manifest, Draw IR generation, sealed allocation,
+bounded-process, and fail-closed aggregate owners. They remain policy/contract
+evidence and do not prove external production rows or all 20 release
+requirements/NFRs individually.
 
 Known release blockers outside this isolated implementation lane remain
 fail-closed: independently signed peer compiler evidence, live trust-key
@@ -218,8 +221,9 @@ NFR-MCI-009.
 2. Produce and admit an exact-current Stage 4 full CLI; run the essential-tools
    smoke gate against that exact binary.
 3. Run each focused compiler/rendering/allocation/SimpleOS/aggregate spec once.
-4. Expand the SSpec from three umbrella examples to executable ownership for
-   all planned scenario IDs, then run docgen once and review the manual.
+4. The deterministic SSpec expansion is implemented (18 executable examples);
+   after Stage 4 admission, run it and docgen once and review the manual. Add
+   production scenarios only as their external owners become admissible.
 5. Run live producer rows, external-host rows, the independent reviewer, and
    finally the release aggregate. Only `release_blockers=none` permits PASS.
 

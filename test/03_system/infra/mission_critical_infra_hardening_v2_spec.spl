@@ -4,8 +4,9 @@
 # identity-bound lease/reservation/capture/reap negatives are owned by the focused unit spec;
 # canonical process-facade syscall integration remains BLOCKED)
 # @tag: system, infra, mission_critical, fail_closed
-# Scenario IDs below are traceability classifications, not executable `it`
-# declarations.  `evidence-contract` means the linked focused contract executes;
+# Scenario IDs below classify the release evidence behind the executable policy
+# scenarios; they are not claims that external production evidence exists.
+# `evidence-contract` means the linked focused contract executes;
 # `blocked` means the frozen system scenario has no admissible owning receipt.
 # @scenario MCI-AGG-001 class=evidence-contract owner=test/01_unit/scripts/mci_v2_aggregate_contract_test.shs reason=collector-contract-only resume=run-release-gate-after-all-receipts
 # @scenario MCI-AGG-002 class=evidence-contract owner=test/01_unit/scripts/mci_v2_aggregate_contract_test.shs reason=collector-contract-only resume=run-release-gate-after-all-receipts
@@ -155,6 +156,192 @@ fn mci_relaxed_profile() -> RelaxedAllocationProfileV1:
     )
 
 describe "mission-critical infrastructure hardening V2":
+    describe "REQ-MCI-003 and REQ-MCI-004: certified SimpleOS evidence":
+        it "should admit a selected certified guest subset":
+            step("Validate selected guests against the canonical 24-cell catalog")
+            val result = certified_simpleos_manifest_validate(mci_subset_manifest())
+            expect(result.status).to_equal("pass")
+            expect(result.selected_cell_count).to_equal(2u32)
+            expect(result.visible_cell_count).to_equal(24u32)
+
+        it "should retain unselected platform rows without an umbrella claim":
+            step("Inspect the bounded subset result")
+            val result = certified_simpleos_manifest_validate(mci_subset_manifest())
+            expect(result.umbrella_all_platforms).to_be(false)
+            expect(result.visible_cell_count).to_equal(24u32)
+
+        it "should reject a guest receipt with mismatched host identity":
+            step("Corrupt one selected guest receipt and recompute its manifest hash")
+            var manifest = mci_subset_manifest()
+            var row = manifest.cells[0]
+            var boot = row.boot
+            boot.host_identity = "host-windows"
+            row.boot = boot
+            manifest.cells[0] = row
+            manifest.manifest_hash = certified_simpleos_manifest_hash_v1(manifest)
+            expect(certified_simpleos_manifest_validate(manifest).reason).to_equal("receipt-correlation-mismatch:linux:x86_32")
+
+    describe "REQ-MCI-005 and NFR-MCI-006: bounded Draw IR generations":
+        it "should admit an exactly sized packed generation":
+            step("Plan and admit an exact-capacity Draw IR generation")
+            val counts = draw_ir_generation_count_v3(2u32, 1u32, 1u32, 1u32, 1u32, 2u32)
+            val outcome = draw_ir_generation_plan_v3(41u64, 1u64, counts, 8u64, 64u64, 8u64)
+            var arena = DrawIrGenerationArenaV3.bounded(41u64, 64u64, 8u64)
+            match outcome:
+                DrawIrPlanOutcomeV3.Planned(plan):
+                    match arena.admit(plan):
+                        DrawIrAdmissionOutcomeV3.Admitted(admitted):
+                            expect(admitted.total_bytes).to_equal(64u64)
+                            expect(admitted.generation).to_equal(1u64)
+                        DrawIrAdmissionOutcomeV3.Refused(receipt):
+                            expect(receipt.reason).to_equal(0u16)
+                DrawIrPlanOutcomeV3.Refused(receipt):
+                    expect(receipt.reason).to_equal(0u16)
+
+        it "should seal and retire a published generation":
+            step("Publish only the exact admitted byte and row counts")
+            val counts = draw_ir_generation_count_v3(2u32, 1u32, 1u32, 1u32, 1u32, 2u32)
+            val outcome = draw_ir_generation_plan_v3(42u64, 1u64, counts, 8u64, 64u64, 8u64)
+            var arena = DrawIrGenerationArenaV3.bounded(42u64, 64u64, 8u64)
+            match outcome:
+                DrawIrPlanOutcomeV3.Planned(plan):
+                    match arena.admit(plan):
+                        DrawIrAdmissionOutcomeV3.Admitted(admitted):
+                            expect(admitted.arena_id).to_equal(42u64)
+                        DrawIrAdmissionOutcomeV3.Refused(receipt):
+                            expect(receipt.reason).to_equal(0u16)
+                DrawIrPlanOutcomeV3.Refused(receipt):
+                    expect(receipt.reason).to_equal(0u16)
+            expect(arena.seal(64u64, 8u64)).to_be_nil()
+            expect(arena.retire()).to_be(true)
+
+        it "should refuse row overflow before admission":
+            step("Plan one row beyond the fixed generation capacity")
+            val outcome = draw_ir_generation_plan_v3(
+                43u64, 1u64,
+                draw_ir_generation_count_v3(9u32, 0u32, 0u32, 0u32, 0u32, 0u32),
+                8u64, 64u64, 8u64)
+            match outcome:
+                DrawIrPlanOutcomeV3.Refused(receipt):
+                    expect(receipt.reason).to_equal(DRAW_IR_OVERFLOW_COUNT)
+                DrawIrPlanOutcomeV3.Planned(plan):
+                    expect(plan.total_rows).to_equal(8u64)
+
+    describe "REQ-MCI-007 and REQ-MCI-008: sealed domain allocation":
+        it "should allocate exactly the sealed domain quota":
+            step("Allocate the complete normal-context quota")
+            var arena = DomainArenaV1.from_sealed_profile(51u64, mci_relaxed_profile())
+            match arena.try_allocate(64u64, ARENA_CONTEXT_NORMAL):
+                DomainArenaAllocationV1.Allocated(reference):
+                    expect(reference.size_bytes).to_equal(64u64)
+                    expect(arena.high_water_bytes).to_equal(64u64)
+                DomainArenaAllocationV1.Exhausted(receipt):
+                    expect(receipt.reason).to_equal(0u16)
+
+        it "should return typed exhaustion without advancing publication":
+            step("Exhaust a sealed arena by one byte")
+            var arena = DomainArenaV1.from_sealed_profile(52u64, mci_relaxed_profile())
+            val checkpoint = arena.checkpoint()
+            val admitted = arena.try_allocate(64u64, ARENA_CONTEXT_NORMAL)
+            match admitted:
+                DomainArenaAllocationV1.Allocated(reference):
+                    expect(reference.size_bytes).to_equal(64u64)
+                DomainArenaAllocationV1.Exhausted(receipt):
+                    expect(receipt.reason).to_equal(0u16)
+            match arena.try_allocate(1u64, ARENA_CONTEXT_NORMAL):
+                DomainArenaAllocationV1.Exhausted(receipt):
+                    expect(receipt.reason).to_equal(ARENA_EXHAUSTION_QUOTA)
+                DomainArenaAllocationV1.Allocated(reference):
+                    expect(reference.size_bytes).to_equal(0u64)
+            expect(arena.rollback(checkpoint)).to_be(true)
+            expect(arena.cursor_bytes).to_equal(0u64)
+
+        it "should reject allocation in an ISR context":
+            step("Request memory from a forbidden critical context")
+            var arena = DomainArenaV1.from_sealed_profile(53u64, mci_relaxed_profile())
+            match arena.try_allocate(8u64, ARENA_CONTEXT_ISR):
+                DomainArenaAllocationV1.Exhausted(receipt):
+                    expect(receipt.reason).to_equal(ARENA_EXHAUSTION_FORBIDDEN_CONTEXT)
+                DomainArenaAllocationV1.Allocated(reference):
+                    expect(reference.size_bytes).to_equal(0u64)
+            expect(arena.cursor_bytes).to_equal(0u64)
+
+    describe "REQ-MCI-009 and NFR-MCI-003: bounded process policy":
+        it "should admit exact bounded capture and available work":
+            step("Admit requests at their declared bounds")
+            val capture = admit_bounded_capture(BoundedProcessCaptureV1(
+                max_stdout_bytes: 16, max_stderr_bytes: 8,
+                stdout_bytes: 16, stderr_bytes: 8))
+            val work = admit_bounded_work(BoundedWorkPoolV1(
+                max_workers: 2, max_pending: 1,
+                active_workers: 1, pending_work: 1))
+            expect(capture.accepted).to_be(true)
+            expect(work.accepted).to_be(true)
+
+        it "should reject saturated work and overflowing output":
+            step("Exceed queue and capture capacity independently")
+            val work = admit_bounded_work(BoundedWorkPoolV1(
+                max_workers: 2, max_pending: 1,
+                active_workers: 2, pending_work: 1))
+            val capture = admit_bounded_capture(BoundedProcessCaptureV1(
+                max_stdout_bytes: 16, max_stderr_bytes: 8,
+                stdout_bytes: 17, stderr_bytes: 8))
+            expect(work.accepted).to_be(false)
+            expect(capture.accepted).to_be(false)
+
+        it "should reject nonpositive process identities":
+            step("Validate kill and wait identities before syscall ownership")
+            expect(validate_process_signal_pid(-1).accepted).to_be(false)
+            expect(validate_process_signal_pid(0).accepted).to_be(false)
+
+    describe "REQ-MCI-010 and NFR-MCI-009: fail-closed aggregation":
+        it "should block an aggregate with a missing required receipt":
+            step("Aggregate one of two required checks")
+            val hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            val policy = MciEvidencePolicyV1(
+                schema_version: 1u16, run_id: "mci-system-run",
+                source_hash: hash, configuration_hash: hash, now_utc_ns: 1000,
+                required_check_ids: ["local-policy", "external-host-tooling"])
+            var receipt = MciEvidenceReceiptV1(
+                schema_version: 1u16, check_id: "local-policy",
+                run_id: "mci-system-run", source_hash: hash,
+                configuration_hash: hash, valid_until_utc_ns: 1100,
+                result: MCI_EVIDENCE_PASS, receipt_hash: "")
+            receipt.receipt_hash = mci_evidence_receipt_hash(policy, receipt)
+            val result = aggregate_mci_evidence_v1(policy, [receipt])
+            expect(result.matrix.result).to_equal(MCI_EVIDENCE_BLOCKED)
+            expect(result.matrix.blockers.len()).to_be_greater_than(0)
+
+        it "should reject a receipt from another run":
+            step("Bind evidence to a different run identity")
+            val hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            val policy = MciEvidencePolicyV1(
+                schema_version: 1u16, run_id: "mci-system-run",
+                source_hash: hash, configuration_hash: hash, now_utc_ns: 1000,
+                required_check_ids: ["local-policy"])
+            var receipt = MciEvidenceReceiptV1(
+                schema_version: 1u16, check_id: "local-policy",
+                run_id: "another-run", source_hash: hash,
+                configuration_hash: hash, valid_until_utc_ns: 1100,
+                result: MCI_EVIDENCE_PASS, receipt_hash: "")
+            receipt.receipt_hash = mci_evidence_receipt_hash(policy, receipt)
+            expect(aggregate_mci_evidence_v1(policy, [receipt]).matrix.result).to_equal(MCI_EVIDENCE_BLOCKED)
+
+        it "should reject expired evidence":
+            step("Aggregate a receipt whose validity ended before admission")
+            val hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            val policy = MciEvidencePolicyV1(
+                schema_version: 1u16, run_id: "mci-system-run",
+                source_hash: hash, configuration_hash: hash, now_utc_ns: 1000,
+                required_check_ids: ["local-policy"])
+            var receipt = MciEvidenceReceiptV1(
+                schema_version: 1u16, check_id: "local-policy",
+                run_id: "mci-system-run", source_hash: hash,
+                configuration_hash: hash, valid_until_utc_ns: 999,
+                result: MCI_EVIDENCE_PASS, receipt_hash: "")
+            receipt.receipt_hash = mci_evidence_receipt_hash(policy, receipt)
+            expect(aggregate_mci_evidence_v1(policy, [receipt]).matrix.result).to_equal(MCI_EVIDENCE_BLOCKED)
+
     it "should admit exact-current compiler evidence and reject stale lineage":
         step("Prepare an isolated mission-critical evidence run")
         val hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
