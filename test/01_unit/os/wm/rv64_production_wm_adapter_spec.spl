@@ -1,0 +1,56 @@
+use std.spec
+use os.compositor.rv64_wm_present_receipt.{rv64_wm_engine2d_present_receipt}
+use os.services.wm.rv64_production_wm_adapter.{Rv64WmProcessLiveness, Rv64ProductionWmAdapter}
+
+fn live_process(process_id: u64) -> Rv64WmProcessLiveness:
+    Rv64WmProcessLiveness(process_id: process_id, queried: true, alive: true, reason: "live")
+
+describe "RV64 production WM ownership adapter":
+    it "correlates a live process to its first Engine2D present":
+        var adapter = Rv64ProductionWmAdapter.create(41u64)
+        adapter.observe_process(live_process(41u64))
+        val receipt = rv64_wm_engine2d_present_receipt(41u64, 41u64, 7, 7)
+        adapter.observe_first_present(receipt)
+        val verdict = adapter.verdict()
+        expect(verdict.ready).to_equal(true)
+        expect(verdict.failed).to_equal(false)
+        expect(verdict.process_id).to_equal(41u64)
+        expect(verdict.first_present_revision).to_equal(7)
+        expect(verdict.reason).to_equal("wm-process-owned-frame-ready")
+
+    it "fails when presentation arrives before process liveness":
+        var adapter = Rv64ProductionWmAdapter.create(41u64)
+        adapter.observe_first_present(rv64_wm_engine2d_present_receipt(41u64, 41u64, 7, 7))
+        val verdict = adapter.verdict()
+        expect(verdict.ready).to_equal(false)
+        expect(verdict.failed).to_equal(true)
+        expect(verdict.reason).to_equal("present-before-process-live")
+
+    it "fails an owner mismatch before readiness":
+        var adapter = Rv64ProductionWmAdapter.create(41u64)
+        adapter.observe_process(live_process(41u64))
+        adapter.observe_first_present(rv64_wm_engine2d_present_receipt(41u64, 99u64, 7, 7))
+        val verdict = adapter.verdict()
+        expect(verdict.ready).to_equal(false)
+        expect(verdict.failed).to_equal(true)
+        expect(verdict.reason).to_equal("window-owner-mismatch")
+
+    it "fails an Engine2D revision mismatch before readiness":
+        var adapter = Rv64ProductionWmAdapter.create(41u64)
+        adapter.observe_process(live_process(41u64))
+        adapter.observe_first_present(rv64_wm_engine2d_present_receipt(41u64, 41u64, 7, 6))
+        val verdict = adapter.verdict()
+        expect(verdict.ready).to_equal(false)
+        expect(verdict.failed).to_equal(true)
+        expect(verdict.reason).to_equal("present-revision-mismatch")
+
+    it "fails a duplicate first-present receipt":
+        var adapter = Rv64ProductionWmAdapter.create(41u64)
+        adapter.observe_process(live_process(41u64))
+        val receipt = rv64_wm_engine2d_present_receipt(41u64, 41u64, 7, 7)
+        adapter.observe_first_present(receipt)
+        adapter.observe_first_present(receipt)
+        val verdict = adapter.verdict()
+        expect(verdict.ready).to_equal(false)
+        expect(verdict.failed).to_equal(true)
+        expect(verdict.reason).to_equal("duplicate-present-receipt")

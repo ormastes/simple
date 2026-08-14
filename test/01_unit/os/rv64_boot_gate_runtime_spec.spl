@@ -1,0 +1,36 @@
+"""Runtime-result adapter for the RV64 lifecycle gate."""
+
+use std.spec.*
+use os.rv64_boot_gate_runtime.{Rv64BootGateRuntime}
+use os.kernel.arch.riscv64.paging.{Rv64Sv39ActivationResult}
+use os.kernel.boot.rv64_pid1_boot.{Rv64Pid1BootResult}
+use os.kernel.boot.riscv_services.{RiscvNetworkBootFacts}
+use os.apps.sshd.sshd.{SshDaemonAcceptResult}
+
+fn runtime_through_first_ssh_resume() -> Rv64BootGateRuntime:
+    var gate = Rv64BootGateRuntime.create()
+    gate.observe_sv39(Rv64Sv39ActivationResult(root_phys: 0x81000000, satp_value: 0x8000000000081000, satp_mode: 8, satp_root_ppn: 0x81000, active: true))
+    gate.observe_pid1(Rv64Pid1BootResult(created: true, live: true, pid: 1))
+    gate.observe_network(RiscvNetworkBootFacts(tx_ready: true, rx_ready: true, service_ready: true))
+    gate.observe_sshd_ready(true)
+    gate.observe_ssh_progress(SshDaemonAcceptResult(accepted: true, session_complete: true, accept_resumed: true))
+    gate
+
+describe "RV64 runtime boot-gate adapter":
+    it "remains incomplete without a production WM process/present verdict":
+        val gate = runtime_through_first_ssh_resume()
+        expect(gate.verdict()).to_equal("INCOMPLETE:missing=wm-process-owned-frame-ready")
+
+    it "fails closed when the production WM producer is unavailable":
+        var gate = runtime_through_first_ssh_resume()
+        gate.block_missing_wm_producer()
+        expect(gate.verdict()).to_equal("FAIL:wm-production-launch-and-engine2d-present-producer-missing")
+
+    it "rejects an SSH accept without completed session recovery":
+        var gate = Rv64BootGateRuntime.create()
+        gate.observe_sv39(Rv64Sv39ActivationResult(root_phys: 0x81000000, satp_value: 0x8000000000081000, satp_mode: 8, satp_root_ppn: 0x81000, active: true))
+        gate.observe_pid1(Rv64Pid1BootResult(created: true, live: true, pid: 1))
+        gate.observe_network(RiscvNetworkBootFacts(tx_ready: true, rx_ready: true, service_ready: true))
+        gate.observe_sshd_ready(true)
+        gate.observe_ssh_progress(SshDaemonAcceptResult(accepted: true, session_complete: false, accept_resumed: false))
+        expect(gate.verdict()).to_equal("FAIL:sshd-session-incomplete")

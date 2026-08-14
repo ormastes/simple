@@ -2,8 +2,11 @@ use os.kernel.boot.riscv_noalloc_handoff.{riscv_noalloc_handoff, riscv_noalloc_b
 use os.kernel.boot.riscv_noalloc_heap.{riscv_noalloc_heap_init}
 use os.kernel.boot.riscv_noalloc_log.{riscv_noalloc_log_init, riscv_noalloc_log_boot_ok}
 use os.kernel.boot.riscv_noalloc_services.{riscv_noalloc_services_init}
-use os.rv64_probe.{rv64_network_init}
+use os.kernel.arch.riscv64.paging.{rv64_sv39_activate_and_readback}
+use os.kernel.boot.rv64_pid1_boot.{rv64_pid1_create_and_confirm_live}
+use os.rv64_probe.{rv64_network_init_facts}
 use os.apps.sshd.sshd.{SshDaemon}
+use os.rv64_boot_gate_runtime.{Rv64BootGateRuntime}
 use os.crypto.dual_backend.{dual_backend_alpha_default_mode, dual_backend_set_default_config}
 
 extern fn serial_println(msg: text)
@@ -57,19 +60,48 @@ fn spl_start():
     serial_println("")
     serial_println("=== SimpleOS RV64 SSH Live Boot ===")
     serial_println("")
+    var gate = Rv64BootGateRuntime.create()
+
+    val sv39 = rv64_sv39_activate_and_readback()
+    if not gate.observe_sv39(sv39):
+        serial_println("[FATAL] Sv39 activation/readback gate failed")
+        return
+
+    val pid1 = rv64_pid1_create_and_confirm_live()
+    if not gate.observe_pid1(pid1):
+        serial_println("[FATAL] PID1 ownership/liveness gate failed")
+        return
+
     serial_println("[boot] Initializing RV64 VirtIO network runtime")
-    val init_rc = rv64_network_init()
-    serial_println("[boot] rv64_network_init rc={init_rc}")
-    if init_rc != 1:
-        serial_println("[FATAL] SSH network init failed rc={init_rc}")
+    val network = rv64_network_init_facts()
+    if not gate.observe_network(network):
+        serial_println("[FATAL] SSH network gate failed")
         return
     dual_backend_set_default_config(dual_backend_alpha_default_mode())
     serial_println("[boot] Live host key policy: Ed25519 enabled; RV64 live dual-backend mode=alpha runtime-first")
     serial_println("[boot] Starting production SSH daemon on port 2222")
     serial_println("[ssh-live] production-daemon-starting arch=riscv64 port=2222 hostfwd=2222")
     var daemon = SshDaemon.new(2222)
-    match daemon.start():
-        Ok(_):
-            serial_println("[ssh-live] daemon exited")
+    match daemon.bind_and_ready():
+        Ok(ready):
+            if not gate.observe_sshd_ready(ready):
+                serial_println("[FATAL] SSH daemon readiness gate failed")
+                return
+            serial_println("[sshd] accept loop start")
+            while true:
+                val progress = daemon.accept_and_handle_once_result()
+                if progress.accepted:
+                    if not gate.observe_ssh_progress(progress):
+                        serial_println("[FATAL] SSH session/accept recovery gate failed")
+                        return
+                    if gate.ssh_progress_observed:
+                        # There is currently no RV64 production function that
+                        # launches a WM-owned process and returns a correlated
+                        # Engine2D present receipt. Stop here so the legacy
+                        # SSH-only host wrapper cannot mistake later command
+                        # success for a combined lifecycle PASS.
+                        gate.block_missing_wm_producer()
+                        return
         Err(err):
-            serial_println("[FATAL] SSH daemon start failed: {err}")
+            gate.observe_sshd_ready(false)
+            serial_println("[FATAL] SSH daemon bind/listen failed: {err}")

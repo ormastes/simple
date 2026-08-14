@@ -55,8 +55,8 @@ stale artifacts are diagnostics, never PASS evidence.
 | No admissible Stage 4 CLI | `bin/simple` absent; no essential-tools receipt | `--full-cli --deploy` plus the exact fresh binary passing `check-bootstrap-essential-tools-smoke.shs` |
 | SSH entry has no Sv39/PID1 owner | `examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl:40-73`; noalloc handoff/services at `src/os/kernel/boot/riscv_noalloc_handoff.spl:84-108` and `riscv_noalloc_services.spl:32-48` | SATP readback and process-owner PID1 create/liveness integrated before network/SSHD |
 | Actual PID1 owner is disconnected | `src/os/services/pm_service.spl:264-271` | Boot orchestrator calls the process owner and consumes its liveness result |
-| RV64 SSH probe uses fixed-command behavior | `src/os/ssh_qemu_contract.spl:74-120`; canned combined command at `src/os/apps/sshd/ssh_session_channel.spl:244-250`; fixed outputs at `ssh_session.spl:325-331` | Separate real OpenSSH commands execute target filesystem payloads and stream actual stdout/status |
-| Desktop proof is a fixture/shim | Fixed rectangles at `desktop_service_entry.spl:43-81`, string-only GUI stub at `boot/baremetal_stubs.c:790-803`, banner shim at `desktop_service_entry.spl:176-183`, unconditional ready/PASS at `:210-220` | PID-owned WM process plus correlated compositor presentation; failures return before readiness |
+| RV64 SSH source is implemented but unexecuted | Canned admitted branches are removed; independent sessions, typed bounded stdout/status capture, bad-auth, and accept-resumed oracles are present | Admitted Stage 4 execution proves exact stdout/status and retained OpenSSH/serial evidence (TODO806/TODO808) |
+| Production RV64 WM boot resources/live proof are missing | Producer source launches through the real launcher, snapshots only PID-owned compositor surfaces, invokes canonical Engine2D, and correlates its revision; admitted entry still stops because no boot owner supplies initialized compositor/executor/frames and pumps publication | Wire real boot resources/event loop without synthetic surfaces, then execute and retain PID/scene/present/QMP evidence (TODO809) |
 | SSpec/manual source is only partially modernized | Four steps and fail-closed live row exist, but frozen interfaces and behavioral negatives are absent; the live blocker uses a matcher mismatch instead of `fail(...)`; a stale duplicate manual and port-22 fragments remain | Implement behavioral scenarios, use the frozen failure scaffold, reconcile port 2222, remove/redirect duplicate, then generate one canonical mirror and review all seven maintain scores |
 
 ## Acceptance and Evidence Matrix
@@ -68,8 +68,8 @@ No row is complete until the Evidence cell contains one fresh passing result.
 | AC-1 | Claim/reproduce Stage 3 failure; pure-Simple root fix; exact + adjacent native regression | BLOCKED | bug record, bounded diagnostic log, backtrace, two regression outputs | bootstrap sidecar | root highest-capability review |
 | AC-2 | Provenance Stage 4 CLI and essential test/lint/duplicate/aggregate markers | BLOCKED | Stage 3/4 manifests, hashes, build logs, essential-tools env/log | bootstrap sidecar | root |
 | AC-3 | Ordered Sv39/PID1/TX/RX/network/SSHD/WM state machine; missing/reordered/duplicate negatives | STATE SOURCE IMPLEMENTED; runtime owners/open execution | `src/os/rv64_boot_gate.spl`, focused unit source; executable result pending | RV64 gate sidecar | root |
-| AC-4 | Real OpenSSH good auth; `true`; `simple --version`; `simple.smf --version`; bad auth; accept resumes after each session | NOT IMPLEMENTED | host transcript, per-command rc/stdout, serial log, correlation IDs | SSH owner | root |
-| AC-5 | Live process-owned WM plus correlated presented frame | NOT IMPLEMENTED | PID/liveness receipt, compositor receipt, QMP capture metadata | PM/scheduler + compositor owners | root |
+| AC-4 | Real OpenSSH good auth; `true`; `simple --version`; `simple.smf --version`; bad auth; accept resumes after each session | SOURCE IMPLEMENTED; execution BLOCKED | host transcript, per-command rc/stdout, serial log, correlation IDs | SSH owner | root |
+| AC-5 | Live process-owned WM plus correlated presented frame | PRODUCER SOURCE IMPLEMENTED; boot resources/live execution BLOCKED | PID/liveness receipt, compositor receipt, QMP capture metadata | PM/scheduler + compositor owners | root |
 | AC-6 | Shared interfaces and exact/adjacent fail-closed SSpec coverage | INTERFACES + UNIT SOURCE IMPLEMENTED; SSpec integration/execution open | focused unit and SSpec results | RV64 gate sidecar | root |
 | AC-7 | Manual-first steps, zero stubs, seven-score maintain review, mirror and requirement traceability | SOURCE PARTIAL; execution review BLOCKED | scan output, preview/rollback record, generated manual | docs/SPipe sidecar | root manual reviewer |
 | AC-8 | This plan and dedicated agent-task breakdown complete | PLANNED | plan and `doc/03_plan/agent_tasks/rv64_sv39_pid1_network_ssh_wm_boot.md` | merge owner | root |
@@ -201,9 +201,9 @@ Live artifacts:
 
 | Lane | Scope | Status |
 |---|---|---|
-| bootstrap sidecar | AC-1/2 audit and implementation | audit complete; implementation open |
-| RV64 gate sidecar | AC-3..6 audit and implementation | audit complete; implementation open |
-| docs/SPipe sidecar | AC-7..10 audit and documentation | audit complete; docs in progress |
+| bootstrap sidecar | AC-1/2 regression scaffold plus WM producer source | scaffold/producer source complete; native/live evidence blocked |
+| RV64 gate sidecar | AC-3/6 state, runtime owners, and serial entry integration | source complete through SSH; WM boot resources blocked |
+| docs/SPipe sidecar | AC-4/7 SSH, stdout capture, SSpec/manual cleanup | source complete; executable/docgen evidence blocked |
 | merge owner | root Codex agent in this detached worktree | active |
 | final reviewer | root normal/highest-capability review | plan findings accepted; no implementation done marks accepted |
 

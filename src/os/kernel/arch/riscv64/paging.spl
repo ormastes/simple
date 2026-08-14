@@ -30,7 +30,7 @@
 
 use os.kernel.types.memory_types.{PhysAddr, VirtAddr, PageFrame, VmFlags}
 use os.kernel.boot.mmio.{mmio_read64, mmio_write64}
-use os.kernel.arch.riscv64.cpu.{csrw_satp, sfence_vma}
+use os.kernel.arch.riscv64.cpu.{csrr_satp, csrw_satp, sfence_vma}
 use os.kernel.log.klog_api.{log_raw_println}
 use os.kernel.memory.pmm.{pmm_alloc_page, pmm_free_page}
 
@@ -80,6 +80,13 @@ struct Rv64VirtMemManager:
     """
     root_ppn: u64           # Physical page number of root page table
     root_phys: u64          # Physical address of root page table
+
+pub struct Rv64Sv39ActivationResult:
+    root_phys: u64
+    satp_value: u64
+    satp_mode: u64
+    satp_root_ppn: u64
+    active: bool
 
 # Global VMM instance
 var g_vmm: Rv64VirtMemManager = Rv64VirtMemManager(
@@ -441,6 +448,35 @@ fn vmm_activate():
     log_raw_println("[VMM] Activating Sv39 paging...")
     vmm_switch_address_space(g_vmm.root_phys)
     log_raw_println("[VMM] Sv39 paging active")
+
+pub fn rv64_sv39_activate_and_readback() -> Rv64Sv39ActivationResult:
+    """Initialize, activate, and verify the kernel Sv39 root from SATP.
+
+    `active` is true only when allocation produced a nonzero root and the SATP
+    readback reports mode 8 with that exact root PPN.  Callers may advance the
+    typed boot gate only from this returned fact.
+    """
+    if g_vmm.root_phys == 0:
+        vmm_init()
+    if g_vmm.root_phys == 0:
+        return Rv64Sv39ActivationResult(
+            root_phys: 0,
+            satp_value: csrr_satp(),
+            satp_mode: 0,
+            satp_root_ppn: 0,
+            active: false
+        )
+    vmm_activate()
+    val satp_value = csrr_satp()
+    val satp_mode = satp_value >> SATP_MODE_SHIFT
+    val satp_root_ppn = satp_value & 0x00000FFFFFFFFFFFu64
+    Rv64Sv39ActivationResult(
+        root_phys: g_vmm.root_phys,
+        satp_value: satp_value,
+        satp_mode: satp_mode,
+        satp_root_ppn: satp_root_ppn,
+        active: satp_mode == SATP_MODE_SV39 and satp_root_ppn == g_vmm.root_ppn
+    )
 
 # ============================================================================
 # Rv64Paging — HAL-Compatible Paging Interface

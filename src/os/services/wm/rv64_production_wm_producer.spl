@@ -1,0 +1,71 @@
+# Production RV64 WM launch -> ownership -> Engine2D presentation producer.
+#
+# The boot owner supplies its already-initialized compositor/executor and pumps
+# WM IPC until the launched process publishes a surface. This producer refuses
+# to fabricate or locally synthesize that surface.
+
+use common.ui.taskbar_model.{TaskbarModel}
+use common.ui.window_scene.{WmContentFrame}
+use os.compositor.compositor.{Compositor}
+use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
+use os.compositor.rv64_process_owned_scene.{rv64_process_owned_scene}
+use os.compositor.rv64_wm_present_receipt.{rv64_wm_engine2d_present_receipt}
+use os.services.launcher.launcher_registry.{launcher_launch_path_with_args}
+use os.services.wm.rv64_production_wm_adapter.{Rv64ProductionWmAdapter, Rv64ProductionWmVerdict}
+
+pub class Rv64ProductionWmProducer:
+    process_id: u64
+    adapter: Rv64ProductionWmAdapter
+
+    pub static fn launch(binary_path: text, args: [text]) -> Rv64ProductionWmProducer:
+        val launched_pid = launcher_launch_path_with_args(binary_path, args)
+        if launched_pid <= 0:
+            var failed_adapter = Rv64ProductionWmAdapter.create(0u64)
+            failed_adapter.mark_failed("wm-process-launch-failed")
+            return Rv64ProductionWmProducer(process_id: 0u64, adapter: failed_adapter)
+        val process_id = launched_pid.to_u64()
+        var adapter = Rv64ProductionWmAdapter.create(process_id)
+        adapter.query_process_owner()
+        Rv64ProductionWmProducer(process_id: process_id, adapter: adapter)
+
+    pub me present_published_scene(
+        compositor: Compositor,
+        executor: Engine2dWmFrameExecutor,
+        taskbar: TaskbarModel,
+        content_frames: [WmContentFrame],
+        taskbar_revision: i64,
+        clock_label: text
+    ) -> Rv64ProductionWmVerdict:
+        if self.adapter.failed:
+            return self.adapter.verdict()
+
+        # Re-query immediately before presentation. A process that exited after
+        # launch must fail before any framebuffer result can become readiness.
+        self.adapter.query_process_owner()
+        if self.adapter.failed:
+            return self.adapter.verdict()
+
+        val owned_scene = rv64_process_owned_scene(compositor, self.process_id)
+        if owned_scene.process_surface_count <= 0:
+            self.adapter.mark_failed("wm-process-surface-not-published")
+            return self.adapter.verdict()
+
+        val presented_revision = executor.render(
+            owned_scene.scene,
+            taskbar,
+            content_frames,
+            owned_scene.scene_revision,
+            taskbar_revision,
+            clock_label
+        )
+        val receipt = rv64_wm_engine2d_present_receipt(
+            self.process_id,
+            owned_scene.process_id,
+            owned_scene.scene_revision,
+            presented_revision
+        )
+        self.adapter.observe_first_present(receipt)
+        self.adapter.verdict()
+
+    pub fn verdict() -> Rv64ProductionWmVerdict:
+        self.adapter.verdict()

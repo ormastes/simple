@@ -33,6 +33,8 @@ val RISCV_SPM_WELL_KNOWN_TASK_ID: u64 = 0xfffffff0 as u64
 var riscv_services_started: bool = false
 var riscv_spm_port_ok: bool = false
 var riscv_network_ok: i64 = 0
+var riscv_network_tx_ok: bool = false
+var riscv_network_rx_ok: bool = false
 var riscv_display_ok: i64 = 0
 var riscv_storage_ok: i64 = 0
 var riscv_filesystem_ok: i64 = 0
@@ -40,6 +42,11 @@ var riscv_network_device_index: i64 = -1
 var riscv_display_width: u32 = 0
 var riscv_display_height: u32 = 0
 var riscv_storage_capacity: i64 = 0
+
+pub struct RiscvNetworkBootFacts:
+    tx_ready: bool
+    rx_ready: bool
+    service_ready: bool
 
 pub fn init_riscv_services():
     """Initialize the architecture-safe service surface for RISC-V boot."""
@@ -64,6 +71,8 @@ fn init_riscv_services_impl(enable_network: i64, enable_display_storage: i64) ->
     log_raw_println("[init] SPM port: registered placeholder receiver")
 
     var network_ok: i64 = 0
+    riscv_network_tx_ok = false
+    riscv_network_rx_ok = false
     if enable_network == 0:
         log_raw_println("[net-riscv] Network service disabled")
     else:
@@ -98,12 +107,14 @@ fn init_riscv_services_impl(enable_network: i64, enable_display_storage: i64) ->
                     log_raw_println("[net-riscv] Network packet TX unavailable rc={tx_rc}")
                     network_ok = 0
                 else:
+                    riscv_network_tx_ok = true
                     log_raw_println("[net-riscv] Network packet TX ready")
                     val rx_rc = _decode_riscv_status(rt_net_rx_ready())
                     if rx_rc < 0:
                         log_raw_println("[net-riscv] Network packet RX unavailable rc={rx_rc}")
                         network_ok = 0
                     else:
+                        riscv_network_rx_ok = true
                         val stats_rc = _decode_riscv_status(rt_net_stats())
                         if stats_rc < 0:
                             log_raw_println("[net-riscv] Network stats probe failed rc={stats_rc}")
@@ -223,6 +234,14 @@ pub fn riscv_network_ready() -> bool:
 pub fn riscv_network_ready_code() -> i64:
     """Freestanding-safe numeric readiness gate for boot callers."""
     return riscv_network_ok
+
+pub fn riscv_network_boot_facts() -> RiscvNetworkBootFacts:
+    """Return independently derived TX, RX, and full service readiness."""
+    RiscvNetworkBootFacts(
+        tx_ready: riscv_network_tx_ok,
+        rx_ready: riscv_network_rx_ok,
+        service_ready: riscv_network_ok == 1
+    )
 
 fn riscv_display_ready() -> bool:
     """Check whether the RISC-V display service initialized a framebuffer."""

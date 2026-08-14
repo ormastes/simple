@@ -1,0 +1,43 @@
+use os.kernel.arch.riscv64.process_stdout_capture.{RV64_PROCESS_STDOUT_LIMIT, rv64_process_stdout_begin, rv64_process_stdout_write_byte, rv64_process_stdout_finish}
+use os.kernel.loader.riscv64_fs_exec_spawn.{riscv64_fs_exec_failed_capture}
+
+describe "RV64 process stdout capture":
+    it "returns exact stdout bytes with a successful status":
+        rv64_process_stdout_begin()
+        rv64_process_stdout_write_byte(0x4Fu8)
+        rv64_process_stdout_write_byte(0x4Bu8)
+        val result = rv64_process_stdout_finish(0)
+        expect(result.bytes.len()).to_equal(2)
+        expect(result.bytes[0]).to_equal(0x4Fu8)
+        expect(result.bytes[1]).to_equal(0x4Bu8)
+        expect(result.exit_code).to_equal(0)
+        expect(result.truncated).to_be(false)
+
+    it "preserves empty output and a nonzero status":
+        rv64_process_stdout_begin()
+        val result = rv64_process_stdout_finish(37)
+        expect(result.bytes.len()).to_equal(0)
+        expect(result.exit_code).to_equal(37)
+        expect(result.truncated).to_be(false)
+
+    it "clears prior stdout for a pre-launch command failure":
+        rv64_process_stdout_begin()
+        rv64_process_stdout_write_byte(0x58u8)
+        val prior = rv64_process_stdout_finish(0)
+        expect(prior.bytes.len()).to_equal(1)
+        val failed = riscv64_fs_exec_failed_capture(127)
+        expect(failed.bytes.len()).to_equal(0)
+        expect(failed.exit_code).to_equal(127)
+        expect(failed.truncated).to_be(false)
+
+    it "retains the bounded prefix and reports truncation":
+        rv64_process_stdout_begin()
+        var i: u64 = 0
+        while i < RV64_PROCESS_STDOUT_LIMIT + 3:
+            rv64_process_stdout_write_byte((i % 251).to_u8())
+            i = i + 1
+        val result = rv64_process_stdout_finish(0)
+        expect(result.bytes.len()).to_equal(RV64_PROCESS_STDOUT_LIMIT)
+        expect(result.bytes[0]).to_equal(0u8)
+        expect(result.bytes[RV64_PROCESS_STDOUT_LIMIT - 1]).to_equal(((RV64_PROCESS_STDOUT_LIMIT - 1) % 251).to_u8())
+        expect(result.truncated).to_be(true)

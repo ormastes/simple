@@ -1,0 +1,116 @@
+# Runtime adapter for the pure RV64 boot-gate state machine.
+#
+# Each owner supplies a typed result derived from its real operation. This
+# adapter advances and prints a canonical receipt only after validating that
+# result. It never manufactures paging, process, network, SSH, or WM success.
+
+use os.rv64_boot_gate.{
+    Rv64BootGateState, Rv64BootGateObservation,
+    RV64_BOOT_GATE_RECEIPT_PREFIX,
+    rv64_boot_gate_new, rv64_boot_gate_advance, rv64_boot_gate_verdict
+}
+use os.kernel.arch.riscv64.paging.{Rv64Sv39ActivationResult}
+use os.kernel.boot.rv64_pid1_boot.{Rv64Pid1BootResult}
+use os.kernel.boot.riscv_services.{RiscvNetworkBootFacts}
+use os.apps.sshd.sshd.{SshDaemonAcceptResult}
+use os.services.wm.rv64_production_wm_adapter.{Rv64ProductionWmVerdict}
+
+extern fn serial_println(msg: text)
+
+pub class Rv64BootGateRuntime:
+    state: Rv64BootGateState
+    failed: bool
+    first_error: text
+    ssh_progress_observed: bool
+
+    pub static fn create() -> Rv64BootGateRuntime:
+        Rv64BootGateRuntime(
+            state: rv64_boot_gate_new(),
+            failed: false,
+            first_error: "",
+            ssh_progress_observed: false
+        )
+
+    me fail_closed(reason: text) -> bool:
+        if not self.failed:
+            self.first_error = reason
+            serial_println("[rv64-boot-gate] blocked=" + reason)
+        self.failed = true
+        false
+
+    me advance(observation: Rv64BootGateObservation) -> bool:
+        if self.failed:
+            return false
+        self.state = rv64_boot_gate_advance(self.state, observation)
+        val verdict = rv64_boot_gate_verdict(self.state)
+        if verdict.starts_with("FAIL:"):
+            return self.fail_closed(verdict)
+        serial_println(RV64_BOOT_GATE_RECEIPT_PREFIX + _rv64_runtime_observation_name(observation))
+        true
+
+    pub me observe_sv39(result: Rv64Sv39ActivationResult) -> bool:
+        if not result.active or result.satp_mode != 8 or result.root_phys == 0:
+            return self.fail_closed("sv39-readback-unproven")
+        self.advance(Rv64BootGateObservation.Sv39Active)
+
+    pub me observe_pid1(result: Rv64Pid1BootResult) -> bool:
+        if not result.created or not result.live or result.pid != 1:
+            return self.fail_closed("pid1-owner-or-liveness-unproven")
+        self.advance(Rv64BootGateObservation.Pid1Live)
+
+    pub me observe_network(result: RiscvNetworkBootFacts) -> bool:
+        if not result.tx_ready:
+            return self.fail_closed("network-tx-unproven")
+        if not self.advance(Rv64BootGateObservation.NetworkTxReady): return false
+        if not result.rx_ready:
+            return self.fail_closed("network-rx-unproven")
+        if not self.advance(Rv64BootGateObservation.NetworkRxReady): return false
+        if not result.service_ready:
+            return self.fail_closed("network-service-unproven")
+        self.advance(Rv64BootGateObservation.NetworkServiceReady)
+
+    pub me observe_sshd_ready(ready: bool) -> bool:
+        if not ready:
+            return self.fail_closed("sshd-bind-listen-unproven")
+        self.advance(Rv64BootGateObservation.SshdReady)
+
+    pub me observe_ssh_progress(result: SshDaemonAcceptResult) -> bool:
+        if self.ssh_progress_observed:
+            return true
+        if not result.accepted:
+            return false
+        if not result.session_complete:
+            return self.fail_closed("sshd-session-incomplete")
+        if not self.advance(Rv64BootGateObservation.SshdSessionComplete): return false
+        if not result.accept_resumed:
+            return self.fail_closed("sshd-accept-not-resumed")
+        if not self.advance(Rv64BootGateObservation.SshdAcceptResumed): return false
+        self.ssh_progress_observed = true
+        true
+
+    pub me observe_wm(result: Rv64ProductionWmVerdict) -> bool:
+        if result.failed:
+            return self.fail_closed("wm:" + result.reason)
+        if not result.ready or result.process_id == 0 or result.first_present_revision <= 0:
+            return self.fail_closed("wm-process-frame-unproven:" + result.reason)
+        self.advance(Rv64BootGateObservation.WmProcessOwnedFrameReady)
+
+    pub me block_missing_wm_producer() -> bool:
+        self.fail_closed("wm-production-launch-and-engine2d-present-producer-missing")
+
+    pub fn verdict() -> text:
+        if self.failed:
+            return "FAIL:" + self.first_error
+        rv64_boot_gate_verdict(self.state)
+
+fn _rv64_runtime_observation_name(observation: Rv64BootGateObservation) -> text:
+    match observation:
+        Rv64BootGateObservation.Sv39Active: "sv39-active"
+        Rv64BootGateObservation.Pid1Live: "pid1-live"
+        Rv64BootGateObservation.NetworkTxReady: "network-tx-ready"
+        Rv64BootGateObservation.NetworkRxReady: "network-rx-ready"
+        Rv64BootGateObservation.NetworkServiceReady: "network-service-ready"
+        Rv64BootGateObservation.SshdReady: "sshd-ready"
+        Rv64BootGateObservation.SshdSessionComplete: "sshd-session-complete"
+        Rv64BootGateObservation.SshdAcceptResumed: "sshd-accept-resumed"
+        Rv64BootGateObservation.WmProcessOwnedFrameReady: "wm-process-owned-frame-ready"

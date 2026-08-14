@@ -26,6 +26,10 @@ use os.kernel.net.rt_net_socket_facade.{rt_net_close}
 use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_spawn, x86_64_fs_exec_spawn_heap}
 @cfg(x86_64)
 use os.kernel.loader.fs_exec_resolve.{fs_exec_resolve}
+@cfg(riscv64)
+use os.kernel.loader.fs_exec_resolve.{fs_exec_resolve}
+@cfg(riscv64)
+use os.kernel.loader.riscv64_fs_exec_spawn.{riscv64_fs_exec_spawn_capture, riscv64_fs_exec_failed_capture}
 extern fn serial_println(msg: text)
 extern fn rt_boot_tcp_bind(addr: text) -> i64
 extern fn rt_boot_tcp_accept_timeout(fd: i64, ms: i64) -> i64
@@ -159,12 +163,51 @@ fn _sshd_run_pending_exec(command: text) -> i64:
     0
 
 @cfg(riscv64)
-fn _sshd_run_pending_exec(command: text) -> i64:
-    0
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    val all_tokens = _sshd_tokenize_command(command)
+    if all_tokens.len() == 0:
+        serial_println("[fs-exec] command not found: (empty)")
+        val failed = riscv64_fs_exec_failed_capture(127)
+        return (failed.bytes, failed.exit_code, failed.truncated)
+    val name = all_tokens[0]
+    val resolved = fs_exec_resolve(name)
+    if resolved.length == 0u64:
+        serial_println("[fs-exec] command not found: {name}")
+        val failed = riscv64_fs_exec_failed_capture(127)
+        return (failed.bytes, failed.exit_code, failed.truncated)
+    var argv: [text] = []
+    var i: u64 = 1
+    while i < all_tokens.len():
+        argv.push(all_tokens[i])
+        i = i + 1
+    serial_println("[sshd] rv64 filesystem exec {resolved} command={command}")
+    val result = riscv64_fs_exec_spawn_capture(resolved, argv, _sshd_default_envp())
+    serial_println("[sshd] rv64 filesystem exec returned rc={result.exit_code}")
+    (result.bytes, result.exit_code, result.truncated)
 
 @cfg(riscv32)
 fn _sshd_run_pending_exec(command: text) -> i64:
     0
+
+@cfg(x86_64)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    ([], _sshd_run_pending_exec(command), false)
+
+@cfg(x86)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    ([], _sshd_run_pending_exec(command), false)
+
+@cfg(arm64)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    ([], _sshd_run_pending_exec(command), false)
+
+@cfg(arm32)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    ([], _sshd_run_pending_exec(command), false)
+
+@cfg(riscv32)
+fn _sshd_run_pending_exec_result(command: text) -> ([u8], i64, bool):
+    ([], _sshd_run_pending_exec(command), false)
 
 fn _sshd_bytes_equal(a: [u8], b: [u8]) -> bool:
     if a.len() != b.len():
@@ -176,6 +219,11 @@ fn _sshd_bytes_equal(a: [u8], b: [u8]) -> bool:
         i = i + 1
     true
 val SSHD_MAX_SESSIONS: u32 = 16
+
+pub struct SshDaemonAcceptResult:
+    accepted: bool
+    session_complete: bool
+    accept_resumed: bool
 
 fn decode_net_runtime_i32(raw: i64) -> i32:
     """Decode tagged positive ints returned by the baremetal direct net runtime.
@@ -467,7 +515,7 @@ impl SshDaemon:
         self.accept_loop()
         Ok(true)
 
-    me bind_and_ready() -> Result<bool, text>:
+    pub me bind_and_ready() -> Result<bool, text>:
         """Run the Ed25519 self-test, pin host keys, and bind the listener.
 
         Extracted from start() so a combined multi-service boot entry can
@@ -541,7 +589,10 @@ impl SshDaemon:
                     serial_println("[sshd] accept wait ticks=5000")
                     accept_wait_ticks = 0
 
-    me accept_and_handle_once() -> bool:
+    pub me accept_and_handle_once() -> bool:
+        self.accept_and_handle_once_result().accepted
+
+    pub me accept_and_handle_once_result() -> SshDaemonAcceptResult:
         """Accept and fully handle a single pending SSH connection, if any.
 
         Returns true iff a connection was accepted and handled. Extracted
@@ -553,7 +604,7 @@ impl SshDaemon:
         """
         val raw_client_fd = rt_boot_tcp_accept_timeout(self.listen_fd, 1)
         if raw_client_fd < 0:
-            return false
+            return SshDaemonAcceptResult(accepted: false, session_complete: false, accept_resumed: false)
         val client_fd = normalize_boot_tcp_client_fd(raw_client_fd)
         serial_println("[sshd] accepted client fd={client_fd}")
         serial_println("[sshd] handle_connection")
@@ -563,7 +614,7 @@ impl SshDaemon:
         if priv_len < 1 or pub_len < 1:
             serial_println("[sshd] FATAL: host keys not initialized")
             rt_net_close(client_fd)
-            return true
+            return SshDaemonAcceptResult(accepted: true, session_complete: false, accept_resumed: false)
         serial_println("[sshd] host key lengths ok")
         serial_println("[sshd] build host keys")
         var host_keys = self.build_host_keys_for_session()
@@ -583,12 +634,15 @@ impl SshDaemon:
         # Must run BEFORE session.close(): the real exit-status reply for
         # the deferred exec goes out on the still-open session socket.
         if session.pending_ring3_exec:
-            val exit_rc = _sshd_run_pending_exec(session.pending_ring3_exec_command)
+            val (stdout_bytes, exit_rc, stdout_truncated) = _sshd_run_pending_exec_result(session.pending_ring3_exec_command)
             session.pending_ring3_exec_exit_code = exit_rc.to_u32()
+            session.pending_ring3_exec_stdout = stdout_bytes
+            session.pending_ring3_exec_stdout_truncated = stdout_truncated
             session._send_deferred_ring3_exec_response()
         serial_println("[sshd] session close")
         session.close()
-        true
+        serial_println("[sshd] accept resumed")
+        SshDaemonAcceptResult(accepted: true, session_complete: true, accept_resumed: true)
 
     me handle_connection(client_fd: i64):
         """Handle a new SSH connection from a client."""

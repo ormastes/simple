@@ -1,0 +1,102 @@
+# RV64 production WM ownership/readiness adapter.
+#
+# Readiness is a correlation of two independent owner receipts: a live task
+# returned by the process syscall facade and the first successful Engine2D
+# compositor presentation for a window owned by that same PID.
+
+use os.userlib.process.{get_task_info}
+use os.compositor.rv64_wm_present_receipt.{Rv64WmPresentReceipt}
+
+pub struct Rv64WmProcessLiveness:
+    process_id: u64
+    queried: bool
+    alive: bool
+    reason: text
+
+pub struct Rv64ProductionWmVerdict:
+    ready: bool
+    failed: bool
+    process_id: u64
+    first_present_revision: i64
+    reason: text
+
+pub fn rv64_wm_process_liveness(process_id: u64) -> Rv64WmProcessLiveness:
+    if process_id == 0u64:
+        return Rv64WmProcessLiveness(process_id: process_id, queried: false, alive: false, reason: "process-id-zero")
+    match get_task_info(process_id):
+        case Ok(entry):
+            if entry.pid != process_id:
+                return Rv64WmProcessLiveness(process_id: process_id, queried: true, alive: false, reason: "process-identity-mismatch")
+            if entry.state == 3:
+                return Rv64WmProcessLiveness(process_id: process_id, queried: true, alive: false, reason: "process-zombie")
+            Rv64WmProcessLiveness(process_id: process_id, queried: true, alive: true, reason: "live")
+        case Err(_):
+            Rv64WmProcessLiveness(process_id: process_id, queried: true, alive: false, reason: "process-query-failed")
+
+pub class Rv64ProductionWmAdapter:
+    process_id: u64
+    process_live: bool
+    first_present_revision: i64
+    ready: bool
+    failed: bool
+    failure_reason: text
+
+    pub static fn create(process_id: u64) -> Rv64ProductionWmAdapter:
+        Rv64ProductionWmAdapter(process_id: process_id, process_live: false, first_present_revision: 0, ready: false, failed: false, failure_reason: "")
+
+    pub me mark_failed(reason: text):
+        if not self.failed:
+            self.failure_reason = reason
+        self.failed = true
+        self.ready = false
+
+    pub me observe_process(observation: Rv64WmProcessLiveness):
+        if self.failed or self.ready:
+            return
+        if self.process_id == 0u64:
+            self.mark_failed("process-id-zero")
+            return
+        if observation.process_id != self.process_id:
+            self.mark_failed("process-identity-mismatch")
+            return
+        if not observation.queried:
+            self.mark_failed("process-not-queried")
+            return
+        if not observation.alive:
+            self.mark_failed(observation.reason)
+            return
+        self.process_live = true
+
+    pub me query_process_owner():
+        self.observe_process(rv64_wm_process_liveness(self.process_id))
+
+    pub me observe_first_present(receipt: Rv64WmPresentReceipt):
+        if self.failed:
+            return
+        if self.ready or self.first_present_revision != 0:
+            self.mark_failed("duplicate-present-receipt")
+            return
+        if not self.process_live:
+            self.mark_failed("present-before-process-live")
+            return
+        if receipt.process_id != self.process_id:
+            self.mark_failed("present-process-mismatch")
+            return
+        if not receipt.engine2d_presented:
+            self.mark_failed(receipt.reason)
+            return
+        if receipt.scene_revision <= 0 or receipt.presented_revision != receipt.scene_revision:
+            self.mark_failed("present-revision-invalid")
+            return
+        self.first_present_revision = receipt.presented_revision
+        self.ready = true
+
+    pub fn verdict() -> Rv64ProductionWmVerdict:
+        var reason = "waiting-for-process"
+        if self.failed:
+            reason = self.failure_reason
+        elif self.ready:
+            reason = "wm-process-owned-frame-ready"
+        elif self.process_live:
+            reason = "waiting-for-first-engine2d-present"
+        Rv64ProductionWmVerdict(ready: self.ready, failed: self.failed, process_id: self.process_id, first_present_revision: self.first_present_revision, reason: reason)
