@@ -73,6 +73,73 @@ implementation." Status values:
   structured; the gap is interpreter-bound perf, not a duplicate path);
   full Simple DB server tier.
 
+#### Restart12 secure Pure-Simple server acceptance ledger (2026-08-14)
+
+This detached replacement lane owns only the two Phase-6 server blockers. The
+accepted implementation boundary is Pure Simple: production entrypoints may
+use the repository's owned socket/file capability providers, but must not add
+new local `rt_*` declarations, raw-source launcher wrappers, or foreign server
+implementations.
+
+- [ ] **WEB-1 production routing:** the canonical web-server entrypoint routes
+  real accepted connections through the hardened parser/router/response path;
+  benchmark-only and in-memory transports are not production evidence.
+- [ ] **WEB-2 fail-closed request security:** bounded request line, headers,
+  body, keep-alive lifetime, and timeout policy; malformed framing, traversal,
+  ambiguous duplicate security headers, and unsupported transfer codings are
+  rejected without panic or partial dispatch.
+- [ ] **WEB-3 secure defaults:** TLS configuration refuses absent/invalid key
+  material, plaintext downgrade is explicit, and security headers plus request
+  identity are applied by the production dispatch path.
+- [ ] **DB-1 listener lifecycle:** the database capsule owns a bounded listener
+  and accept loop with explicit shutdown and per-connection/session cleanup.
+- [ ] **DB-2 authenticated principals:** the wire `OPEN` request proves a
+  configured credential; a caller cannot obtain another known principal's
+  capability by naming it. Secrets are compared without logging or echoing.
+- [ ] **DB-3 concurrency and visibility:** shared session/store state has one
+  owner or an explicit lock; readers cannot observe the durability P3/P4
+  mid-commit window; capacity/backpressure is bounded and fail-closed.
+- [ ] **DB-4 restart-safe conflicts:** optimistic row versions survive reopen,
+  and repeated commit identifiers are idempotent across retry/reconnect.
+- [ ] **DB-5 query surface:** bounded batch and range operations preserve the
+  same capability checks, transaction semantics, and response-size limits as
+  single-row operations.
+- [ ] **DB-6 evidence:** focused parser/security, auth rejection, concurrent
+  visibility, recovery/idempotency, and bounded batch/range specs pass once;
+  the existing DB tier and durability specs remain green.
+- [ ] **GATE-1 repository policy:** numbered-artifact, direct-env/runtime,
+  STUB001, executable-spec-layout, lint/check, and changed-SPipe maintenance
+  gates pass with current manuals and requirement links.
+- [ ] **GATE-2 delivery:** all intentional changes are committed, rebased under
+  `/tmp/simple-main-restart12-push.lock`, pushed without force to `main`, and
+  the pushed commit is proven reachable from the refetched `origin/main`.
+
+Current blockers at lane start:
+
+1. The DB `serve()` path drains one `MemoryTransport`; no owned socket listener
+   or accept loop exists.
+2. `OPEN as=<principal>` trusts the claimed name, allowing impersonation of a
+   configured principal.
+3. Session registry and store mutation are single-threaded assumptions; the
+   durable commit contract documents an observable P3/P4 window once real
+   concurrent connections exist.
+4. Row versions are not durable and commit retry identifiers are not recorded.
+5. DB operations are single-row only; bounded batch/range protocol and response
+   limits are absent.
+6. The web implementation has hardening units and benchmark fixtures, but the
+   umbrella plan has no retained proof that a production listener traverses the
+   same secure dispatch path.
+
+Lane execution blocker (2026-08-14): the deployed Pure-Simple CLI at
+`release/x86_64-unknown-linux-gnu/simple` identifies as Simple v1.0.0-beta but
+segfaults on the bounded `test --help` ABI probe; `bin/simple_native` also
+segfaults. A single guarded full-bootstrap recovery rebuilt the Rust
+bootstrap-only prerequisites, then stopped making observable progress in
+Stage 2 (`seed -> bootstrap_main.spl`) and was terminated after the final
+bounded wait. No feature acceptance test has therefore been credited. Resume
+by producing a healthy self-hosted CLI, then run the focused DB checks exactly
+once before continuing DB-1/3/4/5 and WEB-1/2/3.
+
 ### Phase 7 — Desktop / browser — **blocked**
 - Browser renderer/network/GPU process split, origin/cookie/permission model,
   WPT/Test262 conformance. Multi-session; needs conformance corpora + a

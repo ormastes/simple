@@ -66,14 +66,14 @@ fn make_store() -> SdnDatabase:
 # mallory: registered with no grants at all.
 fn make_policy() -> CapabilityTable:
     var policy = CapabilityTable.new()
-    policy.register(capability_with("alice", [
+    policy.register_authenticated(capability_with("alice", [
         grant_key("users", "read"),
         grant_key("users", "write"),
         grant_key("audit", "read"),
         grant_key("audit", "write")
-    ]))
-    policy.register(capability_with("bob", [grant_key("users", "read")]))
-    policy.register(empty_capability("mallory"))
+    ]), "alice-secret")
+    policy.register_authenticated(capability_with("bob", [grant_key("users", "read")]), "bob-secret")
+    policy.register_authenticated(empty_capability("mallory"), "mallory-secret")
     policy
 
 fn make_server() -> DbServerCapsule:
@@ -85,10 +85,18 @@ fn make_server() -> DbServerCapsule:
 
 describe "DB server tier — connection lifecycle":
 
+    it "rejects a known principal without its credential":
+        var server = make_server()
+        assert_contains(server.handle_message("OPEN as=alice"), "code=auth")
+
+    it "rejects a known principal with the wrong credential":
+        var server = make_server()
+        assert_contains(server.handle_message("OPEN as=alice credential=bob-secret"), "code=auth")
+
     it "gives each client its own session id":
         var server = make_server()
-        val first = server.handle_message("OPEN as=alice")
-        val second = server.handle_message("OPEN as=bob")
+        val first = server.handle_message("OPEN as=alice credential=alice-secret")
+        val second = server.handle_message("OPEN as=bob credential=bob-secret")
         assert_equal(first, "OK session=1")
         assert_equal(second, "OK session=2")
 
@@ -99,13 +107,13 @@ describe "DB server tier — connection lifecycle":
 
     it "refuses to work for a session that has been closed":
         var server = make_server()
-        server.handle_message("OPEN as=alice")
+        server.handle_message("OPEN as=alice credential=alice-secret")
         assert_equal(server.handle_message("CLOSE session=1"), "OK")
         assert_contains(server.handle_message("BEGIN session=1"), "code=no_session")
 
     it "discards an abandoned transaction when the connection closes":
         var server = make_server()
-        server.handle_message("OPEN as=alice")
+        server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
         server.handle_message("PUT session=1 tbl=users id=ghost name=nobody")
         server.handle_message("CLOSE session=1")
@@ -116,7 +124,7 @@ describe "DB server tier — connection lifecycle":
     it "answers every message on a connection driven by the transport port":
         var server = make_server()
         var channel = MemoryTransport.with_messages([
-            "OPEN as=alice",
+            "OPEN as=alice credential=alice-secret",
             "PING session=1",
             "CLOSE session=1"
         ])
@@ -135,7 +143,7 @@ describe "DB server tier — request framing is fail-closed":
 
     it "rejects an unterminated quote instead of crashing":
         var server = make_server()
-        server.handle_message("OPEN as=alice")
+        server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
         val reply = server.handle_message('PUT session=1 tbl=users id="oops name=x')
         assert_contains(reply, "code=malformed")
@@ -181,8 +189,8 @@ describe "DB server tier — transaction isolation between two sessions":
 
     it "hides one session's uncommitted write from the other session":
         var server = make_server()
-        server.handle_message("OPEN as=alice")   # session 1, read+write
-        server.handle_message("OPEN as=bob")     # session 2, read-only
+        server.handle_message("OPEN as=alice credential=alice-secret")   # session 1, read+write
+        server.handle_message("OPEN as=bob credential=bob-secret")     # session 2, read-only
         server.handle_message("BEGIN session=1")
         assert_equal(server.handle_message("PUT session=1 tbl=users id=u1 name=ada"), "OK")
 
@@ -207,8 +215,8 @@ describe "DB server tier — transaction isolation between two sessions":
         # row, this assertion would fail too — so the "not_found" above cannot
         # be a false green.
         var server = make_server()
-        server.handle_message("OPEN as=alice")
-        server.handle_message("OPEN as=bob")
+        server.handle_message("OPEN as=alice credential=alice-secret")
+        server.handle_message("OPEN as=bob credential=bob-secret")
         server.handle_message("BEGIN session=1")
         server.handle_message("PUT session=1 tbl=users id=u1 name=ada")
         assert_equal(server.handle_message("COMMIT session=1"), "OK applied=1")
@@ -224,8 +232,8 @@ describe "DB server tier — transaction isolation between two sessions":
         # leak.  This proves the two assertions in the isolation test above are
         # capable of failing.
         var server = make_server()
-        server.handle_message("OPEN as=alice")
-        server.handle_message("OPEN as=bob")
+        server.handle_message("OPEN as=alice credential=alice-secret")
+        server.handle_message("OPEN as=bob credential=bob-secret")
         server.handle_message("BEGIN session=1")
         server.handle_message("PUT session=1 tbl=users id=u1 name=ada")
 
@@ -254,8 +262,8 @@ describe "DB server tier — transaction isolation between two sessions":
 
     it "discards a rolled-back transaction entirely":
         var server = make_server()
-        server.handle_message("OPEN as=alice")
-        server.handle_message("OPEN as=bob")
+        server.handle_message("OPEN as=alice credential=alice-secret")
+        server.handle_message("OPEN as=bob credential=bob-secret")
         server.handle_message("BEGIN session=1")
         server.handle_message("PUT session=1 tbl=users id=u1 name=ada")
         assert_equal(server.handle_message("ROLLBACK session=1"), "OK")
@@ -267,8 +275,8 @@ describe "DB server tier — transaction isolation between two sessions":
 
     it "keeps two concurrent transactions from seeing each other's writes":
         var server = make_server()
-        server.handle_message("OPEN as=alice")   # session 1
-        server.handle_message("OPEN as=alice")   # session 2, same principal
+        server.handle_message("OPEN as=alice credential=alice-secret")   # session 1
+        server.handle_message("OPEN as=alice credential=alice-secret")   # session 2, same principal
         server.handle_message("BEGIN session=1")
         server.handle_message("BEGIN session=2")
         server.handle_message("PUT session=1 tbl=users id=r1 name=one")
@@ -292,8 +300,8 @@ describe "DB server tier — transaction isolation between two sessions":
 
     it "aborts a commit whose row was changed underneath it":
         var server = make_server()
-        server.handle_message("OPEN as=alice")
-        server.handle_message("OPEN as=alice")
+        server.handle_message("OPEN as=alice credential=alice-secret")
+        server.handle_message("OPEN as=alice credential=alice-secret")
         # Seed a committed row.
         server.handle_message("BEGIN session=1")
         server.handle_message("PUT session=1 tbl=users id=u1 name=v0")
@@ -316,7 +324,7 @@ describe "DB server tier — transaction isolation between two sessions":
 
     it "requires an open transaction before any write":
         var server = make_server()
-        server.handle_message("OPEN as=alice")
+        server.handle_message("OPEN as=alice credential=alice-secret")
         assert_contains(
             server.handle_message("PUT session=1 tbl=users id=u1 name=ada"),
             "code=no_txn"
@@ -326,13 +334,13 @@ describe "DB server tier — transaction isolation between two sessions":
 
     it "refuses to nest transactions on one session":
         var server = make_server()
-        server.handle_message("OPEN as=alice")
+        server.handle_message("OPEN as=alice credential=alice-secret")
         assert_equal(server.handle_message("BEGIN session=1"), "OK")
         assert_contains(server.handle_message("BEGIN session=1"), "code=txn_open")
 
     it "makes a committed delete invisible":
         var server = make_server()
-        server.handle_message("OPEN as=alice")
+        server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
         server.handle_message("PUT session=1 tbl=users id=u1 name=ada")
         server.handle_message("COMMIT session=1")
@@ -349,7 +357,7 @@ describe "DB server tier — capability-checked access is deny-wins":
 
     it "refuses a write from a read-only principal":
         var server = make_server()
-        server.handle_message("OPEN as=bob")
+        server.handle_message("OPEN as=bob credential=bob-secret")
         server.handle_message("BEGIN session=1")
         val reply = server.handle_message("PUT session=1 tbl=users id=u1 name=eve")
         assert_contains(reply, "code=denied")
@@ -359,7 +367,7 @@ describe "DB server tier — capability-checked access is deny-wins":
 
     it "refuses every data reach from a principal with no grants":
         var server = make_server()
-        server.handle_message("OPEN as=mallory")
+        server.handle_message("OPEN as=mallory credential=mallory-secret")
         server.handle_message("BEGIN session=1")
         assert_contains(
             server.handle_message("GET session=1 tbl=users id=u1 col=name"),
@@ -372,7 +380,7 @@ describe "DB server tier — capability-checked access is deny-wins":
 
     it "refuses a table the principal was never granted":
         var server = make_server()
-        server.handle_message("OPEN as=bob")   # read on users only
+        server.handle_message("OPEN as=bob credential=bob-secret")   # read on users only
         server.handle_message("BEGIN session=1")
         assert_contains(
             server.handle_message("GET session=1 tbl=audit id=a1 col=event"),
@@ -382,7 +390,7 @@ describe "DB server tier — capability-checked access is deny-wins":
     it "refuses an unregistered principal's data reach":
         var server = make_server()
         # OPEN succeeds — but with an empty capability, not with a bypass.
-        assert_equal(server.handle_message("OPEN as=stranger"), "OK session=1")
+        assert_contains(server.handle_message("OPEN as=stranger credential=guess"), "code=auth")
         server.handle_message("BEGIN session=1")
         assert_contains(
             server.handle_message("GET session=1 tbl=users id=u1 col=name"),
@@ -391,7 +399,7 @@ describe "DB server tier — capability-checked access is deny-wins":
 
     it "refuses a data operation that names no table":
         var server = make_server()
-        server.handle_message("OPEN as=alice")
+        server.handle_message("OPEN as=alice credential=alice-secret")
         server.handle_message("BEGIN session=1")
         # An absent table is never read as "unrestricted".
         assert_contains(server.handle_message("GET session=1 id=u1"), "code=missing_arg")

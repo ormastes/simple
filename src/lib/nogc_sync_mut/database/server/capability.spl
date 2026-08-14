@@ -77,9 +77,10 @@ fn capability_allows_op(capability: DbCapability, op: text, table: text) -> bool
 
 class CapabilityTable:
     entries: Dict<text, DbCapability>
+    credentials: Dict<text, text>
 
     static fn new() -> CapabilityTable:
-        CapabilityTable(entries: {})
+        CapabilityTable(entries: {}, credentials: {})
 
     me register(capability: DbCapability):
         # Extract -> mutate -> write back: never a mutating call through two
@@ -87,6 +88,38 @@ class CapabilityTable:
         var entries = self.entries
         entries[capability.principal] = capability
         self.entries = entries
+
+    me register_authenticated(capability: DbCapability, credential: text):
+        """Register a capability with the credential required by OPEN.
+
+        Empty credentials are refused so a configured principal can never
+        silently become name-only authenticated.
+        """
+        if credential == "":
+            return
+        self.register(capability)
+        var credentials = self.credentials
+        credentials[capability.principal] = credential
+        self.credentials = credentials
+
+    fn authenticate(principal: text, candidate: text) -> bool:
+        """Compare credentials without content-dependent early return."""
+        if principal == "" or candidate == "":
+            return false
+        if not self.credentials.contains_key(principal):
+            return false
+        val expected: text = self.credentials[principal]
+        val left = expected.chars()
+        val right = candidate.chars()
+        var different = left.len() ^ right.len()
+        val count = if left.len() > right.len(): left.len() else: right.len()
+        var i = 0
+        while i < count:
+            val a = if i < left.len(): left[i].to_int() else: 0
+            val b = if i < right.len(): right[i].to_int() else: 0
+            different = different | (a ^ b)
+            i = i + 1
+        different == 0
 
     fn lookup(principal: text) -> DbCapability?:
         if self.entries.contains_key(principal):
