@@ -61,7 +61,7 @@ current requirement audit is:
 
 | AC | Status | Authoritative next evidence |
 |---|---|---|
-| AC-1 | **M0 DESIGN/ACTIONABLE / TODO666** | historical `e383...` predates complete snapshot authority; the incompatible full-bootstrap draft was reverted. Implement safe phase publication, full-bootstrap sinks, process/RSS/signal supervision, and provenance migration before fresh current Stage 2/instrumented Stage 3 evidence |
+| AC-1 | **M0 ACTIONABLE / TODO666** | historical `e383...` predates complete snapshot authority. The three-cycle supervisor draft was rejected and reverted because post-fork cleanup was not total, survivors could be abandoned, and bounds were soft. Implement safe phase publication, hard-bounded zero-survivor process-tree supervision under the inherited outer PGID, full-bootstrap sinks, analyzer, and provenance migration before fresh current Stage 2/instrumented Stage 3 evidence |
 | AC-2 | gated by AC-1; A2 not reached | source-matched Stage 4 provenance, the transaction's once-only internal essential-tools log, deploy evidence, B--F/Q evidence while deployed, then executable rollback evidence |
 | AC-3/AC-6 | source integrated, including exact SATP-root validation and persistent post-WM accept ownership; execution missing | admitted focused boot/IPC/VFS/runtime/checker logs and ordered live serial receipts |
 | AC-4 | source integrated, including continued acceptance after WM, later-session `accept_resumed`, and version output that contains `Simple` while rejecting `bootstrap seed only`; execution missing | admitted stdout/SSH focused logs and independent live OpenSSH outcomes |
@@ -78,9 +78,12 @@ reviewers are frozen in
 
 The dedicated QEMU lane forwards host port 2222 to guest port 2222. The live
 row is deliberately fail-closed: an unset opt-in is a blocker, not a passing
-skip. The source lanes are integrated. TODO806 owns admitted combined execution;
-TODO808 and TODO809 own focused SSH/WM evidence; TODO807 owns regeneration and
-the seven-dimension SSpec-maintain review once the admitted Stage 4 CLI exists.
+skip. The separate explicit `SIMPLEOS_RV64_SSH_NONLIVE_CHECK=1` mode runs the
+static/checker scenarios and records one visible live non-admission skip; it
+cannot satisfy TODO806. The source lanes are integrated. TODO806 owns admitted
+combined execution; TODO808 and TODO809 own focused SSH/WM evidence; TODO807
+owns regeneration and the seven-dimension SSpec-maintain review once the
+admitted Stage 4 CLI exists.
 
 ## Bootstrap and Terra Diagnostic Boundary (2026-08-14)
 
@@ -203,9 +206,10 @@ the same checker to return `PASS`; the QEMU runner's boolean is not sufficient.
 
 ## Syntax
 
-Run static checks:
+Run the explicit non-live static/checker path:
 
 ```bash
+SIMPLEOS_RV64_SSH_NONLIVE_CHECK=1 \
 bin/simple test test/03_system/os/rv64_ssh_live_login_in_qemu_spec.spl --mode=interpreter --clean --timeout 120 --sequential \
   | tee doc/06_spec/tui/03_system/os/rv64_ssh_live_login_in_qemu_spec.txt
 ```
@@ -240,7 +244,8 @@ production daemon banner, complete KEX, authenticate `root/simpleos`, execute
 `true`, `simple --version`, and `simple.smf --version` on independent
 connections, reject a wrong password, then accept a later good connection.
 Until the serial checker passes and that leg prints `TEST PASSED`, RV64 SSH is
-not production-ready.
+not production-ready. A non-live checker PASS plus its explicit live skip is
+manual-generation evidence only, never live admission evidence.
 
 ## Current Boundary
 
@@ -482,8 +487,14 @@ if _rv64_ssh_live_enabled():
     expect(gate_verdict).to_equal("PASS")
     val run_status = if ok: "TEST PASSED" else: "TEST FAILED"
     expect(run_status).to_equal("TEST PASSED")
+elif _rv64_ssh_nonlive_check_enabled():
+    skip(
+        "live RV64 QEMU lifecycle admission",
+        "explicit non-live checker mode; static/checker scenarios ran, but no live evidence is claimed")
+    print("NONLIVE CHECK PASSED: live RV64 QEMU admission remains pending")
+    expect(_rv64_ssh_live_enabled()).to_be(false)
 else:
-    print("BLOCKED: admitted Stage 4 and retained QEMU evidence are required")
+    print("BLOCKED: set SIMPLEOS_RV64_SSH_LIVE=1 only with an admitted Stage 4 CLI and retained QEMU evidence")
     fail("blocked: live evidence unavailable")
 ```
 

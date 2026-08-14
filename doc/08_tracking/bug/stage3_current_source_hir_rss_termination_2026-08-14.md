@@ -295,16 +295,34 @@ boundary.
 
 ## Restart12 H0 dispatch reconciliation
 
-This record is the current TODO666 authority. M0 is design-complete/actionable,
-but its incompatible full-bootstrap wiring draft and subsequent C
-sampler/analyzer were both reverted at their bounded three-cycle boundaries.
+This record is the current TODO666 authority. M0 remains actionable, but its
+incompatible full-bootstrap wiring draft, subsequent C sampler/analyzer, and
+latest supervisor redo were rejected and reverted at their bounded three-cycle
+boundaries.
 Existing resume-only durable phase/memory sinks remain. Safe phase
 O_EXCL/no-follow publication, canonical full-bootstrap sink wiring, the
-zero-survivor process-group RSS/signal contract above, and compatible provenance
+zero-survivor process-tree RSS/signal contract under the inherited outer PGID,
+and compatible provenance
 remain unimplemented. After acceptance, a fresh session builds a
 current-HEAD Stage 2 in a unique output and runs exactly one instrumented Stage
-3, retaining phase, memory, process-group, RSS, source/runtime/tool provenance,
+3, retaining phase, memory, process-tree, RSS, source/runtime/tool provenance,
 manifests, logs, and hashes. Historical `e383...` predates the complete
 `d99deb3` snapshot runtime provider. Its 41,394 MiB interrupted high-water mark
 does not establish the completion RAM requirement or select Phase 2 parsing
 versus Phase 3 HIR as owner. No fourth run is permitted in this session.
+
+## Restart12 supervisor redo terminal review
+
+A later three-cycle supervisor-only redo did not start Stage 3. It repaired the
+earlier shell/Perl facade error, descriptor-walked exclusive receipt creation,
+durable record writes, explicit x86_64-Linux gating, inherited outer-PGID
+recording, identity-checked TERM/KILL, bounded configuration, and several
+adversarial cases. Independent final review still rejected activation: any
+post-fork handshake or evidence failure could exit without cleaning the child;
+the deadline path could publish `survivors > 0` and abandon those processes;
+and a complete sampling batch could exceed the advertised caps. The draft and
+its focused test were reverted after the third cycle. TODO666 therefore retains
+total cleanup from fork through exit, hard caps, zero-survivor termination,
+strict analyzer/correlation, safe phase publication, full/resume wiring parity,
+provenance migration, and the missing adversarial tests. This is a source/evidence
+implementation blocker, not authorization for another Stage-3 run here.
