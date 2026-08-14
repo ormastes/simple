@@ -91,6 +91,13 @@ forged capacities before admission, so zero cannot reopen an unbounded queue.
 The high-priority reserve is active only when priority admission is enabled;
 the default normal-only mailbox retains its full configured finite capacity.
 
+The compiler-private `PoolStateV1` wrapper is a separate internal runtime
+pilot: it accepts only a direct `fn(i64) -> i64` plus inline `i64` input,
+holds bounded credit until the caller joins and releases the scalar result, and
+uses opaque runtime handles. It is not exported as `ThreadPool`, does not
+accept closures or heap graphs, and requires native-runtime evidence before a
+public task API can rely on it.
+
 The scalar `BoundedChannel` implementation also uses a consumed-prefix cursor:
 receive is normally O(1), and backing storage is compacted only when a later
 send needs capacity. This retains its existing scalar sentinel API and does

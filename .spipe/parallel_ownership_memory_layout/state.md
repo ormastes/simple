@@ -823,3 +823,8 @@ in-progress
   handle and releases its callback/result/done/runtime-handle registry rows.
   This bounds joined-task retention while preserving repeat join values; the
   unsynchronized global registry remains outside the admitted WP-18 API.
+- impl: Added compiler-private `PoolStateV1` / `PoolTaskI64V1` wrappers over
+  the already-registered runtime v1 ABI. They admit direct scalar functions
+  only, retain credit through join+release, and keep Full/Closed/Invalid/stale
+  states explicit without `GLOBAL_*` task registries. Native callback evidence
+  remains the admission gate before public export or legacy-pool replacement.
