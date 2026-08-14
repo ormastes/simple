@@ -54,21 +54,21 @@ stale artifacts are diagnostics, never PASS evidence.
 
 This section is the current dispatch authority. Later work-package prose records
 the implementation history, but it does not override the statuses, dependencies,
-commands, or evidence rules below. The audit is against commit
-`bc32e19f4fec692d13a759bd127372b5c270113c` and the retained artifacts that are
-present in this worktree.
+commands, or evidence rules below. The integrated baseline is commit
+`2ab26e0cf4bd9d71ab08f09de394e11c20efbbcc` plus the current working source and
+retained artifacts in this worktree.
 
 | AC | Current proof | Audit verdict | Remaining proof |
 |---|---|---|---|
-| AC-1 | Final cycle 3 repaired the grammar and verification-contract owner frontiers and published a current-source pure-Simple Stage 2 at `build/restart12-riscv-current/stage2/x86_64-unknown-linux-gnu/simple`, SHA-256 `e383d2c6ea86e63ba6805cf3478f723cecd673c2e141be86b3cf1150d14e9378`. Its Stage 2 log SHA-256 is `db7907064858b472ffadf3cc9527f73acfaf4e80a5f3156d203ba84b924fb167`. At 09:52:45 host `earlyoom` sent Stage 3 SIGTERM when `simple` reached 41,394 MiB RSS on a no-swap host with less than 10% free memory; exit 143 followed 5.4 seconds later. Its empty log hashes to `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`. | **STAGE 2 PASS; HOST-MEMORY BLOCKER / TODO666.** The three fix cycles are exhausted. Repeating the same transaction or resume is forbidden by the iteration guard. | Provide a host/supervisor window with enough memory or swap for the unchanged, admitted Stage 2 to finish Stage 3. Retain the Stage 3 log, manifest, executable hash, and supervisor/host-memory provenance. |
+| AC-1 | Historical cycle 3 published Stage 2 SHA-256 `e383d2c6ea86e63ba6805cf3478f723cecd673c2e141be86b3cf1150d14e9378`, then `earlyoom` terminated Stage 3 at a 41,394 MiB interrupted high-water mark. That parent predates the complete `d99deb3` snapshot runtime provider and is not current-source admission authority. Current HIR owner reuse/in-place reset and the resume wrapper's durable phase/memory sinks remain unexecuted; canonical full-bootstrap wiring is not landed. The unresolved boundary is Phase 2 parsing versus Phase 3 HIR retention. | **INSTRUMENTATION/ADMISSION OPEN / TODO666.** Host capacity alone is not a proved root cause or remedy. No fourth run is permitted in this session. | Implement/review safe phase O_EXCL/no-follow publication, full-bootstrap sink wiring, process/RSS/signal supervision, and compatible provenance migration; then build a fresh current-HEAD Stage 2 in a unique output and run one instrumented Stage 3. |
 | AC-2 | Cycle 3 reached Stage 2 publication but external SIGTERM/143 stopped Stage 3. No Stage 3/4 candidate, essential-tools smoke, deploy, or rollback evidence exists. | **GATED ON AC-1 / TODO667.** A2 was not reached. | After TODO666 admits Stage 3, continue the same source lineage through Stage 4 and its internal essential-tools smoke exactly once, then deploy. Keep that deployment active through B--F/Q and roll back only afterward, unless an isolated immutable bundle binds candidate, deploy, downstream, and rollback evidence. |
 | AC-3 | Boot-gate owners now validate active Sv39 against SATP mode and the exact root PPN, preserve PID1/network ordering, and keep the production accept/WM loop alive after the first presented frame. Negative source specs cover mismatched SATP root and later-session recovery. | **SOURCE COMPLETE; executable and live proof missing.** | Run B/C focused rows on the admitted Stage 4, then retain ordered SATP/Sv39/PID1/TX/RX/service/SSHD receipts from the one live QEMU run. |
-| AC-4 | Filesystem exec, attempt-local bounded stdout/status capture, and independent-session host contracts exist. The AES-256-GCM path now passes authenticated decrypted bytes into the generic parser; all known-payload sequence/length builders and bypasses are removed and rejected by the source contract. | **SOURCE COMPLETE; executable and OpenSSH proof missing.** | Run D focused rows, then retain actual decrypted-byte parsing, exact stdout/status, bad-auth, later-good-session, and persistent accept-resumed correlations from TODO806. |
+| AC-4 | Filesystem exec, attempt-local bounded stdout/status capture, and independent-session host contracts exist. AES-256-GCM authenticated bytes feed the generic parser and known-payload builders/bypasses are rejected. The host oracle now requires both version commands to contain `Simple` and rejects `bootstrap seed only`, rather than accepting arbitrary nonempty output. | **SOURCE COMPLETE; executable and OpenSSH proof missing.** | Run D focused rows, then retain actual decrypted-byte parsing, exact stdout/status/version identity, bad-auth, later-good-session, and persistent accept-resumed correlations from TODO806. |
 | AC-5 | The production WM producer, authenticated sender, compositor/Engine2D correlation, scanout checks, and byte-zero wire owner exist in source. | **SOURCE COMPLETE; executable and frame proof missing.** | Consume B's admitted IPC receipts, run E focused rows, then retain PID/liveness/scene/revision/scanout/QMP evidence in TODO806/TODO809. |
 | AC-6 | Shared interfaces and focused source specs exist, including SATP root/readback consistency, persistent post-WM accept ownership, and rejection of later sessions that do not resume accept. | **SOURCE COMPLETE; checker-loaded results missing.** | Run B/C/D/F focused specs once on the admitted Stage 4 and retain every log under the canonical artifact root. |
 | AC-7 | The executable scenario and a prepared manual mirror exist; the mirror explicitly says regeneration is pending. | **PREPARED; generation and seven-score review missing.** | Run F's focused SSpec, `sspec-maintain scan`, and `spipe-docgen` in order; retain runtime hash, scan/preview/rollback, zero-stub output, and reviewed mirror (TODO807). |
-| AC-8 | Canonical plan and task breakdown name the lanes, owners, commands, artifacts, merge owner, reviewer, and statuses. | **DOCUMENTATION CORRECTED; root acceptance pending.** | Highest-capability root review of this redo ledger; no runtime dependency. |
-| AC-9 | QEMU guide plus RISC-V, WM, and kernel-exec expert handoffs link this plan and preserve the fail-closed evidence boundary. | **DOCUMENTATION CORRECTED; root acceptance pending.** | Highest-capability root review for freshness; no runtime dependency. |
+| AC-8 | Canonical plan and task breakdown separate locally actionable memory/source/docs rows from Stage 4/live-only evidence and name exact commands, artifacts, owners, merge owner, reviewer, and statuses. | **ACCEPTED: H0 static correction and root review.** | No runtime dependency; reopen only if dispatch or evidence ownership changes. |
+| AC-9 | QEMU/bootstrap guides, current RSS authority, historical bug boundary, and RISC-V/WM/kernel-exec expert handoffs preserve the fail-closed evidence contract. | **ACCEPTED: H0 static correction and root review.** | No runtime dependency; keep synchronized with TODO666/667 and live evidence status. |
 | AC-10 | The source handoff was committed, rebased, pushed, and proven reachable; `/tmp/restart12-riscv.done` records that hash with `WARN`. | **FINAL AC INCOMPLETE.** The WARN receipt proves only the prior handoff integration. | After AC-1..AC-9 pass, run the final ledger once, perform a new locked linear integration, prove reachability and a clean tree, and replace the receipt with `<final-hash> PASS`. |
 
 ### Disjoint redo waves
@@ -79,14 +79,15 @@ borrow another row's files or create an alternate interface.
 
 | Wave | Parallel rows | Start condition | Convergence |
 |---|---|---|---|
-| R0 | H documentation/root review | immediate | H closes AC-8/9 documentation review. Historical A0 and cycles 1--2 are superseded by final cycle 3. |
-| R1 | A1 Stage 3 admission from cycle-3 Stage 2 | external supervisor can run to completion | resume once from the admitted Stage 2 without a source fix; require Stage 3 provenance and executable. The three source-fix cycles are closed. |
+| R0 | M0 memory evidence design/implementation; H documentation/root review | immediate, disjoint source/docs scopes | M0 is design-complete/actionable but implementation is reverted: safe phase publication, full-bootstrap sinks, process/RSS/signal supervisor, and provenance migration remain TODO666; H closes AC-8/9. |
+| R1 | A1 fresh current Stage 2 plus one instrumented Stage 3 | M0 accepted; fresh unique output available | one current-source transaction with phase/memory/process/RSS evidence; no blind retry and no fourth run this session. |
 | R1b | A2 Stage 4 admission | A1 accepted | source-matched Stage 4, essential-tools, and deploy receipts. This row is serial because it owns the deployment transaction; rollback waits until B--F/Q finish unless an immutable isolated evidence bundle is used. |
 | R2 | B boot/IPC/VFS; C paging/PID1/network; D SSH; E WM; F SSpec/manual | A2 admitted Stage 4 and froze hash/provenance | Each row runs its exact focused commands once and writes only its disjoint artifact subtree. No row claims live QEMU PASS. |
 | R3 | Q combined live evidence | B-F focused receipts accepted | one serial QEMU/OpenSSH/QMP run because the rows share port 2222 and canonical output paths. |
 | R4 | G verification/integration | AC-1..AC-9 accepted | one final ledger, highest-capability review, locked fetch/rebase/push/fetch/ancestry proof, clean tree, and PASS receipt. |
 
-The remaining Stage 3 admission is an exact external host-memory blocker. The
+The remaining Stage 3 admission is an unresolved parse/HIR retention and
+evidence-instrumentation blocker, not a proved host-only capacity problem. The
 AES payload shortcut has been removed in source but still lacks admitted live
 proof. The Todo database
 carries the existing prerequisite/admission and retained-runtime-evidence rows
@@ -96,7 +97,7 @@ only; it must not gain duplicate AC or agent-lane rows.
 
 | Blocker | Evidence | Unblock condition |
 |---|---|---|
-| Stage 3 killed for host memory after admitted Stage 2 | Cycle 3 Stage 2 PASS: binary SHA-256 `e383d2c6ea86e63ba6805cf3478f723cecd673c2e141be86b3cf1150d14e9378`, Stage 2 log SHA-256 `db7907064858b472ffadf3cc9527f73acfaf4e80a5f3156d203ba84b924fb167`. At 09:52:45 `earlyoom` sent SIGTERM at 41,394 MiB RSS with less than 10% free memory and no swap; exit 143 followed 5.4 seconds later. The Stage 3 log is empty (`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`) and there is no compiler diagnostic or executable. | **External host-memory blocker / TODO666:** provide enough memory or swap and resume once from this admitted Stage 2 in a new session. The three fix cycles and repeated identical resume attempts are closed by the runaway guard. |
+| Current Stage 3 memory owner unresolved | Historical `e383...` Stage 2 reached an interrupted 41,394 MiB high-water mark but predates the complete snapshot provider. A retained attempt reached only parser source 128/616; HIR-only snapshots cannot distinguish Phase 2 parser retention from Phase 3 HIR retention. | **TODO666:** finish/review safe process-group sampling and full-bootstrap sink wiring, create a fresh current-HEAD Stage 2, then run one capped instrumented Stage 3 in a fresh session. Completion RAM is unknown; do not prescribe memory alone as the fix. |
 | No admissible Stage 4 CLI | Stage 3 did not publish, so no Stage 4, essential-tools, deploy, or rollback evidence exists. | After TODO666 admits Stage 3, finish TODO667's source-matched Stage 4/internal-smoke/deploy transaction. Run B--F/Q while that authority remains deployed, then roll back, or bind all evidence in one immutable isolated bundle. |
 | Sv39/PID1/network owners are source-integrated but unexecuted | The admitted entry consumes SATP readback, real PM PID1 liveness, separate TX/RX/service facts, and SSH readiness/session results in order | Admitted Stage 4 focused checks and live QEMU transcript prove the source path |
 | RV64 SSH source is implemented but unexecuted | Authenticated AES-256-GCM bytes feed the generic parser; the focused source contract rejects the removed known-payload sequence/length builders and bypasses | Admitted Stage 4 execution proves actual decrypted-byte parsing, exact stdout/status, and retained OpenSSH/serial evidence (TODO806/TODO808) |
@@ -162,15 +163,15 @@ No row is complete until the Evidence cell contains one fresh passing result.
 
 | AC | Required gate | Current status | Retained evidence | Owner | Final reviewer |
 |---|---|---|---|---|---|
-| AC-1 | Admit Stage 3 from the current-source cycle-3 Stage 2 | STAGE 2 PASS; Stage 3 externally terminated | Stage 2 binary/log hashes retained; Stage 3 manifest, executable, log, and uninterrupted-supervisor receipt missing | bootstrap sidecar | root highest-capability review |
+| AC-1 | Admit Stage 3 from a fresh current-HEAD Stage 2 with durable memory/process evidence | instrumentation and admission open | historical Stage 2/interruption hashes retained; current phase/memory/process/RSS receipts and Stage 3 authority missing | compiler memory/bootstrap owners | root highest-capability review |
 | AC-2 | Provenance Stage 4 CLI and essential test/lint/duplicate/aggregate markers | GATED ON AC-1; A2 NOT REACHED | Stage 3/4 manifests, hashes, build logs, one internal essential-tools log | bootstrap sidecar | root |
 | AC-3 | Ordered Sv39/PID1/TX/RX/network/SSHD/WM state machine; missing/reordered/duplicate negatives | boot-gate and IPC/VFS source integrated; execution blocked | `src/os/rv64_boot_gate.spl`, IPC lifecycle/VFS focused source; executable result pending | RV64 gate sidecar | root |
-| AC-4 | Real OpenSSH good auth; `true`; `simple --version`; `simple.smf --version`; bad auth; accept resumes after each session | SOURCE COMPLETE: authenticated bytes use generic parsing and shortcut builders are absent; execution BLOCKED | host transcript proving actual decrypted bytes, per-command rc/stdout, serial log, correlation IDs | SSH owner | root |
+| AC-4 | Real OpenSSH good auth; `true`; `simple --version`; `simple.smf --version`; bad auth; accept resumes after each session | SOURCE COMPLETE: authenticated bytes use generic parsing, shortcut builders are absent, and version output must identify `Simple` without `bootstrap seed only`; execution BLOCKED | host transcript proving actual decrypted bytes, per-command rc/stdout/version identity, serial log, correlation IDs | SSH owner | root |
 | AC-5 | Live process-owned WM plus correlated presented frame | production path and WM/Window byte-zero source integrated; execution blocked | PID/liveness receipt, compositor receipt, WM wire focused output, QMP capture metadata | PM/scheduler + compositor owners | root |
 | AC-6 | Shared interfaces and exact/adjacent fail-closed SSpec coverage | source artifacts and IPC/VFS/WM focused coverage integrated; execution BLOCKED | focused unit, IPC/VFS, and SSpec results | RV64 gate sidecar | root |
 | AC-7 | Manual-first steps, zero stubs, seven-score maintain review, mirror and requirement traceability | source artifacts present; generation/review BLOCKED | scan output, preview/rollback record, generated manual | docs/SPipe sidecar | root manual reviewer |
-| AC-8 | This plan and dedicated agent-task breakdown complete | plan/task artifacts present; final source-alignment and evidence-ledger review open | plan and `doc/03_plan/agent_tasks/rv64_sv39_pid1_network_ssh_wm_boot.md` name every lane, owner, resume command/artifact, blocker, merge owner, and reviewer | merge owner | root |
-| AC-9 | Guide, feature/layer expert wikis, architecture/design and bug records current | artifacts present; final reviewer acceptance open | QEMU guide; RISC-V, WM, and kernel-exec expert wikis; Stage 3 bug; architecture/design links | docs sidecar | root |
+| AC-8 | This plan and dedicated agent-task breakdown complete | **ACCEPTED by H0/root static review** | plan/task name every lane, owner, exact command/artifact, blocker, merge owner, and reviewer | merge owner | root |
+| AC-9 | Guide, feature/layer expert wikis, architecture/design and bug records current | **ACCEPTED by H0/root static review** | QEMU/bootstrap guides; RISC-V, WM, kernel-exec expert wikis; historical and current RSS bug authorities | docs sidecar | root |
 | AC-10 | Focused/release guards, locked integration, reachability, clean tree, done receipt | BLOCKED on AC-1..9 | command ledger, commit, ancestry proof, done file | merge owner | root |
 
 ## Work Packages
@@ -206,13 +207,15 @@ the admitted target rather than becoming shared edit hotspots.
 
 ### WP-A — Current-source bootstrap fix and Stage 4 admission
 
-1. Treat stale-parent A0 and cycles 1--2 as superseded diagnostic history.
-2. Preserve final cycle 3's admitted Stage 2 binary and hashes. It repaired both
-   source frontiers and is the current bootstrap authority.
-3. Do not start a fourth fix cycle or repeat the identical resume command in
-   this session. TODO666 now requires an external supervisor that can keep the
-   unchanged Stage 3 build alive to completion.
-4. After Stage 3 publishes, continue that source lineage through Stage 4; do
+1. Treat stale-parent A0, cycles 1--2, and `e383...` as diagnostic history.
+   The historical parent predates the complete `d99deb3` snapshot provider.
+2. M0 implements/reviews safe phase O_EXCL/no-follow publication, canonical
+   full-bootstrap sinks, process/RSS/signal supervision, and compatible
+   provenance migration. The rejected wiring was reverted; only the existing
+   resume wrapper retains durable phase/memory sinks.
+3. In a fresh session, use a unique output to build a fresh current-HEAD Stage
+   2 and run exactly one instrumented Stage 3. No fourth run is permitted here.
+4. After Stage 3 publishes, continue that exact output lineage through Stage 4; do
    not substitute a candidate from another worktree.
 5. Accept the transaction's internal essential-tools smoke exactly once and
    deploy before B--F/Q. Run rollback only after all source-matched downstream
@@ -221,9 +224,13 @@ the admitted target rather than becoming shared edit hotspots.
 Exact commands:
 
 ```sh
-# Run only in a new, sufficiently long supervisor window; do not repeat in this session:
+# A1: run only in a fresh session after M0 acceptance; the output must be absent.
 env SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh \
-  --resume-stage3-from-admitted=build/restart12-riscv-current --jobs=1
+  --full-bootstrap --backend=cranelift --mode=dynload \
+  --output=build/restart12-riscv-current-head --jobs=1
+# A2: only after A1 admits Stage 3 from that same output.
+env SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --resume-stage4-from-admitted=build/restart12-riscv-current-head --deploy --jobs=1
 # after B--F/Q, unless they used TODO667's isolated immutable bundle:
 sh scripts/bootstrap/rollback-bootstrap-deploy.shs x86_64-unknown-linux-gnu
 ```
@@ -308,9 +315,9 @@ Live artifacts (the runner's current canonical paths):
 
 | Lane | Scope | Status |
 |---|---|---|
-| bootstrap sidecar | AC-1/2 same-lineage Stage 3/4 admission, deploy and deferred rollback | **EXTERNAL-SUPERVISOR BLOCKER:** cycle-3 Stage 2 PASS; Stage 3 received SIGTERM/143 with no diagnostic or output; three fix cycles are exhausted |
+| compiler memory/bootstrap owners | AC-1/2 sampling/sink review, fresh current Stage 2, instrumented Stage 3, Stage 4 admission/deploy/deferred rollback | **M0 DESIGN/ACTIONABLE / TODO666:** rejected full-bootstrap wiring was reverted; safe phase publication, full-bootstrap sinks, process/RSS/signal supervision, provenance migration, and parse-vs-HIR ownership remain; no fourth run this session |
 | RV64 gate sidecar | AC-3/6 state, runtime owners, IPC/VFS wire integration, and serial entry integration | boot-gate source exists; wire review and focused/live execution blocked by TODO667 |
-| docs/SPipe sidecar | AC-7 SSpec/manual tooling plus AC-8/9 plan/guide/wiki consistency | AC-8/9 documentation is ready for root review now; only AC-7 execution/docgen/maintain evidence is blocked by TODO667/807 |
+| docs/SPipe sidecar | AC-7 SSpec/manual tooling plus AC-8/9 plan/guide/wiki consistency | AC-8/9 accepted by H0/root static review; only AC-7 execution/docgen/maintain evidence is blocked by TODO667/807 |
 | merge owner | root Codex agent in this detached worktree | active |
 | final reviewer | root normal/highest-capability review | plan findings accepted; no implementation done marks accepted |
 
@@ -318,7 +325,7 @@ Live artifacts (the runner's current canonical paths):
 
 | Agent task | Immediate completion definition | Blocked evidence Todo |
 |---|---|---|
-| A1 compiler admission/recovery | preserve the admitted cycle-3 Stage 2 and hand off one unchanged Stage 3 resume to a sufficiently long external supervisor; no fourth fix cycle | TODO666 retains Stage 2 hashes, SIGTERM/143 boundary, and required Stage 3 authority; TODO667 retains Stage 4/internal-smoke/deploy/deferred-rollback bundle artifacts; compiler bootstrap owner; highest-capability reviewer |
+| M0/A1 compiler memory and admission | review safe sampler/full-bootstrap sinks, then create a fresh current-HEAD Stage 2 and run one instrumented Stage 3 in a fresh session | TODO666 retains historical hashes plus required phase/memory/process/RSS receipts and Stage 3 authority; TODO667 retains Stage 4/internal-smoke/deploy/deferred-rollback bundle artifacts; compiler memory/bootstrap owners; highest-capability reviewer |
 | B1 boot-state/IPC/VFS owner | source integrated: destroy syscall, named service/anonymous reply framing, public VFS wire, manager routes, and FD VFS READ/WRITE/SEEK/close; after TODO667 run the full B ledger once, then consume F's one-run focused-system-SSpec output before live execution | TODO806: focused outputs at `build/os/rv64-ssh-live/focused/`, plus ordered/sabotaged live serial; RV64 gate owner; root reviewer |
 | C1 runtime ownership | implementation handoff prepared; after TODO667 run source check and combined live gate once | TODO806: SATP, PID1 liveness, TX/RX/service receipts and hashes; runtime owner; root reviewer |
 | D1 SSH owner | source complete: authenticated decrypted bytes feed the generic parser and source contracts reject the removed sequence/length builders; after TODO667 run focused capture/SSH and VFS-wire specs and the combined live gate once | TODO808: exact bytes/status/empty/nonzero/truncation; TODO806: independent OpenSSH outcomes; SSH owner; root reviewer |
@@ -328,8 +335,8 @@ Live artifacts (the runner's current canonical paths):
 
 There is no physical-hardware dependency for this QEMU goal. Lock contention is
 an operational retry condition, not a feature Todo. The compiler source fixes
-and Stage 2 are complete; Stage 3 now needs a sufficiently memory-provisioned
-external supervisor window. The SSH payload shortcut is removed but needs live
+and historical Stage 2 are diagnostic only; M0 and fresh instrumented Stage 3
+evidence remain. The SSH payload shortcut is removed but needs live
 proof. Other
 lanes remain actionable only where their declared prerequisites permit.
 

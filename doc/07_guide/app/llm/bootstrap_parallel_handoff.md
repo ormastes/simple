@@ -34,8 +34,8 @@ release or platform claim.
 
 ## Current x86 transaction status (2026-08-14)
 
-Final cycle 3 repaired both source frontiers and published current-source Stage
-2, binary SHA-256
+Historical cycle 3 repaired two source frontiers and published Stage 2,
+binary SHA-256
 `e383d2c6ea86e63ba6805cf3478f723cecd673c2e141be86b3cf1150d14e9378`,
 log SHA-256
 `db7907064858b472ffadf3cc9527f73acfaf4e80a5f3156d203ba84b924fb167`.
@@ -43,17 +43,26 @@ At 09:52:45 host `earlyoom` sent Stage 3 SIGTERM at 41,394 MiB RSS with less
 than 10% free memory and no swap; exit 143 followed 5.4 seconds later. The
 empty log hashes to
 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
-The three fix cycles are exhausted. TODO666 requires one unchanged resume on a
-new host/supervisor with enough memory or swap; TODO667 remains gated.
+That parent predates the complete `d99deb3` memory-snapshot runtime provider;
+41,394 MiB is an interrupted high-water mark, not a proved completion budget.
+The current authority is
+`doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`:
+Phase 2 parser versus Phase 3 HIR retention is unresolved. TODO666 is
+open/actionable: the incompatible M0 draft was reverted; existing resume-only
+durable sinks remain, while safe phase publication, full-bootstrap wiring,
+process/RSS/signal supervision, and provenance migration. After M0 acceptance,
+build a fresh current-HEAD Stage 2 and run one instrumented Stage 3 in a fresh session. No fourth run is permitted in
+this session. TODO667 remains gated.
 
 ## Exact Gate 1-7 sequence
 
 Run and record these in order. Do not skip a gate or restart with a different
 candidate between gates.
 
-1. **Gate 1, Stage 3 admission:** the Stage 3 owner records the canonical pure-
-   Simple build, exact identity, rejection probe, frontend admission, path, and
-   SHA-256.
+1. **Gate 1, Stage 3 admission:** after M0 acceptance, run a fresh unique-output
+   current-HEAD Stage 2 plus one instrumented Stage 3; retain phase, memory,
+   process-group, RSS, exact identity, rejection probe, frontend admission,
+   path, manifests, and SHA-256.
 2. **Gate 2, x86_64 Linux Stage 4:** build the non-stub pure-Simple candidate
    from the Gate 1 lineage and retain build/progress/RSS receipts.
 3. **Gate 3, candidate sanity/hash:** freeze the candidate path and SHA-256;

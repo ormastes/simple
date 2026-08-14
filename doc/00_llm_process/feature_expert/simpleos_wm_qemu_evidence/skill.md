@@ -232,13 +232,17 @@ presented frame instead of returning from the daemon, and later accepted SSH
 sessions remain subject to terminal and accept-resumed validation. This is a
 source correction only until the admitted focused and live rows pass.
 
-Final cycle 3 completed current-source Stage 2 (binary SHA-256
+Historical cycle 3 published Stage 2 (binary SHA-256
 `e383d2c6ea86e63ba6805cf3478f723cecd673c2e141be86b3cf1150d14e9378`,
 log SHA-256
 `db7907064858b472ffadf3cc9527f73acfaf4e80a5f3156d203ba84b924fb167`).
 Host `earlyoom` then terminated Stage 3 at 41,394 MiB RSS on a no-swap host
-with less than 10% free memory; exit 143 followed 5.4 seconds later. TODO666
-owns one unchanged resume on a host with enough memory or swap. TODO667/A2
+with less than 10% free memory; exit 143 followed 5.4 seconds later. That parent
+predates the complete snapshot provider. TODO666 is open/actionable: the M0
+draft was reverted, resume-only durable sinks remain, and full-bootstrap
+wiring plus admission-grade supervisor/provenance must still land before a
+fresh current-HEAD Stage 2 and one instrumented Stage 3 run in a fresh session;
+the interrupted high-water mark is not a proved RAM requirement. TODO667/A2
 remains gated; no Stage 3/4, deploy, essential-smoke, or rollback evidence exists.
 
 P1c IPC service transport is shared with the WM path: copied traffic is

@@ -61,13 +61,13 @@ current requirement audit is:
 
 | AC | Status | Authoritative next evidence |
 |---|---|---|
-| AC-1 | **STAGE 2 PASS; HOST-MEMORY BLOCKER / TODO666** | cycle-3 Stage 2 binary SHA-256 `e383d2c6ea86e63ba6805cf3478f723cecd673c2e141be86b3cf1150d14e9378`; Stage 2 log SHA-256 `db7907064858b472ffadf3cc9527f73acfaf4e80a5f3156d203ba84b924fb167`; resume Stage 3 only on a host with enough memory or swap |
+| AC-1 | **M0 DESIGN/ACTIONABLE / TODO666** | historical `e383...` predates complete snapshot authority; the incompatible full-bootstrap draft was reverted. Implement safe phase publication, full-bootstrap sinks, process/RSS/signal supervision, and provenance migration before fresh current Stage 2/instrumented Stage 3 evidence |
 | AC-2 | gated by AC-1; A2 not reached | source-matched Stage 4 provenance, the transaction's once-only internal essential-tools log, deploy evidence, B--F/Q evidence while deployed, then executable rollback evidence |
 | AC-3/AC-6 | source integrated, including exact SATP-root validation and persistent post-WM accept ownership; execution missing | admitted focused boot/IPC/VFS/runtime/checker logs and ordered live serial receipts |
-| AC-4 | source integrated, including continued acceptance after the first WM frame and later-session `accept_resumed` validation; execution missing | admitted stdout/SSH focused logs and independent live OpenSSH outcomes |
+| AC-4 | source integrated, including continued acceptance after WM, later-session `accept_resumed`, and version output that contains `Simple` while rejecting `bootstrap seed only`; execution missing | admitted stdout/SSH focused logs and independent live OpenSSH outcomes |
 | AC-5 | source integrated; execution missing | admitted WM focused logs and PID/scene/revision/scanout/QMP correlation |
 | AC-7 | prepared; tool review missing | focused SSpec, seven-score maintain scan, zero-stub docgen, and highest-capability manual review |
-| AC-8/AC-9 | documentation corrected; root review pending | canonical plan/task/guide/expert consistency review; no runtime dependency |
+| AC-8/AC-9 | **ACCEPTED by H0/root static review** | canonical plan/task/guide/expert/current-RSS consistency is runtime-independent |
 | AC-10 | prior WARN push reachable; final acceptance incomplete | final post-AC integration, ancestry/clean-tree proof, and PASS receipt |
 
 The disjoint redo owners, exact commands, artifact paths, merge owner, and
@@ -97,8 +97,14 @@ At 09:52:45 host `earlyoom` sent Stage 3 SIGTERM when `simple` reached
 followed 5.4 seconds later. The empty Stage 3 log SHA-256 is
 `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
 No Stage 3/4, essential-smoke, deploy, or rollback evidence was produced. The
-three fix cycles are exhausted, so the identical resume must wait for a new,
-sufficiently memory-provisioned host/supervisor window. Cycle 2's observed log
+`e383...` parent predates the complete `d99deb3` snapshot runtime provider and
+cannot establish current-source admission. The interrupted 41,394 MiB value is
+only a high-water mark, not a proved completion requirement. TODO666 first
+implements/reviews M0; existing resume-only durable sinks remain, but
+full-bootstrap wiring and admission-grade supervision/provenance are not
+landed. It then builds a fresh current-HEAD Stage 2 and runs one instrumented
+Stage 3 in a fresh session; no
+fourth run is permitted here. Cycle 2's observed log
 hash was `7f50a19470adec9fa508caf4427e159f9dcf150e6ae6e814f0204cd806320f16`;
 cycle 3 reused that path, so the cycle-2 bytes are no longer retained.
 

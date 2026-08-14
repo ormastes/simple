@@ -221,14 +221,18 @@ PID1 must come from the process owner before network or service readiness; a
 later SSH/WM marker cannot imply either prerequisite. The lane remains blocked
 until a provenance-admitted Stage 4 CLI exists and every ordered receipt passes
 the shared fail-closed checker.
-Final cycle 3 supersedes earlier bootstrap diagnostics. Current-source Stage 2
-passed (binary SHA-256
+Historical cycle 3 published Stage 2 (binary SHA-256
 `e383d2c6ea86e63ba6805cf3478f723cecd673c2e141be86b3cf1150d14e9378`,
 log SHA-256
 `db7907064858b472ffadf3cc9527f73acfaf4e80a5f3156d203ba84b924fb167`).
 Host `earlyoom` then sent Stage 3 SIGTERM at 41,394 MiB RSS on a no-swap host
-with less than 10% free memory; exit 143 followed 5.4 seconds later. TODO666
-owns one unchanged resume on a sufficiently memory-provisioned host. TODO667/A2
+with less than 10% free memory; exit 143 followed 5.4 seconds later. That parent
+predates the complete `d99deb3` snapshot provider and is diagnostic only.
+TODO666 is open/actionable. Its incompatible M0 draft was reverted; existing
+resume-only durable sinks remain, while safe phase publication, full-bootstrap
+wiring, process/RSS/signal supervision, and provenance migration are not
+landed. Then a fresh current-HEAD Stage 2 and one instrumented Stage 3 run in a
+fresh session; parser versus HIR retention remains unresolved. TODO667/A2
 remains gated; no Stage 3/4, essential smoke, deploy, or rollback exists.
 Source integration includes the IPC/VFS lifecycle wave: syscall-18
 owner-checked port destruction, unique named VFS discovery, copied request/raw
@@ -262,5 +266,6 @@ These changes strengthen AC-3/AC-4/AC-6 source status but are not runtime PASS.
 After Stage 4 admission, boot-owner, IPC/VFS, SSH, WM, and SSpec/manual focused
 rows run in parallel with disjoint log names. The combined QEMU row is serial
 because it owns host port 2222 and the canonical serial/OpenSSH/QMP artifacts.
-AC-8/AC-9 documentation review has no runtime dependency; the prior reachable
+AC-8/AC-9 is accepted by H0/root static review and has no runtime dependency;
+the prior reachable
 WARN push is not final AC-10 evidence.

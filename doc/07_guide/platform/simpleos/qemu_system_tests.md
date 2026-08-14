@@ -38,16 +38,20 @@ accept-resumed correlation receipt. A fixed combined command, canned stdout, ban
 marker-only PID1, or fixed rectangle/string WM fixture is not production boot
 evidence.
 
-As of 2026-08-14 this lane has no provenance-admitted Stage 4 full CLI. Final
-cycle 3 published current-source Stage 2 (binary SHA-256
+As of 2026-08-14 this lane has no provenance-admitted Stage 4 full CLI.
+Historical cycle 3 published Stage 2 (binary SHA-256
 `e383d2c6ea86e63ba6805cf3478f723cecd673c2e141be86b3cf1150d14e9378`,
 log SHA-256
 `db7907064858b472ffadf3cc9527f73acfaf4e80a5f3156d203ba84b924fb167`).
 Host `earlyoom` then sent Stage 3 SIGTERM at 41,394 MiB RSS on a no-swap host
 with less than 10% free memory; exit 143 followed 5.4 seconds later. No Stage
-3/4, deployment, rollback, or essential smoke occurred. TODO666 now owns one
-unchanged resume on a sufficiently memory-provisioned host; TODO667/A2 remains
-gated. Earlier cycles and probe rows are superseded diagnostics.
+3/4, deployment, rollback, or essential smoke occurred. That Stage 2 predates
+the complete `d99deb3` snapshot runtime provider. TODO666 is open/actionable:
+the incompatible M0 draft was reverted, while resume-only durable sinks remain.
+Safe phase publication, full-bootstrap wiring, supervisor/provenance migration,
+a fresh current-HEAD Stage 2, and one
+instrumented Stage 3 in a fresh session; the 41,394 MiB value is an interrupted
+high-water mark, not a proved RAM requirement. TODO667/A2 remains gated.
 The current source lanes B-F are integrated; this statement blocks executable
 evidence only, not additional speculative source rewrites. In particular, the
 IPC/VFS wave has syscall-18 owner-only destruction, named-service discovery,
@@ -99,8 +103,8 @@ The remaining execution wave is deliberately parallel after Stage 4
 admission: IPC/VFS/SOSIX, boot-owner, SSH, WM, and SSpec/manual owners write
 disjoint focused logs. The combined QEMU/OpenSSH/QMP run is then serial because
 it owns fixed port 2222 and the canonical live artifact paths. AC-8/AC-9
-documentation review can proceed while TODO666's local typed-owner fix runs and must not be
-misclassified as runtime-blocked. The earlier reachable `WARN` receipt proves
+documentation is accepted by the H0/root static review and has no runtime
+dependency. The earlier reachable `WARN` receipt proves
 only the source handoff; final AC-10 still requires a post-acceptance `PASS`
 receipt.
 

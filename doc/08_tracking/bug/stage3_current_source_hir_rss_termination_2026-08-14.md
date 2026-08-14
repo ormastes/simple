@@ -292,3 +292,19 @@ The session's three-cycle cap is exhausted. Do not make a fourth sampler or
 analyzer attempt, and do not start Stage 3, in this session. Resume in a fresh
 scoped lane from this jointly frozen producer/consumer and zero-survivor
 boundary.
+
+## Restart12 H0 dispatch reconciliation
+
+This record is the current TODO666 authority. M0 is design-complete/actionable,
+but its incompatible full-bootstrap wiring draft and subsequent C
+sampler/analyzer were both reverted at their bounded three-cycle boundaries.
+Existing resume-only durable phase/memory sinks remain. Safe phase
+O_EXCL/no-follow publication, canonical full-bootstrap sink wiring, the
+zero-survivor process-group RSS/signal contract above, and compatible provenance
+remain unimplemented. After acceptance, a fresh session builds a
+current-HEAD Stage 2 in a unique output and runs exactly one instrumented Stage
+3, retaining phase, memory, process-group, RSS, source/runtime/tool provenance,
+manifests, logs, and hashes. Historical `e383...` predates the complete
+`d99deb3` snapshot runtime provider. Its 41,394 MiB interrupted high-water mark
+does not establish the completion RAM requirement or select Phase 2 parsing
+versus Phase 3 HIR as owner. No fourth run is permitted in this session.

@@ -1,5 +1,10 @@
 # Stage 3 self-host post-HIR segfault (2026-08-14)
 
+> Historical frontier record. The current dispatch authority is
+> `stage3_current_source_hir_rss_termination_2026-08-14.md`. In particular,
+> historical Stage 2 `e383...` predates the complete `d99deb3` snapshot runtime
+> provider and cannot authorize an unchanged current-source resume.
+
 ## Reproducer
 
 From a clean `origin/main` worktree, run:
@@ -457,9 +462,14 @@ the following retained boundary:
   `7f50a19470adec9fa508caf4427e159f9dcf150e6ae6e814f0204cd806320f16`,
   but cycle 3 reused that path; the cycle-2 bytes are no longer retained.
 
-This is an external host-memory termination, not a new compiler diagnostic and
-not proof of the historical post-HIR SIGSEGV. The three source-fix cycles and
-identical resume attempts are exhausted. TODO666 now owns one unchanged resume
-from the admitted Stage 2 on a new host/supervisor window with enough memory or
-swap. Stage 4, essential-tools smoke, deployment, downstream evidence, and
-rollback remain gated by TODO667.
+This was an external termination, not a new compiler diagnostic and not proof
+of the historical post-HIR SIGSEGV. Later current-source work added HIR owner
+reuse/in-place reset plus durable phase/memory sinks, while runtime provider
+commit `d99deb3` landed after the `e383...` parent. Therefore this record does
+not authorize an unchanged resume or establish host RAM as the root cause.
+TODO666 is open/actionable. The incompatible M0 wiring was reverted; existing
+resume-only durable sinks remain, while full-bootstrap wiring and safe
+supervisor/provenance must land before a fresh current-HEAD Stage 2 and one
+instrumented Stage 3 in a fresh session. No fourth run is
+permitted here. Stage 4, essential-tools smoke, deployment, downstream
+evidence, and rollback remain gated by TODO667.

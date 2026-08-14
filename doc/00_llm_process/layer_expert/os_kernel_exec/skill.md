@@ -337,14 +337,18 @@ desktop/scanout/framebuffer and mounted-filesystem toolchain execution to the
 same kernel/image hashes. Canonical details and blocker truth:
 `doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`.
 
-Final cycle 3 completed current-source Stage 2 (binary SHA-256
+Historical cycle 3 published Stage 2 (binary SHA-256
 `e383d2c6ea86e63ba6805cf3478f723cecd673c2e141be86b3cf1150d14e9378`,
 log SHA-256
 `db7907064858b472ffadf3cc9527f73acfaf4e80a5f3156d203ba84b924fb167`).
 Host `earlyoom` terminated Stage 3 at 41,394 MiB RSS on a no-swap host with
-less than 10% free memory; exit 143 followed 5.4 seconds later. TODO666 owns
-one unchanged resume on a host with enough memory or swap; no fourth fix cycle
-is permitted. TODO667/A2 remains gated. After a provenance-admitted Stage 4
+less than 10% free memory; exit 143 followed 5.4 seconds later. That parent
+predates complete snapshot-provider authority. TODO666 is open/actionable: the
+M0 draft was reverted; resume-only durable sinks remain, while safe phase
+publication, full-bootstrap wiring, supervisor/provenance migration, a fresh
+current-HEAD Stage 2, and one instrumented Stage 3 remain. Parser versus HIR
+retention is unresolved and no fourth run is
+permitted here. TODO667/A2 remains gated. After a provenance-admitted Stage 4
 exists, this layer's stdout/SSH evidence may run in parallel with the
 disjoint IPC/VFS, boot-owner, WM, and manual rows. The source now keeps the
 daemon accepting after WM admission and rejects later accepted sessions that

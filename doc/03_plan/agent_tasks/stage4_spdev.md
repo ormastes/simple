@@ -1,10 +1,11 @@
 # Stage 4 SPipe agent tasks
 
-## Current status after final cycle 3 (2026-08-14)
+## Current status after final cycle 3 (superseded 2026-08-14)
 
-This is the current status. The historical snapshot below is retained for
-diagnostic context and is explicitly stale; it must not be used as current
-admission evidence.
+This section is historical diagnostic context. The current authority is
+TODO666 plus
+`doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`;
+the cycle-3 Stage 2 below must not be used as current admission evidence.
 
 - Final cycle 3 repaired both source frontiers and published current-source
   Stage 2 at `build/restart12-riscv-current/stage2/x86_64-unknown-linux-gnu/simple`.
@@ -17,10 +18,12 @@ admission evidence.
   10% free memory. It exited 5.4 seconds later. The empty Stage 3 log SHA-256 is
   `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`;
   no Stage 3 executable was produced.
-- This is an **EXTERNAL HOST-MEMORY BLOCKER**, not another compiler diagnostic.
-  The three fix cycles and identical resume attempts are exhausted. Resume the
-  unchanged admitted Stage 2 only in a new host/supervisor window with enough
-  memory (or swap) to finish Stage 3. A2 remains gated; no Stage 4,
+- The 41,394 MiB reading is an interrupted high-water mark, not a proved root
+  cause, completion budget, or remedy. That Stage 2 predates the complete
+  snapshot provider. TODO666 first owns admission-grade phase publication,
+  full-bootstrap evidence wiring, process/RSS/signal supervision, and compatible
+  provenance verification; a fresh current-HEAD Stage 2 then runs one
+  instrumented Stage 3 in a fresh session. A2 remains gated; no Stage 4,
   essential-smoke, deploy, or rollback evidence exists.
 
 - SDK contract preparation is implemented, frontier-reviewed, and statically
@@ -59,11 +62,11 @@ source and candidate lineage.
 
 | Order | Gate / lane | Canonical command or authoritative owner evidence | Required result |
 |---|---|---|---|
-| 1 | Stage 2/3 admission | Preserve the admitted cycle-3 Stage 2 and resume it once only in a new host/supervisor window with enough memory or swap. Retain Stage 2/3 logs, host-memory/supervisor evidence, authority/runtime identities, manifests, and hashes from one lineage. | Admitted pure-Simple Stage 2 and Stage 3; cycle-3 Stage 2 is current authority and its earlyoom boundary is blocker evidence |
-| 2 | x86_64 Linux Stage 4 | Continue the admitted lineage from Gate 1; do not substitute another worktree's candidate. Retain `stage4-native-build.log`, progress events/RSS, source identity, cache identity, and candidate lineage. | Fresh non-stub pure-Simple Stage 4 candidate from the Gate 1 Stage 3 lineage |
+| 1 | Stage 2/3 admission | After TODO666's M0 evidence owners are accepted, run `env SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --backend=cranelift --mode=dynload --output=build/restart12-riscv-current-head --jobs=1` in a fresh session and absent output. Because `--full-cli`/`--deploy` is absent, this invocation stops after admitted Stage 3. Retain phase/memory/process/RSS evidence, Stage 2/3 logs, authority identities, manifests, and hashes. | Fresh current-HEAD admitted pure-Simple Stage 2 and instrumented Stage 3; historical `e383...` is diagnostic only |
+| 2 | x86_64 Linux Stage 4 | Run `env SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-stage4-from-admitted=build/restart12-riscv-current-head --deploy --jobs=1`. Keep the deployment active through source-matched Gate 6 evidence. | Fresh non-stub pure-Simple Stage 4 candidate from Gate 1, internal essential smoke exactly once, and deployment receipt |
 | 3 | Candidate sanity and hash | Continue the same lineage. Record exact path/SHA-256, identity/version/hash, no-stub/no-failure scan, unsupported-command behavior, sanity output, and unchanged candidate bytes. | One frozen candidate admitted for smoke |
 | 4 | Essential-tools smoke | Continue the same transaction; it invokes the checker internally exactly once. Do not start a standalone duplicate smoke. | `stage4-essential-tools-smoke.log` from the same candidate emits all four required markers |
-| 5 | Deployment | Continue the exact cycle-3 transaction; do not start a second invocation. | Install only after Gates 1 through 4 pass against the same lineage; retain deployed hash, pre/post-swap identity, `bin/release/<platform>/simple.pre_deploy`, and post-swap `-c 'print(1+1)'` output. Keep it deployed through source-matched Gate 6 evidence unless an isolated immutable bundle is published. |
+| 5 | Deployment | Gate 2's exact resume invocation owns Stage 4, the internal smoke, and deployment without rebuilding Stage 2/3. | Install only after Gates 1 through 4 pass against the same lineage; retain deployed hash, pre/post-swap identity, `bin/release/<platform>/simple.pre_deploy`, and post-swap `-c 'print(1+1)'` output. Keep it deployed through source-matched Gate 6 evidence unless an isolated immutable bundle is published. |
 | 6 | Linux AArch64 native acceptance | `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --full-cli --jobs=2` on native AArch64 Linux | Retain `build/bootstrap/stage3/aarch64-unknown-linux-gnu/simple`, `build/bootstrap/full/aarch64-unknown-linux-gnu/simple`, hashes, logs, sanity, and all essential markers |
 | 6 | macOS x86_64/AArch64 native acceptance | `sh scripts/bootstrap/bootstrap-from-scratch.sh --backend=llvm --mode=dynload --full-bootstrap --full-cli --jobs=2` on macOS | Retain matching `stage3/<triple>/simple` and `full/<triple>/simple`, hashes, logs, sanity, and all essential markers |
 | 6 | Windows x86_64 native acceptance | `bash scripts/bootstrap/bootstrap-windows.sh --msvc --backend=llvm --mode=dynload --full-bootstrap --no-mcp --jobs=2` in Git Bash/MSYS2 | Retain `build/bootstrap/stage3/x86_64-pc-windows-msvc/simple.exe`, hash, logs, and scoped wrapper evidence; do not add unsupported full-CLI/deploy claims |
