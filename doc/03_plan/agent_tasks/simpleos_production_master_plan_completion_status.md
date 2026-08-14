@@ -136,16 +136,31 @@ gates do not launch servers, and the UNO Q full-stack script currently reports
 the SimpleOS QRB2210 runtime evidence runner unavailable. The connected board
 and `/dev/kvm` must be probed rather than assumed to clear those gaps.
 
-Current evidence: ARM64 mounted ELFs have no file/network syscall implementation
-and ARM `rt_net_*` remains stubbed, so ARM-SRV-1/2 require a substantive
-virtio-net/TCP plus durable FAT32 implementation. The physical board identifies
-as Arduino Imola/aarch64 Debian 13 with Adreno 702/Turnip, but its canonical
-gate stops at `pure-simple-runtime-missing` and the SimpleOS evidence executable
-is absent. These are blockers, not acceptance credit.
+Current source now contains a current-source filesystem payload, a bounded
+VirtIO-MMIO NIC transport, TTBR0-aware user copies, capability-gated direct
+socket dispatch, FAT32 metadata sync, and negotiated VirtIO block FLUSH. This
+is static implementation progress only. Canonical DB atomic persistence still
+depends on unavailable hosted runtime file/process/time/liveness owners, and
+FAT32 replacement rename is non-atomic, so the payload fails closed before
+publishing listeners. The host is also below the 5 GiB storage admission floor
+and lacks the required ARM sysroot/runtime payload, so no build/QEMU/reboot row
+was executed or credited. The physical board identifies as Arduino
+Imola/aarch64 Debian 13 with Adreno 702/Turnip, but its canonical gate stops at
+`pure-simple-runtime-missing` and the SimpleOS evidence executable is absent.
+These are blockers, not acceptance credit.
 
-The CPU/server board lane also found no SimpleOS server executable; web
-cross-build stops in HIR and DB cross-link lacks target compression/terminal
-libraries. The fresh Linux benchmark is blocked because the HTTP artifact does
+Final static verification remains FAIL: the ARM file handler recopies through
+an unavailable/non-TTBR0 owner, capability checks precede path normalization,
+and file close can observe a stale task FD context. A two-cycle cached compiler
+prerequisite attempt also stopped on unresolved module `GlobalLoad` owners and
+forbidden stub fallback. No ARM/UNO/matrix acceptance or delivery row closes,
+and this lane is not authorized for a normal push to `main`.
+
+The CPU/server board lane also found no SimpleOS server executable. The web
+example's qualified-import HIR defect is fixed and source-contract diagnostics
+pass, but a source-matched admitted target compiler/runtime and QRB2210
+SimpleOS boot/download owner remain absent. The fresh Linux benchmark is
+blocked because the HTTP artifact does
 not bind after readiness and DB insertion hits an invalid-array-handle ABI.
 Consequently no parity, optimization, or CUDA row closes; the retained reports
 and bug record are diagnostic WARN evidence only.
@@ -310,6 +325,24 @@ physical-hardware/secure-boot/installer/SBOM are genuinely host-blocked and
 remain honest resume-planned rows, per the SPipe forced-PASS ban. The full
 8-phase program is a multi-session effort; this document is its precise resume
 map.
+
+### Restart12 server continuation — final cycle-3 disposition (2026-08-14)
+
+- [ ] ARM QEMU web/filesystem execution receipt
+- [ ] ARM QEMU durable database/reboot receipt
+- [ ] RecoverableReplaceV1 13-seam crash/replay receipt
+- [ ] Physical UNO Q SimpleOS CPU server receipt
+- [ ] Physical UNO Q SimpleOS GPU submit/fence/readback receipt
+
+Source/static owners for ARM VirtIO networking, EL0 copy/capability boundaries,
+the filesystem payload, target runtime, FAT32 recoverable replace, and the
+frozen QEMU harness are authored. Final review permits a non-release WARN
+checkpoint only: `simpleos-arm64-server-cap-status.spl` still reaches
+`fat32_atomic_replace_caps()` before mounted globals are published, so its
+`ready` result is deterministically false and the canonical gate exits before
+QEMU. The marker grep is not exact-line anchored and target immutable-text
+zeroization remains unproved. The three-cycle cap is exhausted; none of these
+rows or the release gate is closed.
 
 ## Wave 3 (2026-07-27) — board bring-up + convergence, all lanes landed
 

@@ -1,0 +1,98 @@
+"""Integration wiring checks for FAT32 RecoverableReplaceV1.
+
+Live crash/reboot behavior belongs to the red system runner; these checks keep
+the provisioner, mount gate, syscall adapter, and ordinary rename boundary
+connected in source builds.
+"""
+
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn _source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "FAT32 atomic-replace integration wiring":
+    it "should provision exactly sixteen reserved journal sectors":
+        step("Inspect the native FAT32 image provisioner")
+        val source = _source("scripts/os/make_os_disk.c")
+        expect(source).to_contain("SIMPLEOS_REPLACE_DESCRIPTOR_SECTOR = 2")
+        expect(source).to_contain("SIMPLEOS_REPLACE_JOURNAL_START = 16")
+        expect(source).to_contain("SIMPLEOS_REPLACE_JOURNAL_SECTORS = 16")
+        expect(source).to_contain("write_atomic_replace_descriptor();")
+
+    it "should recover before root cache load and mount publication":
+        step("Inspect the FAT32 mount and boot publication order")
+        val fs = _source("src/os/kernel/fs/fat32.spl")
+        val boot = _source("src/os/kernel/boot/boot_fs_mount.spl")
+        expect(fs).to_contain("fat32_atomic_replace_recover_device(")
+        expect(fs).to_contain("# Stash root dir cluster sectors for readdir")
+        expect(boot).to_contain("fat32_mount_publish(fs, dev)")
+        expect(fs.index_of("fat32_atomic_replace_recover_device(") < fs.index_of("# Stash root dir cluster sectors for readdir")).to_equal(true)
+
+    it "should route only allowlisted DB destinations to recoverable replace":
+        step("Inspect syscall dispatch without changing ordinary rename")
+        val syscall = _source("src/os/kernel/ipc/syscall_file.spl")
+        val fs = _source("src/os/kernel/fs/fat32.spl")
+        expect(syscall).to_contain("if fat32_atomic_replace_path_allowed(new_resolved):")
+        expect(syscall).to_contain("fs.atomic_replace_at(dev, old_resolved, new_resolved)")
+        expect(syscall).to_contain("fs.rename_at(dev, old_resolved, new_resolved)")
+        expect(fs).to_contain("The two directory-entry writes are NOT atomic as a pair")
+
+    it "should persist payload before header and cursor before FAT free":
+        step("Inspect the device-backed journal owner ordering")
+        val owner = _source("src/os/kernel/fs/fat32_atomic_replace.spl")
+        expect(owner.index_of("dev.write_sector(bank_lba + 1u64") < owner.index_of("dev.write_sector(bank_lba, header)")).to_equal(true)
+        expect(owner.index_of("_publish_raw_bank(dev, js, bank, header, payload)?") < owner.index_of("_free_fat_cluster(dev")).to_equal(true)
+        expect(owner).to_contain("3u32, generation, 0u32, 0u32")
+
+    it "should publish database durability only from recovered filesystem caps":
+        step("Inspect the server database capability adapter")
+        val adapter = _source("src/os/apps/servers_user/database_persistence_adapter.spl")
+        expect(adapter).to_contain("replace.mount_recovery_complete")
+        expect(adapter).to_contain("atomic_replace_rename: recoverable")
+        expect(adapter).to_contain("crash_recovery: recoverable")
+
+    it "should validate and repair every FAT copy before cursor advancement":
+        step("Inspect all-copy recovery and post-flush reread gates")
+        val owner = _source("src/os/kernel/fs/fat32_atomic_replace.spl")
+        expect(owner).to_contain("while copy < fat_count")
+        expect(owner).to_contain("_fat_reclaim_observation")
+        expect(owner).to_contain("while verify_copy < fat_count")
+        expect(owner).to_contain("FatCopiesReread")
+        expect(owner.index_of("while verify_copy < fat_count") < owner.index_of("current = next")).to_equal(true)
+
+    it "should restrict replay images to exact root-directory sectors":
+        step("Inspect replay LBA admission and exact database route")
+        val owner = _source("src/os/kernel/fs/fat32_atomic_replace.spl")
+        expect(owner).to_contain("fat32_replace_image_lba_allowed")
+        expect(owner).to_contain("source_tmp == \"/SERVER.TMP\" and destination == \"/SERVER.DB\"")
+        expect(owner).to_contain("start > reserved_sectors - count")
+        expect(owner).to_contain("start > total_sectors - count")
+
+    it "should validate bounded acyclic disjoint chains before COMMITTED":
+        step("Inspect consensus chain validation and full alias traversal")
+        val owner = _source("src/os/kernel/fs/fat32_atomic_replace.spl")
+        val fs = _source("src/os/kernel/fs/fat32.spl")
+        expect(owner).to_contain("fat32_replace_validate_disjoint_chains")
+        expect(owner).to_contain("_fat_consensus_value")
+        expect(fs).to_contain("val alias_chain = alias_chain_r.unwrap()")
+        expect(fs).to_contain("while ai < alias_chain.len()")
+
+    it "should serialize all namespace mutation and revalidate after lock":
+        step("Inspect the shared filesystem mutation owner")
+        val fs = _source("src/os/kernel/fs/fat32.spl")
+        expect(fs).to_contain("mutation_active: bool")
+        expect(fs).to_contain("fn _mutation_enter")
+        expect(fs).to_contain("fn _mutation_leave")
+        expect(fs).to_contain("fn _atomic_replace_at_locked")
+        expect(fs).to_contain("source.dirent_sector != expected_source_lba")
+        expect(fs).to_contain("dest.dirent_sector != expected_destination_lba")
+        expect(fs).to_contain("val root_scan_data = root_scan_r.unwrap()")
+
+    it "should reserve only safe fixed V1 sectors and keep probing non-publishing":
+        step("Inspect descriptor and capability probe boundaries")
+        val owner = _source("src/os/kernel/fs/fat32_atomic_replace.spl")
+        expect(owner).to_contain("start != 16u32")
+        expect(owner).to_contain("fn fat32_atomic_replace_caps_probe")
+        expect(owner).to_contain("never publishes or overrides mounted truth")

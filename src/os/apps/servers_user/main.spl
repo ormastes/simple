@@ -1,0 +1,267 @@
+# Filesystem-launched SimpleOS server process.
+#
+# Transport is the thin user-syscall adapter. HTTP classification, response
+# framing/security headers, database authentication/capability checks,
+# transaction semantics, bounded responses, commit identity, and durability
+# are all delegated to their canonical Pure-Simple owners.
+
+use os.userlib.net.{IpAddr, SockAddr, Socket, socket, bind, listen, accept, socket_send, socket_recv}
+use os.userlib.fs.{read_file_bytes_direct}
+use os.userlib.syscall_raw.{syscall}
+use os.kernel.net.http_route.{http_classify_request, HttpRouteKind}
+use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
+use std.nogc_sync_mut.http_server.response.{serialize_response, with_default_security_headers}
+use std.nogc_sync_mut.http_server.mime.{mime_from_path}
+use std.nogc_sync_mut.http_server.server.{SecureServerPolicy, plaintext_development_capability}
+use std.nogc_sync_mut.http_server.parser.{parse_request_line, headers_decision}
+use std.database.core.{SdnTable, SdnDatabase}
+use std.database.server.capability.{CapabilityTable, capability_with, grant_key}
+use std.database.server.server.{DbServerCapsule}
+use std.fs_driver.bytes_util.{text_to_bytes_pure}
+use std.nogc_sync_mut.binary_io.{bytes_to_string}
+use os.apps.servers_user.database_persistence_adapter.{
+    simpleos_database_persistence_caps,
+    simpleos_database_persistence_ready,
+    simpleos_database_persistence_blocker,
+    simpleos_database_persistence_rename_blocker
+}
+
+val HTTP_PORT: u16 = 8080u16
+val DB_PORT: u16 = 5433u16
+val MAX_IDLE_POLLS: i64 = 10000000
+val DB_PATH: text = "/SERVER.DB"
+val DB_CREDENTIAL_PATH: text = "/SYS/SRVDB.KEY"
+val MAX_DB_CREDENTIAL_BYTES: u64 = 128u64
+val MAX_WIRE_RESPONSE: u64 = 65536
+
+fn debug_line(message: text):
+    val bytes = text_to_bytes_pure(message + "\n")
+    for byte in bytes:
+        val _ = syscall(60, byte as u64, 0, 0, 0, 0)
+
+fn close_fd(fd: i32):
+    val _ = syscall(33, fd as u64, 0, 0, 0, 0)
+
+fn send_all(sock: Socket, bytes: [u8]) -> bool:
+    var sent: u64 = 0
+    var attempts: i32 = 0
+    while sent < bytes.len() as u64 and attempts < 64:
+        val remaining = bytes.slice(sent, bytes.len() as u64)
+        match socket_send(sock, remaining):
+            Ok(count):
+                if count == 0:
+                    attempts = attempts + 1
+                else:
+                    sent = sent + count
+            Err(_):
+                attempts = attempts + 1
+    sent == bytes.len() as u64
+
+fn bind_listener(port: u16) -> Result<Socket, text>:
+    val ip = IpAddr.from_text("0.0.0.0")?
+    val listener = socket(2u32, 1u32)?
+    val _bound = bind(listener, SockAddr(ip: ip, port: port))?
+    val _listening = listen(listener, 8)?
+    Ok(listener)
+
+fn bounded_http_request(request: text, policy: SecureServerPolicy) -> bool:
+    val sections = request.split("\r\n\r\n")
+    if sections.len() != 2:
+        return false
+    val lines = sections[0].split("\r\n")
+    if lines.len() < 1 or lines.len() - 1 > policy.max_header_count as i64:
+        return false
+    if lines[0].len() > policy.max_request_line:
+        return false
+    val request_parts = parse_request_line(lines[0])
+    if request_parts.0 == "" or request_parts.1 == "" or request_parts.2 == "":
+        return false
+    var headers: [(text, text)] = []
+    var index: i64 = 1
+    while index < lines.len():
+        if lines[index].len() > policy.max_header_line:
+            return false
+        val separator = lines[index].find(":")
+        if separator <= 0:
+            return false
+        headers.push((lines[index].slice(0, separator), lines[index].slice(separator + 1, lines[index].len()).trim()))
+        index = index + 1
+    val body_decision = headers_decision(headers, policy.max_body)
+    body_decision.0 == "" and sections[1].len() == body_decision.1 as i64
+
+fn http_response(request: text) -> text:
+    val route = http_classify_request(request)
+    var response = HttpResponse(
+        status: HttpStatus.NotFound,
+        headers: [],
+        body: "ERR route not found\n"
+    )
+    match route.kind:
+        case HttpRouteKind.BadRequest:
+            response = HttpResponse(status: HttpStatus.BadRequest, headers: [], body: "ERR malformed request\n")
+        case HttpRouteKind.NotFound:
+            response = HttpResponse(status: HttpStatus.NotFound, headers: [], body: "ERR route not found\n")
+        case HttpRouteKind.Status:
+            response = HttpResponse(
+                status: HttpStatus.Ok,
+                headers: [("Content-Type", "text/html; charset=utf-8")],
+                body: "<html><body>SimpleOS ready</body></html>"
+            )
+        case HttpRouteKind.Health:
+            response = HttpResponse(
+                status: HttpStatus.Ok,
+                headers: [("Content-Type", "application/json")],
+                body: "{\"status\":\"ok\",\"server\":\"SimpleOS\"}\n"
+            )
+        case HttpRouteKind.File:
+            # /files/X is the public route; the immutable system document is
+            # stored under /SYS/X on the mounted FAT32 image.
+            val mounted_path = "/SYS" + route.file_path
+            match read_file_bytes_direct(mounted_path, 65536):
+                Err(_):
+                    response = HttpResponse(status: HttpStatus.NotFound, headers: [], body: "ERR file not found\n")
+                Ok(bytes):
+                    response = HttpResponse(
+                        status: HttpStatus.Ok,
+                        headers: [("Content-Type", mime_from_path(mounted_path))],
+                        body: bytes_to_string(bytes)
+                    )
+    serialize_response(with_default_security_headers(response, false))
+
+fn handle_http(listener: Socket, policy: SecureServerPolicy) -> bool:
+    match accept(listener):
+        Err(_): false
+        Ok(client):
+            match socket_recv(client, 8192):
+                Err(_): debug_line("[arm64-servers-user] http recv=fail")
+                Ok(bytes):
+                    val request = bytes_to_string(bytes)
+                    if bounded_http_request(request, policy):
+                        val response = text_to_bytes_pure(http_response(request))
+                        if response.len() <= MAX_WIRE_RESPONSE:
+                            val _sent = send_all(client, response)
+                    else:
+                        val rejected = HttpResponse(
+                            status: HttpStatus.BadRequest,
+                            headers: [], body: "ERR incomplete request\n"
+                        )
+                        val wire = serialize_response(with_default_security_headers(rejected, false))
+                        val _ = send_all(client, text_to_bytes_pure(wire))
+            close_fd(client.fd)
+            true
+
+fn server_store() -> SdnDatabase:
+    val loaded = SdnDatabase.load(DB_PATH)
+    var store = loaded ?? SdnDatabase.new(DB_PATH)
+    if not store.get_table("records").?:
+        store.set_table("records", SdnTable.new(
+            "records", ["id", "value", "valid", "_db_server_version"]
+        ))
+    store
+
+fn wipe_credential_bytes(bytes: [u8]):
+    var index: u64 = 0
+    while index < bytes.len() as u64:
+        bytes[index] = 0u8
+        index = index + 1u64
+
+fn load_server_policy() -> CapabilityTable?:
+    # Keep the file material in a mutable byte buffer.  The only immutable
+    # credential view is scoped to verifier setup; only its SHA-256 digest is
+    # retained by CapabilityTable.  Wipe the mutable source on every path.
+    match read_file_bytes_direct(DB_CREDENTIAL_PATH, MAX_DB_CREDENTIAL_BYTES + 1u64):
+        Err(_): nil
+        Ok(loaded_bytes):
+            var bytes = loaded_bytes
+            if bytes.len() == 0 or bytes.len() > MAX_DB_CREDENTIAL_BYTES:
+                wipe_credential_bytes(bytes)
+                nil
+            else:
+                val credential = bytes_to_string(bytes).trim()
+                if credential == "" or credential.len() > MAX_DB_CREDENTIAL_BYTES as i64:
+                    wipe_credential_bytes(bytes)
+                    nil
+                else:
+                    var policy = CapabilityTable.new()
+                    policy.register_authenticated(capability_with("operator", [
+                        grant_key("records", "read"), grant_key("records", "write")
+                    ]), credential)
+                    wipe_credential_bytes(bytes)
+                    Some(policy)
+
+fn handle_db(listener: Socket, server: DbServerCapsule) -> bool:
+    match accept(listener):
+        Err(_): false
+        Ok(client):
+            match socket_recv(client, 8192):
+                Err(_): debug_line("[arm64-servers-user] db recv=fail")
+                Ok(bytes):
+                    val line = bytes_to_string(bytes).trim()
+                    val reply = server.handle_message(line) + "\n"
+                    val _ = send_all(client, text_to_bytes_pure(reply))
+            close_fd(client.fd)
+            true
+
+fn main() -> i64:
+    # DbServerCapsule acknowledges COMMIT only after SdnDatabase.save().  Do
+    # not publish either listener when the target filesystem cannot supply the
+    # canonical exclusive-lock/temp/fsync/atomic-replace/recovery contract.
+    # In particular, a successful two-step FAT32 rename is not an atomic
+    # database commit point.
+    val persistence_caps = simpleos_database_persistence_caps()
+    if not simpleos_database_persistence_ready(persistence_caps):
+        debug_line("[arm64-servers-user] persistence=blocked reason=" +
+            simpleos_database_persistence_blocker(persistence_caps) +
+            " rename=" + simpleos_database_persistence_rename_blocker(persistence_caps))
+        return 4
+
+    val server_policy_result = load_server_policy()
+    if not server_policy_result.?:
+        debug_line("[arm64-servers-user] credential=blocked path=" + DB_CREDENTIAL_PATH)
+        return 5
+
+    # Plaintext is narrowly authorized for loopback hostfwd acceptance. The
+    # canonical secure policy still supplies every request/connection bound;
+    # production TLS remains fail-closed outside this explicit capability.
+    val capability = plaintext_development_capability("isolated QEMU hostfwd acceptance")
+    if capability.is_err():
+        return 2
+    val secure_policy = SecureServerPolicy.plaintext_dev(capability.unwrap())
+    if secure_policy.max_request_line < 1 or secure_policy.max_connections < 1:
+        return 2
+
+    val http_result = bind_listener(HTTP_PORT)
+    val db_result = bind_listener(DB_PORT)
+    if http_result.is_err() or db_result.is_err():
+        debug_line("[arm64-servers-user] listener bind=fail")
+        return 3
+    val http_listener = http_result.unwrap()
+    val db_listener = db_result.unwrap()
+    var db_server = DbServerCapsule.new(server_store(), server_policy_result.unwrap())
+
+    debug_line("[arm64-servers-user] executable=/SERVERS.ELF launch=ok")
+    debug_line("[arm64-servers-user] http=:8080 db=:5433 ready=ok")
+
+    var idle_polls: i64 = 0
+    var accepted_connections: i64 = 0
+    while idle_polls < MAX_IDLE_POLLS:
+        if accepted_connections >= secure_policy.max_connections:
+            break
+        val http_work = handle_http(http_listener, secure_policy)
+        if http_work:
+            accepted_connections = accepted_connections + 1
+        var db_work = false
+        if accepted_connections < secure_policy.max_connections:
+            db_work = handle_db(db_listener, db_server)
+            if db_work:
+                accepted_connections = accepted_connections + 1
+        if http_work or db_work:
+            idle_polls = 0
+        else:
+            idle_polls = idle_polls + 1
+            val _ = syscall(2, 0, 0, 0, 0, 0)
+
+    close_fd(http_listener.fd)
+    close_fd(db_listener.fd)
+    debug_line("[arm64-servers-user] bounded idle stop")
+    0

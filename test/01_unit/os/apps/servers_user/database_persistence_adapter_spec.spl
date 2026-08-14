@@ -1,0 +1,89 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use os.apps.servers_user.database_persistence_adapter.{
+    SimpleOsDatabasePersistenceCaps,
+    simpleos_database_persistence_caps_for,
+    simpleos_database_persistence_ready,
+    simpleos_database_persistence_blocker,
+    simpleos_database_persistence_rename_blocker
+}
+
+describe "SimpleOS database persistence adapter":
+    it "admits linked runtime and RecoverableReplaceV1 capabilities together":
+        val caps = simpleos_database_persistence_caps_for(31)
+        expect(simpleos_database_persistence_ready(caps)).to_equal(true)
+        expect(simpleos_database_persistence_blocker(caps)).to_equal("")
+
+    it "requires every canonical atomic-save capability":
+        val ready = SimpleOsDatabasePersistenceCaps(
+            exclusive_create: true,
+            bounded_lock_wait: true,
+            private_temp_write: true,
+            durable_file_sync: true,
+            runtime_rename_owner_linked: true,
+            atomic_replace_rename: true,
+            crash_recovery: true
+        )
+        expect(simpleos_database_persistence_ready(ready)).to_equal(true)
+
+    it "does not accept non-atomic replacement as durable":
+        val non_atomic = SimpleOsDatabasePersistenceCaps(
+            exclusive_create: true,
+            bounded_lock_wait: true,
+            private_temp_write: true,
+            durable_file_sync: true,
+            runtime_rename_owner_linked: true,
+            atomic_replace_rename: false,
+            crash_recovery: true
+        )
+        expect(simpleos_database_persistence_ready(non_atomic)).to_equal(false)
+        expect(simpleos_database_persistence_blocker(non_atomic)).to_equal(
+            "atomic-replace-rename-unavailable")
+
+    it "distinguishes an unlinked runtime symbol from FAT32 replace semantics":
+        val caps = simpleos_database_persistence_caps_for(31)
+        expect(simpleos_database_persistence_rename_blocker(caps)).to_equal("")
+
+        val unlinked = SimpleOsDatabasePersistenceCaps(
+            exclusive_create: true,
+            bounded_lock_wait: true,
+            private_temp_write: true,
+            durable_file_sync: true,
+            runtime_rename_owner_linked: false,
+            atomic_replace_rename: false,
+            crash_recovery: false
+        )
+        expect(simpleos_database_persistence_rename_blocker(unlinked)).to_equal(
+            "runtime-rename-owner-unlinked")
+
+    it "maps the exact database route through sync then RecoverableReplaceV1":
+        val atomic = file_read("src/lib/nogc_sync_mut/database/atomic.spl")
+        expect(atomic).to_contain("if path == \"/SERVER.DB\"")
+        expect(atomic).to_contain("return \"/SERVER.TMP\"")
+        expect(atomic).to_contain("if not rt_file_sync(temp_path)")
+
+        val runtime = file_read("src/runtime/simple_core/core_fs.spl")
+        expect(runtime).to_contain("pub fn rt_file_create_excl")
+        expect(runtime).to_contain("val fd = open(path_ptr, 193)")
+        expect(runtime).to_contain("pub fn rt_file_sync")
+        expect(runtime).to_contain("val fd = open(path_ptr, 2)")
+        val runtime_owner = runtime.split("pub fn rt_file_rename")[1]
+        expect(runtime_owner).to_contain("val result = rename(src, dst)")
+
+        val libc = file_read("src/os/libc/simpleos_fs.c")
+        val libc_owner = libc.split("int rename(")[1]
+        expect(libc_owner).to_contain("simpleos_syscall(44")
+
+        val syscall = file_read("src/os/kernel/ipc/syscall_file.spl")
+        val rename_owner = syscall.split("fn _handle_file_rename")[1]
+        expect(rename_owner).to_contain("fs.atomic_replace_at(dev, old_resolved, new_resolved)")
+        expect(rename_owner).to_contain("there is no delete+rename or ordinary-rename fallback")
+
+    it "uses scheduler-owned task liveness without turning signal zero into termination":
+        val atomic = file_read("src/lib/nogc_sync_mut/database/atomic.spl")
+        expect(atomic).to_contain("rt_process_is_running(pid)")
+        expect(atomic.contains("rt_process_run")).to_equal(false)
+
+        val signal = file_read("src/os/libc/simpleos_signal.c")
+        expect(signal).to_contain("if (sig == 0)")
+        expect(signal).to_contain("simpleos_syscall(6, (int64_t)pid, 0, 0, 0, 0)")

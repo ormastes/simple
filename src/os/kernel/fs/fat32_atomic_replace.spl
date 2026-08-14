@@ -1,0 +1,833 @@
+"""RecoverableReplaceV1 FAT32 journal protocol.
+
+This module is the authority for the fixed, dual-bank replace journal.  It is
+deliberately separate from `Fat32Filesystem.rename_at`: ordinary rename stays
+the documented non-atomic no-replace operation.  The I/O-facing owner consumes
+only complete sector after-images and immutable chain cursors, which keeps
+replay bounded and idempotent.
+"""
+
+use os.crypto.crc32.{crc32c}
+use std.fs_driver.block_device.{BlockDevice}
+use os.kernel.log.klog_api.{log_raw_println}
+
+val FAT32_REPLACE_SECTOR_BYTES: i64 = 512
+val FAT32_REPLACE_JOURNAL_SECTORS: i64 = 16
+val FAT32_REPLACE_BANK_SECTORS: i64 = 8
+val FAT32_REPLACE_PAYLOAD_SECTORS: i64 = 7
+val FAT32_REPLACE_MAX_IMAGES: i64 = 4
+val FAT32_REPLACE_MAGIC: u32 = 0x4A524153u32  # "SARJ", little endian
+val FAT32_REPLACE_VERSION: u32 = 1u32
+val FAT32_REPLACE_DESCRIPTOR_MAGIC: u32 = 0x44524153u32 # "SARD"
+val FAT32_REPLACE_DESCRIPTOR_LBA: u64 = 2u64
+
+enum AtomicReplaceRecoveryLevel:
+    Unsupported
+    RecoverableReplaceV1
+
+enum Fat32ReplaceState:
+    Committed
+    Reclaim
+    Done
+
+enum Fat32ReplaceError:
+    Unsupported
+    Invalid
+    Conflict
+    TooLarge
+    Io
+    NeedsRepair
+
+enum Fat32ReplaceCrashSeam:
+    PayloadWrite
+    PayloadFlush
+    HeaderWrite
+    HeaderFlush
+    ImageWrite
+    ImageFlush
+    ReclaimHeaderWrite
+    ReclaimHeaderFlush
+    FatCopyWrite
+    FatCopiesFlush
+    FatCopiesReread
+    DoneHeaderWrite
+    DoneHeaderFlush
+
+var g_fat32_replace_fault_enabled: bool = false
+var g_fat32_replace_fault_seam: Fat32ReplaceCrashSeam = Fat32ReplaceCrashSeam.PayloadWrite
+var g_fat32_replace_fault_occurrence: i64 = 0
+var g_fat32_replace_fault_seen: i64 = 0
+var g_fat32_replace_fault_triggered: bool = false
+
+fn fat32_replace_fault_injection_set(seam: Fat32ReplaceCrashSeam, occurrence: i64):
+    g_fat32_replace_fault_enabled = occurrence >= 0
+    g_fat32_replace_fault_seam = seam
+    g_fat32_replace_fault_occurrence = occurrence
+    g_fat32_replace_fault_seen = 0
+    g_fat32_replace_fault_triggered = false
+
+fn fat32_replace_fault_injection_clear():
+    g_fat32_replace_fault_enabled = false
+    g_fat32_replace_fault_seen = 0
+    g_fat32_replace_fault_triggered = false
+
+fn fat32_replace_fault_injection_triggered() -> bool:
+    g_fat32_replace_fault_triggered
+
+fn fat32_replace_fault_injection_occurrence() -> i64:
+    g_fat32_replace_fault_occurrence
+
+fn fat32_replace_fault_injection_seam() -> Fat32ReplaceCrashSeam:
+    g_fat32_replace_fault_seam
+
+fn _fault_at(seam: Fat32ReplaceCrashSeam) -> bool:
+    if not g_fat32_replace_fault_enabled or seam != g_fat32_replace_fault_seam:
+        return false
+    val hit = g_fat32_replace_fault_seen == g_fat32_replace_fault_occurrence
+    g_fat32_replace_fault_seen = g_fat32_replace_fault_seen + 1
+    if hit:
+        g_fat32_replace_fault_triggered = true
+        # Emit at the exact post-I/O boundary, before stack unwind or any
+        # subsequent storage operation. The host cuts QEMU on this marker.
+        log_raw_println("[far-crash] seam={fat32_replace_crash_seam_code(seam)} occurrence={g_fat32_replace_fault_occurrence}")
+    hit
+
+fn fat32_replace_crash_seam_code(seam: Fat32ReplaceCrashSeam) -> i64:
+    match seam:
+        Fat32ReplaceCrashSeam.PayloadWrite: 1
+        Fat32ReplaceCrashSeam.PayloadFlush: 2
+        Fat32ReplaceCrashSeam.HeaderWrite: 3
+        Fat32ReplaceCrashSeam.HeaderFlush: 4
+        Fat32ReplaceCrashSeam.ImageWrite: 5
+        Fat32ReplaceCrashSeam.ImageFlush: 6
+        Fat32ReplaceCrashSeam.ReclaimHeaderWrite: 7
+        Fat32ReplaceCrashSeam.ReclaimHeaderFlush: 8
+        Fat32ReplaceCrashSeam.FatCopyWrite: 9
+        Fat32ReplaceCrashSeam.FatCopiesFlush: 10
+        Fat32ReplaceCrashSeam.FatCopiesReread: 11
+        Fat32ReplaceCrashSeam.DoneHeaderWrite: 12
+        Fat32ReplaceCrashSeam.DoneHeaderFlush: 13
+
+fn fat32_replace_fault_injection_checkpoint(seam: Fat32ReplaceCrashSeam) -> bool:
+    """Test/harness seam reachability adapter; production I/O calls `_fault_at` directly."""
+    _fault_at(seam)
+
+struct AtomicReplaceRecoveryCaps:
+    level: AtomicReplaceRecoveryLevel
+    journal_bytes: i64
+    max_dir_sectors: i64
+    durable_flush: bool
+    mount_recovery_complete: bool
+    same_volume_only: bool
+    root_db_policy: bool
+
+struct Fat32ReplaceImage:
+    lba: u64
+    bytes: [u8]
+    checksum: u32
+
+struct Fat32ReplaceRecord:
+    bank: i64
+    state: Fat32ReplaceState
+    generation: u64
+    destination_parent_cluster: u32
+    destination_lba: u64
+    destination_offset: i64
+    source_parent_cluster: u32
+    source_lba: u64
+    source_offset: i64
+    source_lfn_slots: i64
+    old_first_cluster: u32
+    old_size: u64
+    new_first_cluster: u32
+    new_size: u64
+    reclaim_current: u32
+    reclaim_next: u32
+    images: [Fat32ReplaceImage]
+
+struct ReplaceReceipt:
+    generation: u64
+    destination_lba: u64
+    old_first_cluster: u32
+    new_first_cluster: u32
+    terminal_state: Fat32ReplaceState
+    flush_count: i64
+    recovered: bool
+
+var g_fat32_replace_replay_generation: u64 = 0u64
+var g_fat32_replace_replay_state: u32 = 3u32
+var g_fat32_replace_replay_recovered: bool = false
+
+fn _publish_replay_receipt(receipt: ReplaceReceipt) -> ReplaceReceipt:
+    g_fat32_replace_replay_generation = receipt.generation
+    g_fat32_replace_replay_state = _state_code(receipt.terminal_state)
+    g_fat32_replace_replay_recovered = receipt.recovered
+    receipt
+
+fn fat32_replace_replay_generation() -> u64:
+    g_fat32_replace_replay_generation
+
+fn fat32_replace_replay_state_code() -> u32:
+    g_fat32_replace_replay_state
+
+fn fat32_replace_replay_recovered() -> bool:
+    g_fat32_replace_replay_recovered
+
+fn fat32_atomic_replace_unsupported_caps() -> AtomicReplaceRecoveryCaps:
+    AtomicReplaceRecoveryCaps(
+        level: AtomicReplaceRecoveryLevel.Unsupported,
+        journal_bytes: 0,
+        max_dir_sectors: FAT32_REPLACE_MAX_IMAGES,
+        durable_flush: false,
+        mount_recovery_complete: false,
+        same_volume_only: true,
+        root_db_policy: true)
+
+fn fat32_atomic_replace_caps_for(journal_valid: bool, durable_flush: bool, recovery_complete: bool) -> AtomicReplaceRecoveryCaps:
+    if not journal_valid or not durable_flush or not recovery_complete:
+        return fat32_atomic_replace_unsupported_caps()
+    AtomicReplaceRecoveryCaps(
+        level: AtomicReplaceRecoveryLevel.RecoverableReplaceV1,
+        journal_bytes: FAT32_REPLACE_JOURNAL_SECTORS * FAT32_REPLACE_SECTOR_BYTES,
+        max_dir_sectors: FAT32_REPLACE_MAX_IMAGES,
+        durable_flush: true,
+        mount_recovery_complete: true,
+        same_volume_only: true,
+        root_db_policy: true)
+
+var g_fat32_replace_journal_valid: bool = false
+var g_fat32_replace_recovery_complete: bool = false
+var g_fat32_replace_durable_flush: bool = false
+
+fn fat32_atomic_replace_publish_caps(journal_valid: bool, durable_flush: bool, recovery_complete: bool):
+    g_fat32_replace_journal_valid = journal_valid
+    g_fat32_replace_durable_flush = durable_flush
+    g_fat32_replace_recovery_complete = recovery_complete
+
+fn fat32_atomic_replace_caps() -> AtomicReplaceRecoveryCaps:
+    fat32_atomic_replace_caps_for(g_fat32_replace_journal_valid, g_fat32_replace_durable_flush, g_fat32_replace_recovery_complete)
+
+fn fat32_atomic_replace_caps_probe(descriptor: [u8], total_sectors: u32, reserved_sectors: u32, durable_flush: bool, recovery_complete: bool) -> AtomicReplaceRecoveryCaps:
+    """Pure/testable probe; never publishes or overrides mounted truth."""
+    val extent = fat32_replace_descriptor_start(descriptor, total_sectors, reserved_sectors)
+    fat32_atomic_replace_caps_for(extent.is_ok(), durable_flush, recovery_complete)
+
+fn fat32_atomic_replace_path_allowed(path: text) -> bool:
+    # Exact normalized root names only.  The server capsule may narrow this
+    # list, but must never widen it to subdirectories or traversal.
+    if not path.starts_with("/") or path.contains(".."):
+        return false
+    path == "/SERVER.DB"
+
+fn fat32_atomic_replace_route_allowed(source_tmp: text, destination: text) -> bool:
+    source_tmp == "/SERVER.TMP" and destination == "/SERVER.DB"
+
+fn fat32_replace_image_lba_allowed(lba: u64, root_dir_lba: u64, root_dir_sectors: u32) -> bool:
+    root_dir_sectors > 0u32 and lba >= root_dir_lba and lba - root_dir_lba < root_dir_sectors.to_u64()
+
+fn fat32_replace_extent_valid(start: u32, count: u32, total_sectors: u32, reserved_sectors: u32) -> bool:
+    # V1 is fixed at reserved LBAs 16..31. This excludes primary/backup boot,
+    # FSInfo, extension descriptor, and every other reserved control sector.
+    if start != 16u32 or count != FAT32_REPLACE_JOURNAL_SECTORS.to_u32():
+        return false
+    if count > reserved_sectors or start > reserved_sectors - count:
+        return false
+    if count > total_sectors or start > total_sectors - count:
+        return false
+    true
+
+fn _put_u32_le(out: [u8], off: i64, value: u32) -> [u8]:
+    var b = out
+    b[off] = (value & 0xFFu32).to_u8()
+    b[off + 1] = ((value >> 8u32) & 0xFFu32).to_u8()
+    b[off + 2] = ((value >> 16u32) & 0xFFu32).to_u8()
+    b[off + 3] = ((value >> 24u32) & 0xFFu32).to_u8()
+    b
+
+fn _put_u64_le(out: [u8], off: i64, value: u64) -> [u8]:
+    var b = out
+    var i = 0
+    while i < 8:
+        b[off + i] = ((value >> (i * 8).to_u64()) & 0xFFu64).to_u8()
+        i = i + 1
+    b
+
+fn _get_u32_le(b: [u8], off: i64) -> u32:
+    b[off].to_u32() | (b[off + 1].to_u32() << 8u32) | (b[off + 2].to_u32() << 16u32) | (b[off + 3].to_u32() << 24u32)
+
+fn _get_u64_le(b: [u8], off: i64) -> u64:
+    var value = 0u64
+    var i = 0
+    while i < 8:
+        value = value | (b[off + i].to_u64() << (i * 8).to_u64())
+        i = i + 1
+    value
+
+fn _zero_sector() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < FAT32_REPLACE_SECTOR_BYTES:
+        out.push(0u8)
+        i = i + 1
+    out
+
+fn fat32_replace_image(lba: u64, bytes: [u8]) -> Result<Fat32ReplaceImage, Fat32ReplaceError>:
+    if bytes.len() != FAT32_REPLACE_SECTOR_BYTES:
+        return Err(Fat32ReplaceError.Invalid)
+    Ok(Fat32ReplaceImage(lba: lba, bytes: bytes, checksum: crc32c(bytes)))
+
+fn fat32_replace_coalesce_images(images: [Fat32ReplaceImage]) -> Result<[Fat32ReplaceImage], Fat32ReplaceError>:
+    var out: [Fat32ReplaceImage] = []
+    var i = 0
+    while i < images.len():
+        val image = images[i]
+        if image.bytes.len() != FAT32_REPLACE_SECTOR_BYTES or crc32c(image.bytes) != image.checksum:
+            return Err(Fat32ReplaceError.Invalid)
+        var found = -1
+        var j = 0
+        while j < out.len():
+            if out[j].lba == image.lba:
+                found = j
+            j = j + 1
+        if found >= 0:
+            out[found] = image
+        else:
+            out.push(image)
+        i = i + 1
+    if out.len() > FAT32_REPLACE_MAX_IMAGES:
+        return Err(Fat32ReplaceError.TooLarge)
+    # Deterministic ascending-LBA commit order.
+    var n = 1
+    while n < out.len():
+        val key = out[n]
+        var p = n - 1
+        while p >= 0 and out[p].lba > key.lba:
+            out[p + 1] = out[p]
+            p = p - 1
+        out[p + 1] = key
+        n = n + 1
+    Ok(out)
+
+fn fat32_replace_generation_newer(candidate: u64, current: u64) -> bool:
+    # RFC1982-style half-range ordering.  Exactly half-range is ambiguous.
+    val delta = candidate - current
+    delta != 0u64 and delta < 0x8000000000000000u64
+
+fn fat32_replace_generation_ambiguous(a: u64, b: u64) -> bool:
+    a != b and (a - b) == 0x8000000000000000u64
+
+fn _state_code(state: Fat32ReplaceState) -> u32:
+    match state:
+        Fat32ReplaceState.Committed: 1u32
+        Fat32ReplaceState.Reclaim: 2u32
+        Fat32ReplaceState.Done: 3u32
+
+fn fat32_replace_encode_header(record: Fat32ReplaceRecord, payload_crc: u32) -> Result<[u8], Fat32ReplaceError>:
+    if record.bank < 0 or record.bank > 1 or record.images.len() > FAT32_REPLACE_MAX_IMAGES:
+        return Err(Fat32ReplaceError.Invalid)
+    var h = _zero_sector()
+    h = _put_u32_le(h, 0, FAT32_REPLACE_MAGIC)
+    h = _put_u32_le(h, 4, FAT32_REPLACE_VERSION)
+    h = _put_u32_le(h, 8, record.bank.to_u32())
+    h = _put_u32_le(h, 12, _state_code(record.state))
+    h = _put_u64_le(h, 16, record.generation)
+    h = _put_u32_le(h, 24, FAT32_REPLACE_SECTOR_BYTES.to_u32())
+    h = _put_u32_le(h, 28, (record.images.len() * FAT32_REPLACE_SECTOR_BYTES).to_u32())
+    h = _put_u32_le(h, 32, record.images.len().to_u32())
+    h = _put_u32_le(h, 36, record.destination_parent_cluster)
+    h = _put_u64_le(h, 40, record.destination_lba)
+    h = _put_u32_le(h, 48, record.destination_offset.to_u32())
+    h = _put_u32_le(h, 52, record.source_parent_cluster)
+    h = _put_u64_le(h, 56, record.source_lba)
+    h = _put_u32_le(h, 64, record.source_offset.to_u32())
+    h = _put_u32_le(h, 68, record.source_lfn_slots.to_u32())
+    h = _put_u32_le(h, 72, record.old_first_cluster)
+    h = _put_u64_le(h, 76, record.old_size)
+    h = _put_u32_le(h, 84, record.new_first_cluster)
+    h = _put_u64_le(h, 88, record.new_size)
+    h = _put_u32_le(h, 96, record.reclaim_current)
+    h = _put_u32_le(h, 100, record.reclaim_next)
+    var i = 0
+    while i < record.images.len():
+        val off = 104 + i * 16
+        h = _put_u64_le(h, off, record.images[i].lba)
+        h = _put_u32_le(h, off + 8, (i * FAT32_REPLACE_SECTOR_BYTES).to_u32())
+        h = _put_u32_le(h, off + 12, record.images[i].checksum)
+        i = i + 1
+    h = _put_u32_le(h, 168, payload_crc)
+    h = _put_u32_le(h, 172, 0u32)
+    h = _put_u32_le(h, 172, crc32c(h))
+    Ok(h)
+
+fn fat32_replace_header_valid(header: [u8], payload: [u8], expected_bank: i64) -> bool:
+    if header.len() != FAT32_REPLACE_SECTOR_BYTES or expected_bank < 0 or expected_bank > 1:
+        return false
+    if _get_u32_le(header, 0) != FAT32_REPLACE_MAGIC or _get_u32_le(header, 4) != FAT32_REPLACE_VERSION:
+        return false
+    if _get_u32_le(header, 8) != expected_bank.to_u32():
+        return false
+    val state = _get_u32_le(header, 12)
+    if state < 1u32 or state > 3u32:
+        return false
+    if _get_u32_le(header, 24) != FAT32_REPLACE_SECTOR_BYTES.to_u32():
+        return false
+    val count = _get_u32_le(header, 32).to_i64()
+    val payload_len = _get_u32_le(header, 28).to_i64()
+    if count < 0 or count > FAT32_REPLACE_MAX_IMAGES or payload_len != count * FAT32_REPLACE_SECTOR_BYTES or payload.len() != payload_len:
+        return false
+    if crc32c(payload) != _get_u32_le(header, 168):
+        return false
+    var copy = header
+    val saved = _get_u32_le(copy, 172)
+    copy = _put_u32_le(copy, 172, 0u32)
+    if crc32c(copy) != saved:
+        return false
+    var prior = 0u64
+    var i = 0
+    while i < count:
+        val off = 104 + i * 16
+        val lba = _get_u64_le(header, off)
+        if i > 0 and lba <= prior:
+            return false
+        if _get_u32_le(header, off + 8) != (i * FAT32_REPLACE_SECTOR_BYTES).to_u32():
+            return false
+        var image: [u8] = []
+        var j = 0
+        while j < FAT32_REPLACE_SECTOR_BYTES:
+            image.push(payload[i * FAT32_REPLACE_SECTOR_BYTES + j])
+            j = j + 1
+        if crc32c(image) != _get_u32_le(header, off + 12):
+            return false
+        prior = lba
+        i = i + 1
+    true
+
+fn fat32_replace_choose_bank(valid0: bool, generation0: u64, valid1: bool, generation1: u64) -> Result<i64, Fat32ReplaceError>:
+    if not valid0 and not valid1:
+        return Err(Fat32ReplaceError.Invalid)
+    if valid0 and not valid1:
+        return Ok(0)
+    if valid1 and not valid0:
+        return Ok(1)
+    if fat32_replace_generation_ambiguous(generation0, generation1):
+        return Err(Fat32ReplaceError.Invalid)
+    if fat32_replace_generation_newer(generation1, generation0):
+        return Ok(1)
+    Ok(0)
+
+fn fat32_replace_reclaim_transition(current: u32, saved_next: u32, observed: u32, current_is_free: bool, new_first: u32) -> Result<u32, Fat32ReplaceError>:
+    if current < 2u32 or current == new_first or saved_next == current:
+        return Err(Fat32ReplaceError.NeedsRepair)
+    if saved_next == new_first or (saved_next >= 0x0FFFFFF0u32 and saved_next < 0x0FFFFFF8u32):
+        return Err(Fat32ReplaceError.NeedsRepair)
+    if not current_is_free and observed != saved_next:
+        return Err(Fat32ReplaceError.NeedsRepair)
+    Ok(saved_next)
+
+fn fat32_replace_done_requires_replay(state: Fat32ReplaceState) -> bool:
+    state != Fat32ReplaceState.Done
+
+fn _all_zero(bytes: [u8]) -> bool:
+    var i = 0
+    while i < bytes.len():
+        if bytes[i] != 0u8:
+            return false
+        i = i + 1
+    true
+
+fn fat32_replace_descriptor_start(descriptor: [u8], total_sectors: u32, reserved_sectors: u32) -> Result<u64, Fat32ReplaceError>:
+    if descriptor.len() != FAT32_REPLACE_SECTOR_BYTES:
+        return Err(Fat32ReplaceError.Unsupported)
+    val saved = _get_u32_le(descriptor, 20)
+    var copy = descriptor
+    copy = _put_u32_le(copy, 20, 0u32)
+    if _get_u32_le(descriptor, 0) != FAT32_REPLACE_DESCRIPTOR_MAGIC or _get_u32_le(descriptor, 4) != 1u32 or crc32c(copy) != saved:
+        return Err(Fat32ReplaceError.Unsupported)
+    val start = _get_u32_le(descriptor, 8)
+    val count = _get_u32_le(descriptor, 12)
+    if count != FAT32_REPLACE_JOURNAL_SECTORS.to_u32() or _get_u32_le(descriptor, 16) != FAT32_REPLACE_SECTOR_BYTES.to_u32():
+        return Err(Fat32ReplaceError.Unsupported)
+    if not fat32_replace_extent_valid(start, count, total_sectors, reserved_sectors):
+        return Err(Fat32ReplaceError.Unsupported)
+    Ok(start.to_u64())
+
+fn _read_payload(dev: BlockDevice, bank_lba: u64, image_count: i64) -> Result<[u8], Fat32ReplaceError>:
+    var payload: [u8] = []
+    var i = 0
+    while i < image_count:
+        val rr = dev.read_sector(bank_lba + 1u64 + i.to_u64())
+        if rr.is_err() or rr.unwrap().len() != FAT32_REPLACE_SECTOR_BYTES:
+            return Err(Fat32ReplaceError.Io)
+        val sec = rr.unwrap()
+        var j = 0
+        while j < FAT32_REPLACE_SECTOR_BYTES:
+            payload.push(sec[j])
+            j = j + 1
+        i = i + 1
+    Ok(payload)
+
+fn _flush_required(dev: BlockDevice) -> Result<(), Fat32ReplaceError>:
+    val fr = dev.flush()
+    if fr.is_err() or not fr.unwrap():
+        return Err(Fat32ReplaceError.Io)
+    Ok(())
+
+fn _publish_raw_bank(dev: BlockDevice, journal_start: u64, active_bank: i64, header: [u8], payload: [u8]) -> Result<i64, Fat32ReplaceError>:
+    val next_bank = 1 - active_bank
+    val bank_lba = journal_start + (next_bank * FAT32_REPLACE_BANK_SECTORS).to_u64()
+    val count = _get_u32_le(header, 32).to_i64()
+    var i = 0
+    while i < count:
+        var sector: [u8] = []
+        var j = 0
+        while j < FAT32_REPLACE_SECTOR_BYTES:
+            sector.push(payload[i * FAT32_REPLACE_SECTOR_BYTES + j])
+            j = j + 1
+        val wr = dev.write_sector(bank_lba + 1u64 + i.to_u64(), sector)
+        if wr.is_err() or not wr.unwrap():
+            return Err(Fat32ReplaceError.Io)
+        if _fault_at(Fat32ReplaceCrashSeam.PayloadWrite):
+            return Err(Fat32ReplaceError.Io)
+        i = i + 1
+    _flush_required(dev)?
+    if _fault_at(Fat32ReplaceCrashSeam.PayloadFlush):
+        return Err(Fat32ReplaceError.Io)
+    val hw = dev.write_sector(bank_lba, header)
+    if hw.is_err() or not hw.unwrap():
+        return Err(Fat32ReplaceError.Io)
+    val record_state = _get_u32_le(header, 12)
+    if record_state == 2u32 and _fault_at(Fat32ReplaceCrashSeam.ReclaimHeaderWrite):
+        return Err(Fat32ReplaceError.Io)
+    if record_state == 3u32 and _fault_at(Fat32ReplaceCrashSeam.DoneHeaderWrite):
+        return Err(Fat32ReplaceError.Io)
+    if record_state == 1u32 and _fault_at(Fat32ReplaceCrashSeam.HeaderWrite):
+        return Err(Fat32ReplaceError.Io)
+    _flush_required(dev)?
+    if record_state == 2u32 and _fault_at(Fat32ReplaceCrashSeam.ReclaimHeaderFlush):
+        return Err(Fat32ReplaceError.Io)
+    if record_state == 3u32 and _fault_at(Fat32ReplaceCrashSeam.DoneHeaderFlush):
+        return Err(Fat32ReplaceError.Io)
+    if record_state == 1u32 and _fault_at(Fat32ReplaceCrashSeam.HeaderFlush):
+        return Err(Fat32ReplaceError.Io)
+    val verify = dev.read_sector(bank_lba)
+    if verify.is_err() or verify.unwrap() != header:
+        return Err(Fat32ReplaceError.Io)
+    Ok(next_bank)
+
+fn _header_with_state_cursor(header: [u8], bank: i64, state: u32, generation: u64, current: u32, next: u32) -> [u8]:
+    var h = header
+    h = _put_u32_le(h, 8, bank.to_u32())
+    h = _put_u32_le(h, 12, state)
+    h = _put_u64_le(h, 16, generation)
+    h = _put_u32_le(h, 96, current)
+    h = _put_u32_le(h, 100, next)
+    h = _put_u32_le(h, 172, 0u32)
+    h = _put_u32_le(h, 172, crc32c(h))
+    h
+
+fn _fat_value_copy(dev: BlockDevice, fat_start: u32, fat_size: u32, copy: u32, cluster: u32) -> Result<u32, Fat32ReplaceError>:
+    val byte_off = cluster.to_u64() * 4u64
+    val lba = fat_start.to_u64() + copy.to_u64() * fat_size.to_u64() + byte_off / 512u64
+    val off = (byte_off % 512u64).to_i64()
+    val rr = dev.read_sector(lba)
+    if rr.is_err():
+        return Err(Fat32ReplaceError.Io)
+    Ok(_get_u32_le(rr.unwrap(), off) & 0x0FFFFFFFu32)
+
+fn _fat_consensus_value(dev: BlockDevice, fat_start: u32, fat_size: u32, fat_count: u32, cluster: u32) -> Result<u32, Fat32ReplaceError>:
+    if fat_count == 0u32:
+        return Err(Fat32ReplaceError.NeedsRepair)
+    val first = _fat_value_copy(dev, fat_start, fat_size, 0u32, cluster)?
+    var copy = 1u32
+    while copy < fat_count:
+        if _fat_value_copy(dev, fat_start, fat_size, copy, cluster)? != first:
+            return Err(Fat32ReplaceError.NeedsRepair)
+        copy = copy + 1u32
+    Ok(first)
+
+fn _fat_reclaim_observation(dev: BlockDevice, fat_start: u32, fat_size: u32, fat_count: u32, cluster: u32, saved_next: u32) -> Result<bool, Fat32ReplaceError>:
+    """Accept only the two crash-safe states: saved-next or already-free.
+
+    A mixture means reset interrupted FAT-copy repair; it is repaired by
+    rewriting zero to every copy. Any third value is corruption.
+    """
+    if fat_count == 0u32:
+        return Err(Fat32ReplaceError.NeedsRepair)
+    var values: [u32] = []
+    var copy = 0u32
+    while copy < fat_count:
+        values.push(_fat_value_copy(dev, fat_start, fat_size, copy, cluster)?)
+        copy = copy + 1u32
+    fat32_replace_classify_reclaim_copies(values, saved_next)
+
+fn fat32_replace_classify_reclaim_copies(values: [u32], saved_next: u32) -> Result<bool, Fat32ReplaceError>:
+    if values.len() == 0:
+        return Err(Fat32ReplaceError.NeedsRepair)
+    var saw_free = false
+    var saw_allocated = false
+    var copy = 0
+    while copy < values.len():
+        val value = values[copy]
+        if value == 0u32:
+            saw_free = true
+        elif value == saved_next:
+            saw_allocated = true
+        else:
+            return Err(Fat32ReplaceError.NeedsRepair)
+        copy = copy + 1
+    Ok(saw_free and not saw_allocated)
+
+fn fat32_replace_chains_are_disjoint(old_chain: [u32], new_chain: [u32]) -> bool:
+    var oi = 0
+    while oi < old_chain.len():
+        var ni = 0
+        while ni < new_chain.len():
+            if old_chain[oi] == new_chain[ni]:
+                return false
+            ni = ni + 1
+        oi = oi + 1
+    true
+
+fn _collect_chain_consensus(dev: BlockDevice, fat_start: u32, fat_size: u32, fat_count: u32, data_clusters: u32, start: u32) -> Result<[u32], Fat32ReplaceError>:
+    var chain: [u32] = []
+    if start == 0u32:
+        return Ok(chain)
+    var current = start
+    var fuel = data_clusters
+    while current >= 2u32 and current < 0x0FFFFFF8u32:
+        if fuel == 0u32 or current > data_clusters + 1u32:
+            return Err(Fat32ReplaceError.NeedsRepair)
+        var seen = 0
+        while seen < chain.len():
+            if chain[seen] == current:
+                return Err(Fat32ReplaceError.NeedsRepair)
+            seen = seen + 1
+        chain.push(current)
+        val next = _fat_consensus_value(dev, fat_start, fat_size, fat_count, current)?
+        if next == 0u32 or next == 0x0FFFFFF7u32 or (next >= 0x0FFFFFF0u32 and next < 0x0FFFFFF8u32):
+            return Err(Fat32ReplaceError.NeedsRepair)
+        current = next
+        fuel = fuel - 1u32
+    Ok(chain)
+
+fn fat32_replace_validate_disjoint_chains(dev: BlockDevice, fat_start: u32, fat_size: u32, fat_count: u32, data_clusters: u32, old_start: u32, new_start: u32) -> Result<bool, Fat32ReplaceError>:
+    val old_chain = _collect_chain_consensus(dev, fat_start, fat_size, fat_count, data_clusters, old_start)?
+    val new_chain = _collect_chain_consensus(dev, fat_start, fat_size, fat_count, data_clusters, new_start)?
+    if not fat32_replace_chains_are_disjoint(old_chain, new_chain):
+        return Err(Fat32ReplaceError.Conflict)
+    Ok(true)
+
+fn _root_directory_lba_allowed(dev: BlockDevice, fat_start: u32, fat_size: u32, fat_count: u32, data_clusters: u32, data_start: u32, sectors_per_cluster: u32, root_cluster: u32, lba: u64) -> Result<bool, Fat32ReplaceError>:
+    if sectors_per_cluster == 0u32:
+        return Err(Fat32ReplaceError.Invalid)
+    val chain = _collect_chain_consensus(dev, fat_start, fat_size, fat_count, data_clusters, root_cluster)?
+    var i = 0
+    while i < chain.len():
+        val base = data_start.to_u64() + (chain[i] - 2u32).to_u64() * sectors_per_cluster.to_u64()
+        if lba >= base and lba - base < sectors_per_cluster.to_u64():
+            return Ok(true)
+        i = i + 1
+    Ok(false)
+
+fn _free_fat_cluster(dev: BlockDevice, fat_start: u32, fat_size: u32, fat_count: u32, cluster: u32) -> Result<(), Fat32ReplaceError>:
+    val byte_off = cluster.to_u64() * 4u64
+    var copy = 0u32
+    while copy < fat_count:
+        val lba = fat_start.to_u64() + copy.to_u64() * fat_size.to_u64() + byte_off / 512u64
+        val off = (byte_off % 512u64).to_i64()
+        val rr = dev.read_sector(lba)
+        if rr.is_err():
+            return Err(Fat32ReplaceError.Io)
+        var sector = rr.unwrap()
+        sector = _put_u32_le(sector, off, 0u32)
+        val wr = dev.write_sector(lba, sector)
+        if wr.is_err() or not wr.unwrap():
+            return Err(Fat32ReplaceError.Io)
+        if _fault_at(Fat32ReplaceCrashSeam.FatCopyWrite):
+            return Err(Fat32ReplaceError.Io)
+        copy = copy + 1u32
+    _flush_required(dev)?
+    if _fault_at(Fat32ReplaceCrashSeam.FatCopiesFlush):
+        return Err(Fat32ReplaceError.Io)
+
+    # Cursor advancement is forbidden until every copy rereads as FREE.
+    var verify_copy = 0u32
+    while verify_copy < fat_count:
+        if _fat_value_copy(dev, fat_start, fat_size, verify_copy, cluster)? != 0u32:
+            return Err(Fat32ReplaceError.Io)
+        if _fault_at(Fat32ReplaceCrashSeam.FatCopiesReread):
+            return Err(Fat32ReplaceError.Io)
+        verify_copy = verify_copy + 1u32
+    Ok(())
+
+fn fat32_atomic_replace_recover_device(dev: BlockDevice, total_sectors: u32, reserved_sectors: u32, fat_start: u32, fat_size: u32, fat_count: u32, data_clusters: u32, data_start: u32, sectors_per_cluster: u32, root_cluster: u32) -> Result<ReplaceReceipt, Fat32ReplaceError>:
+    """Replay the newest valid bank before filesystem publication.
+
+    Both all-zero headers mean a pristine provisioned journal. Any other pair
+    without a valid record is corruption and fails mount closed.
+    """
+    val dr = dev.read_sector(FAT32_REPLACE_DESCRIPTOR_LBA)
+    if dr.is_err():
+        return Err(Fat32ReplaceError.Unsupported)
+    val js = fat32_replace_descriptor_start(dr.unwrap(), total_sectors, reserved_sectors)?
+    val h0r = dev.read_sector(js)
+    val h1r = dev.read_sector(js + FAT32_REPLACE_BANK_SECTORS.to_u64())
+    if h0r.is_err() or h1r.is_err():
+        return Err(Fat32ReplaceError.Io)
+    val h0 = h0r.unwrap()
+    val h1 = h1r.unwrap()
+    if _all_zero(h0) and _all_zero(h1):
+        _flush_required(dev)?
+        return Ok(_publish_replay_receipt(ReplaceReceipt(generation: 0u64, destination_lba: 0u64, old_first_cluster: 0u32, new_first_cluster: 0u32, terminal_state: Fat32ReplaceState.Done, flush_count: 1, recovered: false)))
+    var p0: [u8] = []
+    var p1: [u8] = []
+    var v0 = false
+    var v1 = false
+    val c0 = if h0.len() == 512: _get_u32_le(h0, 32).to_i64() else: 5
+    val c1 = if h1.len() == 512: _get_u32_le(h1, 32).to_i64() else: 5
+    if c0 >= 0 and c0 <= FAT32_REPLACE_MAX_IMAGES:
+        val pr = _read_payload(dev, js, c0)
+        if pr.is_ok():
+            p0 = pr.unwrap()
+            v0 = fat32_replace_header_valid(h0, p0, 0)
+    if c1 >= 0 and c1 <= FAT32_REPLACE_MAX_IMAGES:
+        val pr = _read_payload(dev, js + FAT32_REPLACE_BANK_SECTORS.to_u64(), c1)
+        if pr.is_ok():
+            p1 = pr.unwrap()
+            v1 = fat32_replace_header_valid(h1, p1, 1)
+    val chosen = fat32_replace_choose_bank(v0, _get_u64_le(h0, 16), v1, _get_u64_le(h1, 16))?
+    var header = if chosen == 0: h0 else: h1
+    val payload = if chosen == 0: p0 else: p1
+    var bank = chosen
+    var generation = _get_u64_le(header, 16)
+    val state = _get_u32_le(header, 12)
+    if state == 3u32:
+        return Ok(_publish_replay_receipt(ReplaceReceipt(generation: generation, destination_lba: _get_u64_le(header, 40), old_first_cluster: _get_u32_le(header, 72), new_first_cluster: _get_u32_le(header, 84), terminal_state: Fat32ReplaceState.Done, flush_count: 0, recovered: false)))
+    val saved_current = _get_u32_le(header, 96)
+    val saved_next = _get_u32_le(header, 100)
+    var remaining_old = saved_current
+    if state == 2u32 and saved_current >= 2u32 and saved_current < 0x0FFFFFF8u32:
+        if saved_current == _get_u32_le(header, 84):
+            return Err(Fat32ReplaceError.Conflict)
+        _fat_reclaim_observation(dev, fat_start, fat_size, fat_count, saved_current, saved_next)?
+        # The durable cursor authenticates current->next. Validate the full
+        # remaining suffix from saved_next even if FAT-copy repair is partial.
+        remaining_old = saved_next
+    fat32_replace_validate_disjoint_chains(dev, fat_start, fat_size, fat_count, data_clusters, remaining_old, _get_u32_le(header, 84))?
+    # COMMITTED and RECLAIM both redo the complete namespace image set.
+    val count = _get_u32_le(header, 32).to_i64()
+    var i = 0
+    while i < count:
+        val off = 104 + i * 16
+        val lba = _get_u64_le(header, off)
+        val allowed = _root_directory_lba_allowed(dev, fat_start, fat_size, fat_count, data_clusters, data_start, sectors_per_cluster, root_cluster, lba)?
+        if not allowed:
+            return Err(Fat32ReplaceError.Invalid)
+        var image: [u8] = []
+        var j = 0
+        while j < 512:
+            image.push(payload[i * 512 + j])
+            j = j + 1
+        val wr = dev.write_sector(lba, image)
+        if wr.is_err() or not wr.unwrap():
+            return Err(Fat32ReplaceError.Io)
+        if _fault_at(Fat32ReplaceCrashSeam.ImageWrite):
+            return Err(Fat32ReplaceError.Io)
+        i = i + 1
+    _flush_required(dev)?
+    if _fault_at(Fat32ReplaceCrashSeam.ImageFlush):
+        return Err(Fat32ReplaceError.Io)
+    var current = _get_u32_le(header, 96)
+    var next = _get_u32_le(header, 100)
+    val new_first = _get_u32_le(header, 84)
+    var fuel = data_clusters
+    while current >= 2u32 and current < 0x0FFFFFF8u32:
+        if fuel == 0u32 or current > data_clusters + 1u32:
+            return Err(Fat32ReplaceError.NeedsRepair)
+        val free = _fat_reclaim_observation(dev, fat_start, fat_size, fat_count, current, next)?
+        val observed = if free: 0u32 else: next
+        fat32_replace_reclaim_transition(current, next, observed, free, new_first)?
+        generation = generation + 1u64
+        val target_bank = 1 - bank
+        header = _header_with_state_cursor(header, target_bank, 2u32, generation, current, next)
+        bank = _publish_raw_bank(dev, js, bank, header, payload)?
+        if not free:
+            _free_fat_cluster(dev, fat_start, fat_size, fat_count, current)?
+        current = next
+        if current >= 2u32 and current < 0x0FFFFFF8u32:
+            next = _fat_consensus_value(dev, fat_start, fat_size, fat_count, current)?
+        fuel = fuel - 1u32
+    generation = generation + 1u64
+    val done_bank = 1 - bank
+    header = _header_with_state_cursor(header, done_bank, 3u32, generation, 0u32, 0u32)
+    bank = _publish_raw_bank(dev, js, bank, header, payload)?
+    Ok(_publish_replay_receipt(ReplaceReceipt(generation: generation, destination_lba: _get_u64_le(header, 40), old_first_cluster: _get_u32_le(header, 72), new_first_cluster: new_first, terminal_state: Fat32ReplaceState.Done, flush_count: 3, recovered: true)))
+
+fn fat32_atomic_replace_commit_device(dev: BlockDevice, record: Fat32ReplaceRecord, total_sectors: u32, reserved_sectors: u32, fat_start: u32, fat_size: u32, fat_count: u32, data_clusters: u32, data_start: u32, sectors_per_cluster: u32, root_cluster: u32) -> Result<ReplaceReceipt, Fat32ReplaceError>:
+    """Persist COMMITTED before metadata, then reuse the recovery owner.
+
+    The caller supplies already-validated complete directory after-images and
+    an already-synced new chain. No fallback to ordinary rename exists.
+    """
+    val dr = dev.read_sector(FAT32_REPLACE_DESCRIPTOR_LBA)
+    if dr.is_err():
+        return Err(Fat32ReplaceError.Unsupported)
+    val js = fat32_replace_descriptor_start(dr.unwrap(), total_sectors, reserved_sectors)?
+    fat32_replace_validate_disjoint_chains(dev, fat_start, fat_size, fat_count, data_clusters, record.old_first_cluster, record.new_first_cluster)?
+    val coalesced = fat32_replace_coalesce_images(record.images)?
+    var allowed_i = 0
+    while allowed_i < coalesced.len():
+        val lba = coalesced[allowed_i].lba
+        val allowed = _root_directory_lba_allowed(dev, fat_start, fat_size, fat_count, data_clusters, data_start, sectors_per_cluster, root_cluster, lba)?
+        if not allowed:
+            return Err(Fat32ReplaceError.Invalid)
+        allowed_i = allowed_i + 1
+    var payload: [u8] = []
+    var pi = 0
+    while pi < coalesced.len():
+        var pj = 0
+        while pj < 512:
+            payload.push(coalesced[pi].bytes[pj])
+            pj = pj + 1
+        pi = pi + 1
+    val h0r = dev.read_sector(js)
+    val h1r = dev.read_sector(js + FAT32_REPLACE_BANK_SECTORS.to_u64())
+    if h0r.is_err() or h1r.is_err():
+        return Err(Fat32ReplaceError.Io)
+    val h0 = h0r.unwrap()
+    val h1 = h1r.unwrap()
+    var active = 1
+    var generation = 0u64
+    if not (_all_zero(h0) and _all_zero(h1)):
+        val c0 = _get_u32_le(h0, 32).to_i64()
+        val c1 = _get_u32_le(h1, 32).to_i64()
+        var p0: [u8] = []
+        var p1: [u8] = []
+        var v0 = false
+        var v1 = false
+        if c0 >= 0 and c0 <= 4:
+            val rr = _read_payload(dev, js, c0)
+            if rr.is_ok():
+                p0 = rr.unwrap()
+                v0 = fat32_replace_header_valid(h0, p0, 0)
+        if c1 >= 0 and c1 <= 4:
+            val rr = _read_payload(dev, js + 8u64, c1)
+            if rr.is_ok():
+                p1 = rr.unwrap()
+                v1 = fat32_replace_header_valid(h1, p1, 1)
+        active = fat32_replace_choose_bank(v0, _get_u64_le(h0, 16), v1, _get_u64_le(h1, 16))?
+        generation = if active == 0: _get_u64_le(h0, 16) else: _get_u64_le(h1, 16)
+    val target = 1 - active
+    val committed = Fat32ReplaceRecord(
+        bank: target, state: Fat32ReplaceState.Committed, generation: generation + 1u64,
+        destination_parent_cluster: record.destination_parent_cluster,
+        destination_lba: record.destination_lba, destination_offset: record.destination_offset,
+        source_parent_cluster: record.source_parent_cluster, source_lba: record.source_lba,
+        source_offset: record.source_offset, source_lfn_slots: record.source_lfn_slots,
+        old_first_cluster: record.old_first_cluster, old_size: record.old_size,
+        new_first_cluster: record.new_first_cluster, new_size: record.new_size,
+        reclaim_current: record.reclaim_current, reclaim_next: record.reclaim_next,
+        images: coalesced)
+    val header = fat32_replace_encode_header(committed, crc32c(payload))?
+    _publish_raw_bank(dev, js, active, header, payload)?
+    fat32_atomic_replace_recover_device(dev, total_sectors, reserved_sectors, fat_start, fat_size, fat_count, data_clusters, data_start, sectors_per_cluster, root_cluster)

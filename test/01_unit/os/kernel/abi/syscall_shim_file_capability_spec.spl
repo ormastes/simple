@@ -1,0 +1,29 @@
+use std.spec.{describe, it, expect}
+use os.kernel.abi.syscall_shim_file.{shim_file_fd_authorized}
+use os.kernel.fd_table.{fd_table_init, fd_activate_task, fd_set, fd_close, FD_TYPE_FAT32, O_RDONLY, O_WRONLY}
+
+describe "C-ABI file descriptor authority":
+    it "allows operations only when the live descriptor mode permits them":
+        fd_table_init()
+        fd_activate_task(71u64)
+        expect(fd_set(3, FD_TYPE_FAT32, O_RDONLY, 9u64)).to_equal(0)
+        expect(shim_file_fd_authorized(71u64, 3, false)).to_equal(true)
+        expect(shim_file_fd_authorized(71u64, 3, true)).to_equal(false)
+
+    it "denies a descriptor after close instead of trusting its numeric slot":
+        fd_table_init()
+        fd_activate_task(72u64)
+        expect(fd_set(3, FD_TYPE_FAT32, O_RDONLY, 9u64)).to_equal(0)
+        expect(fd_close(3)).to_equal(0)
+        expect(shim_file_fd_authorized(72u64, 3, false)).to_equal(false)
+
+    it "does not transfer authority when another task reuses the same fd number":
+        fd_table_init()
+        fd_activate_task(73u64)
+        expect(fd_set(3, FD_TYPE_FAT32, O_RDONLY, 9u64)).to_equal(0)
+        fd_activate_task(74u64)
+        expect(fd_set(3, FD_TYPE_FAT32, O_WRONLY, 10u64)).to_equal(0)
+
+        expect(shim_file_fd_authorized(73u64, 3, false)).to_equal(false)
+        expect(shim_file_fd_authorized(74u64, 3, false)).to_equal(false)
+        expect(shim_file_fd_authorized(74u64, 3, true)).to_equal(true)

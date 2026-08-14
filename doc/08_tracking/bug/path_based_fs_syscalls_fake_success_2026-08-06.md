@@ -6,6 +6,31 @@ read/write-after-open wiring landed 2026-08-06 evening, see "Update 3" below;
 Wall 2 (mount-accessor persistence) INVESTIGATED and CONFIRMED REAL 2026-08-06
 night — see "Update 4" below; boot-reachability still open)
 
+## Ownership update 2026-08-14 — ARM64 database atomic-replace boundary claimed
+
+Owner: `/root/arm_file_rename_owner` (SimpleOS server execution matrix lane).
+
+Initial source inspection found the boot-kernel runtime's fatal
+`S2(rt_file_rename)` trap, but retained target-object evidence corrected that
+scope: the ARM64 **user payload** runtime archive exports a strong
+`rt_file_rename` from `simple_core/core_fs.spl`, with an unresolved `rename`
+that the SimpleOS libc maps to syscall 44.  The runtime boundary is therefore
+present for the server payload.  The real kernel syscall below it reaches
+`Fat32Filesystem.rename_at`, but that primitive is link-new/delete-old, returns
+`EEXIST` for an existing destination, and is explicitly non-atomic across its
+directory-entry writes.  Therefore neither the existing mapping nor unlinking
+the destination first can honestly implement the canonical database owner's
+atomic replacement commit.
+
+Claimed acceptance boundary: keep the database adapter fail-closed, distinguish
+"runtime rename is not linked" from "linked FAT32 rename cannot atomically
+replace", and retain focused source/object-symbol evidence.  Current target
+classification is the latter.  Unblock only when
+the mounted target filesystem has one crash-consistent atomic replace owner
+(including destination replacement) and the ARM runtime maps `rt_file_rename`
+to that owner without a trap/fallback.  No full payload rebuild is authorized
+in this lane.
+
 ## Update 4 (2026-08-06, this lane): Wall 2 confirmed REAL, root-caused, and NOT independently fixable in this pass — same pre-existing, already-closed seed-only defect, not a new bug
 
 **Verdict up front:** Wall 2 is real. It reproduces exactly as "Update 3"

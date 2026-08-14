@@ -1,0 +1,65 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use os.kernel.ipc.syscall_file.{cwd_set, path_resolve}
+use os.kernel.fd_table.{
+    fd_table_init, fd_activate_task, fd_set, fd_close, fd_is_valid,
+    FD_TYPE_FAT32, O_RDONLY
+}
+
+fn _path_bytes(path: text) -> [u8]:
+    var bytes: [u8] = []
+    var i: u64 = 0
+    while i < path.len():
+        bytes.push(path.byte_at(i))
+        i = i + 1
+    bytes
+
+fn _path_text(bytes: [u8]) -> text:
+    var path = ""
+    var i: u64 = 0
+    while i < bytes.len():
+        path = path + bytes[i].chr()
+        i = i + 1
+    path
+
+describe "ARM64 file syscall boundary":
+    it "canonicalizes traversal against the caller cwd before authorization":
+        expect(cwd_set(901u64, _path_bytes("/SERVER.SDN"))).to_equal(true)
+        val escaped = path_resolve(901u64, _path_bytes("../UNGRANTED"))
+        expect(_path_text(escaped)).to_equal("/UNGRANTED")
+
+        val syscall = file_read("src/os/kernel/ipc/syscall_file.spl")
+        val open_body = syscall.split("fn _handle_file_open")[1].split("fn _handle_file_read")[0]
+        expect(open_body).to_contain("path_resolve(current.id, raw)")
+        expect(open_body).to_contain("check_file_access(")
+        expect(open_body.split("_fs_copy_user_bytes").len()).to_equal(2)
+
+        val shim = file_read("src/os/kernel/abi/syscall_shim_file.spl")
+        expect(shim.contains("user_copyin_bytes")).to_equal(false)
+        expect(shim).to_contain("case 30: true")
+
+    it "selects the caller fd context before a cross-task close":
+        fd_table_init()
+        fd_activate_task(902u64)
+        expect(fd_set(3, FD_TYPE_FAT32, O_RDONLY, 20u64)).to_equal(0)
+        fd_activate_task(903u64)
+        expect(fd_set(3, FD_TYPE_FAT32, O_RDONLY, 21u64)).to_equal(0)
+
+        fd_activate_task(902u64)
+        expect(fd_close(3)).to_equal(0)
+        fd_activate_task(903u64)
+        expect(fd_is_valid(3)).to_equal(true)
+
+        val syscall = file_read("src/os/kernel/ipc/syscall_file.spl")
+        val close_body = syscall.split("fn _handle_file_close")[1].split("fn _handle_file_sync")[0]
+        expect(close_body).to_contain("fd_activate_task(current.id)")
+        expect(close_body).to_contain("posix_close(fd)")
+
+    it "uses only the architecture-selected copy facade for file bytes":
+        val syscall = file_read("src/os/kernel/ipc/syscall_file.spl")
+        expect(syscall).to_contain("user_copyin_bytes(ptr_addr, len)")
+        expect(syscall).to_contain("user_copyout_bytes(ptr_addr, bytes)")
+        expect(syscall).to_contain("copied.status.bytes_read != len")
+        expect(syscall.contains("rt_copy_user_byte")).to_equal(false)
+        expect(syscall.contains("mmio_write8")).to_equal(false)
+        expect(syscall.contains("vmm_verify_user_write")).to_equal(false)

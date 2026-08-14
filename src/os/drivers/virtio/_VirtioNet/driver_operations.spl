@@ -23,6 +23,11 @@ use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, lo
 use os.apps.sshd.ssh_hex.{format_hex_width}
 
 extern fn unsafe_addr_of(ref: any) -> u64
+extern fn rt_arm64_virtio_net_init() -> i64
+extern fn rt_arm64_virtio_net_send(data_addr: u64, len: u64) -> i64
+extern fn rt_arm64_virtio_net_recv(out_addr: u64, max_len: u64) -> i64
+extern fn rt_arm64_virtio_net_mac_octet(index: u64) -> u64
+extern fn rt_arm64_virtio_net_ready() -> i64
 
 # ============================================================================
 # VirtIO Legacy PCI BAR0 Register Offsets
@@ -43,9 +48,28 @@ impl VirtioNetDriver:
             rx_queue_allocation_id: 0, tx_queue_allocation_id: 0,
             mac0: 0, mac1: 0, mac2: 0, mac3: 0, mac4: 0, mac5: 0,
             initialized: false,
+            transport_mode: VIRTIO_NET_TRANSPORT_PCI,
             completion_mode: VIRTIO_NET_COMPLETION_AUTO,
             tx_async_reserved: false
         )
+
+    me init_arm64_mmio() -> Result<bool, text>:
+        """Initialize the QEMU virt modern VirtIO-MMIO NIC transport."""
+        val rc = rt_arm64_virtio_net_init()
+        if rc < 0:
+            return Err("ARM64 VirtIO-MMIO net init failed: {rc}")
+        self.transport_mode = VIRTIO_NET_TRANSPORT_ARM64_MMIO
+        self.completion_mode = VIRTIO_NET_COMPLETION_POLL
+        self.mac0 = rt_arm64_virtio_net_mac_octet(0).to_u8()
+        self.mac1 = rt_arm64_virtio_net_mac_octet(1).to_u8()
+        self.mac2 = rt_arm64_virtio_net_mac_octet(2).to_u8()
+        self.mac3 = rt_arm64_virtio_net_mac_octet(3).to_u8()
+        self.mac4 = rt_arm64_virtio_net_mac_octet(4).to_u8()
+        self.mac5 = rt_arm64_virtio_net_mac_octet(5).to_u8()
+        self.initialized = rt_arm64_virtio_net_ready() == 1
+        if not self.initialized:
+            return Err("ARM64 VirtIO-MMIO net did not publish ready")
+        Ok(true)
 
     # ========================================================================
     # Initialization from DeviceGrant
@@ -433,6 +457,11 @@ impl VirtioNetDriver:
             return Err("device not initialized")
         if len > 1514:
             return Err("frame too large: {len}")
+        if self.transport_mode == VIRTIO_NET_TRANSPORT_ARM64_MMIO:
+            val sent = rt_arm64_virtio_net_send(data_virt, len)
+            if sent != len as i64:
+                return Err("ARM64 VirtIO-MMIO TX failed: {sent}")
+            return Ok(true)
 
         # Pick a TX buffer slot (round-robin via tx_last_used as index)
         val tx_slot_count = if self.tx_queue_size.to_u64() < TX_BUFFER_COUNT: self.tx_queue_size.to_u64() else: TX_BUFFER_COUNT
@@ -506,6 +535,11 @@ impl VirtioNetDriver:
         """
         if not self.initialized:
             return 0
+        if self.transport_mode == VIRTIO_NET_TRANSPORT_ARM64_MMIO:
+            val received = rt_arm64_virtio_net_recv(buf_virt, buf_len)
+            if received <= 0:
+                return 0
+            return received as u64
 
         # Check if there are already completed RX descriptors.
         var used_idx = mmio_read16(self.rx_used_virt + 2)
@@ -715,6 +749,8 @@ impl VirtioNetDriver:
         """Check if network link is active."""
         if not self.initialized:
             return false
+        if self.transport_mode == VIRTIO_NET_TRANSPORT_ARM64_MMIO:
+            return rt_arm64_virtio_net_ready() == 1
         val status = mmio_read16(self.bar0_virt + VIRTIO_NET_STATUS_OFFSET)
         (status & 1) != 0
 

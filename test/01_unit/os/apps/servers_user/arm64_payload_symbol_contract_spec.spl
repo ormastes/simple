@@ -1,0 +1,32 @@
+use std.spec.*
+use std.io.*
+
+describe "ARM64 SimpleOS server payload symbol ownership":
+    it "uses the sysroot-owned libc syscall trampoline":
+        val source = read_text("scripts/os/build_arm64_servers_payload.shs")
+        val userlib = read_text("src/os/userlib/syscall_raw.spl")
+        expect(source).to_contain("BACKEND=\"${SIMPLE_NATIVE_BACKEND:-cranelift}\"")
+        expect(source).to_contain("(bytes_to_string|rt_arm64_syscall|simpleos_syscall|Array[._](enumerate|data_ptr))")
+        expect(userlib).to_contain("extern fn simpleos_syscall(")
+        expect(userlib).to_contain("simpleos_syscall(id, arg0, arg1, arg2, arg3, arg4)")
+        expect(userlib.contains("extern fn rt_arm64_syscall")).to_equal(false)
+
+    it "routes the public bytes helper through the canonical runtime ABI":
+        val source = read_text("src/lib/common/binary_io.spl")
+        expect(source).to_contain("extern fn rt_bytes_to_text(bytes: [u8]) -> text")
+        expect(source).to_contain("fn bytes_to_string(bytes: [u8]) -> text:")
+        expect(source).to_contain("rt_bytes_to_text(bytes)")
+        expect(source.contains("extern fn bytes_to_string(bytes: [u8]) -> text")).to_equal(false)
+
+    it "uses the canonical byte-array pointer runtime primitive":
+        val raw = read_text("src/os/userlib/syscall_raw.spl")
+        val fs = read_text("src/os/userlib/fs.spl")
+        val net = read_text("src/os/userlib/net.spl")
+        expect(raw).to_contain("extern fn rt_array_data_ptr_u8(bytes: [u8]) -> i64")
+        expect(raw).to_contain("fn array_data_ptr_u8(bytes: [u8]) -> u64:")
+        expect(fs.contains(".data_ptr()")).to_equal(false)
+        expect(net.contains(".data_ptr()")).to_equal(false)
+
+    it "keeps database traversal independent of Array enumerate lowering":
+        val core = read_text("src/lib/nogc_sync_mut/database/core.spl")
+        expect(core.contains(".enumerate()")).to_equal(false)

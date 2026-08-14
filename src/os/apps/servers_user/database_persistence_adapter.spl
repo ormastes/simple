@@ -1,0 +1,88 @@
+# SimpleOS persistence capability adapter for the canonical database capsule.
+#
+# This module deliberately does not reimplement DbServerCapsule or
+# SdnDatabase.  It is the target boundary that decides whether the filesystem
+# below std.database.atomic can honour that owner's commit protocol.  A target
+# with only "write then close" is not a degraded durability mode: it is
+# unavailable and must fail before a database listener is published.
+
+use os.kernel.fs.fat32_atomic_replace.{AtomicReplaceRecoveryLevel, fat32_atomic_replace_caps}
+
+extern fn rt_simpleos_file_atomic_caps() -> i64
+
+val FILE_ATOMIC_EXCLUSIVE_CREATE: i64 = 1
+val FILE_ATOMIC_BOUNDED_LOCK: i64 = 2
+val FILE_ATOMIC_PRIVATE_TEMP_WRITE: i64 = 4
+val FILE_ATOMIC_DURABLE_SYNC: i64 = 8
+val FILE_ATOMIC_RENAME_OWNER: i64 = 16
+
+fn file_atomic_cap(bits: i64, cap: i64) -> bool:
+    (bits & cap) == cap
+
+struct SimpleOsDatabasePersistenceCaps:
+    exclusive_create: bool
+    bounded_lock_wait: bool
+    private_temp_write: bool
+    durable_file_sync: bool
+    runtime_rename_owner_linked: bool
+    atomic_replace_rename: bool
+    crash_recovery: bool
+
+fn simpleos_database_persistence_caps_for(runtime: i64) -> SimpleOsDatabasePersistenceCaps:
+    val replace = fat32_atomic_replace_caps()
+    val recoverable = replace.level == AtomicReplaceRecoveryLevel.RecoverableReplaceV1 and
+        replace.durable_flush and replace.mount_recovery_complete
+    SimpleOsDatabasePersistenceCaps(
+        exclusive_create: file_atomic_cap(runtime, FILE_ATOMIC_EXCLUSIVE_CREATE),
+        bounded_lock_wait: file_atomic_cap(runtime, FILE_ATOMIC_BOUNDED_LOCK),
+        private_temp_write: file_atomic_cap(runtime, FILE_ATOMIC_PRIVATE_TEMP_WRITE),
+        durable_file_sync: replace.durable_flush and file_atomic_cap(runtime, FILE_ATOMIC_DURABLE_SYNC),
+        # The ARM64 user payload's simple-core archive exports rt_file_rename;
+        # core_fs maps it through libc rename to SimpleOS syscall 44.  This is
+        # distinct from the boot-kernel runtime's unrelated S2 trap symbol.
+        runtime_rename_owner_linked: file_atomic_cap(runtime, FILE_ATOMIC_RENAME_OWNER),
+        # Exact /SERVER.TMP -> /SERVER.DB rename requests are owned by the
+        # recoverable FAT32 replace path; ordinary rename is never a fallback.
+        atomic_replace_rename: recoverable,
+        # Recovery cannot be claimed without durable flush plus atomic replace.
+        crash_recovery: recoverable
+    )
+
+fn simpleos_database_persistence_caps() -> SimpleOsDatabasePersistenceCaps:
+    simpleos_database_persistence_caps_for(rt_simpleos_file_atomic_caps())
+
+fn simpleos_database_persistence_ready(caps: SimpleOsDatabasePersistenceCaps) -> bool:
+    caps.exclusive_create and
+        caps.bounded_lock_wait and
+        caps.private_temp_write and
+        caps.durable_file_sync and
+        caps.runtime_rename_owner_linked and
+        caps.atomic_replace_rename and
+        caps.crash_recovery
+
+fn simpleos_database_persistence_blocker(caps: SimpleOsDatabasePersistenceCaps) -> text:
+    if not caps.exclusive_create:
+        return "exclusive-create-unavailable"
+    if not caps.bounded_lock_wait:
+        return "bounded-lock-unavailable"
+    if not caps.private_temp_write:
+        return "private-temp-write-unavailable"
+    if not caps.durable_file_sync:
+        return "durable-file-sync-unavailable"
+    if not caps.runtime_rename_owner_linked:
+        return "runtime-rename-owner-unlinked"
+    if not caps.atomic_replace_rename:
+        return "atomic-replace-rename-unavailable"
+    if not caps.crash_recovery:
+        return "crash-recovery-unavailable"
+    ""
+
+fn simpleos_database_persistence_rename_blocker(caps: SimpleOsDatabasePersistenceCaps) -> text:
+    """Report the target rename boundary independently of earlier lock/write
+    prerequisites, so diagnostics never hide a fatal runtime trap behind the
+    first unavailable capability."""
+    if not caps.runtime_rename_owner_linked:
+        return "runtime-rename-owner-unlinked"
+    if not caps.atomic_replace_rename:
+        return "fat32-atomic-replace-unavailable"
+    ""

@@ -1,0 +1,54 @@
+use std.spec.{describe, it, expect}
+use os.kernel.loader.arm64_fs_exec_spawn.{arm64_fs_exec_launch_caps}
+use os.kernel.ipc.capability.{CapabilityManager}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilityKind}
+
+describe "ARM64 filesystem payload launch capabilities":
+    it "allows only the prepared network and file operations":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 41u64)
+        val caps = arm64_fs_exec_launch_caps(
+            "/usr/bin/simple", ["/usr/bin/simple", "/hello.spl", "--check"], task.id)
+        mgr.init_task(task, caps)
+
+        expect(mgr.check(task, CapabilityKind.NetConnect(port: 0))).to_equal(true)
+        expect(mgr.check(task, CapabilityKind.NetListen(port: 0))).to_equal(true)
+        expect(mgr.check_file_access(task, "/usr/bin/simple", "rx")).to_equal(true)
+        expect(mgr.check_file_access(task, "/hello.spl", "r")).to_equal(true)
+
+    it "denies undeclared paths, writes, raw network, and process spawning":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 42u64)
+        val caps = arm64_fs_exec_launch_caps(
+            "/usr/bin/simple", ["/usr/bin/simple", "/hello.spl", "--check"], task.id)
+        mgr.init_task(task, caps)
+
+        expect(mgr.check_file_access(task, "/etc/passwd", "r")).to_equal(false)
+        expect(mgr.check_file_access(task, "/hello.spl.bak", "r")).to_equal(false)
+        expect(mgr.check_file_access(task, "/hello.spl", "w")).to_equal(false)
+        expect(mgr.check(task, CapabilityKind.NetRaw)).to_equal(false)
+        expect(mgr.check(task, CapabilityKind.ProcessSpawn)).to_equal(false)
+
+    it "keeps the launch pouch pledged and non-ambient":
+        val caps = arm64_fs_exec_launch_caps("/FSEXEC.ELF", ["/FSEXEC.ELF"], 43u64)
+        expect(caps.is_pledged).to_equal(true)
+        expect(caps.caps.len()).to_equal(4)
+
+    it "grants the server only its exact documents, credential, and persistence names":
+        var mgr = CapabilityManager.new()
+        val task = TaskId(id: 44u64)
+        mgr.init_task(task, arm64_fs_exec_launch_caps(
+            "/SERVERS.ELF", ["/SERVERS.ELF"], task.id))
+
+        expect(mgr.check_file_access(task, "/SYS/SERVER.HTM", "r")).to_equal(true)
+        expect(mgr.check_file_access(task, "/SYS/SRVDB.KEY", "r")).to_equal(true)
+        expect(mgr.check_file_access(task, "/SERVER.SDN", "rwc")).to_equal(true)
+        expect(mgr.check_file_access(task, "/SERVER.SDN.lock", "rwc")).to_equal(true)
+        expect(mgr.check_file_access(task, "/SERVER.SDN.tmp", "rwc")).to_equal(true)
+        expect(mgr.check_file_access(task, "/SERVER.SDN.wal", "rwc")).to_equal(true)
+        expect(mgr.check_file_access(task, "/SERVER.SDN.wal.lock", "rwc")).to_equal(true)
+        expect(mgr.check_file_access(task, "/SERVER.SDN.wal.tmp", "rwc")).to_equal(true)
+        expect(mgr.check_file_access(task, "/SYS/OTHER.HTM", "r")).to_equal(false)
+        expect(mgr.check_file_access(task, "/SERVER.SDN.backup", "r")).to_equal(false)
+        expect(mgr.check_file_access(task, "/", "rwc")).to_equal(false)

@@ -1208,6 +1208,71 @@ int64_t _pci_enumerate(uint64_t mode, uint64_t index, uint64_t buf_addr)
     return -38;
 }
 
+typedef int64_t (*arm64_syscall_shim_fn)(uint64_t, uint64_t, uint64_t,
+                                         uint64_t, uint64_t, uint64_t);
+extern int64_t spl_handle_net_socket(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_net_bind(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_net_listen(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_net_connect(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_net_accept(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_net_send_to(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_net_recv_from(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_ipc_send(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_ipc_recv(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_ipc_create_port(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_file_open(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_file_read(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_file_write(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_file_close(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_handle_file_sync(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_shim_file_capability_check(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_arm64_net_socket_direct(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_arm64_net_bind_direct(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_arm64_net_listen_direct(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_arm64_net_connect_direct(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_arm64_net_accept_direct(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_arm64_net_send_direct(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_arm64_net_recv_direct(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_arm64_net_close_direct(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t spl_shim_net_capability_check(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) __attribute__((weak));
+extern int64_t rt_arm64_virtio_net_ready(void);
+
+static int64_t arm64_dispatch_optional_shim(arm64_syscall_shim_fn shim,
+                                            uint64_t a0, uint64_t a1,
+                                            uint64_t a2, uint64_t a3,
+                                            uint64_t a4)
+{
+    if (!shim) return -38; /* ENOSYS: entry closure did not link the owner. */
+    return shim(a0, a1, a2, a3, a4, 0);
+}
+
+static int64_t arm64_dispatch_file_shim(uint64_t syscall_id,
+                                        arm64_syscall_shim_fn shim,
+                                        uint64_t a0, uint64_t a1,
+                                        uint64_t a2, uint64_t a3,
+                                        uint64_t a4)
+{
+    if (!spl_shim_file_capability_check) return -1;
+    if (spl_shim_file_capability_check(syscall_id, a0, a1, a2, a3, a4) < 0)
+        return -1;
+    return arm64_dispatch_optional_shim(shim, a0, a1, a2, a3, a4);
+}
+
+static int64_t arm64_dispatch_net_shim(uint64_t syscall_id,
+                                       arm64_syscall_shim_fn direct,
+                                       arm64_syscall_shim_fn fallback,
+                                       uint64_t a0, uint64_t a1,
+                                       uint64_t a2, uint64_t a3,
+                                       uint64_t a4)
+{
+    if (!spl_shim_net_capability_check) return -1; /* deny without owner */
+    if (spl_shim_net_capability_check(syscall_id, a0, a1, a2, a3, a4) < 0)
+        return -1;
+    if (rt_arm64_virtio_net_ready() > 0 && direct)
+        return direct(a0, a1, a2, a3, a4, 0);
+    return arm64_dispatch_optional_shim(fallback, a0, a1, a2, a3, a4);
+}
+
 int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
                                        uint64_t a2, uint64_t a3, uint64_t a4)
 {
@@ -1221,16 +1286,37 @@ int64_t userlib__syscall_raw__syscall(uint64_t id, uint64_t a0, uint64_t a1,
         case 60: /* DebugWrite */
             serial_putchar((char)(a0 & 0xFF));
             return 0;
-        case 80: /* DevEnumerate */
-            return _pci_enumerate(a0, a1, a2);
-        case 82: /* DeviceGrant */
-            return _pci_enumerate(5, a0, 0);
-        case 83: /* MapBar — identity map on baremetal */
-            return (int64_t)a0;
-        case 84: { /* AllocDma */
-            void *p = _heap_alloc(a0 > 0 ? a0 : 4096);
-            return ENCODE_INT((int64_t)(uintptr_t)p);
-        }
+        case 20: return arm64_dispatch_optional_shim(spl_handle_ipc_send, a0, a1, a2, a3, a4);
+        case 21: return arm64_dispatch_optional_shim(spl_handle_ipc_recv, a0, a1, a2, a3, a4);
+        case 22: return arm64_dispatch_optional_shim(spl_handle_ipc_create_port, a0, a1, a2, a3, a4);
+        case 30: return arm64_dispatch_file_shim(30, spl_handle_file_open, a0, a1, a2, a3, a4);
+        case 31: return arm64_dispatch_file_shim(31, spl_handle_file_read, a0, a1, a2, a3, a4);
+        case 32: return arm64_dispatch_file_shim(32, spl_handle_file_write, a0, a1, a2, a3, a4);
+        case 33:
+            if (spl_arm64_net_close_direct) {
+                int64_t net_close = spl_arm64_net_close_direct(a0, a1, a2, a3, a4, 0);
+                if (net_close != -4096) return net_close;
+            }
+            return arm64_dispatch_optional_shim(spl_handle_file_close, a0, a1, a2, a3, a4);
+        case 78: return arm64_dispatch_file_shim(78, spl_handle_file_sync, a0, 0, 0, 0, 0);
+        /* Ring-3 server payloads have no ambient hardware authority. Device
+         * enumeration/grant/BAR/DMA remain kernel-only until the canonical
+         * Device* capability shims replace these historical raw shortcuts. */
+        case 80: /* DevEnumerate */ return -1;
+        case 81: /* DevGetInfo */ return -1;
+        case 82: /* DeviceGrant */ return -1;
+        case 83: /* MapBar */ return -1;
+        case 84: /* AllocDma */ return -1;
+        case 85: /* FreeDma */ return -1;
+        case 86: /* DeviceWaitIrq */ return -1;
+        case 87: /* DeviceAckIrq */ return -1;
+        case 70: return arm64_dispatch_net_shim(70, spl_arm64_net_socket_direct, spl_handle_net_socket, a0, a1, a2, a3, a4);
+        case 71: return arm64_dispatch_net_shim(71, spl_arm64_net_bind_direct, spl_handle_net_bind, a0, a1, a2, a3, a4);
+        case 72: return arm64_dispatch_net_shim(72, spl_arm64_net_listen_direct, spl_handle_net_listen, a0, a1, a2, a3, a4);
+        case 73: return arm64_dispatch_net_shim(73, spl_arm64_net_connect_direct, spl_handle_net_connect, a0, a1, a2, a3, a4);
+        case 74: return arm64_dispatch_net_shim(74, spl_arm64_net_accept_direct, spl_handle_net_accept, a0, a1, a2, a3, a4);
+        case 75: return arm64_dispatch_net_shim(75, spl_arm64_net_send_direct, spl_handle_net_send_to, a0, a1, a2, a3, a4);
+        case 76: return arm64_dispatch_net_shim(76, spl_arm64_net_recv_direct, spl_handle_net_recv_from, a0, a1, a2, a3, a4);
         default:
             return -38; /* ENOSYS */
     }
@@ -2934,6 +3020,267 @@ static void arm64_invalidate_dcache_range(uint64_t addr, uint64_t size)
     __asm__ volatile("dsb sy" ::: "memory");
 }
 
+/*
+ * ARM64 QEMU virt VirtIO-MMIO network transport.
+ *
+ * This capsule owns only device discovery, the two bounded virtqueues, DMA
+ * buffers, and completion. Ethernet/IP/TCP and socket state remain in the
+ * shared Simple NetstackService. Queue state is parent-owned and every TX
+ * scoped loan is completed before return; RX copies into the caller buffer.
+ */
+#define ARM64_VIRTIO_NET_DEVICE_ID 1U
+#define ARM64_NET_QUEUE_SIZE 8U
+#define ARM64_NET_BUFFER_SIZE 2048U
+#define ARM64_NET_HEADER_SIZE 10U
+#define ARM64_NET_CONFIG_BASE 0x100U
+#define ARM64_NET_F_MAC 5U
+#define ARM64_NET_F_STATUS 16U
+#define ARM64_NET_POLL_LIMIT 1000000U
+
+struct arm64_net_avail {
+    uint16_t flags;
+    uint16_t idx;
+    uint16_t ring[ARM64_NET_QUEUE_SIZE];
+};
+
+struct arm64_net_used {
+    uint16_t flags;
+    uint16_t idx;
+    struct arm64_virtq_used_elem ring[ARM64_NET_QUEUE_SIZE];
+};
+
+static struct arm64_virtq_desc g_arm64_net_rx_desc[ARM64_NET_QUEUE_SIZE]
+    __attribute__((aligned(4096)));
+static struct arm64_net_avail g_arm64_net_rx_avail __attribute__((aligned(4096)));
+static struct arm64_net_used g_arm64_net_rx_used __attribute__((aligned(4096)));
+static uint8_t g_arm64_net_rx_buf[ARM64_NET_QUEUE_SIZE][ARM64_NET_BUFFER_SIZE]
+    __attribute__((aligned(4096)));
+static struct arm64_virtq_desc g_arm64_net_tx_desc[ARM64_NET_QUEUE_SIZE]
+    __attribute__((aligned(4096)));
+static struct arm64_net_avail g_arm64_net_tx_avail __attribute__((aligned(4096)));
+static struct arm64_net_used g_arm64_net_tx_used __attribute__((aligned(4096)));
+static uint8_t g_arm64_net_tx_buf[ARM64_NET_QUEUE_SIZE][ARM64_NET_BUFFER_SIZE]
+    __attribute__((aligned(4096)));
+static uint64_t g_arm64_net_base;
+static uint16_t g_arm64_net_rx_last_used;
+static uint16_t g_arm64_net_tx_last_used;
+static uint8_t g_arm64_net_rx_posted[ARM64_NET_QUEUE_SIZE];
+static uint8_t g_arm64_net_mac[6];
+static uint64_t g_arm64_net_tx_completions;
+static uint64_t g_arm64_net_rx_frames;
+static uint8_t g_arm64_net_ready;
+
+static void arm64_net_zero(void *ptr, uint64_t len)
+{
+    uint8_t *bytes = (uint8_t *)ptr;
+    for (uint64_t i = 0; i < len; ++i) bytes[i] = 0;
+}
+
+static void arm64_net_write_addr(volatile uint32_t *mmio, uint32_t low_off,
+                                 uint64_t addr)
+{
+    mmio[low_off / 4U] = (uint32_t)addr;
+    mmio[(low_off + 4U) / 4U] = (uint32_t)(addr >> 32);
+}
+
+static int arm64_net_setup_queue(volatile uint32_t *mmio, uint32_t queue,
+                                 struct arm64_virtq_desc *desc,
+                                 struct arm64_net_avail *avail,
+                                 struct arm64_net_used *used)
+{
+    mmio[VMMIO_QUEUE_SEL / 4U] = queue;
+    if (mmio[VMMIO_QUEUE_READY / 4U] != 0U ||
+        mmio[VMMIO_QUEUE_NUM_MAX / 4U] < ARM64_NET_QUEUE_SIZE) return 0;
+    mmio[VMMIO_QUEUE_NUM / 4U] = ARM64_NET_QUEUE_SIZE;
+    arm64_net_write_addr(mmio, VMMIO_QUEUE_DESC_LOW, (uint64_t)(uintptr_t)desc);
+    arm64_net_write_addr(mmio, VMMIO_QUEUE_AVAIL_LOW, (uint64_t)(uintptr_t)avail);
+    arm64_net_write_addr(mmio, VMMIO_QUEUE_USED_LOW, (uint64_t)(uintptr_t)used);
+    mmio[VMMIO_QUEUE_READY / 4U] = 1U;
+    return mmio[VMMIO_QUEUE_READY / 4U] == 1U;
+}
+
+RuntimeValue rt_arm64_virtio_net_init(void)
+{
+    g_arm64_net_ready = 0U;
+    g_arm64_net_base = 0ULL;
+    for (uint32_t slot = 0; slot < ARM64_VIRTIO_MMIO_SLOTS; ++slot) {
+        uint64_t base = ARM64_VIRTIO_MMIO_BASE + (uint64_t)slot * ARM64_VIRTIO_MMIO_STRIDE;
+        volatile uint32_t *candidate = (volatile uint32_t *)(uintptr_t)base;
+        if (candidate[VMMIO_MAGIC / 4U] == ARM64_VIRTIO_MAGIC &&
+            candidate[VMMIO_VERSION / 4U] == 2U &&
+            candidate[VMMIO_DEVICE_ID / 4U] == ARM64_VIRTIO_NET_DEVICE_ID) {
+            g_arm64_net_base = base;
+            break;
+        }
+    }
+    if (!g_arm64_net_base) return -19; /* ENODEV */
+
+    volatile uint32_t *mmio = (volatile uint32_t *)(uintptr_t)g_arm64_net_base;
+    mmio[VMMIO_STATUS / 4U] = 0U;
+    mmio[VMMIO_STATUS / 4U] = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER;
+    mmio[VMMIO_DEVICE_FEATURES_SEL / 4U] = 1U;
+    uint32_t features_high = mmio[VMMIO_DEVICE_FEATURES / 4U];
+    if ((features_high & 1U) == 0U) return -95; /* VirtIO 1 required. */
+    mmio[VMMIO_DRIVER_FEATURES_SEL / 4U] = 1U;
+    mmio[VMMIO_DRIVER_FEATURES / 4U] = 1U;
+    mmio[VMMIO_DEVICE_FEATURES_SEL / 4U] = 0U;
+    uint32_t features_low = mmio[VMMIO_DEVICE_FEATURES / 4U];
+    uint32_t accepted_low = features_low & ((1U << ARM64_NET_F_MAC) |
+                                             (1U << ARM64_NET_F_STATUS));
+    mmio[VMMIO_DRIVER_FEATURES_SEL / 4U] = 0U;
+    mmio[VMMIO_DRIVER_FEATURES / 4U] = accepted_low;
+    uint32_t status = VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
+                      VIRTIO_STATUS_FEATURES_OK;
+    mmio[VMMIO_STATUS / 4U] = status;
+    if ((mmio[VMMIO_STATUS / 4U] & VIRTIO_STATUS_FEATURES_OK) == 0U) return -95;
+
+    arm64_net_zero(g_arm64_net_rx_desc, sizeof(g_arm64_net_rx_desc));
+    arm64_net_zero(&g_arm64_net_rx_avail, sizeof(g_arm64_net_rx_avail));
+    arm64_net_zero(&g_arm64_net_rx_used, sizeof(g_arm64_net_rx_used));
+    arm64_net_zero(g_arm64_net_tx_desc, sizeof(g_arm64_net_tx_desc));
+    arm64_net_zero(&g_arm64_net_tx_avail, sizeof(g_arm64_net_tx_avail));
+    arm64_net_zero(&g_arm64_net_tx_used, sizeof(g_arm64_net_tx_used));
+    if (!arm64_net_setup_queue(mmio, 0U, g_arm64_net_rx_desc,
+                               &g_arm64_net_rx_avail, &g_arm64_net_rx_used) ||
+        !arm64_net_setup_queue(mmio, 1U, g_arm64_net_tx_desc,
+                               &g_arm64_net_tx_avail, &g_arm64_net_tx_used)) {
+        mmio[VMMIO_STATUS / 4U] = status | VIRTIO_STATUS_FAILED;
+        return -5;
+    }
+
+    for (uint16_t i = 0; i < ARM64_NET_QUEUE_SIZE; ++i) {
+        g_arm64_net_rx_desc[i].addr = (uint64_t)(uintptr_t)g_arm64_net_rx_buf[i];
+        g_arm64_net_rx_desc[i].len = ARM64_NET_BUFFER_SIZE;
+        g_arm64_net_rx_desc[i].flags = VIRTQ_DESC_F_WRITE;
+        g_arm64_net_rx_avail.ring[i] = i;
+        g_arm64_net_rx_posted[i] = 1U;
+    }
+    g_arm64_net_rx_avail.idx = ARM64_NET_QUEUE_SIZE;
+    g_arm64_net_rx_last_used = 0U;
+    g_arm64_net_tx_last_used = 0U;
+    g_arm64_net_tx_completions = 0ULL;
+    g_arm64_net_rx_frames = 0ULL;
+    arm64_clean_dcache_range((uint64_t)(uintptr_t)g_arm64_net_rx_desc,
+                             sizeof(g_arm64_net_rx_desc));
+    arm64_clean_dcache_range((uint64_t)(uintptr_t)&g_arm64_net_rx_avail,
+                             sizeof(g_arm64_net_rx_avail));
+    arm64_invalidate_dcache_range((uint64_t)(uintptr_t)&g_arm64_net_rx_used,
+                                  sizeof(g_arm64_net_rx_used));
+
+    if ((accepted_low & (1U << ARM64_NET_F_MAC)) != 0U) {
+        volatile uint8_t *config = (volatile uint8_t *)(uintptr_t)
+            (g_arm64_net_base + ARM64_NET_CONFIG_BASE);
+        for (uint32_t i = 0; i < 6U; ++i) g_arm64_net_mac[i] = config[i];
+    } else {
+        uint8_t fallback[6] = {0x52U, 0x54U, 0x00U, 0x12U, 0x34U, 0x56U};
+        for (uint32_t i = 0; i < 6U; ++i) g_arm64_net_mac[i] = fallback[i];
+    }
+    mmio[VMMIO_STATUS / 4U] = status | VIRTIO_STATUS_DRIVER_OK;
+    mmio[VMMIO_QUEUE_NOTIFY / 4U] = 0U;
+    g_arm64_net_ready = 1U;
+    serial_puts("[arm64-net] virtio-mmio ready rxq=8 txq=8\r\n");
+    return 0;
+}
+
+RuntimeValue rt_arm64_virtio_net_send(RuntimeValue data_addr, RuntimeValue len_value)
+{
+    uint64_t len = (uint64_t)len_value;
+    if (!g_arm64_net_ready) return -19;
+    if (!data_addr || len == 0ULL || len > 1514ULL) return -22;
+    volatile uint32_t *mmio = (volatile uint32_t *)(uintptr_t)g_arm64_net_base;
+    uint16_t slot = (uint16_t)(g_arm64_net_tx_avail.idx % ARM64_NET_QUEUE_SIZE);
+    uint8_t *dst = g_arm64_net_tx_buf[slot];
+    arm64_net_zero(dst, ARM64_NET_HEADER_SIZE);
+    const uint8_t *src = (const uint8_t *)(uintptr_t)(uint64_t)data_addr;
+    for (uint64_t i = 0; i < len; ++i) dst[ARM64_NET_HEADER_SIZE + i] = src[i];
+    g_arm64_net_tx_desc[slot].addr = (uint64_t)(uintptr_t)dst;
+    g_arm64_net_tx_desc[slot].len = (uint32_t)(ARM64_NET_HEADER_SIZE + len);
+    g_arm64_net_tx_desc[slot].flags = 0U;
+    g_arm64_net_tx_avail.ring[slot] = slot;
+    g_arm64_net_tx_avail.idx++;
+    arm64_clean_dcache_range((uint64_t)(uintptr_t)dst, ARM64_NET_HEADER_SIZE + len);
+    arm64_clean_dcache_range((uint64_t)(uintptr_t)&g_arm64_net_tx_desc[slot],
+                             sizeof(g_arm64_net_tx_desc[slot]));
+    arm64_clean_dcache_range((uint64_t)(uintptr_t)&g_arm64_net_tx_avail,
+                             sizeof(g_arm64_net_tx_avail));
+    mmio[VMMIO_QUEUE_NOTIFY / 4U] = 1U;
+    uint32_t polls = 0U;
+    while (polls++ < ARM64_NET_POLL_LIMIT) {
+        arm64_invalidate_dcache_range((uint64_t)(uintptr_t)&g_arm64_net_tx_used,
+                                      sizeof(g_arm64_net_tx_used));
+        if (g_arm64_net_tx_used.idx != g_arm64_net_tx_last_used) {
+            g_arm64_net_tx_last_used = g_arm64_net_tx_used.idx;
+            g_arm64_net_tx_completions++;
+            uint32_t irq = mmio[VMMIO_INTERRUPT_STATUS / 4U];
+            if (irq) mmio[VMMIO_INTERRUPT_ACK / 4U] = irq;
+            return (RuntimeValue)len;
+        }
+    }
+    return -110;
+}
+
+static void arm64_net_repost_rx(uint16_t desc_id)
+{
+    if (desc_id >= ARM64_NET_QUEUE_SIZE) return;
+    volatile uint32_t *mmio = (volatile uint32_t *)(uintptr_t)g_arm64_net_base;
+    uint16_t avail_slot = (uint16_t)(g_arm64_net_rx_avail.idx % ARM64_NET_QUEUE_SIZE);
+    g_arm64_net_rx_avail.ring[avail_slot] = desc_id;
+    g_arm64_net_rx_avail.idx++;
+    g_arm64_net_rx_posted[desc_id] = 1U;
+    arm64_clean_dcache_range((uint64_t)(uintptr_t)&g_arm64_net_rx_avail,
+                             sizeof(g_arm64_net_rx_avail));
+    mmio[VMMIO_QUEUE_NOTIFY / 4U] = 0U;
+    uint32_t irq = mmio[VMMIO_INTERRUPT_STATUS / 4U];
+    if (irq) mmio[VMMIO_INTERRUPT_ACK / 4U] = irq;
+}
+
+RuntimeValue rt_arm64_virtio_net_recv(RuntimeValue out_addr, RuntimeValue max_value)
+{
+    uint64_t max = (uint64_t)max_value;
+    if (!g_arm64_net_ready) return -19;
+    if (!out_addr || max == 0ULL) return -22;
+    arm64_invalidate_dcache_range((uint64_t)(uintptr_t)&g_arm64_net_rx_used,
+                                  sizeof(g_arm64_net_rx_used));
+    if (g_arm64_net_rx_used.idx == g_arm64_net_rx_last_used) return 0;
+    uint16_t used_slot = (uint16_t)(g_arm64_net_rx_last_used % ARM64_NET_QUEUE_SIZE);
+    struct arm64_virtq_used_elem elem = g_arm64_net_rx_used.ring[used_slot];
+    g_arm64_net_rx_last_used++;
+    if (elem.id >= ARM64_NET_QUEUE_SIZE || !g_arm64_net_rx_posted[elem.id]) {
+        /* No trustworthy consumed descriptor identity: fail the device rather
+         * than guessing and double-posting a DMA buffer. */
+        volatile uint32_t *mmio = (volatile uint32_t *)(uintptr_t)g_arm64_net_base;
+        mmio[VMMIO_STATUS / 4U] |= VIRTIO_STATUS_FAILED;
+        g_arm64_net_ready = 0U;
+        return -5;
+    }
+    g_arm64_net_rx_posted[elem.id] = 0U;
+    if (elem.len <= ARM64_NET_HEADER_SIZE || elem.len > ARM64_NET_BUFFER_SIZE) {
+        arm64_net_repost_rx((uint16_t)elem.id);
+        return -5;
+    }
+    uint64_t frame_len = (uint64_t)elem.len - ARM64_NET_HEADER_SIZE;
+    if (frame_len > max) {
+        arm64_net_repost_rx((uint16_t)elem.id);
+        return -90;
+    }
+    arm64_invalidate_dcache_range((uint64_t)(uintptr_t)g_arm64_net_rx_buf[elem.id],
+                                  elem.len);
+    uint8_t *out = (uint8_t *)(uintptr_t)(uint64_t)out_addr;
+    for (uint64_t i = 0; i < frame_len; ++i)
+        out[i] = g_arm64_net_rx_buf[elem.id][ARM64_NET_HEADER_SIZE + i];
+    arm64_net_repost_rx((uint16_t)elem.id);
+    g_arm64_net_rx_frames++;
+    return (RuntimeValue)frame_len;
+}
+
+RuntimeValue rt_arm64_virtio_net_mac_octet(RuntimeValue index)
+{
+    return (uint64_t)index < 6ULL ? g_arm64_net_mac[(uint64_t)index] : 0;
+}
+RuntimeValue rt_arm64_virtio_net_ready(void) { return g_arm64_net_ready; }
+RuntimeValue rt_arm64_virtio_net_tx_completions(void) { return g_arm64_net_tx_completions; }
+RuntimeValue rt_arm64_virtio_net_rx_frames(void) { return g_arm64_net_rx_frames; }
+
 RuntimeValue rt_arm64_dcache_clean_range(RuntimeValue addr, RuntimeValue size)
 {
     arm64_clean_dcache_range((uint64_t)addr, (uint64_t)size);
@@ -4148,6 +4495,80 @@ RuntimeValue rt_arm64_user_as_translate(RuntimeValue root_val, RuntimeValue virt
     uint64_t entry = entries[idxs[3]];
     if (!(entry & ARM64_PTE_VALID)) return 0;
     return (RuntimeValue)((entry & ARM64_PTE_OUTPUT_MASK) + (virt & 4095ULL));
+}
+
+static uint64_t arm64_user_translate_checked(uint64_t root, uint64_t virt,
+                                             int require_write)
+{
+    if (!arm64_user_as_find(root)) return 0;
+    uint64_t table = root;
+    uint64_t idxs[4] = {
+        (virt >> 39) & 0x1FFULL, (virt >> 30) & 0x1FFULL,
+        (virt >> 21) & 0x1FFULL, (virt >> 12) & 0x1FFULL
+    };
+    for (uint32_t level = 0; level < 3U; ++level) {
+        volatile uint64_t *entries = (volatile uint64_t *)(uintptr_t)table;
+        uint64_t entry = entries[idxs[level]];
+        if (!(entry & ARM64_PTE_VALID) || !(entry & ARM64_PTE_TABLE)) return 0;
+        table = entry & ARM64_PTE_OUTPUT_MASK;
+    }
+    volatile uint64_t *entries = (volatile uint64_t *)(uintptr_t)table;
+    uint64_t leaf = entries[idxs[3]];
+    if (!(leaf & ARM64_PTE_VALID) || !(leaf & ARM64_PTE_TABLE)) return 0;
+    if ((leaf & (1ULL << 6)) == 0ULL) return 0; /* AP[1:0] must allow EL0. */
+    if (require_write && (leaf & (1ULL << 7)) != 0ULL) return 0; /* RO at EL0. */
+    return (leaf & ARM64_PTE_OUTPUT_MASK) + (virt & 4095ULL);
+}
+
+static int arm64_user_range_accessible(uint64_t ptr, uint64_t len,
+                                       int require_write)
+{
+    if (!arm64_recorded_user_root || !ptr || !len || len - 1ULL > UINT64_MAX - ptr)
+        return 0;
+    uint64_t last = ptr + len - 1ULL;
+    uint64_t page = ptr & ~4095ULL;
+    uint64_t last_page = last & ~4095ULL;
+    for (;;) {
+        if (!arm64_user_translate_checked(arm64_recorded_user_root, page,
+                                          require_write)) return 0;
+        if (page == last_page) return 1;
+        if (page > UINT64_MAX - 4096ULL) return 0;
+        page += 4096ULL;
+    }
+}
+
+RuntimeValue rt_arm64_user_copyin(RuntimeValue dst_value, RuntimeValue user_value,
+                                  RuntimeValue len_value)
+{
+    uint8_t *dst = (uint8_t *)(uintptr_t)(uint64_t)dst_value;
+    uint64_t user = (uint64_t)user_value;
+    uint64_t len = (uint64_t)len_value;
+    if (len == 0ULL) return 0;
+    if (!dst || !arm64_user_range_accessible(user, len, 0)) return -14;
+    for (uint64_t i = 0; i < len; ++i) {
+        uint64_t phys = arm64_user_translate_checked(arm64_recorded_user_root,
+                                                     user + i, 0);
+        if (!phys) return -14;
+        dst[i] = *(volatile uint8_t *)(uintptr_t)phys;
+    }
+    return (RuntimeValue)len;
+}
+
+RuntimeValue rt_arm64_user_copyout(RuntimeValue user_value, RuntimeValue src_value,
+                                   RuntimeValue len_value)
+{
+    uint64_t user = (uint64_t)user_value;
+    const uint8_t *src = (const uint8_t *)(uintptr_t)(uint64_t)src_value;
+    uint64_t len = (uint64_t)len_value;
+    if (len == 0ULL) return 0;
+    if (!src || !arm64_user_range_accessible(user, len, 1)) return -14;
+    for (uint64_t i = 0; i < len; ++i) {
+        uint64_t phys = arm64_user_translate_checked(arm64_recorded_user_root,
+                                                     user + i, 1);
+        if (!phys) return -14;
+        *(volatile uint8_t *)(uintptr_t)phys = src[i];
+    }
+    return (RuntimeValue)len;
 }
 
 RuntimeValue rt_arm64_user_as_ttbr0_probe(RuntimeValue root_val)

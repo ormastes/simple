@@ -1,0 +1,129 @@
+use std.nogc_sync_mut.io.env_ops.{env_get}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+extern fn rt_file_read_text(path: text) -> text
+
+struct SimpleOsServerExecutionReceiptV1:
+    mode: text
+    source_revision: text
+    target_identity: text
+    executable_sha256: text
+    image_sha256: text
+    command: text
+    utc_time: text
+    exit_status: i64
+    http_file_verified: bool
+    db_reboot_verified: bool
+    gpu_selected: bool
+    gpu_submit_completed: bool
+    device_readback_verified: bool
+
+fn _receipt_hash(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var i = 0
+    while i < value.len():
+        val ch = value[i]
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+        i = i + 1
+    true
+
+fn _receipt_fields(wire: text) -> Result<Dict<text, text>, text>:
+    var fields: Dict<text, text> = {}
+    for line in wire.split("\n"):
+        if line == "":
+            continue
+        val separator = line.find("=")
+        if separator <= 0:
+            return Err("malformed receipt line")
+        val key = line.slice(0, separator)
+        val value = line.slice(separator + 1, line.len())
+        if fields.has(key):
+            return Err("duplicate receipt field: {key}")
+        fields[key] = value
+    Ok(fields)
+
+fn parse_simpleos_server_execution_receipt_v1(wire: text) -> Result<SimpleOsServerExecutionReceiptV1, text>:
+    val parsed = _receipt_fields(wire)?
+    if (parsed.get("schema") ?? "") != "SimpleOsServerExecutionReceiptV1":
+        return Err("wrong or missing receipt schema")
+    val hash_keys = [
+        "executable_sha256", "compiler_sha256", "source_manifest_sha256",
+        "compiler_admission_receipt_sha256", "kernel_sha256", "image_sha256",
+        "image_staged_sha256", "image_after_commit_sha256", "command_sha256",
+        "http_expected_sha256", "http_observed_sha256",
+        "db_commit_response_sha256", "db_reboot_response_sha256",
+        "crash_replay_manifest_sha256",
+        "boot1_serial_sha256", "boot2_serial_sha256"
+    ]
+    for key in hash_keys:
+        if not _receipt_hash(parsed.get(key) ?? ""):
+            return Err("missing or malformed receipt hash: {key}")
+    val expected_document_sha256 = "772260f72b55b342bf50c825f6793df48ff4cc292c4dd966394b390f10393594"
+    if ((parsed.get("http_expected_sha256") ?? "") != expected_document_sha256 or
+        parsed.get("http_expected_sha256") != parsed.get("http_observed_sha256")):
+        return Err("HTTP bytes do not match")
+    if (parsed.get("mode") ?? "") != "qemu-arm64-cpu":
+        return Err("wrong execution mode")
+    if not (parsed.get("target_identity") ?? "").starts_with("qemu-system-aarch64:virt:"):
+        return Err("wrong target identity")
+    if (parsed.get("fresh_qemu_processes") ?? "") != "2" or (parsed.get("shutdown_verified") ?? "") != "true":
+        return Err("fresh reboot/shutdown evidence missing")
+    if (parsed.get("http_file_verified") ?? "") != "true" or (parsed.get("db_reboot_verified") ?? "") != "true":
+        return Err("HTTP or database proof missing")
+    if ((parsed.get("db_commit_verified") ?? "") != "true" or
+        (parsed.get("db_boot1_read_verified") ?? "") != "true" or
+        (parsed.get("db_boot2_read_verified") ?? "") != "true"):
+        return Err("exact database commit/read evidence missing")
+    if ((parsed.get("crash_replay_matrix_verified") ?? "") != "true" or
+        (parsed.get("crash_replay_seam_count") ?? "") != "13"):
+        return Err("power-cut replay matrix is incomplete")
+    if (parsed.get("gpu_selected") ?? "") != "false" or (parsed.get("gpu_submit_completed") ?? "") != "false":
+        return Err("QEMU CPU receipt claims GPU work")
+    if ((parsed.get("image_contains_credential") ?? "") != "true" or
+        (parsed.get("credential_bytes_retained") ?? "") != "false" or
+        (parsed.get("credential_image_sensitive") ?? "") != "true" or
+        (parsed.get("credential_image_ephemeral") ?? "") != "true" or
+        (parsed.get("credential_image_destroyed_after_run") ?? "") != "true"):
+        return Err("credential-bearing image lifecycle is dishonest or incomplete")
+    if ((parsed.get("source_revision") ?? "").len() < 7 or
+        (parsed.get("source_manifest_roots") ?? "") == "" or
+        (parsed.get("utc_time") ?? "") == "" or
+        (parsed.get("command") ?? "") != "scripts/check/check-simpleos-arm64-servers-qemu.shs qemu-arm64-cpu"):
+        return Err("receipt provenance is incomplete")
+    if (parsed.get("compiler_admission_schema") ?? "") != "simpleos-arm64-current-source-compiler-admission-v1":
+        return Err("compiler admission provenance is missing")
+    val status_text = parsed.get("exit_status") ?? ""
+    if status_text != "0":
+        return Err("gate exit status is not zero")
+    Ok(SimpleOsServerExecutionReceiptV1(
+        mode: parsed.get("mode") ?? "",
+        source_revision: parsed.get("source_revision") ?? "",
+        target_identity: parsed.get("target_identity") ?? "",
+        executable_sha256: parsed.get("executable_sha256") ?? "",
+        image_sha256: parsed.get("image_sha256") ?? "",
+        command: parsed.get("command") ?? "",
+        utc_time: parsed.get("utc_time") ?? "",
+        exit_status: 0,
+        http_file_verified: true,
+        db_reboot_verified: true,
+        gpu_selected: false,
+        gpu_submit_completed: false,
+        device_readback_verified: false
+    ))
+
+fn run_arm_qemu_server_fixture(mode: text) -> SimpleOsServerExecutionReceiptV1:
+    if mode != "qemu-arm64-cpu":
+        fail("unsupported ARM QEMU server mode: {mode}")
+    val receipt_path = env_get("SIMPLEOS_ARM64_SERVERS_QEMU_RECEIPT") ??
+        "build/test-artifacts/simpleos-arm64-servers-qemu/receipt.env"
+    val result = rt_process_run_timeout(
+        "sh", ["scripts/check/check-simpleos-arm64-servers-qemu.shs"], 900000)
+    if result.2 != 0:
+        fail("ARM QEMU server gate failed: {result.0}{result.1}")
+    match parse_simpleos_server_execution_receipt_v1(rt_file_read_text(receipt_path)):
+        Ok(receipt): receipt
+        Err(message): fail("invalid ARM QEMU server receipt: {message}")
+
+export SimpleOsServerExecutionReceiptV1, parse_simpleos_server_execution_receipt_v1, run_arm_qemu_server_fixture

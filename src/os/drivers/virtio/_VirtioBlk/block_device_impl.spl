@@ -147,3 +147,52 @@ impl BlockDevice for VirtioBlkDriver:
 
     fn sector_size() -> u32:
         self.sector_size
+
+    me flush() -> Result<bool, text>:
+        """Complete a VirtIO BLK_T_FLUSH request before acknowledging fsync."""
+        if not self.initialized:
+            return Err("device not initialized")
+        if not self.flush_supported:
+            return Err("virtio-blk FLUSH feature was not negotiated")
+        val dma_result = _virtio_blk_alloc_dma(17)
+        if dma_result.is_err():
+            return Err("virtio-blk flush DMA allocation failed")
+        val dma = dma_result.unwrap()
+        val header_addr = dma.virt_addr
+        val status_addr = header_addr + 16
+        val desc0 = _virtq_alloc_desc()
+        val desc1 = _virtq_alloc_desc()
+        if desc0 < 0 or desc1 < 0:
+            if desc0 >= 0:
+                _virtq_free_desc(desc0.to_u32())
+            if desc1 >= 0:
+                _virtq_free_desc(desc1.to_u32())
+            val _freed = _virtio_blk_free_dma(dma.virt_addr, 17)
+            return Err("no free descriptors")
+        mmio_write32(header_addr, VIRTIO_BLK_T_FLUSH)
+        mmio_write32(header_addr + 4, 0)
+        mmio_write32(header_addr + 8, 0)
+        mmio_write32(header_addr + 12, 0)
+        mmio_write8(status_addr, 0xFF)
+        val d0_addr = _virtq_desc_addr(desc0.to_u32())
+        mmio_write32(d0_addr, (header_addr & 0xFFFFFFFF).to_u32())
+        mmio_write32(d0_addr + 4, (header_addr >> 32).to_u32())
+        mmio_write32(d0_addr + 8, 16)
+        mmio_write32(d0_addr + 12, (1u32 << 16) | desc1.to_u32())
+        val d1_addr = _virtq_desc_addr(desc1.to_u32())
+        mmio_write32(d1_addr, (status_addr & 0xFFFFFFFF).to_u32())
+        mmio_write32(d1_addr + 4, (status_addr >> 32).to_u32())
+        mmio_write32(d1_addr + 8, 1)
+        mmio_write32(d1_addr + 12, 2u32 << 16)
+        _virtq_push_avail(desc0.to_u32())
+        _virtio_blk_reg_write32(80, 0)
+        val completed = self.wait_completion(BLK_COMPLETION_TIMEOUT_POLLS)
+        val status = mmio_read8(status_addr)
+        _virtq_free_desc(desc0.to_u32())
+        _virtq_free_desc(desc1.to_u32())
+        val _freed = _virtio_blk_free_dma(dma.virt_addr, 17)
+        if not completed:
+            return Err("virtio-blk flush timeout")
+        if status != VIRTIO_BLK_S_OK:
+            return Err("virtio-blk flush error (status={status})")
+        Ok(true)

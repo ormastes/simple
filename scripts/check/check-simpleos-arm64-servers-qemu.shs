@@ -1,0 +1,441 @@
+#!/bin/sh
+# Canonical live ARM64 SimpleOS filesystem-server acceptance gate.
+# Builds the fs-exec kernel owner, stages the current /SERVERS.ELF plus the
+# fixed /SYS/SERVER.HTM witness and a private database credential, then proves
+# exact HTTP bytes and authenticated durable DB readback across two distinct
+# QEMU processes using the same writable FAT32 image.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+. scripts/check/lib/qemu-frozen-source-admission.shs
+
+OUT_DIR=${SIMPLEOS_ARM64_SERVERS_QEMU_OUT:-build/test-artifacts/simpleos-arm64-servers-qemu}
+case "$OUT_DIR" in build/test-artifacts/*) ;; *) fail_early=1 ;; esac
+COMPILER=${SIMPLE_BUILD_COMPILER:-}
+COMPILER_ADMISSION=${SIMPLEOS_ARM64_SERVERS_COMPILER_ADMISSION_RECEIPT:-}
+SERVER_ELF=build/os/arm64_servers/servers.elf
+KERNEL="$OUT_DIR/kernel.elf"
+IMAGE="$OUT_DIR/server-disk.img"
+RECEIPT="$OUT_DIR/receipt.env"
+SERIAL1="$OUT_DIR/boot1.serial.log"
+SERIAL2="$OUT_DIR/boot2.serial.log"
+QMP="$OUT_DIR/qmp.sock"
+QEMU_LOG="$OUT_DIR/qemu.log"
+CACHE="$OUT_DIR/native-cache"
+GENERATED_SOURCE="$OUT_DIR/generated-source"
+HTTP_PORT=${SIMPLEOS_ARM64_SERVERS_HTTP_PORT:-18080}
+DB_PORT=${SIMPLEOS_ARM64_SERVERS_DB_PORT:-15433}
+BOOT_TIMEOUT=${SIMPLEOS_ARM64_SERVERS_BOOT_TIMEOUT:-90}
+EXPECTED_DOCUMENT='<html><body>SimpleOS filesystem server document</body></html>'
+ENTRY=examples/09_embedded/simple_os/arch/arm64/servers_entry.spl
+LINKER=examples/09_embedded/simple_os/arch/arm64/fs_exec_linker.ld
+TARGET=aarch64-unknown-none
+
+fail() { printf 'simpleos-arm64-servers-qemu: FAIL: %s\n' "$*" >&2; exit 1; }
+sha256_file() { sha256sum "$1" | awk '{print $1}'; }
+require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"; }
+one_line() { tr -d '\r\n' < "$1"; }
+canonical_path() { (CDPATH= cd -- "$(dirname -- "$1")" && printf '%s/%s\n' "$(pwd -P)" "$(basename -- "$1")"); }
+receipt_field() {
+    key=$1; receipt_file=$2
+    awk -F= -v wanted="$key" '
+        $1 == wanted { count++; value = substr($0, length(wanted) + 2) }
+        END { if (count == 1 && value != "") print value; else exit 1 }
+    ' "$receipt_file"
+}
+[ "${fail_early:-0}" = 0 ] || fail "output directory must stay under build/test-artifacts"
+
+mkdir -p "$OUT_DIR" "$CACHE" "$GENERATED_SOURCE/generated"
+chmod 700 "$OUT_DIR"
+for cmd in qemu-system-aarch64 nc socat timeout sha256sum readelf nm cc ss git cmp sed; do require_cmd "$cmd"; done
+[ -n "$COMPILER" ] || fail "SIMPLE_BUILD_COMPILER is required; no compiler default is admitted"
+[ -x "$COMPILER" ] || fail "admitted current-source compiler is not executable: $COMPILER"
+[ -n "$COMPILER_ADMISSION" ] || fail "SIMPLEOS_ARM64_SERVERS_COMPILER_ADMISSION_RECEIPT is required"
+[ -f "$COMPILER_ADMISSION" ] && [ ! -L "$COMPILER_ADMISSION" ] || fail "compiler admission receipt must be a regular non-symlink file"
+CURRENT_REVISION=$(git rev-parse HEAD)
+SOURCE_MANIFEST_ROOTS='src/compiler|src/lib|src/os|examples/09_embedded/simple_os|scripts/check/check-simpleos-arm64-servers-qemu.shs|scripts/check/simpleos-arm64-server-cap-status.spl|scripts/os/build_arm64_servers_payload.shs|scripts/os/make_os_disk.shs|scripts/os/make_os_disk.c|config/simpleos_arm64_servers_weak_undefined_allowlist.sdn'
+qemu_admission_source_snapshot \
+    src/compiler src/lib src/os examples/09_embedded/simple_os \
+    scripts/check/check-simpleos-arm64-servers-qemu.shs \
+    scripts/check/simpleos-arm64-server-cap-status.spl \
+    scripts/os/build_arm64_servers_payload.shs \
+    scripts/os/make_os_disk.shs scripts/os/make_os_disk.c \
+    config/simpleos_arm64_servers_weak_undefined_allowlist.sdn \
+    || fail "current worktree content manifest failed"
+SOURCE_MANIFEST_SHA=$QEMU_ADMISSION_SOURCE_FINGERPRINT
+SOURCE_MANIFEST_FILES=$QEMU_ADMISSION_SOURCE_FILE_COUNT
+COMPILER_SHA=$(sha256_file "$COMPILER")
+COMPILER_CANONICAL=$(canonical_path "$COMPILER")
+COMPILER_VERSION=$("$COMPILER" --version 2>/dev/null) || fail "compiler version probe failed"
+[ "$(receipt_field schema "$COMPILER_ADMISSION")" = simpleos-arm64-current-source-compiler-admission-v1 ] \
+    || fail "wrong compiler admission schema"
+[ "$(receipt_field status "$COMPILER_ADMISSION")" = pass ] || fail "compiler admission did not pass"
+[ "$(canonical_path "$(receipt_field compiler_path "$COMPILER_ADMISSION")")" = "$COMPILER_CANONICAL" ] \
+    || fail "compiler admission path does not identify SIMPLE_BUILD_COMPILER"
+[ "$(receipt_field compiler_version "$COMPILER_ADMISSION")" = "$COMPILER_VERSION" ] \
+    || fail "compiler admission version does not match SIMPLE_BUILD_COMPILER"
+[ "$(receipt_field native_smoke_status "$COMPILER_ADMISSION")" = pass ] \
+    || fail "compiler admission lacks native smoke proof"
+[ "$(receipt_field stub_fallback "$COMPILER_ADMISSION")" = forbidden ] \
+    || fail "compiler admission permits stub fallback"
+[ "$(receipt_field fabricated_stub_status "$COMPILER_ADMISSION")" = none ] \
+    || fail "compiler admission contains fabricated stubs"
+[ "$(receipt_field source_revision "$COMPILER_ADMISSION")" = "$CURRENT_REVISION" ] \
+    || fail "compiler admission is not bound to the current source revision"
+[ "$(receipt_field source_manifest_sha256 "$COMPILER_ADMISSION")" = "$SOURCE_MANIFEST_SHA" ] \
+    || fail "compiler admission is not bound to current dirty-worktree content"
+[ "$(receipt_field source_manifest_roots "$COMPILER_ADMISSION")" = "$SOURCE_MANIFEST_ROOTS" ] \
+    || fail "compiler admission used a different source-manifest scope"
+[ "$(receipt_field compiler_sha256 "$COMPILER_ADMISSION")" = "$COMPILER_SHA" ] \
+    || fail "compiler admission SHA-256 does not match SIMPLE_BUILD_COMPILER"
+ADMISSION_SHA=$(sha256_file "$COMPILER_ADMISSION")
+# Build the payload inside the admitted snapshot. A pre-existing ELF is never
+# accepted as evidence for this run, even if it happens to pass the ELF gates.
+env SIMPLE_BUILD_COMPILER="$COMPILER" SIMPLE_NATIVE_BACKEND=cranelift \
+    sh scripts/os/build_arm64_servers_payload.shs > "$OUT_DIR/server-build.log" 2>&1 \
+    || fail "admitted current-source ARM64 server payload build failed"
+[ -s "$SERVER_ELF" ] || fail "current gate produced no ARM64 server executable"
+readelf -h "$SERVER_ELF" | grep -Eq 'Machine:[[:space:]]+AArch64' || fail "SERVERS.ELF is not AArch64"
+readelf -h "$SERVER_ELF" | grep -Eq 'Type:[[:space:]]+EXEC' || fail "SERVERS.ELF is not executable"
+UNDEFINED_STRONG=$(nm -u "$SERVER_ELF" 2>/dev/null | awk '$1 == "U" { print $2 }')
+[ -z "$UNDEFINED_STRONG" ] || fail "SERVERS.ELF retains undefined strong symbols: $UNDEFINED_STRONG"
+WEAK_ALLOWLIST=config/simpleos_arm64_servers_weak_undefined_allowlist.sdn
+[ -f "$WEAK_ALLOWLIST" ] || fail "missing reviewed weak-symbol allowlist"
+UNDEFINED_WEAK=$(nm -u "$SERVER_ELF" 2>/dev/null | awk '$1 == "w" || $1 == "v" { print $2 }')
+for weak_symbol in $UNDEFINED_WEAK; do
+    grep -Fqx "$weak_symbol" "$WEAK_ALLOWLIST" || fail "unreviewed undefined weak symbol: $weak_symbol"
+done
+for required_provider in rt_file_create_excl rt_file_sync rt_simpleos_file_atomic_caps rt_time_now_unix_micros rt_sleep_ms rt_process_is_running; do
+    nm "$SERVER_ELF" 2>/dev/null | awk -v symbol="$required_provider" '$2 ~ /^[TDBR]$/ && $3 == symbol { found=1 } END { exit(found ? 0 : 1) }' \
+        || fail "SERVERS.ELF lacks strong target runtime provider: $required_provider"
+done
+
+CAP_STATUS=$(env SIMPLE_LIB="$ROOT_DIR/src" "$COMPILER" run \
+    scripts/check/simpleos-arm64-server-cap-status.spl 2>/dev/null) \
+    || fail "typed SimpleOS persistence capability probe failed"
+printf '%s\n' "$CAP_STATUS" > "$OUT_DIR/persistence-caps.env"
+[ "$(receipt_field schema "$OUT_DIR/persistence-caps.env")" = SimpleOsArm64ServerPersistenceCapsV1 ] \
+    || fail "typed persistence capability schema mismatch"
+[ "$(receipt_field ready "$OUT_DIR/persistence-caps.env")" = true ] \
+    || fail "typed persistence capabilities are not ready: $(receipt_field blocker "$OUT_DIR/persistence-caps.env")"
+
+for port in "$HTTP_PORT" "$DB_PORT"; do
+    if ss -ltn 2>/dev/null | grep -Eq "[:.]${port}[[:space:]]"; then fail "host port already in use: $port"; fi
+done
+
+umask 077
+CREDENTIAL_FILE="$OUT_DIR/.db-credential.$$"
+SENSITIVE_IMAGES=""
+SENSITIVE_FILES="$CREDENTIAL_FILE $OUT_DIR/db.request $OUT_DIR/db.open $OUT_DIR/db.reboot.open $OUT_DIR/crash-db.open"
+cleanup_sensitive() {
+    test -n "${QEMU_PID:-}" && kill "$QEMU_PID" 2>/dev/null || true
+    rm -f "$CREDENTIAL_FILE" "$QMP"
+    for sensitive_image in $SENSITIVE_IMAGES; do rm -f "$sensitive_image"; done
+    for sensitive_file in $SENSITIVE_FILES; do rm -f "$sensitive_file"; done
+}
+trap cleanup_sensitive EXIT HUP INT TERM
+dd if=/dev/urandom bs=24 count=1 2>/dev/null | od -An -tx1 | tr -d ' \n' > "$CREDENTIAL_FILE"
+[ "$(wc -c < "$CREDENTIAL_FILE" | tr -d ' ')" -eq 48 ] || fail "credential generation failed"
+CREDENTIAL=$(one_line "$CREDENTIAL_FILE")
+
+cat > "$GENERATED_SOURCE/generated/simpleos_log_config.spl" <<'SPL'
+val SIMPLEOS_LOG_COMPILED: bool = false
+fn simpleos_log_compile_enabled() -> bool: false
+fn simpleos_log_compile_mode_name() -> text: "off"
+SPL
+cat > "$GENERATED_SOURCE/generated/simpleos_server_crash_profile.spl" <<'SPL'
+fn simpleos_server_crash_seam_code() -> i64: -1
+fn simpleos_server_crash_occurrence() -> i64: 0
+SPL
+
+rm -f "$KERNEL"
+env SIMPLE_BOOT_MINIMAL=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
+    "$COMPILER" native-build --cache-dir "$CACHE" \
+    --source "$GENERATED_SOURCE" --source src/os --source src/lib \
+    --source examples/09_embedded/simple_os --backend cranelift \
+    --opt-level=aggressive --log off --timeout 180 --entry-closure \
+    --entry "$ENTRY" --target "$TARGET" --output "$KERNEL" \
+    --linker-script "$LINKER" > "$OUT_DIR/kernel-build.log" 2>&1 \
+    || fail "ARM fs-exec server kernel build failed"
+[ -s "$KERNEL" ] || fail "kernel build produced no ELF"
+
+rm -f "$IMAGE"
+env SIMPLEOS_SERVERS_BINARY="$SERVER_ELF" \
+    SIMPLEOS_FSEXEC_BINARY="$SERVER_ELF" \
+    SIMPLEOS_SERVER_DB_CREDENTIAL_FILE="$CREDENTIAL_FILE" \
+    sh scripts/os/make_os_disk.shs 256 "$IMAGE" "$KERNEL" arm64 fs-exec \
+    > "$OUT_DIR/image-build.log" 2>&1 || fail "ARM FAT32 server image staging failed"
+[ -s "$IMAGE" ] || fail "image builder produced no FAT32 image"
+chmod 600 "$IMAGE"
+PRISTINE_IMAGE="$OUT_DIR/server-disk.pristine.img"
+SENSITIVE_IMAGES="$IMAGE $PRISTINE_IMAGE"
+
+SERVER_SHA=$(sha256_file "$SERVER_ELF")
+KERNEL_SHA=$(sha256_file "$KERNEL")
+IMAGE_STAGED_SHA=$(sha256_file "$IMAGE")
+SOURCE_REVISION=$CURRENT_REVISION
+UTC_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+qemu_start() {
+    serial=$1
+    rm -f "$serial" "$QMP" "$QEMU_LOG"
+    qemu-system-aarch64 -no-user-config -machine virt -accel tcg \
+        -cpu cortex-a72 -m 512M -display none -serial "file:$serial" \
+        -monitor none -no-reboot -kernel "$KERNEL" \
+        -drive "file=$IMAGE,if=none,id=armdisk,format=raw" \
+        -device virtio-blk-device,drive=armdisk \
+        -global virtio-mmio.force-legacy=false \
+        -netdev "user,id=servernet,hostfwd=tcp::$HTTP_PORT-:8080,hostfwd=tcp::$DB_PORT-:5433" \
+        -device virtio-net-device,netdev=servernet \
+        -qmp "unix:$QMP,server=on,wait=off" > "$QEMU_LOG" 2>&1 &
+    QEMU_PID=$!
+}
+
+wait_ready() {
+    serial=$1
+    deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        grep -Fq '[arm64-servers-user] http=:8080 db=:5433 ready=ok' "$serial" 2>/dev/null && return 0
+        kill -0 "$QEMU_PID" 2>/dev/null || return 1
+        sleep 1
+    done
+    return 1
+}
+
+qemu_stop() {
+    printf '{"execute":"qmp_capabilities"}\n{"execute":"quit"}\n' | socat - UNIX-CONNECT:"$QMP" >/dev/null 2>&1 \
+        || fail "QMP shutdown request failed"
+    deadline=$(( $(date +%s) + 10 ))
+    while kill -0 "$QEMU_PID" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do sleep 1; done
+    kill -0 "$QEMU_PID" 2>/dev/null && fail "QEMU did not stop after QMP quit"
+    wait "$QEMU_PID" 2>/dev/null || true
+    unset QEMU_PID
+}
+
+tcp_request() {
+    port=$1; request_file=$2; response_file=$3
+    timeout 10 nc -N 127.0.0.1 "$port" < "$request_file" > "$response_file" 2>/dev/null \
+        || fail "TCP request failed on host port $port"
+}
+
+db_command() {
+    command_text=$1; output=$2
+    printf '%s\n' "$command_text" > "$OUT_DIR/db.request"
+    tcp_request "$DB_PORT" "$OUT_DIR/db.request" "$output"
+}
+
+wait_crash_marker() {
+    serial=$1; marker=$2
+    deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        grep -Fq "$marker" "$serial" 2>/dev/null && return 0
+        kill -0 "$QEMU_PID" 2>/dev/null || return 1
+        sleep 1
+    done
+    return 1
+}
+
+build_kernel_for_crash_code() {
+    code=$1; output=$2
+    cat > "$GENERATED_SOURCE/generated/simpleos_server_crash_profile.spl" <<EOF
+fn simpleos_server_crash_seam_code() -> i64: $code
+fn simpleos_server_crash_occurrence() -> i64: 0
+EOF
+    env SIMPLE_BOOT_MINIMAL=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" \
+        "$COMPILER" native-build --cache-dir "$CACHE" \
+        --source "$GENERATED_SOURCE" --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os --backend cranelift \
+        --opt-level=aggressive --log off --timeout 180 --entry-closure \
+        --entry "$ENTRY" --target "$TARGET" --output "$output" \
+        --linker-script "$LINKER" > "$output.build.log" 2>&1 \
+        || fail "crash-profile kernel build failed for code $code"
+    [ -s "$output" ] || fail "crash-profile kernel missing for code $code"
+}
+
+qemu_start "$SERIAL1"
+wait_ready "$SERIAL1" || fail "boot 1 server readiness marker missing"
+printf 'GET /files/SERVER.HTM HTTP/1.1\r\nHost: simpleos\r\nConnection: close\r\n\r\n' > "$OUT_DIR/http.request"
+tcp_request "$HTTP_PORT" "$OUT_DIR/http.request" "$OUT_DIR/http.response"
+sed '1,/^\r$/d' "$OUT_DIR/http.response" > "$OUT_DIR/http.body"
+printf '%s\n' "$EXPECTED_DOCUMENT" > "$OUT_DIR/http.expected"
+cmp -s "$OUT_DIR/http.expected" "$OUT_DIR/http.body" || fail "HTTP document bytes differ from staged /SYS/SERVER.HTM"
+grep -Fq 'HTTP/1.1 200 OK' "$OUT_DIR/http.response" || fail "HTTP status is not exactly 200"
+
+db_command "OPEN as=operator credential=$CREDENTIAL" "$OUT_DIR/db.open"
+[ "$(one_line "$OUT_DIR/db.open")" = 'OK session=1' ] || fail "authenticated DB OPEN failed"
+db_command 'BEGIN session=1' "$OUT_DIR/db.begin"
+[ "$(one_line "$OUT_DIR/db.begin")" = 'OK' ] || fail "DB BEGIN failed"
+db_command 'PUT session=1 tbl=records id=reboot-key value=reboot-value' "$OUT_DIR/db.put"
+[ "$(one_line "$OUT_DIR/db.put")" = 'OK' ] || fail "DB PUT failed"
+db_command 'COMMIT session=1 commit_id=arm-qemu-reboot-1' "$OUT_DIR/db.commit"
+[ "$(one_line "$OUT_DIR/db.commit")" = 'OK applied=1' ] || fail "durable DB COMMIT was not acknowledged"
+db_command 'GET session=1 tbl=records id=reboot-key col=value' "$OUT_DIR/db.read.boot1"
+[ "$(one_line "$OUT_DIR/db.read.boot1")" = 'OK value=reboot-value' ] || fail "boot 1 DB readback failed"
+qemu_stop
+IMAGE_COMMIT_SHA=$(sha256_file "$IMAGE")
+
+qemu_start "$SERIAL2"
+wait_ready "$SERIAL2" || fail "boot 2 server readiness marker missing"
+db_command "OPEN as=operator credential=$CREDENTIAL" "$OUT_DIR/db.reboot.open"
+[ "$(one_line "$OUT_DIR/db.reboot.open")" = 'OK session=1' ] || fail "reboot authenticated DB OPEN failed"
+db_command 'BEGIN session=1' "$OUT_DIR/db.reboot.begin"
+[ "$(one_line "$OUT_DIR/db.reboot.begin")" = 'OK' ] || fail "reboot DB BEGIN failed"
+db_command 'GET session=1 tbl=records id=reboot-key col=value' "$OUT_DIR/db.read.boot2"
+[ "$(one_line "$OUT_DIR/db.read.boot2")" = 'OK value=reboot-value' ] || fail "fresh-QEMU DB readback failed"
+qemu_stop
+IMAGE_REBOOT_SHA=$(sha256_file "$IMAGE")
+# Crash cases start with an existing committed /SERVER.DB. This is required to
+# reach replacement/reclaim/FAT-copy/DONE transitions rather than only the
+# first-create path.
+cp "$IMAGE" "$PRISTINE_IMAGE"
+chmod 600 "$PRISTINE_IMAGE"
+
+# Every journal transition is independently power-cut from the same pristine
+# credential-bearing image. The injected kernel spins only after the storage
+# owner reports the exact post-I/O seam; the host then kills that QEMU process
+# and boots the normal kernel against the same crash image. Acceptance requires
+# a deterministic replay generation/state receipt from the mounted owner.
+NORMAL_KERNEL=$KERNEL
+NORMAL_IMAGE=$IMAGE
+CRASH_MANIFEST="$OUT_DIR/crash-replay-manifest.env"
+: > "$CRASH_MANIFEST"
+CRASH_SEAMS='payload-write payload-flush header-write header-flush image-write image-flush reclaim-header-write reclaim-header-flush fat-copy-write fat-copies-flush fat-copies-reread done-header-write done-header-flush'
+crash_code=0
+for crash_seam_name in $CRASH_SEAMS; do
+    CRASH_KERNEL="$OUT_DIR/crash-$crash_code.kernel.elf"
+    CRASH_IMAGE="$OUT_DIR/crash-$crash_code.img"
+    CRASH_SERIAL="$OUT_DIR/crash-$crash_code.serial.log"
+    REPLAY_SERIAL="$OUT_DIR/crash-$crash_code.replay.serial.log"
+    build_kernel_for_crash_code "$crash_code" "$CRASH_KERNEL"
+    cp "$PRISTINE_IMAGE" "$CRASH_IMAGE"
+    chmod 600 "$CRASH_IMAGE"
+    SENSITIVE_IMAGES="$SENSITIVE_IMAGES $CRASH_IMAGE"
+    KERNEL=$CRASH_KERNEL; IMAGE=$CRASH_IMAGE
+    qemu_start "$CRASH_SERIAL"
+    wait_ready "$CRASH_SERIAL" || fail "crash profile $crash_seam_name never became ready"
+    db_command "OPEN as=operator credential=$CREDENTIAL" "$OUT_DIR/crash-db.open"
+    [ "$(one_line "$OUT_DIR/crash-db.open")" = 'OK session=1' ] || fail "crash profile authentication failed"
+    db_command 'BEGIN session=1' "$OUT_DIR/crash-db.begin"
+    [ "$(one_line "$OUT_DIR/crash-db.begin")" = 'OK' ] || fail "crash profile BEGIN failed"
+    db_command "PUT session=1 tbl=records id=crash-$crash_code value=after" "$OUT_DIR/crash-db.put"
+    [ "$(one_line "$OUT_DIR/crash-db.put")" = 'OK' ] || fail "crash profile PUT failed"
+    printf '%s\n' "COMMIT session=1 commit_id=crash-$crash_code" > "$OUT_DIR/db.request"
+    timeout 10 nc -N 127.0.0.1 "$DB_PORT" < "$OUT_DIR/db.request" > "$OUT_DIR/crash-db.commit" 2>/dev/null || true
+    wait_crash_marker "$CRASH_SERIAL" "[far-crash] seam=$crash_seam_name occurrence=0" \
+        || fail "crash profile $crash_seam_name did not trigger exact seam"
+    kill "$QEMU_PID" 2>/dev/null || true
+    wait "$QEMU_PID" 2>/dev/null || true
+    unset QEMU_PID
+
+    KERNEL=$NORMAL_KERNEL
+    qemu_start "$REPLAY_SERIAL"
+    wait_ready "$REPLAY_SERIAL" || fail "replay boot failed for $crash_seam_name"
+    REPLAY_LINE=$(tr -d '\r' < "$REPLAY_SERIAL" | grep -E '^\[far-replay\] generation=[0-9]+ state=3 recovered=(true|false)$' | tail -1)
+    [ -n "$REPLAY_LINE" ] || fail "terminal replay generation/state missing for $crash_seam_name"
+    db_command "OPEN as=operator credential=$CREDENTIAL" "$OUT_DIR/crash-replay-db.open"
+    [ "$(one_line "$OUT_DIR/crash-replay-db.open")" = 'OK session=1' ] || fail "replay authentication failed for $crash_seam_name"
+    db_command 'GET session=1 tbl=records id=reboot-key col=value' "$OUT_DIR/crash-replay-old.read"
+    [ "$(one_line "$OUT_DIR/crash-replay-old.read")" = 'OK value=reboot-value' ] || fail "pre-existing committed DB state lost at $crash_seam_name"
+    db_command "GET session=1 tbl=records id=crash-$crash_code col=value" "$OUT_DIR/crash-replay-new.read"
+    CRASH_ACK=$(one_line "$OUT_DIR/crash-db.commit")
+    CRASH_PUBLIC=$(one_line "$OUT_DIR/crash-replay-new.read")
+    if [ "$CRASH_ACK" = 'OK applied=1' ]; then
+        [ "$CRASH_PUBLIC" = 'OK value=after' ] || fail "acknowledged commit was not public after replay at $crash_seam_name"
+    else
+        case "$CRASH_PUBLIC" in 'OK value=after'|'ERR not_found') ;; *) fail "unacknowledged commit has invalid public state at $crash_seam_name" ;; esac
+    fi
+    qemu_stop
+    printf 'seam=%s crash_serial_sha256=%s replay_serial_sha256=%s replay=%s\n' \
+        "$crash_seam_name" "$(sha256_file "$CRASH_SERIAL")" "$(sha256_file "$REPLAY_SERIAL")" "$REPLAY_LINE ack=$CRASH_ACK public=$CRASH_PUBLIC" \
+        >> "$CRASH_MANIFEST"
+    rm -f "$CRASH_IMAGE"
+    crash_code=$((crash_code + 1))
+done
+[ "$crash_code" -eq 13 ] || fail "crash seam matrix incomplete"
+KERNEL=$NORMAL_KERNEL; IMAGE=$NORMAL_IMAGE
+cat > "$GENERATED_SOURCE/generated/simpleos_server_crash_profile.spl" <<'SPL'
+fn simpleos_server_crash_seam_code() -> i64: -1
+fn simpleos_server_crash_occurrence() -> i64: 0
+SPL
+CRASH_MANIFEST_SHA=$(sha256_file "$CRASH_MANIFEST")
+
+[ "$(git rev-parse HEAD)" = "$CURRENT_REVISION" ] || fail "source revision changed during gate"
+qemu_admission_source_snapshot \
+    src/compiler src/lib src/os examples/09_embedded/simple_os \
+    scripts/check/check-simpleos-arm64-servers-qemu.shs \
+    scripts/check/simpleos-arm64-server-cap-status.spl \
+    scripts/os/build_arm64_servers_payload.shs \
+    scripts/os/make_os_disk.shs scripts/os/make_os_disk.c \
+    config/simpleos_arm64_servers_weak_undefined_allowlist.sdn \
+    || fail "post-run worktree content manifest failed"
+[ "$QEMU_ADMISSION_SOURCE_FINGERPRINT" = "$SOURCE_MANIFEST_SHA" ] \
+    || fail "worktree content changed during gate"
+[ "$(sha256_file "$COMPILER")" = "$COMPILER_SHA" ] || fail "compiler changed during gate"
+[ "$(sha256_file "$COMPILER_ADMISSION")" = "$ADMISSION_SHA" ] || fail "compiler admission receipt changed during gate"
+
+HTTP_SHA=$(sha256_file "$OUT_DIR/http.body")
+EXPECTED_HTTP_SHA=$(sha256_file "$OUT_DIR/http.expected")
+DB_COMMIT_SHA=$(sha256_file "$OUT_DIR/db.commit")
+DB_REBOOT_SHA=$(sha256_file "$OUT_DIR/db.read.boot2")
+SERIAL1_SHA=$(sha256_file "$SERIAL1")
+SERIAL2_SHA=$(sha256_file "$SERIAL2")
+COMMAND_SHA=$(printf '%s' 'scripts/check/check-simpleos-arm64-servers-qemu.shs qemu-arm64-cpu' | sha256sum | awk '{print $1}')
+for sensitive_image in $SENSITIVE_IMAGES; do rm -f "$sensitive_image"; done
+for sensitive_image in $SENSITIVE_IMAGES; do
+    [ ! -e "$sensitive_image" ] || fail "sensitive credential-bearing image was not destroyed: $sensitive_image"
+done
+for sensitive_file in $SENSITIVE_FILES; do rm -f "$sensitive_file"; done
+if grep -R -a -F -q -- "$CREDENTIAL" "$OUT_DIR"; then
+    fail "retained artifact contains the database credential"
+fi
+
+cat > "$RECEIPT" <<EOF
+schema=SimpleOsServerExecutionReceiptV1
+mode=qemu-arm64-cpu
+source_revision=$SOURCE_REVISION
+source_manifest_sha256=$SOURCE_MANIFEST_SHA
+source_manifest_file_count=$SOURCE_MANIFEST_FILES
+source_manifest_roots=$SOURCE_MANIFEST_ROOTS
+target_identity=qemu-system-aarch64:virt:cortex-a72:tcg
+executable_sha256=$SERVER_SHA
+compiler_sha256=$COMPILER_SHA
+compiler_admission_schema=simpleos-arm64-current-source-compiler-admission-v1
+compiler_admission_receipt_sha256=$ADMISSION_SHA
+kernel_sha256=$KERNEL_SHA
+image_sha256=$IMAGE_REBOOT_SHA
+image_staged_sha256=$IMAGE_STAGED_SHA
+image_after_commit_sha256=$IMAGE_COMMIT_SHA
+command_sha256=$COMMAND_SHA
+utc_time=$UTC_TIME
+exit_status=0
+http_file_verified=true
+http_expected_sha256=$EXPECTED_HTTP_SHA
+http_observed_sha256=$HTTP_SHA
+db_commit_response_sha256=$DB_COMMIT_SHA
+db_reboot_response_sha256=$DB_REBOOT_SHA
+db_commit_verified=true
+db_boot1_read_verified=true
+db_boot2_read_verified=true
+db_reboot_verified=true
+crash_replay_matrix_verified=true
+crash_replay_seam_count=13
+crash_replay_manifest_sha256=$CRASH_MANIFEST_SHA
+boot1_serial_sha256=$SERIAL1_SHA
+boot2_serial_sha256=$SERIAL2_SHA
+fresh_qemu_processes=2
+shutdown_verified=true
+gpu_selected=false
+gpu_submit_completed=false
+device_readback_verified=false
+image_contains_credential=true
+credential_bytes_retained=false
+credential_image_sensitive=true
+credential_image_ephemeral=true
+credential_image_destroyed_after_run=true
+target_credential_zeroization=unverified
+command=scripts/check/check-simpleos-arm64-servers-qemu.shs qemu-arm64-cpu
+EOF
+chmod 600 "$RECEIPT"
+rm -f "$CREDENTIAL_FILE" "$OUT_DIR/db.request" "$OUT_DIR/http.request"
+printf 'PASS SimpleOsServerExecutionReceiptV1=%s\n' "$RECEIPT"

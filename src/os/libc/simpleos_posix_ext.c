@@ -20,6 +20,10 @@
 #include "include/string.h"
 #include "include/ctype.h"
 #include "include/errno.h"
+#include "include/stdint.h"
+
+extern int64_t simpleos_syscall(int64_t id, int64_t a0, int64_t a1,
+                                int64_t a2, int64_t a3, int64_t a4);
 
 ssize_t pread(int fd, void *buf, size_t count, off_t offset) {
     if (!buf) { errno = EFAULT; return -1; }
@@ -74,21 +78,15 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset) {
  *     although the NVMe driver implements FLUSH (opcode 0x00), it is
  *     unreachable from the filesystem path.
  *
- * There is also no VFS_SYNC IPC opcode and no reachable flush syscall, so
- * there is nothing this function could call to make the claim true.
- *
- * Consequence, accepted knowingly: rt_file_write_atomic() in
- * src/runtime/runtime_native.c does `ok = fsync(fd) == 0`, so atomic writes
- * report failure on SimpleOS. That is a loud, correct signal — far better than
- * silently reporting durable writes that a crash would lose.
- *
- * To make this return 0 honestly, SimpleOS needs: dirent size writeback, a
- * BlockDevice.flush that issues NVMe FLUSH, and a VFS_SYNC opcode to reach it.
+ * FileSync syscall 78 now orders FAT32 directory-entry writeback before the
+ * mounted BlockDevice.flush operation. Unsupported devices fail closed; the
+ * libc boundary never fabricates durability.
  */
 int fsync(int fd) {
     if (fd < 0) { errno = EBADF; return -1; }
-    errno = ENOSYS;
-    return -1;
+    long rc = simpleos_syscall(78, (long)fd, 0, 0, 0, 0);
+    if (rc < 0) { errno = (int)-rc; return -1; }
+    return 0;
 }
 
 int fdatasync(int fd) {

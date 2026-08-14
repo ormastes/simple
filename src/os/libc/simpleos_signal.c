@@ -130,6 +130,15 @@ int sigpending(sigset_t *set) {
  * ==================================================================== */
 
 int kill(pid_t pid, int sig) {
+    /* POSIX signal 0 is a liveness/permission probe and must never terminate
+     * the task. GetTaskInfo accepts null output buffers, so the scheduler is
+     * the sole liveness owner and no process-list command or /proc guess is
+     * involved. */
+    if (sig == 0) {
+        int64_t probe = simpleos_syscall(6, (int64_t)pid, 0, 0, 0, 0);
+        if (probe < 0) { errno = ESRCH; return -1; }
+        return 0;
+    }
     int64_t r = simpleos_syscall(7, (int64_t)pid, (int64_t)sig, 0, 0, 0);
     if (r < 0) { errno = (int)(-r); return -1; }
     return 0;

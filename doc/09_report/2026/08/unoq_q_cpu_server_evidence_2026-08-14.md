@@ -92,3 +92,34 @@ The frozen helpers `expect_http_file`, `expect_db_reboot`, and
 `expect_cpu_mode` must fail for this receipt. Promotion requires a
 provenance-admitted AArch64 server artifact and a physical SimpleOS QRB2210
 boot; Debian userspace execution must never be relabeled as SimpleOS.
+
+## Concurrent verification refresh — 2026-08-14T05:34:51Z
+
+Physical-board access was serialized with
+`flock /tmp/unoq-server-matrix.lock`. The read-only identity refresh again
+observed ADB serial `3655308719`, device-tree model `Arduino SA,Imola`,
+compatibility `arduino,imola|qcom,qcm2290|qcom,qrb2210`, AArch64 Linux kernel
+`6.16.7-g0dd6551ae96b`, Debian 13.4, ext4 root `/dev/mmcblk0p68`, and boot ID
+`e5bd8b78-9719-4a98-acba-11a0ef34980e`. This is exact physical-board identity
+evidence, but it is not SimpleOS identity evidence.
+
+Every canonical SimpleOS compiler/loader filesystem path required by the
+verification contract was absent, as was
+`/usr/bin/simpleos-unoq-2d-evidence`. Therefore a filesystem executable could
+not be launched; CPU-only HTTP/database/restart receipts and GPU
+submit/fence/device-readback receipts remain absent. The canonical live GPU
+wrapper exited 2 with `pure-simple-runtime-missing` before board mutation, so
+it supplies only a fail-closed blocker receipt and no provider/runtime credit.
+
+Retained local evidence:
+
+- `build/unoq-server-matrix/verify-20260814/identity.log` — SHA-256
+  `266cf122ca291b9b477542464dd1dcd8269f6f691174eb59a7fdd6b33f11cde9`
+- `build/unoq-server-matrix/verify-20260814/gpu-gate.log` — SHA-256
+  `9797668b837e5ca35a599447886ab8bb5821c79f0956a0bee73f6e76232a9e5b`
+- `build/unoq-server-matrix/verify-20260814/status.env` — SHA-256
+  `b754eae3f584323a8416a6ec55ced5729e9bc31a30ec918dab059801f87810f7`
+- `build/unoq-server-matrix/verify-20260814/SHA256SUMS` — checksum manifest
+
+Verification disposition: **STATUS: FAIL / BLOCKED-TARGET-RUNTIME**. Debian
+execution and Vulkan enumeration are explicitly not accepted as SimpleOS.

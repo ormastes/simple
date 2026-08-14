@@ -28,7 +28,9 @@ extern fn rt_file_rename(from: text, to: text) -> bool
 extern fn rt_file_create_excl(path: text, content: text) -> bool
 extern fn rt_file_sync(path: text) -> bool
 extern fn rt_getpid() -> i64
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_sleep_ms(ms: i64)
+extern fn rt_process_is_running(pid: i64) -> bool
 
 fn file_read(path: text) -> text:
     # Bootstrap runtime wraps rt_file_read_text result in Option
@@ -41,16 +43,12 @@ fn file_exists(path: text) -> bool:
 fn file_delete(path: text) -> bool:
     rt_file_delete(path)
 
-# Polyfill for rt_timestamp_now (returns microseconds since epoch)
-# Uses date +%s%3N for millisecond precision since rt_timestamp_now is not in bootstrap runtime
 fn get_timestamp() -> i64:
-    val (out, err, code) = rt_process_run("date", ["+%s%3N"])
-    val ms = out.trim().to_int() ?? 0
-    ms * 1000  # Convert milliseconds to microseconds
+    rt_time_now_unix_micros()
 
 # Polyfill for rt_sleep_ms
 fn sleep_ms(ms: i64):
-    rt_process_run("sleep", ["0.01"])
+    rt_sleep_ms(ms)
 
 # Exports
 
@@ -63,23 +61,7 @@ fn is_process_alive(pid: i64) -> bool:
     if pid <= 0:
         return false
 
-    # Method 1: Linux /proc filesystem (fast)
-    val proc_path = "/proc/{pid}"
-    if file_exists(proc_path):
-        return true
-
-    # Method 2: ps command (portable fallback for macOS/BSD/Unix)
-    # Using -p flag which works on Linux, macOS, BSD
-    val (stdout, stderr, exit_code) = rt_process_run("ps", ["-p", "{pid}", "-o", "pid="])
-
-    # ps returns 0 if process exists, non-zero if not found
-    if exit_code == 0:
-        # Double-check: ps output should contain the PID
-        val output = stdout.trim()
-        output.len() > 0
-    else:
-        # /proc doesn't exist and ps failed - process is dead
-        false
+    rt_process_is_running(pid)
 
 # ============================================================================
 # FileLock - File-based locking mechanism
@@ -209,6 +191,11 @@ fn atomic_read(path: text) -> text?:
     lock.release()
     content
 
+fn atomic_temp_path(path: text) -> text:
+    if path == "/SERVER.DB":
+        return "/SERVER.TMP"
+    path + ".tmp"
+
 # Write file atomically
 fn atomic_write(path: text, content: text) -> bool:
     var lock = FileLock.for_file(path)
@@ -216,13 +203,15 @@ fn atomic_write(path: text, content: text) -> bool:
         return false
 
     # Write to temp file first
-    val temp_path = path + ".tmp"
+    val temp_path = atomic_temp_path(path)
     if not file_write(temp_path, content):
         lock.release()
         return false
 
     # Flush to durable storage before rename (crash safety)
-    rt_file_sync(temp_path)
+    if not rt_file_sync(temp_path):
+        lock.release()
+        return false
 
     # Rename temp to actual (atomic on Unix)
     val success = rt_file_rename(temp_path, path)
@@ -274,7 +263,7 @@ fn atomic_write_batch(paths: [text], contents: [text]) -> bool:
     # Write all temp files
     var wrote: i64 = 0
     for idx in sorted_indices:
-        val temp_path = paths[idx] + ".tmp"
+        val temp_path = atomic_temp_path(paths[idx])
         if not file_write(temp_path, contents[idx]):
             # Release all locks
             var ri: i64 = 0
@@ -286,14 +275,19 @@ fn atomic_write_batch(paths: [text], contents: [text]) -> bool:
 
     # Flush all temp files to durable storage before rename (crash safety)
     for idx in sorted_indices:
-        val temp_path = paths[idx] + ".tmp"
-        rt_file_sync(temp_path)
+        val temp_path = atomic_temp_path(paths[idx])
+        if not rt_file_sync(temp_path):
+            var ri: i64 = 0
+            while ri < locks.len():
+                locks[ri].release()
+                ri = ri + 1
+            return false
 
     # Rename all temp files to final paths
     var renamed: i64 = 0
     var all_ok = true
     for idx in sorted_indices:
-        val temp_path = paths[idx] + ".tmp"
+        val temp_path = atomic_temp_path(paths[idx])
         if not rt_file_rename(temp_path, paths[idx]):
             all_ok = false
         renamed = renamed + 1
@@ -322,13 +316,15 @@ fn atomic_append(path: text, content: text) -> bool:
     val new_content = existing + content
 
     # Write via temp file
-    val temp_path = path + ".tmp"
+    val temp_path = atomic_temp_path(path)
     if not file_write(temp_path, new_content):
         lock.release()
         return false
 
     # Flush to durable storage before rename (crash safety)
-    rt_file_sync(temp_path)
+    if not rt_file_sync(temp_path):
+        lock.release()
+        return false
 
     # Rename temp to actual
     val success = rt_file_rename(temp_path, path)

@@ -1,6 +1,7 @@
 # Filesystem operations via IPC to VFS service and raw syscalls.
 
 use std.nogc_sync_mut.binary_io.{bytes_to_string}
+use std.fs_driver.bytes_util.{text_to_bytes_pure}
 use os.userlib.syscall_raw
 use os.userlib.ipc_protocol(VFS_READ, VFS_WRITE, VFS_STAT, VFS_MKDIR, VFS_READDIR, VFS_REMOVE, VFS_RENAME, VFS_MOUNT_LIST)
 use os.kernel.types.fs_types(DirEntry, FsNode, FsNodeKind)
@@ -10,6 +11,69 @@ extern fn unsafe_addr_of(ref: any) -> u64
 
 # Well-known VFS service port
 val _VFS_PORT: u64 = 1
+val _DIRECT_FILE_MAX_BYTES: u64 = 1048576
+
+# Direct file-descriptor facade for filesystem-launched SimpleOS programs.
+# The kernel remains the sole filesystem/state owner; byte arrays are bounded
+# user payloads copied and validated at the syscall boundary.
+fn file_open_direct(path: text, flags: u32) -> Result<i32, text>:
+    val path_bytes = text_to_bytes_pure(path)
+    if path_bytes.len() == 0 or path_bytes.len() > 4096:
+        return Err("invalid file path length")
+    val rc = syscall(30, array_data_ptr_u8(path_bytes), path_bytes.len() as u64, flags as u64, 0, 0)
+    if rc < 0:
+        return Err("open failed with code {rc}")
+    Ok(rc as i32)
+
+fn file_read_direct(fd: i32, max_len: u64) -> Result<[u8], text>:
+    if max_len == 0 or max_len > _DIRECT_FILE_MAX_BYTES:
+        return Err("invalid read bound")
+    var buf: [u8] = [0u8; max_len]
+    val rc = syscall(31, fd as u64, array_data_ptr_u8(buf), max_len, 0, 0)
+    if rc < 0:
+        return Err("read failed with code {rc}")
+    if rc as u64 > max_len:
+        return Err("read returned invalid length {rc}")
+    Ok(buf.slice(0, rc as u64))
+
+fn file_write_direct(fd: i32, bytes: [u8]) -> Result<u64, text>:
+    if bytes.len() == 0 or bytes.len() > _DIRECT_FILE_MAX_BYTES:
+        return Err("invalid write bound")
+    val rc = syscall(32, fd as u64, array_data_ptr_u8(bytes), bytes.len() as u64, 0, 0)
+    if rc < 0:
+        return Err("write failed with code {rc}")
+    if rc as u64 != bytes.len() as u64:
+        return Err("short write {rc}/{bytes.len()}")
+    Ok(rc as u64)
+
+fn file_close_direct(fd: i32) -> bool:
+    syscall(33, fd as u64, 0, 0, 0, 0) >= 0
+
+fn file_sync_direct(fd: i32) -> Result<bool, text>:
+    val rc = syscall(78, fd as u64, 0, 0, 0, 0)
+    if rc < 0:
+        return Err("fsync failed with code {rc}")
+    Ok(true)
+
+fn file_rename_direct(from: text, to: text) -> Result<bool, text>:
+    val old_bytes = text_to_bytes_pure(from)
+    val new_bytes = text_to_bytes_pure(to)
+    if old_bytes.len() == 0 or new_bytes.len() == 0 or old_bytes.len() > 4096 or new_bytes.len() > 4096:
+        return Err("invalid rename path")
+    val rc = syscall(44, array_data_ptr_u8(old_bytes), old_bytes.len() as u64,
+        array_data_ptr_u8(new_bytes), new_bytes.len() as u64, 0)
+    if rc < 0:
+        return Err("rename failed with code {rc}")
+    Ok(true)
+
+fn read_file_bytes_direct(path: text, max_len: u64) -> Result<[u8], text>:
+    val opened = file_open_direct(path, 0)
+    match opened:
+        Err(message): Err(message)
+        Ok(fd):
+            val result = file_read_direct(fd, max_len)
+            val _closed = file_close_direct(fd)
+            result
 
 fn _vfs_request(method: u32, payload: text) -> Result<text, text>:
     # Connect to VFS service port

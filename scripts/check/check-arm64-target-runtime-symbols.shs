@@ -1,0 +1,41 @@
+#!/bin/sh
+# Focused contract for runtime symbols required by the retained ARM64 payload.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+OBJECT_DIR="${1:-.simple/native-objects-jWARot}"
+RUNTIME_ARCHIVE="${2:-build/os/simple-core-simpleos-aarch64/libsimple_runtime.a}"
+NM="${NM:-llvm-nm}"
+LD="${LD:-ld.lld}"
+
+for path in "$OBJECT_DIR/mod_27.o" "$OBJECT_DIR/mod_47.o" "$RUNTIME_ARCHIVE"; do
+    [ -s "$path" ] || { echo "FAIL missing=$path" >&2; exit 1; }
+done
+
+for symbol in rt_array_enumerate rt_unwrap_or_trap; do
+    "$NM" -g --defined-only "$RUNTIME_ARCHIVE" | awk '{print $3}' | grep -qx "$symbol" || {
+        echo "FAIL archive_missing=$symbol" >&2
+        exit 1
+    }
+    if grep -q "$symbol" "$OBJECT_DIR/_stubs_freestanding.c"; then
+        echo "FAIL fallback_stub_owns=$symbol" >&2
+        exit 1
+    fi
+done
+
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
+"$LD" -r "$OBJECT_DIR/mod_27.o" "$OBJECT_DIR/mod_47.o" \
+    "$RUNTIME_ARCHIVE" -o "$TMP_DIR/runtime-symbol-contract.o"
+
+UNDEFINED="$($NM -u "$TMP_DIR/runtime-symbol-contract.o")"
+for symbol in rt_array_enumerate rt_unwrap_or_trap; do
+    if printf '%s\n' "$UNDEFINED" | awk '{print $2}' | grep -qx "$symbol"; then
+        echo "FAIL unresolved_after_archive=$symbol" >&2
+        exit 1
+    fi
+done
+
+echo "PASS target=aarch64-unknown-simpleos retained_objects=$OBJECT_DIR runtime=$RUNTIME_ARCHIVE symbols=rt_array_enumerate,rt_unwrap_or_trap"

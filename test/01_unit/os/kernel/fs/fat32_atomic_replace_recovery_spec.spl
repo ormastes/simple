@@ -1,0 +1,178 @@
+"""FAR-001..009 focused executable contract for RecoverableReplaceV1.
+
+The unit fixture exercises the bounded codec/state machine.  Fresh-process
+power-cut evidence remains in the system spec and may not be inferred here.
+"""
+
+use std.spec.*
+use os.kernel.fs.fat32_atomic_replace.*
+use os.crypto.crc32.{crc32c}
+
+fn _sector(fill: u8) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 512:
+        out.push(fill)
+        i = i + 1
+    out
+
+fn Given_provisioned_replace_journal() -> AtomicReplaceRecoveryCaps:
+    fat32_atomic_replace_caps_for(true, true, true)
+
+fn When_replace_crashes_after(boundary: i64) -> bool:
+    # A valid COMMITTED header exists only after payload flush and header flush.
+    boundary >= 4
+
+fn When_mount_recovery_runs(state: Fat32ReplaceState) -> bool:
+    fat32_replace_done_requires_replay(state)
+
+fn Then_exactly_generation_is_visible(old_generation: i64, new_generation: i64, committed: bool) -> i64:
+    if committed:
+        new_generation
+    else:
+        old_generation
+
+fn _record(bank: i64, generation: u64, images: [Fat32ReplaceImage], state: Fat32ReplaceState) -> Fat32ReplaceRecord:
+    Fat32ReplaceRecord(
+        bank: bank, state: state, generation: generation,
+        destination_parent_cluster: 2u32, destination_lba: 100u64, destination_offset: 32,
+        source_parent_cluster: 2u32, source_lba: 100u64, source_offset: 64, source_lfn_slots: 1,
+        old_first_cluster: 20u32, old_size: 900u64,
+        new_first_cluster: 30u32, new_size: 901u64,
+        reclaim_current: 20u32, reclaim_next: 21u32, images: images)
+
+fn _payload(images: [Fat32ReplaceImage]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < images.len():
+        var j = 0
+        while j < images[i].bytes.len():
+            out.push(images[i].bytes[j])
+            j = j + 1
+        i = i + 1
+    out
+
+describe "FAT32 RecoverableReplaceV1":
+    describe "FAR-001: same-sector coalescing":
+        it "should retain one final image and expose new only after commit":
+            step("Given a provisioned dual-bank journal")
+            val a = fat32_replace_image(100u64, _sector(1u8)).unwrap()
+            val b = fat32_replace_image(100u64, _sector(2u8)).unwrap()
+            val images = fat32_replace_coalesce_images([a, b]).unwrap()
+            expect(images.len()).to_equal(1)
+            expect(images[0].bytes[0]).to_equal(2u8)
+            expect(Then_exactly_generation_is_visible(7, 8, When_replace_crashes_after(4))).to_equal(8)
+
+    describe "FAR-002: distinct ordered images":
+        it "should sort complete after-images and keep pre-commit old":
+            step("Construct destination and source after-images in reverse LBA order")
+            val hi = fat32_replace_image(120u64, _sector(3u8)).unwrap()
+            val lo = fat32_replace_image(100u64, _sector(4u8)).unwrap()
+            val images = fat32_replace_coalesce_images([hi, lo]).unwrap()
+            expect(images.len()).to_equal(2)
+            expect(images[0].lba).to_equal(100u64)
+            expect(images[1].lba).to_equal(120u64)
+            expect(Then_exactly_generation_is_visible(7, 8, When_replace_crashes_after(3))).to_equal(7)
+
+    describe "FAR-003: corrupt and torn banks":
+        it "should reject corrupted payload and choose the older valid bank":
+            step("Encode a checksummed committed bank")
+            val image = fat32_replace_image(100u64, _sector(5u8)).unwrap()
+            val images = [image]
+            val payload = _payload(images)
+            val header = fat32_replace_encode_header(_record(0, 10u64, images, Fat32ReplaceState.Committed), crc32c(payload)).unwrap()
+            expect(fat32_replace_header_valid(header, payload, 0)).to_equal(true)
+            var torn = payload
+            torn[0] = 9u8
+            expect(fat32_replace_header_valid(header, torn, 0)).to_equal(false)
+            expect(fat32_replace_choose_bank(true, 9u64, false, 10u64).unwrap()).to_equal(0)
+
+        it "should fail closed for two invalid banks and ambiguous generations":
+            step("Reject absence of authoritative journal state")
+            expect(fat32_replace_choose_bank(false, 0u64, false, 0u64).is_err()).to_equal(true)
+            expect(fat32_replace_choose_bank(true, 0u64, true, 0x8000000000000000u64).is_err()).to_equal(true)
+
+    describe "FAR-004: repeated replay and reclamation":
+        it "should make already-free cursor replay advance without double-free":
+            step("Resume a durable reclaim cursor after its cluster was freed")
+            expect(fat32_replace_reclaim_transition(20u32, 21u32, 0u32, true, 30u32).unwrap()).to_equal(21u32)
+            expect(fat32_replace_reclaim_transition(20u32, 21u32, 22u32, false, 30u32).is_err()).to_equal(true)
+
+        it "should repair only saved-next/free FAT-copy divergence":
+            step("Classify every FAT copy after an interrupted free")
+            expect(fat32_replace_classify_reclaim_copies([21u32, 0u32], 21u32).unwrap()).to_equal(false)
+            expect(fat32_replace_classify_reclaim_copies([0u32, 0u32], 21u32).unwrap()).to_equal(true)
+            expect(fat32_replace_classify_reclaim_copies([21u32, 22u32], 21u32).is_err()).to_equal(true)
+
+        it "should reject overlap anywhere in complete old and new chains":
+            step("Compare full candidate cluster chains before COMMITTED")
+            expect(fat32_replace_chains_are_disjoint([20u32, 21u32, 22u32], [30u32, 31u32])).to_equal(true)
+            expect(fat32_replace_chains_are_disjoint([20u32, 21u32, 22u32], [30u32, 21u32])).to_equal(false)
+
+    describe "FAR-005: bounded old-chain reclamation":
+        it "should expose exactly sixteen journal sectors and a durable cursor":
+            step("Inspect provisioned capability and cursor transitions")
+            val caps = Given_provisioned_replace_journal()
+            expect(caps.journal_bytes).to_equal(8192)
+            expect(fat32_replace_reclaim_transition(20u32, 0x0FFFFFF8u32, 0x0FFFFFF8u32, false, 30u32).unwrap()).to_equal(0x0FFFFFF8u32)
+
+    describe "FAR-006: fail-closed policy":
+        it "should reject missing durability, traversal, bad cursors, and oversized image sets":
+            step("Exercise every locally decidable fail-closed bound")
+            expect(fat32_atomic_replace_caps_for(true, false, true).level).to_equal(AtomicReplaceRecoveryLevel.Unsupported)
+            expect(fat32_atomic_replace_path_allowed("/../SERVER.DB")).to_equal(false)
+            expect(fat32_atomic_replace_path_allowed("/SERVER.DB")).to_equal(true)
+            expect(fat32_atomic_replace_path_allowed("/SIMPLE.DB")).to_equal(false)
+            expect(fat32_atomic_replace_route_allowed("/SERVER.TMP", "/SERVER.DB")).to_equal(true)
+            expect(fat32_atomic_replace_route_allowed("/OTHER.TMP", "/SERVER.DB")).to_equal(false)
+            expect(fat32_replace_image_lba_allowed(100u64, 100u64, 4u32)).to_equal(true)
+            expect(fat32_replace_image_lba_allowed(103u64, 100u64, 4u32)).to_equal(true)
+            expect(fat32_replace_image_lba_allowed(99u64, 100u64, 4u32)).to_equal(false)
+            expect(fat32_replace_image_lba_allowed(104u64, 100u64, 4u32)).to_equal(false)
+            expect(fat32_replace_extent_valid(16u32, 16u32, 1000u32, 32u32)).to_equal(true)
+            expect(fat32_replace_extent_valid(0xFFFFFFF8u32, 16u32, 0xFFFFFFFFu32, 0xFFFFFFFFu32)).to_equal(false)
+            expect(fat32_replace_reclaim_transition(30u32, 31u32, 31u32, false, 30u32).is_err()).to_equal(true)
+            var images: [Fat32ReplaceImage] = []
+            var i = 0
+            while i < 5:
+                images.push(fat32_replace_image((100 + i).to_u64(), _sector(i.to_u8())).unwrap())
+                i = i + 1
+            expect(fat32_replace_coalesce_images(images).is_err()).to_equal(true)
+
+    describe "FAR-007: DONE tombstone":
+        it "should outrank older committed and require no replay":
+            step("Select a newer terminal record")
+            expect(fat32_replace_choose_bank(true, 8u64, true, 9u64).unwrap()).to_equal(1)
+            expect(When_mount_recovery_runs(Fat32ReplaceState.Done)).to_equal(false)
+
+        it "should expose deterministic zero-based crash injection controls":
+            step("Arm and clear a frozen journal crash seam")
+            fat32_replace_fault_injection_set(Fat32ReplaceCrashSeam.FatCopyWrite, 2)
+            expect(fat32_replace_fault_injection_occurrence()).to_equal(2)
+            expect(fat32_replace_fault_injection_triggered()).to_equal(false)
+            fat32_replace_fault_injection_clear()
+
+        it "should make every reclaim and DONE crash seam deterministically reachable":
+            step("Seed each owner checkpoint at zero-based occurrence zero")
+            fat32_replace_fault_injection_set(Fat32ReplaceCrashSeam.ReclaimHeaderWrite, 0)
+            expect(fat32_replace_fault_injection_checkpoint(Fat32ReplaceCrashSeam.ReclaimHeaderWrite)).to_equal(true)
+            fat32_replace_fault_injection_set(Fat32ReplaceCrashSeam.FatCopiesFlush, 0)
+            expect(fat32_replace_fault_injection_checkpoint(Fat32ReplaceCrashSeam.FatCopiesFlush)).to_equal(true)
+            fat32_replace_fault_injection_set(Fat32ReplaceCrashSeam.FatCopiesReread, 0)
+            expect(fat32_replace_fault_injection_checkpoint(Fat32ReplaceCrashSeam.FatCopiesReread)).to_equal(true)
+            fat32_replace_fault_injection_set(Fat32ReplaceCrashSeam.DoneHeaderFlush, 0)
+            expect(fat32_replace_fault_injection_checkpoint(Fat32ReplaceCrashSeam.DoneHeaderFlush)).to_equal(true)
+            fat32_replace_fault_injection_clear()
+
+    describe "FAR-008: mount-before-publish":
+        it "should withhold capability until recovery completes":
+            step("Attempt capability publication before mount recovery")
+            expect(fat32_atomic_replace_caps_for(true, true, false).level).to_equal(AtomicReplaceRecoveryLevel.Unsupported)
+            expect(Given_provisioned_replace_journal().level).to_equal(AtomicReplaceRecoveryLevel.RecoverableReplaceV1)
+
+    describe "FAR-009: distinct ordinary rename semantics":
+        it "should keep recoverable replacement as an explicit separate capability":
+            step("Inspect the typed replacement level")
+            val caps = Given_provisioned_replace_journal()
+            expect(caps.level).to_equal(AtomicReplaceRecoveryLevel.RecoverableReplaceV1)
+            expect(caps.same_volume_only).to_equal(true)

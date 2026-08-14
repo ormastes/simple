@@ -29,12 +29,22 @@ enum {
     DIRECTORY_BYTES = 4096,
     DIRECTORY_ENTRY_CAPACITY = DIRECTORY_BYTES / 32,
     FAT32_MIN_DATA_CLUSTERS = 65525,
+    SIMPLEOS_REPLACE_DESCRIPTOR_SECTOR = 2,
+    SIMPLEOS_REPLACE_JOURNAL_START = 16,
+    SIMPLEOS_REPLACE_JOURNAL_SECTORS = 16,
 };
 
 struct bytes {
     unsigned char *data;
     size_t len;
 };
+
+static void wipe_bytes(struct bytes bytes)
+{
+    volatile unsigned char *p = bytes.data;
+    for (size_t i = 0; p && i < bytes.len; ++i)
+        p[i] = 0;
+}
 
 static unsigned char *g_image;
 static uint32_t *g_fat;
@@ -152,6 +162,34 @@ static void write_u64(unsigned char *data, size_t offset, uint64_t value)
 {
     for (int i = 0; i < 8; ++i)
         data[offset + (size_t)i] = (unsigned char)((value >> (i * 8)) & 0xff);
+}
+
+static uint32_t crc32c_bytes(const unsigned char *data, size_t len)
+{
+    uint32_t crc = 0xffffffffU;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; ++bit)
+            crc = (crc >> 1) ^ (0x82f63b78U & (uint32_t)-(int32_t)(crc & 1U));
+    }
+    return ~crc;
+}
+
+/* SimpleOS FAT32 extension descriptor.  It lives in reserved sector 2 and
+ * points at the fixed journal in reserved sectors 16..31.  Neither region is
+ * addressable as a FAT cluster, so runtime allocation can never claim it. */
+static void write_atomic_replace_descriptor(void)
+{
+    unsigned char *descriptor = g_image +
+        (size_t)SIMPLEOS_REPLACE_DESCRIPTOR_SECTOR * SECTOR_SIZE;
+    memset(descriptor, 0, SECTOR_SIZE);
+    write_u32(descriptor, 0, 0x44524153U); /* "SARD", little endian */
+    write_u32(descriptor, 4, 1U);
+    write_u32(descriptor, 8, SIMPLEOS_REPLACE_JOURNAL_START);
+    write_u32(descriptor, 12, SIMPLEOS_REPLACE_JOURNAL_SECTORS);
+    write_u32(descriptor, 16, SECTOR_SIZE);
+    write_u32(descriptor, 20, 0U);
+    write_u32(descriptor, 20, crc32c_bytes(descriptor, SECTOR_SIZE));
 }
 
 static size_t cluster_offset(int cluster)
@@ -665,6 +703,7 @@ static void finish_fat32_image(const char *img_path)
     memcpy(g_image + (size_t)6 * SECTOR_SIZE, g_image, SECTOR_SIZE);
     write_fat32_fsinfo((size_t)1 * SECTOR_SIZE);
     write_fat32_fsinfo((size_t)7 * SECTOR_SIZE);
+    write_atomic_replace_descriptor();
 
     unsigned char *fat_bytes = g_image + ((size_t)RESERVED_SECTORS * SECTOR_SIZE);
     for (size_t i = 0; i < (size_t)g_fat_size_sectors * SECTOR_SIZE / 4; ++i)
@@ -845,6 +884,15 @@ int main(int argc, char **argv)
     struct bytes hello_object_payload = read_file(getenv("SIMPLEOS_HELLO_OBJECT"));
     struct bytes hello_ir_payload = read_file(getenv("SIMPLEOS_HELLO_IR"));
     struct bytes fsexec_payload = read_file(getenv("SIMPLEOS_FSEXEC_BINARY"));
+    struct bytes servers_payload = read_file(getenv("SIMPLEOS_SERVERS_BINARY"));
+    const char *server_credential_path = getenv("SIMPLEOS_SERVER_DB_CREDENTIAL_FILE");
+    struct bytes server_credential = read_file(server_credential_path);
+    if (servers_payload.len && (!server_credential_path || !server_credential_path[0] ||
+                                !server_credential.len || server_credential.len > 128)) {
+        wipe_bytes(server_credential);
+        fprintf(stderr, "SIMPLEOS_SERVER_DB_CREDENTIAL_FILE must name a non-empty file of at most 128 bytes when staging SERVERS.ELF\n");
+        return 1;
+    }
     /* The fullscreen WM showcase stages a REAL freestanding browser client at
      * ::/SYS/APPS/BROWSMF.SMF. When SIMPLEOS_BROWSER_DEMO_BINARY is supplied it
      * is authoritative: an explicitly requested client must never be silently
@@ -919,6 +967,7 @@ int main(int argc, char **argv)
     struct bytes bootloader = bootloader_file.len ? bootloader_file : text_bytes("SIMPLEOS_UEFI_BOOTLOADER_MISSING\n");
     struct bytes limine = text_bytes("timeout: 0\nserial: yes\n/ SimpleOS\nprotocol: multiboot1\npath: boot():/kernel.elf\ntextmode: no\nresolution: 1024x768x32\ncmdline: console=serial root=/dev/nvme0n1\n");
     struct bytes hello_txt = text_bytes("Hello from SimpleOS\n");
+    struct bytes server_document = text_bytes("<html><body>SimpleOS filesystem server document</body></html>\n");
     static unsigned char qemu_nonce_slot_data[118];
     static const char qemu_nonce_placeholder[] =
         "SIMPLEOS_QEMU_NONCE=__SIMPLEOS_QEMU_NONCE_SLOT_V1__\n";
@@ -994,6 +1043,12 @@ int main(int argc, char **argv)
     int bootloader_cluster = alloc_clusters(bootloader.data, bootloader.len);
     int limine_cluster = alloc_clusters(limine.data, limine.len);
     int hello_txt_cluster = alloc_clusters(hello_txt.data, hello_txt.len);
+    int server_document_cluster = servers_payload.len ? alloc_clusters(server_document.data, server_document.len) : 0;
+    int server_credential_cluster = servers_payload.len ? alloc_clusters(server_credential.data, server_credential.len) : 0;
+    /* alloc_clusters copied the secret into the credential-bearing image.
+     * Remove the transient host-side read buffer immediately; the resulting
+     * image remains sensitive and is governed by the acceptance-image policy. */
+    wipe_bytes(server_credential);
     int qemu_nonce_cluster = alloc_clusters(qemu_nonce_slot.data, qemu_nonce_slot.len);
     int collector_nonce_cluster = alloc_clusters(
         collector_nonce_slot.data, collector_nonce_slot.len);
@@ -1066,6 +1121,7 @@ int main(int argc, char **argv)
     int hello_object_cluster = hello_object_payload.len ? alloc_clusters(hello_object_payload.data, hello_object_payload.len) : 0;
     int hello_ir_cluster = hello_ir_payload.len ? alloc_clusters(hello_ir_payload.data, hello_ir_payload.len) : 0;
     int fsexec_cluster = fsexec_payload.len ? alloc_clusters(fsexec_payload.data, fsexec_payload.len) : 0;
+    int servers_cluster = servers_payload.len ? alloc_clusters(servers_payload.data, servers_payload.len) : 0;
     int font_clusters[FONT_ASSET_COUNT];
     int font_metadata_clusters[FONT_ASSET_COUNT];
     int font_license_clusters[FONT_ASSET_COUNT];
@@ -1132,6 +1188,8 @@ int main(int argc, char **argv)
         put_dir_entry(root, &root_n, "HELLO   LL ", hello_ir_cluster, hello_ir_payload.len, 0x20);
     if (fsexec_cluster)
         put_dir_entry(root, &root_n, "FSEXEC  ELF", fsexec_cluster, fsexec_payload.len, 0x20);
+    if (servers_cluster)
+        put_dir_entry(root, &root_n, "SERVERS ELF", servers_cluster, servers_payload.len, 0x20);
     put_dot_entries(efi, &efi_n, efi_cluster, 0);
     put_dot_entries(boot, &boot_n, boot_cluster, efi_cluster);
     put_dot_entries(sys, &sys_n, sys_cluster, 0);
@@ -1149,6 +1207,10 @@ int main(int argc, char **argv)
     put_dir_entry(sys, &sys_n, "APPS       ", apps_cluster, 0, 0x10);
     put_dir_entry(sys, &sys_n, "PERF       ", perf_cluster, 0, 0x10);
     put_dir_entry(sys, &sys_n, "FONTS      ", fonts_cluster, 0, 0x10);
+    if (servers_payload.len) {
+        put_dir_entry(sys, &sys_n, "SERVER  HTM", server_document_cluster, server_document.len, 0x20);
+        put_dir_entry(sys, &sys_n, "SRVDB   KEY", server_credential_cluster, server_credential.len, 0x20);
+    }
     for (int i = 0; i < FONT_ASSET_COUNT; ++i) {
         put_named_dir_entry(fonts, &fonts_n, font_fat_names[i], font_long_names[i],
                             font_clusters[i], font_payloads[i].len, 0x20);

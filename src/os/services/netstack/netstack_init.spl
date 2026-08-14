@@ -15,12 +15,15 @@ use os.drivers.virtio.virtio_net.{VirtioNetDriver}
 use os.services.netstack.netstack_service.{NetstackService}
 use os.services.netstack.ipv4.{Ipv4Address}
 use os.kernel.log.klog_api.{log_raw_println}
+use os.kernel.memory.vmm.{vmm_copy_bytes_result_ok}
+use os.kernel.memory.user_copy.{user_copyin_bytes, user_copyout_bytes}
 extern fn rt_pci_device_count() -> i64
 extern fn rt_pci_get_field(index: i64, field: i64) -> i64
 extern fn rt_net_init() -> i64
 extern fn rt_net_tx_test() -> i64
 extern fn rt_net_rx_ready() -> i64
 extern fn rt_net_stats() -> i64
+extern fn spl_shim_current_task_id() -> u64
 
 val VIRTIO_VENDOR: u16 = 0x1AF4
 val VIRTIO_DEV_NET: u16 = 0x1000
@@ -139,6 +142,212 @@ fn net_boot_init() -> bool:
     g_net_initialized = true
     log_raw_println("[net-init] Network stack ready (C-backed)")
     true
+
+fn net_boot_init_arm64_mmio() -> bool:
+    """Initialize QEMU ARM virt networking without changing PCI users."""
+    log_raw_println("[net-init] ARM64 VirtIO-MMIO network initialization")
+    g_arm64_net_fd_map = []
+    g_arm64_net_fd_ready = true
+    var driver = VirtioNetDriver.new()
+    val initialized = driver.init_arm64_mmio()
+    if initialized.is_err():
+        log_raw_println("[net-init] ARM64 VirtIO-MMIO init failed: {initialized.unwrap_err()}")
+        return false
+    g_net_driver = driver
+    var service = NetstackService.new(g_net_driver)
+    service.init_kernel_transport()
+    g_netstack = Some(service)
+    g_net_initialized = true
+    log_raw_println("[net-init] ARM64 VirtIO-MMIO network stack ready")
+    true
+
+# ===========================================================================
+# ARM64 kernel-local syscall bridge
+# ===========================================================================
+# C dispatch reaches this bridge only after `spl_shim_net_capability_check`
+# authorizes the current scheduler task through the canonical CapabilityManager.
+
+struct Arm64NetFdMap:
+    owner_task: u64
+    external_fd: i32
+    internal_fd: i32
+
+val ARM64_NET_FD_CAPACITY: u64 = 64
+val ARM64_NET_IO_MAX: u64 = 1048576
+var g_arm64_net_fd_map: [Arm64NetFdMap] = []
+var g_arm64_net_fd_ready: bool = false
+
+fn _arm64_net_fd_ensure():
+    if not g_arm64_net_fd_ready:
+        g_arm64_net_fd_map = []
+        g_arm64_net_fd_ready = true
+
+fn _arm64_net_fd_reserve() -> i64:
+    _arm64_net_fd_ensure()
+    if g_arm64_net_fd_map.len() >= ARM64_NET_FD_CAPACITY:
+        return -24
+    # Choose the lowest free descriptor so close deterministically permits
+    # reuse instead of exhausting a monotonic 64-entry namespace.
+    var candidate: i32 = 100
+    while candidate < 100 + ARM64_NET_FD_CAPACITY as i32:
+        var used = false
+        var i: u64 = 0
+        while i < g_arm64_net_fd_map.len():
+            if g_arm64_net_fd_map[i].owner_task == spl_shim_current_task_id() and g_arm64_net_fd_map[i].external_fd == candidate:
+                used = true
+            i = i + 1
+        if not used:
+            g_arm64_net_fd_map.push(Arm64NetFdMap(owner_task: spl_shim_current_task_id(), external_fd: candidate, internal_fd: -1))
+            return candidate as i64
+        candidate = candidate + 1
+    -24
+
+fn _arm64_net_fd_commit(external_fd: i32, internal_fd: i32) -> bool:
+    var i: u64 = 0
+    while i < g_arm64_net_fd_map.len():
+        if g_arm64_net_fd_map[i].owner_task == spl_shim_current_task_id() and g_arm64_net_fd_map[i].external_fd == external_fd:
+            g_arm64_net_fd_map[i] = Arm64NetFdMap(owner_task: spl_shim_current_task_id(), external_fd: external_fd, internal_fd: internal_fd)
+            return true
+        i = i + 1
+    false
+
+fn _arm64_net_fd_resolve(external_fd: i32) -> i32:
+    var i: u64 = 0
+    while i < g_arm64_net_fd_map.len():
+        if g_arm64_net_fd_map[i].owner_task == spl_shim_current_task_id() and g_arm64_net_fd_map[i].external_fd == external_fd:
+            return g_arm64_net_fd_map[i].internal_fd
+        i = i + 1
+    -1
+
+fn _arm64_net_fd_remove(external_fd: i32) -> i32:
+    var i: u64 = 0
+    while i < g_arm64_net_fd_map.len():
+        if g_arm64_net_fd_map[i].owner_task == spl_shim_current_task_id() and g_arm64_net_fd_map[i].external_fd == external_fd:
+            val internal = g_arm64_net_fd_map[i].internal_fd
+            g_arm64_net_fd_map.remove(i)
+            return internal
+        i = i + 1
+    -4096
+
+pub fn net_arm64_task_teardown(owner_task: u64):
+    """Close and remove every direct socket owned by one exiting EL0 task."""
+    var i: u64 = 0
+    while i < g_arm64_net_fd_map.len():
+        if g_arm64_net_fd_map[i].owner_task == owner_task:
+            val internal = g_arm64_net_fd_map[i].internal_fd
+            g_arm64_net_fd_map.remove(i)
+            if internal >= 0:
+                net_tcp_close(internal as i64)
+        else:
+            i = i + 1
+
+struct Arm64SockaddrCopy:
+    ip: u32
+    port: u16
+
+fn _arm64_copy_sockaddr(ptr: u64, len: u64) -> Result<Arm64SockaddrCopy, i64>:
+    if len < 16:
+        return Err(-14)
+    val copied = user_copyin_bytes(ptr, 16)
+    if not vmm_copy_bytes_result_ok(copied):
+        return Err(-14)
+    val bytes = copied.bytes
+    val family = (bytes[0] as u16) | ((bytes[1] as u16) << 8)
+    if family != 2:
+        return Err(-22)
+    val port = ((bytes[2] as u16) << 8) | (bytes[3] as u16)
+    val ip = (bytes[4] as u32) | ((bytes[5] as u32) << 8) |
+        ((bytes[6] as u32) << 16) | ((bytes[7] as u32) << 24)
+    Ok(Arm64SockaddrCopy(ip: ip, port: port))
+
+@export("C", name: "spl_arm64_net_socket_direct")
+fn spl_arm64_net_socket_direct(domain: u64, type_: u64, protocol: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    if not g_net_initialized or domain != 2 or type_ != 1:
+        return -22
+    _arm64_net_fd_reserve()
+
+@export("C", name: "spl_arm64_net_bind_direct")
+fn spl_arm64_net_bind_direct(external: u64, ptr: u64, len: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    match _arm64_copy_sockaddr(ptr, len):
+        Err(errno): errno
+        Ok(pair):
+            val internal = net_tcp_bind(pair.ip, pair.port, 16)
+            if internal < 0:
+                return internal
+            if not _arm64_net_fd_commit(external as i32, internal as i32):
+                net_tcp_close(internal)
+                return -9
+            0
+
+@export("C", name: "spl_arm64_net_listen_direct")
+fn spl_arm64_net_listen_direct(external: u64, backlog: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    if _arm64_net_fd_resolve(external as i32) < 0: -9 else: 0
+
+@export("C", name: "spl_arm64_net_accept_direct")
+fn spl_arm64_net_accept_direct(external: u64, out_addr: u64, out_len: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    if out_addr != 0 or out_len != 0:
+        return -95
+    val listener = _arm64_net_fd_resolve(external as i32)
+    if listener < 0:
+        return -9
+    val internal = net_tcp_accept(listener as i64)
+    if internal < 0:
+        return -11
+    val accepted = _arm64_net_fd_reserve()
+    if accepted < 0:
+        net_tcp_close(internal)
+        return accepted
+    if not _arm64_net_fd_commit(accepted as i32, internal as i32):
+        net_tcp_close(internal)
+        _arm64_net_fd_remove(accepted as i32)
+        return -24
+    accepted
+
+@export("C", name: "spl_arm64_net_connect_direct")
+fn spl_arm64_net_connect_direct(external: u64, ptr: u64, len: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    match _arm64_copy_sockaddr(ptr, len):
+        Err(errno): errno
+        Ok(pair):
+            val internal = net_tcp_connect(pair.ip, pair.port, 200000)
+            if internal < 0:
+                return internal
+            if not _arm64_net_fd_commit(external as i32, internal as i32):
+                net_tcp_close(internal)
+                return -9
+            0
+
+@export("C", name: "spl_arm64_net_send_direct")
+fn spl_arm64_net_send_direct(external: u64, ptr: u64, len: u64, dest: u64, dest_len: u64, flags: u64) -> i64:
+    if dest != 0 or dest_len != 0 or len > ARM64_NET_IO_MAX:
+        return -95
+    val internal = _arm64_net_fd_resolve(external as i32)
+    if internal < 0:
+        return -9
+    val copied = user_copyin_bytes(ptr, len)
+    if not vmm_copy_bytes_result_ok(copied):
+        return -14
+    net_tcp_write(internal as i64, copied.bytes)
+
+@export("C", name: "spl_arm64_net_recv_direct")
+fn spl_arm64_net_recv_direct(external: u64, ptr: u64, max: u64, src: u64, src_len: u64, flags: u64) -> i64:
+    if src != 0 or src_len != 0 or max > ARM64_NET_IO_MAX:
+        return -95
+    val internal = _arm64_net_fd_resolve(external as i32)
+    if internal < 0:
+        return -9
+    val bytes = net_tcp_read(internal as i64, max)
+    user_copyout_bytes(ptr, bytes)
+
+@export("C", name: "spl_arm64_net_close_direct")
+fn spl_arm64_net_close_direct(external: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    # -4096 is an ownership sentinel, not an errno: the C dispatcher then
+    # routes ordinary file descriptors to the VFS close owner.
+    val internal = _arm64_net_fd_remove(external as i32)
+    if internal == -4096:
+        return -4096
+    if internal >= 0:
+        net_tcp_close(internal as i64)
+    0
 
 # ============================================================================
 # Network Service Start

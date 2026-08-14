@@ -1,0 +1,67 @@
+use std.io_runtime.{file_read}
+
+describe "ARM64 VirtIO-MMIO NIC transport contract":
+    it "negotiates modern features and publishes both bounded queues":
+        val source = file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+        expect(source).to_contain("ARM64_VIRTIO_NET_DEVICE_ID 1U")
+        expect(source).to_contain("candidate[VMMIO_VERSION / 4U] == 2U")
+        expect(source).to_contain("(features_high & 1U) == 0U")
+        expect(source).to_contain("VIRTIO_STATUS_FEATURES_OK")
+        expect(source).to_contain("mmio[VMMIO_STATUS / 4U] & VIRTIO_STATUS_FEATURES_OK")
+        expect(source).to_contain("ARM64_NET_QUEUE_SIZE 8U")
+        expect(source).to_contain("arm64_net_setup_queue(mmio, 0U")
+        expect(source).to_contain("arm64_net_setup_queue(mmio, 1U")
+        expect(source).to_contain("VMMIO_QUEUE_DESC_LOW")
+        expect(source).to_contain("VMMIO_QUEUE_READY / 4U] = 1U")
+
+    it "owns RX write descriptors and bounded TX completion":
+        val source = file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+        expect(source).to_contain("g_arm64_net_rx_desc[i].flags = VIRTQ_DESC_F_WRITE")
+        expect(source).to_contain("ARM64_NET_POLL_LIMIT 1000000U")
+        expect(source).to_contain("g_arm64_net_tx_used.idx != g_arm64_net_tx_last_used")
+        expect(source).to_contain("arm64_clean_dcache_range")
+        expect(source).to_contain("arm64_invalidate_dcache_range")
+        expect(source).to_contain("VMMIO_INTERRUPT_ACK")
+        expect(source).to_contain("g_arm64_net_rx_avail.idx++")
+        expect(source).to_contain("static void arm64_net_repost_rx")
+        expect(source).to_contain("g_arm64_net_rx_posted[i] = 1U")
+        expect(source).to_contain("!g_arm64_net_rx_posted[elem.id]")
+        expect(source).to_contain("g_arm64_net_rx_posted[elem.id] = 0U")
+        expect(source).to_contain("mmio[VMMIO_STATUS / 4U] |= VIRTIO_STATUS_FAILED")
+        expect(source).to_contain("g_arm64_net_ready = 0U")
+        expect(source).to_contain("arm64_net_repost_rx((uint16_t)elem.id)")
+
+    it "wires ARM transport into the existing driver and netstack owner":
+        val driver = file_read("src/os/drivers/virtio/_VirtioNet/driver_operations.spl")
+        val init = file_read("src/os/services/netstack/netstack_init.spl")
+        expect(driver).to_contain("me init_arm64_mmio()")
+        expect(driver).to_contain("VIRTIO_NET_TRANSPORT_ARM64_MMIO")
+        expect(driver).to_contain("rt_arm64_virtio_net_send")
+        expect(driver).to_contain("rt_arm64_virtio_net_recv")
+        expect(init).to_contain("fn net_boot_init_arm64_mmio()")
+        expect(init).to_contain("NetstackService.new(g_net_driver)")
+
+    it "routes direct sockets with bounded reusable descriptor ownership":
+        val init = file_read("src/os/services/netstack/netstack_init.spl")
+        expect(init).to_contain("candidate < 100 + ARM64_NET_FD_CAPACITY")
+        expect(init).to_contain("g_arm64_net_fd_map.remove(i)")
+        expect(init).to_contain("return -4096")
+        expect(init).to_contain("net_tcp_close(internal as i64)")
+        expect(init).to_contain("val internal = net_tcp_accept")
+        expect(init).to_contain("svc.poll_once()")
+        expect(init).to_contain("user_copyin_bytes")
+        expect(init).to_contain("user_copyout_bytes")
+        expect(init).to_contain("owner_task: u64")
+        expect(init).to_contain("owner_task == spl_shim_current_task_id()")
+        expect(init).to_contain("pub fn net_arm64_task_teardown")
+
+    it "denies ambient ring3 device and DMA authority":
+        val source = file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+        expect(source).to_contain("case 80: /* DevEnumerate */ return -1")
+        expect(source).to_contain("case 81: /* DevGetInfo */ return -1")
+        expect(source).to_contain("case 82: /* DeviceGrant */ return -1")
+        expect(source).to_contain("case 83: /* MapBar */ return -1")
+        expect(source).to_contain("case 84: /* AllocDma */ return -1")
+        expect(source).to_contain("case 85: /* FreeDma */ return -1")
+        expect(source).to_contain("case 86: /* DeviceWaitIrq */ return -1")
+        expect(source).to_contain("case 87: /* DeviceAckIrq */ return -1")

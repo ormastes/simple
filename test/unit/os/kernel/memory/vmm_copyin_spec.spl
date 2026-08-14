@@ -9,6 +9,7 @@ paths because it needs real VMM/MMIO state.
 use std.spec.{describe, it, expect}
 use os.kernel.memory.vmm.{
     vmm_verify_user_read,
+    vmm_verify_user_write,
     vmm_pt_walk_user_read,
     vmm_pt_range_user_readable,
     vmm_pt_range_user_writable,
@@ -20,6 +21,7 @@ use os.kernel.memory.vmm.{
     vmm_copy_clear_test_words,
     vmm_copy_set_test_word
 }
+use os.kernel.memory.vmm_core.{vmm_publish_kernel_pml4}
 use os.kernel.types.vmspace_types.{ProcessVmSpace, VmArea, VMA_READ, VMA_WRITE, VMA_EXEC, VMA_ANON}
 use os.posix.errno.{E2BIG, EFAULT, ESUCCESS}
 
@@ -99,6 +101,20 @@ describe "vmm copy-in status":
 
     it "rejects wrapping read verification ranges":
         expect(vmm_verify_user_read(0xFFFFFFFFFFFFFFF8, 16)).to_equal(false)
+
+    it "rejects wrapping write verification ranges":
+        expect(vmm_verify_user_write(0xFFFFFFFFFFFFFFF8, 16)).to_equal(false)
+
+    it "checks the unmapped tail page of an unaligned writable range":
+        vmm_copy_clear_test_words()
+        val pml4: u64 = 0x120000
+        val pdpt: u64 = 0x121000
+        val pd: u64 = 0x122000
+        val pt: u64 = 0x123000
+        val data0: u64 = 0x124000
+        _wire_test_user_pages(pml4, pdpt, pd, pt, 0x7000, data0, 0)
+        vmm_publish_kernel_pml4(pml4, 0)
+        expect(vmm_verify_user_write(0x7FF0, 32)).to_equal(false)
 
 describe "explicit ProcessVmSpace page-table copy-in":
     """These cases cover the FR-SPM-0001 pt-walk contract before MMIO deref."""

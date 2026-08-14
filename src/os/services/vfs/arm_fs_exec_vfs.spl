@@ -4,6 +4,7 @@
 # service closure while still mounting real VirtIO-BLK FAT32 media.
 
 use os.drivers.virtio.virtio_blk.{VirtioBlkDriver, virtio_blk_arm_init}
+use os.kernel.boot.boot_fs_mount.{boot_fs_mount_fat32_from_device}
 use common.string_core.{str_char_at}
 use os.kernel.boot.mmio.{mmio_read32}
 use os.services.vfs.arm_fs_exec_alias.{_arm_exec_alias, arm_fs_exec_disk_alias, _arm_short_name_for_mapped_path}
@@ -81,6 +82,17 @@ pub fn arm_fs_exec_vfs_boot_init() -> bool:
         arm_fs_exec_trace(213)
         _arm_vfs_log("[vfs-init] FAT32 BPB probe failed")
         return false
+    # Publish the same live VirtIO-BLK owner through the kernel FAT32 mount.
+    # EL0 file syscalls then resolve against the mounted filesystem instead of
+    # an unrelated hosted VFS or a marker-only reader.  The mount retains the
+    # device handle; all mutation remains serialized by the kernel syscall
+    # owner and the single VirtIO queue.
+    val mount_result = boot_fs_mount_fat32_from_device(dev, "arm64-virtio-mmio", true)
+    if mount_result.is_err():
+        arm_fs_exec_trace(219)
+        _arm_vfs_log("[vfs-init] kernel FAT32 publication failed")
+        return false
+    _arm_vfs_log("[vfs-init] kernel FAT32 publication ready")
     arm_fs_exec_trace(214)
     val hello_smf_bytes = _arm_fat32_read_path_from_dev(dev, "/sys/apps/hello_world.smf")
     if rt_arm_array_len_u32(hello_smf_bytes) <= 4:

@@ -188,3 +188,20 @@ fn fat32_fd_write_from(task_id: u64, fd: i32, bytes: [u8]) -> Result<u64, i32>:
     updated.offset = updated.file_size
     g_fat32_fd_table[idx as u64] = Fat32FdEntry(task_id: task_id, fd: fd, handle: updated)
     Ok(bytes.len() as u64)
+
+fn fat32_fd_sync(task_id: u64, fd: i32) -> Result<bool, i32>:
+    """Commit file metadata, then the backing device cache, in that order."""
+    val idx = _fat32_fd_index(task_id, fd)
+    if idx < 0:
+        return Err(FAT32_FD_EBADF)
+    if not fat32_mount_ready():
+        return Err(FAT32_FD_ENOSYS)
+    var fs = fat32_mount_fs()
+    val dev = fat32_mount_dev()
+    val metadata = fs.flush(dev, g_fat32_fd_table[idx as u64].handle)
+    if metadata.is_err():
+        return Err(metadata.unwrap_err())
+    val durable = dev.flush()
+    if durable.is_err():
+        return Err(-5)
+    Ok(durable.unwrap())

@@ -21,6 +21,7 @@ use os.kernel.ipc.syscall.{_handle_file_rmdir}
 use os.kernel.ipc.syscall.{_handle_lseek}
 use os.kernel.ipc.syscall.{_handle_getcwd}
 use os.kernel.ipc.syscall.{_handle_chdir}
+use os.kernel.ipc.syscall.{_handle_file_sync}
 use os.kernel.ipc.syscall.{_handle_fork_state}
 use os.kernel.ipc.syscall.{_handle_exec_state}
 use os.kernel.ipc.syscall.{_handle_waitpid_state}
@@ -32,6 +33,44 @@ use os.kernel.ipc.syscall.{_handle_fcntl}
 use os.kernel.scheduler.scheduler.{Scheduler}
 use os.kernel.ipc.ipc.{IpcManager}
 use os.kernel.abi.syscall_shim.{g_shim_scheduler, g_shim_ipc, _make_args}
+use os.kernel.fd_table.{fd_activate_task, fd_current_task, fd_is_valid, fd_get_status_flags, O_WRONLY, O_RDWR}
+
+pub fn shim_file_fd_authorized(caller: u64, fd: i32, want_write: bool) -> bool:
+    """Authorize an operation through the caller's active open description.
+
+    Task-scoped fd contexts prevent a numeric descriptor from borrowing a
+    different task's authority. Invalid/closed descriptors and stale reused
+    numbers have no live open-description object and fail closed.
+    """
+    if fd_current_task() != caller or not fd_is_valid(fd):
+        return false
+    val access = fd_get_status_flags(fd) & 3u32
+    if want_write:
+        return access == O_WRONLY or access == O_RDWR
+    access != O_WRONLY
+
+@export("C", name: "spl_shim_file_capability_check")
+fn spl_shim_file_capability_check(syscall_id: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64:
+    """Path-aware open and task-scoped fd-authority gate for live C ABI."""
+    val caller = g_shim_scheduler.get_current()
+    # C-ABI leaves bypass syscall_handler, so select the scheduler caller's
+    # canonical task-scoped fd table here before consulting descriptor state.
+    fd_activate_task(caller.id)
+    val allowed = match syscall_id:
+        # _handle_file_open owns the one exact copy, canonicalization,
+        # capability decision, and lookup. A precheck here would create a
+        # mutable-user-buffer check/use race by forcing a second copy there.
+        case 30: true
+        case 31: shim_file_fd_authorized(caller.id, a0 as i32, false)
+        case 32: shim_file_fd_authorized(caller.id, a0 as i32, true)
+        case 78: shim_file_fd_authorized(caller.id, a0 as i32, true)
+        case _: false
+    if allowed: 0 else: -1
+
+@export("C", name: "spl_handle_file_sync")
+fn spl_handle_file_sync(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    val args = _make_args(78, a0, a1, a2, a3, a4, a5)
+    _handle_file_sync(args, g_shim_scheduler).value
 
 # ===========================================================================
 # syscall 30 — file_open   [IMPLEMENTED]

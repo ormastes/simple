@@ -98,3 +98,76 @@ describe "ARM64 blocking EL0 exit return contract":
         expect(runtime).to_contain("padded > ARM64_UAS_IMAGE_BYTES")
         expect(memory).to_contain("ARM64_FS_EXEC_FRAME_BASE: u64 = 0x52000000")
         expect(memory).to_contain("ARM64_FS_EXEC_FRAME_END: u64 = 0x57000000")
+
+    it "09 routes mounted EL0 network syscalls to the live ARM owner and fails closed":
+        val runtime = file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+
+        expect(runtime).to_contain("arm64_dispatch_optional_shim")
+        expect(runtime).to_contain("if (!shim) return -38")
+        expect(runtime).to_contain("rt_arm64_virtio_net_ready() > 0 && direct")
+        expect(runtime).to_contain("case 70: return arm64_dispatch_net_shim(70, spl_arm64_net_socket_direct")
+        expect(runtime).to_contain("case 76: return arm64_dispatch_net_shim(76, spl_arm64_net_recv_direct")
+        expect(runtime).to_contain("if (net_close != -4096) return net_close")
+        expect(runtime).to_contain("case 78: return arm64_dispatch_optional_shim(spl_handle_file_sync")
+
+    it "10 validates every ARM user page and translates each copied byte":
+        val runtime = file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+        val facade = file_read("src/os/kernel/memory/user_copy.spl")
+
+        expect(runtime).to_contain("len - 1ULL > UINT64_MAX - ptr")
+        expect(runtime).to_contain("if (page == last_page) return 1")
+        expect(runtime).to_contain("AP[1:0] must allow EL0")
+        expect(runtime).to_contain("RO at EL0")
+        expect(runtime).to_contain("user + i, 1")
+        expect(facade).to_contain("rt_arm64_user_copyin")
+        expect(facade).to_contain("rt_arm64_user_copyout")
+
+    it "11 denies absent network authority and reuses the canonical capability owner":
+        val runtime = file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+        val shim = file_read("src/os/kernel/abi/syscall_shim_net.spl")
+        val caps = file_read("src/os/kernel/types/capability_types.spl")
+
+        expect(runtime).to_contain("if (!spl_shim_net_capability_check) return -1")
+        expect(runtime).to_contain("spl_shim_net_capability_check(syscall_id")
+        expect(shim).to_contain("g_shim_scheduler.get_current().id")
+        expect(shim).to_contain("ipc.cap_check(caller, CapabilityKind.NetListen(port: 0))")
+        expect(shim).to_contain("ipc.cap_check(caller, CapabilityKind.NetConnect(port: 0))")
+        expect(shim).to_contain("if allowed: 0 else: _EPERM")
+        expect(caps).to_contain("if not self.is_pledged and self.caps.len() == 0:")
+        expect(caps).to_contain("return true")
+        expect(caps).to_contain("CapabilitySet(caps: [], is_pledged: true)")
+
+    it "12 provisions the prepared payload without ambient or full authority":
+        val launch = file_read("src/os/kernel/loader/arm64_fs_exec_spawn.spl")
+
+        expect(launch).to_contain("arm64_fs_exec_launch_caps(path, argv, launch_id.id)")
+        expect(launch).to_contain("CapabilityKind.NetConnect(port: 0)")
+        expect(launch).to_contain("CapabilityKind.NetListen(port: 0)")
+        expect(launch).to_contain("CapabilityKind.FileExec(path_prefix: path)")
+        expect(launch).to_contain("CapabilityKind.FileRead(path_prefix: arg)")
+        expect(launch).to_contain("CapabilitySet(caps: tokens, is_pledged: true)")
+        expect(launch.contains("init_task_record(launch_id, full: true)")).to_equal(false)
+        expect(launch.contains("CapabilitySet.full()")).to_equal(false)
+
+    it "12 gates ARM file IO while leaving ownership-releasing close allowed":
+        val runtime = file_read("examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c")
+        val shim = file_read("src/os/kernel/abi/syscall_shim_file.spl")
+        val launch = file_read("src/os/kernel/loader/arm64_fs_exec_spawn.spl")
+
+        expect(runtime).to_contain("if (!spl_shim_file_capability_check) return -1")
+        expect(runtime).to_contain("case 30: return arm64_dispatch_file_shim(30")
+        expect(runtime).to_contain("case 31: return arm64_dispatch_file_shim(31")
+        expect(runtime).to_contain("case 32: return arm64_dispatch_file_shim(32")
+        expect(runtime).to_contain("case 78: return arm64_dispatch_file_shim(78")
+        expect(runtime).to_contain("case 33:")
+        val file_consumer = file_read("src/os/kernel/ipc/syscall_file.spl")
+        expect(shim).to_contain("case 30: true")
+        expect(shim.contains("user_copyin_bytes")).to_equal(false)
+        expect(file_consumer).to_contain("check_file_access(")
+        expect(shim).to_contain("shim_file_fd_authorized(caller.id, a0 as i32, false)")
+        expect(shim).to_contain("shim_file_fd_authorized(caller.id, a0 as i32, true)")
+        expect(shim.contains("CapabilityKind.FileRead(path_prefix: \"\")")).to_equal(false)
+        expect(shim.contains("CapabilityKind.FileWrite(path_prefix: \"\")")).to_equal(false)
+        expect(shim).to_contain("if allowed: 0 else: -1")
+        expect(launch).to_contain("launch_ipc.cap_manager.init_task(launch_id")
+        expect(launch).to_contain("net_arm64_task_teardown(launch_id.id)")
