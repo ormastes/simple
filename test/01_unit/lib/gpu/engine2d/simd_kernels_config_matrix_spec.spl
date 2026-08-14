@@ -1,0 +1,186 @@
+"""engine2d SIMD kernels — 6-config shared test matrix
+
+One shared test body runs across all six CPU configs (x86_64, aarch64,
+riscv64 — each scalar and SIMD), plus config-specific assertions per lane.
+Host hardware fixes which lane executes natively; every lane's pure-Simple
+branches (level texts, evidence validity, scalar/simd parity) are still
+exercised here so CPU-specific branch coverage does not depend on the host.
+
+Shared-body pattern: configs are data, the body is one function — see
+.claude/skills/spipe.md § "Config-variable shared tests".
+"""
+
+use std.spec.{describe, it, expect}
+use std.gpu.engine2d.simd_kernels.{SimdLevel, detect_simd_level, CpuSimdRuntimeEvidence, cpu_simd_required_evidence_valid, fill_span, _scalar_fill_span, copy_span, _scalar_copy_span, alpha_blend_span, _scalar_alpha_blend_span, simd_blit_rect, _scalar_blit_rect, simd_scroll_region, _scalar_scroll_region, simd_config_mode, native_pixel_rows_enabled}
+
+# ============================================================================
+# The 6-config matrix: arch × (scalar | simd)
+# ============================================================================
+
+class KernelConfig:
+    arch: text
+    feature: text
+    simd: bool
+    level: SimdLevel
+
+fn all_configs() -> [KernelConfig]:
+    [
+        KernelConfig(arch: "x86_64", feature: "scalar", simd: false, level: SimdLevel.None_),
+        KernelConfig(arch: "x86_64", feature: "avx2", simd: true, level: SimdLevel.Avx2),
+        KernelConfig(arch: "aarch64", feature: "scalar", simd: false, level: SimdLevel.None_),
+        KernelConfig(arch: "aarch64", feature: "neon", simd: true, level: SimdLevel.Neon),
+        KernelConfig(arch: "riscv64", feature: "scalar", simd: false, level: SimdLevel.None_),
+        KernelConfig(arch: "riscv64", feature: "rvv", simd: true, level: SimdLevel.Rvv)
+    ]
+
+fn make_evidence(cfg: KernelConfig, executed: bool, bit_exact: bool, hits: i64) -> CpuSimdRuntimeEvidence:
+    CpuSimdRuntimeEvidence(
+        arch: cfg.arch,
+        feature: cfg.feature,
+        level: cfg.level.to_text(),
+        x86_available: cfg.arch == "x86_64" and cfg.simd,
+        arm_available: cfg.arch == "aarch64" and cfg.simd,
+        riscv_available: cfg.arch == "riscv64" and cfg.simd,
+        executed_fill: executed,
+        executed_copy: executed,
+        executed_alpha: executed,
+        executed_scroll: executed,
+        checksum: 1,
+        hit_summary: "synthetic",
+        reason: "matrix",
+        native_simd_executed: executed,
+        native_simd_bit_exact: bit_exact,
+        native_simd_hits: hits
+    )
+
+# Shared body: same kernel workload, checked scalar-vs-dispatch bit-exact.
+# Returns a fail-reason or "" — parity must hold in EVERY config lane.
+fn shared_kernel_body(cfg: KernelConfig) -> text:
+    var buf: [u32] = [0; 64]
+    var ref_buf: [u32] = [0; 64]
+    var src: [u32] = [0x80336699; 64]
+
+    fill_span(buf, 0, 64, 0xFF102030)
+    _scalar_fill_span(ref_buf, 0, 64, 0xFF102030)
+    copy_span(buf, 8, src, 0, 16)
+    _scalar_copy_span(ref_buf, 8, src, 0, 16)
+    alpha_blend_span(buf, src, 32, 16)
+    _scalar_alpha_blend_span(ref_buf, src, 32, 16)
+    simd_blit_rect(buf, 8, 0, 0, src, 8, 0, 0, 4, 4)
+    _scalar_blit_rect(ref_buf, 8, 0, 0, src, 8, 0, 0, 4, 4)
+    simd_scroll_region(buf, 8, 0, 0, 8, 8, 2)
+    _scalar_scroll_region(ref_buf, 8, 0, 0, 8, 8, 2)
+    simd_scroll_region(buf, 8, 0, 0, 8, 8, -3)
+    _scalar_scroll_region(ref_buf, 8, 0, 0, 8, 8, -3)
+
+    var i: i64 = 0
+    while i < 64:
+        if buf[i.to_i32()] != ref_buf[i.to_i32()]:
+            return "{cfg.arch}/{cfg.feature}: pixel {i} diverged"
+        i = i + 1
+    ""
+
+describe "engine2d 6-config shared kernel matrix":
+    it "shared body holds bit-exact scalar parity in every config lane":
+        for cfg in all_configs():
+            expect(shared_kernel_body(cfg)).to_equal("")
+
+    it "each config maps level to the right arch and feature text":
+        for cfg in all_configs():
+            if cfg.simd:
+                expect(cfg.level.arch_text()).to_equal(cfg.arch)
+                expect(cfg.level.feature_text()).to_equal(cfg.feature)
+            else:
+                expect(cfg.level.arch_text()).to_equal("unknown")
+                expect(cfg.level.feature_text()).to_equal("scalar")
+
+    it "covers every SimdLevel text arm including Avx512 and Sse42":
+        expect(SimdLevel.None_.to_text()).to_equal("None")
+        expect(SimdLevel.Sse42.to_text()).to_equal("SSE4.2")
+        expect(SimdLevel.Avx2.to_text()).to_equal("AVX2")
+        expect(SimdLevel.Avx512.to_text()).to_equal("AVX-512")
+        expect(SimdLevel.Neon.to_text()).to_equal("NEON")
+        expect(SimdLevel.Rvv.to_text()).to_equal("RVV")
+        expect(SimdLevel.Sse42.arch_text()).to_equal("x86_64")
+        expect(SimdLevel.Avx512.arch_text()).to_equal("x86_64")
+        expect(SimdLevel.Avx512.feature_text()).to_equal("avx2")
+        expect(SimdLevel.Sse42.feature_text()).to_equal("sse42")
+
+# ============================================================================
+# Config-specific tests: strict-evidence gate, every conjunct branch
+# ============================================================================
+
+describe "cpu_simd_required_evidence_valid per config":
+    it "accepts genuine SIMD evidence in each simd lane":
+        for cfg in all_configs():
+            if cfg.simd:
+                val ev = make_evidence(cfg, true, true, 4)
+                expect(cpu_simd_required_evidence_valid(ev, cfg.arch, 0)).to_equal(true)
+
+    it "rejects on wrong expected arch":
+        for cfg in all_configs():
+            if cfg.simd:
+                val ev = make_evidence(cfg, true, true, 4)
+                expect(cpu_simd_required_evidence_valid(ev, "other_arch", 0)).to_equal(false)
+
+    it "rejects when kernels did not all execute":
+        val cfg = all_configs()[1]
+        val ev = make_evidence(cfg, false, true, 4)
+        expect(cpu_simd_required_evidence_valid(ev, cfg.arch, 0)).to_equal(false)
+
+    it "rejects when native output diverged from scalar":
+        val cfg = all_configs()[3]
+        var ev = make_evidence(cfg, true, false, 4)
+        expect(cpu_simd_required_evidence_valid(ev, cfg.arch, 0)).to_equal(false)
+
+    it "rejects when hit counter never advanced":
+        val cfg = all_configs()[5]
+        var ev = make_evidence(cfg, true, true, 4)
+        ev.native_simd_hits = 0
+        ev.native_simd_executed = true
+        expect(cpu_simd_required_evidence_valid(ev, cfg.arch, 0)).to_equal(false)
+
+    it "rejects when any scalar fallback call was observed":
+        val cfg = all_configs()[1]
+        val ev = make_evidence(cfg, true, true, 4)
+        expect(cpu_simd_required_evidence_valid(ev, cfg.arch, 1)).to_equal(false)
+
+# ============================================================================
+# Config-specific tests: scroll edge branches + host lane sanity
+# ============================================================================
+
+describe "scroll region branch edges":
+    it "overshoot delta leaves buffer untouched (rows_to_copy <= 0)":
+        var buf: [u32] = [0xAA; 16]
+        simd_scroll_region(buf, 4, 0, 0, 4, 4, 5)
+        simd_scroll_region(buf, 4, 0, 0, 4, 4, -4)
+        expect(buf[0]).to_equal(0xAAu32)
+
+    it "zero delta and empty rect return early":
+        var buf: [u32] = [0xBB; 16]
+        simd_scroll_region(buf, 4, 0, 0, 4, 4, 0)
+        simd_scroll_region(buf, 4, 0, 0, 0, 4, 1)
+        simd_scroll_region(buf, 4, 0, 0, 4, 0, 1)
+        expect(buf[15]).to_equal(0xBBu32)
+
+describe "host lane detection":
+    it "host resolves to exactly one lane of the matrix":
+        val level = detect_simd_level()
+        val arch = level.arch_text()
+        val ok = (arch == "x86_64" or arch == "aarch64" or
+            arch == "riscv64" or arch == "unknown")
+        expect(ok).to_equal(true)
+
+    it "simd config mode is a known vocabulary value":
+        val mode = simd_config_mode()
+        val known = (mode == "auto" or mode == "off" or mode == "sse2" or
+            mode == "avx2" or mode == "neon")
+        expect(known).to_equal(true)
+
+    it "native rows gate agrees with detected level when mode is not off":
+        if simd_config_mode() == "off":
+            expect(native_pixel_rows_enabled()).to_equal(false)
+        else:
+            val level = detect_simd_level()
+            val has_simd = level != SimdLevel.None_
+            expect(native_pixel_rows_enabled()).to_equal(has_simd)

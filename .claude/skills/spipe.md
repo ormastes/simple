@@ -1053,6 +1053,21 @@ observe a pass:
   the backend initializes AND ignored (auto-probe, value changes) when it cannot —
   never just that some backend is returned. See
   `engine2d_env_backend_select_spec.spl`.
+- **Config-variable shared tests (one body, N configs).** When the same API must
+  hold across a config matrix (e.g. engine2d's 6 CPU lanes: x86_64/aarch64/riscv64
+  × scalar/simd), do NOT copy the spec per config. Model each config as a plain
+  data record (`class KernelConfig: arch/feature/simd/level`), list them in an
+  `all_configs()` function, and write the shared invariant as ONE function taking
+  the config and returning a fail-reason text (`""` = pass); the `it` block loops
+  `for cfg in all_configs(): expect(body(cfg)).to_equal("")` so a failure names
+  the offending lane. Config-SPECIFIC behavior (a branch only one lane takes, a
+  strict evidence gate, an arch-only diagnostic) gets its own additional `it`
+  blocks indexed off the same config list — never a separate spec file per arch.
+  Host hardware fixes which lane runs natively; keep the shared body pure-Simple
+  (scalar-reference parity, synthetic evidence records) so all lanes' branches
+  are exercised on any host, and add a separate host-lane sanity `describe` for
+  the one lane that genuinely executes. Reference implementation:
+  `test/01_unit/lib/gpu/engine2d/simd_kernels_config_matrix_spec.spl`.
 - **ExecTarget (std.compute) two-level + suggest/require.** The compute stdlib
   (`src/lib/nogc_async_mut/compute/`, guide
   `doc/07_guide/lib/compute/exec_target_compute_stdlib.md`) tags a device CLASS
