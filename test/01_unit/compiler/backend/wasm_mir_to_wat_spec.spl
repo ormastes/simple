@@ -69,6 +69,11 @@ fn unaryop_wat_ty(k: MirTypeKind, op: MirUnaryOp) -> text:
 fn unaryop_wat(op: MirUnaryOp) -> text:
     unaryop_wat_ty(MirTypeKind.I64, op)
 
+fn instruction_wat(inst: MirInst) -> text:
+    val b = builder()
+    translator().translate_instruction(b, inst)
+    b.build()
+
 fn float_fn_module() -> MirModule:
     """A one-instruction f64 function: r = a * b; return r."""
     val f64_ty = ty(MirTypeKind.F64)
@@ -97,6 +102,31 @@ fn float_fn_module() -> MirModule:
     MirModule(name: "float_mod", functions: functions, statics: {}, constants: {}, types: {})
 
 describe "MirToWat translation layer":
+
+    describe "coverage evidence probes":
+        it "fails closed when a DecisionProbe reaches WAT translation":
+            val inst = MirInst(kind: MirInstKind.DecisionProbe(
+                7, "decision:sha256", op_const(
+                    MirConstValue.Bool(true), ty(MirTypeKind.Bool)
+                ), "src/example.spl", 12, 0
+            ), span: nil)
+            val wat = instruction_wat(inst)
+
+            expect(wat).to_contain("unlowered DecisionProbe 'decision:sha256'")
+            expect(wat).to_contain("unreachable")
+            assert_false(wat.contains(";; unhandled instruction"))
+
+        it "fails closed when a ConditionProbe reaches WAT translation":
+            val inst = MirInst(kind: MirInstKind.ConditionProbe(
+                8, "condition:sha256", 7, "decision:sha256", op_const(
+                    MirConstValue.Bool(false), ty(MirTypeKind.Bool)
+                ), "src/example.spl", 12, 4
+            ), span: nil)
+            val wat = instruction_wat(inst)
+
+            expect(wat).to_contain("unlowered ConditionProbe 'condition:sha256'")
+            expect(wat).to_contain("unreachable")
+            assert_false(wat.contains(";; unhandled instruction"))
 
     describe "translate_const":
         it "writes the destination local for a scalar Zero constant":

@@ -12,6 +12,9 @@
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction}
+use compiler.mir.mir_coverage_probe_admission.{
+    mir_coverage_probe_admission_diagnostic_module_v1
+}
 use compiler.backend.wasm_backend.{WatBuilder, WasmType, WasmTarget}
 use compiler.backend.wasm_type_mapper.{WasmTypeMapper}
 use compiler.backend.wasm.wasm_memory.{WasmMemoryManager}
@@ -71,6 +74,10 @@ class MirToWat:
 
     me translate_module(module: MirModule) -> text:
         """Translate a complete MIR module to WAT text."""
+        val coverage_probe_diagnostic =
+            mir_coverage_probe_admission_diagnostic_module_v1(module)
+        if coverage_probe_diagnostic != "":
+            panic("compile error: {coverage_probe_diagnostic}")
         var builder = WatBuilder.create()
         builder.begin_module(self.module_name)
 
@@ -368,6 +375,18 @@ class MirToWat:
 
             case CheckedBinOp(dest, op, left, right):
                 self.translate_binop(builder, dest, op, left, right)
+
+            # Coverage probes are ordered observations. The WAT backend does
+            # not yet import the coverage runtime ABI, so it must reject them
+            # explicitly. Falling through to the generic comment would erase
+            # the observation while still producing runnable output.
+            case DecisionProbe(_, semantic_id, _, _, _, _):
+                builder.emit(";; UNSUPPORTED: unlowered DecisionProbe '{semantic_id}' reached WAT instruction translation")
+                builder.emit("unreachable")
+
+            case ConditionProbe(_, semantic_id, _, _, _, _, _, _):
+                builder.emit(";; UNSUPPORTED: unlowered ConditionProbe '{semantic_id}' reached WAT instruction translation")
+                builder.emit("unreachable")
 
             case _:
                 builder.emit(";; unhandled instruction")
@@ -869,4 +888,3 @@ fn mir_local_is_arg(local: MirLocal) -> bool:
 # ============================================================================
 # Exports
 # ============================================================================
-

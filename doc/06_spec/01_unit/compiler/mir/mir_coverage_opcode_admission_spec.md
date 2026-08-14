@@ -34,9 +34,11 @@ The mirrored spec verifies:
    zero;
 8. a producer consumed only by a block terminator remains intact;
 9. malformed IDs, paths, positions, and operand types fail closed;
-10. SSA rewriting and inlining reject probe-bearing blocks;
-11. the interpreter rejects unlowered probes; and
-12. LLVM translation paths reject unlowered probes before emission.
+10. function and module admission report a later malformed probe before an
+    earlier well-formed probe's expected unlowered diagnostic;
+11. SSA rewriting and inlining reject probe-bearing blocks;
+12. the interpreter rejects unlowered probes; and
+13. LLVM translation paths reject unlowered probes before emission.
 
 ## Deferred integration
 

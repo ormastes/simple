@@ -2,12 +2,14 @@ use std.spec
 use compiler.hir.hir_types.{SymbolId}
 use compiler.mir.mir_instructions.{
     BlockId, LocalId, LocalKind, MirBlock, MirConstValue, MirInst, MirInstKind,
-    MirFunction, MirLocal, MirOperand, MirOperandKind, MirSignature,
+    MirFunction, MirLocal, MirModule, MirOperand, MirOperandKind, MirSignature,
     MirTerminator, MirType
 }
 use compiler.mir.mir_json.{serialize_mir_inst_kind}
 use compiler.mir.mir_coverage_probe_admission.{
-    mir_coverage_probe_admission_diagnostic_inst_v1
+    mir_coverage_probe_admission_diagnostic_inst_v1,
+    mir_coverage_probe_admission_diagnostic_function_v1,
+    mir_coverage_probe_admission_diagnostic_module_v1
 }
 use compiler.mir_opt.mir_opt.dce.{dce_instruction_is_mandatory_observation}
 use compiler.mir_opt.mir_opt.mir_visitor.{MirVisitor, mir_visitor_walk_inst}
@@ -315,6 +317,39 @@ describe "typed MIR coverage opcode admission":
         expect(mir_coverage_probe_admission_diagnostic_inst_v1(
             non_bool, locals
         )).to_contain("OPERAND")
+
+    it "reports a malformed later probe before a valid first probe is unlowered":
+        val block = MirBlock(
+            id: BlockId.entry(), label: "entry",
+            instructions: [decision_probe(), decision_probe(0)],
+            terminator: MirTerminator.Ret(nil)
+        )
+        val function = MirFunction(
+            symbol: SymbolId(id: 0), name: "malformed_after_valid",
+            signature: MirSignature(
+                params: [], return_type: MirType.unit(), is_variadic: false
+            ),
+            locals: [probe_bool_local()], blocks: [block],
+            entry_block: BlockId.entry(), span: nil, generic_params: [],
+            is_generic_template: false, specialization_of: nil,
+            type_bindings: {}
+        )
+        val function_diagnostic =
+            mir_coverage_probe_admission_diagnostic_function_v1(function)
+        expect(function_diagnostic).to_contain("MIRCOV-PROBE-E-RUNTIME-ID")
+        expect(function_diagnostic.contains("UNLOWERED")).to_equal(false)
+
+        var functions: Dict<SymbolId, MirFunction> = {}
+        functions[SymbolId(id: 0)] = function
+        val module = MirModule(
+            name: "malformed_after_valid", functions: functions,
+            statics: {}, constants: {}, types: {}
+        )
+        val module_diagnostic =
+            mir_coverage_probe_admission_diagnostic_module_v1(module)
+        expect(module_diagnostic).to_contain("MIRCOV-PROBE-E-RUNTIME-ID")
+        expect(module_diagnostic).to_contain("in function 'malformed_after_valid'")
+        expect(module_diagnostic.contains("UNLOWERED")).to_equal(false)
 
     it "makes SSA and inlining reject probe-bearing blocks":
         val block = MirBlock(

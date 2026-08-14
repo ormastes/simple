@@ -68,7 +68,7 @@ fn mir_coverage_probe_common_diagnostic_v1(
         return "MIRCOV-PROBE-E-COLUMN: column must be a u32"
     ""
 
-fn mir_coverage_probe_admission_diagnostic_inst_v1(
+fn mir_coverage_probe_malformed_diagnostic_inst_v1(
     kind: MirInstKind,
     locals: [MirLocal]
 ) -> text:
@@ -78,7 +78,7 @@ fn mir_coverage_probe_admission_diagnostic_inst_v1(
                 runtime_id, semantic_id, result, authored_path, line, column, locals
             )
             if invalid != "": return invalid
-            "MIRCOV-PROBE-E-UNLOWERED: DecisionProbe '{semantic_id}' requires admitted backend lowering"
+            ""
         case ConditionProbe(runtime_id, semantic_id, parent_runtime_id, parent_semantic_id, result, authored_path, line, column):
             val invalid = mir_coverage_probe_common_diagnostic_v1(
                 runtime_id, semantic_id, result, authored_path, line, column, locals
@@ -88,10 +88,32 @@ fn mir_coverage_probe_admission_diagnostic_inst_v1(
                 return "MIRCOV-PROBE-E-PARENT-RUNTIME-ID: parent_runtime_id must be a nonzero u32"
             if not mir_coverage_probe_atom_valid_v1(parent_semantic_id):
                 return "MIRCOV-PROBE-E-PARENT-SEMANTIC-ID: parent_semantic_id must be a nonempty canonical atom"
+            ""
+        case _: ""
+
+fn mir_coverage_probe_admission_diagnostic_inst_v1(
+    kind: MirInstKind,
+    locals: [MirLocal]
+) -> text:
+    val malformed = mir_coverage_probe_malformed_diagnostic_inst_v1(kind, locals)
+    if malformed != "": return malformed
+    match kind:
+        case DecisionProbe(_, semantic_id, _, _, _, _):
+            "MIRCOV-PROBE-E-UNLOWERED: DecisionProbe '{semantic_id}' requires admitted backend lowering"
+        case ConditionProbe(_, semantic_id, _, _, _, _, _, _):
             "MIRCOV-PROBE-E-UNLOWERED: ConditionProbe '{semantic_id}' requires admitted backend lowering"
         case _: ""
 
 fn mir_coverage_probe_admission_diagnostic_function_v1(func: MirFunction) -> text:
+    # Phase one checks every row before an otherwise valid probe can produce
+    # the expected fail-closed UNLOWERED result and mask a later malformed row.
+    for block in func.blocks:
+        for inst in block.instructions:
+            val malformed = mir_coverage_probe_malformed_diagnostic_inst_v1(
+                inst.kind, func.locals
+            )
+            if malformed != "": return malformed
+    # Phase two rejects the first well-formed probe until lowering is admitted.
     for block in func.blocks:
         for inst in block.instructions:
             val diagnostic = mir_coverage_probe_admission_diagnostic_inst_v1(
@@ -101,6 +123,17 @@ fn mir_coverage_probe_admission_diagnostic_function_v1(func: MirFunction) -> tex
     ""
 
 fn mir_coverage_probe_admission_diagnostic_module_v1(module: MirModule) -> text:
+    # Preserve malformed-before-unlowered precedence across function boundaries,
+    # not only within each individual function.
+    for fn_ in module.functions.values():
+        val func: MirFunction = fn_
+        for block in func.blocks:
+            for inst in block.instructions:
+                val malformed = mir_coverage_probe_malformed_diagnostic_inst_v1(
+                    inst.kind, func.locals
+                )
+                if malformed != "":
+                    return "{malformed} in function '{func.name}'"
     for fn_ in module.functions.values():
         val func: MirFunction = fn_
         val diagnostic = mir_coverage_probe_admission_diagnostic_function_v1(func)
