@@ -18,6 +18,34 @@ bootstrap attempt completed Stage 2 and its sanity check, then the exact fresh
 Stage 2 binary segfaulted during Stage 3 self-hosting. This is an owned FAIL,
 not an external-host warning and not a verification PASS.
 
+### Completion audit — plan objective versus feature objective
+
+Re-audited on synced `origin/main` at
+`d5e954141053728639f36882e706a1ee041b4a87`.
+
+The completed thread objective was narrowly and explicitly: run `$sp_dev` with
+parallel plan/guide audits, merge their findings, obtain higher-capability
+review, and complete this resumable plan document. Evidence for that objective:
+
+- `/root/acceptance_audit` and `/root/guide_audit` completed read-only audits;
+- `/root/higher_model_review` (`gpt-5.6-sol`, xhigh) ended PASS for truthful,
+  resumable plan-document completeness after correction rounds;
+- `test/01_unit/scripts/mci_v2_traceability_contract_test.shs` remains PASS on
+  the synced head;
+- executable-source/manual SHA identity, numbered-artifact, direct-env,
+  rendering-source-coupling, and `doc/06_spec` layout guards remain PASS;
+- plan-document commit `8350cbc8502859104ca1a3b0120560ffb3f84b3c` is reachable
+  from `origin/main`.
+
+That completion does **not** complete the mission-critical feature, verify
+phase, or release. The umbrella feature remains `impl-in-progress` and BLOCKED
+by the owned Stage 3 self-host failure, unexecuted current-head runtime gates,
+missing per-scenario executable ownership/docgen provenance, external
+QEMU/GPU/RenderDoc/Metal/24-hour evidence, the real independently signed
+reviewer receipt, and a final aggregate with `release_blockers=none`. No agent
+may use the completed plan-document goal status as evidence that any of those
+rows passed.
+
 ### Restart12 owned acceptance ledger
 
 | Item | Current classification | Exact source/evidence paths | Exact resume command | Owner | Final reviewer |
