@@ -20,14 +20,28 @@ The static runner token contract test confirms only that the wrapper contains
 the planned tokens; it cannot prove either phase is executable. No admitted
 self-hosted runtime can satisfy this inconsistent command/schema contract.
 
+## Selected contract (2026-08-14)
+
+The shell runner owns phase-one command execution in a private staging sibling
+while the final run directory remains absent. It runs the admitted CLI, measured
+branch coverage, fixed testbench generation, and separate bounded GHDL analyze,
+elaborate, and run commands. It then invokes the admitted CLI on the Simple
+composer with only `--manifest` and `--run-id`. The composer exclusively
+validates/copies evidence, creates the immutable final directory, and writes the
+receipt last.
+
+The schema advances to `riscv-gen2-hwir-qualification-run-v2`; v1 cannot meet
+the selected NFR because it omits the coverage command, changed-file set,
+exclusions, testbench identity, and individually bound GHDL commands/exits.
+There is no accepted v1 retained receipt requiring compatibility.
+
 ## Unblock condition
 
-Select one canonical two-phase design: a command-owned evidence producer must
-run the fixed RV32/RV64 products and write hash-bound row artifacts, then the
-Simple composer must consume only that validated manifest and write the final
-receipt last. Align CLI switches, schemas, field names, filenames, and tests;
-add deliberate-red contract coverage; then execute the wrapper with an admitted
-Stage-4 CLI and retain the receipt directory.
+Implement the selected contract, including exact-key parsing and deliberate-red
+coverage for phase order, symlinks/preexisting paths, malformed/duplicate keys,
+low coverage, each command failure, artifact mutation, composer failure, and
+partial-receipt cleanup. Then execute it with an admitted Stage-4 CLI and retain
+the receipt directory.
 
 Relevant files:
 

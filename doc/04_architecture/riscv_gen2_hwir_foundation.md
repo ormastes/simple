@@ -548,3 +548,12 @@ derives an order-independent digest from the composition, lock, and attachment
 set. An absent plan accepts no attachments and returns the original composition
 with zero added ports. This is a pre-legalization contract, not RVFI or formal
 noninterference qualification.
+
+## Canonical parcel/trap sequential lowering (2026-08-14)
+
+The fixed parcel and trap frontend contracts remain product validators and
+typed port factories. After validation, emission constructs a child-bound
+`HwSequentialModuleDef` with the fixed plan, selected decoder entity, and the
+decoder's actual structural hash. The sole sequential serializer and graph
+owner is `render_strict_sequential_hwir`; decoder VHDL is prepended exactly
+once. The former stateful serializer/hash schema is not an alternate layer.

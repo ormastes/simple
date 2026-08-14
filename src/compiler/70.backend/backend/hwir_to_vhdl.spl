@@ -427,18 +427,6 @@ fn strict_seq_process(plan: HwSequentialPlan) -> Result<text, text>:
         rules = rules + " -- simple-hwir node=" + plan.rule_node_id(rule).value + "\n elsif " + rendered_guards + " then" + rendered_assignments
     Ok(" process(clk) begin if rising_edge(clk) then if rst='1' then" + resets + rules + " end if; end if; end process;\n")
 
-fn strict_stateful_vhdl(entity: text, config: CoreConfig, decoder_entity: text,
-    ports: [HwPort], plan: HwSequentialPlan, decoder_vhdl: text, route: text,
-    graph_sha256: text) -> Result<text, text>:
-    val profile = strict_vhdl_profile_comment(config.profile)?
-    val outputs = strict_seq_outputs(plan)?
-    val process_vhdl = strict_seq_process(plan)?
-    Ok(decoder_vhdl + "\nlibrary ieee;\nuse ieee.std_logic_1164.all;\nuse ieee.numeric_std.all;\n\n-- simple-hwir route=" + route + " profile=" + profile + " graph=" + graph_sha256 + "\n" +
-        "-- simple-hwir port-schema=" + strict_hwir_port_schema_sha256(ports) + "\n" +
-        "entity " + entity + " is port(\n" + strict_stateful_ports(ports) + "    ); end entity;\n" +
-        "architecture rtl of " + entity + " is\n" + strict_seq_plan_declarations(plan) + "\nbegin\n decoder: entity work." + decoder_entity + " port map(" + strict_seq_decoder_map(plan) + ");\n" +
-        outputs + "\n" + process_vhdl + "end architecture rtl;\n")
-
 pub fn render_strict_sequential_hwir(module: HwSequentialModuleDef,
     route: text) -> HwirStrictVhdlResult:
     """Serialize a typed sequential module with zero or one typed child.
@@ -478,28 +466,36 @@ pub fn render_strict_sequential_hwir(module: HwSequentialModuleDef,
         module_node_id: module.node_id.value, config_xlen: module.config.xlen,
         config_profile: module.config.profile, hwir_graph_sha256: graph_sha256)
 
-pub fn strict_stateful_graph_sha(node_id: text, config: CoreConfig, origins: [HwOrigin], ports: [HwPort],
-    decoder_entity: text, plan: HwSequentialPlan, decoder_graph_sha: text) -> text:
-    var fields: [text] = ["simple-hwir-stateful/v2", node_id, config.xlen.to_text(),
-        config.physical_address_bits.to_text(), config.register_count.to_text(),
-        config.profile, config.isa_profile, config.compressed_decode_profile]
-    for origin in origins:
-        fields.push("origin")
-        fields.push(origin.node_id.value)
-        fields.push(origin.source_name)
-    for port in ports:
-        fields.push("port")
-        fields.push(port.name)
-        fields.push(port.direction)
-        fields.push(port.type_name)
-        fields.push(port.bit_width.to_text())
-        fields.push(port.clock_domain)
-    fields.push("plan")
-    fields.push(plan.canonical_text())
-    fields.push("decoder")
-    fields.push(decoder_entity)
-    fields.push(decoder_graph_sha)
-    sha256_text(hwir_hash_fields(fields))
+fn strict_stateful_sequential_module(node_id: HwNodeId, entity_name: text,
+    config: CoreConfig, origins: [HwOrigin], ports: [HwPort],
+    plan: HwSequentialPlan, child_entity: text,
+    child_graph_sha256: text) -> HwSequentialModuleDef:
+    HwSequentialModuleDef(
+        node_id: node_id, entity_name: entity_name, config: config,
+        origins: origins, ports: ports, datapath_signals: [],
+        datapath_constants: [], datapath_bit_vector_constants: [],
+        datapath_comb_ops: [], datapath_compare_ops: [], datapath_select_ops: [],
+        datapath_bit_extract_ops: [], datapath_fixed_slice_ops: [], plan: plan,
+        child_entity: child_entity, child_graph_sha256: child_graph_sha256)
+
+pub fn strict_stateful_graph_sha(node_id: text, config: CoreConfig,
+    origins: [HwOrigin], ports: [HwPort], decoder_entity: text,
+    plan: HwSequentialPlan, decoder_graph_sha: text) -> text:
+    """Compatibility entrypoint backed by the canonical sequential graph.
+
+    Drivers and provenance readers use this helper to recompute a product hash
+    without rendering VHDL.  Keeping the public name avoids a flag-day API
+    change while eliminating the former private stateful hash schema.
+    """
+    val module_suffix = ":module"
+    val entity_name = if node_id.ends_with(module_suffix):
+        node_id[0:node_id.len() - module_suffix.len()]
+    else:
+        node_id
+    val module = strict_stateful_sequential_module(HwNodeId(value: node_id),
+        entity_name, config, origins, ports, plan, decoder_entity,
+        decoder_graph_sha)
+    module.structural_sha256()
 
 fn strict_stateful_result(frontend: HwParcelFrontendDef, route: text) -> HwirStrictVhdlResult:
     val error = frontend.shape_diagnostic()
@@ -518,16 +514,16 @@ fn strict_stateful_result(frontend: HwParcelFrontendDef, route: text) -> HwirStr
         return HwirStrictVhdlResult.rejected("HWIR-E-SEQUENTIAL-DECODER: stateful frontend decoder does not match its selected concrete product")
     if decoder.module_node_id != HwNodeId.module_root(frontend.decoder_entity).value:
         return HwirStrictVhdlResult.rejected("HWIR-E-SEQUENTIAL-DECODER: emitted decoder node identity does not match the bound decoder entity")
-    val graph_sha256 = strict_stateful_graph_sha(frontend.node_id.value, frontend.config,
-        frontend.origins, frontend.frontend_contract.ports(), frontend.decoder_entity, frontend.sequential,
-        decoder.hwir_graph_sha256)
-    val vhdl = strict_stateful_vhdl(frontend.summary_name, frontend.config, frontend.decoder_entity,
-        frontend.frontend_contract.ports(), frontend.sequential, decoder.vhdl, route, graph_sha256)
-    if vhdl.is_err():
-        return HwirStrictVhdlResult.rejected(vhdl.err().unwrap())
-    HwirStrictVhdlResult(success: true, vhdl: vhdl.ok().unwrap(), diagnostic: "", route: route,
-        module_node_id: frontend.node_id.value, config_xlen: frontend.config.xlen,
-        config_profile: frontend.config.profile, hwir_graph_sha256: graph_sha256)
+    val module = strict_stateful_sequential_module(frontend.node_id,
+        frontend.summary_name, frontend.config, frontend.origins,
+        frontend.frontend_contract.ports(), frontend.sequential,
+        frontend.decoder_entity, decoder.hwir_graph_sha256)
+    val rendered = render_strict_sequential_hwir(module, route)
+    if not rendered.is_success(): return rendered
+    HwirStrictVhdlResult(success: true, vhdl: decoder.vhdl + "\n" + rendered.vhdl,
+        diagnostic: "", route: rendered.route, module_node_id: rendered.module_node_id,
+        config_xlen: rendered.config_xlen, config_profile: rendered.config_profile,
+        hwir_graph_sha256: rendered.hwir_graph_sha256)
 
 fn strict_trap_stateful_result(frontend: HwTrapParcelFrontendDef) -> HwirStrictVhdlResult:
     val error = frontend.shape_diagnostic()
@@ -556,16 +552,16 @@ fn strict_trap_stateful_result(frontend: HwTrapParcelFrontendDef) -> HwirStrictV
         return HwirStrictVhdlResult.rejected("HWIR-E-SEQUENTIAL-DECODER: trap frontend decoder does not match its selected concrete product")
     if decoder.module_node_id != HwNodeId.module_root(frontend.decoder_entity).value:
         return HwirStrictVhdlResult.rejected("HWIR-E-SEQUENTIAL-DECODER: emitted trap decoder node identity does not match the bound decoder entity")
-    val graph_sha256 = strict_stateful_graph_sha(frontend.node_id.value, frontend.config,
-        frontend.origins, frontend.frontend_contract.ports(), frontend.decoder_entity, frontend.sequential,
-        decoder.hwir_graph_sha256)
-    val vhdl = strict_stateful_vhdl(frontend.summary_name, frontend.config, frontend.decoder_entity,
-        frontend.frontend_contract.ports(), frontend.sequential, decoder.vhdl, "hwir-gen2-trap-stateful-product-v3", graph_sha256)
-    if vhdl.is_err():
-        return HwirStrictVhdlResult.rejected(vhdl.err().unwrap())
-    HwirStrictVhdlResult(success: true, vhdl: vhdl.ok().unwrap(), diagnostic: "", route: "hwir-gen2-trap-stateful-product-v3",
-        module_node_id: frontend.node_id.value, config_xlen: frontend.config.xlen,
-        config_profile: frontend.config.profile, hwir_graph_sha256: graph_sha256)
+    val module = strict_stateful_sequential_module(frontend.node_id,
+        frontend.summary_name, frontend.config, frontend.origins,
+        frontend.frontend_contract.ports(), frontend.sequential,
+        frontend.decoder_entity, decoder.hwir_graph_sha256)
+    val rendered = render_strict_sequential_hwir(module, "hwir-gen2-trap-stateful-product-v3")
+    if not rendered.is_success(): return rendered
+    HwirStrictVhdlResult(success: true, vhdl: decoder.vhdl + "\n" + rendered.vhdl,
+        diagnostic: "", route: rendered.route, module_node_id: rendered.module_node_id,
+        config_xlen: rendered.config_xlen, config_profile: rendered.config_profile,
+        hwir_graph_sha256: rendered.hwir_graph_sha256)
 
 pub fn compile_strict_zca_single_outstanding_frontend_product(config: CoreConfig) -> HwirStrictVhdlResult:
     val name = if config.profile == "riscv-gen2-rv32-zca-cjal-critical":

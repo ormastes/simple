@@ -1049,3 +1049,17 @@ duplicate-check, and modern-SSpec maintenance gates recorded below complete.
   `src/app/test/riscv_gen2_qualification_receipt.spl`. This is tracked in
   `doc/08_tracking/bug/riscv_gen2_hwir_qualification_contract_mismatch_2026-08-14.md`.
   A deployed runtime alone does not unblock qualification.
+- impl (2026-08-14, A13 follow-up): Parcel and trap product emission now adapts
+  the already validated fixed frontend contract into `HwSequentialModuleDef`,
+  binds the actual compiled decoder graph hash, and uses
+  `render_strict_sequential_hwir`. The former private stateful renderer and
+  hash schema were removed; decoder VHDL is prepended exactly once. The public
+  hash recomputation helper remains as a compatibility API but constructs the
+  canonical v3 typed graph, so drivers and manifests share one hash owner.
+- design-frozen (2026-08-14, A14): The qualification runner is the phase-one
+  command/evidence owner; the admitted Simple receipt app is the sole
+  phase-two validator/copier and writes the receipt last. The final directory
+  remains absent during staging. Schema v2 must hash-bind the coverage command,
+  changed files, exclusions, testbench, and each GHDL command/log/exit. The
+  current contradictory runner is not accepted and remains WARN-blocked until
+  this contract and its deliberate-red tests execute on the repaired runtime.

@@ -606,6 +606,14 @@ are the runnable evidence lane while the deployed binary cannot run the spec
 
 ## Troubleshooting
 
+Parcel and trap frontends now serialize through the same
+`HwSequentialModuleDef` renderer as other typed sequential products. Their
+fixed validators still reject template, pin, register, origin, and decoder
+drift; the adapter binds the compiled decoder graph and prepends that decoder
+once. Source rendering is not qualification: the admitted two-phase runner
+must retain measured coverage and independent GHDL analyze/elaborate/run
+evidence before PASS.
+
 **`expected Fn, found FString` when running the spec.** Pre-existing, not a
 regression in this lane: the deployed seed's `simple test` cannot parse the
 `@step "..."` decorator form. HEAD fails identically. The spec in this lane is

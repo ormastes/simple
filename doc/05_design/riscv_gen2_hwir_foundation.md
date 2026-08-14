@@ -173,3 +173,13 @@
     XLEN. The focused mixed-datapath specification covers positive lowering,
     unsigned predicates, invalid sources/operations/drivers, LSU geometry, and
     graph-hash drift.
+23. Parcel/trap compilation validates its fixed interface, decoder, pins,
+    registers, origins, and plan before adapting them into a child-bound
+    `HwSequentialModuleDef`. The compiled decoder digest becomes
+    `child_graph_sha256`; the generic renderer emits the parent and its v3
+    structural digest, and the product helper prepends the decoder once. The
+    compatibility hash helper constructs that same canonical module.
+24. Qualification is a two-phase transaction. The runner stages admitted CLI,
+    coverage, testbench, and GHDL command evidence while the final path is
+    absent. The Simple composer validates a v2 exact-key manifest, copies
+    hash-bound artifacts into a fresh run, and writes its receipt last.

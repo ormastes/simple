@@ -15,8 +15,8 @@
 | A10 | Release-toolchain evidence | compiler/bootstrap owner; final reviewer `/root` | blocked: deploy an admitted self-hosted runtime, align the qualification producer/composer contract, rerun critical CLI/GHDL product scenarios, then record deterministic manifest hashes |
 | A11 | Shared scalar semantic database | `/root` | first I/M/RV64-word/shift declarative schema, RV32/RV64 specialization, and concrete I/IM multiply/divide provider selection exist; complete scalar table, HWIR resource binding, generated decoder/toolchain metadata remain pending |
 | A12 | Typed HWIR aspect packs | `/root` | hash-pinned manifest/application plan, typed exact-set lock contract, first fail-closed observational output graph weave, and Gen2 VHDL manifest lock provenance exist; lockfile discovery, proof execution, and all timing/state/provider advice remain pending |
-| A13 | Typed VHDL sequential HWIR migration and evidence | `/root` | standalone/retirement module boundary implemented with source/static evidence; parcel/trap migration, executable qualification, and independent RTL receipt remain open |
-| A14 | Qualification producer/composer alignment | compiler evidence owner; final reviewer `/root` | blocked: the wrapper invokes unsupported `--emit-evidence`/`--compose-receipt` modes and expects a receipt schema/shape different from the in-tree Simple composer; implement and test one canonical two-phase contract before A10 can run |
+| A13 | Typed VHDL sequential HWIR migration and evidence | `/root` | standalone/retirement plus parcel/trap emission now use the canonical sequential renderer/hash boundary; executable qualification and independent RTL receipt remain open |
+| A14 | Qualification producer/composer alignment | compiler evidence owner; final reviewer `/root` | design frozen: runner owns staged commands/evidence and the admitted Simple app solely validates, copies, and writes a v2 receipt last; implementation is blocked from acceptance until the self-hosted runtime can execute its deliberate-red tests |
 
 ## Current replacement-lane acceptance (2026-08-14)
 
@@ -38,10 +38,19 @@
 - [ ] Generated VHDL is analyzed, elaborated, and behaviorally simulated with
   GHDL for datapath-before-state capture, reset, guard-false, and guard-true
   cycles; source-text assertions alone do not close this item.
-- [ ] Parcel/trap stateful products migrate from the plan-only private renderer
+- [x] Parcel/trap stateful products migrate from the plan-only private renderer
   to the canonical `HwSequentialModuleDef` boundary, or an accepted design
   explicitly proves why they remain a separate typed owner without duplicated
   sequential semantics.
+- [x] A14's canonical contract is frozen: the wrapper produces staged evidence,
+  the admitted Simple app composes a fresh immutable run, and only the composer
+  writes `qualification_receipt.json` last.
+- [ ] The runner removes the unsupported producer/composer switches and emits
+  an exact-key v2 manifest that hash-binds coverage command/report/changed
+  files/exclusions plus each row's testbench and GHDL commands/logs/exits.
+- [ ] Deliberate-red runner/composer tests prove phase ordering, immutable-path
+  and symlink rejection, malformed/duplicate keys, low coverage, every command
+  failure, artifact mutation, composer failure, and partial-receipt cleanup.
 - [ ] Changed `.spl` files pass lint, HWIR token duplication, and the seven-part
   `sspec-maintain scan`; the qualification receipt records at least 80% branch
   coverage or leaves the coverage contract blocked.
@@ -67,6 +76,11 @@ The exact resume commands and owner are recorded in
 The qualification-contract mismatch is tracked separately in
 `doc/08_tracking/bug/riscv_gen2_hwir_qualification_contract_mismatch_2026-08-14.md`;
 runtime deployment alone cannot make the current wrapper runnable.
+The accepted A14 contract removes the fictitious composer producer modes,
+keeps the final run directory absent during staging, and advances the receipt
+to v2 so coverage command/files/exclusions plus each testbench and GHDL command
+are hash-bound. Implementing or accepting that contract without executable
+deliberate-red coverage would be a shortcut, so A14 remains explicitly open.
 This is an implementation handoff. It does not mark A10, independent RTL
 equivalence, or the Gen2 umbrella complete.
 
