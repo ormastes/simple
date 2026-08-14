@@ -4,14 +4,18 @@
 # WM IPC until the launched process publishes a surface. This producer refuses
 # to fabricate or locally synthesize that surface.
 
-use common.ui.taskbar_model.{TaskbarModel}
-use common.ui.window_scene.{WmContentFrame}
-use os.compositor.compositor.{Compositor}
 use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
-use os.compositor.rv64_process_owned_scene.{rv64_process_owned_scene}
+use os.compositor.rv64_process_owned_scene.{Rv64ProcessOwnedScene, rv64_process_owned_scene}
 use os.compositor.rv64_wm_present_receipt.{rv64_wm_engine2d_present_receipt}
+use os.desktop.shell.{DesktopShell, Rv64WmShellRenderInputs}
 use os.services.launcher.launcher_registry.{launcher_launch_path_with_args}
 use os.services.wm.rv64_production_wm_adapter.{Rv64ProductionWmAdapter, Rv64ProductionWmVerdict}
+
+pub struct Rv64ProductionWmSnapshot:
+    ready_to_present: bool
+    reason: text
+    owned_scene: Rv64ProcessOwnedScene
+    render_inputs: Rv64WmShellRenderInputs
 
 pub class Rv64ProductionWmProducer:
     process_id: u64
@@ -28,40 +32,49 @@ pub class Rv64ProductionWmProducer:
         adapter.query_process_owner()
         Rv64ProductionWmProducer(process_id: process_id, adapter: adapter)
 
-    pub me present_published_scene(
-        compositor: Compositor,
-        executor: Engine2dWmFrameExecutor,
-        taskbar: TaskbarModel,
-        content_frames: [WmContentFrame],
-        taskbar_revision: i64,
-        clock_label: text
-    ) -> Rv64ProductionWmVerdict:
-        if self.adapter.failed:
-            return self.adapter.verdict()
+    pub me pump_one_published_action(shell: DesktopShell) -> bool:
+        shell.rv64_wm_pump_one_action()
 
-        # Re-query immediately before presentation. A process that exited after
-        # launch must fail before any framebuffer result can become readiness.
+    pub me snapshot_published_scene(shell: DesktopShell) -> Rv64ProductionWmSnapshot:
+        if self.adapter.failed:
+            val failed_scene = rv64_process_owned_scene(shell.compositor, self.process_id)
+            val failed_inputs = shell.rv64_wm_render_inputs_for_snapshot(failed_scene)
+            return Rv64ProductionWmSnapshot(ready_to_present: false, reason: self.adapter.failure_reason, owned_scene: failed_scene, render_inputs: failed_inputs)
+
         self.adapter.query_process_owner()
         if self.adapter.failed:
-            return self.adapter.verdict()
+            val dead_scene = rv64_process_owned_scene(shell.compositor, self.process_id)
+            val dead_inputs = shell.rv64_wm_render_inputs_for_snapshot(dead_scene)
+            return Rv64ProductionWmSnapshot(ready_to_present: false, reason: self.adapter.failure_reason, owned_scene: dead_scene, render_inputs: dead_inputs)
 
-        val owned_scene = rv64_process_owned_scene(compositor, self.process_id)
+        val owned_scene = rv64_process_owned_scene(shell.compositor, self.process_id)
         if owned_scene.process_surface_count <= 0:
-            self.adapter.mark_failed("wm-process-surface-not-published")
-            return self.adapter.verdict()
+            val waiting_inputs = shell.rv64_wm_render_inputs_for_snapshot(owned_scene)
+            return Rv64ProductionWmSnapshot(ready_to_present: false, reason: "wm-process-surface-not-published", owned_scene: owned_scene, render_inputs: waiting_inputs)
+        val render_inputs = shell.rv64_wm_render_inputs_for_snapshot(owned_scene)
+        if not render_inputs.consistent:
+            return Rv64ProductionWmSnapshot(ready_to_present: false, reason: render_inputs.reason, owned_scene: owned_scene, render_inputs: render_inputs)
+        Rv64ProductionWmSnapshot(ready_to_present: true, reason: "ready-to-present", owned_scene: owned_scene, render_inputs: render_inputs)
 
+    pub me present_snapshot(executor: Engine2dWmFrameExecutor, snapshot: Rv64ProductionWmSnapshot) -> Rv64ProductionWmVerdict:
+        if not snapshot.ready_to_present or not snapshot.render_inputs.consistent:
+            self.adapter.mark_failed(snapshot.reason)
+            return self.adapter.verdict()
+        if snapshot.owned_scene.process_id != self.process_id:
+            self.adapter.mark_failed("snapshot-process-mismatch")
+            return self.adapter.verdict()
         val presented_revision = executor.render(
-            owned_scene.scene,
-            taskbar,
-            content_frames,
-            owned_scene.scene_revision,
-            taskbar_revision,
-            clock_label
+            snapshot.owned_scene.scene,
+            snapshot.render_inputs.taskbar,
+            snapshot.render_inputs.content_frames,
+            snapshot.owned_scene.scene_revision,
+            snapshot.render_inputs.taskbar_revision,
+            snapshot.render_inputs.clock_label
         )
         val receipt = rv64_wm_engine2d_present_receipt(
             self.process_id,
-            owned_scene.process_id,
-            owned_scene.scene_revision,
+            snapshot.owned_scene.process_id,
+            snapshot.owned_scene.scene_revision,
             presented_revision
         )
         self.adapter.observe_first_present(receipt)

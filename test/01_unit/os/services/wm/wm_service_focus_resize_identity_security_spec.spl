@@ -4,8 +4,8 @@ Covers three protocol-security hardening items on the WM IPC parse path:
   1. parse_focus now verifies ownership like destroy/resize/move/minimize.
   2. parse_resize writes the new dimensions into the ECS window world
      (WmWorld.geometries), not just the returned WmAction.
-  3. parse_create_window uses src_port (kernel-verified sender) as the
-     process identity instead of trusting a client-supplied payload
+  3. parse_create_window_authenticated uses the kernel-verified port-owner
+     task as process identity instead of a reply port or client payload
      process_id, so a spoofed process_id cannot be used to hijack pid-keyed
      ownership queries (see shell.spl's window_owner_process_id /
      window_ids_for_process consumers).
@@ -84,7 +84,7 @@ describe "WmService.parse_resize protocol + ECS wiring (item 2)":
         expect(wm.world.geometries.dense[slot].h).to_equal(768)
 
 describe "WmService client identity spoofing (item 3)":
-    it "keys ownership by src_port instead of a spoofed payload process_id, and rejects a destroy from the spoofed identity":
+    it "keys ownership by authenticated sender PID instead of reply port or spoofed payload PID":
         val wm = WmService.new()
         var create_payload: [u8] = []
         push_u32(create_payload, 5)
@@ -95,11 +95,13 @@ describe "WmService client identity spoofing (item 3)":
         push_i32(create_payload, 100)
         push_i32(create_payload, 100)
         push_u64(create_payload, 9999) # spoofed victim pid in the payload
-        val create_action = wm.parse_create_window(42, unsafe_addr_of(create_payload), create_payload.len().to_u32())
-        expect(create_action.process_id).to_equal(42)
+        val create_action = wm.parse_create_window_authenticated(
+            42, 314, unsafe_addr_of(create_payload), create_payload.len().to_u32()
+        )
+        expect(create_action.process_id).to_equal(314)
 
         wm.register_window_owner_with_identity(WindowId(value: 1), create_action.owner_port, create_action.process_id, create_action.app_id)
-        expect(wm.window_owner_process_id(1)).to_equal(42)
+        expect(wm.window_owner_process_id(1)).to_equal(314)
 
         var destroy_from_spoofed_pid: [u8] = []
         push_u64(destroy_from_spoofed_pid, 1)

@@ -62,14 +62,21 @@ The candidate-bound diagnostic scaffold is now:
   two source contracts for normal focused test execution after Stage 4 exists.
 - `scripts/check/check-stage3-aggregate-receiver-native.shs` requires an
   explicit absolute pure-Simple candidate and an independently admitted digest
-  in `SIMPLE_ADMITTED_COMPILER_SHA256`. It rejects Rust-seed identities, hashes
-  the candidate before and after, disables stub fallback, and retains build/run
-  stdout, stderr, exit codes, candidate identity, and artifact hashes under
-  `build/bootstrap/probes/stage3-aggregate-receiver/<hash-prefix>/`.
+  in `SIMPLE_ADMITTED_COMPILER_SHA256`, plus the admitted runtime authority in
+  `SIMPLE_ADMITTED_RUNTIME_PATH`. It rejects Rust-seed identities, hashes the
+  candidate before and after, disables stub fallback, and retains build/run
+  stdout, stderr, exit codes, candidate identity, and artifact hashes under a
+  candidate-and-checker-hash-bound directory.
 
-This scaffold has not selected or proved a compiler fix. Its interpreter spec
-is structural evidence only; AC-1 still requires the native result from an
-admitted candidate and the next diagnostic bootstrap backtrace.
+The third distinct focused cycle reached the exact native compiler invocation
+and exited 139 before producing an executable. Its receipt is
+`build/bootstrap/probes/stage3-aggregate-receiver/0476f625056fc990-13f1b7e0ed21a031/result.env`:
+`build_rc=139`, `run_rc=125`, unchanged candidate hash, and no output artifact.
+Stderr contains the timeout core-dump/segmentation-fault report but no
+symbolized backtrace. This is a bounded exact reproducer, not a selected or
+proved compiler fix. The three focused cycles are exhausted; AC-1 still
+requires localization, a pure-Simple repair, and passing exact plus adjacent
+native regressions in a fresh lane.
 
 The separate record
 `stage3_selfhost_exit_139_2026-08-14.md` describes an earlier infrastructure

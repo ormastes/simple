@@ -28,7 +28,7 @@ rv64_ssh_live_login_in_qemu_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 5 | 0 | 1 |
+| 7 | 6 | 0 | 1 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -70,10 +70,11 @@ the seven-dimension SSpec-maintain review once the admitted Stage 4 CLI exists.
 - The retained serial transcript proves Sv39, PID1, TX, RX, network readiness,
   SSH accept readiness, and process-owned WM frame readiness exactly once and
   in canonical order.
-- When `SIMPLEOS_RV64_SSH_LIVE=1` is set, QEMU emits the SSH listening marker,
-  OpenSSH authenticates as `root` with password `simpleos`, `true` exec reaches
-  the daemon, wrong-password auth fails closed, and the host contract prints
-  `TEST PASSED`.
+- When `SIMPLEOS_RV64_SSH_LIVE=1` is set, independent OpenSSH connections
+  authenticate as `root` with password `simpleos`, execute `true`,
+  `simple --version`, and `simple.smf --version`, reject a wrong password, then
+  prove a later good connection and the daemon's accept-resumed receipts before
+  the host contract prints `TEST PASSED`.
 
 ## Operator Steps
 
@@ -84,6 +85,26 @@ the seven-dimension SSpec-maintain review once the admitted Stage 4 CLI exists.
 
 Any missing, reordered, or duplicate receipt; canned command output; passing
 disabled row; or uncorrelated WM marker fails the gate.
+
+## Shared Behavioral Oracle
+
+`src/os/rv64_boot_gate.spl` owns `Rv64BootGateState`,
+`rv64_boot_gate_advance`, `rv64_boot_gate_verdict`, the canonical receipt
+fixture, and `check_rv64_boot_gate_transcript`. The focused unit spec owns
+internal transition coverage, first-error retention, post-terminal rejection,
+and unknown-token behavior. This system spec does not duplicate those internals;
+it binds canonical serial strings to the public checker and requires:
+
+- canonical receipts: `PASS`;
+- missing network TX after Sv39/PID1:
+  `INCOMPLETE:missing=network-tx-ready`;
+- network TX before PID1:
+  `FAIL:reordered:expected=pid1-live:observed=network-tx-ready`;
+- duplicate Sv39:
+  `FAIL:duplicate-or-replayed:sv39-active`.
+
+The live row separately reads `build/os/rv64-ssh-live.serial.log` and requires
+the same checker to return `PASS`; the QEMU runner's boolean is not sufficient.
 
 ## Syntax
 
@@ -121,8 +142,10 @@ work has a concrete executable gate and cannot silently fall back to `x64-ssh`.
 The live leg is intentionally opt-in. It is the only leg that can prove the full
 SSH requirement: OpenSSH must connect through QEMU user networking, receive the
 production daemon banner, complete KEX, authenticate `root/simpleos`, execute
-`true`, and reject a wrong password. Until that leg prints `TEST PASSED`, RV64
-SSH is not production-ready.
+`true`, `simple --version`, and `simple.smf --version` on independent
+connections, reject a wrong password, then accept a later good connection.
+Until the serial checker passes and that leg prints `TEST PASSED`, RV64 SSH is
+not production-ready.
 
 ## Current Boundary
 
@@ -244,8 +267,34 @@ expect(runner.contains("run_rv64_ssh_probe(cmd_parts, timeout_ms)")).to_equal(tr
 expect(compiler_selector.contains("src/compiler_rust/target/")).to_equal(false)
 expect(build_runner).to_contain("not stderr.contains(\"bootstrap seed only\")")
 expect(contract.contains("pub fn run_rv64_ssh_probe")).to_equal(true)
-expect(contract.contains("run_rv64_ssh_single_connection_probe(cmd_parts, timeout_ms)")).to_equal(true)
+expect(contract).to_contain("run_ssh_probe(\"rv64\", cmd_parts, timeout_ms)")
 expect(contract.contains("extern fn rt_process_run_timeout")).to_equal(true)
+```
+
+</details>
+
+#### binds canonical and sabotaged serial receipts to the shared boot-gate checker
+
+- Validate the shared boot-gate transcript oracle
+- Expected canonical verdict: `PASS`
+- Expected missing, reordered, and duplicate verdicts: fail closed as listed
+  in Shared Behavioral Oracle
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Validate the shared boot-gate transcript oracle")
+val initial: Rv64BootGateState = rv64_boot_gate_new()
+expect(rv64_boot_gate_verdict(initial)).to_equal("INCOMPLETE:missing=sv39-active")
+val canonical = prepare_rv64_boot_gate_fixture()
+expect(check_rv64_boot_gate_transcript(canonical)).to_equal("PASS")
+val missing = canonical.slice(0, 2)
+expect(check_rv64_boot_gate_transcript(missing)).to_equal("INCOMPLETE:missing=network-tx-ready")
+val reordered = [canonical[0], canonical[2]]
+expect(check_rv64_boot_gate_transcript(reordered)).to_equal("FAIL:reordered:expected=pid1-live:observed=network-tx-ready")
+val duplicate = [canonical[0], canonical[0]]
+expect(check_rv64_boot_gate_transcript(duplicate)).to_equal("FAIL:duplicate-or-replayed:sv39-active")
 ```
 
 </details>
@@ -262,7 +311,7 @@ expect(contract.contains("extern fn rt_process_run_timeout")).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -277,6 +326,9 @@ if _rv64_ssh_live_enabled():
         fail("blocked: admitted RV64 boot image build failed")
         return
     val ok = test_scenario(scenario, 900000u64)
+    val serial = rt_file_read_text("build/os/rv64-ssh-live.serial.log")
+    val gate_verdict = check_rv64_boot_gate_transcript(serial.split("\n"))
+    expect(gate_verdict).to_equal("PASS")
     val run_status = if ok: "TEST PASSED" else: "TEST FAILED"
     expect(run_status).to_equal("TEST PASSED")
 else:
@@ -290,8 +342,8 @@ else:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 5 |
+| Total scenarios | 7 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 1 |

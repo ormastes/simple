@@ -1,0 +1,36 @@
+use std.spec
+use os.rv64_wm_boot_resources.{
+    RV64_WM_BOOT_BINARY_PATH,
+    RV64_WM_BOOT_MAX_PUMP_ATTEMPTS,
+    rv64_wm_scanout_metadata_valid,
+    rv64_wm_snapshot_facts_ready
+}
+
+describe "RV64 WM boot resource admission":
+    it "accepts only canonical 32-bit packed scanout metadata":
+        expect(rv64_wm_scanout_metadata_valid(0x1000u64, 800u32, 600u32, 3200u32, 32u32)).to_be(true)
+        expect(rv64_wm_scanout_metadata_valid(0u64, 800u32, 600u32, 3200u32, 32u32)).to_be(false)
+        expect(rv64_wm_scanout_metadata_valid(0x1000u64, 800u32, 600u32, 800u32, 32u32)).to_be(false)
+
+    it "requires one correlated process-owned content frame":
+        expect(rv64_wm_snapshot_facts_ready(41u64, 41u64, 1, true, true, 1, 7)).to_be(true)
+        expect(rv64_wm_snapshot_facts_ready(41u64, 42u64, 1, true, true, 1, 7)).to_be(false)
+        expect(rv64_wm_snapshot_facts_ready(41u64, 41u64, 1, true, true, 0, 7)).to_be(false)
+        expect(rv64_wm_snapshot_facts_ready(41u64, 41u64, 0, true, true, 1, 7)).to_be(false)
+
+    it "freezes the source-proven path and bounded pump budget":
+        expect(RV64_WM_BOOT_BINARY_PATH).to_equal("/sys/apps/browser_demo.smf")
+        expect(RV64_WM_BOOT_MAX_PUMP_ATTEMPTS).to_equal(64)
+
+    it "keeps the serial entry on production resources and one module init":
+        val source = file_read("examples/09_embedded/simple_os/arch/riscv64/ssh_live_entry.spl")
+        expect(source).to_contain("if not launcher_path_exists(RV64_WM_BOOT_BINARY_PATH):")
+        expect(source).to_contain("Rv64ProductionWmProducer.launch(")
+        expect(source).to_contain("wm_producer.pump_one_published_action(shell)")
+        expect(source).to_contain("wm_producer.present_snapshot(executor, snapshot)")
+        expect(source).to_contain("if not riscv64_display_present():")
+        expect(source.contains("riscv64_display_boot_memory_initialize")).to_be(false)
+        expect(source.contains("compositor_materialize_process_surface_scalar")).to_be(false)
+        val module_init = "__simple_call_module_inits()"
+        expect(source.index_of(module_init)).to_be_greater_than(0)
+        expect(source.index_of(module_init)).to_equal(source.last_index_of(module_init))

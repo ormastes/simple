@@ -148,6 +148,13 @@ use os.qemu_runner.{
     test_scenario
 }
 use os.apps.sshd.ssh_cipher_live.{ssh_decrypt_packet_aes_gcm}
+use os.rv64_boot_gate.{
+    Rv64BootGateState,
+    rv64_boot_gate_new,
+    rv64_boot_gate_verdict,
+    prepare_rv64_boot_gate_fixture,
+    check_rv64_boot_gate_transcript
+}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_file_read_text(path: text) -> text
@@ -338,6 +345,21 @@ describe "RV64 production SSHD in QEMU":
         expect(data[40]).to_equal(0x01u8)
         expect(data[41]).to_equal(0x30u8)
 
+# @manual_section: Shared fail-closed transcript oracle
+    # @req AC-6 AC-7
+    it "binds canonical and sabotaged serial receipts to the shared boot-gate checker":
+        step("Validate the shared boot-gate transcript oracle")
+        val initial: Rv64BootGateState = rv64_boot_gate_new()
+        expect(rv64_boot_gate_verdict(initial)).to_equal("INCOMPLETE:missing=sv39-active")
+        val canonical = prepare_rv64_boot_gate_fixture()
+        expect(check_rv64_boot_gate_transcript(canonical)).to_equal("PASS")
+        val missing = canonical.slice(0, 2)
+        expect(check_rv64_boot_gate_transcript(missing)).to_equal("INCOMPLETE:missing=network-tx-ready")
+        val reordered = [canonical[0], canonical[2]]
+        expect(check_rv64_boot_gate_transcript(reordered)).to_equal("FAIL:reordered:expected=pid1-live:observed=network-tx-ready")
+        val duplicate = [canonical[0], canonical[0]]
+        expect(check_rv64_boot_gate_transcript(duplicate)).to_equal("FAIL:duplicate-or-replayed:sv39-active")
+
 # @manual_section: Live ordered lifecycle gate
     # @req AC-3 AC-4 AC-5 AC-6 AC-7
     it "proves the ordered RV64 lifecycle and remains red when live evidence is unavailable":
@@ -352,6 +374,9 @@ describe "RV64 production SSHD in QEMU":
                 fail("blocked: admitted RV64 boot image build failed")
                 return
             val ok = test_scenario(scenario, 900000u64)
+            val serial = rt_file_read_text("build/os/rv64-ssh-live.serial.log")
+            val gate_verdict = check_rv64_boot_gate_transcript(serial.split("\n"))
+            expect(gate_verdict).to_equal("PASS")
             val run_status = if ok: "TEST PASSED" else: "TEST FAILED"
             expect(run_status).to_equal("TEST PASSED")
         else:

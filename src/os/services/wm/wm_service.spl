@@ -44,6 +44,7 @@ use os.services.wm.wm_codec.{wm_send_create_reply, wm_send_create_response, wm_s
 # dispatcher cases 20..23. Keep in sync with test/01_unit/os/kernel/ipc/
 # syscall_number_consistency_spec.spl.
 val SYS_IPC_RECV: u64 = 21
+val SYS_IPC_PORT_OWNER: u64 = 19
 val SYS_IPC_CREATE_PORT: u64 = 22
 val SYS_IPC_CONNECT: u64 = 23
 
@@ -235,11 +236,16 @@ impl WmService:
         val payload_len = _read_u32(msg_addr + 24)
         val payload_addr = msg_addr + 32
 
+        # src_port is a reply transport address.  Resolve its owner through the
+        # kernel instead of treating the port number or payload as a PID.
+        val sender_pid_raw = syscall(SYS_IPC_PORT_OWNER, src_port, 0, 0, 0, 0)
+        val sender_pid = if sender_pid_raw > 0: sender_pid_raw.to_u64() else: 0u64
+
         match method:
             COMP_CREATE_WINDOW:
-                return self.parse_create_window(src_port, payload_addr, payload_len)
+                return self.parse_create_window_authenticated(src_port, sender_pid, payload_addr, payload_len)
             COMP_CREATE_WEB_WINDOW:
-                return self.parse_create_web_window(src_port, payload_addr, payload_len)
+                return self.parse_create_web_window_authenticated(src_port, sender_pid, payload_addr, payload_len)
             COMP_DESTROY_WINDOW:
                 return self.parse_destroy_window(src_port, payload_addr, payload_len)
             COMP_UPDATE_TREE:
@@ -291,6 +297,11 @@ impl WmService:
     # -- Request Parsers (return WmAction) ------------------------------------
 
     me parse_create_window(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        # Compatibility for direct parser callers whose source identity predates
+        # separate reply ports. Production dispatch always uses the kernel query.
+        self.parse_create_window_authenticated(src_port, src_port, payload_addr, payload_len)
+
+    me parse_create_window_authenticated(src_port: u64, sender_pid: u64, payload_addr: u64, payload_len: u32) -> WmAction:
         """Parse COMP_CREATE_WINDOW into a WmAction.
 
         Payload: title_len(u32) | title(bytes) | x(i32) | y(i32) | w(i32) | h(i32)
@@ -312,13 +323,16 @@ impl WmService:
         val w = _read_i32(payload_addr + fields_offset + 8)
         val h = _read_i32(payload_addr + fields_offset + 12)
         # SECURITY: process_id is ownership identity and MUST come from the
-        # kernel-verified src_port, never from the client-supplied payload —
+        # kernel-verified owner task of src_port, never from the port number or
+        # client-supplied payload —
         # a payload process_id is trivially spoofable and would let one
         # process impersonate another's window ownership (e.g. escaping
         # process-exit window cleanup, or hijacking focus/terminate actions
         # keyed by pid in shell.spl). app_id remains payload-sourced since it
         # is only a display label, not a security boundary.
-        val process_id = src_port
+        if sender_pid == 0:
+            return wm_action_none()
+        val process_id = sender_pid
         var app_id = ""
         val identity_offset = fields_offset + 16
         if payload_len.to_u64() >= identity_offset + 8:
@@ -337,6 +351,9 @@ impl WmService:
         WmAction(kind: "create_window", window_id: 0, title: title, x: x, y: y, width: w, height: h, content: "", process_id: process_id, app_id: app_id, owner_port: src_port, src_port: src_port)
 
     me parse_create_web_window(src_port: u64, payload_addr: u64, payload_len: u32) -> WmAction:
+        self.parse_create_web_window_authenticated(src_port, src_port, payload_addr, payload_len)
+
+    me parse_create_web_window_authenticated(src_port: u64, sender_pid: u64, payload_addr: u64, payload_len: u32) -> WmAction:
         """Parse COMP_CREATE_WEB_WINDOW into a WmAction.
 
         Payload: url_len(u32) | url(bytes) | x(i32) | y(i32) | w(i32) | h(i32)
@@ -358,7 +375,9 @@ impl WmService:
         val w = _read_i32(payload_addr + fields_offset + 8)
         val h = _read_i32(payload_addr + fields_offset + 12)
 
-        var process_id = src_port
+        if sender_pid == 0:
+            return wm_action_none()
+        val process_id = sender_pid
         var app_id = launcher_get_process_app_id_for_pid(process_id)
         if app_id == "":
             app_id = url

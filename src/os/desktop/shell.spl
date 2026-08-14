@@ -70,6 +70,7 @@ use os.desktop.shell_process.{
     _selected_process_row, _normalized_process_selection, _process_is_live
 }
 use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
+use os.compositor.rv64_process_owned_scene.{Rv64ProcessOwnedScene, rv64_process_owned_scene}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
 use os.desktop.wm_runtime_bridge.{simpleos_wm_pointer_runtime_command, simpleos_wm_apply_pointer}
 use os.desktop.wm_pointer_decode.{wm_pointer_button_from_code, wm_pointer_kind_from_code}
@@ -177,6 +178,14 @@ val CLOCK_WIDTH: i32 = 80
 val SYSTEM_TRAY_WIDTH: i32 = 120
 val EDITOR_SMOKE_PATH: text = "/EDITOR.TXT"
 val EDITOR_SMOKE_CONTENT: text = "SimpleOS editor smoke saved from GUI"
+
+pub struct Rv64WmShellRenderInputs:
+    consistent: bool
+    reason: text
+    taskbar: TaskbarModel
+    content_frames: [WmContentFrame]
+    taskbar_revision: i64
+    clock_label: text
 
 fn _app_uses_remote_window(name: text) -> bool:
     match name:
@@ -1607,6 +1616,31 @@ impl DesktopShell:
             if next_action.kind == "none":
                 continue
             self.apply_wm_action(next_action)
+
+    pub me rv64_wm_pump_one_action() -> bool:
+        """Poll and apply at most one real WM IPC action."""
+        val action = self.wm.poll_once()
+        if action == nil:
+            return false
+        val next_action = action
+        if next_action.kind == "none":
+            return false
+        self.apply_wm_action(next_action)
+        true
+
+    pub me rv64_wm_render_inputs_for_snapshot(snapshot: Rv64ProcessOwnedScene) -> Rv64WmShellRenderInputs:
+        """Bind taskbar/content inputs to one unchanged process-owned snapshot."""
+        val empty_taskbar = TaskbarModel(pinned: [], running: [], tray: [])
+        val before = rv64_process_owned_scene(self.compositor, snapshot.process_id)
+        if before.scene_revision != snapshot.scene_revision or before.process_surface_count != snapshot.process_surface_count:
+            return Rv64WmShellRenderInputs(consistent: false, reason: "snapshot-changed-before-content", taskbar: empty_taskbar, content_frames: [], taskbar_revision: 0, clock_label: self.clock_text)
+        val taskbar = self.runtime_taskbar_model()
+        val content_frames = self.runtime_content_frames(snapshot.scene_revision)
+        val taskbar_revision = simpleos_runtime_taskbar_revision(taskbar, self.clock_text)
+        val after = rv64_process_owned_scene(self.compositor, snapshot.process_id)
+        if after.scene_revision != snapshot.scene_revision or after.process_surface_count != snapshot.process_surface_count:
+            return Rv64WmShellRenderInputs(consistent: false, reason: "snapshot-changed-during-content", taskbar: empty_taskbar, content_frames: [], taskbar_revision: 0, clock_label: self.clock_text)
+        Rv64WmShellRenderInputs(consistent: true, reason: "snapshot-consistent", taskbar: taskbar, content_frames: content_frames, taskbar_revision: taskbar_revision, clock_label: self.clock_text)
 
     me handle_pending_shell_input(baremetal: bool):
         """Consume compositor-owned global shortcuts and route them into shell actions."""

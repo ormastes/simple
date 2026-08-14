@@ -57,11 +57,17 @@ may run the bounded exact/adjacent diagnostic with:
 
 ```sh
 SIMPLE_ADMITTED_COMPILER_SHA256=<admitted-sha256> \
+  SIMPLE_ADMITTED_RUNTIME_PATH=/absolute/path/to/admitted/runtime \
   sh scripts/check/check-stage3-aggregate-receiver-native.shs \
   /absolute/path/to/admitted/pure-simple/compiler
 ```
 
-The checker retains candidate identity and before/after hashes, build/run logs,
-exit codes, and output hash. A passing focused probe does not itself admit
-Stage 3 or Stage 4 and does not replace the symbolized full-bootstrap failure
-capture required above.
+The restart12 focused lane exhausted three distinct checker cycles. The final
+corrected invocation retained
+`build/bootstrap/probes/stage3-aggregate-receiver/0476f625056fc990-13f1b7e0ed21a031/result.env`
+with `build_rc=139`, `run_rc=125`, an unchanged candidate hash, no output, and
+only an unsymbolized timeout/core-dump message. This independently confirms the
+small exact aggregate-receiver fixture triggers the failure class, but does
+not localize or repair it and does not admit Stage 3 or Stage 4. Do not rerun
+that command unchanged; the next lane must capture a symbolized backtrace or
+otherwise distinguish HIR receiver corruption from MIR writeback/resolution.
