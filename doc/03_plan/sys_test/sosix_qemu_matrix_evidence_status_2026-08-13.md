@@ -13,6 +13,12 @@ The collector remains the only matrix-promotion owner and requires exactly 24
 valid bundles. macOS is postponed for lack of a prepared Darwin executor, not
 excluded or complete.
 
+Stable `SOSIX-<HOST>-<GUEST>` acceptance IDs, per-row expected outputs, owners,
+and exact resume commands are authoritative in the
+[canonical parallel plan](../agent_tasks/sosix_parallel_qemu_refactor.md).
+Grouped external-host rows below are a status summary only; they do not collapse
+or close any of the 18 distinct external-host acceptance IDs.
+
 ## Current evidence ledger
 
 | Host | Guest | Status | Authoritative evidence / exact resume |
@@ -23,7 +29,7 @@ excluded or complete.
 | Linux | x86_32 | blocked | CPL3 filesystem lifecycle has no linked `enter_user_first.s`, no installed GDT/TSS/`esp0` owner, only a weak same-CPL `int 0x80` probe bridge, and a context switch that never restores `to`; freeze and wire authenticated token/stack/trap/scheduler owners before a live run. |
 | Linux | arm32 | blocked | The current entry is an NVFS/SMF probe chain that can print `TEST PASSED`; `check-arm32-user-lifecycle-contract.shs --admit` now refuses it before QEMU because no EL0 entry/vector/SVC/token/read-program lifecycle exists. It neither reads mounted `/FSEXEC.ELF` nor performs a user-mode/SVC/reap lifecycle. |
 | Linux | riscv64 | blocked | Existing retained records are diagnostics; rebuild and canonical direct-kernel/OpenSBI closure remains required. |
-| Windows | all six | blocked, target-host execution required | `scripts/check/check-sosix-qemu-matrix.ps1` now provides strict row/runtime/admission records, but PowerShell validation and real guest execution remain pending on Windows. Run its self-test first, then `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -AllGuests -Run -Parallel` with all native artifacts present. |
+| Windows | all six | blocked, target-host execution required | `scripts/check/check-sosix-qemu-matrix.ps1` provides strict row/runtime/admission records but no guest-run implementation. Run its self-test, then the honest current resume command: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/check/check-sosix-qemu-matrix.ps1 -AllGuests -Preflight`. Only after producer-backed guest execution is implemented may a native Windows operator use `-AllGuests -Run -Parallel`. |
 | macOS | all six | postponed, not complete | On a prepared Darwin host use `SIMPLE_QEMU_ACCELERATOR=tcg sh scripts/check/check-sosix-qemu-matrix.shs --host macos --all-guests --run --parallel`; retain native-host blockers until then. |
 | FreeBSD | all six | blocked, target-host execution required | Supply the checksum-pinned FreeBSD 14.4 cloud qcow2 and its trusted SHA-256 under the shared image root; `sh scripts/qemu/simple-freebsd-media.shs --check` must pass before `sh scripts/check/check-freebsd-bootstrap-qemu.shs --smoke`. Then, on FreeBSD, run `sh scripts/check/check-sosix-qemu-matrix.shs --host freebsd --all-guests --run --parallel`. The wrapper no longer downloads a floating image. |
 
@@ -62,3 +68,8 @@ state does not supersede the immutable ARM64 and RV32 PASS bundles above.
    producer run.
 4. After each new bundle, invoke the collector once with the full source root;
    it must remain blocked until all 24 valid rows exist.
+
+Open implementation ownership, including collector promotion wording,
+same-path nonce-media rejection, admitted-runtime threading, the three Linux
+guest blockers, and the external-host prerequisites, is tracked in
+[`sosix_qemu_matrix_remaining_owners_2026-08-14.md`](../../08_tracking/bug/sosix_qemu_matrix_remaining_owners_2026-08-14.md).
