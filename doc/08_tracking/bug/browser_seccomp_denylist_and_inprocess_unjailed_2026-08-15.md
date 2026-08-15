@@ -89,3 +89,15 @@ Engine-level capability gate: untrusted page script
 `process.exit/cwd/nextTick` at native dispatch —
 `src/lib/{gc_async_mut,nogc_sync_mut}/js/engine/interpreter_native.spl`,
 spec `test/01_unit/lib/js/js_native_confinement_spec.spl`.
+
+## Landing note (2026-08-15)
+
+The seccomp ALLOW-list conversion, honest browser sandbox surface, and the
+engine2d enum alias-path comparison fixes landed in origin/main commit
+`f549cda1991a442a5678a129a4ae4d70c80ea760` (11 files, all pre-push guards +
+C-runtime compile verified against the committed tree). NOTE: that commit's
+message text was mislabeled by a landing-script heredoc bug — it repeats the
+prior commit's "strict-create enum identity, vendored rspirv repair" subject
+instead of describing the seccomp/sandbox/enum work it actually contains. The
+TREE is correct; only the message is wrong. Force-push is disallowed here, so
+the message was not amended.
