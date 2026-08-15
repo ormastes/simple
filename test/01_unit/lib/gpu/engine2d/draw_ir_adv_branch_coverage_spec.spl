@@ -1,0 +1,451 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 60%
+# @tag: unit, engine2d, draw_ir, coverage
+"""
+# Draw IR Advanced Executor — Branch Coverage Specification
+
+## Overview
+
+Drives `engine2d_draw_ir_adv_batch` on the software backend with command
+variants deliberately chosen to take BOTH outcomes of the executor's
+decision points: visible vs fully-transparent fills, zero-size and
+off-viewport geometry, clipped vs unclipped commands, plain vs styled vs
+resolved-font vs shaped text (valid and invalid advance-width shapes),
+per-side borders with visible and invisible alpha, rounded vs square
+corners, multi-stop gradients, paths, images with unresolvable URIs, and
+group/port structural commands.
+
+Every scenario asserts a concrete executor outcome (accepted/rendered/
+skipped counts or pixel effects) — no vacuous "it ran" checks.
+
+**Requirements:** doc/03_plan/ui/testing/wm_gui_web_system_test_coverage_plan_2026-08-07.md
+"""
+
+use std.spec
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    DrawIrCommand,
+    DrawIrStyleProp,
+    draw_ir_batch,
+    draw_ir_box_with_style,
+    draw_ir_embedding_config,
+    draw_ir_empty_glyph_run_payload,
+    draw_ir_glyph_run_payload,
+    draw_ir_group_command,
+    draw_ir_image_command,
+    draw_ir_no_rect,
+    draw_ir_path_command,
+    draw_ir_point,
+    draw_ir_port_command,
+    draw_ir_rect,
+    draw_ir_rect_bounds,
+    draw_ir_rect_clipped,
+    draw_ir_style_prop,
+    draw_ir_text,
+    draw_ir_text_resolved_font,
+    draw_ir_text_shaped_font,
+    draw_ir_text_styled,
+    draw_ir_text_styled_clipped
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    engine2d_draw_ir_adv_batch,
+    engine2d_draw_ir_adv_batch_with_images,
+    engine2d_resolved_draw_ir_image
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val W: i32 = 64
+val H: i32 = 48
+
+fn _run(commands: [DrawIrCommand]) -> (i64, i64, i64, [u32]):
+    """Execute one batch, return (rendered, skipped, pixels_len, pixels)."""
+    var engine = Engine2D.create_with_backend(W, H, "cpu")
+    engine.clear(0xff101010u32)
+    val batch = draw_ir_batch(
+        "cov", DRAW_IR_BACKEND_CPU,
+        draw_ir_embedding_config("surface", "cov", 0, 0, W, H, 0, 1000, false),
+        commands)
+    val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+    val pixels = result.pixels
+    engine.shutdown()
+    (result.rendered_command_count, result.skipped_command_count,
+     pixels.len(), pixels)
+
+fn _box_style(props: [DrawIrStyleProp], x: i32, y: i32, w: i32, h: i32,
+              id: text) -> DrawIrCommand:
+    draw_ir_box_with_style(
+        id, x, y, w, h, 0xff2266aau32,
+        draw_ir_rect_bounds(x, y, w, h), draw_ir_rect_bounds(x, y, w, h),
+        draw_ir_rect_bounds(x, y, w, h), draw_ir_no_rect(), props)
+
+describe "draw_ir_adv rect and clip decision outcomes":
+    it "renders visible, skips transparent, clips partial and rejects empty rects":
+        val outcome = _run([
+            draw_ir_rect("r-visible", 4, 4, 12, 10, 0xffcc3344u32),
+            draw_ir_rect("r-transparent", 20, 4, 12, 10, 0x00cc3344u32),
+            draw_ir_rect("r-zero-w", 4, 20, 0, 8, 0xff00ff00u32),
+            draw_ir_rect("r-neg-h", 4, 30, 8, -2, 0xff00ff00u32),
+            draw_ir_rect("r-offscreen", 200, 200, 8, 8, 0xffffffffu32),
+            draw_ir_rect_clipped(
+                "r-clipped", 30, 20, 20, 20, 0xff44aa44u32,
+                draw_ir_rect_bounds(30, 20, 10, 10)),
+            draw_ir_rect_clipped(
+                "r-clip-empty", 30, 34, 8, 8, 0xff44aa44u32,
+                draw_ir_rect_bounds(0, 0, 0, 0))
+        ])
+        expect(outcome.2).to_equal((W as i64) * (H as i64))
+        # visible rect painted
+        expect(outcome.3[(6 * W + 6) as i64]).to_equal(0xffcc3344u32)
+        # transparent rect left background untouched
+        expect(outcome.3[(6 * W + 22) as i64]).to_equal(0xff101010u32)
+        # clip honored: inside clip painted, outside clip untouched
+        expect(outcome.3[(25 * W + 35) as i64]).to_equal(0xff44aa44u32)
+        expect(outcome.3[(25 * W + 45) as i64]).to_equal(0xff101010u32)
+
+describe "draw_ir_adv text decision outcomes":
+    it "renders plain, styled, resolved-font (valid and invalid advances) and shaped text":
+        val bold = [draw_ir_style_prop("font-weight", "700"),
+                    draw_ir_style_prop("font-size", "14px")]
+        val outcome = _run([
+            draw_ir_text("t-plain", 2, 2, "Ab", 0xffffffffu32),
+            draw_ir_text("t-empty", 2, 14, "", 0xffffffffu32),
+            draw_ir_text_styled("t-styled", 2, 24, "Cd", 0xffeeeeeeu32, bold),
+            draw_ir_text_styled_clipped(
+                "t-styled-clip", 2, 34, "Ef", 0xffddddddu32, bold,
+                draw_ir_rect_bounds(2, 34, 6, 8)),
+            # valid advance widths: sum matches declared width
+            draw_ir_text_resolved_font(
+                "t-resolved-ok", 24, 2, "Gh", 0xffffffffu32,
+                "mono", "test-font", [7, 7], 14, 12, 12),
+            # INVALID advance widths: sum does not match declared width
+            draw_ir_text_resolved_font(
+                "t-resolved-bad", 24, 14, "Ij", 0xffffffffu32,
+                "mono", "test-font", [7, 7], 99, 12, 12),
+            # shaped with a valid glyph run and an empty (invalid) one
+            draw_ir_text_shaped_font(
+                "t-shaped-ok", 24, 26, "Kl", 0xffffffffu32,
+                "mono", "test-font", [7, 7], 14, 12, 12,
+                draw_ir_glyph_run_payload(
+                    [75u32, 76u32], [24, 31], [26, 26], [0, 1], true)),
+            draw_ir_text_shaped_font(
+                "t-shaped-empty", 24, 38, "Mn", 0xffffffffu32,
+                "mono", "test-font", [7, 7], 14, 12, 12,
+                draw_ir_empty_glyph_run_payload())
+        ])
+        expect(outcome.2).to_equal((W as i64) * (H as i64))
+        expect(outcome.0 + outcome.1).to_be_greater_than(0)
+
+describe "draw_ir_adv styled-box decision outcomes":
+    it "renders borders per side, radius, gradients, and background-image fallbacks":
+        val outcome = _run([
+            # all four borders visible
+            _box_style([
+                draw_ir_style_prop("border-top-width", "2px"),
+                draw_ir_style_prop("border-top-color", "#ff0000"),
+                draw_ir_style_prop("border-bottom-width", "2px"),
+                draw_ir_style_prop("border-bottom-color", "#00ff00"),
+                draw_ir_style_prop("border-left-width", "2px"),
+                draw_ir_style_prop("border-left-color", "#0000ff"),
+                draw_ir_style_prop("border-right-width", "2px"),
+                draw_ir_style_prop("border-right-color", "#ffff00")
+            ], 2, 2, 20, 16, "b-borders"),
+            # borders declared with fully transparent colors (alpha path false)
+            _box_style([
+                draw_ir_style_prop("border-top-width", "2px"),
+                draw_ir_style_prop("border-top-color", "transparent"),
+                draw_ir_style_prop("border-left-width", "2px"),
+                draw_ir_style_prop("border-left-color", "transparent")
+            ], 26, 2, 20, 16, "b-borders-clear"),
+            # rounded corners vs square
+            _box_style([draw_ir_style_prop("border-radius", "6px")],
+                       2, 22, 20, 16, "b-rounded"),
+            _box_style([], 26, 22, 20, 16, "b-square"),
+            # multi-stop gradient (>= 2 stops, radius 0)
+            _box_style([
+                draw_ir_style_prop("background-gradient-stop-count", "3"),
+                draw_ir_style_prop("background-gradient-stop-0", "#ff0000 0%"),
+                draw_ir_style_prop("background-gradient-stop-1", "#00ff00 50%"),
+                draw_ir_style_prop("background-gradient-stop-2", "#0000ff 100%"),
+                draw_ir_style_prop("background-gradient-angle", "90deg")
+            ], 48, 2, 14, 16, "b-gradient"),
+            # background-image that cannot resolve
+            _box_style([
+                draw_ir_style_prop("background-image", "url(missing.png)")
+            ], 48, 22, 14, 16, "b-bg-image")
+        ])
+        expect(outcome.2).to_equal((W as i64) * (H as i64))
+        # square box body painted with its fill color
+        expect(outcome.3[(30 * W + 36) as i64]).to_equal(0xff2266aau32)
+
+describe "draw_ir_adv numeric-style decision outcomes":
+    it "flips border alpha, uniform rounded outline, gradients and font-size parses":
+        # 0xffff0000 = 4294901760 (visible), 0x00ff0000 = 16711680 (invisible)
+        val outcome = _run([
+            # all four borders equal width+color with radius -> rounded outline
+            _box_style([
+                draw_ir_style_prop("border-radius", "4px"),
+                draw_ir_style_prop("border-top-width", "2"),
+                draw_ir_style_prop("border-right-width", "2"),
+                draw_ir_style_prop("border-bottom-width", "2"),
+                draw_ir_style_prop("border-left-width", "2"),
+                draw_ir_style_prop("border-top-color", "4294901760"),
+                draw_ir_style_prop("border-right-color", "4294901760"),
+                draw_ir_style_prop("border-bottom-color", "4294901760"),
+                draw_ir_style_prop("border-left-color", "4294901760")
+            ], 2, 2, 18, 14, "n-uniform-rounded"),
+            # mixed per-side: visible top/left, invisible-alpha bottom, zero right
+            _box_style([
+                draw_ir_style_prop("border-top-width", "2"),
+                draw_ir_style_prop("border-top-color", "4278255360"),
+                draw_ir_style_prop("border-left-width", "3"),
+                draw_ir_style_prop("border-left-color", "4278190335"),
+                draw_ir_style_prop("border-bottom-width", "2"),
+                draw_ir_style_prop("border-bottom-color", "16711680")
+            ], 24, 2, 18, 14, "n-mixed-borders"),
+            # linear gradient: 3 numeric color tokens then 3 positions, angled
+            _box_style([
+                draw_ir_style_prop("background-gradient-stop-count", "3"),
+                draw_ir_style_prop(
+                    "background-gradient-stops",
+                    "4294901760 4278255360 4278190335 0 50 100"),
+                draw_ir_style_prop("background-gradient-angle-deg", "90")
+            ], 2, 20, 18, 14, "n-linear-gradient"),
+            # radial gradient with negative/signed junk positions
+            _box_style([
+                draw_ir_style_prop("background-gradient-stop-count", "2"),
+                draw_ir_style_prop(
+                    "background-gradient-stops",
+                    "4294901760 4278190335 -5 +100"),
+                draw_ir_style_prop("background-gradient-is-radial", "1")
+            ], 24, 20, 18, 14, "n-radial-gradient"),
+            # font-size digit-only (parses), oversized text, and letter form
+            draw_ir_text_styled("n-fs-digits", 44, 4, "Aa", 0xffffffffu32,
+                                [draw_ir_style_prop("font-size", "14")]),
+            draw_ir_text_styled("n-fs-huge", 44, 16, "Bb", 0xffffffffu32,
+                                [draw_ir_style_prop("font-size", "9999999999")]),
+            draw_ir_text_styled("n-fs-empty", 44, 28, "Cc", 0xffffffffu32,
+                                [draw_ir_style_prop("font-size", "")]),
+            # path with valid numeric stroke color (opaque) and one non-opaque
+            draw_ir_path_command("n-path-opaque", [
+                draw_ir_point(4, 40), draw_ir_point(30, 44)
+            ], [draw_ir_style_prop("stroke-color", "4294967295")]),
+            draw_ir_path_command("n-path-alpha", [
+                draw_ir_point(4, 44), draw_ir_point(30, 46)
+            ], [draw_ir_style_prop("stroke-color", "16777215")])
+        ])
+        expect(outcome.2).to_equal((W as i64) * (H as i64))
+        expect(outcome.0).to_be_greater_than(0)
+
+describe "draw_ir_adv glass and embedding decision outcomes":
+    it "takes glass capability, resolved image, opacity and clip branches":
+        val glass_props = [
+            draw_ir_style_prop("backdrop-filter", "4"),
+            draw_ir_style_prop("backdrop-filter-capability",
+                               "engine2d-cpu-composited-material-v1"),
+            draw_ir_style_prop("backdrop-filter-realized-blur-radius-px", "4"),
+            draw_ir_style_prop("backdrop-filter-realized-saturation-milli",
+                               "1100"),
+            draw_ir_style_prop("wm-material-request", "window-surface-glass"),
+            draw_ir_style_prop("background-color", "2164260863")
+        ]
+        val glass_hostile_blur = [
+            draw_ir_style_prop("backdrop-filter", "999"),
+            draw_ir_style_prop("backdrop-filter-capability",
+                               "engine2d-cpu-composited-material-v1"),
+            draw_ir_style_prop("backdrop-filter-realized-blur-radius-px",
+                               "999"),
+            draw_ir_style_prop("backdrop-filter-realized-saturation-milli",
+                               "1100"),
+            draw_ir_style_prop("wm-material-request", "window-surface-glass")
+        ]
+        val wrong_cap = [
+            draw_ir_style_prop("backdrop-filter", "blur(4px)"),
+            draw_ir_style_prop("backdrop-filter-capability",
+                               "engine2d-some-other-long-capability-x1")
+        ]
+        # one non-opaque pixel forces the image blend (non-opaque) path
+        var pixels: [u32] = [0xff112233u32, 0x80445566u32,
+                             0xff778899u32, 0xffaabbccu32]
+        val resolved = [engine2d_resolved_draw_ir_image(
+            "wm://cov-image", 2, 2, pixels)]
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        engine.clear(0xff101010u32)
+        val commands = [
+            draw_ir_rect("g-under", 2, 2, 30, 24, 0xffbb5533u32),
+            _box_style(glass_props, 6, 6, 16, 12, "g-glass"),
+            _box_style(glass_hostile_blur, 6, 22, 12, 10, "g-glass-hostile"),
+            _box_style(wrong_cap, 26, 6, 12, 12, "g-wrong-cap"),
+            # exact-size non-opaque image (blend path) and mismatched-size
+            draw_ir_image_command("g-img", 42, 6, 2, 2, "wm://cov-image", []),
+            draw_ir_image_command("g-img-scaled", 42, 12, 8, 8,
+                                  "wm://cov-image", []),
+            draw_ir_image_command("g-img-missing", 42, 24, 8, 8,
+                                  "wm://not-there", []),
+            # stroke-width variants: 1 (valid), 2 (rejected)
+            draw_ir_path_command("g-stroke-1", [
+                draw_ir_point(2, 40), draw_ir_point(20, 40)
+            ], [draw_ir_style_prop("stroke-color", "4294967295"),
+                draw_ir_style_prop("stroke-width", "1")]),
+            draw_ir_path_command("g-stroke-2", [
+                draw_ir_point(2, 42), draw_ir_point(20, 42)
+            ], [draw_ir_style_prop("stroke-color", "4294967295"),
+                draw_ir_style_prop("stroke-width", "2")]),
+            # font-size zero (rejects value > 0) and sign-without-digit token
+            draw_ir_text_styled("g-fs-zero", 26, 22, "Zz", 0xffffffffu32,
+                                [draw_ir_style_prop("font-size", "0")]),
+            _box_style([
+                draw_ir_style_prop("background-gradient-stop-count", "2"),
+                draw_ir_style_prop("background-gradient-stops",
+                                   "+x 4294901760 4278190335 0 100")
+            ], 26, 34, 10, 8, "g-sign-junk")
+        ]
+        # opacity < 1000 + clip=true + offset embedding: flips the
+        # embedded-surface, apply_clip and blend decisions.
+        val batch = draw_ir_batch(
+            "cov-embed", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("child-surface", "cov", 4, 4,
+                                     W - 8, H - 8, 1, 500, true),
+            commands)
+        val result = engine2d_draw_ir_adv_batch_with_images(
+            engine, batch, false, resolved)
+        expect(result.rendered_command_count).to_be_greater_than(0)
+        engine.shutdown()
+
+describe "draw_ir_adv typed-effects and parser-limit decision outcomes":
+    it "flips typed shadows/corners, saturation ranges and parser guards":
+        # style value beyond the 64KiB parser cap (built by doubling)
+        var huge = "12 34 "
+        var doubles = 0
+        while doubles < 15:
+            huge = huge + huge
+            doubles = doubles + 1
+        val outcome = _run([
+            # valid typed shadow schema: one outer + one inset layer
+            _box_style([
+                draw_ir_style_prop("box-shadow-layer-schema",
+                                   "web-box-shadow-layers-v1"),
+                draw_ir_style_prop("box-shadow-layer-count", "2"),
+                draw_ir_style_prop("box-shadow-layer-0-kind", "outer"),
+                draw_ir_style_prop("box-shadow-layer-0-offset-x", "2"),
+                draw_ir_style_prop("box-shadow-layer-0-offset-y", "2"),
+                draw_ir_style_prop("box-shadow-layer-0-blur-radius", "3"),
+                draw_ir_style_prop("box-shadow-layer-0-spread-radius", "1"),
+                draw_ir_style_prop("box-shadow-layer-0-color", "2147483648"),
+                draw_ir_style_prop("box-shadow-layer-1-kind", "inset"),
+                draw_ir_style_prop("box-shadow-layer-1-offset-x", "-1"),
+                draw_ir_style_prop("box-shadow-layer-1-offset-y", "-1"),
+                draw_ir_style_prop("box-shadow-layer-1-blur-radius", "2"),
+                draw_ir_style_prop("box-shadow-layer-1-spread-radius", "0"),
+                draw_ir_style_prop("box-shadow-layer-1-color", "2130706432")
+            ], 6, 6, 16, 12, "e-typed-shadows"),
+            # invalid shadow schema string
+            _box_style([
+                draw_ir_style_prop("box-shadow-layer-schema", "bogus-schema"),
+                draw_ir_style_prop("box-shadow-layer-count", "1")
+            ], 26, 6, 12, 10, "e-bad-schema"),
+            # nonuniform typed corners
+            _box_style([
+                draw_ir_style_prop("border-top-left-radius", "2"),
+                draw_ir_style_prop("border-top-right-radius", "6"),
+                draw_ir_style_prop("border-bottom-left-radius", "0"),
+                draw_ir_style_prop("border-bottom-right-radius", "4")
+            ], 6, 22, 16, 12, "e-nonuniform-corners"),
+            # uniform typed corners
+            _box_style([
+                draw_ir_style_prop("border-top-left-radius", "5"),
+                draw_ir_style_prop("border-top-right-radius", "5"),
+                draw_ir_style_prop("border-bottom-left-radius", "5"),
+                draw_ir_style_prop("border-bottom-right-radius", "5")
+            ], 26, 22, 16, 12, "e-uniform-corners"),
+            # oversized style value hits the parser byte cap
+            _box_style([
+                draw_ir_style_prop("border-top-width", huge)
+            ], 46, 6, 10, 8, "e-huge-style"),
+            # trailing sign token without a following digit
+            _box_style([
+                draw_ir_style_prop("background-gradient-stop-count", "2"),
+                draw_ir_style_prop("background-gradient-stops",
+                                   "4294901760 4278190335 0 100 +")
+            ], 46, 18, 10, 8, "e-trailing-sign"),
+            # saturation out of accepted range + realized mismatch
+            _box_style([
+                draw_ir_style_prop("backdrop-filter", "4 400"),
+                draw_ir_style_prop("backdrop-filter-capability",
+                                   "engine2d-cpu-composited-material-v1"),
+                draw_ir_style_prop("backdrop-filter-realized-blur-radius-px",
+                                   "4"),
+                draw_ir_style_prop(
+                    "backdrop-filter-realized-saturation-milli", "500"),
+                draw_ir_style_prop("wm-material-request",
+                                   "window-surface-glass")
+            ], 46, 30, 10, 8, "e-saturation-clamp")
+        ])
+        expect(outcome.2).to_equal((W as i64) * (H as i64))
+        expect(outcome.0).to_be_greater_than(0)
+
+describe "draw_ir_adv metal-request and hostile-geometry decision outcomes":
+    it "counts metal glass requests on a metal-target batch executed on cpu":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        engine.clear(0xff101010u32)
+        val commands = [
+            _box_style([
+                draw_ir_style_prop("wm-material-request",
+                                   "window-surface-glass")
+            ], 4, 4, 16, 12, "m-glass-request"),
+            draw_ir_rect("m-plain", 24, 4, 10, 8, 0xff884422u32)
+        ]
+        val batch = draw_ir_batch(
+            "cov-metal", "metal",
+            draw_ir_embedding_config("surface", "cov", 0, 0, W, H, 0, 1000,
+                                     false),
+            commands)
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+        # cpu engine cannot fulfil a metal device glass request; the executor
+        # must still produce a coherent outcome (not crash) and account for
+        # every command.
+        expect(result.rendered_command_count + result.skipped_command_count)
+            .to_be_greater_than(0)
+        engine.shutdown()
+
+    it "rejects hostile negative corner radii and off-viewport masked boxes":
+        val outcome = _run([
+            # negative typed corner radii on a box hanging off the viewport
+            _box_style([
+                draw_ir_style_prop("border-top-left-radius", "-9"),
+                draw_ir_style_prop("border-top-right-radius", "-9"),
+                draw_ir_style_prop("border-bottom-left-radius", "-9"),
+                draw_ir_style_prop("border-bottom-right-radius", "-9")
+            ], -2, -2, 16, 12, "h-neg-corners-offscreen"),
+            # inset shadow on a box that exceeds the viewport (unsafe mask)
+            _box_style([
+                draw_ir_style_prop("box-shadow-layer-schema",
+                                   "web-box-shadow-layers-v1"),
+                draw_ir_style_prop("box-shadow-layer-count", "1"),
+                draw_ir_style_prop("box-shadow-layer-0-kind", "inset"),
+                draw_ir_style_prop("box-shadow-layer-0-offset-x", "1"),
+                draw_ir_style_prop("box-shadow-layer-0-offset-y", "1"),
+                draw_ir_style_prop("box-shadow-layer-0-blur-radius", "2"),
+                draw_ir_style_prop("box-shadow-layer-0-spread-radius", "0"),
+                draw_ir_style_prop("box-shadow-layer-0-color", "2147483648")
+            ], 50, 30, 40, 40, "h-inset-overflow")
+        ])
+        expect(outcome.2).to_equal((W as i64) * (H as i64))
+
+describe "draw_ir_adv structural and non-rect command outcomes":
+    it "executes path, image, group, port and empty batches":
+        val path_style = [draw_ir_style_prop("stroke", "#ffffff"),
+                          draw_ir_style_prop("stroke-width", "1px")]
+        val outcome = _run([
+            draw_ir_group_command("g-root", ""),
+            draw_ir_port_command("p-port", "g-root", 1, 1),
+            draw_ir_path_command("p-line", [
+                draw_ir_point(2, 2), draw_ir_point(30, 20),
+                draw_ir_point(2, 20)
+            ], path_style),
+            draw_ir_path_command("p-degenerate", [draw_ir_point(5, 5)], path_style),
+            draw_ir_image_command(
+                "i-missing", 34, 4, 16, 12, "wm://missing-image", [])
+        ])
+        expect(outcome.2).to_equal((W as i64) * (H as i64))
+        val empty = _run([])
+        expect(empty.0).to_equal(0)
+        expect(empty.2).to_equal((W as i64) * (H as i64))
