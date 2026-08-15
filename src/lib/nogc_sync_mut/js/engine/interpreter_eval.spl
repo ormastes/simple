@@ -384,14 +384,22 @@ impl JsInterpreter:
                     # lookup here made `typeof Promise` report "undefined" even
                     # though `Promise.resolve(...)` worked (bug
                     # js_engine_missing_builtins_regex_promise_prototype_2026-07-11).
-                    # eval_expression on an unknown identifier returns Undefined
-                    # (warn only), matching typeof's ReferenceError suppression.
-                    val v = self.eval_expression(operand, env)?
-                    # Constructors modeled as namespace objects still report
-                    # "function" per spec.
-                    if name == "Promise" and typeof_value(v) == "object":
-                        return Ok(JsValue.String(v: "function"))
-                    return Ok(JsValue.String(v: typeof_value(v)))
+                    # Per the JS spec `typeof` on an UNRESOLVED identifier never
+                    # throws — it yields "undefined". Most unknown identifiers
+                    # take eval_expression's warn-and-Undefined path, but
+                    # require/process/Buffer under disabled node-compat now
+                    # THROW a ReferenceError (see the Identifier arm above);
+                    # typeof must suppress that throw too, otherwise browser
+                    # runtime init (`typeof require + ...`) fails.
+                    match self.eval_expression(operand, env):
+                        Ok(v):
+                            # Constructors modeled as namespace objects still
+                            # report "function" per spec.
+                            if name == "Promise" and typeof_value(v) == "object":
+                                return Ok(JsValue.String(v: "function"))
+                            return Ok(JsValue.String(v: typeof_value(v)))
+                        Err(_):
+                            return Ok(JsValue.String(v: "undefined"))
                 _:
                     val v = self.eval_expression(operand, env)?
                     return Ok(JsValue.String(v: typeof_value(v)))

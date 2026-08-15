@@ -13,19 +13,22 @@ fn js_parse_program_subset(source: text) -> [JsStatement]:
     var i = 0
     while i < parts.len():
         var stmt = parts.get(i).trim()
-        # A function DECLARATION needs no trailing `;`, so the `;`-split can
-        # merge it with the statement that follows its closing brace
-        # (`function f() { ... }setTimeout(f, 5)`). Peel declarations off the
-        # front of the part until no leading declaration remains.
-        while stmt.starts_with("function ") or stmt.starts_with("function("):
-            val body_start = _js_parser_find_function_body_start(stmt, 0)
-            if body_start < 0:
+        # A brace-terminated construct (function DECLARATION, `for`/`while`/`if`
+        # loop or block) needs no trailing `;`, so the `;`-split can merge it
+        # with the statement that follows its closing brace
+        # (`function f() { ... }setTimeout(f, 5)`,
+        # `for (var k=0; k<n; k=k+1) { ... }done()`). Peel each such construct
+        # off the front of the part until no leading brace-construct remains.
+        var guard = 0
+        while stmt != "" and guard < 100000:
+            val cend = _js_parser_leading_construct_end(stmt)
+            if cend < 0 or cend >= stmt.len():
                 break
-            val body_end = _js_parser_matching_brace(stmt, body_start)
-            if body_end < 0 or body_end + 1 >= stmt.len():
-                break
-            statements.push(_js_parser_statement(stmt.slice(0, body_end + 1)))
-            stmt = stmt.slice(body_end + 1, stmt.len()).trim()
+            val head = stmt.slice(0, cend).trim()
+            if head != "":
+                statements.push(_js_parser_statement(head))
+            stmt = stmt.slice(cend, stmt.len()).trim()
+            guard = guard + 1
         if stmt != "":
             statements.push(_js_parser_statement(stmt))
         i = i + 1
@@ -57,7 +60,209 @@ fn _js_parser_statement(stmt: text) -> JsStatement:
         return JsStatement.Return(value: _js_parser_expression(stmt.slice(7, stmt.len()).trim()))
     if stmt == "return":
         return JsStatement.Return(value: JsExpression.Literal(value: JsValue.Undefined))
+    # Compound statements. The subset parser historically dropped these on the
+    # floor, so a C-style `for (var i=0; ...)` fell through to expression
+    # parsing and the loop header was evaluated as bare identifier lookups
+    # (`ReferenceError: for is not defined`). Parse them into the real AST
+    # nodes the interpreter already executes.
+    if _js_parser_starts_with_keyword(stmt, "for"):
+        return _js_parser_for_statement(stmt)
+    if _js_parser_starts_with_keyword(stmt, "while"):
+        return _js_parser_while_statement(stmt)
+    if _js_parser_starts_with_keyword(stmt, "if"):
+        return _js_parser_if_statement(stmt)
+    if stmt.starts_with("{"):
+        val be = _js_parser_matching_brace(stmt, 0)
+        if be >= 0:
+            return JsStatement.Block(stmts: js_parse_program_subset(stmt.slice(1, be)))
     JsStatement.ExprStmt(_js_parser_expression(stmt))
+
+fn _js_parser_starts_with_keyword(stmt: text, kw: text) -> bool:
+    if not stmt.starts_with(kw):
+        return false
+    if stmt.len() == kw.len():
+        return true
+    val ch = stmt.slice(kw.len(), kw.len() + 1)
+    val ident = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == "$"
+    not ident
+
+# Return the exclusive end index of a leading brace-terminated construct
+# (function decl, for/while/if with optional else chain, or bare block), or
+# -1 if `stmt` does not begin with one.
+fn _js_parser_leading_construct_end(stmt: text) -> i64:
+    if stmt.starts_with("function ") or stmt.starts_with("function("):
+        val bs = _js_parser_find_function_body_start(stmt, 0)
+        if bs < 0:
+            return -1
+        val be = _js_parser_matching_brace(stmt, bs)
+        if be < 0:
+            return -1
+        return be + 1
+    if _js_parser_starts_with_keyword(stmt, "for") or _js_parser_starts_with_keyword(stmt, "while") or _js_parser_starts_with_keyword(stmt, "if"):
+        val open = _js_parser_find_char_from(stmt, "(", 0)
+        if open < 0:
+            return -1
+        val close = _js_parser_matching_paren(stmt, open)
+        if close < 0:
+            return -1
+        var end = _js_parser_body_end_after(stmt, close + 1)
+        if end < 0:
+            return -1
+        if _js_parser_starts_with_keyword(stmt, "if"):
+            var cont = true
+            while cont:
+                val e = _js_parser_skip_spaces(stmt, end)
+                val rest = stmt.slice(e, stmt.len())
+                if _js_parser_starts_with_keyword(rest, "else"):
+                    val after = _js_parser_skip_spaces(stmt, e + 4)
+                    val rest2 = stmt.slice(after, stmt.len())
+                    if _js_parser_starts_with_keyword(rest2, "if"):
+                        val o2 = _js_parser_find_char_from(stmt, "(", after)
+                        if o2 < 0:
+                            cont = false
+                        else:
+                            val c2 = _js_parser_matching_paren(stmt, o2)
+                            if c2 < 0:
+                                cont = false
+                            else:
+                                end = _js_parser_body_end_after(stmt, c2 + 1)
+                                if end < 0:
+                                    cont = false
+                    else:
+                        end = _js_parser_body_end_after(stmt, after)
+                        cont = false
+                else:
+                    cont = false
+        return end
+    if stmt.starts_with("{"):
+        val be = _js_parser_matching_brace(stmt, 0)
+        if be < 0:
+            return -1
+        return be + 1
+    -1
+
+# Return the exclusive end index of a statement body that begins at/after
+# `pos`: a `{ ... }` block (matched brace) or a single statement terminated by
+# the next top-level `;`.
+fn _js_parser_body_end_after(stmt: text, pos: i64) -> i64:
+    val s = _js_parser_skip_spaces(stmt, pos)
+    if s >= stmt.len():
+        return -1
+    if stmt.slice(s, s + 1) == "{":
+        val be = _js_parser_matching_brace(stmt, s)
+        if be < 0:
+            return -1
+        return be + 1
+    val rest = stmt.slice(s, stmt.len())
+    val semi = _js_parser_find_top_level(rest, ";")
+    if semi < 0:
+        return stmt.len()
+    return s + semi + 1
+
+# Extract the body statements of a loop/conditional whose body begins at/after
+# `pos` (either a `{ ... }` block or a single statement).
+fn _js_parser_extract_body(stmt: text, pos: i64) -> [JsStatement]:
+    val s = _js_parser_skip_spaces(stmt, pos)
+    if s < stmt.len() and stmt.slice(s, s + 1) == "{":
+        val be = _js_parser_matching_brace(stmt, s)
+        if be >= 0:
+            return js_parse_program_subset(stmt.slice(s + 1, be))
+        return []
+    val rest = stmt.slice(s, stmt.len())
+    val semi = _js_parser_find_top_level(rest, ";")
+    val body_text = if semi >= 0: rest.slice(0, semi) else: rest
+    val trimmed = body_text.trim()
+    if trimmed == "":
+        return []
+    [_js_parser_statement(trimmed)]
+
+fn _js_parser_for_binding(raw: text) -> text:
+    var b = raw.trim()
+    if b.starts_with("var "):
+        b = b.slice(4, b.len()).trim()
+    else if b.starts_with("let "):
+        b = b.slice(4, b.len()).trim()
+    else if b.starts_with("const "):
+        b = b.slice(6, b.len()).trim()
+    b
+
+fn _js_parser_for_statement(stmt: text) -> JsStatement:
+    val open = _js_parser_find_char_from(stmt, "(", 0)
+    if open < 0:
+        return JsStatement.ExprStmt(_js_parser_expression(stmt))
+    val close = _js_parser_matching_paren(stmt, open)
+    if close < 0:
+        return JsStatement.ExprStmt(_js_parser_expression(stmt))
+    val header = stmt.slice(open + 1, close)
+    val body = _js_parser_extract_body(stmt, close + 1)
+    val of_idx = _js_parser_find_top_level(header, " of ")
+    if of_idx >= 0:
+        return JsStatement.ForOf(
+            binding: _js_parser_for_binding(header.slice(0, of_idx)),
+            iterable: _js_parser_expression(header.slice(of_idx + 4, header.len())),
+            body: body
+        )
+    val in_idx = _js_parser_find_top_level(header, " in ")
+    if in_idx >= 0:
+        return JsStatement.ForIn(
+            binding: _js_parser_for_binding(header.slice(0, in_idx)),
+            object: _js_parser_expression(header.slice(in_idx + 4, header.len())),
+            body: body
+        )
+    val parts = _js_parser_split_top_level(header, ";")
+    # Guard against a malformed header with no `;` becoming an infinite loop
+    # (default cond `true`, no update). Treat it as a plain block.
+    if parts.len() < 2:
+        return JsStatement.Block(stmts: body)
+    var init_stmt = JsStatement.ExprStmt(JsExpression.Literal(value: JsValue.Undefined))
+    val ip = parts.get(0).trim()
+    if ip != "":
+        init_stmt = _js_parser_statement(ip)
+    var cond_expr = JsExpression.Literal(value: JsValue.Boolean(v: true))
+    val cp = parts.get(1).trim()
+    if cp != "":
+        cond_expr = _js_parser_expression(cp)
+    var update_expr = JsExpression.Literal(value: JsValue.Undefined)
+    if parts.len() > 2:
+        val up = parts.get(2).trim()
+        if up != "":
+            update_expr = _js_parser_expression(up)
+    JsStatement.For(init: init_stmt, cond: cond_expr, update: update_expr, body: body)
+
+fn _js_parser_while_statement(stmt: text) -> JsStatement:
+    val open = _js_parser_find_char_from(stmt, "(", 0)
+    if open < 0:
+        return JsStatement.ExprStmt(_js_parser_expression(stmt))
+    val close = _js_parser_matching_paren(stmt, open)
+    if close < 0:
+        return JsStatement.ExprStmt(_js_parser_expression(stmt))
+    JsStatement.While(
+        cond: _js_parser_expression(stmt.slice(open + 1, close)),
+        body: _js_parser_extract_body(stmt, close + 1)
+    )
+
+fn _js_parser_if_statement(stmt: text) -> JsStatement:
+    val open = _js_parser_find_char_from(stmt, "(", 0)
+    if open < 0:
+        return JsStatement.ExprStmt(_js_parser_expression(stmt))
+    val close = _js_parser_matching_paren(stmt, open)
+    if close < 0:
+        return JsStatement.ExprStmt(_js_parser_expression(stmt))
+    val cond = _js_parser_expression(stmt.slice(open + 1, close))
+    val then_body = _js_parser_extract_body(stmt, close + 1)
+    val then_end = _js_parser_body_end_after(stmt, close + 1)
+    var else_body: [JsStatement] = []
+    if then_end >= 0:
+        val e = _js_parser_skip_spaces(stmt, then_end)
+        val rest = stmt.slice(e, stmt.len())
+        if _js_parser_starts_with_keyword(rest, "else"):
+            val after = _js_parser_skip_spaces(stmt, e + 4)
+            val rest2 = stmt.slice(after, stmt.len())
+            if _js_parser_starts_with_keyword(rest2, "if"):
+                else_body = [_js_parser_if_statement(rest2)]
+            else:
+                else_body = _js_parser_extract_body(stmt, after)
+    JsStatement.If(cond: cond, then_body: then_body, else_body: else_body)
 
 fn _js_parser_expression(raw: text) -> JsExpression:
     val expr = _js_parser_strip_outer_parens(raw.trim())
