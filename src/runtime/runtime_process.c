@@ -1738,6 +1738,13 @@ int64_t rt_browser_renderer_write_protocol_some(
     BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (number), 0, 1), \
     BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA))
 
+/* Allow-list entry: fall through to the next check unless the syscall
+   number matches, in which case allow it. Anything that matches no entry
+   reaches the filter's final default, SECCOMP_RET_KILL_PROCESS. */
+#define BROWSER_RENDERER_ALLOW_SYSCALL(number) \
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (number), 0, 1), \
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+
 static bool browser_renderer_set_limit(
         int resource, rlim_t current, rlim_t maximum) {
     struct rlimit limit = {current, maximum};
@@ -1892,484 +1899,141 @@ static bool browser_renderer_apply_seccomp(void) {
         BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000U, 0, 1),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
 #endif
-#ifdef __NR_socket
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_socket),
+        /* ALLOW-list: only the syscalls the jailed renderer worker needs.
+           Audited against hosted_browser_renderer_worker.spl's post-enter
+           runtime: blocking read/write loops on the two inherited pipe fds,
+           anonymous memory management for the JS/layout heap, futex-based
+           runtime locks, clocks/sleeps, signal return paths, event polling
+           on inherited fds, randomness, and clean exit. Everything else --
+           including any future kernel syscall -- falls through to the
+           default SECCOMP_RET_KILL_PROCESS below. Fail closed. */
+#ifdef __NR_read
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_read),
 #endif
-#ifdef __NR_socketpair
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_socketpair),
+#ifdef __NR_write
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_write),
 #endif
-#ifdef __NR_socketcall
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_socketcall),
+#ifdef __NR_readv
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_readv),
 #endif
-#ifdef __NR_connect
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_connect),
+#ifdef __NR_writev
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_writev),
 #endif
-#ifdef __NR_bind
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_bind),
+#ifdef __NR_close
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_close),
 #endif
-#ifdef __NR_listen
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_listen),
+#ifdef __NR_fstat
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_fstat),
 #endif
-#ifdef __NR_accept
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_accept),
+#ifdef __NR_fstat64
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_fstat64),
 #endif
-#ifdef __NR_accept4
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_accept4),
+#ifdef __NR_mmap
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_mmap),
 #endif
-#ifdef __NR_sendto
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_sendto),
+#ifdef __NR_mmap2
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_mmap2),
 #endif
-#ifdef __NR_recvfrom
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_recvfrom),
+#ifdef __NR_munmap
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_munmap),
 #endif
-#ifdef __NR_sendmsg
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_sendmsg),
+#ifdef __NR_mprotect
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_mprotect),
 #endif
-#ifdef __NR_recvmsg
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_recvmsg),
+#ifdef __NR_mremap
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_mremap),
 #endif
-#ifdef __NR_fcntl
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fcntl),
+#ifdef __NR_brk
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_brk),
 #endif
-#ifdef __NR_fcntl64
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fcntl64),
+#ifdef __NR_madvise
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_madvise),
 #endif
-#ifdef __NR_ioctl
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_ioctl),
+#ifdef __NR_futex
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_futex),
 #endif
-#ifdef __NR_statx
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_statx),
+#ifdef __NR_futex_time64
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_futex_time64),
 #endif
-#ifdef __NR_stat
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_stat),
+#ifdef __NR_clock_gettime
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_clock_gettime),
 #endif
-#ifdef __NR_lstat
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_lstat),
+#ifdef __NR_clock_gettime64
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_clock_gettime64),
 #endif
-#ifdef __NR_oldstat
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_oldstat),
+#ifdef __NR_clock_nanosleep
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_clock_nanosleep),
 #endif
-#ifdef __NR_oldlstat
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_oldlstat),
+#ifdef __NR_clock_nanosleep_time64
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_clock_nanosleep_time64),
 #endif
-#ifdef __NR_stat64
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_stat64),
+#ifdef __NR_nanosleep
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_nanosleep),
 #endif
-#ifdef __NR_lstat64
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_lstat64),
+#ifdef __NR_gettimeofday
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_gettimeofday),
 #endif
-#ifdef __NR_newfstatat
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_newfstatat),
+#ifdef __NR_exit
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_exit),
 #endif
-#ifdef __NR_fstatat64
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fstatat64),
+#ifdef __NR_exit_group
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_exit_group),
 #endif
-#ifdef __NR_statfs
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_statfs),
+#ifdef __NR_rt_sigreturn
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_rt_sigreturn),
 #endif
-#ifdef __NR_statfs64
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_statfs64),
+#ifdef __NR_sigreturn
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_sigreturn),
 #endif
-#ifdef __NR_statmount
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_statmount),
+#ifdef __NR_sigaltstack
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_sigaltstack),
 #endif
-#ifdef __NR_listmount
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_listmount),
+#ifdef __NR_rt_sigaction
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_rt_sigaction),
 #endif
-#ifdef __NR_name_to_handle_at
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_name_to_handle_at),
+#ifdef __NR_rt_sigprocmask
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_rt_sigprocmask),
 #endif
-#ifdef __NR_access
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_access),
+#ifdef __NR_restart_syscall
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_restart_syscall),
 #endif
-#ifdef __NR_faccessat
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_faccessat),
+#ifdef __NR_epoll_create1
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_epoll_create1),
 #endif
-#ifdef __NR_faccessat2
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_faccessat2),
+#ifdef __NR_epoll_ctl
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_epoll_ctl),
 #endif
-#ifdef __NR_readlink
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_readlink),
+#ifdef __NR_epoll_wait
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_epoll_wait),
 #endif
-#ifdef __NR_readlinkat
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_readlinkat),
+#ifdef __NR_epoll_pwait
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_epoll_pwait),
 #endif
-#ifdef __NR_getxattr
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_getxattr),
+#ifdef __NR_epoll_pwait2
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_epoll_pwait2),
 #endif
-#ifdef __NR_lgetxattr
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_lgetxattr),
+#ifdef __NR_poll
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_poll),
 #endif
-#ifdef __NR_fgetxattr
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fgetxattr),
+#ifdef __NR_ppoll
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_ppoll),
 #endif
-#ifdef __NR_listxattr
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_listxattr),
+#ifdef __NR_ppoll_time64
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_ppoll_time64),
 #endif
-#ifdef __NR_llistxattr
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_llistxattr),
+#ifdef __NR_getrandom
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_getrandom),
 #endif
-#ifdef __NR_flistxattr
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_flistxattr),
+#ifdef __NR_sched_yield
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_sched_yield),
 #endif
-#ifdef __NR_setxattr
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_setxattr),
+#ifdef __NR_getpid
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_getpid),
 #endif
-#ifdef __NR_lsetxattr
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_lsetxattr),
+#ifdef __NR_gettid
+        BROWSER_RENDERER_ALLOW_SYSCALL(__NR_gettid),
 #endif
-#ifdef __NR_fsetxattr
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fsetxattr),
-#endif
-#ifdef __NR_removexattr
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_removexattr),
-#endif
-#ifdef __NR_lremovexattr
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_lremovexattr),
-#endif
-#ifdef __NR_fremovexattr
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fremovexattr),
-#endif
-#ifdef __NR_chmod
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_chmod),
-#endif
-#ifdef __NR_fchmod
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fchmod),
-#endif
-#ifdef __NR_fchmodat
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fchmodat),
-#endif
-#ifdef __NR_fchmodat2
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fchmodat2),
-#endif
-#ifdef __NR_chown
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_chown),
-#endif
-#ifdef __NR_lchown
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_lchown),
-#endif
-#ifdef __NR_fchown
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fchown),
-#endif
-#ifdef __NR_fchownat
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fchownat),
-#endif
-#ifdef __NR_chown32
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_chown32),
-#endif
-#ifdef __NR_lchown32
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_lchown32),
-#endif
-#ifdef __NR_fchown32
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fchown32),
-#endif
-#ifdef __NR_utime
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_utime),
-#endif
-#ifdef __NR_utimes
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_utimes),
-#endif
-#ifdef __NR_futimesat
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_futimesat),
-#endif
-#ifdef __NR_utimensat
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_utimensat),
-#endif
-#ifdef __NR_utimensat_time64
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_utimensat_time64),
-#endif
-#ifdef __NR_truncate
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_truncate),
-#endif
-#ifdef __NR_truncate64
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_truncate64),
-#endif
-#ifdef __NR_ftruncate
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_ftruncate),
-#endif
-#ifdef __NR_ftruncate64
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_ftruncate64),
-#endif
-#ifdef __NR_getdents
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_getdents),
-#endif
-#ifdef __NR_getdents64
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_getdents64),
-#endif
-#ifdef __NR_inotify_init
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_inotify_init),
-#endif
-#ifdef __NR_inotify_init1
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_inotify_init1),
-#endif
-#ifdef __NR_inotify_add_watch
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_inotify_add_watch),
-#endif
-#ifdef __NR_inotify_rm_watch
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_inotify_rm_watch),
-#endif
-#ifdef __NR_fanotify_init
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fanotify_init),
-#endif
-#ifdef __NR_fanotify_mark
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fanotify_mark),
-#endif
-#ifdef __NR_membarrier
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_membarrier),
-#endif
-#ifdef __NR_ipc
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_ipc),
-#endif
-#ifdef __NR_shmget
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_shmget),
-#endif
-#ifdef __NR_shmat
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_shmat),
-#endif
-#ifdef __NR_shmdt
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_shmdt),
-#endif
-#ifdef __NR_shmctl
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_shmctl),
-#endif
-#ifdef __NR_msgget
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_msgget),
-#endif
-#ifdef __NR_msgsnd
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_msgsnd),
-#endif
-#ifdef __NR_msgrcv
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_msgrcv),
-#endif
-#ifdef __NR_msgctl
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_msgctl),
-#endif
-#ifdef __NR_semget
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_semget),
-#endif
-#ifdef __NR_semop
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_semop),
-#endif
-#ifdef __NR_semtimedop
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_semtimedop),
-#endif
-#ifdef __NR_semtimedop_time64
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_semtimedop_time64),
-#endif
-#ifdef __NR_semctl
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_semctl),
-#endif
-#ifdef __NR_shutdown
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_shutdown),
-#endif
-#ifdef __NR_setsockopt
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_setsockopt),
-#endif
-#ifdef __NR_getsockopt
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_getsockopt),
-#endif
-#ifdef __NR_fork
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fork),
-#endif
-#ifdef __NR_vfork
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_vfork),
-#endif
-#ifdef __NR_clone
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_clone),
-#endif
-#ifdef __NR_clone3
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_clone3),
-#endif
-#ifdef __NR_execve
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_execve),
-#endif
-#ifdef __NR_execveat
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_execveat),
-#endif
-#ifdef __NR_kill
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_kill),
-#endif
-#ifdef __NR_tkill
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_tkill),
-#endif
-#ifdef __NR_tgkill
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_tgkill),
-#endif
-#ifdef __NR_rt_sigqueueinfo
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_rt_sigqueueinfo),
-#endif
-#ifdef __NR_rt_tgsigqueueinfo
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_rt_tgsigqueueinfo),
-#endif
-#ifdef __NR_ptrace
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_ptrace),
-#endif
-#ifdef __NR_get_robust_list
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_get_robust_list),
-#endif
-#ifdef __NR_process_vm_readv
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_process_vm_readv),
-#endif
-#ifdef __NR_process_vm_writev
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_process_vm_writev),
-#endif
-#ifdef __NR_process_madvise
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_process_madvise),
-#endif
-#ifdef __NR_process_mrelease
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_process_mrelease),
-#endif
-#ifdef __NR_pidfd_open
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_pidfd_open),
-#endif
-#ifdef __NR_pidfd_getfd
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_pidfd_getfd),
-#endif
-#ifdef __NR_pidfd_send_signal
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_pidfd_send_signal),
-#endif
-#ifdef __NR_prlimit64
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_prlimit64),
-#endif
-#ifdef __NR_ioprio_set
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_ioprio_set),
-#endif
-#ifdef __NR_setpriority
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_setpriority),
-#endif
-#ifdef __NR_sched_setaffinity
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_sched_setaffinity),
-#endif
-#ifdef __NR_sched_setparam
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_sched_setparam),
-#endif
-#ifdef __NR_sched_setscheduler
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_sched_setscheduler),
-#endif
-#ifdef __NR_sched_setattr
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_sched_setattr),
-#endif
-#ifdef __NR_kcmp
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_kcmp),
-#endif
-#ifdef __NR_setns
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_setns),
-#endif
-#ifdef __NR_unshare
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_unshare),
-#endif
-#ifdef __NR_mount
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_mount),
-#endif
-#ifdef __NR_umount2
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_umount2),
-#endif
-#ifdef __NR_pivot_root
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_pivot_root),
-#endif
-#ifdef __NR_chroot
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_chroot),
-#endif
-#ifdef __NR_open_by_handle_at
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_open_by_handle_at),
-#endif
-#ifdef __NR_open_tree
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_open_tree),
-#endif
-#ifdef __NR_move_mount
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_move_mount),
-#endif
-#ifdef __NR_fsopen
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fsopen),
-#endif
-#ifdef __NR_fsconfig
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fsconfig),
-#endif
-#ifdef __NR_fsmount
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fsmount),
-#endif
-#ifdef __NR_fspick
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_fspick),
-#endif
-#ifdef __NR_mount_setattr
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_mount_setattr),
-#endif
-#ifdef __NR_add_key
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_add_key),
-#endif
-#ifdef __NR_request_key
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_request_key),
-#endif
-#ifdef __NR_keyctl
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_keyctl),
-#endif
-#ifdef __NR_userfaultfd
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_userfaultfd),
-#endif
-#ifdef __NR_bpf
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_bpf),
-#endif
-#ifdef __NR_perf_event_open
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_perf_event_open),
-#endif
-#ifdef __NR_io_uring_setup
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_io_uring_setup),
-#endif
-#ifdef __NR_io_uring_enter
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_io_uring_enter),
-#endif
-#ifdef __NR_io_uring_register
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_io_uring_register),
-#endif
-#ifdef __NR_syslog
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_syslog),
-#endif
-#ifdef __NR_acct
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_acct),
-#endif
-#ifdef __NR_reboot
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_reboot),
-#endif
-#ifdef __NR_kexec_load
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_kexec_load),
-#endif
-#ifdef __NR_kexec_file_load
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_kexec_file_load),
-#endif
-#ifdef __NR_init_module
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_init_module),
-#endif
-#ifdef __NR_finit_module
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_finit_module),
-#endif
-#ifdef __NR_delete_module
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_delete_module),
-#endif
-#ifdef __NR_swapon
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_swapon),
-#endif
-#ifdef __NR_swapoff
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_swapoff),
-#endif
-#ifdef __NR_quotactl
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_quotactl),
-#endif
-#ifdef __NR_personality
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_personality),
-#endif
-#ifdef __NR_modify_ldt
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_modify_ldt),
-#endif
-#ifdef __NR_iopl
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_iopl),
-#endif
-#ifdef __NR_ioperm
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_ioperm),
-#endif
-#ifdef __NR_lookup_dcookie
-        BROWSER_RENDERER_DENY_SYSCALL(__NR_lookup_dcookie),
-#endif
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS)
     };
     struct sock_fprog program = {
         .len = (unsigned short)(sizeof(filter) / sizeof(filter[0])),

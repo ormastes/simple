@@ -8,6 +8,7 @@ use std.log.{error}
 use app.ui.render.types.{RenderConfig}
 use app.browser.render_adapter.{render_browser, browser_engine_pixels_at}
 use app.browser.gui_window.{run_browser_window_gui}
+use app.browser.sandbox_status.{browser_sandbox_status, browser_sandbox_status_line}
 use std.common.json.{json_escape_string}
 
 val TOOL_NAME = "Simple Browser"
@@ -42,6 +43,19 @@ fn main() -> i64:
         else:
             print "{TOOL_NAME} v{TOOL_VERSION}"
         return 0
+
+    if browser_has_option(args, "--sandbox-status"):
+        print browser_sandbox_status_line(browser_sandbox_status())
+        return 0
+
+    # Honest sandbox gate: SIMPLE_BROWSER_SANDBOX=1 REQUIRES the jailed
+    # renderer worker. Until worker routing lands (see sandbox_status.spl's
+    # header), a sandbox request is refused rather than served unjailed —
+    # never silently claim or imply sandboxed rendering.
+    val sandbox = browser_sandbox_status()
+    if sandbox.requested and not sandbox.jailed:
+        browser_print_error(log_opts.log_mode, browser_sandbox_status_line(sandbox))
+        return 1
 
     val unknown = browser_first_unknown_option(args)
     if unknown != "":
@@ -91,6 +105,11 @@ fn print_help():
     print "  -h, --help          Show this help message"
     print "  -v, --version       Show version information"
     print "  --open              Launch the browser in a real GUI window (blocks until closed)"
+    print "  --sandbox-status    Report sandbox posture (jailed/unjailed) and exit"
+    print ""
+    print "Environment:"
+    print "  SIMPLE_BROWSER_SANDBOX=1  Require jailed page rendering; refused (exit 1)"
+    print "                            until renderer-worker routing lands"
     print ""
     print "Shared log options:"
     for line in log_options_help():
@@ -133,7 +152,7 @@ fn browser_first_unknown_option(args: [text]) -> text:
     var i = 0
     while i < args.len():
         val arg = args[i]
-        if arg == "--open":
+        if arg == "--open" or arg == "--sandbox-status":
             i = i + 1
         elif arg.starts_with("-"):
             return arg

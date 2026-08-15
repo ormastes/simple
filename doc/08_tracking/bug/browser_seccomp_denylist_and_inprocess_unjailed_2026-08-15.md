@@ -1,7 +1,9 @@
 # Browser jail: seccomp is a deny-list and in-process browsers are unjailed
 
 - **Date**: 2026-08-15
-- **Status**: OPEN (tracked; out of scope of the 2026-08-15 engine-gate change)
+- **Status**: PARTIALLY FIXED 2026-08-15 (problem 1 fixed: seccomp is now an
+  ALLOW-list; problem 3 partially addressed: honest sandbox posture surface +
+  refusal gate landed, worker routing still open; problem 2 still open)
 - **Area**: runtime (C), app/browser, os/hosted
 - **Research**: `doc/01_research/app/browser/browser_sandbox_model_research_2026-08-15.md`
 
@@ -30,6 +32,55 @@
 - Unshare user+net (+PID where possible) namespaces before entering the jail.
 - Route the in-process browsers' page-script execution through the jailed
   renderer worker instead of the host process.
+
+## Fixed 2026-08-15 (this change)
+
+1. **seccomp ALLOW-list (problem 1: FIXED).**
+   `browser_renderer_apply_seccomp` (`src/runtime/runtime_process.c`, applied
+   by `rt_browser_renderer_sandbox_enter`) is now an ALLOW-list with default
+   `SECCOMP_RET_KILL_PROCESS`: only read/write/readv/writev, close,
+   fstat(/64), mmap(/2)/munmap/mprotect/mremap/brk/madvise, futex(+time64),
+   clocks/nanosleep/gettimeofday, exit/exit_group, rt_sigreturn/sigreturn/
+   sigaltstack/rt_sigaction/rt_sigprocmask/restart_syscall, epoll*/poll/
+   ppoll(+time64), getrandom, sched_yield, getpid/gettid are allowed. The
+   architecture check and (on x86_64) the x32-ABI kill are kept; the preinit
+   startup deny filter (fork/exec/socket) is unchanged. Any other syscall —
+   including future kernel additions — kills the process.
+   Proven natively by a new self-check
+   (`src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c`):
+   a forked child enters the REAL jail via `rt_browser_renderer_sandbox_enter`
+   (preinit contract simulated: argv[0]=marker, empty envp, fds 0..3 only),
+   read/write on inherited pipe fds succeed, then `socket()` KILLS the child
+   with SIGSYS (not the old EPERM deny-list behaviour). PASS on this host.
+   Operational note discovered while testing: the jail's RLIMIT_NOFILE=4
+   means the in-jail Landlock ruleset fd only allocates when the worker holds
+   fds 0..3 only — a worker with a higher open fd fails `sandbox_enter`.
+2. **Honest sandbox posture for the in-process browser (problem 3: partial).**
+   New `src/app/browser/sandbox_status.spl`: `SIMPLE_BROWSER_SANDBOX=1`
+   requests jailed rendering; `browser_sandbox_status()` reports
+   requested/jailed/mode/reason fail-closed. `src/app/browser/main.spl` gained
+   `--sandbox-status` and a gate: a sandbox request is REFUSED (exit 1, honest
+   message) rather than served unjailed — never a silent sandboxed claim.
+   Spec: `test/01_unit/app/browser/browser_sandbox_status_spec.spl`
+   (3 examples, green).
+
+## Still open (exact remainder)
+
+- **Worker routing (problem 3 core)**: route `src/app/browser`'s page
+  rendering (render_adapter/browser_engine_pixels_at) through the sandboxed
+  renderer worker via the broker `hosted_browser_renderer_process.spl`
+  (`HostedBrowserRendererProcess`, ~3.5k lines). When it lands, flip
+  `browser_sandbox_worker_routing_available()` in
+  `src/app/browser/sandbox_status.spl` (the single flip-line) and the refusal
+  gate becomes the jailed path automatically. `src/os/apps/*browser*` remain
+  unjailed too.
+- **Namespaces / uid drop (problem 2)**: unchanged — no unshare(user/net/PID),
+  no uid drop.
+- Verification gap noted 2026-08-15: `bin/simple test
+  test/01_unit/os/hosted/hosted_browser_renderer_worker_spec.spl` times out at
+  the test-daemon's 120s worker budget on this host (pre-existing; the
+  deployed `bin/simple` is a prebuilt binary that does not contain this C
+  change, so the timeout is unrelated to the ALLOW-list).
 
 ## Interim mitigation (landed 2026-08-15)
 

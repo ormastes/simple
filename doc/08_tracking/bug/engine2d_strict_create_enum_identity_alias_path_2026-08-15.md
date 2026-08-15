@@ -56,3 +56,47 @@ was also rewritten with explicit `return`s.
   (`Error: unknown option: --no-daemon`) — the real flag is
   `--no-session-daemon`. Fixed in the same change; with both fixes the lane
   reports `overall=pass` with `spec_status=pass` on the TITAN RTX host.
+
+## Follow-up census + broadened fix (2026-08-15, second pass)
+
+Census of `BackendStatus.` comparisons OUTSIDE the defining module
+(`src/lib/gc_async_mut/gpu/engine2d/backend_probe.spl`), src/lib + src/app:
+
+| Site | Import path | Verdict |
+|------|-------------|---------|
+| engine.spl:942,950,952,1081,1093,1095,1121 (`== BackendStatus.Initialized`) | alias `std.gpu.engine2d.backend_probe` | UNSAFE — fixed (blob c81c4723ee33) |
+| src/app/wm_compare/backend_measurement_capture.spl:294 (`==`), :563 (`!=`) | alias | UNSAFE — fixed (blob 0436dd444468) |
+| src/app/wm_compare/backend_measurement_report.spl:320 (`== BackendStatus.Fallback`) | alias | UNSAFE — fixed via new exported helper `backend_probe_fallback` (report blob 306d3c057dff, backend_probe.spl blob 51393b6a2731) |
+| browser_engine/simple_web_engine2d_renderer.spl:1177, simple_web_layout_engine2d_fast.spl:807 | canonical `std.gc_async_mut...` | SAFE (canonical import matches constructor identity) |
+| backend_vulkan_spirv/ffi_dispatch/sffi_dispatch/backend_opencl/backend_directx | mixed | SAFE — constructor-only, no comparisons |
+
+Fixed variants are built on `git show origin/main:` bases (the working-tree
+engine.spl carries another session's font WIP and was left untouched);
+stored as git blobs via `git hash-object -w`:
+engine.spl c81c4723ee33c9b29cb4668caf388d0dcdb36d0c,
+backend_probe.spl 51393b6a27312a9d0b816e7560dad17261ea8298,
+backend_measurement_capture.spl 0436dd44446d81611b32ea55e3896955b8ac3b9f,
+backend_measurement_report.spl 306d3c057dffe98e5c918dc854d8a77cd7360b11.
+
+### Interpreter-fallback from the earlier broadened attempt: NOT REPRODUCIBLE
+
+An earlier session reported that replacing all remaining comparisons with
+`backend_probe_initialized` caused `native_execution_reason=interpreter-fallback`
+in the readback lane. Re-attempted on a clean origin/main base with ALL 7
+remaining engine.spl sites replaced (swap-run-restore,
+`SIMPLE_BIN=build/browser-vulkan/simple sh scripts/check/check-vulkan-engine2d-readback.shs`):
+the lane reports `overall=pass` / `spec_status=pass` with ZERO
+"falling back to interpreter" occurrences in the evidence log. Conclusion:
+the fallback was an artifact of the earlier variant's base (pre-fix working
+tree carrying unrelated WIP), not of the helper-call migration itself. No
+separate native-codegen bug record is warranted on current evidence.
+
+### wm_compare validation
+
+`bin/simple test test/03_system/gui/wm_compare/backend_measurement_{capture,report}_spec.spl`
+run with the three fixed files swapped in, then on the unmodified tree:
+verdicts are byte-identical (capture: `passed=0 failed=1 timeout=1
+reason=daemon-worker-timeout`; report: `16 examples, 1 failure` — same
+example "accepts unavailable backend lanes only with explicit reason").
+Both failures are PRE-EXISTING on the unmodified tree; the fix introduces
+zero delta.

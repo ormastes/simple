@@ -1,0 +1,78 @@
+# @cover src/app/browser/sandbox_status.spl 90%
+# @req REQ-BROWSER-SANDBOX-STATUS-001
+"""
+# Browser Sandbox Posture: Honest Jailed/Unjailed Reporting
+
+**Category:** Browser / Security
+**Status:** Active
+
+## Purpose and Audience
+
+I run the in-process Simple Browser, which today executes its engine and page
+script in the host process with no OS jail. The jailed path exists only in the
+hosted renderer worker behind `rt_browser_renderer_sandbox_enter`. Until this
+app's rendering is routed through that worker, the sandbox knob
+`SIMPLE_BROWSER_SANDBOX=1` must be handled honestly: a request that cannot be
+honoured is refused, never silently served unjailed and never falsely
+reported as jailed.
+
+The audience is whoever lands the worker routing (they flip
+`browser_sandbox_worker_routing_available` and this spec tells them what the
+posture contract is) and whoever audits the browser's security claims.
+
+## Scope
+
+Covers `src/app/browser/sandbox_status.spl` only. The seccomp ALLOW-list
+itself is proven natively by
+`src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c`.
+Tracking: doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md
+"""
+
+use std.spipe.*
+use app.browser.sandbox_status.{
+    BROWSER_SANDBOX_ENV,
+    BROWSER_SANDBOX_MODE_UNJAILED,
+    BROWSER_SANDBOX_MODE_JAILED,
+    BROWSER_SANDBOX_MODE_REFUSED,
+    browser_sandbox_worker_routing_available,
+    browser_sandbox_status,
+    browser_sandbox_status_line
+}
+use std.io_runtime.{env_get}
+
+describe "browser sandbox posture is reported honestly":
+    it "reports unjailed-in-process when no sandbox was requested":
+        step("read the posture with the knob unset in this test process")
+        if env_get(BROWSER_SANDBOX_ENV) != "1":
+            val s = browser_sandbox_status()
+            assert_false(s.requested)
+            assert_false(s.jailed)
+            expect(s.mode).to_equal(BROWSER_SANDBOX_MODE_UNJAILED)
+            step("the reason names the env knob so the posture is discoverable")
+            expect(s.reason).to_contain(BROWSER_SANDBOX_ENV)
+        else:
+            step("knob is set in this environment: posture must not claim jailed")
+            assert_false(browser_sandbox_status().jailed)
+
+    it "never claims jailed while worker routing is unavailable":
+        step("check the routing flip-line is still off")
+        if not browser_sandbox_worker_routing_available():
+            val s = browser_sandbox_status()
+            step("whatever was requested, jailed must be false")
+            assert_false(s.jailed)
+            step("a refused posture must carry a concrete reason")
+            if s.mode == BROWSER_SANDBOX_MODE_REFUSED:
+                expect(s.reason).to_contain("renderer worker")
+        else:
+            step("routing landed: jailed may only be claimed with requested")
+            val s2 = browser_sandbox_status()
+            if s2.jailed:
+                assert_true(s2.requested)
+                expect(s2.mode).to_equal(BROWSER_SANDBOX_MODE_JAILED)
+
+    it "renders a status line that carries the mode and the reason":
+        step("format the current posture")
+        val s = browser_sandbox_status()
+        val line = browser_sandbox_status_line(s)
+        expect(line).to_start_with("browser sandbox: ")
+        expect(line).to_contain(s.mode)

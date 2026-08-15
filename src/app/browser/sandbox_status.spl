@@ -1,0 +1,76 @@
+# Browser sandbox posture surface.
+#
+# The in-process Simple Browser (this app) runs its engine and page script in
+# the HOST process with no OS confinement. The jailed path exists elsewhere:
+# the hosted renderer worker (src/os/hosted/hosted_browser_renderer_worker.spl)
+# enters rt_browser_renderer_sandbox_enter (rlimits + no_new_privs + Landlock
+# + seccomp ALLOW-list) via the broker
+# (src/os/hosted/hosted_browser_renderer_process.spl). Routing this app's page
+# rendering through that broker is NOT yet wired — tracked in
+# doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md.
+#
+# This module is the honest surface for that fact:
+#   - SIMPLE_BROWSER_SANDBOX=1 REQUESTS sandboxed rendering;
+#   - until worker routing lands, a request is REFUSED (never silently served
+#     unjailed, never falsely reported as jailed);
+#   - the default (knob unset) renders unjailed and SAYS so on query.
+
+use std.io_runtime.{env_get}
+
+pub val BROWSER_SANDBOX_ENV: text = "SIMPLE_BROWSER_SANDBOX"
+
+pub val BROWSER_SANDBOX_MODE_UNJAILED: text = "unjailed-in-process"
+pub val BROWSER_SANDBOX_MODE_JAILED: text = "worker-jailed"
+pub val BROWSER_SANDBOX_MODE_REFUSED: text = "refused"
+
+class BrowserSandboxStatus:
+    requested: bool
+    jailed: bool
+    mode: text
+    reason: text
+
+pub fn browser_sandbox_requested() -> bool:
+    """True when SIMPLE_BROWSER_SANDBOX=1 asks for jailed page rendering."""
+    env_get(BROWSER_SANDBOX_ENV) == "1"
+
+pub fn browser_sandbox_worker_routing_available() -> bool:
+    """Whether this app can route page rendering through the sandboxed
+    renderer worker. Always false today: the broker exists
+    (hosted_browser_renderer_process.spl) but this app's render path is not
+    wired through it — see the bug doc in the header. This function is the
+    single line to flip when that routing lands."""
+    false
+
+pub fn browser_sandbox_status() -> BrowserSandboxStatus:
+    """Honest sandbox posture for this process. Fail-closed reporting:
+    `jailed` is true only on a path that actually entered the jail, and a
+    sandbox request that cannot be honoured is REFUSED, not silently
+    downgraded."""
+    val requested = browser_sandbox_requested()
+    if not requested:
+        return BrowserSandboxStatus(
+            requested: false, jailed: false,
+            mode: BROWSER_SANDBOX_MODE_UNJAILED,
+            reason: "engine and page script run in the host process; set {BROWSER_SANDBOX_ENV}=1 to require the jailed renderer worker")
+    if browser_sandbox_worker_routing_available():
+        return BrowserSandboxStatus(
+            requested: true, jailed: true,
+            mode: BROWSER_SANDBOX_MODE_JAILED,
+            reason: "")
+    BrowserSandboxStatus(
+        requested: true, jailed: false,
+        mode: BROWSER_SANDBOX_MODE_REFUSED,
+        reason: "sandbox requested but in-process browser cannot yet route page rendering through the jailed renderer worker (hosted_browser_renderer_process.spl); refusing to render unjailed — see doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md")
+
+pub fn browser_sandbox_status_line(status: BrowserSandboxStatus) -> text:
+    """One-line human/CLI rendering of the posture."""
+    if status.reason == "":
+        "browser sandbox: {status.mode}"
+    else:
+        "browser sandbox: {status.mode} — {status.reason}"
+
+export BROWSER_SANDBOX_ENV
+export BROWSER_SANDBOX_MODE_UNJAILED, BROWSER_SANDBOX_MODE_JAILED, BROWSER_SANDBOX_MODE_REFUSED
+export BrowserSandboxStatus
+export browser_sandbox_requested, browser_sandbox_worker_routing_available
+export browser_sandbox_status, browser_sandbox_status_line
