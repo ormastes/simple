@@ -118,8 +118,26 @@ describe "simd_fill_row":
         expect(backend_source).to_contain("self.buf = rt_engine2d_simd_fill_span_u32")
         expect(backend_source).to_contain("self.buf = rt_engine2d_simd_copy_span_u32")
         expect(backend_source).to_contain("self.native_simd_spans and native_pixel_rows_enabled()")
-        expect(backend_source).to_contain("_scalar_fill_row(self.buf, offset as i64, count as i64, color)")
+        # The scalar fallback must write through self.buf DIRECTLY: passing the
+        # field to a `mut` callee (e.g. _scalar_fill_row(self.buf, ...)) hands
+        # the callee a field-read COPY under the interpreter, making fills a
+        # silent no-op (see backend_software.spl sw_fill_raw_span comment).
+        expect(backend_source).to_contain("self.buf[offset + i] = color")
+        expect(backend_source.contains("_scalar_fill_row(self.buf")).to_equal(false)
         expect(backend_source.contains("simd_fill_row(self.buf, offset as i64, count as i64, color)")).to_equal(false)
+        # Behavioral equivalence: the bridge's scalar reference produces the
+        # same pixels the backend's direct-write fallback loop produces.
+        var bridge_buf: [u32] = [0; 8]
+        _scalar_fill_row(bridge_buf, 2, 4, 0xAABBCCDDu32)
+        var loop_buf: [u32] = [0; 8]
+        var li = 2
+        while li < 6:
+            loop_buf[li] = 0xAABBCCDDu32
+            li = li + 1
+        var bi = 0
+        while bi < 8:
+            expect(bridge_buf[bi]).to_equal(loop_buf[bi])
+            bi = bi + 1
         expect(backend_source).to_contain("record_simd_alpha_hit()")
         expect(engine_source).to_contain("var cpu_simd = CpuBackend.create_simd()")
         expect(interp_source).to_contain("pub fn rt_engine2d_simd_fill_span_u32")
