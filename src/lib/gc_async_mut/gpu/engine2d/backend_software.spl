@@ -447,18 +447,43 @@ impl RenderBackend for SoftwareBackend:
         if thickness <= 1:
             self.sw_bresenham(x1, y1, x2, y2, color)
         else:
+            # Thick-line coverage rule unified with the Vulkan line kernel
+            # (backend_vulkan_glsl.spl::_glsl_line, 2026-08-15): walk the
+            # Bresenham points of the center line and stamp a full
+            # (2*half+1)^2 square at each point — square end caps included —
+            # instead of offsetting parallel Bresenham lines. See
+            # doc/08_tracking/bug/vulkan_cpu_thick_line_row_coverage_divergence_2026-08-15.md
             val half = thickness / 2
-            var offset = -half
-            var adx = x2 - x1
-            if adx < 0: adx = -adx
-            var ady = y2 - y1
-            if ady < 0: ady = -ady
-            while offset <= half:
-                if adx >= ady:
-                    self.sw_bresenham(x1, y1 + offset, x2, y2 + offset, color)
-                else:
-                    self.sw_bresenham(x1 + offset, y1, x2 + offset, y2, color)
-                offset = offset + 1
+            var dx = x2 - x1
+            var dy = y2 - y1
+            var sx: i32 = 1
+            var sy: i32 = 1
+            if dx < 0:
+                dx = -dx
+                sx = -1
+            if dy < 0:
+                dy = -dy
+                sy = -1
+            var err = dx - dy
+            var cx = x1
+            var cy = y1
+            while true:
+                var ty = -half
+                while ty <= half:
+                    var tx = -half
+                    while tx <= half:
+                        self.sw_set_pixel(cx + tx, cy + ty, color)
+                        tx = tx + 1
+                    ty = ty + 1
+                if cx == x2 and cy == y2:
+                    return
+                val e2 = 2 * err
+                if e2 > -dy:
+                    err = err - dy
+                    cx = cx + sx
+                if e2 < dx:
+                    err = err + dx
+                    cy = cy + sy
 
     me draw_circle(cx: i32, cy: i32, r: i32, color: u32):
         # Degenerate radius is a no-op, matching Metal's
@@ -1469,7 +1494,8 @@ impl SoftwareBackend:
         Scan is row-major over the tile grid, emitting one rect per run of
         horizontally-adjacent dirty tiles, then merging vertically-stacked runs
         that share x and w. Past `max_rects` the set collapses to its single
-        bounding rect; if the bound covers >60% of the surface the whole
+        bounding rect; if the damaged area (or that bound) covers >60% of
+        the surface the whole
         surface is returned as one rect (a partial path costing more than the
         full copy is a loss).
 
@@ -1559,13 +1585,29 @@ impl SoftwareBackend:
         # 8K areas multiplied by a percentage exceed i32.  Widen before every
         # multiply so the full/local decision is deterministic at large sizes.
         val bound_area = (bx1 - bx0).to_i64() * (by1 - by0).to_i64()
+        # Actual damaged area: emitted rects are disjoint, so a plain sum is
+        # exact.  Using the bound here instead used to widen two separated
+        # vertical strips into a full-surface copy just because their bounding
+        # box was large.
+        var damage_area = 0i64
+        var da = 0
+        while da < rect_count:
+            val o4 = da * 4
+            damage_area = damage_area + out[o4 + 2].to_i64() * out[o4 + 3].to_i64()
+            da = da + 1
         val surface_area = self.w.to_i64() * self.h.to_i64()
         # Compare against floor(3/5 surface) without cross-multiplication;
         # even the largest positive i32 dimensions cannot overflow this form.
         val full_threshold = (surface_area / 5) * 3 + ((surface_area % 5) * 3) / 5
-        if surface_area > 0 and bound_area > full_threshold:
+        # Full-surface fallback keys off ACTUAL damaged area (>60% of the
+        # surface actually touched means a partial path costs more than the
+        # full copy).  The over-cap collapse below still keys off the bound,
+        # since the bound is what it would return.
+        if surface_area > 0 and damage_area > full_threshold:
             return [0, 0, self.w, self.h]
         if rect_count > cap:
+            if surface_area > 0 and bound_area > full_threshold:
+                return [0, 0, self.w, self.h]
             return [bx0, by0, bx1 - bx0, by1 - by0]
         out
 

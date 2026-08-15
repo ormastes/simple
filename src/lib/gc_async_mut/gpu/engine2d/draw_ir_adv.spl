@@ -1216,11 +1216,23 @@ fn _engine2d_draw_ir_fresh_device_command_supported(command: DrawIrCommand, imag
         native_index_bounded and
         (exact_size or scaled_work_bounded)
 
+fn _engine2d_draw_ir_fresh_device_initializer_metadata_only(style: [DrawIrStyleProp]) -> bool:
+    # Style keys that never change how an opaque rect paints: identity
+    # metadata plus the fallback material hash marker. Any painting-relevant
+    # key (borders, shadows, radius, backgrounds, realized backdrop props)
+    # disqualifies the rect as a full-target opaque initializer.
+    for prop in style:
+        val key = prop.key
+        if not (key == "source" or key == "part" or key == "z-index" or
+            key == "focused" or key == "backdrop-filter-fallback-material-hash"):
+            return false
+    true
+
 fn _engine2d_draw_ir_fresh_device_initializes_target(command: DrawIrCommand, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32) -> bool:
     if command.x != 0 or command.y != 0 or command.width != width or command.height != height:
         return false
     if command.kind == "rect":
-        return command.computed_style.len() == 0 and ((command.color >> 24) & 0xFFu32) == 0xFFu32
+        return _engine2d_draw_ir_fresh_device_initializer_metadata_only(command.computed_style) and ((command.color >> 24) & 0xFFu32) == 0xFFu32
     if command.kind != "image":
         return false
     val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
@@ -1365,8 +1377,14 @@ fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, compositio
 
 fn _engine2d_draw_ir_strict_vulkan_rejected(composition: DrawIrComposition, reason: text) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, true)
-    _engine2d_draw_ir_result_from_composition_plan_with_unsupported(
+    var result = _engine2d_draw_ir_result_from_composition_plan_with_unsupported(
         plan, 0, 1, reason, engine2d_readback([], "preflight_rejected"))
+    # The strict lane reports the canonical rejection token verbatim: `reason`
+    # is a preflight verdict, not an unsupported-command-kinds list, so it must
+    # not be wrapped in the "unsupported Draw IR commands skipped:" prefix.
+    result.fallback_required = true
+    result.fallback_reason = reason
+    result
 
 fn _engine2d_draw_ir_strict_vulkan_command_count(composition: DrawIrComposition) -> i32:
     var count = 0
@@ -3063,6 +3081,10 @@ fn engine2d_draw_ir_adv_strict_vulkan_primitives_with_images(engine: Engine2D, c
     val submission = engine2d_draw_ir_adv_strict_vulkan_submit_with_images(
         engine, composition, images)
     var result = engine2d_draw_ir_adv_strict_vulkan_readback(submission)
+    if result.readback_source == "preflight_rejected":
+        # A preflight rejection already carries the canonical verdict token
+        # verbatim; it must not be relabelled as missing device evidence.
+        return result
     val expected = _engine2d_draw_ir_strict_vulkan_command_count(composition)
     val font_required = _engine2d_draw_ir_composition_has_text(composition)
     val readback_valid = (result.readback_source == "device_readback" and
