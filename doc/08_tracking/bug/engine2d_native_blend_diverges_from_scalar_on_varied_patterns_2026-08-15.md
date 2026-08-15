@@ -36,10 +36,19 @@ Rust kernel change and no seed rebuild were needed.
 - `test/perf/graphics_2d/bench_span_kernels.spl`: `SIMPLE_2D_SIMD=off` and
   `=auto` now both print `SPAN_BENCH_DONE checksum=316643543` (previously
   948743592 vs 316643543).
-- New regression test "iterated const-src blends over translucent dst stay
+- New parity test "iterated const-src blends over translucent dst stay
   bit-identical to scalar" added to
   `test/01_unit/lib/gpu/engine2d/simd_kernels_config_matrix_spec.spl`
-  (18/18 pass). `simd_kernels_branch_coverage_spec.spl` 26/26,
+  (18/18 pass). **Scope caveat (review 2026-08-15):** `bin/simple test` runs
+  the interpreter lane, which was never affected — this spec guards formula
+  parity, NOT the MIR-lane defect; it would have been green before the fix.
+  The non-vacuous regression evidence is the run-lane bench checksum
+  comparison above; the root-cause fix
+  (`seed_mir_any_binop_result_unboxed_2026-08-15.md`) must carry a run-lane
+  probe. Note also: the C blend has vector paths only for SSE2/AVX2; NEON and
+  RVV use the same scalar `engine2d_blend_pixel` loop, so "native kernels
+  correct" is proven on AVX2 and structurally safe (same formula, no separate
+  kernel) elsewhere. `simd_kernels_branch_coverage_spec.spl` 26/26,
   `engine2d_vulkan_image_compare_spec.spl` 2/2, `simd_kernels_spec.spl`
   50/51 (the 1 red is the pre-existing "cross-mode return-array span bridge"
   source-shape test from another session's backend_software.spl work, tracked
