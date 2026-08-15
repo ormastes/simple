@@ -785,6 +785,17 @@ fn _cov_print_report(spec_path: text, sdn: text):
     var called: dict<text, bool> = {}
     var seen_files: dict<text, bool> = {}
     var files: [text] = []
+    # Branch (decision) coverage: per-file executed-decision accounting from
+    # the runtime store's `decisions |id, file, line, column, true_count,
+    # false_count|` section. A decision is covered when BOTH outcomes were
+    # taken. Denominator = decisions the run actually executed (the runtime
+    # store records nothing for never-reached decisions), so this measures
+    # decision-outcome coverage over executed decisions — stated as such in
+    # the bug doc; a static all-decisions denominator is future work.
+    var dec_total: dict<text, i64> = {}
+    var dec_hit: dict<text, i64> = {}
+    var seen_dec_files: dict<text, bool> = {}
+    var dec_files: [text] = []
     var section = ""
     for raw in sdn.split("\n"):
         val t = raw.trim()
@@ -794,7 +805,10 @@ fn _cov_print_report(spec_path: text, sdn: text):
         if t.starts_with("functions |"):
             section = "functions"
             continue
-        if t.starts_with("sffi_calls |") or t.starts_with("summary"):
+        if t.starts_with("decisions |"):
+            section = "decisions"
+            continue
+        if t.starts_with("sffi_calls |") or t.starts_with("summary") or t.starts_with("conditions |") or t.starts_with("paths |"):
             section = ""
             continue
         if t == "":
@@ -815,6 +829,25 @@ fn _cov_print_report(spec_path: text, sdn: text):
             val parts = t.split(", ")
             if parts.len() >= 2:
                 called[parts[0]] = true
+        elif section == "decisions":
+            # Row: id, file, line, column, true_count, false_count
+            val parts = t.split(", ")
+            if parts.len() >= 6:
+                val f = _cov_norm_path(parts[1])
+                val tc = parts[4].trim().to_i64() ?? 0
+                val fc = parts[5].trim().to_i64() ?? 0
+                if dec_total.contains_key(f):
+                    dec_total[f] = dec_total[f] + 1
+                else:
+                    dec_total[f] = 1
+                if tc > 0 and fc > 0:
+                    if dec_hit.contains_key(f):
+                        dec_hit[f] = dec_hit[f] + 1
+                    else:
+                        dec_hit[f] = 1
+                if not seen_dec_files.contains_key(f):
+                    seen_dec_files[f] = true
+                    dec_files.push(f)
     val spec_src = rt_file_read_text(spec_path)
     if spec_src == "":
         return
@@ -824,6 +857,23 @@ fn _cov_print_report(spec_path: text, sdn: text):
     print ""
     for tpath in targets:
         print _cov_report_for_file(tpath, hits, called, files)
+    for tpath in targets:
+        print _cov_branch_report_for_file(tpath, dec_total, dec_hit, dec_files)
+
+fn _cov_branch_report_for_file(path: text, dec_total: dict<text, i64>,
+                               dec_hit: dict<text, i64>, dec_files: [text]) -> text:
+    """`coverage-branch: <path> NN% (hit/total decisions)` — decision-outcome
+    coverage over decisions this run executed in `path` (both outcomes taken
+    = hit). 0/0 means the run never reached a decision in the file."""
+    val rec = _cov_recorded_file_for_target(path, dec_files)
+    if rec == "" or not dec_total.contains_key(rec):
+        return "coverage-branch: {path} 0% (0/0 decisions)"
+    val total = dec_total[rec]
+    val hit = if dec_hit.contains_key(rec): dec_hit[rec] else: 0
+    if total == 0:
+        return "coverage-branch: {path} 0% (0/0 decisions)"
+    val pct = (hit * 100) / total
+    "coverage-branch: {path} {pct}% ({hit}/{total} decisions)"
 
 fn main() -> i64:
     var run = parse_child_run(clean_args())

@@ -537,3 +537,39 @@ prerequisite specs F7/F8 absent from `origin/main`) is unaffected by
 anything in this pass and still blocks C2/C3 regardless. **This pass does
 not reopen or re-assess C2/C3 achievability** — it only rebuilds the
 render_2d Wave-3 prerequisite gate script itself, per its own scope.
+
+## 2026-08-15: per-file branch summary line landed (prerequisite 5's rollup, runner path)
+
+Minimal end-to-end slice implemented in pure Simple (no rebuild needed —
+runner source is read at process start):
+`src/app/test_runner_new/test_runner_single.spl`'s `_cov_print_report` now
+also parses the runtime store's `decisions |id, file, line, column,
+true_count, false_count|` section of the merged SDN and prints, per `@cover`
+target, alongside the existing line banner:
+
+```
+coverage-branch: <path> NN% (hit/total decisions)
+```
+
+A decision counts as hit when BOTH outcomes were taken. **Denominator
+semantics, stated honestly:** total = decisions the run actually EXECUTED in
+that file (the runtime store records nothing for never-reached decisions), so
+this is decision-outcome coverage over executed decisions, not over all
+static decisions in the file. A static denominator (enumerate all decisions
+via MIR probe-plan of the target file) remains future work, as does JIT/
+native probe emission on the production `lower_to_mir` path (root cause 1)
+— this slice covers the interpreter path `bin/simple test` actually uses.
+
+Verification (2026-08-15, `bin/simple` -> Rust seed
+`bin/release/x86_64-unknown-linux-gnu/simple`): a 3-example branching spec
+with `# @cover src/lib/common/base_encoding.spl`, run as
+`SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<path> bin/simple test <spec>
+--coverage --no-cache --no-cover-check`, printed
+`Results: 3 total, 3 passed, 0 failed`, wrote a 6,719-byte SDN artifact whose
+`decisions` section holds 10 real `src/lib/common/base_encoding.spl` rows
+(real line/column, nonzero true/false counts), and emitted
+`coverage: src/lib/common/base_encoding.spl 55% (29/52 lines)` plus
+`coverage-branch: src/lib/common/base_encoding.spl 40% (4/10 decisions)` —
+the 4/10 hand-checked against the artifact rows (exactly 4 rows have both
+counts > 0). Branch coverage is now measurable on the spipe/.spl runner
+path, with the executed-decisions denominator caveat above.
