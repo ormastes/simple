@@ -11,7 +11,7 @@ Shared-body pattern: configs are data, the body is one function — see
 """
 
 use std.spec.{describe, it, expect}
-use std.gpu.engine2d.simd_kernels.{SimdLevel, detect_simd_level, CpuSimdRuntimeEvidence, cpu_simd_required_evidence_valid, fill_span, _scalar_fill_span, copy_span, _scalar_copy_span, alpha_blend_span, _scalar_alpha_blend_span, simd_blit_rect, _scalar_blit_rect, simd_scroll_region, _scalar_scroll_region, simd_config_mode, native_pixel_rows_enabled}
+use std.gpu.engine2d.simd_kernels.{SimdLevel, detect_simd_level, CpuSimdRuntimeEvidence, cpu_simd_required_evidence_valid, fill_span, _scalar_fill_span, copy_span, _scalar_copy_span, alpha_blend_span, _scalar_alpha_blend_span, simd_blit_rect, _scalar_blit_rect, simd_scroll_region, _scalar_scroll_region, simd_config_mode, native_pixel_rows_enabled, _forced_simd_level}
 
 # ============================================================================
 # The 6-config matrix: arch × (scalar | simd)
@@ -149,6 +149,37 @@ describe "cpu_simd_required_evidence_valid per config":
 # Config-specific tests: scroll edge branches + host lane sanity
 # ============================================================================
 
+describe "varied-pattern blend parity (native vs scalar)":
+    it "blends a varied translucent pattern identically on native and scalar paths":
+        # Guards the native-vs-scalar blend contract on varied (non-canonical)
+        # alpha. A divergence on a different input class (iterated const-src
+        # blending over translucent dst) is tracked in doc/08_tracking/bug/
+        # engine2d_native_blend_diverges_from_scalar_on_varied_patterns_2026-08-15.md
+        # The scalar reference is the contract; do not weaken this assertion.
+        val n: i64 = 64
+        var dst: [u32] = [0; 64]
+        var ref_dst: [u32] = [0; 64]
+        var src: [u32] = [0; 64]
+        var i: i64 = 0
+        while i < n:
+            # varied alpha/color, incl. translucent dst pixels
+            val a = ((i * 37 + 11) % 256) as u32
+            val c = ((i * 97 + 5) % 256) as u32
+            src[i.to_i32()] = (a << 24) | (c << 16) | ((255u32 - c) << 8) | (a ^ c)
+            val da = ((i * 53 + 3) % 256) as u32
+            dst[i.to_i32()] = (da << 24) | (c << 8) | 0x40u32
+            ref_dst[i.to_i32()] = dst[i.to_i32()]
+            i = i + 1
+        alpha_blend_span(dst, src, 0, n)
+        _scalar_alpha_blend_span(ref_dst, src, 0, n)
+        var mismatches: i64 = 0
+        i = 0
+        while i < n:
+            if dst[i.to_i32()] != ref_dst[i.to_i32()]:
+                mismatches = mismatches + 1
+            i = i + 1
+        expect(mismatches).to_equal(0)
+
 describe "scroll region branch edges":
     it "overshoot delta leaves buffer untouched (rows_to_copy <= 0)":
         var buf: [u32] = [0xAA; 16]
@@ -174,8 +205,35 @@ describe "host lane detection":
     it "simd config mode is a known vocabulary value":
         val mode = simd_config_mode()
         val known = (mode == "auto" or mode == "off" or mode == "sse2" or
-            mode == "avx2" or mode == "neon")
+            mode == "avx2" or mode == "neon" or mode == "rvv")
         expect(known).to_equal(true)
+
+    it "forced ISA mode forces the reported level (D8 wiring)":
+        # Run this spec with SIMPLE_2D_SIMD=sse2|avx2|neon|rvv to drive each
+        # non-host detection arm on any host; the C kernels still dispatch on
+        # the real CPU so the shared parity body above stays bit-exact.
+        val mode = simd_config_mode()
+        if mode == "sse2":
+            expect(detect_simd_level().feature_text()).to_equal("sse42")
+        elif mode == "avx2":
+            expect(detect_simd_level().feature_text()).to_equal("avx2")
+        elif mode == "neon":
+            expect(detect_simd_level().arch_text()).to_equal("aarch64")
+        elif mode == "rvv":
+            expect(detect_simd_level().arch_text()).to_equal("riscv64")
+        elif mode == "off":
+            expect(native_pixel_rows_enabled()).to_equal(false)
+        else:
+            expect(mode).to_equal("auto")
+
+    it "forced-level mapper covers every ISA name and rejects non-ISA values":
+        expect(_forced_simd_level("sse2")).to_equal(SimdLevel.Sse42)
+        expect(_forced_simd_level("avx2")).to_equal(SimdLevel.Avx2)
+        expect(_forced_simd_level("neon")).to_equal(SimdLevel.Neon)
+        expect(_forced_simd_level("rvv")).to_equal(SimdLevel.Rvv)
+        expect(_forced_simd_level("auto")).to_equal(SimdLevel.None_)
+        expect(_forced_simd_level("off")).to_equal(SimdLevel.None_)
+        expect(_forced_simd_level("bogus")).to_equal(SimdLevel.None_)
 
     it "native rows gate agrees with detected level when mode is not off":
         if simd_config_mode() == "off":

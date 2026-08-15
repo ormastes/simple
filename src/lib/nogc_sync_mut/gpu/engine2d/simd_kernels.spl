@@ -123,9 +123,32 @@ fn engine2d_simd_neon_reset() -> i64:
 var _cached_simd_level: SimdLevel = SimdLevel.None_
 var _simd_detected: bool = false
 
+fn _forced_simd_level(mode: text) -> SimdLevel:
+    # Explicit ISA names in SIMPLE_2D_SIMD force the reported level (D8).
+    # The C row kernels still dispatch on the real CPU, so forcing a foreign
+    # ISA name is safe: routing/telemetry follow the forced level, execution
+    # stays correct for the host. "auto"/"off"/unknown return None_ (not forced).
+    if mode == "sse2":
+        return SimdLevel.Sse42
+    if mode == "avx2":
+        return SimdLevel.Avx2
+    if mode == "neon":
+        return SimdLevel.Neon
+    if mode == "rvv":
+        return SimdLevel.Rvv
+    SimdLevel.None_
+
 fn detect_simd_level() -> SimdLevel:
     if _simd_detected:
         return _cached_simd_level
+
+    val mode = simd_config_mode()
+    if mode != "auto" and mode != "off":
+        val forced = _forced_simd_level(mode)
+        if forced != SimdLevel.None_:
+            _cached_simd_level = forced
+            _simd_detected = true
+            return forced
 
     if engine2d_simd_has_avx2():
         _cached_simd_level = SimdLevel.Avx2
@@ -336,13 +359,14 @@ var _native_rows_detected: bool = false
 extern fn rt_env_get(name: text) -> text
 
 # SIMPLE_2D_SIMD selects the CPU span-kernel path. Values:
-#   auto (default) | off | sse2 | avx2 | neon
+#   auto (default) | off | sse2 | avx2 | neon | rvv
 # NOTE: Workstream A owns the `screen_simd` rc.conf key that surfaces this
 # setting on SimpleOS; the two value sets MUST stay identical. Do not add a
-# third vocabulary.
-# Today only `auto` and `off` change behaviour: the explicit ISA names are
-# accepted and treated as `auto` (the C/Rust kernel does its own runtime
-# dispatch); wiring them to a forced level is D8.
+# third vocabulary. (`rvv` added 2026-08-15 with the D8 wiring below —
+# mirror it into the rc.conf key's accepted set.)
+# D8 (done): explicit ISA names force the reported SimdLevel via
+# _forced_simd_level(); the C/Rust row kernel still does its own runtime
+# dispatch, so execution is always host-correct.
 pub fn simd_config_mode() -> text:
     val raw = rt_env_get("SIMPLE_2D_SIMD")
     if raw == nil or raw == "":

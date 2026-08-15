@@ -1,0 +1,100 @@
+# @tag: rendering, engine2d, vulkan, parity, readback
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl 20%
+"""Engine2D software-vs-Vulkan rendered-image comparison.
+
+Renders the same axis-aligned scene (clear + filled rects + clip) through the
+software backend and through a real Vulkan device, reads back the Vulkan
+framebuffer, and compares images pixel-for-pixel. The scene deliberately uses
+only rect fills and clipping so GPU rasterization is bit-exact against the
+CPU reference — no circles/lines whose GPU coverage rules may differ.
+
+Skips (with a real probe diagnostic) only when the host has no usable Vulkan
+device; on this repo's CI hosts lavapipe guarantees one.
+"""
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.color.{rgb}
+
+val W: i32 = 32
+val H: i32 = 24
+
+fn draw_compare_scene(mut engine: Engine2D):
+    engine.clear(rgb(3, 5, 7))
+    engine.draw_rect_filled(1, 1, 8, 5, rgb(40, 70, 100))
+    engine.draw_rect_filled(11, 8, 9, 6, rgb(120, 20, 80))
+    engine.draw_rect_filled(20, 14, 12, 10, rgb(10, 200, 30))
+    engine.set_clip(25, 0, 7, 7)
+    engine.draw_rect_filled(22, 0, 10, 10, rgb(8, 180, 200))
+    engine.clear_clip()
+
+fn render_software() -> [u32]:
+    var engine = Engine2D.create_with_backend(W, H, "software")
+    draw_compare_scene(engine)
+    engine.present()
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn mismatch_count(a: [u32], b: [u32]) -> i64:
+    if a.len() != b.len():
+        return 999999
+    var bad: i64 = 0
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            bad = bad + 1
+        i = i + 1
+    bad
+
+describe "Engine2D Vulkan rendered-buffer image comparison":
+
+    context "vulkan device readback vs software reference":
+
+        it "renders the scene identically on Vulkan and software backends":
+            val probe = Engine2D.probe_backend(W, H, "vulkan")
+            if not probe.is_ok():
+                # No Vulkan device on this host — record why, pass vacuously
+                # only with the diagnostic visible in the spec output.
+                println("VULKAN_UNAVAILABLE diagnostic=" + probe.diagnostic_text())
+                expect(probe.diagnostic_text().len() > 0).to_equal(true)
+                return
+            val created = Engine2D.create_with_backend_strict(W, H, "vulkan")
+            expect(created.is_ok()).to_equal(true)
+            var engine = created.unwrap()
+            draw_compare_scene(engine)
+            engine.present()
+            val readback = engine.read_pixels_with_source()
+            val software = render_software()
+            println("VULKAN_COMPARE source=" + readback.source +
+                " pixels=" + readback.pixel_count.to_text() +
+                " checksum=" + readback.checksum.to_text())
+            # A CPU-fallback readback would compare the software mirror with
+            # itself — demand pixels actually came off the device.
+            expect(readback.source).to_equal("device_readback")
+            expect(readback.pixel_count).to_equal((W * H).to_i64())
+            expect(mismatch_count(readback.pixels, software)).to_equal(0)
+            engine.shutdown()
+
+        it "vulkan readback is deterministic across two renders":
+            val probe = Engine2D.probe_backend(W, H, "vulkan")
+            if not probe.is_ok():
+                println("VULKAN_UNAVAILABLE diagnostic=" + probe.diagnostic_text())
+                expect(probe.diagnostic_text().len() > 0).to_equal(true)
+                return
+            var first: [u32] = []
+            var second: [u32] = []
+            var round = 0
+            while round < 2:
+                val created = Engine2D.create_with_backend_strict(W, H, "vulkan")
+                expect(created.is_ok()).to_equal(true)
+                var engine = created.unwrap()
+                draw_compare_scene(engine)
+                engine.present()
+                if round == 0:
+                    first = engine.read_pixels()
+                else:
+                    second = engine.read_pixels()
+                engine.shutdown()
+                round = round + 1
+            expect(mismatch_count(first, second)).to_equal(0)
