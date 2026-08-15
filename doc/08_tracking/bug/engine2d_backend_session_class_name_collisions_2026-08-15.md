@@ -20,15 +20,18 @@ Three parallel definitions of the BackendSession* family existed:
   (session_types.spl, session_api.spl, session_perf.spl, session_frame.spl,
   session_frame_contract_spec.spl)
 
-## Still open (not renamed — actively edited by concurrent work)
-- `src/lib/gc_async_mut/gpu/engine2d/engine2d_api.spl` defines local
-  `enum BackendSessionMode` / `BackendSessionKind` duplicating
-  `gc_async_mut/gpu/engine2d/backend_session.spl`'s enums.
-- `src/lib/gc_async_mut/gpu/engine2d/web_render_session.spl:23` defines a local
-  `enum BackendSessionMode` (third copy).
-- `src/lib/nogc_sync_mut/gpu/engine2d/backend_session.spl:224` still defines
-  `class BackendSessionError` (internal-only; collides with spec-local mocks in
-  `test/*/gpu/graphics_3d_session_managed_backend_spec.spl`).
+## Follow-up fixed after the first synchronized push
+- `src/lib/gc_async_mut/gpu/engine2d/engine2d_api.spl` local enums are now
+  `Engine2DApiSessionMode` / `Engine2DApiSessionKind`, so they cannot collide
+  with `gc_async_mut/gpu/engine2d/backend_session.spl`.
+- `src/lib/gc_async_mut/gpu/engine2d/web_render_session.spl` now uses
+  `WebRenderSessionMode` instead of a third `BackendSessionMode` definition.
+
+- The no-GC module's internal `BackendSessionError` is now
+  `ComputeSessionLifecycleError`, removing its collision with spec-local mocks
+  in `test/*/gpu/graphics_3d_session_managed_backend_spec.spl`.
+
+All production collisions identified in this record are now removed.
 
 ## Verification (queued behind the Stage-4 bootstrap resource lock)
 ```
