@@ -1,0 +1,338 @@
+# @tag: unit, wm, compositor, coverage
+# @cover src/os/compositor/engine2d_wm_frame_executor.spl 62%
+"""
+# Engine2dWmFrameExecutor — Branch Coverage Closure
+
+Drives every headless-reachable decision in
+`src/os/compositor/engine2d_wm_frame_executor.spl`: render() admission
+gates, per-window fail-closed degrade filtering, retained old/new damage
+plan branches, local recompose, and the create_host_gpu early-exit lattice
+(unavailable base, bad dims, invalid session, invalid clock, budget
+timeouts).
+
+Headless ceiling (decisions that CANNOT flip under `simple test`):
+- Host-gpu ivshmem lanes (lines 180 loop side, 231, 375, 403 and all of
+  `_render_host_gpu`): the tree-walk test interpreter has no
+  `rt_volatile_read/write_*` extern implementations, so any mmio touch
+  errors out — a mapped mock region cannot be exercised here.
+- `_WM_TRACE` receipts (lines 352, 354, 384, 400, 402, 421, 435): gated by
+  a compile-time `false` constant.
+- Line 386 resource-coverage mismatch: defensive invariant, structurally
+  unreachable (image/frame pushes are symmetric with admission).
+- Line 429 packed-v3 acceptance: the owner accepts rect-only scenes and
+  every WM composition carries text commands.
+- Line 443 zero-rendered rejection: the software lane always renders the
+  background rect, and target-name mismatches are not skipped.
+"""
+
+use std.spec
+use common.gpu.simpleos_host_gpu_protocol.{
+    SIMPLEOS_HOST_GPU_ISA_X86_64,
+    SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+    SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US
+}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU}
+use common.ui.taskbar_model.{TaskbarModel, AppRef, WindowRef, TrayItem}
+use common.ui.window_scene.{
+    BackgroundSpec, SharedWmScene, SharedWmWindow, WmContentFrame,
+    WM_CONTENT_ORIGIN_PIXEL_SURFACE, WM_CONTENT_ORIGIN_SIMPLE_WEB,
+    shared_wm_background_color, wm_content_frame_checksum
+}
+use common.ui.render_opt.damage_plan.{DAMAGE_PLAN_FULL, DAMAGE_FALLBACK_INVALID}
+use os.compositor.engine2d_wm_frame_executor.{
+    Engine2dWmFrameExecutor,
+    engine2d_wm_background_key,
+    engine2d_wm_draw_ir_backend_target,
+    engine2d_wm_draw_ir_local_recompose_required,
+    engine2d_wm_full_damage_plan
+}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use os.kernel.boot.monotonic_hardware.{boot_monotonic_now_us}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val W: i64 = 64
+val H: i64 = 64
+
+fn _executor() -> Engine2dWmFrameExecutor:
+    Engine2dWmFrameExecutor.create(
+        Engine2D.create_with_backend(8, 8, "cpu"),
+        FramebufferDriver.empty(), W, H)
+
+fn _window(id: text, x: i32, y: i32, w: i32, h: i32, minimized: bool) -> SharedWmWindow:
+    SharedWmWindow(
+        surface_id: "s-{id}", window_id: id, surface_kind: "app",
+        process_id: 1u64, app_id: "app", title: "T", language: "en",
+        x: x, y: y, width: w, height: h, tree: nil, html: "",
+        minimized: minimized, focused: true, z_index: 1)
+
+fn _scene(windows: [SharedWmWindow]) -> SharedWmScene:
+    SharedWmScene(width: W.to_i32(), height: H.to_i32(), backend: "cpu",
+                  windows: windows,
+                  background: shared_wm_background_color(0xff101010u32))
+
+# Minimal taskbar keeps per-frame command counts (and interpreter-under-
+# coverage runtime) low; one dedicated test drives a populated model.
+fn _taskbar() -> TaskbarModel:
+    TaskbarModel(pinned: [], running: [], tray: [])
+
+fn _full_taskbar() -> TaskbarModel:
+    TaskbarModel(
+        pinned: [AppRef(app_id: "terminal", display_name: "Terminal", icon: "term")],
+        running: [WindowRef(window_id: "w1", app_id: "app", title: "T", minimized: false)],
+        tray: [TrayItem(item_id: "clock", label: "09:41", icon: "clock")])
+
+# A valid pixel-surface content frame for a titled 64x48 window: content
+# rect is (w-8)x(h-36) = 56x12.
+fn _frame_for(id: text, scene_revision: i64, w: i32, h: i32) -> WmContentFrame:
+    var pixels: [u32] = []
+    var i = 0
+    while i < w.to_i64() * h.to_i64():
+        pixels.push(0xFF336699u32)
+        i = i + 1
+    WmContentFrame(
+        window_id: id, scene_revision: scene_revision, content_revision: 2,
+        origin_kind: WM_CONTENT_ORIGIN_PIXEL_SURFACE,
+        width: w, height: h, pixels: pixels,
+        checksum: wm_content_frame_checksum(pixels),
+        parent_window_id: "", offset_x: 0, offset_y: 0)
+
+describe "backend target and recompose helpers":
+    it "selects host, cpu_simd and cpu targets by gate order":
+        expect(engine2d_wm_draw_ir_backend_target(true, "metal", false)).to_equal("metal")
+        expect(engine2d_wm_draw_ir_backend_target(true, "vulkan", true)).to_equal("vulkan")
+        expect(engine2d_wm_draw_ir_backend_target(true, "", true)).to_equal("cpu_simd")
+        expect(engine2d_wm_draw_ir_backend_target(false, "metal", true)).to_equal("cpu_simd")
+        expect(engine2d_wm_draw_ir_backend_target(false, "", false)).to_equal(DRAW_IR_BACKEND_CPU)
+
+    it "requires local recompose only when targets differ":
+        assert_true(engine2d_wm_draw_ir_local_recompose_required("vulkan", "cpu"))
+        assert_false(engine2d_wm_draw_ir_local_recompose_required("cpu", "cpu"))
+
+    it "clamps negative dims in the fail-closed full plan":
+        val clamped = engine2d_wm_full_damage_plan(-3, -4)
+        expect(clamped.planned_pixels).to_equal(0)
+        expect(clamped.mode).to_equal(DAMAGE_PLAN_FULL)
+        val normal = engine2d_wm_full_damage_plan(5, 7)
+        expect(normal.planned_pixels).to_equal(35)
+        expect(normal.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
+
+describe "create backend-target wiring":
+    it "records cpu_simd as both targets when enabled":
+        val executor = Engine2dWmFrameExecutor.create(
+            Engine2D.create_with_backend(8, 8, "cpu"),
+            FramebufferDriver.empty(), W, H, true)
+        expect(executor.draw_ir_backend_target).to_equal("cpu_simd")
+        expect(executor.local_draw_ir_backend_target).to_equal("cpu_simd")
+
+    it "defaults to the cpu draw target":
+        val executor = _executor()
+        expect(executor.draw_ir_backend_target).to_equal(DRAW_IR_BACKEND_CPU)
+        expect(executor.host_gpu_base).to_equal(0u64)
+
+describe "create_host_gpu early-exit lattice":
+    it "falls back with no mapped base":
+        val executor = Engine2dWmFrameExecutor.create_host_gpu(
+            Engine2D.create_with_backend(8, 8, "cpu"), FramebufferDriver.empty(),
+            0u64, SIMPLEOS_HOST_GPU_ISA_X86_64, SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+            W, H, boot_monotonic_now_us())
+        expect(executor.host_gpu_base).to_equal(0u64)
+        assert_false(executor.host_gpu_required)
+        expect(executor.draw_ir_backend_target).to_equal(DRAW_IR_BACKEND_CPU)
+
+    it "rejects with no mapped base when the backend is required":
+        val executor = Engine2dWmFrameExecutor.create_host_gpu(
+            Engine2D.create_with_backend(8, 8, "cpu"), FramebufferDriver.empty(),
+            0u64, SIMPLEOS_HOST_GPU_ISA_X86_64, SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+            W, H, boot_monotonic_now_us(), false, true)
+        expect(executor.host_gpu_base).to_equal(0u64)
+        assert_true(executor.host_gpu_required)
+
+    it "falls back on zero scanout dims even with a mapped base":
+        val executor = Engine2dWmFrameExecutor.create_host_gpu(
+            Engine2D.create_with_backend(8, 8, "cpu"), FramebufferDriver.empty(),
+            4096u64, SIMPLEOS_HOST_GPU_ISA_X86_64, SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+            0, 0, boot_monotonic_now_us())
+        expect(executor.host_gpu_base).to_equal(0u64)
+
+    it "falls back when the readback capacity is exceeded":
+        val executor = Engine2dWmFrameExecutor.create_host_gpu(
+            Engine2D.create_with_backend(8, 8, "cpu"), FramebufferDriver.empty(),
+            4096u64, SIMPLEOS_HOST_GPU_ISA_X86_64, SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+            8, 99999999, boot_monotonic_now_us())
+        expect(executor.host_gpu_base).to_equal(0u64)
+
+    it "falls back on an unsupported guest isa":
+        val executor = Engine2dWmFrameExecutor.create_host_gpu(
+            Engine2D.create_with_backend(8, 8, "cpu"), FramebufferDriver.empty(),
+            4096u64, 99, SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+            W, H, boot_monotonic_now_us())
+        expect(executor.host_gpu_base).to_equal(0u64)
+
+    it "rejects an invalid backend code when required":
+        val executor = Engine2dWmFrameExecutor.create_host_gpu(
+            Engine2D.create_with_backend(8, 8, "cpu"), FramebufferDriver.empty(),
+            4096u64, SIMPLEOS_HOST_GPU_ISA_X86_64, 0,
+            W, H, boot_monotonic_now_us(), false, true)
+        expect(executor.host_gpu_base).to_equal(0u64)
+        assert_true(executor.host_gpu_required)
+
+    it "falls back on an invalid negotiation clock":
+        val executor = Engine2dWmFrameExecutor.create_host_gpu(
+            Engine2D.create_with_backend(8, 8, "cpu"), FramebufferDriver.empty(),
+            4096u64, SIMPLEOS_HOST_GPU_ISA_X86_64, SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+            W, H, 0)
+        expect(executor.host_gpu_base).to_equal(0u64)
+
+    it "times out before any attempt when the start is in the future":
+        val executor = Engine2dWmFrameExecutor.create_host_gpu(
+            Engine2D.create_with_backend(8, 8, "cpu"), FramebufferDriver.empty(),
+            4096u64, SIMPLEOS_HOST_GPU_ISA_X86_64, SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+            W, H, boot_monotonic_now_us() + 1000000000)
+        expect(executor.host_gpu_base).to_equal(0u64)
+
+    it "times out before any attempt when the budget already elapsed":
+        val executor = Engine2dWmFrameExecutor.create_host_gpu(
+            Engine2D.create_with_backend(8, 8, "cpu"), FramebufferDriver.empty(),
+            4096u64, SIMPLEOS_HOST_GPU_ISA_X86_64, SIMPLEOS_HOST_GPU_BACKEND_VULKAN,
+            W, H, boot_monotonic_now_us() - 2 * SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US)
+        expect(executor.host_gpu_base).to_equal(0u64)
+
+describe "render admission gates":
+    it "rejects non-positive revisions":
+        var executor = _executor()
+        expect(executor.render(_scene([]), _taskbar(), [], 0, 1, "09:41")).to_equal(0)
+        expect(executor.render(_scene([]), _taskbar(), [], 1, 0, "09:41")).to_equal(0)
+
+    it "rejects when host gpu is required but never negotiated":
+        var executor = _executor()
+        executor.host_gpu_required = true
+        expect(executor.render(_scene([]), _taskbar(), [], 1, 1, "09:41")).to_equal(0)
+
+describe "render software presents":
+    it "presents an empty scene and retains it, then re-presents unchanged":
+        var executor = _executor()
+        expect(executor.render(_scene([]), _taskbar(), [], 3, 1, "09:41")).to_equal(3)
+        expect(executor.last_successful_scene_revision).to_equal(3)
+        # same revision again: retained plan admitted, no extents marked
+        expect(executor.render(_scene([]), _taskbar(), [], 3, 1, "09:41")).to_equal(3)
+
+    it "keeps minimized and zero-content windows as chrome without surfaces":
+        var executor = _executor()
+        val windows = [
+            _window("wmin", 10, 10, 64, 48, true),
+            _window("wzero", 30, 30, 8, 48, false)]
+        expect(executor.render(_scene(windows), _taskbar(), [], 5, 1, "09:41")).to_equal(5)
+        # both recorded invalid (minimized / zero-size) in retained extents
+        expect(executor.last_successful_window_rects.len()).to_equal(10)
+        expect(executor.last_successful_window_rects[4]).to_equal(0)
+        expect(executor.last_successful_window_rects[9]).to_equal(0)
+        # next changed revision walks retained extents past the valid==0 arm
+        expect(executor.render(_scene(windows), _taskbar(), [], 6, 1, "09:41")).to_equal(6)
+
+    it "degrades a window with no content frame but still presents":
+        var executor = _executor()
+        expect(executor.render(
+            _scene([_window("w1", 10, 10, 64, 48, false)]),
+            _taskbar(), [], 2, 1, "09:41")).to_equal(2)
+
+    it "degrades on a checksum-invalid content frame":
+        var executor = _executor()
+        var frame = _frame_for("w1", 2, 56, 12)
+        frame.checksum = 12345u64
+        expect(executor.render(
+            _scene([_window("w1", 10, 10, 64, 48, false)]),
+            _taskbar(), [frame], 2, 1, "09:41")).to_equal(2)
+
+    it "degrades on duplicate content frames for one window":
+        var executor = _executor()
+        val frames = [_frame_for("w1", 2, 56, 12), _frame_for("w1", 2, 56, 12)]
+        expect(executor.render(
+            _scene([_window("w1", 10, 10, 64, 48, false)]),
+            _taskbar(), frames, 2, 1, "09:41")).to_equal(2)
+
+    it "rejects a degraded window outright when host gpu is required":
+        var executor = _executor()
+        executor.host_gpu_required = true
+        executor.host_gpu_base = 4096u64
+        expect(executor.render(
+            _scene([_window("w1", 10, 10, 64, 48, false)]),
+            _taskbar(), [], 2, 1, "09:41")).to_equal(0)
+
+    it "presents resolved window content and retains its extents":
+        var executor = _executor()
+        val win = _window("w1", 10, 10, 64, 48, false)
+        expect(executor.render(
+            _scene([win]), _taskbar(), [_frame_for("w1", 2, 56, 12)],
+            2, 1, "09:41")).to_equal(2)
+        expect(executor.last_successful_window_rects.len()).to_equal(5)
+        expect(executor.last_successful_window_rects[4]).to_equal(1)
+        # moved window at a new revision marks old+new extents (retained lane)
+        val moved = _window("w1", 30, 30, 64, 48, false)
+        expect(executor.render(
+            _scene([moved]), _taskbar(), [_frame_for("w1", 3, 56, 12)],
+            3, 1, "09:41")).to_equal(3)
+
+    it "recomposes locally when a stale host target lingers":
+        var executor = _executor()
+        executor.draw_ir_backend_target = "vulkan"
+        expect(executor.render(_scene([]), _taskbar(), [], 4, 1, "09:41")).to_equal(4)
+
+    it "degrades a provenance-invalid simple-web frame but still presents":
+        var executor = _executor()
+        var frame = _frame_for("w1", 2, 56, 12)
+        frame.origin_kind = WM_CONTENT_ORIGIN_SIMPLE_WEB
+        expect(executor.render(
+            _scene([_window("w1", 10, 10, 64, 48, false)]),
+            _taskbar(), [frame], 2, 1, "09:41")).to_equal(2)
+
+    it "degrades the second window sharing a duplicate content uri":
+        var executor = _executor()
+        val windows = [
+            _window("w1", 2, 2, 64, 48, false),
+            _window("w1", 30, 8, 64, 48, false)]
+        expect(executor.render(
+            _scene(windows), _taskbar(), [_frame_for("w1", 2, 56, 12)],
+            2, 1, "09:41")).to_equal(2)
+
+describe "retained plan background identity":
+    it "fails closed to full when the background key changes":
+        var executor = _executor()
+        val scene = _scene([])
+        executor.record_successful_scene(scene, "key-a", 1)
+        val plan = executor.retained_scene_damage_plan(scene, "key-b", 2)
+        expect(plan.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(plan.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
+
+describe "render composition edge shapes":
+    it "still presents a zero-size scene through the software lane":
+        var executor = Engine2dWmFrameExecutor.create(
+            Engine2D.create_with_backend(8, 8, "cpu"),
+            FramebufferDriver.empty(), 0, 0)
+        val scene = SharedWmScene(width: 0, height: 0, backend: "cpu",
+                                  windows: [],
+                                  background: shared_wm_background_color(0xff101010u32))
+        expect(executor.render(scene, _taskbar(), [], 9, 1, "09:41")).to_equal(9)
+
+    it "presents a fully populated taskbar composition":
+        var executor = _executor()
+        expect(executor.render(_scene([]), _full_taskbar(), [], 8, 1, "")).to_equal(8)
+
+    it "resolves two windows with distinct content uris":
+        var executor = _executor()
+        val windows = [
+            _window("w1", 2, 2, 64, 48, false),
+            _window("w2", 30, 8, 64, 48, false)]
+        val frames = [_frame_for("w1", 7, 56, 12), _frame_for("w2", 7, 56, 12)]
+        expect(executor.render(_scene(windows), _taskbar(), frames,
+                               7, 1, "09:41")).to_equal(7)
+        expect(executor.last_successful_window_rects.len()).to_equal(10)
+        expect(executor.last_successful_window_rects[4]).to_equal(1)
+        expect(executor.last_successful_window_rects[9]).to_equal(1)
+
+    it "still presents under an unknown material target name":
+        var executor = _executor()
+        # The advanced software lane renders by command kind, not by target
+        # string, so an unknown target must not black-screen the frame.
+        executor.draw_ir_backend_target = "no-such-backend"
+        executor.local_draw_ir_backend_target = "no-such-backend"
+        expect(executor.render(_scene([]), _taskbar(), [], 11, 1, "09:41")).to_equal(11)
