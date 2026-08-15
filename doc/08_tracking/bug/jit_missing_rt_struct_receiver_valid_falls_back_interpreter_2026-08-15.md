@@ -1,7 +1,11 @@
 # JIT lane reports missing runtime fn `rt_struct_receiver_valid` and silently falls back to interpreter
 
 - **Date:** 2026-08-15
-- **Status:** OPEN
+- **Status:** RESOLVED at source (verification pending) — fixed by parallel
+  session in `f11bd8f0d6b` "fix(jit): register struct-field runtime funcs"
+  (runtime_sffi.rs RuntimeFuncSpec for rt_struct_alloc +
+  rt_struct_receiver_valid). Post-lock verification: the repro below must run
+  JIT without the missing-fn message.
 - **Area:** src/compiler_rust JIT runtime-symbol registration
 - **Severity:** perf/coverage — programs silently demote to the tree-walk interpreter
 
