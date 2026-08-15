@@ -1,0 +1,270 @@
+# @cover src/os/compositor/vulkan_present_damage_gate.spl 60%
+# NOTE: no @cover for vulkan_presenter.spl — its headless receipt validators
+# (VulkanEngine2dPresenterReceipt.is_valid,
+# VulkanEngine2dPresentDamageReceipt.is_direct_partial_present) ARE exercised
+# below (14/14 assertions pass), but the coverage probe plan attributes
+# 0/91 lines and 0/0 decisions to that module for struct-method bodies, so a
+# threshold there would fail vacuously. The rest of the module is device-bound.
+# Branch (decision) coverage for the hosted Vulkan present gate validators,
+# plus the headless-checkable receipt validators of the Vulkan presenter.
+# Pure, headless: no device or swapchain work involved.
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.gpu.engine2d.vulkan_presenter.{
+    VulkanEngine2dPresenterReceipt,
+    VulkanEngine2dPresentDamageReceipt
+}
+use os.compositor.vulkan_present_damage_gate.{
+    hosted_vulkan_present_rects_valid,
+    hosted_vulkan_present_revision_valid,
+    hosted_vulkan_present_identity_valid,
+    HOSTED_VULKAN_PRESENT_MAX_RECTS
+}
+use common.ui.render_opt.damage_plan.{DAMAGE_PLAN_NONE, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_FULL}
+
+describe "hosted_vulkan_present_rects_valid viewport and mode gates":
+    it "rejects degenerate viewports on either axis":
+        # width <= 0 true side
+        expect(hosted_vulkan_present_rects_valid(
+            0, 80, DAMAGE_PLAN_LOCAL, [0, 0, 1, 1])).to_equal(false)
+        expect(hosted_vulkan_present_rects_valid(
+            -5, 80, DAMAGE_PLAN_LOCAL, [0, 0, 1, 1])).to_equal(false)
+        # height <= 0 true side (width valid so the second sub-condition decides)
+        expect(hosted_vulkan_present_rects_valid(
+            100, 0, DAMAGE_PLAN_LOCAL, [0, 0, 1, 1])).to_equal(false)
+        expect(hosted_vulkan_present_rects_valid(
+            100, -1, DAMAGE_PLAN_LOCAL, [0, 0, 1, 1])).to_equal(false)
+
+    it "rejects any mode that is neither LOCAL nor FULL":
+        # mode != LOCAL and mode != FULL both true
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_NONE, [0, 0, 100, 80])).to_equal(false)
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, 99, [0, 0, 100, 80])).to_equal(false)
+
+    it "rejects empty, odd-length, and over-budget rect arrays":
+        # rects.len() == 0
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL, [])).to_equal(false)
+        # rects.len() % 4 != 0
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL, [1, 2, 3])).to_equal(false)
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL, [1, 2, 3, 4, 5])).to_equal(false)
+        # rects.len() / 4 > HOSTED_VULKAN_PRESENT_MAX_RECTS (257 rects)
+        var too_many: [i64] = []
+        var count: i64 = 0
+        while count <= HOSTED_VULKAN_PRESENT_MAX_RECTS:
+            # 1x1 rects along the diagonal, all in-bounds and non-overlapping
+            too_many.push(count)
+            too_many.push(count)
+            too_many.push(1)
+            too_many.push(1)
+            count = count + 1
+        expect(hosted_vulkan_present_rects_valid(
+            1000, 1000, DAMAGE_PLAN_LOCAL, too_many)).to_equal(false)
+
+describe "hosted_vulkan_present_rects_valid FULL canonical rect":
+    it "accepts only the exact full-viewport rect":
+        # all four conjuncts true
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_FULL, [0, 0, 100, 80])).to_equal(true)
+        # rects.len() == 4 false (two rects)
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_FULL,
+            [0, 0, 100, 80, 0, 0, 1, 1])).to_equal(false)
+        # rects[0] == 0 false
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_FULL, [1, 0, 100, 80])).to_equal(false)
+        # rects[1] == 0 false
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_FULL, [0, 1, 100, 80])).to_equal(false)
+        # rects[2] == width false
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_FULL, [0, 0, 99, 80])).to_equal(false)
+        # rects[3] == height false
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_FULL, [0, 0, 100, 79])).to_equal(false)
+
+describe "hosted_vulkan_present_rects_valid LOCAL per-rect bounds":
+    it "accepts an in-bounds rect and the full-cover local rect":
+        # every bounds sub-condition false; loop entered then exits
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL, [2, 3, 10, 12])).to_equal(true)
+        # rect exactly covering the viewport is a legal LOCAL rect
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL, [0, 0, 100, 80])).to_equal(true)
+
+    it "rejects each out-of-bounds axis independently":
+        # x < 0
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL, [-1, 3, 10, 12])).to_equal(false)
+        # y < 0
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL, [2, -1, 10, 12])).to_equal(false)
+        # rect_width <= 0
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL, [2, 3, 0, 12])).to_equal(false)
+        # rect_height <= 0
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL, [2, 3, 10, -2])).to_equal(false)
+        # x >= width
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL, [100, 3, 1, 1])).to_equal(false)
+        # y >= height
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL, [2, 80, 1, 1])).to_equal(false)
+        # rect_width > width - x (right edge overflow by one)
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL, [95, 3, 6, 1])).to_equal(false)
+        # rect_height > height - y (bottom edge overflow by one)
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL, [2, 75, 1, 6])).to_equal(false)
+
+describe "hosted_vulkan_present_rects_valid LOCAL overlap gate":
+    it "rejects overlapping local rects":
+        # all four overlap conjuncts true
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL,
+            [2, 3, 10, 12, 9, 12, 5, 3])).to_equal(false)
+        # containment counts as overlap too
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL,
+            [0, 0, 50, 50, 10, 10, 5, 5])).to_equal(false)
+
+    it "accepts disjoint rects flipping each overlap conjunct":
+        # second rect fully to the right, edges touching: x < prior_x+prior_width false
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL,
+            [2, 3, 10, 12, 12, 3, 5, 3])).to_equal(true)
+        # second rect fully to the left: prior_x < x + rect_width false
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL,
+            [50, 3, 10, 12, 2, 3, 5, 3])).to_equal(true)
+        # second rect fully below, edges touching: y < prior_y+prior_height false
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL,
+            [2, 3, 10, 12, 2, 15, 10, 5])).to_equal(true)
+        # second rect fully above: prior_y < y + rect_height false
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL,
+            [2, 40, 10, 12, 2, 3, 10, 5])).to_equal(true)
+        # three disjoint rects: prior loop iterates more than once per rect
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL,
+            [0, 0, 5, 5, 20, 0, 5, 5, 40, 0, 5, 5])).to_equal(true)
+        # third rect overlaps the FIRST prior only (prior loop hit at prior=0)
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL,
+            [0, 0, 5, 5, 20, 0, 5, 5, 3, 3, 5, 5])).to_equal(false)
+        # third rect overlaps the SECOND prior (prior loop advanced past first)
+        expect(hosted_vulkan_present_rects_valid(
+            100, 80, DAMAGE_PLAN_LOCAL,
+            [0, 0, 5, 5, 20, 0, 5, 5, 22, 2, 5, 5])).to_equal(false)
+
+describe "hosted_vulkan_present_revision_valid":
+    it "requires strict monotonicity of both serial and revision":
+        # both strictly greater -> true
+        expect(hosted_vulkan_present_revision_valid(8, 7, 12, 11)).to_equal(true)
+        # serial equal -> false
+        expect(hosted_vulkan_present_revision_valid(7, 7, 12, 11)).to_equal(false)
+        # serial went backwards -> false
+        expect(hosted_vulkan_present_revision_valid(6, 7, 12, 11)).to_equal(false)
+        # revision equal -> false
+        expect(hosted_vulkan_present_revision_valid(8, 7, 11, 11)).to_equal(false)
+        # revision went backwards -> false
+        expect(hosted_vulkan_present_revision_valid(8, 7, 10, 11)).to_equal(false)
+
+describe "hosted_vulkan_present_identity_valid":
+    it "rejects non-positive candidate identities":
+        # framebuffer <= 0
+        expect(hosted_vulkan_present_identity_valid(
+            0, 5, 6, 0, 0, 0)).to_equal(false)
+        # device_identity <= 0
+        expect(hosted_vulkan_present_identity_valid(
+            4, -1, 6, 0, 0, 0)).to_equal(false)
+        # adapter_identity <= 0
+        expect(hosted_vulkan_present_identity_valid(
+            4, 5, 0, 0, 0, 0)).to_equal(false)
+
+    it "accepts first-frame zero bindings and exact rebinds":
+        # all bound zero (first frame) -> true
+        expect(hosted_vulkan_present_identity_valid(
+            4, 5, 6, 0, 0, 0)).to_equal(true)
+        # all bound match exactly -> true
+        expect(hosted_vulkan_present_identity_valid(
+            4, 5, 6, 4, 5, 6)).to_equal(true)
+        # mixed zero and matching bindings -> true
+        expect(hosted_vulkan_present_identity_valid(
+            4, 5, 6, 0, 5, 6)).to_equal(true)
+
+    it "rejects any bound identity mismatch":
+        # bound framebuffer differs
+        expect(hosted_vulkan_present_identity_valid(
+            4, 5, 6, 9, 5, 6)).to_equal(false)
+        # bound device differs
+        expect(hosted_vulkan_present_identity_valid(
+            4, 5, 6, 4, 9, 6)).to_equal(false)
+        # bound adapter differs
+        expect(hosted_vulkan_present_identity_valid(
+            4, 5, 6, 4, 5, 9)).to_equal(false)
+
+describe "VulkanEngine2dPresenterReceipt.is_valid (headless)":
+    it "requires positive adapter identity, driver text, and ownership 1":
+        # all conjuncts true
+        expect(VulkanEngine2dPresenterReceipt(
+            physical_adapter_identity: 7,
+            physical_adapter_driver_identity: "gpu|vendor=1|device=2|driver=3|api=4",
+            engine2d_buffer_ownership_status: 1).is_valid()).to_equal(true)
+        # adapter identity not positive
+        expect(VulkanEngine2dPresenterReceipt(
+            physical_adapter_identity: 0,
+            physical_adapter_driver_identity: "gpu",
+            engine2d_buffer_ownership_status: 1).is_valid()).to_equal(false)
+        # empty driver identity
+        expect(VulkanEngine2dPresenterReceipt(
+            physical_adapter_identity: 7,
+            physical_adapter_driver_identity: "",
+            engine2d_buffer_ownership_status: 1).is_valid()).to_equal(false)
+        # ownership mismatch (0) and FFI error (negative)
+        expect(VulkanEngine2dPresenterReceipt(
+            physical_adapter_identity: 7,
+            physical_adapter_driver_identity: "gpu",
+            engine2d_buffer_ownership_status: 0).is_valid()).to_equal(false)
+        expect(VulkanEngine2dPresenterReceipt(
+            physical_adapter_identity: 7,
+            physical_adapter_driver_identity: "gpu",
+            engine2d_buffer_ownership_status: -2).is_valid()).to_equal(false)
+
+describe "VulkanEngine2dPresentDamageReceipt.is_direct_partial_present (headless)":
+    it "accepts only status 3 with real rects and bytes and no fallback/readback":
+        # all conjuncts true
+        expect(VulkanEngine2dPresentDamageReceipt(
+            last_present_status: 3, rect_count: 2, copied_bytes: 4096,
+            full_fallback: false, readback_performed: false)
+            .is_direct_partial_present()).to_equal(true)
+        # status 4 is the full-fallback status, not a partial present
+        expect(VulkanEngine2dPresentDamageReceipt(
+            last_present_status: 4, rect_count: 2, copied_bytes: 4096,
+            full_fallback: false, readback_performed: false)
+            .is_direct_partial_present()).to_equal(false)
+        # zero rects
+        expect(VulkanEngine2dPresentDamageReceipt(
+            last_present_status: 3, rect_count: 0, copied_bytes: 4096,
+            full_fallback: false, readback_performed: false)
+            .is_direct_partial_present()).to_equal(false)
+        # zero copied bytes
+        expect(VulkanEngine2dPresentDamageReceipt(
+            last_present_status: 3, rect_count: 2, copied_bytes: 0,
+            full_fallback: false, readback_performed: false)
+            .is_direct_partial_present()).to_equal(false)
+        # full fallback flag set
+        expect(VulkanEngine2dPresentDamageReceipt(
+            last_present_status: 3, rect_count: 2, copied_bytes: 4096,
+            full_fallback: true, readback_performed: false)
+            .is_direct_partial_present()).to_equal(false)
+        # readback performed
+        expect(VulkanEngine2dPresentDamageReceipt(
+            last_present_status: 3, rect_count: 2, copied_bytes: 4096,
+            full_fallback: false, readback_performed: true)
+            .is_direct_partial_present()).to_equal(false)
