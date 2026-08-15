@@ -1,4 +1,5 @@
 # @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 60%
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 20%
 # @tag: unit, engine2d, draw_ir, coverage
 """
 # Draw IR Advanced Executor — Branch Coverage Specification
@@ -429,6 +430,61 @@ describe "draw_ir_adv metal-request and hostile-geometry decision outcomes":
             ], 50, 30, 40, 40, "h-inset-overflow")
         ])
         expect(outcome.2).to_equal((W as i64) * (H as i64))
+
+describe "engine2d engine decision outcomes":
+    it "creates every requested backend name with software fallback":
+        # "cuda" is EXCLUDED on the interpreter lane: its create path assigns
+        # a field on a nil FFI object — see doc/08_tracking/bug/
+        # engine2d_font_api_interpreter_lane_crashes_2026-08-15.md (site 1).
+        for name in ["vulkan", "metal", "opencl", "rocm", "directx",
+                     "webgpu", "software", "cpu", "cpu_simd"]:
+            var engine = Engine2D.create_with_backend(8, 8, name)
+            # every request must resolve to a live backend with real dims
+            expect(engine.width()).to_equal(8)
+            expect(engine.height()).to_equal(8)
+            expect(engine.backend_name().len()).to_be_greater_than(0)
+            engine.shutdown()
+
+    it "draws primitives with valid and degenerate parameters":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        engine.clear(0xff202020u32)
+        engine.draw_rect(2, 2, 20, 14, 0xffff0000u32)
+        engine.draw_rect(2, 2, 0, 0, 0xffff0000u32)
+        engine.draw_rect_filled(4, 4, 16, 10, 0xff00ff00u32)
+        engine.draw_rect_filled(-5, -5, 3, 3, 0xff00ff00u32)
+        engine.draw_line(0, 0, 40, 30, 0xffffffffu32, 1)
+        engine.draw_line(5, 5, 5, 5, 0xffffffffu32, 3)
+        engine.draw_circle(30, 20, 8, 0xff00aaffu32)
+        engine.draw_circle(30, 20, 0, 0xff00aaffu32)
+        engine.draw_circle_filled(30, 20, 5, 0xffaa00ffu32)
+        engine.draw_circle_filled(90, 90, 4, 0xffaa00ffu32)
+        engine.draw_rounded_rect(10, 28, 24, 14, 4, 0xffcccc00u32)
+        engine.draw_rounded_rect(10, 28, 24, 14, 0, 0xffcccc00u32)
+        engine.draw_triangle_filled(2, 44, 20, 34, 30, 46, 0xff44cc88u32)
+        engine.draw_gradient_rect(38, 30, 20, 14, 0xffff0000u32, 0xff0000ffu32)
+        engine.present()
+        val pixels = engine.read_pixels()
+        expect(pixels.len()).to_equal((W as i64) * (H as i64))
+        # filled rect actually painted
+        expect(pixels[(8 * W + 8) as i64]).to_equal(0xff00ff00u32)
+        engine.shutdown()
+
+    it "exercises text drawing and receipt paths on the interpreter-safe surface":
+        # font-identity selection, *_with_advances, points_dpi and load_font
+        # are interpreter-lane crashers — excluded until doc/08_tracking/bug/
+        # engine2d_font_api_interpreter_lane_crashes_2026-08-15.md is fixed.
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        engine.clear(0xff000000u32)
+        engine.draw_text(2, 2, "Hi", 0xffffffffu32, 12)
+        engine.draw_text(2, 14, "", 0xffffffffu32, 12)
+        expect(engine.font_receipt_identity_matches("anything"))
+            .to_equal(false)
+        expect(engine.cancel_vulkan_present_source(0, 0)).to_equal(false)
+        expect(engine.vulkan_framebuffer_handle()).to_equal(0)
+        expect(engine.vulkan_device_identity()).to_equal(0)
+        # text lanes must not corrupt the surface size
+        expect(engine.read_pixels().len()).to_equal((W as i64) * (H as i64))
+        engine.shutdown()
 
 describe "draw_ir_adv structural and non-rect command outcomes":
     it "executes path, image, group, port and empty batches":
