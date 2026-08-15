@@ -160,9 +160,43 @@ impl<'a> MirLowerer<'a> {
                 let any_involved = (left_is_any || right_is_any)
                     && !(op == BinOp::Add && left_is_any && right_is_any);
                 if any_involved {
+                    // ANY+ANY float-possible ops (Sub/Mul/Div/Mod and ordered
+                    // comparisons) cannot pick UnboxInt vs UnboxFloat
+                    // statically — a float-valued any operand hit UnboxInt on
+                    // a float box and computed on raw bits
+                    // (seed_mir_any_binop_result_unboxed_2026-08-15.md, TODO
+                    // closed 2026-08-15). Dispatch to rt_any_* helpers that
+                    // tag-check at runtime, mirroring rt_any_add. Comparisons
+                    // return raw i64 0/1; arithmetic returns a tag-boxed
+                    // ANY result. Bit/shift ops stay on the UnboxInt path
+                    // below (float bit ops are not meaningful).
+                    if left_is_any && right_is_any {
+                        let helper = match op {
+                            BinOp::Sub => Some("rt_any_sub"),
+                            BinOp::Mul => Some("rt_any_mul"),
+                            BinOp::Div => Some("rt_any_div"),
+                            BinOp::Mod => Some("rt_any_mod"),
+                            BinOp::Lt => Some("rt_any_lt"),
+                            BinOp::Gt => Some("rt_any_gt"),
+                            BinOp::LtEq => Some("rt_any_le"),
+                            BinOp::GtEq => Some("rt_any_ge"),
+                            _ => None,
+                        };
+                        if let Some(helper) = helper {
+                            return self.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: Some(dest),
+                                    target: crate::mir::CallTarget::from_name(helper),
+                                    args: vec![left_reg, right_reg],
+                                });
+                                dest
+                            });
+                        }
+                    }
                     // Float-ness comes from a concrete side when there is one;
-                    // ANY+ANY assumes integer (the only case observed in
-                    // practice; float ANY+ANY non-Add is filed in the bug doc).
+                    // ANY+ANY reaching here is bit/shift only (integer lane).
                     let concrete_ty = if !left_is_any {
                         Some(left.ty)
                     } else if !right_is_any {

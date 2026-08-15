@@ -73,9 +73,34 @@ Evidence (deployed seed `bin/release/x86_64-unknown-linux-gnu/simple`,
   `test/01_unit/compiler/50.mir/any_binop_boxed_result_spec.spl` (7/7) covering
   `>>`, `&`, `|`, `^`, `-`, `*` and a nested chain on any-typed elements.
 
-Remaining TODO (filed, out of minimal scope): ANY+ANY non-Add ops assume
-integer operands (`UnboxInt`); float ANY+ANY Sub/Mul/etc. would need runtime
-tag dispatch (`rt_any_sub`-style helpers) mirroring `rt_any_add`.
+### Float ANY+ANY follow-up (TODO closed 2026-08-15)
+
+The remaining TODO — ANY+ANY non-Add ops assumed integer operands
+(`UnboxInt`), so a float-valued any operand computed on raw bits — was
+confirmed failing and fixed the same day.
+
+Repro (f64 array passed as `any`, elements 7.75 and 2.5): before the fix,
+`bin/simple run` (JIT) printed `sub=-64`, `mul=912910859327140449`, `div=0`,
+`lt=true`/`gt=false` (inverted), `chain=NaN`; interpreter was correct.
+
+Fix: added tag-dispatch runtime helpers mirroring `rt_any_add` —
+`rt_any_sub`/`rt_any_mul`/`rt_any_div`/`rt_any_mod` (boxed result; float lane
+when either operand `is_float()`, else wrapping int lane) and
+`rt_any_lt`/`rt_any_gt`/`rt_any_le`/`rt_any_ge` (raw i64 0/1, matching the
+comparison convention) in
+`src/compiler_rust/runtime/src/value/collections.rs`. MIR lowering
+(`lowering_expr_ops.rs`) now routes ANY+ANY Sub/Mul/Div/Mod/Lt/Gt/LtEq/GtEq
+through these calls; bit/shift ops stay on the UnboxInt path (no float lane).
+Registered in `common/src/runtime_symbols.rs` (JIT symbol table) and
+`compiler/src/codegen/runtime_sffi.rs` (RuntimeFuncSpec, so native/.smf
+captures the result).
+
+Evidence (rebuilt + redeployed seed, 2026-08-15):
+- Float repro now prints `5.25 / 19.375 / 3.1 / false / true / 10.5` under
+  both `bin/simple run` (JIT) and `SIMPLE_EXECUTION_MODE=interpreter`.
+- `test/01_unit/compiler/50.mir/any_binop_boxed_result_spec.spl` extended
+  with 5 float cases (sub/mul/div/compares/chain): 12/12.
+- `test/01_unit/lib/gpu/engine2d/simd_kernels_config_matrix_spec.spl` 18/18.
 
 ## Wanted
 

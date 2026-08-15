@@ -393,6 +393,15 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // spec, get_runtime_return_type() returns None so the call's result is never
     // captured — the native/.smf path silently yields 0 for erased addition.
     RuntimeFuncSpec::new("rt_any_add", &[I64, I64], &[I64]),
+    // ANY+ANY float-possible binops (tag-dispatched int/float lanes).
+    RuntimeFuncSpec::new("rt_any_sub", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_any_mul", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_any_div", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_any_mod", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_any_lt", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_any_gt", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_any_le", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_any_ge", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_builder_new", &[], &[I64]),
     RuntimeFuncSpec::new("rt_string_builder_push", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_builder_finish", &[I64], &[I64]),

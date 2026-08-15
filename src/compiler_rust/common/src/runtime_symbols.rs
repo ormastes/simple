@@ -488,6 +488,18 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // (Quoted text must not appear in comments here: build.rs takes the first
     // quoted token on every line in this list, so a quote creates a phantom name.)
     "rt_any_add",
+    // ANY+ANY float-possible binops: runtime tag dispatch (int vs float lane)
+    // for Sub/Mul/Div/Mod and ordered comparisons, mirroring rt_any_add.
+    // Emitted by MIR lowering for ANY+ANY operands where UnboxInt/UnboxFloat
+    // cannot be chosen statically (seed_mir_any_binop_result_unboxed doc).
+    "rt_any_sub",
+    "rt_any_mul",
+    "rt_any_div",
+    "rt_any_mod",
+    "rt_any_lt",
+    "rt_any_gt",
+    "rt_any_le",
+    "rt_any_ge",
     // String operations
     "rt_string_new",
     "rt_string_concat",

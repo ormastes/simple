@@ -2455,6 +2455,99 @@ pub extern "C" fn rt_any_add(left: RuntimeValue, right: RuntimeValue) -> Runtime
     RuntimeValue::from_int(left.as_int() + right.as_int())
 }
 
+/// True when an `any + any`-style binop must take the float lane: either
+/// operand is a float (inline TAG_FLOAT or heap-boxed). Int+int stays int.
+#[inline]
+fn any_binop_is_float(left: RuntimeValue, right: RuntimeValue) -> bool {
+    left.is_float() || right.is_float()
+}
+
+/// Decode an ANY operand numerically for the float lane: floats as-is,
+/// tagged ints promoted to f64.
+#[inline]
+fn any_as_f64(v: RuntimeValue) -> f64 {
+    if v.is_float() {
+        v.as_float()
+    } else {
+        v.as_int() as f64
+    }
+}
+
+/// Runtime tag dispatch for `any - any` (mirrors rt_any_add's tag check;
+/// see seed_mir_any_binop_result_unboxed_2026-08-15.md — an int-assuming
+/// UnboxInt on a float box computes on raw bits).
+#[no_mangle]
+pub extern "C" fn rt_any_sub(left: RuntimeValue, right: RuntimeValue) -> RuntimeValue {
+    if any_binop_is_float(left, right) {
+        return RuntimeValue::from_float(any_as_f64(left) - any_as_f64(right));
+    }
+    RuntimeValue::from_int(left.as_int().wrapping_sub(right.as_int()))
+}
+
+/// Runtime tag dispatch for `any * any`.
+#[no_mangle]
+pub extern "C" fn rt_any_mul(left: RuntimeValue, right: RuntimeValue) -> RuntimeValue {
+    if any_binop_is_float(left, right) {
+        return RuntimeValue::from_float(any_as_f64(left) * any_as_f64(right));
+    }
+    RuntimeValue::from_int(left.as_int().wrapping_mul(right.as_int()))
+}
+
+/// Runtime tag dispatch for `any / any`. Int/int keeps integer division;
+/// any float operand promotes both sides to f64. Integer division by zero
+/// yields 0 rather than trapping (no diagnostic channel here).
+#[no_mangle]
+pub extern "C" fn rt_any_div(left: RuntimeValue, right: RuntimeValue) -> RuntimeValue {
+    if any_binop_is_float(left, right) {
+        return RuntimeValue::from_float(any_as_f64(left) / any_as_f64(right));
+    }
+    RuntimeValue::from_int(left.as_int().checked_div(right.as_int()).unwrap_or(0))
+}
+
+/// Runtime tag dispatch for `any % any`. Same lane rules as rt_any_div.
+#[no_mangle]
+pub extern "C" fn rt_any_mod(left: RuntimeValue, right: RuntimeValue) -> RuntimeValue {
+    if any_binop_is_float(left, right) {
+        return RuntimeValue::from_float(any_as_f64(left) % any_as_f64(right));
+    }
+    RuntimeValue::from_int(left.as_int().checked_rem(right.as_int()).unwrap_or(0))
+}
+
+/// Ordered comparisons for `any OP any`. Return raw i64 0/1 (NOT tag-boxed):
+/// the MIR lowering's convention is that comparison results are raw bools,
+/// matching every other comparison lowering.
+#[no_mangle]
+pub extern "C" fn rt_any_lt(left: RuntimeValue, right: RuntimeValue) -> i64 {
+    if any_binop_is_float(left, right) {
+        return i64::from(any_as_f64(left) < any_as_f64(right));
+    }
+    i64::from(left.as_int() < right.as_int())
+}
+
+#[no_mangle]
+pub extern "C" fn rt_any_gt(left: RuntimeValue, right: RuntimeValue) -> i64 {
+    if any_binop_is_float(left, right) {
+        return i64::from(any_as_f64(left) > any_as_f64(right));
+    }
+    i64::from(left.as_int() > right.as_int())
+}
+
+#[no_mangle]
+pub extern "C" fn rt_any_le(left: RuntimeValue, right: RuntimeValue) -> i64 {
+    if any_binop_is_float(left, right) {
+        return i64::from(any_as_f64(left) <= any_as_f64(right));
+    }
+    i64::from(left.as_int() <= right.as_int())
+}
+
+#[no_mangle]
+pub extern "C" fn rt_any_ge(left: RuntimeValue, right: RuntimeValue) -> i64 {
+    if any_binop_is_float(left, right) {
+        return i64::from(any_as_f64(left) >= any_as_f64(right));
+    }
+    i64::from(left.as_int() >= right.as_int())
+}
+
 /// Shared body for the `is_*` character-class predicates.
 ///
 /// Mirrors the tree-walking interpreter (`interpreter_method/string.rs`, arms
