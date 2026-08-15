@@ -1,9 +1,49 @@
 # engine2d native blend row/span diverges from scalar reference on varied pixel patterns
 
 - **Date:** 2026-08-15
-- **Status:** OPEN
+- **Status:** RESOLVED (2026-08-15)
 - **Area:** src/runtime/runtime_simd_dispatch.c blend kernels vs src/lib/nogc_sync_mut/gpu/engine2d/simd_kernels.spl `_scalar_blend_row`
 - **Severity:** correctness — violates the module's stated bit-identical contract
+
+## Resolution (2026-08-15)
+
+**The filing hypothesis was inverted: the native kernels were correct; the
+scalar *reference* was mis-executing.** Both `engine2d_blend_pixel`
+(src/runtime/runtime_simd_dispatch.c:1160) and `blend_pixel`
+(src/compiler_rust/runtime/src/value/engine2d_simd_ops.rs:156) already
+implement the exact premultiplied-composite + divide-by-`out_a` formula of
+`_scalar_blend_row`, including the `sa==255`/`sa==0` fast paths and da<255
+unpremultiply — no truncating opaque-dst `/255` formula existed in the tree.
+
+The real defect: `_scalar_blend_row`'s `dst` param is typed `any`, and in the
+seed's `bin/simple run` MIR lane a bit-op on an any-typed array element
+returns its result UNBOXED while consumers decode it as boxed (int tagging is
+`v << 3`), so `da = (d >> 24) & 0xFF` came back as `f64::from_bits(80)`-style
+garbage and `dst_weight`/`out_a` were wrong on any pixel taking the
+translucent-blend branch (sa in 1..254) — hence exactly the varied-pattern
+pixels diverging while the sa==255/sa==0 canonical-alpha spec inputs stayed
+green. Root cause filed separately:
+`doc/08_tracking/bug/seed_mir_any_binop_result_unboxed_2026-08-15.md`.
+
+**Fix:** pin the element to a typed lane in the scalar reference —
+`val d = dst[idx] as u32` (simd_kernels.spl `_scalar_blend_row`). No C or
+Rust kernel change and no seed rebuild were needed.
+
+**Evidence (2026-08-15, x86_64 AVX2 host, seed `bin/simple run`):**
+- Per-pixel probe (640-px varied translucent src+dst,
+  `engine2d_simd_blend_row_u32` vs `_scalar_blend_row`): 437/640 diffs before
+  the cast, **0/640 after**.
+- `test/perf/graphics_2d/bench_span_kernels.spl`: `SIMPLE_2D_SIMD=off` and
+  `=auto` now both print `SPAN_BENCH_DONE checksum=316643543` (previously
+  948743592 vs 316643543).
+- New regression test "iterated const-src blends over translucent dst stay
+  bit-identical to scalar" added to
+  `test/01_unit/lib/gpu/engine2d/simd_kernels_config_matrix_spec.spl`
+  (18/18 pass). `simd_kernels_branch_coverage_spec.spl` 26/26,
+  `engine2d_vulkan_image_compare_spec.spl` 2/2, `simd_kernels_spec.spl`
+  50/51 (the 1 red is the pre-existing "cross-mode return-array span bridge"
+  source-shape test from another session's backend_software.spl work, tracked
+  outside this bug).
 
 ## Symptom
 

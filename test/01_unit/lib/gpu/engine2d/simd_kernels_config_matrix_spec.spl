@@ -180,6 +180,40 @@ describe "varied-pattern blend parity (native vs scalar)":
             i = i + 1
         expect(mismatches).to_equal(0)
 
+    it "iterated const-src blends over translucent dst stay bit-identical to scalar":
+        # Reproducing input class from doc/08_tracking/bug/
+        # engine2d_native_blend_diverges_from_scalar_on_varied_patterns_2026-08-15.md:
+        # a constant translucent src blended repeatedly over a varied translucent
+        # dst (the span-bench pattern). Before the fix the scalar reference lane
+        # mis-executed the da/dr/dg/db bit ops on the any-typed dst (seed MIR
+        # unboxed-binop-result bug), diverging from the native kernels on
+        # 350/640 bench pixels. The scalar formula is the contract; native and
+        # scalar must agree on every pixel after every iteration.
+        val n: i64 = 64
+        var dst: [u32] = [0; 64]
+        var ref_dst: [u32] = [0; 64]
+        var src: [u32] = [0; 64]
+        var i: i64 = 0
+        while i < n:
+            val da = ((i * 61 + 19) % 256) as u32   # includes da < 255 (translucent dst)
+            val dr = ((i * 17 + 23) % 256) as u32
+            dst[i.to_i32()] = (da << 24) | (dr << 16) | ((255u32 - dr) << 8) | (dr ^ 0x55u32)
+            ref_dst[i.to_i32()] = dst[i.to_i32()]
+            src[i.to_i32()] = 0x80CC4488u32          # constant translucent src
+            i = i + 1
+        var pass_no: i64 = 0
+        var mismatches: i64 = 0
+        while pass_no < 4:
+            alpha_blend_span(dst, src, 0, n)
+            _scalar_alpha_blend_span(ref_dst, src, 0, n)
+            i = 0
+            while i < n:
+                if dst[i.to_i32()] != ref_dst[i.to_i32()]:
+                    mismatches = mismatches + 1
+                i = i + 1
+            pass_no = pass_no + 1
+        expect(mismatches).to_equal(0)
+
 describe "scroll region branch edges":
     it "overshoot delta leaves buffer untouched (rows_to_copy <= 0)":
         var buf: [u32] = [0xAA; 16]
