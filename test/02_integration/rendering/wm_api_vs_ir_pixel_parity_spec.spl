@@ -1,0 +1,163 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 10%
+# @tag: integration, rendering, wm, draw_ir, engine2d
+"""
+# WM API vs Draw IR Pixel Parity Specification
+
+## Overview
+
+Renders the SAME small wm-like scene (desktop background, two windows with
+titlebar, body, and title text) through two independent paths and asserts
+per-pixel equality on the deterministic software (CPU) backend:
+
+- Path A (direct API): Engine2D calls — `clear`, `draw_rect_filled`,
+  `draw_text` — dispatched to the software backend.
+- Path B (Draw IR): the equivalent `DrawIrCommand` list executed through the
+  advanced Draw IR executor (`engine2d_draw_ir_adv_batch`) onto a second
+  Engine2D software instance.
+
+On failure the spec reports the first mismatching pixels with coordinates and
+RGBA values instead of a bare boolean.
+
+**Requirements:** N/A — implementation evidence for the wm -> rendering
+Draw IR projection parity.
+
+**Plan:** doc/03_plan/ui/ui_test/ui_test_sgtti_plan.md
+
+**Design:** doc/04_architecture/ui/ui_test_architecture.md
+"""
+
+use std.spec
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    DrawIrCommand,
+    draw_ir_batch,
+    draw_ir_embedding_config,
+    draw_ir_rect,
+    draw_ir_text
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_batch}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val W: i32 = 96
+val H: i32 = 64
+val DESKTOP: u32 = 0xff1e2a3au32
+val WIN1_BODY: u32 = 0xffe8e8e8u32
+val WIN1_TITLEBAR: u32 = 0xff3a6ea5u32
+val WIN2_BODY: u32 = 0xfff4f0e8u32
+val WIN2_TITLEBAR: u32 = 0xff7a4a8au32
+val TITLE_COLOR: u32 = 0xffffffffu32
+val FONT_SIZE: i32 = 12
+
+fn _hex8(v: u32) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var shift = 28
+    while shift >= 0:
+        val nibble = ((v >> (shift as u32)) & 0xfu32) as i64
+        out = out + digits[nibble]
+        shift = shift - 4
+    out
+
+fn _mismatch_report(expected: [u32], actual: [u32], width: i32, max_reports: i32) -> text:
+    var report = ""
+    var reported = 0
+    var total = 0
+    val n = expected.len()
+    var i = 0
+    while i < n:
+        if expected[i] != actual[i]:
+            total = total + 1
+            if reported < max_reports:
+                val x = (i as i32) % width
+                val y = (i as i32) / width
+                report = report + "(" + x.to_text() + "," + y.to_text() + ") api=0x" + _hex8(expected[i]) + " ir=0x" + _hex8(actual[i]) + "; "
+                reported = reported + 1
+        i = i + 1
+    if total > 0:
+        report = total.to_text() + " mismatching pixel(s): " + report
+    report
+
+# One wm-like scene, described once, as (kind, x, y, w/h or text payload).
+# Path A and Path B both consume exactly this description.
+struct WmSceneRect:
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    color: u32
+
+struct WmSceneText:
+    x: i32
+    y: i32
+    value: text
+    color: u32
+
+fn _wm_scene_rects() -> [WmSceneRect]:
+    [
+        # window 1: body + titlebar
+        WmSceneRect(x: 8, y: 8, width: 44, height: 34, color: WIN1_BODY),
+        WmSceneRect(x: 8, y: 8, width: 44, height: 10, color: WIN1_TITLEBAR),
+        # window 2 (overlapping window 1): body + titlebar
+        WmSceneRect(x: 36, y: 22, width: 50, height: 34, color: WIN2_BODY),
+        WmSceneRect(x: 36, y: 22, width: 50, height: 10, color: WIN2_TITLEBAR)
+    ]
+
+fn _wm_scene_texts() -> [WmSceneText]:
+    [
+        WmSceneText(x: 11, y: 8, value: "Ed", color: TITLE_COLOR),
+        WmSceneText(x: 39, y: 22, value: "Sh", color: TITLE_COLOR)
+    ]
+
+fn _render_via_api() -> [u32]:
+    var engine = Engine2D.create_with_backend(W, H, "cpu")
+    engine.clear(DESKTOP)
+    for r in _wm_scene_rects():
+        engine.draw_rect_filled(r.x, r.y, r.width, r.height, r.color)
+    for t in _wm_scene_texts():
+        engine.draw_text(t.x, t.y, t.value, t.color, FONT_SIZE)
+    val pixels = engine.read_pixels()
+    engine.shutdown()
+    pixels
+
+fn _render_via_draw_ir() -> [u32]:
+    var commands: [DrawIrCommand] = []
+    var rect_index = 0
+    for r in _wm_scene_rects():
+        commands.push(draw_ir_rect(
+            "wm-rect-" + rect_index.to_text(), r.x, r.y, r.width, r.height, r.color))
+        rect_index = rect_index + 1
+    var text_index = 0
+    for t in _wm_scene_texts():
+        commands.push(draw_ir_text(
+            "wm-title-" + text_index.to_text(), t.x, t.y, t.value, t.color))
+        text_index = text_index + 1
+    val batch = draw_ir_batch(
+        "wm-scene", DRAW_IR_BACKEND_CPU,
+        draw_ir_embedding_config("surface", "wm", 0, 0, W, H, 0, 1000, false),
+        commands)
+    var engine = Engine2D.create_with_backend(W, H, "cpu")
+    engine.clear(DESKTOP)
+    val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+    val pixels = result.pixels
+    engine.shutdown()
+    pixels
+
+describe "WM scene API vs Draw IR pixel parity":
+
+    it "renders identical pixels through Engine2D API and Draw IR execution":
+        val api_pixels = _render_via_api()
+        val ir_pixels = _render_via_draw_ir()
+        expect(api_pixels.len()).to_equal((W as i64) * (H as i64))
+        expect(ir_pixels.len()).to_equal(api_pixels.len())
+        expect(_mismatch_report(api_pixels, ir_pixels, W, 8)).to_equal("")
+
+    it "renders a non-trivial scene (not all background)":
+        val api_pixels = _render_via_api()
+        expect(api_pixels[0]).to_equal(DESKTOP)
+        # inside window 1 body
+        expect(api_pixels[((25 * W) + 20) as i64]).to_equal(WIN1_BODY)
+        # window 2 overlaps window 1 — top-of-stack wins (probe right of the
+        # title text so glyph rendering does not cover the sampled pixel)
+        expect(api_pixels[((25 * W) + 78) as i64]).to_equal(WIN2_TITLEBAR)
+        # inside window 2 body, below the titlebar
+        expect(api_pixels[((45 * W) + 70) as i64]).to_equal(WIN2_BODY)
