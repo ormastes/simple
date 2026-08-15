@@ -1,7 +1,7 @@
 # Seed MIR lane: bit-op on any-typed value returns UNBOXED result, corrupting nested expressions
 
 - **Date:** 2026-08-15
-- **Status:** OPEN
+- **Status:** RESOLVED (2026-08-15)
 - **Area:** src/compiler_rust/compiler/src/mir/lower/lowering_expr_ops.rs (ANY-operand BinOp lowering) / MIR execution lane used by `bin/simple run`
 - **Severity:** correctness — silent wrong integers, no diagnostic
 
@@ -47,6 +47,35 @@ This was the actual root cause of
 350/640 varied bench pixels, making the pure-Simple *reference* diverge from
 the (correct) native C/Rust kernels. Fixed there with the `as u32` workaround;
 the underlying lowering bug remains open here.
+
+## Resolution (2026-08-15)
+
+Fixed in `src/compiler_rust/compiler/src/mir/lower/lowering_expr_ops.rs`
+(`lower_binary_expr`): the existing mixed-ANY unbox block was extended to
+cover ANY+ANY operands for the non-Add arithmetic/bit/compare ops
+(Sub/Mul/Div/Mod/BitAnd/BitOr/BitXor/Shl/Shr/Lt/Gt/LtEq/GtEq) — each ANY
+operand is unboxed (`UnboxInt`/`UnboxFloat`), the native `BinOp` runs on raw
+values, and — the actual defect — the raw result of an arithmetic/bit op is
+now **re-boxed** (`BoxInt`/`BoxFloat`), since these expressions are ANY-typed
+and every consumer decodes the tag-boxed representation. Comparisons stay
+raw (bool i64 0/1). ANY+ANY `Add` remains on `rt_any_add` (string concat).
+No new runtime symbols needed (pure MIR insts), so `runtime_symbols.rs`
+is unchanged.
+
+Evidence (deployed seed `bin/release/x86_64-unknown-linux-gnu/simple`,
+2026-08-15):
+- Repro now prints `1344853885 / 80 / 125 / 80` (was `…/10/<value:0x7d>/denormal`)
+  under both `bin/simple run` (JIT) and `SIMPLE_EXECUTION_MODE=interpreter`.
+- `test/perf/graphics_2d/bench_span_kernels.spl` checksum `316643543` under
+  both `SIMPLE_2D_SIMD=off` and `auto`.
+- `test/01_unit/lib/gpu/engine2d/simd_kernels_config_matrix_spec.spl` 18/18.
+- New regression spec:
+  `test/01_unit/compiler/50.mir/any_binop_boxed_result_spec.spl` (7/7) covering
+  `>>`, `&`, `|`, `^`, `-`, `*` and a nested chain on any-typed elements.
+
+Remaining TODO (filed, out of minimal scope): ANY+ANY non-Add ops assume
+integer operands (`UnboxInt`); float ANY+ANY Sub/Mul/etc. would need runtime
+tag dispatch (`rt_any_sub`-style helpers) mirroring `rt_any_add`.
 
 ## Wanted
 

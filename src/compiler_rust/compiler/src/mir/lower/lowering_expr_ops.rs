@@ -155,40 +155,88 @@ impl<'a> MirLowerer<'a> {
             ) {
                 let left_is_any = left.ty == TypeId::ANY;
                 let right_is_any = right.ty == TypeId::ANY;
-                if left_is_any != right_is_any {
-                    let (any_reg, concrete_ty) = if left_is_any {
-                        (left_reg, right.ty)
+                // ANY+ANY Add stays on the rt_any_add runtime-dispatch path
+                // below (it must handle string concat too).
+                let any_involved = (left_is_any || right_is_any)
+                    && !(op == BinOp::Add && left_is_any && right_is_any);
+                if any_involved {
+                    // Float-ness comes from a concrete side when there is one;
+                    // ANY+ANY assumes integer (the only case observed in
+                    // practice; float ANY+ANY non-Add is filed in the bug doc).
+                    let concrete_ty = if !left_is_any {
+                        Some(left.ty)
+                    } else if !right_is_any {
+                        Some(right.ty)
                     } else {
-                        (right_reg, left.ty)
+                        None
                     };
-                    let is_float_concrete = matches!(concrete_ty, TypeId::F32 | TypeId::F64);
-                    let is_int_concrete = matches!(
-                        concrete_ty,
-                        TypeId::I8
-                            | TypeId::I16
-                            | TypeId::I32
-                            | TypeId::I64
-                            | TypeId::U8
-                            | TypeId::U16
-                            | TypeId::U32
-                            | TypeId::U64
-                    );
+                    let is_float_concrete = matches!(concrete_ty, Some(TypeId::F32 | TypeId::F64));
+                    let is_int_concrete = concrete_ty.map_or(true, |t| {
+                        matches!(
+                            t,
+                            TypeId::I8
+                                | TypeId::I16
+                                | TypeId::I32
+                                | TypeId::I64
+                                | TypeId::U8
+                                | TypeId::U16
+                                | TypeId::U32
+                                | TypeId::U64
+                        )
+                    });
                     if is_int_concrete || is_float_concrete {
-                        let unboxed = self.with_func(|func, current_block| {
+                        let mut unbox = |lowerer: &mut Self, any_reg: VReg| {
+                            lowerer.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                if is_float_concrete {
+                                    block.instructions.push(MirInst::UnboxFloat { dest, value: any_reg });
+                                } else {
+                                    block.instructions.push(MirInst::UnboxInt { dest, value: any_reg });
+                                }
+                                dest
+                            })
+                        };
+                        if left_is_any {
+                            left_reg = unbox(self, left_reg)?;
+                        }
+                        if right_is_any {
+                            right_reg = unbox(self, right_reg)?;
+                        }
+                        // Comparisons yield a raw bool (i64 0/1) like every
+                        // other comparison; arithmetic/bit ops on an ANY
+                        // operand have an ANY-typed RESULT, so the raw native
+                        // result must be re-boxed — a consumer of an ANY value
+                        // always decodes the tag-boxed representation. Leaving
+                        // it raw made `(d >> 24) & 0xFF` on an any element
+                        // decode as garbage (seed_mir_any_binop_result_unboxed
+                        // _2026-08-15.md).
+                        let is_compare =
+                            matches!(op, BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq);
+                        let raw = self.with_func(|func, current_block| {
+                            let dest = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::BinOp {
+                                dest,
+                                op,
+                                left: left_reg,
+                                right: right_reg,
+                            });
+                            dest
+                        })?;
+                        if is_compare {
+                            return Ok(raw);
+                        }
+                        return self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();
                             if is_float_concrete {
-                                block.instructions.push(MirInst::UnboxFloat { dest, value: any_reg });
+                                block.instructions.push(MirInst::BoxFloat { dest, value: raw });
                             } else {
-                                block.instructions.push(MirInst::UnboxInt { dest, value: any_reg });
+                                block.instructions.push(MirInst::BoxInt { dest, value: raw });
                             }
                             dest
-                        })?;
-                        if left_is_any {
-                            left_reg = unboxed;
-                        } else {
-                            right_reg = unboxed;
-                        }
+                        });
                     }
                 }
             }
