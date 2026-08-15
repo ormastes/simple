@@ -6576,27 +6576,47 @@ int8_t rt_array_push_i64_raw(SplArray* a, int64_t val) {
  * src[src_off..] into dst[dst_off..]. Contract mirrors the seed runtime's
  * rt_array_write_span (compiler_rust/runtime value/collections.rs): returns
  * 0 for count <= 0, -1 on any out-of-bounds or invalid handle, else count.
- * Overlap-safe for dst == src (memmove). Mixed bytes/i64 storage falls back
- * to a per-element get/set loop so the byte<->tagged conversion stays with
- * the existing accessors. */
+ * Overlap-safe for dst == src (memmove). The memmove fast path requires the
+ * FULL storage layout to match — BOTH the BYTES flag AND the U64_PACKED flag
+ * (same pairwise flag-equality discipline as rt_core_array_eq above): a
+ * packed slot holds a raw u64 while an unpacked non-bytes slot holds a
+ * TAGGED value, so a bit copy between them silently corrupts. Any layout
+ * mismatch takes the per-element path, which normalizes each element to a
+ * raw u64 and re-encodes for the destination layout — the exact conversion
+ * pattern the rt_typed_words_* accessors use (rt_value_as_u64 to read a
+ * tagged slot, rt_core_value_u64_compact to store into one). */
 int64_t rt_array_write_span(SplArray* dst, SplArray* src, int64_t dst_off,
                             int64_t src_off, int64_t count) {
     if (count <= 0) return 0;
     RtCoreArray* d = rt_core_array_ptr(dst);
     RtCoreArray* s = rt_core_array_ptr(src);
     if (!d || !s) return -1;
-    if (dst_off < 0 || src_off < 0 ||
+    /* Explicit count-vs-len checks first so `len - count` can never
+     * underflow below the signed range (pathological huge counts). */
+    if (dst_off < 0 || src_off < 0 || count > d->len || count > s->len ||
         dst_off > d->len - count || src_off > s->len - count) return -1;
     int d_bytes = (d->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
     int s_bytes = (s->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
-    if (d_bytes == s_bytes) {
+    int d_u64 = (d->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
+    int s_u64 = (s->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
+    if (d_bytes == s_bytes && d_u64 == s_u64) {
         size_t esz = d_bytes ? sizeof(uint8_t) : sizeof(int64_t);
         memmove((uint8_t*)d->data + (size_t)dst_off * esz,
                 (uint8_t*)s->data + (size_t)src_off * esz,
                 (size_t)count * esz);
-    } else {
-        for (int64_t i = 0; i < count; i++) {
-            rt_array_set(dst, dst_off + i, rt_array_get(src, src_off + i));
+        return count;
+    }
+    /* Cross-layout copy: distinct layouts imply distinct arrays, so plain
+     * forward order needs no overlap handling. */
+    for (int64_t i = 0; i < count; i++) {
+        int64_t slot = s_bytes ? (int64_t)((uint8_t*)s->data)[src_off + i]
+                               : ((int64_t*)s->data)[src_off + i];
+        int64_t raw = (s_bytes || s_u64) ? slot : rt_value_as_u64(slot);
+        if (d_bytes) {
+            ((uint8_t*)d->data)[dst_off + i] = (uint8_t)(raw & 0xff);
+        } else {
+            ((int64_t*)d->data)[dst_off + i] =
+                d_u64 ? raw : rt_core_value_u64_compact(raw);
         }
     }
     return count;

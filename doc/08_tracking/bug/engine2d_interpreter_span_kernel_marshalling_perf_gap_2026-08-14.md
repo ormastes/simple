@@ -174,6 +174,28 @@ return-array round trip to shave the remaining fill ms.
   (element-loop fallbacks deleted).
 - Verified: `array_write_span_spec.spl` 6/6, `simd_kernels_config_matrix_spec`
   18/18, `simd_kernels_spec` 51/51 (interpreter lane, 2026-08-15).
+- Review fixes (Opus, 2026-08-15): (a) the C memmove fast path now requires
+  BOTH the BYTES and U64_PACKED flags to match (packed slots hold raw u64,
+  unpacked non-bytes slots hold TAGGED values — a bit copy across that
+  boundary corrupts, e.g. engine2d's `[u32]` shapes); the cross-layout
+  fallback normalizes each element to a raw u64 and re-encodes for the
+  destination (rt_value_as_u64 / rt_core_value_u64_compact, same pattern as
+  the rt_typed_words_* accessors — the plain rt_array_get/set pair is
+  packed-blind and was NOT reused). (b) The RuntimeValue-ABI declare lanes
+  (`llvm_backend.spl`, `llvm_backend_tools.spl`, `llvm_lib_translate.spl`)
+  return `ptr` (tagged RuntimeValue, sibling-consistent with their
+  `ptr @rt_array_push(ptr, ptr)`); the C-ABI lane
+  (`asm_constraints_helpers.spl`) stays raw `i64`. (c) Bounds check adds
+  explicit `count > len` guards ahead of `off > len - count` so the
+  subtraction can never underflow (the Rust impl's `dst_off + count >
+  dst_len` form has the analogous i64-overflow edge for pathological counts
+  — noted, not changed here).
+- Packed-vs-boxed regression test: NOT expressible as an interpreter spec —
+  `bin/simple test` runs on the Rust seed runtime, which never calls the C
+  `rt_array_write_span`, and the C U64_PACKED layout (rt_array_new_u64 /
+  rt_typed_words_*) has no pure-Simple constructor on that lane. The
+  cross-layout branch is therefore covered by the pending AOT probe below,
+  not by a faked spec.
 - **PENDING AOT verification** (bootstrap was running; no admitted stage
   binary to compile with at the time): after the next bootstrap deploys a
   self-hosted `bin/release/<triple>/simple`, compile+run a probe that does
