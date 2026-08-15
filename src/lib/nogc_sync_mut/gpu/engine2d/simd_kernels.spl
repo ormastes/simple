@@ -390,12 +390,40 @@ pub fn native_pixel_rows_enabled() -> bool:
 # Fill Row — write solid color across a pixel row
 # ============================================================================
 
+# Interpreter bulk write-back channel (2026-08-15). The interpreter cannot
+# mutate an array through the extern ABI (Arc-clone args), and the old
+# per-element scatter loop dominated the row cost (~180-300x vs the C kernel —
+# doc/08_tracking/bug/engine2d_interpreter_span_kernel_marshalling_perf_gap_2026-08-14.md).
+# `arr.write_span(src, dst_off, src_off, count)` is the interpreter's bulk
+# in-place array primitive on the MUTATING-METHOD channel — the one channel
+# proven to propagate through nested `mut` params (like `push`). The receiver
+# and source are typed `any` so the call lowers as a dynamic method in every
+# lane; the interpreter-only gate below keeps AOT/native on its existing
+# in-place packed-buffer path.
+fn _write_span_bulk(mut dst: any, src: any, dst_off: i64, src_off: i64, count: i64):
+    dst.write_span(src, dst_off, src_off, count)
+
+extern fn rt_is_interpreter_runtime() -> bool
+extern fn rt_is_jit_runtime() -> bool
+
+# write_span exists on the interpreter's mutating-method channel and (as
+# rt_array_write_span) in the seed-JIT dispatch table. The self-hosted AOT
+# lowering has no counterpart yet, so AOT lanes keep the element loops:
+# rt_is_jit_runtime() is a driver-set flag that stays false in AOT binaries
+# (Rust runtime default; C runtime stub in src/runtime/runtime.c).
+fn _bulk_span_ready() -> bool:
+    rt_is_interpreter_runtime() or rt_is_jit_runtime()
+
 pub fn simd_fill_row(mut buf: [u32], offset: i64, count: i64, color: u32):
     if count <= 0:
         return
     if native_pixel_rows_enabled():
         val row = engine2d_simd_fill_row_u32(count, color)
         if row.len() == count:
+            if _bulk_span_ready():
+                # One bulk scatter instead of `count` interpreted stores.
+                _write_span_bulk(buf, row, offset, 0, count)
+                return
             var j: i64 = 0
             while j < count:
                 buf[(offset + j).to_i32()] = row[j.to_i32()]
@@ -423,6 +451,14 @@ pub fn simd_blend_row(mut dst: any, src: [u32], offset: i64, count: i64):
         val n = count.to_i32()
         var dst_row: [u32] = [0; n]
         var src_row: [u32] = [0; n]
+        if _bulk_span_ready():
+            # Bulk gather + bulk scatter (three write_span calls) instead of
+            # 3*count interpreted element ops. Output identical to the loops.
+            _write_span_bulk(dst_row, dst, 0, offset, count)
+            _write_span_bulk(src_row, src, 0, offset, count)
+            val blended_i = engine2d_simd_blend_row_u32(dst_row, src_row)
+            _write_span_bulk(dst, blended_i, offset, 0, count)
+            return
         var j: i64 = 0
         while j < count:
             val idx = (offset + j).to_i32()
@@ -480,6 +516,12 @@ pub fn _scalar_blend_row(mut dst: any, src: [u32], offset: i64, count: i64):
 
 pub fn simd_blit_row(mut dst: any, dst_offset: i64, src: [u32], src_offset: i64, count: i64):
     if count <= 0:
+        return
+    if native_pixel_rows_enabled() and _bulk_span_ready():
+        # A blit is a pure copy: one bulk write_span replaces the per-element
+        # interpreted loop. Byte-identical to _scalar_blit_row by construction
+        # (memmove-style snapshot semantics cover dst==src overlap too).
+        _write_span_bulk(dst, src, dst_offset, src_offset, count)
         return
     _scalar_blit_row(dst, dst_offset, src, src_offset, count)
 

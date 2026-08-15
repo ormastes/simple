@@ -27,6 +27,23 @@ pub extern "C" fn rt_is_interpreter_runtime() -> bool {
     false
 }
 
+/// True while the current process is executing seed-JIT-compiled code
+/// (set by the driver's `run_file_jit` immediately before `main` runs).
+/// Stays `false` in AOT-native binaries, which never call the setter.
+/// Lets libraries pick lanes that exist in the in-process JIT+runtime but
+/// not (yet) in the self-hosted AOT lowering — e.g. `arr.write_span`
+/// (doc/08_tracking/bug/engine2d_interpreter_span_kernel_marshalling_perf_gap_2026-08-14.md).
+static JIT_RUNTIME_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+#[no_mangle]
+pub extern "C" fn rt_set_jit_runtime(active: bool) {
+    JIT_RUNTIME_ACTIVE.store(active, Ordering::SeqCst);
+}
+#[no_mangle]
+pub extern "C" fn rt_is_jit_runtime() -> bool {
+    JIT_RUNTIME_ACTIVE.load(Ordering::SeqCst)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1891,6 +1891,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_set_debug_mode", &[I8], &[]),  // enable -> ()
     RuntimeFuncSpec::new("rt_is_debug_mode_enabled", &[], &[I8]), // () -> bool
     RuntimeFuncSpec::new("rt_is_interpreter_runtime", &[], &[I8]), // () -> bool
+    RuntimeFuncSpec::new("rt_is_jit_runtime", &[], &[I8]), // () -> bool
     // =========================================================================
     // Regex Operations
     // =========================================================================
@@ -1978,6 +1979,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_package_sha256", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue(text)
     RuntimeFuncSpec::new("rt_pop", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_push", &[I64, I64], &[I64]),
+    // dst, src, dst_off, src_off, count -> count written (bulk in-place span copy)
+    RuntimeFuncSpec::new("rt_array_write_span", &[I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_reverse", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_reverse_mut", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_sort", &[I64], &[I64]),

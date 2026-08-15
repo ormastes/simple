@@ -5463,6 +5463,49 @@ pub extern "C" fn rt_array_fill(array: RuntimeValue, value: RuntimeValue) -> boo
     }
 }
 
+/// Bulk in-place span copy: dst[dst_off..dst_off+count] = src[src_off..src_off+count].
+///
+/// JIT/native counterpart of the interpreter's `arr.write_span(src, dst_off,
+/// src_off, count)` mutating method (compiler interpreter_method/collections.rs
+/// `array_write_span`), added for
+/// doc/08_tracking/bug/engine2d_interpreter_span_kernel_marshalling_perf_gap_2026-08-14.md.
+/// Semantics mirror the interpreter kernel: count <= 0 is a no-op returning 0;
+/// out-of-range NEVER writes and never grows the destination (returns tagged -1
+/// here, where the interpreter raises a loud error — a C ABI cannot); overlap is
+/// memmove-style (`copy_within` when dst and src are the same heap object).
+/// Returns the count written.
+#[no_mangle]
+pub extern "C" fn rt_array_write_span(
+    dst: RuntimeValue,
+    src: RuntimeValue,
+    dst_off: i64,
+    src_off: i64,
+    count: i64,
+) -> RuntimeValue {
+    if count <= 0 {
+        return RuntimeValue::from_int(0);
+    }
+    let err = RuntimeValue::from_int(-1);
+    let dst_arr = as_typed_ptr!(mut dst, HeapObjectType::Array, RuntimeArray, err);
+    let src_arr = as_typed_ptr!(src, HeapObjectType::Array, RuntimeArray, err);
+    unsafe {
+        let dst_len = (*dst_arr).len as i64;
+        let src_len = (*src_arr).len as i64;
+        if dst_off < 0 || src_off < 0 || dst_off + count > dst_len || src_off + count > src_len {
+            return err;
+        }
+        if std::ptr::eq(dst_arr as *const RuntimeArray, src_arr as *const RuntimeArray) {
+            (*dst_arr)
+                .as_mut_slice()
+                .copy_within(src_off as usize..(src_off + count) as usize, dst_off as usize);
+        } else {
+            let src_slice = &(*src_arr).as_slice()[src_off as usize..(src_off + count) as usize];
+            (*dst_arr).as_mut_slice()[dst_off as usize..(dst_off + count) as usize].copy_from_slice(src_slice);
+        }
+    }
+    RuntimeValue::from_int(count)
+}
+
 /// Create a new array filled with a value
 #[no_mangle]
 pub extern "C" fn rt_array_repeat(value: RuntimeValue, count: i64) -> RuntimeValue {

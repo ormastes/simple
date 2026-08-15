@@ -119,6 +119,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "__simple_runtime_init",
     "__simple_runtime_shutdown",
     "rt_is_interpreter_runtime",
+    "rt_is_jit_runtime",
     "rt_alloc",
     "rt_struct_alloc",
     "rt_struct_receiver_valid",
@@ -984,6 +985,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_set_debug_mode",
     "rt_is_debug_mode_enabled",
     "rt_is_interpreter_runtime",
+    "rt_is_jit_runtime",
     // File I/O operations - metadata
     "rt_file_exists",
     "rt_file_is_regular_no_follow",
@@ -1370,6 +1372,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_array_extend_i64",
     "rt_array_fill",
     "rt_array_flatten",
+    "rt_array_write_span",
     "rt_array_free",
     "rt_array_header_ptr",
     "rt_string_free",

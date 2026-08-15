@@ -564,6 +564,11 @@ pub fn rt_is_interpreter_runtime(_args: &[Value]) -> Result<Value, CompileError>
     Ok(Value::Bool(true))
 }
 
+/// The interpreter lane is never the seed-JIT lane.
+pub fn rt_is_jit_runtime(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(false))
+}
+
 /// Run a command and capture output
 ///
 /// Callable from Simple as: `rt_process_run(cmd, args)`

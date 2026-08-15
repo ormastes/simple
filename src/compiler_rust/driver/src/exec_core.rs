@@ -1165,7 +1165,15 @@ impl ExecCore {
             eprintln!("[rust-jit] execute main start");
         }
 
-        let exit_code = em.execute("main", &[])?;
+        // Mark the process as running seed-JIT code for the duration of main:
+        // JIT'd code binds rt_* symbols in-process, so stdlib gates like
+        // simd_kernels' write_span routing can detect this lane via
+        // rt_is_jit_runtime(). Cleared afterwards so a later interpreter
+        // fallback in the same process does not misreport.
+        simple_runtime::rt_set_jit_runtime(true);
+        let exit_code = em.execute("main", &[]);
+        simple_runtime::rt_set_jit_runtime(false);
+        let exit_code = exit_code?;
         if trace {
             eprintln!("[rust-jit] execute main done exit={}", exit_code);
         }

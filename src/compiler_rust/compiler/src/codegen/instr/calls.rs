@@ -3469,6 +3469,11 @@ pub fn compile_call<M: Module>(
                 // contract byte-for-byte.
                 "push" => Some("rt_push"),
                 "pop" => Some("rt_pop"),
+                // Bulk in-place span copy — JIT counterpart of the interpreter's
+                // `arr.write_span(src, dst_off, src_off, count)` mutating method.
+                // Array-only name (no text/dict method shares it), so a plain
+                // mapping cannot mis-route another receiver.
+                "write_span" => Some("rt_array_write_span"),
                 "clear" => Some("rt_clear"),
                 "join" => Some("rt_string_join"),
                 // `strip`/`trimmed` are interpreter-level aliases of `trim`

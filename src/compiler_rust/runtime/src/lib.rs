@@ -571,6 +571,9 @@ pub use value::{
     RuntimeShared, RuntimeString, RuntimeTuple, RuntimeUnique, RuntimeValue, RuntimeWeak,
 };
 
+// Re-export the seed-JIT lane flag for the driver (set around JIT main execution)
+pub use value::{rt_is_jit_runtime, rt_set_jit_runtime};
+
 // Re-export async runtime scheduler SFFI functions
 pub use async_runtime::{
     rt_async_current_task_id, rt_async_poll_tasks, rt_async_run_until_complete, rt_async_schedule_await,

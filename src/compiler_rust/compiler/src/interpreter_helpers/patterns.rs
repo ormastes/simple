@@ -173,7 +173,8 @@ pub(crate) fn handle_functional_update(
 
 /// Array methods that mutate and should update the binding
 /// Note: sort, sorted, reverse, reversed, concat all return NEW arrays and are NOT mutating
-const ARRAY_MUTATING_METHODS: &[&str] = &["append", "push", "pop", "insert", "remove", "extend", "clear"];
+const ARRAY_MUTATING_METHODS: &[&str] =
+    &["append", "push", "pop", "insert", "remove", "extend", "clear", "write_span"];
 
 /// Apply an array mutating method to a `&mut Vec<Value>` in place.
 ///
@@ -658,6 +659,38 @@ pub(crate) fn handle_method_call_with_self_update(
                             ),
                             ctx,
                         ));
+                    }
+
+                    // `write_span(src, dst_off, src_off, count)` — bulk in-place span copy.
+                    // Handled before the generic item/idx/second plumbing because it takes
+                    // FOUR arguments. Same ownership-gated `Arc::make_mut` discipline as the
+                    // generic path below: uniquely-owned → true in-place copy; aliased
+                    // (including a same-array `a.write_span(a, ...)`, whose src argument
+                    // holds a second strong ref) → clone-then-mutate, which is exactly what
+                    // gives the documented memmove-style overlap semantics (the src Value is
+                    // a pre-copy snapshot). Expression result is the COUNT WRITTEN.
+                    if method.as_str() == "write_span" {
+                        let src =
+                            eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                        let mut ints = [-1i64, -1, 0];
+                        for (slot, (arg_i, dflt)) in ints.iter_mut().zip([(1usize, -1i64), (2, -1), (3, 0)]) {
+                            *slot = match args.get(arg_i) {
+                                Some(a) => evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)?
+                                    .as_int()
+                                    .unwrap_or(dflt),
+                                None => dflt,
+                            };
+                        }
+                        if let Some(Value::Array(arc)) = env.get_mut(obj_name) {
+                            let written = {
+                                let vec = Arc::make_mut(arc);
+                                super::super::interpreter_method::collections::array_write_span(
+                                    vec, &src, ints[0], ints[1], ints[2],
+                                )?
+                            };
+                            let new_array_val = Value::Array(Arc::clone(arc));
+                            return Ok((Value::Int(written), Some((obj_name.clone(), new_array_val))));
+                        }
                     }
 
                     // Evaluate the method's argument(s) exactly ONCE, up front. This mirrors the

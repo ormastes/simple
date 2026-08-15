@@ -1724,6 +1724,12 @@ fn try_compile_builtin_method_call<M: Module>(
         "push" | "append" => "rt_push",
         "pop" => "rt_pop",
         "clear" => "rt_clear",
+        // Bulk in-place span copy — JIT counterpart of the interpreter's
+        // `arr.write_span(src, dst_off, src_off, count)` mutating method
+        // (rt_array_write_span mutates the receiver heap array in place and
+        // returns the count written). Array-only name; no other receiver
+        // type defines it.
+        "write_span" => "rt_array_write_span",
         // Generic collection methods (work on String, Array, Tuple, Dict)
         "len" | "length" => "rt_len",
         // Result/Option methods.

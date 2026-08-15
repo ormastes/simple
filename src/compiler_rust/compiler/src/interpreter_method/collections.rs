@@ -42,6 +42,61 @@ fn is_condition_present(condition_expr: &Expr, val: &Value) -> bool {
     }
 }
 
+/// Bulk in-place span copy: `dst[dst_off..dst_off+count] = src[src_off..src_off+count]`.
+///
+/// Shared validation + copy kernel for every `arr.write_span(src, dst_off, src_off,
+/// count)` dispatch site (the identifier fast path in interpreter_helpers/patterns.rs,
+/// the place write-back path in interpreter_method/mod.rs, and the borrowed-slice
+/// handler below), so bounds semantics cannot drift between lanes.
+///
+/// Contract (doc/08_tracking/bug/engine2d_interpreter_span_kernel_marshalling_perf_gap_2026-08-14.md):
+///   * `count <= 0` is a no-op returning 0 (mirrors the span kernels' guard);
+///   * any out-of-range access is a LOUD error — no silent growth, no clamp;
+///   * returns the number of elements written (== count);
+///   * overlap semantics are memmove-style: `src` here is always a snapshot Value
+///     taken at argument-evaluation time, so a same-array copy reads the PRE-copy
+///     contents even when the destination is mutated in place (the in-place path's
+///     `Arc::make_mut` sees the src argument holding a second strong ref and clones).
+pub(crate) fn array_write_span(
+    dst: &mut Vec<Value>,
+    src: &Value,
+    dst_off: i64,
+    src_off: i64,
+    count: i64,
+) -> Result<i64, CompileError> {
+    if count <= 0 {
+        return Ok(0);
+    }
+    let src_arr = match src {
+        Value::Array(a) => a,
+        _ => {
+            let ctx = ErrorContext::new()
+                .with_code(codes::TYPE_MISMATCH)
+                .with_help("write_span expects an array as its first argument");
+            return Err(CompileError::semantic_with_context(
+                "write_span expects array source argument",
+                ctx,
+            ));
+        }
+    };
+    let dst_len = dst.len() as i64;
+    let src_len = src_arr.len() as i64;
+    if dst_off < 0 || src_off < 0 || dst_off + count > dst_len || src_off + count > src_len {
+        let ctx = ErrorContext::new()
+            .with_code(codes::INDEX_OUT_OF_BOUNDS)
+            .with_help("write_span never grows the destination; ensure dst_off+count <= dst.len() and src_off+count <= src.len()");
+        return Err(CompileError::semantic_with_context(
+            format!(
+                "write_span out of range: dst_off={dst_off} src_off={src_off} count={count} dst_len={dst_len} src_len={src_len}"
+            ),
+            ctx,
+        ));
+    }
+    dst[dst_off as usize..(dst_off + count) as usize]
+        .clone_from_slice(&src_arr[src_off as usize..(src_off + count) as usize]);
+    Ok(count)
+}
+
 fn array_ndim(arr: &[Value]) -> i64 {
     if arr.is_empty() {
         return 1;
@@ -150,6 +205,30 @@ pub fn handle_array_methods(
             //     because this result is the element, not the array).
             // A non-place receiver (`[10, 20, 30].pop()`) has nothing to write back to.
             arr.last().cloned().unwrap_or(Value::Nil)
+        }
+        // Bulk in-place span copy. Like `pop` above, this handler only ever sees a
+        // BORROWED slice, so it cannot write the mutated receiver back: the owning
+        // callers do that (identifier receiver — interpreter_helpers/patterns.rs
+        // fast path; field/index/deep place — `evaluate_method_call_with_self_update`
+        // re-derives the mutated array from the RECEIVER, exactly as it does for
+        // `pop`). The expression result is the COUNT WRITTEN, not the array.
+        // This arm still runs the copy on a clone so bounds errors surface loudly
+        // even for a non-place receiver, and so the shared kernel is the single
+        // source of truth for the semantics.
+        "write_span" => {
+            let src = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let dst_off = eval_arg(args, 1, Value::Int(-1), env, functions, classes, enums, impl_methods)?
+                .as_int()
+                .unwrap_or(-1);
+            let src_off = eval_arg(args, 2, Value::Int(-1), env, functions, classes, enums, impl_methods)?
+                .as_int()
+                .unwrap_or(-1);
+            let count = eval_arg(args, 3, Value::Int(0), env, functions, classes, enums, impl_methods)?
+                .as_int()
+                .unwrap_or(0);
+            let mut tmp = arr.to_vec();
+            let written = array_write_span(&mut tmp, &src, dst_off, src_off, count)?;
+            Value::Int(written)
         }
         "concat" | "extend" | "merge" => {
             let other = eval_arg(

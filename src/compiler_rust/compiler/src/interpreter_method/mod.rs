@@ -1,6 +1,6 @@
 // Method call dispatcher - delegates to type-specific handlers
 
-mod collections;
+pub(crate) mod collections;
 mod primitives;
 mod special;
 
@@ -1875,6 +1875,8 @@ pub(crate) fn evaluate_method_call_with_self_update(
         "rotate_right",
         "truncate",
         "drain",
+        // Bulk in-place span copy (returns the COUNT, receiver derived below like `pop`)
+        "write_span",
         // Dict / Map in-place mutators
         "update",
         "set",
@@ -1957,6 +1959,41 @@ pub(crate) fn evaluate_method_call_with_self_update(
             let mut shortened = bytes.as_ref().clone();
             shortened.remove(idx as usize);
             return Ok((result, Some(Value::byte_array(shortened))));
+        }
+    }
+
+    // `write_span(src, dst_off, src_off, count)` is the third mutator whose
+    // expression result is not the mutated receiver: it yields the COUNT WRITTEN
+    // (`Int` vs `Array` never matches the discriminant test below), so — exactly
+    // like `pop` and `remove` above — the mutated receiver must be re-derived from
+    // `recv_val` here or the mutation would be SILENTLY DROPPED for every
+    // field/index/deep place. Re-evaluating the arguments is cheap (identifiers /
+    // integer expressions) and keeps this block independent of the arm that
+    // produced `result`. Bounds were already validated by the arm (shared kernel
+    // `collections::array_write_span`), which errored before reaching here.
+    if method == "write_span" {
+        if let Value::Array(arr) = &recv_val {
+            let src = match args.first() {
+                Some(a) => evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)?,
+                None => Value::Nil,
+            };
+            let mut ints = [-1i64, -1, 0];
+            for (slot, (arg_i, dflt)) in ints.iter_mut().zip([(1usize, -1i64), (2, -1), (3, 0)]) {
+                if let Some(a) = args.get(arg_i) {
+                    *slot = evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)?
+                        .as_int()
+                        .unwrap_or(dflt);
+                } else {
+                    *slot = dflt;
+                }
+            }
+            let (dst_off, src_off, count) = (ints[0], ints[1], ints[2]);
+            if count <= 0 {
+                return Ok((result, None));
+            }
+            let mut updated = arr.as_ref().clone();
+            collections::array_write_span(&mut updated, &src, dst_off, src_off, count)?;
+            return Ok((result, Some(Value::array(updated))));
         }
     }
 

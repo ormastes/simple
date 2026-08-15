@@ -254,6 +254,11 @@ bool rt_is_interpreter_runtime(void) {
     return false;
 }
 
+/* AOT-native binaries linked against this C runtime never run seed-JIT code. */
+bool rt_is_jit_runtime(void) {
+    return false;
+}
+
 /* ================================================================
  * Value Constructors
  * ================================================================ */

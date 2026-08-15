@@ -1,7 +1,7 @@
 # engine2d interpreter span kernels 180–300× slower than C due to per-element marshalling
 
 - **Date:** 2026-08-14
-- **Status:** OPEN
+- **Status:** RESOLVED 2026-08-15 (bulk `arr.write_span` primitive; see Resolution below)
 - **Area:** lib/engine2d + interpreter extern array ABI
 - **Severity:** perf (correctness is bit-exact; parity specs green)
 
@@ -91,6 +91,67 @@ test/01_unit/lib/gpu/engine2d/simd_kernels_config_matrix_spec.spl` (15/15) and
 red from ANOTHER session's uncommitted backend_software.spl edit that removed
 the literal `_scalar_fill_row(self.buf, offset as i64, count as i64, color)` —
 pre-existing, not part of this bug).
+
+## Resolution 2026-08-15 — bulk in-place `arr.write_span` primitive
+
+Implemented the doc's first "next viable direction": a bulk mutating array
+method `arr.write_span(src, dst_off, src_off, count)` (copies
+`src[src_off..+count]` into `self[dst_off..+count]`, bounds-checked with no
+silent growth, `count<=0` no-op returning 0, returns count written,
+memmove-style overlap semantics — src is snapshotted at argument evaluation).
+
+Surfaces:
+- **Interpreter (seed):** shared kernel `array_write_span` in
+  `compiler/src/interpreter_method/collections.rs`; identifier fast path in
+  `interpreter_helpers/patterns.rs` (ownership-gated `Arc::make_mut`, added to
+  `ARRAY_MUTATING_METHODS`); place write-back special case (like `pop`) in
+  `interpreter_method/mod.rs` + `MUTATING_METHODS`. Proven to propagate
+  through nested `mut` params exactly like `push`.
+- **Seed JIT:** `rt_array_write_span` (runtime/src/value/collections.rs,
+  in-place on the heap array, `copy_within` for same-array overlap, returns a
+  tagged int), dispatch arms in `codegen/instr/calls.rs` and
+  `codegen/instr/closures_structs.rs`, registered in `runtime_sffi.rs` +
+  `common/src/runtime_symbols.rs`.
+- **Lane gate:** new `rt_is_jit_runtime()` (Rust runtime flag set by the
+  driver around `run_file_jit` main execution; `false` stub in the C runtime
+  `src/runtime/runtime.c`). `simd_kernels.spl` routes its fill/blend/blit
+  scatter/gather loops through `_write_span_bulk` only when
+  `rt_is_interpreter_runtime() or rt_is_jit_runtime()` — self-hosted AOT
+  lowering has no write_span counterpart yet, so AOT keeps the element loops
+  (and AOT never needed the bridge: packed buffers run kernels in place).
+
+Measured (same host/bench, `bin/simple run test/perf/graphics_2d/bench_span_kernels.spl`):
+
+| kernel | before ms | after ms |
+|--------|-----------|----------|
+| fill   | 8         | 7 (dominated by the extern row build, no longer the scatter) |
+| copy   | 12–17     | **0** |
+| blend  | 63–71     | **26** |
+| blit   | 12–21     | **0** |
+
+Checksum stayed **316643543**. `SIMPLE_2D_SIMD=off` now also yields 316643543
+(the scalar/native blend divergence flagged in finding 4 was fixed separately
+by the blend-formula lane; off and auto agree with each other). Pure
+interpreter micro-bench of the scatter itself: 400×640 px, per-element loop
+650.7ms vs `write_span` 6.8ms (**~96×**).
+
+Important lane discovery recorded for future readers: the bench file JITs
+(its `println` even proves it — the interpreter rejects `println`), so the
+numbers in the table above are the seed-JIT lane; the pure-interpreter lane
+improvement is the 96× micro-bench. Both lanes are covered by the gate.
+
+Specs: new `test/01_unit/lib/gpu/engine2d/array_write_span_spec.spl` (6/6:
+bounds/no-growth, zero-count, overlap fwd+back memmove semantics, nested-mut
+propagation); `simd_kernels_config_matrix_spec.spl` 18/18;
+`simd_kernels_branch_coverage_spec.spl` 26/26; `simd_kernels_spec.spl` 50/51
+(the 1 red is the pre-existing "cross-mode return-array span bridge"
+source-shape test from another session's uncommitted backend_software.spl
+edit, noted above).
+
+Follow-up (small, not blocking): give the self-hosted AOT lowering
+(`src/compiler/50.mir`) a `write_span -> rt_array_write_span` arm and then
+widen `_bulk_span_ready()`; consider building the fill row without the extern
+return-array round trip to shave the remaining fill ms.
 
 ## Non-goals
 
