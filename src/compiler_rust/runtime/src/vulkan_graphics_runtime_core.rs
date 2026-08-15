@@ -436,10 +436,41 @@ pub extern "C" fn rt_vulkan_is_available() -> i64 {
     }
 }
 
+/// Without the `vulkan` cargo feature we cannot create a device, but we can
+/// still answer the availability probe honestly: dlopen the system Vulkan
+/// loader exactly like the interpreter's `interpreter_extern/gpu.rs` probe
+/// does. Fail-closed — any error means "not available" (0). Cached after the
+/// first probe.
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_is_available() -> i64 {
-    0
+    use std::sync::OnceLock;
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+
+    #[cfg(target_os = "macos")]
+    const CANDIDATES: &[&str] = &[
+        "libvulkan.1.dylib",
+        "libvulkan.dylib",
+        "/opt/homebrew/lib/libvulkan.1.dylib",
+        "/opt/homebrew/lib/libvulkan.dylib",
+        "/usr/local/lib/libvulkan.1.dylib",
+        "/usr/local/lib/libvulkan.dylib",
+    ];
+    #[cfg(all(unix, not(target_os = "macos")))]
+    const CANDIDATES: &[&str] = &["libvulkan.so.1", "libvulkan.so"];
+    #[cfg(windows)]
+    const CANDIDATES: &[&str] = &["vulkan-1.dll"];
+
+    let available = *AVAILABLE.get_or_init(|| {
+        CANDIDATES
+            .iter()
+            .any(|name| unsafe { libloading::Library::new(name).is_ok() })
+    });
+    if available {
+        1
+    } else {
+        0
+    }
 }
 
 /// Distinct provider entry used by the core C runtime fallback.
