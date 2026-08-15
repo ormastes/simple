@@ -19,6 +19,7 @@
 #ifdef SPL_HAS_IO_URING
 
 #define _GNU_SOURCE
+#include <stddef.h>
 #include "async_driver.h"
 #include <liburing.h>
 
@@ -725,6 +726,7 @@ spl_driver* spl_driver_create_uring(int64_t queue_depth)
  * Stub: io_uring headers not available at compile time.
  * Returns NULL so the dispatch layer falls through to epoll.
  */
+#include <stddef.h>
 #include "async_driver.h"
 
 spl_driver* spl_driver_create_uring(int64_t q)

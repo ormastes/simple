@@ -1,4 +1,5 @@
-#include "runtime.h"
+#define SIMPLE_RUNTIME_TESTING 1
+#include "../runtime.h"
 
 #include <errno.h>
 #include <stdint.h>
