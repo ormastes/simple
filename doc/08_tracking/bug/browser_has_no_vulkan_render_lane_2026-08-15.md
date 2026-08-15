@@ -1,10 +1,23 @@
 # Browser has no Vulkan render lane; deployed seed lacks the vulkan feature
 
 **Date:** 2026-08-15
-**Status:** PARTIAL (2026-08-15: docker/Vulkan system lane GREEN with a
-runtime-vulkan seed at `build/browser-vulkan/simple`; the compiler `vulkan`
-feature vendoring blocker is now FIXED — see "Vendored rspirv repaired" below)
+**Status:** PARTIAL (2026-08-15 post-push audit: the earlier Docker/Vulkan
+result used a Rust runtime-vulkan seed and is diagnostic only, not admissible
+production evidence. The gate now rejects seeds and remains unverified until a
+Vulkan-capable pure-Simple self-hosted CLI passes it. The compiler `vulkan`
+feature vendoring blocker is fixed — see "Vendored rspirv repaired" below.)
 **Area:** src/app/browser, src/compiler_rust (seed features)
+
+## Post-push verification correction
+
+The original lane silently returned from its SSpec when Docker or the
+Vulkan-featured seed was absent, and its shell driver explicitly executed that
+seed. Both behaviors violated the repository's fail-closed, pure-Simple
+verification policy. The SSpec now treats every unavailable/error result as a
+failure, while the driver defaults to `bin/simple` and uses
+`scripts/check/lib/require-self-hosted.shs` to reject Rust bootstrap seeds.
+Historical seed results below remain useful diagnostics, but do not establish
+a green system-test verdict.
 
 ## Gap 1 — no browser-level Vulkan render lane
 
