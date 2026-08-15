@@ -1,0 +1,293 @@
+# @tag: gpu, rendering, engine2d, webgpu, web, offload, oracle
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_webgpu.spl 40%
+# @cover src/lib/gc_async_mut/gpu/engine2d/web_render_session.spl 60%
+# @cover src/lib/gc_async_mut/gpu/engine2d/web_wm_session.spl 40%
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_webgpu_proof.spl 40%
+
+# Engine2D WEB renderer GPU offload — end-to-end as far as headless allows.
+#
+# Exercises the web-offload path: WebGPU adapter probe (honest disclosure, no
+# vacuous green), WebGpuBackend surface create + draw submission + readback,
+# a web HTML scene composited through the WebGPU backend compared against the
+# SoftwareBackend CPU oracle, WebRenderSession / WM session lifecycle rules
+# (PerfExclusive forbidden for web surfaces), and the WebGpuProofBackend
+# submit/present session flow.
+#
+# Honesty contract (mirrors engine2d_backend_matrix_spec.spl):
+#   - The CPU-mirror parts are HARD-asserted on every host: WebGpuBackend keeps
+#     a CPU ARGB mirror unconditionally, so pixel oracles never get skipped.
+#   - The GPU-device parts are disclosed: when no WebGPU adapter exists the spec
+#     prints "[webgpu-offload] SKIPPED: ..." lines and hard-asserts that the
+#     backend REPORTS unavailability honestly (init() false, probe Unavailable,
+#     readback source "cpu_mirror") instead of claiming a device it lacks.
+#   - Regression guard for the offload-desync bug fixed 2026-08-15: the GPU
+#     compute offload of clear()/draw_rect_filled() used to early-return
+#     WITHOUT writing the CPU mirror and WITHOUT applying clip/mask. The clip
+#     oracle below fails on any recurrence (on gpu_ready hosts) by construction.
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_webgpu.{
+    WebGpuBackend, webgpu_available, webgpu_probe_adapter, webgpu_strict_init_check
+}
+use std.gc_async_mut.gpu.engine2d.backend_webgpu_proof.{WebGpuProofBackend}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d.web_render_session.{WebRenderSession, BackendSessionMode}
+use std.gc_async_mut.gpu.engine2d.web_wm_session.{RenderSurfaceSession, WmSessionPolicy, WmBackendSession}
+use std.gc_async_mut.gpu.engine2d.color.{rgb, color_r, color_g, color_b}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_scene}
+
+# NOTE: no CSS `{...}` braces in this literal — `{ident}` interpolates.
+val HTML: text = "<html><body style='background:#336699'><main><p>offload</p></main></body></html>"
+
+fn pixel_mismatches(a: [u32], b: [u32]) -> i64:
+    var m = 0
+    var i = 0
+    val n = if a.len() < b.len(): a.len() else: b.len()
+    while i < n:
+        if a[i] != b[i]:
+            m = m + 1
+        i = i + 1
+    m
+
+describe "Engine2D web renderer GPU offload":
+
+    it "probes the WebGPU adapter honestly and disclosures the offload lane":
+        step("Probe adapter availability (no assumption either way)")
+        val avail = webgpu_available()
+        val probe = webgpu_probe_adapter()
+        if avail:
+            print("[webgpu-offload] adapter lane AVAILABLE: status=" + probe.status +
+                " adapters=" + probe.adapter_count.to_text() +
+                " selected=" + probe.selected_adapter)
+        else:
+            print("[webgpu-offload] SKIPPED: no WebGPU runtime on this host; " +
+                "CPU-mirror assertions below still run hard")
+
+        step("Probe result is self-consistent on every host")
+        # status vocabulary is closed
+        val status_ok = (probe.status == "Ok" or probe.status == "Failed" or probe.status == "Fallback")
+        expect(status_ok).to_be(true)
+        if not avail:
+            # No runtime => the probe must say Failed with zero adapters, never Ok.
+            expect(probe.status).to_equal("Failed")
+            expect(probe.adapter_count).to_equal(0)
+            expect(probe.fell_through_to_cpu).to_be(false)
+        if probe.status == "Ok":
+            expect(probe.adapter_count > 0).to_be(true)
+            expect(probe.fell_through_to_cpu).to_be(false)
+        if probe.status == "Fallback":
+            expect(probe.fell_through_to_cpu).to_be(true)
+
+        step("Strict-init check agrees with the probe")
+        val strict = webgpu_strict_init_check()
+        if probe.status == "Ok":
+            expect(strict.reason).to_equal("")
+        else:
+            expect(strict.reason == "").to_be(false)
+
+    it "creates a WebGPU surface session with honest init and probe reporting":
+        step("Create + init a WebGpuBackend surface")
+        var backend = WebGpuBackend.create()
+        val gpu_ok = backend.init(16, 16)
+
+        step("init() and probe() carry the same availability signal")
+        val pr = backend.probe()
+        if gpu_ok:
+            print("[webgpu-offload] surface live: " + pr.device_name)
+        else:
+            print("[webgpu-offload] SKIPPED: no live WebGPU surface (" + pr.fallback_reason + ")")
+            # Honest reporting: a CPU-mirror-only backend must not claim a device.
+            expect(backend.initialized).to_be(false)
+
+        step("CPU mirror is allocated unconditionally (hard assert)")
+        val px = backend.read_pixels()
+        expect(px.len()).to_equal(16 * 16)
+
+        step("Readback provenance is cpu_mirror always (no device readback SFFI exists)")
+        val rb = backend.read_pixels_with_source()
+        expect(rb.source).to_equal("cpu_mirror")
+        backend.shutdown()
+
+    it "draw submission readback matches the SoftwareBackend oracle (hard)":
+        step("Submit clear + filled-rect draws to the WebGPU backend")
+        var backend = WebGpuBackend.create()
+        backend.init(16, 16)
+        backend.clear(rgb(0, 0, 0))
+        backend.draw_rect_filled(4, 4, 8, 8, rgb(255, 0, 0))
+        backend.present()
+        val px = backend.read_pixels()
+
+        step("Render the same ops on the SoftwareBackend CPU oracle")
+        var sw = SoftwareBackend.create()
+        sw.init(16, 16)
+        sw.clear(rgb(0, 0, 0))
+        sw.draw_rect_filled(4, 4, 8, 8, rgb(255, 0, 0))
+        val oracle = sw.read_pixels()
+
+        step("Center is red, corner is black, channel-for-channel vs oracle")
+        val ci = (8 * 16 + 8) as i64
+        expect(color_r(px[ci])).to_equal(255)
+        expect(color_g(px[ci])).to_equal(0)
+        expect(color_b(px[ci])).to_equal(0)
+        expect(color_r(px[0])).to_equal(0)
+        expect(px[ci]).to_equal(oracle[ci])
+        expect(px[0]).to_equal(oracle[0])
+
+        step("Full-frame mismatch count is zero")
+        expect(pixel_mismatches(px, oracle)).to_equal(0)
+        backend.shutdown()
+
+    it "clip and mask apply to offloaded ops (offload-desync regression guard)":
+        step("Draw a clipped filled rect on the WebGPU backend")
+        var backend = WebGpuBackend.create()
+        backend.init(16, 16)
+        backend.clear(rgb(0, 0, 0))
+        backend.set_clip(0, 0, 8, 8)
+        backend.draw_rect_filled(0, 0, 16, 16, rgb(0, 255, 0))
+        backend.clear_clip()
+        val px = backend.read_pixels()
+
+        step("Same ops on the SoftwareBackend oracle")
+        var sw = SoftwareBackend.create()
+        sw.init(16, 16)
+        sw.clear(rgb(0, 0, 0))
+        sw.set_clip(0, 0, 8, 8)
+        sw.draw_rect_filled(0, 0, 16, 16, rgb(0, 255, 0))
+        sw.clear_clip()
+        val oracle = sw.read_pixels()
+
+        step("Inside-clip pixel painted, outside-clip pixel untouched, oracle-equal")
+        val inside = (4 * 16 + 4) as i64
+        val outside = (12 * 16 + 12) as i64
+        expect(color_g(px[inside])).to_equal(255)
+        expect(color_g(px[outside])).to_equal(0)
+        expect(pixel_mismatches(px, oracle)).to_equal(0)
+        backend.shutdown()
+
+    it "web HTML scene offloaded through the WebGPU backend matches the CPU oracle":
+        step("Produce the web draw command scene from HTML")
+        val scene = simple_web_render_html_to_scene(HTML, 48, 32)
+        expect(scene.commands.len() > 0).to_be(true)
+
+        step("Submit the scene's fill commands to the WebGPU backend")
+        var backend = WebGpuBackend.create()
+        backend.init(48, 32)
+        backend.clear(0xFFFFFFFFu32)
+        var i = 0
+        while i < scene.commands.len():
+            if scene.commands[i].kind == "fill_rect":
+                backend.draw_rect_filled(0, 0, 48, 32, scene.commands[i].color | 0xFF000000u32)
+            i = i + 1
+        backend.present()
+        val px = backend.read_pixels()
+
+        step("Composite the same scene on the SoftwareBackend oracle")
+        var sw = SoftwareBackend.create()
+        sw.init(48, 32)
+        sw.clear(0xFFFFFFFFu32)
+        var j = 0
+        while j < scene.commands.len():
+            if scene.commands[j].kind == "fill_rect":
+                sw.draw_rect_filled(0, 0, 48, 32, scene.commands[j].color | 0xFF000000u32)
+            j = j + 1
+        val oracle = sw.read_pixels()
+
+        step("Pixel-for-pixel parity with the CPU oracle (hard)")
+        expect(px.len()).to_equal(48 * 32)
+        expect(pixel_mismatches(px, oracle)).to_equal(0)
+        backend.shutdown()
+
+    it "WebRenderSession lifecycle: create, frames, refcount teardown":
+        step("Create a managed-shared web render session")
+        var ws = WebRenderSession.create(surface_id: 42, session_id: 7,
+            session_mode: BackendSessionMode.ManagedShared)
+        expect(ws.is_valid()).to_be(true)
+        expect(ws.create_surface()).to_equal(42)
+
+        step("Frame begin/end accounting")
+        ws.begin_frame()
+        expect(ws.is_active).to_be(true)
+        ws.end_frame()
+        ws.begin_frame()
+        ws.end_frame()
+        expect(ws.frame_count).to_equal(2)
+        expect(ws.begin_count).to_equal(2)
+        expect(ws.end_count).to_equal(2)
+        expect(ws.is_active).to_be(false)
+
+        step("Retain then release to zero tears the session down")
+        expect(ws.retain_session()).to_equal(2)
+        ws.release_session()
+        ws.release_session()
+        expect(ws.is_valid()).to_be(false)
+        expect(ws.create_surface()).to_equal(0)
+
+    it "PerfExclusive is rejected for web surfaces and WM children":
+        step("WebRenderSession refuses PerfExclusive")
+        var ws = WebRenderSession.create(surface_id: 1, session_id: 1,
+            session_mode: BackendSessionMode.PerfExclusive)
+        expect(ws.is_valid()).to_be(false)
+        expect(ws.create_surface()).to_equal(0)
+        expect(ws.retain_session()).to_equal(-1)
+
+        step("WM policy refuses perf_exclusive children, accepts managed_shared")
+        var wm = WmBackendSession.create(session_id: 9)
+        val rejected = wm.retain_for_child("perf_exclusive")
+        expect(rejected.starts_with("error:")).to_be(true)
+        val accepted = wm.retain_for_child("managed_shared")
+        expect(accepted.starts_with("retained")).to_be(true)
+
+    it "WM session composes surfaces and a RenderSurfaceSession tracks the pipeline":
+        step("Adopt two surfaces into the WM session and present a batch")
+        var wm = WmBackendSession.create(session_id: 3)
+        wm.add_surface(101, 48, 32)
+        wm.add_surface(102, 16, 16)
+        wm.propagate_dirty(101, 0, 0, 48, 32)
+        val presented = wm.compose_and_present()
+        expect(presented.starts_with("present batch=1")).to_be(true)
+        expect(wm.surface_count).to_equal(2)
+        expect(wm.dirty_count).to_equal(1)
+
+        step("RenderSurfaceSession accumulates stage timings + readback toggle")
+        var rs = RenderSurfaceSession.create(101, 3, "managed_shared", 48, 32)
+        val fid = rs.begin_frame()
+        rs.record_paint(120)
+        rs.record_upload(40)
+        rs.record_present(15)
+        val line = rs.end_frame(fid)
+        expect(rs.frame_count).to_equal(1)
+        expect(rs.total_pipeline_us()).to_equal(175)
+        expect(line.contains("total_us=175")).to_be(true)
+        rs.enable_readback(true)
+        expect(rs.readback_enabled).to_be(true)
+        wm.cleanup()
+
+    it "WebGpuProofBackend session flow submits and presents with honest mode":
+        step("Create the proof backend and disclose its mode")
+        var proof = WebGpuProofBackend.create()
+        val mode_ok = (proof.mode == "real" or proof.mode == "stub" or proof.mode == "unavailable")
+        expect(mode_ok).to_be(true)
+        if proof.mode == "unavailable":
+            print("[webgpu-offload] SKIPPED: proof backend unavailable (" +
+                proof.adapter_info.error_message + "); logic assertions still run")
+            step("Uninitialized session refuses submit/present")
+            expect(proof.create_device()).to_equal("error: adapter not initialized")
+            expect(proof.submit_commands(3)).to_equal("error: not initialized")
+            expect(proof.present()).to_equal("error: not initialized")
+            expect(proof.is_real_mode()).to_be(false)
+            return
+
+        print("[webgpu-offload] proof backend mode=" + proof.mode +
+            " adapter=" + proof.adapter_info.summary())
+        step("Init adapter then submit + present through the session")
+        expect(proof.init_adapter()).to_equal("ok")
+        expect(proof.create_device()).to_equal("ok")
+        val surf = proof.create_surface(48, 32)
+        expect(surf.starts_with("ok")).to_be(true)
+        val sub = proof.submit_commands(3)
+        expect(sub.starts_with("error")).to_be(false)
+        val pres = proof.present()
+        expect(pres.starts_with("error")).to_be(false)
+        expect(proof.submit_count).to_equal(1)
+        expect(proof.present_count).to_equal(1)
+        expect(proof.cleanup()).to_equal("ok")

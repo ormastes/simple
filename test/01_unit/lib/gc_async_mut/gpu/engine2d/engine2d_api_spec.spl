@@ -1,0 +1,94 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine2d_api.spl 90%
+# @tag: unit, gpu, engine2d, api
+"""
+# Engine2D API Surface Specification
+
+## Overview
+
+Covers every branch of the session-aware Engine2D API surface:
+- `resolve_kind` / `resolved_kind_name`: all ten backend-name mappings plus
+  the unknown-name Cpu default (round-tripped so both functions' branches run).
+- `resolve_mode`: legacy / perf / managed-default policies.
+- The three constructors (legacy, managed, caller-owned session).
+- The initialized / not-initialized branch of fill, blit, present, read_pixels.
+
+**Requirements:** N/A
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.engine2d_api.{
+    BackendSessionKind,
+    BackendSessionMode,
+    Engine2D,
+    resolve_kind,
+    resolve_mode,
+    resolved_kind_name
+}
+
+describe "Engine2D API kind/mode resolution":
+
+    it "round-trips every recognized backend kind name":
+        val names = ["cuda", "hip", "rocm", "opencl", "cpu_simd",
+                     "vulkan", "metal", "webgpu", "qualcomm", "cpu"]
+        for name in names:
+            expect(resolved_kind_name(name)).to_equal(name)
+
+    it "defaults unknown backend names to cpu":
+        expect(resolved_kind_name("")).to_equal("cpu")
+        expect(resolved_kind_name("directx")).to_equal("cpu")
+        assert_true(resolve_kind("nonsense") == BackendSessionKind.Cpu)
+
+    it "resolves session policies with managed as default":
+        assert_true(resolve_mode("legacy") == BackendSessionMode.LegacyNoSession)
+        assert_true(resolve_mode("perf") == BackendSessionMode.PerfExclusive)
+        assert_true(resolve_mode("managed") == BackendSessionMode.ManagedShared)
+        assert_true(resolve_mode("") == BackendSessionMode.ManagedShared)
+
+describe "Engine2D constructors":
+
+    it "creates a legacy no-session surface":
+        val e = Engine2D.create(800, 600)
+        expect(e.width).to_equal(800)
+        expect(e.height).to_equal(600)
+        expect(e.get_session_handle()).to_equal(0)
+        assert_true(e.session_mode == BackendSessionMode.LegacyNoSession)
+        assert_true(e.session_kind == BackendSessionKind.Cpu)
+        assert_true(e.initialized)
+
+    it "creates a managed session with resolved kind, policy, and synthetic handle":
+        val e = Engine2D.create_managed(64, 32, "vulkan", "perf")
+        expect(e.get_session_handle()).to_equal(64 * 32)
+        assert_true(e.session_kind == BackendSessionKind.Vulkan)
+        assert_true(e.session_mode == BackendSessionMode.PerfExclusive)
+        val d = Engine2D.create_managed(4, 4, "unknown", "unknown")
+        assert_true(d.session_kind == BackendSessionKind.Cpu)
+        assert_true(d.session_mode == BackendSessionMode.ManagedShared)
+
+    it "adopts a caller-owned session handle":
+        val e = Engine2D.create_with_session(16, 16, 42)
+        expect(e.get_session_handle()).to_equal(42)
+        assert_true(e.session_mode == BackendSessionMode.ManagedShared)
+        assert_true(e.session_kind == BackendSessionKind.Cpu)
+
+describe "Engine2D rendering operations":
+
+    it "succeeds on an initialized surface":
+        val e = Engine2D.create(8, 8)
+        expect(e.fill(0, 0, 8, 8, 0)).to_equal(0)
+        expect(e.blit(0, 0, 1, 1, 4, 4)).to_equal(0)
+        expect(e.present()).to_equal(0)
+        expect(e.read_pixels(0, 0, 8, 8)).to_equal(1)
+
+    it "rejects operations on an uninitialized surface":
+        val e = Engine2D(
+            width: 8,
+            height: 8,
+            session_handle_id: 0,
+            session_mode: BackendSessionMode.LegacyNoSession,
+            session_kind: BackendSessionKind.Cpu,
+            initialized: false
+        )
+        expect(e.fill(0, 0, 8, 8, 0)).to_equal(1)
+        expect(e.blit(0, 0, 1, 1, 4, 4)).to_equal(1)
+        expect(e.present()).to_equal(1)
+        expect(e.read_pixels(0, 0, 8, 8)).to_equal(0)

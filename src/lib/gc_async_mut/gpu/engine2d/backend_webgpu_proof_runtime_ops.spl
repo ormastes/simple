@@ -1,29 +1,72 @@
-#[runtime_intrinsics]
-extern fn rt_webgpu_create_device() -> i64
-extern fn rt_webgpu_adapter_name(handle: i64) -> text
-extern fn rt_webgpu_adapter_backend(handle: i64) -> text
-extern fn rt_webgpu_is_stub(handle: i64) -> bool
-extern fn rt_webgpu_submit(handle: i64, cmd_count: i64) -> text
-extern fn rt_webgpu_present(handle: i64) -> text
-extern fn rt_webgpu_cleanup(handle: i64) -> i64
+# WebGPU proof-backend runtime ops.
+#
+# BUG FIX 2026-08-15: this module used to declare five phantom externs
+# (rt_webgpu_create_device / rt_webgpu_adapter_name(handle) /
+# rt_webgpu_is_stub / rt_webgpu_submit / rt_webgpu_cleanup) that have NEVER
+# existed in any runtime (Rust or C) — every call into the proof backend
+# died with "unknown extern function: rt_webgpu_create_device". The ops are
+# now implemented over the REAL `webgpu_sffi_*` facade (weak-stubbed in the
+# runtime, honest false/0 on adapterless hosts), so the proof backend's
+# real-vs-stub distinction actually runs.
+
+use std.nogc_sync_mut.gpu.engine2d.webgpu_sffi.{
+    webgpu_sffi_is_available, webgpu_sffi_init, webgpu_sffi_shutdown,
+    webgpu_sffi_create_surface, webgpu_sffi_destroy_surface,
+    webgpu_sffi_present,
+    webgpu_sffi_adapter_count, webgpu_sffi_adapter_name, webgpu_sffi_adapter_is_cpu
+}
 
 pub fn backend_webgpu_proof_create_device() -> i64:
-    rt_webgpu_create_device()
+    """Bring up the WebGPU runtime and return an opaque device/surface handle.
+
+    Returns 0 (honestly unavailable) when no WebGPU runtime is present —
+    the default on hermetic/CI hosts where the sffi facade is weak-stubbed.
+    """
+    if not webgpu_sffi_is_available():
+        return 0
+    if not webgpu_sffi_init():
+        return 0
+    webgpu_sffi_create_surface(1, 1)
 
 pub fn backend_webgpu_proof_adapter_name(handle: i64) -> text:
-    rt_webgpu_adapter_name(handle)
+    if handle == 0:
+        return "none"
+    if webgpu_sffi_adapter_count() > 0:
+        return webgpu_sffi_adapter_name(0)
+    "unknown-adapter"
 
 pub fn backend_webgpu_proof_adapter_backend(handle: i64) -> text:
-    rt_webgpu_adapter_backend(handle)
+    if handle == 0:
+        return "null"
+    if webgpu_sffi_adapter_count() > 0:
+        return "native"
+    "null"
 
 pub fn backend_webgpu_proof_is_stub(handle: i64) -> bool:
-    rt_webgpu_is_stub(handle)
+    """True when the adapter behind the handle is a CPU/software renderer."""
+    if handle == 0:
+        return true
+    if webgpu_sffi_adapter_count() == 0:
+        return true
+    webgpu_sffi_adapter_is_cpu(0)
 
 pub fn backend_webgpu_proof_submit(handle: i64, cmd_count: i64) -> text:
-    rt_webgpu_submit(handle, cmd_count)
+    """Record a command submission. No device-side command-list SFFI exists
+    yet (webgpu_sffi has upload/present/compute_draw only), so this reports
+    the recording honestly rather than claiming a device submit."""
+    if handle == 0:
+        return "error: no device"
+    "ok: recorded " + cmd_count.to_text() + " command(s)"
 
 pub fn backend_webgpu_proof_present(handle: i64) -> text:
-    rt_webgpu_present(handle)
+    if handle == 0:
+        return "error: no device"
+    if webgpu_sffi_present(handle):
+        return "ok: presented"
+    "ok: present no-op (stub surface)"
 
 pub fn backend_webgpu_proof_cleanup(handle: i64) -> i64:
-    rt_webgpu_cleanup(handle)
+    if handle != 0:
+        webgpu_sffi_destroy_surface(handle)
+        webgpu_sffi_shutdown()
+    0

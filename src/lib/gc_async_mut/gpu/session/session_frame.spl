@@ -1,17 +1,17 @@
-"""session_frame — BackendFrame and frame lifecycle functions.
+"""session_frame — GpuSessionFrame and frame lifecycle functions.
 
 Implements backend_session_begin_frame, backend_session_end_frame,
 and backend_session_sync_readback. All return new values (interpreter-safe).
 """
 
 use std.io
-use std.gpu.session.session_types.{BackendSessionHandle, BackendSessionError}
+use std.gpu.session.session_types.{GpuSessionHandle, GpuSessionError}
 
 # ---------------------------------------------------------------------------
-# BackendFrameStats — read-only per-frame counters
+# GpuSessionFrameStats — read-only per-frame counters
 # ---------------------------------------------------------------------------
 
-class BackendFrameStats:
+class GpuSessionFrameStats:
     """Read-only statistics captured at end_frame."""
 
     session_id: i64
@@ -23,8 +23,8 @@ class BackendFrameStats:
     readback_bytes: i64
     valid: bool
 
-    static fn zero(session_id: i64, frame_index: i64) -> BackendFrameStats:
-        return BackendFrameStats(
+    static fn zero(session_id: i64, frame_index: i64) -> GpuSessionFrameStats:
+        return GpuSessionFrameStats(
             session_id: session_id,
             frame_index: frame_index,
             draw_call_count: 0,
@@ -35,8 +35,8 @@ class BackendFrameStats:
             valid: true
         )
 
-    static fn invalid() -> BackendFrameStats:
-        return BackendFrameStats(
+    static fn invalid() -> GpuSessionFrameStats:
+        return GpuSessionFrameStats(
             session_id: -1,
             frame_index: -1,
             draw_call_count: 0,
@@ -47,8 +47,8 @@ class BackendFrameStats:
             valid: false
         )
 
-    static fn with_draws(s: BackendFrameStats, draws: i64, verts: i64, tris: i64) -> BackendFrameStats:
-        return BackendFrameStats(
+    static fn with_draws(s: GpuSessionFrameStats, draws: i64, verts: i64, tris: i64) -> GpuSessionFrameStats:
+        return GpuSessionFrameStats(
             session_id: s.session_id,
             frame_index: s.frame_index,
             draw_call_count: draws,
@@ -60,10 +60,10 @@ class BackendFrameStats:
         )
 
 # ---------------------------------------------------------------------------
-# BackendFrame — in-progress frame token
+# GpuSessionFrame — in-progress frame token
 # ---------------------------------------------------------------------------
 
-class BackendFrame:
+class GpuSessionFrame:
     """Token representing a frame in progress. Owned by begin_frame caller.
     Frame must not cross session boundaries (rule 5 of hard rules)."""
 
@@ -75,8 +75,8 @@ class BackendFrame:
     allow_readback: bool
     draw_calls_recorded: i64
 
-    static fn begin(h: BackendSessionHandle, frame_index: i64, width: i64, height: i64, allow_readback: bool) -> BackendFrame:
-        return BackendFrame(
+    static fn begin(h: GpuSessionHandle, frame_index: i64, width: i64, height: i64, allow_readback: bool) -> GpuSessionFrame:
+        return GpuSessionFrame(
             session_id: h.id,
             frame_index: frame_index,
             width: width,
@@ -86,8 +86,8 @@ class BackendFrame:
             draw_calls_recorded: 0
         )
 
-    static fn invalid() -> BackendFrame:
-        return BackendFrame(
+    static fn invalid() -> GpuSessionFrame:
+        return GpuSessionFrame(
             session_id: -1,
             frame_index: -1,
             width: 0,
@@ -97,11 +97,11 @@ class BackendFrame:
             draw_calls_recorded: 0
         )
 
-    static fn is_valid(f: BackendFrame) -> bool:
+    static fn is_valid(f: GpuSessionFrame) -> bool:
         return f.is_active and f.session_id >= 0
 
-    static fn record_draw(f: BackendFrame) -> BackendFrame:
-        return BackendFrame(
+    static fn record_draw(f: GpuSessionFrame) -> GpuSessionFrame:
+        return GpuSessionFrame(
             session_id: f.session_id,
             frame_index: f.frame_index,
             width: f.width,
@@ -111,8 +111,8 @@ class BackendFrame:
             draw_calls_recorded: f.draw_calls_recorded + 1
         )
 
-    static fn close(f: BackendFrame) -> BackendFrame:
-        return BackendFrame(
+    static fn close(f: GpuSessionFrame) -> GpuSessionFrame:
+        return GpuSessionFrame(
             session_id: f.session_id,
             frame_index: f.frame_index,
             width: f.width,
@@ -126,32 +126,32 @@ class BackendFrame:
 # Frame lifecycle API
 # ---------------------------------------------------------------------------
 
-fn backend_session_begin_frame(h: BackendSessionHandle, frame_index: i64, width: i64, height: i64, allow_readback: bool) -> BackendFrame:
+fn backend_session_begin_frame(h: GpuSessionHandle, frame_index: i64, width: i64, height: i64, allow_readback: bool) -> GpuSessionFrame:
     """Begin a new frame on the given session handle.
     Returns invalid frame if the session handle is not valid or dimensions are zero.
     """
-    if BackendSessionHandle.is_valid(h) == false:
-        return BackendFrame.invalid()
+    if GpuSessionHandle.is_valid(h) == false:
+        return GpuSessionFrame.invalid()
     if width <= 0 or height <= 0:
-        return BackendFrame.invalid()
-    return BackendFrame.begin(h, frame_index, width, height, allow_readback)
+        return GpuSessionFrame.invalid()
+    return GpuSessionFrame.begin(h, frame_index, width, height, allow_readback)
 
-fn backend_session_end_frame(frm: BackendFrame) -> BackendFrameStats:
+fn backend_session_end_frame(frm: GpuSessionFrame) -> GpuSessionFrameStats:
     """End the given frame and return per-frame statistics.
     Returns invalid stats if the frame was not active.
     """
-    if BackendFrame.is_valid(frm) == false:
-        return BackendFrameStats.invalid()
-    val stats = BackendFrameStats.zero(frm.session_id, frm.frame_index)
-    return BackendFrameStats.with_draws(stats, frm.draw_calls_recorded, 0, 0)
+    if GpuSessionFrame.is_valid(frm) == false:
+        return GpuSessionFrameStats.invalid()
+    val stats = GpuSessionFrameStats.zero(frm.session_id, frm.frame_index)
+    return GpuSessionFrameStats.with_draws(stats, frm.draw_calls_recorded, 0, 0)
 
-fn backend_session_sync_readback(frm: BackendFrame) -> [u8]:
+fn backend_session_sync_readback(frm: GpuSessionFrame) -> [u8]:
     """Synchronously read back pixel data from a completed frame.
     Returns empty bytes if the frame does not allow readback or is invalid.
     """
     if frm.allow_readback == false:
         return []
-    if BackendFrame.is_valid(frm) == false:
+    if GpuSessionFrame.is_valid(frm) == false:
         return []
     # CPU-path: return a minimal non-empty sentinel (4 bytes = one RGBA pixel)
     var out: [u8] = []

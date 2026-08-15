@@ -242,6 +242,127 @@ impl DrawIrPackedGenerationStoreV3:
         self.slot_hashes[slot] = ""
         DRAW_IR_PACKED_REASON_OK
 
+    # Discard a generation before publication.  A failed write/seal or a
+    # full handoff queue must never strand an encoding/sealed slot: the next
+    # frame may reuse the fixed storage, but no caller may make a partial
+    # generation visible.  IN_FLIGHT is intentionally owned by complete().
+    me abort(generation_ref: DrawIrPackedGenerationRefV3) -> u16:
+        if generation_ref.arena_id != self.arena_id or generation_ref.slot >= self.slot_count:
+            return DRAW_IR_PACKED_REASON_STALE
+        val slot = generation_ref.slot
+        if self.slot_generations[slot] != generation_ref.generation:
+            return DRAW_IR_PACKED_REASON_STALE
+        if (self.slot_states[slot] != DRAW_IR_PACKED_SLOT_ENCODING and
+            self.slot_states[slot] != DRAW_IR_PACKED_SLOT_SEALED):
+            return DRAW_IR_PACKED_REASON_STATE
+        self.slot_states[slot] = DRAW_IR_PACKED_SLOT_FREE
+        self.slot_planned_rows[slot] = 0u32
+        self.slot_written_rows[slot] = 0u32
+        self.slot_hashes[slot] = ""
+        DRAW_IR_PACKED_REASON_OK
+
+    me recover_queued(generation_ref: DrawIrPackedGenerationRefV3) -> u16:
+        """Remove the exact queued generation and release its slot."""
+        if generation_ref.arena_id != self.arena_id or generation_ref.slot >= self.slot_count:
+            return DRAW_IR_PACKED_REASON_STALE
+        val slot = generation_ref.slot
+        if self.slot_states[slot] != DRAW_IR_PACKED_SLOT_QUEUED or
+                self.slot_generations[slot] != generation_ref.generation:
+            return DRAW_IR_PACKED_REASON_STATE
+        var found = -1
+        var offset = 0u32
+        while offset < self.queue_len:
+            val index = (self.queue_head + offset) % self.queue_capacity
+            if self.queue_slots[index] == slot and
+                    self.queue_generations[index] == generation_ref.generation:
+                found = offset as i64
+                break
+            offset = offset + 1u32
+        if found < 0:
+            return DRAW_IR_PACKED_REASON_STATE
+        # `move` is a reserved token in the seed parser ("expected expression,
+        # found Plus" at `move + 1u32`), so the compaction cursor is named
+        # `shift` instead.
+        var shift = found.to_u32()
+        while shift + 1u32 < self.queue_len:
+            val dst = (self.queue_head + shift) % self.queue_capacity
+            val src = (self.queue_head + shift + 1u32) % self.queue_capacity
+            self.queue_slots[dst] = self.queue_slots[src]
+            self.queue_generations[dst] = self.queue_generations[src]
+            self.queue_rows[dst] = self.queue_rows[src]
+            self.queue_hashes[dst] = self.queue_hashes[src]
+            shift = shift + 1u32
+        self.queue_len = self.queue_len - 1u32
+        self.queue_tail = (self.queue_head + self.queue_len) % self.queue_capacity
+        self.slot_states[slot] = DRAW_IR_PACKED_SLOT_FREE
+        self.slot_planned_rows[slot] = 0u32
+        self.slot_written_rows[slot] = 0u32
+        self.slot_hashes[slot] = ""
+        DRAW_IR_PACKED_REASON_OK
+
+    me reject_in_flight(generation_ref: DrawIrPackedGenerationRefV3) -> u16:
+        if generation_ref.arena_id != self.arena_id or generation_ref.slot >= self.slot_count:
+            return DRAW_IR_PACKED_REASON_STALE
+        if self.slot_states[generation_ref.slot] != DRAW_IR_PACKED_SLOT_IN_FLIGHT or
+                self.slot_generations[generation_ref.slot] != generation_ref.generation:
+            return DRAW_IR_PACKED_REASON_STATE
+        self.terminal = true
+        self.slot_states[generation_ref.slot] = DRAW_IR_PACKED_SLOT_FREE
+        DRAW_IR_PACKED_REASON_OK
+
+struct DrawIrPackedCapacityProbeV3:
+    arena_id: u64
+    frame_generation: u64
+    capacity_events: text
+    before_state: text
+    after_state: text
+
+fn draw_ir_packed_capacity_probe_v3(capacity: u32) -> DrawIrPackedCapacityProbeV3:
+    """Exercise the real bounded owner at capacity and capacity+1.
+
+    The rejected attempt occurs before any slot/generation/queue publication;
+    before_state and after_state are direct owner-field snapshots.
+    """
+    var store = DrawIrPackedGenerationStoreV3.bounded(991u64, 1u32, capacity, 1u32)
+    val admitted = store.admit(capacity)
+    var exact = false
+    match admitted:
+        case DrawIrPackedAdmissionV3.Admitted(_): exact = true
+        case _: exact = false
+    val before = "next={store.next_generation};queue={store.queue_len};state={store.slot_states[0]}"
+    val rejected = store.admit(capacity + 1u32)
+    var reason = 0u16
+    match rejected:
+        case DrawIrPackedAdmissionV3.Refused(code): reason = code
+        case _: reason = DRAW_IR_PACKED_REASON_OK
+    val after = "next={store.next_generation};queue={store.queue_len};state={store.slot_states[0]}"
+    DrawIrPackedCapacityProbeV3(
+        arena_id: store.arena_id, frame_generation: store.next_generation,
+        capacity_events: "capacity={capacity}\nexact_admitted={if exact: 1 else: 0}\nplus_one={capacity + 1u32}\nplus_one_reason={reason}\n",
+        before_state: before,
+        after_state: after
+    )
+
+fn draw_ir_packed_owner_preflight_v3(store: DrawIrPackedGenerationStoreV3,
+                                     frame_rows: u32) -> DrawIrPackedCapacityProbeV3:
+    """Nonpublishing +1 preflight over the exact configured frame owner.
+
+    It snapshots the owner, invokes its real admission rejection path on a
+    value exceeding rows_per_slot, and returns the unchanged owner binding.
+    """
+    var owned = store
+    val before = "arena={owned.arena_id};next={owned.next_generation};queue={owned.queue_len}"
+    val rejected = owned.admit(owned.rows_per_slot + 1u32)
+    var reason = DRAW_IR_PACKED_REASON_OK
+    match rejected:
+        case DrawIrPackedAdmissionV3.Refused(code): reason = code
+        case _: reason = DRAW_IR_PACKED_REASON_OK
+    val after = "arena={owned.arena_id};next={owned.next_generation};queue={owned.queue_len}"
+    DrawIrPackedCapacityProbeV3(
+        arena_id: owned.arena_id, frame_generation: owned.next_generation,
+        capacity_events: "capacity={owned.rows_per_slot}\nframe_rows={frame_rows}\nexact_admitted={if frame_rows <= owned.rows_per_slot: 1 else: 0}\nplus_one={owned.rows_per_slot + 1u32}\nplus_one_reason={reason}\n",
+        before_state: before, after_state: after)
+
 export DRAW_IR_PACKED_SLOT_FREE, DRAW_IR_PACKED_SLOT_ENCODING,
     DRAW_IR_PACKED_SLOT_SEALED, DRAW_IR_PACKED_SLOT_IN_FLIGHT,
     DRAW_IR_PACKED_REASON_OK, DRAW_IR_PACKED_REASON_CAPACITY,

@@ -14,32 +14,32 @@ Usage:
     val r2 = session.blit_rect(dst, 1920, 0, 0, src, 1920, 0, 0, 64, 64)
 """
 
-use std.nogc_sync_mut.gpu.engine2d.backend_session.{BackendSessionKind, ComputeError}
+use std.nogc_sync_mut.gpu.engine2d.backend_session.{ComputeSessionKind, ComputeSessionError}
 use std.nogc_sync_mut.gpu.engine2d.simd_kernels.{detect_simd_level, fill_span, copy_span, alpha_blend_span, simd_blit_rect, simd_scroll_region}
 use std.nogc_sync_mut.gpu.engine2d.simd_provider.{SimdHitCounts, simd_hit_counts}
 
 # ============================================================================
-# CpuKernelTable
+# CpuSimdIsaKernelTable
 # ============================================================================
 
-class CpuKernelTable:
+class CpuSimdIsaKernelTable:
     fill_kernel:   text
     blit_kernel:   text
     blend_kernel:  text
     scroll_kernel: text
 
-impl CpuKernelTable:
-    static fn select_for_features(features: text, arch: text) -> CpuKernelTable:
+impl CpuSimdIsaKernelTable:
+    static fn select_for_features(features: text, arch: text) -> CpuSimdIsaKernelTable:
         if arch == "x86_64":
             if features == "avx2" or features == "avx2,sse4":
-                return CpuKernelTable(
+                return CpuSimdIsaKernelTable(
                     fill_kernel:   "simd_fill_avx2",
                     blit_kernel:   "simd_blit_avx2",
                     blend_kernel:  "simd_blend_avx2",
                     scroll_kernel: "simd_scroll_avx2"
                 )
             if features == "sse4":
-                return CpuKernelTable(
+                return CpuSimdIsaKernelTable(
                     fill_kernel:   "simd_fill_sse4",
                     blit_kernel:   "simd_blit_sse4",
                     blend_kernel:  "simd_blend_sse4",
@@ -47,7 +47,7 @@ impl CpuKernelTable:
                 )
         if arch == "aarch64":
             if features == "neon":
-                return CpuKernelTable(
+                return CpuSimdIsaKernelTable(
                     fill_kernel:   "simd_fill_neon",
                     blit_kernel:   "simd_blit_neon",
                     blend_kernel:  "simd_blend_neon",
@@ -55,13 +55,13 @@ impl CpuKernelTable:
                 )
         if arch == "riscv64":
             if features == "rvv":
-                return CpuKernelTable(
+                return CpuSimdIsaKernelTable(
                     fill_kernel:   "simd_fill_rvv",
                     blit_kernel:   "simd_blit_rvv",
                     blend_kernel:  "simd_blend_rvv",
                     scroll_kernel: "simd_scroll_rvv"
                 )
-        CpuKernelTable(
+        CpuSimdIsaKernelTable(
             fill_kernel:   "scalar_fill",
             blit_kernel:   "scalar_blit",
             blend_kernel:  "scalar_blend",
@@ -78,7 +78,7 @@ impl CpuKernelTable:
 class CpuSimdSession:
     arch:                  text
     features:              text
-    kernel_table:          CpuKernelTable
+    kernel_table:          CpuSimdIsaKernelTable
     mode:                  text
     fill_count:            i64
     blit_count:            i64
@@ -93,7 +93,7 @@ impl CpuSimdSession:
         CpuSimdSession(
             arch:                  "",
             features:              "",
-            kernel_table:          CpuKernelTable(
+            kernel_table:          CpuSimdIsaKernelTable(
                 fill_kernel:   "scalar_fill",
                 blit_kernel:   "scalar_blit",
                 blend_kernel:  "scalar_blend",
@@ -109,14 +109,14 @@ impl CpuSimdSession:
             generation:            0
         )
 
-    me kind() -> BackendSessionKind:
-        BackendSessionKind.cpu_simd()
+    me kind() -> ComputeSessionKind:
+        ComputeSessionKind.cpu_simd()
 
-    me init() -> ComputeError?:
+    me init() -> ComputeSessionError?:
         val level = detect_simd_level()
         self.arch = level.arch_text()
         self.features = level.feature_text()
-        self.kernel_table = CpuKernelTable.select_for_features(self.features, self.arch)
+        self.kernel_table = CpuSimdIsaKernelTable.select_for_features(self.features, self.arch)
         self.initialized = true
         self.generation = self.generation + 1
         nil
@@ -124,48 +124,48 @@ impl CpuSimdSession:
     me is_available() -> bool:
         true
 
-    me fill(dst: any, offset: i64, count: i64, color: u32) -> ComputeError?:
+    me fill(dst: any, offset: i64, count: i64, color: u32) -> ComputeSessionError?:
         self.fill_count = self.fill_count + 1
         if self.kernel_table.fill_kernel == "scalar_fill":
             self.scalar_fallback_count = self.scalar_fallback_count + 1
         fill_span(dst, offset, count, color)
         nil
 
-    me copy(dst: any, dst_off: i64, src: [u32], src_off: i64, count: i64) -> ComputeError?:
+    me copy(dst: any, dst_off: i64, src: [u32], src_off: i64, count: i64) -> ComputeSessionError?:
         self.blit_count = self.blit_count + 1
         if self.kernel_table.blit_kernel == "scalar_blit":
             self.scalar_fallback_count = self.scalar_fallback_count + 1
         copy_span(dst, dst_off, src, src_off, count)
         nil
 
-    me alpha_blend(dst: any, src: [u32], offset: i64, count: i64) -> ComputeError?:
+    me alpha_blend(dst: any, src: [u32], offset: i64, count: i64) -> ComputeSessionError?:
         self.blend_count = self.blend_count + 1
         if self.kernel_table.blend_kernel == "scalar_blend":
             self.scalar_fallback_count = self.scalar_fallback_count + 1
         alpha_blend_span(dst, src, offset, count)
         nil
 
-    me blit_rect(dst: any, dst_stride: i64, dx: i64, dy: i64, src: [u32], src_stride: i64, sx: i64, sy: i64, w: i64, h: i64) -> ComputeError?:
+    me blit_rect(dst: any, dst_stride: i64, dx: i64, dy: i64, src: [u32], src_stride: i64, sx: i64, sy: i64, w: i64, h: i64) -> ComputeSessionError?:
         self.blit_count = self.blit_count + 1
         if self.kernel_table.blit_kernel == "scalar_blit":
             self.scalar_fallback_count = self.scalar_fallback_count + 1
         simd_blit_rect(dst, dst_stride, dx, dy, src, src_stride, sx, sy, w, h)
         nil
 
-    me scroll(buf: any, stride: i64, x: i64, y: i64, w: i64, h: i64, delta_y: i64) -> ComputeError?:
+    me scroll(buf: any, stride: i64, x: i64, y: i64, w: i64, h: i64, delta_y: i64) -> ComputeSessionError?:
         self.scroll_count = self.scroll_count + 1
         if self.kernel_table.scroll_kernel == "scalar_scroll":
             self.scalar_fallback_count = self.scalar_fallback_count + 1
         simd_scroll_region(buf, stride, x, y, w, h, delta_y)
         nil
 
-    me load_module(name: text, source: text) -> ComputeError?:
+    me load_module(name: text, source: text) -> ComputeSessionError?:
         nil
 
-    me launch_kernel(name: text, gx: i64, gy: i64, bx: i64, by: i64) -> ComputeError?:
+    me launch_kernel(name: text, gx: i64, gy: i64, bx: i64, by: i64) -> ComputeSessionError?:
         nil
 
-    me synchronize() -> ComputeError?:
+    me synchronize() -> ComputeSessionError?:
         nil
 
     me shutdown():

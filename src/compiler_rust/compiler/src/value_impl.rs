@@ -357,6 +357,7 @@ impl Value {
             Value::BorrowMut(b) => b.inner().truthy(),
             Value::Union { inner, .. } => inner.truthy(),
             Value::Object { .. }
+            | Value::ClassInstance(_)
             | Value::Enum { .. }
             | Value::Lambda { .. }
             | Value::BlockClosure { .. }
@@ -485,6 +486,14 @@ impl Value {
                     .collect();
                 format!("{}({})", class, parts.join(", "))
             }
+            Value::ClassInstance(instance) => {
+                let fields = instance.fields_snapshot();
+                let parts: Vec<String> = fields
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
+                    .collect();
+                format!("{}({})", instance.class(), parts.join(", "))
+            }
             Value::Enum {
                 enum_name,
                 variant,
@@ -611,7 +620,7 @@ impl Value {
             Value::BlockClosure { .. } => "function",
             Value::Function { .. } => "function",
             Value::NativeFunction(_) => "function",
-            Value::Object { .. } => "object",
+            Value::Object { .. } | Value::ClassInstance(_) => "object",
             Value::Enum { .. } => "enum",
             Value::Union { inner, .. } => inner.type_name(),
             Value::Constructor { .. } => "constructor",
@@ -664,7 +673,7 @@ impl Value {
             Value::BlockClosure { .. } => ValueKind::BlockClosure,
             Value::Function { .. } => ValueKind::Closure,
             Value::NativeFunction(_) => ValueKind::NativeFunction,
-            Value::Object { .. } => ValueKind::Object,
+            Value::Object { .. } | Value::ClassInstance(_) => ValueKind::Object,
             Value::Enum { .. } => ValueKind::Enum,
             Value::Union { inner, .. } => inner.value_kind(),
             Value::Constructor { .. } => ValueKind::Constructor,

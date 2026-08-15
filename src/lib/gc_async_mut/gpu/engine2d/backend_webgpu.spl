@@ -316,8 +316,13 @@ impl RenderBackend for WebGpuBackend:
     # -- Clear --
 
     me clear(color: u32):
-        if self.gpu_ready and webgpu_sffi_compute_draw(self.surface, 0, 0, 0, self.w, self.h, color):
-            return
+        # GPU offload is an ACCELERATION HINT only: the CPU mirror is always
+        # written too. Early-returning here (pre-2026-08-15 behaviour) left
+        # read_pixels() — documented and labeled "cpu_mirror", the ONLY
+        # readback this backend has — returning stale pixels on gpu_ready
+        # hosts, and bypassed clip/mask entirely on the offloaded ops.
+        if self.gpu_ready and not self.clip_enabled and self.mask_buf.len() == 0:
+            webgpu_sffi_compute_draw(self.surface, 0, 0, 0, self.w, self.h, color)
         var i = 0
         val total = self.w * self.h
         while i < total:
@@ -343,8 +348,10 @@ impl RenderBackend for WebGpuBackend:
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         if w <= 0 or h <= 0:
             return
-        if self.gpu_ready and webgpu_sffi_compute_draw(self.surface, 1, x, y, w, h, color):
-            return
+        # See clear(): offload is a hint; the CPU mirror write below is
+        # unconditional so readback stays truthful and clip/mask apply.
+        if self.gpu_ready and not self.clip_enabled and self.mask_buf.len() == 0:
+            webgpu_sffi_compute_draw(self.surface, 1, x, y, w, h, color)
         var yy = 0
         while yy < h:
             var xx = 0

@@ -340,6 +340,11 @@ impl From<&Value> for BridgeValue {
                 payload: 0,
                 extended: CString::new(class.as_str()).unwrap().into_raw() as *mut u8,
             },
+            Value::ClassInstance(instance) => BridgeValue {
+                tag: bridge_tags::OBJECT,
+                payload: 0,
+                extended: CString::new(instance.class()).unwrap().into_raw() as *mut u8,
+            },
             Value::Enum { enum_name, variant, .. } => {
                 // Store enum_name::variant as extended
                 let full_name = format!("{}::{}", enum_name, variant);

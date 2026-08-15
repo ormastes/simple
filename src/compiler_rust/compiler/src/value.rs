@@ -1109,6 +1109,46 @@ impl SpecialEnumKind {
     }
 }
 
+/// Shared-identity class instance storage (source `class` values).
+#[derive(Debug)]
+pub struct ClassInstance {
+    class: String,
+    fields: RwLock<HashMap<String, Value>>,
+}
+
+impl ClassInstance {
+    pub fn new(class: String, fields: HashMap<String, Value>) -> Self {
+        Self {
+            class,
+            fields: RwLock::new(fields),
+        }
+    }
+
+    pub fn class(&self) -> &str {
+        &self.class
+    }
+
+    pub fn field(&self, name: &str) -> Option<Value> {
+        self.fields.read().unwrap().get(name).cloned()
+    }
+
+    pub fn set_field(&self, name: String, value: Value) {
+        self.fields.write().unwrap().insert(name, value);
+    }
+
+    /// Mutate a field's value in place under the write lock. Returns None
+    /// when the field does not exist. Used by indexed field assignment
+    /// (`obj.field[i] = v`) so hot raster loops avoid cloning the container
+    /// on every write.
+    pub fn field_mut<R>(&self, name: &str, f: impl FnOnce(&mut Value) -> R) -> Option<R> {
+        self.fields.write().unwrap().get_mut(name).map(f)
+    }
+
+    pub fn fields_snapshot(&self) -> HashMap<String, Value> {
+        self.fields.read().unwrap().clone()
+    }
+}
+
 /// Runtime value representation.
 #[derive(Debug)]
 pub enum Value {
@@ -1195,6 +1235,9 @@ pub enum Value {
         class: String,
         fields: Arc<HashMap<String, Value>>,
     },
+    /// A source `class` value. Clones share this identity cell, unlike the
+    /// copy-on-write `Object` carrier used by source `struct` values.
+    ClassInstance(Arc<ClassInstance>),
     Enum {
         enum_name: String,
         variant: String,

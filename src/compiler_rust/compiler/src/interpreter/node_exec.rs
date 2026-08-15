@@ -5,11 +5,17 @@ use std::sync::Arc;
 use simple_parser::ast::{AssignOp, BinOp, BitfieldDef, BitfieldField, ClassDef, Expr, FunctionDef, Node, Type};
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::{strict_mem_enabled, Env, Value};
-use super::core_types::{Control, Enums, ImplMethods, get_identifier_name, get_pattern_name, is_immutable_by_pattern, visit_pattern_binding_names};
+use super::core_types::{
+    Control, Enums, ImplMethods, get_identifier_name, get_pattern_name, is_immutable_by_pattern,
+    visit_pattern_binding_names,
+};
 use super::async_support::await_value;
 use super::expr::evaluate_expr;
 use super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update, handle_functional_update};
-use super::interpreter_control::{assert_stmt_failure, exec_if, exec_while, exec_loop, exec_for, exec_match, exec_context, exec_with, is_condition_present};
+use super::interpreter_control::{
+    assert_stmt_failure, exec_if, exec_while, exec_loop, exec_for, exec_match, exec_context, exec_with,
+    is_condition_present,
+};
 use super::interpreter_state::{mark_as_moved, BLOCK_SCOPED_ENUMS, CONST_NAMES, IMMUTABLE_VARS, MODULE_GLOBALS};
 use super::coverage_helpers::{record_node_coverage, extract_node_location};
 use crate::interpreter_unit::{is_unit_type, validate_unit_type, validate_unit_constraints};
@@ -19,7 +25,9 @@ use simple_runtime::debug;
 macro_rules! check_timeout {
     () => {
         if crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
+            return Err(CompileError::TimeoutExceeded {
+                timeout_secs: crate::interpreter::timeout_limit_secs(),
+            });
         }
     };
 }
@@ -247,14 +255,16 @@ pub(crate) fn exec_node(
                     )
                 })?;
             env.insert(const_stmt.name.clone(), value);
-            crate::interpreter::const_trace("node_exec:const-insert", &const_stmt.name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
+            crate::interpreter::const_trace("node_exec:const-insert", &const_stmt.name);
+            CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
             Ok(Control::Next)
         }
         Node::Static(static_stmt) => {
             let value = evaluate_expr(&static_stmt.value, env, functions, classes, enums, impl_methods)?;
             env.insert(static_stmt.name.clone(), value);
             if !static_stmt.mutability.is_mutable() {
-                crate::interpreter::const_trace("node_exec:static-insert", &static_stmt.name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
+                crate::interpreter::const_trace("node_exec:static-insert", &static_stmt.name);
+                CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
             }
             Ok(Control::Next)
         }
@@ -748,7 +758,8 @@ pub(crate) fn exec_assignment(
                     if immutable_by_pattern {
                         if is_all_caps {
                             // ALL_CAPS = constant
-                            crate::interpreter::const_trace("node_exec:implicit-caps-insert", name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
+                            crate::interpreter::const_trace("node_exec:implicit-caps-insert", name);
+                            CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
                         } else {
                             // Lowercase = immutable (supports functional updates)
                             IMMUTABLE_VARS.with(|cell| cell.borrow_mut().insert(name.clone()));
@@ -774,6 +785,10 @@ pub(crate) fn exec_assignment(
         if let Expr::Identifier(obj_name) = receiver.as_ref() {
             if let Some(obj_val) = env.remove(obj_name) {
                 match obj_val {
+                    Value::ClassInstance(instance) => {
+                        instance.set_field(field.clone(), value);
+                        env.insert(obj_name.clone(), Value::ClassInstance(instance));
+                    }
                     Value::Object { class, mut fields } => {
                         {
                             let bf_check = Value::Object {
@@ -794,7 +809,7 @@ pub(crate) fn exec_assignment(
                             .with_code(codes::INVALID_ASSIGNMENT)
                             .with_help("field assignment requires an object with mutable access");
                         return Err(CompileError::semantic_with_context(
-                            "invalid assignment: cannot assign field on non-object value",
+                            format!("invalid assignment: cannot assign field on non-object value (obj `{}`, field `{}`)", obj_name, field),
                             ctx,
                         ));
                     }
@@ -804,6 +819,14 @@ pub(crate) fn exec_assignment(
                 let global_obj = MODULE_GLOBALS.with(|cell| cell.borrow().get(obj_name).cloned());
                 if let Some(obj_val) = global_obj {
                     match obj_val {
+                        Value::ClassInstance(instance) => {
+                            instance.set_field(field.clone(), value);
+                            MODULE_GLOBALS.with(|cell| {
+                                cell.borrow_mut()
+                                    .insert(obj_name.clone(), Value::ClassInstance(instance));
+                            });
+                            Ok(Control::Next)
+                        }
                         Value::Object { class, mut fields } => {
                             {
                                 let bf_check = Value::Object {
@@ -829,7 +852,7 @@ pub(crate) fn exec_assignment(
                                 .with_code(codes::INVALID_ASSIGNMENT)
                                 .with_help("field assignment requires an object with mutable access");
                             Err(CompileError::semantic_with_context(
-                                "invalid assignment: cannot assign field on non-object value",
+                                format!("invalid assignment: cannot assign field on non-object value (obj `{}`, field `{}`)", obj_name, field),
                                 ctx,
                             ))
                         }
@@ -880,6 +903,12 @@ pub(crate) fn exec_assignment(
                         ));
                     }
                     match items[idx].clone() {
+                        Value::ClassInstance(instance) => {
+                            instance.set_field(field.clone(), value);
+                            items[idx] = Value::ClassInstance(instance);
+                            env.insert(array_name.clone(), Value::Array(values));
+                            Ok(Control::Next)
+                        }
                         Value::Object { class, mut fields } => {
                             Arc::make_mut(&mut fields).insert(field.clone(), value);
                             items[idx] = Value::Object { class, fields };
@@ -973,12 +1002,62 @@ pub(crate) fn exec_assignment(
                                 ))
                             }
                         }
+                        // Class instances (`self` inside methods, any class-typed
+                        // variable) use shared interior mutability: mutate the
+                        // inner value through the instance's field lock.
+                        Value::ClassInstance(instance) => {
+                            let inner_val = instance.field(inner_field);
+                            let result = match inner_val {
+                                Some(Value::ClassInstance(inner_inst)) => {
+                                    inner_inst.set_field(field.clone(), value);
+                                    Ok(Control::Next)
+                                }
+                                Some(Value::Object {
+                                    class: inner_class,
+                                    fields: inner_fields,
+                                }) => {
+                                    let mut inner_fields = inner_fields;
+                                    Arc::make_mut(&mut inner_fields).insert(field.clone(), value);
+                                    instance.set_field(
+                                        inner_field.clone(),
+                                        Value::Object {
+                                            class: inner_class,
+                                            fields: inner_fields,
+                                        },
+                                    );
+                                    Ok(Control::Next)
+                                }
+                                Some(_) => {
+                                    let ctx = ErrorContext::new()
+                                        .with_code(codes::INVALID_ASSIGNMENT)
+                                        .with_help("nested field assignment requires inner value to be an object");
+                                    Err(CompileError::semantic_with_context(
+                                        format!(
+                                            "invalid assignment: cannot assign field '{}' on non-object field '{}'",
+                                            field, inner_field
+                                        ),
+                                        ctx,
+                                    ))
+                                }
+                                None => {
+                                    let ctx = ErrorContext::new()
+                                        .with_code(codes::UNDEFINED_FIELD)
+                                        .with_help("check the field name");
+                                    Err(CompileError::semantic_with_context(
+                                        format!("field '{}' not found on object", inner_field),
+                                        ctx,
+                                    ))
+                                }
+                            };
+                            env.insert(obj_name.clone(), Value::ClassInstance(instance));
+                            result
+                        }
                         _ => {
                             let ctx = ErrorContext::new()
                                 .with_code(codes::INVALID_ASSIGNMENT)
                                 .with_help("nested field assignment requires an object");
                             Err(CompileError::semantic_with_context(
-                                "invalid assignment: cannot assign field on non-object value",
+                                format!("invalid assignment: cannot assign field on non-object value (obj `{}`, field `{}`)", obj_name, field),
                                 ctx,
                             ))
                         }
@@ -997,14 +1076,9 @@ pub(crate) fn exec_assignment(
                 // `a.b.c.d = v`, `a[i].b.c = v`). Resolve the general place and
                 // write through it. This is what used to be rejected with
                 // "deeply nested field access requires intermediate variables".
-                if let Some(place) = super::place::resolve_place(
-                    &assign.target,
-                    env,
-                    functions,
-                    classes,
-                    enums,
-                    impl_methods,
-                )? {
+                if let Some(place) =
+                    super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
+                {
                     if super::place::write_place(env, &place, value) {
                         return Ok(Control::Next);
                     }
@@ -1253,7 +1327,10 @@ pub(crate) fn exec_assignment(
                                     }
                                     Value::Dict(dict) => {
                                         if let Some(map) = Arc::get_mut(dict) {
-                                            map.insert(index_val.to_key_string(), Value::wrap_dict_entry(&index_val, value));
+                                            map.insert(
+                                                index_val.to_key_string(),
+                                                Value::wrap_dict_entry(&index_val, value),
+                                            );
                                             return Ok(Control::Next);
                                         }
                                     }
@@ -1265,6 +1342,90 @@ pub(crate) fn exec_assignment(
                 }
                 if let Some(obj_val) = env.get(obj_name).cloned() {
                     match obj_val {
+                        Value::ClassInstance(instance) => {
+                            // Mutate in place under the instance's field lock so hot
+                            // raster loops (`self.buf[i] = color`) do not clone the
+                            // whole container per write. Resolve the index/key BEFORE
+                            // taking the field lock: index_val could reference this
+                            // same instance, and re-entering its RwLock inside
+                            // field_mut would deadlock.
+                            let pre_idx = index_val.as_int().ok().map(|v| v as usize);
+                            let pre_key = index_val.to_key_string();
+                            let mutated = instance.field_mut(field_name, |slot| -> Result<(), CompileError> {
+                                match slot {
+                                    Value::Array(arc) => {
+                                        let idx = pre_idx.ok_or_else(|| {
+                                            CompileError::semantic("array index must be an integer".to_string())
+                                        })?;
+                                        let arr = Arc::make_mut(arc);
+                                        if idx < arr.len() {
+                                            arr[idx] = value.clone();
+                                        } else {
+                                            while arr.len() < idx {
+                                                arr.push(Value::Nil);
+                                            }
+                                            arr.push(value.clone());
+                                        }
+                                        Ok(())
+                                    }
+                                    Value::Dict(dict) => {
+                                        let stored = Value::wrap_dict_entry(&index_val, value.clone());
+                                        Arc::make_mut(dict).insert(pre_key.clone(), stored);
+                                        Ok(())
+                                    }
+                                    Value::Tuple(tup) => {
+                                        let idx = pre_idx.ok_or_else(|| {
+                                            CompileError::semantic("tuple index must be an integer".to_string())
+                                        })?;
+                                        if idx < tup.len() {
+                                            tup[idx] = value.clone();
+                                            Ok(())
+                                        } else {
+                                            let ctx = ErrorContext::new()
+                                                .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                                                .with_help(format!("tuple has {} element(s)", tup.len()))
+                                                .with_note(format!("index {} is out of bounds", idx));
+                                            Err(CompileError::semantic_with_context(
+                                                format!(
+                                                    "index out of bounds: tuple index {} out of bounds (len={})",
+                                                    idx,
+                                                    tup.len()
+                                                ),
+                                                ctx,
+                                            ))
+                                        }
+                                    }
+                                    other => {
+                                        let ctx = ErrorContext::new()
+                                            .with_code(codes::INVALID_ASSIGNMENT)
+                                            .with_help("index assignment requires an array, dict, or tuple");
+                                        Err(CompileError::semantic_with_context(
+                                            format!(
+                                                "invalid assignment: cannot index assign to field `{}` of type {}",
+                                                field_name,
+                                                other.type_name()
+                                            ),
+                                            ctx,
+                                        ))
+                                    }
+                                }
+                            });
+                            match mutated {
+                                Some(result) => {
+                                    result?;
+                                    Ok(Control::Next)
+                                }
+                                None => {
+                                    let ctx = ErrorContext::new()
+                                        .with_code(codes::INVALID_ASSIGNMENT)
+                                        .with_help("field does not exist on this object");
+                                    Err(CompileError::semantic_with_context(
+                                        format!("invalid assignment: field `{}` not found on object", field_name),
+                                        ctx,
+                                    ))
+                                }
+                            }
+                        }
                         Value::Object { class, fields } => {
                             let mut fields = fields;
                             if let Some(container) = fields.get(field_name).cloned() {
@@ -1759,6 +1920,31 @@ pub(crate) fn exec_augmented_assignment(
                         env.insert(obj_name.clone(), Value::Object { class, fields });
                         Ok(Control::Next)
                     }
+                    Value::ClassInstance(instance) => {
+                        let new_value = if let Some(op) = bin_op {
+                            let current = instance
+                                .field(field)
+                                .ok_or_else(|| crate::error::factory::undefined_field(field))?;
+                            let temp_lhs = "__lhs_temp__".to_string();
+                            let temp_rhs = "__rhs_temp__".to_string();
+                            env.insert(temp_lhs.clone(), current);
+                            env.insert(temp_rhs.clone(), rhs_value);
+                            let binary_expr = Expr::Binary {
+                                op,
+                                left: Box::new(Expr::Identifier(temp_lhs.clone())),
+                                right: Box::new(Expr::Identifier(temp_rhs.clone())),
+                            };
+                            let result = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
+                            env.remove(&temp_lhs);
+                            env.remove(&temp_rhs);
+                            result
+                        } else {
+                            rhs_value
+                        };
+                        instance.set_field(field.clone(), new_value);
+                        env.insert(obj_name.clone(), Value::ClassInstance(instance));
+                        Ok(Control::Next)
+                    }
                     other => {
                         env.insert(obj_name.clone(), other);
                         let ctx = ErrorContext::new()
@@ -1801,6 +1987,34 @@ pub(crate) fn exec_augmented_assignment(
                             MODULE_GLOBALS.with(|cell| {
                                 cell.borrow_mut()
                                     .insert(obj_name.clone(), Value::Object { class, fields });
+                            });
+                            Ok(Control::Next)
+                        }
+                        Value::ClassInstance(instance) => {
+                            let new_value = if let Some(op) = bin_op {
+                                let current = instance
+                                    .field(field)
+                                    .ok_or_else(|| crate::error::factory::undefined_field(field))?;
+                                let temp_lhs = "__lhs_temp__".to_string();
+                                let temp_rhs = "__rhs_temp__".to_string();
+                                env.insert(temp_lhs.clone(), current);
+                                env.insert(temp_rhs.clone(), rhs_value);
+                                let binary_expr = Expr::Binary {
+                                    op,
+                                    left: Box::new(Expr::Identifier(temp_lhs.clone())),
+                                    right: Box::new(Expr::Identifier(temp_rhs.clone())),
+                                };
+                                let result = evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
+                                env.remove(&temp_lhs);
+                                env.remove(&temp_rhs);
+                                result
+                            } else {
+                                rhs_value
+                            };
+                            instance.set_field(field.clone(), new_value);
+                            MODULE_GLOBALS.with(|cell| {
+                                cell.borrow_mut()
+                                    .insert(obj_name.clone(), Value::ClassInstance(instance));
                             });
                             Ok(Control::Next)
                         }
@@ -1919,6 +2133,111 @@ pub(crate) fn exec_augmented_assignment(
                                     format!("field '{}' not found on object", inner_field),
                                     ctx,
                                 ))
+                            }
+                        }
+                        Value::ClassInstance(instance) => {
+                            let inner_val = instance.field(inner_field);
+                            let mut rhs_value =
+                                evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+                            if is_suspend {
+                                rhs_value = await_value(rhs_value)?;
+                            }
+                            match inner_val {
+                                Some(Value::ClassInstance(inner_inst)) => {
+                                    let current = inner_inst
+                                        .field(field)
+                                        .ok_or_else(|| crate::error::factory::undefined_field(field))?;
+                                    let new_value = if let Some(op) = bin_op {
+                                        let temp_lhs = "__lhs_temp__".to_string();
+                                        let temp_rhs = "__rhs_temp__".to_string();
+                                        env.insert(temp_lhs.clone(), current);
+                                        env.insert(temp_rhs.clone(), rhs_value);
+                                        let binary_expr = Expr::Binary {
+                                            op,
+                                            left: Box::new(Expr::Identifier(temp_lhs.clone())),
+                                            right: Box::new(Expr::Identifier(temp_rhs.clone())),
+                                        };
+                                        let result = evaluate_expr(
+                                            &binary_expr,
+                                            env,
+                                            functions,
+                                            classes,
+                                            enums,
+                                            impl_methods,
+                                        )?;
+                                        env.remove(&temp_lhs);
+                                        env.remove(&temp_rhs);
+                                        result
+                                    } else {
+                                        rhs_value
+                                    };
+                                    inner_inst.set_field(field.clone(), new_value);
+                                    Ok(Control::Next)
+                                }
+                                Some(Value::Object {
+                                    class: inner_class,
+                                    fields: inner_fields,
+                                }) => {
+                                    let mut inner_fields = inner_fields;
+                                    let current = inner_fields
+                                        .get(field)
+                                        .cloned()
+                                        .ok_or_else(|| crate::error::factory::undefined_field(field))?;
+                                    let new_value = if let Some(op) = bin_op {
+                                        let temp_lhs = "__lhs_temp__".to_string();
+                                        let temp_rhs = "__rhs_temp__".to_string();
+                                        env.insert(temp_lhs.clone(), current);
+                                        env.insert(temp_rhs.clone(), rhs_value);
+                                        let binary_expr = Expr::Binary {
+                                            op,
+                                            left: Box::new(Expr::Identifier(temp_lhs.clone())),
+                                            right: Box::new(Expr::Identifier(temp_rhs.clone())),
+                                        };
+                                        let result = evaluate_expr(
+                                            &binary_expr,
+                                            env,
+                                            functions,
+                                            classes,
+                                            enums,
+                                            impl_methods,
+                                        )?;
+                                        env.remove(&temp_lhs);
+                                        env.remove(&temp_rhs);
+                                        result
+                                    } else {
+                                        rhs_value
+                                    };
+                                    Arc::make_mut(&mut inner_fields).insert(field.clone(), new_value);
+                                    instance.set_field(
+                                        inner_field.clone(),
+                                        Value::Object {
+                                            class: inner_class,
+                                            fields: inner_fields,
+                                        },
+                                    );
+                                    Ok(Control::Next)
+                                }
+                                Some(_) => {
+                                    let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT).with_help(
+                                        "nested augmented field assignment requires inner value to be an object",
+                                    );
+                                    Err(CompileError::semantic_with_context(
+                                        format!(
+                                            "invalid assignment: cannot use augmented assignment on field '{}' of non-object field '{}'",
+                                            field, inner_field
+                                        ),
+                                        ctx,
+                                    ))
+                                }
+                                None => {
+                                    let ctx = ErrorContext::new()
+                                        .with_code(codes::UNDEFINED_FIELD)
+                                        .with_help("check the field name");
+                                    Err(CompileError::semantic_with_context(
+                                        format!("field '{}' not found on object", inner_field),
+                                        ctx,
+                                    ))
+                                }
                             }
                         }
                         _ => {

@@ -269,6 +269,7 @@ impl Clone for Value {
                 class: class.clone(),
                 fields: Arc::clone(fields),
             },
+            Value::ClassInstance(instance) => Value::ClassInstance(Arc::clone(instance)),
             Value::Enum {
                 enum_name,
                 variant,

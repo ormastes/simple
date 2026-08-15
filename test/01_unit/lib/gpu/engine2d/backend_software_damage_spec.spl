@@ -312,6 +312,41 @@ describe "SoftwareBackend damage tracking":
                 ty += 1
             val rects = b.damage_rects(16)
             assert_equal(rects, [0, 0, 7680, 4320])
+        it "packs only dirty tile rows in deterministic plan order without clearing damage":
+            var b = SoftwareBackend.create()
+            if b.init(W, H):
+                b.clear(0xFF101820u32)
+                b.present()
+                # One write at (70,70) dirties exactly tile [64,64,128,128).
+                b.draw_rect_filled(70, 70, 2, 2, 0xFF00FF00u32)
+                val packed = b.read_damage_pixels_packed(16)
+                assert_true(packed.valid)
+                assert_equal(packed.rects, [64, 64, 64, 64])
+                assert_equal(packed.pixels.len(), 64 * 64)
+                val full = b.read_pixels()
+                # Packed order is rectangle-major then row-major, so the
+                # first pixel and the locally changed pixel have exact source
+                # coordinates in the current framebuffer.
+                assert_equal(packed.pixels[0], full[64 + 64 * W])
+                assert_equal(packed.pixels[6 + 6 * 64], 0xFF00FF00u32)
+                # Extraction is not presentation: retry remains possible.
+                assert_false(b.damage_is_empty())
+                b.shutdown()
+
+        it "concatenates disjoint dirty rectangles without widening their payload":
+            var b = SoftwareBackend.create()
+            if b.init(512, 128):
+                b.clear(0xFF101820u32)
+                b.present()
+                b.draw_rect_filled(2, 2, 1, 1, 0xFF112233u32)
+                b.draw_rect_filled(258, 2, 1, 1, 0xFF445566u32)
+                val packed = b.read_damage_pixels_packed(16)
+                assert_true(packed.valid)
+                assert_equal(packed.rects, [0, 0, 64, 64, 256, 0, 64, 64])
+                assert_equal(packed.pixels.len(), 2 * 64 * 64)
+                assert_equal(packed.pixels[2 + 2 * 64], 0xFF112233u32)
+                assert_equal(packed.pixels[64 * 64 + 2 + 2 * 64], 0xFF445566u32)
+                b.shutdown()
 
         it "a no-op frame yields zero rects":
             var b = SoftwareBackend.create()

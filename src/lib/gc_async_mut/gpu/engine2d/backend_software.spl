@@ -237,6 +237,19 @@ fn _kernel_probe_mask_src_over_bucket(n: i64, iters: i64) -> i64:
 # Software Backend
 # ============================================================================
 
+class SoftwareBackendPackedDamage:
+    """One synchronous, packed snapshot of the current dirty plan.
+
+    `rects` is the backend's canonical flat [x, y, w, h] damage plan and
+    `pixels` concatenates each rectangle's rows in that exact plan order.
+    The method that creates this value never clears dirty tiles: presentation
+    remains the only clear owner, so a failed downstream transport can safely
+    retry the same frame.
+    """
+    rects: [i32]
+    pixels: [u32]
+    valid: bool
+
 class SoftwareBackend:
     """Optimized software renderer with tile-based processing.
 
@@ -1363,16 +1376,31 @@ impl SoftwareBackend:
             var batch = span_batch_new(1)
             span_batch_push(batch, KERNEL_OP_FILL_CONST, offset as i64, 0, count as i64, color as i64, 0)
             val empty_u32: [u32] = []
-            val executed = simd_span_batch_execute(batch, self.buf, empty_u32, empty_u32, self.kernel_table,
+            # Local-var binding + write-back: passing self.buf directly hands the
+            # executor a field-read COPY under the interpreter (same pitfall as the
+            # scalar fallback below), which left the SIMD lane's fills invisible —
+            # "readback center mismatch for cpu_simd" in the backend matrix spec.
+            var work_buf = self.buf
+            val executed = simd_span_batch_execute(batch, work_buf, empty_u32, empty_u32, self.kernel_table,
                                                    KERNEL_FORMAT_ARGB8888_STRAIGHT, KERNEL_ALIGN_UNKNOWN, KERNEL_SPAN_CONTIGUOUS)
             self.simd_batch_hits = self.simd_batch_hits + batch.non_scalar_lookups
             if executed == batch.length:
+                self.buf = work_buf
                 return
             # Batch dispatcher refused (shouldn't happen for a single valid op) —
             # fall back to the direct native call rather than leave the span unfilled.
             self.buf = rt_engine2d_simd_fill_span_u32(self.buf, offset as i64, count as i64, color)
             return
-        _scalar_fill_row(self.buf, offset as i64, count as i64, color)
+        # Scalar fallback writes through self.buf DIRECTLY (same idiom as
+        # sw_copy_raw_span below). Passing the field to _scalar_fill_row(mut
+        # buf, ...) does NOT propagate under the interpreter — the field read
+        # hands the callee a copy — which left every fill/clear a silent no-op
+        # on interpreter hosts (found 2026-08-15 via the web-offload oracle).
+        var i = 0
+        # cpu-lane-loop-ok: scalar fallback inside sw_fill_raw_span itself, taken only when SIMD spans are unavailable; this IS the bulk span primitive
+        while i < count:
+            self.buf[offset + i] = color
+            i = i + 1
 
     me sw_copy_raw_span(dst_offset: i32, src: [u32], src_offset: i32, count: i32):
         val safe_count = _span_copy_safe_count(self.buf.len(), dst_offset, src.len(), src_offset, count)
@@ -1597,6 +1625,64 @@ impl SoftwareBackend:
                 row = row + 1
             r = r + 1
         self.mirror
+
+    me read_damage_pixels_packed(max_rects: i32) -> SoftwareBackendPackedDamage:
+        """Pack only the canonical dirty rectangle rows, in plan order.
+
+        This is intentionally separate from `read_pixels_damaged`: that API
+        updates and returns a retained *full* mirror for legacy callers,
+        whereas this one is the sparse transport primitive for an owner that
+        already holds a validated retained base. It neither creates a full
+        mirror nor clears dirty tiles.
+        """
+        if not self.initialized or self.w <= 0 or self.h <= 0:
+            return SoftwareBackendPackedDamage(rects: [], pixels: [], valid: false)
+        val rects = self.damage_rects(max_rects)
+        if rects.len() == 0:
+            return SoftwareBackendPackedDamage(rects: rects, pixels: [], valid: true)
+        if rects.len() % 4 != 0:
+            return SoftwareBackendPackedDamage(rects: [], pixels: [], valid: false)
+        var total: i64 = 0
+        var r = 0
+        val rect_count = rects.len() / 4
+        while r < rect_count:
+            val o = r * 4
+            val rx = rects[o]
+            val ry = rects[o + 1]
+            val rw = rects[o + 2]
+            val rh = rects[o + 3]
+            # Subtraction-form bounds checks avoid endpoint overflow and make
+            # this transport fail closed if a future plan producer is wrong.
+            if (rx < 0 or ry < 0 or rw <= 0 or rh <= 0 or
+                rx > self.w - rw or ry > self.h - rh):
+                return SoftwareBackendPackedDamage(rects: [], pixels: [], valid: false)
+            val area = rw.to_i64() * rh.to_i64()
+            if area > 2147483647 - total:
+                return SoftwareBackendPackedDamage(rects: [], pixels: [], valid: false)
+            total = total + area
+            r = r + 1
+        var packed: [u32] = [0u32; total.to_i32()]
+        var write = 0
+        r = 0
+        while r < rect_count:
+            val o = r * 4
+            val rx = rects[o]
+            val ry = rects[o + 1]
+            val rw = rects[o + 2]
+            val rh = rects[o + 3]
+            var row = 0
+            while row < rh:
+                val base = (ry + row) * self.w + rx
+                var col = 0
+                # cpu-lane-loop-ok: this is the packed sparse transport copy;
+                # boxed [u32] elements cannot be passed to memcpy as pixels.
+                while col < rw:
+                    packed[write] = self.buf[base + col]
+                    write = write + 1
+                    col = col + 1
+                row = row + 1
+            r = r + 1
+        SoftwareBackendPackedDamage(rects: rects, pixels: packed, valid: true)
 
     me invalidate_mirror():
         """Drop the frame-persistent mirror; the next damaged read reseeds."""
