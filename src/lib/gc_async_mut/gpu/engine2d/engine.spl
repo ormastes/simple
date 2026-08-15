@@ -286,6 +286,16 @@ class Engine2D with DrawIrRenderTarget:
         # Constructor rebuild — see ensure_font_renderer above.
         self.font_owner = Engine2DFontOwner(active: [renderer])
 
+    me _install_active_fonts(fonts: FontRenderer):
+        """Interpreter-safe writeback of the active FontRenderer slot: the
+        nested form `self.font_owner.active[0] = fonts` fails on the
+        interpreter lane with "nested field access not fully supported"
+        (doc/08_tracking/bug/engine2d_font_api_interpreter_lane_crashes_2026-08-15.md,
+        site 5). Rebinding through a local owner is supported on both lanes."""
+        var owner = self.font_owner
+        owner.active[0] = fonts
+        self.font_owner = owner
+
     me selected_font_identity() -> text:
         if self.font_owner.active.len() == 0:
             return ""
@@ -1666,7 +1676,12 @@ class Engine2D with DrawIrRenderTarget:
 
     me draw_glyph_run(x: i32, y: i32, run: FontGlyphRun, color: u32, font_size: i32) -> bool:
         self.ensure_font_renderer()
-        self.font_owner.active[0].stage_glyph_run(run, color, font_size)
+        # Explicit read/mutate/writeback (mirrors _install_active_fonts): the
+        # nested in-place mutation form relies on reference semantics that the
+        # interpreter lane does not guarantee for nested element receivers.
+        var run_fonts = self.font_owner.active[0]
+        run_fonts.stage_glyph_run(run, color, font_size)
+        self._install_active_fonts(run_fonts)
         self._font_batch_receipt("glyph-run", run.glyph_ids.len())
         self._draw_font_batch_staged(
             x, y, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
@@ -1748,7 +1763,7 @@ class Engine2D with DrawIrRenderTarget:
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
         fonts.stage_text_configured(text_val, color, config)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         self._font_batch_receipt("text", text_val.len())
         self._draw_font_batch_staged(x, y, plan)
 
@@ -1793,7 +1808,7 @@ class Engine2D with DrawIrRenderTarget:
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
         fonts.stage_text_with_advances_configured(text_val, advance_widths, color, config)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         self._font_batch_receipt("text-advances-vulkan-only", text_val.len())
         self._draw_font_batch_staged(x, y, ["vulkan"])
 
@@ -1818,7 +1833,7 @@ class Engine2D with DrawIrRenderTarget:
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
         fonts.stage_text_with_advances_configured(text_val, advance_widths, color, config)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         self._font_batch_receipt("text-advances", text_val.len())
         val advances_drawn = self._draw_font_batch_staged(x, y, plan)
         if not advances_drawn:
@@ -1841,7 +1856,7 @@ class Engine2D with DrawIrRenderTarget:
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
         fonts.stage_selected_glyph_run_configured(glyph_run, color, config)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         self._font_batch_receipt("shaped-vulkan-only", glyph_run.glyph_ids.len())
         self._draw_font_batch_staged(x, y, ["vulkan"])
 
@@ -1852,7 +1867,7 @@ class Engine2D with DrawIrRenderTarget:
         self.ensure_font_renderer()
         var fonts: FontRenderer = self.font_owner.active[0]
         fonts.stage_selected_glyph_run_configured(glyph_run, color, config)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         self._font_batch_receipt("shaped", glyph_run.glyph_ids.len())
         self._draw_font_batch_staged(x, y, plan)
 
@@ -1883,14 +1898,14 @@ class Engine2D with DrawIrRenderTarget:
         self.ensure_font_renderer()
         val fonts: FontRenderer = self.font_owner.active[0]
         val loaded = fonts.try_load_runtime_ttf(path)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         loaded
 
     me load_font_bytes(path: text, blob: [u8]) -> bool:
         self.ensure_font_renderer()
         val fonts: FontRenderer = self.font_owner.active[0]
         val loaded = fonts.try_load_selected_bytes(path, blob)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         loaded
 
     me select_font_identity(identity: text) -> bool:
@@ -1900,7 +1915,7 @@ class Engine2D with DrawIrRenderTarget:
         if self.font_owner.active.len() > 0:
             val owner_fonts: FontRenderer = self.font_owner.active[0]
             val current_identity = owner_fonts.current_font_identity()
-            self.font_owner.active[0] = owner_fonts
+            self._install_active_fonts(owner_fonts)
             if current_identity == identity:
                 return true
         val selected_path = selected_font_asset_local_path_for_identity(identity)
@@ -1909,13 +1924,13 @@ class Engine2D with DrawIrRenderTarget:
         self.ensure_font_renderer()
         val fonts: FontRenderer = self.font_owner.active[0]
         val registered = fonts.try_load_registered_identity(identity)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         if (not registered and
             (font_renderer_registered_selected_bytes_only() or not self.load_font(selected_path))):
             return false
         val loaded_fonts: FontRenderer = self.font_owner.active[0]
         val loaded_identity = loaded_fonts.current_font_identity()
-        self.font_owner.active[0] = loaded_fonts
+        self._install_active_fonts(loaded_fonts)
         if loaded_identity == identity:
             return true
         self.unload_font()
@@ -1952,7 +1967,7 @@ class Engine2D with DrawIrRenderTarget:
         self.ensure_font_renderer()
         val fonts: FontRenderer = self.font_owner.active[0]
         val stats = fonts.cache_stats()
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         stats
 
     me font_receipt_reset_cache_stats() -> bool:
@@ -1960,7 +1975,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val reset_ok = fonts.reset_cache_stats_receipt()
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         reset_ok
 
     me font_receipt_plan_admitted() -> bool: self.last_font_plan_admitted
@@ -1971,7 +1986,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         val fonts: FontRenderer = self.font_owner.active[0]
         val matches = fonts.receipt_identity_matches(expected_identity)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         matches
 
     me font_receipt_staged_valid() -> bool:
@@ -1979,7 +1994,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_staged_valid()
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_staged_quads_nonempty() -> bool:
@@ -1987,7 +2002,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_staged_quads_nonempty()
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_quad_phase_local_nonempty(token: bool) -> bool:
@@ -1995,7 +2010,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_quad_phase_local_nonempty(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_quad_phase_inbound_nonempty(token: bool) -> bool:
@@ -2003,7 +2018,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_quad_phase_inbound_nonempty(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_quad_phase_stored_nonempty(token: bool) -> bool:
@@ -2011,7 +2026,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_quad_phase_stored_nonempty(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_text_phase_layout_nonempty(token: bool) -> bool:
@@ -2019,7 +2034,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_text_phase_layout_nonempty(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_text_phase_fallback_glyph_positive(token: bool) -> bool:
@@ -2027,7 +2042,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_text_phase_fallback_glyph_positive(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_text_phase_glyph_positive(token: bool) -> bool:
@@ -2035,7 +2050,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_text_phase_glyph_positive(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_glyph_phase_cache_hit(token: bool) -> bool:
@@ -2043,7 +2058,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_glyph_phase_cache_hit(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_glyph_phase_cache_hit_positive(token: bool) -> bool:
@@ -2051,7 +2066,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_glyph_phase_cache_hit_positive(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_glyph_phase_rasterizer_maps(token: bool) -> bool:
@@ -2059,7 +2074,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_glyph_phase_rasterizer_maps(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_glyph_phase_bitmap_non_nil(token: bool) -> bool:
@@ -2067,7 +2082,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_glyph_phase_bitmap_non_nil(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_glyph_phase_bitmap_positive(token: bool) -> bool:
@@ -2075,7 +2090,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_glyph_phase_bitmap_positive(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_glyph_phase_bitmap_pixels_match(token: bool) -> bool:
@@ -2083,7 +2098,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_glyph_phase_bitmap_pixels_match(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_glyph_phase_adapter_positive(token: bool) -> bool:
@@ -2091,7 +2106,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_glyph_phase_adapter_positive(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_glyph_phase_adapter_pixels_match(token: bool) -> bool:
@@ -2099,7 +2114,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_glyph_phase_adapter_pixels_match(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_glyph_phase_reconstructed_positive(token: bool) -> bool:
@@ -2107,7 +2122,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_glyph_phase_reconstructed_positive(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_glyph_phase_return_positive(token: bool) -> bool:
@@ -2115,7 +2130,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_glyph_phase_return_positive(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_text_phase_atlas_index_valid(token: bool) -> bool:
@@ -2123,7 +2138,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_text_phase_atlas_index_valid(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_text_phase_quad_appended(token: bool) -> bool:
@@ -2131,7 +2146,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_text_phase_quad_appended(token)
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_staged_atlas_nonempty() -> bool:
@@ -2139,7 +2154,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_staged_atlas_nonempty()
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_staged_atlas_has_alpha() -> bool:
@@ -2147,7 +2162,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_staged_atlas_has_alpha()
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_cache_rasterizations_positive() -> bool:
@@ -2155,7 +2170,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_cache_rasterizations_positive()
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_cache_rasterizations_zero() -> bool:
@@ -2163,7 +2178,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_cache_rasterizations_zero()
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_cache_hits_positive() -> bool:
@@ -2171,7 +2186,7 @@ class Engine2D with DrawIrRenderTarget:
             return false
         var fonts: FontRenderer = self.font_owner.active[0]
         val result = fonts.receipt_cache_hits_positive()
-        self.font_owner.active[0] = fonts
+        self._install_active_fonts(fonts)
         result
 
     me font_receipt_execution_target_cpu() -> bool:
@@ -2212,7 +2227,7 @@ class Engine2D with DrawIrRenderTarget:
             if fonts.has_sffi_ttf() and font_size > 0 and font_size <= 512:
                     val text_width = fonts.measure_text_width(text_val, font_size)
                     var line_height = fonts.horizontal_line_metric(font_size, 3)
-                    self.font_owner.active[0] = fonts
+                    self._install_active_fonts(fonts)
                     if line_height <= 0:
                         line_height = font_size
                     if text_width > 0:

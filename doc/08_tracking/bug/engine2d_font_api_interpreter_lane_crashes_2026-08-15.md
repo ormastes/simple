@@ -29,3 +29,30 @@ test/01_unit/lib/gpu/engine2d/draw_ir_adv_branch_coverage_spec.spl, which
 now restricts itself to the working surface and references this doc.
 Related lane-divergence context:
 doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md.
+
+## RESOLVED 2026-08-15 (same day)
+
+All five sites fixed and verified:
+
+- Sites 2-4 root cause: the interpreter lane does not narrow an Option-typed
+  binding for FIELD access after `!= nil` (method calls dispatch by name and
+  worked, masking it). Fixed with explicit `.unwrap()` rebinds at the three
+  glyph/advance cache hits in
+  `src/lib/nogc_sync_mut/text_layout/font_renderer.spl`.
+- Site 5 root cause: `self.font_owner.active[0] = fonts` nested assignment
+  (unsupported on the interpreter). Fixed via new `_install_active_fonts()`
+  local-rebind helper in `src/lib/gc_async_mut/gpu/engine2d/engine.spl`
+  (39 call sites replaced).
+- Site 1 (cuda create) was the same font-path defects reached through
+  `install_pinned_cuda_font_artifact` — resolved by the fixes above; cuda now
+  resolves under the interpreter (real device present).
+- Additional harness-only crash found while verifying: `FontRasterizer.load()`
+  read a missing unmanaged font via the COLLIDING `file_read_bytes` duplicate
+  (returns nil, not [], under the co-compiled test harness) then called
+  `.len()` on it. Fixed fail-closed with a `file_exists` guard in
+  `src/lib/nogc_sync_mut/sffi/spl_fonts.spl`.
+
+Evidence: interpreter probes green for all five repros;
+`bin/simple test test/01_unit/lib/gpu/engine2d/draw_ir_adv_branch_coverage_spec.spl`
+(cuda re-enabled, full font lanes restored): `Results: 13 total, 13 passed,
+0 failed`; engine.spl decision coverage 3% -> 19%.

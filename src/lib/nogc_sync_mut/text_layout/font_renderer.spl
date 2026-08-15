@@ -1312,13 +1312,19 @@ class FontRenderer:
             cache.sync_face_identity(active_rasterizer.cache_identity_generation(), active_rasterizer.cache_identity())
         # Check cache first
         val cached = cache.lookup(codepoint, font_size)
-        if cached != nil:
+        # `if val Some(...)` narrowing — NOT `.unwrap()` and NOT bare field
+        # access: the runtime value's Option wrapping depends on provenance
+        # (fresh lookups wrap; cross-instance raster-cache values are RAW
+        # CachedGlyph), so each of the other two idioms crashes on one side.
+        # See doc/08_tracking/bug/
+        # font_renderer_cached_glyph_unwrap_semantic_crash_2026-08-15.md.
+        if val Some(cached_glyph) = cached:
             self.glyph_phase_cache_hit = true
-            if cached.width > 0 and cached.height > 0:
+            if cached_glyph.width > 0 and cached_glyph.height > 0:
                 self.glyph_phase_cache_hit_positive = true
                 self.glyph_phase_return_positive = true
             self.cache = cache
-            return cached
+            return cached_glyph
 
         # Cross-instance glyph-raster cache (T12, render-perf replan
         # 2026-08-07) -- keyed by rasterizer identity + codepoint + size.
@@ -1337,13 +1343,15 @@ class FontRenderer:
             if _glyph_raster_keys[raster_idx] == raster_key:
                 raster_hit = _glyph_raster_values[raster_idx]
             raster_idx = raster_idx + 1
-        if raster_hit != nil:
+        # Same dual-provenance narrowing as the cache.lookup hit above —
+        # values in _glyph_raster_values are stored RAW.
+        if val Some(raster_glyph) = raster_hit:
             _glyph_raster_hits = _glyph_raster_hits + 1
-            cache.insert(raster_hit)
+            cache.insert(raster_glyph)
             self.cache = cache
-            if raster_hit.width > 0 and raster_hit.height > 0:
+            if raster_glyph.width > 0 and raster_glyph.height > 0:
                 self.glyph_phase_return_positive = true
-            return raster_hit
+            return raster_glyph
         _glyph_raster_misses = _glyph_raster_misses + 1
 
         # Rasterize
@@ -1535,9 +1543,15 @@ class FontRenderer:
             cache.sync_face_identity(active_rasterizer.cache_identity_generation(), _adv_identity)
         val cached = cache.lookup(codepoint, font_size)
         self.cache = cache
-        if cached != nil:
-            _adv_cache_store(_adv_identity, font_size, codepoint, cached.advance)
-            return cached.advance
+        # `if val Some(...)` narrowing — NOT `.unwrap()`: the runtime value's
+        # Option wrapping depends on provenance (a fresh lookup wraps; the
+        # cross-instance raster cache stores RAW CachedGlyph), so `.unwrap()`
+        # crashed on cache hits and bare field access crashed on wrapped
+        # values. Pattern-match narrowing handles both. See doc/08_tracking/
+        # bug/font_renderer_cached_glyph_unwrap_semantic_crash_2026-08-15.md.
+        if val Some(cached_adv) = cached:
+            _adv_cache_store(_adv_identity, font_size, codepoint, cached_adv.advance)
+            return cached_adv.advance
 
         val rast_has_glyph = active_rasterizer != nil and active_rasterizer.has_glyph(codepoint.to_i64())
         if rast_has_glyph:
