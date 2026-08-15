@@ -934,6 +934,37 @@ impl MirLowering:
         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, push_recv)
         push_recv
 
+    me lower_unresolved_array_write_span(ws_recv: LocalId, ws_args: [HirCallArg], wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64) -> LocalId:
+        """Builtin Array.write_span(src, dst_off, src_off, count) -> i64.
+
+        Mirrors lower_unresolved_array_push: arrays are builtins with no HIR
+        method symbol, so the bulk-copy lowers straight to the runtime symbol
+        `rt_array_write_span(ptr dst, ptr src, i64 dst_off, i64 src_off,
+        i64 count) -> i64` (count copied, -1 on out-of-bounds, 0 for
+        count <= 0 -- same contract as the seed runtime's
+        rt_array_write_span in value/collections.rs and the interpreter's
+        array_write_span kernel). Elements are copied slot-for-slot between
+        two array handles, so no per-value box/unbox is needed; the offsets
+        and count are raw i64 operands like every rt_array_* index."""
+        val ws_src = self.lower_expr(ws_args[0].value)
+        val ws_dst_off = self.lower_expr(ws_args[1].value)
+        val ws_src_off = self.lower_expr(ws_args[2].value)
+        val ws_count = self.lower_expr(ws_args[3].value)
+        val ws_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_write_span"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType.ptr(MirType.i64(), false), MirType.ptr(MirType.i64(), false), MirType.i64(), MirType.i64(), MirType.i64()],
+                return_type: MirType.i64(),
+                is_variadic: false
+            )))
+        ))
+        var b_ws = self.builder
+        val ws_result = b_ws.emit_call(ws_op, [mir_operand_copy(ws_recv), mir_operand_copy(ws_src), mir_operand_copy(ws_dst_off), mir_operand_copy(ws_src_off), mir_operand_copy(ws_count)], MirType.i64())
+        self.builder = b_ws
+        self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, ws_recv)
+        ws_result
+
+
     me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution, static_receiver_name_hint: text, static_receiver_symbol_hint: i64) -> LocalId:
         """Lower method call based on resolution.
 
@@ -2732,6 +2763,13 @@ impl MirLowering:
                         unresolved_receiver_local, args[0].value,
                         wb_kind, wb_base, wb_index, wb_field_idx)
 
+                # Builtin Array.write_span, same no-method-symbol situation
+                # as push above (see lower_unresolved_array_write_span).
+                if method == "write_span" and args.len() == 4:
+                    return self.lower_unresolved_array_write_span(
+                        unresolved_receiver_local, args,
+                        wb_kind, wb_base, wb_index, wb_field_idx)
+
                 # `char_code_at` is a text runtime primitive, but flat HIR has
                 # no method symbol for it. Keep custom owner methods above,
                 # then use the runtime's tagged-or-raw text ABI directly.
@@ -3008,6 +3046,12 @@ impl MirLowering:
                     # push(7) stored raw 7, then read-side `7 >> 3 == 0`).
                     return self.lower_unresolved_array_push(
                         unresolved_receiver_local, args[0].value,
+                        wb_kind, wb_base, wb_index, wb_field_idx)
+                # Builtin Array.write_span, same no-method-symbol situation
+                # and same stable-handle writeback rationale as push above.
+                if method == "write_span" and args.len() == 4:
+                    return self.lower_unresolved_array_write_span(
+                        unresolved_receiver_local, args,
                         wb_kind, wb_base, wb_index, wb_field_idx)
                 # Enumerated siblings (2026-08-08). A single probe carrying
                 # eight typed-receiver method calls through plain native-build

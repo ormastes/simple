@@ -153,6 +153,36 @@ Follow-up (small, not blocking): give the self-hosted AOT lowering
 widen `_bulk_span_ready()`; consider building the fill row without the extern
 return-array round trip to shave the remaining fill ms.
 
+### Follow-up DONE 2026-08-15 — AOT lowering landed, gate removed
+
+- MIR: `lower_unresolved_array_write_span` in
+  `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`, hooked at
+  both unresolved-builtin-method sites next to `push` (args.len()==4), plus
+  `write_span` added to `is_mutating_method` (switch_operators_calls.spl) so
+  Index/Field receivers get the same write-back as `push`.
+- Backend decls: `declare i64 @rt_array_write_span(ptr, ptr, i64, i64, i64)`
+  registered in `_MirToLlvm/asm_constraints_helpers.spl` (declare +
+  defined_func_names + param/return types), `llvm_lib_translate.spl`,
+  `llvm_backend.spl`, `llvm_backend_tools.spl`.
+- C runtime: `rt_array_write_span` added to `src/runtime/runtime_native.c`
+  (+ decl in `runtime.h`) — same contract as the seed runtime's
+  (count copied / -1 OOB / 0 for count<=0), memmove for same-storage
+  (overlap-safe), per-element get/set for mixed bytes-vs-i64 storage.
+  `clang -fsyntax-only` clean.
+- `_bulk_span_ready()` + `rt_is_interpreter_runtime`/`rt_is_jit_runtime`
+  externs removed from `simd_kernels.spl`; all lanes now use `write_span`
+  (element-loop fallbacks deleted).
+- Verified: `array_write_span_spec.spl` 6/6, `simd_kernels_config_matrix_spec`
+  18/18, `simd_kernels_spec` 51/51 (interpreter lane, 2026-08-15).
+- **PENDING AOT verification** (bootstrap was running; no admitted stage
+  binary to compile with at the time): after the next bootstrap deploys a
+  self-hosted `bin/release/<triple>/simple`, compile+run a probe that does
+  `var d=[0,0,0,0]; var s=[1,2,3,4]; d.write_span(s,1,0,2); print(d[1]); print(d[2])`
+  under the pure-Simple AOT backend and expect `1`/`2`; also re-run
+  `sh scripts/check/check-simpleos-qemu-engine2d-simd-kernels.shs` for the
+  end-to-end lane. Until that runs, the AOT arm is code-reviewed +
+  interpreter-spec-verified only.
+
 ## Non-goals
 
 AOT/native builds are NOT affected (packed framebuffer, kernels run in place).

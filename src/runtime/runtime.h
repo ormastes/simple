@@ -430,6 +430,10 @@ int8_t   rt_array_set(SplArray* array, int64_t idx, int64_t value);
 int8_t   rt_array_set_text(SplArray* array, int64_t idx, int64_t value);
 int8_t   rt_array_push(SplArray* array, int64_t value);
 int8_t   rt_array_clear(SplArray* array);
+/* Bulk element copy: dst[dst_off..dst_off+count] = src[src_off..src_off+count].
+ * Returns count copied, -1 on out-of-bounds/invalid handle, 0 for count<=0. */
+int64_t  rt_array_write_span(SplArray* dst, SplArray* src, int64_t dst_off,
+                             int64_t src_off, int64_t count);
 int8_t   rt_array_push_i64_raw(SplArray* array, int64_t value);
 int64_t  rt_array_get_i64_raw(SplArray* array, int64_t index);
 /* Closure-invoking collection ops. rt_array_reduce takes `init` BEFORE the

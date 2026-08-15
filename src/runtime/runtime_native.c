@@ -6572,6 +6572,36 @@ int8_t rt_array_push_i64_raw(SplArray* a, int64_t val) {
     return rt_array_push(a, val);
 }
 
+/* Bulk element copy between two array handles: copies `count` slots from
+ * src[src_off..] into dst[dst_off..]. Contract mirrors the seed runtime's
+ * rt_array_write_span (compiler_rust/runtime value/collections.rs): returns
+ * 0 for count <= 0, -1 on any out-of-bounds or invalid handle, else count.
+ * Overlap-safe for dst == src (memmove). Mixed bytes/i64 storage falls back
+ * to a per-element get/set loop so the byte<->tagged conversion stays with
+ * the existing accessors. */
+int64_t rt_array_write_span(SplArray* dst, SplArray* src, int64_t dst_off,
+                            int64_t src_off, int64_t count) {
+    if (count <= 0) return 0;
+    RtCoreArray* d = rt_core_array_ptr(dst);
+    RtCoreArray* s = rt_core_array_ptr(src);
+    if (!d || !s) return -1;
+    if (dst_off < 0 || src_off < 0 ||
+        dst_off > d->len - count || src_off > s->len - count) return -1;
+    int d_bytes = (d->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+    int s_bytes = (s->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+    if (d_bytes == s_bytes) {
+        size_t esz = d_bytes ? sizeof(uint8_t) : sizeof(int64_t);
+        memmove((uint8_t*)d->data + (size_t)dst_off * esz,
+                (uint8_t*)s->data + (size_t)src_off * esz,
+                (size_t)count * esz);
+    } else {
+        for (int64_t i = 0; i < count; i++) {
+            rt_array_set(dst, dst_off + i, rt_array_get(src, src_off + i));
+        }
+    }
+    return count;
+}
+
 int64_t rt_array_get_i64_raw(SplArray* a, int64_t index) {
     return rt_array_get(a, index);
 }
