@@ -35,6 +35,11 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     engine2d_draw_ir_adv_composition_present_with_images,
     engine2d_resolved_draw_ir_image
 }
+use common.ui.render_opt.damage_tiles.{DirtyTilePyramid}
+use common.ui.render_opt.damage_plan.{
+    DamagePlan, DamagePlanPolicy, build_damage_plan, DAMAGE_PLAN_FULL,
+    DAMAGE_FALLBACK_INVALID
+}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 use os.kernel.boot.monotonic_hardware.{boot_monotonic_deadline_us, boot_monotonic_elapsed_us, boot_monotonic_now_us}
 use os.lib.gpu_bridge.host_gpu_ivshmem.{
@@ -69,6 +74,24 @@ fn engine2d_wm_draw_ir_backend_target(host_gpu_active: bool, host_gpu_backend: t
 fn engine2d_wm_draw_ir_local_recompose_required(host_target: text, local_target: text) -> bool:
     host_target != local_target
 
+# Fail-closed full-frame plan for the retained old/new damage contract: any
+# state that cannot prove which pixels are stale (no successful prior frame,
+# background identity change, zero-size viewport) repaints everything.
+fn engine2d_wm_full_damage_plan(width: i64, height: i64) -> DamagePlan:
+    val w = if width > 0: width else: 0
+    val h = if height > 0: height else: 0
+    DamagePlan(
+        rects: [0, 0, w, h], mode: DAMAGE_PLAN_FULL,
+        source_tile_count: 0, output_rect_count: 1, merged_tile_count: 0,
+        dirty_pixels: w * h, planned_pixels: w * h,
+        full_fallback_count: 1, fallback_reason: DAMAGE_FALLBACK_INVALID,
+        tiles_examined: 0)
+
+# Retained window-extent identity for one scene background provider spec —
+# any component change invalidates the retained frame entirely.
+fn engine2d_wm_background_key(scene: SharedWmScene) -> text:
+    "{scene.background.kind}:{scene.background.color}:{scene.background.source}:{scene.background.fit}"
+
 class Engine2dWmFrameExecutor:
     engine: Engine2D
     framebuffer: FramebufferDriver
@@ -94,10 +117,21 @@ class Engine2dWmFrameExecutor:
     # empty whenever retention isn't negotiated with the host, or after any
     # non-PASS receipt (fail closed — next frame re-sends full resources).
     image_resource_revisions: [SimpleOsHostGpuImageResourceRevision]
+    # Retained old/new damage state (wm_retained_damage_contract): after a
+    # successful present the executor keeps every window extent as a 5-slot
+    # record (x, y, w, h, valid) plus the background identity and scene
+    # revision. The NEXT changed scene marks BOTH the retained old extents
+    # (vacated pixels) and the current extents dirty.
+    last_successful_scene_revision: i64
+    last_successful_window_rects: [i64]
+    last_successful_background_key: text
+    damage_tiles: DirtyTilePyramid
 
     static fn create(engine: Engine2D, framebuffer: FramebufferDriver, fb_w: i64 = 0, fb_h: i64 = 0, cpu_simd_enabled: bool = false) -> Engine2dWmFrameExecutor:
         val local_target = engine2d_wm_draw_ir_backend_target(false, "", cpu_simd_enabled)
-        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, host_gpu_required: false, draw_ir_backend_target: local_target, local_draw_ir_backend_target: local_target, fb_w: fb_w, fb_h: fb_h, image_resource_revisions: [])
+        val tile_w = if fb_w > 0: fb_w else: framebuffer.width.to_i64()
+        val tile_h = if fb_h > 0: fb_h else: framebuffer.height.to_i64()
+        Engine2dWmFrameExecutor(engine: engine, framebuffer: framebuffer, host_gpu_base: 0u64, host_gpu_run_id_hash: 0, host_gpu_backend: "", host_gpu_backend_code: 0, host_gpu_required: false, draw_ir_backend_target: local_target, local_draw_ir_backend_target: local_target, fb_w: fb_w, fb_h: fb_h, image_resource_revisions: [], last_successful_scene_revision: 0, last_successful_window_rects: [], last_successful_background_key: "", damage_tiles: DirtyTilePyramid.create(tile_w, tile_h, [256, 64, 32], [256, 64, 32]))
 
     static fn create_host_gpu(engine: Engine2D, framebuffer: FramebufferDriver, base: u64, guest_isa_code: i64, backend_code: i64, fb_width: i64, fb_height: i64, negotiation_started_us: i64, cpu_simd_enabled: bool = false, backend_required: bool = false) -> Engine2dWmFrameExecutor:
         var executor = Engine2dWmFrameExecutor.create(engine, framebuffer, fb_width, fb_height, cpu_simd_enabled)
@@ -221,6 +255,52 @@ class Engine2dWmFrameExecutor:
         serial_println("[wm-frame] host-gpu-device-evidence backend={self.host_gpu_backend} generation={generation} run={receipt.run_id_hash} frame={receipt.frame_id} submit_id={receipt.submit_id} fence_id={receipt.fence_id} fence_completed={receipt.fence_signaled} device_frame_id={receipt.device_frame_id} scene_revision={scene_revision} handle={receipt.native_handle} identity={receipt.device_identity} readback=device checksum={receipt.output_checksum} elapsed_us={receipt.elapsed_us}")
         true
 
+    # Retained old/new damage plan. Admission requires a successful prior
+    # frame and an unchanged background identity; a changed scene revision
+    # marks BOTH the retained old window extents and the current extents
+    # dirty so vacated pixels repaint without a full-frame fallback.
+    # Anything unprovable returns the fail-closed full plan.
+    me retained_scene_damage_plan(scene: SharedWmScene, background_key: text, scene_revision: i64) -> DamagePlan:
+        val width = if self.fb_w > 0: self.fb_w else: self.framebuffer.width.to_i64()
+        val height = if self.fb_h > 0: self.fb_h else: self.framebuffer.height.to_i64()
+        if not (self.last_successful_scene_revision > 0):
+            return engine2d_wm_full_damage_plan(width, height)
+        if background_key != self.last_successful_background_key:
+            return engine2d_wm_full_damage_plan(width, height)
+        self.damage_tiles.begin_frame()
+        if scene_revision != self.last_successful_scene_revision:
+            var old: i64 = 0
+            while old + 4 < self.last_successful_window_rects.len():
+                if self.last_successful_window_rects[old + 4] != 0:
+                    self.damage_tiles.mark_rect(
+                        self.last_successful_window_rects[old],
+                        self.last_successful_window_rects[old + 1],
+                        self.last_successful_window_rects[old + 2],
+                        self.last_successful_window_rects[old + 3])
+                old = old + 5
+            for window in scene.windows:
+                if not window.minimized:
+                    val current = shared_wm_scene_window_content_rect_with_titlebar(window, 28)
+                    self.damage_tiles.mark_rect(
+                        current.x.to_i64(), current.y.to_i64(),
+                        current.width.to_i64(), current.height.to_i64())
+        build_damage_plan(self.damage_tiles, 1, DamagePlanPolicy.create(64, 60))
+
+    # Commit the retained extents only for a frame that actually presented.
+    me record_successful_scene(scene: SharedWmScene, background_key: text, scene_revision: i64):
+        var rects: [i64] = []
+        for window in scene.windows:
+            val current = shared_wm_scene_window_content_rect_with_titlebar(window, 28)
+            val valid = if window.minimized or current.width <= 0 or current.height <= 0: 0 else: 1
+            rects.push(current.x.to_i64())
+            rects.push(current.y.to_i64())
+            rects.push(current.width.to_i64())
+            rects.push(current.height.to_i64())
+            rects.push(valid)
+        self.last_successful_window_rects = rects
+        self.last_successful_background_key = background_key
+        self.last_successful_scene_revision = scene_revision
+
     me render(scene: SharedWmScene, taskbar: TaskbarModel, content_frames: [WmContentFrame], scene_revision: i64, taskbar_revision: i64, clock_label: text) -> i64:
         if scene_revision <= 0 or taskbar_revision <= 0:
             return 0
@@ -305,6 +385,7 @@ class Engine2dWmFrameExecutor:
                     serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} path=host-gpu scene_revision={scene_revision}")
                 for frame in good_content_frames:
                     serial_println("[wm-frame] content-presented scene_revision={scene_revision} path=host-gpu window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
+                self.record_successful_scene(scene, engine2d_wm_background_key(scene), scene_revision)
                 return scene_revision
             if self.host_gpu_required:
                 serial_println("[wm-frame] host-gpu-required-rejected reason=device-receipt-or-readback")
@@ -333,4 +414,5 @@ class Engine2dWmFrameExecutor:
             serial_println("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={result.skipped_command_count} rendered={result.rendered_command_count} scene_revision={scene_revision} reason={result.fallback_reason}")
         for frame in good_content_frames:
             serial_println("[wm-frame] content-presented scene_revision={scene_revision} path=software window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
+        self.record_successful_scene(scene, engine2d_wm_background_key(scene), scene_revision)
         scene_revision
