@@ -1,0 +1,262 @@
+@allow(primitive_api)
+# Counterpart Conformance — Chrome DOM-snapshot lane.
+#
+# Launches the pinned headless Chrome for Testing binary (the same discovery
+# order as tools/layout_diff/run_layout_diff.shs), drives it over CDP through
+# std.play (WebSocket over TcpStream — no node, no curl in the hot path),
+# navigates to a data: URL whose body carries a caller-chosen token, and reads
+# the DOM back out of the live renderer via Runtime.evaluate. The IO compare
+# is: the token Simple put INTO the page must come back OUT of Chrome's DOM,
+# byte-identical, and the serialized document must contain it.
+#
+# Fail-closed, always:
+#   * no chrome executable found            -> unavailable ("chrome unavailable: ...")
+#   * launch / DevTools handshake failed    -> unavailable, stage named
+#   * navigation never produced the DOM     -> unavailable
+#   * token mismatch                        -> executed, matched=false, detail names it
+#   * NEVER a fabricated DOM string, NEVER a literal browser version
+#
+# Artifact schema id: chrome.dom_snapshot@1 (already registered in
+# converter_registry.spl as a versioned schema id).
+
+use std.play.types.{LaunchOptions, default_launch_options, PlayError}
+use std.play.electron_application.{ElectronApplication}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.common.spec.evidence.counterpart.model.{
+    ProviderStatus,
+    CounterpartRelation,
+    LogicalArtifact,
+    ExecutionReceipt,
+    ExecutionMode,
+    ProvenanceReceipt
+}
+
+extern fn rt_time_now_unix_micros() -> i64
+
+pub val CHROME_DOM_BOUNDARY: text = "infra.counterpart.chrome_dom@1"
+pub val CHROME_DOM_SCHEMA_ID: text = "chrome.dom_snapshot"
+pub val CHROME_DOM_SCHEMA_VERSION: i64 = 1
+
+# ============================================================================
+# Pinned-chrome discovery — same candidate order as run_layout_diff.shs
+# ============================================================================
+
+# Returns the path of the first executable chrome candidate, or "" when none
+# exists. Honors LAYOUT_DIFF_CHROME first, exactly like the layout_diff lane.
+pub fn chrome_discover_pinned() -> text:
+    val script = "for c in \"$LAYOUT_DIFF_CHROME\" " +
+        "../simple-webrender-gpu-offload-wt/.cache/ms-playwright/chromium-*/chrome-linux64/chrome " +
+        "\"$HOME\"/dev/pub/simple-webrender-gpu-offload-wt/.cache/ms-playwright/chromium-*/chrome-linux64/chrome " +
+        "\"$HOME\"/.cache/ms-playwright/chromium-*/chrome-linux64/chrome " +
+        "/usr/bin/google-chrome /usr/bin/chromium /usr/bin/chromium-browser; do " +
+        "if [ -n \"$c\" ] && [ -x \"$c\" ]; then echo \"$c\"; exit 0; fi; done; exit 1"
+    val (stdout, _stderr, exit_code) = process_run_bounded("/bin/sh", ["-c", script], 5000, 4096)
+    if exit_code != 0:
+        return ""
+    stdout.trim()
+
+# The REAL version string the binary reports, e.g.
+# "Google Chrome for Testing 151.0.7922.34". Empty when it cannot be run.
+pub fn chrome_probe_version(chrome_path: text) -> text:
+    if chrome_path == "":
+        return ""
+    val (stdout, _stderr, exit_code) = process_run_bounded(chrome_path, ["--version"], 10000, 4096)
+    if exit_code != 0:
+        return ""
+    stdout.trim()
+
+# ============================================================================
+# Outcome
+# ============================================================================
+
+pub struct ChromeDomSnapshotOutcome:
+    provider_id: text
+    status: ProviderStatus
+    detail: text
+    # The REAL --version string of the binary that answered. Empty whenever no
+    # browser was reached — never a literal.
+    browser_version: text
+    requested_token: text
+    observed_token: text
+    dom_length: i64
+    matched: bool
+    relation: CounterpartRelation
+    artifact: LogicalArtifact
+    execution: ExecutionReceipt
+    provenance: ProvenanceReceipt
+
+fn chrome_provider_id(chrome_path: text) -> text:
+    "chrome-dom-snapshot:" + chrome_path
+
+fn empty_artifact() -> LogicalArtifact:
+    LogicalArtifact(
+        boundary_id: "",
+        schema_id: "",
+        schema_version: -1,
+        item_count: 0,
+        canonical_hash: "",
+        artifact_ref: ""
+    )
+
+fn receipt(provider_id: text, browser_version: text, submitted: i64, completed: bool) -> ExecutionReceipt:
+    ExecutionReceipt(
+        provider_id: provider_id,
+        execution_mode: ExecutionMode.cpu_reference,
+        device_identity: browser_version,
+        queue_identity: "",
+        submission_count: submitted,
+        fence_completed: false,
+        device_origin_readback: completed,
+        fallback_used: false,
+        dropped_events: 0,
+        completed: completed
+    )
+
+fn provenance_for(chrome_path: text, browser_version: text, provider_id: text) -> ProvenanceReceipt:
+    ProvenanceReceipt(
+        package_manifest_hash: "",
+        provider_manifest_hash: "",
+        input_hash: "",
+        converter_route_hash: "",
+        environment_profile: chrome_path + "|" + browser_version,
+        run_id: provider_id
+    )
+
+fn outcome_unavailable(chrome_path: text, detail: text, browser_version: text, token: text) -> ChromeDomSnapshotOutcome:
+    val provider_id = chrome_provider_id(chrome_path)
+    ChromeDomSnapshotOutcome(
+        provider_id: provider_id,
+        status: ProviderStatus.unavailable,
+        detail: detail,
+        browser_version: browser_version,
+        requested_token: token,
+        observed_token: "",
+        dom_length: 0,
+        matched: false,
+        relation: CounterpartRelation.canonical_exact,
+        artifact: empty_artifact(),
+        execution: receipt(provider_id, browser_version, 0, false),
+        provenance: provenance_for(chrome_path, browser_version, provider_id)
+    )
+
+# ============================================================================
+# The real round trip
+# ============================================================================
+
+# Extract the "value":"..." string from a Runtime.evaluate response body.
+fn _value_string(body: text) -> text:
+    val marker = "\"value\":\""
+    if not body.contains(marker):
+        return ""
+    body.split(marker)[1].split("\"")[0]
+
+fn _value_int(body: text) -> i64:
+    val marker = "\"value\":"
+    if not body.contains(marker):
+        return 0
+    val raw = body.split(marker)[1].split(",")[0].split("}")[0].trim()
+    if raw == "":
+        return 0
+    int(raw)
+
+struct ChromeDomProbe:
+    observed_token: text
+    dom_length: i64
+    failure: text
+
+# Inner Result-shaped body so `?` can propagate PlayError; the public wrapper
+# converts every error into a fail-closed unavailable outcome.
+fn chrome_dom_round_trip(chrome_path: text, token: text, timeout_ms: i64) -> Result<ChromeDomProbe, PlayError>:
+    var opts = default_launch_options()
+    opts.executable_path = chrome_path
+    opts.headless = true
+    opts.xvfb = false
+    opts.timeout_ms = timeout_ms
+    opts.args = [
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-gpu",
+        "--no-first-run",
+        "--user-data-dir=/tmp/counterpart_chrome_" + rt_time_now_unix_micros().to_text(),
+        "about:blank"
+    ]
+    val app = ElectronApplication.launch(opts)?
+    val page = app.first_window()?
+    val sess = page.session
+    # No spaces in the data: URL — %20 keeps every transport quoting-free.
+    val data_url = "data:text/html,<html><body><p%20id=%22cp%22>" + token + "</p></body></html>"
+    sess.navigate(data_url)?
+    var observed = ""
+    var dom_len: i64 = 0
+    val deadline = rt_time_now_unix_micros() + (timeout_ms * 1000)
+    while rt_time_now_unix_micros() < deadline:
+        val body = sess.evaluate("(() => { const el = document.getElementById('cp'); return el ? el.textContent : ''; })()")?
+        observed = _value_string(body)
+        if observed == token:
+            val len_body = sess.evaluate("document.documentElement.outerHTML.length")?
+            dom_len = _value_int(len_body)
+            break
+    val contains_body = sess.evaluate("document.documentElement.outerHTML.indexOf('" + token + "') >= 0 ? 'yes' : 'no'")?
+    val serialized_has_token = _value_string(contains_body) == "yes"
+    app.close()?
+    if observed == "":
+        return Ok(ChromeDomProbe(observed_token: "", dom_length: 0,
+            failure: "navigation produced no DOM token within " + timeout_ms.to_text() + "ms"))
+    if not serialized_has_token:
+        return Ok(ChromeDomProbe(observed_token: observed, dom_length: dom_len,
+            failure: "serialized document does not contain the token"))
+    Ok(ChromeDomProbe(observed_token: observed, dom_length: dom_len, failure: ""))
+
+# Launch `chrome_path` headless, navigate to a data: URL carrying `token`, and
+# read the token back out of the live DOM over CDP. `canonical_exact`: the DOM
+# text of an element written verbatim into the source must round-trip
+# byte-identically — there is no lossy stage for a tolerance to absorb.
+pub fn chrome_dom_snapshot_compare(chrome_path: text, token: text, timeout_ms: i64) -> ChromeDomSnapshotOutcome:
+    val provider_id = chrome_provider_id(chrome_path)
+    if chrome_path == "":
+        return outcome_unavailable(chrome_path,
+            "chrome unavailable: no executable found (pass a path or set LAYOUT_DIFF_CHROME)", "", token)
+    val version = chrome_probe_version(chrome_path)
+    if version == "":
+        return outcome_unavailable(chrome_path,
+            "chrome unavailable: '" + chrome_path + "' did not answer --version", "", token)
+
+    val probe_result = chrome_dom_round_trip(chrome_path, token, timeout_ms)
+    val probe = match probe_result:
+        Err(e) => ChromeDomProbe(observed_token: "", dom_length: 0,
+            failure: "cdp error " + e.code + ": " + e.message)
+        Ok(p) => p
+    if probe.failure != "" and probe.observed_token == "":
+        return outcome_unavailable(chrome_path, "chrome unavailable: " + probe.failure, version, token)
+    val ok = probe.observed_token == token and probe.failure == ""
+    val detail = if ok:
+        "DOM token round-tripped byte-identically through " + version
+    else if probe.failure != "":
+        "token MISMATCH: " + probe.failure
+    else:
+        "token MISMATCH: requested '" + token + "' observed '" + probe.observed_token + "'"
+    ChromeDomSnapshotOutcome(
+        provider_id: provider_id,
+        status: ProviderStatus.executed,
+        detail: detail,
+        browser_version: version,
+        requested_token: token,
+        observed_token: probe.observed_token,
+        dom_length: probe.dom_length,
+        matched: ok,
+        relation: CounterpartRelation.canonical_exact,
+        artifact: LogicalArtifact(
+            boundary_id: CHROME_DOM_BOUNDARY,
+            schema_id: CHROME_DOM_SCHEMA_ID,
+            schema_version: CHROME_DOM_SCHEMA_VERSION,
+            item_count: probe.dom_length,
+            canonical_hash: probe.observed_token,
+            artifact_ref: provider_id
+        ),
+        execution: receipt(provider_id, version, 1, true),
+        provenance: provenance_for(chrome_path, version, provider_id)
+    )
+
+export ChromeDomSnapshotOutcome
+export chrome_dom_snapshot_compare, chrome_discover_pinned, chrome_probe_version
+export CHROME_DOM_BOUNDARY, CHROME_DOM_SCHEMA_ID, CHROME_DOM_SCHEMA_VERSION

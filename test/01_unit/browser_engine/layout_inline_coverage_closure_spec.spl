@@ -1,0 +1,72 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/layout_inline.spl 95%
+"""
+# Inline Formatting Context Leaf Helpers — Coverage Closure
+
+Direct-oracle closure over layout_inline.spl: recursive text collection,
+whitespace word splitting, and inline text-align extraction (style
+attribute hit, no-semicolon tail, and computed-style fallback).
+"""
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, StyleProps}
+
+fn _node_with_align(align: text) -> BeDomNode:
+    var n = BeDomNode.element("p")
+    var sp = StyleProps.empty()
+    sp.text_align = align
+    n.style = sp
+    n
+use std.gc_async_mut.gpu.browser_engine.layout_inline.{
+    _collect_text, _split_words, _parse_inline_text_align}
+
+describe "_collect_text":
+    it "returns text node data directly":
+        expect(_collect_text(BeDomNode.text("hi"))).to_equal("hi")
+
+    it "joins nested subtree text with single spaces, skipping empties":
+        var root = BeDomNode.element("div")
+        var span = BeDomNode.element("span")
+        span.add_child(BeDomNode.text("world"))
+        root.add_child(BeDomNode.text("hello"))
+        root.add_child(BeDomNode.element("br"))
+        root.add_child(span)
+        expect(_collect_text(root)).to_equal("hello world")
+
+    it "returns empty for an element with no text descendants":
+        expect(_collect_text(BeDomNode.element("div"))).to_equal("")
+
+describe "_split_words":
+    it "splits on spaces, tabs, newlines and carriage returns":
+        val w = _split_words(" one\ttwo\nthree\rfour ")
+        expect(w.len()).to_equal(4)
+        expect(w[0]).to_equal("one")
+        expect(w[3]).to_equal("four")
+
+    it "handles empty and all-whitespace input":
+        expect(_split_words("").len()).to_equal(0)
+        expect(_split_words("  \t\n ").len()).to_equal(0)
+
+    it "keeps a trailing word with no terminating whitespace":
+        val w = _split_words("a bb")
+        expect(w.len()).to_equal(2)
+        expect(w[1]).to_equal("bb")
+
+describe "_parse_inline_text_align":
+    it "reads text-align from the inline style attribute":
+        var n = BeDomNode.element("p")
+        n.set_attr("style", "color:red; text-align: center; width:10px")
+        expect(_parse_inline_text_align(n)).to_equal("center")
+
+    it "reads an unterminated text-align value at end of attribute":
+        var n = BeDomNode.element("p")
+        n.set_attr("style", "text-align:right")
+        expect(_parse_inline_text_align(n)).to_equal("right")
+
+    it "falls back to computed style when attribute lacks text-align":
+        var n = _node_with_align("justify")
+        n.set_attr("style", "color:red")
+        expect(_parse_inline_text_align(n)).to_equal("justify")
+
+    it "falls back to computed style when no style attribute exists":
+        val n = _node_with_align("left")
+        expect(_parse_inline_text_align(n)).to_equal("left")

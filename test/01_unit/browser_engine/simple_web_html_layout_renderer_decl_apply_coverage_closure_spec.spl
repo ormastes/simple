@@ -1,0 +1,500 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl 64%
+"""
+# HTML Layout Renderer Decl Apply — Coverage Closure (tranche 3)
+
+`simple_web_html_layout_renderer_decl_apply.spl` is one 2268-line function,
+`_apply_decls_without_grid`, the full-probe declaration applier reached via
+`apply_decls` whenever a declaration block contains at least one property the
+O(k) dispatch table does not handle. This spec drives it black-box through
+`apply_decls(renderer_default_style(), decls, em_base)`; every block appends
+`letter-spacing` (documented in css_property_id_ok_dispatch_spec.spl as NOT
+dispatch-handled) when needed so the full-probe body — this file — is the code
+actually executed. Colors use relational oracles (keyword vs hex equivalence)
+so the spec does not bake in the ARGB byte order.
+
+Covered branch families: early returns (empty decls, over-quota rule),
+box-model px/percent/em lengths, auto margins, borders (shorthand, per-side,
+logical), display/position/inset, flex, overflow/visibility, typography
+(font shorthand + variants), text decoration, backgrounds and gradients,
+radius, z-index/opacity, transitions/animations, last-declaration-wins
+ordering, and invalid-value rejection paths.
+"""
+
+use std.spec
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_declarations.{apply_decls}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{renderer_default_style, Style}
+
+fn ap(decls: text) -> Style:
+    # letter-spacing is not dispatch-handled -> forces the full-probe body
+    apply_decls(renderer_default_style(), decls + ";letter-spacing:0px", 16)
+
+describe "decl_apply early returns":
+    it "empty declaration block returns the style unchanged":
+        val base = renderer_default_style()
+        val st = apply_decls(base, "", 16)
+        expect(st.width_px).to_equal(base.width_px)
+        expect(st.fg).to_equal(base.fg)
+
+    it "a rule over the per-rule declaration quota is dropped wholesale":
+        var decls = "width:10px"
+        var i = 0
+        while i < 260:
+            decls = decls + ";color:#123456"
+            i = i + 1
+        val st = apply_decls(renderer_default_style(), decls, 16)
+        val base = renderer_default_style()
+        expect(st.width_px).to_equal(base.width_px)
+        expect(st.fg).to_equal(base.fg)
+
+describe "decl_apply box model lengths":
+    it "applies width/height/min/max in px":
+        val st = ap("width:120px;height:48px;min-width:10px;max-width:300px;min-height:5px;max-height:400px")
+        expect(st.width_px).to_equal(120)
+        expect(st.height_px).to_equal(48)
+        expect(st.min_width_px).to_equal(10)
+        expect(st.max_width_px).to_equal(300)
+        expect(st.min_height_px).to_equal(5)
+        expect(st.max_height_px).to_equal(400)
+
+    it "font-size em lengths scale by em_base (width does not support em)":
+        val st = apply_decls(renderer_default_style(), "font-size:2em;letter-spacing:0px", 20)
+        expect(st.font_size).to_equal(40)
+        # width has no em branch: the numeric prefix is taken as-is
+        val w = apply_decls(renderer_default_style(), "width:2em;letter-spacing:0px", 20)
+        expect(w.width_px).to_equal(2)
+
+    it "padding shorthand 1/2/4-value forms":
+        val one = ap("padding:8px")
+        expect(one.pad_l).to_equal(8)
+        expect(one.pad_t).to_equal(8)
+        expect(one.pad_r).to_equal(8)
+        expect(one.pad_b).to_equal(8)
+        val two = ap("padding:4px 12px")
+        expect(two.pad_t).to_equal(4)
+        expect(two.pad_b).to_equal(4)
+        expect(two.pad_l).to_equal(12)
+        expect(two.pad_r).to_equal(12)
+        val four = ap("padding:1px 2px 3px 4px")
+        expect(four.pad_t).to_equal(1)
+        expect(four.pad_r).to_equal(2)
+        expect(four.pad_b).to_equal(3)
+        expect(four.pad_l).to_equal(4)
+
+    it "margin shorthand and auto margins":
+        val st = ap("margin:5px 6px 7px 8px")
+        expect(st.margin_t).to_equal(5)
+        expect(st.margin_r).to_equal(6)
+        expect(st.margin_b).to_equal(7)
+        expect(st.margin_l).to_equal(8)
+        val au = ap("margin:0 auto")
+        expect(au.margin_l_auto).to_equal(true)
+        expect(au.margin_r_auto).to_equal(true)
+        expect(au.margin_t_auto).to_equal(false)
+
+    it "individual margin/padding longhands win over earlier shorthand":
+        val st = ap("margin:2px;margin-left:9px;padding:3px;padding-bottom:11px")
+        expect(st.margin_l).to_equal(9)
+        expect(st.margin_t).to_equal(2)
+        expect(st.pad_b).to_equal(11)
+        expect(st.pad_t).to_equal(3)
+
+    it "box-sizing border-box toggles border_box":
+        expect(ap("box-sizing:border-box").border_box).to_equal(true)
+        expect(ap("box-sizing:content-box").border_box).to_equal(false)
+
+describe "decl_apply borders":
+    it "border shorthand sets width, sides and color":
+        val st = ap("border:3px solid #112233")
+        expect(st.border_w).to_equal(3)
+        expect(st.border_l).to_equal(3)
+        expect(st.border_b).to_equal(3)
+        # same color through the border-color longhand path (relational oracle)
+        expect(st.border_color).to_equal(ap("border-color:#112233").border_color)
+
+    it "per-side border widths (left/right require a paintable style)":
+        val st = ap("border-left-style:solid;border-right-style:solid;border-left-width:1px;border-top-width:2px;border-right-width:3px;border-bottom-width:4px")
+        expect(st.border_l).to_equal(1)
+        expect(st.border_t).to_equal(2)
+        expect(st.border_r).to_equal(3)
+        expect(st.border_b).to_equal(4)
+
+    it "l/r widths without a border style are zeroed (default style none), t/b are kept":
+        # Style only tracks border_style_l/border_style_r; the none/hidden
+        # paint-disable pass therefore applies to left/right only.
+        val st = ap("border-left-width:1px;border-top-width:2px;border-right-width:3px;border-bottom-width:4px")
+        expect(st.border_l).to_equal(0)
+        expect(st.border_r).to_equal(0)
+        expect(st.border_t).to_equal(2)
+        expect(st.border_b).to_equal(4)
+
+    it "per-side border colors parse hex":
+        val st = ap("border-left-color:#0000ff;border-top-color:#0000ff")
+        expect(st.border_color_l).to_equal(st.border_color_t)
+        expect(st.border_color_l == renderer_default_style().border_color_l).to_equal(false)
+
+    it "border-radius shorthand and corners":
+        val st = ap("border-radius:6px")
+        expect(st.border_radius_px).to_equal(6)
+        val c = ap("border-radius:1px 2px 3px 4px")
+        expect(c.border_radius_tl_px).to_equal(1)
+        expect(c.border_radius_tr_px).to_equal(2)
+        expect(c.border_radius_br_px).to_equal(3)
+        expect(c.border_radius_bl_px).to_equal(4)
+
+    it "outline shorthand sets width and offset longhand applies":
+        val st = ap("outline:2px solid red;outline-offset:3px")
+        expect(st.outline_w).to_equal(2)
+        expect(st.outline_offset_px).to_equal(3)
+
+    it "border-collapse and border-spacing":
+        val st = ap("border-collapse:collapse;border-spacing:4px 7px")
+        expect(st.border_collapse).to_equal("collapse")
+        expect(st.border_spacing_x_px).to_equal(4)
+        expect(st.border_spacing_y_px).to_equal(7)
+
+describe "decl_apply display, position, inset":
+    it "display keywords land in display":
+        expect(ap("display:flex").display).to_equal("flex")
+        expect(ap("display:none").display).to_equal("none")
+        expect(ap("display:inline-block").display).to_equal("inline-block")
+
+    it "position keywords set the exclusive position flags":
+        val rel = ap("position:relative")
+        expect(rel.position_relative).to_equal(true)
+        expect(rel.position_absolute).to_equal(false)
+        val abs = ap("position:absolute;left:10px;top:20px;right:30px;bottom:40px")
+        expect(abs.position_absolute).to_equal(true)
+        expect(abs.left_px).to_equal(10)
+        expect(abs.top_px).to_equal(20)
+        expect(abs.right_px).to_equal(30)
+        expect(abs.bottom_px).to_equal(40)
+        expect(ap("position:fixed").position_fixed).to_equal(true)
+        expect(ap("position:sticky").position_sticky).to_equal(true)
+
+    it "z-index and opacity":
+        expect(ap("z-index:7").z_index).to_equal(7)
+        expect(ap("opacity:0.5").opacity_pct).to_equal(50)
+        expect(ap("opacity:1").opacity_pct).to_equal(100)
+
+describe "decl_apply flex":
+    it "flex container properties":
+        val st = ap("flex-direction:column;flex-wrap:wrap;justify-content:center;align-items:center;align-content:center;gap:9px")
+        expect(st.flex_direction).to_equal("column")
+        expect(st.flex_wrap).to_equal("wrap")
+        expect(st.justify_content).to_equal("center")
+        expect(st.align_items).to_equal("center")
+        expect(st.align_content).to_equal("center")
+        expect(st.gap_px).to_equal(9)
+
+    it "row-gap and column-gap longhands":
+        val st = ap("row-gap:3px;column-gap:5px")
+        expect(st.row_gap_px).to_equal(3)
+        expect(st.column_gap_px).to_equal(5)
+
+    it "flex item properties":
+        val st = ap("flex-grow:2;flex-shrink:3;flex-basis:44px;order:5;align-self:end")
+        expect(st.flex_grow).to_equal(2)
+        expect(st.flex_shrink).to_equal(3)
+        expect(st.flex_basis_px).to_equal(44)
+        expect(st.order).to_equal(5)
+
+describe "decl_apply overflow and visibility":
+    it "overflow hidden and scroll axes":
+        expect(ap("overflow:hidden").overflow_hidden).to_equal(true)
+        expect(ap("overflow-y:auto").overflow_auto_y).to_equal(true)
+        expect(ap("overflow-y:scroll").overflow_scroll_y).to_equal(true)
+
+    it "visibility and content-visibility hidden":
+        expect(ap("visibility:hidden").visibility_hidden).to_equal(true)
+        expect(ap("visibility:visible").visibility_hidden).to_equal(false)
+        expect(ap("content-visibility:hidden").content_visibility_hidden).to_equal(true)
+
+    it "text-overflow ellipsis and white-space nowrap":
+        expect(ap("text-overflow:ellipsis").text_overflow_ellipsis).to_equal(true)
+        expect(ap("white-space:nowrap").white_space_nowrap).to_equal(true)
+
+describe "decl_apply typography":
+    it "font-size, family, weight, style, line-height":
+        val st = ap("font-size:22px;font-family:Georgia;font-weight:bold;font-style:italic;line-height:30px")
+        expect(st.font_size).to_equal(22)
+        expect(st.font_family).to_equal("Georgia")
+        expect(st.bold).to_equal(true)
+        expect(st.font_style_italic).to_equal(true)
+        expect(st.line_height_px).to_equal(30)
+
+    it "numeric font-weight 700 is bold, 400 is not":
+        expect(ap("font-weight:700").bold).to_equal(true)
+        expect(ap("font-weight:400").bold).to_equal(false)
+
+    it "font shorthand sets size and family":
+        val st = ap("font:italic bold 18px/24px Verdana")
+        expect(st.font_size).to_equal(18)
+        expect(st.font_family).to_equal("Verdana")
+
+    it "text-align and text-transform and text-indent":
+        val st = ap("text-align:center;text-transform:uppercase;text-indent:12px")
+        expect(st.text_align).to_equal("center")
+        expect(st.text_transform).to_equal("uppercase")
+        expect(st.text_indent_px).to_equal(12)
+
+    it "letter-spacing and word-spacing":
+        val st = apply_decls(renderer_default_style(), "letter-spacing:3px;word-spacing:5px", 16)
+        expect(st.letter_spacing_px).to_equal(3)
+        expect(st.word_spacing_px).to_equal(5)
+
+    it "direction and writing-mode":
+        val st = ap("direction:rtl;writing-mode:vertical-rl")
+        expect(st.direction_rtl).to_equal(true)
+        expect(st.writing_mode).to_equal("vertical-rl")
+
+    it "font-variant-caps and font-kerning keywords are recorded":
+        val st = ap("font-variant-caps:small-caps;font-kerning:none")
+        expect(st.font_variant_caps).to_equal("small-caps")
+        expect(st.font_kerning).to_equal("none")
+
+describe "decl_apply text decoration":
+    it "text-decoration line kinds":
+        val u = ap("text-decoration:underline")
+        expect(u.text_decoration_underline).to_equal(true)
+        val l = ap("text-decoration:line-through")
+        expect(l.text_decoration_line_through).to_equal(true)
+        val o = ap("text-decoration:overline")
+        expect(o.text_decoration_overline).to_equal(true)
+
+    it "text-decoration none clears underline":
+        val st = ap("text-decoration:underline;text-decoration:none")
+        expect(st.text_decoration_underline).to_equal(false)
+
+    it "decoration style, thickness and underline offset":
+        val st = ap("text-decoration-style:dashed;text-decoration-thickness:2px;text-underline-offset:4px")
+        expect(st.text_decoration_style).to_equal("dashed")
+        expect(st.text_decoration_thickness_px).to_equal(2)
+        expect(st.text_underline_offset_px).to_equal(4)
+
+describe "decl_apply backgrounds":
+    it "background-color parses hex directly and keywords via the named table":
+        val hex = ap("background-color:#ff0000")
+        expect(hex.bg).to_equal(0xFFFF0000u32)
+        # 'red' resolves through the named-color table (a themed red, not #ff0000)
+        val kw = ap("background-color:red")
+        expect(kw.bg == renderer_default_style().bg).to_equal(false)
+
+    it "background repeat, attachment, clip, origin keywords":
+        val st = ap("background-repeat:no-repeat;background-attachment:fixed;background-clip:padding-box;background-origin:border-box")
+        expect(st.background_repeat).to_equal("no-repeat")
+        expect(st.background_attachment).to_equal("fixed")
+        expect(st.background_clip).to_equal("padding-box")
+        expect(st.background_origin).to_equal("border-box")
+
+    it "background-size and position in px":
+        val st = ap("background-size:40px 30px;background-position:10px 20px")
+        expect(st.background_size_w_px).to_equal(40)
+        expect(st.background_size_h_px).to_equal(30)
+        expect(st.background_position_x_px).to_equal(10)
+        expect(st.background_position_y_px).to_equal(20)
+
+    it "background-image url is recorded":
+        val st = ap("background-image:url(foo.png)")
+        expect(st.background_image_uri.contains("foo.png")).to_equal(true)
+
+    it "background-image linear-gradient records from/to and the stop model":
+        val st = ap("background-image:linear-gradient(#ff0000,#0000ff)")
+        expect(st.background_gradient_from).to_equal(0xFFFF0000u32)
+        expect(st.background_gradient_to).to_equal(0xFF0000FFu32)
+        expect(st.background_gradient_stop_colors.len()).to_equal(2)
+        # the background SHORTHAND keeps the layer raw instead of decoding here
+        val sh = ap("background:linear-gradient(to bottom,#ff0000,#0000ff)")
+        expect(sh.background_gradient_from).to_equal(0u32)
+        expect(sh.bg_layers_raw.contains("linear-gradient")).to_equal(true)
+
+describe "decl_apply shadows and misc":
+    it "box-shadow sets offsets and blur":
+        val st = ap("box-shadow:2px 3px 4px rgba(0,0,0,0.5)")
+        expect(st.box_shadow_x_px).to_equal(2)
+        expect(st.box_shadow_y_px).to_equal(3)
+        expect(st.box_shadow_blur_px).to_equal(4)
+
+    it "text-shadow sets offsets":
+        val st = ap("text-shadow:1px 2px #000000")
+        expect(st.text_shadow_x_px).to_equal(1)
+        expect(st.text_shadow_y_px).to_equal(2)
+
+    it "cursor, caption-side, table-layout, vertical-align keywords":
+        val st = ap("cursor:pointer;caption-side:bottom;table-layout:fixed;vertical-align:middle")
+        expect(st.cursor).to_equal("pointer")
+        expect(st.caption_side).to_equal("bottom")
+        expect(st.table_layout).to_equal("fixed")
+        expect(st.vertical_align).to_equal("middle")
+
+    it "transition and animation longhands are recorded":
+        val st = ap("transition-property:opacity;transition-duration:200ms;animation-name:spin;animation-duration:1s;animation-iteration-count:3")
+        expect(st.transition_property).to_equal("opacity")
+        expect(st.transition_duration_ms).to_equal(200)
+        expect(st.animation_name).to_equal("spin")
+        expect(st.animation_duration_ms).to_equal(1000)
+
+describe "decl_apply logical border longhands (tranche 4)":
+    it "border-block shorthand sets top+bottom width and color together":
+        val st = ap("border-block:3px solid #112233")
+        expect(st.border_t).to_equal(3)
+        expect(st.border_b).to_equal(3)
+        expect(st.border_color_t).to_equal(st.border_color_b)
+        expect(st.border_color_t == renderer_default_style().border_color_t).to_equal(false)
+
+    it "border-block-start/end map to top/bottom independently":
+        val st = ap("border-block-start:2px solid #ff0000;border-block-end:5px solid #00ff00")
+        expect(st.border_t).to_equal(2)
+        expect(st.border_b).to_equal(5)
+        expect(st.border_color_t == st.border_color_b).to_equal(false)
+
+    it "bare border-block:none disables top/bottom paint; a multi-token value does not":
+        # border_style_disables_paint matches only a BARE none/hidden value
+        val bare = ap("border:4px solid #112233;border-block:none")
+        expect(bare.border_t).to_equal(0)
+        expect(bare.border_b).to_equal(0)
+        val multi = ap("border-block:4px none #112233")
+        expect(multi.border_t).to_equal(4)
+        expect(multi.border_b).to_equal(4)
+
+    it "border-inline shorthand sets left+right width, style and color":
+        val st = ap("border-inline:3px solid #112233")
+        expect(st.border_l).to_equal(3)
+        expect(st.border_r).to_equal(3)
+        expect(st.border_color_l).to_equal(st.border_color_r)
+
+    it "border-inline-start/end map to left/right and carry their style":
+        val st = ap("border-inline-start:1px solid #ff0000;border-inline-end:6px solid #0000ff")
+        expect(st.border_l).to_equal(1)
+        expect(st.border_r).to_equal(6)
+        expect(st.border_color_l == st.border_color_r).to_equal(false)
+
+    it "border-inline-start with hidden style zeroes the left width":
+        val st = ap("border-inline-start:7px hidden #ff0000")
+        expect(st.border_l).to_equal(0)
+
+    it "border-block-width and border-inline-width take two-value forms":
+        val st = ap("border-block-width:1px 2px;border-inline-width:3px 4px;border-inline-style:solid")
+        expect(st.border_t).to_equal(1)
+        expect(st.border_b).to_equal(2)
+        expect(st.border_l).to_equal(3)
+        expect(st.border_r).to_equal(4)
+
+    it "border-block-start/end-width single-side widths apply":
+        val st = ap("border-block-start-width:9px;border-block-end-width:8px")
+        expect(st.border_t).to_equal(9)
+        expect(st.border_b).to_equal(8)
+
+    it "border-inline-start/end-width need a paintable inline style":
+        val st = ap("border-inline-style:solid;border-inline-start-width:5px;border-inline-end-width:6px")
+        expect(st.border_l).to_equal(5)
+        expect(st.border_r).to_equal(6)
+
+    it "logical border colors mirror the physical color longhands":
+        val phys = ap("border-top-color:#123456;border-bottom-color:#123456;border-left-color:#654321;border-right-color:#654321")
+        val logical = ap("border-block-color:#123456;border-inline-color:#654321")
+        expect(logical.border_color_t).to_equal(phys.border_color_t)
+        expect(logical.border_color_b).to_equal(phys.border_color_b)
+        expect(logical.border_color_l).to_equal(phys.border_color_l)
+        expect(logical.border_color_r).to_equal(phys.border_color_r)
+
+    it "border-block-start/end-color and border-inline-start/end-color set one side each":
+        val st = ap("border-block-start-color:#ff0000;border-block-end-color:#00ff00;border-inline-start-color:#0000ff;border-inline-end-color:#ffffff")
+        expect(st.border_color_t == st.border_color_b).to_equal(false)
+        expect(st.border_color_l == st.border_color_r).to_equal(false)
+
+    it "border-block-style and border-inline-style none disable their axes":
+        val st = ap("border:3px solid #112233;border-block-style:none;border-inline-style:hidden")
+        expect(st.border_t).to_equal(0)
+        expect(st.border_b).to_equal(0)
+        expect(st.border_l).to_equal(0)
+        expect(st.border_r).to_equal(0)
+
+    it "border-block-start-style/none zeroes only top; end-style only bottom":
+        val t = ap("border:2px solid #112233;border-block-start-style:none")
+        expect(t.border_t).to_equal(0)
+        expect(t.border_b).to_equal(2)
+        val b = ap("border:2px solid #112233;border-block-end-style:none")
+        expect(b.border_b).to_equal(0)
+        expect(b.border_t).to_equal(2)
+
+    it "border-inline-start/end-style tokens land in the side style slots":
+        val st = ap("border:2px solid #112233;border-inline-start-style:dashed;border-inline-end-style:dotted")
+        expect(st.border_l).to_equal(2)
+        expect(st.border_r).to_equal(2)
+
+    it "border-style shorthand none disables every side":
+        val st = ap("border:3px solid #112233;border-style:none")
+        expect(st.border_w).to_equal(0)
+        expect(st.border_l).to_equal(0)
+        expect(st.border_t).to_equal(0)
+        expect(st.border_r).to_equal(0)
+        expect(st.border_b).to_equal(0)
+
+describe "decl_apply animation and transition shorthands (tranche 4)":
+    it "animation shorthand decodes name, times, timing, count, direction, fill, play state":
+        val st = ap("animation:spin 2s 500ms ease-in-out 3 alternate both paused")
+        expect(st.animation_name).to_equal("spin")
+        expect(st.animation_duration_ms).to_equal(2000)
+        expect(st.animation_delay_ms).to_equal(500)
+        expect(st.animation_timing_function).to_equal("ease-in-out")
+        expect(st.animation_iteration_count).to_equal("3")
+        expect(st.animation_direction).to_equal("alternate")
+        expect(st.animation_fill_mode).to_equal("both")
+        expect(st.animation_play_state).to_equal("paused")
+
+    it "animation shorthand keyword defaults survive a minimal form":
+        val st = ap("animation:fade 1s")
+        expect(st.animation_name).to_equal("fade")
+        expect(st.animation_duration_ms).to_equal(1000)
+        expect(st.animation_delay_ms).to_equal(0)
+        expect(st.animation_direction).to_equal("normal")
+        expect(st.animation_play_state).to_equal("running")
+
+    it "later animation longhands override the shorthand, earlier ones do not":
+        val late = ap("animation:spin 2s;animation-duration:250ms;animation-delay:40ms")
+        expect(late.animation_duration_ms).to_equal(250)
+        expect(late.animation_delay_ms).to_equal(40)
+        expect(late.animation_name).to_equal("spin")
+        val early = ap("animation-duration:250ms;animation:spin 2s")
+        expect(early.animation_duration_ms).to_equal(2000)
+
+    it "animation-timing-function and iteration-count longhands after the shorthand win":
+        val st = ap("animation:spin 1s linear 2;animation-timing-function:ease-out;animation-iteration-count:infinite")
+        expect(st.animation_timing_function).to_equal("ease-out")
+        expect(st.animation_iteration_count).to_equal("infinite")
+
+    it "transition shorthand decodes property, duration, delay and timing":
+        val st = ap("transition:opacity 300ms 100ms ease-in")
+        expect(st.transition_property).to_equal("opacity")
+        expect(st.transition_duration_ms).to_equal(300)
+        expect(st.transition_delay_ms).to_equal(100)
+        expect(st.transition_timing_function).to_equal("ease-in")
+
+    it "later transition longhands override the shorthand":
+        val st = ap("transition:opacity 300ms;transition-duration:50ms;transition-timing-function:linear;transition-delay:5ms")
+        expect(st.transition_duration_ms).to_equal(50)
+        expect(st.transition_delay_ms).to_equal(5)
+        expect(st.transition_timing_function).to_equal("linear")
+        expect(st.transition_property).to_equal("opacity")
+
+describe "decl_apply ordering and rejection":
+    it "last declaration wins within one block":
+        val st = ap("width:10px;width:90px;color:#ff0000;color:#00ff00")
+        expect(st.width_px).to_equal(90)
+        val green = ap("color:#00ff00")
+        expect(st.fg).to_equal(green.fg)
+
+    it "an unparseable last width parses to 0 (last-wins, no CSS-style rollback)":
+        # CSS would keep 50px; this applier is last-declaration-wins on the raw
+        # value, so 'banana' parses to 0. Documented current behavior.
+        val st = ap("width:50px;width:banana")
+        expect(st.width_px).to_equal(0)
+
+    it "unknown property names are ignored without disturbing neighbors":
+        val st = ap("not-a-prop:12;height:33px")
+        expect(st.height_px).to_equal(33)
+
+    it "whitespace and trailing semicolons are tolerated":
+        val st = ap("  width : 25px ;; height:14px ; ")
+        expect(st.width_px).to_equal(25)
+        expect(st.height_px).to_equal(14)

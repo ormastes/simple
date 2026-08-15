@@ -1,0 +1,89 @@
+#!/bin/sh
+# check-simple-web-browser-docker-vulkan.shs — system-test the Simple web
+# browser in Docker against the Vulkan backend (lavapipe headless).
+#
+# What this lane actually proves (and its precise delta from a "full" path):
+#   - The browser app's real render lane (src/app/browser/render_lane.spl,
+#     lane `live`) renders an HTML page to a [u32] pixel array. This is the
+#     browser's genuine rendering path — the same one src/app/browser/main.spl
+#     dispatches through.
+#   - That pixel array is then PRESENTED through the engine2d VulkanBackend
+#     (draw_image on a real lavapipe Vulkan device inside the container) and
+#     read BACK from the device framebuffer; readback provenance must be
+#     `device_readback` and the readback must match the browser's pixels.
+#   DELTA vs a hypothetical fully-GPU browser: the browser's HTML layout/paint
+#   itself is CPU-side — src/app/browser has only `live` and `blink` lanes,
+#   neither rasterizes ON the GPU. There is no browser-level "vulkan" render
+#   lane today; the Vulkan device carries the present + readback of the
+#   browser's frame, not the paint. Recorded in
+#   doc/08_tracking/bug/browser_has_no_vulkan_render_lane_2026-08-15.md.
+#
+# Requires a vulkan-featured seed binary (the deployed seed is built WITHOUT
+# the vulkan feature and lacks rt_vulkan_selected_device_index — see the bug
+# record above). Build one with:
+#   cd src/compiler_rust && cargo build --release --bin simple \
+#       --features "simple-runtime/vulkan"
+# (do NOT add simple-compiler/vulkan: vendored rspirv 0.12 fails E0583)
+# and point SIMPLE_VULKAN_BIN at it (default below).
+#
+# Verdict convention (last stdout line):
+#   PASS — <n> check(s) verified ...   exit 0
+#   FAIL — ...                         exit 1
+#   ERROR — nothing was checked ...    exit 2  (fail-closed, non-vacuous)
+set -u
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+IMG="${SIMPLE_BROWSER_VULKAN_IMG:-simple-browser-vulkan}"
+SIMPLE_VULKAN_BIN="${SIMPLE_VULKAN_BIN:-build/browser-vulkan/simple}"
+EVIDENCE_SPL="scripts/check/browser_vulkan_evidence.spl"
+EVIDENCE_PPM="build/browser-vulkan-docker/browser_vulkan_readback.ppm"
+LOG="build/browser-vulkan-docker/run.log"
+mkdir -p build/browser-vulkan-docker
+
+err() { echo "ERROR — nothing was checked: $1"; exit 2; }
+
+command -v docker >/dev/null 2>&1 || err "docker not installed"
+docker info >/dev/null 2>&1 || err "docker daemon not usable"
+[ -f "$EVIDENCE_SPL" ] || err "$EVIDENCE_SPL missing"
+[ -x "$SIMPLE_VULKAN_BIN" ] || err "vulkan-featured seed missing at $SIMPLE_VULKAN_BIN (see header for build command)"
+
+docker image inspect "$IMG" >/dev/null 2>&1 || \
+    docker build -f tools/docker/Dockerfile.browser-vulkan -t "$IMG" tools/docker \
+        >/dev/null 2>&1 || err "docker build of $IMG failed"
+
+docker run --rm -v "$ROOT_DIR:/opt/simple" "$IMG" -c \
+    "cd /opt/simple && SIMPLE_TIMEOUT_SECONDS=0 ./$SIMPLE_VULKAN_BIN run $EVIDENCE_SPL" \
+    > "$LOG" 2>&1
+RUN_EXIT=$?
+
+get() { awk -F= -v k="$1" 'index($0, k "=") == 1 { v = substr($0, length(k) + 2) } END { print v }' "$LOG"; }
+
+VERDICT_KEY="$(get verdict)"
+LANE="$(get lane_selected)"
+SOURCE="$(get readback_source)"
+MATCH="$(get pixels_match)"
+NONBG="$(get pixels_nonbg)"
+echo "container_exit=$RUN_EXIT lane=$LANE readback_source=$SOURCE pixels_match=$MATCH pixels_nonbg=$NONBG verdict_key=$VERDICT_KEY"
+
+[ -n "$VERDICT_KEY" ] || err "evidence run produced no verdict (log: $LOG)"
+
+CHECKS=0
+fail() { echo "FAIL — $1 (log: $LOG)"; exit 1; }
+
+[ "$RUN_EXIT" = 0 ] || fail "container run exited $RUN_EXIT"
+CHECKS=$((CHECKS + 1))
+[ "$VERDICT_KEY" = "ok" ] || fail "evidence verdict: $VERDICT_KEY"
+CHECKS=$((CHECKS + 1))
+[ "$SOURCE" = "device_readback" ] || fail "readback source: $SOURCE"
+CHECKS=$((CHECKS + 1))
+[ "$MATCH" = "1" ] || fail "device readback != browser pixels"
+CHECKS=$((CHECKS + 1))
+[ -n "$NONBG" ] && [ "$NONBG" -gt 0 ] 2>/dev/null || fail "page rendered no foreground pixels"
+CHECKS=$((CHECKS + 1))
+[ -s "$EVIDENCE_PPM" ] || fail "evidence image missing: $EVIDENCE_PPM"
+CHECKS=$((CHECKS + 1))
+
+echo "PASS — $CHECKS check(s) verified: browser page rendered in docker, presented and read back on Vulkan (lavapipe), evidence $EVIDENCE_PPM"
+exit 0

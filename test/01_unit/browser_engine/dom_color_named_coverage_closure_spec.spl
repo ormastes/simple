@@ -1,0 +1,104 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/dom_color_named.spl 85%
+"""
+# DOM Gradient / Background Shorthand Parsing — Coverage Closure
+
+`dom_color_named.spl` had zero test/ references before this spec. It holds
+the linear-gradient parser and background-shorthand color extraction used by
+DOM style resolution. All functions are pure; this spec closes their
+branches with real oracles (angles, keyword directions, stop stripping,
+top-level comma splitting, and shorthand token scanning).
+"""
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.dom_color_named.{
+    GradientParseResult,
+    dom_background_shorthand_color_value,
+    dom_background_token_from,
+    find_char_in,
+    find_last_space,
+    parse_linear_gradient,
+    sb_dom_split_ws,
+    split_top_level_commas,
+    strip_stop_position,
+}
+
+describe "sb_dom_split_ws / find_char_in / find_last_space (closure)":
+    it "splits on mixed whitespace and handles empty input":
+        val parts = sb_dom_split_ws(" a\tb\nc ")
+        expect(parts.len()).to_equal(3)
+        expect(parts[0]).to_equal("a")
+        expect(parts[2]).to_equal("c")
+        expect(sb_dom_split_ws("").len()).to_equal(0)
+
+    it "finds a character or reports the sentinel":
+        expect(find_char_in("abc", "b", 0)).to_equal(1)
+        expect(find_char_in("abc", "b", 2)).to_equal(999999999)
+
+    it "returns the last top-level space, ignoring spaces inside parens":
+        expect(find_last_space("rgba(0, 0, 0, 1) 50%")).to_equal(16)
+        expect(find_last_space("abc")).to_equal(999999999)
+
+describe "split_top_level_commas (closure)":
+    it "splits only commas outside parentheses and trims parts":
+        val parts = split_top_level_commas("90deg, rgba(1,2,3,0.5), #fff")
+        expect(parts.len()).to_equal(3)
+        expect(parts[0]).to_equal("90deg")
+        expect(parts[1]).to_equal("rgba(1,2,3,0.5)")
+        expect(parts[2]).to_equal("#fff")
+
+    it "drops an empty tail":
+        expect(split_top_level_commas("a,").len()).to_equal(1)
+
+describe "strip_stop_position (closure)":
+    it "strips trailing % and px stop positions":
+        expect(strip_stop_position("red 50%")).to_equal("red")
+        expect(strip_stop_position("rgba(0,0,0,0.2) 10px")).to_equal("rgba(0,0,0,0.2)")
+
+    it "leaves colors without stop positions alone":
+        expect(strip_stop_position("red")).to_equal("red")
+        expect(strip_stop_position("to bottom")).to_equal("to bottom")
+
+describe "parse_linear_gradient (closure)":
+    it "parses an explicit angle with two hex colors":
+        val g = parse_linear_gradient("linear-gradient(90deg, #007AFF, #30D158)")
+        expect(g.gradient_set).to_equal(true)
+        expect(g.gradient_angle).to_equal(90)
+
+    it "maps direction keywords to angles":
+        expect(parse_linear_gradient("linear-gradient(to top, #000, #fff)").gradient_angle).to_equal(0)
+        expect(parse_linear_gradient("linear-gradient(to right, #000, #fff)").gradient_angle).to_equal(90)
+        expect(parse_linear_gradient("linear-gradient(to left, #000, #fff)").gradient_angle).to_equal(270)
+        expect(parse_linear_gradient("linear-gradient(to bottom, #000, #fff)").gradient_angle).to_equal(180)
+
+    it "defaults to 180deg when the first part is already a color":
+        val g = parse_linear_gradient("linear-gradient(#000, #fff)")
+        expect(g.gradient_set).to_equal(true)
+        expect(g.gradient_angle).to_equal(180)
+
+    it "rejects malformed input (no paren, unbalanced, too few parts)":
+        expect(parse_linear_gradient("none").gradient_set).to_equal(false)
+        expect(parse_linear_gradient("linear-gradient(90deg, #000").gradient_set).to_equal(false)
+        expect(parse_linear_gradient("linear-gradient(90deg)").gradient_set).to_equal(false)
+        expect(parse_linear_gradient("linear-gradient(90deg, #000)").gradient_set).to_equal(false)
+
+    it "parses rgba stops with stop positions":
+        val g = parse_linear_gradient("linear-gradient(180deg, rgba(255,255,255,0.09) 0%, rgba(255,255,255,0.02) 100%)")
+        expect(g.gradient_set).to_equal(true)
+        expect(g.gradient_angle).to_equal(180)
+
+describe "dom_background_shorthand_color_value (closure)":
+    it "returns hex / functional / keyword color tokens":
+        expect(dom_background_shorthand_color_value("#ff0000 url(x.png)")).to_equal("#ff0000")
+        expect(dom_background_shorthand_color_value("url(x.png) rgba(1,2,3,0.5)")).to_equal("rgba(1,2,3,0.5)")
+        expect(dom_background_shorthand_color_value("transparent")).to_equal("transparent")
+        expect(dom_background_shorthand_color_value("red")).to_equal("red")
+
+    it "returns empty for gradients, empty input, and non-color values":
+        expect(dom_background_shorthand_color_value("linear-gradient(90deg, #000, #fff)")).to_equal("")
+        expect(dom_background_shorthand_color_value("")).to_equal("")
+        expect(dom_background_shorthand_color_value("url(x.png)")).to_equal("")
+
+describe "dom_background_token_from (closure)":
+    it "extracts a token, keeping paren groups intact":
+        expect(dom_background_token_from("rgba(1, 2, 3, 1) red", 0)).to_equal("rgba(1, 2, 3, 1)")
+        expect(dom_background_token_from("red blue", 4)).to_equal("blue")

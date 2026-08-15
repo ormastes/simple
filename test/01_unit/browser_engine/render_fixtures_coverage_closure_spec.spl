@@ -1,0 +1,168 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/render_fixtures.spl 75%
+"""
+# Render Fixtures — Coverage Closure
+
+`render_fixtures.spl` had zero test/ references. This spec closes its
+pure branches: fixture detectors (positive + negative), fill/stroke rect
+clipping, hex color parsing, css var() resolution (inline style, :root,
+any-style scan, fallback), background/color extraction, alpha
+compositing, and shorthand color tokenization. Pixel renderers are
+checked by size and probe pixels, not full golden images.
+"""
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.render_fixtures.{
+    br_is_block_boxes_fixture, br_is_list_fixture, br_is_button_fixture,
+    br_is_text_input_fixture, br_is_card_panel_fixture,
+    br_is_scrollable_list_fixture, br_is_display_none_probe,
+    br_is_hex003_probe, br_is_simple_border_probe, br_is_acid2_probe,
+    br_is_acid1_probe,
+    br_render_solid_pixels, br_render_block_boxes_pixels,
+    br_render_simple_border_pixels,
+    br_fill_rect, br_stroke_rect, br_hex_value, br_parse_rgb_hex6,
+    br_resolve_css_var, br_resolve_css_var_with_style,
+    br_first_background_argb, br_first_color_argb,
+    br_rgba_to_opaque_page_argb, br_background_color_value,
+    br_background_shorthand_color_value, br_background_token_from,
+    br_style_background_argb, br_style_color_argb,
+    br_find_custom_property_in_all_styles}
+
+describe "fixture detectors":
+    it "block boxes fixture needs all three markers":
+        val hit = "id=\"header\" background-color:#dbeafe background-color:#60a5fa"
+        expect(br_is_block_boxes_fixture(hit)).to_equal(true)
+        expect(br_is_block_boxes_fixture("id=\"header\"")).to_equal(false)
+
+    it "list, button, input, card and scrollable detectors reject empty html":
+        expect(br_is_list_fixture("")).to_equal(false)
+        expect(br_is_button_fixture("")).to_equal(false)
+        expect(br_is_text_input_fixture("")).to_equal(false)
+        expect(br_is_card_panel_fixture("")).to_equal(false)
+        expect(br_is_scrollable_list_fixture("")).to_equal(false)
+
+    it "list fixture detects its marker set":
+        val hit = "<ul><li style=\"height:12px;background-color:#93c5fd\">"
+        expect(br_is_list_fixture(hit)).to_equal(true)
+
+    it "probe detectors match their signatures case-appropriately":
+        expect(br_is_display_none_probe("<div CLASS=\"HIDDEN\" style=\"DISPLAY: NONE\">")).to_equal(true)
+        expect(br_is_display_none_probe("<div>")).to_equal(false)
+        expect(br_is_hex003_probe("background-color:#070")).to_equal(true)
+        expect(br_is_hex003_probe("background-color:#071")).to_equal(false)
+        expect(br_is_acid2_probe("The Second Acid Test")).to_equal(true)
+        expect(br_is_acid1_probe("display/box/float/clear test")).to_equal(true)
+
+    it "simple border probe excludes display:none and block-boxes pages":
+        expect(br_is_simple_border_probe("border: 1px solid red")).to_equal(true)
+        expect(br_is_simple_border_probe("border: solid; display: none")).to_equal(false)
+
+describe "rect primitives":
+    it "fill_rect writes only inside the clip and stroke_rect only the outline":
+        var px = br_render_solid_pixels(4, 4, 0xFF000000u32)
+        expect(px.len()).to_equal(16)
+        px = br_fill_rect(px, 4, 4, 1, 1, 2, 2, 0xFFFFFFFFu32)
+        expect(px[0]).to_equal(0xFF000000u32)      # outside
+        expect(px[5]).to_equal(0xFFFFFFFFu32)      # (1,1)
+        expect(px[10]).to_equal(0xFFFFFFFFu32)     # (2,2)
+
+    it "fill_rect clips negative and overflowing coordinates safely":
+        var px = br_render_solid_pixels(2, 2, 0xFF111111u32)
+        px = br_fill_rect(px, 2, 2, -1, -1, 10, 10, 0xFF222222u32)
+        expect(px[0]).to_equal(0xFF222222u32)
+        expect(px[3]).to_equal(0xFF222222u32)
+
+    it "stroke_rect leaves the interior untouched":
+        var px = br_render_solid_pixels(4, 4, 0xFF000000u32)
+        px = br_stroke_rect(px, 4, 4, 0, 0, 4, 4, 0xFF00FF00u32)
+        expect(px[0]).to_equal(0xFF00FF00u32)      # corner
+        expect(px[5]).to_equal(0xFF000000u32)      # interior
+
+describe "hex parsing":
+    it "maps hex digits both cases and defaults unknown to 0":
+        expect(br_hex_value("a")).to_equal(10u32)
+        expect(br_hex_value("F")).to_equal(15u32)
+        expect(br_hex_value("z")).to_equal(0u32)
+
+    it "parses a 6-digit hex and falls back on short input":
+        expect(br_parse_rgb_hex6("dbeafe")).to_equal(0xDBEAFEu32)
+        expect(br_parse_rgb_hex6("07")).to_equal(0x2050A0u32)
+
+describe "css var resolution":
+    it "returns non-var values trimmed and unchanged":
+        expect(br_resolve_css_var("<html>", "  #fff  ")).to_equal("#fff")
+
+    it "resolves from :root style block":
+        val html = "<style>:root " + 123.chr() + " --brand: #123456; " + 125.chr() + "</style>"
+        expect(br_resolve_css_var(html, "var(--brand)")).to_equal("#123456")
+
+    it "prefers the inline style over :root and uses the fallback last":
+        val html = "<style>:root " + 123.chr() + " --brand: #123456; " + 125.chr() + "</style>"
+        expect(br_resolve_css_var_with_style(html, "var(--brand)", "--brand: #abcdef")).to_equal("#abcdef")
+        expect(br_resolve_css_var_with_style("<html>", "var(--missing, red)", "")).to_equal("red")
+        expect(br_resolve_css_var_with_style("<html>", "var(--missing)", "")).to_equal("var(--missing)")
+
+    it "finds a custom property declared in any style rule":
+        val html = "<style>.card " + 123.chr() + " --pad: 4px; " + 125.chr() + "</style>"
+        expect(br_find_custom_property_in_all_styles(html, "--pad")).to_equal("4px")
+        expect(br_find_custom_property_in_all_styles(html, "--nope")).to_equal("")
+
+describe "background extraction":
+    it "reads the first background-color hex as opaque argb":
+        expect(br_first_background_argb("background-color:#60a5fa;")).to_equal(0xFF60A5FAu32)
+
+    it "defaults to white when no background is declared":
+        expect(br_first_background_argb("<p>hi</p>")).to_equal(0xFFFFFFFFu32)
+
+    it "resolves background-color: var(--theme-panel) via the property hex":
+        val html = "<style>:root " + 123.chr() + " --theme-panel: #d0d8e8; " + 125.chr() +
+            "</style><div style=\"background-color: var(--theme-panel)\">"
+        expect(br_first_background_argb(html)).to_equal(0xFFD0D8E8u32)
+
+    it "currentcolor background falls through to the color property":
+        val html = "<div style=\"color: #112233; background-color: currentcolor\">"
+        expect(br_first_background_argb(html)).to_equal(0xFF112233u32)
+
+    it "first color argb defaults to black without a color property":
+        expect(br_first_color_argb("<p>plain</p>")).to_equal(0xFF000000u32)
+
+describe "alpha compositing":
+    it "keeps opaque colors and blends translucent ones over white":
+        expect(br_rgba_to_opaque_page_argb(0x102030FFu32)).to_equal(0xFF102030u32)
+        # fully transparent -> white
+        expect(br_rgba_to_opaque_page_argb(0x10203000u32)).to_equal(0xFFFFFFFFu32)
+
+describe "shorthand color tokenization":
+    it "extracts value up to a terminator":
+        expect(br_background_color_value("background-color: #abc123; x", 0)).to_equal("#abc123")
+        expect(br_background_color_value("background-color #abc", 999)).to_equal("")
+
+    it "picks hex and function tokens out of a background shorthand":
+        expect(br_background_shorthand_color_value("background: url(a.png) #ff0000 no-repeat", 0)).to_equal("#ff0000")
+        expect(br_background_shorthand_color_value("background: rgba(1, 2, 3, 0.5) fixed", 0)).to_equal("rgba(1, 2, 3, 0.5)")
+        expect(br_background_shorthand_color_value("background: red center", 0)).to_equal("red")
+        expect(br_background_shorthand_color_value("background: ;", 0)).to_equal("")
+
+    it "token_from stops at whitespace":
+        expect(br_background_token_from("#aabbcc more", 0)).to_equal("#aabbcc")
+
+describe "style declaration scanning":
+    it "last background declaration wins and shorthand parses":
+        val argb = br_style_background_argb("", "background-color: #111111; background: #223344 no-repeat")
+        expect(argb).to_equal(0xFF223344u32)
+
+    it "returns transparent sentinel when nothing parses":
+        expect(br_style_background_argb("", "width: 10px")).to_equal(0x00000000u32)
+
+    it "style color falls back when absent or unparseable":
+        expect(br_style_color_argb("", "color: #445566", 0xFF000000u32)).to_equal(0xFF445566u32)
+        expect(br_style_color_argb("", "width: 2px", 0xFF0000FFu32)).to_equal(0xFF0000FFu32)
+
+describe "pixel renderers":
+    it "solid and fixture renderers produce width*height buffers":
+        expect(br_render_solid_pixels(3, 2, 0xFFABCDEFu32).len()).to_equal(6)
+        expect(br_render_block_boxes_pixels(320, 100).len()).to_equal(32000)
+
+    it "simple border renderer paints red at the border origin":
+        val px = br_render_simple_border_pixels(20, 20)
+        expect(px[4 * 20 + 4]).to_equal(0xFFFF0000u32)
+        expect(px[0]).to_equal(0xFFFFFFFFu32)

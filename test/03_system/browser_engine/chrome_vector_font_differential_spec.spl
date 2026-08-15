@@ -1,0 +1,107 @@
+# @cover src/lib/nogc_sync_mut/sffi/spl_fonts.spl 0%
+"""
+# Chrome <-> Simple Vector-Font (Outline) Rasterization Differential
+
+**Category:** Testing
+**Status:** In Progress
+
+## Purpose and Audience
+
+Chrome and Simple's outline rasterizer are fed the SAME TTF file at the same
+pixel size, and per-glyph ink metrics (ink bounding box, ink pixel count, ink
+density) are compared. This is the vector-font counterpart of the bitmap-font
+glyph-atlas corpus lane: it exercises the spl_fonts rt_fonts_* outline
+rasterizer (the exact provider `FontRasterizer` in
+`src/lib/nogc_sync_mut/sffi/spl_fonts.spl` drives in production) against
+Chrome's FreeType/Skia rendering of the identical outlines.
+
+Audience: anyone changing spl_fonts, font_rasterizer.spl, or text_painter.spl.
+
+## Scope and Preconditions
+
+Requires a Chrome/Chromium executable and `node`. Extraction and comparison are
+done by the driver `sh tools/vector_font_diff/run_vector_font_diff.shs`
+(seconds, not minutes; it runs one `bin/simple run` extraction, which cannot be
+nested inside `bin/simple test`). This spec gates on the driver's retained
+evidence and is fail-closed on it: missing evidence, evidence older than any
+extractor source, or a chrome side that does not carry a real `Chrome`
+version string all FAIL. There is deliberately no "chrome absent, therefore
+pass" path.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Shared TTF | Both sides load the same font FILE (default DejaVuSans; Chrome via @font-face file:// URL, so no substitution) |
+| Ink metrics | Per glyph: ink bbox w/h, ink pixel count (coverage/luminance >= 128), density permille |
+| Tolerances | bbox: max(2px, 5%); ink count: 10%; density: 80 permille, skipped for tiny glyphs (bbox area < 400) |
+
+## Evidence and Provenance
+
+Measured against Google Chrome for Testing 151.0.7922.34, deviceScaleFactor 1,
+font-size 96px. Retained evidence: `tools/vector_font_diff/out/{chrome.json,
+simple.json,summary.txt}`.
+
+## Recovery and Troubleshooting
+
+`UNAVAILABLE: no chrome executable found` — pass `--chrome <path>` or set
+`VECTOR_FONT_CHROME`. A missing `build/lib/libspl_fonts.so` is built by the
+driver via `cargo build -p spl_fonts --release`.
+
+## Compatibility and Limitations
+
+Compares scale-level ink statistics, not per-pixel masks: hinting and AA
+differences between Chrome's FreeType and spl_fonts are below the tolerance
+floor by design. A wrong glyph, wrong scale, flipped bitmap, or empty raster
+is far outside them.
+"""
+
+use std.spec.*
+use std.io_runtime.{shell_output, file_exists}
+
+val TOOL_DIR: text = "tools/vector_font_diff"
+val SUMMARY: text = "tools/vector_font_diff/out/summary.txt"
+
+fn summary_value(key: text) -> text:
+    shell_output(
+        "sed -n 's/^" + key + "=//p' " + SUMMARY + " | head -1 | tr -d '\\n'"
+    )
+
+fn summary_i64(key: text) -> i64:
+    val raw = summary_value(key)
+    if raw == "":
+        return -1
+    raw.to_i64()
+
+fn evidence_is_stale() -> bool:
+    # Fail-closed freshness gate: the summary must exist AND be newer than
+    # every extractor/differ source; otherwise the evidence does not describe
+    # the current code and the run is a failure, not a pass.
+    if not file_exists(SUMMARY):
+        return true
+    val newer = shell_output(
+        "find " + TOOL_DIR + "/simple_vector_font_dump.spl " +
+        TOOL_DIR + "/chrome_vector_font_dump.js " + TOOL_DIR + "/vector_font_diff.js " +
+        "-newer " + SUMMARY + " 2>/dev/null | head -1 | tr -d '\\n'"
+    )
+    newer != ""
+
+describe "Chrome to Simple vector-font differential":
+    it "has fresh vector-font evidence produced against a real Chrome":
+        step("The summary must exist and be newer than every extractor source")
+        expect(evidence_is_stale()).to_equal(false)  # oracle: missing or stale evidence FAILS; run sh tools/vector_font_diff/run_vector_font_diff.shs
+        step("A real Chrome must have produced the chrome side")
+        val version = summary_value("chrome_version")
+        expect(version.contains("Chrome")).to_equal(true)  # oracle: chrome absent or extraction failed is a FAILURE, never a vacuous pass
+        step("Assert a nonzero compared-glyph count — 0 findings over 0 glyphs is not a pass")
+        expect(summary_i64("glyphs_compared") > 0).to_equal(true)
+
+    # @prev("has fresh vector-font evidence produced against a real Chrome")
+    it "keeps outline rasterization ink metrics within tolerance of Chrome":
+        step("All sample glyphs must have been compared")
+        expect(summary_i64("glyphs_compared")).to_equal(10)
+        step("No per-glyph ink-metric finding may remain")
+        expect(summary_i64("findings")).to_equal(0)  # oracle: any bbox/ink/density delta beyond tolerance is a real rasterization divergence
+        step("The driver's verdict line must be PASS")
+        val verdict = shell_output("tail -1 " + SUMMARY + " | tr -d '\\n'")
+        expect(verdict.contains("verdict: PASS")).to_equal(true)

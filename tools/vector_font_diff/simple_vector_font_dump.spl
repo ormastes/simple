@@ -1,0 +1,94 @@
+# Simple-side vector-font glyph dump for the Chrome vector-font differential.
+#
+# Rasterizes each sample codepoint from the shared TTF through the repo's
+# vector/outline rasterizer (spl_fonts cdylib, the same rt_fonts_* provider
+# FontRasterizer in src/lib/nogc_sync_mut/sffi/spl_fonts.spl drives) and prints
+# scale-invariant ink metrics as JSON between BEGIN/END markers.
+#
+# Env: VECTOR_FONT_DYLIB (libspl_fonts.so path), VECTOR_FONT_TTF (shared TTF).
+
+use std.io_runtime.env_get
+
+extern fn spl_dlopen(path: text) -> i64
+extern fn spl_dlsym(handle: i64, name: text) -> i64
+extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
+extern fn rt_text_to_bytes(s: text) -> [u8]
+extern fn rt_array_data_ptr_u8(bytes: [u8]) -> i64
+
+val SIZE: i64 = 96
+# Must stay in sync with SAMPLE in chrome_vector_font_dump.js
+val SAMPLE: [i64] = [65, 103, 72, 120, 111, 48, 49, 86, 87, 46]  # A g H x o 0 1 V W .
+
+fn call1(fp: i64, a: i64) -> i64:
+    var args: [i64] = []
+    args = args.push(a)
+    spl_wffi_call_i64(fp, args, 1)
+
+fn call2(fp: i64, a: i64, b: i64) -> i64:
+    var args: [i64] = []
+    args = args.push(a)
+    args = args.push(b)
+    spl_wffi_call_i64(fp, args, 2)
+
+fn call3(fp: i64, a: i64, b: i64, c: i64) -> i64:
+    var args: [i64] = []
+    args = args.push(a)
+    args = args.push(b)
+    args = args.push(c)
+    spl_wffi_call_i64(fp, args, 3)
+
+fn main():
+    val dylib = env_get("VECTOR_FONT_DYLIB")
+    val ttf = env_get("VECTOR_FONT_TTF")
+    if dylib == "" or ttf == "":
+        print("VECTOR_FONT_DUMP_ERROR: VECTOR_FONT_DYLIB / VECTOR_FONT_TTF not set")
+        return
+    val h = spl_dlopen(dylib)
+    if h == 0:
+        print("VECTOR_FONT_DUMP_ERROR: dlopen failed: " + dylib)
+        return
+    val init_fp = spl_dlsym(h, "rt_fonts_init")
+    val raster_fp = spl_dlsym(h, "rt_fonts_rasterize_glyph")
+    val metric_fp = spl_dlsym(h, "rt_fonts_glyph_metric")
+    val pixel_fp = spl_dlsym(h, "rt_fonts_glyph_pixel")
+    val free_fp = spl_dlsym(h, "rt_fonts_glyph_free")
+    if init_fp == 0 or raster_fp == 0 or metric_fp == 0 or pixel_fp == 0 or free_fp == 0:
+        print("VECTOR_FONT_DUMP_ERROR: missing rt_fonts_* symbol in " + dylib)
+        return
+    val pb = rt_text_to_bytes(ttf)
+    if call2(init_fp, rt_array_data_ptr_u8(pb), pb.len()) != 1:
+        print("VECTOR_FONT_DUMP_ERROR: rt_fonts_init failed for " + ttf)
+        return
+    var parts: [text] = []
+    for cp in SAMPLE:
+        val g = call2(raster_fp, cp, SIZE)
+        if g == 0:
+            print("VECTOR_FONT_DUMP_ERROR: rasterize failed for cp " + cp.to_text())
+            return
+        val w = call2(metric_fp, g, 0)
+        val hh = call2(metric_fp, g, 1)
+        val adv = call2(metric_fp, g, 2)
+        var ink: i64 = 0
+        var y: i64 = 0
+        while y < hh:
+            var x: i64 = 0
+            while x < w:
+                # coverage 0..255; count ink at >=128 to match the chrome-side
+                # luminance threshold.
+                if call3(pixel_fp, g, x, y) >= 128:
+                    ink = ink + 1
+                x = x + 1
+            y = y + 1
+        call1(free_fp, g)
+        var density: i64 = 0
+        if w > 0 and hh > 0:
+            density = (ink * 1000) / (w * hh)
+        parts.push("{\"cp\":" + cp.to_text() + ",\"w\":" + w.to_text() +
+                   ",\"h\":" + hh.to_text() + ",\"advance\":" + adv.to_text() +
+                   ",\"ink\":" + ink.to_text() +
+                   ",\"density_permille\":" + density.to_text() + "}")
+    print("VECTOR_FONT_DUMP_JSON_BEGIN")
+    print("{\"size\":" + SIZE.to_text() + ",\"glyphs\":[" + parts.join(",") + "]}")
+    print("VECTOR_FONT_DUMP_JSON_END")
+
+main()

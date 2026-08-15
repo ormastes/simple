@@ -1,0 +1,443 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl 82%
+"""
+# HTML Layout Renderer Paint Primitives — Coverage Closure (tranche 3)
+
+Covers the pure framebuffer primitives of
+`simple_web_html_layout_renderer_paint_primitives.spl` (1327 lines): pixel
+put/clear, clipped and opacity rects, rounded-rect radius clamping, clip
+intersection, blend/composite math, gradient dither + centered channel mix,
+text-transform helpers, and glyph scaling. Framebuffers are tiny ([u32] of
+w*h) so every oracle is an exact pixel value. GPU/large-surface paths
+(fb_soft_box_shadow interior, radial stacks, widget chrome overlays) are
+exercised only where they terminate on small inputs.
+"""
+
+use std.spec
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{
+    glyph_scale, fb_put, fb_clear, fb_rect, fb_px,
+    ClipRect, clip_intersect, fb_rect_clip, fb_rect_opacity_clip,
+    blend_opacity, composite_over_base, clamp_corner_radius,
+    fb_rounded_rect_corners_opacity_clip,
+    gradient_dither_threshold, mix_channel_gradient_centered,
+    mix_color_vertical_centered, background_gradient_pixel_opacity,
+    apply_text_transform_for_paint, reverse_text_for_paint,
+    fb_border_sides_clip, fb_outline_clip, fb_text_underline,
+    browser_layout_framebuffer_filled_serial,
+    fb_soft_box_shadow, paint_box_shadow,
+    fb_background_radial_stack_clip, fb_style_background_opacity_clip,
+    fb_rounded_rect_opacity_clip, fb_text_underline_clip,
+    fb_text_thin_scaled_clip_range, fb_text_sparse_range,
+    fb_generated_widget_chrome_text, fb_text_flow_chrome_overlay,
+    compute_widget_paint_flags, is_text_flow_fixture,
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{mk_node, HNode}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{renderer_default_style}
+
+fn mkfb(w: i32, h: i32) -> [u32]:
+    var fb: [u32] = []
+    var i = 0
+    while i < w * h:
+        fb.push(0u32)
+        i = i + 1
+    fb
+
+fn full_clip(w: i32, h: i32) -> ClipRect:
+    ClipRect(x0: 0, y0: 0, x1: w, y1: h)
+
+describe "glyph_scale":
+    it "is font-size/8 with a floor of 1":
+        expect(glyph_scale(7)).to_equal(1)
+        expect(glyph_scale(8)).to_equal(1)
+        expect(glyph_scale(16)).to_equal(2)
+        expect(glyph_scale(33)).to_equal(4)
+
+describe "fb_put / fb_clear / fb_px":
+    it "writes inside bounds and ignores out-of-bounds writes":
+        var fb = mkfb(4, 3)
+        fb_put(fb, 4, 3, 1, 2, 9u32)
+        expect(fb[2 * 4 + 1]).to_equal(9u32)
+        fb_put(fb, 4, 3, -1, 0, 7u32)
+        fb_put(fb, 4, 3, 4, 0, 7u32)
+        fb_put(fb, 4, 3, 0, 3, 7u32)
+        expect(fb[0]).to_equal(0u32)
+
+    it "fb_clear floods every pixel":
+        var fb = mkfb(3, 3)
+        fb_clear(fb, 5u32)
+        expect(fb[0]).to_equal(5u32)
+        expect(fb[8]).to_equal(5u32)
+
+    it "fb_px returns the buffer with one clipped write":
+        val fb = fb_px(mkfb(2, 2), 2, 2, 1, 1, 3u32)
+        expect(fb[3]).to_equal(3u32)
+        val oob = fb_px(mkfb(2, 2), 2, 2, 5, 5, 3u32)
+        expect(oob[0]).to_equal(0u32)
+
+describe "fb_rect and clipping":
+    it "fills exactly the requested rect, clamped to the framebuffer":
+        val fb = fb_rect(mkfb(4, 4), 4, 4, 1, 1, 2, 2, 8u32)
+        expect(fb[0]).to_equal(0u32)
+        expect(fb[1 * 4 + 1]).to_equal(8u32)
+        expect(fb[2 * 4 + 2]).to_equal(8u32)
+        expect(fb[3 * 4 + 3]).to_equal(0u32)
+        val over = fb_rect(mkfb(2, 2), 2, 2, -5, -5, 100, 100, 6u32)
+        expect(over[0]).to_equal(6u32)
+        expect(over[3]).to_equal(6u32)
+
+    it "zero or negative size paints nothing":
+        val fb = fb_rect(mkfb(2, 2), 2, 2, 0, 0, 0, 5, 6u32)
+        expect(fb[0]).to_equal(0u32)
+
+    it "clip_intersect shrinks only where the new rect is tighter":
+        val c = clip_intersect(ClipRect(x0: 0, y0: 0, x1: 10, y1: 10), 2, -5, 8, 20)
+        expect(c.x0).to_equal(2)
+        expect(c.y0).to_equal(0)
+        expect(c.x1).to_equal(8)
+        expect(c.y1).to_equal(10)
+
+    it "fb_rect_clip honors the clip rect":
+        val clip = ClipRect(x0: 1, y0: 1, x1: 3, y1: 3)
+        val fb = fb_rect_clip(mkfb(4, 4), 4, 4, 0, 0, 4, 4, 9u32, clip)
+        expect(fb[0]).to_equal(0u32)
+        expect(fb[1 * 4 + 1]).to_equal(9u32)
+        expect(fb[2 * 4 + 2]).to_equal(9u32)
+        expect(fb[3 * 4 + 3]).to_equal(0u32)
+
+describe "blend and composite math":
+    it "blend_opacity endpoints return src/dst unchanged":
+        expect(blend_opacity(0x00FF0000u32, 0x000000FFu32, 100)).to_equal(0x00FF0000u32)
+        expect(blend_opacity(0x00FF0000u32, 0x000000FFu32, 0)).to_equal(0x000000FFu32)
+
+    it "blend_opacity mixes channels with rounding":
+        # 50% of ff and 00 rounds to 0x80 per channel; argb sets alpha FF
+        val mixed = blend_opacity(0x00FF0000u32, 0x000000FFu32, 50)
+        expect((mixed >> 16) & 255u32).to_equal(128u32)
+        expect(mixed & 255u32).to_equal(128u32)
+
+    it "composite_over_base endpoints and midpoint":
+        expect(composite_over_base(0x00FF0000u32, 255, 0x000000FFu32)).to_equal(0x00FF0000u32)
+        expect(composite_over_base(0x00FF0000u32, 0, 0x000000FFu32)).to_equal(0x000000FFu32)
+        val mid = composite_over_base(0x00FF0000u32, 128, 0x00000000u32)
+        expect((mid >> 16) & 255u32).to_equal(128u32)
+
+    it "fb_rect_opacity_clip at full opacity writes the color":
+        val fb = fb_rect_opacity_clip(mkfb(2, 2), 2, 2, 0, 0, 2, 2, 0xFF00FF00u32, 100, full_clip(2, 2))
+        expect(fb[0]).to_equal(0xFF00FF00u32)
+
+describe "rounded rect radius handling":
+    it "clamp_corner_radius clamps to half the smaller dimension":
+        expect(clamp_corner_radius(0, 10, 10)).to_equal(0)
+        expect(clamp_corner_radius(-3, 10, 10)).to_equal(0)
+        expect(clamp_corner_radius(4, 10, 20)).to_equal(4)
+        expect(clamp_corner_radius(50, 10, 20)).to_equal(5)
+
+    it "corner radius leaves the extreme corner pixels unpainted":
+        val fb = fb_rounded_rect_corners_opacity_clip(
+            mkfb(8, 8), 8, 8, 0, 0, 8, 8, 4, 4, 4, 4, 1u32, 100, full_clip(8, 8))
+        expect(fb[0]).to_equal(0u32)          # top-left corner clipped by radius
+        expect(fb[3 * 8 + 3]).to_equal(1u32)  # interior painted
+        expect(fb[7 * 8]).to_equal(0u32)      # bottom-left corner clipped
+
+describe "gradient math":
+    it "dither threshold is a 4x4 (plus px%8 tweak) matrix of 0..15":
+        var y = 0
+        var bad = 0
+        while y < 8:
+            var x = 0
+            while x < 8:
+                val t = gradient_dither_threshold(x, y)
+                if t < 0 or t > 15:
+                    bad = bad + 1
+                x = x + 1
+            y = y + 1
+        expect(bad).to_equal(0)
+        expect(gradient_dither_threshold(0, 0)).to_equal(7)
+        expect(gradient_dither_threshold(4, 2)).to_equal(3)
+
+    it "mix_channel_gradient_centered hits endpoints and guards span<=0":
+        expect(mix_channel_gradient_centered(10, 20, 0, 0, 0, 0)).to_equal(10)
+        # pos 0 of span 1: weights are equal halves
+        expect(mix_channel_gradient_centered(0, 200, 0, 1, 0, 0) >= 100).to_equal(true)
+
+    it "mix_color_vertical_centered with span<=0 returns the first color":
+        expect(mix_color_vertical_centered(7u32, 9u32, 0, 0, 0, 0)).to_equal(7u32)
+
+    it "background_gradient_pixel_opacity scales element opacity by pixel alpha":
+        expect(background_gradient_pixel_opacity(0xFF000000u32, 100)).to_equal(100)
+        expect(background_gradient_pixel_opacity(0x00000000u32, 100)).to_equal(0)
+        expect(background_gradient_pixel_opacity(0x80000000u32, 100)).to_equal(50)
+
+describe "text paint helpers":
+    it "apply_text_transform_for_paint covers upper/lower/capitalize/none":
+        expect(apply_text_transform_for_paint("hello world", "uppercase")).to_equal("HELLO WORLD")
+        expect(apply_text_transform_for_paint("HeLLo", "lowercase")).to_equal("hello")
+        expect(apply_text_transform_for_paint("hello world", "capitalize")).to_equal("Hello World")
+        expect(apply_text_transform_for_paint("hello", "")).to_equal("hello")
+
+    it "reverse_text_for_paint reverses codepoints":
+        expect(reverse_text_for_paint("abc")).to_equal("cba")
+        expect(reverse_text_for_paint("")).to_equal("")
+
+describe "border, outline, underline strokes":
+    it "fb_border_sides_clip paints each side in its own color":
+        val fb = fb_border_sides_clip(mkfb(6, 6), 6, 6, 0, 0, 6, 6, 1, 1, 1, 1,
+            1u32, 2u32, 3u32, 4u32, full_clip(6, 6))
+        expect(fb[2 * 6]).to_equal(1u32)       # left column
+        expect(fb[3]).to_equal(2u32)           # top row
+        expect(fb[2 * 6 + 5]).to_equal(3u32)   # right column
+        expect(fb[5 * 6 + 3]).to_equal(4u32)   # bottom row
+        expect(fb[2 * 6 + 2]).to_equal(0u32)   # interior untouched
+
+    it "fb_outline_clip paints outside the box edge":
+        val fb = fb_outline_clip(mkfb(8, 8), 8, 8, 2, 2, 4, 4, 1, 0, 9u32, full_clip(8, 8))
+        expect(fb[1 * 8 + 3]).to_equal(9u32)   # ring above the box
+        expect(fb[3 * 8 + 3]).to_equal(0u32)   # interior untouched
+
+    it "fb_text_underline paints a solid run of the given thickness":
+        val fb = fb_text_underline(mkfb(6, 4), 6, 4, 1, 1, 4, 1, "solid", 5u32)
+        expect(fb[1 * 6 + 1]).to_equal(5u32)
+        expect(fb[1 * 6 + 4]).to_equal(5u32)
+        expect(fb[1 * 6 + 5]).to_equal(0u32)
+
+fn mkfb_color(w: i32, h: i32, c: u32) -> [u32]:
+    var fb: [u32] = []
+    var i = 0
+    while i < w * h:
+        fb.push(c)
+        i = i + 1
+    fb
+
+describe "soft box shadow interior (tranche 4)":
+    it "guards return the framebuffer unchanged":
+        val base = mkfb(4, 4)
+        expect(fb_soft_box_shadow(base, 4, 4, 0, 0, 2, 2, 1u32, 0, 255, full_clip(4, 4))[0]).to_equal(0u32)
+        expect(fb_soft_box_shadow(base, 4, 4, 0, 0, 2, 2, 1u32, 2, 0, full_clip(4, 4))[0]).to_equal(0u32)
+        expect(fb_soft_box_shadow(base, 4, 4, 0, 0, 0, 2, 1u32, 2, 255, full_clip(4, 4))[0]).to_equal(0u32)
+
+    it "deep interior composites near the source color, halo corner stays dark":
+        val fb = fb_soft_box_shadow(mkfb(16, 16), 16, 16, 4, 4, 8, 8, 0xFFFFFFFFu32, 4, 255, full_clip(16, 16))
+        val center = fb[8 * 16 + 8]
+        expect(((center >> 16) & 255u32) > 200u32).to_equal(true)
+        expect(fb[0]).to_equal(0u32)
+
+    it "coverage falls off monotonically from the box edge outward":
+        val fb = fb_soft_box_shadow(mkfb(16, 16), 16, 16, 4, 4, 8, 8, 0xFFFFFFFFu32, 4, 255, full_clip(16, 16))
+        val inside = (fb[8 * 16 + 8] >> 16) & 255u32
+        val edge = (fb[8 * 16 + 4] >> 16) & 255u32
+        val outside = (fb[8 * 16 + 2] >> 16) & 255u32
+        expect(inside > edge).to_equal(true)
+        expect(edge > outside).to_equal(true)
+
+describe "paint_box_shadow dispatch (tranche 4)":
+    it "blur with an empty raw declaration takes the single soft-shadow path":
+        var st = renderer_default_style()
+        st.box_shadow_blur_px = 3
+        val fb = paint_box_shadow(mkfb_color(12, 12, 0xFFFFFFFFu32), 12, 12, 3, 3, 6, 6, st, full_clip(12, 12))
+        expect(((fb[6 * 12 + 6] >> 16) & 255u32) < 255u32).to_equal(true)
+
+    it "a raw multi-layer declaration paints each dark layer back-to-front":
+        var st = renderer_default_style()
+        st.box_shadow_blur_px = 4
+        st.box_shadow_raw = "0px 2px 4px rgba(0,0,0,0.5), 0px 1px 2px rgba(0,0,0,0.6)"
+        val fb = paint_box_shadow(mkfb_color(12, 12, 0xFFFFFFFFu32), 12, 12, 3, 3, 6, 6, st, full_clip(12, 12))
+        expect(((fb[6 * 12 + 6] >> 16) & 255u32) < 255u32).to_equal(true)
+
+    it "inset layers are skipped, leaving the framebuffer untouched":
+        var st = renderer_default_style()
+        st.box_shadow_blur_px = 4
+        st.box_shadow_raw = "inset 0px 1px 2px rgba(0,0,0,0.5)"
+        val fb = paint_box_shadow(mkfb_color(8, 8, 0xFFFFFFFFu32), 8, 8, 2, 2, 4, 4, st, full_clip(8, 8))
+        expect(fb[4 * 8 + 4]).to_equal(0xFFFFFFFFu32)
+
+    it "zero blur falls back to the hard offset rounded rect":
+        var st = renderer_default_style()
+        st.box_shadow_x_px = 1
+        st.box_shadow_y_px = 1
+        st.box_shadow_color = 0xFF010101u32
+        val fb = paint_box_shadow(mkfb(8, 8), 8, 8, 2, 2, 4, 4, st, full_clip(8, 8))
+        expect(fb[4 * 8 + 4]).to_equal(0xFF010101u32)
+        expect(fb[0]).to_equal(0u32)
+
+describe "radial gradient stacks (tranche 4)":
+    it "a centered circle paints the center and leaves far corners untouched":
+        val raw = "radial-gradient(circle at 50% 50%, rgba(255,0,0,0.9), transparent 70%)"
+        val fb = fb_background_radial_stack_clip(mkfb(20, 20), 20, 20, 0, 0, 20, 20, raw, 100, full_clip(20, 20))
+        expect(((fb[10 * 20 + 10] >> 16) & 255u32) > 100u32).to_equal(true)
+        expect(fb[0]).to_equal(0u32)
+        expect(fb[19 * 20 + 19]).to_equal(0u32)
+
+    it "keyword centers bind their own axes (at top left)":
+        val raw = "radial-gradient(circle at top left, rgba(0,0,255,0.8), transparent 50%)"
+        val fb = fb_background_radial_stack_clip(mkfb(20, 20), 20, 20, 0, 0, 20, 20, raw, 100, full_clip(20, 20))
+        expect((fb[0] & 255u32) > 100u32).to_equal(true)
+        expect(fb[19 * 20 + 19]).to_equal(0u32)
+
+    it "non-radial layers and zero opacity are ignored":
+        val lin = fb_background_radial_stack_clip(mkfb(4, 4), 4, 4, 0, 0, 4, 4, "linear-gradient(#fff,#000)", 100, full_clip(4, 4))
+        expect(lin[5]).to_equal(0u32)
+        val z = fb_background_radial_stack_clip(mkfb(4, 4), 4, 4, 0, 0, 4, 4, "radial-gradient(circle, rgba(255,0,0,0.9), transparent 70%)", 0, full_clip(4, 4))
+        expect(z[5]).to_equal(0u32)
+
+    it "element opacity scales the radial falloff alpha":
+        val raw = "radial-gradient(circle at 50% 50%, rgba(255,0,0,0.9), transparent 70%)"
+        val full = fb_background_radial_stack_clip(mkfb(20, 20), 20, 20, 0, 0, 20, 20, raw, 100, full_clip(20, 20))
+        val half = fb_background_radial_stack_clip(mkfb(20, 20), 20, 20, 0, 0, 20, 20, raw, 50, full_clip(20, 20))
+        val fr = (full[10 * 20 + 10] >> 16) & 255u32
+        val hr = (half[10 * 20 + 10] >> 16) & 255u32
+        expect(hr < fr).to_equal(true)
+        expect(hr > 0u32).to_equal(true)
+
+describe "style background painting (tranche 4)":
+    it "solid background folds the color's own alpha into the paint opacity":
+        var st = renderer_default_style()
+        st.bg = 0xFFFF0000u32
+        val fb = fb_style_background_opacity_clip(mkfb(6, 6), 6, 6, 0, 0, 6, 6, st, full_clip(6, 6))
+        expect(fb[3 * 6 + 3]).to_equal(0xFFFF0000u32)
+        var tr = renderer_default_style()
+        tr.bg = 0x00FF0000u32
+        val fb2 = fb_style_background_opacity_clip(mkfb(6, 6), 6, 6, 0, 0, 6, 6, tr, full_clip(6, 6))
+        expect(fb2[3 * 6 + 3]).to_equal(0u32)
+
+    it "a vertical gradient ramps from the from-color to the to-color":
+        var st = renderer_default_style()
+        st.background_gradient_from = 0xFFFF0000u32
+        st.background_gradient_to = 0xFF0000FFu32
+        val fb = fb_style_background_opacity_clip(mkfb(8, 8), 8, 8, 0, 0, 8, 8, st, full_clip(8, 8))
+        val top = fb[0]
+        val bottom = fb[7 * 8]
+        expect(((top >> 16) & 255u32) > (top & 255u32)).to_equal(true)
+        expect((bottom & 255u32) > ((bottom >> 16) & 255u32)).to_equal(true)
+
+    it "a small no-repeat tile takes the per-pixel dithered path":
+        var st = renderer_default_style()
+        st.background_gradient_from = 0xFFFF0000u32
+        st.background_gradient_to = 0xFF0000FFu32
+        st.background_repeat = "no-repeat"
+        st.background_size_w_px = 4
+        st.background_size_h_px = 4
+        val fb = fb_style_background_opacity_clip(mkfb(8, 8), 8, 8, 0, 0, 8, 8, st, full_clip(8, 8))
+        expect(((fb[0] >> 16) & 255u32) > 0u32).to_equal(true)
+        expect(fb[7 * 8 + 7]).to_equal(0u32)
+
+    it "background-clip padding-box shrinks the painted area by the border":
+        var st = renderer_default_style()
+        st.bg = 0xFF00FF00u32
+        st.background_clip = "padding-box"
+        st.border_l = 2
+        st.border_t = 2
+        st.border_r = 2
+        st.border_b = 2
+        val fb = fb_style_background_opacity_clip(mkfb(8, 8), 8, 8, 0, 0, 8, 8, st, full_clip(8, 8))
+        expect(fb[0]).to_equal(0u32)
+        expect(fb[4 * 8 + 4]).to_equal(0xFF00FF00u32)
+
+describe "underline styles and clipped variant (tranche 4)":
+    it "double paints two runs with a one-pixel gap":
+        val fb = fb_text_underline(mkfb(8, 6), 8, 6, 1, 1, 5, 1, "double", 5u32)
+        expect(fb[1 * 8 + 1]).to_equal(5u32)
+        expect(fb[2 * 8 + 1]).to_equal(0u32)
+        expect(fb[3 * 8 + 1]).to_equal(5u32)
+
+    it "dashed leaves gaps between segments; dotted uses shorter dashes":
+        val da = fb_text_underline(mkfb(12, 3), 12, 3, 0, 0, 12, 1, "dashed", 5u32)
+        expect(da[0]).to_equal(5u32)
+        expect(da[3]).to_equal(0u32)
+        val dot = fb_text_underline(mkfb(12, 3), 12, 3, 0, 0, 12, 1, "dotted", 5u32)
+        expect(dot[0]).to_equal(5u32)
+        expect(dot[1]).to_equal(0u32)
+
+    it "fb_text_underline_clip honors the clip for solid, double and dashed":
+        val clip = ClipRect(x0: 2, y0: 0, x1: 6, y1: 6)
+        val s = fb_text_underline_clip(mkfb(8, 6), 8, 6, 0, 0, 8, 1, "solid", 5u32, clip)
+        expect(s[0]).to_equal(0u32)
+        expect(s[3]).to_equal(5u32)
+        val d = fb_text_underline_clip(mkfb(8, 6), 8, 6, 0, 0, 8, 1, "double", 5u32, clip)
+        expect(d[2 * 8 + 3]).to_equal(5u32)
+        val g = fb_text_underline_clip(mkfb(8, 6), 8, 6, 0, 0, 8, 1, "dashed", 5u32, clip)
+        expect(g[0]).to_equal(0u32)
+
+describe "glyph rendering paths (tranche 4)":
+    it "scaled thin text paints pixels and respects the vertical guard":
+        val fb = fb_text_thin_scaled_clip_range(mkfb(24, 16), 24, 16, 1, 1, "A", 0, 1, 9u32, 2, 12, 6, false, full_clip(24, 16))
+        var painted = 0
+        var i = 0
+        while i < 24 * 16:
+            if fb[i] == 9u32:
+                painted = painted + 1
+            i = i + 1
+        expect(painted > 0).to_equal(true)
+        val off = fb_text_thin_scaled_clip_range(mkfb(24, 16), 24, 16, 1, 99, "A", 0, 1, 9u32, 2, 12, 6, false, full_clip(24, 16))
+        expect(off[0]).to_equal(0u32)
+
+    it "sparse text paints a strict subset of checkerboard pixels":
+        val fb = fb_text_sparse_range(mkfb(12, 8), 12, 8, 0, 0, "AB", 0, 2, 9u32, 6, 3, false)
+        var painted = 0
+        var i = 0
+        while i < 12 * 8:
+            if fb[i] == 9u32:
+                painted = painted + 1
+            i = i + 1
+        expect(painted > 0).to_equal(true)
+        val off = fb_text_sparse_range(mkfb(12, 8), 12, 8, 0, 9, "AB", 0, 2, 9u32, 6, 3, false)
+        expect(off[0]).to_equal(0u32)
+
+    it "italic shear shifts painted columns rightward on upper rows":
+        val up = fb_text_thin_scaled_clip_range(mkfb(24, 16), 24, 16, 1, 1, "H", 0, 1, 9u32, 2, 12, 6, false, full_clip(24, 16))
+        val it_fb = fb_text_thin_scaled_clip_range(mkfb(24, 16), 24, 16, 1, 1, "H", 0, 1, 9u32, 2, 12, 6, true, full_clip(24, 16))
+        var same = true
+        var i = 0
+        while i < 24 * 16:
+            if up[i] != it_fb[i]:
+                same = false
+            i = i + 1
+        expect(same).to_equal(false)
+
+describe "widget chrome branches (tranche 4)":
+    it "generated chrome text needs a 38x62 surface; small buffers pass through":
+        val small = fb_generated_widget_chrome_text(mkfb(10, 10), 10, 10)
+        expect(small[0]).to_equal(0u32)
+        val fb = fb_generated_widget_chrome_text(mkfb(40, 64), 40, 64)
+        expect(fb[7 * 40 + 9]).to_equal(0xff48484bu32)
+
+    it "text-flow chrome overlay applies only on the 96x64 fixture surface":
+        val wrong = fb_text_flow_chrome_overlay(mkfb(10, 10), 10, 10)
+        expect(wrong[0]).to_equal(0u32)
+        val fb = fb_text_flow_chrome_overlay(mkfb(96, 64), 96, 64)
+        expect(fb[1451]).to_equal(0xffffffffu32)
+
+    it "compute_widget_paint_flags finds panels and widget-descendant text":
+        var root = mk_node("div", -1)
+        root.has_widget_class = true
+        var panel = mk_node("div", 0)
+        panel.has_widget_panel_class = true
+        var txt = mk_node("#text", 0)
+        txt.text_trimmed = "go"
+        val flags = compute_widget_paint_flags([root, panel, txt], false, true)
+        expect(flags.has_widget_panel).to_equal(true)
+        expect(flags.has_nonempty_widget_text).to_equal(true)
+        val no_text = compute_widget_paint_flags([root, panel, txt], false, false)
+        expect(no_text.has_widget_panel).to_equal(true)
+        expect(no_text.has_nonempty_widget_text).to_equal(false)
+
+    it "is_text_flow_fixture requires the exact size and both marker texts":
+        var a = mk_node("#text", -1)
+        a.text_trimmed = "GUI"
+        var b = mk_node("#text", -1)
+        b.text_trimmed = "taskbar command"
+        expect(is_text_flow_fixture([a, b], 96, 64)).to_equal(true)
+        expect(is_text_flow_fixture([a, b], 95, 64)).to_equal(false)
+        expect(is_text_flow_fixture([a], 96, 64)).to_equal(false)
+
+describe "rounded rect single-radius path (tranche 4)":
+    it "fb_rounded_rect_opacity_clip clips corners with a uniform radius":
+        val fb = fb_rounded_rect_opacity_clip(mkfb(8, 8), 8, 8, 0, 0, 8, 8, 4, 1u32, 100, full_clip(8, 8))
+        expect(fb[0]).to_equal(0u32)
+        expect(fb[3 * 8 + 3]).to_equal(1u32)
+        expect(fb[7 * 8 + 7]).to_equal(0u32)
+
+describe "framebuffer factory":
+    it "serial fill produces w*h pixels of the base color":
+        val fb = browser_layout_framebuffer_filled_serial(0xFF101010u32, 3, 2)
+        expect(fb.len()).to_equal(6)
+        expect(fb[0]).to_equal(0xFF101010u32)
+        expect(fb[5]).to_equal(0xFF101010u32)

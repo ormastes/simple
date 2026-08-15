@@ -1,0 +1,132 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/layout_table.spl 90%
+"""
+# CSS Table Structure Helpers — Coverage Closure
+
+Direct-oracle closure over layout_table.spl: table discovery, row/cell
+collection (with and without row groups), colspan parsing edge cases,
+column counting, distribute-remainder width math, and the HNode-arena
+simple_web_* table row/column helpers.
+"""
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.layout_table.{
+    _find_table_node, _collect_table_rows, _collect_cells, _get_colspan,
+    _count_logical_columns, _compute_col_widths,
+    SimpleWebTableRows, simple_web_collect_table_rows,
+    simple_web_fixed_table_cell_span, simple_web_fixed_table_row_column_count,
+    simple_web_fixed_table_column_count}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    HNode, HtmlChildIndex}
+
+fn _cell(colspan: text) -> BeDomNode:
+    var c = BeDomNode.element("td")
+    if colspan.len() > 0:
+        c.set_attr("colspan", colspan)
+    c
+
+fn _hnode(tag: text, attrs: text) -> HNode:
+    HNode(
+        tag: tag, text_data: "", text_trimmed: "", style_attr: "",
+        class_attr: "", class_words: [], has_widget_class: false,
+        has_icon_image_class: false, has_widget_panel_class: false,
+        has_widget_button_class: false, has_widget_image_class: false,
+        has_focused_class: false, id_attr: "", attrs_raw: attrs, parent: -1)
+
+describe "_find_table_node":
+    it "returns the node itself when it is a table":
+        val t = BeDomNode.element("table")
+        expect(_find_table_node(t).tag_name).to_equal("table")
+
+    it "finds a nested table inside wrappers":
+        var outer = BeDomNode.element("div")
+        var inner = BeDomNode.element("section")
+        inner.add_child(BeDomNode.element("table"))
+        outer.add_child(BeDomNode.element("p"))
+        outer.add_child(inner)
+        expect(_find_table_node(outer).tag_name).to_equal("table")
+
+    it "returns the input node when no table exists":
+        var d = BeDomNode.element("div")
+        d.add_child(BeDomNode.element("span"))
+        expect(_find_table_node(d).tag_name).to_equal("div")
+
+describe "_collect_table_rows / _collect_cells":
+    it "collects direct tr children and tr inside tbody/thead/tfoot":
+        var table = BeDomNode.element("table")
+        table.add_child(BeDomNode.element("tr"))
+        var thead = BeDomNode.element("thead")
+        thead.add_child(BeDomNode.element("tr"))
+        var tbody = BeDomNode.element("tbody")
+        tbody.add_child(BeDomNode.element("tr"))
+        tbody.add_child(BeDomNode.element("caption"))
+        table.add_child(thead)
+        table.add_child(tbody)
+        table.add_child(BeDomNode.element("caption"))
+        expect(_collect_table_rows(table).len()).to_equal(3)
+
+    it "collects only td/th cells from a row":
+        var row = BeDomNode.element("tr")
+        row.add_child(BeDomNode.element("td"))
+        row.add_child(BeDomNode.element("th"))
+        row.add_child(BeDomNode.text(" "))
+        row.add_child(BeDomNode.element("script"))
+        expect(_collect_cells(row).len()).to_equal(2)
+
+describe "_get_colspan":
+    it "defaults to 1 when missing, empty, non-numeric or zero":
+        expect(_get_colspan(_cell(""))).to_equal(1)
+        expect(_get_colspan(_cell("abc"))).to_equal(1)
+        expect(_get_colspan(_cell("0"))).to_equal(1)
+
+    it "parses multi-digit colspans and ignores stray characters":
+        expect(_get_colspan(_cell("12"))).to_equal(12)
+        expect(_get_colspan(_cell(" 3 "))).to_equal(3)
+
+describe "_count_logical_columns / _compute_col_widths":
+    it "sums colspans and treats an empty row as one column":
+        val cells = [_cell("2"), _cell(""), _cell("3")]
+        expect(_count_logical_columns(cells)).to_equal(6)
+        var no_cells: [BeDomNode] = []
+        expect(_count_logical_columns(no_cells)).to_equal(1)
+
+    it "distributes remainder pixels to the leftmost columns":
+        val w = _compute_col_widths(10, 3, [])
+        expect(w.len()).to_equal(3)
+        expect(w[0]).to_equal(4)
+        expect(w[1]).to_equal(3)
+        expect(w[2]).to_equal(3)
+
+    it "returns empty widths for non-positive column counts":
+        expect(_compute_col_widths(10, 0, []).len()).to_equal(0)
+
+# Arena: 0=table, 1=tr(direct), 2=tbody, 3=tr(in tbody), 4=td colspan=2, 5=td
+fn _arena() -> [HNode]:
+    [_hnode("table", ""), _hnode("tr", ""), _hnode("tbody", ""),
+     _hnode("tr", ""), _hnode("td", "td colspan=\"2\""), _hnode("td", "td")]
+
+fn _index() -> HtmlChildIndex:
+    # table->tr(1)->tbody(2); tbody->tr(3); tr(1)->td(4)->td(5)
+    HtmlChildIndex(
+        first_child: [1, 4, 3, -1, -1, -1],
+        next_sibling: [-1, 2, -1, -1, 5, -1],
+        child_count: [2, 2, 1, 0, 0, 0])
+
+describe "simple_web_* HNode table helpers":
+    it "collects rows with their group markers":
+        val rows = simple_web_collect_table_rows(_arena(), _index(), 0)
+        expect(rows.rows.len()).to_equal(2)
+        expect(rows.groups[0]).to_equal(-1)
+        expect(rows.groups[1]).to_equal(2)
+
+    it "clamps cell span to column count and floors at 1":
+        expect(simple_web_fixed_table_cell_span(_hnode("td", "td colspan=\"5\""), 3)).to_equal(3)
+        expect(simple_web_fixed_table_cell_span(_hnode("td", "td"), 3)).to_equal(1)
+
+    it "counts row columns from colspans, minimum 1":
+        expect(simple_web_fixed_table_row_column_count(_arena(), _index(), 1)).to_equal(3)
+        expect(simple_web_fixed_table_row_column_count(_arena(), _index(), 3)).to_equal(1)
+
+    it "takes the max row column count across the table":
+        val rows = simple_web_collect_table_rows(_arena(), _index(), 0)
+        expect(simple_web_fixed_table_column_count(_arena(), _index(), rows)).to_equal(3)
