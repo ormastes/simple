@@ -476,10 +476,18 @@ impl JsInterpreter:
         if native_id == NATIVE_NODE_STREAM_WRITABLE_UNCORK:
             return self._native_node_stream_writable_uncork(this_val)
         if native_id == NATIVE_NODE_PROCESS_CWD:
+            # Capability gate: page script must not see the host cwd.
+            if not self.node_compat_enabled:
+                return JsValue.Undefined
             return process_cwd(arg_vals)
         if native_id == NATIVE_NODE_PROCESS_NEXT_TICK:
+            if not self.node_compat_enabled:
+                return JsValue.Undefined
             return self._native_node_process_next_tick(arg_vals)
         if native_id == NATIVE_NODE_PROCESS_EXIT:
+            # Capability gate: page script must never terminate the host.
+            if not self.node_compat_enabled:
+                return JsValue.Undefined
             return process_exit(arg_vals)
         if native_id == NATIVE_NODE_OS_PLATFORM:
             return os_platform(arg_vals)
@@ -627,6 +635,11 @@ impl JsInterpreter:
             val grant_key = self._native_node_module_marker_key(specifier)
             if val Some(granted_module) = self.lookup_global_value(grant_key):
                 return self._native_node_require_cached(module_cache_key, granted_module)
+            return self._native_node_denied_module(specifier)
+        # Capability gate: node builtin modules are a host-granted capability.
+        # Untrusted page script (node_compat_enabled=false) gets the same
+        # denied-module object as any unknown specifier.
+        if not self.node_compat_enabled:
             return self._native_node_denied_module(specifier)
         var module_value = JsValue.Undefined
         if canonical == "path":

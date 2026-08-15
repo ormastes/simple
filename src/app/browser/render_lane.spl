@@ -31,12 +31,20 @@
 use std.io_runtime.{env_get}
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixel_array}
 use std.blink.lane.html_pixels.{blink_render_html_to_pixel_array}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 
 # The existing, shipping engine. Everything renders through this today.
 pub val BROWSER_RENDER_LANE_LIVE: text = "live"
 
 # The blink stack. Selectable, not default — see the header.
 pub val BROWSER_RENDER_LANE_BLINK: text = "blink"
+
+# Vulkan present lane: the frame is PAINTED by the live CPU engine, then
+# PRESENTED through the engine2d VulkanBackend (draw_image on a real device)
+# and read back from the device (mirrors scripts/check/browser_vulkan_evidence.spl).
+# When Vulkan is unavailable on the running binary the lane falls back to the
+# CPU pixels and says so — provenance is reported, never assumed.
+pub val BROWSER_RENDER_LANE_VULKAN: text = "vulkan"
 
 # >>> THE FLAG <<< — the one-line flip, and the one-line rollback.
 pub val BROWSER_RENDER_LANE_DEFAULT: text = BROWSER_RENDER_LANE_LIVE
@@ -47,7 +55,7 @@ pub val BROWSER_RENDER_LANE_ENV: text = "SIMPLE_BROWSER_RENDER_LANE"
 
 pub fn browser_render_lane_is_known(lane: text) -> bool:
     """True when `lane` names a lane this adapter can actually dispatch to."""
-    lane == BROWSER_RENDER_LANE_LIVE or lane == BROWSER_RENDER_LANE_BLINK
+    lane == BROWSER_RENDER_LANE_LIVE or lane == BROWSER_RENDER_LANE_BLINK or lane == BROWSER_RENDER_LANE_VULKAN
 
 pub fn browser_render_lane_selected() -> text:
     """The lane this process renders through.
@@ -72,8 +80,41 @@ pub fn render_html_to_pixel_array_via(lane: text, html: text,
     what an unrecognised name means."""
     if lane == BROWSER_RENDER_LANE_BLINK:
         blink_render_html_to_pixel_array(html, width, height)
+    elif lane == BROWSER_RENDER_LANE_VULKAN:
+        browser_render_html_vulkan(html, width, height).pixels
     else:
         render_html_to_pixel_array(html, width, height)
+
+# Result of the vulkan lane, with honest provenance.
+#   backend  : "vulkan" when the device readback actually happened,
+#              "software" when the lane fell back to the CPU frame.
+#   reason   : empty on "vulkan"; the concrete failure otherwise.
+class BrowserVulkanFrame:
+    pixels: [u32]
+    backend: text
+    reason: text
+
+pub fn browser_render_html_vulkan(html: text, width: i32, height: i32) -> BrowserVulkanFrame:
+    """Render `html` on the live CPU engine, then present the frame through
+    the engine2d VulkanBackend and return the DEVICE readback.
+
+    Fail-closed provenance: when Vulkan cannot initialize on the running
+    binary (e.g. a seed built without the vulkan feature), or the readback is
+    not a device readback, the CPU frame is returned with backend="software"
+    and a non-empty reason — this function never labels software pixels as
+    "vulkan"."""
+    val page = render_html_to_pixel_array(html, width, height)
+    var b = VulkanBackend.create()
+    if not b.init(width, height):
+        return BrowserVulkanFrame(pixels: page, backend: "software",
+                                  reason: "vulkan unavailable: {b.last_error}")
+    b.draw_image(0, 0, width, height, page)
+    val rb = b.read_pixels_with_source()
+    b.shutdown()
+    if rb.source != "device_readback":
+        return BrowserVulkanFrame(pixels: page, backend: "software",
+                                  reason: "readback source was '{rb.source}', not device_readback")
+    BrowserVulkanFrame(pixels: rb.pixels, backend: "vulkan", reason: "")
 
 pub fn browser_render_html_to_pixel_array(html: text, width: i32,
                                           height: i32) -> [u32]:

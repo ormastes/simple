@@ -1,0 +1,74 @@
+use std.spec.*
+use std.io_runtime.{env_set}
+use app.browser.render_lane.{
+    BROWSER_RENDER_LANE_ENV, BROWSER_RENDER_LANE_VULKAN,
+    BROWSER_RENDER_LANE_LIVE,
+    browser_render_lane_is_known, browser_render_lane_selected,
+    browser_render_html_vulkan, render_html_to_pixel_array_via
+}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+
+val HTML = "<html><body><style>body { background-color: white; } div { width: 8px; height: 4px; background-color: red; }</style><div></div></body></html>"
+val W = 16
+val H = 8
+
+describe "Browser Vulkan render lane":
+    it "reports honest backend provenance when vulkan is requested":
+        """Requesting "vulkan" must yield EITHER a renderer whose backend
+        actually initialized as a vulkan-named backend, OR an explicit
+        software fallback carrying a non-empty reason. A "vulkan" label over
+        software pixels — or a silent reasonless downgrade — is the defect
+        this spec fences."""
+        step("create a BrowserRenderer with the vulkan backend requested")
+        val r = BrowserRenderer.create_with_backend(W, H, "vulkan")
+        val name = r.backend_name()
+        val reason = r.backend_fallback_reason()
+        if name.contains("vulkan"):
+            step("real vulkan backend initialized — no fallback reason expected")
+            expect(reason).to_equal("")
+        else:
+            step("fallback path — must name software AND carry a concrete reason")
+            expect(name).to_equal("software")
+            expect(reason.len()).to_be_greater_than(0)
+
+    it "never labels the vulkan lane frame as vulkan unless device readback ran":
+        """browser_render_html_vulkan paints on the CPU engine and presents
+        through the engine2d VulkanBackend. backend=="vulkan" is only
+        permitted with an empty reason (device readback happened); any
+        fallback must say backend=="software" with a non-empty reason."""
+        step("render a small two-tone page through the vulkan lane")
+        val frame = browser_render_html_vulkan(HTML, W, H)
+        if frame.backend == "vulkan":
+            expect(frame.reason).to_equal("")
+        else:
+            expect(frame.backend).to_equal("software")
+            expect(frame.reason.len()).to_be_greater_than(0)
+        step("the frame carries a full viewport of pixels either way")
+        expect(frame.pixels.len()).to_equal(W * H)
+
+    it "selects the vulkan lane via SIMPLE_BROWSER_RENDER_LANE":
+        """The env override must recognise "vulkan" as a known lane and
+        select it; an unknown value still falls back to the default lane."""
+        step("set SIMPLE_BROWSER_RENDER_LANE=vulkan")
+        env_set(BROWSER_RENDER_LANE_ENV, BROWSER_RENDER_LANE_VULKAN)
+        expect(browser_render_lane_is_known(BROWSER_RENDER_LANE_VULKAN)).to_equal(true)
+        expect(browser_render_lane_selected()).to_equal(BROWSER_RENDER_LANE_VULKAN)
+        step("restore the default lane selection")
+        env_set(BROWSER_RENDER_LANE_ENV, "")
+        expect(browser_render_lane_selected()).to_equal(BROWSER_RENDER_LANE_LIVE)
+
+    it "produces non-empty pixels for a small viewport through the vulkan lane":
+        """Dispatching via the lane name must return width*height pixels with
+        at least one non-zero pixel (the page is two-tone white/red), whether
+        the present ran on the device or fell back honestly to CPU."""
+        step("dispatch through render_html_to_pixel_array_via('vulkan')")
+        val pixels = render_html_to_pixel_array_via(BROWSER_RENDER_LANE_VULKAN, HTML, W, H)
+        expect(pixels.len()).to_equal(W * H)
+        step("count non-zero pixels")
+        var nonzero = 0
+        var i = 0
+        while i < pixels.len():
+            if (pixels[i] & 0xFFFFFFu32) != 0u32:
+                nonzero = nonzero + 1
+            i = i + 1
+        expect(nonzero).to_be_greater_than(0)

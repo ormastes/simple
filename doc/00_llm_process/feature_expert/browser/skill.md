@@ -97,3 +97,25 @@ current handoff notes.
   the entire engine into the tree-walk interpreter (~10-50x, no diagnostic;
   four 1800s-budget runs never finished before the hoist). Compiler defect:
   `doc/08_tracking/bug/gui_window_caller_frame_silent_interp_fallback_2026-08-06.md`.
+- **2026-08-15 session lanes** (specs under `test/01_unit/browser_engine/`):
+  - **Vulkan render lane**: `render_lane.spl` gained a `vulkan` lane
+    (CPU paint → engine2d `VulkanBackend` present → `device_readback`,
+    fail-closed provenance — never labels software pixels "vulkan");
+    `browser_renderer.spl create_with_backend` routes `vulkan`/`webgpu`
+    through `Engine2D.create_requested_backend` instead of silently
+    degrading. Gate: `browser_vulkan_lane_spec.spl`. Docker lavapipe
+    end-to-end: `scripts/check/check-simple-web-browser-docker-vulkan.shs`
+    (needs a `simple-runtime/vulkan`-featured build at
+    `build/browser-vulkan/simple`; `simple-compiler/vulkan` still blocked on
+    an incompletely vendored rspirv — see
+    `doc/08_tracking/bug/browser_has_no_vulkan_render_lane_2026-08-15.md`).
+  - **Script execution + animation clock**: page `<script>` (JS and
+    `text/simple`) executes pre-paint; `browser_engine_animated_frames`
+    (render_adapter) drives rAF/CSS clocks per frame. The nogc JS subset
+    parser now supports `function name() {}` DECLARATIONS (it previously
+    dropped them AND the statement after the closing brace). Gates:
+    `browser_script_execution_spec.spl`, `browser_animation_clock_spec.spl`.
+  - **Sandbox**: research + gap list in
+    `doc/01_research/app/browser/browser_sandbox_model_research_2026-08-15.md`;
+    page-script node natives (`require("process")`/`os`, `process.exit/cwd`)
+    are now capability-gated (default DENY in `JsRuntime.new_browser`).

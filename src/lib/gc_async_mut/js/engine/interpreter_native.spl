@@ -143,10 +143,19 @@ impl JsInterpreter:
         if native_id == NATIVE_NODE_OS_ENDIANNESS:
             return os_endianness(arg_vals)
         if native_id == NATIVE_NODE_PROCESS_CWD:
+            # Capability gate: host-granted node compat only. Page script
+            # (untrusted, node_compat_enabled=false) must not see the cwd.
+            if not self.node_compat_enabled:
+                return JsValue.Undefined
             return process_cwd(arg_vals)
         if native_id == NATIVE_NODE_PROCESS_NEXT_TICK:
+            if not self.node_compat_enabled:
+                return JsValue.Undefined
             return process_nextTick(arg_vals)
         if native_id == NATIVE_NODE_PROCESS_EXIT:
+            # Capability gate: page script must never terminate the host.
+            if not self.node_compat_enabled:
+                return JsValue.Undefined
             return process_exit(arg_vals)
         dispatch_native(native_id, arg_vals, self.logger)
 
@@ -170,6 +179,11 @@ impl JsInterpreter:
             i = i - 1
         if canonical == "":
             return self._native_node_require_cached(cache_key, self._native_node_denied_module(specifier))
+        # Capability gate: without host-granted node compat, the host-facing
+        # modules are denied exactly like unknown modules (default DENY for
+        # untrusted page script; trusted embedders keep node_compat_enabled).
+        if not self.node_compat_enabled and (canonical == "process" or canonical == "os"):
+            return self._native_node_denied_module(specifier)
         var module_value = JsValue.Undefined
         if canonical == "path":
             module_value = self._native_node_path_module()

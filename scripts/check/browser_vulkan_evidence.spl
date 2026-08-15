@@ -1,0 +1,90 @@
+# Browser -> Vulkan (lavapipe) headless evidence.
+#
+# Renders a simple HTML page through the browser's render lane
+# (src/app/browser/render_lane.spl -> [u32] pixels), presents that pixel
+# array through the engine2d VulkanBackend (draw_image on a real Vulkan
+# device — lavapipe headless in the container), reads the framebuffer BACK
+# from the device, verifies device provenance and pixel fidelity, and
+# writes the readback as a PPM evidence image.
+#
+# Output protocol (stdout, key=value):
+#   lane_selected=<live|blink>
+#   page_first=<u32> page_len=<n>   (browser-lane output diagnostic)
+#   vulkan_init=<0|1>
+#   readback_source=<device_readback|...>
+#   backend_handle=<i64> device_identity=<i64>
+#   pixels_total=<n> pixels_nonbg=<n> pixels_match=<0|1>
+#   evidence_ppm=<path>
+#   verdict=<ok|vulkan_unavailable|mismatch|error:...>
+use app.browser.render_lane.{browser_render_lane_selected, browser_render_html_to_pixel_array}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.io_runtime.{dir_create_all, file_write}
+
+val W = 64
+val H = 32
+val HTML = "<html><body><style>body { background-color: white; width: 64px; height: 32px; } div { width: 32px; height: 16px; background-color: red; }</style><div></div></body></html>"
+
+fn write_ppm(path: text, w: i64, h: i64, pixels: [u32]):
+    var out = "P3\n{w} {h}\n255\n"
+    var i = 0
+    while i < w * h:
+        val p = pixels[i] as i64
+        out = out + "{(p / 65536) % 256} {(p / 256) % 256} {p % 256}\n"
+        i = i + 1
+    file_write(path, out)
+
+fn main():
+    print("lane_selected={browser_render_lane_selected()}")
+    val page = browser_render_html_to_pixel_array(HTML, W, H)
+    print("page_first={page[0]} page_len={page.len()}")
+    if page.len() != W * H:
+        print("verdict=error:browser_lane_pixel_count_{page.len()}")
+        return
+    var b = VulkanBackend.create()
+    if not b.init(W as i32, H as i32):
+        print("vulkan_init=0")
+        print("verdict=vulkan_unavailable last_error={b.last_error}")
+        return
+    print("vulkan_init=1")
+    b.draw_image(0, 0, W as i32, H as i32, page)
+    val rb = b.read_pixels_with_source()
+    print("readback_source={rb.source}")
+    print("backend_handle={rb.backend_handle}")
+    print("device_identity={rb.device_identity}")
+    if rb.source != "device_readback":
+        b.shutdown()
+        print("verdict=error:readback_source_{rb.source}")
+        return
+    # fidelity: device readback must equal the browser's rendered pixels (RGB)
+    # foreground = the red div's pixels — any non-white pixel. Not an exact
+    # 0xFF0000 match: the live lane's palette paints `red` as 0xDC3232
+    # (measured 2026-08-15), and this check gates "did the page paint a
+    # foreground + did the device return it", not a palette value. The page
+    # must contain BOTH foreground and white background so an all-one-color
+    # frame can never pass.
+    var nonbg = 0
+    var other = 0
+    var mismatch = 0
+    var i = 0
+    while i < W * H:
+        if (rb.pixels[i] & 0xFFFFFFu32) != (page[i] & 0xFFFFFFu32):
+            mismatch = mismatch + 1
+        if (page[i] & 0xFFFFFFu32) != 0xFFFFFFu32:
+            nonbg = nonbg + 1
+        else:
+            other = other + 1
+        i = i + 1
+    b.shutdown()
+    print("pixels_total={W * H}")
+    print("pixels_nonbg={nonbg}")
+    print("pixels_match={if mismatch == 0: 1 else: 0}")
+    dir_create_all("build/browser-vulkan-docker")
+    val ppm = "build/browser-vulkan-docker/browser_vulkan_readback.ppm"
+    write_ppm(ppm, W, H, rb.pixels)
+    print("evidence_ppm={ppm}")
+    if nonbg == 0 or other == 0:
+        print("verdict=error:page_not_two_tone nonred={other}")
+    elif mismatch != 0:
+        print("verdict=mismatch count={mismatch}")
+    else:
+        print("verdict=ok")

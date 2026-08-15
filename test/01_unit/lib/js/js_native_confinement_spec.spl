@@ -1,0 +1,64 @@
+# JS engine native confinement: node host capabilities (require("process"),
+# require("os"), process.exit/cwd) are a host-granted capability, DENIED by
+# default for untrusted page script (JsRuntime.new_browser) and still available
+# to trusted embedders (default JsRuntime with node compat enabled).
+# See doc/01_research/app/browser/browser_sandbox_model_research_2026-08-15.md
+use std.spec.*
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.nogc_sync_mut.js.engine.runtime.{JsRuntime, js_runtime_with_default_logger}
+use std.js.types.js_types.{JsValue}
+
+fn untrusted_runtime() -> JsRuntime:
+    JsRuntime.new_browser(Logger(name: "confinement-spec", level: LogLevel.Error))
+
+fn trusted_runtime() -> JsRuntime:
+    js_runtime_with_default_logger("confinement-spec-trusted")
+
+fn probe(rt: JsRuntime, src: text) -> text:
+    var runtime = rt
+    match runtime.eval(src):
+        Ok(v):
+            match v:
+                JsValue.String(v: s): s
+                JsValue.Number(v: n): n.to_text()
+                JsValue.Boolean(v: b): b.to_text()
+                JsValue.Undefined: "<undefined>"
+                _: "<other>"
+        Err(e):
+            "<err>"
+
+describe "JS native confinement (node capability gating)":
+    it "denies require('process') to untrusted page script":
+        step("page script asks for the process module")
+        val verdict = probe(untrusted_runtime(), "typeof require('process').exit")
+        step("no callable exit surfaces from the module")
+        expect(verdict).to_not_equal("function")
+
+    it "denies require('os') to untrusted page script":
+        step("page script asks for the os module")
+        val verdict = probe(untrusted_runtime(), "typeof require('os').platform")
+        step("no callable platform probe surfaces from the module")
+        expect(verdict).to_not_equal("function")
+
+    it "keeps process.exit uninvocable from untrusted page script":
+        step("page script tries to terminate the host, then reports back")
+        val exit_type = probe(untrusted_runtime(), "typeof process.exit")
+        expect(exit_type).to_not_equal("function")
+        step("a direct exit call errors instead of terminating the host")
+        val survived = probe(untrusted_runtime(), "process.exit(3)")
+        expect(survived).to_equal("<err>")
+
+    it "hides the host cwd from untrusted page script":
+        step("page script tries to read the working directory")
+        val cwd_type = probe(untrusted_runtime(), "typeof process.cwd")
+        expect(cwd_type).to_not_equal("function")
+
+    it "still serves require('os') to a trusted embedder":
+        step("trusted embedder (node compat granted) asks for os")
+        val verdict = probe(trusted_runtime(), "typeof require('os').platform")
+        expect(verdict).to_equal("function")
+
+    it "still serves require('process') to a trusted embedder":
+        step("trusted embedder asks for process")
+        val verdict = probe(trusted_runtime(), "typeof require('process')")
+        expect(verdict).to_equal("object")

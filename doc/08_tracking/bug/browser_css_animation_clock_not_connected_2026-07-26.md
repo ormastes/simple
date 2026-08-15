@@ -64,3 +64,29 @@ The production fixture and integration spec now require distinct
 start/mid/end frames from CSS `@keyframes` without JavaScript mutating the
 animated property. They cannot be executed until the separately recorded
 target compiler build failure is fixed; no runtime PASS is claimed.
+
+## Update 2026-08-15 — clock wired end-to-end; JS function-declaration parser gap fixed
+
+The session clock now demonstrably drives rAF and CSS keyframes:
+
+- `app.browser.render_adapter.browser_engine_animated_frames` renders N frames
+  from ONE `BrowserSession`, calling `advance_time(i * frame_ms)` between
+  renders; `app.browser.gui_window.run_browser_window_gui_frames` presents them.
+- Two blocking defects were found and fixed while proving it:
+  1. `src/lib/nogc_sync_mut/js/engine/parser.spl` — the subset parser had NO
+     `function name() {}` DECLARATION arm (only expressions), so every named
+     rAF/timer loop silently never existed (`typeof loop == "undefined"`), and
+     a declaration followed without `;` swallowed the next statement
+     (`}setTimeout(loop, 5)` was discarded). Both fixed; load-armed timers and
+     chained rAF loops now fire (probe: ticks=2 across 2 advances).
+  2. `src/lib/nogc_sync_mut/js/engine/runtime.spl` `drain_due_timers` — chained
+     field-receiver call lost the queue pop under the interpreter; now
+     local-copy-store-back.
+- Gate: `test/01_unit/browser_engine/browser_animation_clock_spec.spl` — the
+  rAF example is GREEN; the CSS-pixels example exposed a further interpreter
+  landmine (`invalid assignment: cannot assign field on non-object value`)
+  inside the animation-time engine2d render chain
+  (`simple_web_layout_engine2d_fast.spl` execution path) — fix in progress in
+  the same session; spec stays RED on that example until it lands.
+
+Remaining open: target-binary (native) evidence; non-hosted browser surfaces.

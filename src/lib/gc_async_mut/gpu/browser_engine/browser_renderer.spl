@@ -1,4 +1,5 @@
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{
     simple_web_engine2d_render_html_pixels,
     simple_web_engine2d_render_html_pixels_at_time,
@@ -61,19 +62,41 @@ class BrowserRenderer:
     width: i32
     height: i32
     backend_value: text
+    # Why the requested backend was not selected. Empty when backend_value is
+    # exactly what the caller asked for (honest provenance — a "software"
+    # backend_value with a non-empty reason means a GPU request fell back).
+    backend_fallback: text
     engine: bool?
 
 impl BrowserRenderer:
     static fn create(width: i32, height: i32) -> BrowserRenderer:
-        BrowserRenderer(width: width, height: height, backend_value: "software", engine: nil)
+        BrowserRenderer(width: width, height: height, backend_value: "software", backend_fallback: "", engine: nil)
 
     static fn create_with_backend(width: i32, height: i32, backend_name: text) -> BrowserRenderer:
         if backend_name == "software" or backend_name == "cpu" or backend_name == "metal":
-            return BrowserRenderer(width: width, height: height, backend_value: backend_name, engine: true)
-        BrowserRenderer(width: width, height: height, backend_value: "software", engine: nil)
+            return BrowserRenderer(width: width, height: height, backend_value: backend_name, backend_fallback: "", engine: true)
+        if backend_name == "vulkan" or backend_name == "webgpu":
+            # Route through Engine2D's real name dispatch instead of silently
+            # degrading. Probe the requested backend for real; on success the
+            # renderer carries the ACTUAL initialized backend name, on failure
+            # it reports software WITH the reason — never "vulkan" over software.
+            val created = Engine2D.create_requested_backend(width, height, backend_name)
+            match created:
+                Ok(engine):
+                    val actual = engine.selected_backend_name
+                    engine.shutdown()
+                    return BrowserRenderer(width: width, height: height, backend_value: actual, backend_fallback: "", engine: true)
+                Err(reason):
+                    return BrowserRenderer(width: width, height: height, backend_value: "software", backend_fallback: "{backend_name} unavailable: {reason}", engine: nil)
+        BrowserRenderer(width: width, height: height, backend_value: "software", backend_fallback: "unknown backend '{backend_name}'", engine: nil)
 
     fn backend_name() -> text:
         self.backend_value
+
+    fn backend_fallback_reason() -> text:
+        """Empty when the requested backend actually initialized; otherwise
+        the honest reason this renderer runs on software instead."""
+        self.backend_fallback
 
     fn render_html(html: text) -> BeRenderResult:
         self.render_html_to_pixels(html)
@@ -231,7 +254,10 @@ fn browser_renderer_html_string_to_dom(html: text) -> BeDomNode:
     root
 
 pub fn render_html_to_pixels_with_viewport(html: text, width: i32, height: i32) -> BeRenderResult:
-    BrowserRenderer.create(width, height).render_html_to_pixels(html)
+    # Split rather than chained: the seed interpreter cannot dispatch a method
+    # on a static-call result in a nested call context.
+    val renderer = BrowserRenderer.create(width, height)
+    renderer.render_html_to_pixels(html)
 
 pub fn render_html_to_pixels_with_viewport_with_images(
     html: text, width: i32, height: i32,

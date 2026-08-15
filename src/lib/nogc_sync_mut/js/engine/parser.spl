@@ -12,7 +12,20 @@ fn js_parse_program_subset(source: text) -> [JsStatement]:
     val parts = _js_parser_split_top_level(source, ";")
     var i = 0
     while i < parts.len():
-        val stmt = parts.get(i).trim()
+        var stmt = parts.get(i).trim()
+        # A function DECLARATION needs no trailing `;`, so the `;`-split can
+        # merge it with the statement that follows its closing brace
+        # (`function f() { ... }setTimeout(f, 5)`). Peel declarations off the
+        # front of the part until no leading declaration remains.
+        while stmt.starts_with("function ") or stmt.starts_with("function("):
+            val body_start = _js_parser_find_function_body_start(stmt, 0)
+            if body_start < 0:
+                break
+            val body_end = _js_parser_matching_brace(stmt, body_start)
+            if body_end < 0 or body_end + 1 >= stmt.len():
+                break
+            statements.push(_js_parser_statement(stmt.slice(0, body_end + 1)))
+            stmt = stmt.slice(body_end + 1, stmt.len()).trim()
         if stmt != "":
             statements.push(_js_parser_statement(stmt))
         i = i + 1
@@ -25,6 +38,21 @@ fn _js_parser_statement(stmt: text) -> JsStatement:
         if eq >= 0:
             return JsStatement.VarDecl(body.slice(0, eq).trim(), _js_parser_expression(body.slice(eq + 1, body.len())))
         return JsStatement.VarDecl(body, JsExpression.Literal(value: JsValue.Undefined))
+    if stmt.starts_with("function ") or stmt.starts_with("function("):
+        # Function DECLARATION: `function name(a) { ... }`. Desugar to
+        # `var name = function(a) { ... }` — _js_parser_function_expression
+        # already skips the optional name before the parameter list. Without
+        # this arm the declaration fell through to expression parsing, the
+        # binding never existed, and every page relying on a named callback
+        # (setTimeout/rAF loops) silently did nothing.
+        val name_start = _js_parser_skip_spaces(stmt, 8)
+        val name_end = _js_parser_identifier_end(stmt, name_start)
+        if name_end > name_start:
+            return JsStatement.VarDecl(
+                stmt.slice(name_start, name_end),
+                _js_parser_function_expression(stmt, 0)
+            )
+        return JsStatement.ExprStmt(_js_parser_function_expression(stmt, 0))
     if stmt.starts_with("return "):
         return JsStatement.Return(value: _js_parser_expression(stmt.slice(7, stmt.len()).trim()))
     if stmt == "return":

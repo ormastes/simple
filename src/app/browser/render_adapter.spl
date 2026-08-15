@@ -19,6 +19,9 @@ use app.ui.render.html.{html_page, html_escape, css_dark_theme, css_light_theme,
 use app.ui.render.ansi.{colorize, BOLD, DIM, CYAN, GREEN}
 use app.ui.render.css.{css_for_components}
 use app.browser.render_lane.{browser_render_html_to_pixel_array}
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_loading.*
 
 val SIMPLE_BROWSER_HOME_URL: text = "simple://home"
 val SIMPLE_BROWSER_TITLE: text = "Simple Browser"
@@ -132,7 +135,65 @@ pub fn browser_engine_pixels_at(url: text, width: i32, height: i32) -> [u32]:
     doc/03_plan/ui/rendering/blink_wiring_plan.md) rather than calling the live
     engine directly, so the lane is selectable by flag. The flag defaults to
     the live lane, so this call renders exactly as it did before."""
-    browser_render_html_to_pixel_array(browser_page_document_html(url), width, height)
+    val html = browser_page_document_html(url)
+    if browser_document_needs_session(html):
+        return browser_session_pixels_at_time(url, html, width, height, 0)
+    browser_render_html_to_pixel_array(html, width, height)
+
+pub fn browser_document_needs_session(html: text) -> bool:
+    """True when the document carries <script> or CSS @keyframes content, so
+    the render must route through BrowserSession (script execution + the
+    session-owned monotonic animation clock) instead of the static lane."""
+    val lo = html.lower()
+    lo.contains("<script") or lo.contains("@keyframes")
+
+pub fn browser_session_pixels_at_time(
+    url: text, html: text, width: i32, height: i32, time_ms: i64
+) -> [u32]:
+    """Render one frame through BrowserSession: open_html executes the page's
+    inline scripts (JS / text-simple / wasm validation) against the live DOM,
+    advance_time drives the session monotonic clock (JS timers, rAF, and CSS
+    keyframe sampling share it), and render_to_pixels paints the post-script
+    DOM at that time. This is the production wiring for
+    doc/08_tracking/bug/browser_script_execution_not_wired_2026-05-10.md and
+    browser_css_animation_clock_not_connected_2026-07-26.md. Falls back to
+    the static lane if the session refuses the document."""
+    var session = BrowserSession.new()
+    match session.open_html(url, html):
+        Ok(_):
+            if time_ms > 0:
+                val _ = session.advance_time(time_ms)
+            session.render_to_pixels(width, height).pixel_data
+        Err(_):
+            browser_render_html_to_pixel_array(html, width, height)
+
+pub fn browser_engine_document_is_animated(url: text) -> bool:
+    """True when the loaded page schedules successive frames (CSS @keyframes
+    or a requestAnimationFrame script), so the GUI window should present the
+    pre-rendered animated frame set instead of one static frame."""
+    val lo = browser_page_document_html(url).lower()
+    lo.contains("@keyframes") or lo.contains("requestanimationframe")
+
+pub fn browser_engine_animated_frames(
+    url: text, width: i32, height: i32, frame_count: i64, frame_ms: i64
+) -> [[u32]]:
+    """Pre-render successive frames of a scripted/animated page by advancing
+    ONE session's clock between renders. Rendering stays in the caller's
+    call chain (never inside gui_window.spl — see its docstring for the
+    tree-walk fallback trap); gui_window's frame loop only presents these."""
+    val html = browser_page_document_html(url)
+    var frames: [[u32]] = []
+    var session = BrowserSession.new()
+    match session.open_html(url, html):
+        Ok(_):
+            var i: i64 = 0
+            while i < frame_count:
+                val _ = session.advance_time(i * frame_ms)
+                frames.push(session.render_to_pixels(width, height).pixel_data)
+                i = i + 1
+        Err(_):
+            frames.push(browser_render_html_to_pixel_array(html, width, height))
+    frames
 
 fn browser_engine_pixels(url: text) -> [u32]:
     browser_engine_pixels_at(url, SIMPLE_BROWSER_ENGINE_VIEWPORT_W, SIMPLE_BROWSER_ENGINE_VIEWPORT_H)

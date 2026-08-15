@@ -38,7 +38,7 @@ use std.gpu.engine2d.backend_cpu.{CpuBackend}
 use std.gpu.engine2d.backend_cuda.{CudaBackend}
 use std.gpu.engine2d.backend_cuda_font_ptx.{FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256, FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION, cuda_font_atlas_composite_ptx, cuda_font_atlas_composite_ptx_trusted}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CUDA_FONT_PTX_MAX_BYTES}
-use std.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanFrameReceipt}
+use std.gpu.engine2d.backend_vulkan.{VulkanBackend, vulkan_submitted_framebuffer_handle, vulkan_submitted_device_identity, vulkan_submitted_generation, vulkan_framebuffer_ownership_handle, vulkan_cancel_submitted_present_source}
 use std.gpu.engine2d.backend_vulkan_font
 use std.gpu.engine2d.backend_vulkan_font_types.{VulkanFontCompositeEvidence}
 use std.gpu.engine2d.helpers_text.{text_aa_blit_buffer}
@@ -275,17 +275,24 @@ class Engine2D with DrawIrRenderTarget:
 
     me ensure_font_renderer():
         if self.font_owner.active.len() == 0:
-            self.font_owner.active = [FontRenderer.new()]
+            # Constructor rebuild, not `self.font_owner.active = ...`: a
+            # chained field assignment fails under the tree-walk interpreter
+            # when the intermediate receiver is erased ("cannot assign field
+            # on non-object value"), which happens when this engine came back
+            # through an aggregate result field (animation render path).
+            self.font_owner = Engine2DFontOwner(active: [FontRenderer.new()])
 
     me install_font_renderer(renderer: FontRenderer):
-        self.font_owner.active = [renderer]
+        # Constructor rebuild — see ensure_font_renderer above.
+        self.font_owner = Engine2DFontOwner(active: [renderer])
 
     me selected_font_identity() -> text:
         if self.font_owner.active.len() == 0:
             return ""
         val fonts: FontRenderer = self.font_owner.active[0]
         val identity = fonts.current_font_identity()
-        self.font_owner.active[0] = fonts
+        # Constructor rebuild — see ensure_font_renderer above.
+        self.font_owner = Engine2DFontOwner(active: [fonts])
         identity
 
     fn font_execution_attempts() -> [text]: self.last_font_execution_attempts
@@ -712,55 +719,6 @@ class Engine2D with DrawIrRenderTarget:
                 selected_backend_name: "vulkan"))
         Err("backend unavailable: vulkan")
 
-    static fn create_vulkan_window_present(width: i32, height: i32, vsync: bool = true) -> Result<Engine2D, text>:
-        """Create one same-device Vulkan compute + visible-window session.
-
-        Surface creation must precede device selection, so this cannot be
-        retrofitted onto an Engine2D created by `create_with_backend`. The
-        returned engine owns both the device framebuffer and swapchain.
-        """
-        var vulkan = VulkanBackend.create()
-        if vulkan.init_window_present(width, height, vsync):
-            vulkan.enable_frame_batching()
-            return Ok(Engine2D(
-                backend: vulkan, capability: backend_capability_default(),
-                baremetal_backend: nil, virtio_gpu_backend: nil,
-                cuda_backend: nil, vulkan_backend: Some(vulkan),
-                vulkan_font_state_unknown: false,
-                last_vulkan_font_evidence: nil, metal_backend: nil,
-                opencl_backend: nil, rocm_backend: nil,
-                software_backend: nil, font_owner: Engine2DFontOwner.new(),
-                last_font_execution_attempts: [],
-                last_font_execution_target: "",
-                w: width, h: height, pacing: make_frame_pacing_counters(),
-                selected_backend_name: "vulkan"))
-        Err(if vulkan.last_error == "":
-            "backend unavailable: vulkan window presentation"
-        else:
-            vulkan.last_error)
-
-    static fn create_vulkan_external_window_present(kind: i64, display: i64, window: i64, width: i32, height: i32, vsync: bool = true) -> Result<Engine2D, text>:
-        """Create Vulkan compute/swapchain ownership for an existing window."""
-        var vulkan = VulkanBackend.create()
-        if vulkan.init_external_window_present(
-            kind, display, window, width, height, vsync):
-            vulkan.enable_frame_batching()
-            return Ok(Engine2D(
-                backend: vulkan, capability: backend_capability_default(),
-                baremetal_backend: nil, virtio_gpu_backend: nil,
-                cuda_backend: nil, vulkan_backend: Some(vulkan),
-                vulkan_font_state_unknown: false,
-                last_vulkan_font_evidence: nil, metal_backend: nil,
-                opencl_backend: nil, rocm_backend: nil,
-                software_backend: nil, font_owner: Engine2DFontOwner.new(),
-                last_font_execution_attempts: [], last_font_execution_target: "",
-                w: width, h: height, pacing: make_frame_pacing_counters(),
-                selected_backend_name: "vulkan"))
-        Err(if vulkan.last_error == "":
-            "backend unavailable: external Vulkan window presentation"
-        else:
-            vulkan.last_error)
-
     static fn create_with_baremetal_backend(backend: BaremetalBackend) -> Engine2D:
         """Create engine with a pre-initialized BaremetalBackend.
 
@@ -996,7 +954,7 @@ class Engine2D with DrawIrRenderTarget:
         8x8 surface round-trips ALL THREE of the render lane's paint
         primitives — a solid fill, a CLIPPED fill, and a residual draw_image
         blit — with device provenance (source device_readback or
-        host_cache_after_device_present/host_cache_after_device_copy, and a backend handle or device
+        host_cache_after_device_present, and a backend handle or device
         identity > 0). CPU lanes pass by definition.
 
         The clip and blit halves are load-bearing: a lane that serves plain
@@ -1061,7 +1019,7 @@ class Engine2D with DrawIrRenderTarget:
         b.present()
         val rb = b.read_pixels_with_source()
         engine.shutdown()
-        if rb.source != "device_readback" and rb.source != "host_cache_after_device_present" and rb.source != "host_cache_after_device_copy":
+        if rb.source != "device_readback" and rb.source != "host_cache_after_device_present":
             return BackendProbeResult.failed(canon, "readback_unproven source=" + rb.source)
         if rb.backend_handle <= 0 and rb.device_identity <= 0:
             return BackendProbeResult.failed(canon, "readback_unproven handle=0 source=" + rb.source)
@@ -1206,17 +1164,42 @@ class Engine2D with DrawIrRenderTarget:
             return vulkan.cpu_fallback_reason
         ""
 
-    fn vulkan_present_readback_bytes() -> i64:
-        """Bytes copied device-to-host by the latest Vulkan present action."""
-        if val Some(vulkan) = self.vulkan_backend:
-            return vulkan.present_readback_bytes
+    fn vulkan_framebuffer_handle() -> i64:
+        """Return a fenced Vulkan framebuffer handle for direct presentation.
+
+        Zero is the fail-closed result for CPU fallback, poisoned/unknown
+        completion, or an unsubmitted batch.
+        """
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            return vulkan_submitted_framebuffer_handle(vulkan)
         0
 
-    fn vulkan_device_finalize_no_readback_count() -> i64:
-        """Completed compute-frame finalizers that performed no host copy."""
-        if val Some(vulkan) = self.vulkan_backend:
-            return vulkan.device_finalize_no_readback_count
+    fn vulkan_ownership_framebuffer_handle() -> i64:
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            return vulkan_framebuffer_ownership_handle(vulkan)
         0
+
+    fn vulkan_device_identity() -> i64:
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            return vulkan_submitted_device_identity(vulkan)
+        0
+
+    fn vulkan_submission_generation() -> i64:
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            return vulkan_submitted_generation(vulkan)
+        0
+
+    me cancel_vulkan_present_source(framebuffer: i64, receipt: i64) -> bool:
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            val cancelled = vulkan_cancel_submitted_present_source(
+                vulkan, framebuffer, receipt)
+            if cancelled:
+                vulkan.fenced_submission_generation = 0
+                vulkan.submission_generation = 0
+            self.vulkan_backend = Some(vulkan)
+            self.backend = vulkan
+            return cancelled
+        false
 
     me width() -> i32:
         self.w
@@ -2832,53 +2815,6 @@ class Engine2D with DrawIrRenderTarget:
         else:
             self.backend.present()
 
-    me stage_present_damage(rects: [i64]) -> bool:
-        """Stage exact out-of-band damage on a retained Vulkan surface."""
-        if val Some(vulkan) = self._vulkan_primitive_target():
-            val accepted = vulkan.stage_present_damage(rects)
-            self.vulkan_backend = Some(vulkan)
-            self.backend = vulkan
-            return accepted
-        false
-
-    me finalize_compute_frame_no_readback() -> bool:
-        """Finalize a Vulkan storage-buffer frame with no host transfer.
-
-        Returns false for non-Vulkan backends so callers can use their normal
-        present path. This is not evidence of swapchain/device presentation.
-        """
-        if val Some(vulkan) = self._vulkan_primitive_target():
-            val ok = vulkan.finalize_compute_frame_no_readback()
-            self.vulkan_backend = Some(vulkan)
-            self.backend = vulkan
-            return ok
-        false
-
-    me present_window_device() -> bool:
-        """Present the retained Vulkan framebuffer to its visible swapchain.
-
-        This never aliases the legacy `present()` host-cache refresh. False
-        means this engine does not own a valid same-device window surface or
-        the native presentation did not complete.
-        """
-        if val Some(vulkan) = self._vulkan_primitive_target():
-            val ok = vulkan.present_window_device()
-            self.vulkan_backend = Some(vulkan)
-            self.backend = vulkan
-            return ok
-        false
-
-    fn latest_vulkan_frame_receipt() -> VulkanFrameReceipt?:
-        """Return the Vulkan frame receipt without fabricating one for CPU."""
-        if val Some(vulkan) = self._vulkan_primitive_target():
-            return Some(vulkan.latest_frame_receipt())
-        nil
-
-    fn window_present_enabled() -> bool:
-        if val Some(vulkan) = self._vulkan_primitive_target():
-            return vulkan.window_present_enabled()
-        false
-
     me submit_batch() -> bool:
         """Flush any backend-buffered draw calls for this frame into one
         fenced submission. No-op (returns true) on backends that dispatch
@@ -2900,6 +2836,15 @@ class Engine2D with DrawIrRenderTarget:
             return ok
         else:
             return self.backend.submit_batch()
+
+    me submit_batch_for_present() -> bool:
+        """Flush Vulkan with an exclusive one-shot presenter-read receipt."""
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            val ok = vulkan.submit_batch_for_present()
+            self.vulkan_backend = Some(vulkan)
+            self.backend = vulkan
+            return ok
+        false
 
     me read_pixels() -> [u32]:
         # Checksum-free readback: delegate straight to the backend's read_pixels
@@ -2929,20 +2874,6 @@ class Engine2D with DrawIrRenderTarget:
             return pixels
         else:
             return self.backend.read_pixels()
-
-    me read_pixels_damaged(max_rects: i32) -> [u32]:
-        """Borrow a retained mirror when the selected backend supports it.
-
-        CPU and CPU-SIMD route through their single owned CpuBackend instance;
-        other backends use RenderBackend's exact full-read default. This API is
-        intentionally separate from read_pixels()/read_pixels_with_source(),
-        whose callers receive a snapshot suitable for independent retention.
-        """
-        self.backend.read_pixels_damaged(max_rects)
-
-    me invalidate_damage_mirror():
-        """Invalidate a retained CPU mirror after an out-of-band full draw."""
-        self.backend.invalidate_damage_mirror()
 
     me read_pixels_with_source() -> Engine2DReadback:
         """Read the framebuffer contents as a flat u32 array."""

@@ -245,9 +245,11 @@ class JsRuntime:
         JsRuntime.create(logger)
 
     static fn new_browser(logger: Logger) -> JsRuntime:
-        var runtime = JsRuntime.create(logger)
-        runtime.interpreter.node_compat_enabled = false
-        runtime
+        # Assign on a local before wrapping: chained field assignment
+        # (runtime.interpreter.x = ...) fails under the interpreter.
+        var interpreter = JsInterpreter.new(logger)
+        interpreter.node_compat_enabled = false
+        JsRuntime(interpreter: interpreter)
 
     static fn create(logger: Logger) -> JsRuntime:
         var interpreter = JsInterpreter.new(logger)
@@ -1110,7 +1112,13 @@ class JsRuntime:
         self.interpreter._define_global_native(name, native_id)
 
     me drain_due_timers(current_time_ms: i64) -> i64:
-        self.interpreter.drain_due_timers(current_time_ms)
+        # Local-then-store-back: calling a mutating method through the
+        # self.interpreter field receiver loses the mutation (pending timer
+        # queue pop) under the tree-walk interpreter.
+        var interpreter = self.interpreter
+        val ran = interpreter.drain_due_timers(current_time_ms)
+        self.interpreter = interpreter
+        ran
 
     me drain_pending_microtasks() -> bool:
         self.interpreter.drain_pending_microtasks()

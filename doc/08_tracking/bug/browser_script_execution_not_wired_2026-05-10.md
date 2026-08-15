@@ -52,3 +52,13 @@ test coverage is a follow-up task.
 ## Related
 - `script_runner.spl` f-string parse bug: fixed (commit a3c, 2026-05-10)
 - Color commonization blocked: `browser_color_commonization_blocked_2026-05-10.md`
+
+## Update 2026-08-15 — JS + Simple-script execution gated by spec
+
+`test/01_unit/browser_engine/browser_script_execution_spec.spl` (4/4 GREEN)
+now proves through `BrowserSession`: JS DOM mutation visible in rendered
+output, inline style mutation, `text/simple` script body mutation, and the
+explicit unsupported report for inline wasm `<script>` blocks. ScriptHost /
+SimpleScriptExecutor DOM binding required the local-copy-store-back fix in
+`script/script_host.spl` and `script/simple_script.spl` (chained field
+assignment on `self._runner` was silently lost under the interpreter).
