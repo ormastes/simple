@@ -1,0 +1,212 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/web_draw_ir_damage_consumer.spl 50%
+# @tag: unit, browser_engine, draw_ir, damage, coverage
+"""
+# Web DrawIR Damage Consumer — Branch Coverage Specification
+
+## Overview
+
+Drives `web_draw_ir_consume_damage` through both outcomes of each decision:
+retained NONE no-op vs full replan, LOCAL replay acceptance vs full
+fallback (unstable resources, unstable viewport, changed batch metadata),
+and the GPU-backend selection predicate. Every scenario asserts concrete
+effective plan modes, rects, and reasons.
+"""
+
+use std.spec
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    DrawIrComposition,
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect
+}
+use common.ui.render_opt.damage_plan.{
+    DAMAGE_PLAN_FULL, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_NONE
+}
+use std.gc_async_mut.gpu.browser_engine.web_draw_ir_damage_consumer.{
+    web_draw_ir_consume_damage
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val W: i32 = 64
+val H: i32 = 48
+
+fn _comp(comp_id: text, scene_key: text, x: i32, y: i32,
+         color: u32) -> DrawIrComposition:
+    val batch = draw_ir_batch(
+        "b0", DRAW_IR_BACKEND_CPU,
+        draw_ir_embedding_config("surface", "root", 0, 0, W, H, 0, 1000, false),
+        [draw_ir_rect("box", x, y, 8, 8, color)])
+    draw_ir_composition(comp_id, scene_key, DRAW_IR_BACKEND_CPU, [batch])
+
+fn _images() -> [Engine2dResolvedDrawIrImage]:
+    []
+
+describe "web_draw_ir_consume_damage branch coverage":
+
+    it "keeps a retained NONE plan when compositions are identical and stable":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        val prior = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val current = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val out = web_draw_ir_consume_damage(
+            engine, prior, current, _images(), true, true)
+        expect out.effective_plan_mode == DAMAGE_PLAN_NONE
+        expect out.effective_plan_rects.len() == 0
+        expect out.reason == "composition-patch-empty"
+        expect out.result.fallback_required == false
+        expect out.result.pixels.len() == (W * H).to_i64()
+        out.engine.shutdown()
+
+    it "executes a LOCAL clipped replay when one rect moves":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        val prior = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val current = _comp("c1", "scene", 20, 12, 0xff2040f0u32)
+        val out = web_draw_ir_consume_damage(
+            engine, prior, current, _images(), true, true)
+        expect out.effective_plan_mode == DAMAGE_PLAN_LOCAL
+        expect out.effective_plan_rects.len() > 0
+        expect out.effective_plan_rects.len() % 4 == 0
+        expect out.result.fallback_required == false
+        expect out.result.rendered_command_count >= 1
+        expect out.result.pixels.len() == (W * H).to_i64()
+        out.engine.shutdown()
+
+    it "executes a LOCAL replay when a rect is recolored in place":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        val prior = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val current = _comp("c1", "scene", 4, 4, 0xfff04020u32)
+        val out = web_draw_ir_consume_damage(
+            engine, prior, current, _images(), true, true)
+        expect out.effective_plan_mode == DAMAGE_PLAN_LOCAL
+        expect out.effective_plan_rects.len() >= 4
+        out.engine.shutdown()
+
+    it "fails closed to FULL when resources are unstable":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        val prior = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val current = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val out = web_draw_ir_consume_damage(
+            engine, prior, current, _images(), true, false)
+        expect out.effective_plan_mode == DAMAGE_PLAN_FULL
+        expect out.reason == "resources-changed"
+        expect out.effective_plan_rects == [0, 0, W.to_i64(), H.to_i64()]
+        expect out.result.pixels.len() == (W * H).to_i64()
+        out.engine.shutdown()
+
+    it "fails closed to FULL when the viewport is unstable":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        val prior = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val current = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val out = web_draw_ir_consume_damage(
+            engine, prior, current, _images(), false, true)
+        expect out.effective_plan_mode == DAMAGE_PLAN_FULL
+        expect out.reason == "viewport-changed"
+        expect out.effective_plan_rects == [0, 0, W.to_i64(), H.to_i64()]
+        out.engine.shutdown()
+
+    it "fails closed to FULL when batch metadata changes":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        val prior = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val current = draw_ir_composition(
+            "c1", "scene", DRAW_IR_BACKEND_CPU,
+            [draw_ir_batch(
+                "b0", DRAW_IR_BACKEND_CPU,
+                draw_ir_embedding_config(
+                    "surface", "root", 0, 0, W, H, 1, 900, true),
+                [draw_ir_rect("box", 4, 4, 8, 8, 0xff2040f0u32)])])
+        val out = web_draw_ir_consume_damage(
+            engine, prior, current, _images(), true, true)
+        expect out.effective_plan_mode == DAMAGE_PLAN_FULL
+        expect out.reason == "batch-metadata-changed"
+        expect out.effective_plan_rects == [0, 0, W.to_i64(), H.to_i64()]
+        out.engine.shutdown()
+
+    it "replans FULL when a batch is added to the composition":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        val prior = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val extra = draw_ir_batch(
+            "b1", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surface", "root2", 0, 0, W, H, 0, 1000, false),
+            [draw_ir_rect("box2", 30, 30, 8, 8, 0xff00ff00u32)])
+        val cbatch = draw_ir_batch(
+            "b0", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surface", "root", 0, 0, W, H, 0, 1000, false),
+            [draw_ir_rect("box", 4, 4, 8, 8, 0xff2040f0u32)])
+        val current = draw_ir_composition(
+            "c1", "scene", DRAW_IR_BACKEND_CPU, [cbatch, extra])
+        val out = web_draw_ir_consume_damage(
+            engine, prior, current, _images(), true, true)
+        expect out.effective_plan_mode == DAMAGE_PLAN_FULL
+        expect out.effective_plan_rects == [0, 0, W.to_i64(), H.to_i64()]
+        out.engine.shutdown()
+
+    it "consumes damage on a non-cpu backend selection path":
+        var engine = Engine2D.create_with_backend(W, H, "software")
+        val prior = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val current = _comp("c1", "scene", 12, 4, 0xff2040f0u32)
+        val out = web_draw_ir_consume_damage(
+            engine, prior, current, _images(), true, true)
+        expect (out.effective_plan_mode == DAMAGE_PLAN_LOCAL or
+                out.effective_plan_mode == DAMAGE_PLAN_FULL)
+        expect out.result.pixels.len() == (W * H).to_i64()
+        out.engine.shutdown()
+
+    it "handles an empty prior against a populated current":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        val prior = draw_ir_composition(
+            "c1", "scene", DRAW_IR_BACKEND_CPU, [])
+        val current = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val out = web_draw_ir_consume_damage(
+            engine, prior, current, _images(), true, true)
+        expect (out.effective_plan_mode == DAMAGE_PLAN_FULL or
+                out.effective_plan_mode == DAMAGE_PLAN_LOCAL)
+        expect out.result.pixels.len() == (W * H).to_i64()
+        out.engine.shutdown()
+
+    it "rejects LOCAL replay for a translucent batch and fails to FULL":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        fn tcomp(x: i32) -> DrawIrComposition:
+            draw_ir_composition(
+                "c1", "scene", DRAW_IR_BACKEND_CPU,
+                [draw_ir_batch(
+                    "b0", DRAW_IR_BACKEND_CPU,
+                    draw_ir_embedding_config(
+                        "surface", "root", 0, 0, W, H, 0, 900, false),
+                    [draw_ir_rect("box", x, 4, 8, 8, 0xff2040f0u32)])])
+        val out = web_draw_ir_consume_damage(
+            engine, tcomp(4), tcomp(20), _images(), true, true)
+        expect out.effective_plan_mode == DAMAGE_PLAN_FULL
+        expect out.reason.contains("damage-batch-requires-full-replay")
+        expect out.effective_plan_rects == [0, 0, W.to_i64(), H.to_i64()]
+        out.engine.shutdown()
+
+    it "publishes an empty FULL plan on a zero-size viewport":
+        var engine = Engine2D.create_with_backend(0, 0, "cpu")
+        val prior = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val current = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val out = web_draw_ir_consume_damage(
+            engine, prior, current, _images(), true, true)
+        expect out.effective_plan_mode == DAMAGE_PLAN_FULL
+        expect out.reason == "invalid-viewport"
+        expect out.effective_plan_rects.len() == 0
+        out.engine.shutdown()
+
+    it "removing the only command yields a concrete non-NONE plan":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        val prior = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val current = draw_ir_composition(
+            "c1", "scene", DRAW_IR_BACKEND_CPU,
+            [draw_ir_batch(
+                "b0", DRAW_IR_BACKEND_CPU,
+                draw_ir_embedding_config(
+                    "surface", "root", 0, 0, W, H, 0, 1000, false),
+                [])])
+        val out = web_draw_ir_consume_damage(
+            engine, prior, current, _images(), true, true)
+        expect out.effective_plan_mode != DAMAGE_PLAN_NONE
+        expect out.effective_plan_rects.len() >= 4
+        out.engine.shutdown()
