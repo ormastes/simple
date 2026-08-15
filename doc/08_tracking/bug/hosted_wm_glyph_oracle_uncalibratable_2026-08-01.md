@@ -183,3 +183,19 @@ Proposal: alongside `GLYPH_RGB_SHA256`, pin the exact
 `linux_hosted_wm_live_window_font_identity` string captured at calibration
 time and fail on mismatch. This **strengthens** the gate; it does not
 relax it. Not applied unilaterally.
+
+## Triage 2026-08-15 (static, under Stage-4 resource lock)
+
+Blocker #4 (`JsValue.Symbol` used but not declared) appears RESOLVED at
+source level: `Symbol(id: i64)` is declared in
+`src/lib/common/js/types/js_types.spl:14`, and every `JsValue.Symbol` use in
+the tree (`common/js/builtins/object.spl:290`, `common/js/engine/runtime.spl`,
+`common/js/engine/vm_object_store.spl`) imports exactly that enum
+(`std.common.js.types.js_types`). The sibling `src/lib/js/types` and
+`src/lib/nogc_sync_mut/js/types` JsValue enums still lack Symbol but have no
+Symbol-using consumers. Blockers #3 (native-build timeout vs host load) and
+#5 (real glyph render to hash) remain environment/capture-bound and are
+exactly what the current resource lock forbids — deferred, not shortcut.
+Deferred verification: rerun
+`sh scripts/check/check-linux-hosted-wm-live-window-evidence.shs` on a quiet
+host after Stage-4 completes.
