@@ -573,3 +573,40 @@ with `# @cover src/lib/common/base_encoding.spl`, run as
 the 4/10 hand-checked against the artifact rows (exactly 4 rows have both
 counts > 0). Branch coverage is now measurable on the spipe/.spl runner
 path, with the executed-decisions denominator caveat above.
+
+## 2026-08-15 — coverage-branch verified on a real integration spec
+
+`SIMPLE_COVERAGE=1 ... bin/simple test test/02_integration/rendering/wm_api_vs_ir_pixel_parity_spec.spl --coverage --no-cache --no-cover-check` (Rust seed, load ~3):
+
+```
+Results: 2 total, 2 passed, 0 failed
+coverage: src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 13% (162/1170 lines)
+coverage-branch: src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 4% (2/46 decisions)
+coverage-branch: src/lib/gc_async_mut/gpu/engine2d/engine.spl 0% (0/39 decisions)
+```
+
+The reporter works end-to-end on arbitrary @cover-annotated specs. The
+"overall 80% branch coverage" target for wm/gui/web/engine2d is now
+MEASURABLE; reaching it is the campaign tracked by
+doc/03_plan/ui/testing/wm_gui_web_system_test_coverage_plan_2026-08-07.md and
+render_2d_vulkan_functional_coverage_plan_2026-08-07.md — this measurement is
+the honest baseline, not the target.
+
+## 2026-08-15 — per-layer 80% branch-coverage campaign results (parallel agents)
+
+Flagship-module decision coverage, all specs green, measured via the
+coverage-branch reporter landed earlier this session:
+
+| Layer | Module | Decisions | Verdict |
+|---|---|---|---|
+| 2d (draw path) | gpu/engine2d/draw_ir_adv.spl | 80% (124/155) | 22/22 |
+| gui | ui/render_opt/damage_plan.spl | 93% (15/16) | 34/34 |
+| gui | ui/render_opt/damage_tiles.spl | 95% (40/42) | (same spec) |
+| web | browser_engine/web_draw_ir_damage_consumer.spl | 80% (4/5) | 12/12 |
+| vulkan | os/compositor/vulkan_present_damage_gate.spl | 100% (9/9) | 14/14 |
+| wm | os/compositor/engine2d_wm_frame_executor.spl | campaign in flight | — |
+
+Remaining one-sided decisions per module are catalogued in each spec/agent
+report as provable headless ceilings (device/FFI lanes, never-nil retained
+engines, compile-time-false probes). Struct-method attribution gap filed as
+coverage_probe_plan_skips_struct_method_decisions_2026-08-15.md.
