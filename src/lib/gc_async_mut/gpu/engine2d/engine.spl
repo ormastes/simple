@@ -54,7 +54,7 @@ use std.gpu.engine2d.backend_rocm.{RocmBackend}
 use std.gpu.engine2d.backend_intel.{IntelBackend}
 use std.gpu.engine2d.backend_webgpu.{WebGpuBackend}
 use std.gpu.engine2d.backend_qualcomm.{QualcommBackend}
-use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus, backend_probe_initialized}
 use std.gpu.engine2d.compute_dispatch.{ComputeDispatchResult, compute_dispatch_auto, compute_dispatch_for_backend}
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_default_priority_order}
 use std.gpu.engine2d.wm_frame_pacing.{FramePacingCounters, make_frame_pacing_counters, tick_once}
@@ -776,15 +776,24 @@ class Engine2D with DrawIrRenderTarget:
         Unlike create() which silently falls back to CPU, this returns a typed
         BackendProbeResult explaining exactly why the requested backend is unavailable.
         """
+        # NOTE(2026-08-15): compare probe status via backend_probe_initialized()
+        # (defined in backend_probe.spl itself), NOT `probe.status ==
+        # BackendStatus.Initialized` in this module. engine.spl imports
+        # BackendStatus through the `std.gpu.engine2d.backend_probe` alias path
+        # while the probe object is constructed in the canonically-imported
+        # module; under native codegen the two enum identities do not compare
+        # equal, so the equality was always false and strict create returned
+        # Err(probe) with status=Initialized inside the error. See
+        # doc/08_tracking/bug/engine2d_strict_create_enum_identity_alias_path_2026-08-15.md
         var probe = Engine2D.probe_backend(width, height, backend_name)
-        if probe.status == BackendStatus.Initialized:
-            match Engine2D.create_requested_backend(width, height, backend_name):
-                Ok(engine):
-                    Ok(engine)
-                Err(message):
-                    Err(BackendProbeResult.failed(backend_canonical_name(backend_name), message))
-        else:
-            Err(probe)
+        if not backend_probe_initialized(probe):
+            return Err(probe)
+        match Engine2D.create_requested_backend(width, height, backend_name):
+            Ok(engine):
+                return Ok(engine)
+            Err(message):
+                return Err(BackendProbeResult.failed(backend_canonical_name(backend_name), message))
+        Err(BackendProbeResult.failed(backend_canonical_name(backend_name), "unreachable"))
 
     static fn probe_backend(width: i32, height: i32, backend_name: text) -> BackendProbeResult:
         """Probe whether a backend is available without creating an engine."""

@@ -2,8 +2,8 @@
 
 **Date:** 2026-08-15
 **Status:** PARTIAL (2026-08-15: docker/Vulkan system lane GREEN with a
-runtime-vulkan seed at `build/browser-vulkan/simple`; compiler `vulkan`
-feature still blocked by incomplete vendored rspirv — see bottom)
+runtime-vulkan seed at `build/browser-vulkan/simple`; the compiler `vulkan`
+feature vendoring blocker is now FIXED — see "Vendored rspirv repaired" below)
 **Area:** src/app/browser, src/compiler_rust (seed features)
 
 ## Gap 1 — no browser-level Vulkan render lane
@@ -120,6 +120,33 @@ it and reads it back pixel-perfect on lavapipe (`readback_source=device_readback
   `blink_parse_declarations` which `src/std/blink/css_parser/parser.spl` does
   not provide — browser_render_lane_spec results also fluctuated (10/11 →
   3/11) under concurrent-session tree churn.
+
+## Vendored rspirv repaired (2026-08-15)
+
+The `simple-compiler/vulkan` blocker (`E0583: file not found for module
+'build'` in `vendor/rspirv/dr/mod.rs:28`) is fixed:
+
+- Fetched pristine `rspirv v0.12.0+sdk-1.3.268.0` from crates.io via
+  `cargo fetch` (scratch `CARGO_HOME`, minimal manifest depending on
+  `rspirv = "=0.12.0"`). `diff -rq` against the vendored copy showed exactly
+  one delta: the whole `dr/build/` directory was missing (7 files:
+  `mod.rs`, `autogen_{annotation,constant,debug,norm_insts,terminator,type}.rs`).
+- Copied `dr/build/` into `src/compiler_rust/vendor/rspirv/dr/build/` and
+  added the 7 sha256 entries to `vendor/rspirv/.cargo-checksum.json`
+  (package checksum unchanged — files match the registry crate exactly).
+- Also fixed two unrelated blockers hit on the way: refreshed the
+  `vendor/zerocopy/.cargo-checksum.json` entry for `win-cargo.bat` (the
+  COMMITTED file's sha256 disagrees with the committed checksum — CRLF
+  normalization at vendoring time), and re-exported
+  `compile_stack_bytes_from_mib` from `compiler/src/pipeline/mod.rs`
+  (defined in `pipeline/native_project`, used by `driver/src/cli/native_build.rs`,
+  never re-exported — this also un-breaks the "committed HEAD seed
+  unbuildable" E0432 item above).
+- Verified: `cargo check --release --bin simple --features
+  "simple-compiler/vulkan"` → `Finished 'release' profile` (exit 0), and
+  `cargo build --release --bin simple --features
+  "simple-runtime/vulkan,simple-compiler/vulkan"` → `Finished 'release'
+  profile [optimized] target(s) in 4m 38s`, exit 0.
 
 ## Fix direction
 
