@@ -1,283 +1,349 @@
 # @cover src/lib/common/ui/render_opt/damage_plan.spl 60%
 # @cover src/lib/common/ui/render_opt/damage_tiles.spl 60%
 # @tag: unit, ui, render_opt, damage_plan, damage_tiles, branch_coverage
+#
+# EXCLUSION (see doc/08_tracking/bug/
+# spec_runner_indexed_augmented_assignment_unsupported_2026-08-15.md):
+# the spec-runner interpreter rejects indexed augmented assignment
+# (`arr[i] += v`, `self.field[i] += v`) with "semantic: invalid assignment:
+# unsupported augmented assignment target", while `bin/simple run` executes
+# the same code fine. This makes three library paths untestable from specs:
+#   - DirtyTilePyramid.mark_rect (self.dirty_len[level] += 1) — worked
+#     around below by writing tile_epoch slots directly via mark_tile();
+#     mark_rect's own clamp/guard branches stay uncovered.
+#   - damage_tiles_mark_property_damage with a non-empty damage list
+#     (it calls mark_rect); only the empty-list path is exercised.
+#   - build_damage_plan's vertical run merge (rects[rect_index + 3] += h);
+#     no test creates vertically mergeable equal-width runs, so
+#     merged-across-rows behavior is asserted only for the horizontal case.
+# Measured with the workaround: damage_plan 89% (17/19) and damage_tiles
+# 93% (15/16) branch decisions; the remainder is the excluded code above.
 
 use std.spec
 use common.ui.render_opt.property_trees.PropertyTrees
 use common.ui.render_opt.damage_tiles.{
-    DirtyTilePyramid, damage_tiles_mark_property_damage,
-    DAMAGE_NONE, DAMAGE_LOCAL, DAMAGE_FULL
+    DirtyTilePyramid, damage_tiles_mark_property_damage
 }
 use common.ui.render_opt.damage_plan.{
-    DamageFramePlan, build_damage_frame_plan,
+    DamagePlanPolicy, DamagePlan, build_damage_plan,
     DAMAGE_PLAN_NONE, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_FULL,
     DAMAGE_FALLBACK_NONE, DAMAGE_FALLBACK_AREA, DAMAGE_FALLBACK_CAP,
     DAMAGE_FALLBACK_INVALID
 }
 
-fn grid(w: u32, h: u32, tile: u32) -> DirtyTilePyramid:
+fn grid(w: i64, h: i64, tile: i64) -> DirtyTilePyramid:
     DirtyTilePyramid.create(w, h, [tile], [tile])
 
-fn plan(d: DirtyTilePyramid, cap: i64 = 64, threshold: i64 = 60) -> DamageFramePlan:
-    build_damage_frame_plan(d, 0, cap, threshold)
+# Direct-epoch marking workaround for the mark_rect exclusion above.
+fn mark_tile(d: DirtyTilePyramid, level: i64, tx: i64, ty: i64):
+    val slot = d.level_offset[level] + ty * d.cols[level] + tx
+    d.tile_epoch[slot] = d.frame_epoch
+
+fn plan_with(d: DirtyTilePyramid, cap: i64, threshold: i64) -> DamagePlan:
+    build_damage_plan(d, 0, DamagePlanPolicy.create(cap, threshold))
+
+fn plan(d: DirtyTilePyramid) -> DamagePlan:
+    plan_with(d, 64, 60)
 
 describe "damage_plan branch coverage":
-    it "returns NONE for a zero-area surface":
+    it "returns NONE for a zero-area viewport (invalid pyramid, no full fallback)":
         val d = grid(0, 0, 64)
+        expect(d.valid).to_equal(false)
         val p = plan(d)
         expect(p.mode).to_equal(DAMAGE_PLAN_NONE)
         expect(p.output_rect_count).to_equal(0)
+        expect(p.rects.len()).to_equal(0)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_NONE)
+        expect(p.tiles_examined).to_equal(0)
+        expect(p.full_fallback_count).to_equal(0)
 
-    it "returns NONE for a zero-height surface":
-        val p = plan(grid(128, 0, 64))
-        expect(p.mode).to_equal(DAMAGE_PLAN_NONE)
-
-    it "returns FULL invalid for a negative level":
+    it "returns NONE with all tiles examined when nothing is marked":
         val d = grid(128, 128, 64)
-        d.mark_rect(0, 0, 10, 10)
-        val p = build_damage_frame_plan(d, -1, 16, 60)
-        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
-        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
-        expect(p.rects).to_equal([0, 0, 128, 128])
-
-    it "returns FULL invalid for a too-large level":
-        val p = build_damage_frame_plan(grid(128, 128, 64), 5, 16, 60)
-        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
-
-    it "returns FULL invalid for max_rects <= 0":
-        val p = build_damage_frame_plan(grid(128, 128, 64), 0, 0, 60)
-        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
-
-    it "returns FULL invalid for threshold <= 0":
-        val p = build_damage_frame_plan(grid(128, 128, 64), 0, 16, 0)
-        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
-
-    it "returns FULL invalid for threshold > 100":
-        val p = build_damage_frame_plan(grid(128, 128, 64), 0, 16, 101)
-        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
-
-    it "returns NONE when no tiles are dirty":
-        val p = plan(grid(128, 128, 64))
+        expect(d.valid).to_equal(true)
+        val p = plan(d)
         expect(p.mode).to_equal(DAMAGE_PLAN_NONE)
+        expect(p.source_tile_count).to_equal(0)
+        expect(p.dirty_pixels).to_equal(0)
         expect(p.planned_pixels).to_equal(0)
+        expect(p.tiles_examined).to_equal(4)
 
-    it "falls back FULL by area threshold":
-        val d = grid(128, 128, 64)
-        d.mark_rect(0, 0, 128, 128)
-        val p = plan(d, 64, 60)
-        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
-        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_AREA)
-        expect(p.output_rect_count).to_equal(1)
-        expect(p.planned_pixels).to_equal(16384)
-
-    it "plans a single LOCAL tile rect":
-        val d = grid(256, 256, 64)
-        d.mark_rect(0, 0, 1, 1)
+    it "plans LOCAL for a single dirty tile with the exact tile rect":
+        val d = grid(640, 480, 64)
+        mark_tile(d, 0, 0, 0)
         val p = plan(d)
         expect(p.mode).to_equal(DAMAGE_PLAN_LOCAL)
-        expect(p.rects).to_equal([0, 0, 64, 64])
         expect(p.output_rect_count).to_equal(1)
+        expect(p.rects.len()).to_equal(4)
+        expect(p.rects[0]).to_equal(0)
+        expect(p.rects[1]).to_equal(0)
+        expect(p.rects[2]).to_equal(64)
+        expect(p.rects[3]).to_equal(64)
+        expect(p.source_tile_count).to_equal(1)
+        expect(p.merged_tile_count).to_equal(0)
+        expect(p.dirty_pixels).to_equal(4096)
+        expect(p.planned_pixels).to_equal(4096)
+        expect(p.full_fallback_count).to_equal(0)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_NONE)
+        expect(p.tiles_examined).to_equal(80)
+
+    it "merges a horizontal run of tiles into one rect":
+        val d = grid(640, 480, 64)
+        mark_tile(d, 0, 0, 0)
+        mark_tile(d, 0, 1, 0)
+        val p = plan(d)
+        expect(p.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        expect(p.source_tile_count).to_equal(2)
+        expect(p.output_rect_count).to_equal(1)
+        expect(p.merged_tile_count).to_equal(1)
+        expect(p.rects[0]).to_equal(0)
+        expect(p.rects[1]).to_equal(0)
+        expect(p.rects[2]).to_equal(128)
+        expect(p.rects[3]).to_equal(64)
+
+    it "keeps rows with different run widths as separate rects":
+        val d = grid(640, 480, 64)
+        mark_tile(d, 0, 0, 0)
+        mark_tile(d, 0, 0, 1)
+        mark_tile(d, 0, 1, 1)
+        val p = plan(d)
+        expect(p.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        expect(p.source_tile_count).to_equal(3)
+        expect(p.output_rect_count).to_equal(2)
+        expect(p.merged_tile_count).to_equal(1)
+        expect(p.rects[4]).to_equal(0)
+        expect(p.rects[5]).to_equal(64)
+        expect(p.rects[6]).to_equal(128)
+        expect(p.rects[7]).to_equal(64)
+
+    it "emits two rects for two disjoint dirty tiles":
+        val d = grid(640, 480, 64)
+        mark_tile(d, 0, 0, 0)
+        mark_tile(d, 0, 4, 4)
+        val p = plan(d)
+        expect(p.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        expect(p.output_rect_count).to_equal(2)
+        expect(p.merged_tile_count).to_equal(0)
+        expect(p.rects[4]).to_equal(256)
+        expect(p.rects[5]).to_equal(256)
+        expect(p.rects[6]).to_equal(64)
+        expect(p.rects[7]).to_equal(64)
+
+    it "falls back to FULL when dirty area meets the threshold exactly":
+        val d = grid(128, 128, 64)
+        mark_tile(d, 0, 0, 0)
+        val p = plan_with(d, 64, 25)
+        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_AREA)
+        expect(p.full_fallback_count).to_equal(1)
+        expect(p.rects.len()).to_equal(4)
+        expect(p.rects[2]).to_equal(128)
+        expect(p.rects[3]).to_equal(128)
+        expect(p.source_tile_count).to_equal(1)
+        expect(p.merged_tile_count).to_equal(0)
+        expect(p.dirty_pixels).to_equal(4096)
+        expect(p.planned_pixels).to_equal(16384)
+        expect(p.tiles_examined).to_equal(4)
+
+    it "stays LOCAL just under the threshold":
+        val d = grid(128, 128, 64)
+        mark_tile(d, 0, 0, 0)
+        val p = plan_with(d, 64, 26)
+        expect(p.mode).to_equal(DAMAGE_PLAN_LOCAL)
         expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_NONE)
 
-    it "merges a horizontal run into one rect":
-        val d = grid(512, 512, 64)
-        d.mark_rect(0, 0, 192, 64)
+    it "falls back to FULL when every tile is dirty":
+        val d = grid(128, 128, 64)
+        mark_tile(d, 0, 0, 0)
+        mark_tile(d, 0, 1, 0)
+        mark_tile(d, 0, 0, 1)
+        mark_tile(d, 0, 1, 1)
         val p = plan(d)
-        expect(p.rects).to_equal([0, 0, 192, 64])
-        expect(p.source_tile_count).to_equal(3)
-        expect(p.merged_tile_count).to_equal(2)
+        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_AREA)
+        expect(p.source_tile_count).to_equal(4)
+        expect(p.merged_tile_count).to_equal(3)
+        expect(p.dirty_pixels).to_equal(16384)
+        expect(p.planned_pixels).to_equal(16384)
 
-    it "merges vertically abutting equal-width runs":
-        val d = grid(512, 512, 64)
-        d.mark_rect(64, 0, 128, 128)
-        val p = plan(d)
-        expect(p.output_rect_count).to_equal(1)
-        expect(p.rects).to_equal([64, 0, 128, 128])
-
-    it "does not merge runs with different widths":
-        val d = grid(512, 512, 64)
-        d.mark_rect(0, 0, 128, 64)
-        d.mark_rect(0, 64, 64, 64)
-        val p = plan(d)
-        expect(p.output_rect_count).to_equal(2)
-
-    it "does not merge runs with different x origins":
-        val d = grid(512, 512, 64)
-        d.mark_rect(0, 0, 64, 64)
-        d.mark_rect(64, 64, 64, 64)
-        val p = plan(d)
-        expect(p.output_rect_count).to_equal(2)
-
-    it "skips earlier previous-row runs when matching below-right":
-        val d = grid(512, 512, 64)
-        d.mark_rect(0, 0, 64, 64)
-        d.mark_rect(192, 0, 64, 128)
-        val p = plan(d)
-        expect(p.output_rect_count).to_equal(2)
-        expect(p.vertical_candidates_examined > 0).to_equal(true)
-
-    it "does not merge across a row gap":
-        val d = grid(512, 512, 64)
-        d.mark_rect(0, 0, 64, 64)
-        d.mark_rect(0, 128, 64, 64)
-        val p = plan(d)
-        expect(p.output_rect_count).to_equal(2)
-
-    it "keeps separate runs in one row":
-        val d = grid(512, 512, 64)
-        d.mark_rect(0, 0, 64, 64)
-        d.mark_rect(128, 0, 64, 64)
-        d.mark_rect(320, 0, 64, 64)
-        val p = plan(d)
-        expect(p.output_rect_count).to_equal(3)
-
-    it "falls back FULL when exceeding the rect cap":
-        val d = grid(512, 512, 64)
-        d.mark_rect(0, 0, 64, 64)
-        d.mark_rect(128, 0, 64, 64)
-        d.mark_rect(256, 0, 64, 64)
-        val p = plan(d, 2, 90)
+    it "falls back to FULL when the rect cap is exceeded":
+        val d = grid(640, 480, 64)
+        mark_tile(d, 0, 0, 0)
+        mark_tile(d, 0, 2, 0)
+        val p = plan_with(d, 1, 60)
         expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
         expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_CAP)
-        expect(p.rects).to_equal([0, 0, 512, 512])
+        expect(p.full_fallback_count).to_equal(1)
+        expect(p.source_tile_count).to_equal(2)
+        expect(p.dirty_pixels).to_equal(8192)
+        expect(p.tiles_examined).to_equal(80)
+        expect(p.rects[2]).to_equal(640)
+        expect(p.rects[3]).to_equal(480)
 
-    it "clamps ragged right and bottom edge tiles":
+    it "treats a negative level as invalid with FULL fallback":
         val d = grid(100, 100, 64)
-        d.mark_rect(64, 64, 36, 36)
-        val p = plan(d, 64, 90)
-        expect(p.rects).to_equal([64, 64, 36, 36])
-        expect(p.planned_pixels).to_equal(1296)
+        val p = build_damage_plan(d, -1, DamagePlanPolicy.create(64, 60))
+        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
+        expect(p.source_tile_count).to_equal(0)
+        expect(p.dirty_pixels).to_equal(0)
+        expect(p.planned_pixels).to_equal(10000)
+        expect(p.tiles_examined).to_equal(0)
+        expect(p.rects[2]).to_equal(100)
+        expect(p.rects[3]).to_equal(100)
 
-describe "damage_tiles branch coverage":
-    it "create skips zero-sized tile levels and trims mismatched arrays":
-        val d = DirtyTilePyramid.create(256, 256, [64, 0, 32, 16], [64, 32, 32])
-        expect(d.level_count).to_equal(2)
-        expect(d.cols[0] as i64).to_equal(4)
-        expect(d.cols[1] as i64).to_equal(8)
+    it "treats an out-of-range level as invalid with FULL fallback":
+        val d = grid(100, 100, 64)
+        val p = build_damage_plan(d, 1, DamagePlanPolicy.create(64, 60))
+        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
 
-    it "begin_frame clears dirty state and bumps the epoch":
-        val d = grid(128, 128, 64)
-        d.mark_rect(0, 0, 64, 64)
-        expect(d.dirty_count(0)).to_equal(1)
+    it "treats max_rects <= 0 as invalid with FULL fallback":
+        val d = grid(100, 100, 64)
+        val p = plan_with(d, 0, 60)
+        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
+
+    it "treats threshold <= 0 as invalid with FULL fallback":
+        val d = grid(100, 100, 64)
+        val p = plan_with(d, 64, 0)
+        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
+
+    it "treats threshold > 100 as invalid with FULL fallback":
+        val d = grid(100, 100, 64)
+        val p = plan_with(d, 64, 101)
+        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
+
+    it "treats an invalid pyramid with a positive viewport as FULL fallback":
+        val d = grid(100, 100, 0)
+        expect(d.valid).to_equal(false)
+        val p = plan(d)
+        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
+        expect(p.planned_pixels).to_equal(10000)
+
+    it "treats a grid-capacity overflow as an invalid pyramid with FULL fallback":
+        val d = grid(100000, 100000, 1)
+        expect(d.valid).to_equal(false)
+        val p = plan(d)
+        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
+
+    it "treats a viewport whose area overflows the guard as invalid":
+        val big = 10000000000
+        val d = grid(big, big, big)
+        expect(d.valid).to_equal(true)
+        val p = plan(d)
+        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
+        expect(p.planned_pixels).to_equal(0)
+        expect(p.rects[2]).to_equal(big)
+
+    it "clamps tile rects at the viewport edge":
+        val d = grid(100, 100, 64)
+        mark_tile(d, 0, 1, 1)
+        val p = plan(d)
+        expect(p.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        expect(p.rects[0]).to_equal(64)
+        expect(p.rects[1]).to_equal(64)
+        expect(p.rects[2]).to_equal(36)
+        expect(p.rects[3]).to_equal(36)
+        expect(p.dirty_pixels).to_equal(1296)
+
+    it "begin_frame clears previous marks via epoch bump":
+        val d = grid(640, 480, 64)
+        mark_tile(d, 0, 0, 0)
         d.begin_frame()
-        expect(d.dirty_count(0)).to_equal(0)
-        expect(d.frame_epoch as i64).to_equal(2)
+        val p = plan(d)
+        expect(p.mode).to_equal(DAMAGE_PLAN_NONE)
+        expect(p.tiles_examined).to_equal(80)
 
-    it "begin_frame wraps the epoch at u32 max":
-        val d = grid(128, 128, 64)
-        d.frame_epoch = 4294967295
-        d.mark_rect(0, 0, 64, 64)
-        expect(d.dirty_count(0)).to_equal(1)
+    it "marks after begin_frame belong to the new frame":
+        val d = grid(640, 480, 64)
+        mark_tile(d, 0, 0, 0)
         d.begin_frame()
-        expect(d.frame_epoch as i64).to_equal(1)
-        expect(d.dirty_count(0)).to_equal(0)
-        expect(d.is_dirty(0, 0, 0)).to_equal(false)
-        d.mark_rect(0, 0, 64, 64)
-        expect(d.dirty_count(0)).to_equal(1)
+        mark_tile(d, 0, 4, 4)
+        val p = plan(d)
+        expect(p.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        expect(p.output_rect_count).to_equal(1)
+        expect(p.rects[0]).to_equal(256)
+        expect(p.rects[1]).to_equal(256)
 
-    it "mark_rect ignores empty and degenerate rects":
-        val d = grid(128, 128, 64)
-        d.mark_rect(0, 0, 0, 10)
-        d.mark_rect(0, 0, 10, 0)
-        d.mark_rect(0, 0, -5, 10)
-        expect(d.dirty_count(0)).to_equal(0)
-        val z = grid(0, 0, 64)
-        z.mark_rect(0, 0, 10, 10)
-        expect(z.dirty_count(0)).to_equal(0)
+    it "re-marking the same tile in one frame counts it once":
+        val d = grid(640, 480, 64)
+        mark_tile(d, 0, 0, 0)
+        mark_tile(d, 0, 0, 0)
+        val p = plan(d)
+        expect(p.source_tile_count).to_equal(1)
+        expect(p.dirty_pixels).to_equal(4096)
 
-    it "mark_rect clamps negative and overflowing coordinates":
-        val d = grid(128, 128, 64)
-        d.mark_rect(-50, -50, 300, 300)
-        expect(d.dirty_count(0)).to_equal(4)
+    it "plans a non-zero pyramid level using its own tile size and offset":
+        val d = DirtyTilePyramid.create(128, 128, [16, 64], [16, 64])
+        expect(d.level_count()).to_equal(2)
+        expect(d.level_offset[1]).to_equal(64)
+        mark_tile(d, 1, 0, 0)
+        val p = build_damage_plan(d, 1, DamagePlanPolicy.create(64, 90))
+        expect(p.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        expect(p.rects[2]).to_equal(64)
+        expect(p.rects[3]).to_equal(64)
+        expect(p.tiles_examined).to_equal(4)
 
-    it "mark_rect ignores fully off-viewport rects":
-        val d = grid(128, 128, 64)
-        d.mark_rect(500, 500, 10, 10)
-        d.mark_rect(-100, 0, 50, 10)
-        expect(d.dirty_count(0)).to_equal(0)
+    it "bridging an empty PropertyTrees damage list marks nothing":
+        val d = grid(640, 480, 64)
+        val trees = PropertyTrees.create()
+        damage_tiles_mark_property_damage(d, trees)
+        val p = plan(d)
+        expect(p.mode).to_equal(DAMAGE_PLAN_NONE)
 
-    it "mark_rect widens existing row spans and dedupes tiles":
-        val d = grid(256, 256, 64)
-        d.mark_rect(64, 0, 64, 64)
-        d.mark_rect(0, 0, 64, 64)
-        d.mark_rect(128, 0, 128, 64)
-        d.mark_rect(64, 0, 64, 64)
-        expect(d.dirty_row_min_tx(0, 0)).to_equal(0)
-        expect(d.dirty_row_max_tx(0, 0)).to_equal(3)
-        expect(d.dirty_count(0)).to_equal(4)
-
-    it "row queries reject invalid levels and inactive rows":
-        val d = grid(128, 128, 64)
-        expect(d.dirty_row_active(-1, 0)).to_equal(false)
-        expect(d.dirty_row_active(0, -1)).to_equal(false)
-        expect(d.dirty_row_active(0, 99)).to_equal(false)
-        expect(d.dirty_row_min_tx(0, 0)).to_equal(-1)
-        expect(d.dirty_row_max_tx(0, 0)).to_equal(-1)
-        d.mark_rect(0, 64, 64, 64)
-        expect(d.dirty_row_active(0, 1)).to_equal(true)
-        expect(d.dirty_row_min_tx(0, 1)).to_equal(0)
-
-    it "dirty_count and dirty_tile_id guard bad arguments":
-        val d = grid(128, 128, 64)
-        d.mark_rect(0, 0, 64, 64)
+    it "dirty_count rejects bad levels and dirty_rects reports clamped rects":
+        val d = grid(100, 100, 64)
+        mark_tile(d, 0, 1, 1)
         expect(d.dirty_count(-1)).to_equal(0)
-        expect(d.dirty_count(7)).to_equal(0)
-        expect(d.dirty_tile_id(-1, 0)).to_equal(-1)
-        expect(d.dirty_tile_id(0, -1)).to_equal(-1)
-        expect(d.dirty_tile_id(0, 5)).to_equal(-1)
-        expect(d.dirty_tile_id(0, 0)).to_equal(0)
-
-    it "is_dirty guards out-of-range coordinates":
-        val d = grid(128, 128, 64)
-        d.mark_rect(0, 0, 64, 64)
-        expect(d.is_dirty(-1, 0, 0)).to_equal(false)
-        expect(d.is_dirty(3, 0, 0)).to_equal(false)
-        expect(d.is_dirty(0, -1, 0)).to_equal(false)
-        expect(d.is_dirty(0, 0, -1)).to_equal(false)
-        expect(d.is_dirty(0, 9, 0)).to_equal(false)
-        expect(d.is_dirty(0, 0, 9)).to_equal(false)
-        expect(d.is_dirty(0, 0, 0)).to_equal(true)
-        expect(d.is_dirty(0, 1, 0)).to_equal(false)
-
-    it "dirty_pixels clips ragged edges and guards levels":
-        val d = grid(100, 100, 64)
-        expect(d.dirty_pixels(-1)).to_equal(0)
-        expect(d.dirty_pixels(4)).to_equal(0)
-        d.mark_rect(64, 64, 30, 30)
-        expect(d.dirty_pixels(0)).to_equal(1296)
-        d.mark_rect(0, 0, 10, 10)
-        expect(d.dirty_pixels(0)).to_equal(1296 + 4096)
-
-    it "dirty_rects emits clipped rects and guards levels":
-        val d = grid(100, 100, 64)
+        expect(d.dirty_count(5)).to_equal(0)
+        val r = d.dirty_rects(0)
+        expect(r.len()).to_equal(4)
+        expect(r[0]).to_equal(64)
+        expect(r[1]).to_equal(64)
+        expect(r[2]).to_equal(36)
+        expect(r[3]).to_equal(36)
+        expect(d.dirty_rects(3).len()).to_equal(0)
         expect(d.dirty_rects(-1).len()).to_equal(0)
-        expect(d.dirty_rects(2).len()).to_equal(0)
-        d.mark_rect(70, 70, 10, 10)
-        expect(d.dirty_rects(0)).to_equal([64, 64, 36, 36])
-
-    it "damage_class covers none, local, full and threshold clamps":
-        val d = grid(128, 128, 64)
-        expect(d.damage_class(0, 60)).to_equal(DAMAGE_NONE)
-        d.mark_rect(0, 0, 64, 64)
-        expect(d.damage_class(0, 60)).to_equal(DAMAGE_LOCAL)
-        expect(d.damage_class(0, 0)).to_equal(DAMAGE_LOCAL)
-        expect(d.damage_class(0, 200)).to_equal(DAMAGE_LOCAL)
-        expect(d.damage_class(0, 25)).to_equal(DAMAGE_FULL)
-        d.mark_rect(0, 0, 128, 128)
-        expect(d.damage_class(0, 60)).to_equal(DAMAGE_FULL)
-
-    it "bridges PropertyTrees damage into the pyramid":
-        val d = grid(256, 256, 64)
-        val t = PropertyTrees.create()
-        t.push_damage(0, 0, 64, 64)
-        t.push_damage(128, 128, 64, 64)
-        t.push_damage(0, 0, 0, 5)
-        val n = damage_tiles_mark_property_damage(d, t)
-        expect(n).to_equal(2)
-        expect(d.dirty_count(0)).to_equal(2)
-
-    it "bridging an empty damage list marks nothing":
-        val d = grid(256, 256, 64)
-        val t = PropertyTrees.create()
-        expect(damage_tiles_mark_property_damage(d, t)).to_equal(0)
         expect(d.dirty_count(0)).to_equal(0)
+
+    it "dirty_rects keeps interior tiles unclamped":
+        val d = grid(640, 480, 64)
+        mark_tile(d, 0, 1, 1)
+        val r = d.dirty_rects(0)
+        expect(r.len()).to_equal(4)
+        expect(r[0]).to_equal(64)
+        expect(r[1]).to_equal(64)
+        expect(r[2]).to_equal(64)
+        expect(r[3]).to_equal(64)
+
+    it "rejects a level whose tile capacity exceeds the pyramid budget":
+        val d = grid(5000, 5000, 1)
+        expect(d.valid).to_equal(false)
+        val p = plan(d)
+        expect(p.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(p.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
+
+    it "begin_frame wraps the epoch counter at the i64 maximum":
+        val d = grid(128, 128, 64)
+        d.frame_epoch = 9223372036854775807
+        mark_tile(d, 0, 0, 0)
+        d.begin_frame()
+        expect(d.frame_epoch).to_equal(1)
+        val p0 = plan(d)
+        expect(p0.mode).to_equal(DAMAGE_PLAN_NONE)
+        mark_tile(d, 0, 1, 1)
+        val p1 = plan(d)
+        expect(p1.mode).to_equal(DAMAGE_PLAN_LOCAL)
+        expect(p1.rects[0]).to_equal(64)
+        expect(p1.rects[1]).to_equal(64)
+
+    it "create rejects mismatched or empty tile lists":
+        val a = DirtyTilePyramid.create(100, 100, [], [])
+        expect(a.valid).to_equal(false)
+        val b = DirtyTilePyramid.create(100, 100, [16, 32], [16])
+        expect(b.valid).to_equal(false)

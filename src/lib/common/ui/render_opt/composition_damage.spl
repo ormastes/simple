@@ -1,0 +1,140 @@
+# Backend-independent retained-composition damage classification.
+
+use common.ui.draw_ir.{DrawIrComposition, DrawIrRect}
+use common.ui.draw_ir_patch.{
+    draw_ir_patch_apply, draw_ir_patch_between,
+    draw_ir_patch_commands_equal
+}
+use common.ui.render_opt.damage_plan.{
+    DAMAGE_PLAN_FULL, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_NONE
+}
+
+class CompositionDamageDecision:
+    mode: i64
+    rects: [i64]
+    reason: text
+    damage_candidates: i64 = 0
+    dedup_probes: i64 = 0
+
+fn _composition_damage_full(width: i32, height: i32,
+                            reason: text) -> CompositionDamageDecision:
+    var rects: [i64] = []
+    if width > 0 and height > 0:
+        rects = [0, 0, width as i64, height as i64]
+    CompositionDamageDecision(mode: DAMAGE_PLAN_FULL, rects: rects,
+                              reason: reason)
+
+fn _composition_damage_batches_compatible(
+    prior: DrawIrComposition, current: DrawIrComposition
+) -> bool:
+    if prior.batches.len() != current.batches.len():
+        return false
+    var index = 0
+    while index < prior.batches.len():
+        val a = prior.batches[index]
+        val b = current.batches[index]
+        if (
+            a.schema != b.schema or a.batch_id != b.batch_id or
+            a.backend_target != b.backend_target or
+            a.source != b.source or a.embedding != b.embedding
+        ):
+            return false
+        index = index + 1
+    true
+
+fn _composition_damage_rects(rects: [DrawIrRect], width: i32,
+                             height: i32) -> ([i64], i64, i64):
+    var result: [i64] = []
+    var table_capacity: i64 = 4
+    while table_capacity < (rects.len() as i64) * 2:
+        table_capacity = table_capacity * 2
+    var occupied: [u32] = [0u32; table_capacity.to_i32()]
+    var output_offsets: [i64] = [0; table_capacity.to_i32()]
+    var candidates: i64 = 0
+    var probes: i64 = 0
+    for rect in rects:
+        if not rect.present:
+            continue
+        var x0 = rect.x
+        var y0 = rect.y
+        var x1 = rect.x + rect.width
+        var y1 = rect.y + rect.height
+        if x0 < 0:
+            x0 = 0
+        if y0 < 0:
+            y0 = 0
+        if x1 > width:
+            x1 = width
+        if y1 > height:
+            y1 = height
+        if x1 <= x0 or y1 <= y0:
+            continue
+        candidates = candidates + 1
+        val rw = (x1 - x0) as i64
+        val rh = (y1 - y0) as i64
+        var hash: u64 = 1469598103934665603u64
+        hash = (hash ^ (x0 as i64 as u64)) * 1099511628211u64
+        hash = (hash ^ (y0 as i64 as u64)) * 1099511628211u64
+        hash = (hash ^ (rw as u64)) * 1099511628211u64
+        hash = (hash ^ (rh as u64)) * 1099511628211u64
+        var slot = (hash & ((table_capacity - 1) as u64)) as i64
+        var duplicate = false
+        while occupied[slot.to_i32()] != 0u32:
+            probes = probes + 1
+            val offset = output_offsets[slot.to_i32()]
+            if (
+                result[offset] == x0 as i64 and
+                result[offset + 1] == y0 as i64 and
+                result[offset + 2] == rw and result[offset + 3] == rh
+            ):
+                duplicate = true
+                break
+            slot = (slot + 1) & (table_capacity - 1)
+        if not duplicate:
+            probes = probes + 1
+            occupied[slot.to_i32()] = 1u32
+            output_offsets[slot.to_i32()] = result.len() as i64
+            result.push(x0 as i64)
+            result.push(y0 as i64)
+            result.push(rw)
+            result.push(rh)
+    (result, candidates, probes)
+
+fn composition_damage_between(
+    prior: DrawIrComposition, current: DrawIrComposition,
+    width: i32, height: i32,
+    viewport_stable: bool, resources_stable: bool
+) -> CompositionDamageDecision:
+    if width <= 0 or height <= 0:
+        return _composition_damage_full(width, height, "invalid-viewport")
+    if not viewport_stable:
+        return _composition_damage_full(width, height, "viewport-changed")
+    if not resources_stable:
+        return _composition_damage_full(width, height, "resources-changed")
+    if not _composition_damage_batches_compatible(prior, current):
+        return _composition_damage_full(
+            width, height, "batch-metadata-changed")
+
+    val patch = draw_ir_patch_between(
+        prior, prior.composition_id, current, current.composition_id)
+    val applied = draw_ir_patch_apply(prior, patch)
+    if not applied.ok or not draw_ir_patch_commands_equal(
+        applied.composition, current
+    ):
+        return _composition_damage_full(
+            width, height, "composition-patch-roundtrip-failed")
+    if patch.operations.len() == 0:
+        return CompositionDamageDecision(
+            mode: DAMAGE_PLAN_NONE, rects: [],
+            reason: "composition-patch-empty")
+    val (rects, candidates, probes) = _composition_damage_rects(
+        patch.damage_rects, width, height)
+    if rects.len() == 0:
+        return _composition_damage_full(
+            width, height, "composition-patch-no-bounds")
+    CompositionDamageDecision(
+        mode: DAMAGE_PLAN_LOCAL, rects: rects,
+        reason: "composition-patch", damage_candidates: candidates,
+        dedup_probes: probes)
+
+export CompositionDamageDecision, composition_damage_between
