@@ -287,3 +287,25 @@ per-node cost is a separate, already-tracked, multi-session defect
 (`doc/08_tracking/bug/web_style_producer_4s_per_node_interpreted_lane_2026-07-29.md`)
 and remains out of scope for T17, whose acceptance bar is only "a real
 verdict exists," which it does and continues to.
+
+## Triage 2026-08-15 (static, under Stage-4 resource lock — no repro run)
+
+The structural blocker this doc identifies (whole-module interpreter fallback
+from the `SimpleWebLayoutEngine2DReadbackResult.resolved_backend` HIR
+inference failure) appears RESOLVED at source level in the current tree:
+`resolved_backend: text` is now explicitly declared
+(`simple_web_layout_engine2d_fast.spl:93`, with the workaround comment citing
+`hir_lowering_cannot_infer_struct_field_type_from_constructor_args_only_2026-08-08.md`)
+and ALL four constructor sites now pass it (`:738`, `:755`, `:775` plus the
+renderer's). Every FAIL re-verification recorded above predates or straddles
+that fix landing. Verification pending (do not run under the resource lock):
+
+```
+SIMPLE_WM_HEADLESS_CAPTURE=1 SIMPLE_TIMEOUT_SECONDS=1750 \
+  bin/simple run examples/06_io/ui/wm_web_standards_showcase_gui.spl
+```
+
+Expected if fixed: no `[jit-fallback] HIR lowering error ... resolved_backend`
+line; child styles 149 nodes within the 180s frame budget and the host prints
+a non-timeout verdict. If the fallback line still fires, the residual gap is
+in the seed's HIR lowering, not the .spl sources.
