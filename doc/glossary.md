@@ -1177,10 +1177,12 @@ re-derives the sequence. It was written out three times before this module exist
 **Re-derived sequence (anti-pattern)** — Writing out a multi-step handshake against a
 subsystem (broker/raster, spawn/present, submit/complete) at a new call site instead of
 calling the shared helper. It compiles, passes review, and then drifts: a protocol change
-has to find every copy. Two live instances in this tree, both recorded rather than
-tolerated: the browser jailed-render sequence (fixed 2026-08-16, collapsed into
-[[Jailed render session]]) and the triplicated `_completion`/`_rejected`/`submit_composition`
-helpers in `src/os/compositor/host_services/{cocoa,win32,sdl2}_display_adapter.spl`.
+has to find every copy. Two instances were found in this tree and BOTH are now fixed (2026-08-16): the
+browser jailed-render sequence, collapsed into [[Jailed render session]]; and the
+triplicated `_completion`/`_rejected` helpers in
+`src/os/compositor/host_services/{cocoa,win32,sdl2}_display_adapter.spl`, collapsed into
+`display_adapter_common.spl`. A fourth display backend is now added by calling that
+helper, not by copying the third adapter.
 Before adding a call site, search for an existing driver of the same subsystem with
 `/usr/bin/grep` — and see **Absence claim** for why the plain wrapper will not do.
 
@@ -1196,7 +1198,10 @@ blocker recorded in a doc is a claim to re-verify, not a fact to build around.
 platform-agnostic: SOSIX `service_contract` + `CompositorBackend` + `DedicatedHost`,
 with per-OS backends chosen at one dispatch site (`select_hosted_backend`). The
 invariant is that SimpleOS and other OSes differ **only** inside that layer. Verified
-2026-08-16: `src/os/apps/` contains zero platform conditionals. Known violations are
-tracked as [[Re-derived sequence (anti-pattern)]] instances plus
-`src/os/hosted/hosted_win32_mdi_probe.spl`, a Windows-only probe that re-declares the
-Win32 externs and bypasses `CompositorBackend` with no Cocoa/SDL2 counterpart.
+2026-08-16: `src/os/apps/` contains zero platform conditionals. The one asymmetry that
+remains is deliberate: `src/os/hosted/hosted_win32_mdi_probe.spl` re-declares the Win32
+externs and bypasses `CompositorBackend` on purpose, because it is a raw-Win32
+diagnostic harness driven by `scripts/check/check-windows-native-mdi-evidence.{shs,ps1}`
+and needs a message pump, window lifecycle and pixel readback that `CompositorBackend`
+does not expose. It is not duplication debt; do not "fix" it by routing it through the
+backend, which would destroy what it measures.
