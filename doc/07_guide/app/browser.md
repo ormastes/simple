@@ -60,9 +60,46 @@ purpose. Details and isolation matrix:
 - `test/02_integration/app/browser_cli_log_modes_spec.spl` — spawns the real
   CLI (`--help`, `--version`, unknown-option rejection, `--open` parse).
 
+## Renderer sandbox (seccomp allow-list)
+
+Check the jail with:
+
+```bash
+sh scripts/check/check-browser-renderer-sandbox-seccomp.shs
+```
+
+It builds and runs `src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c`,
+which forks a child into the **real** jail via `rt_browser_renderer_sandbox_enter`
+and proves both directions: allow-listed `read`/`write` on inherited pipe fds
+still work, and a non-allow-listed `socket()` is killed with `SIGSYS` by
+`SECCOMP_RET_KILL_PROCESS` — not merely refused with `EPERM`, which is what the
+pre-2026-08-15 deny-list did. Verdict is the last stdout line; `ERROR — nothing
+was checked` (exit 2) covers a kernel without seccomp/Landlock and a host
+without a C compiler, and is never a pass.
+
+Two operational notes that cost time otherwise:
+
+- The build **requires** `-ffunction-sections -fdata-sections -Wl,--gc-sections`.
+  `runtime_process.c` also defines spawn/fork paths referencing the wider
+  runtime's value helpers (`rt_array_len`, `rt_string_data`, `rt_fork_*`) that a
+  single-TU build does not link; the self-check never calls them, so they must be
+  dead-stripped or the link fails on undefined references.
+- The jail sets `RLIMIT_NOFILE=4`, so the in-jail Landlock ruleset fd only
+  allocates when the worker holds fds 0..3 only. A worker holding a higher fd
+  fails `sandbox_enter`.
+
+Still open (see
+`doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md`):
+no namespace/privilege drop, and the in-process browsers under
+`src/app/browser/**` evaluate page script in the host process without entering
+the jail at all. The gate proves the jail's syscall contract, not that every
+browser surface uses it.
+
 ## Related
 
 - Feature expert: `doc/00_llm_process/feature_expert/browser/skill.md`
+- Sandbox system scenario: `test/03_system/browser_engine/browser_renderer_sandbox_spec.spl`
+  (manual: `doc/06_spec/03_system/browser_engine/browser_renderer_sandbox_spec.md`)
 - Engine internals: `doc/07_guide/ui/browser_engine_implementation.md`
 - Don't confuse with `src/app/ui.browser/` (standalone winit widget-tree
   app) or `src/os/apps/simple_browser/` (baremetal).

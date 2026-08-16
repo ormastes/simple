@@ -1,0 +1,53 @@
+# @req REQ-WEB-BROWSER-014
+#
+# System test: the browser renderer jail (SANDBOX-N/E/D) for
+# REQ-WEB-BROWSER-014 sandbox/broker.
+#
+# Drives scripts/check/check-browser-renderer-sandbox-seccomp.shs, which builds
+# and runs the native self-check
+# src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c. That
+# self-check forks a child which enters the REAL jail through
+# rt_browser_renderer_sandbox_enter — it is not a mock and not a source-text
+# assertion.
+#
+# Fail-closed by construction. The gate emits its verdict as the last stdout
+# line: PASS exit 0 / FAIL exit 1 / ERROR exit 2. A kernel without
+# seccomp/Landlock cannot establish the jail, so the gate reports ERROR
+# ("nothing was checked") and this spec fails — an unexercised property is
+# never a pass. Every nonzero exit fails this spec.
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val SANDBOX_GATE = "scripts/check/check-browser-renderer-sandbox-seccomp.shs"
+
+describe "browser renderer jail confines a compromised renderer":
+    it "keeps allow-listed I/O working while killing a non-allow-listed syscall":
+        """
+        A renderer process is confined before it parses any untrusted page.
+        The operator needs two opposite guarantees at once: the renderer must
+        still do its job (read the page bytes handed to it, write pixels back),
+        and it must lose the ability to reach anything else — no new sockets,
+        no matter what the page does to it. This scenario proves both halves
+        against the real jail, plus the honest third case where the host
+        kernel cannot provide the jail at all.
+        """
+        step("Enter the real browser renderer jail via rt_browser_renderer_sandbox_enter")
+        val (stdout, stderr, code) = process_run("sh", [SANDBOX_GATE])
+
+        step("SANDBOX-N: allow-listed read/write on inherited pipe fds still succeed inside the jail")
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("rt_browser_renderer_seccomp_allowlist_selfcheck: PASS")
+
+        step("SANDBOX-E: a non-allow-listed socket() is killed by SECCOMP_RET_KILL_PROCESS, not merely denied")
+        # An EPERM-style deny-list would let the child survive the call. The
+        # allow-list contract is that the process dies with SIGSYS instead.
+        expect(stdout).to_contain("SIGSYS-killed by SECCOMP_RET_KILL_PROCESS")
+
+        step("SANDBOX-D: the verdict states how many checks actually ran, so an unexercised jail cannot read as a pass")
+        # ERROR (exit 2) covers a kernel lacking seccomp/Landlock and a host
+        # with no C compiler. Both mean the jail was never entered, and both
+        # are already excluded by the exit-0 check above. Asserting the counted
+        # verdict closes the remaining gap: a vacuous run that verified nothing
+        # cannot satisfy this, because the count is emitted only on the path
+        # that ran the self-check to completion.
+        expect(stdout).to_contain("PASS — 3 check(s) verified")

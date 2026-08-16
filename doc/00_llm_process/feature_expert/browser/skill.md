@@ -149,3 +149,33 @@ records `coverage_collector_skips_pub_val_and_match_heads_2026-08-15.md` and
 - **Interpreter fixes landed**: ClassInstance `simple` handling and nested
   field-index assignment — unblocked several of the coverage specs above
   (related record: `engine2d_landing_blocked_on_classinstance_seed_infra_2026-08-15.md`).
+
+## Handoff Notes (2026-08-16, sandbox gate wiring)
+
+- **The seccomp allow-list self-check was orphaned.**
+  `src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c` landed
+  2026-08-15 with the deny-list→allow-list fix and was invoked by **nothing** —
+  no runner, no spec, no wrapper. The jail's strongest evidence was unreachable
+  from any gate. Now wired by
+  `scripts/check/check-browser-renderer-sandbox-seccomp.shs` (fail-closed:
+  no-seccomp kernel and no-C-compiler host both give `ERROR — nothing was
+  checked`, exit 2), gated by
+  `test/03_system/browser_engine/browser_renderer_sandbox_spec.spl`
+  (REQ-WEB-BROWSER-014, SANDBOX-N/E/D). Gate ran here: `PASS — 3 check(s)
+  verified`, real `SIGSYS` kill on `socket()`.
+- **Build trap**: the self-check needs
+  `-ffunction-sections -fdata-sections -Wl,--gc-sections`. `runtime_process.c`
+  drags in spawn/fork paths referencing `rt_array_len`/`rt_string_data`/`rt_fork_*`
+  that a single-TU build cannot link; they must be dead-stripped. Cost one fix
+  cycle — the sibling `run_process_piped_write_test.shs` already did this and is
+  the pattern to copy.
+- **Evidence split is deliberate.** The gate is native C-runtime evidence and it
+  passed. The SSpec scenario is **unexecuted** — no admitted pure-Simple runtime
+  on this host, and Rust-seed output is not evidence for this lane. So
+  REQ-WEB-BROWSER-014 is **not promoted**. Do not read the green gate as a
+  promoted production row.
+- **Still open, do not claim covered**: problems 2 and 3 of
+  `browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md` — no
+  namespace/privilege drop, and in-process browsers under `src/app/browser/**`
+  still evaluate page script unjailed. The gate proves the jail's syscall
+  contract, not that every browser surface enters it.

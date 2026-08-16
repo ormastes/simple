@@ -134,6 +134,7 @@ replace their live assertions.
 | `cargo test --offline -p simple-runtime --lib --features runtime-tls 'value::net::browser_http_job_tests::silent_tls_peer_respects_job_deadline_and_retires_slot' -- --exact` | PASS | TLS deadline and slot retirement |
 | `sh scripts/check/check-runtime-https-openssl.shs` | PASS | `rt_tls_client_*` address+SNI OpenSSL trusted/mismatch/untrusted/stall/reset/trickle |
 | `node scripts/check/check-web-render-backend-chromium-sandbox.js` | PASS | mocked Chromium-helper contract |
+| `sh scripts/check/check-browser-renderer-sandbox-seccomp.shs` | PASS | real `rt_browser_renderer_sandbox_enter` jail: allow-listed read/write work, non-allow-listed `socket()` is SIGSYS-killed by `SECCOMP_RET_KILL_PROCESS`. Native C-runtime evidence only; promotes no production row |
 | `CRB_HTML="$PWD/test/09_baselines/web_html_input/vanillastyle_demo.html" timeout 60 xvfb-run -a tools/electron-shell/node_modules/.bin/electron --no-sandbox tools/web-render-backend/chromium_event_check.js` | PASS | trusted Electron form events only |
 | `CRB_HTML="$PWD/test/09_baselines/web_html_input/vanillastyle_demo.html" timeout 60 xvfb-run -a /home/ormastes/dev/pub/simple/tools/electron-shell/node_modules/.bin/electron --no-sandbox tools/web-render-backend/chromium_event_check.js` | PASS | pinned Electron/Chromium injected-JS rAF and CSS keyframes changed captured pixels |
 | `cargo test --offline --manifest-path src/compiler_rust/runtime/Cargo.toml --lib --no-default-features public_address_policy_rejects_any_mixed_resolution_set` | PASS | mixed-resolution egress policy unit |
@@ -144,6 +145,37 @@ These checks do not prove a live HTTPS certificate matrix, hosted
 DrawIR, Engine2D, an admitted hosted renderer artifact, broker/CSP enforcement,
 Electron, or Chromium process sandboxing. They do not promote any TLS or
 SANDBOX production row.
+
+## REQ-WEB-BROWSER-014 sandbox/broker — system coverage (2026-08-16)
+
+`test/03_system/browser_engine/browser_renderer_sandbox_spec.spl` is the
+step-based SSpec system scenario for SANDBOX-N/E/D; the mirrored manual is
+`doc/06_spec/03_system/browser_engine/browser_renderer_sandbox_spec.md`. It
+drives `scripts/check/check-browser-renderer-sandbox-seccomp.shs`.
+
+That gate exists because the native self-check
+`src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c` — added
+2026-08-15 with the seccomp ALLOW-list fix — was invoked by **nothing**: no
+runner, no spec, no wrapper. The jail's strongest evidence was unreachable from
+any gate. The gate is fail-closed: a kernel without seccomp/Landlock and a host
+without a C compiler both yield `ERROR — nothing was checked` (exit 2), never a
+pass.
+
+Status split, deliberately:
+
+- The **gate** ran on this host: `PASS — 3 check(s) verified`, including a real
+  `SIGSYS` kill on `socket()`. This is native C-runtime evidence for the jail.
+- The **SSpec scenario has not executed**: no admitted pure-Simple self-hosted
+  runtime exists on this host, and Rust-seed output is not evidence for this
+  lane. REQ-WEB-BROWSER-014 therefore stays **not promoted**; the spec is
+  written to run unchanged once a qualified runtime is deployed.
+
+Problems 2 and 3 of
+`doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md`
+(no namespace/privilege drop; in-process browsers under `src/app/browser/**`
+still evaluate page script unjailed) remain open and are **not** covered by this
+spec. It asserts the jail's syscall contract, not that every browser surface
+enters the jail.
 
 ## Held bundle status (2026-07-30)
 

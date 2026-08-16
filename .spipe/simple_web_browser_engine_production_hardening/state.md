@@ -2676,3 +2676,52 @@ implementation in progress / target evidence blocked
   animation lifecycle `47df593f600`, cookie authority `921fd1`, and D3 retain
   their existing rejected or stopped classifications. No runtime, docgen,
   performance, aggregate HTML/CSS, full-browser, or goal PASS is claimed.
+
+## 2026-08-16 — REQ-WEB-BROWSER-014 sandbox gate wiring (Vulkan/sandbox lane)
+
+- **Audit finding.** The Vulkan half of this lane is code-complete and
+  binary-blocked: `scripts/check/browser_vulkan_evidence.spl` and
+  `check-simple-web-browser-docker-vulkan.shs` are implemented and fail-closed,
+  Docker is usable here and `simple-browser-vulkan:latest` is cached, so the
+  only missing input is an admitted pure-Simple CLI. Its current
+  `SKIPPED (cannot test)` is honest, not a defect. No new Vulkan work was done —
+  it would have duplicated already-landed code.
+- **Genuine gap closed (sandbox half).**
+  `src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c`, added
+  2026-08-15 with the seccomp deny-list→allow-list fix, was invoked by
+  **nothing**: no runner, no spec, no wrapper. Added
+  `scripts/check/check-browser-renderer-sandbox-seccomp.shs` (fail-closed;
+  no-seccomp kernel and no-C-compiler host both yield `ERROR — nothing was
+  checked`, exit 2) plus the step-based SSpec system scenario
+  `test/03_system/browser_engine/browser_renderer_sandbox_spec.spl`
+  (REQ-WEB-BROWSER-014, cases SANDBOX-N/E/D) and its mirrored manual
+  `doc/06_spec/03_system/browser_engine/browser_renderer_sandbox_spec.md`.
+- **Evidence, split honestly.** The GATE executed here:
+  `PASS — 3 check(s) verified`, including a real `SIGSYS` kill on `socket()`
+  through `rt_browser_renderer_sandbox_enter`. That is native C-runtime
+  evidence. The SSPEC SCENARIO is **unexecuted** — no admitted pure-Simple
+  self-hosted runtime exists on this host and Rust-seed output is not accepted
+  for this lane. **REQ-WEB-BROWSER-014 is NOT promoted**; no runtime, docgen, or
+  goal PASS is claimed by this entry.
+- **Runtime blocker (verified, not inherited).** Only `bootstrap/stage3/simple`
+  is non-seed and it core-dumps on a two-line hello-world via both `compile
+  --format=smf` and `native-build`. The bootstrap that would replace it is
+  blocked by design: `bootstrap-from-scratch.sh` requires a planner-admission-v2
+  envelope, and per
+  `doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md` the
+  non-circular producer for that envelope **does not yet exist**. Confirmed
+  empirically — a correctly-formed authorization leaf (reason
+  `self-host-convergence-check`, four real SHA-256 bindings) is rejected with
+  `bootstrap-policy-error: malformed-or-untrusted-planner-admission-v2` by both
+  `--validate-bootstrap-receipt` and a real run. This contradicts
+  `.spipe/stage3-segfault-fix/state.md`, whose closure requires exactly that
+  transaction; that lane's research note calling
+  `scripts/bootstrap/bootstrap-from-scratch.sh` a "stale reference (does not
+  exist)" is also wrong — the script is present (112 KB). Critical path for this
+  lane and every pure-Simple criterion downstream is building the admission
+  producer. Not owned here; not started.
+- **Not covered, do not read as covered**: problems 2 and 3 of
+  `doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md`
+  (no namespace/privilege drop; in-process browsers under `src/app/browser/**`
+  still evaluate page script unjailed). The gate proves the jail's syscall
+  contract, not that every browser surface enters the jail.
