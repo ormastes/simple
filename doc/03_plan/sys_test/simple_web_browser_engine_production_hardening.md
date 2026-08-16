@@ -1778,3 +1778,44 @@ The mirrored manual is
 `doc/06_spec/03_system/app/browser/feature/browser_disabled_fieldset_sequential_focus_spec.md`.
 Status remains **STATIC / EXECUTION HELD** until an admitted current
 pure-Simple runner and docgen execute the scenario.
+
+## REQ-WEB-BROWSER-014 — startup-failure row closed, render route wired (2026-08-16)
+
+The plan row lists three evidence items for this requirement: *syscall denial*,
+*typed broker success*, *startup failure*. Status after this change:
+
+| item | evidence | state |
+|---|---|---|
+| syscall denial | `socket()` SIGSYS-killed by `SECCOMP_RET_KILL_PROCESS` under the real `rt_browser_renderer_sandbox_enter` | native PASS |
+| startup failure | non-empty `envp` fatal with exit 126; `sandbox_enter` refuses without preinit | native PASS (new) |
+| typed broker success | broker -> jailed worker -> Draw IR -> pixels | code complete, NOT executed |
+
+`scripts/check/check-browser-renderer-sandbox-seccomp.shs` now reports
+`PASS — 6 check(s) verified`. The count is ACCUMULATED as each self-check
+passes; it was previously a hardcoded literal `4`, which would have kept
+claiming four even if a check were deleted.
+
+New self-check: `src/runtime/test/rt_browser_renderer_startup_failure_selfcheck.c`.
+Neither of its arms can SKIP — both fire before any kernel capability is
+consulted, so a host without seccomp or Landlock still decides them. Both were
+sabotage-tested and both FAIL under sabotage.
+
+The render route is wired (`src/app/browser/sandbox_render.spl`). The blocker
+previously recorded here — "the broker returns `DrawIrComposition`, not
+`[u32]`, and no rasterizer exists" — was **false**;
+`Engine2dCompositorBackend.render_draw_ir_composition`
+(`src/os/compositor/compositor_engine2d.spl:364`) has 20 call sites. See the
+bug record for how a `.gitignore`-honouring `grep` wrapper produced that false
+absence, and `.claude/skills/spipe.md` for the rule that now prevents it.
+
+**Not promoted.** The sandboxed render has never executed: the Rust seed lacks
+the `rt_browser_renderer_spawn_sandboxed` extern, and no admitted pure-Simple
+runtime exists on this host. Diagnostic seed observations (not lane evidence):
+the browser runs and renders real glyphs (`61 pixels painted`; GUI captured
+under Xvfb at 64x36 with 15 distinct colours), and all three routing states
+report distinct, correct reasons.
+
+Out of scope and explicitly NOT claimed: rendering a real remote page. The app
+returns `"(no page loaded for {url})"` for every URL except `simple://home`
+(`src/app/browser/render_adapter.spl:110-113`). Real TLS/HTTP exists but is
+wired only into the hosted worker browser.

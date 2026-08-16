@@ -1,0 +1,75 @@
+# Sandboxed render route: page markup -> jailed renderer worker -> pixels.
+#
+# This is the route problem 3 of
+# doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md
+# was missing. The jail itself already existed (the worker calls
+# rt_browser_renderer_sandbox_enter: rlimits + no_new_privs + namespaces +
+# Landlock + a seccomp ALLOW-list), and the broker already existed. What was
+# missing was a caller in this app that put page markup through them.
+#
+# Correction worth recording, because it cost real time: this route was
+# previously documented as blocked on "the broker returns DrawIrComposition,
+# not [u32], so a rasterization step is needed that does not exist". That was
+# WRONG. `Engine2dCompositorBackend.render_draw_ir_composition` has existed all
+# along (src/os/compositor/compositor_engine2d.spl:364) and
+# src/os/hosted/hosted_browser_render_evidence.spl:77 already drives exactly
+# this broker -> raster -> pixels sequence. The false negative came from
+# searching with the repo's default `grep`, which is a wrapped ugrep honouring
+# .gitignore and returned zero hits; /usr/bin/grep returns 20. See
+# .claude/rules/commands.md § Fast Path, which warns about precisely this.
+#
+# Fail-closed contract: every failure returns Err. Nothing here falls back to
+# an in-process render, because a silent fallback is indistinguishable to the
+# caller from a successful jailed render — which is the whole defect this
+# route exists to remove.
+
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.hosted.hosted_browser_renderer_process.{HostedBrowserRendererProcess}
+
+val BROWSER_SANDBOX_RENDER_TIMEOUT_MS: i64 = 4000
+
+pub fn browser_sandbox_render_pixels(
+    executable: text, html: text, width: i32, height: i32
+) -> Result<[u32], text>:
+    """Render `html` in the sandboxed renderer worker and return its pixels.
+
+    `executable` is the operator-supplied worker-capable binary probed by
+    `app.browser.sandbox_routing`. The broker takes the executable as a
+    parameter (hosted_browser_renderer_process.spl:1578 `begin_start`), so no
+    current-exe assumption is made and the CLI never needs the worker arg.
+
+    The page's parse/cascade/layout/paint and any script all run in the child,
+    behind the jail. Only Draw IR crosses back; this process rasterizes it
+    with the software backend and never evaluates page content."""
+    var renderer = HostedBrowserRendererProcess.create(1, width, height)
+    val raster = Engine2dCompositorBackend.create_named(width, height, "software")
+
+    val started = renderer.start(executable, BROWSER_SANDBOX_RENDER_TIMEOUT_MS)
+    if not started.ok:
+        raster.shutdown()
+        return Err("sandboxed renderer launch failed: {started.reason}")
+
+    val frame = renderer.render("init", html, BROWSER_SANDBOX_RENDER_TIMEOUT_MS)
+    if not frame.ok:
+        renderer.close()
+        raster.shutdown()
+        return Err("sandboxed render failed: {frame.reason}")
+
+    val rendered = raster.render_draw_ir_composition(frame.composition, [])
+    val closed = renderer.close()
+    raster.shutdown()
+
+    if not closed:
+        return Err("sandboxed renderer cleanup failed")
+    if rendered.fallback_required:
+        return Err("software raster requested a fallback path")
+    # A jailed render that produced no commands is a failure, not an empty
+    # page: it is what a crashed or muzzled worker also looks like, and
+    # returning a blank buffer would present it as a successful render.
+    if rendered.rendered_command_count <= 0:
+        return Err("sandboxed render produced no draw commands")
+    if rendered.pixels.len() != (width * height).to_i64():
+        return Err("sandboxed render size mismatch")
+    Ok(rendered.pixels)
+
+export browser_sandbox_render_pixels

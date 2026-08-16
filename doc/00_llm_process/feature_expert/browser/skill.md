@@ -245,3 +245,51 @@ records `coverage_collector_skips_pub_val_and_match_heads_2026-08-15.md` and
   pure parse/layout/paint. Jail those two, not everything.
 - **`to_not_contain` does not exist** despite ~10 specs under `test/03_system/`
   calling it. Use `expect(x.contains("...")).to_equal(false)`.
+
+## Handoff Notes (2026-08-16, third pass — render route wired, startup failure covered)
+
+- **The render route is WIRED.** `src/app/browser/sandbox_render.spl` drives
+  broker -> jailed worker -> Draw IR -> software raster -> pixels, and
+  `render_adapter.browser_engine_pixels_at` takes it whenever a sandbox is
+  requested. `browser_sandbox_render_route_wired()` is now `true`.
+- **The blocker that justified `false` was never real.** It was documented as
+  "the broker returns `DrawIrComposition`, not `[u32]`, and no rasterizer
+  exists". `Engine2dCompositorBackend.render_draw_ir_composition`
+  (`src/os/compositor/compositor_engine2d.spl:364`) has 20 call sites, and
+  `src/os/hosted/hosted_browser_render_evidence.spl:77` already ran the exact
+  sequence. The false negative came from the repo's `.gitignore`-honouring
+  `grep` wrapper returning 0 hits. Use `/usr/bin/grep` for absence claims —
+  see the rule added to `.claude/skills/spipe.md`.
+- **The second "blocker" was real but irrelevant to that flag.** The worker arg
+  is dispatched only at `hosted_entry.spl:285` and must not reach the CLI — but
+  the broker takes the worker executable as a PARAMETER
+  (`hosted_browser_renderer_process.spl:1578`), so the operator-supplied
+  `SIMPLE_BROWSER_RENDERER_WORKER` satisfies it with no CLI change.
+- **Fail-closed on jail failure**: `browser_engine_pixels_at` returns an EMPTY
+  buffer, never an in-process re-render. A fallback would be indistinguishable
+  from a successful jailed render.
+- **Startup-failure coverage now exists**:
+  `src/runtime/test/rt_browser_renderer_startup_failure_selfcheck.c`. Two arms
+  that can never SKIP because they fire before any kernel capability is
+  consulted — a non-empty envp must be fatal (exit 126), and
+  `rt_browser_renderer_sandbox_enter` must refuse without preinit. Both proven
+  to bite under sabotage.
+- **The gate's check count was a lie and is fixed.** It printed a hardcoded
+  `4 check(s) verified`, which would keep claiming 4 if a check were deleted.
+  Now accumulated as each self-check passes; currently 6.
+- **Live behaviour observed on the Rust seed** (diagnostic, not lane evidence):
+  the browser runs and renders (`61 pixels painted`, real font shaping and
+  Draw IR). All three routing states are distinct and correct — unset ->
+  `worker-executable-not-configured`, bad path -> `worker-executable-not-found`,
+  valid path -> the route is actually taken and reaches the broker spawn.
+- **The remaining blocker on the sandboxed render is the SEED, not this code**:
+  it dies with `unknown extern function: rt_browser_renderer_spawn_sandboxed`.
+  The C runtime defines it (`runtime_process.c:889,1408`); the Rust seed's
+  extern registry does not. Same class as
+  `deployed_binary_missing_rt_raw_i64_to_string_extern_2026-08-04.md`.
+- **Google/real-URL rendering is NOT possible from this app.**
+  `render_adapter.spl:110-113` returns `"(no page loaded for {url})"` for every
+  URL except `simple://home`. Real TLS/HTTP exists
+  (`src/lib/gc_async_mut/gpu/browser_engine/net/{fetch,h1_client,tls}.spl`) but
+  is wired only into the hosted worker browser. Wiring it here is a separate
+  lane; do not claim a real page rendered until it is.

@@ -118,3 +118,30 @@ and the bootstrap admission blocker recorded in the lane state). Rust-seed
 output is not accepted as evidence for this lane. The spec is written to
 execute unchanged once a qualified runtime is deployed; until then
 REQ-WEB-BROWSER-014 remains **not promoted**.
+
+## Startup failure (added 2026-08-16)
+
+The scenarios above all describe a jail that is already running. This one
+describes what happens when it must **not** start.
+
+Every failure path in `browser_renderer_preinit` collapses to a single
+`_exit(126)`, and `rt_browser_renderer_sandbox_enter` collapses to a bare
+`false`. A change that turned either into a silent success would leave a
+renderer executing page script with no confinement at all, while every other
+scenario on this page still passed — they only run once the jail is up.
+
+Two assertions, neither of which can be skipped, because both are decided
+before any kernel capability is consulted:
+
+1. **A contract-violating environment is fatal.** The renderer worker is
+   executed with an empty environment so it cannot inherit secrets, proxy
+   settings, or `LD_*` injection. Handing it a non-empty environment must kill
+   the process with exit 126. It must never continue unconfined.
+2. **The jail is fail-closed without preinit.** A process whose `argv[0]` is
+   not the worker marker is deliberately left alone — ordinary `simple`
+   invocations must not be jailed. Asking such a process to enter the jail must
+   be refused, not reported as a jail that was never built.
+
+The gate's verdict states how many checks actually ran. That count is
+accumulated as each self-check passes rather than printed as a fixed number, so
+deleting a check lowers the count instead of leaving a stale claim behind.

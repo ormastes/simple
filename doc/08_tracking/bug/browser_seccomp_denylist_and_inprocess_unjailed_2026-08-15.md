@@ -1,11 +1,14 @@
 # Browser jail: seccomp is a deny-list and in-process browsers are unjailed
 
 - **Date**: 2026-08-15
-- **Status**: PARTIALLY FIXED (problem 1 fixed 2026-08-15: seccomp is now an
-  ALLOW-list; **problem 2 fixed 2026-08-16**: user/net/IPC namespaces + uid/gid
-  drop, with a published posture bit — see below; problem 3 partially
-  addressed: honest sandbox posture surface + refusal gate landed, worker
-  routing still open)
+- **Status**: ALL THREE PROBLEMS ADDRESSED IN CODE; runtime execution of the
+  sandboxed render is blocked on the seed (problem 1 fixed 2026-08-15: seccomp
+  is now an ALLOW-list; **problem 2 fixed 2026-08-16**: user/net/IPC namespaces
+  + uid/gid drop with a published posture bit; **problem 3 code-complete
+  2026-08-16**: `src/app/browser/sandbox_render.spl` routes page markup through
+  the jailed worker and `browser_sandbox_render_route_wired()` is now `true` —
+  see "Problem 3 resolution" below, including the correction of a blocker that
+  was never real)
 - **Area**: runtime (C), app/browser, os/hosted
 - **Research**: `doc/01_research/app/browser/browser_sandbox_model_research_2026-08-15.md`
 
@@ -224,3 +227,90 @@ uid_map/gid_map was not written (overflow id means an unmapped user namespace)
 Lesson worth keeping: a check that observes the single easiest-to-see effect
 will happily pass a partial implementation. Verify every claim the change
 makes, or narrow the claim.
+
+## Problem 3 resolution (2026-08-16) — and a blocker that was never real
+
+`src/app/browser/sandbox_render.spl` now performs the route:
+
+    broker (HostedBrowserRendererProcess)
+      -> jailed worker (rt_browser_renderer_sandbox_enter)
+      -> DrawIrComposition back over the pipe
+      -> Engine2dCompositorBackend.render_draw_ir_composition
+      -> [u32] pixels
+
+`render_adapter.browser_engine_pixels_at` takes this route whenever a sandbox
+is requested, so page parse/cascade/layout/paint and any script run in the
+child. This process only rasterizes Draw IR; it never evaluates page content.
+
+### The false blocker
+
+This flag sat at `false` with a documented justification that was wrong:
+
+> `HostedBrowserRendererProcess.render(...)` returns a `DrawIrComposition`, not
+> `[u32]` ... the app needs a rasterization step (Engine2dCompositorBackend)
+> that it does not have today.
+
+`Engine2dCompositorBackend.render_draw_ir_composition` exists at
+`src/os/compositor/compositor_engine2d.spl:364` and has 20 call sites.
+`src/os/hosted/hosted_browser_render_evidence.spl:77` already ran precisely the
+sequence declared impossible. The claim came from a search with the repo's
+default `grep` — a `.gitignore`-honouring ugrep wrapper that returned 0 hits
+where `/usr/bin/grep -rn` returns 20 — and was then quoted back as confirmation
+by a later reader, including a subagent that called it "confirmed by exhaustive
+grep". Rule added to `.claude/skills/spipe.md`: absence claims require
+`/usr/bin/grep`, and a blocker recorded in a doc is a claim to re-verify, not a
+fact to build around.
+
+The second stated blocker was true but never applied to this flag: the worker
+argv marker is dispatched only at `hosted_entry.spl:285` and must not be added
+to the CLI (it would pull `os.hosted.*` into every `simple` invocation's
+startup closure). It does not need to be — `begin_start`
+(`hosted_browser_renderer_process.spl:1578`) takes the worker executable as a
+parameter, which is exactly what the operator-supplied
+`SIMPLE_BROWSER_RENDERER_WORKER` provides.
+
+### Fail-closed contract
+
+Every failure inside the jailed path returns `Err`, and
+`browser_engine_pixels_at` converts that to an EMPTY pixel buffer. It never
+falls back to an in-process render: a fallback would hand the caller good
+pixels with no way to know page script had just run unconfined, which is the
+precise defect this route removes. An empty buffer is never a valid render
+(a real one is always `width * height`), so callers can detect it.
+
+### Startup-failure coverage (was missing entirely)
+
+`src/runtime/test/rt_browser_renderer_startup_failure_selfcheck.c` closes the
+third acceptance row. The two older self-checks both describe a jail that is
+already up; nothing asserted what happens when it must not come up, even though
+every failure path in `browser_renderer_preinit` collapses to a single
+`_exit(126)` and `rt_browser_renderer_sandbox_enter` collapses to a bare
+`false`. Two arms, neither able to SKIP because both fire before any kernel
+capability is consulted:
+
+1. a non-empty `envp` violates the worker entry contract and must be fatal
+   with exit 126 — never an inherited environment;
+2. `rt_browser_renderer_sandbox_enter` must return `false` when preinit never
+   ran, rather than report a jail it never built.
+
+Both were sabotage-tested (relax the envp check; drop the preinit-active
+guard) and both FAIL under sabotage, PASS clean.
+
+### Gate count was hardcoded
+
+`check-browser-renderer-sandbox-seccomp.shs` printed a literal
+`PASS — 4 check(s) verified`, which would have kept claiming four even if a
+check were deleted — the vacuous-pass shape the repo's other guards exist to
+refuse. The count is now accumulated as each self-check passes, and a run that
+verified nothing is an ERROR. Current verdict: `PASS — 6 check(s) verified`.
+
+### What is still NOT proven
+
+The sandboxed render has never executed. On the Rust seed it dies with
+`unknown extern function: rt_browser_renderer_spawn_sandboxed` — the C runtime
+defines it (`runtime_process.c:889,1408`), the seed's extern registry does not
+(same class as `deployed_binary_missing_rt_raw_i64_to_string_extern_2026-08-04.md`).
+No admitted pure-Simple runtime exists on this host, so REQ-WEB-BROWSER-014
+stays **not promoted**. What IS proven natively: the jail's syscall contract,
+its namespace posture, and its startup-failure behaviour, all via the C
+self-checks.

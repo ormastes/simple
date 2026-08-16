@@ -30,6 +30,7 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 SECCOMP_SRC="$ROOT_DIR/src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c"
 NS_SRC="$ROOT_DIR/src/runtime/test/rt_browser_renderer_namespace_selfcheck.c"
+STARTUP_SRC="$ROOT_DIR/src/runtime/test/rt_browser_renderer_startup_failure_selfcheck.c"
 
 err() { echo "ERROR — nothing was checked: $1"; exit 2; }
 
@@ -67,6 +68,12 @@ build() {
         "$_src" "$LINK_GC" -pthread -o "$_out" >"$WORK/build.log" 2>&1
 }
 
+# Checks are COUNTED as they pass, never announced as a literal. The verdict
+# line previously hardcoded "4 check(s)", which would keep claiming 4 even if a
+# check were deleted — the exact vacuous-pass shape the repo's other guards are
+# built to refuse. CHECKS is incremented only at a point already proven reached.
+CHECKS=0
+
 # --- SANDBOX-N / SANDBOX-E: seccomp allow-list -------------------------------
 if ! build "$SECCOMP_SRC" "$WORK/seccomp"; then
     cat "$WORK/build.log"
@@ -94,6 +101,10 @@ case "$SECCOMP_EXIT" in
         exit 1
         ;;
 esac
+# Three distinct assertions: allow-listed read works, allow-listed write works,
+# and a non-allow-listed socket() is SIGSYS-killed through the real
+# rt_browser_renderer_sandbox_enter.
+CHECKS=$((CHECKS + 3))
 
 # --- SANDBOX-D: namespace layer ---------------------------------------------
 if ! build "$NS_SRC" "$WORK/ns"; then
@@ -128,6 +139,46 @@ else
     POSTURE=unavailable
 fi
 echo "sandbox_namespaces=$POSTURE"
+CHECKS=$((CHECKS + 1))
 
-echo "PASS — 4 check(s) verified: allow-listed read/write work inside the jail, a non-allow-listed socket() is SIGSYS-killed by SECCOMP_RET_KILL_PROCESS, the jail was entered through the real rt_browser_renderer_sandbox_enter, and the namespace posture ($POSTURE) matches the observed /proc/self/ns/net identity"
+# --- SANDBOX startup failure -------------------------------------------------
+# The two checks above both assert behaviour of a jail that is already UP. This
+# one asserts what happens when it must NOT come up. Without it, a change that
+# turned either failure path into a silent success would leave page script
+# running unconfined with every other check still green.
+#
+# Unlike the checks above this one can never SKIP: both arms fire before any
+# kernel capability is consulted, so a host lacking seccomp or Landlock still
+# decides them.
+if ! build "$STARTUP_SRC" "$WORK/startup"; then
+    cat "$WORK/build.log"
+    echo "FAIL — browser renderer startup-failure self-check did not compile"
+    exit 1
+fi
+
+set +e
+"$WORK/startup" >"$WORK/startup.log" 2>&1
+STARTUP_EXIT=$?
+set -e
+cat "$WORK/startup.log"
+
+case "$STARTUP_EXIT" in
+    0)
+        grep -q 'rt_browser_renderer_startup_failure_selfcheck: PASS' \
+            "$WORK/startup.log" ||
+            err "startup-failure self-check exited 0 without its PASS marker"
+        ;;
+    *)
+        echo "FAIL — browser renderer startup-failure self-check failed (exit $STARTUP_EXIT)"
+        exit 1
+        ;;
+esac
+# Two assertions: a contract-violating (non-empty) envp is fatal with exit 126,
+# and rt_browser_renderer_sandbox_enter refuses when preinit never ran.
+CHECKS=$((CHECKS + 2))
+
+# Non-vacuity: a run that verified nothing is an ERROR, never a pass.
+[ "$CHECKS" -gt 0 ] || err "no checks were executed"
+
+echo "PASS — $CHECKS check(s) verified: allow-listed read/write work inside the jail, a non-allow-listed socket() is SIGSYS-killed by SECCOMP_RET_KILL_PROCESS through the real rt_browser_renderer_sandbox_enter, the namespace posture ($POSTURE) matches the observed /proc/self/ns/net identity, a non-empty envp is refused with exit 126, and sandbox_enter fails closed without preinit"
 exit 0

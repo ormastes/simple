@@ -2582,3 +2582,39 @@ Import form: `use std.spec.*` dominates `test/03_system` (944 files vs 201
 brace-form vs 125 `std.spipe.*`). Caveat already noted in `spec.spl:609-613` —
 the wildcard does not reliably expose every `pub fn`, so import
 `prevent`/`prevent_at_most`/`prevent_file` fully-qualified.
+
+## A "does not exist" finding from `grep` is not evidence (2026-08-16)
+
+The default `grep` in this repo is a wrapped ugrep that honours `.gitignore`.
+It silently returns FEWER hits than a real exhaustive scan, and a zero-hit
+result reads exactly like proof of absence.
+
+This cost a full implementation cycle on the browser sandbox lane. A search for
+a `DrawIrComposition -> [u32]` rasterizer returned **0 hits**, so the render
+route was documented — in code comments, in the plan doc, in the bug record and
+in the feature wiki — as blocked on "a rasterization step that does not exist".
+It existed the whole time:
+`Engine2dCompositorBackend.render_draw_ir_composition`
+(`src/os/compositor/compositor_engine2d.spl:364`), with **20** call sites
+including `src/os/hosted/hosted_browser_render_evidence.spl:77`, which already
+performed the exact broker -> raster -> pixels sequence that was declared
+impossible. `/usr/bin/grep -rn` finds all 20.
+
+Rules that follow:
+
+- **Any claim of the form "X does not exist" must be made with
+  `/usr/bin/grep -rn`**, never the wrapper. `.claude/rules/commands.md` § Fast
+  Path already says this for censuses; it applies with more force to absence
+  claims, because a false absence gets written into docs as a blocker and then
+  nobody re-checks it.
+- **Subagents inherit the trap.** An Explore agent reported "confirmed by
+  exhaustive grep" and quoted the repo's own stale comment back as
+  corroboration — two independent-looking sources that were the same error.
+  When an agent reports something absent, re-run the search yourself with
+  `/usr/bin/grep` before acting on it.
+- **A blocker recorded in a doc is a claim, not a fact.** Before building
+  around one, re-verify it. The stale comment in `sandbox_status.spl` made the
+  false blocker look confirmed for a second session in a row.
+- Prefer a positive check: instead of "no function returns pixels", grep for
+  the concrete producer already in use (`\.pixels`, `render_.*composition`) and
+  read its callers.

@@ -2839,3 +2839,27 @@ implementation in progress / target evidence blocked
   targets two functions, not all rendering.
   **NOTE: none of this .spl is executable here** — no admitted runtime, so the
   new module and spec are unverified code, not a pass.
+
+## 2026-08-16 — REQ-WEB-BROWSER-014 render route wired, startup failure covered
+
+- `src/app/browser/sandbox_render.spl` routes page markup through the jailed
+  worker: broker -> worker -> Draw IR -> `render_draw_ir_composition` -> pixels.
+  `browser_sandbox_render_route_wired()` flipped to `true`.
+- The blocker that kept it `false` was a FALSE NEGATIVE from the repo's
+  `.gitignore`-honouring `grep` wrapper (0 hits vs 20 from `/usr/bin/grep`).
+  Rule recorded in `.claude/skills/spipe.md`: absence claims require
+  `/usr/bin/grep`, and subagent "not found" results must be re-verified.
+- New native check `rt_browser_renderer_startup_failure_selfcheck.c` closes the
+  startup-failure acceptance row. Two arms, neither can SKIP, both sabotage-
+  proven.
+- Gate check count was a hardcoded `4` and is now accumulated; verdict is
+  `PASS — 6 check(s) verified`.
+- Fail-closed on jail failure: empty buffer, never an in-process re-render.
+- **Blocked, not done**: the sandboxed render has never executed. Seed lacks the
+  `rt_browser_renderer_spawn_sandboxed` extern; no admitted pure-Simple runtime
+  on this host. REQ-WEB-BROWSER-014 stays NOT promoted.
+- Diagnostic (seed, not lane evidence): browser runs, GUI window captured under
+  Xvfb (64x36, 15 distinct colours, real antialiased glyphs), all three routing
+  states report distinct correct reasons.
+- Explicitly not claimed: real remote page rendering. The app stubs every URL
+  except `simple://home`; real TLS/HTTP is wired only into the hosted browser.

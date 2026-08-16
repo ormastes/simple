@@ -19,6 +19,9 @@ use app.ui.render.html.{html_page, html_escape, css_dark_theme, css_light_theme,
 use app.ui.render.ansi.{colorize, BOLD, DIM, CYAN, GREEN}
 use app.ui.render.css.{css_for_components}
 use app.browser.render_lane.{browser_render_html_to_pixel_array}
+use app.browser.sandbox_status.{browser_sandbox_status}
+use app.browser.sandbox_routing.{browser_sandbox_worker_executable}
+use app.browser.sandbox_render.{browser_sandbox_render_pixels}
 use std.gc_async_mut.web.browser_session.{BrowserSession}
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_loading.*
@@ -134,8 +137,31 @@ pub fn browser_engine_pixels_at(url: text, width: i32, height: i32) -> [u32]:
     Routed through `app.browser.render_lane` (Stage 5 of
     doc/03_plan/ui/rendering/blink_wiring_plan.md) rather than calling the live
     engine directly, so the lane is selectable by flag. The flag defaults to
-    the live lane, so this call renders exactly as it did before."""
+    the live lane, so this call renders exactly as it did before.
+
+    When a sandbox is REQUESTED and routing is available, the page is instead
+    rendered by the jailed worker process and this host process only
+    rasterizes the returned Draw IR — it never parses or executes page
+    content. On a jail failure this returns an EMPTY buffer rather than
+    falling back to an in-process render: a fallback would be
+    indistinguishable to the caller from a successful jailed render, which is
+    precisely the defect REQ-WEB-BROWSER-014 exists to prevent. An empty
+    buffer is never a valid render (a real one is always width*height), so
+    callers can detect it."""
     val html = browser_page_document_html(url)
+    val sandbox = browser_sandbox_status()
+    if sandbox.requested:
+        if not sandbox.jailed:
+            # main.spl refuses at startup, so reaching here means the posture
+            # changed under us. Refuse rather than render unjailed.
+            return []
+        match browser_sandbox_render_pixels(
+            browser_sandbox_worker_executable(), html, width, height
+        ):
+            Ok(pixels):
+                return pixels
+            Err(_):
+                return []
     if browser_document_needs_session(html):
         return browser_session_pixels_at_time(url, html, width, height, 0)
     browser_render_html_to_pixel_array(html, width, height)

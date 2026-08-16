@@ -172,3 +172,38 @@ flipped, and neither is a wiring detail:
    (`browser_session_pixels_at_time`, `browser_engine_animated_frames`);
    `browser_render_html_to_pixel_array` is pure parse/layout/paint. Jailing
    should target those two, not all rendering.
+
+## Sandboxed rendering (2026-08-16)
+
+Request the jailed renderer and point the browser at a worker-capable binary:
+
+```bash
+export SIMPLE_BROWSER_SANDBOX=1
+export SIMPLE_BROWSER_RENDERER_WORKER=/path/to/worker-capable-binary
+bin/simple run src/app/browser/main.spl
+```
+
+Both are required and both fail closed. Check the posture without rendering:
+
+```bash
+bin/simple run src/app/browser/main.spl --sandbox-status
+```
+
+The three refusal reasons are distinct on purpose, so you can tell configuration
+from capability:
+
+| reason | meaning |
+|---|---|
+| `worker-executable-not-configured` | `SIMPLE_BROWSER_RENDERER_WORKER` is unset |
+| `worker-executable-not-found` | it is set but nothing is at that path |
+| `render-route-not-wired` | the code cannot route (no longer the case) |
+
+A sandbox request that cannot be honoured exits 1 rather than rendering
+unjailed. If a sandboxed render fails mid-flight, `browser_engine_pixels_at`
+returns an EMPTY buffer — it never silently re-renders in this process, because
+that would be indistinguishable from a successful jailed render.
+
+The worker executable must be one that dispatches the renderer worker argv
+marker (as `src/os/hosted/hosted_entry.spl` does). The browser's own binary is
+not one, deliberately: adding that marker to the CLI would pull `os.hosted.*`
+into the startup closure of every `simple` invocation.

@@ -1,4 +1,5 @@
 # @cover src/app/browser/sandbox_routing.spl 90%
+# @cover src/app/browser/sandbox_render.spl 60%
 # @req REQ-WEB-BROWSER-014
 """
 # Browser Sandbox Worker Routing: Fail-Closed Capability Probe
@@ -18,12 +19,14 @@ capability is PROBED.
 
 The contract this spec defends is that every probe failure keeps the honest
 refusal. There must be no path from "probe failed" to "rendered unjailed",
-and no path from "executable configured" to "claimed jailed" while the render
-route is still unwired.
+and no path from "render failed inside the jail" to "re-rendered in this
+process".
 
-The audience is whoever lands the render route: flip
-`browser_sandbox_render_route_wired` only when pages genuinely reach the
-worker, and this spec tells you what must stay true.
+The render route is now wired: `app.browser.sandbox_render` drives
+broker -> jailed worker -> Draw IR -> software raster -> pixels. So the
+remaining risk this spec guards is the quiet downgrade — a sandboxed render
+that fails and gets silently replaced by an in-process one, which the caller
+cannot distinguish from success.
 
 ## Scope
 
@@ -49,6 +52,7 @@ use app.browser.sandbox_status.{
     browser_sandbox_unavailable_reason,
     browser_sandbox_status
 }
+use app.browser.sandbox_render.{browser_sandbox_render_pixels}
 use std.io_runtime.{env_get}
 
 describe "browser sandbox worker routing fails closed":
@@ -75,31 +79,47 @@ describe "browser sandbox worker routing fails closed":
             expect(reason).to_equal(BROWSER_SANDBOX_ROUTING_UNSET)
             expect(browser_sandbox_routing_probe()).to_equal(false)
 
-    it "never reports jailed while the render route is unwired":
+    it "never claims jailed without a configured worker executable":
         """
-        This is the load-bearing guarantee. Supplying a worker executable makes
-        the capability probe pass, but pages do not reach the worker until the
-        render route is wired. If those two were conflated, setting one
-        environment variable would flip the browser from an honest refusal to
-        a confident claim of a sandbox it does not have.
+        This is the load-bearing guarantee. The render route is now wired, so
+        the browser CAN hand pages to the jailed worker — but only if an
+        operator actually supplied a worker-capable binary. If capability and
+        configuration were conflated, a browser with the code present but no
+        worker configured would claim a sandbox it never entered.
         """
-        step("Check whether the render route has been wired")
-        val wired = browser_sandbox_render_route_wired()
+        step("The render route is wired, so code capability is present")
+        expect(browser_sandbox_render_route_wired()).to_equal(true)
 
-        step("While unwired, routing is unavailable regardless of the probe")
-        if not wired:
+        step("With no worker executable configured, routing stays unavailable")
+        if not browser_sandbox_routing_probe():
             expect(browser_sandbox_worker_routing_available()).to_equal(false)
 
             step("And the posture never claims jailed, whatever was requested")
             expect(browser_sandbox_status().jailed).to_equal(false)
 
-            step("The unavailable reason distinguishes config from capability")
-            val why = browser_sandbox_unavailable_reason()
-            if browser_sandbox_routing_probe():
-                # Executable supplied, so the only remaining blocker is code.
-                expect(why).to_equal("render-route-not-wired")
-            else:
-                expect(why).to_equal(browser_sandbox_routing_reason())
+            step("The reason names the missing configuration, not the code")
+            expect(browser_sandbox_unavailable_reason())
+                .to_equal(browser_sandbox_routing_reason())
+
+    it "refuses rather than falling back when the jail cannot render":
+        """
+        The dangerous failure is not a crash, it is a quiet downgrade. If a
+        sandboxed render fails and the browser silently re-rendered the page
+        in this process, the caller would receive perfectly good pixels and
+        have no way to know page script had just run unconfined. So the
+        sandboxed path reports failure instead of substituting an in-process
+        render.
+        """
+        step("A sandboxed render against a non-existent worker must fail")
+        match browser_sandbox_render_pixels(
+            "/nonexistent/worker-binary", "<html><body>x</body></html>", 8, 8
+        ):
+            Ok(_):
+                step("A missing worker binary must never yield pixels")
+                expect(false).to_equal(true)
+            Err(reason):
+                step("The failure is reported, with a reason, and no pixels")
+                expect(reason.len() > 0).to_equal(true)
 
     it "requires both halves before routing is available":
         """
