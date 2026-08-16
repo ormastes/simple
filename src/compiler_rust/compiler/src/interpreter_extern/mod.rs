@@ -1648,6 +1648,18 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_mmio_write_u16", memory::rt_mmio_write_u16);
     insert_simple!("rt_mmio_read_u8", memory::rt_mmio_read_u8);
     insert_simple!("rt_mmio_write_u8", memory::rt_mmio_write_u8);
+    // rt_volatile_* — interpreter counterparts of the native runtime's
+    // volatile MMIO accessors (runtime/src/lib.rs). Without these, any spec
+    // touching an ivshmem/mmio path died with "unknown extern function"; see
+    // doc/08_tracking/bug/interpreter_missing_rt_volatile_externs_blocks_ivshmem_specs_2026-08-15.md.
+    insert_simple!("rt_volatile_read_u8", memory::rt_volatile_read_u8);
+    insert_simple!("rt_volatile_read_u16", memory::rt_volatile_read_u16);
+    insert_simple!("rt_volatile_read_u32", memory::rt_volatile_read_u32);
+    insert_simple!("rt_volatile_read_u64", memory::rt_volatile_read_u64);
+    insert_simple!("rt_volatile_write_u8", memory::rt_volatile_write_u8);
+    insert_simple!("rt_volatile_write_u16", memory::rt_volatile_write_u16);
+    insert_simple!("rt_volatile_write_u32", memory::rt_volatile_write_u32);
+    insert_simple!("rt_volatile_write_u64", memory::rt_volatile_write_u64);
     insert_simple!("rt_ptr_write_u8", memory::rt_ptr_write_u8);
     insert_simple!("rt_copy_user_byte", memory::rt_copy_user_byte);
     insert_simple!("rt_random_getstate", random::rt_random_getstate_fn);

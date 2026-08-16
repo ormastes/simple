@@ -976,6 +976,107 @@ pub fn rt_mmio_write_u8(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Nil)
 }
 
+
+/// Volatile read/write family mirroring the native runtime's
+/// `rt_volatile_read_u{8,16,32,64}` / `rt_volatile_write_u{8,16,32,64}`
+/// (src/compiler_rust/runtime/src/lib.rs:379-417, all `(addr: i64 [, value:
+/// i64])` C-ABI). Under the tree-walk interpreter these serve spec harnesses
+/// whose "mmio" region is a plain `rt_alloc`ed process-memory buffer (mock
+/// ivshmem), so a plain load/store through the pointer is faithful — no real
+/// volatile ordering semantics are needed here; `read_volatile`/
+/// `write_volatile` are used anyway to match the JIT lane byte-for-byte.
+/// Addresses are treated strictly as process-memory addresses, same as the
+/// sibling `rt_ptr_*`/`rt_mmio_*` accessors above. See
+/// doc/08_tracking/bug/interpreter_missing_rt_volatile_externs_blocks_ivshmem_specs_2026-08-15.md.
+///
+/// Callable from Simple as: `rt_volatile_read_u8(addr: i64) -> i64`
+pub fn rt_volatile_read_u8(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_volatile_read_u8 requires 1 argument (addr)"));
+    }
+    let addr = args[0].as_int()? as usize;
+    unsafe { Ok(Value::Int((addr as *const u8).read_volatile() as i64)) }
+}
+
+/// Callable from Simple as: `rt_volatile_read_u16(addr: i64) -> i64`
+pub fn rt_volatile_read_u16(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_volatile_read_u16 requires 1 argument (addr)"));
+    }
+    let addr = args[0].as_int()? as usize;
+    unsafe { Ok(Value::Int((addr as *const u16).read_volatile() as i64)) }
+}
+
+/// Callable from Simple as: `rt_volatile_read_u32(addr: i64) -> i64`
+pub fn rt_volatile_read_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_volatile_read_u32 requires 1 argument (addr)"));
+    }
+    let addr = args[0].as_int()? as usize;
+    unsafe { Ok(Value::Int((addr as *const u32).read_volatile() as i64)) }
+}
+
+/// Callable from Simple as: `rt_volatile_read_u64(addr: i64) -> i64`
+pub fn rt_volatile_read_u64(args: &[Value]) -> Result<Value, CompileError> {
+    if args.is_empty() {
+        return Err(CompileError::runtime("rt_volatile_read_u64 requires 1 argument (addr)"));
+    }
+    let addr = args[0].as_int()? as usize;
+    unsafe { Ok(Value::Int((addr as *const u64).read_volatile() as i64)) }
+}
+
+/// Callable from Simple as: `rt_volatile_write_u8(addr: i64, value: i64)`
+pub fn rt_volatile_write_u8(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_volatile_write_u8 requires 2 arguments (addr, value)",
+        ));
+    }
+    let addr = args[0].as_int()? as usize;
+    let value = args[1].as_int()? as u8;
+    unsafe { (addr as *mut u8).write_volatile(value) };
+    Ok(Value::Nil)
+}
+
+/// Callable from Simple as: `rt_volatile_write_u16(addr: i64, value: i64)`
+pub fn rt_volatile_write_u16(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_volatile_write_u16 requires 2 arguments (addr, value)",
+        ));
+    }
+    let addr = args[0].as_int()? as usize;
+    let value = args[1].as_int()? as u16;
+    unsafe { (addr as *mut u16).write_volatile(value) };
+    Ok(Value::Nil)
+}
+
+/// Callable from Simple as: `rt_volatile_write_u32(addr: i64, value: i64)`
+pub fn rt_volatile_write_u32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_volatile_write_u32 requires 2 arguments (addr, value)",
+        ));
+    }
+    let addr = args[0].as_int()? as usize;
+    let value = args[1].as_int()? as u32;
+    unsafe { (addr as *mut u32).write_volatile(value) };
+    Ok(Value::Nil)
+}
+
+/// Callable from Simple as: `rt_volatile_write_u64(addr: i64, value: i64)`
+pub fn rt_volatile_write_u64(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_volatile_write_u64 requires 2 arguments (addr, value)",
+        ));
+    }
+    let addr = args[0].as_int()? as usize;
+    let value = args[1].as_int()? as u64;
+    unsafe { (addr as *mut u64).write_volatile(value) };
+    Ok(Value::Nil)
+}
+
 /// Read one byte from a raw address (hosted/interpreter counterpart of a
 /// kernel `copy_from_user`).
 ///
