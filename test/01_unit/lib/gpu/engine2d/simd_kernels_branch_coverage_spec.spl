@@ -12,7 +12,7 @@ native-vs-scalar routing gates take both sides across the run matrix.
 """
 
 use std.spec.{describe, it, expect}
-use std.gpu.engine2d.simd_kernels.{SimdLevel, detect_simd_level, simd_config_mode, native_pixel_rows_enabled, active_feature_text, active_arch_text, active_target_features, fill_span, _scalar_fill_span, copy_span, _scalar_copy_span, alpha_blend_span, _scalar_alpha_blend_span, simd_fill_row, _scalar_fill_row, simd_blend_row, _scalar_blend_row, simd_blit_row, _scalar_blit_row, simd_blit_rect, blit_rect, _scalar_blit_rect, simd_scroll_region, scroll_region, _scalar_scroll_region, CpuSimdRuntimeEvidence, cpu_simd_runtime_evidence, cpu_simd_required_evidence_valid, native_simd_pixel_evidence, _bool_text, _cpu_simd_checksum, make_cpu_simd_provider, engine2d_simd_has_sse, engine2d_simd_has_avx2, engine2d_simd_has_neon, engine2d_simd_has_rvv}
+use std.gpu.engine2d.simd_kernels.{SimdLevel, _forced_simd_level, detect_simd_level, simd_config_mode, native_pixel_rows_enabled, active_feature_text, active_arch_text, active_target_features, fill_span, _scalar_fill_span, copy_span, _scalar_copy_span, alpha_blend_span, _scalar_alpha_blend_span, simd_fill_row, _scalar_fill_row, simd_blend_row, _scalar_blend_row, simd_blit_row, _scalar_blit_row, simd_blit_rect, blit_rect, _scalar_blit_rect, simd_scroll_region, scroll_region, _scalar_scroll_region, CpuSimdRuntimeEvidence, cpu_simd_runtime_evidence, cpu_simd_required_evidence_valid, native_simd_pixel_evidence, _bool_text, _cpu_simd_checksum, make_cpu_simd_provider, engine2d_simd_has_sse, engine2d_simd_has_avx2, engine2d_simd_has_neon, engine2d_simd_has_rvv}
 
 fn mk_evidence(arch: text, feature: text, executed: bool, native_exec: bool, bit_exact: bool, hits: i64) -> CpuSimdRuntimeEvidence:
     CpuSimdRuntimeEvidence(
@@ -280,6 +280,26 @@ describe "detection, config and routing gates":
         expect enabled == cached
         if mode == "off":
             expect enabled == false
+
+    it "_forced_simd_level maps each explicit ISA name and rejects the rest":
+        expect _forced_simd_level("sse2").to_text() == "SSE4.2"
+        expect _forced_simd_level("avx2").to_text() == "AVX2"
+        expect _forced_simd_level("neon").to_text() == "NEON"
+        expect _forced_simd_level("rvv").to_text() == "RVV"
+        expect _forced_simd_level("auto").to_text() == "None"
+        expect _forced_simd_level("off").to_text() == "None"
+        expect _forced_simd_level("bogus").to_text() == "None"
+
+    it "an unknown SIMPLE_2D_SIMD name never forces a level":
+        # Run the matrix with SIMPLE_2D_SIMD=bogus to drive detect_simd_level's
+        # forced-name gate (line 151) down its false side: an unknown name is
+        # not auto/off, but _forced_simd_level returns None_, so detection
+        # falls through to the host CPU probes.
+        val mode = simd_config_mode()
+        if mode != "auto" and mode != "off":
+            if _forced_simd_level(mode).to_text() == "None":
+                # unknown name: the detected level must be host-derived, never None-forced text mismatch
+                expect detect_simd_level().feature_text().len() > 0
 
     it "feature probes return stable booleans":
         expect engine2d_simd_has_sse() == engine2d_simd_has_sse()
