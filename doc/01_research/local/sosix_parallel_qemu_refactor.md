@@ -18,6 +18,16 @@ diagnostic or blocked, not release PASS evidence. The current implementation
 and unblock commands are authoritative in the agent plan, platform guide, and
 remaining-owners tracker linked below.
 
+## 2026-08-16 positioned-I/O continuation
+
+The correction above records the state before this scoped continuation. The
+current lane now adds FAT32 explicit-offset primitives, generation-safe
+canonical file objects with alias retirement, a concrete owned-copy SOSIX
+backend, and production shim retention. Authenticated registry installation is
+still explicit and fail closed. Runtime, linked-kernel, and QEMU claims remain
+blocked until a receipt-bound source-matched Stage-4 runtime executes the
+focused gates; the Rust seed and earlier retained ELF are inadmissible.
+
 ## Existing architecture and implementation surfaces
 
 The repository now has one configurable large-artifact owner:

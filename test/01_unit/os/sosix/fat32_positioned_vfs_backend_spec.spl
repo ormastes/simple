@@ -1,0 +1,52 @@
+# @cover src/os/sosix/fs/fat32_positioned_vfs_backend.spl 80%
+"""SOSIX FAT32 positioned backend boundary and failure contracts."""
+
+use std.spec.*
+use os.sosix.fs.fat32_positioned_vfs_backend.*
+use os.sosix.fs.service_vfs_backend_v1.SosixPositionedVfsBackendV1
+
+describe "SOSIX FAT32 positioned VFS backend":
+    it "advertises the real cursor-independent primitive implementation":
+        val backend = SosixFat32PositionedVfsBackendV1()
+        expect(backend.positioned_io_available()).to_be(true)
+
+    it "rejects lengths that cannot become a Simple byte-array index":
+        val backend = SosixFat32PositionedVfsBackendV1()
+        val result = backend.read_at(
+            1, 0, SOSIX_FAT32_POSITIONED_MAX_LENGTH_V1 + 1)
+        expect(result.is_err()).to_be(true)
+        expect(result.unwrap_err()).to_equal("fat32-positioned-length-overflow")
+
+    it "rejects overflowing read and write ranges before kernel dispatch":
+        val backend = SosixFat32PositionedVfsBackendV1()
+        val read_result = backend.read_at(1, 0xffffffffffffffffu64, 1)
+        val write_result = backend.write_at(1, 0xffffffffffffffffu64, [7])
+        expect(read_result.unwrap_err()).to_equal("fat32-positioned-range-overflow")
+        expect(write_result.unwrap_err()).to_equal("fat32-positioned-range-overflow")
+
+    it "maps a retired or missing file object to a stable typed reason":
+        val backend = SosixFat32PositionedVfsBackendV1()
+        val read_result = backend.read_at(0, 0, 1)
+        val write_result = backend.write_at(0, 0, [9])
+        expect(read_result.unwrap_err()).to_equal(
+            "fat32-positioned-file-object-invalid")
+        expect(write_result.unwrap_err()).to_equal(
+            "fat32-positioned-file-object-invalid")
+
+    it "maps all admitted FAT32 errno classes without leaking numeric text":
+        expect(sosix_fat32_positioned_error_reason_v1(-9)).to_equal(
+            "fat32-positioned-file-object-invalid")
+        expect(sosix_fat32_positioned_error_reason_v1(-38)).to_equal(
+            "fat32-positioned-mount-unavailable")
+        expect(sosix_fat32_positioned_error_reason_v1(-28)).to_equal(
+            "fat32-positioned-no-space")
+        expect(sosix_fat32_positioned_error_reason_v1(-27)).to_equal(
+            "fat32-positioned-file-too-large")
+        expect(sosix_fat32_positioned_error_reason_v1(-16)).to_equal(
+            "fat32-positioned-busy")
+        expect(sosix_fat32_positioned_error_reason_v1(-22)).to_equal(
+            "fat32-positioned-invalid-argument")
+        expect(sosix_fat32_positioned_error_reason_v1(-5)).to_equal(
+            "fat32-positioned-io-error")
+        expect(sosix_fat32_positioned_error_reason_v1(-1234)).to_equal(
+            "fat32-positioned-unknown-error")

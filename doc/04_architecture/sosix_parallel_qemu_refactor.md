@@ -192,6 +192,31 @@ is tracked in
 Fixed responses, host-side `ls`, replayed nonces, stale descriptor hashes,
 missing native accelerators, and nonzero program exits fail closed.
 
+## FAT32 positioned-I/O owner closure
+
+The production positioned route now has one concrete ownership chain:
+
+```text
+syscall 134/135
+  -> kernel positioned dispatch owner
+  -> authenticated capability + owned-buffer registry
+  -> SosixFat32PositionedVfsBackendV1
+  -> generation-safe Fat32FileObject
+  -> Fat32Filesystem.read_at/write_at
+```
+
+`Fat32FileObject` is the canonical mutable open-file description. Descriptor
+aliases are handles to it; dup/fork publish aliases, close/task exit retire
+them, and a monotonic nonzero object identity is never reused. Positioned
+operations carry explicit offsets and owned byte arrays, preserve the shared
+sequential cursor, and commit returned allocation/file-size metadata at the
+object owner. FAT32 mutation remains serialized by `Fat32Filesystem`.
+
+The kernel shim retains the concrete backend, but registry installation remains
+an explicit authenticated composition step. An absent owner, capability,
+buffer registration, mount, or live object fails closed. No compatibility path
+may manufacture success with seek/read-or-write/restore.
+
 ## Deployment sequence
 
 1. Consolidate typed core and compatibility notification waits.

@@ -88,6 +88,25 @@ source, ABI, lengths, API ID, token, and generation, and publishes exactly one
 typed completion before signaling its wait set. POSIX shared-offset sequencing
 is above `read_at`/`write_at`; it is never encoded as `SEEK + READ`.
 
+### Concrete FAT32 positioned path
+
+`Fat32Filesystem.read_at` reads from an explicit offset and never updates the
+handle cursor. `write_at` enters the filesystem mutation owner once, rejects
+u64 overflow and values outside FAT32's u32 size field before mutation,
+allocates the required chain, zeroes an extending hole, overlays caller bytes,
+and returns the updated value-semantic handle with its original cursor.
+
+`fat32_fd_table` separates descriptor aliases from `Fat32FileObject`. Object
+IDs are monotonic, nonzero, and fail closed at exhaustion. Positioned writes
+commit the returned handle to the canonical object, while dup/fork aliases
+observe the same metadata and sequential cursor. Last-alias close and task
+exit retire the object, so a reused fd cannot revive an old capability.
+
+`SosixFat32PositionedVfsBackendV1` is a leaf adapter. It copies buffers at the
+boundary, validates lengths/ranges and transfer counts, and maps kernel errno
+to stable reasons. The syscall shim retains this concrete backend but accepts
+dispatch only after an authenticated registry owner is explicitly installed.
+
 ## 3. Host-service interfaces
 
 ```text

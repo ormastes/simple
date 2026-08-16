@@ -3,6 +3,10 @@
 Executable spec:
 `test/03_system/os/qemu/sosix_qemu_remaining_owners_spec.spl`.
 
+Focused positioned-I/O spec:
+`test/03_system/os/qemu/sosix_fat32_positioned_io_spec.spl`, mirrored at
+`doc/06_spec/03_system/os/qemu/sosix_fat32_positioned_io_spec.md`.
+
 ## Oracle
 
 The spec uses bounded process capture and typed `CommandEvidence` and
@@ -35,6 +39,38 @@ The test must pass and docgen must report zero stubs. Exit 139, timeout,
 missing output, or a handwritten manual is FAIL/BLOCKED, never substitute
 evidence.
 
+For REQ-SQ-018 through REQ-SQ-020, first run exactly once:
+
+```sh
+sh scripts/check/check-sosix-fat32-positioned-io.shs --admit \
+  "$SOSIX_POSITIONED_SIMPLE_RUNTIME" \
+  "$SOSIX_POSITIONED_RUNTIME_RECEIPT" \
+  "$SOSIX_POSITIONED_KERNEL_ELF"
+
+"$SOSIX_POSITIONED_SIMPLE_RUNTIME" test \
+  test/03_system/os/qemu/sosix_fat32_positioned_io_spec.spl \
+  --mode=interpreter
+
+"$SOSIX_POSITIONED_SIMPLE_RUNTIME" spipe-docgen \
+  test/03_system/os/qemu/sosix_fat32_positioned_io_spec.spl \
+  --output doc/06_spec --no-index
+```
+
+The wrapper admits the receipt-bound runtime and linked kernel before it runs
+the three focused specs once. `sspec-maintain scan` is also required once after
+docgen. Missing qualification is an expected fail-closed result, not a skip.
+
+## Positioned-I/O traceability
+
+| Requirement | Implementation | Focused evidence | System scenario |
+| --- | --- | --- | --- |
+| REQ-SQ-018 | `fat32.spl` explicit-offset primitives | `fat32_positioned_io_spec.spl` | qualified owner suite |
+| REQ-SQ-019 | `fat32_fd_table.spl` object/alias lifecycle | `fat32_fd_table_spec.spl` | qualified owner suite |
+| REQ-SQ-020 | concrete backend, shim, lifecycle hooks | backend spec + linked gate | source rejection + qualified admission |
+
+Manual visibility keeps the three system scenarios visible and folds the
+executable source. Evidence is `exec`/`binary`/`log`; no screenshots apply.
+
 ## Current implementation evidence
 
 - RV64: Sv39-isolated U-mode, checked ELF/FAT admission, exact fault provenance,
@@ -50,6 +86,12 @@ evidence.
 These receipts close the source/lifecycle implementation blockers in AC-4
 through AC-6. They do not promote a matrix row without a source-matched admitted
 runtime, canonical producer bundle, executable SSpec, and generated manual.
+
+The current positioned source continuation completes the FAT32 primitive,
+canonical object owner, concrete backend, production shim retention, and
+dup/fork/exit lifecycle hooks. The system spec and manual are present but
+runtime/docgen/maintenance status remains BLOCKED until the admitted Stage-4
+environment exists.
 
 The current bootstrap continuation also completes the typed parser-contract
 owner and proves Stage 2 plus its sanity gate. Stage 3 selects the transient

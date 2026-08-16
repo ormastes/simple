@@ -24,6 +24,7 @@ Implement every host-independent and current-Linux SOSIX QEMU matrix blocker, co
 - AC-8: Todo DB has explicit open rows for the three Linux guest closures, shared L0 defects until verified, six Windows rows, six FreeBSD rows, and six macOS rows; each names prerequisites, exact resume command, retained artifact root, execution owner, merge owner, and high-capability reviewer.
 - AC-9: Guide, canonical plan, evidence ledger, feature/layer experts, architecture/design, executable spec, generated manual, and open-owner tracking agree with the final implementation and evidence.
 - AC-10: Each focused gate runs once; at most three fix/verify cycles are used. Unavailable native hosts remain BLOCKED/POSTPONED and prevent umbrella matrix completion.
+- AC-11: FAT32 provides true cursor-independent positioned primitives and generation-safe aliased file objects; the production syscall 134/135 shim retains the concrete owned-copy backend, and a modern SSpec admits it only through a receipt-bound pure-Simple runtime plus strong linked kernel symbols.
 
 ## Scope Exclusions
 
@@ -72,3 +73,13 @@ blocked
   later owner. The mandatory three-cycle cap was reached; no Stage 4 artifact
   was deployed and SSpec/docgen were not retried with the stale release binary.
 - tracking: Todo DB rows 784-805 retain all shared, Linux, Windows, FreeBSD, and macOS owners.
+- impl: AC-11 host-independent source is complete: FAT32 overwrite/extension/
+  zero-hole semantics, canonical object IDs and alias retirement, concrete
+  SOSIX backend, shim retention, and dup/fork/exit lifecycle hooks are present.
+- tests: `sosix_fat32_positioned_io_spec.spl` and its mirrored operator manual
+  retain fail-closed source, missing-environment, and qualified admission flows
+  with REQ-SQ-018..020 traceability. The qualified wrapper runs each focused
+  spec once only after runtime and linked-kernel admission.
+- blocked: No admitted source-matched Stage-4 runtime or fresh positioned
+  x86_64 kernel ELF exists. Runtime SSpec, docgen, `sspec-maintain`, and live
+  QEMU PASS remain open; source self-test and the Rust seed cannot close them.

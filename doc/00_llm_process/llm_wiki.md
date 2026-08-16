@@ -557,6 +557,14 @@ profile.
 RV64 has a real result-boundary spec but still requires a provenance-admitted
 Stage-4 runner and fresh producer bundle. Do not use Stage 3 or the Rust seed.
 
+The SOSIX positioned-I/O L10 source lane now includes true FAT32
+`read_at`/`write_at`, generation-safe aliased file objects, concrete owned-copy
+backend dispatch, and dup/fork/exit lifecycle hooks. Qualify it only with
+`scripts/check/check-sosix-fat32-positioned-io.shs --admit RUNTIME RECEIPT
+KERNEL_ELF`, followed by the focused system SSpec and docgen using that same
+receipt-bound Stage-4 runtime. Source self-tests and older linked kernels are
+not runtime or QEMU evidence.
+
 Canonical operator detail is
 `doc/07_guide/platform/simpleos/sosix_qemu_shared_settings.md`.
 

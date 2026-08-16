@@ -6,9 +6,10 @@ state after every recognized call.  Registry authentication, operation
 identity, request-token advancement, and backend transaction policy remain in
 the canonical SOSIX FS owner; the shim does not duplicate them.
 
-No production FAT32 positioned-write primitive exists yet.  The retained
-backend therefore implements the explicit unavailable contract and never
-emulates positioned I/O with seek/read/write/restore.
+The retained backend is the concrete FAT32 object adapter.  It reaches only
+cursor-independent ``read_at``/``write_at`` primitives and never emulates
+positioned I/O with seek/read/write/restore.  Dispatch still fails closed
+until an authenticated registry owner is explicitly installed.
 """
 
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
@@ -24,11 +25,11 @@ use os.sosix.fs.positioned_dispatch_owner_v1.SosixFsPositionedDispatchOwnerV1
 use os.sosix.fs.positioned_syscall_v1.{
     SOSIX_FS_PREAD_REGISTERED_V1, SOSIX_FS_PWRITE_REGISTERED_V1
 }
-use os.sosix.fs.service_vfs_backend_v1.SosixUnavailablePositionedVfsBackendV1
+use os.sosix.fs.fat32_positioned_vfs_backend.SosixFat32PositionedVfsBackendV1
 
 var g_shim_positioned_state: SosixFsKernelPositionedStateV1 =
     sosix_fs_kernel_uninstalled_positioned_state_v1()
-var g_shim_positioned_backend = SosixUnavailablePositionedVfsBackendV1()
+var g_shim_positioned_backend = SosixFat32PositionedVfsBackendV1()
 
 pub fn shim_positioned_reset_v1():
     """Reset boot-owned state; called exactly once from ``shim_init``."""
@@ -37,7 +38,7 @@ pub fn shim_positioned_reset_v1():
 pub fn shim_positioned_install_owner_v1(
     owner: SosixFsPositionedDispatchOwnerV1
 ) -> SosixFsKernelPositionedInstallResultV1:
-    """Adopt an authenticated service owner without inventing backend support."""
+    """Adopt an authenticated service owner for the concrete FAT32 backend."""
     val installed = sosix_fs_kernel_install_positioned_owner_v1(
         g_shim_positioned_state, owner)
     if installed.accepted:

@@ -112,14 +112,27 @@ The host-independent positioned-I/O slice lives under
 `src/os/sosix/{core,fs}`. Syscall 134/135 requests cross an authenticated,
 owned-copy provider/registry boundary and its backend contract permits only
 true `read_at`/`write_at`; compatibility code must not emulate positioned I/O
-with seek/read-or-write/restore. The x86_64 trap dispatcher now reaches strong
-Simple shim leaves and adopts the returned owner state, but boot initializes an
-explicit unavailable backend and no production owner installs a replacement.
-The current FAT32 driver has no positioned primitive, so this is a live
-fail-closed route rather than successful production I/O. Run
-`scripts/check/check-sosix-positioned-live-route.shs --admit KERNEL_ELF` after
-the next admitted rebuild. Focused specs require a provenance-admitted Stage-4
-CLI; exit 139 is not permission to use Stage 3 or the Rust seed.
+with seek/read-or-write/restore. FAT32 now owns explicit-offset primitives,
+generation-safe open-file objects, alias/retirement lifecycle hooks, and a
+concrete SOSIX backend retained by the x86_64 shim. Boot still requires an
+authenticated registry owner before dispatch; missing capabilities, owned
+buffer registrations, mounts, or live objects fail closed.
+
+After the next admitted rebuild, run the linked/focused gate once:
+
+```sh
+sh scripts/check/check-sosix-fat32-positioned-io.shs --admit \
+  "$SOSIX_POSITIONED_SIMPLE_RUNTIME" \
+  "$SOSIX_POSITIONED_RUNTIME_RECEIPT" \
+  "$SOSIX_POSITIONED_KERNEL_ELF"
+```
+
+Then execute and documentize
+`test/03_system/os/qemu/sosix_fat32_positioned_io_spec.spl` once with that same
+runtime. The wrapper verifies the receipt and linked strong symbols before it
+runs the three focused specs. Exit 139, missing PASS summaries, a Stage 2/3
+binary, the Rust seed, or a handwritten manual cannot become runtime PASS.
+This focused admission is not QEMU guest or 24-row matrix evidence.
 
 Hosted display/input integration uses the sibling `src/os/sosix/host` seam.
 Surface state binds generation and frame sequence with bounded in-flight work;

@@ -30,6 +30,27 @@ full CLI and `spipe-docgen` produces a zero-stub manual. The SSpec's expected
 3 PASS / 15 BLOCKED / 6 POSTPONED oracle proves honest handoff state, not live
 matrix completion.
 
+The L10 positioned-I/O source lane now owns true FAT32 `read_at`/`write_at`,
+generation-safe canonical file objects, dup/fork aliasing, last-alias/task-exit
+retirement, and the concrete `SosixFat32PositionedVfsBackendV1` retained by the
+production x86_64 shim. Registry installation remains explicit and fail closed;
+this is deliberate authority separation, not permission to bypass capability
+or owned-buffer authentication.
+
+Qualified acceptance is exactly:
+
+```sh
+sh scripts/check/check-sosix-fat32-positioned-io.shs --admit \
+  "$SOSIX_POSITIONED_SIMPLE_RUNTIME" \
+  "$SOSIX_POSITIONED_RUNTIME_RECEIPT" \
+  "$SOSIX_POSITIONED_KERNEL_ELF"
+```
+
+The wrapper admits the runtime and linked kernel before executing each focused
+spec once. Follow it with the mirrored system SSpec/docgen pair. Never use the
+Rust seed, Stage 2/3, source self-test output, or an older linked ELF as
+positioned runtime evidence.
+
 Collector v2 now byte-binds the exact 13-field admission record in the
 manifest, and the pure-Simple trusted importer exposes only the closed-root
 all-24-PASS release predicate. Its multiline boolean forms use the required
