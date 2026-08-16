@@ -50,7 +50,9 @@ DB failures to a class-valued mutex payload becoming nil and a stale
 noalloc allocator path. The source now uses a scalar mutex lease around the
 owner-local listener, checks the returned outcome, removes the dead RISC-V
 allocator declaration, and asserts the bounded aligned bump-heap contract.
-These corrections remain code-only until the exact Stage-4 commands pass.
+Independent repair review cycle 1 accepted these corrections with no blocking
+source finding. They remain code-only until the exact Stage-4 commands pass;
+review acceptance is not runtime or release evidence.
 
 They are code-only handoff material, not PASS evidence. AC-9/10/12/13 remain
 open. Existing manuals are hand-authored rather than current docgen receipts;

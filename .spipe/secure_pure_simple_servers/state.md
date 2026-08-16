@@ -225,4 +225,7 @@ dev-blocked
   plus scalar mutex lease/terminal receipt, asserts the returned outcome, and
   verifies the bounded aligned RISC-V bump heap while removing the dead weak
   allocator declaration. Admitted Stage-4 execution remains required; no AC
-  is promoted.
+  is promoted. Independent repair review cycle 1 accepted the scalar listener
+  lease, returned-outcome assertion, post-stop dispatch guard, and RISC-V
+  bump-heap oracles with no blocking source finding; this is code-review
+  evidence only and does not replace either interpreter test.
