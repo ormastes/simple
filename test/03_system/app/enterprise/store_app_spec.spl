@@ -1,0 +1,165 @@
+"""
+# Store App — customer flow end to end over the hardened route path
+
+## Overview
+
+AC-16 of `.spipe/simple_enterprise_suite` (Goal Set v2): the customer-facing
+store vertical — browse catalog -> cart -> guarded order (`sale_place_order`)
+-> pay (`sale_pay_order`) -> receipt — dispatched through
+`store_app_handle`, which routes via `std.common.net.http_core`
+(`body_decision`, `path_is_safe`, `match_route_pattern`) and executes ONLY
+the frozen guarded sequence from `std.enterprise_sale`. No new storage, no
+new guard path.
+
+Idempotent replay is proven at the HTTP layer: re-POSTing the same order
+form with the same `idem` key returns the recorded result and leaves stock
+and order state unchanged — exactly one effect. Tenant isolation is proven
+by dispatching with a tenant-B session against tenant-A data.
+
+## Troubleshooting
+
+- 409 `insufficient-stock` on a fresh db: seed stock via
+  `sale_receive_stock` (admin role) before ordering.
+- Interpreter sqlite caches connections per db PATH — every scenario here
+  uses its own db path (see `db_path`).
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/simple_erp.md
+**Design:** N/A
+**Research:** doc/01_research/app/enterprise/simple_enterprise_suite_assessment_and_parallel_plan_2026-08-16.md
+
+Lane: .spipe/simple_enterprise_suite (v2, L-B, AC-16).
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+use std.nogc_sync_mut.enterprise_store.store.{store_open, store_close}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, Money
+}
+use std.nogc_sync_mut.enterprise_sale.goods_sale.{
+    sale_setup, sale_add_product, sale_receive_stock,
+    sale_available_stock, sale_order_status
+}
+use std.nogc_sync_mut.http_server.types.{http_status_code}
+use app.enterprise_store_app.main.{
+    store_app_handle, cart_new, cart_add, cart_total_cents
+}
+
+fn db_path(name: text) -> text:
+    "build/test-artifacts/store_app_" + name + ".db"
+
+fn tenant_a() -> TenantContext:
+    TenantContext(tenant_id: "tenant-a", name: "Alpha Trading")
+
+fn admin_a() -> ActorContext:
+    ActorContext(actor_id: "admin-1", role: "admin")
+
+fn clerk_a() -> ActorContext:
+    ActorContext(actor_id: "clerk-1", role: "sales")
+
+fn session_for(who: ActorContext, tenant: TenantContext) -> SessionContext:
+    SessionContext(token: "tok-" + who.actor_id, actor_id: who.actor_id, tenant_id: tenant.tenant_id, active: true)
+
+fn plain_headers() -> [(text, text)]:
+    [("Host", "store.example"), ("Content-Length", "0")]
+
+# fresh_store opens a clean per-scenario store, applies the sale schema, and
+# seeds the catalog: SKU-1 "Widget" at 2500 cents with 10 units of stock.
+fn fresh_seeded(name: text):
+    dir_create_all("build/test-artifacts")
+    if file_exists(db_path(name)):
+        file_delete(db_path(name))
+    val store = store_open(db_path(name))
+    sale_setup(store)
+    val t = tenant_a()
+    val admin = admin_a()
+    val sa = session_for(admin, t)
+    sale_add_product(store, sa, t, admin, "SKU-1", "Widget", Money(amount_cents: 2500, currency: "USD"))
+    sale_receive_stock(store, sa, t, admin, "SKU-1", 10)
+    store
+
+describe "store app — browse, cart, order, pay, receipt":
+    it "carries a customer from catalog to a paid receipt":
+        step("Seed the catalog and open a sales-clerk session")
+        val store = fresh_seeded("e2e")
+        val t = tenant_a()
+        val clerk = clerk_a()
+        val cs = session_for(clerk, t)
+
+        step("Browse the catalog over GET /store/catalog")
+        val catalog = store_app_handle(store, cs, t, clerk, "GET", "/store/catalog", plain_headers(), "")
+        expect(http_status_code(catalog.status)).to_equal(200)
+        expect(catalog.body.contains("Widget")).to_be(true)
+        expect(catalog.body.contains("2500")).to_be(true)
+
+        step("Build a cart of 3 Widgets and price it from the catalog")
+        var cart = cart_new()
+        cart = cart_add(cart, "SKU-1", 3)
+        expect(cart_total_cents(store, "tenant-a", cart)).to_equal(7500)
+
+        step("Check out — POST /store/order runs the guarded sale_place_order")
+        val order = store_app_handle(store, cs, t, clerk, "POST", "/store/order", plain_headers(),
+            "order=order-100&sku=SKU-1&qty=3&idem=key-1")
+        expect(http_status_code(order.status)).to_equal(200)
+        expect(order.body.contains("accepted")).to_be(true)
+        expect(sale_order_status(store, "tenant-a", "order-100")).to_equal("created")
+        expect(sale_available_stock(store, "tenant-a", "SKU-1")).to_equal(7)
+
+        step("Pay — POST /store/pay runs the guarded sale_pay_order")
+        val pay = store_app_handle(store, cs, t, clerk, "POST", "/store/pay", plain_headers(),
+            "order=order-100&idem=pay-1")
+        expect(http_status_code(pay.status)).to_equal(200)
+        expect(sale_order_status(store, "tenant-a", "order-100")).to_equal("paid")
+
+        step("View the receipt — GET /store/order/order-100/receipt")
+        val receipt = store_app_handle(store, cs, t, clerk, "GET", "/store/order/order-100/receipt", plain_headers(), "")
+        expect(http_status_code(receipt.status)).to_equal(200)
+        expect(receipt.body.contains("order-100")).to_be(true)
+        expect(receipt.body.contains("paid")).to_be(true)
+        store_close(store)
+
+describe "store app — idempotent replay at the HTTP layer":
+    it "re-POSTing the same order form produces exactly one effect":
+        val store = fresh_seeded("replay")
+        val t = tenant_a()
+        val clerk = clerk_a()
+        val cs = session_for(clerk, t)
+
+        step("Place the order once")
+        val first = store_app_handle(store, cs, t, clerk, "POST", "/store/order", plain_headers(),
+            "order=order-200&sku=SKU-1&qty=4&idem=same-key")
+        expect(http_status_code(first.status)).to_equal(200)
+        val stock_after_first = sale_available_stock(store, "tenant-a", "SKU-1")
+        expect(stock_after_first).to_equal(6)
+
+        step("Replay the identical POST with the same idem key")
+        val replay = store_app_handle(store, cs, t, clerk, "POST", "/store/order", plain_headers(),
+            "order=order-200&sku=SKU-1&qty=4&idem=same-key")
+        expect(http_status_code(replay.status)).to_equal(200)
+        expect(replay.body.contains("duplicate-key")).to_be(true)
+
+        step("Stock is unchanged — no second effect")
+        expect(sale_available_stock(store, "tenant-a", "SKU-1")).to_equal(stock_after_first)
+        store_close(store)
+
+describe "store app — tenant isolation through the dispatcher":
+    it "a tenant-B session neither sees nor orders tenant A's goods":
+        val store = fresh_seeded("isolation")
+        val tb = TenantContext(tenant_id: "tenant-b", name: "Beta Retail")
+        val clerk_b = ActorContext(actor_id: "clerk-b", role: "sales")
+        val sb = session_for(clerk_b, tb)
+
+        step("Tenant B's catalog view contains none of tenant A's products")
+        val catalog = store_app_handle(store, sb, tb, clerk_b, "GET", "/store/catalog", plain_headers(), "")
+        expect(http_status_code(catalog.status)).to_equal(200)
+        expect(catalog.body.contains("Widget")).to_be(false)
+
+        step("Tenant B ordering tenant A's SKU is denied not-found (404)")
+        val order = store_app_handle(store, sb, tb, clerk_b, "POST", "/store/order", plain_headers(),
+            "order=order-b&sku=SKU-1&qty=1&idem=b-key")
+        expect(http_status_code(order.status)).to_equal(404)
+
+        step("Tenant A's stock is untouched")
+        expect(sale_available_stock(store, "tenant-a", "SKU-1")).to_equal(10)
+        store_close(store)

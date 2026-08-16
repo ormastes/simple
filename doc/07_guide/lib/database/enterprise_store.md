@@ -49,3 +49,50 @@ this module's surface is the frozen Repository/UnitOfWork contract a future
 PostgreSQL adapter implements. No fake driver exists — the adapter is an
 explicit open gap, not a green checkbox. Simple DB (SDN/embedded) is a
 research track and must not carry finance/PII/stock truth.
+
+## Failure-path hardening (AC-18, 2026-08-16)
+
+- **Corruption detection**: `store_open` writes a store-format marker row
+  (`__store_format_v1` in `acid_probe`). `store_verify(store)` returns `""`
+  when healthy, else an explicit `corrupt store: ...` error; it checks every
+  system table is readable (real SQLite: a bad-magic/truncated file fails the
+  COUNT probe) AND the marker is present (portable detector — the interpreter
+  emulation silently answers COUNT=0 for any table on any file, so table
+  presence alone proves nothing there). `store_open_verified(path)` opens an
+  EXISTING store without creating tables and rejects blank/garbage/foreign
+  files with `open_ok=false` plus the error — never silent acceptance.
+- **Write-failure seam**: the interpreter's rt_sqlite externs cannot inject a
+  real disk-full/short-write (non-ACID emulation, tracked bug). The
+  composition seam is `BufferedUow` + `StoreFaults`: stage writes with
+  `buffered_write`, apply all-or-nothing with
+  `buffered_commit(store, uow, faults)`. `store_faults_failing_commit()`
+  simulates the write-layer failure; a failed commit applies NOTHING, so
+  zero-partial-effects holds on BOTH backends.
+- **Native-ACID resume condition**: real short-write/crash injection and
+  rollback-atomicity PASS evidence stay environment-blocked until the specs
+  run `--mode=native` against real SQLite (linked C sqlite3). Resume:
+  `bin/simple test test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_harden_spec.spl --mode=native`
+  on a host where native codegen + real rt_sqlite are green.
+
+## Cross-OS runnability (AC-17, audited 2026-08-16)
+
+`std.enterprise_{store,sale}` is ONE codebase targeting the SimpleOS
+**userland** tier (ring-3 app over libc/syscalls; no kernel-path code, so the
+freestanding discipline in `doc/07_guide/os/simpleos_host_os_guide.md` does
+not constrain it). Full import audit:
+
+| Dependency | Facade | Both-OS status |
+|---|---|---|
+| SQLite access | `std.nogc_sync_mut.io.sqlite_sffi` (rt_sqlite_* externs) | Host: yes (emulation/native). SimpleOS: **blocked** — no `rt_sqlite_*` provider in `src/os/` (libc has no sqlite; DBFS is a filesystem, not this extern surface) |
+| Audit hashing | `std.common.crypto.sha256` (pure Simple) | Both |
+| Foundation contracts (`enterprise_sale.foundation`) | none (pure Simple, zero imports) | Both |
+| Filesystem / env / process / time | **not used** by the library (specs use `std.io_runtime` on the host harness only) | n/a |
+
+Evidence: minimal entry `src/app/enterprise/store_probe_main.spl` —
+host run prints `enterprise store open=true verify=[]`; SimpleOS-target
+cross-compile succeeds:
+`bin/simple compile --target=x86_64-unknown-simpleos src/app/enterprise/store_probe_main.spl -o build/test-artifacts/enterprise_entry_simpleos`
+(SMF module artifact, magic `SMF\0`). Remaining blocked row: link/run inside
+SimpleOS requires an in-guest `rt_sqlite_*` extern provider; resume = provide
+that surface (or a DBFS-backed adapter behind the same facade), then rerun
+the compile + boot the probe per the host-OS guide. No per-OS fork exists.

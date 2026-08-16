@@ -11,6 +11,17 @@ use std.spec
 use framework.registry.{LaneDef, lane_def, default_lanes, is_registered_write, find_lane}
 use framework.guarded.{Tenant, Actor, Session, role_can_for, gate_write_for}
 use web.routes.{routes_for, find_route_in}
+use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore, store_open}
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+
+# Each scenario opens its own durable store: the interpreter backend caches
+# open databases per path in-process, so every it-block gets a fresh path.
+fn fresh_store(name: text) -> EnterpriseStore:
+    dir_create_all("build/test-artifacts")
+    val db = "build/test-artifacts/erp_registry_" + name + ".db"
+    if file_exists(db):
+        file_delete(db)
+    store_open(db)
 
 describe "Registry — registration drives RBAC":
     it "registers the five stock lanes with derived write actions":
@@ -54,9 +65,9 @@ describe "Registry — registration drives routing and gating":
         val tenant = Tenant { id: "t1", name: "Demo" }
         val operator = Actor { id: 1, name: "Mina", role: "operator" }
         val session = Session { token: "sess-1", user_id: 1, tenant_id: "t1", active: true }
-        var used: [text] = []
-        val ok = gate_write_for(lanes, session, tenant, operator, "clinic.write", true, "c-1", used)
+        val store = fresh_store("s1")
+        val ok = gate_write_for(lanes, store, session, tenant, operator, "clinic.write", true, "c-1")
         assert_true(ok.ok)
-        val no = gate_write_for(default_lanes(), session, tenant, operator, "clinic.write", true, "c-2", used)
+        val no = gate_write_for(default_lanes(), store, session, tenant, operator, "clinic.write", true, "c-2")
         assert_false(no.ok)
         expect(no.reason).to_equal("forbidden")

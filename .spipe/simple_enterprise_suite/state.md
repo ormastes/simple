@@ -244,3 +244,72 @@ implement (Wave A in progress)
   six verification commands in
   doc/00_llm_process/feature_expert/enterprise_suite/skill.md; ACID rows
   additionally need --mode=native with real SQLite. Owner: next lane session.
+
+## Goal Set v2 (2026-08-16)
+Raw request: "with spipe skill, harden simple web and db and web ui. find existing
+plan of enterprise app, update it. do not make app on simple os and other os
+separately but both runnable. make a complete enterprise app, store app, harden
+server and web ui. parallel agents with guide and higher-model review."
+
+Research inputs (saved this session):
+- doc/01_research/app/enterprise/simple_enterprise_suite_full_design_2026-08-14.md
+- doc/01_research/app/enterprise/simple_enterprise_suite_assessment_and_parallel_plan_2026-08-16.md
+
+New acceptance criteria (extends AC-1..AC-12 above):
+- AC-13 (verify gate re-run): re-run the six verification commands from
+  doc/00_llm_process/feature_expert/enterprise_suite/skill.md on THIS host's
+  runner; record per-spec verdicts; ACID rows stay environment-blocked until a
+  native SQLite lane exists (do not fake).
+- AC-14 (AC-8b): examples/12_business/simple_erp lanes rewired onto
+  std.enterprise_{store,sale}; ubs_test suite green.
+- AC-15 (web UI harden): the enterprise dashboard/web UI is served through the
+  hardened http_core route path (dynamic dispatch, path safety, limits) with an
+  authenticated session; specs prove unauthenticated denial, escaped HTML
+  output (no raw interpolation of business data), and security headers.
+- AC-16 (store app): a customer-facing store vertical (browse catalog → cart →
+  guarded order via sale_place_order → pay → receipt view) built ONLY on
+  std.enterprise_{store,sale} + http_core; system spec end-to-end incl.
+  idempotent replay and tenant isolation.
+- AC-17 (cross-OS runnable, board-runnable rule analog): the enterprise/store
+  app is ONE codebase runnable on host OS and SimpleOS — no per-OS forks. Host
+  evidence = spec run; SimpleOS evidence = the app's entry compiles for the
+  simpleos target or an explicit blocked row naming the missing prerequisite
+  (per SimpleOS compiler-in-filesystem contract). QEMU-only or host-only
+  silent scoping is a defect.
+- AC-18 (db harden continuation): enterprise_store gains corruption-detection
+  and disk-full/short-write failure specs at the pure-Simple layer (audit chain
+  tamper already covered); document the native-ACID resume condition.
+
+## Parallel lanes (v2)
+- L-A verify+AC-8b (agent): AC-13, AC-14.
+- L-B store app + web UI (agent): AC-15, AC-16.
+- L-C cross-OS + db harden (agent): AC-17, AC-18.
+- Review: orchestrating high-model session reviews all lane diffs before
+  accepting done marks (assessment §12.4).
+
+## Log (v2)
+- dev (2026-08-16): state restored (was deleted by a parallel session's
+  cleanup); v2 goal set added; three parallel lanes launched.
+- merge + review (2026-08-16, orchestrator high-model): three parallel lane
+  worktrees merged. L-A (ent-la 709ea3644cf): AC-13 verify rerun 72/72 across
+  the six skill.md specs (interpreter-mode, Rust seed x86_64 — native-ACID rows
+  stay environment-blocked); AC-14 done — simple_erp example rewired onto
+  std.enterprise_store durable idempotency/audit/outbox, ubs_test 21/21 specs
+  163/163 examples. L-B (ent-lb 9b42402f98d): AC-16 store app
+  (src/app/enterprise_store_app/main.spl, only enterprise_{store,sale}+
+  http_core; escaped HTML; shared security headers) spec 3/3; AC-15 harden
+  spec 4/4 (401 unauth, script-name escaping, headers, limits/traversal);
+  review fix applied at merge: qty form value digit-checked before int().
+  Known tool bug found: seed `spipe-docgen` subcommand drops argv — use
+  `bin/simple run src/app/spipe_docgen/spipe_docgen/main.spl <spec> ...`.
+  L-C (ent-lc 90e2b6e1b9b): AC-18 corruption detection (store_verify/
+  store_open_verified, marker row — interpreter sqlite COUNT is vacuous, noted)
+  + injectable write-failure seam (StoreFaults/BufferedUow), harden spec
+  deliberate-red 3F then 5/5; regressions 10/10 + 7/7. AC-17: one codebase;
+  simpleos cross-compile of store probe → valid SMF; in-guest run blocked on
+  missing rt_sqlite_* provider in src/os (resume recorded in guide).
+  MERGE HAZARD LOG: a concurrent session staged deletion of the entire
+  enterprise stdlib + simple_erp example in the shared WC; restored from HEAD
+  per anti-revert protocol and committed blob-first, scoped to this feature's
+  paths only.
+  (merge note: WC http_server files were a stale pre-hardening snapshot from a parallel session — restored to HEAD per anti-revert protocol; store_app/web_harden/vertical re-verified 3/3, 4/4, 7/7 on the merged tree.)

@@ -22,8 +22,11 @@ Write requests also produce decisions and receipts so accepted/denied outcomes
 are explicit.
 Readiness evidence aggregates identity, RBAC, validation, ledger, recovery,
 security, and guarded-write gates for release handoff.
-Durable-store readiness is intentionally blocked until the example has a
-supported durable storage facade.
+The guarded-write gate is now DURABLE: idempotency keys, the sha256-chained
+audit log, and the transactional outbox live in `std.enterprise_store`
+(SQLite-backed) — each accepted write commits all three in one unit of work,
+replacing the earlier in-memory `used_keys` arrays. Test scenarios open a
+fresh database path per case under `build/test-artifacts/`.
 
 Run:
 

@@ -11,6 +11,8 @@ use web.routes.{routes_for, find_route_in, dispatch_for}
 use lanes.clinic.{Appointment, validate_appointment, mark_seen, bill, submit_appointment_write}
 use report.summary.{LaneKpi, kpi}
 use web.dashboard.{render_dashboard}
+use std.nogc_sync_mut.enterprise_store.store.{store_open}
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
 
 fn extended_lanes() -> [LaneDef]:
     var lanes = default_lanes()
@@ -36,10 +38,14 @@ fn main():
     # A clinic write flows through the SAME gate as every other lane.
     val appt = Appointment { id: 1, patient: "Ara", practitioner: "Dr. Joon", slot: "09:00", fee_minor: 45000, status: "booked" }
     assert validate_appointment(appt)
-    var used: [text] = []
-    val direct = submit_appointment_write(lanes, session, tenant, operator, appt, "clinic-1", used)
+    dir_create_all("build/test-artifacts")
+    val db = "build/test-artifacts/erp_extension_demo.db"
+    if file_exists(db):
+        file_delete(db)
+    val store = store_open(db)
+    val direct = submit_appointment_write(lanes, session, tenant, operator, appt, "clinic-1", store)
     assert direct.ok
-    val via_route = dispatch_for(lanes, session, tenant, operator, "POST", "/api/clinic/appointments", true, "clinic-2", used)
+    val via_route = dispatch_for(lanes, session, tenant, operator, "POST", "/api/clinic/appointments", true, "clinic-2", store)
     assert via_route.ok
 
     # Domain state machine still lane-local.

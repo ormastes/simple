@@ -11,6 +11,17 @@ machine, split-bill rounding, tip math).
 use std.spec
 use lanes.restaurant.{MenuItem, TableOrder, validate_menu_item, validate_table_order, order_total, send_to_kitchen, serve, close_order, split_bill, tip_amount, submit_order_write}
 use framework.guarded.{Tenant, Actor, Session}
+use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore, store_open}
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+
+# Each scenario opens its own durable store: the interpreter backend caches
+# open databases per path in-process, so every it-block gets a fresh path.
+fn fresh_store(name: text) -> EnterpriseStore:
+    dir_create_all("build/test-artifacts")
+    val db = "build/test-artifacts/erp_restaurant_lane_" + name + ".db"
+    if file_exists(db):
+        file_delete(db)
+    store_open(db)
 
 describe "Restaurant lane — guarded writes":
     it "accepts a valid write through the gate":
@@ -20,8 +31,8 @@ describe "Restaurant lane — guarded writes":
         var item_ids: [i64] = []
         item_ids.push(1)
         val order = TableOrder { id: 1, table_no: 5, item_ids: item_ids, status: "open", total: 1500 }
-        var used: [text] = []
-        val r = submit_order_write(session, tenant, user, order, "restaurant-1", used)
+        val store = fresh_store("s1")
+        val r = submit_order_write(session, tenant, user, order, "restaurant-1", store)
         expect(r.ok).to_equal(true)
         expect(r.reason).to_equal("accepted")
         expect(r.ledger_key).to_equal("restaurant-1")
@@ -33,8 +44,8 @@ describe "Restaurant lane — guarded writes":
         var item_ids: [i64] = []
         item_ids.push(1)
         val order = TableOrder { id: 1, table_no: 5, item_ids: item_ids, status: "open", total: 1500 }
-        var used: [text] = []
-        val r = submit_order_write(session, tenant, user, order, "restaurant-1", used)
+        val store = fresh_store("s2")
+        val r = submit_order_write(session, tenant, user, order, "restaurant-1", store)
         assert_false(r.ok)
         expect(r.reason).to_equal("invalid-session")
 
@@ -45,8 +56,8 @@ describe "Restaurant lane — guarded writes":
         var item_ids: [i64] = []
         item_ids.push(1)
         val order = TableOrder { id: 1, table_no: 5, item_ids: item_ids, status: "open", total: 1500 }
-        var used: [text] = []
-        val r = submit_order_write(session, tenant, user, order, "restaurant-1", used)
+        val store = fresh_store("s3")
+        val r = submit_order_write(session, tenant, user, order, "restaurant-1", store)
         assert_false(r.ok)
         expect(r.reason).to_equal("forbidden")
 
@@ -56,8 +67,8 @@ describe "Restaurant lane — guarded writes":
         val session = Session { token: "sess-1", user_id: 1, tenant_id: "t1", active: true }
         var item_ids: [i64] = []
         val order = TableOrder { id: 0, table_no: 0, item_ids: item_ids, status: "open", total: -5 }
-        var used: [text] = []
-        val r = submit_order_write(session, tenant, user, order, "restaurant-1", used)
+        val store = fresh_store("s4")
+        val r = submit_order_write(session, tenant, user, order, "restaurant-1", store)
         assert_false(r.ok)
         expect(r.reason).to_equal("invalid-record")
 
@@ -68,9 +79,9 @@ describe "Restaurant lane — guarded writes":
         var item_ids: [i64] = []
         item_ids.push(1)
         val order = TableOrder { id: 1, table_no: 5, item_ids: item_ids, status: "open", total: 1500 }
-        var used: [text] = []
-        used.push("restaurant-1")
-        val r = submit_order_write(session, tenant, user, order, "restaurant-1", used)
+        val store = fresh_store("s5")
+        submit_order_write(session, tenant, user, order, "restaurant-1", store)
+        val r = submit_order_write(session, tenant, user, order, "restaurant-1", store)
         assert_false(r.ok)
         expect(r.reason).to_equal("duplicate-key")
 

@@ -75,8 +75,24 @@ fn store_open(path: text) -> EnterpriseStore:
     sqlite_execute(conn, "CREATE TABLE IF NOT EXISTS audit_log (id INTEGER PRIMARY KEY, tenant_id TEXT, actor TEXT, action TEXT, detail TEXT, prev_hash TEXT, hash TEXT)")
     sqlite_execute(conn, "CREATE TABLE IF NOT EXISTS acid_probe (id INTEGER PRIMARY KEY, marker TEXT)")
 
+    # Store-format marker (AC-18): the portable corruption detector. A blank,
+    # truncated, or bad-magic file lacks this row; the interpreter emulation
+    # silently answers COUNT(*)=0 for ANY table name, so table presence alone
+    # cannot prove the file is a real enterprise store.
+    if not marker_present(conn):
+        store_insert2(conn, "INSERT INTO acid_probe (marker) VALUES (?)", STORE_FORMAT_MARKER, "")
+
     val acid = probe_backend_acid(conn)
     EnterpriseStore(conn: conn, open_ok: true, acid: acid)
+
+val STORE_FORMAT_MARKER = "__store_format_v1"
+
+fn marker_present(conn: SqliteConnection) -> bool:
+    val rows = sqlite_query_all(conn, "SELECT id, marker FROM acid_probe")
+    for row in rows:
+        if sqlite_row_get(row, "marker") == STORE_FORMAT_MARKER:
+            return true
+    false
 
 # probe_backend_acid proves (or disproves) that begin/rollback actually
 # undo an insert on this backend. Fail closed: any anomaly reports false.
@@ -187,8 +203,103 @@ fn store_insert_row(store: EnterpriseStore, sql: text, values: [text]) -> bool:
     sqlite_finalize(stmt)
     ran == 1 or ran == 0
 
+# =============================================================================
+# Corruption detection (AC-18)
+# =============================================================================
+
+# store_system_tables lists the tables every healthy enterprise store carries.
+fn store_system_tables() -> [text]:
+    ["schema_migrations", "idempotency_keys", "outbox", "audit_log", "acid_probe"]
+
+# store_verify checks every system table is present and readable. Returns ""
+# when healthy, otherwise an explicit error naming the first corrupt table.
+# A COUNT(*) on a healthy empty table yields "0"; a missing/unreadable table
+# (dropped, truncated store, bad-magic file real SQLite refuses to query)
+# yields "" from sqlite_query_value — that is the fail-closed detector.
+fn store_verify(store: EnterpriseStore) -> text:
+    if not store.open_ok:
+        return "corrupt store: not open"
+    for table in store_system_tables():
+        if store_count_text(store.conn, table) == "":
+            return "corrupt store: system table '" + table + "' missing or unreadable"
+    if not marker_present(store.conn):
+        return "corrupt store: schema_migrations/acid_probe store-format marker absent (blank, truncated, or foreign file)"
+    ""
+
+# store_open_verified opens an EXISTING store WITHOUT creating tables and
+# verifies it. A blank, truncated, or bad-magic file is rejected with an
+# explicit error and open_ok=false — never silently accepted. Returns
+# (store, error) where error is "" on success.
+fn store_open_verified(path: text) -> (EnterpriseStore, text):
+    val conn = if path == ":memory:":
+        sqlite_open_memory()
+    else:
+        sqlite_open(path)
+    if not conn.is_valid:
+        return (EnterpriseStore(conn: conn, open_ok: false, acid: false), "corrupt store: cannot open '" + path + "'")
+    val candidate = EnterpriseStore(conn: conn, open_ok: true, acid: false)
+    val err = store_verify(candidate)
+    if err != "":
+        sqlite_close(conn)
+        return (EnterpriseStore(conn: conn, open_ok: false, acid: false), err)
+    (EnterpriseStore(conn: conn, open_ok: true, acid: probe_backend_acid(conn)), "")
+
+# =============================================================================
+# Injectable write-failure seam (AC-18)
+# =============================================================================
+# The interpreter rt_sqlite externs are a non-ACID emulation (tracked bug),
+# so a real disk-full/short-write cannot be injected there. This buffered
+# unit of work holds every write in pure Simple and applies all-or-nothing at
+# commit; StoreFaults is the composition seam that simulates the write-layer
+# failure. On an injected failure NOTHING reaches the store — a failed commit
+# with zero partial observable effects on BOTH backends.
+
+struct StoreFaults:
+    fail_commit_write: bool
+
+fn store_faults_none() -> StoreFaults:
+    StoreFaults(fail_commit_write: false)
+
+fn store_faults_failing_commit() -> StoreFaults:
+    StoreFaults(fail_commit_write: true)
+
+struct BufferedUow:
+    sqls: [text]
+    binds: [[text]]
+
+fn buffered_uow_new() -> BufferedUow:
+    BufferedUow(sqls: [], binds: [])
+
+# buffered_write stages one prepared INSERT (sql + ordered binds).
+fn buffered_write(uow: BufferedUow, sql: text, values: [text]) -> BufferedUow:
+    var sqls = uow.sqls
+    var binds = uow.binds
+    sqls.push(sql)
+    binds.push(values)
+    BufferedUow(sqls: sqls, binds: binds)
+
+# buffered_commit applies all staged writes under one transaction. Returns
+# false — with no staged write applied — when the fault seam injects a
+# write failure (disk-full/short-write stand-in) or any real write fails.
+fn buffered_commit(store: EnterpriseStore, uow: BufferedUow, faults: StoreFaults) -> bool:
+    if not store.open_ok:
+        return false
+    if faults.fail_commit_write:
+        return false
+    uow_begin(store)
+    var i = 0
+    while i < uow.sqls.len():
+        if not store_insert_row(store, uow.sqls[i], uow.binds[i]):
+            uow_rollback(store)
+            return false
+        i = i + 1
+    uow_commit(store)
+
 export EnterpriseStore
 export store_open, store_close, store_backend_acid, store_error
 export uow_begin, uow_commit, uow_rollback
 export store_migrate, store_migration_applied
 export store_rows, store_insert_row
+export store_verify, store_open_verified, store_system_tables
+export StoreFaults, store_faults_none, store_faults_failing_commit
+export BufferedUow, buffered_uow_new, buffered_write, buffered_commit
