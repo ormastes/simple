@@ -42,3 +42,13 @@ apply/verify, deterministic receipt, and rollback assertions. The source is
 wired, but the mapping remains execution-blocked until an admitted pure-Simple
 native verdict is retained; it is not a completion claim for the broader actor,
 cancellation, or backpressure requirements.
+
+The complementary Modern SSpec
+`test/03_system/feature/language/actor_channel_authority_spec.spl` and authored
+mirror
+`doc/06_spec/03_system/feature/language/actor_channel_authority_spec.md`
+map the implemented scalar-text portion of REQ-PAR-002 and REQ-PAR-006 to one
+scheduler-owned bounded mailbox/reply authority, copied argument retention,
+finite backpressure, unknown/stopped rejection, and unique terminal removal.
+Coverage is partial: synchronized cross-thread ingress and typed heap/owned
+payload transport remain open, and native execution is Stage-4 blocked.

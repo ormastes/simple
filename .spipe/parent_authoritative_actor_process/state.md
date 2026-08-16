@@ -42,7 +42,7 @@ Storage-layout lowering, borrow analysis, GPU/device transport, and unrelated MD
 
 ## Phase
 
-dev-done
+verify-blocked
 
 ## Log
 
@@ -51,3 +51,10 @@ dev-done
   gap matrices; `/root` merged them into the canonical plan and guide.
 - highest-capability review: `ACCEPT` for plan/document completion after five
   factual/dependency corrections; underlying implementation remains open.
+- modern SSpec continuation: added closed typed evidence to the process flow and
+  authored a separate scheduler-owned actor/channel system scenario plus mirror,
+  guide, and test plan. Generation and native execution remain blocked by the
+  deployed Stage-4 bounded test ABI probe; AC-5..AC-7 stay open.
+- modernization review: the separate highest-capability reviewer accepted the
+  corrected partial delta after cancellation stopped claiming moved-source
+  invalidation; this is not an underlying feature PASS.

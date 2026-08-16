@@ -3,6 +3,45 @@
 Short, canonical term resolution for coding agents. Read this index when a user
 names a repository capability whose implementation owner is ambiguous.
 
+## Parent-authoritative actor/process transport
+
+- **Canonical owner rule:** the scheduler owns actor registry/admission/replies;
+  `ParentCommitOwnerV1` owns canonical process-result publication.
+- **Actor boundary:** `ActorRef` is `(actor_id, scheduler authority)` and fails
+  closed outside the scheduler creator thread. It is not synchronized
+  cross-thread ingress and does not authorize heap/graph payloads.
+- **Process boundary:** child results cross as bounded pointer-free `SPRF1` /
+  `SPRS` encoded copies into a generation/replay-bound parent inbox, then one
+  validated candidate batch publishes under the parent owner.
+- **Modern SSpec:** `actor_channel_authority_spec.spl` uses closed
+  `actor-channel-authority/v1`; `parent_commit_piped_result_spec.spl` uses
+  closed `parent-commit-piped-result/v1`. Their mirrors and exact commands are
+  linked from `doc/07_guide/language/parallel_apps.md`.
+- **Current status:** source and authored manuals are partial evidence. The
+  deployed Stage-4 test ABI probe blocks native execution, docgen, and
+  maintenance; never substitute the Rust seed or label authored mirrors as
+  generated PASS.
+
+### Agent lookup rule
+
+When a request mentions actor channels, copied actor references, child process
+results, deterministic parent commit, or no-resurrection cancellation, start
+with `doc/05_design/language/concurrency/parent_commit_parallel_apps.md`, then
+the two focused test plans under `doc/03_plan/sys_test/`. Preserve the explicit
+same-thread/typed-payload exclusions and the Stage-4 blocker.
+
+## Modern SSpec typed evidence
+
+- **Observation:** a canonical record produced from the exercised surface.
+- **Oracle:** an independently declared closed `OracleSpec`; never expected
+  text copied from the observation itself.
+- **Fail closed:** parse failure, missing/ambiguous selector, all-ignore or
+  bind-only vacuity, non-numeric tolerance, tolerance overflow, undeclared
+  closed-mode fields, and malformed manifest digests all fail.
+- **Docgen:** the sidecar loader is wired; a missing live provider or evidence
+  sidecar means no retained execution provenance, not a generated evidence PASS.
+- **Primary guide:** `doc/07_guide/infra/sspec_typed_evidence.md`.
+
 ## StarFive JH7110 software reset over Tigard JTAG
 
 - **Canonical command:** `scripts/os/starfive-jtag-sbi-reset.shs`.

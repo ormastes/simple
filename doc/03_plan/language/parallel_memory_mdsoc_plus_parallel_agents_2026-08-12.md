@@ -83,11 +83,11 @@ separately instead of silently substituting the Rust seed.
 | AC-2 bounded framed process result | **implemented; focused Stage-2 PASS** | The admitted Stage-2 executable passed all 8 inbox examples: hostile input, replay, frame/byte budgets, FIFO, copied retention, revoke, and deterministic drain. | Repair nested aggregate lowering and obtain the real-child system verdict. |
 | AC-3 sole parent apply/verify/publish | **implemented; focused Stage-2 PASS** | The admitted Stage-2 executable passed all 9 owner examples, including candidate apply/verify, mutation receipts, canonical order, and mixed malformed/conflict rollback. | Retain the focused PASS while repairing the broad system executable; no overall acceptance yet. |
 | AC-4 lifecycle, cancellation, no resurrection | **implemented; focused mixed PASS** | Hosted actor lifecycle tests pass. The admitted Stage-2 piped unit passed all 6 examples, including zero-generation rejection and close behavior; inbox revoke/no-resurrection passed. | Obtain the real-child cancellation/reap system verdict after aggregate-return repair. |
-| AC-5 focused executable evidence | **partial** | Stage-2 process units pass 8/8 inbox, 9/9 owner, and 6/6 piped examples. Hosted actor tests pass. The five-step system spec retains real assertions and AC/REQ traceability, but 3/4 scenarios fail because nested returned aggregates are corrupted by Stage2. | Repair nested aggregate-return lowering, then run the failed system shard in a fresh session. |
-| AC-6 SPipe manual and maintenance | **authored; generation blocked** | The exact five frozen steps and matching operator manual exist with traceability and no skip-success path. | Stage-4 `spipe-docgen` and seven-score `sspec-maintain` remain unavailable; the authored manual is not labeled generated PASS. |
-| AC-7 production verification | **WARN / blocked** | A typed receipt authorized the current-source Stage-2 compiler (SHA-256 `4c2d7d7328372175260d75ffd1ee2e475d9848a1d534c73ace7a9ef1eee0b68e`). The complete core-C capsule passes 33 checks and links focused native specs. Stage 3 was terminated at 29,019,120 KiB RSS; Stage-4 still exits 139. | Repair staged aggregate-return lowering and the profiled Stage-3 retention owner, then complete Stage 3/4 and run compiler/lib/MCP/LSP, lint, duplication, and SPipe gates. Do not rerun unchanged failed transactions. |
+| AC-5 focused executable evidence | **partial** | Stage-2 process units historically report 8/8 inbox, 9/9 owner, and 6/6 piped examples, but their exact shard logs were not retained. The process system source now has modern typed evidence and four real scenarios; Stage 2 passed copied isolation only. A separate actor/channel Modern SSpec covers same-thread scheduler authority, bounded credit, copied arguments, and unique stop. Neither has an admitted Stage-4 verdict. | Repair nested aggregate-return lowering and Stage-4 deployment, then run both focused system specs once and retain commands/logs/provenance. |
+| AC-6 SPipe manual and maintenance | **authored; generation blocked** | The process and actor/channel primary flows each have five frozen steps, closed typed schemas, authored operator manuals, traceability, and no skip-success path. | Stage-4 `spipe-docgen` and seven-score `sspec-maintain` remain unavailable; neither authored manual is labeled generated PASS. |
+| AC-7 production verification | **FAIL / blocked** | A typed receipt authorized the current-source Stage-2 compiler (SHA-256 `4c2d7d7328372175260d75ffd1ee2e475d9848a1d534c73ace7a9ef1eee0b68e`). Stage 3 terminated at 29,019,120 KiB RSS; the 2026-08-16 Stage-4 focused-test attempt failed its bounded ABI probe before executing the spec. | Repair staged aggregate-return lowering and the profiled Stage-3 retention owner, then complete Stage 3/4 and run compiler/lib/MCP/LSP, lint, duplication, SPipe, and concurrency/resource-model gates. Do not rerun unchanged failed transactions. |
 | AC-8 guide and expert knowledge | **complete** | Architecture, detail design, guide, feature/layer experts, test plans, and blocker classifications reflect the landed actor/process contracts and current evidence. | Reopen if final review finds an overclaim or an interface changes. |
-| AC-9 cooperative review | **review complete; acceptance withheld** | A separate highest-capability reviewer inspected the merged diff. Three source findings were fixed and re-reviewed; the reviewer correctly withheld ACCEPT because AC-5..7 executable evidence remains WARN. | Repeat final acceptance after the staged/Stage-4 and SPipe blockers pass. |
+| AC-9 cooperative review | **modernization delta accepted; feature acceptance withheld** | Read-only SSpec, knowledge, and truthfulness audits identified stale cancellation, plan, provenance, and status claims; the merge owner incorporated their findings. A separate highest-capability reviewer accepted the corrected final modernization diff, including the explicit exclusion of moved-source invalidation from cancellation coverage. | Re-review any later semantic change. Overall feature acceptance remains withheld while AC-5..7 fail. |
 
 ### Frozen implementation and manual vocabulary
 
@@ -104,6 +104,12 @@ separately instead of silently substituting the Rust seed.
   `parent_commit_piped_process_session_v1`, and
   `drain_process_result_batch`. Any not-yet-wired helper must fail explicitly
   with `assert(false)` or `fail(...)`.
+- Actor manual steps: `Create one scheduler-owned bounded actor channel`;
+  `Admit copied arguments through one actor reference`; `Observe finite mailbox
+  and reply backpressure`; `Dispatch and consume the isolated result`; `Stop
+  once through the owning scheduler`.
+- Closed evidence schemas: `actor-channel-authority/v1` and
+  `parent-commit-piped-result/v1`.
 
 ### Ordered implementation lanes
 
@@ -115,8 +121,9 @@ separately instead of silently substituting the Rust seed.
 3. **Process lifecycle (AC-2/4/5):** add parent-issued session freshness,
    cancel/reap/close-once receipts, and real-child hostile-stream evidence.
 4. **Stage-2/3 execution lane (AC-7):** inventory or produce a provenance-bound
-   Stage-3 or Stage-2 pure-Simple binary and use it for every supported focused
-   compile/native/docgen/maintenance gate. Keep Stage-4-only CLI coverage
+   Stage-3 or Stage-2 pure-Simple binary and use it only for explicitly
+   supported focused compile/native gates. General `test`, docgen, and
+   maintenance require the Stage-4 surface. Keep Stage-4-only CLI coverage
    explicit; do not use the Rust seed as acceptance evidence.
 5. **SPipe/manual and production gates (AC-5/6/7):** author the frozen five-step
    scenario, generate its mirrored manual, clear the seven-score maintenance
@@ -134,11 +141,10 @@ separately instead of silently substituting the Rust seed.
   before using it. Run the focused native executable directly when the staged
   compiler lacks the full `test` driver.
 - SPipe manual: docgen/maintenance cannot be admitted with the crashing Stage 4
-  runtime. Resume with `bin/release/simple spipe-docgen
-  test/03_system/feature/language/parent_commit_piped_result_spec.spl --output
-  doc/06_spec --no-index`, then `bin/release/simple sspec-maintain scan` on the
-  same spec via `bin/release/simple sspec-maintain scan
-  test/03_system/feature/language/parent_commit_piped_result_spec.spl`.
+  runtime. Resume `spipe-docgen` and `sspec-maintain scan` for both
+  `actor_channel_authority_spec.spl` and
+  `parent_commit_piped_result_spec.spl` using the exact commands in their
+  focused system-test plans.
 - Raw actor value transport remains tracked by
   `parallel_runtime_raw_value_transport_2026-08-12.md`; session freshness,
   cancellation revocation, PID reuse, and terminal child cleanup are tracked

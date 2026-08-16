@@ -10,9 +10,9 @@
 | Executable source | `test/03_system/feature/language/parent_commit_piped_result_spec.spl` |
 | Audience | Language/runtime maintainers and verification operators |
 | Primary boundary | Real piped child output to bounded parent-owned validation and commit |
-| Scenarios | Real fragmented/replayed child result; copied-frame isolation; mixed-batch rollback |
-| Acceptance runtime | An admitted pure-Simple Stage 4, Stage 3, or Stage 2 runtime with the required commands |
-| Current execution state | Stage-2 copied isolation PASS; three scenarios blocked by aggregate/`Option` corruption; Stage 4 exits 139 |
+| Scenarios | Real fragmented/replayed child result; copied-frame isolation; mixed-batch rollback; live cancellation/revocation |
+| Acceptance runtime | An admitted pure-Simple Stage-4 test surface; admitted Stage 2/3 artifacts may prove only explicitly supported direct-compile commands |
+| Current execution state | Stage-2 copied isolation PASS; three scenarios failed from aggregate/`Option` corruption; the 2026-08-16 Stage-4 attempt was blocked by the bounded test ABI probe |
 
 ## Purpose
 
@@ -42,7 +42,14 @@ reject the replay, validate and apply one candidate root under
 | NFR-PAR-001 | Canonical task/result receipt values | Determinism |
 | NFR-PAR-002 | Capacity, one-frame intake, and bounded reader state | Bounded memory |
 | NFR-PAR-003 | Typed codecs reject malformed bytes before publication | Fail closed |
-| NFR-PAR-006 | Explicit native/tooling blocker and no seed substitution | Parity reporting |
+
+The primary flow also converts eleven observed transport, commit, and lifecycle
+fields into `CanonicalEvidence` and compares them with a closed, independently
+declared `OracleSpec`. The fixed oracle checks accepted/rejected counts, replay
+rejection, both typed receipts, revision/token transition, terminal liveness,
+and the single close attempt. The direct branch assertion remains authoritative
+for the two valid terminal reasons (`exited` or `closed`). Tool availability and
+the no-seed policy are documented blockers, not executable NFR-PAR-006 coverage.
 
 This file contributes to AC-5 and AC-6. It does not by itself complete AC-5:
 the broader acceptance criterion also requires actor public-surface,
@@ -59,7 +66,7 @@ flow. It does not complete AC-6 until pure-Simple doc generation and the full
 3. `/bin/sh` and `sleep` must be available to the test process.
 4. Run from the repository root with `SIMPLE_LIB=src` when required by the
    selected staged runtime.
-5. Keep the five step labels and four frozen helpers unchanged; tooling and
+5. Keep the five primary-flow step labels and four frozen helpers unchanged; tooling and
    reviewers use them as the stable manual contract.
 
 ## Primary scenario contract
@@ -157,8 +164,29 @@ admitted runtime result is still required for an execution verdict.
 
 The owner receives one valid frame and one malformed byte array in the same
 candidate batch. Decode must fail before publication. The negative mutation
-receipt, revision `4`, snapshot token `800`, and empty application root must
+receipt, revision `4`, snapshot token `800`, and application root `[600]` must
 all remain observable afterward.
+
+### Live cancellation and ingress revocation
+
+The child emits one accepted generation-bound result and then remains alive.
+Cancellation must close the session, revoke the retained inbox frame, record
+one native close attempt, and make subsequent receive report `closed`. This is
+focused cancellation/revocation evidence; it does not prove provider-wide PID
+reuse protection or cross-thread actor cancellation.
+
+## Modern typed-evidence contract
+
+The executable observation schema is `parent-commit-piped-result/v1`. It is a
+closed schema: undeclared fields, missing selectors, parse errors, ambiguous
+cardinality, or a mismatched literal fail `compare_evidence`. Expected values
+are declared independently through `check_exact`; diagnostic `print` lines are
+operator context and are never used as their own oracle.
+
+The authored mirror contains no generated provenance manifest yet. Until
+pure-Simple `spipe-docgen` and `sspec-maintain` run successfully, the manual has
+no accepted source digest, environment receipt, seven-score result, or generated
+folded executable block. Those absences remain blockers, not waived findings.
 
 ## Failure diagnostics
 
@@ -191,14 +219,16 @@ Intended maintenance gate:
 bin/release/simple sspec-maintain scan test/03_system/feature/language/parent_commit_piped_result_spec.spl
 ```
 
-This lane produced the provenance-admitted Stage-2 pure-Simple binary at
-`build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple`.
+This lane produced the provenance-admitted Stage-2 pure-Simple binary recorded
+in the verification report; it does not provide the Stage-4 `test`, docgen, or
+maintenance surface.
 Direct execution with that binary passed copied-frame isolation, while the
 fragmented child, rollback, and cancellation paths exposed aggregate/`Option`
 corruption and remain failed evidence. Stage 3 stopped after the mandatory
-three fix cycles, and the available `bin/release/simple` Stage-4 wrapper still
-exits 139 during its bounded CLI ABI probe. Doc generation and maintenance
-therefore have no admitted verdict in this revision.
+three fix cycles. On 2026-08-16 the exact intended native command stopped before
+spec execution with `error: deployed Simple runtime failed its bounded test ABI
+probe`. Doc generation and maintenance therefore have no admitted verdict in
+this revision.
 
 ## Maintenance acceptance
 
@@ -211,7 +241,7 @@ runtime provenance, and verdict; do not hand-enter a PASS.
 ## Review checklist
 
 - [ ] Admitted pure-Simple native scenario PASS is attached.
-- [ ] Exactly five frozen step labels are present and ordered.
+- [x] Exactly five frozen primary-flow step labels are present and ordered.
 - [ ] `child_result_line`, `parent_commit_frame_inbox_v1_for_generation`,
   `parent_commit_piped_process_session_v1`, and
   `drain_process_result_batch` remain wired.
@@ -220,6 +250,7 @@ runtime provenance, and verdict; do not hand-enter a PASS.
 - [ ] Repeated close leaves `close_attempts == 1`.
 - [ ] Generated mirror matches the executable source.
 - [ ] `sspec-maintain` reports seven acceptable scores and no blocker.
+- [x] Typed observations are compared with a closed independent oracle.
 
 ## Related artifacts
 

@@ -424,7 +424,20 @@ expect(result.status).to_equal(EvidenceStatus.passed)
 **Fail-closed rules:** parse error fails · unresolved selector fails ·
 ambiguous cardinality fails · `check_ignore` without a reason fails · a spec
 where every check is `ignore` (no positive oracle) fails · closed-mode
-(`oracle_spec`, not `oracle_spec_open`) rejects undeclared fields.
+(`oracle_spec`, not `oracle_spec_open`) rejects undeclared fields · bind-only
+oracles fail vacuity · non-numeric tolerance fails · tolerance overflow fails ·
+manifest digests must be 64 hex characters.
+
+For parent-authoritative actor/process scenarios, keep actor and process
+observations separate: use closed `actor-channel-authority/v1` for the
+same-thread scheduler-owned actor compatibility surface and closed
+`parent-commit-piped-result/v1` for framed child-result ingress/commit/lifecycle.
+The canonical steps, manuals, and blocked Stage-4 commands are in
+`doc/03_plan/sys_test/actor_channel_authority.md` and
+`doc/03_plan/sys_test/parent_authoritative_actor_process.md`. A source-built
+`CanonicalEvidence` value is a real oracle check but not retained execution
+provenance; do not label an authored mirror generated until pure-Simple docgen
+and maintenance pass, and never substitute the Rust seed.
 
 Guide: [`doc/07_guide/infra/sspec_typed_evidence.md`](../../doc/07_guide/infra/sspec_typed_evidence.md);
 design: [`doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md`](../../doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md);

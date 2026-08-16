@@ -179,6 +179,45 @@ through the session owner and call `close()` or `cancel()` when appropriate;
 poll reaps an observed natural exit. Close is idempotent and the status receipt
 reports cancellation/natural-exit state and the native close-attempt count.
 
+## Focused Modern SSpec evidence
+
+Two focused system specifications document the implemented compatibility
+surfaces without promoting them to complete actor/process transport:
+
+- `test/03_system/feature/language/actor_channel_authority_spec.spl` covers
+  same-thread scheduler authority, copied scalar-text arguments, finite mailbox
+  and reply credit, unknown/stopped rejection, and unique terminal removal. Its
+  authored mirror is
+  `doc/06_spec/03_system/feature/language/actor_channel_authority_spec.md`.
+- `test/03_system/feature/language/parent_commit_piped_result_spec.spl` covers
+  fragmented/replayed encoded child output, copied frame retention, parent
+  candidate apply/verify/publish, rollback, cancellation/revocation, and
+  close-once receipts. Its authored mirror is
+  `doc/06_spec/03_system/feature/language/parent_commit_piped_result_spec.md`.
+
+Both primary scenarios convert observations into closed Modern SSpec evidence
+and compare them with independently declared `check_exact` oracles. Diagnostic
+text is not its own oracle. The actor schema is
+`actor-channel-authority/v1`; the process schema is
+`parent-commit-piped-result/v1`. Missing/extra fields, unresolved selectors,
+and mismatches fail closed.
+
+Run the intended native gates only through an admitted pure-Simple Stage-4
+test surface:
+
+```sh
+SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/actor_channel_authority_spec.spl --mode=native
+SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl --mode=native
+```
+
+Then run `spipe-docgen` and `sspec-maintain scan` for each executable as listed
+in `doc/03_plan/sys_test/actor_channel_authority.md` and
+`doc/03_plan/sys_test/parent_authoritative_actor_process.md`. The deployed
+Stage-4 wrapper currently fails its bounded test ABI probe before either spec
+executes. Their Markdown files are therefore authored mirrors, not accepted
+generated manuals; no Rust seed or Stage-2 direct compile result may substitute
+for Stage-4 test/docgen/maintenance evidence.
+
 WP-18 now has internal runtime groundwork for a deliberately narrow bounded
 scalar pool-state pilot. Capacity counts pending, running, and completed but
 unreleased tasks; credit returns only on release. Tagged generation handles are

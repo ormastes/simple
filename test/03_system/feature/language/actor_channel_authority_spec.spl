@@ -1,0 +1,134 @@
+# codex-system-test
+# @req REQ-PAR-002 REQ-PAR-006 NFR-PAR-002 NFR-PAR-003
+
+"""
+# Scheduler-owned actor channel authority
+
+This system specification exercises the public scalar-text actor compatibility
+surface through one explicit scheduler owner. It proves finite mailbox and
+reply admission, admission-time argument copying, copied-reference routing,
+and one terminal scheduler removal. It does not claim cross-thread ActorRef
+safety, typed heap payload transport, or C/interpreter provider parity.
+
+Run only with an admitted pure-Simple Stage-4 test surface:
+
+    SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/actor_channel_authority_spec.spl --mode=native
+
+The Rust bootstrap seed is not acceptance evidence.
+"""
+
+use std.spec.*
+use std.actor.actor.{Actor, HandlerTable}
+use std.actor.mailbox.{ActorMailbox}
+use std.actor.scheduler.{ActorScheduler}
+use std.actor.spawn.{ActorRef}
+use std.common.spec.evidence.model.{
+    EvidenceStatus,
+    canonical_evidence,
+    evidence_node,
+    oracle_spec,
+    check_exact
+}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+
+fn authority_echo(args: [text]) -> text:
+    if args.is_empty():
+        return ""
+    args[0]
+
+fn actor_ref_with_authority(scheduler: ActorScheduler,
+                            mailbox: ActorMailbox) -> ActorRef:
+    var handlers = HandlerTable.new()
+    handlers.register("echo", authority_echo)
+    val actor = Actor.with_mailbox(handlers, mailbox)
+    val actor_id = scheduler.register_actor(actor)
+    ActorRef(actor_id: actor_id, _scheduler: scheduler)
+
+describe "scheduler-owned actor channel authority":
+    it "should preserve bounded copied-reference authority through terminal stop":
+        step("Create one scheduler-owned bounded actor channel")
+        val scheduler = ActorScheduler.with_reply_capacity(1)
+        val mailbox = ActorMailbox.new(1)
+        val original = actor_ref_with_authority(scheduler, mailbox)
+        val copied = original
+        expect(original.get_id()).to_be_greater_than(0)
+        expect(scheduler.reply_capacity()).to_equal(1)
+
+        step("Admit copied arguments through one actor reference")
+        var args = ["before"]
+        val reply_id = original.ask("echo", args)
+        expect(reply_id).to_be_greater_than(0)
+        args[0] = "after"
+        expect(copied.has_messages()).to_equal(true)
+
+        step("Observe finite mailbox and reply backpressure")
+        expect(copied.send("echo", ["mailbox-full"])).to_equal(false)
+        expect(copied.ask("echo", ["reply-full"])).to_equal(-1)
+        expect(scheduler.outstanding_reply_count()).to_equal(1)
+        expect(mailbox.pending_high_water_count()).to_equal(1)
+
+        step("Dispatch and consume the isolated result")
+        scheduler.run_until_idle()
+        var observed_reply = "missing"
+        if val reply = scheduler.consume_reply(reply_id):
+            observed_reply = reply
+            expect(reply).to_equal("before")
+        else:
+            fail("the admitted actor reply must remain available")
+        expect(scheduler.outstanding_reply_count()).to_equal(0)
+        expect(copied.has_messages()).to_equal(false)
+
+        step("Stop once through the owning scheduler")
+        val first_stop = copied.stop()
+        val second_stop = original.stop()
+        val late_send = original.send("echo", ["late"])
+        val late_ask = copied.ask("echo", ["late"])
+        expect(first_stop).to_equal(true)
+        expect(second_stop).to_equal(false)
+        expect(late_send).to_equal(false)
+        expect(late_ask).to_equal(-1)
+        expect(original.has_messages()).to_equal(false)
+
+        val evidence = canonical_evidence(
+            "protocol",
+            "actor-channel-authority/v1",
+            [
+                evidence_node("mailbox.high_water", "{mailbox.pending_high_water_count()}"),
+                evidence_node("reply.capacity", "{scheduler.reply_capacity()}"),
+                evidence_node("reply.value", observed_reply),
+                evidence_node("reply.outstanding_after_consume", "{scheduler.outstanding_reply_count()}"),
+                evidence_node("lifecycle.first_stop", "{first_stop}"),
+                evidence_node("lifecycle.second_stop", "{second_stop}"),
+                evidence_node("lifecycle.late_send", "{late_send}"),
+                evidence_node("lifecycle.late_ask", "{late_ask}")
+            ]
+        )
+        val oracle = oracle_spec(
+            "actor-channel-authority/v1",
+            [
+                check_exact("mailbox.high_water", "1"),
+                check_exact("reply.capacity", "1"),
+                check_exact("reply.value", "before"),
+                check_exact("reply.outstanding_after_consume", "0"),
+                check_exact("lifecycle.first_stop", "true"),
+                check_exact("lifecycle.second_stop", "false"),
+                check_exact("lifecycle.late_send", "false"),
+                check_exact("lifecycle.late_ask", "-1")
+            ]
+        )
+        val comparison = compare_evidence(evidence, oracle)
+        expect(comparison.status).to_equal(EvidenceStatus.passed)
+        expect(comparison.summary).to_equal("8 check(s) passed")
+
+    # @manual: fold
+    it "should reject an unknown actor without publishing work or reply credit":
+        step("Create an actor reference whose ID is absent from the scheduler")
+        val scheduler = ActorScheduler.with_reply_capacity(1)
+        val unknown = ActorRef(actor_id: 999999, _scheduler: scheduler)
+
+        step("Reject every operation at the scheduler-owned registry boundary")
+        expect(unknown.send("echo", ["unknown"])).to_equal(false)
+        expect(unknown.ask("echo", ["unknown"])).to_equal(-1)
+        expect(unknown.has_messages()).to_equal(false)
+        expect(unknown.stop()).to_equal(false)
+        expect(scheduler.outstanding_reply_count()).to_equal(0)

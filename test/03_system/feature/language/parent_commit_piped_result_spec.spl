@@ -1,5 +1,5 @@
 # codex-system-test
-# @req REQ-PAR-002 REQ-PAR-003 REQ-PAR-005 REQ-PAR-006 REQ-PAR-008 REQ-PAR-009 NFR-PAR-001 NFR-PAR-002 NFR-PAR-003 NFR-PAR-006
+# @req REQ-PAR-002 REQ-PAR-003 REQ-PAR-005 REQ-PAR-006 REQ-PAR-008 REQ-PAR-009 NFR-PAR-001 NFR-PAR-002 NFR-PAR-003
 
 """
 # Parent-authoritative piped child-result evidence
@@ -17,18 +17,25 @@ once. Supporting scenarios make copied frame retention and atomic rollback
 independently observable.
 
 Requirements: REQ-PAR-002, REQ-PAR-003, REQ-PAR-005, REQ-PAR-006,
-REQ-PAR-008, REQ-PAR-009, NFR-PAR-001, NFR-PAR-002, NFR-PAR-003,
-NFR-PAR-006.
+REQ-PAR-008, REQ-PAR-009, NFR-PAR-001, NFR-PAR-002, NFR-PAR-003.
 
 Run with the admitted pure-Simple runtime:
 
-    bin/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl --mode=native
+    SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl --mode=native
 
 The Rust bootstrap seed is not acceptance evidence. See the mirrored operator
 manual and system-test plan for the current runner/doc-generation boundary.
 """
 
 use std.spec.*
+use std.common.spec.evidence.model.{
+    EvidenceStatus,
+    canonical_evidence,
+    evidence_node,
+    oracle_spec,
+    check_exact
+}
+use std.common.spec.evidence.evidence_comparator.{compare_evidence}
 use std.common.structural.parallel_commit.commit_contracts.{
     ParallelCommitOrder,
     ParallelConflictPolicy,
@@ -168,9 +175,11 @@ describe "parent-authoritative piped child results":
         expect(outcome.mutation.before_application_payload_root).to_equal([])
         expect(outcome.mutation.after_application_payload_root).to_equal([707])
         expect(inbox.depth()).to_equal(0)
+        var observed_snapshot_token = -1
         if val snapshot = owner.snapshot():
             expect(snapshot.revision).to_equal(5)
             expect(snapshot.snapshot_token).to_equal(401)
+            observed_snapshot_token = snapshot.snapshot_token
         else:
             fail("committed parent snapshot must remain available")
         if val application_root = owner.snapshot_application_payload_root():
@@ -190,19 +199,62 @@ describe "parent-authoritative piped child results":
         else:
             expect(terminal.terminal_reason).to_equal("closed")
 
+        val evidence = canonical_evidence(
+            "protocol",
+            "parent-commit-piped-result/v1",
+            [
+                evidence_node("transport.accepted", "{accepted_total}"),
+                evidence_node("transport.rejected", "{rejected_total}"),
+                evidence_node("transport.replay_rejected", "{intake_stats.rejected_replay_frames}"),
+                evidence_node("commit.receipt_ok", "{outcome.commit.receipt.ok}"),
+                evidence_node("commit.mutation_ok", "{outcome.mutation.ok}"),
+                evidence_node("commit.before_revision", "{outcome.mutation.before_revision}"),
+                evidence_node("commit.after_revision", "{outcome.mutation.after_revision}"),
+                evidence_node("commit.snapshot_token", "{observed_snapshot_token}"),
+                evidence_node("lifecycle.closed", "{terminal.closed}"),
+                evidence_node("lifecycle.alive", "{terminal.alive}"),
+                evidence_node("lifecycle.close_attempts", "{terminal.close_attempts}")
+            ]
+        )
+        val oracle = oracle_spec(
+            "parent-commit-piped-result/v1",
+            [
+                check_exact("transport.accepted", "1"),
+                check_exact("transport.rejected", "1"),
+                check_exact("transport.replay_rejected", "1"),
+                check_exact("commit.receipt_ok", "true"),
+                check_exact("commit.mutation_ok", "true"),
+                check_exact("commit.before_revision", "4"),
+                check_exact("commit.after_revision", "5"),
+                check_exact("commit.snapshot_token", "401"),
+                check_exact("lifecycle.closed", "true"),
+                check_exact("lifecycle.alive", "false"),
+                check_exact("lifecycle.close_attempts", "1")
+            ]
+        )
+        val comparison = compare_evidence(evidence, oracle)
+        expect(comparison.status).to_equal(EvidenceStatus.passed)
+        expect(comparison.summary).to_equal("11 check(s) passed")
+
+    # @manual: fold
     it "should retain an owned copy before the producer mutates its frame":
+        step("Offer one encoded frame into parent-owned bounded storage")
         val inbox = parent_commit_frame_inbox_v1_for_generation(2, 41)
         val expected = child_result_frame(9, 909, 41)
         var offered = child_result_frame(9, 909, 41)
 
         expect(inbox.offer_process_result_frame(offered)).to_equal(true)
+
+        step("Mutate the producer buffer and compare the retained parent copy")
         offered[0] = 0
 
         val received = inbox.receive()
         expect(received.ok).to_equal(true)
         expect(received.frame).to_equal(expected)
 
+    # @manual: fold
     it "should roll back a mixed valid and malformed process batch":
+        step("Submit one valid and one malformed frame as one candidate batch")
         val owner = parent_commit_owner_v1_with_application_root(
             parallel_commit_state_v1(4, 800),
             [600],
@@ -215,6 +267,7 @@ describe "parent-authoritative piped child results":
 
         print "rollback evidence ok={outcome.mutation.ok} reason={outcome.mutation.reason} before={outcome.mutation.before_revision} after={outcome.mutation.after_revision}"
 
+        step("Verify both canonical roots remain unchanged after rejection")
         expect(outcome.commit.receipt.ok).to_equal(false)
         expect(outcome.mutation.ok).to_equal(false)
         expect(outcome.mutation.reason).to_equal("invalid-process-result-frame")
@@ -232,7 +285,9 @@ describe "parent-authoritative piped child results":
         else:
             fail("rejected process batch must preserve the application root")
 
+    # @manual: fold
     it "should cancel a live child and revoke its accepted result":
+        step("Start a generation-bound child that remains alive after emitting")
         val lifecycle_owner = parent_commit_owner_v1(
             parallel_commit_state_v1(1, 100),
             ParallelCommitOrder.TaskIdThenSequence,
@@ -255,6 +310,8 @@ describe "parent-authoritative piped child results":
             polls = polls + 1
         expect(accepted).to_equal(1)
         expect(inbox.depth()).to_equal(1)
+
+        step("Cancel the child and revoke retained ingress exactly once")
         expect(session.cancel()).to_equal(true)
         expect(session.cancel()).to_equal(true)
         val terminal = session.status()

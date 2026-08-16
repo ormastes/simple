@@ -78,22 +78,28 @@ cargo test --manifest-path src/compiler_rust/runtime/Cargo.toml value::channels:
 cargo test --manifest-path src/compiler_rust/common/Cargo.toml actor_handle_reports_bounded_mailbox_backpressure
 ```
 
-The current self-hosted production gate is:
+The current self-hosted production gates are:
 
 ```text
+SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/actor_channel_authority_spec.spl --mode=native
 SIMPLE_LIB=src bin/release/simple test test/03_system/feature/language/parent_commit_piped_result_spec.spl --mode=native
 ```
 
-The executable now has the frozen five-step process flow, copied-frame
+The actor executable has the five-step same-thread scheduler-authority flow,
+finite mailbox/reply backpressure, copied argument isolation, unique stop, and
+closed `actor-channel-authority/v1` typed evidence. The process executable has
+the frozen five-step process flow, copied-frame
 isolation, typed candidate-root mutation/rollback assertions, no SKIP path, and
-explicit natural-exit/close-once checks. Its authored operator mirror is
+explicit natural-exit/close-once checks plus closed
+`parent-commit-piped-result/v1` evidence. Their authored operator mirrors are
+`doc/06_spec/03_system/feature/language/actor_channel_authority_spec.md` and
 `doc/06_spec/03_system/feature/language/parent_commit_piped_result_spec.md`;
-the exact evidence and resume gates are in
-`doc/03_plan/sys_test/parent_authoritative_actor_process.md`.
+the exact evidence and resume gates are in the matching focused plans under
+`doc/03_plan/sys_test/`.
 
-Do not run it until `bin/release/simple test --help` passes its bounded ABI
+Do not run them until `bin/release/simple test --help` passes its bounded ABI
 probe; status 139 is a deployment blocker, not a spec verdict. The authored
-mirror is not a generated-manual or `sspec-maintain` PASS until those commands
+mirrors are not generated-manual or `sspec-maintain` PASS until those commands
 run successfully on an admitted pure-Simple runtime.
 
 Current `origin/main` has an unrelated missing `rt_io_tcp_probe_peer` re-export;

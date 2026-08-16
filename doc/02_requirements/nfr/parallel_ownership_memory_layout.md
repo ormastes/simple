@@ -28,3 +28,10 @@ behavior, and an explicit blocked native-tooling row. Its authored mirror is
 `doc/06_spec/03_system/feature/language/parent_commit_piped_result_spec.md`.
 These references become execution evidence only after an admitted pure-Simple
 native verdict and do not substitute for the full portability matrix.
+
+`test/03_system/feature/language/actor_channel_authority_spec.spl` adds partial
+NFR-PAR-002/NFR-PAR-003 coverage through one-slot mailbox/reply budgets, retained
+high-water evidence, returned credit after consumption, and fail-closed unknown,
+full, and stopped operations. Its authored mirror is
+`doc/06_spec/03_system/feature/language/actor_channel_authority_spec.md`; it is
+not NFR-PAR-006 parity evidence and remains native/docgen blocked.

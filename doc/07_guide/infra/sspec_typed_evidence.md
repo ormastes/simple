@@ -1,13 +1,12 @@
 # Modern SSpec Typed Evidence
 
-**Status:** Wave-0 contract landed 2026-08-08, and Wave-1/Wave-2 lanes E2, E2b,
-E3, E4, E6, E7a, E7b landed the same day — the shared contract, every format
-adapter, action-trace, manual rendering, and the spec-to-spipe extension
-namespace all exist and are unit-covered. What has **not** landed: the
-`spipe_docgen` evidence loader/wiring (E5), the `sspec-maintain evidence`
-commands, any live capture provider, and the three reference example manuals
-(E8) — see §8. See §8a for four open red-team findings that gate treating the
-comparator as fully trustworthy.
+**Status:** The shared contract, format adapters, action trace, manual rendering,
+spec-to-SPipe extension, sidecar evidence loader, and docgen renderer wiring are
+landed. Runnable reference examples are under
+`test/03_system/tools/spipe/examples/`. The four 2026-08-08 red-team comparator
+findings are fixed and covered. Still open: live capture providers and the
+designed `sspec-maintain evidence` subcommands/profile-completeness surface.
+See §8 for the exact boundary and §8a for the closed findings.
 **Design:** `doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md`
 **Plan:** `doc/03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md`
 **Research:** `doc/01_research/infra/sspec/modern_sspec_typed_evidence_research_2026-08-08.md`
@@ -40,8 +39,9 @@ EvidenceRequest → provider → RawArtifact → format adapter
 | GUI/TUI action-trace capture model | `src/lib/common/spec/evidence/action_trace.spl` |
 | Format adapters (TUI grid, text protocol, binary layout, 2D/3D scene, simulation/stats) | `src/lib/common/spec/evidence/format/*.spl` — see §7a |
 | Spec-to-SPipe evidence extension namespace | `src/lib/common/spec/evidence/spipe_extension.spl` |
-| Executable behaviour of all of the above | `test/01_unit/lib/common/spec/evidence/*_spec.spl` — 8 spec files, 1,862 lines, 124 `it` examples total |
-| `spipe_docgen` evidence loader + renderer wiring, live capture providers, `sspec-maintain evidence` commands, reference examples | not yet implemented — §8 |
+| Executable behaviour of all of the above | `test/01_unit/lib/common/spec/evidence/*_spec.spl` and `test/03_system/tools/spipe/examples/` |
+| `spipe_docgen` evidence sidecar loader + renderer wiring | `src/app/spipe_docgen/spipe_docgen/evidence_loader.spl` and `generator.spl` |
+| Live capture providers and `sspec-maintain evidence` commands | not yet implemented — §8 |
 
 The runtime never renders Markdown. Capture and `spipe_docgen` run in separate processes
 sharing only files, so a `render_md()` on a runtime object (the shape of the superseded
@@ -136,17 +136,20 @@ All are implemented in `compare_evidence` and each has a red fixture in the spec
 | Ambiguous selector fails (declared cardinality) | The check verifies a different node than the manual claims |
 | Ignore without a reason fails | An unchecked field reads as a reviewed one |
 | All-ignore oracle fails | A capture that ignores everything asserts nothing about production |
+| Bind-only oracle fails | Correlation values are captured but never compared |
+| Non-numeric tolerance fails | Unrelated words both coerce to numeric zero |
+| Overflow-safe tolerance fails | Extreme disagreement wraps into a small difference |
 | Closed-mode undeclared field fails | New fields enter the contract without anyone deciding |
 | Zero positive resolutions fails | A pattern-only oracle reports a clean pass over an empty observation |
+| Manifest digests are validated | Placeholder provenance text masquerades as SHA-256 identity |
 
 Expected values may never be derived from the actual observation under test — that is
 equality with itself, not verification.
 
-**Not yet closed:** a 2026-08-08 red-team pass found four more escapes still open in
-`compare_evidence` today — a bind-only oracle passes vacuously, `numeric_tolerance`
-accepts non-numeric operands, tolerance comparison can overflow into a false pass, and
-`evidence_manifest_is_complete` does not check that its digests are 64 hex characters.
-None of the rules above catch these. See §8a and
+The 2026-08-08 red-team pass found four additional escapes. They are now closed
+by `check_is_positive`, numeric-format validation, overflow-safe tolerance, and
+`is_sha256_hex`; the regression cases live in
+`typed_evidence_oracle_spec.spl`. See §8a and the retained audit at
 `doc/08_tracking/audit/modern_sspec_evidence_contract_redteam_2026-08-08.md`.
 
 ## 6. Writing steps a reader can follow
@@ -181,8 +184,8 @@ them a stale manual cannot be told apart from a current one, however green its c
 ## 7a. Modules landed 2026-08-08
 
 Each format adapter turns a domain-specific artifact into `CanonicalEvidence`
-so the single `compare_evidence` in §5 checks it; none of them capture, render
-Markdown, or talk to a live system — see §8 for what still does not exist.
+so the single `compare_evidence` in §5 checks it. Adapters do not acquire live
+data; docgen separately consumes a validated sidecar and renders Markdown.
 
 | Module | Lane | What it's for |
 |---|---|---|
@@ -192,43 +195,38 @@ Markdown, or talk to a live system — see §8 for what still does not exist.
 | `format/binary_layout.spl` | E4 | Decodes a fixed-width integer (register, PTE, capability token, wire header) into evidence nodes from a declared `BinaryLayout`, so the manual's byte/bit table cannot drift from the field set the oracle actually checks. Mirrors the real kernel PTE bitfield accessors in `src/os/kernel/types/bitfield.spl`. |
 | `format/scene_profile.spl` | E7a | Structural 2D draw-node trees and 3D scene-graph assets (geometry, z-order, materials, transforms) as evidence, because a screenshot can pass while referencing a mesh that doesn't exist or a clipped node sitting on top of the control under test. |
 | `format/simulation_profile.spl` | E7b | Simulation-run and performance/statistics evidence (timeline, invariants, KPI tolerances, sample distributions). f64 is banned — all magnitudes are scaled fixed-point `i64`. |
-| `manual_render.spl` | E5 (projection half only) | The sole Markdown renderer for the `ManualBlock` vocabulary in `model.spl`. Pure text-in/text-out; intended to be called by `spipe_docgen` in-process, but nothing currently calls it — see §8. |
+| `manual_render.spl` | E5 | The sole Markdown renderer for the `ManualBlock` vocabulary in `model.spl`; docgen's sidecar loader now calls it in-process. |
 | `spipe_extension.spl` | E6 | Defines `SPIPE_EVIDENCE_EXTENSION_NAMESPACE` (`simple.sspec.evidence.v1`), the versioned opaque-payload shape spec-to-spipe importers attach to `SpecLedgerEntry`/`SpecImportManifest` extension fields. Additive only — does not touch the frozen Phase-0 core. |
 
-## 8. Not yet implemented
+## 8. Remaining implementation boundary
 
 Lanes are tracked in `doc/03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md`.
-The evidence **contract and its format adapters are real and unit-covered** (§7a);
-what is missing is everything that connects that contract to a running system or
-a generated document:
+The evidence contract, adapters, reference examples, and generated-document
+sidecar route are real. Missing capabilities are narrower:
 
 | Capability | Lane | Status |
 |---|---|---|
-| `spipe_docgen` evidence loader + block renderer wiring | E5 | Not implemented. `grep -rl evidence src/app/spipe_docgen/` matches only an unrelated pre-existing "manual capture evidence" summary helper in `parser.spl`/`generator.spl` — nothing there imports or calls `src/lib/common/spec/evidence/**`. `comparison_to_manual_blocks` and `manual_render.spl` are contract-complete and unit-covered, but no generator consumes their output yet. |
+| `spipe_docgen` evidence loader + block renderer wiring | E5 | Implemented through `spipe_docgen/evidence_loader.spl`; it reads the adjacent `.evidence.sdn` sidecar and renders `ManualBlock`s. Absence returns no fragment. The loader currently parses but does not gate rendering through `evidence_manifest_is_complete`, so a rendered fragment alone is not accepted provenance. |
 | `sspec-maintain evidence <spec> --explain` / `verify-examples` / `scan --profile-completeness` | — | Designed in `doc/05_design/infra/sspec/sspec_maintain_evidence_findings.md`, not implemented. `src/app/sspec_maintain/*.spl` has an unrelated `evidence` field (a scoring dimension name/string in its own finding record) — it does not import the typed-evidence module either. |
 | Live capture providers (UI/socket/device acquisition) | — | Every module above takes constructed inputs (`ActionTrace`, `BinaryLayout`, parsed transcript, etc.) built directly in the spec; none of them read from a running terminal, GUI, socket, or file. The provider layer that would populate those records from a live system does not exist yet. |
-| Three runnable reference example manuals | E8 | Not implemented. |
+| Runnable reference examples | E8 | Implemented under `test/03_system/tools/spipe/examples/`; they demonstrate in-memory adapters/oracles and do not imply a live provider. |
 
-## 8a. Known-open comparator gaps (red-team, not yet fixed)
+## 8a. Closed comparator gaps from red-team review
 
 `doc/08_tracking/audit/modern_sspec_evidence_contract_redteam_2026-08-08.md`
-(Wave-0 lane E1) attacked `evidence_comparator.spl` and found four defects that
-are **still present in the code at the time of this writing** — do not treat
-them as fixed, and do not build E2-E7 consumers on the assumption they behave
-as designed:
+(Wave-0 lane E1) attacked `evidence_comparator.spl` and found four false-green
+defects. Current source closes all four:
 
-| Finding | Defect | Verified still open |
+| Finding | Original defect | Current closure |
 |---|---|---|
-| F1 (blocker) | A bind-only oracle (`check_bind` with no other non-ignore check) reports PASS while asserting nothing — `has_positive_oracle` counts `mode == semantic` with a `bind_name` as a positive check. | Yes — `evidence_comparator.spl:255-256`/`~303` has no `bind_name != ""` exclusion. |
-| F2 (blocker) | `check_numeric_tolerance` on a non-numeric value passes: `.to_i64()` on garbage becomes `0`, and `abs(0-0) <= tolerance` succeeds. | Yes — `evidence_comparator.spl:247-253` calls `.to_i64()` with no numeric-format guard. |
-| F3 (major) | Tolerance arithmetic overflows into a false pass at `i64` extremes (`want - got` wraps). | Yes — `abs_i64(got - want)` at `evidence_comparator.spl:250` has no overflow guard. |
-| F4 (major) | `evidence_manifest_is_complete` accepts a non-empty but obviously-fake hash (wrong length, non-hex) as a complete `artifact_sha256`/`spec_sha256`. | Yes — `evidence_manifest_is_complete` (`model.spl:511-520`) checks only for non-empty strings, not 64 lowercase-hex characters, even though `pattern_matches("hex:64", …)` already exists in the comparator and could enforce it in two lines. |
+| F1 (blocker) | Bind-only oracle passes vacuously. | Binds do not count as positive checks; bind-only comparison fails. |
+| F2 (blocker) | Non-numeric tolerance coerces garbage to zero. | Both operands require valid signed-decimal text before conversion. |
+| F3 (major) | Extreme tolerance subtraction overflows. | `within_tolerance` spends the budget without wrapping subtraction. |
+| F4 (major) | Placeholder digest text passes provenance completeness. | `is_sha256_hex` requires exactly 64 hexadecimal characters. |
 
-The audit's own verdict: the contract's architecture held under attack (parse
-failure, cardinality, closed-mode, all-ignore vacuity, and the `positives == 0`
-backstop all resisted every escape it tried) but F1/F2 in particular are
-blockers because both produce a PASS a manual reader would read as verified
-evidence. Fix before treating downstream lanes' adoption of the comparator as safe.
+The retained audit remains the rationale. Current regression cases exercise
+each closure; downstream adoption must still retain independent expected values
+and real provider provenance.
 
 ## 9. Running the coverage
 
@@ -236,8 +234,8 @@ evidence. Fix before treating downstream lanes' adoption of the comparator as sa
 bin/simple run test/01_unit/lib/common/spec/evidence/typed_evidence_oracle_spec.spl
 ```
 
-Use `run` rather than `test` for this spec: the `test` daemon path exceeds its
-800-module transitive-import cap while loading, which surfaces as a load error rather
-than a spec result. Verified 2026-08-08: 24 examples, 0 failures, exit 0; with the
-vacuity gate and the pattern length check deliberately sabotaged, 2 examples go red and
-the run exits 1.
+Use `run` rather than `test` only when the admitted runtime's documented module
+cap requires it. The current source contains 28 examples, including all four
+red-team closures. Record a fresh pure-Simple verdict before claiming them
+executed; the actor/process lane's deployed Stage-4 ABI probe is currently
+blocked and supplies no such verdict.

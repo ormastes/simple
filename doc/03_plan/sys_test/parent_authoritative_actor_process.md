@@ -1,14 +1,15 @@
 # Parent-authoritative actor/process evidence plan
 
-Status: source and manual authored; admitted native execution, generated mirror,
-and maintenance verdict remain blocked.
+Status: Modern SSpec source and authored manual updated; admitted native
+execution, generated mirror, and maintenance verdict remain blocked.
 
 ## Scope
 
 This focused plan owns the process-result portion of AC-5 and the SPipe/manual
 work of AC-6 for the parent-authoritative actor/process restart. It does not
-mark either criterion complete. Actor copied-reference concurrency, public
-native admission failure, separate-process cancellation/backpressure, and
+mark either criterion complete. The source now contributes live
+cancellation/revocation assertions, but actor copied-reference concurrency,
+public native admission failure, separate-process backpressure, and provider
 close wakeup/join evidence remain separate AC-5 dependencies.
 
 Executable specification:
@@ -38,9 +39,20 @@ early return.
 
 | Scenario | Requirements | Assertions | Acceptance boundary |
 |---|---|---|---|
-| Fragmented real child, replay, validated parent commit, close once | REQ-PAR-002, REQ-PAR-003, REQ-PAR-005, REQ-PAR-006, REQ-PAR-008, REQ-PAR-009; NFR-PAR-001..003, NFR-PAR-006 | positive native handle; partial-buffer observation; accepted=1; replay rejected=1; typed commit and mutation receipts; revision/root update; idempotent close; close attempts=1 | Requires admitted pure-Simple native PASS |
-| Mutation after offer | REQ-PAR-002, REQ-PAR-005; NFR-PAR-003 | received bytes equal independent expected frame after producer mutates its array | Source is wired; execution verdict pending |
-| Mixed valid/malformed batch | REQ-PAR-008, REQ-PAR-009; NFR-PAR-001, NFR-PAR-003 | negative mutation receipt; revision/token/root unchanged | Source is wired; execution verdict pending |
+| Fragmented real child, replay, validated parent commit, close once | REQ-PAR-002/003/005/006/008/009; NFR-PAR-001..003 | positive native handle; partial-buffer observation; accepted=1; replay rejected=1; typed commit and mutation receipts; revision/root update; idempotent close; close attempts=1; closed typed oracle | Partial: one result cannot prove completion-order determinism or full portability |
+| Mutation after offer | REQ-PAR-002/005; NFR-PAR-003 | received bytes equal independent expected frame after producer mutates its array | Partial encoded-copy isolation |
+| Mixed valid/malformed batch | REQ-PAR-008/009; NFR-PAR-001/003 | negative mutation receipt; revision/token/root `[600]` unchanged | Partial atomic rollback |
+| Live child cancellation | REQ-PAR-006; NFR-PAR-002/003 | accepted frame revoked; inbox closed; cancellation terminal; close attempts=1 | Partial lifecycle evidence; moved-source invalidation, PID reuse, and provider parity remain open |
+
+## Traceability matrix
+
+| Requirement | Executable cases | Mirror | Coverage |
+|---|---:|---|---|
+| REQ-PAR-002/003/005 | primary + copied isolation | `doc/06_spec/03_system/feature/language/parent_commit_piped_result_spec.md` | Partial: encoded child result only |
+| REQ-PAR-006 | primary + cancellation | same mirror | Partial: finite ingress/replay/revoke, not full backpressure matrix |
+| REQ-PAR-008/009 | primary + rollback | same mirror | Partial: application token-root adapter, not arbitrary schema/determinism permutations |
+| NFR-PAR-001..003 | primary + rollback + cancellation | same mirror | Partial |
+| NFR-PAR-006 | 0 executable cases | documented blocker only | Missing; not tagged as executed coverage |
 
 ## Required evidence details
 
@@ -86,7 +98,7 @@ non-functional requirements. This focused plan does not claim the following:
 | `bin/simple` | Absent in this worktree | None |
 | `bin/release/simple` | Wrapper exists, but its bounded CLI ABI probe reaches a deployed self-hosted runtime that exits with status 139 | Blocked; preserve exact failure |
 | `release/x86_64-unknown-linux-gnu/simple` | Only located deployed self-hosted binary; direct CLI probe exits with status 139 | Blocked |
-| Retained Stage 2 pure-Simple artifact | `build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple`; full Stage-2 build admitted 856 files with 0 failures | Used for supported direct compile/native evidence; it does not provide the Stage-4 `test`/docgen/maintenance surface |
+| Retained Stage 2 pure-Simple artifact | `build/bootstrap-restart12-current/stage2/x86_64-unknown-linux-gnu/simple`; SHA-256 `4c2d7d7328372175260d75ffd1ee2e475d9848a1d534c73ace7a9ef1eee0b68e` in the canonical report | Used only for supported direct compile/native evidence; it does not provide the Stage-4 `test`/docgen/maintenance surface |
 | Rust bootstrap seed | Exists only as bootstrap tooling | Forbidden as acceptance evidence |
 
 Direct Stage-2 execution passed copied-frame isolation and failed the remaining
@@ -120,6 +132,22 @@ verdict as a system PASS.
 7. Merge owner integrates the evidence; a separate highest-capability reviewer
    audits the merged result. Plan acceptance from the earlier review does not
    cover this implementation/manual delta.
+
+## Modern evidence and manual policy
+
+- Primary scenario: visible with the five frozen steps in order.
+- Copied isolation, rollback, and cancellation: supporting/detail scenarios;
+  visible as concise manual sections and folded executable source after docgen.
+- Evidence kind: protocol/domain observation under closed schema
+  `parent-commit-piped-result/v1`.
+- Oracle: eleven independent `check_exact` fields plus direct branch assertion
+  for `exited` versus `closed`.
+- Provenance: exact pure-Simple Stage-4 path/hash, command, environment, source
+  digest, and generated mirror digest are required; currently missing because
+  the bounded ABI probe blocks execution/docgen/maintenance.
+- Pass requires native scenario success, zero docgen stubs, all seven
+  maintenance scores above threshold, blocker=0, mirror PASS, and traceability
+  PASS. A source-only comparison is never promoted to execution evidence.
 
 ## Stop conditions
 

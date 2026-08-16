@@ -58,9 +58,23 @@ The frozen setup/checker helpers are `child_result_line`,
 `parent_commit_piped_process_session_v1`, and `drain_process_result_batch`.
 Unwired scaffolds fail with `fail("parallel ownership contract not wired")`.
 
-Actor admission is not yet a cross-thread contract. `ActorScheduler` is a
-single-threaded owner, while current `ActorRef.send()` directly enqueues and
-then touches the ready queue. The implementation phase must choose exactly one
-of two falsifiable designs: constrain all reference operations to the scheduler
-execution domain, or add one scheduler-owned synchronized command ingress.
-Mailbox locking alone cannot justify concurrent copied-reference safety.
+Actor admission deliberately uses the first falsifiable design: every
+`ActorRef` operation routes through its admitting `ActorScheduler`, and that
+scheduler fails closed outside its creator OS-thread domain. References never
+mutate a mailbox or ready queue independently. This is a same-thread routing
+capability, not a cross-thread contract; a future cross-thread producer must add
+one scheduler-owned synchronized command ingress. Mailbox locking alone cannot
+justify concurrent copied-reference safety.
+
+The actor Modern SSpec freezes these primary steps:
+
+1. `Create one scheduler-owned bounded actor channel`.
+2. `Admit copied arguments through one actor reference`.
+3. `Observe finite mailbox and reply backpressure`.
+4. `Dispatch and consume the isolated result`.
+5. `Stop once through the owning scheduler`.
+
+`actor-channel-authority/v1` is the closed typed-evidence schema. It records
+mailbox/reply boundedness, the isolated reply value, unique terminal removal,
+and stopped-reference rejection. It must not be used to claim synchronized
+cross-thread ingress or typed heap payload support.

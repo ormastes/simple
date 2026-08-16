@@ -68,9 +68,12 @@ before claiming atomic publish.
   it still needs an admitted native verdict.
 - The focused native system spec is not admitted because the deployed Stage 4
   CLI fails its bounded `test --help`/source-check path with status 139. Its
-  operator mirror is authored, not generated. Resume with the provenance-bound
-  Stage 2/3 pure-Simple artifact, then run native evidence, `spipe-docgen`, and
-  `sspec-maintain`; never substitute the Rust seed.
+  operator mirror is authored, not generated. Stage 2/3 may run only their
+  explicitly supported direct-compile evidence; they do not authorize general
+  `test`, `spipe-docgen`, or `sspec-maintain`. Resume the latter through an
+  admitted Stage-4 test surface and never substitute the Rust seed. The primary
+  process flow compares closed `parent-commit-piped-result/v1` typed evidence;
+  this in-memory comparison does not manufacture retained provider provenance.
 
 Update this skill together with the parent-commit contract, guide, execution
 status plan, and focused spec.

@@ -965,6 +965,17 @@ manifest digest) were red-team findings, all now fixed — see
 
 Guide: `doc/07_guide/infra/sspec_typed_evidence.md`.
 
+For the parent-authoritative actor/process lane, keep the closed evidence
+schemas separate: `actor-channel-authority/v1` covers the implemented
+same-thread scheduler-owned actor compatibility surface, while
+`parent-commit-piped-result/v1` covers framed process ingress, parent commit,
+and lifecycle. Follow the frozen steps and exclusions in
+`doc/03_plan/sys_test/actor_channel_authority.md` and
+`doc/03_plan/sys_test/parent_authoritative_actor_process.md`. In-memory typed
+comparison is not retained provider provenance, and authored mirrors are not
+generated PASS while Stage-4 docgen/maintenance are blocked. Never substitute
+the Rust seed.
+
 
 ## Bootstrap platform handoff readiness
 

@@ -84,8 +84,15 @@ not a graph serializer or authenticated remote protocol. V1 admits only
 The focused process evidence source and authored manual are
 `test/03_system/feature/language/parent_commit_piped_result_spec.spl` and
 `doc/06_spec/03_system/feature/language/parent_commit_piped_result_spec.md`.
-They remain execution/docgen blocked until an admitted pure-Simple staged
-runtime supplies the native, `spipe-docgen`, and `sspec-maintain` verdicts.
+The admitted Stage-2 focused inbox/owner/session shards passed, while the broad
+system run passed copied isolation only and failed three aggregate/`Option`
+paths. Stage-2 does not provide Stage-4 `test`/docgen/maintenance evidence.
+The actor compatibility evidence source and authored manual are
+`test/03_system/feature/language/actor_channel_authority_spec.spl` and
+`doc/06_spec/03_system/feature/language/actor_channel_authority_spec.md`.
+Both primary flows now use closed Modern SSpec typed oracles, but native
+execution, generated mirrors, and maintenance remain blocked until an admitted
+pure-Simple Stage-4 test surface is available.
 
 Update this page together with the common transfer contract, native packet
 schema, actor/channel queue semantics, public concurrency guide, and the active

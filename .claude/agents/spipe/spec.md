@@ -145,10 +145,16 @@ For protocol/binary/interactive captures, use typed evidence oracles from
 `evidence_comparator.spl`'s `compare_evidence` — never substring-assert on a
 string built from the captured observation. Fail-closed: parse error,
 unresolved selector, ambiguous cardinality, `ignore` without a reason,
-all-ignore vacuity (no positive oracle), and closed-mode undeclared fields all
-fail the spec. Guide:
+all-ignore or bind-only vacuity (no positive oracle), non-numeric tolerance,
+tolerance overflow, malformed manifest digests, and closed-mode undeclared
+fields all fail the spec. Guide:
 `doc/07_guide/infra/sspec_typed_evidence.md`; skill reference card:
 `.claude/skills/spipe.md` § "Typed evidence (Modern SSpec)".
+
+The focused actor/process schemas are `actor-channel-authority/v1` and
+`parent-commit-piped-result/v1`; their frozen steps and Stage-4-only evidence
+boundary are in the matching `doc/03_plan/sys_test` pages. Authored mirrors and
+Stage-2 direct-compile evidence are not generated Stage-4 SPipe evidence.
 
 ## Evidence Kinds by Spec Type
 

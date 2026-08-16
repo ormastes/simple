@@ -36,11 +36,14 @@ Helpers: `child_result_line`,
 | E3 staged tooling inventory | `/root/highest_review` for inventory only; merge owner resumes execution | read-only Stage 4/3/2 command/provenance inventory | E1 source-ready state | exact supported/unsupported command report; no Rust seed acceptance |
 | E4 merge/integration | `/root` | integrate focused files with concurrent actor/process production and documentation lanes | E1..E3 | resolve API drift, run admissible gates once, retain blockers |
 | E5 final audit | separately assigned highest-capability reviewer | read-only merged AC-5/6 evidence review | E4 | ACCEPT/REJECT with exact findings; no underlying-feature done mark without all AC gates |
+| E6 Modern actor/channel evidence | `/root` | `actor_channel_authority_spec.spl`, authored mirror, focused test plan, guide/skill/wiki links | landed scheduler-domain contract | five frozen actor steps; closed typed oracle; explicit same-thread/Stage-4 boundary |
 
-Sidecar lanes: **N/A for this focused authoring delta**. The best-capability
-merge owner had already frozen the interface, step, and helper vocabulary, and
-the bounded task is performed directly. Earlier actor/process read-only audits
-do not substitute for E5 review of the merged implementation/manual change.
+Modernization sidecars: `sspec_audit` (process source/manual),
+`knowledge_audit` (guide/skill/wiki), and `final_review_prep` (truthfulness and
+blocked-gate audit) were read-only and non-overlapping. `/root` remains merge
+owner. The separate highest-capability E5 reviewer accepted the final
+modernization delta after cancellation traceability stopped claiming
+moved-source invalidation. That acceptance does not mark AC-5..AC-7 complete.
 
 ## E1 completion checklist
 
@@ -66,8 +69,9 @@ do not substitute for E5 review of the merged implementation/manual change.
 
 ## E3 inventory and resume
 
-The lane produced the admitted Stage-2 pure-Simple binary at
-`build/bootstrap/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple`.
+The canonical verification report records the current-source Stage-2 binary at
+`build/bootstrap-restart12-current/stage2/x86_64-unknown-linux-gnu/simple`
+(SHA-256 `4c2d7d7328372175260d75ffd1ee2e475d9848a1d534c73ace7a9ef1eee0b68e`).
 Stage 3 remained blocked after the mandatory three fix cycles. Stage-2 direct
 execution proved copied-frame isolation but exposed aggregate/`Option`
 corruption in the real-child, rollback, and cancellation scenarios. The
