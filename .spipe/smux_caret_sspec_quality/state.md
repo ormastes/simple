@@ -23,6 +23,7 @@ coverage that fails if the legacy shape or mirror drift reappears.
 - AC-4: a fail-closed step-based system SSpec traces REQ-SSQ-001..005 and NFR-SSQ-001, discriminates modern from legacy before judging real files, and treats a missing file as a failure rather than a skip.
 - AC-5: `doc/06_spec` carries the mirrored Markdown manual only and contains no executable `.spl` for this lane.
 - AC-6: any grammar/compiler defect surfaced by the conversion is filed as a concrete bug rather than silently normalized into a workaround.
+- AC-7: the legacy system spec `test/03_system/tools/smux_system_spec.spl` is converted to Modern SSpec with REQ-traced `it` blocks and visible `step(...)` flows.
 
 ## Status
 
@@ -33,7 +34,8 @@ coverage that fails if the legacy shape or mirror drift reappears.
 | AC-3 | DONE (seed-evidenced) | `executed=20/20/21/21`, `failed=0` in all four files |
 | AC-4 | DONE (seed-observed) | `test/03_system/tools/smux_caret_sspec_quality_system_spec.spl`, 13 examples, `executed=13 passed=13 failed=0`; admitted evidence TEST_BLOCKED |
 | AC-5 | DONE | `doc/06_spec/03_system/tools/smux_caret_sspec_quality_system_spec.md`, Markdown only |
-| AC-6 | DONE | `static_factory_method_chain_wrong_value_2026-08-16.md` filed |
+| AC-6 | DONE | `static_factory_method_chain_wrong_value_2026-08-16.md` and `module_var_stale_in_it_closure_2026-08-16.md` filed |
+| AC-7 | DONE (seed-observed) | 56 `fn test_*` -> 56 `it` across 13 REQ groups; `executed=56 passed=56 failed=0`; 858 -> ~700 lines |
 
 ## Upstream audit
 
@@ -61,8 +63,9 @@ No placeholder pass was recorded anywhere in this lane.
 
 ## Open / not claimed
 
-- `test/03_system/tools/smux_system_spec.spl` is still legacy (858 lines, 56
-  `fn test_*`, 0 `describe`/`it`). Deliberately out of scope; next candidate.
+- Two compiler defects are filed OPEN and worked around, not fixed here:
+  `static_factory_method_chain_wrong_value_2026-08-16.md` and
+  `module_var_stale_in_it_closure_2026-08-16.md`.
 - Pre-existing `check-test-tree-divergence` red (828 offenders) stepped over on
   a delta-PASS, recorded in
   `doc/08_tracking/bug/test_tree_divergence_preexisting_red_2026-08-16.md`.
@@ -72,6 +75,7 @@ No placeholder pass was recorded anywhere in this lane.
 - `test/01_unit/os/smux_spec.spl` (+ `test/unit/` mirror)
 - `test/01_unit/os/smux/smux_dashboard_spec.spl` (+ `test/unit/` mirror)
 - `test/03_system/tools/smux_caret_sspec_quality_system_spec.spl`
+- `test/03_system/tools/smux_system_spec.spl` (converted, 56 examples)
 - `doc/06_spec/03_system/tools/smux_caret_sspec_quality_system_spec.md`
 - `doc/03_plan/sys_test/smux_caret_sspec_quality.md`
 - `doc/07_guide/infra/sspec_legacy_migration.md` (worked example 3)

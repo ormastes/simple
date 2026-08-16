@@ -302,8 +302,34 @@ regression guard for this lane lives at
 `test/03_system/tools/smux_caret_sspec_quality_system_spec.spl`, which reads the
 committed sources and fails if a legacy construct reappears or a mirror drifts.
 
-### Remaining candidate
+### A third trap: module-level `var` reads inside an `it`
 
-`test/03_system/tools/smux_system_spec.spl` is still in this shape — 858 lines,
-56 `fn test_*`, zero `describe`/`it`. It was left alone rather than converted
-half-way; it is the obvious next candidate for this recipe.
+An `it` closure captures a module-level `var` **by value**, so a direct read
+inside an example returns the initial value no matter how often a function
+mutated it. Reading through a function is correct:
+
+```simple
+var _counter: int = 0
+fn bump(): _counter = _counter + 1
+fn get_counter() -> int: return _counter
+
+it "direct read":  bump(); expect(_counter).to_equal(1)       # FAILS, reads 0
+it "via getter":   bump(); expect(get_counter()).to_equal(1)  # passes
+```
+
+Filed as `doc/08_tracking/bug/module_var_stale_in_it_closure_2026-08-16.md`. This bites exactly the specs worth converting:
+legacy files often keep mutable module state as a test double. Converting
+`test/03_system/tools/smux_system_spec.spl` hit it in 4 of 56 examples, all
+metrics counters, and the fix was a `_get_metrics()` accessor.
+
+### Both smux candidates are now converted
+
+`test/03_system/tools/smux_system_spec.spl` was the last one in this shape —
+858 lines, 56 `fn test_*`, zero `describe`/`it`. It is now 56 `it` examples
+across 13 REQ groups with `step(...)` flows and `# @req` traceability,
+`executed=56 passed=56 failed=0`.
+
+Note what the conversion bought: 4 of those 56 checks had been **failing all
+along**. They printed `FAIL`, the runner executed zero examples, and nothing
+consumed the output — so the file looked fine. That is the argument for doing
+this work, in one data point.

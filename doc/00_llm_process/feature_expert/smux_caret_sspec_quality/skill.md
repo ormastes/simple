@@ -56,6 +56,16 @@ call. Bind a `val` first. This is a compiler defect
 not a style preference; 9 of 20 examples in one file failed for it alone. Do not
 "fix" it by loosening the assertion.
 
+## Known trap: module-level `var` is stale inside an `it`
+
+An `it` closure captures a module-level `var` by value, so a direct read inside
+an example returns the initial value regardless of mutation. Read through a
+function instead. Filed as `doc/08_tracking/bug/module_var_stale_in_it_closure_2026-08-16.md`.
+
+This matters because legacy specs commonly hold their test doubles in mutable
+module state. In `smux_system_spec.spl` it silently broke 4 of 56 metrics
+examples; the fix is the `_get_metrics()` accessor.
+
 ## Evidence rules for this lane
 
 The seed (`bin/release/<triple>/simple`, which prints a bootstrap-seed warning)
@@ -76,9 +86,16 @@ writing none exists in-tree — the tracked self-hosted binary segfaults in
 | Scenario manual (Markdown only) | `doc/06_spec/03_system/tools/smux_caret_sspec_quality_system_spec.md` |
 | Conversion recipe | `doc/07_guide/infra/sspec_legacy_migration.md` (worked example 3) |
 | Converted unit specs | `test/01_unit/os/smux_spec.spl`, `test/01_unit/os/smux/smux_dashboard_spec.spl` (+ mirrors) |
+| Converted system spec | `test/03_system/tools/smux_system_spec.spl` (56 examples, 13 REQ groups) |
 
-## Next candidate
+## Converted inventory
 
-`test/03_system/tools/smux_system_spec.spl` — still 858 lines, 56 `fn test_*`,
-zero `describe`/`it`. Same recipe applies; it was left whole rather than
-converted half-way.
+| Spec | Examples |
+|---|---|
+| `test/01_unit/os/smux_spec.spl` (+ mirror) | 20 |
+| `test/01_unit/os/smux/smux_dashboard_spec.spl` (+ mirror) | 21 |
+| `test/03_system/tools/smux_system_spec.spl` | 56 |
+| `test/03_system/tools/smux_caret_sspec_quality_system_spec.spl` (new guard) | 15 |
+
+No legacy print-based spec remains in the smux or LLM Caret lanes. The quality
+guard asserts this and fails if one reappears.
