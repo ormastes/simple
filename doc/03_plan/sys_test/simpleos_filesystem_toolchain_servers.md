@@ -25,3 +25,23 @@ all-seven-score `sspec-maintain` review remain blocked on the Stage-4 runner and
 live B-DESKTOP prerequisites. Zero stubs and zero executable specs under
 `doc/06_spec` remain required by
 `doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`.
+
+## Canonical supporting-spec modernization (2026-08-16)
+
+The toolchain system-test surface has one executable owner per behavior under
+`test/03_system/os/`; byte-identical `test/system/` compatibility copies are
+retired. Each spec and mirrored manual names its evidence class:
+
+| Surface | Evidence class | Production oracle | Claim boundary |
+|---|---|---|---|
+| `os_compiler_bootstrap_spec.spl` | source contract | repository path presence | maintained owner layout only; no bootstrap/runtime claim |
+| `simpleos_guest_toolchain_wrapper_spec.spl` | host fixture | `scripts/simpleos_guest_toolchain_wrapper.shs` | wrapper routing, target reporting, and no-host-fallback only |
+| `simpleos_deploy_image_simple_toolchain_spec.spl` | image admission | `os.installer.image_builder.build_install_image_with_simple_binary` | marker rejection and manifest/provenance enforcement only |
+| `simpleos_toolchain_deployment_desktop_boot_spec.spl` | live guest | `scripts/check/check-simpleos-toolchain-desktop-boot.shs` plus its three receipts | full deployment/desktop acceptance when the live gate passes |
+
+Source-file existence, Rust-seed inventory, and generated command text are not
+guest execution evidence. Supporting scenarios use literal `step("...")`
+flows and real assertions, fail closed on unavailable production owners, and
+link their mirrored manual and requirements here. Until an admitted Stage-4
+runner can execute docgen and `sspec-maintain`, their source/manual review is
+reportable only as source-complete/runtime-blocked.

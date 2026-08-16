@@ -198,6 +198,31 @@ evidence.
   `Then_*` helpers are legacy and should not be introduced in new specs.
 - Use `@step` metadata only when labeling an existing helper/checker call that
   cannot be replaced cleanly with `step("...")`.
+
+### SimpleOS toolchain and desktop evidence profiles
+
+- Keep one canonical executable spec under `test/03_system/os/`; remove
+  byte-identical compatibility copies under `test/system/` when modernizing
+  that surface. The generated/manual mirror belongs only under
+  `doc/06_spec/03_system/os/`.
+- Label each scenario as `source-contract`, `host-fixture`, `image-admission`,
+  or `live-guest`. A source/file inventory never satisfies image or live-guest
+  behavior. A host fixture may exercise the production wrapper but proves only
+  wrapper routing and fail-closed policy, not that a guest payload executes.
+- Toolchain and desktop acceptance must call the production owner and validate
+  its durable receipt. Do not reproduce the production decision with source
+  string checks, marker payloads, preloaded commands, or a test-only shell
+  implementation.
+- Missing wrapper, image, admitted pure-Simple runner, receipt, output ELF,
+  serial/SSH transcript, or framebuffer evidence is a failing/blocked result,
+  never an opt-in skip or non-execution pass. The Rust seed and bootstrap-only
+  Stage 2 binaries are never admissible release evidence.
+- The umbrella live scenario is
+  `test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl`.
+  Supporting wrapper and image specs must state their narrower evidence class
+  in both the executable source and manual, and must not claim to close that
+  umbrella scenario.
+
 - Capture is off by default. Bare `@capture` enables after-step `tui` capture.
   Use typed capture kinds for the evidence the reader needs: `tui`, `gui`,
   `html`, `text`, `api`, `protocol`, `exec`, `binary`, `log`, or `artifact`.

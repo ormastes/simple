@@ -283,6 +283,15 @@ pre-boot, and same-run desktop/guest receipts. There is no opt-in environment
 success path. Specs are fail-closed and `step()`-based; an unavailable row
 reports `blocked`, never `skip()`.
 
+Supporting SSpec evidence is classified, not cumulative by file count:
+`simpleos_guest_toolchain_wrapper_spec.spl` is a host-fixture check of the real
+wrapper dispatcher, and `simpleos_deploy_image_simple_toolchain_spec.spl` is an
+image-admission check of the real builder. Neither proves ring-3 filesystem
+execution or desktop readiness. Only the canonical live SSpec plus its
+production wrapper and same-run receipts may move B-DESKTOP-LIVE. Legacy
+`test/system/` duplicates, source existence, and Rust-seed artifacts are not
+additional evidence.
+
 Reject any run containing `spawn:preloaded`, `HOSTED_NETWORK_UNAVAILABLE`,
 `FABRICATED-NEW`, or `guest-toolchain-exec-gate BLOCKED`.
 

@@ -55,7 +55,7 @@ later sections remain non-PASS.
 | Deployment image | `build/os/elfexec_simple/fat32-simple.img` | ABSENT / B-IMAGE |
 | Embedded/external admission records | `/SYS/SIMPLETOOL.SDN`; `build/os/evidence/simpleos-toolchain-image-admission-v1.sdn` | ABSENT / B-IMAGE |
 | Combined desktop/toolchain wrapper | `scripts/check/check-simpleos-toolchain-desktop-boot.shs` | ABSENT / B-DESKTOP-LIVE |
-| Frozen executable/manual | `test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl`; `doc/06_spec/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.md` | ABSENT / B-SPEC |
+| Frozen executable/manual | `test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl`; `doc/06_spec/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.md` | SOURCE COMPLETE / runtime B-SPEC |
 | Same-run live evidence | manifest, QEMU argv, serial, SSH, framebuffer/readback, guest output receipts | ABSENT / B-DESKTOP-LIVE |
 
 The fresh static-owner repair lane fixed the `runtime_error` receiver
@@ -339,7 +339,7 @@ creating another contract.
 | `doc/07_guide/os/simpleos_board_bringup.md` | CURRENT: physical evidence remains B-PHYSICAL; no QEMU substitution |
 | feature/layer experts `simpleos_toolchain_selfhost`, `llvm_toolchain_port`, `os_kernel_exec`, `compiler_driver` | UPDATED with canonical plan, umbrella blocker and current WARN truth |
 | `doc/08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md` plus the Stage 3 frontier record | UPDATED; every B-* row names owner file/line and unblock condition |
-| workflow skills/agents/commands | N/A: this plan does not change SPipe/tool command behavior |
+| `.codex/skills/system_test/SKILL.md` | UPDATED with canonical SimpleOS evidence profiles, single-owner layout, and fail-closed production-oracle rules |
 | generated deployment manual | MANUAL SOURCE COMPLETE/B-SPEC: operator flow and traceability exist; pure-Simple docgen and `sspec-maintain` evidence remain blocked |
 
 ## Implementation sequence
@@ -363,6 +363,13 @@ creating another contract.
 6. Replace/repair the existing supporting specs with the frozen SSpec, generate
    and review the operator manual, and update every affected knowledge owner.
 7. Run the one-pass criteria, merge review, and stop on PASS or bounded WARN.
+
+The 2026-08-16 supporting-spec cleanup retires byte-identical `test/system/`
+copies and narrows the old bootstrap scenario to an explicit source-contract
+inventory without Rust-seed or `bin/simple` acceptance. The canonical source,
+wrapper-fixture, and image-admission specs remain deliberately narrower than
+the live deployment scenario; none may promote B-DESKTOP-LIVE from file
+presence, fixture payloads, or Rust-seed artifacts.
 
 ## Historical evidence (not restart12 acceptance)
 

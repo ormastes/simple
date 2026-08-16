@@ -8,6 +8,10 @@
 > The current x86_64 compiler repair keeps local `HirType` aggregates inside
 > their owning MIR metadata arrays and copies them by scalar local IDs. Its
 > focused native regression is green; Stage 3/4 admission is still pending.
+> The canonical SSpec surface now distinguishes source contracts, host-wrapper
+> fixtures, image-admission checks, and the sole live deployment/desktop scenario.
+> Source inventories, compatibility duplicates, and Rust-seed presence are not
+> guest or release evidence.
 
 ## Role
 
@@ -430,6 +434,24 @@ before landing — this was previously a recurring, silent violation.
     then `sh scripts/os/ssh_simple_hello_uefi.shs` (rung L4b).
 - Specs are fail-closed and `step()`-based; an unavailable row reports
   `blocked`, **never** `skip()`.
+
+### SSpec ownership and claim boundaries (2026-08-16)
+
+- `test/03_system/os/os_compiler_bootstrap_spec.spl` preserves libc and
+  toolchain owner-path inventory as source-contract evidence only. It does not
+  check the Rust seed or `bin/simple` and cannot prove bootstrap convergence.
+- `test/03_system/os/simpleos_guest_toolchain_wrapper_spec.spl` exercises the
+  production wrapper with controlled payload fixtures. It proves wrapper
+  dispatch and no-host-fallback policy only.
+- `test/03_system/os/simpleos_deploy_image_simple_toolchain_spec.spl` exercises
+  the production image builder's admission path. It proves rejection and
+  staging contracts only.
+- `test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl` is the
+  only umbrella live-guest acceptance spec. It must call the combined
+  production wrapper and validate embedded, pre-boot, and same-run receipts.
+- Keep each executable only under `test/03_system/os/` with its manual under
+  `doc/06_spec/03_system/os/`. File inventories, test-only command emulation,
+  and the Rust seed cannot promote any live row.
 
 ## Update Rule
 

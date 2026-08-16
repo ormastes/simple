@@ -1,11 +1,22 @@
 # @tag:system
+# @tag:evidence-host-fixture
+# @req REQ-007 NFR-002
+# codex-system-test
 
-use std.spec
+"""
+Host-fixture coverage for the production SimpleOS guest toolchain wrapper.
 
-extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+These scenarios execute scripts/simpleos_guest_toolchain_wrapper.shs with
+controlled payload fixtures. They prove dispatch, target reporting, and
+fail-closed no-host-fallback behavior. They do not prove that a payload ran in
+SimpleOS and cannot satisfy live deployment or desktop acceptance.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
 
 fn run_shell(cmd: text) -> (text, text, i64):
-    rt_process_run("/bin/sh", ["-c", cmd])
+    process_run("/bin/sh", ["-c", cmd])
 
 fn cleanup_tmpdir(tmpdir: text):
     if tmpdir != "":
@@ -64,8 +75,11 @@ fn setup_wrapper_fixture() -> text:
     return stdout.trim()
 
 describe "SimpleOS guest toolchain wrapper":
-    it "clang reports guest-exec status and forwards supported LLVM operations":
+    it "should report clang guest status and forward supported LLVM operations":
+        step("Create an isolated guest-wrapper fixture")
         val tmpdir = setup_wrapper_fixture()
+
+        step("Query the production clang wrapper status and target")
         val status_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/clang' --print simpleos-wrapper-status"
         val (status_out, status_err, status_code) = run_shell(status_cmd)
         if status_code != 0:
@@ -82,6 +96,7 @@ describe "SimpleOS guest toolchain wrapper":
             fail("clang triple command failed: {triple_out}{triple_err}")
         expect(triple_out.trim()).to_equal("x86_64-simpleos")
 
+        step("Forward compile and link operations to the staged LLVM payloads")
         val exec_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/clang' -c /tmp/hello.c -o /tmp/hello.o"
         val (exec_out, exec_err, exec_code) = run_shell(exec_cmd)
         if exec_code != 0:
@@ -96,8 +111,11 @@ describe "SimpleOS guest toolchain wrapper":
             fail("ld.lld exec command failed: {link_out}{link_err}")
         expect(link_out).to_contain("LLD_PAYLOAD /tmp/hello.o -o /tmp/hello.elf")
 
-    it "cmake and ninja expose the supported configure lane":
+    it "should expose the supported CMake and Ninja configure lane":
+        step("Create an isolated configure-wrapper fixture")
         val tmpdir = setup_wrapper_fixture()
+
+        step("Query production CMake wrapper capabilities")
         val caps_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/cmake' -E capabilities"
         val (caps_out, caps_err, caps_code) = run_shell(caps_cmd)
         if caps_code != 0:
@@ -107,6 +125,7 @@ describe "SimpleOS guest toolchain wrapper":
         expect(caps_out).to_contain("lane=x86_64-simpleos")
         expect(caps_out).to_contain("status=report-and-gate")
 
+        step("Generate Ninja commands with stable guest tool paths")
         val cfg_cmd =
             "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/cmake' " +
             "-S '{tmpdir}/src' -B '{tmpdir}/build' -G Ninja"
@@ -124,6 +143,7 @@ describe "SimpleOS guest toolchain wrapper":
             cleanup_tmpdir(tmpdir)
             fail("generated build.ninja does not reference the stable guest tool paths")
 
+        step("Forward Ninja execution to the staged payload")
         val ninja_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/ninja' -C '{tmpdir}/build'"
         val (ninja_out, ninja_err, ninja_code) = run_shell(ninja_cmd)
         cleanup_tmpdir(tmpdir)
@@ -131,8 +151,11 @@ describe "SimpleOS guest toolchain wrapper":
             fail("ninja wrapper failed: {ninja_out}{ninja_err}")
         expect(ninja_out).to_contain("NINJA_PAYLOAD -C {tmpdir}/build")
 
-    it "rust wrappers expose discovery and reject unsupported build operations":
+    it "should expose Rust discovery and reject unsupported build operations":
+        step("Create an isolated report-and-gate wrapper fixture")
         val tmpdir = setup_wrapper_fixture()
+
+        step("Query the production Rust wrapper discovery surface")
         val status_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/rustc' --print simpleos-wrapper-status"
         val (status_out, status_err, status_code) = run_shell(status_cmd)
         if status_code != 0:
@@ -148,6 +171,7 @@ describe "SimpleOS guest toolchain wrapper":
             fail("rustc target-libdir failed: {target_out}{target_err}")
         expect(target_out.trim()).to_equal("/usr/lib/rustlib/x86_64-unknown-simpleos/lib")
 
+        step("Reject unsupported Rust compilation without host fallback")
         val rust_fail_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/rustc' main.rs"
         val (_rust_fail_out, rust_fail_err, rust_fail_code) = run_shell(rust_fail_cmd)
         expect(rust_fail_code).to_equal(1)
@@ -156,6 +180,7 @@ describe "SimpleOS guest toolchain wrapper":
         expect(rust_fail_err).to_contain("status=report-and-gate")
         expect(rust_fail_err).to_contain("no host fallback")
 
+        step("Reject unsupported Cargo builds without host fallback")
         val cargo_fail_cmd = "SIMPLEOS_WRAPPER_ROOT='{tmpdir}' '{tmpdir}/work/bin/cargo' build"
         val (_cargo_fail_out, cargo_fail_err, cargo_fail_code) = run_shell(cargo_fail_cmd)
         cleanup_tmpdir(tmpdir)

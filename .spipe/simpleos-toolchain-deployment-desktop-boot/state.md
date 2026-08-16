@@ -143,3 +143,10 @@ dev-done
   behavior. Full umbrella implementation is approximately 40%: AC-6/7 source
   is complete, but Stage-4 execution/docgen/maintenance evidence and all live
   deployment prerequisites remain blocked.
+- impl 2026-08-16 supporting-spec modernization: defined canonical
+  `source-contract`/`host-fixture`/`image-admission`/`live-guest` evidence
+  profiles in the SPipe system-test skill, plans, guide, and expert wikis.
+  Byte-identical `test/system/` copies are retired; the bootstrap scenario is
+  narrowed to an explicit source contract with no Rust-seed/`bin/simple`
+  acceptance. Supporting specs cannot promote live guest or desktop
+  acceptance.

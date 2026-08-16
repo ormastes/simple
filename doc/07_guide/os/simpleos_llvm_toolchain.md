@@ -236,6 +236,22 @@ Canonical deployment/desktop harness:
 no opt-in success path: unavailable production wrapper, admitted image, or live
 receipt evidence fails with `blocked:`.
 
+### Reading the supporting SSpec results
+
+The canonical supporting specs are intentionally narrower than the live
+deployment harness. `os_compiler_bootstrap_spec.spl` is now explicitly a
+source-contract inventory and does not check the Rust seed or `bin/simple`.
+`simpleos_guest_toolchain_wrapper_spec.spl` runs the real
+guest-wrapper dispatcher against controlled host fixtures; it proves routing,
+target reporting, and rejection of unsupported host fallback, but not guest
+execution. `simpleos_deploy_image_simple_toolchain_spec.spl` calls the real
+image builder and proves marker/provenance rejection; it does not prove that an
+image booted. Only `simpleos_toolchain_deployment_desktop_boot_spec.spl`, its
+production wrapper, and same-run receipts may establish live desktop/toolchain
+acceptance. File-existence inventories and Rust-seed artifacts are not release
+evidence. Executable specs live once under `test/03_system/os/`; manuals mirror
+them under `doc/06_spec/03_system/os/`.
+
 ## Desktop SimpleOS launch policy — static `clang_static` is DEPRECATED
 
 On **desktop SimpleOS**, the guest-native `clang_static` workaround
