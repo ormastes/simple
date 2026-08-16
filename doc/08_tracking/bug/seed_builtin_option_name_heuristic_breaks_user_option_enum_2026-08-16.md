@@ -82,6 +82,68 @@ Secondary, from the same review: the ~14-line predicate is duplicated verbatim a
 held in sync only by a comment. Whatever the fix, it wants to be one shared helper — the duplication
 is what will let the two drift.
 
+## Companion defect found while authoring the fence: the LINTER also dies on a user `Option`
+
+A user-declared `enum Option` is under-handled in more than one place. This
+six-line file is enough to make `simple lint` fail:
+
+```
+enum Option:
+    Some(i64)
+    None
+
+fn main() -> i32:
+    return 0
+```
+
+```
+$ simple lint opt_only.spl
+error: semantic: method 'with_fix' not found on value of type object in nested call context
+$ echo $?
+1
+```
+
+The full lane fixture (`test/fixtures/user_option_enum_match/main.spl`) fails
+the same way, reporting `with_easy_fix` instead of `with_fix` — the same
+diagnostic-builder chain, one link further along. Control: an otherwise
+identical file with the enum removed lints clean (`Lint passed: all files
+clean`), and a file exercising `.to_text()` alone also lints clean, so the enum
+declaration is the trigger and nothing else in the fixture is.
+
+The shape of the message says the linter is **constructing a diagnostic** and the
+fix-builder call fails on an untyped receiver — valid source, exit 1, no usable
+diagnostic.
+
+**Scope correction — this is NOT specific to `Option`.** A wider control run
+shows the same crash on files that contain no `enum Option` at all, including a
+pre-existing spec this lane never touched:
+
+| File | Verdict |
+|---|---|
+| `opt_only.spl` (6 lines, user `enum Option`) | FAIL `with_fix` |
+| `totext_only.spl` (3 lines, no enum) | pass |
+| `test/fixtures/engine2d_font_offload_fallback/main.spl` | pass |
+| `test/03_system/qualified_pure_simple_runtime.spl` | pass |
+| `test/03_system/.../engine2d_font_offload_fallback_system_spec.spl` (new) | FAIL `with_easy_fix` |
+| `test/03_system/.../user_option_enum_match_lowering_system_spec.spl` (new) | FAIL `with_easy_fix` |
+| `test/03_system/feature/web_platform/html/kbd_samp_var_rendering_spec.spl` (**pre-existing, untouched**) | FAIL `with_fix` |
+
+So the correct statement is: **`simple lint` has a general diagnostic-builder
+defect** (`with_fix` / `with_easy_fix` not found on an untyped receiver) with at
+least two independent triggers — one reachable from a six-line user `enum
+Option`, and another that fires on system specs generally, including ones that
+predate this lane. The `Option` repro is genuine and minimal, but it is one
+entry point into a broader defect, not an `Option`-specific bug. The
+pre-existing-spec row is the load-bearing control: it proves the crash is not
+introduced by the files added here.
+
+**Provenance limit, stated plainly:** observed with the Rust seed's linter,
+because no pure-Simple linter exists to cross-check it —
+`bootstrap/stage3/simple` exposes only `compile` and `native-build`, and
+`bootstrap/stage3/simple lint` is `unknown command`. Recorded as a reproducible
+tool defect, **not** as evidence for any acceptance criterion in this lane.
+Whether the self-hosted linter shares the defect is unverified.
+
 ## Evidence and limits
 
 Source trace only. No test was executed: this lane's evidence rule requires pure-Simple self-hosted

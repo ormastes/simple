@@ -1,0 +1,144 @@
+# @cover src/compiler/35.semantics/resolve.spl 10%
+# @req REQ-OPTLOWER-001 REQ-OPTLOWER-002 REQ-OPTLOWER-003
+"""
+# User-declared `Option` enum match lowering (system lane)
+
+**Category:** Language
+**Status:** In Progress — fail-closed, blocked on a qualified pure-Simple runtime
+**Plan:** doc/03_plan/sys_test/engine2d_font_offload_fallback_system_lane.md
+**Requirements:** doc/02_requirements/feature/feature.md
+**Design:** doc/07_guide/language/user_option_enum_match_lowering.md
+
+## Purpose and Audience
+
+Fences a regression class in match lowering: a USER-DECLARED enum named
+`Option` must be lowered on the enum-discriminant path, not on the nil-boxing
+fast path reserved for the builtin `Option<T>`. Audience: anyone editing the
+match-lowering twins in `hir/lower/expr/control.rs` and
+`hir/lower/stmt_lowering.rs`, or their self-hosted equivalents.
+
+## Scope and Preconditions
+
+Requires an admitted pure-Simple runtime (`SIMPLE_QUALIFIED_RUNTIME`); the Rust
+bootstrap seed is not acceptable evidence for this lane. Without one these
+scenarios FAIL rather than skip.
+
+This must be a NATIVE lane. The tree-walk interpreter binds match arms from
+`HirFunction` directly and cannot observe the defect, so an interpreted run
+would report green against a broken compiler.
+
+## Primary Workflow
+
+Admit a runtime, native-build `test/fixtures/user_option_enum_match/`, execute
+it, and assert both arms of a user-declared `Option` behave as declared.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Builtin `Option<T>` | Nil-boxed at runtime; identified by a RESERVED enum id (1) |
+| User `Option` | An ordinary enum object with an ordinary id, that merely shares the name |
+| Misroute | Treating the latter as the former makes `Some` irrefutable and `None` unmatchable |
+
+## Related Specifications
+
+- [Bug record](../../../doc/08_tracking/bug/seed_builtin_option_name_heuristic_breaks_user_option_enum_2026-08-16.md) — the traced defect this lane fences
+
+## Evidence and Provenance
+
+Derived from a source trace of `8d96687c991`, which keys its builtin-Option
+exception on `name == "Option"` while both runtimes key on the reserved enum id
+(`runtime/src/value/objects.rs:490`, `src/runtime/simple_core/core_values.spl:61`).
+No runtime evidence has been produced: no qualified pure-Simple runtime exists
+on the reference machine as of 2026-08-16.
+
+## Recovery and Troubleshooting
+
+`none_arm` returning `42`, or `none_via_some` reporting `some-matched-none:*`,
+is the misroute itself: the `Some` arm captured a `None` value. A failure naming
+`no qualified pure-Simple runtime admitted` is the toolchain blocker instead.
+
+## Compatibility and Limitations
+
+Covers the two-variant `Some(payload)`/`None` shape only — the exact shape the
+name heuristic collides with. Says nothing about generic `Option<T>` inference
+or about `Result`.
+"""
+
+# @tag: system, compiler, lowering, enum, option
+
+use std.spec.*
+use std.io_runtime.{process_run}
+use test.system.qualified_pure_simple_runtime.{
+    admit_pure_simple_runtime, require_runtime_can_native_build
+}
+
+val FIXTURE_ENTRY = "test/fixtures/user_option_enum_match/main.spl"
+val WORK_BINARY = "build/test-user-option-enum-match/probe"
+
+
+# ============================================================================
+# Step Helpers
+# ============================================================================
+
+fn build_option_probe() -> text:
+    val binary = admit_pure_simple_runtime()
+    require_runtime_can_native_build(binary, FIXTURE_ENTRY, WORK_BINARY)
+    WORK_BINARY
+
+fn run_probe(probe: text) -> text:
+    val (out, err, code) = process_run(probe, [])
+    if code != 0:
+        fail("user-Option probe exited " + code.to_text() + ": " + err)
+    out
+
+fn field(output: text, key: text) -> text:
+    for line in output.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with(key + "="):
+            return trimmed.substring(key.len() + 1, trimmed.len())
+    fail("probe output has no `" + key + "=` line; got: " + output)
+    ""
+
+
+# ============================================================================
+# Primary Scenarios
+# ============================================================================
+# @manual_section: Enum match lowering
+
+describe "User-declared Option enum match lowering":
+
+    # @req REQ-OPTLOWER-001
+    it "binds the payload of a user-declared Some arm":
+        step("Admit a pure-Simple runtime and native-build the user-Option probe")
+        val probe = build_option_probe()
+
+        step("Execute the probe")
+        val output = run_probe(probe)
+
+        step("Verify Some(42) binds its payload rather than dropping it")
+        expect(field(output, "some_arm")).to_equal("42")
+
+    # @prev("binds the payload of a user-declared Some arm")
+    # @req REQ-OPTLOWER-002
+    it "matches a user-declared None arm":
+        step("Admit a pure-Simple runtime and native-build the user-Option probe")
+        val probe = build_option_probe()
+
+        step("Execute the probe")
+        val output = run_probe(probe)
+
+        step("Verify None reaches its own arm and is not swallowed by Some")
+        expect(field(output, "none_arm")).to_equal("99")
+
+    # @prev("binds the payload of a user-declared Some arm")
+    # @req REQ-OPTLOWER-003
+    it "keeps the Some arm refutable against a None value":
+        step("Admit a pure-Simple runtime and native-build the user-Option probe")
+        val probe = build_option_probe()
+
+        step("Execute the probe")
+        val output = run_probe(probe)
+
+        step("Verify the Some arm does not capture None")
+        expect(field(output, "none_via_some")).to_equal("unmatched")
