@@ -18,7 +18,14 @@ use common.ui.render_opt.damage_tiles.{
     DirtyTilePyramid, damage_tiles_mark_property_damage
 }
 use common.ui.render_opt.damage_plan.{
-    DamagePlanPolicy, build_damage_plan, DAMAGE_PLAN_NONE
+    DamagePlan, DamagePlanPolicy, build_damage_plan, DAMAGE_PLAN_NONE,
+    DAMAGE_PLAN_FULL
+}
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
+use os.compositor.vulkan_present_damage_gate.{
+    hosted_vulkan_present_rects_valid,
+    hosted_vulkan_present_revision_valid,
+    hosted_vulkan_present_identity_valid
 }
 
 extern fn rt_env_get(key: text) -> text?
@@ -30,6 +37,24 @@ var _engine2d_compositor_override_width: i32 = 0
 var _engine2d_compositor_override_height: i32 = 0
 var _engine2d_compositor_override_pixels: [u32] = []
 val _ENGINE2D_REVISION_CACHE_COMPOSITION_SATURATION: i64 = 9223372036854775806
+# Full presented frames the owner must seed before any clipped retained
+# replay is admitted. Deliberately small: each sample is a complete presented
+# frame, so warmup cost is bounded and the pre-admission behavior is exactly
+# the established full composition path.
+val _ENGINE2D_RETAINED_DAMAGE_MIN_FULL_SAMPLES: i64 = 3
+
+# Owner-issued calibration seed for retained-damage replay. The receipt is
+# created by seed_retained_damage_calibration(), accumulates presented
+# full-frame samples, and admits a clipped replay only after the presenting
+# host has committed at least _ENGINE2D_RETAINED_DAMAGE_MIN_FULL_SAMPLES via
+# complete_retained_damage_full_present(). It never enters DrawIR.
+class Engine2dRetainedDamageCalibrationReceipt:
+    owner_token: i64
+    full_samples: i64
+    seeded_ns: i64
+    last_full_present_ns: i64
+    presented: bool
+    basis: text
 
 pub struct Engine2dCompositorPackedDamage:
     ok: bool
@@ -190,6 +215,16 @@ class Engine2dCompositorBackend:
     # `present_cpu_damage()` clears the SoftwareBackend dirty bits.
     cpu_damage_seeded: bool = false
     cpu_damage_rects: [i64] = []
+    # Retained-damage calibration lifecycle (owner = presenting host).
+    retained_damage_calibration: Engine2dRetainedDamageCalibrationReceipt? = nil
+    # Vulkan presentation-owner identity binding (vulkan_present_damage_gate):
+    # bound once from the first accepted swapchain receipt, then every later
+    # present must match the exact tuple or the frame is rejected fail-closed.
+    vulkan_present_bound_framebuffer: i64 = 0
+    vulkan_present_bound_device_identity: i64 = 0
+    vulkan_present_bound_adapter_identity: i64 = 0
+    last_retained_replay_reason: text = "immediate-mode-no-replay-receipt"
+    last_retained_replay_plan_mode: i64 = DAMAGE_PLAN_FULL
 
     static fn create(engine: Engine2D) -> Engine2dCompositorBackend:
         val id = _engine2d_compositor_next_id
@@ -447,6 +482,140 @@ class Engine2dCompositorBackend:
         self.cpu_damage_seeded = false
         self.cpu_damage_rects = []
 
+    # -- Retained-damage calibration lifecycle -------------------------------
+    # The presenting host is the owner: it seeds the receipt, and only the
+    # host's post-present commit (complete_retained_damage_full_present) can
+    # mark the seed presented and count a full sample.
+
+    me seed_retained_damage_calibration(owner_token: i64):
+        """Owner-issued full seed ("full-seed-warmup"): idempotent, keeps an
+        existing receipt so accumulated samples survive re-seeding."""
+        if owner_token <= 0:
+            return
+        if self.retained_damage_calibration != nil:
+            return
+        self.retained_damage_calibration = Some(
+            Engine2dRetainedDamageCalibrationReceipt(
+                owner_token: owner_token, full_samples: 0,
+                seeded_ns: time_now_nanos(), last_full_present_ns: 0,
+                presented: false, basis: "full-seed-warmup"))
+
+    me record_retained_damage_full_sample(started_ns: i64, finished_ns: i64):
+        if self.retained_damage_calibration == nil or finished_ns <= started_ns:
+            return
+        var receipt = self.retained_damage_calibration.unwrap()
+        receipt.full_samples = receipt.full_samples + 1
+        self.retained_damage_calibration = Some(receipt)
+
+    me complete_retained_damage_full_present(started_ns: i64, finished_ns: i64):
+        """Host commit: called strictly AFTER the host presenter has presented
+        the full seed frame. This is the ONLY place a full sample is counted,
+        so a frame contributes exactly one sample and only when presented."""
+        if self.retained_damage_calibration == nil or finished_ns <= started_ns:
+            return
+        self.record_retained_damage_full_sample(started_ns, finished_ns)
+        var receipt = self.retained_damage_calibration.unwrap()
+        receipt.presented = true
+        receipt.last_full_present_ns = finished_ns
+        self.retained_damage_calibration = Some(receipt)
+
+    # The retained-replay admission token. nil = execute the established
+    # full composition path; Some(plan) = the owner seed is presented, warm,
+    # and this session's damage sink produced a measured clipped plan.
+    me admitted_retained_damage_schedule(
+        external_presenter: bool
+    ) -> DamagePlan?:
+        if self.retained_damage_calibration != nil:
+            val receipt = self.retained_damage_calibration.unwrap()
+            # Owner-token validation: the receipt must have been seeded by
+            # THIS backend instance; a stale receipt carried across a backend
+            # swap never admits a clipped replay.
+            if receipt.owner_token != self.id.to_i64():
+                self.retained_damage_calibration = nil
+                self.last_retained_replay_reason = "immediate-mode-no-replay-receipt"
+                return nil
+            if not receipt.presented:
+                self.last_retained_replay_reason = "presenter-full-seed-unpresented"
+                return nil
+            if receipt.full_samples < _ENGINE2D_RETAINED_DAMAGE_MIN_FULL_SAMPLES:
+                self.last_retained_replay_reason = "full-seed-warmup"
+                return nil
+            if external_presenter:
+                self.last_retained_replay_reason = "presenter-full-seed-unpresented"
+                return nil
+            self.last_retained_replay_reason = "owner-token-retained-replay"
+            self.damage_pyramid.begin_frame()
+            damage_tiles_mark_property_damage(self.damage_pyramid, self.damage)
+            return Some(build_damage_plan(
+                self.damage_pyramid, 0, DamagePlanPolicy.create(256, 60)))
+        self.last_retained_replay_reason = "immediate-mode-no-replay-receipt"
+        nil
+
+    fn retained_damage_replay_manifest() -> text:
+        """Greppable replay admission receipt for evidence harnesses."""
+        val seeded = self.retained_damage_calibration != nil
+        var samples: i64 = 0
+        var presented = false
+        if seeded:
+            val receipt = self.retained_damage_calibration.unwrap()
+            samples = receipt.full_samples
+            presented = receipt.presented
+        "reason={self.last_retained_replay_reason};plan_mode={self.last_retained_replay_plan_mode};seeded={seeded};presented={presented};full_samples={samples};min_full_samples={_ENGINE2D_RETAINED_DAMAGE_MIN_FULL_SAMPLES}"
+
+    # Production retained entry: use exactly the compositor-owned damage sink
+    # and exactly this Engine2D session's calibration receipt. A missing/
+    # unseeded/unpresented/under-warmed receipt — or a replay rejection —
+    # makes this method perform the established full composition path.
+    me render_draw_ir_composition_from_retained_damage(
+        composition: DrawIrComposition,
+        images: [Engine2dResolvedDrawIrImage]
+    ) -> Engine2dDrawIrAdvResult:
+        val retained_plan = self.admitted_retained_damage_schedule(false)
+        if retained_plan != nil:
+            val plan = retained_plan.unwrap()
+            self.last_retained_replay_plan_mode = plan.mode
+            var dirty_rects: [i64] = []
+            var di: i64 = 0
+            while di < self.damage_rect_count():
+                val (dx, dy, dw, dh) = self.damage_rect_at(di)
+                dirty_rects.push(dx.to_i64())
+                dirty_rects.push(dy.to_i64())
+                dirty_rects.push(dw.to_i64())
+                dirty_rects.push(dh.to_i64())
+                di = di + 1
+            if (plan.rects.len() > 0 and self.cpu_damage_seeded and
+                self.render_draw_ir_composition_cpu_damaged(
+                    composition, images, dirty_rects)):
+                val pixels = _engine2d_compositor_copy_pixels(
+                    self.cpu_damage_pixels())
+                self.present_cpu_damage()
+                if pixels.len() == self.w * self.h:
+                    self.clear_damage()
+                    return Engine2dDrawIrAdvResult(
+                        schema: composition.schema,
+                        unit_id: composition.composition_id,
+                        selected_backend: self.engine.backend_name(),
+                        fallback_required: false,
+                        fallback_reason: "",
+                        rendered_command_count: self.last_damage_ops_rendered,
+                        skipped_command_count: 0,
+                        pixels: pixels,
+                        readback_source: "cpu_damage_mirror_copy",
+                        backend_handle: 0,
+                        device_identity: 0,
+                        readback_checksum: (
+                            _engine2d_compositor_pixels_checksum(pixels)))
+                self.abort_cpu_damage()
+        else:
+            self.last_retained_replay_plan_mode = DAMAGE_PLAN_FULL
+        # Deliberately NO record_retained_damage_full_sample here: the host's
+        # post-present commit (complete_retained_damage_full_present) is the
+        # ONLY sample increment, so rejected frames contribute nothing and
+        # presented frames count exactly once.
+        val result = self.render_draw_ir_composition(composition, images)
+        self.clear_damage()
+        result
+
     me render_draw_ir_composition_resources(
         composition: DrawIrComposition,
         resources: [SimpleOsHostGpuImageResource]
@@ -675,6 +844,23 @@ class Engine2dCompositorBackend:
             selected_backend: selected,
             rendered_command_count: self.last_damage_ops_rendered)
 
+    # Fail-closed owner identity gate for every accepted swapchain receipt.
+    # The tuple binds all-or-exact (see vulkan_present_damage_gate): the
+    # first accepted receipt binds it; any later mismatch rejects the frame.
+    me _vulkan_present_identity_admit(
+        framebuffer: i64, device_identity: i64, adapter_identity: i64
+    ) -> bool:
+        if not hosted_vulkan_present_identity_valid(
+            framebuffer, device_identity, adapter_identity,
+            self.vulkan_present_bound_framebuffer,
+            self.vulkan_present_bound_device_identity,
+            self.vulkan_present_bound_adapter_identity):
+            return false
+        self.vulkan_present_bound_framebuffer = framebuffer
+        self.vulkan_present_bound_device_identity = device_identity
+        self.vulkan_present_bound_adapter_identity = adapter_identity
+        true
+
     me render_draw_ir_composition_resources_window_revision(
         composition: DrawIrComposition,
         resources: [SimpleOsHostGpuImageResource],
@@ -701,7 +887,10 @@ class Engine2dCompositorBackend:
                 if val Some(receipt) = self.engine.latest_vulkan_frame_receipt():
                     if (receipt.present_mode == "window-swapchain" and
                         receipt.present_completed and receipt.device_present and
-                        receipt.no_readback and receipt.completion_known):
+                        receipt.no_readback and receipt.completion_known and
+                        self._vulkan_present_identity_admit(
+                            receipt.backend_handle, receipt.device_identity,
+                            receipt.swapchain_identity)):
                         self.window_represent_count += 1
                         return true
             self.invalidate_revision_cache()
@@ -722,7 +911,10 @@ class Engine2dCompositorBackend:
         if val Some(receipt) = self.engine.latest_vulkan_frame_receipt():
             if (receipt.present_mode == "window-swapchain" and
                 receipt.present_completed and receipt.device_present and
-                receipt.no_readback and receipt.completion_known):
+                receipt.no_readback and receipt.completion_known and
+                self._vulkan_present_identity_admit(
+                    receipt.backend_handle, receipt.device_identity,
+                    receipt.swapchain_identity)):
                 if cacheable:
                     self.window_revision_producer_generation = producer_generation
                     self.window_revision_composition_revision = composition_revision
@@ -768,6 +960,16 @@ class Engine2dCompositorBackend:
             return self.render_draw_ir_composition_resources_window_revision(
                 composition, resources, producer_generation,
                 composition_revision)
+        # Presentation-owner revision gate (vulkan_present_damage_gate): a
+        # retained damaged replay is admitted only for strictly newer
+        # producer/composition serials than the retained base. Anything else
+        # falls closed to the full-frame path before any retained writes.
+        if not hosted_vulkan_present_revision_valid(
+            producer_generation, self.window_revision_producer_generation,
+            composition_revision, self.window_revision_composition_revision):
+            return self.render_draw_ir_composition_resources_window_revision(
+                composition, resources, producer_generation,
+                composition_revision)
 
         self.damage_pyramid.begin_frame()
         var i = 0
@@ -782,6 +984,15 @@ class Engine2dCompositorBackend:
         self.last_damage_plan_rect_count = plan.output_rect_count
         self.last_damage_plan_pixels = plan.planned_pixels
         if plan.rects.len() == 0:
+            return self.render_draw_ir_composition_resources_window_revision(
+                composition, resources, producer_generation,
+                composition_revision)
+        # Presentation-owner rect gate (vulkan_present_damage_gate): the plan
+        # handed to acquisition/submission must be canonically valid
+        # (in-bounds, non-overlapping, budgeted). An invalid plan falls
+        # closed to the full-frame path before any retained writes.
+        if not hosted_vulkan_present_rects_valid(
+            self.w, self.h, plan.mode, plan.rects):
             return self.render_draw_ir_composition_resources_window_revision(
                 composition, resources, producer_generation,
                 composition_revision)
@@ -819,7 +1030,10 @@ class Engine2dCompositorBackend:
             if (receipt.present_mode == "window-swapchain" and
                 receipt.present_completed and receipt.device_present and
                 receipt.no_readback and receipt.completion_known and
-                receipt.dirty_rect_count == plan.output_rect_count):
+                receipt.dirty_rect_count == plan.output_rect_count and
+                self._vulkan_present_identity_admit(
+                    receipt.backend_handle, receipt.device_identity,
+                    receipt.swapchain_identity)):
                 self.window_render_count += 1
                 self.window_revision_producer_generation = producer_generation
                 self.window_revision_composition_revision = composition_revision

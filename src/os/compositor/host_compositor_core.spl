@@ -51,6 +51,7 @@ use os.compositor.wm_action_lifecycle.{HOST_CONTENT_OWNER_GUI, HOST_CONTENT_OWNE
 use os.services.wm.wm_action.{WmAction}
 use common.window_protocol.compositor_methods.{COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 use common.ui.native_scalar_text.{ui_native_i64_text}
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
 
 extern fn rt_sleep_ms(ms: i64)
 extern fn rt_env_get(key: text) -> text?
@@ -1842,6 +1843,11 @@ class HostCompositor:
             self.skipped_frame_count = self.skipped_frame_count + 1
             return true
         self.render_revision = self.render_revision + 1
+        # This host is the presenting owner of the executor's retained-damage
+        # calibration: seed once (idempotent) with the backend's own STABLE
+        # identity (not the changing render revision); commit only after
+        # present below.
+        executor.seed_retained_damage_calibration(executor.id.to_i64())
         val selected_backend = executor.selected_backend()
         # The same persistent Engine2D session that will execute the parent
         # Draw IR selects the backend for every child Web cache. This preserves
@@ -1947,8 +1953,13 @@ class HostCompositor:
             self._mark_external_web_frames_consumed(frames)
             self.dirty.clear()
             return true
+        # Forward the actual host dirty region to the persistent Engine2D
+        # owner. Its retained replay remains fail-closed until same-session
+        # full-frame calibration has enough successful presented samples.
+        for rect in self.dirty.rects:
+            executor.report_damage(rect.x, rect.y, rect.w, rect.h)
         var accepted_composition = composition
-        var accepted_result = executor.render_draw_ir_composition(composition, images)
+        var accepted_result = executor.render_draw_ir_composition_from_retained_damage(composition, images)
         # A concrete Metal WM frame is device-only. The executor must return
         # one valid receipt for every requested glass surface, and that receipt
         # must describe the same completed readback device/handle the host is
@@ -1976,8 +1987,13 @@ class HostCompositor:
             else:
                 print "[hosted-wm] draw-ir-reject-detail reason=render-result fallback_required={accepted_result.fallback_required} fallback_reason={accepted_result.fallback_reason} skipped={accepted_result.skipped_command_count} rendered={accepted_result.rendered_command_count} pixels={accepted_result.pixels.len()} expected_pixels={self.width * self.height}"
             return self._reject_engine2d_frame()
+        val retained_full_started_ns = time_now_nanos()
         self.pixel_backend.blit_pixels(0, 0, self.width, self.height, accepted_result.pixels)
         self.pixel_backend.present()
+        # Commit the calibration seed only now — the host HAS presented this
+        # full frame; a rejected frame never commits.
+        executor.complete_retained_damage_full_present(
+            retained_full_started_ns, time_now_nanos())
         # The ordinary result already established the compositor-visible full
         # frame. Seed the Engine2D retained mirror now, after successful
         # validation, so the next damaged frame can avoid another full copy.

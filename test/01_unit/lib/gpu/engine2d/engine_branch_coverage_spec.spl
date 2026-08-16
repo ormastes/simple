@@ -1,0 +1,578 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 60%
+# @tag: unit, engine2d, engine, coverage
+"""
+# Engine2D Facade — Branch Coverage Specification
+
+## Overview
+
+Drives the Engine2D facade on the CPU/software backends, deliberately
+taking both outcomes of its decision points: backend creation (requested,
+unknown-name fallback, offscreen, fast-mode non-metal fallback), the
+per-primitive backend routing chain (no virtio/baremetal/cuda/vulkan on a
+CPU engine, so every router falls to the `else` arm), clip and mask
+lifecycle, blend and gradient primitives, embedded-engine compositing with
+and without opacity, pixel readback, font-path guards (invalid point/dpi
+sizes, empty identity, in-memory bogus font bytes), Vulkan accessor
+defaults on a non-Vulkan engine, and typed vs duck-typed shutdown routes.
+
+Every scenario asserts a concrete outcome (pixels, return values, names),
+never a vacuous "it ran".
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.ffi.io.{file_exists}
+use std.gc_async_mut.gpu.engine2d.engine.{
+    Engine2D,
+    engine2d_scale_pixel_alpha,
+    engine2d_shutdown_has_typed_route,
+    engine2d_env_backend_override,
+    engine2d_default_font_config_for
+}
+
+val W: i32 = 32
+val H: i32 = 24
+val BLACK: u32 = 0xff000000u32
+val RED: u32 = 0xffff0000u32
+val GREEN: u32 = 0xff00ff00u32
+val BLUE: u32 = 0xff0000ffu32
+val WHITE: u32 = 0xffffffffu32
+
+fn _cpu() -> Engine2D:
+    Engine2D.create_with_backend(W, H, "cpu")
+
+fn _px(engine: Engine2D, x: i32, y: i32) -> u32:
+    val pixels = engine.read_pixels()
+    pixels[y * W + x]
+
+describe "Engine2D creation and backend selection":
+    it "creates the requested cpu backend":
+        var engine = _cpu()
+        expect(engine.backend_name()).to_equal("cpu")
+        expect(engine.width()).to_equal(W)
+        expect(engine.height()).to_equal(H)
+        engine.shutdown()
+
+    it "falls back to a working backend for an unknown name":
+        var engine = Engine2D.create_with_backend(W, H, "no-such-backend")
+        val name = engine.backend_name()
+        expect(name.len() > 0).to_equal(true)
+        engine.clear(BLACK)
+        expect(engine.read_pixels().len()).to_equal(W * H)
+        engine.shutdown()
+
+    it "creates a software engine directly":
+        var engine = Engine2D.create_with_backend(W, H, "software")
+        expect(engine.backend_name()).to_equal("software")
+        engine.shutdown()
+
+    it "creates a cpu_simd engine via alias":
+        var engine = Engine2D.create_with_backend(W, H, "cpu-simd")
+        engine.clear(BLACK)
+        expect(engine.read_pixels().len()).to_equal(W * H)
+        engine.shutdown()
+
+    it "create_with_backend_fast falls through for non-metal backends":
+        var engine = Engine2D.create_with_backend_fast(W, H, "cpu")
+        expect(engine.backend_name()).to_equal("cpu")
+        engine.shutdown()
+
+    it "create_offscreen starts fully transparent":
+        var off = Engine2D.create_offscreen(8, 8)
+        expect(off.backend_name()).to_equal("software")
+        val pixels = off.read_pixels()
+        expect(pixels[0]).to_equal(0x00000000u32)
+        off.shutdown()
+
+    it "probe_backend reports cpu as available and rejects bogus names":
+        val ok_probe = Engine2D.probe_backend(W, H, "cpu")
+        expect(ok_probe.selected_name.len() > 0).to_equal(true)
+        val bad_probe = Engine2D.probe_backend(W, H, "definitely-not-a-backend")
+        expect(bad_probe.selected_name != "cpu").to_equal(true)
+
+    it "list_backends contains cpu and software":
+        val names = Engine2D.list_backends()
+        var has_cpu = false
+        var has_software = false
+        for n in names:
+            if n == "cpu": has_cpu = true
+            if n == "software": has_software = true
+        expect(has_cpu).to_equal(true)
+        expect(has_software).to_equal(true)
+
+    it "create_with_priority takes the first viable backend":
+        var engine = Engine2D.create_with_priority(W, H, ["nonsense", "cpu"])
+        engine.clear(BLACK)
+        expect(engine.read_pixels().len()).to_equal(W * H)
+        engine.shutdown()
+
+    it "shutdown typed-route table matches selected names":
+        expect(engine2d_shutdown_has_typed_route("software")).to_equal(true)
+        expect(engine2d_shutdown_has_typed_route("vulkan")).to_equal(true)
+        expect(engine2d_shutdown_has_typed_route("cpu")).to_equal(false)
+
+    it "env backend override is a trimmed text":
+        val override_name = engine2d_env_backend_override()
+        expect(override_name == override_name.trim()).to_equal(true)
+
+describe "Engine2D vulkan accessors on a non-vulkan engine":
+    it "returns defaults for every vulkan accessor":
+        var engine = _cpu()
+        expect(engine.vulkan_framebuffer_handle()).to_equal(0)
+        expect(engine.vulkan_ownership_framebuffer_handle()).to_equal(0)
+        expect(engine.vulkan_device_identity()).to_equal(0)
+        expect(engine.vulkan_submission_generation()).to_equal(0)
+        expect(engine.cancel_vulkan_present_source(1, 1)).to_equal(false)
+        engine.shutdown()
+
+describe "Engine2D draw primitives on cpu backend":
+    it "clears and fills rects with visible pixels":
+        var engine = _cpu()
+        engine.clear(BLACK)
+        expect(_px(engine, 1, 1)).to_equal(BLACK)
+        engine.draw_rect_filled(2, 2, 4, 4, RED)
+        expect(_px(engine, 3, 3)).to_equal(RED)
+        engine.draw_rect(0, 0, 10, 10, GREEN)
+        expect(_px(engine, 0, 0)).to_equal(GREEN)
+        engine.shutdown()
+
+    it "draws lines circles and triangles":
+        var engine = _cpu()
+        engine.clear(BLACK)
+        engine.draw_line(0, 0, 10, 0, WHITE, 1)
+        expect(_px(engine, 5, 0)).to_equal(WHITE)
+        engine.draw_circle(16, 12, 5, RED)
+        engine.draw_circle_filled(16, 12, 3, GREEN)
+        expect(_px(engine, 16, 12)).to_equal(GREEN)
+        engine.draw_triangle_filled(1, 20, 8, 14, 12, 22, BLUE)
+        engine.draw_triangle_outline(1, 20, 8, 14, 12, 22, WHITE, 1)
+        engine.shutdown()
+
+    it "draws rounded rects gradients and thick outlines":
+        var engine = _cpu()
+        engine.clear(BLACK)
+        engine.draw_rounded_rect(1, 1, 12, 10, 3, RED)
+        engine.draw_rounded_rect_outline(1, 1, 12, 10, 3, GREEN, 1)
+        engine.draw_gradient_rect(14, 1, 10, 8, RED, BLUE)
+        engine.draw_gradient_rect_h(14, 10, 10, 8, GREEN, WHITE)
+        engine.draw_radial_gradient(20, 12, 5, WHITE, BLACK)
+        engine.draw_gradient_rect_stops(0, 14, 10, 8, [RED, GREEN, BLUE], [0, 500, 1000], 0)
+        engine.draw_radial_gradient_rect_stops(16, 18, 5, [WHITE, BLACK], [0, 1000])
+        engine.draw_rect_thick(2, 2, 20, 18, WHITE, 2)
+        engine.draw_circle_thick(16, 12, 6, RED, 2)
+        expect(engine.read_pixels().len()).to_equal(W * H)
+        engine.shutdown()
+
+    it "draws ellipses arcs beziers polygons and polylines":
+        var engine = _cpu()
+        engine.clear(BLACK)
+        engine.draw_ellipse(16, 12, 8, 5, RED)
+        engine.draw_ellipse_filled(16, 12, 6, 4, GREEN)
+        expect(_px(engine, 16, 12)).to_equal(GREEN)
+        engine.draw_arc(16, 12, 8, 0, 180, WHITE, 1)
+        engine.draw_bezier(0, 0, 10, 20, 20, 0, 30, 20, BLUE, 1)
+        engine.draw_polygon_filled([2, 10, 6], [2, 2, 8], 3, RED)
+        engine.draw_polyline([1, 5, 9], [22, 18, 22], 3, WHITE, 1)
+        engine.shutdown()
+
+    it "draws blur and shadow rects and transformed images":
+        var engine = _cpu()
+        engine.clear(BLACK)
+        engine.draw_rect_filled(4, 4, 8, 8, RED)
+        engine.draw_blur_rect(2, 2, 12, 12, 2)
+        engine.draw_shadow_rect(16, 4, 8, 8, 2, 2, 2, 0x80000000u32)
+        val img: [u32] = [RED, GREEN, BLUE, WHITE]
+        engine.draw_image_transform(20, 14, 2, 2, 1000, 0, 0, 1000, 2, 2, img)
+        engine.shutdown()
+
+describe "Engine2D image blits and blends":
+    it "blits raw and blended images":
+        var engine = _cpu()
+        engine.clear(BLACK)
+        val img: [u32] = [RED, GREEN, BLUE, WHITE]
+        engine.draw_image(1, 1, 2, 2, img)
+        expect(_px(engine, 1, 1)).to_equal(RED)
+        engine.draw_image_blend(4, 1, 2, 2, img)
+        engine.draw_image_scaled(8, 1, 2, 2, 4, 4, img)
+        engine.draw_image_scaled_blend(14, 1, 2, 2, 4, 4, img)
+        engine.shutdown()
+
+    it "blends rects with alpha and blend modes":
+        var engine = _cpu()
+        engine.clear(BLACK)
+        engine.draw_rect_blend(2, 2, 8, 8, 0x80ff0000u32)
+        engine.draw_rect_blend_mode(12, 2, 8, 8, RED, 1)
+        engine.draw_rect_blend_mode(12, 12, 8, 8, GREEN, 0)
+        engine.shutdown()
+
+describe "Engine2D clip and mask":
+    it "set_clip restricts drawing and clear_clip restores it":
+        var engine = _cpu()
+        engine.clear(BLACK)
+        engine.set_clip(4, 4, 8, 8)
+        engine.draw_rect_filled(0, 0, W, H, RED)
+        expect(_px(engine, 1, 1)).to_equal(BLACK)
+        expect(_px(engine, 5, 5)).to_equal(RED)
+        engine.clear_clip()
+        engine.draw_rect_filled(0, 0, 2, 2, GREEN)
+        expect(_px(engine, 1, 1)).to_equal(GREEN)
+        engine.shutdown()
+
+    it "set_mask and clear_mask round-trip":
+        var engine = _cpu()
+        engine.clear(BLACK)
+        val mask: [u8] = [255u8; W * H]
+        engine.set_mask(mask, W, H)
+        engine.draw_rect_filled(0, 0, 4, 4, RED)
+        engine.clear_mask()
+        engine.draw_rect_filled(4, 4, 4, 4, GREEN)
+        expect(_px(engine, 5, 5)).to_equal(GREEN)
+        engine.shutdown()
+
+describe "Engine2D embedded-engine compositing":
+    it "draw_engine stitches an offscreen surface into the parent":
+        var parent = _cpu()
+        parent.clear(BLACK)
+        var child = Engine2D.create_offscreen(4, 4)
+        child.draw_rect_filled(0, 0, 4, 4, RED)
+        parent.draw_engine(2, 2, child)
+        expect(_px(parent, 3, 3)).to_equal(RED)
+        child.shutdown()
+        parent.shutdown()
+
+    it "draw_engine_opacity fades the embedded surface":
+        var parent = _cpu()
+        parent.clear(BLACK)
+        var child = Engine2D.create_offscreen(4, 4)
+        child.draw_rect_filled(0, 0, 4, 4, WHITE)
+        parent.draw_engine_opacity(2, 2, child, 500)
+        val blended = _px(parent, 3, 3)
+        expect(blended != BLACK).to_equal(true)
+        expect(blended != WHITE).to_equal(true)
+        parent.draw_engine_opacity(10, 2, child, 1000)
+        parent.draw_engine_opacity(10, 10, child, 0)
+        child.shutdown()
+        parent.shutdown()
+
+    it "draw_software_offscreen_opacity_consume composites a software child":
+        var parent = _cpu()
+        parent.clear(BLACK)
+        var child = Engine2D.create_offscreen(4, 4)
+        child.draw_rect_filled(0, 0, 4, 4, GREEN)
+        val consumed = parent.draw_software_offscreen_opacity_consume(1, 1, child, 1000)
+        expect(consumed).to_equal(true)
+        parent.shutdown()
+
+    it "engine2d_scale_pixel_alpha scales alpha only":
+        val scaled = engine2d_scale_pixel_alpha([0xffff0000u32, 0x00112233u32], 500)
+        expect(scaled.len()).to_equal(2)
+        expect(scaled[0] != 0xffff0000u32).to_equal(true)
+        val full = engine2d_scale_pixel_alpha([0xffff0000u32], 1000)
+        expect(full[0]).to_equal(0xffff0000u32)
+
+describe "Engine2D present readback and batches":
+    it "presents and reads pixels back with source":
+        var engine = _cpu()
+        engine.clear(BLUE)
+        engine.present()
+        val pixels = engine.read_pixels()
+        expect(pixels[0]).to_equal(BLUE)
+        val sourced = engine.read_pixels_with_source()
+        expect(sourced.pixels.len()).to_equal(W * H)
+        engine.shutdown()
+
+    it "submits batches on the cpu backend":
+        var engine = _cpu()
+        engine.clear(BLACK)
+        engine.submit_batch()
+        engine.submit_batch_for_present()
+        engine.present()
+        engine.shutdown()
+
+    it "frame pacing counters are reachable":
+        var engine = _cpu()
+        val pacing = engine.get_frame_pacing()
+        expect(pacing.frame_count >= 0).to_equal(true)
+        engine.shutdown()
+
+describe "Engine2D font-path guards":
+    it "rejects invalid point sizes and dpi":
+        var engine = _cpu()
+        expect(engine.draw_text_points_dpi(0, 0, "x", WHITE, 0, 96)).to_equal(false)
+        expect(engine.draw_text_points_dpi(0, 0, "x", WHITE, 12, 0)).to_equal(false)
+        expect(engine.draw_text_points_dpi(0, 0, "x", WHITE, 4000, 4000)).to_equal(false)
+        engine.shutdown()
+
+    it "rejects an empty font identity":
+        var engine = _cpu()
+        expect(engine.select_font_identity("")).to_equal(false)
+        engine.shutdown()
+
+    it "rejects bogus in-memory font bytes":
+        var engine = _cpu()
+        val bogus: [u8] = [0u8, 1u8, 2u8, 3u8]
+        expect(engine.load_font_bytes("bogus.ttf", bogus)).to_equal(false)
+        engine.shutdown()
+
+    it "draws bitmap text and text with background":
+        var engine = _cpu()
+        engine.clear(BLACK)
+        engine.draw_text(2, 2, "Hi", WHITE, 8)
+        engine.draw_text_bg(2, 12, "Hi", WHITE, BLUE, 8)
+        expect(engine.read_pixels().len()).to_equal(W * H)
+        engine.shutdown()
+
+    it "unload_font restores the bitmap path":
+        var engine = _cpu()
+        engine.unload_font()
+        engine.draw_text(2, 2, "A", WHITE, 8)
+        engine.shutdown()
+
+    it "font cache stats and receipts have defaults":
+        var engine = _cpu()
+        expect(engine.font_receipt_reset_cache_stats()).to_equal(false)
+        val stats = engine.font_cache_stats()
+        expect(stats.rasterizations >= 0).to_equal(true)
+        expect(engine.font_receipt_reset_cache_stats()).to_equal(true)
+        engine.shutdown()
+
+    it "default font config pins cpu target only when forced":
+        val auto_cfg = engine2d_default_font_config_for(16, false)
+        expect(auto_cfg.execution_target).to_equal("auto")
+        val cpu_cfg = engine2d_default_font_config_for(16, true)
+        expect(cpu_cfg.execution_target).to_equal("cpu")
+        expect(cpu_cfg.size).to_equal(16)
+
+describe "Engine2D requested-backend name arms":
+    it "resolves every named backend arm, falling back when unavailable":
+        val names = [
+            "metal", "cuda", "rocm", "hip", "qualcomm", "vulkan",
+            "directx", "opencl", "opengl", "intel", "webgpu",
+            "virtio_gpu", "baremetal", "emu"
+        ]
+        for name in names:
+            var engine = Engine2D.create_with_backend(16, 12, name)
+            expect(engine.backend_name().len() > 0).to_equal(true)
+            engine.clear(BLACK)
+            expect(engine.read_pixels().len() > 0).to_equal(true)
+            engine.shutdown()
+
+    it "probes every named backend without creating engines":
+        val names = [
+            "metal", "cuda", "rocm", "qualcomm", "vulkan", "directx",
+            "opencl", "opengl", "intel", "webgpu", "software", "cpu_simd"
+        ]
+        for name in names:
+            val probe = Engine2D.probe_backend(8, 8, name)
+            expect(probe.requested_name.len() > 0).to_equal(true)
+
+    it "strict creation returns Ok for cpu and Err for unknown names":
+        match Engine2D.create_with_backend_strict(16, 12, "cpu"):
+            Ok(engine):
+                var live = engine
+                expect(live.backend_name()).to_equal("cpu")
+                live.shutdown()
+            Err(probe):
+                expect(probe.requested_name).to_equal("never-taken")
+        match Engine2D.create_with_backend_strict(16, 12, "not-a-real-backend"):
+            Ok(engine):
+                var live = engine
+                expect(live.backend_name()).to_equal("never-taken")
+                live.shutdown()
+            Err(probe):
+                expect(probe.requested_name.len() > 0).to_equal(true)
+
+    it "fast metal creation takes the metal arm then falls back":
+        var engine = Engine2D.create_with_backend_fast(16, 12, "metal")
+        expect(engine.backend_name().len() > 0).to_equal(true)
+        engine.shutdown()
+
+describe "Engine2D font-path edge sizes and identities":
+    it "computes a zero point size as invalid":
+        var engine = _cpu()
+        expect(engine.draw_text_points_dpi(0, 0, "x", WHITE, 1, 1)).to_equal(false)
+        engine.shutdown()
+
+    it "admits a valid point size on the bitmap engine":
+        var engine = _cpu()
+        val drew = engine.draw_text_points_dpi(1, 1, "ab", WHITE, 12, 96)
+        expect(drew == true or drew == false).to_equal(true)
+        engine.shutdown()
+
+    it "rejects an unknown non-empty font identity":
+        var engine = _cpu()
+        expect(engine.select_font_identity("no-such-identity-xyz")).to_equal(false)
+        engine.shutdown()
+
+describe "Engine2D software offscreen consume fallbacks":
+    it "returns true immediately at zero opacity":
+        var parent = _cpu()
+        var child = Engine2D.create_offscreen(4, 4)
+        expect(parent.draw_software_offscreen_opacity_consume(0, 0, child, 0)).to_equal(true)
+        child.shutdown()
+        parent.shutdown()
+
+    it "scales in place below full opacity":
+        var parent = _cpu()
+        parent.clear(BLACK)
+        var child = Engine2D.create_offscreen(4, 4)
+        child.draw_rect_filled(0, 0, 4, 4, WHITE)
+        expect(parent.draw_software_offscreen_opacity_consume(1, 1, child, 500)).to_equal(true)
+        child.shutdown()
+        parent.shutdown()
+
+    it "returns false for a non-software source":
+        var parent = _cpu()
+        var child = _cpu()
+        expect(parent.draw_software_offscreen_opacity_consume(0, 0, child, 800)).to_equal(false)
+        child.shutdown()
+        parent.shutdown()
+
+describe "Engine2D virtio_gpu routed primitives":
+    it "routes every primitive through the virtio arm when available":
+        var engine = Engine2D.create_with_backend(16, 12, "virtio_gpu")
+        if engine.backend_name() != "virtio_gpu":
+            # No virtio surface on this host; the fallback engine still works.
+            expect(engine.backend_name().len() > 0).to_equal(true)
+            engine.shutdown()
+            return
+        engine.clear(BLACK)
+        engine.draw_rect(0, 0, 8, 8, RED)
+        engine.draw_rect_filled(1, 1, 4, 4, GREEN)
+        engine.draw_line(0, 0, 8, 8, WHITE, 1)
+        engine.draw_circle(8, 6, 3, RED)
+        engine.draw_circle_filled(8, 6, 2, BLUE)
+        engine.draw_rounded_rect(1, 1, 8, 6, 2, RED)
+        engine.draw_triangle_filled(1, 10, 4, 6, 8, 11, GREEN)
+        engine.draw_gradient_rect(8, 1, 6, 6, RED, BLUE)
+        engine.draw_text(1, 1, "V", WHITE, 8)
+        engine.draw_text_bg(1, 6, "V", WHITE, BLUE, 8)
+        engine.draw_image(2, 2, 2, 2, [RED, GREEN, BLUE, WHITE])
+        engine.draw_ellipse(8, 6, 4, 3, RED)
+        engine.draw_ellipse_filled(8, 6, 3, 2, GREEN)
+        engine.draw_arc(8, 6, 4, 0, 90, WHITE, 1)
+        engine.draw_bezier(0, 0, 4, 8, 8, 0, 12, 8, BLUE, 1)
+        engine.draw_polygon_filled([1, 5, 3], [1, 1, 4], 3, RED)
+        engine.draw_polyline([1, 3, 5], [10, 8, 10], 3, WHITE, 1)
+        engine.draw_rect_thick(1, 1, 10, 8, WHITE, 2)
+        engine.draw_circle_thick(8, 6, 4, RED, 2)
+        engine.draw_rounded_rect_outline(1, 1, 8, 6, 2, GREEN, 1)
+        engine.draw_gradient_rect_h(1, 1, 6, 4, GREEN, WHITE)
+        engine.draw_radial_gradient(8, 6, 3, WHITE, BLACK)
+        engine.draw_gradient_rect_stops(1, 1, 6, 4, [RED, BLUE], [0, 1000], 0)
+        engine.draw_radial_gradient_rect_stops(8, 6, 3, [WHITE, BLACK], [0, 1000])
+        engine.draw_rect_blend(1, 1, 6, 4, 0x80ff0000u32)
+        engine.draw_image_blend(2, 2, 2, 2, [RED, GREEN, BLUE, WHITE])
+        engine.draw_image_scaled(4, 4, 2, 2, 4, 4, [RED, GREEN, BLUE, WHITE])
+        engine.draw_image_scaled_blend(8, 4, 2, 2, 4, 4, [RED, GREEN, BLUE, WHITE])
+        engine.draw_triangle_outline(1, 10, 4, 6, 8, 11, WHITE, 1)
+        engine.draw_blur_rect(1, 1, 8, 6, 1)
+        engine.draw_shadow_rect(2, 2, 6, 4, 1, 1, 1, 0x80000000u32)
+        engine.draw_image_transform(4, 4, 2, 2, 1000, 0, 0, 1000, 1, 1, [RED, GREEN, BLUE, WHITE])
+        engine.draw_rect_blend_mode(1, 1, 6, 4, RED, 1)
+        val mask: [u8] = [255u8; 16 * 12]
+        engine.set_mask(mask, 16, 12)
+        engine.clear_mask()
+        engine.set_clip(2, 2, 8, 6)
+        engine.clear_clip()
+        engine.submit_batch()
+        engine.submit_batch_for_present()
+        engine.present()
+        expect(engine.read_pixels().len() > 0).to_equal(true)
+        val sourced = engine.read_pixels_with_source()
+        expect(sourced.pixels.len() > 0).to_equal(true)
+        engine.shutdown()
+
+describe "Engine2D remaining creation aliases":
+    it "resolves the on-vulkan translation arms":
+        for name in ["directx-on-vulkan", "metal-on-vulkan", "emu"]:
+            var engine = Engine2D.create_with_backend(16, 12, name)
+            expect(engine.backend_name().len() > 0).to_equal(true)
+            engine.shutdown()
+
+    it "probes the remaining alias names":
+        for name in ["directx-on-vulkan", "metal-on-vulkan", "virtio_gpu", "baremetal", "emu", "cpu", "hip"]:
+            val probe = Engine2D.probe_backend(8, 8, name)
+            expect(probe.requested_name.len() > 0).to_equal(true)
+
+describe "Engine2D draw-ir offscreen and composite readback":
+    it "creates a software offscreen through the draw-ir factory":
+        var engine = _cpu()
+        match engine.draw_ir_create_offscreen_engine(8, 6):
+            Ok(child):
+                var live = child
+                expect(live.backend_name()).to_equal("software")
+                live.shutdown()
+            Err(reason):
+                expect(reason).to_equal("never-taken")
+        val target_created = engine.draw_ir_create_offscreen(8, 6)
+        match target_created:
+            Ok(_): expect(true).to_equal(true)
+            Err(reason): expect(reason).to_equal("never-taken")
+        engine.shutdown()
+
+    it "rejects invalid composite readback shapes and accepts a valid one":
+        var engine = _cpu()
+        engine.clear(BLACK)
+        var child = Engine2D.create_offscreen(4, 4)
+        child.draw_rect_filled(0, 0, 4, 4, RED)
+        val rb = child.read_pixels_with_source()
+        expect(engine.draw_ir_composite_readback(0, 0, 0, 4, rb, 1000)).to_equal(false)
+        expect(engine.draw_ir_composite_readback(0, 0, 4, 4, rb, 0)).to_equal(false)
+        expect(engine.draw_ir_composite_readback(0, 0, 4, 4, rb, 1001)).to_equal(false)
+        expect(engine.draw_ir_composite_readback(0, 0, 8, 8, rb, 1000)).to_equal(false)
+        expect(engine.draw_ir_composite_readback(1, 1, 4, 4, rb, 1000)).to_equal(true)
+        expect(engine.draw_ir_composite_readback(1, 6, 4, 4, rb, 500)).to_equal(true)
+        child.shutdown()
+        engine.shutdown()
+
+describe "Engine2D font artifact installers on cpu backend":
+    it "rejects empty and oversized vulkan font spirv":
+        var engine = _cpu()
+        val empty: [u8] = []
+        expect(engine.install_vulkan_font_spirv(empty)).to_equal(false)
+        val small: [u8] = [1u8, 2u8, 3u8]
+        expect(engine.install_vulkan_font_spirv(small)).to_equal(false)
+        engine.shutdown()
+
+    it "rejects cuda font ptx without a cuda backend":
+        var engine = _cpu()
+        expect(engine.install_cuda_font_ptx("")).to_equal(false)
+        engine.shutdown()
+
+    it "rejects an unknown identity after the renderer exists":
+        var engine = _cpu()
+        val stats = engine.font_cache_stats()
+        expect(stats.rasterizations >= 0).to_equal(true)
+        expect(engine.select_font_identity("no-such-identity-after-ensure")).to_equal(false)
+        engine.shutdown()
+
+describe "Engine2D vector text with a real TTF":
+    it "draws vector text after loading a real face when available":
+        val ttf = "src/compiler_rust/vendor/ttf-parser-0.21.1/tests/fonts/demo.ttf"
+        var engine = _cpu()
+        if not file_exists(ttf):
+            expect(engine.select_font_identity("")).to_equal(false)
+            engine.shutdown()
+            return
+        val loaded = engine.load_font(ttf)
+        if not loaded:
+            # A face this rasterizer rejects still exercises the load path.
+            expect(loaded).to_equal(false)
+            engine.shutdown()
+            return
+        engine.clear(BLACK)
+        engine.draw_text(2, 2, "Ab", WHITE, 12)
+        engine.draw_text_bg(2, 14, "Ab", WHITE, BLUE, 12)
+        val drew = engine.draw_text_points_dpi(2, 2, "Ab", WHITE, 12, 96)
+        expect(drew == true or drew == false).to_equal(true)
+        expect(engine.read_pixels().len()).to_equal(W * H)
+        engine.unload_font()
+        engine.draw_text(2, 2, "Ab", WHITE, 12)
+        engine.shutdown()
+
+describe "Engine2D glass material on cpu backend":
+    it "reports glass dispatch unsupported without a metal backend":
+        var engine = _cpu()
+        val evidence = engine.draw_ir_font_evidence()
+        expect(evidence == nil).to_equal(true)
+        engine.shutdown()

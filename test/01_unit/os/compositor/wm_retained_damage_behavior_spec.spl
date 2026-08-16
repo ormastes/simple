@@ -1,0 +1,139 @@
+# @tag: unit, wm, compositor, retained, damage
+"""
+# WM Retained Old/New Damage — Behavioral Specification
+
+## Overview
+
+Behavioral companion to the source-text contract specs: drives
+`Engine2dWmFrameExecutor.retained_scene_damage_plan` /
+`record_successful_scene` directly and asserts SEMANTICS, not substrings —
+a moved window must dirty BOTH its vacated (old) extents and its current
+extents; no prior frame or a changed background identity must fail closed
+to a full-frame plan with an explicit invalid fallback reason.
+
+Added per external (Codex) review finding #2, 2026-08-15.
+"""
+
+use std.spec
+use common.ui.window_scene.{
+    BackgroundSpec, SharedWmScene, SharedWmWindow, shared_wm_background_color
+}
+use common.ui.render_opt.damage_plan.{
+    DAMAGE_PLAN_FULL, DAMAGE_FALLBACK_INVALID
+}
+use os.compositor.engine2d_wm_frame_executor.{
+    Engine2dWmFrameExecutor, engine2d_wm_background_key
+}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+val W: i64 = 256
+val H: i64 = 256
+
+fn _window(x: i32, y: i32) -> SharedWmWindow:
+    SharedWmWindow(
+        surface_id: "s1", window_id: "w1", surface_kind: "app",
+        process_id: 1u64, app_id: "app", title: "T", language: "en",
+        x: x, y: y, width: 64, height: 48, tree: nil, html: "",
+        minimized: false, focused: true, z_index: 1, chrome_kind: "titled")
+
+fn _scene(win_x: i32, win_y: i32, bg: BackgroundSpec) -> SharedWmScene:
+    SharedWmScene(width: W.to_i32(), height: H.to_i32(), backend: "cpu",
+                  windows: [_window(win_x, win_y)], background: bg)
+
+fn _executor() -> Engine2dWmFrameExecutor:
+    Engine2dWmFrameExecutor.create(
+        Engine2D.create_with_backend(8, 8, "cpu"),
+        FramebufferDriver.empty(), W, H)
+
+describe "retained old/new damage plan semantics":
+    it "fails closed to a full invalid-reason plan without a prior frame":
+        var executor = _executor()
+        val bg = shared_wm_background_color(0xff101010u32)
+        val plan = executor.retained_scene_damage_plan(
+            _scene(10, 10, bg), engine2d_wm_background_key(_scene(10, 10, bg)), 1)
+        expect(plan.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(plan.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
+        expect(plan.planned_pixels).to_equal(W * H)
+
+    it "marks both vacated and current extents for a moved window":
+        var executor = _executor()
+        val bg = shared_wm_background_color(0xff101010u32)
+        val first = _scene(10, 10, bg)
+        executor.record_successful_scene(
+            first, engine2d_wm_background_key(first), 1)
+        # window moved far away; revision changed
+        val moved = _scene(150, 150, bg)
+        val plan = executor.retained_scene_damage_plan(
+            moved, engine2d_wm_background_key(moved), 2)
+        # the plan must cover pixels at BOTH the old and the new location;
+        # a correct old/new plan needs at least both window areas' pixels
+        # (window content rect is 64x48 plus titlebar band)
+        expect(plan.planned_pixels).to_be_greater_than((64 * 48 * 2 - 1).to_i64())
+        # and must NOT be a blind full-frame fallback
+        expect(plan.planned_pixels).to_be_less_than(W * H)
+
+    it "covers the full window bounds including chrome for a moved window":
+        var executor = _executor()
+        val bg = shared_wm_background_color(0xff101010u32)
+        val first = _scene(10, 10, bg)
+        executor.record_successful_scene(
+            first, engine2d_wm_background_key(first), 1)
+        val moved = _scene(150, 150, bg)
+        val plan = executor.retained_scene_damage_plan(
+            moved, engine2d_wm_background_key(moved), 2)
+        # The old titlebar/border chrome starts at the window ORIGIN (10,10),
+        # which the titlebar-inset content rect excluded. The plan must cover
+        # both the vacated origin and the new origin, or moves leave stale
+        # chrome behind (external review F3).
+        var covers_old = false
+        var covers_new = false
+        var i: i64 = 0
+        while i + 3 < plan.rects.len():
+            val x = plan.rects[i]
+            val y = plan.rects[i + 1]
+            val w = plan.rects[i + 2]
+            val h = plan.rects[i + 3]
+            if x <= 10 and y <= 10 and x + w > 10 and y + h > 10:
+                covers_old = true
+            if x <= 150 and y <= 150 and x + w > 150 and y + h > 150:
+                covers_new = true
+            i = i + 4
+        assert_true(covers_old)
+        assert_true(covers_new)
+
+    it "fails closed to full when the taskbar revision changes":
+        var executor = _executor()
+        val bg = shared_wm_background_color(0xff101010u32)
+        val first = _scene(10, 10, bg)
+        executor.record_successful_scene(
+            first, engine2d_wm_background_key(first), 1, 7, "09:41")
+        val plan = executor.retained_scene_damage_plan(
+            first, engine2d_wm_background_key(first), 2, 8, "09:41")
+        expect(plan.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(plan.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
+        expect(plan.planned_pixels).to_equal(W * H)
+
+    it "fails closed to full when only the clock label changes":
+        var executor = _executor()
+        val bg = shared_wm_background_color(0xff101010u32)
+        val first = _scene(10, 10, bg)
+        executor.record_successful_scene(
+            first, engine2d_wm_background_key(first), 1, 7, "09:41")
+        val plan = executor.retained_scene_damage_plan(
+            first, engine2d_wm_background_key(first), 2, 7, "09:42")
+        expect(plan.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(plan.planned_pixels).to_equal(W * H)
+
+    it "fails closed to full when the background identity changes":
+        var executor = _executor()
+        val bg1 = shared_wm_background_color(0xff101010u32)
+        val first = _scene(10, 10, bg1)
+        executor.record_successful_scene(
+            first, engine2d_wm_background_key(first), 1)
+        val bg2 = shared_wm_background_color(0xff2020ffu32)
+        val changed = _scene(10, 10, bg2)
+        val plan = executor.retained_scene_damage_plan(
+            changed, engine2d_wm_background_key(changed), 2)
+        expect(plan.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(plan.planned_pixels).to_equal(W * H)

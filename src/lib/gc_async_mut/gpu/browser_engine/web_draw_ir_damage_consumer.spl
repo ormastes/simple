@@ -45,6 +45,24 @@ fn web_draw_ir_consume_damage(
     var effective_plan_mode = DAMAGE_PLAN_FULL
     var effective_plan_rects: [i64] = []
     var effective_reason = decision.reason
+    # NONE is the retained no-op: the compositions are identical and stable,
+    # so the caller's retained surface is already exact. Return without
+    # rendering or reading back anything.
+    if decision.mode == DAMAGE_PLAN_NONE:
+        var retained_pixels: [u32] = []
+        return WebDrawIrDamageConsumerResult(
+            engine: engine,
+            result: Engine2dDrawIrAdvResult(
+                schema: current.schema, unit_id: current.composition_id,
+                selected_backend: engine.backend_name(),
+                fallback_required: false, fallback_reason: "",
+                rendered_command_count: 0, skipped_command_count: 0,
+                pixels: retained_pixels, readback_source: "retained_none",
+                backend_handle: 0, device_identity: 0,
+                readback_checksum: 0),
+            effective_plan_mode: DAMAGE_PLAN_NONE,
+            effective_plan_rects: [],
+            reason: effective_reason)
     # NONE is valid only for the exact retained decision.  Any discrepancy
     # between the producer decision and execution result fails closed to a
     # whole-surface update; never hand a direct presenter stale retained data.
@@ -77,19 +95,15 @@ fn web_draw_ir_consume_damage(
                 effective_plan_rects: effective_plan_rects,
                 reason: effective_reason)
         effective_reason = "{decision.reason}:{replay.unsupported_kinds}"
-    # NONE is a caller-owned retained-cache no-op. Any non-local decision, or
-    # a local execution rejection, takes the canonical complete renderer and
-    # publishes an exact full viewport plan instead of stale pixels.
+    # Any non-local decision, or a local execution rejection, takes the
+    # canonical complete renderer and publishes an exact full viewport plan
+    # instead of stale pixels.
     val full = engine2d_draw_ir_adv_composition_with_images(
         engine, current, _web_draw_ir_gpu_backend(engine.backend_name()), images)
-    if (decision.mode == DAMAGE_PLAN_NONE and not full.fallback_required and
-        full.skipped_command_count == 0):
-        effective_plan_mode = DAMAGE_PLAN_NONE
-    else:
-        effective_plan_mode = DAMAGE_PLAN_FULL
-        if engine.width() > 0 and engine.height() > 0:
-            effective_plan_rects = [
-                0, 0, engine.width() as i64, engine.height() as i64]
+    effective_plan_mode = DAMAGE_PLAN_FULL
+    if engine.width() > 0 and engine.height() > 0:
+        effective_plan_rects = [
+            0, 0, engine.width() as i64, engine.height() as i64]
     WebDrawIrDamageConsumerResult(
         engine: engine, result: full,
         effective_plan_mode: effective_plan_mode,

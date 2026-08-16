@@ -1,5 +1,5 @@
 # @tag: unit, wm, compositor, coverage
-# @cover src/os/compositor/engine2d_wm_frame_executor.spl 62%
+# @cover src/os/compositor/engine2d_wm_frame_executor.spl 66%
 """
 # Engine2dWmFrameExecutor — Branch Coverage Closure
 
@@ -10,18 +10,21 @@ plan branches, local recompose, and the create_host_gpu early-exit lattice
 (unavailable base, bad dims, invalid session, invalid clock, budget
 timeouts).
 
-Headless ceiling (decisions that CANNOT flip under `simple test`):
-- Host-gpu ivshmem lanes (lines 180 loop side, 231, 375, 403 and all of
-  `_render_host_gpu`): the tree-walk test interpreter has no
-  `rt_volatile_read/write_*` extern implementations, so any mmio touch
-  errors out — a mapped mock region cannot be exercised here.
-- `_WM_TRACE` receipts (lines 352, 354, 384, 400, 402, 421, 435): gated by
-  a compile-time `false` constant.
-- Line 386 resource-coverage mismatch: defensive invariant, structurally
+Headless ceiling — measured 66% (24/36 executed decisions, 2026-08-15).
+The 12 remaining one-sided decisions CANNOT flip under `simple test`:
+- `_WM_TRACE` receipts (7 decisions: lines 331, 333, 363, 379, 381, 400,
+  402): gated by a compile-time `false` module constant — always executed,
+  never true. These alone cap headless branch coverage at 80.5%
+  ((36-7)/36) even if everything else flipped.
+- Host-gpu ivshmem lanes (line 175 false arm, 226, 382 true arms): the
+  tree-walk test interpreter has no `rt_volatile_read/write_*` extern
+  implementations, so any mmio touch (line 179's next_generation, all of
+  `_render_host_gpu`) errors out — a mapped mock region cannot be
+  exercised here. Line 354's host-image staging IS covered: it is pure
+  and the required-degraded gate returns before any mmio submit.
+- Line 365 resource-coverage mismatch: defensive invariant, structurally
   unreachable (image/frame pushes are symmetric with admission).
-- Line 429 packed-v3 acceptance: the owner accepts rect-only scenes and
-  every WM composition carries text commands.
-- Line 443 zero-rendered rejection: the software lane always renders the
+- Line 410 zero-rendered rejection: the software lane always renders the
   background rect, and target-name mismatches are not skipped.
 """
 
@@ -222,10 +225,12 @@ describe "render software presents":
             _window("wmin", 10, 10, 64, 48, true),
             _window("wzero", 30, 30, 8, 48, false)]
         expect(executor.render(_scene(windows), _taskbar(), [], 5, 1, "09:41")).to_equal(5)
-        # both recorded invalid (minimized / zero-size) in retained extents
+        # retained extents are FULL window bounds (chrome included): the
+        # minimized window records invalid, but the zero-CONTENT window still
+        # paints chrome across its 8x48 bounds, so its extents stay valid.
         expect(executor.last_successful_window_rects.len()).to_equal(10)
         expect(executor.last_successful_window_rects[4]).to_equal(0)
-        expect(executor.last_successful_window_rects[9]).to_equal(0)
+        expect(executor.last_successful_window_rects[9]).to_equal(1)
         # next changed revision walks retained extents past the valid==0 arm
         expect(executor.render(_scene(windows), _taskbar(), [], 6, 1, "09:41")).to_equal(6)
 
@@ -295,6 +300,36 @@ describe "render software presents":
             2, 1, "09:41")).to_equal(2)
 
 describe "retained plan background identity":
+    it "fails closed to full before any successful frame":
+        var executor = _executor()
+        val scene = _scene([])
+        val plan = executor.retained_scene_damage_plan(scene, "key-a", 1)
+        expect(plan.mode).to_equal(DAMAGE_PLAN_FULL)
+        expect(plan.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
+
+    it "admits the retained plan on an unchanged revision and matching key":
+        var executor = _executor()
+        val scene = _scene([
+            _window("w1", 4, 4, 40, 40, false),
+            _window("wmin", 8, 8, 40, 40, true)])
+        val key = engine2d_wm_background_key(scene)
+        executor.record_successful_scene(scene, key, 5)
+        # same revision: admitted past the background gate, no extents marked
+        val same = executor.retained_scene_damage_plan(scene, key, 5)
+        assert_true(same.planned_pixels >= 0)
+
+    it "marks retained old and current extents on a changed revision":
+        var executor = _executor()
+        val scene = _scene([
+            _window("w1", 4, 4, 40, 40, false),
+            _window("wmin", 8, 8, 40, 40, true)])
+        val key = engine2d_wm_background_key(scene)
+        executor.record_successful_scene(scene, key, 5)
+        # one valid + one invalid retained record: the while walk takes both
+        # arms of the valid flag, the current pass both arms of minimized.
+        val changed = executor.retained_scene_damage_plan(scene, key, 6)
+        assert_true(changed.dirty_pixels > 0)
+
     it "fails closed to full when the background key changes":
         var executor = _executor()
         val scene = _scene([])
@@ -302,6 +337,22 @@ describe "retained plan background identity":
         val plan = executor.retained_scene_damage_plan(scene, "key-b", 2)
         expect(plan.mode).to_equal(DAMAGE_PLAN_FULL)
         expect(plan.fallback_reason).to_equal(DAMAGE_FALLBACK_INVALID)
+
+describe "host image resource staging":
+    it "stages a resolved host image before the required-degraded reject":
+        # host_gpu_base set: the resolved w1 frame is pushed into the host
+        # image resource list (line 354 true arm — pure staging, no mmio),
+        # then the degraded w2 window trips the fail-closed required gate
+        # BEFORE any ivshmem submit could touch mmio.
+        var executor = _executor()
+        executor.host_gpu_base = 4096u64
+        executor.host_gpu_required = true
+        val windows = [
+            _window("w1", 2, 2, 64, 48, false),
+            _window("w2", 30, 8, 64, 48, false)]
+        expect(executor.render(
+            _scene(windows), _taskbar(), [_frame_for("w1", 2, 56, 12)],
+            2, 1, "09:41")).to_equal(0)
 
 describe "render composition edge shapes":
     it "still presents a zero-size scene through the software lane":

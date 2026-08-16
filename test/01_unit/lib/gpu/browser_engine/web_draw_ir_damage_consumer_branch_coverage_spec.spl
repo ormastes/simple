@@ -45,6 +45,19 @@ fn _comp(comp_id: text, scene_key: text, x: i32, y: i32,
 fn _images() -> [Engine2dResolvedDrawIrImage]:
     []
 
+val BG: u32 = 0xff101010u32
+val BOX: u32 = 0xff2040f0u32
+
+fn _px(pixels: [u32], x: i32, y: i32) -> u32:
+    pixels[(y * W + x).to_i64()]
+
+# Seed the engine's retained surface with a full render of `comp` by forcing
+# the resources-unstable FULL path.
+fn _seed(engine: Engine2D, comp: DrawIrComposition) -> Engine2D:
+    val out = web_draw_ir_consume_damage(
+        engine, comp, comp, _images(), true, false)
+    out.engine
+
 describe "web_draw_ir_consume_damage branch coverage":
 
     it "keeps a retained NONE plan when compositions are identical and stable":
@@ -57,31 +70,47 @@ describe "web_draw_ir_consume_damage branch coverage":
         expect out.effective_plan_rects.len() == 0
         expect out.reason == "composition-patch-empty"
         expect out.result.fallback_required == false
-        expect out.result.pixels.len() == (W * H).to_i64()
+        # NONE is a retained no-op: no render, no readback.
+        expect out.result.rendered_command_count == 0
+        expect out.result.pixels.len() == 0
+        expect out.result.readback_source == "retained_none"
         out.engine.shutdown()
 
     it "executes a LOCAL clipped replay when one rect moves":
         var engine = Engine2D.create_with_backend(W, H, "cpu")
-        val prior = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
-        val current = _comp("c1", "scene", 20, 12, 0xff2040f0u32)
+        val prior = _comp("c1", "scene", 4, 4, BOX)
+        val current = _comp("c1", "scene", 20, 12, BOX)
+        val seeded = _seed(engine, prior)
         val out = web_draw_ir_consume_damage(
-            engine, prior, current, _images(), true, true)
+            seeded, prior, current, _images(), true, true)
         expect out.effective_plan_mode == DAMAGE_PLAN_LOCAL
         expect out.effective_plan_rects.len() > 0
         expect out.effective_plan_rects.len() % 4 == 0
         expect out.result.fallback_required == false
         expect out.result.rendered_command_count >= 1
         expect out.result.pixels.len() == (W * H).to_i64()
+        # new box position is painted
+        expect _px(out.result.pixels, 22, 14) == BOX
+        # old box position is repainted with the background
+        expect _px(out.result.pixels, 5, 5) == BG
+        # unchanged exterior pixels are preserved from the prior render
+        expect _px(out.result.pixels, 50, 40) == BG
+        expect _px(out.result.pixels, 0, 0) == BG
         out.engine.shutdown()
 
     it "executes a LOCAL replay when a rect is recolored in place":
         var engine = Engine2D.create_with_backend(W, H, "cpu")
-        val prior = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val prior = _comp("c1", "scene", 4, 4, BOX)
         val current = _comp("c1", "scene", 4, 4, 0xfff04020u32)
+        val seeded = _seed(engine, prior)
         val out = web_draw_ir_consume_damage(
-            engine, prior, current, _images(), true, true)
+            seeded, prior, current, _images(), true, true)
         expect out.effective_plan_mode == DAMAGE_PLAN_LOCAL
         expect out.effective_plan_rects.len() >= 4
+        # recolored box pixels updated in place
+        expect _px(out.result.pixels, 5, 5) == 0xfff04020u32
+        # unchanged exterior preserved
+        expect _px(out.result.pixels, 50, 40) == BG
         out.engine.shutdown()
 
     it "fails closed to FULL when resources are unstable":
@@ -147,25 +176,34 @@ describe "web_draw_ir_consume_damage branch coverage":
 
     it "consumes damage on a non-cpu backend selection path":
         var engine = Engine2D.create_with_backend(W, H, "software")
-        val prior = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
-        val current = _comp("c1", "scene", 12, 4, 0xff2040f0u32)
+        val prior = _comp("c1", "scene", 4, 4, BOX)
+        val current = _comp("c1", "scene", 12, 4, BOX)
+        val seeded = _seed(engine, prior)
         val out = web_draw_ir_consume_damage(
-            engine, prior, current, _images(), true, true)
-        expect (out.effective_plan_mode == DAMAGE_PLAN_LOCAL or
-                out.effective_plan_mode == DAMAGE_PLAN_FULL)
+            seeded, prior, current, _images(), true, true)
+        expect out.effective_plan_mode == DAMAGE_PLAN_LOCAL
         expect out.result.pixels.len() == (W * H).to_i64()
+        # moved box painted at new x, old x repainted with background
+        expect _px(out.result.pixels, 13, 5) == BOX
+        expect _px(out.result.pixels, 5, 5) == BG
+        # unchanged exterior preserved from the prior render
+        expect _px(out.result.pixels, 50, 40) == BG
         out.engine.shutdown()
 
     it "handles an empty prior against a populated current":
         var engine = Engine2D.create_with_backend(W, H, "cpu")
         val prior = draw_ir_composition(
             "c1", "scene", DRAW_IR_BACKEND_CPU, [])
-        val current = _comp("c1", "scene", 4, 4, 0xff2040f0u32)
+        val current = _comp("c1", "scene", 4, 4, BOX)
         val out = web_draw_ir_consume_damage(
             engine, prior, current, _images(), true, true)
-        expect (out.effective_plan_mode == DAMAGE_PLAN_FULL or
-                out.effective_plan_mode == DAMAGE_PLAN_LOCAL)
+        # batch count changed (0 -> 1), so this is exactly the
+        # batch-metadata-changed FULL replan
+        expect out.effective_plan_mode == DAMAGE_PLAN_FULL
+        expect out.reason == "batch-metadata-changed"
         expect out.result.pixels.len() == (W * H).to_i64()
+        expect _px(out.result.pixels, 5, 5) == BOX
+        expect _px(out.result.pixels, 50, 40) == BG
         out.engine.shutdown()
 
     it "rejects LOCAL replay for a translucent batch and fails to FULL":

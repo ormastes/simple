@@ -100,6 +100,59 @@ fn _composition_damage_rects(rects: [DrawIrRect], width: i32,
             result.push(rh)
     (result, candidates, probes)
 
+# Union overlapping rects into bounding boxes until no overlaps remain.
+# Engine2D rejects overlapping damage rects, so old/new bounds of a short
+# move must be coalesced rather than forcing a FULL fallback.
+# ponytail: O(n^2) pairwise pass repeated to fixpoint — rect counts are
+# bounded by patch command count, so quadratic is fine here.
+fn _composition_damage_coalesce(rects: [i64]) -> [i64]:
+    var current = rects
+    var merged = true
+    while merged:
+        merged = false
+        val n = current.len() / 4
+        var used: [bool] = []
+        var k: i64 = 0
+        while k < n:
+            used.push(false)
+            k = k + 1
+        var out: [i64] = []
+        var i: i64 = 0
+        while i < n:
+            if used[i]:
+                i = i + 1
+                continue
+            var x0 = current[i * 4]
+            var y0 = current[i * 4 + 1]
+            var x1 = x0 + current[i * 4 + 2]
+            var y1 = y0 + current[i * 4 + 3]
+            var j = i + 1
+            while j < n:
+                if not used[j]:
+                    val bx0 = current[j * 4]
+                    val by0 = current[j * 4 + 1]
+                    val bx1 = bx0 + current[j * 4 + 2]
+                    val by1 = by0 + current[j * 4 + 3]
+                    if x0 < bx1 and bx0 < x1 and y0 < by1 and by0 < y1:
+                        if bx0 < x0:
+                            x0 = bx0
+                        if by0 < y0:
+                            y0 = by0
+                        if bx1 > x1:
+                            x1 = bx1
+                        if by1 > y1:
+                            y1 = by1
+                        used[j] = true
+                        merged = true
+                j = j + 1
+            out.push(x0)
+            out.push(y0)
+            out.push(x1 - x0)
+            out.push(y1 - y0)
+            i = i + 1
+        current = out
+    current
+
 fn composition_damage_between(
     prior: DrawIrComposition, current: DrawIrComposition,
     width: i32, height: i32,
@@ -114,6 +167,14 @@ fn composition_damage_between(
     if not _composition_damage_batches_compatible(prior, current):
         return _composition_damage_full(
             width, height, "batch-metadata-changed")
+    # Patch damage bounds are command-local, but Engine2D replay applies the
+    # batch embedding offset. Until the offset is plumbed into the bounds,
+    # fail closed to FULL whenever any embedding offset is non-zero so LOCAL
+    # damage never lands on wrong pixels.
+    for batch in current.batches:
+        if batch.embedding.x != 0 or batch.embedding.y != 0:
+            return _composition_damage_full(
+                width, height, "embedding-offset-nonzero")
 
     val patch = draw_ir_patch_between(
         prior, prior.composition_id, current, current.composition_id)
@@ -132,8 +193,9 @@ fn composition_damage_between(
     if rects.len() == 0:
         return _composition_damage_full(
             width, height, "composition-patch-no-bounds")
+    val coalesced = _composition_damage_coalesce(rects)
     CompositionDamageDecision(
-        mode: DAMAGE_PLAN_LOCAL, rects: rects,
+        mode: DAMAGE_PLAN_LOCAL, rects: coalesced,
         reason: "composition-patch", damage_candidates: candidates,
         dedup_probes: probes)
 
