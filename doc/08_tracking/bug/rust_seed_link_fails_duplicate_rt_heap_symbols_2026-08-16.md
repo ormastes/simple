@@ -1,27 +1,27 @@
 # Rust seed fails to LINK from a clean target dir: duplicate `rt_heap_*` symbols
 
-**Status:** OPEN
+**Status:** FIXED 2026-08-16 in `93e0b028ffb` (another session) — independently
+reproduced and verified here
 **Found:** 2026-08-16
-**Severity:** blocker — no Rust-seed binary can be produced from a clean build
+**Severity:** was a blocker — no Rust-seed binary could be produced from a clean build
 **Scope:** `src/compiler_rust/runtime/src/value/heap.rs`, `src/runtime/runtime_memtrack.c`
-**Related:** `doc/08_tracking/bug/origin_main_unbuildable_rust_seed_2026-08-11.md` (same
-class: a structurally clean tree that does not build)
+**Related:** `doc/08_tracking/bug/origin_main_unbuildable_rust_seed_2026-08-11.md`
+(same class: a structurally clean tree that does not build)
 
 ## Symptom
 
-From a clean `CARGO_TARGET_DIR`, at `origin/main`:
+From a clean `CARGO_TARGET_DIR`:
 
 ```
 cargo build --release --bin simple
-...
 rust-lld: error: duplicate symbol: rt_heap_live_bytes
 rust-lld: error: duplicate symbol: rt_heap_peak_bytes
 collect2: error: ld returned 1 exit status
 error: could not compile `simple-runtime` (lib)
 ```
 
-`cargo check --release --bin simple` **passes** — the failure is at link time when
-`libsimple_runtime.so` is produced, so any check-only gate is blind to it.
+`cargo check --release --bin simple` **passes** — the failure is at link time,
+producing `libsimple_runtime.so`, so any check-only gate is blind to it.
 
 ## Cause
 
@@ -29,41 +29,54 @@ Both symbols are defined twice in committed source, once per runtime:
 
 | Symbol | Rust definition | C definition |
 |---|---|---|
-| `rt_heap_live_bytes` | `src/compiler_rust/runtime/src/value/heap.rs:328` (`pub extern "C" fn`) | `src/runtime/runtime_memtrack.c:251` (`int64_t rt_heap_live_bytes(void)`) |
-| `rt_heap_peak_bytes` | `src/compiler_rust/runtime/src/value/heap.rs:334` (`pub extern "C" fn`) | `src/runtime/runtime_memtrack.c:255` (`int64_t rt_heap_peak_bytes(void)`) |
+| `rt_heap_live_bytes` | `runtime/src/value/heap.rs:328` (`pub extern "C" fn`) | `src/runtime/runtime_memtrack.c` |
+| `rt_heap_peak_bytes` | `runtime/src/value/heap.rs:334` (`pub extern "C" fn`) | `src/runtime/runtime_memtrack.c` |
 
-The C runtime is linked with `-Wl,--whole-archive -lruntime_sffi_c`, so every C
-definition is pulled in unconditionally and collides with the Rust `extern "C"`
-export of the same name.
+`runtime_sffi_c` is linked `-Wl,--whole-archive` into the Rust cdylib
+(`runtime/build.rs:271`), so every C definition is pulled in unconditionally and
+collides with the Rust `extern "C"` export of the same name.
 
-## Why the existing guards did not catch it
+## Fix (owned by `93e0b028ffb`, not by this lane)
 
-`check-runtime-api-regression-push.shs` evaluates the Rust and C symbol sets
-**separately and never unions them** — by design, because they are parallel
-implementations. That design decision is correct for detecting *removals*, but it
-means a name defined in BOTH is invisible to it: neither set shrank.
-`check-c-runtime-compiles-push.shs` uses `-fsyntax-only`, which by its own
-documented limitation does not link. `check-seed-builds-push.shs` runs
-`cargo check`, which as shown above passes. So all three relevant guards are
-green on a tree that cannot produce a binary.
+The C fallbacks are marked `__attribute__((weak))`, so a link that also carries
+the Rust runtime resolves to the Rust accounting, while standalone C builds keep
+the fallbacks. MSVC has no weak attribute and takes the strong `#else` branch,
+which is correct there because Windows does not whole-archive this file into the
+Rust cdylib.
 
-## Unblock condition
+This lane independently hit the same blocker and prepared a macro-gated variant
+(`SIMPLE_RUNTIME_RUST_HEAP_COUNTERS` defined in `build.rs`, `#ifndef` in the C
+file). That variant was **dropped in favour of the landed one** — weak symbols
+need no build-system coordination and cover links this lane's build.rs never
+sees. Recorded per the anti-clobber rule: origin superseded this work, so the
+right move was to take origin's.
 
-Pick one owner per symbol. Either `#[cfg]`-gate the Rust `extern "C"` exports out
-when the C runtime provides them, or rename the C definitions to
-`rt_heap_live_bytes_c` / `rt_heap_peak_bytes_c` and have the C callers
-(`runtime.c:1938`, `runtime_legacy_core.c:584`,
-`test/rt_string_free_selfcheck.c:22-23,49`) use those.
+## Independent verification performed here
 
-Then extend a guard to actually link — the cheapest honest gate is adding a
-duplicate-symbol check that compares the Rust and C exported-symbol sets for
-INTERSECTION, which is exactly the axis the current separate-sets design leaves
-uncovered.
+Exit status read directly into a variable, never through a pipe (a `| tail`
+pipeline reported a false `exit 0` for this exact build earlier in the session):
 
-## Impact on the user-`Option` lowering fix
+```
+BEFORE: rust-lld: error: duplicate symbol: rt_heap_live_bytes / rt_heap_peak_bytes
+AFTER:  cargo build --release --bin simple  ->  BUILD_RC=0
+        Finished `release` profile [optimized] target(s) in 2m 53s
+        -rwxrwxr-x 59509368 .../release/simple
+```
 
-The lowering fix in `hir/lower/expr/control.rs` and `hir/lower/stmt_lowering.rs`
-(this session) `cargo check`s clean but cannot be run, because no seed binary can
-be linked. Its regression fixture and dual-toolchain SSpec are committed and will
-execute the moment either this blocker or the self-hosted toolchain is repaired.
-No runtime PASS is claimed for that fix.
+The resulting binary runs a real program end to end.
+
+## Gate gap — still open, owned by nobody
+
+No guard would catch a recurrence:
+
+- `check-runtime-api-regression-push.shs` compares the Rust and C symbol sets
+  **separately and never intersects them** — by design, since they are parallel
+  implementations. A name defined in BOTH is therefore invisible: neither set
+  shrank.
+- `check-c-runtime-compiles-push.shs` is `-fsyntax-only`, which by its own
+  documented limitation does not link.
+- `check-seed-builds-push.shs` is `cargo check`, which passes on the broken tree.
+
+All three are green on a tree that cannot produce a binary. The cheapest honest
+gate is an INTERSECTION check between the two exported-symbol sets — exactly the
+axis the separate-sets design leaves uncovered. Not implemented here.

@@ -209,3 +209,40 @@ non-functional). The dual-toolchain SSpec
 (`test/03_system/compiler/user_option_enum_match_lowering_system_spec.spl`) runs
 the same fixture under BOTH compilers and names whichever one disagrees, so this
 is fenced the moment either toolchain works.
+
+## CORRECTION 2026-08-16: the runtime manifestation is UNPROVEN
+
+With the link blocker fixed (see below) a seed binary could finally be built and
+the fixture actually run. The result does **not** support the failure this record
+originally described, and the earlier "traced end to end" wording was wrong.
+
+| Binary | `some_arm` | `none_arm` | `none_via_some` |
+|---|---|---|---|
+| WITH the lowering fix | 42 | 99 | unmatched |
+| WITHOUT it (control, `hir/lower/*` reverted to origin/main) | 42 | 99 | unmatched |
+
+Identical, and both correct. `simple run` dispatches through the interpreter,
+which does not use the `hir/lower/expr/control.rs` / `stmt_lowering.rs` match
+lowering at all, so this fixture cannot observe the predicate on that path.
+
+The native path, which does use it, cannot be reached either: `native-build`
+fails first with `semantic: undefined field 'kind': cannot access field on value
+of type 'nil'` in the native-build worker — a separate pre-existing failure,
+unrelated to this fixture (it reproduces with the lowering change reverted).
+
+### What is and is not claimed
+
+- **Claimed:** the predicate is fragile. Keying a runtime-representation decision
+  on a user-controllable *name* is wrong in kind — both runtimes key on the
+  reserved enum id 1, and a user-declared `enum Option` satisfies the name test.
+  The genericity check makes the predicate say what it means.
+- **NOT claimed:** that this produced an observable wrong answer. No failing run
+  has been exhibited. The fix is a correctness improvement to a fragile
+  predicate, not a repair of a demonstrated defect.
+
+### To settle it
+
+Repair the native-build worker's `undefined field 'kind'` failure, then run
+`test/fixtures/user_option_enum_match/main.spl` through `native-build` with and
+without the lowering change. The dual-toolchain SSpec already encodes exactly that
+comparison and will name whichever toolchain disagrees.
