@@ -17,11 +17,116 @@ struct WidgetProp:
     key: text
     value: text
 
+# Duplicate-registration diagnostic (phase 1 identity safety).
+# severity is "warning" (default mode: replacement still happens) or
+# "error" (strict mode: replacement refused).
+struct WidgetDupDiagnostic:
+    id: text
+    existing_kind: text
+    new_kind: text
+    existing_site: text
+    new_site: text
+    severity: text
+
+# Strict-lookup result for find_widget_strict: exactly-one-or-error.
+struct WidgetFindStrictResult:
+    found: bool
+    node_id: text
+    error: text
+    candidates: [text]
+
 var _widget_registry: [WidgetRecord] = []
 var _widget_props_store: [WidgetProp] = []
 var _widget_registry_ready: bool = false
 var _widget_props_ready: bool = false
 var _widget_store_revision: i64 = 0
+var _widget_dup_diagnostics: [WidgetDupDiagnostic] = []
+var _widget_dup_ready: bool = false
+var _widget_store_strict: bool = false
+# Construction sites per widget id (empty when the caller never supplied one).
+var _widget_sites: [WidgetProp] = []
+var _widget_sites_ready: bool = false
+
+fn set_widget_store_strict(flag: bool):
+    _widget_store_strict = flag
+
+fn widget_store_strict() -> bool:
+    return _widget_store_strict
+
+fn widget_dup_diagnostics() -> [WidgetDupDiagnostic]:
+    if not _widget_dup_ready:
+        return []
+    return _widget_dup_diagnostics
+
+fn widget_dup_warnings() -> [text]:
+    val diags = widget_dup_diagnostics()
+    val diag_count = diags.len()
+    if diag_count == 0:
+        return []
+    var out: [text] = [""; diag_count]
+    var i = 0
+    while i < diag_count:
+        out[i] = _widget_dup_message(diags[i])
+        i = i + 1
+    return out
+
+fn clear_widget_dup_diagnostics():
+    _widget_dup_diagnostics = []
+    _widget_dup_ready = true
+
+fn _widget_dup_message(diag: WidgetDupDiagnostic) -> text:
+    var msg = "{diag.severity}: duplicate widget id '{diag.id}' (existing kind '{diag.existing_kind}', new kind '{diag.new_kind}')"
+    if diag.existing_site != "" or diag.new_site != "":
+        msg = msg + " [existing site '{diag.existing_site}', new site '{diag.new_site}']"
+    return msg
+
+fn _record_dup_diagnostic(diag: WidgetDupDiagnostic):
+    if not _widget_dup_ready:
+        _widget_dup_diagnostics = [diag]
+        _widget_dup_ready = true
+        return
+    _widget_dup_diagnostics = _widget_dup_diagnostics.push(diag)
+
+fn _widget_site_of(id: text) -> text:
+    if not _widget_sites_ready:
+        return ""
+    var i = 0
+    while i < _widget_sites.len():
+        val entry = _widget_sites[i]
+        if entry.node_id == id:
+            return entry.value
+        i = i + 1
+    return ""
+
+fn _set_widget_site(id: text, site: text):
+    val entry = WidgetProp(node_id: id, key: "site", value: site)
+    if not _widget_sites_ready:
+        _widget_sites = [entry]
+        _widget_sites_ready = true
+        return
+    val site_len = _widget_sites.len()
+    var replaced = false
+    var scan_idx = 0
+    while scan_idx < site_len:
+        if _widget_sites[scan_idx].node_id == id:
+            replaced = true
+            scan_idx = site_len
+        scan_idx = scan_idx + 1
+    var updated_len = site_len
+    if not replaced:
+        updated_len = site_len + 1
+    var updated: [WidgetProp] = [entry; updated_len]
+    var write_idx = 0
+    while write_idx < site_len:
+        val existing = _widget_sites[write_idx]
+        if existing.node_id == id:
+            updated[write_idx] = entry
+        else:
+            updated[write_idx] = existing
+        write_idx = write_idx + 1
+    if not replaced:
+        updated[site_len] = entry
+    _widget_sites = updated
 
 fn widget_store_revision() -> i64:
     _widget_store_revision
@@ -52,6 +157,43 @@ fn default_widget_record(id: text, kind: text) -> WidgetRecord:
     return WidgetRecord(id: id, kind: kind, layout: "vbox", visible: true, focused: false)
 
 fn upsert_widget_record(record: WidgetRecord):
+    upsert_widget_record_at(record, "")
+
+# Upsert with an optional construction-site tag. Returns "" on success or
+# an error message when strict mode refuses a conflicting re-registration.
+# A conflict is a same-id record with a DIFFERENT kind, or a different
+# non-empty construction site. Default (non-strict) mode keeps the legacy
+# replace behavior but records a warning diagnostic instead of staying
+# silent.
+fn upsert_widget_record_at(record: WidgetRecord, site: text) -> text:
+    if _widget_registry_ready:
+        var probe_idx = 0
+        while probe_idx < _widget_registry.len():
+            val existing = _widget_registry[probe_idx]
+            if existing.id == record.id:
+                val existing_site = _widget_site_of(record.id)
+                val kind_conflict = existing.kind != record.kind
+                val site_conflict = site != "" and existing_site != "" and existing_site != site
+                if kind_conflict or site_conflict:
+                    val severity = if _widget_store_strict: "error" else: "warning"
+                    val diag = WidgetDupDiagnostic(
+                        id: record.id,
+                        existing_kind: existing.kind,
+                        new_kind: record.kind,
+                        existing_site: existing_site,
+                        new_site: site,
+                        severity: severity)
+                    _record_dup_diagnostic(diag)
+                    if _widget_store_strict:
+                        return _widget_dup_message(diag)
+                probe_idx = _widget_registry.len()
+            probe_idx = probe_idx + 1
+    if site != "":
+        _set_widget_site(record.id, site)
+    _upsert_widget_record_raw(record)
+    return ""
+
+fn _upsert_widget_record_raw(record: WidgetRecord):
     val registry_len = _widget_registry.len()
     var replaced = false
     var scan_idx = 0
@@ -200,6 +342,54 @@ fn decode_child_ids(blob: text) -> [text]:
             write_idx = write_idx + 1
     return ids
 
+# Collect every (id, path) pair in the subtree — FULL traversal, never
+# first-match, so ambiguity is always detected.
+fn _collect_widget_id_paths(node: WidgetNode, prefix: text) -> [WidgetProp]:
+    val path = if prefix == "": node.id else: "{prefix}/{node.id}"
+    var out: [WidgetProp] = [WidgetProp(node_id: node.id, key: "path", value: path)]
+    for child in node.children():
+        for entry in _collect_widget_id_paths(child, path):
+            out = out.push(entry)
+    return out
+
+fn _find_widget_strict_in(root: WidgetNode, target_id: text) -> WidgetFindStrictResult:
+    val entries = _collect_widget_id_paths(root, "")
+    var match_count = 0
+    for entry in entries:
+        if entry.node_id == target_id:
+            match_count = match_count + 1
+    if match_count == 1:
+        return WidgetFindStrictResult(found: true, node_id: target_id, error: "", candidates: [])
+    if match_count > 1:
+        var paths: [text] = []
+        for entry in entries:
+            if entry.node_id == target_id:
+                paths = paths.push(entry.value)
+        val joined_paths = paths.join(", ")
+        return WidgetFindStrictResult(
+            found: false,
+            node_id: "",
+            error: "ambiguous widget id '{target_id}': {match_count} matches: {joined_paths}",
+            candidates: paths)
+    # 0 matches: unknown id — suggest near misses (substring either way).
+    val needle = target_id.to_lower()
+    var suggestions: [text] = []
+    for entry in entries:
+        if suggestions.len() < 3:
+            val candidate = entry.node_id.to_lower()
+            if candidate != "" and needle != "" and (candidate.contains(needle) or needle.contains(candidate)):
+                var seen = false
+                for s in suggestions:
+                    if s == entry.node_id:
+                        seen = true
+                if not seen:
+                    suggestions = suggestions.push(entry.node_id)
+    var msg = "unknown widget id '{target_id}'"
+    if suggestions.len() > 0:
+        val joined_suggestions = suggestions.join(", ")
+        msg = msg + "; near misses: {joined_suggestions}"
+    return WidgetFindStrictResult(found: false, node_id: "", error: msg, candidates: suggestions)
+
 impl WidgetNode:
     static fn new(id: text, kind: text) -> WidgetNode:
         val handle = WidgetNode(id: id)
@@ -309,6 +499,11 @@ impl WidgetNode:
                 case _:
                     pass
         return nil
+
+    # Strict lookup: exactly-one-or-error. Never first-match — the whole
+    # subtree is scanned so duplicate ids surface as an ambiguity error.
+    fn find_widget_strict(target_id: text) -> WidgetFindStrictResult:
+        return _find_widget_strict_in(self, target_id)
 
     fn collect_ids() -> [text]:
         var ids: [text] = [self.id]
