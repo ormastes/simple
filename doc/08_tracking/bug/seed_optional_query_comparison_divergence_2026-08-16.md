@@ -108,8 +108,23 @@ landed, because example.com serves chunked transfer encoding.
 pattern, not a novel hack. Verified: chunked fixture parses and live
 `https://example.com` loads (559 bytes) under the seed.
 
-**Underlying seed bug:** open — the interpreter's `+` on array reassignment
-should be fixed so the workaround can be reverted.
+**Underlying seed bug:** open — pinpointed while writing the pinning test:
+only the packed `Value::ByteArray` representation triggers it (bytes from
+runtime externs like `rt_io_tcp_read`/`rt_bytes_alloc`); a `[u8]` array
+LITERAL lowers to generic `Value::Array`, which has a dedicated
+`Array + Array` concat arm in
+`src/compiler_rust/compiler/src/interpreter/expr/ops.rs:680-684`.
+`ByteArray + ByteArray` has no such arm and falls through to numeric
+coercion (`src/compiler_rust/compiler/src/value_impl.rs:137`), producing the
+"cannot convert array to int" error. Fix = add a ByteArray concat arm; then
+revert the per-byte `.push()` workarounds and flip the pinning test.
+
+**Pinning tests:**
+`src/compiler_rust/compiler/tests/seed_semantic_divergences.rs` (divergences
+A + D, asserts CURRENT seed behavior — a failure there means the bug got
+fixed) and
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/h1_response_parse_spec.spl`
+(6 parse cases incl. the chunked regression, compiler-agnostic).
 
 ## Divergence C — Seed reports semantic errors with no position information
 
