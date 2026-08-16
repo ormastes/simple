@@ -2307,10 +2307,16 @@ impl Lowerer {
                 // fall-through). Kept in sync with the expression-form twin in
                 // hir/lower/expr/control.rs; see
                 // doc/08_tracking/bug/seed_jit_option_generic_match_none_arm_unmatched_2026-08-16.md.
+                // The name alone does NOT identify the builtin: a user-declared
+                // `enum Option: Some(i64) / None` is an ordinary enum object and MUST
+                // stay on the discriminant path. Only the builtin is generic
+                // (`generic_params: vec!["T"]`); user enums clone their own, empty.
+                // See doc/08_tracking/bug/seed_builtin_option_name_heuristic_breaks_user_option_enum_2026-08-16.md
                 let subject_is_builtin_option = matches!(
                     self.module.types.get(subject_ty),
-                    Some(HirType::Enum { name, variants, .. })
+                    Some(HirType::Enum { name, variants, generic_params, .. })
                         if name == "Option"
+                            && !generic_params.is_empty()
                             && variants.len() == 2
                             && variants.iter().any(|(n, p)| n == "Some" && p.is_some())
                             && variants.iter().any(|(n, p)| n == "None" && p.is_none())

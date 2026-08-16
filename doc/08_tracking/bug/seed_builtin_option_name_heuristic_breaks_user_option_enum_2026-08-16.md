@@ -155,3 +155,57 @@ reading the lowering predicate, the two early-return branches it selects, and bo
 implementations of `rt_is_none`/`rt_is_some`; each is cited by file and line above. **Running
 `runner_handles_option_type` against a rebuilt seed would confirm or refute it in one step** and is
 the recommended next action for whoever owns the seed.
+
+## Rust seed: FIXED 2026-08-16 (compiles clean, not yet run)
+
+Both sites now additionally require the subject enum to be GENERIC, which is the
+property that actually separates the two cases:
+
+- the builtin is registered by `instantiate_builtin_generic_enum`
+  (`hir/lower/type_resolver.rs:104-110`) with `generic_params: vec!["T"]`;
+- a user-declared `enum Option: Some(i64) / None` clones its own declaration's
+  `generic_params`, which is empty (`hir/lower/type_registration.rs`,
+  `import_loader.rs` — every user path uses `enum_def.generic_params.clone()`).
+
+```rust
+Some(HirType::Enum { name, variants, generic_params, .. })
+    if name == "Option"
+        && !generic_params.is_empty()      // <-- added
+        && variants.len() == 2
+        ...
+```
+
+Applied to `hir/lower/expr/control.rs:609` and `hir/lower/stmt_lowering.rs:2310`,
+which the code comments require be kept in sync. `cargo check --release --bin
+simple` passes.
+
+**Not verified at runtime.** A seed binary cannot currently be linked at all —
+see `doc/08_tracking/bug/rust_seed_link_fails_duplicate_rt_heap_symbols_2026-08-16.md`.
+
+**Residual limit, stated rather than hidden:** a user who declares a GENERIC
+`enum Option<T>: Some(T) / None` still collides. Distinguishing that case needs a
+provenance flag on `HirType::Enum` set by `instantiate_builtin_generic_enum`,
+which is a wider change than this lane covers.
+
+## Pure-Simple compiler: SAME DEFECT CLASS, unfixed
+
+The self-hosted compiler keys the same lane on the bare name, at three MIR sites
+in `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`:
+
+| Line | Code | Effect on a user-declared `enum Option` |
+|---|---|---|
+| 2281 | `var option_flat_lane = enum_name == "Option"` | routes it through the Option flat-lane discriminant normalization |
+| 3196 | `if enum_name == "Option": self.option_value_locals[tagged.id] = true` | marks an ordinary enum local as an option value |
+| 3307 | same, MethodCall construction path | same |
+
+Notably that file's own `enum_bare_of` docstring (line 101-110) already warns that
+comparing a resolved owner "against a bare literal (`== \"Option\"`)" silently
+takes the wrong branch — the warning is about qualified-vs-bare names, but the
+user-shadowing case is the same failure mode and is not guarded.
+
+Not fixed here: it cannot be verified — no functional self-hosted binary exists
+(fleet sweep, 1099 instances, 19 unique, all five self-hosted artifacts
+non-functional). The dual-toolchain SSpec
+(`test/03_system/compiler/user_option_enum_match_lowering_system_spec.spl`) runs
+the same fixture under BOTH compilers and names whichever one disagrees, so this
+is fenced the moment either toolchain works.

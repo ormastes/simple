@@ -70,7 +70,7 @@ or about `Result`.
 use std.spec.*
 use std.io_runtime.{process_run}
 use test.system.qualified_pure_simple_runtime.{
-    admit_pure_simple_runtime, require_runtime_can_native_build
+    Toolchain, discover_toolchains, run_fixture_under
 }
 
 val FIXTURE_ENTRY = "test/fixtures/user_option_enum_match/main.spl"
@@ -81,16 +81,21 @@ val WORK_BINARY = "build/test-user-option-enum-match/probe"
 # Step Helpers
 # ============================================================================
 
-fn build_option_probe() -> text:
-    val binary = admit_pure_simple_runtime()
-    require_runtime_can_native_build(binary, FIXTURE_ENTRY, WORK_BINARY)
-    WORK_BINARY
-
-fn run_probe(probe: text) -> text:
-    val (out, err, code) = process_run(probe, [])
-    if code != 0:
-        fail("user-Option probe exited " + code.to_text() + ": " + err)
-    out
+# The defect is implemented independently by BOTH compilers -- the Rust seed
+# keyed the builtin-Option exception on `name == "Option"`
+# (hir/lower/expr/control.rs, stmt_lowering.rs) and the pure-Simple compiler
+# keys the same lane on `enum_name == "Option"`
+# (50.mir/_MirLoweringExpr/switch_operators_calls.spl). Asserting on only one
+# toolchain would leave the other's regression unfenced, so every scenario runs
+# the fixture under each admitted toolchain and asserts the same answer,
+# reporting WHICH one disagreed.
+fn assert_field_on_all(key: text, expected: text):
+    for tc in discover_toolchains():
+        val output = run_fixture_under(tc, FIXTURE_ENTRY, WORK_BINARY)
+        val actual = field(output, key)
+        if actual != expected:
+            fail("[" + tc.label + "] " + key + "=" + actual + ", expected " + expected)
+        expect(actual).to_equal(expected)
 
 fn field(output: text, key: text) -> text:
     for line in output.split("\n"):
@@ -109,36 +114,21 @@ fn field(output: text, key: text) -> text:
 describe "User-declared Option enum match lowering":
 
     # @req REQ-OPTLOWER-001
-    it "binds the payload of a user-declared Some arm":
-        step("Admit a pure-Simple runtime and native-build the user-Option probe")
-        val probe = build_option_probe()
-
-        step("Execute the probe")
-        val output = run_probe(probe)
-
+    it "binds the payload of a user-declared Some arm on every toolchain":
+        step("Build and run the user-Option fixture under each admitted toolchain")
         step("Verify Some(42) binds its payload rather than dropping it")
-        expect(field(output, "some_arm")).to_equal("42")
+        assert_field_on_all("some_arm", "42")
 
-    # @prev("binds the payload of a user-declared Some arm")
+    # @prev("binds the payload of a user-declared Some arm on every toolchain")
     # @req REQ-OPTLOWER-002
-    it "matches a user-declared None arm":
-        step("Admit a pure-Simple runtime and native-build the user-Option probe")
-        val probe = build_option_probe()
-
-        step("Execute the probe")
-        val output = run_probe(probe)
-
+    it "matches a user-declared None arm on every toolchain":
+        step("Build and run the user-Option fixture under each admitted toolchain")
         step("Verify None reaches its own arm and is not swallowed by Some")
-        expect(field(output, "none_arm")).to_equal("99")
+        assert_field_on_all("none_arm", "99")
 
-    # @prev("binds the payload of a user-declared Some arm")
+    # @prev("binds the payload of a user-declared Some arm on every toolchain")
     # @req REQ-OPTLOWER-003
-    it "keeps the Some arm refutable against a None value":
-        step("Admit a pure-Simple runtime and native-build the user-Option probe")
-        val probe = build_option_probe()
-
-        step("Execute the probe")
-        val output = run_probe(probe)
-
+    it "keeps the Some arm refutable against a None value on every toolchain":
+        step("Build and run the user-Option fixture under each admitted toolchain")
         step("Verify the Some arm does not capture None")
-        expect(field(output, "none_via_some")).to_equal("unmatched")
+        assert_field_on_all("none_via_some", "unmatched")
