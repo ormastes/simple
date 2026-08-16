@@ -350,3 +350,14 @@ New acceptance criteria (extends AC-1..AC-12 above):
   codebase; riscv32/i686/armv7 BLOCKED (toolchain, incl. seed --backend llvm
   ignored). W4-A (in-guest QEMU run) and W5-A/B/C (session+throttle,
   payment boundary, channel hub) still in flight.
+- merge wave 5 (2026-08-16, orchestrator review): W5-A std.enterprise_session
+  (salted-credential login, bearer resolution, insert-only revocation/expiry,
+  deterministic fixed-window throttle incl. login brute-force window;
+  auth_routes + store_app_handle_bearer; 6/6, red-first on expiry). W5-B
+  std.enterprise_payment (provider signature seam, webhook dedupe BEFORE
+  transition validation, atomic captured->sale_pay_order same-uow, 3-class
+  reconciliation; foundation gains payments role; 7/7, red-first 4/7; honest
+  note: nested-BEGIN flattening relied on for same-uow claim). W5-C
+  std.enterprise_channel (mode-struct SPI + deterministic mock, cursor
+  checkpoints, exactly-once import via chan:<id> idem keys, kill switch,
+  reconcile; 9/9, red-first 8/9). W4-A (QEMU in-guest) still in flight.

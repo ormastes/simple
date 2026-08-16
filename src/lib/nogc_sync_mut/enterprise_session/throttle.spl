@@ -1,0 +1,51 @@
+"""
+# Enterprise Request Throttle — pure fixed-window counter over insert-only rows
+
+Lane `.spipe/simple_enterprise_suite` W5-A. Deterministic fixed-window rate
+limiting: the caller supplies `now_epoch`; the window is
+`now_epoch / window_secs` (integer division). Each admitted request is one
+insert-only counter row; the decision is a pure-Simple filter-and-count over
+rows with the same key + window. Over-limit requests insert NOTHING, so a
+denied burst cannot extend its own lockout.
+
+Key discipline (chosen by the caller): `tenant + "|" + actor-or-ip`, with a
+stricter (smaller limit) window for login attempts — anti-brute-force.
+"""
+
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_rows, store_insert_row
+}
+
+fn throttle_setup(store: EnterpriseStore) -> bool:
+    store_migrate(store, "throttle_001_hits",
+        "CREATE TABLE IF NOT EXISTS throttle_hits (id INTEGER PRIMARY KEY, key TEXT, window TEXT)")
+
+fn throttle_window(now_epoch: i64, window_secs: i64) -> i64:
+    if window_secs <= 0:
+        return 0
+    now_epoch / window_secs
+
+fn throttle_count(store: EnterpriseStore, key: text, window: i64) -> i64:
+    var n: i64 = 0
+    val rows = store_rows(store, "throttle_hits", "id, key, window")
+    for row in rows:
+        if sqlite_row_get(row, "key") == key and sqlite_row_get(row, "window") == "{window}":
+            n = n + 1
+    n
+
+# throttle_admit admits (true) or rejects (false) one request for `key` at
+# `now_epoch` under a fixed window of `window_secs` allowing `limit` requests.
+# Admission records one counter row; rejection records nothing.
+fn throttle_admit(store: EnterpriseStore, key: text, now_epoch: i64, window_secs: i64, limit: i64) -> bool:
+    if key == "" or limit <= 0:
+        return false
+    val window = throttle_window(now_epoch, window_secs)
+    if throttle_count(store, key, window) >= limit:
+        return false
+    store_insert_row(store,
+        "INSERT INTO throttle_hits (key, window) VALUES (?, ?)",
+        [key, "{window}"])
+    true
+
+export throttle_setup, throttle_window, throttle_count, throttle_admit

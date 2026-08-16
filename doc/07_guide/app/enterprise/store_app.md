@@ -82,3 +82,37 @@ seed's subcommand delegation drops argv (open bug:
 `doc/08_tracking/bug/spipe_docgen_subcommand_argv_drop_2026-08-16.md`). On
 non-procfs platforms use the direct form:
 `bin/simple run src/app/spipe_docgen/spipe_docgen/main.spl <spec> --output doc/06_spec --no-index`.
+
+## Authentication and throttling (W5-A)
+
+Production entry: `store_app_handle_bearer(store, tenant, method, path,
+headers, body, now_epoch, entropy)` in
+`src/app/enterprise_store_app/auth_routes.spl`. The explicit-session
+`store_app_handle` stays for tests; the bearer variant resolves the
+`SessionContext` from `Authorization: Bearer <token>` via the durable
+session store `std.enterprise_session`
+(`src/lib/nogc_sync_mut/enterprise_session/`), then delegates to the same
+hardened route path. Determinism: the caller supplies `now_epoch` and login
+`entropy` — the library never reads a wall clock or randomness.
+
+- **Credentials** — insert-only `credentials` rows: tenant, actor, role,
+  salt, sha256 salted-hash secret (never plaintext). Seeded via the
+  admin-guarded `credential_seed` (session_valid + role_allows rung order).
+- **`POST /auth/login`** — form `user`/`secret` (+ optional `ttl`); success
+  returns `token=<sha256>` in the body (no cookies); failure is a generic
+  401 `invalid-credentials` for both unknown user and wrong secret (no
+  user enumeration).
+- **`POST /auth/logout`** — writes an insert-only revocation row.
+- **Resolution** — missing / revoked / expired
+  (`now_epoch >= issued_at + ttl`) all collapse to 401.
+- **Throttling** — `std.enterprise_session.throttle`: deterministic
+  fixed-window counter over insert-only `throttle_hits` rows,
+  window = `now_epoch / window_secs`. General key `tenant|token-or-anon`,
+  30/60s; login key `tenant|login:user`, 5/60s (anti-brute-force). Over
+  limit -> 429 with the shared security headers; rejections record nothing,
+  so a denied burst cannot extend its own lockout.
+
+Spec: `test/03_system/app/enterprise/enterprise_auth_throttle_spec.spl` —
+login + bearer authorization, generic 401, revocation, expiry (red-first),
+replayed-login token idempotency, tenant isolation, 429-then-window-advance,
+login brute-force window.

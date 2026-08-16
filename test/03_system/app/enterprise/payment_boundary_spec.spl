@@ -1,0 +1,274 @@
+"""
+# Payment Provider Boundary — intents, verified webhooks, reconciliation
+
+## Overview
+
+System scenarios for `std.enterprise_payment` (lane
+`.spipe/simple_enterprise_suite` W5-B): a clerk sells a product, a payments
+operator creates a payment intent (getting a provider_ref for the hosted
+provider flow), and provider webhooks — signature-verified and deduplicated
+by provider_event_id — drive the intent through
+pending -> authorized -> captured, with the order becoming paid in the SAME
+unit of work as the capture.
+
+## Proven here
+
+- happy path: create -> authorized -> captured; order paid atomically;
+  journal stays balanced; audit chain verifies;
+- bad signature: rejected `invalid-record`, NO state change of any kind;
+- duplicate provider_event_id: replay returns the recorded result with
+  exactly one effect (event count, order status unchanged);
+- failed webhook: intent failed, order still unpaid and payable;
+- reconciliation (§7.2): pending-over-ttl, captured-intent-without-paid-order
+  and paid-order-without-captured-intent, seeded via direct store writes;
+- tenant isolation: tenant B cannot drive tenant A's provider_ref;
+- restart survival: statuses derive identically from a reopened store.
+
+## Troubleshooting
+
+- `invalid-record` from a webhook: check the signature is
+  sha256(secret + "|" + payload) over the SAME payload text, and that the
+  transition is legal for the intent's current status.
+- The signature scheme is a stand-in for provider SDK verification — see
+  the module docstring; no card data ever transits these tests.
+
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** doc/01_research/app/enterprise/simple_enterprise_suite_full_design_2026-08-14.md §7.1, §7.2, §10.2
+**Research:** doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md
+
+Lane: .spipe/simple_enterprise_suite (W5-B).
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+use std.nogc_sync_mut.enterprise_store.store.{store_open, store_close, store_rows, store_insert_row}
+use std.nogc_sync_mut.enterprise_store.records.{audit_verify_chain}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope, Money
+}
+use std.nogc_sync_mut.enterprise_sale.goods_sale.{
+    sale_setup, sale_add_product, sale_receive_stock,
+    sale_place_order, sale_order_status, sale_journal_balanced
+}
+use std.nogc_sync_mut.enterprise_payment.payment.{
+    PaymentProvider, provider_sign,
+    payment_setup, payment_intent_status, payment_intent_ref,
+    payment_create_intent, payment_webhook_receive, payment_reconcile
+}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+
+# Each scenario uses its own database path: the interpreter backend caches
+# open databases per path in-process.
+fn db_path(name: text) -> text:
+    "build/test-artifacts/payment_boundary_" + name + ".db"
+
+fn usd(amount_cents: i64) -> Money:
+    Money(amount_cents: amount_cents, currency: "USD")
+
+fn tenant_a() -> TenantContext:
+    TenantContext(tenant_id: "tenant-a", name: "Alpha Trading")
+
+fn tenant_b() -> TenantContext:
+    TenantContext(tenant_id: "tenant-b", name: "Beta Retail")
+
+fn admin_a() -> ActorContext:
+    ActorContext(actor_id: "admin-1", role: "admin")
+
+fn clerk_a() -> ActorContext:
+    ActorContext(actor_id: "clerk-1", role: "sales")
+
+fn pay_op(id: text) -> ActorContext:
+    ActorContext(actor_id: id, role: "payments")
+
+fn session_for(who: ActorContext, tenant: TenantContext) -> SessionContext:
+    SessionContext(token: "tok-" + who.actor_id, actor_id: who.actor_id, tenant_id: tenant.tenant_id, active: true)
+
+fn envelope(key: text, action: text, payload: text) -> CommandEnvelope:
+    CommandEnvelope(request_id: "req-" + key, idempotency_key: key, action: action, payload: payload)
+
+fn provider() -> PaymentProvider:
+    PaymentProvider(name: "hosted-stand-in", shared_secret: "s3cr3t")
+
+# fresh_store opens a clean store with sale + payment schemas and a created
+# (unpaid) order-100 for tenant-a worth 3 x 2500 cents.
+fn fresh_store(name: text):
+    dir_create_all("build/test-artifacts")
+    if file_exists(db_path(name)):
+        file_delete(db_path(name))
+    val store = store_open(db_path(name))
+    sale_setup(store)
+    payment_setup(store)
+    val t = tenant_a()
+    val admin = admin_a()
+    val s = session_for(admin, t)
+    sale_add_product(store, s, t, admin, "SKU-1", "Widget", usd(2500))
+    sale_receive_stock(store, s, t, admin, "SKU-1", 10)
+    val clerk = clerk_a()
+    sale_place_order(store, session_for(clerk, t), t, clerk, envelope("ord-1", "sale.order.place", ""), "order-100", "SKU-1", 3)
+    store
+
+fn intent_event_count(store, tenant_id: text) -> i64:
+    var n: i64 = 0
+    val rows = store_rows(store, "payment_intent_events", "id, tenant_id, intent_id, order_id, event, provider_ref, detail, at")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id:
+            n = n + 1
+    n
+
+# create_pending drives create-intent for order-100 and returns provider_ref.
+fn create_pending(store, key: text) -> text:
+    val t = tenant_a()
+    val op = pay_op("pay-1")
+    val r = payment_create_intent(store, session_for(op, t), t, op, envelope(key, "payment.intent.create", ""), "intent-1", "order-100", 1000)
+    r.detail
+
+fn webhook(store, provider_ref: text, kind: text, event_id: text, payload: text, signature: text):
+    val t = tenant_a()
+    val op = pay_op("pay-1")
+    payment_webhook_receive(store, session_for(op, t), t, op,
+        envelope("wh-" + event_id, "payment.webhook.receive", payload),
+        provider(), provider_ref, kind, signature, event_id, 2000)
+
+fn signed_webhook(store, provider_ref: text, kind: text, event_id: text):
+    val payload = "{\"kind\":\"" + kind + "\",\"ref\":\"" + provider_ref + "\"}"
+    webhook(store, provider_ref, kind, event_id, payload, provider_sign(provider(), payload))
+
+describe "payment boundary — hosted-provider happy path":
+    it "creates an intent, authorizes, captures, and pays the order atomically":
+        step("Create a pending intent for the created order")
+        val store = fresh_store("happy")
+        val ref = create_pending(store, "int-key-1")
+        expect(ref.len() > 0).to_be(true)
+        expect(payment_intent_status(store, "tenant-a", "intent-1")).to_equal("pending")
+        expect(payment_intent_ref(store, "tenant-a", "intent-1")).to_equal(ref)
+
+        step("Provider webhook: authorized")
+        val auth = signed_webhook(store, ref, "authorized", "evt-1")
+        expect(auth.reason).to_equal("accepted")
+        expect(payment_intent_status(store, "tenant-a", "intent-1")).to_equal("authorized")
+        expect(sale_order_status(store, "tenant-a", "order-100")).to_equal("created")
+
+        step("Provider webhook: captured — intent captured AND order paid together")
+        val cap = signed_webhook(store, ref, "captured", "evt-2")
+        expect(cap.reason).to_equal("accepted")
+        expect(payment_intent_status(store, "tenant-a", "intent-1")).to_equal("captured")
+        expect(sale_order_status(store, "tenant-a", "order-100")).to_equal("paid")
+        expect(sale_journal_balanced(store, "tenant-a")).to_be(true)
+
+        step("Audit chain still verifies")
+        expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+describe "payment boundary — signature verification":
+    it "rejects a bad signature with invalid-record and NO state change":
+        val store = fresh_store("badsig")
+        val ref = create_pending(store, "int-key-1")
+        val before = intent_event_count(store, "tenant-a")
+        step("Send a captured webhook with a wrong signature")
+        val r = webhook(store, ref, "captured", "evt-bad", "{\"kind\":\"captured\"}", "not-a-valid-signature")
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("invalid-record")
+        step("No state changed: intent still pending, order unpaid, no new events")
+        expect(payment_intent_status(store, "tenant-a", "intent-1")).to_equal("pending")
+        expect(sale_order_status(store, "tenant-a", "order-100")).to_equal("created")
+        expect(intent_event_count(store, "tenant-a")).to_equal(before)
+        store_close(store)
+
+describe "payment boundary — webhook deduplication":
+    it "replays a provider_event_id with exactly one effect":
+        val store = fresh_store("dedupe")
+        val ref = create_pending(store, "int-key-1")
+        step("First captured webhook lands")
+        val first = signed_webhook(store, ref, "captured", "evt-cap")
+        expect(first.reason).to_equal("accepted")
+        val after_first = intent_event_count(store, "tenant-a")
+        step("Replaying the SAME provider_event_id returns the recorded result")
+        val replay = signed_webhook(store, ref, "captured", "evt-cap")
+        expect(replay.ok).to_be(true)
+        expect(replay.reason).to_equal("duplicate-key")
+        step("Exactly one effect: same event count, order still paid once")
+        expect(intent_event_count(store, "tenant-a")).to_equal(after_first)
+        expect(payment_intent_status(store, "tenant-a", "intent-1")).to_equal("captured")
+        expect(sale_order_status(store, "tenant-a", "order-100")).to_equal("paid")
+        expect(sale_journal_balanced(store, "tenant-a")).to_be(true)
+        store_close(store)
+
+describe "payment boundary — failed webhook":
+    it "fails the intent and leaves the order untouched":
+        val store = fresh_store("failed")
+        val ref = create_pending(store, "int-key-1")
+        step("Provider webhook: failed")
+        val r = signed_webhook(store, ref, "failed", "evt-f")
+        expect(r.reason).to_equal("accepted")
+        expect(payment_intent_status(store, "tenant-a", "intent-1")).to_equal("failed")
+        step("Order untouched and journal balanced")
+        expect(sale_order_status(store, "tenant-a", "order-100")).to_equal("created")
+        expect(sale_journal_balanced(store, "tenant-a")).to_be(true)
+        step("A failed intent accepts no further capture")
+        val cap = signed_webhook(store, ref, "captured", "evt-late")
+        expect(cap.reason).to_equal("invalid-record")
+        store_close(store)
+
+describe "payment boundary — reconciliation (§7.2)":
+    it "flags stale pending intents and seeded intent/order divergence":
+        val store = fresh_store("reconcile")
+        val ref = create_pending(store, "int-key-1")
+        step("Clean state reconciles clean (short clock, long ttl)")
+        val clean = payment_reconcile(store, "tenant-a", 1500, 3600)
+        expect(clean.pending_over_ttl.len()).to_equal(0)
+        expect(clean.captured_without_paid_order.len()).to_equal(0)
+        expect(clean.paid_order_without_captured_intent.len()).to_equal(0)
+        step("Pending intent over TTL is flagged")
+        val stale = payment_reconcile(store, "tenant-a", 999999, 3600)
+        expect(stale.pending_over_ttl.len()).to_equal(1)
+        expect(stale.pending_over_ttl[0]).to_equal("intent-1")
+        step("Seed corruption directly: a captured event without paying the order")
+        store_insert_row(store,
+            "INSERT INTO payment_intent_events (tenant_id, intent_id, order_id, event, provider_ref, detail, at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ["tenant-a", "intent-1", "order-100", "captured", ref, "seeded", "1500"])
+        step("Seed corruption directly: a paid order with no captured intent")
+        store_insert_row(store,
+            "INSERT INTO order_events (tenant_id, order_id, event, detail) VALUES (?, ?, ?, ?)",
+            ["tenant-a", "order-777", "created", ""])
+        store_insert_row(store,
+            "INSERT INTO order_events (tenant_id, order_id, event, detail) VALUES (?, ?, ?, ?)",
+            ["tenant-a", "order-777", "paid", ""])
+        val div = payment_reconcile(store, "tenant-a", 1500, 3600)
+        expect(div.captured_without_paid_order.len()).to_equal(1)
+        expect(div.captured_without_paid_order[0]).to_equal("intent-1")
+        expect(div.paid_order_without_captured_intent.len()).to_equal(1)
+        expect(div.paid_order_without_captured_intent[0]).to_equal("order-777")
+        store_close(store)
+
+describe "payment boundary — tenant isolation":
+    it "tenant B cannot drive tenant A's provider_ref":
+        val store = fresh_store("tenants")
+        val ref = create_pending(store, "int-key-1")
+        step("Tenant B sends a correctly signed capture for tenant A's ref")
+        val tb = tenant_b()
+        val op_b = pay_op("pay-b")
+        val payload = "{\"ref\":\"" + ref + "\"}"
+        val r = payment_webhook_receive(store, session_for(op_b, tb), tb, op_b,
+            envelope("wh-x", "payment.webhook.receive", payload),
+            provider(), ref, "captured", provider_sign(provider(), payload), "evt-x", 2000)
+        expect(r.ok).to_be(false)
+        expect(r.reason).to_equal("not-found")
+        step("Tenant A's intent and order are untouched")
+        expect(payment_intent_status(store, "tenant-a", "intent-1")).to_equal("pending")
+        expect(sale_order_status(store, "tenant-a", "order-100")).to_equal("created")
+        store_close(store)
+
+describe "payment boundary — restart survival":
+    it "derives identical statuses from a reopened store":
+        val store = fresh_store("restart")
+        val ref = create_pending(store, "int-key-1")
+        signed_webhook(store, ref, "captured", "evt-1")
+        store_close(store)
+        step("Reopen the same database file")
+        val store2 = store_open(db_path("restart"))
+        expect(payment_intent_status(store2, "tenant-a", "intent-1")).to_equal("captured")
+        expect(sale_order_status(store2, "tenant-a", "order-100")).to_equal("paid")
+        expect(sale_journal_balanced(store2, "tenant-a")).to_be(true)
+        expect(audit_verify_chain(store2, "tenant-a")).to_be(true)
+        store_close(store2)
