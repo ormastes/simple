@@ -3128,6 +3128,145 @@ uint64_t simpleos_fat32_path_read_buffer_addr(void)
     return (uint64_t)(uintptr_t)simpleos_fat32_path_read_buf;
 }
 
+/* ---- enterprise-store kernel-tier facade backing (lane W8-B) --------------
+ * Backs the externs in
+ * examples/09_embedded/simple_os/arch/x86_64/ent_store_fat32_kernel_facade.spl.
+ * Two single-`text`-arg calls (latch path, then write) rather than one
+ * two-`text` call: the measured Simple->C ABI passes ONE RuntimeString
+ * pointer per text arg, and a second (ptr,len) pair arrives as garbage — a
+ * 5-byte write then asked for ~480 KB and filled the volume.
+ */
+static char     _entstore_path[128];
+static uint32_t _entstore_path_len = 0;
+static uint8_t  _entstore_read_buf[32768];
+
+/* Resolve a Simple `text` argument to (data,len) without the 128-byte path
+ * truncation _fat32_copy_path_arg imposes. Same dual tagged/raw probe. */
+static int _entstore_text_arg(const char *src, const char **out, uint32_t *out_len)
+{
+    if (!src || !out || !out_len)
+        return -1;
+    RuntimeValue rv = (RuntimeValue)(uintptr_t)src;
+    if (IS_HEAP(rv)) {
+        RuntimeString *s = (RuntimeString *)DECODE_PTR(rv);
+        if (s && s->hdr.type == HEAP_STRING && s->len < 0x100000) {
+            *out = s->data;
+            *out_len = s->len;
+            return 0;
+        }
+    }
+    RuntimeString *r = (RuntimeString *)(uintptr_t)src;
+    if (r && r->hdr.type == HEAP_STRING && r->len < 0x100000) {
+        *out = r->data;
+        *out_len = r->len;
+        return 0;
+    }
+    return -1;
+}
+
+int64_t entstore_fat32_set_path(const char *path)
+{
+    int n = _fat32_copy_path_arg(path, -1, _entstore_path, sizeof(_entstore_path));
+    if (n <= 0) {
+        _entstore_path_len = 0;
+        return -1;
+    }
+    _entstore_path_len = (uint32_t)n;
+    return 0;
+}
+
+int64_t entstore_fat32_write_pending(const char *content)
+{
+    const char *data = "";
+    uint32_t len = 0;
+    if (_entstore_path_len == 0)
+        return -1;
+    if (_entstore_text_arg(content, &data, &len) != 0)
+        return -1;
+    serial_puts("[ent-store-c] write len=");
+    serial_put_dec((int64_t)len);
+    serial_puts("\r\n");
+    return fat32_write_file(_entstore_path, (const uint8_t *)data, len) == 0 ? 0 : -1;
+}
+
+/* Ground-truth byte extraction in C. The Simple-side tail
+ * (mmio_read8 + rt_push_byte + rt_bytes_to_text) is bypassed because
+ * an `extern fn mmio_read8` DECLARED IN A .spl FILE does not bind to the
+ * kernel's Simple `os.kernel.boot.mmio.mmio_read8`: it binds to the C symbol
+ * `mmio_read8` (type_stubs.c / auto_stubs.c weak), whose body is
+ * `return NIL_VALUE` — every byte reads back 0. Every other kernel entry
+ * `use`s the real Simple mmio module instead. Plain C loads are
+ * authoritative here (see also rt_dump_phys16's note above). */
+RuntimeValue entstore_fat32_read_slice_text(const char *path, int64_t offset, int64_t size)
+{
+    char path_buf[128];
+    uint32_t cluster = 0, file_size = 0;
+    uint32_t off, want;
+
+    if (offset < 0 || size <= 0)
+        return rt_string_new(0, 0);
+    if (_fat32_copy_path_arg(path, -1, path_buf, sizeof(path_buf)) <= 0)
+        return rt_string_new(0, 0);
+    if (fat32_find_file(path_buf, &cluster, &file_size) != 0)
+        return rt_string_new(0, 0);
+    if (file_size == 0 || file_size > sizeof(_entstore_read_buf))
+        return rt_string_new(0, 0);
+    if (simpleos_fat32_stream_open(path_buf, (int64_t)strlen(path_buf)) < 0)
+        return rt_string_new(0, 0);
+    if (simpleos_fat32_stream_read_at(0, (uint64_t)(uintptr_t)_entstore_read_buf,
+                                      (uint64_t)file_size) != (int64_t)file_size)
+        return rt_string_new(0, 0);
+
+    off = (uint32_t)offset;
+    if (off >= file_size)
+        return rt_string_new(0, 0);
+    want = (uint32_t)size;
+    if (off + want > file_size)
+        want = file_size - off;
+    return rt_string_new((RuntimeValue)(uintptr_t)(_entstore_read_buf + off),
+                         (RuntimeValue)want);
+}
+
+/* Diagnostic (lane W8-B resume step): dump, via plain C loads, the first 16
+ * bytes of `path` as they sit in the very buffer the Simple extraction loop
+ * reads, so "absent / shifted / mis-assembled" can be told apart. */
+void entstore_fat32_dump_first16(const char *path)
+{
+    char path_buf[128];
+    uint32_t cluster = 0, file_size = 0;
+    int64_t n;
+    int i;
+
+    if (_fat32_copy_path_arg(path, -1, path_buf, sizeof(path_buf)) <= 0) {
+        serial_puts("[ent-store-dump] bad-path\r\n");
+        return;
+    }
+    if (fat32_find_file(path_buf, &cluster, &file_size) != 0) {
+        serial_puts("[ent-store-dump] not-found ");
+        serial_puts(path_buf);
+        serial_puts("\r\n");
+        return;
+    }
+    if (simpleos_fat32_stream_open(path_buf, (int64_t)strlen(path_buf)) < 0) {
+        serial_puts("[ent-store-dump] open-fail\r\n");
+        return;
+    }
+    n = simpleos_fat32_stream_read_at(0, (uint64_t)(uintptr_t)simpleos_fat32_path_read_buf,
+                                      (uint64_t)file_size);
+    serial_puts("[ent-store-dump] ");
+    serial_puts(path_buf);
+    serial_puts(" fsize=");
+    serial_put_dec((int64_t)file_size);
+    serial_puts(" n=");
+    serial_put_dec(n);
+    serial_puts(" cbytes:");
+    for (i = 0; i < 16; i++) {
+        serial_puts(" ");
+        serial_put_dec((int64_t)simpleos_fat32_path_read_buf[i]);
+    }
+    serial_puts("\r\n");
+}
+
 static int64_t simpleos_fat32_read_known_app_size_raw(uint64_t app_id)
 {
     const char *name = simpleos_known_app_name(app_id);

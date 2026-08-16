@@ -247,12 +247,20 @@ int64_t spl_memtrack_live_bytes(void) {
 /* ABI compatibility for callers that request the hosted heap-counter names.
  * In core-C these are only opt-in/manual SPL memtrack totals. runtime_native.c
  * RuntimeValue allocations use raw allocation paths and are not covered.
- * These values must not classify production heap growth. */
-int64_t rt_heap_live_bytes(void) {
+ * These values must not classify production heap growth.
+ *
+ * WEAK on purpose: the hosted build links this archive alongside the Rust
+ * runtime, which defines the same two names in value/heap.rs. Strong
+ * definitions on both sides made `cargo build --release --bin simple` fail
+ * with `rust-lld: error: duplicate symbol: rt_heap_live_bytes` — the seed did
+ * not link at all. Weak here keeps the core-C-only link resolvable while
+ * letting the Rust (authoritative, allocator-backed) definitions win whenever
+ * they are present. */
+__attribute__((weak)) int64_t rt_heap_live_bytes(void) {
     return g_live_bytes;
 }
 
-int64_t rt_heap_peak_bytes(void) {
+__attribute__((weak)) int64_t rt_heap_peak_bytes(void) {
     return g_peak_bytes;
 }
 

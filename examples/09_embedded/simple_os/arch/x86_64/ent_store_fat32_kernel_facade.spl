@@ -12,8 +12,8 @@
 # Primitives (all proven in this kernel image):
 #   simpleos_fat32_stream_open(path)   -> file size, -1 if absent (the same
 #       existence probe fs_exec_resolve uses for PATH resolution)
-#   simpleos_fat32_stream_read_at + simpleos_fat32_path_read_buffer_addr +
-#       mmio_read8 — the exact scp `_scp_read_file_bytes` read idiom
+#   entstore_fat32_read_slice_text — C-side byte extraction (see the
+#       mmio_read8 binding note below for why this is not done in Simple)
 #   entstore_fat32_write_text — uniquely-named C wrapper over
 #       fat32_write_file. NOT rt_file_write_text/rt_file_read_text: those
 #       names are shadowed by Simple-side @export stubs (tls_shim's
@@ -37,17 +37,21 @@
 #     so nobody trusts this facade for big files.
 #
 # Freestanding discipline: no module-level array initializers, no trait
-# objects; raw byte loops (mmio_read8 + rt_push_byte) and static serial
+# objects; C-side byte extraction and static serial
 # markers only — dynamic-text interpolation is avoided in verdict lines
 # (x64 freestanding dynamic-text interpolation bug).
 
 extern fn serial_println(msg: text)
 extern fn simpleos_fat32_stream_open(path: text) -> i64
-extern fn simpleos_fat32_stream_read_at(file_off: u64, dst: u64, len: u64) -> i64
-extern fn simpleos_fat32_path_read_buffer_addr() -> u64
-extern fn mmio_read8(addr: u64) -> u8
 extern fn entstore_fat32_set_path(path: text) -> i64
 extern fn entstore_fat32_write_pending(content: text) -> i64
+# Read-back is done in C. An `extern fn mmio_read8` declared HERE does NOT
+# bind to the kernel's Simple os.kernel.boot.mmio.mmio_read8 — it binds to the
+# C symbol of that name (type_stubs.c / auto_stubs.c weak), whose body is
+# `return NIL_VALUE`, so every extracted byte was 0. That, not the FAT32
+# layer, is why rung L3.5b missed while write/size/open all passed.
+extern fn entstore_fat32_read_slice_text(path: text, offset: i64, size: i64) -> text
+extern fn entstore_fat32_dump_first16(path: text)
 
 # Two single-text-arg calls, never one two-text call: the C side documents the
 # measured miscompile (second (ptr,len) pair arrived as garbage, so a 5-byte
@@ -56,8 +60,6 @@ fn entstore_fat32_write_text(path: text, content: text) -> i64:
     if entstore_fat32_set_path(path) != 0:
         return -1
     entstore_fat32_write_pending(content)
-extern fn rt_push_byte(arr: [u8], b: i64) -> [u8]
-extern fn rt_bytes_to_text(data: [u8]) -> text
 
 val _ENT_READ_CAP: i64 = 32768
 
@@ -78,23 +80,7 @@ fn rt_file_read_text_at(path: text, offset: i64, size: i64) -> text:
         return ""
     if offset >= fsize:
         return ""
-    val buf = simpleos_fat32_path_read_buffer_addr()
-    if buf == 0.to_u64():
-        return ""
-    val n = simpleos_fat32_stream_read_at(0.to_u64(), buf, fsize.to_u64())
-    if n != fsize:
-        serial_println("[ent-store] read-short")
-        return ""
-    var stop = offset + size
-    if stop > fsize:
-        stop = fsize
-    var out: [u8] = []
-    var i = offset
-    while i < stop:
-        val b = mmio_read8(buf + i.to_u64())
-        out = rt_push_byte(out, b.to_i64())
-        i = i + 1
-    rt_bytes_to_text(out)
+    entstore_fat32_read_slice_text(path, offset, size)
 
 @export("C")
 fn rt_file_atomic_write(path: text, content: text) -> bool:
@@ -122,7 +108,12 @@ fn ent_store_kernel_probe():
     val pf = simpleos_fat32_stream_open("/PROBE.TXT")
     serial_println("[ent-store] probe-file fsize={pf}")
     val mw = rt_file_atomic_write("/ENTHEAD.TXT", "SPLSTORE1\n")
+    # Ground-truth C dump of the bytes the extraction path sees (lane W8-B
+    # diagnostic): kept permanently so a future read-back miss is immediately
+    # classifiable as absent / shifted / mis-assembled.
+    entstore_fat32_dump_first16("/ENTHEAD.TXT")
     val head = rt_file_read_text_at("/ENTHEAD.TXT", 0, 9)
+    serial_println("[ent-store] head read-back={head}")
     if mw and head == "SPLSTORE1":
         serial_println("[ent-store] facade write+read-back=OK")
     else:

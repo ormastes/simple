@@ -493,3 +493,29 @@ New acceptance criteria (extends AC-1..AC-12 above):
   CONCLUSIONS were sound, only their evidence path was contaminated — that
   path is now closed and future worktrees get a private build/. Table lives
   in doc/07_guide/app/enterprise/guarded_command_contract.md § Vacuity audit.
+- IN-GUEST SIMPLEOS PROVEN (2026-08-16, lane W8-B): L3.5b CLOSED. Under real
+  OVMF pflash -> GRUB-EFI -> multiboot1 (never -kernel, no isa-debug-exit),
+  against an EMPTY mkfs.vfat NVMe volume so every byte read back is one the
+  guest wrote, the enterprise store's marker round-trips inside the guest.
+  Retained transcript doc/09_report/2026/ent_store_in_guest_ovmf_2026-08-16.serial.log:
+    [ent-store-dump] /ENTHEAD.TXT fsize=10 n=10 cbytes: 83 80 76 83 84 79 82 69 49 10 ...
+    [ent-store] head read-back=SPLSTORE1
+    [ent-store] facade write+read-back=OK
+  New gate: scripts/check/check-enterprise-store-in-guest-ovmf.shs.
+  ROOT CAUSE (a defect class worth remembering): an `extern fn mmio_read8`
+  DECLARED IN A .spl FILE does not bind to the kernel's Simple
+  os.kernel.boot.mmio.mmio_read8 — it binds to the C symbol mmio_read8 in
+  boot/type_stubs.c whose body is `return NIL_VALUE`. Every extracted byte was
+  0. FAT32 was never at fault, which is exactly why write/size/open were green
+  while the marker never came back. Read-back moved into C; the permanent
+  entstore_fat32_dump_first16 keeps ground truth visible.
+  Also landed: W4-A's never-committed C write backing (the 4 guest externs had
+  NO C side in main), and a fix for the Rust seed failing to link at all
+  (duplicate strong rt_heap_live_bytes/rt_heap_peak_bytes in heap.rs and
+  runtime_memtrack.c; core-C shims now weak).
+  L4 [MISS], deferred honestly — SAME defect class one layer out:
+  file_backend.spl:31 declares its own `extern fn rt_file_exists`, so it exits
+  through the C symbol and loses to a freestanding stub instead of reaching the
+  facade's @export("C"). Resume: nm which object supplies rt_file_exists, then
+  rerun the gate. Merge checks: c-runtime-compiles PASS (120 files), file
+  backend spec 6/6.
