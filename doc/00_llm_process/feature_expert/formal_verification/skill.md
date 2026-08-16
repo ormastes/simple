@@ -56,6 +56,27 @@ erasure is a hard failure. The broader producer, runtime manifest, VIR,
 contracts, receipts, product proofs, and release replay remain open as recorded
 in the plan.
 
+## Focused RVFI readiness lane
+
+Use
+`test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl` for the
+REQ-FV2-015/019 readiness seam and its mirror at
+`doc/06_spec/03_system/compiler/fv2_riscv_dual_track_readiness_spec.md`.
+Keep these boundaries explicit:
+
+- The checker requires the complete 21-port manifest. `rvfi_halt`,
+  `rvfi_intr`, `rvfi_mode`, and `rvfi_ixl` are mandatory, not optional detail.
+- A synthetic complete core is positive checker evidence only. It is not a
+  generated CPU, Sail oracle, SBY proof, refinement, or equivalence result.
+- Missing extended ports and missing generated cores exit nonzero and emit no
+  readiness marker.
+- Product evidence requires both
+  `check-riscv-formal-dual-track.shs` and
+  `check-riscv-rtl-sby-proof.shs` to pass in the qualified environment.
+- Without a source-matched admitted Stage-4 CLI, mark SSpec, docgen, and
+  `sspec-maintain` as `TEST_BLOCKED`. Never execute them with the Rust seed or
+  stale Stage-2/3 artifacts, and never hand-promote the blocked manual.
+
 ## Review and handoff
 
 Parallel lanes own disjoint files. The merge owner reconciles sidecar findings

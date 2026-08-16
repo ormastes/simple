@@ -351,6 +351,29 @@ release decision, which also requires `release_blockers=none`. If `sby`,
 `yosys`, or an SMT solver is missing, report the result as blocked readiness
 evidence, not as a proof pass.
 
+#### Focused RVFI readiness system coverage
+
+`test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl` is the
+modern step-based system contract for the RVFI readiness seam. Its production
+checker must require all 21 canonical ports, including `rvfi_halt`,
+`rvfi_intr`, `rvfi_mode`, and `rvfi_ixl`. The positive fixture proves only
+manifest recognition. The edge and error flows remove an extended control
+port or supply a missing generated core and require a nonzero result with no
+`READY:` marker.
+
+The final two scenarios invoke both production gates above. They may pass only
+in a source-matched qualified environment where the admitted pure-Simple CLI,
+generated sidecars, durable Lean/BYL proof layer, SymbiYosys toolchain, and
+strict proof artifacts all exist. Until then, record the spec and mirrored
+manual as `TEST_BLOCKED`; never replace execution with a source-string pass,
+Rust seed, Stage-2/3 binary, readiness-only marker, or hand-built receipt.
+
+After admission, run the SSpec, `sspec-maintain scan`, and `spipe-docgen` once
+on the unchanged tree using the commands in
+`doc/03_plan/sys_test/simple_formal_verification_2_0.md`. The generated manual
+must replace the blocked hand-maintained mirror with `0 stubs` and accepted
+scores before this lane can contribute PASS evidence.
+
 ---
 
 ## Legacy verification states

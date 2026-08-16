@@ -86,9 +86,30 @@ backends, proof replay, and shipped artifact evidence.
 
 ## Phase
 
-dev-done
+dev-done; focused-rvfi-system-test-prepared; TEST_BLOCKED
+
+## Focused RVFI readiness addendum (2026-08-16)
+
+- Executable SSpec:
+  `test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl`
+- Mirrored blocked manual:
+  `doc/06_spec/03_system/compiler/fv2_riscv_dual_track_readiness_spec.md`
+- Requirements: REQ-FV2-015, REQ-FV2-019, NFR-FV2-002, NFR-FV2-009.
+- Visible flow names are frozen by the focused spec: prepare the canonical
+  21-port fixture, run strict readiness, remove `rvfi_mode`, reject the
+  incomplete interface, reject a missing generated core, run the aggregate
+  proof-model gate, and run strict RVFI/SBY proof.
+- Source/static status: complete-port shell checker self-test passed; the SSpec
+  contains real positive, edge, error, mutation, aggregate, and strict-proof
+  assertions with built-in matchers.
+- Runtime status: `TEST_BLOCKED`. No current-source admitted Stage-4 CLI exists,
+  so SSpec execution, docgen, and `sspec-maintain` were not run. The manual is
+  explicitly hand-maintained and may not be promoted to generated evidence.
+- Phase 4 remains excluded from this addendum.
 
 ## Log
 
 - dev: Reconstructed the accepted feature baseline and created 12 testable
   acceptance criteria with parallel ownership and highest-capability review.
+- system-test: Added the focused fail-closed RVFI readiness contract and
+  operator manual; retained Stage-4 execution/docgen/maintenance as blocked.
