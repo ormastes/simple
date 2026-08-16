@@ -1,37 +1,40 @@
 #!/bin/sh
 # check-browser-renderer-sandbox-seccomp.shs — REQ-WEB-BROWSER-014 (SANDBOX-N/E/D).
 #
-# Wires the previously orphaned native self-check
-# src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c, which was
-# added 2026-08-15 with the seccomp ALLOW-list fix and invoked by nothing (no
-# runner, no spec) — so the browser renderer jail had no executable gate.
+# Drives the two native self-checks for the browser renderer jail:
 #
-# The self-check forks a child that enters the REAL jail through
-# rt_browser_renderer_sandbox_enter (preinit contract simulated: argv[0]=marker,
-# empty envp, fds 0..3 only) and proves both directions:
-#   SANDBOX-N  allow-listed read/write on inherited pipe fds still work in jail;
-#   SANDBOX-E  a non-allow-listed syscall (socket()) KILLS the child with SIGSYS
-#              via SECCOMP_RET_KILL_PROCESS — not an EPERM-style deny-list return;
-#   SANDBOX-D  a kernel without seccomp/Landlock cannot establish the jail, which
-#              is reported as untested, never as a pass.
+#   rt_browser_renderer_seccomp_allowlist_selfcheck.c
+#       SANDBOX-N  allow-listed read/write on inherited pipe fds work in jail;
+#       SANDBOX-E  a non-allow-listed socket() KILLS the child with SIGSYS via
+#                  SECCOMP_RET_KILL_PROCESS, not an EPERM deny-list return.
 #
-# Self-check exit contract: 0 = PASS, 1 = FAIL, 77 = SKIP (no landlock/seccomp).
+#   rt_browser_renderer_namespace_selfcheck.c
+#       SANDBOX-D  the namespace layer either isolates the network namespace or
+#                  honestly reports that it could not. A posture bit claiming
+#                  isolation while /proc/self/ns/net is unchanged is a FAIL.
+#
+# The seccomp check was orphaned when it landed 2026-08-15 — no runner, no
+# spec — so the jail's strongest evidence was unreachable from any gate.
 #
 # Verdict is the LAST line of stdout:
 #   PASS — <n> check(s) verified ...    exit 0
 #   FAIL — ...                          exit 1
 #   ERROR — nothing was checked         exit 2
 #
-# Fail-closed, deliberately: 77/SKIP, a missing compiler, and a missing source
-# file are all ERROR (exit 2), never a pass. Absence of evidence is not evidence.
+# Fail-closed: a kernel without seccomp/Landlock, a missing source file, and a
+# host with no C compiler are all ERROR, never a pass. Absence of evidence is
+# not evidence. Namespace UNAVAILABILITY is different and is not an error — it
+# is a real, reportable posture, printed as sandbox_namespaces=unavailable.
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-SRC="$ROOT_DIR/src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c"
+SECCOMP_SRC="$ROOT_DIR/src/runtime/test/rt_browser_renderer_seccomp_allowlist_selfcheck.c"
+NS_SRC="$ROOT_DIR/src/runtime/test/rt_browser_renderer_namespace_selfcheck.c"
 
 err() { echo "ERROR — nothing was checked: $1"; exit 2; }
 
-[ -f "$SRC" ] || err "self-check source missing: $SRC"
+[ -f "$SECCOMP_SRC" ] || err "self-check source missing: $SECCOMP_SRC"
+[ -f "$NS_SRC" ] || err "self-check source missing: $NS_SRC"
 
 CC_BIN=${CC:-}
 if [ -z "$CC_BIN" ]; then
@@ -45,50 +48,86 @@ fi
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT HUP INT TERM
 
-BIN="$WORK/seccomp_allowlist_selfcheck"
-# The self-check #includes runtime_process.c, so this is a single translation
-# unit; -I gives it the runtime headers it expects. Section-splitting plus
-# --gc-sections is REQUIRED, not an optimization: runtime_process.c also defines
-# spawn/fork paths that reference the wider runtime's value helpers
-# (rt_array_len, rt_array_get, rt_string_data, rt_fork_*), which this single-TU
-# build does not link. The self-check never calls them, so dead-stripping drops
-# them; without it the link fails on undefined references. Same reason the
-# sibling test/01_unit/runtime/run_process_piped_write_test.shs does this.
+# Section-splitting plus --gc-sections is REQUIRED, not an optimization:
+# runtime_process.c also defines spawn/fork paths that reference the wider
+# runtime's value helpers (rt_array_len, rt_array_get, rt_string_data,
+# rt_fork_*), which these single-TU builds do not link. The self-checks never
+# call them, so dead-stripping drops them; without it the link fails on
+# undefined references. Same reason the sibling
+# test/01_unit/runtime/run_process_piped_write_test.shs does this.
 LINK_GC=-Wl,--gc-sections
 [ "$(uname -s)" = Darwin ] && LINK_GC=-Wl,-dead_strip
 
-if ! "$CC_BIN" -O2 -std=gnu11 -Wall -Wextra \
+build() {
+    _src=$1
+    _out=$2
+    "$CC_BIN" -O2 -std=gnu11 -Wall -Wextra \
         -ffunction-sections -fdata-sections \
         -I "$ROOT_DIR/src/runtime" \
-        "$SRC" "$LINK_GC" -pthread -o "$BIN" >"$WORK/build.log" 2>&1; then
-    echo "build failed (log follows):"
+        "$_src" "$LINK_GC" -pthread -o "$_out" >"$WORK/build.log" 2>&1
+}
+
+# --- SANDBOX-N / SANDBOX-E: seccomp allow-list -------------------------------
+if ! build "$SECCOMP_SRC" "$WORK/seccomp"; then
     cat "$WORK/build.log"
-    echo "FAIL — browser renderer sandbox self-check did not compile"
+    echo "FAIL — browser renderer seccomp self-check did not compile"
     exit 1
 fi
 
 # Read the status directly into a variable on the line after the invocation —
 # never through a pipe, whose $? is the last pipeline stage, not the program.
 set +e
-"$BIN" >"$WORK/run.log" 2>&1
-RUN_EXIT=$?
+"$WORK/seccomp" >"$WORK/seccomp.log" 2>&1
+SECCOMP_EXIT=$?
 set -e
+cat "$WORK/seccomp.log"
 
-cat "$WORK/run.log"
-
-case "$RUN_EXIT" in
+case "$SECCOMP_EXIT" in
     0)
-        grep -q 'rt_browser_renderer_seccomp_allowlist_selfcheck: PASS' "$WORK/run.log" ||
-            err "self-check exited 0 without emitting its PASS marker"
-        echo "PASS — 3 check(s) verified: allow-listed read/write work inside the jail, a non-allow-listed socket() is SIGSYS-killed by SECCOMP_RET_KILL_PROCESS, and the jail was entered through the real rt_browser_renderer_sandbox_enter"
-        exit 0
+        grep -q 'rt_browser_renderer_seccomp_allowlist_selfcheck: PASS' \
+            "$WORK/seccomp.log" ||
+            err "seccomp self-check exited 0 without emitting its PASS marker"
         ;;
-    77)
-        # Not a pass: the property under test was never exercised.
-        err "kernel lacks seccomp/Landlock support, so the jail was never entered"
-        ;;
+    77) err "kernel lacks seccomp/Landlock support, so the jail was never entered" ;;
     *)
-        echo "FAIL — browser renderer sandbox self-check failed (exit $RUN_EXIT)"
+        echo "FAIL — browser renderer seccomp self-check failed (exit $SECCOMP_EXIT)"
         exit 1
         ;;
 esac
+
+# --- SANDBOX-D: namespace layer ---------------------------------------------
+if ! build "$NS_SRC" "$WORK/ns"; then
+    cat "$WORK/build.log"
+    echo "FAIL — browser renderer namespace self-check did not compile"
+    exit 1
+fi
+
+set +e
+"$WORK/ns" >"$WORK/ns.log" 2>&1
+NS_EXIT=$?
+set -e
+cat "$WORK/ns.log"
+
+case "$NS_EXIT" in
+    0) : ;;
+    77) err "kernel lacks the seccomp/Landlock preinit, so the namespace layer was never reached" ;;
+    *)
+        echo "FAIL — browser renderer namespace self-check failed (exit $NS_EXIT)"
+        exit 1
+        ;;
+esac
+
+# Publish the observed posture so a reader never has to infer it. Unavailable
+# is a real result here, not a silent downgrade: on a host with
+# kernel.apparmor_restrict_unprivileged_userns=1 (Ubuntu 24.04 default)
+# CLONE_NEWUSER succeeds but its capabilities are stripped, so CLONE_NEWNET
+# returns EPERM and the renderer keeps only the seccomp+Landlock layers.
+if grep -q 'namespaces=active' "$WORK/ns.log"; then
+    POSTURE=active
+else
+    POSTURE=unavailable
+fi
+echo "sandbox_namespaces=$POSTURE"
+
+echo "PASS — 4 check(s) verified: allow-listed read/write work inside the jail, a non-allow-listed socket() is SIGSYS-killed by SECCOMP_RET_KILL_PROCESS, the jail was entered through the real rt_browser_renderer_sandbox_enter, and the namespace posture ($POSTURE) matches the observed /proc/self/ns/net identity"
+exit 0

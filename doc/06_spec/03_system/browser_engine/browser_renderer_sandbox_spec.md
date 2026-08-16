@@ -43,10 +43,38 @@ third case where the host kernel cannot provide the jail at all.
    `SIGSYS`. A deny-list regression therefore fails this step rather than
    passing it quietly.
 
-4. **SANDBOX-D — the verdict states how many checks actually ran.** A kernel
-   without seccomp/Landlock, or a host with no C compiler, means the jail was
-   never entered. The gate reports `ERROR — nothing was checked` (exit 2) in
-   both cases and the spec fails. An unexercised property is never a pass.
+4. **SANDBOX-D — the namespace posture is published and matches reality.** The
+   jail unshares the user, network and IPC namespaces and drops to an
+   unprivileged identity, so the renderer loses its *route* to the network
+   rather than relying on every socket-creating syscall staying denied. The
+   posture is reported, never assumed: the self-check FAILS if
+   `rt_browser_renderer_namespaces_active()` claims isolation while
+   `/proc/self/ns/net` is unchanged, and equally if the namespace moved but the
+   posture under-reports it. The gate prints
+   `sandbox_namespaces=active|unavailable`.
+
+5. **The verdict states how many checks actually ran.** A kernel without
+   seccomp/Landlock, or a host with no C compiler, means the jail was never
+   entered. The gate reports `ERROR — nothing was checked` (exit 2) in both
+   cases and the spec fails. An unexercised property is never a pass.
+
+### Why `namespaces=unavailable` is a pass, not a failure
+
+Ubuntu 24.04 ships `kernel.apparmor_restrict_unprivileged_userns=1`: an
+unconfined binary may create `CLONE_NEWUSER`, but its capabilities are stripped,
+so the follow-up `CLONE_NEWNET` returns `EPERM`. Treating that as fatal would
+turn a working seccomp+Landlock jail into **no jail** on every default Ubuntu
+host — strictly worse security for a stricter-looking check. The jail therefore
+enters the strongest layer set available and publishes which layers it obtained.
+Only a *false* claim fails.
+
+Ordering inside the jail is load-bearing and not rearrangeable: namespaces (need
+`openat` and a writable `/proc`) must precede Landlock (declares
+`handled_access_fs` with no allow rules, so all writes die, including
+`/proc/self/uid_map`), which must precede seccomp (the allow-list contains
+neither `unshare` nor `openat`). PID namespace is deliberately not unshared —
+`CLONE_NEWPID` only affects children created after the unshare, and the jail
+sets `RLIMIT_NPROC=0` so the worker cannot fork; claiming it would be theatre.
 
 ### Verdict contract
 
@@ -60,10 +88,28 @@ The gate's verdict is the last line of stdout:
 
 ## Evidence status
 
-The gate itself was executed on this host and reported
-`PASS — 3 check(s) verified`, including a real `SIGSYS` kill on `socket()`.
-That is **native C-runtime evidence for the jail**, and it is what closes the
-gap left when the self-check landed on 2026-08-15 wired to no runner.
+The gate itself was executed and reported `PASS — 4 check(s) verified`,
+including a real `SIGSYS` kill on `socket()`. That is **native C-runtime
+evidence for the jail**, and it is what closes the gap left when the seccomp
+self-check landed on 2026-08-15 wired to no runner.
+
+The namespace layer was proven on both sides of its posture, which is what
+makes the check meaningful rather than tautological:
+
+| Host | Posture | Net namespace |
+| --- | --- | --- |
+| bare host (Ubuntu 24.04, apparmor userns restriction on) | `unavailable` | `net:[4026531840]` unchanged |
+| `docker run` (default) | `unavailable` | `net:[4026533421]` unchanged |
+| `docker run --security-opt apparmor=unconfined` | `unavailable` | `net:[4026533421]` unchanged |
+| **`docker run --privileged`** | **`active`** | **`net:[4026533421]` → `net:[4026533540]`** |
+
+The privileged-container row is the one that proves the code path actually
+isolates; the others prove it reports its own absence honestly.
+
+QEMU was **not** used: there is no Linux x86_64 qcow2 in-tree and `curl`/`wget`
+are blocked by the context-mode rules, so a VM image would have to be supplied
+out of band. The privileged container exercises the same kernel property, so
+this is a redundancy gap rather than a hole in the evidence.
 
 The **SSpec scenario above has not been executed**: this host has no admitted
 pure-Simple self-hosted runtime (see

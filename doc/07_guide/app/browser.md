@@ -88,12 +88,42 @@ Two operational notes that cost time otherwise:
   allocates when the worker holds fds 0..3 only. A worker holding a higher fd
   fails `sandbox_enter`.
 
+### Namespace posture
+
+The jail also unshares the user, network and IPC namespaces and drops to an
+unprivileged identity, so the renderer loses its *route* to the network instead
+of relying on every socket-creating syscall staying denied. The gate prints:
+
+```
+sandbox_namespaces=active        # netns genuinely isolated
+sandbox_namespaces=unavailable   # host forbids it, reported honestly
+```
+
+`unavailable` is a legitimate result, not a failure. Ubuntu 24.04 ships
+`kernel.apparmor_restrict_unprivileged_userns=1`, which permits `CLONE_NEWUSER`
+but strips its capabilities so `CLONE_NEWNET` returns `EPERM`. Hard-failing
+there would turn a working seccomp+Landlock jail into **no jail** on every
+default Ubuntu host. Read the posture with
+`rt_browser_renderer_namespaces_active()`; never infer it from a successful
+`sandbox_enter()`. Only a false claim — posture `active` while
+`/proc/self/ns/net` is unchanged — fails the self-check.
+
+Ordering is load-bearing: namespaces (need `openat` + writable `/proc`) →
+Landlock (no allow rules, so all writes die, including `/proc/self/uid_map`) →
+seccomp (allow-list has neither `unshare` nor `openat`). PID namespace is
+deliberately not unshared: `CLONE_NEWPID` only affects children created after
+the unshare, and `RLIMIT_NPROC=0` means the worker cannot fork.
+
+To see the active path, run under a permissive kernel —
+`docker run --privileged` flips the same binary to `active` with the netns
+identity actually moving. Default Docker and `--security-opt
+apparmor=unconfined` both still report `unavailable`.
+
 Still open (see
 `doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md`):
-no namespace/privilege drop, and the in-process browsers under
-`src/app/browser/**` evaluate page script in the host process without entering
-the jail at all. The gate proves the jail's syscall contract, not that every
-browser surface uses it.
+the in-process browsers under `src/app/browser/**` evaluate page script in the
+host process without entering the jail at all. The gate proves the jail's
+syscall and namespace contract, not that every browser surface uses it.
 
 ## Related
 

@@ -1,9 +1,11 @@
 # Browser jail: seccomp is a deny-list and in-process browsers are unjailed
 
 - **Date**: 2026-08-15
-- **Status**: PARTIALLY FIXED 2026-08-15 (problem 1 fixed: seccomp is now an
-  ALLOW-list; problem 3 partially addressed: honest sandbox posture surface +
-  refusal gate landed, worker routing still open; problem 2 still open)
+- **Status**: PARTIALLY FIXED (problem 1 fixed 2026-08-15: seccomp is now an
+  ALLOW-list; **problem 2 fixed 2026-08-16**: user/net/IPC namespaces + uid/gid
+  drop, with a published posture bit — see below; problem 3 partially
+  addressed: honest sandbox posture surface + refusal gate landed, worker
+  routing still open)
 - **Area**: runtime (C), app/browser, os/hosted
 - **Research**: `doc/01_research/app/browser/browser_sandbox_model_research_2026-08-15.md`
 
@@ -74,8 +76,9 @@
   `src/app/browser/sandbox_status.spl` (the single flip-line) and the refusal
   gate becomes the jailed path automatically. `src/os/apps/*browser*` remain
   unjailed too.
-- **Namespaces / uid drop (problem 2)**: unchanged — no unshare(user/net/PID),
-  no uid drop.
+- **Namespaces / uid drop (problem 2)**: FIXED 2026-08-16 — see the section
+  below. user/net/IPC unshare + uid/gid drop, posture published. PID namespace
+  deliberately excluded (no fork possible under `RLIMIT_NPROC=0`).
 - Verification gap noted 2026-08-15: `bin/simple test
   test/01_unit/os/hosted/hosted_browser_renderer_worker_spec.spl` times out at
   the test-daemon's 120s worker budget on this host (pre-existing; the
@@ -101,3 +104,55 @@ prior commit's "strict-create enum identity, vendored rspirv repair" subject
 instead of describing the seccomp/sandbox/enum work it actually contains. The
 TREE is correct; only the message is wrong. Force-push is disallowed here, so
 the message was not amended.
+
+## Fixed 2026-08-16 (problem 2: namespaces / privilege drop)
+
+`browser_renderer_enter_namespaces()` in `src/runtime/runtime_process.c`
+unshares `CLONE_NEWUSER`, then writes `/proc/self/setgroups=deny`, `gid_map`
+and `uid_map` (identity-mapping the caller's own uid/gid), then unshares
+`CLONE_NEWNET | CLONE_NEWIPC`. It runs from `browser_renderer_preinit` and the
+ordering is load-bearing and not rearrangeable:
+
+    namespaces -> landlock -> seccomp
+
+Namespaces need `openat` and a writable `/proc`; the Landlock ruleset declares
+`handled_access_fs` with **no allow rules**, so every write dies the moment it
+applies — including `/proc/self/uid_map`; and the seccomp allow-list contains
+neither `unshare` nor `openat`. Any other order makes the uid/gid drop
+impossible.
+
+PID namespace is deliberately NOT unshared: `CLONE_NEWPID` only takes effect
+for children created after the unshare, and the jail already sets
+`RLIMIT_NPROC=0` so the worker cannot fork. Claiming it would be theatre.
+
+**Namespace loss is recorded, not fatal.** Ubuntu 24.04 ships
+`kernel.apparmor_restrict_unprivileged_userns=1`, which lets an unconfined
+binary create `CLONE_NEWUSER` but strips its capabilities, so `CLONE_NEWNET`
+returns `EPERM`. Treating that as fatal would turn a working seccomp+Landlock
+jail into NO jail on every default Ubuntu host — strictly worse security for a
+stricter-looking check. `rt_browser_renderer_namespaces_active()` publishes
+which layers were obtained; the gate prints
+`sandbox_namespaces=active|unavailable`.
+
+Proven by `src/runtime/test/rt_browser_renderer_namespace_selfcheck.c`, driven
+by `scripts/check/check-browser-renderer-sandbox-seccomp.shs`. The check does
+not trust the posture boolean: it compares `/proc/self/ns/net` before and after
+and FAILS on a false claim in either direction (posture says isolated while the
+namespace is unchanged, or the namespace moved while posture under-reports).
+
+Evidence across four hosts, which is what makes the check non-tautological:
+
+| Host | Posture | Net namespace |
+| --- | --- | --- |
+| bare host (Ubuntu 24.04) | `unavailable` | `net:[4026531840]` unchanged |
+| `docker run` (default) | `unavailable` | `net:[4026533421]` unchanged |
+| `docker run --security-opt apparmor=unconfined` | `unavailable` | `net:[4026533421]` unchanged |
+| `docker run --privileged` | `active` | `net:[4026533421]` -> `net:[4026533540]` |
+
+QEMU was not used: no Linux x86_64 qcow2 exists in-tree and `curl`/`wget` are
+blocked by the context-mode rules, so a VM image must be supplied out of band.
+The privileged container exercises the same kernel property.
+
+Problem 3 remains open: the in-process browsers under `src/app/browser/**` and
+`src/os/apps/*browser*` still evaluate page script in the host process without
+entering this jail.

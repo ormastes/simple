@@ -179,3 +179,23 @@ records `coverage_collector_skips_pub_val_and_match_heads_2026-08-15.md` and
   namespace/privilege drop, and in-process browsers under `src/app/browser/**`
   still evaluate page script unjailed. The gate proves the jail's syscall
   contract, not that every browser surface enters it.
+
+## Handoff Notes (2026-08-16, second pass — namespaces)
+
+- **Problem 2 of the seccomp bug is now fixed** (user/net/IPC namespaces +
+  uid/gid drop). The one thing to know before touching it: the order
+  `namespaces -> landlock -> seccomp` is NOT rearrangeable. Landlock's ruleset
+  has no allow rules, so it kills every write including `/proc/self/uid_map`;
+  the seccomp allow-list has neither `unshare` nor `openat`. Move the namespace
+  step after either one and the uid drop becomes impossible.
+- **Do not make namespace failure fatal.** Ubuntu 24.04's
+  `kernel.apparmor_restrict_unprivileged_userns=1` allows `CLONE_NEWUSER` but
+  strips capabilities so `CLONE_NEWNET` gets EPERM. Hard-failing leaves NO jail
+  on default Ubuntu — worse than seccomp+landlock. Posture is published via
+  `rt_browser_renderer_namespaces_active()` instead.
+- **To actually exercise the active path**: `docker run --privileged`. Default
+  Docker and `--security-opt apparmor=unconfined` both still report
+  `unavailable`, so they cannot prove the code works — only `--privileged` did
+  (netns `net:[4026533421] -> net:[4026533540]`).
+- **PID namespace is intentionally absent.** Don't "fix" it: `CLONE_NEWPID`
+  only affects post-unshare children and `RLIMIT_NPROC=0` blocks forking.

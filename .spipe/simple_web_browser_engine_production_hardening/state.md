@@ -2725,3 +2725,43 @@ implementation in progress / target evidence blocked
   (no namespace/privilege drop; in-process browsers under `src/app/browser/**`
   still evaluate page script unjailed). The gate proves the jail's syscall
   contract, not that every browser surface enters the jail.
+
+## 2026-08-16 (second pass) — sandbox problem 2 implemented + container-verified
+
+- **Implemented** `browser_renderer_enter_namespaces()` in
+  `src/runtime/runtime_process.c`, closing problem 2 of
+  `doc/08_tracking/bug/browser_seccomp_denylist_and_inprocess_unjailed_2026-08-15.md`:
+  unshare `CLONE_NEWUSER` -> write `/proc/self/setgroups=deny`, `gid_map`,
+  `uid_map` -> unshare `CLONE_NEWNET | CLONE_NEWIPC`. Runs from
+  `browser_renderer_preinit`. Ordering namespaces -> landlock -> seccomp is
+  load-bearing: landlock declares `handled_access_fs` with no allow rules
+  (kills every write, including `/proc/self/uid_map`) and the seccomp
+  allow-list has neither `unshare` nor `openat`.
+- **runtime_need**: the jail is a C-runtime-owned property; `chosen_path`
+  = `runtime-owned-change` (this IS the runtime owner module).
+  `rejected_shortcuts`: (a) hard-failing `sandbox_enter` when namespaces are
+  unavailable — rejected because Ubuntu 24.04's
+  `kernel.apparmor_restrict_unprivileged_userns=1` would then leave NO jail at
+  all on default hosts, strictly worse than seccomp+landlock; (b) trusting the
+  posture boolean in the self-check instead of comparing `/proc/self/ns/net` —
+  rejected as exactly the false-green this repo keeps hitting.
+- **PID namespace deliberately not unshared**: `CLONE_NEWPID` only affects
+  children created after the unshare and `RLIMIT_NPROC=0` forbids forking.
+  Claiming it would be theatre. Recorded so a later agent does not "fix" it.
+- **New evidence**: `src/runtime/test/rt_browser_renderer_namespace_selfcheck.c`
+  (fails on a false claim in EITHER direction), driven by the extended
+  `scripts/check/check-browser-renderer-sandbox-seccomp.shs`, now
+  `PASS — 4 check(s) verified` and printing `sandbox_namespaces=`.
+- **Container verification (both postures proven, so the check is not
+  tautological):** bare host `unavailable`; `docker run` default `unavailable`;
+  `--security-opt apparmor=unconfined` `unavailable`; **`--privileged`
+  `active`** with the netns identity genuinely moving
+  `net:[4026533421] -> net:[4026533540]`.
+- **QEMU: NOT DONE.** No Linux x86_64 qcow2 exists in-tree and `curl`/`wget`
+  are blocked by the context-mode rules, so a VM image must be supplied out of
+  band. The privileged container exercises the same kernel property, so this is
+  a redundancy gap, not a hole. Do not record QEMU evidence for this row.
+- **Still NOT promoted.** All of the above is native C-runtime evidence. The
+  SSpec scenario remains **unexecuted** — no admitted pure-Simple runtime; see
+  the runtime blocker recorded in the previous entry, unchanged. Problem 3
+  (in-process browsers unjailed) remains open.

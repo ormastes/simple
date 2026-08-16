@@ -2472,3 +2472,89 @@ scratch address allowlisted, reject arbitrary payloads/addresses, and preserve
 the UART reset-burst transcript. An immutable packaged-root
 manifest remains real VFS evidence when CLI `ls` calls public `readdir`; never
 hardcode the listing in the shell command handler.
+
+## When NO SSpec can be executed at all (2026-08-16)
+
+Sometimes the answer to "run the spec" is that **no runtime exists to run any
+spec**, and the honest move is to stop hunting for a runner. Every route to
+pure-Simple executable evidence was closed simultaneously on 2026-08-16. Verify
+this state before spending a session rediscovering it:
+
+| Candidate | Result |
+|---|---|
+| `bin/simple` (and `build/browser-vulkan/simple`) | **Rust seed** — prints "bootstrap seed only; do not use it as the normal tool" |
+| `bootstrap/stage3/simple` | only non-seed binary; **core-dumps on a two-line hello-world** via BOTH its commands (`compile --format=smf`, `native-build`). It has no `test`/`run` command at all |
+| a fresh bootstrap | **blocked by design** (below) |
+
+The bootstrap is not merely broken, it is *intentionally unreachable* at this
+commit. `scripts/bootstrap/bootstrap-from-scratch.sh` (which DOES exist, 112 KB —
+`.spipe/stage3-segfault-fix/state.md`'s note calling it a "stale reference /
+does not exist" is wrong) refuses to start Stage 1 without a planner-admission-v2
+envelope. Per
+`doc/07_guide/compiler/minimal_bootstrap_configuration_composition.md`, only a
+"future non-circular producer ... may wrap it in the 29-field planner admission
+v2 envelope. **That producer does not yet exist.**" Confirmed empirically: a
+correctly-formed authorization leaf emitted by the sanctioned seed path
+(`src/app/build/bootstrap_receipt_main.spl`, reason
+`self-host-convergence-check`, four real SHA-256 bindings) is rejected by both
+`--validate-bootstrap-receipt` and a real run with
+`bootstrap-policy-error: malformed-or-untrusted-planner-admission-v2`. **No
+stage starts.** Direct Stage 3 resume enforces the same verifier, so there is no
+side door.
+
+**A container does not rescue you.** `tools/docker/Dockerfile.browser-vulkan`
+and `Dockerfile.test-isolation` are deliberately deps-only — they bind-mount the
+repo at run time and still expect a *qualified self-hosted CLI* on the inside.
+They supply drivers and libraries, never a runtime. Do not spend cycles building
+images hoping to dodge the bootstrap wall.
+
+### What IS still verifiable, and where to put evidence meanwhile
+
+Native C self-checks under `src/runtime/test/**` compile and run with nothing
+but `cc`, independent of every blocker above. When the Simple runtime is down,
+that is the only executable tier left — so a lane whose property lives in the C
+runtime should gate it there rather than reporting the whole lane unverifiable.
+Worked example: `scripts/check/check-browser-renderer-sandbox-seccomp.shs`
+drives two `src/runtime/test/*.c` self-checks for REQ-WEB-BROWSER-014 and
+produced real evidence (a genuine `SIGSYS` kill, and a namespace identity
+actually changing) on a host where no `.spl` spec could run at all.
+
+Rules that keep this honest:
+
+- **Split the claim.** Say which tier produced the evidence. "The gate passed"
+  and "the SSpec passed" are different sentences; a green C gate promotes no
+  requirement whose acceptance is defined in SSpec.
+- **An unexecuted spec is unverified code**, not a pass-in-waiting. It may not
+  even parse. Check matcher names exist against `src/lib/nogc_sync_mut/spec.spl`
+  before claiming it is ready — `to_not_contain` does NOT exist, though
+  `to_contain`/`to_equal` do.
+- **Never substitute the seed.** Seed output is not evidence for a self-hosted
+  lane, and the seed's own banner says so.
+- Record the blocker once in the lane state and stop; do not re-derive it per
+  session.
+
+### Capability that the host forbids is a posture, not a failure
+
+Related trap from the same lane. A jail/capability lane will hit hosts where the
+kernel refuses the hardening outright: Ubuntu 24.04 ships
+`kernel.apparmor_restrict_unprivileged_userns=1`, which lets an unconfined
+binary create `CLONE_NEWUSER` but strips its capabilities, so the follow-up
+`CLONE_NEWNET` returns `EPERM`.
+
+Do **not** make that fatal. Hard-failing there converts a working
+seccomp+Landlock jail into *no jail* on every default Ubuntu host — strictly
+worse security for a stricter-looking check. Publish the posture instead
+(`rt_browser_renderer_namespaces_active()`, printed by the gate as
+`sandbox_namespaces=active|unavailable`) and have the self-check fail only on a
+**false claim** — posture says isolated while `/proc/self/ns/net` is unchanged.
+That is the discriminating assertion; the boolean alone is not.
+
+Prove the restricted path really works somewhere permissive rather than
+assuming it: `docker run --privileged` flipped the same binary from
+`namespaces=unavailable` to `namespaces=active` with the netns identity
+genuinely moving (`net:[4026533421] -> net:[4026533540]`). Default Docker and
+`--security-opt apparmor=unconfined` both still report `unavailable`, so
+`--privileged` is the discriminator worth reaching for. A QEMU Linux VM would
+serve equally, but note there is **no Linux x86_64 qcow2 in-tree** and
+`curl`/`wget` are blocked by the context-mode rules, so that route needs an
+image supplied out of band.
