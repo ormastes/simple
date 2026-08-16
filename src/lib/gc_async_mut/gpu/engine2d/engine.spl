@@ -38,7 +38,7 @@ use std.gpu.engine2d.backend_cpu.{CpuBackend}
 use std.gpu.engine2d.backend_cuda.{CudaBackend}
 use std.gpu.engine2d.backend_cuda_font_ptx.{FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256, FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION, cuda_font_atlas_composite_ptx, cuda_font_atlas_composite_ptx_trusted}
 use std.gc_async_mut.gpu.engine2d.cuda_session.{CUDA_FONT_PTX_MAX_BYTES}
-use std.gpu.engine2d.backend_vulkan.{VulkanBackend, vulkan_submitted_framebuffer_handle, vulkan_submitted_device_identity, vulkan_submitted_generation, vulkan_framebuffer_ownership_handle, vulkan_cancel_submitted_present_source}
+use std.gpu.engine2d.backend_vulkan.{VulkanBackend, VulkanFrameReceipt, vulkan_submitted_framebuffer_handle, vulkan_submitted_device_identity, vulkan_submitted_generation, vulkan_framebuffer_ownership_handle, vulkan_cancel_submitted_present_source}
 use std.gpu.engine2d.backend_vulkan_font
 use std.gpu.engine2d.backend_vulkan_font_types.{VulkanFontCompositeEvidence}
 use std.gpu.engine2d.helpers_text.{text_aa_blit_buffer}
@@ -2938,6 +2938,80 @@ class Engine2D with DrawIrRenderTarget:
             readback
         else:
             self.backend.read_pixels_with_source()
+
+    me read_pixels_damaged(max_rects: i32) -> [u32]:
+        """Borrowed retained damage mirror from the active backend.
+
+        Backends without a retained mirror fall back to a full read via the
+        RenderBackend trait default. Callers must not retain the returned
+        array across another damaged read."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            return vg.read_pixels()
+        elif val Some(bm) = self.baremetal_backend:
+            return bm.read_pixels()
+        elif self.selected_backend_name == "cuda":
+            val cuda = self.cuda_backend.?
+            val pixels = cuda.read_pixels()
+            self.cuda_backend = cuda
+            self.backend = cuda
+            return pixels
+        elif val Some(vulkan) = self._vulkan_primitive_target():
+            val pixels = vulkan.read_pixels_damaged(max_rects)
+            self.vulkan_backend = Some(vulkan)
+            self.backend = vulkan
+            return pixels
+        else:
+            return self.backend.read_pixels_damaged(max_rects)
+
+    me stage_present_damage(rects: [i64]) -> bool:
+        """Stage an exact damage plan for the next Vulkan present.
+
+        Non-Vulkan owners return false so callers conservatively select the
+        full-frame path instead of assuming a partial refresh was staged."""
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            val ok = vulkan.stage_present_damage(rects)
+            self.vulkan_backend = Some(vulkan)
+            self.backend = vulkan
+            return ok
+        false
+
+    me present_window_device() -> bool:
+        """Present via the Vulkan window swapchain. False without Vulkan."""
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            val ok = vulkan.present_window_device()
+            self.vulkan_backend = Some(vulkan)
+            self.backend = vulkan
+            return ok
+        false
+
+    me latest_vulkan_frame_receipt() -> VulkanFrameReceipt?:
+        """Most recent Vulkan frame receipt, or nil without a Vulkan owner."""
+        if val Some(vulkan) = self.vulkan_backend:
+            return Some(vulkan.latest_frame_receipt())
+        nil
+
+    me finalize_compute_frame_no_readback() -> bool:
+        """Finalize a Vulkan compute frame device-resident (no readback).
+
+        Non-Vulkan owners return false so callers fall back to present()."""
+        if val Some(vulkan) = self._vulkan_primitive_target():
+            val ok = vulkan.finalize_compute_frame_no_readback()
+            self.vulkan_backend = Some(vulkan)
+            self.backend = vulkan
+            return ok
+        false
+
+    me vulkan_present_readback_bytes() -> i64:
+        """Bytes copied device->host by the most recent Vulkan present."""
+        if val Some(vulkan) = self.vulkan_backend:
+            return vulkan.present_readback_bytes
+        0
+
+    me vulkan_device_finalize_no_readback_count() -> i64:
+        """Count of Vulkan frames finalized device-resident (no readback)."""
+        if val Some(vulkan) = self.vulkan_backend:
+            return vulkan.device_finalize_no_readback_count
+        0
 
     # ========================================================================
     # Lifecycle

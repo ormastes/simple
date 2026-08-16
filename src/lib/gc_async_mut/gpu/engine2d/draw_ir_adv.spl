@@ -1774,7 +1774,6 @@ fn _engine2d_draw_ir_select_damage_commands(
     var selected: [DrawIrCommand] = []
     var selected_weights: [i32] = []
     var culled = 0
-    var culled_commands = 0
     var index: i64 = 0
     while index < plan.commands.len():
         val command = plan.commands[index]
@@ -1800,13 +1799,13 @@ fn _engine2d_draw_ir_select_damage_commands(
                 selected_weights.push(weight)
         else:
             culled += weight
-            culled_commands += 1
         index += 1
     Engine2dDrawIrDamageSelection(
         plan: Engine2dDrawIrCommandPlan(
             commands: selected, logical_weights: selected_weights),
         culled_logical_count: culled,
-        culled_command_count: culled_commands)
+        # Logical source-command receipts, matching the indexed selector.
+        culled_command_count: culled)
 
 fn _engine2d_draw_ir_spatial_index_invalid() -> Engine2dDrawIrSpatialIndex:
     Engine2dDrawIrSpatialIndex(
@@ -1955,7 +1954,6 @@ fn _engine2d_draw_ir_select_damage_indexed(
     var selected: [DrawIrCommand] = []
     var selected_weights: [i32] = []
     var selected_logical = 0
-    var selected_commands = 0
     while true:
         var minimum = 2147483647
         source = 0
@@ -1992,7 +1990,6 @@ fn _engine2d_draw_ir_select_damage_indexed(
             if plan.logical_weights.len() != 0:
                 selected_weights.push(weight)
             selected_logical += weight
-            selected_commands += 1
         source = 0
         while source < source_count:
             if cursors[source] < ends[source]:
@@ -2007,8 +2004,11 @@ fn _engine2d_draw_ir_select_damage_indexed(
         plan: Engine2dDrawIrCommandPlan(
             commands: selected, logical_weights: selected_weights),
         culled_logical_count: spatial.logical_total - selected_logical,
-        culled_command_count:
-            plan.commands.len().to_i32() - selected_commands)
+        # Culled receipts count LOGICAL source commands, not post-coalesce
+        # physical entries: a merged run of N adjacent fills culled by damage
+        # is N commands the author submitted and the executor skipped (pinned
+        # by the embedded-index spec example expecting 512, not 3).
+        culled_command_count: spatial.logical_total - selected_logical)
 
 # Render one batch's flat command list onto `engine`, with every command's
 # local (x, y) shifted by (offset_x, offset_y). Shared by the direct
@@ -3213,8 +3213,26 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
         # unsatisfiable (see the ordering note in
         # web_engine2d_lane_matrix_parity_spec.spl).
         readback = eng.read_pixels_with_source()
+    # Caller-visible frame writeback for host-memory backends. Interpreter
+    # assignment semantics deep-copy a class on `var eng = engine` (see
+    # doc/08_tracking/bug/engine2d_draw_ir_free_function_state_visibility_2026-06-05.md),
+    # so without this the composed frame lives only in the local copy and the
+    # caller's retained Engine2D never receives it — breaking every retained-
+    # damage lineage that seeds via a present entrypoint and then replays
+    # damage on the caller-owned engine. Method calls on the PARAMETER are
+    # caller-visible, so blit the final surface back onto `engine` and present
+    # there. Device-resident backends (vulkan/metal/cuda/virtio/baremetal)
+    # share native handles across the copy and keep their existing path.
+    val writeback_backend = eng.backend_name()
+    val host_memory_writeback = (writeback_backend == "cpu" or
+        writeback_backend == "cpu_simd" or writeback_backend == "software")
+    if host_memory_writeback:
+        engine.draw_image(0, 0, eng.width(), eng.height(), eng.read_pixels())
     if present_frame:
-        eng.present()
+        if host_memory_writeback:
+            engine.present()
+        else:
+            eng.present()
     var result = _engine2d_draw_ir_result_from_composition_plan_with_unsupported(
         plan, rendered, skipped, unsupported_kinds, readback)
     if gpu_fallback_required:
@@ -3682,14 +3700,12 @@ fn _engine2d_draw_ir_render_composition_damaged_with_images(
             tiles_skipped: 0, ops_rendered: 0, ops_skipped: 0,
             unsupported_kinds: "invalid-damage-plan",
             readback: engine2d_readback([], "preflight_rejected"))
-    val preflight_reason = _engine2d_draw_ir_fresh_device_reason(
-        composition, images, engine.width(), engine.height())
-    if preflight_reason != "":
-        return Engine2dDrawIrTileOutcome(
-            engine: engine, tiles_total: 0, tiles_rendered: 0,
-            tiles_skipped: 0, ops_rendered: 0, ops_skipped: 0,
-            unsupported_kinds: preflight_reason,
-            readback: engine2d_readback([], "preflight_rejected"))
+    # No fresh-device preflight here: this internal executor serves RETAINED
+    # partial updates whose surface the caller has already seeded, where
+    # demanding an opaque full-target first command would reject every
+    # legitimate sparse replay. The public `..._with_images` wrapper applies
+    # the fresh-device preflight itself (pinned by the "does not retain a
+    # Vulkan damage plan after rejected composition preflight" spec example).
     for batch in composition.batches:
         val embedding = batch.embedding
         if (embedding.width <= 0 or embedding.height <= 0 or
@@ -3815,6 +3831,20 @@ fn engine2d_draw_ir_render_composition_damaged_with_images(
     damage_rects: [i64],
     readback_frame: bool
 ) -> Engine2dDrawIrTileOutcome:
+    # Fresh-device preflight lives on this public wrapper, not the internal
+    # executor: a rejected replay must not leave a stale plan (see the
+    # "rejected composition preflight" spec example), while retained-only
+    # callers (single-root composition fast path, deferred-CPU lane) replay
+    # sparse damage on an already-seeded surface and must not be forced to
+    # open with an opaque full-target command.
+    val preflight_reason = _engine2d_draw_ir_fresh_device_reason(
+        composition, images, engine.width(), engine.height())
+    if preflight_reason != "":
+        return Engine2dDrawIrTileOutcome(
+            engine: engine, tiles_total: 0, tiles_rendered: 0,
+            tiles_skipped: 0, ops_rendered: 0, ops_skipped: 0,
+            unsupported_kinds: preflight_reason,
+            readback: engine2d_readback([], "preflight_rejected"))
     _engine2d_draw_ir_render_composition_damaged_with_images(
         engine, composition, images, damage_rects, readback_frame, false)
 
@@ -3935,9 +3965,7 @@ fn engine2d_draw_ir_render_composition_damaged(
             readback: engine2d_readback([], "preflight_rejected"))
     val batch = composition.batches[0]
     val embedding = batch.embedding
-    if (embedding.x != 0 or embedding.y != 0 or
-        embedding.width != engine.width() or
-        embedding.height != engine.height() or
+    if (embedding.width <= 0 or embedding.height <= 0 or
         embedding.opacity_milli != 1000 or
         _engine2d_draw_ir_batch_samples_parent(batch)):
         return Engine2dDrawIrTileOutcome(
@@ -3947,6 +3975,15 @@ fn engine2d_draw_ir_render_composition_damaged(
             unsupported_kinds: "retained-composition-unsafe-embedding",
             readback: engine2d_readback([], "preflight_rejected"))
     var images: [Engine2dResolvedDrawIrImage] = []
+    if (embedding.x != 0 or embedding.y != 0 or
+        embedding.width != engine.width() or
+        embedding.height != engine.height()):
+        # An offset/cropped opaque root batch is a legitimate retained update:
+        # clamp the damage to the embedding and replay only its overlap via
+        # the embedding-aware executor (no fresh-device preflight — the
+        # caller's surface is already seeded).
+        return _engine2d_draw_ir_render_composition_damaged_with_images(
+            engine, composition, images, damage_rects, readback_frame, false)
     engine2d_draw_ir_render_damaged_with_images(
         engine, batch.commands, images, damage_rects, readback_frame)
 
