@@ -380,3 +380,36 @@ New acceptance criteria (extends AC-1..AC-12 above):
   defects fixed: Simple->C `text` ABI is ONE RuntimeString ptr (not ptr+len;
   the wrong-length write masqueraded as disk-full) and a FAT32 per-call
   aligned-buffer leak. Resume: dump first 16 bytes the extraction loop sees.
+- merge wave 6b (2026-08-16): W6-C std.enterprise_finance merged. Trial
+  balance / AR / AP reads over the EXISTING journal; period close as
+  insert-only period_locks with a trial-balance snapshot. SEAM: the period
+  check lives in enterprise_store/records.spl (period_latest_close,
+  journal_post_allowed, journal_post_pair) — goods_sale.post_journal and
+  restaurant.rest_post_journal are thin wrappers, so both inherit the lock
+  and the dependency stays finance->store. LIMITS (documented): only
+  postings routed through journal_post_pair are checked (a raw
+  store_insert_row into journal bypasses it); the lock is a hard freeze
+  through a date, not a window; locks are insert-only (no reopen). Two real
+  bugs fixed: (1) uow_rollback does NOT undo issued inserts on this backend,
+  so a denial inside the UoW left an order_events row and flipped derived
+  status — validation now happens BEFORE uow_begin; (2) period-transition
+  was checked before idempotency, misreporting a replay as invalid-transition.
+  Red-first 4/6 -> 6/6; regressions goods_sale 7/7, restaurant 7/7, booking
+  8/8, payment 7/7. Merge fixes by orchestrator: 3-way dropped the finance
+  role (base predated wave 6a) — re-added by hand, and the action strings
+  corrected from fin.* to finance.* to match the implementation's
+  role_allows calls. Merged-tree reruns: finance 6/6, goods_sale 7/7,
+  restaurant 7/7.
+- HARNESS DEFECT found by W6-C, applies to THIS orchestration (2026-08-16):
+  lane worktrees were created with `build` symlinked to the main tree, which
+  causes CROSS-WORKTREE COMPILE-CACHE CONTAMINATION — W6-C observed a
+  `post_journal` hardcoded to false still producing accepted orders because
+  the compiler resolved a CACHED goods_sale from another worktree. Impact:
+  red-first evidence produced inside lane worktrees may be unreliable where
+  the sabotaged module was cached elsewhere. MITIGATION APPLIED: (a) running
+  lanes W7-A/W7-B were told to remove the symlink and re-verify from
+  scratch; (b) every merge in this orchestration was re-verified by running
+  the specs in the main tree (its own build dir) after merge — those runs
+  are the trustworthy evidence, and all have been green; (c) future lane
+  worktrees must NOT share build/. Re-verification of earlier lanes'
+  red-first claims under clean caches is an OPEN follow-up.

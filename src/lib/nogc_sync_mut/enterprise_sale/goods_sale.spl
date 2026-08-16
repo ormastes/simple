@@ -31,8 +31,9 @@ use std.nogc_sync_mut.enterprise_store.store.{
 }
 use std.nogc_sync_mut.enterprise_store.records.{
     idempotency_seen, idempotency_result, idempotency_record,
-    outbox_append, audit_append
+    outbox_append, audit_append, journal_post_allowed, journal_post_pair
 }
+use std.nogc_sync_mut.ffi.system.{time_now}
 use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
 use std.nogc_sync_mut.enterprise_sale.foundation.{
     TenantContext, ActorContext, SessionContext, Money,
@@ -134,13 +135,12 @@ fn sale_journal_balanced(store: EnterpriseStore, tenant_id: text) -> bool:
 # Guarded order commands
 # =============================================================================
 
-fn post_journal(store: EnterpriseStore, tenant_id: text, order_id: text, debit_account: text, credit_account: text, amount_cents: i64):
-    store_insert_row(store,
-        "INSERT INTO journal (tenant_id, order_id, account, side, amount_cents) VALUES (?, ?, ?, ?, ?)",
-        [tenant_id, order_id, debit_account, "debit", "{amount_cents}"])
-    store_insert_row(store,
-        "INSERT INTO journal (tenant_id, order_id, account, side, amount_cents) VALUES (?, ?, ?, ?, ?)",
-        [tenant_id, order_id, credit_account, "credit", "{amount_cents}"])
+# post_journal routes through the shared period seam (records.journal_post_pair):
+# a posting dated inside a closed finance period is refused (false, no rows).
+# Postings from this module are dated "now" (server wall clock), sampled ONCE
+# per command so the pre-UoW `journal_post_allowed` check and the write agree.
+fn post_journal(store: EnterpriseStore, tenant_id: text, order_id: text, debit_account: text, credit_account: text, amount_cents: i64, posted_at_epoch: i64) -> bool:
+    journal_post_pair(store, tenant_id, order_id, debit_account, credit_account, amount_cents, posted_at_epoch)
 
 # sale_place_order executes the guarded sequence for a new order of `qty`
 # units of `sku`. Replaying the same idempotency key returns the recorded
@@ -160,6 +160,11 @@ fn sale_place_order(store: EnterpriseStore, session: SessionContext, tenant: Ten
         return denied("not-found", sku)
     if sale_available_stock(store, tenant.tenant_id, sku) < qty:
         return denied("insufficient-stock", sku)
+    # 3b. period lock — checked BEFORE the unit of work opens, so a denial
+    # writes nothing at all (see the rollback caveat in the finance guide).
+    val posted_at = time_now()
+    if not journal_post_allowed(store, tenant.tenant_id, posted_at):
+        return denied("invalid-transition", order_id)
     # 4. idempotency — a replay returns the recorded outcome, no new effect
     if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
@@ -171,7 +176,9 @@ fn sale_place_order(store: EnterpriseStore, session: SessionContext, tenant: Ten
     store_insert_row(store,
         "INSERT INTO stock_moves (tenant_id, sku, delta, reason, order_id) VALUES (?, ?, ?, ?, ?)",
         [tenant.tenant_id, sku, "{0 - qty}", "reserve", order_id])
-    post_journal(store, tenant.tenant_id, order_id, "accounts_receivable", "sales_revenue", price * qty)
+    if not post_journal(store, tenant.tenant_id, order_id, "accounts_receivable", "sales_revenue", price * qty, posted_at):
+        uow_rollback(store)
+        return denied("invalid-transition", order_id)
     outbox_append(store, tenant.tenant_id, "sales.order.created", order_id)
     audit_append(store, tenant.tenant_id, who.actor_id, "order.create", order_id)
     idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, order_id)
@@ -186,6 +193,11 @@ fn sale_pay_order(store: EnterpriseStore, session: SessionContext, tenant: Tenan
         return denied("forbidden", order_id)
     if sale_order_status(store, tenant.tenant_id, order_id) != "created":
         return denied("invalid-record", order_id)
+    # 3b. period lock — checked BEFORE the unit of work opens, so a denial
+    # writes nothing at all (see the rollback caveat in the finance guide).
+    val posted_at = time_now()
+    if not journal_post_allowed(store, tenant.tenant_id, posted_at):
+        return denied("invalid-transition", order_id)
     if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     val amount = order_amount(store, tenant.tenant_id, order_id)
@@ -193,7 +205,9 @@ fn sale_pay_order(store: EnterpriseStore, session: SessionContext, tenant: Tenan
     store_insert_row(store,
         "INSERT INTO order_events (tenant_id, order_id, event, detail) VALUES (?, ?, ?, ?)",
         [tenant.tenant_id, order_id, "paid", ""])
-    post_journal(store, tenant.tenant_id, order_id, "cash", "accounts_receivable", amount)
+    if not post_journal(store, tenant.tenant_id, order_id, "cash", "accounts_receivable", amount, posted_at):
+        uow_rollback(store)
+        return denied("invalid-transition", order_id)
     outbox_append(store, tenant.tenant_id, "payment.captured", order_id)
     audit_append(store, tenant.tenant_id, who.actor_id, "order.pay", order_id)
     idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, order_id)
@@ -209,6 +223,11 @@ fn sale_refund_order(store: EnterpriseStore, session: SessionContext, tenant: Te
         return denied("forbidden", order_id)
     if sale_order_status(store, tenant.tenant_id, order_id) != "paid":
         return denied("invalid-record", order_id)
+    # 3b. period lock — checked BEFORE the unit of work opens, so a denial
+    # writes nothing at all (see the rollback caveat in the finance guide).
+    val posted_at = time_now()
+    if not journal_post_allowed(store, tenant.tenant_id, posted_at):
+        return denied("invalid-transition", order_id)
     if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     val amount = order_amount(store, tenant.tenant_id, order_id)
@@ -220,7 +239,9 @@ fn sale_refund_order(store: EnterpriseStore, session: SessionContext, tenant: Te
     store_insert_row(store,
         "INSERT INTO stock_moves (tenant_id, sku, delta, reason, order_id) VALUES (?, ?, ?, ?, ?)",
         [tenant.tenant_id, order_sku.0, "{order_sku.1}", "refund-return", order_id])
-    post_journal(store, tenant.tenant_id, order_id, "sales_revenue", "cash", amount)
+    if not post_journal(store, tenant.tenant_id, order_id, "sales_revenue", "cash", amount, posted_at):
+        uow_rollback(store)
+        return denied("invalid-transition", order_id)
     outbox_append(store, tenant.tenant_id, "sales.order.refunded", order_id)
     audit_append(store, tenant.tenant_id, who.actor_id, "order.refund", order_id)
     idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, order_id)

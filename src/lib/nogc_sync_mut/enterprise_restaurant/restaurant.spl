@@ -32,12 +32,13 @@ Frozen restaurant denial reasons (extending the foundation's closed set):
 
 use std.nogc_sync_mut.enterprise_store.store.{
     EnterpriseStore, store_migrate, store_rows, store_insert_row,
-    uow_begin, uow_commit
+    uow_begin, uow_commit, uow_rollback
 }
 use std.nogc_sync_mut.enterprise_store.records.{
     idempotency_seen, idempotency_result, idempotency_record,
-    outbox_append, audit_append
+    outbox_append, audit_append, journal_post_allowed, journal_post_pair
 }
+use std.nogc_sync_mut.ffi.system.{time_now}
 use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
 use std.nogc_sync_mut.enterprise_sale.foundation.{
     TenantContext, ActorContext, SessionContext,
@@ -143,13 +144,11 @@ fn restaurant_session_total(store: EnterpriseStore, tenant_id: text, session_id:
 # Journal posting (same debit/credit-pair approach as goods_sale.post_journal)
 # =============================================================================
 
-fn rest_post_journal(store: EnterpriseStore, tenant_id: text, ref_id: text, debit_account: text, credit_account: text, amount_cents: i64):
-    store_insert_row(store,
-        "INSERT INTO journal (tenant_id, order_id, account, side, amount_cents) VALUES (?, ?, ?, ?, ?)",
-        [tenant_id, ref_id, debit_account, "debit", "{amount_cents}"])
-    store_insert_row(store,
-        "INSERT INTO journal (tenant_id, order_id, account, side, amount_cents) VALUES (?, ?, ?, ?, ?)",
-        [tenant_id, ref_id, credit_account, "credit", "{amount_cents}"])
+# rest_post_journal routes through the shared finance period seam
+# (records.journal_post_pair): postings dated inside a closed period are
+# refused (false, no rows) and the command must roll back.
+fn rest_post_journal(store: EnterpriseStore, tenant_id: text, ref_id: text, debit_account: text, credit_account: text, amount_cents: i64, posted_at_epoch: i64) -> bool:
+    journal_post_pair(store, tenant_id, ref_id, debit_account, credit_account, amount_cents, posted_at_epoch)
 
 # =============================================================================
 # Guarded commands
@@ -275,6 +274,11 @@ fn bill_close_session(store: EnterpriseStore, session: SessionContext, tenant: T
         val status = restaurant_line_status(store, tenant.tenant_id, session_id, line_id)
         if status != "served" and status != "voided":
             return denied("unserved-lines", line_id)
+    # Period lock — checked BEFORE the unit of work opens, so a denial writes
+    # nothing at all (see the rollback caveat in the finance guide).
+    val posted_at = time_now()
+    if not journal_post_allowed(store, tenant.tenant_id, posted_at):
+        return denied("invalid-transition", session_id)
     if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     val total = restaurant_session_total(store, tenant.tenant_id, session_id)
@@ -282,7 +286,9 @@ fn bill_close_session(store: EnterpriseStore, session: SessionContext, tenant: T
     store_insert_row(store,
         "INSERT INTO rest_session_events (tenant_id, session_id, venue_id, table_id, event, detail) VALUES (?, ?, ?, ?, ?, ?)",
         [tenant.tenant_id, session_id, "", "", "closed", "total:{total}"])
-    rest_post_journal(store, tenant.tenant_id, session_id, "cash", "sales_revenue", total)
+    if not rest_post_journal(store, tenant.tenant_id, session_id, "cash", "sales_revenue", total, posted_at):
+        uow_rollback(store)
+        return denied("invalid-transition", session_id)
     outbox_append(store, tenant.tenant_id, "restaurant.session.closed", session_id)
     audit_append(store, tenant.tenant_id, who.actor_id, "restaurant.bill.close", session_id + ":{total}")
     idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, "{total}")

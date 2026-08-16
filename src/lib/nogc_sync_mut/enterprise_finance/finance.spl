@@ -1,0 +1,245 @@
+"""
+# Enterprise Finance — reporting and period control over the shared journal
+
+Lane `.spipe/simple_enterprise_suite`, W6-C (design §6.3, finance vertical:
+journals, AR/AP, period close and lock; tax/multi-currency/budgets/assets
+are future work and deliberately absent).
+
+This module does NOT fork the journal. It reads the SAME `journal` table
+that `enterprise_sale.goods_sale.post_journal` and
+`enterprise_restaurant.rest_post_journal` write, and adds:
+
+- **Reports** (pure reads returning data, no printing):
+  `fin_trial_balance` (per-account debit/credit totals + balanced flag),
+  `fin_ar_open` (orders placed-but-unpaid, derived from `order_events` +
+  journal exactly like the dashboard derives), `fin_ap_open` (payable rows
+  when a procurement module has been set up on the store — probed via the
+  migration ledger, empty otherwise, never a crash).
+- **Period close** (`fin_period_close`): an admin/finance-guarded command
+  running the frozen sequence (session -> rbac -> validation -> idempotency
+  -> effects in one UoW) that writes an insert-only `period_locks` row,
+  capturing the trial-balance totals at close for later comparison
+  (`fin_close_report`).
+- **The period seam**: the lock is ENFORCED in
+  `enterprise_store.records.journal_post_pair` — the single shared posting
+  helper — so goods_sale and restaurant inherit the check without knowing
+  finance exists. `fin_post_journal_guarded` is the finance-facing guarded
+  posting command over the same seam for explicitly dated adjustments.
+
+## Known limitation (documented, spec'd)
+Only postings routed through `records.journal_post_pair` are period-checked.
+goods_sale and restaurant are wired through it; a module inserting into
+`journal` with raw `store_insert_row` bypasses the lock. New journal writers
+MUST use the seam. See doc/07_guide/app/enterprise/finance.md.
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_migration_applied, store_rows,
+    store_insert_row, uow_begin, uow_commit, uow_rollback
+}
+use std.nogc_sync_mut.enterprise_store.records.{
+    idempotency_seen, idempotency_result, idempotency_record,
+    outbox_append, audit_append,
+    period_latest_close, journal_post_pair
+}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext,
+    CommandEnvelope, CommandResult,
+    accepted, denied, session_valid, role_allows
+}
+
+# =============================================================================
+# Schema — insert-only period locks (the journal itself is sale-owned)
+# =============================================================================
+
+fn fin_setup(store: EnterpriseStore) -> bool:
+    store_migrate(store, "fin_001_period_locks",
+        "CREATE TABLE IF NOT EXISTS period_locks (id INTEGER PRIMARY KEY, tenant_id TEXT, period_end_epoch TEXT, closed_by TEXT, debit_total TEXT, credit_total TEXT, closed_at_epoch TEXT)")
+
+# =============================================================================
+# Reports — pure reads returning data
+# =============================================================================
+
+# One per-account line of a trial balance.
+struct FinAccountLine:
+    account: text
+    debit_cents: i64
+    credit_cents: i64
+
+struct FinTrialBalance:
+    debit_total: i64
+    credit_total: i64
+    balanced: bool
+    lines: [FinAccountLine]
+
+# fin_trial_balance aggregates the tenant's journal per account.
+fn fin_trial_balance(store: EnterpriseStore, tenant_id: text) -> FinTrialBalance:
+    var lines: [FinAccountLine] = []
+    var debit_total: i64 = 0
+    var credit_total: i64 = 0
+    val rows = store_rows(store, "journal", "id, tenant_id, order_id, account, side, amount_cents")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        val account = sqlite_row_get(row, "account")
+        val amount = int(sqlite_row_get(row, "amount_cents"))
+        val is_debit = sqlite_row_get(row, "side") == "debit"
+        if is_debit:
+            debit_total = debit_total + amount
+        else:
+            credit_total = credit_total + amount
+        var found = false
+        var i = 0
+        while i < lines.len():
+            if lines[i].account == account:
+                found = true
+                if is_debit:
+                    lines[i] = FinAccountLine(account: account, debit_cents: lines[i].debit_cents + amount, credit_cents: lines[i].credit_cents)
+                else:
+                    lines[i] = FinAccountLine(account: account, debit_cents: lines[i].debit_cents, credit_cents: lines[i].credit_cents + amount)
+            i = i + 1
+        if not found:
+            if is_debit:
+                lines.push(FinAccountLine(account: account, debit_cents: amount, credit_cents: 0))
+            else:
+                lines.push(FinAccountLine(account: account, debit_cents: 0, credit_cents: amount))
+    FinTrialBalance(debit_total: debit_total, credit_total: credit_total, balanced: debit_total == credit_total, lines: lines)
+
+# fin_trial_balance_account returns one account's (debit, credit) totals.
+fn fin_trial_balance_account(tb: FinTrialBalance, account: text) -> (i64, i64):
+    for line in tb.lines:
+        if line.account == account:
+            return (line.debit_cents, line.credit_cents)
+    (0, 0)
+
+# fin_ar_open lists (order_id, open_amount_cents) for orders whose latest
+# event is "created" (placed but unpaid) — derived from the order event
+# stream plus the order's sales_revenue credit, like the dashboard does.
+fn fin_ar_open(store: EnterpriseStore, tenant_id: text) -> [(text, i64)]:
+    var order_ids: [text] = []
+    var statuses: [text] = []
+    val events = store_rows(store, "order_events", "id, tenant_id, order_id, event, detail")
+    for row in events:
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        val oid = sqlite_row_get(row, "order_id")
+        val ev = sqlite_row_get(row, "event")
+        var found = false
+        var i = 0
+        while i < order_ids.len():
+            if order_ids[i] == oid:
+                found = true
+                statuses[i] = ev
+            i = i + 1
+        if not found:
+            order_ids.push(oid)
+            statuses.push(ev)
+    var out: [(text, i64)] = []
+    var j = 0
+    while j < order_ids.len():
+        if statuses[j] == "created":
+            out.push((order_ids[j], fin_order_revenue(store, tenant_id, order_ids[j])))
+        j = j + 1
+    out
+
+fn fin_order_revenue(store: EnterpriseStore, tenant_id: text, order_id: text) -> i64:
+    val rows = store_rows(store, "journal", "id, tenant_id, order_id, account, side, amount_cents")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "order_id") == order_id:
+            if sqlite_row_get(row, "account") == "sales_revenue" and sqlite_row_get(row, "side") == "credit":
+                return int(sqlite_row_get(row, "amount_cents"))
+    0
+
+# fin_ap_open lists open payables (ref_id, amount_cents). No procurement
+# module exists yet; when one lands, its migration `proc_001_payables` and
+# `payables` table are read here. Absent module -> empty list, never a crash.
+fn fin_ap_open(store: EnterpriseStore, tenant_id: text) -> [(text, i64)]:
+    var out: [(text, i64)] = []
+    if not store_migration_applied(store, "proc_001_payables"):
+        return out
+    val rows = store_rows(store, "payables", "id, tenant_id, ref_id, amount_cents, status")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "status") == "open":
+            out.push((sqlite_row_get(row, "ref_id"), int(sqlite_row_get(row, "amount_cents"))))
+    out
+
+# fin_period_status returns the tenant's latest closed period end (0 = none).
+fn fin_period_status(store: EnterpriseStore, tenant_id: text) -> i64:
+    period_latest_close(store, tenant_id)
+
+# fin_close_report returns the (debit_total, credit_total) snapshot captured
+# in the tenant's latest close row ((0, 0) when nothing was closed).
+fn fin_close_report(store: EnterpriseStore, tenant_id: text) -> (i64, i64):
+    var latest: i64 = 0
+    var debit: i64 = 0
+    var credit: i64 = 0
+    val rows = store_rows(store, "period_locks", "id, tenant_id, period_end_epoch, closed_by, debit_total, credit_total, closed_at_epoch")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        val end = int(sqlite_row_get(row, "period_end_epoch"))
+        if end >= latest:
+            latest = end
+            debit = int(sqlite_row_get(row, "debit_total"))
+            credit = int(sqlite_row_get(row, "credit_total"))
+    (debit, credit)
+
+# =============================================================================
+# Guarded commands (frozen sequence)
+# =============================================================================
+
+# fin_period_close closes the tenant's books through `period_end_epoch`:
+# an insert-only lock row capturing the trial-balance totals at close.
+# After close, the shared seam denies any posting dated <= period_end_epoch.
+fn fin_period_close(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, period_end_epoch: i64, now_epoch: i64) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", "{period_end_epoch}")
+    if not role_allows(who.role, "finance.period.close"):
+        return denied("forbidden", "{period_end_epoch}")
+    if period_end_epoch <= 0:
+        return denied("invalid-record", "{period_end_epoch}")
+    # Idempotency is checked BEFORE the period transition, because a replay of
+    # an already-applied close would otherwise be misreported as a transition
+    # error: the first attempt made its own period_end the latest close.
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    if period_end_epoch <= period_latest_close(store, tenant.tenant_id):
+        return denied("invalid-transition", "{period_end_epoch}")
+    val tb = fin_trial_balance(store, tenant.tenant_id)
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO period_locks (tenant_id, period_end_epoch, closed_by, debit_total, credit_total, closed_at_epoch) VALUES (?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, "{period_end_epoch}", who.actor_id, "{tb.debit_total}", "{tb.credit_total}", "{now_epoch}"])
+    outbox_append(store, tenant.tenant_id, "finance.period.closed", "{period_end_epoch}")
+    audit_append(store, tenant.tenant_id, who.actor_id, "finance.period.close", "{period_end_epoch}")
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, "{period_end_epoch}")
+    uow_commit(store)
+    accepted("{period_end_epoch}")
+
+# fin_post_journal_guarded posts one explicitly dated debit/credit pair via
+# the shared seam; a posting dated inside a closed period is denied with
+# invalid-transition (the same denial goods_sale/restaurant inherit).
+fn fin_post_journal_guarded(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, ref_id: text, debit_account: text, credit_account: text, amount_cents: i64, posted_at_epoch: i64) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", ref_id)
+    if not role_allows(who.role, "finance.journal.post"):
+        return denied("forbidden", ref_id)
+    if ref_id == "" or amount_cents <= 0 or debit_account == "" or credit_account == "":
+        return denied("invalid-record", ref_id)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    uow_begin(store)
+    if not journal_post_pair(store, tenant.tenant_id, ref_id, debit_account, credit_account, amount_cents, posted_at_epoch):
+        uow_rollback(store)
+        return denied("invalid-transition", ref_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "finance.journal.post", ref_id + ":{amount_cents}")
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, ref_id)
+    uow_commit(store)
+    accepted(ref_id)
+
+export fin_setup
+export FinAccountLine, FinTrialBalance
+export fin_trial_balance, fin_trial_balance_account, fin_ar_open, fin_ap_open
+export fin_period_status, fin_close_report
+export fin_period_close, fin_post_journal_guarded
