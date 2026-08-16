@@ -94,6 +94,9 @@ dev-done; focused-rvfi-system-test-prepared; TEST_BLOCKED
   `test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl`
 - Mirrored blocked manual:
   `doc/06_spec/03_system/compiler/fv2_riscv_dual_track_readiness_spec.md`
+- Reviewer routes:
+  `doc/00_llm_process/feature_expert/formal_verification/skill.md` and
+  `doc/00_llm_process/llm_wiki.md#fv2-risc-v-dual-track-verification`.
 - Requirements: REQ-FV2-015, REQ-FV2-019, NFR-FV2-002, NFR-FV2-009.
 - Visible flow names are frozen by the focused spec: prepare the canonical
   21-port fixture, run strict readiness, remove `rvfi_mode`, reject the

@@ -60,8 +60,10 @@ in the plan.
 
 Use
 `test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl` for the
-REQ-FV2-015/019 readiness seam and its mirror at
-`doc/06_spec/03_system/compiler/fv2_riscv_dual_track_readiness_spec.md`.
+REQ-FV2-015, REQ-FV2-019, NFR-FV2-002, and NFR-FV2-009 readiness seam and its
+mirror at `doc/06_spec/03_system/compiler/fv2_riscv_dual_track_readiness_spec.md`.
+The central LLM lookup entry is
+`doc/00_llm_process/llm_wiki.md#fv2-risc-v-dual-track-verification`.
 Keep these boundaries explicit:
 
 - The checker requires the complete 21-port manifest. `rvfi_halt`,

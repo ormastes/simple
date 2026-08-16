@@ -360,6 +360,7 @@ checker must require all 21 canonical ports, including `rvfi_halt`,
 manifest recognition. The edge and error flows remove an extended control
 port or supply a missing generated core and require a nonzero result with no
 `READY:` marker.
+The contract traces REQ-FV2-015, REQ-FV2-019, NFR-FV2-002, and NFR-FV2-009.
 
 The final two scenarios invoke both production gates above. They may pass only
 in a source-matched qualified environment where the admitted pure-Simple CLI,

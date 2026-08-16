@@ -614,6 +614,28 @@ improve preview/conflict/reparse/write diagnostics to stderr; machine report
 stdout stays serialization-only. Do not infer documentation-quality acceptance
 from timing output or a zero-stub count alone.
 
+## FV2 RISC-V dual-track verification
+
+Route formal-verification work through
+`doc/00_llm_process/feature_expert/formal_verification/skill.md`. The focused
+system contract is
+`test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl`, mirrored as
+Markdown only at
+`doc/06_spec/03_system/compiler/fv2_riscv_dual_track_readiness_spec.md`.
+The lane traces REQ-FV2-015, REQ-FV2-019, NFR-FV2-002, and NFR-FV2-009.
+
+The readiness checker requires all 21 canonical RVFI ports. Its synthetic
+fixture proves checker behavior only; it is not a generated-CPU, Sail-oracle,
+refinement, equivalence, or SymbiYosys proof result. Production acceptance
+requires both `sh scripts/check/check-riscv-formal-dual-track.shs` and
+`sh scripts/check/check-riscv-rtl-sby-proof.shs` to pass in a qualified
+environment.
+
+Run the SSpec, `spipe-docgen`, and `sspec-maintain` only with an admitted,
+current-source pure-Simple Stage-4 CLI. If that runtime is absent, retain
+`TEST_BLOCKED`; never substitute the Rust seed, a stale Stage-2/3 artifact,
+readiness-only output, or a hand-authored receipt for executable evidence.
+
 ## Minimal-bootstrap feature development
 
 Normal feature work starts with the smallest named target, provider artifact,

@@ -14,6 +14,9 @@ status truthfulness, ownership, executable command closure, and Lean links.
   `test/03_system/compiler/fv2_riscv_dual_track_readiness_spec.spl`
 - Focused blocked manual mirror:
   `doc/06_spec/03_system/compiler/fv2_riscv_dual_track_readiness_spec.md`
+- Focused feature-expert and LLM lookup:
+  `doc/00_llm_process/feature_expert/formal_verification/skill.md` and
+  `doc/00_llm_process/llm_wiki.md#fv2-risc-v-dual-track-verification`
 - Focused implemented foundation:
   `test/01_unit/compiler/mir/mir_coverage_opcode_admission_spec.spl`
 
