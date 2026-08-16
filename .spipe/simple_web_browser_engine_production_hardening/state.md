@@ -2676,6 +2676,36 @@ implementation in progress / target evidence blocked
   animation lifecycle `47df593f600`, cookie authority `921fd1`, and D3 retain
   their existing rejected or stopped classifications. No runtime, docgen,
   performance, aggregate HTML/CSS, full-browser, or goal PASS is claimed.
+- layout box content contract system coverage (2026-08-16): the layout/paint
+  recovery landed at `81684d8af46` deleted `_paint_box` and ported
+  `layout_core.spl` onto the real `BeLayoutBox` shape, but that shape had no
+  system-tier statement — only unit coverage of the paint colour helper. Added
+  `test/03_system/browser_engine/layout_box_content_contract_spec.spl` (6
+  scenarios: positive geometry, zero-inset identity, derived-not-stored
+  mutation, over-constrained negative width, pinned `node_id`/tag identity,
+  text-box box-model zeroing), mirrored at
+  `doc/06_spec/03_system/browser_engine/layout_box_content_contract_spec.md`,
+  planned at
+  `doc/03_plan/sys_test/browser_engine_layout_box_content_contract.md`, with the
+  contract documented in `doc/07_guide/ui/browser_engine_implementation.md`.
+  CSS reaches the box through the product's own `BeDomNode.set_style` expander;
+  every assertion is an exact arithmetic oracle computed in the spec, with no
+  `skip()`, no `pending()`, and no placeholder pass, so the spec fails closed.
+  Scenario 3 is the discriminating one: it mutates padding after construction,
+  which is the only way to tell a derived content rectangle from a stored one —
+  the precise defect shape of `_paint_box`.
+  Coverage boundary recorded rather than padded: `_apply_opacity` is excluded
+  because unit tier already closes all four branches, `StyleProps` has no
+  `opacity` property, and the function has zero product callers, so no
+  CSS-to-paint producer exists to integrate against.
+  TEST_BLOCKED — the spec has NOT been executed and is not claimed as passing.
+  No admitted pure-Simple CLI exists in this tree: the deployed self-hosted
+  binary SIGSEGVs on `simple test --help`, re-bootstrap is gated on that same
+  binary's bounded test ABI probe, and stage3 `native-build` of a spec fails HIR
+  lowering (`unresolved name: __p-1`). See
+  `doc/08_tracking/bug/deployed_selfhost_test_subcommand_segv_blocks_bootstrap_2026-08-16.md`.
+  No runtime, docgen, or sspec-maintain evidence is claimed; the mirrored manual
+  is hand-authored in generated shape pending a docgen run.
 
 ## 2026-08-16 — REQ-WEB-BROWSER-014 sandbox gate wiring (Vulkan/sandbox lane)
 

@@ -312,4 +312,49 @@ pixel buffer down as data. Full isolation matrix:
   nested field-index assignment. Feature-side handoff:
   [browser feature expert](../../feature_expert/browser/skill.md).
 
+## Session update 2026-08-16 — `BeLayoutBox` content contract is now executable
+
+**Read this before touching `layout_box.spl`, `layout_core.spl`, or anything
+that consumes a layout box.**
+
+`BeLayoutBox` stores the **border box** (`x`/`y`/`width`/`height`) plus the box
+model and *derives* the content rectangle on every call:
+
+    content_x      == x + padding_left + border_width
+    content_y      == y + padding_top  + border_width
+    content_width  == width  - padding_left - padding_right  - border_width * 2
+    content_height == height - padding_top  - padding_bottom - border_width * 2
+
+Two consequences, both of which have already produced dead code:
+
+- `content_x`/`content_y`/`content_width`/`content_height` are **methods, not
+  fields**.
+- A box names its element by the integer `node_id` (`-1` for anonymous). There
+  is **no** `node` field holding a `BeDomNode`, and no pipeline currently offers
+  a `node_id -> BeDomNode` resolution — which is why `_paint_box` was deleted
+  rather than ported (`81684d8af46`; record
+  `layout_paint_paint_box_dead_code_wrong_belayoutbox_shape_2026-08-15.md`).
+
+The contract is now stated executably by
+`test/03_system/browser_engine/layout_box_content_contract_spec.spl` (plan:
+`doc/03_plan/sys_test/browser_engine_layout_box_content_contract.md`; mirror:
+`doc/06_spec/03_system/browser_engine/layout_box_content_contract_spec.md`).
+Its third scenario mutates padding *after* construction — the only assertion
+that distinguishes a derived content rectangle from a stored one, i.e. the exact
+defect shape of `_paint_box`.
+
+Also worth knowing: the engine does **not** clamp an over-constrained box.
+Padding plus border wider than the box yields a negative `content_width()`;
+callers must handle that rather than assume non-negative.
+
+`_apply_opacity` is `layout_paint.spl`'s entire surface and has **zero product
+callers** — only the unit coverage spec imports it, and `StyleProps` has no
+`opacity` property, so there is no CSS-to-paint producer. Do not add system-tier
+"integration" coverage for it without first wiring a real producer.
+
+**Status: TEST_BLOCKED.** The spec has never been executed — no admitted
+pure-Simple CLI exists in this tree (`deployed_selfhost_test_subcommand_segv_blocks_bootstrap_2026-08-16.md`).
+It is written fail-closed to verify automatically once one is available; do not
+report it as passing until it has actually run.
+
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`

@@ -199,3 +199,26 @@ records `coverage_collector_skips_pub_val_and_match_heads_2026-08-15.md` and
   (netns `net:[4026533421] -> net:[4026533540]`).
 - **PID namespace is intentionally absent.** Don't "fix" it: `CLONE_NEWPID`
   only affects post-unshare children and `RLIMIT_NPROC=0` blocks forking.
+## Handoff Notes (2026-08-16, layout box contract system coverage)
+
+- **New system lane**:
+  `test/03_system/browser_engine/layout_box_content_contract_spec.spl` states
+  the `BeLayoutBox` contract that the `81684d8af46` layout/paint recovery
+  settled — content rectangle derived per call from padding/border, element
+  named by integer `node_id` and never by an embedded node object. Plan:
+  `doc/03_plan/sys_test/browser_engine_layout_box_content_contract.md`; mirror:
+  `doc/06_spec/03_system/browser_engine/layout_box_content_contract_spec.md`.
+  Layer detail lives in
+  [browser_engine layer expert](../../layer_expert/browser_engine/skill.md).
+- **Why it exists**: the recovery deleted `_paint_box` (written against a
+  nonexistent box shape) but left that shape with no system-tier statement, so
+  the defect shape was unguarded. Scenario 3 mutates padding after construction
+  — the only assertion that tells a derived content rectangle from a stored one.
+- **Coverage boundary, recorded rather than padded**: `_apply_opacity` is
+  excluded. Unit tier already closes all four branches, `StyleProps` has no
+  `opacity` property, and it has zero product callers — there is no
+  CSS-to-paint producer to integrate against.
+- **TEST_BLOCKED**: never executed; no admitted pure-Simple CLI in this tree
+  (`deployed_selfhost_test_subcommand_segv_blocks_bootstrap_2026-08-16.md`).
+  Fail-closed by construction, so it verifies automatically once one exists.
+  Do not report it as passing until it has run.
