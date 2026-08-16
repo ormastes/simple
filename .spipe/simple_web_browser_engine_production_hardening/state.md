@@ -2781,3 +2781,11 @@ implementation in progress / target evidence blocked
   refusal with a silent unjailed render. The single flip-line remains
   `browser_sandbox_worker_routing_available()` in
   `src/app/browser/sandbox_status.spl`.
+- **Self-audit 2026-08-16**: the namespace self-check originally verified only
+  the net namespace while the change claimed user+net+IPC plus a uid/gid drop —
+  3 of 4 claims unproven. Extended to compare all three ns identities (partial
+  unshare reported as full isolation now FAILs) and to prove the privilege drop
+  via the overflow-uid oracle (unmapped user ns yields 65534). Sabotage arm 3
+  (drop the `uid_map` write) bites: `uid/gid inside jail is 65534/0, expected
+  0/0`. Verified active under `docker run --privileged`; host remains
+  `unavailable`.

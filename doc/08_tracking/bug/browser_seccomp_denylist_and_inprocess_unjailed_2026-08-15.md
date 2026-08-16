@@ -189,3 +189,38 @@ time:
 `docker run --privileged` exercises the same kernel property and DID prove the
 active path, so the QEMU gap is redundancy, not missing evidence. Resuming it
 needs a VM image or kernel supplied out of band.
+
+### Evidence gap closed (2026-08-16, self-audit)
+
+The first version of the namespace self-check verified only the NET namespace
+identity, while the fix and its docs claimed "user/net/IPC namespaces + uid/gid
+drop". Three of those four claims were unverified. Closed:
+
+- all three namespace identities are now compared (`/proc/self/ns/{net,user,ipc}`),
+  and a partial unshare reported as full isolation is an explicit FAIL;
+- the privilege drop is proven by an indirect oracle: the uid/gid observed
+  INSIDE the jail must equal the pre-jail ids. In a fresh user namespace with
+  no `uid_map` written, `getuid()` returns the overflow id (65534/nobody), so
+  the original id coming back proves the identity map was actually written.
+  The map cannot be read back directly — landlock denies the read by then.
+
+Observed under `docker run --privileged`:
+
+```
+namespaces=active;
+  net  net:[4026533421] -> net:[4026533540]
+  user user:[4026531837] -> user:[4026533538]
+  ipc  ipc:[4026533418] -> ipc:[4026533539]
+  uid/gid 0/0 mapped through
+```
+
+Sabotage arm 3 (removing the `uid_map` write) bit as designed:
+
+```
+FAIL: uid/gid inside jail is 65534/0, expected 0/0 — the identity
+uid_map/gid_map was not written (overflow id means an unmapped user namespace)
+```
+
+Lesson worth keeping: a check that observes the single easiest-to-see effect
+will happily pass a partial implementation. Verify every claim the change
+makes, or narrow the claim.
