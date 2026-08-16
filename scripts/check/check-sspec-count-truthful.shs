@@ -21,13 +21,20 @@ set -eu
 #   SIMPLE_BIN   simple binary to test with (default: bin/simple)
 #   SSPEC_CLEAN  set to 0 to run warm (default: 1 => pass --clean, the worse case)
 
-BIN="${SIMPLE_BIN:-bin/simple}"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+. "$SCRIPT_DIR/lib/require-self-hosted.shs"
+
+BIN="${SIMPLE_BIN:-$ROOT_DIR/bin/simple}"
 CLEAN="${SSPEC_CLEAN:-1}"
 
 if [ "$#" -eq 0 ]; then
   echo "usage: $0 <spec.spl> [<spec.spl> ...]" >&2
   exit 2
 fi
+
+require_self_hosted "$BIN" "SSpec count runner"
+BIN=$SELF_HOSTED_BIN
 
 clean_flag=""
 [ "$CLEAN" = "1" ] && clean_flag="--clean"
@@ -41,15 +48,26 @@ for spec in "$@"; do
   fi
 
   # Declared examples: `it "..."` at statement position (leading whitespace only).
-  declared=$(grep -cE '^[[:space:]]*it ' "$spec" || true)
+  declared_status=0
+  declared=$(grep -cE '^[[:space:]]*it ' "$spec") || declared_status=$?
+  if [ "$declared_status" -gt 1 ]; then
+    echo "FAIL     $spec — source example count failed with status $declared_status"
+    rc=1
+    continue
+  fi
 
-  out=$("$BIN" test "$spec" $clean_flag 2>&1 || true)
+  runner_status=0
+  out=$("$BIN" test "$spec" $clean_flag 2>&1) || runner_status=$?
+  if [ "$runner_status" -ne 0 ]; then
+    echo "FAIL     $spec — runner exited $runner_status; no passing count claim is possible"
+    rc=1
+    continue
+  fi
 
   # Reported total from the SSpec summary block ("Results: N total, ...").
   reported=$(printf '%s\n' "$out" \
-    | grep -oE 'Results:[[:space:]]*[0-9]+[[:space:]]+total' \
-    | grep -oE '[0-9]+' \
-    | head -1)
+    | sed -n 's/.*Results:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*total.*/\1/p' \
+    | sed -n '1p')
 
   if [ -z "${reported:-}" ]; then
     echo "FAIL     $spec — declared=$declared reported=<no Results: summary> (runner produced no verdict)"

@@ -232,3 +232,18 @@ present in that job.
 Still open: `.github/workflows/` has no `SIMPLE_BIN` gating for the ~50 GUI
 evidence scripts; whether CI ever runs them with a seed was not established
 (only `check-gui-hardening-open-gates.shs` is invoked from a workflow).
+
+## Recovery update — 2026-08-16
+
+`check-sspec-count-truthful.shs` is no longer part of the remaining fail-open
+set. It now sources the canonical `require-self-hosted.shs` guard and admits the
+selected runner before executing a spec. The runner invocation preserves its
+exit status; any nonzero result fails the check instead of being converted to a
+successful count comparison. Missing summary output and declared/reported count
+mismatches remain failures.
+
+Focused shell syntax and source-contract checks passed. No Simple test command
+was run: pushed state has no admitted current-source Stage 4 CLI, and the
+tracked `release/x86_64-unknown-linux-gnu/simple` is the known stale artifact
+with SHA-256 `04a38e21d6fbd86149d46d3ee2d761349f8ad29b02c5037a8eb589b6a1b9e4e0`.
+It is not acceptable test evidence for this criterion.
