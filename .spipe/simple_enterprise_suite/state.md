@@ -542,3 +542,32 @@ New acceptance criteria (extends AC-1..AC-12 above):
   green: finance 8/8, procurement 8/8, goods_sale 10/10, back_office_web 7/7,
   conformance 8/8. Merged-tree reruns: finance 8/8, back_office_web 7/7,
   procurement 8/8.
+- wave 9b (2026-08-16): W9-B attacked the native-ACID row and returned an
+  HONEST NEGATIVE — the row stays blocked, but the blocker is now located and
+  mechanised, and the previously recorded resume condition was WRONG.
+  Findings: (1) `--mode=native` is the SAME non-ACID emulation — byte-identical
+  probe output vs the interpreter (rollback a no-op, UNIQUE unenforced, stale
+  count on a freshly deleted db file); it is in-process JIT over
+  interpreter_extern/sffi_db.rs. (2) CRITICAL for evidence integrity: the JIT
+  SILENTLY DEGRADES on enterprise_store — "[jit-fallback] unresolved external
+  symbol 'store_open': whole module dropped to the interpreter" — so a
+  --mode=native run of these specs is an interpreter run wearing a native
+  label. The lane therefore did NOT run them under that label and relabelled
+  nothing. (3) The bug doc's premise that rusqlite is already a seed dependency
+  is FALSE (no sqlite in ldd, none in any Cargo.toml) — corrected in place.
+  (4) store_backend_acid stays false under both modes; the honest probe holds.
+  DELIBERATELY NO atomicity specs: under the emulation both candidate
+  assertions are vacuous in the DANGEROUS direction (rollback leaves the row,
+  a UNIQUE violation returns success), so they would pass while proving
+  nothing. New gate scripts/check/check-sqlite-backend-acid.shs prints
+  ACID/NONACID/BLOCKED as its last line and today prints BLOCKED. NOTE: in the
+  lane worktree it blocked with `codegen: undefined symbol: rt_sqlite_open`;
+  in the main tree it blocks earlier with `runtime archive identity is
+  missing/stale: build/simple-core/libsimple_runtime.a`. Both are honest
+  BLOCKED states but the main-tree archive staleness masks the real linker
+  gap — refresh that archive before treating the undefined-symbol error as
+  the current frontier. Prereq for the real fix: add runtime_sqlite.o (or the
+  staged provider .so) + -lsqlite3 to the SINGLE-FILE `compile --native` link
+  line, reusing is_sqlite_runtime_symbol (native_project/linker.rs:500) which
+  the project pipeline already has. Host is otherwise ready (libsqlite3 +
+  headers installed; runtime_sqlite.c includes the real header).

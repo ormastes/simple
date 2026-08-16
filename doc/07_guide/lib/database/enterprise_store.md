@@ -68,11 +68,83 @@ research track and must not carry finance/PII/stock truth.
   `buffered_commit(store, uow, faults)`. `store_faults_failing_commit()`
   simulates the write-layer failure; a failed commit applies NOTHING, so
   zero-partial-effects holds on BOTH backends.
-- **Native-ACID resume condition**: real short-write/crash injection and
-  rollback-atomicity PASS evidence stay environment-blocked until the specs
-  run `--mode=native` against real SQLite (linked C sqlite3). Resume:
-  `bin/simple test test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_harden_spec.spl --mode=native`
-  on a host where native codegen + real rt_sqlite are green.
+- **Native-ACID status (VERIFIED BLOCKED, measured 2026-08-16, lane W9-B)**.
+  The earlier text here stated a resume condition — run the specs
+  `--mode=native` — as though `--mode=native` were the missing ingredient. It
+  is not, and following it would have produced *false* native evidence. What
+  was actually measured on this host (`bin/simple` = the Rust seed,
+  `bin/release/x86_64-unknown-linux-gnu/simple`, 59497616 bytes, 2026-08-15,
+  whose own `--version` prints the "bootstrap seed only" warning):
+
+  1. **`--mode=native` does not reach real SQLite.** An ACID probe
+     (create table with `PRIMARY KEY`/`UNIQUE NOT NULL`, `begin`, insert,
+     `rollback`, count; then a deliberate duplicate insert) produces
+     **byte-identical non-ACID output under `--mode=native` and under the
+     default interpreter**: `start_count=48` on a freshly deleted db file
+     (a global emulation counter, not this file's rows),
+     `in_tx_count=49` -> `after_rollback_count=49` (**rollback did nothing**),
+     and `dup_insert_ok=true` (**UNIQUE not enforced**). `--mode=native` is
+     in-process JIT; its externs resolve to the same Rust emulation table
+     (`src/compiler_rust/compiler/src/interpreter_extern/sffi_db.rs`, where
+     e.g. `rt_sqlite_begin_fn(_args)` ignores its argument entirely).
+  2. **Real SQLite is physically absent from the seed process.**
+     `ldd $(readlink -f bin/simple) | grep -i sqlite` -> nothing; no
+     `rusqlite`/`libsqlite3-sys` in any `src/compiler_rust` `Cargo.toml`. No
+     mode flag can make an unlinked library appear.
+  3. **`--mode=native` on this module silently degrades to the interpreter
+     anyway.** Running `store_open` + `store_backend_acid` with
+     `--mode=native` emits
+     `[jit-fallback] unresolved external symbol 'store_open': whole module
+     dropped to the interpreter` and
+     `[INFO] JIT compilation failed, falling back to interpreter`. So a
+     `--mode=native` spec run of the enterprise store **is an interpreter run
+     wearing a native label** — do not record it as native evidence.
+     `store_backend_acid` correctly returns **`false`** there; the honest
+     probe holds under both modes.
+  4. **The AOT path is the right route and is blocked one step earlier.**
+     `bin/simple compile <src> -o <out>` emits an `SMF` bytecode module
+     (magic `S M F \0`), not an ELF, so it re-enters the same interpreter.
+     `bin/simple compile <src> --native -o <out>` does build an ELF, and is
+     the only path whose linker knows about sqlite
+     (`pipeline/native_project/linker.rs:1534` and `tools.rs:1317` pass
+     `-lsqlite3`) — but for a single-file `--native` compile it fails with
+     **`error: codegen: undefined symbol: rt_sqlite_open`** (a real lld
+     error parsed by `linker/native.rs:628` and re-prefixed `codegen:`). The
+     link line for single-file `--native` includes neither
+     `src/runtime/runtime_sqlite.o` nor `-lsqlite3`; that wiring exists only
+     in the separate `native_project` pipeline.
+
+  The host is otherwise ready: `libsqlite3.so`/`libsqlite3.a` and
+  `/usr/include/sqlite3.h` are installed, `src/runtime/runtime_sqlite.c`
+  `#include <sqlite3.h>` (real header, not a shim), and
+  `sh scripts/build/build_simple_runtime_sqlite_sffi.shs` builds the provider
+  cleanly to `build/sffi/libsimple_runtime_sqlite_wm.so` with its own
+  `rt_sqlite_open`/`rt_sqlite_query_next` presence assertions passing.
+  Staging that provider does **not** fix the `--native` link (retried; same
+  undefined symbol) because the single-file link line never references it.
+
+  **Concrete prerequisite (one change, not an environment wish):** make the
+  single-file `compile --native` link line include the compiled
+  `src/runtime/runtime_sqlite.c` object (or the staged
+  `libsimple_runtime_sqlite_wm.so`) plus `-lsqlite3`, exactly as
+  `native_project/linker.rs` already does when it detects an
+  `rt_sqlite_*`/`sqlite3_*` undefined symbol
+  (`is_sqlite_runtime_symbol`, linker.rs:500). Until then, real
+  rollback-atomicity and real constraint-rejection assertions **cannot be
+  written honestly** — under the emulation both would pass vacuously
+  (rollback is a no-op that leaves the row, and a UNIQUE violation returns
+  success), which is the precise reason the store is insert-only with
+  pure-Simple filtering and why `acid=false` is recorded rather than assumed.
+  Verification is mechanised — do not re-derive it by hand:
+  `sh scripts/check/check-sqlite-backend-acid.shs` builds
+  `test/fixture/enterprise_store/sqlite_acid_probe.spl` via
+  `compile --native` and prints one of `ACID` (exit 0) / `NONACID` (exit 1) /
+  `BLOCKED` (exit 2) as its last line. It gates nothing; it only answers
+  whether this host reaches real ACID SQLite. **Today it prints
+  `BLOCKED — AOT native build failed: error: codegen: undefined symbol:
+  rt_sqlite_open`.** When it flips to `ACID`, the rollback-atomicity and
+  constraint-rejection specs become writable and this section must be
+  rewritten with their verdicts.
 
 ## Cross-OS runnability (AC-17, audited 2026-08-16)
 
