@@ -115,6 +115,22 @@ Those are shell-gate results, not SSpec results. They do not clear this block.
 | `check-env-get-nil-abort-guard.shs` (direct-env) | ERROR — `nothing was checked (no executable bin/simple)` |
 | `check-engine-claiming-specs-use-probe.shs` | FAIL — pre-existing; 4 offenders, none in this change |
 | `check-repo-hygiene.shs` | FAIL — pre-existing; 37 stray `.py` files, none in this change |
+| `check-rules-sdl-integrity.shs` | PASS — 20 gates checked, registry did not shrink |
+| `check-rules-sdl.shs` | PASS — 11 gates checked, 0 shrank, 0 skipped |
+| `check-guard-wiring.shs` | FAIL — 139 → **138** unwired after this change, 0 bad opt-outs. Still red for 138 guards owned by other lanes; zero lane gates remain unwired. |
+| Lane real-assertion / traceability count | 4 scenarios, 22 `step(...)`, 33 `expect(...)`, 6 unique REQ ids, 0 non-standard matchers, 0 placeholders |
+| doc-layout | PASS — 0 `.spl` of any kind under `doc/06_spec` |
+
+**Opt-out ratchet correction (in-lane).** `check-guard-wiring.shs` listed
+`check-engine2d-simd-8k-ops.shs` as an unjustified orphan, and
+`check-engine2d-simd-c-kernels.shs` carried the reason "needs a real GPU or
+display, unavailable on a general CI runner". That reason is false: both gates
+were measured GREEN on this host with no GPU and no display
+(`engine2d-simd-c-kernels: pass`; 8K ops exit 0, checksum
+6655426588272231299, max RSS 507 MiB). Both entries now state the real reason —
+machine-dependent benchmark timing and an owner decision, not capability.
+This is the same class of defect as the silent gate: a claim nobody had
+re-measured.
 
 The two direct-env guards are fail-closed on a missing binary and correctly
 report ERROR rather than a vacuous pass. This spec reads no environment

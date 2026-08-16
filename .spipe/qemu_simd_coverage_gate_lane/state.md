@@ -107,6 +107,12 @@ lane, and no pass/fail is claimed for any scenario.
 - verify: Static quality, direct-env, layout/hygiene, conflict, and
   changed-file/file-count guards run against committed content. Runtime,
   docgen, and sspec-maintain deferred — see TEST_BLOCKED above.
+- verify: `check-guard-wiring.shs` flagged `check-engine2d-simd-8k-ops.shs` as
+  an unjustified orphan and `check-engine2d-simd-c-kernels.shs` as needing "a
+  real GPU or display". Both claims were re-measured on a plain Linux host with
+  neither and are GREEN; `guard_wiring_optout.txt` now records the real
+  reasons. Unwired count 139 → 138; the guard stays red for 138 guards owned by
+  other lanes, and zero lane gates remain unwired.
 - verify: Bootstrap attempted so the lane could be executed honestly; blocked
   by the receipt/planner circularity recorded above. Seed symlink removed
   afterward so no guard can silently run against the Rust seed.

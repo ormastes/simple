@@ -270,6 +270,26 @@ wrong repository subsystem. Link detailed guides instead of duplicating them.
   or 2D/font/QEMU independently. `/root` is merge owner; Sol reviews before
   done/release claims.
 
+## QEMU SIMD and coverage gate lane
+
+- **Expert note:** `doc/00_llm_process/feature_expert/qemu_simd_coverage_gate_lane/skill.md`.
+- **Scope:** the static-prerequisite tier only — the baremetal SIMD object gate
+  plus the coverage gates that need no deployed compiler. It does not own guest
+  hit/chunk receipts, QMP captures, the arch matrix, or `check-render2d-coverage.shs`.
+- **Load-bearing rule:** read a gate's exit status on the line after the
+  invocation, never through a pipe. `check-simpleos-qemu-engine2d-simd-kernels.shs`
+  exited 1 with ZERO output for its whole life — a doubled-backslash ERE in its
+  `st1` assertion matched a literal backslash, and `set -eu` aborted the script
+  before three further assertions ran. `sh gate.shs | tail` reports `tail`'s 0.
+  Repaired 2026-08-16; pinned by
+  `test/03_system/check/qemu_simd_coverage_gate_lane_spec.spl`.
+- **Honesty rule:** an `engine2d-simd-8k-ops` PASS is not an 80fps proof — the
+  gate requires its own receipt to state
+  `engine2d_8k_full_dynamic_frame_80fps_proven=false`.
+- **Capability claims in `guard_wiring_optout.txt` are not evidence.** Two of
+  this lane's gates were justified as needing "a real GPU or display"; both were
+  measured GREEN on a plain Linux host with neither. Corrected 2026-08-16.
+
 ## Robust lifecycle persistence
 
 - **Canonical owner:** `std.lifecycle_persistence`, implemented under

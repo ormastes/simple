@@ -23,6 +23,8 @@ sosix QEMU matrix lane; do not edit their skills from here.
 
 ## Feature Links
 
+- Requirements owned: `REQ-QEMU-SIMD-COV-LANE-001` .. `-006` (defined in the
+  spec docstring and the plan's traceability matrix; unique to this lane)
 - Plan: `doc/03_plan/sys_test/qemu_simd_coverage_gate_lane.md`
 - Executable spec: `test/03_system/check/qemu_simd_coverage_gate_lane_spec.spl`
 - Authored mirror: `doc/06_spec/03_system/check/qemu_simd_coverage_gate_lane_spec.md`
@@ -69,7 +71,15 @@ read-only evidence; forward deltas go on top of fetched `origin/main`.
 its own report to state `engine2d_8k_full_dynamic_frame_80fps_proven=false`.
 A PASS from it means the receipt is well-formed and honest, nothing more.
 
-**6. No pure-Simple CLI is available in this environment, and bootstrapping
+**6. A reason in `guard_wiring_optout.txt` is a claim, not evidence.** Two of
+this lane's four gates were justified there as needing "a real GPU or display,
+unavailable on a general CI runner". Both were re-measured on a plain Linux
+host with neither and both are GREEN. Corrected 2026-08-16 to state the real
+reasons: a 7680x4320 x7-sample CPU benchmark is machine-dependent and slow as a
+push gate, and the C-kernel gate is unwired by owner decision, not capability.
+Before repeating any capability claim from that file, run the gate.
+
+**7. No pure-Simple CLI is available in this environment, and bootstrapping
 one is itself blocked.** `bin/simple` is the Rust seed (self-declared);
 `bootstrap/stage3/simple` has no `test` command; `bootstrap-from-scratch.sh`
 exits 64 needing a receipt only the pure-Simple planner can issue, and that
