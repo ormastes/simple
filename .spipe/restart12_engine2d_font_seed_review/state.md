@@ -25,8 +25,37 @@ artifacts. Report blockers rather than looping or substituting seed evidence.
 - [x] AC-4: Every unfixed gap has a `doc/08_tracking/bug` record with owner and unblock condition.
 - [x] AC-5: Fail-closed step-based SSpec system coverage exists under `test/03_system` with real assertions and REQ traceability, designed to execute when a qualified runtime is admitted.
 - [x] AC-6: Knowledge is current — mirrored `doc/06_spec` Markdown manuals (no executable `.spl`), lane test plan, two `doc/07_guide` pages, this state file, and the feature-expert wiki entry.
-- [ ] AC-7: **BLOCKED** — runtime PASS for the engine2d fallback ledger (REQ-E2DFONT-001..003). No qualified pure-Simple runtime exists. Not claimed.
-- [ ] AC-8: **BLOCKED** — runtime PASS for user-`Option` lowering (REQ-OPTLOWER-001..003). Same blocker. Not claimed.
+- [ ] AC-7: **TEST_BLOCKED** — runtime verdict for the engine2d fallback ledger (REQ-E2DFONT-001..003). No qualified pure-Simple runtime exists. **Not PASS. Not claimed.**
+- [ ] AC-8: **TEST_BLOCKED** — runtime verdict for user-`Option` lowering (REQ-OPTLOWER-001..003). Same blocker. **Not PASS. Not claimed.**
+
+## Static gate results (run once each, 2026-08-16)
+
+The runtime lane being blocked does not excuse the future-executable SSpec from
+static quality. Each gate was run once; all pass.
+
+| Gate | Command | Verdict |
+|---|---|---|
+| Real assertions / non-vacuous | `check-vacuous-specs.shs --root <both specs>` | PASS — 2 files scanned, 0 flagged (selftest 8/8) |
+| Executable `.spl` under `doc/06_spec` | `find doc/06_spec -name '*.spl' \| wc -l` | **0** — required |
+| Numbered artifact | `numbered-artifact-guard.shs --changed-from origin/main` | OK |
+| Direct env/process | `direct-env-runtime-guard.shs --all` | PASS — 0 hits on lane files |
+| Skill / rules registry integrity | `check-rules-sdl-integrity.shs` | PASS — 20 gates, registry did not shrink |
+| Doc layout / FILE.md manifests | `check-workspace-root-guard.shs` | OK |
+| Conflict trees | `check-no-conflict-tree-push.shs` | PASS |
+| Conflict markers | `check-no-conflict-markers-push.shs` | PASS |
+| File count | `check-tree-size-push.shs` | PASS |
+| Test-tree divergence delta | `check-test-tree-divergence-delta.shs` | PASS — 0 introduced |
+
+REQ traceability is carried by `# @req` annotations on every `it` block and
+mapped in the plan's traceability table
+(`doc/03_plan/sys_test/engine2d_font_offload_fallback_system_lane.md`).
+
+**Lint note:** both system specs fail `simple lint` with
+`with_easy_fix`/`with_fix` not found. This is a **pre-existing general linter
+defect**, not attributable to this lane — a pre-existing untouched spec
+(`test/03_system/feature/web_platform/html/kbd_samp_var_rendering_spec.spl`)
+reproduces it identically, while this lane's fixtures and admission helper lint
+clean. Recorded in the Option bug record.
 - [x] AC-9: Landed under `/mnt/data/tmp/simple-main-restart12-push.lock`, linear rebase, one non-force push, remote reachability proven.
 
 ## Blocker
