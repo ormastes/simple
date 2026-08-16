@@ -519,3 +519,26 @@ New acceptance criteria (extends AC-1..AC-12 above):
   facade's @export("C"). Resume: nm which object supplies rt_file_exists, then
   rerun the gate. Merge checks: c-runtime-compiles PASS (120 files), file
   backend spec 6/6.
+- merge wave 9a (2026-08-16): W9-A closed the AP silent-wrong-answer defect.
+  REPRODUCE-FIRST: before any fix, a new example seeding two real
+  purchase-to-stock flows (3x700c + 2x250c) showed fin_ap_open returning 0
+  line items and a 0 total, while TWO independent oracles in the same run —
+  proc_payable_total and the trial-balance accounts_payable credit — both
+  reported 2600c. The money was on the books; the report hid it. Spec 6/8 red
+  -> 8/8 green. FIX = journal-derived (option a): fin_ap_open groups the
+  tenant's accounts_payable postings by ref and nets credits - debits.
+  Rejected a payables projection in procurement because the journal already
+  determines the balance — a projection is a second copy that can drift and
+  would need its own period-lock story. Bonus properties: a settlement posted
+  through records.journal_post_pair clears a line for free (asserted), and any
+  FUTURE accounts_payable writer is picked up with no code change. Dead
+  proc_001_payables probe removed. NEIGHBOUR AUDIT: fin_ar_open CORRECT
+  (derives from order_events + sales_revenue credit); dashboard payable
+  roll-up CORRECT (already journal-derived); GET /fin/ap was WRONG by the same
+  bug and now asserts line items, not just a total. Web layer simplified: the
+  compensating "authoritative journal total" is now the sum of the page's own
+  lines (mirroring page_ar) so total and lines can no longer disagree;
+  finance_routes no longer imports enterprise_procurement. Regressions all
+  green: finance 8/8, procurement 8/8, goods_sale 10/10, back_office_web 7/7,
+  conformance 8/8. Merged-tree reruns: finance 8/8, back_office_web 7/7,
+  procurement 8/8.

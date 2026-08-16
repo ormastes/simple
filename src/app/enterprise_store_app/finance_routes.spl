@@ -19,14 +19,12 @@ Reads reuse the FROZEN `role_allows` policy with an action that already
 exists in it — `finance.period.close`, the vertical's back-office tier
 (admin or `finance`). No new auth scheme and no new action string.
 
-## Known upstream limitation surfaced here
-`fin_ap_open` gates on the migration id `proc_001_payables`, which no module
-applies (`enterprise_procurement` applies `proc_001_suppliers` and books
-payables into the shared `journal` under `accounts_payable`). `GET /fin/ap`
-therefore renders an empty line list today and reports the authoritative
-payable total from the journal alongside it, so the page is never silently
-wrong. Filed rather than papered over — see the route table in
-doc/07_guide/app/enterprise/store_app.md.
+## AP is journal-derived (fixed 2026-08-16)
+`fin_ap_open` previously gated on a migration id `proc_001_payables` that no
+module ever applied, so `GET /fin/ap` always rendered an empty line list
+while a real payable existed. It now derives lines from the shared journal's
+`accounts_payable` account, and this page's total is simply the sum of those
+lines — one source of truth, lines and total cannot disagree.
 """
 
 use std.common.net.http_core.{match_route_pattern}
@@ -39,7 +37,6 @@ use std.nogc_sync_mut.enterprise_finance.finance.{
     fin_trial_balance, fin_ar_open, fin_ap_open,
     fin_period_status, fin_close_report, fin_period_close
 }
-use std.nogc_sync_mut.enterprise_procurement.procurement.{proc_payable_total}
 use app.enterprise_store_app.web_common.{esc, form_value, form_int, secured, deny}
 
 # fin_balanced is the dashboard roll-up flag: the tenant's journal balances.
@@ -77,14 +74,21 @@ fn page_ar(store: EnterpriseStore, tenant_id: text) -> text:
     body = body + "</ul><p>Open total: <span class=\"ar-total\">" + esc("{total}") + "</span></p>"
     body
 
+# page_ap mirrors page_ar: line items plus their own total. Both come from
+# `fin_ap_open`, which derives them from the authoritative journal, so the
+# total can never disagree with the lines. (It used to be computed separately
+# via `proc_payable_total` because `fin_ap_open` always returned empty; that
+# compensation is gone with the bug, and with it the dependency of the
+# finance route family on the procurement module.)
 fn page_ap(store: EnterpriseStore, tenant_id: text) -> text:
+    var total: i64 = 0
     var body = "<h1>Accounts Payable</h1><ul class=\"ap\">"
     for entry in fin_ap_open(store, tenant_id):
+        total = total + entry.1
         body = body + "<li data-ref=\"" + esc(entry.0) + "\">"
         body = body + "<span class=\"ref\">" + esc(entry.0) + "</span>"
         body = body + " — <span class=\"amount\">" + esc("{entry.1}") + "</span></li>"
-    val journal_total = proc_payable_total(store, tenant_id)
-    body = body + "</ul><p>Payable total (journal, authoritative): <span class=\"ap-total\">" + esc("{journal_total}") + "</span></p>"
+    body = body + "</ul><p>Payable total (journal): <span class=\"ap-total\">" + esc("{total}") + "</span></p>"
     body
 
 fn page_period_status(store: EnterpriseStore, tenant_id: text) -> text:

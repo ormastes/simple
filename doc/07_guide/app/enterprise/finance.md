@@ -17,7 +17,7 @@ System spec: `test/03_system/app/enterprise/finance_vertical_spec.spl`
 | `fin_trial_balance(store, tenant)` | pure read | per-account debit/credit lines + totals + `balanced` |
 | `fin_trial_balance_account(tb, account)` | pure read | one account's `(debit, credit)` |
 | `fin_ar_open(store, tenant)` | pure read | `[(order_id, open_cents)]` for placed-but-unpaid orders |
-| `fin_ap_open(store, tenant)` | pure read | open payables; **empty** when no procurement module is set up |
+| `fin_ap_open(store, tenant)` | pure read | `[(ref_id, outstanding_cents)]` derived from the journal's `accounts_payable` account |
 | `fin_period_status(store, tenant)` | pure read | latest closed `period_end_epoch` (0 = none) |
 | `fin_close_report(store, tenant)` | pure read | `(debit_total, credit_total)` snapshot captured in the latest close row |
 | `fin_period_close(...)` | guarded command | insert-only period lock, capturing the trial balance at close |
@@ -32,9 +32,33 @@ closed reason set (`invalid-session`, `forbidden`, `invalid-record`,
 `invalid-transition`, `duplicate-key`). No module-global mutable state; all
 filtering is pure Simple over `store_rows`.
 
-`fin_ap_open` **probes** the migration ledger for `proc_001_payables` before
-reading a `payables` table. When no procurement module has been set up on the
-store it returns an empty list — it never crashes.
+### `fin_ap_open` reads the journal, not a payables table
+
+`fin_ap_open` groups the tenant's `accounts_payable` journal postings by the
+posting's ref (`journal.order_id`), nets **credits minus debits**, and returns
+the refs that still owe money. There is no `payables` table anywhere in the
+suite, and there must not be one: the journal is authoritative and modules
+read it rather than mirroring it. `enterprise_procurement.proc_receive`
+already credits `accounts_payable` through the shared journal; a settlement
+debits the same account through `records.journal_post_pair`. A separate
+payables projection would be a second copy of state that can drift from the
+ledger and would need its own period-lock story. Any future module that
+credits `accounts_payable` is picked up by this report for free.
+
+An empty result therefore means one of two real things — nothing credited
+`accounts_payable`, or every credit has been settled — never "the module
+isn't installed".
+
+**Bug history (fixed 2026-08-16, lane W9-A).** This read used to gate on
+`store_migration_applied(store, "proc_001_payables")`, a migration id that
+NOTHING in the tree ever applies (`enterprise_procurement` applies
+`proc_001_suppliers`). AP line items were therefore ALWAYS empty — in the
+library and on `GET /fin/ap` — while a nonzero payable genuinely existed on
+the books. A silent wrong answer in a finance report. Regression cover:
+`test/03_system/app/enterprise/finance_vertical_spec.spl`, describe
+*"finance vertical — AP reads the shared journal's payable postings"*, which
+seeds two real purchase-to-stock flows and checks the lines against a
+hand-computed 2100 + 500 = 2600c oracle plus a settlement that clears a line.
 
 ## Where the period check lives
 

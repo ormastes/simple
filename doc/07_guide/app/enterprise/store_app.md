@@ -58,7 +58,7 @@ customer from catalog to receipt, built ONLY on existing layers:
 | GET | `/proc/reconcile` | Escaped three-way report: `open_pos`, `under_invoiced`, `fully_invoiced`, `payable_cents` |
 | GET | `/fin/trial-balance` | Escaped per-account debit/credit table + totals + `balanced` flag |
 | GET | `/fin/ar` | Escaped open receivables (`fin_ar_open`) + open total |
-| GET | `/fin/ap` | Escaped open payables (`fin_ap_open`) + authoritative journal payable total |
+| GET | `/fin/ap` | Escaped open payables (`fin_ap_open`) + open total (the sum of the same lines) |
 | POST | `/fin/period/close` | body `end=T&now=T&idem=K` -> `fin_period_close` |
 | GET | `/fin/period/status` | Latest closed period end + the debit/credit totals captured at close |
 | GET | `/admin/dashboard` | Read-only escaped per-tenant summary (admin role via frozen `role_allows`): products, orders, bookings, open table sessions, outbox pending (`outbox_worker_pending` — run `outbox_worker_setup` once on the store), audit chain OK (`audit_verify_chain`), plus the back-office roll-up: employees, open POs, payable total, trial-balance balanced flag |
@@ -87,14 +87,17 @@ Each roll-up figure degrades to 0 / empty when that vertical's schema was
 never applied to the store (probed via `store_migration_applied`), so the
 dashboard never crashes on a partially set-up suite.
 
-### Known upstream gap: `/fin/ap` line items
+### `/fin/ap` line items (upstream gap fixed 2026-08-16)
 
-`fin_ap_open` gates on the migration id `proc_001_payables`, which no module
-applies — `enterprise_procurement` applies `proc_001_suppliers` and books
-payables into the shared `journal` under `accounts_payable`. `/fin/ap`
-therefore renders no line items today; the page reports the authoritative
-payable total from the journal alongside the (empty) list so it is never
-silently wrong. Recorded here rather than worked around in the view.
+`/fin/ap` renders one `<li data-ref="...">` per ref that still owes money,
+from `fin_ap_open`, which derives them from the shared journal's
+`accounts_payable` account. The page's `ap-total` is simply the sum of those
+lines, exactly mirroring `/fin/ar` — so the total can never disagree with the
+list. The earlier compensating "authoritative journal total", computed
+separately via `proc_payable_total` because the line list was always empty,
+is gone; with it went the finance route family's dependency on the
+procurement module. See doc/07_guide/app/enterprise/finance.md for the bug
+history.
 
 All interpolated business data passes through `esc()` — a product named
 `<script>...</script>` renders as `&lt;script&gt;...`.

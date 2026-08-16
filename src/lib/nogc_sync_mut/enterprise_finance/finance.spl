@@ -12,9 +12,9 @@ that `enterprise_sale.goods_sale.post_journal` and
 - **Reports** (pure reads returning data, no printing):
   `fin_trial_balance` (per-account debit/credit totals + balanced flag),
   `fin_ar_open` (orders placed-but-unpaid, derived from `order_events` +
-  journal exactly like the dashboard derives), `fin_ap_open` (payable rows
-  when a procurement module has been set up on the store — probed via the
-  migration ledger, empty otherwise, never a crash).
+  journal exactly like the dashboard derives), `fin_ap_open` (outstanding
+  payables derived from the journal's `accounts_payable` account, credits
+  minus debits per ref — no `payables` table, the journal is the truth).
 - **Period close** (`fin_period_close`): an admin/finance-guarded command
   running the frozen sequence (session -> rbac -> validation -> idempotency
   -> effects in one UoW) that writes an insert-only `period_locks` row,
@@ -34,7 +34,7 @@ MUST use the seam. See doc/07_guide/app/enterprise/finance.md.
 """
 
 use std.nogc_sync_mut.enterprise_store.store.{
-    EnterpriseStore, store_migrate, store_migration_applied, store_rows,
+    EnterpriseStore, store_migrate, store_rows,
     store_insert_row, uow_begin, uow_commit, uow_rollback
 }
 use std.nogc_sync_mut.enterprise_store.records.{
@@ -151,17 +151,56 @@ fn fin_order_revenue(store: EnterpriseStore, tenant_id: text, order_id: text) ->
                 return int(sqlite_row_get(row, "amount_cents"))
     0
 
-# fin_ap_open lists open payables (ref_id, amount_cents). No procurement
-# module exists yet; when one lands, its migration `proc_001_payables` and
-# `payables` table are read here. Absent module -> empty list, never a crash.
+# fin_ap_open lists open payables (ref_id, outstanding_cents) DERIVED FROM THE
+# SHARED JOURNAL — the `accounts_payable` account, grouped by the posting's
+# ref (`journal.order_id`), credits minus debits, keeping only refs that still
+# owe money.
+#
+# Why the journal and not a `payables` table: the suite's rule is that the
+# journal is authoritative and modules read it rather than mirroring it.
+# `enterprise_procurement.proc_receive` already credits `accounts_payable`
+# through the shared journal, and a settlement debits the same account
+# through `records.journal_post_pair`, so the outstanding balance is fully
+# determined there. Adding a `payables` projection would be a SECOND copy of
+# state that could drift from the ledger and would need its own period-lock
+# story. Every future payable writer (any module crediting
+# `accounts_payable`) is picked up here for free.
+#
+# History: this read used to gate on a migration id `proc_001_payables` that
+# NOTHING in the tree ever applied, so it always returned an empty list while
+# a nonzero payable genuinely existed — a silent wrong answer in a finance
+# report. See doc/07_guide/app/enterprise/finance.md.
 fn fin_ap_open(store: EnterpriseStore, tenant_id: text) -> [(text, i64)]:
-    var out: [(text, i64)] = []
-    if not store_migration_applied(store, "proc_001_payables"):
-        return out
-    val rows = store_rows(store, "payables", "id, tenant_id, ref_id, amount_cents, status")
+    var refs: [text] = []
+    var balances: [i64] = []
+    val rows = store_rows(store, "journal", "id, tenant_id, order_id, account, side, amount_cents")
     for row in rows:
-        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "status") == "open":
-            out.push((sqlite_row_get(row, "ref_id"), int(sqlite_row_get(row, "amount_cents"))))
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        if sqlite_row_get(row, "account") != "accounts_payable":
+            continue
+        val ref_id = sqlite_row_get(row, "order_id")
+        val amount = int(sqlite_row_get(row, "amount_cents"))
+        val delta = if sqlite_row_get(row, "side") == "credit":
+            amount
+        else:
+            0 - amount
+        var found = false
+        var i = 0
+        while i < refs.len():
+            if refs[i] == ref_id:
+                found = true
+                balances[i] = balances[i] + delta
+            i = i + 1
+        if not found:
+            refs.push(ref_id)
+            balances.push(delta)
+    var out: [(text, i64)] = []
+    var j = 0
+    while j < refs.len():
+        if balances[j] > 0:
+            out.push((refs[j], balances[j]))
+        j = j + 1
     out
 
 # fin_period_status returns the tenant's latest closed period end (0 = none).

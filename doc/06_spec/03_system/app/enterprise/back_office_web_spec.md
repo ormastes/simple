@@ -68,10 +68,10 @@ cents/unit (inheriting qty 10 from the requisition); receive 4 units.
   request body; an absent window degrades to the full range.
 - A raw `<script>` in any rendered body means business data bypassed
   `esc()` — fix the view, never the spec.
-- `GET /fin/ap` lists no line items: `fin_ap_open` gates on the migration id
-  `proc_001_payables`, which no module applies. The authoritative payable
-  total is rendered from the journal alongside it. Upstream gap, recorded in
-  the route table rather than papered over.
+- `GET /fin/ap` lists one line per ref that still owes money, derived from
+  the shared journal's `accounts_payable` account (credits minus debits);
+  the rendered total is the sum of those same lines, so a total that
+  disagrees with the lines is impossible by construction.
 
 **Requirements:** N/A
 **Plan:** doc/03_plan/agent_tasks/simple_erp.md
@@ -300,7 +300,7 @@ store_close(store)
    - Expected: http_status_code(tb.status) equals `200`
 - GET /fin/ar is empty — no order was placed in this scenario
    - Expected: http_status_code(ar.status) equals `200`
-- GET /fin/ap reports the authoritative journal payable total
+- GET /fin/ap lists the po-f line AND a total that agrees with it
    - Expected: http_status_code(ap.status) equals `200`
 - Before any close, GET /fin/period/status reports 0
    - Expected: http_status_code(before.status) equals `200`
@@ -314,7 +314,7 @@ store_close(store)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 52 lines folded for reproduction.
+Runnable source: 54 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -347,9 +347,11 @@ val ar = store_app_handle(store, s, t, admin, "GET", "/fin/ar", plain_headers(),
 expect(http_status_code(ar.status)).to_equal(200)
 expect(ar.body.contains("class=\"ar-total\">0</span>")).to_be(true)
 
-step("GET /fin/ap reports the authoritative journal payable total")
+step("GET /fin/ap lists the po-f line AND a total that agrees with it")
 val ap = store_app_handle(store, s, t, admin, "GET", "/fin/ap", plain_headers(), "")
 expect(http_status_code(ap.status)).to_equal(200)
+expect(ap.body.contains("data-ref=\"po-f\"")).to_be(true)
+expect(ap.body.contains("class=\"amount\">1000</span>")).to_be(true)
 expect(ap.body.contains("class=\"ap-total\">1000</span>")).to_be(true)
 
 step("Before any close, GET /fin/period/status reports 0")

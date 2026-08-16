@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -60,8 +60,10 @@ writers MUST use the seam (guide: doc/07_guide/app/enterprise/finance.md).
 - `invalid-transition` on a NEW sale after close: the close's
   `period_end_epoch` is in the future, so ALL current-dated postings are
   locked — that is the hard-freeze semantic, not a bug.
-- Empty `fin_ap_open`: no procurement module is set up on the store; the
-  report probes the migration ledger and returns empty rather than crash.
+- Empty `fin_ap_open`: nothing has credited `accounts_payable` for the
+  tenant, or every credit has been matched by a settling debit. The report
+  reads the SHARED journal, not a `payables` table — there is no such table
+  and no second copy of payable state (that is the point).
 
 **Requirements:** N/A
 **Plan:** doc/03_plan/agent_tasks/simple_erp.md
@@ -137,7 +139,7 @@ store_close(store)
    - Expected: open_before[0].1 equals `5000`
 - Payment clears the receivable
    - Expected: fin_ar_open(store, "tenant-a").len() equals `0`
-- AP is empty because no procurement module is set up (probe, no crash)
+- AP is empty because nothing ever credited accounts_payable
    - Expected: fin_ap_open(store, "tenant-a").len() equals `0`
 
 
@@ -169,8 +171,101 @@ step("Payment clears the receivable")
 sale_pay_order(store, clerk_session, t, clerk, envelope("ar-pay-1", "sale.order.pay"), "order-200")
 expect(fin_ar_open(store, "tenant-a").len()).to_equal(0)
 
-step("AP is empty because no procurement module is set up (probe, no crash)")
+step("AP is empty because nothing ever credited accounts_payable")
 expect(fin_ap_open(store, "tenant-a").len()).to_equal(0)
+store_close(store)
+```
+
+</details>
+
+### finance vertical — AP reads the shared journal's payable postings
+
+#### lists a real procurement payable with the hand-computed total
+
+- Seed two purchase-to-stock flows (oracle 3x700 + 2x250 = 2600c)
+- The journal really holds the payable (independent oracle side)
+   - Expected: proc_payable_total(store, "tenant-a") equals `2600`
+   - Expected: fin_trial_balance_account(tb, "accounts_payable").1 equals `2600`
+- fin_ap_open returns one line per PO summing to the same 2600c
+   - Expected: ap.len() equals `2`
+   - Expected: ap_total equals `2600`
+   - Expected: ap[0].0 equals `po-1`
+   - Expected: ap[0].1 equals `2100`
+   - Expected: ap[1].0 equals `po-2`
+   - Expected: ap[1].1 equals `500`
+- Settling a payable through the shared seam removes it from AP
+   - Expected: ap_after.len() equals `1`
+   - Expected: ap_after[0].0 equals `po-1`
+   - Expected: ap_after[0].1 equals `2100`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 36 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Seed two purchase-to-stock flows (oracle 3x700 + 2x250 = 2600c)")
+val store = fresh_store("ap")
+proc_setup(store)
+val t = tenant_a()
+val admin = admin_a()
+val s = session_for(admin, t)
+seed_payable(store, t, "SUP-1", "REQ-1", "po-1", "SKU-9", 3, 700, 3)
+seed_payable(store, t, "SUP-1", "REQ-2", "po-2", "SKU-8", 4, 250, 2)
+
+step("The journal really holds the payable (independent oracle side)")
+expect(proc_payable_total(store, "tenant-a")).to_equal(2600)
+val tb = fin_trial_balance(store, "tenant-a")
+expect(fin_trial_balance_account(tb, "accounts_payable").1).to_equal(2600)
+
+step("fin_ap_open returns one line per PO summing to the same 2600c")
+val ap = fin_ap_open(store, "tenant-a")
+expect(ap.len()).to_equal(2)
+var ap_total: i64 = 0
+for entry in ap:
+    ap_total = ap_total + entry.1
+expect(ap_total).to_equal(2600)
+expect(ap[0].0).to_equal("po-1")
+expect(ap[0].1).to_equal(2100)
+expect(ap[1].0).to_equal("po-2")
+expect(ap[1].1).to_equal(500)
+
+step("Settling a payable through the shared seam removes it from AP")
+val fin = fin_clerk()
+val fin_session = session_for(fin, t)
+val paid = fin_post_journal_guarded(store, fin_session, t, fin, envelope("ap-settle-1", "finance.journal.post"), "po-2", "accounts_payable", "cash", 500, 1755000000)
+expect(paid.ok).to_be(true)
+val ap_after = fin_ap_open(store, "tenant-a")
+expect(ap_after.len()).to_equal(1)
+expect(ap_after[0].0).to_equal("po-1")
+expect(ap_after[0].1).to_equal(2100)
+store_close(store)
+```
+
+</details>
+
+#### keeps one tenant's payables out of another's AP report
+
+- Only tenant A has procurement activity
+   - Expected: fin_ap_open(store, "tenant-a").len() equals `1`
+   - Expected: fin_ap_open(store, "tenant-b").len() equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Only tenant A has procurement activity")
+val store = fresh_store("ap_tenants")
+proc_setup(store)
+seed_payable(store, tenant_a(), "SUP-1", "REQ-1", "po-1", "SKU-9", 3, 700, 3)
+expect(fin_ap_open(store, "tenant-a").len()).to_equal(1)
+expect(fin_ap_open(store, "tenant-b").len()).to_equal(0)
 store_close(store)
 ```
 
@@ -400,8 +495,8 @@ store_close(store2)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
