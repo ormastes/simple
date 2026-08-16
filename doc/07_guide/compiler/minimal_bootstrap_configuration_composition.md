@@ -102,6 +102,13 @@ It does not establish a deployed Stage 4 CLI, general SPipe/docgen/test-runner
 operation, release readiness, self-host convergence, DDC, or another host's
 behavior. Those claims require their own admitted binary and evidence.
 
+For staged-native compiler metadata, keep aggregate values inside the owning
+component. Helper boundaries should carry scalar identities and copy aligned
+metadata in the owner; do not return an aggregate and immediately pass it into
+another native method. The focused reference is
+`scripts/check/check-native-scalar-metadata-copy.shs`, tracked by
+`doc/08_tracking/bug/stage3_post_file_copy_exit139_2026-08-14.md`.
+
 ## Required build receipt
 
 Initial acceptance is structural: report modules parsed, typed, and lowered;

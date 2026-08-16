@@ -9,7 +9,7 @@ Owner plan:
 
 | ID | Owner location | Exact gap | Unblock condition |
 |---|---|---|---|
-| B-HOST-CLI | `src/compiler/50.mir/_MirLowering/function_lowering.spl`; detail: `stage3_post_file_copy_exit139_2026-08-14.md` | The `runtime_error` static-owner corruption is fixed and its exact regression is green, but Stage 3 now exits 139 after lowering `file_copy`, before admission | Capture a symbolized post-`file_copy` frontier, fix its pure-Simple owner, then resume the retained Stage 3 cache with a materially changed source identity and run Stage 4 plus essential-tools smoke |
+| B-HOST-CLI | `src/compiler/50.mir/mir_lowering_types.spl:414`; detail: `stage3_post_file_copy_exit139_2026-08-14.md` | GDB proves `maybe_copy_array_value` crashes in aggregate-argument `remember_local_hir_type`; scalar-ID metadata-copy repair is focused-green, but Stage 3/4 remain unadmitted | Resume the retained Stage 3 cache once with the material repair; on admission run Stage 4 plus essential-tools smoke |
 | B-TARGET-SIMPLE | `scripts/os/simpleos-native-build.shs:1` | No fresh target payload built by an admitted pure-Simple Stage 4 CLI | Strict build produces target-native static ELF and provenance receipt with fallback disabled |
 | B-GUEST-LLD | `src/os/port/llvm/build.spl:1` | No genuine guest-static x86_64 SimpleOS `ld.lld` in this worktree | Pinned-fork build produces a validated static target ELF and dependency/hash receipts |
 | B-IMAGE | `src/os/installer/image_builder.spl:1` | No versioned embedded component manifest plus external image admission receipt | Image builder emits both non-self-referential records and validates every canonical alias byte-for-byte |
@@ -78,3 +78,13 @@ must not drive the current resume command.
   `bfa17aa9b5ea1b4d7f58eb4b92049a808ee15586384d02fdba47bd06de841a19`.
 - These latest results supersede the earlier exit-143 resume suggestion. The
   global three-cycle cap is exhausted; no unchanged command may rerun here.
+- A later symbolized diagnostic captured SIGSEGV in
+  `MirLowering.remember_local_hir_type`, called from
+  `maybe_copy_array_value`; retained GDB log SHA-256 is
+  `25f6fb3c1cf8585ed0bfee4c589386e2cc89dff8c60e74d9eab652719d6064ab`.
+  The owner-local scalar-ID repair at
+  `src/compiler/50.mir/mir_lowering_types.spl` is source-bound and focused
+  native-green for append/update/missing-source plus both aligned scalar state
+  arrays. Stage 3/4 are still unadmitted. The next permitted action is one
+  materially changed cache-preserving Stage 3 resume after the dedicated
+  Stage-4 owner releases canonical bootstrap resources.

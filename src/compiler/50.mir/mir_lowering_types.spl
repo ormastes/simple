@@ -443,6 +443,55 @@ impl MirLowering:
         self.local_hir_type_isolation_states = states
         self.local_hir_type_resource_states = resource_states
 
+    me copy_local_hir_type_metadata(source_local_id: i64, destination_local_id: i64):
+        """Copy aligned HIR metadata without transporting HirType as an ABI arg.
+
+        The admitted Stage 2 native ABI can corrupt an aggregate `HirType`
+        passed from `maybe_copy_array_value` into `remember_local_hir_type`.
+        Keep both method arguments scalar and copy the aggregate only while it
+        remains an element of this owner's aligned local arrays.
+        """
+        var source_index: i64 = -1
+        var i = self.local_hir_type_ids.len() - 1
+        while i >= 0:
+            if self.local_hir_type_ids[i] == source_local_id:
+                source_index = i
+                break
+            i = i - 1
+        if source_index < 0:
+            return
+
+        var ids = self.local_hir_type_ids
+        var values = self.local_hir_type_values
+        var states = self.local_hir_type_isolation_states
+        var resource_states = self.local_hir_type_resource_states
+        val source_type = values[source_index]
+        # Match find_local_hir_type's fail-closed sentinel contract. A raw
+        # staged-native zero is not valid HIR metadata and must not be copied
+        # into a second local.
+        if source_type == nil or source_type == 0:
+            return
+        var destination_index: i64 = -1
+        i = ids.len() - 1
+        while i >= 0:
+            if ids[i] == destination_local_id:
+                destination_index = i
+                break
+            i = i - 1
+        if destination_index >= 0:
+            values[destination_index] = source_type
+            states[destination_index] = states[source_index]
+            resource_states[destination_index] = resource_states[source_index]
+        else:
+            ids.push(destination_local_id)
+            values.push(source_type)
+            states.push(states[source_index])
+            resource_states.push(resource_states[source_index])
+        self.local_hir_type_ids = ids
+        self.local_hir_type_values = values
+        self.local_hir_type_isolation_states = states
+        self.local_hir_type_resource_states = resource_states
+
     fn find_local_hir_type(local_id: i64) -> HirType?:
         var i = self.local_hir_type_ids.len() - 1
         while i >= 0:

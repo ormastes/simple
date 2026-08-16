@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+cd "$root"
+admission_dir=build/bootstrap/stage3/x86_64-unknown-linux-gnu
+simple_bin=${SIMPLE_BIN:-$admission_dir/stage2-admitted/simple}
+sanity_receipt=${SIMPLE_COMPILER_PROVENANCE:-$admission_dir/stage2-sanity.env}
+fixture=test/fixtures/native_scalar_metadata_copy/main.spl
+artifact_dir=build/test-artifacts/native_scalar_metadata_copy
+candidate=$artifact_dir/probe
+build_log=$artifact_dir/native-build.log
+run_log=$artifact_dir/native-run.log
+
+[ -x "$simple_bin" ] && [ ! -L "$simple_bin" ] || { echo "STATUS: FAIL scalar-metadata-copy reason=compiler-missing-or-symlink"; exit 1; }
+[ -f "$sanity_receipt" ] && [ ! -L "$sanity_receipt" ] || { echo "STATUS: FAIL scalar-metadata-copy reason=provenance-missing"; exit 1; }
+simple_bin=$(CDPATH= cd -- "$(dirname -- "$simple_bin")" && pwd -P)/$(basename -- "$simple_bin")
+sanity_receipt=$(CDPATH= cd -- "$(dirname -- "$sanity_receipt")" && pwd -P)/$(basename -- "$sanity_receipt")
+expected_hash=$(sed -n 's/^candidate_sha256_after=//p' "$sanity_receipt")
+actual_hash=$(sha256sum -- "$simple_bin" | awk '{print $1}')
+[ -n "$expected_hash" ] && [ "$actual_hash" = "$expected_hash" ] || { echo "STATUS: FAIL scalar-metadata-copy reason=provenance-hash-mismatch"; exit 1; }
+grep -Fxq 'status=pass' "$sanity_receipt" || { echo "STATUS: FAIL scalar-metadata-copy reason=provenance-not-admitted"; exit 1; }
+version=$($simple_bin --version 2>&1) || exit 1
+case "$version" in *Rust-built*|*"bootstrap seed only"*) echo "STATUS: FAIL scalar-metadata-copy reason=rust-seed-forbidden"; exit 1;; esac
+case "$version" in simple-bootstrap*) ;; *) echo "STATUS: FAIL scalar-metadata-copy reason=unsupported-stage"; exit 1;; esac
+grep -Fq 'self.copy_local_hir_type_metadata(init_local.id, result_arr.id)' src/compiler/50.mir/mir_lowering_stmts.spl || { echo "STATUS: FAIL scalar-metadata-copy reason=production-call-missing"; exit 1; }
+grep -Fq 'me copy_local_hir_type_metadata(source_local_id: i64, destination_local_id: i64)' src/compiler/50.mir/mir_lowering_types.spl || { echo "STATUS: FAIL scalar-metadata-copy reason=production-helper-missing"; exit 1; }
+mkdir -p "$artifact_dir"
+rm -f "$candidate"
+build_ok=0
+env SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 "$simple_bin" native-build \
+  --target x86_64-unknown-linux-gnu --backend llvm --runtime-bundle core-c-bootstrap \
+  --source test/fixtures/native_scalar_metadata_copy --entry-closure --threads 1 \
+  --cache-dir "$artifact_dir/cache" --entry "$fixture" -o "$candidate" \
+  >"$build_log" 2>&1 || build_ok=$?
+[ "$build_ok" -eq 0 ] || { echo "STATUS: FAIL scalar-metadata-copy reason=native-compile-failed log=$build_log"; exit 1; }
+[ -x "$candidate" ] || { echo "STATUS: FAIL scalar-metadata-copy reason=candidate-missing"; exit 1; }
+timeout 30 "$candidate" >"$run_log" 2>&1 || { echo "STATUS: FAIL scalar-metadata-copy reason=native-run-failed"; exit 1; }
+grep -Fq 'SCALAR METADATA COPY VERDICT: PASS 3:array:2:4:array:1:2:4' "$run_log" || { echo "STATUS: FAIL scalar-metadata-copy reason=verdict-missing"; exit 1; }
+echo "STATUS: PASS scalar-metadata-copy source=pass append=pass update=pass missing-source=pass compiler_sha256=$actual_hash"

@@ -4,6 +4,9 @@ Date: 2026-08-14
 
 Status: PLAN COMPLETE (higher-capability PASS) / IMPLEMENTATION WARN — no deployment acceptance PASS
 SPipe state: `.spipe/simpleos-toolchain-deployment-desktop-boot/state.md`
+B-HOST-CLI scalar-metadata repair sublane: 85% implemented and focused-green;
+Stage 3/4 admission remains blocked and the complete deployment feature is not
+85% complete.
 
 ## Objective
 
@@ -52,12 +55,13 @@ later sections remain non-PASS.
 | Same-run live evidence | manifest, QEMU argv, serial, SSH, framebuffer/readback, guest output receipts | ABSENT / B-DESKTOP-LIVE |
 
 The fresh static-owner repair lane fixed the `runtime_error` receiver
-corruption with scalar owner hints plus a fail-closed unique-static-symbol
-fallback guarded by the observed negative receiver discriminant. Its final
-Stage 3 trace has zero `runtime_error`, impossible receiver, and unsupported
-expression rows. Stage 3 remains absent because the downstream high-memory
-build exits 139 at a varying later frontier (`file_copy` in Cycle 2,
-`eval_binop` in final Cycle 3). Retained logs are
+corruption. A later GDB run proved the next exit 139 at
+`maybe_copy_array_value` passing an aggregate `HirType` into
+`remember_local_hir_type`. The scalar-ID, owner-local metadata-copy repair now
+has source-bound unit coverage plus a pure-Simple Stage-2 native fixture for
+append, update, missing-source, isolation-state, and resource-state behavior.
+Stage 3/4 admission remains pending; this focused PASS is not deployment or
+self-host convergence evidence. Retained earlier logs are
 `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`
 (SHA-256 `1dfe959161d18cc16146825d69f9b5f64240c6917e67ab28718ddd339252bf8f`)
 and `stage3-native-build.log`
@@ -73,8 +77,10 @@ It supplies the owner file/line and unblock condition for every row below.
 
 1. **B-HOST-CLI:** no admitted Stage 3 and Stage 4 pure-Simple host CLI. The
    `runtime_error` static-owner defect is fixed and regression-covered. The
-   remaining build exits 139 at varying later high-memory frontiers. Resume
-   only in a fresh bounded lane after the symbolized/RSS reduction required by
+   GDB now identifies aggregate `HirType` transport from
+   `maybe_copy_array_value` into `remember_local_hir_type` as the exact crash.
+   A scalar-ID metadata-copy repair and focused native regression are green;
+   Stage 3/4 verification remains required per
    `stage3_post_file_copy_exit139_2026-08-14.md`.
 2. **B-TARGET-SIMPLE:** no fresh strict
    `x86_64-unknown-simpleos/simple`. Resume after B-HOST-CLI with the AC-2
@@ -226,7 +232,7 @@ artifact; WARN is never verify PASS, release, or feature completion.
 
 | Row | State | Missing prerequisite | Exact resume command | Retained artifacts | Owner | Final reviewer |
 |---|---|---|---|---|---|---|
-| Linux x86_64 Stage 3/4 admission | BLOCKED ([B-HOST-CLI](../../../../08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md)) | static-owner bug fixed; downstream high-memory exit 139 at varying later function frontier; Stage 3/4 absent | In a fresh authorized lane, capture the symbolized/RSS reduction required by `stage3_post_file_copy_exit139_2026-08-14.md`; only after a material owner fix resume the admitted Stage 3 cache, then run Stage 4 plus essential-tools and handoff-readiness gates | `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage{2,3}-native-build.log`; static-factory unit/integration/system evidence; future candidate/provenance/admission/handoff receipts | bootstrap owner | higher-capability reviewer |
+| Linux x86_64 Stage 3/4 admission | BLOCKED ([B-HOST-CLI](../../../../08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md)) | GDB-rooted `HirType` aggregate ABI repair is focused-green; Stage 3/4 verification absent | Resume the admitted Stage 3 cache once with the scalar metadata-copy repair; on candidate admission run Stage 4 plus essential-tools and handoff-readiness gates | `build/native_probe/stage3-gdb/gdb.log`; scalar-metadata unit/integration/system evidence; future candidate/provenance/admission/handoff receipts | bootstrap owner | higher-capability reviewer |
 | Linux x86_64 OVMF+GRUB production desktop + guest toolchain | BLOCKED ([B-DESKTOP-LIVE](../../../../08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md)) | payload, guest linker, two-record image admission, frozen combined wrapper | After wrapper implementation: `SIMPLE_BIN=<admitted-stage4> SIMPLEOS_TOOLCHAIN_IMAGE=<admitted-image> SIMPLEOS_WM_READINESS_TIMEOUT_MS=900000 sh scripts/check/check-simpleos-toolchain-desktop-boot.shs` | embedded manifest, external receipt, QEMU argv, serial, framebuffer/readback, SSH transcript, output ELF | root/QEMU+desktop owner | higher-capability reviewer |
 | Physical x86_64 board | BLOCKED ([B-PHYSICAL](../../../../08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md)) | board acquisition/identity, physical NIC driver, boot/download route | Build/check: `sh scripts/os/build-simpleos-x86_64-board-usb.shs && sh scripts/check/check-simpleos-x86_64-board-usb-image.shs`. Only after board acquisition and reviewed stable by-id recording: `SIMPLEOS_BOARD_DEVICE=/dev/disk/by-id/<reviewed-id>; test -b "$SIMPLEOS_BOARD_DEVICE"; sudo dd if=build/os/x86_64_board_usb/board-usb.img of="$SIMPLEOS_BOARD_DEVICE" bs=4M conv=fsync status=progress`; boot the named mini-PC and capture the selected evidence channel | board identity, image receipt, download log, serial or SSH transcript | board owner | higher-capability reviewer |
 
@@ -254,6 +260,13 @@ consumed: scalar owner hint (insufficient), unique exact-symbol fallback
 (primary frontier cleared), and negative-discriminant ambiguity guard (primary
 frontier remained cleared; downstream exit 139 remained). No fourth retry is
 permitted in this session.
+
+The subsequent scalar-metadata lane is a distinct, GDB-rooted source repair,
+not a fourth unchanged bootstrap retry. Its code and focused regression are
+complete; the one materially changed cache-preserving Stage 3 resume remains
+deferred while the dedicated Stage-4 owner holds the canonical bootstrap
+resources. It may run once after that owner releases them. Until then
+B-HOST-CLI and every downstream implementation AC remain BLOCKED.
 
 Never rerun an unchanged green criterion or an identical failed command.
 
