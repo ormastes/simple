@@ -2618,3 +2618,41 @@ Rules that follow:
 - Prefer a positive check: instead of "no function returns pixels", grep for
   the concrete producer already in use (`\.pixels`, `render_.*composition`) and
   read its callers.
+
+## Before adding a call site, look for the existing driver (2026-08-16)
+
+Duplication in this tree does not arrive as copied files. It arrives as a
+**re-derived sequence**: someone needs a multi-step handshake against a
+subsystem, does not find the existing driver, and writes the steps out again at
+a new call site. It compiles and reviews clean, then drifts.
+
+Real instance, same session as the `grep`-wrapper lesson above: the browser's
+broker -> jailed worker -> Draw IR -> raster -> pixels handshake was written out
+**three times** (twice in `hosted_browser_render_evidence.spl`, once in a new
+`app/browser/sandbox_render.spl`) before being collapsed into
+`os.hosted.hosted_browser_render_session`. The second and third copies were
+written by someone who had *already read* the first — it was the file that
+proved the rasterizer existed.
+
+Rules:
+
+- **Search for a driver before writing steps.** If you are about to call
+  `create` + `start` + `render` + `close` against a subsystem, grep for an
+  existing caller of the same entry points with `/usr/bin/grep -rn` and read it.
+  If one exists, extract or reuse; do not parallel-write.
+- **Extract the shape that fits ALL callers, not the one in front of you.** The
+  obvious extraction here was a one-shot `html -> pixels`. It would have broken
+  the animation path, which holds one worker across `init` -> `begin_advance` ->
+  poll -> a second rasterize. A *session* (`open`/`render_frame`/`close`) fits
+  all three; a one-shot fits two. Read every caller before choosing the shape.
+- **A near-duplicate with a different return type is still a duplicate.** The
+  evidence functions return a verdict `text` and the product path returns
+  `[u32]`; that difference hid the shared handshake underneath.
+- **Refactoring verified code you cannot run is a real risk — price it.** Here
+  it was acceptable only because `bin/simple check <file>` type-checks even
+  without a runtime, and the blast radius was one importer. Confirm both before
+  collapsing, and say so in the commit.
+- **Per-OS boilerplate counts.** `src/os/compositor/host_services/{cocoa,win32,
+  sdl2}_display_adapter.spl` carry byte-identical `_completion`/`_rejected`
+  helpers three times. Adding a fourth backend by copying the third is the
+  failure mode this rule exists to stop.

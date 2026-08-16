@@ -293,3 +293,51 @@ records `coverage_collector_skips_pub_val_and_match_heads_2026-08-15.md` and
   (`src/lib/gc_async_mut/gpu/browser_engine/net/{fetch,h1_client,tls}.spl`) but
   is wired only into the hosted worker browser. Wiring it here is a separate
   lane; do not claim a real page rendered until it is.
+
+## Do not re-derive the jailed-render sequence (2026-08-16)
+
+**One entry point for a jailed render**: `os.hosted.hosted_browser_render_session`.
+
+```
+open(executable, generation, width, height, timeout_ms)  -> Result<Session, text>
+render_frame(session, kind, payload, timeout_ms)         -> Result<Frame, text>
+rasterize(session, result)                               -> Frame   # for polled frames
+close(session)                                           -> bool
+```
+
+`Frame` carries BOTH `result` (the worker's `HostedBrowserRendererResult`, incl.
+the Draw IR composition) and `raster` (the `[u32]` pixels plus
+`rendered_command_count` / `fallback_required`), because evidence paths assert
+on draw commands and product paths want pixels.
+
+**Why a session and not `render_html_to_pixels(...)`**: `hosted_browser_animation_evidence`
+holds ONE worker across `init` -> `begin_advance(16)` -> `_await_evidence_frame`
+poll -> a second rasterize. A one-shot helper cannot express that and would have
+broken it. Read every caller before choosing an extraction shape.
+
+**Current callers** (add yourself here if you become one):
+- `src/app/browser/sandbox_render.spl` — product path, returns pixels
+- `src/os/hosted/hosted_browser_render_evidence.spl` — both evidence functions
+
+**History**: this handshake existed in three copies before the module was
+written, and the third copy was authored by someone who had already read the
+first. If you are about to write `HostedBrowserRendererProcess.create(...)` +
+`Engine2dCompositorBackend.create_named(...)` + `start` + `render` yourself,
+stop — open a session instead.
+
+## Tiny browser is NOT downstream of this (2026-08-16, verified)
+
+A common assumption is that the tiny browser depends on the large one. It does
+not, at import level. All 37 files under `src/lib/nogc_sync_mut/tiny/`,
+`src/os/apps/tiny_browser/` and `src/os/services/tiny_wm/` import only
+`std.tiny.*`, `os.services.tiny_wm.*`, `os.apps.tiny_browser.*`, `std.common.*`
+and `std.nogc_sync_mut.*` — zero references to `HostedBrowserRendererProcess`,
+`Engine2dCompositorBackend`, `render_draw_ir_composition`, the hosted evidence
+functions, or anything under `src/app/browser/`. It has its own renderer
+(`TinySoftware2D`, `std.tiny.engine2d.software`), and
+`.spipe/tiny_ui_web_wm/state.md` explicitly EXCLUDES the full compositor and
+full Web renderer from the tiny base closure.
+
+Consequence: refactors of the large browser's render path cannot break the tiny
+browser, and conversely the tiny browser must not be "fixed" by importing large
+browser modules — that would violate its stated scope exclusion.

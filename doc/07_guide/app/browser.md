@@ -207,3 +207,25 @@ The worker executable must be one that dispatches the renderer worker argv
 marker (as `src/os/hosted/hosted_entry.spl` does). The browser's own binary is
 not one, deliberately: adding that marker to the CLI would pull `os.hosted.*`
 into the startup closure of every `simple` invocation.
+
+### Getting a jailed render (do not re-derive the handshake)
+
+Use `os.hosted.hosted_browser_render_session` — `open` / `render_frame` /
+`rasterize` / `close`. It is the only place the broker + software-raster
+sequence is written, shared by `src/app/browser/sandbox_render.spl` and both
+evidence functions in `src/os/hosted/hosted_browser_render_evidence.spl`.
+
+It is a session rather than a one-shot `html -> pixels` call because the
+animation evidence path keeps one worker alive across `init` -> `begin_advance`
+-> poll -> a second rasterize.
+
+If you find yourself writing `HostedBrowserRendererProcess.create(...)` next to
+`Engine2dCompositorBackend.create_named(...)`, you are re-deriving it; open a
+session instead. That sequence previously existed in three copies.
+
+### The tiny browser is independent
+
+`src/os/apps/tiny_browser/` and `src/lib/nogc_sync_mut/tiny/**` do not import
+anything from this browser, the compositor, or `src/os/hosted/`. They render
+through their own `TinySoftware2D`. Do not wire them together — the tiny stack's
+scope explicitly excludes the full compositor and Web renderer.

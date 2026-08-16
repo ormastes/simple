@@ -314,3 +314,28 @@ No admitted pure-Simple runtime exists on this host, so REQ-WEB-BROWSER-014
 stays **not promoted**. What IS proven natively: the jail's syscall contract,
 its namespace posture, and its startup-failure behaviour, all via the C
 self-checks.
+
+## Duplication collapsed (2026-08-16, follow-up)
+
+The first cut of `sandbox_render.spl` re-derived the broker + raster handshake
+that `hosted_browser_render_evidence.spl` already performed twice — a third
+copy of the same six steps, written by the same session that had just read the
+first copy to prove the rasterizer existed.
+
+Collapsed into `src/os/hosted/hosted_browser_render_session.spl`
+(`open` / `render_frame` / `rasterize` / `close`). All three call sites now go
+through it. Shape chosen by reading every caller: a one-shot `html -> pixels`
+helper would have broken `hosted_browser_animation_evidence`, which holds one
+worker across `init` -> `begin_advance` -> poll -> a second rasterize.
+
+Risk accepted knowingly: this rewrote verified evidence code with no runtime to
+re-run it. Priced by two facts — `bin/simple check` type-checks each file
+without a runtime (all three PASS), and the blast radius is a single importer
+(`hosted_entry.spl:81,82,288,292`). Nothing else in the repo calls those
+functions.
+
+Not affected: the tiny browser. Verified all 37 files under
+`src/lib/nogc_sync_mut/tiny/`, `src/os/apps/tiny_browser/` and
+`src/os/services/tiny_wm/` import only `std.tiny.*` / `tiny_wm` /
+`tiny_browser` / `std.common.*` / `std.nogc_sync_mut.*` — no path into the
+large browser at all.
