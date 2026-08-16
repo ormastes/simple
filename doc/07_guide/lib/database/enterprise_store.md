@@ -83,7 +83,8 @@ not constrain it). Full import audit:
 
 | Dependency | Facade | Both-OS status |
 |---|---|---|
-| SQLite access | `std.nogc_sync_mut.io.sqlite_sffi` (rt_sqlite_* externs) | Host: yes (emulation/native). SimpleOS: **blocked** — no `rt_sqlite_*` provider in `src/os/` (libc has no sqlite; DBFS is a filesystem, not this extern surface) |
+| SQLite access | `std.nogc_sync_mut.io.sqlite_sffi` (rt_sqlite_* externs) | Host: yes (emulation/native). SimpleOS: no `rt_sqlite_*` provider in `src/os/` — **unblocked by the file backend fallback below** |
+| Storage fallback | `enterprise_store.file_backend` (pure Simple over `rt_file_exists`/`rt_file_size`/`rt_file_read_text_at`/`rt_file_atomic_write`) | Both — `store_open(path)` composes it automatically when sqlite is unavailable; explicit via `store_open_file(path)` |
 | Audit hashing | `std.common.crypto.sha256` (pure Simple) | Both |
 | Foundation contracts (`enterprise_sale.foundation`) | none (pure Simple, zero imports) | Both |
 | Filesystem / env / process / time | **not used** by the library (specs use `std.io_runtime` on the host harness only) | n/a |
@@ -92,13 +93,65 @@ Evidence: minimal entry `src/app/enterprise/store_probe_main.spl` —
 host run prints `enterprise store open=true verify=[]`; SimpleOS-target
 cross-compile succeeds:
 `bin/simple compile --target=x86_64-unknown-simpleos src/app/enterprise/store_probe_main.spl -o build/test-artifacts/enterprise_entry_simpleos`
-(SMF module artifact, magic `SMF\0`). Remaining blocked row: link/run inside
-SimpleOS requires an in-guest `rt_sqlite_*` extern provider; resume = provide
-that surface (or a DBFS-backed adapter behind the same facade), then rerun
-the compile + boot the probe per the host-OS guide. No per-OS fork exists.
+(SMF module artifact, magic `SMF\0`). No per-OS fork exists.
 
-Spec manuals (generated via spipe-docgen into `doc/06_spec/`):
-`enterprise_store_spec.md` (repository/UoW/migration/outbox surface) and
-`enterprise_store_harden_spec.md` (corruption/fault-injection seams); system
-level: `store_app_spec.md`, `store_web_harden_spec.md`,
-`goods_sale_vertical_spec.md`.
+### File backend fallback (2026-08-16, lane W2-A)
+
+`enterprise_store/file_backend.spl` is a pure-Simple append-only store
+(one file, `SPLSTORE1` magic line, percent-encoded `table\tcol=val` rows)
+behind the SAME `store.spl` API. `store_open(path)` selects it by
+composition when `sqlite_open` yields an invalid handle (no rt_sqlite
+provider — SimpleOS in-guest); `store_open_file(path)` selects it
+explicitly. Raw uow begin/rollback do not undo appends, so the honest
+ACID probe reports `acid=false` (same contract as the interpreter sqlite
+emulation); atomic multi-write is the `BufferedUow` layer, and each single
+insert is whole-file `rt_file_atomic_write`. `store_open_verified`
+recognizes a file-backend store by its magic line and never feeds it to
+sqlite. Spec: `enterprise_store_file_backend_spec.spl` (6 cases — records
+layer unchanged, separator round-trip, buffered all-or-nothing, migration
+no-op, restart survival). It deliberately declares its externs locally
+(file_ops' `??` TryOperator blocks standalone-SMF cross-compilation).
+
+Remaining honest gap for an in-guest RUN: the SimpleOS guest must provide
+the four `rt_file_*` externs above at SMF load time and a loader/exec path
+for the compiled probe; no guest transcript exists yet, so AC-17 in-guest
+execution is still evidence-pending (cross-compile row is green).
+
+## Outbox worker — dispatch + reconciliation (W2-F, 2026-08-16)
+
+`std.enterprise_outbox` (sync-tier impl
+`src/lib/nogc_sync_mut/enterprise_outbox/outbox_worker.spl`, default-tier
+wrapper in `nogc_async_mut/enterprise_outbox/`) drains the store's outbox:
+
+- `outbox_worker_setup(store)` — idempotent migrations for the insert-only
+  side tables `outbox_dispatch` and `outbox_retry` (no UPDATE anywhere; a
+  dispatch is a NEW row keyed by the outbox row id, pending = rows minus
+  dispatch records, filtered in pure Simple).
+- `outbox_worker_pending(store, tenant)` — undispatched `OutboxEvent`s
+  (`outbox_id`, `event_type`, `payload`) in insertion order. Named
+  `outbox_worker_pending` because `records.outbox_pending` (tuple view of
+  ALL rows) already owns the shorter name and the interpreter resolves
+  same-named imports ambiguously.
+- `outbox_dispatch_batch(store, tenant, target, now_epoch, max_batch)` —
+  at-least-once delivery to a `DispatchTarget` (composition seam like
+  `StoreFaults`: mode = "ok" | "fail_all" | "fail_payload"). Success
+  commits the dispatch record atomically WITH an audit-chain entry in one
+  unit of work; failure records an `outbox_retry` row and leaves the event
+  pending. Exactly-once EFFECT is the consumer's dedup on `outbox_id`.
+- `reconcile_report(store, tenant, max_retries)` — data (not prints):
+  counts, dead-letter candidates (pending with retries > N), and
+  dispatch-without-outbox-row corruption (`orphan_dispatch_ids`).
+
+Spec: `test/01_unit/lib/nogc_sync_mut/enterprise_outbox/outbox_worker_spec.spl`
+(8/8; deliberate-red run with the dedup filter sabotaged failed 6/8 first).
+
+## Spec manuals (generated, doc/06_spec)
+
+`enterprise_store_spec`, `enterprise_store_harden_spec`,
+`enterprise_store_file_backend_spec`, `outbox_worker_spec`,
+`goods_sale_vertical_spec`, `booking_vertical_spec`,
+`restaurant_vertical_spec`, `store_app_spec`, `store_web_harden_spec` —
+regenerate via `bin/simple spipe-docgen <spec> --output doc/06_spec
+--no-index` (0 stubs required; on the Rust seed the subcommand argv-drop
+workaround is documented in
+`doc/08_tracking/bug/spipe_docgen_subcommand_argv_drop_2026-08-16.md`).
