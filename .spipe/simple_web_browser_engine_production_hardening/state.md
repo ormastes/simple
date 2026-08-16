@@ -2765,3 +2765,19 @@ implementation in progress / target evidence blocked
   SSpec scenario remains **unexecuted** — no admitted pure-Simple runtime; see
   the runtime blocker recorded in the previous entry, unchanged. Problem 3
   (in-process browsers unjailed) remains open.
+- **Sabotage discipline satisfied (2026-08-16).** Both gate arms proven to bite
+  in a scratch tree copy: posture-lie arm -> FAIL `namespaces_active()=true but
+  net ns unchanged`; seccomp default flipped to `SECCOMP_RET_ALLOW` (replaying
+  the original deny-list defect) -> FAIL `child survived a non-allow-listed
+  syscall (fail-open)`. Pre and post runs both `PASS — 4 check(s) verified`.
+- **QEMU hard-blocked, not deferred**: no Linux image in-tree, curl/wget
+  blocked by context-mode rules, and `/boot/vmlinuz-*` is root-only with no
+  passwordless sudo. Needs an image supplied out of band.
+- **Problem 3 NOT attempted, deliberately.** Routing `src/app/browser` through
+  the broker is pure-Simple code (~3.5k-line `hosted_browser_renderer_process.spl`).
+  With no admitted runtime it could not be compiled, tested, or even
+  parse-checked, and it sits on a security-critical path guarded today by an
+  honest refusal gate. A large blind edit there would risk replacing a correct
+  refusal with a silent unjailed render. The single flip-line remains
+  `browser_sandbox_worker_routing_available()` in
+  `src/app/browser/sandbox_status.spl`.

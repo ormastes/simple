@@ -156,3 +156,36 @@ The privileged container exercises the same kernel property.
 Problem 3 remains open: the in-process browsers under `src/app/browser/**` and
 `src/os/apps/*browser*` still evaluate page script in the host process without
 entering this jail.
+
+### Sabotage evidence (2026-08-16)
+
+A gate that has never gone red proves nothing. Both arms were sabotaged in a
+scratch copy of `src/runtime/` (never the working tree, to avoid racing a
+pending push) and both bit:
+
+| Arm | Sabotage | Result |
+| --- | --- | --- |
+| pre | none | `PASS — 4 check(s) verified` |
+| 1 | `rt_browser_renderer_namespaces_active()` -> `return true` unconditionally | **FAIL** exit 1: `namespaces_active()=true but net ns unchanged (net:[4026531840]) — the jail advertises isolation it does not have` |
+| 2 | seccomp default `SECCOMP_RET_KILL_PROCESS` -> `SECCOMP_RET_ALLOW` (the exact pre-2026-08-15 deny-list defect) | **FAIL** exit 1: `child survived a non-allow-listed syscall (fail-open)` + `expected SIGSYS kill on socket(), got status 0x7b00` |
+| post | reverted | `PASS — 4 check(s) verified` |
+
+Arm 2 is the important one: it replays the original defect this lane exists to
+prevent, and the gate catches it. Arm 1 proves the posture bit cannot lie.
+
+### QEMU: hard-blocked on this host (not merely "not done")
+
+Three independent routes are closed, so this is not a matter of spending more
+time:
+
+1. no Linux x86_64 `.qcow2` / `.img` in-tree (only a riscv32 FAT image);
+2. `curl`/`wget` are blocked by the context-mode rules, so no image can be
+   fetched;
+3. the host kernel cannot be borrowed for a `-kernel` boot: `/boot/vmlinuz-*`
+   is `-rw------- root root` and `sudo -n` reports a password is required. No
+   other bootable kernel is user-readable (`/sys/kernel/btf/vmlinux` is BTF
+   metadata, not a bootable image).
+
+`docker run --privileged` exercises the same kernel property and DID prove the
+active path, so the QEMU gap is redundancy, not missing evidence. Resuming it
+needs a VM image or kernel supplied out of band.
