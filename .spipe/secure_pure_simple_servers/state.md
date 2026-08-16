@@ -171,3 +171,47 @@ dev-blocked
   Tier DB ended 39/1 on UTF-8 batch round-trip after the third attempt, so the
   iteration cap is exhausted. No immutable command receipt or admitted
   Stage-4 runtime exists; these observations promote no AC or ledger row.
+- continuation-truth-audit-2026-08-16: The audited baseline was detached HEAD
+  `00496db6f95a12dfc7d7c0ecd21648093be61322`, equal to the then-local
+  `origin/main`. Later commits in that baseline moved the synchronous parser's
+  limit/header policy and route matching into `std.common.net.http_core`, but
+  this lane's guide and verification inventory had not been reconciled. Their
+  recorded green counts used a runner with a seed-banner caveat and remain
+  diagnostic only, not Stage-4 evidence for this lane.
+- continuation-code-only-2026-08-16: Bounded sidecars prepared fixes for the
+  synchronous `Transfer-Encoding` fail-closed regression, bounded/write-all
+  HTTP responses, the DB protocol's UTF-8 byte-slice mismatch, and a real
+  loopback DB bind/OPEN/EOF/cleanup/rebind fixture. These are unexecuted
+  working-tree changes until the merge owner runs each focused criterion once
+  on an admitted Stage-4 self-hosted CLI; they promote no AC.
+- continuation-evidence-audit-2026-08-16: AC-9/10/12/13 remain open. Existing
+  hand-authored mirrors are not docgen receipts, no current `sspec-maintain`
+  scorecards exist, and the secure web scenario's manual-step/boolean-wrapper
+  quality findings were corrected only in the unexecuted working spec; a fresh
+  scan and generated-manual review are still required before AC-10 can pass.
+  The exact deferred command order is authoritative in
+  `doc/03_plan/sys_test/secure_pure_simple_servers.md`.
+- continuation-review-cycle1-2026-08-16: Fresh highest-capability review
+  rejected the first code-only handoff because retained listener-control copies
+  could close the same raw fd twice, the idle-stop oracle and canonical DB
+  steps were missing, two changed mirrors were stale, and architecture/design
+  named a nonexistent `stop_listening` API. Fix cycle 1 added one shared
+  mutex-backed close-once authority, a retained-copy idle accept/stop/join/
+  rebind scenario, canonical steps/matchers, synchronized the affected manuals,
+  and reconciled the lifecycle contract. Re-review and Stage-4 execution remain
+  required; no AC is promoted.
+- continuation-review-cycle2-2026-08-16: Re-review rejected close-once alone:
+  normal close did not publish stopped state to retained copies, and a fixed
+  sleep did not prove the worker reached accept. Fix cycle 2 replaces copied
+  raw-fd ownership with one mutex-owned listener/closed state, serializes
+  bounded accept and close, gives the stopping domain only `DbStopControl`,
+  and requires its accept-attempt receipt before stop/join/rebind. Final
+  re-review and Stage-4 execution remain required.
+- continuation-review-cycle3-2026-08-16: Final review rejected the remaining
+  post-stop accept/dispatch race: stop could be published while bounded accept
+  was in flight and a completed connection could still reach authentication or
+  mutation dispatch. Fix cycle 3 rechecks stop immediately after accept, closes
+  the transport before dispatch, and adds a post-receipt stop/connect oracle
+  requiring an empty response and zero accepted/active/session state. The
+  three-cycle cap is reached; no PASS is claimed without Stage-4 execution and
+  a future independent acceptance review.

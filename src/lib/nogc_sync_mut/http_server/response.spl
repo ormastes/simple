@@ -8,10 +8,24 @@ use std.nogc_sync_mut.io.tcp.{TcpStream}
 use std.nogc_sync_mut.http_server.types.{
     HttpResponse, HttpStatus, http_status_code, http_status_reason
 }
+use std.common.base_encoding.{text_to_bytes}
 
 fn write_response(stream: TcpStream, resp: HttpResponse) -> bool:
-    val wire = serialize_response(resp)
-    match stream.write_text(wire):
+    _write_response_wire(stream, serialize_response(resp))
+
+# Canonical bounded writer used by the production listener.  It builds at
+# most one complete wire response and then uses write_all, so an oversized
+# application response is never truncated into a syntactically valid prefix.
+# The fallback is generated through the same serializer and carries the same
+# baseline security headers as every other server-owned error.
+fn write_response_limited(stream: TcpStream, resp: HttpResponse, max_response_bytes: i64) -> bool:
+    val wire = bounded_response_wire(resp, max_response_bytes)
+    if wire == "":
+        return false
+    _write_response_wire(stream, wire)
+
+fn _write_response_wire(stream: TcpStream, wire: text) -> bool:
+    match stream.write_all(text_to_bytes(wire)):
         Ok(_):
             return true
         Err(_):
@@ -36,7 +50,7 @@ fn _header_default(resp: HttpResponse, name: text, value: text) -> HttpResponse:
             return resp
     resp.with_header(name, value)
 
-fn serialize_response(resp: HttpResponse) -> text:
+fn _serialize_response_head(resp: HttpResponse) -> text:
     val status_code = http_status_code(resp.status)
     val reason = http_status_reason(resp.status)
     val body_len = resp.body.len()
@@ -55,12 +69,38 @@ fn serialize_response(resp: HttpResponse) -> text:
         wire = "{wire}Content-Type: text/plain; charset=utf-8\r\n"
 
     wire = "{wire}\r\n"
-    wire = "{wire}{resp.body}"
     return wire
+
+fn serialize_response(resp: HttpResponse) -> text:
+    "{_serialize_response_head(resp)}{resp.body}"
+
+fn response_wire_size(resp: HttpResponse) -> i64:
+    _serialize_response_head(resp).len() + resp.body.len()
+
+fn response_wire_fits(resp: HttpResponse, max_response_bytes: i64) -> bool:
+    max_response_bytes > 0 and response_wire_size(resp) <= max_response_bytes
+
+# Returns one complete response or an empty string.  The empty result means
+# even the fixed, security-hardened 500 response does not fit; callers close
+# the connection without emitting a partial response.
+fn bounded_response_wire(resp: HttpResponse, max_response_bytes: i64) -> text:
+    if response_wire_fits(resp, max_response_bytes):
+        return serialize_response(resp)
+    val fallback = with_default_security_headers(
+        HttpResponse.error(HttpStatus.InternalError, "response exceeds configured byte limit"),
+        false
+    )
+    if response_wire_fits(fallback, max_response_bytes):
+        return serialize_response(fallback)
+    ""
 
 fn write_error(stream: TcpStream, status: HttpStatus, message: text) -> bool:
     val resp = with_default_security_headers(HttpResponse.error(status, message), false)
     write_response(stream, resp)
+
+fn write_error_limited(stream: TcpStream, status: HttpStatus, message: text, max_response_bytes: i64) -> bool:
+    val resp = with_default_security_headers(HttpResponse.error(status, message), false)
+    write_response_limited(stream, resp, max_response_bytes)
 
 # =============================================================================
 # Error Page Generation
@@ -101,5 +141,7 @@ fn html_error_page(status: HttpStatus, message: text) -> HttpResponse:
         body: body
     )
 
-export write_response, write_error, serialize_response, with_default_security_headers
+export write_response, write_response_limited, write_error, write_error_limited
+export serialize_response, response_wire_size, response_wire_fits, bounded_response_wire
+export with_default_security_headers
 export generate_error_page, html_not_found_page, html_error_page

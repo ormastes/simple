@@ -10,7 +10,7 @@
 # applies to the parsed header list. These specs drive the REAL rejection
 # branches (review finding: the previous version of this spec only poked
 # content_length_from_text and left the 501/400/413 branches untested):
-#   - Transfer-Encoding: chunked -> 501 (fail closed, never misparsed)
+#   - any Transfer-Encoding -> 501 (sync transport has no decoder)
 #   - duplicate Content-Length -> 400 (request-smuggling vector)
 #   - invalid Content-Length -> 400
 #   - Content-Length above max_body -> 413
@@ -19,21 +19,29 @@
 use std.spec.*
 use std.nogc_sync_mut.http_server.parser.{headers_decision, MAX_BODY_SIZE}
 
-describe "headers_decision — chunked Transfer-Encoding rejected with 501":
+describe "headers_decision — unsupported Transfer-Encoding rejected with 501":
     it "rejects Transfer-Encoding: chunked":
         val d = headers_decision([("Transfer-Encoding", "chunked")], MAX_BODY_SIZE)
-        expect(d.0.starts_with("501")).to_equal(true)
+        expect(d.0).to_start_with("501")
 
     it "rejects mixed-case header name and value":
         val d = headers_decision([("TRANSFER-ENCODING", "Chunked")], MAX_BODY_SIZE)
-        expect(d.0.starts_with("501")).to_equal(true)
+        expect(d.0).to_start_with("501")
 
     it "rejects chunked inside a compound value":
         val d = headers_decision([("Transfer-Encoding", "gzip, chunked")], MAX_BODY_SIZE)
-        expect(d.0.starts_with("501")).to_equal(true)
+        expect(d.0).to_start_with("501")
 
-    it "accepts non-chunked transfer-encoding values":
+    it "rejects a non-chunked transfer coding the sync server cannot decode":
+        val d = headers_decision([("Transfer-Encoding", "gzip")], MAX_BODY_SIZE)
+        expect(d.0).to_start_with("501")
+
+    it "rejects identity rather than silently treating it as Content-Length framing":
         val d = headers_decision([("Transfer-Encoding", "identity")], MAX_BODY_SIZE)
+        expect(d.0).to_start_with("501")
+
+    it "accepts a request without Transfer-Encoding":
+        val d = headers_decision([("Host", "example.com")], MAX_BODY_SIZE)
         expect(d.0).to_equal("")
 
 describe "headers_decision — Content-Length policy":

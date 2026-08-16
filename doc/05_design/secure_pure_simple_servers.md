@@ -5,8 +5,14 @@
 
 - `SecureServerPolicy`: immutable web limits, timeout/read budgets, TLS-required
   flag, and explicit plaintext-development constructor.
-- `DbListener` / `TcpDbListener`: concrete listener port and production owner;
-  `DbServerCapsule.listen/stop_listening` composes lifecycle and capacity.
+- `DbListener` / `TcpDbListener`: concrete listener port and production owner.
+  `DbListenerControl` stores the listener and closed flag behind one shared
+  mutex; bounded accept and close serialize through that gate.
+  `DbServerCapsule.listen/serve_listener` composes lifecycle and capacity.
+  Cross-owner shutdown retains only `DbStopControl`; its
+  `accept_attempt_count` supplies the idle-stop synchronization receipt. The
+  serving owner rechecks stop after accept and rejects a just-completed
+  transport before dispatch.
 - `DbTransport`: bounded framed `read`, bounded `write`, idempotent `close`.
 - `TcpDbTransport`: concrete production adapter implementing `DbTransport`.
 - `AuthenticatedPrincipal`: non-secret principal identity produced only by the
@@ -62,7 +68,8 @@ The production `serve_tcp` and scripted adapters both route through
 
 Errors are data, not panics: invalid policy, unavailable TLS, bad frame,
 unauthorized, forbidden, conflict, capacity, persistence, response-too-large,
-and shutdown. Shutdown stops new accepts, closes the listener, drains or closes
+and shutdown. Shutdown stops new dispatch, rejects an accept completed after
+stop, closes the listener, drains or closes
 bounded active transports, rolls back open overlays, and reaches zero slots.
 
 ## SSpec/manual contract

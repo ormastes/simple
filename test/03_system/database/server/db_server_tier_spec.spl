@@ -48,7 +48,10 @@ use std.database.server.capability.{
 use std.database.server.session.{ SessionRegistry }
 use std.database.server.txn.{ store_read, store_version }
 use std.database.server.server.{ DbServerCapsule }
-use std.database.server.transport.{ MemoryTransport, DbStopControl }
+use std.database.server.transport.{ MemoryTransport, DbStopControl, DbListenerControl }
+use std.nogc_sync_mut.io.tcp.{ TcpStream }
+use std.io.types.{ Shutdown, IoErrorKind }
+use std.concurrent.thread.{ thread_spawn_with_args, thread_sleep }
 
 # ============================================================================
 # Fixtures
@@ -114,6 +117,148 @@ describe "DB server tier — connection lifecycle":
         assert_false(accept_owner.is_stopped())
         owner.request_stop()
         assert_true(accept_owner.is_stopped())
+
+    it "binds, serves, cleans up, closes, and rebinds a real loopback listener":
+        step("Bind the production listener")
+        var control = match DbListenerControl.bind("127.0.0.1:0"):
+            Err(error): panic("bind failed: {error.message}")
+            Ok(listener): listener
+        val addr = match control.local_addr():
+            Err(error): panic("local_addr failed: {error.message}")
+            Ok(value): value
+
+        # Queue the connection before accept so the capsule remains the sole
+        # mutable state owner; the client crosses the boundary as encoded text.
+        var client = match TcpStream.connect(addr):
+            Err(error): panic("connect failed: {error.message}")
+            Ok(stream): stream
+        expect(client.write_text_status("OPEN as=alice credential=alice-secret\n")).to_be(true)
+        match client.shutdown(Shutdown.Write):
+            Err(error): panic("client write shutdown failed: {error.message}")
+            Ok(_): pass
+
+        var server = make_server()
+        match server.serve_listener(control, 1):
+            Err(error): panic("listener serve failed: {error.message}")
+            Ok(accepted): expect(accepted).to_equal(1)
+
+        expect(client.read_line_or_empty()).to_equal("OK session=1\n")
+        expect(server.connection_count()).to_equal(0)
+        expect(server.registry.open_session_count()).to_equal(0)
+        expect(server.listener_running).to_be(false)
+        expect(control.is_stopped()).to_be(true)
+        match control.local_addr():
+            Err(error): expect(error.kind).to_equal(IoErrorKind.Interrupted)
+            Ok(_): fail("normally closed listener retained a usable local address")
+        val _client_closed = client.close()
+
+        # Closing the production owner must release the exact bound address.
+        step("Shut down and release the connection")
+        var rebound = match DbListenerControl.bind(addr):
+            Err(error): panic("rebind after listener shutdown failed: {error.message}")
+            Ok(listener): listener
+        match rebound.close_owned():
+            Err(error): panic("rebound listener close failed: {error.message}")
+            Ok(_): pass
+        var after_stop = match DbListenerControl.bind(addr):
+            Err(error): panic("rebind after explicit stop failed: {error.message}")
+            Ok(listener): listener
+        match after_stop.close_owned():
+            Err(error): panic("post-stop listener close failed: {error.message}")
+            Ok(_): pass
+
+    it "stops an idle serving owner once through a retained control":
+        step("Bind the production listener")
+        var control = match DbListenerControl.bind("127.0.0.1:0"):
+            Err(error): panic("idle bind failed: {error.message}")
+            Ok(listener): listener
+        val addr = match control.local_addr():
+            Err(error): panic("idle local_addr failed: {error.message}")
+            Ok(value): value
+        var retained = control.stop_handle()
+        val server = make_server()
+        val worker = thread_spawn_with_args(server, control, \server_value, control_value:
+            var owned_server: DbServerCapsule = server_value
+            val owned_control: DbListenerControl = control_value
+            match owned_server.serve_listener(owned_control, 1):
+                Err(_): -1
+                Ok(accepted): accepted
+        )
+        var saw_accept_attempt = false
+        var wait_iters = 0
+        while not saw_accept_attempt and wait_iters < 1000:
+            saw_accept_attempt = retained.accept_attempt_count() > 0
+            if not saw_accept_attempt:
+                thread_sleep(1)
+            wait_iters = wait_iters + 1
+        expect(saw_accept_attempt).to_be(true)
+        expect(worker.is_done()).to_be(false)
+
+        step("Shut down and release the connection")
+        retained.request_stop()
+        expect(worker.join()).to_equal(0)
+        expect(retained.is_stopped()).to_be(true)
+        match control.local_addr():
+            Err(error): expect(error.kind).to_equal(IoErrorKind.Interrupted)
+            Ok(_): fail("stopped retained listener exposed a stale fd address")
+
+        var rebound = match DbListenerControl.bind(addr):
+            Err(error): panic("rebind after retained idle stop failed: {error.message}")
+            Ok(listener): listener
+        match rebound.close_owned():
+            Err(error): panic("idle rebound close failed: {error.message}")
+            Ok(_): pass
+
+    it "rejects a connection completed after stop without dispatching it":
+        step("Bind the production listener")
+        var control = match DbListenerControl.bind("127.0.0.1:0"):
+            Err(error): panic("post-stop bind failed: {error.message}")
+            Ok(listener): listener
+        val addr = match control.local_addr():
+            Err(error): panic("post-stop local_addr failed: {error.message}")
+            Ok(value): value
+        var retained = control.stop_handle()
+        val server = make_server()
+        val worker = thread_spawn_with_args(server, control, \server_value, control_value:
+            var owned_server: DbServerCapsule = server_value
+            val owned_control: DbListenerControl = control_value
+            match owned_server.serve_listener(owned_control, 1):
+                Err(_): -1
+                Ok(accepted):
+                    accepted * 10000 + owned_server.connection_count() * 100 + owned_server.registry.open_session_count()
+        )
+        var saw_accept_attempt = false
+        var wait_iters = 0
+        while not saw_accept_attempt and wait_iters < 1000:
+            saw_accept_attempt = retained.accept_attempt_count() > 0
+            if not saw_accept_attempt:
+                thread_sleep(1)
+            wait_iters = wait_iters + 1
+        expect(saw_accept_attempt).to_be(true)
+        expect(worker.is_done()).to_be(false)
+
+        step("Publish stop while bounded accept is in flight")
+        retained.request_stop()
+        var client = match TcpStream.connect(addr):
+            Err(error): panic("post-stop connect failed: {error.message}")
+            Ok(stream): stream
+        val _write_status = client.write_text_status("OPEN as=alice credential=alice-secret\n")
+        match client.shutdown(Shutdown.Write):
+            Err(_): pass
+            Ok(_): pass
+
+        step("Reject the completed connection before request dispatch")
+        expect(client.read_line_or_empty()).to_equal("")
+        expect(worker.join()).to_equal(0)
+        expect(retained.is_stopped()).to_be(true)
+        val _client_closed = client.close()
+
+        var rebound = match DbListenerControl.bind(addr):
+            Err(error): panic("post-stop rebind failed: {error.message}")
+            Ok(listener): listener
+        match rebound.close_owned():
+            Err(error): panic("post-stop rebound close failed: {error.message}")
+            Ok(_): pass
 
     it "terminates the connection and cleans sessions after a write failure":
         var server = make_server()
@@ -456,6 +601,11 @@ describe "DB server tier — bounded batch and range requests":
         server.handle_message("BEGIN session=1")
         server.handle_message("BATCH_PUT session=1 tbl=users ids=u1,u2 name=猫")
         assert_equal(server.handle_message("BATCH_GET session=1 tbl=users ids=u1,u2 col=name"), "OK values=猫,猫")
+
+    it "preserves a quoted multibyte value after an ASCII argument key":
+        match parse_request('PUT session=1 tbl=users id=u1 name="猫 café"'):
+            Err(message): panic("multibyte request parse failed: {message}")
+            Ok(request): expect(request.arg("name") ?? "").to_equal("猫 café")
 
     it "rejects an invalid commit identity before durability work":
         var server = make_server()

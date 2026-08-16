@@ -44,8 +44,16 @@ without plaintext fallback.
 
 ## Database capsule
 
-`DbListener` owns bind/accept/shutdown; `TcpDbListener` and
-`DbServerCapsule.listen/stop_listening` compose it with `TcpDbTransport`.
+`DbListener` owns bind/accept/shutdown; `TcpDbListener`,
+`DbListenerControl`, and `DbServerCapsule.listen/serve_listener` compose it
+with `TcpDbTransport`. Every control copy references one mutex-backed listener
+owner state; accept holds that gate only for its bounded timeout, and close
+waits for the attempt before marking the shared state closed and releasing the
+fd. Cross-owner shutdown retains only `DbStopControl`, never a raw listener
+copy. A shared bounded accept-attempt counter provides lifecycle evidence
+without granting another mutable store/session owner. If stop is published
+while bounded accept is in flight, the serving owner closes the completed
+transport before authentication, session creation, or request dispatch.
 Each connection has one session identity and cleanup path. Frame,
 message, connection, batch/range, and response limits are checked before
 allocation or mutation. `OPEN` resolves credentials to an

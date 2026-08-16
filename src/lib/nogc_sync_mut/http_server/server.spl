@@ -7,7 +7,7 @@
 use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
 use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, HttpStatus}
 use std.nogc_sync_mut.http_server.parser.{parse_request_with_policy_limits, MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE}
-use std.nogc_sync_mut.http_server.response.{write_response, write_error, with_default_security_headers}
+use std.nogc_sync_mut.http_server.response.{write_response_limited, write_error_limited, with_default_security_headers}
 use std.nogc_sync_mut.http_server.router.{Router}
 use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
 use std.concurrent.thread.{thread_spawn_with_args}
@@ -18,6 +18,7 @@ use std.concurrent.thread.{thread_spawn_with_args}
 # normal requests while bounding worst-case handler occupation.
 val DEFAULT_MAX_READ_ITERS: i32 = 200
 val DEFAULT_MAX_CONNECTIONS: i64 = 128
+val DEFAULT_MAX_RESPONSE_BYTES: i64 = 16777216
 
 class ConnectionAdmission:
     active: AtomicI64
@@ -67,6 +68,7 @@ class SecureServerPolicy:
     write_timeout_ms: i64
     max_keep_alive_requests: i32
     max_connections: i64
+    max_response_bytes: i64
     plaintext_development: bool
 
     static fn production() -> SecureServerPolicy:
@@ -80,6 +82,7 @@ class SecureServerPolicy:
             write_timeout_ms: 5000,
             max_keep_alive_requests: 1,
             max_connections: DEFAULT_MAX_CONNECTIONS,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             plaintext_development: false
         )
 
@@ -105,6 +108,8 @@ fn secure_server_policy_error(policy: SecureServerPolicy) -> text:
         return "this connection-close server requires max_keep_alive_requests=1"
     if policy.max_connections <= 0:
         return "max_connections must be positive"
+    if policy.max_response_bytes <= 0:
+        return "max_response_bytes must be positive"
     ""
 
 fn request_parse_error_status(message: text) -> HttpStatus:
@@ -227,15 +232,16 @@ class SimpleHttpServer:
                 var request = req
                 request.remote_addr = remote_addr
                 val resp = with_default_security_headers(self.router.dispatch(request), false)
-                if not write_response(stream, resp):
+                if not write_response_limited(stream, resp, self.policy.max_response_bytes):
                     val _ = stream.close()
                     return
             Err(e):
-                if not write_error(stream, request_parse_error_status(e), e):
+                if not write_error_limited(stream, request_parse_error_status(e), e,
+                        self.policy.max_response_bytes):
                     val _ = stream.close()
                     return
         val _ = stream.close()
 
 export SimpleHttpServer, SecureServerPolicy, PlaintextDevelopmentCapability, ConnectionAdmission
 export plaintext_development_capability, secure_server_policy_error, request_parse_error_status
-export DEFAULT_MAX_CONNECTIONS
+export DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_RESPONSE_BYTES

@@ -1,5 +1,8 @@
 # Simpleos Riscv Network Gate Specification
 
+> Source synchronized manually on 2026-08-16 after the bounded synchronous
+> response-writer change. Fresh Stage-4 docgen provenance remains pending.
+
 > <details>
 
 | Tests | Active | Skipped | Pending |
@@ -397,9 +400,9 @@ val response = rt_file_read_text("src/lib/nogc_sync_mut/http_server/response.spl
 
 expect(server).to_contain("val handler = thread_spawn_with_args(stream, self")
 expect(server).to_contain("if handler.handle < 0:")
-expect(server).to_contain("SimpleHttpServer.handle_connection_static(self, stream)")
-expect(server).to_contain("if not write_response(stream, resp):")
-expect(response).to_contain("match stream.write_text(wire):")
+expect(server).to_contain("SimpleHttpServer.handle_connection_admitted(self, stream)")
+expect(server).to_contain("if not write_response_limited(stream, resp, self.policy.max_response_bytes):")
+expect(response).to_contain("match stream.write_all(text_to_bytes(wire)):")
 expect(server).to_contain("handler.free()")
 ```
 
@@ -704,8 +707,8 @@ expect(rt_file_read_text(path)).to_contain("_assert(services_network_ready()")
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/03_system/os/simpleos_riscv_network_gate_spec.spl` |
-| Updated | 2026-07-19 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-08-16 manual source synchronization |
+| Previous generator | `simple spipe-docgen` (Simple); fresh receipt pending |
 
 ## Overview
 
