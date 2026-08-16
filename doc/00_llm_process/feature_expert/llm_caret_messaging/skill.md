@@ -41,3 +41,19 @@ The composite integration must keep `.codex`, `.agents`, `.claude`, and Gemini
 command instructions semantically aligned. Installer tests must prove merge,
 backup, hash ownership, safe uninstall, executable validation, MCP discovery,
 and absence of embedded secrets.
+
+## Agent-manager hardening (2026-08-16)
+
+- `agent_runtime.spl` validates providers via `is_known_agent_provider`; an
+  unknown provider is an `unknown_provider:<p>` error, never a silent claude
+  fallback. Team launches suffix duplicate `agent_md_path` ids with `#<idx>`.
+- `agent_plan.spl` drops caller extra_args starting with `--dangerously` and
+  bare `--output-format` overrides.
+- `agent_vcs.spl` filters Error/Warning/Hint banner lines from jj stdout;
+  `agent_files.spl` marks unreadable files `unreadable:<path>` instead of an
+  empty fingerprint that compares as "unchanged".
+- `agent_discovery.spl` collects every `"name"`/`"identifier"` occurrence in a
+  manifest (multi-server manifests no longer lose entries).
+- Backend system evidence: `test/03_system/llm_caret_agent_backends_spec.spl`
+  exercises spawn/poll/kill for both the claude (`-p ... --output-format json`)
+  and codex (`exec <prompt>`) argv contracts with a stub binary.

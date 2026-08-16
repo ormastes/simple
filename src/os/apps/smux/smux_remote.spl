@@ -60,9 +60,14 @@ pub fn smux_remote_main():
     # Open the default PTY (24 rows × 80 cols) and spawn a shell on it.
     val fd = rt_pty_open(24, 80)
     if fd >= 0:
-        default_master_fd = fd
-        val _pid = rt_pty_spawn(fd, "/bin/sh")
-        print("smux_remote_main: PTY opened fd=" + fd.to_text())
+        val pid = rt_pty_spawn(fd, "/bin/sh")
+        if pid > 0:
+            default_master_fd = fd
+            print("smux_remote_main: PTY opened fd=" + fd.to_text() + " shell pid=" + pid.to_text())
+        else:
+            # Shell failed to fork — an open PTY with no shell would swallow
+            # every send, so stay on the scrollback fallback instead.
+            print("smux_remote_main: rt_pty_spawn failed (" + pid.to_text() + "), no PTY available")
     else:
         print("smux_remote_main: rt_pty_open failed (" + fd.to_text() + "), no PTY available")
     print("smux_remote_main: service started, session=default")
@@ -99,7 +104,13 @@ fn _smux_dispatch(line: text):
         if n < 3:
             print("smux: send requires extra arg")
             return
-        val cmd = parts[2]
+        # Rejoin everything after "send <sid>" — multi-word commands must not
+        # be truncated to their first token.
+        var cmd = parts[2]
+        var i = 3
+        while i < n:
+            cmd = cmd + " " + parts[i]
+            i = i + 1
         if default_master_fd >= 0:
             # Route the command through the real PTY master fd.
             val written = rt_pty_write(default_master_fd, cmd + "\n")

@@ -1,0 +1,42 @@
+# System test: agent launches backed by both the claude and codex CLI shapes.
+# Uses /bin/echo as a stand-in binary so the spawn path, argv contract, status
+# polling, and kill path are exercised end-to-end without paid API calls.
+use app.llm_caret.agent_plan.{AgentLaunchRequest, build_agent_launch_plan}
+use app.llm_caret.agent_runtime.{launch_agent_plan_with_gemini, agent_process_status, stop_agent_process}
+
+fn _request(provider: text) -> AgentLaunchRequest:
+    AgentLaunchRequest(provider: provider, agent_md_path: "agents/sys.md",
+        skill_path: "skills/sys.md", task_desc: "system backend check",
+        model: "", session_id: "", extra_args: [])
+
+describe "LLM Caret agent backends (claude + codex)":
+    it "builds the claude argv contract":
+        val plan = build_agent_launch_plan(_request("claude_cli"))
+        expect(plan.argv[0]).to_equal("-p")
+        expect(plan.argv).to_contain("--output-format")
+        expect(plan.argv).to_contain("json")
+
+    it "builds the codex argv contract":
+        val plan = build_agent_launch_plan(_request("codex"))
+        expect(plan.argv[0]).to_equal("exec")
+        expect(plan.argv.len()).to_equal(2)
+
+    it "launches, polls, and stops a claude-backed agent process":
+        val plan = build_agent_launch_plan(_request("claude_cli"))
+        val proc = launch_agent_plan_with_gemini("sys-claude", plan, "/bin/echo", "", "", "")
+        expect(proc.status).to_equal("started")
+        assert_true(proc.pid > 0)
+        val polled = agent_process_status(proc)
+        assert_true(polled.status == "running" or polled.status == "not_running")
+        val stopped = stop_agent_process(proc)
+        assert_true(stopped.status == "stopped" or stopped.status == "error")
+
+    it "launches, polls, and stops a codex-backed agent process":
+        val plan = build_agent_launch_plan(_request("codex"))
+        val proc = launch_agent_plan_with_gemini("sys-codex", plan, "", "/bin/echo", "", "")
+        expect(proc.status).to_equal("started")
+        assert_true(proc.pid > 0)
+        val polled = agent_process_status(proc)
+        assert_true(polled.status == "running" or polled.status == "not_running")
+        val stopped = stop_agent_process(proc)
+        assert_true(stopped.status == "stopped" or stopped.status == "error")

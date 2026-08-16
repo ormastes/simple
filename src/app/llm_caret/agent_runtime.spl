@@ -33,6 +33,11 @@ pub fn messaging_agent_environment(context: MessagingAgentLaunchContext) -> {tex
         env["LLM_CARET_MESSAGING_DB"] = context.database_path
     env
 
+pub fn is_known_agent_provider(provider: text) -> bool:
+    provider == "" or provider == "claude" or provider == "claude_cli" or
+        provider == "codex" or provider == "opencode_cli" or
+        provider == "gemini" or provider == "gemini_cli" or provider == "team"
+
 pub fn agent_command_for_provider(provider: text, claude_path: text, codex_path: text, opencode_path: text) -> text:
     agent_command_for_provider_with_gemini(provider, claude_path, codex_path, "", opencode_path)
 
@@ -62,6 +67,9 @@ pub fn launch_agent_plan_with_gemini(agent_id: text, plan: AgentLaunchPlan,
         opencode_path: text) -> AgentProcess:
     if plan.provider == "team":
         return AgentProcess(agent_id: agent_id, status: "not_started", reason: "team_plan_not_executable", pid: -1)
+    if not is_known_agent_provider(plan.provider):
+        return AgentProcess(agent_id: agent_id, status: "error",
+            reason: "unknown_provider:" + plan.provider, pid: -1)
     val cmd = agent_command_for_provider_with_gemini(plan.provider, claude_path,
         codex_path, gemini_path, opencode_path)
     val pid = process_spawn_async(cmd, plan.argv)
@@ -78,6 +86,9 @@ pub fn launch_messaging_agent_plan(agent_id: text, plan: AgentLaunchPlan,
     if context.task_id == "" or context.room_id == "" or context.agent_id == "":
         return AgentProcess(agent_id: agent_id, status: "not_started",
             reason: "messaging_context_required", pid: -1)
+    if not is_known_agent_provider(plan.provider):
+        return AgentProcess(agent_id: agent_id, status: "error",
+            reason: "unknown_provider:" + plan.provider, pid: -1)
     val cmd = agent_command_for_provider_with_gemini(plan.provider, claude_path,
         codex_path, gemini_path, opencode_path)
     val pid = process_spawn_async_env(cmd, plan.argv, messaging_agent_environment(context))
@@ -107,10 +118,20 @@ pub fn launch_agent_team_with_gemini(team_id: text, requests: [AgentLaunchReques
         claude_path: text, codex_path: text, gemini_path: text,
         opencode_path: text) -> AgentTeamProcess:
     var processes: [AgentProcess] = []
+    var seen_ids: [text] = []
+    var idx = 0
     for req in requests:
         val plan = build_agent_launch_plan(req)
-        processes = processes + [launch_agent_plan_with_gemini(req.agent_md_path,
+        # Duplicate agent_md_paths would collide in mailbox/usage lookups —
+        # suffix repeats with their launch index to keep agent ids unique.
+        var aid = req.agent_md_path
+        for existing in seen_ids:
+            if existing == req.agent_md_path:
+                aid = req.agent_md_path + "#" + idx.to_text()
+        seen_ids = seen_ids + [req.agent_md_path]
+        processes = processes + [launch_agent_plan_with_gemini(aid,
             plan, claude_path, codex_path, gemini_path, opencode_path)]
+        idx = idx + 1
     summarize_agent_team(team_id, processes)
 
 pub fn agent_team_status(team: AgentTeamProcess) -> AgentTeamProcess:
@@ -140,6 +161,7 @@ pub fn stop_agent_process(proc: AgentProcess) -> AgentProcess:
     AgentProcess(agent_id: proc.agent_id, status: "error", reason: "process_kill_failed", pid: proc.pid)
 
 export AgentProcess, AgentTeamProcess, MessagingAgentLaunchContext
+export is_known_agent_provider
 export agent_command_for_provider, launch_agent_plan, launch_agent_team, summarize_agent_team, agent_team_status, stop_agent_team, agent_process_status, stop_agent_process
 export agent_command_for_provider_with_gemini, launch_agent_plan_with_gemini,
     launch_agent_team_with_gemini
