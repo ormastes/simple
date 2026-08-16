@@ -1,0 +1,91 @@
+"""
+# Enterprise Web App — booking route family (/booking/*)
+
+Dispatched from `main.store_app_handle` AFTER the hardened prelude
+(limits -> path safety -> session auth). Executes ONLY the frozen guarded
+commands of `std.enterprise_booking`; every rendered business value goes
+through `esc()`, every response through `secured()`.
+
+Routes:
+- GET  /booking/resources     — tenant's reservable resources (escaped list)
+- POST /booking/hold          — booking, resource, start, end, qty, seat, now, ttl, idem
+- POST /booking/confirm       — booking, now, idem
+- POST /booking/cancel        — booking, idem
+- GET  /booking/:id/status    — derived booking status (404 unknown)
+
+`now` and `ttl` are digit-checked form values (caller-supplied server time;
+the library performs no wall-clock reads).
+"""
+
+use std.common.net.http_core.{match_route_pattern, extract_route_params}
+use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore, store_rows}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope
+}
+use std.nogc_sync_mut.enterprise_booking.booking.{
+    booking_status, booking_hold, booking_confirm, booking_cancel
+}
+use app.enterprise_store_app.web_common.{esc, form_value, form_int, secured, deny}
+
+fn page_resources(store: EnterpriseStore, tenant_id: text) -> text:
+    var body = "<h1>Reservable Resources</h1><ul>"
+    val rows = store_rows(store, "booking_resources", "id, tenant_id, resource_id, mode, capacity, seat_map_version")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id:
+            val rid = esc(sqlite_row_get(row, "resource_id"))
+            val mode = esc(sqlite_row_get(row, "mode"))
+            val cap = esc(sqlite_row_get(row, "capacity"))
+            body = body + "<li data-resource=\"" + rid + "\">" + rid + " — " + mode + " (" + cap + ")</li>"
+    body + "</ul>"
+
+fn page_booking_status(booking_id: text, status: text) -> text:
+    var body = "<h1>Booking Status</h1>"
+    body = body + "<p>Booking: <span class=\"booking\">" + esc(booking_id) + "</span></p>"
+    body = body + "<p>Status: <span class=\"status\">" + esc(status) + "</span></p>"
+    body
+
+fn command_page(reason: text, detail: text) -> HttpResponse:
+    secured(HttpResponse.html("<p class=\"result\">" + esc(reason) + ": " + esc(detail) + "</p>"))
+
+# booking_routes_handle serves every /booking/* route; unknown subpaths 404.
+fn booking_routes_handle(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, method: text, path: text, body: text) -> HttpResponse:
+    if method == "GET" and match_route_pattern("/booking/resources", path):
+        return secured(HttpResponse.html(page_resources(store, tenant.tenant_id)))
+    if method == "GET" and match_route_pattern("/booking/:id/status", path):
+        val params = extract_route_params("/booking/:id/status", path)
+        var booking_id = ""
+        for p in params:
+            if p.0 == "id":
+                booking_id = p.1
+        val status = booking_status(store, tenant.tenant_id, booking_id)
+        if status == "":
+            return deny("not-found", booking_id)
+        return secured(HttpResponse.html(page_booking_status(booking_id, status)))
+    if method == "POST" and match_route_pattern("/booking/hold", path):
+        val booking_id = form_value(body, "booking")
+        val env = CommandEnvelope(request_id: "req-hold-" + booking_id, idempotency_key: form_value(body, "idem"), action: "booking.hold", payload: body)
+        val r = booking_hold(store, session, tenant, who, env, booking_id,
+            form_value(body, "resource"), form_int(body, "start"), form_int(body, "end"),
+            form_int(body, "qty"), form_value(body, "seat"), form_int(body, "now"), form_int(body, "ttl"))
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    if method == "POST" and match_route_pattern("/booking/confirm", path):
+        val booking_id = form_value(body, "booking")
+        val env = CommandEnvelope(request_id: "req-confirm-" + booking_id, idempotency_key: form_value(body, "idem"), action: "booking.confirm", payload: body)
+        val r = booking_confirm(store, session, tenant, who, env, booking_id, form_int(body, "now"))
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    if method == "POST" and match_route_pattern("/booking/cancel", path):
+        val booking_id = form_value(body, "booking")
+        val env = CommandEnvelope(request_id: "req-cancel-" + booking_id, idempotency_key: form_value(body, "idem"), action: "booking.cancel", payload: body)
+        val r = booking_cancel(store, session, tenant, who, env, booking_id)
+        if not r.ok:
+            return deny(r.reason, r.detail)
+        return command_page(r.reason, r.detail)
+    secured(HttpResponse.error(HttpStatus.NotFound, "no such route"))
+
+export booking_routes_handle

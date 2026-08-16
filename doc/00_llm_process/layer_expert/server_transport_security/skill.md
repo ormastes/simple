@@ -10,6 +10,13 @@ response bounds.
 ## Layer Links
 
 - Guide: [pure_simple_servers.md](../../../07_guide/lib/pure_simple_servers.md)
+- Enterprise suite HTTP hardening (shared `src/lib/common/net/http_core.spl`
+  limits/chunked/path-safety core, sync+async server unification, live-socket
+  dispatch spec): see feature expert
+  [enterprise_suite](../../feature_expert/enterprise_suite/skill.md) and
+  `doc/07_guide/lib/networking/http_server_hardening.md`. No dedicated
+  stdlib-enterprise layer expert exists; the storage half (enterprise_store)
+  is covered by the feature expert, not a layer template.
 - Feature expert: [secure_pure_simple_servers](../../feature_expert/secure_pure_simple_servers/skill.md)
 - Web listener/parser/router/response: `src/lib/nogc_sync_mut/http_server/`
 - DB transport/protocol/capsule: `src/lib/nogc_sync_mut/database/server/`

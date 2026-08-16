@@ -89,11 +89,63 @@ not constrain it). Full import audit:
 | Foundation contracts (`enterprise_sale.foundation`) | none (pure Simple, zero imports) | Both |
 | Filesystem / env / process / time | **not used** by the library (specs use `std.io_runtime` on the host harness only) | n/a |
 
-Evidence: minimal entry `src/app/enterprise/store_probe_main.spl` —
-host run prints `enterprise store open=true verify=[]`; SimpleOS-target
-cross-compile succeeds:
-`bin/simple compile --target=x86_64-unknown-simpleos src/app/enterprise/store_probe_main.spl -o build/test-artifacts/enterprise_entry_simpleos`
-(SMF module artifact, magic `SMF\0`). No per-OS fork exists.
+Vertical modules audited the same way (W4-B, 2026-08-16):
+
+| Module | Imports | Both-OS status |
+|---|---|---|
+| `std.enterprise_booking` (`booking.spl`) | `enterprise_store.{store,records}`, `sqlite_sffi.sqlite_row_get`, `enterprise_sale.foundation` | Both — cross-compiles after the audit-hash facade fix below |
+| `std.enterprise_restaurant` (`restaurant.spl`) | same as booking + `enterprise_sale.goods_sale` | Both — same |
+| `std.enterprise_outbox` (`outbox_worker.spl`) | `enterprise_store.{store,records}`, `sqlite_sffi.sqlite_row_get` | Both — same |
+| Audit hashing (`records.spl`) | `enterprise_store.audit_hash` (self-contained pure-Simple SHA-256, SMF-safe) | Both — **finding fixed 2026-08-16**: the previous `std.common.crypto.sha256.sha256_text` import dragged `string_core` slice helpers (`s[a:b]` → CollectionOps) and the sized literal `[0; n]` in `sha256_bytes` (CollectionLiteral) into the closure, so every vertical probe FAILED standalone-SMF cross-compilation. `audit_hash.audit_sha256_hex` is digest-identical (verified vs `sha256_text` on FIPS vectors incl. `abc` and multi-block inputs) and uses only SMF-safe constructs |
+
+### Continuously enforced gate (W4-B)
+
+`sh scripts/check/check-enterprise-cross-os.shs` — fail-closed, verdict last
+on stdout (`PASS — <n> probe(s) checked ...` 0 / `FAIL — ...` 1 /
+`ERROR — nothing was checked` 2; 0 probes = ERROR). `--selftest` runs before
+every scan and is fatal (well-formed fixture must compile both targets; a
+deliberately host-only fixture importing a slice-using module must be
+rejected with `cannot compile to standalone SMF`). Probe roster (every
+`src/app/enterprise/*_probe_main.spl`, each compiled for the host default
+target AND `--target=x86_64-unknown-simpleos`, artifact non-empty with
+`SMF\0` magic):
+
+- `store_probe_main.spl` — host run prints `enterprise store open=true verify=[]`
+- `booking_probe_main.spl` — `enterprise booking probe open=true setup=true status=[]`
+- `restaurant_probe_main.spl` — `enterprise restaurant probe open=true setup=true state=[]`
+- `outbox_probe_main.spl` — `enterprise outbox probe open=true setup=true pending=0`
+
+Current verdict (2026-08-16, Rust seed):
+`PASS — 4 probe(s) checked, each compiles host + x86_64-unknown-simpleos with SMF magic`.
+No per-OS fork exists.
+
+### Arch matrix (2026-08-16, lane W4-C)
+
+SimpleOS arch-completeness for the enterprise probe. The compiler's target
+table (`src/compiler_rust/common/src/target.rs`) maps six arches to
+`TargetOS::SimpleOS`; each was attempted with
+`bin/simple compile --target=<arch>-unknown-simpleos src/app/enterprise/store_probe_main.spl -o build/test-artifacts/ent_probe_<arch>`
+(Rust seed, `bin/release/x86_64-unknown-linux-gnu/simple`, 59,497,616 bytes,
+mtime 2026-08-15 12:46:55Z). Artifact format for PASS rows is an SMF module
+(magic `SMF\0`) — a portable Simple module, not a per-arch ELF; the arch
+selection still exercises the target-specific codegen path.
+
+| Target triple | Artifact | Verdict |
+|---|---|---|
+| x86_64-unknown-simpleos | SMF\0, 121,854 B | PASS |
+| aarch64-unknown-simpleos | SMF\0, 127,662 B | PASS |
+| riscv64-unknown-simpleos | SMF\0, 137,726 B | PASS |
+| riscv32-unknown-simpleos | none | BLOCKED (toolchain): `codegen: Unsupported target architecture: Cranelift native builds do not support hosted riscv32 yet; use --backend llvm for this lane` — but the seed's `compile` emits the same error with `--backend llvm` (flag not honored) |
+| i686-unknown-simpleos (`x86`) | none | BLOCKED (toolchain): `codegen: Compilation error: Support for this target has not been implemented yet` |
+| armv7-unknown-simpleos (`arm`) | none | BLOCKED (toolchain): same Cranelift riscv32-style error for hosted armv7; `--backend llvm` likewise not honored by the seed |
+
+All three BLOCKED rows are toolchain gaps, not enterprise-code defects — the
+identical single-codebase probe compiles unchanged on every arch the backend
+supports. Host-OS breadth, honestly: evidence exists for linux-x86_64 only
+(this host, interpreter-mode specs). macOS/FreeBSD rows are external-host
+gates and are NOT claimed; the FreeBSD QEMU wrapper
+(`scripts/check/check-freebsd-bootstrap-qemu.shs`) is a bootstrap check, not
+an enterprise gate — it is the future lane for a FreeBSD row.
 
 ### File backend fallback (2026-08-16, lane W2-A)
 
@@ -112,10 +164,24 @@ layer unchanged, separator round-trip, buffered all-or-nothing, migration
 no-op, restart survival). It deliberately declares its externs locally
 (file_ops' `??` TryOperator blocks standalone-SMF cross-compilation).
 
-Remaining honest gap for an in-guest RUN: the SimpleOS guest must provide
-the four `rt_file_*` externs above at SMF load time and a loader/exec path
-for the compiled probe; no guest transcript exists yet, so AC-17 in-guest
-execution is still evidence-pending (cross-compile row is green).
+### Guest-side extern provider (2026-08-16, lane W3-A)
+
+`src/os/userlib/rt_file_facade.spl` (wired into `os.userlib.mod`) now
+provides all four externs as `@export("C")` ring-3 wrappers over the
+direct file syscalls (`rt_simpleos_file_*_bytes` + close/fsync);
+`rt_file_atomic_write` = temp file + fsync + rename. It deliberately does
+NOT ride `os.userlib.fs` — that VFS IPC client's `?`/sized-array bodies
+are rejected by codegen ("constructs that require the interpreter"), so
+the facade declares its externs locally (same precedent as
+`file_backend.spl`). Proof at the artifact level: the probe
+`src/app/enterprise/rt_file_facade_probe_main.spl` importing the facade
+cross-compiles to a SimpleOS SMF artifact carrying all 4 names.
+
+Remaining honest gap for an in-guest RUN: no OVMF boot lane yet builds a
+guest image containing `os.userlib.rt_file_facade` or execs an SMF app
+(existing lanes boot the ssh_ring3 clang ELF-exec entry); no guest
+transcript exists, so AC-17 in-guest execution is still evidence-pending
+(cross-compile + guest-owner rows are green).
 
 ## Outbox worker — dispatch + reconciliation (W2-F, 2026-08-16)
 

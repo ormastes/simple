@@ -1,0 +1,157 @@
+# rt_file_* extern facade for SimpleOS userland (ring-3, direct-fd syscalls).
+#
+# Provides the four `rt_file_*` externs that `std.enterprise_store`'s
+# file backend (src/lib/nogc_sync_mut/enterprise_store/file_backend.spl)
+# and the cross-compiled probe (src/app/enterprise/store_probe_main.spl)
+# declare, so a SimpleOS guest image carrying this module resolves them
+# for SMF-loaded enterprise apps.
+#
+# Pattern: @export("C") facade discipline as in
+# src/os/kernel/net/rt_net_socket_facade.spl and tls_shim.spl's
+# rt_file_read_text. Built on the DIRECT file syscalls
+# (rt_simpleos_file_*_bytes + close/fsync syscalls), NOT os.userlib.fs:
+# the VFS IPC client there is TryOperator/CollectionLiteral-heavy, which
+# the current codegen rejects ("constructs that require the interpreter"),
+# so importing it makes any image containing this facade uncompilable.
+# Externs are declared locally, same as file_backend.spl, for the same
+# reason. Codegen-clean constructs only: no `?`, no sized array literals,
+# no trait objects.
+#
+# Runtime-boundary decision (recorded in .spipe/simple_enterprise_suite):
+#   runtime_need: 4 externs at SMF load for the enterprise file backend
+#   facade_checked: os.userlib.fs — rejected (TryOperator blocks codegen)
+#   chosen_path: pure-Simple @export("C") wrappers over direct-fd syscalls
+#   rejected_shortcuts: C runtime additions; kernel-side exports (probe is
+#   ring-3); host-only stubs pretending to be guest evidence.
+
+use os.userlib.syscall_raw.{syscall}
+use os.userlib.ipc_protocol(VFS_OPEN_O_RDONLY, VFS_OPEN_O_WRONLY, VFS_OPEN_O_CREAT, VFS_OPEN_O_TRUNC)
+
+# Direct file syscall externs (owned by os.userlib.syscall_raw; declared
+# locally because extern decls do not re-export and file_backend.spl set
+# the local-declaration precedent for codegen-clean modules).
+extern fn rt_simpleos_file_open_bytes(path: [u8], flags: u64) -> i64
+extern fn rt_simpleos_file_read_bytes(fd: u64, out: [u8], max_len: u64) -> i64
+extern fn rt_simpleos_file_write_bytes(fd: u64, data: [u8]) -> i64
+extern fn rt_simpleos_file_rename_bytes(old_path: [u8], new_path: [u8]) -> i64
+extern fn bytes_to_string(bytes: [u8]) -> text
+
+val _SYS_FILE_CLOSE: u64 = 33
+val _SYS_FILE_SYNC: u64 = 78
+val _READ_CHUNK: u64 = 4096
+val _MAX_FILE_BYTES: i64 = 1048576
+
+fn _text_bytes(s: text) -> [u8]:
+    var out: [u8] = []
+    val n = s.len()
+    var i = 0
+    while i < n:
+        out.push(s.byte_at(i))
+        i = i + 1
+    out
+
+fn _zeros(n: u64) -> [u8]:
+    var b: [u8] = []
+    var i = 0u64
+    while i < n:
+        b.push(0u8)
+        i = i + 1u64
+    b
+
+fn _open(path: text, flags: u64) -> i64:
+    val pb = _text_bytes(path)
+    if pb.len() == 0u64 or pb.len() > 4096u64:
+        return -1
+    rt_simpleos_file_open_bytes(pb, flags)
+
+fn _close(fd: i64):
+    val _rc = syscall(_SYS_FILE_CLOSE, fd as u64, 0, 0, 0, 0)
+
+fn _read_all(fd: i64, bound: i64) -> [u8]:
+    """Read up to `bound` bytes from fd by chunked reads."""
+    var out: [u8] = []
+    var total: i64 = 0
+    while total < bound:
+        val buf = _zeros(_READ_CHUNK)
+        val rc = rt_simpleos_file_read_bytes(fd as u64, buf, _READ_CHUNK)
+        if rc <= 0:
+            return out
+        var i = 0u64
+        while i < rc as u64:
+            out.push(buf[i])
+            i = i + 1u64
+        total = total + rc
+        if rc < _READ_CHUNK as i64:
+            return out
+    out
+
+@export("C")
+fn rt_file_exists(path: text) -> bool:
+    """True when path opens for read via the direct file syscall."""
+    val fd = _open(path, VFS_OPEN_O_RDONLY as u64)
+    if fd < 0:
+        return false
+    _close(fd)
+    true
+
+@export("C")
+fn rt_file_size(path: text) -> i64:
+    """Byte size of path (bounded chunked read), or -1 when unopenable."""
+    val fd = _open(path, VFS_OPEN_O_RDONLY as u64)
+    if fd < 0:
+        return -1
+    val bytes = _read_all(fd, _MAX_FILE_BYTES)
+    _close(fd)
+    bytes.len().to_i64()
+
+@export("C")
+fn rt_file_read_text_at(path: text, offset: i64, size: i64) -> text:
+    """Read `size` bytes of path starting at byte `offset`, as text.
+
+    Whole-file read then byte slice: enterprise stores are small
+    append-only files; a seek syscall is not warranted yet.
+    Out-of-range requests clamp; errors return "".
+    """
+    if offset < 0 or size <= 0:
+        return ""
+    val fd = _open(path, VFS_OPEN_O_RDONLY as u64)
+    if fd < 0:
+        return ""
+    val bytes = _read_all(fd, _MAX_FILE_BYTES)
+    _close(fd)
+    val total = bytes.len().to_i64()
+    if offset >= total:
+        return ""
+    var stop = offset + size
+    if stop > total:
+        stop = total
+    var out: [u8] = []
+    var i = offset
+    while i < stop:
+        out.push(bytes[i.to_u64()])
+        i = i + 1
+    bytes_to_string(out)
+
+@export("C")
+fn rt_file_atomic_write(path: text, content: text) -> bool:
+    """Whole-file replace: write+fsync a sibling temp file, rename over path.
+
+    Atomicity is the rename syscall's; a failed temp write never touches
+    path.
+    """
+    val tmp = path + ".atomic~"
+    val flags = (VFS_OPEN_O_WRONLY | VFS_OPEN_O_CREAT | VFS_OPEN_O_TRUNC) as u64
+    val fd = _open(tmp, flags)
+    if fd < 0:
+        return false
+    val data = _text_bytes(content)
+    var wrote_ok = true
+    if data.len() > 0u64:
+        val rc = rt_simpleos_file_write_bytes(fd as u64, data)
+        wrote_ok = rc >= 0 and rc as u64 == data.len()
+    val _sync = syscall(_SYS_FILE_SYNC, fd as u64, 0, 0, 0, 0)
+    _close(fd)
+    if not wrote_ok:
+        return false
+    val rrc = rt_simpleos_file_rename_bytes(_text_bytes(tmp), _text_bytes(path))
+    rrc >= 0

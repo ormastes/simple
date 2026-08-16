@@ -15,9 +15,16 @@ piece of business data rendered into HTML goes through `esc()`, and every
 request is checked in order: limits (`body_decision`) -> path safety
 (`path_is_safe`) -> authenticated session (`session_valid`) -> route.
 
-Denial mapping (CommandResult.reason -> HTTP):
-invalid-session 401, forbidden 403, not-found 404, insufficient-stock /
-invalid-record 409, duplicate-key 200 (idempotent replay: recorded result).
+Route families are split into cohesive siblings, all dispatched through
+THIS hardened prelude: `booking_routes` (/booking/*), `restaurant_routes`
+(/restaurant/*), `dashboard` (GET /admin/dashboard). Shared helpers
+(esc/form_value/secured/deny) live in `web_common`.
+
+Denial mapping (CommandResult.reason -> HTTP), frozen in web_common.deny:
+invalid-session 401, forbidden 403, not-found / no-session /
+line-not-found 404, conflict / table-occupied / session-closed /
+invalid-transition / unserved-lines / insufficient-stock / invalid-record
+409, duplicate-key 200 (idempotent replay: recorded result).
 """
 
 use std.common.net.http_core.{
@@ -25,7 +32,6 @@ use std.common.net.http_core.{
     match_route_pattern, extract_route_params
 }
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
-use std.nogc_sync_mut.http_server.response.{with_default_security_headers}
 use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore, store_rows}
 use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
 use std.nogc_sync_mut.enterprise_sale.foundation.{
@@ -34,18 +40,11 @@ use std.nogc_sync_mut.enterprise_sale.foundation.{
 use std.nogc_sync_mut.enterprise_sale.goods_sale.{
     sale_place_order, sale_pay_order, sale_order_status, sale_product_price
 }
-
-# =============================================================================
-# HTML escaping — ALL interpolated business data flows through esc()
-# =============================================================================
-
-fn esc(s: text) -> text:
-    var out = s.replace("&", "&amp;")
-    out = out.replace("<", "&lt;")
-    out = out.replace(">", "&gt;")
-    out = out.replace("\"", "&quot;")
-    out = out.replace("'", "&#39;")
-    out
+export use app.enterprise_store_app.web_common.{esc, form_value}
+use app.enterprise_store_app.web_common.{secured, deny}
+use app.enterprise_store_app.booking_routes.{booking_routes_handle}
+use app.enterprise_store_app.restaurant_routes.{restaurant_routes_handle}
+use app.enterprise_store_app.dashboard.{dashboard_handle}
 
 # =============================================================================
 # Cart — pure request-scoped model (no storage; checkout is the effect)
@@ -96,33 +95,8 @@ fn page_receipt(store: EnterpriseStore, tenant_id: text, order_id: text) -> text
     body
 
 # =============================================================================
-# Form-body parsing (k=v&k=v — values must not contain & or =)
-# =============================================================================
-
-fn form_value(body: text, key: text) -> text:
-    for pair in body.split("&"):
-        val kv = pair.split("=")
-        if kv.len() == 2 and kv[0] == key:
-            return kv[1]
-    ""
-
-# =============================================================================
 # Dispatcher — hardened route path
 # =============================================================================
-
-fn secured(resp: HttpResponse) -> HttpResponse:
-    with_default_security_headers(resp, false)
-
-fn deny(reason: text, detail: text) -> HttpResponse:
-    val status = if reason == "invalid-session":
-        HttpStatus.Unauthorized
-    elif reason == "forbidden":
-        HttpStatus.Forbidden
-    elif reason == "not-found":
-        HttpStatus.NotFound
-    else:
-        HttpStatus.Conflict
-    secured(HttpResponse.error(status, reason + ": " + esc(detail)))
 
 # store_app_handle dispatches one request through the hardened path:
 # limits -> path safety -> session auth -> route match -> guarded command.
@@ -143,7 +117,13 @@ fn store_app_handle(store: EnterpriseStore, session: SessionContext, tenant: Ten
     # 3. authenticated session — the ONLY auth scheme is the frozen one
     if not session_valid(session, tenant, who):
         return secured(HttpResponse.error(HttpStatus.Unauthorized, "invalid-session: authentication required"))
-    # 4. routes (http_core pattern matching)
+    # 4. routes (http_core pattern matching); sibling route families first
+    if path.starts_with("/booking/"):
+        return booking_routes_handle(store, session, tenant, who, method, path, body)
+    if path.starts_with("/restaurant/"):
+        return restaurant_routes_handle(store, session, tenant, who, method, path, body)
+    if match_route_pattern("/admin/dashboard", path):
+        return dashboard_handle(store, session, tenant, who, method, path)
     if method == "GET" and match_route_pattern("/store/catalog", path):
         return secured(HttpResponse.html(page_catalog(store, tenant.tenant_id)))
     if method == "GET" and match_route_pattern("/store/order/:id/receipt", path):
@@ -181,6 +161,6 @@ fn store_app_handle(store: EnterpriseStore, session: SessionContext, tenant: Ten
         return secured(HttpResponse.html("<p class=\"result\">" + esc(r.reason) + ": " + esc(r.detail) + "</p>"))
     secured(HttpResponse.error(HttpStatus.NotFound, "no such route"))
 
-export esc, CartItem, cart_new, cart_add, cart_total_cents
-export page_catalog, page_receipt, form_value
+export CartItem, cart_new, cart_add, cart_total_cents
+export page_catalog, page_receipt
 export store_app_handle

@@ -331,3 +331,22 @@ New acceptance criteria (extends AC-1..AC-12 above):
   renamed outbox_worker_pending to dodge records.outbox_pending collision).
   Guide enterprise_store.md hand-merged (A/C/F three-way). Research docs
   committed (missed in a24e214). Merge sanity reruns below.
+- merge wave 3+4 partial (2026-08-16, orchestrator review): five lanes merged.
+  W3-A rt_file_facade guest externs (src/os/userlib/rt_file_facade.spl,
+  @export("C") x4; probe cross-compiles w/ all 4 symbols; QEMU rung blocked —
+  existing OVMF lanes boot a kernel entry without SMF exec; resume recorded).
+  W3-B booking/restaurant/admin-dashboard web routes (web_common/
+  booking_routes/restaurant_routes/dashboard siblings behind the same
+  hardened prelude; enterprise_web_app_spec 5/5, red-first 4/5).
+  W3-C full regression 37/37 (wave-1 six, wave-2 ten, ubs_test 21) + wiki
+  refresh (feature_expert/enterprise_suite/skill.md rewritten;
+  layer_expert/server_transport_security pointer). W4-B cross-OS gate
+  scripts/check/check-enterprise-cross-os.shs (fail-closed + fatal selftest;
+  4 probes compile host+simpleos; REAL FIX: sha256_text closure not SMF-safe
+  -> audit_hash.spl SMF-safe facade, FIPS digest parity. DEBT: audit_hash is
+  a deliberate second sha256 impl; root fix = standalone-SMF codegen support
+  for slice/CollectionLiteral, then collapse the facade to a re-export).
+  W4-C arch matrix: x86_64/aarch64/riscv64 simpleos SMF PASS unchanged
+  codebase; riscv32/i686/armv7 BLOCKED (toolchain, incl. seed --backend llvm
+  ignored). W4-A (in-guest QEMU run) and W5-A/B/C (session+throttle,
+  payment boundary, channel hub) still in flight.

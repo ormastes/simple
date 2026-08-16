@@ -1,0 +1,98 @@
+"""
+# Enterprise Web App — employee/admin dashboard (GET /admin/dashboard)
+
+Read-only, escaped HTML summary of per-tenant state, dispatched from
+`main.store_app_handle` AFTER the hardened prelude. Authorization reuses the
+frozen `role_allows` scheme (only `admin` may read — no new auth scheme).
+
+Counts summarized: products, orders (distinct order streams), bookings
+(distinct booking streams), open table sessions, outbox pending
+(`std.enterprise_outbox.outbox_worker_pending` — requires
+`outbox_worker_setup` to have run once on the store), and audit chain
+integrity (`audit_verify_chain`). Product names are business data and are
+rendered ONLY through `esc()`.
+"""
+
+use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore, store_rows}
+use std.nogc_sync_mut.enterprise_store.records.{audit_verify_chain}
+use std.nogc_sync_mut.enterprise_outbox.outbox_worker.{outbox_worker_pending}
+use std.nogc_sync_mut.enterprise_restaurant.restaurant.{restaurant_session_state}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, role_allows
+}
+use app.enterprise_store_app.web_common.{esc, secured, deny}
+
+# distinct_count counts distinct values of `id_col` over the tenant's rows.
+fn distinct_count(store: EnterpriseStore, table: text, columns: text, tenant_id: text, id_col: text) -> i64:
+    var seen: [text] = []
+    for row in store_rows(store, table, columns):
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        val v = sqlite_row_get(row, id_col)
+        var known = false
+        for x in seen:
+            if x == v:
+                known = true
+        if not known:
+            seen.push(v)
+    seen.len()
+
+# open_table_sessions counts sessions opened and not yet closed.
+fn open_table_sessions(store: EnterpriseStore, tenant_id: text) -> i64:
+    var seen: [text] = []
+    for row in store_rows(store, "rest_session_events", "id, tenant_id, session_id, venue_id, table_id, event, detail"):
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        if sqlite_row_get(row, "event") != "opened":
+            continue
+        val sid = sqlite_row_get(row, "session_id")
+        var known = false
+        for x in seen:
+            if x == sid:
+                known = true
+        if not known:
+            seen.push(sid)
+    var open: i64 = 0
+    for sid in seen:
+        if restaurant_session_state(store, tenant_id, sid) != "closed":
+            open = open + 1
+    open
+
+fn stat_line(label: text, css: text, value: text) -> text:
+    "<li>" + label + ": <span class=\"" + css + "\">" + esc(value) + "</span></li>"
+
+fn page_dashboard(store: EnterpriseStore, tenant_id: text) -> text:
+    val products = distinct_count(store, "products", "id, tenant_id, sku, name, price_cents, currency", tenant_id, "sku")
+    val orders = distinct_count(store, "order_events", "id, tenant_id, order_id, event, detail", tenant_id, "order_id")
+    val bookings = distinct_count(store, "booking_events", "id, tenant_id, booking_id, resource_id, event, start_epoch, end_epoch, qty, seat, expires_epoch", tenant_id, "booking_id")
+    val open_tables = open_table_sessions(store, tenant_id)
+    val pending = outbox_worker_pending(store, tenant_id).len()
+    val audit_ok = audit_verify_chain(store, tenant_id)
+    var body = "<h1>Admin Dashboard</h1><ul class=\"stats\">"
+    body = body + stat_line("Products", "products", "{products}")
+    body = body + stat_line("Orders", "orders", "{orders}")
+    body = body + stat_line("Bookings", "bookings", "{bookings}")
+    body = body + stat_line("Open table sessions", "open-tables", "{open_tables}")
+    body = body + stat_line("Outbox pending", "outbox-pending", "{pending}")
+    val audit_text = if audit_ok:
+        "OK"
+    else:
+        "TAMPERED"
+    body = body + stat_line("Audit chain", "audit", audit_text)
+    body = body + "</ul><h2>Catalog</h2><ul class=\"catalog\">"
+    for row in store_rows(store, "products", "id, tenant_id, sku, name, price_cents, currency"):
+        if sqlite_row_get(row, "tenant_id") == tenant_id:
+            body = body + "<li>" + esc(sqlite_row_get(row, "sku")) + " — " + esc(sqlite_row_get(row, "name")) + "</li>"
+    body + "</ul>"
+
+# dashboard_handle serves GET /admin/dashboard (read-only, admin role only).
+fn dashboard_handle(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, method: text, path: text) -> HttpResponse:
+    if method != "GET":
+        return secured(HttpResponse.error(HttpStatus.NotFound, "no such route"))
+    if not role_allows(who.role, "admin.dashboard.read"):
+        return deny("forbidden", who.actor_id)
+    secured(HttpResponse.html(page_dashboard(store, tenant.tenant_id)))
+
+export dashboard_handle

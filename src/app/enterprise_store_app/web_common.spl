@@ -1,0 +1,67 @@
+"""
+# Enterprise Web App — shared hardened-dispatch helpers
+
+Shared by `main.spl` and the sibling route modules (`booking_routes`,
+`restaurant_routes`, `dashboard`): HTML escaping for ALL business data,
+form-body parsing, the shared security-header policy wrapper, and the
+FROZEN denial-reason -> HTTP status mapping.
+
+Denial mapping (CommandResult.reason -> HTTP):
+- invalid-session -> 401
+- forbidden -> 403
+- not-found | no-session | line-not-found -> 404
+- conflict | table-occupied | session-closed | invalid-transition |
+  unserved-lines | insufficient-stock | invalid-record -> 409
+- duplicate-key never reaches deny(): idempotent replays return the
+  recorded result with 200.
+"""
+
+use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
+use std.nogc_sync_mut.http_server.response.{with_default_security_headers}
+
+# esc HTML-escapes ALL interpolated business data.
+fn esc(s: text) -> text:
+    var out = s.replace("&", "&amp;")
+    out = out.replace("<", "&lt;")
+    out = out.replace(">", "&gt;")
+    out = out.replace("\"", "&quot;")
+    out = out.replace("'", "&#39;")
+    out
+
+# form_value parses k=v&k=v bodies (values must not contain & or =).
+fn form_value(body: text, key: text) -> text:
+    for pair in body.split("&"):
+        val kv = pair.split("=")
+        if kv.len() == 2 and kv[0] == key:
+            return kv[1]
+    ""
+
+# form_int digit-checks a form field before int(); non-digits -> 0.
+fn form_int(body: text, key: text) -> i64:
+    val t = form_value(body, key)
+    var digits = t != ""
+    for ch in t:
+        if ch < "0" or ch > "9":
+            digits = false
+    if digits:
+        int(t)
+    else:
+        0
+
+# secured applies the EXISTING shared security-header policy (never duplicated).
+fn secured(resp: HttpResponse) -> HttpResponse:
+    with_default_security_headers(resp, false)
+
+# deny maps a frozen CommandResult denial reason onto an HTTP response.
+fn deny(reason: text, detail: text) -> HttpResponse:
+    val status = if reason == "invalid-session":
+        HttpStatus.Unauthorized
+    elif reason == "forbidden":
+        HttpStatus.Forbidden
+    elif reason == "not-found" or reason == "no-session" or reason == "line-not-found":
+        HttpStatus.NotFound
+    else:
+        HttpStatus.Conflict
+    secured(HttpResponse.error(status, reason + ": " + esc(detail)))
+
+export esc, form_value, form_int, secured, deny

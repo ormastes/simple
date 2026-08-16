@@ -3,7 +3,10 @@
 Customer-facing store vertical of the Simple Enterprise Suite
 (`.spipe/simple_enterprise_suite`, Goal Set v2 AC-15/AC-16).
 
-Module: `src/app/enterprise_store_app/main.spl`
+Modules: `src/app/enterprise_store_app/main.spl` (dispatcher + store routes),
+`web_common.spl` (esc/form parsing/security wrapper/denial mapping),
+`booking_routes.spl`, `restaurant_routes.spl`, `dashboard.spl` (W3-B route
+families, all dispatched through the same hardened prelude in `main.spl`).
 
 ## What it is
 
@@ -28,11 +31,26 @@ customer from catalog to receipt, built ONLY on existing layers:
 | POST | `/store/order` | body `order=O&sku=S&qty=N&idem=K` -> `sale_place_order` |
 | POST | `/store/pay` | body `order=O&idem=K` -> `sale_pay_order` |
 | GET | `/store/order/:id/receipt` | Escaped HTML receipt (status derived) |
+| GET | `/booking/resources` | Escaped list of the tenant's reservable resources |
+| POST | `/booking/hold` | body `booking=B&resource=R&start=E&end=E&qty=N&seat=S&now=E&ttl=N&idem=K` -> `booking_hold` (epochs/ttl digit-checked) |
+| POST | `/booking/confirm` | body `booking=B&now=E&idem=K` -> `booking_confirm` |
+| POST | `/booking/cancel` | body `booking=B&idem=K` -> `booking_cancel` |
+| GET | `/booking/:id/status` | Escaped derived booking status (404 unknown) |
+| POST | `/restaurant/table/open` | body `session=S&venue=V&table=T&party=N&idem=K` -> `table_open_session` |
+| POST | `/restaurant/order/line` | body `session=S&line=L&sku=P&qty=N&mods=M&idem=K` -> `order_add_line` |
+| POST | `/restaurant/kitchen/ready` | body `session=S&line=L&idem=K` -> `kitchen_mark_ready` |
+| POST | `/restaurant/line/served` | body `session=S&line=L&idem=K` -> `line_mark_served` |
+| POST | `/restaurant/bill/close` | body `session=S&idem=K` -> `bill_close_session` |
+| GET | `/restaurant/session/:table/view` | Escaped lines + served total of the table's ACTIVE session (404 `no-session` when free) |
+| GET | `/admin/dashboard` | Read-only escaped per-tenant summary (admin role via frozen `role_allows`): products, orders, bookings, open table sessions, outbox pending (`outbox_worker_pending` — run `outbox_worker_setup` once on the store), audit chain OK (`audit_verify_chain`) |
 
 Dispatch order for every request: limits -> path safety -> authenticated
-session (`session_valid`, the only auth scheme) -> route. Denial mapping:
-invalid-session 401, forbidden 403, not-found 404, stock/record conflicts
-409; idempotent replay returns 200 with the recorded `duplicate-key` result.
+session (`session_valid`, the only auth scheme) -> route. Denial mapping
+(frozen in `web_common.deny`): invalid-session 401, forbidden 403,
+not-found / no-session / line-not-found 404, conflict / table-occupied /
+session-closed / invalid-transition / unserved-lines / stock/record
+conflicts 409; idempotent replay returns 200 with the recorded
+`duplicate-key` result.
 
 All interpolated business data passes through `esc()` — a product named
 `<script>...</script>` renders as `&lt;script&gt;...`.
@@ -47,6 +65,11 @@ request-scoped model; checkout (the POST) is the only effect.
 - `test/03_system/app/enterprise/store_web_harden_spec.spl` —
   unauthenticated denial, HTML escaping, shared security headers,
   http_core limit/traversal gating (AC-15).
+- `test/03_system/app/enterprise/enterprise_web_app_spec.spl` — W3-B:
+  booking flow incl. conflict 409, restaurant flow incl. invalid-transition /
+  table-occupied / session-closed 409, admin dashboard counts + hostile-name
+  escaping + 403 for non-admin, 401 on every new route family, idempotent
+  hold replay = one effect.
 
 Run one at a time: `bin/simple test <spec>` (interpreter-mode evidence;
 per-scenario db paths because the interpreter caches sqlite per path).

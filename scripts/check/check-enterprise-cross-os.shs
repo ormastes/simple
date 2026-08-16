@@ -1,0 +1,139 @@
+#!/bin/sh
+# Enterprise cross-OS gate (AC-17, lane W4-B) — continuously enforced, not a
+# one-off probe.
+#
+# WHY: std.enterprise_{store,sale,booking,restaurant,outbox} must stay ONE
+# codebase runnable on the host OS and SimpleOS. The evidence contract is that
+# every minimal probe entry under src/app/enterprise/*_probe_main.spl
+# cross-compiles to a standalone SMF for BOTH the host default target and
+# --target=x86_64-unknown-simpleos, each artifact non-empty with `SMF\0`
+# magic. A host-only import (e.g. a module whose body uses a text slice or a
+# `?` TryOperator — constructs the standalone-SMF analyzer rejects) breaks the
+# simpleos side; this gate catches that on every run instead of at merge
+# archaeology time. See doc/07_guide/lib/database/enterprise_store.md
+# § Cross-OS runnability.
+#
+# Verdict convention (matches other scripts/check gates; last line on stdout):
+#   PASS — <n> probe(s) checked, ...        exit 0
+#   FAIL — ...                              exit 1
+#   ERROR — nothing was checked (...)       exit 2
+# Non-vacuity is absolute: 0 probes found is ERROR, never PASS.
+# --selftest runs before every scan and is fatal.
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT" || { echo "ERROR — nothing was checked (no repo root)"; exit 2; }
+[ -x bin/simple ] || { echo "ERROR — nothing was checked (bin/simple missing)"; exit 2; }
+
+SIMPLEOS_TARGET="x86_64-unknown-simpleos"
+TMPD=$(mktemp -d "${TMPDIR:-/tmp}/ent_crossos.XXXXXX") || { echo "ERROR — nothing was checked (mktemp)"; exit 2; }
+trap 'rm -rf "$TMPD"' EXIT
+
+# has_smf_magic FILE -> 0 if file starts with the 4 bytes 'S' 'M' 'F' '\0'.
+has_smf_magic() {
+    [ -s "$1" ] || return 1
+    magic=$(od -An -tx1 -N4 "$1" | tr -d ' \n')
+    [ "$magic" = "534d4600" ]
+}
+
+# compile_one SRC OUT TARGET("host"|simpleos-triple) LOG -> compiler exit code.
+compile_one() {
+    c_src=$1; c_out=$2; c_tgt=$3; c_log=$4
+    rm -f "$c_out"
+    if [ "$c_tgt" = "host" ]; then
+        SIMPLE_TIMEOUT_SECONDS=900 bin/simple compile "$c_src" -o "$c_out" >"$c_log" 2>&1
+        c_rc=$?
+    else
+        SIMPLE_TIMEOUT_SECONDS=900 bin/simple compile --target="$c_tgt" "$c_src" -o "$c_out" >"$c_log" 2>&1
+        c_rc=$?
+    fi
+    return $c_rc
+}
+
+# ---------------------------------------------------------------------------
+# Selftest — runs before every scan, fatal. Proves the gate can (a) pass a
+# well-formed both-OS probe and (b) FAIL a deliberately host-only probe whose
+# import closure contains a standalone-SMF-blocked construct (text slice).
+# ---------------------------------------------------------------------------
+run_selftest() {
+    st_dir="$TMPD/selftest"
+    mkdir -p "$st_dir"
+    cat > "$st_dir/good_probe.spl" <<'EOF'
+fn main():
+    print("selftest good probe marker")
+EOF
+    cat > "$st_dir/hostonly_helper.spl" <<'EOF'
+fn helper_head(s: text) -> text:
+    s[0:2]
+export helper_head
+EOF
+    cat > "$st_dir/bad_probe.spl" <<'EOF'
+use hostonly_helper.{helper_head}
+fn main():
+    print("selftest bad probe " + helper_head("marker"))
+EOF
+    compile_one "$st_dir/good_probe.spl" "$st_dir/good_host.smf" host "$st_dir/good_host.log"
+    rc=$?
+    if [ $rc -ne 0 ] || ! has_smf_magic "$st_dir/good_host.smf"; then
+        echo "selftest: well-formed fixture failed HOST compile (rc=$rc)"; return 1
+    fi
+    compile_one "$st_dir/good_probe.spl" "$st_dir/good_os.smf" "$SIMPLEOS_TARGET" "$st_dir/good_os.log"
+    rc=$?
+    if [ $rc -ne 0 ] || ! has_smf_magic "$st_dir/good_os.smf"; then
+        echo "selftest: well-formed fixture failed SIMPLEOS compile (rc=$rc)"; return 1
+    fi
+    compile_one "$st_dir/bad_probe.spl" "$st_dir/bad_os.smf" "$SIMPLEOS_TARGET" "$st_dir/bad_os.log"
+    rc=$?
+    if [ $rc -eq 0 ]; then
+        echo "selftest: host-only fixture (slice-using import) was NOT rejected"; return 1
+    fi
+    if ! grep -q "cannot compile to standalone SMF" "$st_dir/bad_os.log"; then
+        echo "selftest: host-only fixture failed for an unexpected reason (see $st_dir/bad_os.log)"; return 1
+    fi
+    return 0
+}
+
+if ! run_selftest; then
+    echo "ERROR — nothing was checked (selftest failed)"
+    exit 2
+fi
+if [ "${1:-}" = "--selftest" ]; then
+    echo "selftest: 3 fixture compile(s) behaved as required"
+    echo "PASS — 3 selftest fixture(s) checked, gate logic verified"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Scan — every enterprise probe entry, both targets.
+# ---------------------------------------------------------------------------
+PROBES=""
+for p in src/app/enterprise/*_probe_main.spl; do
+    [ -f "$p" ] && PROBES="$PROBES $p"
+done
+n=0
+failures=""
+for p in $PROBES; do
+    n=$((n + 1))
+    name=$(basename "$p" .spl)
+    for side in host "$SIMPLEOS_TARGET"; do
+        out="$TMPD/${name}_${side}.smf"
+        compile_one "$p" "$out" "$side" "$TMPD/${name}_${side}.log"
+        rc=$?
+        if [ $rc -ne 0 ]; then
+            failures="$failures ${name}[${side}:compile rc=$rc]"
+        elif ! has_smf_magic "$out"; then
+            failures="$failures ${name}[${side}:bad artifact (empty or no SMF magic)]"
+        fi
+    done
+done
+
+if [ $n -eq 0 ]; then
+    echo "ERROR — nothing was checked (no probes matched src/app/enterprise/*_probe_main.spl)"
+    exit 2
+fi
+if [ -n "$failures" ]; then
+    echo "FAIL — $n probe(s) checked, cross-OS defect(s):$failures"
+    exit 1
+fi
+echo "PASS — $n probe(s) checked, each compiles host + $SIMPLEOS_TARGET with SMF magic"
+exit 0
