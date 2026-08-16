@@ -741,3 +741,21 @@ copies of new sources until they land.
 - Gen2 SPipe state and current Stage-3 blocker:
   `.spipe/riscv_gen2_hwir_foundation/state.md` and
   `doc/08_tracking/bug/stage3_current_source_hir_rss_termination_2026-08-14.md`
+
+## RV32 dead-scratch acceptance contract
+
+`REQ-RISCV-HARDEN-005` removes the unreachable `scratch`/`scratch_bytes`
+storage, `SCRATCH_*` geometry, and payload-specific `stack_ra_ab*` overrides
+from the structured RV32 base generator. The narrow core now has only its ROM
+and data-ROM owners; payloads that need more than its 64 KiB window must use
+the flat/AXI memory lane rather than address-specific RTL exceptions.
+
+The future-executable system contract is
+`test/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.spl`, with
+its operator manual at
+`doc/06_spec/03_system/app/hardware/feature/simple_riscv_hardening_ac5_spec.md`
+and test plan at `doc/03_plan/sys_test/simple_riscv_hardening_ac5.md`.
+It checks production generation, complete golden equality, the debug-aspect
+edge, and deliberate stale-artifact rejection. Run it, docgen, and
+`sspec-maintain` only with an admitted pure-Simple full CLI. Until then retain
+`TEST_BLOCKED`; never substitute the Rust seed or a fallback-stub artifact.
