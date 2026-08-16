@@ -7,8 +7,18 @@ as `[i64]`. SCV reads through the `[i64]` shape and narrows; the font and
 rendering path reads `[u8]` directly. A return-type change to either entry point
 silently reshapes every one of those readers.
 
-Requirements: REQ-IOREAD-001 through REQ-IOREAD-006, defined in
+Requirements: REQ-IOREAD-001, REQ-IOREAD-002, REQ-IOREAD-003, REQ-IOREAD-004,
+REQ-IOREAD-005, REQ-IOREAD-006 — defined in
 `doc/03_plan/sys_test/scv_render_file_read_coverage.md`.
+
+| Requirement | Scenario |
+|---|---|
+| REQ-IOREAD-001 | Should return unsigned bytes from the canonical read |
+| REQ-IOREAD-002 | Should return unsigned bytes from the canonical read |
+| REQ-IOREAD-003 | Should return the same bytes from the raw i64 read |
+| REQ-IOREAD-004 | Should agree between the unsigned and raw read shapes |
+| REQ-IOREAD-005 | Should preserve the sfnt version bytes of a real font |
+| REQ-IOREAD-006 | Should report the same ASCII content through both read families |
 
 ## stdlib file-read byte contract
 
@@ -74,8 +84,14 @@ pass may be claimed for it until it has actually run.
 
 This evidence covers byte fidelity of the read entry points only. It does not
 assert that the several same-named `file_read_bytes` definitions across the tree
-agree with one another — that remains a static definition-count concern, tracked
-in `doc/08_tracking/bug/file_read_has_23_definitions_with_two_return_types_2026-08-16.md`
-and guarded by
+agree with one another — that is a static definition-count concern, guarded by
 `test/01_unit/lib/nogc_sync_mut/file_read_bytes_single_definition_spec.spl`.
-It makes no claim about SCV pack, delta, or integrity semantics.
+
+The sibling text-family property (single return type, plus shim re-export
+symmetry — REQ-IOREAD-007/008) is asserted separately by
+[file_read single return type](../../../01_unit/lib/nogc_sync_mut/file_read_single_return_type_spec.md),
+because those are static repo properties and a unit-level oracle is the right
+altitude for them. Remaining spread is tracked in
+`doc/08_tracking/bug/file_read_has_23_definitions_with_two_return_types_2026-08-16.md`.
+
+This specification makes no claim about SCV pack, delta, or integrity semantics.
