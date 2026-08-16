@@ -46,11 +46,12 @@ without plaintext fallback.
 
 `DbListener` owns bind/accept/shutdown; `TcpDbListener`,
 `DbListenerControl`, and `DbServerCapsule.listen/serve_listener` compose it
-with `TcpDbTransport`. Every control copy references one mutex-backed listener
-owner state; accept holds that gate only for its bounded timeout, and close
-waits for the attempt before marking the shared state closed and releasing the
-fd. Cross-owner shutdown retains only `DbStopControl`, never a raw listener
-copy. A shared bounded accept-attempt counter provides lifecycle evidence
+with `TcpDbTransport`. Each control keeps its listener value owner-local while
+all copies share a scalar mutex lease/terminal-close receipt; accept holds that
+gate only for its bounded timeout, and close waits for the attempt before
+publishing terminal state and releasing the fd exactly once. Cross-owner
+shutdown retains only `DbStopControl`, never a raw listener copy. A shared
+bounded accept-attempt counter provides lifecycle evidence
 without granting another mutable store/session owner. If stop is published
 while bounded accept is in flight, the serving owner closes the completed
 transport before authentication, session creation, or request dispatch.

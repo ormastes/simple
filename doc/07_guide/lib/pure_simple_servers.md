@@ -112,8 +112,9 @@ new lifecycle fixture uses `DbListenerControl.local_addr()` to bind an
 ephemeral loopback listener, prequeue one client, exchange `OPEN`, observe EOF
 session cleanup and zero active connections, close, and rebind after both
 normal completion and explicit stop. After two review cycles, every control
-copy references one mutex-owned listener/closed state; bounded accept and close
-serialize through that gate. The stopping domain retains only `DbStopControl`,
+copy references one scalar mutex lease/terminal-close receipt around its
+owner-local listener; bounded accept and close serialize through that gate
+without class-valued mutex payloads. The stopping domain retains only `DbStopControl`,
 observes its positive accept-attempt receipt, requests stop, and lets the
 serving owner close after the bounded accept returns. The owner rechecks stop
 after accept and closes a just-completed transport before auth or dispatch; the

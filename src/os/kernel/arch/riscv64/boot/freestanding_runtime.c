@@ -210,8 +210,6 @@ __asm__(
 );
 #endif
 
-extern spl_i64 kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(spl_i64 size) __attribute__((weak));
-
 static spl_u64 g_freestanding_heap_next = 0x87000000ULL;
 /* Top of physical RAM, not 0x90000000: rt_riscv_qemu_ram_base() (0x80000000)
  * + rt_riscv_qemu_ram_size() (128 MiB) == 0x88000000. The previous
@@ -231,7 +229,6 @@ static spl_u64 rt_align8(spl_u64 value) {
 void *rt_alloc(spl_i64 size) {
     spl_u64 next;
     spl_u64 bytes;
-    void *boot_alloc;
     if (size <= 0) {
         return (void *)0;
     }

@@ -18,9 +18,10 @@ maintenance scorecard, and docgen receipt remain pending.**
    rebind. The parent retains only `DbStopControl`, observes its shared
    accept-attempt receipt, then requests stop. The serving owner returns from
    the bounded accept, rejects any connection completed after stop before
-   authentication or session dispatch, and closes the mutex-owned listener
-   state. No raw fd crosses to the stopping domain; copied controls see the
-   shared closed state.
+   authentication or session dispatch, and closes its owner-local listener.
+   No raw fd crosses to the stopping domain; a scalar mutex lease serializes
+   descriptor use and publishes the shared terminal-close receipt without
+   trying to transport a listener class through the runtime mutex boundary.
 4. **Prevent observation of the P3/P4 window.** Peer reads cannot see staged
    writes, while an unconditional committed control is visible. An injected
    store leak is designed to show the isolation oracle changes outcome when the
@@ -35,9 +36,10 @@ maintenance scorecard, and docgen receipt remain pending.**
 
 The source has non-vacuous absolute assertions, including retained-copy idle
 shutdown, post-stop connection rejection with zero accepted/active/session
-state, and the adjacent quoted UTF-8 parser oracle. It has not been executed or
-regenerated in this lane: no runtime PASS, coverage percentage, docgen receipt,
-or deliberate-red transcript is claimed while Stage 4 is unhealthy.
+state, the returned transport outcome, and the adjacent quoted UTF-8 parser
+oracle. It has not been executed or regenerated in this lane: no runtime PASS,
+coverage percentage, docgen receipt, or deliberate-red transcript is claimed
+while Stage 4 is unhealthy.
 
 No executable `.spl` is stored below `doc/06_spec`; this manual contains no
 stub scenario.

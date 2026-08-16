@@ -33,14 +33,24 @@ scenario shape were corrected, but re-review required a stronger owner boundary.
 
 Re-review cycle 2 found that close-once did not itself publish stopped state
 and that a sleep-only idle test could pass before the worker reached accept.
-The working tree now keeps listener/closed state behind one shared mutex,
-serializes bounded accept and close through that gate, and gives the stopping
+The working tree now keeps only a scalar listener lease/terminal receipt behind
+the shared mutex, serializes bounded accept and close around owner-local
+listener values through that gate, and gives the stopping
 domain only `DbStopControl`. The idle scenario observes its shared
 accept-attempt receipt before stop/join/rebind. Review cycle 3 then found that
 a connection completing during the in-flight accept could still reach request
 dispatch. The final bounded fix rechecks stop after accept, closes that transport,
 and adds an empty-response/zero-state oracle. This remains unexecuted code-only
 evidence; the three-cycle cap is reached.
+
+Post-rebase triage used two mutable `/tmp` logs produced by a Rust seed only as
+diagnostic clues. Those logs are not admissible receipts. They localized the
+DB failures to a class-valued mutex payload becoming nil and a stale
+`ServeOutcome` assertion, and the SimpleOS failure to assertions for a retired
+noalloc allocator path. The source now uses a scalar mutex lease around the
+owner-local listener, checks the returned outcome, removes the dead RISC-V
+allocator declaration, and asserts the bounded aligned bump-heap contract.
+These corrections remain code-only until the exact Stage-4 commands pass.
 
 They are code-only handoff material, not PASS evidence. AC-9/10/12/13 remain
 open. Existing manuals are hand-authored rather than current docgen receipts;

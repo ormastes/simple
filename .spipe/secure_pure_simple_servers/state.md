@@ -203,8 +203,9 @@ dev-blocked
 - continuation-review-cycle2-2026-08-16: Re-review rejected close-once alone:
   normal close did not publish stopped state to retained copies, and a fixed
   sleep did not prove the worker reached accept. Fix cycle 2 replaces copied
-  raw-fd ownership with one mutex-owned listener/closed state, serializes
-  bounded accept and close, gives the stopping domain only `DbStopControl`,
+  raw-fd ownership with owner-local listener values plus one shared scalar
+  mutex lease/terminal receipt, serializes bounded accept and close, gives the
+  stopping domain only `DbStopControl`,
   and requires its accept-attempt receipt before stop/join/rebind. Final
   re-review and Stage-4 execution remain required.
 - continuation-review-cycle3-2026-08-16: Final review rejected the remaining
@@ -215,3 +216,13 @@ dev-blocked
   requiring an empty response and zero accepted/active/session state. The
   three-cycle cap is reached; no PASS is claimed without Stage-4 execution and
   a future independent acceptance review.
+- post-rebase-failure-triage-2026-08-16: Mutable `/tmp` diagnostics from an
+  explicitly inadmissible Rust-seed run were used only to locate failures, not
+  as acceptance evidence. They showed that class-valued mutex payloads became
+  nil in three DB listener scenarios, an older DB assertion inspected the
+  input instead of returned `ServeOutcome`, and the SimpleOS gate expected a
+  retired noalloc allocator path. The working fix uses an owner-local listener
+  plus scalar mutex lease/terminal receipt, asserts the returned outcome, and
+  verifies the bounded aligned RISC-V bump heap while removing the dead weak
+  allocator declaration. Admitted Stage-4 execution remains required; no AC
+  is promoted.

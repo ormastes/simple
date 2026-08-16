@@ -25,8 +25,8 @@ response bounds.
 - Response writes select one complete bounded response and use write-all
   semantics; a partial syntactically valid prefix is not success.
 - Listener owners close every accepted connection and expose bounded shutdown.
-- Listener controls share one mutex-owned listener/closed state; bounded accept
-  and close serialize through that gate.
+- Listener controls keep listener values owner-local and share only a scalar
+  mutex lease/terminal receipt; bounded accept and close serialize through it.
 - Cross-owner shutdown retains only `DbStopControl`, observes its shared
   accept-attempt receipt, then requests stop. It never receives or closes the
   raw listener fd.

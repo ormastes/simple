@@ -50,7 +50,8 @@ agent after integration and before delivery integration.
 - An unhealthy Stage-4 self-hosted CLI blocks runtime acceptance evidence.
 - DB listener/stop ownership, sequential synchronization, batch/range logic,
   and Markdown mirrors exist in source. After review cycle 1, retained listener
-  controls share one mutex-owned listener state, while the stopping domain
+  controls share one scalar mutex lease/terminal receipt around owner-local
+  listener values, while the stopping domain
   retains only `DbStopControl`; an idle-stop fixture exercises the accept
   receipt, stop, join, and rebind without a client. A second fixture connects
   after that receipt and stop publication and requires zero dispatch/session

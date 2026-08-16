@@ -16,8 +16,8 @@
 - DB `OPEN` requires principal plus credential, compares 64 digest characters,
   and uses one exact missing/wrong/unknown failure frame.
 - DB has owned bounded TCP/memory transports with sequential state ownership.
-- DB listener copies share one mutex-owned listener/closed state; bounded accept
-  and close cannot race the numeric fd.
+- DB listener copies share one scalar mutex lease/terminal receipt around
+  owner-local listeners; bounded accept and close cannot race the numeric fd.
 - Cross-owner idle shutdown retains only `DbStopControl`, waits for its shared
   accept-attempt receipt, requests stop, then joins the serving owner. A
   connection completed after stop is closed before auth/session dispatch.

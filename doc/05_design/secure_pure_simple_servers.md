@@ -6,8 +6,9 @@
 - `SecureServerPolicy`: immutable web limits, timeout/read budgets, TLS-required
   flag, and explicit plaintext-development constructor.
 - `DbListener` / `TcpDbListener`: concrete listener port and production owner.
-  `DbListenerControl` stores the listener and closed flag behind one shared
-  mutex; bounded accept and close serialize through that gate.
+  `DbListenerControl` keeps its listener owner-local and stores only a scalar
+  open/closed lease in the shared mutex; bounded accept and close serialize
+  through that gate without transporting a class value through `Mutex`.
   `DbServerCapsule.listen/serve_listener` composes lifecycle and capacity.
   Cross-owner shutdown retains only `DbStopControl`; its
   `accept_attempt_count` supplies the idle-stop synchronization receipt. The
