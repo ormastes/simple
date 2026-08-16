@@ -133,3 +133,42 @@ syscall and namespace contract, not that every browser surface uses it.
 - Engine internals: `doc/07_guide/ui/browser_engine_implementation.md`
 - Don't confuse with `src/app/ui.browser/` (standalone winit widget-tree
   app) or `src/os/apps/simple_browser/` (baremetal).
+
+### Worker routing (problem 3) — capability probe
+
+Routing this app's page rendering through the jailed renderer worker needs a
+worker-capable executable to re-exec. `bin/simple` is not one: the worker arg
+is dispatched only by `src/os/hosted/hosted_entry.spl:285`, and importing that
+into the CLI entry would pull `os.hosted.*` into the closure of every `simple`
+invocation — the hub-import/startup-cost anti-pattern this repo polices.
+
+So the executable is operator-supplied and the capability is probed:
+
+```bash
+export SIMPLE_BROWSER_RENDERER_WORKER=/path/to/worker-capable-binary
+bin/simple browser --sandbox-status
+```
+
+`browser_sandbox_unavailable_reason()` distinguishes the failure modes:
+
+| Reason | Meaning |
+|---|---|
+| `worker-executable-not-configured` | env knob unset |
+| `worker-executable-not-found` | configured path is not on disk |
+| `render-route-not-wired` | executable is fine; the code cannot route yet |
+
+**Availability is the conjunction of both halves** — a supplied executable AND
+a wired render route. Setting the env var alone does NOT make the browser claim
+`jailed`; that would be the exact false claim this surface exists to prevent.
+
+Two concrete pieces remain before `browser_sandbox_render_route_wired()` may be
+flipped, and neither is a wiring detail:
+
+1. `HostedBrowserRendererProcess.render(...)` returns a `DrawIrComposition`,
+   not `[u32]`, while `browser_engine_pixels_at` owes its caller pixels — the
+   app needs a rasterization step (`Engine2dCompositorBackend`) it does not
+   have.
+2. Only the *session* paths execute page script
+   (`browser_session_pixels_at_time`, `browser_engine_animated_frames`);
+   `browser_render_html_to_pixel_array` is pure parse/layout/paint. Jailing
+   should target those two, not all rendering.

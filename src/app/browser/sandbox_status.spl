@@ -16,6 +16,7 @@
 #   - the default (knob unset) renders unjailed and SAYS so on query.
 
 use std.io_runtime.{env_get}
+use app.browser.sandbox_routing.{browser_sandbox_routing_probe, browser_sandbox_routing_reason}
 
 pub val BROWSER_SANDBOX_ENV: text = "SIMPLE_BROWSER_SANDBOX"
 
@@ -33,13 +34,47 @@ pub fn browser_sandbox_requested() -> bool:
     """True when SIMPLE_BROWSER_SANDBOX=1 asks for jailed page rendering."""
     env_get(BROWSER_SANDBOX_ENV) == "1"
 
+pub fn browser_sandbox_render_route_wired() -> bool:
+    """Whether this app's render path actually hands pages to the renderer
+    worker.
+
+    Still false, and it is the ONLY reason routing is unavailable once an
+    operator supplies a worker executable. Two concrete pieces are missing and
+    neither is a wiring detail:
+
+      1. `HostedBrowserRendererProcess.render(...)` returns a
+         `DrawIrComposition`, not `[u32]`. `browser_engine_pixels_at` owes its
+         caller pixels, so the app needs a rasterization step
+         (Engine2dCompositorBackend) that it does not have today.
+      2. The worker is dispatched only by `src/os/hosted/hosted_entry.spl:285`.
+         Reaching it from the CLI would import `os.hosted.*` into the closure
+         of every `simple` invocation — the hub-import/startup-cost
+         anti-pattern this repo polices. Hence the operator-supplied executable
+         in `sandbox_routing.spl` rather than a CLI entry change.
+
+    Flipping this to true before those land would make `browser_sandbox_status`
+    report `jailed` while page script still runs in the host process — the one
+    outcome this whole surface exists to prevent."""
+    false
+
 pub fn browser_sandbox_worker_routing_available() -> bool:
     """Whether this app can route page rendering through the sandboxed
-    renderer worker. Always false today: the broker exists
-    (hosted_browser_renderer_process.spl) but this app's render path is not
-    wired through it — see the bug doc in the header. This function is the
-    single line to flip when that routing lands."""
-    false
+    renderer worker.
+
+    Requires BOTH a worker-capable executable (probed, operator-supplied) AND
+    a wired render route. Fail-closed: either half missing means unavailable,
+    which keeps the honest refusal rather than an unjailed render."""
+    browser_sandbox_routing_probe() and browser_sandbox_render_route_wired()
+
+pub fn browser_sandbox_unavailable_reason() -> text:
+    """Precise, machine-readable reason routing is unavailable, so an operator
+    can tell 'you never set the env var' apart from 'the code cannot do this
+    yet'. Empty when routing IS available."""
+    if not browser_sandbox_routing_probe():
+        return browser_sandbox_routing_reason()
+    if not browser_sandbox_render_route_wired():
+        return "render-route-not-wired"
+    ""
 
 pub fn browser_sandbox_status() -> BrowserSandboxStatus:
     """Honest sandbox posture for this process. Fail-closed reporting:
@@ -73,4 +108,5 @@ export BROWSER_SANDBOX_ENV
 export BROWSER_SANDBOX_MODE_UNJAILED, BROWSER_SANDBOX_MODE_JAILED, BROWSER_SANDBOX_MODE_REFUSED
 export BrowserSandboxStatus
 export browser_sandbox_requested, browser_sandbox_worker_routing_available
+export browser_sandbox_render_route_wired, browser_sandbox_unavailable_reason
 export browser_sandbox_status, browser_sandbox_status_line

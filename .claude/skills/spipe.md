@@ -2558,3 +2558,27 @@ genuinely moving (`net:[4026533421] -> net:[4026533540]`). Default Docker and
 serve equally, but note there is **no Linux x86_64 qcow2 in-tree** and
 `curl`/`wget` are blocked by the context-mode rules, so that route needs an
 image supplied out of band.
+
+### `to_not_contain` does not exist (2026-08-16)
+
+The complete matcher surface is `pub trait ExpectScalarMatcher` in
+`src/lib/nogc_sync_mut/spec.spl` — 18 matchers plus `not_()`: `to_equal`,
+`to_be`, `to_be_true/false/nil/truthy/falsy`, `to_be_greater_than`,
+`to_be_less_than`, `to_be_at_least`, `to_be_at_most`, `to_contain`,
+`to_start_with`, `to_end_with`, `to_be_empty`, `to_have_length`,
+`to_be_close_to`, `to_match`.
+
+**`to_not_contain` is NOT among them** — `grep -rn "to_not_contain" src/
+--include=*.spl` returns zero definitions. Roughly ten specs under
+`test/03_system/` call it anyway (e.g. `tools/simple_lab/lab_shared_ui_contract_spec.spl`,
+`feature/usage/networking_spec.spl`); those calls have no backing definition.
+Do not copy the idiom. The negative assertion that works is:
+
+```simple
+expect(report.contains("Passed: 2")).to_equal(false)
+```
+
+Import form: `use std.spec.*` dominates `test/03_system` (944 files vs 201
+brace-form vs 125 `std.spipe.*`). Caveat already noted in `spec.spl:609-613` —
+the wildcard does not reliably expose every `pub fn`, so import
+`prevent`/`prevent_at_most`/`prevent_file` fully-qualified.

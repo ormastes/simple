@@ -222,3 +222,26 @@ records `coverage_collector_skips_pub_val_and_match_heads_2026-08-15.md` and
   (`deployed_selfhost_test_subcommand_segv_blocks_bootstrap_2026-08-16.md`).
   Fail-closed by construction, so it verifies automatically once one exists.
   Do not report it as passing until it has run.
+
+## Handoff Notes (2026-08-16, problem 3 groundwork)
+
+- **The flip-line is now two predicates, deliberately.** `browser_sandbox_worker_routing_available()`
+  = `browser_sandbox_routing_probe()` AND `browser_sandbox_render_route_wired()`.
+  The probe is operator config (`SIMPLE_BROWSER_RENDERER_WORKER`); the second is
+  code capability. Do NOT collapse them — setting an env var must never make the
+  browser claim `jailed`.
+- **What actually blocks the render route** (verified, not guessed): the broker's
+  `render(kind, payload, timeout_ms)` returns `HostedBrowserRendererResult` whose
+  payload is a `DrawIrComposition`, NOT `[u32]`; and no render call takes
+  width/height (viewport is fixed at `create(generation, width, height)`, changed
+  via `begin_resize`). So the app needs a rasterization step it lacks.
+- **Do not add the worker arg to the CLI entry casually.** It is dispatched only
+  at `src/os/hosted/hosted_entry.spl:285`; importing that into the CLI pulls
+  `os.hosted.*` into every `simple` invocation's closure. That is a startup-cost
+  design decision, which is why the executable is operator-supplied instead.
+- **Layering is NOT the blocker.** 47 files under `src/app/` already `use os.*`.
+- **Only the session paths run page script**: `browser_session_pixels_at_time`
+  and `browser_engine_animated_frames`. `browser_render_html_to_pixel_array` is
+  pure parse/layout/paint. Jail those two, not everything.
+- **`to_not_contain` does not exist** despite ~10 specs under `test/03_system/`
+  calling it. Use `expect(x.contains("...")).to_equal(false)`.

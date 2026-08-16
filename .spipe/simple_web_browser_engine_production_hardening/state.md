@@ -2819,3 +2819,23 @@ implementation in progress / target evidence blocked
   (drop the `uid_map` write) bites: `uid/gid inside jail is 65534/0, expected
   0/0`. Verified active under `docker run --privileged`; host remains
   `unavailable`.
+- **Problem 3 partial (2026-08-16)**: added `src/app/browser/sandbox_routing.spl`
+  (operator-supplied `SIMPLE_BROWSER_RENDERER_WORKER`, fail-closed probe with
+  three declared reasons) and split the flip-line into
+  `browser_sandbox_render_route_wired()` AND the probe.
+  `browser_sandbox_worker_routing_available()` is now their conjunction, so
+  supplying the env var alone can never make the browser claim `jailed`.
+  Spec: `test/01_unit/app/browser/browser_sandbox_routing_spec.spl`.
+  **Render route still NOT wired** — two concrete blockers, both design
+  decisions rather than wiring: (a) the broker returns `DrawIrComposition`,
+  not `[u32]`, so the app needs an Engine2dCompositorBackend rasterization
+  step; (b) the worker arg is dispatched only at `hosted_entry.spl:285`, and
+  reaching it from the CLI would import `os.hosted.*` into every `simple`
+  invocation's closure. Corrected an agent claim: app->os is NOT forbidden
+  (47 files under src/app already import os.*), so layering is not the blocker.
+  Narrowing worth keeping: only the SESSION paths execute page script
+  (`browser_session_pixels_at_time`, `browser_engine_animated_frames`);
+  `browser_render_html_to_pixel_array` is pure parse/layout/paint, so jailing
+  targets two functions, not all rendering.
+  **NOTE: none of this .spl is executable here** — no admitted runtime, so the
+  new module and spec are unverified code, not a pass.
