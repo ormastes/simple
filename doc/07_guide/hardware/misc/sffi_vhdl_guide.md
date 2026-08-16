@@ -32,7 +32,7 @@ Path 1: Compilation (Simple -> VHDL)
                           VhdlConstraintChecker (E07xx errors)
 
 Path 2: Tool Invocation (SFFI -> GHDL/Yosys)
-   .spl source  ->  vhdl_ffi.spl  ->  rt_process_run_capture()
+   .spl source  ->  vhdl_sffi.spl  ->  process_ops.process_run()
                           |
                     ghdl_analyze() / ghdl_elaborate() / ghdl_run()
                     yosys_synth_ghdl()
@@ -234,13 +234,15 @@ fn main():
 
 ## SFFI Tool Bindings Reference
 
-All hardware tool bindings live in `src/lib/nogc_sync_mut/io/vhdl_ffi.spl`.
+All hardware tool bindings live in `src/lib/nogc_sync_mut/io/vhdl_sffi.spl`.
+Process execution is owned by `io/process_ops.spl`; compatibility modules only
+re-export this canonical boundary.
 
 ### Tier 1: Raw Externs
 
 ```simple
-extern fn rt_process_run(command: text, args: [text]) -> i64
-extern fn rt_process_run_capture(command: text, args: [text]) -> (i64, text, text)
+# Owned by io/process_ops.spl and consumed through process_run():
+extern fn rt_process_run(command: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
@@ -498,7 +500,7 @@ bin/simple test --only-slow test/03_system/feature/baremetal/
 |------|--------|-------|
 | Write .spl RTL | Done | `rv32i_rtl/`, `soc_rtl/` modules exist |
 | VHDL backend compilation | Done | 18-file backend, type mapper, constraint checker |
-| SFFI tool bindings | Done | `vhdl_ffi.spl` wraps GHDL + Yosys |
+| SFFI tool bindings | Done | canonical `vhdl_sffi.spl` wraps GHDL + Yosys through `process_ops` |
 | GHDL simulation (reference VHDL) | Working | Handwritten VHDL at `examples/09_embedded/` passes |
 | GHDL simulation (generated VHDL) | Gap | `write_stub_rtl()` produces placeholders, not real VHDL |
 | FPGA bundle generation | Working | Board profiles, manifests, TCL scaffolds |
