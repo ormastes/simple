@@ -341,3 +341,23 @@ full Web renderer from the tiny base closure.
 Consequence: refactors of the large browser's render path cannot break the tiny
 browser, and conversely the tiny browser must not be "fixed" by importing large
 browser modules — that would violate its stated scope exclusion.
+
+## Real page loading merged onto one engine (2026-08-16)
+
+- `src/app/browser/page_loader.spl` = scheme gate (REQ-WEB-BROWSER-015, was
+  enforced by NOTHING) + one-entry cache + `browser_load_page_html` -> the
+  shared `FetchEngine`. Do NOT add a second fetch path; both browser fronts
+  ride this engine now.
+- `render_adapter`: text mode shows a load receipt; the ENGINE gets the
+  origin's untouched document via `browser_page_document_html`. Failures keep
+  the `(no page loaded for {url}: {reason})` shape — never a fabricated page.
+- Seed truth: TCP real, TLS stubbed (-1) — `http://` works live under the
+  seed, `https://` reports `h1: missing TLS connection`. Compiled runtime has
+  real TLS.
+- Seed trap fixed: `.?` + `.unwrap()` on a module-level optional dies in the
+  seed's semantic pass (`h1_client.spl` get_mock_registry). Use optional
+  `match`. If you see "method `unwrap` not found on class X" under
+  `bin/simple run`, this is why.
+- GUI viewport limit: `--open` is 64x36; a real page renders as its
+  background fill there (text lays out off-frame). Glyph evidence needs a
+  larger viewport through `browser_engine_pixels_at`.

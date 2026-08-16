@@ -22,6 +22,7 @@ use app.browser.render_lane.{browser_render_html_to_pixel_array}
 use app.browser.sandbox_status.{browser_sandbox_status}
 use app.browser.sandbox_routing.{browser_sandbox_worker_executable}
 use app.browser.sandbox_render.{browser_sandbox_render_pixels}
+use app.browser.page_loader.{browser_load_page_html}
 use std.gc_async_mut.web.browser_session.{BrowserSession}
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_loading.*
@@ -109,9 +110,14 @@ fn browser_url(config: RenderConfig) -> text:
 
 fn browser_page_text_lines(url: text) -> [text]:
     if url == SIMPLE_BROWSER_HOME_URL:
-        ["Hello, World!", "Welcome to Simple Browser."]
-    else:
-        ["(no page loaded for {url})"]
+        return ["Hello, World!", "Welcome to Simple Browser."]
+    match browser_load_page_html(url):
+        Ok(html):
+            ["Loaded {url}", "{html.len()} bytes via the shared fetch engine"]
+        Err(reason):
+            # One line, reason included: keeps the honest refusal AND tells the
+            # operator whether it was the scheme gate or the network.
+            ["(no page loaded for {url}: {reason})"]
 
 # =========================================================================
 # Real engine render — proof the page actually goes through the Simple
@@ -119,9 +125,17 @@ fn browser_page_text_lines(url: text) -> [text]:
 # =========================================================================
 
 fn browser_page_document_html(url: text) -> text:
-    """Full HTML document for the loaded page, wrapping the same body markup
-    shown in the chrome viewport below -- one source of truth fed to both
-    the display and the real engine."""
+    """Full HTML document for the loaded page. For the built-in home page
+    (and for load failures) this wraps the same body markup shown in the
+    chrome viewport below. For a successfully fetched http/https page it is
+    the ORIGIN'S OWN DOCUMENT, untouched — the engine renders what the server
+    actually sent, not a wrapper around a summary of it."""
+    if url != SIMPLE_BROWSER_HOME_URL:
+        match browser_load_page_html(url):
+            Ok(html):
+                return html
+            Err(_):
+                ()  # fall through to the honest not-loaded wrapper below
     "<html><body>" + browser_page_body_html(url) + "</body></html>"
 
 pub fn browser_engine_pixels_at(url: text, width: i32, height: i32) -> [u32]:
@@ -244,14 +258,23 @@ fn browser_page_body_html(url: text) -> text:
     real headings/paragraphs, cascaded through the shared HTML renderer,
     not a pre-rendered bitmap."""
     if url == SIMPLE_BROWSER_HOME_URL:
-        "<div class=\"browser-page\">" +
+        return "<div class=\"browser-page\">" +
             "<h1 class=\"browser-page-title\">Hello, World!</h1>" +
             "<p class=\"browser-page-lede\">Welcome to Simple Browser.</p>" +
             "</div>"
-    else:
-        "<div class=\"browser-page\">" +
-            "<p class=\"browser-page-lede\">No page loaded for " +
-            html_escape(url) + "</p></div>"
+    match browser_load_page_html(url):
+        Ok(html):
+            # Chrome viewport shows a load receipt; the full origin document
+            # goes to the ENGINE via browser_page_document_html. Splicing a
+            # whole fetched <html> document inside this chrome <div> would be
+            # invalid markup, so the receipt is deliberate, not a shortcut.
+            "<div class=\"browser-page\">" +
+                "<p class=\"browser-page-lede\">Loaded " + html_escape(url) +
+                " ({html.len()} bytes)</p></div>"
+        Err(reason):
+            "<div class=\"browser-page\">" +
+                "<p class=\"browser-page-lede\">No page loaded for " +
+                html_escape(url) + ": " + html_escape(reason) + "</p></div>"
 
 # =========================================================================
 # Chrome — address bar + tab strip around the page content

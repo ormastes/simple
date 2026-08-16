@@ -2863,3 +2863,15 @@ implementation in progress / target evidence blocked
   states report distinct correct reasons.
 - Explicitly not claimed: real remote page rendering. The app stubs every URL
   except `simple://home`; real TLS/HTTP is wired only into the hosted browser.
+
+## 2026-08-16 — real fetch merged into app browser; REQ-015 gate live
+
+- page_loader.spl: scheme gate + FetchEngine reuse (one engine, both fronts).
+- EXECUTED evidence (first in this lane): browser_page_loader_spec 3/3 passed
+  under seed interpreter (counted verdict). Live: http://example.com fetched
+  559 bytes, origin document rendered; https honest-fails (seed TLS stubs);
+  file:// refused with REQ-015 reason.
+- h1_client get_mock_registry seed-narrowing fix (.?/.unwrap -> match).
+- REQ-WEB-BROWSER-015 now has an enforcing implementation + executed unit
+  coverage; still not promoted to verified until a self-hosted runtime runs
+  the full suite.

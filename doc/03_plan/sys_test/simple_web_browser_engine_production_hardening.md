@@ -1819,3 +1819,31 @@ Out of scope and explicitly NOT claimed: rendering a real remote page. The app
 returns `"(no page loaded for {url})"` for every URL except `simple://home`
 (`src/app/browser/render_adapter.spl:110-113`). Real TLS/HTTP exists but is
 wired only into the hosted worker browser.
+
+## REQ-WEB-BROWSER-015 — scheme gate landed, real fetch merged (2026-08-16)
+
+`src/app/browser/page_loader.spl` closes the enforcement gap: until now NO
+code in the app validated URL schemes at all — any string was accepted. The
+gate allows top-level http/https plus `simple://home`; file/data/javascript/
+custom schemes are refused with a reason naming this requirement.
+
+The same module merges the browser fronts onto ONE fetch path: the app browser
+now loads real pages through `FetchEngine` — the engine already carrying the
+hosted worker browser's cache/CORS surface — instead of a stub. No second
+fetch implementation exists.
+
+Evidence tiers, kept honest:
+- Unit (EXECUTED, seed interpreter): `browser_page_loader_spec.spl` — 3/3
+  passed, counted verdict `executed=3`. Gate logic only, no network.
+- Live (seed, diagnostic): `http://example.com` fetched (559 bytes) and the
+  ORIGIN'S document rendered by the engine; `https://` fails honestly under
+  the seed (TLS externs are stubs returning -1 — `interpreter_extern/
+  mod.rs:2438`); `file://` refused with the REQ-015 reason.
+- The seed TLS stub means https live evidence requires a compiled runtime;
+  this is recorded, not worked around.
+
+Also fixed en route: `h1_client.spl:get_mock_registry` used `.?` +
+`.unwrap()`, which the seed's semantic pass cannot resolve after narrowing
+("method `unwrap` not found") — every live fetch died before reaching the
+network. Rewritten as an optional `match` (the dominant idiom, valid under
+both runtimes).

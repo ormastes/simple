@@ -1,0 +1,102 @@
+# Real page loading for the in-process browser: scheme gate + fetch + cache.
+#
+# This is the MERGE point between the two browser fronts. Until 2026-08-16 the
+# app browser stubbed every URL except simple://home while the hosted worker
+# browser had the only wiring into the real network stack. This module gives
+# the app browser real pages by REUSING that same stack — FetchEngine
+# (net/fetch.spl: DNS, cache, cookies, CORS, redirects, H1 transport, TLS) —
+# rather than growing a second fetch implementation. One engine, both
+# browsers; see doc/04_architecture/os/one_app_host_interface_rule.md for the
+# rule this follows.
+#
+# Scheme gate (REQ-WEB-BROWSER-015, previously enforced by NOTHING in this
+# app): top-level http/https and the internal simple://home page are allowed;
+# every other scheme — file, data, javascript, custom — is refused with a
+# reason. Fail-closed: an unparseable URL is a denial, not a guess.
+#
+# Runtime honesty: under the Rust seed interpreter, TCP externs are real but
+# every rt_tls_* extern is a stub returning -1
+# (src/compiler_rust/compiler/src/interpreter_extern/mod.rs:2438-2449), so
+# http:// fetches genuinely work while https:// fails its handshake and
+# reports a load failure. On a compiled runtime both work
+# (runtime/src/value/net_tls.rs). The failure is REPORTED, never papered
+# over with a fallback page pretending to be the origin.
+
+use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, RequestMode}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, BrowserLogLevel}
+
+pub val BROWSER_PAGE_HOME_URL: text = "simple://home"
+
+# One-entry page cache: the render pass asks for the same URL from several
+# functions (text lines, chrome html, engine document), and each render must
+# not refetch. Module-level `var` is the established idiom for this
+# (src/lib/nogc_sync_mut/io/debug_state.spl).
+var _loaded_url: text = ""
+var _loaded_html: text = ""
+var _loaded_error: text = ""
+
+pub fn browser_url_scheme_allowed(url: text) -> bool:
+    """Top-level navigation gate. http/https and the internal home page only —
+    the REQ-WEB-BROWSER-015 shape. Everything else is denied here, in the one
+    place every page read passes through."""
+    url == BROWSER_PAGE_HOME_URL or
+        url.starts_with("http://") or url.starts_with("https://")
+
+pub fn browser_scheme_denial_reason(url: text) -> text:
+    """Stable, human-readable reason for a scheme denial; empty when allowed."""
+    if browser_url_scheme_allowed(url):
+        return ""
+    "scheme not permitted for top-level navigation (REQ-WEB-BROWSER-015): only http, https and simple://home are allowed"
+
+fn _fetch_page(url: text) -> Result<text, text>:
+    val parsed = match Url.parse(url):
+        Some(u): u
+        nil: return Err("URL failed to parse")
+    val engine = FetchEngine.new(Logger.new("browser-app", BrowserLogLevel.Error))
+    val response = match engine.fetch(FetchRequest(
+        method: "GET",
+        url: parsed,
+        headers: "",
+        body: [],
+        mode: RequestMode.Navigate,
+        credentials: "same-origin"
+    )):
+        Ok(r): r
+        Err(e): return Err("fetch failed: {e.message}")
+    if response.status < 200 or response.status >= 400:
+        return Err("HTTP status {response.status}")
+    val body = response.body_text()
+    if body.trim().len() == 0:
+        return Err("empty response body")
+    Ok(body)
+
+pub fn browser_load_page_html(url: text) -> Result<text, text>:
+    """Load a page's HTML through the shared fetch engine, once per URL per
+    process. Denied schemes and failed loads return Err with the reason —
+    there is no fabricated fallback page, because a fallback that looks like
+    content is a lie about what the origin served."""
+    if url == BROWSER_PAGE_HOME_URL:
+        return Err("home page is rendered from built-in markup, not fetched")
+    if not browser_url_scheme_allowed(url):
+        return Err(browser_scheme_denial_reason(url))
+    if _loaded_url == url:
+        if _loaded_error != "":
+            return Err(_loaded_error)
+        return Ok(_loaded_html)
+    val outcome = _fetch_page(url)
+    _loaded_url = url
+    match outcome:
+        Ok(html):
+            _loaded_html = html
+            _loaded_error = ""
+            Ok(html)
+        Err(reason):
+            _loaded_html = ""
+            _loaded_error = reason
+            Err(reason)
+
+export BROWSER_PAGE_HOME_URL
+export browser_url_scheme_allowed, browser_scheme_denial_reason
+export browser_load_page_html

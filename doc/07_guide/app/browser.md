@@ -229,3 +229,38 @@ session instead. That sequence previously existed in three copies.
 anything from this browser, the compositor, or `src/os/hosted/`. They render
 through their own `TinySoftware2D`. Do not wire them together — the tiny stack's
 scope explicitly excludes the full compositor and Web renderer.
+
+## Real page loading (2026-08-16)
+
+The app browser loads real http/https pages through the SAME engine the hosted
+worker browser uses — `FetchEngine` (`net/fetch.spl`: DNS, cache, cookies,
+CORS, redirects, H1, TLS). There is deliberately no second fetch
+implementation; `src/app/browser/page_loader.spl` is a thin scheme-gate +
+one-entry cache over it. See
+`doc/04_architecture/os/one_app_host_interface_rule.md`.
+
+```bash
+bin/simple run src/app/browser/main.spl http://example.com          # text receipt
+bin/simple run src/app/browser/main.spl http://example.com --open   # GUI window
+```
+
+Scheme gate (REQ-WEB-BROWSER-015, previously unenforced): http, https and
+`simple://home` only. `file:`, `data:`, `javascript:` and custom schemes are
+refused with a reason naming the requirement. A failed load is reported as
+`(no page loaded for <url>: <reason>)` — never replaced with a fabricated
+page.
+
+Runtime honesty under the SEED interpreter: TCP externs are real, every
+`rt_tls_*` extern is a stub returning -1
+(`interpreter_extern/mod.rs:2438-2449`), so `http://` genuinely fetches while
+`https://` fails its handshake with `h1: missing TLS connection` — reported,
+not hidden. A compiled runtime has real TLS (`runtime/src/value/net_tls.rs`).
+
+Measured live (seed, 2026-08-16): `http://example.com` → 559 bytes fetched,
+origin document rendered by the engine (2304 pixels painted at 64x36 vs 61 for
+the home page); `https://` and `file://` refuse with the exact reasons above.
+
+Known viewport limit: the `--open` GUI window is fixed at 64x36
+(`main.spl:26-27`), where a real page's text lays out off-frame and the
+capture shows only the origin's background fill. Use a larger viewport via
+`browser_engine_pixels_at(url, w, h)` for glyph-level evidence.
