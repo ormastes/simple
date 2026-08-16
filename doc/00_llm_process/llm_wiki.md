@@ -9,18 +9,21 @@ names a repository capability whose implementation owner is ambiguous.
   `ParentCommitOwnerV1` owns canonical process-result publication.
 - **Actor boundary:** `ActorRef` is `(actor_id, scheduler authority)` and fails
   closed outside the scheduler creator thread. It is not synchronized
-  cross-thread ingress and does not authorize heap/graph payloads.
+  cross-thread ingress and does not authorize heap/graph payloads. Off-domain
+  scheduler queries and reply lifecycle calls return nil/false/zero/empty or
+  the explicit unavailable stats sentinel without exposing or mutating state.
 - **Process boundary:** child results cross as bounded pointer-free `SPRF1` /
   `SPRS` encoded copies into a generation/replay-bound parent inbox, then one
   validated candidate batch publishes under the parent owner.
 - **Modern SSpec:** `actor_channel_authority_spec.spl` uses closed
-  `actor-channel-authority/v1`; `parent_commit_piped_result_spec.spl` uses
+  `actor-channel-authority/v1` plus owner-guard schema
+  `actor-owner-domain-rejection/v1`; `parent_commit_piped_result_spec.spl` uses
   closed `parent-commit-piped-result/v1`. Their mirrors and exact commands are
   linked from `doc/07_guide/language/parallel_apps.md`.
 - **Current status:** source and authored manuals are partial evidence. The
-  deployed Stage-4 test ABI probe blocks native execution, docgen, and
-  maintenance; never substitute the Rust seed or label authored mirrors as
-  generated PASS.
+  admitted Stage-2 compiler has no qualified self-hosted test/docgen surface,
+  so execution and generated-manual maintenance remain blocked; never
+  substitute the Rust seed or label authored mirrors as generated PASS.
 
 ### Agent lookup rule
 
