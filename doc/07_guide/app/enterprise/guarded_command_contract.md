@@ -180,3 +180,37 @@ When W7-A lands, add three replay rows to the conformance spec — a
 fingerprint for place/pay/refund — and change the three `W7-A` cells in the
 matrix above to `ok`. The spec's deliberate scope gap is documented in its
 own docstring.
+
+## Vacuity audit (clean cache)
+
+Lane W8-A, 2026-08-16. Earlier lanes ran with `build/` symlinked to the main
+tree, so their "I sabotaged X and the spec went red" claims were unverified
+(cross-worktree compile-cache contamination). This audit re-ran the mutation
+test in worktree `ent8-a` with its OWN real `build/` directory
+(`stat -c %F build` = `directory`), one spec at a time, interpreter mode,
+`SIMPLE_TIMEOUT_SECONDS=900`, verdict read from the ANSI-stripped
+`SPEC FILE VERDICT` line.
+
+Binary: `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple` (Rust
+bootstrap seed; first `--version` line is the seed warning banner).
+
+Counts are passed/total.
+
+| spec | sabotage applied | green | red | restored | verdict |
+|---|---|---|---|---|---|
+| `test/01_unit/lib/nogc_sync_mut/enterprise_conformance_spec.spl` | `payment.spl` `payment_create_intent`: drop the `not replayed and` guard so the intent-existence rung re-evaluates feasibility ahead of replay detection (undo the W7 fix for one command) | 8/8 | 7/8 — `payment: intent-create and captured webhook replay to duplicate-key with one effect`: `expected int-1 to equal prov-tenant-a-int-1` | 8/8 | bites |
+| `test/03_system/app/enterprise/goods_sale_vertical_spec.spl` | `enterprise_store/records.spl` `journal_post_pair`: credit line written as `{amount_cents + 1}` so the posted pair is unbalanced | 10/10 | 6/10 — consistent-ledgers, payment replay, refund replay, and reopen examples (`expected false to equal true`) | 10/10 | bites |
+| `test/03_system/app/enterprise/store_web_harden_spec.spl` | `enterprise_store_app/web_common.spl` `esc()`: early `return s` (passthrough, no HTML escaping) | 4/4 | 3/4 — `renders a script-tag product name with no raw script element`: `expected false to equal true` | 4/4 | bites |
+| `test/03_system/app/enterprise/enterprise_auth_throttle_spec.spl` | `enterprise_session/throttle.spl` `throttle_admit`: over-limit branch condition replaced with `false` (always admit) | 6/6 | 4/6 — `over-limit is 429 ...` and `5 failed logins lock the 6th attempt ...`: `expected 200 to equal 429` | 6/6 | bites |
+| `test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_harden_spec.spl` | `enterprise_store/store.spl` `store_verify`: early `return ""` (always reports healthy) | 5/5 | 3/5 — blank-file and bad-magic rejection examples (`expected false to equal true`) | 5/5 | bites |
+| `test/03_system/app/enterprise/payment_boundary_spec.spl` | `enterprise_payment/payment.spl` `provider_verify`: body replaced with `true` | 7/7 | 6/7 — `rejects a bad signature with invalid-record and NO state change`: `expected 2 to equal 1` | 7/7 | bites |
+| `test/03_system/app/enterprise/booking_vertical_spec.spl` | `enterprise_booking/booking.spl` `ranges_overlap`: body replaced with `false` (never conflicts) | 8/8 | 5/8 — exclusive/pool/seat conflict, expired-hold, and reopen examples (`expected accepted to equal conflict`) | 8/8 | bites |
+
+**Result: 7 of 7 bite. No spec failed to bite** — every sabotage produced at
+least one red example naming the broken invariant, and every revert restored
+the original green count exactly. The earlier lanes' conclusions are therefore
+confirmed on a clean cache, even though their evidence was not.
+
+Sabotages were applied to IMPLEMENTATION files only (never a spec, never a
+fixture input) and all were reverted with `git checkout --`; the audit commit
+carries doc/state changes only.

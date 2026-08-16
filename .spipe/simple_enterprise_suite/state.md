@@ -479,3 +479,17 @@ New acceptance criteria (extends AC-1..AC-12 above):
   total alongside it so the page is never silently wrong. Fix = either a
   payables projection in procurement or repointing fin_ap_open at the
   journal; queued as its own lane (W9-A).
+- VACUITY AUDIT CLOSED (2026-08-16, lane W8-A): the integrity debt created by
+  this orchestration's shared-build/ harness defect is discharged. Under a
+  VERIFIED-clean cache (worktree build/ confirmed a real directory), all 7
+  audited specs BITE: conformance 8->7 (replay rung undone in one payment
+  command), goods_sale 10->6 (journal_post_pair credit +1, unbalanced),
+  store_web_harden 4->3 (esc() passthrough), auth_throttle 6->4 (throttle
+  always admits), store_harden 5->3 (store_verify always ""), payment 7->6
+  (provider_verify always true), booking 8->5 (ranges_overlap always false).
+  Every sabotage was applied to the IMPLEMENTATION only, every one was
+  reverted, and each spec returned to its original green. Zero non-biting
+  specs; no broader fallback sabotage was needed. Conclusion: earlier lanes'
+  CONCLUSIONS were sound, only their evidence path was contaminated — that
+  path is now closed and future worktrees get a private build/. Table lives
+  in doc/07_guide/app/enterprise/guarded_command_contract.md § Vacuity audit.
