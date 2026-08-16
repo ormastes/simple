@@ -18,7 +18,10 @@ The exact executable target is
 `test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl`; its
 Markdown operator manual is
 `doc/06_spec/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.md`.
-Both are B-SPEC until implemented/generated. The frozen steps/checkers,
-REQ-SOS-TD-001..004 traceability, all-seven-score `sspec-maintain` review, zero
-stubs, and zero executable specs under `doc/06_spec` are required by
+The executable and operator manual are implemented with the frozen
+steps/checkers and REQ-SOS-TD-001..004 traceability. They fail closed through
+the canonical production wrapper path. Execution, pure-Simple docgen, and the
+all-seven-score `sspec-maintain` review remain blocked on the Stage-4 runner and
+live B-DESKTOP prerequisites. Zero stubs and zero executable specs under
+`doc/06_spec` remain required by
 `doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`.

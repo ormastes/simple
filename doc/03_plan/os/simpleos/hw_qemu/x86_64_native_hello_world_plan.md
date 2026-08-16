@@ -7,6 +7,10 @@ SPipe state: `.spipe/simpleos-toolchain-deployment-desktop-boot/state.md`
 B-HOST-CLI scalar-metadata repair sublane: 85% implemented and focused-green;
 Stage 3/4 admission remains blocked and the complete deployment feature is not
 85% complete.
+Full umbrella implementation estimate: 40%. AC-1 and the plan/review/knowledge
+contracts are current; AC-2..5 remain production-blocked, AC-6/7 now have a
+fail-closed executable/manual source but lack Stage-4 execution/docgen/quality
+evidence, and AC-12 has no pushed integration receipt.
 
 ## Objective
 
@@ -91,10 +95,11 @@ It supplies the owner file/line and unblock condition for every row below.
    admitted payload, linker, runtime input, source, and canonical aliases.
 5. **B-DESKTOP-LIVE:** no fresh OVMF/GRUB serial plus SSH transcript for version,
    compile, link, mounted-filesystem execution, exact output, and exit status.
-6. **B-SPEC:** the existing deploy-image spec proves negative/source contracts
-   only. The existing live spec uses raw runtime externs, `isa-debug-exit`, an
-   opt-in false branch that can green without execution, and a Clang/Rust flow.
-   Neither is full acceptance for this plan.
+6. **B-SPEC:** the duplicated opt-in Clang/Rust live specs were removed. The
+   canonical frozen executable/manual now call the production combined-wrapper
+   path and fail closed while it or any receipt is unavailable. Stage-4
+   execution, pure-Simple docgen, and the all-seven-score maintenance scan are
+   still required before this row can pass.
 7. **B-PHYSICAL:** no purchased mini-PC/identity/live transcript and no physical
    NIC driver beyond virtio-net. This blocks a physical-board claim, not an
    explicitly QEMU-only result.
@@ -214,8 +219,8 @@ implementation row.
 | AC-3 deployment records | PASS | BLOCKED / B-GUEST-LLD, B-IMAGE | Frozen embedded, pre-boot image-admission and post-boot desktop/guest v1 schemas above; complete payload, linker, kernel and image | root/image owner | higher-capability reviewer |
 | AC-4 production desktop boot | PASS | BLOCKED / B-DESKTOP-LIVE | After wrapper implementation, run `scripts/check/check-simpleos-toolchain-desktop-boot.shs`; same-run receipt contract above | root/QEMU+desktop owner | higher-capability reviewer |
 | AC-5 in-guest Simple compile/run | PASS | BLOCKED / B-DESKTOP-LIVE | Literal guest commands, output/hash/identity, exact `Hello World`, rc=0 frozen above | root/toolchain owner | higher-capability reviewer |
-| AC-6 frozen SSpec flow | PASS | BLOCKED / B-SPEC | Exact target, helpers, visible steps and `fail(...)` policy above | root/spec owner | higher-capability reviewer |
-| AC-7 operator manual and traceability | PASS | BLOCKED / B-SPEC | Mirror target, AC/REQ matrix, all seven `sspec-maintain` scores and layout gate below | root/doc owner | higher-capability reviewer |
+| AC-6 frozen SSpec flow | PASS | SOURCE COMPLETE / EXECUTION BLOCKED | Canonical target contains exact helpers/visible steps, calls the production wrapper, and has no skip/non-execution pass; run once with Stage 4 after B-DESKTOP exists | root/spec owner | higher-capability reviewer |
+| AC-7 operator manual and traceability | PASS | SOURCE COMPLETE / QUALITY GATES BLOCKED | Manual and REQ matrix exist; pure-Simple docgen plus all seven `sspec-maintain` scores remain required | root/doc owner | higher-capability reviewer |
 | AC-8 host/capability honesty | PASS | BLOCKED rows retained | Matrix below gives prerequisite, post-implementation command, artifacts, owner and reviewer per row | root | higher-capability reviewer |
 | AC-9 bounded convergence | PASS | WARN after three cycles | Attempt ledger below; no fourth or unchanged-green rerun | root | higher-capability reviewer |
 | AC-10 knowledge freshness | PASS | implementation guides remain blocker-aware | Dated restart12 notes and expert cross-links listed below; umbrella bug owns every gap | root/doc owner | higher-capability reviewer |
@@ -335,7 +340,7 @@ creating another contract.
 | feature/layer experts `simpleos_toolchain_selfhost`, `llvm_toolchain_port`, `os_kernel_exec`, `compiler_driver` | UPDATED with canonical plan, umbrella blocker and current WARN truth |
 | `doc/08_tracking/bug/simpleos_toolchain_deployment_desktop_boot_blockers_2026-08-14.md` plus the Stage 3 frontier record | UPDATED; every B-* row names owner file/line and unblock condition |
 | workflow skills/agents/commands | N/A: this plan does not change SPipe/tool command behavior |
-| generated deployment manual | PLANNED/B-SPEC: mandatory after the executable spec exists; absence is not plan or feature PASS |
+| generated deployment manual | MANUAL SOURCE COMPLETE/B-SPEC: operator flow and traceability exist; pure-Simple docgen and `sspec-maintain` evidence remain blocked |
 
 ## Implementation sequence
 

@@ -378,7 +378,7 @@ expect(file_exists("scripts/bootstrap/bootstrap-from-scratch.sh")).to_equal(true
 
 </details>
 
-#### SimpleOS guest toolchain live spec exists
+#### Canonical SimpleOS deployment desktop toolchain spec exists
 
 <details>
 <summary>Executable SSpec</summary>
@@ -387,7 +387,7 @@ Runnable source: 1 line folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-expect(file_exists("test/system/simpleos_guest_toolchain_live_spec.spl")).to_equal(true)
+expect(file_exists("test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl")).to_equal(true)
 ```
 
 </details>

@@ -624,7 +624,7 @@ bin/simple run src/os/port/bootstrap_cross.spl -- --status
 
 # Live guest toolchain proof (requires QEMU + sshpass)
 SIMPLEOS_QEMU_SSH_TOOLCHAIN_LIVE=1 \
-  bin/simple test test/03_system/simpleos_guest_toolchain_live_spec.spl
+  bin/simple test test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl
 ```
 
 ### 5.3 Cross-Compilation Bootstrap

@@ -136,3 +136,10 @@ dev-done
   and the umbrella blocker ledger. Workflow skills/commands are N/A because no
   SPipe/tool behavior changed. Generated deployment manual remains B-SPEC and
   mandatory after its executable spec exists.
+- impl 2026-08-16: Removed both duplicated opt-in guest-toolchain scenarios.
+  Added the frozen canonical executable/manual with exact helpers and visible
+  steps, production combined-wrapper invocation, three-receipt validation,
+  literal guest-command evidence, real assertions, and fail-closed `blocked:`
+  behavior. Full umbrella implementation is approximately 40%: AC-6/7 source
+  is complete, but Stage-4 execution/docgen/maintenance evidence and all live
+  deployment prerequisites remain blocked.

@@ -463,9 +463,10 @@ and
 - `.claude/rules/board-runnable.md` — why the real-firmware proxy is mandatory.
 ## Toolchain deployment desktop gate (planned, 2026-08-14)
 
-The planned combined owner is
-`scripts/check/check-simpleos-toolchain-desktop-boot.shs`; it does not exist
-yet and remains B-DESKTOP-LIVE. After implementation it must preserve one
+The canonical executable scenario and manual now fail closed through combined
+owner `scripts/check/check-simpleos-toolchain-desktop-boot.shs`; that production
+wrapper does not exist yet and remains B-DESKTOP-LIVE. After implementation it
+must preserve one
 canonical `gui_entry_desktop.spl` OVMF CODE/per-run VARS/GRUB QEMU lifetime,
 bind `[desktop-gui]`, `[production-readiness]`, `[scanout-evidence]`, and
 framebuffer proof to the admitted kernel/image, then run the embedded toolchain

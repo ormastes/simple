@@ -231,9 +231,10 @@ yet provable**. Two tracked blockers:
    is DEPRECATED — see the launch-policy section below.**
 
 Full detail & remaining steps: `doc/08_tracking/bug/simpleos_in_guest_toolchain_execution.md`.
-SSH live-guest harness (gated): `test/03_system/os/simpleos_guest_toolchain_live_spec.spl`
-(needs `SIMPLEOS_QEMU_SSH_TOOLCHAIN_LIVE=1`, `sshpass`, and a baked
-`build/os/simpleos_disk.img`).
+Canonical deployment/desktop harness:
+`test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl`. It has
+no opt-in success path: unavailable production wrapper, admitted image, or live
+receipt evidence fails with `blocked:`.
 
 ## Desktop SimpleOS launch policy — static `clang_static` is DEPRECATED
 

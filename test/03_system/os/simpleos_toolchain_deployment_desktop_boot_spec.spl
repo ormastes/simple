@@ -1,0 +1,136 @@
+# @tag:system
+# @evidence-display: links
+
+use std.spec.*
+
+"""REQ-SOS-TD-001..004: fail-closed production desktop/toolchain evidence."""
+
+extern fn rt_process_run(program: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_text(path: text) -> text?
+
+struct SimpleOsToolchainDeploymentFixture:
+    wrapper_stdout: text
+    wrapper_stderr: text
+    wrapper_status: i64
+    deployment_manifest: text
+    image_admission_receipt: text
+    desktop_guest_receipt: text
+
+fn _required_receipt(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn _require_text(receipt_name: text, receipt: text, needle: text):
+    if receipt == "":
+        fail("blocked: missing {receipt_name}")
+    if not receipt.contains(needle):
+        fail("blocked: {receipt_name} missing required evidence: {needle}")
+
+fn simpleos_toolchain_deployment_manifest(
+    fixture: SimpleOsToolchainDeploymentFixture) -> text:
+    fixture.deployment_manifest
+
+fn simpleos_toolchain_image_admission_receipt(
+    fixture: SimpleOsToolchainDeploymentFixture) -> text:
+    fixture.image_admission_receipt
+
+fn simpleos_toolchain_desktop_guest_receipt(
+    fixture: SimpleOsToolchainDeploymentFixture) -> text:
+    fixture.desktop_guest_receipt
+
+fn prepare_toolchain_deployment_fixture() -> SimpleOsToolchainDeploymentFixture:
+    val wrapper = "scripts/check/check-simpleos-toolchain-desktop-boot.shs"
+    val (stdout, stderr, status) = rt_process_run("sh", [wrapper])
+    SimpleOsToolchainDeploymentFixture(
+        wrapper_stdout: stdout,
+        wrapper_stderr: stderr,
+        wrapper_status: status,
+        deployment_manifest: _required_receipt("build/os/evidence/SIMPLETOOL.SDN"),
+        image_admission_receipt: _required_receipt(
+            "build/os/evidence/simpleos-toolchain-image-admission-v1.sdn"),
+        desktop_guest_receipt: _required_receipt(
+            "build/os/evidence/simpleos-toolchain-desktop-guest-v1.sdn"))
+
+fn require_toolchain_deployment_manifest(fixture: SimpleOsToolchainDeploymentFixture):
+    if fixture.wrapper_status != 0:
+        fail("blocked: production desktop/toolchain wrapper failed rc={fixture.wrapper_status}\nstdout:\n{fixture.wrapper_stdout}\nstderr:\n{fixture.wrapper_stderr}")
+    val manifest = simpleos_toolchain_deployment_manifest(fixture)
+    _require_text("deployment manifest", manifest, "schema=simpleos-toolchain-deployment-v1")
+    _require_text("deployment manifest", manifest, "status=pass")
+    _require_text("deployment manifest", manifest, "/usr/bin/simple")
+    _require_text("deployment manifest", manifest, "/bin/simple")
+    _require_text("deployment manifest", manifest, "/sys/apps/simple_compiler")
+    _require_text("deployment manifest", manifest, "/sys/apps/simple_interpreter")
+    _require_text("deployment manifest", manifest, "/sys/apps/simple_loader")
+    _require_text("deployment manifest", manifest, "/usr/bin/ld.lld")
+    _require_text("deployment manifest", manifest, "/usr/lib/CRT0.O")
+    _require_text("deployment manifest", manifest, "/usr/lib/SIMAIN.O")
+    _require_text("deployment manifest", manifest, "/usr/lib/SIMPRT.A")
+    _require_text("deployment manifest", manifest, "/usr/lib/SOSLIB.A")
+    _require_text("deployment manifest", manifest, "/sysrt/simpleos.ld")
+    _require_text("deployment manifest", manifest, "/HELLO.SPL")
+    _require_text("deployment manifest", manifest, "record_sha256=")
+
+    val image_receipt = simpleos_toolchain_image_admission_receipt(fixture)
+    _require_text("image admission receipt", image_receipt,
+        "schema=simpleos-toolchain-image-admission-v1")
+    _require_text("image admission receipt", image_receipt, "status=pass")
+    _require_text("image admission receipt", image_receipt, "image_sha256=")
+    _require_text("image admission receipt", image_receipt, "kernel_sha256=")
+    _require_text("image admission receipt", image_receipt, "record_sha256=")
+
+fn require_simpleos_desktop_boot_receipt(fixture: SimpleOsToolchainDeploymentFixture):
+    val receipt = simpleos_toolchain_desktop_guest_receipt(fixture)
+    _require_text("desktop guest receipt", receipt,
+        "schema=simpleos-toolchain-desktop-guest-v1")
+    _require_text("desktop guest receipt", receipt, "status=pass")
+    _require_text("desktop guest receipt", receipt, "gui_entry_desktop.spl")
+    _require_text("desktop guest receipt", receipt, "OVMF")
+    _require_text("desktop guest receipt", receipt, "GRUB")
+    _require_text("desktop guest receipt", receipt, "[desktop-gui]")
+    _require_text("desktop guest receipt", receipt, "[production-readiness]")
+    _require_text("desktop guest receipt", receipt, "[scanout-evidence]")
+    _require_text("desktop guest receipt", receipt, "framebuffer_sha256=")
+    _require_text("desktop guest receipt", receipt, "qemu_argv_sha256=")
+
+fn require_guest_hello_receipt(fixture: SimpleOsToolchainDeploymentFixture):
+    val receipt = simpleos_toolchain_desktop_guest_receipt(fixture)
+    _require_text("desktop guest receipt", receipt, "/usr/bin/simple --version")
+    _require_text("desktop guest receipt", receipt,
+        "/usr/bin/simple compile --emit-object /HELLO.SPL -o /HELLO.O")
+    _require_text("desktop guest receipt", receipt, "-flavor gnu")
+    _require_text("desktop guest receipt", receipt, "--no-mmap-output-file")
+    _require_text("desktop guest receipt", receipt, "/usr/lib/SIMAIN.O")
+    _require_text("desktop guest receipt", receipt, "/HELLO.ELF")
+    _require_text("desktop guest receipt", receipt, "guest_version_rc=0")
+    _require_text("desktop guest receipt", receipt, "guest_compile_rc=0")
+    _require_text("desktop guest receipt", receipt, "guest_link_rc=0")
+    _require_text("desktop guest receipt", receipt, "guest_execution_rc=0")
+    _require_text("desktop guest receipt", receipt, "guest_stdout=Hello World")
+    _require_text("desktop guest receipt", receipt, "guest_stderr_sha256=")
+    _require_text("desktop guest receipt", receipt, "output_elf_type=ET_EXEC")
+    _require_text("desktop guest receipt", receipt, "output_elf_pt_interp=absent")
+    _require_text("desktop guest receipt", receipt, "record_sha256=")
+
+fn step_prepare_toolchain_deployment_image() -> SimpleOsToolchainDeploymentFixture:
+    step("Prepare the toolchain deployment image")
+    val fixture = prepare_toolchain_deployment_fixture()
+    require_toolchain_deployment_manifest(fixture)
+    fixture
+
+fn step_boot_simpleos_desktop(fixture: SimpleOsToolchainDeploymentFixture):
+    step("Boot the SimpleOS production desktop")
+    require_simpleos_desktop_boot_receipt(fixture)
+
+fn step_compile_and_run_guest_hello(fixture: SimpleOsToolchainDeploymentFixture):
+    step("Compile and run Hello World inside the guest")
+    require_guest_hello_receipt(fixture)
+
+describe "REQ-SOS-TD-001..004: SimpleOS deployment desktop toolchain":
+    it "boots one admitted production image and runs guest-built Hello World":
+        val fixture = step_prepare_toolchain_deployment_image()
+        step_boot_simpleos_desktop(fixture)
+        step_compile_and_run_guest_hello(fixture)
+        expect(fixture.wrapper_status).to_equal(0)
+        expect(fixture.deployment_manifest).to_contain("status=pass")
+        expect(fixture.image_admission_receipt).to_contain("status=pass")
+        expect(fixture.desktop_guest_receipt).to_contain("guest_stdout=Hello World")

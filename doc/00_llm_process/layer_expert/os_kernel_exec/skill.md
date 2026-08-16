@@ -276,10 +276,12 @@ sh scripts/os/build_simpleos_install_image.shs disk --arch=x86_64
 sh scripts/os/build_spawn_wait_ring3.shs              # SpawnWait probe
 ```
 
-Live SSpec: `test/03_system/os/simpleos_guest_toolchain_live_spec.spl` (needs
-`SIMPLEOS_QEMU_SSH_TOOLCHAIN_LIVE=1`, `sshpass`, and a baked
-`build/os/simpleos_disk.img`). Specs are fail-closed and `step()`-based; an
-unavailable row reports `blocked`, never `skip()`.
+Live SSpec:
+`test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl`. It
+calls the canonical combined production wrapper and validates embedded,
+pre-boot, and same-run desktop/guest receipts. There is no opt-in environment
+success path. Specs are fail-closed and `step()`-based; an unavailable row
+reports `blocked`, never `skip()`.
 
 Reject any run containing `spawn:preloaded`, `HOSTED_NETWORK_UNAVAILABLE`,
 `FABRICATED-NEW`, or `guest-toolchain-exec-gate BLOCKED`.

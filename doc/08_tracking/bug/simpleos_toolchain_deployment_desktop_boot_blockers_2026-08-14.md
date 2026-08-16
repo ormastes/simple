@@ -14,7 +14,7 @@ Owner plan:
 | B-GUEST-LLD | `src/os/port/llvm/build.spl:1` | No genuine guest-static x86_64 SimpleOS `ld.lld` in this worktree | Pinned-fork build produces a validated static target ELF and dependency/hash receipts |
 | B-IMAGE | `src/os/installer/image_builder.spl:1` | No versioned embedded component manifest plus external image admission receipt | Image builder emits both non-self-referential records and validates every canonical alias byte-for-byte |
 | B-DESKTOP-LIVE | `examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl:1` | No same-run production desktop and in-guest Simple compile/run receipt | One OVMF/GRUB run binds desktop, scanout/framebuffer, toolchain, output, rc, kernel, and image evidence |
-| B-SPEC | `test/03_system/os/simpleos_guest_toolchain_live_spec.spl:1` | Existing live scenario permits non-execution green and uses a noncanonical boot/tool flow | Replacement frozen scenario/manual fails closed and passes its one-time quality/traceability gates |
+| B-SPEC | `test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl:1` | Frozen fail-closed scenario/manual now call the canonical production wrapper and validate all three receipts; pure-Simple execution/docgen and `sspec-maintain` evidence remain unavailable until Stage 4 and B-DESKTOP unblock | Run the executable scenario, docgen, and one all-seven-score maintenance scan with the admitted Stage-4 runner; no source-only PASS |
 | B-PHYSICAL | `doc/03_plan/os/simpleos/hw_qemu/clang_board_bringup_x86_64_uefi.md:38` | Board not acquired/identified and physical NIC driver/live transcript absent | Named board plus stable by-id media path, reviewed image write, boot/download path, and fresh serial or SSH transcript |
 
 ## Historical/superseded attempt ledger
