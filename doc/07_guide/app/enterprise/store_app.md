@@ -50,3 +50,12 @@ request-scoped model; checkout (the POST) is the only effect.
 
 Run one at a time: `bin/simple test <spec>` (interpreter-mode evidence;
 per-scenario db paths because the interpreter caches sqlite per path).
+
+## Docgen note
+
+`bin/simple spipe-docgen <spec> --output doc/06_spec --no-index` works on
+Linux via an in-app `/proc/self/cmdline` argv-recovery fallback — the Rust
+seed's subcommand delegation drops argv (open bug:
+`doc/08_tracking/bug/spipe_docgen_subcommand_argv_drop_2026-08-16.md`). On
+non-procfs platforms use the direct form:
+`bin/simple run src/app/spipe_docgen/spipe_docgen/main.spl <spec> --output doc/06_spec --no-index`.

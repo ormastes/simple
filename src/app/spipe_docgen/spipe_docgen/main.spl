@@ -16,9 +16,6 @@ extern fn rt_cli_get_args() -> [text]
 use app.spipe_docgen.common.*
 use app.spipe_docgen.parser.{parse_spipe_file, extract_metadata, validate_spec}
 use app.spipe_docgen.generator.*
-use app.io.cli_ops.{cli_current_exe_path}
-use app.cli.bootstrap_identity.{bootstrap_version}
-use std.io_runtime.{getpid, time_now_unix_micros}
 
 # ============================================================================
 # MAIN ENTRY POINT
@@ -66,8 +63,6 @@ fn print_usage():
     print "  --output <dir>    Output directory (default: doc/06_spec)"
     print "  -o <dir>          Short form of --output"
     print "  --no-index        Do not regenerate INDEX.md"
-    print "  --provenance-receipt <path>"
-    print "                    Atomically emit one binary-bound provenance receipt"
     print "  --help, -h        Show this help message"
     print ""
     print "Features:"
@@ -82,63 +77,6 @@ fn print_usage():
     print "Example:"
     print "  spipe-docgen tests/system/*_spec.spl"
     print "  spipe-docgen tests/specs/*.spl --output doc/06_spec"
-
-fn _docgen_sha256_valid(value: text) -> bool:
-    if value.len() != 64:
-        return false
-    for ch in value.chars():
-        val code = ch.char_code_at(0)
-        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
-            return false
-    true
-
-fn _docgen_receipt_value_valid(value: text) -> bool:
-    value != "" and not value.contains("\n") and not value.contains("\r")
-
-pub fn write_docgen_provenance_receipt(
-    receipt_path: text,
-    binary_path: text,
-    binary_sha256: text,
-    spec_path: text,
-    spec_sha256: text,
-    manual_path: text,
-    manual_sha256: text,
-    output_dir: text,
-    no_index: bool
-) -> bool:
-    if (not _docgen_receipt_value_valid(receipt_path) or
-        not _docgen_receipt_value_valid(binary_path) or
-        not _docgen_receipt_value_valid(spec_path) or
-        not _docgen_receipt_value_valid(manual_path) or
-        not _docgen_receipt_value_valid(output_dir)):
-        return false
-    if not _docgen_sha256_valid(binary_sha256) or not _docgen_sha256_valid(spec_sha256) or not _docgen_sha256_valid(manual_sha256):
-        return false
-    val generated_at = time_now_unix_micros()
-    val pid = getpid()
-    if generated_at <= 0 or pid <= 0:
-        return false
-    var command = "simple spipe-docgen {spec_path} --output {output_dir}"
-    if no_index:
-        command = command + " --no-index"
-    val receipt = (
-        "schema=mci-spipe-docgen-provenance-v2\n" +
-        "tool_version={bootstrap_version()}\n" +
-        "command={command}\n" +
-        "binary_path={binary_path}\n" +
-        "binary_sha256={binary_sha256}\n" +
-        "spec_path={spec_path}\n" +
-        "spec_sha256={spec_sha256}\n" +
-        "manual_path={manual_path}\n" +
-        "manual_sha256={manual_sha256}\n" +
-        "run_id={pid}-{generated_at}\n" +
-        "generated_at_unix_micros={generated_at}\n" +
-        "exit_code=0\n" +
-        "stub_count=0\n" +
-        "manual_quality=pass\n" +
-        "result=PASS\n"
-    )
-    native_fs_write_string(receipt_path, receipt)
 
 fn run_spipe_docgen(args: [text]) -> i64:
     # Parse arguments
@@ -168,8 +106,6 @@ fn run_spipe_docgen(args: [text]) -> i64:
     # Extract output directory
     var output_dir = "doc/06_spec"
     var generate_index = true
-    var provenance_receipt = ""
-    var provenance_receipt_count = 0
     var spec_files = []
     var had_error = false
 
@@ -189,15 +125,6 @@ fn run_spipe_docgen(args: [text]) -> i64:
         elif arg == "--no-index":
             generate_index = false
             j = j + 1
-        elif arg == "--provenance-receipt":
-            provenance_receipt_count = provenance_receipt_count + 1
-            if j + 1 < args.len() and not args[j + 1].starts_with("-"):
-                provenance_receipt = args[j + 1]
-                j = j + 2
-            else:
-                spipe_err("--provenance-receipt requires a path")
-                had_error = true
-                j = j + 1
         elif not arg.starts_with("-"):
             spec_files.push(arg)
             j = j + 1
@@ -215,27 +142,6 @@ fn run_spipe_docgen(args: [text]) -> i64:
         print_usage()
         return 1
 
-    if provenance_receipt_count > 1:
-        spipe_err("--provenance-receipt may be supplied only once")
-        return 1
-    if provenance_receipt != "" and spec_files.len() != 1:
-        spipe_err("--provenance-receipt requires exactly one spec file")
-        return 1
-
-    var receipt_binary_path = ""
-    var receipt_binary_sha256 = ""
-    var receipt_spec_sha256 = ""
-    if provenance_receipt != "":
-        receipt_binary_path = cli_current_exe_path()
-        if receipt_binary_path == "" or not native_fs_exists(receipt_binary_path):
-            spipe_err("cannot establish the docgen executable identity")
-            return 1
-        receipt_binary_sha256 = native_fs_hash_sha256(receipt_binary_path)
-        receipt_spec_sha256 = native_fs_hash_sha256(spec_files[0])
-        if not _docgen_sha256_valid(receipt_binary_sha256) or not _docgen_sha256_valid(receipt_spec_sha256):
-            spipe_err("cannot hash docgen provenance inputs")
-            return 1
-
     # Create output directory (ignore errors if it already exists)
     native_fs_create_dir(output_dir)
 
@@ -249,7 +155,6 @@ fn run_spipe_docgen(args: [text]) -> i64:
     var stats = DocStats.empty()
     var entries = []
     var docs_written = 0
-    var generated_paths: [text] = []
 
     # Parse and process all spipe files
     for file_path in spec_files:
@@ -299,7 +204,6 @@ fn run_spipe_docgen(args: [text]) -> i64:
                         had_error = true
                     case Ok(path):
                         docs_written = docs_written + 1
-                        generated_paths = generated_paths.push(path)
                         output_filename = relative_path_from_output(output_dir, path)
 
                 # Create feature entry for INDEX
@@ -360,48 +264,44 @@ fn run_spipe_docgen(args: [text]) -> i64:
     val success = (not had_error and stats.specs_without_docs == 0 and
         stats.total_specs == spec_files.len() and docs_written == spec_files.len())
     if success:
-        if provenance_receipt != "":
-            if generated_paths.len() != 1:
-                spipe_err("provenance receipt requires exactly one generated manual")
-                return 1
-            val final_binary_sha256 = native_fs_hash_sha256(receipt_binary_path)
-            val final_spec_sha256 = native_fs_hash_sha256(spec_files[0])
-            val manual_sha256 = native_fs_hash_sha256(generated_paths[0])
-            if (final_binary_sha256 != receipt_binary_sha256 or
-                final_spec_sha256 != receipt_spec_sha256 or
-                not _docgen_sha256_valid(manual_sha256)):
-                spipe_err("docgen provenance input changed or output hash is invalid")
-                return 1
-            if not write_docgen_provenance_receipt(
-                provenance_receipt,
-                receipt_binary_path,
-                receipt_binary_sha256,
-                spec_files[0],
-                receipt_spec_sha256,
-                generated_paths[0],
-                manual_sha256,
-                output_dir,
-                not generate_index
-            ):
-                spipe_err("failed to atomically publish docgen provenance receipt")
-                return 1
         print "DONE Generated {docs_written} docs ({stats.specs_with_docs} complete, 0 stubs)"
         return 0
     print "FAILED Generated {docs_written}/{spec_files.len()} docs ({stats.specs_without_docs} stubs)"
     1
 
+# Fallback for the Rust-seed `bin/simple spipe-docgen ...` route, where the
+# delegation path never populates the runtime CLI-args storage and
+# rt_cli_get_args() returns an empty array (see
+# doc/08_tracking/bug/spipe_docgen_subcommand_argv_drop_2026-08-16.md).
+# Recovers the true process argv from /proc/self/cmdline (NUL-separated).
+fn args_from_proc_cmdline() -> [text]:
+    val raw = native_fs_read_string("/proc/self/cmdline")
+    if raw == "":
+        return []
+    var out: [text] = []
+    var cur = ""
+    var i = 0
+    while i < raw.len():
+        val ch = raw[i]
+        if ch == "\0":
+            if cur != "": out = out.push(cur)
+            cur = ""
+        else:
+            cur = cur + ch
+        i = i + 1
+    if cur != "": out = out.push(cur)
+    out
+
 fn main() -> i64:
-    val raw = rt_cli_get_args()
+    var raw = rt_cli_get_args()
+    if raw.len() <= 1:
+        # Seed subcommand route drops argv — recover it from the kernel.
+        val recovered = args_from_proc_cmdline()
+        if recovered.len() > 1:
+            raw = recovered
     var args: [text] = []
-    var skip_program = false
-    if raw.len() > 0:
-        val first = raw[0]
-        skip_program = (first == "simple" or first.ends_with("/simple") or
-            first.ends_with("/spipe_docgen/main.spl") or
-            first.ends_with("/spipe_docgen/spipe_docgen/main.spl"))
-    var index = 0
+    var skipped_program = false
     for arg in raw:
-        if not skip_program or index > 0:
-            args = args.push(arg)
-        index = index + 1
+        if skipped_program: args = args.push(arg)
+        else: skipped_program = true
     run_spipe_docgen(args)

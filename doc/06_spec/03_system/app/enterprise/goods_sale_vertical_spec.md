@@ -24,7 +24,7 @@ The first proving vertical of the Simple Enterprise Suite, exercised end to end 
 | Design | N/A |
 | Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
 | Source | `test/03_system/app/enterprise/goods_sale_vertical_spec.spl` |
-| Updated | 2026-08-14 |
+| Updated | 2026-08-16 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -97,7 +97,6 @@ Lane: .spipe/simple_enterprise_suite (Wave C, AC-9/AC-10).
    - Expected: sale_order_status(store, "tenant-a", "order-100") equals `refunded`
    - Expected: sale_available_stock(store, "tenant-a", "SKU-1") equals `10`
 - Verify the audit chain recomputes end to end
-- store close
 
 
 <details>
@@ -112,7 +111,7 @@ val store = fresh_store("e2e")
 val t = tenant_a()
 val admin = admin_a()
 val admin_session = session_for(admin, t)
-val add = sale_add_product(store, admin_session, t, admin, "SKU-1", "Widget", 2500, "USD")
+val add = sale_add_product(store, admin_session, t, admin, "SKU-1", "Widget", usd(2500))
 expect(add.reason).to_equal("accepted")
 
 step("Receive 10 units of stock")
@@ -156,10 +155,8 @@ store_close(store)
 
 #### rejects an inactive session
 
-- var dead = session for
 - Attempt an order with an inactive session
    - Expected: r.reason equals `invalid-session`
-- store close
 
 
 <details>
@@ -187,7 +184,6 @@ store_close(store)
 
 - Attempt an order as a viewer
    - Expected: r.reason equals `forbidden`
-- store close
 
 
 <details>
@@ -210,14 +206,11 @@ store_close(store)
 
 #### rejects an unknown SKU and an oversell
 
-- sale add product
-- sale receive stock
 - Order an unknown SKU
    - Expected: r1.reason equals `not-found`
 - Order more units than available — stock must never go negative
    - Expected: r2.reason equals `insufficient-stock`
    - Expected: sale_available_stock(store, "tenant-a", "SKU-1") equals `2`
-- store close
 
 
 <details>
@@ -231,7 +224,7 @@ val store = fresh_store("guard_stock")
 val t = tenant_a()
 val admin = admin_a()
 val admin_session = session_for(admin, t)
-sale_add_product(store, admin_session, t, admin, "SKU-1", "Widget", 2500, "USD")
+sale_add_product(store, admin_session, t, admin, "SKU-1", "Widget", usd(2500))
 sale_receive_stock(store, admin_session, t, admin, "SKU-1", 2)
 val clerk = clerk_a()
 val cs = session_for(clerk, t)
@@ -251,8 +244,6 @@ store_close(store)
 
 #### replaying the same order command changes nothing
 
-- sale add product
-- sale receive stock
 - Place the order once
    - Expected: first.reason equals `accepted`
 - Replay the SAME idempotency key
@@ -261,7 +252,6 @@ store_close(store)
 - Verify NO second effect — stock and outbox unchanged
    - Expected: sale_available_stock(store, "tenant-a", "SKU-1") equals `stock_after_first`
    - Expected: outbox_pending(store, "tenant-a").len() equals `outbox_after_first`
-- store close
 
 
 <details>
@@ -275,7 +265,7 @@ val store = fresh_store("replay")
 val t = tenant_a()
 val admin = admin_a()
 val admin_session = session_for(admin, t)
-sale_add_product(store, admin_session, t, admin, "SKU-1", "Widget", 2500, "USD")
+sale_add_product(store, admin_session, t, admin, "SKU-1", "Widget", usd(2500))
 sale_receive_stock(store, admin_session, t, admin, "SKU-1", 10)
 val clerk = clerk_a()
 val cs = session_for(clerk, t)
@@ -304,8 +294,6 @@ store_close(store)
 
 #### tenant B cannot read or affect tenant A's catalog and stock
 
-- sale add product
-- sale receive stock
 - Tenant B sees no stock and no product for tenant A's SKU
    - Expected: sale_available_stock(store, "tenant-b", "SKU-1") equals `0`
 - A tenant-B clerk cannot order tenant A's product
@@ -314,7 +302,6 @@ store_close(store)
    - Expected: r2.reason equals `invalid-session`
 - Tenant A's stock is untouched by the attempts
    - Expected: sale_available_stock(store, "tenant-a", "SKU-1") equals `5`
-- store close
 
 
 <details>
@@ -328,7 +315,7 @@ val store = fresh_store("isolation")
 val ta = tenant_a()
 val admin = admin_a()
 val sa = session_for(admin, ta)
-sale_add_product(store, sa, ta, admin, "SKU-1", "Widget", 2500, "USD")
+sale_add_product(store, sa, ta, admin, "SKU-1", "Widget", usd(2500))
 sale_receive_stock(store, sa, ta, admin, "SKU-1", 5)
 
 step("Tenant B sees no stock and no product for tenant A's SKU")
@@ -359,18 +346,13 @@ store_close(store)
 
 #### reopens the database with orders, stock, and ledgers intact
 
-- sale add product
-- sale receive stock
-- sale place order
 - Close the store (simulated shutdown)
-- store close
 - Reopen and verify orders, stock, journal, audit, and replay guard
    - Expected: sale_order_status(store2, "tenant-a", "order-300") equals `created`
    - Expected: sale_available_stock(store2, "tenant-a", "SKU-1") equals `8`
 - Replay the pre-restart command against the reopened store
    - Expected: replay.reason equals `duplicate-key`
    - Expected: sale_available_stock(store2, "tenant-a", "SKU-1") equals `8`
-- store close
 
 
 <details>
@@ -384,7 +366,7 @@ val store = fresh_store("restart")
 val t = tenant_a()
 val admin = admin_a()
 val sa = session_for(admin, t)
-sale_add_product(store, sa, t, admin, "SKU-1", "Widget", 2500, "USD")
+sale_add_product(store, sa, t, admin, "SKU-1", "Widget", usd(2500))
 sale_receive_stock(store, sa, t, admin, "SKU-1", 10)
 val clerk = clerk_a()
 val cs = session_for(clerk, t)
