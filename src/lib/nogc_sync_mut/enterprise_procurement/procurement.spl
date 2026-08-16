@@ -203,11 +203,17 @@ fn proc_requisition_approve(store: EnterpriseStore, session: SessionContext, ten
     if not role_allows(who.role, "proc.requisition.approve"):
         return denied("forbidden", req_id)
     val status = proc_requisition_status(store, tenant.tenant_id, req_id)
+    # not-found is state-INDEPENDENT (approving never creates the
+    # requisition) and stays unconditional; the "must still be created" rung
+    # is state-DEPENDENT — `approved` is this command's own first effect —
+    # so it is asked only of a command not already recorded. Approving twice
+    # with a FRESH key is still invalid-transition.
     if status == "":
         return denied("not-found", req_id)
-    if status != "created":
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and status != "created":
         return denied("invalid-transition", req_id + ":" + status)
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+    if replayed:
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     uow_begin(store)
     store_insert_row(store,

@@ -166,10 +166,14 @@ fn table_open_session(store: EnterpriseStore, session: SessionContext, tenant: T
     # 3. domain validation
     if session_id == "" or venue_id == "" or table_id == "" or party_size <= 0:
         return denied("invalid-record", session_id)
-    if restaurant_table_session(store, tenant.tenant_id, venue_id, table_id) != "":
+    # 4. idempotency — checked BEFORE the occupancy rung, which is
+    #    state-dependent: the session occupying the table IS this command's
+    #    own recorded effect when the key was already seen, so re-evaluating
+    #    it would answer `table-occupied` to a command that was accepted.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and restaurant_table_session(store, tenant.tenant_id, venue_id, table_id) != "":
         return denied("table-occupied", venue_id + "/" + table_id)
-    # 4. idempotency
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+    if replayed:
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     # 5. effects — one unit of work
     uow_begin(store)
@@ -226,11 +230,16 @@ fn line_transition(store: EnterpriseStore, session: SessionContext, tenant: Tena
     if line_id == "" or session_id == "":
         return denied("invalid-record", line_id)
     val current = restaurant_line_status(store, tenant.tenant_id, session_id, line_id)
+    # `line-not-found` is state-INDEPENDENT of this command (a transition
+    # never creates a line) and stays unconditional. The from-state rung is
+    # state-DEPENDENT — `to_state` is this command's own first effect — so it
+    # is asked only of a command not already recorded.
     if current == "":
         return denied("line-not-found", line_id)
-    if current != from_state and current != from_state2:
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and current != from_state and current != from_state2:
         return denied("invalid-transition", current + "->" + to_state)
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+    if replayed:
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     uow_begin(store)
     store_insert_row(store,
@@ -266,21 +275,28 @@ fn bill_close_session(store: EnterpriseStore, session: SessionContext, tenant: T
     if not role_allows(who.role, "restaurant.bill.close"):
         return denied("forbidden", session_id)
     val state = restaurant_session_state(store, tenant.tenant_id, session_id)
+    # `no-session` is state-independent of this command and stays
+    # unconditional; `session-closed` and `unserved-lines` are
+    # state-dependent (the closed session is this command's own effect), so
+    # they are asked only of a command not already recorded.
     if state == "":
         return denied("no-session", session_id)
-    if state == "closed":
-        return denied("session-closed", session_id)
-    for line_id in restaurant_session_lines(store, tenant.tenant_id, session_id):
-        val status = restaurant_line_status(store, tenant.tenant_id, session_id, line_id)
-        if status != "served" and status != "voided":
-            return denied("unserved-lines", line_id)
-    # Period lock — checked BEFORE the unit of work opens, so a denial writes
-    # nothing at all (see the rollback caveat in the finance guide).
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed:
+        if state == "closed":
+            return denied("session-closed", session_id)
+        for line_id in restaurant_session_lines(store, tenant.tenant_id, session_id):
+            val status = restaurant_line_status(store, tenant.tenant_id, session_id, line_id)
+            if status != "served" and status != "voided":
+                return denied("unserved-lines", line_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    # Period lock — asked only of a command that will actually post (a replay
+    # above posts nothing), and BEFORE the unit of work opens so a denial
+    # writes nothing at all (see the rollback caveat in the finance guide).
     val posted_at = time_now()
     if not journal_post_allowed(store, tenant.tenant_id, posted_at):
         return denied("invalid-transition", session_id)
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
-        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     val total = restaurant_session_total(store, tenant.tenant_id, session_id)
     uow_begin(store)
     store_insert_row(store,

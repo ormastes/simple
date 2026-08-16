@@ -207,9 +207,13 @@ fn hcm_hire(store: EnterpriseStore, session: SessionContext, tenant: TenantConte
         return denied("forbidden", employee_id)
     if employee_id == "" or wage_cents_per_hour <= 0 or weekly_hours <= 0 or weekly_hours > 168:
         return denied("invalid-record", employee_id)
-    if hcm_employee_status(store, tenant.tenant_id, employee_id) != "":
+    # The already-exists rung is state-DEPENDENT: the active employee IS this
+    # command's own first effect, so a replay must not be re-checked against
+    # it. Hiring the same id twice with a FRESH key is still `conflict`.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and hcm_employee_status(store, tenant.tenant_id, employee_id) != "":
         return denied("conflict", employee_id)
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+    if replayed:
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     uow_begin(store)
     store_insert_row(store,
@@ -257,11 +261,14 @@ fn hcm_terminate(store: EnterpriseStore, session: SessionContext, tenant: Tenant
     if not role_allows(who.role, "hcm.terminate"):
         return denied("forbidden", employee_id)
     val status = hcm_employee_status(store, tenant.tenant_id, employee_id)
+    # not-found is state-independent and unconditional; `terminated` is this
+    # command's own first effect, so that rung is gated on a fresh command.
     if status == "":
         return denied("not-found", employee_id)
-    if status == "terminated":
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and status == "terminated":
         return denied("invalid-transition", employee_id)
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+    if replayed:
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     uow_begin(store)
     store_insert_row(store,
@@ -284,9 +291,13 @@ fn hcm_clock_in(store: EnterpriseStore, session: SessionContext, tenant: TenantC
         return denied("forbidden", employee_id)
     if hcm_employee_status(store, tenant.tenant_id, employee_id) != "active":
         return denied("invalid-transition", employee_id)
-    if hcm_open_clock_in(store, tenant.tenant_id, employee_id) >= 0:
+    # The open-punch rung is state-DEPENDENT: the open punch IS this
+    # command's own first effect. A double clock-in with a FRESH key is
+    # still `invalid-transition`.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and hcm_open_clock_in(store, tenant.tenant_id, employee_id) >= 0:
         return denied("invalid-transition", employee_id)
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+    if replayed:
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     uow_begin(store)
     store_insert_row(store,
@@ -302,12 +313,17 @@ fn hcm_clock_out(store: EnterpriseStore, session: SessionContext, tenant: Tenant
         return denied("invalid-session", employee_id)
     if not role_allows(who.role, "hcm.clock.out"):
         return denied("forbidden", employee_id)
+    # Both rungs are state-DEPENDENT: this command CLOSES the open punch, so
+    # after its own first execution there is none to find. Re-evaluating
+    # either for a replay would deny a command that was accepted.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
     val open_at = hcm_open_clock_in(store, tenant.tenant_id, employee_id)
-    if open_at < 0:
-        return denied("invalid-transition", employee_id)
-    if now_epoch <= open_at:
-        return denied("invalid-record", employee_id)
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+    if not replayed:
+        if open_at < 0:
+            return denied("invalid-transition", employee_id)
+        if now_epoch <= open_at:
+            return denied("invalid-record", employee_id)
+    if replayed:
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     uow_begin(store)
     store_insert_row(store,
@@ -331,9 +347,12 @@ fn hcm_leave_request(store: EnterpriseStore, session: SessionContext, tenant: Te
         return denied("invalid-record", leave_id)
     if hcm_employee_status(store, tenant.tenant_id, employee_id) != "active":
         return denied("invalid-transition", leave_id)
-    if hcm_leave_status(store, tenant.tenant_id, leave_id) != "":
+    # The leave-already-exists rung is state-DEPENDENT: the `requested` event
+    # IS this command's own first effect. A fresh key still gets `conflict`.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and hcm_leave_status(store, tenant.tenant_id, leave_id) != "":
         return denied("conflict", leave_id)
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+    if replayed:
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     uow_begin(store)
     store_insert_row(store,
@@ -355,7 +374,12 @@ fn hcm_leave_decide(store: EnterpriseStore, session: SessionContext, tenant: Ten
         return denied("invalid-session", leave_id)
     if not role_allows(who.role, "hcm.leave.decide"):
         return denied("forbidden", leave_id)
-    if hcm_leave_status(store, tenant.tenant_id, leave_id) != "requested":
+    # The must-still-be-requested rung is state-DEPENDENT: the decision event
+    # IS this command's own first effect. Deciding twice with a FRESH key is
+    # still `invalid-transition`. The identity rung (`not-found`, below) and
+    # the overlap rung are handled after the leave row is resolved.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and hcm_leave_status(store, tenant.tenant_id, leave_id) != "requested":
         return denied("invalid-transition", leave_id)
     var employee_id = ""
     var lo: i64 = 0
@@ -368,9 +392,11 @@ fn hcm_leave_decide(store: EnterpriseStore, session: SessionContext, tenant: Ten
             hi = int(sqlite_row_get(row, "end_epoch"))
     if employee_id == "":
         return denied("not-found", leave_id)
-    if approve and hcm_leave_overlaps_approved(store, tenant.tenant_id, employee_id, lo, hi, leave_id):
+    # The overlap rung excludes THIS leave, so it is already replay-stable
+    # (this command's own approval can never conflict with itself).
+    if not replayed and approve and hcm_leave_overlaps_approved(store, tenant.tenant_id, employee_id, lo, hi, leave_id):
         return denied("conflict", leave_id)
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+    if replayed:
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     var verdict = "denied"
     if approve:

@@ -433,3 +433,29 @@ New acceptance criteria (extends AC-1..AC-12 above):
   result BEFORE the period check — a replay posts nothing, so a closed period
   must not turn a successful replay into invalid-transition. Merged-tree
   reruns: goods_sale 10/10, finance 6/6.
+- merge wave 7b (2026-08-16): W7-B conformance sweep merged — THE defect was
+  systemic, not local: state-dependent feasibility evaluated before replay
+  detection in 14 COMMANDS across 6 MODULES (booking confirm/cancel/no_show;
+  restaurant table_open/line_transition/bill_close; payment create_intent;
+  hcm hire/terminate/clock_in/clock_out/leave_request/leave_decide;
+  proc_requisition_approve). Reproduce-first: conformance spec 3/5 red ->
+  8/8 green. Notable: (a) procurement, used as the "reference fix", was only
+  HALF fixed — proc_requisition_approve still had the bug, contradicting its
+  own docstring; (b) hcm_vertical_spec had the drift BAKED INTO an assertion
+  (a step labelled "replay returns duplicate-key" asserted conflict) —
+  corrected; (c) session_issue returned invalid-credentials, OUTSIDE the
+  documented closed set — legitimised as a deliberate anti-enumeration denial
+  rather than weakened. New: foundation.reason_set()/reason_allowed() make
+  the closed set an EXECUTABLE predicate, so the conformance spec asserts
+  membership by calling it, never by grepping prose; new gate
+  test/01_unit/lib/nogc_sync_mut/enterprise_conformance_spec.spl drives real
+  commands (no source-text assertions); canonical contract doc
+  doc/07_guide/app/enterprise/guarded_command_contract.md with the full
+  module x command x invariant matrix. W7-B removed its build symlink BEFORE
+  any run, so its counts are cache-clean. ORCHESTRATOR HAND-MERGE:
+  restaurant.spl bill_close and foundation.spl both diverged; merged so a
+  replay returns its recorded result BEFORE the period check (same rule as
+  goods_sale), and exported reason_set/reason_allowed which the lane had left
+  unexported (the conformance spec imports them). Merged-tree reruns:
+  conformance 8/8, restaurant 7/7, finance 6/6, hcm 8/8, procurement 8/8,
+  booking 8/8, payment 7/7.

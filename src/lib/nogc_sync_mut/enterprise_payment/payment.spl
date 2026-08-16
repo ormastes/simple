@@ -145,11 +145,17 @@ fn payment_create_intent(store: EnterpriseStore, session: SessionContext, tenant
         return denied("invalid-record", intent_id)
     if sale_order_status(store, tenant.tenant_id, order_id) != "created":
         return denied("invalid-record", order_id)
-    if payment_intent_status(store, tenant.tenant_id, intent_id) != "":
-        return denied("invalid-record", intent_id)
     val amount = order_amount_cents(store, tenant.tenant_id, order_id)
-    # 4. idempotency
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+    # 4. idempotency — checked BEFORE the intent-existence rung, which is
+    #    state-dependent: the pending intent IS this command's own recorded
+    #    effect on a replay, so validating it first would answer
+    #    `invalid-record` to a command that was accepted. (The order-status
+    #    rung above is state-INDEPENDENT here — creating an intent never
+    #    moves the order out of `created` — and stays unconditional.)
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and payment_intent_status(store, tenant.tenant_id, intent_id) != "":
+        return denied("invalid-record", intent_id)
+    if replayed:
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     # 5. effects — one unit of work
     val provider_ref = "prov-" + tenant.tenant_id + "-" + intent_id

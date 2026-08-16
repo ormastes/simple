@@ -224,14 +224,20 @@ fn booking_confirm(store: EnterpriseStore, session: SessionContext, tenant: Tena
         return denied("invalid-session", booking_id)
     if not role_allows(who.role, "booking.confirm"):
         return denied("forbidden", booking_id)
-    if booking_status(store, tenant.tenant_id, booking_id) != "hold":
-        return denied("invalid-record", booking_id)
+    # The rungs stay in the frozen order, but the STATUS rung is
+    # state-dependent: `confirmed` is this very command's own first effect, so
+    # re-evaluating it for a replay would deny a command that was accepted.
+    # Feasibility is asked only of a command not already recorded.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
     val h = booking_hold_fields(store, tenant.tenant_id, booking_id)
-    if h.5 <= now_epoch:
-        return denied("invalid-record", booking_id)
-    if booking_conflicts(store, tenant.tenant_id, h.0, h.1, h.2, h.3, h.4, now_epoch, booking_id):
-        return denied("conflict", booking_id)
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+    if not replayed:
+        if booking_status(store, tenant.tenant_id, booking_id) != "hold":
+            return denied("invalid-record", booking_id)
+        if h.5 <= now_epoch:
+            return denied("invalid-record", booking_id)
+        if booking_conflicts(store, tenant.tenant_id, h.0, h.1, h.2, h.3, h.4, now_epoch, booking_id):
+            return denied("conflict", booking_id)
+    if replayed:
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     booking_event_append(store, tenant, who, envelope, booking_id, h.0, "confirmed", "booking.confirmed", "booking.confirm")
 
@@ -241,10 +247,14 @@ fn booking_cancel(store: EnterpriseStore, session: SessionContext, tenant: Tenan
         return denied("invalid-session", booking_id)
     if not role_allows(who.role, "booking.cancel"):
         return denied("forbidden", booking_id)
-    val status = booking_status(store, tenant.tenant_id, booking_id)
-    if status != "hold" and status != "confirmed":
-        return denied("invalid-record", booking_id)
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+    # Replay detection precedes the status rung: `cancelled` is this command's
+    # own effect (see booking_confirm for the full rationale).
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed:
+        val status = booking_status(store, tenant.tenant_id, booking_id)
+        if status != "hold" and status != "confirmed":
+            return denied("invalid-record", booking_id)
+    if replayed:
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     val h = booking_hold_fields(store, tenant.tenant_id, booking_id)
     booking_event_append(store, tenant, who, envelope, booking_id, h.0, "cancelled", "booking.cancelled", "booking.cancel")
@@ -255,9 +265,12 @@ fn booking_no_show(store: EnterpriseStore, session: SessionContext, tenant: Tena
         return denied("invalid-session", booking_id)
     if not role_allows(who.role, "booking.no_show"):
         return denied("forbidden", booking_id)
-    if booking_status(store, tenant.tenant_id, booking_id) != "confirmed":
+    # Replay detection precedes the status rung: `no-show` is this command's
+    # own effect (see booking_confirm for the full rationale).
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and booking_status(store, tenant.tenant_id, booking_id) != "confirmed":
         return denied("invalid-record", booking_id)
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+    if replayed:
         return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     val h = booking_hold_fields(store, tenant.tenant_id, booking_id)
     booking_event_append(store, tenant, who, envelope, booking_id, h.0, "no-show", "booking.no_show", "booking.no_show")
