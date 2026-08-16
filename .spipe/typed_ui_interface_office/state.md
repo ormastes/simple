@@ -1,7 +1,35 @@
 # typed_ui_interface_office — SPipe state
 
-phase: plan (docs landed; implementation NOT started — do it in other sessions)
+phase: implement — WAVE 1 COMPLETE (A/B/C/D/E landed on branch typed-ui-interface-plan)
 updated: 2026-08-16
+
+## Wave 1 results
+- A e0ee925343e: ADR-001 (doc/04_architecture/ui/testing/adr/) + office feature
+  ledger (doc/08_tracking/office_feature_ledger.md). Only sheets has real hosts.
+- B: ui_identity.spl (UiNodeKey etc.), duplicate detection + strict mode in
+  widget_store_ops.spl, find_widget_strict (never first-match), kind-aware
+  text_value in access_snapshot.spl. 18/18 + 21/21 green; 3 pre-existing
+  ui_access_dispatch failures verified pre-existing via stash A/B.
+- C 54abcd5ea87: config/ui_builder_descriptors.sdn (31 builders),
+  src/app/ui_manifest (gen/check CLI), generated
+  config/ui-locks/app.office.calc.ui.sdn (10 nodes). 11/11 green.
+- D 8bdf981c33a: src/lib/common/spec/ui_target.spl + ui_target_resolver.spl,
+  UIE1001/1002/1003/1004, exactly-one-or-error. 11/11 + 13/13 green.
+- E 56c0324a706: src/lib/common/spec/evidence/ui_step_render.spl (UI-step
+  manual blocks + annotated terminal frames). 4/4 green.
+
+## Reconciliation items for wave 2+
+- Calc's REAL ids: formula_input, cell_grid, btn_save, sheet_tabs, formula_bar,
+  cell_ref_label, grid_scroll, nav, root, status — arch doc assumed sheet_grid/
+  confirm_edit; use the generated manifest as truth.
+- UIE1003 (unsupported action) code was coined by Agent D — add to ADR.
+- Duplicate `root` id (sheets_app vs another file) — first real UIE1002 case.
+- bin/simple lint broken tree-wide (with_fix internal error) — file a bug or
+  confirm one exists before wave 2 relies on lint.
+- Manifest scanner is literal-first-arg text scan; cell_{CellRef} pattern and
+  scope paths deferred.
+- Interpolation gotcha: "{Name}" inside string literals interpolates — build
+  pattern literals by concatenation.
 
 ## Docs (source of truth)
 - research (fact-checked): doc/01_research/ui/testing/typed_ui_interface_office_research_2026-08-16.md
