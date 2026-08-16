@@ -9,8 +9,11 @@ Counts summarized: products, orders (distinct order streams), bookings
 (distinct booking streams), open table sessions, outbox pending
 (`std.enterprise_outbox.outbox_worker_pending` — requires
 `outbox_worker_setup` to have run once on the store), and audit chain
-integrity (`audit_verify_chain`). Product names are business data and are
-rendered ONLY through `esc()`.
+integrity (`audit_verify_chain`), plus a compact back-office roll-up across
+the three newer verticals: employee count (`hcm_routes`), open POs and
+payable total (`procurement_routes`), and the trial-balance balanced flag
+(`finance_routes`). Product names are business data and are rendered ONLY
+through `esc()`.
 """
 
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
@@ -23,6 +26,9 @@ use std.nogc_sync_mut.enterprise_sale.foundation.{
     TenantContext, ActorContext, SessionContext, role_allows
 }
 use app.enterprise_store_app.web_common.{esc, secured, deny}
+use app.enterprise_store_app.hcm_routes.{hcm_employee_count}
+use app.enterprise_store_app.procurement_routes.{proc_open_po_count, proc_payable_total_safe}
+use app.enterprise_store_app.finance_routes.{fin_balanced}
 
 # distinct_count counts distinct values of `id_col` over the tenant's rows.
 fn distinct_count(store: EnterpriseStore, table: text, columns: text, tenant_id: text, id_col: text) -> i64:
@@ -81,6 +87,21 @@ fn page_dashboard(store: EnterpriseStore, tenant_id: text) -> text:
     else:
         "TAMPERED"
     body = body + stat_line("Audit chain", "audit", audit_text)
+    # Back-office roll-up across the three newer verticals. Each figure comes
+    # from the vertical's own route module (single source of truth) and each
+    # of those degrades to 0 / empty when that vertical's schema was never
+    # applied to this store — the dashboard never crashes on a partial suite.
+    val employees = hcm_employee_count(store, tenant_id)
+    val open_pos = proc_open_po_count(store, tenant_id)
+    val payable = proc_payable_total_safe(store, tenant_id)
+    val balanced_text = if fin_balanced(store, tenant_id):
+        "true"
+    else:
+        "false"
+    body = body + stat_line("Employees", "employees", "{employees}")
+    body = body + stat_line("Open POs", "open-pos", "{open_pos}")
+    body = body + stat_line("Payable total", "payable-total", "{payable}")
+    body = body + stat_line("Trial balance balanced", "tb-balanced", balanced_text)
     body = body + "</ul><h2>Catalog</h2><ul class=\"catalog\">"
     for row in store_rows(store, "products", "id, tenant_id, sku, name, price_cents, currency"):
         if sqlite_row_get(row, "tenant_id") == tenant_id:

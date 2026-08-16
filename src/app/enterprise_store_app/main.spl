@@ -17,14 +17,17 @@ request is checked in order: limits (`body_decision`) -> path safety
 
 Route families are split into cohesive siblings, all dispatched through
 THIS hardened prelude: `booking_routes` (/booking/*), `restaurant_routes`
-(/restaurant/*), `dashboard` (GET /admin/dashboard). Shared helpers
-(esc/form_value/secured/deny) live in `web_common`.
+(/restaurant/*), `hcm_routes` (/hcm/*), `procurement_routes` (/proc/*),
+`finance_routes` (/fin/*), `dashboard` (GET /admin/dashboard). Shared
+helpers (esc/form_value/form_int/secured/deny) live in `web_common`.
 
-Denial mapping (CommandResult.reason -> HTTP), frozen in web_common.deny:
-invalid-session 401, forbidden 403, not-found / no-session /
+Denial mapping (CommandResult.reason -> HTTP), frozen in web_common.deny
+and covering the WHOLE closed `foundation.reason_set()`: invalid-session /
+invalid-credentials 401, forbidden 403, not-found / no-session /
 line-not-found 404, conflict / table-occupied / session-closed /
 invalid-transition / unserved-lines / insufficient-stock / invalid-record
-409, duplicate-key 200 (idempotent replay: recorded result).
+409, store-error 500, duplicate-key 200 (idempotent replay: recorded
+result), accepted 200.
 """
 
 use std.common.net.http_core.{
@@ -45,6 +48,9 @@ use app.enterprise_store_app.web_common.{secured, deny}
 use app.enterprise_store_app.booking_routes.{booking_routes_handle}
 use app.enterprise_store_app.restaurant_routes.{restaurant_routes_handle}
 use app.enterprise_store_app.dashboard.{dashboard_handle}
+use app.enterprise_store_app.hcm_routes.{hcm_routes_handle}
+use app.enterprise_store_app.procurement_routes.{procurement_routes_handle}
+use app.enterprise_store_app.finance_routes.{finance_routes_handle}
 
 # =============================================================================
 # Cart — pure request-scoped model (no storage; checkout is the effect)
@@ -122,6 +128,12 @@ fn store_app_handle(store: EnterpriseStore, session: SessionContext, tenant: Ten
         return booking_routes_handle(store, session, tenant, who, method, path, body)
     if path.starts_with("/restaurant/"):
         return restaurant_routes_handle(store, session, tenant, who, method, path, body)
+    if path.starts_with("/hcm/"):
+        return hcm_routes_handle(store, session, tenant, who, method, path, body)
+    if path.starts_with("/proc/"):
+        return procurement_routes_handle(store, session, tenant, who, method, path, body)
+    if path.starts_with("/fin/"):
+        return finance_routes_handle(store, session, tenant, who, method, path, body)
     if match_route_pattern("/admin/dashboard", path):
         return dashboard_handle(store, session, tenant, who, method, path)
     if method == "GET" and match_route_pattern("/store/catalog", path):

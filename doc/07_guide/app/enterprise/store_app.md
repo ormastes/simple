@@ -42,15 +42,59 @@ customer from catalog to receipt, built ONLY on existing layers:
 | POST | `/restaurant/line/served` | body `session=S&line=L&idem=K` -> `line_mark_served` |
 | POST | `/restaurant/bill/close` | body `session=S&idem=K` -> `bill_close_session` |
 | GET | `/restaurant/session/:table/view` | Escaped lines + served total of the table's ACTIVE session (404 `no-session` when free) |
-| GET | `/admin/dashboard` | Read-only escaped per-tenant summary (admin role via frozen `role_allows`): products, orders, bookings, open table sessions, outbox pending (`outbox_worker_pending` — run `outbox_worker_setup` once on the store), audit chain OK (`audit_verify_chain`) |
+| GET | `/hcm/employees` | Escaped roster: id, name, status, contract-effective wage |
+| POST | `/hcm/hire` | body `employee=E&name=N&start=T&wage=C&hours=H&idem=K` -> `hcm_hire` |
+| POST | `/hcm/clock/in` | body `employee=E&now=T&idem=K` -> `hcm_clock_in` |
+| POST | `/hcm/clock/out` | body `employee=E&now=T&idem=K` -> `hcm_clock_out` |
+| POST | `/hcm/leave/request` | body `leave=L&employee=E&start=T&end=T&type=Y&idem=K` -> `hcm_leave_request` |
+| POST | `/hcm/leave/decide` | body `leave=L&approve=1|0&idem=K` -> `hcm_leave_decide` |
+| GET | `/hcm/payroll/export` | Escaped table of `hcm_payroll_export`, window `start=T&end=T` read off the body by the same digit-checked parser (absent -> full range). Labelled in-page as calculation **INPUT** for an external payroll engine — NOT a payslip: no gross/net, no tax, no deductions |
+| GET | `/proc/pos` | Escaped list of open POs (received < ordered) with supplier, sku, ordered/received/invoiced |
+| POST | `/proc/requisition` | body `req=R&sku=S&qty=N&idem=K` -> `proc_requisition_create` |
+| POST | `/proc/requisition/approve` | body `req=R&idem=K` -> `proc_requisition_approve` |
+| POST | `/proc/po` | body `po=P&req=R&supplier=S&cost=C&currency=U&idem=K` (currency defaults `USD`) -> `proc_po_create` |
+| POST | `/proc/receive` | body `po=P&qty=N&idem=K` -> `proc_receive` (over-receipt = `insufficient-stock` 409) |
+| POST | `/proc/invoice` | body `po=P&invoice=I&qty=N&idem=K` -> `proc_invoice_record` |
+| GET | `/proc/reconcile` | Escaped three-way report: `open_pos`, `under_invoiced`, `fully_invoiced`, `payable_cents` |
+| GET | `/fin/trial-balance` | Escaped per-account debit/credit table + totals + `balanced` flag |
+| GET | `/fin/ar` | Escaped open receivables (`fin_ar_open`) + open total |
+| GET | `/fin/ap` | Escaped open payables (`fin_ap_open`) + authoritative journal payable total |
+| POST | `/fin/period/close` | body `end=T&now=T&idem=K` -> `fin_period_close` |
+| GET | `/fin/period/status` | Latest closed period end + the debit/credit totals captured at close |
+| GET | `/admin/dashboard` | Read-only escaped per-tenant summary (admin role via frozen `role_allows`): products, orders, bookings, open table sessions, outbox pending (`outbox_worker_pending` — run `outbox_worker_setup` once on the store), audit chain OK (`audit_verify_chain`), plus the back-office roll-up: employees, open POs, payable total, trial-balance balanced flag |
 
 Dispatch order for every request: limits -> path safety -> authenticated
 session (`session_valid`, the only auth scheme) -> route. Denial mapping
-(frozen in `web_common.deny`): invalid-session 401, forbidden 403,
-not-found / no-session / line-not-found 404, conflict / table-occupied /
-session-closed / invalid-transition / unserved-lines / stock/record
-conflicts 409; idempotent replay returns 200 with the recorded
-`duplicate-key` result.
+(frozen in `web_common.deny`, covering the WHOLE closed
+`foundation.reason_set()` with an explicit arm per reason rather than an
+accidental 409 default): invalid-session / invalid-credentials 401,
+forbidden 403, not-found / no-session / line-not-found 404, conflict /
+table-occupied / session-closed / invalid-transition / unserved-lines /
+stock/record conflicts 409, store-error 500; a success (`accepted`) and an
+idempotent replay (`duplicate-key`) both return 200 with the recorded
+result.
+
+### Back-office read authorization
+
+The three back-office families reuse the FROZEN `role_allows` policy with an
+action that already exists in it — no new auth scheme and no new action
+string. Reads are gated by the vertical's back-office tier: `/hcm/*` on
+`hcm.leave.decide` (admin or `hcm`), `/proc/*` on `proc.requisition.approve`
+(admin or `procurement`), `/fin/*` on `finance.period.close` (admin or
+`finance`). A role without the grant gets 403 on reads exactly as on writes.
+
+Each roll-up figure degrades to 0 / empty when that vertical's schema was
+never applied to the store (probed via `store_migration_applied`), so the
+dashboard never crashes on a partially set-up suite.
+
+### Known upstream gap: `/fin/ap` line items
+
+`fin_ap_open` gates on the migration id `proc_001_payables`, which no module
+applies — `enterprise_procurement` applies `proc_001_suppliers` and books
+payables into the shared `journal` under `accounts_payable`. `/fin/ap`
+therefore renders no line items today; the page reports the authoritative
+payable total from the journal alongside the (empty) list so it is never
+silently wrong. Recorded here rather than worked around in the view.
 
 All interpolated business data passes through `esc()` — a product named
 `<script>...</script>` renders as `&lt;script&gt;...`.
@@ -70,6 +114,12 @@ request-scoped model; checkout (the POST) is the only effect.
   table-occupied / session-closed 409, admin dashboard counts + hostile-name
   escaping + 403 for non-admin, 401 on every new route family, idempotent
   hold replay = one effect.
+- `test/03_system/app/enterprise/back_office_web_spec.spl` — W8-C: one
+  end-to-end flow per new family (HCM, procurement, finance) through the
+  dispatcher, 401 on every new family (read and write), 403 for a role
+  lacking the vertical grant, hostile employee/supplier names escaped, and
+  the dashboard roll-up against an absolute hand-computed oracle
+  (2 employees, 1 open PO, 1000 cents payable, balanced).
 
 Run one at a time: `bin/simple test <spec>` (interpreter-mode evidence;
 per-scenario db paths because the interpreter caches sqlite per path).

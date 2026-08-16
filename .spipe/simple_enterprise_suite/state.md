@@ -459,3 +459,23 @@ New acceptance criteria (extends AC-1..AC-12 above):
   unexported (the conformance spec imports them). Merged-tree reruns:
   conformance 8/8, restaurant 7/7, finance 6/6, hcm 8/8, procurement 8/8,
   booking 8/8, payment 7/7.
+- merge wave 8c (2026-08-16): W8-C back-office web routes merged — 19 routes
+  for HCM / procurement / finance through the EXISTING hardened prelude, plus
+  a dashboard roll-up (employees, open POs, payable total, tb-balanced) that
+  degrades to 0/empty via store_migration_applied when a vertical's schema is
+  absent. Reads gated by the frozen role_allows using existing action strings;
+  no new auth scheme or storage. Spec back_office_web_spec 7/7; red-first
+  (esc() '<' replacement sabotaged AND the forbidden arm of deny() deleted)
+  4/7 with escaping, 403 and roll-up all biting; restored 7/7. Regressions
+  store_app 3/3, web_app 5/5, conformance 8/8. Merged-tree reruns: 7/7, 5/5,
+  8/8. FINDING (fixed): store-error and invalid-credentials had NO explicit
+  arm in web_common.deny and were silently inheriting the 409 default — a 500
+  and a 401 presenting as conflicts; every closed-set member now has an
+  explicit arm. FINDING (open, escalated not worked around): fin_ap_open
+  gates on migration id `proc_001_payables` which NOTHING applies —
+  enterprise_procurement applies proc_001_suppliers and books payables into
+  the shared journal under accounts_payable, so GET /fin/ap always renders an
+  empty line-item list. The route reports the authoritative journal payable
+  total alongside it so the page is never silently wrong. Fix = either a
+  payables projection in procurement or repointing fin_ap_open at the
+  journal; queued as its own lane (W9-A).

@@ -2,18 +2,27 @@
 # Enterprise Web App — shared hardened-dispatch helpers
 
 Shared by `main.spl` and the sibling route modules (`booking_routes`,
-`restaurant_routes`, `dashboard`): HTML escaping for ALL business data,
-form-body parsing, the shared security-header policy wrapper, and the
-FROZEN denial-reason -> HTTP status mapping.
+`restaurant_routes`, `hcm_routes`, `procurement_routes`, `finance_routes`,
+`dashboard`): HTML escaping for ALL business data, form-body parsing, the
+shared security-header policy wrapper, and the FROZEN denial-reason -> HTTP
+status mapping.
+
+## Mapping completeness
+`deny()` covers the WHOLE closed set `foundation.reason_set()` — every reason
+has an explicit arm rather than falling into the 409 default by accident.
+The two reasons no web route emits today (`store-error`,
+`invalid-credentials`) are mapped here anyway, because the closed set is an
+executable predicate and a new emitter must not silently inherit a 409.
 
 Denial mapping (CommandResult.reason -> HTTP):
-- invalid-session -> 401
+- invalid-session | invalid-credentials -> 401
 - forbidden -> 403
 - not-found | no-session | line-not-found -> 404
 - conflict | table-occupied | session-closed | invalid-transition |
   unserved-lines | insufficient-stock | invalid-record -> 409
-- duplicate-key never reaches deny(): idempotent replays return the
-  recorded result with 200.
+- store-error -> 500
+- accepted / duplicate-key never reach deny(): a success and an idempotent
+  replay both return the recorded result with 200.
 """
 
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
@@ -54,12 +63,14 @@ fn secured(resp: HttpResponse) -> HttpResponse:
 
 # deny maps a frozen CommandResult denial reason onto an HTTP response.
 fn deny(reason: text, detail: text) -> HttpResponse:
-    val status = if reason == "invalid-session":
+    val status = if reason == "invalid-session" or reason == "invalid-credentials":
         HttpStatus.Unauthorized
     elif reason == "forbidden":
         HttpStatus.Forbidden
     elif reason == "not-found" or reason == "no-session" or reason == "line-not-found":
         HttpStatus.NotFound
+    elif reason == "store-error":
+        HttpStatus.InternalError
     else:
         HttpStatus.Conflict
     secured(HttpResponse.error(status, reason + ": " + esc(detail)))
