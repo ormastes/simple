@@ -33,7 +33,10 @@ first become an authenticated encrypted stream, then use the same bounded
 parser/router/writer path as explicit plaintext development mode. Parser
 limits are applied during reads rather than after allocation. Request identity
 and security headers are created in the canonical dispatch path. Parse,
-framing, traversal, and capacity failures terminate before routing.
+framing, traversal, and capacity failures terminate before routing. The writer
+is the sole response-framing owner: it emits one canonical `Content-Length`
+and `Connection: close`, suppresses application attempts to supply those fields
+or `Transfer-Encoding`, and drops invalid field names or control-bearing values.
 
 TLS is deliberately fail-closed today. `TlsServerConfig` can validate material
 and `tls_server_accept` reports unavailability, but no owned encrypted overlay

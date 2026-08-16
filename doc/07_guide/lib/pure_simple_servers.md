@@ -67,8 +67,16 @@ not implement any transfer coding. The continuation fix restores that
 fail-closed boundary. `SecureServerPolicy.max_response_bytes` and the canonical
 writer now prepare one bounded complete response (or one bounded hardened 500)
 and use `write_all`; if even the fallback cannot fit, the connection closes
-without emitting a partial response. These changes remain code-only until the
-focused Stage-4 commands pass.
+without emitting a partial response. The writer is also the sole framing owner:
+application `Content-Length`, `Transfer-Encoding`, and `Connection` fields are
+suppressed case-insensitively. Non-token field names and control-bearing values
+are dropped before serialization and cannot suppress a safe default security
+header. Modern REQ-002 SSpec coverage makes that ownership visible as three
+step-based flows: valid application header plus canonical framing, conflicting
+and control-bearing header rejection, and a real-loopback hostile-handler wire
+response. The flows use built-in matchers and exact positive, edge/error, and
+integration oracles; they contain no placeholder pass. These changes remain
+`TEST_BLOCKED`, not PASS, until the focused Stage-4 commands run.
 
 The present TLS configuration check recognizes only a hex-DER envelope. The
 existing certificate owner can parse PEM X.509, but exposes no typed parser for
@@ -209,11 +217,13 @@ readable mirrored Markdown manual. The whole interpreter suite is the final
 release-bound gate, not a substitute for the focused scenarios.
 
 At this audit point the mirrors are hand-authored, not current docgen receipts.
-The secure web scenario's manual-step and boolean-wrapper quality findings were
-corrected in the unexecuted working spec; a fresh maintenance scan and
-generated-manual review are still required before AC-10 can pass. Static source
-shape, historical seed diagnostics, and unexecuted fixtures cannot upgrade
-those gaps.
+No local binary has an adjacent receipt admitting it as the current-source,
+pure-Simple Stage-4 full CLI, so runtime, docgen, and `sspec-maintain` are not
+run. The secure web response-framing scenarios and their Markdown manual are
+therefore explicitly `TEST_BLOCKED`; a fresh focused run, maintenance scan,
+generated-manual review, and zero-stub receipt are still required before AC-10
+can pass. Static source shape, historical seed diagnostics, and unexecuted
+fixtures cannot upgrade those gaps.
 
 ## Update Rule
 

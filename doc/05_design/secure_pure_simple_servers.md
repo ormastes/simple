@@ -32,8 +32,11 @@
 4. Read with line/header/body/iteration/timeout limits. Reject ambiguous
    framing, duplicate security-sensitive headers, unsupported coding, or
    traversal before constructing a routed request.
-5. Attach request identity, route once, apply security headers, write a bounded
-   response, then close at the keep-alive bound and release accounting.
+5. Attach request identity, route once, apply security headers, then serialize
+   through the sole framing owner. The writer supplies canonical
+   `Content-Length` and `Connection: close`, excludes application-provided
+   framing headers, invalid field names, and control-bearing values, writes one
+   bounded response, then closes at the keep-alive bound and releases accounting.
 
 ## DB flow (REQ-004..008)
 

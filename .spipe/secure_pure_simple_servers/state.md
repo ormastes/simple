@@ -229,3 +229,18 @@ dev-blocked
   lease, returned-outcome assertion, post-stop dispatch guard, and RISC-V
   bump-heap oracles with no blocking source finding; this is code-review
   evidence only and does not replace either interpreter test.
+- parallel-recovery-framing-audit-2026-08-16: An independent read-only AC-2
+  review found that the response serializer emitted its canonical framing and
+  then appended conflicting application `Content-Length`, `Transfer-Encoding`,
+  or `Connection` fields. The scoped code-only repair makes the writer the sole
+  framing owner, drops CR/LF-bearing header pairs, and adds an absolute mixed-
+  case conflict oracle. No runtime PASS is claimed without an admitted Stage-4
+  CLI, maintenance scan, and regenerated manual receipt.
+- response-framing-sspec-2026-08-16: REQ-002 now has modern visible-step SSpec
+  coverage for a valid application header, conflicting/control-bearing header
+  rejection, and a hostile-handler real-loopback response. All assertions use
+  built-in matchers with exact positive, edge/error, and integration oracles;
+  no placeholder pass is present. The synchronized `doc/06_spec` artifact is a
+  Markdown operator manual only. Status is `TEST_BLOCKED`: no adjacent receipt
+  admits a current-source pure-Simple Stage-4 full CLI, so runtime execution,
+  `sspec-maintain`, and docgen were intentionally not run and no AC is promoted.

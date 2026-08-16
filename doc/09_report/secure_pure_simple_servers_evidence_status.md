@@ -3,6 +3,15 @@
 Date: 2026-08-16 (continuation audit; historical runtime observations remain
 dated 2026-08-14)
 
+Parallel recovery follow-up found that the synchronous response serializer
+emitted canonical framing and then appended conflicting application framing
+fields. The scoped source repair now owns `Content-Length`,
+`Transfer-Encoding`, and `Connection` at the writer, rejects non-token field
+names and control-bearing values, preserves safe default security headers, and
+adds direct plus real-loopback wire oracles. Independent static review cycle 2
+accepted the patch. No admitted Stage-4 CLI or adjacent provenance receipt
+exists locally, so this is code-only evidence and promotes no AC.
+
 ## 2026-08-16 continuation audit
 
 The detached baseline audited for this continuation was
