@@ -110,6 +110,29 @@ No Rust seed result was substituted for Simple acceptance evidence.
   Modern SSpec/manual/plan delta after cancellation traceability stopped
   claiming moved-source invalidation. AC-5..AC-7 remain open.
 
+## Non-Phase-4 repair continuation (2026-08-16)
+
+- PASS: `src/lib/nogc_async_mut/actor/mailbox.spl` now keeps its bounded
+  closed/full admission condition on one parser-safe line. The admitted
+  pure-Simple Stage-2 compiler, with the documented SHA-256, no longer reports
+  `expected Indent, found Self_` in the mailbox and advances into
+  `actor/spawn.spl`.
+- BLOCKED after the mailbox parse: the one bounded Stage-2 compile exited 70 on
+  the existing flat-AST tag-39 conversion gap followed by the compiled
+  `str.clear` receiver-dispatch gap. It was not retried, and no Rust seed or
+  Phase-4 command was used.
+- PASS: `runtime_memtrack.c` is normalized from mixed CRLF/LF to canonical LF;
+  its staged semantic diff is empty and
+  `normalize-line-endings.shs --check` passes.
+- PASS: staged direct-runtime and numbered-artifact guards, repository diff
+  whitespace, generated-spec layout (`0` misplaced `.spl` files), and the
+  focused stub scan pass.
+- EXCLUDED: the old `codex/runtime-server-actors-01a00035` branch was not
+  merged. Its `STP1` codec duplicates the canonical `SPRF1`/`SPRS` boundary and
+  its usage-spec paths are stale.
+- EXCLUDED by user directive: every Phase-4 test, docgen, maintenance, and core
+  CLI gate.
+
 STATUS: FAIL (blocked)
 
 Integration reachability and post-rebase tree state are recorded after the

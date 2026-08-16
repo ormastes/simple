@@ -58,3 +58,8 @@ verify-blocked
 - modernization review: the separate highest-capability reviewer accepted the
   corrected partial delta after cancellation stopped claiming moved-source
   invalidation; this is not an underlying feature PASS.
+- shortened non-Phase-4 continuation: repaired the actor mailbox indentation
+  parse defect and normalized `runtime_memtrack.c` to LF. The admitted Stage-2
+  compile now passes the mailbox and stops later at the tracked actor-spawn
+  flat-AST/compiled `str.clear` gap. Static guards pass; the obsolete `STP1`
+  sibling branch was inspected and deliberately not merged.
