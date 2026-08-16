@@ -9,4 +9,13 @@
 
 All arithmetic checks overflow before addition. Sector writes require exactly one sector. Any reset, link, identify, GPT, FAT, flush, remount, or hash error aborts; no QSPI writes are permitted.
 
-The first hardware slice is deliberately read-only: `starfive_find_nvme_read_only()` validates link and reports domain/BDF/vendor/device/class/BAR values. If link is down, it stops with `starfive-pcie1-link-down`; it does not silently perform Linux's clock/reset/PHY/PERST sequence. Cold initialization is the next board-owned capsule and must follow `pcie-starfive.c` plus `phy-jh7110-pcie.c` before common NVMe initialization is admitted.
+The board-owned `starfive_jh7110_pcie1_initialize()` capsule now mirrors the
+mainline Linux PHY/STG/PLDA programming sequence and readback-validates each
+masked update. It admits an existing firmware-trained link immediately. On a
+down link it requires a responsive PLDA APB aperture as evidence that firmware
+left clocks enabled and resets deasserted, programs only documented controller
+registers, and bounds link polling to ten 100 ms slots. It deliberately does
+not guess clock/reset-controller fields or directly drive GPIO28/PERST; failure
+to prove those firmware-owned prerequisites blocks ECAM access. The subsequent
+`starfive_find_nvme_read_only()` reports domain/BDF/vendor/device/class/BAR
+values without PCI configuration or media writes.

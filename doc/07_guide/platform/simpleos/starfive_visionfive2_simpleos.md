@@ -78,11 +78,32 @@ PHY/clocks/resets, PERST, PLDA configuration and link validation in
 `src/os/kernel/arch/riscv64/starfive/`; common PCI enumeration and
 `src/os/drivers/nvme/` contain no StarFive constants.
 
-The first RAM image uses `starfive_find_nvme_read_only()`. It checks link-status
-bit 5 at `0x10240368`, scans only the bounded 16 MiB PCIe1 ECAM aperture, and
+Before enumeration, `starfive_jh7110_pcie1_initialize()` admits an already
+trained firmware link or restores the register sequence from mainline Linux
+`pcie-starfive.c` and `phy-jh7110-pcie.c`: PCIe1 PHY KVCO tuning, root-port
+mode, external reference clock and CLKREQ, functions 1--3 disabled, function 0
+restored, root-port enable, hidden RC BARs, bridge class, LTR forwarding off,
+and 64-bit prefetch support. Every masked write is read back. An inaccessible
+PLDA APB aperture is treated as clocks/resets not proven and blocks the scan.
+SimpleOS does not guess clock/reset-controller bit positions or drive the
+active-low GPIO28 PERST line; those remain part of the preserved U-Boot handoff.
+Link training is bounded to ten 100 ms polling slots.
+
+The read-only probe then uses `starfive_find_nvme_read_only()`. It checks link-status
+bit 5 at `0x10240368`, scans only downstream bus 1 in the bounded 16 MiB PCIe1 ECAM aperture, and
 accepts class `01:08:02`. Its UART line reports domain, BDF, vendor/device IDs,
 BARs, and `read_only=1`, or a precise link/not-found reason. It does not write
 PCI config, NVMe registers, queues, partitions, or storage.
+
+Do not access domain 1 bus 0 with the ordinary ECAM formula. JH7110's PLDA root
+port has a controller-specific root-configuration path; the M.2 endpoint is on
+downstream bus 1. An invalid root-bus ECAM access can wedge the U74 hart so that
+even the SBI reset trampoline cannot be injected, requiring one physical reset.
+
+Expected admission markers are `STARFIVE pcie1-init-ready
+source=firmware-link-ready` or `source=cold-init-link-ready`. Any
+`STARFIVE pcie1-init-blocked` marker means ECAM/NVMe access is not authorized;
+use its reason rather than retrying an unsafe address.
 
 The vendor U-Boot may report `Unknown command` for `pci` and `nvme`; that is a
 firmware configuration limitation, not SSD absence. NVMe model, serial,
@@ -97,3 +118,13 @@ partition as FAT32, and mounts it at `/nvme`. PASS then requires a nonce file to
 survive flush, unmount and remount with an equal hash, followed by a command-
 correlated public-VFS `ls /nvme`. A password is privilege input, never storage
 identity confirmation.
+
+Use `scripts/check/check-starfive-nvme-storage.shs` as the storage acceptance
+gate. `--contract` and `--self-test` are host-only safety checks.
+`--identify-live` may perform only PCI/NVMe reads and must emit an immutable
+Identify Controller/Namespace receipt before it can pass. `--provision-live`
+is a separately authorized mode; authorization for it never carries over from
+identify or general board boot. Both live modes currently fail closed with exit
+2 because the real Identify and provisioning paths are not complete. Do not
+interpret the PCI identity line or a contract PASS as proof of an NVMe model,
+namespace, filesystem, or durable write.

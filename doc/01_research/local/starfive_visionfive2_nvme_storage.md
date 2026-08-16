@@ -13,3 +13,10 @@ Hardware status on 2026-08-16: Tigard UART/JTAG is enumerated and JTAG previousl
 `src/os/kernel/arch/riscv64/starfive/nvme_probe.spl` now mirrors Linux's ownership boundary: it checks the JH7110 PCIe1 link-status bit at `0x10240368`, uses a bounded 16 MiB ECAM descriptor for domain 1, and scans only for PCI class `01:08:02`. It performs no PCI configuration, BAR, NVMe controller, or media writes. The StarFive image builds through the admitted Stage 3 compiler.
 
 Live execution is currently blocked before image staging because hart 1 remains unexaminable after the earlier failed >4 GiB OpenOCD memory access. The board needs a physical reset/power-cycle; repeated software-reset attempts must not be treated as useful retries.
+
+The first live SimpleOS PCI probe reached `STARFIVE console-ready` and then
+hung because it treated PLDA root bus 0 as ordinary ECAM. Linux routes root-port
+configuration through the PLDA host's special path and exposes the M.2 endpoint
+on domain 1, bus 1. The corrected first-light probe therefore checks link state
+and reads only downstream bus 1; generic enumeration must later receive a host
+operation that distinguishes root and downstream configuration.

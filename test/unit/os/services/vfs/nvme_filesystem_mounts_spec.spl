@@ -7,7 +7,8 @@ use std.fs_driver.extension.{Extension}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.direct_io.{direct_io_nvme_filesystem_extension}
 use std.db.dbfs_driver.dbfs_driver.{DbFsDriver}
-use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_driver_instance_for_lease, vfs_nvme_buffered_driver_instance_for_lease, vfs_nvme_driver_instance_for_adapter_lease, vfs_nvme_driver_instance_for_lease_checked, vfs_nvme_filesystem_region_blocks, vfs_nvme_block_device_lease_reason}
+use os.services.vfs.nvme_filesystem_mounts.{vfs_nvme_partition_lease, vfs_nvme_driver_instance_for_lease, vfs_nvme_buffered_driver_instance_for_lease, vfs_nvme_driver_instance_for_adapter_lease, vfs_nvme_driver_instance_for_lease_checked, vfs_nvme_filesystem_region_blocks, vfs_nvme_block_device_lease_reason}
+use std.fs_driver.gpt_partition.{GptPartition}
 use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}
 use os.services.vfs.vfs_init.{_clear_vfs_rootfs_for_test, vfs_mount_rootfs_from_nvme_lease_checked}
 use os.drivers.nvme.nvme_driver.{NvmeDriver}
@@ -61,6 +62,20 @@ fn _user_mount_test_lease(nsid: u32) -> NvmeFilesystemLease:
     nvme_filesystem_lease(ns, 0u64, 1024u64, NvmeNamespaceMode.UserAssigned, queue, "simple-driver", "resource-grant-set:tok=300", true, true)
 
 describe "NVMe filesystem mount factory":
+    it "narrows a namespace lease to the exact GPT partition before FAT32 mount":
+        val parent = _mount_test_lease()
+        val part = GptPartition(index: 1u32, first_lba: 34u64, last_lba: 545u64, type_guid_lo: 1u64, type_guid_hi: 2u64, unique_guid_lo: 3u64, unique_guid_hi: 4u64)
+        val lease = vfs_nvme_partition_lease(parent, part).unwrap()
+        expect(lease.base_lba).to_equal(162u64)
+        expect(lease.lba_count).to_equal(512u64)
+        val mounted = vfs_nvme_driver_instance_for_lease("fat32-gpt", MemBlockDevice.new(512u64, 512u32), lease, NvmeFilesystemConsumer.Fat32)
+        expect(mounted.is_ok()).to_equal(true)
+
+    it "rejects GPT partitions outside the already bounded namespace lease":
+        val parent = _mount_test_lease()
+        val outside = GptPartition(index: 1u32, first_lba: 1000u64, last_lba: 1100u64, type_guid_lo: 1u64, type_guid_hi: 0u64, unique_guid_lo: 0u64, unique_guid_hi: 0u64)
+        expect(vfs_nvme_partition_lease(parent, outside).unwrap_err()).to_equal("nvme-gpt-partition-outside-parent-lease")
+
     it "reports the lease region block count used by device-backed filesystems":
         val lease = _mount_test_lease()
         expect(vfs_nvme_filesystem_region_blocks(lease)).to_equal(1024i64)

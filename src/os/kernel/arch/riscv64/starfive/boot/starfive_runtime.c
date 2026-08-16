@@ -82,6 +82,22 @@ spl_u64 rt_starfive_mmio_read32(spl_u64 address) {
     return (spl_u64)value;
 }
 
+void rt_starfive_mmio_write32(spl_u64 address, spl_u64 value) {
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    *(volatile spl_u32 *)address = (spl_u32)value;
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+}
+
+void rt_starfive_delay_ms(spl_u64 milliseconds) {
+    /* U74 time CSR runs at the JH7110 4 MHz timebase used by OpenSBI. */
+    spl_u64 start;
+    spl_u64 now;
+    __asm__ volatile("rdtime %0" : "=r"(start));
+    do {
+        __asm__ volatile("rdtime %0" : "=r"(now));
+    } while ((now - start) < (milliseconds * 4000ULL));
+}
+
 spl_i64 rt_string_new_literal(const spl_u8 *bytes, spl_u64 len) {
     return rt_string_new((spl_i64)(spl_u64)bytes, (spl_i64)len);
 }
