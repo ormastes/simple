@@ -1,0 +1,92 @@
+"""SOSIX adapter for the existing real headless compositor framebuffer."""
+
+use os.compositor.host_compositor_core.{
+    HeadlessHostCompositorBackend,
+    headless_host_compositor_pixels
+}
+use os.sosix.host.service_contract.{
+    SosixDisplayRequest,
+    SosixDisplayCompletionKey,
+    sosix_display_request_create
+}
+use os.sosix.host.display_surface_state.{
+    SosixDisplaySurfaceState,
+    sosix_display_surface_submit,
+    sosix_display_surface_complete
+}
+
+pub struct SosixHeadlessPresentReceipt:
+    accepted: bool
+    reason: text
+    state: SosixDisplaySurfaceState
+    frame_sequence: u64
+    pixel_count: u64
+    first_pixel: u32
+    last_pixel: u32
+
+export SosixHeadlessPresentReceipt
+
+pub fn sosix_headless_present_completed(
+    backend: HeadlessHostCompositorBackend,
+    state: SosixDisplaySurfaceState,
+    request: SosixDisplayRequest
+) -> SosixHeadlessPresentReceipt:
+    val pixels = headless_host_compositor_pixels(backend)
+    val empty = SosixHeadlessPresentReceipt(
+        accepted: false,
+        reason: "empty-headless-framebuffer",
+        state: state,
+        frame_sequence: request.frame_sequence,
+        pixel_count: 0,
+        first_pixel: 0u32,
+        last_pixel: 0u32
+    )
+    if pixels.len() == 0:
+        return empty
+    val validated = sosix_display_request_create(
+        request.operation,
+        request.api_id,
+        request.surface,
+        request.surface_generation,
+        request.frame_sequence,
+        request.buffer,
+        request.deadline_ns
+    )
+    if not validated.accepted:
+        return SosixHeadlessPresentReceipt(
+            accepted: false,
+            reason: validated.reason,
+            state: state,
+            frame_sequence: request.frame_sequence,
+            pixel_count: pixels.len() as u64,
+            first_pixel: pixels[0],
+            last_pixel: pixels[pixels.len() - 1]
+        )
+    val submitted = sosix_display_surface_submit(state, request)
+    if not submitted.accepted:
+        return SosixHeadlessPresentReceipt(
+            accepted: false,
+            reason: submitted.reason,
+            state: state,
+            frame_sequence: request.frame_sequence,
+            pixel_count: pixels.len() as u64,
+            first_pixel: pixels[0],
+            last_pixel: pixels[pixels.len() - 1]
+        )
+    val key = SosixDisplayCompletionKey(
+        surface: request.surface,
+        surface_generation: request.surface_generation,
+        frame_sequence: request.frame_sequence
+    )
+    val completed = sosix_display_surface_complete(submitted.state, key)
+    SosixHeadlessPresentReceipt(
+        accepted: completed.accepted,
+        reason: completed.reason,
+        state: completed.state,
+        frame_sequence: request.frame_sequence,
+        pixel_count: pixels.len() as u64,
+        first_pixel: pixels[0],
+        last_pixel: pixels[pixels.len() - 1]
+    )
+
+export sosix_headless_present_completed

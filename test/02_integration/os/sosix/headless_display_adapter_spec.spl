@@ -1,0 +1,59 @@
+# @cover src/os/compositor/host_services/headless_display_adapter.spl 80%
+use std.spec
+use os.compositor.display_backend_core.{CompositorBackend}
+use os.compositor.host_compositor_core.{HeadlessHostCompositorBackend}
+use os.compositor.host_services.headless_display_adapter.{sosix_headless_present_completed}
+use os.sosix.core.operation.{SosixOperationId}
+use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
+use os.sosix.host.service_contract.{SOSIX_HOST_DISPLAY_PRESENT, SosixDisplayRequest}
+use os.sosix.host.display_surface_state.{SosixDisplaySurfaceState, sosix_display_surface_state_create}
+
+fn surface() -> SosixCapabilityRef:
+    SosixCapabilityRef(slot: 2, generation: 3)
+
+fn state() -> SosixDisplaySurfaceState:
+    sosix_display_surface_state_create(surface(), 2).state
+
+fn request(sequence: u64) -> SosixDisplayRequest:
+    SosixDisplayRequest(
+        operation: SosixOperationId(slot: sequence as u32, generation: 1),
+        api_id: SOSIX_HOST_DISPLAY_PRESENT,
+        surface: surface(),
+        surface_generation: 1,
+        frame_sequence: sequence,
+        buffer: SosixBufferRef(slot: 8, generation: 1),
+        deadline_ns: 1000
+    )
+
+describe "SOSIX headless display adapter":
+    it "captures a real rendered framebuffer as one completed frame":
+        var backend = HeadlessHostCompositorBackend.new(4, 3)
+        backend.clear(0xFF112233u32)
+        val receipt = sosix_headless_present_completed(backend, state(), request(1))
+        expect(receipt.accepted).to_equal(true)
+        expect(receipt.pixel_count).to_equal(12)
+        expect(receipt.first_pixel).to_equal(0xFF112233u32)
+        expect(receipt.last_pixel).to_equal(0xFF112233u32)
+        expect(receipt.state.inflight_count).to_equal(0)
+
+    it "rejects an empty framebuffer":
+        val backend = HeadlessHostCompositorBackend.new(0, 0)
+        val receipt = sosix_headless_present_completed(backend, state(), request(1))
+        expect(receipt.accepted).to_equal(false)
+        expect(receipt.reason).to_equal("empty-headless-framebuffer")
+
+    it "preserves frame ordering across completed presents":
+        var backend = HeadlessHostCompositorBackend.new(2, 2)
+        backend.clear(0xFF000001u32)
+        val first = sosix_headless_present_completed(backend, state(), request(1))
+        backend.clear(0xFF000002u32)
+        val second = sosix_headless_present_completed(backend, first.state, request(2))
+        expect(second.accepted).to_equal(true)
+        expect(second.frame_sequence).to_equal(2)
+        expect(second.first_pixel).to_equal(0xFF000002u32)
+
+    it "rejects a skipped sequence through the canonical state owner":
+        val backend = HeadlessHostCompositorBackend.new(2, 2)
+        val receipt = sosix_headless_present_completed(backend, state(), request(2))
+        expect(receipt.accepted).to_equal(false)
+        expect(receipt.reason).to_equal("unexpected-frame-sequence")

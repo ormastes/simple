@@ -1,0 +1,91 @@
+# @cover src/os/sosix/fs/kernel_positioned_dispatch_v1.spl 80%
+"""Architecture-neutral persistent positioned-syscall dispatcher contract."""
+
+use std.spec.*
+use os.kernel.types.syscall_types.SyscallArgs
+use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
+use os.sosix.fs.kernel_positioned_dispatch_v1.*
+use os.sosix.fs.positioned_dispatch_owner_v1.SosixFsPositionedDispatchOwnerV1
+use os.sosix.fs.positioned_syscall_v1.*
+use os.sosix.fs.registry_lifecycle_v1.SosixFsRegistryOwnerV1
+use os.sosix.fs.service_adapter_v1.*
+use os.sosix.fs.service_vfs_backend_v1.SosixPositionedVfsBackendV1
+
+class KernelPositionedBackend:
+    bytes: [u8]
+
+impl SosixPositionedVfsBackendV1 for KernelPositionedBackend:
+    fn positioned_io_available() -> bool: true
+    fn read_at(file_object_id: u64, offset: u64, length: u64) -> Result<[u8], text>:
+        Ok([self.bytes[offset.to_i32()]])
+    me fn write_at(file_object_id: u64, offset: u64, data: [u8]) -> Result<u64, text>:
+        self.bytes[offset.to_i32()] = data[0]
+        Ok(1)
+
+fn _kernel_owner() -> SosixFsPositionedDispatchOwnerV1:
+    SosixFsPositionedDispatchOwnerV1(
+        registry_owner: SosixFsRegistryOwnerV1(
+            service_endpoint: 80, service_generation: 3,
+            registry: SosixFsServiceRegistryV1(
+                capabilities: [SosixFsCapabilityEntryV1(
+                    active: true, ref_: SosixCapabilityRef(slot: 2, generation: 1),
+                    owner_process_id: 42, file_object_id: 41,
+                    rights: SOSIX_FS_SERVICE_RIGHT_READ_V1)],
+                buffers: [SosixFsBufferEntryV1(
+                    active: true, ref_: SosixBufferRef(slot: 4, generation: 9),
+                    owner_process_id: 42, registration_id: 73, byte_length: 2,
+                    access: SOSIX_FS_SERVICE_BUFFER_WRITE_V1,
+                    service_endpoint: 80, memory_mode: 1, bytes: [0, 0])])),
+        operation_slot: 6, operation_generation: 7, next_request_token: 11)
+
+fn _pread() -> SyscallArgs:
+    sosix_fs_positioned_syscall_args_v1(
+        SOSIX_FS_PREAD_REGISTERED_V1, 41, 73,
+        0x0000000900000004, 1, 0, 1)
+
+describe "SOSIX kernel positioned dispatcher v1":
+    it "fails closed before a lifecycle owner is installed":
+        val state = sosix_fs_kernel_positioned_state_v1(_kernel_owner())
+        val result = sosix_fs_kernel_dispatch_positioned_v1(
+            state, _pread(), true, 42, KernelPositionedBackend(bytes: [10, 20]))
+        expect(result.recognized).to_be(true)
+        expect(result.accepted).to_equal(false)
+        expect(result.reason).to_equal("positioned-owner-not-installed")
+        expect(result.result.value).to_equal(-95)
+
+    it "installs a ready owner and persists registry and request-token changes":
+        val empty = sosix_fs_kernel_positioned_state_v1(_kernel_owner())
+        val installed = sosix_fs_kernel_install_positioned_owner_v1(empty, _kernel_owner())
+        val first = sosix_fs_kernel_dispatch_positioned_v1(
+            installed.state, _pread(), true, 42,
+            KernelPositionedBackend(bytes: [10, 20]))
+        expect(installed.accepted).to_be(true)
+        expect(first.accepted).to_be(true)
+        expect(first.state.owner.registry_owner.registry.buffers[0].bytes).to_equal([20, 0])
+        expect(first.state.owner.next_request_token).to_equal(12)
+
+    it "does not consume persistent identity for unauthenticated or unrelated calls":
+        val installed = sosix_fs_kernel_install_positioned_owner_v1(
+            sosix_fs_kernel_positioned_state_v1(_kernel_owner()), _kernel_owner())
+        val denied = sosix_fs_kernel_dispatch_positioned_v1(
+            installed.state, _pread(), false, 42,
+            KernelPositionedBackend(bytes: [10, 20]))
+        expect(denied.accepted).to_equal(false)
+        expect(denied.reason).to_equal("unauthenticated-positioned-caller")
+        expect(denied.result.value).to_equal(-13)
+        expect(denied.state.owner.next_request_token).to_equal(11)
+        val unrelated = sosix_fs_kernel_dispatch_positioned_v1(
+            denied.state,
+            SyscallArgs(id: 12, arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0),
+            true, 42, KernelPositionedBackend(bytes: [10]))
+        expect(unrelated.recognized).to_equal(false)
+        expect(unrelated.state.owner.next_request_token).to_equal(11)
+
+    it "rejects installation of an unready lifecycle owner":
+        var owner = _kernel_owner()
+        owner.registry_owner.service_generation = 0
+        val state = sosix_fs_kernel_positioned_state_v1(_kernel_owner())
+        val installed = sosix_fs_kernel_install_positioned_owner_v1(state, owner)
+        expect(installed.accepted).to_equal(false)
+        expect(installed.reason).to_equal("positioned-owner-not-ready")
+        expect(installed.state.installed).to_equal(false)

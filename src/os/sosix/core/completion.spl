@@ -1,0 +1,74 @@
+"""Typed terminal results for canonical SOSIX asynchronous operations."""
+
+use os.sosix.core.operation.{SosixOperationId, SosixOperationSlot, sosix_operation_is_terminal}
+
+pub struct SosixCompletion:
+    operation: SosixOperationId
+    api_id: u32
+    status: i32
+    transferred: u64
+    partial_progress: bool
+    terminal_state: u8
+
+pub struct SosixCompletionCreateResult:
+    accepted: bool
+    reason: text
+    completion: SosixCompletion
+
+pub struct SosixTypedCompletionResult:
+    accepted: bool
+    reason: text
+    completion: SosixCompletion
+
+export SosixCompletion, SosixCompletionCreateResult, SosixTypedCompletionResult
+
+fn _empty_completion(operation: SosixOperationId, api_id: u32) -> SosixCompletion:
+    SosixCompletion(
+        operation: operation,
+        api_id: api_id,
+        status: 0,
+        transferred: 0,
+        partial_progress: false,
+        terminal_state: 0
+    )
+
+pub fn sosix_completion_from_slot(
+    operation: SosixOperationId, api_id: u32, slot: SosixOperationSlot
+) -> SosixCompletionCreateResult:
+    if slot.generation != operation.generation:
+        return SosixCompletionCreateResult(
+            accepted: false,
+            reason: "stale-generation",
+            completion: _empty_completion(operation, api_id)
+        )
+    if not sosix_operation_is_terminal(slot):
+        return SosixCompletionCreateResult(
+            accepted: false,
+            reason: "operation-not-terminal",
+            completion: _empty_completion(operation, api_id)
+        )
+    SosixCompletionCreateResult(
+        accepted: true,
+        reason: "accepted",
+        completion: SosixCompletion(
+            operation: operation,
+            api_id: api_id,
+            status: slot.status,
+            transferred: slot.transferred,
+            partial_progress: slot.partial_progress,
+            terminal_state: slot.state
+        )
+    )
+
+pub fn sosix_completion_expect_api(
+    completion: SosixCompletion, expected_api_id: u32
+) -> SosixTypedCompletionResult:
+    if completion.api_id != expected_api_id:
+        return SosixTypedCompletionResult(
+            accepted: false,
+            reason: "completion-api-mismatch",
+            completion: completion
+        )
+    SosixTypedCompletionResult(accepted: true, reason: "accepted", completion: completion)
+
+export sosix_completion_from_slot, sosix_completion_expect_api

@@ -1,0 +1,270 @@
+"""Pure SOSIX filesystem async submission/completion correlation model.
+
+The model owns no queue and performs no IPC.  A transport adapter stores one
+state value per slot and applies these transitions before publishing a request
+or completion.  Both operation generation and request token must match, so a
+late reply cannot complete either a reused operation slot or a later request in
+the same slot.
+"""
+
+use os.sosix.core.operation.SosixOperationId
+
+pub val SOSIX_FS_TRANSPORT_FREE: u8 = 0
+pub val SOSIX_FS_TRANSPORT_PENDING: u8 = 1
+pub val SOSIX_FS_TRANSPORT_COMPLETE: u8 = 2
+pub val SOSIX_FS_TRANSPORT_CONSUMED: u8 = 3
+
+pub struct SosixFsRequestKey:
+    operation_slot: u32
+    operation_generation: u32
+    request_token: u64
+
+pub struct SosixFsCompletionEvent:
+    key: SosixFsRequestKey
+    notification_event: u64
+    status: i32
+    transferred: u64
+    partial_progress: bool
+
+pub struct SosixFsTransportState:
+    active_operation_slot: u32
+    active_operation_generation: u32
+    next_request_token: u64
+    active_request_token: u64
+    phase: u8
+    requested_length: u64
+    transferred: u64
+    status: i32
+    partial_progress: bool
+    notification_event: u64
+
+pub struct SosixFsSubmitTransition:
+    accepted: bool
+    reason: text
+    key: SosixFsRequestKey
+    state: SosixFsTransportState
+
+pub struct SosixFsStateTransition:
+    accepted: bool
+    reason: text
+    state: SosixFsTransportState
+
+pub struct SosixFsCompletionTransition:
+    accepted: bool
+    reason: text
+    event: SosixFsCompletionEvent
+    state: SosixFsTransportState
+
+export SOSIX_FS_TRANSPORT_FREE, SOSIX_FS_TRANSPORT_PENDING
+export SOSIX_FS_TRANSPORT_COMPLETE, SOSIX_FS_TRANSPORT_CONSUMED
+export SosixFsRequestKey, SosixFsCompletionEvent, SosixFsTransportState
+export SosixFsSubmitTransition, SosixFsStateTransition, SosixFsCompletionTransition
+
+fn _next_nonzero(value: u64) -> u64:
+    val advanced = value + 1
+    if advanced == 0: 1 else: advanced
+
+fn _empty_key(state: SosixFsTransportState) -> SosixFsRequestKey:
+    SosixFsRequestKey(
+        operation_slot: state.active_operation_slot,
+        operation_generation: state.active_operation_generation,
+        request_token: state.active_request_token
+    )
+
+fn _empty_event(state: SosixFsTransportState) -> SosixFsCompletionEvent:
+    SosixFsCompletionEvent(
+        key: _empty_key(state),
+        notification_event: state.notification_event,
+        status: state.status,
+        transferred: state.transferred,
+        partial_progress: state.partial_progress
+    )
+
+fn _matches(state: SosixFsTransportState, key: SosixFsRequestKey) -> bool:
+    (key.operation_slot == state.active_operation_slot and
+        key.operation_generation == state.active_operation_generation and
+        key.request_token == state.active_request_token)
+
+pub fn sosix_fs_transport_state_new() -> SosixFsTransportState:
+    SosixFsTransportState(
+        active_operation_slot: 0,
+        active_operation_generation: 0,
+        next_request_token: 1,
+        active_request_token: 0,
+        phase: SOSIX_FS_TRANSPORT_FREE,
+        requested_length: 0,
+        transferred: 0,
+        status: 0,
+        partial_progress: false,
+        notification_event: 0
+    )
+
+pub fn sosix_fs_transport_submit(
+    state: SosixFsTransportState,
+    operation: SosixOperationId,
+    requested_length: u64
+) -> SosixFsSubmitTransition:
+    if state.phase != SOSIX_FS_TRANSPORT_FREE:
+        return SosixFsSubmitTransition(
+            accepted: false,
+            reason: "slot-not-free",
+            key: _empty_key(state),
+            state: state
+        )
+    if requested_length == 0:
+        return SosixFsSubmitTransition(
+            accepted: false,
+            reason: "empty-request",
+            key: _empty_key(state),
+            state: state
+        )
+    if operation.generation == 0:
+        return SosixFsSubmitTransition(
+            accepted: false,
+            reason: "invalid-operation-generation",
+            key: _empty_key(state),
+            state: state
+        )
+    val token = if state.next_request_token == 0: 1 else: state.next_request_token
+    val pending = SosixFsTransportState(
+        active_operation_slot: operation.slot,
+        active_operation_generation: operation.generation,
+        next_request_token: _next_nonzero(token),
+        active_request_token: token,
+        phase: SOSIX_FS_TRANSPORT_PENDING,
+        requested_length: requested_length,
+        transferred: 0,
+        status: 0,
+        partial_progress: false,
+        notification_event: state.notification_event
+    )
+    SosixFsSubmitTransition(
+        accepted: true,
+        reason: "submitted",
+        key: _empty_key(pending),
+        state: pending
+    )
+
+pub fn sosix_fs_transport_record_progress(
+    state: SosixFsTransportState,
+    key: SosixFsRequestKey,
+    transferred: u64
+) -> SosixFsStateTransition:
+    if not _matches(state, key):
+        return SosixFsStateTransition(accepted: false, reason: "correlation-mismatch", state: state)
+    if state.phase != SOSIX_FS_TRANSPORT_PENDING:
+        return SosixFsStateTransition(accepted: false, reason: "request-not-pending", state: state)
+    if transferred < state.transferred or transferred > state.requested_length:
+        return SosixFsStateTransition(accepted: false, reason: "invalid-progress", state: state)
+    val progressed = SosixFsTransportState(
+        active_operation_slot: state.active_operation_slot,
+        active_operation_generation: state.active_operation_generation,
+        next_request_token: state.next_request_token,
+        active_request_token: state.active_request_token,
+        phase: state.phase,
+        requested_length: state.requested_length,
+        transferred: transferred,
+        status: state.status,
+        partial_progress: transferred > 0 and transferred < state.requested_length,
+        notification_event: state.notification_event
+    )
+    SosixFsStateTransition(accepted: true, reason: "progress-recorded", state: progressed)
+
+pub fn sosix_fs_transport_complete(
+    state: SosixFsTransportState,
+    key: SosixFsRequestKey,
+    status: i32,
+    transferred: u64
+) -> SosixFsCompletionTransition:
+    if not _matches(state, key):
+        return SosixFsCompletionTransition(
+            accepted: false,
+            reason: "correlation-mismatch",
+            event: _empty_event(state),
+            state: state
+        )
+    if state.phase != SOSIX_FS_TRANSPORT_PENDING:
+        return SosixFsCompletionTransition(
+            accepted: false,
+            reason: "completion-already-published",
+            event: _empty_event(state),
+            state: state
+        )
+    if transferred < state.transferred or transferred > state.requested_length:
+        return SosixFsCompletionTransition(
+            accepted: false,
+            reason: "invalid-progress",
+            event: _empty_event(state),
+            state: state
+        )
+    val event_id = _next_nonzero(state.notification_event)
+    val completed = SosixFsTransportState(
+        active_operation_slot: state.active_operation_slot,
+        active_operation_generation: state.active_operation_generation,
+        next_request_token: state.next_request_token,
+        active_request_token: state.active_request_token,
+        phase: SOSIX_FS_TRANSPORT_COMPLETE,
+        requested_length: state.requested_length,
+        transferred: transferred,
+        status: status,
+        partial_progress: transferred > 0 and transferred < state.requested_length,
+        notification_event: event_id
+    )
+    SosixFsCompletionTransition(
+        accepted: true,
+        reason: "completion-published",
+        event: SosixFsCompletionEvent(
+            key: key,
+            notification_event: event_id,
+            status: status,
+            transferred: transferred,
+            partial_progress: completed.partial_progress
+        ),
+        state: completed
+    )
+
+pub fn sosix_fs_transport_consume(
+    state: SosixFsTransportState, key: SosixFsRequestKey
+) -> SosixFsStateTransition:
+    if not _matches(state, key):
+        return SosixFsStateTransition(accepted: false, reason: "correlation-mismatch", state: state)
+    if state.phase != SOSIX_FS_TRANSPORT_COMPLETE:
+        return SosixFsStateTransition(accepted: false, reason: "completion-not-ready", state: state)
+    val consumed = SosixFsTransportState(
+        active_operation_slot: state.active_operation_slot,
+        active_operation_generation: state.active_operation_generation,
+        next_request_token: state.next_request_token,
+        active_request_token: state.active_request_token,
+        phase: SOSIX_FS_TRANSPORT_CONSUMED,
+        requested_length: state.requested_length,
+        transferred: state.transferred,
+        status: state.status,
+        partial_progress: state.partial_progress,
+        notification_event: state.notification_event
+    )
+    SosixFsStateTransition(accepted: true, reason: "completion-consumed", state: consumed)
+
+pub fn sosix_fs_transport_release(
+    state: SosixFsTransportState, key: SosixFsRequestKey
+) -> SosixFsStateTransition:
+    if not _matches(state, key):
+        return SosixFsStateTransition(accepted: false, reason: "correlation-mismatch", state: state)
+    if state.phase != SOSIX_FS_TRANSPORT_CONSUMED:
+        return SosixFsStateTransition(accepted: false, reason: "completion-not-consumed", state: state)
+    val released = SosixFsTransportState(
+        active_operation_slot: 0,
+        active_operation_generation: 0,
+        next_request_token: state.next_request_token,
+        active_request_token: 0,
+        phase: SOSIX_FS_TRANSPORT_FREE,
+        requested_length: 0,
+        transferred: 0,
+        status: 0,
+        partial_progress: false,
+        notification_event: state.notification_event
+    )
+    SosixFsStateTransition(accepted: true, reason: "released", state: released)
+
+export sosix_fs_transport_state_new, sosix_fs_transport_submit
+export sosix_fs_transport_record_progress, sosix_fs_transport_complete
+export sosix_fs_transport_consume, sosix_fs_transport_release

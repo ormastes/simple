@@ -1,0 +1,82 @@
+"""Callback adapter from the canonical hosted input owner to SOSIX input.
+
+The host event loop owns event acquisition and the monotonic timestamp.  This
+module never polls.  It only translates one already-produced HostInputEvent
+and lets SosixInputStreamState own ordering, admission, and coalescing.
+"""
+
+use common.ui.host_input_event.{HostInputEvent, HOST_BTN_NONE}
+use os.sosix.host.input_stream_state.{
+    SOSIX_INPUT_POINTER_MOVE,
+    SOSIX_INPUT_POINTER_BUTTON,
+    SOSIX_INPUT_KEY,
+    SOSIX_INPUT_TEXT,
+    SOSIX_INPUT_WHEEL,
+    SOSIX_INPUT_RESIZE,
+    SosixHostInputEvent,
+    SosixInputStreamState,
+    SosixInputStreamTransition,
+    sosix_input_stream_publish
+}
+
+pub fn sosix_host_input_publish(
+    state: SosixInputStreamState, event: HostInputEvent, timestamp_ns: u64
+) -> SosixInputStreamTransition:
+    """Publish one normalized host callback without acquiring another event.
+
+    The complete typed HostInputEvent is retained on the stream event. The two
+    numeric fields are compatibility metadata, not an alternate input model.
+    """
+    match event:
+        HostInputEvent.Pointer(x, y, button, pressed, wheel):
+            if wheel != 0:
+                return _sosix_host_input_publish_raw(state, event, SOSIX_INPUT_WHEEL, timestamp_ns, wheel.to_i64(), 0)
+            if button == HOST_BTN_NONE:
+                if not pressed:
+                    return _sosix_host_input_rejected(state, "invalid-host-pointer-motion")
+                return _sosix_host_input_publish_raw(
+                    state, event, SOSIX_INPUT_POINTER_MOVE, timestamp_ns,
+                    x.to_i64(), y.to_i64()
+                )
+            return _sosix_host_input_publish_raw(
+                state, event, SOSIX_INPUT_POINTER_BUTTON, timestamp_ns,
+                button, if pressed: 1 else: 0
+            )
+        HostInputEvent.Key(code, ch, down, mods):
+            return _sosix_host_input_publish_raw(
+                state, event, SOSIX_INPUT_KEY, timestamp_ns,
+                code, mods * 2 + (if down: 1 else: 0)
+            )
+        HostInputEvent.Resize(w, h):
+            return _sosix_host_input_publish_raw(state, event, SOSIX_INPUT_RESIZE, timestamp_ns, w.to_i64(), h.to_i64())
+
+fn _sosix_host_input_publish_raw(
+    state: SosixInputStreamState, host_event: HostInputEvent, kind: u8, timestamp_ns: u64,
+    data0: i64, data1: i64
+) -> SosixInputStreamTransition:
+    sosix_input_stream_publish(
+        state,
+        SosixHostInputEvent(
+            kind: kind,
+            sequence: state.next_sequence,
+            timestamp_ns: timestamp_ns,
+            data0: data0,
+            data1: data1,
+            host_event: host_event
+        )
+    )
+
+fn _sosix_host_input_rejected(
+    state: SosixInputStreamState, reason: text
+) -> SosixInputStreamTransition:
+    SosixInputStreamTransition(
+        accepted: false,
+        reason: reason,
+        state: state,
+        has_event: false,
+        event: SosixHostInputEvent(
+            kind: 0, sequence: 0, timestamp_ns: 0, data0: 0, data1: 0, host_event: nil
+        )
+    )
+
+export sosix_host_input_publish

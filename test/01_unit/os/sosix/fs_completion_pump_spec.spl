@@ -1,0 +1,214 @@
+"""Authenticated SOSIX filesystem completion-pump contract."""
+
+use std.spec.*
+use os.sosix.core.operation.{
+    SosixOperationId,
+    SosixOperationSlot,
+    sosix_operation_slot_new,
+    sosix_operation_begin
+}
+use os.sosix.fs.operation_adapter.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
+use os.sosix.fs.async_transport_state.{
+    SosixFsTransportState,
+    sosix_fs_transport_state_new,
+    sosix_fs_transport_submit
+}
+use os.sosix.fs.ipc_codec_v1.{
+    SOSIX_FS_IPC_COMPLETION_FLAG_PARTIAL,
+    SosixFsIpcCompletionV1,
+    sosix_fs_ipc_encode_completion_v1
+}
+use os.sosix.fs.completion_pump.sosix_fs_completion_pump_receive
+
+val FS_SERVICE_ENDPOINT: u64 = 41
+
+struct PendingFixture:
+    operation_slot: SosixOperationSlot
+    transport_state: SosixFsTransportState
+
+fn _pending(slot_index: u32, length: u64) -> PendingFixture:
+    val begun = sosix_operation_begin(slot_index, sosix_operation_slot_new(), 0)
+    val submitted = sosix_fs_transport_submit(
+        sosix_fs_transport_state_new(), begun.operation, length)
+    PendingFixture(operation_slot: begun.slot, transport_state: submitted.state)
+
+fn _wire(
+    api_id: u32,
+    slot: u32,
+    generation: u32,
+    token: u64,
+    status: i32,
+    transferred: u64,
+    payload: [u8]
+) -> [u8]:
+    val flags = if transferred > 0: SOSIX_FS_IPC_COMPLETION_FLAG_PARTIAL else: 0
+    val encoded = sosix_fs_ipc_encode_completion_v1(
+        SosixFsIpcCompletionV1(
+            api_id: api_id,
+            flags: flags,
+            operation_slot: slot,
+            operation_generation: generation,
+            request_token: token,
+            status: status,
+            transferred: transferred,
+            payload: payload
+        )
+    )
+    encoded.bytes
+
+fn _fixture_wire(fixture: PendingFixture, transferred: u64, payload: [u8]) -> [u8]:
+    _wire(
+        SOSIX_FS_READ_AT,
+        fixture.transport_state.active_operation_slot,
+        fixture.transport_state.active_operation_generation,
+        fixture.transport_state.active_request_token,
+        0,
+        transferred,
+        payload
+    )
+
+describe "SOSIX filesystem completion pump":
+    it "publishes one typed partial completion and one notification decision":
+        step("Create one pending read and receive an authenticated partial reply")
+        val fixture = _pending(7, 8)
+        val result = sosix_fs_completion_pump_receive(
+            FS_SERVICE_ENDPOINT,
+            FS_SERVICE_ENDPOINT,
+            SOSIX_FS_READ_AT,
+            fixture.operation_slot,
+            fixture.transport_state,
+            _fixture_wire(fixture, 3, [10, 20, 30])
+        )
+        expect(result.accepted).to_be(true)
+        expect(result.notify).to_be(true)
+        expect(result.completion.api_id).to_equal(SOSIX_FS_READ_AT)
+        expect(result.completion.transferred).to_equal(3)
+        expect(result.completion.partial_progress).to_be(true)
+        expect(result.payload.len()).to_equal(3)
+        expect(result.event.notification_event).to_equal(1)
+
+        step("Feed the same terminal reply back and reject duplicate publication")
+        val duplicate = sosix_fs_completion_pump_receive(
+            FS_SERVICE_ENDPOINT,
+            FS_SERVICE_ENDPOINT,
+            SOSIX_FS_READ_AT,
+            result.operation_slot,
+            result.transport_state,
+            _fixture_wire(fixture, 3, [10, 20, 30])
+        )
+        expect(duplicate.accepted).to_be(false)
+        expect(duplicate.notify).to_be(false)
+        expect(duplicate.reason).to_equal("completion-already-published")
+        expect(duplicate.transport_state.notification_event).to_equal(1)
+
+    it "rejects a spoofed endpoint before decoding attacker bytes":
+        val fixture = _pending(2, 4)
+        val spoofed = sosix_fs_completion_pump_receive(
+            FS_SERVICE_ENDPOINT,
+            99,
+            SOSIX_FS_READ_AT,
+            fixture.operation_slot,
+            fixture.transport_state,
+            [0]
+        )
+        expect(spoofed.accepted).to_be(false)
+        expect(spoofed.notify).to_be(false)
+        expect(spoofed.reason).to_equal("untrusted-service-source")
+
+    it "rejects stale and swapped request identities without notification":
+        val fixture = _pending(5, 4)
+        val stale = sosix_fs_completion_pump_receive(
+            FS_SERVICE_ENDPOINT,
+            FS_SERVICE_ENDPOINT,
+            SOSIX_FS_READ_AT,
+            fixture.operation_slot,
+            fixture.transport_state,
+            _wire(SOSIX_FS_READ_AT, 5, 2, 1, 0, 4, [])
+        )
+        expect(stale.accepted).to_be(false)
+        expect(stale.reason).to_equal("operation-mismatch")
+
+        val swapped = sosix_fs_completion_pump_receive(
+            FS_SERVICE_ENDPOINT,
+            FS_SERVICE_ENDPOINT,
+            SOSIX_FS_READ_AT,
+            fixture.operation_slot,
+            fixture.transport_state,
+            _wire(SOSIX_FS_READ_AT, 6, 1, 1, 0, 4, [])
+        )
+        expect(swapped.accepted).to_be(false)
+        expect(swapped.notify).to_be(false)
+        expect(swapped.reason).to_equal("operation-mismatch")
+
+        val wrong_token = sosix_fs_completion_pump_receive(
+            FS_SERVICE_ENDPOINT,
+            FS_SERVICE_ENDPOINT,
+            SOSIX_FS_READ_AT,
+            fixture.operation_slot,
+            fixture.transport_state,
+            _wire(SOSIX_FS_READ_AT, 5, 1, 2, 0, 4, [])
+        )
+        expect(wrong_token.reason).to_equal("request-token-mismatch")
+
+    it "rejects swapped APIs and malformed wire messages":
+        val fixture = _pending(3, 4)
+        val swapped_api = sosix_fs_completion_pump_receive(
+            FS_SERVICE_ENDPOINT,
+            FS_SERVICE_ENDPOINT,
+            SOSIX_FS_READ_AT,
+            fixture.operation_slot,
+            fixture.transport_state,
+            _wire(SOSIX_FS_WRITE_AT, 3, 1, 1, 0, 4, [])
+        )
+        expect(swapped_api.reason).to_equal("api-mismatch")
+        val malformed = sosix_fs_completion_pump_receive(
+            FS_SERVICE_ENDPOINT,
+            FS_SERVICE_ENDPOINT,
+            SOSIX_FS_READ_AT,
+            fixture.operation_slot,
+            fixture.transport_state,
+            [1, 0, 48]
+        )
+        expect(malformed.reason).to_equal("completion-too-short")
+
+    it "bounds transferred bytes and payload against the pending request":
+        val fixture = _pending(9, 4)
+        val excess_transfer = sosix_fs_completion_pump_receive(
+            FS_SERVICE_ENDPOINT,
+            FS_SERVICE_ENDPOINT,
+            SOSIX_FS_READ_AT,
+            fixture.operation_slot,
+            fixture.transport_state,
+            _fixture_wire(fixture, 5, [])
+        )
+        expect(excess_transfer.reason).to_equal("transferred-exceeds-request")
+
+        val excess_payload = sosix_fs_completion_pump_receive(
+            FS_SERVICE_ENDPOINT,
+            FS_SERVICE_ENDPOINT,
+            SOSIX_FS_READ_AT,
+            fixture.operation_slot,
+            fixture.transport_state,
+            _fixture_wire(fixture, 4, [1, 2, 3, 4, 5])
+        )
+        expect(excess_payload.reason).to_equal("payload-exceeds-request")
+
+        val payload_over_transfer = sosix_fs_completion_pump_receive(
+            FS_SERVICE_ENDPOINT,
+            FS_SERVICE_ENDPOINT,
+            SOSIX_FS_READ_AT,
+            fixture.operation_slot,
+            fixture.transport_state,
+            _fixture_wire(fixture, 2, [1, 2, 3])
+        )
+        expect(payload_over_transfer.reason).to_equal("payload-exceeds-transferred")
+
+        val full_marked_partial = sosix_fs_completion_pump_receive(
+            FS_SERVICE_ENDPOINT,
+            FS_SERVICE_ENDPOINT,
+            SOSIX_FS_READ_AT,
+            fixture.operation_slot,
+            fixture.transport_state,
+            _fixture_wire(fixture, 4, [1, 2, 3, 4])
+        )
+        expect(full_marked_partial.reason).to_equal("partial-flag-mismatch")

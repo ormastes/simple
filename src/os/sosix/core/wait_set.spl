@@ -1,0 +1,104 @@
+"""Notification-oriented state for SOSIX compatibility wait adapters.
+
+This module never sleeps or spins. A completion publisher calls `notify`; an
+OS-specific adapter signals its event/condition only when that returns true.
+The awakened consumer calls `take_ready` until nil, then sleeps again.
+"""
+
+use os.sosix.core.operation.SosixOperationId
+use os.sosix.core.completion.SosixCompletion
+
+pub val SOSIX_WAIT_SET_MAX_OPERATIONS: i64 = 256
+
+class SosixWaitSet:
+    watched: [SosixOperationId]
+    ready: [SosixCompletion]
+    notification_generation: u64
+    consumed_notifications: u64
+    rejected_notifications: u64
+
+impl SosixWaitSet:
+    static fn create() -> SosixWaitSet:
+        SosixWaitSet(
+            watched: [],
+            ready: [],
+            notification_generation: 0,
+            consumed_notifications: 0,
+            rejected_notifications: 0
+        )
+
+    fn watches(operation: SosixOperationId) -> bool:
+        for candidate in self.watched:
+            if candidate.slot == operation.slot and candidate.generation == operation.generation:
+                return true
+        false
+
+    me watch(operation: SosixOperationId) -> bool:
+        if operation.generation == 0 or self.watches(operation):
+            return false
+        if self.watched.len() >= SOSIX_WAIT_SET_MAX_OPERATIONS:
+            return false
+        self.watched = self.watched.push(operation)
+        true
+
+    me notify(completion: SosixCompletion) -> bool:
+        if not self.watches(completion.operation):
+            self.rejected_notifications = self.rejected_notifications + 1
+            return false
+        for existing in self.ready:
+            if (existing.operation.slot == completion.operation.slot and
+                existing.operation.generation == completion.operation.generation):
+                return false
+        # Watches are one-shot. Removing the exact generation here prevents a
+        # duplicated transport completion from waking the consumer again even
+        # after the first ready record has been consumed.
+        var remaining: [SosixOperationId] = []
+        for candidate in self.watched:
+            if (candidate.slot != completion.operation.slot or
+                candidate.generation != completion.operation.generation):
+                remaining = remaining.push(candidate)
+        self.watched = remaining
+        self.ready = self.ready.push(completion)
+        self.notification_generation = self.notification_generation + 1
+        true
+
+    me remove_watch(operation: SosixOperationId):
+        var retained: [SosixOperationId] = []
+        for candidate in self.watched:
+            if candidate.slot != operation.slot or candidate.generation != operation.generation:
+                retained = retained.push(candidate)
+        self.watched = retained
+
+    me take_ready() -> SosixCompletion?:
+        if self.ready.is_empty():
+            return nil
+        val completion = self.ready[0]
+        self.ready = self.ready[1:]
+        self.remove_watch(completion.operation)
+        self.consumed_notifications = self.consumed_notifications + 1
+        completion
+
+    me take_ready_for(operation: SosixOperationId) -> SosixCompletion?:
+        """Take only the requested generation, preserving unrelated readiness."""
+        var retained: [SosixCompletion] = []
+        var matched: SosixCompletion? = nil
+        for completion in self.ready:
+            if (matched == nil and completion.operation.slot == operation.slot and
+                completion.operation.generation == operation.generation):
+                matched = completion
+            else:
+                retained = retained.push(completion)
+        if matched == nil:
+            return nil
+        self.ready = retained
+        self.remove_watch(operation)
+        self.consumed_notifications = self.consumed_notifications + 1
+        matched
+
+    fn has_ready() -> bool:
+        not self.ready.is_empty()
+
+    fn ready_count() -> i64:
+        self.ready.len()
+
+export SOSIX_WAIT_SET_MAX_OPERATIONS, SosixWaitSet

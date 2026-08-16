@@ -1,0 +1,58 @@
+# @cover src/os/sosix/host/display_surface_state.spl 80%
+use std.spec
+use os.sosix.core.operation.{SosixOperationId}
+use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
+use os.sosix.host.service_contract.{SOSIX_HOST_DISPLAY_PRESENT, SosixDisplayRequest, SosixDisplayCompletionKey}
+use os.sosix.host.display_surface_state.{
+    sosix_display_surface_state_create,
+    sosix_display_surface_submit,
+    sosix_display_present_fence_pending,
+    sosix_display_present_fence_observe
+}
+
+fn surface() -> SosixCapabilityRef:
+    SosixCapabilityRef(slot: 31, generation: 7)
+
+fn request() -> SosixDisplayRequest:
+    SosixDisplayRequest(
+        operation: SosixOperationId(slot: 4, generation: 1),
+        api_id: SOSIX_HOST_DISPLAY_PRESENT,
+        surface: surface(),
+        surface_generation: 1,
+        frame_sequence: 1,
+        buffer: SosixBufferRef(slot: 9, generation: 1),
+        deadline_ns: 1000)
+
+fn completion(sequence: u64) -> SosixDisplayCompletionKey:
+    SosixDisplayCompletionKey(
+        surface: surface(), surface_generation: 1, frame_sequence: sequence)
+
+describe "SOSIX asynchronous display presentation fence state":
+    it "keeps a submitted frame in flight until its exact fence is observed":
+        val initial = sosix_display_surface_state_create(surface(), 2).state
+        val submitted = sosix_display_surface_submit(initial, request())
+        val pending = sosix_display_present_fence_pending(submitted.state, completion(1))
+        expect(pending.pending).to_equal(true)
+        expect(pending.state.inflight_count).to_equal(1)
+
+        val wrong = sosix_display_present_fence_observe(pending, completion(2))
+        expect(wrong.accepted).to_equal(false)
+        expect(wrong.reason).to_equal("wrong-present-fence")
+        expect(wrong.fence.pending).to_equal(true)
+        expect(wrong.fence.state.inflight_count).to_equal(1)
+
+        val observed = sosix_display_present_fence_observe(wrong.fence, completion(1))
+        expect(observed.accepted).to_equal(true)
+        expect(observed.reason).to_equal("present-fence-observed")
+        expect(observed.fence.pending).to_equal(false)
+        expect(observed.fence.state.inflight_count).to_equal(0)
+
+    it "rejects a duplicate observation without completing another frame":
+        val initial = sosix_display_surface_state_create(surface(), 2).state
+        val submitted = sosix_display_surface_submit(initial, request())
+        val pending = sosix_display_present_fence_pending(submitted.state, completion(1))
+        val observed = sosix_display_present_fence_observe(pending, completion(1))
+        val duplicate = sosix_display_present_fence_observe(observed.fence, completion(1))
+        expect(duplicate.accepted).to_equal(false)
+        expect(duplicate.reason).to_equal("present-fence-already-completed")
+        expect(duplicate.fence.state.inflight_count).to_equal(0)

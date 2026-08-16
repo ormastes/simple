@@ -8,17 +8,67 @@ source/run aliases before mutation, and compiler-serial validation runs through
 the row's admitted `spec_runtime`.  Their focused self-test is
 `sh scripts/check/check-sosix-qemu-shared-owners.shs --self-test`.
 
-The umbrella remains incomplete.  Linux RV64 still requires admitted
-named/immediate inline-assembly lowering and a fresh producer bundle.  Linux
-x86_32 still lacks the strong `enter_user_first`/GDT/TSS/`esp0`/token/trap
-implementation.  Linux ARM32 still lacks the strong EL0/vector/SVC/token/result
-implementation.  Windows has preflight but no producer-backed guest runner;
+The umbrella remains incomplete. Linux RV64 now has the named/immediate
+inline-assembly transport and real user lifecycle in source, but still needs a
+Stage-4-proven rebuild and fresh producer bundle. Linux x86_32 and ARM32 have
+user-entry/token/trap owners in source; linked-artifact gates distinguish those
+sources from an admissible kernel. The x86_32 source now binds `esp0` to the
+authenticated task/generation before each CPL3 handoff, but no admitted rebuild
+yet proves the new binding symbols are linked. The retained ARM32 kernel passes
+its linked gate, while the retained x86_32 kernel predates the binding and is
+rejected. Windows has preflight but no producer-backed guest runner;
 FreeBSD requires admitted native media/execution; macOS requires native Darwin
 execution.  The modern executable handoff spec is
 `test/03_system/os/qemu/sosix_qemu_remaining_owners_spec.spl`; its generated
 manual is blocked because the available self-hosted `spipe-docgen` crashed
 with exit 139; the same runtime also crashed with exit 139 when executing the
 modern SSpec. No hand-written file may substitute for generated evidence.
+
+## 2026-08-16 full-plan continuation status
+
+The broader SOSIX prerequisite set is restored under the canonical feature
+slug: local/domain research, selected feature/NFR requirements, architecture,
+detail design, and system-test plan. The first host-independent implementation
+slice restores typed operation/capability ownership, completion queues,
+wait-set/synchronous notification decisions, asynchronous FS client/transport,
+completion pumping, OFD sequencing, and the positioned-I/O dependency closure
+under `src/os/sosix/{core,fs}`. It includes syscall 134/135
+envelopes, authenticated registry/provider transactions, a true positioned
+backend contract, value-threaded request-token progression, and a fail-closed
+install/dispatch owner. Four focused specs cover the public syscall, provider,
+owner, and install/dispatch boundaries. This remains a library slice: the
+existing live kernel syscall path has not adopted the owner/backend state, and
+the current FAT32 driver exposes only cursor-based I/O, so no production FAT32
+positioned adapter is claimed.
+
+The typed host seam is also restored under `src/os/sosix/host`, with bounded
+display-surface and input-stream state plus configuration, timer, process,
+library, and producer contracts. The headless adapter reuses the canonical
+backend in `host_compositor_core`; SDL2, Win32, and Cocoa adapters use the same
+host seam. Their unit/integration specs are present. These restorations are
+host-independent source work, not native producer or visual evidence.
+
+The x86_32 rebuild profile now includes the parent SimpleOS tree, `src/os`, and
+`src/lib`; the lightweight rebuild self-test binds that source closure. Both
+32-bit lifecycle admission scripts validate actual ELF class/machine/entry and
+strong linked symbols with `readelf`/`nm`, rather than accepting source grep.
+The RV64 lane adds a behavioral result-boundary spec for exact nonce stdout,
+exit 37, truncation, late writes, and stale-output clearing.
+
+Verification is intentionally incomplete. The direct pure-Simple deployed CLI
+exited 139 before the positioned-I/O scenario ran and also exited 139 on a
+separate source check; neither unchanged criterion is rerun in this session.
+There is no provenance-admitted Stage-4 CLI for the new RV64 spec or rebuilt
+guest media. No Rust seed or Stage-3 artifact substitutes. Linux x86_32 still
+needs one admitted rebuild that makes `rt_x86_32_tss_set_esp0` strong, followed
+by one canonical QEMU run; all external-host rows retain their existing
+blocked/postponed state.
+
+A bounded typed-evidence audit also found that collector v2 publishes an
+admission-record path without an admission-record SHA-256. The historical v1
+importer is both schema-incompatible and first-line-only, so it was not
+restored. The concrete release-trust blocker and sabotage contract are tracked
+in `doc/08_tracking/bug/sosix_qemu_v2_admission_record_hash_binding_2026-08-16.md`.
 
 ## Objective
 
@@ -105,9 +155,10 @@ state is not permission to weaken the 24-row contract or claim matrix PASS.
 | L1 Linux x86_64 | x86_64 OVMF/GRUB fs-exec entry and boot artifacts | canonical PASS | OVMF→GRUB→guest-entry, real listing, mounted program stdout, exit37/reap/PASS | N/A | root | root/high |
 | L2 Linux ARM64 | ARM64 direct-kernel fs-exec entry, nonce reader and EL0 lifecycle | canonical PASS | direct-kernel v2 bundle, exact ordered serial lifecycle | N/A | root | root/high |
 | L3 Linux RV32 | RV32 direct-kernel trap lifecycle and nonce media | canonical PASS | direct-kernel v2 bundle, M-mode recovery and exact reap | N/A | root | root/high |
-| L4 Linux RV64 | RV64 compiler operand transport, then live fs-exec | blocked | admitted compiler must lower named/immediate asm operands; fresh rebuild then canonical run | N/A | compiler owner | root/high |
-| L5 Linux x86_32 | First establish an i686 CPL3 build profile that includes the parent SimpleOS tree, `src/os`, and `src/lib`; then own GDT/TSS/`esp0`, authenticated token, `enter_user_first`, trap return, and mounted ELF staging | blocked | i386 link gate proves strong entry/TSS/token symbols before any QEMU; then live iret/int80/exit37 continuation plus exact scheduler reap | N/A | x86_32 kernel owner | root/high |
-| L6 Linux ARM32 | Own real `enter_user_first.s`, exception-vector/SVC entry, token/result lifecycle in baremetal C, scheduler binding, and mounted ELF staging | blocked | ARM link gate proves vector + EL0 entry symbols; then real vector/TTBR lifecycle, target listing/program and exact reap | N/A | ARM32 kernel owner | root/high |
+| L4 Linux RV64 | RV64 compiler operand transport, real user lifecycle, and focused result-boundary spec | source implemented; verification blocked | provenance-admitted Stage-4 focused spec, fresh rebuild, then canonical run | N/A | compiler owner | root/high |
+| L5 Linux x86_32 | Broad i686 source closure plus task/generation-bound GDT/TSS/`esp0`, authenticated token, `enter_user_first`, trap return, and mounted ELF staging | source corrected; retained ELF predates and lacks strong `rt_x86_32_tss_set_esp0`/`rt_x86_32_tss_bind_task` | admitted rebuild, passing linked-symbol gate, then live iret/int80/exit37 continuation plus exact scheduler reap | N/A | x86_32 kernel owner | root/high |
+| L6 Linux ARM32 | Real `enter_user_first.s`, exception-vector/SVC entry, token/result lifecycle, scheduler binding, and mounted ELF staging | source and retained linked ELF admitted; live row blocked | canonical vector/TTBR lifecycle, target listing/program and exact reap | N/A | ARM32 kernel owner | root/high |
+| L10 SOSIX positioned I/O | `src/os/sosix/{core,fs}` typed operation/capability and syscall 134/135 owner/provider library closure | partial source; no live kernel-dispatch adoption or true FAT32 positioned primitive; focused execution blocked by deployed CLI exit 139 | wire a production backend and state owner, then four focused interpreter specs on a provenance-admitted Stage-4 CLI | N/A | root | root/high |
 | L7 Windows | PowerShell matrix execution and native producer | blocked external host | actual Windows admission plus all six bundles; no Linux relabeling | N/A | Windows operator | root/high |
 | L8 FreeBSD | image/bootstrap and native FreeBSD matrix execution | blocked external host | checksum-pinned image/bootstrap, then all six FreeBSD bundles | N/A | FreeBSD operator | root/high |
 | L9 macOS | Darwin QEMU/firmware/native execution | postponed external host | prepared Darwin host, actual admission and six bundles | N/A | macOS operator | root/high |

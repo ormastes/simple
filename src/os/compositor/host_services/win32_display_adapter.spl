@@ -1,0 +1,113 @@
+"""Win32 renderer-host boundary over SOSIX capabilities and canonical Draw IR.
+
+Configuration is injected as an immutable SOSIX snapshot, display authority is
+carried by ``SosixDisplayRequest``, and Engine2D remains the only raster owner.
+A successful Win32 BitBlt submits pixels but is not a completion oracle, so the
+SOSIX present fence remains explicitly pending for a host completion producer.
+"""
+
+use common.ui.draw_ir.{DrawIrComposition}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.hosted_backend_win32.{HostedWin32Backend}
+use os.sosix.host.service_contract.{
+    SosixHostConfigurationSnapshot,
+    SosixDisplayRequest,
+    SosixDisplayCompletionKey,
+    sosix_display_request_create
+}
+use os.sosix.host.display_surface_state.{
+    SosixDisplaySurfaceState,
+    sosix_display_surface_submit,
+    sosix_display_present_fence_pending
+}
+
+pub struct SosixWin32PresentSubmission:
+    accepted: bool
+    reason: text
+    state: SosixDisplaySurfaceState
+    completion: SosixDisplayCompletionKey
+    composition_id: text
+
+export SosixWin32PresentSubmission
+
+fn _win32_completion(request: SosixDisplayRequest) -> SosixDisplayCompletionKey:
+    SosixDisplayCompletionKey(
+        surface: request.surface,
+        surface_generation: request.surface_generation,
+        frame_sequence: request.frame_sequence
+    )
+
+fn _win32_rejected(
+    reason: text,
+    state: SosixDisplaySurfaceState,
+    request: SosixDisplayRequest,
+    composition_id: text
+) -> SosixWin32PresentSubmission:
+    SosixWin32PresentSubmission(
+        accepted: false,
+        reason: reason,
+        state: state,
+        completion: _win32_completion(request),
+        composition_id: composition_id
+    )
+
+pub fn sosix_win32_submit_composition(
+    configuration: SosixHostConfigurationSnapshot,
+    raster: Engine2dCompositorBackend,
+    display: HostedWin32Backend,
+    state: SosixDisplaySurfaceState,
+    request: SosixDisplayRequest,
+    composition: DrawIrComposition
+) -> SosixWin32PresentSubmission:
+    if configuration.display_backend.trim().lower() != "win32":
+        return _win32_rejected(
+            "win32-not-configured", state, request, composition.composition_id)
+    if not HostedWin32Backend.uses_native_win32_symbols():
+        return _win32_rejected(
+            "win32-host-unavailable", state, request, composition.composition_id)
+    if display.window_id <= 0 or display.buffer_id <= 0:
+        return _win32_rejected(
+            "win32-surface-unavailable", state, request, composition.composition_id)
+    if display.w != raster.w or display.h != raster.h:
+        return _win32_rejected(
+            "display-size-mismatch", state, request, composition.composition_id)
+
+    val validated = sosix_display_request_create(
+        request.operation,
+        request.api_id,
+        request.surface,
+        request.surface_generation,
+        request.frame_sequence,
+        request.buffer,
+        request.deadline_ns
+    )
+    if not validated.accepted:
+        return _win32_rejected(
+            validated.reason, state, request, composition.composition_id)
+    val submitted = sosix_display_surface_submit(state, request)
+    if not submitted.accepted:
+        return _win32_rejected(
+            submitted.reason, state, request, composition.composition_id)
+
+    val rendered = raster.render_draw_ir_composition(composition, [])
+    if (rendered.fallback_required or rendered.skipped_command_count != 0 or
+        rendered.rendered_command_count == 0 or
+        rendered.pixels.len() != display.w * display.h):
+        return _win32_rejected(
+            "draw-ir-render-rejected", state, request, composition.composition_id)
+
+    display.blit_pixels(0, 0, display.w, display.h, rendered.pixels)
+    if not display.present_checked():
+        return _win32_rejected(
+            "win32-present-failed", state, request, composition.composition_id)
+    val pending = sosix_display_present_fence_pending(
+        submitted.state, _win32_completion(request))
+    SosixWin32PresentSubmission(
+        accepted: true,
+        reason: "present-awaiting-host-completion",
+        state: pending.state,
+        completion: _win32_completion(request),
+        composition_id: composition.composition_id
+    )
+
+export sosix_win32_submit_composition

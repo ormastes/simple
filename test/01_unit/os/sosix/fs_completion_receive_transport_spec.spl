@@ -1,0 +1,168 @@
+"""Owned-copy syscall-133 completion receive transport contract."""
+
+use std.spec.*
+use os.sosix.core.operation.{SosixOperationSlot, sosix_operation_slot_new, sosix_operation_begin}
+use os.sosix.fs.operation_adapter.SOSIX_FS_READ_AT
+use os.sosix.fs.async_transport_state.{
+    SosixFsTransportState, sosix_fs_transport_state_new, sosix_fs_transport_submit
+}
+use os.sosix.fs.ipc_codec_v1.{
+    SOSIX_FS_IPC_COMPLETION_FLAG_PARTIAL,
+    SosixFsIpcCompletionV1, sosix_fs_ipc_encode_completion_v1
+}
+use os.sosix.fs.completion_receive_transport.{
+    SOSIX_FS_COMPLETION_RECEIVE_CAPACITY_V1,
+    SOSIX_FS_COMPLETION_RECEIVE_EAGAIN,
+    sosix_fs_completion_receive_owned_result_v1
+}
+
+val SERVICE: u64 = 41
+val REPLY: u64 = 77
+
+struct Fixture:
+    slot: SosixOperationSlot
+    transport: SosixFsTransportState
+
+fn _push_u32(out: [u8], value: u32):
+    out.push((value & 0xff) as u8)
+    out.push(((value >> 8) & 0xff) as u8)
+    out.push(((value >> 16) & 0xff) as u8)
+    out.push(((value >> 24) & 0xff) as u8)
+
+fn _push_u64(out: [u8], value: u64):
+    _push_u32(out, (value & 0xffffffff) as u32)
+    _push_u32(out, ((value >> 32) & 0xffffffff) as u32)
+
+fn _pending() -> Fixture:
+    _pending_length(8)
+
+fn _pending_length(length: u64) -> Fixture:
+    val begun = sosix_operation_begin(5, sosix_operation_slot_new(), 0)
+    val submitted = sosix_fs_transport_submit(
+        sosix_fs_transport_state_new(), begun.operation, length)
+    Fixture(slot: begun.slot, transport: submitted.state)
+
+fn _payload(fixture: Fixture, token: u64) -> [u8]:
+    val encoded = sosix_fs_ipc_encode_completion_v1(SosixFsIpcCompletionV1(
+        api_id: SOSIX_FS_READ_AT,
+        flags: SOSIX_FS_IPC_COMPLETION_FLAG_PARTIAL,
+        operation_slot: fixture.transport.active_operation_slot,
+        operation_generation: fixture.transport.active_operation_generation,
+        request_token: token, status: 0, transferred: 3,
+        payload: [1, 2, 3]
+    ))
+    encoded.bytes
+
+fn _envelope(source: u64, destination: u64, method: u32, flags: u32,
+             cap_count: u32, payload: [u8]) -> [u8]:
+    var out: [u8] = []
+    _push_u64(out, source)
+    _push_u64(out, destination)
+    _push_u32(out, method)
+    _push_u32(out, flags)
+    _push_u32(out, payload.len() as u32)
+    _push_u32(out, cap_count)
+    for byte in payload: out.push(byte)
+    out
+
+fn _receive(fixture: Fixture, envelope: [u8], status: i64):
+    sosix_fs_completion_receive_owned_result_v1(
+        status, envelope, SERVICE, REPLY, SOSIX_FS_READ_AT,
+        fixture.slot, fixture.transport)
+
+fn _receive_pending_at(fixture: Fixture, service: u64, reply: u64):
+    sosix_fs_completion_receive_owned_result_v1(
+        SOSIX_FS_COMPLETION_RECEIVE_EAGAIN, [], service, reply,
+        SOSIX_FS_READ_AT, fixture.slot, fixture.transport)
+
+describe "SOSIX owned completion receive transport":
+    it "rejects invalid endpoint contracts before classifying EAGAIN":
+        val fixture = _pending()
+        val service_result = _receive_pending_at(fixture, 0, REPLY)
+        expect(service_result.accepted).to_be(false)
+        expect(service_result.pending).to_be(false)
+        expect(service_result.reason).to_equal("invalid-service-endpoint")
+        val reply_result = _receive_pending_at(fixture, SERVICE, 0)
+        expect(reply_result.accepted).to_be(false)
+        expect(reply_result.pending).to_be(false)
+        expect(reply_result.reason).to_equal("invalid-reply-endpoint")
+
+    it "exposes EAGAIN as pending without publishing":
+        step("Poll once while the owned reply endpoint is empty")
+        val fixture = _pending()
+        val result = _receive(fixture, [], SOSIX_FS_COMPLETION_RECEIVE_EAGAIN)
+        expect(result.accepted).to_be(false)
+        expect(result.pending).to_be(true)
+        expect(result.reason).to_equal("completion-pending")
+        expect(result.pump.notify).to_be(false)
+        expect(result.pump.transport_state.notification_event).to_equal(0)
+
+    it "authenticates kernel envelope facts and publishes exactly once":
+        step("Receive one bounded completion from the expected service and reply endpoint")
+        val fixture = _pending()
+        val envelope = _envelope(
+            SERVICE, REPLY, SOSIX_FS_READ_AT, 1, 0,
+            _payload(fixture, fixture.transport.active_request_token))
+        val first = _receive(fixture, envelope, envelope.len() as i64)
+        expect(first.accepted).to_be(true)
+        expect(first.pending).to_be(false)
+        expect(first.pump.notify).to_be(true)
+        expect(first.pump.payload.len()).to_equal(3)
+        expect(first.pump.transport_state.notification_event).to_equal(1)
+
+        step("Replay the same owned envelope after terminal publication")
+        val duplicate = sosix_fs_completion_receive_owned_result_v1(
+            envelope.len() as i64, envelope, SERVICE, REPLY, SOSIX_FS_READ_AT,
+            first.pump.operation_slot, first.pump.transport_state)
+        expect(duplicate.accepted).to_be(false)
+        expect(duplicate.pump.notify).to_be(false)
+        expect(duplicate.reason).to_equal("completion-already-published")
+        expect(duplicate.pump.transport_state.notification_event).to_equal(1)
+
+    it "rejects spoofed source, swapped reply endpoint, and stale token":
+        val fixture = _pending()
+        val payload = _payload(fixture, fixture.transport.active_request_token)
+        val spoofed = _envelope(99, REPLY, SOSIX_FS_READ_AT, 1, 0, payload)
+        val spoofed_result = _receive(fixture, spoofed, spoofed.len() as i64)
+        expect(spoofed_result.reason).to_equal("untrusted-service-source")
+        val swapped = _envelope(SERVICE, 78, SOSIX_FS_READ_AT, 1, 0, payload)
+        val swapped_result = _receive(fixture, swapped, swapped.len() as i64)
+        expect(swapped_result.reason).to_equal("unexpected-reply-endpoint")
+        val stale = _envelope(SERVICE, REPLY, SOSIX_FS_READ_AT, 1, 0, _payload(fixture, 9))
+        val stale_result = _receive(fixture, stale, stale.len() as i64)
+        expect(stale_result.reason).to_equal("request-token-mismatch")
+
+    it "rejects oversized, truncated, and capability-bearing envelopes":
+        val fixture = _pending()
+        val payload = _payload(fixture, fixture.transport.active_request_token)
+        val valid = _envelope(SERVICE, REPLY, SOSIX_FS_READ_AT, 1, 0, payload)
+        val truncated = _receive(fixture, valid, valid.len() as i64 + 1)
+        expect(truncated.reason).to_equal("owned-envelope-size-mismatch")
+        val oversized = _receive(fixture, valid, 4177)
+        expect(oversized.reason).to_equal("owned-envelope-size-mismatch")
+        val capability = _envelope(SERVICE, REPLY, SOSIX_FS_READ_AT, 1, 1, payload)
+        val capability_result = _receive(
+            fixture, capability, capability.len() as i64)
+        expect(capability_result.reason).to_equal("unsupported-owned-envelope-metadata")
+
+    it "accepts the exact maximum completion envelope and rejects one byte beyond it":
+        val fixture = _pending_length(4096)
+        var bytes: [u8] = []
+        var index: u64 = 0
+        while index < 4096:
+            bytes.push((index & 0xff) as u8)
+            index = index + 1
+        val encoded = sosix_fs_ipc_encode_completion_v1(SosixFsIpcCompletionV1(
+            api_id: SOSIX_FS_READ_AT, flags: 0,
+            operation_slot: fixture.transport.active_operation_slot,
+            operation_generation: fixture.transport.active_operation_generation,
+            request_token: fixture.transport.active_request_token,
+            status: 0, transferred: 4096, payload: bytes))
+        val completion = encoded.bytes
+        val boundary = _envelope(SERVICE, REPLY, SOSIX_FS_READ_AT, 1, 0, completion)
+        expect(boundary.len() as u64).to_equal(SOSIX_FS_COMPLETION_RECEIVE_CAPACITY_V1)
+        val accepted = _receive(fixture, boundary, boundary.len() as i64)
+        expect(accepted.accepted).to_be(true)
+        expect(accepted.pump.payload.len()).to_equal(4096)
+        val beyond = _receive(fixture, boundary, boundary.len() as i64 + 1)
+        expect(beyond.reason).to_equal("owned-envelope-size-mismatch")

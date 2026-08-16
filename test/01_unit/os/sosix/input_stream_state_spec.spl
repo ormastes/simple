@@ -1,0 +1,69 @@
+# @cover src/os/sosix/host/input_stream_state.spl 80%
+use std.spec
+use os.sosix.core.capability_ref.{SosixCapabilityRef}
+use os.sosix.host.input_stream_state.{
+    SOSIX_INPUT_POINTER_MOVE,
+    SOSIX_INPUT_POINTER_BUTTON,
+    SOSIX_INPUT_KEY,
+    SosixHostInputEvent,
+    SosixInputStreamState,
+    sosix_input_stream_state_create,
+    sosix_input_stream_publish,
+    sosix_input_stream_try_take,
+    sosix_input_stream_close
+}
+
+fn stream() -> SosixCapabilityRef:
+    SosixCapabilityRef(slot: 6, generation: 2)
+
+fn fresh(capacity: u32) -> SosixInputStreamState:
+    sosix_input_stream_state_create(stream(), capacity).state
+
+fn event(kind: u8, sequence: u64, timestamp: u64, data0: i64) -> SosixHostInputEvent:
+    SosixHostInputEvent(kind: kind, sequence: sequence, timestamp_ns: timestamp, data0: data0, data1: 0, host_event: nil)
+
+describe "SOSIX asynchronous input stream":
+    it "rejects invalid stream and zero capacity":
+        val invalid = SosixCapabilityRef(slot: 6, generation: 0)
+        expect(sosix_input_stream_state_create(invalid, 2).reason).to_equal("invalid-input-stream")
+        expect(sosix_input_stream_state_create(stream(), 0).reason).to_equal("zero-input-capacity")
+
+    it "publishes and consumes events in sequence":
+        val one = sosix_input_stream_publish(fresh(2), event(SOSIX_INPUT_KEY, 1, 10, 65))
+        val two = sosix_input_stream_publish(one.state, event(SOSIX_INPUT_POINTER_BUTTON, 2, 11, 1))
+        val first = sosix_input_stream_try_take(two.state)
+        val second = sosix_input_stream_try_take(first.state)
+        expect(first.event.sequence).to_equal(1)
+        expect(second.event.sequence).to_equal(2)
+        expect(second.state.events.len()).to_equal(0)
+
+    it "rejects sequence gaps and regressing timestamps":
+        val state = fresh(2)
+        expect(sosix_input_stream_publish(state, event(SOSIX_INPUT_KEY, 2, 10, 65)).reason).to_equal("unexpected-input-sequence")
+        val first = sosix_input_stream_publish(state, event(SOSIX_INPUT_KEY, 1, 10, 65)).state
+        expect(sosix_input_stream_publish(first, event(SOSIX_INPUT_KEY, 2, 9, 66)).reason).to_equal("input-time-regressed")
+
+    it "coalesces only the newest pointer motion when full":
+        val first = sosix_input_stream_publish(fresh(2), event(SOSIX_INPUT_KEY, 1, 10, 65)).state
+        val motion = sosix_input_stream_publish(first, event(SOSIX_INPUT_POINTER_MOVE, 2, 11, 10)).state
+        val coalesced = sosix_input_stream_publish(motion, event(SOSIX_INPUT_POINTER_MOVE, 3, 12, 20))
+        expect(coalesced.reason).to_equal("motion-coalesced")
+        expect(coalesced.state.events.len()).to_equal(2)
+        val key = sosix_input_stream_try_take(coalesced.state)
+        val newest_motion = sosix_input_stream_try_take(key.state)
+        expect(newest_motion.event.sequence).to_equal(3)
+        expect(newest_motion.event.data0).to_equal(20)
+
+    it "applies backpressure to non-motion and nonadjacent motion":
+        val key = sosix_input_stream_publish(fresh(1), event(SOSIX_INPUT_KEY, 1, 10, 65)).state
+        expect(sosix_input_stream_publish(key, event(SOSIX_INPUT_POINTER_MOVE, 2, 11, 4)).reason).to_equal("input-backpressure")
+        val motion = sosix_input_stream_publish(fresh(1), event(SOSIX_INPUT_POINTER_MOVE, 1, 10, 4)).state
+        expect(sosix_input_stream_publish(motion, event(SOSIX_INPUT_KEY, 2, 11, 65)).reason).to_equal("input-backpressure")
+
+    it "allows draining after close but rejects new publication":
+        val queued = sosix_input_stream_publish(fresh(1), event(SOSIX_INPUT_KEY, 1, 10, 65)).state
+        val closed = sosix_input_stream_close(queued)
+        expect(sosix_input_stream_publish(closed.state, event(SOSIX_INPUT_KEY, 2, 11, 66)).reason).to_equal("input-stream-closed")
+        val drained = sosix_input_stream_try_take(closed.state)
+        expect(drained.event.sequence).to_equal(1)
+        expect(sosix_input_stream_try_take(drained.state).reason).to_equal("input-stream-closed")

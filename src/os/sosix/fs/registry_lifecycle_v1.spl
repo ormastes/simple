@@ -1,0 +1,164 @@
+"""Bounded persistent ownership for the SOSIX FS positioned-I/O registry.
+
+The kernel or filesystem service keeps one ``SosixFsRegistryOwnerV1`` value and
+publishes the returned value after every accepted transition.  Control facts
+come from the authenticated IPC/syscall boundary; callers cannot select an
+owner or service generation.  Entries contain opaque integer identities only.
+"""
+
+use os.sosix.core.capability_ref.SosixCapabilityRef
+use os.sosix.fs.service_adapter_v1.{
+    SOSIX_FS_SERVICE_RIGHT_READ_V1, SOSIX_FS_SERVICE_RIGHT_WRITE_V1,
+    SOSIX_FS_SERVICE_MAX_CAPABILITIES_V1,
+    SosixFsCapabilityEntryV1, SosixFsServiceRegistryV1
+}
+
+pub struct SosixFsRegistryControlFactsV1:
+    caller_authenticated: bool
+    caller_process_id: u64
+    service_endpoint: u64
+    service_generation: u32
+
+pub struct SosixFsRegistryOwnerV1:
+    service_endpoint: u64
+    service_generation: u32
+    registry: SosixFsServiceRegistryV1
+
+pub struct SosixFsCapabilityLifecycleResultV1:
+    accepted: bool
+    reason: text
+    owner: SosixFsRegistryOwnerV1
+    capability: SosixCapabilityRef
+
+export SosixFsRegistryControlFactsV1, SosixFsRegistryOwnerV1
+export SosixFsCapabilityLifecycleResultV1
+
+pub fn sosix_fs_registry_owner_v1(service_endpoint: u64, service_generation: u32) -> SosixFsRegistryOwnerV1:
+    SosixFsRegistryOwnerV1(
+        service_endpoint: service_endpoint, service_generation: service_generation,
+        registry: SosixFsServiceRegistryV1(capabilities: [], buffers: []))
+
+fn _invalid_ref_v1() -> SosixCapabilityRef:
+    SosixCapabilityRef(slot: 0, generation: 0)
+
+fn _reject_v1(reason: text, owner: SosixFsRegistryOwnerV1) -> SosixFsCapabilityLifecycleResultV1:
+    SosixFsCapabilityLifecycleResultV1(
+        accepted: false, reason: reason, owner: owner, capability: _invalid_ref_v1())
+
+fn _facts_match_v1(owner: SosixFsRegistryOwnerV1, facts: SosixFsRegistryControlFactsV1) -> bool:
+    facts.caller_authenticated and facts.caller_process_id != 0 and
+        owner.service_endpoint != 0 and facts.service_endpoint == owner.service_endpoint and
+        owner.service_generation != 0 and facts.service_generation == owner.service_generation
+
+fn _rights_valid_v1(rights: u32) -> bool:
+    val known = SOSIX_FS_SERVICE_RIGHT_READ_V1 | SOSIX_FS_SERVICE_RIGHT_WRITE_V1
+    rights != 0 and (rights & ~known) == 0
+
+pub fn sosix_fs_registry_register_capability_v1(
+    owner: SosixFsRegistryOwnerV1, facts: SosixFsRegistryControlFactsV1,
+    capability: SosixCapabilityRef, file_object_id: u64, rights: u32
+) -> SosixFsCapabilityLifecycleResultV1:
+    if not _facts_match_v1(owner, facts):
+        return _reject_v1("unauthenticated-capability-registration", owner)
+    if capability.slot == 0 or capability.generation == 0 or file_object_id == 0 or not _rights_valid_v1(rights):
+        return _reject_v1("invalid-capability-registration", owner)
+    var entries = owner.registry.capabilities
+    var reusable = entries.len().to_u64()
+    var index = 0u64
+    while index < entries.len().to_u64():
+        val entry = entries[index]
+        if entry.ref_.slot == capability.slot:
+            if entry.active:
+                return _reject_v1("capability-slot-already-active", owner)
+            if entry.ref_.generation != capability.generation:
+                return _reject_v1("stale-capability-generation", owner)
+            reusable = index
+        index = index + 1
+    if reusable == entries.len().to_u64() and entries.len().to_u64() >= SOSIX_FS_SERVICE_MAX_CAPABILITIES_V1:
+        return _reject_v1("capability-registry-full", owner)
+    val entry = SosixFsCapabilityEntryV1(
+        active: true, ref_: capability, owner_process_id: facts.caller_process_id,
+        file_object_id: file_object_id, rights: rights)
+    if reusable < entries.len().to_u64(): entries[reusable] = entry
+    else: entries.push(entry)
+    val next = SosixFsRegistryOwnerV1(
+        service_endpoint: owner.service_endpoint, service_generation: owner.service_generation,
+        registry: SosixFsServiceRegistryV1(capabilities: entries, buffers: owner.registry.buffers))
+    SosixFsCapabilityLifecycleResultV1(
+        accepted: true, reason: "capability-registered", owner: next, capability: capability)
+
+pub fn sosix_fs_registry_refresh_capability_v1(
+    owner: SosixFsRegistryOwnerV1, facts: SosixFsRegistryControlFactsV1,
+    capability: SosixCapabilityRef, file_object_id: u64, rights: u32
+) -> SosixFsCapabilityLifecycleResultV1:
+    if not _facts_match_v1(owner, facts):
+        return _reject_v1("unauthenticated-capability-refresh", owner)
+    if file_object_id == 0 or not _rights_valid_v1(rights):
+        return _reject_v1("invalid-capability-refresh", owner)
+    var entries = owner.registry.capabilities
+    var index = 0u64
+    while index < entries.len().to_u64():
+        val entry = entries[index]
+        if entry.active and entry.ref_.slot == capability.slot and entry.ref_.generation == capability.generation:
+            if entry.owner_process_id != facts.caller_process_id:
+                return _reject_v1("capability-owner-mismatch", owner)
+            entries[index].file_object_id = file_object_id
+            entries[index].rights = rights
+            val next = SosixFsRegistryOwnerV1(
+                service_endpoint: owner.service_endpoint, service_generation: owner.service_generation,
+                registry: SosixFsServiceRegistryV1(capabilities: entries, buffers: owner.registry.buffers))
+            return SosixFsCapabilityLifecycleResultV1(
+                accepted: true, reason: "capability-refreshed", owner: next, capability: capability)
+        index = index + 1
+    _reject_v1("stale-capability", owner)
+
+pub fn sosix_fs_registry_retire_capability_v1(
+    owner: SosixFsRegistryOwnerV1, facts: SosixFsRegistryControlFactsV1,
+    capability: SosixCapabilityRef
+) -> SosixFsCapabilityLifecycleResultV1:
+    if not _facts_match_v1(owner, facts):
+        return _reject_v1("unauthenticated-capability-retirement", owner)
+    var entries = owner.registry.capabilities
+    var index = 0u64
+    while index < entries.len().to_u64():
+        val entry = entries[index]
+        if entry.active and entry.ref_.slot == capability.slot and entry.ref_.generation == capability.generation:
+            if entry.owner_process_id != facts.caller_process_id:
+                return _reject_v1("capability-owner-mismatch", owner)
+            val advanced = entry.ref_.generation + 1
+            val next_generation = if advanced == 0: 1u32 else: advanced
+            entries[index] = SosixFsCapabilityEntryV1(
+                active: false,
+                ref_: SosixCapabilityRef(slot: entry.ref_.slot, generation: next_generation),
+                owner_process_id: entry.owner_process_id, file_object_id: 0, rights: 0)
+            val next = SosixFsRegistryOwnerV1(
+                service_endpoint: owner.service_endpoint, service_generation: owner.service_generation,
+                registry: SosixFsServiceRegistryV1(capabilities: entries, buffers: owner.registry.buffers))
+            return SosixFsCapabilityLifecycleResultV1(
+                accepted: true, reason: "capability-retired", owner: next,
+                capability: SosixCapabilityRef(slot: entry.ref_.slot, generation: next_generation))
+        index = index + 1
+    _reject_v1("stale-capability", owner)
+
+pub fn sosix_fs_registry_lookup_capability_v1(
+    owner: SosixFsRegistryOwnerV1, facts: SosixFsRegistryControlFactsV1,
+    capability: SosixCapabilityRef, required_right: u32
+) -> SosixFsCapabilityLifecycleResultV1:
+    if not _facts_match_v1(owner, facts):
+        return _reject_v1("unauthenticated-capability-lookup", owner)
+    var matches = 0u32
+    for entry in owner.registry.capabilities:
+        if (entry.active and entry.ref_.slot == capability.slot and
+            entry.ref_.generation == capability.generation and
+            entry.owner_process_id == facts.caller_process_id and
+            (entry.rights & required_right) == required_right):
+            matches = matches + 1
+    if matches != 1:
+        val reason = if matches == 0: "stale-or-denied-capability" else: "ambiguous-capability"
+        return _reject_v1(reason, owner)
+    SosixFsCapabilityLifecycleResultV1(
+        accepted: true, reason: "capability-authorized", owner: owner, capability: capability)
+
+export sosix_fs_registry_owner_v1
+export sosix_fs_registry_register_capability_v1, sosix_fs_registry_refresh_capability_v1
+export sosix_fs_registry_retire_capability_v1, sosix_fs_registry_lookup_capability_v1

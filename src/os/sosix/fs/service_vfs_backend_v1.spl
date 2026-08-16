@@ -1,0 +1,109 @@
+"""Pointer-free SOSIX plans dispatched only to true positioned-I/O backends."""
+
+use os.sosix.fs.operation_adapter.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
+use os.sosix.fs.service_adapter_v1.{
+    SosixFsServicePrepareResultV1,
+    SOSIX_FS_SERVICE_STATUS_INVALID_V1
+}
+
+pub val SOSIX_FS_VFS_STATUS_IO_V1: i32 = -5
+pub val SOSIX_FS_VFS_STATUS_UNAVAILABLE_V1: i32 = -38
+
+pub trait SosixPositionedVfsBackendV1:
+    """Lower-layer contract: operations must never mutate an OFD cursor."""
+    fn positioned_io_available() -> bool
+    fn read_at(file_object_id: u64, offset: u64, length: u64) -> Result<[u8], text>
+    me fn write_at(file_object_id: u64, offset: u64, data: [u8]) -> Result<u64, text>
+
+pub struct SosixFsVfsDispatchResultV1:
+    accepted: bool
+    reason: text
+    status: i32
+    transferred: u64
+    buffer: [u8]
+
+export SOSIX_FS_VFS_STATUS_IO_V1, SOSIX_FS_VFS_STATUS_UNAVAILABLE_V1
+export SosixPositionedVfsBackendV1, SosixFsVfsDispatchResultV1
+
+fn _reject(reason: text, buffer: [u8]) -> SosixFsVfsDispatchResultV1:
+    SosixFsVfsDispatchResultV1(
+        accepted: false, reason: reason,
+        status: SOSIX_FS_SERVICE_STATUS_INVALID_V1,
+        transferred: 0, buffer: buffer
+    )
+
+fn _slice(data: [u8], start: u64, length: u64) -> [u8]:
+    var out: [u8] = []
+    var i = 0u64
+    while i < length:
+        out.push(data[(start + i).to_i32()])
+        i = i + 1
+    out
+
+fn _copy_into(target: [u8], start: u64, data: [u8]) -> [u8]:
+    var out = target
+    var i = 0i32
+    while i < data.len():
+        out[(start + i.to_u64()).to_i32()] = data[i]
+        i = i + 1
+    out
+
+pub fn sosix_fs_service_dispatch_vfs_v1(
+    prepared: SosixFsServicePrepareResultV1,
+    registered_buffer_id: u64,
+    registered_buffer: [u8],
+    backend: SosixPositionedVfsBackendV1
+) -> SosixFsVfsDispatchResultV1:
+    """Execute one authenticated service plan without accepting an address."""
+    if not prepared.accepted or not prepared.plan.ready:
+        return _reject("dispatch-plan-not-accepted", registered_buffer)
+    val plan = prepared.plan
+    if registered_buffer_id == 0 or registered_buffer_id != plan.buffer_registration_id:
+        return _reject("buffer-registration-mismatch", registered_buffer)
+    if (plan.buffer_offset > registered_buffer.len().to_u64() or
+        plan.length > registered_buffer.len().to_u64() - plan.buffer_offset):
+        return _reject("registered-buffer-range-out-of-bounds", registered_buffer)
+    if not backend.positioned_io_available():
+        return SosixFsVfsDispatchResultV1(
+            accepted: false, reason: "backend-positioned-io-unavailable",
+            status: SOSIX_FS_VFS_STATUS_UNAVAILABLE_V1,
+            transferred: 0, buffer: registered_buffer
+        )
+
+    if plan.api_id == SOSIX_FS_READ_AT:
+        val read_result = backend.read_at(plan.file_object_id, plan.resource_offset, plan.length)
+        if read_result.is_err():
+            return SosixFsVfsDispatchResultV1(
+                accepted: false, reason: read_result.unwrap_err(),
+                status: SOSIX_FS_VFS_STATUS_IO_V1, transferred: 0,
+                buffer: registered_buffer
+            )
+        val bytes = read_result.unwrap()
+        if bytes.len().to_u64() > plan.length:
+            return _reject("backend-read-exceeds-request", registered_buffer)
+        return SosixFsVfsDispatchResultV1(
+            accepted: true, reason: "read-at-complete", status: 0,
+            transferred: bytes.len().to_u64(),
+            buffer: _copy_into(registered_buffer, plan.buffer_offset, bytes)
+        )
+
+    if plan.api_id == SOSIX_FS_WRITE_AT:
+        val data = _slice(registered_buffer, plan.buffer_offset, plan.length)
+        val write_result = backend.write_at(plan.file_object_id, plan.resource_offset, data)
+        if write_result.is_err():
+            return SosixFsVfsDispatchResultV1(
+                accepted: false, reason: write_result.unwrap_err(),
+                status: SOSIX_FS_VFS_STATUS_IO_V1, transferred: 0,
+                buffer: registered_buffer
+            )
+        val transferred = write_result.unwrap()
+        if transferred > plan.length:
+            return _reject("backend-write-exceeds-request", registered_buffer)
+        return SosixFsVfsDispatchResultV1(
+            accepted: true, reason: "write-at-complete", status: 0,
+            transferred: transferred, buffer: registered_buffer
+        )
+
+    _reject("unsupported-dispatch-api", registered_buffer)
+
+export sosix_fs_service_dispatch_vfs_v1

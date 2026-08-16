@@ -1,0 +1,82 @@
+"""Value-threaded owner seam for live positioned syscall dispatch.
+
+The architecture runtime may keep this value beside its scheduler and IPC
+owners, inject the authenticated caller identity at trap entry, and publish the
+returned owner after syscall 134/135.  No global registry, address, or cursor
+compatibility path is introduced here.
+"""
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.sosix.fs.positioned_syscall_provider_v1.{
+    SosixFsPositionedProviderFactsV1,
+    sosix_fs_dispatch_positioned_registered_v1
+}
+use os.sosix.fs.registry_lifecycle_v1.SosixFsRegistryOwnerV1
+use os.sosix.fs.service_vfs_backend_v1.SosixPositionedVfsBackendV1
+
+pub struct SosixFsPositionedDispatchOwnerV1:
+    registry_owner: SosixFsRegistryOwnerV1
+    operation_slot: u32
+    operation_generation: u32
+    next_request_token: u64
+
+pub struct SosixFsPositionedDispatchStateV1:
+    accepted: bool
+    reason: text
+    result: SyscallResult
+    owner: SosixFsPositionedDispatchOwnerV1
+
+export SosixFsPositionedDispatchOwnerV1, SosixFsPositionedDispatchStateV1
+
+fn _next_nonzero_token_v1(token: u64) -> u64:
+    val advanced = token + 1
+    if advanced == 0:
+        return 1
+    advanced
+
+pub fn sosix_fs_dispatch_positioned_with_owner_v1(
+    args: SyscallArgs, caller_authenticated: bool, caller_process_id: u64,
+    owner: SosixFsPositionedDispatchOwnerV1,
+    backend: SosixPositionedVfsBackendV1
+) -> SosixFsPositionedDispatchStateV1:
+    """Dispatch through an explicitly injected owner and return its next value."""
+    if (owner.registry_owner.service_endpoint == 0 or
+        owner.registry_owner.service_generation == 0 or
+        owner.operation_slot == 0 or owner.operation_generation == 0 or
+        owner.next_request_token == 0):
+        return SosixFsPositionedDispatchStateV1(
+            accepted: false, reason: "positioned-dispatch-owner-not-ready",
+            result: SyscallResult(value: -95), owner: owner)
+
+    val dispatched = sosix_fs_dispatch_positioned_registered_v1(
+        args,
+        SosixFsPositionedProviderFactsV1(
+            caller_authenticated: caller_authenticated,
+            caller_process_id: caller_process_id,
+            operation_slot: owner.operation_slot,
+            operation_generation: owner.operation_generation,
+            request_token: owner.next_request_token),
+        owner.registry_owner.registry, backend)
+    # The authoritative syscall result is also the success boundary consumed
+    # by trap entry.  Derive identity consumption from that value before the
+    # provider result is decomposed into the returned owner.  This avoids
+    # relying on a copied aggregate boolean after its registry field has been
+    # moved through the value-semantic transaction chain.
+    val dispatch_succeeded = dispatched.syscall_result.value >= 0
+    val next_token = if dispatch_succeeded:
+        _next_nonzero_token_v1(owner.next_request_token)
+    else:
+        owner.next_request_token
+    val next_owner = SosixFsPositionedDispatchOwnerV1(
+        registry_owner: SosixFsRegistryOwnerV1(
+            service_endpoint: owner.registry_owner.service_endpoint,
+            service_generation: owner.registry_owner.service_generation,
+            registry: dispatched.registry),
+        operation_slot: owner.operation_slot,
+        operation_generation: owner.operation_generation,
+        next_request_token: next_token)
+    SosixFsPositionedDispatchStateV1(
+        accepted: dispatch_succeeded, reason: dispatched.reason,
+        result: dispatched.syscall_result, owner: next_owner)
+
+export sosix_fs_dispatch_positioned_with_owner_v1

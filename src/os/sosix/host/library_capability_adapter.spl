@@ -1,0 +1,54 @@
+"""Pure snapshot/callback seam for SOSIX hosted library consumers.
+
+Portable WM and renderer code supplies an immutable, already-authorized
+library snapshot. Only the injected host owner callback may resolve the
+private backend handle; this adapter never reads environment or loads a
+library directly.
+"""
+
+use os.sosix.core.capability_ref.{
+    SosixCapabilityRef,
+    sosix_capability_ref_is_valid
+}
+
+pub struct SosixHostLibrarySnapshot:
+    library: SosixCapabilityRef
+    logical_name: text
+    abi: text
+
+pub struct SosixHostLibraryPlan:
+    accepted: bool
+    reason: text
+    snapshot: SosixHostLibrarySnapshot
+
+export SosixHostLibrarySnapshot, SosixHostLibraryPlan
+
+pub fn sosix_host_library_plan(
+    snapshot: SosixHostLibrarySnapshot
+) -> SosixHostLibraryPlan:
+    if not sosix_capability_ref_is_valid(snapshot.library):
+        return SosixHostLibraryPlan(
+            accepted: false, reason: "invalid-library-capability",
+            snapshot: snapshot)
+    if snapshot.logical_name.trim() == "":
+        return SosixHostLibraryPlan(
+            accepted: false, reason: "missing-library-name", snapshot: snapshot)
+    if snapshot.abi.trim() == "":
+        return SosixHostLibraryPlan(
+            accepted: false, reason: "missing-library-abi", snapshot: snapshot)
+    SosixHostLibraryPlan(accepted: true, reason: "ready", snapshot: snapshot)
+
+pub fn sosix_host_library_dispatch(
+    plan: SosixHostLibraryPlan,
+    resolve: fn(SosixCapabilityRef, text, text) -> bool
+) -> bool:
+    """Invoke the host owner once, but only for a canonical accepted plan."""
+    val canonical = sosix_host_library_plan(plan.snapshot)
+    if (not plan.accepted or plan.reason != "ready" or
+        not canonical.accepted):
+        return false
+    resolve(
+        plan.snapshot.library, plan.snapshot.logical_name,
+        plan.snapshot.abi)
+
+export sosix_host_library_plan, sosix_host_library_dispatch

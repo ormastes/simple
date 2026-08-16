@@ -1,0 +1,194 @@
+"""Authenticated pure-Simple filesystem completion pump.
+
+The caller supplies the endpoint identity attached by the IPC receive layer and
+the received bytes.  This module performs no syscall and owns no endpoint.  It
+decodes only replies from the configured filesystem service, correlates them
+with one pending request, and returns the canonical terminal completion plus a
+one-shot notification decision.
+"""
+
+use os.sosix.core.operation.{
+    SOSIX_OPERATION_PENDING,
+    SosixOperationId,
+    SosixOperationSlot,
+    sosix_operation_complete
+}
+use os.sosix.core.completion.{SosixCompletion, sosix_completion_from_slot}
+use os.sosix.fs.async_transport_state.{
+    SosixFsCompletionEvent,
+    SosixFsRequestKey,
+    SosixFsTransportState,
+    sosix_fs_transport_complete
+}
+use os.sosix.fs.ipc_codec_v1.{
+    SOSIX_FS_IPC_COMPLETION_FLAG_PARTIAL,
+    sosix_fs_ipc_decode_completion_v1
+}
+
+pub struct SosixFsCompletionPumpResult:
+    accepted: bool
+    reason: text
+    notify: bool
+    payload: [u8]
+    event: SosixFsCompletionEvent
+    completion: SosixCompletion
+    operation_slot: SosixOperationSlot
+    transport_state: SosixFsTransportState
+
+export SosixFsCompletionPumpResult
+
+fn _empty_event(state: SosixFsTransportState) -> SosixFsCompletionEvent:
+    SosixFsCompletionEvent(
+        key: SosixFsRequestKey(
+            operation_slot: state.active_operation_slot,
+            operation_generation: state.active_operation_generation,
+            request_token: state.active_request_token
+        ),
+        notification_event: state.notification_event,
+        status: state.status,
+        transferred: state.transferred,
+        partial_progress: state.partial_progress
+    )
+
+fn _empty_completion(
+    state: SosixFsTransportState, api_id: u32
+) -> SosixCompletion:
+    SosixCompletion(
+        operation: SosixOperationId(
+            slot: state.active_operation_slot,
+            generation: state.active_operation_generation
+        ),
+        api_id: api_id,
+        status: state.status,
+        transferred: state.transferred,
+        partial_progress: state.partial_progress,
+        terminal_state: 0
+    )
+
+fn _rejected(
+    reason: text,
+    api_id: u32,
+    operation_slot: SosixOperationSlot,
+    transport_state: SosixFsTransportState
+) -> SosixFsCompletionPumpResult:
+    SosixFsCompletionPumpResult(
+        accepted: false,
+        reason: reason,
+        notify: false,
+        payload: [],
+        event: _empty_event(transport_state),
+        completion: _empty_completion(transport_state, api_id),
+        operation_slot: operation_slot,
+        transport_state: transport_state
+    )
+
+pub fn sosix_fs_completion_pump_receive(
+    expected_service_endpoint: u64,
+    source_endpoint: u64,
+    expected_api_id: u32,
+    operation_slot: SosixOperationSlot,
+    transport_state: SosixFsTransportState,
+    data: [u8]
+) -> SosixFsCompletionPumpResult:
+    if expected_service_endpoint == 0:
+        return _rejected(
+            "invalid-service-endpoint", expected_api_id, operation_slot, transport_state)
+    if source_endpoint != expected_service_endpoint:
+        return _rejected(
+            "untrusted-service-source", expected_api_id, operation_slot, transport_state)
+
+    val decoded = sosix_fs_ipc_decode_completion_v1(
+        data,
+        expected_api_id,
+        transport_state.active_operation_slot,
+        transport_state.active_operation_generation,
+        transport_state.active_request_token
+    )
+    if not decoded.accepted:
+        return _rejected(decoded.reason, expected_api_id, operation_slot, transport_state)
+
+    if operation_slot.generation != transport_state.active_operation_generation:
+        return _rejected(
+            "operation-slot-generation-mismatch",
+            expected_api_id,
+            operation_slot,
+            transport_state
+        )
+    if operation_slot.state != SOSIX_OPERATION_PENDING:
+        # The transport check below owns the more precise duplicate-completion
+        # diagnostic once its terminal event has already been published.
+        val duplicate = sosix_fs_transport_complete(
+            transport_state,
+            SosixFsRequestKey(
+                operation_slot: decoded.completion.operation_slot,
+                operation_generation: decoded.completion.operation_generation,
+                request_token: decoded.completion.request_token
+            ),
+            decoded.completion.status,
+            decoded.completion.transferred
+        )
+        if not duplicate.accepted:
+            return _rejected(
+                duplicate.reason, expected_api_id, operation_slot, transport_state)
+        return _rejected(
+            "operation-not-pending", expected_api_id, operation_slot, transport_state)
+
+    if decoded.completion.transferred > transport_state.requested_length:
+        return _rejected(
+            "transferred-exceeds-request", expected_api_id, operation_slot, transport_state)
+    if decoded.completion.payload.len() as u64 > transport_state.requested_length:
+        return _rejected(
+            "payload-exceeds-request", expected_api_id, operation_slot, transport_state)
+    if decoded.completion.payload.len() as u64 > decoded.completion.transferred:
+        return _rejected(
+            "payload-exceeds-transferred", expected_api_id, operation_slot, transport_state)
+    val expected_partial = (decoded.completion.transferred > 0 and
+        decoded.completion.transferred < transport_state.requested_length)
+    val declared_partial = ((decoded.completion.flags &
+        SOSIX_FS_IPC_COMPLETION_FLAG_PARTIAL) != 0)
+    if declared_partial != expected_partial:
+        return _rejected(
+            "partial-flag-mismatch", expected_api_id, operation_slot, transport_state)
+
+    val key = SosixFsRequestKey(
+        operation_slot: decoded.completion.operation_slot,
+        operation_generation: decoded.completion.operation_generation,
+        request_token: decoded.completion.request_token
+    )
+    val transport = sosix_fs_transport_complete(
+        transport_state,
+        key,
+        decoded.completion.status,
+        decoded.completion.transferred
+    )
+    if not transport.accepted:
+        return _rejected(transport.reason, expected_api_id, operation_slot, transport_state)
+
+    val operation = SosixOperationId(
+        slot: key.operation_slot, generation: key.operation_generation)
+    val terminal = sosix_operation_complete(
+        operation_slot,
+        operation,
+        decoded.completion.status,
+        decoded.completion.transferred,
+        transport_state.requested_length
+    )
+    if not terminal.accepted:
+        return _rejected(terminal.reason, expected_api_id, operation_slot, transport_state)
+
+    val typed = sosix_completion_from_slot(operation, expected_api_id, terminal.slot)
+    if not typed.accepted:
+        return _rejected(typed.reason, expected_api_id, operation_slot, transport_state)
+
+    SosixFsCompletionPumpResult(
+        accepted: true,
+        reason: "completion-published",
+        notify: true,
+        payload: decoded.completion.payload,
+        event: transport.event,
+        completion: typed.completion,
+        operation_slot: terminal.slot,
+        transport_state: transport.state
+    )
+
+export sosix_fs_completion_pump_receive

@@ -485,6 +485,16 @@ be published as a row.
 The current PASS/blocked ledger is
 `doc/03_plan/sys_test/sosix_qemu_matrix_evidence_status_2026-08-13.md`.
 
+The 32-bit lifecycle source gates are no longer sufficient admission by
+themselves. Run the x86_32 or ARM32 contract with `--admit KERNEL_ELF`; the
+gate checks ELF identity, nonzero entry, and strong linked lifecycle symbols.
+The retained ARM32 ELF passes, while the retained x86_32 ELF is rejected until
+the task/generation-bound `rt_x86_32_tss_set_esp0` and
+`rt_x86_32_tss_bind_task` owners are linked strongly through the broad rebuild
+profile.
+RV64 has a real result-boundary spec but still requires a provenance-admitted
+Stage-4 runner and fresh producer bundle. Do not use Stage 3 or the Rust seed.
+
 Canonical operator detail is
 `doc/07_guide/platform/simpleos/sosix_qemu_shared_settings.md`.
 

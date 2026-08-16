@@ -1,0 +1,90 @@
+"""REQ-SQ-015: notification-oriented synchronous compatibility wait protocol."""
+
+use std.spec.*
+use os.sosix.core.*
+
+fn completion(slot_index: u32, api_id: u32, terminal_kind: u8) -> SosixCompletion:
+    val begin = sosix_operation_begin(slot_index, sosix_operation_slot_new(), 10)
+    var terminal = sosix_operation_complete(begin.slot, begin.operation, 0, 8, 8)
+    if terminal_kind == SOSIX_OPERATION_CANCELED:
+        terminal = sosix_operation_cancel(begin.slot, begin.operation)
+    elif terminal_kind == SOSIX_OPERATION_TIMED_OUT:
+        terminal = sosix_operation_expire_deadline(begin.slot, begin.operation, 10)
+    sosix_completion_from_slot(begin.operation, api_id, terminal.slot).completion
+
+describe "SOSIX synchronous notification wait adapter":
+    it "closes the lost-wake window by rechecking before native sleep":
+        val ready = completion(7, 0x0101, SOSIX_OPERATION_COMPLETED)
+        val waits = SosixWaitSet.create()
+        expect(waits.watch(ready.operation)).to_be(true)
+        val state = SosixSyncWaitState.begin(ready.operation, 0x0101, waits)
+        expect(waits.notify(ready)).to_be(true)
+        val decision = state.before_wait(waits)
+        expect(decision.outcome).to_equal(SOSIX_SYNC_WAIT_COMPLETED)
+        expect(decision.should_wait).to_be(false)
+        expect(decision.cleanup_watch).to_be(true)
+
+    it "retries a spurious signal without spinning inside the adapter":
+        val ready = completion(8, 0x0101, SOSIX_OPERATION_COMPLETED)
+        val waits = SosixWaitSet.create()
+        expect(waits.watch(ready.operation)).to_be(true)
+        val state = SosixSyncWaitState.begin(ready.operation, 0x0101, waits)
+        expect(state.before_wait(waits).should_wait).to_be(true)
+        val decision = state.after_wait(waits, SOSIX_NATIVE_WAIT_SIGNALED, 0)
+        expect(decision.retry).to_be(true)
+        expect(decision.cleanup_watch).to_be(false)
+        expect(decision.reason).to_equal("spurious-wake")
+
+    it "preserves unrelated readiness while matching operation and API":
+        val target = completion(9, 0x0101, SOSIX_OPERATION_COMPLETED)
+        val other = completion(10, 0x0102, SOSIX_OPERATION_COMPLETED)
+        val waits = SosixWaitSet.create()
+        expect(waits.watch(target.operation)).to_be(true)
+        expect(waits.watch(other.operation)).to_be(true)
+        expect(waits.notify(other)).to_be(true)
+        val state = SosixSyncWaitState.begin(target.operation, 0x0101, waits)
+        val decision = state.before_wait(waits)
+        expect(decision.retry).to_be(true)
+        expect(waits.ready_count()).to_equal(1)
+
+    it "rejects a matching operation completed as the wrong API":
+        val ready = completion(11, 0x0102, SOSIX_OPERATION_COMPLETED)
+        val waits = SosixWaitSet.create()
+        expect(waits.watch(ready.operation)).to_be(true)
+        val state = SosixSyncWaitState.begin(ready.operation, 0x0101, waits)
+        expect(waits.notify(ready)).to_be(true)
+        val decision = state.before_wait(waits)
+        expect(decision.outcome).to_equal(SOSIX_SYNC_WAIT_ERROR)
+        expect(decision.reason).to_equal("completion-api-mismatch")
+        expect(decision.cleanup_watch).to_be(true)
+
+    it "maps terminal completion and native termination outcomes with cleanup":
+        val canceled = completion(12, 0x0101, SOSIX_OPERATION_CANCELED)
+        val waits = SosixWaitSet.create()
+        expect(waits.watch(canceled.operation)).to_be(true)
+        val canceled_state = SosixSyncWaitState.begin(canceled.operation, 0x0101, waits)
+        expect(waits.notify(canceled)).to_be(true)
+        expect(canceled_state.after_wait(waits, SOSIX_NATIVE_WAIT_TIMED_OUT, 0).outcome).to_equal(SOSIX_SYNC_WAIT_CANCELED)
+
+        val pending = completion(13, 0x0101, SOSIX_OPERATION_COMPLETED)
+        val timeout_waits = SosixWaitSet.create()
+        expect(timeout_waits.watch(pending.operation)).to_be(true)
+        val timeout_state = SosixSyncWaitState.begin(pending.operation, 0x0101, timeout_waits)
+        val timeout = timeout_state.after_wait(timeout_waits, SOSIX_NATIVE_WAIT_TIMED_OUT, 0)
+        expect(timeout.outcome).to_equal(SOSIX_SYNC_WAIT_TIMED_OUT)
+        expect(timeout.cleanup_watch).to_be(true)
+
+        val cancel_waits = SosixWaitSet.create()
+        expect(cancel_waits.watch(pending.operation)).to_be(true)
+        val cancel_state = SosixSyncWaitState.begin(pending.operation, 0x0101, cancel_waits)
+        val native_canceled = cancel_state.after_wait(cancel_waits, SOSIX_NATIVE_WAIT_CANCELED, 0)
+        expect(native_canceled.outcome).to_equal(SOSIX_SYNC_WAIT_CANCELED)
+        expect(native_canceled.cleanup_watch).to_be(true)
+
+        val error_waits = SosixWaitSet.create()
+        expect(error_waits.watch(pending.operation)).to_be(true)
+        val error_state = SosixSyncWaitState.begin(pending.operation, 0x0101, error_waits)
+        val failed = error_state.after_wait(error_waits, SOSIX_NATIVE_WAIT_ERROR, -5)
+        expect(failed.outcome).to_equal(SOSIX_SYNC_WAIT_ERROR)
+        expect(failed.cleanup_watch).to_be(true)
+        expect(failed.wait_error_status).to_equal(-5)

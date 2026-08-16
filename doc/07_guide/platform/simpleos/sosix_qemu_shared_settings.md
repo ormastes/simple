@@ -88,10 +88,36 @@ zero-stub generated manual before L0 verification closes.
 ## Host status
 
 Linux x86_64, ARM64, and RV32 retain canonical evidence. RV64, x86_32, and
-ARM32 remain blocked on their named compiler/lifecycle owners. Windows and
-FreeBSD require actual native hosts; macOS is explicitly postponed until a
+ARM32 now have their named compiler/lifecycle owners in source, but remain
+blocked on admitted Stage-4 builds and fresh producer bundles. Before QEMU,
+run `--admit KERNEL_ELF` on the x86_32/ARM32 lifecycle checks: these use
+`readelf` and `nm` to require the correct 32-bit machine, nonzero entry, and
+strong linked entry/TSS-or-vector/token/reap symbols. A source self-test is not
+linked-artifact admission. The x86_32 source binds the TSS `esp0` stack to its
+authenticated task/generation before each CPL3 handoff; admission therefore
+requires both `rt_x86_32_tss_set_esp0` and `rt_x86_32_tss_bind_task`. The
+rebuild wrapper intentionally includes `src/os`, `src/lib`, and the parent
+`examples/09_embedded/simple_os` tree.
+Windows and FreeBSD require actual native hosts; macOS is explicitly postponed until a
 Darwin executor is available. No host may be counted as PASS from a simulated
 or relabelled run.
+
+The host-independent positioned-I/O slice lives under
+`src/os/sosix/{core,fs}`. Syscall 134/135 requests cross an authenticated,
+owned-copy provider/registry boundary and its backend contract permits only
+true `read_at`/`write_at`; compatibility code must not emulate positioned I/O
+with seek/read-or-write/restore. The current FAT32 driver has no such primitive,
+and the library owner is not yet installed in the live kernel syscall path, so
+this slice is not production-connected. Its four focused specs require a
+provenance-admitted Stage-4 CLI. Exit 139 before scenario output is a
+verification blocker, not permission to use Stage 3 or the Rust seed.
+
+Hosted display/input integration uses the sibling `src/os/sosix/host` seam.
+Surface state binds generation and frame sequence with bounded in-flight work;
+input state preserves ordered key/text/button events and coalesces only the
+declared adjacent pointer-motion case. Headless, SDL2, Win32, and Cocoa
+adapters are source-present and have focused specs, but source/static checks do
+not prove native fence completion or platform parity.
 
 The Windows PowerShell peer currently performs fail-closed admission and
 artifact readiness only; `-Preflight` is its honest next command. It must gain

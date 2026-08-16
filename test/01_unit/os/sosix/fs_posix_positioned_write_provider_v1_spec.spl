@@ -1,0 +1,48 @@
+# @cover src/os/sosix/fs/posix_positioned_write_provider_v1.spl 80%
+"""POSIX positioned-write provider contract specification."""
+
+use std.spec.*
+use os.sosix.core.operation.SosixOperationId
+use os.sosix.core.capability_ref.SosixCapabilityRef
+use os.sosix.fs.registered_buffer_client_v1.*
+use os.sosix.fs.posix_positioned_write_provider_v1.*
+
+fn provider(available: bool) -> SosixPosixPositionedWriteProviderV1:
+    val registered = sosix_fs_client_register_buffer_v1(
+        sosix_fs_client_buffer_table_v1(9), 9, [10u8, 20u8, 30u8],
+        SOSIX_FS_CLIENT_BUFFER_READ_V1)
+    SosixPosixPositionedWriteProviderV1(
+        available: available,
+        owner_process_id: 9,
+        endpoints: SosixFsClientEndpointInputV1(
+            service_discovered: true, service_endpoint: 70,
+            reply_endpoint_created: true, reply_endpoint: 71),
+        table: registered.table,
+        receipt: SosixFsClientRegistrationReceiptV1(
+            authenticated: true, owner_process_id: 9, service_endpoint: 70,
+            buffer: registered.ref_, service_registration_id: 81,
+            byte_length: 3, access: SOSIX_FS_CLIENT_BUFFER_READ_V1,
+            memory_mode: SOSIX_FS_CLIENT_MEMORY_OWNED_COPY_V1),
+        file: SosixCapabilityRef(slot: 5, generation: 6),
+        buffer: registered.ref_)
+
+describe "SOSIX POSIX positioned-write provider v1":
+    it "plans write_at from a certified registered buffer without a raw address":
+        val plan = sosix_posix_plan_pwrite_v1(
+            provider(true), SosixOperationId(slot: 2, generation: 3),
+            4096, 1, 2, 0, 17)
+
+        expect(plan.accepted).to_be(true)
+        expect(plan.reason).to_equal("ready")
+        expect(plan.api_id).to_equal(2u32)
+        expect(plan.payload.len()).to_equal(88)
+
+    it "fails closed when the kernel registration provider is unavailable":
+        val plan = sosix_posix_plan_pwrite_v1(
+            provider(false), SosixOperationId(slot: 2, generation: 3),
+            4096, 0, 3, 0, 17)
+
+        expect(plan.accepted).to_be(false)
+        expect(plan.reason).to_equal("positioned-write-provider-unavailable")
+        expect(plan.status).to_equal(SOSIX_POSIX_PWRITE_PROVIDER_UNAVAILABLE_V1)
+        expect(plan.payload.len()).to_equal(0)

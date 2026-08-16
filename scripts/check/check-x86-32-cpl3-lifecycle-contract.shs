@@ -20,6 +20,15 @@ stub=$root/examples/09_embedded/simple_os/arch/x86_32/boot/baremetal_stubs.c
 bridge=$root/src/os/kernel/arch/x86_32/user_entry.spl
 context=$root/src/os/kernel/arch/x86_32/context.spl
 probe=$root/examples/09_embedded/simple_os/arch/x86_32/initrd_fs_exec_probe_entry.spl
+kernel_default=$root/build/os/simpleos_x86_32_initrd_fs_exec_probe.elf
+
+require_global_text_symbol() {
+    symbol=$1
+    artifact=$2
+    nm -g "$artifact" 2>/dev/null |
+        awk -v expected="$symbol" '$2 ~ /^[Tt]$/ && $3 == expected { found = 1 } END { exit found ? 0 : 1 }' ||
+        fail "linked kernel lacks strong text symbol: $symbol"
+}
 
 contract() {
     require 'SimpleOS x86_32 boot OK' "$matrix"
@@ -38,15 +47,17 @@ contract() {
     require 'boot-fail:SimpleOS x86_32 boot OK' "$unit"
 }
 
-admit() {
+source_admit() {
     contract
     [ -f "$entry" ] || fail 'not admitted: missing enter_user_first.s'
     require 'rt_x86_32_enter_user_first:' "$entry"
     require 'iret' "$entry"
     require 'rt_x86_32_tss_init' "$stub"
     require 'rt_x86_32_tss_set_esp0' "$stub"
+    require 'rt_x86_32_tss_bind_task' "$stub"
     require 'rt_x86_32_exec_token_install' "$bridge"
     require 'rt_x86_32_exec_token_take_result' "$bridge"
+    require 'rt_x86_32_tss_bind_task(target_pid as u32, generation) != 1' "$bridge"
     require 'rt_x86_32_fs_exec_load' "$stub"
     require 'x86_32_fat_find_root' "$stub"
     require 'rt_x86_32_fs_list_apps' "$stub"
@@ -68,6 +79,9 @@ admit() {
     require 'rt_x86_32_elf_policy_self_test()' "$probe"
     require 'rt_x86_32_fat_hostile_self_test()' "$probe"
     require 'rt_x86_32_exec_token_install(1u32, 3u32, cr3) != 0' "$probe"
+    require 'rt_x86_32_tss_bind_task(1u32, 1u32) != 1' "$probe"
+    require 'rt_x86_32_tss_bind_task(1u32, 2u32) != 1' "$probe"
+    require 'rt_x86_32_tss_bind_task(1u32, 3u32) != 1' "$probe"
     require 'rt_x86_32_fault_probe_entry(13u32)' "$probe"
     require 'rt_x86_32_fault_probe_entry(14u32)' "$probe"
     require 'rt_x86_32_exec_token_take_result(1u32, 3u32, cr3) != -4096' "$probe"
@@ -81,15 +95,59 @@ admit() {
     printf '%s\n' 'PASS x86_32 CPL3 filesystem-exec lifecycle admitted'
 }
 
+artifact_admit() {
+    artifact=${1:-$kernel_default}
+    source_admit >/dev/null
+    [ -s "$artifact" ] || fail "linked kernel missing: $artifact"
+    command -v readelf >/dev/null 2>&1 || fail 'linked admission requires readelf'
+    command -v nm >/dev/null 2>&1 || fail 'linked admission requires nm'
+    readelf -h "$artifact" 2>/dev/null | grep -Eq 'Class:[[:space:]]+ELF32' ||
+        fail 'linked kernel is not ELF32'
+    readelf -h "$artifact" 2>/dev/null | grep -Eq 'Machine:[[:space:]]+Intel 80386' ||
+        fail 'linked kernel is not Intel 80386'
+    readelf -h "$artifact" 2>/dev/null |
+        awk '/Entry point address:/ { found = 1; nonzero = ($NF != "0x0") } END { exit found && nonzero ? 0 : 1 }' ||
+        fail 'linked kernel has no nonzero entry point'
+    for symbol in \
+        rt_x86_32_enter_user_first \
+        rt_x86_32_ring3_resume \
+        rt_x86_32_tss_init \
+        rt_x86_32_tss_set_esp0 \
+        rt_x86_32_tss_bind_task \
+        rt_x86_32_exec_token_install \
+        rt_x86_32_exec_token_take_result \
+        x86_32_int80_probe_handler \
+        x86_32_gp_handler \
+        x86_32_pf_handler \
+        src__os__kernel__arch__x86_32__user_entry__dispatch_enter_user_blocking_x86_32; do
+        require_global_text_symbol "$symbol" "$artifact"
+    done
+    printf '%s\n' "PASS x86_32 linked CPL3 lifecycle admitted artifact=$artifact"
+}
+
 case "$mode" in
     --contract)
         contract
         printf '%s\n' 'PASS x86_32 CPL3 contract rejects the legacy same-CPL probe'
         ;;
-    --admit) admit ;;
-    --self-test)
-        admit >/dev/null
-        printf '%s\n' 'PASS x86_32 CPL3 lifecycle gate self-test (real FAT/ELF/CPL3 owners present)'
+    --admit)
+        [ "$#" -le 2 ] || fail 'usage: --admit [KERNEL_ELF]'
+        artifact_admit "${2:-$kernel_default}"
         ;;
-    *) fail 'usage: check-x86-32-cpl3-lifecycle-contract.shs [--contract|--admit|--self-test]' ;;
+    --self-test)
+        source_admit >/dev/null
+        fake=$(mktemp "${TMPDIR:-/tmp}/x86-32-linked-admit.XXXXXX")
+        trap 'rm -f "$fake"' EXIT HUP INT TERM
+        printf '%s\n' 'not an ELF' >"$fake"
+        if (artifact_admit "$fake") >/dev/null 2>&1; then
+            fail 'linked admission accepted a non-ELF artifact'
+        fi
+        symbol_fixture=$(command -v sh)
+        [ -s "$symbol_fixture" ] || fail 'missing executable fixture for strong-symbol sabotage'
+        if (require_global_text_symbol '__sosix_missing_x86_32_strong_symbol_fixture__' "$symbol_fixture") >/dev/null 2>&1; then
+            fail 'strong-symbol admission accepted an ELF without the required symbol'
+        fi
+        printf '%s\n' 'PASS x86_32 CPL3 lifecycle gate self-test (source owners present; non-ELF and missing-strong-symbol gates fail closed)'
+        ;;
+    *) fail 'usage: check-x86-32-cpl3-lifecycle-contract.shs [--contract|--admit [KERNEL_ELF]|--self-test]' ;;
 esac

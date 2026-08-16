@@ -2049,7 +2049,14 @@ typedef struct __attribute__((packed)) {
 
 static uint64_t x86_32_gdt[6] __attribute__((aligned(8)));
 static X86_32Tss x86_32_tss __attribute__((aligned(16)));
-static uint8_t x86_32_ring0_stack[8192] __attribute__((aligned(16)));
+#define X86_32_RING0_STACK_SLOTS 4U
+#define X86_32_RING0_STACK_BYTES 8192U
+
+static uint8_t x86_32_ring0_stacks[X86_32_RING0_STACK_SLOTS]
+                                  [X86_32_RING0_STACK_BYTES]
+    __attribute__((aligned(16)));
+static uint32_t x86_32_ring0_stack_task[X86_32_RING0_STACK_SLOTS];
+static uint32_t x86_32_ring0_stack_generation[X86_32_RING0_STACK_SLOTS];
 
 static uint64_t x86_32_segment(uint32_t base, uint32_t limit,
                                uint8_t access, uint8_t flags)
@@ -2062,11 +2069,35 @@ static uint64_t x86_32_segment(uint32_t base, uint32_t limit,
            ((uint64_t)(base >> 24) << 56);
 }
 
+__attribute__((used, noinline))
 int32_t rt_x86_32_tss_set_esp0(uint32_t esp0)
 {
     if (!esp0) return 0;
     x86_32_tss.esp0 = esp0;
     return 1;
+}
+
+/* Bind the privilege-transition stack to the same authenticated task and
+ * generation that owns the run-to-completion execution token.  The bounded
+ * probe rejects slot collisions instead of silently sharing an esp0 stack
+ * between distinct tasks. */
+int32_t rt_x86_32_tss_bind_task(uint32_t task_id, uint32_t generation)
+{
+    uint32_t slot;
+    uint32_t stack_top;
+    if (!task_id || !generation || !x86_32_exec_active ||
+        task_id != x86_32_exec_task ||
+        generation != x86_32_exec_generation)
+        return 0;
+    slot = (task_id - 1U) % X86_32_RING0_STACK_SLOTS;
+    if (x86_32_ring0_stack_task[slot] != 0U &&
+        x86_32_ring0_stack_task[slot] != task_id)
+        return 0;
+    x86_32_ring0_stack_task[slot] = task_id;
+    x86_32_ring0_stack_generation[slot] = generation;
+    stack_top = (uint32_t)(uintptr_t)(
+        x86_32_ring0_stacks[slot] + X86_32_RING0_STACK_BYTES);
+    return rt_x86_32_tss_set_esp0(stack_top);
 }
 
 int32_t rt_x86_32_tss_init(void)
@@ -2076,8 +2107,13 @@ int32_t rt_x86_32_tss_init(void)
     uint32_t tss_limit = sizeof(x86_32_tss) - 1U;
     for (uint32_t i = 0; i < sizeof(x86_32_tss); ++i)
         ((volatile uint8_t *)&x86_32_tss)[i] = 0;
+    for (uint32_t i = 0; i < X86_32_RING0_STACK_SLOTS; ++i) {
+        x86_32_ring0_stack_task[i] = 0U;
+        x86_32_ring0_stack_generation[i] = 0U;
+    }
     x86_32_tss.ss0 = 0x10U;
-    x86_32_tss.esp0 = (uint32_t)(uintptr_t)(x86_32_ring0_stack + sizeof(x86_32_ring0_stack));
+    x86_32_tss.esp0 = (uint32_t)(uintptr_t)(
+        x86_32_ring0_stacks[0] + X86_32_RING0_STACK_BYTES);
     x86_32_tss.iomap = sizeof(x86_32_tss);
     x86_32_gdt[0] = 0;
     x86_32_gdt[1] = x86_32_segment(0, 0xFFFFFU, 0x9AU, 0xCU);

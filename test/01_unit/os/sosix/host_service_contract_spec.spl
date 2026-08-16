@@ -1,0 +1,63 @@
+# @cover src/os/sosix/host/service_contract.spl 80%
+use std.spec
+use os.sosix.core.operation.{SosixOperationId}
+use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
+use os.sosix.host.service_contract.{
+    SOSIX_HOST_DISPLAY_PRESENT,
+    SosixDisplayCompletionKey,
+    sosix_host_configuration_snapshot_create,
+    sosix_display_request_create,
+    sosix_display_completion_matches,
+    sosix_input_request_create,
+    sosix_timer_request_create
+}
+
+fn operation() -> SosixOperationId:
+    SosixOperationId(slot: 3, generation: 7)
+
+fn capability() -> SosixCapabilityRef:
+    SosixCapabilityRef(slot: 4, generation: 2)
+
+fn buffer() -> SosixBufferRef:
+    SosixBufferRef(slot: 5, generation: 9)
+
+describe "SOSIX host-service contracts":
+    it "snapshots startup configuration as typed values":
+        val snapshot = sosix_host_configuration_snapshot_create("headless", "queue", "cpu", true, "/mnt/data/.simple")
+        expect(snapshot.display_backend).to_equal("headless")
+        expect(snapshot.storage_root).to_equal("/mnt/data/.simple")
+        expect(snapshot.evidence_enabled).to_equal(true)
+
+    it "accepts one batched display frame identity":
+        val result = sosix_display_request_create(operation(), SOSIX_HOST_DISPLAY_PRESENT, capability(), 3, 44, buffer(), 1000)
+        expect(result.accepted).to_equal(true)
+        expect(result.request.surface_generation).to_equal(3)
+        expect(result.request.frame_sequence).to_equal(44)
+
+    it "rejects invalid display API surface buffer and sequence":
+        val bad_cap = SosixCapabilityRef(slot: 4, generation: 0)
+        val bad_buf = SosixBufferRef(slot: 5, generation: 0)
+        expect(sosix_display_request_create(operation(), 99, capability(), 1, 1, buffer(), 0).reason).to_equal("unsupported-display-api")
+        expect(sosix_display_request_create(operation(), SOSIX_HOST_DISPLAY_PRESENT, bad_cap, 1, 1, buffer(), 0).reason).to_equal("invalid-surface")
+        expect(sosix_display_request_create(operation(), SOSIX_HOST_DISPLAY_PRESENT, capability(), 1, 1, bad_buf, 0).reason).to_equal("invalid-frame-buffer")
+        expect(sosix_display_request_create(operation(), SOSIX_HOST_DISPLAY_PRESENT, capability(), 1, 0, buffer(), 0).reason).to_equal("invalid-frame-sequence")
+
+    it "rejects stale surface and frame completion identities":
+        val expected = SosixDisplayCompletionKey(surface: capability(), surface_generation: 8, frame_sequence: 21)
+        val exact = SosixDisplayCompletionKey(surface: capability(), surface_generation: 8, frame_sequence: 21)
+        val stale = SosixDisplayCompletionKey(surface: capability(), surface_generation: 7, frame_sequence: 21)
+        val wrong_frame = SosixDisplayCompletionKey(surface: capability(), surface_generation: 8, frame_sequence: 20)
+        expect(sosix_display_completion_matches(expected, exact)).to_equal(true)
+        expect(sosix_display_completion_matches(expected, stale)).to_equal(false)
+        expect(sosix_display_completion_matches(expected, wrong_frame)).to_equal(false)
+
+    it "validates input stream generation":
+        expect(sosix_input_request_create(operation(), capability(), 17, 2000).accepted).to_equal(true)
+        val invalid = SosixCapabilityRef(slot: 4, generation: 0)
+        expect(sosix_input_request_create(operation(), invalid, 17, 2000).reason).to_equal("invalid-input-stream")
+
+    it "requires a valid timer and nonzero deadline":
+        expect(sosix_timer_request_create(operation(), capability(), 2000).accepted).to_equal(true)
+        val invalid = SosixCapabilityRef(slot: 4, generation: 0)
+        expect(sosix_timer_request_create(operation(), invalid, 2000).reason).to_equal("invalid-timer")
+        expect(sosix_timer_request_create(operation(), capability(), 0).reason).to_equal("missing-deadline")

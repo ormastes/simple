@@ -23,6 +23,14 @@ fs_entry=$root/examples/09_embedded/simple_os/arch/arm32/fs_exec_entry.spl
 kernel=$root/build/os/simpleos_arm32_fs_exec.elf
 image=$root/build/os/fat32-arm32.img
 
+require_global_text_symbol() {
+    symbol=$1
+    artifact=$2
+    nm -g "$artifact" 2>/dev/null |
+        awk -v expected="$symbol" '$2 ~ /^[Tt]$/ && $3 == expected { found = 1 } END { exit found ? 0 : 1 }' ||
+        fail "linked kernel lacks strong text symbol: $symbol"
+}
+
 contract() {
     require 'FS_MOUNT_OK' "$matrix"
     require 'FS_LS_BEGIN path=/SYS/APPS' "$matrix"
@@ -33,7 +41,7 @@ contract() {
     require 'boot-fail:FS_LS_BEGIN path=/SYS/APPS' "$unit"
 }
 
-admit() {
+source_admit() {
     contract
     [ -f "$entry" ] || fail 'not admitted: missing enter_user_first.s'
     [ -f "$vectors" ] || fail 'not admitted: missing exception_vectors.s'
@@ -96,8 +104,37 @@ admit() {
     printf '%s\n' 'PASS arm32 EL0 filesystem-exec lifecycle admitted'
 }
 
+artifact_admit() {
+    artifact=${1:-$kernel}
+    source_admit >/dev/null
+    [ -s "$artifact" ] || fail "linked kernel missing: $artifact"
+    command -v readelf >/dev/null 2>&1 || fail 'linked admission requires readelf'
+    command -v nm >/dev/null 2>&1 || fail 'linked admission requires nm'
+    readelf -h "$artifact" 2>/dev/null | grep -Eq 'Class:[[:space:]]+ELF32' ||
+        fail 'linked kernel is not ELF32'
+    readelf -h "$artifact" 2>/dev/null | grep -Eq 'Machine:[[:space:]]+ARM' ||
+        fail 'linked kernel is not ARM'
+    readelf -h "$artifact" 2>/dev/null |
+        awk '/Entry point address:/ { found = 1; nonzero = ($NF != "0x0") } END { exit found && nonzero ? 0 : 1 }' ||
+        fail 'linked kernel has no nonzero entry point'
+    for symbol in \
+        rt_arm32_enter_user_first \
+        rt_arm32_svc_resume_kernel \
+        rt_arm32_context_restore_asm \
+        rt_arm32_svc_vector \
+        rt_arm32_svc_vector_install \
+        rt_arm32_exec_token_install \
+        rt_arm32_exec_reap \
+        rt_arm32_svc_dispatch \
+        rt_arm32_user_fault_dispatch \
+        src__os__kernel__arch__arm32__user_entry__enter_user_blocking; do
+        require_global_text_symbol "$symbol" "$artifact"
+    done
+    printf '%s\n' "PASS arm32 linked EL0 lifecycle admitted artifact=$artifact"
+}
+
 behavioral() {
-    admit >/dev/null
+    artifact_admit "$kernel" >/dev/null
     [ -s "$kernel" ] || fail "behavioral kernel missing: $kernel"
     [ -s "$image" ] || fail "behavioral image missing: $image"
     qemu=${SIMPLE_QEMU_ARM32_BIN:-qemu-system-arm}
@@ -150,11 +187,25 @@ case "$mode" in
         contract
         printf '%s\n' 'PASS arm32 contract rejects the NVFS/SMF probe'
         ;;
-    --admit) admit ;;
+    --admit)
+        [ "$#" -le 2 ] || fail 'usage: --admit [KERNEL_ELF]'
+        artifact_admit "${2:-$kernel}"
+        ;;
     --behavioral) behavioral ;;
     --self-test)
-        admit >/dev/null
-        printf '%s\n' 'PASS arm32 EL0 lifecycle gate self-test'
+        source_admit >/dev/null
+        fake=$(mktemp "${TMPDIR:-/tmp}/arm32-linked-admit.XXXXXX")
+        trap 'rm -f "$fake"' EXIT HUP INT TERM
+        printf '%s\n' 'not an ELF' >"$fake"
+        if (artifact_admit "$fake") >/dev/null 2>&1; then
+            fail 'linked admission accepted a non-ELF artifact'
+        fi
+        symbol_fixture=$(command -v sh)
+        [ -s "$symbol_fixture" ] || fail 'missing executable fixture for strong-symbol sabotage'
+        if (require_global_text_symbol '__sosix_missing_arm32_strong_symbol_fixture__' "$symbol_fixture") >/dev/null 2>&1; then
+            fail 'strong-symbol admission accepted an ELF without the required symbol'
+        fi
+        printf '%s\n' 'PASS arm32 EL0 lifecycle gate self-test (source owners present; non-ELF and missing-strong-symbol gates fail closed)'
         ;;
-    *) fail 'usage: check-arm32-user-lifecycle-contract.shs [--contract|--admit|--behavioral|--self-test]' ;;
+    *) fail 'usage: check-arm32-user-lifecycle-contract.shs [--contract|--admit [KERNEL_ELF]|--behavioral|--self-test]' ;;
 esac

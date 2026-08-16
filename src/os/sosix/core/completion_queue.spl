@@ -1,0 +1,71 @@
+"""Bounded FIFO for typed SOSIX completions.
+
+Publication is nonblocking. A full queue rejects the newest completion and
+records overflow; the transport owner must treat that rejection as a fault.
+"""
+
+use os.sosix.core.operation.SosixOperationId
+use os.sosix.core.completion.SosixCompletion
+
+pub val SOSIX_COMPLETION_QUEUE_MAX_CAPACITY: i64 = 1024
+
+class SosixCompletionQueue:
+    slots: [SosixCompletion]
+    head: i64
+    tail: i64
+    count: i64
+    limit: i64
+    rejected: u64
+
+impl SosixCompletionQueue:
+    static fn create(requested_capacity: i64) -> SosixCompletionQueue:
+        var bounded = requested_capacity
+        if bounded < 1:
+            bounded = 1
+        if bounded > SOSIX_COMPLETION_QUEUE_MAX_CAPACITY:
+            bounded = SOSIX_COMPLETION_QUEUE_MAX_CAPACITY
+        val placeholder = SosixCompletion(
+            operation: SosixOperationId(slot: 0, generation: 0),
+            api_id: 0,
+            status: 0,
+            transferred: 0,
+            partial_progress: false,
+            terminal_state: 0
+        )
+        var slots: [SosixCompletion] = []
+        var i: i64 = 0
+        # cpu-lane-loop-ok: one-time bounded queue allocation
+        while i < bounded:
+            slots = slots.push(placeholder)
+            i = i + 1
+        SosixCompletionQueue(
+            slots: slots, head: 0, tail: 0, count: 0, limit: bounded, rejected: 0
+        )
+
+    me publish(completion: SosixCompletion) -> bool:
+        if self.count >= self.limit:
+            self.rejected = self.rejected + 1
+            return false
+        self.slots[self.tail] = completion
+        self.tail = (self.tail + 1) % self.limit
+        self.count = self.count + 1
+        true
+
+    me take() -> SosixCompletion?:
+        if self.count <= 0:
+            return nil
+        val completion = self.slots[self.head]
+        self.head = (self.head + 1) % self.limit
+        self.count = self.count - 1
+        completion
+
+    fn len() -> i64:
+        self.count
+
+    fn capacity() -> i64:
+        self.limit
+
+    fn rejected_count() -> u64:
+        self.rejected
+
+export SOSIX_COMPLETION_QUEUE_MAX_CAPACITY, SosixCompletionQueue

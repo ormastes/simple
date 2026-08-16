@@ -1,0 +1,66 @@
+"""Pointer-free SOSIX FS positioned-I/O syscall v1 contract.
+
+The kernel authenticates ``file_object_id`` and ``buffer_registration_id``
+against caller-owned registries before a provider may execute the operation.
+No register is a userspace address.  The live handler validates this envelope
+and fails closed with ENOTSUP until it owns persistent registry state; the
+authenticated executable provider boundary is in
+``positioned_syscall_provider_v1``.
+"""
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+
+pub val SOSIX_FS_PREAD_REGISTERED_V1: u64 = 134
+pub val SOSIX_FS_PWRITE_REGISTERED_V1: u64 = 135
+pub val SOSIX_FS_POSITIONED_SYSCALL_INVALID_V1: i64 = -22
+pub val SOSIX_FS_POSITIONED_SYSCALL_UNAVAILABLE_V1: i64 = -95
+val _SOSIX_FS_U64_MAX_V1: u64 = 0xffffffffffffffff
+
+export SOSIX_FS_PREAD_REGISTERED_V1, SOSIX_FS_PWRITE_REGISTERED_V1
+export SOSIX_FS_POSITIONED_SYSCALL_INVALID_V1
+export SOSIX_FS_POSITIONED_SYSCALL_UNAVAILABLE_V1
+
+pub fn sosix_fs_positioned_syscall_args_v1(
+    syscall_id: u64,
+    file_object_id: u64,
+    buffer_registration_id: u64,
+    buffer_identity: u64,
+    resource_offset: u64,
+    buffer_offset: u64,
+    length: u64
+) -> SyscallArgs:
+    """Build the v1 register envelope; ``buffer_identity`` packs slot/generation."""
+    SyscallArgs(
+        id: syscall_id, arg0: file_object_id,
+        arg1: buffer_registration_id, arg2: buffer_identity,
+        arg3: resource_offset, arg4: buffer_offset, arg5: length)
+
+pub fn sosix_fs_positioned_syscall_envelope_valid_v1(args: SyscallArgs) -> bool:
+    if (args.id != SOSIX_FS_PREAD_REGISTERED_V1 and
+        args.id != SOSIX_FS_PWRITE_REGISTERED_V1):
+        return false
+    if args.arg0 == 0:
+        return false
+    if args.arg1 == 0:
+        return false
+    # BufferRef packs slot in the low word and generation in the high word.
+    # A nonzero slot with generation zero is stale/unauthenticated as well.
+    if args.arg2 == 0 or (args.arg2 >> 32) == 0:
+        return false
+    if args.arg5 == 0:
+        return false
+    if args.arg5 > _SOSIX_FS_U64_MAX_V1 - args.arg3:
+        return false
+    if args.arg5 > _SOSIX_FS_U64_MAX_V1 - args.arg4:
+        return false
+    true
+
+pub fn sosix_fs_handle_positioned_registered_v1(args: SyscallArgs) -> SyscallResult:
+    """Validate the pointer-free ABI and fail closed pending a registry provider."""
+    if not sosix_fs_positioned_syscall_envelope_valid_v1(args):
+        return SyscallResult(value: SOSIX_FS_POSITIONED_SYSCALL_INVALID_V1)
+    SyscallResult(value: SOSIX_FS_POSITIONED_SYSCALL_UNAVAILABLE_V1)
+
+export sosix_fs_positioned_syscall_args_v1
+export sosix_fs_positioned_syscall_envelope_valid_v1
+export sosix_fs_handle_positioned_registered_v1

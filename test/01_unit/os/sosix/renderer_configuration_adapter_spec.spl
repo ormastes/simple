@@ -1,0 +1,70 @@
+# @cover src/os/sosix/host/configuration_adapter.spl 80%
+# @cover src/os/compositor/compositor_engine2d.spl 1%
+# @tag: unit, os, sosix, compositor, capability
+
+use std.spec.{describe, it, expect}
+use os.sosix.host.service_contract.{
+    sosix_host_configuration_snapshot_create,
+    sosix_host_configuration_snapshot_create_with_engine2d_transfer
+}
+use os.sosix.host.configuration_adapter.{
+    sosix_host_configuration_from_environment
+}
+use os.compositor.compositor_engine2d.{
+    Engine2dCompositorBackend,
+    host_wm_render_backend_key_from_configuration,
+    engine2d_compositor_transfer_profile_from_configuration
+}
+use std.nogc_sync_mut.env.variables.{env_set, env_unset}
+
+describe "SOSIX renderer configuration capability":
+    it "defaults an empty capability selection to software without ambient host access":
+        val configuration = sosix_host_configuration_snapshot_create(
+            "headless", "queue", "", false, "")
+        expect(host_wm_render_backend_key_from_configuration(configuration)).to_equal("software")
+
+    it "normalizes and applies an explicit backend selection":
+        val configuration = sosix_host_configuration_snapshot_create(
+            "hosted", "queue", "  software  ", false, "")
+        expect(host_wm_render_backend_key_from_configuration(configuration)).to_equal("software")
+        var raster = Engine2dCompositorBackend.create_from_host_configuration(
+            2, 2, configuration)
+        expect(raster.selected_backend()).to_equal("software")
+        raster.shutdown()
+
+    it "captures transfer settings in one immutable snapshot profile":
+        val configuration =
+            sosix_host_configuration_snapshot_create_with_engine2d_transfer(
+                "hosted", "queue", "software", false, "",
+                "upload", "bulk", "mapped", "readback")
+        expect(engine2d_compositor_transfer_profile_from_configuration(
+            configuration)).to_equal("upload\0bulk\0mapped\0readback")
+
+    it "captures hosted environment settings once through the SOSIX adapter":
+        env_set("SIMPLE_GUI_BACKEND", "software")
+        env_set("SIMPLE_ONE_CALL_UPLOAD", "1")
+        env_set("SIMPLE_BULK_UPLOAD", "0")
+        env_set("SIMPLE_SPL_GPU_TRANSFER_PATH", "mapped")
+        env_set("SIMPLE_ONE_CALL_READBACK", "1")
+        val configuration = sosix_host_configuration_from_environment()
+        val captured = "1\0" + "0\0" + "mapped\0" + "1"
+        expect(configuration.display_backend).to_equal("hosted")
+        expect(configuration.input_backend).to_equal("host-event-queue")
+        expect(configuration.gpu_backend).to_equal("software")
+        expect(configuration.evidence_enabled).to_equal(false)
+        expect(configuration.storage_root).to_equal("")
+        expect(engine2d_compositor_transfer_profile_from_configuration(
+            configuration)).to_equal(captured)
+        var raster = Engine2dCompositorBackend.create_from_host_configuration(
+            2, 2, configuration)
+        expect(raster.selected_backend()).to_equal("software")
+        expect(raster.host_transfer_profile).to_equal(captured)
+        env_set("SIMPLE_SPL_GPU_TRANSFER_PATH", "changed-after-create")
+        expect(configuration.engine2d_transfer_path).to_equal("mapped")
+        expect(raster.host_transfer_profile).to_equal(captured)
+        raster.shutdown()
+        env_unset("SIMPLE_GUI_BACKEND")
+        env_unset("SIMPLE_ONE_CALL_UPLOAD")
+        env_unset("SIMPLE_BULK_UPLOAD")
+        env_unset("SIMPLE_SPL_GPU_TRANSFER_PATH")
+        env_unset("SIMPLE_ONE_CALL_READBACK")

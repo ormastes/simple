@@ -1,0 +1,118 @@
+"""Hosted SDL2 SOSIX display producer over canonical Draw IR and Engine2D.
+
+Submission renders exactly once through the compositor-owned Engine2D session,
+copies that readback into the existing SDL2 pixel backend, and presents it.
+SDL2 exposes a synchronous boolean present rather than a host fence, so this
+compatibility adapter completes SOSIX state only after that call succeeds.
+"""
+
+use common.ui.draw_ir.{DrawIrComposition}
+use os.compositor.display_backend_core.{CompositorBackend}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.hosted_backend_sdl2.{HostedSdl2Backend}
+use os.sosix.host.service_contract.{
+    SosixDisplayRequest,
+    SosixDisplayCompletionKey,
+    sosix_display_request_create
+}
+use os.sosix.host.display_surface_state.{
+    SosixDisplaySurfaceState,
+    sosix_display_surface_submit,
+    sosix_display_present_fence_pending,
+    sosix_display_present_fence_observe
+}
+
+pub struct SosixSdl2PresentSubmission:
+    accepted: bool
+    reason: text
+    state: SosixDisplaySurfaceState
+    completion: SosixDisplayCompletionKey
+    pixel_count: u64
+    composition_id: text
+
+export SosixSdl2PresentSubmission
+
+fn _sosix_sdl2_completion(request: SosixDisplayRequest) -> SosixDisplayCompletionKey:
+    SosixDisplayCompletionKey(
+        surface: request.surface,
+        surface_generation: request.surface_generation,
+        frame_sequence: request.frame_sequence
+    )
+
+fn _sosix_sdl2_rejected(
+    reason: text,
+    state: SosixDisplaySurfaceState,
+    request: SosixDisplayRequest,
+    composition_id: text
+) -> SosixSdl2PresentSubmission:
+    SosixSdl2PresentSubmission(
+        accepted: false,
+        reason: reason,
+        state: state,
+        completion: _sosix_sdl2_completion(request),
+        pixel_count: 0,
+        composition_id: composition_id
+    )
+
+pub fn sosix_sdl2_submit_composition(
+    raster: Engine2dCompositorBackend,
+    display: HostedSdl2Backend,
+    state: SosixDisplaySurfaceState,
+    request: SosixDisplayRequest,
+    composition: DrawIrComposition
+) -> SosixSdl2PresentSubmission:
+    if display.window_handle == 0:
+        return _sosix_sdl2_rejected(
+            "sdl2-surface-unavailable", state, request, composition.composition_id)
+    if display.w != raster.w or display.h != raster.h:
+        return _sosix_sdl2_rejected(
+            "display-size-mismatch", state, request, composition.composition_id)
+
+    val validated = sosix_display_request_create(
+        request.operation,
+        request.api_id,
+        request.surface,
+        request.surface_generation,
+        request.frame_sequence,
+        request.buffer,
+        request.deadline_ns
+    )
+    if not validated.accepted:
+        return _sosix_sdl2_rejected(
+            validated.reason, state, request, composition.composition_id)
+
+    val submitted = sosix_display_surface_submit(state, request)
+    if not submitted.accepted:
+        return _sosix_sdl2_rejected(
+            submitted.reason, state, request, composition.composition_id)
+
+    # Engine2D is the sole raster owner. The hosted adapter consumes only its
+    # canonical Draw IR result; it never draws commands or text independently.
+    val rendered = raster.render_draw_ir_composition(composition, [])
+    if (rendered.fallback_required or rendered.skipped_command_count != 0 or
+        rendered.rendered_command_count == 0 or
+        rendered.pixels.len() != display.w * display.h):
+        return _sosix_sdl2_rejected(
+            "draw-ir-render-rejected", state, request, composition.composition_id)
+
+    display.blit_pixels(0, 0, display.w, display.h, rendered.pixels)
+    if not display.present_checked():
+        return _sosix_sdl2_rejected(
+            "sdl2-present-failed", state, request, composition.composition_id)
+    # SDL2's compatibility API signals completion synchronously. Keep the
+    # pending fence explicit so asynchronous hosts can share the lifecycle
+    # without claiming completion before their own fence is observed.
+    val pending = sosix_display_present_fence_pending(
+        submitted.state, _sosix_sdl2_completion(request))
+    val completed = sosix_display_present_fence_observe(
+        pending, _sosix_sdl2_completion(request))
+    SosixSdl2PresentSubmission(
+        accepted: completed.accepted,
+        reason: if completed.accepted: "presented-synchronously" else: completed.reason,
+        state: completed.fence.state,
+        completion: _sosix_sdl2_completion(request),
+        pixel_count: rendered.pixels.len() as u64,
+        composition_id: composition.composition_id
+    )
+
+export sosix_sdl2_submit_composition

@@ -1,0 +1,43 @@
+# @cover src/os/compositor/host_services/cocoa_display_adapter.spl 20%
+
+use std.spec
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.hosted_backend_cocoa.{HostedCocoaBackend}
+use os.compositor.host_services.cocoa_display_adapter.{sosix_cocoa_submit_composition}
+use os.sosix.core.operation.{SosixOperationId}
+use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
+use os.sosix.host.service_contract.{
+    SOSIX_HOST_DISPLAY_PRESENT,
+    SosixDisplayRequest,
+    sosix_host_configuration_snapshot_create
+}
+use os.sosix.host.display_surface_state.{sosix_display_surface_state_create}
+use common.ui.draw_ir.{draw_ir_composition}
+
+describe "SOSIX Cocoa renderer-host boundary":
+    it "rejects a non-Cocoa configuration before touching the host display":
+        val surface = SosixCapabilityRef(slot: 41, generation: 2)
+        val request = SosixDisplayRequest(
+            operation: SosixOperationId(slot: 1, generation: 1),
+            api_id: SOSIX_HOST_DISPLAY_PRESENT,
+            surface: surface,
+            surface_generation: 1,
+            frame_sequence: 1,
+            buffer: SosixBufferRef(slot: 42, generation: 1),
+            deadline_ns: 1000
+        )
+        val configuration = sosix_host_configuration_snapshot_create(
+            "headless", "queue", "software", false, "")
+        var raster = Engine2dCompositorBackend.create_named(2, 2, "software")
+        val display = HostedCocoaBackend.new(0, 0, 2, 2)
+        val state = sosix_display_surface_state_create(surface, 2).state
+        val composition = draw_ir_composition(
+            "cocoa-frame-1", "sosix-host", "software", [])
+
+        val submission = sosix_cocoa_submit_composition(
+            configuration, raster, display, state, request, composition)
+
+        expect(submission.accepted).to_equal(false)
+        expect(submission.reason).to_equal("cocoa-not-configured")
+        expect(submission.state.next_frame_sequence).to_equal(1)
+        raster.shutdown()

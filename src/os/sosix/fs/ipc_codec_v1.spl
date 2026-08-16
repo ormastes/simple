@@ -1,0 +1,290 @@
+"""Pure, versioned SOSIX filesystem IPC wire codec.
+
+This module only translates typed values to and from bounded byte arrays.  It
+does not send IPC, own endpoints, dereference capabilities, or expose raw
+pointers.  ABI v1 is packed little-endian and rejects non-exact messages.
+"""
+
+use os.sosix.core.capability_ref.{SosixCapabilityRef, SosixBufferRef}
+use os.sosix.fs.operation_adapter.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
+
+pub val SOSIX_FS_IPC_ABI_MAJOR_V1: u16 = 1
+pub val SOSIX_FS_IPC_REQUEST_HEADER_SIZE_V1: u16 = 48
+pub val SOSIX_FS_IPC_TRANSFER_DESCRIPTOR_SIZE_V1: u16 = 40
+pub val SOSIX_FS_IPC_REQUEST_SIZE_V1: u64 = 88
+pub val SOSIX_FS_IPC_COMPLETION_HEADER_SIZE_V1: u16 = 48
+pub val SOSIX_FS_IPC_MAX_COMPLETION_PAYLOAD_V1: u64 = 4096
+pub val SOSIX_FS_IPC_REQUEST_FLAG_CANCELLABLE: u32 = 1
+pub val SOSIX_FS_IPC_REQUEST_FLAG_REGISTERED_BUFFER: u32 = 2
+pub val SOSIX_FS_IPC_REQUEST_FLAGS_V1: u32 = 3
+pub val SOSIX_FS_IPC_COMPLETION_FLAG_PARTIAL: u32 = 1
+pub val SOSIX_FS_IPC_COMPLETION_FLAGS_V1: u32 = 1
+
+pub struct SosixFsIpcRequestV1:
+    api_id: u32
+    flags: u32
+    operation_slot: u32
+    operation_generation: u32
+    reply_endpoint: u64
+    request_token: u64
+    deadline_ns: u64
+    capability: SosixCapabilityRef
+    resource_offset: u64
+    length: u64
+    buffer: SosixBufferRef
+    buffer_offset: u64
+
+pub struct SosixFsIpcCompletionV1:
+    api_id: u32
+    flags: u32
+    operation_slot: u32
+    operation_generation: u32
+    request_token: u64
+    status: i32
+    transferred: u64
+    payload: [u8]
+
+pub struct SosixFsIpcRequestEncodeResultV1:
+    accepted: bool
+    reason: text
+    bytes: [u8]
+
+pub struct SosixFsIpcRequestDecodeResultV1:
+    accepted: bool
+    reason: text
+    request: SosixFsIpcRequestV1
+
+pub struct SosixFsIpcCompletionEncodeResultV1:
+    accepted: bool
+    reason: text
+    bytes: [u8]
+
+pub struct SosixFsIpcCompletionDecodeResultV1:
+    accepted: bool
+    reason: text
+    completion: SosixFsIpcCompletionV1
+
+export SOSIX_FS_IPC_ABI_MAJOR_V1, SOSIX_FS_IPC_REQUEST_HEADER_SIZE_V1
+export SOSIX_FS_IPC_TRANSFER_DESCRIPTOR_SIZE_V1, SOSIX_FS_IPC_REQUEST_SIZE_V1
+export SOSIX_FS_IPC_COMPLETION_HEADER_SIZE_V1
+export SOSIX_FS_IPC_MAX_COMPLETION_PAYLOAD_V1
+export SOSIX_FS_IPC_REQUEST_FLAG_CANCELLABLE, SOSIX_FS_IPC_REQUEST_FLAG_REGISTERED_BUFFER
+export SOSIX_FS_IPC_REQUEST_FLAGS_V1, SOSIX_FS_IPC_COMPLETION_FLAG_PARTIAL
+export SOSIX_FS_IPC_COMPLETION_FLAGS_V1
+export SosixFsIpcRequestV1, SosixFsIpcCompletionV1
+export SosixFsIpcRequestEncodeResultV1, SosixFsIpcRequestDecodeResultV1
+export SosixFsIpcCompletionEncodeResultV1, SosixFsIpcCompletionDecodeResultV1
+
+fn _sosix_fs_ipc_push_u16_v1(buffer: [u8], value: u16):
+    buffer.push((value & 0xff) as u8)
+    buffer.push(((value >> 8) & 0xff) as u8)
+
+fn _sosix_fs_ipc_push_u32_v1(buffer: [u8], value: u32):
+    buffer.push((value & 0xff) as u8)
+    buffer.push(((value >> 8) & 0xff) as u8)
+    buffer.push(((value >> 16) & 0xff) as u8)
+    buffer.push(((value >> 24) & 0xff) as u8)
+
+fn _sosix_fs_ipc_push_u64_v1(buffer: [u8], value: u64):
+    _sosix_fs_ipc_push_u32_v1(buffer, (value & 0xffffffff) as u32)
+    _sosix_fs_ipc_push_u32_v1(buffer, ((value >> 32) & 0xffffffff) as u32)
+
+fn _sosix_fs_ipc_read_u16_v1(data: [u8], offset: u64) -> u16:
+    (data[offset] as u16) | ((data[offset + 1] as u16) << 8)
+
+fn _sosix_fs_ipc_read_u32_v1(data: [u8], offset: u64) -> u32:
+    ((data[offset] as u32) |
+        ((data[offset + 1] as u32) << 8) |
+        ((data[offset + 2] as u32) << 16) |
+        ((data[offset + 3] as u32) << 24))
+
+fn _sosix_fs_ipc_read_u64_v1(data: [u8], offset: u64) -> u64:
+    (_sosix_fs_ipc_read_u32_v1(data, offset) as u64) |
+        ((_sosix_fs_ipc_read_u32_v1(data, offset + 4) as u64) << 32)
+
+fn _sosix_fs_ipc_supported_api_v1(api_id: u32) -> bool:
+    api_id == SOSIX_FS_READ_AT or api_id == SOSIX_FS_WRITE_AT
+
+fn _sosix_fs_ipc_range_overflows_v1(offset: u64, length: u64) -> bool:
+    offset + length < offset
+
+fn _sosix_fs_ipc_empty_request_v1() -> SosixFsIpcRequestV1:
+    SosixFsIpcRequestV1(
+        api_id: 0, flags: 0, operation_slot: 0, operation_generation: 0,
+        reply_endpoint: 0, request_token: 0, deadline_ns: 0,
+        capability: SosixCapabilityRef(slot: 0, generation: 0),
+        resource_offset: 0, length: 0,
+        buffer: SosixBufferRef(slot: 0, generation: 0), buffer_offset: 0
+    )
+
+fn _sosix_fs_ipc_empty_completion_v1() -> SosixFsIpcCompletionV1:
+    SosixFsIpcCompletionV1(
+        api_id: 0, flags: 0, operation_slot: 0, operation_generation: 0,
+        request_token: 0, status: 0,
+        transferred: 0, payload: []
+    )
+
+fn _sosix_fs_ipc_validate_request_v1(request: SosixFsIpcRequestV1) -> text:
+    if not _sosix_fs_ipc_supported_api_v1(request.api_id): return "api-mismatch"
+    if (request.flags & ~SOSIX_FS_IPC_REQUEST_FLAGS_V1) != 0: return "unknown-request-flags"
+    if (request.flags & SOSIX_FS_IPC_REQUEST_FLAG_REGISTERED_BUFFER) == 0:
+        return "registered-buffer-required"
+    if request.operation_generation == 0: return "invalid-operation-generation"
+    if request.reply_endpoint == 0: return "invalid-reply-endpoint"
+    if request.request_token == 0: return "invalid-request-token"
+    if request.capability.generation == 0: return "invalid-capability-generation"
+    if request.buffer.generation == 0: return "invalid-buffer-generation"
+    if request.length == 0: return "empty-transfer"
+    if _sosix_fs_ipc_range_overflows_v1(request.resource_offset, request.length):
+        return "resource-range-overflow"
+    if _sosix_fs_ipc_range_overflows_v1(request.buffer_offset, request.length):
+        return "buffer-range-overflow"
+    "accepted"
+
+pub fn sosix_fs_ipc_encode_request_v1(
+    request: SosixFsIpcRequestV1
+) -> SosixFsIpcRequestEncodeResultV1:
+    val reason = _sosix_fs_ipc_validate_request_v1(request)
+    if reason != "accepted":
+        return SosixFsIpcRequestEncodeResultV1(accepted: false, reason: reason, bytes: [])
+    var buffer: [u8] = []
+    _sosix_fs_ipc_push_u16_v1(buffer, SOSIX_FS_IPC_ABI_MAJOR_V1)
+    _sosix_fs_ipc_push_u16_v1(buffer, SOSIX_FS_IPC_REQUEST_HEADER_SIZE_V1)
+    _sosix_fs_ipc_push_u32_v1(buffer, request.api_id)
+    _sosix_fs_ipc_push_u32_v1(buffer, request.flags)
+    _sosix_fs_ipc_push_u32_v1(buffer, request.operation_slot)
+    _sosix_fs_ipc_push_u32_v1(buffer, request.operation_generation)
+    _sosix_fs_ipc_push_u64_v1(buffer, request.reply_endpoint)
+    _sosix_fs_ipc_push_u64_v1(buffer, request.request_token)
+    _sosix_fs_ipc_push_u64_v1(buffer, request.deadline_ns)
+    _sosix_fs_ipc_push_u32_v1(buffer, 0)
+    _sosix_fs_ipc_push_u32_v1(buffer, request.capability.slot)
+    _sosix_fs_ipc_push_u32_v1(buffer, request.capability.generation)
+    _sosix_fs_ipc_push_u64_v1(buffer, request.resource_offset)
+    _sosix_fs_ipc_push_u64_v1(buffer, request.length)
+    _sosix_fs_ipc_push_u32_v1(buffer, request.buffer.slot)
+    _sosix_fs_ipc_push_u32_v1(buffer, request.buffer.generation)
+    _sosix_fs_ipc_push_u64_v1(buffer, request.buffer_offset)
+    SosixFsIpcRequestEncodeResultV1(accepted: true, reason: "accepted", bytes: buffer)
+
+pub fn sosix_fs_ipc_decode_request_v1(
+    data: [u8], expected_api_id: u32
+) -> SosixFsIpcRequestDecodeResultV1:
+    val empty = _sosix_fs_ipc_empty_request_v1()
+    if data.len() as u64 != SOSIX_FS_IPC_REQUEST_SIZE_V1:
+        return SosixFsIpcRequestDecodeResultV1(accepted: false, reason: "request-size-mismatch", request: empty)
+    if _sosix_fs_ipc_read_u16_v1(data, 0) != SOSIX_FS_IPC_ABI_MAJOR_V1:
+        return SosixFsIpcRequestDecodeResultV1(accepted: false, reason: "abi-major-mismatch", request: empty)
+    if _sosix_fs_ipc_read_u16_v1(data, 2) != SOSIX_FS_IPC_REQUEST_HEADER_SIZE_V1:
+        return SosixFsIpcRequestDecodeResultV1(accepted: false, reason: "request-header-size-mismatch", request: empty)
+    val api_id = _sosix_fs_ipc_read_u32_v1(data, 4)
+    if api_id != expected_api_id or not _sosix_fs_ipc_supported_api_v1(api_id):
+        return SosixFsIpcRequestDecodeResultV1(accepted: false, reason: "api-mismatch", request: empty)
+    if _sosix_fs_ipc_read_u32_v1(data, 44) != 0:
+        return SosixFsIpcRequestDecodeResultV1(accepted: false, reason: "nonzero-reserved", request: empty)
+    val request = SosixFsIpcRequestV1(
+        api_id: api_id,
+        flags: _sosix_fs_ipc_read_u32_v1(data, 8),
+        operation_slot: _sosix_fs_ipc_read_u32_v1(data, 12),
+        operation_generation: _sosix_fs_ipc_read_u32_v1(data, 16),
+        reply_endpoint: _sosix_fs_ipc_read_u64_v1(data, 20),
+        request_token: _sosix_fs_ipc_read_u64_v1(data, 28),
+        deadline_ns: _sosix_fs_ipc_read_u64_v1(data, 36),
+        capability: SosixCapabilityRef(
+            slot: _sosix_fs_ipc_read_u32_v1(data, 48),
+            generation: _sosix_fs_ipc_read_u32_v1(data, 52)
+        ),
+        resource_offset: _sosix_fs_ipc_read_u64_v1(data, 56),
+        length: _sosix_fs_ipc_read_u64_v1(data, 64),
+        buffer: SosixBufferRef(
+            slot: _sosix_fs_ipc_read_u32_v1(data, 72),
+            generation: _sosix_fs_ipc_read_u32_v1(data, 76)
+        ),
+        buffer_offset: _sosix_fs_ipc_read_u64_v1(data, 80)
+    )
+    val reason = _sosix_fs_ipc_validate_request_v1(request)
+    SosixFsIpcRequestDecodeResultV1(
+        accepted: reason == "accepted", reason: reason, request: request
+    )
+
+pub fn sosix_fs_ipc_encode_completion_v1(
+    completion: SosixFsIpcCompletionV1
+) -> SosixFsIpcCompletionEncodeResultV1:
+    if not _sosix_fs_ipc_supported_api_v1(completion.api_id):
+        return SosixFsIpcCompletionEncodeResultV1(accepted: false, reason: "api-mismatch", bytes: [])
+    if (completion.flags & ~SOSIX_FS_IPC_COMPLETION_FLAGS_V1) != 0:
+        return SosixFsIpcCompletionEncodeResultV1(accepted: false, reason: "unknown-completion-flags", bytes: [])
+    if completion.operation_generation == 0:
+        return SosixFsIpcCompletionEncodeResultV1(accepted: false, reason: "invalid-operation-generation", bytes: [])
+    if completion.request_token == 0:
+        return SosixFsIpcCompletionEncodeResultV1(accepted: false, reason: "invalid-request-token", bytes: [])
+    if completion.payload.len() as u64 > SOSIX_FS_IPC_MAX_COMPLETION_PAYLOAD_V1:
+        return SosixFsIpcCompletionEncodeResultV1(accepted: false, reason: "payload-length-overflow", bytes: [])
+    var buffer: [u8] = []
+    _sosix_fs_ipc_push_u16_v1(buffer, SOSIX_FS_IPC_ABI_MAJOR_V1)
+    _sosix_fs_ipc_push_u16_v1(buffer, SOSIX_FS_IPC_COMPLETION_HEADER_SIZE_V1)
+    _sosix_fs_ipc_push_u32_v1(buffer, completion.api_id)
+    _sosix_fs_ipc_push_u32_v1(buffer, completion.flags)
+    _sosix_fs_ipc_push_u32_v1(buffer, completion.operation_slot)
+    _sosix_fs_ipc_push_u32_v1(buffer, completion.operation_generation)
+    _sosix_fs_ipc_push_u32_v1(buffer, completion.status as u32)
+    _sosix_fs_ipc_push_u64_v1(buffer, completion.request_token)
+    _sosix_fs_ipc_push_u64_v1(buffer, completion.transferred)
+    _sosix_fs_ipc_push_u32_v1(buffer, completion.payload.len() as u32)
+    _sosix_fs_ipc_push_u32_v1(buffer, 0)
+    for byte in completion.payload:
+        buffer.push(byte)
+    SosixFsIpcCompletionEncodeResultV1(accepted: true, reason: "accepted", bytes: buffer)
+
+pub fn sosix_fs_ipc_decode_completion_v1(
+    data: [u8], expected_api_id: u32, expected_operation_slot: u32,
+    expected_operation_generation: u32, expected_request_token: u64
+) -> SosixFsIpcCompletionDecodeResultV1:
+    val empty = _sosix_fs_ipc_empty_completion_v1()
+    if data.len() as u64 < SOSIX_FS_IPC_COMPLETION_HEADER_SIZE_V1 as u64:
+        return SosixFsIpcCompletionDecodeResultV1(accepted: false, reason: "completion-too-short", completion: empty)
+    if _sosix_fs_ipc_read_u16_v1(data, 0) != SOSIX_FS_IPC_ABI_MAJOR_V1:
+        return SosixFsIpcCompletionDecodeResultV1(accepted: false, reason: "abi-major-mismatch", completion: empty)
+    if _sosix_fs_ipc_read_u16_v1(data, 2) != SOSIX_FS_IPC_COMPLETION_HEADER_SIZE_V1:
+        return SosixFsIpcCompletionDecodeResultV1(accepted: false, reason: "completion-header-size-mismatch", completion: empty)
+    val api_id = _sosix_fs_ipc_read_u32_v1(data, 4)
+    if api_id != expected_api_id or not _sosix_fs_ipc_supported_api_v1(api_id):
+        return SosixFsIpcCompletionDecodeResultV1(accepted: false, reason: "api-mismatch", completion: empty)
+    val flags = _sosix_fs_ipc_read_u32_v1(data, 8)
+    if (flags & ~SOSIX_FS_IPC_COMPLETION_FLAGS_V1) != 0:
+        return SosixFsIpcCompletionDecodeResultV1(accepted: false, reason: "unknown-completion-flags", completion: empty)
+    val operation_slot = _sosix_fs_ipc_read_u32_v1(data, 12)
+    val operation_generation = _sosix_fs_ipc_read_u32_v1(data, 16)
+    if (operation_slot != expected_operation_slot or
+        operation_generation == 0 or
+        operation_generation != expected_operation_generation):
+        return SosixFsIpcCompletionDecodeResultV1(accepted: false, reason: "operation-mismatch", completion: empty)
+    val token = _sosix_fs_ipc_read_u64_v1(data, 24)
+    if token == 0 or token != expected_request_token:
+        return SosixFsIpcCompletionDecodeResultV1(accepted: false, reason: "request-token-mismatch", completion: empty)
+    val payload_length = _sosix_fs_ipc_read_u32_v1(data, 40) as u64
+    if _sosix_fs_ipc_read_u32_v1(data, 44) != 0:
+        return SosixFsIpcCompletionDecodeResultV1(accepted: false, reason: "nonzero-reserved", completion: empty)
+    if (payload_length > SOSIX_FS_IPC_MAX_COMPLETION_PAYLOAD_V1 or
+        payload_length > data.len() as u64 or
+        SOSIX_FS_IPC_COMPLETION_HEADER_SIZE_V1 as u64 + payload_length != data.len() as u64):
+        return SosixFsIpcCompletionDecodeResultV1(accepted: false, reason: "completion-size-mismatch", completion: empty)
+    var payload: [u8] = []
+    var index: u64 = SOSIX_FS_IPC_COMPLETION_HEADER_SIZE_V1 as u64
+    while index < data.len() as u64:
+        payload.push(data[index])
+        index = index + 1
+    val completion = SosixFsIpcCompletionV1(
+        api_id: api_id,
+        flags: flags,
+        operation_slot: operation_slot,
+        operation_generation: operation_generation,
+        request_token: token,
+        status: _sosix_fs_ipc_read_u32_v1(data, 20) as i32,
+        transferred: _sosix_fs_ipc_read_u64_v1(data, 32),
+        payload: payload
+    )
+    SosixFsIpcCompletionDecodeResultV1(accepted: true, reason: "accepted", completion: completion)
+
+export sosix_fs_ipc_encode_request_v1, sosix_fs_ipc_decode_request_v1
+export sosix_fs_ipc_encode_completion_v1, sosix_fs_ipc_decode_completion_v1

@@ -1,0 +1,95 @@
+"""Atomic value-semantic SOSIX FS v1 service dispatch transaction.
+
+The caller supplies an accepted plan, the authoritative service registry, and
+a positioned backend.  Buffer bytes can only enter backend dispatch through
+the registry lookup.  READ results are committed against the same generation
+bound plan before a correlated completion is returned; WRITE never rewrites
+the registry's owned copy.
+"""
+
+use os.sosix.fs.operation_adapter.SOSIX_FS_READ_AT
+use os.sosix.fs.service_adapter_v1.{
+    SOSIX_FS_SERVICE_STATUS_STALE_V1,
+    SosixFsServicePrepareResultV1, SosixFsServiceRegistryV1,
+    sosix_fs_service_encode_completion_v1
+}
+use os.sosix.fs.service_buffer_registry_v1.{
+    sosix_fs_service_lookup_dispatch_buffer_v1,
+    sosix_fs_service_commit_dispatch_buffer_v1
+}
+use os.sosix.fs.service_vfs_backend_v1.{
+    SosixPositionedVfsBackendV1, sosix_fs_service_dispatch_vfs_v1
+}
+
+pub struct SosixFsServiceDispatchTransactionV1:
+    accepted: bool
+    reason: text
+    status: i32
+    transferred: u64
+    registry: SosixFsServiceRegistryV1
+    completion: [u8]
+
+export SosixFsServiceDispatchTransactionV1
+
+fn _finish_v1(
+    accepted: bool, reason: text, status: i32, transferred: u64,
+    prepared: SosixFsServicePrepareResultV1,
+    registry: SosixFsServiceRegistryV1
+) -> SosixFsServiceDispatchTransactionV1:
+    if not prepared.accepted or not prepared.plan.ready:
+        return SosixFsServiceDispatchTransactionV1(
+            accepted: false, reason: reason, status: status,
+            transferred: 0, registry: registry, completion: [])
+    val partial = status == 0 and transferred > 0 and transferred < prepared.plan.length
+    val encoded = sosix_fs_service_encode_completion_v1(
+        prepared.plan, status, transferred, partial)
+    if not encoded.accepted:
+        return SosixFsServiceDispatchTransactionV1(
+            accepted: false, reason: encoded.reason, status: status,
+            transferred: 0, registry: registry, completion: [])
+    SosixFsServiceDispatchTransactionV1(
+        accepted: accepted, reason: reason, status: status,
+        transferred: transferred, registry: registry,
+        completion: encoded.bytes)
+
+pub fn sosix_fs_service_dispatch_transaction_v1(
+    prepared: SosixFsServicePrepareResultV1,
+    registry: SosixFsServiceRegistryV1,
+    backend: SosixPositionedVfsBackendV1
+) -> SosixFsServiceDispatchTransactionV1:
+    """Dispatch using only authoritative registered bytes and return one completion."""
+    if not prepared.accepted or not prepared.plan.ready:
+        return _finish_v1(
+            false, "dispatch-plan-not-accepted", prepared.status, 0,
+            prepared, registry)
+
+    val lookup = sosix_fs_service_lookup_dispatch_buffer_v1(
+        registry, prepared.plan)
+    if not lookup.accepted:
+        return _finish_v1(
+            false, lookup.reason, SOSIX_FS_SERVICE_STATUS_STALE_V1, 0,
+            prepared, registry)
+
+    val dispatched = sosix_fs_service_dispatch_vfs_v1(
+        prepared, prepared.plan.buffer_registration_id, lookup.bytes, backend)
+    if not dispatched.accepted:
+        return _finish_v1(
+            false, dispatched.reason, dispatched.status, 0,
+            prepared, registry)
+
+    if prepared.plan.api_id == SOSIX_FS_READ_AT:
+        val committed = sosix_fs_service_commit_dispatch_buffer_v1(
+            registry, prepared.plan, dispatched.buffer)
+        if not committed.accepted:
+            return _finish_v1(
+                false, committed.reason, SOSIX_FS_SERVICE_STATUS_STALE_V1, 0,
+                prepared, registry)
+        return _finish_v1(
+            true, dispatched.reason, dispatched.status, dispatched.transferred,
+            prepared, committed.registry)
+
+    _finish_v1(
+        true, dispatched.reason, dispatched.status, dispatched.transferred,
+        prepared, registry)
+
+export sosix_fs_service_dispatch_transaction_v1

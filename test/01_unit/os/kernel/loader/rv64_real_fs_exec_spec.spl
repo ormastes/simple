@@ -1,0 +1,60 @@
+# @cover src/os/kernel/loader/riscv64_fs_exec_spawn.spl 80%
+# @cover src/os/kernel/arch/riscv64/process_stdout_capture.spl 80%
+
+use std.spec.*
+use os.kernel.arch.riscv64.process_stdout_capture.{
+    RV64_PROCESS_STDOUT_LIMIT,
+    rv64_process_stdout_begin,
+    rv64_process_stdout_write_byte,
+    rv64_process_stdout_finish,
+    rv64_process_stdout_last_result
+}
+use os.kernel.loader.riscv64_fs_exec_spawn.{riscv64_fs_exec_failed_capture}
+
+describe "RV64 real filesystem execution result boundary":
+    it "retains target-origin nonce stdout and exit 37 exactly":
+        val expected = "SIMPLEOS_FS_EXEC_OK arch=riscv64 nonce=rv64-real-exec-0001\n".bytes()
+        rv64_process_stdout_begin()
+        for byte in expected:
+            rv64_process_stdout_write_byte(byte)
+
+        val completed = rv64_process_stdout_finish(37)
+        expect(completed.bytes.len()).to_equal(expected.len())
+        var index: u64 = 0
+        while index < expected.len():
+            expect(completed.bytes[index]).to_equal(expected[index])
+            index = index + 1
+        expect(completed.exit_code).to_equal(37)
+        expect(completed.truncated).to_be(false)
+
+        # Completion closes the capture. A late kernel or stale-task write must
+        # not alter the authenticated child result.
+        rv64_process_stdout_write_byte(0x58u8)
+        val retained = rv64_process_stdout_last_result()
+        expect(retained.bytes.len()).to_equal(expected.len())
+        expect(retained.exit_code).to_equal(37)
+        expect(retained.truncated).to_be(false)
+
+    it "marks oversized child output instead of silently accepting it":
+        rv64_process_stdout_begin()
+        var count: u64 = 0
+        while count < RV64_PROCESS_STDOUT_LIMIT + 1:
+            rv64_process_stdout_write_byte(0x41u8)
+            count = count + 1
+
+        val completed = rv64_process_stdout_finish(37)
+        expect(completed.bytes.len()).to_equal(RV64_PROCESS_STDOUT_LIMIT)
+        expect(completed.exit_code).to_equal(37)
+        expect(completed.truncated).to_be(true)
+
+    it "clears stale stdout when filesystem launch fails before user entry":
+        rv64_process_stdout_begin()
+        rv64_process_stdout_write_byte(0x4fu8)
+        rv64_process_stdout_write_byte(0x4bu8)
+        val stale = rv64_process_stdout_finish(37)
+        expect(stale.bytes.len()).to_equal(2)
+
+        val failed = riscv64_fs_exec_failed_capture(-8)
+        expect(failed.bytes.len()).to_equal(0)
+        expect(failed.exit_code).to_equal(-8)
+        expect(failed.truncated).to_be(false)

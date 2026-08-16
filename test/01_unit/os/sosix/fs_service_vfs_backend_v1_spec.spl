@@ -1,0 +1,124 @@
+"""SOSIX service plans require genuine cursor-independent positioned I/O."""
+
+use std.spec.*
+use os.sosix.fs.operation_adapter.{SOSIX_FS_READ_AT, SOSIX_FS_WRITE_AT}
+use os.sosix.fs.service_adapter_v1.*
+use os.sosix.fs.service_vfs_backend_v1.*
+
+class PositionedMemoryBackend:
+    bytes: [u8]
+
+impl PositionedMemoryBackend:
+    static fn new() -> PositionedMemoryBackend:
+        PositionedMemoryBackend(bytes: [10, 20, 30, 40, 50, 60])
+
+impl SosixPositionedVfsBackendV1 for PositionedMemoryBackend:
+    fn positioned_io_available() -> bool: true
+    fn read_at(file_object_id: u64, offset: u64, length: u64) -> Result<[u8], text>:
+        if file_object_id != 1200:
+            return Err("unknown file object")
+        var out: [u8] = []
+        var i = 0u64
+        while i < length and offset + i < self.bytes.len().to_u64():
+            out.push(self.bytes[(offset + i).to_i32()])
+            i = i + 1
+        Ok(out)
+    me fn write_at(file_object_id: u64, offset: u64, data: [u8]) -> Result<u64, text>:
+        if file_object_id != 1200:
+            return Err("unknown file object")
+        var i = 0i32
+        while i < data.len() and offset + i.to_u64() < self.bytes.len().to_u64():
+            self.bytes[(offset + i.to_u64()).to_i32()] = data[i]
+            i = i + 1
+        Ok(i.to_u64())
+
+class UnavailablePositionedBackend:
+
+impl SosixPositionedVfsBackendV1 for UnavailablePositionedBackend:
+    fn positioned_io_available() -> bool: false
+    fn read_at(file_object_id: u64, offset: u64, length: u64) -> Result<[u8], text>:
+        Err("positioned I/O unavailable")
+    me fn write_at(file_object_id: u64, offset: u64, data: [u8]) -> Result<u64, text>:
+        Err("positioned I/O unavailable")
+
+class OversizePositionedBackend:
+
+impl SosixPositionedVfsBackendV1 for OversizePositionedBackend:
+    fn positioned_io_available() -> bool: true
+    fn read_at(file_object_id: u64, offset: u64, length: u64) -> Result<[u8], text>:
+        Ok([1, 2, 3])
+    me fn write_at(file_object_id: u64, offset: u64, data: [u8]) -> Result<u64, text>:
+        Ok(data.len().to_u64() + 1)
+
+fn _prepared(api_id: u32, buffer_offset: u64, length: u64) -> SosixFsServicePrepareResultV1:
+    SosixFsServicePrepareResultV1(
+        accepted: true, reason: "dispatch-ready", status: 0,
+        plan: SosixFsServiceDispatchPlanV1(
+            ready: true, api_id: api_id, source_process_id: 42,
+            reply_endpoint: 900, operation_slot: 1, operation_generation: 1,
+            request_token: 2, deadline_ns: 3, file_object_id: 1200,
+            buffer_registration_id: 1300, buffer_slot: 4,
+            buffer_generation: 9, resource_offset: 2,
+            buffer_offset: buffer_offset, length: length
+        )
+    )
+
+describe "SOSIX service positioned backend v1":
+    it "copies a genuine positioned read into the authenticated buffer":
+        val result = sosix_fs_service_dispatch_vfs_v1(
+            _prepared(SOSIX_FS_READ_AT, 1, 3), 1300,
+            [0, 0, 0, 0, 0], PositionedMemoryBackend.new()
+        )
+        expect(result.accepted).to_be(true)
+        expect(result.transferred).to_equal(3)
+        expect(result.buffer).to_equal([0, 30, 40, 50, 0])
+
+    it "writes registered bytes through a genuine positioned backend":
+        val backend = PositionedMemoryBackend.new()
+        val result = sosix_fs_service_dispatch_vfs_v1(
+            _prepared(SOSIX_FS_WRITE_AT, 1, 3), 1300,
+            [9, 71, 72, 73, 8], backend
+        )
+        expect(result.accepted).to_be(true)
+        expect(result.transferred).to_equal(3)
+        expect(backend.read_at(1200, 0, 6).unwrap()).to_equal([10, 20, 71, 72, 73, 60])
+
+    it "fails closed when the real VFS lacks positioned I/O":
+        val result = sosix_fs_service_dispatch_vfs_v1(
+            _prepared(SOSIX_FS_READ_AT, 0, 2), 1300,
+            [1, 2], UnavailablePositionedBackend()
+        )
+        expect(result.accepted).to_be(false)
+        expect(result.reason).to_equal("backend-positioned-io-unavailable")
+        expect(result.status).to_equal(SOSIX_FS_VFS_STATUS_UNAVAILABLE_V1)
+        expect(result.transferred).to_equal(0)
+
+    it "fails before backend dispatch for an unaccepted plan or wrong registration":
+        var rejected = _prepared(SOSIX_FS_READ_AT, 0, 2)
+        rejected.accepted = false
+        expect(sosix_fs_service_dispatch_vfs_v1(
+            rejected, 1300, [1, 2], PositionedMemoryBackend.new()
+        ).reason).to_equal("dispatch-plan-not-accepted")
+        expect(sosix_fs_service_dispatch_vfs_v1(
+            _prepared(SOSIX_FS_READ_AT, 0, 2), 999,
+            [1, 2], PositionedMemoryBackend.new()
+        ).reason).to_equal("buffer-registration-mismatch")
+
+    it "rejects a backend read payload larger than the authenticated plan":
+        val result = sosix_fs_service_dispatch_vfs_v1(
+            _prepared(SOSIX_FS_READ_AT, 1, 2), 1300,
+            [9, 9, 9, 9], OversizePositionedBackend()
+        )
+        expect(result.accepted).to_be(false)
+        expect(result.reason).to_equal("backend-read-exceeds-request")
+        expect(result.transferred).to_equal(0)
+        expect(result.buffer).to_equal([9, 9, 9, 9])
+
+    it "rejects a backend write count larger than the authenticated plan":
+        val result = sosix_fs_service_dispatch_vfs_v1(
+            _prepared(SOSIX_FS_WRITE_AT, 1, 2), 1300,
+            [9, 7, 8, 9], OversizePositionedBackend()
+        )
+        expect(result.accepted).to_be(false)
+        expect(result.reason).to_equal("backend-write-exceeds-request")
+        expect(result.transferred).to_equal(0)

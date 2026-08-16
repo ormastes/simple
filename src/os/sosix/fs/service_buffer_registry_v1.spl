@@ -1,0 +1,238 @@
+"""Authenticated, bounded SOSIX FS v1 service buffer registration.
+
+Owned-copy registration and refresh messages arrive through an IPC transport
+that supplies `SosixFsBufferControlFactsV1`.  Bytes are copied into this
+registry; wire messages never contain a pointer and this module does not claim
+shared memory.  A receipt is trustworthy only when returned by an accepted
+transition and kept with the authenticated transport facts that produced it.
+"""
+
+use os.sosix.core.capability_ref.SosixBufferRef
+use os.sosix.fs.registered_buffer_client_v1.{
+    SOSIX_FS_CLIENT_MEMORY_OWNED_COPY_V1,
+    SosixFsClientRegistrationReceiptV1
+}
+use os.sosix.fs.service_adapter_v1.{
+    SOSIX_FS_SERVICE_BUFFER_READ_V1, SOSIX_FS_SERVICE_BUFFER_WRITE_V1,
+    SOSIX_FS_SERVICE_MAX_BUFFERS_V1,
+    SosixFsBufferEntryV1, SosixFsServiceRegistryV1,
+    SosixFsServiceDispatchPlanV1
+}
+
+pub struct SosixFsBufferControlFactsV1:
+    source_authenticated: bool
+    source_process_id: u64
+    received_service_endpoint: u64
+    expected_service_endpoint: u64
+
+pub struct SosixFsBufferRegistryTransitionV1:
+    accepted: bool
+    reason: text
+    registry: SosixFsServiceRegistryV1
+    receipt: SosixFsClientRegistrationReceiptV1
+
+pub struct SosixFsServiceBufferLookupV1:
+    accepted: bool
+    reason: text
+    bytes: [u8]
+
+export SosixFsBufferControlFactsV1, SosixFsBufferRegistryTransitionV1
+export SosixFsServiceBufferLookupV1
+
+fn _copy_owned_bytes_v1(source: [u8]) -> [u8]:
+    var owned: [u8] = []
+    for byte in source:
+        owned.push(byte)
+    owned
+
+fn _invalid_receipt_v1() -> SosixFsClientRegistrationReceiptV1:
+    SosixFsClientRegistrationReceiptV1(
+        authenticated: false, owner_process_id: 0, service_endpoint: 0,
+        buffer: SosixBufferRef(slot: 0, generation: 0),
+        service_registration_id: 0, byte_length: 0, access: 0, memory_mode: 0)
+
+fn _reject_v1(reason: text, registry: SosixFsServiceRegistryV1) -> SosixFsBufferRegistryTransitionV1:
+    SosixFsBufferRegistryTransitionV1(
+        accepted: false, reason: reason, registry: registry,
+        receipt: _invalid_receipt_v1())
+
+fn _facts_valid_v1(facts: SosixFsBufferControlFactsV1) -> bool:
+    facts.source_authenticated and facts.source_process_id != 0 and
+        facts.expected_service_endpoint != 0 and
+        facts.received_service_endpoint == facts.expected_service_endpoint
+
+fn _next_registration_id_v1(entries: [SosixFsBufferEntryV1]) -> u64:
+    var greatest = 0u64
+    for entry in entries:
+        if entry.registration_id > greatest:
+            greatest = entry.registration_id
+    # Keep generated IDs in the language's portable positive-integer range.
+    if greatest >= 9223372036854775807u64: 0 else: greatest + 1
+
+fn _receipt_v1(entry: SosixFsBufferEntryV1) -> SosixFsClientRegistrationReceiptV1:
+    SosixFsClientRegistrationReceiptV1(
+        authenticated: true, owner_process_id: entry.owner_process_id,
+        service_endpoint: entry.service_endpoint, buffer: entry.ref_,
+        service_registration_id: entry.registration_id,
+        byte_length: entry.byte_length, access: entry.access,
+        memory_mode: entry.memory_mode)
+
+pub fn sosix_fs_service_register_owned_buffer_v1(
+    registry: SosixFsServiceRegistryV1, facts: SosixFsBufferControlFactsV1,
+    buffer: SosixBufferRef, access: u32, bytes: [u8]
+) -> SosixFsBufferRegistryTransitionV1:
+    if not _facts_valid_v1(facts):
+        return _reject_v1("unauthenticated-buffer-registration", registry)
+    if buffer.generation == 0 or bytes.len() == 0:
+        return _reject_v1("invalid-buffer-registration", registry)
+    val known_access = SOSIX_FS_SERVICE_BUFFER_READ_V1 | SOSIX_FS_SERVICE_BUFFER_WRITE_V1
+    if access == 0 or (access & ~known_access) != 0:
+        return _reject_v1("invalid-buffer-access", registry)
+    if registry.buffers.len().to_u64() > SOSIX_FS_SERVICE_MAX_BUFFERS_V1:
+        return _reject_v1("buffer-registry-too-large", registry)
+    var entries = registry.buffers
+    var reusable = entries.len().to_u64()
+    var index = 0u64
+    while index < entries.len().to_u64():
+        val entry = entries[index]
+        if entry.active and entry.ref_.slot == buffer.slot:
+            return _reject_v1("buffer-slot-already-active", registry)
+        if not entry.active and entry.ref_.slot == buffer.slot:
+            if entry.ref_.generation != buffer.generation:
+                return _reject_v1("stale-buffer-generation", registry)
+            reusable = index
+        index = index + 1
+    if reusable == entries.len().to_u64() and entries.len().to_u64() >= SOSIX_FS_SERVICE_MAX_BUFFERS_V1:
+        return _reject_v1("buffer-registry-full", registry)
+    val registration_id = _next_registration_id_v1(entries)
+    if registration_id == 0:
+        return _reject_v1("registration-id-exhausted", registry)
+    val entry = SosixFsBufferEntryV1(
+        active: true, ref_: buffer, owner_process_id: facts.source_process_id,
+        registration_id: registration_id, byte_length: bytes.len().to_u64(),
+        access: access, service_endpoint: facts.expected_service_endpoint,
+        memory_mode: SOSIX_FS_CLIENT_MEMORY_OWNED_COPY_V1,
+        bytes: _copy_owned_bytes_v1(bytes))
+    if reusable < entries.len().to_u64():
+        entries[reusable] = entry
+    else:
+        entries.push(entry)
+    val next = SosixFsServiceRegistryV1(capabilities: registry.capabilities, buffers: entries)
+    SosixFsBufferRegistryTransitionV1(
+        accepted: true, reason: "registered-owned-copy", registry: next,
+        receipt: _receipt_v1(entry))
+
+pub fn sosix_fs_service_refresh_owned_buffer_v1(
+    registry: SosixFsServiceRegistryV1, facts: SosixFsBufferControlFactsV1,
+    receipt: SosixFsClientRegistrationReceiptV1, bytes: [u8]
+) -> SosixFsBufferRegistryTransitionV1:
+    if not _facts_valid_v1(facts):
+        return _reject_v1("unauthenticated-buffer-refresh", registry)
+    var entries = registry.buffers
+    var index = 0u64
+    while index < entries.len().to_u64():
+        val entry = entries[index]
+        if (entry.active and entry.ref_.slot == receipt.buffer.slot and
+            entry.ref_.generation == receipt.buffer.generation):
+            if (not receipt.authenticated or entry.owner_process_id != facts.source_process_id or
+                entry.service_endpoint != facts.expected_service_endpoint or
+                entry.registration_id != receipt.service_registration_id or
+                entry.byte_length != receipt.byte_length or entry.access != receipt.access or
+                entry.memory_mode != receipt.memory_mode):
+                return _reject_v1("buffer-receipt-mismatch", registry)
+            if bytes.len().to_u64() != entry.byte_length:
+                return _reject_v1("buffer-length-mismatch", registry)
+            entries[index].bytes = _copy_owned_bytes_v1(bytes)
+            val next = SosixFsServiceRegistryV1(capabilities: registry.capabilities, buffers: entries)
+            return SosixFsBufferRegistryTransitionV1(
+                accepted: true, reason: "owned-copy-refreshed", registry: next,
+                receipt: _receipt_v1(entries[index]))
+        index = index + 1
+    _reject_v1("stale-buffer-registration", registry)
+
+pub fn sosix_fs_service_retire_buffer_v1(
+    registry: SosixFsServiceRegistryV1, facts: SosixFsBufferControlFactsV1,
+    receipt: SosixFsClientRegistrationReceiptV1
+) -> SosixFsBufferRegistryTransitionV1:
+    if not _facts_valid_v1(facts):
+        return _reject_v1("unauthenticated-buffer-retirement", registry)
+    var entries = registry.buffers
+    var index = 0u64
+    while index < entries.len().to_u64():
+        val entry = entries[index]
+        if (entry.active and entry.ref_.slot == receipt.buffer.slot and
+            entry.ref_.generation == receipt.buffer.generation):
+            if (not receipt.authenticated or entry.owner_process_id != facts.source_process_id or
+                entry.service_endpoint != facts.expected_service_endpoint or
+                entry.registration_id != receipt.service_registration_id or
+                entry.byte_length != receipt.byte_length or entry.access != receipt.access or
+                entry.memory_mode != receipt.memory_mode):
+                return _reject_v1("buffer-receipt-mismatch", registry)
+            val advanced = entry.ref_.generation + 1
+            val next_generation = if advanced == 0: 1u32 else: advanced
+            entries[index] = SosixFsBufferEntryV1(
+                active: false,
+                ref_: SosixBufferRef(slot: entry.ref_.slot, generation: next_generation),
+                owner_process_id: entry.owner_process_id,
+                registration_id: entry.registration_id, byte_length: 0, access: 0,
+                service_endpoint: entry.service_endpoint,
+                memory_mode: entry.memory_mode, bytes: [])
+            val next = SosixFsServiceRegistryV1(capabilities: registry.capabilities, buffers: entries)
+            return SosixFsBufferRegistryTransitionV1(
+                accepted: true, reason: "buffer-retired", registry: next,
+                receipt: _invalid_receipt_v1())
+        index = index + 1
+    _reject_v1("stale-buffer-registration", registry)
+
+fn _entry_matches_plan_v1(entry: SosixFsBufferEntryV1, plan: SosixFsServiceDispatchPlanV1) -> bool:
+    entry.active and plan.ready and entry.owner_process_id == plan.source_process_id and
+        entry.ref_.slot == plan.buffer_slot and
+        entry.ref_.generation == plan.buffer_generation and
+        entry.registration_id == plan.buffer_registration_id and
+        entry.byte_length == entry.bytes.len().to_u64()
+
+pub fn sosix_fs_service_lookup_dispatch_buffer_v1(
+    registry: SosixFsServiceRegistryV1, plan: SosixFsServiceDispatchPlanV1
+) -> SosixFsServiceBufferLookupV1:
+    var matches = 0u32
+    var found: [u8] = []
+    for entry in registry.buffers:
+        if _entry_matches_plan_v1(entry, plan):
+            matches = matches + 1
+            found = _copy_owned_bytes_v1(entry.bytes)
+    if matches != 1:
+        val reason = if matches == 0: "stale-dispatch-buffer" else: "ambiguous-dispatch-buffer"
+        return SosixFsServiceBufferLookupV1(accepted: false, reason: reason, bytes: [])
+    SosixFsServiceBufferLookupV1(
+        accepted: true, reason: "dispatch-buffer-ready", bytes: found)
+
+pub fn sosix_fs_service_commit_dispatch_buffer_v1(
+    registry: SosixFsServiceRegistryV1, plan: SosixFsServiceDispatchPlanV1,
+    bytes: [u8]
+) -> SosixFsBufferRegistryTransitionV1:
+    if not plan.ready:
+        return _reject_v1("dispatch-plan-not-ready", registry)
+    var entries = registry.buffers
+    var match_index = entries.len().to_u64()
+    var matches = 0u32
+    var index = 0u64
+    while index < entries.len().to_u64():
+        if _entry_matches_plan_v1(entries[index], plan):
+            matches = matches + 1
+            match_index = index
+        index = index + 1
+    if matches != 1:
+        val reason = if matches == 0: "stale-dispatch-buffer" else: "ambiguous-dispatch-buffer"
+        return _reject_v1(reason, registry)
+    if bytes.len().to_u64() != entries[match_index].byte_length:
+        return _reject_v1("dispatch-buffer-length-mismatch", registry)
+    entries[match_index].bytes = _copy_owned_bytes_v1(bytes)
+    val next = SosixFsServiceRegistryV1(capabilities: registry.capabilities, buffers: entries)
+    SosixFsBufferRegistryTransitionV1(
+        accepted: true, reason: "dispatch-buffer-committed", registry: next,
+        receipt: _receipt_v1(entries[match_index]))
+
+export sosix_fs_service_register_owned_buffer_v1
+export sosix_fs_service_refresh_owned_buffer_v1, sosix_fs_service_retire_buffer_v1
+export sosix_fs_service_lookup_dispatch_buffer_v1
+export sosix_fs_service_commit_dispatch_buffer_v1

@@ -1,0 +1,116 @@
+"""Pure bounded SOSIX input stream with ordered publication and motion coalescing."""
+
+use os.sosix.core.capability_ref.{SosixCapabilityRef, sosix_capability_ref_is_valid}
+use common.ui.host_input_event.{HostInputEvent}
+
+pub val SOSIX_INPUT_POINTER_MOVE: u8 = 1
+pub val SOSIX_INPUT_POINTER_BUTTON: u8 = 2
+pub val SOSIX_INPUT_KEY: u8 = 3
+pub val SOSIX_INPUT_TEXT: u8 = 4
+pub val SOSIX_INPUT_WHEEL: u8 = 5
+pub val SOSIX_INPUT_RESIZE: u8 = 6
+
+pub struct SosixHostInputEvent:
+    kind: u8
+    sequence: u64
+    timestamp_ns: u64
+    data0: i64
+    data1: i64
+    host_event: HostInputEvent?
+
+pub struct SosixInputStreamState:
+    stream: SosixCapabilityRef
+    capacity: u32
+    next_sequence: u64
+    last_timestamp_ns: u64
+    events: [SosixHostInputEvent]
+    closed: bool
+
+pub struct SosixInputStreamTransition:
+    accepted: bool
+    reason: text
+    state: SosixInputStreamState
+    has_event: bool
+    event: SosixHostInputEvent
+
+export SOSIX_INPUT_POINTER_MOVE, SOSIX_INPUT_POINTER_BUTTON
+export SOSIX_INPUT_KEY, SOSIX_INPUT_TEXT, SOSIX_INPUT_WHEEL, SOSIX_INPUT_RESIZE
+export SosixHostInputEvent, SosixInputStreamState, SosixInputStreamTransition
+
+fn _sosix_empty_input_event() -> SosixHostInputEvent:
+    SosixHostInputEvent(kind: 0, sequence: 0, timestamp_ns: 0, data0: 0, data1: 0, host_event: nil)
+
+fn _sosix_input_kind_valid(kind: u8) -> bool:
+    kind == SOSIX_INPUT_POINTER_MOVE or kind == SOSIX_INPUT_POINTER_BUTTON or
+        kind == SOSIX_INPUT_KEY or kind == SOSIX_INPUT_TEXT or
+        kind == SOSIX_INPUT_WHEEL or kind == SOSIX_INPUT_RESIZE
+
+pub fn sosix_input_stream_state_create(
+    stream: SosixCapabilityRef, capacity: u32
+) -> SosixInputStreamTransition:
+    val state = SosixInputStreamState(
+        stream: stream,
+        capacity: capacity,
+        next_sequence: 1,
+        last_timestamp_ns: 0,
+        events: [],
+        closed: false
+    )
+    if not sosix_capability_ref_is_valid(stream):
+        return SosixInputStreamTransition(accepted: false, reason: "invalid-input-stream", state: state, has_event: false, event: _sosix_empty_input_event())
+    if capacity == 0:
+        return SosixInputStreamTransition(accepted: false, reason: "zero-input-capacity", state: state, has_event: false, event: _sosix_empty_input_event())
+    SosixInputStreamTransition(accepted: true, reason: "accepted", state: state, has_event: false, event: _sosix_empty_input_event())
+
+pub fn sosix_input_stream_publish(
+    state: SosixInputStreamState, event: SosixHostInputEvent
+) -> SosixInputStreamTransition:
+    if state.closed:
+        return SosixInputStreamTransition(accepted: false, reason: "input-stream-closed", state: state, has_event: false, event: event)
+    if not _sosix_input_kind_valid(event.kind):
+        return SosixInputStreamTransition(accepted: false, reason: "invalid-input-kind", state: state, has_event: false, event: event)
+    if event.sequence != state.next_sequence:
+        return SosixInputStreamTransition(accepted: false, reason: "unexpected-input-sequence", state: state, has_event: false, event: event)
+    if event.timestamp_ns < state.last_timestamp_ns:
+        return SosixInputStreamTransition(accepted: false, reason: "input-time-regressed", state: state, has_event: false, event: event)
+
+    var next_events: [SosixHostInputEvent] = []
+    val full = state.events.len() >= state.capacity as i64
+    if full:
+        if event.kind != SOSIX_INPUT_POINTER_MOVE or state.events.len() == 0 or state.events[state.events.len() - 1].kind != SOSIX_INPUT_POINTER_MOVE:
+            return SosixInputStreamTransition(accepted: false, reason: "input-backpressure", state: state, has_event: false, event: event)
+        var i: i64 = 0
+        while i + 1 < state.events.len():
+            next_events.push(state.events[i])
+            i = i + 1
+        next_events.push(event)
+        val next = SosixInputStreamState(stream: state.stream, capacity: state.capacity, next_sequence: state.next_sequence + 1, last_timestamp_ns: event.timestamp_ns, events: next_events, closed: false)
+        return SosixInputStreamTransition(accepted: true, reason: "motion-coalesced", state: next, has_event: false, event: event)
+
+    for queued in state.events:
+        next_events.push(queued)
+    next_events.push(event)
+    val next = SosixInputStreamState(stream: state.stream, capacity: state.capacity, next_sequence: state.next_sequence + 1, last_timestamp_ns: event.timestamp_ns, events: next_events, closed: false)
+    SosixInputStreamTransition(accepted: true, reason: "published", state: next, has_event: false, event: event)
+
+pub fn sosix_input_stream_try_take(state: SosixInputStreamState) -> SosixInputStreamTransition:
+    if state.events.len() == 0:
+        val reason = if state.closed: "input-stream-closed" else: "no-input-event"
+        return SosixInputStreamTransition(accepted: false, reason: reason, state: state, has_event: false, event: _sosix_empty_input_event())
+    val taken = state.events[0]
+    var remaining: [SosixHostInputEvent] = []
+    var i: i64 = 1
+    while i < state.events.len():
+        remaining.push(state.events[i])
+        i = i + 1
+    val next = SosixInputStreamState(stream: state.stream, capacity: state.capacity, next_sequence: state.next_sequence, last_timestamp_ns: state.last_timestamp_ns, events: remaining, closed: state.closed)
+    SosixInputStreamTransition(accepted: true, reason: "taken", state: next, has_event: true, event: taken)
+
+pub fn sosix_input_stream_close(state: SosixInputStreamState) -> SosixInputStreamTransition:
+    if state.closed:
+        return SosixInputStreamTransition(accepted: false, reason: "input-stream-closed", state: state, has_event: false, event: _sosix_empty_input_event())
+    val next = SosixInputStreamState(stream: state.stream, capacity: state.capacity, next_sequence: state.next_sequence, last_timestamp_ns: state.last_timestamp_ns, events: state.events, closed: true)
+    SosixInputStreamTransition(accepted: true, reason: "closed", state: next, has_event: false, event: _sosix_empty_input_event())
+
+export sosix_input_stream_state_create, sosix_input_stream_publish
+export sosix_input_stream_try_take, sosix_input_stream_close

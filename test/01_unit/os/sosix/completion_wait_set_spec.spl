@@ -1,0 +1,68 @@
+"""REQ-SQ-002/015: typed completion queue and notification wait-set state."""
+
+use std.spec.*
+use os.sosix.core.operation.*
+use os.sosix.core.completion.*
+use os.sosix.core.completion_queue.SosixCompletionQueue
+use os.sosix.core.wait_set.SosixWaitSet
+
+fn completed_read(slot_index: u32, generation_seed: SosixOperationSlot) -> SosixCompletion:
+    val begin = sosix_operation_begin(slot_index, generation_seed, 0)
+    val terminal = sosix_operation_complete(begin.slot, begin.operation, 0, 7, 16)
+    sosix_completion_from_slot(begin.operation, 0x0101, terminal.slot).completion
+
+describe "SOSIX typed completion and notification wait set":
+    it "preserves FIFO completion identity and partial progress":
+        val queue = SosixCompletionQueue.create(2)
+        val first = completed_read(3, sosix_operation_slot_new())
+        val second = completed_read(4, sosix_operation_slot_new())
+        expect(queue.publish(first)).to_be(true)
+        expect(queue.publish(second)).to_be(true)
+
+        val taken = queue.take()
+        expect(taken != nil).to_be(true)
+        if val completion = taken:
+            expect(completion.operation.slot).to_equal(3)
+            expect(completion.partial_progress).to_be(true)
+        expect(queue.len()).to_equal(1)
+
+    it "rejects overflow without overwriting an unread completion":
+        val queue = SosixCompletionQueue.create(1)
+        val first = completed_read(8, sosix_operation_slot_new())
+        val second = completed_read(9, sosix_operation_slot_new())
+        expect(queue.publish(first)).to_be(true)
+        expect(queue.publish(second)).to_be(false)
+        expect(queue.rejected_count()).to_equal(1)
+        if val completion = queue.take():
+            expect(completion.operation.slot).to_equal(8)
+
+    it "prevents completion type confusion":
+        val completion = completed_read(5, sosix_operation_slot_new())
+        val decoded = sosix_completion_expect_api(completion, 0x0102)
+        expect(decoded.accepted).to_be(false)
+        expect(decoded.reason).to_equal("completion-api-mismatch")
+
+    it "publishes one consumable notification for a watched generation":
+        val completion = completed_read(11, sosix_operation_slot_new())
+        val wait_set = SosixWaitSet.create()
+        expect(wait_set.watch(completion.operation)).to_be(true)
+        expect(wait_set.notify(completion)).to_be(true)
+        expect(wait_set.notify(completion)).to_be(false)
+        expect(wait_set.has_ready()).to_be(true)
+        expect(wait_set.notification_generation).to_equal(1)
+
+        if val ready = wait_set.take_ready():
+            expect(ready.operation.slot).to_equal(11)
+        expect(wait_set.has_ready()).to_be(false)
+        expect(wait_set.consumed_notifications).to_equal(1)
+        expect(wait_set.watch(completion.operation)).to_be(true)
+        expect(wait_set.notify(completion)).to_be(false)
+
+    it "rejects an unwatched or stale-generation notification":
+        val completion = completed_read(15, sosix_operation_slot_new())
+        val wait_set = SosixWaitSet.create()
+        val stale = SosixOperationId(slot: 15, generation: completion.operation.generation + 1)
+        expect(wait_set.watch(stale)).to_be(true)
+        expect(wait_set.notify(completion)).to_be(false)
+        expect(wait_set.ready_count()).to_equal(0)
+        expect(wait_set.rejected_notifications).to_equal(1)
