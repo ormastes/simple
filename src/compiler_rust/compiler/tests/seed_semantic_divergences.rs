@@ -9,10 +9,10 @@
 //!   - Divergence A (`.?` yields value-or-nil, not bool): update the ~43
 //!     `.? == false` / `.? == true` workaround sites census'd in the bug doc
 //!     (including h1_client.spl comments), then flip this test's assertion.
-//!   - Divergence D (`var [u8]` accumulator reassigned via `+` inside a while
-//!     loop): revert the per-byte `.push()` workarounds in h1_client.spl
-//!     (parse_chunked_body_bytes, read_tcp_response_bytes,
-//!     read_tls_response_bytes), then flip this test's assertion.
+//!   - Divergence D was FIXED on 2026-08-16 (ByteArray concat arms added in
+//!     interpreter/expr/ops.rs; the per-byte `.push()` workarounds in
+//!     h1_client.spl were reverted). Its test below now asserts the FIXED
+//!     behavior and guards against regression.
 //!
 //! Divergence B (module-private `val` import binds to a non-int sentinel)
 //! needs a two-module source (an importer + a separate module declaring a
@@ -89,11 +89,13 @@ fn main() -> i32:
     assert_eq!(run_program(source), Ok(0));
 }
 
-/// Divergence D: inside a `while` loop, reassigning a `var [u8]` accumulator
-/// via `+` (acc = acc + other_bytes, both [u8]) dies with "cannot convert
-/// array to int" on the first non-empty RHS under the seed interpreter.
+/// Divergence D (FIXED 2026-08-16): reassigning a `var [u8]` accumulator via
+/// `+` used to die with "cannot convert array to int" because packed
+/// Value::ByteArray had no concat arm and fell through to numeric coercion.
+/// Concat arms (ByteArray+ByteArray and mixed Array/ByteArray) were added in
+/// interpreter/expr/ops.rs; this now guards against regression.
 #[test]
-fn while_loop_byte_array_plus_reassign_errors_under_seed() {
+fn while_loop_byte_array_plus_reassign_concats() {
     // Mirrors the real h1_client.spl shape: `bytes: [u8]` built from a
     // runtime/extern source (packed byte-array representation), not an
     // array literal -- `rt_bytes_alloc` gives us that packed representation,
@@ -110,15 +112,25 @@ fn main() -> i32:
         i = i + 1
     return acc.len().to_i32()
 "#;
-    let result = run_program(source);
-    let error = result.expect_err(
-        "expected seed divergence D to still reproduce: [u8] accumulator += via '+' inside a \
-         while loop should currently error; if this now succeeds, the underlying seed bug was \
-         fixed -- revert the per-byte .push() workarounds in h1_client.spl and flip this \
-         assertion to assert_eq!(result, Ok(3))",
-    );
-    assert!(
-        error.contains("cannot convert array to int"),
-        "unexpected error shape (bug may have changed character, not just been fixed): {error}"
-    );
+    assert_eq!(run_program(source), Ok(3));
+}
+
+/// Divergence D mixed-representation case: `var acc: [u8] = []` lowers the
+/// empty literal to a generic Value::Array, so the first `acc + bytes` in a
+/// loop is Array + ByteArray. The mixed concat arm must keep this working.
+#[test]
+fn empty_literal_accumulator_plus_packed_bytes_concats() {
+    let source = r#"
+extern fn rt_bytes_alloc(len: u64) -> [u8]
+
+fn main() -> i32:
+    var acc: [u8] = []
+    var i = 0
+    while i < 2:
+        val chunk = rt_bytes_alloc(2u64)
+        acc = acc + chunk
+        i = i + 1
+    return acc.len().to_i32()
+"#;
+    assert_eq!(run_program(source), Ok(4));
 }

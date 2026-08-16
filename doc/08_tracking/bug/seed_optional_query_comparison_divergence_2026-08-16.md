@@ -89,7 +89,15 @@ use ... (path to non-pub val constant)
 ```
 in files that are not in the same module as the constant's definition.
 
-## Divergence D — Reassigning a `var [u8]` loop accumulator via `+` dies with "cannot convert array to int"
+## Divergence D — Reassigning a `var [u8]` loop accumulator via `+` dies with "cannot convert array to int" — FIXED 2026-08-16
+
+**FIXED at the root:** concat arms for packed `Value::ByteArray` were added in
+`src/compiler_rust/compiler/src/interpreter/expr/ops.rs` (ByteArray+ByteArray,
+plus mixed Array/ByteArray arms for the `var acc: [u8] = []` empty-literal
+case, which lowers to a generic Array). The per-byte `.push()` workarounds in
+`h1_client.spl` were REVERTED to plain `+` concat. The pinning tests in
+`seed_semantic_divergences.rs` were flipped to assert the fixed behavior
+(4/4 pass) and live https re-verified. Original analysis kept below.
 
 **Seed behavior:** inside a `while` loop, `acc = acc + other_bytes` (both `[u8]`)
 throws `error: semantic: type mismatch: cannot convert array to int` on the
@@ -108,7 +116,7 @@ landed, because example.com serves chunked transfer encoding.
 pattern, not a novel hack. Verified: chunked fixture parses and live
 `https://example.com` loads (559 bytes) under the seed.
 
-**Underlying seed bug:** open — pinpointed while writing the pinning test:
+**Underlying seed bug:** fixed (see header) — pinpointed while writing the pinning test:
 only the packed `Value::ByteArray` representation triggers it (bytes from
 runtime externs like `rt_io_tcp_read`/`rt_bytes_alloc`); a `[u8]` array
 LITERAL lowers to generic `Value::Array`, which has a dedicated
@@ -120,9 +128,9 @@ coercion (`src/compiler_rust/compiler/src/value_impl.rs:137`), producing the
 revert the per-byte `.push()` workarounds and flip the pinning test.
 
 **Pinning tests:**
-`src/compiler_rust/compiler/tests/seed_semantic_divergences.rs` (divergences
-A + D, asserts CURRENT seed behavior — a failure there means the bug got
-fixed) and
+`src/compiler_rust/compiler/tests/seed_semantic_divergences.rs` (divergence A
+still pins current seed behavior — a failure there means A got fixed;
+divergence D's tests now assert the FIXED concat behavior) and
 `test/01_unit/lib/gc_async_mut/gpu/browser_engine/h1_response_parse_spec.spl`
 (6 parse cases incl. the chunked regression, compiler-agnostic).
 

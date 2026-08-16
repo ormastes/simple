@@ -524,12 +524,7 @@ fn read_tcp_response_bytes(fd: i64, deadline_ms: i64) -> Result<[u8]>:
             break
         if not h1_response_size_allowed(bytes.len(), chunk.len()):
             return Err(network_error("h1: response exceeds 50 MiB limit"))
-        # NOTE(seed divergence): see parse_chunked_body_bytes below —
-        # `bytes = bytes + chunk` trips the Rust seed's spurious
-        # "cannot convert array to int" semantic error. Per-byte `.push()`
-        # avoids it.
-        for b in chunk:
-            bytes = bytes.push(b)
+        bytes = bytes + chunk
     Ok(bytes)
 
 fn read_tls_response_bytes(
@@ -553,12 +548,7 @@ fn read_tls_response_bytes(
         val _ = browser_runtime_string_free(chunk)
         if not h1_response_size_allowed(response.len(), chunk_bytes.len()):
             return Err(network_error("h1: response exceeds 50 MiB limit"))
-        # NOTE(seed divergence): see parse_chunked_body_bytes below —
-        # `response = response + chunk_bytes` trips the Rust seed's spurious
-        # "cannot convert array to int" semantic error. Per-byte `.push()`
-        # avoids it.
-        for b in chunk_bytes:
-            response = response.push(b)
+        response = response + chunk_bytes
     Ok(response)
 
 # Parse a raw HTTP/1.x response given as bytes.
@@ -757,19 +747,7 @@ fn parse_chunked_body_bytes(raw: [u8]) -> Result<[u8]>:
         if not h1_response_size_allowed(body_acc.len(), chunk_size):
             return Err(parse_error("h1: decoded body exceeds 50 MiB limit"))
 
-        # NOTE(seed divergence): `body_acc = body_acc + raw.slice(...)` here
-        # trips the Rust seed interpreter with a spurious
-        # "semantic: type mismatch: cannot convert array to int" on any
-        # non-empty chunk (bisected 2026-08-16; the equivalent Content-Length
-        # path and a bare `[u8] + [u8]` in isolation are both fine, so this is
-        # narrowly about reassigning a `var [u8]` accumulator via `+` inside
-        # this while loop). Per-byte `.push()` (already used as the `[u8]`
-        # concat idiom elsewhere, e.g. debug/formats/test codeview/pdb/macho
-        # helpers) sidesteps it and works under both the seed and self-hosted
-        # compiler.
-        val chunk_data = raw.slice(data_start, data_end)
-        for b in chunk_data:
-            body_acc = body_acc.push(b)
+        body_acc = body_acc + raw.slice(data_start, data_end)
 
         # Skip \r\n after chunk data
         pos = data_end + 2
