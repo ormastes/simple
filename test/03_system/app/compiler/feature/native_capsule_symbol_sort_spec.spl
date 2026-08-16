@@ -1,0 +1,165 @@
+# codex-system-test
+# @req REQ-CNSS-001 REQ-CNSS-002 REQ-CNSS-003 NFR-CNSS-001
+# @evidence-display: links
+"""
+# Native capsule symbol ordering
+
+This system contract exercises the deterministic symbol ordering used by
+frozen native-capsule identity generation. It covers normal ordering, boundary
+shapes that reach partial merge tails, and a fail-closed result auditor. It
+does not substitute timing thresholds for the retained performance report.
+"""
+
+use std.spec.*
+use compiler.driver.driver_types.{native_capsule_sorted_symbol_ids_v1}
+use compiler.hir.hir_types.{SymbolId}
+
+struct SymbolSortAudit:
+    code: text
+    count: i64
+    checksum: i64
+
+fn make_symbols(ids: [i64]) -> [SymbolId]:
+    var symbols: [SymbolId] = []
+    for id in ids:
+        symbols.push(SymbolId(id: id))
+    symbols
+
+fn reverse_symbols(count: i64) -> [SymbolId]:
+    var symbols: [SymbolId] = []
+    var id = count - 1
+    while id >= 0:
+        symbols.push(SymbolId(id: id))
+        id = id - 1
+    symbols
+
+fn symbol_ids(symbols: [SymbolId]) -> [i64]:
+    var ids: [i64] = []
+    for symbol in symbols:
+        ids.push(symbol.id)
+    ids
+
+fn audit_expected_sequence(symbols: [SymbolId], expected_count: i64) -> SymbolSortAudit:
+    if symbols.len() != expected_count:
+        return SymbolSortAudit(
+            code: "length-mismatch",
+            count: symbols.len(),
+            checksum: -1
+        )
+    var checksum: i64 = 0
+    var index: i64 = 0
+    while index < symbols.len():
+        if symbols[index].id != index:
+            return SymbolSortAudit(
+                code: "id-mismatch:{index}",
+                count: symbols.len(),
+                checksum: -1
+            )
+        checksum = checksum + (index + 1) * (symbols[index].id + 1)
+        index = index + 1
+    SymbolSortAudit(code: "ok", count: symbols.len(), checksum: checksum)
+
+describe "Native capsule symbol sort":
+    # @manual_section: Deterministic production ordering
+    # @req REQ-CNSS-001
+    it "should order reverse symbols without mutating the caller input":
+        step("Create a reverse-ordered native capsule symbol set")
+        val input = make_symbols([7, 6, 5, 4, 3, 2, 1, 0])
+        val sorted = native_capsule_sorted_symbol_ids_v1(input)
+
+        step("Require ascending output and unchanged value-semantic input")
+        expect(symbol_ids(sorted)).to_equal([0, 1, 2, 3, 4, 5, 6, 7])
+        expect(symbol_ids(input)).to_equal([7, 6, 5, 4, 3, 2, 1, 0])
+
+    # @manual_section: Deterministic production ordering
+    # @req REQ-CNSS-001
+    it "should preserve an already ordered symbol set":
+        step("Submit symbols that already satisfy capsule identity order")
+        val input = make_symbols([0, 1, 2, 3, 4, 5])
+        val sorted = native_capsule_sorted_symbol_ids_v1(input)
+
+        step("Require the exact canonical sequence")
+        expect(symbol_ids(sorted)).to_equal([0, 1, 2, 3, 4, 5])
+        expect(sorted.len()).to_equal(6)
+
+    # @manual_section: Deterministic production ordering
+    # @req REQ-CNSS-001
+    it "should order mixed negative and duplicate identifiers deterministically":
+        step("Submit non-canonical identifiers without assuming uniqueness")
+        val sorted = native_capsule_sorted_symbol_ids_v1(
+            make_symbols([3, -1, 2, 3, 0, -1]))
+
+        step("Require a total ascending order without dropped values")
+        expect(symbol_ids(sorted)).to_equal([-1, -1, 0, 2, 3, 3])
+        expect(sorted.len()).to_equal(6)
+
+    # @manual_section: Merge boundary behavior
+    # @req REQ-CNSS-002
+    it "should return an empty result for empty input":
+        step("Invoke the production sorter with no symbols")
+        val sorted = native_capsule_sorted_symbol_ids_v1([])
+
+        step("Require the empty boundary to remain empty")
+        expect(sorted.len()).to_equal(0)
+        expect(symbol_ids(sorted)).to_equal([])
+
+    # @manual_section: Merge boundary behavior
+    # @req REQ-CNSS-002
+    it "should preserve a singleton identifier exactly":
+        step("Invoke the production sorter with one symbol")
+        val sorted = native_capsule_sorted_symbol_ids_v1(
+            [SymbolId(id: 41)])
+
+        step("Require the singleton value and cardinality")
+        expect(sorted.len()).to_equal(1)
+        expect(sorted[0].id).to_equal(41)
+
+    # @manual_section: Merge boundary behavior
+    # @req REQ-CNSS-002 NFR-CNSS-001
+    it "should order a non-power-of-two reverse workload through the partial tail":
+        step("Create 4097 reverse symbols to exercise the final partial merge run")
+        val sorted = native_capsule_sorted_symbol_ids_v1(
+            reverse_symbols(4097))
+
+        step("Audit every identifier and the complete weighted checksum")
+        val audit = audit_expected_sequence(sorted, 4097)
+        expect(audit.code).to_equal("ok")
+        expect(audit.count).to_equal(4097)
+        expect(audit.checksum).to_be_greater_than(0)
+
+    # @manual_section: Fail-closed result auditing
+    # @req REQ-CNSS-003
+    it "should accept a complete canonical result with an exact checksum":
+        step("Sort one complete canonical fixture")
+        val sorted = native_capsule_sorted_symbol_ids_v1(
+            reverse_symbols(8))
+
+        step("Require the auditor to accept every position")
+        val audit = audit_expected_sequence(sorted, 8)
+        expect(audit.code).to_equal("ok")
+        expect(audit.count).to_equal(8)
+        expect(audit.checksum).to_equal(204)
+
+    # @manual_section: Fail-closed result auditing
+    # @req REQ-CNSS-003
+    it "should reject a result with missing symbols":
+        step("Construct a result whose cardinality is smaller than declared")
+        val incomplete = make_symbols([0, 1, 2])
+
+        step("Require an exact fail-closed length error")
+        val audit = audit_expected_sequence(incomplete, 4)
+        expect(audit.code).to_equal("length-mismatch")
+        expect(audit.count).to_equal(3)
+        expect(audit.checksum).to_equal(-1)
+
+    # @manual_section: Fail-closed result auditing
+    # @req REQ-CNSS-003
+    it "should reject an interior duplicate that endpoint checks would miss":
+        step("Corrupt one interior position while retaining the expected endpoints")
+        val corrupted = make_symbols([0, 1, 1, 3])
+
+        step("Require the auditor to name the first mismatched position")
+        val audit = audit_expected_sequence(corrupted, 4)
+        expect(audit.code).to_equal("id-mismatch:2")
+        expect(audit.count).to_equal(4)
+        expect(audit.checksum).to_equal(-1)

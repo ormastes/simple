@@ -11,6 +11,7 @@ modes, compared against bun, python, go, erlang, java, and C.
 - **Result interpretation:** [Reading the Results](#reading-the-results)
 - **Simple optimization:** [Optimizing Simple Code](#optimizing-simple-code)
 - **Loader and packed bytes:** [Compiler-loader packed-byte lane](#compiler-loader-packed-byte-lane)
+- **Native capsule ordering:** [Native-capsule symbol-sort lane](#native-capsule-symbol-sort-lane)
 
 ## Compiler-loader packed-byte lane
 
@@ -43,6 +44,41 @@ the canonical plan.
 The facade counter measures failed existence probes, not kernel syscalls. Live
 performance claims require admitted executable identity, exact semantic
 receipts, a retained report, and the p95/RSS budgets in the plan.
+
+## Native-capsule symbol-sort lane
+
+Frozen native-capsule identity generation sorts `SymbolId` dictionary keys
+before serializing MIR functions, constants, statics, and types. The production
+owner is `src/compiler/80.driver/driver_types.spl`. Compiler performance lane B
+replaced the prior quadratic selection scan with a typed bottom-up mergesort,
+preserving ascending `SymbolId.id` order and value semantics while changing the
+comparison bound from `O(n^2)` to `O(n log n)` with `O(n)` auxiliary storage.
+
+The retained microbenchmark and provenance are in
+`doc/09_report/perf/compiler_native_capsule_symbol_sort_microbenchmark_2026-08-16.md`.
+Its final seven-sample median is 19,639 µs for five sorts of 4,096 reverse IDs;
+the single retained baseline sample is 11,607,363 µs. Keep the report's
+single-baseline-sample caveat visible and do not invent baseline percentiles.
+
+Modern behavioral coverage is
+`test/03_system/app/compiler/feature/native_capsule_symbol_sort_spec.spl`, with
+the operator manual at
+`doc/06_spec/03_system/app/compiler/feature/native_capsule_symbol_sort_spec.md`
+and traceability plan at
+`doc/03_plan/sys_test/compiler_native_capsule_symbol_sort.md`. The spec uses
+visible `step("...")` flows and covers reverse/ordered/mixed input, empty and
+singleton boundaries, a 4,097-element partial merge tail, exact weighted
+checksums, missing results, and interior corruption that endpoint-only checks
+would miss.
+
+Current SSpec/docgen status is **TEST_BLOCKED**: this lane has no admitted
+pure-Simple Stage 4/5 full CLI. The admitted Stage 2 compiler used for focused
+native benchmark construction supports only `compile` and `native-build`; it
+cannot certify `test`, `spipe-docgen`, or `sspec-maintain`. Do not substitute
+the Rust seed or an unadmitted deployed wrapper. Once a current-source full CLI
+passes admission and bounded identity/ABI probes, execute the four commands in
+the system-test plan exactly once and require nine examples, zero failures,
+docgen `0 stubs`, a current mirror, and no blocker-capped `SSDOC-*` findings.
 
 ## Execution Modes
 
