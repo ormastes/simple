@@ -339,3 +339,27 @@ Not affected: the tiny browser. Verified all 37 files under
 `src/os/services/tiny_wm/` import only `std.tiny.*` / `tiny_wm` /
 `tiny_browser` / `std.common.*` / `std.nogc_sync_mut.*` — no path into the
 large browser at all.
+
+## Why patching the SEED does not unblock execution (2026-08-16, analyzed)
+
+Tempting shortcut, investigated and rejected: register
+`rt_browser_renderer_spawn_sandboxed` in the seed so the sandboxed render runs
+interpreted. Two independent blockers:
+
+1. **Interpreter externs are not registry entries.** Per
+   `interpreter_extern/io_file.rs` header: the dynamic dlsym fallback marshals
+   one leaked `i64` per `Value::Str`, not the `(ptr,len)` pairs the C ABI
+   expects, so each extern family needs a full Rust mirror implementation in
+   `src/compiler_rust/compiler/src/interpreter_extern/`. The seed has NO
+   `rt_browser_renderer_*` module at all — this is a family port, not a
+   one-line registration.
+2. **The child cannot be interpreted anyway.** `browser_renderer_preinit`
+   engages only when `argv[0] == "simple-browser-renderer"` and requires an
+   EMPTY envp. A seed-interpreted child is invoked as `bin/simple run ...`
+   (wrong argv[0] -> preinit no-ops -> `sandbox_enter` correctly refuses) and
+   needs environment variables to run at all (non-empty envp -> `_exit(126)`).
+   Either way, no jailed worker.
+
+So the unlock remains exactly one thing: a compiled self-hosted binary that
+dispatches `BROWSER_RENDERER_WORKER_ARG` (as `hosted_entry.spl` does). Do not
+spend seed work here.

@@ -193,6 +193,7 @@ Before declaring implementation complete, verify:
 
 ## Rules
 
+- **One App, One Host Interface:** Implement apps to run on all OSes identically; only HAL/backend varies behind SOSIX, CompositorBackend, or DedicatedHost. Never add per-OS app logic, platform conditionals, or adapter copies in app code. See `doc/04_architecture/os/one_app_host_interface_rule.md`.
 - All code in `.spl` — no Python, no Bash
 - Generics use `<>` for type parameters — `Option<T>`, `Result<T, E>`; arrays use `[]` like `[i64]`
 - Pattern binding: `if val` not `if let`
