@@ -98,6 +98,95 @@ void rt_starfive_delay_ms(spl_u64 milliseconds) {
     } while ((now - start) < (milliseconds * 4000ULL));
 }
 
+/* Bare-metal service fallback: there is no userspace syscall ABI in this
+ * single-image StarFive lane, so common drivers fall through to their explicit
+ * runtime providers. */
+spl_i64 syscall(spl_u64 id, spl_u64 arg0, spl_u64 arg1, spl_u64 arg2,
+                spl_u64 arg3, spl_u64 arg4) {
+    (void)id; (void)arg0; (void)arg1; (void)arg2; (void)arg3; (void)arg4;
+    return -38;
+}
+
+#define STARFIVE_DMA_PAGE_SIZE 4096ULL
+#define STARFIVE_DMA_POOL_SIZE (1024ULL * 1024ULL)
+#define STARFIVE_DMA_SLOT_COUNT 32
+#define JH7110_CCACHE_BASE 0x02010000ULL
+#define JH7110_CCACHE_FLUSH64 (JH7110_CCACHE_BASE + 0x200ULL)
+#define JH7110_CCACHE_LINE_SIZE 64ULL
+
+static spl_u8 g_starfive_dma_pool[STARFIVE_DMA_POOL_SIZE]
+    __attribute__((aligned(STARFIVE_DMA_PAGE_SIZE)));
+static spl_u64 g_starfive_dma_used;
+struct starfive_dma_slot {
+    spl_u8 *address;
+    spl_u64 size;
+    int active;
+};
+static struct starfive_dma_slot g_starfive_dma_slots[STARFIVE_DMA_SLOT_COUNT];
+
+static spl_u64 starfive_align_up(spl_u64 value, spl_u64 alignment) {
+    return (value + alignment - 1ULL) & ~(alignment - 1ULL);
+}
+
+static void starfive_ccache_flush_range(spl_u64 start, spl_u64 size) {
+    if (size == 0ULL) return;
+    spl_u64 line = start & ~(JH7110_CCACHE_LINE_SIZE - 1ULL);
+    const spl_u64 end = start + size;
+    volatile spl_u64 *flush64 = (volatile spl_u64 *)JH7110_CCACHE_FLUSH64;
+    __asm__ volatile("fence rw, rw" ::: "memory");
+    while (line < end) {
+        *flush64 = line;
+        line += JH7110_CCACHE_LINE_SIZE;
+    }
+    __asm__ volatile("fence rw, rw" ::: "memory");
+}
+
+spl_i64 rt_dma_alloc(spl_i64 size, int direction) {
+    (void)direction;
+    if (size <= 0) return -1;
+    const spl_u64 rounded = starfive_align_up((spl_u64)size, STARFIVE_DMA_PAGE_SIZE);
+    if (rounded > STARFIVE_DMA_POOL_SIZE - g_starfive_dma_used) return -1;
+    int slot = -1;
+    for (int index = 0; index < STARFIVE_DMA_SLOT_COUNT; index++) {
+        if (!g_starfive_dma_slots[index].active) { slot = index; break; }
+    }
+    if (slot < 0) return -1;
+    spl_u8 *address = &g_starfive_dma_pool[g_starfive_dma_used];
+    g_starfive_dma_used += rounded;
+    g_starfive_dma_slots[slot].address = address;
+    g_starfive_dma_slots[slot].size = rounded;
+    g_starfive_dma_slots[slot].active = 1;
+    for (spl_u64 offset = 0; offset < rounded; offset++) address[offset] = 0;
+    starfive_ccache_flush_range((spl_u64)address, rounded);
+    return (spl_i64)slot;
+}
+
+spl_i64 rt_dma_virt_of(spl_i64 handle) {
+    if (handle < 0 || handle >= STARFIVE_DMA_SLOT_COUNT ||
+        !g_starfive_dma_slots[handle].active) return 0;
+    return (spl_i64)(spl_u64)g_starfive_dma_slots[handle].address;
+}
+
+spl_i64 rt_dma_phys_of(spl_i64 handle) {
+    return rt_dma_virt_of(handle); /* OpenSBI S-mode boot retains identity map. */
+}
+
+void rt_dma_sync_for_device(spl_i64 handle, int direction) {
+    (void)direction;
+    if (handle < 0 || handle >= STARFIVE_DMA_SLOT_COUNT ||
+        !g_starfive_dma_slots[handle].active) return;
+    starfive_ccache_flush_range((spl_u64)g_starfive_dma_slots[handle].address,
+                                g_starfive_dma_slots[handle].size);
+}
+
+void rt_dma_sync_for_cpu(spl_i64 handle, int direction) {
+    rt_dma_sync_for_device(handle, direction);
+}
+
+spl_i64 rt_dma_cache_line_size(void) {
+    return (spl_i64)JH7110_CCACHE_LINE_SIZE;
+}
+
 spl_i64 rt_string_new_literal(const spl_u8 *bytes, spl_u64 len) {
     return rt_string_new((spl_i64)(spl_u64)bytes, (spl_i64)len);
 }

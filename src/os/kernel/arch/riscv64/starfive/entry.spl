@@ -7,6 +7,7 @@ use os.kernel.boot.riscv_noalloc_services.{riscv_noalloc_services_init}
 use os.kernel.arch.riscv64.starfive.console.{starfive_serial_shell_main}
 use os.kernel.arch.riscv64.starfive_root.{starfive_mount_packaged_root}
 use os.kernel.arch.riscv64.starfive.nvme_probe.{starfive_find_nvme_read_only, starfive_pcie1_link_up}
+use os.kernel.arch.riscv64.starfive.nvme_storage.{starfive_nvme_identify, starfive_nvme_remember}
 use os.kernel.arch.riscv64.starfive.pcie_init.{starfive_jh7110_pcie1_initialize}
 
 extern fn log_raw_println(msg: text)
@@ -75,12 +76,22 @@ fn starfive_boot_main(hart_id: u64, dtb_addr: u64):
         log_raw_println("STARFIVE pcie1-init-ready source={pcie_init.unwrap()}")
     val pcie_link = starfive_pcie1_link_up()
     log_raw_println("STARFIVE pcie1-link-up={pcie_link}")
-    val nvme_pci = starfive_find_nvme_read_only()
-    if nvme_pci.is_ok():
-        val identity = nvme_pci.unwrap()
-        log_raw_println("STARFIVE nvme-pci-ready domain={identity.domain} bdf={identity.bus}:{identity.device}.{identity.func} vendor={identity.vendor_id} device={identity.device_id} class={identity.class_code}:{identity.subclass}:{identity.prog_if} bar0={identity.bar0_raw} bar1={identity.bar1_raw} read_only=1")
+    if pcie_init.is_ok() and pcie_link:
+        val nvme_pci = starfive_find_nvme_read_only()
+        if nvme_pci.is_ok():
+            val identity = nvme_pci.unwrap()
+            log_raw_println("STARFIVE nvme-pci-ready domain={identity.domain} bdf={identity.bus}:{identity.device}.{identity.func} vendor={identity.vendor_id} device={identity.device_id} class={identity.class_code}:{identity.subclass}:{identity.prog_if} bar0={identity.bar0_raw} bar1={identity.bar1_raw} read_only=1")
+            val live_nvme = starfive_nvme_identify(identity)
+            if live_nvme.is_ok():
+                val device = live_nvme.unwrap()
+                log_raw_println("STARFIVE nvme-identify-ready model={device.model} serial={device.serial} firmware={device.firmware} nsid={device.nsid} lba_size={device.lba_size} lba_count={device.lba_count} bar0={device.bar0_cpu} bar_size={device.bar0_size} completion=polling media_writes=0")
+                starfive_nvme_remember(device)
+            else:
+                log_raw_println("STARFIVE nvme-identify-blocked reason={live_nvme.unwrap_err()} media_writes=0")
+        else:
+            log_raw_println("STARFIVE nvme-pci-blocked reason={nvme_pci.unwrap_err()} read_only=1")
     else:
-        log_raw_println("STARFIVE nvme-pci-blocked reason={nvme_pci.unwrap_err()} read_only=1")
+        log_raw_println("STARFIVE nvme-pci-blocked reason=pcie-host-not-admitted read_only=1")
     val root_r = starfive_mount_packaged_root()
     if root_r.is_err():
         log_raw_println("STARFIVE filesystem-failed: {root_r.unwrap_err()}")

@@ -1,7 +1,7 @@
 # UP Squared Apollo Lake SimpleOS handoff
 
-Updated: 2026-08-16
-Status: PAUSED — saved before returning to StarFive NVMe work
+Updated: 2026-08-17
+Status: RESUMED — removable-media admission pending
 
 ## Objective retained
 
@@ -30,12 +30,27 @@ runtime provider (`rt_string_*`, allocation/array/enum helpers,
 `.simple/native-objects-Lz0pcQ` when present. Do not repeat the identical
 command without changing the runtime-bundle contract.
 
+The 2026-08-17 resume repeated the failure once, then tested explicit
+`SIMPLE_NATIVE_BUILD_TARGET` propagation and the documented
+`simpleos_x86_64` output discriminator. Both still reached the generic linker
+with the same unresolved runtime surface; the last retained objects were under
+`.simple/native-objects-Xf8peY`. Both ineffective wrapper experiments were
+reverted. The next change must fix or explicitly bind the admitted compiler's
+x86 freestanding linker/provider capsule, not retry wrapper naming.
+
 ## External prerequisites still pending
 
 - User selection of feature option A and NFR set A.
 - A dedicated removable USB stick or disposable drive in a USB enclosure.
 - Live board identity/SKU, CN16 wiring/power, and firmware console-redirection
   evidence.
+
+On the 2026-08-17 resume, Linux enumerated only the internal system NVMe and a
+USB `Smart KM Link` read-only optical-class device (`sr0`). No removable USB
+mass-storage disk or stable USB disk by-id path was present. Never reinterpret
+that `sr0` device or the host NVMe as the requested install target. If the stick
+was inserted into the UP2 rather than this build host, move it to the build
+host for image installation, then return it to the UP2 for F7 boot.
 
 ## Resume sequence
 
@@ -57,4 +72,3 @@ command without changing the runtime-bundle contract.
 - Sidecar research lanes: completed read-only (repo, hardware, SPipe design).
 - Merge owner: primary Codex agent.
 - Final reviewer: normal/highest-capability Codex pass after live evidence.
-

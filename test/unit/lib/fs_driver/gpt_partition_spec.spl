@@ -1,7 +1,7 @@
 use std.spec.{describe, it, expect}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.mem_block_device.{MemBlockDevice}
-use std.fs_driver.gpt_partition.{GptPartition, gpt_crc32, gpt_format_plan, gpt_partition_sector_count, gpt_partition_window_reason, gpt_read_primary}
+use std.fs_driver.gpt_partition.{GptPartition, GptSinglePartitionRequest, gpt_crc32, gpt_format_plan, gpt_create_single_partition, gpt_partition_sector_count, gpt_partition_window_reason, gpt_read_primary}
 
 fn _put_u32_le(buf: [u8], off: i64, value: u32) -> [u8]:
     var out = buf
@@ -100,3 +100,44 @@ describe "host-neutral GPT partition boundary":
         val outside = GptPartition(index: 2u32, first_lba: 8u64, last_lba: 16u64, type_guid_lo: 1u64, type_guid_hi: 0u64, unique_guid_lo: 0u64, unique_guid_hi: 0u64)
         expect(gpt_partition_sector_count(reversed).unwrap_err()).to_equal("gpt-partition-reversed")
         expect(gpt_partition_window_reason(outside, 16u64)).to_equal("gpt-partition-out-of-bounds")
+
+    it "writes and validates mirrored GPT metadata for one aligned partition":
+        val mem = MemBlockDevice.new(8192u64, 512u32)
+        val plan = gpt_format_plan(512u32, 8192u64, 128u32).unwrap()
+        val request = GptSinglePartitionRequest(
+            first_lba: 2048u64,
+            last_lba: plan.last_usable_lba,
+            type_guid_lo: 0x11d2f81fc12a7328u64,
+            type_guid_hi: 0x3bc93ec9a0004bbau64,
+            unique_guid_lo: 0x0123456789abcdefu64,
+            unique_guid_hi: 0xfedcba9876543210u64,
+            disk_guid_lo: 0x1020304050607080u64,
+            disk_guid_hi: 0x90a0b0c0d0e0f001u64
+        )
+        val created = gpt_create_single_partition(mem, plan, request).unwrap()
+        expect(created.first_lba).to_equal(2048u64)
+        expect(created.last_lba).to_equal(plan.last_usable_lba)
+        val dev: BlockDevice = mem
+        val mbr = dev.read_sector(0u64).unwrap()
+        expect(mbr[450]).to_equal(0xeeu8)
+        expect(mbr[510]).to_equal(0x55u8)
+        expect(mbr[511]).to_equal(0xaau8)
+        val backup = dev.read_sector(plan.backup_header_lba).unwrap()
+        expect(backup[0]).to_equal(0x45u8)
+        expect(backup[7]).to_equal(0x54u8)
+        expect(gpt_read_primary(mem, 8192u64).unwrap().partitions.len()).to_equal(1)
+
+    it "rejects destructive GPT geometry that is not 1 MiB aligned":
+        val mem = MemBlockDevice.new(8192u64, 512u32)
+        val plan = gpt_format_plan(512u32, 8192u64, 128u32).unwrap()
+        val request = GptSinglePartitionRequest(
+            first_lba: 34u64,
+            last_lba: plan.last_usable_lba,
+            type_guid_lo: 1u64,
+            type_guid_hi: 1u64,
+            unique_guid_lo: 2u64,
+            unique_guid_hi: 2u64,
+            disk_guid_lo: 3u64,
+            disk_guid_hi: 3u64
+        )
+        expect(gpt_create_single_partition(mem, plan, request).unwrap_err()).to_equal("gpt-create-partition-not-1mib-aligned")

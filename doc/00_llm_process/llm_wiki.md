@@ -103,6 +103,16 @@ PASS.
 - **Recovery:** if OpenOCD cannot examine the selected U74 hart after a failed
   high-address access, do not loop software reset; request one physical reset or
   power-cycle.
+- **Reset escalation:** try the fixed SBI SRST trampoline first. If the hart
+  cannot be examined, pulse Debug Module `ndmreset` while retaining `dmactive`,
+  then open a fresh OpenOCD session and require halt+resume proof. An
+  unverified `ndmreset` is BLOCKED, not reset success; never loop it.
+- **Implemented offline path (2026-08-17):** the common driver parses NVMe
+  SN/MN/FR and namespace geometry, carries non-coherent DMA handles through SQ,
+  CQ, Identify, and filesystem bounce buffers, creates mirrored GPT plus FAT32
+  inside a bounded partition, and proves write/flush/unmount/remount/read and
+  public-VFS `/nvme` enumeration. The StarFive ELF builds, but none of this is
+  physical PASS until UART evidence from the exact SSD exists.
 - **Primary documents:**
   `doc/04_architecture/starfive_visionfive2_nvme_storage.md` and
   `doc/07_guide/platform/simpleos/starfive_visionfive2_simpleos.md`.

@@ -1,0 +1,207 @@
+# Host-neutral FAT32 formatter for an already-bounded BlockDevice lease.
+#
+# The caller is responsible for presenting a partition window rather than a
+# whole namespace. Formatting requires an explicit identity-bound authority;
+# constructing a plan or inspecting geometry never writes media.
+
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.bytes_util.{text_to_bytes_pure}
+
+val FAT32_MIN_CLUSTERS: u64 = 65525u64
+val FAT32_RESERVED_SECTORS: u32 = 32u32
+val FAT32_FAT_COUNT: u32 = 2u32
+val FAT32_ROOT_CLUSTER: u32 = 2u32
+
+struct Fat32FormatAuthorization:
+    approved: bool
+    identity_hash: text
+    challenge: text
+
+struct Fat32FormatPlan:
+    sector_size: u32
+    sector_count: u64
+    sectors_per_cluster: u32
+    reserved_sectors: u32
+    fat_count: u32
+    fat_sectors: u32
+    data_start_lba: u64
+    cluster_count: u64
+    root_cluster: u32
+
+fn _fat32_zero_sector(sector_size: u32) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < sector_size.to_i64():
+        out.push(0u8)
+        i = i + 1
+    out
+
+fn _fat32_put_u16(data: [u8], off: i64, value: u32) -> [u8]:
+    var out = data
+    out[off] = (value & 0xffu32).to_u8()
+    out[off + 1] = ((value >> 8) & 0xffu32).to_u8()
+    out
+
+fn _fat32_put_u32(data: [u8], off: i64, value: u32) -> [u8]:
+    var out = _fat32_put_u16(data, off, value)
+    _fat32_put_u16(out, off + 2, value >> 16)
+
+fn _fat32_put_text(data: [u8], off: i64, value: text, width: i64) -> [u8]:
+    var out = data
+    val bytes = text_to_bytes_pure(value)
+    var i: i64 = 0
+    while i < width:
+        out[off + i] = if i < bytes.len(): bytes[i] else: 0x20u8
+        i = i + 1
+    out
+
+fn _fat32_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _fat32_write_verify(dev: BlockDevice, lba: u64, sector: [u8]) -> Result<bool, text>:
+    val written = dev.write_sector(lba, sector)
+    if written.is_err() or not written.unwrap():
+        return Err("fat32-sector-write-failed")
+    val readback = dev.read_sector(lba)
+    if readback.is_err():
+        return Err("fat32-sector-readback-failed")
+    if not _fat32_equal(sector, readback.unwrap()):
+        return Err("fat32-sector-readback-mismatch")
+    Ok(true)
+
+fn fat32_format_plan(sector_size: u32, sector_count: u64, sectors_per_cluster: u32) -> Result<Fat32FormatPlan, text>:
+    """Compute strict FAT32 geometry without writing the device."""
+    if sector_size != 512u32 and sector_size != 1024u32 and sector_size != 2048u32 and sector_size != 4096u32:
+        return Err("fat32-format-unsupported-sector-size")
+    if sectors_per_cluster == 0u32 or sectors_per_cluster > 128u32 or (sectors_per_cluster & (sectors_per_cluster - 1u32)) != 0u32:
+        return Err("fat32-format-invalid-sectors-per-cluster")
+    if sector_count > 0xffffffffu64:
+        return Err("fat32-format-sector-count-too-large")
+
+    # FAT size and cluster count depend on each other. Iterate until the FAT
+    # has enough 32-bit entries for every data cluster plus entries 0 and 1.
+    var fat_sectors: u64 = 1u64
+    var cluster_count: u64 = 0u64
+    var iteration: i64 = 0
+    while iteration < 16:
+        val overhead = FAT32_RESERVED_SECTORS.to_u64() + FAT32_FAT_COUNT.to_u64() * fat_sectors
+        if sector_count <= overhead:
+            return Err("fat32-format-device-too-small")
+        cluster_count = (sector_count - overhead) / sectors_per_cluster.to_u64()
+        val required_bytes = (cluster_count + 2u64) * 4u64
+        val required_sectors = (required_bytes + sector_size.to_u64() - 1u64) / sector_size.to_u64()
+        if required_sectors == fat_sectors:
+            iteration = 16
+        else:
+            fat_sectors = required_sectors
+            iteration = iteration + 1
+    if cluster_count < FAT32_MIN_CLUSTERS:
+        return Err("fat32-format-not-fat32-cluster-count")
+    if fat_sectors > 0xffffffffu64:
+        return Err("fat32-format-fat-too-large")
+    val data_start = FAT32_RESERVED_SECTORS.to_u64() + FAT32_FAT_COUNT.to_u64() * fat_sectors
+    Ok(Fat32FormatPlan(
+        sector_size: sector_size,
+        sector_count: sector_count,
+        sectors_per_cluster: sectors_per_cluster,
+        reserved_sectors: FAT32_RESERVED_SECTORS,
+        fat_count: FAT32_FAT_COUNT,
+        fat_sectors: fat_sectors.to_u32(),
+        data_start_lba: data_start,
+        cluster_count: cluster_count,
+        root_cluster: FAT32_ROOT_CLUSTER
+    ))
+
+fn _fat32_boot_sector(plan: Fat32FormatPlan, volume_id: u32, label: text) -> [u8]:
+    var boot = _fat32_zero_sector(plan.sector_size)
+    boot[0] = 0xebu8
+    boot[1] = 0x58u8
+    boot[2] = 0x90u8
+    boot = _fat32_put_text(boot, 3, "SIMPLEOS", 8)
+    boot = _fat32_put_u16(boot, 11, plan.sector_size)
+    boot[13] = plan.sectors_per_cluster.to_u8()
+    boot = _fat32_put_u16(boot, 14, plan.reserved_sectors)
+    boot[16] = plan.fat_count.to_u8()
+    boot[21] = 0xf8u8
+    boot = _fat32_put_u16(boot, 24, 63u32)
+    boot = _fat32_put_u16(boot, 26, 255u32)
+    boot = _fat32_put_u32(boot, 32, plan.sector_count.to_u32())
+    boot = _fat32_put_u32(boot, 36, plan.fat_sectors)
+    boot = _fat32_put_u32(boot, 44, plan.root_cluster)
+    boot = _fat32_put_u16(boot, 48, 1u32)
+    boot = _fat32_put_u16(boot, 50, 6u32)
+    boot[64] = 0x80u8
+    boot[66] = 0x29u8
+    boot = _fat32_put_u32(boot, 67, volume_id)
+    boot = _fat32_put_text(boot, 71, label, 11)
+    boot = _fat32_put_text(boot, 82, "FAT32", 8)
+    boot[510] = 0x55u8
+    boot[511] = 0xaau8
+    boot
+
+fn _fat32_fsinfo_sector(plan: Fat32FormatPlan) -> [u8]:
+    var info = _fat32_zero_sector(plan.sector_size)
+    info = _fat32_put_u32(info, 0, 0x41615252u32)
+    info = _fat32_put_u32(info, 484, 0x61417272u32)
+    val free_clusters = if plan.cluster_count > 0u64: plan.cluster_count - 1u64 else: 0u64
+    info = _fat32_put_u32(info, 488, free_clusters.to_u32())
+    info = _fat32_put_u32(info, 492, 3u32)
+    _fat32_put_u32(info, 508, 0xaa550000u32)
+
+fn fat32_format(dev: BlockDevice, plan: Fat32FormatPlan, authorization: Fat32FormatAuthorization, volume_id: u32, label: text) -> Result<bool, text>:
+    """Create an empty FAT32 filesystem inside an authorized partition lease."""
+    if not authorization.approved or authorization.identity_hash.len() == 0 or authorization.challenge.len() == 0:
+        return Err("fat32-format-authorization-required")
+    if dev.sector_size() != plan.sector_size:
+        return Err("fat32-format-sector-size-mismatch")
+    val recomputed = fat32_format_plan(plan.sector_size, plan.sector_count, plan.sectors_per_cluster)
+    if recomputed.is_err():
+        return Err(recomputed.unwrap_err())
+    val checked = recomputed.unwrap()
+    if checked.fat_sectors != plan.fat_sectors or checked.data_start_lba != plan.data_start_lba or checked.cluster_count != plan.cluster_count:
+        return Err("fat32-format-plan-mismatch")
+
+    val boot = _fat32_boot_sector(plan, volume_id, label)
+    val fsinfo = _fat32_fsinfo_sector(plan)
+    val zero = _fat32_zero_sector(plan.sector_size)
+    var lba: u64 = 0u64
+    while lba < plan.reserved_sectors.to_u64():
+        val sector = if lba == 0u64 or lba == 6u64: boot else if lba == 1u64 or lba == 7u64: fsinfo else: zero
+        val wr = _fat32_write_verify(dev, lba, sector)
+        if wr.is_err():
+            return Err("fat32-reserved:" + wr.unwrap_err())
+        lba = lba + 1u64
+
+    var fat_index: u32 = 0u32
+    while fat_index < plan.fat_count:
+        var fat_sector_index: u32 = 0u32
+        while fat_sector_index < plan.fat_sectors:
+            var fat_sector = _fat32_zero_sector(plan.sector_size)
+            if fat_sector_index == 0u32:
+                fat_sector = _fat32_put_u32(fat_sector, 0, 0x0ffffff8u32)
+                fat_sector = _fat32_put_u32(fat_sector, 4, 0xffffffffu32)
+                fat_sector = _fat32_put_u32(fat_sector, 8, 0x0fffffffu32)
+            val fat_lba = plan.reserved_sectors.to_u64() + fat_index.to_u64() * plan.fat_sectors.to_u64() + fat_sector_index.to_u64()
+            val wr = _fat32_write_verify(dev, fat_lba, fat_sector)
+            if wr.is_err():
+                return Err("fat32-fat:" + wr.unwrap_err())
+            fat_sector_index = fat_sector_index + 1u32
+        fat_index = fat_index + 1u32
+
+    lba = 0u64
+    while lba < plan.sectors_per_cluster.to_u64():
+        val wr = _fat32_write_verify(dev, plan.data_start_lba + lba, zero)
+        if wr.is_err():
+            return Err("fat32-root-cluster:" + wr.unwrap_err())
+        lba = lba + 1u64
+    val flushed = dev.flush()
+    if flushed.is_err() or not flushed.unwrap():
+        return Err("fat32-format-flush-failed")
+    Ok(true)

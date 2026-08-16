@@ -13,6 +13,9 @@ val JH7110_STG_SYSCON_BASE: u64 = 0x10240000u64
 val JH7110_PCIE1_STG_BASE: u64 = 0x1F8u64
 val JH7110_PCIE1_APB_BASE: u64 = 0x2C000000u64
 val JH7110_PCIE1_PHY_BASE: u64 = 0x10220000u64
+val JH7110_PCIE1_CONFIG_BASE: u64 = 0x9C0000000u64
+val JH7110_PCIE1_MEM_BASE: u64 = 0x38000000u64
+val JH7110_PCIE1_PREF64_BASE: u64 = 0x980000000u64
 
 val JH7110_STG_AR: u64 = JH7110_STG_SYSCON_BASE + JH7110_PCIE1_STG_BASE + 0x78u64
 val JH7110_STG_AW: u64 = JH7110_STG_SYSCON_BASE + JH7110_PCIE1_STG_BASE + 0x7Cu64
@@ -42,6 +45,44 @@ val PLDA_PMSG_SUPPORT_RX: u64 = JH7110_PCIE1_APB_BASE + 0x3F0u64
 val PLDA_CONFIG_BAR0: u64 = JH7110_PCIE1_APB_BASE + 0x1010u64
 val PLDA_CONFIG_BAR1: u64 = JH7110_PCIE1_APB_BASE + 0x1014u64
 
+# PLDA outbound ATR entry 0 is reserved for PCI configuration transactions.
+# Linux programs this window even when firmware has already trained the link.
+val PLDA_ATR_TABLE_BASE: u64 = JH7110_PCIE1_APB_BASE + 0x800u64
+val PLDA_ATR_ENTRY_SIZE: u64 = 32u64
+val PLDA_ATR_SRCADDR_PARAM_OFFSET: u64 = 0u64
+val PLDA_ATR_SRC_ADDR_OFFSET: u64 = 4u64
+val PLDA_ATR_TRSL_ADDR_LSB_OFFSET: u64 = 8u64
+val PLDA_ATR_TRSL_ADDR_UDW_OFFSET: u64 = 12u64
+val PLDA_ATR_TRSL_PARAM_OFFSET: u64 = 16u64
+val PLDA_CONFIG_WINDOW_SIZE_LOG2_MINUS_ONE: u64 = 23u64
+val PLDA_MEM_WINDOW_SIZE_LOG2_MINUS_ONE: u64 = 26u64
+val PLDA_PREF64_WINDOW_SIZE_LOG2_MINUS_ONE: u64 = 29u64
+val PLDA_ATR_SIZE_SHIFT: u64 = 1u64
+val PLDA_ATR_ENABLE: u64 = 1u64
+val PLDA_CONFIG_INTERFACE: u64 = 1u64
+val PLDA_MEMORY_INTERFACE: u64 = 0u64
+
+fn _jh7110_write32_checked(address: u64, value: u64) -> bool:
+    rt_starfive_mmio_write32(address, value)
+    rt_starfive_mmio_read32(address) == value
+
+fn _jh7110_setup_atr_window(index: u64, axi_base: u64, pci_base: u64, size_log2_minus_one: u64, interface_kind: u64) -> Result<text, text>:
+    val registers = PLDA_ATR_TABLE_BASE + index * PLDA_ATR_ENTRY_SIZE
+    val source_low = (axi_base & 0xFFFFF000u64) |
+        (size_log2_minus_one << PLDA_ATR_SIZE_SHIFT) |
+        PLDA_ATR_ENABLE
+    if not _jh7110_write32_checked(registers + PLDA_ATR_TRSL_PARAM_OFFSET, interface_kind):
+        return Err("translation-parameter-readback")
+    if not _jh7110_write32_checked(registers + PLDA_ATR_SRCADDR_PARAM_OFFSET, source_low):
+        return Err("source-low-readback")
+    if not _jh7110_write32_checked(registers + PLDA_ATR_SRC_ADDR_OFFSET, axi_base >> 32):
+        return Err("source-high-readback")
+    if not _jh7110_write32_checked(registers + PLDA_ATR_TRSL_ADDR_LSB_OFFSET, pci_base & 0xFFFFFFFFu64):
+        return Err("translation-low-readback")
+    if not _jh7110_write32_checked(registers + PLDA_ATR_TRSL_ADDR_UDW_OFFSET, pci_base >> 32):
+        return Err("translation-high-readback")
+    Ok("ready")
+
 fn _jh7110_rmw32(address: u64, mask: u64, value: u64) -> bool:
     val old_value = rt_starfive_mmio_read32(address)
     if old_value == 0xFFFFFFFFu64:
@@ -64,12 +105,22 @@ fn starfive_jh7110_pcie1_initialize() -> Result<text, text>:
     clocks and deasserted the six PCIe1 resets.  An inaccessible aperture fails
     closed; SimpleOS never guesses CRG bit positions or drives GPIO28.
     """
-    if starfive_jh7110_pcie1_link_up():
-        return Ok("firmware-link-ready")
-
     val bridge_probe = rt_starfive_mmio_read32(PLDA_GEN_SETTINGS)
     if bridge_probe == 0xFFFFFFFFu64:
         return Err("starfive-pcie1-apb-inaccessible-clocks-or-resets")
+
+    val config_window = _jh7110_setup_atr_window(0u64, JH7110_PCIE1_CONFIG_BASE, 0u64, PLDA_CONFIG_WINDOW_SIZE_LOG2_MINUS_ONE, PLDA_CONFIG_INTERFACE)
+    if config_window.is_err():
+        return Err("starfive-pcie1-config-window-" + config_window.unwrap_err())
+    val mem_window = _jh7110_setup_atr_window(1u64, JH7110_PCIE1_MEM_BASE, JH7110_PCIE1_MEM_BASE, PLDA_MEM_WINDOW_SIZE_LOG2_MINUS_ONE, PLDA_MEMORY_INTERFACE)
+    if mem_window.is_err():
+        return Err("starfive-pcie1-mem-window-" + mem_window.unwrap_err())
+    val pref64_window = _jh7110_setup_atr_window(2u64, JH7110_PCIE1_PREF64_BASE, JH7110_PCIE1_PREF64_BASE, PLDA_PREF64_WINDOW_SIZE_LOG2_MINUS_ONE, PLDA_MEMORY_INTERFACE)
+    if pref64_window.is_err():
+        return Err("starfive-pcie1-pref64-window-" + pref64_window.unwrap_err())
+
+    if starfive_jh7110_pcie1_link_up():
+        return Ok("firmware-link-ready-config-window-ready")
 
     # PCIe1 PHY has no syscon mode mux in the upstream DT; PCIe is its default.
     rt_starfive_mmio_write32(JH7110_PHY_KVCO_LEVEL, 0x91u64)
@@ -110,7 +161,7 @@ fn starfive_jh7110_pcie1_initialize() -> Result<text, text>:
     var retry: u64 = 0u64
     while retry < 10u64:
         if starfive_jh7110_pcie1_link_up():
-            return Ok("cold-init-link-ready")
+            return Ok("cold-init-link-ready-config-window-ready")
         rt_starfive_delay_ms(100u64)
         retry = retry + 1u64
     Err("starfive-pcie1-link-timeout-perst-or-endpoint")

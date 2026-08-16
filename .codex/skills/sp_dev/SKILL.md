@@ -1061,6 +1061,13 @@ transcript must show a fresh BootROM/OpenSBI/U-Boot sequence. For immutable
 packaged roots, a VFS-owned manifest is valid evidence when the shell calls
 public `readdir`; names must not be embedded in the shell output path.
 
+If SBI injection is impossible because the selected hart is unexaminable, a
+JH7110-specific fallback may pulse RISC-V Debug Module `ndmreset` with
+`dmactive` retained. It is successful only when a fresh OpenOCD session can
+halt and resume the intended U74 hart and UART shows the firmware restart.
+Otherwise classify BLOCKED and require one physical reset/power-cycle; never
+repeat an unverified software-reset loop.
+
 For StarFive VisionFive 2 NVMe work, separate PCI identity, NVMe Identify, and
 destructive provisioning. The M.2 socket is JH7110 PCIe1/domain 1; DT parsing,
 clocks, resets, PHY, PERST, PLDA quirks, and link validation remain in the
@@ -1078,3 +1085,9 @@ filesystem. Persistence PASS requires write, flush, unmount, remount, hash-
 equal read, and command-correlated VFS `ls /nvme` from one retained transcript.
 If failed high-address debug access leaves a hart unexaminable, stop software-
 reset retries and require a physical reset/power-cycle.
+
+For non-coherent JH7110 PCIe DMA, carry allocator handles with queue and bounce
+resources. Flush SQ/data buffers before ringing a doorbell and synchronize CQ,
+Identify, and read buffers before CPU inspection. A linked image or clean
+Identify parser test without those ownership transitions is not live NVMe
+evidence.

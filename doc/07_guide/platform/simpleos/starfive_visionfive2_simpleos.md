@@ -64,6 +64,9 @@ After SimpleOS replaces U-Boot, use
 writes a three-instruction `ecall` trampoline only to scratch RAM, invokes SBI
 SRST, restores Tigard channel B, and has been verified to reboot BootROM, DDR,
 OpenSBI, peripherals, and U-Boot. Generic OpenOCD `reset run` is insufficient.
+If the hart is unexaminable, the helper pulses Debug Module `ndmreset` while
+retaining `dmactive`, then requires halt+resume in a fresh session. Failure of
+that verification is BLOCKED and requires one physical reset; do not loop it.
 
 On the tested U-Boot 2021.10 build, `bootelf -p` faults while processing this
 ELF's program headers. `bootelf -s 0x48000000` is the proven loader and reaches
@@ -124,7 +127,11 @@ gate. `--contract` and `--self-test` are host-only safety checks.
 `--identify-live` may perform only PCI/NVMe reads and must emit an immutable
 Identify Controller/Namespace receipt before it can pass. `--provision-live`
 is a separately authorized mode; authorization for it never carries over from
-identify or general board boot. Both live modes currently fail closed with exit
-2 because the real Identify and provisioning paths are not complete. Do not
+identify or general board boot. The board image now contains the real polling
+Identify path, identity-bound UART format command, mirrored GPT writer,
+partition-bounded FAT32 formatter, durable remount/readback proof, and public
+VFS `/nvme` listing. It also synchronizes non-coherent SQ/CQ, Identify, and
+bounce-buffer DMA using retained allocation handles. Live checker promotion is
+still blocked until the exact SSD and UART transcript prove those paths. Do not
 interpret the PCI identity line or a contract PASS as proof of an NVMe model,
 namespace, filesystem, or durable write.

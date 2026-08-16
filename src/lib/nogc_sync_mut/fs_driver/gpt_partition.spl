@@ -39,6 +39,16 @@ struct GptFormatPlan:
     first_usable_lba: u64
     last_usable_lba: u64
 
+struct GptSinglePartitionRequest:
+    first_lba: u64
+    last_lba: u64
+    type_guid_lo: u64
+    type_guid_hi: u64
+    unique_guid_lo: u64
+    unique_guid_hi: u64
+    disk_guid_lo: u64
+    disk_guid_hi: u64
+
 fn _gpt_u32_le(data: [u8], off: i64) -> u32:
     data[off].to_u32() |
         (data[off + 1].to_u32() << 8) |
@@ -47,6 +57,72 @@ fn _gpt_u32_le(data: [u8], off: i64) -> u32:
 
 fn _gpt_u64_le(data: [u8], off: i64) -> u64:
     _gpt_u32_le(data, off).to_u64() | (_gpt_u32_le(data, off + 4).to_u64() << 32)
+
+fn _gpt_put_u32_le(data: [u8], off: i64, value: u32) -> [u8]:
+    var out = data
+    out[off] = (value & 0xffu32).to_u8()
+    out[off + 1] = ((value >> 8) & 0xffu32).to_u8()
+    out[off + 2] = ((value >> 16) & 0xffu32).to_u8()
+    out[off + 3] = ((value >> 24) & 0xffu32).to_u8()
+    out
+
+fn _gpt_put_u64_le(data: [u8], off: i64, value: u64) -> [u8]:
+    var out = _gpt_put_u32_le(data, off, (value & 0xffffffffu64).to_u32())
+    _gpt_put_u32_le(out, off + 4, (value >> 32).to_u32())
+
+fn _gpt_zero_bytes(count: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < count:
+        out.push(0u8)
+        i = i + 1
+    out
+
+fn _gpt_bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _gpt_header(plan: GptFormatPlan, current_lba: u64, backup_lba: u64, entries_lba: u64, entries_crc: u32, disk_guid_lo: u64, disk_guid_hi: u64) -> [u8]:
+    var header = _gpt_zero_bytes(plan.sector_size.to_i64())
+    header[0] = 0x45u8
+    header[1] = 0x46u8
+    header[2] = 0x49u8
+    header[3] = 0x20u8
+    header[4] = 0x50u8
+    header[5] = 0x41u8
+    header[6] = 0x52u8
+    header[7] = 0x54u8
+    header = _gpt_put_u32_le(header, 8, 0x00010000u32)
+    header = _gpt_put_u32_le(header, 12, GPT_MIN_HEADER_SIZE)
+    header = _gpt_put_u64_le(header, 24, current_lba)
+    header = _gpt_put_u64_le(header, 32, backup_lba)
+    header = _gpt_put_u64_le(header, 40, plan.first_usable_lba)
+    header = _gpt_put_u64_le(header, 48, plan.last_usable_lba)
+    header = _gpt_put_u64_le(header, 56, disk_guid_lo)
+    header = _gpt_put_u64_le(header, 64, disk_guid_hi)
+    header = _gpt_put_u64_le(header, 72, entries_lba)
+    header = _gpt_put_u32_le(header, 80, plan.entry_count)
+    header = _gpt_put_u32_le(header, 84, plan.entry_size)
+    header = _gpt_put_u32_le(header, 88, entries_crc)
+    val crc = _gpt_crc_region(header, GPT_MIN_HEADER_SIZE.to_i64(), true)
+    _gpt_put_u32_le(header, 16, crc)
+
+fn _gpt_write_verify_sector(dev: BlockDevice, lba: u64, sector: [u8]) -> Result<bool, text>:
+    val write_result = dev.write_sector(lba, sector)
+    if write_result.is_err() or not write_result.unwrap():
+        return Err("gpt-sector-write-failed")
+    val read_result = dev.read_sector(lba)
+    if read_result.is_err():
+        return Err("gpt-sector-readback-failed")
+    if not _gpt_bytes_equal(sector, read_result.unwrap()):
+        return Err("gpt-sector-readback-mismatch")
+    Ok(true)
 
 fn gpt_crc32(data: [u8]) -> u32:
     """IEEE CRC-32 used by EFI GPT (polynomial 0xedb88320)."""
@@ -102,6 +178,96 @@ fn gpt_format_plan(sector_size: u32, sector_count: u64, entry_count: u32) -> Res
         first_usable_lba: first_usable_lba,
         last_usable_lba: last_usable_lba
     ))
+
+fn gpt_create_single_partition(dev: BlockDevice, plan: GptFormatPlan, request: GptSinglePartitionRequest) -> Result<GptPartition, text>:
+    """Commit a protective MBR and mirrored GPT containing one partition.
+
+    The caller must already hold destructive authorization for this exact
+    BlockDevice lease. Every written sector is read back before the final
+    durable flush; no write can escape plan.sector_count.
+    """
+    if dev.sector_size() != plan.sector_size:
+        return Err("gpt-create-sector-size-mismatch")
+    if request.first_lba < plan.first_usable_lba or request.last_lba > plan.last_usable_lba or request.first_lba > request.last_lba:
+        return Err("gpt-create-partition-outside-usable-range")
+    val alignment_lbas = 1048576u64 / plan.sector_size.to_u64()
+    if alignment_lbas == 0u64 or (request.first_lba % alignment_lbas) != 0u64:
+        return Err("gpt-create-partition-not-1mib-aligned")
+    val zero_type_guid = request.type_guid_lo == 0u64 and request.type_guid_hi == 0u64
+    val zero_unique_guid = request.unique_guid_lo == 0u64 and request.unique_guid_hi == 0u64
+    val zero_disk_guid = request.disk_guid_lo == 0u64 and request.disk_guid_hi == 0u64
+    if zero_type_guid or zero_unique_guid or zero_disk_guid:
+        return Err("gpt-create-zero-guid")
+
+    val entries_bytes = plan.entry_count.to_i64() * plan.entry_size.to_i64()
+    var entries = _gpt_zero_bytes(entries_bytes)
+    entries = _gpt_put_u64_le(entries, 0, request.type_guid_lo)
+    entries = _gpt_put_u64_le(entries, 8, request.type_guid_hi)
+    entries = _gpt_put_u64_le(entries, 16, request.unique_guid_lo)
+    entries = _gpt_put_u64_le(entries, 24, request.unique_guid_hi)
+    entries = _gpt_put_u64_le(entries, 32, request.first_lba)
+    entries = _gpt_put_u64_le(entries, 40, request.last_lba)
+    val entries_crc = gpt_crc32(entries)
+    val entry_sectors = (entries.len().to_u64() + plan.sector_size.to_u64() - 1u64) / plan.sector_size.to_u64()
+
+    # Backup metadata first keeps the primary table authoritative until the
+    # final phase. Then publish primary entries/header and protective MBR.
+    var sector_index: u64 = 0u64
+    while sector_index < entry_sectors:
+        var sector = _gpt_zero_bytes(plan.sector_size.to_i64())
+        val start = sector_index.to_i64() * plan.sector_size.to_i64()
+        var byte_index: i64 = 0
+        while byte_index < sector.len() and start + byte_index < entries.len():
+            sector[byte_index] = entries[start + byte_index]
+            byte_index = byte_index + 1
+        val backup_write = _gpt_write_verify_sector(dev, plan.backup_entries_lba + sector_index, sector)
+        if backup_write.is_err():
+            return Err("gpt-backup-entries:" + backup_write.unwrap_err())
+        sector_index = sector_index + 1u64
+    val backup_header = _gpt_header(plan, plan.backup_header_lba, plan.primary_header_lba, plan.backup_entries_lba, entries_crc, request.disk_guid_lo, request.disk_guid_hi)
+    val backup_header_write = _gpt_write_verify_sector(dev, plan.backup_header_lba, backup_header)
+    if backup_header_write.is_err():
+        return Err("gpt-backup-header:" + backup_header_write.unwrap_err())
+
+    sector_index = 0u64
+    while sector_index < entry_sectors:
+        var sector = _gpt_zero_bytes(plan.sector_size.to_i64())
+        val start = sector_index.to_i64() * plan.sector_size.to_i64()
+        var byte_index: i64 = 0
+        while byte_index < sector.len() and start + byte_index < entries.len():
+            sector[byte_index] = entries[start + byte_index]
+            byte_index = byte_index + 1
+        val primary_write = _gpt_write_verify_sector(dev, plan.primary_entries_lba + sector_index, sector)
+        if primary_write.is_err():
+            return Err("gpt-primary-entries:" + primary_write.unwrap_err())
+        sector_index = sector_index + 1u64
+    val primary_header = _gpt_header(plan, plan.primary_header_lba, plan.backup_header_lba, plan.primary_entries_lba, entries_crc, request.disk_guid_lo, request.disk_guid_hi)
+    val primary_header_write = _gpt_write_verify_sector(dev, plan.primary_header_lba, primary_header)
+    if primary_header_write.is_err():
+        return Err("gpt-primary-header:" + primary_header_write.unwrap_err())
+
+    var protective_mbr = _gpt_zero_bytes(plan.sector_size.to_i64())
+    protective_mbr[446 + 4] = 0xeeu8
+    protective_mbr = _gpt_put_u32_le(protective_mbr, 446 + 8, 1u32)
+    var protected_sectors = (plan.sector_count - 1u64).to_u32()
+    if plan.sector_count - 1u64 > 0xffffffffu64:
+        protected_sectors = 0xffffffffu32
+    protective_mbr = _gpt_put_u32_le(protective_mbr, 446 + 12, protected_sectors)
+    protective_mbr[510] = 0x55u8
+    protective_mbr[511] = 0xaau8
+    val mbr_write = _gpt_write_verify_sector(dev, 0u64, protective_mbr)
+    if mbr_write.is_err():
+        return Err("gpt-protective-mbr:" + mbr_write.unwrap_err())
+    val flush_result = dev.flush()
+    if flush_result.is_err() or not flush_result.unwrap():
+        return Err("gpt-create-durable-flush-failed")
+    val parsed = gpt_read_primary(dev, plan.sector_count)
+    if parsed.is_err():
+        return Err("gpt-create-primary-validation-failed")
+    val table = parsed.unwrap()
+    if table.partitions.len() != 1:
+        return Err("gpt-create-primary-validation-failed")
+    return Ok(table.partitions[0])
 
 fn gpt_partition_window_reason(part: GptPartition, device_sector_count: u64) -> text:
     if part.first_lba > part.last_lba:

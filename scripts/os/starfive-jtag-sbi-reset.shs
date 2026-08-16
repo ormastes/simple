@@ -40,8 +40,46 @@ timeout 20 openocd \
     -c "reg pc $SCRATCH" -c resume -c shutdown > "$OUTPUT" 2>&1
 RC=$?
 set -e
-test "$RC" -eq 0 || test "$RC" -eq 124 || { echo "starfive_status=fail"; echo "starfive_reason=sbi-reset-command-failed"; exit 1; }
+RESET_METHOD=sbi-srst
+if test "$RC" -ne 0 -a "$RC" -ne 124; then
+    # A faulting MMIO access can leave a hart unexaminable, which prevents the
+    # SBI trampoline from being injected.  The RISC-V Debug Module's ndmreset
+    # bit resets the platform without requiring a halt or touching flash.
+    # Keep dmactive asserted, pulse ndmreset, then release it.
+    set +e
+    timeout 20 openocd \
+        -f interface/ftdi/tigard.cfg \
+        -c 'ftdi device_desc {port A:Serial  port B:JTAG}' \
+        -f "$ROOT_DIR/scripts/os/openocd-starfive-jh7110-target.cfg" \
+        -c init \
+        -c 'riscv dmi_write 0x10 0x00000003' \
+        -c 'sleep 100' \
+        -c 'riscv dmi_write 0x10 0x00000001' \
+        -c shutdown >> "$OUTPUT" 2>&1
+    RC=$?
+    set -e
+    test "$RC" -eq 0 || { echo "starfive_status=fail"; echo "starfive_reason=jtag-software-reset-failed"; exit 1; }
+    sleep 1
+    set +e
+    timeout 15 openocd \
+        -f interface/ftdi/tigard.cfg \
+        -c 'ftdi device_desc {port A:Serial  port B:JTAG}' \
+        -f "$ROOT_DIR/scripts/os/openocd-starfive-jh7110-target.cfg" \
+        -c init -c 'targets jh7110.u74_hart1' -c halt -c resume -c shutdown >> "$OUTPUT" 2>&1
+    VERIFY_RC=$?
+    set -e
+    test "$VERIFY_RC" -eq 0 || {
+        echo "starfive_status=blocked"
+        echo "starfive_reason=jtag-ndmreset-did-not-recover-hart"
+        echo "jtag_software_reset_method=debug-module-ndmreset-unverified"
+        echo "jtag_flash_writes=0"
+        echo "openocd_log=$OUTPUT"
+        exit 2
+    }
+    RESET_METHOD=debug-module-ndmreset
+fi
 echo "jtag_sbi_reset_status=issued"
 echo "jtag_sbi_reset_type=cold-reboot"
+echo "jtag_software_reset_method=$RESET_METHOD"
 echo "jtag_flash_writes=0"
 echo "openocd_log=$OUTPUT"

@@ -1,0 +1,191 @@
+# codex-impl: StarFive binding for the host-neutral NVMe controller driver.
+#
+# The board layer owns PCIe/BAR admission. NvmeDriver owns standard NVMe admin
+# queues, Identify, and block I/O. This first phase submits admin commands only;
+# namespace media remains untouched until exact identity authorization exists.
+
+use os.drivers.nvme.nvme_driver.{NvmeDriver}
+use os.kernel.arch.riscv64.starfive.nvme_probe.{StarFiveNvmePciIdentity, starfive_prepare_nvme_controller}
+use os.services.vfs.vfs_block_adapters.{NvmeBlockAdapter}
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.gpt_partition.{GptSinglePartitionRequest, gpt_format_plan, gpt_create_single_partition}
+use std.fs_driver.fat32_format.{Fat32FormatAuthorization, fat32_format_plan, fat32_format}
+use std.fs_driver.fat32_core.{Fat32Core}
+use std.fs_driver.types.{DirEntry}
+
+var g_starfive_nvme_device: StarFiveNvmeLiveDevice? = nil
+var g_starfive_nvme_mounted_core: Fat32Core? = nil
+
+struct StarFiveNvmeLiveDevice:
+    driver: NvmeDriver
+    domain: u32
+    bus: u8
+    device: u8
+    func: u8
+    bar0_cpu: u64
+    bar0_size: u64
+    nsid: u32
+    model: text
+    serial: text
+    firmware: text
+    lba_size: u32
+    lba_count: u64
+
+fn starfive_nvme_identify(identity: StarFiveNvmePciIdentity) -> Result<StarFiveNvmeLiveDevice, text>:
+    """Prepare PCI resources and run NVMe admin Identify without media writes."""
+    val resource_result = starfive_prepare_nvme_controller(identity)
+    if resource_result.is_err():
+        return Err(resource_result.unwrap_err())
+    val resource = resource_result.unwrap()
+    var driver = NvmeDriver.new()
+    val initialized = driver.init_baremetal(resource.bar0_cpu.to_i64(), 0i64)
+    if initialized.is_err():
+        return Err(initialized.unwrap_err())
+    if not driver.is_initialized() or driver.sector_count == 0u64 or driver.sector_size == 0u32:
+        return Err("starfive-nvme-identify-incomplete")
+    Ok(StarFiveNvmeLiveDevice(
+        driver: driver,
+        domain: identity.domain,
+        bus: identity.bus,
+        device: identity.device,
+        func: identity.func,
+        bar0_cpu: resource.bar0_cpu,
+        bar0_size: resource.bar0_size,
+        nsid: driver.identified_nsid,
+        model: driver.controller_model,
+        serial: driver.controller_serial,
+        firmware: driver.controller_firmware,
+        lba_size: driver.sector_size,
+        lba_count: driver.sector_count
+    ))
+
+fn starfive_nvme_remember(device: StarFiveNvmeLiveDevice):
+    g_starfive_nvme_device = device
+
+fn starfive_nvme_format_challenge() -> Result<text, text>:
+    if g_starfive_nvme_device == nil:
+        return Err("starfive-nvme-not-identified")
+    val device = g_starfive_nvme_device.unwrap()
+    Ok("FORMAT:" + device.serial + ":" + device.nsid.to_text() + ":" + device.lba_count.to_text())
+
+fn _starfive_nvme_adapter(device: StarFiveNvmeLiveDevice, base_lba: u64, lba_count: u64) -> Result<NvmeBlockAdapter, text>:
+    var adapter = NvmeBlockAdapter.for_identified_namespace_unchecked(
+        device.driver,
+        device.nsid,
+        1u16,
+        base_lba,
+        lba_count,
+        device.lba_size,
+        "fat32"
+    )
+    val initialized = adapter.init_bounce_buffer()
+    if initialized.is_err():
+        return Err(initialized.unwrap_err())
+    Ok(adapter)
+
+fn _starfive_bytes_equal(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn starfive_nvme_provision_fat32(challenge: text) -> Result<text, text>:
+    """Destructively create GPT/FAT32 only after exact live identity consent."""
+    val expected = starfive_nvme_format_challenge()
+    if expected.is_err() or challenge != expected.unwrap():
+        return Err("starfive-nvme-format-challenge-mismatch")
+    val device = g_starfive_nvme_device.unwrap()
+    if device.lba_size != 512u32 and device.lba_size != 4096u32:
+        return Err("starfive-nvme-format-unsupported-lba-size")
+    val namespace_adapter_result = _starfive_nvme_adapter(device, 0u64, device.lba_count)
+    if namespace_adapter_result.is_err():
+        return Err(namespace_adapter_result.unwrap_err())
+    val namespace_adapter = namespace_adapter_result.unwrap()
+    val namespace_dev: BlockDevice = namespace_adapter
+    val gpt_plan_result = gpt_format_plan(device.lba_size, device.lba_count, 128u32)
+    if gpt_plan_result.is_err():
+        return Err(gpt_plan_result.unwrap_err())
+    val gpt_plan = gpt_plan_result.unwrap()
+    val alignment_lbas = 1048576u64 / device.lba_size.to_u64()
+    val first_lba = alignment_lbas
+    if first_lba < gpt_plan.first_usable_lba or first_lba >= gpt_plan.last_usable_lba:
+        return Err("starfive-nvme-partition-geometry-invalid")
+    val partition_request = GptSinglePartitionRequest(
+        first_lba: first_lba,
+        last_lba: gpt_plan.last_usable_lba,
+        type_guid_lo: 0x4433b9e5ebd0a0a2u64,
+        type_guid_hi: 0xc79926b7b668c087u64,
+        unique_guid_lo: 0x53494d504c454f53u64,
+        unique_guid_hi: device.lba_count ^ device.nsid.to_u64(),
+        disk_guid_lo: 0x4a48373131304e56u64,
+        disk_guid_hi: device.lba_count ^ 0x5354415246495645u64
+    )
+    val created = gpt_create_single_partition(namespace_dev, gpt_plan, partition_request)
+    if created.is_err():
+        return Err(created.unwrap_err())
+    val partition = created.unwrap()
+    val partition_count = partition.last_lba - partition.first_lba + 1u64
+    val partition_adapter_result = _starfive_nvme_adapter(device, partition.first_lba, partition_count)
+    if partition_adapter_result.is_err():
+        return Err(partition_adapter_result.unwrap_err())
+    val partition_adapter = partition_adapter_result.unwrap()
+    val partition_dev: BlockDevice = partition_adapter
+    val fat_plan_result = fat32_format_plan(device.lba_size, partition_count, 1u32)
+    if fat_plan_result.is_err():
+        return Err(fat_plan_result.unwrap_err())
+    val authority = Fat32FormatAuthorization(
+        approved: true,
+        identity_hash: device.serial + ":" + device.nsid.to_text() + ":" + device.lba_count.to_text(),
+        challenge: challenge
+    )
+    val formatted = fat32_format(partition_dev, fat_plan_result.unwrap(), authority, device.nsid ^ device.lba_count.to_u32(), "SIMPLEOS")
+    if formatted.is_err():
+        return Err(formatted.unwrap_err())
+
+    var writer = Fat32Core.new(partition_adapter)
+    val mounted = writer.mount()
+    if mounted.is_err():
+        return Err("starfive-nvme-mount-after-format:" + mounted.unwrap_err())
+    val proof: [u8] = [115u8, 105u8, 109u8, 112u8, 108u8, 101u8, 111u8, 115u8, 45u8, 110u8, 118u8, 109u8, 101u8]
+    val handle_result = writer.create_file("/proof.txt")
+    if handle_result.is_err():
+        return Err("starfive-nvme-proof-create:" + handle_result.unwrap_err())
+    val handle = handle_result.unwrap()
+    val wrote = writer.write(handle, proof, proof.len())
+    if wrote.is_err() or wrote.unwrap() != proof.len():
+        return Err("starfive-nvme-proof-write")
+    val closed = writer.close(handle)
+    if closed.is_err():
+        return Err("starfive-nvme-proof-close:" + closed.unwrap_err())
+    val unmounted = writer.unmount()
+    if unmounted.is_err():
+        return Err("starfive-nvme-proof-unmount:" + unmounted.unwrap_err())
+
+    val remount_adapter_result = _starfive_nvme_adapter(device, partition.first_lba, partition_count)
+    if remount_adapter_result.is_err():
+        return Err(remount_adapter_result.unwrap_err())
+    var reader = Fat32Core.new(remount_adapter_result.unwrap())
+    val remounted = reader.mount()
+    if remounted.is_err():
+        return Err("starfive-nvme-proof-remount:" + remounted.unwrap_err())
+    val read_handle_result = reader.open("/proof.txt")
+    if read_handle_result.is_err():
+        return Err("starfive-nvme-proof-open:" + read_handle_result.unwrap_err())
+    var readback: [u8] = [0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+    val read_result = reader.read(read_handle_result.unwrap(), readback, readback.len())
+    if read_result.is_err() or read_result.unwrap() != proof.len() or not _starfive_bytes_equal(readback, proof):
+        return Err("starfive-nvme-proof-readback-mismatch")
+    g_starfive_nvme_mounted_core = reader
+    Ok("partition=1 filesystem=fat32 label=SIMPLEOS mount=/nvme write=/nvme/proof.txt durable_remount=1")
+
+fn starfive_nvme_readdir(path: text) -> Result<[DirEntry], text>:
+    if g_starfive_nvme_mounted_core == nil:
+        return Err("starfive-nvme-not-mounted")
+    var core = g_starfive_nvme_mounted_core.unwrap()
+    core.readdir(path)
+
+export StarFiveNvmeLiveDevice, starfive_nvme_identify, starfive_nvme_remember, starfive_nvme_format_challenge, starfive_nvme_provision_fat32, starfive_nvme_readdir

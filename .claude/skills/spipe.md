@@ -2473,6 +2473,20 @@ the UART reset-burst transcript. An immutable packaged-root
 manifest remains real VFS evidence when CLI `ls` calls public `readdir`; never
 hardcode the listing in the shell command handler.
 
+For the StarFive JH7110/Tigard lane, if SBI injection cannot run because the
+U74 hart is unexaminable, the only software fallback is a bounded Debug Module
+`ndmreset` pulse with `dmactive` retained. Verify it in a new OpenOCD session by
+halting and resuming the exact hart and by observing fresh firmware UART
+markers. If either proof is absent, emit BLOCKED and require physical
+reset/power-cycle; do not loop reset attempts.
+
+VisionFive 2 NVMe acceptance requires read-only PCI plus controller/namespace
+identity before a distinct identity-bound provisioning action. Keep JH7110
+PCIe1 setup outside common PCI/NVMe. Carry non-coherent DMA allocation handles:
+synchronize SQ/data before doorbells and CQ/Identify/read buffers before CPU
+parsing. Format only a bounded GPT partition, issue durable NVMe Flush, then
+prove unmount/remount readback and command-correlated public-VFS `ls /nvme`.
+
 Running spec lanes beside an active bootstrap (2026-08-17): pin the runner to
 an immutable lineage-named snapshot under `build/phase_snapshots/`
 (`phase1_<t1>_phase2_<t2>/simple`; see its README), never `bin/simple` or an

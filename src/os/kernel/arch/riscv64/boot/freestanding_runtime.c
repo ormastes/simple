@@ -669,6 +669,25 @@ spl_i64 rt_array_len(spl_i64 array_value) {
     return array ? (spl_i64)array->len : -1;
 }
 
+/* Preserve Simple array value semantics in the freestanding runtime. MIR
+ * emits this helper for mutable copies used by the shared filesystem core. */
+spl_i64 rt_array_copy(spl_i64 array_value) {
+    RtArray *source = rt_as_array(array_value);
+    if (!source) {
+        return array_value;
+    }
+    spl_i64 result = rt_array_new((spl_i64)source->len);
+    RtArray *destination = rt_as_array(result);
+    if (!destination) {
+        return rt_nil();
+    }
+    for (spl_u64 i = 0; i < source->len; i = i + 1) {
+        destination->data[i] = source->data[i];
+    }
+    destination->len = source->len;
+    return result;
+}
+
 spl_i64 rt_array_get(spl_i64 collection, spl_i64 index_value) {
     RtArray *array = rt_as_array(collection);
     spl_i64 index = rt_index_arg(index_value);

@@ -11,6 +11,8 @@
 
 use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_write64}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
+extern fn rt_dma_sync_for_device(handle: i64, dir_raw: i32)
+extern fn rt_dma_sync_for_cpu(handle: i64, dir_raw: i32)
 
 # ============================================================================
 # NVMe Queue Pair
@@ -34,6 +36,8 @@ struct NvmeQueuePair:
     sq_doorbell: u64    # Virtual address of SQ tail doorbell register
     cq_doorbell: u64    # Virtual address of CQ head doorbell register
     next_cmd_id: u16    # Next command ID to assign
+    sq_dma_handle: i64  # Allocator handle for non-coherent cache maintenance
+    cq_dma_handle: i64
 
 impl NvmeQueuePair:
     static fn new(qid: u16, depth: u16) -> NvmeQueuePair:
@@ -50,7 +54,9 @@ impl NvmeQueuePair:
             qid: qid,
             sq_doorbell: 0,
             cq_doorbell: 0,
-            next_cmd_id: 0
+            next_cmd_id: 0,
+            sq_dma_handle: -1,
+            cq_dma_handle: -1
         )
 
     me submit_command(opcode: u8, nsid: u32, prp1: u64, prp2: u64, cdw10: u32, cdw11: u32, cdw12: u32) -> u16:
@@ -105,6 +111,9 @@ impl NvmeQueuePair:
         mmio_write32(entry_addr + 56, 0)
         mmio_write32(entry_addr + 60, 0)
 
+        if self.sq_dma_handle >= 0:
+            rt_dma_sync_for_device(self.sq_dma_handle, 0)
+
         # Advance tail (wraps at depth)
         self.sq_tail = (self.sq_tail + 1) % self.depth
         # Ring SQ tail doorbell
@@ -127,6 +136,8 @@ impl NvmeQueuePair:
             return false
         val head_u64 = self.cq_head.to_u64()
         val entry_addr = self.cq_virt + head_u64 * 16
+        if self.cq_dma_handle >= 0:
+            rt_dma_sync_for_cpu(self.cq_dma_handle, 1)
         # DW3 of CQE: bits[31:17] = status, bit[16] = phase, bits[15:0] = command_id
         val dw3 = mmio_read32(entry_addr + 12)
         val phase_bit = (dw3 >> 16) & 1

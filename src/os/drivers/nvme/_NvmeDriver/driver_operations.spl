@@ -34,10 +34,14 @@ use os.drivers.nvme.nvme_sector_probe.{NvmeSectorProbeResult, nvme_sector_probe_
 use os.drivers.nvme.nvme_storage_model.{NvmeTransferEvidence, nvme_queue_is_system_reserved, nvme_transfer_evidence}
 use std.io.dma.{SharedDmaBuffer, dma_shared_sync_cpu_to_device, dma_shared_sync_device_to_cpu}
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
+use common.string_core.{char_from_code}
 
 extern fn syscall(id: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64
 extern fn rt_dma_alloc(size: i64, dir_raw: i32) -> i64
+extern fn rt_dma_virt_of(handle: i64) -> i64
 extern fn rt_dma_phys_of(handle: i64) -> i64
+extern fn rt_dma_sync_for_device(handle: i64, dir_raw: i32)
+extern fn rt_dma_sync_for_cpu(handle: i64, dir_raw: i32)
 
 val NVME_DRIVER_MAX_DATA_QUEUE_ID: u16 = 3
 val NVME_DRIVER_MAX_TRACKED_QUEUE_OWNERS: u64 = 8
@@ -50,6 +54,30 @@ var g_nvme_user_queue_owner_tasks: [u64; 8] = [0; 8]
 var g_nvme_user_queue_depths: [u16; 8] = [0; 8]
 var g_nvme_system_namespace_count: u64 = 0
 var g_nvme_system_queue_nsids: [u32; 8] = [0; 8]
+
+fn _nvme_identify_ascii(base: u64, offset: u64, length: u64) -> text:
+    """Read one fixed-width, space-padded ASCII field from Identify data."""
+    var first: u64 = 0u64
+    while first < length:
+        val b = mmio_read8(base + offset + first)
+        if b != 0u8 and b != 0x20u8:
+            break
+        first = first + 1u64
+    var last = length
+    while last > first:
+        val b = mmio_read8(base + offset + last - 1u64)
+        if b != 0u8 and b != 0x20u8:
+            break
+        last = last - 1u64
+    var value = ""
+    var index = first
+    while index < last:
+        val b = mmio_read8(base + offset + index)
+        if b < 0x20u8 or b > 0x7eu8:
+            return ""
+        value = value + char_from_code(b.to_i64())
+        index = index + 1u64
+    value
 # Timeout for controller ready transitions (spin iterations)
 impl NvmeDriver:
     static fn new() -> NvmeDriver:
@@ -65,6 +93,9 @@ impl NvmeDriver:
             identified_nsid: 1u32,
             identified_namespaces: [],
             controller_namespace_count: 1u32,
+            controller_serial: "",
+            controller_model: "",
+            controller_firmware: "",
             sector_count: 0,
             sector_size: 512,
             db_stride: 0,
@@ -153,7 +184,9 @@ impl NvmeDriver:
             cq_phys: admin_cq_addrs.phys,
             cq_virt: admin_cq_addrs.virt,
             bar0_virt: self.bar0_virt,
-            doorbell_stride_bytes: nvme_dstrd_to_doorbell_stride_bytes(self.db_stride)
+            doorbell_stride_bytes: nvme_dstrd_to_doorbell_stride_bytes(self.db_stride),
+            sq_dma_handle: admin_sq_addrs.handle,
+            cq_dma_handle: admin_cq_addrs.handle
         ))
         if admin_queue_result.is_err():
             return Result.Err("NVMe: invalid admin queue resources: " + admin_queue_result.unwrap_err())
@@ -162,6 +195,8 @@ impl NvmeDriver:
         # Zero out queue memory
         self.zero_memory(self.admin_queue.sq_virt, admin_sq_size)
         self.zero_memory(self.admin_queue.cq_virt, admin_cq_size)
+        rt_dma_sync_for_device(admin_sq_addrs.handle, 2)
+        rt_dma_sync_for_device(admin_cq_addrs.handle, 2)
 
         # Step 5: Write AQA (admin queue attributes)
         # Bits 0-11: ASQS (admin SQ size, 0-based), Bits 16-27: ACQS (admin CQ size, 0-based)
@@ -263,7 +298,9 @@ impl NvmeDriver:
             cq_phys: cq_dma.phys,
             cq_virt: cq_dma.virt,
             bar0_virt: self.bar0_virt,
-            doorbell_stride_bytes: nvme_dstrd_to_doorbell_stride_bytes(self.db_stride)
+            doorbell_stride_bytes: nvme_dstrd_to_doorbell_stride_bytes(self.db_stride),
+            sq_dma_handle: sq_dma.handle,
+            cq_dma_handle: cq_dma.handle
         ))
         if admin_queue_result.is_err():
             return Result.Err("[nvme] invalid admin queue resources: " + admin_queue_result.unwrap_err())
@@ -272,6 +309,8 @@ impl NvmeDriver:
         # Zero the queue memory
         self.zero_memory(self.admin_queue.sq_virt, admin_sq_size)
         self.zero_memory(self.admin_queue.cq_virt, admin_cq_size)
+        rt_dma_sync_for_device(sq_dma.handle, 2)
+        rt_dma_sync_for_device(cq_dma.handle, 2)
 
         # Configure AQA, ASQ, ACQ registers
         val aqa = (31 << 16) | 31  # 32-1 entries each
@@ -389,11 +428,17 @@ impl NvmeDriver:
 
         if not self.admin_queue.wait_completion(CMD_TIMEOUT):
             return Result.Err("NVMe: identify controller timeout")
+        rt_dma_sync_for_cpu(buf.handle, 1)
         val namespace_count = mmio_read32(buf.virt + IDENTITY_CONTROLLER_NN_OFFSET)
         if namespace_count > 0u32:
             self.controller_namespace_count = namespace_count
         else:
             self.controller_namespace_count = 1u32
+        self.controller_serial = _nvme_identify_ascii(buf.virt, IDENTITY_CONTROLLER_SN_OFFSET, IDENTITY_CONTROLLER_SN_LENGTH)
+        self.controller_model = _nvme_identify_ascii(buf.virt, IDENTITY_CONTROLLER_MN_OFFSET, IDENTITY_CONTROLLER_MN_LENGTH)
+        self.controller_firmware = _nvme_identify_ascii(buf.virt, IDENTITY_CONTROLLER_FR_OFFSET, IDENTITY_CONTROLLER_FR_LENGTH)
+        if self.controller_serial.len() == 0 or self.controller_model.len() == 0:
+            return Result.Err("NVMe: identify controller identity missing")
         Result.Ok(true)
 
     me identify_namespace() -> Result<bool, text>:
@@ -423,6 +468,7 @@ impl NvmeDriver:
 
         if not self.admin_queue.wait_completion(CMD_TIMEOUT):
             return Result.Err("NVMe: identify namespace timeout")
+        rt_dma_sync_for_cpu(buf.handle, 1)
 
         val nsze = mmio_read64(buf.virt + IDENTITY_NAMESPACE_NSZE_OFFSET)
 
@@ -478,7 +524,9 @@ impl NvmeDriver:
         val cq = cq_result.unwrap()
         self.io_queue.cq_virt = cq.virt
         self.io_queue.cq_phys = cq.phys
+        self.io_queue.cq_dma_handle = cq.handle
         self.zero_memory(cq.virt, cq_size)
+        rt_dma_sync_for_device(cq.handle, 2)
 
         self.io_queue.cq_doorbell = nvme_cq_doorbell_addr(self.bar0_virt, 1u16, nvme_dstrd_to_doorbell_stride_bytes(self.db_stride))
 
@@ -511,6 +559,7 @@ impl NvmeDriver:
         self.io_queue.sq_virt = sq.virt
         self.io_queue.sq_phys = sq.phys
         self.zero_memory(sq.virt, sq_size)
+        rt_dma_sync_for_device(sq.handle, 2)
 
         val io_queue_result = nvme_queue_pair_from_resources(NvmeQueueResources(
             qid: 1u16,
@@ -520,7 +569,9 @@ impl NvmeDriver:
             cq_phys: self.io_queue.cq_phys,
             cq_virt: self.io_queue.cq_virt,
             bar0_virt: self.bar0_virt,
-            doorbell_stride_bytes: nvme_dstrd_to_doorbell_stride_bytes(self.db_stride)
+            doorbell_stride_bytes: nvme_dstrd_to_doorbell_stride_bytes(self.db_stride),
+            sq_dma_handle: sq.handle,
+            cq_dma_handle: self.io_queue.cq_dma_handle
         ))
         if io_queue_result.is_err():
             return Result.Err("NVMe: invalid I/O queue resources: " + io_queue_result.unwrap_err())
@@ -685,6 +736,7 @@ impl NvmeDriver:
             return Result.Err("NVMe: failed to allocate data I/O CQ")
         val cq = cq_result.unwrap()
         self.zero_memory(cq.virt, cq_size)
+        rt_dma_sync_for_device(cq.handle, 2)
         val cq_cmd_result = nvme_admin_create_io_completion_queue(qid, depth, cq.phys)
         if cq_cmd_result.is_err():
             return Result.Err("NVMe: create data I/O CQ " + cq_cmd_result.unwrap_err())
@@ -702,6 +754,7 @@ impl NvmeDriver:
             return Result.Err("NVMe: failed to allocate data I/O SQ")
         val sq = sq_result.unwrap()
         self.zero_memory(sq.virt, sq_size)
+        rt_dma_sync_for_device(sq.handle, 2)
         val queue_result = nvme_queue_pair_from_resources(NvmeQueueResources(
             qid: qid,
             depth: depth,
@@ -710,7 +763,9 @@ impl NvmeDriver:
             cq_phys: cq.phys,
             cq_virt: cq.virt,
             bar0_virt: self.bar0_virt,
-            doorbell_stride_bytes: nvme_dstrd_to_doorbell_stride_bytes(self.db_stride)
+            doorbell_stride_bytes: nvme_dstrd_to_doorbell_stride_bytes(self.db_stride),
+            sq_dma_handle: sq.handle,
+            cq_dma_handle: cq.handle
         ))
         if queue_result.is_err():
             return Result.Err("NVMe: invalid data I/O queue resources: " + queue_result.unwrap_err())
@@ -1655,34 +1710,37 @@ impl NvmeDriver:
         # Kernel protocol: arg0=size, arg1=pointer to 16-byte result buffer
         # Result buffer layout: offset 0 = phys_addr, offset 8 = allocation_id.
         # The syscall return value is the CPU virtual address.
-        var result_buf = DmaAddrs(virt: 0, phys: 0)
+        var result_buf = DmaAddrs(virt: 0, phys: 0, handle: -1)
         val result_ptr = unsafe_addr_of(result_buf)
         val virt_result = syscall(SYS_ALLOC_DMA, size, result_ptr, 0, 0, 0)
         if virt_result <= 0:
             val handle = rt_dma_alloc(size.to_i64(), 2)
-            if handle <= 0:
+            if handle < 0:
                 return Result.Err("DMA allocation failed")
+            val virt_fallback = rt_dma_virt_of(handle)
             val phys_fallback = rt_dma_phys_of(handle)
-            if phys_fallback <= 0:
+            if virt_fallback <= 0 or phys_fallback <= 0:
                 return Result.Err("DMA allocation returned zero address")
-            val fallback_addrs = DmaAddrs(virt: handle.to_u64(), phys: phys_fallback.to_u64())
+            val fallback_addrs = DmaAddrs(virt: virt_fallback.to_u64(), phys: phys_fallback.to_u64(), handle: handle)
             return Result.Ok(fallback_addrs)
         val phys_addr = mmio_read64(result_ptr)
         val virt_addr = virt_result as u64
         if phys_addr == 0 or virt_addr == 0:
             val handle = rt_dma_alloc(size.to_i64(), 2)
-            if handle <= 0:
+            if handle < 0:
                 return Result.Err("DMA allocation returned zero address")
+            val virt_fallback = rt_dma_virt_of(handle)
             val phys_fallback = rt_dma_phys_of(handle)
-            if phys_fallback <= 0:
+            if virt_fallback <= 0 or phys_fallback <= 0:
                 return Result.Err("DMA allocation returned zero address")
-            return Result.Ok(DmaAddrs(virt: handle.to_u64(), phys: phys_fallback.to_u64()))
+            return Result.Ok(DmaAddrs(virt: virt_fallback.to_u64(), phys: phys_fallback.to_u64(), handle: handle))
         if size >= DMA_PAGE_SIZE:
             if (phys_addr & (DMA_PAGE_SIZE - 1)) != 0:
                 return Result.Err("DMA physical address not page-aligned")
             if (virt_addr & (DMA_PAGE_SIZE - 1)) != 0:
                 return Result.Err("DMA virtual address not page-aligned")
-        val addrs = DmaAddrs(virt: virt_addr, phys: phys_addr)
+        val allocation_id = mmio_read64(result_ptr + 8u64).to_i64()
+        val addrs = DmaAddrs(virt: virt_addr, phys: phys_addr, handle: allocation_id)
         Result.Ok(addrs)
 
     fn zero_memory(addr: u64, size: u64):
