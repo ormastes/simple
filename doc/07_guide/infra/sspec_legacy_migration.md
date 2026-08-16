@@ -231,3 +231,79 @@ already-failing baseline. The next migrator should either build the MCP
 server binary and add a real `capture_exec_detailed` call there, or widen
 the search (e.g. `test/03_system/`) to find further real candidates — the
 "five more" target could not be reached from this corpus as scoped.
+
+## Worked example 3 — print-based `fn test_*` specs (`test/01_unit/os/smux*`)
+
+A second legacy shape, distinct from the untyped-capture case above: specs
+written as `fn test_*` bodies that `print("PASS: ...")` / `print("FAIL: ...")`
+and are driven by `main()`.
+
+These are worse than untyped captures, because they are **not checks at all**:
+
+- The runner executes **zero examples**, so the fail-closed zero-examples gate
+  holds the file permanently RED — `declared>=1 executed=0 passed=0 failed=1
+  reason=zero-examples` — no matter how many `PASS` lines it prints.
+- A `FAIL` print does not fail the process. The verdict and the printed output
+  can disagree completely, and the printed side is the one humans read.
+
+### How to convert
+
+Turn each `fn test_*` body into an `it` block and each `if`-guarded print into
+an `expect(...)` oracle. Keep the module-level type definitions as they are.
+
+```simple
+# before — executes zero examples, prints a verdict nobody enforces
+fn test_pane_area():
+    val p = PaneId.create(0, 80, 24)
+    if p.area() == 1920:
+        print("PASS: test_pane_area")
+    else:
+        print("FAIL: test_pane_area")
+
+# after — one executed example with a real oracle
+describe "smux panes":
+    it "computes area as width times height":
+        val p = PaneId.create(0, 80, 24)
+        expect(p.area()).to_equal(1920)
+```
+
+Convert the whole file: a leftover `main()` that still calls the old helpers
+keeps the print-based path alive alongside the examples.
+
+### Two traps this conversion hits
+
+**Mirror trees.** `test/01_unit/**` and `test/unit/**` are duplicated. Convert
+both copies identically or `check-test-tree-divergence` turns red. Verify with
+`cmp`, not by eye.
+
+**Do not chain off a static factory.** Writing the natural compact form
+
+```simple
+expect(PaneId.create(0, 80, 24).area()).to_equal(1920)   # fails to resolve
+```
+
+currently fails with `semantic: method 'area' not found on value of type object
+in nested call context` — the receiver's declared type is erased to `object`
+inside a nested call. Bind a `val` first. This is a compiler defect, filed as
+`doc/08_tracking/bug/static_factory_method_chain_wrong_value_2026-08-16.md`,
+not a style rule; 9 of 20 examples in one file failed for this reason alone
+during the smux conversion.
+
+### Verifying the conversion is real
+
+The verdict line is the evidence, and the number that matters is `executed`:
+
+```
+SPEC FILE VERDICT: test/01_unit/os/smux_spec.spl declared>=20 executed=20 passed=20 failed=0 dropped=0
+```
+
+`executed=0` means the conversion did not take, whatever the file prints. A
+regression guard for this lane lives at
+`test/03_system/tools/smux_caret_sspec_quality_system_spec.spl`, which reads the
+committed sources and fails if a legacy construct reappears or a mirror drifts.
+
+### Remaining candidate
+
+`test/03_system/tools/smux_system_spec.spl` is still in this shape — 858 lines,
+56 `fn test_*`, zero `describe`/`it`. It was left alone rather than converted
+half-way; it is the obvious next candidate for this recipe.
