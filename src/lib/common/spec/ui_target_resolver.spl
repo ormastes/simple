@@ -1,0 +1,299 @@
+# UI target resolution against a UiInterfaceManifest + UIE diagnostics.
+#
+# Frozen contract: doc/04_architecture/ui/testing/typed_ui_interface_arch.md
+# §Identity / §Acceptance gates. Law: exactly-one-or-error, never first-match.
+#   UIE1001 unknown id (did-you-mean, edit distance <= 2, + declaration site)
+#   UIE1002 duplicate local id in one scope (both source locations)
+#   UIE1003 unsupported action for the resolved node's kind
+#   UIE1004 ambiguous short id (all qualified candidates listed, sorted)
+#
+# The manifest is parsed defensively from SDN-ish text: Agent C generates the
+# real manifest in parallel, so unknown lines are ignored and specs here ship
+# their own fixture. Node fields consumed: id (qualified), kind, actions,
+# source_file, source_line. Other manifest fields (schema_version, aliases,
+# patterns, lock data) are NOT modeled yet — resolver v1 does not use them.
+
+use std.common.spec.ui_target (UiTargetRef, UI_TARGET_SYMBOL, UI_TARGET_QUALIFIED, UI_TARGET_PATTERN, UI_TARGET_FOCUSED, UI_TARGET_RUNTIME, UI_TARGET_NAME)
+
+pub struct UiManifestNode:
+    id: text            # qualified id, e.g. "toolbar.save" or plain "save"
+    kind: text
+    actions: [text]
+    source_file: text
+    source_line: i64
+
+pub struct UiManifest:
+    app_id: text
+    nodes: [UiManifestNode]
+
+# Result of a resolve. ok=true → node_index points into manifest.nodes,
+# except runtime-deferred targets (focused / runtime / name) where
+# node_index = -1 and deferred = true. ok=false → code + message set.
+pub struct UiResolveResult:
+    ok: bool
+    deferred: bool
+    node_index: i64
+    code: text
+    message: text
+
+fn resolve_ok(index: i64) -> UiResolveResult:
+    UiResolveResult(ok: true, deferred: false, node_index: index, code: "", message: "")
+
+fn resolve_deferred() -> UiResolveResult:
+    UiResolveResult(ok: true, deferred: true, node_index: -1, code: "", message: "")
+
+fn resolve_err(code: text, message: text) -> UiResolveResult:
+    UiResolveResult(ok: false, deferred: false, node_index: -1, code: code, message: message)
+
+# --- defensive SDN-ish manifest parsing ----------------------------------
+# Accepted shape (extra/unknown lines ignored):
+#   app_id: calc
+#   nodes:
+#     - id: toolbar.save
+#       kind: button
+#       actions: click, focus
+#       source_file: src/app/office/sheets/toolbar.spl
+#       source_line: 12
+
+fn value_after(line: text, key: text) -> text:
+    val t = line.trim()
+    val k = key + ":"
+    if t.starts_with("- "):
+        val rest = t[2:t.len()].trim()
+        if rest.starts_with(k):
+            return rest[k.len():rest.len()].trim()
+        return ""
+    if t.starts_with(k):
+        return t[k.len():t.len()].trim()
+    ""
+
+fn parse_actions(raw: text) -> [text]:
+    var out: [text] = []
+    val parts = raw.split(",")
+    for p in parts:
+        val a = p.trim()
+        if a != "":
+            out.push(a)
+    out
+
+pub fn parse_ui_manifest(source: text) -> UiManifest:
+    var app_id = ""
+    var nodes: [UiManifestNode] = []
+    var cur_id = ""
+    var cur_kind = ""
+    var cur_actions: [text] = []
+    var cur_file = ""
+    var cur_line = 0
+    var has_cur = false
+    val lines = source.split("\n")
+    for line in lines:
+        val app = value_after(line, "app_id")
+        if app != "" and app_id == "":
+            app_id = app
+        val nid = value_after(line, "id")
+        if line.trim().starts_with("- id:") and nid != "":
+            if has_cur and cur_id != "":
+                nodes.push(UiManifestNode(id: cur_id, kind: cur_kind, actions: cur_actions, source_file: cur_file, source_line: cur_line))
+            cur_id = nid
+            cur_kind = ""
+            cur_actions = []
+            cur_file = ""
+            cur_line = 0
+            has_cur = true
+        elif has_cur:
+            val k = value_after(line, "kind")
+            if k != "":
+                cur_kind = k
+            val a = value_after(line, "actions")
+            if a != "":
+                cur_actions = parse_actions(a)
+            val f = value_after(line, "source_file")
+            if f != "":
+                cur_file = f
+            val ln = value_after(line, "source_line")
+            if ln != "":
+                cur_line = ln.to_int()
+    if has_cur and cur_id != "":
+        nodes.push(UiManifestNode(id: cur_id, kind: cur_kind, actions: cur_actions, source_file: cur_file, source_line: cur_line))
+    UiManifest(app_id: app_id, nodes: nodes)
+
+# --- helpers --------------------------------------------------------------
+
+fn local_id_of(qualified: text) -> text:
+    val parts = qualified.split(".")
+    if parts.len() == 0:
+        return qualified
+    parts[parts.len() - 1]
+
+fn min3(a: i64, b: i64, c: i64) -> i64:
+    var m = a
+    if b < m:
+        m = b
+    if c < m:
+        m = c
+    m
+
+# Levenshtein edit distance (small ids, plain DP over two rows).
+pub fn edit_distance(a: text, b: text) -> i64:
+    val n = a.len()
+    val m = b.len()
+    var prev: [i64] = []
+    var j = 0
+    while j <= m:
+        prev.push(j)
+        j = j + 1
+    var i = 1
+    while i <= n:
+        var cur: [i64] = []
+        cur.push(i)
+        j = 1
+        while j <= m:
+            var cost = 1
+            if a[i - 1:i] == b[j - 1:j]:
+                cost = 0
+            cur.push(min3(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost))
+            j = j + 1
+        prev = cur
+        i = i + 1
+    prev[m]
+
+fn texts_contain(items: [text], wanted: text) -> bool:
+    for item in items:
+        if item == wanted:
+            return true
+    false
+
+fn sorted_texts(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        var rebuilt: [text] = []
+        var placed = false
+        for existing in out:
+            if not placed and item < existing:
+                rebuilt.push(item)
+                placed = true
+            rebuilt.push(existing)
+        if not placed:
+            rebuilt.push(item)
+        out = rebuilt
+    out
+
+fn join_texts(items: [text], sep: text) -> text:
+    var out = ""
+    var first = true
+    for item in items:
+        if not first:
+            out = out + sep
+        out = out + item
+        first = false
+    out
+
+# Deterministic did-you-mean: all manifest ids (qualified and local) within
+# edit distance 2 of `wanted`, sorted, deduplicated.
+pub fn did_you_mean(wanted: text, manifest: UiManifest) -> [text]:
+    var hits: [text] = []
+    for node in manifest.nodes:
+        val lid = local_id_of(node.id)
+        if edit_distance(wanted, lid) <= 2:
+            if not texts_contain(hits, lid):
+                hits.push(lid)
+        elif edit_distance(wanted, node.id) <= 2:
+            if not texts_contain(hits, node.id):
+                hits.push(node.id)
+    sorted_texts(hits)
+
+# Match a pattern like "cell_{CellRef}" or "sheet.cell_{CellRef}" against a
+# qualified id. `{...}` matches one non-empty run without dots.
+fn pattern_matches(pattern: text, candidate: text) -> bool:
+    val open = pattern.index_of("{")
+    if open < 0:
+        return pattern == candidate
+    val close = pattern.index_of("}")
+    if close < open:
+        return false
+    val prefix = pattern[0:open]
+    val suffix = pattern[close + 1:pattern.len()]
+    if not candidate.starts_with(prefix):
+        return false
+    if not candidate.ends_with(suffix):
+        return false
+    val middle = candidate[prefix.len():candidate.len() - suffix.len()]
+    middle.len() > 0 and not middle.contains(".")
+
+# --- diagnostics ----------------------------------------------------------
+
+# UIE1002: duplicate qualified id in the manifest. Returns one message per
+# duplicated id, carrying BOTH source locations. Empty list = clean.
+pub fn check_duplicate_ids(manifest: UiManifest) -> [text]:
+    var out: [text] = []
+    var reported: [text] = []
+    var i = 0
+    while i < manifest.nodes.len():
+        var j = i + 1
+        while j < manifest.nodes.len():
+            val a = manifest.nodes[i]
+            val b = manifest.nodes[j]
+            if a.id == b.id and not texts_contain(reported, a.id):
+                reported.push(a.id)
+                out.push("UIE1002: duplicate local id '" + a.id + "' declared at " + a.source_file + ":" + a.source_line.to_text() + " and " + b.source_file + ":" + b.source_line.to_text())
+            j = j + 1
+        i = i + 1
+    out
+
+fn unknown_id_error(wanted: text, manifest: UiManifest) -> UiResolveResult:
+    val suggestions = did_you_mean(wanted, manifest)
+    var msg = "UIE1001: unknown ui id '" + wanted + "' in app '" + manifest.app_id + "'"
+    if suggestions.len() > 0:
+        msg = msg + "; did you mean: " + join_texts(suggestions, ", ") + "?"
+    resolve_err("UIE1001", msg)
+
+fn ambiguous_error(wanted: text, candidates: [text]) -> UiResolveResult:
+    val sorted = sorted_texts(candidates)
+    resolve_err("UIE1004", "UIE1004: ambiguous short id '" + wanted + "'; qualified candidates: " + join_texts(sorted, ", "))
+
+fn exactly_one(wanted: text, matches: [i64], manifest: UiManifest) -> UiResolveResult:
+    if matches.len() == 0:
+        return unknown_id_error(wanted, manifest)
+    if matches.len() > 1:
+        var quals: [text] = []
+        for idx in matches:
+            quals.push(manifest.nodes[idx].id)
+        return ambiguous_error(wanted, quals)
+    resolve_ok(matches[0])
+
+# --- resolution -----------------------------------------------------------
+
+# Resolve a target against the manifest. Exactly-one-or-error; runtime-only
+# targets (focused / id(expr) / accessible-name) are deferred to the driver.
+pub fn resolve(target: UiTargetRef, manifest: UiManifest) -> UiResolveResult:
+    if target.kind == UI_TARGET_FOCUSED or target.kind == UI_TARGET_RUNTIME or target.kind == UI_TARGET_NAME:
+        return resolve_deferred()
+    val dups = check_duplicate_ids(manifest)
+    if dups.len() > 0:
+        return resolve_err("UIE1002", dups[0])
+    var matches: [i64] = []
+    var i = 0
+    while i < manifest.nodes.len():
+        val node = manifest.nodes[i]
+        if target.kind == UI_TARGET_SYMBOL:
+            if local_id_of(node.id) == target.value or node.id == target.value:
+                matches.push(i)
+        elif target.kind == UI_TARGET_QUALIFIED:
+            if node.id == target.value:
+                matches.push(i)
+        elif target.kind == UI_TARGET_PATTERN:
+            if pattern_matches(target.value, node.id):
+                matches.push(i)
+        i = i + 1
+    exactly_one(target.value, matches, manifest)
+
+# Resolve, then verify the node supports `action`. UIE1003 when unsupported.
+pub fn resolve_action(target: UiTargetRef, action: text, manifest: UiManifest) -> UiResolveResult:
+    val res = resolve(target, manifest)
+    if not res.ok or res.deferred:
+        return res
+    val node = manifest.nodes[res.node_index]
+    if not texts_contain(node.actions, action):
+        val allowed = join_texts(sorted_texts(node.actions), ", ")
+        return resolve_err("UIE1003", "UIE1003: action '" + action + "' not supported by '" + node.id + "' (kind " + node.kind + "); supported: " + allowed)
+    res
