@@ -31,8 +31,10 @@ owner.
 The SOSIX filesystem refactor is centered under `src/os/sosix/core` and
 `src/os/sosix/fs`. It includes typed operations/completions, owned-copy IPC
 132/133, registered buffers, authenticated request correlation, nonblocking
-completion pumping, generation-safe service dispatch, OFD sequencing, and a
-cursor-independent FAT32 positioned backend. Legacy raw VFS buffers fail
+completion pumping, generation-safe service dispatch, OFD sequencing, and what
+the 2026-08-11 snapshot described as a cursor-independent FAT32 positioned
+backend. The 2026-08-16 correction above supersedes that last claim: no valid
+FAT32 positioned adapter exists today. Legacy raw VFS buffers fail
 closed rather than fabricating registered references.
 
 Host UI work is split by semantic ownership. GUI/web still lower through

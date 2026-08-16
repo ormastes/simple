@@ -1,0 +1,173 @@
+"""Structural parser for the closed SOSIX QEMU collector-v2 admission record.
+
+This module deliberately grants no byte trust.  The trusted importer owns file
+resolution and SHA-256 binding; callers that parse text directly receive only a
+structural result.
+"""
+
+pub val SOSIX_QEMU_V2_ROW_PASS: text = "pass"
+pub val SOSIX_QEMU_V2_ROW_FAILED: text = "failed"
+pub val SOSIX_QEMU_V2_ROW_BLOCKED: text = "blocked"
+pub val SOSIX_QEMU_V2_ROW_UNSUPPORTED: text = "unsupported"
+pub val SOSIX_QEMU_V2_MATRIX_ROW_COUNT: u32 = 24
+pub val SOSIX_QEMU_V2_ADMISSION_FIELD_COUNT: u32 = 13
+pub val SOSIX_QEMU_V2_ADMISSION_MAX_BYTES: i64 = 32768
+pub val SOSIX_QEMU_V2_ADMISSION_MAX_LINE_BYTES: i64 = 8192
+
+pub struct SosixQemuV2AdmissionReceipt:
+    manifest_version: u32
+    status: text
+    evidence_sha256: text
+    artifact_count: u32
+    source_identity: text
+    transcript_identity: text
+    program_identity: text
+    firmware_identity: text
+    firmware_mode: text
+    firmware_path: text
+    firmware_version: text
+    firmware_sha256: text
+    firmware_stage_markers: text
+
+pub struct SosixQemuV2StructuralAdmission:
+    structurally_valid: bool
+    reason: text
+    receipt: SosixQemuV2AdmissionReceipt
+
+fn _sosix_qemu_v2_blank_receipt() -> SosixQemuV2AdmissionReceipt:
+    SosixQemuV2AdmissionReceipt(
+        manifest_version: 0, status: "", evidence_sha256: "", artifact_count: 0,
+        source_identity: "", transcript_identity: "", program_identity: "",
+        firmware_identity: "", firmware_mode: "", firmware_path: "",
+        firmware_version: "", firmware_sha256: "", firmware_stage_markers: "")
+
+fn _sosix_qemu_v2_rejected(reason: text) -> SosixQemuV2StructuralAdmission:
+    SosixQemuV2StructuralAdmission(
+        structurally_valid: false, reason: reason,
+        receipt: _sosix_qemu_v2_blank_receipt())
+
+fn _sosix_qemu_v2_lower_hex(value: text, size: i64) -> bool:
+    if value.len() != size:
+        return false
+    for character in value:
+        if not ((character >= '0' and character <= '9') or
+            (character >= 'a' and character <= 'f')):
+            return false
+    true
+
+fn _sosix_qemu_v2_sha256_identity(value: text) -> bool:
+    value.starts_with("sha256:") and value.len() == 71 and
+        _sosix_qemu_v2_lower_hex(value.substring(7, value.len()), 64)
+
+fn _sosix_qemu_v2_source_identity(value: text) -> bool:
+    val parts = value.split(":")
+    if parts.len() != 5 or parts[0] != "git" or parts[2] != "tree" or parts[4] != "clean":
+        return false
+    val commit_valid = (parts[1].len() == 40 or parts[1].len() == 64) and
+        _sosix_qemu_v2_lower_hex(parts[1], parts[1].len())
+    val tree_valid = (parts[3].len() == 40 or parts[3].len() == 64) and
+        _sosix_qemu_v2_lower_hex(parts[3], parts[3].len())
+    commit_valid and tree_valid
+
+fn _sosix_qemu_v2_known_status(value: text) -> bool:
+    value == SOSIX_QEMU_V2_ROW_PASS or value == SOSIX_QEMU_V2_ROW_FAILED or
+        value == SOSIX_QEMU_V2_ROW_BLOCKED or value == SOSIX_QEMU_V2_ROW_UNSUPPORTED
+
+fn _sosix_qemu_v2_canonical_artifact_count(value: text) -> bool:
+    value == "1" or value == "2" or value == "3" or value == "4" or
+        value == "5" or value == "6" or value == "7" or value == "8" or
+        value == "9" or value == "10" or value == "11" or value == "12" or
+        value == "13"
+
+fn _sosix_qemu_v2_expected_admission_key(index: i64) -> text:
+    if index == 0: return "manifest_version"
+    if index == 1: return "status"
+    if index == 2: return "evidence_sha256"
+    if index == 3: return "artifact_count"
+    if index == 4: return "source_identity"
+    if index == 5: return "transcript_identity"
+    if index == 6: return "program_identity"
+    if index == 7: return "firmware_identity"
+    if index == 8: return "firmware_mode"
+    if index == 9: return "firmware_path"
+    if index == 10: return "firmware_version"
+    if index == 11: return "firmware_sha256"
+    if index == 12: return "firmware_stage_markers"
+    ""
+
+fn _sosix_qemu_v2_external_firmware_valid(receipt: SosixQemuV2AdmissionReceipt) -> bool:
+    val mode_valid = receipt.firmware_mode == "uefi-pflash" or
+        receipt.firmware_mode == "opensbi-bios" or receipt.firmware_mode == "board-rom"
+    if not mode_valid or not receipt.firmware_identity.starts_with("firmware:") or
+        receipt.firmware_identity == "firmware:none":
+        return false
+    val absolute_path = receipt.firmware_path.starts_with("/") or
+        (receipt.firmware_path.len() > 3 and receipt.firmware_path.substring(1, 3) == ":\\") or
+        (receipt.firmware_path.len() > 3 and receipt.firmware_path.substring(1, 3) == ":/")
+    if not absolute_path or not receipt.firmware_version.starts_with("version:") or
+        not _sosix_qemu_v2_sha256_identity(receipt.firmware_sha256):
+        return false
+    if receipt.firmware_mode == "uefi-pflash":
+        return receipt.firmware_stage_markers == "firmware-entry>firmware-handoff>guest-entry" or
+            receipt.firmware_stage_markers == "BdsDxe: starting Boot>[grub-uefi] multiboot loading>guest-entry"
+    if receipt.firmware_mode == "opensbi-bios":
+        return receipt.firmware_stage_markers == "opensbi-entry>opensbi-handoff>guest-entry"
+    receipt.firmware_stage_markers == "rom-entry>rom-handoff>guest-entry"
+
+fn _sosix_qemu_v2_receipt_valid(receipt: SosixQemuV2AdmissionReceipt) -> bool:
+    if receipt.manifest_version != 2 or not _sosix_qemu_v2_known_status(receipt.status):
+        return false
+    if not _sosix_qemu_v2_lower_hex(receipt.evidence_sha256, 64) or
+        not _sosix_qemu_v2_source_identity(receipt.source_identity):
+        return false
+    if receipt.transcript_identity.len() == 0 or receipt.program_identity.len() == 0 or
+        receipt.firmware_identity.len() == 0 or receipt.firmware_mode.len() == 0 or
+        receipt.firmware_path.len() == 0 or receipt.firmware_version.len() == 0 or
+        receipt.firmware_sha256.len() == 0 or receipt.firmware_stage_markers.len() == 0:
+        return false
+    if receipt.status != SOSIX_QEMU_V2_ROW_PASS:
+        return true
+    if not _sosix_qemu_v2_sha256_identity(receipt.transcript_identity) or
+        not _sosix_qemu_v2_sha256_identity(receipt.program_identity):
+        return false
+    if receipt.firmware_mode == "direct-kernel":
+        return receipt.artifact_count == 8 and
+            receipt.firmware_identity == "firmware:none" and
+            receipt.firmware_path == "none" and receipt.firmware_version == "version:none" and
+            receipt.firmware_sha256 == "none" and receipt.firmware_stage_markers == "guest-entry"
+    (receipt.artifact_count == 9 or receipt.artifact_count == 13) and
+        _sosix_qemu_v2_external_firmware_valid(receipt)
+
+pub fn sosix_qemu_v2_structural_admission_parse(record: text) -> SosixQemuV2StructuralAdmission:
+    if record.len() == 0 or record.len() > SOSIX_QEMU_V2_ADMISSION_MAX_BYTES:
+        return _sosix_qemu_v2_rejected("admission-byte-contract")
+    val lines = record.split_lines()
+    if lines.len() != SOSIX_QEMU_V2_ADMISSION_FIELD_COUNT as i64:
+        return _sosix_qemu_v2_rejected("admission-field-count")
+    var values: [text] = []
+    var index: i64 = 0
+    while index < SOSIX_QEMU_V2_ADMISSION_FIELD_COUNT as i64:
+        val line = lines[index]
+        val key = _sosix_qemu_v2_expected_admission_key(index)
+        if line.len() == 0 or line.len() > SOSIX_QEMU_V2_ADMISSION_MAX_LINE_BYTES or
+            not line.starts_with(key + "="):
+            return _sosix_qemu_v2_rejected("admission-field-order")
+        values.push(line.substring(key.len() + 1, line.len()))
+        index = index + 1
+    if values[0] != "2" or not _sosix_qemu_v2_canonical_artifact_count(values[3]):
+        return _sosix_qemu_v2_rejected("admission-scalar-canonicality")
+    val receipt = SosixQemuV2AdmissionReceipt(
+        manifest_version: 2, status: values[1], evidence_sha256: values[2],
+        artifact_count: values[3].to_i64() as u32, source_identity: values[4],
+        transcript_identity: values[5], program_identity: values[6],
+        firmware_identity: values[7], firmware_mode: values[8], firmware_path: values[9],
+        firmware_version: values[10], firmware_sha256: values[11],
+        firmware_stage_markers: values[12])
+    if not _sosix_qemu_v2_receipt_valid(receipt):
+        return _sosix_qemu_v2_rejected("admission-field-value")
+    SosixQemuV2StructuralAdmission(
+        structurally_valid: true, reason: "collector-v2-record-structurally-valid",
+        receipt: receipt)
+
+export SosixQemuV2AdmissionReceipt, SosixQemuV2StructuralAdmission
+export sosix_qemu_v2_structural_admission_parse

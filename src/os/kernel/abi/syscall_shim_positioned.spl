@@ -1,0 +1,83 @@
+"""Live C-ABI shim for pointer-free SOSIX positioned syscalls 134/135.
+
+The x86_64 trap dispatcher calls the two exported leaves below.  This module
+retains exactly one ``SosixFsKernelPositionedStateV1`` and adopts the returned
+state after every recognized call.  Registry authentication, operation
+identity, request-token advancement, and backend transaction policy remain in
+the canonical SOSIX FS owner; the shim does not duplicate them.
+
+No production FAT32 positioned-write primitive exists yet.  The retained
+backend therefore implements the explicit unavailable contract and never
+emulates positioned I/O with seek/read/write/restore.
+"""
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.abi.syscall_shim.{g_shim_scheduler, _make_args}
+use os.sosix.fs.kernel_positioned_dispatch_v1.{
+    SosixFsKernelPositionedStateV1,
+    SosixFsKernelPositionedInstallResultV1,
+    sosix_fs_kernel_uninstalled_positioned_state_v1,
+    sosix_fs_kernel_install_positioned_owner_v1,
+    sosix_fs_kernel_dispatch_positioned_v1
+}
+use os.sosix.fs.positioned_dispatch_owner_v1.SosixFsPositionedDispatchOwnerV1
+use os.sosix.fs.positioned_syscall_v1.{
+    SOSIX_FS_PREAD_REGISTERED_V1, SOSIX_FS_PWRITE_REGISTERED_V1
+}
+use os.sosix.fs.service_vfs_backend_v1.SosixUnavailablePositionedVfsBackendV1
+
+var g_shim_positioned_state: SosixFsKernelPositionedStateV1 =
+    sosix_fs_kernel_uninstalled_positioned_state_v1()
+var g_shim_positioned_backend = SosixUnavailablePositionedVfsBackendV1()
+
+pub fn shim_positioned_reset_v1():
+    """Reset boot-owned state; called exactly once from ``shim_init``."""
+    g_shim_positioned_state = sosix_fs_kernel_uninstalled_positioned_state_v1()
+
+pub fn shim_positioned_install_owner_v1(
+    owner: SosixFsPositionedDispatchOwnerV1
+) -> SosixFsKernelPositionedInstallResultV1:
+    """Adopt an authenticated service owner without inventing backend support."""
+    val installed = sosix_fs_kernel_install_positioned_owner_v1(
+        g_shim_positioned_state, owner)
+    if installed.accepted:
+        g_shim_positioned_state = installed.state
+    installed
+
+pub fn shim_positioned_dispatch_v1(
+    args: SyscallArgs, caller_authenticated: bool, caller_process_id: u64
+) -> SyscallResult:
+    """Dispatch once and publish the canonical owner's returned state."""
+    val dispatched = sosix_fs_kernel_dispatch_positioned_v1(
+        g_shim_positioned_state, args, caller_authenticated,
+        caller_process_id, g_shim_positioned_backend)
+    val result = dispatched.result
+    g_shim_positioned_state = dispatched.state
+    result
+
+fn _shim_positioned_from_trap_v1(
+    id: u64, a0: u64, a1: u64, a2: u64,
+    a3: u64, a4: u64, a5: u64
+) -> i64:
+    val caller = g_shim_scheduler.get_current()
+    val result = shim_positioned_dispatch_v1(
+        _make_args(id, a0, a1, a2, a3, a4, a5),
+        caller.id != 0, caller.id)
+    result.value
+
+@export("C", name: "spl_handle_fs_pread_registered_v1")
+fn spl_handle_fs_pread_registered_v1(
+    a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64
+) -> i64:
+    _shim_positioned_from_trap_v1(
+        SOSIX_FS_PREAD_REGISTERED_V1, a0, a1, a2, a3, a4, a5)
+
+@export("C", name: "spl_handle_fs_pwrite_registered_v1")
+fn spl_handle_fs_pwrite_registered_v1(
+    a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64
+) -> i64:
+    _shim_positioned_from_trap_v1(
+        SOSIX_FS_PWRITE_REGISTERED_V1, a0, a1, a2, a3, a4, a5)
+
+export shim_positioned_reset_v1, shim_positioned_install_owner_v1
+export shim_positioned_dispatch_v1

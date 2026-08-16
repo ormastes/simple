@@ -1,12 +1,12 @@
 # SOSIX QEMU v2 admission record lacks manifest hash binding
 
-Status: OPEN — release-trust blocker
+Status: SOURCE FIXED / VERIFICATION OPEN — release-trust blocker
 
 ## Failure
 
-The current collector v2 matrix manifest records
+The pre-fix collector v2 matrix manifest recorded
 `admission_record_path_b64` but no `admission_record_sha256`. The adjacent
-13-field `admission.env` can therefore be addressed by the manifest without
+13-field `admission.env` could therefore be addressed by the manifest without
 the manifest byte-binding the exact record consumed by a typed importer.
 
 The preserved typed importer from commit `5958de7d4c7` cannot be reused: it
@@ -16,22 +16,34 @@ artifacts. That importer also returned from inside its manifest-line loop and
 validated only the first line. The stale files were removed rather than
 weakening release admission.
 
-## Unblock contract
+## 2026-08-16 source correction
 
-1. The collector must publish the SHA-256 of the exact `admission.env` bytes in
-   the immutable matrix manifest.
-2. A v2 typed importer must canonicalize the collector root and relative
-   admission path, require a regular non-escaping file, hash its exact bytes,
-   compare the manifest claim, then parse the same bytes.
-3. Tests must reject record mutation, path escape/symlink, missing/reordered
-   fields, malformed base64, wrong artifact count, and a valid first row
-   followed by a malformed later row.
-4. The release gate must accept only the trusted importer result; structural
-   caller-authored rows cannot cross the boundary.
+The collector now hashes the exact written `admission.env`, emits
+`admission_record_sha256`, and rechecks the record after the manifest append.
+`src/os/sosix/qemu_evidence/trusted_importer.spl` consumes the complete 24-row
+v2 wire, canonicalizes cell-relative paths and base64, binds admission and
+evidence bytes, cross-checks identities, and validates canonical PASS artifact
+sets. Its only release API accepts a collector root; the structural parser is
+not re-exported as admission.
+
+Focused specs cover admission mutation, a malformed late row, and retained
+artifact mutation. They have not executed because no provenance-admitted
+Stage-4 CLI is available. The current filesystem API also cannot hold an
+fd-pinned snapshot across read/hash checks, so a hostile concurrent filesystem
+can still race replacement between checks; the importer performs pre/post
+regular-file/path/hash validation but does not claim to eliminate that TOCTOU.
+
+## Remaining unblock contract
+
+1. Run both v2 focused specs once on a source-matched admitted Stage-4 CLI.
+2. Add behavioral path-escape/symlink sabotage coverage.
+3. Introduce fd-pinned regular-file read/hash primitives, then use them for the
+   manifest, admission, evidence, and retained artifact snapshots.
+4. Keep the release gate restricted to the trusted collector-root importer.
 
 ## Exact resume
 
-Update `scripts/check/collect-sosix-qemu-evidence.shs` and the v2 typed
-`src/os/sosix/qemu_evidence/` model together, run their focused sabotage tests
-once on a provenance-admitted Stage-4 CLI, then rerun the collector self-test.
-Do not use Stage 3 or the Rust seed.
+With a provenance-admitted Stage-4 CLI, run
+`test/01_unit/os/sosix/qemu_v2_admission_contract_spec.spl` and
+`test/01_unit/os/sosix/qemu_v2_trusted_importer_spec.spl` once each. Do not use
+Stage 3 or the Rust seed.

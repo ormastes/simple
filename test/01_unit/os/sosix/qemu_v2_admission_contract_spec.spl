@@ -1,0 +1,53 @@
+# @cover src/os/sosix/qemu_evidence/matrix_contract.spl 90%
+use std.spec
+use os.sosix.qemu_evidence.matrix_contract.{sosix_qemu_v2_structural_admission_parse}
+
+fn _v2_admission_record() -> text:
+    "manifest_version=2\n" +
+    "status=pass\n" +
+    "evidence_sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n" +
+    "artifact_count=8\n" +
+    "source_identity=git:0123456789abcdef0123456789abcdef01234567:tree:89abcdef0123456789abcdef0123456789abcdef:clean\n" +
+    "transcript_identity=sha256:1111111111111111111111111111111111111111111111111111111111111111\n" +
+    "program_identity=sha256:2222222222222222222222222222222222222222222222222222222222222222\n" +
+    "firmware_identity=firmware:none\n" +
+    "firmware_mode=direct-kernel\n" +
+    "firmware_path=none\n" +
+    "firmware_version=version:none\n" +
+    "firmware_sha256=none\n" +
+    "firmware_stage_markers=guest-entry\n"
+
+describe "SOSIX QEMU v2 structural admission contract":
+    it "accepts the closed direct-kernel eight-artifact record without granting trust":
+        val parsed = sosix_qemu_v2_structural_admission_parse(_v2_admission_record())
+        expect(parsed.structurally_valid).to_be(true)
+        expect(parsed.receipt.artifact_count).to_equal(8)
+        expect(parsed.reason).to_equal("collector-v2-record-structurally-valid")
+
+    it "rejects missing, reordered, duplicated, and unknown record fields":
+        val record = _v2_admission_record()
+        expect(sosix_qemu_v2_structural_admission_parse(
+            record.replace("firmware_path=none\n", "")).structurally_valid).to_be(false)
+        expect(sosix_qemu_v2_structural_admission_parse(
+            record.replace("status=pass\nevidence_sha256=", "evidence_sha256=") +
+            "status=pass\n").structurally_valid).to_be(false)
+        expect(sosix_qemu_v2_structural_admission_parse(
+            record + "status=pass\n").structurally_valid).to_be(false)
+        expect(sosix_qemu_v2_structural_admission_parse(
+            record + "verified=true\n").structurally_valid).to_be(false)
+
+    it "rejects noncanonical counts and false direct-kernel firmware claims":
+        val record = _v2_admission_record()
+        expect(sosix_qemu_v2_structural_admission_parse(
+            record.replace("artifact_count=8", "artifact_count=08")).structurally_valid).to_be(false)
+        expect(sosix_qemu_v2_structural_admission_parse(
+            record.replace("artifact_count=8", "artifact_count=9")).structurally_valid).to_be(false)
+        expect(sosix_qemu_v2_structural_admission_parse(
+            record.replace("firmware_sha256=none", "firmware_sha256=sha256:" + "a" * 64)).structurally_valid).to_be(false)
+
+    it "rejects dirty source identity and malformed hash fields":
+        val record = _v2_admission_record()
+        expect(sosix_qemu_v2_structural_admission_parse(
+            record.replace(":clean", ":dirty")).structurally_valid).to_be(false)
+        expect(sosix_qemu_v2_structural_admission_parse(
+            record.replace("evidence_sha256=0123", "evidence_sha256=ABCD")).structurally_valid).to_be(false)

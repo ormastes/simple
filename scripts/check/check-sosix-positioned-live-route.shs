@@ -1,0 +1,107 @@
+#!/bin/sh
+# Fail-closed admission for the live x86_64 SOSIX positioned-syscall route.
+#
+# Source admission proves only that syscall IDs 134/135 reach the canonical
+# value-threaded owner through the production C-ABI trap seam and that the
+# retained backend is explicitly unavailable.  Linked admission additionally
+# proves those exact C-ABI shims are strong symbols in a nonzero-entry x86_64
+# kernel ELF.  Neither mode claims an installed service owner, a true backend,
+# successful I/O, or runtime/QEMU evidence.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+mode=${1:---source}
+
+fail() { printf '%s\n' "sosix-positioned-live-route: $*" >&2; exit 1; }
+require() { grep -Fq "$1" "$2" || fail "missing '$1' in $2"; }
+
+contract=$root/src/os/sosix/fs/positioned_syscall_v1.spl
+owner=$root/src/os/sosix/fs/kernel_positioned_dispatch_v1.spl
+backend=$root/src/os/sosix/fs/service_vfs_backend_v1.spl
+shim=$root/src/os/kernel/abi/syscall_shim_positioned.spl
+shim_root=$root/src/os/kernel/abi/syscall_shim.spl
+trap=$root/examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c
+kernel_default=$root/build/os/simpleos_x86_64_fs_exec.elf
+
+require_global_text_symbol() {
+    symbol=$1
+    artifact=$2
+    nm -g "$artifact" 2>/dev/null |
+        awk -v expected="$symbol" '$2 ~ /^[Tt]$/ && $3 == expected { found = 1 } END { exit found ? 0 : 1 }' ||
+        fail "linked kernel lacks strong text symbol: $symbol"
+}
+
+source_admit() {
+    require 'SOSIX_FS_PREAD_REGISTERED_V1: u64 = 134' "$contract"
+    require 'SOSIX_FS_PWRITE_REGISTERED_V1: u64 = 135' "$contract"
+    require 'sosix_fs_kernel_dispatch_positioned_v1' "$owner"
+    require 'sosix_fs_kernel_uninstalled_positioned_state_v1' "$owner"
+    require 'class SosixUnavailablePositionedVfsBackendV1' "$backend"
+    require 'fn positioned_io_available() -> bool: false' "$backend"
+    require 'sosix_fs_kernel_dispatch_positioned_v1(' "$shim"
+    require 'g_shim_positioned_state = dispatched.state' "$shim"
+    require '@export("C", name: "spl_handle_fs_pread_registered_v1")' "$shim"
+    require '@export("C", name: "spl_handle_fs_pwrite_registered_v1")' "$shim"
+    require 'use os.kernel.abi.syscall_shim_positioned' "$shim_root"
+    require 'spl_handle_fs_pread_registered_v1 as u64' "$shim_root"
+    require 'spl_handle_fs_pwrite_registered_v1 as u64' "$shim_root"
+    require 'case 134: return spl_handle_fs_pread_registered_v1' "$trap"
+    require 'case 135: return spl_handle_fs_pwrite_registered_v1' "$trap"
+    if grep -Eq 'posix_(lseek|read|write)' "$shim" "$backend"; then
+        fail 'positioned live route contains cursor-based POSIX emulation'
+    fi
+    printf '%s\n' 'PASS SOSIX positioned source route present (owner/backend runtime remains unproven)'
+}
+
+artifact_admit() {
+    artifact=${1:-$kernel_default}
+    source_admit >/dev/null
+    [ -s "$artifact" ] || fail "linked kernel missing: $artifact"
+    command -v readelf >/dev/null 2>&1 || fail 'linked admission requires readelf'
+    command -v nm >/dev/null 2>&1 || fail 'linked admission requires nm'
+    readelf -h "$artifact" 2>/dev/null | grep -Eq 'Class:[[:space:]]+ELF64' ||
+        fail 'linked kernel is not ELF64'
+    readelf -h "$artifact" 2>/dev/null | grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64' ||
+        fail 'linked kernel is not x86_64'
+    readelf -h "$artifact" 2>/dev/null |
+        awk '/Entry point address:/ { found = 1; nonzero = ($NF != "0x0") } END { exit found && nonzero ? 0 : 1 }' ||
+        fail 'linked kernel has no nonzero entry point'
+    for symbol in \
+        rt_syscall_dispatch \
+        shim_init \
+        spl_handle_fs_pread_registered_v1 \
+        spl_handle_fs_pwrite_registered_v1; do
+        require_global_text_symbol "$symbol" "$artifact"
+    done
+    printf '%s\n' "PASS SOSIX positioned linked route admitted artifact=$artifact (backend/runtime success not claimed)"
+}
+
+case "$mode" in
+    --source)
+        [ "$#" -le 1 ] || fail 'usage: --source'
+        source_admit
+        ;;
+    --admit)
+        [ "$#" -le 2 ] || fail 'usage: --admit [KERNEL_ELF]'
+        artifact_admit "${2:-$kernel_default}"
+        ;;
+    --self-test)
+        [ "$#" -eq 1 ] || fail 'usage: --self-test'
+        source_admit >/dev/null
+        fake=$(mktemp "${TMPDIR:-/tmp}/sosix-positioned-live-route.XXXXXX")
+        trap 'rm -f "$fake"' EXIT HUP INT TERM
+        printf '%s\n' 'not an ELF' >"$fake"
+        if (artifact_admit "$fake") >/dev/null 2>&1; then
+            fail 'linked admission accepted a non-ELF artifact'
+        fi
+        symbol_fixture=$(command -v sh)
+        [ -s "$symbol_fixture" ] || fail 'missing executable fixture for strong-symbol sabotage'
+        if (require_global_text_symbol '__sosix_missing_positioned_route_symbol_fixture__' "$symbol_fixture") >/dev/null 2>&1; then
+            fail 'strong-symbol admission accepted an ELF without the required symbol'
+        fi
+        printf '%s\n' 'PASS SOSIX positioned live-route self-test (source route present; non-ELF and missing-strong-symbol gates fail closed)'
+        ;;
+    *)
+        fail 'usage: check-sosix-positioned-live-route.shs [--source|--admit [KERNEL_ELF]|--self-test]'
+        ;;
+esac

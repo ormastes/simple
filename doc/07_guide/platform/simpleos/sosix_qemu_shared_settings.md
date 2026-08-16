@@ -80,6 +80,12 @@ ordered evidence. The parent-only
 `scripts/check/collect-sosix-qemu-evidence.shs` accepts exactly 24 valid row
 bundles; all unavailable rows stay visible as blocked or postponed in
 the [SOSIX QEMU evidence ledger](../../../03_plan/sys_test/sosix_qemu_matrix_evidence_status_2026-08-13.md).
+Collector v2 now writes `admission_record_sha256` beside each canonical
+cell-relative admission path. The pure-Simple trusted importer consumes the
+complete closed manifest and byte-binds the admission, evidence record, and
+retained artifacts; only
+`sosix_qemu_collector_root_is_release_admissible` crosses the release boundary.
+Its focused Simple sabotage specs still require an admitted Stage-4 CLI.
 The shared collector/media/runtime source repairs are implemented and covered
 by `scripts/check/check-sosix-qemu-shared-owners.shs --self-test`; their modern
 typed 24-row SSpec still requires a source-matched admitted full CLI and a
@@ -106,11 +112,14 @@ The host-independent positioned-I/O slice lives under
 `src/os/sosix/{core,fs}`. Syscall 134/135 requests cross an authenticated,
 owned-copy provider/registry boundary and its backend contract permits only
 true `read_at`/`write_at`; compatibility code must not emulate positioned I/O
-with seek/read-or-write/restore. The current FAT32 driver has no such primitive,
-and the library owner is not yet installed in the live kernel syscall path, so
-this slice is not production-connected. Its four focused specs require a
-provenance-admitted Stage-4 CLI. Exit 139 before scenario output is a
-verification blocker, not permission to use Stage 3 or the Rust seed.
+with seek/read-or-write/restore. The x86_64 trap dispatcher now reaches strong
+Simple shim leaves and adopts the returned owner state, but boot initializes an
+explicit unavailable backend and no production owner installs a replacement.
+The current FAT32 driver has no positioned primitive, so this is a live
+fail-closed route rather than successful production I/O. Run
+`scripts/check/check-sosix-positioned-live-route.shs --admit KERNEL_ELF` after
+the next admitted rebuild. Focused specs require a provenance-admitted Stage-4
+CLI; exit 139 is not permission to use Stage 3 or the Rust seed.
 
 Hosted display/input integration uses the sibling `src/os/sosix/host` seam.
 Surface state binds generation and frame sequence with bounded in-flight work;
@@ -119,9 +128,15 @@ declared adjacent pointer-motion case. Headless, SDL2, Win32, and Cocoa
 adapters are source-present and have focused specs, but source/static checks do
 not prove native fence completion or platform parity.
 
-The Windows PowerShell peer currently performs fail-closed admission and
-artifact readiness only; `-Preflight` is its honest next command. It must gain
-the same native guest-run and producer contract before `-Run` can emit a PASS.
+The Windows PowerShell peer retains fail-closed `-Preflight`. Its x86_64 `-Run`
+source path prepares nonce-isolated media, extracts and hashes the exact mounted
+ELF, invokes QEMU with bounded serial capture, validates ordered
+listing/program/exit-37/exact-reap markers, and delegates to the canonical
+producer. The other five descriptors stop explicitly because their guest
+sources do not yet echo `/SOSIXNON.TXT`; sharing the workload nonce is not an
+acceptable substitute. None of these paths has been parsed or executed on
+Windows. After the guest readers land, a native operator runs `-AllGuests -Run`
+serially and retains six bundles.
 FreeBSD first requires checksum-admitted 14.4 media. macOS TCG rows may prove
 correctness but never native timing. All non-PASS acceptance IDs remain active;
 this is an implementation handoff, not feature completion.

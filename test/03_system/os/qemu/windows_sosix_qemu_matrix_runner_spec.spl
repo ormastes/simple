@@ -1,0 +1,63 @@
+# codex-system-test
+# @req REQ-SQ-001 REQ-SQ-003 REQ-SQ-004 REQ-SQ-005 REQ-SQ-006 REQ-SQ-007 REQ-SQ-009 REQ-SQ-011 REQ-SQ-017
+"""# Native Windows SOSIX QEMU runner contract
+
+Checks that the Windows peer consumes the shared owners, isolates row media,
+executes QEMU, validates real ordered guest evidence, and delegates PASS bundle
+creation to the canonical producer. Preflight remains readiness-only.
+"""
+
+use std.spec.*
+use app.io.mod.{file_read_text}
+
+fn windows_runner_source() -> text:
+    file_read_text("scripts/check/check-sosix-qemu-matrix.ps1")
+
+describe "native Windows SOSIX QEMU runner":
+    it "keeps the six shared operator steps and one row receipt owner":
+        step("Validate shared settings")
+        step("Admit the native host row")
+        step("Prepare isolated nonce media")
+        step("Run mounted filesystem execution")
+        step("Produce the canonical row bundle")
+        step("Collect exactly 24 rows")
+        val source = windows_runner_source()
+        expect(source).to_contain("scripts/qemu/simple-qemu-settings.shs")
+        expect(source).to_contain("scripts/qemu/simple-qemu-host-admission.shs")
+        expect(source).to_contain("scripts/os/prepare_qemu_nonce_media.shs")
+        expect(source).to_contain("scripts/check/produce-sosix-qemu-native-pass-bundle.shs")
+        expect(source).to_contain("row-receipt.env")
+        expect(source).to_contain("canonical_bundle=$CanonicalBundle")
+
+    it "runs real QEMU only after admission and rejects incomplete evidence":
+        val source = windows_runner_source()
+        val admit = source.index_of("New-SosixWindowsAdmission -Row $row")
+        val invoke = source.index_of("Invoke-SosixWindowsGuestRow -Row $row")
+        val produce = source.index_of("Invoke-SosixWindowsBundleProducer -Row $row")
+        expect(admit).to_be_greater_than(0)
+        expect(invoke).to_be_greater_than(admit)
+        expect(produce).to_be_greater_than(invoke)
+        expect(source).to_contain("Start-Process -FilePath $Admission.NativeQemu")
+        expect(source).to_contain("Assert-SosixOrderedTranscript")
+        expect(source).to_contain("collector-nonce-count:$collectorCount")
+        expect(source).to_contain("missing-or-out-of-order-marker:$marker")
+        expect(source).to_contain("canonical-producer-failed:")
+        expect(source).to_contain("Write-SosixLfAsciiRecord")
+        expect(source).to_contain("shared records must use LF-only ASCII bytes")
+
+    it "covers all six guests without turning preflight into PASS":
+        val source = windows_runner_source()
+        expect(source).to_contain("Guest='x86_32'")
+        expect(source).to_contain("Guest='x86_64'")
+        expect(source).to_contain("Guest='arm32'")
+        expect(source).to_contain("Guest='arm64'")
+        expect(source).to_contain("Guest='riscv32'")
+        expect(source).to_contain("Guest='riscv64'")
+        expect(source).to_contain("collector-nonce-echo-not-implemented:$($Row.Guest)")
+        expect(source).to_contain("only the source-proven x86_64 collector nonce echo may run")
+        expect(source).to_contain("-Parallel is not implemented; process-global shell environments require serial rows")
+        expect(source).to_contain("if (-not $Run)")
+        expect(source).to_contain("-Status ready -Reason 'host-admitted-artifacts-present'")
+        expect(source).to_contain("sosix_qemu_matrix_status=ready")
+        expect(source.contains("guest-execution-not-implemented-by-windows-peer")).to_equal(false)
+        expect(source.contains("compiler_rust/target/bootstrap/simple")).to_equal(false)

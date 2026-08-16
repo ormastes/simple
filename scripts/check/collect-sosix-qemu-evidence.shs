@@ -48,7 +48,8 @@ accepted for existing UEFI/OpenSBI/board-ROM bundles but cannot use direct-kerne
 
 Output matrix.env: sosix_qemu_matrix_manifest_version=2,
 sosix_qemu_matrix_row_count=24, then indexed sosix_qemu_matrix_row_I_* fields.
-host, guest, status, evidence_sha256, and artifact_count are plain ASCII.
+host, guest, status, evidence_sha256, admission_record_sha256, and
+artifact_count are plain ASCII.
 reason, evidence_path, resume_command, owner, reviewer, source_identity,
 compiler_identity, kernel_identity, image_identity, qemu_identity, qemu_argv,
 accelerator_identity, firmware_identity, firmware_mode, firmware_path,
@@ -59,7 +60,8 @@ Each imported row also owns `admission.env`, a closed thirteen-field record of t
 collector-verified manifest version, status, evidence hash, artifact count,
 clean source identity, transcript identity, program identity, firmware identity,
 firmware mode, absolute path, version, digest, and ordered stage markers. Its relative
-path is emitted as `admission_record_path_b64`; callers do not supply admission
+path is emitted as `admission_record_path_b64`; the SHA-256 of its exact bytes
+is emitted as `admission_record_sha256`. Callers do not supply admission
 booleans.
 compiler_in_filesystem is plain true|false; compiler_version_evidence_path and
 compiler_hello_evidence_path use `_b64`. evidence_path is
@@ -221,6 +223,9 @@ while IFS= read -r env_file; do
     artifact_count=$(field artifact_count "$env_file")
     case "$artifact_count" in ''|*[!0-9]*) die "$env_file: invalid artifact_count";; esac
     [ "$artifact_count" -gt 0 ] || die "$env_file: empty artifact bundle"
+    if [ "$status" = pass ] && [ "$(field firmware_mode "$env_file")" = direct-kernel ]; then
+        [ "$artifact_count" -eq 8 ] || die "$env_file: direct-kernel PASS requires exactly 8 artifacts"
+    fi
     bundle_dir=${env_file%/*}
     if [ "$status" = pass ]; then
         sosix_qemu_validate_lineage "$env_file" "$bundle_dir" || die "$env_file: source lineage or nonce correlation rejected"
@@ -303,6 +308,7 @@ while IFS= read -r env_file; do
         echo "firmware_sha256=$(field firmware_sha256 "$env_file")"
         echo "firmware_stage_markers=$(field firmware_stage_markers "$env_file")"
     } > "$dest/admission.env"
+    admission_record_hash=$(hash_file "$dest/admission.env")
     row=$((row + 1))
     prefix=sosix_qemu_matrix_row_$row
     {
@@ -312,6 +318,7 @@ while IFS= read -r env_file; do
         echo "${prefix}_reason_b64=$(b64 "$reason")"
         echo "${prefix}_evidence_path_b64=$(b64 "rows/$host/$guest/evidence.env")"
         echo "${prefix}_admission_record_path_b64=$(b64 "rows/$host/$guest/admission.env")"
+        echo "${prefix}_admission_record_sha256=$admission_record_hash"
         echo "${prefix}_resume_command_b64=$(b64 "$resume")"
         echo "${prefix}_owner_b64=$(b64 "$owner")"
         echo "${prefix}_reviewer_b64=$(b64 "$reviewer")"
@@ -325,6 +332,8 @@ while IFS= read -r env_file; do
         echo "${prefix}_evidence_sha256=$imported_env_hash"
         echo "${prefix}_artifact_count=$artifact_count"
     } >> "$manifest"
+    [ "$(hash_file "$dest/admission.env")" = "$admission_record_hash" ] ||
+        die "$env_file: admission record changed after manifest binding"
     rm "$artifact_seen"
 done < "$list"
 
@@ -344,7 +353,7 @@ echo "sosix_qemu_matrix_nonpass_row_count=$nonpass_rows" >> "$manifest"
 mkdir -p "$output"
 bundle_id=$(hash_file "$manifest" | cut -c1-16)
 echo "sosix_qemu_matrix_bundle_id=$bundle_id" >> "$manifest"
-final=$output/matrix-v1-$bundle_id
+final=$output/matrix-v2-$bundle_id
 [ ! -e "$final" ] || die "destination already exists: $final"
 mv "$stage" "$final"
 trap 'rm -f "$list"' EXIT HUP INT TERM

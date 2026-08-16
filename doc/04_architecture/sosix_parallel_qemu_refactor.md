@@ -171,14 +171,16 @@ cross the module boundary: the only release API is
 trusted import and the exact all-24-PASS gate internally. Caller-authored rows or
 results therefore cannot be supplied to the release gate.
 
-This trusted v2 path is **not present today**. The current v2 collector publishes
-`admission_record_path_b64`, but not `admission_record_sha256`; no production v2
-trusted importer consumes and byte-binds that record. The preserved v1 importer
-is wire-incompatible with the current 13-field/eight-artifact v2 record and is
-not release evidence. Implementation and runtime provenance therefore remain
-**HOLD** until the collector hash binding, complete v2 importer, sabotage tests,
-and current self-hosted execution exist. The concrete unblock contract is
-tracked in
+This trusted v2 path is now present in source. The collector publishes
+`admission_record_sha256`, and the v2 importer consumes the closed 24-row wire,
+hashes exact admission/evidence bytes, cross-binds identities, and validates
+canonical retained artifacts before its all-PASS release predicate. The
+preserved v1 importer remains wire-incompatible and is not evidence. Runtime
+provenance remains **HOLD** until the focused sabotage specs execute on an
+admitted Stage-4 CLI. The available filesystem wrappers also cannot pin a file
+descriptor across read/hash operations, so adversarial concurrent replacement
+remains a hardening gap rather than a claimed invariant. The unblock contract
+is tracked in
 `doc/08_tracking/bug/sosix_qemu_v2_admission_record_hash_binding_2026-08-16.md`.
 
 Fixed responses, host-side `ls`, replayed nonces, stale descriptor hashes,
