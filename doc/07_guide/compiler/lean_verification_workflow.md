@@ -531,7 +531,10 @@ On a Simple-code change that touches a verified/mirrored path:
 
 `simple gen-lean generate|write|compare|verify` operate on a **fixed inventory** of `src/.../verification/regenerate/*.spl` modules — they do **not** scan arbitrary `@verify` user files and cannot emit algorithm Lean for an arbitrary `.spl` (only `gen-lean memory-safety --file <p>` consumes a user file, and only for memory-safety obligations). So for code outside that inventory — the NVMe firmware/emulator, for example — the mirror defs are **hand-transcribed** under the marked `gen lean` section, not machine-generated. `gen-lean write --force` overwrites whole files with **no** manual-edit preservation, so never hand-edit a file the regeneration tree owns; edit its source module instead.
 
-> The `bin/simple gen-lean` CLI is currently broken (the wrapper re-spawns itself and infinitely recurses; the Rust codegen is unreachable through the CLI) — see `doc/08_tracking/bug/gen_lean_cli_infinite_recursion_2026-06-30.md`. Until that is fixed, the regeneration tree is reachable only by internal callers, and the hand-transcribed in-file split above is the working path for example/firmware proofs.
+> The prior `bin/simple gen-lean` self-recursion has a source fix: the CLI now
+> dispatches a distinct worker. Canonical self-hosted runtime evidence is still
+> unavailable, so the fix is not release-admitted; see
+> `doc/08_tracking/bug/gen_lean_cli_infinite_recursion_2026-06-30.md`.
 
 ---
 

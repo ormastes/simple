@@ -8,7 +8,10 @@ use compiler.common.assurance.replay_receipt.{ReplayCheckerClassV1,
     close_independent_replay_v1}
 use compiler.common.assurance.trust_audit.{audit_lean_axiom_report}
 use compiler.tools.verify.formal_gate_collectors.{TruthfulnessProofEvidenceV1,
-    trust_audit_hash_v1, collect_verification_truthfulness_gate_v1}
+    trust_audit_hash_v1, finalize_formal_gate_collection_v2,
+    collect_verification_truthfulness_gate_v1}
+use compiler.common.assurance.formal_delivery_gates.{FormalDeliveryGateV1,
+    FormalDeliveryReceiptFileV1}
 
 fn truth_replay(artifact: text = sha256_text("artifact")) -> IndependentReplayClosureV1:
     val fresh = ReplayCheckerReceiptV1("ReplayCheckerReceipt-v1",
@@ -42,18 +45,32 @@ fn truth_item(root: text = "Proofs.safe") -> TruthfulnessProofEvidenceV1:
         sha256_text("artifact"), trust, replay)
 
 describe "FV2 verification-truthfulness gate collector":
-    it "derives a passed gate and exact materialized receipt from closed evidence":
+    it "keeps the public receipt finalizer diagnostic-only":
+        val content = "caller-owned-receipt"
+        val raw = FormalDeliveryReceiptFileV1(sha256_text(content), content)
+        val collection = finalize_formal_gate_collection_v2(
+            FormalDeliveryGateV1.VerificationTruthfulness,
+            sha256_text("semantic-evidence"), [raw])
+        expect(collection.gate_evidence.status.name()).to_equal("failed")
+        expect(collection.gate_evidence.diagnostic).to_contain(
+            "GATE-FINALIZER-AUTHORITY")
+        expect(collection.receipt_files.is_empty()).to_be(true)
+
+        val malformed = FormalDeliveryReceiptFileV1(
+            sha256_text("other-content"), content)
+        expect(finalize_formal_gate_collection_v2(
+            FormalDeliveryGateV1.VerificationTruthfulness,
+            sha256_text("semantic-evidence"), [malformed]).gate_evidence.diagnostic).to_contain(
+            "RECEIPT-FINALIZE")
+
+    it "does not promote caller-constructed closed proof evidence":
         val collection = collect_verification_truthfulness_gate_v1([
             truth_item()])
-        expect(collection.gate_evidence.status.name()).to_equal("passed")
-        expect(collection.gate_evidence.receipt_hashes.len()).to_equal(1)
-        expect(collection.receipt_files.len()).to_equal(1)
-        expect(sha256_text(collection.receipt_files[0].content)).to_equal(
-            collection.gate_evidence.receipt_hashes[0])
-        expect(collection.receipt_files[0].content).to_start_with(
-            "FormalDeliveryReceipt-v2\ngate=verification_truthfulness\n")
-        expect(collection.receipt_files[0].content).to_contain(
-            "semantic_evidence_hash=")
+        expect(collection.gate_evidence.status.name()).to_equal("failed")
+        expect(collection.gate_evidence.diagnostic).to_contain(
+            "TRUTH-EXECUTION-AUTHORITY")
+        expect(collection.gate_evidence.receipt_hashes.is_empty()).to_be(true)
+        expect(collection.receipt_files.is_empty()).to_be(true)
 
     it "rejects a transitive sorry axiom rather than publishing passing evidence":
         val root = "Proofs.unsafe"
@@ -77,7 +94,7 @@ describe "FV2 verification-truthfulness gate collector":
                 sha256_text("artifact"), trust, replay)])
         expect(collection.gate_evidence.status.name()).to_equal("failed")
         expect(collection.gate_evidence.diagnostic).to_contain("AXIOMS")
-        expect(collection.receipt_files.is_empty()).to_equal(true)
+        expect(collection.receipt_files.is_empty()).to_be(true)
 
     it "rejects weak identities replay drift and duplicate roots":
         var weak = truth_item()
@@ -113,5 +130,12 @@ describe "FV2 verification-truthfulness gate collector":
     it "rejects cache or toolchain substitution":
         var substituted = truth_item()
         substituted.cache_key.lean_version = "different-lean"
+        expect(collect_verification_truthfulness_gate_v1([
+            substituted]).gate_evidence.diagnostic).to_contain("CACHE")
+
+    it "rejects a cache key without a verified Mathlib identity":
+        var substituted = truth_item()
+        substituted.cache_key.mathlib_hash = ""
+        substituted.receipt.cache_key_hash = substituted.cache_key.hash()
         expect(collect_verification_truthfulness_gate_v1([
             substituted]).gate_evidence.diagnostic).to_contain("CACHE")
