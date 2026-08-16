@@ -43,7 +43,9 @@ Rust kernel change and no seed rebuild were needed.
   the interpreter lane, which was never affected — this spec guards formula
   parity, NOT the MIR-lane defect; it would have been green before the fix.
   The non-vacuous regression evidence is the run-lane bench checksum
-  comparison above; the root-cause fix
+  comparison above — now gated by
+  `scripts/check/check-engine2d-runlane-blend-parity.shs` (off vs auto,
+  fail-closed, verified PASS at 316643543); the root-cause fix
   (`seed_mir_any_binop_result_unboxed_2026-08-15.md`) must carry a run-lane
   probe. Note also: the C blend has vector paths only for SSE2/AVX2; NEON and
   RVV use the same scalar `engine2d_blend_pixel` loop, so "native kernels
