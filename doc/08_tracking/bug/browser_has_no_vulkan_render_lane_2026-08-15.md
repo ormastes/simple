@@ -168,3 +168,29 @@ The `simple-compiler/vulkan` blocker (`E0583: file not found for module
   a vulkan-featured seed.
 - Longer term: a real browser `vulkan` render lane routing draw IR through
   engine2d GPU primitives.
+
+## 2026-08-16 update — browser ENGINE vulkan routing verified (minimal wiring already existed)
+
+Assessment of `src/lib/gc_async_mut/gpu/browser_engine/**`: the minimal wiring
+is already present — no glue needed. `SimpleWebRenderer.create_with_backend`
+/ `simple_web_render_html_to_readback_with_engine2d_backend(html,w,h,"vulkan")`
+route through `simple_web_engine2d_resolved_backend_name` (probe-gated:
+resolves "vulkan" only when `Engine2D.probe_backend` initializes, else
+"software"), and non-CPU resolutions present through
+`present_layout_pixels_with_engine2d_readback`, returning `Engine2DReadback`
+with honest `source` provenance ("device_readback" vs "cpu_mirror").
+
+What was missing was proof. Added
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_engine_vulkan_readback_spec.spl`
+(oracle-compare vs the strict software backend, [probe-gpu] disclosure, no
+vacuous green). On this host (lavapipe + 2x RTX A6000, vulkan-featured
+self-hosted binary):
+
+```
+[probe-gpu] browser-vulkan: GPU-PROVEN — device readback served the browser frame (source=device_readback identity=... mismatches=0/512)
+2 total, 2 passed  |  engine2d_backend_matrix_spec: 16/16 (vulkan GPU-PROVEN)
+```
+
+Still open (unchanged): a fully GPU-PAINTING browser lane (draw IR executed by
+engine2d GPU primitives rather than CPU layout raster + device present) —
+that remains the large feature under "Fix direction".

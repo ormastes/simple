@@ -1,0 +1,89 @@
+# @tag: gpu, rendering, browser-engine, vulkan, render-diff
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer.spl 10%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl 5%
+
+# Browser engine -> engine2d Vulkan lane.
+#
+# Renders ONE fixture page (white body + red div) through the browser
+# engine's public facade twice — once with the strict "software" backend
+# (the oracle, owed on every host) and once requesting "vulkan" — and
+# checks provenance + pixel fidelity.
+#
+# Honesty rules (same discipline as engine2d_backend_matrix_spec.spl):
+#   - The software oracle assertions run UNCONDITIONALLY: full viewport of
+#     pixels, and the page is genuinely two-tone (some red-dominant pixels,
+#     some white).
+#   - The vulkan request is ATTEMPTED unconditionally. Resolution is
+#     probe-gated (simple_web_resolved_engine2d_backend_name): it resolves
+#     to "vulkan" only when the backend really initializes, otherwise to
+#     "software". Whichever way it resolves, one "[probe-gpu] browser-vulkan:
+#     ..." line discloses it. A resolution to any third name is a defect.
+#   - Only when the readback source is "device_readback" is the GPU branch
+#     asserted: exact per-pixel RGB equality against the software oracle
+#     (the vulkan lane presents the same layout raster and reads it back
+#     byte-exact). A cpu-sourced frame under a vulkan resolution is a
+#     provenance lie and FAILS. A software fallback asserts the honest pair
+#     (resolved=="software", source=="cpu_mirror") and proves NOTHING about
+#     the GPU — disclosed, never silently green.
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend,
+    simple_web_render_html_to_readback_with_engine2d_backend,
+    simple_web_resolved_engine2d_backend_name
+}
+
+val HTML = "<html><body><style>body { background-color: white; } div { width: 16px; height: 8px; background-color: red; }</style><div></div></body></html>"
+val W = 32
+val H = 16
+
+fn rgb_mismatches(a: [u32], b: [u32]) -> i64:
+    var mismatched: i64 = 0
+    var i: i64 = 0
+    while i < a.len().to_i64():
+        if (a[i] & 0xFFFFFFu32) != (b[i] & 0xFFFFFFu32):
+            mismatched = mismatched + 1
+        i = i + 1
+    mismatched
+
+describe "Browser engine vulkan readback":
+    it "renders the fixture two-tone through the software oracle on every host":
+        val oracle = simple_web_render_html_to_pixels_with_engine2d_backend(HTML, W, H, "software")
+        expect(oracle.len()).to_equal(W * H)
+        var red = 0
+        var white = 0
+        var i = 0
+        while i < oracle.len():
+            val p = oracle[i] & 0xFFFFFFu32
+            if p == 0xFFFFFFu32:
+                white = white + 1
+            else:
+                val r = (p >> 16u32) & 0xFFu32
+                val b = p & 0xFFu32
+                if r > 0x80u32 and b < 0x80u32:
+                    red = red + 1
+            i = i + 1
+        step("oracle frame has both red-dominant and white pixels")
+        expect(red).to_be_greater_than(0)
+        expect(white).to_be_greater_than(0)
+
+    it "serves an honest, oracle-exact frame when vulkan is requested":
+        val resolved = simple_web_resolved_engine2d_backend_name(W, H, "vulkan")
+        step("probe-gated resolution may only yield vulkan or software")
+        expect(resolved == "vulkan" or resolved == "software").to_equal(true)
+        val oracle = simple_web_render_html_to_pixels_with_engine2d_backend(HTML, W, H, "software")
+        val rb = simple_web_render_html_to_readback_with_engine2d_backend(HTML, W, H, "vulkan")
+        expect(rb.pixels.len()).to_equal(W * H)
+        if resolved == "vulkan":
+            step("vulkan resolved — provenance must be device_readback, never a cpu label")
+            expect(rb.source).to_equal("device_readback")
+            expect(rb.device_identity != 0).to_equal(true)
+            val mism = rgb_mismatches(rb.pixels, oracle)
+            print("[probe-gpu] browser-vulkan: GPU-PROVEN — device readback served the browser frame (source={rb.source} identity={rb.device_identity} mismatches={mism}/{W * H})")
+            step("device frame matches the software oracle exactly")
+            expect(mism).to_equal(0)
+        else:
+            print("[probe-gpu] browser-vulkan: GPU BRANCH SKIPPED — vulkan did not initialize on this host; software fallback exercised, this example proves NOTHING about the GPU path")
+            step("fallback is honest: software resolution serves a cpu_mirror frame")
+            expect(rb.source).to_equal("cpu_mirror")
+            expect(rgb_mismatches(rb.pixels, oracle)).to_equal(0)

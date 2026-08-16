@@ -1,7 +1,7 @@
 # Font registry Bungee digest mismatch blocks the registry-validated outline path
 
 **Date:** 2026-08-15
-**Status:** OPEN
+**Status:** RESOLVED 2026-08-16 — NOT a digest mismatch (see resolution at bottom)
 **Found while:** building the Chrome vector-font differential lane
 (`tools/vector_font_diff/`, `test/03_system/browser_engine/chrome_vector_font_differential_spec.spl`).
 
@@ -45,3 +45,35 @@ is not.
 Either re-pin the registry digests to the committed TTF bytes, or document/
 provision the expected `SIMPLE_ASSET_ROOT` selected asset so
 `load_selected_font_file` validates on a fresh checkout.
+
+## RESOLVED 2026-08-16
+
+The diagnosis above misread the registry: the `ec1a...` constant at
+`font_registry.spl:230` is `_font_candidate_metadata_sha256` — the pinned
+digest of `METADATA.pb` (which it matches exactly). The Bungee TTF pin in
+`_google_font_candidate(...)` (line 317) is `c4f5...` and matches the
+committed TTF byte-for-byte. Probing `load_selected_font_file` showed the
+digest check PASSING and the rejection coming from
+`validate_glyf_font_instance` with `reason=format`.
+
+Actual root cause (in `src/lib/common/encoding/sfnt.spl`): the val-assigned
+match-EXPRESSION `val has_fvar = match find_table(font, 'fvar'): Some(_):
+true / None: false` mis-evaluates to an error value on the seed JIT lane
+(host-probed: bool printed as `error`), making `has_fvar` truthy for a
+static font with NO fvar table, so `parse_fvar_axes().len() == 0` rejected
+every static registry font with `invalid-fvar-default`, surfaced upstream
+as `reason=format`. Same Option-marshalling defect class already documented
+for `parse_fvar_axes` (sfnt_fvar_option_match_nil_baremetal_2026-08-04).
+
+Fix: new Option-free `_sfnt_has_table()` helper; both fvar-presence sites
+(`validate_default_glyf_font`, `sfnt_manifest_default_axes_match`) now use
+it. Statement-form matches are untouched (they work).
+
+Evidence: `load_selected_font_file(bungee)` now returns
+`blob.len=118996 selected=true valid=true reason=valid` under BOTH the JIT
+and interpreter lanes; digest pins unchanged (never wrong).
+
+The underlying compiler defect (match-expression over an Option return with
+a `Some(_)` wildcard arm yielding an error value on the seed JIT lane)
+remains a real seed bug worth its own fix; this doc records the concrete
+repro shape per the no-silent-workaround rule.

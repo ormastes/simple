@@ -127,6 +127,42 @@ fn engine2d_scale_pixel_alpha(pixels: [u32], opacity_milli: i32) -> [u32]:
         i = i + 1
     out
 
+fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_height: i32,
+                                   dst_x: i32, dst_y: i32, width: i32, height: i32,
+                                   opacity_milli: i32) -> [u32]:
+    """Canonical opacity_milli readback composite, per channel:
+        a8  = opacity_milli * 255 / 1000            (floor)
+        out = (src*a8 + dst*(256 - a8)) >> 8        (truncate)
+    This single truncating >>8 contract is what the spec oracles pin
+    (half 500 -> 63, inactive 930 -> 117 for src=127 over dst=0); both the
+    exact-/255 blend and a milli /1000 floor land one HIGH at 930 (118), and
+    the SIMD span's rounding (+128) >>8 also lands one high. Replaces the
+    alpha-scale + draw_image_blend double-blend (see
+    doc/08_tracking/bug/engine2d_parent_sampling_embed_opacity_one_ulp_parity_2026-08-16.md)."""
+    val a8 = (opacity_milli * 255) / 1000
+    val inv8 = 256 - a8
+    val count = src.len()
+    var out: [u32] = [0u32; count]
+    var row = 0
+    while row < height:
+        var col = 0
+        while col < width:
+            val idx = (row * width + col).to_i64()
+            val s = src[idx]
+            val fx = dst_x + col
+            val fy = dst_y + row
+            var d = 0u32
+            if fx >= 0 and fx < fb_width and fy >= 0 and fy < fb_height:
+                d = fb[(fy * fb_width + fx).to_i64()]
+            val r = (color_r(s) * a8 + color_r(d) * inv8) >> 8
+            val g = (color_g(s) * a8 + color_g(d) * inv8) >> 8
+            val b = (color_b(s) * a8 + color_b(d) * inv8) >> 8
+            val a = (color_a(s) * a8 + color_a(d) * inv8) >> 8
+            out[idx] = rgba(r, g, b, a)
+            col = col + 1
+        row = row + 1
+    out
+
 fn engine2d_font_atlas_subrect_pixels(atlas_pixels: [u32], atlas_width: i32, atlas_height: i32,
                                       atlas_x: i32, atlas_y: i32, width: i32, height: i32,
                                       color: u32) -> [u32]:
@@ -2613,7 +2649,15 @@ class Engine2D with DrawIrRenderTarget:
                 dst_x, dst_y, width, height, readback.pixels, opacity_milli)
         var pixels = readback.pixels
         if opacity_milli < 1000:
-            pixels = engine2d_scale_pixel_alpha(pixels, opacity_milli)
+            # Milli-exact composite (floor /1000) against the current
+            # framebuffer, then an opaque draw — never the 8-bit alpha-scale
+            # + /255 double-floor, which is one ulp off the milli oracle.
+            val fb = self.read_pixels()
+            pixels = engine2d_composite_region_milli(
+                pixels, fb, self.width(), self.height(),
+                dst_x, dst_y, width, height, opacity_milli)
+            self.draw_image(dst_x, dst_y, width, height, pixels)
+            return true
         self.draw_image_blend(dst_x, dst_y, width, height, pixels)
         true
 

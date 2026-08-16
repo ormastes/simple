@@ -1,7 +1,7 @@
 # Engine2D font/backends APIs crash under the interpreter lane (5 distinct sites)
 
 **Date:** 2026-08-15
-**Status:** OPEN
+**Status:** RESOLVED (2026-08-15; re-verified on the current seed 2026-08-16)
 **Severity:** P2 — `bin/simple test` hard-defaults to the interpreter, so no
 spec can exercise these APIs until fixed; JIT (`bin/simple run` default) is
 unaffected (all sites verified working there).
@@ -56,3 +56,13 @@ Evidence: interpreter probes green for all five repros;
 `bin/simple test test/01_unit/lib/gpu/engine2d/draw_ir_adv_branch_coverage_spec.spl`
 (cuda re-enabled, full font lanes restored): `Results: 13 total, 13 passed,
 0 failed`; engine.spl decision coverage 3% -> 19%.
+
+## Re-verified 2026-08-16 (current seed, origin/main fd085136a6d)
+
+The seed's nested + augmented ClassInstance field-assignment support (landed
+2026-08-15/16) is in; re-ran
+`bin/simple test test/01_unit/lib/gpu/engine2d/draw_ir_adv_branch_coverage_spec.spl`
+(interpreter-default test lane): `Results: 13 total, 13 passed, 0 failed`.
+Bitmap/vector font offload, font_runtime_config, engine_vulkan_font_route,
+font scalar receipt, and font offload preference smoke specs also green (see
+the bungee bug doc's fix, same session).

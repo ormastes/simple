@@ -4,7 +4,39 @@
 - date: 2026-08-16
 - area: rendering / engine2d / draw-ir / glass materials
 - severity: low (single-channel ±1 rounding on inactive-window glass)
-- status: open
+- status: RESOLVED (2026-08-16)
+
+## Resolution
+
+Root cause: `draw_ir_composite_readback`'s CPU arm approximated the milli
+opacity as an 8-bit alpha scale (`engine2d_scale_pixel_alpha`) followed by a
+second full alpha blend (`draw_image_blend`), whose SIMD span uses a
+ROUNDING `(+128) >> 8`. For src=127 over dst=0 at 930 that double-blend
+lands at 118 (0x76) instead of the oracle's 117 (0x75).
+
+Canonical contract (pinned by the spec oracle pair, measured src channel is
+127, not the 126 hypothesised above — so a milli /1000 floor provably cannot
+produce 117 and was rejected after implementation and measurement):
+
+```
+a8  = opacity_milli * 255 / 1000        # floor
+out = (src*a8 + dst*(256 - a8)) >> 8    # truncate, per channel
+```
+
+This single truncating composite yields 63 at 500 and 117 at 930 for
+src=127/dst=0, and is the identity for a8=0. Implemented as
+`engine2d_composite_region_milli` in
+`src/lib/gc_async_mut/gpu/engine2d/engine.spl`; the CPU arm of
+`draw_ir_composite_readback` now reads the destination framebuffer, applies
+this composite once, and draws the result opaquely — no alpha-scale, no
+second blend. The Vulkan/Metal `*_image_blend_checked` arms are unchanged.
+
+Evidence: interpreter repro prints half=0xFF3F3FFF, inactive=0xFF7575FF,
+full=0xFF7F7FFF (exact oracle pair);
+`test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl` 69
+examples, 0 failures (was 1 failure);
+`test/01_unit/lib/gpu/engine2d/simd_kernels_config_matrix_spec.spl` all
+example groups green (18 passing examples, 0 failures).
 
 ## Symptom
 

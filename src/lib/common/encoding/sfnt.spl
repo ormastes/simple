@@ -68,6 +68,14 @@ fn find_table(font: OtFont, tag: u32) -> Option<OtTable>:
         if table.tag == tag: return Some(table)
     None
 
+# Option-free presence check. Required where the result feeds a val-assigned
+# boolean: the `val x = match find_table(...): Some(_)/None` EXPRESSION form
+# mis-evaluates on the seed JIT lane (see validate_default_glyf_font note).
+fn _sfnt_has_table(font: OtFont, tag: u32) -> bool:
+    for table in font.tables:
+        if table.tag == tag: return true
+    false
+
 class FvarAxis:
     tag: u32
     min_value: f64
@@ -171,9 +179,15 @@ fn validate_default_glyf_font(blob: [u8]) -> SfntValidation:
         match find_table(font, tag):
             Some(_): return _sfnt_unsupported("unsupported-sfnt-table")
             None: ()
-    val has_fvar = match find_table(font, 1719034226):
-        Some(_): true
-        None: false
+    # Option-free scan instead of a match-EXPRESSION over find_table: the
+    # val-assigned `match Option: Some(_)/None` expression form mis-evaluates
+    # to an error value on the seed JIT lane (host-reproduced 2026-08-16 on
+    # the static Bungee face: no fvar table present, yet the expression made
+    # has_fvar truthy and every static registry font was rejected with
+    # reason=invalid-fvar-default). Same Option-marshalling defect class as
+    # the parse_fvar_axes note above; statement-form matches remain fine.
+    # doc/08_tracking/bug/font_registry_bungee_digest_mismatch_blocks_selected_outline_path_2026-08-15.md
+    val has_fvar = _sfnt_has_table(font, 1719034226)
     if has_fvar and parse_fvar_axes(font).len() == 0:
         return _sfnt_unsupported("invalid-fvar-default")
     _sfnt_supported()
@@ -211,9 +225,8 @@ fn sfnt_manifest_default_axes_match(blob: [u8], manifest: text) -> bool:
     # match instead of `find_table(...) == None`: Option-vs-None `==` is the
     # documented unhealed marshalling sink on the freestanding native lane
     # (see validate_default_glyf_font comment above).
-    val has_fvar = match find_table(font, 1719034226):
-        Some(_): true
-        None: false
+    # _sfnt_has_table, not a match-EXPRESSION: see validate_default_glyf_font.
+    val has_fvar = _sfnt_has_table(font, 1719034226)
     if not has_fvar: return manifest == "static"
     val axes = parse_fvar_axes(font)
     val defaults = manifest.split(",")
