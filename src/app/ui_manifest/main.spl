@@ -1,0 +1,297 @@
+# UI interface manifest generator (typed UI interface, phase 2 v1).
+#
+# Usage:
+#   simple run src/app/ui_manifest/main.spl gen <app-src-dir> <app-id>
+#   simple run src/app/ui_manifest/main.spl check <app-src-dir> <app-id>
+#
+# gen:   scans <app-src-dir>/**/*.spl for builder calls with literal first-arg
+#        IDs (text-level scan keyed on descriptor fn names from
+#        config/ui_builder_descriptors.sdn) and writes the UiInterfaceManifest
+#        to config/ui-locks/<app-id>.ui.sdn.
+# check: regenerates in memory and diffs against the committed manifest.
+#        Breaking change (removed id / removed action / kind change) -> exit 1.
+#        Additions only -> exit 0 with a note.
+#
+# v1 limitations (documented, not built around):
+# - Text-level scan: only `name("literal_id"` call shapes are detected.
+#   Non-literal ids, ids built at runtime, aliased/renamed builder imports,
+#   and calls split across lines are NOT captured.
+# - No scope paths, aliases, patterns, source_hash, or surfaces yet
+#   (arch doc §Manifest); fields are added expand-only when their producer
+#   lands.
+# - Duplicate ids keep the first occurrence and print a warning (the strict
+#   UIE1002 duplicate error is Agent B/D territory).
+
+use app.io.mod (dir_walk, file_read, file_exists, file_write, dir_create_all)
+use std.cli.cli_util (get_cli_args)
+
+struct BuilderDescriptor:
+    fn_name: text
+    id_argument: i64
+    kind: text
+    actions: [text]
+
+struct UiNode:
+    id: text
+    kind: text
+    actions: [text]
+    source_file: text
+    source_line: i64
+
+# --- descriptor registry -----------------------------------------------------
+
+fn split_actions(raw: text) -> [text]:
+    var out: [text] = []
+    for part in raw.split(","):
+        val p = part.trim()
+        if p != "":
+            out.push(p)
+    out
+
+fn parse_descriptors(content: text) -> [BuilderDescriptor]:
+    """Parse config/ui_builder_descriptors.sdn (line-based, v1 schema only)."""
+    var out: [BuilderDescriptor] = []
+    var name = ""
+    var id_arg = 0
+    var kind = ""
+    var actions: [text] = []
+    var have = false
+    for line in content.split("\n"):
+        val t = line.trim()
+        if t == "" or t.starts_with("#") or t == "descriptors:":
+            continue
+        if line.starts_with("        "):
+            if t.starts_with("id_argument:"):
+                val v = t.substring(12).trim()
+                id_arg = v.to_int() ?? 0
+            elif t.starts_with("kind:"):
+                kind = t.substring(5).trim()
+            elif t.starts_with("actions:"):
+                actions = split_actions(t.substring(8))
+        elif line.starts_with("    ") and t.ends_with(":"):
+            if have and name != "":
+                out.push(BuilderDescriptor(fn_name: name, id_argument: id_arg, kind: kind, actions: actions))
+            name = t.substring(0, t.len() - 1)
+            id_arg = 0
+            kind = ""
+            actions = []
+            have = true
+    if have and name != "":
+        out.push(BuilderDescriptor(fn_name: name, id_argument: id_arg, kind: kind, actions: actions))
+    out
+
+# --- source scan -------------------------------------------------------------
+
+fn uim_ident_char(c: text) -> bool:
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".contains(c)
+
+fn scan_source(content: text, file_label: text, descriptors: [BuilderDescriptor]) -> [UiNode]:
+    """Scan one .spl source for `fn_name("literal_id"` builder calls."""
+    var out: [UiNode] = []
+    var line_num = 0
+    for line in content.split("\n"):
+        line_num = line_num + 1
+        if line.trim().starts_with("#"):
+            continue
+        for d in descriptors:
+            if d.id_argument != 0:
+                continue  # v1 supports first-arg ids only
+            val pattern = d.fn_name + "(\""
+            var rest = line
+            while true:
+                val idx = rest.index_of(pattern)
+                if idx < 0:
+                    break
+                var boundary_ok = true
+                if idx > 0:
+                    if uim_ident_char(rest.substring(idx - 1, idx)):
+                        boundary_ok = false
+                val after = rest.substring(idx + pattern.len())
+                if boundary_ok:
+                    val close = after.index_of("\"")
+                    if close > 0:
+                        val id = after.substring(0, close)
+                        # A literal followed by `+` is a runtime-built id
+                        # (e.g. button("cell_" + ref, ...)) — dynamic ids are
+                        # out of scope for the v1 scan (typed patterns come
+                        # later); skip rather than emit a bogus prefix node.
+                        val tail = after.substring(close + 1).trim()
+                        if not tail.starts_with("+"):
+                            out.push(UiNode(id: id, kind: d.kind, actions: d.actions,
+                                            source_file: file_label, source_line: line_num))
+                rest = after
+    out
+
+fn scan_dir(src_dir: text, descriptors: [BuilderDescriptor]) -> [UiNode]:
+    var nodes: [UiNode] = []
+    for f in dir_walk(src_dir):
+        if not f.ends_with(".spl") or f.ends_with("_spec.spl"):
+            continue
+        val content = file_read(f) ?? ""
+        for n in scan_source(content, f, descriptors):
+            nodes.push(n)
+    dedup_nodes(nodes)
+
+fn dedup_nodes(nodes: [UiNode]) -> [UiNode]:
+    """Keep first occurrence per id (warn on duplicates), sorted by id."""
+    var out: [UiNode] = []
+    for n in nodes:
+        var seen = false
+        for e in out:
+            if e.id == n.id:
+                seen = true
+        if seen:
+            print("warning: duplicate ui id '{n.id}' at {n.source_file}:{n.source_line} (first occurrence kept)")
+        else:
+            out.push(n)
+    sort_nodes(out)
+
+fn sort_nodes(nodes: [UiNode]) -> [UiNode]:
+    """Insertion sort by id for deterministic output."""
+    var out: [UiNode] = []
+    for n in nodes:
+        var inserted = false
+        var next: [UiNode] = []
+        for e in out:
+            if (not inserted) and n.id < e.id:
+                next.push(n)
+                inserted = true
+            next.push(e)
+        if not inserted:
+            next.push(n)
+        out = next
+    out
+
+# --- manifest emit / parse / diff ---------------------------------------------
+
+fn join_actions(actions: [text]) -> text:
+    var s = ""
+    var first = true
+    for a in actions:
+        if first:
+            s = a
+            first = false
+        else:
+            s = s + ", " + a
+    s
+
+fn render_manifest(nodes: [UiNode], app_id: text) -> text:
+    var s = "schema_version: 1\n"
+    s = s + "app_id: {app_id}\n"
+    s = s + "interface_version: 1\n"
+    s = s + "nodes:\n"
+    for n in nodes:
+        s = s + "    {n.id}:\n"
+        s = s + "        kind: {n.kind}\n"
+        s = s + "        actions: {join_actions(n.actions)}\n"
+        s = s + "        source_file: {n.source_file}\n"
+        s = s + "        source_line: {n.source_line}\n"
+    s
+
+fn parse_manifest(content: text) -> [UiNode]:
+    """Parse a committed manifest back into nodes (id/kind/actions only needed for diff)."""
+    var out: [UiNode] = []
+    var id = ""
+    var kind = ""
+    var actions: [text] = []
+    var line_no = 0
+    var have = false
+    for line in content.split("\n"):
+        val t = line.trim()
+        if line.starts_with("        "):
+            if t.starts_with("kind:"):
+                kind = t.substring(5).trim()
+            elif t.starts_with("actions:"):
+                actions = split_actions(t.substring(8))
+            elif t.starts_with("source_line:"):
+                line_no = t.substring(12).trim().to_int() ?? 0
+        elif line.starts_with("    ") and t.ends_with(":"):
+            if have and id != "":
+                out.push(UiNode(id: id, kind: kind, actions: actions, source_file: "", source_line: line_no))
+            id = t.substring(0, t.len() - 1)
+            kind = ""
+            actions = []
+            line_no = 0
+            have = true
+    if have and id != "":
+        out.push(UiNode(id: id, kind: kind, actions: actions, source_file: "", source_line: line_no))
+    out
+
+fn diff_breaking(committed: [UiNode], regenerated: [UiNode]) -> [text]:
+    """Breaking changes: removed id, kind change, removed action."""
+    var breaks: [text] = []
+    for old in committed:
+        var found = false
+        for new in regenerated:
+            if new.id == old.id:
+                found = true
+                if new.kind != old.kind:
+                    breaks.push("kind change: {old.id} {old.kind} -> {new.kind}")
+                for a in old.actions:
+                    var has = false
+                    for b in new.actions:
+                        if a == b:
+                            has = true
+                    if not has:
+                        breaks.push("removed action: {old.id}.{a}")
+        if not found:
+            breaks.push("removed id: {old.id}")
+    breaks
+
+fn diff_additions(committed: [UiNode], regenerated: [UiNode]) -> [text]:
+    var adds: [text] = []
+    for new in regenerated:
+        var found = false
+        for old in committed:
+            if old.id == new.id:
+                found = true
+        if not found:
+            adds.push("added id: {new.id}")
+    adds
+
+# --- CLI ----------------------------------------------------------------------
+
+fn manifest_path(app_id: text) -> text:
+    "config/ui-locks/{app_id}.ui.sdn"
+
+fn load_registry() -> [BuilderDescriptor]:
+    val content = file_read("config/ui_builder_descriptors.sdn") ?? ""
+    parse_descriptors(content)
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() < 3:
+        print("usage: ui_manifest gen|check <app-src-dir> <app-id>")
+        return 1
+    val cmd = args[0]
+    val src_dir = args[1]
+    val app_id = args[2]
+    val descriptors = load_registry()
+    if descriptors.len() == 0:
+        print("error: no descriptors loaded from config/ui_builder_descriptors.sdn")
+        return 1
+    val nodes = scan_dir(src_dir, descriptors)
+    val out_path = manifest_path(app_id)
+    if cmd == "gen":
+        dir_create_all("config/ui-locks")
+        file_write(out_path, render_manifest(nodes, app_id))
+        print("wrote {out_path}: {nodes.len()} nodes")
+        return 0
+    elif cmd == "check":
+        if not file_exists(out_path):
+            print("error: no committed manifest at {out_path} (run gen first)")
+            return 1
+        val committed = parse_manifest(file_read(out_path) ?? "")
+        val breaks = diff_breaking(committed, nodes)
+        val adds = diff_additions(committed, nodes)
+        for b in breaks:
+            print("BREAKING: {b}")
+        for a in adds:
+            print("note: {a}")
+        if breaks.len() > 0:
+            print("check FAILED: {breaks.len()} breaking change(s) vs {out_path}")
+            return 1
+        print("check OK: {committed.len()} committed nodes, {adds.len()} addition(s)")
+        return 0
+    print("unknown command: {cmd}")
+    1
