@@ -119,3 +119,33 @@ current handoff notes.
     `doc/01_research/app/browser/browser_sandbox_model_research_2026-08-15.md`;
     page-script node natives (`require("process")`/`os`, `process.exit/cwd`)
     are now capability-gated (default DENY in `JsRuntime.new_browser`).
+
+## Handoff Notes (2026-08-15, renderer hardening session)
+
+All lanes below verified green this session. Run pattern for specs:
+`SIMPLE_TIMEOUT_SECONDS=600 bin/simple test --no-session-daemon <spec>`; add
+`SIMPLE_COVERAGE=1` for recordable-coverage runs (quirk: coverage is only
+recorded on that flag, and the collector has known decision-skips — see bug
+records `coverage_collector_skips_pub_val_and_match_heads_2026-08-15.md` and
+`coverage_probe_plan_skips_struct_method_decisions_2026-08-15.md`).
+
+- **Chrome counterpart provider**: `src/lib/nogc_sync_mut/spec/evidence/counterpart/chrome_dom_snapshot_provider.spl`
+  — real Chrome over pure-Simple CDP at boundary `chrome.dom_snapshot@1`.
+  Spec: `test/01_unit/infra/counterpart/chrome_counterpart_compare_spec.spl`.
+  Details in the [counterpart_conformance expert](../counterpart_conformance/skill.md).
+- **Coverage closure**: ~40 `*_coverage_closure_spec.spl` files under
+  `test/01_unit/browser_engine/` drive renderer modules (layout, style,
+  paint, dom color, file renderers) to 100% recordable branch coverage.
+  Counterpart-side closure record (link, don't duplicate):
+  `doc/08_tracking/test/counterpart_branch_coverage_closure_2026-08-15.md`.
+- **Vector-font differential lane**: `tools/vector_font_diff/`
+  (`run_vector_font_diff.shs`, `chrome_vector_font_dump.js`,
+  `simple_vector_font_dump.spl`, outputs in `out/`) + system spec
+  `test/03_system/browser_engine/chrome_vector_font_differential_spec.spl`.
+  See also [vector_fonts expert](../vector_fonts/skill.md).
+- **Docker+Vulkan system lane**: `scripts/check/check-simple-web-browser-docker-vulkan.shs`
+  (lavapipe in Docker) now gated by
+  `test/03_system/browser_engine/docker_vulkan_browser_spec.spl`.
+- **Interpreter fixes landed**: ClassInstance `simple` handling and nested
+  field-index assignment — unblocked several of the coverage specs above
+  (related record: `engine2d_landing_blocked_on_classinstance_seed_infra_2026-08-15.md`).

@@ -295,4 +295,21 @@ engine call into a JIT-healthy frame (e.g. the app's `main()`) and pass the
 pixel buffer down as data. Full isolation matrix:
 `doc/08_tracking/bug/gui_window_caller_frame_silent_interp_fallback_2026-08-06.md`.
 
+## Coverage closure + hardening lanes (2026-08-15)
+
+- ~40 `*_coverage_closure_spec.spl` files under `test/01_unit/browser_engine/`
+  push layout/style/paint/dom modules to 100% recordable branch coverage.
+  Run: `SIMPLE_COVERAGE=1 SIMPLE_TIMEOUT_SECONDS=600 bin/simple test
+  --no-session-daemon <spec>` — coverage records only under that env var,
+  and "recordable" excludes known collector gaps (bugs
+  `coverage_collector_skips_pub_val_and_match_heads_2026-08-15.md`,
+  `coverage_probe_plan_skips_struct_method_decisions_2026-08-15.md`).
+- System lanes: `test/03_system/browser_engine/docker_vulkan_browser_spec.spl`
+  (gates `scripts/check/check-simple-web-browser-docker-vulkan.shs`, lavapipe
+  in Docker) and `chrome_vector_font_differential_spec.spl`
+  (tool: `tools/vector_font_diff/`).
+- Interpreter fixes that unblocked these: ClassInstance `simple` handling and
+  nested field-index assignment. Feature-side handoff:
+  [browser feature expert](../../feature_expert/browser/skill.md).
+
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`
