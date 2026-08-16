@@ -1,0 +1,325 @@
+"""
+# Procurement Vertical — purchase-to-stock over the shared enterprise store
+
+Lane `.spipe/simple_enterprise_suite` (W6-B; design §6.4). Flow:
+
+    supplier -> requisition -> approve -> purchase order -> receipt(s)
+             -> purchase invoice -> reconciliation
+
+Every write runs the frozen guarded sequence over the durable store:
+
+    session -> rbac -> domain validation -> idempotency -> effects in one UoW
+
+CRITICAL shared-stock rule: a receipt INCREASES the SAME `stock_moves`
+table the goods-sale vertical reads and reserves against (insert-only
+signed deltas, reason `po-receive`). Sale and procurement share one stock
+truth — there is no second stock table. Each receipt also posts a balanced
+journal pair (debit `inventory_asset` / credit `accounts_payable`) exactly
+the way goods_sale posts via debit/credit pairs.
+
+Storage model is insert-only + derive:
+- `proc_suppliers`: supplier master rows.
+- `proc_req_events`: requisition status derived from its event stream
+  ("" -> created -> approved).
+- `proc_po_rows`: one row per PO capturing req/supplier/sku/qty/unit cost.
+- receipts live in the SHARED `stock_moves` (order_id = po_id).
+- `proc_invoices`: purchase-invoice rows against received quantity.
+
+RFQ, quotations, and landed cost are FUTURE scope per design §6.4 and are
+deliberately not modeled here.
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_rows, store_insert_row,
+    uow_begin, uow_commit, uow_rollback
+}
+use std.nogc_sync_mut.enterprise_store.records.{
+    idempotency_seen, idempotency_result, idempotency_record,
+    outbox_append, audit_append
+}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, Money,
+    CommandEnvelope, CommandResult,
+    accepted, denied, session_valid, role_allows
+}
+
+# =============================================================================
+# Schema — receipts intentionally have NO table here: they are stock_moves.
+# =============================================================================
+
+fn proc_setup(store: EnterpriseStore) -> bool:
+    var ok = store_migrate(store, "proc_001_suppliers",
+        "CREATE TABLE IF NOT EXISTS proc_suppliers (id INTEGER PRIMARY KEY, tenant_id TEXT, supplier_id TEXT, name TEXT)")
+    ok = ok and store_migrate(store, "proc_002_req_events",
+        "CREATE TABLE IF NOT EXISTS proc_req_events (id INTEGER PRIMARY KEY, tenant_id TEXT, req_id TEXT, event TEXT, sku TEXT, qty TEXT, requester TEXT)")
+    ok = ok and store_migrate(store, "proc_003_po_rows",
+        "CREATE TABLE IF NOT EXISTS proc_po_rows (id INTEGER PRIMARY KEY, tenant_id TEXT, po_id TEXT, req_id TEXT, supplier_id TEXT, sku TEXT, qty TEXT, unit_cost_cents TEXT)")
+    ok = ok and store_migrate(store, "proc_004_invoices",
+        "CREATE TABLE IF NOT EXISTS proc_invoices (id INTEGER PRIMARY KEY, tenant_id TEXT, po_id TEXT, invoice_id TEXT, qty TEXT, amount_cents TEXT)")
+    ok
+
+# =============================================================================
+# Supplier administration (admin-guarded)
+# =============================================================================
+
+fn proc_supplier_add(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, supplier_id: text, name: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", supplier_id)
+    if not role_allows(who.role, "proc.supplier.admin"):
+        return denied("forbidden", supplier_id)
+    if supplier_id == "" or name == "":
+        return denied("invalid-record", supplier_id)
+    store_insert_row(store,
+        "INSERT INTO proc_suppliers (tenant_id, supplier_id, name) VALUES (?, ?, ?)",
+        [tenant.tenant_id, supplier_id, name])
+    audit_append(store, tenant.tenant_id, who.actor_id, "proc.supplier.add", supplier_id)
+    accepted(supplier_id)
+
+# =============================================================================
+# Derived reads (pure-Simple filtering; see store docstring)
+# =============================================================================
+
+fn proc_supplier_exists(store: EnterpriseStore, tenant_id: text, supplier_id: text) -> bool:
+    val rows = store_rows(store, "proc_suppliers", "id, tenant_id, supplier_id, name")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "supplier_id") == supplier_id:
+            return true
+    false
+
+# proc_requisition_status derives "" (unknown) -> created -> approved.
+fn proc_requisition_status(store: EnterpriseStore, tenant_id: text, req_id: text) -> text:
+    var status = ""
+    val rows = store_rows(store, "proc_req_events", "id, tenant_id, req_id, event, sku, qty, requester")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "req_id") == req_id:
+            status = sqlite_row_get(row, "event")
+    status
+
+# proc_requisition_sku_qty derives (sku, qty) from the creation event.
+fn proc_requisition_sku_qty(store: EnterpriseStore, tenant_id: text, req_id: text) -> (text, i64):
+    val rows = store_rows(store, "proc_req_events", "id, tenant_id, req_id, event, sku, qty, requester")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "req_id") == req_id:
+            if sqlite_row_get(row, "event") == "created":
+                return (sqlite_row_get(row, "sku"), int(sqlite_row_get(row, "qty")))
+    ("", 0)
+
+# proc_po_ordered returns (sku, ordered_qty, unit_cost_cents); qty -1 = unknown PO.
+fn proc_po_ordered(store: EnterpriseStore, tenant_id: text, po_id: text) -> (text, i64, i64):
+    val rows = store_rows(store, "proc_po_rows", "id, tenant_id, po_id, req_id, supplier_id, sku, qty, unit_cost_cents")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "po_id") == po_id:
+            return (sqlite_row_get(row, "sku"), int(sqlite_row_get(row, "qty")), int(sqlite_row_get(row, "unit_cost_cents")))
+    ("", -1, 0)
+
+# proc_po_received sums this PO's receipts from the SHARED stock_moves table.
+fn proc_po_received(store: EnterpriseStore, tenant_id: text, po_id: text) -> i64:
+    var total: i64 = 0
+    val rows = store_rows(store, "stock_moves", "id, tenant_id, sku, delta, reason, order_id")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "order_id") == po_id and sqlite_row_get(row, "reason") == "po-receive":
+            total = total + int(sqlite_row_get(row, "delta"))
+    total
+
+# proc_po_invoiced sums invoiced quantity against a PO.
+fn proc_po_invoiced(store: EnterpriseStore, tenant_id: text, po_id: text) -> i64:
+    var total: i64 = 0
+    val rows = store_rows(store, "proc_invoices", "id, tenant_id, po_id, invoice_id, qty, amount_cents")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "po_id") == po_id:
+            total = total + int(sqlite_row_get(row, "qty"))
+    total
+
+# proc_payable_total: absolute accounts_payable credit total for the tenant —
+# the journal oracle (every receipt credits accounts_payable by qty*unit cost).
+fn proc_payable_total(store: EnterpriseStore, tenant_id: text) -> i64:
+    var total: i64 = 0
+    val rows = store_rows(store, "journal", "id, tenant_id, order_id, account, side, amount_cents")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "account") == "accounts_payable" and sqlite_row_get(row, "side") == "credit":
+            total = total + int(sqlite_row_get(row, "amount_cents"))
+    total
+
+# proc_reconcile: open POs (received < ordered), under/fully-invoiced counts,
+# and the payable total, as a machine-readable data line.
+fn proc_reconcile(store: EnterpriseStore, tenant_id: text) -> text:
+    var open_pos: i64 = 0
+    var under_invoiced: i64 = 0
+    var fully_invoiced: i64 = 0
+    val rows = store_rows(store, "proc_po_rows", "id, tenant_id, po_id, req_id, supplier_id, sku, qty, unit_cost_cents")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        val po_id = sqlite_row_get(row, "po_id")
+        val ordered = int(sqlite_row_get(row, "qty"))
+        val received = proc_po_received(store, tenant_id, po_id)
+        val invoiced = proc_po_invoiced(store, tenant_id, po_id)
+        if received < ordered:
+            open_pos = open_pos + 1
+        if invoiced < received:
+            under_invoiced = under_invoiced + 1
+        if received > 0 and invoiced == received:
+            fully_invoiced = fully_invoiced + 1
+    "open_pos={open_pos};under_invoiced={under_invoiced};fully_invoiced={fully_invoiced};payable_cents={proc_payable_total(store, tenant_id)}"
+
+# =============================================================================
+# Guarded commands
+# =============================================================================
+
+fn post_proc_journal(store: EnterpriseStore, tenant_id: text, po_id: text, amount_cents: i64):
+    store_insert_row(store,
+        "INSERT INTO journal (tenant_id, order_id, account, side, amount_cents) VALUES (?, ?, ?, ?, ?)",
+        [tenant_id, po_id, "inventory_asset", "debit", "{amount_cents}"])
+    store_insert_row(store,
+        "INSERT INTO journal (tenant_id, order_id, account, side, amount_cents) VALUES (?, ?, ?, ?, ?)",
+        [tenant_id, po_id, "accounts_payable", "credit", "{amount_cents}"])
+
+fn proc_requisition_create(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, req_id: text, sku: text, qty: i64) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", req_id)
+    if not role_allows(who.role, "proc.requisition.create"):
+        return denied("forbidden", req_id)
+    if req_id == "" or sku == "" or qty <= 0:
+        return denied("invalid-record", req_id)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO proc_req_events (tenant_id, req_id, event, sku, qty, requester) VALUES (?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, req_id, "created", sku, "{qty}", who.actor_id])
+    outbox_append(store, tenant.tenant_id, "proc.requisition.created", req_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "proc.requisition.create", req_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, req_id)
+    uow_commit(store)
+    accepted(req_id)
+
+# proc_requisition_approve: approving a nonexistent requisition is not-found;
+# approving twice replays via the idempotency key (duplicate-key) or, with a
+# fresh key, is rejected as invalid-transition (already approved).
+fn proc_requisition_approve(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, req_id: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", req_id)
+    if not role_allows(who.role, "proc.requisition.approve"):
+        return denied("forbidden", req_id)
+    val status = proc_requisition_status(store, tenant.tenant_id, req_id)
+    if status == "":
+        return denied("not-found", req_id)
+    if status != "created":
+        return denied("invalid-transition", req_id + ":" + status)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO proc_req_events (tenant_id, req_id, event, sku, qty, requester) VALUES (?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, req_id, "approved", "", "0", who.actor_id])
+    outbox_append(store, tenant.tenant_id, "proc.requisition.approved", req_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "proc.requisition.approve", req_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, req_id)
+    uow_commit(store)
+    accepted(req_id)
+
+# proc_po_create: only an APPROVED requisition may become a purchase order;
+# the PO references a known supplier and captures the unit cost in cents.
+fn proc_po_create(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, po_id: text, req_id: text, supplier_id: text, unit_cost: Money) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", po_id)
+    if not role_allows(who.role, "proc.po.create"):
+        return denied("forbidden", po_id)
+    if po_id == "" or unit_cost.amount_cents <= 0 or unit_cost.currency == "":
+        return denied("invalid-record", po_id)
+    if not proc_supplier_exists(store, tenant.tenant_id, supplier_id):
+        return denied("not-found", supplier_id)
+    val status = proc_requisition_status(store, tenant.tenant_id, req_id)
+    if status == "":
+        return denied("not-found", req_id)
+    if status != "approved":
+        return denied("invalid-transition", req_id + ":" + status)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val req = proc_requisition_sku_qty(store, tenant.tenant_id, req_id)
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO proc_po_rows (tenant_id, po_id, req_id, supplier_id, sku, qty, unit_cost_cents) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, po_id, req_id, supplier_id, req.0, "{req.1}", "{unit_cost.amount_cents}"])
+    outbox_append(store, tenant.tenant_id, "proc.po.created", po_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "proc.po.create", po_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, po_id)
+    uow_commit(store)
+    accepted(po_id)
+
+# proc_receive: receipt against an open PO. Partial receipts are allowed;
+# qty must be <= ordered - already-received (over-receipt reuses the closed
+# `insufficient-stock` reason with an explanatory detail). The receipt
+# INCREASES the shared stock ledger (stock_moves) and posts the balanced
+# inventory_asset / accounts_payable journal pair.
+fn proc_receive(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, po_id: text, qty: i64) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", po_id)
+    if not role_allows(who.role, "proc.po.receive"):
+        return denied("forbidden", po_id)
+    if qty <= 0:
+        return denied("invalid-record", po_id)
+    val po = proc_po_ordered(store, tenant.tenant_id, po_id)
+    if po.1 < 0:
+        return denied("not-found", po_id)
+    val remaining = po.1 - proc_po_received(store, tenant.tenant_id, po_id)
+    # The rungs stay in the frozen order (session -> rbac -> validation ->
+    # idempotency), but the OVER-RECEIPT check is state-dependent: it reads
+    # `received`, which this very command already increased on its first
+    # execution. Re-evaluating it for a replay would deny a command that was
+    # accepted, so feasibility is asked only of a command not already
+    # recorded. Identity checks above (not-found) are state-independent and
+    # stay unconditional.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and qty > remaining:
+        return denied("insufficient-stock", "over-receipt:" + po_id + ":remaining={remaining}:got={qty}")
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO stock_moves (tenant_id, sku, delta, reason, order_id) VALUES (?, ?, ?, ?, ?)",
+        [tenant.tenant_id, po.0, "{qty}", "po-receive", po_id])
+    post_proc_journal(store, tenant.tenant_id, po_id, po.2 * qty)
+    outbox_append(store, tenant.tenant_id, "proc.po.received", po_id + ":{qty}")
+    audit_append(store, tenant.tenant_id, who.actor_id, "proc.po.receive", po_id + ":{qty}")
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, po_id)
+    uow_commit(store)
+    accepted(po_id)
+
+# proc_invoice_record: a purchase invoice against received quantity marks the
+# payable; invoicing more than has been received is invalid-record.
+fn proc_invoice_record(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, po_id: text, invoice_id: text, qty: i64) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", invoice_id)
+    if not role_allows(who.role, "proc.invoice.record"):
+        return denied("forbidden", invoice_id)
+    if invoice_id == "" or qty <= 0:
+        return denied("invalid-record", invoice_id)
+    val po = proc_po_ordered(store, tenant.tenant_id, po_id)
+    if po.1 < 0:
+        return denied("not-found", po_id)
+    val uninvoiced = proc_po_received(store, tenant.tenant_id, po_id) - proc_po_invoiced(store, tenant.tenant_id, po_id)
+    # Same state-dependence as proc_receive: `uninvoiced` shrinks by exactly
+    # this command's own effect, so a replay must not be re-checked against it.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and qty > uninvoiced:
+        return denied("invalid-record", "invoice-over-received:" + po_id + ":uninvoiced={uninvoiced}:got={qty}")
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO proc_invoices (tenant_id, po_id, invoice_id, qty, amount_cents) VALUES (?, ?, ?, ?, ?)",
+        [tenant.tenant_id, po_id, invoice_id, "{qty}", "{po.2 * qty}"])
+    outbox_append(store, tenant.tenant_id, "proc.invoice.recorded", invoice_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "proc.invoice.record", invoice_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, invoice_id)
+    uow_commit(store)
+    accepted(invoice_id)
+
+export proc_setup
+export proc_supplier_add
+export proc_supplier_exists, proc_requisition_status, proc_po_ordered
+export proc_po_received, proc_po_invoiced, proc_payable_total, proc_reconcile
+export proc_requisition_create, proc_requisition_approve
+export proc_po_create, proc_receive, proc_invoice_record

@@ -1,0 +1,467 @@
+# HCM Vertical — employee, contract, attendance, leave, payroll boundary
+
+> System spec for the safer-first-release HCM vertical of the Simple Enterprise Suite (design §6.5, lane W6-A): employee lifecycle with effective-dated contracts, attendance/time intervals, leave with an overlap-checked approval, and the payroll BOUNDARY export — calculation INPUT rows only, never a payroll result (no pay/tax logic exists).
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 8 | 8 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# HCM Vertical — employee, contract, attendance, leave, payroll boundary
+
+System spec for the safer-first-release HCM vertical of the Simple Enterprise Suite (design §6.5, lane W6-A): employee lifecycle with effective-dated contracts, attendance/time intervals, leave with an overlap-checked approval, and the payroll BOUNDARY export — calculation INPUT rows only, never a payroll result (no pay/tax logic exists).
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Application |
+| Status | Active |
+| Requirements | N/A |
+| Plan | doc/03_plan/agent_tasks/simple_erp.md |
+| Design | doc/01_research/app/enterprise/simple_enterprise_suite_full_design_2026-08-14.md §6.5 |
+| Research | doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md |
+| Source | `test/03_system/app/enterprise/hcm_vertical_spec.spl` |
+| Updated | 2026-08-16 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+System spec for the safer-first-release HCM vertical of the Simple
+Enterprise Suite (design §6.5, lane W6-A): employee lifecycle with
+effective-dated contracts, attendance/time intervals, leave with an
+overlap-checked approval, and the payroll BOUNDARY export — calculation
+INPUT rows only, never a payroll result (no pay/tax logic exists).
+
+Every write runs the frozen guarded sequence
+(session -> rbac -> validation -> idempotency -> effects in one UoW)
+over the durable enterprise store, identical to the goods-sale vertical.
+Time is caller-supplied: no wall-clock reads anywhere.
+
+## Denials proven here
+
+| Rung / rule | Denial reason | Scenario |
+|-------------|---------------|----------|
+| terminated employee commanded | invalid-transition | amend after terminate |
+| double clock-in / out-without-in | invalid-transition | attendance scenario |
+| overlapping approved leave | conflict | leave scenario (red-first check) |
+| replayed idempotency key | duplicate-key | replay scenario, one effect |
+
+The payroll export is checked against a hand-computed absolute oracle
+string, not values derived from the code under test.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/simple_erp.md
+**Design:** doc/01_research/app/enterprise/simple_enterprise_suite_full_design_2026-08-14.md §6.5
+**Research:** doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md
+
+Lane: .spipe/simple_enterprise_suite (v2, W6-A HCM vertical).
+
+## Scenarios
+
+### hcm vertical — employee lifecycle with effective-dated contracts
+
+#### hires, amends with preserved history, and fences a terminated employee
+
+- Hire emp-1 at 1500 cents/h, 40 h/week, effective t0
+   - Expected: h.reason equals `accepted`
+   - Expected: hcm_employee_status(store, "tenant-a", "emp-1") equals `active`
+   - Expected: hcm_contract_count(store, "tenant-a", "emp-1") equals `1`
+- Amend to 2000 cents/h effective t0+1000 — a NEW row, history grows
+   - Expected: a.reason equals `accepted`
+   - Expected: hcm_contract_count(store, "tenant-a", "emp-1") equals `2`
+- Latest-effective-at(now) wins: old wage before, new wage after
+   - Expected: hcm_wage_at(store, "tenant-a", "emp-1", t0() + 500) equals `1500`
+   - Expected: hcm_wage_at(store, "tenant-a", "emp-1", t0() + 1500) equals `2000`
+- Terminate end-dates the employee; a further amend is invalid-transition
+   - Expected: hcm_terminate(store, s, t, hr, envelope("lc-t1", "hcm.terminate"), "emp-1", t0() + 2000).reason equals `accepted`
+   - Expected: hcm_employee_status(store, "tenant-a", "emp-1") equals `terminated`
+   - Expected: a2.reason equals `invalid-transition`
+- History stays readable after termination; audit chain recomputes
+   - Expected: hcm_contract_count(store, "tenant-a", "emp-1") equals `2`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val store = fresh_store("lifecycle")
+val t = tenant_a()
+val hr = hr_a()
+val s = session_for(hr, t)
+step("Hire emp-1 at 1500 cents/h, 40 h/week, effective t0")
+val h = hcm_hire(store, s, t, hr, envelope("lc-h1", "hcm.hire"), "emp-1", "Ada", t0(), 1500, 40)
+expect(h.reason).to_equal("accepted")
+expect(hcm_employee_status(store, "tenant-a", "emp-1")).to_equal("active")
+expect(hcm_contract_count(store, "tenant-a", "emp-1")).to_equal(1)
+
+step("Amend to 2000 cents/h effective t0+1000 — a NEW row, history grows")
+val a = hcm_contract_amend(store, s, t, hr, envelope("lc-a1", "hcm.contract.amend"), "emp-1", t0() + 1000, 2000, 40)
+expect(a.reason).to_equal("accepted")
+expect(hcm_contract_count(store, "tenant-a", "emp-1")).to_equal(2)
+
+step("Latest-effective-at(now) wins: old wage before, new wage after")
+expect(hcm_wage_at(store, "tenant-a", "emp-1", t0() + 500)).to_equal(1500)
+expect(hcm_wage_at(store, "tenant-a", "emp-1", t0() + 1500)).to_equal(2000)
+
+step("Terminate end-dates the employee; a further amend is invalid-transition")
+expect(hcm_terminate(store, s, t, hr, envelope("lc-t1", "hcm.terminate"), "emp-1", t0() + 2000).reason).to_equal("accepted")
+expect(hcm_employee_status(store, "tenant-a", "emp-1")).to_equal("terminated")
+val a2 = hcm_contract_amend(store, s, t, hr, envelope("lc-a2", "hcm.contract.amend"), "emp-1", t0() + 3000, 2500, 40)
+expect(a2.ok).to_be(false)
+expect(a2.reason).to_equal("invalid-transition")
+
+step("History stays readable after termination; audit chain recomputes")
+expect(hcm_contract_count(store, "tenant-a", "emp-1")).to_equal(2)
+expect(audit_verify_chain(store, "tenant-a")).to_be(true)
+store_close(store)
+```
+
+</details>
+
+#### denies rbac and session violations at the outer rungs
+
+- A viewer role cannot hire (forbidden)
+   - Expected: hcm_hire(store, vs, t, viewer, envelope("g-h1", "hcm.hire"), "emp-x", "X", t0(), 1500, 40).reason equals `forbidden`
+- An inactive session is rejected before rbac
+   - Expected: hcm_hire(store, dead, t, hr, envelope("g-h2", "hcm.hire"), "emp-x", "X", t0(), 1500, 40).reason equals `invalid-session`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val store = fresh_store("guards")
+val t = tenant_a()
+val viewer = viewer_a()
+val vs = session_for(viewer, t)
+step("A viewer role cannot hire (forbidden)")
+expect(hcm_hire(store, vs, t, viewer, envelope("g-h1", "hcm.hire"), "emp-x", "X", t0(), 1500, 40).reason).to_equal("forbidden")
+step("An inactive session is rejected before rbac")
+val hr = hr_a()
+val dead = SessionContext(token: "tok-hr-1", actor_id: "hr-1", tenant_id: "tenant-a", active: false)
+expect(hcm_hire(store, dead, t, hr, envelope("g-h2", "hcm.hire"), "emp-x", "X", t0(), 1500, 40).reason).to_equal("invalid-session")
+store_close(store)
+```
+
+</details>
+
+### hcm vertical — attendance intervals with caller-supplied time
+
+#### closes intervals, computes worked seconds, and denies bad transitions
+
+- Clock in at t0+100; a second clock-in is invalid-transition
+   - Expected: hcm_clock_in(store, s, t, hr, envelope("at-i1", "hcm.clock.in"), "emp-1", t0() + 100).reason equals `accepted`
+   - Expected: dbl.reason equals `invalid-transition`
+- Clock out at t0+3700 closes a 3600s interval
+   - Expected: hcm_clock_out(store, s, t, hr, envelope("at-o1", "hcm.clock.out"), "emp-1", t0() + 3700).reason equals `accepted`
+   - Expected: hcm_time_entries(store, "tenant-a", "emp-1") equals `1`
+   - Expected: hcm_worked_seconds(store, "tenant-a", "emp-1", t0(), t0() + 10000) equals `3600`
+- Clock out with no open interval is invalid-transition
+   - Expected: orphan.reason equals `invalid-transition`
+- A second interval clips to the query window
+   - Expected: hcm_time_entries(store, "tenant-a", "emp-1") equals `2`
+   - Expected: hcm_worked_seconds(store, "tenant-a", "emp-1", t0() + 5500, t0() + 10000) equals `500`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val store = fresh_store("attendance")
+val t = tenant_a()
+val hr = hr_a()
+val s = session_for(hr, t)
+hcm_hire(store, s, t, hr, envelope("at-h1", "hcm.hire"), "emp-1", "Ada", t0(), 1500, 40)
+
+step("Clock in at t0+100; a second clock-in is invalid-transition")
+expect(hcm_clock_in(store, s, t, hr, envelope("at-i1", "hcm.clock.in"), "emp-1", t0() + 100).reason).to_equal("accepted")
+val dbl = hcm_clock_in(store, s, t, hr, envelope("at-i2", "hcm.clock.in"), "emp-1", t0() + 150)
+expect(dbl.ok).to_be(false)
+expect(dbl.reason).to_equal("invalid-transition")
+
+step("Clock out at t0+3700 closes a 3600s interval")
+expect(hcm_clock_out(store, s, t, hr, envelope("at-o1", "hcm.clock.out"), "emp-1", t0() + 3700).reason).to_equal("accepted")
+expect(hcm_time_entries(store, "tenant-a", "emp-1")).to_equal(1)
+expect(hcm_worked_seconds(store, "tenant-a", "emp-1", t0(), t0() + 10000)).to_equal(3600)
+
+step("Clock out with no open interval is invalid-transition")
+val orphan = hcm_clock_out(store, s, t, hr, envelope("at-o2", "hcm.clock.out"), "emp-1", t0() + 4000)
+expect(orphan.ok).to_be(false)
+expect(orphan.reason).to_equal("invalid-transition")
+
+step("A second interval clips to the query window")
+hcm_clock_in(store, s, t, hr, envelope("at-i3", "hcm.clock.in"), "emp-1", t0() + 5000)
+hcm_clock_out(store, s, t, hr, envelope("at-o3", "hcm.clock.out"), "emp-1", t0() + 6000)
+expect(hcm_time_entries(store, "tenant-a", "emp-1")).to_equal(2)
+expect(hcm_worked_seconds(store, "tenant-a", "emp-1", t0() + 5500, t0() + 10000)).to_equal(500)
+store_close(store)
+```
+
+</details>
+
+### hcm vertical — leave approval with overlap conflict
+
+#### approves a leave, then denies an overlapping approval as conflict
+
+- Request and approve a 2-day leave [t0, t0+172800)
+   - Expected: hcm_leave_request(store, s, t, hr, envelope("lv-r1", "hcm.leave.request"), "lv-1", "emp-1", t0(), t0() + 172800, "vacation").reason equals `accepted`
+   - Expected: hcm_leave_decide(store, sa, t, admin, envelope("lv-d1", "hcm.leave.decide"), "lv-1", true).reason equals `accepted`
+   - Expected: hcm_leave_status(store, "tenant-a", "lv-1") equals `approved`
+- Approving an overlapping request is denied conflict (red-first check)
+   - Expected: hcm_leave_request(store, s, t, hr, envelope("lv-r2", "hcm.leave.request"), "lv-2", "emp-1", t0() + 86400, t0() + 259200, "vacation").reason equals `accepted`
+   - Expected: d.reason equals `accepted`
+   - Expected: hcm_leave_status(store, "tenant-a", "lv-2") equals `denied`
+   - Expected: hcm_leave_request(store, s, t, hr, envelope("lv-r3", "hcm.leave.request"), "lv-3", "emp-1", t0() + 86400, t0() + 259200, "vacation").reason equals `accepted`
+   - Expected: c.reason equals `conflict`
+- An adjacent (non-overlapping) leave approves fine
+   - Expected: hcm_leave_request(store, s, t, hr, envelope("lv-r4", "hcm.leave.request"), "lv-4", "emp-1", t0() + 172800, t0() + 259200, "vacation").reason equals `accepted`
+   - Expected: hcm_leave_decide(store, sa, t, admin, envelope("lv-d4", "hcm.leave.decide"), "lv-4", true).reason equals `accepted`
+- Balance is a data read: 3 approved days in the window
+   - Expected: hcm_leave_balance(store, "tenant-a", "emp-1", t0(), t0() + 259200) equals `3`
+- A viewer cannot decide (forbidden)
+   - Expected: hcm_leave_decide(store, vs, t, viewer, envelope("lv-d5", "hcm.leave.decide"), "lv-2", true).reason equals `forbidden`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val store = fresh_store("leave")
+val t = tenant_a()
+val hr = hr_a()
+val s = session_for(hr, t)
+val admin = admin_a()
+val sa = session_for(admin, t)
+hcm_hire(store, s, t, hr, envelope("lv-h1", "hcm.hire"), "emp-1", "Ada", t0(), 1500, 40)
+
+step("Request and approve a 2-day leave [t0, t0+172800)")
+expect(hcm_leave_request(store, s, t, hr, envelope("lv-r1", "hcm.leave.request"), "lv-1", "emp-1", t0(), t0() + 172800, "vacation").reason).to_equal("accepted")
+expect(hcm_leave_decide(store, sa, t, admin, envelope("lv-d1", "hcm.leave.decide"), "lv-1", true).reason).to_equal("accepted")
+expect(hcm_leave_status(store, "tenant-a", "lv-1")).to_equal("approved")
+
+step("Approving an overlapping request is denied conflict (red-first check)")
+expect(hcm_leave_request(store, s, t, hr, envelope("lv-r2", "hcm.leave.request"), "lv-2", "emp-1", t0() + 86400, t0() + 259200, "vacation").reason).to_equal("accepted")
+val d = hcm_leave_decide(store, sa, t, admin, envelope("lv-d2", "hcm.leave.decide"), "lv-2", false)
+expect(d.reason).to_equal("accepted")
+expect(hcm_leave_status(store, "tenant-a", "lv-2")).to_equal("denied")
+expect(hcm_leave_request(store, s, t, hr, envelope("lv-r3", "hcm.leave.request"), "lv-3", "emp-1", t0() + 86400, t0() + 259200, "vacation").reason).to_equal("accepted")
+val c = hcm_leave_decide(store, sa, t, admin, envelope("lv-d3", "hcm.leave.decide"), "lv-3", true)
+expect(c.ok).to_be(false)
+expect(c.reason).to_equal("conflict")
+
+step("An adjacent (non-overlapping) leave approves fine")
+expect(hcm_leave_request(store, s, t, hr, envelope("lv-r4", "hcm.leave.request"), "lv-4", "emp-1", t0() + 172800, t0() + 259200, "vacation").reason).to_equal("accepted")
+expect(hcm_leave_decide(store, sa, t, admin, envelope("lv-d4", "hcm.leave.decide"), "lv-4", true).reason).to_equal("accepted")
+
+step("Balance is a data read: 3 approved days in the window")
+expect(hcm_leave_balance(store, "tenant-a", "emp-1", t0(), t0() + 259200)).to_equal(3)
+
+step("A viewer cannot decide (forbidden)")
+val viewer = viewer_a()
+val vs = session_for(viewer, t)
+expect(hcm_leave_decide(store, vs, t, viewer, envelope("lv-d5", "hcm.leave.decide"), "lv-2", true).reason).to_equal("forbidden")
+store_close(store)
+```
+
+</details>
+
+### hcm vertical — payroll boundary export
+
+#### matches a hand-computed oracle exactly — input rows, not a payroll result
+
+- Two employees: emp-1 amended mid-period, emp-2 flat wage
+- emp-1 works 3600s in period + 1000s straddling the period end
+- emp-2 works 7200s and takes 1 approved day of leave
+- Export [t0, t0+604800) equals the hand-computed oracle
+   - Expected: hcm_payroll_export(store, "tenant-a", t0(), t0() + 604800) equals `oracle`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 32 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val store = fresh_store("payroll")
+val t = tenant_a()
+val hr = hr_a()
+val s = session_for(hr, t)
+val admin = admin_a()
+val sa = session_for(admin, t)
+step("Two employees: emp-1 amended mid-period, emp-2 flat wage")
+hcm_hire(store, s, t, hr, envelope("pr-h1", "hcm.hire"), "emp-1", "Ada", t0(), 1500, 40)
+hcm_contract_amend(store, s, t, hr, envelope("pr-a1", "hcm.contract.amend"), "emp-1", t0() + 1000, 2000, 40)
+hcm_hire(store, s, t, hr, envelope("pr-h2", "hcm.hire"), "emp-2", "Bob", t0(), 1200, 20)
+
+step("emp-1 works 3600s in period + 1000s straddling the period end")
+hcm_clock_in(store, s, t, hr, envelope("pr-i1", "hcm.clock.in"), "emp-1", t0() + 100)
+hcm_clock_out(store, s, t, hr, envelope("pr-o1", "hcm.clock.out"), "emp-1", t0() + 3700)
+hcm_clock_in(store, s, t, hr, envelope("pr-i2", "hcm.clock.in"), "emp-1", t0() + 604000)
+hcm_clock_out(store, s, t, hr, envelope("pr-o2", "hcm.clock.out"), "emp-1", t0() + 605600)
+
+step("emp-2 works 7200s and takes 1 approved day of leave")
+hcm_clock_in(store, s, t, hr, envelope("pr-i3", "hcm.clock.in"), "emp-2", t0() + 200)
+hcm_clock_out(store, s, t, hr, envelope("pr-o3", "hcm.clock.out"), "emp-2", t0() + 7400)
+hcm_leave_request(store, s, t, hr, envelope("pr-r1", "hcm.leave.request"), "lv-1", "emp-2", t0() + 100000, t0() + 186400, "sick")
+hcm_leave_decide(store, sa, t, admin, envelope("pr-d1", "hcm.leave.decide"), "lv-1", true)
+
+step("Export [t0, t0+604800) equals the hand-computed oracle")
+# Oracle, computed by hand and stated as absolute values:
+# emp-1: wage at period end = 2000 (amended row effective t0+1000);
+#        worked = 3600 (full first interval) + 800 (second interval
+#        clipped: t0+604000 .. t0+604800) = 4400; leave days = 0.
+# emp-2: wage 1200; worked 7200; leave = 86400s in window = 1 day.
+val oracle = "emp-1|2000|4400|0\nemp-2|1200|7200|1"
+expect(hcm_payroll_export(store, "tenant-a", t0(), t0() + 604800)).to_equal(oracle)
+store_close(store)
+```
+
+</details>
+
+### hcm vertical — idempotency, tenant isolation, restart survival
+
+#### replays a command with duplicate-key and exactly one effect
+
+- Replaying the amend key returns duplicate-key, history unchanged
+   - Expected: hcm_contract_amend(store, s, t, hr, envelope("rp-a1", "hcm.contract.amend"), "emp-1", t0() + 1000, 2000, 40).reason equals `accepted`
+   - Expected: r.reason equals `duplicate-key`
+   - Expected: hcm_contract_count(store, "tenant-a", "emp-1") equals `2`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val store = fresh_store("replay")
+val t = tenant_a()
+val hr = hr_a()
+val s = session_for(hr, t)
+hcm_hire(store, s, t, hr, envelope("rp-h1", "hcm.hire"), "emp-1", "Ada", t0(), 1500, 40)
+step("Replaying the amend key returns duplicate-key, history unchanged")
+expect(hcm_contract_amend(store, s, t, hr, envelope("rp-a1", "hcm.contract.amend"), "emp-1", t0() + 1000, 2000, 40).reason).to_equal("accepted")
+val r = hcm_contract_amend(store, s, t, hr, envelope("rp-a1", "hcm.contract.amend"), "emp-1", t0() + 1000, 2000, 40)
+expect(r.reason).to_equal("duplicate-key")
+expect(hcm_contract_count(store, "tenant-a", "emp-1")).to_equal(2)
+store_close(store)
+```
+
+</details>
+
+#### keeps tenants fully isolated
+
+- The same employee id does not exist in tenant-b
+   - Expected: hcm_employee_status(store, "tenant-a", "emp-1") equals `active`
+   - Expected: hcm_employee_status(store, "tenant-b", "emp-1") equals ``
+- A tenant-b session cannot act as tenant-a (invalid-session)
+   - Expected: hcm_terminate(store, sb, ta, hr, envelope("tn-t1", "hcm.terminate"), "emp-1", t0()).reason equals `invalid-session`
+- Hiring emp-1 in tenant-b is independent
+   - Expected: hcm_hire(store, sb, tb, hr, envelope("tn-h2", "hcm.hire"), "emp-1", "Ada-b", t0(), 999, 10).reason equals `accepted`
+   - Expected: hcm_wage_at(store, "tenant-b", "emp-1", t0()) equals `999`
+   - Expected: hcm_wage_at(store, "tenant-a", "emp-1", t0()) equals `1500`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val store = fresh_store("tenants")
+val ta = tenant_a()
+val tb = tenant_b()
+val hr = hr_a()
+val sa = session_for(hr, ta)
+val sb = session_for(hr, tb)
+hcm_hire(store, sa, ta, hr, envelope("tn-h1", "hcm.hire"), "emp-1", "Ada", t0(), 1500, 40)
+step("The same employee id does not exist in tenant-b")
+expect(hcm_employee_status(store, "tenant-a", "emp-1")).to_equal("active")
+expect(hcm_employee_status(store, "tenant-b", "emp-1")).to_equal("")
+step("A tenant-b session cannot act as tenant-a (invalid-session)")
+expect(hcm_terminate(store, sb, ta, hr, envelope("tn-t1", "hcm.terminate"), "emp-1", t0()).reason).to_equal("invalid-session")
+step("Hiring emp-1 in tenant-b is independent")
+expect(hcm_hire(store, sb, tb, hr, envelope("tn-h2", "hcm.hire"), "emp-1", "Ada-b", t0(), 999, 10).reason).to_equal("accepted")
+expect(hcm_wage_at(store, "tenant-b", "emp-1", t0())).to_equal(999)
+expect(hcm_wage_at(store, "tenant-a", "emp-1", t0())).to_equal(1500)
+store_close(store)
+```
+
+</details>
+
+#### survives a close/reopen with full state intact
+
+- Reopen: status, contract, and worked time all survive
+   - Expected: hcm_employee_status(store2, "tenant-a", "emp-1") equals `active`
+   - Expected: hcm_wage_at(store2, "tenant-a", "emp-1", t0()) equals `1500`
+   - Expected: hcm_worked_seconds(store2, "tenant-a", "emp-1", t0(), t0() + 10000) equals `1000`
+- Replay across restart still returns duplicate-key
+   - Expected: hcm_hire(store2, s, t, hr, envelope("rs-h1", "hcm.hire"), "emp-1", "Ada", t0(), 1500, 40).reason equals `conflict`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val store = fresh_store("restart")
+val t = tenant_a()
+val hr = hr_a()
+val s = session_for(hr, t)
+hcm_hire(store, s, t, hr, envelope("rs-h1", "hcm.hire"), "emp-1", "Ada", t0(), 1500, 40)
+hcm_clock_in(store, s, t, hr, envelope("rs-i1", "hcm.clock.in"), "emp-1", t0() + 100)
+hcm_clock_out(store, s, t, hr, envelope("rs-o1", "hcm.clock.out"), "emp-1", t0() + 1100)
+store_close(store)
+step("Reopen: status, contract, and worked time all survive")
+val store2 = store_open(db_path("restart"))
+hcm_setup(store2)
+expect(hcm_employee_status(store2, "tenant-a", "emp-1")).to_equal("active")
+expect(hcm_wage_at(store2, "tenant-a", "emp-1", t0())).to_equal(1500)
+expect(hcm_worked_seconds(store2, "tenant-a", "emp-1", t0(), t0() + 10000)).to_equal(1000)
+step("Replay across restart still returns duplicate-key")
+expect(hcm_hire(store2, s, t, hr, envelope("rs-h1", "hcm.hire"), "emp-1", "Ada", t0(), 1500, 40).reason).to_equal("conflict")
+expect(audit_verify_chain(store2, "tenant-a")).to_be(true)
+store_close(store2)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 8 |
+| Active scenarios | 8 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** `doc/03_plan/agent_tasks/simple_erp.md`
+- **Design:** `doc/01_research/app/enterprise/simple_enterprise_suite_full_design_2026-08-14.md §6.5`
+- **Research:** `doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md`
+
+
+</details>

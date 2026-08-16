@@ -361,3 +361,22 @@ New acceptance criteria (extends AC-1..AC-12 above):
   std.enterprise_channel (mode-struct SPI + deterministic mock, cursor
   checkpoints, exactly-once import via chan:<id> idem keys, kill switch,
   reconcile; 9/9, red-first 8/9). W4-A (QEMU in-guest) still in flight.
+- merge wave 6a (2026-08-16, orchestrator review): W6-A std.enterprise_hcm
+  (effective-dated contracts, attendance intervals, leave w/ overlap conflict,
+  payroll BOUNDARY export vs hand-computed oracle; hcm role; 8/8, red-first
+  7/8). W6-B std.enterprise_procurement (requisition->approve->PO->partial
+  receipts->invoice; receipts write the SAME stock_moves ledger sales read —
+  integration case proven: post-receipt sale_place_order succeeds, stock 5->3,
+  payable oracle 5000c; 8/8, red-first 7/8; goods_sale regression 7/7).
+  FINDING (open): state-dependent feasibility checks ran BEFORE replay
+  detection, denying legitimate idempotent replays with insufficient-stock;
+  fixed in procurement by asking feasibility only of not-already-recorded
+  commands. goods_sale has the SAME latent shape and was deliberately not
+  touched (shared path) — queued as its own lane with a spec that must fail
+  first. W4-A in-guest QEMU: rung (b) NOT reached, honest deferral. Kernel-tier
+  FAT32 rt_file_* facade + OVMF gate rungs L3.5a/b landed; retained transcript
+  build/os/ent_store_rung_b_attempt_2026-08-16.serial.log shows in-guest write
+  rc=0, fsize=5, open=OK, L3.5b [MISS] on read-back extraction. Two real
+  defects fixed: Simple->C `text` ABI is ONE RuntimeString ptr (not ptr+len;
+  the wrong-length write masqueraded as disk-full) and a FAT32 per-call
+  aligned-buffer leak. Resume: dump first 16 bytes the extraction loop sees.

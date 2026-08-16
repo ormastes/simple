@@ -3470,20 +3470,6 @@ int64_t rt_qemu_nonce_echo(void) {
     return 1;
 }
 
-/* Canonical evidence nonce: distinct from the workload nonce in QEMUNONC. */
-int64_t rt_sosix_collector_nonce_echo(void) {
-    uint8_t nonce_file[118];
-    uint32_t bytes_read = 0;
-    if (!_fat32.initialized && _fat32_init() != 0) return 0;
-    if (fat32_read_file("/SOSIXNON.TXT", nonce_file, sizeof(nonce_file),
-                        &bytes_read) != 0)
-        return 0;
-    size_t line_len = x86_64_collector_nonce_slot_line_length(nonce_file, bytes_read);
-    if (line_len == 0U) return 0;
-    for (size_t i = 0; i < line_len; i++) serial_putchar((char)nonce_file[i]);
-    return 1;
-}
-
 /* Syscall wrapper: Fat32ReadFile
  * a0 = pointer to null-terminated filename string
  * a1 = destination buffer address
@@ -8940,48 +8926,6 @@ RuntimeValue rt_gui_hline(RuntimeValue y, RuntimeValue x, RuntimeValue count, Ru
         *(volatile uint32_t *)(uintptr_t)(base + i * 4) = c;
     }
     return 0;
-}
-
-static uint32_t gui_blend_argb(uint32_t s, uint32_t d)
-{
-    uint32_t sa = s >> 24;
-    if (sa == 255u) return s;
-    if (sa == 0u) return d;
-    uint32_t da = d >> 24;
-    uint32_t dw = (da * (255u - sa)) / 255u;
-    uint32_t oa = sa + dw;
-    uint32_t r = ((((s >> 16) & 255u) * sa) +
-                  (((d >> 16) & 255u) * dw)) / oa;
-    uint32_t g = ((((s >> 8) & 255u) * sa) +
-                  (((d >> 8) & 255u) * dw)) / oa;
-    uint32_t b = (((s & 255u) * sa) + ((d & 255u) * dw)) / oa;
-    return (oa << 24) | (r << 16) | (g << 8) | b;
-}
-
-RuntimeValue rt_gui_blend_span4(RuntimeValue xy, RuntimeValue src_value,
-                                RuntimeValue src_offset_value,
-                                RuntimeValue count_value)
-{
-    uint32_t x = (uint32_t)((uint64_t)xy >> 32);
-    uint32_t y = (uint32_t)(uint64_t)xy;
-    int64_t src_offset = (int64_t)src_offset_value;
-    int64_t count = (int64_t)count_value;
-    RuntimeArray *src = runtime_array_from_abi(src_value);
-    RuntimeValue *items = runtime_array_items(src);
-    if (!src || !items || src_offset < 0 || count <= 0 ||
-        src_offset > (int64_t)src->len || count > (int64_t)src->len - src_offset ||
-        x >= g_fb_w || y >= g_fb_height || (uint64_t)count > g_fb_w - x) {
-        return 0;
-    }
-    volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)
-        (g_fb_addr + ((uint64_t)y * g_fb_w + x) * 4u);
-    for (int64_t i = 0; i < count; i++) {
-        RuntimeValue tagged = items[src_offset + i];
-        uint32_t source = (uint32_t)(IS_INT(tagged) ?
-            (uint64_t)DECODE_INT(tagged) : (uint64_t)tagged);
-        dst[i] = gui_blend_argb(source, dst[i]);
-    }
-    return 1;
 }
 
 RuntimeValue rt_gui_simd_fill_hits(void) { return (RuntimeValue)g_gui_simd_fill_hits; }
@@ -16317,11 +16261,6 @@ __attribute__((naked)) static void _rich_fault_entry(void)
 void _rich_fault_print(uint64_t rip, uint64_t errcode, uint64_t cs,
                         uint64_t rflags, uint64_t cr2, uint64_t cr3)
 {
-    extern uint64_t _ring3_iret_rip;
-    extern uint64_t _ring3_iret_rsp;
-    extern uint64_t _ring3_iret_cs;
-    extern uint64_t _ring3_iret_ss;
-    extern uint64_t _ring3_iret_rflags;
     serial_puts("\r\n[fault] *** EXCEPTION FRAME ***\r\n");
     serial_puts("[fault] rip=");     _serial_puthex64(rip);     serial_puts("\r\n");
     serial_puts("[fault] errcode="); _serial_puthex64(errcode); serial_puts("\r\n");
@@ -16329,11 +16268,6 @@ void _rich_fault_print(uint64_t rip, uint64_t errcode, uint64_t cs,
     serial_puts("[fault] rflags=");  _serial_puthex64(rflags);  serial_puts("\r\n");
     serial_puts("[fault] cr2=");     _serial_puthex64(cr2);     serial_puts("\r\n");
     serial_puts("[fault] cr3=");     _serial_puthex64(cr3);     serial_puts("\r\n");
-    serial_puts("[fault] iret-rip="); _serial_puthex64(_ring3_iret_rip); serial_puts("\r\n");
-    serial_puts("[fault] iret-rsp="); _serial_puthex64(_ring3_iret_rsp); serial_puts("\r\n");
-    serial_puts("[fault] iret-cs="); _serial_puthex64(_ring3_iret_cs); serial_puts("\r\n");
-    serial_puts("[fault] iret-ss="); _serial_puthex64(_ring3_iret_ss); serial_puts("\r\n");
-    serial_puts("[fault] iret-rflags="); _serial_puthex64(_ring3_iret_rflags); serial_puts("\r\n");
     _bt_dump_from(g_fault_rbp); /* DEBUG-INSTR */
     serial_puts("[fault] *** END FRAME (recovering) ***\r\n");
 }
@@ -16946,8 +16880,6 @@ __attribute__((weak)) int64_t spl_handle_file_open(uint64_t, uint64_t, uint64_t,
 __attribute__((weak)) int64_t spl_handle_file_read(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_file_write(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_file_close(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-__attribute__((weak)) int64_t spl_handle_fs_pread_registered_v1(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-__attribute__((weak)) int64_t spl_handle_fs_pwrite_registered_v1(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_file_stat(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_file_mkdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 __attribute__((weak)) int64_t spl_handle_file_readdir(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
@@ -17938,8 +17870,6 @@ int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
         case 97: return spl_handle_set_hostname(a0, a1, a2, a3, a4, a5);
         case 106: return spl_handle_schedule(a0, a1, a2, a3, a4, a5);
         case 107: return spl_handle_schedctl(a0, a1, a2, a3, a4, a5);
-        case 134: return spl_handle_fs_pread_registered_v1(a0, a1, a2, a3, a4, a5);
-        case 135: return spl_handle_fs_pwrite_registered_v1(a0, a1, a2, a3, a4, a5);
         default:
             /* Loud ENOSYS — the discovery loop for growing the exec syscall
              * surface. Log the number + first two args so a missing syscall in
@@ -18183,20 +18113,6 @@ __attribute__((weak)) int64_t spl_handle_file_write(uint64_t a0, uint64_t a1, ui
 
 __attribute__((weak)) int64_t spl_handle_file_close(uint64_t a0, uint64_t a1, uint64_t a2,
                                                      uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return -38;
-}
-
-__attribute__((weak)) int64_t spl_handle_fs_pread_registered_v1(
-    uint64_t a0, uint64_t a1, uint64_t a2,
-    uint64_t a3, uint64_t a4, uint64_t a5) {
-    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return -38;
-}
-
-__attribute__((weak)) int64_t spl_handle_fs_pwrite_registered_v1(
-    uint64_t a0, uint64_t a1, uint64_t a2,
-    uint64_t a3, uint64_t a4, uint64_t a5) {
     (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
     return -38;
 }
@@ -19779,15 +19695,6 @@ static uint32_t _bm_blend_pixel(uint32_t sp, uint32_t dp)
     if (sa == 0u) return dp;
     uint32_t da = (dp >> 24) & 0xFFu;
     uint32_t inv = 255u - sa;
-    if (da == 255u) {
-        uint32_t r = ((((sp >> 16) & 0xFFu) * sa) +
-                      (((dp >> 16) & 0xFFu) * inv)) / 255u;
-        uint32_t g = ((((sp >> 8) & 0xFFu) * sa) +
-                      (((dp >> 8) & 0xFFu) * inv)) / 255u;
-        uint32_t b = (((sp & 0xFFu) * sa) +
-                      ((dp & 0xFFu) * inv)) / 255u;
-        return 0xFF000000u | (r << 16) | (g << 8) | b;
-    }
     uint32_t dst_weight = (da * inv) / 255u;
     uint32_t out_a = sa + dst_weight;          /* >= sa >= 1 */
     uint32_t r = (((sp >> 16) & 0xFFu) * sa + ((dp >> 16) & 0xFFu) * dst_weight) / out_a;
@@ -19930,9 +19837,7 @@ RuntimeValue rt_engine2d_simd_blend_span_u32(RuntimeValue dst, int64_t dst_offse
     RuntimeValue *si = runtime_array_items(s);
     if (!di || !si) return dst;
 
-    int backwards = (di == si && d_off > s_off && d_off - s_off < n);
-    for (int64_t step = 0; step < n; step++) {
-        int64_t i = backwards ? n - 1 - step : step;
+    for (int64_t i = 0; i < n; i++) {
         uint32_t sp = _bm_unbox_pixel(si[s_off + i]);
         uint32_t dp = _bm_unbox_pixel(di[d_off + i]);
         di[d_off + i] = _bm_box_pixel(_bm_blend_pixel(sp, dp));
@@ -20049,11 +19954,6 @@ RuntimeValue rt_engine2d_simd_blend_const_span_u32(RuntimeValue dst, int64_t off
     uint32_t sp = (uint32_t)(uint64_t)const_color;
     uint32_t sa = (sp >> 24) & 0xFFu;
     if (sa == 0u) return dst;
-    if (sa == 255u) {
-        RuntimeValue word = _bm_box_pixel(sp);
-        for (int64_t i = 0; i < n; i++) items[off + i] = word;
-        return dst;
-    }
     for (int64_t i = 0; i < n; i++) {
         uint32_t dp = _bm_unbox_pixel(items[off + i]);
         items[off + i] = _bm_box_pixel(_bm_blend_pixel(sp, dp));
