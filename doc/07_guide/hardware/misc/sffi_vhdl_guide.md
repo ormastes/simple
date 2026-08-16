@@ -274,6 +274,30 @@ struct VhdlToolResult:
     stderr: text        # standard error
 ```
 
+### Qualified system acceptance
+
+The canonical fail-closed system spec is
+`test/03_system/feature/usage/vhdl_spec.spl` (`REQ-VHDL-SFFI-001`), mirrored at
+`doc/06_spec/03_system/feature/usage/vhdl_spec.md`. It covers:
+
+1. a positive qualified GHDL analysis through the public async compatibility
+   facade and canonical `process_ops.process_run` owner;
+2. exact quiet/noisy `VhdlToolResult` edge semantics; and
+3. invalid VHDL returning failure, a nonzero code, and captured diagnostics.
+
+Run it only with an admitted pure-Simple full CLI:
+
+```sh
+SIMPLE_VHDL_TEST=1 SIMPLE_TIMEOUT_SECONDS=3600 \
+  <admitted-simple> test test/03_system/feature/usage/vhdl_spec.spl
+```
+
+The gate is deliberately fail-closed. Without `SIMPLE_VHDL_TEST=1`, the
+tool-backed scenarios print `TEST_BLOCKED`, fail the environment matcher, and
+return before invoking GHDL/Yosys. Do not turn this into an environment-skip
+PASS, and do not use the Rust seed or a bootstrap-only CLI as evidence. See
+`doc/03_plan/sys_test/vhdl_process_facade.md` for docgen and maintenance gates.
+
 ---
 
 ## VHDL Backend Internals
