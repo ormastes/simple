@@ -1836,11 +1836,14 @@ Evidence tiers, kept honest:
 - Unit (EXECUTED, seed interpreter): `browser_page_loader_spec.spl` — 3/3
   passed, counted verdict `executed=3`. Gate logic only, no network.
 - Live (seed, diagnostic): `http://example.com` fetched (559 bytes) and the
-  ORIGIN'S document rendered by the engine; `https://` fails honestly under
-  the seed (TLS externs are stubs returning -1 — `interpreter_extern/
-  mod.rs:2438`); `file://` refused with the REQ-015 reason.
-- The seed TLS stub means https live evidence requires a compiled runtime;
-  this is recorded, not worked around.
+  ORIGIN'S document rendered by the engine; `file://` refused with the
+  REQ-015 reason.
+- UPDATE 2026-08-16: the seed TLS stubs were replaced with real delegates to
+  the runtime rustls client (`interpreter_extern/net_tls_client.rs`, driver
+  `runtime-tls` feature). Live under the seed: `https://example.com` loads
+  (559 bytes, chunked transfer decoded) and `https://self-signed.badssl.com`
+  is rejected by the certificate verifier. Seed evidence remains diagnostic
+  tier — promotion still requires the self-hosted binary.
 
 Also fixed en route: `h1_client.spl:get_mock_registry` used `.?` +
 `.unwrap()`, which the seed's semantic pass cannot resolve after narrowing

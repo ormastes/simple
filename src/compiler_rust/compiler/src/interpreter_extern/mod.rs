@@ -108,6 +108,7 @@ pub mod sffi_string;
 pub mod collections;
 pub mod lexer_sffi;
 pub mod tls13;
+pub mod net_tls_client;
 pub mod i18n;
 pub mod native_sffi;
 pub mod package;
@@ -196,48 +197,6 @@ fn call_loaded_function_by_name(
 /// `rt_stdin_read_line` — read a line from stdin (ignores all args)
 fn rt_stdin_read_line_stub(_args: &[Value]) -> Result<Value, CompileError> {
     io::input::input(&[])
-}
-
-/// `rt_tls_client_connect` / `rt_tls_client_connect_with_sni` — stub
-fn rt_tls_client_connect_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(-1))
-}
-
-/// `rt_tls_client_write` — stub
-fn rt_tls_client_write_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(-1))
-}
-
-/// `rt_tls_client_read` — stub
-fn rt_tls_client_read_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::text(String::new()))
-}
-
-/// `rt_tls_client_connect_address_with_sni_timeout` — stub
-fn rt_tls_client_connect_address_with_sni_timeout_stub(
-    _args: &[Value],
-) -> Result<Value, CompileError> {
-    Ok(Value::Int(-1))
-}
-
-/// `rt_tls_client_write_timeout` — stub
-fn rt_tls_client_write_timeout_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(-1))
-}
-
-/// `rt_tls_client_read_timeout` — stub
-fn rt_tls_client_read_timeout_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::text(String::new()))
-}
-
-/// `rt_tls_client_close` — stub
-fn rt_tls_client_close_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Bool(false))
-}
-
-/// `rt_tls_get_protocol_version` — stub
-fn rt_tls_get_protocol_version_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::text(String::new()))
 }
 
 fn rt_browser_http_job_start_stub(_args: &[Value]) -> Result<Value, CompileError> {
@@ -2434,19 +2393,34 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         "rt_tls13_hkdf_expand_label_server_app",
         tls13::rt_tls13_hkdf_expand_label_server_app
     );
-    // TLS client stubs (interpreter mode — no real TLS)
-    insert_simple!("rt_tls_client_connect", rt_tls_client_connect_stub);
-    insert_simple!("rt_tls_client_connect_with_sni", rt_tls_client_connect_stub);
+    // TLS client — delegates to the runtime's rustls implementation
+    // (net_tls_client.rs). Falls back to the runtime's own refusing stubs
+    // only when the build lacks the `runtime-tls` feature; never fakes
+    // success. Replaced the old always-`-1` interpreter stubs 2026-08-16.
+    insert_simple!("rt_tls_client_connect", net_tls_client::rt_tls_client_connect);
+    insert_simple!(
+        "rt_tls_client_connect_with_sni",
+        net_tls_client::rt_tls_client_connect_with_sni
+    );
     insert_simple!(
         "rt_tls_client_connect_address_with_sni_timeout",
-        rt_tls_client_connect_address_with_sni_timeout_stub
+        net_tls_client::rt_tls_client_connect_address_with_sni_timeout
     );
-    insert_simple!("rt_tls_client_write", rt_tls_client_write_stub);
-    insert_simple!("rt_tls_client_write_timeout", rt_tls_client_write_timeout_stub);
-    insert_simple!("rt_tls_client_read", rt_tls_client_read_stub);
-    insert_simple!("rt_tls_client_read_timeout", rt_tls_client_read_timeout_stub);
-    insert_simple!("rt_tls_client_close", rt_tls_client_close_stub);
-    insert_simple!("rt_tls_get_protocol_version", rt_tls_get_protocol_version_stub);
+    insert_simple!("rt_tls_client_write", net_tls_client::rt_tls_client_write);
+    insert_simple!(
+        "rt_tls_client_write_timeout",
+        net_tls_client::rt_tls_client_write_timeout
+    );
+    insert_simple!("rt_tls_client_read", net_tls_client::rt_tls_client_read);
+    insert_simple!(
+        "rt_tls_client_read_timeout",
+        net_tls_client::rt_tls_client_read_timeout
+    );
+    insert_simple!("rt_tls_client_close", net_tls_client::rt_tls_client_close);
+    insert_simple!(
+        "rt_tls_get_protocol_version",
+        net_tls_client::rt_tls_get_protocol_version
+    );
     insert_simple!("rt_browser_http_job_start", rt_browser_http_job_start_stub);
     insert_simple!(
         "rt_browser_http_job_start_public_limited",

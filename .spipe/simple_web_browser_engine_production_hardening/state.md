@@ -198,6 +198,12 @@ implementation in progress / target evidence blocked
   consumed. Source and documentation now distinguish rustls-enabled runtime
   TLS from the fail-closed stub. Live HTTPS remains unproven until a genuine
   pure-Simple binary is linked with runtime TLS.
+  [UPDATE 2026-08-16: the seed interpreter now delegates rt_tls_* to the
+  runtime rustls client (interpreter_extern/net_tls_client.rs, runtime-tls
+  feature); live https://example.com loads (559 bytes, chunked decoded) and a
+  self-signed host is rejected. This exercises the pure-Simple H1/TLS code
+  path live, but under the SEED — diagnostic tier only; self-hosted-binary
+  live HTTPS is still the promotion gate.]
 - evidence: Focused diff validation and both required
   `direct-env-runtime-guard` working/staged audits passed after the current
   browser/session/render changes.

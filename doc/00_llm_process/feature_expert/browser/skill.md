@@ -351,9 +351,14 @@ browser modules — that would violate its stated scope exclusion.
 - `render_adapter`: text mode shows a load receipt; the ENGINE gets the
   origin's untouched document via `browser_page_document_html`. Failures keep
   the `(no page loaded for {url}: {reason})` shape — never a fabricated page.
-- Seed truth: TCP real, TLS stubbed (-1) — `http://` works live under the
-  seed, `https://` reports `h1: missing TLS connection`. Compiled runtime has
-  real TLS.
+- Seed truth (updated 2026-08-16): TCP real AND TLS real — the seed
+  interpreter's `rt_tls_*` externs delegate to the runtime rustls client
+  (`interpreter_extern/net_tls_client.rs`, driver `runtime-tls` feature), so
+  both `http://` and `https://` work live under the seed, with real cert
+  verification (self-signed hosts are rejected). Without `runtime-tls` the
+  stub variant refuses honestly. Seed traps that bit this path:
+  `.? == false` dead guards and `var [u8]` `+`-accumulator — see
+  `doc/08_tracking/bug/seed_optional_query_comparison_divergence_2026-08-16.md`.
 - Seed trap fixed: `.?` + `.unwrap()` on a module-level optional dies in the
   seed's semantic pass (`h1_client.spl` get_mock_registry). Use optional
   `match`. If you see "method `unwrap` not found on class X" under

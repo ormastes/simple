@@ -250,11 +250,15 @@ refused with a reason naming the requirement. A failed load is reported as
 `(no page loaded for <url>: <reason>)` — never replaced with a fabricated
 page.
 
-Runtime honesty under the SEED interpreter: TCP externs are real, every
-`rt_tls_*` extern is a stub returning -1
-(`interpreter_extern/mod.rs:2438-2449`), so `http://` genuinely fetches while
-`https://` fails its handshake with `h1: missing TLS connection` — reported,
-not hidden. A compiled runtime has real TLS (`runtime/src/value/net_tls.rs`).
+Runtime honesty under the SEED interpreter: TCP externs are real, and since
+2026-08-16 the `rt_tls_*` externs are real too — the interpreter delegates to
+the runtime's rustls client (`interpreter_extern/net_tls_client.rs`, enabled by
+the driver's `runtime-tls` feature), so `https://` performs a genuine TLS 1.3
+handshake with certificate verification. Verified live: `https://example.com`
+loads (559 bytes) while `https://self-signed.badssl.com` is REJECTED
+("TLS connection failed") — the platform verifier really verifies. If the
+runtime is built without `runtime-tls`, the stub variant refuses honestly
+(`net_tls_stub.rs`); either way no fabricated success.
 
 Measured live (seed, 2026-08-16): `http://example.com` → 559 bytes fetched,
 origin document rendered by the engine (2304 pixels painted at 64x36 vs 61 for
