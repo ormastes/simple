@@ -413,3 +413,23 @@ New acceptance criteria (extends AC-1..AC-12 above):
   are the trustworthy evidence, and all have been green; (c) future lane
   worktrees must NOT share build/. Re-verification of earlier lanes'
   red-first claims under clean caches is an OPEN follow-up.
+- merge wave 7a (2026-08-16): W7-A goods_sale replay-ordering fix merged.
+  Reproduce-first honored: BEFORE any impl change the spec went 7/3 with
+  three named red examples — replaying an order that consumed the last stock
+  returned insufficient-stock, and replaying pay/refund returned
+  invalid-record, all instead of duplicate-key. The pay/refund pair is a
+  SECOND instance of the defect (the status-transition guard is itself
+  state-dependent on the command's own effect). Fix mirrors procurement:
+  feasibility asked only of a not-already-recorded command; state-independent
+  checks (shape, unknown sku not-found, unknown order) stay unconditional;
+  each new example also asserts a FRESH key is still denied, so the guard is
+  not merely disabled. W7-A removed its build symlink and re-ran BOTH red and
+  green from scratch, so this evidence is cache-clean. Lane verdicts:
+  goods_sale 10/10, store_app 3/3, web_app 5/5, payment 7/7, procurement 8/8,
+  restaurant 7/7, booking 8/8. Canonical rule doc added:
+  doc/07_guide/app/enterprise/replay_and_state_dependent_validation.md.
+  ORCHESTRATOR HAND-MERGE: goods_sale.spl had diverged (W6-C added the
+  period-lock seam on main). Merged so that a REPLAY returns its recorded
+  result BEFORE the period check — a replay posts nothing, so a closed period
+  must not turn a successful replay into invalid-transition. Merged-tree
+  reruns: goods_sale 10/10, finance 6/6.

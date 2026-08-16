@@ -158,16 +158,24 @@ fn sale_place_order(store: EnterpriseStore, session: SessionContext, tenant: Ten
     val price = sale_product_price(store, tenant.tenant_id, sku)
     if price < 0:
         return denied("not-found", sku)
-    if sale_available_stock(store, tenant.tenant_id, sku) < qty:
+    # 4. idempotency — a replay returns the recorded outcome, no new effect.
+    # The rungs stay in the frozen order, but STATE-DEPENDENT feasibility is a
+    # question about a command that has NOT yet been recorded: this order's own
+    # effect reduced the very stock the check reads, so re-judging a replay
+    # would deny a command that was already accepted. Identity and shape checks
+    # above (invalid-record, not-found) are state-independent and stay
+    # unconditional.
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and sale_available_stock(store, tenant.tenant_id, sku) < qty:
         return denied("insufficient-stock", sku)
-    # 3b. period lock — checked BEFORE the unit of work opens, so a denial
-    # writes nothing at all (see the rollback caveat in the finance guide).
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    # 4b. period lock — asked only of a command that will actually post (a
+    # replay above posts nothing), and BEFORE the unit of work opens so a
+    # denial writes nothing at all (see the rollback caveat in the finance guide).
     val posted_at = time_now()
     if not journal_post_allowed(store, tenant.tenant_id, posted_at):
         return denied("invalid-transition", order_id)
-    # 4. idempotency — a replay returns the recorded outcome, no new effect
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
-        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     # 5. effects — one unit of work
     uow_begin(store)
     store_insert_row(store,
@@ -191,15 +199,22 @@ fn sale_pay_order(store: EnterpriseStore, session: SessionContext, tenant: Tenan
         return denied("invalid-session", order_id)
     if not role_allows(who.role, "sale.order.pay"):
         return denied("forbidden", order_id)
-    if sale_order_status(store, tenant.tenant_id, order_id) != "created":
+    val status = sale_order_status(store, tenant.tenant_id, order_id)
+    # An unknown order is state-INDEPENDENT (this command never creates one),
+    # so it is denied unconditionally. The created -> paid transition is
+    # state-DEPENDENT on this command's own effect and is therefore asked only
+    # of a command not already recorded.
+    if status == "":
         return denied("invalid-record", order_id)
-    # 3b. period lock — checked BEFORE the unit of work opens, so a denial
-    # writes nothing at all (see the rollback caveat in the finance guide).
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and status != "created":
+        return denied("invalid-record", order_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    # Period lock — only for a command that will actually post, before the UoW.
     val posted_at = time_now()
     if not journal_post_allowed(store, tenant.tenant_id, posted_at):
         return denied("invalid-transition", order_id)
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
-        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     val amount = order_amount(store, tenant.tenant_id, order_id)
     uow_begin(store)
     store_insert_row(store,
@@ -221,15 +236,21 @@ fn sale_refund_order(store: EnterpriseStore, session: SessionContext, tenant: Te
         return denied("invalid-session", order_id)
     if not role_allows(who.role, "sale.order.refund"):
         return denied("forbidden", order_id)
-    if sale_order_status(store, tenant.tenant_id, order_id) != "paid":
+    val status = sale_order_status(store, tenant.tenant_id, order_id)
+    # Same split as sale_pay_order: unknown order is state-independent and
+    # denied unconditionally; the paid -> refunded transition is state-dependent
+    # on this command's own effect and is asked only of a not-yet-recorded one.
+    if status == "":
         return denied("invalid-record", order_id)
-    # 3b. period lock — checked BEFORE the unit of work opens, so a denial
-    # writes nothing at all (see the rollback caveat in the finance guide).
+    val replayed = idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key)
+    if not replayed and status != "paid":
+        return denied("invalid-record", order_id)
+    if replayed:
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    # Period lock — only for a command that will actually post, before the UoW.
     val posted_at = time_now()
     if not journal_post_allowed(store, tenant.tenant_id, posted_at):
         return denied("invalid-transition", order_id)
-    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
-        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
     val amount = order_amount(store, tenant.tenant_id, order_id)
     val order_sku = order_sku_qty(store, tenant.tenant_id, order_id)
     uow_begin(store)

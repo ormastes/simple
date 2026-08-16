@@ -75,7 +75,13 @@ This is a general property of the frozen pattern, not a procurement quirk:
 any command whose validation reads its own effect needs the same
 treatment. Discovered by the W6-B green run, where the receipt-replay and
 restart-replay examples failed until the two checks were made
-replay-aware.
+replay-aware; the same shape was later found and closed in the goods-sale
+vertical.
+
+**The rule is stated canonically in
+[replay_and_state_dependent_validation.md](replay_and_state_dependent_validation.md)**
+— read that for the general form, what stays unconditional, and the list of
+commands it currently governs.
 
 ## Storage model (insert-only + derive)
 
