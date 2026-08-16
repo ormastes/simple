@@ -1,0 +1,197 @@
+# codex-impl
+
+use std.tiny.common.status.{TinyStatus, TINY_ERR_ABI, TINY_ERR_CAPACITY, TINY_ERR_INVALID, TINY_ERR_MALFORMED}
+
+const TINY_ABI_MAJOR: i32 = 1
+const TINY_ABI_MINOR: i32 = 0
+const TINY_DRAW_STREAM_FORMAT_V1: i64 = 1
+const TINY_DRAW_STREAM_V1_NAME_HASH: i64 = 1413763921
+const TINY_DRAW_STREAM_V1_NAME_LENGTH: i32 = 16
+
+const TINY_2D_CAP_DRAW_STREAM_V1: i64 = 1
+const TINY_2D_CAP_ARGB8888: i64 = 2
+const TINY_2D_CAP_RGB565: i64 = 4
+const TINY_2D_CAP_READBACK: i64 = 8
+const TINY_2D_CAP_SOFTWARE_V1: i64 = 15
+
+const TINY_ABI_DETAIL_VERSION: i32 = 1
+const TINY_ABI_DETAIL_LIMIT: i32 = 2
+const TINY_ABI_DETAIL_MODULE_ID: i32 = 3
+const TINY_ABI_DETAIL_MODULE_NAME: i32 = 4
+const TINY_ABI_DETAIL_MODULE_ENTRY: i32 = 5
+const TINY_ABI_DETAIL_CLASS_ID: i32 = 6
+const TINY_ABI_DETAIL_CLASS_NAME: i32 = 7
+const TINY_ABI_DETAIL_CLASS_ENTRY: i32 = 8
+const TINY_ABI_DETAIL_DEPENDENCY_SPAN: i32 = 9
+const TINY_ABI_DETAIL_DEPENDENCY_ID: i32 = 10
+const TINY_ABI_DETAIL_DUPLICATE_CLASS: i32 = 11
+const TINY_ABI_DETAIL_DRAW_STREAM: i32 = 12
+
+# Wire-safe entry IDs are resolved by the current static registry or SFM bridge.
+# Function objects never cross the ABI boundary.
+class TinyDrawStreamV1:
+    abi_major: i32
+    abi_minor: i32
+    format_id: i64
+    stable_name_hash: i64
+    name_offset: i32
+    name_length: i32
+    words: [i32]
+    word_count: i32
+    required_capability_bits: i64 = TINY_2D_CAP_DRAW_STREAM_V1
+
+    static fn create(words: [i32], required_capability_bits: i64) -> TinyDrawStreamV1:
+        TinyDrawStreamV1.create_counted(words, words.len(), required_capability_bits)
+
+    static fn create_counted(words: [i32], word_count: i32, required_capability_bits: i64) -> TinyDrawStreamV1:
+        TinyDrawStreamV1(
+            abi_major: TINY_ABI_MAJOR,
+            abi_minor: TINY_ABI_MINOR,
+            format_id: TINY_DRAW_STREAM_FORMAT_V1,
+            stable_name_hash: TINY_DRAW_STREAM_V1_NAME_HASH,
+            name_offset: 0,
+            name_length: TINY_DRAW_STREAM_V1_NAME_LENGTH,
+            required_capability_bits: required_capability_bits,
+            words: words,
+            word_count: word_count,
+        )
+
+class TinyRenderedSurfaceV1:
+    abi_major: i32
+    abi_minor: i32
+    surface_id: i64
+    frame_id: i64
+    source_stream_hash: i64
+    source_word_count: i32
+    backend_capability_bits: i64
+    width: i32
+    height: i32
+    pixel_format: i32
+    pixels: [i32]
+    pixel_count: i32
+    checksum: i64
+
+    static fn empty() -> TinyRenderedSurfaceV1:
+        TinyRenderedSurfaceV1(
+            abi_major: TINY_ABI_MAJOR,
+            abi_minor: TINY_ABI_MINOR,
+            surface_id: 0,
+            frame_id: 0,
+            source_stream_hash: 0,
+            source_word_count: 0,
+            backend_capability_bits: 0,
+            width: 0,
+            height: 0,
+            pixel_format: 0,
+            pixels: [],
+            pixel_count: 0,
+            checksum: 0,
+        )
+
+class TinyClassDescriptorV1:
+    class_id: i64
+    stable_name_hash: i64
+    name_offset: i32
+    name_length: i32
+    capability_bits: i64
+    dependency_first: i32
+    dependency_count: i32
+    factory_entry_id: i64
+    destroy_entry_id: i64
+
+class TinyModuleV1:
+    abi_major: i32
+    abi_minor: i32
+    module_id: i64
+    stable_name_hash: i64
+    name_offset: i32
+    name_length: i32
+    name_bytes_length: i32
+    capability_bits: i64
+    init_entry_id: i64
+    shutdown_entry_id: i64
+    query_entry_id: i64
+    classes: [TinyClassDescriptorV1]
+    dependencies: [i64]
+
+fn tiny_module_validate(module: TinyModuleV1, max_classes: i32, max_dependencies: i32) -> TinyStatus:
+    if module.abi_major != TINY_ABI_MAJOR:
+        return TinyStatus.error(TINY_ERR_ABI, TINY_ABI_DETAIL_VERSION)
+    if module.abi_minor < 0:
+        return TinyStatus.error(TINY_ERR_ABI, TINY_ABI_DETAIL_VERSION)
+    if max_classes < 0 or max_dependencies < 0 or module.classes.len() > max_classes or module.dependencies.len() > max_dependencies:
+        return TinyStatus.error(TINY_ERR_CAPACITY, TINY_ABI_DETAIL_LIMIT)
+    if module.module_id <= 0:
+        return TinyStatus.error(TINY_ERR_INVALID, TINY_ABI_DETAIL_MODULE_ID)
+    if not tiny_name_metadata_valid(module.stable_name_hash, module.name_offset, module.name_length, module.name_bytes_length):
+        return TinyStatus.error(TINY_ERR_MALFORMED, TINY_ABI_DETAIL_MODULE_NAME)
+    if module.init_entry_id <= 0 or module.shutdown_entry_id <= 0 or module.query_entry_id <= 0:
+        return TinyStatus.error(TINY_ERR_INVALID, TINY_ABI_DETAIL_MODULE_ENTRY)
+    var i = 0
+    while i < module.dependencies.len():
+        if module.dependencies[i] <= 0:
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_ABI_DETAIL_DEPENDENCY_ID)
+        i = i + 1
+    i = 0
+    while i < module.classes.len():
+        val descriptor = module.classes[i]
+        if descriptor.class_id <= 0:
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_ABI_DETAIL_CLASS_ID)
+        if not tiny_name_metadata_valid(descriptor.stable_name_hash, descriptor.name_offset, descriptor.name_length, module.name_bytes_length):
+            return TinyStatus.error(TINY_ERR_MALFORMED, TINY_ABI_DETAIL_CLASS_NAME)
+        if descriptor.factory_entry_id <= 0 or descriptor.destroy_entry_id <= 0:
+            return TinyStatus.error(TINY_ERR_INVALID, TINY_ABI_DETAIL_CLASS_ENTRY)
+        if not tiny_dependency_span_valid(descriptor.dependency_first, descriptor.dependency_count, module.dependencies.len()):
+            return TinyStatus.error(TINY_ERR_MALFORMED, TINY_ABI_DETAIL_DEPENDENCY_SPAN)
+        var prior = 0
+        while prior < i:
+            if module.classes[prior].class_id == descriptor.class_id:
+                return TinyStatus.error(TINY_ERR_MALFORMED, TINY_ABI_DETAIL_DUPLICATE_CLASS)
+            prior = prior + 1
+        i = i + 1
+    TinyStatus.ok()
+
+fn tiny_draw_stream_validate(stream: TinyDrawStreamV1, max_words: i32, name_bytes_length: i32) -> TinyStatus:
+    if stream.abi_major != TINY_ABI_MAJOR or stream.abi_minor < 0 or stream.format_id != TINY_DRAW_STREAM_FORMAT_V1:
+        return TinyStatus.error(TINY_ERR_ABI, TINY_ABI_DETAIL_DRAW_STREAM)
+    if max_words < 0 or stream.word_count < 0 or stream.word_count > max_words or stream.word_count > stream.words.len():
+        return TinyStatus.error(TINY_ERR_CAPACITY, TINY_ABI_DETAIL_DRAW_STREAM)
+    if stream.required_capability_bits <= 0:
+        return TinyStatus.error(TINY_ERR_MALFORMED, TINY_ABI_DETAIL_DRAW_STREAM)
+    if not tiny_name_metadata_valid(stream.stable_name_hash, stream.name_offset, stream.name_length, name_bytes_length):
+        return TinyStatus.error(TINY_ERR_MALFORMED, TINY_ABI_DETAIL_DRAW_STREAM)
+    TinyStatus.ok()
+
+fn tiny_rendered_surface_validate(surface: TinyRenderedSurfaceV1, max_pixels: i32) -> TinyStatus:
+    if surface.abi_major != TINY_ABI_MAJOR or surface.abi_minor < 0:
+        return TinyStatus.error(TINY_ERR_ABI, TINY_ABI_DETAIL_VERSION)
+    if surface.surface_id <= 0 or surface.frame_id <= 0 or surface.source_stream_hash == 0:
+        return TinyStatus.error(TINY_ERR_INVALID, TINY_ABI_DETAIL_DRAW_STREAM)
+    if surface.source_word_count <= 0 or surface.backend_capability_bits <= 0 or surface.pixel_format <= 0:
+        return TinyStatus.error(TINY_ERR_INVALID, TINY_ABI_DETAIL_DRAW_STREAM)
+    if surface.width <= 0 or surface.height <= 0 or surface.width > 2147483647 / surface.height:
+        return TinyStatus.error(TINY_ERR_MALFORMED, TINY_ABI_DETAIL_DRAW_STREAM)
+    val expected_pixels = surface.width * surface.height
+    if max_pixels < 0 or expected_pixels > max_pixels or surface.pixel_count != expected_pixels or surface.pixels.len() != expected_pixels:
+        return TinyStatus.error(TINY_ERR_CAPACITY, TINY_ABI_DETAIL_DRAW_STREAM)
+    if tiny_surface_checksum(surface.pixels) != surface.checksum:
+        return TinyStatus.error(TINY_ERR_MALFORMED, TINY_ABI_DETAIL_DRAW_STREAM)
+    TinyStatus.ok()
+
+fn tiny_surface_checksum(pixels: [i32]) -> i64:
+    var hash: i64 = 146959810
+    var i = 0
+    while i < pixels.len():
+        hash = (hash * 16777619 + (pixels[i] as i64)) & 2147483647
+        i = i + 1
+    hash
+
+fn tiny_name_metadata_valid(stable_name_hash: i64, name_offset: i32, name_length: i32, name_bytes_length: i32) -> bool:
+    if stable_name_hash == 0 or name_offset < 0 or name_length <= 0 or name_bytes_length < 0:
+        return false
+    name_offset <= name_bytes_length and name_length <= name_bytes_length - name_offset
+
+fn tiny_dependency_span_valid(first: i32, count: i32, dependency_length: i32) -> bool:
+    if first < 0 or count < 0 or dependency_length < 0 or first > dependency_length:
+        return false
+    count <= dependency_length - first

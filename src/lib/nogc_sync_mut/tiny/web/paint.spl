@@ -1,0 +1,115 @@
+# codex-impl
+
+use std.tiny.common.status.{TinyStatus, TINY_ERR_CAPACITY, TINY_ERR_INVALID, TINY_ERR_UNSUPPORTED}
+use std.tiny.common.types.{TinyRect}
+use std.tiny.draw.writer.{TinyDrawWriter}
+use std.tiny.web.layout.{TinyWebLayoutResult}
+use std.tiny.web.model.{TINY_WEB_BODY, TINY_WEB_BUTTON, TINY_WEB_DIV, TINY_WEB_INPUT, TINY_WEB_P, TINY_WEB_TEXT}
+
+# Web-owned intermediate. TinyDraw conversion remains isolated here once its
+# frozen writer API is available.
+const TINY_PAINT_FILL_RECT: i32 = 1
+const TINY_PAINT_BORDER_RECT: i32 = 2
+const TINY_PAINT_GLYPH_RUN: i32 = 3
+
+class TinyPaintRecord:
+    opcode: i32
+    bounds: TinyRect
+    color: i32
+    text_value: text
+
+class TinyWebPaintResult:
+    status: TinyStatus
+    records: [TinyPaintRecord]
+
+class TinyWebDrawResult:
+    status: TinyStatus
+    stream: [i32]
+    word_count: i32
+
+fn tiny_web_paint(layout: TinyWebLayoutResult, max_records: i32) -> TinyWebPaintResult:
+    if not layout.status.is_ok():
+        return TinyWebPaintResult(status: layout.status, records: [])
+    if layout.styles.len() != layout.nodes.len() or layout.rendered.len() != layout.nodes.len():
+        return TinyWebPaintResult(status: TinyStatus.error(TINY_ERR_INVALID, layout.nodes.len()), records: [])
+    var records: [TinyPaintRecord] = []
+    var index = 0
+    while index < layout.nodes.len():
+        val node = layout.nodes[index]
+        if index < layout.rendered.len() and not layout.rendered[index]:
+            index = index + 1
+            continue
+        val style = layout.styles[index]
+        val styled_fill = style.background_color.len() > 0
+        val should_fill = styled_fill or node.kind == TINY_WEB_BODY or node.kind == TINY_WEB_DIV or node.kind == TINY_WEB_P or node.kind == TINY_WEB_BUTTON or node.kind == TINY_WEB_INPUT
+        val should_border = style.border > 0 or node.kind == TINY_WEB_BUTTON or node.kind == TINY_WEB_INPUT
+        val should_value_text = node.kind == TINY_WEB_INPUT and node.text_value.len() > 0
+        var required = 0
+        if should_fill: required = required + 1
+        if should_border: required = required + 1
+        if node.kind == TINY_WEB_TEXT: required = required + 1
+        if should_value_text: required = required + 1
+        if records.len() + required > max_records:
+            return TinyWebPaintResult(status: TinyStatus.error(TINY_ERR_CAPACITY, records.len() + required), records: records)
+        if should_fill:
+            var fallback = -460552
+            if node.kind == TINY_WEB_BODY: fallback = -1
+            if node.kind == TINY_WEB_BUTTON or node.kind == TINY_WEB_INPUT: fallback = -2039584
+            records.push(TinyPaintRecord(opcode: TINY_PAINT_FILL_RECT, bounds: node.bounds, color: tiny_web_css_color(style.background_color, fallback), text_value: ""))
+        if should_border:
+            records.push(TinyPaintRecord(opcode: TINY_PAINT_BORDER_RECT, bounds: node.bounds, color: -14671840, text_value: ""))
+        if node.kind == TINY_WEB_TEXT:
+            records.push(TinyPaintRecord(opcode: TINY_PAINT_GLYPH_RUN, bounds: node.bounds, color: tiny_web_css_color(style.color, -15724528), text_value: node.text_value))
+        if should_value_text:
+            var text_width = node.bounds.width - 8
+            var text_height = node.bounds.height - 8
+            if text_width < 0: text_width = 0
+            if text_height < 0: text_height = 0
+            val value_bounds = TinyRect(x: node.bounds.x + 4, y: node.bounds.y + 4, width: text_width, height: text_height)
+            records.push(TinyPaintRecord(opcode: TINY_PAINT_GLYPH_RUN, bounds: value_bounds, color: tiny_web_css_color(style.color, -15724528), text_value: node.text_value))
+        index = index + 1
+    TinyWebPaintResult(status: TinyStatus.ok(), records: records)
+
+fn tiny_web_css_color(value: text, fallback: i32) -> i32:
+    val color = value.trim().lower()
+    if color == "white": return -1
+    if color == "black": return -16777216
+    if color == "red": return -65536
+    if color == "green": return -16711936
+    if color == "blue": return -16776961
+    if color == "gray" or color == "grey": return -8355712
+    if color == "transparent": return 0
+    fallback
+
+fn _tiny_web_glyph_rows(code: i32) -> [i32]:
+    # A deterministic 5x7 bootstrap glyph. The fixed font pack can replace
+    # this mapping without changing TinyDrawStream.
+    val a = 17 | ((code & 1) << 1) | ((code & 2) << 2)
+    val b = 17 | ((code & 4) >> 1) | ((code & 8) << 1)
+    [31, a & 31, b & 31, (a ^ b) & 31, a & 31, b & 31, 31]
+
+fn tiny_web_paint_to_draw(paint: TinyWebPaintResult, capacity_words: i32) -> TinyWebDrawResult:
+    if not paint.status.is_ok():
+        return TinyWebDrawResult(status: paint.status, stream: [], word_count: 0)
+    var writer = TinyDrawWriter.create(capacity_words)
+    for record in paint.records:
+        var status = TinyStatus.ok()
+        if record.opcode == TINY_PAINT_FILL_RECT:
+            status = writer.fill_rect(record.bounds.x, record.bounds.y, record.bounds.width, record.bounds.height, record.color)
+        elif record.opcode == TINY_PAINT_BORDER_RECT:
+            status = writer.border_rect(record.bounds.x, record.bounds.y, record.bounds.width, record.bounds.height, record.color)
+        elif record.opcode == TINY_PAINT_GLYPH_RUN:
+            val glyphs = record.text_value.chars()
+            var cursor_x = record.bounds.x
+            var index = 0
+            while index < glyphs.len() and status.is_ok():
+                val code = glyphs[index].char_code_at(0) as i32
+                status = writer.glyph_mono(cursor_x, record.bounds.y, 5, 7, record.color, _tiny_web_glyph_rows(code))
+                cursor_x = cursor_x + 6
+                index = index + 1
+        else:
+            status = TinyStatus.error(TINY_ERR_UNSUPPORTED, record.opcode)
+        if not status.is_ok():
+            return TinyWebDrawResult(status: status, stream: writer.stream(), word_count: writer.count())
+    val ended = writer.end_stream()
+    TinyWebDrawResult(status: ended, stream: writer.stream(), word_count: writer.count())

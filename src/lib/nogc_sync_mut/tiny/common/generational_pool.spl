@@ -1,0 +1,59 @@
+# codex-impl
+
+use std.tiny.common.status.{TinyStatus, TINY_OK, TINY_ERR_CAPACITY, TINY_ERR_INVALID, TINY_ERR_STALE_HANDLE}
+use std.tiny.common.types.{TinyHandle}
+
+class TinyHandleResult:
+    status: TinyStatus
+    handle: TinyHandle
+
+class TinyGenerationalPool:
+    capacity: i32
+    generations: [i32]
+    occupied: [bool]
+    live_count: i32
+
+    static fn with_capacity(capacity: i32) -> TinyGenerationalPool:
+        var generations: [i32] = []
+        var occupied: [bool] = []
+        var i = 0
+        while i < capacity:
+            generations.push(0)
+            occupied.push(false)
+            i = i + 1
+        TinyGenerationalPool(capacity: capacity, generations: generations, occupied: occupied, live_count: 0)
+
+    fn count() -> i32:
+        self.live_count
+
+    fn validate(handle: TinyHandle) -> TinyStatus:
+        if handle.index < 0 or handle.index >= self.capacity or handle.generation <= 0:
+            return TinyStatus.error(TINY_ERR_INVALID, handle.index)
+        if not self.occupied[handle.index] or self.generations[handle.index] != handle.generation:
+            return TinyStatus.error(TINY_ERR_STALE_HANDLE, handle.index)
+        TinyStatus.ok()
+
+    me acquire() -> TinyHandleResult:
+        var i = 0
+        while i < self.capacity:
+            if not self.occupied[i] and self.generations[i] < 2147483647:
+                val next_generation = self.generations[i] + 1
+                self.generations[i] = next_generation
+                self.occupied[i] = true
+                self.live_count = self.live_count + 1
+                return TinyHandleResult(
+                    status: TinyStatus.ok(),
+                    handle: TinyHandle(index: i, generation: next_generation),
+                )
+            i = i + 1
+        TinyHandleResult(
+            status: TinyStatus.error(TINY_ERR_CAPACITY, self.capacity),
+            handle: TinyHandle.invalid(),
+        )
+
+    me release(handle: TinyHandle) -> TinyStatus:
+        val status = self.validate(handle)
+        if status.code != TINY_OK: return status
+        self.occupied[handle.index] = false
+        self.live_count = self.live_count - 1
+        TinyStatus.ok()

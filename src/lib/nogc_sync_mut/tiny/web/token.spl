@@ -1,0 +1,130 @@
+# codex-impl
+
+use std.tiny.common.status.{TinyStatus, TINY_ERR_CAPACITY, TINY_ERR_MALFORMED}
+
+const TINY_HTML_START: i32 = 1
+const TINY_HTML_END: i32 = 2
+const TINY_HTML_TEXT: i32 = 3
+
+class TinyHtmlToken:
+    kind: i32
+    name: text
+    value: text
+    offset: i32
+    self_closing: bool
+
+class TinyHtmlTokenResult:
+    status: TinyStatus
+    tokens: [TinyHtmlToken]
+
+fn _tiny_tag_name(raw: text) -> text:
+    val clean = raw.trim()
+    var end = 0
+    while end < clean.len():
+        val ch = clean.slice(end, end + 1)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "/": break
+        end = end + 1
+    clean.slice(0, end).lower()
+
+fn tiny_html_attribute(raw: text, wanted_name: text) -> text:
+    val clean = raw.trim()
+    var cursor = _tiny_tag_name(clean).len()
+    while cursor < clean.len():
+        while cursor < clean.len() and (clean.slice(cursor, cursor + 1) == " " or clean.slice(cursor, cursor + 1) == "\t" or clean.slice(cursor, cursor + 1) == "\n"): cursor = cursor + 1
+        val name_start = cursor
+        while cursor < clean.len():
+            val ch = clean.slice(cursor, cursor + 1)
+            if ch == "=" or ch == " " or ch == "\t" or ch == "\n" or ch == "/": break
+            cursor = cursor + 1
+        val name = clean.slice(name_start, cursor).lower()
+        while cursor < clean.len() and (clean.slice(cursor, cursor + 1) == " " or clean.slice(cursor, cursor + 1) == "\t" or clean.slice(cursor, cursor + 1) == "\n"): cursor = cursor + 1
+        var value = ""
+        if cursor < clean.len() and clean.slice(cursor, cursor + 1) == "=":
+            cursor = cursor + 1
+            while cursor < clean.len() and clean.slice(cursor, cursor + 1) == " ": cursor = cursor + 1
+            if cursor < clean.len() and (clean.slice(cursor, cursor + 1) == "\"" or clean.slice(cursor, cursor + 1) == "'"):
+                val quote = clean.slice(cursor, cursor + 1)
+                cursor = cursor + 1
+                val value_start = cursor
+                while cursor < clean.len() and clean.slice(cursor, cursor + 1) != quote: cursor = cursor + 1
+                value = clean.slice(value_start, cursor)
+                if cursor < clean.len(): cursor = cursor + 1
+            else:
+                val value_start = cursor
+                while cursor < clean.len() and clean.slice(cursor, cursor + 1) != " " and clean.slice(cursor, cursor + 1) != "/": cursor = cursor + 1
+                value = clean.slice(value_start, cursor)
+        if name == wanted_name.lower(): return value
+        if cursor == name_start: cursor = cursor + 1
+    ""
+
+fn tiny_html_has_attribute(raw: text, wanted_name: text) -> bool:
+    val clean = raw.trim()
+    var cursor = _tiny_tag_name(clean).len()
+    while cursor < clean.len():
+        while cursor < clean.len() and (clean.slice(cursor, cursor + 1) == " " or clean.slice(cursor, cursor + 1) == "\t" or clean.slice(cursor, cursor + 1) == "\n"): cursor = cursor + 1
+        val name_start = cursor
+        while cursor < clean.len():
+            val ch = clean.slice(cursor, cursor + 1)
+            if ch == "=" or ch == " " or ch == "\t" or ch == "\n" or ch == "/": break
+            cursor = cursor + 1
+        val name = clean.slice(name_start, cursor).lower()
+        if name == wanted_name.lower(): return true
+        while cursor < clean.len() and (clean.slice(cursor, cursor + 1) == " " or clean.slice(cursor, cursor + 1) == "\t" or clean.slice(cursor, cursor + 1) == "\n"): cursor = cursor + 1
+        if cursor < clean.len() and clean.slice(cursor, cursor + 1) == "=":
+            cursor = cursor + 1
+            while cursor < clean.len() and clean.slice(cursor, cursor + 1) == " ": cursor = cursor + 1
+            if cursor < clean.len() and (clean.slice(cursor, cursor + 1) == "\"" or clean.slice(cursor, cursor + 1) == "'"):
+                val quote = clean.slice(cursor, cursor + 1)
+                cursor = cursor + 1
+                while cursor < clean.len() and clean.slice(cursor, cursor + 1) != quote: cursor = cursor + 1
+                if cursor < clean.len(): cursor = cursor + 1
+            else:
+                while cursor < clean.len() and clean.slice(cursor, cursor + 1) != " " and clean.slice(cursor, cursor + 1) != "/": cursor = cursor + 1
+        if cursor == name_start: cursor = cursor + 1
+    false
+
+fn tiny_html_tokenize(source: text, max_tokens: i32, max_text_bytes: i32) -> TinyHtmlTokenResult:
+    var tokens: [TinyHtmlToken] = []
+    var cursor = 0
+    var text_bytes = 0
+    while cursor < source.len():
+        if tokens.len() >= max_tokens:
+            return TinyHtmlTokenResult(status: TinyStatus.error(TINY_ERR_CAPACITY, tokens.len()), tokens: tokens)
+        if source.slice(cursor, cursor + 1) != "<":
+            var finish = cursor
+            while finish < source.len() and source.slice(finish, finish + 1) != "<": finish = finish + 1
+            val value = source.slice(cursor, finish)
+            text_bytes = text_bytes + value.len()
+            if text_bytes > max_text_bytes:
+                return TinyHtmlTokenResult(status: TinyStatus.error(TINY_ERR_CAPACITY, text_bytes), tokens: tokens)
+            if value.len() > 0:
+                tokens.push(TinyHtmlToken(kind: TINY_HTML_TEXT, name: "", value: value, offset: cursor, self_closing: false))
+            cursor = finish
+        else:
+            var finish = cursor + 1
+            var quote = ""
+            while finish < source.len():
+                val ch = source.slice(finish, finish + 1)
+                if (ch == "\"" or ch == "'"):
+                    if quote == "": quote = ch
+                    else:
+                        if quote == ch: quote = ""
+                if ch == ">" and quote == "": break
+                finish = finish + 1
+            if finish >= source.len():
+                return TinyHtmlTokenResult(status: TinyStatus.error(TINY_ERR_MALFORMED, cursor), tokens: tokens)
+            val raw = source.slice(cursor + 1, finish).trim()
+            if raw.len() == 0:
+                return TinyHtmlTokenResult(status: TinyStatus.error(TINY_ERR_MALFORMED, cursor), tokens: tokens)
+            if raw.slice(0, 1) == "!":
+                cursor = finish + 1
+            else:
+                val ending = raw.slice(0, 1) == "/"
+                val body = if ending: raw.slice(1, raw.len()) else: raw
+                val name = _tiny_tag_name(body)
+                if name.len() == 0:
+                    return TinyHtmlTokenResult(status: TinyStatus.error(TINY_ERR_MALFORMED, cursor), tokens: tokens)
+                val self_closing = raw.slice(raw.len() - 1, raw.len()) == "/" or name == "input" or name == "br" or name == "hr"
+                tokens.push(TinyHtmlToken(kind: if ending: TINY_HTML_END else: TINY_HTML_START, name: name, value: body, offset: cursor, self_closing: self_closing))
+                cursor = finish + 1
+    TinyHtmlTokenResult(status: TinyStatus.ok(), tokens: tokens)

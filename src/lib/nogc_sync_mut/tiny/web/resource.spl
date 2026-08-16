@@ -1,0 +1,136 @@
+# codex-impl
+
+use std.tiny.common.status.{TinyStatus, TINY_ERR_CAPACITY, TINY_ERR_INVALID, TINY_ERR_UNSUPPORTED}
+use std.tiny.wm_contract.ports.{TinyWebHostPortV1, TinyWebHostPortV2}
+
+const TINY_RESOURCE_BUILTIN: i32 = 1
+const TINY_RESOURCE_ROM: i32 = 2
+const TINY_RESOURCE_VFS: i32 = 3
+
+class TinyResourceReceipt:
+    status: TinyStatus
+    provider_kind: i32
+    path: text
+    bytes_read: i32
+
+class TinyWebResourceEntry:
+    resource_id: i32
+    provider_kind: i32
+    path: text
+    bytes: [u8]
+
+class TinyWebResourceLoad:
+    status: TinyStatus
+    resource_id: i32
+    provider_kind: i32
+    path: text
+    bytes: [u8]
+
+class TinyWebHostReadReceipt:
+    status: TinyStatus
+    viewport_width: i32
+    viewport_height: i32
+    resource_id: i32
+    bytes: [u8]
+
+class TinyWebMemoryHost:
+    viewport_width_value: i32
+    viewport_height_value: i32
+    max_resources: i32
+    max_resource_bytes: i32
+    entries: [TinyWebResourceEntry]
+    sealed: bool
+
+    static fn bounded(viewport_width: i32, viewport_height: i32, max_resources: i32, max_resource_bytes: i32) -> TinyWebMemoryHost:
+        TinyWebMemoryHost(
+            viewport_width_value: viewport_width, viewport_height_value: viewport_height,
+            max_resources: max_resources, max_resource_bytes: max_resource_bytes, entries: [], sealed: false,
+        )
+
+    me register(resource_id: i32, provider_kind: i32, path: text, bytes: [u8]) -> TinyStatus:
+        if self.sealed: return TinyStatus.error(TINY_ERR_INVALID, resource_id)
+        if resource_id < 0: return TinyStatus.error(TINY_ERR_INVALID, resource_id)
+        val request = tiny_resource_request(provider_kind, path, bytes.len(), self.max_resource_bytes)
+        if not request.status.is_ok(): return request.status
+        if self.entries.len() >= self.max_resources: return TinyStatus.error(TINY_ERR_CAPACITY, self.entries.len())
+        for entry in self.entries:
+            if entry.resource_id == resource_id: return TinyStatus.error(TINY_ERR_INVALID, resource_id)
+            if entry.provider_kind == provider_kind and entry.path == path: return TinyStatus.error(TINY_ERR_INVALID, resource_id)
+        self.entries.push(TinyWebResourceEntry(resource_id: resource_id, provider_kind: provider_kind, path: path, bytes: bytes))
+        TinyStatus.ok()
+
+    me seal():
+        self.sealed = true
+
+    fn load(provider_kind: i32, path: text, max_bytes: i32) -> TinyWebResourceLoad:
+        val request = tiny_resource_request(provider_kind, path, 0, max_bytes)
+        if not request.status.is_ok():
+            return TinyWebResourceLoad(status: request.status, resource_id: -1, provider_kind: provider_kind, path: path, bytes: [])
+        for entry in self.entries:
+            if entry.provider_kind == provider_kind and entry.path == path:
+                if entry.bytes.len() > max_bytes:
+                    return TinyWebResourceLoad(status: TinyStatus.error(TINY_ERR_CAPACITY, entry.bytes.len()), resource_id: entry.resource_id, provider_kind: provider_kind, path: path, bytes: [])
+                return TinyWebResourceLoad(status: TinyStatus.ok(), resource_id: entry.resource_id, provider_kind: provider_kind, path: path, bytes: entry.bytes)
+        TinyWebResourceLoad(status: TinyStatus.error(TINY_ERR_INVALID, path.len()), resource_id: -1, provider_kind: provider_kind, path: path, bytes: [])
+
+impl TinyWebHostPortV1 for TinyWebMemoryHost:
+    fn viewport_width() -> i32:
+        self.viewport_width_value
+
+    fn viewport_height() -> i32:
+        self.viewport_height_value
+
+    fn resource_bytes(resource_id: i32) -> [u8]:
+        for entry in self.entries:
+            if entry.resource_id == resource_id: return entry.bytes
+        []
+
+impl TinyWebHostPortV2 for TinyWebMemoryHost:
+    fn viewport_width() -> i32:
+        self.viewport_width_value
+
+    fn viewport_height() -> i32:
+        self.viewport_height_value
+
+    fn resource_exists(resource_id: i32) -> bool:
+        for entry in self.entries:
+            if entry.resource_id == resource_id: return true
+        false
+
+    fn resource_bytes(resource_id: i32) -> [u8]:
+        for entry in self.entries:
+            if entry.resource_id == resource_id: return entry.bytes
+        []
+
+fn tiny_web_host_read(host: TinyWebHostPortV1, resource_id: i32, max_bytes: i32) -> TinyWebHostReadReceipt:
+    val width = host.viewport_width()
+    val height = host.viewport_height()
+    if width <= 0 or height <= 0 or resource_id < 0:
+        return TinyWebHostReadReceipt(status: TinyStatus.error(TINY_ERR_INVALID, resource_id), viewport_width: width, viewport_height: height, resource_id: resource_id, bytes: [])
+    val bytes = host.resource_bytes(resource_id)
+    if bytes.len() == 0:
+        return TinyWebHostReadReceipt(status: TinyStatus.error(TINY_ERR_INVALID, resource_id), viewport_width: width, viewport_height: height, resource_id: resource_id, bytes: [])
+    if max_bytes < 0 or bytes.len() > max_bytes:
+        return TinyWebHostReadReceipt(status: TinyStatus.error(TINY_ERR_CAPACITY, bytes.len()), viewport_width: width, viewport_height: height, resource_id: resource_id, bytes: [])
+    TinyWebHostReadReceipt(status: TinyStatus.ok(), viewport_width: width, viewport_height: height, resource_id: resource_id, bytes: bytes)
+
+fn tiny_web_host_read_v2(host: TinyWebHostPortV2, resource_id: i32, max_bytes: i32) -> TinyWebHostReadReceipt:
+    val width = host.viewport_width()
+    val height = host.viewport_height()
+    if width <= 0 or height <= 0 or resource_id < 0:
+        return TinyWebHostReadReceipt(status: TinyStatus.error(TINY_ERR_INVALID, resource_id), viewport_width: width, viewport_height: height, resource_id: resource_id, bytes: [])
+    if not host.resource_exists(resource_id):
+        return TinyWebHostReadReceipt(status: TinyStatus.error(TINY_ERR_INVALID, resource_id), viewport_width: width, viewport_height: height, resource_id: resource_id, bytes: [])
+    val bytes = host.resource_bytes(resource_id)
+    if max_bytes < 0 or bytes.len() > max_bytes:
+        return TinyWebHostReadReceipt(status: TinyStatus.error(TINY_ERR_CAPACITY, bytes.len()), viewport_width: width, viewport_height: height, resource_id: resource_id, bytes: [])
+    TinyWebHostReadReceipt(status: TinyStatus.ok(), viewport_width: width, viewport_height: height, resource_id: resource_id, bytes: bytes)
+
+fn tiny_resource_request(provider_kind: i32, path: text, available_bytes: i32, max_bytes: i32) -> TinyResourceReceipt:
+    if provider_kind != TINY_RESOURCE_BUILTIN and provider_kind != TINY_RESOURCE_ROM and provider_kind != TINY_RESOURCE_VFS:
+        return TinyResourceReceipt(status: TinyStatus.error(TINY_ERR_UNSUPPORTED, provider_kind), provider_kind: provider_kind, path: path, bytes_read: 0)
+    if path.len() == 0 or not path.starts_with("/") or path.contains(".."):
+        return TinyResourceReceipt(status: TinyStatus.error(TINY_ERR_INVALID, path.len()), provider_kind: provider_kind, path: path, bytes_read: 0)
+    if available_bytes < 0 or available_bytes > max_bytes:
+        return TinyResourceReceipt(status: TinyStatus.error(TINY_ERR_CAPACITY, available_bytes), provider_kind: provider_kind, path: path, bytes_read: 0)
+    TinyResourceReceipt(status: TinyStatus.ok(), provider_kind: provider_kind, path: path, bytes_read: available_bytes)

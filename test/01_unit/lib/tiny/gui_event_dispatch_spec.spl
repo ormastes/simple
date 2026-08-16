@@ -1,0 +1,94 @@
+use std.spec.{describe, it, expect}
+use std.tiny.common.event.{TinyEvent, TINY_EVENT_KEY, TINY_EVENT_POINTER_DOWN, TINY_EVENT_TEXT, TINY_EVENT_WHEEL}
+use std.tiny.common.types.{TinyHandle, TinyPoint, TinyRect}
+use std.tiny.gui.component.{TINY_COMPONENT_BUTTON, TINY_COMPONENT_CHECKBOX, TINY_COMPONENT_LIST, TINY_COMPONENT_ROW, TINY_COMPONENT_SCROLL_PANE, TINY_COMPONENT_TEXT, TINY_COMPONENT_TEXT_INPUT}
+use std.tiny.gui.event_dispatch.{TINY_KEY_DOWN, TINY_KEY_ENTER, TINY_KEY_TAB, tiny_gui_dispatch}
+use std.tiny.gui.state.{TinyGuiState}
+
+describe("tiny GUI focus and event dispatch"):
+    it("routes tab, enter, pointer, checkbox, and text input"):
+        var state = TinyGuiState.bounded(3)
+        state.add(TinyHandle.invalid(), TINY_COMPONENT_BUTTON, TinyRect(x: 0, y: 0, width: 20, height: 10), "go")
+        state.add(TinyHandle.invalid(), TINY_COMPONENT_CHECKBOX, TinyRect(x: 0, y: 12, width: 20, height: 10), "check")
+        state.add(TinyHandle.invalid(), TINY_COMPONENT_TEXT_INPUT, TinyRect(x: 0, y: 24, width: 30, height: 10), "")
+        var button = state.nodes[0]
+        button.value = 77
+        state.nodes[0] = button
+
+        val tab = tiny_gui_dispatch(state, TinyEvent(kind: TINY_EVENT_KEY, point: TinyPoint(x: 0, y: 0), code: TINY_KEY_TAB, value: 0))
+        state = tab.state
+        expect(tab.target_index).to_equal(0)
+        val enter = tiny_gui_dispatch(state, TinyEvent(kind: TINY_EVENT_KEY, point: TinyPoint(x: 0, y: 0), code: TINY_KEY_ENTER, value: 0))
+        state = enter.state
+        expect(enter.action_id).to_equal(77)
+
+        val click = tiny_gui_dispatch(state, TinyEvent(kind: TINY_EVENT_POINTER_DOWN, point: TinyPoint(x: 4, y: 16), code: 0, value: 0))
+        state = click.state
+        expect(click.changed).to_be(true)
+        expect(state.nodes[1].value).to_equal(1)
+
+        val focus_input = tiny_gui_dispatch(state, TinyEvent(kind: TINY_EVENT_POINTER_DOWN, point: TinyPoint(x: 4, y: 28), code: 0, value: 0))
+        state = focus_input.state
+        val typed = tiny_gui_dispatch(state, TinyEvent(kind: TINY_EVENT_TEXT, point: TinyPoint(x: 0, y: 0), code: 65, value: 0))
+        state = typed.state
+        expect(typed.changed).to_be(true)
+        expect(state.nodes[2].text_value).to_equal("A")
+
+    it("resolves child-local bounds before pointer hit testing"):
+        var state = TinyGuiState.bounded(2)
+        state.add(TinyHandle.invalid(), TINY_COMPONENT_BUTTON, TinyRect(x: 40, y: 30, width: 40, height: 30), "parent")
+        val parent = state.handle_at(0)
+        state.add(parent, TINY_COMPONENT_CHECKBOX, TinyRect(x: 5, y: 6, width: 10, height: 10), "child")
+        val click = tiny_gui_dispatch(state, TinyEvent(kind: TINY_EVENT_POINTER_DOWN, point: TinyPoint(x: 47, y: 38), code: 0, value: 0))
+        expect(click.target_index).to_equal(1)
+        expect(click.state.nodes[1].value).to_equal(1)
+
+    it("routes pointer events through Row flow positions"):
+        var state = TinyGuiState.bounded(3)
+        state.add(TinyHandle.invalid(), TINY_COMPONENT_ROW, TinyRect(x: 0, y: 0, width: 20, height: 4), "")
+        state.add(state.handle_at(0), TINY_COMPONENT_BUTTON, TinyRect(x: 99, y: 99, width: 5, height: 3), "go")
+        state.add(state.handle_at(0), TINY_COMPONENT_CHECKBOX, TinyRect(x: 99, y: 99, width: 5, height: 3), "check")
+        val click = tiny_gui_dispatch(state, TinyEvent(kind: TINY_EVENT_POINTER_DOWN, point: TinyPoint(x: 7, y: 1), code: 0, value: 0))
+        expect(click.target_index).to_equal(2)
+        expect(click.state.nodes[2].value).to_equal(1)
+
+    it("reports events without a target and unsupported events"):
+        var empty = TinyGuiState.bounded(0)
+        val miss = tiny_gui_dispatch(empty, TinyEvent(kind: TINY_EVENT_POINTER_DOWN, point: TinyPoint(x: 99, y: 99), code: 0, value: 0))
+        expect(miss.status.is_ok()).to_be(false)
+
+        var state = TinyGuiState.bounded(1)
+        state.add(TinyHandle.invalid(), TINY_COMPONENT_BUTTON, TinyRect(x: 0, y: 0, width: 10, height: 10), "go")
+        state.focused_index = 0
+        val unsupported = tiny_gui_dispatch(state, TinyEvent.none())
+        expect(unsupported.status.is_ok()).to_be(false)
+
+    it("does not assign pointer focus to non-focusable display components"):
+        var state = TinyGuiState.bounded(1)
+        state.add(TinyHandle.invalid(), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 20, height: 10), "label")
+        val click = tiny_gui_dispatch(state, TinyEvent(kind: TINY_EVENT_POINTER_DOWN, point: TinyPoint(x: 2, y: 2), code: 0, value: 0))
+        expect(click.status.is_ok()).to_be(false)
+        expect(click.target_index).to_equal(-1)
+        expect(click.state.focused_index).to_equal(-1)
+
+    it("selects List items and scrolls ScrollPane children through resolved geometry"):
+        var list_state = TinyGuiState.bounded(3)
+        list_state.add(TinyHandle.invalid(), TINY_COMPONENT_LIST, TinyRect(x: 0, y: 0, width: 20, height: 3), "")
+        list_state.add(list_state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 10, height: 1), "first")
+        list_state.add(list_state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 10, height: 1), "second")
+        val selected = tiny_gui_dispatch(list_state, TinyEvent(kind: TINY_EVENT_POINTER_DOWN, point: TinyPoint(x: 3, y: 1), code: 0, value: 0))
+        expect(selected.status.is_ok()).to_be(true)
+        expect(selected.state.nodes[0].value).to_equal(1)
+        val moved = tiny_gui_dispatch(selected.state, TinyEvent(kind: TINY_EVENT_KEY, point: TinyPoint(x: 0, y: 0), code: TINY_KEY_DOWN, value: 0))
+        expect(moved.state.nodes[0].value).to_equal(1)
+
+        var scroll_state = TinyGuiState.bounded(4)
+        scroll_state.add(TinyHandle.invalid(), TINY_COMPONENT_SCROLL_PANE, TinyRect(x: 0, y: 0, width: 20, height: 2), "")
+        scroll_state.add(scroll_state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 10, height: 1), "one")
+        scroll_state.add(scroll_state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 10, height: 1), "two")
+        scroll_state.add(scroll_state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 10, height: 1), "three")
+        val scrolled = tiny_gui_dispatch(scroll_state, TinyEvent(kind: TINY_EVENT_WHEEL, point: TinyPoint(x: 1, y: 1), code: 0, value: 1))
+        expect(scrolled.status.is_ok()).to_be(true)
+        expect(scrolled.changed).to_be(true)
+        expect(scrolled.state.nodes[0].value).to_equal(1)
+        expect(scrolled.state.resolved_panes(TinyRect(x: 0, y: 0, width: 20, height: 4))[1].absolute.y).to_equal(-1)

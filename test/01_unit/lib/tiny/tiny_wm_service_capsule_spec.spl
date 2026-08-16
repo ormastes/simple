@@ -1,0 +1,45 @@
+use std.spec.{describe, it, expect}
+use std.tiny.common.abi.{TINY_ABI_MAJOR, TINY_ABI_MINOR}
+use std.tiny.common.event.{TinyEvent, TINY_EVENT_POINTER_DOWN}
+use std.tiny.common.status.{TINY_OK, TINY_ERR_ABI}
+use std.tiny.common.types.{TinyPoint, TinyRect}
+use std.tiny.wm_contract.ports.{TinyWmPortV1}
+use os.services.tiny_wm.model.{TinyWmKiosk}
+use os.services.tiny_wm.service_capsule.{TinyWmServiceCapsule}
+
+describe "Tiny WM optional service capsule":
+    it "matches linked kiosk commands and frame receipts behind TinyWmPortV1":
+        var linked = TinyWmKiosk.create(100, 80, 3)
+        var service = TinyWmServiceCapsule.connect(100, 80, 3, TINY_ABI_MAJOR, TINY_ABI_MINOR)
+        expect(service.is_admitted()).to_be(true)
+        expect(linked.set_root(1).code).to_equal(TINY_OK)
+        expect(service.set_root(1).code).to_equal(TINY_OK)
+        val popup = TinyRect(x: 70, y: 60, width: 50, height: 40)
+        expect(linked.open_popup(2, popup).code).to_equal(TINY_OK)
+        expect(service.open_popup(2, popup).code).to_equal(TINY_OK)
+        val down = TinyEvent(kind: TINY_EVENT_POINTER_DOWN, point: TinyPoint(x: 75, y: 65), code: 1, value: 1)
+        expect(linked.dispatch(down).code).to_equal(TINY_OK)
+        expect(service.dispatch(down).code).to_equal(TINY_OK)
+        val linked_frame = linked.frame_receipt()
+        val service_frame = service.frame_receipt()
+        expect(service_frame.status.code).to_equal(linked_frame.status.code)
+        expect(service_frame.direct_present).to_equal(linked_frame.direct_present)
+        expect(service_frame.visible_surfaces).to_equal(linked_frame.visible_surfaces)
+        expect(service_frame.focused_content_id).to_equal(linked_frame.focused_content_id)
+        expect(service_frame.captured_content_id).to_equal(linked_frame.captured_content_id)
+        expect(service_frame.routed_content_id).to_equal(linked_frame.routed_content_id)
+        expect(service_frame.damage_count).to_equal(linked_frame.damage_count)
+        expect(service.kiosk.surfaces[1].resolved.width).to_equal(linked.surfaces[1].resolved.width)
+        expect(service.kiosk.surfaces[1].clip.width).to_equal(linked.surfaces[1].clip.width)
+        expect(service.accepted_requests).to_equal(4)
+        expect(service.rejected_requests).to_equal(0)
+
+    it "rejects incompatible ABI before mutating linked policy state":
+        var service = TinyWmServiceCapsule.connect(100, 80, 2, TINY_ABI_MAJOR + 1, TINY_ABI_MINOR)
+        expect(service.is_admitted()).to_be(false)
+        expect(service.set_root(1).code).to_equal(TINY_ERR_ABI)
+        expect(service.open_popup(2, TinyRect(x: 1, y: 1, width: 10, height: 10)).code).to_equal(TINY_ERR_ABI)
+        expect(service.frame().code).to_equal(TINY_ERR_ABI)
+        expect(service.kiosk.surface_count).to_equal(0)
+        expect(service.accepted_requests).to_equal(0)
+        expect(service.rejected_requests).to_equal(3)
