@@ -60,13 +60,32 @@ out.push((raw[i] & 0xFF).to_u8())
 That masking pattern is what `file_read_bytes` itself does internally, and what
 `scv_i64_bytes_to_u8` does for SCV.
 
-## The shim does not re-export the raw shape
+## The optional text read has its own name
+
+`file_read` returns `text`, never `text?`. If you want an absence case, call
+**`file_read_opt(path) -> text?`**.
+
+Until 2026-08-16 three compiler modules defined a module-local
+`fn file_read(path: text) -> text?`, so `file_read` existed in two incompatible
+return types at once. Because the function registry is keyed on NAME ALONE,
+which one a call site received depended on the import closure of the compiling
+module — and a caller written against `-> text` has no nil branch, so being
+handed the optional definition drops the absence path silently. Those three were
+renamed to `file_read_opt`; do not reintroduce an optional-returning
+`file_read`. Guarded by
+`test/01_unit/lib/nogc_sync_mut/file_read_single_return_type_spec.spl`.
+
+## Reaching the readers through the `app.io.mod` shim
 
 `src/app/io/mod.spl` is a backward-compatibility shim that re-exports the
-`file_ops` readers for `use app.io.mod (...)` callers. It re-exports
-`file_read_bytes` but **not** `file_read_bytes_i64`. Code going through the shim
-cannot reach the raw shape; import from `std.nogc_sync_mut.io.file_ops` directly
-if you need it.
+`file_ops` readers for `use app.io.mod (...)` callers. As of 2026-08-16 it
+re-exports **both** byte shapes — `file_read_bytes` and `file_read_bytes_i64`.
+Before that it carried only the `[u8]` one, so shim callers could not reach the
+shape SCV consumes.
+
+A symbol needs both an import line and an export line in that file to be
+reachable; one without the other is a dangling re-export. The guard spec asserts
+both lines exist for each byte reader.
 
 ## Related
 

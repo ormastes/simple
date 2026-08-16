@@ -57,6 +57,8 @@ entry point would again be caught only by inspection.
 | REQ-IOREAD-004 | Both entry points report the same byte at every index for the same file |
 | REQ-IOREAD-005 | Reading a real TrueType asset through the byte API preserves the leading sfnt version bytes `00 01 00 00` |
 | REQ-IOREAD-006 | The text and byte read families agree on length and content for an ASCII payload |
+| REQ-IOREAD-007 | No definition of `file_read` returns an optional; every definition shares the plain `text` return type, and exactly one is `pub` |
+| REQ-IOREAD-008 | The `app.io.mod` shim imports and exports both byte-read shapes, so shim callers can reach `file_read_bytes_i64` |
 
 ## Traceability matrix
 
@@ -68,6 +70,26 @@ entry point would again be caught only by inspection.
 | REQ-IOREAD-004 | should agree between the unsigned and raw read shapes | `disagreements == 0` |
 | REQ-IOREAD-005 | should preserve the sfnt version bytes of a real font | leading bytes equal `0,1,0,0` |
 | REQ-IOREAD-006 | should report the same ASCII content through both read families | `as_text == "SCV"`, `as_bytes[0] == 83` |
+| REQ-IOREAD-007 | no definition of file_read returns an optional / every definition shares the plain text return type / canonical text read exported exactly once | optional owners `== ""`, optional count `== 0`, `plain == total`, `pub == 1` |
+| REQ-IOREAD-008 | re-exports the canonical [u8] byte read / re-exports the raw [i64] byte read | `shim_exports(...) == 2` for each |
+
+REQ-IOREAD-007 and -008 are asserted by the unit guard
+`test/01_unit/lib/nogc_sync_mut/file_read_single_return_type_spec.spl`; they are
+static repo properties, so a unit-level oracle is the right altitude for them.
+REQ-IOREAD-001..006 are asserted by the system spec.
+
+## Code changes this plan covers
+
+| Change | Files |
+|---|---|
+| Rename the three module-local `fn file_read(...) -> text?` to `file_read_opt`, closing the two-return-type spread (6 call sites) | `src/compiler/40.mono/monomorphize/hot_reload.spl`, `src/compiler/99.loader/module_resolver/manifest.spl`, `src/compiler/99.loader/module_resolver/resolution.spl` |
+| Re-export `file_read_bytes_i64` through the compatibility shim | `src/app/io/mod.spl` |
+
+Both were verified statically by running the guard's own oracle commands:
+`file_read -> text?` = 0, `-> text` = 20, total = 20, `file_read_opt` = 3 (all
+`-> text?`), `pub fn file_read` = 1, and both byte readers present on 2 lines of
+the shim. That verifies the asserted facts; it is **not** evidence that the spec
+harness executed.
 
 ## Fail-closed design
 

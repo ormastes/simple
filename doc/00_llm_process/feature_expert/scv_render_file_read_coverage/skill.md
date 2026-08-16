@@ -65,11 +65,28 @@ byte-identical and segfault on a two-line program). The spec is fail-closed by
 construction: preconditions are asserted, nothing skips, no oracle is stubbed to
 pass. Do not record a pass for it until it has actually run.
 
+## Code landed by this lane
+
+- **`file_read` two-return-type spread closed.** The three module-local
+  `fn file_read(path: text) -> text?` definitions
+  (`40.mono/monomorphize/hot_reload.spl`,
+  `99.loader/module_resolver/manifest.spl`,
+  `99.loader/module_resolver/resolution.spl`) are renamed `file_read_opt`, with
+  their 6 call sites. `file_read` is now 20 definitions, all `-> text`. Safe
+  because all three were non-exported, so no cross-module caller could bind them.
+- **`app.io.mod` shim asymmetry closed.** It now imports and exports
+  `file_read_bytes_i64` alongside `file_read_bytes`.
+- **Guard added:** `test/01_unit/lib/nogc_sync_mut/file_read_single_return_type_spec.spl`
+  (REQ-IOREAD-007/008), with positive and negative oracle self-checks.
+
 ## Open work
 
-- Execute the spec once a runtime exists; record the result in the plan.
-- Add a sibling definition-count guard for the `file_read` text family — the
-  existing guard covers only `file_read_bytes` and has zero references to the
-  text family, so nothing catches a 24th definition.
-- `src/app/io/mod.spl` re-exports `file_read_bytes` but not
-  `file_read_bytes_i64`; decide whether the shim should expose both.
+- Execute both specs once a runtime exists; record results in the plan. Nine
+  asserted facts were verified by running the guard's own oracle commands, which
+  establishes the facts but **not** that the harness ran.
+- Converge the remaining 20 same-named `file_read -> text` definitions to one.
+  Not attempted here. Read the sibling doc first: full convergence of
+  `file_read_bytes` was tried and reverted because it hung the compiler.
+- The seed remains unbuildable (duplicate `rt_heap_*_bytes`), which is what
+  blocks execution. Owned by another lane — do not edit `runtime_memtrack.c`
+  from here.

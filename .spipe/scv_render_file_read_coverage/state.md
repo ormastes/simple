@@ -30,8 +30,15 @@ code-quality (review) + test-coverage
       traceability
 - [x] AC-5: Mirrored `doc/06_spec` Markdown manual authored (no executable
       `.spl` under `doc/06_spec`)
-- [ ] AC-6: Coverage EXECUTED and green — **BLOCKED**, no qualified pure-Simple
-      runtime exists. Not claimed.
+- [x] AC-6: Code fixes implemented — the two-return-type spread on `file_read`
+      closed by renaming the three module-local optional definitions to
+      `file_read_opt` (6 call sites), and the `app.io.mod` shim asymmetry closed
+      by re-exporting `file_read_bytes_i64`
+- [x] AC-7: Unit guard authored for the static properties (REQ-IOREAD-007/008),
+      with positive and negative oracle self-checks; all nine asserted facts
+      verified by running the guard's own oracle commands
+- [ ] AC-8: Coverage EXECUTED under a qualified runtime — **BLOCKED**, no
+      admissible pure-Simple runtime exists. Not claimed.
 
 ## Blockers
 - **No admissible runtime.** `bin/simple` is the Rust seed and is inadmissible
@@ -55,8 +62,20 @@ code-quality (review) + test-coverage
 - `doc/08_tracking/bug/test_tree_divergence_preexisting_red_2026-08-16.md`
   — mandatory step-over record for a pre-existing divergence red.
 
+## Code Landed
+- `src/compiler/40.mono/monomorphize/hot_reload.spl` — `file_read` -> `file_read_opt`
+- `src/compiler/99.loader/module_resolver/manifest.spl` — same rename
+- `src/compiler/99.loader/module_resolver/resolution.spl` — same rename
+- `src/app/io/mod.spl` — import + export `file_read_bytes_i64`
+
+Measured after the change: `file_read -> text?` = 0, `-> text` = 20, total = 20,
+`file_read_opt` = 3 (all `-> text?`), `pub fn file_read` = 1. The rename is safe
+because all three optional definitions were module-local and non-exported, so no
+cross-module caller could bind them.
+
 ## Artifacts
 - `test/03_system/stdlib/io/scv_render_file_read_contract_spec.spl`
+- `test/01_unit/lib/nogc_sync_mut/file_read_single_return_type_spec.spl`
 - `doc/06_spec/03_system/stdlib/io/scv_render_file_read_contract_spec.md`
 - `doc/03_plan/sys_test/scv_render_file_read_coverage.md`
 - `doc/07_guide/lib/io/file_read_byte_contracts.md`

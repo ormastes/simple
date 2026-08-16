@@ -1,6 +1,21 @@
 # `file_read` has 23 definitions across two incompatible return types
 
-**Status:** OPEN
+> **RETURN-TYPE SPREAD CLOSED 2026-08-16.** The three `-> text?` definitions were
+> module-local and non-exported; they are renamed to **`file_read_opt`**
+> (`40.mono/monomorphize/hot_reload.spl`, `99.loader/module_resolver/manifest.spl`,
+> `99.loader/module_resolver/resolution.spl`, 6 call sites total). `file_read`
+> is now **20 definitions, all `-> text`** — mutually substitutable, so the
+> misdispatch hazard is gone. Measured after the change: `-> text?` = 0,
+> `-> text` = 20, total = 20, `file_read_opt` = 3, `pub fn file_read` = 1.
+> Guarded by `test/01_unit/lib/nogc_sync_mut/file_read_single_return_type_spec.spl`.
+>
+> **Still open:** convergence to a single definition. Twenty same-named `-> text`
+> definitions remain. They are identical in signature so nothing misdispatches,
+> which is the same state the byte family reached on 2026-08-16. Note the sibling
+> doc records that full convergence of `file_read_bytes` was attempted and
+> reverted because it hung the compiler — expect the same hazard here.
+
+**Status:** PARTIALLY FIXED (return-type spread closed; single-definition convergence open)
 **Found:** 2026-08-16 — during the SCV file-read/rendering coverage review at
 `f6cadcc36aff61d16d988651ea36a040d2af6aad`, as the direct sibling of the
 `file_read_bytes` defect
@@ -62,16 +77,20 @@ not evidence of absence.
   limits blast radius but is also what let the spread grow to 23 unnoticed: each module
   quietly adds its own copy rather than importing the `pub` one.
 
-## No guard covers this family
+## Guard (added 2026-08-16)
 
 `test/01_unit/lib/nogc_sync_mut/file_read_bytes_single_definition_spec.spl` (81 lines)
 is the guard the 2026-08-09 doc refers to. It contains **zero** references to the plain
 `file_read` family — grep for `file_read\b` / `file_read(` in it returns nothing. So the
-23-definition text family is entirely unguarded, and no existing test would fail if a
-24th definition (or a third return type) were added tomorrow.
+text family was entirely unguarded, and no existing test would have failed if a 24th
+definition or a third return type were added.
 
-A sibling guard modelled on that spec is the cheapest containment step, and it can land
-independently of any de-duplication work.
+A sibling guard now exists:
+`test/01_unit/lib/nogc_sync_mut/file_read_single_return_type_spec.spl`. It asserts the
+property that was actually achieved — single return type — with positive and negative
+oracle self-checks so a green verdict is meaningful, and it names the offending file on
+failure. It deliberately does **not** assert single-definition convergence, since this
+change did not attempt that; an assertion failing for untried work is noise, not a guard.
 
 ## Not verified by execution
 
