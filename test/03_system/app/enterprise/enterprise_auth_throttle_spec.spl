@@ -6,7 +6,7 @@
 Lane `.spipe/simple_enterprise_suite` W5-A: real login for the enterprise web
 app. Credentials are per-tenant salted-hash rows seeded via an admin-guarded
 command (never plaintext); `POST /auth/login` issues a durable session token
-(sha256 over caller-supplied entropy) and `store_app_handle_bearer` resolves
+(sha256 over caller-supplied entropy plus server-side secret hash + sequence) and `store_app_handle_bearer` resolves
 `SessionContext` FROM `Authorization: Bearer <token>` — missing / wrong /
 revoked / expired all collapse to a GENERIC 401 with no user-enumeration
 detail. Request throttling is a deterministic fixed-window counter over
@@ -144,18 +144,27 @@ describe "enterprise auth — revocation and expiry":
         expect(http_status_code(after.status)).to_equal(401)
         store_close(store)
 
-describe "enterprise auth — replayed login idempotency":
-    it "same entropy + now yields the same token, no divergent session":
+describe "enterprise auth — repeated login issues distinct sessions":
+    it "does not collide two logins onto one token even with identical entropy + now":
+        # Until the W9-D security audit the token was
+        # sha256(entropy | tenant | actor | now), so two logins in the same
+        # second with the same entropy produced ONE token — and any party that
+        # knew a (constant) entropy could derive another actor's token. The
+        # derivation now also binds the actor's server-side secret hash and a
+        # per-store issuance sequence. Both sessions must exist and resolve.
         val store = fresh("replay")
         val t = tenant_a()
         val a = session_issue(store, "tenant-a", "clerk-1", "s3cret", 500, 1000, "same-entropy")
         val b = session_issue(store, "tenant-a", "clerk-1", "s3cret", 500, 1000, "same-entropy")
         expect(a.ok).to_be(true)
         expect(b.ok).to_be(true)
-        expect(a.detail).to_equal(b.detail)
+        expect(a.detail == b.detail).to_be(false)
         val resolved = session_resolve(store, "tenant-a", a.detail, 600)
         expect(resolved.0.active).to_be(true)
         expect(resolved.0.actor_id).to_equal("clerk-1")
+        val resolved_b = session_resolve(store, "tenant-a", b.detail, 600)
+        expect(resolved_b.0.active).to_be(true)
+        expect(resolved_b.0.actor_id).to_equal("clerk-1")
         store_close(store)
 
 describe "enterprise auth — tenant isolation of sessions":

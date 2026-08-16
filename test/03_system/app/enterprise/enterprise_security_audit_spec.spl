@@ -1,0 +1,479 @@
+"""
+# Enterprise Suite — Adversarial Security Audit (executable attack specs)
+
+## Overview
+
+Lane `.spipe/simple_enterprise_suite` W9-D. This is an ATTACK spec, not a
+feature spec: every scenario below drives a real attack through the real
+hardened dispatcher (`store_app_handle` / `store_app_handle_bearer`) or a real
+guarded command, and asserts the system FAILS CLOSED.
+
+Attack classes probed (see doc/07_guide/app/enterprise/security_posture.md for
+the matrix and the residual risks):
+
+1. **Tenant isolation** — a valid tenant-B session must never read tenant-A
+   catalog, employees, purchase orders, booking resources, or the dashboard
+   roll-up.
+2. **Authorization** — a low-privilege (`sales`) role must not reach an
+   admin/back-office read or write by picking a different route that shares
+   the same underlying command.
+3. **Session handling** — revoked and expired bearer tokens stop working
+   everywhere; a tenant-A token is inert against tenant-B; and a caller that
+   supplies CONSTANT entropy must still not get a token another party can
+   derive or collide with.
+4. **Injection / escaping** — SQL-ish payloads through form values reach only
+   prepared binds; XSS payloads through supplier / employee / resource /
+   table names and through denial details render escaped; traversal in a
+   route parameter is rejected.
+5. **Payment integrity** — a webhook signature must bind the event it
+   authorises (provider_ref + kind + event id + tenant), not just the opaque
+   payload, and must not cross tenants.
+6. **Denial of service** — no unauthenticated route performs unbounded work
+   before the request-limit and throttle rungs.
+
+## Troubleshooting
+
+- A 200 where a 401/403/404/409/413/429 is expected means a rung was skipped
+  in the dispatcher — fix the dispatcher, NEVER the expectation.
+- A raw `<script>` in a body means a view interpolated business data without
+  `esc()` — fix the view.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/simple_erp.md
+**Design:** N/A
+**Research:** doc/01_research/app/enterprise/simple_enterprise_suite_assessment_and_parallel_plan_2026-08-16.md
+
+Lane: .spipe/simple_enterprise_suite (v2, W9-D).
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+use std.nogc_sync_mut.enterprise_store.store.{store_open, store_close}
+use std.nogc_sync_mut.http_server.types.{HttpResponse, http_status_code}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext, CommandEnvelope, Money
+}
+use std.nogc_sync_mut.enterprise_sale.goods_sale.{
+    sale_setup, sale_add_product, sale_receive_stock, sale_place_order,
+    sale_order_status
+}
+use std.nogc_sync_mut.enterprise_hcm.hcm.{hcm_setup, hcm_hire}
+use std.nogc_sync_mut.enterprise_procurement.procurement.{
+    proc_setup, proc_supplier_add, proc_requisition_create,
+    proc_requisition_approve, proc_po_create
+}
+use std.nogc_sync_mut.enterprise_booking.booking.{
+    booking_setup, booking_create_resource
+}
+use std.nogc_sync_mut.enterprise_finance.finance.{fin_setup}
+use std.nogc_sync_mut.enterprise_outbox.outbox_worker.{outbox_worker_setup}
+use std.nogc_sync_mut.enterprise_payment.payment.{
+    PaymentProvider, provider_sign, provider_sign_webhook, payment_setup,
+    payment_create_intent, payment_webhook_receive, payment_intent_status
+}
+use std.nogc_sync_mut.enterprise_session.session.{
+    session_setup, credential_seed, session_issue, session_revoke
+}
+use std.nogc_sync_mut.enterprise_session.throttle.{throttle_setup}
+use app.enterprise_store_app.main.{store_app_handle}
+use app.enterprise_store_app.auth_routes.{store_app_handle_bearer}
+
+# =============================================================================
+# Fixtures — one db path per scenario
+# =============================================================================
+
+fn db_path(name: text) -> text:
+    "build/test-artifacts/ent_sec_audit_" + name + ".db"
+
+fn tenant_a() -> TenantContext:
+    TenantContext(tenant_id: "tenant-a", name: "Alpha Trading")
+
+fn tenant_b() -> TenantContext:
+    TenantContext(tenant_id: "tenant-b", name: "Beta Trading")
+
+fn admin_of(tenant_marker: text) -> ActorContext:
+    ActorContext(actor_id: "admin-" + tenant_marker, role: "admin")
+
+fn sales_actor() -> ActorContext:
+    ActorContext(actor_id: "clerk-1", role: "sales")
+
+fn session_for(who: ActorContext, tenant: TenantContext) -> SessionContext:
+    SessionContext(token: "tok-" + who.actor_id, actor_id: who.actor_id, tenant_id: tenant.tenant_id, active: true)
+
+fn plain_headers() -> [(text, text)]:
+    [("Host", "store.example"), ("Content-Length", "0")]
+
+fn bearer_headers(token: text) -> [(text, text)]:
+    [("Host", "store.example"), ("Content-Length", "0"), ("Authorization", "Bearer " + token)]
+
+fn envelope(key: text, action: text) -> CommandEnvelope:
+    CommandEnvelope(request_id: "req-" + key, idempotency_key: key, action: action, payload: "")
+
+# fresh_full opens a clean store with every vertical's schema applied.
+# wenv builds a webhook envelope carrying the opaque provider payload.
+fn wenv(key: text, payload: text) -> CommandEnvelope:
+    CommandEnvelope(request_id: "req-" + key, idempotency_key: key, action: "payment.webhook.receive", payload: payload)
+
+fn fresh_full(name: text):
+    dir_create_all("build/test-artifacts")
+    if file_exists(db_path(name)):
+        file_delete(db_path(name))
+    val store = store_open(db_path(name))
+    sale_setup(store)
+    hcm_setup(store)
+    proc_setup(store)
+    booking_setup(store)
+    fin_setup(store)
+    payment_setup(store)
+    outbox_worker_setup(store)
+    session_setup(store)
+    throttle_setup(store)
+    store
+
+# seed_tenant_a plants recognisable tenant-A data across the verticals.
+fn seed_tenant_a(store):
+    val t = tenant_a()
+    val admin = admin_of("a")
+    val sa = session_for(admin, t)
+    sale_add_product(store, sa, t, admin, "SKU-A-SECRET", "Alpha Widget", Money(amount_cents: 500, currency: "USD"))
+    sale_receive_stock(store, sa, t, admin, "SKU-A-SECRET", 10)
+    hcm_hire(store, sa, t, admin, envelope("k-hire-a", "hcm.hire"), "EMP-A-SECRET", "Alice Alpha", 100, 2000, 40)
+    proc_supplier_add(store, sa, t, admin, "SUP-A-SECRET", "Alpha Supply Co")
+    proc_requisition_create(store, sa, t, admin, envelope("k-req-a", "proc.requisition.create"), "REQ-A-SECRET", "SKU-A-SECRET", 5)
+    proc_requisition_approve(store, sa, t, admin, envelope("k-appr-a", "proc.requisition.approve"), "REQ-A-SECRET")
+    proc_po_create(store, sa, t, admin, envelope("k-po-a", "proc.po.create"), "PO-A-SECRET", "REQ-A-SECRET", "SUP-A-SECRET", Money(amount_cents: 400, currency: "USD"))
+    val bres = booking_create_resource(store, sa, t, admin, "RES-A-SECRET", "capacity-pool", 4, "v1")
+    expect(bres.reason).to_equal("accepted")
+    true
+
+# =============================================================================
+# 1. Tenant isolation — several routes, not one
+# =============================================================================
+
+describe "attack: tenant isolation — a tenant-B session reads tenant-A data":
+    it "leaks nothing across ANY of the catalog, hcm, proc, booking, dashboard routes":
+        val store = fresh_full("tenant")
+        seed_tenant_a(store)
+        val tb = tenant_b()
+        val admin_b = admin_of("b")
+        val sb = session_for(admin_b, tb)
+
+        step("ATTACK: tenant-B admin reads the store catalog")
+        val cat = store_app_handle(store, sb, tb, admin_b, "GET", "/store/catalog", plain_headers(), "")
+        expect(http_status_code(cat.status)).to_equal(200)
+        expect(cat.body.contains("SKU-A-SECRET")).to_be(false)
+
+        step("ATTACK: tenant-B admin reads the HCM roster")
+        val emp = store_app_handle(store, sb, tb, admin_b, "GET", "/hcm/employees", plain_headers(), "")
+        expect(http_status_code(emp.status)).to_equal(200)
+        expect(emp.body.contains("EMP-A-SECRET")).to_be(false)
+        expect(emp.body.contains("Alice Alpha")).to_be(false)
+
+        step("ATTACK: tenant-B admin reads open purchase orders")
+        val pos = store_app_handle(store, sb, tb, admin_b, "GET", "/proc/pos", plain_headers(), "")
+        expect(http_status_code(pos.status)).to_equal(200)
+        expect(pos.body.contains("PO-A-SECRET")).to_be(false)
+        expect(pos.body.contains("Alpha Supply Co")).to_be(false)
+
+        step("ATTACK: tenant-B admin reads bookable resources")
+        val res = store_app_handle(store, sb, tb, admin_b, "GET", "/booking/resources", plain_headers(), "")
+        expect(http_status_code(res.status)).to_equal(200)
+        expect(res.body.contains("RES-A-SECRET")).to_be(false)
+
+        step("ATTACK: tenant-B admin reads the dashboard roll-up")
+        val dash = store_app_handle(store, sb, tb, admin_b, "GET", "/admin/dashboard", plain_headers(), "")
+        expect(http_status_code(dash.status)).to_equal(200)
+        expect(dash.body.contains("SKU-A-SECRET")).to_be(false)
+        expect(dash.body.contains("<span class=\"employees\">0</span>")).to_be(true)
+        expect(dash.body.contains("<span class=\"open-pos\">0</span>")).to_be(true)
+        expect(dash.body.contains("<span class=\"products\">0</span>")).to_be(true)
+        store_close(store)
+
+    it "cannot MUTATE tenant-A records from a tenant-B session":
+        val store = fresh_full("tenant_mutate")
+        seed_tenant_a(store)
+        val tb = tenant_b()
+        val admin_b = admin_of("b")
+        val sb = session_for(admin_b, tb)
+
+        step("ATTACK: tenant-B places an order against tenant-A's SKU")
+        val order = store_app_handle(store, sb, tb, admin_b, "POST", "/store/order", plain_headers(),
+            "order=ORD-X&sku=SKU-A-SECRET&qty=1&idem=k-x")
+        expect(http_status_code(order.status)).to_equal(404)
+
+        step("The order did not appear in tenant-A's stream either")
+        expect(sale_order_status(store, "tenant-a", "ORD-X")).to_equal("")
+
+        step("ATTACK: tenant-B receives against tenant-A's purchase order")
+        val recv = store_app_handle(store, sb, tb, admin_b, "POST", "/proc/receive", plain_headers(),
+            "po=PO-A-SECRET&qty=5&idem=k-y")
+        expect(http_status_code(recv.status) != 200).to_be(true)
+
+        step("ATTACK: tenant-B clocks in tenant-A's employee")
+        val clock = store_app_handle(store, sb, tb, admin_b, "POST", "/hcm/clock/in", plain_headers(),
+            "employee=EMP-A-SECRET&now=200&idem=k-z")
+        expect(http_status_code(clock.status) != 200).to_be(true)
+        store_close(store)
+
+# =============================================================================
+# 2. Authorization — reaching an admin action through a different route
+# =============================================================================
+
+describe "attack: authorization — a low-privilege role hunts for an unguarded route":
+    it "gets 403 on every back-office read and write it can name":
+        val store = fresh_full("authz")
+        seed_tenant_a(store)
+        val t = tenant_a()
+        val clerk = sales_actor()
+        val sc = session_for(clerk, t)
+
+        step("ATTACK: the sales clerk reads the admin dashboard")
+        expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/admin/dashboard", plain_headers(), "").status)).to_equal(403)
+
+        step("ATTACK: the sales clerk reads the HCM roster and payroll export")
+        expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/hcm/employees", plain_headers(), "").status)).to_equal(403)
+        expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/hcm/payroll/export", plain_headers(), "").status)).to_equal(403)
+
+        step("ATTACK: the sales clerk reads procurement POs and the reconciliation")
+        expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/proc/pos", plain_headers(), "").status)).to_equal(403)
+        expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/proc/reconcile", plain_headers(), "").status)).to_equal(403)
+
+        step("ATTACK: the sales clerk reads every finance report")
+        expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/trial-balance", plain_headers(), "").status)).to_equal(403)
+        expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/ar", plain_headers(), "").status)).to_equal(403)
+        expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/ap", plain_headers(), "").status)).to_equal(403)
+        expect(http_status_code(store_app_handle(store, sc, t, clerk, "GET", "/fin/period/status", plain_headers(), "").status)).to_equal(403)
+
+        step("ATTACK: the sales clerk decides a leave request and closes a period")
+        expect(http_status_code(store_app_handle(store, sc, t, clerk, "POST", "/hcm/leave/decide", plain_headers(), "leave=LV-1&approve=1&idem=k1").status)).to_equal(403)
+        expect(http_status_code(store_app_handle(store, sc, t, clerk, "POST", "/fin/period/close", plain_headers(), "end=1000&now=1001&idem=k2").status)).to_equal(403)
+
+        step("ATTACK: the sales clerk seeds itself an admin credential via the proc route family")
+        expect(http_status_code(store_app_handle(store, sc, t, clerk, "POST", "/proc/po", plain_headers(), "po=PO-EVIL&req=REQ-A-SECRET&supplier=SUP-A-SECRET&cost=1&idem=k3").status)).to_equal(403)
+        store_close(store)
+
+# =============================================================================
+# 3. Session handling — bearer resolution, revocation, expiry, cross-tenant
+# =============================================================================
+
+describe "attack: session handling — stolen, revoked, expired, cross-tenant tokens":
+    it "refuses a revoked, an expired, and a cross-tenant bearer token":
+        val store = fresh_full("session")
+        val t = tenant_a()
+        val admin = admin_of("a")
+        credential_seed(store, session_for(admin, t), t, admin, "clerk-1", "sales", "salt-1", "s3cret")
+
+        step("Log in legitimately")
+        val login = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
+            "user=clerk-1&secret=s3cret&ttl=100", 1000, "server-entropy-aaaa")
+        expect(http_status_code(login.status)).to_equal(200)
+        val token = login.body.replace("token=", "")
+        expect(token.len() > 0).to_be(true)
+
+        step("ATTACK: the same token against tenant-B")
+        val cross = store_app_handle_bearer(store, tenant_b(), "GET", "/store/catalog", bearer_headers(token), "", 1010, "e")
+        expect(http_status_code(cross.status)).to_equal(401)
+
+        step("ATTACK: the token after expiry")
+        val expired = store_app_handle_bearer(store, t, "GET", "/store/catalog", bearer_headers(token), "", 1200, "e")
+        expect(http_status_code(expired.status)).to_equal(401)
+
+        step("ATTACK: a revoked token, on a write route and on a read route")
+        val login2 = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
+            "user=clerk-1&secret=s3cret&ttl=1000", 1300, "server-entropy-bbbb")
+        val tok2 = login2.body.replace("token=", "")
+        session_revoke(store, "tenant-a", tok2)
+        expect(http_status_code(store_app_handle_bearer(store, t, "GET", "/store/catalog", bearer_headers(tok2), "", 1310, "e").status)).to_equal(401)
+        expect(http_status_code(store_app_handle_bearer(store, t, "POST", "/store/order", bearer_headers(tok2), "order=O1&sku=S&qty=1&idem=i", 1311, "e").status)).to_equal(401)
+        expect(http_status_code(store_app_handle_bearer(store, t, "POST", "/auth/logout", bearer_headers(tok2), "", 1312, "e").status)).to_equal(401)
+        store_close(store)
+
+    it "does not hand out a guessable or colliding token when the caller supplies CONSTANT entropy":
+        val store = fresh_full("token_entropy")
+        val t = tenant_a()
+        val admin = admin_of("a")
+        credential_seed(store, session_for(admin, t), t, admin, "victim", "sales", "salt-v", "victim-secret")
+        credential_seed(store, session_for(admin, t), t, admin, "attacker", "sales", "salt-x", "attacker-secret")
+
+        step("A deployment wires a CONSTANT entropy value (the realistic mistake)")
+        val fixed = "CONSTANT"
+
+        step("Two logins for the same actor at the same epoch must not collide")
+        val a1 = session_issue(store, "tenant-a", "victim", "victim-secret", 5000, 600, fixed)
+        val a2 = session_issue(store, "tenant-a", "victim", "victim-secret", 5000, 600, fixed)
+        expect(a1.ok).to_be(true)
+        expect(a2.ok).to_be(true)
+        expect(a1.detail == a2.detail).to_be(false)
+
+        step("ATTACK: the attacker knows entropy, tenant, actor and epoch — derive the victim's token")
+        val mine = session_issue(store, "tenant-a", "attacker", "attacker-secret", 5000, 600, fixed)
+        expect(mine.ok).to_be(true)
+        expect(mine.detail == a1.detail).to_be(false)
+        expect(mine.detail == a2.detail).to_be(false)
+
+        step("The victim's live token is not reachable by replaying the derivation inputs")
+        val guess = session_issue(store, "tenant-a", "attacker", "attacker-secret", 5000, 600, fixed)
+        expect(guess.detail == a1.detail).to_be(false)
+        store_close(store)
+
+# =============================================================================
+# 4. Injection / escaping / traversal
+# =============================================================================
+
+describe "attack: injection — SQL-ish payloads, XSS in every rendered field, traversal":
+    it "binds SQL payloads and escapes hostile names on every rendered surface":
+        val store = fresh_full("inject")
+        val t = tenant_a()
+        val admin = admin_of("a")
+        val sa = session_for(admin, t)
+        val xss = "<script>alert('x')</script>"
+        val sqli = "'; DROP TABLE products;--"
+
+        step("ATTACK: SQL injection through a form value into a prepared bind")
+        val ord = store_app_handle(store, sa, t, admin, "POST", "/store/order", plain_headers(),
+            "order=" + sqli + "&sku=NOPE&qty=1&idem=k-sqli")
+        expect("sqli-not-500=" + "{http_status_code(ord.status) != 500}").to_equal("sqli-not-500=true")
+        step("The products table still answers reads after the payload")
+        val cat = store_app_handle(store, sa, t, admin, "GET", "/store/catalog", plain_headers(), "")
+        expect(http_status_code(cat.status)).to_equal(200)
+
+        step("ATTACK: XSS through the SUPPLIER name")
+        sale_add_product(store, sa, t, admin, "SKU-X", "Plain", Money(amount_cents: 100, currency: "USD"))
+        proc_supplier_add(store, sa, t, admin, "SUP-X", xss)
+        proc_requisition_create(store, sa, t, admin, envelope("k-r", "proc.requisition.create"), "REQ-X", "SKU-X", 3)
+        proc_requisition_approve(store, sa, t, admin, envelope("k-a", "proc.requisition.approve"), "REQ-X")
+        proc_po_create(store, sa, t, admin, envelope("k-p", "proc.po.create"), "PO-X", "REQ-X", "SUP-X", Money(amount_cents: 10, currency: "USD"))
+        val pos = store_app_handle(store, sa, t, admin, "GET", "/proc/pos", plain_headers(), "")
+        expect("supplier-raw=" + "{pos.body.contains(\"<script>\")}").to_equal("supplier-raw=false")
+        expect("supplier-esc=" + "{pos.body.contains(\"&lt;script&gt;\")}").to_equal("supplier-esc=true")
+
+        step("ATTACK: XSS through the EMPLOYEE name")
+        hcm_hire(store, sa, t, admin, envelope("k-h", "hcm.hire"), "EMP-X", xss, 100, 1000, 40)
+        val emp = store_app_handle(store, sa, t, admin, "GET", "/hcm/employees", plain_headers(), "")
+        expect("employee-raw=" + "{emp.body.contains(\"<script>\")}").to_equal("employee-raw=false")
+        expect("employee-esc=" + "{emp.body.contains(\"&lt;script&gt;\")}").to_equal("employee-esc=true")
+
+        step("ATTACK: XSS through the BOOKING RESOURCE id and its seat-map version")
+        step("The hostile resource id is accepted as data — the RENDERER must neutralise it")
+        expect(booking_create_resource(store, sa, t, admin, xss, "capacity-pool", 2, "v1").reason).to_equal("accepted")
+        expect(booking_create_resource(store, sa, t, admin, "RES-X", "capacity-pool", 2, xss).reason).to_equal("accepted")
+        val res = store_app_handle(store, sa, t, admin, "GET", "/booking/resources", plain_headers(), "")
+        expect("resource-raw=" + "{res.body.contains(\"<script>\")}").to_equal("resource-raw=false")
+        expect("resource-listed=" + "{res.body.contains(\"RES-X\")}").to_equal("resource-listed=true")
+        expect("resource-esc=" + "{res.body.contains(\"&lt;script&gt;\")}").to_equal("resource-esc=true")
+
+        step("ATTACK: XSS reflected through a DENIAL detail (restaurant table id)")
+        val tbl = store_app_handle(store, sa, t, admin, "GET", "/restaurant/session/" + xss + "/view", plain_headers(), "")
+        expect(http_status_code(tbl.status)).to_equal(404)
+        expect("table-raw=" + "{tbl.body.contains(\"<script>\")}").to_equal("table-raw=false")
+
+        step("ATTACK: XSS reflected through the receipt route's not-found detail")
+        val rcpt = store_app_handle(store, sa, t, admin, "GET", "/store/order/" + xss + "/receipt", plain_headers(), "")
+        expect(http_status_code(rcpt.status)).to_equal(404)
+        expect("receipt-raw=" + "{rcpt.body.contains(\"<script>\")}").to_equal("receipt-raw=false")
+
+        step("ATTACK: path traversal via a route parameter, raw and percent-encoded")
+        expect(http_status_code(store_app_handle(store, sa, t, admin, "GET", "/store/order/../../etc/passwd/receipt", plain_headers(), "").status)).to_equal(400)
+        expect(http_status_code(store_app_handle(store, sa, t, admin, "GET", "/booking/..%2f..%2fetc%2fpasswd/status", plain_headers(), "").status)).to_equal(400)
+        expect(http_status_code(store_app_handle(store, sa, t, admin, "GET", "/hcm/employees%00.png", plain_headers(), "").status)).to_equal(400)
+        store_close(store)
+
+# =============================================================================
+# 5. Payment integrity — what the signature actually binds
+# =============================================================================
+
+describe "attack: payment integrity — webhook signature reuse and cross-tenant replay":
+    it "refuses a valid signature lifted onto a different provider_ref / kind / event":
+        val store = fresh_full("payment")
+        val t = tenant_a()
+        val admin = admin_of("a")
+        val sa = session_for(admin, t)
+        val prov = PaymentProvider(name: "stub", shared_secret: "shhh")
+
+        step("Two orders, two pending intents, in the same tenant")
+        sale_add_product(store, sa, t, admin, "SKU-P", "Payable", Money(amount_cents: 700, currency: "USD"))
+        sale_receive_stock(store, sa, t, admin, "SKU-P", 10)
+        sale_place_order(store, sa, t, admin, envelope("k-o1", "sale.order.place"), "ORD-1", "SKU-P", 1)
+        sale_place_order(store, sa, t, admin, envelope("k-o2", "sale.order.place"), "ORD-2", "SKU-P", 1)
+        val i1 = payment_create_intent(store, sa, t, admin, envelope("k-i1", "payment.intent.create"), "INT-1", "ORD-1", 100)
+        val i2 = payment_create_intent(store, sa, t, admin, envelope("k-i2", "payment.intent.create"), "INT-2", "ORD-2", 100)
+        expect(i1.ok).to_be(true)
+        expect(i2.ok).to_be(true)
+
+        step("A legitimate capture webhook for intent 1")
+        val payload = "provider=stub&event=captured&ref=" + i1.detail
+        val sig1 = provider_sign_webhook(prov, "tenant-a", i1.detail, "captured", "evt-1", payload)
+        val ok = payment_webhook_receive(store, sa, t, admin, wenv("k-w1", payload),
+            prov, i1.detail, "captured", sig1, "evt-1", 200)
+        expect(ok.reason).to_equal("accepted")
+        expect(payment_intent_status(store, "tenant-a", "INT-1")).to_equal("captured")
+
+        step("ATTACK: reuse intent 1's payload+signature to capture intent 2")
+        val lifted = payment_webhook_receive(store, sa, t, admin, wenv("k-w2", payload),
+            prov, i2.detail, "captured", sig1, "evt-2", 210)
+        expect(lifted.ok).to_be(false)
+        expect(lifted.reason).to_equal("invalid-record")
+        expect(payment_intent_status(store, "tenant-a", "INT-2")).to_equal("pending")
+
+        step("ATTACK: reuse the signature with a different event KIND on the same ref")
+        val kind_swap = payment_webhook_receive(store, sa, t, admin, wenv("k-w3", payload),
+            prov, i2.detail, "failed", sig1, "evt-3", 220)
+        expect(kind_swap.ok).to_be(false)
+        expect(payment_intent_status(store, "tenant-a", "INT-2")).to_equal("pending")
+
+        step("ATTACK: reuse the signature with a different provider_event_id (dedupe bypass)")
+        val id_swap = payment_webhook_receive(store, sa, t, admin, wenv("k-w4", payload),
+            prov, i1.detail, "captured", sig1, "evt-99", 230)
+        expect(id_swap.ok).to_be(false)
+
+        step("A legacy payload-only signature no longer authorises anything")
+        val old_sig = provider_sign(prov, payload)
+        val legacy = payment_webhook_receive(store, sa, t, admin, wenv("k-w5", payload),
+            prov, i2.detail, "captured", old_sig, "evt-5", 240)
+        expect(legacy.ok).to_be(false)
+
+        step("ATTACK: replay tenant-A's webhook against tenant-B")
+        val tb = tenant_b()
+        val admin_b = admin_of("b")
+        val cross = payment_webhook_receive(store, session_for(admin_b, tb), tb, admin_b,
+            wenv("k-w6", payload), prov, i1.detail, "captured", sig1, "evt-6", 250)
+        expect(cross.ok).to_be(false)
+        store_close(store)
+
+# =============================================================================
+# 6. Denial of service — unbounded work before the limit/throttle rungs
+# =============================================================================
+
+describe "attack: denial of service — unauthenticated flood and oversized bodies":
+    it "applies the request-limit and throttle rungs to the unauthenticated auth routes":
+        val store = fresh_full("dos")
+        val t = tenant_a()
+        val admin = admin_of("a")
+        credential_seed(store, session_for(admin, t), t, admin, "clerk-1", "sales", "salt-1", "s3cret")
+
+        step("ATTACK: a 20 MB unauthenticated login body")
+        val huge = [("Host", "store.example"), ("Content-Length", "20000000")]
+        val big = store_app_handle_bearer(store, t, "POST", "/auth/login", huge, "user=clerk-1&secret=s3cret", 100, "ent-1")
+        expect(http_status_code(big.status)).to_equal(413)
+
+        step("ATTACK: a smuggling-shaped unauthenticated login (chunked + content-length)")
+        val smuggle = [("Host", "store.example"), ("Content-Length", "10"), ("Transfer-Encoding", "chunked")]
+        val sm = store_app_handle_bearer(store, t, "POST", "/auth/login", smuggle, "user=clerk-1&secret=s3cret", 100, "ent-2")
+        expect(http_status_code(sm.status) != 200).to_be(true)
+
+        step("ATTACK: credential-stuffing flood — rotate the user so the per-user lockout never fires")
+        var codes: [i64] = []
+        var i = 0
+        while i < 40:
+            val r = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
+                "user=ghost-" + "{i}" + "&secret=nope", 500, "ent-3")
+            codes.push(http_status_code(r.status))
+            i = i + 1
+        step("The tenant-wide unauthenticated window eventually rejects with 429")
+        expect(codes[codes.len() - 1]).to_equal(429)
+
+        step("A genuine login is still refused generically while the window is saturated")
+        val gen = store_app_handle_bearer(store, t, "POST", "/auth/login", plain_headers(),
+            "user=clerk-1&secret=wrong", 500, "ent-4")
+        expect(http_status_code(gen.status) == 401 or http_status_code(gen.status) == 429).to_be(true)
+        store_close(store)

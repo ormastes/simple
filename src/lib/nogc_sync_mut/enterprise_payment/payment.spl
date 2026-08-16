@@ -20,7 +20,9 @@ doc/01_research/app/enterprise/simple_enterprise_suite_full_design_2026-08-14.md
 
 ## Signature seam — stand-in, not PCI evidence
 
-`PaymentProvider` verifies `sha256(shared_secret + "|" + payload)` — an
+`PaymentProvider` verifies `sha256(shared_secret + "|" + material)`, where
+`material` is the canonical `webhook_signing_material` binding tenant,
+provider_ref, event kind, provider event id AND the opaque payload — an
 HMAC-style shared-secret check using the repo's own sha256. It is a
 composition seam standing in for real provider SDK verification
 (e.g. Stripe's `t=..,v1=..` HMAC-SHA256 scheme); swapping in a real
@@ -77,6 +79,21 @@ fn provider_sign(provider: PaymentProvider, payload: text) -> text:
 
 fn provider_verify(provider: PaymentProvider, payload: text, signature: text) -> bool:
     signature != "" and provider_sign(provider, payload) == signature
+
+# webhook_signing_material is the canonical string a webhook signature MUST
+# cover. Signing the opaque payload alone binds nothing the command acts on:
+# the W9-D security audit lifted a valid capture signature onto a DIFFERENT
+# provider_ref and captured another order. The signature therefore binds the
+# tenant, the provider reference, the event kind and the provider event id
+# alongside the payload.
+fn webhook_signing_material(tenant_id: text, provider_ref: text, event_kind: text, provider_event_id: text, payload: text) -> text:
+    "pwh/v2|" + tenant_id + "|" + provider_ref + "|" + event_kind + "|" + provider_event_id + "|" + payload
+
+fn provider_sign_webhook(provider: PaymentProvider, tenant_id: text, provider_ref: text, event_kind: text, provider_event_id: text, payload: text) -> text:
+    provider_sign(provider, webhook_signing_material(tenant_id, provider_ref, event_kind, provider_event_id, payload))
+
+fn provider_verify_webhook(provider: PaymentProvider, tenant_id: text, provider_ref: text, event_kind: text, provider_event_id: text, payload: text, signature: text) -> bool:
+    provider_verify(provider, webhook_signing_material(tenant_id, provider_ref, event_kind, provider_event_id, payload), signature)
 
 # =============================================================================
 # Schema
@@ -182,7 +199,11 @@ fn payment_webhook_receive(store: EnterpriseStore, session: SessionContext, tena
         return denied("forbidden", provider_ref)
     # 3. domain validation — signature FIRST: an unverified webhook is
     #    untrusted input and must cause no state change of any kind.
-    if not provider_verify(provider, envelope.payload, signature):
+    #    The signature binds the EVENT, not just the payload: tenant,
+    #    provider_ref, event_kind and provider_event_id are all covered, so a
+    #    signature cannot be lifted onto another reference, kind, event id or
+    #    tenant (W9-D security audit).
+    if not provider_verify_webhook(provider, tenant.tenant_id, provider_ref, event_kind, provider_event_id, envelope.payload, signature):
         return denied("invalid-record", provider_ref)
     if provider_event_id == "":
         return denied("invalid-record", provider_ref)
@@ -290,6 +311,7 @@ fn order_amount_cents(store: EnterpriseStore, tenant_id: text, order_id: text) -
     0
 
 export PaymentProvider, provider_sign, provider_verify
+export webhook_signing_material, provider_sign_webhook, provider_verify_webhook
 export payment_setup
 export payment_intent_status, payment_intent_by_ref, payment_intent_ref
 export payment_create_intent, payment_webhook_receive

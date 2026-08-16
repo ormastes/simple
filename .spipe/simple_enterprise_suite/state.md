@@ -571,3 +571,41 @@ New acceptance criteria (extends AC-1..AC-12 above):
   line, reusing is_sqlite_runtime_symbol (native_project/linker.rs:500) which
   the project pipeline already has. Host is otherwise ready (libsqlite3 +
   headers installed; runtime_sqlite.c includes the real header).
+- SECURITY AUDIT (2026-08-16, lane W9-D): 12 attacks probed through the real
+  dispatcher/commands; 4 SUCCEEDED before fixes. All now fail closed, and the
+  successful attacks are retained as regression fences.
+  EXPLOITED #5a PAYMENT SIGNATURE LIFT (money bug): the webhook signature
+  covered ONLY envelope.payload, so a valid capture signature for intent 1,
+  replayed with intent 2's provider_ref and a fresh provider_event_id,
+  CAPTURED THE SECOND ORDER AND MARKED IT PAID. Fix: signing material is now
+  pwh/v2|tenant|ref|kind|event_id|payload via provider_sign_webhook /
+  provider_verify_webhook -> denied invalid-record.
+  EXPLOITED #3b SESSION TOKEN DERIVABLE/COLLIDING: token was
+  sha256(entropy|tenant|actor|now); two same-second logins produced ONE token,
+  and anyone knowing a constant entropy could derive ANY actor's token from
+  public inputs. Fix: token also binds server-side secret_hash +
+  session_issued_count sequence.
+  EXPLOITED #6a UNAUTHENTICATED 20MB LOGIN BODY: body_decision ran only inside
+  store_app_handle, so the auth routes — the ONLY unauthenticated surface —
+  applied no limit (200). Fix: body_decision is rung 0 of auth_routes -> 413.
+  EXPLOITED #6b CREDENTIAL STUFFING: the login throttle keyed on a
+  caller-controlled form field, so rotating `user` left /auth/login
+  effectively unlimited (40/40 processed). Fix: tenant-wide anon throttle
+  charged BEFORE the per-user one -> 429.
+  A TEST WAS ENCODING THE VULNERABILITY AS A FEATURE: auth_throttle's "same
+  entropy + now yields the same token" asserted the collision as expected
+  behaviour. Rewritten (not weakened) to assert two distinct, independently
+  resolvable sessions.
+  Already safe, kept as fences: tenant isolation (5 read + 3 mutation routes),
+  authorization (11 back-office routes vs the sales role), revoked/expired/
+  cross-tenant bearer tokens, SQL payloads into prepared binds, XSS on 6
+  rendered surfaces, 3 traversal shapes, cross-tenant webhook replay.
+  RESIDUAL RISKS (documented in doc/07_guide/app/enterprise/security_posture.md,
+  NOT fixed): entropy quality is still caller-supplied; the provider seam is a
+  sha256 stand-in (not constant-time, no timestamp tolerance, NOT PCI
+  evidence); throttle_count is an unpruned full-table scan (amplification over
+  time); role_allows is a hardcoded table whose reads reuse write actions;
+  form_value cannot express &/= and does no percent-decoding; /booking/* and
+  /restaurant/* reads are authenticated but not role-gated.
+  Spec enterprise_security_audit 8/8. Merged-tree reruns: security 8/8,
+  payment 7/7, auth_throttle 6/6, conformance 8/8, back_office_web 7/7.

@@ -9,9 +9,15 @@ explicit-session `store_app_handle` stays for tests and remains the single
 hardened route path underneath.
 
 Dispatch prelude order (before ANY route logic):
+0. request limits — `http_core.body_decision` (oversize 413, chunked 501,
+   smuggling/duplicate-header 400) applies to EVERY request including the
+   unauthenticated auth routes (W9-D).
 1. request throttle — fixed-window counter keyed `tenant|token-or-anon`
    (general window) or `tenant|login:user` (stricter anti-brute-force window
-   for POST /auth/login). Over-limit -> 429 with the shared security headers.
+   for POST /auth/login). A login is charged to BOTH windows: the per-user
+   key is a caller-controlled form field, so the tenant-wide anonymous window
+   is what bounds a rotating-user credential-stuffing flood (W9-D).
+   Over-limit -> 429 with the shared security headers.
    A rejected request records nothing, so a burst cannot extend its lockout.
 2. POST /auth/login — form `user`/`secret`; issues a durable session and
    returns `token=<tok>` in the body (no cookies). Failure is a GENERIC 401
@@ -24,6 +30,7 @@ Determinism: the caller supplies `now_epoch` and login `entropy` — this
 module never reads a wall clock or randomness.
 """
 
+use std.common.net.http_core.{MAX_BODY_SIZE, body_decision}
 use std.nogc_sync_mut.http_server.types.{HttpResponse, HttpStatus}
 use std.nogc_sync_mut.enterprise_store.store.{EnterpriseStore}
 use std.nogc_sync_mut.enterprise_sale.foundation.{TenantContext, ActorContext, SessionContext}
@@ -58,7 +65,26 @@ fn unauthorized() -> HttpResponse:
 
 # store_app_handle_bearer — production entry; see module doc for the prelude.
 fn store_app_handle_bearer(store: EnterpriseStore, tenant: TenantContext, method: text, path: text, headers: [(text, text)], body: text, now_epoch: i64, entropy: text) -> HttpResponse:
+    # 0. request limits FIRST — the auth routes are the only UNAUTHENTICATED
+    #    surface, so they must not be the one place that skips `body_decision`.
+    #    Before W9-D only `store_app_handle` applied it, so an anonymous caller
+    #    could post an arbitrarily large / smuggling-shaped body to
+    #    /auth/login and /auth/logout.
+    val decision = body_decision(headers, MAX_BODY_SIZE, false)
+    if decision.0 != "":
+        val status = if decision.0.starts_with("413"):
+            HttpStatus.PayloadTooLarge
+        elif decision.0.starts_with("501"):
+            HttpStatus.NotImplemented
+        else:
+            HttpStatus.BadRequest
+        return secured(HttpResponse.error(status, decision.0))
     if method == "POST" and path == "/auth/login":
+        # Tenant-wide anonymous window FIRST: the per-user lockout below is
+        # keyed on a caller-controlled form field, so rotating `user` evaded
+        # every limit (credential stuffing / login flood, W9-D).
+        if not throttle_admit(store, tenant.tenant_id + "|anon", now_epoch, throttle_general_window(), throttle_general_limit()):
+            return too_many()
         val user = form_value(body, "user")
         val key = tenant.tenant_id + "|login:" + user
         if not throttle_admit(store, key, now_epoch, throttle_login_window(), throttle_login_limit()):

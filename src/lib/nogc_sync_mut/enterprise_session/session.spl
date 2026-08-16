@@ -12,7 +12,11 @@ Tables (insert-only; lookup = pure filtering, latest row wins):
   NEVER stores plaintext secrets. Seeding is admin-guarded
   (`session_valid` + `role_allows`), same rung order as every guarded write.
 - `sessions` — one row per issued session: token, tenant, actor, role,
-  issued_at, ttl. Token = sha256(entropy | tenant | actor | issued_at).
+  issued_at, ttl. Token = sha256(entropy | tenant | actor | issued_at |
+  secret_hash | issuance_seq) — the last two terms are server-side values a
+  requester cannot observe, so a deployment that mistakenly wires a CONSTANT
+  `entropy` still cannot let one actor derive another's token, and two logins
+  in the same second cannot collide (W9-D security audit).
 - `session_revocations` — revocation is a row, never an update/delete.
 
 `session_resolve` is the bearer-token rung for the web dispatcher: it returns
@@ -55,8 +59,22 @@ fn session_setup(store: EnterpriseStore) -> bool:
 fn credential_hash(salt: text, secret: text) -> text:
     sha256_text(salt + "|" + secret)
 
-fn session_token_derive(entropy: text, tenant_id: text, actor_id: text, now_epoch: i64) -> text:
-    sha256_text(entropy + "|" + tenant_id + "|" + actor_id + "|" + "{now_epoch}")
+# session_token_derive mixes the caller's entropy with two SERVER-SIDE values
+# the requester cannot observe:
+# - `binding`: the actor's stored salted secret hash. Without it, a deployment
+#   that wires a CONSTANT `entropy` hands every party the whole preimage
+#   (entropy | tenant | actor | epoch) and therefore any other actor's token.
+# - `seq`: a monotonically increasing per-store issuance counter, so two logins
+#   for the same actor within the same second cannot collide onto one token.
+fn session_token_derive(entropy: text, tenant_id: text, actor_id: text, now_epoch: i64, binding: text, seq: i64) -> text:
+    sha256_text(entropy + "|" + tenant_id + "|" + actor_id + "|" + "{now_epoch}" + "|" + binding + "|" + "{seq}")
+
+# session_issued_count is the per-store issuance sequence (insert-only rows).
+fn session_issued_count(store: EnterpriseStore) -> i64:
+    var n: i64 = 0
+    for row in store_rows(store, "sessions", "id, tenant_id, actor_id, role, token, issued_at, ttl"):
+        n = n + 1
+    n
 
 # =============================================================================
 # Credentials — admin-guarded seeding
@@ -102,7 +120,7 @@ fn session_issue(store: EnterpriseStore, tenant_id: text, actor_id: text, secret
     val cred = credential_row(store, tenant_id, actor_id)
     if cred.2 == "" or credential_hash(cred.1, secret) != cred.2:
         return denied("invalid-credentials", "")
-    val token = session_token_derive(entropy, tenant_id, actor_id, now_epoch)
+    val token = session_token_derive(entropy, tenant_id, actor_id, now_epoch, cred.2, session_issued_count(store))
     store_insert_row(store,
         "INSERT INTO sessions (tenant_id, actor_id, role, token, issued_at, ttl) VALUES (?, ?, ?, ?, ?, ?)",
         [tenant_id, actor_id, cred.0, token, "{now_epoch}", "{ttl}"])
@@ -143,6 +161,6 @@ fn session_resolve(store: EnterpriseStore, tenant_id: text, token: text, now_epo
     (dead, "")
 
 export session_setup
-export credential_hash, session_token_derive
+export credential_hash, session_token_derive, session_issued_count
 export credential_seed, credential_row
 export session_issue, session_revoke, session_revoked, session_resolve
