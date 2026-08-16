@@ -609,3 +609,33 @@ New acceptance criteria (extends AC-1..AC-12 above):
   /restaurant/* reads are authenticated but not role-gated.
   Spec enterprise_security_audit 8/8. Merged-tree reruns: security 8/8,
   payment 7/7, auth_throttle 6/6, conformance 8/8, back_office_web 7/7.
+- FULL REGRESSION + WIKI (2026-08-16, lane W9-C): 48/48 spec files GREEN, 429
+  examples, 0 failed, 0 dropped, 0 environment-blocked spec rows, 0 timeouts —
+  14 unit + 13 system + 21 ubs_test. Gates: cross-OS PASS (8 probes,
+  host+simpleos), c-runtime-compiles PASS (102 files). OVMF in-guest gate
+  deliberately not run (owned elsewhere, very long).
+  STALENESS CAVEAT (orchestrator): that sweep ran against a tree PREDATING the
+  W9-A AP fix, W9-B native-ACID docs and W9-D security fixes. It is therefore
+  not a current whole-suite number. Coverage is completed by the post-merge
+  reruns of every spec those merges touched: finance 8/8, payment 7/7,
+  auth_throttle 6/6, conformance 8/8, back_office_web 7/7, security 8/8,
+  procurement 8/8, goods_sale 10/10, restaurant 7/7, store_app 3/3,
+  web_app 5/5, file_backend 6/6. A fresh single-pass whole-suite sweep on the
+  current tip is the next verification item.
+  ONE RED, harness plumbing not a regression: ubs_test/restaurant_lane_spec
+  reported declared>=1 executed=1 failed=1 timeout=1
+  reason=daemon-no-response. The tell is `declared>=1` against the spec's real
+  12 examples — the runner never received the daemon's declaration. Standalone
+  re-run 12/12 green. Recorded as landmine 9.
+  WIKI: doc/00_llm_process/feature_expert/enterprise_suite/skill.md rewritten
+  — full module map (store + records period-lock seam + file_backend + faults
+  seam + audit_hash, all verticals, all web route families, http_core
+  unification, conformance gate), complete verification command list, 5
+  environment-blocked rows with resume commands, and 9 landmines including the
+  new one that cost two lanes days: a .spl-declared `extern fn` silently binds
+  to a same-named C runtime stub (rc=0, plausible fsize, empty read-back —
+  presents as a storage bug).
+  GUIDE FRESHNESS: audited mechanically (every backticked API identifier in
+  doc/07_guide/app/enterprise/*.md and enterprise_store.md resolved against
+  the sources) — ZERO drift, no edits needed; store_app.md already documents
+  all 41 routes. find doc/06_spec -name '*_spec.spl' | wc -l = 0.

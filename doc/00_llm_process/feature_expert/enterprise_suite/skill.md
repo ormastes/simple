@@ -2,70 +2,177 @@
 
 ## Role
 
-Own process knowledge for the Simple Enterprise Suite build-out: the
-assessment-driven plan, the shared hardened HTTP core, the durable
-enterprise store, and the goods-sale proving vertical. Lane state:
+Own process knowledge for the Simple Enterprise Suite: the shared hardened
+HTTP core, the durable enterprise store, the guarded-command business
+verticals, and the web app in front of them. Lane state:
 `.spipe/simple_enterprise_suite/state.md`.
 
-## Feature Links
+## Module map (current, 2026-08-16)
 
-- Research/assessment (authoritative plan):
-  `doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md`
-  (linked from `doc/01_research/local/simple_erp.md`)
-- Guides: `doc/07_guide/lib/networking/http_server_hardening.md` (+_tldr),
-  `doc/07_guide/lib/database/enterprise_store.md` (+_tldr)
-- Source:
-  - `src/lib/common/net/http_core.spl` — shared protocol core (limits,
-    body_decision, bounded chunked decode, path_is_safe, route matching)
-    consumed by BOTH `nogc_sync_mut/http_server` and
-    `nogc_async_mut/http_server`
-  - `src/lib/nogc_sync_mut/enterprise_store/` — durable store (migrations,
-    UoW, idempotency, outbox, sha256 audit chain) + `nogc_async_mut` wrapper
-  - `src/lib/nogc_sync_mut/enterprise_sale/` — frozen foundation contracts +
-    goods-sale vertical (guarded orders, stock ledger, balanced journal)
-- Specs (evidence):
-  - `test/01_unit/lib/common/net/http_core_spec.spl` (23)
-  - `test/01_unit/lib/nogc_async_mut/http_server/async_{parser_limits,path_safety,dynamic_dispatch}_spec.spl` (18/8/6)
-  - `test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_spec.spl` (10)
-  - `test/03_system/app/enterprise/goods_sale_vertical_spec.spl` (7)
-- Prototype being superseded: `examples/12_business/simple_erp/` (in-memory)
-  and the split repo `ormastes/simple-erp`
+### Foundation
 
-## Constraints and known blockers
+| Module | Files | What it owns |
+|---|---|---|
+| `src/lib/common/net/http_core.spl` | 1 | Shared protocol core: parser limits, `body_decision`, bounded chunked decode, `path_is_safe`, route matching. Consumed by **both** `nogc_sync_mut/http_server` and `nogc_async_mut/http_server` — the tier copies of `std.http.{limits,path_security}` are unified onto it. |
+| `src/lib/nogc_sync_mut/enterprise_store/store.spl` | 29 fns | Migrations, unit-of-work (`uow_begin`/`uow_rollback`), idempotency, outbox rows, tenant filtering, `store_backend_acid` honesty probe. |
+| `.../enterprise_store/records.spl` | 13 fns | Row helpers + the **period-lock seam**: `period_latest_close`, `journal_post_allowed`, `journal_post_pair`. Sale and restaurant journal posting are thin wrappers, so both inherit the finance lock; dependency direction stays finance -> store. |
+| `.../enterprise_store/file_backend.spl` | 11 fns | `SPLSTORE1` file backend used when sqlite is unavailable (incl. SimpleOS). Declares its `rt_file_*` externs locally. |
+| `.../enterprise_store/audit_hash.spl` | 4 fns | sha256 audit chain (`audit_verify_chain`). |
+| **faults seam** | in `store.spl` | `StoreFaults`, `store_faults_none()`, `store_faults_failing_commit()`, threaded through `buffered_commit` — the only supported way to drive commit-failure paths in specs. |
 
-- **Interpreter rt_sqlite is a NON-ACID emulation** (transactions no-op,
-  constraints unenforced, WHERE-equality ignored, UPDATE unsupported,
-  per-path in-process db cache):
-  `doc/08_tracking/bug/interpreter_sqlite_externs_nonacid_emulation_2026-08-14.md`.
-  The store probes rollback honesty at open (`store_backend_acid`); ACID
-  evidence requires native/real SQLite. Store design: insert-only tables,
-  pure-Simple tenant filtering, prepared binds, one db path per spec case.
-- **Evidence runner caveat:** current spec evidence ran on
-  `bin/release/aarch64-apple-darwin/simple` (prints seed banner on some
-  commands); the macho-dir deploy is bootstrap-only (no `test`). Re-verify on
-  a fresh stage4 self-hosted deploy before verify PASS.
-- Edge posture: no direct public TLS/HTTP2 from Simple servers yet —
-  edge-proxy deployment per assessment §3.2.
-- `std.http.headers` aliased import (`index_of as common_index_of`) is
-  unresolvable on the deployed interpreter — http_core carries its own
-  bounded chunked decoder instead.
+### Business verticals (all guarded-command, all on the frozen `foundation` contracts)
+
+| Module | Files | Notes |
+|---|---|---|
+| `enterprise_sale/foundation.spl` (6 fns) | frozen contracts | `role_allows`, and the **executable** closed reason set `reason_set()` / `reason_allowed()`. Specs assert set membership by CALLING these, never by grepping prose. |
+| `enterprise_sale/goods_sale.spl` (13) | orders, stock ledger, balanced journal |
+| `enterprise_booking/booking.spl` (14) | resources, holds, confirm/cancel/no-show, `ranges_overlap` |
+| `enterprise_restaurant/restaurant.spl` (15) | table sessions, line transitions, bill close |
+| `enterprise_payment/payment.spl` (11) | intents, `provider_verify` boundary |
+| `enterprise_hcm/hcm.spl` (18) | hire/terminate, clock in/out, leave request/decide, payroll **input** export |
+| `enterprise_procurement/procurement.spl` (16) | requisition -> PO -> receive -> invoice, three-way reconcile |
+| `enterprise_finance/finance.spl` (10) + `finance_async.spl` | trial balance, AR, AP, insert-only period close |
+| `enterprise_outbox/outbox_worker.spl` (11) | drain/dispatch + reconciliation |
+| `enterprise_channel/channel_hub.spl` (25) | external marketplace adapters, inbox dedup, checkpoints |
+| `enterprise_session/{session,throttle}.spl` (9+4) | session issue/verify + login throttling |
+
+### Web app — `src/app/enterprise_store_app/`
+
+`main.spl` (router) + `web_common.spl` (hardened prelude: `esc()`, `deny()`
+with an explicit arm for **every** closed-set reason) + route families:
+
+- `auth_routes.spl` — `/auth/login`, `/auth/logout`
+- storefront (in `main.spl`) — `/store/catalog`, `/store/order`, `/store/pay`, `/store/order/:id/receipt`
+- `booking_routes.spl` — `/booking/`, `/booking/resources`, `/booking/hold|confirm|cancel`, `/booking/:id/status`
+- `restaurant_routes.spl` — `/restaurant/`, `/restaurant/table/open`, `/restaurant/order/line`, `/restaurant/kitchen/ready`, `/restaurant/line/served`, `/restaurant/bill/close`, `/restaurant/session/:table/view`
+- `hcm_routes.spl` — `/hcm/`, `/hcm/employees`, `/hcm/hire`, `/hcm/clock/in|out`, `/hcm/leave/request|decide`, `/hcm/payroll/export`
+- `procurement_routes.spl` — `/proc/`, `/proc/pos`, `/proc/requisition[/approve]`, `/proc/po`, `/proc/receive`, `/proc/invoice`, `/proc/reconcile`
+- `finance_routes.spl` — `/fin/`, `/fin/trial-balance`, `/fin/ar`, `/fin/ap`, `/fin/period/close|status`
+- `dashboard.spl` — `/admin/dashboard` roll-up, degrading to 0/empty via `store_migration_applied` when a vertical's schema is absent
+
+### Conformance gate
+
+`test/01_unit/lib/nogc_sync_mut/enterprise_conformance_spec.spl` drives REAL
+commands across all verticals and asserts the guarded-command invariants
+(replay-before-feasibility, closed reason set). No source-text assertions.
+Contract doc: `doc/07_guide/app/enterprise/guarded_command_contract.md`.
 
 ## Verification commands
 
+Run **one spec per process** (`SIMPLE_TIMEOUT_SECONDS=900`), read the
+`SPEC FILE VERDICT` line, and record the binary identity once
+(`readlink -f bin/simple` + `bin/simple --version | head -1`).
+A ready-made driver lives at `build/w9c/sweep.sh` in the W9-C worktree; the
+spec list is:
+
 ```bash
+# unit
 bin/simple test test/01_unit/lib/common/net/http_core_spec.spl
 bin/simple test test/01_unit/lib/nogc_async_mut/http_server/async_parser_limits_spec.spl
 bin/simple test test/01_unit/lib/nogc_async_mut/http_server/async_path_safety_spec.spl
 bin/simple test test/01_unit/lib/nogc_async_mut/http_server/async_dynamic_dispatch_spec.spl
+bin/simple test test/01_unit/lib/http_server/chunked_rejection_spec.spl
+bin/simple test test/01_unit/lib/http_server/parser_limits_spec.spl
+bin/simple test test/01_unit/lib/http_server/path_safety_spec.spl
+bin/simple test test/01_unit/lib/nogc_async_mut/http/http_hardening_spec.spl
 bin/simple test test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_spec.spl
+bin/simple test test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_harden_spec.spl
+bin/simple test test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_file_backend_spec.spl
+bin/simple test test/01_unit/lib/nogc_sync_mut/enterprise_outbox/outbox_worker_spec.spl
+bin/simple test test/01_unit/lib/nogc_sync_mut/enterprise_channel/channel_hub_spec.spl
+bin/simple test test/01_unit/lib/nogc_sync_mut/enterprise_conformance_spec.spl
+# system
 bin/simple test test/03_system/app/enterprise/goods_sale_vertical_spec.spl
+bin/simple test test/03_system/app/enterprise/booking_vertical_spec.spl
+bin/simple test test/03_system/app/enterprise/restaurant_vertical_spec.spl
+bin/simple test test/03_system/app/enterprise/hcm_vertical_spec.spl
+bin/simple test test/03_system/app/enterprise/procurement_vertical_spec.spl
+bin/simple test test/03_system/app/enterprise/finance_vertical_spec.spl
+bin/simple test test/03_system/app/enterprise/payment_boundary_spec.spl
+bin/simple test test/03_system/app/enterprise/store_app_spec.spl
+bin/simple test test/03_system/app/enterprise/store_web_harden_spec.spl
+bin/simple test test/03_system/app/enterprise/enterprise_web_app_spec.spl
+bin/simple test test/03_system/app/enterprise/back_office_web_spec.spl
+bin/simple test test/03_system/app/enterprise/enterprise_auth_throttle_spec.spl
+bin/simple test test/03_system/web/server/http_dynamic_dispatch_live_socket_spec.spl
+# ERP example suite (21 specs)
+for s in examples/12_business/simple_erp/ubs_test/*_spec.spl; do bin/simple test "$s"; done
 ```
 
-## Handoff notes (2026-08-14)
+Standing gates:
 
-Waves A (HTTP harden, AC-1..4), B (durable store, AC-5..7), and C slice 1
-(contracts + goods-sale vertical, AC-8a/9/10) landed with green specs on the
-diagnostic runner. Open: AC-8b rewiring of the example ERP lanes onto
-`std.enterprise_{store,sale}` + its ubs_test suite; live-socket dynamic
-dispatch system spec; unify `std.http.{limits,path_security}` tier copies
-onto http_core; native-mode ACID re-verification.
+```bash
+sh scripts/check/check-enterprise-cross-os.shs      # PASS — 8 probe(s), host + x86_64-unknown-simpleos, SMF magic
+sh scripts/check/check-c-runtime-compiles-push.shs  # PASS — 102 file(s) compiled, 0 errors (2 external-dep skips)
+```
+
+Do NOT run the OVMF in-guest gate casually — it is very long and owned by the
+SimpleOS lanes.
+
+## Environment-blocked rows (with resume commands)
+
+| Row | Why blocked | Resume |
+|---|---|---|
+| Store ACID evidence | Interpreter `rt_sqlite` externs are a non-ACID emulation (transactions no-op, constraints unenforced, WHERE-equality ignored, no UPDATE). `store_backend_acid` reports this at open. | Re-run the store specs on a **native** build with real SQLite: `bin/simple test test/01_unit/lib/nogc_sync_mut/enterprise_store/enterprise_store_spec.spl` on a stage4 self-hosted deploy. Bug: `doc/08_tracking/bug/interpreter_sqlite_externs_nonacid_emulation_2026-08-14.md` |
+| AC-17 in-guest execution of the store | No OVMF boot lane builds a guest image containing `os.userlib.rt_file_facade` or execs an SMF app; cross-compile + guest-owner rows ARE green. Retained transcript `build/os/ent_store_rung_b_attempt_2026-08-16.serial.log` shows in-guest write rc=0, fsize=5, read-back `[MISS]`. | Dump the first 16 bytes the extraction loop actually sees, then re-run the OVMF lane. See `doc/07_guide/lib/database/enterprise_store.md` § Guest-side extern provider. |
+| `riscv32` / `i686` / `armv7` cross-compile probes | Toolchain absent (incl. seed `--backend llvm`). | Re-run `sh scripts/check/check-enterprise-cross-os.shs` once those triples have a toolchain. |
+| Public TLS / HTTP2 termination | No direct public TLS from Simple servers yet. | Edge-proxy deployment per the assessment §3.2. |
+| `/fin/ap` line items | `fin_ap_open` gates on migration id `proc_001_payables`, which nothing applies; procurement books payables into the shared `journal` under `accounts_payable`. The route prints the authoritative journal total so the page is never silently wrong. | Lane W9-A: add a payables projection in procurement, or repoint `fin_ap_open` at the journal. |
+
+## Landmines (each of these has already cost a lane real time)
+
+1. **Interpreter sqlite is non-ACID.** Any durability/constraint/UPDATE claim
+   proven only on the interpreter is vacuous. Design around it: insert-only
+   tables, pure-Simple tenant filtering, prepared binds.
+2. **sqlite caches per db path in-process** — two scenarios sharing a path
+   share state. **One db path per scenario**, always.
+3. **Outbox naming collision** — `std.enterprise_outbox` (the worker) vs the
+   store's own `outbox` rows; and the sync-tier impl vs the `nogc_async_mut`
+   wrapper of the same name. Import the exact tier you mean.
+4. **Seed `spipe-docgen` subcommand drops argv.** Use
+   `bin/simple run src/app/spipe_docgen/spipe_docgen/main.spl <spec> ...`
+   instead. Bug: `doc/08_tracking/bug/spipe_docgen_subcommand_argv_drop_2026-08-16.md`.
+   (The app carries a `/proc/self/cmdline` argv-recovery fallback on Linux.)
+5. **NEW, cost lane W4-A days: a `.spl`-declared `extern` can bind to a C
+   runtime stub instead of the Simple module that `@export("C")`s the same
+   name.** `file_backend.spl` and `os/userlib/rt_file_facade.spl` both declare
+   `rt_file_*` locally; if a same-named stub exists in `src/runtime`, the link
+   silently prefers it and every call "succeeds" while doing nothing
+   observable (rc=0, plausible fsize, empty read-back). Symptoms look like a
+   storage bug, not a linking bug. **Before debugging store durability,
+   confirm which definition is actually bound.** Two real defects hid behind
+   this: the Simple->C `text` ABI is ONE `RuntimeString` pointer (not
+   ptr+len — the wrong-length write masqueraded as disk-full), and a FAT32
+   per-call aligned-buffer leak.
+6. **Never share `build/` across worktrees.** Cross-worktree compile-cache
+   contamination made red-first evidence unreliable for several lanes (a
+   sabotaged module still resolved from another worktree's cache). Verify
+   `stat -c %F build` prints `directory`, not `symbolic link`, before
+   producing any red-first evidence. The vacuity audit that discharged this
+   debt is in `guarded_command_contract.md` § Vacuity audit.
+7. **Replay before state-dependent feasibility.** The suite's one systemic
+   defect class: 14 commands across 6 modules evaluated feasibility before
+   replay detection, so replaying a command that consumed its own precondition
+   returned the wrong reason. Rule doc:
+   `doc/07_guide/app/enterprise/replay_and_state_dependent_validation.md`.
+   Corollary from the period-lock merge: a replay must return its recorded
+   result **before** the period check — a replay posts nothing.
+8. **`uow_rollback` does not undo issued inserts on this backend.** Validate
+   BEFORE `uow_begin`, never inside the UoW.
+9. **`reason=daemon-no-response budget_ms=120000` is harness plumbing, not a
+   regression.** It shows up as `declared>=1 executed=1 passed=0 failed=1
+   timeout=1` — note the `declared>=1`, far below the spec's real example
+   count, which is the tell. Observed on `ubs_test/restaurant_lane_spec.spl`
+   during the 2026-08-16 sweep; a plain standalone re-run gave 12/12. Always
+   re-run a red once standalone before diagnosing the code.
+
+## Guides
+
+- `doc/07_guide/lib/database/enterprise_store.md` (surface, backend honesty,
+  failure-path hardening, cross-OS matrix, file backend, outbox worker)
+- `doc/07_guide/app/enterprise/` — `store_app.md` (all route families incl.
+  back-office + auth/throttle), `guarded_command_contract.md`,
+  `replay_and_state_dependent_validation.md`, `booking.md`, `restaurant.md`,
+  `payment.md`, `hcm.md`, `procurement.md`, `finance.md`, `channel_hub.md`
+- `doc/07_guide/lib/networking/http_server_hardening.md`
+- Assessment: `doc/01_research/local/simple_enterprise_suite_assessment_2026-08-14.md`
