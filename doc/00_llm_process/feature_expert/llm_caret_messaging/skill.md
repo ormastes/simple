@@ -55,5 +55,7 @@ and absence of embedded secrets.
 - `agent_discovery.spl` collects every `"name"`/`"identifier"` occurrence in a
   manifest (multi-server manifests no longer lose entries).
 - Backend system evidence: `test/03_system/llm_caret_agent_backends_spec.spl`
-  exercises spawn/poll/kill for both the claude (`-p ... --output-format json`)
+  is a Modern SSpec scenario (docstring manual header, step() flow,
+  @req REQ-LLM-CARET-BACKEND-001) exercising spawn/poll/kill for both the
+  claude (`-p ... --output-format json`)
   and codex (`exec <prompt>`) argv contracts with a stub binary.

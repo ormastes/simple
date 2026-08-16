@@ -1,42 +1,77 @@
-# System test: agent launches backed by both the claude and codex CLI shapes.
-# Uses /bin/echo as a stand-in binary so the spawn path, argv contract, status
-# polling, and kill path are exercised end-to-end without paid API calls.
+# @cover src/app/llm_caret/agent_runtime.spl 80%
+# @req REQ-LLM-CARET-BACKEND-001
+"""
+# LLM Caret Agent Backends (Claude + Codex)
+
+**Category:** Tooling
+**Status:** Implemented
+**Requirements:** doc/02_requirements/feature/llm_caret_agent_teams.md (agent launch contract)
+
+## Purpose and Audience
+
+Proves the LLM Caret agent manager can launch, poll, and stop an agent process
+through both supported CLI backend contracts: the claude CLI shape
+(`-p <prompt> --output-format json`) and the codex CLI shape (`exec <prompt>`).
+Audience: anyone changing `agent_plan.spl` argv construction or
+`agent_runtime.spl` spawn/status/kill paths.
+
+## Scope and Preconditions
+
+Runs the real spawn/poll/kill path end-to-end using `/bin/echo` as the backend
+binary, so no paid API call and no installed claude/codex CLI is required. The
+argv contract itself is asserted separately, so a stub binary does not weaken
+the backend-shape oracle. Requires a POSIX `/bin/echo`.
+
+## Primary Workflow
+
+Build a launch plan per provider, assert its argv contract, spawn it, poll its
+status (running or already exited — echo is fast), then stop it.
+
+## Compatibility and Limitations
+
+Live-CLI conversation behavior is out of scope; see
+`test/03_system/llm_caret_live_comprehensive_spec.spl` for the paid live gate.
+"""
+
+use std.spec.*
 use app.llm_caret.agent_plan.{AgentLaunchRequest, build_agent_launch_plan}
 use app.llm_caret.agent_runtime.{launch_agent_plan_with_gemini, agent_process_status, stop_agent_process}
 
-fn _request(provider: text) -> AgentLaunchRequest:
+fn backend_request(provider: text) -> AgentLaunchRequest:
     AgentLaunchRequest(provider: provider, agent_md_path: "agents/sys.md",
         skill_path: "skills/sys.md", task_desc: "system backend check",
         model: "", session_id: "", extra_args: [])
 
+fn launch_poll_stop(agent_id: text, provider: text, claude_path: text, codex_path: text):
+    step("Build the launch plan and spawn the backend process")
+    val plan = build_agent_launch_plan(backend_request(provider))
+    val proc = launch_agent_plan_with_gemini(agent_id, plan, claude_path, codex_path, "", "")
+    expect(proc.status).to_equal("started")
+    assert_true(proc.pid > 0)
+    step("Poll process status — running or already exited, never an error")
+    val polled = agent_process_status(proc)
+    assert_true(polled.status == "running" or polled.status == "not_running")
+    step("Stop the process — killed, or already-exited kill failure")
+    val stopped = stop_agent_process(proc)
+    assert_true(stopped.status == "stopped" or stopped.status == "error")
+
+# @manual_section: Backend Contracts
 describe "LLM Caret agent backends (claude + codex)":
     it "builds the claude argv contract":
-        val plan = build_agent_launch_plan(_request("claude_cli"))
+        step("Plan a claude_cli launch and assert the -p/--output-format json shape")
+        val plan = build_agent_launch_plan(backend_request("claude_cli"))
         expect(plan.argv[0]).to_equal("-p")
         expect(plan.argv).to_contain("--output-format")
         expect(plan.argv).to_contain("json")
 
     it "builds the codex argv contract":
-        val plan = build_agent_launch_plan(_request("codex"))
+        step("Plan a codex launch and assert the exec <prompt> shape")
+        val plan = build_agent_launch_plan(backend_request("codex"))
         expect(plan.argv[0]).to_equal("exec")
         expect(plan.argv.len()).to_equal(2)
 
     it "launches, polls, and stops a claude-backed agent process":
-        val plan = build_agent_launch_plan(_request("claude_cli"))
-        val proc = launch_agent_plan_with_gemini("sys-claude", plan, "/bin/echo", "", "", "")
-        expect(proc.status).to_equal("started")
-        assert_true(proc.pid > 0)
-        val polled = agent_process_status(proc)
-        assert_true(polled.status == "running" or polled.status == "not_running")
-        val stopped = stop_agent_process(proc)
-        assert_true(stopped.status == "stopped" or stopped.status == "error")
+        launch_poll_stop("sys-claude", "claude_cli", "/bin/echo", "")
 
     it "launches, polls, and stops a codex-backed agent process":
-        val plan = build_agent_launch_plan(_request("codex"))
-        val proc = launch_agent_plan_with_gemini("sys-codex", plan, "", "/bin/echo", "", "")
-        expect(proc.status).to_equal("started")
-        assert_true(proc.pid > 0)
-        val polled = agent_process_status(proc)
-        assert_true(polled.status == "running" or polled.status == "not_running")
-        val stopped = stop_agent_process(proc)
-        assert_true(stopped.status == "stopped" or stopped.status == "error")
+        launch_poll_stop("sys-codex", "codex", "", "/bin/echo")
