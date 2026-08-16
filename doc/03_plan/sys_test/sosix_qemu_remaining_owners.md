@@ -7,6 +7,11 @@ Focused positioned-I/O spec:
 `test/03_system/os/qemu/sosix_fat32_positioned_io_spec.spl`, mirrored at
 `doc/06_spec/03_system/os/qemu/sosix_fat32_positioned_io_spec.md`.
 
+NVFS/DBFS positioned matrix spec:
+`test/03_system/os/qemu/sosix_positioned_filesystem_matrix_spec.spl`, manually
+mirrored pending qualified docgen at
+`doc/06_spec/03_system/os/qemu/sosix_positioned_filesystem_matrix_spec.md`.
+
 ## Oracle
 
 The spec uses bounded process capture and typed `CommandEvidence` and
@@ -67,6 +72,9 @@ docgen. Missing qualification is an expected fail-closed result, not a skip.
 | REQ-SQ-018 | `fat32.spl` explicit-offset primitives | `fat32_positioned_io_spec.spl` | qualified owner suite |
 | REQ-SQ-019 | `fat32_fd_table.spl` object/alias lifecycle | `fat32_fd_table_spec.spl` | qualified owner suite |
 | REQ-SQ-020 | concrete backend, shim, lifecycle hooks | backend spec + linked gate | source rejection + qualified admission |
+| REQ-SQ-021 | DBFS/NVFS exact binary positioned primitives | DBFS + NVFS integration specs | exercise positioned owners |
+| REQ-SQ-022 | `MountTable` virtual binding and concrete SOSIX adapters | positioned backend unit spec | source rejection + qualified owner suite |
+| REQ-SQ-023 | `nvfs-dbfs-backed-v1` image, root mount, two-boot persistence | image/boot source specs + live QEMU gate | qualified NVFS live guest |
 
 Manual visibility keeps the three system scenarios visible and folds the
 executable source. Evidence is `exec`/`binary`/`log`; no screenshots apply.
@@ -112,3 +120,43 @@ canonical planner admission therefore remains fail-closed. The three-cycle cap
 is exhausted. No Stage 4 CLI was deployed,
 so the exact SSpec/docgen commands above remain pending and must not be run
 against the known-stale release binary.
+
+## NVFS/DBFS positioned matrix continuation
+
+The modern spec uses the exact seven steps `Validate positioned filesystem
+source contracts`, `Reject an unqualified live-guest environment`, `Bind the
+admitted pure-Simple runtime`, `Exercise NVFS and DBFS positioned owners`,
+`Boot the NVFS-backed SimpleOS guest`, `Verify cursor-independent guest I/O`,
+and `Retain filesystem matrix evidence`. Its frozen helper vocabulary is
+`run_positioned_filesystem_gate`, `run_nvfs_qemu_gate`,
+`qualified_positioned_environment`, `expect_positioned_backend_evidence`, and
+`expect_nvfs_live_guest_evidence`.
+
+When all six inputs exist, run this admission once:
+
+```sh
+SIMPLE_RUNTIME_PATH="$SOSIX_POSITIONED_SIMPLE_RUNTIME" \
+SIMPLE_STAGE4_PROVENANCE="$SOSIX_POSITIONED_STAGE4_PROVENANCE" \
+SIMPLE_RUNTIME_RECEIPT="$SOSIX_POSITIONED_RUNTIME_RECEIPT" \
+sh scripts/check/build-simpleos-nvfs-positioned-qemu.shs
+```
+
+This construction must produce the dedicated-entry kernel, its closed build
+receipt, the NVFS image, and the image manifest before admission. Then run:
+
+```sh
+sh scripts/check/check-sosix-positioned-filesystem-matrix.shs --admit \
+  "$SOSIX_POSITIONED_SIMPLE_RUNTIME" \
+  "$SOSIX_POSITIONED_STAGE4_PROVENANCE" \
+  "$SOSIX_POSITIONED_RUNTIME_RECEIPT" \
+  "$SOSIX_POSITIONED_KERNEL_ELF" \
+  "$SIMPLEOS_NVFS_ROOT_IMAGE" \
+  "$SIMPLEOS_NVFS_ROOT_IMAGE_MANIFEST"
+```
+
+Then run the new SSpec, docgen, and `sspec-maintain scan` once with that same
+admitted runtime. The wrapper executes each DBFS, NVFS, and SOSIX focused spec
+once, copies the admitted image privately, boots it twice, and requires exact
+mount, cursor-independent round-trip, and persistence markers. No qualified
+Stage-4 runtime is presently available, so these runtime commands are pending;
+the source gate and manual mirror do not claim PASS.

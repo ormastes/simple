@@ -1,0 +1,165 @@
+"""
+NVFS binary positioned-I/O integration specification.
+
+The POSIX-compatible NVFS driver must preserve arbitrary bytes, return short
+reads at EOF, create zero-filled holes, and reject invalid signed ranges before
+delegating to its DBFS byte owner.
+"""
+
+use std.spipe.*
+use std.fs_driver.error.{FsError}
+use std.fs_driver.fat32_stub.{RamBlockDevice}
+use std.fs_driver.nvfs_driver.{NvfsDriver}
+use std.fs_driver.nvfs_posix_driver.{NvfsPosixDriver}
+use std.fs_driver.types.{FileHandle, MountOptions, OpenFlags, Path}
+
+fn open_positioned_fixture(name: text, path: text) -> (NvfsPosixDriver, FileHandle):
+    val driver = NvfsPosixDriver.new(name)
+    driver.mount(MountOptions.default()).unwrap()
+    val handle = driver.open(
+        Path(raw: path), OpenFlags.read_write().with_create()).unwrap()
+    (driver, handle)
+
+fn open_native_positioned_fixture(name: text, path: text) -> (NvfsDriver, FileHandle):
+    val driver = NvfsDriver.new(name)
+    driver.mount(MountOptions.default()).unwrap()
+    val handle = driver.open(
+        Path(raw: path), OpenFlags.read_write().with_create()).unwrap()
+    (driver, handle)
+
+describe "NVFS binary positioned I/O":
+    # @req: REQ-SQ-021
+    it "replays positioned bytes from a block device after native reopen":
+        val dev = RamBlockDevice.new_empty()
+        val path = Path(raw: "/nvfs-device-positioned.bin")
+
+        step("Create a device-backed native NVFS driver")
+        val first = NvfsDriver.new_on_device(
+            "nvfs-positioned-device-first", dev, 2048, 128).unwrap()
+        expect(first.name).to_equal("nvfs-positioned-device-first")
+        val handle = first.open(
+            path, OpenFlags.read_write().with_create()).unwrap()
+        val payload: [u8] = [0x00u8, 0xffu8, 0x80u8, 0x41u8]
+        expect(first.pwrite(handle, 0, payload).unwrap()).to_equal(4)
+        first.close(handle).unwrap()
+
+        step("Open a fresh driver on the same device region")
+        val second = NvfsDriver.new_on_device(
+            "nvfs-positioned-device-second", dev, 2048, 128).unwrap()
+        val reopened = second.open(path, OpenFlags.read_only()).unwrap()
+        var out: [u8] = [0u8, 0u8, 0u8, 0u8]
+        expect(second.pread(reopened, 0, out).unwrap()).to_equal(4)
+        expect(out).to_equal(payload)
+
+    # @req: REQ-SQ-021
+    it "exposes positioned binary I/O from the POSIX device constructor":
+        val dev = RamBlockDevice.new_empty()
+        val driver = NvfsPosixDriver.new_on_device(
+            "nvfs-posix-device", dev, 4096, 128).unwrap()
+        val handle = driver.open(
+            Path(raw: "/nvfs-posix-device.bin"),
+            OpenFlags.read_write().with_create()).unwrap()
+
+        step("Patch and read arbitrary bytes through the device-backed facade")
+        expect(driver.pwrite(handle, 2, [0x00u8, 0xffu8]).unwrap()).to_equal(2)
+        var out: [u8] = [0xaau8, 0xaau8, 0xaau8, 0xaau8]
+        expect(driver.pread(handle, 0, out).unwrap()).to_equal(4)
+        expect(out).to_equal([0u8, 0u8, 0x00u8, 0xffu8])
+
+    # @req: REQ-SQ-021
+    it "returns an owned short binary read from a nonzero offset":
+        step("Seed bytes that are not safe to round-trip through text")
+        val (driver, handle) = open_positioned_fixture(
+            "nvfs-positioned-short-read", "/positioned-short-read.bin")
+        val seed: [u8] = [0x00u8, 0xffu8, 0x80u8, 0x41u8, 0x7fu8]
+        expect(driver.pwrite(handle, 0, seed).unwrap()).to_equal(5)
+
+        step("Read past EOF without padding the caller buffer")
+        var out: [u8] = [0xaau8, 0xaau8, 0xaau8, 0xaau8, 0xaau8]
+        val read_count = driver.pread(handle, 2, out).unwrap()
+        expect(read_count).to_equal(3)
+        expect(out[0]).to_equal(0x80u8)
+        expect(out[1]).to_equal(0x41u8)
+        expect(out[2]).to_equal(0x7fu8)
+        expect(out[3]).to_equal(0xaau8)
+
+    # @req: REQ-SQ-021
+    it "preserves binary prefix and suffix around a positioned overwrite":
+        val (driver, handle) = open_positioned_fixture(
+            "nvfs-positioned-overwrite", "/positioned-overwrite.bin")
+        val seed: [u8] = [0x00u8, 0xffu8, 0x80u8, 0x7fu8]
+        expect(driver.pwrite(handle, 0, seed).unwrap()).to_equal(4)
+
+        step("Overwrite only the selected binary range")
+        val patch: [u8] = [0xfeu8, 0x00u8]
+        expect(driver.pwrite(handle, 1, patch).unwrap()).to_equal(2)
+        var out: [u8] = [0u8, 0u8, 0u8, 0u8]
+        expect(driver.pread(handle, 0, out).unwrap()).to_equal(4)
+        expect(out).to_equal([0x00u8, 0xfeu8, 0x00u8, 0x7fu8])
+
+    # @req: REQ-SQ-021
+    it "zero-fills a positioned-write hole and retains it across reopen":
+        val path = "/positioned-hole.bin"
+        val (driver, handle) = open_positioned_fixture(
+            "nvfs-positioned-hole", path)
+        expect(driver.pwrite(handle, 0, [0x31u8, 0x32u8]).unwrap()).to_equal(2)
+
+        step("Write beyond EOF and require a zero-filled gap")
+        expect(driver.pwrite(handle, 5, [0xffu8]).unwrap()).to_equal(1)
+        driver.close(handle).unwrap()
+
+        step("Reopen through the persisted-file mirror")
+        val reopened = driver.open(Path(raw: path), OpenFlags.read_only()).unwrap()
+        var out: [u8] = [0xaau8, 0xaau8, 0xaau8, 0xaau8, 0xaau8, 0xaau8]
+        expect(driver.pread(reopened, 0, out).unwrap()).to_equal(6)
+        expect(out).to_equal([0x31u8, 0x32u8, 0u8, 0u8, 0u8, 0xffu8])
+
+    # @req: REQ-SQ-021
+    it "rejects negative and overflowing ranges without mutation":
+        val (driver, handle) = open_positioned_fixture(
+            "nvfs-positioned-invalid", "/positioned-invalid.bin")
+        expect(driver.pwrite(handle, 0, [0x41u8, 0x42u8]).unwrap()).to_equal(2)
+
+        step("Reject invalid ranges at the NVFS boundary")
+        var rejected_read: [u8] = [0u8]
+        expect(driver.pread(
+            handle, -1, rejected_read).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(driver.pwrite(handle, -1, [0x99u8]).unwrap_err()).to_equal(FsError.InvalidArg)
+        expect(driver.pwrite(
+            handle, 9223372036854775807, [0x99u8]).unwrap_err()).to_equal(FsError.InvalidArg)
+
+        step("Prove rejected writes left the file unchanged")
+        var out: [u8] = [0u8, 0u8]
+        expect(driver.pread(handle, 0, out).unwrap()).to_equal(2)
+        expect(out).to_equal([0x41u8, 0x42u8])
+
+describe "native NVFS binary positioned I/O":
+    # @req: REQ-SQ-021
+    it "uses byte-exact pread and pwrite at arbitrary valid offsets":
+        val (driver, handle) = open_native_positioned_fixture(
+            "nvfs-native-positioned", "/native-positioned.bin")
+        val seed: [u8] = [0x00u8, 0xffu8, 0x80u8, 0x7fu8]
+        expect(driver.pwrite(handle, 0, seed).unwrap()).to_equal(4)
+
+        step("Patch the native facade without a text conversion")
+        expect(driver.pwrite(handle, 1, [0xfeu8, 0x00u8]).unwrap()).to_equal(2)
+        var out: [u8] = [0xaau8, 0xaau8, 0xaau8, 0xaau8, 0xaau8]
+        expect(driver.pread(handle, 1, out).unwrap()).to_equal(3)
+        expect(out[0]).to_equal(0xfeu8)
+        expect(out[1]).to_equal(0x00u8)
+        expect(out[2]).to_equal(0x7fu8)
+        expect(out[3]).to_equal(0xaau8)
+
+    # @req: REQ-SQ-021
+    it "keeps compatibility write offset-zero-only while pwrite is positioned":
+        val (driver, handle) = open_native_positioned_fixture(
+            "nvfs-native-write-policy", "/native-write-policy.bin")
+        expect(driver.write(handle, 0, [0x41u8, 0x42u8]).unwrap()).to_equal(2)
+
+        step("Keep ordinary write policy separate from positioned pwrite")
+        expect(driver.write(
+            handle, 1, [0x99u8]).unwrap_err()).to_equal(FsError.Unsupported)
+        expect(driver.pwrite(handle, 1, [0x43u8]).unwrap()).to_equal(1)
+        var out: [u8] = [0u8, 0u8]
+        expect(driver.pread(handle, 0, out).unwrap()).to_equal(2)
+        expect(out).to_equal([0x41u8, 0x43u8])

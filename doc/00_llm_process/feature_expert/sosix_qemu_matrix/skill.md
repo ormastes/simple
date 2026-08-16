@@ -63,3 +63,43 @@ fd-pinned protection against hostile concurrent replacement.
 
 Refresh this expert, the plan, ledger, and guide together whenever a row state,
 shared interface, resume command, ownership boundary, or promotion rule changes.
+
+## NVFS/DBFS positioned extension
+
+REQ-SQ-021..023 preserve `MountTable` as the only positioned object owner.
+Its virtual handle binds mount, driver family, and opaque driver handle;
+SOSIX must call the global VFS positioned facade through
+`SosixNvfsPositionedVfsBackendV1` or
+`SosixDbfsPositionedVfsBackendV1`. Never expose raw NVFS/DBFS handles as SOSIX
+object IDs and never emulate positioned I/O with seek/restore.
+
+The live SimpleOS provider name is exactly `nvfs-dbfs-backed-v1`. That name is
+an honesty boundary: NVFS metadata is backed by DBFS on the device. First use
+the same qualified runtime to build the dedicated entry, closed kernel
+receipt, image, and image manifest:
+
+```sh
+SIMPLE_RUNTIME_PATH="$SOSIX_POSITIONED_SIMPLE_RUNTIME" \
+SIMPLE_STAGE4_PROVENANCE="$SOSIX_POSITIONED_STAGE4_PROVENANCE" \
+SIMPLE_RUNTIME_RECEIPT="$SOSIX_POSITIONED_RUNTIME_RECEIPT" \
+sh scripts/check/build-simpleos-nvfs-positioned-qemu.shs
+```
+
+Qualified acceptance is then:
+
+```sh
+sh scripts/check/check-sosix-positioned-filesystem-matrix.shs --admit \
+  "$SOSIX_POSITIONED_SIMPLE_RUNTIME" \
+  "$SOSIX_POSITIONED_STAGE4_PROVENANCE" \
+  "$SOSIX_POSITIONED_RUNTIME_RECEIPT" \
+  "$SOSIX_POSITIONED_KERNEL_ELF" \
+  "$SIMPLEOS_NVFS_ROOT_IMAGE" \
+  "$SIMPLEOS_NVFS_ROOT_IMAGE_MANIFEST"
+```
+
+The gate runs each focused owner spec once and boots a private image copy
+twice. Accept only exact mount, cursor-independent round-trip, persistence,
+closed kernel/image receipts, and both transcript hashes. The seven-step SSpec manual is future-executable
+and unrun while no admitted pure-Simple Stage-4 runtime exists. Source tests,
+the Rust seed, Stage 2/3, a handwritten manual, or a single boot are never live
+PASS evidence and do not alter the 24-row ledger.

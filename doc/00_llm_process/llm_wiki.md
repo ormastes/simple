@@ -565,6 +565,20 @@ KERNEL_ELF`, followed by the focused system SSpec and docgen using that same
 receipt-bound Stage-4 runtime. Source self-tests and older linked kernels are
 not runtime or QEMU evidence.
 
+The continuation adds exact binary NVFS/DBFS positioned primitives while
+retaining `MountTable` virtual handles as the sole SOSIX object authority. The
+SimpleOS provider is honestly named `nvfs-dbfs-backed-v1`; its qualified gate
+is `scripts/check/check-sosix-positioned-filesystem-matrix.shs --admit RUNTIME
+STAGE4_PROVENANCE RECEIPT KERNEL_ELF IMAGE IMAGE_MANIFEST`. It executes focused
+owners once and requires two boots of one private image copy with exact mount,
+cursor-independent round-trip, persistence, and hash evidence. Construct the
+inputs first with `build-simpleos-nvfs-positioned-qemu.shs`; its closed receipt
+binds the dedicated entry, current source, kernel, and admitted Stage-4 runtime.
+The gate also retains both boot transcript hashes. Its modern
+seven-step manual is future-executable/unrun until an admitted pure-Simple
+Stage-4 environment exists. The Rust seed, Stage 2/3, source self-tests, and a
+handwritten manual cannot claim live PASS or change the 24-row ledger.
+
 Canonical operator detail is
 `doc/07_guide/platform/simpleos/sosix_qemu_shared_settings.md`.
 

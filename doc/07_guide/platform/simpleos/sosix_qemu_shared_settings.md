@@ -154,3 +154,46 @@ operator must run `-AllGuests -Run` serially and retain six bundles.
 FreeBSD first requires checksum-admitted 14.4 media. macOS TCG rows may prove
 correctness but never native timing. All non-PASS acceptance IDs remain active;
 this is an implementation handoff, not feature completion.
+
+## NVFS/DBFS positioned acceptance
+
+The current SimpleOS NVFS root provider is explicitly
+`nvfs-dbfs-backed-v1`. It uses NVFS metadata over a DBFS backing engine; do not
+describe it as an independent native NVFS disk engine. SOSIX-facing NVFS and
+DBFS backends use `MountTable` virtual handles through the global VFS
+positioned facade. Raw driver handles are not capabilities and must not be
+passed to SOSIX.
+
+Build the dedicated kernel, closed kernel receipt, image, and image manifest
+with the same qualified runtime:
+
+```sh
+SIMPLE_RUNTIME_PATH="$SOSIX_POSITIONED_SIMPLE_RUNTIME" \
+SIMPLE_STAGE4_PROVENANCE="$SOSIX_POSITIONED_STAGE4_PROVENANCE" \
+SIMPLE_RUNTIME_RECEIPT="$SOSIX_POSITIONED_RUNTIME_RECEIPT" \
+sh scripts/check/build-simpleos-nvfs-positioned-qemu.shs
+```
+
+Set `SOSIX_POSITIONED_KERNEL_ELF` to the emitted
+`build/os/simpleos_x86_64_nvfs_positioned.elf`. The adjacent receipt binds the
+dedicated entry, target, kernel hash, admitted compiler/runtime identity, and
+source revision. Then execute exactly once:
+
+```sh
+sh scripts/check/check-sosix-positioned-filesystem-matrix.shs --admit \
+  "$SOSIX_POSITIONED_SIMPLE_RUNTIME" \
+  "$SOSIX_POSITIONED_STAGE4_PROVENANCE" \
+  "$SOSIX_POSITIONED_RUNTIME_RECEIPT" \
+  "$SOSIX_POSITIONED_KERNEL_ELF" \
+  "$SIMPLEOS_NVFS_ROOT_IMAGE" \
+  "$SIMPLEOS_NVFS_ROOT_IMAGE_MANIFEST"
+```
+
+The gate first verifies the source and rejection contracts, then runs the
+focused FAT32, DBFS, NVFS, and SOSIX owner specs, makes a private image copy,
+and boots that copy twice. PASS requires the exact provider marker, the
+cursor-independent read/write marker, the first-boot write marker, the
+second-boot persistence match, and retained runtime/kernel/image/QEMU plus
+boot1/boot2 transcript hashes.
+`--self-test`, missing inputs, Stage 2/3, the Rust seed, one boot, or a manual
+Markdown mirror is not live QEMU evidence and cannot promote a matrix row.

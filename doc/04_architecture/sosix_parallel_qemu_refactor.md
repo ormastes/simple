@@ -260,3 +260,36 @@ x86_64 is blocked before boot by image payload capacity; ARM64 is blocked in
 FAT/VFS directory-buffer handling after the three-cycle cap. External-host
 non-PASS receipts remain required. This snapshot describes admission, not an
 absence of implemented guest capability.
+
+## Positioned filesystem owner extension (2026-08-16)
+
+REQ-SQ-021 and REQ-SQ-022 extend the existing positioned-I/O lane without
+creating another handle authority. `MountTable` remains the canonical owner:
+its monotonically allocated virtual handle binds one mount, one driver kind,
+and one opaque driver handle. NVFS and DBFS dispatch therefore follows
+
+`SOSIX backend -> global VFS positioned facade -> MountTable virtual handle -> driver read_at/write_at`.
+
+The raw NVFS or DBFS handle is never a SOSIX object ID. Close retires the
+virtual binding, stale handles fail, cross-driver use fails, and offset/count
+validation occurs before driver dispatch. The concrete fieldless
+`SosixNvfsPositionedVfsBackendV1` and `SosixDbfsPositionedVfsBackendV1`
+adapters deliberately reuse that owner and return stable typed errors. The
+production shim retains a generation-bound typed route owner; boot installs
+the explicit root kind and never infers it from a numeric object ID. The live
+oracle crosses registered-buffer SOSIX kernel dispatch before the adapter.
+
+REQ-SQ-023 adds a narrow x86_64 live-guest route. The current NVFS facade is
+honestly named `nvfs-dbfs-backed-v1`: NVFS metadata occupies logical sectors
+0-1, the DBFS backing superblock occupies sectors 2-3, and its arena begins at
+sector 4. The image builder and boot path must retain that label; they may not
+claim a separate native NVFS storage engine. The guest mounts the device via
+`DriverInstance.Nvfs`, performs a cursor-independent positioned round trip,
+then proves persistence by observing the same private image on a second boot.
+
+Live evidence is admitted only when a source-matched pure-Simple Stage-4
+runtime, runtime receipt, closed dedicated-entry kernel receipt, immutable
+image manifest, both transcript hashes, and QEMU binary all validate. Source
+inspection, `--self-test`, Stage 2/3, the Rust
+seed, or one boot cannot promote this row. The evidence gate remains additive
+to the 24-row matrix and does not change any existing host/guest row state.

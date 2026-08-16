@@ -6,10 +6,11 @@ state after every recognized call.  Registry authentication, operation
 identity, request-token advancement, and backend transaction policy remain in
 the canonical SOSIX FS owner; the shim does not duplicate them.
 
-The retained backend is the concrete FAT32 object adapter.  It reaches only
-cursor-independent ``read_at``/``write_at`` primitives and never emulates
-positioned I/O with seek/read/write/restore.  Dispatch still fails closed
-until an authenticated registry owner is explicitly installed.
+The retained backend is a typed composition owner.  FAT32 remains the default,
+while an explicit boot composition step may install NVFS or DBFS.  No route is
+inferred from an integer handle and no route emulates positioned I/O with
+seek/read/write/restore.  Dispatch still fails closed until an authenticated
+registry owner is explicitly installed.
 """
 
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
@@ -25,20 +26,38 @@ use os.sosix.fs.positioned_dispatch_owner_v1.SosixFsPositionedDispatchOwnerV1
 use os.sosix.fs.positioned_syscall_v1.{
     SOSIX_FS_PREAD_REGISTERED_V1, SOSIX_FS_PWRITE_REGISTERED_V1
 }
-use os.sosix.fs.fat32_positioned_vfs_backend.SosixFat32PositionedVfsBackendV1
+use os.sosix.fs.positioned_backend_composition_v1.{
+    SosixPositionedBackendKindV1,
+    SosixPositionedBackendOwnerV1,
+    SosixPositionedBackendInstallResultV1,
+    sosix_positioned_backend_default_v1,
+    sosix_positioned_backend_install_v1
+}
 
 var g_shim_positioned_state: SosixFsKernelPositionedStateV1 =
     sosix_fs_kernel_uninstalled_positioned_state_v1()
-var g_shim_positioned_backend = SosixFat32PositionedVfsBackendV1()
+var g_shim_positioned_backend: SosixPositionedBackendOwnerV1 =
+    sosix_positioned_backend_default_v1()
 
 pub fn shim_positioned_reset_v1():
     """Reset boot-owned state; called exactly once from ``shim_init``."""
     g_shim_positioned_state = sosix_fs_kernel_uninstalled_positioned_state_v1()
+    g_shim_positioned_backend = sosix_positioned_backend_default_v1()
+
+pub fn shim_positioned_install_backend_route_v1(
+    kind: SosixPositionedBackendKindV1
+) -> SosixPositionedBackendInstallResultV1:
+    """Install one explicit typed route without inspecting a file-object ID."""
+    val installed = sosix_positioned_backend_install_v1(
+        g_shim_positioned_backend, kind)
+    if installed.accepted:
+        g_shim_positioned_backend = installed.owner
+    installed
 
 pub fn shim_positioned_install_owner_v1(
     owner: SosixFsPositionedDispatchOwnerV1
 ) -> SosixFsKernelPositionedInstallResultV1:
-    """Adopt an authenticated service owner for the concrete FAT32 backend."""
+    """Adopt an authenticated service owner for the installed typed route."""
     val installed = sosix_fs_kernel_install_positioned_owner_v1(
         g_shim_positioned_state, owner)
     if installed.accepted:
@@ -81,4 +100,5 @@ fn spl_handle_fs_pwrite_registered_v1(
         SOSIX_FS_PWRITE_REGISTERED_V1, a0, a1, a2, a3, a4, a5)
 
 export shim_positioned_reset_v1, shim_positioned_install_owner_v1
+export shim_positioned_install_backend_route_v1
 export shim_positioned_dispatch_v1

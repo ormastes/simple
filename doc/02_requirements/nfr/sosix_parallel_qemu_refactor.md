@@ -13,3 +13,5 @@
 - NFR-SQ-011: No per-pixel, per-primitive, or repeated hot-frame environment/file/process SOSIX calls; frames and events are batched and configuration is snapshotted at startup.
 - NFR-SQ-012: Display completions bind surface generation and frame sequence; stale, duplicate, canceled, or reset completions fail closed.
 - NFR-SQ-013: Knowledge surfaces state the current immutable matrix count explicitly; as of 2026-08-12 it is **0 PASS / 24**, regardless of narrower diagnostic successes.
+- NFR-SQ-014: Positioned filesystem data remains owned bytes across SOSIX/VFS/driver boundaries; binary payloads never round-trip through `text`.
+- NFR-SQ-015: Qualified NVFS QEMU evidence uses one private image copy for both boots, bounded execution, a closed dedicated-entry kernel receipt, exact runtime/kernel/image/QEMU/transcript hashes, and no implicit build, prebuilt fallback, marker-only promotion, or Rust-seed substitution.

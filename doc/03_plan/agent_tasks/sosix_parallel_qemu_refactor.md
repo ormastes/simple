@@ -336,3 +336,20 @@ unchanged green gates after the correction:
 
 This is `STATUS: PASS` for the plan-document goal only. It does not change the
 implementation handoff or make `SOSIX-MATRIX-COLLECT-24` pass.
+
+## Positioned filesystem parallel continuation — 2026-08-16
+
+| Lane | Exclusive ownership | Result / review status |
+| --- | --- | --- |
+| DBFS positioned primitives | `/root/dbfs_positioned_research` (Bernoulli): DBFS driver, superblock facades, focused DBFS specs | Implemented; static-reviewed; runtime pending admitted Stage 4 |
+| NVFS positioned primitives | `/root/nvfs_positioned_research` (Kant): NVFS native/POSIX drivers, focused NVFS spec | Implemented; static-reviewed; runtime pending admitted Stage 4 |
+| SimpleOS NVFS bridge | `/root/sosix_backend_bridge` (Noether): NVFS image/mkfs, boot mount/probe, focused image/boot specs | Implements honest `nvfs-dbfs-backed-v1`; reviewed and corrected for checksum-valid failover/strict oracles |
+| Canonical object/backend owner | `/root` plus production-route sidecar: `MountTable`, typed shim composition, registered-buffer SOSIX route, adapters/specs | Independent review blockers corrected; merge owner `/root` |
+| System evidence/docs | `/root` plus evidence/documentation sidecars: builder, closed receipts, matrix/live wrappers, modern SSpec, lane docs/manual | Static review complete; qualified runtime execution pending |
+
+Interface names, the seven displayed steps, and the five helper names were
+frozen by the merge owner before the sidecars started. Sidecars were forbidden
+from editing outside their exclusive lane and no sidecar runtime result can
+replace final high-capability review. The manual is intentionally marked
+future-executable/unrun until a receipt-bound pure-Simple Stage-4 environment
+executes it. This continuation does not alter the earlier 24-row ledger.

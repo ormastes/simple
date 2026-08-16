@@ -1,0 +1,91 @@
+# @cover src/os/kernel/boot/boot_fs.spl
+# @cover src/os/port/nvfs_image.spl
+# @cover scripts/os/mkfs-nvfs.shs
+
+use std.spec
+use std.fs_driver.mem_block_device.MemBlockDevice
+use std.fs_driver.nvfs_superblock.{
+    nvfs_superblock_set_device, nvfs_superblock_format_disk
+}
+use os.kernel.boot.boot_fs.nvfs_boot_select_valid_superblock
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn _source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "SimpleOS NVFS DBFS-backed production root source contract":
+    # @req: REQ-SQ-023
+    it "mounts the canonical NVFS driver through the MountTable root":
+        val source = _source("src/os/kernel/boot/boot_fs.spl")
+        expect(source.contains("NvfsDriver.new_on_device(")).to_equal(true)
+        expect(source.contains("vfs_mount_rootfs(DriverInstance.Nvfs(driver_r.unwrap()))")).to_equal(true)
+        expect(source.contains("nvfs_boot_select_valid_superblock(dev)")).to_equal(true)
+        expect(source.contains("nvfs_superblock_read_from_bytes(bytes.unwrap())")).to_equal(true)
+        expect(source.contains("dbfs_superblock_validate(backing_sb)")).to_equal(true)
+        expect(source.contains("backing_sb.block_count.to_i64()")).to_equal(true)
+        expect(source.contains("shim_positioned_install_backend_route_v1(")).to_equal(true)
+        expect(source.contains("SosixPositionedBackendKindV1.Nvfs")).to_equal(true)
+        expect(source.contains("SosixPositionedBackendKindV1.Dbfs")).to_equal(true)
+
+    # @req: REQ-SQ-023
+    it "fails over from a checksum-corrupt primary replica":
+        val dev = MemBlockDevice.new(8u64, 512u32)
+        nvfs_superblock_set_device(dev)
+        expect(nvfs_superblock_format_disk(11u64, 22u64)).to_equal(true)
+        var primary = dev.read_sector(0u64).unwrap()
+        primary[50] = primary[50] ^ 0x01u8
+        expect(dev.write_sector(0u64, primary).is_ok()).to_equal(true)
+
+        val selected = nvfs_boot_select_valid_superblock(dev)
+        expect(selected.?).to_equal(true)
+        expect(selected.unwrap().replica_id).to_equal(1u8)
+
+    it "names the DBFS-backed provider and exact persistence boundaries":
+        val source = _source("src/os/kernel/boot/boot_fs.spl")
+        expect(source.contains("[NVFS] mounted as root filesystem provider=nvfs-dbfs-backed-v1")).to_equal(true)
+        expect(source.contains("[boot-fs] NVFS persistence check: written:first-boot")).to_equal(true)
+        expect(source.contains("[boot-fs] NVFS persistence check: persisted:match content=nvfs-persist-ok")).to_equal(true)
+        expect(source.contains("[boot-fs] NVFS persistence check: FAILED")).to_equal(true)
+
+    # @req: REQ-SQ-022
+    # @req: REQ-SQ-023
+    it "exercises byte-exact positioned I/O through canonical SOSIX dispatch":
+        val source = _source("src/os/kernel/boot/boot_fs.spl")
+        expect(source.contains("sosix_positioned_acceptance_round_trip_v1(")).to_equal(true)
+        expect(source.contains("SosixPositionedBackendKindV1.Nvfs")).to_equal(true)
+        expect(source.contains("g_vfs_nvfs_write_at(")).to_equal(false)
+        expect(source.contains("g_vfs_nvfs_read_at(")).to_equal(false)
+        expect(source.contains("data[0] == 0u8 and data[1] == 0u8 and data[2] == 11u8 and data[3] == 22u8")).to_equal(true)
+        expect(source.contains("[boot-fs] NVFS positioned I/O: cursor-independent round-trip")).to_equal(true)
+        expect(source.contains("[boot-fs] NVFS positioned I/O: FAILED")).to_equal(true)
+
+    it "propagates both boot oracles before emitting the mount success marker":
+        val source = _source("src/os/kernel/boot/boot_fs.spl")
+        expect(source.contains("if not _nvfs_root_persistence_check():\n        return false")).to_equal(true)
+        expect(source.contains("if not _nvfs_root_positioned_io_check():\n        return false")).to_equal(true)
+        expect(source.contains("val _ = _nvfs_root_persistence_check()")).to_equal(false)
+        expect(source.contains("val _ = _nvfs_root_positioned_io_check()")).to_equal(false)
+
+    it "requires an admitted runtime and emits an adjacent closed image manifest":
+        val source = _source("scripts/os/mkfs-nvfs.shs")
+        expect(source.contains("SIMPLE_RUNTIME_PATH")).to_equal(true)
+        expect(source.contains("SIMPLE_RUNTIME_RECEIPT")).to_equal(true)
+        expect(source.contains("check-sosix-qemu-runtime-admission.shs")).to_equal(true)
+        expect(source.contains("provider=nvfs-dbfs-backed-v1")).to_equal(true)
+        expect(source.contains("image_sha256=%s")).to_equal(true)
+        expect(source.contains("runtime_sha256=%s")).to_equal(true)
+        expect(source.contains("exec bin/simple")).to_equal(false)
+
+    it "builds a dedicated entry that reaches the production boot sequence":
+        val entry = _source(
+            "examples/09_embedded/simple_os/arch/x86_64/nvfs_positioned_entry.spl")
+        val builder = _source(
+            "scripts/check/build-simpleos-nvfs-positioned-qemu.shs")
+        expect(entry.contains("boot_fs_sequence()")).to_equal(true)
+        expect(entry.contains("NVFS_POSITIONED_QEMU_PASSED")).to_equal(true)
+        expect(builder.contains("check-post-bootstrap-stage4-sspec.shs")).to_equal(true)
+        expect(builder.contains("check-sosix-qemu-runtime-admission.shs")).to_equal(true)
+        expect(builder.contains("entry=examples/09_embedded/simple_os/arch/x86_64/nvfs_positioned_entry.spl")).to_equal(true)
+        expect(builder.contains("compiler_path=%s")).to_equal(true)
+        expect(builder.contains("source_revision=%s")).to_equal(true)
