@@ -1,0 +1,267 @@
+"""
+# Booking/Rental Vertical — reservable resources, guarded holds and bookings
+
+The booking/rental proving vertical of the Simple Enterprise Suite (lane
+`.spipe/simple_enterprise_suite`, Wave 3; assessment §7.2): a
+`ReservableResource` model with three reservation modes and a guarded
+hold -> confirm -> cancel / no-show lifecycle.
+
+Every write runs the frozen guarded sequence over the durable store —
+identical to the goods-sale vertical:
+
+    session -> rbac -> domain validation -> idempotency -> effects in one UoW
+
+Effects committed together in the unit of work: the booking event, the
+outbox event, the audit record, and the idempotency key — a replayed
+command produces exactly one effect.
+
+## Resource modes and overlap policy
+
+- `exclusive-unit`  — at most one active booking may overlap a time range.
+- `capacity-pool`   — the sum of overlapping active quantities must stay
+                      <= the resource capacity.
+- `assigned-seat`   — a seat id may not be taken by an overlapping active
+                      booking (seat map versioned via `seat_map_version`).
+
+"Active" means a non-expired hold or a confirmed booking. Expired holds
+never block: expiry is judged against the CALLER-SUPPLIED `now_epoch` —
+this library performs no wall-clock reads.
+
+Storage model is insert-only + derive (same discipline as goods_sale):
+- `booking_resources`: one row per resource declaration.
+- `booking_events`: the hold row carries the time range / qty / seat /
+  expiry; a booking's status is the last event in its stream
+  (hold -> confirmed -> cancelled | no-show).
+
+Denials use the frozen closed reason set from
+`std.enterprise_sale.foundation`, including the `conflict` reason added
+for overlap rejections.
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_rows, store_insert_row,
+    uow_begin, uow_commit
+}
+use std.nogc_sync_mut.enterprise_store.records.{
+    idempotency_seen, idempotency_result, idempotency_record,
+    outbox_append, audit_append
+}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext,
+    CommandEnvelope, CommandResult,
+    accepted, denied, session_valid, role_allows
+}
+
+# =============================================================================
+# Schema
+# =============================================================================
+
+fn booking_setup(store: EnterpriseStore) -> bool:
+    var ok = store_migrate(store, "booking_001_resources",
+        "CREATE TABLE IF NOT EXISTS booking_resources (id INTEGER PRIMARY KEY, tenant_id TEXT, resource_id TEXT, mode TEXT, capacity TEXT, seat_map_version TEXT)")
+    ok = ok and store_migrate(store, "booking_002_events",
+        "CREATE TABLE IF NOT EXISTS booking_events (id INTEGER PRIMARY KEY, tenant_id TEXT, booking_id TEXT, resource_id TEXT, event TEXT, start_epoch TEXT, end_epoch TEXT, qty TEXT, seat TEXT, expires_epoch TEXT)")
+    ok
+
+# =============================================================================
+# Resource administration (admin-guarded)
+# =============================================================================
+
+fn booking_mode_valid(mode: text) -> bool:
+    mode == "exclusive-unit" or mode == "capacity-pool" or mode == "assigned-seat"
+
+fn booking_create_resource(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, resource_id: text, mode: text, capacity: i64, seat_map_version: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", resource_id)
+    if not role_allows(who.role, "booking.resource.admin"):
+        return denied("forbidden", resource_id)
+    if resource_id == "" or not booking_mode_valid(mode):
+        return denied("invalid-record", resource_id)
+    if mode == "capacity-pool" and capacity <= 0:
+        return denied("invalid-record", resource_id)
+    store_insert_row(store,
+        "INSERT INTO booking_resources (tenant_id, resource_id, mode, capacity, seat_map_version) VALUES (?, ?, ?, ?, ?)",
+        [tenant.tenant_id, resource_id, mode, "{capacity}", seat_map_version])
+    audit_append(store, tenant.tenant_id, who.actor_id, "booking.resource.create", resource_id)
+    accepted(resource_id)
+
+# =============================================================================
+# Derived reads (pure-Simple filtering; see enterprise_store docstring)
+# =============================================================================
+
+# booking_resource_mode returns (mode, capacity); mode "" means not found.
+fn booking_resource_mode(store: EnterpriseStore, tenant_id: text, resource_id: text) -> (text, i64):
+    val rows = store_rows(store, "booking_resources", "id, tenant_id, resource_id, mode, capacity, seat_map_version")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "resource_id") == resource_id:
+            return (sqlite_row_get(row, "mode"), int(sqlite_row_get(row, "capacity")))
+    ("", 0)
+
+# booking_status derives a booking's status from its event stream:
+# "" (unknown) -> hold -> confirmed -> cancelled | no-show
+fn booking_status(store: EnterpriseStore, tenant_id: text, booking_id: text) -> text:
+    var status = ""
+    val rows = store_rows(store, "booking_events", "id, tenant_id, booking_id, resource_id, event, start_epoch, end_epoch, qty, seat, expires_epoch")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "booking_id") == booking_id:
+            status = sqlite_row_get(row, "event")
+    status
+
+# booking_active decides whether a booking blocks others at `now_epoch`:
+# a confirmed booking always blocks; a hold blocks only until it expires.
+fn booking_active(status: text, expires_epoch: i64, now_epoch: i64) -> bool:
+    if status == "confirmed":
+        return true
+    if status == "hold":
+        return expires_epoch > now_epoch
+    false
+
+# ranges_overlap: half-open intervals [a_start, a_end) and [b_start, b_end).
+fn ranges_overlap(a_start: i64, a_end: i64, b_start: i64, b_end: i64) -> bool:
+    a_start < b_end and b_start < a_end
+
+# booking_conflicts applies the per-mode overlap policy for a candidate
+# reservation of `qty` units / seat `seat` on [start, end), judged at
+# `now_epoch`, ignoring `exclude_booking_id` (the candidate itself on
+# confirm). Returns true when the candidate must be rejected.
+fn booking_conflicts(store: EnterpriseStore, tenant_id: text, resource_id: text, start_epoch: i64, end_epoch: i64, qty: i64, seat: text, now_epoch: i64, exclude_booking_id: text) -> bool:
+    val res = booking_resource_mode(store, tenant_id, resource_id)
+    val mode = res.0
+    val capacity = res.1
+    var pool_used: i64 = 0
+    val rows = store_rows(store, "booking_events", "id, tenant_id, booking_id, resource_id, event, start_epoch, end_epoch, qty, seat, expires_epoch")
+    for row in rows:
+        # Only the hold row carries the reservation fields.
+        if sqlite_row_get(row, "event") != "hold":
+            continue
+        if sqlite_row_get(row, "tenant_id") != tenant_id or sqlite_row_get(row, "resource_id") != resource_id:
+            continue
+        val other_id = sqlite_row_get(row, "booking_id")
+        if other_id == exclude_booking_id:
+            continue
+        val status = booking_status(store, tenant_id, other_id)
+        if not booking_active(status, int(sqlite_row_get(row, "expires_epoch")), now_epoch):
+            continue
+        if not ranges_overlap(start_epoch, end_epoch, int(sqlite_row_get(row, "start_epoch")), int(sqlite_row_get(row, "end_epoch"))):
+            continue
+        if mode == "exclusive-unit":
+            return true
+        if mode == "capacity-pool":
+            pool_used = pool_used + int(sqlite_row_get(row, "qty"))
+        if mode == "assigned-seat" and sqlite_row_get(row, "seat") == seat:
+            return true
+    if mode == "capacity-pool":
+        return pool_used + qty > capacity
+    false
+
+# =============================================================================
+# Guarded booking commands
+# =============================================================================
+
+# booking_hold places a server-time-TTL hold on a resource. `now_epoch` is
+# caller-supplied server time; the hold expires at now_epoch + ttl_seconds.
+fn booking_hold(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, booking_id: text, resource_id: text, start_epoch: i64, end_epoch: i64, qty: i64, seat: text, now_epoch: i64, ttl_seconds: i64) -> CommandResult:
+    # 1. session
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", booking_id)
+    # 2. rbac
+    if not role_allows(who.role, "booking.hold"):
+        return denied("forbidden", booking_id)
+    # 3. domain validation
+    if booking_id == "" or start_epoch >= end_epoch or qty <= 0 or ttl_seconds <= 0:
+        return denied("invalid-record", booking_id)
+    val res = booking_resource_mode(store, tenant.tenant_id, resource_id)
+    if res.0 == "":
+        return denied("not-found", resource_id)
+    if res.0 == "assigned-seat" and seat == "":
+        return denied("invalid-record", booking_id)
+    if booking_conflicts(store, tenant.tenant_id, resource_id, start_epoch, end_epoch, qty, seat, now_epoch, booking_id):
+        return denied("conflict", booking_id)
+    # 4. idempotency — a replay returns the recorded outcome, no new effect
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    # 5. effects — one unit of work
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO booking_events (tenant_id, booking_id, resource_id, event, start_epoch, end_epoch, qty, seat, expires_epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, booking_id, resource_id, "hold", "{start_epoch}", "{end_epoch}", "{qty}", seat, "{now_epoch + ttl_seconds}"])
+    outbox_append(store, tenant.tenant_id, "booking.hold.placed", booking_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "booking.hold", booking_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, booking_id)
+    uow_commit(store)
+    accepted(booking_id)
+
+# booking_event_append is the shared effect body for the lifecycle commands
+# (confirm/cancel/no-show): one status event + outbox + audit + idempotency
+# in one UoW.
+fn booking_event_append(store: EnterpriseStore, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, booking_id: text, resource_id: text, event: text, topic: text, audit_action: text) -> CommandResult:
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO booking_events (tenant_id, booking_id, resource_id, event, start_epoch, end_epoch, qty, seat, expires_epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, booking_id, resource_id, event, "", "", "", "", ""])
+    outbox_append(store, tenant.tenant_id, topic, booking_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, audit_action, booking_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, booking_id)
+    uow_commit(store)
+    accepted(booking_id)
+
+# booking_hold_fields derives (resource_id, start, end, qty, seat, expires)
+# from the booking's hold row.
+fn booking_hold_fields(store: EnterpriseStore, tenant_id: text, booking_id: text) -> (text, i64, i64, i64, text, i64):
+    val rows = store_rows(store, "booking_events", "id, tenant_id, booking_id, resource_id, event, start_epoch, end_epoch, qty, seat, expires_epoch")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "booking_id") == booking_id:
+            if sqlite_row_get(row, "event") == "hold":
+                return (sqlite_row_get(row, "resource_id"), int(sqlite_row_get(row, "start_epoch")), int(sqlite_row_get(row, "end_epoch")), int(sqlite_row_get(row, "qty")), sqlite_row_get(row, "seat"), int(sqlite_row_get(row, "expires_epoch")))
+    ("", 0, 0, 0, "", 0)
+
+# booking_confirm promotes a live hold into a confirmed booking, re-running
+# the conflict policy (excluding the hold itself) at caller-supplied now.
+# An expired hold cannot be confirmed.
+fn booking_confirm(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, booking_id: text, now_epoch: i64) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", booking_id)
+    if not role_allows(who.role, "booking.confirm"):
+        return denied("forbidden", booking_id)
+    if booking_status(store, tenant.tenant_id, booking_id) != "hold":
+        return denied("invalid-record", booking_id)
+    val h = booking_hold_fields(store, tenant.tenant_id, booking_id)
+    if h.5 <= now_epoch:
+        return denied("invalid-record", booking_id)
+    if booking_conflicts(store, tenant.tenant_id, h.0, h.1, h.2, h.3, h.4, now_epoch, booking_id):
+        return denied("conflict", booking_id)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    booking_event_append(store, tenant, who, envelope, booking_id, h.0, "confirmed", "booking.confirmed", "booking.confirm")
+
+# booking_cancel releases a live hold or a confirmed booking.
+fn booking_cancel(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, booking_id: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", booking_id)
+    if not role_allows(who.role, "booking.cancel"):
+        return denied("forbidden", booking_id)
+    val status = booking_status(store, tenant.tenant_id, booking_id)
+    if status != "hold" and status != "confirmed":
+        return denied("invalid-record", booking_id)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val h = booking_hold_fields(store, tenant.tenant_id, booking_id)
+    booking_event_append(store, tenant, who, envelope, booking_id, h.0, "cancelled", "booking.cancelled", "booking.cancel")
+
+# booking_no_show marks a confirmed booking as a no-show.
+fn booking_no_show(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, booking_id: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", booking_id)
+    if not role_allows(who.role, "booking.no_show"):
+        return denied("forbidden", booking_id)
+    if booking_status(store, tenant.tenant_id, booking_id) != "confirmed":
+        return denied("invalid-record", booking_id)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val h = booking_hold_fields(store, tenant.tenant_id, booking_id)
+    booking_event_append(store, tenant, who, envelope, booking_id, h.0, "no-show", "booking.no_show", "booking.no_show")
+
+export booking_setup, booking_create_resource
+export booking_resource_mode, booking_status, booking_active, booking_conflicts
+export booking_hold, booking_confirm, booking_cancel, booking_no_show

@@ -40,6 +40,9 @@ use std.nogc_sync_mut.io.sqlite_sffi.{
     sqlite_error_message, sqlite_row_get
 }
 use std.nogc_sync_mut.io.sqlite_sffi.{rt_sqlite_query_next}
+use std.nogc_sync_mut.enterprise_store.file_backend.{
+    fb_is_store, fb_open, fb_insert, fb_rows, fb_count
+}
 
 # =============================================================================
 # Store
@@ -49,6 +52,15 @@ struct EnterpriseStore:
     conn: SqliteConnection
     open_ok: bool
     acid: bool
+    # file_path != "" selects the pure-Simple file backend (sqlite-free
+    # fallback, see file_backend.spl); "" = sqlite backend.
+    file_path: text
+
+fn store_is_file(store: EnterpriseStore) -> bool:
+    store.file_path != ""
+
+fn invalid_conn(path: text) -> SqliteConnection:
+    SqliteConnection(handle: 0, path: path, is_valid: false)
 
 # store_open opens (or creates) the enterprise database at `path`
 # (":memory:" for an in-memory store), applies durability pragmas, creates
@@ -59,7 +71,13 @@ fn store_open(path: text) -> EnterpriseStore:
     else:
         sqlite_open(path)
     if not conn.is_valid:
-        return EnterpriseStore(conn: conn, open_ok: false, acid: false)
+        # sqlite unavailable (no rt_sqlite_* provider — e.g. SimpleOS
+        # in-guest): fall back to the pure-Simple file backend so the
+        # SAME store API keeps working. ":memory:" has no file to fall
+        # back to and stays a failed open.
+        if path != ":memory:":
+            return store_open_file(path)
+        return EnterpriseStore(conn: conn, open_ok: false, acid: false, file_path: "")
 
     # Durability pragmas — honored by real SQLite, harmlessly rejected by the
     # interpreter emulation (result deliberately ignored; the ACID probe below
@@ -83,9 +101,27 @@ fn store_open(path: text) -> EnterpriseStore:
         store_insert2(conn, "INSERT INTO acid_probe (marker) VALUES (?)", STORE_FORMAT_MARKER, "")
 
     val acid = probe_backend_acid(conn)
-    EnterpriseStore(conn: conn, open_ok: true, acid: acid)
+    EnterpriseStore(conn: conn, open_ok: true, acid: acid, file_path: "")
 
 val STORE_FORMAT_MARKER = "__store_format_v1"
+
+# store_open_file opens (or creates) the enterprise store on the pure-Simple
+# file backend — no sqlite involved. Raw begin/rollback cannot undo appends,
+# so acid is HONESTLY false (same contract as the interpreter sqlite
+# emulation); multi-write atomicity comes from BufferedUow below.
+fn store_open_file(path: text) -> EnterpriseStore:
+    if not fb_open(path):
+        return EnterpriseStore(conn: invalid_conn(path), open_ok: false, acid: false, file_path: "")
+    val store = EnterpriseStore(conn: invalid_conn(path), open_ok: true, acid: false, file_path: path)
+    if not file_marker_present(path):
+        fb_insert(path, "acid_probe", ["marker"], [STORE_FORMAT_MARKER])
+    store
+
+fn file_marker_present(path: text) -> bool:
+    for row in fb_rows(path, "acid_probe", ["id", "marker"]):
+        if sqlite_row_get(row, "marker") == STORE_FORMAT_MARKER:
+            return true
+    false
 
 fn marker_present(conn: SqliteConnection) -> bool:
     val rows = sqlite_query_all(conn, "SELECT id, marker FROM acid_probe")
@@ -109,31 +145,45 @@ fn probe_backend_acid(conn: SqliteConnection) -> bool:
 fn store_close(store: EnterpriseStore) -> bool:
     if not store.open_ok:
         return false
+    if store_is_file(store):
+        return true
     sqlite_close(store.conn)
 
 fn store_backend_acid(store: EnterpriseStore) -> bool:
     store.acid
 
 fn store_error(store: EnterpriseStore) -> text:
+    if store_is_file(store):
+        return ""
     sqlite_error_message(store.conn)
 
 # =============================================================================
 # Unit of work
 # =============================================================================
 
+# File backend: raw begin/commit/rollback accept but do NOT undo (appends
+# are already individually atomic); acid=false is reported honestly and
+# atomic multi-write goes through BufferedUow — same contract as the
+# interpreter sqlite emulation.
 fn uow_begin(store: EnterpriseStore) -> bool:
     if not store.open_ok:
         return false
+    if store_is_file(store):
+        return true
     sqlite_begin(store.conn)
 
 fn uow_commit(store: EnterpriseStore) -> bool:
     if not store.open_ok:
         return false
+    if store_is_file(store):
+        return true
     sqlite_commit(store.conn)
 
 fn uow_rollback(store: EnterpriseStore) -> bool:
     if not store.open_ok:
         return false
+    if store_is_file(store):
+        return true
     sqlite_rollback(store.conn)
 
 # =============================================================================
@@ -155,6 +205,12 @@ fn store_migrate(store: EnterpriseStore, name: text, sql: text) -> bool:
         return false
     if store_migration_applied(store, name):
         return true
+    if store_is_file(store):
+        # File backend has no DDL — tables are implicit. Record the
+        # migration so re-run stays a no-op.
+        val fseq = fb_count(store.file_path, "schema_migrations")
+        return fb_insert(store.file_path, "schema_migrations",
+            ["name", "applied_seq"], [name, fseq])
     if not sqlite_execute(store.conn, sql):
         return false
     val seq = store_count_text(store.conn, "schema_migrations")
@@ -170,7 +226,28 @@ fn store_migrate(store: EnterpriseStore, name: text, sql: text) -> bool:
 fn store_rows(store: EnterpriseStore, table: text, columns: text) -> [SqliteRow]:
     if not store.open_ok:
         return []
+    if store_is_file(store):
+        return fb_rows(store.file_path, table, split_columns(columns))
     sqlite_query_all(store.conn, "SELECT " + columns + " FROM " + table)
+
+# split_columns parses "a, b, c" into ["a", "b", "c"].
+fn split_columns(columns: text) -> [text]:
+    var out: [text] = []
+    for c in columns.split(","):
+        out.push(c.trim())
+    out
+
+# parse_insert_target extracts (table, columns) from an
+# "INSERT INTO t (a, b) VALUES (...)" statement.
+fn parse_insert_target(sql: text) -> (text, [text]):
+    val after = sql.split("INTO ")
+    if after.len() < 2:
+        return ("", [])
+    val table = after[1].split(" ")[0]
+    val parens = sql.split("(")
+    if parens.len() < 2:
+        return (table, [])
+    (table, split_columns(parens[1].split(")")[0]))
 
 fn store_count_text(conn: SqliteConnection, table: text) -> text:
     sqlite_query_value(conn, "SELECT COUNT(*) FROM " + table)
@@ -192,6 +269,11 @@ fn store_insert2(conn: SqliteConnection, sql: text, v1: text, v2: text) -> bool:
 fn store_insert_row(store: EnterpriseStore, sql: text, values: [text]) -> bool:
     if not store.open_ok:
         return false
+    if store_is_file(store):
+        val (table, cols) = parse_insert_target(sql)
+        if table == "" or cols.len() != values.len():
+            return false
+        return fb_insert(store.file_path, table, cols, values)
     val stmt = sqlite_prepare(store.conn, sql)
     if not stmt.is_valid:
         return false
@@ -219,6 +301,12 @@ fn store_system_tables() -> [text]:
 fn store_verify(store: EnterpriseStore) -> text:
     if not store.open_ok:
         return "corrupt store: not open"
+    if store_is_file(store):
+        if not fb_is_store(store.file_path):
+            return "corrupt store: file-backend magic line absent (blank, truncated, or foreign file)"
+        if not file_marker_present(store.file_path):
+            return "corrupt store: schema_migrations/acid_probe store-format marker absent (blank, truncated, or foreign file)"
+        return ""
     for table in store_system_tables():
         if store_count_text(store.conn, table) == "":
             return "corrupt store: system table '" + table + "' missing or unreadable"
@@ -231,18 +319,27 @@ fn store_verify(store: EnterpriseStore) -> text:
 # explicit error and open_ok=false — never silently accepted. Returns
 # (store, error) where error is "" on success.
 fn store_open_verified(path: text) -> (EnterpriseStore, text):
+    # A file-backend store is recognized by its magic line and never fed to
+    # sqlite; a file-backend candidate WITHOUT the magic is only accepted
+    # via the file path when sqlite is genuinely unavailable.
+    if path != ":memory:" and fb_is_store(path):
+        val fstore = EnterpriseStore(conn: invalid_conn(path), open_ok: true, acid: false, file_path: path)
+        val ferr = store_verify(fstore)
+        if ferr != "":
+            return (EnterpriseStore(conn: invalid_conn(path), open_ok: false, acid: false, file_path: ""), ferr)
+        return (fstore, "")
     val conn = if path == ":memory:":
         sqlite_open_memory()
     else:
         sqlite_open(path)
     if not conn.is_valid:
-        return (EnterpriseStore(conn: conn, open_ok: false, acid: false), "corrupt store: cannot open '" + path + "'")
-    val candidate = EnterpriseStore(conn: conn, open_ok: true, acid: false)
+        return (EnterpriseStore(conn: conn, open_ok: false, acid: false, file_path: ""), "corrupt store: cannot open '" + path + "'")
+    val candidate = EnterpriseStore(conn: conn, open_ok: true, acid: false, file_path: "")
     val err = store_verify(candidate)
     if err != "":
         sqlite_close(conn)
-        return (EnterpriseStore(conn: conn, open_ok: false, acid: false), err)
-    (EnterpriseStore(conn: conn, open_ok: true, acid: probe_backend_acid(conn)), "")
+        return (EnterpriseStore(conn: conn, open_ok: false, acid: false, file_path: ""), err)
+    (EnterpriseStore(conn: conn, open_ok: true, acid: probe_backend_acid(conn), file_path: ""), "")
 
 # =============================================================================
 # Injectable write-failure seam (AC-18)
@@ -296,7 +393,7 @@ fn buffered_commit(store: EnterpriseStore, uow: BufferedUow, faults: StoreFaults
     uow_commit(store)
 
 export EnterpriseStore
-export store_open, store_close, store_backend_acid, store_error
+export store_open, store_open_file, store_close, store_backend_acid, store_error
 export uow_begin, uow_commit, uow_rollback
 export store_migrate, store_migration_applied
 export store_rows, store_insert_row

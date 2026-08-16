@@ -1,0 +1,80 @@
+# Sync HTTP server — dynamic handler dispatch over a REAL loopback socket.
+#
+# AC-4 hardening follow-up (.spipe/simple_enterprise_suite): prove that a
+# handler registered on the Router runs for bytes that actually crossed the
+# kernel — TcpListener.bind on 127.0.0.1, a real TcpStream client, and the
+# production connection path SimpleHttpServer.handle_connection_admitted —
+# and that the response carries the default security headers on the wire.
+#
+# The transport-established security identity on the sync path is
+# HttpRequest.remote_addr, which handle_connection sets from peer_addr()
+# BEFORE dispatch. The handler echoes it into the body, so the client-side
+# assertion on "addr=127.0.0.1" proves the handler observed the
+# server-established identity while running.
+
+use std.spec.*
+use std.nogc_sync_mut.http_server.router.{Router}
+use std.nogc_sync_mut.http_server.server.{SimpleHttpServer}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+
+val DYN_MARKER = "DYN-HANDLER-RAN-91"
+
+fn dyn_handler(req: HttpRequest) -> HttpResponse:
+    # Echo the transport-established identity so the wire proves both
+    # "the handler ran" and "it ran under the connection's security context".
+    HttpResponse.ok("{DYN_MARKER} addr={req.remote_addr}")
+
+fn drive_one_request(request_bytes: text) -> text:
+    """Bind a real loopback listener, send request_bytes from a real client
+    socket, serve it through the production connection handler, and return
+    the raw response wire text ("" on any harness failure)."""
+    match TcpListener.bind("127.0.0.1:0"):
+        Err(_): ""
+        Ok(listener):
+            match listener.local_addr():
+                Err(_):
+                    val _ = listener.close()
+                    ""
+                Ok(addr):
+                    var router = Router.new()
+                    router.get("/api/dyn", dyn_handler)
+                    val server = SimpleHttpServer.new("127.0.0.1", 0, router)
+                    match TcpStream.connect(addr):
+                        Err(_):
+                            val _ = listener.close()
+                            ""
+                        Ok(client):
+                            var wire = ""
+                            if client.write_text_status(request_bytes):
+                                match listener.accept():
+                                    Err(_): pass
+                                    Ok(conn):
+                                        val _ = server.admission.try_acquire()
+                                        SimpleHttpServer.handle_connection_admitted(server, conn)
+                                        match client.read_text():
+                                            Err(_): pass
+                                            Ok(t): wire = t
+                            val _ = client.close()
+                            val _ = listener.close()
+                            wire
+
+describe "sync http server — dynamic dispatch over a live loopback socket":
+    it "runs the registered dynamic handler for a real TCP request":
+        val wire = drive_one_request("GET /api/dyn HTTP/1.1\r\nHost: loopback\r\nConnection: close\r\n\r\n")
+        expect(wire).to_contain("HTTP/1.1 200")
+        expect(wire).to_contain(DYN_MARKER)
+
+    it "handler observes the transport-established security identity":
+        val wire = drive_one_request("GET /api/dyn HTTP/1.1\r\nHost: loopback\r\nConnection: close\r\n\r\n")
+        expect(wire).to_contain("addr=127.0.0.1")
+
+    it "live response carries the default security headers on the wire":
+        val wire = drive_one_request("GET /api/dyn HTTP/1.1\r\nHost: loopback\r\nConnection: close\r\n\r\n")
+        expect(wire).to_contain("X-Content-Type-Options: nosniff")
+        expect(wire).to_contain("X-Frame-Options: DENY")
+
+    it "rejects an unsafe path before any dynamic handler over the wire":
+        val wire = drive_one_request("GET /api/../secret HTTP/1.1\r\nHost: loopback\r\nConnection: close\r\n\r\n")
+        expect(wire.contains(DYN_MARKER)).to_equal(false)
+        expect(wire.contains("200 OK")).to_equal(false)

@@ -313,3 +313,21 @@ New acceptance criteria (extends AC-1..AC-12 above):
   per anti-revert protocol and committed blob-first, scoped to this feature's
   paths only.
   (merge note: WC http_server files were a stale pre-hardening snapshot from a parallel session — restored to HEAD per anti-revert protocol; store_app/web_harden/vertical re-verified 3/3, 4/4, 7/7 on the merged tree.)
+- merge wave 2 (2026-08-16, orchestrator high-model review): six lanes merged
+  onto a24e214200d. W2-A file-backend fallback (store_open composes pure-Simple
+  SPLSTORE1 backend when sqlite unavailable; simpleos cross-compile green;
+  in-guest run evidence-pending on 4 rt_file_* externs). W2-B http unification
+  (3-tier limits/path_security -> thin re-exports of http_core; live-socket
+  dynamic dispatch system spec 4/4; REAL DEFECT fixed: sync Router fn-field
+  dispatch never worked under interpreter; sync CL+TE ambiguity cases added).
+  W2-C spipe-docgen argv-drop root cause + bug doc + /proc/self/cmdline
+  fallback; 5 manuals regenerated 0 stubs. W2-D booking vertical
+  (std.enterprise_booking, 3 conflict modes, holds/TTL; foundation gains
+  closed reason 'conflict' + booking role; 8/8, red-first 5/8). W2-E
+  restaurant vertical (std.enterprise_restaurant, 7/7, red-first 4/7; review
+  finding: its six new denial reasons were added to the closed set in
+  foundation.spl at merge). W2-F outbox worker + reconciliation
+  (std.enterprise_outbox, at-least-once + dedup contract, 8/8, red-first 2/8;
+  renamed outbox_worker_pending to dodge records.outbox_pending collision).
+  Guide enterprise_store.md hand-merged (A/C/F three-way). Research docs
+  committed (missed in a24e214). Merge sanity reruns below.

@@ -1,0 +1,132 @@
+"""
+# Enterprise Store file backend — same API without sqlite
+
+## Overview
+
+Evidence that `std.enterprise_store` runs UNCHANGED on the pure-Simple
+file backend (`file_backend.spl`), the fallback `store_open` selects by
+composition when the `rt_sqlite_*` externs are unavailable (SimpleOS
+in-guest, lane `.spipe/simple_enterprise_suite` Goal Set v2, AC-17).
+Exercised here explicitly via `store_open_file` so it is proven on hosts
+where sqlite IS available too. Covered: open + format marker, records
+layer (idempotency, outbox, sha256 audit chain) through the same store
+API, buffered-commit all-or-nothing semantics, migration re-run no-op,
+value round-trip of separator characters, and restart survival with
+auto-detection by the verifying open.
+
+## Troubleshooting
+
+- acid=false on the file backend is HONEST: raw begin/rollback do not
+  undo appends; atomic multi-write is the BufferedUow layer.
+- A blank or foreign file is never adopted: fb magic line absent →
+  open/verify fail closed.
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/simple_erp.md
+**Design:** N/A
+**Research:** doc/01_research/app/enterprise/simple_enterprise_suite_assessment_and_parallel_plan_2026-08-16.md
+
+Lane: .spipe/simple_enterprise_suite (Goal Set v2, AC-17).
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.enterprise_store.store.{
+    store_open_file, store_close, store_verify, store_open_verified,
+    store_backend_acid, store_migrate, store_migration_applied,
+    store_faults_none, store_faults_failing_commit,
+    buffered_uow_new, buffered_write, buffered_commit
+}
+use std.nogc_sync_mut.enterprise_store.records.{
+    idempotency_seen, idempotency_result, idempotency_record,
+    outbox_append, outbox_pending,
+    audit_append, audit_verify_chain
+}
+use std.io_runtime.{file_exists, file_delete, dir_create_all}
+
+fn fresh_path(name: text) -> text:
+    val p = "build/test-artifacts/" + name
+    dir_create_all("build/test-artifacts")
+    if file_exists(p):
+        file_delete(p)
+    p
+
+describe "enterprise store file backend — same API without sqlite":
+    it "opens a fresh file store healthy, with honest non-ACID capability":
+        val path = fresh_path("fb_open.store")
+        step("Open the store on the pure-Simple file backend")
+        val store = store_open_file(path)
+        expect(store.open_ok).to_equal(true)
+        step("Verify format marker and health")
+        expect(store_verify(store)).to_equal("")
+        step("Capability is honestly non-ACID at the raw uow layer")
+        expect(store_backend_acid(store)).to_equal(false)
+        store_close(store)
+
+    it "runs the records layer (idempotency, outbox, audit chain) unchanged":
+        val path = fresh_path("fb_records.store")
+        val store = store_open_file(path)
+        step("Record an idempotency key with its result")
+        expect(idempotency_seen(store, "t1", "k1")).to_equal(false)
+        expect(idempotency_record(store, "t1", "k1", "ok:42")).to_equal(true)
+        expect(idempotency_seen(store, "t1", "k1")).to_equal(true)
+        expect(idempotency_result(store, "t1", "k1")).to_equal("ok:42")
+        step("Append outbox events and read them back tenant-scoped")
+        expect(outbox_append(store, "t1", "order.placed", "o-1")).to_equal(true)
+        expect(outbox_append(store, "t2", "order.placed", "other-tenant")).to_equal(true)
+        val pending = outbox_pending(store, "t1")
+        expect(pending.len()).to_equal(1)
+        step("Append audit entries and verify the sha256 chain")
+        expect(audit_append(store, "t1", "alice", "order.place", "o-1")).to_equal(true)
+        expect(audit_append(store, "t1", "alice", "order.pay", "o-1")).to_equal(true)
+        expect(audit_verify_chain(store, "t1")).to_equal(true)
+        store_close(store)
+
+    it "round-trips values containing tabs, newlines, percent and equals":
+        val path = fresh_path("fb_roundtrip.store")
+        val store = store_open_file(path)
+        val nasty = "a\tb\nc%09=d%e"
+        step("Store a payload full of separator characters")
+        expect(outbox_append(store, "t1", "raw", nasty)).to_equal(true)
+        step("Read it back byte-identical")
+        val pending = outbox_pending(store, "t1")
+        expect(pending[0].1).to_equal(nasty)
+        store_close(store)
+
+    it "applies a buffered commit all-or-nothing under an injected write failure":
+        val path = fresh_path("fb_buffered.store")
+        val store = store_open_file(path)
+        step("Stage two writes and commit with an injected write failure")
+        var uow = buffered_uow_new()
+        uow = buffered_write(uow, "INSERT INTO outbox (tenant_id, event_type, payload) VALUES (?, ?, ?)", ["t1", "e1", "p1"])
+        uow = buffered_write(uow, "INSERT INTO outbox (tenant_id, event_type, payload) VALUES (?, ?, ?)", ["t1", "e2", "p2"])
+        expect(buffered_commit(store, uow, store_faults_failing_commit())).to_equal(false)
+        step("Nothing reached the store")
+        expect(outbox_pending(store, "t1").len()).to_equal(0)
+        step("The same commit without the fault applies both writes")
+        expect(buffered_commit(store, uow, store_faults_none())).to_equal(true)
+        expect(outbox_pending(store, "t1").len()).to_equal(2)
+        store_close(store)
+
+    it "treats migrations as apply-once with re-run as a no-op":
+        val path = fresh_path("fb_migrate.store")
+        val store = store_open_file(path)
+        step("Apply a named migration")
+        expect(store_migration_applied(store, "m1")).to_equal(false)
+        expect(store_migrate(store, "m1", "CREATE TABLE demo (id INTEGER PRIMARY KEY)")).to_equal(true)
+        expect(store_migration_applied(store, "m1")).to_equal(true)
+        step("Re-run is a no-op that still reports applied")
+        expect(store_migrate(store, "m1", "CREATE TABLE demo (id INTEGER PRIMARY KEY)")).to_equal(true)
+        store_close(store)
+
+    it "survives restart and is auto-detected by the verifying open":
+        val path = fresh_path("fb_restart.store")
+        val store = store_open_file(path)
+        expect(audit_append(store, "t1", "alice", "boot", "d")).to_equal(true)
+        store_close(store)
+        step("Reopen the same path through store_open_verified (no backend named)")
+        val reopened = store_open_verified(path)
+        expect(reopened.1).to_equal("")
+        expect(reopened.0.open_ok).to_equal(true)
+        step("State and the audit chain survived the restart")
+        expect(audit_verify_chain(reopened.0, "t1")).to_equal(true)
+        store_close(reopened.0)

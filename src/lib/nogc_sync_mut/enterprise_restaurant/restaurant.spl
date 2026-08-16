@@ -1,0 +1,297 @@
+"""
+# Restaurant Table-Service Vertical — sessions, ordered lines, kitchen flow, bill
+
+The table-service proving vertical of the Simple Enterprise Suite (lane
+`.spipe/simple_enterprise_suite`, W2-E; assessment §7.3/§7.4):
+
+    open table session -> order lines (menu = sale catalog) ->
+    kitchen ready -> served -> bill close with a balanced journal
+
+Every write runs the frozen guarded sequence from `enterprise_sale.foundation`:
+
+    session -> rbac -> domain validation -> idempotency -> effects in one UoW
+
+Menu items ARE `enterprise_sale` products: a line references a product `sku`
+and snapshots its price (via `sale_product_price`) at line time — there is
+deliberately no second product table.
+
+Storage model is insert-only + derive (both backends; immutable-ledger rule):
+- `rest_session_events`: a table session's state is derived from its stream
+  (`opened` -> `closed`). One ACTIVE session per (venue, table).
+- `rest_line_events`: a line's state is derived from its stream, forward-only:
+  `ordered` -> `ready` -> `served`, with `voided` allowed from
+  `ordered`/`ready`. The `ordered` event carries the sku, qty, free-text
+  modifiers, and the price snapshot.
+- Journal postings reuse the sale `journal` table and its debit/credit-pair
+  posting approach; `sale_journal_balanced` remains the balance oracle.
+
+Frozen restaurant denial reasons (extending the foundation's closed set):
+    table-occupied | no-session | session-closed | invalid-transition |
+    unserved-lines | line-not-found
+"""
+
+use std.nogc_sync_mut.enterprise_store.store.{
+    EnterpriseStore, store_migrate, store_rows, store_insert_row,
+    uow_begin, uow_commit
+}
+use std.nogc_sync_mut.enterprise_store.records.{
+    idempotency_seen, idempotency_result, idempotency_record,
+    outbox_append, audit_append
+}
+use std.nogc_sync_mut.io.sqlite_sffi.{sqlite_row_get}
+use std.nogc_sync_mut.enterprise_sale.foundation.{
+    TenantContext, ActorContext, SessionContext,
+    CommandEnvelope, CommandResult,
+    accepted, denied, session_valid, role_allows
+}
+use std.nogc_sync_mut.enterprise_sale.goods_sale.{sale_setup, sale_product_price}
+
+# =============================================================================
+# Schema (applies the sale schema too — the menu IS the sale catalog)
+# =============================================================================
+
+fn restaurant_setup(store: EnterpriseStore) -> bool:
+    var ok = sale_setup(store)
+    ok = ok and store_migrate(store, "rest_001_session_events",
+        "CREATE TABLE IF NOT EXISTS rest_session_events (id INTEGER PRIMARY KEY, tenant_id TEXT, session_id TEXT, venue_id TEXT, table_id TEXT, event TEXT, detail TEXT)")
+    ok = ok and store_migrate(store, "rest_002_line_events",
+        "CREATE TABLE IF NOT EXISTS rest_line_events (id INTEGER PRIMARY KEY, tenant_id TEXT, session_id TEXT, line_id TEXT, event TEXT, sku TEXT, qty TEXT, modifiers TEXT, price_cents TEXT)")
+    ok
+
+# =============================================================================
+# Derived reads (pure-Simple filtering; see store docstring)
+# =============================================================================
+
+# restaurant_table_session returns the ACTIVE session id for a (venue, table)
+# — "" when the table is free. Derived: the newest session `opened` at the
+# table whose own stream has not reached `closed`. (The `closed` event does
+# not repeat the venue/table — the session id links the streams.)
+fn restaurant_table_session(store: EnterpriseStore, tenant_id: text, venue_id: text, table_id: text) -> text:
+    var newest = ""
+    val rows = store_rows(store, "rest_session_events", "id, tenant_id, session_id, venue_id, table_id, event, detail")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") != tenant_id:
+            continue
+        if sqlite_row_get(row, "venue_id") != venue_id or sqlite_row_get(row, "table_id") != table_id:
+            continue
+        if sqlite_row_get(row, "event") == "opened":
+            newest = sqlite_row_get(row, "session_id")
+    if newest == "":
+        return ""
+    if restaurant_session_state(store, tenant_id, newest) == "closed":
+        return ""
+    newest
+
+# restaurant_session_state derives a session's state from its stream:
+# "" (unknown) -> opened -> closed.
+fn restaurant_session_state(store: EnterpriseStore, tenant_id: text, session_id: text) -> text:
+    var state = ""
+    val rows = store_rows(store, "rest_session_events", "id, tenant_id, session_id, venue_id, table_id, event, detail")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "session_id") == session_id:
+            state = sqlite_row_get(row, "event")
+    state
+
+# restaurant_line_status derives a line's state from its stream:
+# "" (unknown) -> ordered -> ready -> served (or voided).
+fn restaurant_line_status(store: EnterpriseStore, tenant_id: text, session_id: text, line_id: text) -> text:
+    var state = ""
+    val rows = store_rows(store, "rest_line_events", "id, tenant_id, session_id, line_id, event, sku, qty, modifiers, price_cents")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "session_id") == session_id:
+            if sqlite_row_get(row, "line_id") == line_id:
+                state = sqlite_row_get(row, "event")
+    state
+
+# line_snapshot returns (price_cents, qty) captured on the line's `ordered`
+# event — the menu snapshot billed at close. (-1, 0) when the line is unknown.
+fn line_snapshot(store: EnterpriseStore, tenant_id: text, session_id: text, line_id: text) -> (i64, i64):
+    val rows = store_rows(store, "rest_line_events", "id, tenant_id, session_id, line_id, event, sku, qty, modifiers, price_cents")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "session_id") == session_id:
+            if sqlite_row_get(row, "line_id") == line_id and sqlite_row_get(row, "event") == "ordered":
+                return (int(sqlite_row_get(row, "price_cents")), int(sqlite_row_get(row, "qty")))
+    (-1, 0)
+
+# restaurant_session_lines returns the distinct line ids of a session in
+# order-of-first-appearance.
+fn restaurant_session_lines(store: EnterpriseStore, tenant_id: text, session_id: text) -> [text]:
+    var out: [text] = []
+    val rows = store_rows(store, "rest_line_events", "id, tenant_id, session_id, line_id, event, sku, qty, modifiers, price_cents")
+    for row in rows:
+        if sqlite_row_get(row, "tenant_id") == tenant_id and sqlite_row_get(row, "session_id") == session_id:
+            val line_id = sqlite_row_get(row, "line_id")
+            var seen = false
+            for known in out:
+                if known == line_id:
+                    seen = true
+            if not seen:
+                out.push(line_id)
+    out
+
+# restaurant_session_total sums price_snapshot * qty over the session's
+# SERVED lines — the amount the bill posts to the journal.
+fn restaurant_session_total(store: EnterpriseStore, tenant_id: text, session_id: text) -> i64:
+    var total: i64 = 0
+    for line_id in restaurant_session_lines(store, tenant_id, session_id):
+        if restaurant_line_status(store, tenant_id, session_id, line_id) == "served":
+            val snap = line_snapshot(store, tenant_id, session_id, line_id)
+            total = total + snap.0 * snap.1
+    total
+
+# =============================================================================
+# Journal posting (same debit/credit-pair approach as goods_sale.post_journal)
+# =============================================================================
+
+fn rest_post_journal(store: EnterpriseStore, tenant_id: text, ref_id: text, debit_account: text, credit_account: text, amount_cents: i64):
+    store_insert_row(store,
+        "INSERT INTO journal (tenant_id, order_id, account, side, amount_cents) VALUES (?, ?, ?, ?, ?)",
+        [tenant_id, ref_id, debit_account, "debit", "{amount_cents}"])
+    store_insert_row(store,
+        "INSERT INTO journal (tenant_id, order_id, account, side, amount_cents) VALUES (?, ?, ?, ?, ?)",
+        [tenant_id, ref_id, credit_account, "credit", "{amount_cents}"])
+
+# =============================================================================
+# Guarded commands
+# =============================================================================
+
+# table_open_session opens a table session. One ACTIVE session per
+# (venue, table): reopening an occupied table is denied `table-occupied`.
+fn table_open_session(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, session_id: text, venue_id: text, table_id: text, party_size: i64) -> CommandResult:
+    # 1. session
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", session_id)
+    # 2. rbac
+    if not role_allows(who.role, "restaurant.table.open"):
+        return denied("forbidden", session_id)
+    # 3. domain validation
+    if session_id == "" or venue_id == "" or table_id == "" or party_size <= 0:
+        return denied("invalid-record", session_id)
+    if restaurant_table_session(store, tenant.tenant_id, venue_id, table_id) != "":
+        return denied("table-occupied", venue_id + "/" + table_id)
+    # 4. idempotency
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    # 5. effects — one unit of work
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO rest_session_events (tenant_id, session_id, venue_id, table_id, event, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, session_id, venue_id, table_id, "opened", "party:{party_size}"])
+    outbox_append(store, tenant.tenant_id, "restaurant.session.opened", session_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "restaurant.table.open", session_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, session_id)
+    uow_commit(store)
+    accepted(session_id)
+
+# order_add_line adds a menu line to an OPEN session, snapshotting the menu
+# price (sale catalog) at line time. Modifiers are free text.
+fn order_add_line(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, session_id: text, line_id: text, sku: text, qty: i64, modifiers: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", line_id)
+    if not role_allows(who.role, "restaurant.order.add"):
+        return denied("forbidden", line_id)
+    if line_id == "" or qty <= 0:
+        return denied("invalid-record", line_id)
+    val state = restaurant_session_state(store, tenant.tenant_id, session_id)
+    if state == "":
+        return denied("no-session", session_id)
+    if state == "closed":
+        return denied("session-closed", session_id)
+    val price = sale_product_price(store, tenant.tenant_id, sku)
+    if price < 0:
+        return denied("not-found", sku)
+    # Replay detection must precede the line-uniqueness check: the existing
+    # line IS this command's own recorded effect when the key was seen.
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    if restaurant_line_status(store, tenant.tenant_id, session_id, line_id) != "":
+        return denied("invalid-record", line_id)
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO rest_line_events (tenant_id, session_id, line_id, event, sku, qty, modifiers, price_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, session_id, line_id, "ordered", sku, "{qty}", modifiers, "{price}"])
+    outbox_append(store, tenant.tenant_id, "restaurant.line.ordered", line_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "restaurant.order.add", session_id + ":" + line_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, line_id)
+    uow_commit(store)
+    accepted(line_id)
+
+# line_transition runs the shared guarded sequence for the forward-only line
+# state machine: `from_state` -> `to_state`. Any other current state is
+# denied `invalid-transition` (never applied).
+fn line_transition(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, session_id: text, line_id: text, from_state: text, from_state2: text, to_state: text, action: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", line_id)
+    if not role_allows(who.role, action):
+        return denied("forbidden", line_id)
+    if line_id == "" or session_id == "":
+        return denied("invalid-record", line_id)
+    val current = restaurant_line_status(store, tenant.tenant_id, session_id, line_id)
+    if current == "":
+        return denied("line-not-found", line_id)
+    if current != from_state and current != from_state2:
+        return denied("invalid-transition", current + "->" + to_state)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO rest_line_events (tenant_id, session_id, line_id, event, sku, qty, modifiers, price_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, session_id, line_id, to_state, "", "", "", ""])
+    outbox_append(store, tenant.tenant_id, "restaurant.line." + to_state, line_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, action, session_id + ":" + line_id)
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, line_id)
+    uow_commit(store)
+    accepted(line_id)
+
+# kitchen_mark_ready: ordered -> ready (forward-only).
+fn kitchen_mark_ready(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, session_id: text, line_id: text) -> CommandResult:
+    line_transition(store, session, tenant, who, envelope, session_id, line_id, "ordered", "ordered", "ready", "restaurant.kitchen.ready")
+
+# line_mark_served: ready -> served (forward-only; serving an ordered-but-
+# not-ready or an already-served line is `invalid-transition`).
+fn line_mark_served(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, session_id: text, line_id: text) -> CommandResult:
+    line_transition(store, session, tenant, who, envelope, session_id, line_id, "ready", "ready", "served", "restaurant.line.serve")
+
+# order_void_line: ordered|ready -> voided. A voided line does not bill and
+# does not block bill_close_session.
+fn order_void_line(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, session_id: text, line_id: text) -> CommandResult:
+    line_transition(store, session, tenant, who, envelope, session_id, line_id, "ordered", "ready", "voided", "restaurant.line.void")
+
+# bill_close_session totals the session's SERVED lines, posts the balanced
+# cash/revenue journal pair (same posting approach as goods_sale), and closes
+# the session — further lines are denied `session-closed`. Denied
+# `unserved-lines` while any line is still ordered/ready (void it instead).
+fn bill_close_session(store: EnterpriseStore, session: SessionContext, tenant: TenantContext, who: ActorContext, envelope: CommandEnvelope, session_id: text) -> CommandResult:
+    if not session_valid(session, tenant, who):
+        return denied("invalid-session", session_id)
+    if not role_allows(who.role, "restaurant.bill.close"):
+        return denied("forbidden", session_id)
+    val state = restaurant_session_state(store, tenant.tenant_id, session_id)
+    if state == "":
+        return denied("no-session", session_id)
+    if state == "closed":
+        return denied("session-closed", session_id)
+    for line_id in restaurant_session_lines(store, tenant.tenant_id, session_id):
+        val status = restaurant_line_status(store, tenant.tenant_id, session_id, line_id)
+        if status != "served" and status != "voided":
+            return denied("unserved-lines", line_id)
+    if idempotency_seen(store, tenant.tenant_id, envelope.idempotency_key):
+        return CommandResult(ok: true, reason: "duplicate-key", detail: idempotency_result(store, tenant.tenant_id, envelope.idempotency_key))
+    val total = restaurant_session_total(store, tenant.tenant_id, session_id)
+    uow_begin(store)
+    store_insert_row(store,
+        "INSERT INTO rest_session_events (tenant_id, session_id, venue_id, table_id, event, detail) VALUES (?, ?, ?, ?, ?, ?)",
+        [tenant.tenant_id, session_id, "", "", "closed", "total:{total}"])
+    rest_post_journal(store, tenant.tenant_id, session_id, "cash", "sales_revenue", total)
+    outbox_append(store, tenant.tenant_id, "restaurant.session.closed", session_id)
+    audit_append(store, tenant.tenant_id, who.actor_id, "restaurant.bill.close", session_id + ":{total}")
+    idempotency_record(store, tenant.tenant_id, envelope.idempotency_key, "{total}")
+    uow_commit(store)
+    accepted("{total}")
+
+export restaurant_setup
+export restaurant_table_session, restaurant_session_state, restaurant_line_status
+export restaurant_session_lines, restaurant_session_total
+export table_open_session, order_add_line
+export kitchen_mark_ready, line_mark_served, order_void_line
+export bill_close_session
