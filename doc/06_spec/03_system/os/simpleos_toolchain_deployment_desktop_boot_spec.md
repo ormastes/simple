@@ -18,6 +18,14 @@ compile, link, and execute exact `Hello World` inside that same guest.
 Unavailable prerequisites are BLOCKED failures. There is no opt-in skip or
 non-execution green path.
 
+Current source status (2026-08-16): the production wrapper and shared receipt
+validator exist. Their 16-case hermetic self-test passes with
+`platform_acceptance_claimed=false`; production mode uses the canonical
+Stage-4 provenance verifier rather than path or marker-based admission.
+Default live mode remains blocked because the canonical desktop owner has no
+same-run network/SSHD guest-command hook, so the system scenario has no runtime
+PASS.
+
 ## Procedure
 
 ### Prepare the toolchain deployment image

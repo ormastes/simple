@@ -4,7 +4,10 @@
 > historical unless a current receipt revalidates it. The canonical current
 > plan is `doc/03_plan/os/simpleos/hw_qemu/x86_64_native_hello_world_plan.md`;
 > Stage 2 is bootstrap-only, while Stage 3/4, payload, guest-static lld, image,
-> wrapper, SSpec/manual and live receipts remain BLOCKED/WARN.
+> SSpec execution and live receipts remain BLOCKED/WARN. The combined wrapper's
+> canonical Stage-4 admission, preflight, and shared receipt contract are
+> source-complete and self-tested; live mode correctly blocks on the missing
+> canonical same-run desktop/SSHD hook.
 > The current x86_64 compiler repair keeps local `HirType` aggregates inside
 > their owning MIR metadata arrays and copies them by scalar local IDs. Its
 > focused native regression is green; Stage 3/4 admission is still pending.

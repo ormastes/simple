@@ -150,3 +150,9 @@ dev-done
   narrowed to an explicit source contract with no Rust-seed/`bin/simple`
   acceptance. Supporting specs cannot promote live guest or desktop
   acceptance.
+- impl 2026-08-16 combined-wrapper boundary: added canonical Stage-4
+  provenance admission, production fail-closed preflight, a shared
+  sorted/hashed receipt validator, and a 16-case hermetic self-test
+  (`platform_acceptance_claimed=false`). Live mode remains blocked at the
+  precise owner gap: canonical fullscreen QEMU uses `-net none` and exits
+  after capture, while `gui_entry_desktop.spl` has no cooperative SSHD poll.

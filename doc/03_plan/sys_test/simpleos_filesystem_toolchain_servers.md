@@ -45,3 +45,12 @@ flows and real assertions, fail closed on unavailable production owners, and
 link their mirrored manual and requirements here. Until an admitted Stage-4
 runner can execute docgen and `sspec-maintain`, their source/manual review is
 reportable only as source-complete/runtime-blocked.
+
+The combined wrapper's shared receipt contract has one bounded non-live check:
+`sh test/01_unit/scripts/simpleos_toolchain_desktop_boot_receipt_contract_test.shs`.
+It covers 16 accept/reject validator cases and must print
+`platform_acceptance_claimed=false`. Production mode additionally delegates
+host-CLI admission to the canonical Stage-4 provenance verifier. This check
+never replaces the frozen live SSpec; default wrapper mode fails closed until
+the canonical desktop owner supports cooperative SSHD/network polling and
+same-run guest commands.
