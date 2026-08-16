@@ -257,3 +257,37 @@ Status:
   reached (3,629 substitutions, 538 names, 0 hard errors, object emitted), so
   only the final "executed wrong value" step is still open, and it is blocked
   by a separate vacuous-link defect rather than by this one.
+
+## 2026-08-16: W1.5 C4 fail-fast plumbing evidence and contained repair
+
+The immutable Phase 4 mixed-tail W1.5 receipt records a pure-Simple Stage 2
+launch with `SIMPLE_NO_STUB_FALLBACK=1` that emitted **5,257** unresolved-method
+const-zero placeholder warnings before failing later at LLVM text assembly.
+The command and terminal evidence are retained under
+`build/native_probe/p4_mixed_tail_probe_s2new_20260816/`.
+
+This is not an environment-propagation failure. The frozen resolved command
+contains the strict variable, but its existing compiler consumer guards
+SimpleOS link-time fabricated symbol bodies. The unresolved MIR arm did not
+consult it: it recorded a non-fatal `MirError`, emitted `rt_panic` plus the
+unreachable const definition, and continued. The bootstrap flat-module loop
+also checked fatal errors only before lowering function bodies, then appended
+each partially lowered function without a post-function rejection.
+
+Cycle 1 contains the repair at the two owning seams:
+
+- the unresolved-method arm now records the condition with `error_fatal` while
+  retaining `rt_panic` and the unreachable const definition needed to keep
+  partial MIR structurally defined;
+- the flat bootstrap function loop rejects newly recorded fatal errors and
+  exits before adding that function to the shared accumulator.
+
+The source-contract coverage is traced to `REQ-BOOT-STAGE-001` in
+`test/01_unit/compiler/driver/bootstrap_flat_nonentry_globals_source_spec.spl`
+and
+`test/01_unit/compiler/mir/unresolved_method_fatal_guard_source_spec.spl`.
+Execution verification remains pending the separately authorized focused test
+cycle. This C4 guard defect is independent of the W1.5 C3 undefined-SSA-local
+LLVM-text defect: the repair does not touch MIR-to-LLVM call destinations and
+will make C3 temporarily unobservable by rejecting invalid MIR earlier, not
+claim to fix it.

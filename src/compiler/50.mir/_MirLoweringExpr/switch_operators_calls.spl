@@ -4401,8 +4401,16 @@ impl MirLowering:
                 case _:
                     pass
 
-        if is_direct and self.local_map.has(mir_expr_symbol_id_value(direct_symbol)):
-            is_direct = false
+        if is_direct:
+            val direct_symbol_id = mir_expr_symbol_id_value(direct_symbol)
+            val exact_bound_local = self.find_local(direct_symbol_id)
+            if exact_bound_local.id >= 0 and self.symbols.exact_local_value_binding_raw(direct_symbol_id, direct_name):
+                # Symbol ids are module-local and can collide with a NamedVar's
+                # authored builtin/import name on the flat bootstrap lane. A
+                # local binding owns this callee only when the stored record's
+                # name and value-kind match the HIR payload. This still keeps a
+                # genuinely shadowing `val int = ...; int(x)` indirect.
+                is_direct = false
 
         if is_direct:
             # Inline a val-bound lambda `f(args)` by beta-reduction (lambda-lift).
@@ -4470,6 +4478,19 @@ impl MirLowering:
                 return str_arg_local
             if direct_name == "int" and args.len() == 1:
                 val int_arg_local = self.lower_expr(args[0].value)
+                val int_arg_type = self.local_mir_type_of(int_arg_local)
+                if int_arg_type != nil:
+                    match int_arg_type.kind:
+                        case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64 | MirTypeKind.F32 | MirTypeKind.F64 | MirTypeKind.Bool:
+                            # Numeric/bool int() is a language conversion, not
+                            # string parsing. Emit the typed MIR cast so f64
+                            # never becomes a function-pointer operand.
+                            var b_int_cast = self.builder
+                            val int_cast = b_int_cast.emit_cast(mir_operand_copy(int_arg_local), MirType.i64())
+                            self.builder = b_int_cast
+                            return int_cast
+                        case _:
+                            ()
                 val int_op = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_string_to_int_any"),
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))

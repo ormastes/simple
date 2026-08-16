@@ -1,0 +1,339 @@
+# codex-impl: executable regression probe for staged mixed-tail MIR lowering.
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_kinds.*
+use compiler.mir.mir_instructions.{MirFunction}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.hir.hir_definitions.{
+    HirFunction, HirParam, HirBlock, HirStmt, HirStmtKind,
+    HirExpr, HirExprKind, HirCallArg, HirBinOp
+}
+use compiler.hir.hir_types.{
+    HirType, HirTypeKind, SymbolId, SymbolKind, SymbolTable
+}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{FunctionAttr}
+
+extern fn rt_exit(code: i32)
+
+fn probe_span(line: i64) -> Span:
+    Span(start: 0, end: 0, line: line, col: 1,
+        file: "bootstrap_mixed_tail_ret_probe.spl", length: 0)
+
+fn f64_type() -> HirType:
+    HirType(kind: HirTypeKind.Float(64), span: probe_span(0))
+
+fn f32_type() -> HirType:
+    HirType(kind: HirTypeKind.Float(32), span: probe_span(0))
+
+fn i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: probe_span(0))
+
+fn i32_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(32, true), span: probe_span(0))
+
+fn u32_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(32, false), span: probe_span(0))
+
+fn bool_type() -> HirType:
+    HirType(kind: HirTypeKind.Bool, span: probe_span(0))
+
+fn text_type() -> HirType:
+    HirType(kind: HirTypeKind.Str, span: probe_span(0))
+
+fn nil_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.NilLit, has_type_: true,
+        type_: i64_type(), span: probe_span(0))
+
+fn int_lit(value: i64, line: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: true,
+        type_: i64_type(), span: probe_span(line))
+
+fn string_lit(value: text, line: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.StringLit(value, nil), has_type_: true,
+        type_: text_type(), span: probe_span(line))
+
+fn var_read(symbol: SymbolId, type_: HirType, line: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(symbol), has_type_: true,
+        type_: type_, span: probe_span(line))
+
+fn param(symbol: SymbolId, name: text, type_: HirType) -> HirParam:
+    HirParam(symbol: symbol, name: name, type_: type_, has_default: false,
+        default: nil_expr(), span: probe_span(1), is_mutable: false)
+
+fn function_with(name: text, symbol: SymbolId, params: [HirParam],
+                 return_type: HirType, body: HirBlock) -> HirFunction:
+    HirFunction(
+        symbol: symbol,
+        name: name,
+        type_params: [],
+        params: params,
+        return_type: return_type,
+        body: body,
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: probe_span(1)
+    )
+
+fn mixed_tail_function() -> HirFunction:
+    # Mirrors std.common.format.format_fixed's decisive shape:
+    #   (f: f64, decimals: i64) -> text
+    #   if decimals == 0: return <text>
+    #   <implicit text tail>
+    val f_symbol = SymbolId(id: 101)
+    val decimals_symbol = SymbolId(id: 102)
+    val condition = HirExpr(
+        kind: HirExprKind.Binary(
+            HirBinOp.Eq,
+            var_read(decimals_symbol, i64_type(), 3),
+            int_lit(0, 3)
+        ),
+        has_type_: true,
+        type_: bool_type(),
+        span: probe_span(3)
+    )
+    val explicit_value = string_lit("explicit-zero", 4)
+    val explicit_return = HirExpr(
+        kind: HirExprKind.Return(Some(explicit_value)),
+        has_type_: true,
+        type_: text_type(),
+        span: probe_span(4)
+    )
+    val then_block = HirBlock(stmts: [], has: true,
+        value: explicit_return, span: probe_span(4))
+    val if_expr = HirExpr(kind: HirExprKind.If(condition, then_block, nil),
+        has_type_: true, type_: text_type(), span: probe_span(3))
+    val if_stmt = HirStmt(kind: HirStmtKind.Expr(if_expr), span: probe_span(3))
+    val body = HirBlock(stmts: [if_stmt], has: true,
+        value: string_lit("implicit-tail", 6), span: probe_span(2))
+    function_with(
+        "format_fixed_mixed_tail_probe",
+        SymbolId(id: 100),
+        [param(f_symbol, "f", f64_type()),
+         param(decimals_symbol, "decimals", i64_type())],
+        text_type(),
+        body
+    )
+
+fn string_const_local(function: MirFunction, expected: text) -> i64:
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Const(dest, MirConstValue.Str(value), _):
+                    if value == expected:
+                        return dest.id
+                case _:
+                    ()
+    return -1
+
+fn has_return_copy(function: MirFunction, expected_local: i64) -> bool:
+    for block in function.blocks:
+        match block.terminator:
+            case MirTerminator.Ret(Some(operand)):
+                match operand.kind:
+                    case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                        if local.id == expected_local:
+                            return true
+                    case _:
+                        ()
+            case _:
+                ()
+    return false
+
+fn has_f64_arg_zero(function: MirFunction) -> bool:
+    for local in function.locals:
+        match local.kind:
+            case LocalKind.Arg(0):
+                if local.id.id == 0 and local.type_.kind == MirTypeKind.F64:
+                    return true
+            case _:
+                ()
+    return false
+
+fn call_arg(value: HirExpr, line: i64) -> HirCallArg:
+    HirCallArg(has_name: false, name: "", value: value,
+        span: probe_span(line))
+
+fn int_call_function(parameter_symbol: SymbolId, parameter_name: text,
+                     parameter_type: HirType) -> HirFunction:
+    val parameter_read = var_read(parameter_symbol, parameter_type, 10)
+    val callee = HirExpr(
+        kind: HirExprKind.NamedVar(parameter_symbol, "int"),
+        has_type_: false,
+        type_: i64_type(),
+        span: probe_span(10)
+    )
+    val call = HirExpr(
+        kind: HirExprKind.Call(callee, [call_arg(parameter_read, 10)], []),
+        has_type_: true,
+        type_: i64_type(),
+        span: probe_span(10)
+    )
+    val body = HirBlock(stmts: [], has: true, value: call,
+        span: probe_span(10))
+    function_with("int_{parameter_name}_binding_probe", SymbolId(id: 200),
+        [param(parameter_symbol, parameter_name, parameter_type)],
+        i64_type(), body)
+
+fn has_call_indirect(function: MirFunction) -> bool:
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.CallIndirect(_, _, _, _):
+                    return true
+                case _:
+                    ()
+    return false
+
+fn has_i64_cast(function: MirFunction) -> bool:
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Cast(_, _, target):
+                    if target.kind == MirTypeKind.I64:
+                        return true
+                case _:
+                    ()
+    return false
+
+fn has_direct_string_to_int_call(function: MirFunction) -> bool:
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _):
+                            if name == "rt_string_to_int_any":
+                                return true
+                        case _:
+                            ()
+                case _:
+                    ()
+    return false
+
+fn numeric_int_probe_status(record_name: text, parameter_type: HirType,
+                            line: i64) -> i64:
+    var symbols = SymbolTable.new()
+    val parameter_symbol = symbols.define(record_name, SymbolKind.Parameter,
+        parameter_type, probe_span(line), Visibility.Private, false, nil)
+    var lowering = MirLowering.new(symbols)
+    val function = lowering.lower_function(
+        int_call_function(parameter_symbol, record_name, parameter_type))
+    if has_call_indirect(function):
+        return 1
+    if not has_i64_cast(function):
+        return 2
+    return 0
+
+fn main():
+    var lowering = MirLowering.new(SymbolTable.new())
+    val mixed_mir = lowering.lower_function(mixed_tail_function())
+    if not has_f64_arg_zero(mixed_mir):
+        print "FAIL mixed_tail_f64_arg_not_l0"
+        rt_exit(21)
+
+    val explicit_local = string_const_local(mixed_mir, "explicit-zero")
+    if explicit_local < 0 or not has_return_copy(mixed_mir, explicit_local):
+        print "FAIL mixed_tail_explicit_return_missing"
+        rt_exit(22)
+
+    val tail_local = string_const_local(mixed_mir, "implicit-tail")
+    if tail_local < 0:
+        print "FAIL mixed_tail_value_missing"
+        rt_exit(23)
+    if has_return_copy(mixed_mir, 0):
+        print "FAIL mixed_tail_ret_used_f64_l0"
+        rt_exit(24)
+    if not has_return_copy(mixed_mir, tail_local):
+        print "FAIL mixed_tail_ret_lost_tail_local"
+        rt_exit(25)
+
+    # A stored local record named `f` may share its SymbolId with an authored
+    # NamedVar(_, "int") on the flat lane. The record-name mismatch means the
+    # authored builtin still owns the call and numeric int(f) must be a Cast.
+    val f64_status = numeric_int_probe_status("f", f64_type(), 10)
+    if f64_status == 1:
+        print "FAIL int_f_symbol_lowered_call_indirect"
+        rt_exit(31)
+    if f64_status == 2:
+        print "FAIL int_f_numeric_cast_missing"
+        rt_exit(32)
+
+    # A genuine local parameter NAMED `int` owns the same authored spelling;
+    # this is real shadowing and must remain an indirect call through the local.
+    var shadow_symbols = SymbolTable.new()
+    val shadow_int_symbol = shadow_symbols.define("int", SymbolKind.Parameter,
+        f64_type(), probe_span(11), Visibility.Private, false, nil)
+    var shadow_lowering = MirLowering.new(shadow_symbols)
+    val shadow_mir = shadow_lowering.lower_function(
+        int_call_function(shadow_int_symbol, "int", f64_type()))
+    if not has_call_indirect(shadow_mir):
+        print "FAIL local_int_shadow_not_call_indirect"
+        rt_exit(33)
+
+    # Text int(s) remains a direct runtime parse, even when its NamedVar symbol
+    # collides with the stored parameter record for s.
+    var text_symbols = SymbolTable.new()
+    val text_s_symbol = text_symbols.define("s", SymbolKind.Parameter,
+        text_type(), probe_span(12), Visibility.Private, false, nil)
+    var text_lowering = MirLowering.new(text_symbols)
+    val text_mir = text_lowering.lower_function(
+        int_call_function(text_s_symbol, "s", text_type()))
+    if has_call_indirect(text_mir):
+        print "FAIL int_s_symbol_lowered_call_indirect"
+        rt_exit(34)
+    if not has_direct_string_to_int_call(text_mir):
+        print "FAIL int_s_runtime_parse_call_missing"
+        rt_exit(35)
+
+    val i32_status = numeric_int_probe_status("signed_value", i32_type(), 13)
+    if i32_status == 1:
+        print "FAIL int_i32_symbol_lowered_call_indirect"
+        rt_exit(36)
+    if i32_status == 2:
+        print "FAIL int_i32_numeric_cast_missing"
+        rt_exit(37)
+
+    val u32_status = numeric_int_probe_status("unsigned_value", u32_type(), 14)
+    if u32_status == 1:
+        print "FAIL int_u32_symbol_lowered_call_indirect"
+        rt_exit(38)
+    if u32_status == 2:
+        print "FAIL int_u32_numeric_cast_missing"
+        rt_exit(39)
+
+    val bool_status = numeric_int_probe_status("flag", bool_type(), 15)
+    if bool_status == 1:
+        print "FAIL int_bool_symbol_lowered_call_indirect"
+        rt_exit(40)
+    if bool_status == 2:
+        print "FAIL int_bool_numeric_cast_missing"
+        rt_exit(41)
+
+    val f32_status = numeric_int_probe_status("ratio", f32_type(), 16)
+    if f32_status == 1:
+        print "FAIL int_f32_symbol_lowered_call_indirect"
+        rt_exit(42)
+    if f32_status == 2:
+        print "FAIL int_f32_numeric_cast_missing"
+        rt_exit(43)
+
+    print "PASS bootstrap_mixed_tail_ret tail_local={tail_local} explicit_local={explicit_local} numeric_matrix=true shadow_indirect=true text_parse=true"
