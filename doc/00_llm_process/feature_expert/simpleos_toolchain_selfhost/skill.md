@@ -15,6 +15,11 @@
 > fixtures, image-admission checks, and the sole live deployment/desktop scenario.
 > Source inventories, compatibility duplicates, and Rust-seed presence are not
 > guest or release evidence.
+> The live umbrella SSpec additionally exposes step-based positive receipt,
+> extra-argument edge, and missing-runtime error coverage with real assertions.
+> Runtime/docgen/maintenance status is `TEST_BLOCKED` until a current-source
+> CLI passes canonical Stage-4 provenance admission; the mirrored manual is not
+> runtime evidence.
 
 ## Role
 

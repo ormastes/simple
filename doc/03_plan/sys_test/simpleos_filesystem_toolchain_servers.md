@@ -54,3 +54,22 @@ host-CLI admission to the canonical Stage-4 provenance verifier. This check
 never replaces the frozen live SSpec; default wrapper mode fails closed until
 the canonical desktop owner supports cooperative SSHD/network polling and
 same-run guest commands.
+
+## Umbrella SSpec fail-closed matrix (2026-08-16)
+
+The canonical umbrella SSpec now carries four visible, step-based scenarios:
+
+| Evidence profile | Visible step | Assertions | Requirements |
+|---|---|---|---|
+| positive host fixture | `Validate the receipt contract without claiming platform acceptance` | rc=0, empty stderr, PASS prefix, `checked=16`, false platform claim | REQ-SOS-TD-002, REQ-SOS-TD-004 |
+| CLI edge | `Reject extra receipt self-test arguments` | rc=2, empty stdout, canonical usage | REQ-SOS-TD-004 |
+| admission error | `Reject production execution without an admitted runtime` | rc=1, empty stdout, `blocked:simple-bin-not-set` | REQ-SOS-TD-001, REQ-SOS-TD-003 |
+| live guest | the frozen prepare/boot/compile steps | admitted manifest/image/desktop receipts and exact guest output | REQ-SOS-TD-001..004 |
+
+The first three cases make wrapper policy automatically testable without
+promoting host-fixture evidence to platform acceptance. The live case remains
+fail-closed and is the only completion oracle. Runtime execution, docgen, and
+`sspec-maintain scan` are `TEST_BLOCKED`: the bounded runtime audit found no
+current-source CLI with canonical adjacent Stage-4 provenance. Resume all three
+only with an admitted pure-Simple CLI; never substitute the Rust seed or the
+stale release binary.

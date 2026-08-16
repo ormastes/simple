@@ -486,3 +486,13 @@ sh test/01_unit/scripts/simpleos_toolchain_desktop_boot_receipt_contract_test.sh
 Its `platform_acceptance_claimed=false` marker is mandatory. Default wrapper
 mode remains blocked until all real inputs and the same-run desktop/SSH owner
 exist; never substitute a historical SSH entry or a second QEMU run.
+
+The umbrella SSpec at
+`test/03_system/os/simpleos_toolchain_deployment_desktop_boot_spec.spl` also
+checks the same production owner through visible positive, edge, and error
+steps before the frozen live-guest flow. It requires exact rc/stdout/stderr
+behavior for the 16-case self-test, extra-argument rejection, and missing-runtime
+rejection. These host-fixture results cannot satisfy the live gate. Current
+runtime/docgen/maintenance status is `TEST_BLOCKED` because no canonically
+admitted pure-Simple CLI is available; run the SSpec, `spipe-docgen`, and
+`sspec-maintain scan` only after that admission exists.

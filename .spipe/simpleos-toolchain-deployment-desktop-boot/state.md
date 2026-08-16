@@ -156,3 +156,10 @@ dev-done
   (`platform_acceptance_claimed=false`). Live mode remains blocked at the
   precise owner gap: canonical fullscreen QEMU uses `-net none` and exits
   after capture, while `gui_entry_desktop.spl` has no cooperative SSHD poll.
+- system-test 2026-08-16: extended the canonical umbrella SSpec with visible
+  positive host-fixture, CLI-edge, and missing-admission error steps plus the
+  frozen live-guest flow. All four scenarios use concrete built-in matcher
+  assertions and REQ-SOS-TD-001..004 traceability. Runtime, docgen, and
+  `sspec-maintain scan` are `TEST_BLOCKED`: no current-source CLI with canonical
+  adjacent Stage-4 provenance exists. The spec stays fail-closed for automatic
+  execution when a qualified environment becomes available.
