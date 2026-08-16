@@ -128,15 +128,16 @@ declared adjacent pointer-motion case. Headless, SDL2, Win32, and Cocoa
 adapters are source-present and have focused specs, but source/static checks do
 not prove native fence completion or platform parity.
 
-The Windows PowerShell peer retains fail-closed `-Preflight`. Its x86_64 `-Run`
-source path prepares nonce-isolated media, extracts and hashes the exact mounted
-ELF, invokes QEMU with bounded serial capture, validates ordered
-listing/program/exit-37/exact-reap markers, and delegates to the canonical
-producer. The other five descriptors stop explicitly because their guest
-sources do not yet echo `/SOSIXNON.TXT`; sharing the workload nonce is not an
-acceptable substitute. None of these paths has been parsed or executed on
-Windows. After the guest readers land, a native operator runs `-AllGuests -Run`
-serially and retains six bundles.
+The Windows PowerShell peer retains fail-closed `-Preflight`. Every guest has a
+distinct bounded `/SOSIXNON.TXT` reader in source; sharing the workload nonce
+remains forbidden. Only x86_64 and ARM32 also have the complete ordered
+workload/listing/program/exit-37/reap source contract. The other four
+descriptors return `guest-run-contract-not-implemented:<guest>` before a ready
+receipt. The fail-closed source gate
+`sh scripts/check/check-sosix-collector-nonce-readers.shs --self-test` passed
+once on 2026-08-16. This is not native evidence: none of these paths has been
+parsed or executed on Windows. Complete the four guest contracts, then a native
+operator must run `-AllGuests -Run` serially and retain six bundles.
 FreeBSD first requires checksum-admitted 14.4 media. macOS TCG rows may prove
 correctness but never native timing. All non-PASS acceptance IDs remain active;
 this is an implementation handoff, not feature completion.

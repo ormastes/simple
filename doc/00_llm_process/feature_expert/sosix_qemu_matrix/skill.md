@@ -19,9 +19,10 @@ rows. Blocked/postponed rows stay active and are never exclusions or PASS.
 The manual flow and shared script names are frozen in the plan. Producer
 `--self-test` proves fixture closure only. Windows preflight, TCG correctness,
 cached transcripts, and host-side execution are not row evidence. The Windows
-peer has a source-present producer-backed x86_64 `-Run` path; the other five
-descriptors fail closed until their guest kernels echo the distinct collector
-nonce. Only native Windows execution can verify a path or create row evidence.
+peer has six distinct bounded collector-nonce readers. Only x86_64 and ARM32
+currently have the complete workload/listing/program/reap source contract;
+the other four descriptors must fail before ready. Source gates are not
+execution evidence; only native Windows execution can create row evidence.
 
 The L0 collector/media/runtime repairs are implemented in source. Do not call
 L0 verified until the bounded typed SSpec passes on a source-matched admitted
@@ -31,8 +32,10 @@ matrix completion.
 
 Collector v2 now byte-binds the exact 13-field admission record in the
 manifest, and the pure-Simple trusted importer exposes only the closed-root
-all-24-PASS release predicate. Its new focused sabotage specs remain unexecuted
-without an admitted Stage-4 CLI; pre/post path/hash checks do not claim
+all-24-PASS release predicate. Its multiline boolean forms use the required
+parenthesized Simple grammar. Both focused specs and a module check were
+attempted once with the deployed self-hosted CLI but exited 139 before usable
+results, so they remain unverified without an admitted Stage-4 CLI. Pre/post path/hash checks do not claim
 fd-pinned protection against hostile concurrent replacement.
 
 ## Update rule

@@ -976,6 +976,39 @@ static int x86_32_fat_read(const X86_32Fat *fs, uint32_t first, uint32_t file_si
     return 1;
 }
 
+/* Canonical evidence nonce: distinct from the workload nonce in QEMUNONC. */
+RuntimeValue rt_sosix_collector_nonce_echo(void)
+{
+    static const char prefix[] = "SOSIX_COLLECTOR_RUN_NONCE=";
+    uint8_t record[118];
+    X86_32Fat fs;
+    uint32_t first = 0;
+    uint32_t file_size = 0;
+    if (!x86_32_fat_mount(&fs) ||
+        !x86_32_fat_find_root(&fs, "SOSIXNONTXT", &first, &file_size) ||
+        file_size <= sizeof(prefix) - 1U || file_size > sizeof(record) ||
+        !x86_32_fat_read(&fs, first, file_size, 0U, record, file_size))
+        return 0;
+
+    uint32_t prefix_len = (uint32_t)(sizeof(prefix) - 1U);
+    for (uint32_t i = 0; i < prefix_len; ++i)
+        if (record[i] != (uint8_t)prefix[i]) return 0;
+    uint32_t end = prefix_len;
+    while (end < file_size && record[end] != '\n') {
+        uint8_t c = record[end];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+              c == ':' || c == '-')) return 0;
+        ++end;
+    }
+    if (end == prefix_len || end >= file_size || record[end] != '\n') return 0;
+    uint32_t line_len = end + 1U;
+    for (uint32_t i = line_len; i < file_size; ++i)
+        if (record[i] != 0U) return 0;
+    for (uint32_t i = 0; i < line_len; ++i) serial_putchar((char)record[i]);
+    return 1;
+}
+
 RuntimeValue rt_x86_32_fat_hostile_self_test(void)
 {
     uint8_t image[4096];

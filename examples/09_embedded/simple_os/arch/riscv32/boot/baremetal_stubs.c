@@ -63,6 +63,55 @@ extern char _stack_top[];
  * rt_qemu_exit_success, rt_native_eq/neq, rt_riscv_nvfs_probe). */
 #include "../../common/riscv_common.h"
 
+static size_t riscv32_collector_nonce_line_length(const unsigned char *slot,
+                                                   size_t slot_len)
+{
+    static const char prefix[] = "SOSIX_COLLECTOR_RUN_NONCE=";
+    const size_t prefix_len = sizeof(prefix) - 1U;
+    if (!slot || slot_len <= prefix_len || slot_len > 118U) return 0U;
+    for (size_t i = 0; i < prefix_len; i++) {
+        if (slot[i] != (unsigned char)prefix[i]) return 0U;
+    }
+
+    size_t i = prefix_len;
+    const size_t nonce_begin = i;
+    while (i < slot_len && slot[i] != '\n') {
+        const unsigned char c = slot[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '.' || c == '_' ||
+              c == ':' || c == '-')) return 0U;
+        i++;
+    }
+    if (i == nonce_begin || i >= slot_len || slot[i] != '\n') return 0U;
+
+    const size_t line_len = i + 1U;
+    for (i = line_len; i < slot_len; i++) {
+        if (slot[i] != 0U) return 0U;
+    }
+    return line_len;
+}
+
+/* Canonical evidence nonce: distinct from every workload nonce. */
+RuntimeValue rt_sosix_collector_nonce_echo(void)
+{
+    Fat32Probe fat;
+    unsigned char nonce_file[118];
+    uint32_t file_size = 0U;
+    if (!fat32_probe_bpb(&fat)) return 0;
+    const uint32_t cluster = fat32_find_entry_cluster(
+        &fat, fat.root_cluster, "SOSIXNONTXT", 0U, &file_size);
+    if (cluster < 2U || file_size == 0U || file_size > sizeof(nonce_file)) return 0;
+    const uint32_t bytes_read = fat32_read_file_into(
+        &fat, cluster, file_size, nonce_file, sizeof(nonce_file));
+    if (bytes_read != file_size) return 0;
+
+    const size_t line_len = riscv32_collector_nonce_line_length(
+        nonce_file, bytes_read);
+    if (line_len == 0U) return 0;
+    for (size_t i = 0; i < line_len; i++) uart_putc((char)nonce_file[i]);
+    return 1;
+}
+
 static void uart_put_u32(uint32_t v)
 {
     char buf[10];

@@ -2,7 +2,7 @@
 # SOSIX Refactor and Multi-Host QEMU Architecture
 
 **Status:** implementation architecture
-**Requirements:** `REQ-SQ-001` through `REQ-SQ-015`
+**Requirements:** `REQ-SQ-001` through `REQ-SQ-017`
 **Date:** 2026-08-11
 
 ## Decision
@@ -106,6 +106,12 @@ One descriptor owner lowers each of six guest identities (`x86_32`, `x86_64`,
 firmware, accelerator, memory, disk, serial, QMP, timeout, and marker settings.
 Host overlays select only proven KVM/HVF/WHPX/NVMM support; TCG is correctness
 evidence, never native-performance evidence.
+
+Windows descriptors keep collector-nonce capability separate from complete
+run-contract readiness. All six guests may own a bounded `/SOSIXNON.TXT`
+reader, while only rows with workload nonce, mounted listing, program/exit,
+and exact-reap markers may reach ready or QEMU execution. Incomplete rows fail
+before ready with `guest-run-contract-not-implemented:<guest>`.
 
 Large storage resolves in this order:
 
