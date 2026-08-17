@@ -219,3 +219,13 @@ payload types against the current child's filename. The compiler fix and
 behavioral regression are tracked in
 `hir_package_sibling_imported_enum_surface_leak_2026-08-02.md`. No fourth build
 was attempted.
+
+## FIXED BY CONTENT — verified 2026-08-17
+`src/app/test_runner_new/test_runner_main.spl` no longer resolves these through
+the broad `std.io` facade: line 12 is
+`use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}` and line 13
+`use std.io.{dir_create_all}` (explicit single-item import, not the glob facade).
+`duration_ms` / `to_int` are used as ordinary members. Executable evidence: every
+`bin/simple test <spec> --no-session-daemon` run performed today (5 specs,
+including 20/20 and 21/21 green files) is driven by this exact module, so the
+names resolve at runtime. Status: FIXED.

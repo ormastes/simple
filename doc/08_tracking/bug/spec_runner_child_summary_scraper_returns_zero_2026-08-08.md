@@ -72,3 +72,16 @@ Do not merely make the scraper parse — add a discrimination proof that
 check that a *broken* scraper cannot read as "clean". A scraper that returns
 zero on both "no summary" and "unparseable summary" is the defect shape here;
 those two cases need distinct signals.
+
+## 2026-08-17 test-lane note (src/ scope — diagnosis only, not fixed here)
+Still present: `parse_child_example_summary` defined at
+`src/app/test_runner_new/test_runner_single.spl:416`, called at :1036.
+Concrete lead from today's captured child output: the summary line the scraper
+looks for is ANSI-coloured, e.g. `\x1b[31m12 examples, 1 failure\x1b[0m` /
+`\x1b[32m6 examples, 0 failures\x1b[0m`. The predicate
+`line.contains("example") and line.contains("failure")` matches, so any
+`has_summary=0` must come from `extract_number_before(line, "example")` failing
+to skip the leading escape sequence — that helper is where to instrument first.
+Note also that the runner already has a second, working path
+(`SPEC FILE VERDICT` / `warning: child exit 1 contradicted by a clean SPEC FILE
+VERDICT; trusting the verdict`), which is why a dead scraper is silent.

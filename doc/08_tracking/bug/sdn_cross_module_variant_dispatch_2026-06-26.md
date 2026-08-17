@@ -48,3 +48,17 @@ because they avoid the problematic dispatch.
 Seed interpreter fix in `src/compiler_rust/`: the method lookup for cross-module
 enum values must not walk contained-value variants to resolve dispatch. Intra-module
 method calls on SdnValue should bypass the cross-module variant registry.
+
+## NOT REPRODUCIBLE 2026-08-17 — appears FIXED BY CONTENT
+Two measurements, seed binary `bin/release/x86_64-unknown-linux-gnu/simple`,
+`--no-session-daemon`, exit code read directly:
+1. `test/01_unit/lib/common/roundtrip_spec.spl` (the cited spec, imports
+   `std.common.sdn.parser.{parse}` + `std.common.sdn.value.{SdnValue}` from a
+   different module) — `6 examples, 0 failures`, `executed=6 passed=6 failed=0`, rc=0.
+2. A targeted throwaway probe calling the method the doc names, on a document that
+   contains primitive values:
+   `match parse("name: \"x\"\ncount: 3\n") -> case Ok(v): v.type_name()`
+   printed `type_name=dict` and passed (rc=0). No `unknown variant or method`.
+Cross-module method dispatch on a parsed `SdnValue` therefore works today.
+Status: recommend CLOSED-not-reproducible; reopen with a fresh failing snippet if
+seen again.

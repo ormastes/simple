@@ -160,3 +160,35 @@ Completed 2026-08-10 in commit `6f66d2a6c9885c70fd8fb0163e445cadd0881e1c`, which
 method: `doc/08_tracking/test/half_landed_fixes_across_duplicate_test_trees_2026-08-10.md`.
 The class is now fenced: `scripts/check/check-test-tree-divergence.shs`
 fails a push whose range edits one leg and leaves the twin divergent.
+
+## 2026-08-17 — layer 1 FIXED in the spec, layer 2 CONFIRMED still OPEN
+`test/01_unit/compiler/hir/module_lowering_dict_keys_source_spec.spl` line 6 held
+`"use std.alloc.sffi.{rt_dict_keys}"` in an interpolating string, so the SPEC's
+own lexer resolved `{rt_dict_keys}`:
+
+    before: ✗ uses typed Dict runtime views ... / semantic: variable `rt_dict_keys` not found
+            executed=1 passed=0 failed=1 (rc=1)   <- the RED measured the spec itself
+
+Escaped to `"use std.alloc.sffi.\{rt_dict_keys\}"` (the `\{ \}` convention already
+used by `test/01_unit/compiler/frontend/single_item_use_import_spec.spl`):
+
+    after:  ✗ uses typed Dict runtime views ... / expected true to equal false
+            executed=1 passed=0 failed=1 (rc=1)   <- now a real content assertion
+
+Layer 2 (product drift) verified directly against
+`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl` (175,593 bytes),
+both by grep -cF and by an in-language probe reading the file at runtime:
+
+| expected fixture string | occurrences |
+|---|---|
+| `use std.alloc.sffi.{rt_dict_keys}` | 0 |
+| `val cls_keys: [text] = rt_dict_keys(module_classes)` | 0 |
+| `val fn_keys: [text] = rt_dict_keys(module_functions)` | 0 |
+| `val lowered_impl_function_keys: [SymbolId] = rt_dict_keys(...)` | 0 |
+| `var keys: [text] = rt_dict_keys(imported_mod.classes)` | 0 |
+| `me register_glob_imported_symbols(imported_mod: Module` | 1 |
+| `.keys()` (asserted absent) | **32** |
+
+The rt_dict_keys migration was never applied to the product source. The spec is
+left RED on purpose — it documents a real, open src/ defect and must not be
+weakened. Owner: HIR lane (src/ scope).

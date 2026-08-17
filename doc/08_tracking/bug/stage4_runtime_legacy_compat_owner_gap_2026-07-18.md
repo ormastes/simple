@@ -56,3 +56,19 @@ archive and object tools rather than `lib.exe`. The broader hosted architecture
 surface is Linux x86_64/AArch64/RISC-V64, macOS x86_64/AArch64, FreeBSD
 x86_64/AArch64, and Windows x86_64; x86, ARM32, and RISC-V32 are not claimed
 for Stage4.
+
+## EXECUTED 2026-08-17 — "execution pending" is resolved; 1 real failure remains
+`bin/simple test test/01_unit/compiler/backend/stage4_runtime_legacy_compat_provider_spec.spl --no-session-daemon`
+(rc read directly) gives:
+
+    12 examples, 1 failure
+    declared>=12 executed=12 passed=11 failed=1 dropped=0
+    Results: 12 total, 11 passed, 1 failed   Duration: 1630ms   (rc=1)
+
+The single failing example is
+`✗ builds localizes admits and cleans only the dedicated compatibility archive`
+-> `expected subject to be truthy, got false`. Everything else is green, so the
+source-side fix is real and now verified by execution; what is left is one
+concrete behavioural gap in the archive build/localize/admit/clean path, not an
+owner/verification gap. Owner: backend lane (src/ scope) — the spec is correct and
+stays RED.

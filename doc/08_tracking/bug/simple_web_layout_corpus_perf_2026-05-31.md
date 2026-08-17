@@ -26,3 +26,8 @@ passing, but the system spec is too slow for a healthy hardening gate.
 - Profile the slow corpus scenarios.
 - Separate smoke coverage from full corpus coverage if needed.
 - Add a bounded perf target for the web layout/corpus path before release.
+
+## Path note 2026-08-17
+No path drift: the spec is at `test/03_system/gui/wm_compare/famous_site_corpus_spec.spl`
+(the doc's path is correct); `test/03_system/wm_compare/famous_site_corpus_spec.spl`
+does not exist. Perf claim not re-measured this pass (system/GUI lane).

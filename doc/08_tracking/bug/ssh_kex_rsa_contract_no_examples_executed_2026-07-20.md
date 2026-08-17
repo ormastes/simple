@@ -62,3 +62,27 @@ SIMPLE_RUST_SEED_WARNING=0 timeout 90 \
 
 - `test/01_unit/os/apps/sshd/ssh_kex_rsa_contract_spec.spl` (import path fixed
   in-place; spec still does not go green — 0 examples executed)
+
+## Re-reproduced 2026-08-17 — symptom has CHANGED, still OPEN
+`bin/simple test test/01_unit/os/apps/sshd/ssh_kex_rsa_contract_spec.spl --no-session-daemon`
+(seed binary `bin/release/x86_64-unknown-linux-gnu/simple`, exit code read
+directly, never through a pipe) now ends:
+
+    ... executed=1 passed=0 failed=1 dropped=0 timeout=1 reason=child-timeout budget_ms=120000
+    Results: 1 total, 0 passed, 1 failed   Duration: 120250ms   (rc=1)
+
+So this is **not** the old "0 examples in ~64s / suspected private-helper symbol
+collision". The example is discovered and started; the child is killed at the
+runner's default 120s budget. Raising it with the supported
+`# @timeout_secs 600` header directive (parsed by
+`src/app/test_runner_new/test_runner_main.spl:120 spec_timeout_secs_directive`)
+did NOT produce a result either — still no output after >600s. The cost is
+therefore in the pure-Simple RSA path exercised by the spec
+(`os.crypto.rsa.rsa_sha512_verify` modexp, plus `openssl genpkey` fixture) under
+the tree-walk interpreter that `bin/simple test` hard-defaults to, i.e. a
+src/lib-side perf defect, not a runner budget or a symbol collision.
+The directive was deliberately NOT left in the spec: a fast honest 120s red is
+better than a >10min hang in the suite. A note recording this sits in the spec
+header.
+Unblock: make `os/crypto/rsa` modexp usable under the interpreter (or give the
+spec a smaller key / precomputed fixture). Owner: crypto lane (src/ scope).

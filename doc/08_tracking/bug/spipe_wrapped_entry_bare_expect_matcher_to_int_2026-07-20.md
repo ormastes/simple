@@ -81,3 +81,16 @@ file content is wrong, so no test-only edit can fix it.
   independently verified against other `.spipe_wrapped_entry_*` files in this
   triage pass, flagging for whoever picks this up to check the wider
   `.spipe_wrapped_entry_*` family).
+
+## FIXED BY CONTENT — verified 2026-08-17
+`bin/simple test "test/01_unit/lib/editor/.spipe_wrapped_entry_split_pane_spec.spl" --no-session-daemon`
+(the wrapped `fn main():` + bare `expect X to_equal(N)` form the doc cites):
+
+    Results: 6 total, 6 passed, 0 failed   Duration: 138ms   (rc=0)
+
+No `cannot convert matcher to int` anywhere in the output. Status: FIXED.
+Side observation worth keeping: the run also printed
+`warning: test-runner: child exit 1 contradicted by a clean SPEC FILE VERDICT; trusting the verdict`
+— the wrapped child still exits 1 and the file is only green because the verdict
+line overrides the exit code. That override is by design but means this spec form
+cannot be judged by exit status alone.

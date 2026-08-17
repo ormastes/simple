@@ -23,3 +23,19 @@ oracles (per `.claude/rules/testing.md` Modern SSpec), updating BOTH duplicate
 trees identically so `check-test-tree-divergence` stays green. Verified during
 the 2026-08-16 smux hardening pass; not converted then because the 2×~400-line
 rewrite is independent of that change set.
+
+## FIXED 2026-08-17 (test-lane)
+Both files converted to SSpec: each `fn test_*()` now returns `bool` (the
+`print("PASS:")`/`print("FAIL:")` lines became `return true`/`return false`) and
+`fn main()` was replaced by a `describe` with one `it` per check
+(`expect(test_X()).to_equal(true)`). Both duplicate trees updated by explicit
+filename (not glob) and are byte-identical.
+
+Before (`bin/simple test <spec> --no-session-daemon`):
+- `test/01_unit/os/smux_spec.spl` — `declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=zero-examples`, exit 1
+
+After:
+- `test/01_unit/os/smux_spec.spl` — `declared>=20 executed=20 passed=20 failed=0 dropped=0`, exit 0
+- `test/01_unit/os/smux/smux_dashboard_spec.spl` — `declared>=21 executed=21 passed=21 failed=0 dropped=0`, exit 0
+
+Status: FIXED.
