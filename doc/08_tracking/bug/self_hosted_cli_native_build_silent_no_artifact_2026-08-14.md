@@ -1,5 +1,86 @@
 # Self-hosted CLI native-build silently returns success without an artifact
 
+Status: **RETIRED 2026-08-17 — the silent-no-artifact symptom does NOT reproduce.**
+The residual render-lane blocker is a DEPLOY question, not this defect; see the
+re-triage immediately below before reading the 2026-08-14 text, which is kept
+verbatim for history but is superseded.
+
+## 2026-08-17 re-triage (triage shard) — DID NOT REPRODUCE
+
+Binary identity: `readlink -f bin/simple` =
+`bin/release/x86_64-unknown-linux-gnu/simple`, 59536728 bytes, mtime
+2026-08-16 22:59:37 (a Rust seed; it prints the seed banner). Nothing was
+rebuilt or redeployed — `src/**` is read as source on every run, so this
+exercises CURRENT source through that front-end.
+
+The row's symptom is "exited 0 in about 1.4 seconds, printed nothing, and
+produced no output file". Re-run against a minimal entry
+(`fn main() -> i64: print("hi"); 0`):
+
+```
+$ bin/simple native-build <tmp>/nb.spl -o <tmp>/nbout
+[build] source_closure 1/1 step 1/6 complete
+[build] load_sources 1/1 step 1/6 complete
+[build] parse 1/1 step 2/6 complete
+[bootstrap-error-count] source_idx=0 point=post-store count=0
+...
+rc=0
+ARTIFACT 23816 bytes 2026-08-17 09:26:41.856372876 +0000
+```
+
+Every element of the symptom is absent:
+
+- **Not 1.4s.** A 115s probe timed out mid-build (`rc=124`) with live progress
+  streaming; the full build needed several minutes.
+- **Not silent.** Six-step `[build] …` progress plus per-point error counts.
+- **An artifact exists and RUNS.** `file` reports `ELF 64-…`; executing it
+  prints `hi` and exits 0. `stat` size/mtime quoted above, per the
+  artifact-not-exit-code rule.
+
+### Proving code in CURRENT source
+
+The row itself suspected this ("Current source already contains two fail-closed
+checks that the deployed artifact does not exhibit") and was right. Both are
+present and are now spec-pinned:
+
+- `src/app/cli/native_build_main.spl:270` —
+  `if code == 0 and output_path != "" and not rt_file_exists(output_path):` ->
+  prints `error: native-build worker exited 0 but produced no output binary:`
+  plus `Treating a successful-looking exit with a missing output file as a hard
+  failure.` and returns 1.
+- `src/app/io/_CliCompile/compile_targets.spl:1245` —
+  `if not _cli_file_exists_impl(staged_output):` rejects a driver `Success`
+  whose staged output is absent.
+
+So the defect this row names was a property of the unadmitted deployed
+artifact, not of the source. Classified by CONTENT, not by SHA ancestry.
+
+### Spec
+
+`test/01_unit/app/cli/native_build_missing_output_fail_closed_spec.spl` —
+`Results: 4 total, 4 passed, 0 failed`. It asserts the ARTIFACT check itself
+exists at both layers (an implementation that returns 0 without ever stat-ing
+its output would pass any exit-code-based spec while shipping this exact
+defect), with a non-vacuity floor on both source reads.
+
+**Ablation (causation proved):** neutering the worker gate to `if false:` gives
+`Results: 4 total, 3 passed, 1 failed`; restoring it returns 4/4.
+
+### What is NOT retired
+
+The render-lane unblock condition at the top of the original text — admit and
+deploy a source-matched Stage 4 CLI, then build/run
+`test/05_perf/graphics_2d/draw_ir_damage_8k_bench.spl` — is untouched. It needs
+a deploy of the shared `bin/release/**`, which this shard was forbidden from
+doing (~15 lanes share this checkout). That work belongs to
+`doc/08_tracking/bug/no_self_hosted_binary_deployed_blocks_bootstrap_gate_2026-08-09.md`,
+not here: no 8K performance conclusion is drawn either way.
+
+---
+
+## Original 2026-08-14 record (superseded, kept verbatim)
+
+
 Status: **OPEN / restart12 render lane blocker**
 
 Owner: pure-Simple CLI/native-build dispatch —

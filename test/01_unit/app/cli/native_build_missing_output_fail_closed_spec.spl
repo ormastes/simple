@@ -1,0 +1,56 @@
+# @cover src/app/cli/native_build_main.spl 10%
+#
+# REPRODUCER + DETECTION spec for
+# doc/08_tracking/bug/self_hosted_cli_native_build_silent_no_artifact_2026-08-14.md
+#
+# That row: three native-build variants each "exited 0 in about 1.4 seconds,
+# printed nothing, and produced no output file". The class is the worst kind of
+# false green — a build tool reporting success with no artifact.
+#
+# The row was filed against a DEPLOYED artifact, and its own text already
+# suspected current source had moved on. It had. Both fail-closed gates exist
+# and are pinned here, at both layers that can swallow the failure:
+#
+#   * src/app/cli/native_build_main.spl      — a worker exit 0 with the
+#     requested --output absent is converted to a hard failure.
+#   * src/app/io/_CliCompile/compile_targets.spl — driver Success with the
+#     staged output absent is rejected rather than passed through.
+#
+# The oracle deliberately targets the ARTIFACT check itself, not an exit code:
+# an implementation that returns 0 without ever stat-ing its output would pass
+# any exit-code-based spec while shipping the exact defect.
+
+extern fn rt_file_read_text(path: text) -> text?
+
+val WORKER = "src/app/cli/native_build_main.spl"
+val TARGETS = "src/app/io/_CliCompile/compile_targets.spl"
+
+fn worker_source() -> text:
+    rt_file_read_text(WORKER) ?? ""
+
+fn targets_source() -> text:
+    rt_file_read_text(TARGETS) ?? ""
+
+describe "native-build never reports success without an artifact":
+    it "both source files were actually read (non-vacuity)":
+        expect(worker_source().len() > 1000).to_equal(true)
+        expect(targets_source().len() > 1000).to_equal(true)
+
+    it "a worker exit 0 with a missing --output is a hard failure":
+        val source = worker_source()
+        # The gate must test the exit code AND the artifact together; either
+        # half alone is the defect.
+        expect(source).to_contain("if code == 0 and output_path")
+        expect(source).to_contain("not rt_file_exists(output_path):")
+        expect(source).to_contain("worker exited 0 but produced no output binary")
+        expect(source).to_contain("Treating a successful-looking exit with a missing output file as a hard failure.")
+
+    it "driver Success with an absent staged output is rejected":
+        val source = targets_source()
+        expect(source).to_contain("if not _cli_file_exists_impl(staged_output):")
+
+    it "the missing-output-directory silent-exit-1 regression stays referenced":
+        # An earlier sibling defect in the same family; the comment is the only
+        # in-source record of why the parent-dir handling exists.
+        val source = targets_source()
+        expect(source).to_contain("native_build_missing_output_dir_silent_fail")
