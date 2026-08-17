@@ -329,11 +329,74 @@ the facade declares its externs locally (same precedent as
 `src/app/enterprise/rt_file_facade_probe_main.spl` importing the facade
 cross-compiles to a SimpleOS SMF artifact carrying all 4 names.
 
-Remaining honest gap for an in-guest RUN: no OVMF boot lane yet builds a
-guest image containing `os.userlib.rt_file_facade` or execs an SMF app
-(existing lanes boot the ssh_ring3 clang ELF-exec entry); no guest
-transcript exists, so AC-17 in-guest execution is still evidence-pending
-(cross-compile + guest-owner rows are green).
+### In-guest execution — CLOSED (W10-B, 2026-08-17)
+
+AC-17 in-guest execution is no longer evidence-pending. Under real OVMF
+pflash -> GRUB-EFI -> multiboot1 (never `-kernel`, never isa-debug-exit),
+against an EMPTY `mkfs.vfat` FAT32-on-NVMe volume, the whole file backend
+(`fb_open` -> `fb_insert` -> `fb_count` -> `fb_is_store`) runs inside
+SimpleOS. All six rungs of
+`scripts/check/check-enterprise-store-in-guest-ovmf.shs` pass; retained
+transcript
+`doc/09_report/2026/ent_store_in_guest_ovmf_l4_2026-08-17.serial.log`:
+
+    [ent-store] head read-back=SPLSTORE1
+    [ent-store] facade write+read-back=OK
+    [ent-store] open=OK
+    [ent-store] insert=OK
+    [ent-store] count=2 OK
+    [ent-store] magic=OK
+    enterprise store open=true verify=[] (file-backend, in-guest FAT32)
+
+#### Why two of the four externs are provided in C, not Simple
+
+The last blocker (rung L4) was a link-graph defect worth remembering, and
+it is the reason the kernel-tier facade is deliberately SPLIT across two
+languages. `nm` on the failing kernel showed the split precisely:
+
+| symbol | resolved to | outcome |
+|---|---|---|
+| `rt_file_atomic_write` | facade `@export("C")` | correct |
+| `rt_file_read_text_at` | facade `@export("C")` | correct |
+| `rt_file_exists` | `NOP1` stub in `boot/rt_extras.c` | always false |
+| `rt_file_size` | `TRAP_STUB_RET` in `boot/baremetal_stubs.c` | would halt the CPU |
+
+Two independent causes stacked:
+
+1. **Link order under `-z muldefs`.** The freestanding link passes
+   `-z muldefs` (`pipeline/native_project/linker.rs`), so a Simple
+   `@export("C")` provider and a hand-written C stub of the same name are
+   BOTH strong definitions and do not collide — the first in link order
+   silently wins, and the boot C objects precede the Simple module
+   objects. (`@export` does keep the unmangled name: `mangle.rs`'s
+   `keeps_abi_name`.)
+2. **ABI.** `rt_file_exists` and `rt_file_size` are in codegen's
+   `text_arg_indices` table (`codegen/instr/calls.rs` and its LLVM twin),
+   so every Simple call site lowers `rt_file_exists(p)` into
+   `rt_file_exists(rt_string_data(p), rt_string_len(p))` — a raw
+   (ptr, len) pair. A Simple provider `fn rt_file_exists(path: text)`
+   takes ONE boxed RuntimeValue and would receive the raw data pointer
+   instead, so it is unfixable at the Simple layer regardless of who wins
+   the link. `rt_file_read_text_at` and `rt_file_atomic_write` are NOT in
+   that table (nor in `boxed_text_arg_indices`, which holds only
+   `rt_string_builder_push`), pass boxed values, and are correctly
+   provided by the Simple facade.
+
+So `rt_file_exists`/`rt_file_size` are now real C definitions in
+`boot/baremetal_stubs.c` over the FAT32-on-NVMe API, with the (ptr, len)
+signature their call sites emit; the two competing stubs were deleted, so
+each name has exactly ONE definition and no longer depends on link order.
+The facade declares them `extern fn` instead. `file_backend.spl` was NOT
+changed — its local extern declarations remain correct, and the recorded
+reason for them (importing the io facade drags `?`-TryOperator readers
+that break standalone-SMF cross-compilation) still holds; the cross-OS
+gate still passes 8/8.
+
+Generalisation of the defect class first recorded for `mmio_read8`: an
+`extern fn` declared in a `.spl` file binds to the same-named C symbol,
+never to a same-named Simple module function — and a Simple
+`@export("C")` competing with a C stub of the same name is decided
+silently by link order, not by an error.
 
 ## Outbox worker — dispatch + reconciliation (W2-F, 2026-08-16)
 

@@ -53,6 +53,21 @@ extern fn entstore_fat32_write_pending(content: text) -> i64
 extern fn entstore_fat32_read_slice_text(path: text, offset: i64, size: i64) -> text
 extern fn entstore_fat32_dump_first16(path: text)
 
+# rt_file_exists / rt_file_size are DECLARED here and DEFINED IN C
+# (baremetal_stubs.c), never as Simple `@export("C")` providers. Lane W10-B
+# measured why: both names sit in codegen's `text_arg_indices` table
+# (compiler/src/codegen/instr/calls.rs, and the LLVM twin in
+# codegen/llvm/functions/calls.rs), so every Simple call site lowers
+# `rt_file_exists(p)` into `rt_file_exists(rt_string_data(p), rt_string_len(p))`
+# — a raw (ptr, len) pair. A Simple provider written `fn rt_file_exists(path:
+# text)` takes ONE boxed RuntimeValue and would receive the raw data pointer in
+# its place, so it cannot be correct no matter who wins the link.
+# `rt_file_read_text_at` / `rt_file_atomic_write` are NOT in that table (nor in
+# `boxed_text_arg_indices`, which holds only rt_string_builder_push), pass boxed
+# values, and so remain Simple `@export("C")` providers below.
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_size(path: text) -> i64
+
 # Two single-text-arg calls, never one two-text call: the C side documents the
 # measured miscompile (second (ptr,len) pair arrived as garbage, so a 5-byte
 # write asked for 480 KB and filled the volume). Latch path, then write.
@@ -62,14 +77,6 @@ fn entstore_fat32_write_text(path: text, content: text) -> i64:
     entstore_fat32_write_pending(content)
 
 val _ENT_READ_CAP: i64 = 32768
-
-@export("C")
-fn rt_file_exists(path: text) -> bool:
-    simpleos_fat32_stream_open(path) >= 0
-
-@export("C")
-fn rt_file_size(path: text) -> i64:
-    simpleos_fat32_stream_open(path)
 
 @export("C")
 fn rt_file_read_text_at(path: text, offset: i64, size: i64) -> text:

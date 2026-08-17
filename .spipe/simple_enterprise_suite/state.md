@@ -684,3 +684,37 @@ New acceptance criteria (extends AC-1..AC-12 above):
   reports acid=false with is_file=false. Suspect the pragma/CREATE/marker-write
   state established just before the in-situ probe. Next diagnostic spelled out
   in the guide and bug doc.
+- L4 CLOSED — FULL ENTERPRISE STORE RUNS IN-GUEST ON SIMPLEOS (2026-08-17,
+  lane W10-B, one fix/verify cycle of a permitted three). Gate now
+  `PASS — 6 rung(s) checked, enterprise store read its own marker in-guest`;
+  L1/L2/L3/L3.5a/L3.5b/L4 all [OK]. Transcript
+  doc/09_report/2026/ent_store_in_guest_ovmf_l4_2026-08-17.serial.log:
+    [ent-store] open=OK / insert=OK / count=2 OK
+    enterprise store open=true verify=[] (file-backend, in-guest FAT32)
+  Interleaved [ent-store-c] write len= 10 -> 32 -> 53 shows the file genuinely
+  growing as rows append, so the count is not a constant.
+  DIAGNOSIS (static, via nm, before booting): TWO INDEPENDENT DEFECTS STACKED,
+  which is why any single-cause fix would have failed.
+  (1) LINK ORDER: the freestanding link passes `-z muldefs`
+  (linker.rs:2289/2298), so a Simple @export("C") and a same-named C stub are
+  BOTH STRONG and do not collide — first in link order silently wins, and boot
+  C objects precede Simple module objects. @export does keep its unmangled
+  name (mangle.rs:202), so the facade genuinely competed and lost. Losers:
+  NOP1(rt_file_exists) in rt_extras.c returning NIL_VALUE (every existence
+  probe answered "no" -> open=FAIL) and TRAP_STUB_RET(rt_file_size,1), which
+  WOULD HAVE HALTED THE CPU had fb_open reached it.
+  (2) ABI — the half that makes "just weaken the stubs" wrong:
+  rt_file_exists/rt_file_size are in codegen's text_arg_indices, so every call
+  site lowers rt_file_exists(p) -> rt_file_exists(rt_string_data(p),
+  rt_string_len(p)), a raw (ptr,len) pair. A Simple provider taking one boxed
+  RuntimeValue CANNOT be correct even after winning the link. The other two
+  symbols are not in that table and pass boxed values.
+  FIX, split by symbol at its own layer: real rt_file_exists/rt_file_size in
+  baremetal_stubs.c over the FAT32 API with the (ptr,len) signature their call
+  sites emit; both competing stubs DELETED (each replaced by a comment on why
+  nothing may re-add them); facade declares those two as extern. Post-fix nm
+  shows exactly ONE definition per name — no longer link-order dependent.
+  file_backend.spl DELIBERATELY UNCHANGED: its local externs were never the
+  bug and the recorded ?-TryOperator/standalone-SMF reason still holds.
+  Merged-tree verification: c-runtime-compiles PASS (120 files), cross-OS PASS
+  (8 probes), file_backend spec 6/6.

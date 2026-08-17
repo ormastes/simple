@@ -3164,6 +3164,53 @@ static int _entstore_text_arg(const char *src, const char **out, uint32_t *out_l
     return -1;
 }
 
+/* Kernel-tier rt_file_exists / rt_file_size providers (lane W10-B, AC-17 L4).
+ *
+ * These are C, not Simple `@export("C")` in ent_store_fat32_kernel_facade.spl,
+ * and the link graph makes the reason unambiguous:
+ *
+ *  1. ABI. Both names are in codegen's `text_arg_indices` table
+ *     (compiler/src/codegen/instr/calls.rs + the LLVM twin), so EVERY Simple
+ *     call site lowers `rt_file_exists(p)` to
+ *     `rt_file_exists(rt_string_data(p), rt_string_len(p))` — a raw (ptr, len)
+ *     pair. A Simple provider `fn rt_file_exists(path: text)` takes one boxed
+ *     RuntimeValue and would be handed the raw data pointer instead. It cannot
+ *     be correct even if it wins the link.
+ *  2. Link order. The freestanding link passes `-z muldefs`
+ *     (pipeline/native_project/linker.rs), so two STRONG definitions do not
+ *     error — the first in link order silently wins, and the boot C objects
+ *     precede the Simple module objects. `nm` on the pre-fix kernel showed
+ *     exactly that split: rt_file_atomic_write/rt_file_read_text_at resolved to
+ *     the facade, while rt_file_exists/rt_file_size resolved to the C stubs
+ *     (NOP1 in rt_extras.c returning NIL_VALUE, and a TRAP_STUB_RET here that
+ *     would have halted the CPU). Both of those stubs are now deleted in favour
+ *     of the real definitions below, so there is one definition, not a race.
+ *
+ * `_fat32_copy_path_arg` decodes a boxed RuntimeValue text first and only falls
+ * back to (ptr, len), so these stay correct under either calling shape.
+ */
+int rt_file_exists(const char *path, int64_t path_len)
+{
+    char path_buf[128];
+    uint32_t cluster = 0, file_size = 0;
+
+    if (_fat32_copy_path_arg(path, path_len, path_buf, sizeof(path_buf)) <= 0)
+        return 0;
+    return fat32_find_file(path_buf, &cluster, &file_size) == 0 ? 1 : 0;
+}
+
+int64_t rt_file_size(const char *path, int64_t path_len)
+{
+    char path_buf[128];
+    uint32_t cluster = 0, file_size = 0;
+
+    if (_fat32_copy_path_arg(path, path_len, path_buf, sizeof(path_buf)) <= 0)
+        return -1;
+    if (fat32_find_file(path_buf, &cluster, &file_size) != 0)
+        return -1;
+    return (int64_t)file_size;
+}
+
 int64_t entstore_fat32_set_path(const char *path)
 {
     int n = _fat32_copy_path_arg(path, -1, _entstore_path, sizeof(_entstore_path));
@@ -15259,7 +15306,11 @@ TRAP_STUB_RET(rt_file_read, 1)
 TRAP_STUB_RET(rt_file_write, 2)
 TRAP_STUB_RET(rt_file_delete, 1)
 TRAP_STUB_RET(rt_file_append, 2)
-TRAP_STUB_RET(rt_file_size, 1)
+/* rt_file_size is defined for real above, over the FAT32-on-NVMe API, with the
+ * (ptr, len) ABI its call sites actually emit. The TRAP stub that used to sit
+ * here was a second STRONG definition; under `-z muldefs` it won by link order
+ * and would have halted the CPU the moment std.enterprise_store's file backend
+ * asked for a file size. See the note on rt_file_exists above (lane W10-B). */
 TRAP_STUB_RET(rt_file_copy, 2)
 TRAP_STUB_RET(rt_file_move, 2)
 TRAP_STUB_RET(rt_file_rename, 2)

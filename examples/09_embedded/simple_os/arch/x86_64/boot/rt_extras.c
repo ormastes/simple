@@ -1800,7 +1800,11 @@ NOP1(rt_set_macro_trace)
 NOP1(rt_file_copy)
 NOP2(rt_file_copy_to)
 NOP1(rt_file_create)
-NOP1(rt_file_exists)
+/* rt_file_exists is NOT stubbed here: baremetal_stubs.c defines it for real
+ * over the FAT32-on-NVMe API, with the (ptr, len) ABI its call sites emit.
+ * This NOP1 was a second STRONG definition returning NIL_VALUE; under the
+ * freestanding link's `-z muldefs` it won by link order, so every existence
+ * probe in std.enterprise_store's file backend answered "no" (lane W10-B). */
 NOP1(rt_file_is_dir)
 NOP1(rt_file_is_file)
 NOP2(rt_file_lock)
