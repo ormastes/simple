@@ -31,11 +31,22 @@ fn _make_payload() -> [u8]:
 
 describe "Response-body compression dispatcher":
 
-    it "lists zstd and lz4 as supported encodings":
+    # STALE-SPEC CORRECTION (2026-08-17). This block used to assert that only
+    # zstd and lz4 were supported and that br/gzip/deflate returned Err "not yet
+    # wired". All five are wired now: compression.spl imports brotli_compress,
+    # gzip_compress and deflate_compress_sync_flush and dispatches to them, and
+    # each was measured returning Ok with real output. Keeping the Err pins
+    # would have required the un-wired state back. See
+    # doc/08_tracking/bug/zstd_brotli_encoders_are_stored_only_2026-08-17.md for
+    # what each encoder actually achieves.
+    it "lists all five wired codecs in server preference order":
         val codecs = supported_encodings()
-        expect(codecs.len()).to_equal(2)
-        expect(codecs[0]).to_equal("zstd")
-        expect(codecs[1]).to_equal("lz4")
+        expect(codecs.len()).to_equal(5)
+        expect(codecs[0]).to_equal("br")
+        expect(codecs[1]).to_equal("gzip")
+        expect(codecs[2]).to_equal("deflate")
+        expect(codecs[3]).to_equal("zstd")
+        expect(codecs[4]).to_equal("lz4")
 
     it "compresses with zstd and round-trips back to identical bytes":
         val payload = _make_payload()
@@ -62,17 +73,35 @@ describe "Response-body compression dispatcher":
         val decoded = round_trip.unwrap()
         expect(decoded.len()).to_equal(payload.len())
 
-    it "returns Err with a specific reason for gzip (not yet wired)":
-        val out = compress_response_body([0x68u8, 0x69u8], "gzip")
-        expect(out.is_err()).to_equal(true)
+    it "compresses with gzip and round-trips back to identical bytes":
+        val payload = _make_payload()
+        val compressed_res = compress_response_body(payload, "gzip")
+        expect(compressed_res.is_ok()).to_equal(true)
+        val compressed = compressed_res.unwrap()
+        # gzip is a real encoder here: 200 repetitive bytes shrink substantially.
+        expect(compressed.len() < payload.len()).to_equal(true)
+        val round_trip = decompress_bytes(compressed, nil)
+        expect(round_trip.is_ok()).to_equal(true)
+        expect(round_trip.unwrap().len()).to_equal(payload.len())
 
-    it "returns Err with a specific reason for br (Phase 3)":
-        val out = compress_response_body([0x68u8, 0x69u8], "br")
-        expect(out.is_err()).to_equal(true)
+    it "compresses with br rather than rejecting it":
+        # br is wired. Its encoder is a container writer that does not yet
+        # shrink anything (300 -> 304 measured), so this pins Ok + non-empty
+        # output only, NOT a size reduction. Asserting a reduction would be
+        # asserting an encoder that does not exist; asserting Err would be
+        # asserting br is unwired, which it is not.
+        val out = compress_response_body(_make_payload(), "br")
+        expect(out.is_ok()).to_equal(true)
+        expect(out.unwrap().len() > 0).to_equal(true)
 
-    it "returns Err with a specific reason for deflate":
-        val out = compress_response_body([0x68u8, 0x69u8], "deflate")
-        expect(out.is_err()).to_equal(true)
+    it "compresses with deflate rather than rejecting it":
+        # deflate is a real encoder (300 -> 28 measured). No auto-detect
+        # round-trip assertion: a raw deflate stream carries no magic bytes, so
+        # decompress_bytes(_, nil) cannot identify it.
+        val payload = _make_payload()
+        val out = compress_response_body(payload, "deflate")
+        expect(out.is_ok()).to_equal(true)
+        expect(out.unwrap().len() < payload.len()).to_equal(true)
 
     it "returns Err for empty encoding (caller should skip)":
         val out = compress_response_body([0x68u8, 0x69u8], "")
@@ -103,11 +132,17 @@ fn _resp_with_text_body(body: text) -> HttpResponseData:
         chunked: false
     )
 
+# Content-Type is text/plain, not application/octet-stream. compression.spl
+# filters by MIME allowlist and octet-stream is deliberately NOT on it, so the
+# original fixture made every negotiation example below exit on the content-type
+# check before negotiation was ever reached — three of them failed for a reason
+# that had nothing to do with what they claimed to protect, and a fourth passed
+# vacuously. The MIME filter itself is pinned by its own example further down.
 fn _resp_with_byte_body(body_bytes: [u8]) -> HttpResponseData:
     HttpResponseData(
         status: 200,
         reason: "OK",
-        headers: [("Content-Type", "application/octet-stream")],
+        headers: [("Content-Type", "text/plain")],
         body: "",
         body_bytes: body_bytes,
         body_file: "",
@@ -143,20 +178,34 @@ fn _get_header(headers: [(text, text)], name: text) -> text:
 
 describe "compress_response_for — response-level decision":
 
-    it "compresses with zstd when Accept-Encoding includes zstd":
+    # The next two examples used to demand Content-Encoding: zstd. That was not
+    # achievable and, more importantly, not desirable: zstd_compress_frame is a
+    # container writer that emits a raw block, so it returns 310 bytes for this
+    # 300-byte payload and the "only use the compressed form when it is actually
+    # smaller" guard correctly refuses it. Serving Content-Encoding: zstd over a
+    # LARGER body would be a pessimisation, so the implementation is right to
+    # decline. What was genuinely broken is that declining used to end the
+    # attempt entirely, leaving a client that offered lz4 as well with no
+    # compression at all — fixed in compression.spl, and pinned here. See
+    # doc/08_tracking/bug/zstd_brotli_encoders_are_stored_only_2026-08-17.md.
+
+    it "compresses via the next acceptable codec when the preferred one cannot shrink":
         val payload = _make_eligible_payload()
         val resp = _resp_with_byte_body(payload)
         val out = compress_response_for(resp, "zstd, lz4")
         expect(out.body_bytes.len() > 0).to_equal(true)
         expect(out.body_bytes.len() < payload.len()).to_equal(true)
-        expect(_get_header(out.headers, "content-encoding")).to_equal("zstd")
+        expect(_get_header(out.headers, "content-encoding")).to_equal("lz4")
         expect(out.body).to_equal("")
 
-    it "prefers zstd over lz4 (server preference order)":
+    it "selection follows server preference, not client order":
+        # Client lists lz4 first, but the server prefers gzip, and gzip really
+        # does shrink this body — so gzip wins regardless of client ordering.
         val payload = _make_eligible_payload()
-        val resp = _resp_with_byte_body(payload)
-        val out = compress_response_for(resp, "lz4, zstd")
-        expect(_get_header(out.headers, "content-encoding")).to_equal("zstd")
+        val out_a = compress_response_for(_resp_with_byte_body(payload), "lz4, gzip")
+        val out_b = compress_response_for(_resp_with_byte_body(payload), "gzip, lz4")
+        expect(_get_header(out_a.headers, "content-encoding")).to_equal("gzip")
+        expect(_get_header(out_b.headers, "content-encoding")).to_equal("gzip")
 
     it "falls back to lz4 when client does not accept zstd":
         val payload = _make_eligible_payload()
@@ -174,10 +223,35 @@ describe "compress_response_for — response-level decision":
     it "leaves response unchanged when client only accepts unsupported codecs":
         val payload = _make_eligible_payload()
         val resp = _resp_with_byte_body(payload)
-        # gzip is not in supported_encodings() yet (still Err in dispatcher).
-        val out = compress_response_for(resp, "gzip")
+        # This example used to name gzip as "not supported yet". gzip is now
+        # wired, so it proved nothing; snappy is genuinely absent from
+        # supported_encodings().
+        val out = compress_response_for(resp, "snappy")
         expect(_has_header(out.headers, "content-encoding")).to_equal(false)
         expect(out.body_bytes.len()).to_equal(payload.len())
+
+    it "skips compression for MIME types outside the compressible allowlist":
+        # Pins the content-type filter that the old byte-body fixture was
+        # accidentally tripping. Both of these are eligible on every other axis
+        # (300 bytes, not chunked, no body_file, no Content-Encoding) and lz4
+        # would shrink them — the MIME allowlist is the only thing stopping it.
+        val payload = _make_eligible_payload()
+        for ct in ["application/octet-stream", "image/png", "application/pdf"]:
+            var resp = _resp_with_byte_body(payload)
+            resp = HttpResponseData(
+                status: resp.status,
+                reason: resp.reason,
+                headers: [("Content-Type", ct)],
+                body: resp.body,
+                body_bytes: resp.body_bytes,
+                body_file: resp.body_file,
+                body_offset: resp.body_offset,
+                body_length: resp.body_length,
+                chunked: resp.chunked
+            )
+            val out = compress_response_for(resp, "lz4")
+            expect(_has_header(out.headers, "content-encoding")).to_equal(false)
+            expect(out.body_bytes.len()).to_equal(payload.len())
 
     it "skips compression when body is too small":
         # 100-byte payload, below the 256-byte minimum.
@@ -258,6 +332,14 @@ describe "compress_response_for — response-level decision":
             body_length: resp.body_length,
             chunked: resp.chunked
         )
-        val out = compress_response_for(resp, "zstd")
-        expect(_has_header(out.headers, "content-length")).to_equal(false)
-        expect(_get_header(out.headers, "content-encoding")).to_equal("zstd")
+        val out = compress_response_for(resp, "lz4")
+        # The stale "300" must be gone, but its replacement must be the
+        # COMPRESSED length, not nothing. This example used to assert that no
+        # Content-Length survived at all; the implementation now strips the
+        # stale value and emits an accurate one, which is what RFC 9110 requires
+        # (Content-Length describes the encoded body). An absent Content-Length
+        # on a non-chunked response is the weaker, wronger outcome, so the
+        # assertion moved to match the implementation rather than the reverse.
+        expect(_get_header(out.headers, "content-encoding")).to_equal("lz4")
+        expect(_get_header(out.headers, "content-length")).to_equal("{out.body_bytes.len()}")
+        expect(_get_header(out.headers, "content-length")).to_not_equal("300")
