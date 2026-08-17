@@ -809,7 +809,10 @@ pub(crate) fn exec_assignment(
                             .with_code(codes::INVALID_ASSIGNMENT)
                             .with_help("field assignment requires an object with mutable access");
                         return Err(CompileError::semantic_with_context(
-                            format!("invalid assignment: cannot assign field on non-object value (obj `{}`, field `{}`)", obj_name, field),
+                            format!(
+                                "invalid assignment: cannot assign field on non-object value (obj `{}`, field `{}`)",
+                                obj_name, field
+                            ),
                             ctx,
                         ));
                     }
@@ -2157,14 +2160,8 @@ pub(crate) fn exec_augmented_assignment(
                                             left: Box::new(Expr::Identifier(temp_lhs.clone())),
                                             right: Box::new(Expr::Identifier(temp_rhs.clone())),
                                         };
-                                        let result = evaluate_expr(
-                                            &binary_expr,
-                                            env,
-                                            functions,
-                                            classes,
-                                            enums,
-                                            impl_methods,
-                                        )?;
+                                        let result =
+                                            evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
                                         env.remove(&temp_lhs);
                                         env.remove(&temp_rhs);
                                         result
@@ -2193,14 +2190,8 @@ pub(crate) fn exec_augmented_assignment(
                                             left: Box::new(Expr::Identifier(temp_lhs.clone())),
                                             right: Box::new(Expr::Identifier(temp_rhs.clone())),
                                         };
-                                        let result = evaluate_expr(
-                                            &binary_expr,
-                                            env,
-                                            functions,
-                                            classes,
-                                            enums,
-                                            impl_methods,
-                                        )?;
+                                        let result =
+                                            evaluate_expr(&binary_expr, env, functions, classes, enums, impl_methods)?;
                                         env.remove(&temp_lhs);
                                         env.remove(&temp_rhs);
                                         result
@@ -2416,5 +2407,107 @@ mod struct_local_alias_cow_tests {
         };
         assert_eq!(a_x, 10, "a must be unaffected by mutation through alias b");
         assert_eq!(b_x, 41, "b must observe its own mutation");
+    }
+}
+
+#[cfg(test)]
+mod indexed_augmented_assignment_tests {
+    use super::*;
+    use simple_parser::Span;
+
+    /// Regression: `exec_augmented_assignment` had arms only for
+    /// `Expr::Identifier` and `Expr::FieldAccess`, so EVERY indexed lvalue
+    /// (`arr[i] += 1`, `dict[k] *= 2`, `obj.slots[i] -= 1`) hit the catch-all
+    /// and raised "invalid assignment: unsupported augmented assignment
+    /// target".
+    /// Bug: doc/08_tracking/bug/spec_runner_indexed_augmented_assignment_unsupported_2026-08-15.md
+    /// Spec: test/01_unit/compiler/interpreter/indexed_augmented_assignment_spec.spl
+    fn run_indexed_aug(target_receiver: &str, index: Expr, op: AssignOp, rhs: i64, env: &mut Env) {
+        let assign = simple_parser::ast::AssignmentStmt {
+            span: Span::new(0, 0, 0, 0),
+            target: Expr::Index {
+                receiver: Box::new(Expr::Identifier(target_receiver.to_string())),
+                index: Box::new(index),
+            },
+            op,
+            value: Expr::Integer(rhs),
+        };
+        exec_augmented_assignment(
+            &assign,
+            env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("indexed augmented assignment must be supported");
+    }
+
+    fn elem(env: &Env, name: &str, i: usize) -> i64 {
+        match env.get(name).expect("array binding") {
+            Value::Array(items) => items[i].as_int().expect("int element"),
+            other => panic!("expected an array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn every_augmented_operator_applies_to_an_array_element() {
+        let mut env = Env::new();
+        env.insert(
+            "xs".to_string(),
+            Value::Array(Arc::new(vec![
+                Value::Int(10),
+                Value::Int(20),
+                Value::Int(30),
+                Value::Int(40),
+                Value::Int(50),
+            ])),
+        );
+
+        run_indexed_aug("xs", Expr::Integer(0), AssignOp::AddAssign, 5, &mut env);
+        run_indexed_aug("xs", Expr::Integer(1), AssignOp::SubAssign, 5, &mut env);
+        run_indexed_aug("xs", Expr::Integer(2), AssignOp::MulAssign, 2, &mut env);
+        run_indexed_aug("xs", Expr::Integer(3), AssignOp::DivAssign, 4, &mut env);
+        run_indexed_aug("xs", Expr::Integer(4), AssignOp::ModAssign, 7, &mut env);
+
+        assert_eq!(elem(&env, "xs", 0), 15);
+        assert_eq!(elem(&env, "xs", 1), 15);
+        assert_eq!(elem(&env, "xs", 2), 60);
+        assert_eq!(elem(&env, "xs", 3), 10);
+        assert_eq!(elem(&env, "xs", 4), 1);
+    }
+
+    #[test]
+    fn the_index_expression_is_evaluated_through_a_temp_and_left_unbound() {
+        let mut env = Env::new();
+        env.insert(
+            "xs".to_string(),
+            Value::Array(Arc::new(vec![Value::Int(1), Value::Int(2)])),
+        );
+        // A non-literal subscript: the desugaring must bind it to a temp,
+        // then restore the environment so no `__aug_*_temp__` name leaks.
+        env.insert("i".to_string(), Value::Int(1));
+        run_indexed_aug(
+            "xs",
+            Expr::Identifier("i".to_string()),
+            AssignOp::AddAssign,
+            40,
+            &mut env,
+        );
+        assert_eq!(elem(&env, "xs", 1), 42);
+        assert_eq!(elem(&env, "xs", 0), 1, "other elements untouched");
+        assert!(
+            env.get("__aug_idx_temp__").is_none(),
+            "index temp must not leak into the environment"
+        );
+        assert!(
+            env.get("__aug_rhs_temp__").is_none(),
+            "rhs temp must not leak into the environment"
+        );
+        assert_eq!(
+            env.get("i").expect("i").as_int().expect("int"),
+            1,
+            "the subscript variable must be unchanged"
+        );
     }
 }
