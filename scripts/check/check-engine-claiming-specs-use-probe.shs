@@ -79,13 +79,45 @@
 # FAIL-CLOSED: scanning 0 files is an ERROR (exit 2), never a PASS. --selftest
 # runs before every scan and is fatal.
 #
+# TWO INPUT MODES — and only ONE of them is valid for gating a PUSH
+# -----------------------------------------------------------------
+#   --root DIR   scans the FILESYSTEM working tree. Correct for interactive use.
+#   --ref <rev>  scans the COMMITTED content at <rev>: paths from
+#                `git ls-tree -r --name-only <rev>`, bodies from
+#                `git cat-file blob <rev>:<path>`, and the BASELINE itself read
+#                from <rev> too.
+#
+# Why --ref exists (2026-08-17): this guard is invoked by
+# scripts/check/pre-push-conflict-tree-guard.shs to gate a PUSH, but a push only
+# ever sends COMMITTED content. Scanning the working tree made it fail on files
+# that cannot possibly be in any push. Measured on this host: of 56 reported
+# offenders, 52 were already committed at origin/main (other lanes' pre-existing
+# debt) and **4 were UNTRACKED scratch files** belonging to one of ~16 concurrent
+# agent sessions sharing this single working copy — so one lane's temporary file
+# blocked every other lane's push. This is the same failure, and the same fix,
+# that check-test-tree-divergence.shs already took (see .claude/rules/vcs.md: it
+# "reads COMMITTED content via git ls-tree/cat-file, never the shared working
+# copy"). BOTH modes feed ONE shared analyzer (scan_one / is_engine_claiming /
+# is_exempt, all of which take a BODY FILE, never a repo path) precisely so the
+# two modes cannot drift apart; fixture 19 asserts they agree byte-for-byte on an
+# identical committed tree.
+#
+# For the range-scoped escape used at push time (pre-existing debt must not block
+# a landing that introduces nothing), see the companion
+# scripts/check/check-engine-claiming-specs-use-probe-delta.shs.
+#
 # Usage:
 #   sh scripts/check/check-engine-claiming-specs-use-probe.shs [--selftest]
-#        [--root DIR] [--list] [--update-baseline]
+#        [--root DIR | --ref REV] [--list] [--update-baseline] [--baseline FILE]
 # Verdict is always the LAST line of stdout:
 #   PASS  — <n> spec files scanned, <m> engine-claiming, <k> baselined  (exit 0)
 #   FAIL  — <k> new engine-claiming spec(s) with no engine probe        (exit 1)
 #   ERROR — nothing was checked                                        (exit 2)
+#
+# ENGINE_CLAIMING_SPECS_OUT=<path> additionally writes the sorted list of NEW
+# (unbaselined) offenders to <path> on every verdict-producing run, including a
+# PASS (an empty file). The delta helper reads it; its absence after an exit
+# 0/1 run means the scan never reached comparison and is an ERROR to the caller.
 
 set -u
 
@@ -96,20 +128,35 @@ ROOT="."
 BASELINE=""
 MODE=scan
 LIST=0
+REF=""
+ROOT_GIVEN=0
+BASELINE_GIVEN=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --selftest) MODE=selftest ;;
         --update-baseline) MODE=update ;;
         --list) LIST=1 ;;
-        --root) shift; ROOT="${1:-.}" ;;
-        --baseline) shift; BASELINE="${1:-}" ;;
+        --root) shift; ROOT="${1:-.}"; ROOT_GIVEN=1 ;;
+        --ref) shift; REF="${1:-}" ;;
+        --baseline) shift; BASELINE="${1:-}"; BASELINE_GIVEN=1 ;;
         *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked"; exit 2 ;;
     esac
     shift
 done
 
-[ -n "$BASELINE" ] || BASELINE="$ROOT/scripts/check/engine_claiming_specs_baseline.txt"
+# Fail closed on ambiguous input rather than silently picking a source of truth.
+if [ -n "$REF" ]; then
+    [ "$ROOT_GIVEN" -eq 0 ] || { echo "--ref and --root are mutually exclusive" >&2; echo "ERROR — nothing was checked"; exit 2; }
+    [ "$MODE" != update ] || { echo "--update-baseline is not supported with --ref (it writes the working tree)" >&2; echo "ERROR — nothing was checked"; exit 2; }
+    # In --ref mode the baseline is read FROM THE REF; an override would compare
+    # committed content against a working-copy file that concurrent sessions
+    # mutate, reintroducing exactly the hazard --ref exists to remove.
+    [ "$BASELINE_GIVEN" -eq 0 ] || { echo "--baseline override is not supported with --ref" >&2; echo "ERROR — nothing was checked"; exit 2; }
+fi
+
+BASELINE_REL="scripts/check/engine_claiming_specs_baseline.txt"
+[ -n "$BASELINE" ] || BASELINE="$ROOT/$BASELINE_REL"
 
 # Title-anchored: only a describe/it TITLE counts, never a comment or an import
 # path. Whole-file matching flagged 677 files (mostly incidental mentions of the
@@ -137,7 +184,14 @@ NATIVE_EXEC_RE='rt_process_run|process_run|process_run_timeout|run_command|shell
 # collision in spec titles.
 DECOY_SED='s/[Jj][Ii][Tt][Tt][Ee][Rr]//g'
 
-# is_engine_claiming FILE -> 0 when the file needs a probe or an ack
+# ------------------------------------------------------------- the analyzer ---
+# Every predicate below takes a BODY FILE — a local file whose contents are the
+# spec text — never a repo-relative path. In --root mode the body file IS the
+# working-tree file; in --ref mode it is a temp file holding
+# `git cat-file blob <rev>:<path>`. That is the whole reason the two modes cannot
+# drift: they differ only in how a body reaches this code, not in what it decides.
+#
+# is_engine_claiming BODYFILE -> 0 when the file needs a probe or an ack
 is_engine_claiming() {
     sed "$DECOY_SED" "$1" 2>/dev/null | $GREP -qE "$CLAIM_RE"
 }
@@ -149,7 +203,7 @@ is_exempt() {
     return 1
 }
 
-# has_native_by_compile FILE -> 0 when the file carries the native-by-compile
+# has_native_by_compile BODYFILE -> 0 when the file carries the native-by-compile
 # marker AND its body backs the claim with a real compile+execute pattern.
 # A marker with no evidence is NOT an escape hatch: it stays an offender.
 has_native_by_compile() {
@@ -165,6 +219,12 @@ has_native_by_compile() {
 selftest() {
     tmp=$(mktemp -d) || { echo "ERROR — nothing was checked"; exit 2; }
     rc=0
+    # The --ref fixtures re-invoke this script from INSIDE a throwaway git repo,
+    # so $0 (typically a relative path) would not resolve there. Absolutise once.
+    case "$0" in
+        /*) SELF_ABS="$0" ;;
+        *)  SELF_ABS="$(pwd)/$0" ;;
+    esac
     fail() { echo "  selftest FAIL: $1"; rc=1; }
 
     # 1. a title claiming JIT is detected
@@ -262,6 +322,74 @@ selftest() {
     printf 'describe "g":\n    it "measures jitter under the JIT":\n        expect(1).to_equal(1)\n' > "$tmp/n_spec.spl"
     is_engine_claiming "$tmp/n_spec.spl" || fail "decoy stripping swallowed a real JIT claim on the same line"
 
+    # 19. --ref mode: the INCIDENT this mode exists to fix. A COMMITTED offender
+    #     must be flagged, and an equivalent UNTRACKED file present only on disk
+    #     must NOT be — an untracked scratch file from one of the ~16 concurrent
+    #     agent lanes sharing this working copy cannot be in any push, so it must
+    #     never block one.
+    gr="$tmp/gitrepo"
+    mkdir -p "$gr/test/x" "$gr/scripts/check"
+    ( cd "$gr" \
+      && git init -q . \
+      && git config user.email t@t && git config user.name t \
+      && cp "$tmp/f_spec.spl" test/x/committed_spec.spl \
+      && : > scripts/check/engine_claiming_specs_baseline.txt \
+      && git add -A && git commit -qm base ) >/dev/null 2>&1 \
+      || fail "could not build the --ref selftest git repo"
+    # untracked twin, on disk only, never committed
+    cp "$tmp/f_spec.spl" "$gr/test/x/untracked_spec.spl"
+    ( cd "$gr" && ENGINE_PROBE_GUARD_NESTED=1 ENGINE_CLAIMING_SPECS_OUT="$tmp/ref.offenders" \
+        sh "$SELF_ABS" --ref HEAD >"$tmp/ref.out" 2>&1 )
+    refrc=$?
+    [ "$refrc" -eq 1 ] || fail "--ref mode did not FAIL (exit 1) on a committed offender (got $refrc)"
+    $GREP -qxF "test/x/committed_spec.spl" "$tmp/ref.offenders" 2>/dev/null \
+        || fail "--ref mode did not flag the COMMITTED offender"
+    if $GREP -qxF "test/x/untracked_spec.spl" "$tmp/ref.offenders" 2>/dev/null; then
+        fail "--ref mode flagged an UNTRACKED on-disk file (the incident being fixed)"
+    fi
+    # ...and the offender list is written on a PASS too (empty file, not absent).
+    rm -f "$gr/test/x/untracked_spec.spl"
+    echo "test/x/committed_spec.spl" > "$gr/scripts/check/engine_claiming_specs_baseline.txt"
+    ( cd "$gr" && git add -A && git commit -qm baselined ) >/dev/null 2>&1
+    ( cd "$gr" && ENGINE_PROBE_GUARD_NESTED=1 ENGINE_CLAIMING_SPECS_OUT="$tmp/ref2.offenders" \
+        sh "$SELF_ABS" --ref HEAD >"$tmp/ref2.out" 2>&1 )
+    refrc2=$?
+    [ "$refrc2" -eq 0 ] || fail "--ref mode did not PASS with the offender baselined AT THE REF (got $refrc2)"
+    [ -f "$tmp/ref2.offenders" ] || fail "--ref mode did not write the offender list on a PASS"
+    [ ! -s "$tmp/ref2.offenders" ] || fail "--ref mode wrote a non-empty offender list on a PASS"
+
+    # 20. ANTI-DRIFT: on an identical, fully-committed tree with nothing
+    #     untracked, --ref and --root must reach the same verdict and the same
+    #     offender list. If the two modes ever fork their rules, this fixture is
+    #     what catches it.
+    gr2="$tmp/gitrepo2"
+    mkdir -p "$gr2/test/x" "$gr2/scripts/check"
+    cp "$tmp/f_spec.spl" "$gr2/test/x/one_spec.spl"
+    cp "$tmp/d_spec.spl" "$gr2/test/x/probed_spec.spl"
+    cp "$tmp/k_spec.spl" "$gr2/test/x/decoy_spec.spl"
+    cp "$tmp/h_spec.spl" "$gr2/test/x/backed_spec.spl"
+    printf 'describe "g":\n    it "runs under cranelift":\n        expect(1).to_equal(1)\n' > "$gr2/test/x/two_spec.spl"
+    echo "test/x/two_spec.spl" > "$gr2/scripts/check/engine_claiming_specs_baseline.txt"
+    ( cd "$gr2" && git init -q . && git config user.email t@t && git config user.name t \
+      && git add -A && git commit -qm base ) >/dev/null 2>&1 \
+      || fail "could not build the anti-drift selftest git repo"
+    ( cd "$gr2" && ENGINE_PROBE_GUARD_NESTED=1 ENGINE_CLAIMING_SPECS_OUT="$tmp/drift.ref" \
+        sh "$SELF_ABS" --ref HEAD >"$tmp/drift.ref.out" 2>&1 )
+    drc_ref=$?
+    ENGINE_PROBE_GUARD_NESTED=1 ENGINE_CLAIMING_SPECS_OUT="$tmp/drift.root" \
+        sh "$0" --root "$gr2" >"$tmp/drift.root.out" 2>&1
+    drc_root=$?
+    [ "$drc_ref" -eq "$drc_root" ] \
+        || fail "--ref and --root disagreed on exit code for an identical committed tree ($drc_ref vs $drc_root)"
+    cmp -s "$tmp/drift.ref" "$tmp/drift.root" \
+        || fail "--ref and --root produced different offender lists for an identical committed tree"
+    # non-vacuity: this fixture must actually have found something to compare
+    [ -s "$tmp/drift.ref" ] || fail "anti-drift fixture compared two EMPTY offender lists (vacuous)"
+
+    # 21. fail-closed: --ref pointing at a non-commit is an ERROR, not a PASS
+    ( cd "$gr2" && ENGINE_PROBE_GUARD_NESTED=1 sh "$SELF_ABS" --ref no/such/rev >"$tmp/ref3.out" 2>&1 )
+    [ $? -eq 2 ] || fail "--ref with an unresolvable rev did not ERROR (exit 2)"
+
     # 10. fail-closed: an empty tree is an ERROR, not a PASS
     mkdir -p "$tmp/empty/scripts/check"
     : > "$tmp/empty/scripts/check/engine_claiming_specs_baseline.txt"
@@ -274,7 +402,7 @@ selftest() {
 
 if [ "$MODE" = selftest ]; then
     if selftest; then
-        echo "PASS — 18 selftest fixtures checked"
+        echo "PASS — 21 selftest fixtures checked"
         exit 0
     fi
     echo "FAIL — selftest fixtures failed"
@@ -292,37 +420,82 @@ if [ "${ENGINE_PROBE_GUARD_NESTED:-0}" != 1 ] && ! selftest >/dev/null 2>&1; the
     exit 2
 fi
 
-[ -d "$ROOT/test" ] || { echo "no test/ directory under $ROOT" >&2; echo "ERROR — nothing was checked"; exit 2; }
-
 scanned=0
 claiming=0
 baselined=0
 newoffenders=""
+alloffenders=""
 
 # Read baseline into a lookup file (POSIX sh has no arrays/assoc).
 bl=$(mktemp) || { echo "ERROR — nothing was checked"; exit 2; }
-[ -f "$BASELINE" ] && sed 's/[[:space:]]*#.*$//; /^[[:space:]]*$/d' "$BASELINE" > "$bl"
+body=$(mktemp) || { echo "ERROR — nothing was checked"; exit 2; }
+: > "$bl"
+: > "$bl.files"
 
-find "$ROOT/test" -name '*_spec.spl' -type f 2>/dev/null | sort > "$bl.files"
-scanned=$(wc -l < "$bl.files" | tr -d ' ')
+# scan_one REL BODYFILE — the ONE classifier both modes go through.
+scan_one() {
+    _rel="$1"
+    _body="$2"
+    is_engine_claiming "$_body" || return 0
+    claiming=$((claiming + 1))
+    is_exempt "$_body" && return 0
+    alloffenders="$alloffenders$_rel
+"
+    if $GREP -qxF "$_rel" "$bl" 2>/dev/null; then
+        baselined=$((baselined + 1))
+        return 0
+    fi
+    newoffenders="$newoffenders$_rel
+"
+}
+
+if [ -n "$REF" ]; then
+    git rev-parse --verify --quiet "${REF}^{commit}" >/dev/null 2>&1 \
+        || { echo "--ref '$REF' does not resolve to a commit" >&2; rm -f "$bl" "$bl.files" "$bl.all" "$body"; echo "ERROR — nothing was checked"; exit 2; }
+    # Baseline read from the REF, not the working copy (see --ref rationale).
+    if git cat-file -e "$REF:$BASELINE_REL" 2>/dev/null; then
+        git show "$REF:$BASELINE_REL" 2>/dev/null \
+            | sed 's/[[:space:]]*#.*$//; /^[[:space:]]*$/d' > "$bl"
+    fi
+    # `scanned` is the honest denominator: every spec file committed at the ref.
+    git ls-tree -r --name-only "$REF" 2>/dev/null \
+        | $GREP -E '^test/.*_spec\.spl$' | sort > "$bl.all"
+    # PERFORMANCE, not a rule change. One `git cat-file` fork per spec is ~20k
+    # forks and does not finish in a sane time. `git grep` at the ref narrows to
+    # CANDIDATES first — and that narrowing is a strict SUPERSET of the claiming
+    # set, because the only difference between this regex and the analyzer's is
+    # the decoy-word strip (DECOY_SED), which can only ever REMOVE a match. Every
+    # candidate is then classified by the SAME shared analyzer as --root mode; if
+    # the prefilter were ever narrowed below the analyzer, fixture 20 (--ref vs
+    # --root on an identical committed tree) is what would catch it.
+    git grep -l -E "$CLAIM_RE" "$REF" -- 'test/' 2>/dev/null \
+        | sed "s|^$REF:||" | $GREP -E '^test/.*_spec\.spl$' | sort > "$bl.files"
+else
+    [ -d "$ROOT/test" ] || { echo "no test/ directory under $ROOT" >&2; rm -f "$bl" "$bl.files" "$bl.all" "$body"; echo "ERROR — nothing was checked"; exit 2; }
+    [ -f "$BASELINE" ] && sed 's/[[:space:]]*#.*$//; /^[[:space:]]*$/d' "$BASELINE" > "$bl"
+    find "$ROOT/test" -name '*_spec.spl' -type f 2>/dev/null | sort > "$bl.files"
+fi
+
+if [ -n "$REF" ]; then
+    scanned=$(wc -l < "$bl.all" | tr -d ' ')
+else
+    scanned=$(wc -l < "$bl.files" | tr -d ' ')
+fi
 
 if [ "$scanned" -eq 0 ]; then
-    rm -f "$bl" "$bl.files"
+    rm -f "$bl" "$bl.files" "$bl.all" "$body"
     echo "ERROR — nothing was checked"
     exit 2
 fi
 
 while IFS= read -r f; do
-    is_engine_claiming "$f" || continue
-    claiming=$((claiming + 1))
-    is_exempt "$f" && continue
-    rel=$(printf '%s' "$f" | sed "s|^$ROOT/||")
-    if $GREP -qxF "$rel" "$bl" 2>/dev/null; then
-        baselined=$((baselined + 1))
-        continue
+    if [ -n "$REF" ]; then
+        git cat-file blob "$REF:$f" > "$body" 2>/dev/null || continue
+        scan_one "$f" "$body"
+    else
+        rel=$(printf '%s' "$f" | sed "s|^$ROOT/||")
+        scan_one "$rel" "$f"
     fi
-    newoffenders="$newoffenders$rel
-"
 done < "$bl.files"
 
 if [ "$MODE" = update ]; then
@@ -336,15 +509,10 @@ if [ "$MODE" = update ]; then
       echo "# ADDING a line must be justified in the same commit — that review checkpoint is"
       echo "# the entire point of this guard. Do not run --update-baseline to silence a new"
       echo "# failure."
-      while IFS= read -r f; do
-        is_engine_claiming "$f" || continue
-        is_exempt "$f" && continue
-        printf '%s' "$f" | sed "s|^$ROOT/||"
-        echo
-      done < "$bl.files" | sort -u; } > "$BASELINE.new"
+      printf '%s' "$alloffenders" | sort -u; } > "$BASELINE.new"
     mv "$BASELINE.new" "$BASELINE"
     n=$($GREP -cv '^#' "$BASELINE" | tr -d ' ')
-    rm -f "$bl" "$bl.files"
+    rm -f "$bl" "$bl.files" "$bl.all" "$body"
     echo "PASS — baseline rewritten with $n entries"
     exit 0
 fi
@@ -353,7 +521,16 @@ fi
 
 nnew=$(printf '%s' "$newoffenders" | $GREP -c . 2>/dev/null || true)
 [ -n "$nnew" ] || nnew=0
-rm -f "$bl" "$bl.files"
+
+# Machine-readable offender list for the range-scoped delta helper. Written on
+# every verdict-producing run, PASS included (then empty), so a MISSING file
+# unambiguously means "this run never reached comparison".
+if [ -n "${ENGINE_CLAIMING_SPECS_OUT:-}" ]; then
+    printf '%s' "$newoffenders" | $GREP -v '^$' | sort > "$ENGINE_CLAIMING_SPECS_OUT" 2>/dev/null \
+        || : > "$ENGINE_CLAIMING_SPECS_OUT"
+fi
+
+rm -f "$bl" "$bl.files" "$bl.all" "$body"
 
 if [ "$nnew" -gt 0 ]; then
     echo ""

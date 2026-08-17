@@ -199,6 +199,7 @@ gui_web_2d_parallel_review_guard="$repo_root/scripts/check/check-gui-web-2d-para
 # see the header comment near each run_guard call below for what was measured.
 class_identity_seed_matrix_guard="$repo_root/scripts/check/check-class-identity-seed-matrix.shs"
 engine_claiming_specs_guard="$repo_root/scripts/check/check-engine-claiming-specs-use-probe.shs"
+engine_claiming_specs_delta_guard="$repo_root/scripts/check/check-engine-claiming-specs-use-probe-delta.shs"
 engine_differential_guard="$repo_root/scripts/check/check-engine-differential.shs"
 lint_cached_guard="$repo_root/scripts/check/lint-cached.shs"
 
@@ -765,7 +766,27 @@ run_guard "$class_identity_seed_matrix_guard" "class-identity SEED-only matrix c
 # fails it. --selftest gates every scan and is fatal. Verified standalone
 # 2026-08-09: PASS, well under a minute (25024 spec files scanned, 197
 # engine-claiming, 192 already baselined).
-run_guard "$engine_claiming_specs_guard" "engine-claiming-spec-without-probe ratchet meta-guard (full scan, not range-bound)"
+# 2026-08-17: this used to be a FULL WORKING-TREE scan, which is structurally
+# wrong for a push gate -- a push only ever sends COMMITTED content. Measured on
+# this host: of 56 reported offenders, 52 were already committed at origin/main
+# (other lanes' pre-existing debt) and 4 were UNTRACKED scratch files from one of
+# ~16 concurrent agent sessions sharing this single working copy, so one lane's
+# temporary file blocked every lane's push. Now range-scoped and
+# committed-content-only via the delta helper, exactly as
+# check-test-tree-divergence.shs already is (.claude/rules/vcs.md). The ratchet
+# itself is NOT weakened: a newly introduced offender still hard-blocks, and the
+# helper requires the pre-existing offender list to be recorded before landing.
+if [ -n "$pushed_sha" ] && [ -n "$pushed_base" ]; then
+    run_guard "$engine_claiming_specs_delta_guard" "$pushed_base..$pushed_sha (engine-claiming-spec-without-probe ratchet, committed content only)" \
+        "$pushed_base" "$pushed_sha"
+elif [ -n "$pushed_sha" ]; then
+    # New ref with no base on origin: no two-endpoint range exists, so evaluate
+    # the pushed commit's committed content directly. Still never the working copy.
+    run_guard "$engine_claiming_specs_guard" "engine-claiming-spec-without-probe ratchet at $pushed_sha (new ref, committed content only)" \
+        --ref "$pushed_sha"
+else
+    echo "pre-push: no pushed commit to check the engine-claiming-spec ratchet against — skipping (delete-only push)" >&2
+fi
 
 # check-engine-differential.shs: multi-engine differential harness comparing
 # interpret/jit/native readings against a fixed fixture corpus, baseline-

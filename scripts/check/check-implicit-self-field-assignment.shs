@@ -4,15 +4,34 @@
 #
 # Bug: doc/08_tracking/bug/interp_implicit_self_field_assignment_silent_noop_2026-07-17.md
 #
+# WHICH LANE ACTUALLY REJECTS THIS (corrected 2026-08-17)
+# -------------------------------------------------------
+# The earlier version of this comment had the two lanes backwards. Verified by
+# direct execution against a seed built from HEAD:
+#   * HIR lowering (`compiler/src/hir/lower/error.rs`) rejects the shape. This is
+#     the JIT's front end.
+#   * The Cranelift JIT therefore never *executes* the bad program — but it does
+#     NOT hard-error on it either: it prints `[jit-fallback] HIR lowering error:
+#     ...` and drops the whole module to the tree-walk AST interpreter. So under
+#     `SIMPLE_EXECUTION_MODE=jit` the verdict is decided by the interpreter, not
+#     by HIR lowering.
+#   * The AST interpreter check (`compiler/src/interpreter/node_exec.rs`, added by
+#     `941605d43d9`) is consequently the load-bearing one for BOTH engine
+#     settings this guard exercises. It fires for a bare `field = ...` at
+#     statement level and inside nested `if`/`for` blocks, for both `me m()` and
+#     `fn m(self)` forms, and it does NOT disturb a legitimate implicit local
+#     whose name is not a field of `self`.
+#
 # WHY THIS IS A SHELL SCRIPT AND NOT A `*_spec.spl`
 # -------------------------------------------------
-# `bin/simple test` runs the tree-walk AST interpreter, and the AST interpreter
-# has rejected this shape since `941605d43d9`. The broken lane is the OTHER one:
-# `bin/simple run` (Cranelift JIT, via the HIR lowering path), which accepted the
-# program and silently dropped the write. A spec therefore cannot observe the
-# defect at all — it is green on the engine specs run and red on the engine it
-# cannot reach. Only a plain `.spl` script shelled through `run` reaches it.
-# Same structural gap as doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md.
+# The engine argument above is not the reason (specs DO run the AST interpreter,
+# which is the engine that carries the check). The reason is that the assertion
+# is a *negative compilation* one: the program under test must fail to compile
+# and the diagnostic text must be inspected. `bin/simple test` has no
+# must-not-compile harness — a spec cannot host a body that is required to be
+# rejected without the spec file itself being rejected. Asserting on a
+# subprocess' stderr is exactly what a shell guard does, so it stays a guard.
+# Related structural gap: doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md.
 #
 # WHAT IS ASSERTED
 # ----------------
@@ -31,14 +50,29 @@
 #
 # BINARY UNDER TEST
 # -----------------
-# `SIMPLE_BIN` (default `bin/simple`). At the time this guard landed the fix was
-# in seed SOURCE but `bin/release/<triple>/simple` had NOT been redeployed (the
-# repo's Stage-3 self-host blocker, .claude/rules/bootstrap.md), so this guard is
-# RED against the deployed binary and GREEN against a freshly built seed:
+# `SIMPLE_BIN` (default `bin/simple`). The fix is in seed SOURCE, but
+# `bin/release/<triple>/simple` has NOT been redeployed (the repo's Stage-3
+# self-host blocker, .claude/rules/bootstrap.md), so this guard is RED against
+# the deployed binary and GREEN against a genuinely freshly built seed. Re-verified
+# 2026-08-17 at HEAD: `PASS — 2 engine setting(s) checked: interpreter,jit`.
+# It closes on the next seed redeploy. The guard is deliberately NOT written to
+# pass vacuously in the meantime.
+#
+# READ THIS BEFORE CONCLUDING "THE FIX IS NOT IN SOURCE"
+# ------------------------------------------------------
+# `src/compiler_rust/target/release/simple` is NOT necessarily a build of your
+# working tree. It is routinely a HARDLINK planted by a deploy step in another
+# lane (seen at link count 4, mtime a day older than `bin/release/...`), so
+# pointing SIMPLE_BIN at it without building first reproduces the deployed
+# binary's stale FAIL and looks like an unimplemented fix. That exact trap
+# produced a false "the fix was never written" report on 2026-08-17. Always
+# build first, and record identity with any verdict:
+#   ( cd src/compiler_rust && cargo build --release --bin simple )
+#   stat -c 'links=%h %y' src/compiler_rust/target/release/simple
 #   SIMPLE_BIN=src/compiler_rust/target/release/simple sh scripts/check/check-implicit-self-field-assignment.shs
-# That is expected and is recorded in the bug doc. It closes on the next seed
-# redeploy. The guard is deliberately NOT written to pass vacuously in the
-# meantime.
+# Note also that a plain `grep 'is a field of' <binary>` is NOT evidence the
+# check runs: the deployed binary CONTAINS both diagnostic strings and still
+# silently no-ops.
 #
 # FAIL-CLOSED CONTRACT — verdict line is always the LAST line of stdout:
 #   PASS — <n> engine setting(s) checked: ...   exit 0   (n is always > 0)
