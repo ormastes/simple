@@ -43,3 +43,14 @@ env BOOTSTRAP_NATIVE_CACHE_TTL_DAYS=0 SIMPLE_NO_STUB_FALLBACK=1 \
   --resume-stage4-from-admitted=build/restart12-build11-a-r5/output \
   --deploy --jobs=1
 ```
+
+
+## Triage 2026-08-17 — DEFERRED, blocker recorded
+
+Reviewed in the lines 32-46 backlog sweep. Not actionable from this session: the record states its own blocker precisely -- "live acceptance remains blocked
+until an admitted Stage 3 lane and planner receipt are available". Neither
+exists on this host. The source-only continuation path and sabotage contract are
+already written; what is missing is an execution environment, not code.
+
+Status unchanged. Recorded so future sweeps skip this in O(1) instead of
+re-deriving the same blocker.

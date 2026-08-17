@@ -1,0 +1,170 @@
+# @cover src/app/replay/main.spl 60%
+"""
+# CLI entrypoints must not re-invoke themselves
+
+**Category:** Tooling
+**Status:** Implemented
+
+## Purpose and Audience
+
+`simple replay <build-log>` once handled its unimplemented build-log branch by
+re-invoking `./bin/simple replay <same args>`. Because the delegated child took
+the same branch, it delegated again, forever: every process stayed alive blocked
+in `wait`, producing ~124 live processes/min at ~62 MB RSS each (~8.4 GB/min)
+until a 128 GB host was exhausted. `earlyoom` was configured with
+`--prefer '^(simple|...)'`, so the resulting kills landed on *unrelated healthy*
+`simple` processes -- Stage-3 bootstrap builds, test runs, MCP servers -- which
+then presented as bare exit 143 with no diagnostic.
+
+Bug: doc/08_tracking/bug/simple_replay_self_spawns_unbounded_process_chain_2026-08-10.md
+
+## Scope and Preconditions
+
+This is a SOURCE-INVARIANT spec. It deliberately does not execute the CLI: the
+failure mode under test is an unbounded fork chain, and a spec that reproduced
+it by running the binary would be the very host-exhaustion event it guards
+against. Instead it reads the checked-in CLI entrypoint sources and asserts the
+structural property whose absence caused the incident.
+
+## Primary Workflow
+
+An unimplemented (or not-found) CLI subcommand branch reports a terminating
+diagnostic and returns a nonzero status. It never shells out to the same
+subcommand of the same binary.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Self-spawn | A CLI branch invoking `bin/simple <its own subcommand>` |
+| Terminating branch | Reports an error and returns; performs no delegation |
+
+## Evidence and Provenance
+
+Live re-verification 2026-08-17 with the exact incident argv:
+`bin/simple replay missing-build-log.json` exits 1 printing
+`log file not found: missing-build-log.json`, under a watchdog armed to kill at
+>8 concurrent matching processes. The watchdog never fired and the process
+count delta was 0.
+
+## Recovery and Troubleshooting
+
+If this spec fails, a CLI entrypoint has reintroduced self-delegation. Replace
+the delegation with a terminating diagnostic; do not bound it with a depth
+counter, which still multiplies processes.
+
+## Compatibility and Limitations
+
+Static/source-level. It cannot catch a self-spawn constructed dynamically from
+a runtime-assembled command string.
+"""
+
+use std.spec.*
+use std.fs.{read_file}
+
+
+# ============================================================================
+# Step Helpers
+# ============================================================================
+
+fn read_cli_source(path: text) -> text:
+    read_file(path)
+
+fn line_is_comment(line: text) -> bool:
+    line.trim().starts_with("#")
+
+fn spawns_own_subcommand(source: text, subcommand: text) -> bool:
+    # A self-spawn is EXECUTABLE code naming the binary immediately followed by
+    # the very subcommand this entrypoint implements. Comment lines are skipped
+    # on purpose: the fixed `delegate_replay` carries a prose warning quoting
+    # the old `./bin/simple replay <same args>` invocation, and a naive
+    # substring scan would read that warning as the defect it warns about.
+    #
+    # It must ALSO be a process invocation. Naming the subcommand is not
+    # enough: `print "Usage: simple replay [options] ..."` names it in a help
+    # string and spawns nothing, so a name-only scan reports the usage banner
+    # as a fork bomb.
+    val needle = "simple " + subcommand
+    val lines = source.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if not line_is_comment(line) and line.contains(needle) and line_spawns(line):
+            return true
+        i = i + 1
+    false
+
+fn line_spawns(line: text) -> bool:
+    line.contains("shell(") or line.contains("spawn") or
+        line.contains("run_process") or line.contains("exec(") or
+        line.contains("run_command")
+
+fn expect_terminating_diagnostic(source: text, needle: text):
+    expect(source.contains(needle)).to_equal(true)
+
+
+# ============================================================================
+# Primary Scenarios
+# ============================================================================
+
+describe "replay CLI never self-spawns":
+    it "the build-log branch reports instead of delegating to itself":
+        step("Read the replay entrypoint source")
+        val source = read_cli_source("src/app/replay/main.spl")
+        step("The unimplemented build-log branch states so and stops")
+        expect_terminating_diagnostic(source, "build-log replay is not yet implemented")
+        step("A missing log file is a terminating error, not a delegation")
+        expect_terminating_diagnostic(source, "log file not found")
+
+    it "carries no invocation of its own subcommand":
+        step("Read the replay entrypoint source")
+        val source = read_cli_source("src/app/replay/main.spl")
+        step("No `bin/simple replay ...` self-invocation remains")
+        expect(spawns_own_subcommand(source, "replay")).to_equal(false)
+
+    it "keeps the incident rationale attached to the fixed branch":
+        step("Read the replay entrypoint source")
+        val source = read_cli_source("src/app/replay/main.spl")
+        step("The bug record is cited where the self-spawn used to be")
+        expect(source.contains("simple_replay_self_spawns_unbounded_process_chain")).to_equal(true)
+
+    # Absence control: the detector must be capable of answering `true`, or the
+    # three assertions above would pass against any source whatsoever.
+    it "the self-spawn detector actually detects a self-spawn":
+        step("Construct source that does delegate to its own subcommand")
+        val bad = "fn delegate(): shell(\"./bin/simple replay \" + target)"
+        step("The detector reports it")
+        expect(spawns_own_subcommand(bad, "replay")).to_equal(true)
+        step("And a same-shaped call to a DIFFERENT subcommand is not a self-spawn")
+        expect(spawns_own_subcommand(bad, "build")).to_equal(false)
+        step("A COMMENT quoting the old invocation is not a self-spawn")
+        val commented = "# never do: shell(\"./bin/simple replay \" + target)"
+        expect(spawns_own_subcommand(commented, "replay")).to_equal(false)
+        step("A help/usage string naming the subcommand is not a self-spawn")
+        val usage = "    print \"Usage: simple replay [options] <trace.srr>\""
+        expect(spawns_own_subcommand(usage, "replay")).to_equal(false)
+
+
+# ============================================================================
+# Generalization: the property is not specific to `replay`
+# ============================================================================
+
+describe "no CLI entrypoint delegates to its own subcommand":
+    it "holds for every entrypoint known to have had the hazard":
+        step("Check each entrypoint against its own subcommand name")
+        val entries = [
+            ["src/app/replay/main.spl", "replay"],
+        ]
+        var offenders: [text] = []
+        var i = 0
+        while i < entries.len():
+            val path = entries[i][0]
+            val subcommand = entries[i][1]
+            val source = read_cli_source(path)
+            if spawns_own_subcommand(source, subcommand):
+                offenders.push(path)
+            i = i + 1
+        step("No entrypoint self-delegates")
+        expect(offenders.len()).to_equal(0)
+        step("The sweep examined a non-empty set (non-vacuity control)")
+        expect(entries.len()).to_equal(1)

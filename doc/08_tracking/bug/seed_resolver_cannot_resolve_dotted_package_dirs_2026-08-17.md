@@ -1,3 +1,72 @@
+## FIXED 2026-08-17 (seed-side; see Verification status below)
+
+Fix option 1 (the preferred one) is implemented in
+`src/compiler_rust/compiler/src/interpreter_module/path_resolution.rs` as
+"Strategy 5" in `resolve_with_numbered_dirs_recursive`: when the plain
+per-segment join and the existing one-level dotted join both miss, join 2+
+*pending* segments with a literal `.` against the current directory, longest
+window first, bounded by `parts.len() - 1` so at least one segment remains for
+the module itself. Because each strategy only returns on success, the walk
+backtracks naturally out of prefixes that exist but lead nowhere.
+
+This makes the seed agree with the pure-Simple driver for **all** dotted
+directories rather than the four hardcoded in
+`driver_source_loading.spl:801` — a rewrite table was explicitly rejected as
+fix option 2 because two hand-maintained lists are how this drifted.
+
+Commit: `61502d60632`.
+
+### Repro before the fix (2026-08-17, seed
+`bin/release/x86_64-unknown-linux-gnu/simple`)
+
+```
+$ bin/simple info
+error: semantic: Cannot resolve module: app.package.registry.config
+EXIT=1
+```
+
+### Verification status — HONEST
+
+The change is Rust, in the seed. It is **not provable from a spec run against
+the currently deployed `bin/simple`**, which is the pre-fix seed. It is proven
+only after a seed rebuild and redeploy. Do not read a green run of the specs
+below on the old binary as evidence; on the old binary they fail to resolve
+their own imports and the examples never execute.
+
+Three additional facts found while verifying, all worth knowing:
+
+- **`src/app/ui.chromium.acid2/` is a THREE-segment dotted directory** (two
+  dots), and it is the most important case in this bug. Any fix that joins only
+  two pending segments — the obvious reading of "handle `package.registry`" —
+  still misses it and would pass a test suite that only covered the reported
+  symptom. It is harder than it looks for a second reason: **both `src/app/ui/`
+  and `src/app/ui.chromium/` exist as real directories**, so a resolver reaches
+  two plausible wrong turns before the correct one and must backtrack out of
+  each. Strategy 5 gets this right only because every strategy returns solely on
+  success. This is the case the prevention spec leads with; do not weaken it.
+- The seed tree was independently unbuildable at the time of this fix
+  (borrow-check errors in `parser/src/expressions/binary.rs` from a concurrent
+  lane, since repaired in the working tree) — worth noting because it blocks
+  anyone trying to reproduce this verification.
+- **The pipe-exit-status trap bit this lane for real.** The first seed rebuild
+  was run as `cargo build --release --bin simple 2>&1 | tail -20`. Cargo FAILED
+  (`error: could not compile 'simple-parser' due to 3 previous errors`) while
+  the pipeline reported `[exited with code 0]`, because a pipeline's status is
+  the LAST stage's — `tail`'s — not the compiler's. The failure was invisible
+  until the binary was found missing, and the resulting "build succeeded but
+  produced no binary" state is confusing enough to burn an hour. `.claude/rules/`
+  already warns about this class (`check-c-runtime-compiles-push.shs` reads a
+  compiler's status into a variable on the line after the invocation, expressly
+  never through a pipe); it is recorded here because a warning in a rules file
+  did not stop it happening. Read the status into a variable, or redirect to a
+  log and check `$?` — never judge a build by a piped tail.
+
+### Specs
+
+- repro: `test/01_unit/compiler/module_resolution/dotted_package_dir_resolution_spec.spl`
+- prevention: `test/01_unit/compiler/module_resolution/dotted_package_dir_convention_prevention_spec.spl`
+- both mirrored identically under `test/unit/compiler/module_resolution/`
+
 # Rust seed resolver cannot resolve dotted package directories; `simple info` is dead in seed mode
 
 - **Date:** 2026-08-17
