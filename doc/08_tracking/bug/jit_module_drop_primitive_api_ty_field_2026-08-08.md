@@ -216,3 +216,38 @@ remains in tree as the standing gate.
 Not proven: this lane did not execute `check-no-jit-module-drop.shs` end-to-end
 (host at 164 concurrent `simple` processes under a live bootstrap); the close
 rests on source content, which is decisive for the named defect.
+
+---
+
+## Re-verification 2026-08-17 (compiler-lint lane) — content close CONFIRMED; gate selftest green, full scan not completed
+
+Independently re-checked the content evidence of the close above:
+
+```
+$ grep -n '\.ty\b' src/compiler/35.semantics/lint/primitive_api.spl
+21:# objects. This file used to field-access `.ty`/`.name` on those text entries
+```
+
+Exactly one hit, and it is a comment. No `.ty` field access on a flat-text entry
+survives anywhere in the file. The named defect ("field 'ty' accessed on struct
+String", which is what made the module undroppable-into-JIT) cannot occur.
+
+The standing gate `scripts/check/check-no-jit-module-drop.shs` was additionally
+**executed** this session. Its fail-closed selftest passed in both directions:
+
+```
+selftest: OK (known-bad -> DROP, known-good -> CLEAN; 2 fixtures, both directions)
+scanning 13532 file(s) — roots:src/lib src/app src/os src/compiler
+```
+
+so the gate itself is proven non-vacuous — it does detect a planted module drop
+and does not fire on a clean module.
+
+**Verdict: ALREADY FIXED (stale doc), unchanged. No patch applied.**
+Not proven: the 13,532-file scan did not finish inside this session's window
+(host load 48-124, ~104 concurrent `simple` processes from a live bootstrap). It
+was deliberately SIGTERMed by this lane to free host capacity and so exited
+**rc=144 — that exit code is this lane's own kill, NOT a gate FAIL**. There is
+therefore no tree-wide `PASS`/`FAIL` verdict line to quote. The close rests on the
+source content, which is decisive for this specific defect; the tree-wide sweep
+would only add breadth, not settle this row.

@@ -95,3 +95,36 @@ gains a "does this place have a live outstanding borrow" check before
 allowing the move/drop, and the RED spec above should be updated to assert
 `errors.len() > 0` passes for real (it already does — no change to the
 assertion needed, only to the implementation).
+
+## Content re-verification 2026-08-17 (m4_compiler_spl lane) — STILL OPEN
+
+The central claim holds verbatim against current source.
+`BorrowGraph.record_move` (`src/compiler/55.borrow/borrow_check/borrow_graph.spl:580-608`)
+iterates **only** `self.moved_now` and emits `borrowerror_use_after_move` on a
+conflict. It never calls `get_or_create_borrows(point)` and never consults
+`borrows_of(place)`, so moving a place that is currently borrowed produces no
+diagnostic at all — the borrow is not pinned.
+
+The asymmetry is visible in the same struct: `record_assign` (`:609-643`) DOES
+take `val conflicts = borrow_set.borrows_of(place)` (`:631`) and reports
+`"Assignment while mutably borrowed"`. Only the move path is missing that
+consultation. `borrows_of` has exactly two references tree-wide
+(`borrow_graph.spl:380` definition, `:631` sole call site).
+
+What has landed since this doc was filed is adjacent but different: LANE ISO1's
+double-*move* detection (`:600-604`, documented in `record_move`'s own
+docstring) and WP-G's Drop-as-Move arm (`borrow_check/mod.spl:245-273`). Both
+extend move-vs-move; neither adds move-vs-borrow.
+
+**Verdict: ARCHITECTURAL-OPEN, unchanged.** No fix attempted here: adding a
+borrow consultation to `record_move` changes checker verdicts tree-wide, and
+the accepted over-approximation already recorded in `mod.spl:265-272` (the walk
+is linear over `func.blocks`, not CFG-path-sensitive) means it would false-
+positive on mutually exclusive branches without region/liveness infra first.
+
+**Not proven by execution.** `bin/simple test
+test/01_unit/compiler/resource/resource_borrow_pinning_spec.spl --timeout 900`
+was launched under `scripts/resource/test-slot.shs` and produced a **zero-byte
+log after >30 minutes** at high host load. Per the 2026-08-17 RESTART FINDINGS
+(item C), an absent `Results:` line is UNVERIFIED, not a failure — so no
+before/after `Results:` line is quoted and none should be inferred.
