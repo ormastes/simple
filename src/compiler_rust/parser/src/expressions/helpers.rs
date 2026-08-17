@@ -459,6 +459,10 @@ impl<'a> Parser<'a> {
                 // `examples` is a Gherkin data-table soft keyword; it must still
                 // work as a named-arg/field label (e.g. K(examples: "ok")).
                 TokenKind::Examples => Some("examples".to_string()),
+                // `and_then` is a Gherkin chained-step soft keyword; same rule
+                // as `examples` — it must still work as a named-arg/field label
+                // (e.g. K(and_then: "ok")).
+                TokenKind::AndThen => Some("and_then".to_string()),
                 _ => None,
             };
             if let Some(id_clone) = maybe_name {
@@ -589,6 +593,18 @@ impl<'a> Parser<'a> {
                         | TokenKind::Old
                         | TokenKind::Out
                         | TokenKind::Var
+                        // Soft keywords accepted as named-arg labels above must
+                        // also be recognised here, or a missing comma before one
+                        // of them reports a confusing generic error instead of
+                        // "expected comma before argument '<name>'".
+                        | TokenKind::Examples
+                        | TokenKind::AndThen
+                        | TokenKind::Grid
+                        | TokenKind::Outline
+                        | TokenKind::Class
+                        | TokenKind::Lazy
+                        | TokenKind::Skip
+                        | TokenKind::Exists
                 );
 
                 if is_likely_named_arg {
