@@ -1,0 +1,66 @@
+# Regression guard (a): the REPRODUCING spec for the multi-module native build
+# failure
+#
+#   error: semantic: method `owner_collect_fn` not found on class `ParallelBuilder`
+#   at src/compiler/80.driver/driver_build/parallel.spl:248
+#
+# reported on BOTH backends.
+#
+# Root cause (compiler, NOT in this lane's file scope): a postfix call on a
+# member access, `self.<field>(args)`, is resolved as a METHOD call on the
+# receiver's class instead of an INDIRECT call through the value held in the
+# field. When the field holds a callable (a named fn or a lambda) and no method
+# of that name exists, resolution errors out rather than falling back to
+# invoking the field's value.
+#
+# Minimal reproduction, verified 2026-08-17 against bin/simple (Rust seed):
+#
+#     class Holder:
+#         cb: any
+#     impl Holder:
+#         me call_it(a: i64, b: i64) -> i64:
+#             return self.cb(a, b)         # <-- error
+#
+#   $ bin/simple run repro.spl --timeout 600
+#   error: semantic: method `cb` not found on class `Holder`
+#
+# Binding the field to a local first is the working source-level form:
+#
+#     me call_it(a: i64, b: i64) -> i64:
+#         val f = self.cb
+#         return f(a, b)                   # <-- result=7
+#
+# The compiler-side fix lives in method resolution, which is outside this
+# lane's editable scope (src/compiler/{10.frontend,20.hir,50.mir,70.backend}).
+# See doc/08_tracking/bug/native_build_closure_field_call_resolved_as_method_2026-08-17.md
+#
+# This spec therefore fences the in-scope half: driver_build/parallel.spl must
+# invoke `owner_collect_fn` through a local binding, never as `self.owner_collect_fn(`.
+#
+# @cover src/compiler/80.driver/driver_build/parallel.spl
+
+use std.spec
+use std.io_runtime.{file_read, file_exists}
+
+fn _parallel_src_path() -> text:
+    "src/compiler/80.driver/driver_build/parallel.spl"
+
+describe "ParallelBuilder owner_collect_fn closure-field invocation":
+    it "never calls the closure-valued field directly as self.owner_collect_fn(...)":
+        val path = _parallel_src_path()
+        expect(file_exists(path)).to_be_true()
+        val src = file_read(path)
+        # The defective form. Any occurrence re-breaks the multi-module native
+        # build with "method `owner_collect_fn` not found on class `ParallelBuilder`".
+        expect(src.contains("self.owner_collect_fn(")).to_be_false()
+
+    it "still declares the owner_collect_fn field and its setter":
+        val src = file_read(_parallel_src_path())
+        expect(src.contains("owner_collect_fn: any")).to_be_true()
+        expect(src.contains("me set_owner_collect(")).to_be_true()
+
+    it "invokes the collect hook through a local binding":
+        val src = file_read(_parallel_src_path())
+        # The working form: bind the field value to a local, then call the local.
+        expect(src.contains("val owner_collect = self.owner_collect_fn")).to_be_true()
+        expect(src.contains("owner_collect(build_unit.path, output)")).to_be_true()
