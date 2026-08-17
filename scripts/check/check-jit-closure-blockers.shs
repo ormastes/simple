@@ -20,8 +20,34 @@
 #
 # See doc/08_tracking/bug/jit_closure_abi_refuses_lambdas_and_miscompiles_fn_refs_2026-08-06.md
 #
+# RATCHET, not a retrofit (added 2026-08-17). Until now this guard had no
+# baseline mechanism at all — unlike every sibling ratchet in this directory
+# (`check-engine-claiming-specs-use-probe.shs`,
+# `check-test-tree-divergence.shs`). That made it a FULL-TREE gate with no way
+# to record debt, so one legitimately-closure-shaped file failed every push in
+# the repo, for every lane, forever. It was not reporting a fixable defect:
+#
+#   `src/lib/nogc_sync_mut/ui/access_store.spl` builds a `UiAccessPersistence`
+#   out of four capturing lambdas. That class is a DEPENDENCY-INVERSION port
+#   declared in `session.spl`, which deliberately imports no Database/SQLite
+#   symbol; `access_store.spl` imports `session.spl`, so the edge cannot be
+#   reversed without a circular import. The lambdas capture the store handle,
+#   so they cannot become named function references — and per this file's own
+#   header a named fn ref passed as a value SILENTLY MISCOMPILES under the JIT,
+#   which would trade a perf blocker for a correctness bug. There is no
+#   source-level remedy: the actual defect is the Rust seed JIT refusing any
+#   module containing a ClosureCreate.
+#
+# So baselined entries are recorded debt, NOT approval, and the baseline is
+# COUNTED: an entry is `<path> <n>`, and finding MORE than n blockers in a
+# baselined file still FAILS. That is strictly stronger than the file-only
+# baselines the sibling ratchets use — a fifth lambda added to a baselined file
+# cannot hide. Removing a line is how debt is retired; adding one requires
+# editing the baseline in the same commit, which is reviewable.
+#
 # Usage:
 #   sh scripts/check/check-jit-closure-blockers.shs [path ...]
+#     [--baseline FILE] [--no-baseline]
 # Default paths are the hot render/UI lanes. Exit 0 = clean, 1 = blockers
 # found, 2 = nothing was checked (fail closed).
 
@@ -31,6 +57,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
 
 FIXTURES=test/fixtures/repro/compiler/jit_closure
+BASELINE="$ROOT/scripts/check/jit_closure_blockers_baseline.txt"
 
 # String literals and comments are stripped BEFORE matching. Without that the
 # scan is badly contaminated: a `\n` inside a string matches the lambda
@@ -52,6 +79,33 @@ AWK_SCAN='
 }'
 
 scan() { awk "$AWK_SCAN" "$@" 2>/dev/null; }
+
+# --- baseline ---------------------------------------------------------------
+# Reads `<path> <count>` lines (comments/blanks stripped) and echoes the
+# recorded count for $1, or 0 when the file is not baselined / baselining off.
+baseline_count() {
+    [ -n "${BASELINE:-}" ] || { echo 0; return; }
+    [ -f "$BASELINE" ] || { echo 0; return; }
+    awk -v want="$1" '
+      { sub(/#.*/, "") }
+      NF >= 2 && $1 == want { print $2 + 0; found = 1; exit }
+      END { if (!found) print 0 }' "$BASELINE"
+}
+
+# Given raw `path:line: kind` hits on stdin, drop up to the baselined count of
+# hits per file and echo the survivors. A file with MORE hits than baselined
+# still reports its excess, so the ratchet cannot be defeated by editing a
+# baselined file.
+apply_baseline() {
+    hits_in=$(cat)
+    [ -n "$hits_in" ] || return 0
+    files=$(printf '%s\n' "$hits_in" | cut -d: -f1 | sort -u)
+    for f in $files; do
+        allowed=$(baseline_count "$f")
+        printf '%s\n' "$hits_in" | awk -F: -v f="$f" -v allow="$allowed" \
+            '$1 == f { n++; if (n > allow) print $0 }'
+    done
+}
 
 # --- selftest: FATAL, runs before every scan -------------------------------
 # A detector that cannot see its own known-bad fixtures is worse than none.
@@ -75,6 +129,54 @@ selftest() {
             echo "selftest: FALSE POSITIVE on $f"; fails=$((fails+1))
         fi
     done
+    # --- baseline mechanism ------------------------------------------------
+    # The escape hatch gets the same fatal-selftest treatment as the detector.
+    bl_tmp=$(mktemp)
+    bl_saved="${BASELINE:-}"
+
+    # f04 has exactly 1 blocker; use it as the counted subject.
+    n04=$(scan "$FIXTURES/f04_lambda_capturing.spl" | grep -c ':' || true)
+
+    # 1. an exactly-baselined file is fully suppressed.
+    printf '%s %s\n' "$FIXTURES/f04_lambda_capturing.spl" "$n04" > "$bl_tmp"
+    BASELINE="$bl_tmp"
+    if [ -n "$(scan "$FIXTURES/f04_lambda_capturing.spl" | apply_baseline)" ]; then
+        echo "selftest: baselined file was not suppressed"; fails=$((fails+1))
+    fi
+
+    # 2. UNDER-baselining still reports the excess — the ratchet's whole point.
+    printf '%s %s\n' "$FIXTURES/f04_lambda_capturing.spl" "$((n04 - 1))" > "$bl_tmp"
+    if [ -z "$(scan "$FIXTURES/f04_lambda_capturing.spl" | apply_baseline)" ]; then
+        echo "selftest: under-baselined file was wrongly suppressed"; fails=$((fails+1))
+    fi
+
+    # 3. a baseline entry for one file must NOT suppress a different file.
+    printf '%s 99\n' "$FIXTURES/f04_lambda_capturing.spl" > "$bl_tmp"
+    if [ -z "$(scan "$FIXTURES/f02_lambda_stored_local.spl" | apply_baseline)" ]; then
+        echo "selftest: baseline leaked across files"; fails=$((fails+1))
+    fi
+
+    # 4. --no-baseline / absent baseline suppresses nothing.
+    BASELINE=""
+    if [ -z "$(scan "$FIXTURES/f04_lambda_capturing.spl" | apply_baseline)" ]; then
+        echo "selftest: suppression happened with baselining disabled"; fails=$((fails+1))
+    fi
+
+    # 5. the real baseline file must parse and must not be vacuous, otherwise a
+    #    typo'd path would silently baseline nothing while looking authoritative.
+    if [ -f "$bl_saved" ]; then
+        bad=0
+        while read -r p n _rest; do
+            case "$p" in ''|\#*) continue ;; esac
+            [ -f "$p" ] || { echo "selftest: baseline path does not exist: $p"; bad=1; }
+            case "$n" in ''|*[!0-9]*) echo "selftest: baseline count not a number for $p: '$n'"; bad=1 ;; esac
+        done < "$bl_saved"
+        [ "$bad" -eq 0 ] || fails=$((fails+1))
+    fi
+
+    rm -f "$bl_tmp"
+    BASELINE="$bl_saved"
+
     if [ "$fails" -ne 0 ]; then
         echo "check-jit-closure-blockers: ERROR — nothing was checked (selftest failed: $fails)"
         exit 2
@@ -84,6 +186,18 @@ selftest() {
 selftest
 
 # --- scan ------------------------------------------------------------------
+ARG_PATHS=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --baseline) shift; BASELINE="${1:-}" ;;
+        --no-baseline) BASELINE="" ;;
+        -*) echo "check-jit-closure-blockers: ERROR — nothing was checked (unknown option $1)"; exit 2 ;;
+        *) ARG_PATHS="$ARG_PATHS $1" ;;
+    esac
+    shift
+done
+set -- $ARG_PATHS
+
 if [ "$#" -gt 0 ]; then
     PATHS="$*"
 else
@@ -102,13 +216,18 @@ if [ "$FILE_COUNT" -eq 0 ]; then
     exit 2
 fi
 
-HITS=$(scan $(cat "$LIST") || true)
+RAW=$(scan $(cat "$LIST") || true)
+RAW_COUNT=$(printf '%s' "$RAW" | grep -c ':' || true)
+[ -z "$RAW" ] && RAW_COUNT=0
+
+HITS=$(printf '%s\n' "$RAW" | apply_baseline || true)
 HIT_COUNT=$(printf '%s' "$HITS" | grep -c ':' || true)
 [ -z "$HITS" ] && HIT_COUNT=0
+BASELINED=$((RAW_COUNT - HIT_COUNT))
 
 if [ "$HIT_COUNT" -ne 0 ]; then
     printf '%s\n' "$HITS"
-    echo "check-jit-closure-blockers: FAIL — $HIT_COUNT closure blocker(s) in $FILE_COUNT file(s); each forces its whole module to the interpreter"
+    echo "check-jit-closure-blockers: FAIL — $HIT_COUNT unbaselined closure blocker(s) in $FILE_COUNT file(s) ($BASELINED baselined); each forces its whole module to the interpreter"
     exit 1
 fi
-echo "check-jit-closure-blockers: PASS — $FILE_COUNT file(s) scanned, 0 closure blockers (does NOT cover named-fn-ref miscompiles)"
+echo "check-jit-closure-blockers: PASS — $FILE_COUNT file(s) scanned, 0 unbaselined closure blockers, $BASELINED baselined (does NOT cover named-fn-ref miscompiles)"

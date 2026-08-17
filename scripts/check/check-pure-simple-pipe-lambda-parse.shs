@@ -62,12 +62,46 @@
 set -u
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-SIMPLE="$ROOT/bin/simple"
+
+# INJECTABLE COMPILER (2026-08-17). This used to hardcode "$ROOT/bin/simple",
+# which made the gate measure whatever stale binary happened to be deployed
+# rather than the tree it gates. A census found 27 files with that defect, and
+# one such guard RETIRED 4 REAL DEFECTS on a green verdict it was structurally
+# incapable of failing. A guard that cannot observe the change it gates is
+# decorative, so the binary is now overridable and its identity is RECORDED in
+# every verdict line — a reader can always tell what was actually measured.
+# See doc/08_tracking/bug/guards_hardcode_stale_seed_binary_census_2026-08-17.md
+SIMPLE="${SIMPLE_BIN:-$ROOT/bin/simple}"
 WORK="$ROOT/build/pipe_lambda_parse_gate"
 
 if [ ! -x "$SIMPLE" ]; then
-    echo "ERROR — nothing was checked: $SIMPLE not executable"
+    echo "ERROR — nothing was checked: $SIMPLE not executable (set SIMPLE_BIN to override)"
     exit 2
+fi
+
+# STALENESS DISCLOSURE. A binary older than the source it is asked to parse
+# cannot have observed that source, so its PASS is not evidence about this tree.
+#
+# Why this DISCLOSES rather than hard-fails by default: measured 2026-08-17,
+# 589 files under src/compiler and src/lib are newer than the deployed
+# bin/simple, and redeploying bin/simple is forbidden to individual lanes (~16
+# share it). A hard ERROR here would therefore block every push in the repo on a
+# condition no lane is permitted to clear — trading one repo-wide block for
+# another. Instead the staleness is stamped into the verdict line so a stale run
+# can never be read as clean evidence, and `SIMPLE_REQUIRE_FRESH=1` opts into
+# fail-closed for the bootstrap/CI lane that CAN deploy a current binary.
+SIMPLE_REAL=$(readlink -f "$SIMPLE" 2>/dev/null || echo "$SIMPLE")
+SIMPLE_MTIME=$(date -r "$SIMPLE_REAL" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null || echo unknown)
+STALE_NOTE=""
+NEWER_COUNT=$(find "$ROOT/src/compiler" "$ROOT/src/lib" -name '*.spl' -newer "$SIMPLE_REAL" -print 2>/dev/null | wc -l | tr -d ' ')
+if [ "${NEWER_COUNT:-0}" -gt 0 ]; then
+    STALE_NOTE=" [STALE ORACLE: compiler '$SIMPLE_REAL' mtime $SIMPLE_MTIME predates $NEWER_COUNT tree source file(s) and cannot have observed them — this verdict is NOT evidence about those files]"
+    if [ "${SIMPLE_REQUIRE_FRESH:-0}" = "1" ]; then
+        echo "ERROR — nothing was checked: compiler '$SIMPLE_REAL' (mtime $SIMPLE_MTIME) is older than $NEWER_COUNT tree source file(s); SIMPLE_REQUIRE_FRESH=1 demands a current oracle. Point SIMPLE_BIN at a freshly built binary."
+        exit 2
+    fi
+else
+    STALE_NOTE=" [oracle: $SIMPLE_REAL mtime $SIMPLE_MTIME, newer than all scanned source]"
 fi
 if [ ! -f "$ROOT/src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl" ]; then
     echo "ERROR — nothing was checked: parser source not found (run from a real clone)"
@@ -250,11 +284,11 @@ done
 if [ -n "$FAILED" ]; then
     echo "--- offending lint output ---"
     grep -E "PARSE001|NOT LINTED" "$OUT"
-    echo "FAIL — pure-Simple parse failure in:$FAILED (of $N fixtures)"
+    echo "FAIL — pure-Simple parse failure in:$FAILED (of $N fixtures)$STALE_NOTE"
     echo "  p* = the pipe-lambda production is missing or broken"
     echo "  r*/asm = the pipe-lambda production has STOLEN a pre-existing \`|\` meaning"
     exit 1
 fi
 
-echo "PASS — $N fixture(s) checked: 4 pipe-lambda forms parse, $((N - 4)) pre-existing \`|\` meanings intact"
+echo "PASS — $N fixture(s) checked: 4 pipe-lambda forms parse, $((N - 4)) pre-existing \`|\` meanings intact$STALE_NOTE"
 exit 0
