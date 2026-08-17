@@ -36,6 +36,38 @@ no Rust-seed fallback was used, and the 900-second command was not repeated.
 A deployed pure-Simple binary must run the focused spec and a bounded lint
 timing before this record can close.
 
+## 2026-08-17 macOS ARM deployment-authority audit — still pending
+
+The focused admission spec was invoked once through the executable currently
+deployed at `/Users/ormastes/simple/bin/release/aarch64-apple-darwin/simple`
+(SHA-256 `f2c216a660da83da1a253d2e8191a3059a66b1d9dc11bbcbaf237fe7e5b8d2bc`):
+
+```
+Results: 2 total, 2 passed, 0 failed
+Time: 288ms (setup: 10129ms)
+```
+
+The one exact `zca_rows.spl` lint timing was then started under a 600-second
+process alarm. During startup that same executable identified its authority:
+
+```
+WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.
+Build and use the pure-Simple bin/simple instead.
+```
+
+The run was stopped after 96.99 seconds rather than spending the remaining
+budget on inadmissible seed evidence. It had emitted substantially more than
+the old 382-line frozen transcript, but it had no lint verdict at interruption;
+neither that progress nor the focused 2/2 result can close a criterion that
+explicitly requires deployed pure-Simple authority. The isolated worktree also
+has no `bin/simple`, and no deployment/provenance receipt beside the executable
+establishes a pure-Simple lineage.
+
+Status remains **SOURCE FIXED / PURE-SIMPLE RUNTIME TIMING PENDING**. The exact
+remaining host-fixable gap is deployment of a receipt-bound pure-Simple CLI;
+after that, run the focused spec once and one bounded exact-file lint timing.
+Do not relabel the current release-path seed or cite its path as authority.
+
 # Lint timeout (>600s) on src/compiler/50.mir/hwir/zca_rows.spl
 
 - Date: 2026-08-17
