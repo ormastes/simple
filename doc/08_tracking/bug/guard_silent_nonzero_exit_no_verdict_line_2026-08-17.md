@@ -70,6 +70,9 @@ And in this case the reassuring half was also substantively wrong. Where
 `doc/08_tracking/bug/native_build_entry_module_loses_own_class_methods_multimodule_2026-08-17.md`.
 So the bypass premise was wrong twice over: the guard did not fire for that lane,
 **and** the content it gates is genuinely broken.
+fired — it had exited before checking anything, and `origin` is not red on it.
+A guard's silence became the evidence for a decision that only a human was
+allowed to make. Absence of evidence was consumed as evidence.
 
 This is the same family as
 `doc/08_tracking/bug/guards_hardcode_stale_seed_binary_census_2026-08-17.md`
