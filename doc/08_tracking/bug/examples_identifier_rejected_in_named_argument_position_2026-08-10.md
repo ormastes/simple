@@ -1,5 +1,30 @@
 # `examples` is an undocumented contextual keyword: rejected as a named argument (2026-08-10)
 
+**Status: FIXED 2026-08-17.** Resolution 1 (make them contextual everywhere)
+was taken, for both members of the census family:
+
+- `examples` — `TokenKind::Examples` added to the named-arg label match in
+  `src/compiler_rust/parser/src/expressions/helpers.rs`.
+- `and_then` — `TokenKind::AndThen` added at the same site (commit
+  `5f8ddf3b7aa`), plus every soft keyword the label match accepts is now
+  listed in `is_likely_named_arg` so a *missing comma* before one produces the
+  specific "expected comma before argument '<name>'" diagnostic rather than the
+  generic `expected Comma, found Colon`.
+
+Parameter-name and field-name positions were already fine: `expect_identifier`
+(`parser_helpers.rs:882`) has accepted both tokens all along — only the
+named-arg path was missing them, which is why declare/read worked and
+construct did not.
+
+Regression spec: `test/01_unit/compiler/parser_contextual_keyword_named_arg_spec.spl`
+(mirrored to `test/unit/compiler/...`). It asserts the whole census table:
+`examples`, `and_then`, `feature`/`scenario`/`given`/`when`/`then`,
+`describe`/`it`/`context`, `grid`.
+
+**A rebuilt seed is required** — any `bin/simple` older than 2026-08-17 still
+reproduces the original error, so a red run of that spec on a stale binary is
+binary provenance, not a live defect.
+
 ## Observation
 
 A struct field named `examples` **declares** fine and **reads** fine, but
