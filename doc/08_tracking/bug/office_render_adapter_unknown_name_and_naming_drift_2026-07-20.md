@@ -54,3 +54,18 @@ convention decide the canonical per-adapter display name (and update either
 the adapter's output string or the spec's expected substring accordingly),
 and separately implement unknown-`adapter_name` detection + warning in
 `office_render`.
+
+## Re-verification 2026-08-17 (app-rest lane) — LIVE (both findings, by content)
+
+1. **Unknown adapter names are silently accepted.**
+   `src/app/office/render_adapter.spl:432`
+   `val label = if known: surface else: "suite"` — an unrecognised surface name
+   is relabelled "suite" rather than rejected. `_normalize_surface` (`:58-69`)
+   passes unknown values through unchanged. `:437` `warnings: []` is the sole
+   `RenderResult` constructor, so no warning is ever produced.
+2. **Naming drift.** `:408` returns `"{libreoffice_suite_name()} Writer"`
+   (= "LibreOffice Writer") while
+   `test/02_integration/app/render/render_integration_spec.spl:203` asserts
+   `to_contain("Word")`.
+
+Verdict: LIVE. Silent-wrong-result class (exit 0, wrong adapter selected).

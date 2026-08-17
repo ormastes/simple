@@ -83,3 +83,17 @@ filed against, `src/app/jupyter_kernel/main.spl`, is unrelated to federated
 extension packaging and needs no change. **Recommend CLOSED.**
 Not proven: that the extension actually builds/installs — no `jupyter
 labextension build` was run (host at load 346, bootstrap live).
+
+## Re-verification 2026-08-17 (app-rest lane) — ALREADY FIXED (content)
+
+The exact missing wiring is now present:
+- `tools/jupyter/labextension/pyproject.toml:14-15`
+  `requires = ["hatchling>=1.5.0","jupyterlab>=4.0.0,<5","hatch-jupyter-builder>=0.5"]`
+- `tools/jupyter/labextension/pyproject.toml:41-42`
+  `build-function = "hatch_jupyter_builder.npm_builder"`
+- plus `install.json`, `simple_labextension/labextension/`, and
+  `@jupyterlab/builder ^4.0.0` in `package.json:51`.
+
+Path drift note: the claimed file `src/app/jupyter_kernel/main.spl` was never
+the subject of this record — the packaging pipeline lives under
+`tools/jupyter/labextension/`. Verdict: ALREADY-FIXED / closeable.

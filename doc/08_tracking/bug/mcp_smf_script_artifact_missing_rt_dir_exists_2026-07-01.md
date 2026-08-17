@@ -71,3 +71,17 @@ env SIMPLE_LIB=src bin/simple compile src/app/mcp/main.spl -o build/mcp-script/s
 env SIMPLE_MCP_TOOL_SET=core SIMPLE_LIB=src bin/simple build/mcp-script/simple_mcp_server.smf < framed-init-tools-list.in
 MCP_SCRIPT_PERF_USE_SMF=1 MCP_SCRIPT_PERF_STRICT=1 sh scripts/check/check-mcp-script-mode-perf.shs
 ```
+
+## Re-verification 2026-08-17 (app-rest lane) — named blocker FIXED; residual open
+
+`rt_dir_exists` is now defined in BOTH runtimes:
+- `src/compiler_rust/runtime/src/value/sffi/file_io/metadata.rs:301`
+  `pub unsafe extern "C" fn rt_dir_exists(...) -> bool` (exported at
+  `src/compiler_rust/runtime/src/value/sffi/file_io/mod.rs:39`)
+- `src/runtime/runtime.c:1702` and `src/runtime/runtime_native.c:10166`
+
+Named follow-on symbols are present too (`io_print.rs:856 stdin_read_char`,
+`collections.rs:3677 text_dot_from_char_code`). The specific missing-symbol
+blocker in the title is therefore CLOSED by content. The residual Stage-4
+`cannot parse '0.0' as i64` item is UNVERIFIABLE without a native build and
+remains the only open part.

@@ -348,3 +348,16 @@ record should be CLOSED as not-reproducible-by-content.** Any remaining
 bootstrap-readthrough concern in this doc is separate and was not evaluated.
 Not proven: no execution evidence — the host was at load 346 with a live
 bootstrap, so no native-build run was performed.
+
+## Re-verification 2026-08-17 (app-rest lane) — LIVE, and the triage note misread line 258
+
+Correction to the triage evidence: this doc's line 258 is *proposing* `return ""`
+as the fix shape; it does not assert that such a return exists. Current source
+still carries the widening fallback it describes:
+
+    src/app/io/_CliCompile/compile_targets.spl:570-573
+    if segs.len() > 0 and not _nb_source_dirs_cover_workspace(source_dirs):
+        val src_path = _nb_resolve_under_root("src", segs)
+
+No strict / opt-in mode exists. Verdict: LIVE, but classify as a MISSING
+FEATURE (no strict scope mode was ever implemented), not a regression.

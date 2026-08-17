@@ -103,3 +103,16 @@ Relevant files:
 - `scripts/check/run-riscv-gen2-hwir-qualification.shs`
 - `src/app/test/riscv_gen2_qualification_receipt.spl`
 - `test/01_unit/scripts/riscv_gen2_hwir_qualification_runner_contract_test.shs`
+
+## Re-verification 2026-08-17 (app-rest lane) — contract half ALREADY FIXED
+
+Both sides of the contract now agree:
+- composer `src/app/test/riscv_gen2_qualification_receipt.spl:16`
+  schema `= "riscv-gen2-hwir-qualification-run-v2"`, parsing only
+  `--manifest` (`:826`) and `--run-id` (`:829`);
+- runner `scripts/check/run-riscv-gen2-hwir-qualification.shs:381` invokes the
+  composer with exactly those two flags, and `:384` validates v2.
+
+`--emit-evidence` / `--compose-receipt` appear nowhere in the tree. The
+MISMATCH in the title is therefore closed. Still open and not proven here:
+executable acceptance (a Stage-4 CLI run producing a retained receipt).

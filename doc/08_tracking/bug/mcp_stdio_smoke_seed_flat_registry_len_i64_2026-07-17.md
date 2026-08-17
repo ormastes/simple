@@ -507,3 +507,12 @@ interpreter/registry** defect and has no representation in `src/app/mcp/**`.
 It cannot be fixed from this file and should be re-filed against the seed
 registry lowering if it is still wanted. **Status: app half CLOSED, mechanism
 OPEN and out of `src/app/` scope.**
+
+## Re-verification 2026-08-17 (app-rest lane) — symptom 1 FIXED; symptom 2 UNVERIFIABLE
+
+Symptom 1 (`--stdio` rejected) is fixed: `src/app/mcp/main.spl:137-138`
+`val singleton = arg == "--stdio" or ...` returns `""` (no error) when the flag
+appears alone, and the comment at `:391-393` documents the no-op fall-through.
+
+Symptom 2 (seed whole-program flat-registry corruption of `extract_id()`) is
+reproducible only by running the seed interpreter and is UNVERIFIABLE here.

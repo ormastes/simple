@@ -114,3 +114,12 @@ stale native candidate, and only then falls back to
 `bin/simple src/app/mcp/main.spl`. `bin/simple_lsp_mcp_server` now applies the
 same checked-native selection and verifies `lsp_definition` before executing a
 candidate.
+
+## Re-verification 2026-08-17 (app-rest lane) — UNVERIFIABLE (macOS deploy lane)
+
+Every symptom in this record is macOS-ARM64 deploy/link-time: duplicate
+`to_string` symbols, clang `.weak` handling, and `mcp_tools_count=0` read from a
+deployed binary. Confirming or closing it requires a native build plus redeploy
+on Darwin, which is not available on this host. No static verdict is possible;
+the record should carry a blocked-on-platform marker rather than sit as an
+untriaged open bug.

@@ -80,3 +80,17 @@ llm_caret logic. Tracked here; fix belongs in the compiler, not this app.
 Root-cause and repair the interpreter's `Option<i64>` boxing so `index_of` /
 `to_int` are usable directly. Until then, prefer bare-`i64` scans over the
 Option-returning stdlib forms in hot parsing paths.
+
+## Re-verification 2026-08-17 (app-rest lane) — SPLIT: half fixed, half live
+
+Runtime probe (interpreter, `bin/simple`):
+- **Defect 1 (`Option<i64>` tag-box on `text.index_of`) — FIXED.** Probe printed
+  `idx_colon=3`, `idx_abc=0`, `idx_zzz=-1`, `toint7=7`, `toint42=42`. The doc
+  predicted nil / `<value:0x7>` / `0.000…` for these.
+- **Defect 2 (cross-module `char.to_i64()`) — LIVE, reproduced exactly.**
+  `cross_to_i64=7` where the code point 55 is correct, and `cross_parse50=-478`
+  — the precise wrong value this doc predicted.
+
+Workarounds are still present at `src/app/llm_caret/json_helpers.spl:105-107`
+and `:176-179`. Recommend splitting this record: close the `index_of` half,
+keep the cross-module `char.to_i64()` half open.

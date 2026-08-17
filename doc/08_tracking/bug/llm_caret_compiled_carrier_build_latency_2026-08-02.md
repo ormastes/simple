@@ -118,3 +118,11 @@ imported database methods were unresolved, lowered to const-zero placeholders,
 and caused a nil-receiver crash (exit 132, Task #145). Owner-module free
 façades now replace open/startup/query/close plus map/join rendering. Their
 closure contract test exits 0; the three-cycle guard prevented another compile.
+
+## Re-verification 2026-08-17 (app-rest lane) — UNVERIFIABLE (build-latency record)
+
+`src/app/llm_caret/messaging/hook_worker.spl` is 526 bytes and contains no
+statically visible defect. The claim is a >120 s native-build timeout plus 57
+functions requiring interpreter-only features — a build-lane property, not a
+source defect, and not reproducible without a native build. Classify as
+blocked-on-deploy rather than a silent-wrong-result bug.

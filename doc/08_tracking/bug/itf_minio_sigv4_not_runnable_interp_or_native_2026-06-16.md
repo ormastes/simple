@@ -108,3 +108,15 @@ The remaining blocker the doc describes (JIT bridge + module/native gaps for the
 SigV4 round-trip) is a **runtime/JIT tuple-return** issue, not app code, so it
 is unfixable from `src/app/**`. **Re-file against the JIT bridge or close as
 path-drifted;** no app-layer patch exists.
+
+## Re-verification 2026-08-17 (app-rest lane) — path drift; re-file
+
+The claimed file is not where the defect is. `src/app/io/http_sffi.spl:26,189,267`
+declares and calls `rt_http_request` correctly — no defect there, and this doc's
+own Resolved section already records that interpreter registration is done.
+
+The residual blockers are elsewhere: (a) the JIT tuple-return bridge,
+(b) `http_client.types` module resolution, (c) `simple compile` reporting
+`undefined identifier: platform`. Recommend re-filing against the JIT tuple
+bridge. End-to-end verification is UNVERIFIABLE here (needs a live MinIO
+endpoint plus a JIT run).

@@ -59,3 +59,15 @@ The diagnostics risk is now fixed in source: the opt-in call uses
 cap, and a focused regression rejects restoration of `process_run_timeout`.
 This does not identify or resolve the external owner of the original 48 server
 processes; the tracked-PID EOF lifecycle gate remains pending.
+
+## Re-verification 2026-08-17 (app-rest lane) — diagnostics half FIXED; root UNVERIFIABLE
+
+Bounded-process half is fixed: `src/app/simple_lsp_mcp/tools.spl:11`
+`use std.nogc_sync_mut.io.process_ops.{process_run_bounded}`, used at `:34` and
+`:81`; there are zero `process_run_timeout` uses left in that directory.
+
+Path drift: the claimed owner `src/app/simple_lsp_mcp/main.spl` no longer holds
+this code — it moved to `tools.spl`.
+
+The 48-orphan observation depends on an external spawner and admits no static
+evidence, so the root cause stays UNVERIFIABLE here.

@@ -37,3 +37,14 @@ error: compile failed: parse: in "src/app/test/renderdoc_replay_inspect.spl": Un
 - `parse_renderdoc_capture_xml` and `inspect_renderdoc_capture` are implemented in pure Simple.
 - The real repo RenderDoc 1.44 CLI successfully converts the canonical Vulkan `.rdc` to XML containing driver, chunks, buffers, shaders, pipelines, and dispatch actions.
 - Native unit execution of the inspector remains blocked; it is not accepted as verification evidence.
+
+## Re-verification 2026-08-17 (app-rest lane) — ALREADY FIXED (content)
+
+`bin/simple check src/app/test/renderdoc_replay_inspect.spl` produced ZERO
+parse errors (no `found Else`, no `parse:` diagnostics) and reached
+semantic/gc warnings, despite the chained `else if` at
+`renderdoc_replay_inspect.spl:96-100` plus the inline `if/else` at `:101` —
+the exact construct that originally failed to parse.
+Verdict: parse defect ALREADY-FIXED. Not proven: full inspector execution
+(the `check` run hit the lane's own 120s budget), which matches this doc's
+own remaining open item.

@@ -157,3 +157,12 @@ cost) only for callers that pass dotted `module_path`, e.g. the `phase1:load_sou
 in `driver_source_pipeline_loading.spl` — outside the profiled BFS hot path, so out of scope here.
 Left unchanged apart from a comment recording this so a future reader doesn't re-chase the same
 "~150 probes" estimate against the wrong call path. No code/behavior change.
+
+## Re-verification 2026-08-17 (app-rest lane) — LIVE (perf record, not wrong results)
+
+`src/app/cli/native_build_main.spl:248-250` still unconditionally forces
+`env_set("SIMPLE_EXECUTION_MODE", "interpret")` for the whole worker, and
+`src/app/io/_CliCompile/compile_targets.spl:605` `_native_build_entry_closure`
+still runs its BFS under that mode. The timing probe exists but is default-off.
+Verdict: LIVE, but a PERFORMANCE record — not a silent-wrong-result defect, so
+it does not belong in the core silent-wrong-result batch.

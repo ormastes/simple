@@ -66,3 +66,42 @@ does for classes. Until then, spec-local helpers need globally unique names.
 
 `test/01_unit/app/build/build_targets_spec.spl`: `_has` -> `_errors_contain`.
 No assertion was weakened; no product code changed.
+
+## Re-verification 2026-08-17 (app-rest lane) — LIVE by content; specs added
+
+Static confirmation (content, not SHA ancestry): the colliding definition is
+still present at `src/app/build/targets/change_classifier.spl:56`
+
+    fn _has(values: [text], value: text) -> bool:   # EQUALITY semantics
+
+and the workaround is still load-bearing in the spec — the helper there is now
+named `_has_error`, with an explanatory comment at
+`test/01_unit/app/build/build_targets_spec.spl:32-37`. (Note the drift: this doc
+records the rename as `_errors_contain`; the tree uses `_has_error`.) Nothing in
+the interpreter makes `_`-prefixed top-level functions module-local, and no
+`cross_module_private_symbol_collision` diagnostic is emitted for functions.
+Verdict: LIVE.
+
+Two specs were added for this record:
+- reproducing: `test/01_unit/app/build/private_helper_name_collision_spec.spl`
+  — declares a spec-local `_has` with SUBSTRING semantics under the same import
+  closure and asserts it keeps its own body.
+- class-detection: `test/01_unit/app/build/private_helper_collision_class_spec.spl`
+  with fixtures `test/fixtures/compiler/private_collision_mod_a.spl` and
+  `private_collision_mod_b.spl` — two modules sharing the private helper name
+  `_collision_probe_shared` with different bodies (+1 vs +100), asserting each
+  pub wrapper resolves to its OWN module. This generalises past the `_has`
+  instance, so a future recurrence under any other name is still caught.
+
+NOT YET VERIFIED BY EXECUTION. Both spec runs were killed under concurrent
+bootstrap load (host load average 60-106) and produced **no `Results:` line**:
+the class spec returned `rc=143` (SIGTERM) after the full module-loading dump,
+and the wrapper still reported `[exited with code 0]` — exactly the false-green
+laundering the lane brief warns about. Per lane convention an absent `Results:`
+line is UNVERIFIED, never a pass or a fail. Both specs need a re-run on a quiet
+host before this record is closed or its severity changed.
+
+The fix itself is out of this lane's file scope: it belongs in the interpreter's
+free-function resolution (make `_`-prefixed non-`pub` top-level functions
+module-local), or at minimum extend the existing
+`cross_module_private_symbol_collision` diagnostic from classes to functions.

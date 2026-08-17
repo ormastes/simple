@@ -189,3 +189,16 @@ parallel lanes). Landing an unverified restructure of the shared test runner
 under those conditions is exactly the clobber class the session brief forbids.
 **Unblock condition:** re-attempt when load is below ~32 and a
 `Results: N total, ...` line can actually be captured before and after.
+
+## Re-verification 2026-08-17 (app-rest lane) — LIVE (by content)
+
+`src/app/test_runner_new/test_runner_main.spl:257` still early-returns before
+any spec executes:
+
+    return TestRunResult(files: [], total_passed: 0,
+                         total_failed: missing_covers.len(), ...)
+
+This is the same shape as the `TestRunResult::success()` defect called out in
+the session brief: a run in which ZERO specs executed is reported through the
+normal result type. Verdict: LIVE, P1 retained.
+Not proven in this lane: that no outer caller downgrades the early return.

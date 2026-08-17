@@ -107,3 +107,15 @@ conditional in the new runner at `driver.spl:450`; that compact form was
 replaced with the supported single-line condition. The corrected entry has not
 yet been rebuilt, so the `core-c-bootstrap` link and real RV32 VHDL output remain
 open.
+
+## Re-verification 2026-08-17 (app-rest lane) — LIVE (static evidence)
+
+The named symbols genuinely do not exist in the C runtime:
+- `rt_process_exists` — zero definitions anywhere under `src/runtime/`
+- `rt_range` — likewise (only Rust `.rlib` hits)
+- `rt_file_rename` — exists only as `src/runtime/simple_core/core_fs.spl`,
+  not as a C definition
+
+So the core-c bootstrap bundle cannot satisfy them and the ABI gap is real.
+Not proven: the link failure itself, which needs a Stage-2 build (out of scope
+for this lane).

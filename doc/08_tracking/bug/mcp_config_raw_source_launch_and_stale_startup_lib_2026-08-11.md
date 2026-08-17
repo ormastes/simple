@@ -159,3 +159,13 @@ The remaining items — stale startup-lib extraction and the missing POSIX
 wrappers — are explicitly RECORDED-not-fixed by this doc and stay OPEN; nothing
 in `src/app/simple_lsp_mcp/main.spl` implements them. **No patch available in
 `src/app/`; this is a backlog record, not a live app-code defect.**
+
+## Re-verification 2026-08-17 (app-rest lane) — section 1 FIXED, sections 2-4 LIVE
+
+FIXED: `.mcp.json:7-8,18-19,29-30` all `exec "$PWD/bin/simple_mcp_server"` /
+`bin/simple_lsp_mcp_server` — no raw `.spl` launch remains, and the node bridge
+is gone from the LSP lane.
+
+STILL LIVE by content: `config/mcp/mcp_startup_lib.shs` (14,686 B) is still
+present and obsolete, and the orphan `src/app/lsp_mcp/main.spl` (13,877 B)
+still exists with its own dispatch (`:418` `make_error(id, -32601, ...)`).

@@ -76,3 +76,10 @@ or claim a new root cause.
 - The tracked backend passes its provenance/trust check.
 - Device readback covers translucent destination alpha and matches the common
   composition result.
+
+## Re-verification 2026-08-17 (app-rest lane) — UNVERIFIABLE (blocked on deploy + CUDA host)
+
+The symptom is a segfault of a DEPLOYED native binary.
+`src/app/portable_compute_emit/main.spl` is a 2.6 KB thin entry point with no
+statically visible defect, so no content-based verdict is possible. Reproduction
+needs a native deploy and a CUDA host. Classify as blocked-on-deploy.

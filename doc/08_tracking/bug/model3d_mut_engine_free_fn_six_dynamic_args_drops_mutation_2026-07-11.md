@@ -87,3 +87,18 @@ the in-code pointer back to this doc.
   share a root cause (both are about `mut <ClassType>` parameter handling in
   compiled/JIT free-function calls), just triggered along different axes
   (argument dynamism/count here vs. a second class-typed argument there).
+
+## Re-verification 2026-08-17 (app-rest lane) — LIVE; NOT covered by the COW fix
+
+The interpreter's `merge_shared_collection_fields`
+(`src/compiler_rust/.../interpreter_call/core/function_exec.rs:975-1015`,
+called at `:1140`) propagates only Array/Dict/ByteArray fields (`:990`) and has
+no argument-count sensitivity, so it does NOT cover this record's JIT,
+count-triggered shape. The workaround is still in place —
+`src/app/model3d/main.spl:424-445` carries the 21-line NOTE and the helper is
+still deliberately inlined.
+
+Consequence for reproduction: `test/02_integration/app/model3d/model3d_nested_nodes_spec.spl`
+now exercises the INLINED path and would pass regardless, so it is not a valid
+reproducer. A new fixture that re-introduces the >=6-dynamic-arg free-function
+call is required. Verdict: LIVE, unreproduced.

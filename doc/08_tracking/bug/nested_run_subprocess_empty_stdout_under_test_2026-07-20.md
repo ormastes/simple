@@ -90,3 +90,26 @@ different observable symptom).
 
 Both spec files are correct as written (they reflect real, working CLI
 contracts, confirmed by manual reproduction) and were left unmodified.
+
+## Re-verification 2026-08-17 (app-rest lane) — UNVERIFIED; wrapper hypothesis REFUTED
+
+Checked against the known "refusing production-guard wrapper" trap
+(`doc/08_tracking/bug/shellout_specs_target_refusing_production_wrapper_2026-08-17.md`):
+`test/02_integration/app/plugin_log_modes_spec.spl:11` spawns `"$REPO/bin/simple"`,
+which is a symlink to the real 59 MB ELF, NOT the 2181-byte refusing wrapper at
+`bin/release/simple`. So this record is **not** an instance of that trap and the
+empty-stdout symptom still lacks an explanation.
+
+Execution attempt did not settle it: the spec produced no `Results:` line within
+budget under concurrent bootstrap load. Per lane convention an absent `Results:`
+line is UNVERIFIED, never a pass or a fail.
+
+Exact terminal output of the attempted run (no `Results:` line, so UNVERIFIED):
+
+    ERROR: test daemon timed out: test/02_integration/app/plugin_log_modes_spec.spl
+    SPEC FILE VERDICT: ... executed=1 passed=0 failed=1 dropped=0 timeout=1
+      reason=daemon-no-response budget_ms=400000
+
+Note the wrapper **exited 0** despite `failed=1 timeout=1` — the same false-green
+laundering this lane was warned about. The daemon-no-response mode may itself be
+related to the empty-stdout symptom under investigation.
