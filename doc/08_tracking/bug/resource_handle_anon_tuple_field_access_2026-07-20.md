@@ -42,3 +42,24 @@ it needs interpreter/compiler-level investigation into anonymous tuple
 `.0`/`.1` access under the `simple test` evaluation path, which is out of
 scope for this cluster-fix pass (guide: "Do NOT attempt a Rust seed source
 fix; out of scope").
+
+## Re-triage 2026-08-17 (m9a_tests lane)
+
+**Verdict: preconditions confirmed present; outcome not re-measured.**
+
+Both ends of the reported failure exist in current source:
+
+- spec `test/unit/lib/engine/resource_handle_spec.spl` imports
+  `std.nogc_sync_mut.engine.resource.handle.{HandleArena}` (line 8), and
+  `src/lib/nogc_sync_mut/engine/resource/handle.spl` is present — so this is
+  **not** a missing-module vacuity like its batch-mates
+  `rv64_memory_ops_spec` or the `persistent_*` specs;
+- the spec really does exercise anonymous-tuple field access on the value
+  returned by `arena.insert(...)` — `handle.0` / `handle.1` at lines 14-15,
+  32-33, 42-43, 46-47.
+
+So if the docs "2/8 passing" still holds, it is a genuine interpreter/compiler
+tuple-return defect as classified, not a test artefact. The fix would be in the
+compiler, outside this lanes file scope.
+
+**Not reproduced from this lane** — see the parent reports Unproven list.

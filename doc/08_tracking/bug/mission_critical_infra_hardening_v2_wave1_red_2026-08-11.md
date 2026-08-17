@@ -207,3 +207,21 @@ as a Rust bootstrap seed. BYL/Lean proof checking did not begin.
   hardware, aggregate, or release evidence is claimed.
 - Unblock: rerun the same producer once with an exact-current admitted
   pure-Simple compiler selected by the canonical sidecar contract.
+
+## Re-triage 2026-08-17 (m9a_tests lane) — SPLIT REQUIRED
+
+This is a **three-spec umbrella** and cannot be closed or worked as one row.
+The three subjects are independent and were located on disk:
+
+1. `test/01_unit/compiler/mission_critical/compiler_admission_spec.spl`
+2. `test/01_unit/lib/common/mission_critical/draw_ir_generation_arena_v3_spec.spl`
+   (the "draw_ir arena v3" spec — the triage row did not carry its path; this
+   is the only match for `*draw_ir*arena*` / `*arena_v3*` under `test/`)
+3. `test/01_unit/os/sosix/certified_manifest_spec.spl`
+
+All three files are present. A single umbrella verdict over three unrelated
+specs is exactly the shape that lets one genuine RED hide behind two stale
+ones, so this doc should be split into three rows before any of them is
+actioned.
+
+**Not reproduced from this lane** — see the parent reports Unproven list.

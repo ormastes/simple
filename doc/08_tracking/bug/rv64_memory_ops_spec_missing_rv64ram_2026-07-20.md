@@ -46,3 +46,30 @@ Not touched: `test/unit/hardware/rv64gc/rv64_memory_ops_spec.spl` left as-is (no
 implementation exists to rename the import to; also note the file has a stray
 `# tag: only-compiled` **comment**, not an actual `tag:` clause on `describe`,
 so that comment plays no role in the failure and was left alone).
+
+## Re-triage 2026-08-17 (content-classified, m9a_tests lane)
+
+**Verdict: LIVE — the import target does not exist anywhere in the tree.**
+
+`test/unit/hardware/rv64gc/rv64_memory_ops_spec.spl` imports
+`hardware.rv64gc.mem.rv64_ram.Rv64Ram`. Searched exhaustively:
+
+- `find src -name rv64_ram* -o -name Rv64Ram*` -> **no hits**
+- `grep -rn "Rv64Ram" src --include=*.spl` -> **no hits**
+- `find src -path *rv64gc* -type d` -> only `src/lib/hardware/rv64gc`,
+  `src/lib/hardware/rv64gc/top`, `src/lib/hardware/rv64gc_rtl`
+
+`src/lib/hardware/rv64gc/` contains exactly `__init__.spl`, `mod.spl` and
+`top/`. There is **no `mem/` subdirectory** and no `Rv64Ram` type under any
+name. The PATH DRIFT annotation in the triage row is therefore not drift: the
+module was never implemented, under this or any other path.
+
+Because an unresolved `use` is only a WARNing, the spec loads with the symbol
+missing and yields **zero examples executed** — a vacuous green, exactly the
+class this batch targets.
+
+Runtime confirmation attempt: `bin/simple test test/unit/hardware/rv64gc/rv64_memory_ops_spec.spl --timeout 1200`
+was **SIGTERMed (rc=143, "Terminated") with no `Results:` line emitted** under a
+host load average of 81-133. Per the session brief that is UNVERIFIED, not
+failed, so no `Results:` line is quoted here. The content evidence above stands
+on its own and does not depend on that run.

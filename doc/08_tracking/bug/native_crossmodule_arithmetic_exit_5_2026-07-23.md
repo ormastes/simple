@@ -101,3 +101,119 @@ suspects, since both are classic silent-wrong-result lowering bugs.
 
 NOT proven here: the probe was not executed, so it is not confirmed that exit 5
 still reproduces today — only that IF it does, this is the predicate at fault.
+
+## Re-triage 2026-08-17 (m9a_tests lane)
+
+**Verdict: STILL RED — and the check script is undiagnosable by construction.**
+
+`sh scripts/check/check-native-crossmodule-result-u8.shs` -> **rc=1** (read
+directly into a variable on the line after the command, never through a pipe).
+Not a signal, so this is a genuine failure rather than the rc=143 load-kill
+seen elsewhere in this batch.
+
+**But it produced ZERO bytes on stdout and stderr.** That is a defect in the
+gate itself, independent of the bug it is meant to catch:
+
+- the script is `set -eu`, so the first failing command aborts it silently;
+- both `native-build` invocations redirect all output into
+  `"$WORK_DIR/result-u8-$backend.log"` (lines 22-27);
+- `trap rm -rf "$WORK_DIR" EXIT HUP INT TERM` (line 14) **deletes that log
+  on the way out**, including on the failure path;
+- the final check is a bare `test "$actual" = "$EXPECTED"` (line 30) with no
+  message.
+
+So a failing run destroys its own evidence and prints no verdict line at all,
+violating the repos `PASS —/FAIL —/ERROR —` convention used by every
+`scripts/check/` guard. Overriding `WORK_DIR` does not help: the EXIT trap
+removes whatever path it is given. As written, this gate cannot distinguish
+"the LLVM build failed", "the cranelift build failed", "the binary was not
+produced", and "the binary ran and printed the wrong string" — which is
+precisely the information the bug doc needs.
+
+Recommended (owner of `scripts/check/**`, not this lane): emit a verdict line,
+and either skip the cleanup on failure or copy the logs out before the trap
+fires.
+
+Reproduction was therefore re-driven manually with the trap out of the picture;
+see the parent report for the outcome. The `exit 5` claim in the title is not
+confirmed by this run — the observed script status is 1, and the underlying
+per-backend statuses are the ones the script discards.
+
+## Re-triage 2026-08-17 (m9a_tests lane) — ROOT CAUSE FOUND, and it is not arithmetic
+
+**Verdict: LIVE, but MISDIAGNOSED. The probe never reaches `main()`, so it
+never evaluates any arithmetic. The NATIVE-BUILD FAILS FIRST.**
+
+The `exit 5` in the title is emitted by `main()` at
+`test/fixtures/native_crossmodule_result_u8/main.spl` when
+`cross_target_arithmetic_ok()` returns false. That line is unreachable today:
+
+```
+$ env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build \
+    --source test/fixtures --source src/lib --entry-closure \
+    --entry test/fixtures/native_crossmodule_result_u8/main.spl \
+    --cache-dir <tmp>/cache --output <tmp>/bin
+BUILD rc=1
+no binary produced
+
+error: unresolved import 'native_crossmodule_result_u8.provider' (used in
+test/fixtures/native_crossmodule_result_u8/main.spl): no source file found for
+this module path relative to the working directory, src/, src/lib/, or
+'test/fixtures/native_crossmodule_result_u8'
+error: native-build worker exited with code 1.
+  interpreter: /mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple (exit code 1)
+```
+
+### The imported module is present on disk
+
+```
+$ ls -la test/fixtures/native_crossmodule_result_u8/
+-rw-rw-r-- 1 ormastes ormastes 16889 Aug 11 22:10 main.spl
+-rw-rw-r-- 1 ormastes ormastes   551 Aug 11 22:10 provider.spl
+```
+
+`provider.spl` exists and defines exactly the symbols `main.spl:1` imports
+(`enum BytesError`, `enum CrossProviderIdentity`, ...). So this is **not** a
+missing fixture file, and it is not path drift.
+
+### The `--source` root is being ignored
+
+Read the resolver's own error text: it lists the roots it searched as *"the
+working directory, src/, src/lib/, or
+`test/fixtures/native_crossmodule_result_u8`"*. The invocation passed
+`--source test/fixtures`, under which `native_crossmodule_result_u8.provider`
+resolves trivially to `test/fixtures/native_crossmodule_result_u8/provider.spl`.
+**`test/fixtures` does not appear in the searched list at all** — the
+`--source` flag is not reaching module resolution on the native-build path.
+Note the entry directory is searched, but a sibling module is addressed by its
+*package-qualified* name (`native_crossmodule_result_u8.provider`), which the
+entry directory alone cannot satisfy.
+
+**DIAGNOSIS ONLY — the fix is in the native-build module resolver / `--source`
+plumbing (`src/**`), owned by another lane.** No source edit made from the test
+lane. The fixture itself needs no change.
+
+### Secondary defect: this gate destroys its own evidence
+
+Independently of the above, `scripts/check/check-native-crossmodule-result-u8.shs`
+cannot be diagnosed from its own output. Running it plain gives **rc=1 with
+ZERO bytes on stdout and stderr**, because:
+
+- it is `set -eu`, so the first failure aborts silently;
+- both `native-build` calls redirect all output into `"$WORK_DIR/result-u8-$backend.log"` (lines 22-27);
+- `trap 'rm -rf "$WORK_DIR"' EXIT HUP INT TERM` (line 14) deletes that log on the failure path too;
+- the verdict is a bare `test "$actual" = "$EXPECTED"` (line 30) with no message.
+
+Overriding `WORK_DIR` does not rescue the logs — verified: the EXIT trap removed
+the supplied directory, leaving `ls` reporting *No such file or directory*. The
+root cause above was only recoverable by re-running the `native-build` command
+by hand outside the script. The gate also prints no `PASS —/FAIL —/ERROR —`
+verdict line, unlike every other guard in `scripts/check/`.
+
+Recommended (owner of `scripts/check/**`): emit a verdict line, and preserve
+the per-backend logs on failure.
+
+### Not covered
+
+Only the `default-llvm` backend was driven manually. The `cranelift` arm of the
+loop was not reached, so no claim is made about it.

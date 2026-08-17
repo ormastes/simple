@@ -104,3 +104,23 @@ validation and rejected immutable-StorageBuffer to mutable-GEP escalation. The
 new mutability regression passes; its containing intensive spec reports 38
 passes and two pre-existing failures. The bijection worker's targeted run timed
 out in the existing daemon and remains unverified.
+
+## Re-triage 2026-08-17 (m9a_tests lane)
+
+**Verdict: the named spec is not a shell-out reproducer — scoping note.**
+
+`test/01_unit/compiler/backend/vulkan_source_storage_buffer_abi_spec.spl`
+contains no subprocess call: `grep -n "process_run\|bin/release\|bin/simple"`
+over it returns **zero hits**. Per the session brief, a spec body runs
+INTERPRETED, so this spec cannot exercise the "cache-free pure-Simple execution
+of a dynamic frontend-to-HIR path" the doc describes — that path is only
+reachable from a separate `bin/simple` process. Whoever picks this up must add
+a subprocess shell-out (pattern:
+`test/01_unit/compiler/codegen/scalar_slot_roundtrip_class_spec.spl`) or the
+reproduction will be vacuous.
+
+Note also that the deployed `bin/simple` here is the **Rust bootstrap seed**,
+so a "pure-Simple execution" claim cannot be settled on this host at all until
+a self-hosted binary is available.
+
+**Not reproduced from this lane.**

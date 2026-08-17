@@ -135,3 +135,29 @@ Similar-bug-class detection spec added:
 `test/03_system/feature/lib/mcp/vacuous_print_only_test_detection_spec.spl` —
 fails if ANY `*_test.spl`/`*_spec.spl` in the two MCP feature trees contains no
 oracle token, with a positive control so a scan that scanned nothing cannot pass.
+
+## Re-triage 2026-08-17 (content-classified, m9a_tests lane)
+
+**Verdict: ALREADY FIXED — both halves of the title are false today.**
+
+*"imports a removed api_tools API"* — `test/03_system/feature/lib/mcp/bootstrap_e2e_test.spl`
+imports only two modules, and both resolve:
+
+- line 14: `use std.mcp.helpers.{LB, RB, jp, js, jo3, extract_json_string_v2, extract_json_value, extract_nested_string, make_error_response, make_result_response}` -> `src/lib/nogc_async_mut/mcp/helpers.spl`
+- line 15: `use std.mcp.schema.{get_all_tool_schemas, init_core_schemas}` -> `src/lib/nogc_async_mut/mcp/schema.spl`
+
+The file even carries its own repair note at line 8: *"Also dropped `use
+app.mcp.session.{McpState}`: that module does not exist"*. There is no
+`api_tools` import left to be stale.
+
+*"assert nothing (vacuous green)"* — the file is 50 lines with **six** `it`
+blocks, each carrying a real assertion, none of them trivially true:
+
+- line 22 `expect(schemas.len()).to_be_greater_than(100)`
+- line 26 `expect(extract_json_string_v2(test_json, "method")).to_equal("initialize")`
+- line 34 `expect(extract_nested_string(test_json, "params", "protocolVersion")).to_equal("2024-11-05")`
+- plus raw-value extraction (28), three-field response construction (36), error-code response (42), tools/call content-block response (47)
+
+Recommend closing. (Not runtime-confirmed from this lane — see the parent
+reports Unproven list — but the two specific defects the doc names are
+verifiably absent from current content.)

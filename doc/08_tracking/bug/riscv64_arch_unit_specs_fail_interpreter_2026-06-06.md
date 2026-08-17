@@ -47,3 +47,20 @@ Failing summary rows from `build/test-artifacts/unit/os/kernel/arch/` include:
 
 No QEMU was launched for this reproduction. Several unrelated QEMU processes
 were already running before the lane started.
+
+## Re-triage 2026-08-17 (content-classified, m9a_tests lane)
+
+**Verdict: ALREADY-FIXED CANDIDATE — the module the specs import now exists.**
+
+`test/01_unit/os/kernel/arch/riscv64_boot_spec.spl:2` imports
+`os.kernel.arch.riscv64.boot_info.{Rv64Boot}`, and
+`src/os/kernel/arch/riscv64/boot_info.spl` is present on disk today. All four
+cited specs are still in the tree alongside their siblings
+(`riscv64_boot_spec.spl`, `riscv64_interrupt_spec.spl`,
+`riscv64_trap_frame_spec.spl`, `riscv64_trap_model_spec.spl`, plus
+`riscv64_ipc_destroy_port_spec.spl` and `riscv64_syscall_ipc_spec.spl`).
+
+This doc has been open since 2026-06-06. The import-resolution failure mode
+that would explain an interpreter-mode failure is no longer present. **Not
+runtime-confirmed** — see the parent reports Unproven list; a re-run is
+required before closing.

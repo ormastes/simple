@@ -85,3 +85,32 @@ Evidence: `build/native_probe/riscv_f1_n3_spipe_docgen_inprocess.log`.
 - `md-diagram-update` renders one fixture and the four F1/N3 phase documents.
 - The Rust seed is used only to bootstrap a pure compiler and never supplies
   normal command execution.
+
+## Re-triage 2026-08-17 (m9a_tests lane) — scoping correction
+
+**The named spec is NOT the reproducer, and this row is almost certainly the
+same defect as `pure_simple_spipe_docgen_vector_font_spec_crash_2026-07-11.md`.**
+
+`test/03_system/app/hardware/feature/riscv32_riscv64_fpga_simpleos_production_spec.spl`
+contains no shell-out at all: `grep -n "bin/\|release\|spipe-docgen"` over it
+returns zero hits. It is an ordinary spec importing
+`std.hardware.fpga_linux.riscv_fpga_linux`. The crash this doc describes happens
+when **spipe-docgen is run OVER that spec file**, i.e. in
+`rt_process_run_inherit` inside the pure-Simple CLI — not when the spec is run.
+Anyone reproducing this by running the spec will get an unrelated result.
+
+The sibling doc `pure_simple_spipe_docgen_vector_font_spec_crash_2026-07-11.md`
+names `test/03_system/app/simple_2d/feature/simple_2d_vector_fonts_spec.spl`,
+which likewise contains no shell-out (same grep, same zero hits) and is also a
+plain spec. Two different subject specs, one identical mechanism: the
+pure-Simple binary dying while delegating spipe-docgen. **Treat these as ONE
+root cause with two witnesses, not two bugs.** Whoever fixes
+`rt_process_run_inherit` should close both, and the two docs should be
+cross-linked rather than worked separately.
+
+**Not reproduced from this lane.** The crash is specific to the *pure-Simple*
+binary; the deployed `bin/simple` here is the **Rust seed** (`bin/simple
+--version` prints "this Rust-built Simple binary is a bootstrap seed only",
+59,536,728 bytes, mtime 2026-08-16 22:59). A seed run neither confirms nor
+refutes a pure-Simple-only crash. This needs a self-hosted binary from a
+completed bootstrap.

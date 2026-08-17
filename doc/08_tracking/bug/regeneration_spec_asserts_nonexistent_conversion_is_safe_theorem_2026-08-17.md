@@ -78,3 +78,63 @@ bin/simple test test/00_formal_verification/compiler/regeneration_spec.spl --tim
 
 Note: `SIMPLE_TIMEOUT_SECONDS` does **not** work here — see
 `doc/08_tracking/bug/simple_timeout_seconds_ignored_by_light_daemon_budget_2026-08-17.md`.
+
+## Re-triage 2026-08-17 (content-classified, m9a_tests lane)
+
+**Verdict: LIVE, and the root cause is worse than the doc title suggests — the
+generator emits NO theorem at all, not merely a differently-named one.**
+
+Generator: `src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl`.
+`grep -n "theorem \|inductive \|def canConvert"` over that file returns exactly
+one line:
+
+```
+67:    codegen_ = codegen_.add_raw_line("def canConvert (srcCap dstCap : RefCapability) : Bool :=")
+```
+
+There is no `add_raw_line("theorem ...")` anywhere in it. So
+`regen_mem_cap.regenerate_memory_capabilities()` emits a *model* (`inductive
+RefCapability`, `def canConvert`) and **zero proof obligations**. Renaming the
+assertion to some other theorem name would not fix it; no name would pass.
+
+This is not a naming drift against the checked-in Lean either. The checked-in
+`src/verification/memory_capabilities/src/MemoryCapabilitiesConstraints.lean`
+is hand-written and rich in theorems — `capability_downgrades_allowed:13`,
+`shared_to_exclusive_denied:23`, `capability_conversion_table_policy:45`,
+`can_convert_implies_restrictive:59`, `can_convert_iff_restrictive:67`, and
+~15 more — but **none of them is named `conversion_is_safe`**, and none of them
+is produced by the generator the spec calls. The spec asserts on generator
+output, so the hand-written file is irrelevant to it.
+
+Contrast with the two healthy sibling generators in the same spec, which do
+emit theorems: `async_compile` (`theorem append_safe`, `theorem wait_detected`)
+and `gc_manual_borrow` (`theorem borrow_preserves`, `theorem
+collect_preserves`). Only the memory-capabilities lane is proof-free.
+
+### Scope of the assertion (three identical mirrors)
+
+`grep -rn conversion_is_safe src test` returns three hits and nothing else —
+all three are the same assertion in byte-identical mirrored copies (`diff`
+confirms all three files are identical):
+
+- `test/00_formal_verification/compiler/regeneration_spec.spl:26`
+- `test/01_unit/compiler/verification/regeneration_spec.spl:26`
+- `test/unit/compiler/verification/regeneration_spec.spl:26`
+
+### Class-detection spec added
+
+The reproducing assertion (line 26 above) pins one theorem name. Added a
+generalising spec that fails for *any* Lean regenerator emitting a model with
+no proof obligation, and which is non-vacuous in both directions because it
+passes for the two healthy generators:
+
+- `test/00_formal_verification/compiler/regeneration_theorem_emission_class_spec.spl`
+- `test/01_unit/compiler/verification/regeneration_theorem_emission_class_spec.spl`
+- `test/unit/compiler/verification/regeneration_theorem_emission_class_spec.spl`
+
+(mirrored by explicit filename, never by glob).
+
+**The generator fix is DIAGNOSIS ONLY from this lane** — it lives under
+`src/compiler_rust/`, outside the test lanes file scope. The assertion at
+line 26 is deliberately left in place: it is the reproducer, and making it
+green by renaming would convert a real verification gap into a false green.

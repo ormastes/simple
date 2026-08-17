@@ -156,3 +156,21 @@ rather than guessed at.
 - The Rust bootstrap seed was **not** inspected or modified. Whether the same
   gap exists in `src/compiler_rust/**` is unverified and is out of scope per
   the fix-`.spl`-not-the-seed rule.
+
+## Re-triage 2026-08-17 (m9a_tests lane)
+
+**Verdict: not re-measured; ownership note.**
+
+Fixture `test/fixtures/native_trait_receiver_resolution/main.spl` is present.
+The doc states the root cause is located and the fix is blocked on a semantic
+policy decision recorded in `native_trait_object_dispatch_options.md` — i.e.
+this is not an unknown-cause bug but a pending design decision.
+
+The fix lives in MIR lowering (`src/compiler/50.mir/**`), which is owned by
+another lane in the current parallel session, so this lane contributes
+**diagnosis only** and made no edit.
+
+**Not reproduced from this lane** — a native-build reproduction requires a
+`native-build` run, and the one native-build lane this session attempted
+(`check-native-crossmodule-result-u8.shs`, see that doc) was still executing
+when this batch closed under a host load average of 81-133.

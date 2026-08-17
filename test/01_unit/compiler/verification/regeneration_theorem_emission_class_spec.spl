@@ -1,0 +1,51 @@
+## Class-detection spec: Lean regenerators must actually emit the theorems
+## their specs assert on.
+##
+## Defect class (found via
+## doc/08_tracking/bug/regeneration_spec_asserts_nonexistent_conversion_is_safe_theorem_2026-08-17.md):
+## `regeneration_spec.spl:26` asserts the memory-capabilities generator emits
+## `theorem conversion_is_safe`. It does not. The generator
+## `src/compiler_rust/lib/std/src/verification/regenerate/memory_capabilities.spl`
+## emits `inductive RefCapability` and `def canConvert` (line 67) and **no
+## `theorem` line at all** — so that assertion names a theorem that exists
+## nowhere in the tree.
+##
+## The reproducing spec pins that one name. This spec generalises to the CLASS:
+## a Lean regenerator that emits a model but zero proof obligations is a
+## vacuous verification lane regardless of what any individual assertion is
+## spelled. Each generator below must emit at least one `theorem `.
+##
+## Sibling generators `async_compile` (theorem append_safe / wait_detected) and
+## `gc_manual_borrow` (theorem borrow_preserves / collect_preserves) DO emit
+## theorems, so this spec is non-vacuous in both directions: it passes for the
+## two healthy generators and fails for the defective one.
+
+use verification.regenerate.async_compile as regen_async
+use verification.regenerate.gc_manual_borrow as regen_gc
+use verification.regenerate.memory_capabilities as regen_mem_cap
+
+describe "Lean regenerator theorem-emission class":
+    context "every generator emits at least one proof obligation":
+        it "async_compile emits a theorem":
+            val lean_code = regen_async.regenerate_async_compile()
+            expect(lean_code.contains("theorem ")).to_equal(true)
+
+        it "gc_manual_borrow emits a theorem":
+            val lean_code = regen_gc.regenerate_gc_manual_borrow()
+            expect(lean_code.contains("theorem ")).to_equal(true)
+
+        it "memory_capabilities emits a theorem":
+            val lean_code = regen_mem_cap.regenerate_memory_capabilities()
+            expect(lean_code.contains("theorem ")).to_equal(true)
+
+    context "a model without proofs is not verification":
+        it "memory_capabilities emits its model":
+            val lean_code = regen_mem_cap.regenerate_memory_capabilities()
+            expect(lean_code).to_contain("inductive RefCapability")
+            expect(lean_code).to_contain("def canConvert")
+
+        it "memory_capabilities model is accompanied by a proof, not just a definition":
+            val lean_code = regen_mem_cap.regenerate_memory_capabilities()
+            val has_model = lean_code.contains("def canConvert")
+            val has_proof = lean_code.contains("theorem ")
+            expect(has_model and has_proof).to_equal(true)
