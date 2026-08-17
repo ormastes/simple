@@ -1,10 +1,12 @@
-## Triage 2026-08-17 — BLOCKED, skipped fast (not a compiler/runtime/tooling defect)
+## Superseded triage 2026-08-17 — previously blocked
 
-Blocker: requires a provenance-admitted self-hosted Stage-4 CLI whose bounded
-test-ABI probe passes. `bin/simple` in this lane is still the Rust seed (it
+This pre-closure blocker is retained only as history. It required a
+provenance-admitted self-hosted Stage-4 CLI whose bounded
+test-ABI probe. `bin/simple` in that lane was still the Rust seed (it
 prints the seed warning banner), and this lane is forbidden from building the
 main compiler. Unblock = deploy Stage-4, then run the exact resume commands from
-`.spipe/riscv_gen2_hwir_foundation/state.md`. Unchanged.
+`.spipe/riscv_gen2_hwir_foundation/state.md`. The closure evidence below
+supersedes this state.
 # RISC-V Gen2 Sequential HWIR Self-Host Runtime Blocker
 
 Status: CLOSED (2026-08-17) — a current deployed self-hosted CLI executes the

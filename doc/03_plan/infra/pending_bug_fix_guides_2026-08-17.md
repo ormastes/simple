@@ -89,8 +89,8 @@ thing. **These are immediately actionable.**
 
 | Class | Count | Bugs |
 |---|---:|---|
-| **fixed/closed on this host** | 12 | dns_aaaa_qtype, simple_timeout_seconds_ignored, lint_timeout_hwir_zca_rows, bootstrap_stage2_silent_exit1, board_vulkan_fabricated_counterpart, vulkan_8k_jit_retained_host_buf_sample_crash, stage4_resume_from_admitted_gap, stage4_bootstrap_rust_inputs_changed, riscv_gen2_sequential_hwir, a2_target_ir_untracked_target_graph, silent_deletion_audit, process_transfer_session_replay_identity |
-| **partial source fix / external evidence pending** | 6 | blink_specs_import, host_qemu_virtio_gpu_gl_missing_egl, render_perf_8k80_aggregator, cmdstream_boundary_no_intel_gpu, img_bxe_submit_encoder, starfive_check_deployed_simple_segv |
+| **fully closed** | 7 | dns_aaaa_qtype, simple_timeout_seconds_ignored, blink_specs_import, stage4_bootstrap_rust_inputs_changed, riscv_gen2_sequential_hwir, a2_target_ir_untracked_target_graph, silent_deletion_audit |
+| **source fixed / admitted or external evidence pending** | 11 | lint_timeout_hwir_zca_rows, bootstrap_stage2_silent_exit1, board_vulkan_fabricated_counterpart, host_qemu_virtio_gpu_gl_missing_egl, render_perf_8k80_aggregator, vulkan_8k_jit_retained_host_buf_sample_crash, stage4_resume_from_admitted_gap, cmdstream_boundary_no_intel_gpu, img_bxe_submit_encoder, starfive_check_deployed_simple_segv, process_transfer_session_replay_identity |
 | **bootstrap-admission gated** | 2 | stage3_selfhost_exit_139, stage3_post_file_copy_exit139 |
 | **owner-decision** | 2 | app_interpreter_deletion_evidence_package, app_interpreter_tree_declared_removed |
 
@@ -106,11 +106,10 @@ binary mismatch.
 host has Metal 4 and no `nvidia-smi`. The aggregator and retained-array source
 fixes are green, but NVIDIA Vulkan and 7680x4320@80 receipts remain external.
 
-**Rank 2 — cheap software, no machine, part of 1 bug:** vendor the upstream
-`drivers/gpu/drm/imagination` UAPI header (`struct drm_pvr_job`). Probe: `find /
--name 'drm_pvr*'` returns nothing, so it is genuinely absent — but it is a text
-file, obtainable from a pinned upstream revision. Closes the byte-layout half of
-`img_bxe_submit_encoder`.
+**Rank 2 — completed source half:** the PowerVR `drm_pvr_job` layout is pinned
+to Linux commit `8d3ae59288f1e7d58d76558a6ee96d533bc5019f` and encoded by the
+checked-in UAPI layout owner. Firmware/device submission validation remains
+external.
 
 **Rank 3 — 1 bug — x86_64 Linux host with a discrete Intel Gen12/Xe-LP GPU**
 (a Tiger Lake / Alder Lake laptop or NUC, or an Arc A-series card; plus
@@ -143,12 +142,12 @@ physical-presentation receipt is **optional** in the A7 contract).
 
 ### Current host result
 
-All evidence-backed source corrections available on this host have been
-implemented except the Blink paint walker, which remains a bounded three-cycle
-compiler/interpreter diagnostic blocker. Rows 10/11 need admitted pure-Simple
-bootstrap authority; rows 7/8/16/17/18 need the explicitly named external
-runtime or hardware evidence; rows 19/20 still require an owner deletion
-decision and were not changed destructively.
+All evidence-backed source corrections identified by this sweep are now
+implemented, including Blink paint and production process-session
+authentication. Rows 4/5/6/9/10/11/12/22 still require receipt-bound admitted
+execution; rows 7/8/16/17/18 need the explicitly named external runtime or
+hardware evidence; rows 19/20 still require an owner deletion decision and
+were not changed destructively.
 
 ---
 
@@ -168,28 +167,28 @@ decision and were not changed destructively.
 - **Reproduce here:** `SIMPLE_TIMEOUT_SECONDS=840 timeout 900 bin/simple test test/00_formal_verification/compiler/lean_basic_spec.spl` (currently 0/1 timeout) vs `bin/simple test … --timeout 800` (4/4). Fix = both give 4/4.
 - **Hardware:** none. **Unblock:** nothing.
 
-### 3. `blink_specs_import_unimplemented_modules_2026-08-10.md` — PARTIAL (form/input fixed; paint open)
+### 3. `blink_specs_import_unimplemented_modules_2026-08-10.md` — CLOSED (`00920d22fe`; all four owners green)
 - **Symptom:** four blink specs RED, `semantic: Cannot resolve module: std.blink.dom.form_state` and siblings.
 - **Root cause:** known — feature gap, not a compiler defect. **[false blocker]** the reported `STATICS_FAILED_KEY` failure mode was console-noise misreading; that constant is `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:298` and is unrelated. A separate still-unfiled defect is documented there: the `Use <> instead of [] for generics` warning is a **false positive** on dict bracket-assignment (`handles[K] = 1`, line 305), emitted on every parse of the compiler tree.
 - **Fix guide:** write the missing `std.blink.dom.*` modules (`form_state` + the three other `geo.*`/`BoxModel` dependants) under `src/lib/`. Stdlib, no build. Then file the bracket-assignment warning separately.
 - **Reproduce here:** `SIMPLE_TIMEOUT_SECONDS=3600 bin/simple test test/01_unit/lib/blink` — currently `89 total, 52 passed, 37 failed`.
 - **Hardware:** none. **Unblock:** nothing.
 
-### 4. `lint_timeout_hwir_zca_rows_2026-08-17.md` — FIX IMPLEMENTED (`8c50d36609`; full timing pending)
+### 4. `lint_timeout_hwir_zca_rows_2026-08-17.md` — SOURCE FIXED / RECEIPT-BOUND PURE-SIMPLE TIMING PENDING
 - **Symptom:** lint of `src/compiler/50.mir/hwir/zca_rows.spl` exceeds **900s** (re-verified worse than the 600s at filing), no verdict line, log frozen at 382 lines.
 - **Root cause:** suspected — superlinear per-decl lint cost. Measured: 1901 lines, 30 function decls; the published model (~11.7s startup + ~3.3–4.0s/decl) predicts ~130s, so observed is **~7× above even the linear prediction**. The published cost model under-predicts badly here.
 - **Fix guide:** profile `bin/simple lint` on this one file (sampling profiler or in-linter timing counters); the likely shape is a per-decl pass rescanning all prior decls. Fix in **pure-Simple** (`src/app/lint` / the lint pass in `src/compiler`) — the seed cannot be the fix target since no pure-Simple binary can lint today. Correct `.claude/rules/commands.md`'s cost model afterwards.
 - **Reproduce here:** `nice -n 19 timeout 900 sh scripts/check/lint-cached.shs src/compiler/50.mir/hwir/zca_rows.spl` — **CPU-bound for 15+ min; do not run while a bootstrap is compiling.**
 - **Hardware:** none — but wants an idle box. **Unblock:** CPU time.
 
-### 5. `bootstrap_stage2_silent_exit1_empty_log_2026-08-17.md` — FIXED (`17b9c0d72d`)
+### 5. `bootstrap_stage2_silent_exit1_empty_log_2026-08-17.md` — SOURCE FIXED (`17b9c0d72d`) / LIVE MID-BUILD RECEIPT PENDING
 - **Symptom:** stage2 exits 1 with a **0-byte** `stage2-native-build.log`. Status MITIGATED (a diagnostic block now distinguishes the three silent cases); the root defect is open.
 - **Root cause:** **known.** Replay against `build/phase_snapshots/phase1_1786935122/simple` proved the restricted `env -i` sandbox does *not* break the seed (`--version`, `native-build --help` both exit 0). The defect is that `native-build` writes **nothing** to a non-tty stdout/stderr until completion or a flushed error — 580s of real CPU work with a 0-byte log throughout. `SIMPLE_BUILD_PROGRESS_EVENTS` is a file path, not a verbosity flag, so it yields no progress evidence either.
 - **Fix guide:** line-buffer or explicitly flush progress/diagnostics when stdout is not a tty — a tty check is selecting full buffering. Pure-Simple driver (`src/app/cli`, `src/compiler/80.driver`).
 - **Verify here:** rerun the transcript's exact command redirected to a file; the log must grow *during* the build, not only at exit.
 - **Hardware:** none. **Unblock:** nothing.
 
-### 6. `board_vulkan_lanes_fabricated_counterpart_output_despite_available_exec_api_2026-08-11.md` — FIXED (`1358b28f0c`)
+### 6. `board_vulkan_lanes_fabricated_counterpart_output_despite_available_exec_api_2026-08-11.md` — SOURCE FIXED (`1358b28f0c`) / LIVE WORKER RECEIPT PENDING
 - **Symptom:** none of the eight board-Vulkan boundary lanes ever executed an open-source counterpart; every "comparison" ran against bytes the lane authored itself. L2 device enumeration returns a hand-typed lavapipe literal at `boundary_enumeration_provider.spl:104-137`; L4's measured hashes were gathered by the agent's own shell, not the spec.
 - **Root cause:** **known, and the lanes' stated cause is false** — see "Blockers that were FALSE" #3 for the four exported exec/evidence APIs with file:line.
 - **Fix guide:** delete the literal at `boundary_enumeration_provider.spl:104-137`; have the spec invoke `vulkaninfo` through `process_run_with_limits` and feed the output to `exec_to_evidence`. Same for the L4 inventory hashes. L3's receipt gate is already sound and sabotage-proven; it just needs a real `libvulkan_lvp.so` invocation behind it.
@@ -210,7 +209,7 @@ decision and were not changed destructively.
 - **Fix guide:** run the existing wrapper with explicit DrawIR, producer, optional-physical, and report inputs. It must correlate A4 and A5 for the same workload/damage class/revision/provenance, requiring p95 ≤ 12.5 ms, nonzero RSS/checksum, exact readback scope, and no disallowed fallback. Contract: `doc/03_plan/ui/perf/render_perf_redesign_plan_2026-08-06.md` §0-B A7; owner TODO811. The AOT lane going green at `3463d698fee` unblocks the draw_ir 8K path feeding A4.
 - **Hardware:** none — already present. A physical display is needed only for the **optional** presentation receipt, which A7 does not require. **Unblock:** run it.
 
-### 9. `vulkan_8k_jit_retained_host_buf_sample_crash_2026-08-12.md` — FIXED (`4051bc8c494`; 8K capacity rerun pending)
+### 9. `vulkan_8k_jit_retained_host_buf_sample_crash_2026-08-12.md` — OWNER FIXED (`fda534d0dd`) / STRICT-JIT 8K RERUN PENDING
 - **Symptom:** the retained Vulkan 8K workload completes 200 timed frames, then strict JIT SIGSEGVs when the harness samples `VulkanBackend.host_buf` for readback parity. Peak RSS 2,137,920 KiB. The preceding run (before direct sample assertions) gave p50 1,040,146 ns / p95 1,539,488 ns, 3,276,800 transfer bytes, zero full fallbacks — but an invalid **zero checksum**.
 - **Root cause:** unknown, **narrowed by a negative result**: `test/fixtures/jit_class_u32_array_retained_read/main.spl` — same 33,177,600-element `[u32]`, class field, 210 frames of mutation, aliased, first/changed/last reads under strict JIT — **passes**. So plain class-field `[u32]` retained reads are not the defect; something Vulkan-specific (mirror lifetime, or the host-visible mapping) is.
 - **Fix guide:** extend that reduction toward the real shape (add the host-visible mapping and the strided 64-row mirror transfer) until it reproduces. Required closure per the doc: isolate class-field array borrowing vs direct indexed access vs retained-mirror lifetime; add a strict-JIT regression reading first/middle/last from a class-owned `[u32]` after repeated mutation; preserve a nonzero checksum or an explicit sampled-parity receipt. Engines: JIT in `src/compiler/70.backend` **and** the Vulkan SFFI in `src/compiler_rust/runtime/src/value/gpu_vulkan/` — both, since the crash straddles them. **Never substitute an expected checksum for the missing proof**; a timing-only row is not an admissible 8K/80 pass.
@@ -295,13 +294,13 @@ decision and were not changed destructively.
 - **Fix guide:** merge into bug 19's decision. If the owner picks migration, the work is rewriting 62 files off `from X import {…}` onto `use module.{…}` plus renaming the `actor` parameter — 25k lines, which is why deletion is on the table.
 - **Hardware:** none. **Unblock:** same owner decision as bug 19.
 
-### 21. `silent_deletion_audit_2026-08-11.md` — owner-decision / bookkeeping
+### 21. `silent_deletion_audit_2026-08-11.md` — CLOSED (all 12 rows reverified)
 - **Symptom:** audit of silent mass deletions across the 343 commits landed 2026-08-10 12:00 → 2026-08-11 on origin/main; 12 commits flagged (thresholds: ≥300 total deletions, ≥200 lines from one file, or ≥40 files changed).
 - **Root cause:** known per row. **[stale]** Row #3 re-verified 2026-08-17: `src/compiler_rust/runtime/src/value/collections.rs` is back at **6148 lines / 210 `fn rt_*`** with `rt_array_reduce` and `rt_array_free_deep` present — the audit's "STILL MISSING" verdict for `6e2f613d302` (recorded 4211/198) is stale. **Do not double-restore.** Row #1 `ad2b5d5307f` *is* the restore commit.
 - **Fix guide:** re-run the audit's own method (`git log --numstat` over the window; per-path pre/post/current-tip line counts plus symbol-set diffs), close every RESTORED-SINCE row, escalate only rows still short at HEAD, then mark the doc closed. `check-runtime-api-regression-push.shs` now guards this class going forward.
 - **Hardware:** none. **Unblock:** one verification pass and a closure marker.
 
-### 22. `process_transfer_session_replay_identity_2026-08-12.md` — SOURCE FIXED (authenticated session identity)
+### 22. `process_transfer_session_replay_identity_2026-08-12.md` — PRODUCTION SOURCE FIXED / ADMITTED EXEC EVIDENCE PENDING
 - **Symptom:** the native transfer allocator's RegionId (low 31 PID bits + 32-bit local sequence in a positive `i64`) gives no global uniqueness across PID namespaces, PID reuse, stale frame replay, or process restarts.
 - **Root cause:** known by design. The bounded frame decoder verifies route, destination, length, and an FNV-1a corruption checksum — **FNV-1a is a corruption check, not authentication.**
 - **Current source:** HMAC-SHA256 wire authentication, parent-issued epoch/namespace/PID/generation identity, and cancellation revocation are integrated into `parent_commit_piped_process.spl`. Its `SPRF2` reader authenticates before the existing generation/replay inbox. The exec-isolated scenario covers valid admission, wrong-session rejection, exact replay rejection, and cancellation; V1 remains an explicit compatibility constructor.

@@ -1,14 +1,18 @@
-# A2 target IR is complete but NOT landed — blocked on an untracked file
+# A2 target IR recovered and landed
 
 **Date:** 2026-08-10
-**Status:** OPEN — work is done and passing, deliberately withheld from `main`.
-**Work location:** worktree `.claude/worktrees/agent-a5cdacdf7286b11a3`, branch
-`worktree-agent-a5cdacdf7286b11a3` (do not delete this worktree).
+**Status:** CLOSED 2026-08-17 — recovered in `df2e577a89`; focused target graph
+spec passes 9/9.
 **Plan:** `doc/03_plan/compiler/build_system/targeted_build_interface_compat_minimal_bootstrap_2026-08-10.md` §5/§6, Wave 1.
 
 ---
 
-## What is done
+## Landed implementation
+
+The historical untracked-worktree account below is retained as recovery
+history. It no longer describes current repository state. The compute-only
+owner now lives at `src/compiler/80.driver/cache/target_ir.spl`, with its
+regression at `test/01_unit/compiler/build_graph/target_graph_spec.spl`.
 
 Agent A2 delivered the complete Wave-1 target IR, compute-only:
 
