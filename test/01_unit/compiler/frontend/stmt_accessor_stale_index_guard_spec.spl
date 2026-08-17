@@ -1,0 +1,59 @@
+# Reproducer for
+# doc/08_tracking/bug/stage4_phase3_flat_ast_arena_desync_2026-08-01.md
+# (containment layer).
+#
+# @cover src/compiler/10.frontend/core/ast_stmt.spl
+#
+# The statement-arena accessor family must FAIL CLOSED on a stale index — one
+# minted before an interleaved `ast_reset()`/`stmt_reset()` cleared the shared
+# arena. `stmt_get_tag` has always returned its -1 sentinel for such an index,
+# but its five siblings indexed their backing arrays unguarded, so a walker that
+# correctly took the -1 default branch and then read any FIELD of the same stale
+# statement aborted the whole process.
+#
+# NON-VACUITY (verified by ablation, 2026-08-17, Rust seed `bin/simple` ->
+# bin/release/x86_64-unknown-linux-gnu/simple, mtime 2026-08-16 22:59): with the
+# guards removed, `stmt_get_span(stale)` aborts with
+# `error: semantic: array index out of bounds: index is 12 but length is 0`
+# and exit 1 — the process dies, so these examples cannot pass by accident.
+# The five reads below therefore genuinely discriminate.
+
+use compiler.core.ast.{
+    ast_reset,
+    STMT_EXPR,
+    stmt_reset, stmt_alloc,
+    stmt_get_tag, stmt_get_span, stmt_get_expr, stmt_get_name, stmt_get_type, stmt_get_body
+}
+
+# Mint one statement, then rotate the arena underneath the index we hold.
+fn _stale_index() -> i64:
+    stmt_reset()
+    val live = stmt_alloc(STMT_EXPR, 7)
+    ast_reset()
+    stmt_reset()
+    live + 12
+
+describe "statement accessors on an index stale across an arena reset":
+    it "returns the -1 no-tag sentinel from stmt_get_tag":
+        expect stmt_get_tag(_stale_index()) to_equal -1
+
+    it "returns -1 from stmt_get_span instead of aborting the process":
+        expect stmt_get_span(_stale_index()) to_equal -1
+
+    it "returns -1 from stmt_get_expr instead of aborting the process":
+        expect stmt_get_expr(_stale_index()) to_equal -1
+
+    it "returns the empty name from stmt_get_name instead of aborting":
+        expect stmt_get_name(_stale_index()) to_equal ""
+
+    it "returns -1 from stmt_get_type instead of aborting the process":
+        expect stmt_get_type(_stale_index()) to_equal -1
+
+    it "returns an empty body list from stmt_get_body instead of aborting":
+        expect stmt_get_body(_stale_index()).len() to_equal 0
+
+    it "still reads a LIVE index correctly -- the guard is not a blanket -1":
+        stmt_reset()
+        val live = stmt_alloc(STMT_EXPR, 7)
+        expect stmt_get_tag(live) to_equal STMT_EXPR
+        expect stmt_get_span(live) to_equal 7

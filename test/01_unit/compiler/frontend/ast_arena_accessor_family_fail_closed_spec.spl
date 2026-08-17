@@ -1,0 +1,81 @@
+# Similar-problem DETECTION spec for the defect CLASS behind
+# doc/08_tracking/bug/stage4_phase3_flat_ast_arena_desync_2026-08-01.md.
+#
+# @cover src/compiler/10.frontend/core/ast_stmt.spl
+# @cover src/compiler/10.frontend/core/_AstExpr/accessors.spl
+#
+# THE CLASS, stated once: every accessor over a shared, resettable AST arena is
+# reachable with an index that is no longer live — either PAST the end (minted
+# before an interleaved reset) or NEGATIVE (the -1 sentinel that the guarded
+# dispatchers themselves return, fed straight back in by a walker that did not
+# re-check it). An accessor that indexes its backing array without banding BOTH
+# ends does not produce a wrong answer, it aborts the process. That is why the
+# defect keeps resurfacing one sibling at a time: `expr_get_tag` was guarded,
+# then its siblings; then `stmt_get_tag`, then its siblings; and
+# `stmt_get_gpu_grid`/`stmt_get_gpu_block` banded only the UPPER end, so `-1`
+# passed their `idx < len` test and indexed negatively.
+#
+# This spec is deliberately a SWEEP, not a single case: it walks the family with
+# both out-of-range shapes so the next unguarded sibling added to the family is
+# caught by an existing test rather than by a stage-4 crash log.
+#
+# Non-vacuity: an unguarded accessor kills the whole process (measured:
+# `error: semantic: array index out of bounds: index is 12 but length is 0`,
+# exit 1), so no example here can pass by silently not running.
+
+use compiler.core.ast.{
+    ast_reset,
+    STMT_EXPR,
+    stmt_reset, stmt_alloc,
+    stmt_get_tag, stmt_get_span, stmt_get_expr, stmt_get_name, stmt_get_type, stmt_get_body,
+    stmt_get_gpu_grid, stmt_get_gpu_block,
+    expr_get_tag
+}
+
+# The two out-of-range shapes the class covers, exercised against a freshly
+# reset (empty) arena so EVERY index is out of range.
+fn _probe_all(idx: i64) -> i64:
+    # Returns a count of accessors that answered with their absent-sentinel.
+    # Reaching the return at all is the real assertion: an unguarded accessor
+    # aborts the process instead of returning.
+    var ok: i64 = 0
+    if stmt_get_tag(idx) == -1:
+        ok = ok + 1
+    if stmt_get_span(idx) == -1:
+        ok = ok + 1
+    if stmt_get_expr(idx) == -1:
+        ok = ok + 1
+    if stmt_get_name(idx) == "":
+        ok = ok + 1
+    if stmt_get_type(idx) == -1:
+        ok = ok + 1
+    if stmt_get_body(idx).len() == 0:
+        ok = ok + 1
+    if stmt_get_gpu_grid(idx).len() == 0:
+        ok = ok + 1
+    if stmt_get_gpu_block(idx).len() == 0:
+        ok = ok + 1
+    ok
+
+describe "AST arena accessor family fails closed on every non-live index":
+    it "answers with absent-sentinels for an index PAST the end of the arena":
+        ast_reset()
+        stmt_reset()
+        expect _probe_all(12) to_equal 8
+
+    it "answers with absent-sentinels for a NEGATIVE index (the -1 sentinel fed back in)":
+        ast_reset()
+        stmt_reset()
+        expect _probe_all(-1) to_equal 8
+
+    it "answers with absent-sentinels for an index stale across a reset":
+        stmt_reset()
+        val live = stmt_alloc(STMT_EXPR, 7)
+        ast_reset()
+        stmt_reset()
+        expect _probe_all(live + 12) to_equal 8
+
+    it "guards the expression half of the family the same way":
+        ast_reset()
+        expect expr_get_tag(-1) to_equal -1
+        expect expr_get_tag(9999) to_equal -1

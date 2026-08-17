@@ -529,13 +529,16 @@ fn stmt_contract_clause(tag: i64, binding: text, clause_stmts: [i64], span_id: i
     stmt_list_set(idx, "BODY", clause_stmts)
     idx
 
+# These two already band the upper bound but not the lower one: `idx = -1`, the
+# very sentinel `stmt_get_tag`/`decl_get` return for a stale index, passed the
+# `idx < len` test and indexed the array negatively.
 fn stmt_get_gpu_grid(idx: i64) -> [i64]:
-    if idx < stmt_gpu_grid_exprs.len():
+    if idx >= 0 and idx < stmt_gpu_grid_exprs.len():
         return stmt_gpu_grid_exprs[idx]
     []
 
 fn stmt_get_gpu_block(idx: i64) -> [i64]:
-    if idx < stmt_gpu_block_exprs.len():
+    if idx >= 0 and idx < stmt_gpu_block_exprs.len():
         return stmt_gpu_block_exprs[idx]
     []
 
@@ -565,34 +568,92 @@ fn stmt_get_tag(idx: i64) -> i64:
         print "[stmt_get_tag] idx={idx} env=<missing> fallback={fallback}"
     fallback
 
+# Sibling bounds guards for the rest of the statement accessor family.
+#
+# `stmt_get_tag` above has been guarded since the stage-4 work; its siblings
+# were not, and guarding only the dispatcher does not prevent the crash: a
+# walker reads the tag (gets -1 plus the loud OOB line), takes its default
+# branch, and then still reads `stmt_get_span/expr/name/type/body` with the
+# SAME stale index — and THAT unguarded read is what kills the process.
+#
+# Measured 2026-08-17 on the Rust seed (`bin/simple`,
+# bin/release/x86_64-unknown-linux-gnu/simple, mtime 2026-08-16 22:59), a plain
+# `bin/simple run` probe: stmt_alloc, ast_reset+stmt_reset, then read a stale
+# index. `stmt_get_tag` printed `[stmt_get_tag] OOB idx=12 arena_len=0
+# arena_gen=1 -> -1` and returned -1 as designed, and the very next
+# `stmt_get_span(12)` aborted the process with
+# `error: semantic: array index out of bounds: index is 12 but length is 0`
+# (exit 1) — the same "index is 48 but length is 13" class that kills the
+# stage-4 build. The expression half of this family was closed for exactly this
+# reason (see the matching comment block in `_AstExpr/accessors.spl`, which
+# names the statement half as "the measured reproducer"); the statement half
+# was left behind. Closed here.
+#
+# The env-mirror read stays FIRST, exactly as in `stmt_get_tag`: in the
+# interpreter bootstrap (`SIMPLE_BOOTSTRAP=1`) module-var arrays do not persist
+# and the env mirror is the only live store, so a length check on the arrays
+# ahead of it would reject live indices.
+#
+# Neutral returns match the established precedent in this arena family
+# (`decl_get`, `expr_get_tag`, `stmt_get_tag`); -1 / "" / [] are already the
+# "absent" sentinels these fields carry. This is CONTAINMENT, not a root-cause
+# fix — why a stale index reaches an accessor at all is still open in
+# doc/08_tracking/bug/stage4_phase3_flat_ast_arena_desync_2026-08-01.md.
+#
+# The loud, always-on report stays on `stmt_get_tag`; the per-accessor line is
+# gated behind SIMPLE_TRACE_AST_OOB (default off, same knob as the expression
+# half) so one stale subtree cannot flood the log with a line per field read.
+fn stmt_oob_trace(accessor: text, idx: i64, arena_len: i64):
+    val trace_ast_oob = rt_env_get("SIMPLE_TRACE_AST_OOB") ?? ""
+    if trace_ast_oob != "":
+        print "[{accessor}] OOB idx={idx} arena_len={arena_len} arena_gen={ast_generation()}"
+
+fn stmt_idx_is_live(idx: i64, arena_len: i64) -> bool:
+    idx >= 0 and idx < arena_len
+
 fn stmt_get_span(idx: i64) -> i64:
     val direct = stmt_env_read(idx, "SPAN")
     if direct != "":
         return stmt_parse_i64(direct)
+    if not stmt_idx_is_live(idx, stmt_span.len()):
+        stmt_oob_trace("stmt_get_span", idx, stmt_span.len())
+        return -1
     stmt_span[idx]
 
 fn stmt_get_expr(idx: i64) -> i64:
     val direct = stmt_env_read(idx, "EXPR")
     if direct != "":
         return stmt_parse_i64(direct)
+    if not stmt_idx_is_live(idx, stmt_expr.len()):
+        stmt_oob_trace("stmt_get_expr", idx, stmt_expr.len())
+        return -1
     stmt_expr[idx]
 
 fn stmt_get_name(idx: i64) -> text:
     val direct = stmt_env_read(idx, "NAME")
     if direct != "":
         return direct
+    if not stmt_idx_is_live(idx, stmt_name.len()):
+        stmt_oob_trace("stmt_get_name", idx, stmt_name.len())
+        return ""
     stmt_name[idx]
 
 fn stmt_get_type(idx: i64) -> i64:
     val direct = stmt_env_read(idx, "TYPE")
     if direct != "":
         return stmt_parse_i64(direct)
+    if not stmt_idx_is_live(idx, stmt_type_tag.len()):
+        stmt_oob_trace("stmt_get_type", idx, stmt_type_tag.len())
+        return -1
     stmt_type_tag[idx]
 
 fn stmt_get_body(idx: i64) -> [i64]:
     val direct = stmt_env_read(idx, "BODY")
     if direct != "":
         return stmt_i64_list_split(direct)
+    if not stmt_idx_is_live(idx, stmt_body.len()):
+        stmt_oob_trace("stmt_get_body", idx, stmt_body.len())
+        return []
     stmt_body[idx]
 
 export STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN, STMT_RETURN
