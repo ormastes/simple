@@ -1,6 +1,32 @@
 # Bug: JIT boxes i64 as `(value << 3) | TAG_INT` — drops the top 3 bits (bit-63 loss); miscompiles RV64 SoC
 
-## VERIFIED FIXED 2026-08-17 — and now actually covered by tests
+## ⛔ STATUS CORRECTION 2026-08-17 — STILL OPEN. Do not read this file for status.
+
+**This document is self-contradictory and has declared this defect fixed at
+least four times. It carries a "VERIFIED FIXED" claim (below), a second
+"VERIFIED FIXED (batch_02)" claim at line ~36, `Status: OPEN` in the metadata
+at line ~62, "not shippable" at line ~182, and a final section stating the fix
+landed and was then REVERTED. The last of those is the accurate one.**
+
+Authoritative status, with a path-by-path table and an execution measurement:
+`doc/08_tracking/bug/runtime_from_int_still_truncates_61bit_2026-08-17.md`.
+
+Measured 2026-08-17 by `cargo test --release -p simple-runtime --test
+boxed_int_wide_roundtrip` against freshly compiled runtime source (no deployed
+binary involved, so the stale-seed explanation offered below does not apply):
+
+```
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out
+from_int(0x8010000000000000).as_int() must round-trip, not truncate to 61 bits
+```
+
+`core.rs` is again `Self((i as u64) << 3)` — no range check, no heap box.
+`from_wide_int` has **no definition anywhere in the tree**; it survives only as
+a call inside the test. `HeapInt` / `HeapObjectType::Int` / `as_heap_i64` exist
+as readers with **no producer**. The LLVM backend truncates *independently* and
+never calls `rt_value_int` at all, so fixing the runtime alone will not fix it.
+The claim immediately below is false at HEAD and is retained only as the record
+of how this was mis-closed.
 
 Classified by content (brief correction #1). `RuntimeValue::from_int`
 (`src/compiler_rust/runtime/src/value/core.rs:260`) now range-checks before
