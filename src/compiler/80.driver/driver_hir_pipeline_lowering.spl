@@ -97,6 +97,20 @@ fn _format_hir_lowering_error(name: text, err: LoweringError) -> text:
     else:
         "HIR lowering error in {name}: {err.message}"
 
+fn _driver_shown_fatal_count(total: i64, unbounded: bool) -> i64:
+    """How many of `total` fatal diagnostics were actually printed.
+
+    The `[hir-fatal-count]` line reports this next to the true total so a
+    reader can tell "10 shown of 10" from "10 shown of 400" and never mistakes
+    a truncated list for the whole story. Kept as a free function returning a
+    scalar: the surrounding loop runs under Stage-3 closure pressure where
+    aggregate transport is unreliable."""
+    if unbounded:
+        return total
+    if total > 10:
+        return 10
+    total
+
 fn _driver_collect_hir_errors(ctx: CompileContext, name: text, errors: [LoweringError]):
     for err in errors:
         if err.kind == LoweringErrorKind.Recovered:
@@ -558,13 +572,33 @@ impl CompilerDriver:
                     if not bootstrap_mode:
                         self.ctx.add_warning(module_error_message)
                 else:
-                    if bootstrap_diag and module_fatal_error_count < 5:
-                        eprint("[bootstrap-hir-module-fatal] source_idx={source_idx} error_idx={module_error_idx} len={module_error_message.len()} text={module_error_message}")
+                    # A FATAL lowering diagnostic is printed UNCONDITIONALLY,
+                    # with its text, at the moment it is recorded.
+                    #
+                    # It used to be gated behind SIMPLE_BOOTSTRAP_DEBUG=1 while
+                    # the `[bootstrap-error-count]` lines below were not, so a
+                    # bootstrap stage emitted diagnostic COUNTS (count=0 -> 21
+                    # -> 25) and never the diagnostic TEXT. The end-of-phase
+                    # `[collect-all]` report does print the text -- but only if
+                    # the process survives to reach it. A stage that dies
+                    # mid-phase (SIGSEGV, OOM kill, exit 139) therefore left
+                    # counts proving diagnostics existed and nothing saying what
+                    # they were. Six stage-3 failures produced no actionable
+                    # message for exactly this reason; the empty-log family is
+                    # documented in
+                    # doc/08_tracking/bug/bootstrap_stage2_silent_exit1_empty_log_2026-08-17.md
+                    #
+                    # Volume is bounded per module (not by source_idx, which
+                    # silenced everything past the 20th file) so a module with
+                    # hundreds of cascading errors cannot flood the log; the
+                    # count line below always states the true total.
+                    if module_fatal_error_count < 10 or bootstrap_diag:
+                        eprint("[hir-fatal] source_idx={source_idx} path={src.path} error_idx={module_error_idx} text={module_error_message}")
                     module_fatal_error_count = module_fatal_error_count + 1
                     self.ctx.add_error(module_error_message)
                 module_error_idx = module_error_idx + 1
-            if bootstrap_diag and module_fatal_error_count > 0:
-                eprint("[bootstrap-hir-module-fatal-count] source_idx={source_idx} path={src.path} count={module_fatal_error_count}")
+            if module_fatal_error_count > 0:
+                eprint("[hir-fatal-count] source_idx={source_idx} path={src.path} count={module_fatal_error_count} shown={_driver_shown_fatal_count(module_fatal_error_count, bootstrap_diag)}")
             if source_idx < 3:
                 eprint("[bootstrap-error-count] source_idx={source_idx} point=post-diagnostics count={self.ctx.error_count_value}")
             if not _driver_hir_mem_snapshot(
@@ -591,6 +625,15 @@ impl CompilerDriver:
             # module was lowered. A global `errors.len() > 0` would report
             # every module after the first failure as poisoned too.
             if self.ctx.error_count_value > module_errors_before:
+                # Fail LOUDLY rather than silently: the module is about to be
+                # poisoned and dropped. If the rise in error_count did not come
+                # from the diagnostic loop above, nothing has printed a reason,
+                # and that silence is the defect this block exists to prevent.
+                # Say so explicitly instead of leaving the reader with only a
+                # count delta.
+                if module_fatal_error_count == 0:
+                    eprint("[hir-fatal] source_idx={source_idx} path={src.path} text=<no diagnostic text> errors rose {module_errors_before}->{self.ctx.error_count_value} with zero fatal lowering diagnostics; the cause is outside the module-error loop (memory-snapshot write failure or a directly added context error)")
+                eprint("[hir-poisoned] source_idx={source_idx} path={src.path} module={name} errors={module_errors_before}->{self.ctx.error_count_value}")
                 val poison_ctx: CompileContext = self.ctx
                 poison_ctx.mark_module_poisoned(name)
                 if poison_ctx.poison_budget_exhausted():
