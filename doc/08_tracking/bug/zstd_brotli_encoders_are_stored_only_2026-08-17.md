@@ -40,6 +40,16 @@ bytes. Fixed by walking the server preference order and taking the first
 mutually-acceptable codec that actually shrinks the body; preference order is
 otherwise unchanged (`Accept-Encoding: gzip, lz4` still selects gzip).
 
+## Triage 2026-08-17 — encoders DEFERRED, no live defect remains
+
+Re-verified 2026-08-17: `compression_spec.spl` is green (20/20) including the
+multi-codec fallback fixed above, so nothing user-visible is broken — the
+dispatcher never serves a non-shrinking zstd/br body. Implementing real
+encoders means FSE + Huffman entropy coding (zstd, RFC 8878 §4) and brotli's
+static-dictionary/context modeling (RFC 7932) — a multi-week feature, not a
+bug fix, and no C-runtime `libzstd`/`libbrotli` binding exists in-tree to
+shortcut it. Deferred as a capability gap; the items below remain the frontier.
+
 ## Still open
 
 - `zstd_compress_frame` performs no actual compression.

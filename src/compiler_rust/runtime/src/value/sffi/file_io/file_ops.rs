@@ -346,6 +346,99 @@ pub unsafe extern "C" fn rt_file_read_text_rv(path: RuntimeValue) -> RuntimeValu
     rt_file_read_text(ptr, len as u64)
 }
 
+/// Atomically write `content` to `path` (RuntimeValue text args, mirrors the C
+/// runtime's `rt_file_atomic_write` in `src/runtime/runtime_native.c`).
+///
+/// Semantics kept identical to the C definition: reject empty or NUL-bearing
+/// paths, create missing parent directories, write to a same-directory temp
+/// file, then `rename()` over the target. On Unix, an existing target's mode
+/// is preserved. Returns 1 on success, 0 on any failure.
+///
+/// This lives in the Rust runtime staticlib because the single-file
+/// `compile --native` link resolves `libsimple_runtime.a` from the cargo
+/// target dirs BEFORE `build/simple-core` (see
+/// `NativeBinaryOptions::find_runtime_library_path_for_target`), and the Rust
+/// archive lacked the symbol — `use std.nogc_sync_mut.enterprise_store.store`
+/// therefore failed with `codegen: undefined symbol: rt_file_atomic_write`
+/// (doc/08_tracking/bug/native_link_missing_rt_file_atomic_write_2026-08-17.md).
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_atomic_write(path: RuntimeValue, content: RuntimeValue) -> i64 {
+    use crate::value::collections::{rt_string_data, rt_string_len};
+    use std::io::Write;
+
+    let decode = |v: RuntimeValue| -> Option<Vec<u8>> {
+        if v.is_nil() || v.0 == 0 {
+            return None;
+        }
+        let len = rt_string_len(v);
+        if len < 0 {
+            return None;
+        }
+        let ptr = rt_string_data(v);
+        if ptr.is_null() {
+            return None;
+        }
+        Some(std::slice::from_raw_parts(ptr, len as usize).to_vec())
+    };
+
+    let path_bytes = match decode(path) {
+        Some(b) if !b.is_empty() && !b.contains(&0) => b,
+        _ => return 0,
+    };
+    let content_bytes = match decode(content) {
+        Some(b) => b,
+        None => return 0,
+    };
+    let path_str = match std::str::from_utf8(&path_bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => return 0,
+    };
+    let target = std::path::PathBuf::from(&path_str);
+
+    #[cfg(unix)]
+    let existing_mode = std::fs::metadata(&target).ok().map(|m| {
+        use std::os::unix::fs::PermissionsExt;
+        m.permissions().mode()
+    });
+
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() && std::fs::create_dir_all(parent).is_err() {
+            return 0;
+        }
+    }
+
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temp_path = std::path::PathBuf::from(format!(
+        "{}.tmp.{}.{}",
+        path_str,
+        std::process::id(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp_path)?;
+        file.write_all(&content_bytes)?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+        return 0;
+    }
+
+    #[cfg(unix)]
+    if let Some(mode) = existing_mode {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode));
+    }
+
+    if std::fs::rename(&temp_path, &target).is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+        return 0;
+    }
+    1
+}
+
 /// Write text to file
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_write_text(
@@ -525,64 +618,6 @@ pub extern "C" fn rt_file_lock(_path: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_file_unlock(_handle: i64) -> bool {
     true
-}
-
-/// Atomic whole-file write: temp file in the target directory + rename.
-///
-/// Mirrors `src/runtime/runtime_native.c`'s `rt_file_atomic_write` (creates
-/// missing parent directories, preserves an existing file's mode on unix,
-/// fsyncs before rename; returns 1 on success, 0 on failure). Needed by
-/// `std.enterprise_store`'s `file_backend.spl`; without a definition here the
-/// single-file `compile --native` link against the cargo-built
-/// `libsimple_runtime.a` fails with `undefined symbol: rt_file_atomic_write`
-/// (doc/08_tracking/bug/native_link_missing_rt_file_atomic_write_2026-08-17.md).
-#[no_mangle]
-pub extern "C" fn rt_file_atomic_write(path: i64, content: i64) -> i64 {
-    let Some(path) = tagged_text_to_str(path) else {
-        return 0;
-    };
-    let Some(content) = tagged_text_to_bytes(content) else {
-        return 0;
-    };
-    if path.is_empty() || path.contains('\0') {
-        return 0;
-    }
-    let target = Path::new(path);
-    #[cfg(unix)]
-    let existing_mode = std::fs::metadata(target).ok().map(|meta| {
-        use std::os::unix::fs::PermissionsExt;
-        meta.permissions().mode()
-    });
-    if let Some(parent) = target.parent() {
-        if !parent.as_os_str().is_empty() && !parent.is_dir() && std::fs::create_dir_all(parent).is_err() {
-            return 0;
-        }
-    }
-    let file_name = match target.file_name().and_then(|name| name.to_str()) {
-        Some(name) => name,
-        None => return 0,
-    };
-    static ATOMIC_WRITE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = ATOMIC_WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let temp_name = format!(".{}.tmp.{}.{}", file_name, std::process::id(), seq);
-    let temp_path = target.with_file_name(temp_name);
-    invalidate_read_mmap_caches(path);
-    let write_result = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new().create_new(true).write(true).open(&temp_path)?;
-        file.write_all(content)?;
-        file.sync_all()?;
-        #[cfg(unix)]
-        if let Some(mode) = existing_mode {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
-        }
-        Ok(())
-    })();
-    if write_result.is_err() || std::fs::rename(&temp_path, target).is_err() {
-        let _ = std::fs::remove_file(&temp_path);
-        return 0;
-    }
-    1
 }
 
 #[no_mangle]
@@ -2051,6 +2086,48 @@ sandbox_lowering:
             assert!(rt_file_move(src_ptr, src_len, dest_ptr, dest_len));
             assert!(!src_path.exists());
             assert!(dest_path.exists());
+        }
+    }
+
+    // Reproducing test for
+    // doc/08_tracking/bug/native_link_missing_rt_file_atomic_write_2026-08-17.md:
+    // the Rust staticlib must DEFINE rt_file_atomic_write with the C runtime's
+    // semantics (write + overwrite, no temp file left behind).
+    fn rv_text(s: &str) -> RuntimeValue {
+        RuntimeValue::from_raw(string_to_tagged_text(s) as u64)
+    }
+
+    #[test]
+    fn test_rt_file_atomic_write_writes_and_overwrites() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("atomic.txt");
+        let path = rv_text(file_path.to_str().unwrap());
+        unsafe {
+            assert_eq!(rt_file_atomic_write(path, rv_text("first")), 1);
+            assert_eq!(fs::read_to_string(&file_path).unwrap(), "first");
+            assert_eq!(rt_file_atomic_write(path, rv_text("second")), 1);
+            assert_eq!(fs::read_to_string(&file_path).unwrap(), "second");
+        }
+        // No .tmp.* residue in the directory.
+        let leftovers: Vec<_> = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty());
+    }
+
+    // Similar-problem test: edge semantics shared with the C definition —
+    // missing parent directories are created; an empty path is rejected.
+    #[test]
+    fn test_rt_file_atomic_write_creates_parents_and_rejects_empty_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let nested = temp_dir.path().join("a/b/c/atomic.txt");
+        let path = rv_text(nested.to_str().unwrap());
+        unsafe {
+            assert_eq!(rt_file_atomic_write(path, rv_text("deep")), 1);
+            assert_eq!(fs::read_to_string(&nested).unwrap(), "deep");
+            assert_eq!(rt_file_atomic_write(rv_text(""), rv_text("x")), 0);
         }
     }
 }

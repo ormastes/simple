@@ -1,41 +1,46 @@
 # `--native` link fails on `rt_file_atomic_write`, so `std.enterprise_store` cannot be AOT-compiled
 
-**Status:** RESOLVED 2026-08-17, lane W13-A of `.spipe/simple_enterprise_suite`.
-**Severity:** blocked end-to-end native measurement of the enterprise store.
+**Status:** RESOLVED in source 2026-08-17 (pending seed redeploy). Filed 2026-08-17, lane W12-A of `.spipe/simple_enterprise_suite`.
 
-## Root cause (lane W13-A, with link-line evidence)
+## RESOLVED (2026-08-17)
 
-The archive W12-A inspected was never on the link line. With
-`SIMPLE_LINKER_DEBUG=1` the failing single-file `--native` link is:
+Root cause confirmed: the link-line suspicion was right, but it is the
+**archive selection**, not ordering. `run_link_pass`
+(`linker/native_binary/linker.rs`) resolves the runtime dir via
+`NativeBinaryOptions::find_runtime_library_path_for_target`
+(`linker/native_binary/options.rs:339`), which walks the exe dir /
+`repo_release_artifact_path_from_dir` and the `cargo_target_paths` list —
+`src/compiler_rust/target/release/deps/libsimple_runtime.a` (the **Rust**
+runtime staticlib) wins before `build/simple-core`. Verified directly:
+`nm -g --defined-only src/compiler_rust/target/release/deps/libsimple_runtime.a`
+has **zero** `rt_file_atomic_write`, while `build/simple-core/libsimple_runtime.a`
+has one — the filed "present in the archive" check inspected the archive the
+link never used.
 
-```
-ld.lld ... main.o _main_shim.o build/simple-sqlite/runtime_sqlite.o crtn.o \
-  -L <seed target>/release/deps ... -Bstatic -lsimple_runtime -Bdynamic -lc ... -lsqlite3
-```
+Fix: implemented `rt_file_atomic_write(path: RuntimeValue, content: RuntimeValue) -> i64`
+in the Rust runtime staticlib
+(`src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs`), mirroring
+the C definition's semantics exactly (empty/NUL-path rejection, parent-dir
+creation, same-dir `path.tmp.<pid>.<seq>` temp file, fsync, mode preservation
+on Unix, rename). Verified with `cargo check --release --bin simple` — clean.
 
-`-lsimple_runtime` resolves from the seed's cargo `deps/` directory — the
-**Rust** `libsimple_runtime.a` staticlib built from
-`src/compiler_rust/runtime`, chosen because
-`NativeBinaryOptions::find_runtime_library_path_for_target` prefers
-`exe_dir/deps` (the seed's own cargo dir) over `build/simple-core`. That
-crate never defined `rt_file_atomic_write` — measured:
-`nm -g --defined-only <target>/release/deps/libsimple_runtime.a` shows
-`T rt_file_write_text_at` (3 defs) and **zero** `rt_file_atomic_write`. The C
-`build/simple-core/libsimple_runtime.a` (from `runtime_native.c`) does define
-it, but that archive is only used when the cargo dirs are absent — so W12-A's
-"present in the archive" check looked at the wrong archive. Not gc-sections,
-not name mangling, not link order.
+Tests: two Rust unit tests added beside the implementation
+(`test_rt_file_atomic_write_writes_and_overwrites` — the reproducing test:
+symbol defined, write + overwrite, no `.tmp.*` residue — and
+`test_rt_file_atomic_write_creates_parents_and_rejects_empty_path` — the
+similar-problem edges shared with the C definition). Compile-verified via
+`cargo check --release -p simple-runtime --tests` (check only; bootstrap owned
+build resources). An end-to-end `.spl` native-link spec is **deploy-gated**:
+the deployed seed predates this fix and `1f4121930a8`, so any `compile
+--native` repro fails earlier at `rt_sqlite_open` until the seed is redeployed.
 
-**Fix (Rust seed edit, no pure-Simple path exists — the missing symbol lives
-in the Rust runtime crate the seed links):** implement
-`rt_file_atomic_write(path: i64, content: i64) -> i64` in
-`src/compiler_rust/runtime/src/value/sffi/file_io/file_ops.rs`, mirroring the
-C semantics (parent-dir creation, unix mode preservation, temp+fsync+rename,
-1/0 return). Gate extended: `scripts/check/check-store-open-acid.shs` now has
-a second stage that AOT-compiles
-`test/fixture/enterprise_store/store_native_acid_probe.spl` (which imports
-`std.enterprise_store` itself) and requires `store_acid=true` from the native
-binary.
+**Caveat (same as `1f4121930a8`):** the deployed seed
+(`bin/release/x86_64-unknown-linux-gnu/simple`, mtime 2026-08-16 22:59)
+predates BOTH this fix and the sqlite on-demand link fix — the repro today
+fails earlier, at `rt_sqlite_open`, on that binary. End-to-end native
+`store_backend_acid` measurement still awaits a seed rebuild + redeploy
+(bootstrap owned the build resources when this landed).
+**Severity:** blocks end-to-end native measurement of the enterprise store.
 
 ## Symptom
 
