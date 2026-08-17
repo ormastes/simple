@@ -748,3 +748,35 @@ New acceptance criteria (extends AC-1..AC-12 above):
   deliberately removed API (delete it with justification) — and then FOLD ALL
   21 INTO THE RECORDED SUITE so the enumeration can never silently drift
   again. Deleting a spec merely because it is red is not acceptable.
+- DUPLICATE SHA-256 PINNED (2026-08-17, lane W12-C). New parity spec
+  test/01_unit/.../enterprise_store_audit_hash_parity_spec.spl — 14/14. The
+  oracle is EXTERNAL reference digests (FIPS 180-4 + python3 hashlib), NOT
+  mutual agreement between the two implementations: mutual agreement would be
+  satisfied by two identically-wrong copies. Vectors: empty, "abc", the FIPS
+  56-byte two-block case, 55/56 (classic padding off-by-one), 63/64/65 (block
+  boundary both sides plus exact fit), 119/120, a 1000-byte sixteen-block
+  input, high-bit-set UTF-8 (would catch a sign-extending u8->i64 in
+  ah_padded_byte), and a realistic audit-record JSON. Both implementations
+  matched ground truth on all 13 — no drift, no live bug.
+  ROOT FIX ASSESSED AND DELIBERATELY DECLINED, with the evidence that makes it
+  a trap: rejection sites are in the RUST SEED —
+  compiler_rust/compiler/src/compilability.rs:529 (Expr::Slice ->
+  CollectionOps) and :879 (Expr::ArrayRepeat -> CollectionLiteral), diagnostic
+  at pipeline/execution.rs:266-292 fired from :611/:746; the .spl mirror
+  src/compiler/80.driver/compilability.spl is a port with NO callers. Lowering
+  exists for both (rt_slice, rt_array_repeat — single calls, no loop emitter),
+  and the Dict arm at :555-576 is precedent for relaxing one. BUT the halves
+  differ in maturity: rt_slice is threaded into the standalone
+  symbol-emission path at four sites in codegen/common_backend.rs (:141, :385,
+  :583, :3290) plus elf_utils.rs:601, while rt_array_repeat appears in EXACTLY
+  ONE file (codegen/runtime_sffi.rs:267) and is absent from both — so relaxing
+  :879 today would LINK-FAIL on an unresolved symbol. Sequenced as its own
+  compiler lane: wire rt_array_repeat into the allowlist -> relax :879 then
+  :529 with tests -> rebuild seed -> only then collapse audit_hash to a
+  re-export. The parity spec survives that collapse, becoming a tautology on
+  one side, which is the correct end state.
+  Duplication made safe meanwhile: reciprocal DUPLICATE-OF: headers in
+  audit_hash.spl and common/crypto/sha256.spl, each naming the other, the
+  parity spec, and the rejection-site file:line. Verdicts: parity 14/14,
+  enterprise_store 10/10, harden 5/5, cross-OS PASS (8 probes), docgen 0 stubs.
+  Merged-tree reruns: parity 14/14, enterprise_store 10/10.
