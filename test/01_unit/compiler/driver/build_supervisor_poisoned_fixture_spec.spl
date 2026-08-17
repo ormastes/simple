@@ -1,0 +1,232 @@
+# @cover src/compiler/80.driver/driver_build/build_outcome.spl 0%
+# @req REQ-DRIVER-BUILD-OUTCOME-003
+"""
+# Six poisoned modules, reported correctly in ONE run
+
+**Category:** Compiler / driver
+**Status:** Instance spec — the acceptance criterion for the crash-safe build slice
+
+## Purpose and Audience
+
+The acceptance criterion for a crash-safe build is not "the build survives a bad
+module". It is: **one run reaches the END of a poisoned work list and reports
+every unit in it, with the categories disjoint.** A build that dies on the first
+bad unit makes every subsequent defect cost another full build to discover — the
+recurring defect recorded in
+`test/01_unit/compiler/driver/build_phase_collect_all_contract_spec.spl`.
+
+This spec drives the six-module fixture in
+`test/fixtures/build_supervisor_poisoned/` through the shared outcome vocabulary
+in `compiler.driver.driver_build.build_outcome`, using REAL subprocesses with
+REAL wait statuses.
+
+The audience is anyone changing the supervisor's unit loop or its
+classification.
+
+## Scope and Preconditions
+
+Six units, one build unit each, four disjoint expected categories:
+
+| unit | fixture                | expected | how it is induced |
+|------|------------------------|----------|-------------------|
+| 1 | `unit1_parse_error.spl` | ERROR    | REAL — `bin/simple run` on genuinely unparseable source, measured exit 1 |
+| 2 | `unit2_segfault.spl`    | CRASHED  | real SIGSEGV of a real child (status 139) — **not** a compiler segfault |
+| 3 | `unit3_oom.spl`         | CRASHED  | real SIGKILL of a real child (status 137) — **not** a real OOM |
+| 4 | `unit4_timeout.spl`     | TIMEOUT  | REAL — a child that genuinely outruns a 1s per-unit budget |
+| 5 | `unit5_clean.spl`       | OK       | REAL — `bin/simple run`, measured exit 0 |
+| 6 | `unit6_clean.spl`       | OK       | REAL — `bin/simple run`, measured exit 0 |
+
+**Stated plainly, because a fixture that overclaims is worse than none:** units 2
+and 3 do not make the *compiler* crash. No .spl source is known to segfault it on
+demand, and a genuine compile-time OOM on this host would be reaped by
+`earlyoom` as SIGTERM (143 = TERMINATED = UNVERIFIED), which is a different
+category from the one under test. What is real in units 2 and 3 is the part that
+matters here: the supervisor observes an actual signal death of an actual child
+and must classify and survive it. Each fixture file repeats this caveat in its
+own header.
+
+### Why the build command is wrapped
+
+`shell()` (`std.nogc_sync_mut.io.process_ops`) reports **-1** for *every* signal
+death — SIGSEGV, SIGKILL and SIGTERM are indistinguishable through it (measured).
+A supervisor reading that channel could not tell CRASHED from TERMINATED, i.e.
+could not tell a compiler bug from earlyoom. So every unit's command is wrapped
+so the outer shell reports the POSIX `128+N` status as its own ordinary exit
+code, which the runtime does preserve. That channel contract is itself pinned as
+a defect class in
+`build_supervisor_status_channel_fidelity_spec.spl`.
+
+## Expected Outcome
+
+ONE pass over the list produces six records: OK=2, ERROR=1, CRASHED=2,
+TIMEOUT=1, TERMINATED=0, NOT_RUN=0. The last unit is reached. TIMEOUT is
+excluded from `failure_count()`. The summary is byte-identical across two
+independent passes.
+
+The negative control at the bottom runs the SAME six units through a supervisor
+that returns on the first non-OK unit — the unfixed behaviour — and asserts it is
+measurably worse: it reports fewer units, never reaches the clean tail, and
+leaves units NOT_RUN.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.process_ops.{shell}
+use compiler.driver.driver_build.build_outcome.{
+    BuildOutcomeKind, BuildUnitOutcome, BuildOutcomeSet
+}
+
+val FIXTURE_DIR = "test/fixtures/build_supervisor_poisoned"
+
+# The six units, in work-list order.
+fn poisoned_unit_paths() -> [text]:
+    ["{FIXTURE_DIR}/unit1_parse_error.spl",
+     "{FIXTURE_DIR}/unit2_segfault.spl",
+     "{FIXTURE_DIR}/unit3_oom.spl",
+     "{FIXTURE_DIR}/unit4_timeout.spl",
+     "{FIXTURE_DIR}/unit5_clean.spl",
+     "{FIXTURE_DIR}/unit6_clean.spl"]
+
+# The inner command for one unit. Units 1/5/6 really invoke the compiler; 2/3/4
+# are induced at the process level (see the docstring's honesty note).
+fn inner_command_for(path: text) -> text:
+    if path.contains("unit2_segfault"):
+        return "kill -SEGV $$"
+    if path.contains("unit3_oom"):
+        return "kill -KILL $$"
+    if path.contains("unit4_timeout"):
+        return "sleep 30"
+    "bin/simple run {path} >/dev/null 2>&1"
+
+# Run one unit and report (status, timed_out).
+#
+# The `sh -c '...'; rc=$?; exit $rc` shape is load-bearing: the inner shell dies
+# by the signal, the OUTER shell turns that into an ordinary 128+N exit status,
+# and only then does the runtime see it. Reading the status any other way loses
+# the signal. `timeout 1` supplies the per-unit budget for unit 4; a budget kill
+# surfaces as 124, which is the supervisor's `timed_out` signal, NOT a status to
+# classify.
+fn run_unit(path: text) -> (i64, bool):
+    val inner = inner_command_for(path)
+    val budget = if path.contains("unit4_timeout"): "timeout 1 " else: ""
+    val result = shell("{budget}sh -c '{inner}'; rc=$?; exit $rc")
+    val status = result.exit_code
+    if status == 124:
+        return (0, true)
+    (status, false)
+
+# THE SUPERVISOR UNDER TEST. Record every unit, continue past every failure,
+# judge only after the loop. The `continue`-instead-of-`return` is the whole fix.
+fn supervise_collect_all(paths: [text]) -> BuildOutcomeSet:
+    var outcomes = BuildOutcomeSet.empty()
+    var unit_id = 0
+    for path in paths:
+        unit_id = unit_id + 1
+        val (status, timed_out) = run_unit(path)
+        val diagnostics = if status != 0 and status < 128:
+            "[compile] {path}: exited {status}"
+        else:
+            ""
+        outcomes.record(BuildUnitOutcome.from_status(unit_id, path, status,
+            timed_out, 0, 0, diagnostics))
+    outcomes
+
+# THE NEGATIVE CONTROL — the UNFIXED behaviour, kept executable so the claim
+# "the fix makes it better" is measured rather than asserted. Returns on the
+# first non-OK unit, then states the units it never reached as NOT_RUN (a
+# supervisor that did not even do THAT would be worse still).
+fn supervise_return_on_first_failure(paths: [text]) -> BuildOutcomeSet:
+    var outcomes = BuildOutcomeSet.empty()
+    var unit_id = 0
+    var stopped = false
+    for path in paths:
+        unit_id = unit_id + 1
+        if stopped:
+            outcomes.record(BuildUnitOutcome.not_run(unit_id, path))
+            continue
+        val (status, timed_out) = run_unit(path)
+        outcomes.record(BuildUnitOutcome.from_status(unit_id, path, status,
+            timed_out, 0, 0, ""))
+        if status != 0 or timed_out:
+            stopped = true
+    outcomes
+
+describe "one run reports all six poisoned units":
+    it "records exactly one outcome per unit and reaches the last one":
+        val paths = poisoned_unit_paths()
+        val outcomes = supervise_collect_all(paths)
+        expect(outcomes.len()).to_equal(6)
+        # Reaching the LAST unit is the acceptance criterion in one assertion.
+        assert_true(outcomes.has_path("{FIXTURE_DIR}/unit6_clean.spl"))
+        expect(outcomes.count_of(BuildOutcomeKind.NOT_RUN)).to_equal(0)
+
+    it "assigns the four expected categories, disjointly":
+        val outcomes = supervise_collect_all(poisoned_unit_paths())
+        expect(outcomes.count_of(BuildOutcomeKind.OK)).to_equal(2)
+        expect(outcomes.count_of(BuildOutcomeKind.ERROR)).to_equal(1)
+        expect(outcomes.count_of(BuildOutcomeKind.CRASHED)).to_equal(2)
+        expect(outcomes.count_of(BuildOutcomeKind.TIMEOUT)).to_equal(1)
+        # 143/SIGTERM is a DIFFERENT category and nothing here produces it.
+        expect(outcomes.count_of(BuildOutcomeKind.TERMINATED)).to_equal(0)
+
+    it "puts each named fixture in the category it was built to produce":
+        val outcomes = supervise_collect_all(poisoned_unit_paths())
+        expect(outcomes.paths_in(BuildOutcomeKind.ERROR)[0])
+            .to_equal("{FIXTURE_DIR}/unit1_parse_error.spl")
+        val crashed = outcomes.paths_in(BuildOutcomeKind.CRASHED)
+        expect(crashed[0]).to_equal("{FIXTURE_DIR}/unit2_segfault.spl")
+        expect(crashed[1]).to_equal("{FIXTURE_DIR}/unit3_oom.spl")
+        expect(outcomes.paths_in(BuildOutcomeKind.TIMEOUT)[0])
+            .to_equal("{FIXTURE_DIR}/unit4_timeout.spl")
+        val ok = outcomes.paths_in(BuildOutcomeKind.OK)
+        expect(ok[0]).to_equal("{FIXTURE_DIR}/unit5_clean.spl")
+        expect(ok[1]).to_equal("{FIXTURE_DIR}/unit6_clean.spl")
+
+    it "counts the timed-out unit as UNVERIFIED, never as a failure":
+        val outcomes = supervise_collect_all(poisoned_unit_paths())
+        # 1 ERROR + 2 CRASHED. The TIMEOUT is deliberately NOT here: a unit that
+        # was never given time to answer has not been judged.
+        expect(outcomes.failure_count()).to_equal(3)
+        expect(outcomes.unverified_count()).to_equal(1)
+
+    it "names every non-OK unit in a deterministic summary":
+        val outcomes = supervise_collect_all(poisoned_unit_paths())
+        val summary = outcomes.summary()
+        for path in poisoned_unit_paths():
+            assert_true(outcomes.has_path(path))
+        assert_true(summary.contains("OK=2"))
+        assert_true(summary.contains("ERROR=1"))
+        assert_true(summary.contains("CRASHED=2"))
+        assert_true(summary.contains("TIMEOUT=1"))
+        assert_true(summary.contains("unit4_timeout.spl"))
+        # The UNVERIFIED categories must SAY they are infrastructure.
+        assert_true(summary.contains("UNVERIFIED"))
+
+    it "produces a byte-identical summary on a second independent run":
+        # Units finish in whatever order the host schedules them; the summary
+        # must not. Two full passes, compared byte-for-byte.
+        val first = supervise_collect_all(poisoned_unit_paths()).summary()
+        val second = supervise_collect_all(poisoned_unit_paths()).summary()
+        expect(first).to_equal(second)
+
+describe "negative control: returning on the first failure is measurably worse":
+    it "reports strictly fewer real outcomes than the collect-all supervisor":
+        val paths = poisoned_unit_paths()
+        val fixed = supervise_collect_all(paths)
+        val unfixed = supervise_return_on_first_failure(paths)
+        # Both name six units — the unfixed one only because it is honest enough
+        # to state NOT_RUN. What it cannot do is JUDGE them.
+        expect(fixed.not_run_count()).to_equal(0)
+        assert_true(unfixed.not_run_count() > 0)
+        expect(unfixed.not_run_count()).to_equal(5)
+
+    it "never discovers the defects that sit behind the first one":
+        val unfixed = supervise_return_on_first_failure(poisoned_unit_paths())
+        # The two real crashers are behind the parse error and stay invisible.
+        expect(unfixed.count_of(BuildOutcomeKind.CRASHED)).to_equal(0)
+        expect(unfixed.count_of(BuildOutcomeKind.TIMEOUT)).to_equal(0)
+
+    it "never reaches the clean tail, so a green module reads as unbuilt":
+        val unfixed = supervise_return_on_first_failure(poisoned_unit_paths())
+        expect(unfixed.count_of(BuildOutcomeKind.OK)).to_equal(0)
+        val not_run = unfixed.paths_in(BuildOutcomeKind.NOT_RUN)
+        assert_true(not_run.contains("{FIXTURE_DIR}/unit6_clean.spl"))
