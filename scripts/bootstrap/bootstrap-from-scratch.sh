@@ -2916,7 +2916,14 @@ if [ "${deploy}" -eq 1 ]; then
     fi
   fi
 
+  full_hash="$(hash_file "${full_bin}")"
   current_hash="$(hash_file "${deployed_bin}")"
+  if [ "${current_hash}" != "${full_hash}" ]; then
+    echo "ERROR: deployed compiler hash differs from admitted Stage 4 candidate" >&2
+    echo "  candidate: ${full_hash}" >&2
+    echo "  deployed:  ${current_hash}" >&2
+    exit 1
+  fi
   backup_hash="none"
   [ "${backup_created}" -eq 1 ] && [ -f "${prev_bin}" ] && [ ! -L "${prev_bin}" ] && backup_hash="$(hash_file "${prev_bin}")"
   {
@@ -2924,6 +2931,7 @@ if [ "${deploy}" -eq 1 ]; then
     echo "platform=${PLATFORM}"
     echo "current_path=${deployed_bin}"
     echo "current_sha256=${current_hash}"
+    echo "stage4_candidate_sha256=${full_hash}"
     echo "backup_path=${prev_bin}"
     echo "backup_sha256=${backup_hash}"
     echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
