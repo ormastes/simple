@@ -244,6 +244,13 @@ impl CompilerDriver:
 
             lowering.begin_module(source.path)
             log_phase("phase3:hir:file:start {source.path} module={source.module_name}")
+            # In-flight receipt, same reasoning as the parse loop: HIR lowering
+            # is the phase that actually breaks (stack-exhaustion SIGSEGV,
+            # 2026-08-17), so the module being lowered must be named BEFORE the
+            # work starts or a hang here is unattributable.
+            log_build_progress("hir", "modules", progress_hir_done,
+                surfaces.surfaces.len(), source.module_name,
+                2, 6, 0, 0, "running")
             # Baseline for the per-module poison check: pre-existing errors
             # belong to EARLIER modules and must not poison this one.
             # Stage-2 self-host codegen has a known aggregate-receiver hazard
@@ -288,14 +295,13 @@ impl CompilerDriver:
             if is_requested_bootstrap_entry:
                 phase_entry_hir = Some(hir_module)
             log_phase("phase3:hir:file:done {source.path} module={source.module_name} funcs={hir_module.functions.len()}")
-            # Sixteen modules keeps the append-only progress receipt current
-            # even when the next compiler/parser module takes several minutes.
-            # This writes at most ~90 tiny records for the present 1,431-module
-            # Stage 4 graph, so it has no measurable compiler-loop overhead.
-            if progress_hir_done % 16 == 0 or progress_hir_done == surfaces.surfaces.len():
-                log_build_progress("hir", "modules", progress_hir_done,
-                    surfaces.surfaces.len(), source.module_name,
-                    2, 6, 0, 0, "running")
+            # Report EVERY module, not a 16-module cadence: a stall inside a
+            # batch was indistinguishable from normal work, and `current` was
+            # stale by up to 15 modules. One append per module against a
+            # multi-minute phase costs nothing measurable.
+            log_build_progress("hir", "modules", progress_hir_done,
+                surfaces.surfaces.len(), source.module_name,
+                2, 6, 0, 0, "running")
             source_index = source_index + 1
 
         # Collect-all summary (streaming surfaces path). Same provenance marker
@@ -417,6 +423,12 @@ impl CompilerDriver:
         var retained_hir_module_count: i64 = self.ctx.hir_module_count_value
         val entry_source_index = bootstrap_entry_source_index(self.ctx)
         var source_idx = 0
+        # This non-streaming loop emitted NO build-progress receipt at all --
+        # the streaming loop above had them, so a stage-3 run on this path went
+        # completely silent after parse finished and "working" could not be
+        # told from "stuck". Same shape and cadence as the streaming loop.
+        log_build_progress("hir", "modules", 0, self.ctx.sources.len(),
+            "pending", 2, 6, 0, 0, "running")
         # Stage3 is a no-GC process. Constructing one HirLowering per source
         # copied the full retained ModuleSurfacesByName aggregate across the
         # constructor boundary hundreds of times and retained those copies.
@@ -444,6 +456,11 @@ impl CompilerDriver:
             if source_idx < 3:
                 eprint("[bootstrap-error-count] source_idx={source_idx} point=entry count={module_errors_before}")
             log_phase("phase3:hir:file:start {src.path} module={name}")
+            # In-flight receipt: names the module ABOUT to be lowered, so a
+            # hang or stack-exhaustion crash here names its own module. done is
+            # the index already finished, current is the unit being worked on.
+            log_build_progress("hir", "modules", source_idx,
+                self.ctx.sources.len(), name, 2, 6, 0, 0, "running")
             if not _driver_hir_mem_snapshot(
                 "hir-file-start", source_idx, src.path,
                 retained_hir_module_count,
@@ -737,6 +754,10 @@ impl CompilerDriver:
             log_phase("phase3:hir:file:done {src.path} module={name} funcs={hir_function_count}")
             log_trace("stored HIR module")
             source_idx = source_idx + 1
+            # Completion receipt, one per module (see the parse loop for why a
+            # cadence is not good enough).
+            log_build_progress("hir", "modules", source_idx,
+                self.ctx.sources.len(), name, 2, 6, 0, 0, "running")
 
         # Step 3b: ParserTrait coherence checking (Check mode only)
         # ParserTrait coherence errors (orphan rules, overlapping impls, blanket conflicts)
