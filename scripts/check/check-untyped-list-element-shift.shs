@@ -2,6 +2,12 @@
 # Regression canary for the untyped `list`-parameter element-read `<<3`
 # corruption (Rust seed JIT lane).
 #
+# STATUS 2026-08-17: FIXED and now PINNED. This guard used to exit 0 on the
+# corrupted `40,56` output (the bug was open) and fail with `promote-me` when
+# the output became correct. That has been inverted: correct `5,7` output is
+# now the PASS, and the `40,56` signature is a hard FAIL. The promotion was
+# done when the guard fired on a real push, exactly as its message instructed.
+#
 # WHY THIS EXISTS: `bin/simple test` hard-defaults to the tree-walk
 # interpreter and never reaches the Cranelift JIT lane, which is where this
 # defect lives -- only a script driving `bin/simple run` under both engines
@@ -87,19 +93,23 @@ if [ "$jit_typed0" != "5" ] || [ "$jit_typed1" != "7" ]; then
 fi
 
 if [ "$jit_list0" = "5" ] && [ "$jit_list1" = "7" ]; then
-    echo "FAIL (promote-me) — the JIT lane now matches the interpreter's correct behaviour for the"
-    echo "       untyped ': list' parameter (list0=$jit_list0 list1=$jit_list1, expected 5,7). The"
-    echo "       <<3 corruption in"
-    echo "       doc/08_tracking/bug/untyped_list_element_read_seed_rootcause_2026-07-30.md"
-    echo "       appears FIXED. Rewrite this branch to a hard assertion of the correct behaviour."
-    exit 1
+    echo "PASS — 4 value(s) checked, untyped ': list' param element read correct on the JIT lane:"
+    echo "       list=[$jit_list0,$jit_list1], typed [i64] control=[$jit_typed0,$jit_typed1] (both expected 5,7)"
+    exit 0
 fi
 
+# PROMOTED 2026-08-17: this used to be the KNOWN-OPEN exit-0 branch. The <<3
+# corruption is fixed, the correct-behaviour branch above is now the pass, and
+# reappearance of the exact value*8 signature is a REGRESSION, not the status
+# quo. Do not demote this back to exit 0 to get a green push -- if it fires,
+# the seed's UnboxInt elision for `TypeId::ANY` element types is back.
 if [ "$jit_list0" = "40" ] && [ "$jit_list1" = "56" ]; then
-    echo "KNOWN-OPEN — untyped ': list' param element read still corrupted, EXACT <<3 signature:"
-    echo "             list0=$jit_list0 (expected 5, got value*8), list1=$jit_list1 (expected 7, got value*8)"
-    echo "             Typed [i64] control unaffected on the same lane: typed0=$jit_typed0 typed1=$jit_typed1"
-    exit 0
+    echo "FAIL — REGRESSION: the untyped ': list' param element read is corrupted again with the"
+    echo "       EXACT <<3 signature: list0=$jit_list0 (expected 5, got value*8), list1=$jit_list1 (expected 7, got value*8)."
+    echo "       Typed [i64] control unaffected on the same lane: typed0=$jit_typed0 typed1=$jit_typed1"
+    echo "       This bug was fixed and is now pinned; see"
+    echo "       doc/08_tracking/bug/untyped_list_element_read_seed_rootcause_2026-07-30.md"
+    exit 1
 fi
 
 echo "FAIL — untyped ': list' param JIT output changed but is neither the correct value NOR the"
