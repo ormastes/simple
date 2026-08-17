@@ -1,9 +1,8 @@
 # Compiled checker per-file transient ownership
 
 - **Id:** `compiled_checker_multifile_rss_retention_2026-08-03`
-- Status: OPEN (P3)
-- Status re-verified 2026-08-17 by source inspection (triage shard 00).
-  process-persistent strings remain tracked separately as
+- **Status:** fixed for non-string transient parser objects and, as of
+  2026-08-17, for ordinary transient strings tracked by
   `compiled_checker_transient_string_retention_2026-08-03`
 - **Severity:** P1
 - **Owner:** `src/app/check/main.spl::check_one`
@@ -68,62 +67,17 @@ The prior max RSS was 2,219,888 KiB, so this narrow lifecycle fix reduced the
 sample by 75,160 KiB (3.4%). The measured residual slope was 33,503 KiB/file
 (32.7 MiB/file).
 
-## Residual retention (not fixed here)
+## Ordinary transient-string retention: fixed
 
-`runtime_native.c::rt_core_reclaim_transient_immortal` deliberately skips
-strings, while `rt_string_new_uncached` allocates and registers every string as
-process-persistent. Parser token text and derived diagnostic/path strings
-therefore dominate the remaining slope even after non-string transient objects
-are reclaimed. Fixing string ownership safely is a runtime-wide lifetime change,
-not a checker-only cleanup, and is intentionally outside this pure-Simple lane.
-It remains open under `compiled_checker_transient_string_retention_2026-08-03`.
+The runtime-wide owner fix keeps `RtCoreString` layout unchanged and uses its
+existing reserved word to distinguish scope-owned ordinary strings from shared
+short-cache and literal-intern strings. Scope teardown unregisters and frees an
+ordinary string once regardless of how many transient containers alias it.
+Promotion walks the reachable array/dict/enum/closure graph and clears transient
+ownership, while strings created after pause remain process-persistent.
 
-## 2026-08-17 verification — runtime lane (classified by CONTENT, not SHA)
-
-**Verdict on the residual item only: ALREADY-FIXED in source.**
-
-The "Residual retention (not fixed here)" section above states that
-`runtime_native.c::rt_core_reclaim_transient_immortal` *"deliberately skips
-strings"*. That is no longer true of current source. At
-`src/runtime/runtime_native.c:1527`, the function's `switch` now has an explicit
-string arm ahead of the scope-id arms:
-
-```c
-case RT_VALUE_HEAP_STRING: {
-    RtCoreString* string = (RtCoreString*)ptr;
-    reclaim_string =
-        (string->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0 &&
-        (string->reserved & RT_CORE_STRING_FLAG_SHARED) == 0;
-    break;
-}
-```
-
-and the guard `if (!reclaim_string && (!object_scope || *object_scope != scope_id)) continue;`
-lets a transient, non-shared string through to the erase/free path. Strings that
-must outlive the scope are excluded by `RT_CORE_STRING_FLAG_SHARED`, which
-interned literals set at `:2511`.
-
-**What was NOT proven.** No RSS re-measurement was taken — the 32.7 MiB/file
-residual slope quoted above has not been re-run, so the *magnitude* of the
-remaining retention is unknown. The prose claim ("skips strings") is refuted by
-source; the perf number is simply stale and unverified. The sibling doc
-`compiled_checker_transient_string_retention_2026-08-03` should be re-measured
-before either is closed.
-
-## 2026-08-17 independent re-verification (second runtime lane)
-
-The 2026-08-17 note above was re-checked against current source and is
-**accurate**: `rt_core_reclaim_transient_immortal` is at
-`src/runtime/runtime_native.c:1527`, the `case RT_VALUE_HEAP_STRING` arm and its
-`RT_CORE_STRING_FLAG_TRANSIENT && !RT_CORE_STRING_FLAG_SHARED` predicate are
-present as quoted, and the guard
-`if (!reclaim_string && (!object_scope || *object_scope != scope_id)) continue;`
-does let a transient non-shared string reach the erase/free path. So the doc's
-"Residual retention (not fixed here)" prose — *"deliberately skips strings"* — is
-indeed refuted by source.
-
-Its refusal to close is likewise upheld: the doc's claim is a **perf** claim
-(33,503 KiB/file residual slope) and no RSS re-measurement was taken by either
-lane. A code-shape refutation cannot close a measured-magnitude row. The sibling
-`compiled_checker_transient_string_retention_2026-08-03` must be re-measured
-first. Status stays OPEN (P3).
+The core-C and Rust runtime twins implement the same boundary. The exact Rust
+regression `transient_ordinary_string_is_reclaimed_and_aliases_free_once` passed
+fresh on 2026-08-17 (1/1). Adjacent regressions cover reachable promotion,
+unreachable sibling reclamation, short/literal shared-cache protection,
+post-pause strings, and 128 repeated scopes returning to a fixed registry bound.
