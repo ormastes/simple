@@ -688,13 +688,13 @@ fn collect_free_vars_recursive(expr: &Expr, bound: &mut Vec<String>, vars: &mut 
         | Expr::Try(expr)
         | Expr::ForceUnwrap(expr)
         | Expr::ExistsCheck(expr)
-        | Expr::UnwrapOrReturn(expr)
         | Expr::Spread(expr)
         | Expr::DictSpread(expr)
         | Expr::OptionalChain { expr, .. } => {
             collect_free_vars_recursive(expr, bound, vars);
         }
         Expr::UnwrapOr { expr, default }
+        | Expr::UnwrapOrReturn { expr, default }
         | Expr::CastOr { expr, default, .. }
         | Expr::Coalesce { expr, default } => {
             collect_free_vars_recursive(expr, bound, vars);

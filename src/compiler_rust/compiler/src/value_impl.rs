@@ -130,6 +130,21 @@ impl Value {
             Value::Nil => Ok(0),
             other => {
                 let actual_type = self.type_name();
+                if std::env::var("SIMPLE_DEBUG_AS_INT_BT").is_ok() {
+                    if let Value::Function { name, .. } = other {
+                        eprintln!(
+                            "[DEBUG as_int] Value::Function name={:?} bt=\n{}",
+                            name,
+                            std::backtrace::Backtrace::force_capture()
+                        );
+                    } else {
+                        eprintln!(
+                            "[DEBUG as_int] {} bt=\n{}",
+                            actual_type,
+                            std::backtrace::Backtrace::force_capture()
+                        );
+                    }
+                }
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
                     .with_help(format!("expected integer type, got {}", actual_type));

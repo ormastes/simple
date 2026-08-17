@@ -1420,6 +1420,53 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
+    /// Exact mirror of `box_scalar_for_tagged_slot`: recover a RAW scalar from a
+    /// tagged `RuntimeValue` when the DECLARED slot is a raw scalar but the
+    /// value's static type is a tagged-value slot (`ANY`, or `T?` over a
+    /// scalar).
+    ///
+    /// Without this, `fn f(l: list, i: i64) -> i64: return l[i] & 0xFF` returned
+    /// the TAGGED word: `l[i]` is `ANY` (a `list` is `Array{element: ANY}`), so
+    /// the ANY-binop path re-boxes its result by design, and the return slot —
+    /// declared `i64`, hence raw — received `10 << 3 == 80`. `.len()` on the
+    /// same array was fine, which is exactly why this class reads as a silently
+    /// wrong number rather than a crash.
+    /// Bug: `doc/08_tracking/bug/untyped_list_element_read_seed_rootcause_2026-07-30.md`.
+    pub(super) fn unbox_scalar_for_raw_slot(
+        &mut self,
+        declared_ty: TypeId,
+        value_ty: TypeId,
+        value: VReg,
+    ) -> MirLowerResult<VReg> {
+        if !self.slot_holds_tagged_value(value_ty) {
+            return Ok(value);
+        }
+        // Bool is deliberately excluded: it is tagged through `rt_value_bool`,
+        // not `BoxInt`, so `UnboxInt` is not its inverse.
+        match declared_ty {
+            TypeId::U64 => self.unbox_u64_runtime_value(value),
+            TypeId::F32 | TypeId::F64 => self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                func.block_mut(current_block)
+                    .unwrap()
+                    .instructions
+                    .push(MirInst::UnboxFloat { dest, value });
+                dest
+            }),
+            TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 => {
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    func.block_mut(current_block)
+                        .unwrap()
+                        .instructions
+                        .push(MirInst::UnboxInt { dest, value });
+                    dest
+                })
+            }
+            _ => Ok(value),
+        }
+    }
+
     /// Box a full-width unsigned integer before it crosses an erased
     /// `RuntimeValue` boundary. `BoxInt` only preserves signed 61-bit values;
     /// using it for u64 also lets low payload bits masquerade as value tags.

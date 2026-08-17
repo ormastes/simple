@@ -236,31 +236,47 @@ fn native_simd_pixel_evidence() -> NativeSimdPixelEvidence:
             fill_checksum: 0
         )
     engine2d_simd_neon_reset()
-    val count: i64 = 64
     val color: u32 = 0xFF8040C0
-    val native_fill = engine2d_simd_fill_row_u32(count, color)
 
-    var ref_fill: [u32] = [0; 64]
-    var i: i64 = 0
-    while i < count:
-        ref_fill[i.to_i32()] = color
-        i = i + 1
+    # Bit-exactness must be sampled across the vector-width boundary, not at a
+    # single convenient multiple of it. count=64 alone is exactly N whole SIMD
+    # vectors on every level we accept here, so it exercises ONLY the aligned
+    # chunk path and can never observe a tail defect — an unfilled remainder or
+    # a write past the end. These counts cover: below one vector (3), a
+    # non-multiple straddling several vectors (17, 65, 67), and the original
+    # aligned case (64) so previous coverage is retained rather than replaced.
+    val counts: [i64] = [3, 17, 64, 65, 67]
 
-    var fill_exact = native_fill.len() == count
-    i = 0
-    while i < count:
-        if native_fill[i.to_i32()] != ref_fill[i.to_i32()]:
+    var fill_exact = true
+    var copy_exact = true
+    var last_fill: [u32] = [0; 1]
+
+    for count in counts:
+        val native_fill = engine2d_simd_fill_row_u32(count, color)
+
+        if native_fill.len() != count:
             fill_exact = false
-        i = i + 1
+            continue
 
-    val native_copy = engine2d_simd_copy_row_u32(native_fill)
-    var copy_exact = native_copy.len() == native_fill.len()
-    i = 0
-    while i < native_fill.len():
-        if native_copy[i.to_i32()] != native_fill[i.to_i32()]:
+        var i: i64 = 0
+        while i < count:
+            if native_fill[i.to_i32()] != color:
+                fill_exact = false
+            i = i + 1
+
+        val native_copy = engine2d_simd_copy_row_u32(native_fill)
+        if native_copy.len() != native_fill.len():
             copy_exact = false
-        i = i + 1
+        else:
+            i = 0
+            while i < native_fill.len():
+                if native_copy[i.to_i32()] != native_fill[i.to_i32()]:
+                    copy_exact = false
+                i = i + 1
 
+        last_fill = native_fill
+
+    val native_fill = last_fill
     val hits = engine2d_simd_neon_hits()
     NativeSimdPixelEvidence(
         executed: hits > 0,

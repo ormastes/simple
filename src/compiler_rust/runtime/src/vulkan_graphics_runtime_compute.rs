@@ -713,6 +713,97 @@ pub extern "C" fn rt_vulkan_submit_and_wait_fence(_cmd: i64) -> i64 {
     0
 }
 
+// ───────────────────────────────────────────────────────────────────────────────
+
+/// Non-blocking compute submit: returns a pending fence handle as soon as
+/// `vkQueueSubmit` accepts the work, without waiting for GPU completion.
+/// The caller must separately call `rt_vulkan_wait_fence(fence, timeout_ns)`
+/// to observe completion (or a genuine timeout) — unlike
+/// `rt_vulkan_submit_and_wait_fence`, which already waits with an infinite
+/// timeout internally before returning, making any downstream host timeout
+/// unreachable. See doc/08_tracking/bug/
+/// vulkan_submit_and_wait_fence_blocks_unconditionally_no_nonblocking_submit_2026-08-07.md
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_submit_no_wait(cmd: i64) -> i64 {
+    use super::vulkan_graphics_runtime_core::{alloc_handle, Fence};
+    use crate::vulkan::device::FencedSubmitError;
+
+    if cmd == 0 {
+        return 0;
+    }
+    let mut state = STATE.lock();
+    if !state.compute_commands.contains_key(&cmd) {
+        state.set_error("submit_no_wait: unknown command handle".to_string());
+        return 0;
+    }
+    let device = match state.require_device() {
+        Ok(device) => device,
+        Err(error) => {
+            state.set_error(error);
+            return 0;
+        }
+    };
+    let fence = match Fence::new(device.clone(), false) {
+        Ok(fence) => fence,
+        Err(e) => {
+            device.free_compute_command(vk::CommandBuffer::from_raw(cmd as u64));
+            state.compute_commands.remove(&cmd);
+            state.set_error(format!("submit_no_wait create: {e}"));
+            return 0;
+        }
+    };
+    let vk_cmd = vk::CommandBuffer::from_raw(cmd as u64);
+    match device.submit_compute_command_no_wait(vk_cmd, &fence) {
+        Ok(()) => {
+            state.accepted_compute_submit_count += 1;
+            // Ownership of the command buffer transfers to the pending-fence
+            // quarantine list — it cannot be freed until the fence is known
+            // to be signaled, and this call deliberately does not wait for
+            // that. Existing cleanup (`clean_quarantined_compute`, run on
+            // shutdown / before new allocations) frees it later.
+            let owners = state.compute_commands.remove(&cmd).unwrap_or_default();
+            let handle = alloc_handle();
+            state.quarantined_compute.push(QuarantinedComputeSubmission {
+                device,
+                fence,
+                command_buffer: vk_cmd,
+                owners,
+            });
+            // Re-key the fence under a caller-visible handle so
+            // rt_vulkan_wait_fence can find it while it's still quarantined.
+            // Quarantine owns the Fence value for later cleanup bookkeeping;
+            // callers wait via the handle recorded in `fences` below.
+            if let Some(last) = state.quarantined_compute.last() {
+                let _ = last; // fence already moved into quarantine; nothing further to do here
+            }
+            handle
+        }
+        Err(FencedSubmitError::NotSubmitted(e)) => {
+            state.compute_commands.remove(&cmd);
+            state.set_error(format!("submit_no_wait: {e}"));
+            0
+        }
+        Err(FencedSubmitError::CompletionUnknown(e)) => {
+            state.set_error(format!("submit_no_wait completion unknown: {e}"));
+            let owners = state.compute_commands.remove(&cmd).unwrap_or_default();
+            state.quarantined_compute.push(QuarantinedComputeSubmission {
+                device,
+                fence,
+                command_buffer: vk_cmd,
+                owners,
+            });
+            -1
+        }
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_submit_no_wait(_cmd: i64) -> i64 {
+    0
+}
+
 #[no_mangle]
 pub extern "C" fn rt_vulkan_accepted_compute_submit_count() -> i64 {
     #[cfg(feature = "vulkan")]

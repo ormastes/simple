@@ -39,6 +39,8 @@ var indent_level = 0
 # Hook storage
 var before_hooks = []
 var after_hooks = []
+# Suite-scoped after_all hooks, drained by the enclosing describe (see below).
+var after_all_hooks = []
 
 # Assertion failures are accumulated in-place so a later passing matcher cannot
 # overwrite an earlier failure through nested-call global writeback.
@@ -82,7 +84,9 @@ pub fn describe(name: text, block: fn()):
     val indent = "  ".repeat(indent_level)
     print "{indent}{name}"
     indent_level = indent_level + 1
+    val after_all_baseline = after_all_hooks.len()
     block()
+    _drain_after_all(after_all_baseline)
     indent_level = indent_level - 1
     val prev = suite_stack.pop()
     current_suite = prev ?? ""
@@ -588,6 +592,43 @@ pub fn before_each(hook: fn()):
 
 pub fn after_each(hook: fn()):
     after_hooks.push(hook)
+
+# before_all / after_all
+#
+# Suite-scoped, once-per-group hooks. Previously ABSENT from this module
+# entirely, so `before_all`/`after_all` were unresolved names and any spec
+# importing them (notably the t32_hw specs, via the `std.spipe` alias module)
+# died at load and ran ZERO examples while looking green. See
+# doc/08_tracking/bug/spipe_before_all_after_all_not_found_t32_hw_2026-07-20.md
+#
+# Implementation contract, chosen because this runner has no separate
+# collect-then-execute phase (a `describe` body EXECUTES as it is read):
+#
+#   * before_all(block) runs the block IMMEDIATELY at the point it is written.
+#     Declaration order inside the enclosing `describe` therefore gives the
+#     required guarantee: it runs once, before any sibling `it` in that group.
+#   * after_all(block) is deferred and drained by the enclosing `describe`
+#     once its body has finished. `describe` drains only the hooks registered
+#     during its OWN body, so a nested group's after_all fires at the end of
+#     the nested group, not the outer one.
+#
+# A top-level after_all with no enclosing `describe` never fires; that is
+# stated rather than faked, because there is no end-of-file callback here.
+pub fn before_all(hook: fn()):
+    hook()
+
+pub fn after_all(hook: fn()):
+    after_all_hooks.push(hook)
+
+fn _drain_after_all(baseline: i64):
+    # Run in registration order, then truncate back to the baseline depth.
+    var i = baseline
+    while i < after_all_hooks.len():
+        val hook = after_all_hooks[i]
+        hook()
+        i = i + 1
+    while after_all_hooks.len() > baseline:
+        val _ = after_all_hooks.pop()
 
 # ================================================================
 # Prevention mocks

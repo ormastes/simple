@@ -338,6 +338,27 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     var lowered_module = lowering.builder.module
     lowered_module.name = module_name
 
+    # Order-independent struct_field_type_name pre-pass.
+    #
+    # `lower_module` (mir/_MirLowering/module_lowering.spl) runs exactly this
+    # walk before it lowers any function, precisely so a chained nested field
+    # access does not depend on which function happens to be lowered first.
+    # The BOOTSTRAP-FLAT path below never goes through `lower_module`, so it
+    # never got that pre-pass: `struct_field_type_name` was populated only as a
+    # side effect of lowering each construction site in stream order.
+    #
+    # Consequence when the constructing function is lowered AFTER its consumer
+    # (measured on `SIMPLE_BOOTSTRAP=1 native-build --entry-closure`, the path
+    # Stage 2/3 use): `n.inner` has no registered struct name, so
+    # `resolve_field_index` (function_lowering.spl) hits its
+    # "type cannot be determined" tier and returns 0. `n.inner.b` then reads
+    # field 0 and yields `inner.a`'s value -- a silent wrong answer with no
+    # diagnostic and exit 0. Seeding the map here makes the result independent
+    # of function order, exactly as the non-flat path already is.
+    for prescan_fn in functions:
+        if not prescan_fn.is_extern:
+            lowering.prescan_block_for_struct_types(prescan_fn.body)
+
     var instruction_total = 0
     for hir_fn in functions:
         if hir_fn.is_extern:

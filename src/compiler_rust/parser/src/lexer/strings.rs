@@ -169,6 +169,15 @@ impl<'a> super::Lexer<'a> {
         use crate::token::FStringToken;
         let mut parts: Vec<FStringToken> = Vec::new();
         let mut current_literal = String::new();
+        // Uncollapsed mirror of `current_literal`: every push to
+        // `current_literal` is mirrored here EXCEPT the `{{`->`{` and
+        // `}}`->`}` collapses, where the raw (doubled) form is kept
+        // instead. If the whole literal turns out to contain no real
+        // `{expr}` interpolation, `{{`/`}}` collapsing is Python-fstring
+        // escape syntax that has no reason to apply -- the string is used
+        // verbatim, so the doubled braces are preserved. See bug
+        // string_literal_double_brace_collapse_2026-06-16.
+        let mut current_literal_raw = String::new();
         let mut has_interpolation = false;
 
         while let Some(ch) = self.peek() {
@@ -180,8 +189,9 @@ impl<'a> super::Lexer<'a> {
                         self.advance(); // First "
                         self.advance(); // Second "
                         self.advance(); // Third "
-                        if !current_literal.is_empty() {
-                            parts.push(FStringToken::Literal(current_literal));
+                        let literal_text = if has_interpolation { current_literal } else { current_literal_raw };
+                        if !literal_text.is_empty() {
+                            parts.push(FStringToken::Literal(literal_text));
                         }
                         return TokenKind::FString(parts);
                     } else {
@@ -193,15 +203,21 @@ impl<'a> super::Lexer<'a> {
                 } else {
                     // End of single-quoted f-string
                     self.advance();
-                    if !current_literal.is_empty() {
-                        parts.push(FStringToken::Literal(current_literal.clone()));
+                    // No real interpolation happened anywhere in this
+                    // literal: use the uncollapsed raw text so a plain
+                    // `"..."` string with no `{expr}` keeps `{{`/`}}`
+                    // verbatim instead of collapsing them as if they were
+                    // f-string escapes.
+                    let literal_text = if has_interpolation { current_literal } else { current_literal_raw };
+                    if !literal_text.is_empty() {
+                        parts.push(FStringToken::Literal(literal_text.clone()));
                     }
 
                     // Check for unit suffix (only allowed if no interpolation)
                     if !has_interpolation {
                         if let Some(suffix) = self.scan_string_unit_suffix() {
                             // Simple string with unit suffix: "127.0.0.1"_ip
-                            return TokenKind::TypedString(current_literal, suffix);
+                            return TokenKind::TypedString(literal_text, suffix);
                         }
                     }
 
@@ -213,6 +229,7 @@ impl<'a> super::Lexer<'a> {
                 if self.check('{') {
                     self.advance();
                     current_literal.push('{');
+                    current_literal_raw.push_str("{{");
                     continue;
                 }
                 // Check if next char is backslash - this can't be a valid expression start
@@ -220,6 +237,7 @@ impl<'a> super::Lexer<'a> {
                 // where { is followed by an escape sequence
                 if self.check('\\') {
                     current_literal.push('{');
+                    current_literal_raw.push('{');
                     continue;
                 }
                 // Check if next char is a quote immediately after {
@@ -227,12 +245,14 @@ impl<'a> super::Lexer<'a> {
                 // where the user wants literal braces in the string
                 if self.check('\'') || self.check('"') {
                     current_literal.push('{');
+                    current_literal_raw.push('{');
                     continue;
                 }
                 // Save state for backtracking if expression scanning fails
                 let saved_state = self.clone();
                 let saved_parts_len = parts.len();
                 let saved_literal = current_literal.clone();
+                let saved_literal_raw = current_literal_raw.clone();
 
                 // Save current literal if any
                 if !current_literal.is_empty() {
@@ -402,13 +422,16 @@ impl<'a> super::Lexer<'a> {
                     *self = saved_state;
                     parts.truncate(saved_parts_len);
                     current_literal = saved_literal;
+                    current_literal_raw = saved_literal_raw;
                     current_literal.push('{');
+                    current_literal_raw.push('{');
                     continue;
                 }
                 // If expression is empty (just "{}"), treat as literal "{}"
                 // This allows strings like "m{} block" without escaping
                 if expr.trim().is_empty() {
                     current_literal.push_str("{}");
+                    current_literal_raw.push_str("{}");
                 } else {
                     // Check if we found a top-level ':' that introduces a format spec.
                     // Format specs follow Python conventions: [fill][align][sign][#][0][width][grouping][.precision][type]
@@ -436,14 +459,21 @@ impl<'a> super::Lexer<'a> {
                 // Check for escaped }} -> literal }
                 if self.check('}') {
                     self.advance();
+                    current_literal.push('}');
+                    current_literal_raw.push_str("}}");
+                } else {
+                    // Treat single } as literal } (lenient mode)
+                    // This allows strings like "{value}}" to work where the } is part of JSON syntax
+                    current_literal.push('}');
+                    current_literal_raw.push('}');
                 }
-                // Treat single } as literal } (lenient mode)
-                // This allows strings like "{value}}" to work where the } is part of JSON syntax
-                current_literal.push('}');
             } else if ch == '\\' {
                 self.advance();
                 match self.process_escape(true) {
-                    EscapeResult::Char(c) => current_literal.push(c),
+                    EscapeResult::Char(c) => {
+                        current_literal.push(c);
+                        current_literal_raw.push(c);
+                    }
                     EscapeResult::Error(msg) => return TokenKind::Error(msg),
                     EscapeResult::Unterminated => return TokenKind::Error("Unterminated f-string".to_string()),
                 }
@@ -454,12 +484,14 @@ impl<'a> super::Lexer<'a> {
                     self.line += 1;
                     self.column = 1;
                     current_literal.push(ch);
+                    current_literal_raw.push(ch);
                 } else {
                     return TokenKind::Error("Unterminated f-string".to_string());
                 }
             } else {
                 self.advance();
                 current_literal.push(ch);
+                current_literal_raw.push(ch);
             }
         }
 

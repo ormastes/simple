@@ -236,14 +236,30 @@ impl<'a> MirLowerer<'a> {
                     block.instructions.push(MirInst::ConstInt { dest: r, value: mask });
                     r
                 })?;
+                // Operand order matters here, and it is NOT cosmetic.
+                // `codegen::instr::body::build_vreg_types` derives a BinOp
+                // dest's TypeId from its LEFT operand only. `shifted` traces
+                // back to a `Load { ty: <Bitfield TypeId> }`, i.e. a TypeId
+                // >= 16, so `left: shifted` stamped the extracted scalar as a
+                // heap/user type. `MirInst::BoxInt` then took its
+                // "already a tagged RuntimeValue handle, pass through"
+                // early-return (codegen/instr/mod.rs), and the RAW bitfield
+                // value reached the formatter untagged: 1 -> "nil",
+                // 5 -> "<value:0x5>", 9 -> "<invalid-heap:0x9>", while 0
+                // happened to render correctly.
+                // BitAnd is commutative, so putting the ConstInt mask on the
+                // left (stamped I64 by build_vreg_types) yields the same
+                // arithmetic and the correct scalar type stamp, restoring the
+                // BoxInt tagging that every other scalar field access gets.
+                // doc/08_tracking/bug/jit_packed_bitfield_field_read_returns_nil_2026-08-10.md
                 return self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::BinOp {
                         dest,
                         op: crate::hir::BinOp::BitAnd,
-                        left: shifted,
-                        right: mask_reg,
+                        left: mask_reg,
+                        right: shifted,
                     });
                     dest
                 });

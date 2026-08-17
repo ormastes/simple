@@ -1,0 +1,230 @@
+# Atomic SCI catalog projection into the existing launcher registry owner.
+
+use os.services.launcher.launcher_registry.{
+    MAX_APPS, MAX_PROCESSES,
+    app_name, app_path, app_icon, app_shortcut_key, app_shortcut_mod,
+    app_pid, app_launch_state, app_window_count, app_exit_code,
+    app_launch_count, app_last_pid, app_is_headless, app_active, app_count,
+    process_app_index, process_app_id, process_active,
+    _app_index_by_name, _app_index_by_path
+}
+use os.services.launcher.launcher_association_registry.{
+    launcher_reset_association_projection_v1,
+    launcher_validate_association_projection_v1,
+    launcher_commit_association_projection_v1
+}
+
+var composition_owned_name_v1: [text; 32] = [""; 32]
+var composition_owned_id_v1: [text; 32] = [""; 32]
+var composition_owned_name_count_v1: u64 = 0
+var composition_projection_active_v1: bool = false
+
+pub fn launcher_reset_composition_policy_v1():
+    var i: u64 = 0
+    while i < MAX_APPS:
+        composition_owned_name_v1[i] = ""
+        composition_owned_id_v1[i] = ""
+        i = i + 1
+    composition_owned_name_count_v1 = 0
+    composition_projection_active_v1 = false
+    launcher_reset_association_projection_v1()
+
+fn _catalog_name_in_list_v1(names: [text], end: i64, name: text) -> bool:
+    var i = 0
+    while i < end:
+        if names[i] == name:
+            return true
+        i = i + 1
+    false
+
+fn _composition_name_owned_v1(name: text) -> bool:
+    var i: u64 = 0
+    while i < composition_owned_name_count_v1:
+        if composition_owned_name_v1[i] == name:
+            return true
+        i = i + 1
+    false
+
+fn _composition_index_by_id_v1(app_id: text) -> i64:
+    var i: u64 = 0
+    while i < composition_owned_name_count_v1:
+        if composition_owned_id_v1[i] == app_id:
+            return i.to_i64()
+        i = i + 1
+    -1
+
+pub fn launcher_composition_projection_active_v1() -> bool:
+    composition_projection_active_v1
+
+pub fn launcher_composition_app_slot_v1(app_id: text) -> i64:
+    """Resolve a stable SCI app ID into the sole launcher registry.
+
+    The projection keeps only the stable-ID-to-current-name index needed for
+    reload migration. Application path/lifecycle data remains owned by the
+    existing launcher arrays; this function does not create a second catalog.
+    """
+    if not composition_projection_active_v1:
+        return -1
+    val owned = _composition_index_by_id_v1(app_id)
+    if owned < 0:
+        return -1
+    _app_index_by_name(composition_owned_name_v1[owned.to_u64()])
+
+pub fn launcher_composition_app_id_for_name_v1(name: text) -> text:
+    if not composition_projection_active_v1:
+        return ""
+    var i: u64 = 0
+    while i < composition_owned_name_count_v1:
+        if composition_owned_name_v1[i] == name:
+            return composition_owned_id_v1[i]
+        i = i + 1
+    ""
+
+pub fn launcher_composition_app_id_for_slot_v1(slot: u64) -> text:
+    if not composition_projection_active_v1 or slot >= app_count:
+        return ""
+    launcher_composition_app_id_for_name_v1(app_name[slot])
+
+fn _old_slot_claimed_v1(old_slots: [i64; 32], end: i64, slot: i64) -> bool:
+    var i = 0
+    while i < end:
+        if old_slots[i.to_u64()] == slot:
+            return true
+        i = i + 1
+    false
+
+pub fn launcher_replace_composition_catalog_v1(
+    ids: [text],
+    names: [text],
+    paths: [text],
+    icons: [text],
+    shortcut_keys: [u32],
+    shortcut_modifiers: [u32],
+    association_keys: [text],
+    association_paths: [text]
+) -> text:
+    """Validate completely, then replace catalog and associations as one commit."""
+    if ids.len() != names.len() or names.len() != paths.len() or names.len() != icons.len() or names.len() != shortcut_keys.len() or names.len() != shortcut_modifiers.len():
+        return "SCI_LAUNCHER_RECORD"
+    if names.len().to_u64() > MAX_APPS:
+        return "SCI_LAUNCHER_CAPACITY"
+
+    val association_code = launcher_validate_association_projection_v1(
+        association_keys,
+        association_paths,
+        paths
+    )
+    if association_code != "SCI_LAUNCHER_OK":
+        return association_code
+
+    var name_index = 0
+    while name_index < names.len():
+        if ids[name_index] == "" or names[name_index] == "" or paths[name_index] == "":
+            return "SCI_LAUNCHER_RECORD"
+        if _catalog_name_in_list_v1(ids, name_index, ids[name_index]):
+            return "SCI_LAUNCHER_DUPLICATE_ID"
+        if _catalog_name_in_list_v1(names, name_index, names[name_index]):
+            return "SCI_LAUNCHER_DUPLICATE_NAME"
+        name_index = name_index + 1
+
+    # Snapshot lifecycle by stable SCI id before replacing metadata. On the
+    # first projection, an exact legacy path is a one-way compatibility import;
+    # every unclaimed built-in is retired so SCI becomes the sole catalog.
+    var old_slots: [i64; 32] = [-1; 32]
+    var next_pid: [u64; 32] = [0; 32]
+    var next_state: [text; 32] = ["idle"; 32]
+    var next_window_count: [u64; 32] = [0; 32]
+    var next_exit_code: [i32; 32] = [0; 32]
+    var next_launch_count: [u64; 32] = [0; 32]
+    var next_last_pid: [u64; 32] = [0; 32]
+    var next_headless: [bool; 32] = [false; 32]
+    var capture_index = 0
+    while capture_index < names.len():
+        var slot: i64 = -1
+        if composition_projection_active_v1:
+            val owned = _composition_index_by_id_v1(ids[capture_index])
+            if owned >= 0:
+                slot = _app_index_by_name(composition_owned_name_v1[owned.to_u64()])
+        else:
+            slot = _app_index_by_path(paths[capture_index])
+            if slot >= 0 and _old_slot_claimed_v1(old_slots, capture_index, slot):
+                slot = -1
+        old_slots[capture_index.to_u64()] = slot
+        if slot >= 0:
+            val old_slot = slot.to_u64()
+            next_pid[capture_index.to_u64()] = app_pid[old_slot]
+            next_state[capture_index.to_u64()] = app_launch_state[old_slot]
+            next_window_count[capture_index.to_u64()] = app_window_count[old_slot]
+            next_exit_code[capture_index.to_u64()] = app_exit_code[old_slot]
+            next_launch_count[capture_index.to_u64()] = app_launch_count[old_slot]
+            next_last_pid[capture_index.to_u64()] = app_last_pid[old_slot]
+            next_headless[capture_index.to_u64()] = app_is_headless[old_slot]
+        capture_index = capture_index + 1
+
+    var commit_index = 0
+    while commit_index < names.len():
+        val slot = commit_index.to_u64()
+        app_name[slot] = names[commit_index]
+        app_path[slot] = paths[commit_index]
+        app_icon[slot] = icons[commit_index]
+        app_shortcut_key[slot] = shortcut_keys[commit_index]
+        app_shortcut_mod[slot] = shortcut_modifiers[commit_index]
+        app_pid[slot] = next_pid[slot]
+        app_launch_state[slot] = next_state[slot]
+        app_window_count[slot] = next_window_count[slot]
+        app_exit_code[slot] = next_exit_code[slot]
+        app_launch_count[slot] = next_launch_count[slot]
+        app_last_pid[slot] = next_last_pid[slot]
+        app_is_headless[slot] = next_headless[slot]
+        app_active[slot] = true
+        commit_index = commit_index + 1
+
+    var clear_slot = names.len().to_u64()
+    while clear_slot < MAX_APPS:
+        app_name[clear_slot] = ""
+        app_path[clear_slot] = ""
+        app_icon[clear_slot] = ""
+        app_shortcut_key[clear_slot] = 0
+        app_shortcut_mod[clear_slot] = 0
+        app_pid[clear_slot] = 0
+        app_launch_state[clear_slot] = ""
+        app_window_count[clear_slot] = 0
+        app_exit_code[clear_slot] = 0
+        app_launch_count[clear_slot] = 0
+        app_last_pid[clear_slot] = 0
+        app_is_headless[clear_slot] = false
+        app_active[clear_slot] = false
+        clear_slot = clear_slot + 1
+    app_count = names.len().to_u64()
+
+    var process_index: u64 = 0
+    while process_index < MAX_PROCESSES:
+        if process_active[process_index] and process_app_index[process_index] >= 0:
+            val previous_slot = process_app_index[process_index]
+            var replacement: i64 = -1
+            var next_index = 0
+            while next_index < names.len():
+                if old_slots[next_index.to_u64()] == previous_slot:
+                    replacement = next_index
+                next_index = next_index + 1
+            process_app_index[process_index] = replacement
+            if replacement < 0:
+                process_app_id[process_index] = ""
+            else:
+                process_app_id[process_index] = ids[replacement]
+        process_index = process_index + 1
+
+    launcher_commit_association_projection_v1(association_keys, association_paths)
+    var clear_index: u64 = 0
+    while clear_index < MAX_APPS:
+        composition_owned_name_v1[clear_index] = ""
+        composition_owned_id_v1[clear_index] = ""
+        clear_index = clear_index + 1
+    var owned_index = 0
+    while owned_index < names.len():
+        composition_owned_name_v1[owned_index.to_u64()] = names[owned_index]
+        composition_owned_id_v1[owned_index.to_u64()] = ids[owned_index]
+        owned_index = owned_index + 1
+    composition_owned_name_count_v1 = names.len().to_u64()
+    composition_projection_active_v1 = true
+    "SCI_LAUNCHER_OK"

@@ -1386,8 +1386,16 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_spawn_async", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_guarded", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_inherit", &[], &[I64]),
-    // rt_process_run_with_limits(cmd_ptr, cmd_len, args, timeout_ms, memory_mb) -> RuntimeValue
-    RuntimeFuncSpec::new("rt_process_run_with_limits", &[I64, I64, I64, I64, I64], &[I64]),
+    // rt_process_run_with_limits(cmd_ptr, cmd_len, args, timeout_ms, memory_bytes,
+    //                            cpu_seconds, max_fds, max_procs) -> RuntimeValue
+    // Must match the Rust definition in
+    // runtime/src/value/sffi/env_process.rs:1269 exactly — an under-declared arity
+    // hands the callee garbage registers for the missing parameters.
+    RuntimeFuncSpec::new(
+        "rt_process_run_with_limits",
+        &[I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
     // rt_process_exists(pid) -> bool (as i64: 0/1)
     RuntimeFuncSpec::new("rt_process_exists", &[I64], &[I64]),
     // rt_getpid() -> process id

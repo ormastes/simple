@@ -560,14 +560,17 @@ pub(crate) fn evaluate_expr(
                 call_closure_no_args(closure, env, functions, classes, enums, impl_methods)
             }
         }
-        // Safe unwrap or early return: expr unwrap or_return:
-        Expr::UnwrapOrReturn(inner) => {
+        // Safe unwrap or early return: expr unwrap or_return: default
+        Expr::UnwrapOrReturn { expr: inner, default } => {
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
             if let Some(unwrapped) = try_unwrap_option_or_result(&val) {
                 Ok(unwrapped)
             } else {
-                // Return the None/Err as a TryError to propagate
-                Err(CompileError::TryError(Box::new(val)))
+                // Evaluate the caller-supplied default and return it (early
+                // return from the enclosing function), rather than
+                // propagating the None/Err receiver like `?` does.
+                let default_val = evaluate_expr(default, env, functions, classes, enums, impl_methods)?;
+                Err(CompileError::TryError(Box::new(default_val)))
             }
         }
         // Null coalescing: expr ?? default

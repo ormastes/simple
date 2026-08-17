@@ -498,8 +498,148 @@ pub extern "C" fn rt_vulkan_get_last_error() -> *const c_char {
     }
 }
 
+/// Error text reported by every Vulkan entry point when the runtime was built
+/// without the `vulkan` cargo feature.
+///
+/// Fail loud, not silent: without this, every graphics entry point returns a bare
+/// `0` and `rt_vulkan_get_last_error` returned the EMPTY string, so a caller
+/// asking "why did this fail?" got nothing back and could not distinguish a
+/// missing implementation from a genuine device/driver failure. Naming the
+/// disabled feature here is the whole fix — the stubs still return 0, but the
+/// reason is now retrievable through the documented error channel.
+#[cfg(not(feature = "vulkan"))]
+pub(super) const VULKAN_FEATURE_DISABLED_ERROR: &[u8] =
+    b"vulkan runtime unavailable: this build of simple_runtime was compiled without the `vulkan` cargo feature, so all rt_vulkan_* graphics entry points are inert stubs. Rebuild with `--features vulkan` to enable them.\0";
+
 #[no_mangle]
 #[cfg(not(feature = "vulkan"))]
 pub extern "C" fn rt_vulkan_get_last_error() -> *const c_char {
-    empty_cstr()
+    VULKAN_FEATURE_DISABLED_ERROR.as_ptr() as *const c_char
+}
+
+// ============================================================================
+// Tests: the feature-disabled stubs must fail LOUD, never silently return 0
+// ============================================================================
+
+#[cfg(all(test, not(feature = "vulkan")))]
+mod vulkan_feature_disabled_tests {
+    use std::ffi::CStr;
+
+    use crate::vulkan_graphics_runtime as gfx;
+
+    fn last_error() -> String {
+        let ptr = super::rt_vulkan_get_last_error();
+        assert!(!ptr.is_null(), "rt_vulkan_get_last_error returned NULL");
+        unsafe { CStr::from_ptr(ptr) }
+            .to_str()
+            .expect("last error must be valid UTF-8")
+            .to_string()
+    }
+
+    /// REPRODUCING TEST for
+    /// `host_vulkan_lavapipe_graphics_entry_points_stubbed_without_vulkan_feature_2026-08-11`.
+    ///
+    /// Before the fix, `rt_vulkan_begin_graphics()` returned a bare `0` and
+    /// `rt_vulkan_get_last_error()` returned the EMPTY string, so the caller could
+    /// not tell a missing implementation from a real device failure. Asserting the
+    /// empty-string half is the whole point: the `0` return is unchanged.
+    #[test]
+    fn graphics_entry_point_failure_reports_why() {
+        assert_eq!(
+            gfx::vulkan_graphics_runtime_compute::rt_vulkan_begin_graphics(),
+            0,
+            "stub is expected to still return a failure sentinel"
+        );
+        let err = last_error();
+        assert!(
+            !err.is_empty(),
+            "rt_vulkan_get_last_error was EMPTY after a failed graphics entry point"
+        );
+        assert!(
+            err.contains("vulkan"),
+            "error text must name the disabled feature, got: {}",
+            err
+        );
+    }
+
+    /// SIMILAR-BUG-PREVENTION TEST — generalizes to the defect CLASS:
+    /// "a public API whose implementation is silently absent behind a build flag".
+    ///
+    /// NO graphics/compute entry point may report failure while leaving the
+    /// documented error channel empty. This sweeps entry points from every
+    /// `vulkan_graphics_runtime_*` stub file — init, compute, graphics, shader,
+    /// pipeline, fence, image, swapchain and present — not just the one named in
+    /// the bug report.
+    #[test]
+    fn no_entry_point_fails_with_an_empty_error_channel() {
+        // (name, observed return, value that means "failed")
+        let probes: Vec<(&str, i64)> = vec![
+            ("rt_vulkan_init", super::rt_vulkan_init()),
+            ("rt_vulkan_is_available", super::rt_vulkan_is_available()),
+            ("rt_vulkan_begin_compute", gfx::vulkan_graphics_runtime_compute::rt_vulkan_begin_compute()),
+            ("rt_vulkan_begin_graphics", gfx::vulkan_graphics_runtime_compute::rt_vulkan_begin_graphics()),
+            ("rt_vulkan_wait_idle", gfx::vulkan_graphics_runtime_compute::rt_vulkan_wait_idle()),
+            ("rt_vulkan_create_fence", gfx::vulkan_graphics_runtime_sync::rt_vulkan_create_fence()),
+            (
+                "rt_vulkan_compile_spirv",
+                gfx::vulkan_graphics_runtime_shader::rt_vulkan_compile_spirv(0),
+            ),
+            (
+                "rt_vulkan_create_compute_pipeline",
+                gfx::vulkan_graphics_runtime_shader::rt_vulkan_create_compute_pipeline(0, 0, 0),
+            ),
+            (
+                "rt_vulkan_create_image",
+                gfx::vulkan_graphics_runtime_graphics::rt_vulkan_create_image(0, 1, 1, 0, 0),
+            ),
+            (
+                "rt_vulkan_create_sampler",
+                gfx::vulkan_graphics_runtime_graphics::rt_vulkan_create_sampler(0),
+            ),
+            (
+                "rt_vulkan_init_window_present",
+                gfx::vulkan_graphics_runtime_swapchain::rt_vulkan_init_window_present(1, 1, 0),
+            ),
+            (
+                "rt_vulkan_init_headless_present",
+                gfx::vulkan_graphics_runtime_swapchain::rt_vulkan_init_headless_present(1, 1, 0),
+            ),
+            (
+                "rt_vulkan_create_swapchain",
+                gfx::vulkan_graphics_runtime_swapchain::rt_vulkan_create_swapchain(0, 0, 1, 1, 0, 0),
+            ),
+            (
+                "rt_vulkan_acquire_next_image",
+                gfx::vulkan_graphics_runtime_swapchain::rt_vulkan_acquire_next_image(0),
+            ),
+        ];
+
+        assert!(
+            probes.len() >= 10,
+            "probe table went vacuous — it must cover the entry-point classes"
+        );
+
+        let mut silent = Vec::new();
+        for (name, ret) in &probes {
+            // Every one of these is an inert stub in this build: a non-failure
+            // return would itself be a lie about work that never happened.
+            if *ret > 0 {
+                silent.push(format!("{} returned success ({}) from an inert stub", name, ret));
+                continue;
+            }
+            let err = last_error();
+            if err.is_empty() || !err.contains("vulkan") {
+                silent.push(format!(
+                    "{} returned {} but rt_vulkan_get_last_error gave {:?}",
+                    name, ret, err
+                ));
+            }
+        }
+
+        assert!(
+            silent.is_empty(),
+            "entry points failed SILENTLY (bare sentinel, no retrievable reason):\n  {}",
+            silent.join("\n  ")
+        );
+    }
 }

@@ -1,0 +1,202 @@
+# SCI application launch owner/consumer.
+#
+# A launch starts from a stable SCI app ID, resolves metadata from the existing
+# launcher registry, crosses the SimpleAppLaunchV1 byte-arena boundary, then
+# validates the unified SimpleArtifactManifest before entering the existing
+# launcher spawn-authority path. No provider-local app catalog exists here.
+
+use os.services.launcher.launcher_app_launch_wire.{
+    LauncherAppLaunchArenaV1, LauncherAppLaunchViewV1,
+    encode_launcher_app_launch_v1, decode_launcher_app_launch_v1
+}
+use os.services.launcher.launcher_catalog_projection.{
+    launcher_composition_projection_active_v1,
+    launcher_composition_app_slot_v1
+}
+use os.services.launcher.launcher_registry.{
+    _app_path, launcher_launch_path_with_args,
+    launcher_bind_process_app_id_v1
+}
+use os.kernel.loader.artifact_manifest.{
+    manifest_kind_elf, manifest_kind_smf, manifest_kind_native_simple,
+    manifest_for_kind, manifest_with_entrypoint, manifest_validate,
+    manifest_summary
+}
+use os.kernel.loader.spawn_recipes.{
+    SPAWN_RECIPE_APP_LAUNCHER, spawn_recipe_exec_prefix
+}
+
+val SCI_APP_LAUNCH_OK: i32 = 0
+val SCI_APP_LAUNCH_REQUEST_INVALID: i32 = 1
+val SCI_APP_LAUNCH_APP_UNKNOWN: i32 = 2
+val SCI_APP_LAUNCH_ARTIFACT_STALE: i32 = 3
+val SCI_APP_LAUNCH_ACTION_UNSUPPORTED: i32 = 4
+val SCI_APP_LAUNCH_MANIFEST_REJECTED: i32 = 5
+val SCI_APP_LAUNCH_SCOPED_CAPABILITY_REQUIRED: i32 = 6
+val SCI_APP_LAUNCH_SPAWN_FAILED: i32 = 7
+val SCI_APP_LAUNCH_IDENTITY_BIND_FAILED: i32 = 8
+
+class LauncherAppLaunchPreparedV1:
+    ok: bool
+    request: LauncherAppLaunchArenaV1
+    code: text
+
+class LauncherAppLaunchPlanV1:
+    ok: bool
+    status: i32
+    code: text
+    app_id: text
+    artifact_path: text
+    args: [text]
+    manifest_identity: text
+
+class LauncherAppLaunchResultV1:
+    ok: bool
+    status: i32
+    code: text
+    app_id: text
+    pid: i64
+
+fn _prepared_error_v1(code: text) -> LauncherAppLaunchPreparedV1:
+    LauncherAppLaunchPreparedV1(
+        false,
+        encode_launcher_app_launch_v1("", "", "", [], []),
+        code,
+    )
+
+fn _plan_error_v1(status: i32, code: text) -> LauncherAppLaunchPlanV1:
+    LauncherAppLaunchPlanV1(false, status, code, "", "", [], "")
+
+fn _result_error_v1(status: i32, code: text, app_id: text) -> LauncherAppLaunchResultV1:
+    LauncherAppLaunchResultV1(false, status, code, app_id, -1)
+
+fn _manifest_kind_for_path_v1(path: text) -> text:
+    if path.ends_with(".smf"):
+        return manifest_kind_smf()
+    if path.ends_with(".elf") or path.ends_with(".bin"):
+        return manifest_kind_elf()
+    if path.ends_with(".app") or path.ends_with(".native"):
+        return manifest_kind_native_simple()
+    ""
+
+fn launcher_prepare_composition_app_launch_v1(
+    app_id: text,
+    args: [text],
+) -> LauncherAppLaunchPreparedV1:
+    if not launcher_composition_projection_active_v1():
+        return _prepared_error_v1("SCI_APP_LAUNCH_COMPOSITION_REQUIRED")
+    val slot = launcher_composition_app_slot_v1(app_id)
+    if slot < 0:
+        return _prepared_error_v1("SCI_APP_LAUNCH_APP_UNKNOWN")
+    # V1 has no independent artifact-id field in the app record. The admitted
+    # canonical artifact path is therefore its exact launch artifact identity.
+    val artifact_path = _app_path(slot.to_u64())
+    val request = encode_launcher_app_launch_v1(
+        app_id, artifact_path, "launch", args, [],
+    )
+    if not request.ok:
+        return LauncherAppLaunchPreparedV1(false, request, request.diagnostic)
+    LauncherAppLaunchPreparedV1(true, request, "SCI_APP_LAUNCH_OK")
+
+fn launcher_validate_app_launch_arena_v1(data: [u8]) -> LauncherAppLaunchPlanV1:
+    val decoded: LauncherAppLaunchViewV1 = decode_launcher_app_launch_v1(data)
+    if not decoded.ok:
+        return _plan_error_v1(
+            SCI_APP_LAUNCH_REQUEST_INVALID,
+            "SCI_APP_LAUNCH_REQUEST_INVALID:" + decoded.diagnostic,
+        )
+    if decoded.action_id != "launch":
+        return _plan_error_v1(
+            SCI_APP_LAUNCH_ACTION_UNSUPPORTED,
+            "SCI_APP_LAUNCH_ACTION_UNSUPPORTED",
+        )
+    # Every non-empty word is denied, including words whose individual bits
+    # are currently unknown. Exact scoped-capability projection belongs in
+    # SimpleArtifactManifest; translating it into the current u32 mask here
+    # would create a weaker second policy surface.
+    if decoded.capability_words.len() > 0:
+        return _plan_error_v1(
+            SCI_APP_LAUNCH_SCOPED_CAPABILITY_REQUIRED,
+            "SCI_APP_LAUNCH_MANIFEST_CAPABILITY_PROJECTION_REQUIRED",
+        )
+    val slot = launcher_composition_app_slot_v1(decoded.app_id)
+    if slot < 0:
+        return _plan_error_v1(
+            SCI_APP_LAUNCH_APP_UNKNOWN,
+            "SCI_APP_LAUNCH_APP_UNKNOWN",
+        )
+    val current_path = _app_path(slot.to_u64())
+    if decoded.artifact_id != current_path:
+        return _plan_error_v1(
+            SCI_APP_LAUNCH_ARTIFACT_STALE,
+            "SCI_APP_LAUNCH_ARTIFACT_STALE",
+        )
+    val recipe_prefix = spawn_recipe_exec_prefix(SPAWN_RECIPE_APP_LAUNCHER)
+    if recipe_prefix == "" or not current_path.starts_with(recipe_prefix):
+        return _plan_error_v1(
+            SCI_APP_LAUNCH_MANIFEST_REJECTED,
+            "SCI_APP_LAUNCH_RECIPE_SCOPE_REJECTED",
+        )
+    val kind = _manifest_kind_for_path_v1(current_path)
+    if kind == "":
+        return _plan_error_v1(
+            SCI_APP_LAUNCH_MANIFEST_REJECTED,
+            "SCI_APP_LAUNCH_ARTIFACT_KIND_UNSUPPORTED",
+        )
+    val manifest = manifest_with_entrypoint(manifest_for_kind(kind), current_path)
+    val checked = manifest_validate(manifest)
+    if not checked.ok:
+        return _plan_error_v1(
+            SCI_APP_LAUNCH_MANIFEST_REJECTED,
+            "SCI_APP_LAUNCH_MANIFEST_REJECTED:" + checked.reason,
+        )
+    LauncherAppLaunchPlanV1(
+        true, SCI_APP_LAUNCH_OK, "SCI_APP_LAUNCH_OK",
+        decoded.app_id, current_path, decoded.args, manifest_summary(manifest),
+    )
+
+fn launcher_consume_app_launch_arena_v1(data: [u8]) -> LauncherAppLaunchResultV1:
+    val plan = launcher_validate_app_launch_arena_v1(data)
+    if not plan.ok:
+        return _result_error_v1(plan.status, plan.code, plan.app_id)
+    val pid = launcher_launch_path_with_args(plan.artifact_path, plan.args)
+    if pid < 0:
+        return _result_error_v1(
+            SCI_APP_LAUNCH_SPAWN_FAILED,
+            "SCI_APP_LAUNCH_SPAWN_FAILED",
+            plan.app_id,
+        )
+    if not launcher_bind_process_app_id_v1(pid.to_u64(), plan.app_id):
+        return LauncherAppLaunchResultV1(
+            false,
+            SCI_APP_LAUNCH_IDENTITY_BIND_FAILED,
+            "SCI_APP_LAUNCH_PROCESS_IDENTITY_BIND_FAILED",
+            plan.app_id,
+            pid,
+        )
+    LauncherAppLaunchResultV1(
+        true, SCI_APP_LAUNCH_OK, "SCI_APP_LAUNCH_OK", plan.app_id, pid,
+    )
+
+fn launcher_dispatch_composition_app_v1(
+    app_id: text,
+    args: [text],
+) -> LauncherAppLaunchResultV1:
+    val prepared = launcher_prepare_composition_app_launch_v1(app_id, args)
+    if not prepared.ok:
+        val status = if prepared.code == "SCI_APP_LAUNCH_APP_UNKNOWN":
+            SCI_APP_LAUNCH_APP_UNKNOWN
+        else:
+            SCI_APP_LAUNCH_REQUEST_INVALID
+        return _result_error_v1(status, prepared.code, app_id)
+    launcher_consume_app_launch_arena_v1(prepared.request.bytes)
+
+export SCI_APP_LAUNCH_OK, SCI_APP_LAUNCH_REQUEST_INVALID
+export SCI_APP_LAUNCH_APP_UNKNOWN, SCI_APP_LAUNCH_ARTIFACT_STALE
+export SCI_APP_LAUNCH_ACTION_UNSUPPORTED, SCI_APP_LAUNCH_MANIFEST_REJECTED
+export SCI_APP_LAUNCH_SCOPED_CAPABILITY_REQUIRED, SCI_APP_LAUNCH_SPAWN_FAILED
+export SCI_APP_LAUNCH_IDENTITY_BIND_FAILED
+export LauncherAppLaunchPreparedV1, LauncherAppLaunchPlanV1, LauncherAppLaunchResultV1
+export launcher_prepare_composition_app_launch_v1
+export launcher_validate_app_launch_arena_v1
+export launcher_consume_app_launch_arena_v1, launcher_dispatch_composition_app_v1

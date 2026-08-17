@@ -238,8 +238,11 @@ fn main() -> i64:
     assert_eq!(compile_native_and_run(code), 42);
 }
 
+// Un-ignored 2026-08-17 (triage shard A6): verified passing on a freshly built
+// seed. The `#[ignore]` predated the fix and made the reproducer invisible —
+// exactly the silent-green shape this sweep is hunting. Bug doc:
+// doc/08_tracking/bug/rust_seed_native_bool_arg_inlined_call_wrong_value_2026-07-17.md
 #[test]
-#[ignore = "OPEN: Rust-seed native inlining corrupts false bool arguments; remove after the linked bug's single- and two-call probes pass"]
 fn native_bool_argument_false_survives_inlined_calls() {
     let code = r#"
 fn f(x: bool) -> i64:

@@ -303,23 +303,23 @@ fn random_bytes(length: i64) -> text:
     """
     rt_random_bytes(length)
 
-fn random_hex(length: i64) -> text:
-    """Generate cryptographically secure random bytes (hex-encoded)
+fn entropy_hex_valid_for(value: text, length: i64) -> bool:
+    """Post-condition for CSPRNG hex output of `length` bytes.
 
-    Args:
-        length: Number of bytes to generate
+    Accepts only exactly `length * 2` lowercase hex characters, and rejects an
+    all-zero result. Generalises `secure_entropy_hex_valid` (which is pinned to
+    the 16-byte / 32-char capability case) to any requested byte count so the
+    same gate can guard every `random_hex` call, not just that one.
 
-    Returns: Hex-encoded random data (length*2 characters)
-
-    Example:
-        salt = random_hex(16)  # 32 hex chars = 16 bytes
+    A zero-byte request is the one honest empty string: "" is the correct answer
+    for `length == 0`, and the all-zero rejection must not fire on it.
     """
-    rt_random_hex(length) ?? ""
-
-fn secure_entropy_hex_valid(value: text) -> bool:
-    """Test seam for the future private command-capability entropy owner."""
-    if value.len() != 32:
+    if length < 0:
         return false
+    if value.len() != length * 2:
+        return false
+    if length == 0:
+        return true
     var saw_nonzero = false
     for i in 0..value.len():
         val byte = value.byte_at(i)
@@ -329,10 +329,55 @@ fn secure_entropy_hex_valid(value: text) -> bool:
             saw_nonzero = true
     saw_nonzero
 
-fn random_salt() -> text:
+fn checked_entropy_hex(raw: text?, length: i64) -> text?:
+    """Pure, total entropy gate: nil unless `raw` is acceptable CSPRNG output.
+
+    Split out from `random_hex` deliberately. The CSPRNG failure path cannot be
+    provoked from a spec without taking down the host entropy source, so the
+    decision logic lives in a function a spec CAN drive by passing nil or a
+    malformed value directly. See
+    doc/08_tracking/bug/crypto_sffi_random_hex_degrades_to_empty_string_on_entropy_failure_2026-08-08.md
+    """
+    if raw == nil:
+        return nil
+    val value: text = raw ?? ""
+    if not entropy_hex_valid_for(value, length):
+        return nil
+    value
+
+fn random_hex(length: i64) -> text?:
+    """Generate cryptographically secure random bytes (hex-encoded)
+
+    Args:
+        length: Number of bytes to generate
+
+    Returns: Hex-encoded random data (length*2 characters), or nil when the OS
+        CSPRNG is unavailable or returned something that is not valid entropy.
+
+    FAILS CLOSED. This used to be `rt_random_hex(length) ?? ""`, which turned a
+    detected entropy failure back into a silent one: `random_salt()` then handed
+    every password the same empty salt with no error surfaced anywhere. The
+    nullable return is the point -- it makes that fail-open unrepresentable
+    rather than merely discouraged, so callers must decide what to do.
+
+    Example:
+        val salt = random_hex(16) ?? ""   # 32 hex chars = 16 bytes
+    """
+    checked_entropy_hex(rt_random_hex(length), length)
+
+fn secure_entropy_hex_valid(value: text) -> bool:
+    """Test seam for the future private command-capability entropy owner.
+
+    Retained at its original 16-byte/32-char contract because callers depend on
+    that exact shape; now expressed via the generalised checker.
+    """
+    entropy_hex_valid_for(value, 16)
+
+fn random_salt() -> text?:
     """Generate random salt for password hashing (16 bytes, hex)
 
-    Returns: 32-character hex string
+    Returns: 32-character hex string, or nil when the CSPRNG is unavailable.
+        An empty salt is never returned -- see `random_hex`.
     """
     random_hex(16)
 

@@ -2426,11 +2426,18 @@ pub extern "C" fn rt_cuda_module_load_data_bytes(ptx_ptr: i64, ptx_len: i64) -> 
     }
     unsafe {
         let bytes = std::slice::from_raw_parts(ptx_ptr as *const u8, ptx_len as usize);
-        let Ok(ptx_cstr) = CString::new(bytes) else {
-            return -1;
-        };
+        // cuModuleLoadData accepts either NUL-terminated PTX text or a binary cubin/
+        // fatbin image (self-describing via its header). CString::new() rejects any
+        // buffer containing an interior NUL, which every cubin has — that made this
+        // entry point silently return -1 for all binary images. Copy the buffer and
+        // append a terminator only if one is not already present; the extra byte is
+        // ignored by the cubin/fatbin parsers and is required by the PTX parser.
+        let mut image: Vec<u8> = bytes.to_vec();
+        if image.last() != Some(&0) {
+            image.push(0);
+        }
         let mut module: CUmodule = ptr::null_mut();
-        let err = cuModuleLoadData(&mut module, ptx_cstr.as_ptr() as *const c_void);
+        let err = cuModuleLoadData(&mut module, image.as_ptr() as *const c_void);
         if err != 0 {
             return -(err as i64);
         }

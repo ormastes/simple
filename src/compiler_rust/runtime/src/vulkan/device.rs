@@ -1076,6 +1076,49 @@ impl VulkanDevice {
         Ok(())
     }
 
+    /// Submit a compute command buffer with a real fence WITHOUT waiting for
+    /// completion. Returns as soon as `vkQueueSubmit` accepts the work, so
+    /// the caller receives a pending (not-yet-signaled) fence and owns all
+    /// waiting/timeout policy via a separate `Fence::wait` call.
+    ///
+    /// The command buffer is intentionally NOT freed here (freeing while the
+    /// GPU may still be executing it is undefined behaviour) — the caller is
+    /// responsible for keeping the associated resources alive until the
+    /// fence is known to be signaled (e.g. by quarantining them the same way
+    /// `FencedSubmitError::CompletionUnknown` is already handled by callers
+    /// of `submit_compute_command_with_fence`).
+    ///
+    /// Added to close the gap documented in doc/08_tracking/bug/
+    /// vulkan_submit_and_wait_fence_blocks_unconditionally_no_nonblocking_submit_2026-08-07.md:
+    /// previously every compute submit path blocked on `fence.wait(u64::MAX)`
+    /// internally, so a host-side fence timeout could never fire.
+    pub fn submit_compute_command_no_wait(
+        &self,
+        cmd: vk::CommandBuffer,
+        fence: &Fence,
+    ) -> Result<(), FencedSubmitError> {
+        let cmd_buffers = [cmd];
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
+        let queue = self.compute_queue.lock();
+        let submit_result = unsafe { self.handle().queue_submit(*queue, &[submit_info], fence.handle()) };
+        if let Err(e) = submit_result {
+            if submit_definitely_not_accepted(e) {
+                let pool = self.compute_pool.lock();
+                unsafe { self.handle().free_command_buffers(*pool, &[cmd]) };
+                return Err(FencedSubmitError::NotSubmitted(VulkanError::CommandBufferError(
+                    format!("Submit: {:?}", e),
+                )));
+            }
+            return Err(FencedSubmitError::CompletionUnknown(VulkanError::CommandBufferError(
+                format!("Submit: {:?}", e),
+            )));
+        }
+        // Deliberately no `fence.wait(...)` here — that is the entire point
+        // of this non-blocking variant. The caller waits separately, with
+        // its own timeout, via `rt_vulkan_wait_fence`.
+        Ok(())
+    }
+
     #[cfg(feature = "vulkan")]
     pub fn submit_graphics_command_with_fence(
         &self,

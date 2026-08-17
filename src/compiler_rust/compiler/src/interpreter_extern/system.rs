@@ -1090,6 +1090,259 @@ pub fn rt_process_kill(args: &[Value]) -> Result<Value, CompileError> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Piped-process family (rt_process_spawn_piped / write_stdin / read_stdout /
+// is_alive / close_piped).
+//
+// These five have existed in the C runtime (`src/runtime/runtime_process.c`)
+// and are declared `extern fn` by real callers (e.g.
+// `src/app/editor/debug_process_runtime.spl`), but were never registered in the
+// interpreter's extern dispatch table. Any interpreted program touching them
+// died with `error: semantic: unknown extern function: rt_process_spawn_piped`
+// -- the whole DAP/adapter debug path was unreachable under the interpreter.
+// See doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md
+//
+// Semantics are matched to the C implementation deliberately, because a
+// divergence here is exactly the silent cross-engine defect class:
+//   * spawn_piped -> real OS pid as the handle, -1 on failure; stdin AND
+//     stdout are pipes, stderr is inherited.
+//   * read_stdout is NON-BLOCKING (O_NONBLOCK) and returns "" when no data is
+//     available -- it must never block, and "no data yet" is not an error.
+//   * write_stdin / close_piped / is_alive return bool.
+// ---------------------------------------------------------------------------
+
+lazy_static::lazy_static! {
+    /// Children spawned by `rt_process_spawn_piped`, keyed by OS pid.
+    /// Kept separate from `SPAWNED_PROCESSES` because these own live pipe
+    /// handles that `rt_process_wait`/`rt_process_kill` must not steal.
+    static ref PIPED_PROCESSES: Mutex<HashMap<i64, std::process::Child>> = Mutex::new(HashMap::new());
+}
+
+fn piped_arg_pid(args: &[Value], who: &str) -> Result<i64, CompileError> {
+    match args.first() {
+        Some(Value::Int(n)) => Ok(*n),
+        _ => Err(CompileError::runtime(format!("{who}: pid must be an integer"))),
+    }
+}
+
+/// Spawn a child with piped stdin+stdout.
+///
+/// Callable from Simple as: `rt_process_spawn_piped(cmd: text, args: [text]) -> i64`
+pub fn rt_process_spawn_piped(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_process_spawn_piped requires 2 arguments (cmd, args)",
+        ));
+    }
+    let cmd = match &args[0] {
+        Value::Str(s) => s.as_ref().clone(),
+        _ => return Err(CompileError::runtime("rt_process_spawn_piped: cmd must be a string")),
+    };
+    let cmd_args: Vec<String> = match &args[1] {
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|item| match item {
+                Value::Str(s) => Some(s.as_ref().clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_process_spawn_piped: args must be an array of strings",
+            ))
+        }
+    };
+
+    let mut command = std::process::Command::new(&*cmd);
+    clear_simple_child_stack_env(&mut command);
+    command
+        .args(&cmd_args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit());
+
+    match command.spawn() {
+        Ok(child) => {
+            let pid = child.id() as i64;
+            // Match the C runtime: stdout is non-blocking, so `read_stdout`
+            // can return "" instead of parking the interpreter forever.
+            #[cfg(unix)]
+            if let Some(out) = child.stdout.as_ref() {
+                use std::os::unix::io::AsRawFd;
+                let fd = out.as_raw_fd();
+                unsafe {
+                    let flags = libc::fcntl(fd, libc::F_GETFL);
+                    if flags >= 0 {
+                        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+                    }
+                }
+            }
+            PIPED_PROCESSES.lock().unwrap().insert(pid, child);
+            Ok(Value::Int(pid))
+        }
+        Err(error) => {
+            if std::env::var_os("SIMPLE_PROCESS_DEBUG").is_some() {
+                eprintln!("rt_process_spawn_piped: {error}");
+            }
+            Ok(Value::Int(-1))
+        }
+    }
+}
+
+/// Write to a piped child's stdin.
+///
+/// Callable from Simple as: `rt_process_write_stdin(pid: i64, data: text) -> bool`
+pub fn rt_process_write_stdin(args: &[Value]) -> Result<Value, CompileError> {
+    use std::io::Write;
+    if args.len() < 2 {
+        return Err(CompileError::runtime(
+            "rt_process_write_stdin requires 2 arguments (pid, data)",
+        ));
+    }
+    let pid = piped_arg_pid(args, "rt_process_write_stdin")?;
+    let data = match &args[1] {
+        Value::Str(s) => s.as_ref().clone(),
+        _ => return Err(CompileError::runtime("rt_process_write_stdin: data must be a string")),
+    };
+    let mut map = PIPED_PROCESSES.lock().unwrap();
+    let ok = match map.get_mut(&pid).and_then(|c| c.stdin.as_mut()) {
+        Some(stdin) => stdin.write_all(data.as_bytes()).and_then(|()| stdin.flush()).is_ok(),
+        None => false,
+    };
+    Ok(Value::Bool(ok))
+}
+
+/// Partial (bounded) write to a piped child's stdin.
+///
+/// Callable from Simple as:
+/// `rt_process_write_stdin_some(pid: i64, data: text, data_len: i64, offset: i64, max_bytes: i64) -> i64`
+///
+/// Argument validation mirrors the C implementation EXACTLY, because the two
+/// lanes must agree on the sentinel values: `-1` for a bad argument or an
+/// unknown/closed child, and `0` for "offset is already at the end" (a
+/// legitimate no-op, not an error).
+pub fn rt_process_write_stdin_some(args: &[Value]) -> Result<Value, CompileError> {
+    use std::io::Write;
+    if args.len() < 5 {
+        return Err(CompileError::runtime(
+            "rt_process_write_stdin_some requires 5 arguments (pid, data, data_len, offset, max_bytes)",
+        ));
+    }
+    let pid = piped_arg_pid(args, "rt_process_write_stdin_some")?;
+    let data = match &args[1] {
+        Value::Str(s) => s.as_ref().clone(),
+        _ => {
+            return Err(CompileError::runtime(
+                "rt_process_write_stdin_some: data must be a string",
+            ))
+        }
+    };
+    let int_at = |i: usize, name: &str| -> Result<i64, CompileError> {
+        match &args[i] {
+            Value::Int(n) => Ok(*n),
+            _ => Err(CompileError::runtime(format!(
+                "rt_process_write_stdin_some: {name} must be an integer"
+            ))),
+        }
+    };
+    let data_len = int_at(2, "data_len")?;
+    let offset = int_at(3, "offset")?;
+    let max_bytes = int_at(4, "max_bytes")?;
+
+    if pid <= 0 || data_len < 0 || offset < 0 || offset > data_len || max_bytes <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    if offset == data_len {
+        return Ok(Value::Int(0));
+    }
+
+    let bytes = data.as_bytes();
+    // `data_len` is the caller's view of the payload length; never read past
+    // the actual buffer even if the caller over-reports it.
+    let end_of_data = (data_len as usize).min(bytes.len());
+    let start = (offset as usize).min(end_of_data);
+    let remaining = end_of_data - start;
+    let request = remaining.min(max_bytes as usize);
+    if request == 0 {
+        return Ok(Value::Int(0));
+    }
+
+    let mut map = PIPED_PROCESSES.lock().unwrap();
+    match map.get_mut(&pid).and_then(|c| c.stdin.as_mut()) {
+        Some(stdin) => match stdin.write(&bytes[start..start + request]) {
+            Ok(n) => {
+                let _ = stdin.flush();
+                Ok(Value::Int(n as i64))
+            }
+            Err(_) => Ok(Value::Int(-1)),
+        },
+        None => Ok(Value::Int(-1)),
+    }
+}
+
+/// Non-blocking read of whatever is currently buffered on a piped child's stdout.
+///
+/// Callable from Simple as: `rt_process_read_stdout(pid: i64) -> text`
+/// Returns "" when the child is unknown or no data is available yet -- this is
+/// the documented C behaviour, not an error.
+pub fn rt_process_read_stdout(args: &[Value]) -> Result<Value, CompileError> {
+    use std::io::Read;
+    let pid = piped_arg_pid(args, "rt_process_read_stdout")?;
+    let mut map = PIPED_PROCESSES.lock().unwrap();
+    let mut out = Vec::new();
+    if let Some(stdout) = map.get_mut(&pid).and_then(|c| c.stdout.as_mut()) {
+        let mut buf = [0u8; 8192];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    out.extend_from_slice(&buf[..n]);
+                    if n < buf.len() {
+                        break;
+                    }
+                }
+                // WouldBlock is the normal "nothing yet" answer on the
+                // O_NONBLOCK fd; every other error also yields "".
+                Err(_) => break,
+            }
+        }
+    }
+    Ok(Value::text(String::from_utf8_lossy(&out).into_owned()))
+}
+
+/// Is a piped child still running?
+///
+/// Callable from Simple as: `rt_process_is_alive(pid: i64) -> bool`
+pub fn rt_process_is_alive(args: &[Value]) -> Result<Value, CompileError> {
+    let pid = piped_arg_pid(args, "rt_process_is_alive")?;
+    let mut map = PIPED_PROCESSES.lock().unwrap();
+    let alive = match map.get_mut(&pid) {
+        // try_wait -> Ok(None) means "still running".
+        Some(child) => matches!(child.try_wait(), Ok(None)),
+        None => false,
+    };
+    Ok(Value::Bool(alive))
+}
+
+/// Close a piped child: drop its stdin (EOF to the child), then kill+reap it.
+///
+/// Callable from Simple as: `rt_process_close_piped(pid: i64) -> bool`
+pub fn rt_process_close_piped(args: &[Value]) -> Result<Value, CompileError> {
+    let pid = piped_arg_pid(args, "rt_process_close_piped")?;
+    let child = PIPED_PROCESSES.lock().unwrap().remove(&pid);
+    match child {
+        Some(mut child) => {
+            // Dropping stdin sends EOF, giving a well-behaved child the chance
+            // to exit on its own before we escalate.
+            drop(child.stdin.take());
+            let _ = child.kill();
+            let _ = child.wait();
+            Ok(Value::Bool(true))
+        }
+        None => Ok(Value::Bool(false)),
+    }
+}
+
 /// Get platform name
 ///
 /// Callable from Simple as: `rt_platform_name()`

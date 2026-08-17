@@ -59,6 +59,11 @@ impl InterpError:
 
 struct CallFrame:
     """Saved state for nested function calls."""
+    # Name of the function that was executing when this frame was pushed (the
+    # CALLER). Without it the frame stack exists but cannot NAME anything, so a
+    # runtime error could never render a `Call stack:` section -- see
+    # doc/08_tracking/bug/runtime_error_stack_absent_on_live_interpreter_2026-08-17.md
+    function_name: text
     locals: {i64: i64}
     current_block: i64?
     previous_block: i64?
@@ -95,6 +100,8 @@ class MirInterpreter:
     string_table: {i64: text}
     next_string_id: i64
     strict_mode: bool       # Miri-mode: SIMPLE_STRICT_INTERP=1, read once at create()
+    current_function: text  # Name of the function currently executing
+    error_frames: [text]    # Innermost-first frame names captured when an error escapes
 
 impl MirInterpreter:
     static fn create() -> MirInterpreter:
@@ -116,8 +123,48 @@ impl MirInterpreter:
             next_string_id: -1,
             # Read once at startup so default (unset) perf/behavior is untouched;
             # never re-read per instruction.
-            strict_mode: (rt_env_get("SIMPLE_STRICT_INTERP") ?? "") == "1"
+            strict_mode: (rt_env_get("SIMPLE_STRICT_INTERP") ?? "") == "1",
+            current_function: "<toplevel>",
+            error_frames: []
         )
+
+    me _record_error_frame():
+        """Record the currently-executing function as an unwound error frame.
+
+        Called on every error-return path BEFORE the frame is popped -- popping
+        restores caller state and destroys the evidence, which is exactly why
+        the frame stack existed but no trace was ever printable.
+        """
+        self.error_frames.push(self.current_function)
+
+    me call_stack_trace() -> text:
+        """Render the captured error frames as a `Call stack:` section.
+
+        Empty string when no error has unwound, so callers can append it
+        unconditionally without emitting a bare header.
+        """
+        if self.error_frames.len() == 0:
+            return ""
+        var out = "Call stack:"
+        var i = 0
+        while i < self.error_frames.len():
+            out = out + "\n  #{i} {self.error_frames[i]}"
+            i = i + 1
+        out
+
+    me format_error(err: InterpError) -> text:
+        """Format a runtime error together with its call stack section."""
+        val msg = err.message()
+        # InterpError.RuntimeError already carries the "Runtime error: " prefix;
+        # every other variant does not. Prefix only when it is missing so the
+        # header appears exactly once.
+        var head = msg
+        if not msg.starts_with("Runtime error"):
+            head = "Runtime error: {msg}"
+        val trace = self.call_stack_trace()
+        if trace == "":
+            return head
+        "{head}\n{trace}"
 
     # ========================================================================
     # Value Management
@@ -585,6 +632,7 @@ impl MirInterpreter:
 
         # Save current state to call stack
         val frame = CallFrame(
+            function_name: self.current_function,
             locals: self.locals,
             current_block: self.current_block,
             previous_block: self.previous_block,
@@ -593,6 +641,7 @@ impl MirInterpreter:
             blocks: self.blocks
         )
         self.call_stack.push(frame)
+        self.current_function = callee.name
 
         # Set up fresh state for callee
         self.locals = {}
@@ -637,7 +686,9 @@ impl MirInterpreter:
                     for inst in block.instructions:
                         val error = self.execute_instruction(inst)
                         if error.?:
-                            # Restore state on error
+                            # Restore state on error -- but capture the frame
+                            # name FIRST; the pop destroys it.
+                            self._record_error_frame()
                             self._pop_call_stack()
                             return (nil, error)
                         if self.has_returned:
@@ -646,6 +697,7 @@ impl MirInterpreter:
                     if not self.has_returned:
                         val error = self.execute_terminator(block.terminator)
                         if error.?:
+                            self._record_error_frame()
                             self._pop_call_stack()
                             return (nil, error)
 
@@ -654,6 +706,7 @@ impl MirInterpreter:
                     has_block = false
 
         if max_iter == 0:
+            self._record_error_frame()
             self._pop_call_stack()
             return (nil, Some(InterpError.RuntimeError(message: "Infinite loop in called function")))
 
@@ -670,6 +723,7 @@ impl MirInterpreter:
         val stack_len = self.call_stack.len()
         if stack_len > 0:
             val frame = self.call_stack[stack_len - 1]
+            self.current_function = frame.function_name
             self.locals = frame.locals
             self.current_block = frame.current_block
             self.previous_block = frame.previous_block
@@ -805,6 +859,8 @@ impl MirInterpreter:
     me execute_function(func: MirFunction) -> (i64?, InterpError?):
         """Execute a MIR function and return result."""
         debug("interp", "Executing function: {func.name} ({func.blocks.len()} blocks, {func.locals.len()} locals)")
+        self.current_function = func.name
+        self.error_frames = []
         # Initialize blocks
         for block in func.blocks:
             self.blocks[block.id.id] = block
@@ -829,6 +885,7 @@ impl MirInterpreter:
             for inst in block.instructions:
                 val error = self.execute_instruction(inst)
                 if error.?:
+                    self._record_error_frame()
                     return (nil, error)
                 if self.has_returned:
                     break
@@ -837,12 +894,14 @@ impl MirInterpreter:
             if not self.has_returned:
                 val error = self.execute_terminator(block.terminator)
                 if error.?:
+                    self._record_error_frame()
                     return (nil, error)
 
             max_iterations = max_iterations - 1
 
         if max_iterations == 0:
             debug("interp", "Infinite loop detected in function: {func.name}")
+            self._record_error_frame()
             return (nil, Some(InterpError.RuntimeError(message: "Infinite loop detected")))
 
         # Return value from return instruction

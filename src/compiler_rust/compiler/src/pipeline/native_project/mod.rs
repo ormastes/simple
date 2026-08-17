@@ -824,6 +824,20 @@ impl NativeProjectBuilder {
             // digest is a CORRECTNESS input to the cache key, not an opt-in extra.
             if use_incremental {
                 layout_fp = cross_module_layout_fingerprint(&result);
+                if std::env::var("SIMPLE_DEBUG_LAYOUT_FP").is_ok() {
+                    eprintln!(
+                        "[layout-fp] fp={:016x} map={} all_mangled={} struct_defs={} enum_defs={} fn_arities={} fn_return_types={} data_exports={} trait_impls={}",
+                        layout_fp,
+                        result.map.len(),
+                        result.all_mangled.len(),
+                        result.struct_defs.len(),
+                        result.enum_defs.len(),
+                        result.fn_arities.len(),
+                        result.fn_return_types.len(),
+                        result.data_exports.len(),
+                        result.trait_impls.len(),
+                    );
+                }
             }
             if self.config.verbose {
                 eprintln!(

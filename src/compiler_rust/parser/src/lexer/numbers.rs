@@ -132,9 +132,39 @@ impl<'a> super::Lexer<'a> {
         )
     }
 
+    /// True when the number starting at `first` is preceded by a member-access
+    /// `.` — i.e. it occupies a tuple-index position such as the `0` and the `1`
+    /// in `r.0.1`.
+    ///
+    /// A float literal can never appear there: `'.'` alone always lexes to
+    /// `TokenKind::Dot` (`lexer/mod.rs:456`) and the language has no
+    /// leading-dot float form, so `.<digit>` is unambiguously an index. Without
+    /// this test `scan_number` absorbed the second `.1` of `r.0.1` as a
+    /// fraction and emitted `Float(0.1)`, which the postfix parser rejects with
+    /// `expected identifier, found Float(0.1)` — nested tuple indexing simply
+    /// did not parse.
+    ///
+    /// `1..2` is excluded: there the `2` is preceded by the second dot of a
+    /// `DoubleDot`, so the char before the dot is itself a dot.
+    fn preceded_by_member_dot(&mut self, first: char) -> bool {
+        // `first` has already been consumed, so the next pending char index
+        // (or EOF) marks the end of `first`.
+        let after = self.chars.peek().map(|(i, _)| *i).unwrap_or(self.source.len());
+        let first_idx = match after.checked_sub(first.len_utf8()) {
+            Some(i) => i,
+            None => return false,
+        };
+        let mut before = self.source[..first_idx].chars().rev();
+        match before.next() {
+            Some('.') => before.next() != Some('.'),
+            _ => false,
+        }
+    }
+
     pub(super) fn scan_number(&mut self, first: char) -> TokenKind {
         let mut num_str = String::from(first);
         let mut is_float = false;
+        let index_position = self.preceded_by_member_dot(first);
 
         // Handle hex, octal, binary
         if first == '0' {
@@ -191,8 +221,9 @@ impl<'a> super::Lexer<'a> {
             }
         }
 
-        // Check for float
-        if self.check('.') {
+        // Check for float. A number in tuple-index position never takes a
+        // fraction — see `preceded_by_member_dot`.
+        if !index_position && self.check('.') {
             // Look ahead to distinguish 1.2 from 1..2
             let mut peek_iter = self.chars.clone();
             peek_iter.next(); // skip '.'

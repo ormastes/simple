@@ -103,8 +103,15 @@ impl FfiDispatchBase for CudaDynFfi:
             case Static: rt_cuda_available() != 0
             case Dynamic:
                 if self._dyn_lib != nil:
-                    val result = self._dyn_lib.call0("cuInit")
-                    result == 0
+                    # cuInit(unsigned int Flags) takes one argument. call0 leaves
+                    # the flags register undefined, so the CUresult was garbage.
+                    val result = self._dyn_lib.call1("cuInit", 0)
+                    if result != 0:
+                        return false
+                    # Availability means "a device is actually present", not merely
+                    # "cuInit returned CUDA_SUCCESS" — a host with the driver
+                    # loaded but zero visible GPUs returns 0 from cuInit too.
+                    rt_cuda_device_count() > 0
                 else:
                     false
 
@@ -127,10 +134,14 @@ impl FfiDispatchBase for CudaDynFfi:
         match self._mode:
             case Static: rt_cuda_device_count()
             case Dynamic:
-                if self._dyn_lib != nil:
-                    self._dyn_lib.call0("cuDeviceGetCount")
-                else:
-                    0
+                # cuDeviceGetCount(int* count) returns its result through an OUT
+                # POINTER; the return value is a CUresult (0 == CUDA_SUCCESS).
+                # DynLib has no out-parameter marshalling (call0..call4/call_n all
+                # return the raw i64 return value), so reading the count from
+                # call0 yielded 0 on every SUCCESSFUL call — indistinguishable
+                # from "no GPUs". Route to the static extern, which marshals the
+                # out param correctly.
+                rt_cuda_device_count()
 
     fn ctx_create(device: i64) -> i64:
         match self._mode:
@@ -138,10 +149,13 @@ impl FfiDispatchBase for CudaDynFfi:
                 val ctx = rt_cuda_ctx_create(device)
                 if ctx < 0: 0 else: ctx
             case Dynamic:
-                if self._dyn_lib != nil:
-                    self._dyn_lib.call2("cuCtxCreate", 0, device)
-                else:
-                    0
+                # cuCtxCreate(CUcontext* pctx, unsigned flags, CUdevice dev) also
+                # returns through an out pointer, and takes THREE args, not two.
+                # call2 returned the CUresult, so a successful create handed back
+                # 0 — the same value this function uses for "failed". Same
+                # out-param defect class as device_count(); use the static extern.
+                val ctx = rt_cuda_ctx_create(device)
+                if ctx < 0: 0 else: ctx
 
     fn module_load_ptx(ptx: text) -> i64:
         match self._mode:
@@ -171,10 +185,12 @@ impl FfiDispatchBase for CudaDynFfi:
                 val ptr = rt_cuda_mem_alloc(size)
                 if ptr < 0: 0 else: ptr
             case Dynamic:
-                if self._dyn_lib != nil:
-                    self._dyn_lib.call1("cuMemAlloc", size)
-                else:
-                    0
+                # cuMemAlloc(CUdeviceptr* dptr, size_t bytesize): out pointer
+                # again. call1 returned the CUresult, so every successful
+                # allocation reported device pointer 0. Same defect class as
+                # device_count()/ctx_create(); use the static extern.
+                val dyn_ptr = rt_cuda_mem_alloc(size)
+                if dyn_ptr < 0: 0 else: dyn_ptr
 
     fn mem_free(ptr: i64) -> bool:
         match self._mode:

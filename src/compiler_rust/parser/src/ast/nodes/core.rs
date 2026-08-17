@@ -685,9 +685,12 @@ pub enum Expr {
         fallback_fn: Box<Expr>,
     },
 
-    /// Unwrap or early return: expr unwrap or_return:
-    /// Returns the inner value if Some/Ok, otherwise returns None/Err from the function
-    UnwrapOrReturn(Box<Expr>),
+    /// Unwrap or early return: expr unwrap or_return: default
+    /// Returns the inner value if Some/Ok, otherwise returns `default` from the function
+    UnwrapOrReturn {
+        expr: Box<Expr>,
+        default: Box<Expr>,
+    },
 
     /// Safe cast with default: expr as Type or: default
     /// Returns the cast value if successful, otherwise evaluates default

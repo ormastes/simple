@@ -3,6 +3,7 @@
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::evaluate_expr;
+// (see `eval_assertion_operand` below)
 use crate::interpreter::{BDD_REGISTRY_CONTEXTS, BDD_REGISTRY_GROUPS, BDD_REGISTRY_SHARED};
 use crate::value::*;
 use simple_parser::ast::{Argument, BinOp, ClassDef, EnumDef, Expr, FunctionDef, UnaryOp};
@@ -555,6 +556,39 @@ fn eval_arg(
     }
 }
 
+/// Evaluate an operand that sits in an ASSERTION position (an `expect(...)`
+/// subject, or either side of a comparison inside one).
+///
+/// Identical to `evaluate_expr` except for `expr.?` (`Expr::ExistsCheck`).
+/// The parser documents `.?` as "existence check — is present/non-empty",
+/// returning a bool (`simple_parser::token`, `TokenKind::DotQuestion`), but the
+/// evaluator deliberately yields the PRESENT PAYLOAD (or `Value::Nil` when
+/// absent) so that `if val v = opt.?:` can bind it; condition sites recover the
+/// boolean through `is_condition_present`. An assertion is a VALUE position, so
+/// it never went through that recovery and silently asserted on the payload:
+///
+///   expect(dict.get("missing").?).to_equal(false)  // compared nil vs false -> FAIL
+///   expect(err.? == true).to_equal(true)           // compared "Empty input" vs true -> FAIL
+///
+/// Both report the opposite of the presence the author asked about. Collapsing
+/// `.?` to its documented bool contract here restores the intended meaning
+/// without touching the payload-binding contract at condition/let-pattern sites.
+/// See doc/08_tracking/bug/sspec_test_path_value_semantics_divergence_2026-07-20.md.
+fn eval_assertion_operand(
+    expr: &Expr,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    let value = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;
+    if matches!(expr, Expr::ExistsCheck(_)) {
+        return Ok(Value::Bool(!matches!(value, Value::Nil)));
+    }
+    Ok(value)
+}
+
 pub(super) fn eval_bdd_builtin(
     name: &str,
     args: &[Argument],
@@ -920,8 +954,8 @@ pub(super) fn eval_bdd_builtin(
                 if matches!(op, BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq));
             if is_cmp_form {
                 if let Expr::Binary { op, left, right } = arg_expr {
-                    let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
-                    let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+                    let left_val = eval_assertion_operand(left, env, functions, classes, enums, impl_methods)?;
+                    let right_val = eval_assertion_operand(right, env, functions, classes, enums, impl_methods)?;
                     let (matched, op_word) = match op {
                         // Bridge `nil` (Value::Nil) and `Option::None`: the language's
                         // `==` treats an empty optional as equal to `nil` (see
@@ -1040,6 +1074,13 @@ pub(super) fn eval_bdd_builtin(
                 enums,
                 impl_methods,
             )?;
+            // `.?` in an assertion SUBJECT position is a presence question, not
+            // a payload pass-through — see `eval_assertion_operand`.
+            let value = if matches!(arg_expr, Expr::ExistsCheck(_)) {
+                Value::Bool(!matches!(value, Value::Nil))
+            } else {
+                value
+            };
             // Vacuity gate: a non-bool subject MUST be consumed by a matcher.
             // Truthiness on a text/number/list/object subject asserts nothing.
             if !matches!(value, Value::Bool(_)) {

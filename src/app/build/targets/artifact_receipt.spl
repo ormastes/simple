@@ -1,0 +1,701 @@
+# codex-impl
+# Canonical dependency, imported-closure, action-receipt, and layered-CAS
+# contracts for named targets. Unknown or malformed evidence never permits reuse.
+
+use std.common.crypto.sha256.{sha256_text}
+use app.io.mod.{
+    file_exists, file_read, file_atomic_write, file_copy, file_delete,
+    file_hash_sha256, file_size_raw, dir_create_all, getpid, rt_file_rename
+}
+
+val DEPENDENCY_MANIFEST_SCHEMA_V1 = "simple-target-dependency-manifest-v1"
+val IMPORTED_CLOSURE_SCHEMA_V1 = "simple-imported-closure-receipt-v1"
+val ACTION_RECEIPT_SCHEMA_V1 = "simple-target-action-receipt-v1"
+val TARGET_CAS_SCHEMA_V1 = "v1"
+
+struct DependencyArtifactInputV1:
+    producer_target: text
+    edge_identity: text
+    artifact_path: text
+    artifact_kind: text
+    artifact_digest: text
+    link_export_digest: text
+    abi_digest: text
+
+struct DependencyManifestV1:
+    consumer_target: text
+    inputs: [DependencyArtifactInputV1]
+    errors: [text]
+
+struct ImportedClosureInputV1:
+    path: text
+    digest: text
+
+struct ImportedClosureReceiptV1:
+    target: text
+    entry: text
+    tool_behavior_digest: text
+    dependency_manifest_digest: text
+    inputs: [ImportedClosureInputV1]
+    closure_digest: text
+    errors: [text]
+
+struct ActionReceiptV1:
+    target: text
+    action: text
+    product: text
+    producer: text
+    cache_namespace: text
+    dependency_manifest_digest: text
+    imported_closure_digest: text
+    tool_behavior_digest: text
+    artifact_kind: text
+    artifact_digest: text
+    cas_path: text
+    result: text
+    action_key: text
+    errors: [text]
+
+struct TargetReuseEvidenceV1:
+    compatibility: text
+    reusable: bool
+    reason: text
+    action_key: text
+    artifact_digest: text
+    action_receipt_path: text
+    cas_path: text
+
+fn digest_is_sha256(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var i = 0
+    while i < value.len():
+        val c = value[i:i + 1]
+        if not ((c >= "0" and c <= "9") or (c >= "a" and c <= "f")):
+            return false
+        i = i + 1
+    true
+
+fn declared_artifact_kind_valid(kind: text) -> bool:
+    kind == "binary" or kind == "object" or kind == "archive" or
+        kind == "shared" or kind == "smf" or kind == "composition" or
+        kind == "aggregate-receipt"
+
+fn declared_dependency_identity_valid(identity: text) -> bool:
+    identity == "implementation" or identity == "compile-interface" or
+        identity == "abi" or identity == "compile-semantic" or
+        identity == "link" or identity == "runtime" or
+        identity == "tool-behavior" or identity == "configuration"
+
+fn declared_path_valid(path: text) -> bool:
+    path.len() > 0 and not path.starts_with("/") and not path.contains("..") and
+        not path.contains("|") and not path.contains("\n") and
+        (path.starts_with("build/") or path.starts_with("src/") or
+         path.starts_with("test/") or path.starts_with("bin/release/") or
+         path == "targets.sdn")
+
+fn _contains_text(values: [text], value: text) -> bool:
+    var i = 0
+    while i < values.len():
+        if values[i] == value:
+            return true
+        i = i + 1
+    false
+
+fn _sorted_dependency_inputs(values: [DependencyArtifactInputV1]) -> [DependencyArtifactInputV1]:
+    var out: [DependencyArtifactInputV1] = []
+    var i = 0
+    while i < values.len():
+        val value = values[i]
+        var pos = 0
+        while pos < out.len() and out[pos].producer_target < value.producer_target:
+            pos = pos + 1
+        var next: [DependencyArtifactInputV1] = []
+        var j = 0
+        while j < out.len():
+            if j == pos:
+                next.push(value)
+            next.push(out[j])
+            j = j + 1
+        if pos == out.len():
+            next.push(value)
+        out = next
+        i = i + 1
+    out
+
+fn _sorted_closure_inputs(values: [ImportedClosureInputV1]) -> [ImportedClosureInputV1]:
+    var out: [ImportedClosureInputV1] = []
+    var i = 0
+    while i < values.len():
+        val value = values[i]
+        var pos = 0
+        while pos < out.len() and out[pos].path < value.path:
+            pos = pos + 1
+        var next: [ImportedClosureInputV1] = []
+        var j = 0
+        while j < out.len():
+            if j == pos:
+                next.push(value)
+            next.push(out[j])
+            j = j + 1
+        if pos == out.len():
+            next.push(value)
+        out = next
+        i = i + 1
+    out
+
+fn dependency_manifest_text_v1(consumer_target: text, inputs: [DependencyArtifactInputV1]) -> text:
+    var out = DEPENDENCY_MANIFEST_SCHEMA_V1 + "\nconsumer=" + consumer_target
+    val ordered = _sorted_dependency_inputs(inputs)
+    var i = 0
+    while i < ordered.len():
+        val item = ordered[i]
+        out = out + "\ndependency=" + item.producer_target +
+            "|identity=" + item.edge_identity +
+            "|path=" + item.artifact_path +
+            "|kind=" + item.artifact_kind +
+            "|artifact=" + item.artifact_digest +
+            "|link=" + item.link_export_digest +
+            "|abi=" + item.abi_digest
+        i = i + 1
+    out + "\n"
+
+fn dependency_manifest_digest_v1(consumer_target: text, inputs: [DependencyArtifactInputV1]) -> text:
+    sha256_text(dependency_manifest_text_v1(consumer_target, inputs))
+
+fn parse_dependency_manifest_v1(value: text) -> DependencyManifestV1:
+    var errors: [text] = []
+    var inputs: [DependencyArtifactInputV1] = []
+    val lines = value.trim().split("\n")
+    if lines.len() < 2 or lines[0] != DEPENDENCY_MANIFEST_SCHEMA_V1 or
+            not lines[1].starts_with("consumer="):
+        errors.push("target-receipt-error: malformed-dependency-manifest")
+        return DependencyManifestV1("", inputs, errors)
+    val consumer = lines[1][9:]
+    var i = 2
+    while i < lines.len():
+        val fields = lines[i].split("|")
+        if fields.len() != 7 or not fields[0].starts_with("dependency=") or
+                not fields[1].starts_with("identity=") or
+                not fields[2].starts_with("path=") or
+                not fields[3].starts_with("kind=") or
+                not fields[4].starts_with("artifact=") or
+                not fields[5].starts_with("link=") or
+                not fields[6].starts_with("abi="):
+            errors.push("target-receipt-error: malformed-dependency-record")
+        else:
+            inputs.push(DependencyArtifactInputV1(
+                fields[0][11:], fields[1][9:], fields[2][5:], fields[3][5:],
+                fields[4][9:], fields[5][5:], fields[6][4:]
+            ))
+        i = i + 1
+    if errors.len() == 0 and value != dependency_manifest_text_v1(consumer, inputs):
+        errors.push("target-receipt-error: non-canonical-dependency-manifest")
+    DependencyManifestV1(consumer, inputs, errors)
+
+fn dependency_manifest_error_v1(
+    repo_root: text, consumer_target: text, inputs: [DependencyArtifactInputV1]
+) -> text:
+    if consumer_target.trim().len() == 0 or consumer_target.contains("|") or consumer_target.contains("\n"):
+        return "target-receipt-error: invalid-consumer-target"
+    var seen: [text] = []
+    val ordered = _sorted_dependency_inputs(inputs)
+    var i = 0
+    while i < ordered.len():
+        val item = ordered[i]
+        if item.producer_target.trim().len() == 0 or item.producer_target.contains("|"):
+            return "target-receipt-error: invalid-dependency-target"
+        if _contains_text(seen, item.producer_target):
+            return "target-receipt-error: duplicate-dependency: " + item.producer_target
+        seen.push(item.producer_target)
+        if not declared_dependency_identity_valid(item.edge_identity):
+            return "target-receipt-error: invalid-dependency-identity: " +
+                item.producer_target + ": " + item.edge_identity
+        if not declared_path_valid(item.artifact_path):
+            return "target-receipt-error: unsafe-dependency-path: " + item.artifact_path
+        if not declared_artifact_kind_valid(item.artifact_kind):
+            return "target-receipt-error: invalid-dependency-kind: " + item.artifact_kind
+        if not digest_is_sha256(item.artifact_digest) or
+                not digest_is_sha256(item.link_export_digest) or
+                not digest_is_sha256(item.abi_digest):
+            return "target-receipt-error: invalid-dependency-digest: " + item.producer_target
+        val absolute = repo_root + "/" + item.artifact_path
+        if not file_exists(absolute) or file_size_raw(absolute) <= 0:
+            return "target-receipt-error: dependency-artifact-missing: " + item.producer_target
+        if file_hash_sha256(absolute) != item.artifact_digest:
+            return "target-receipt-error: dependency-artifact-digest-mismatch: " + item.producer_target
+        i = i + 1
+    ""
+
+fn publish_dependency_manifest_layer_v1(
+    repo_root: text, cache_dir: text, consumer_target: text,
+    inputs: [DependencyArtifactInputV1]
+) -> text:
+    val validation = dependency_manifest_error_v1(repo_root, consumer_target, inputs)
+    if validation.len() > 0:
+        return validation
+    val body = dependency_manifest_text_v1(consumer_target, inputs)
+    val digest = sha256_text(body)
+    val path = cache_dir + "/manifests/" + digest + ".manifest"
+    val slash = path.rfind("/")
+    val parent = if slash > 0: path[0:slash] else: "."
+    if not dir_create_all(parent) or not file_atomic_write(path, body):
+        return "target-receipt-error: dependency-manifest-write-failed"
+    digest
+
+fn imported_closure_receipt_text_v1(
+    target: text, entry: text, tool_behavior_digest: text,
+    dependency_manifest_digest: text, inputs: [ImportedClosureInputV1]
+) -> text:
+    val ordered = _sorted_closure_inputs(inputs)
+    var body = IMPORTED_CLOSURE_SCHEMA_V1 +
+        "\ntarget=" + target +
+        "\nentry=" + entry +
+        "\ntool-behavior=" + tool_behavior_digest +
+        "\ndependency-manifest=" + dependency_manifest_digest
+    var i = 0
+    while i < ordered.len():
+        body = body + "\ninput=" + ordered[i].path + "|digest=" + ordered[i].digest
+        i = i + 1
+    val closure_digest = sha256_text(body + "\n")
+    body + "\nclosure-digest=" + closure_digest + "\n"
+
+fn imported_closure_receipt_error_v1(
+    repo_root: text, target: text, entry: text, tool_behavior_digest: text,
+    dependency_manifest_digest: text, inputs: [ImportedClosureInputV1],
+    receipt_text: text
+) -> text:
+    if not declared_path_valid(entry):
+        return "target-receipt-error: unsafe-entry-path: " + entry
+    if not digest_is_sha256(tool_behavior_digest) or
+            not digest_is_sha256(dependency_manifest_digest):
+        return "target-receipt-error: invalid-closure-identity"
+    var seen: [text] = []
+    var entry_present = false
+    val ordered = _sorted_closure_inputs(inputs)
+    var i = 0
+    while i < ordered.len():
+        val item = ordered[i]
+        if not declared_path_valid(item.path) or not digest_is_sha256(item.digest):
+            return "target-receipt-error: invalid-closure-input: " + item.path
+        if _contains_text(seen, item.path):
+            return "target-receipt-error: duplicate-closure-input: " + item.path
+        seen.push(item.path)
+        if item.path == entry:
+            entry_present = true
+        val absolute = repo_root + "/" + item.path
+        if not file_exists(absolute) or file_hash_sha256(absolute) != item.digest:
+            return "target-receipt-error: closure-input-digest-mismatch: " + item.path
+        i = i + 1
+    if not entry_present:
+        return "target-receipt-error: entry-not-in-imported-closure"
+    val canonical = imported_closure_receipt_text_v1(
+        target, entry, tool_behavior_digest, dependency_manifest_digest, ordered
+    )
+    if receipt_text != canonical:
+        return "target-receipt-error: non-canonical-imported-closure-receipt"
+    ""
+
+fn imported_closure_digest_from_text_v1(receipt_text: text) -> text:
+    val lines = receipt_text.trim().split("\n")
+    if lines.len() < 6:
+        return ""
+    val last = lines[lines.len() - 1]
+    if not last.starts_with("closure-digest="):
+        return ""
+    val digest = last[15:]
+    if digest_is_sha256(digest): digest else: ""
+
+fn parse_imported_closure_receipt_v1(value: text) -> ImportedClosureReceiptV1:
+    var errors: [text] = []
+    var inputs: [ImportedClosureInputV1] = []
+    val lines = value.trim().split("\n")
+    if lines.len() < 6 or lines[0] != IMPORTED_CLOSURE_SCHEMA_V1 or
+            not lines[1].starts_with("target=") or
+            not lines[2].starts_with("entry=") or
+            not lines[3].starts_with("tool-behavior=") or
+            not lines[4].starts_with("dependency-manifest=") or
+            not lines[lines.len() - 1].starts_with("closure-digest="):
+        errors.push("target-receipt-error: malformed-imported-closure-receipt")
+        return ImportedClosureReceiptV1("", "", "", "", inputs, "", errors)
+    val target = lines[1][7:]
+    val entry = lines[2][6:]
+    val tool = lines[3][14:]
+    val dependency = lines[4][20:]
+    var i = 5
+    while i < lines.len() - 1:
+        val fields = lines[i].split("|")
+        if fields.len() != 2 or not fields[0].starts_with("input=") or
+                not fields[1].starts_with("digest="):
+            errors.push("target-receipt-error: malformed-closure-input")
+        else:
+            inputs.push(ImportedClosureInputV1(fields[0][6:], fields[1][7:]))
+        i = i + 1
+    val closure = lines[lines.len() - 1][15:]
+    if errors.len() == 0 and value != imported_closure_receipt_text_v1(
+            target, entry, tool, dependency, inputs):
+        errors.push("target-receipt-error: non-canonical-imported-closure-receipt")
+    ImportedClosureReceiptV1(target, entry, tool, dependency, inputs, closure, errors)
+
+fn publish_imported_closure_layer_v1(
+    repo_root: text, cache_dir: text, target: text, entry: text,
+    tool_behavior_digest: text, dependency_manifest_digest: text,
+    inputs: [ImportedClosureInputV1]
+) -> text:
+    val body = imported_closure_receipt_text_v1(
+        target, entry, tool_behavior_digest, dependency_manifest_digest, inputs
+    )
+    val validation = imported_closure_receipt_error_v1(
+        repo_root, target, entry, tool_behavior_digest,
+        dependency_manifest_digest, inputs, body
+    )
+    if validation.len() > 0:
+        return validation
+    val digest = imported_closure_digest_from_text_v1(body)
+    val path = cache_dir + "/closures/" + digest + ".receipt"
+    val slash = path.rfind("/")
+    val parent = if slash > 0: path[0:slash] else: "."
+    if not dir_create_all(parent) or not file_atomic_write(path, body):
+        return "target-receipt-error: imported-closure-receipt-write-failed"
+    digest
+
+fn target_cache_namespace_v1(
+    producer_abi: text, target_identity: text, profile: text, artifact_kind: text
+) -> text:
+    if not digest_is_sha256(producer_abi) or not digest_is_sha256(target_identity) or
+            profile.trim().len() == 0 or not declared_artifact_kind_valid(artifact_kind):
+        return ""
+    TARGET_CAS_SCHEMA_V1 + "/" + producer_abi + "/" + target_identity +
+        "/" + profile + "/" + artifact_kind
+
+fn target_action_key_v1(
+    target: text, action: text, product: text, producer: text,
+    cache_namespace: text, dependency_manifest_digest: text,
+    imported_closure_digest: text, tool_behavior_digest: text,
+    artifact_kind: text
+) -> text:
+    if target.len() == 0 or action.len() == 0 or cache_namespace.len() == 0 or
+            not digest_is_sha256(dependency_manifest_digest) or
+            not digest_is_sha256(imported_closure_digest) or
+            not digest_is_sha256(tool_behavior_digest):
+        return ""
+    sha256_text(
+        "target=" + target + "|action=" + action + "|product=" + product +
+        "|producer=" + producer + "|namespace=" + cache_namespace +
+        "|dependency-manifest=" + dependency_manifest_digest +
+        "|imported-closure=" + imported_closure_digest +
+        "|tool-behavior=" + tool_behavior_digest + "|kind=" + artifact_kind
+    )
+
+fn target_cas_path_v1(repo_root: text, artifact_digest: text) -> text:
+    if not digest_is_sha256(artifact_digest):
+        return ""
+    repo_root + "/build/target_cas/" + TARGET_CAS_SCHEMA_V1 + "/sha256/" + artifact_digest
+
+fn target_action_receipt_text_v1(receipt: ActionReceiptV1) -> text:
+    ACTION_RECEIPT_SCHEMA_V1 +
+        "\ntarget=" + receipt.target +
+        "\naction=" + receipt.action +
+        "\nproduct=" + receipt.product +
+        "\nproducer=" + receipt.producer +
+        "\nnamespace=" + receipt.cache_namespace +
+        "\ndependency-manifest=" + receipt.dependency_manifest_digest +
+        "\nimported-closure=" + receipt.imported_closure_digest +
+        "\ntool-behavior=" + receipt.tool_behavior_digest +
+        "\nartifact-kind=" + receipt.artifact_kind +
+        "\nartifact=" + receipt.artifact_digest +
+        "\ncas-path=" + receipt.cas_path +
+        "\nresult=" + receipt.result +
+        "\naction-key=" + receipt.action_key + "\n"
+
+fn parse_target_action_receipt_v1(value: text) -> ActionReceiptV1:
+    var errors: [text] = []
+    val lines = value.trim().split("\n")
+    if lines.len() != 14 or lines[0] != ACTION_RECEIPT_SCHEMA_V1:
+        errors.push("target-receipt-error: malformed-action-receipt")
+        return ActionReceiptV1("", "", "", "", "", "", "", "", "", "", "", "", "", errors)
+    val prefixes = [
+        "target=", "action=", "product=", "producer=", "namespace=",
+        "dependency-manifest=", "imported-closure=", "tool-behavior=",
+        "artifact-kind=", "artifact=", "cas-path=", "result=", "action-key="
+    ]
+    var i = 0
+    while i < prefixes.len():
+        if not lines[i + 1].starts_with(prefixes[i]):
+            errors.push("target-receipt-error: malformed-action-field: " + prefixes[i])
+        i = i + 1
+    if errors.len() > 0:
+        return ActionReceiptV1("", "", "", "", "", "", "", "", "", "", "", "", "", errors)
+    var receipt = ActionReceiptV1(
+        lines[1][7:], lines[2][7:], lines[3][8:], lines[4][9:], lines[5][10:],
+        lines[6][20:], lines[7][17:], lines[8][14:], lines[9][14:],
+        lines[10][9:], lines[11][9:], lines[12][7:], lines[13][11:], errors
+    )
+    val semantic_error = target_action_receipt_error_v1(receipt)
+    if semantic_error.len() > 0:
+        receipt.errors.push(semantic_error)
+    if receipt.errors.len() == 0 and value != target_action_receipt_text_v1(receipt):
+        receipt.errors.push("target-receipt-error: non-canonical-action-receipt")
+    receipt
+
+fn target_action_receipt_error_v1(receipt: ActionReceiptV1) -> text:
+    if receipt.target.trim().len() == 0 or receipt.action.trim().len() == 0:
+        return "target-receipt-error: incomplete-action-receipt"
+    if not digest_is_sha256(receipt.dependency_manifest_digest) or
+            not digest_is_sha256(receipt.imported_closure_digest) or
+            not digest_is_sha256(receipt.tool_behavior_digest) or
+            not digest_is_sha256(receipt.artifact_digest) or
+            not digest_is_sha256(receipt.action_key):
+        return "target-receipt-error: invalid-action-receipt-digest"
+    if receipt.result != "rebuilt" and receipt.result != "reused":
+        return "target-receipt-error: invalid-action-result"
+    val expected_key = target_action_key_v1(
+        receipt.target, receipt.action, receipt.product, receipt.producer,
+        receipt.cache_namespace, receipt.dependency_manifest_digest,
+        receipt.imported_closure_digest, receipt.tool_behavior_digest,
+        receipt.artifact_kind
+    )
+    if expected_key.len() == 0 or receipt.action_key != expected_key:
+        return "target-receipt-error: action-key-mismatch"
+    ""
+
+fn target_reuse_evidence_v1(
+    repo_root: text, output_path: text, action_receipt_path: text,
+    expected: ActionReceiptV1
+) -> TargetReuseEvidenceV1:
+    val expected_error = target_action_receipt_error_v1(expected)
+    if expected_error.len() > 0:
+        return TargetReuseEvidenceV1(
+            "unknown", false, expected_error, "", "", action_receipt_path, ""
+        )
+    val expected_cas_path = target_cas_path_v1(repo_root, expected.artifact_digest)
+    if expected.cas_path != expected_cas_path:
+        return TargetReuseEvidenceV1(
+            "incompatible", false, "cas-path-mismatch", expected.action_key, "",
+            action_receipt_path, expected.cas_path
+        )
+    if not file_exists(output_path) or file_size_raw(output_path) <= 0:
+        return TargetReuseEvidenceV1(
+            "unknown", false, "artifact-missing", expected.action_key, "",
+            action_receipt_path, expected.cas_path
+        )
+    val artifact_digest = file_hash_sha256(output_path)
+    if artifact_digest != expected.artifact_digest:
+        return TargetReuseEvidenceV1(
+            "incompatible", false, "published-artifact-digest-mismatch",
+            expected.action_key, artifact_digest, action_receipt_path, expected.cas_path
+        )
+    if not file_exists(action_receipt_path):
+        return TargetReuseEvidenceV1(
+            "unknown", false, "action-receipt-missing", expected.action_key,
+            artifact_digest, action_receipt_path, expected.cas_path
+        )
+    if file_read(action_receipt_path) != target_action_receipt_text_v1(expected):
+        return TargetReuseEvidenceV1(
+            "incompatible", false, "action-receipt-mismatch", expected.action_key,
+            artifact_digest, action_receipt_path, expected.cas_path
+        )
+    if not file_exists(expected.cas_path) or
+            file_hash_sha256(expected.cas_path) != artifact_digest:
+        return TargetReuseEvidenceV1(
+            "incompatible", false, "cas-artifact-missing-or-mismatched",
+            expected.action_key, artifact_digest, action_receipt_path, expected.cas_path
+        )
+    TargetReuseEvidenceV1(
+        "exact", true, "verified-action-receipt-and-cas", expected.action_key,
+        artifact_digest, action_receipt_path, expected.cas_path
+    )
+
+fn _reuse_failure(
+    compatibility: text, reason: text, action_receipt_path: text,
+    action_key: text = "", artifact_digest: text = "", cas_path: text = ""
+) -> TargetReuseEvidenceV1:
+    TargetReuseEvidenceV1(
+        compatibility, false, reason, action_key, artifact_digest,
+        action_receipt_path, cas_path
+    )
+
+fn target_layered_reuse_evidence_from_files_v1(
+    repo_root: text, target: text, action: text, product: text, producer: text,
+    entry: text, artifact_kind: text, output_path: text, cache_dir: text
+) -> TargetReuseEvidenceV1:
+    """Verify current+immutable action receipts, dependency manifest, imported
+    closure, published output, and CAS bytes before permitting reuse."""
+    val current_receipt_path = cache_dir + "/receipts/current.receipt"
+    if not file_exists(current_receipt_path):
+        return _reuse_failure("unknown", "action-receipt-missing", current_receipt_path)
+    val action_receipt = parse_target_action_receipt_v1(file_read(current_receipt_path))
+    if action_receipt.errors.len() > 0:
+        return _reuse_failure("incompatible", action_receipt.errors[0], current_receipt_path)
+    if action_receipt.target != target or action_receipt.action != action or
+            action_receipt.product != product or action_receipt.producer != producer or
+            action_receipt.artifact_kind != artifact_kind:
+        return _reuse_failure(
+            "incompatible", "action-receipt-subject-mismatch", current_receipt_path,
+            action_receipt.action_key, action_receipt.artifact_digest, action_receipt.cas_path
+        )
+    val immutable_receipt_path = cache_dir + "/receipts/" + action_receipt.action_key + ".receipt"
+    if not file_exists(immutable_receipt_path) or
+            file_read(immutable_receipt_path) != file_read(current_receipt_path):
+        return _reuse_failure(
+            "incompatible", "immutable-action-receipt-missing-or-mismatched",
+            current_receipt_path, action_receipt.action_key,
+            action_receipt.artifact_digest, action_receipt.cas_path
+        )
+
+    val manifest_path = cache_dir + "/manifests/" +
+        action_receipt.dependency_manifest_digest + ".manifest"
+    if not file_exists(manifest_path):
+        return _reuse_failure(
+            "unknown", "dependency-manifest-missing", current_receipt_path,
+            action_receipt.action_key, action_receipt.artifact_digest, action_receipt.cas_path
+        )
+    val manifest_text = file_read(manifest_path)
+    if sha256_text(manifest_text) != action_receipt.dependency_manifest_digest:
+        return _reuse_failure(
+            "incompatible", "dependency-manifest-digest-mismatch", current_receipt_path,
+            action_receipt.action_key, action_receipt.artifact_digest, action_receipt.cas_path
+        )
+    val manifest = parse_dependency_manifest_v1(manifest_text)
+    if manifest.errors.len() > 0 or manifest.consumer_target != target:
+        var reason = "dependency-manifest-consumer-mismatch"
+        if manifest.errors.len() > 0:
+            reason = manifest.errors[0]
+        return _reuse_failure(
+            "incompatible", reason, current_receipt_path, action_receipt.action_key,
+            action_receipt.artifact_digest, action_receipt.cas_path
+        )
+    val manifest_error = dependency_manifest_error_v1(
+        repo_root, target, manifest.inputs
+    )
+    if manifest_error.len() > 0:
+        return _reuse_failure(
+            "incompatible", manifest_error, current_receipt_path,
+            action_receipt.action_key, action_receipt.artifact_digest, action_receipt.cas_path
+        )
+
+    val closure_path = if action == "aggregate":
+        cache_dir + "/aggregates/" + action_receipt.imported_closure_digest + ".receipt"
+    else:
+        cache_dir + "/closures/" + action_receipt.imported_closure_digest + ".receipt"
+    if not file_exists(closure_path):
+        return _reuse_failure(
+            "unknown", "imported-closure-receipt-missing", current_receipt_path,
+            action_receipt.action_key, action_receipt.artifact_digest, action_receipt.cas_path
+        )
+    val closure_text = file_read(closure_path)
+    if action == "aggregate":
+        if sha256_text(closure_text) != action_receipt.imported_closure_digest:
+            return _reuse_failure(
+                "incompatible", "aggregate-identity-digest-mismatch",
+                current_receipt_path, action_receipt.action_key,
+                action_receipt.artifact_digest, action_receipt.cas_path
+            )
+        return target_reuse_evidence_v1(
+            repo_root, output_path, current_receipt_path, action_receipt
+        )
+    val closure = parse_imported_closure_receipt_v1(closure_text)
+    if closure.errors.len() > 0 or closure.closure_digest != action_receipt.imported_closure_digest:
+        var reason = "imported-closure-digest-mismatch"
+        if closure.errors.len() > 0:
+            reason = closure.errors[0]
+        return _reuse_failure(
+            "incompatible", reason, current_receipt_path, action_receipt.action_key,
+            action_receipt.artifact_digest, action_receipt.cas_path
+        )
+    if closure.target != target or closure.entry != entry or
+            closure.tool_behavior_digest != action_receipt.tool_behavior_digest or
+            closure.dependency_manifest_digest != action_receipt.dependency_manifest_digest:
+        return _reuse_failure(
+            "incompatible", "imported-closure-subject-mismatch", current_receipt_path,
+            action_receipt.action_key, action_receipt.artifact_digest, action_receipt.cas_path
+        )
+    val closure_error = imported_closure_receipt_error_v1(
+        repo_root, target, entry, closure.tool_behavior_digest,
+        closure.dependency_manifest_digest, closure.inputs, closure_text
+    )
+    if closure_error.len() > 0:
+        return _reuse_failure(
+            "incompatible", closure_error, current_receipt_path,
+            action_receipt.action_key, action_receipt.artifact_digest, action_receipt.cas_path
+        )
+    target_reuse_evidence_v1(
+        repo_root, output_path, current_receipt_path, action_receipt
+    )
+
+fn publish_target_action_evidence_v1(
+    repo_root: text, output_path: text, action_receipt_path: text,
+    receipt: ActionReceiptV1
+) -> text:
+    val receipt_error = target_action_receipt_error_v1(receipt)
+    if receipt_error.len() > 0:
+        return receipt_error
+    if not file_exists(output_path) or file_hash_sha256(output_path) != receipt.artifact_digest:
+        return "target-receipt-error: output-digest-mismatch"
+    val cas_path = target_cas_path_v1(repo_root, receipt.artifact_digest)
+    if cas_path != receipt.cas_path:
+        return "target-receipt-error: cas-path-mismatch"
+    if not dir_create_all(repo_root + "/build/target_cas/" + TARGET_CAS_SCHEMA_V1 + "/sha256"):
+        return "target-receipt-error: cas-directory-create-failed"
+    if not file_exists(cas_path):
+        val candidate = cas_path + ".candidate-" + getpid().to_text()
+        file_delete(candidate)
+        if not file_copy(output_path, candidate) or file_hash_sha256(candidate) != receipt.artifact_digest:
+            file_delete(candidate)
+            return "target-receipt-error: cas-copy-failed"
+        if not rt_file_rename(candidate, cas_path):
+            file_delete(candidate)
+            return "target-receipt-error: cas-publish-failed"
+    elif file_hash_sha256(cas_path) != receipt.artifact_digest:
+        return "target-receipt-error: cas-collision"
+    val slash = action_receipt_path.rfind("/")
+    val parent = if slash > 0: action_receipt_path[0:slash] else: "."
+    if not dir_create_all(parent):
+        return "target-receipt-error: receipt-directory-create-failed"
+    if not file_atomic_write(action_receipt_path, target_action_receipt_text_v1(receipt)):
+        return "target-receipt-error: action-receipt-write-failed"
+    ""
+
+fn publish_target_action_evidence_layers_v1(
+    repo_root: text, output_path: text, cache_dir: text, receipt: ActionReceiptV1
+) -> text:
+    """Publish immutable keyed receipt first, then the current receipt pointer."""
+    val immutable_path = cache_dir + "/receipts/" + receipt.action_key + ".receipt"
+    val canonical_receipt = target_action_receipt_text_v1(receipt)
+    if file_exists(immutable_path):
+        if file_read(immutable_path) != canonical_receipt:
+            return "target-receipt-error: immutable-action-key-collision"
+        val existing = target_reuse_evidence_v1(
+            repo_root, output_path, immutable_path, receipt
+        )
+        if not existing.reusable:
+            return "target-receipt-error: immutable-action-evidence-invalid:" + existing.reason
+    else:
+        val publish_error = publish_target_action_evidence_v1(
+            repo_root, output_path, immutable_path, receipt
+        )
+        if publish_error.len() > 0:
+            return publish_error
+    val current_path = cache_dir + "/receipts/current.receipt"
+    if not file_atomic_write(current_path, canonical_receipt):
+        return "target-receipt-error: current-action-receipt-write-failed"
+    ""
+
+export DEPENDENCY_MANIFEST_SCHEMA_V1, IMPORTED_CLOSURE_SCHEMA_V1
+export ACTION_RECEIPT_SCHEMA_V1, TARGET_CAS_SCHEMA_V1
+export DependencyArtifactInputV1, DependencyManifestV1
+export ImportedClosureInputV1, ImportedClosureReceiptV1
+export ActionReceiptV1, TargetReuseEvidenceV1
+export digest_is_sha256, declared_artifact_kind_valid, declared_path_valid
+export declared_dependency_identity_valid
+export dependency_manifest_text_v1, dependency_manifest_digest_v1
+export parse_dependency_manifest_v1, dependency_manifest_error_v1
+export publish_dependency_manifest_layer_v1
+export imported_closure_receipt_text_v1, parse_imported_closure_receipt_v1
+export imported_closure_receipt_error_v1, imported_closure_digest_from_text_v1
+export publish_imported_closure_layer_v1
+export target_cache_namespace_v1, target_action_key_v1, target_cas_path_v1
+export target_action_receipt_text_v1, parse_target_action_receipt_v1
+export target_action_receipt_error_v1
+export target_reuse_evidence_v1, target_layered_reuse_evidence_from_files_v1
+export publish_target_action_evidence_v1, publish_target_action_evidence_layers_v1

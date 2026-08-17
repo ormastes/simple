@@ -626,7 +626,25 @@ impl<'a> Parser<'a> {
             TokenKind::HandlePool => self.parse_handle_pool(),
             TokenKind::Extern => self.parse_extern(),
             TokenKind::Macro => self.parse_macro_def(),
-            TokenKind::Literal => self.parse_literal_function(),
+            // Disambiguate: `literal fn _suffix ...` (a literal-function
+            // declaration) vs `literal` used as an ordinary identifier.
+            // `parse_literal_function` immediately `expect`s `Fn` after
+            // `literal`, so the declaration form is always exactly this
+            // two-token prefix. Routing here unconditionally meant a statement
+            // like `literal = 2` (reassigning a variable named `literal`, which
+            // expression position ALREADY accepts via
+            // `parse_keyword_identifier("literal")`) died with the misleading
+            // `expected Fn, found Assign` — a diagnostic that never names the
+            // keyword collision. Same disambiguation pattern as `from` below.
+            // (Checked in the arm body, not a guard: the match borrows
+            // `&self.current.kind` and `peek_next` needs `&mut self`.)
+            TokenKind::Literal => {
+                if self.peek_next().kind == TokenKind::Fn {
+                    self.parse_literal_function()
+                } else {
+                    self.parse_expression_or_assignment()
+                }
+            }
             // Module system (Features #104-111)
             TokenKind::Use => self.parse_use(),
             TokenKind::Import => self.parse_import(), // alias for use

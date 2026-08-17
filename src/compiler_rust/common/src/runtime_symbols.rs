@@ -2249,6 +2249,57 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_selected_device_name",
     "rt_vulkan_submit_graphics_and_wait_fence",
     "rt_write_file",
+    // Native socket / HTTP externs. These are `#[no_mangle] extern "C"` in
+    // `simple_runtime` (`value/net_tcp.rs`, `value/net_udp.rs`) and are already
+    // classified `Sys` by `symbol_tier_of` above and stubbed by the native
+    // linker (`compiler/src/linker/native_binary/stubs.rs`) — but they were
+    // absent from THIS manifest until 2026-08-17, and this manifest is the only
+    // thing `register_runtime_symbols_from_provider`
+    // (`compiler/src/codegen/jit.rs:387`) iterates. A symbol missing here is
+    // never handed to `JITBuilder::symbol`, so any module declaring one failed
+    // Cranelift JIT compilation with "unresolved external symbol" and the WHOLE
+    // module was silently demoted to the tree-walk interpreter. That made every
+    // `SIMPLE_EXECUTION_MODE=jit` networking claim false and unfalsifiable.
+    // See doc/08_tracking/bug/jit_cannot_resolve_native_socket_externs_2026-08-09.md
+    "native_http_send",
+    "native_tcp_accept",
+    "native_tcp_bind",
+    "native_tcp_close",
+    "native_tcp_connect",
+    "native_tcp_connect_timeout",
+    "native_tcp_flush",
+    "native_tcp_get_nodelay",
+    "native_tcp_peek",
+    "native_tcp_read",
+    "native_tcp_set_backlog",
+    "native_tcp_set_keepalive",
+    "native_tcp_set_nodelay",
+    "native_tcp_set_read_timeout",
+    "native_tcp_set_write_timeout",
+    "native_tcp_shutdown",
+    "native_tcp_write",
+    "native_udp_bind",
+    "native_udp_close",
+    "native_udp_connect",
+    "native_udp_get_broadcast",
+    "native_udp_get_ttl",
+    "native_udp_join_multicast_v4",
+    "native_udp_join_multicast_v6",
+    "native_udp_leave_multicast_v4",
+    "native_udp_leave_multicast_v6",
+    "native_udp_peek",
+    "native_udp_peek_from",
+    "native_udp_peer_addr",
+    "native_udp_recv",
+    "native_udp_recv_from",
+    "native_udp_send",
+    "native_udp_send_to",
+    "native_udp_set_broadcast",
+    "native_udp_set_multicast_loop",
+    "native_udp_set_multicast_ttl",
+    "native_udp_set_read_timeout",
+    "native_udp_set_ttl",
+    "native_udp_set_write_timeout",
     "sys_get_args", // -> rt_get_args
     "sys_exit",     // -> rt_exit
 ];
@@ -2277,6 +2328,78 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES
             .windows(2)
             .any(|pair| pair == ["rt_alloc", "rt_realloc"]));
+    }
+
+    /// REPRODUCING TEST for
+    /// doc/08_tracking/bug/jit_cannot_resolve_native_socket_externs_2026-08-09.md
+    ///
+    /// `register_runtime_symbols_from_provider` (compiler/src/codegen/jit.rs:387)
+    /// iterates ONLY `RUNTIME_SYMBOL_NAMES`. Before 2026-08-17 these four names
+    /// were absent, so Cranelift never received an address for them, JIT
+    /// compilation failed with "unresolved external symbol", and the whole
+    /// module was silently demoted to the interpreter. Fails without the fix.
+    #[test]
+    fn native_socket_externs_are_registered_for_the_jit() {
+        for symbol in [
+            "native_tcp_bind",
+            "native_tcp_close",
+            "native_udp_bind",
+            "native_udp_close",
+        ] {
+            assert!(
+                RUNTIME_SYMBOL_NAMES.contains(&symbol),
+                "`{symbol}` is missing from RUNTIME_SYMBOL_NAMES, so the Cranelift \
+                 JIT will never be given its address and any module declaring it \
+                 is silently demoted to the tree-walk interpreter"
+            );
+        }
+    }
+
+    /// SIMILAR-PROBLEM DETECTION TEST for the same defect CLASS: an extern
+    /// family that `symbol_tier_of` claims to know about, but that the
+    /// registration manifest has never heard of.
+    ///
+    /// The socket bug was not one typo — it was an entire family classified as
+    /// `Sys` by the tier table and stubbed by the native linker while being
+    /// completely absent from the only list the JIT reads. This test makes that
+    /// shape impossible to reintroduce for any family, not just sockets:
+    ///   (a) every prefix family the tier table special-cases must have at
+    ///       least one representative in the manifest, and
+    ///   (b) conversely, every `native_*` name already in the manifest must be
+    ///       classified `Sys`, so the two tables cannot silently drift apart.
+    #[test]
+    fn every_classified_native_extern_family_has_manifest_coverage() {
+        use RuntimeSymbolTier::Sys;
+
+        for prefix in ["native_tcp_", "native_udp_", "native_http_"] {
+            assert_eq!(
+                symbol_tier_of(&format!("{prefix}probe")),
+                Sys,
+                "tier table no longer classifies the `{prefix}*` family — update \
+                 this test deliberately rather than letting coverage lapse"
+            );
+            assert!(
+                RUNTIME_SYMBOL_NAMES
+                    .iter()
+                    .any(|name| name.starts_with(prefix)),
+                "the `{prefix}*` extern family is classified Sys but has ZERO \
+                 entries in RUNTIME_SYMBOL_NAMES — the JIT cannot resolve any of \
+                 them and every module using one is silently demoted to the \
+                 interpreter (same defect class as the 2026-08-09 socket bug)"
+            );
+        }
+
+        for name in RUNTIME_SYMBOL_NAMES
+            .iter()
+            .filter(|name| name.starts_with("native_"))
+        {
+            assert_eq!(
+                symbol_tier_of(name),
+                Sys,
+                "`{name}` is registered for the JIT but the tier table does not \
+                 classify it as Sys — the manifest and the classifier have drifted"
+            );
+        }
     }
 
     #[test]

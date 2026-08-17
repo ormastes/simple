@@ -283,12 +283,36 @@ impl Lowerer {
                         .try_resolve_field_type_by_name(candidate_struct_name, field)
                         .or_else(|| self.try_resolve_global_field_type_by_name(candidate_struct_name, field))
                     {
-                        let field_index = self
+                        // Fail closed: an unresolved index used to become 0, so a
+                        // struct returned BY VALUE read EVERY field as field 0
+                        // (silently wrong results, e.g. CompiledUnit.entry_point
+                        // reading a pointer slice). Three resolution attempts, then
+                        // a diagnostic naming the struct and field — never a guess.
+                        let field_index = match self
                             .get_field_info(recv_hir.ty, field)
                             .ok()
                             .map(|(field_index, _)| field_index)
                             .or_else(|| self.try_resolve_global_field_index_by_name(candidate_struct_name, field))
-                            .unwrap_or(0);
+                            .or_else(|| self.try_resolve_registry_field_index_by_name(candidate_struct_name, field))
+                        {
+                            Some(field_index) => field_index,
+                            None => {
+                                if std::env::var_os("SIMPLE_FIELD_INDEX_COUNT_ONLY").is_some() {
+                                    eprintln!(
+                                        "[field-index-unresolved] struct={} field={}",
+                                        candidate_struct_name, field
+                                    );
+                                    0
+                                } else {
+                                    return Err(LowerError::CannotInferFieldType {
+                                        struct_name: candidate_struct_name.clone(),
+                                        field: field.to_string(),
+                                        available_fields: self
+                                            .registry_field_names_for_struct(candidate_struct_name),
+                                    });
+                                }
+                            }
+                        };
                         return Ok(HirExpr {
                             kind: HirExprKind::FieldAccess {
                                 receiver: recv_hir,
@@ -508,6 +532,35 @@ impl Lowerer {
             }
         }
         None
+    }
+
+    /// Third field-index attempt: the HIR type registry (same table
+    /// `try_resolve_field_type_by_name` reads). Declaration order there IS the
+    /// field index, so a struct whose TYPE resolved by name can always resolve
+    /// its INDEX by name too.
+    fn try_resolve_registry_field_index_by_name(&self, struct_name: &str, field_name: &str) -> Option<usize> {
+        for (_, hir_ty) in self.module.types.iter() {
+            if let HirType::Struct { name, fields, .. } = hir_ty {
+                if name == struct_name {
+                    return fields
+                        .iter()
+                        .enumerate()
+                        .find_map(|(idx, (fname, _))| (fname == field_name).then_some(idx));
+                }
+            }
+        }
+        None
+    }
+
+    fn registry_field_names_for_struct(&self, struct_name: &str) -> Vec<String> {
+        for (_, hir_ty) in self.module.types.iter() {
+            if let HirType::Struct { name, fields, .. } = hir_ty {
+                if name == struct_name {
+                    return fields.iter().map(|(fname, _)| fname.clone()).collect();
+                }
+            }
+        }
+        Vec::new()
     }
 
     fn try_resolve_global_field_type_by_name(&mut self, struct_name: &str, field_name: &str) -> Option<TypeId> {

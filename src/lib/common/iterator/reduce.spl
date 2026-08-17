@@ -2,8 +2,40 @@
 
 use std.iterator.create.{Iterator}
 
+# Safety cap for driving an UNBOUNDED iterator (limit < 0) whose step function
+# never returns should_continue = false.  Without it, `iter_collect` on an
+# infinite generator would hang instead of returning.  A bounded iterator
+# (anything that went through `iter_take`) never reaches this.
+val ITER_COLLECT_UNBOUNDED_CAP: i64 = 1000000
+
 fn iter_collect<T>(iter: Iterator<T>) -> [T]:
-    """Collect all elements of an iterator into an array."""
-    []
+    """Drive an iterator to exhaustion and collect its elements into an array.
+
+    Previously this returned a bare `[]` unconditionally, so every generator
+    pipeline in the tree produced an empty array with exit 0 and no diagnostic.
+    """
+    var out: [T] = []
+    val limit = iter.limit
+    if limit == 0:
+        return out
+    var cur = iter.state
+    var steps = 0
+    # Bind the field to a local: `iter.next_fn(cur)` parses as a METHOD call and
+    # fails with "method `next_fn` not found on class `Iterator`".
+    val step_fn = iter.next_fn
+    while true:
+        out.push(cur)
+        if limit >= 0 and out.len() >= limit:
+            break
+        val step = step_fn(cur)
+        val next_state = step[0]
+        val should_continue = step[1]
+        if not should_continue:
+            break
+        cur = next_state
+        steps = steps + 1
+        if limit < 0 and steps >= ITER_COLLECT_UNBOUNDED_CAP:
+            break
+    out
 
 export iter_collect

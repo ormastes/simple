@@ -1619,6 +1619,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_process_run_inherit", system::rt_process_run_inherit);
     insert_simple!("rt_process_run_timeout", system::rt_process_run_timeout);
     insert_simple!("rt_process_spawn_async", system::rt_process_spawn_async);
+    // Piped-process family -- present in the C runtime and declared by real
+    // `.spl` callers, but unregistered here until 2026-08-17. See
+    // doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md
+    insert_simple!("rt_process_spawn_piped", system::rt_process_spawn_piped);
+    insert_simple!("rt_process_write_stdin", system::rt_process_write_stdin);
+    insert_simple!("rt_process_read_stdout", system::rt_process_read_stdout);
+    insert_simple!("rt_process_is_alive", system::rt_process_is_alive);
+    insert_simple!("rt_process_close_piped", system::rt_process_close_piped);
     insert_simple!("rt_process_spawn_guarded", system::rt_process_spawn_guarded);
     insert_simple!("rt_process_wait", system::rt_process_wait);
     insert_simple!("rt_profiler_is_active", time::rt_profiler_is_active_fn);

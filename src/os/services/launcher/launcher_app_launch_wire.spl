@@ -1,0 +1,256 @@
+# Canonical launcher-local SimpleAppLaunchV1 request arena.
+#
+# The shared descriptor contains only fixed-width offsets and lengths. This
+# module owns the corresponding caller-allocated byte arena. Each identity is
+# a length-prefixed UTF-8 field, arguments are a counted length-prefixed list,
+# and capability words are packed little-endian u64 values.
+
+use std.nogc_sync_mut.composition.types.{SimpleAppLaunchV1}
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+val SIMPLE_APP_LAUNCH_V1_SIZE: u32 = 32
+val SIMPLE_APP_LAUNCH_V1_MAX_ARGUMENTS: i64 = 4096
+val SIMPLE_APP_LAUNCH_V1_MAX_CAPABILITY_WORDS: i64 = 64
+val SIMPLE_APP_LAUNCH_V1_MAX_ARENA_BYTES: i64 = 1048576
+
+class LauncherAppLaunchArenaV1:
+    ok: bool
+    descriptor: SimpleAppLaunchV1
+    bytes: [u8]
+    diagnostic: text
+
+class LauncherAppLaunchViewV1:
+    ok: bool
+    descriptor: SimpleAppLaunchV1
+    app_id: text
+    artifact_id: text
+    action_id: text
+    args: [text]
+    capability_words: [u64]
+    diagnostic: text
+
+class _TextFieldV1:
+    ok: bool
+    value: text
+    next_offset: i64
+
+fn _empty_descriptor_v1() -> SimpleAppLaunchV1:
+    SimpleAppLaunchV1(
+        descriptor_size: 0u32,
+        app_id_offset: 0u32,
+        artifact_id_offset: 0u32,
+        action_id_offset: 0u32,
+        args_offset: 0u32,
+        args_length: 0u32,
+        capability_words_offset: 0u32,
+        capability_words_length: 0u32,
+    )
+
+fn _push_u32(out: [u8], value: u32):
+    out.push((value & 255) as u8)
+    out.push(((value >> 8) & 255) as u8)
+    out.push(((value >> 16) & 255) as u8)
+    out.push(((value >> 24) & 255) as u8)
+
+fn _push_u64(out: [u8], value: u64):
+    var shift = 0
+    while shift < 64:
+        out.push(((value >> shift) & 255) as u8)
+        shift = shift + 8
+
+fn _read_u32(data: [u8], offset: i64) -> u32:
+    (data[offset] as u32) |
+        ((data[offset + 1] as u32) << 8) |
+        ((data[offset + 2] as u32) << 16) |
+        ((data[offset + 3] as u32) << 24)
+
+fn _read_u64(data: [u8], offset: i64) -> u64:
+    var value = 0u64
+    var shift = 0
+    while shift < 64:
+        value = value | ((data[offset + shift / 8] as u64) << shift)
+        shift = shift + 8
+    value
+
+fn _append(out: [u8], values: [u8]):
+    var i = 0
+    while i < values.len():
+        out.push(values[i])
+        i = i + 1
+
+fn _append_text_field(out: [u8], value: text):
+    val encoded = value.to_bytes()
+    _push_u32(out, encoded.len() as u32)
+    _append(out, encoded)
+
+fn _text(data: [u8], offset: i64, length: i64) -> text:
+    var raw: [u8] = []
+    var i = 0
+    while i < length:
+        raw.push(data[offset + i])
+        i = i + 1
+    rt_bytes_to_text(raw)
+
+fn _read_text_field(data: [u8], offset: i64, limit: i64) -> _TextFieldV1:
+    if offset < 0 or offset + 4 > limit:
+        return _TextFieldV1(false, "", offset)
+    val length = _read_u32(data, offset) as i64
+    val payload = offset + 4
+    if length <= 0 or length > 65535 or length > limit - payload:
+        return _TextFieldV1(false, "", offset)
+    _TextFieldV1(true, _text(data, payload, length), payload + length)
+
+fn _arena_error_v1(diagnostic: text) -> LauncherAppLaunchArenaV1:
+    LauncherAppLaunchArenaV1(false, _empty_descriptor_v1(), [], diagnostic)
+
+fn _view_error_v1(diagnostic: text) -> LauncherAppLaunchViewV1:
+    LauncherAppLaunchViewV1(
+        false, _empty_descriptor_v1(), "", "", "", [], [], diagnostic,
+    )
+
+fn encode_launcher_app_launch_v1(
+    app_id: text,
+    artifact_id: text,
+    action_id: text,
+    args: [text],
+    capability_words: [u64],
+) -> LauncherAppLaunchArenaV1:
+    if app_id == "" or artifact_id == "" or action_id == "":
+        return _arena_error_v1("app-launch-identity-empty")
+    if app_id.to_bytes().len() > 65535 or artifact_id.to_bytes().len() > 65535 or
+            action_id.to_bytes().len() > 65535:
+        return _arena_error_v1("app-launch-identity-too-large")
+    if args.len() > SIMPLE_APP_LAUNCH_V1_MAX_ARGUMENTS:
+        return _arena_error_v1("app-launch-argument-count-invalid")
+    if capability_words.len() > SIMPLE_APP_LAUNCH_V1_MAX_CAPABILITY_WORDS:
+        return _arena_error_v1("app-launch-capability-count-invalid")
+
+    var app_bytes: [u8] = []
+    var artifact_bytes: [u8] = []
+    var action_bytes: [u8] = []
+    _append_text_field(app_bytes, app_id)
+    _append_text_field(artifact_bytes, artifact_id)
+    _append_text_field(action_bytes, action_id)
+
+    var args_bytes: [u8] = []
+    _push_u32(args_bytes, args.len() as u32)
+    var arg_index = 0
+    while arg_index < args.len():
+        val encoded_arg = args[arg_index].to_bytes()
+        if encoded_arg.len() > SIMPLE_APP_LAUNCH_V1_MAX_ARENA_BYTES:
+            return _arena_error_v1("app-launch-argument-too-large")
+        _push_u32(args_bytes, encoded_arg.len() as u32)
+        _append(args_bytes, encoded_arg)
+        if args_bytes.len() > SIMPLE_APP_LAUNCH_V1_MAX_ARENA_BYTES:
+            return _arena_error_v1("app-launch-arena-too-large")
+        arg_index = arg_index + 1
+
+    val app_offset = SIMPLE_APP_LAUNCH_V1_SIZE
+    val artifact_offset = app_offset + app_bytes.len() as u32
+    val action_offset = artifact_offset + artifact_bytes.len() as u32
+    val args_offset = action_offset + action_bytes.len() as u32
+    val capabilities_offset = args_offset + args_bytes.len() as u32
+    val total_length = capabilities_offset as i64 + capability_words.len() * 8
+    if total_length > SIMPLE_APP_LAUNCH_V1_MAX_ARENA_BYTES:
+        return _arena_error_v1("app-launch-arena-too-large")
+
+    val descriptor = SimpleAppLaunchV1(
+        descriptor_size: SIMPLE_APP_LAUNCH_V1_SIZE,
+        app_id_offset: app_offset,
+        artifact_id_offset: artifact_offset,
+        action_id_offset: action_offset,
+        args_offset: args_offset,
+        args_length: args_bytes.len() as u32,
+        capability_words_offset: capabilities_offset,
+        capability_words_length: capability_words.len() as u32,
+    )
+    var out: [u8] = []
+    _push_u32(out, descriptor.descriptor_size)
+    _push_u32(out, descriptor.app_id_offset)
+    _push_u32(out, descriptor.artifact_id_offset)
+    _push_u32(out, descriptor.action_id_offset)
+    _push_u32(out, descriptor.args_offset)
+    _push_u32(out, descriptor.args_length)
+    _push_u32(out, descriptor.capability_words_offset)
+    _push_u32(out, descriptor.capability_words_length)
+    _append(out, app_bytes)
+    _append(out, artifact_bytes)
+    _append(out, action_bytes)
+    _append(out, args_bytes)
+    var capability_index = 0
+    while capability_index < capability_words.len():
+        _push_u64(out, capability_words[capability_index])
+        capability_index = capability_index + 1
+    LauncherAppLaunchArenaV1(true, descriptor, out, "")
+
+fn decode_launcher_app_launch_v1(data: [u8]) -> LauncherAppLaunchViewV1:
+    if data.len() < SIMPLE_APP_LAUNCH_V1_SIZE as i64 or
+            data.len() > SIMPLE_APP_LAUNCH_V1_MAX_ARENA_BYTES:
+        return _view_error_v1("app-launch-request-size-invalid")
+    val descriptor = SimpleAppLaunchV1(
+        descriptor_size: _read_u32(data, 0),
+        app_id_offset: _read_u32(data, 4),
+        artifact_id_offset: _read_u32(data, 8),
+        action_id_offset: _read_u32(data, 12),
+        args_offset: _read_u32(data, 16),
+        args_length: _read_u32(data, 20),
+        capability_words_offset: _read_u32(data, 24),
+        capability_words_length: _read_u32(data, 28),
+    )
+    if descriptor.descriptor_size != SIMPLE_APP_LAUNCH_V1_SIZE or
+            descriptor.app_id_offset != SIMPLE_APP_LAUNCH_V1_SIZE:
+        return _view_error_v1("app-launch-descriptor-invalid")
+
+    val app = _read_text_field(data, descriptor.app_id_offset as i64, data.len())
+    if not app.ok or app.next_offset != descriptor.artifact_id_offset as i64:
+        return _view_error_v1("app-launch-app-id-bounds-invalid")
+    val artifact = _read_text_field(data, descriptor.artifact_id_offset as i64, data.len())
+    if not artifact.ok or artifact.next_offset != descriptor.action_id_offset as i64:
+        return _view_error_v1("app-launch-artifact-id-bounds-invalid")
+    val action = _read_text_field(data, descriptor.action_id_offset as i64, data.len())
+    if not action.ok or action.next_offset != descriptor.args_offset as i64:
+        return _view_error_v1("app-launch-action-id-bounds-invalid")
+
+    val args_offset = descriptor.args_offset as i64
+    val args_length = descriptor.args_length as i64
+    val capability_offset = descriptor.capability_words_offset as i64
+    val capability_count = descriptor.capability_words_length as i64
+    if args_length < 4 or args_offset + args_length != capability_offset or
+            capability_count > SIMPLE_APP_LAUNCH_V1_MAX_CAPABILITY_WORDS or
+            capability_offset + capability_count * 8 != data.len():
+        return _view_error_v1("app-launch-section-bounds-invalid")
+
+    val args_limit = args_offset + args_length
+    val argument_count = _read_u32(data, args_offset) as i64
+    if argument_count > SIMPLE_APP_LAUNCH_V1_MAX_ARGUMENTS:
+        return _view_error_v1("app-launch-argument-count-invalid")
+    var args: [text] = []
+    var cursor = args_offset + 4
+    var argument_index = 0
+    while argument_index < argument_count:
+        if cursor + 4 > args_limit:
+            return _view_error_v1("app-launch-argument-truncated")
+        val length = _read_u32(data, cursor) as i64
+        cursor = cursor + 4
+        if length > args_limit - cursor:
+            return _view_error_v1("app-launch-argument-bounds-invalid")
+        args.push(_text(data, cursor, length))
+        cursor = cursor + length
+        argument_index = argument_index + 1
+    if cursor != args_limit:
+        return _view_error_v1("app-launch-argument-trailing-bytes")
+
+    var capabilities: [u64] = []
+    var capability_index = 0
+    while capability_index < capability_count:
+        capabilities.push(_read_u64(data, capability_offset + capability_index * 8))
+        capability_index = capability_index + 1
+    LauncherAppLaunchViewV1(
+        true, descriptor, app.value, artifact.value, action.value,
+        args, capabilities, "",
+    )
+
+export SIMPLE_APP_LAUNCH_V1_SIZE
+export LauncherAppLaunchArenaV1, LauncherAppLaunchViewV1
+export encode_launcher_app_launch_v1, decode_launcher_app_launch_v1
