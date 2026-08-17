@@ -939,6 +939,40 @@ fn parse_struct_lit_tail(base: i64) -> i64:
             parser_advance()  # consume ','
     return expr_struct_lit(sl_type, sl_entries, [], 0)
 
+fn pe_is_array_element_type_expr(eid: i64) -> bool:
+    """True when `eid` is spelled like a TYPE in the element position of an
+    array literal that is immediately called: a bare name (`i64`, `Point`) or
+    a nested array type (`[i64]`). Helper for pe_is_typed_empty_array_ctor."""
+    # numeric tags 6/13 = EXPR_IDENT/EXPR_ARRAY_LIT -- imported-const compares
+    # misevaluate in this file (see the notes at parse_call_arg).
+    val pe_ta_tag = expr_get_tag(eid)
+    if pe_ta_tag == 6:
+        return true
+    if pe_ta_tag == 13:
+        val pe_ta_elems = expr_get_args(eid)
+        if pe_ta_elems.len() == 1:
+            return pe_is_array_element_type_expr(pe_ta_elems[0])
+    false
+
+fn pe_is_typed_empty_array_ctor(base: i64, argc: i64) -> bool:
+    """`[T]()` is the typed empty-array constructor: `val a: [i64] = [i64]()`.
+
+    Without this, `[i64]` parses as an ordinary array literal whose element
+    `i64` is then resolved as a VARIABLE and the whole thing is CALLED, which
+    failed with "undefined variable: i64" / "value is not callable". Only a
+    ZERO-argument call on a SINGLE-element array literal whose element is
+    spelled like a type is intercepted -- calling an array value is not legal
+    in any other spelling, so nothing valid is swallowed.
+    doc/08_tracking/bug/typed_empty_array_constructor_rejected_2026-08-10.md"""
+    if argc != 0:
+        return false
+    if expr_get_tag(base) != 13:
+        return false
+    val pe_tc_elems = expr_get_args(base)
+    if pe_tc_elems.len() != 1:
+        return false
+    pe_is_array_element_type_expr(pe_tc_elems[0])
+
 fn parse_postfix_on(base_expr: i64) -> i64:
     # Continue postfix parsing from an already-parsed base expression
     # Disambiguate Ident<TypeArgs>.method() vs Ident < expr (binary less-than).
@@ -1105,7 +1139,10 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                     ppo_after_lparen = par_kind_get()
             parser_expect(141)
             val ppo_call_span = flat_span_new(ppo_call_start, lex_token_start_get(), ppo_call_line, ppo_call_col)
-            base = expr_call_named(base, call_args, call_arg_names, ppo_call_span)
+            if pe_is_typed_empty_array_ctor(base, call_args.len()):
+                base = expr_array_lit([], ppo_call_span)
+            else:
+                base = expr_call_named(base, call_args, call_arg_names, ppo_call_span)
         elif kind == 131:
             parser_advance()
             val field_name = par_text_get()
@@ -1319,7 +1356,10 @@ fn parse_postfix() -> i64:
                     pp_after_lparen = par_kind_get()
             parser_expect(141)
             val pp_call_span = flat_span_new(pp_call_start, lex_token_start_get(), pp_call_line, pp_call_col)
-            base = expr_call_named(base, call_args, call_arg_names, pp_call_span)
+            if pe_is_typed_empty_array_ctor(base, call_args.len()):
+                base = expr_array_lit([], pp_call_span)
+            else:
+                base = expr_call_named(base, call_args, call_arg_names, pp_call_span)
             if parser_expr_trace_line_enabled():
                 eprint("[parser-expr] call:done callee={expr_get_str(base)} argc={call_args.len()}")
         elif kind == 131:

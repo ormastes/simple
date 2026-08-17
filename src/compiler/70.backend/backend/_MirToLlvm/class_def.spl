@@ -91,6 +91,15 @@ class MirToLlvm:
     # so a compiler-generated hardcoded runtime call keeps sole ownership of
     # the bare symbol.
     owned_name_has_local: Dict<text, bool>
+    # `@export("C", name: "...")` requested ABI symbol names, keyed by the
+    # MIR function name (see MirFunction.export_name, populated by
+    # translate_module). The requested name is AUTHORITATIVE in both
+    # mangling modes -- before this existed, `--no-mangle` returned the bare
+    # MIR name and the requested symbol was silently dropped, so `nm -D`
+    # showed e.g. pure_simple_provider_query_v1 instead of the requested
+    # simple_provider_query_v1. See
+    # doc/08_tracking/bug/export_c_custom_name_ignored_under_no_mangle_2026-08-14.md
+    export_symbol_names: Dict<text, text>
     # DS3: line-table debug info toggle. Off by default; set via
     # enable_debug_info() by callers that resolve BackendCompileOptions.debug_info
     # (see llvm_codegen_adapter.spl / llvm_backend.spl compile_module).
@@ -143,6 +152,12 @@ class MirToLlvm:
             if self.entry_main_symbol:
                 return "__simple_main"
             return "__simple_main_" + self.builder.module_name.replace(".", "_")
+        # A requested `@export("C", name: ...)` symbol wins over every other
+        # naming rule EXCEPT the `main` entry-point contract handled above.
+        if self.export_symbol_names.has(name):
+            val requested = self.export_symbol_names[name]
+            if requested != "":
+                return requested
         if self.no_mangle:
             return name
         if mir_runtime_owned_call_name(name) and self.owned_name_has_local.has(name):
@@ -233,6 +248,7 @@ class MirToLlvm:
             global_static_names: {},
             global_static_types: {},
             owned_name_has_local: {},
+            export_symbol_names: {},
             debug_info: false
         )
 
@@ -286,6 +302,7 @@ class MirToLlvm:
             global_static_names: {},
             global_static_types: {},
             owned_name_has_local: {},
+            export_symbol_names: {},
             debug_info: false
         )
 
