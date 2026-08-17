@@ -75,3 +75,53 @@ throughout this file.
 ```
 SIMPLE_TIMEOUT_SECONDS=600 bin/simple test test/feature/plugin/sugar_plugin_spec.spl
 ```
+
+---
+
+## CLOSED 2026-08-17 — misdiagnosis; the real red was a stale spec assertion
+
+Re-verified against `test/feature/plugin/sugar_plugin_spec.spl` on the current
+tree. The N-ary-join guard **does not fire**. The failing example was
+
+```
+✗ FR-PLUG-0004 blocker: Cranelift matrix ops still use generic fallback
+```
+
+a source-contract example (`sugar_plugin_spec.spl:236-242`) that asserted the
+*blocker still existed*. Its four `to_contain` strings included
+`"# Pow, MatMul, Broadcast ops: fall back to integer add"` and the old
+`fn translate_binop(...)` signature — both now absent (measured: 0 occurrences
+each). The `__simple_ssa_phi` / `eprint("[cranelift] ERROR: ...")` lines quoted
+in this doc's Symptom section are the runner echoing the *asserted source text*
+in its failure diff, exactly the hazard `.claude/rules/testing.md` § F3 warns
+about; they are not runtime output. The mangled `eprint(ranelift]` prefix was
+the clue and was misread as evidence of execution.
+
+The blocker itself is genuinely fixed in
+`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:1107-1121`:
+`MatMul` and all five `Broadcast*` ops dispatch through
+`translate_runtime_import_call_i64` to `__simple_runtime_matmul` /
+`__simple_runtime_broadcast_{add,sub,mul,div,pow}`. Only `Pow` and future
+unsupported ops remain on the `cranelift_iadd` fallback.
+
+The example was repointed at the current contract rather than deleted, so it
+still fails if any matrix op regresses back onto the generic fallback.
+
+### Evidence
+
+Before (stale assertion):
+```
+SPEC FILE VERDICT: test/feature/plugin/sugar_plugin_spec.spl declared>=13 executed=13 passed=12 failed=1 dropped=0
+Results: 13 total, 12 passed, 1 failed
+```
+After:
+```
+SPEC FILE VERDICT: test/feature/plugin/sugar_plugin_spec.spl declared>=13 executed=13 passed=13 failed=0 dropped=0
+Results: 13 total, 13 passed, 0 failed
+```
+
+No product code changed, so no reproducing/generalization spec pair is shipped:
+the corrected example in `sugar_plugin_spec.spl` **is** the regression guard,
+and there is no defect to reproduce. The `__simple_ssa_phi` N-ary-join
+restriction at `cranelift_codegen_adapter.spl:728-730` and its llvm-lib twin
+remain in place as designed and unexercised by this spec.
