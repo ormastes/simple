@@ -1,0 +1,100 @@
+# Typecheck-pass profile-gated severity (2026-08-17).
+#
+# Why this file exists
+# --------------------
+# `doc/08_tracking/bug/declared_return_type_not_enforced_2026-08-09.md` reads as
+# "declared return types are not checked anywhere, write the check in
+# 30.types/type_system/checker.spl". Both halves of that are wrong, and acting on
+# them would have produced a second, duplicate checker:
+#
+#   1. `checker.spl` is DEAD CODE. Its own header (lines 11-19) states that
+#      `class TypeChecker` has zero callers repo-wide and has never executed.
+#   2. The return-type check is ALREADY WRITTEN and already correct, at
+#      `src/compiler/30.types/type_infer/inference_control.spl:564-574`:
+#      when a function carries a return annotation the body is inferred in
+#      Check mode and `self.subsume(body_ty, fn_.return_type)` compares it
+#      against the declaration, pushing `self.error(e)` on mismatch.
+#
+# The defect is therefore not a MISSING check but a FAIL-OPEN one, in two
+# independent layers, both in `driver_hir_pipeline_lowering.spl`:
+#
+#   a. the whole pass is gated behind `SIMPLE_TYPECHECK_WARN=1`, off by default;
+#   b. even when switched on it only `log_warn`s — the diagnostics never reach
+#      `ctx`, so the build cannot fail no matter what they say.
+#
+# That is the same shape as the sibling `[use-warning]` fail-open (unresolved
+# imports reported at rc=0) and the unknown-extern-returns-a-default fail-open:
+# a real diagnostic is computed and then discarded.
+#
+# What this file adds
+# -------------------
+# ONLY the projection from an assurance profile name onto an enforcement
+# severity. It deliberately mirrors `driver_safety_severity.spl` rather than
+# inventing a second mechanism, and it reuses the shared profile-name table in
+# `compiler.common.assurance.policy_names` so a new profile name reaches both
+# projections at once.
+#
+# Default is Advisory — byte-for-byte today's behaviour. Nothing changes for any
+# existing build unless a caller opts in explicitly. This is required, not
+# timid: the pass has never run over the full ~993-module set, so the true
+# diagnostic count is UNMEASURED (see the bug doc's own step 2, which says
+# "do not promote to error before step 2 reports a number"). Promoting to Deny
+# by default would turn the build red by an unknown amount.
+#
+# See also `doc/03_plan/compiler/type_system/typecheck_burndown.md`.
+
+use compiler.common.assurance.policy_names.normalize_profile_name
+use compiler.common.assurance.policy_schema.{AssuranceStrictness, ResolvedAssurancePolicyV1}
+
+extern fn rt_env_get(key: text) -> text
+
+# Enforcement severity for the typecheck pass. As with SafetyPassSeverity there
+# is no "allow" state: every diagnostic is always produced for the existing
+# SIMPLE_TYPECHECK_WARN log path. This only controls whether that diagnostic
+# ALSO lands in the compile context, and at what severity.
+enum TypecheckPassSeverity:
+    Advisory  # log-only (today's behavior); never touches ctx
+    Warn      # ctx.add_warning — visible, does not fail the build
+    Deny      # ctx.add_error — fails the build
+
+# Severity mapping, deliberately identical to the safety pass's ladder so the
+# two cannot drift: moderate/strict stay advisory (today's behavior, no build
+# impact); robust WARNS (the migration window — make the gap visible without
+# breaking any currently-building program); critical/verified DENY.
+#
+# Nothing may escalate to Deny at robust; that is the entire point of the
+# migration window, and it matters more here than for the safety pass, because
+# the affected corpus is larger and only partially censused (the companion doc
+# `dotq_tail_position_in_bool_returning_fns_2026-08-09.md` alone names 42
+# `-> bool` violations, five of them in compiler error-reporting paths).
+#
+# Unknown or empty resolves to Advisory, i.e. today's exact behavior is
+# preserved unless a caller opts in explicitly.
+pub fn typecheck_pass_severity_for_name(raw: text) -> TypecheckPassSeverity:
+    val canonical = normalize_profile_name(raw)
+    if canonical == "robust":
+        return TypecheckPassSeverity.Warn
+    if canonical == "critical" or canonical == "verified":
+        # `verified` is the strongest rung of the canonical ladder but has no
+        # AssuranceStrictness (V1) variant — policy_schema.from_name() projects
+        # it onto Critical, and this projection must agree, or asking for the
+        # STRICTEST profile would silently downgrade the pass to advisory.
+        return TypecheckPassSeverity.Deny
+    TypecheckPassSeverity.Advisory
+
+# TYPED-STATE projection, for callers that already hold a resolved policy.
+pub fn typecheck_pass_severity_for_policy(policy: ResolvedAssurancePolicyV1) -> TypecheckPassSeverity:
+    typecheck_pass_severity_for_strictness(policy.strictness)
+
+pub fn typecheck_pass_severity_for_strictness(strictness: AssuranceStrictness) -> TypecheckPassSeverity:
+    match strictness:
+        AssuranceStrictness.Critical: TypecheckPassSeverity.Deny
+        AssuranceStrictness.Robust: TypecheckPassSeverity.Warn
+        AssuranceStrictness.Strict: TypecheckPassSeverity.Advisory
+        AssuranceStrictness.Moderate: TypecheckPassSeverity.Advisory
+
+# Dedicated env knob, separate from SIMPLE_SAFETY_PROFILE on purpose: the two
+# passes have different blast radii over the same corpus, so a lane must be able
+# to enforce one while the other is still burning down. Unset => Advisory.
+pub fn typecheck_pass_severity() -> TypecheckPassSeverity:
+    typecheck_pass_severity_for_name(rt_env_get("SIMPLE_TYPECHECK_PROFILE") ?? "")

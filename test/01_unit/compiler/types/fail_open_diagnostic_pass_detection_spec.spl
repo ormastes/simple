@@ -1,0 +1,77 @@
+# Fail-open diagnostics — SIMILAR-PROBLEM DETECTION spec (defect CLASS)
+#
+# The class: **a compiler pass computes a correct diagnostic and then throws it
+# away**, so the build stays green and a wrong answer ships at exit 0. This is
+# not one bug; at least four instances were found independently:
+#
+#   doc/08_tracking/bug/declared_return_type_not_enforced_2026-08-09.md
+#     The return-type check is fully implemented and correct
+#     (30.types/type_infer/inference_control.spl:564-574 subsumes the body type
+#     against the declared return type). Its errors were collected into a [text]
+#     by run_typecheck_warn_pass and then only log_warn'd by the caller — never
+#     pushed to ctx — so `fn f() -> bool` returning text stayed green on both
+#     engines, with two different wrong values.
+#
+#   safety_checker_pass_never_invoked_2026-07-27.md
+#     Same shape, same file. Fixed earlier by profile-gating (lane SE1).
+#
+#   unresolved `use` imports reported as `[use-warning]` at rc=0
+#   unknown extern function logs an ERROR and then RETURNS A DEFAULT
+#
+# Every one of these was found ONE AT A TIME, by a human noticing a wrong value
+# far downstream. This spec generalises the SHAPE instead, so the next pass
+# added in this style fails here rather than shipping silent.
+#
+# WHY THIS SPEC IS SOURCE-SHAPED, NOT SUBPROCESS-SHAPED.
+# The defect is structural — "this diagnostic has no route to ctx" — and it is
+# invariant over which engine runs. A runtime probe could only ever sample the
+# violations that happen to exist in today's corpus; it could not tell a pass
+# that is correctly silent from one that is structurally incapable of speaking.
+# Asserting on the wiring catches the pass that has no violations *yet*.
+#
+# The invariant: every warn-pass in the driver's HIR pipeline must have a
+# severity projection that can reach ctx.add_error, and must be reachable
+# without setting a *_WARN=1 log flag.
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val PASSES: text = "src/compiler/80.driver/driver_hir_pipeline_passes.spl"
+val LOWERING: text = "src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+
+fn shell(cmd: text) -> text:
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+fn count_in(path: text, pattern: text) -> i64:
+    val raw = shell("grep -c -- '" + pattern + "' " + path + " 2>/dev/null || echo 0")
+    raw.trim().to_i64()
+
+describe "no driver warn-pass may compute a diagnostic it cannot report":
+
+    it "routes typecheck diagnostics to the compile context, not only to the log":
+        step("The typecheck pass must have a severity projection, exactly as the safety pass does")
+        assert_true(count_in(PASSES, "typecheck_pass_severity") > 0)
+
+        step("Deny severity must actually reach ctx.add_error — this is the line whose absence WAS the bug")
+        assert_true(count_in(PASSES, "ctx.add_error") > 0)
+
+        step("Warn severity must reach ctx.add_warning, so the migration window is visible rather than silent")
+        assert_true(count_in(PASSES, "ctx.add_warning") > 0)
+
+    it "does not gate the typecheck pass behind a log-only flag alone":
+        step("Reaching enforcement must not require SIMPLE_TYPECHECK_WARN=1; a log flag can only ever produce log output")
+        assert_true(count_in(LOWERING, "typecheck_enforcing") > 0)
+
+        step("The safety pass established this exact pattern; both must use it, or the two will drift apart")
+        assert_true(count_in(LOWERING, "safety_enforcing") > 0)
+
+    it "keeps every severity ladder in agreement about the strictest profile":
+        step("A profile ladder that maps its STRONGEST rung to Advisory would silently disable the pass for the users who asked for the most checking")
+        step("Both projections must name critical and verified as Deny")
+        val sev = "src/compiler/80.driver/driver_typecheck_severity.spl"
+        assert_true(count_in(sev, "TypecheckPassSeverity.Deny") > 0)
+        assert_true(count_in(sev, "verified") > 0)
+
+        step("Advisory must remain the default, so an unset profile cannot turn a green build red without an explicit opt-in")
+        assert_true(count_in(sev, "TypecheckPassSeverity.Advisory") > 0)
