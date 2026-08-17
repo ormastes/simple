@@ -1,0 +1,103 @@
+"""
+# Class detection: no reserved-keyword-headed expression may reach the flat-AST
+# bridge's generic `NilLit` fallback
+
+Generalizing spec for
+`doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md`.
+
+`spawn(...)` (`EXPR_SPAWN`, tag 39) was one instance of a whole family:
+`src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl` builds
+dedicated flat nodes for `await` (`EXPR_AWAIT`, 37), `yield` (`EXPR_YIELD`,
+38), `spawn` (`EXPR_SPAWN`, 39) and `do:` (`EXPR_DO_BLOCK`, 44) from ordinary
+source text, and `convert_flat_expr` in
+`src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl` had a dispatch arm
+for **none** of them -- every one fell into the same generic
+"unhandled node kind -> `ExprKind.NilLit`" catch-all, discarding the whole
+subexpression.
+
+The reproducing spec (`flat_bridge_spawn_call_expr_spec.spl`) pins `spawn`
+only. This one pins the CLASS: for each construct, the converted body
+statement must NOT be `ExprKind.NilLit`. A future keyword-headed expression
+that regains the same defect fails here even if `spawn` keeps working.
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.parser_types_expr.*
+
+describe "no keyword-headed expression collapses to NilLit in the flat AST bridge":
+    it "does not collapse `spawn(w)` to NilLit":
+        val src = "fn boot(w: i64):\n" +
+            "    spawn(w)\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_class_spawn.spl", "fixture_class_spawn", Logger(level: 0))
+        val boot = parsed.functions["boot"]
+        var collapsed = false
+        if boot.?:
+            val fn_ = boot!
+            if fn_.body.stmts.len() > 0:
+                match fn_.body.stmts[0].kind:
+                    case StmtKind.Expr(e):
+                        match e.kind:
+                            case ExprKind.NilLit: collapsed = true
+                            case _: collapsed = false
+                    case _: collapsed = false
+        assert_false(collapsed)
+
+    it "does not collapse `await f()` to NilLit":
+        val src = "fn f() -> i64:\n" +
+            "    1\n" +
+            "\n" +
+            "fn boot() -> i64:\n" +
+            "    await f()\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_class_await.spl", "fixture_class_await", Logger(level: 0))
+        val boot = parsed.functions["boot"]
+        var collapsed = false
+        if boot.?:
+            val fn_ = boot!
+            if fn_.body.stmts.len() > 0:
+                match fn_.body.stmts[0].kind:
+                    case StmtKind.Expr(e):
+                        match e.kind:
+                            case ExprKind.NilLit: collapsed = true
+                            case _: collapsed = false
+                    case _: collapsed = false
+        assert_false(collapsed)
+
+    it "does not collapse `yield 1` to NilLit":
+        val src = "fn boot():\n" +
+            "    yield 1\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_class_yield.spl", "fixture_class_yield", Logger(level: 0))
+        val boot = parsed.functions["boot"]
+        var collapsed = false
+        if boot.?:
+            val fn_ = boot!
+            if fn_.body.stmts.len() > 0:
+                match fn_.body.stmts[0].kind:
+                    case StmtKind.Expr(e):
+                        match e.kind:
+                            case ExprKind.NilLit: collapsed = true
+                            case _: collapsed = false
+                    case _: collapsed = false
+        assert_false(collapsed)
+
+    it "keeps an ordinary (non-keyword) call as a Call -- control, must not be NilLit either":
+        val src = "fn identity(w: i64) -> i64:\n" +
+            "    w\n" +
+            "\n" +
+            "fn boot(w: i64):\n" +
+            "    identity(w)\n"
+        val parsed = parse_full_frontend(src, "testdata/fixture_class_control.spl", "fixture_class_control", Logger(level: 0))
+        val boot = parsed.functions["boot"]
+        var label = "missing"
+        if boot.?:
+            val fn_ = boot!
+            if fn_.body.stmts.len() > 0:
+                match fn_.body.stmts[0].kind:
+                    case StmtKind.Expr(e):
+                        match e.kind:
+                            case ExprKind.Call(callee, args): label = "Call"
+                            case ExprKind.NilLit: label = "NilLit"
+                            case _: label = "other"
+                    case _: label = "other-stmt"
+        assert_equal(label, "Call")

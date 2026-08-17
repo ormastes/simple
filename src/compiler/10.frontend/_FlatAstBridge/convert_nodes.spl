@@ -1237,6 +1237,66 @@ fn convert_flat_expr(idx: i64) -> Expr:
         val spread_inner_idx = expr_get_left(idx)
         val spread_inner: Expr? = if spread_inner_idx >= 0: convert_flat_expr(spread_inner_idx) else: nil
         return Expr(kind: ExprKind.Range(nil, spread_inner, false, nil), span: span)
+    if tag == EXPR_SPAWN:
+        # `spawn <expr>` (EXPR_SPAWN, tag 39) -- built unconditionally by
+        # core/_ParserPrimary/primary_expr.spl:477-479 from ordinary source
+        # text, because `spawn` lexes as the reserved KwSpawn token (kind 197),
+        # never TOK_IDENT. This bridge had NO arm for it, so every real
+        # `spawn(w)` fell into the generic catch-all below and came out as a
+        # bare `ExprKind.NilLit` -- callee AND every argument discarded, the
+        # call's side effects silently never happening. Bug doc:
+        # doc/08_tracking/bug/spawn_call_expr_silently_becomes_nillit_2026-07-29.md
+        #
+        # Emit an ordinary Call, NOT `ExprKind.Spawn`. Two independent reasons,
+        # both verified against current source rather than assumed:
+        #   1. `20.hir/hir_lowering/expressions.spl`'s `lower_hir_expr` match has
+        #      no `case ExprKind.Spawn` arm -- it would fall to
+        #      `case _: self.error("unsupported expression kind", ...)`, i.e.
+        #      trading a silent drop for a hard lowering error.
+        #   2. Every LIVE consumer of a spawn site in this compiler matches the
+        #      callee NAME on a plain Call: `30.types/type_system/checker.spl`,
+        #      `30.types/type_system/builtin_registry.spl`,
+        #      `50.mir/mir_effects.spl`, and rule E1049 in
+        #      `35.semantics/safety_checker.spl:907`. Rebuilding the plain-call
+        #      shape is what makes those fire on real source for the first time.
+        #
+        # The flat node stores the operand in LEFT. For `spawn(w)` the keyword
+        # is consumed first and `parse_expr()` then yields the PARENTHESIZED
+        # operand (`w`), not a call node -- so the argument list is exactly
+        # [operand]. For `spawn f(a, b)` the operand is itself an EXPR_CALL and
+        # becomes the single argument, matching how a `spawn(f(a, b))` source
+        # form already reads.
+        val spawn_inner_idx = expr_get_left(idx)
+        if spawn_inner_idx < 0:
+            flat_bridge_report_unhandled_node("expr", tag)
+            return Expr(kind: ExprKind.NilLit, span: span)
+        val spawn_callee = Expr(kind: ExprKind.Ident("spawn"), span: span)
+        val spawn_arg = CallArg(
+            has_name: false,
+            name: "",
+            value: convert_flat_expr(spawn_inner_idx),
+            span: span
+        )
+        return Expr(kind: ExprKind.Call(spawn_callee, [spawn_arg]), span: span)
+    if tag == EXPR_AWAIT:
+        # Same family as EXPR_SPAWN above: `await <expr>` (tag 37) is built by
+        # primary_expr.spl:436-439 from real source and had no arm here either,
+        # so it silently became NilLit. Unlike Spawn, `ExprKind.Await` IS
+        # handled downstream (`20.hir/hir_lowering/expressions.spl:965-966`
+        # lowers it to `HirExprKind.Await`), so emit the real node.
+        val await_inner_idx = expr_get_left(idx)
+        if await_inner_idx < 0:
+            flat_bridge_report_unhandled_node("expr", tag)
+            return Expr(kind: ExprKind.NilLit, span: span)
+        return Expr(kind: ExprKind.Await(convert_flat_expr(await_inner_idx)), span: span)
+    if tag == EXPR_YIELD:
+        # `yield <expr>` (tag 38), primary_expr.spl:441-444. Same silent-NilLit
+        # collapse; `ExprKind.Yield(Expr?)` is handled by
+        # `20.hir/hir_lowering/expressions.spl:954-960`. The operand slot is
+        # optional here to match the enum's `Expr?` payload.
+        val yield_inner_idx = expr_get_left(idx)
+        val yield_inner: Expr? = if yield_inner_idx >= 0: convert_flat_expr(yield_inner_idx) else: nil
+        return Expr(kind: ExprKind.Yield(yield_inner), span: span)
     if tag == EXPR_DICT_COMP:
         val dc_args = expr_get_args(idx)
         if dc_args.len() < 2:
