@@ -1,5 +1,44 @@
 # Stage4 Iteration 20 Error Propagation Characterization (#95)
 
+## RETIRED 2026-08-17 — every claim below is either FIXED in current source or already tracked elsewhere
+
+**Binary used for the re-check:** `bin/simple` ->
+`bin/release/x86_64-unknown-linux-gnu/simple`, the **Rust seed** (mtime
+2026-08-16 22:59, 59,536,728 bytes). Probes run with an explicit
+`SIMPLE_EXECUTION_MODE`, comparing `interpreter` vs `jit` in subprocesses
+(the spec DSL provably cannot reach this lowering — see the header of
+`test/01_unit/try_operator_error_propagation_spec.spl`).
+
+Row-by-row against the tables above:
+
+| original claim | 2026-08-17 result |
+|---|---|
+| Repro 1 — `Ok(42)?` yields `5` / garbage | **FIXED.** Prints `42` under both `interpreter` and `jit`. |
+| Repro 2 — `?` does not propagate `Err` | **FIXED.** A marker placed after `get_err()?` never runs; `main` observes `Err("failed")` with the original payload, both engines. |
+| Repro 4 — `?` does not propagate `nil` | **STILL BROKEN under `jit` only** (interpreter short-circuits correctly). This is not a stage4 artifact and is already filed with full root cause: `try_operator_on_option_no_early_return_2026-08-08.md` (OPEN, owned there). Not re-filed here. |
+| Repro 5 — `??` broken | **NOT A DEFECT.** Already corrected by the 2026-07-04 coordinator note below; re-confirmed (`nil ?? "default"` -> `default`). |
+| all `stage4_it20f` rows (crash / RC=132 / silent match) | **UNREPRODUCIBLE BY CONSTRUCTION.** The binary was a `/tmp` scratchpad build that no longer exists. Nothing in this doc can be re-tested against it, and the deployed-side claims it was contrasted with are fixed. |
+
+**Proving symbols in CURRENT source** (classification is by content, not SHA):
+`lower_try` in `src/compiler_rust/compiler/src/hir/lower/expr/control.rs`
+now emits `LetIn tmp = <inner> in if rt_enum_check_discriminant(tmp,
+disc("Err")): return tmp else: rt_enum_payload(tmp)` — a real discriminant
+test plus early return, replacing the bare `rt_enum_payload(expr)` that
+caused Repros 1 and 2. The same function has a `result_like_payload_type`
+is-none branch handling flat-nullable scalars.
+
+**No new specs added, deliberately.** The `Result` half already has both a
+surface spec (`test/01_unit/try_operator_error_propagation_spec.spl`, whose
+own header documents that it does NOT discriminate the lowering) and the
+real engine-crossing guard `scripts/check/check-try-operator-error-propagation.shs`,
+which was run for this retirement:
+
+```
+PASS — 3 engine(s) checked: default,interpret,jit — `?` early-returns Err with the original payload
+```
+
+The `Option` half's guard belongs with its own OPEN row, not here.
+
 **Date:** 2026-07-04  
 **Binary tested:** `/tmp/claude-1000/...scratchpad/stage4_it20f` (42M, ELF x86-64)  
 **Task:** Determine whether the `?` operator's Err-propagation misbehaves on stage4-built binaries
