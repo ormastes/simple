@@ -497,14 +497,34 @@ fn value_to_runtime(v: &Value) -> RuntimeValue {
                 RuntimeValue::from_int(*i)
             }
         }
-        Value::Float(f) => RuntimeValue::from_float(*f),
-        Value::Bool(b) => RuntimeValue::from_bool(*b),
-        Value::Nil => RuntimeValue::NIL,
-        Value::Str(s) => {
-            // For now, convert string to NIL (proper implementation would create RuntimeString)
-            RuntimeValue::NIL
+        // Everything else (text, arrays, tuples, dicts, ...) is marshaled by the
+        // shared bridge, which builds a real heap RuntimeValue.
+        //
+        // This arm used to be `Value::Str(_) => RuntimeValue::NIL` plus a
+        // catch-all `_ => RuntimeValue::NIL`, so `Mutex.new("hello")` /
+        // `RwLock.write(t)` silently stored nil and every subsequent read
+        // handed back nil with no error -- a wrong answer, exit 0.
+        // Bug doc: doc/08_tracking/bug/mutex_rwlock_text_value_nulled_by_pure_std_backend_2026-07-28.md
+        other => crate::runtime_bridge::value_to_runtime(other),
+    }
+}
+
+/// Decode a value that was PROTECTED BY a lock (as opposed to a lock/atomic
+/// HANDLE, which `runtime_to_value` below deliberately keeps in raw form).
+///
+/// A protected value can be a real heap object -- a string, array or dict --
+/// and must be decoded back into the corresponding interpreter `Value`, not
+/// handed back as an opaque `Value::Int(raw)`.
+fn runtime_to_protected_value(rv: RuntimeValue) -> Value {
+    if rv.is_heap() {
+        match crate::runtime_bridge::runtime_to_value(rv) {
+            // Heap object of a kind the bridge does not decode: keep the
+            // previous raw-handle behavior rather than silently nulling it.
+            Value::Nil => Value::Int(rv.to_raw() as i64),
+            decoded => decoded,
         }
-        _ => RuntimeValue::NIL,
+    } else {
+        runtime_to_value(rv)
     }
 }
 
@@ -734,7 +754,7 @@ pub fn rt_mutex_lock_fn(args: &[Value]) -> Result<Value, CompileError> {
     let mutex = value_to_runtime(mutex_val);
     unsafe {
         let value = simple_runtime::value::rt_mutex_lock(mutex);
-        Ok(runtime_to_value(value))
+        Ok(runtime_to_protected_value(value))
     }
 }
 
@@ -756,7 +776,7 @@ pub fn rt_mutex_try_lock_fn(args: &[Value]) -> Result<Value, CompileError> {
     let mutex = value_to_runtime(mutex_val);
     unsafe {
         let value = simple_runtime::value::rt_mutex_try_lock(mutex);
-        Ok(runtime_to_value(value))
+        Ok(runtime_to_protected_value(value))
     }
 }
 
@@ -826,7 +846,7 @@ pub fn rt_rwlock_read_fn(args: &[Value]) -> Result<Value, CompileError> {
     let rwlock = value_to_runtime(rwlock_val);
     unsafe {
         let value = simple_runtime::value::rt_rwlock_read(rwlock);
-        Ok(runtime_to_value(value))
+        Ok(runtime_to_protected_value(value))
     }
 }
 
@@ -848,7 +868,7 @@ pub fn rt_rwlock_write_fn(args: &[Value]) -> Result<Value, CompileError> {
     let rwlock = value_to_runtime(rwlock_val);
     unsafe {
         let value = simple_runtime::value::rt_rwlock_write(rwlock);
-        Ok(runtime_to_value(value))
+        Ok(runtime_to_protected_value(value))
     }
 }
 
@@ -870,7 +890,7 @@ pub fn rt_rwlock_try_read_fn(args: &[Value]) -> Result<Value, CompileError> {
     let rwlock = value_to_runtime(rwlock_val);
     unsafe {
         let value = simple_runtime::value::rt_rwlock_try_read(rwlock);
-        Ok(runtime_to_value(value))
+        Ok(runtime_to_protected_value(value))
     }
 }
 
@@ -892,7 +912,7 @@ pub fn rt_rwlock_try_write_fn(args: &[Value]) -> Result<Value, CompileError> {
     let rwlock = value_to_runtime(rwlock_val);
     unsafe {
         let value = simple_runtime::value::rt_rwlock_try_write(rwlock);
-        Ok(runtime_to_value(value))
+        Ok(runtime_to_protected_value(value))
     }
 }
 
@@ -1054,4 +1074,67 @@ pub fn rt_atomic_store_u8(args: &[Value]) -> Result<Value, CompileError> {
     let cell = unsafe { &*(addr as *const std::sync::atomic::AtomicU8) };
     cell.store(val, std::sync::atomic::Ordering::Release);
     Ok(Value::Nil)
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod lock_value_roundtrip_tests {
+    use super::*;
+
+    /// REPRODUCING: `Mutex.new(text)` then `Mutex.lock()` must hand back the
+    /// same text. Before the fix `value_to_runtime` mapped `Value::Str` to
+    /// `RuntimeValue::NIL`, so the text was silently destroyed at construction
+    /// and every read returned nil -- exit 0, no diagnostic.
+    /// Bug doc: doc/08_tracking/bug/mutex_rwlock_text_value_nulled_by_pure_std_backend_2026-07-28.md
+    #[test]
+    fn mutex_protecting_text_reads_back_the_same_text() {
+        let mutex = rt_mutex_new_fn(&[Value::text("hello".to_string())]).expect("mutex_new");
+        assert!(!matches!(mutex, Value::Nil), "mutex handle must not be nil");
+        let read = rt_mutex_lock_fn(&[mutex]).expect("mutex_lock");
+        match read {
+            Value::Str(s) => assert_eq!(&*s, "hello"),
+            other => panic!("expected the protected text back, got {:?}", other),
+        }
+    }
+
+    /// SIMILAR-PROBLEM DETECTION: generalizes past text to the whole defect
+    /// class -- ANY value the interpreter can hold must survive a
+    /// `value_to_runtime` -> `runtime_to_protected_value` round trip without
+    /// silently degrading to nil. The original defect was not really about
+    /// strings; it was a wildcard `_ => RuntimeValue::NIL` arm, so a new
+    /// composite kind could regress the same way without touching the text
+    /// path at all.
+    #[test]
+    fn no_interpreter_value_kind_silently_degrades_to_nil_through_a_lock() {
+        let cases: Vec<(&str, Value)> = vec![
+            ("int", Value::Int(42)),
+            ("float", Value::Float(1.5)),
+            ("bool", Value::Bool(true)),
+            ("text", Value::text("mixed".to_string())),
+            ("empty text", Value::text(String::new())),
+            (
+                "array",
+                Value::array(vec![Value::Int(1), Value::text("two".to_string())]),
+            ),
+            (
+                "tuple",
+                Value::Tuple(vec![Value::Int(7), Value::Bool(false)]),
+            ),
+        ];
+        for (label, original) in cases {
+            let rv = value_to_runtime(&original);
+            assert!(
+                !rv.is_nil(),
+                "{label}: value_to_runtime silently produced nil for {original:?}"
+            );
+            let back = runtime_to_protected_value(rv);
+            assert!(
+                !matches!(back, Value::Nil),
+                "{label}: round trip through a lock degraded {original:?} to nil"
+            );
+        }
+    }
 }
