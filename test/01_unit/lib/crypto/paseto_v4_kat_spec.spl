@@ -181,12 +181,30 @@ fn _decrypt_4e3() -> [u8]:
     val token_text = "v4.local.32VIErrEkmY4JVILovbmfPXKW9wT1OdQepjMTC_MOtjA4kiqw7_tcaOM5GNEcnTxl60WkwMsYXw6FSNb_UdJPXjpzm0KW9ojM5f4O2mRvE2IcweP-PRdoHjd5-RHCiExR1IK6t6-tyebyWG6Ov7kKvBdkrrAJ837lKP3iDag2hzUPHuMKA"
     _local_payload(_text_to_u8(token_text), _local_key())
 
+# A tamper that does not change the token is not a tamper. Substituting a
+# literal "X" silently degrades to a no-op whenever the byte at that index is
+# ALREADY "X" — which is exactly what happened to the v4.public fixture below
+# (see `_public_token_4s1`): index 15 of that token is the "X" of "eyJkYXRh",
+# so `good.substring(0,15) + "X" + good.substring(16,...)` reproduced the token
+# byte-for-byte and the spec demanded that a perfectly VALID token be rejected.
+# Always substitute a character that differs from the one being replaced.
+fn _flip_char_at(value: text, index: i64) -> text:
+    val original = value.substring(index, index + 1)
+    val replacement = if original == "X": "Y" else: "X"
+    value.substring(0, index) + replacement + value.substring(index + 1, value.length())
+
+fn _local_token_4e1() -> text:
+    "v4.local.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAr68PS4AXe7If_ZgesdkUMvSwscFlAl1pk5HC0e8kApeaqMfGo_7OpBnwJOAbY9V7WU6abu74MmcUE8YWAiaArVI8XJ5hOb_4v9RmDkneN0S92dx0OW4pgy7omxgf3S8c3LlQg"
+
+fn _tampered_local_token() -> text:
+    # Index 15 lands in the base64url-encoded nonce/ciphertext region of 4-E-1.
+    _flip_char_at(_local_token_4e1(), 15)
+
+fn _tampered_local_is_really_different() -> bool:
+    _tampered_local_token() != _local_token_4e1()
+
 fn _tampered_local_ok() -> bool:
-    # Flip one character in the ciphertext portion of 4-E-1
-    val good = "v4.local.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAr68PS4AXe7If_ZgesdkUMvSwscFlAl1pk5HC0e8kApeaqMfGo_7OpBnwJOAbY9V7WU6abu74MmcUE8YWAiaArVI8XJ5hOb_4v9RmDkneN0S92dx0OW4pgy7omxgf3S8c3LlQg"
-    # Flip char at position 15 (in base64url payload)
-    val tampered = good.substring(0, 15) + "X" + good.substring(16, good.length())
-    _local_ok(_text_to_u8(tampered), _local_key())
+    _local_ok(_text_to_u8(_tampered_local_token()), _local_key())
 
 fn _footer_mismatch_ok() -> bool:
     # 4-E-5 has a footer; try to decrypt with wrong footer
@@ -216,11 +234,20 @@ fn _verify_4s1_payload() -> [u8]:
     val token_text = "v4.public.eyJkYXRhIjoidGhpcyBpcyBhIHNpZ25lZCBtZXNzYWdlIiwiZXhwIjoiMjAyMi0wMS0wMVQwMDowMDowMCswMDowMCJ9bg_XBBzds8lTZShVlwwKSgeKpLT3yukTw6JUz3W4h_ExsQV-P0V54zemZDcAxFaSeef1QlXEFtkqxT1ciiQEDA"
     _public_payload(_text_to_u8(token_text), _pub_pk())
 
+fn _public_token_4s1() -> text:
+    "v4.public.eyJkYXRhIjoidGhpcyBpcyBhIHNpZ25lZCBtZXNzYWdlIiwiZXhwIjoiMjAyMi0wMS0wMVQwMDowMDowMCswMDowMCJ9bg_XBBzds8lTZShVlwwKSgeKpLT3yukTw6JUz3W4h_ExsQV-P0V54zemZDcAxFaSeef1QlXEFtkqxT1ciiQEDA"
+
+fn _tampered_public_token() -> text:
+    # Index 15 was a NO-OP here (the token already has "X" at that index), which
+    # made this example assert that a valid token must be rejected. `_flip_char_at`
+    # now guarantees a real change.
+    _flip_char_at(_public_token_4s1(), 15)
+
+fn _tampered_public_is_really_different() -> bool:
+    _tampered_public_token() != _public_token_4s1()
+
 fn _tampered_public_ok() -> bool:
-    # Flip one char in the payload portion of 4-S-1 sig
-    val good = "v4.public.eyJkYXRhIjoidGhpcyBpcyBhIHNpZ25lZCBtZXNzYWdlIiwiZXhwIjoiMjAyMi0wMS0wMVQwMDowMDowMCswMDowMCJ9bg_XBBzds8lTZShVlwwKSgeKpLT3yukTw6JUz3W4h_ExsQV-P0V54zemZDcAxFaSeef1QlXEFtkqxT1ciiQEDA"
-    val tampered = good.substring(0, 15) + "X" + good.substring(16, good.length())
-    _public_ok(_text_to_u8(tampered), _pub_pk())
+    _public_ok(_text_to_u8(_tampered_public_token()), _pub_pk())
 
 fn _wrong_header_local_err() -> bool:
     val bad = _text_to_u8("v3.local.AAAAAAAA")
@@ -277,6 +304,9 @@ describe "PASETO v4.local decrypt — round-trip":
 
 describe "PASETO v4.local tamper rejection":
 
+    it "the tampered local token actually differs from the original":
+        expect(_tampered_local_is_really_different()).to_equal(true)
+
     it "tampered ciphertext is rejected by BLAKE2b MAC":
         expect(_tampered_local_ok()).to_equal(false)
 
@@ -328,6 +358,12 @@ describe "PASETO v4.public verify — round-trip":
 # ============================================================================
 
 describe "PASETO v4.public tamper rejection":
+
+    # Guard the fixture before trusting the rejection assertion below: if the
+    # "tampered" token equals the original, the next example demands that a
+    # VALID token be rejected and manufactures a phantom auth-bypass bug.
+    it "the tampered public token actually differs from the original":
+        expect(_tampered_public_is_really_different()).to_equal(true)
 
     it "tampered token signature is rejected":
         expect(_tampered_public_ok()).to_equal(false)
