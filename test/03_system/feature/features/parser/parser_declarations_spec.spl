@@ -109,7 +109,13 @@ fn compile_parser_declaration_fixture(name: text, source: text) -> (text, text, 
         "/bin/sh",
         [
             "-c",
-            "if [ -x src/compiler_rust/target/release/simple ]; then d=src/compiler_rust/target/release/simple; elif [ -x bin/release/simple ]; then d=bin/release/simple; else d=bin/simple; fi; \"$d\" compile \"$1\" -o \"$2\"",
+            # `bin/release/simple` is deliberately NOT in this fallback chain: it
+            # is a production-guard wrapper that refuses to exec a non-production
+            # runtime ("refusing non-production Simple runtime") and exits
+            # WITHOUT compiling anything, so every fixture below would report a
+            # plausible parser-shaped FALSE RED. `bin/simple` is the documented
+            # default tool path and execs whatever is deployed.
+            "if [ -x src/compiler_rust/target/release/simple ]; then d=src/compiler_rust/target/release/simple; else d=bin/simple; fi; \"$d\" compile \"$1\" -o \"$2\"",
             "parser-declaration-compile",
             path,
             out_path
@@ -118,6 +124,14 @@ fn compile_parser_declaration_fixture(name: text, source: text) -> (text, text, 
     )
     rt_file_delete(path)
     rt_file_delete(out_path)
+    # Prevention guard for the whole class: prove the compiler subprocess
+    # ACTUALLY RAN before any caller inspects its output. A bad binary path, a
+    # wrapper that refuses to exec, or a missing fixture all produce empty
+    # output, which every `contains(...)` below would report as a parser defect.
+    # Costs no extra subprocess launch -- it inspects the run just performed.
+    val combined = result[0] + result[1]
+    if combined == "" or combined.contains("refusing non-production"):
+        return ("", "compiler subprocess did not run (empty output or refusing wrapper): " + combined, 98)
     result
 
 

@@ -2,7 +2,31 @@ use app.io.mod (process_run)
 
 fn _run_structural_script(script: text) -> text:
     val (out, err, code) = process_run("/bin/sh", ["-c", script])
-    "{out}{err}\nexit={code}\n"
+    val combined = "{out}{err}\nexit={code}\n"
+    # PREVENTION GUARD for the whole shell-out CLASS, evaluated before any
+    # content assertion in every example below.
+    #
+    # The scripts invoke the compiler as `$REPO/bin/simple`, deliberately NOT
+    # `bin/release/simple`: that path is a production-guard wrapper shell
+    # script, not the compiler. It currently REFUSES to exec the deployed
+    # runtime ("error: refusing non-production Simple runtime") and exits
+    # without running anything, so stdout is empty and every `to_contain`
+    # below fails at once -- a plausible, compiler-shaped FALSE RED.
+    # `bin/simple` is the documented default tool path and execs whatever is
+    # deployed.
+    #
+    # Assert the subprocess actually RAN before asserting anything about what
+    # it printed, so "did not run" can never masquerade as "ran wrong". This
+    # fails alike for a bad binary path, a refusing wrapper, and a missing
+    # fixture. It lives in the shared helper rather than in an extra `it` on
+    # purpose: each example already launches several full compiler
+    # subprocesses, and one more example would push this file past the test
+    # daemon's 120s budget (reported as `timeout=1 reason=daemon-no-response`
+    # with no `Results:` line at all).
+    assert_equal(code, 0)
+    assert_false(out == "")
+    assert_false(combined.contains("refusing non-production Simple runtime"))
+    combined
 
 describe "scv structural match":
     """
@@ -30,7 +54,7 @@ describe "scv structural match":
 
         Requires WS-A tree-sitter parser + WS-B structural matcher.
         """
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-move.XXXXXX)\nprintf 'fn alpha():\\n    pass\\nfn beta():\\n    pass\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'fn beta():\\n    pass\\nfn alpha():\\n    pass\\n' > code.spl\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" diff --structural)\nprintf '%s\\n' \"$OUT\"\ncase \"$OUT\" in *'deleted alpha'*) printf 'FAIL: reported delete not move\\n'; exit 9;; esac\ncase \"$OUT\" in *'added alpha'*) printf 'FAIL: reported add not move\\n'; exit 9;; esac\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-move.XXXXXX)\nprintf 'fn alpha():\\n    pass\\nfn beta():\\n    pass\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'fn beta():\\n    pass\\nfn alpha():\\n    pass\\n' > code.spl\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" diff --structural)\nprintf '%s\\n' \"$OUT\"\ncase \"$OUT\" in *'deleted alpha'*) printf 'FAIL: reported delete not move\\n'; exit 9;; esac\ncase \"$OUT\" in *'added alpha'*) printf 'FAIL: reported add not move\\n'; exit 9;; esac\n"
         val out = _run_structural_script(script)
         expect(out).to_contain("moved alpha")
         expect(out).to_contain("exit=0")
@@ -45,7 +69,7 @@ describe "scv structural match":
 
         Requires WS-A tree-sitter parser + WS-B structural matcher.
         """
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-rename.XXXXXX)\nprintf 'fn compute():\\n    result = 42\\n    result\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'fn calculate():\\n    result = 42\\n    result\\n' > code.spl\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" diff --structural)\nprintf '%s\\n' \"$OUT\"\ncase \"$OUT\" in *'deleted compute'*) printf 'FAIL: reported delete not update\\n'; exit 9;; esac\ncase \"$OUT\" in *'added calculate'*) printf 'FAIL: reported add not update\\n'; exit 9;; esac\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-rename.XXXXXX)\nprintf 'fn compute():\\n    result = 42\\n    result\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'fn calculate():\\n    result = 42\\n    result\\n' > code.spl\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" diff --structural)\nprintf '%s\\n' \"$OUT\"\ncase \"$OUT\" in *'deleted compute'*) printf 'FAIL: reported delete not update\\n'; exit 9;; esac\ncase \"$OUT\" in *'added calculate'*) printf 'FAIL: reported add not update\\n'; exit 9;; esac\n"
         val out = _run_structural_script(script)
         expect(out).to_contain("updated compute")
         expect(out).to_contain("exit=0")
@@ -60,7 +84,7 @@ describe "scv structural match":
 
         Requires WS-A tree-sitter parser + WS-B structural matcher.
         """
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-ordinal.XXXXXX)\nprintf 'fn setup():\\n    init_db()\\n    init_cache()\\n    init_log()\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'fn setup():\\n    init_cache()\\n    init_db()\\n    init_log()\\n' > code.spl\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" diff --structural)\nprintf '%s\\n' \"$OUT\"\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-ordinal.XXXXXX)\nprintf 'fn setup():\\n    init_db()\\n    init_cache()\\n    init_log()\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'fn setup():\\n    init_cache()\\n    init_db()\\n    init_log()\\n' > code.spl\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" diff --structural)\nprintf '%s\\n' \"$OUT\"\n"
         val out = _run_structural_script(script)
         expect(out).to_contain("moved setup.stmt")
         expect(out).to_contain("setup.stmt[0]")
@@ -77,7 +101,7 @@ describe "scv structural match":
 
         Requires WS-A tree-sitter parser + WS-B structural matcher.
         """
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-hiconf.XXXXXX)\nprintf 'fn stable():\\n    x = 1\\n    y = 2\\n    x + y\\nfn other():\\n    pass\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'fn other():\\n    pass\\nfn stable():\\n    x = 1\\n    y = 2\\n    x + y\\n' > code.spl\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" diff --structural)\nprintf '%s\\n' \"$OUT\"\ncase \"$OUT\" in *'conflict'*) printf 'FAIL: high-conf move reported as conflict\\n'; exit 9;; esac\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-hiconf.XXXXXX)\nprintf 'fn stable():\\n    x = 1\\n    y = 2\\n    x + y\\nfn other():\\n    pass\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'fn other():\\n    pass\\nfn stable():\\n    x = 1\\n    y = 2\\n    x + y\\n' > code.spl\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" diff --structural)\nprintf '%s\\n' \"$OUT\"\ncase \"$OUT\" in *'conflict'*) printf 'FAIL: high-conf move reported as conflict\\n'; exit 9;; esac\n"
         val out = _run_structural_script(script)
         expect(out).to_contain("moved stable")
         expect(out).to_contain("exit=0")
@@ -92,7 +116,7 @@ describe "scv structural match":
 
         Requires WS-A tree-sitter parser + WS-B structural matcher.
         """
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-loconf.XXXXXX)\nprintf 'fn work():\\n    a = 1\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_OP=$(cat .scv/HEAD_OP)\nprintf 'fn work():\\n    a = 1\\n    b = 2\\n    c = 3\\n    d = 4\\n    e = 5\\n    f = 6\\n    g = 7\\n    h = 8\\n' > code.spl\nLEFT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nLEFT=$(printf '%s\\n' \"$LEFT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\" >/dev/null\nprintf 'fn work():\\n    z = 99\\n    y = 88\\n    x = 77\\n    w = 66\\n    v = 55\\n    u = 44\\n    t = 33\\n    s = 22\\n' > code.spl\nRIGHT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nRIGHT=$(printf '%s\\n' \"$RIGHT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" merge-commits \"$BASE\" \"$LEFT\" \"$RIGHT\"\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-loconf.XXXXXX)\nprintf 'fn work():\\n    a = 1\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_OP=$(cat .scv/HEAD_OP)\nprintf 'fn work():\\n    a = 1\\n    b = 2\\n    c = 3\\n    d = 4\\n    e = 5\\n    f = 6\\n    g = 7\\n    h = 8\\n' > code.spl\nLEFT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nLEFT=$(printf '%s\\n' \"$LEFT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\" >/dev/null\nprintf 'fn work():\\n    z = 99\\n    y = 88\\n    x = 77\\n    w = 66\\n    v = 55\\n    u = 44\\n    t = 33\\n    s = 22\\n' > code.spl\nRIGHT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nRIGHT=$(printf '%s\\n' \"$RIGHT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" merge-commits \"$BASE\" \"$LEFT\" \"$RIGHT\"\n"
         val out = _run_structural_script(script)
         expect(out).to_contain("conflicts=1")
         expect(out).to_contain("exit=0")
@@ -112,7 +136,7 @@ describe "scv structural match":
         Requires WS-B scv_try_structural_merge to be wired into merge.spl.
         The strategy-label assertion distinguishes this from the pre-WS-B line merge.
         """
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-fallback.XXXXXX)\nprintf 'one\\ntwo\\nthree\\n' > \"$TMP/broken.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_OP=$(cat .scv/HEAD_OP)\nprintf 'ONE\\ntwo\\nthree\\n' > broken.spl\nLEFT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nLEFT=$(printf '%s\\n' \"$LEFT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\" >/dev/null\nprintf 'one\\ntwo\\nTHREE\\n' > broken.spl\nRIGHT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nRIGHT=$(printf '%s\\n' \"$RIGHT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" merge-commits \"$BASE\" \"$LEFT\" \"$RIGHT\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out >/dev/null\nprintf 'merged=%s\\n' \"$(cat out/broken.spl | tr '\\n' '|')\"\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-fallback.XXXXXX)\nprintf 'one\\ntwo\\nthree\\n' > \"$TMP/broken.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_OP=$(cat .scv/HEAD_OP)\nprintf 'ONE\\ntwo\\nthree\\n' > broken.spl\nLEFT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nLEFT=$(printf '%s\\n' \"$LEFT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\" >/dev/null\nprintf 'one\\ntwo\\nTHREE\\n' > broken.spl\nRIGHT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nRIGHT=$(printf '%s\\n' \"$RIGHT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" merge-commits \"$BASE\" \"$LEFT\" \"$RIGHT\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out >/dev/null\nprintf 'merged=%s\\n' \"$(cat out/broken.spl | tr '\\n' '|')\"\n"
         val out = _run_structural_script(script)
         expect(out).to_contain("conflicts=0")
         expect(out).to_contain("broken.spl: structural-fallback-line")
@@ -129,7 +153,7 @@ describe "scv structural match":
 
         Requires WS-A tree-sitter parser + WS-B structural matcher.
         """
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-3way.XXXXXX)\nprintf 'fn alpha():\\n    base_alpha\\nfn beta():\\n    base_beta\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_OP=$(cat .scv/HEAD_OP)\nprintf 'fn alpha():\\n    left_alpha\\nfn beta():\\n    base_beta\\n' > code.spl\nLEFT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nLEFT=$(printf '%s\\n' \"$LEFT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\" >/dev/null\nprintf 'fn alpha():\\n    base_alpha\\nfn beta():\\n    right_beta\\n' > code.spl\nRIGHT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nRIGHT=$(printf '%s\\n' \"$RIGHT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" merge-commits \"$BASE\" \"$LEFT\" \"$RIGHT\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out >/dev/null\nprintf 'merged=%s\\n' \"$(cat out/code.spl | tr '\\n' '|')\"\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-3way.XXXXXX)\nprintf 'fn alpha():\\n    base_alpha\\nfn beta():\\n    base_beta\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_OP=$(cat .scv/HEAD_OP)\nprintf 'fn alpha():\\n    left_alpha\\nfn beta():\\n    base_beta\\n' > code.spl\nLEFT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nLEFT=$(printf '%s\\n' \"$LEFT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\" >/dev/null\nprintf 'fn alpha():\\n    base_alpha\\nfn beta():\\n    right_beta\\n' > code.spl\nRIGHT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nRIGHT=$(printf '%s\\n' \"$RIGHT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" merge-commits \"$BASE\" \"$LEFT\" \"$RIGHT\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out >/dev/null\nprintf 'merged=%s\\n' \"$(cat out/code.spl | tr '\\n' '|')\"\n"
         val out = _run_structural_script(script)
         expect(out).to_contain("conflicts=0")
         expect(out).to_contain("code.spl: structural-anchor-merge")
@@ -150,7 +174,7 @@ describe "scv structural match":
 
         Requires WS-A tree-sitter parser + WS-B structural matcher.
         """
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-move-edit.XXXXXX)\nprintf 'fn alpha():\\n    base_body\\nfn gamma():\\n    pass\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_OP=$(cat .scv/HEAD_OP)\nprintf 'fn gamma():\\n    pass\\nfn alpha():\\n    base_body\\n' > code.spl\nLEFT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nLEFT=$(printf '%s\\n' \"$LEFT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\" >/dev/null\nprintf 'fn alpha():\\n    right_body\\nfn gamma():\\n    pass\\n' > code.spl\nRIGHT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nRIGHT=$(printf '%s\\n' \"$RIGHT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" merge-commits \"$BASE\" \"$LEFT\" \"$RIGHT\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out >/dev/null\nprintf 'merged=%s\\n' \"$(cat out/code.spl | tr '\\n' '|')\"\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-struct-move-edit.XXXXXX)\nprintf 'fn alpha():\\n    base_body\\nfn gamma():\\n    pass\\n' > \"$TMP/code.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nBASE_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nBASE=$(printf '%s\\n' \"$BASE_OUT\" | awk '{print $2}')\nBASE_OP=$(cat .scv/HEAD_OP)\nprintf 'fn gamma():\\n    pass\\nfn alpha():\\n    base_body\\n' > code.spl\nLEFT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nLEFT=$(printf '%s\\n' \"$LEFT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" restore-op \"$BASE_OP\" >/dev/null\nprintf 'fn alpha():\\n    right_body\\nfn gamma():\\n    pass\\n' > code.spl\nRIGHT_OUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nRIGHT=$(printf '%s\\n' \"$RIGHT_OUT\" | awk '{print $2}')\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" merge-commits \"$BASE\" \"$LEFT\" \"$RIGHT\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out >/dev/null\nprintf 'merged=%s\\n' \"$(cat out/code.spl | tr '\\n' '|')\"\n"
         val out = _run_structural_script(script)
         expect(out).to_contain("conflicts=0")
         expect(out).to_contain("right_body")

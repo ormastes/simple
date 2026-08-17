@@ -1,12 +1,34 @@
 use app.io.mod (process_run)
 
+# Every script below invokes the compiler as "$SIMPLE". It is deliberately NOT
+# `bin/release/simple`: that path is a production-guard bash wrapper which
+# refuses to exec a non-production deployed runtime ("refusing non-production
+# Simple runtime") and exits WITHOUT running anything, so every
+# `to_contain(...)` below fails on empty stdout and produces an app-shaped FALSE
+# RED. `bin/simple` is the documented default tool path; `SIMPLE_SPEC_COMPILER`
+# still overrides it.
+#
+# The prelude is prepended rather than written with `${VAR}` syntax because `{`
+# inside a Simple text literal is string interpolation, so `${VAR}` would never
+# reach the shell.
+val SIMPLE_PRELUDE: text = "SIMPLE=\"$SIMPLE_SPEC_COMPILER\"\nif [ -z \"$SIMPLE\" ]; then SIMPLE=\"$(pwd)/bin/simple\"; fi\nexport SIMPLE\n"
+
 fn _run_diff_script(script: text) -> text:
-    val (out, err, code) = process_run("/bin/sh", ["-c", script])
+    val (out, err, code) = process_run("/bin/sh", ["-c", SIMPLE_PRELUDE + script])
     "{out}{err}\nexit={code}\n"
+
+describe "the compiler subprocess actually runs":
+    # Class-level detection guard: assert the subprocess produced output BEFORE
+    # any content assertion, so "did not run" can never masquerade as "ran
+    # wrong". One cheap launch (`--version`, no compile).
+    it "launches the compiler and finds the scv entrypoint":
+        val out = _run_diff_script("set -eu\ntest -x \"$SIMPLE\"\ntest -f \"$(pwd)/src/app/scv/main.spl\"\nVER=$(\"$SIMPLE\" --version 2>&1)\ntest -n \"$VER\"\ncase \"$VER\" in *refusing*) echo GUARD_REFUSED; exit 9;; esac\necho compiler_ran=yes\n")
+        expect(out).to_contain("compiler_ran=yes")
+        expect(out).to_contain("exit=0")
 
 describe "scv diff":
     it "supports raw, syntax, and formatting policy diff views":
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-diff-policy.XXXXXX)\nprintf 'alpha\\nbeta\\n' > \"$TMP/a.txt\"\nprintf 'gone\\n' > \"$TMP/delete.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'alpha   \\nbeta\\t\\n' > a.txt\nRAW=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" diff --raw)\nSYN=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" diff --syntax)\nIGN=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" diff --ignore-trailing-space)\nFMT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" diff --ignore-formatting)\nprintf 'raw=%s\\n' \"$RAW\"\nprintf 'syntax=%s\\n' \"$SYN\"\nprintf 'ignore=%s\\n' \"$IGN\"\nprintf 'format=%s\\n' \"$FMT\"\ncase \"$IGN\" in *'modified a.txt'*) exit 7;; esac\ncase \"$FMT\" in *'modified a.txt'*) exit 8;; esac\nrm delete.txt\nprintf 'gamma\\n' > a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" diff --ignore-formatting\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-diff-policy.XXXXXX)\nprintf 'alpha\\nbeta\\n' > \"$TMP/a.txt\"\nprintf 'gone\\n' > \"$TMP/delete.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$SIMPLE\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$SIMPLE\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'alpha   \\nbeta\\t\\n' > a.txt\nRAW=$(SIMPLE_LIB=\"$REPO/src\" \"$SIMPLE\" run \"$REPO/src/app/scv/main.spl\" diff --raw)\nSYN=$(SIMPLE_LIB=\"$REPO/src\" \"$SIMPLE\" run \"$REPO/src/app/scv/main.spl\" diff --syntax)\nIGN=$(SIMPLE_LIB=\"$REPO/src\" \"$SIMPLE\" run \"$REPO/src/app/scv/main.spl\" diff --ignore-trailing-space)\nFMT=$(SIMPLE_LIB=\"$REPO/src\" \"$SIMPLE\" run \"$REPO/src/app/scv/main.spl\" diff --ignore-formatting)\nprintf 'raw=%s\\n' \"$RAW\"\nprintf 'syntax=%s\\n' \"$SYN\"\nprintf 'ignore=%s\\n' \"$IGN\"\nprintf 'format=%s\\n' \"$FMT\"\ncase \"$IGN\" in *'modified a.txt'*) exit 7;; esac\ncase \"$FMT\" in *'modified a.txt'*) exit 8;; esac\nrm delete.txt\nprintf 'gamma\\n' > a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$SIMPLE\" run \"$REPO/src/app/scv/main.spl\" diff --ignore-formatting\n"
         val out = _run_diff_script(script)
         expect(out).to_contain("raw=modified a.txt")
         expect(out).to_contain("syntax=modified a.txt")
@@ -16,13 +38,13 @@ describe "scv diff":
         expect(out).to_contain("exit=0")
 
     it "detects exact-content renames before add-delete output":
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-diff-rename.XXXXXX)\nprintf 'payload\\n' > \"$TMP/old.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nmv old.txt new.txt\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" diff --raw)\nprintf '%s\\n' \"$OUT\"\ncase \"$OUT\" in *'added new.txt'*) exit 7;; esac\ncase \"$OUT\" in *'deleted old.txt'*) exit 8;; esac\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-diff-rename.XXXXXX)\nprintf 'payload\\n' > \"$TMP/old.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$SIMPLE\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$SIMPLE\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nmv old.txt new.txt\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$SIMPLE\" run \"$REPO/src/app/scv/main.spl\" diff --raw)\nprintf '%s\\n' \"$OUT\"\ncase \"$OUT\" in *'added new.txt'*) exit 7;; esac\ncase \"$OUT\" in *'deleted old.txt'*) exit 8;; esac\n"
         val out = _run_diff_script(script)
         expect(out).to_contain("renamed old.txt -> new.txt")
         expect(out).to_contain("exit=0")
 
     it "keeps formatting ignore language-sensitive":
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-diff-format-policy.XXXXXX)\nprintf 'alpha beta\\n' > \"$TMP/a.txt\"\nprintf 'if ok:\\n    run()\\n' > \"$TMP/code.py\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'alpha      beta\\n' > a.txt\nprintf 'if ok:\\nrun()\\n' > code.py\nRAW=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" diff --raw)\nFMT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" diff --ignore-formatting)\nprintf 'raw=%s\\n' \"$RAW\"\nprintf 'format=%s\\n' \"$FMT\"\ncase \"$FMT\" in *'modified a.txt'*) exit 7;; esac\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-diff-format-policy.XXXXXX)\nprintf 'alpha beta\\n' > \"$TMP/a.txt\"\nprintf 'if ok:\\n    run()\\n' > \"$TMP/code.py\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$SIMPLE\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$SIMPLE\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'alpha      beta\\n' > a.txt\nprintf 'if ok:\\nrun()\\n' > code.py\nRAW=$(SIMPLE_LIB=\"$REPO/src\" \"$SIMPLE\" run \"$REPO/src/app/scv/main.spl\" diff --raw)\nFMT=$(SIMPLE_LIB=\"$REPO/src\" \"$SIMPLE\" run \"$REPO/src/app/scv/main.spl\" diff --ignore-formatting)\nprintf 'raw=%s\\n' \"$RAW\"\nprintf 'format=%s\\n' \"$FMT\"\ncase \"$FMT\" in *'modified a.txt'*) exit 7;; esac\n"
         val out = _run_diff_script(script)
         expect(out).to_contain("raw=modified a.txt")
         expect(out).to_contain("modified code.py")

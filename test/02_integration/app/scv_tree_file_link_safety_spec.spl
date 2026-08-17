@@ -4,9 +4,30 @@ fn _run_tree_file_link_safety_script(script: text) -> text:
     val (out, err, code) = process_run("/bin/sh", ["-c", script])
     "{out}{err}\nexit={code}\n"
 
+# Every script below invokes the compiler as `$REPO/bin/simple`, NOT
+# `$REPO/bin/release/simple`. The latter is the production-guard wrapper: it
+# refuses to exec a non-production runtime ("refusing non-production Simple
+# runtime") and exits WITHOUT running anything, so every `to_contain(...)`
+# below fails on empty output and the spec reports a compiler-shaped false RED.
+# `bin/simple` is the documented default tool path and execs what is deployed.
+
+describe "the scv subprocess actually ran":
+    # Prevention guard for the whole shell-out class, asserted BEFORE any
+    # content assertion: a subprocess that never ran (bad binary path, a wrapper
+    # that refuses to exec, a missing fixture) fails every content check the
+    # same way a live defect does. Assert the compiler actually produced output
+    # so "did not run" can never masquerade as "ran wrong".
+    it "launches the scv CLI and gets real output back":
+        val out = _run_tree_file_link_safety_script("set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-ran-guard.XXXXXX)\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init\n")
+        # exit=0 proves the wrapper/binary actually executed the program
+        expect(out).to_contain("exit=0")
+        # and stdout was non-empty -- the helper's envelope alone is not output
+        assert_false(out == "")
+        assert_false(out == "\nexit=0\n")
+
 describe "scv tree file link safety":
     it "rejects tree rows whose file object metadata disagrees":
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-tree-file-link.XXXXXX)\nprintf 'payload\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nCOMMIT=$(printf '%s\\n' \"$OUT\" | awk '{print $2}')\nTREE=$(sed -n 's/tree: //p' \".scv/objects/commits/$COMMIT.sdn\")\nFILE_ID=$(awk -F'|' 'NR==1 {print $2}' \".scv/objects/trees/$TREE.sdn\")\nCHUNK=$(awk -F'|' 'NR==1 {print $3}' \".scv/objects/trees/$TREE.sdn\")\nprintf 'path: a.txt\\nchunk: %s\\nsize: 9\\nmtime: 0\\n' \"$CHUNK\" > \".scv/objects/files/$FILE_ID.sdn\"\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" fsck)\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-tree-file-link.XXXXXX)\nprintf 'payload\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nCOMMIT=$(printf '%s\\n' \"$OUT\" | awk '{print $2}')\nTREE=$(sed -n 's/tree: //p' \".scv/objects/commits/$COMMIT.sdn\")\nFILE_ID=$(awk -F'|' 'NR==1 {print $2}' \".scv/objects/trees/$TREE.sdn\")\nCHUNK=$(awk -F'|' 'NR==1 {print $3}' \".scv/objects/trees/$TREE.sdn\")\nprintf 'path: a.txt\\nchunk: %s\\nsize: 9\\nmtime: 0\\n' \"$CHUNK\" > \".scv/objects/files/$FILE_ID.sdn\"\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" fsck)\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
         val out = _run_tree_file_link_safety_script(script)
         expect(out).to_contain("tree file size mismatch: file_")
         expect(out).to_contain("object hash mismatch: files file_")
@@ -14,7 +35,7 @@ describe "scv tree file link safety":
         expect(out).to_contain("exit=0")
 
     it "rejects tree rows whose file object path or chunk disagrees":
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-tree-file-path-chunk.XXXXXX)\nprintf 'payload\\n' > \"$TMP/a.txt\"\nprintf 'other!!\\n' > \"$TMP/b.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nCOMMIT=$(printf '%s\\n' \"$OUT\" | awk '{print $2}')\nTREE=$(sed -n 's/tree: //p' \".scv/objects/commits/$COMMIT.sdn\")\nFILE_A=$(awk -F'|' '$1 == \"a.txt\" {print $2}' \".scv/objects/trees/$TREE.sdn\")\nCHUNK_B=$(awk -F'|' '$1 == \"b.txt\" {print $3}' \".scv/objects/trees/$TREE.sdn\")\nprintf 'path: b.txt\\nchunk: %s\\nsize: 8\\nmtime: 0\\n' \"$CHUNK_B\" > \".scv/objects/files/$FILE_A.sdn\"\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" fsck)\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-tree-file-path-chunk.XXXXXX)\nprintf 'payload\\n' > \"$TMP/a.txt\"\nprintf 'other!!\\n' > \"$TMP/b.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot)\nCOMMIT=$(printf '%s\\n' \"$OUT\" | awk '{print $2}')\nTREE=$(sed -n 's/tree: //p' \".scv/objects/commits/$COMMIT.sdn\")\nFILE_A=$(awk -F'|' '$1 == \"a.txt\" {print $2}' \".scv/objects/trees/$TREE.sdn\")\nCHUNK_B=$(awk -F'|' '$1 == \"b.txt\" {print $3}' \".scv/objects/trees/$TREE.sdn\")\nprintf 'path: b.txt\\nchunk: %s\\nsize: 8\\nmtime: 0\\n' \"$CHUNK_B\" > \".scv/objects/files/$FILE_A.sdn\"\nset +e\nBAD=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" fsck)\nBAD_CODE=$?\nset -e\nprintf '%s\\nbad_code=%s\\n' \"$BAD\" \"$BAD_CODE\"\ntest \"$BAD_CODE\" -ne 0\n"
         val out = _run_tree_file_link_safety_script(script)
         expect(out).to_contain("tree file path mismatch: file_")
         expect(out).to_contain("tree file chunk mismatch: file_")

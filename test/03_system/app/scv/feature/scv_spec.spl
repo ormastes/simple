@@ -1,38 +1,58 @@
 use app.io.mod (process_run)
 
 fn _scv_doc_script(script: text) -> text:
+    """Run a documentation script and prove the subprocess ACTUALLY RAN.
+
+    The scripts drive `$REPO/bin/simple`, deliberately NOT
+    `bin/release/simple`: that path is a production-guard wrapper which
+    refuses to exec a non-production runtime ("refusing non-production
+    Simple runtime") and exits WITHOUT running anything. Every
+    `to_contain(...)` in this file would then assert against empty output
+    and report a plausible, scv-shaped FALSE RED.
+
+    The guards below are the generalizing detection for that whole class:
+    a bad binary path, a refusing wrapper and a missing fixture all fail
+    HERE, before any content assertion, so "did not run" can never
+    masquerade as "ran wrong". They cost no extra subprocess launch --
+    each `it` here is already a full compiler run and the test daemon has
+    a 120s budget, so no additional shelling-out example is added.
+    """
     val (out, err, code) = process_run("/bin/sh", ["-c", script])
-    "{out}{err}\nexit={code}\n"
+    val combined = "{out}{err}\nexit={code}\n"
+    expect(code).to_equal(0)
+    expect(out == "").to_equal(false)
+    expect(combined.contains("refusing non-production")).to_equal(false)
+    combined
 
 describe "REQ-001 REQ-002 byte-exact SCV core":
     it "detects same-size byte edits by content identity":
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-same-size.XXXXXX)\nprintf 'one\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'two\\n' > a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" status\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-same-size.XXXXXX)\nprintf 'one\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'two\\n' > a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" status\n"
         val out = _scv_doc_script(script)
         expect(out).to_contain("M a.txt")
 
 describe "REQ-005 automatic private snapshots":
     it "creates private savepoints through auto-snapshot and watch":
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-auto.XXXXXX)\nprintf 'one\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" auto-snapshot\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" watch --iterations 1 --poll-ms 0\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-auto.XXXXXX)\nprintf 'one\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" auto-snapshot\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" watch --iterations 1 --poll-ms 0\n"
         val out = _scv_doc_script(script)
         expect(out).to_contain("auto-snapshot commit_")
         expect(out).to_contain("watch iterations=1 poll_ms=0")
 
 describe "REQ-006 parser failure does not block private save":
     it "snapshots invalid source before publication gates pass":
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-private.XXXXXX)\nprintf 'fn bad(\\n' > \"$TMP/bad.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parse-gate bad.spl >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" log\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-private.XXXXXX)\nprintf 'fn bad(\\n' > \"$TMP/bad.spl\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" parse-gate bad.spl >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" log\n"
         val out = _scv_doc_script(script)
         expect(out).to_contain("snapshot commit_")
         expect(out).to_contain("state=parsed_error")
 
 describe "REQ-010 diff views":
     it "keeps policy diff formatting-aware and detects exact renames":
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-diff.XXXXXX)\nprintf 'alpha\\n' > \"$TMP/a.txt\"\nprintf 'payload\\n' > \"$TMP/old.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'alpha   \\n' > a.txt\nmv old.txt new.txt\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" diff --ignore-formatting)\nprintf '%s\\n' \"$OUT\"\ncase \"$OUT\" in *'modified a.txt'*) exit 7;; esac\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-diff.XXXXXX)\nprintf 'alpha\\n' > \"$TMP/a.txt\"\nprintf 'payload\\n' > \"$TMP/old.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nprintf 'alpha   \\n' > a.txt\nmv old.txt new.txt\nOUT=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" diff --ignore-formatting)\nprintf '%s\\n' \"$OUT\"\ncase \"$OUT\" in *'modified a.txt'*) exit 7;; esac\n"
         val out = _scv_doc_script(script)
         expect(out).to_contain("renamed old.txt -> new.txt")
 
 describe "REQ-014 Simple DB reuse":
     it "writes object index through the shared SDN database library":
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-db-index.XXXXXX)\nprintf 'payload\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" db-index\nsed -n '1,8p' .scv/meta/object_index.sdn\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-db-index.XXXXXX)\nprintf 'payload\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" db-index\nsed -n '1,8p' .scv/meta/object_index.sdn\n"
         val out = _scv_doc_script(script)
         expect(out).to_contain("db-index objects=")
         expect(out).to_contain("objects |id, kind, path, size, valid|")

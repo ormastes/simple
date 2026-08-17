@@ -1,12 +1,32 @@
 use app.io.mod (process_run)
 
 fn _scv_parser_doc_script(script: text) -> text:
+    """Run a documentation script and prove the subprocess ACTUALLY RAN.
+
+    The scripts drive `$REPO/bin/simple`, deliberately NOT
+    `bin/release/simple`: that path is a production-guard wrapper which
+    refuses to exec a non-production runtime ("refusing non-production
+    Simple runtime") and exits WITHOUT running anything. Every
+    `to_contain(...)` in this file would then assert against empty output
+    and report a plausible, scv-shaped FALSE RED.
+
+    The guards below are the generalizing detection for that whole class:
+    a bad binary path, a refusing wrapper and a missing fixture all fail
+    HERE, before any content assertion, so "did not run" can never
+    masquerade as "ran wrong". They cost no extra subprocess launch --
+    each `it` here is already a full compiler run and the test daemon has
+    a 120s budget, so no additional shelling-out example is added.
+    """
     val (out, err, code) = process_run("/bin/sh", ["-c", script])
-    "{out}{err}\nexit={code}\n"
+    val combined = "{out}{err}\nexit={code}\n"
+    expect(code).to_equal(0)
+    expect(out == "").to_equal(false)
+    expect(combined.contains("refusing non-production")).to_equal(false)
+    combined
 
 describe "REQ-008 REQ-009 parser index":
     it "records fallback syntax and semantic hashes":
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-parser.XXXXXX)\nprintf 'alpha\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parse-gate a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parse-index\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-parser.XXXXXX)\nprintf 'alpha\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" parse-gate a.txt\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" parse-index\n"
         val out = _scv_parser_doc_script(script)
         expect(out).to_contain("parse-gate a.txt parsed_ok")
         expect(out).to_contain("a.txt|fallback|sha256_")
@@ -14,7 +34,7 @@ describe "REQ-008 REQ-009 parser index":
         expect(out).to_contain("|semantic_")
 
     it "locks local WASM parser artifacts without executing them":
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-parser-install.XXXXXX)\nprintf '\\\\000asmx' > \"$TMP/parser.wasm\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parser-install simple tree-sitter-simple 0.1.0 parser.wasm\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parser-verify\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parsers\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-parser-install.XXXXXX)\nprintf '\\\\000asmx' > \"$TMP/parser.wasm\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" parser-install simple tree-sitter-simple 0.1.0 parser.wasm\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" parser-verify\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" parsers\n"
         val out = _scv_parser_doc_script(script)
         expect(out).to_contain("parser-install simple tree-sitter-simple 0.1.0")
         expect(out).to_contain("parser-verify checked=1")

@@ -1,12 +1,44 @@
 use std.spec
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_get(key: text) -> text
+
+fn compiler_bin() -> text:
+    """Binary under test. `SIMPLE_SPEC_COMPILER` overrides it so a candidate
+    build can be A/B'd against the deployed one."""
+    val override = rt_env_get("SIMPLE_SPEC_COMPILER")
+    if override != "":
+        return override
+    # NOT `bin/release/simple`: that is the production-guard bash wrapper, which
+    # refuses to exec a non-production runtime ("refusing non-production Simple
+    # runtime") and exits WITHOUT running the driver at all. Every `contains(...)`
+    # below then evaluates against empty stdout, so this spec reported a
+    # permanent, compiler-shaped FALSE RED. `bin/simple` is the documented
+    # default tool path and execs whatever is deployed.
+    return "bin/simple"
 
 fn run_standalone_driver(args_line: text) -> (text, text, i64):
     rt_process_run("/bin/sh", [
         "-c",
-        "SIMPLE_FORCE_ARGS='" + args_line + "' bin/release/simple src/compiler/80.driver/main.spl"
+        "SIMPLE_FORCE_ARGS='" + args_line + "' " + compiler_bin() + " src/compiler/80.driver/main.spl"
     ])
+
+describe "the standalone driver subprocess actually ran":
+    # Detection for the CLASS, not one bug: a subprocess that never ran (bad
+    # binary path, a wrapper that refuses to exec, a missing driver source) fails
+    # every `contains(...)` below and looks exactly like a live parsing defect.
+    # Assert the process produced real output BEFORE asserting anything about
+    # its content. This example carries the out-of-range rejection too, so it
+    # adds no net subprocess launch -- each launch is a full compiler start, and
+    # four of them already exceeded the test daemon's 120s budget (which reports
+    # as `timeout=1 reason=daemon-no-response`, with no `Results:` line at all).
+    it "produces driver output rather than failing silently":
+        val result = run_standalone_driver("simple-compiler --opt-level=4 missing_input.spl")
+        expect(result.0 == "").to_equal(false)
+        expect(result.0.contains("refusing non-production")).to_equal(false)
+        # the driver's own verdict, not a wrapper refusal
+        expect(result.2).to_equal(1)
+        expect(result.0).to_contain("Optimization level must be 0-3")
 
 describe "standalone driver opt-level parsing":
     it "accepts inline legacy numeric opt levels 0 through 3":
@@ -23,11 +55,8 @@ describe "standalone driver opt-level parsing":
             expect(result.0.contains("Invalid optimization level")).to_equal(false)
             expect(result.0.contains("Optimization level must be 0-3")).to_equal(false)
 
-    it "rejects out-of-range legacy numeric opt levels":
-        val result = run_standalone_driver("simple-compiler --opt-level=4 missing_input.spl")
-        expect(result.2).to_equal(1)
-        expect(result.0).to_contain("Optimization level must be 0-3")
-
+    # NOTE: out-of-range rejection (`--opt-level=4`) is asserted by the
+    # "actually ran" example above, which reuses that same launch.
     it "rejects non-numeric legacy opt levels":
         val result = run_standalone_driver("simple-compiler --opt-level=basic missing_input.spl")
         expect(result.2).to_equal(1)

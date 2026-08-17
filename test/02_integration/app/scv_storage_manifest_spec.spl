@@ -4,9 +4,30 @@ fn _run_storage_manifest_script(script: text) -> text:
     val (out, err, code) = process_run("/bin/sh", ["-c", script])
     "{out}{err}\nexit={code}\n"
 
+# Every script below invokes the compiler as `$REPO/bin/simple`, NOT
+# `$REPO/bin/release/simple`. The latter is the production-guard wrapper: it
+# refuses to exec a non-production runtime ("refusing non-production Simple
+# runtime") and exits WITHOUT running anything, so every `to_contain(...)`
+# below fails on empty output and the spec reports a compiler-shaped false RED.
+# `bin/simple` is the documented default tool path and execs what is deployed.
+
+describe "the scv subprocess actually ran":
+    # Prevention guard for the whole shell-out class, asserted BEFORE any
+    # content assertion: a subprocess that never ran (bad binary path, a wrapper
+    # that refuses to exec, a missing fixture) fails every content check the
+    # same way a live defect does. Assert the compiler actually produced output
+    # so "did not run" can never masquerade as "ran wrong".
+    it "launches the scv CLI and gets real output back":
+        val out = _run_storage_manifest_script("set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-ran-guard.XXXXXX)\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init\n")
+        # exit=0 proves the wrapper/binary actually executed the program
+        expect(out).to_contain("exit=0")
+        # and stdout was non-empty -- the helper's envelope alone is not output
+        assert_false(out == "")
+        assert_false(out == "\nexit=0\n")
+
 describe "scv storage manifest interchange":
     it "exports a Git-friendly content manifest":
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-export-manifest.XXXXXX)\nprintf 'payload\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-manifest export.sdn\ncat export.sdn\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-export-manifest.XXXXXX)\nprintf 'payload\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" export-manifest export.sdn\ncat export.sdn\n"
         val out = _run_storage_manifest_script(script)
         expect(out).to_contain("export-manifest export.sdn")
         expect(out).to_contain("format: scv-export-manifest-v1")
@@ -16,7 +37,7 @@ describe "scv storage manifest interchange":
         expect(out).to_contain("exit=0")
 
     it "imports an exported manifest into a fresh repository":
-        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-import-src.XXXXXX)\nDST=$(mktemp -d /tmp/scv-import-dst.XXXXXX)\nprintf 'payload\\n' > \"$SRC/a.txt\"\nmkdir -p \"$SRC/nested\"\nprintf 'nested\\n' > \"$SRC/nested/b.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-manifest \"$SRC/export.sdn\" >/dev/null\ncd \"$DST\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" import-manifest \"$SRC/export.sdn\" \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" fsck\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out >/dev/null\ncmp \"$SRC/a.txt\" out/a.txt\ncmp \"$SRC/nested/b.txt\" out/nested/b.txt\nprintf 'imported_a=%s\\n' \"$(cat out/a.txt | tr '\\n' '|')\"\nprintf 'imported_b=%s\\n' \"$(cat out/nested/b.txt | tr '\\n' '|')\"\n"
+        val script = "set -eu\nREPO=$(pwd)\nSRC=$(mktemp -d /tmp/scv-import-src.XXXXXX)\nDST=$(mktemp -d /tmp/scv-import-dst.XXXXXX)\nprintf 'payload\\n' > \"$SRC/a.txt\"\nmkdir -p \"$SRC/nested\"\nprintf 'nested\\n' > \"$SRC/nested/b.txt\"\ncd \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" export-manifest \"$SRC/export.sdn\" >/dev/null\ncd \"$DST\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" import-manifest \"$SRC/export.sdn\" \"$SRC\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" fsck\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" export-tree out >/dev/null\ncmp \"$SRC/a.txt\" out/a.txt\ncmp \"$SRC/nested/b.txt\" out/nested/b.txt\nprintf 'imported_a=%s\\n' \"$(cat out/a.txt | tr '\\n' '|')\"\nprintf 'imported_b=%s\\n' \"$(cat out/nested/b.txt | tr '\\n' '|')\"\n"
         val out = _run_storage_manifest_script(script)
         expect(out).to_contain("import-manifest files=2")
         expect(out).to_contain("commit=commit_")

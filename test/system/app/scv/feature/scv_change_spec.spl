@@ -2,11 +2,28 @@ use app.io.mod (process_run)
 
 fn _scv_change_doc_script(script: text) -> text:
     val (out, err, code) = process_run("/bin/sh", ["-c", script])
-    "{out}{err}\nexit={code}\n"
+    val combined = "{out}{err}\nexit={code}\n"
+    # Prevention guard for this whole shell-out class: assert the subprocess
+    # ACTUALLY RAN, before any content assertion in the examples below.
+    #
+    # The scripts invoke `bin/simple` (the documented default tool path), NOT
+    # `bin/release/simple`. The latter is a production-guard shell wrapper that
+    # refuses to exec a non-production runtime ("refusing non-production Simple
+    # runtime") and exits WITHOUT running anything, leaving stdout empty -- so
+    # every `to_contain(...)` below failed and produced a plausible,
+    # feature-shaped false RED.
+    #
+    # These three checks fail identically for a bad binary path, a refusing
+    # wrapper, or a missing fixture, and they cost no extra compiler launch
+    # because they run inside the helper each example already calls.
+    expect(code).to_equal(0)
+    expect(out == "" and err == "").to_equal(false)
+    expect(combined.contains("refusing non-production")).to_equal(false)
+    combined
 
 describe "REQ-003 stable change ids":
     it "keeps a logical change id across state rewrites":
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-change.XXXXXX)\nprintf 'payload\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nBEFORE=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" log)\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nAFTER=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" log)\nprintf 'before=%s\\nafter=%s\\n' \"$BEFORE\" \"$AFTER\"\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-change.XXXXXX)\nprintf 'payload\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nBEFORE=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" log)\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" test-gate true >/dev/null\nAFTER=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" log)\nprintf 'before=%s\\nafter=%s\\n' \"$BEFORE\" \"$AFTER\"\n"
         val out = _scv_change_doc_script(script)
         expect(out).to_contain("before=commit commit_")
         expect(out).to_contain("after=commit commit_")

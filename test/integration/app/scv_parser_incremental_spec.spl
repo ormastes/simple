@@ -2,11 +2,35 @@ use app.io.mod (process_run)
 
 fn _run_parser_incremental_script(script: text) -> text:
     val (out, err, code) = process_run("/bin/sh", ["-c", script])
-    "{out}{err}\nexit={code}\n"
+    val combined = "{out}{err}\nexit={code}\n"
+    # PREVENTION GUARD for the whole shell-out CLASS, evaluated before any
+    # content assertion in every example below.
+    #
+    # The scripts invoke the compiler as `$REPO/bin/simple`, deliberately NOT
+    # `bin/release/simple`: that path is a production-guard wrapper shell
+    # script, not the compiler. It currently REFUSES to exec the deployed
+    # runtime ("error: refusing non-production Simple runtime") and exits
+    # without running anything, so stdout is empty and every `to_contain`
+    # below fails at once -- a plausible, compiler-shaped FALSE RED.
+    # `bin/simple` is the documented default tool path and execs whatever is
+    # deployed.
+    #
+    # Assert the subprocess actually RAN before asserting anything about what
+    # it printed, so "did not run" can never masquerade as "ran wrong". This
+    # fails alike for a bad binary path, a refusing wrapper, and a missing
+    # fixture. It lives in the shared helper rather than in an extra `it` on
+    # purpose: each example already launches several full compiler
+    # subprocesses, and one more example would push this file past the test
+    # daemon's 120s budget (reported as `timeout=1 reason=daemon-no-response`
+    # with no `Results:` line at all).
+    assert_equal(code, 0)
+    assert_false(out == "")
+    assert_false(combined.contains("refusing non-production Simple runtime"))
+    combined
 
 describe "scv parser incremental reuse":
     it "reuses unchanged fallback line nodes across single-line edits":
-        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-parse-incremental.XXXXXX)\nprintf 'alpha\\nbeta\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parse-gate a.txt >/dev/null\nROOT1=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parse-index | sed -n 's/.*|node=\\(syntax_node_[^|]*\\).*/\\1/p' | head -1)\nCHILD1=$(sed -n 's/^children: \\(syntax_node_[^,]*\\),.*/\\1/p' \".scv/objects/syntax/$ROOT1.sdn\")\nCOUNT1=$(find .scv/objects/syntax -type f | wc -l | tr -d ' ')\nprintf 'alpha\\ngamma\\n' > a.txt\nSECOND=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parse-gate a.txt)\nROOT2=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" parse-index | sed -n 's/.*|node=\\(syntax_node_[^|]*\\).*/\\1/p' | head -1)\nCHILD2=$(sed -n 's/^children: \\(syntax_node_[^,]*\\),.*/\\1/p' \".scv/objects/syntax/$ROOT2.sdn\")\nCOUNT2=$(find .scv/objects/syntax -type f | wc -l | tr -d ' ')\nprintf '%s\\nroot1=%s\\nroot2=%s\\nchild1=%s\\nchild2=%s\\ncount1=%s\\ncount2=%s\\n' \"$SECOND\" \"$ROOT1\" \"$ROOT2\" \"$CHILD1\" \"$CHILD2\" \"$COUNT1\" \"$COUNT2\"\ntest \"$ROOT1\" != \"$ROOT2\"\ntest \"$CHILD1\" = \"$CHILD2\"\ntest \"$COUNT1\" = 3\ntest \"$COUNT2\" = 5\n"
+        val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-parse-incremental.XXXXXX)\nprintf 'alpha\\nbeta\\n' > \"$TMP/a.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" parse-gate a.txt >/dev/null\nROOT1=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" parse-index | sed -n 's/.*|node=\\(syntax_node_[^|]*\\).*/\\1/p' | head -1)\nCHILD1=$(sed -n 's/^children: \\(syntax_node_[^,]*\\),.*/\\1/p' \".scv/objects/syntax/$ROOT1.sdn\")\nCOUNT1=$(find .scv/objects/syntax -type f | wc -l | tr -d ' ')\nprintf 'alpha\\ngamma\\n' > a.txt\nSECOND=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" parse-gate a.txt)\nROOT2=$(SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/scv/main.spl\" parse-index | sed -n 's/.*|node=\\(syntax_node_[^|]*\\).*/\\1/p' | head -1)\nCHILD2=$(sed -n 's/^children: \\(syntax_node_[^,]*\\),.*/\\1/p' \".scv/objects/syntax/$ROOT2.sdn\")\nCOUNT2=$(find .scv/objects/syntax -type f | wc -l | tr -d ' ')\nprintf '%s\\nroot1=%s\\nroot2=%s\\nchild1=%s\\nchild2=%s\\ncount1=%s\\ncount2=%s\\n' \"$SECOND\" \"$ROOT1\" \"$ROOT2\" \"$CHILD1\" \"$CHILD2\" \"$COUNT1\" \"$COUNT2\"\ntest \"$ROOT1\" != \"$ROOT2\"\ntest \"$CHILD1\" = \"$CHILD2\"\ntest \"$COUNT1\" = 3\ntest \"$COUNT2\" = 5\n"
         val out = _run_parser_incremental_script(script)
         expect(out).to_contain("root1=syntax_node_")
         expect(out).to_contain("root2=syntax_node_")
