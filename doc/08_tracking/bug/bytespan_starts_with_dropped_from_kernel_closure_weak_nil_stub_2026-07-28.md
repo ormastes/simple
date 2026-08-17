@@ -1,7 +1,38 @@
 # ByteSpan.starts_with dropped from the SimpleOS kernel closure and silently replaced by a nil-returning WEAK stub
 
-Status: OPEN (P1)
+Status: **RETIRED 2026-08-17 — fixed in current source.** Both defects (D1
+cache key, D2 fabrication fail-open) are present as landed code in the tree
+today; what remained on 07-28 was a *deployment* gap in a stale
+`bin/release/**` binary, and CLAUDE.md forbids this lane from redeploying it.
+See "Re-triage 2026-08-17" below.
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
+  (That stamp said OPEN; content grep says otherwise — see the re-triage.)
+
+## Re-triage 2026-08-17 (content grep of CURRENT source, not SHA ancestry)
+
+Classified by CONTENT. Each of the four claimed fixes was re-grepped; all four
+are present:
+
+| claimed fix | proving symbol / evidence in current source |
+|---|---|
+| D2 pure-Simple guard, channel 3 | `simpleos_undefined_simple_module_symbols` — 2 occurrences in `src/compiler/70.backend/backend/llvm_native_link.spl` |
+| D2 shrink-only ratchet | `config/simpleos_fabricated_lib_baseline.sdn` exists (1873 bytes) |
+| D2 seed-side backstop | `stale_module_move_report` (`src/compiler_rust/compiler/src/pipeline/native_project/stubs.rs:392`), called at line **561** — i.e. before the `FreestandingUnresolvedMode` match, as designed; `simple_module_symbol_tail` at line 374 excludes `rt_*` by construction (asserted at line 1367) |
+| D1 root: `GlobalBuildFingerprint` ungated | `src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:910-913` carries the explicit comment "This is deliberately NOT gated on `incr_hardening`. The dependency-blind [key] ... `incr_hardening` now only controls the ..."; the remaining `if incr_hardening` at line 1120 gates something else |
+
+Unit coverage for D2's backstop is in-tree at `stubs.rs:1353-1372`
+(`stale_module_move_is_detected_and_rt_channels_are_untouched`), including the
+negative controls: an `rt_*` symbol must NOT be reported (1367-1368) and a live
+symbol must NOT be reported (1372).
+
+Binary identity caveat, stated rather than hidden: this triage did **not** and
+could not rebuild the SimpleOS WM kernel — `bin/simple` here is the stale Rust
+seed (mtime 2026-08-16 22:59) and ~15 lanes share the checkout, so a redeploy
+is prohibited. The row is retired on the strength of the source containing the
+fixes plus in-tree unit coverage with negative controls, **not** on a fresh ELF.
+If a future SimpleOS WM ELF again shows an 8-byte WEAK `lib__*` / `os__*`
+`FUNC`, that is a NEW regression against a guard that now exists — file it
+fresh rather than reopening this row.
 
 - **Filed:** 2026-07-28
 - **Severity:** high (silent wrong answer, no diagnostic, in the WM render path)

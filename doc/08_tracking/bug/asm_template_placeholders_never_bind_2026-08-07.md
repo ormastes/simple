@@ -1,8 +1,92 @@
 # `asm """..."""` template placeholders never bind — and `@cfg("target_arch", ...)` is inert
 
 - **Date:** 2026-08-07
-- Status: OPEN (P1)
+- Status: OPEN (P2 — downgraded from P1) — **root cause C and the arch-gating gap
+  are both FIXED in current source; only `timer.spl` / `topology.spl` and the
+  diagnostic gap remain.** See "Re-triage 2026-08-17" below.
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
+  **That stamp was wrong on two of the three root causes** — see the re-triage.
+
+## Re-triage 2026-08-17 (content grep of CURRENT source, not SHA ancestry)
+
+Binary identity for every number below: `bin/simple` ->
+`bin/release/x86_64-unknown-linux-gnu/simple`, the **stale Rust seed**
+(`--version` self-declares "bootstrap seed only"). `src/compiler/**` and
+`src/lib/**` are read as SOURCE, so the greps below describe what a
+current-source compiler does, not what that seed does.
+
+### Root cause C (`out(reg)` write-back silently dropped) — FIXED in source
+
+`src/compiler/50.mir/_MirLowering/function_lowering.spl:1012-1093`
+(`lower_inline_asm`) no longer aliases an output operand onto the source
+local. Each `Out` / `LateOut` / `InOut` constraint now allocates a **fresh SSA
+temp** (`self.builder.new_temp(...)`, lines 1042 / 1058), the `InlineAsm`
+instruction's `outputs` carry those temps, and lines 1084-1093 emit an
+explicit `MirInstKind.Copy(output_destinations[i], output_results[i])`
+write-back per output. Proving symbols: `output_destinations`,
+`output_results`, and the comment "Explicit copies perform the source-level
+output writeback".
+
+The LLVM side consumes them at
+`src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl:548-624`
+(`translate_inline_asm`), including the multi-output `extractvalue` path.
+
+Existing coverage:
+`test/01_unit/compiler/frontend/flat_ast_inline_asm_bridge_spec.spl`
+(`mir_metadata_score`) scores the write-back `Copy` explicitly (+200 when the
+`Copy`'s source is the asm output temp and its destination is the named `var`).
+**Caveat — that spec does not currently execute here:** on this host it hits
+the runner's per-file budget, not an assertion.
+
+```
+SPEC FILE VERDICT: test/01_unit/compiler/frontend/flat_ast_inline_asm_bridge_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0 timeout=1 reason=child-timeout budget_ms=120000
+Results: 1 total, 0 passed, 1 failed
+```
+
+So root cause C is fixed in source with real coverage written, but that
+coverage is inert on a loaded box. Filed as a separate concern, not re-opened
+here.
+
+### Root cause B (no working arch-gating mechanism) — FALSE in current source
+
+Two mechanisms now exist:
+
+1. `src/compiler_rust/compiler/src/pipeline/cfg_strip.rs` implements
+   `@cfg(<arch>)` gating for **both** globals
+   (`strip_inactive_cfg_arch_globals`, line 197 — called from
+   `native_project/compiler.rs:592`) and top-level functions
+   (`strip_inactive_cfg_arch_fns`, `fn_inactive_cfg_arch`,
+   `cfg_attr_arch_verdict`). `@cfg(not(x86_64))` is supported.
+2. `asm match:` is implemented end to end in the pure-Simple compiler:
+   `ExprKind.AsmMatch` / `AsmMatchArm`
+   (`src/compiler/10.frontend/parser_types_expr.spl:397,765`) lowered with real
+   target selection in `src/compiler/50.mir/_MirLowering/asm_and_targets.spl`
+   (`get_target_arch`, per-arm match, and a fail-closed
+   `error_fatal("no asm match case for target {target_arch}-{target_os}")` at
+   line 200).
+
+**What is still genuinely inert is only the two-argument spelling** this row
+used: `cfg_strip.rs:259-266` documents that `("target_arch", "arm")` pairs and
+an empty `@cfg()` return `None` (unrecognised), i.e. `@cfg("target_arch",
+"arm")` gates nothing. The supported spelling is `@cfg(x86_64)`. That is a
+spelling defect, not "no mechanism", and it does **not** fail open for the
+supported form.
+
+### Still open (unchanged, re-confirmed by grep)
+
+- `src/os/kernel/arch/x86_64/timer.spl:204-205` (`mov {lo}, rax` / `mov {hi},
+  rdx`) and `src/os/kernel/arch/x86_64/topology.spl:35-38` (`mov eax, {leaf}`
+  and three more) still carry bare-template placeholders. Confirmed present.
+  **Deliberately NOT rewritten in this triage pass.** Root cause C is fixed, so
+  the blocker the original entry named is gone — but `rdtsc` (EDX:EAX) and
+  `cpuid` (clobbers RBX) need *explicit register* constraints, and no
+  executable verification path for a freestanding `src/os` build exists on this
+  host. Landing an unverified `out(reg)` rewrite is exactly the "loud error
+  traded for a silent zero" outcome this row warned against, so they stay
+  loudly broken.
+- The diagnostic gap (a bare `asm` template containing `{ident}` with an empty
+  constraint list should error at the asm site) is unimplemented. Its stated
+  precondition — fixing `timer.spl` / `topology.spl` first — still holds.
 - **Severity:** blocker (Stage-3 self-host blocker #10)
 
 ## Symptom
