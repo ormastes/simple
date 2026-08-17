@@ -204,6 +204,15 @@ impl<'a> Parser<'a> {
     /// a line end, `=`, `.`, ...) means the `move` token is the expression itself.
     /// See doc/08_tracking/bug/move_identifier_rejected_as_expression_2026-08-15.md
     pub(crate) fn move_is_keyword_prefix(&mut self) -> bool {
+        self.soft_keyword_prefixes_operand()
+    }
+
+    /// Shared decision for every soft keyword that is BOTH a prefix operator and
+    /// a legal identifier (`move`, `spawn`, ...): it is the keyword only when the
+    /// token after it starts a fresh operand. An operator, delimiter, `=`, `.`,
+    /// or line end means the keyword token is the whole expression.
+    /// `(` is deliberately excluded so `spawn(x)` stays a call on an identifier.
+    pub(crate) fn soft_keyword_prefixes_operand(&mut self) -> bool {
         matches!(
             self.peek_next().kind,
             TokenKind::Backslash

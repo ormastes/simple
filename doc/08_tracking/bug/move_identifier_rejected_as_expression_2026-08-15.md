@@ -74,3 +74,54 @@ Renamed the compaction cursor `move` -> `shift` in
 Either make `move` a plain identifier, or reject its declaration with a clear
 "reserved keyword" diagnostic instead of failing at the first later use, and add
 `move` to the documented reserved-keyword list in `.claude/rules/language.md`.
+
+---
+
+## RESOLVED for the whole CLASS (2026-08-17, verified by executed tests)
+
+`move` itself was already fixed before today (`parser_helpers.rs`
+`move_is_keyword_prefix`). What was NOT fixed is that **eleven sibling soft
+keywords had exactly the same defect**, each failing with a *different* error
+message — which is why they were never recognised as one bug. Found by the
+class-detection test `every_bindable_soft_keyword_reads_back_in_ordinary_
+expression_positions`, not by any per-keyword report.
+
+RED before (executed, `cargo test -p simple-parser --test
+contextual_keyword_identifiers`):
+`test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out`
+first offender `var spawn = 3 / let a = spawn + 1` ->
+`expected expression, found Plus`.
+
+GREEN after:
+`test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`
+
+Full `cargo test -p simple-parser --no-fail-fast`: every integration suite
+passes. The 4 remaining `--lib` failures are all `lexer::tests` f-string
+brace-escape and are **pre-existing** — proven by re-running `--lib` with these
+four files stashed: identical `277 passed; 4 failed`.
+
+### Three distinct root-cause sites, one class
+
+1. `parser/src/expressions/primary/mod.rs:267` — `TokenKind::Spawn` routed
+   unconditionally to `parse_primary_control` -> `parse_spawn_expr`
+   (`expressions/primary/control.rs:182`), which advances and parses an operand,
+   so `spawn + 1` read `+` as the operand start. Now guarded by
+   `soft_keyword_prefixes_operand()`; `(` is deliberately excluded so `spawn(x)`
+   stays a call on an identifier.
+2. `parser/src/parser_impl/core.rs:439` — new `soft_kw_stmt_as_ident` flag,
+   mirroring the existing `is_return_as_ident` idiom. Covers `Skip`, `Bind`,
+   `On`, `With`, `Use`, `Export`, `Requires`, `Auto`, `Mod`, `Examples`,
+   `AndThen`: `<kw> =` / `<kw>.` at statement level is a variable use, never the
+   statement form.
+3. `parser/src/parser_patterns.rs` — the binding side had no pattern arm for
+   `into`, `bind`, `unwrap`, `on`, `with`, `use`, `export`, `auto`, `where`,
+   `onto`, `and_then`, so `var into = 3` died with `expected pattern, found
+   Into` before any use was even reached.
+
+`parser_helpers.rs` gained `soft_keyword_prefixes_operand()`; the pre-existing
+`move_is_keyword_prefix()` now delegates to it (behaviour unchanged).
+
+### Does NOT reproduce — the `new` claim is stale
+`val new = 5 / let a = new + 1` and `var new = 0 / new = new + 1` both parse
+today (probed directly against the parser crate). `error_recovery.rs:376-406`'s
+`TokenKind::New` heuristic is not on that path.

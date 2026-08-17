@@ -433,6 +433,23 @@ impl<'a> Parser<'a> {
             && (self.peek_is(&TokenKind::Assign) || self.peek_is(&TokenKind::Dot));
         let is_return_as_ident = matches!(&self.current.kind, TokenKind::Return)
             && (self.peek_is(&TokenKind::Assign) || self.peek_is(&TokenKind::Dot));
+        // Soft keywords that also introduce a statement (`skip`, `bind …`, `on …`,
+        // `with …`) are bindable as ordinary variables. `<kw> = …` / `<kw>.field`
+        // at statement level is a use of that variable, never the statement form.
+        let soft_kw_stmt_as_ident = matches!(
+            &self.current.kind,
+            TokenKind::Skip
+                | TokenKind::Bind
+                | TokenKind::On
+                | TokenKind::With
+                | TokenKind::Use
+                | TokenKind::Export
+                | TokenKind::Requires
+                | TokenKind::Auto
+                | TokenKind::Mod
+                | TokenKind::Examples
+                | TokenKind::AndThen
+        ) && (self.peek_is(&TokenKind::Assign) || self.peek_is(&TokenKind::Dot));
         // `common` keyword: only treat as `common use` when followed by `use`.
         // Otherwise it's used as a variable name (e.g., `common.push(x)`).
         let is_common_use = matches!(&self.current.kind, TokenKind::Common) && self.peek_is(&TokenKind::Use);
@@ -646,6 +663,7 @@ impl<'a> Parser<'a> {
                 }
             }
             // Module system (Features #104-111)
+            TokenKind::Use if soft_kw_stmt_as_ident => self.parse_expression_or_assignment(),
             TokenKind::Use => self.parse_use(),
             TokenKind::Import => self.parse_import(), // alias for use
             TokenKind::From => {
@@ -668,14 +686,19 @@ impl<'a> Parser<'a> {
                     self.parse_expression_or_assignment()
                 }
             }
+            TokenKind::Mod if soft_kw_stmt_as_ident => self.parse_expression_or_assignment(),
             TokenKind::Mod => self.parse_mod(Visibility::Private, vec![]),
             TokenKind::Common if is_common_use => self.parse_common_use(),
             TokenKind::Common => self.parse_expression_or_assignment(),
+            TokenKind::Export if soft_kw_stmt_as_ident => self.parse_expression_or_assignment(),
             TokenKind::Export => self.parse_export_use(),
             TokenKind::StructuredExport => self.parse_structured_export(),
+            TokenKind::Auto if soft_kw_stmt_as_ident => self.parse_expression_or_assignment(),
             TokenKind::Auto => self.parse_auto_import(),
+            TokenKind::Requires if soft_kw_stmt_as_ident => self.parse_expression_or_assignment(),
             TokenKind::Requires => self.parse_requires_capabilities(),
             // AOP & Unified Predicates (#1000-1050)
+            TokenKind::On if soft_kw_stmt_as_ident => self.parse_expression_or_assignment(),
             TokenKind::On => self.parse_aop_advice().map(Node::AopAdvice),
             TokenKind::Identifier { .. } if is_inject_graph_decl => self.parse_inject_graph().map(Node::InjectGraph),
             TokenKind::Identifier { name, .. } if name == "security" => {
@@ -693,6 +716,9 @@ impl<'a> Parser<'a> {
             TokenKind::Identifier { .. } if is_capability_policy_decl => {
                 self.parse_capability_policy().map(Node::CapabilityPolicy)
             }
+            // `bind` is bindable as a variable too: `bind = ...` / `bind.field`
+            // is a use of that variable, not a DI/interface binding.
+            TokenKind::Bind if soft_kw_stmt_as_ident => self.parse_expression_or_assignment(),
             TokenKind::Bind => {
                 // Disambiguate between:
                 // - DI binding: `bind on pc{...} -> Impl`
@@ -724,6 +750,7 @@ impl<'a> Parser<'a> {
             TokenKind::Break => self.parse_break(),
             TokenKind::Continue => self.parse_continue(),
             TokenKind::Pass => self.parse_pass(),
+            TokenKind::Skip if soft_kw_stmt_as_ident => self.parse_expression_or_assignment(),
             TokenKind::Skip => self.parse_skip(),
             TokenKind::Defer => self.parse_defer(),
             TokenKind::Errdefer => self.parse_errdefer(),
@@ -764,6 +791,7 @@ impl<'a> Parser<'a> {
                     self.parse_context()
                 }
             }
+            TokenKind::With if soft_kw_stmt_as_ident => self.parse_expression_or_assignment(),
             TokenKind::With => self.parse_with(),
             // Lean 4 verification blocks
             // Note: lean{...} (no space) is handled as CustomBlock by lexer
@@ -801,6 +829,7 @@ impl<'a> Parser<'a> {
                     self.parse_examples()
                 }
             }
+            TokenKind::AndThen if soft_kw_stmt_as_ident => self.parse_expression_or_assignment(),
             TokenKind::Given | TokenKind::Then | TokenKind::AndThen => self.parse_step_ref_as_node(),
             TokenKind::When => {
                 // Disambiguate `when COND:` (conditional compilation) from `when "step":` (BDD/Gherkin)
@@ -1059,6 +1088,11 @@ impl<'a> Parser<'a> {
                 | TokenKind::Use
                 | TokenKind::Import
                 | TokenKind::Export
+                | TokenKind::Requires
+                | TokenKind::Auto
+                | TokenKind::Mod
+                | TokenKind::Examples
+                | TokenKind::AndThen
                 | TokenKind::Identifier { .. }
         )
     }

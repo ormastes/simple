@@ -55,6 +55,45 @@ fn move_still_introduces_a_move_closure_and_a_unary_move() {
     parse_ok("var v = 1\nlet g = move v");
 }
 
+/// REPRODUCING TEST for the 2026-08-17 slice of this bug: `move` had been fixed
+/// but eleven sibling soft keywords had not. Each line below failed on the
+/// pre-fix parser with a *different* error message, which is why the class
+/// sweep found them and per-keyword bug reports never did:
+///   `spawn + 1`     -> "expected expression, found Plus"   (primary/mod.rs)
+///   `skip = ...`    -> "expected expression, found Assign" (parser_impl/core.rs)
+///   `var into = 3`  -> "expected pattern, found Into"      (parser_patterns.rs)
+///   `bind = ...`    -> "expected identifier, found Assign"
+///   `on = ...`      -> "expected pointcut expression 'pc{...}', found Assign"
+///   `requires = ..` -> "expected LBracket, found Assign"
+///   `and_then = ..` -> "expected Colon, found Assign"
+#[test]
+fn soft_keywords_that_also_start_a_statement_read_back_as_variables() {
+    parse_ok("var spawn = 3\nlet a = spawn + 1");
+    parse_ok("var skip = 0\nskip = skip + 1");
+    parse_ok("var into = 3\nlet b = into + 1");
+    parse_ok("var bind = 0\nbind = bind + 1");
+    parse_ok("var on = 0\non = on + 1");
+    parse_ok("var with = 0\nwith = with + 1");
+    parse_ok("var use = 0\nuse = use + 1");
+    parse_ok("var export = 0\nexport = export + 1");
+    parse_ok("var requires = 0\nrequires = requires + 1");
+    parse_ok("var auto = 0\nauto = auto + 1");
+    parse_ok("var mod = 0\nmod = mod + 1");
+    parse_ok("var and_then = 0\nand_then = and_then + 1");
+}
+
+/// COUNTERPART to the test above: demoting these tokens to plain identifiers
+/// would pass it while silently deleting the statement forms from the grammar.
+/// Each of these is the KEYWORD meaning and must keep parsing.
+#[test]
+fn the_statement_forms_of_those_soft_keywords_still_parse() {
+    parse_ok("use std.text");
+    parse_ok("mod inner:\n    val x = 1");
+    parse_ok("fn f():\n    skip");
+    parse_ok("var w = 1\nlet s = spawn w");
+    parse_ok("let c = spawn \\x: x + 1");
+}
+
 /// SIMILAR-PROBLEM DETECTION TEST for the defect CLASS: a soft keyword that is
 /// accepted where it is *declared* but rejected where it is *used*.
 ///

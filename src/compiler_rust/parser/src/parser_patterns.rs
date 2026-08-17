@@ -291,6 +291,20 @@ impl<'a> Parser<'a> {
             TokenKind::Is => self.parse_keyword_as_pattern("is"),
             TokenKind::Lazy => self.parse_keyword_as_pattern("lazy"),
             TokenKind::Skip => self.parse_keyword_as_pattern("skip"),
+            // Soft keywords the expression side already accepts as identifiers
+            // (expressions/primary/mod.rs) — a binding form must accept the same
+            // set, or `var into = 3` is rejected while `into + 1` would be fine.
+            TokenKind::Into => self.parse_keyword_as_pattern("into"),
+            TokenKind::Bind => self.parse_keyword_as_pattern("bind"),
+            TokenKind::Unwrap => self.parse_keyword_as_pattern("unwrap"),
+            TokenKind::On => self.parse_keyword_as_pattern("on"),
+            TokenKind::With => self.parse_keyword_as_pattern("with"),
+            TokenKind::Use => self.parse_keyword_as_pattern("use"),
+            TokenKind::Export => self.parse_keyword_as_pattern("export"),
+            TokenKind::Auto => self.parse_keyword_as_pattern("auto"),
+            TokenKind::Where => self.parse_keyword_as_pattern("where"),
+            TokenKind::Onto => self.parse_keyword_as_pattern("onto"),
+            TokenKind::AndThen => self.parse_keyword_as_pattern("and_then"),
             TokenKind::Identifier { name, .. } => {
                 let name = name.clone();
                 self.advance();
