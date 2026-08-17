@@ -1,5 +1,25 @@
 # stage4 cranelift-direct lane regressed by flat-lane fixes (origin 4b79454)
 
+> ## 2026-08-17 (worker W5): re-confirmed ARCHITECTURALLY BLOCKED, unchanged
+>
+> No new evidence obtainable in this session, and none was manufactured. This row's
+> own repro is a clean-cache **stage4 full-CLI `native-build --backend cranelift`
+> rebuild per probe**; this session operates under a hard prohibition on rebuilding
+> or redeploying `bin/simple` / `bin/release/**` (~16 concurrent lanes share this
+> checkout). The deployed seed cannot stand in: it does not execute the
+> cranelift-direct lane at all, so a green seed probe would be evidence about a
+> different code path and quoting one here would be a false signal.
+>
+> Still OPEN, still needs a lane with stage4 rebuild capacity. Suspect-commit list
+> below is untouched.
+>
+> **FAMILY note:** grouped with `stage4_cranelift_direct_enum_text_cross_function_2026-07-24`
+> as a shared "cranelift-direct lane" pair. They are NOT one cause -- see that doc's
+> update: its enum-text mechanism is fully root-caused and localized to
+> `src/compiler/50.mir/**` side-table ordering, whereas this row's SEGV-on-compile
+> class is unlocalized. The shared property is only the blocked verification lane.
+
+
 **Date:** 2026-07-23
 **Lane:** stage4 full-CLI binary, `native-build --backend cranelift` (cranelift-direct)
 **Status:** OPEN — ARCHITECTURAL, confirmed out-of-scope for a source-only

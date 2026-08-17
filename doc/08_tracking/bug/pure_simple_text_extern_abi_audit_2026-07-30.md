@@ -1,5 +1,35 @@
 # Audit: pure-Simple codegen's own `text`-extern-argument ABI (vs. the `(ptr, len)` convention)
 
+> ## 2026-08-17 (worker W5): divergence RE-CONFIRMED as deliberate; BLOCKED-CROSS-OWNER
+>
+> The audit's finding stands, and in the one backend W5 owns it is not an oversight
+> but an explicit, documented convention:
+> `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:222` states that
+> "every cross-module/extern call site uses the all-i64" convention. So the
+> single-word collapse of `text` is a decision the adapter is currently built on,
+> not a missing case -- which also means a point fix in one backend would make the
+> three pure-Simple backends disagree with EACH OTHER, replacing one uniform
+> divergence with a worse non-uniform one.
+>
+> **BLOCKED-CROSS-OWNER.** Any correct fix has to move all three backends plus the
+> MIR call-construction that builds `args: [MirOperand]` one-per-source-argument,
+> and W5 owns only the cranelift adapter:
+> - `src/compiler/70.backend/backend/_MirToLlvm/**` (`llvm_type_text`) -- W4
+> - the hand-written x86_64 instruction selector -- not owned by W5
+> - `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`
+>   (`emit_resolved_direct_call`, would need to split a `text` arg into two
+>   operands at extern call sites) -- not owned by W5
+>
+> Recommendation for whoever takes it: decide the convention ONCE at the MIR
+> boundary (widen `text` extern args to `(ptr, len)` during call construction, so
+> all three backends inherit it) rather than patching each backend. Still OPEN as an
+> audit; no code changed here either.
+>
+> **FAMILY checked and REJECTED:** see the update on
+> `bootstrap_stage4_optional_arg_and_mixed_tail_miscompile_2026-07-23` for why this
+> is not the same defect as that row's optional-in-argument miscompile.
+
+
 **Scope:** the SELF-HOSTED, pure-Simple compiler's own codegen
 (`src/compiler/70.backend/**`, all `.spl`) — NOT `src/compiler_rust` (out of
 scope for this lane; not edited here). This is a separate, parallel compiler

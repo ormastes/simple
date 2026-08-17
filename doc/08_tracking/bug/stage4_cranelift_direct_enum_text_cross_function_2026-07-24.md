@@ -1,5 +1,33 @@
 # Bug: stage4 cranelift-direct — cross-function enum TEXT payload mis-decodes to a pointer
 
+> ## 2026-08-17 (worker W5): STILL PRESENT in source, and BLOCKED-CROSS-OWNER
+>
+> Verified by source inspection that the root-caused mechanism is intact and unfixed
+> -- the order-dependent construction-site registration this doc describes is still
+> exactly that:
+>
+> | site | file:line | role |
+> |---|---|---|
+> | write | `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:3093` | `self.enum_tuple_text_slots["{construct_key}::{si}"] = true` -- construction-site only |
+> | read | `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:2607` | `if self.enum_tuple_text_slots.has(tuple_text_key)` |
+> | ctor | `src/compiler/50.mir/_MirLowering/module_lowering.spl:236` | `enum_tuple_text_slots: {}` (the landed `6e6beb43d51` same-function fix) |
+> | type | `src/compiler/50.mir/mir_lowering_types.spl:193` | `Dict<text, bool>` |
+>
+> There is still no declaration-driven or pre-pass registration, so a callee that
+> matches but does not construct continues to read an empty table -- the documented
+> cross-function failure.
+>
+> **BLOCKED-CROSS-OWNER: every fix site is under `src/compiler/50.mir/**`,** which
+> worker W5 does not own (W5 owns `70.backend/{cranelift_codegen_adapter,env,objects}`
+> and the Rust interpreter/jit). Approach 2 in "Next steps" (order-independent
+> construction pre-pass) remains the cheapest route and needs the 50.mir owner.
+> Independently also blocked on stage4 rebuild capacity for verification.
+>
+> Note the symbol lives ONLY in `.spl`: `grep -rn enum_tuple_text_slots --include=*.rs
+> src/compiler_rust/` is empty, so this is not a seed defect and no seed rebuild can
+> address it.
+
+
 - **Date:** 2026-07-24
 - **Lane:** stage4 self-hosted AOT (`native-build --backend cranelift`, cranelift-direct)
 - **Severity:** correctness (wrong runtime output; compiles + exits 0)
