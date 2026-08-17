@@ -1,0 +1,56 @@
+# Reproducing spec for
+# doc/08_tracking/bug/gc_async_mut_gpu_ffi_facades_are_dangling_2026-08-09.md
+#
+# DEFECT (silent wrong result, not a crash): the gc_async_mut engine2d/engine3d
+# `ffi_*.spl` files are one-line compatibility facades of the form
+#
+#     export use std.nogc_async_mut.gpu.engine2d.ffi_cuda.*
+#
+# but the no-GC async layer was renamed `ffi_* -> sffi_*` and the facades were
+# never updated. The target module DOES NOT EXIST ON DISK. The resolver accepts
+# this silently: a program importing the facade compiles, runs, and exits 0
+# while the facade re-exports NOTHING. Measured 2026-08-17 on the deployed
+# bin/simple: `use std.gc_async_mut.gpu.engine2d.ffi_cuda.*` ran to completion
+# with rc=0 and only an unrelated "avoid export use *" style warning.
+#
+# WHY A FILE SCAN AND NOT A RUN. Precisely because the run is green either way,
+# executing the import cannot distinguish fixed from broken. The observable that
+# actually differs is whether the referenced module path exists in the tree, so
+# that is what this asserts. The generalisation to the whole defect class lives
+# in the sibling detection spec `export_use_targets_exist_spec.spl`.
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+fn missing_targets(dir: text) -> text:
+    # Emit one line per `export use std.X.*` in `dir` whose module path X has no
+    # corresponding .spl file and no corresponding directory under src/lib/.
+    val cmd = "/usr/bin/grep -rhoE '^export use std[.][a-zA-Z0-9_.]+[.][*]' " +
+        dir + " --include=*.spl 2>/dev/null " +
+        "| sed 's/^export use std[.]//; s/[.][*]$//' | sort -u " +
+        "| while read m; do p=\"src/lib/$(echo \"$m\" | tr '.' '/')\"; " +
+        "if [ ! -f \"$p.spl\" ] && [ ! -d \"$p\" ]; then echo \"$m\"; fi; done"
+    val res = process_run("sh", ["-c", cmd])
+    res.stdout.trim()
+
+describe "gc_async_mut GPU ffi_* facades resolve to a real module":
+    """The engine2d/engine3d ffi_* compatibility facades must name a module that
+    exists on disk; a missing target re-exports nothing and still exits 0."""
+
+    it "engine2d ffi_* facades name a module that exists on disk":
+        val missing = missing_targets("src/lib/gc_async_mut/gpu/engine2d")
+        expect(missing).to_equal("")
+
+    it "engine3d ffi_* facades name a module that exists on disk":
+        val missing = missing_targets("src/lib/gc_async_mut/gpu/engine3d")
+        expect(missing).to_equal("")
+
+    it "the scan itself is not vacuous - it finds real export-use lines":
+        # Guards against the scan silently matching zero lines and passing for
+        # the wrong reason (the exact silent-green shape this batch hunts).
+        val cmd = "/usr/bin/grep -rhcE '^export use std[.]' " +
+            "src/lib/gc_async_mut/gpu/engine2d src/lib/gc_async_mut/gpu/engine3d " +
+            "--include=*.spl 2>/dev/null | paste -sd+ - | bc"
+        val res = process_run("sh", ["-c", cmd])
+        val n = res.stdout.trim().to_i64()
+        expect(n > 0).to_be_true()
