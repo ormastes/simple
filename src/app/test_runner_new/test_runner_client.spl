@@ -4,7 +4,6 @@ use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run, process_run_bounded, process_run_timeout}
 use app.io.mod.{env_get}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs}
-use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests}
 use std.test_runner.test_runner_args.{parse_test_args}
 use std.test_runner.test_config.{load_test_config}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
@@ -21,7 +20,6 @@ extern fn rt_getpid() -> i64
 extern fn rt_sleep_ms(ms: i64)
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_path_absolute(path: text) -> text
-extern fn rt_dir_list(path: text) -> [text]
 
 # Atomic write: tmp + rename. Plain rt_file_write_text does open(create,
 # truncate) then write() as two separate steps, so a concurrent reader that
@@ -266,18 +264,6 @@ fn daemon_recorded_binary() -> text:
     if deployed != "" and rt_file_exists(deployed):
         return deployed
     ""
-
-# Queue depth of the shared light-daemon lane: the number of `.req` files that
-# have been submitted and not yet consumed. The daemon is a SINGLE-THREADED
-# FIFO (light_daemon.spl main(): `while i < entries.len(): handle_request(...)`)
-# and handle_request() blocks in process_run_bounded for up to the served
-# spec's ENTIRE budget (up to the 600s protocol cap). So every queued request
-# is a serial wait that this client would pay in full before its own spec even
-# starts.
-fn daemon_queue_depth() -> i64:
-    if not rt_file_exists(LIGHT_REQ_DIR):
-        return 0
-    count_pending_requests(rt_dir_list(LIGHT_REQ_DIR))
 
 fn ensure_daemon() -> bool:
     if daemon_lock_alive():
@@ -630,14 +616,7 @@ fn main() -> i64:
     # A --timeout beyond the daemon protocol cap cannot ride the daemon lane
     # (the request would be clamped and the spec killed at ~600s); run
     # directly so the full requested timeout is honored.
-    # Head-of-line blocking bypass. See daemon_backlog_bypass() above: the
-    # daemon amortizes nothing (78 vs 77 modules per request, measured), so
-    # waiting behind a queue is strictly worse than running the same child
-    # here. Computed BEFORE ensure_daemon() so a backlogged lane never even
-    # spawns/probes a daemon.
-    val backlog_pending = daemon_queue_depth()
-    val backlog_bypass = daemon_backlog_bypass(backlog_pending)
-    val daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass: false else: ensure_daemon()
+    val daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass: false else: ensure_daemon()
     var binary = ""
     if not daemon_ok:
         if cov_bypass:
@@ -652,8 +631,6 @@ fn main() -> i64:
             print "binary-override: {_binary_override_names()} set; bypassing test daemon so the override reaches the spec"
         elif long_timeout_bypass:
             print "timeout: --timeout {run.timeout_secs}s exceeds daemon cap; running directly"
-        elif backlog_bypass:
-            print "daemon-backlog: {backlog_pending} request(s) already queued on the serial light-daemon lane; running directly (the daemon spawns a full child per request and amortizes nothing)"
         else:
             print "WARNING: test daemon unavailable; running directly"
         binary = simple_binary()
