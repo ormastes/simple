@@ -1,0 +1,126 @@
+# @cover src/compiler/80.driver/driver_build/build_outcome.spl 0%
+# @req REQ-DRIVER-BUILD-OUTCOME-002
+"""
+# A build phase must reach the end of its work list
+
+**Category:** Compiler / driver
+**Status:** Similar-problem detection guard (class-level)
+
+## Purpose and Audience
+
+This is the CLASS spec, not the instance one. The instance defect was
+`driver_aot_native_output.spl` returning on the first bad module. The class is
+broader and has recurred in at least three places in this repo:
+
+> **a phase that abandons the remaining work on the first failure.**
+
+`driver_source_pipeline_parsing.spl` did it across 619 files. The native output
+path did it across modules. Any future phase — lowering, linking, spec discovery
+— can do it again, and the symptom is always the same and always misread: the
+build reports *one* problem, the engineer fixes it, and pays another full run to
+discover the second. Each occurrence costs a ~20-minute bootstrap cycle per
+defect instead of one cycle for all of them.
+
+The audience is anyone writing a loop over units of work inside a build phase.
+
+## Scope and Preconditions
+
+This spec does not test one call site. It pins the *contract* that any
+collect-all phase must satisfy, exercised through the shared vocabulary in
+`compiler.driver.driver_build.build_outcome`:
+
+1. **Completeness** — the number of recorded outcomes equals the number of units
+   in the work list, even when the first unit fails. An outcome set smaller than
+   the work list is the signature of an abandoned phase.
+2. **No early exit on the first failure** — a failure at index 0 must not stop
+   the loop; later failures must still be named.
+3. **Fail closed at the boundary, not early** — the verdict is computed after the
+   loop, and it is non-empty whenever any unit is non-OK.
+4. **No fabricated artifacts** — a failed unit contributes nothing to the
+   artifact list. Cf. `linker/native_binary/stubs.rs:209-221`, where fabricated
+   zero-returning stubs masked missing symbols.
+
+## Expected Outcome
+
+The simulated phase below fails its FIRST unit and still attempts all five,
+records five outcomes, names both failing units, produces exactly three
+artifacts, and fails closed only after the loop has finished.
+"""
+
+use std.spec.*
+use compiler.driver.driver_build.build_outcome.{
+    BuildOutcomeKind, BuildUnitOutcome, BuildOutcomeSet
+}
+
+# A stand-in for any build phase: walks a work list, records one outcome per
+# unit, never returns early, and collects an artifact only for units that
+# actually succeeded. Returns (outcomes, artifacts).
+fn simulated_phase(paths: [text], failing: [text]) -> (BuildOutcomeSet, [text]):
+    var outcomes = BuildOutcomeSet.empty()
+    var artifacts: [text] = []
+    var unit_id = 0
+    for path in paths:
+        unit_id = unit_id + 1
+        var is_failing = false
+        for bad in failing:
+            if bad == path:
+                is_failing = true
+        if is_failing:
+            # Record and CONTINUE. This single decision is the whole fix.
+            outcomes.record(BuildUnitOutcome.from_status(unit_id, path, 1, false,
+                1, 1024, "[parser_error] {path}:1 simulated failure"))
+            continue
+        outcomes.record(BuildUnitOutcome.ok(unit_id, path, 1, 1024))
+        artifacts = artifacts.push(path + ".o")
+    (outcomes, artifacts)
+
+fn five_unit_paths() -> [text]:
+    ["fixture/a_broken.spl", "fixture/b_clean.spl", "fixture/c_clean.spl",
+     "fixture/d_broken.spl", "fixture/e_clean.spl"]
+
+describe "a build phase reaches the end of its work list":
+    it "records one outcome per unit even when the first unit fails":
+        val paths = five_unit_paths()
+        val (outcomes, _artifacts) = simulated_phase(paths,
+            ["fixture/a_broken.spl", "fixture/d_broken.spl"])
+        # An outcome set smaller than the work list is the signature of a phase
+        # that abandoned its remaining work.
+        expect(outcomes.len()).to_equal(paths.len())
+
+    it "names a failure that occurs AFTER the first failure":
+        val (outcomes, _artifacts) = simulated_phase(five_unit_paths(),
+            ["fixture/a_broken.spl", "fixture/d_broken.spl"])
+        val errors = outcomes.paths_in(BuildOutcomeKind.ERROR)
+        expect(errors.len()).to_equal(2)
+        expect(errors[0]).to_equal("fixture/a_broken.spl")
+        expect(errors[1]).to_equal("fixture/d_broken.spl")
+
+    it "leaves no unit unaccounted for":
+        val (outcomes, _artifacts) = simulated_phase(five_unit_paths(),
+            ["fixture/a_broken.spl", "fixture/d_broken.spl"])
+        for path in five_unit_paths():
+            expect(outcomes.has_path(path)).to_equal(true)
+
+describe "a build phase fails closed at the boundary, not early":
+    it "produces a non-empty verdict naming every failing unit":
+        val (outcomes, _artifacts) = simulated_phase(five_unit_paths(),
+            ["fixture/a_broken.spl", "fixture/d_broken.spl"])
+        expect(outcomes.all_ok()).to_equal(false)
+        val verdict = outcomes.verdict()
+        expect(verdict.contains("fixture/a_broken.spl")).to_equal(true)
+        expect(verdict.contains("fixture/d_broken.spl")).to_equal(true)
+
+    it "never fabricates an artifact for a failed unit":
+        val (outcomes, artifacts) = simulated_phase(five_unit_paths(),
+            ["fixture/a_broken.spl", "fixture/d_broken.spl"])
+        # Three clean units, three artifacts. Never five.
+        expect(artifacts.len()).to_equal(3)
+        expect(outcomes.ok_count()).to_equal(3)
+        for artifact in artifacts:
+            expect(artifact.contains("broken")).to_equal(false)
+
+    it "still succeeds cleanly when nothing is broken":
+        val (outcomes, artifacts) = simulated_phase(five_unit_paths(), [])
+        expect(outcomes.all_ok()).to_equal(true)
+        expect(outcomes.verdict()).to_equal("")
+        expect(artifacts.len()).to_equal(5)

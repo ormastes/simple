@@ -1,0 +1,208 @@
+# @cover src/compiler/80.driver/driver_build/build_outcome.spl 0%
+# @req REQ-DRIVER-BUILD-OUTCOME-001
+"""
+# Build outcome classification and collect-all accumulation
+
+**Category:** Compiler / driver
+**Status:** Requirement guard (R2/R3/R4 of
+`doc/02_requirements/compiler/supervised_builder.md`)
+
+## Purpose and Audience
+
+A build must be able to say *what happened to every unit of work*, in categories
+that never collapse into one another, and it must reach the end of the unit list
+before it decides the build failed. Two distinct defects motivated this:
+
+1. **Fail-fast across units.** `driver_aot_native_output.spl` carried 24
+   immediate `return CompileResult.CodegenError(...)` sites, so the first bad
+   module abandoned every remaining one and each defect cost a full ~20-minute
+   bootstrap run to locate.
+2. **A death was reported as a compiler verdict.** `earlyoom` on this host runs
+   `--prefer ^(simple|...) --avoid ^(claude|...)` and actively SIGTERMs `simple`.
+   A stage-3 run ended `exit 143` at 26 minutes and was read as a compiler
+   failure. It was not: it was infrastructure, and the units in flight were
+   **UNVERIFIED**, not failed. Conflating the two manufactures phantom compiler
+   bugs — it happened on this repo today.
+
+The audience is anyone extending the builder or tempted to fold `TERMINATED` /
+`TIMEOUT` into a general failure count.
+
+## Scope and Preconditions
+
+Pure unit coverage of `compiler.driver.driver_build.build_outcome`: the
+wait-status classifier, the per-unit record, the accumulator's counting and
+category queries, `all_ok()`, and the determinism of the formatted summary. No
+process spawning, no filesystem, no compiler invocation — this is the vocabulary,
+not the supervisor that uses it.
+
+## Expected Outcome
+
+Each status maps to exactly one category; a `TERMINATED` unit raises the
+unverified count and leaves the failure count untouched; a six-unit set with two
+clean units still names all four poisoned ones; and two `summary()` calls over
+the same set return byte-identical text so two runs can be diffed.
+"""
+
+use std.spec.*
+use compiler.driver.driver_build.build_outcome.{
+    BuildOutcomeKind, BuildUnitOutcome, BuildOutcomeSet,
+    build_outcome_classify_status, build_outcome_kind_label,
+    build_outcome_signal_of_status, build_outcome_is_unverified,
+    build_outcome_is_failure
+}
+
+# The acceptance fixture from the requirement doc: six units, two clean.
+fn fixture_six_unit_set() -> BuildOutcomeSet:
+    var outcomes = BuildOutcomeSet.empty()
+    outcomes.record(BuildUnitOutcome.ok(1, "fixture/clean_a.spl", 12, 2048))
+    outcomes.record(BuildUnitOutcome.ok(2, "fixture/clean_b.spl", 14, 2048))
+    outcomes.record(BuildUnitOutcome.from_status(3, "fixture/bad_parse.spl", 1,
+        false, 5, 1024, "[parser_error] fixture/bad_parse.spl:3 expected expression"))
+    outcomes.record(BuildUnitOutcome.from_status(4, "fixture/bad_segv.spl", 139,
+        false, 7, 1024, ""))
+    outcomes.record(BuildUnitOutcome.from_status(5, "fixture/bad_oom.spl", 137,
+        false, 9, 999999, ""))
+    outcomes.record(BuildUnitOutcome.from_status(6, "fixture/bad_hang.spl", 137,
+        true, 600000, 1024, ""))
+    outcomes
+
+describe "build outcome status classification":
+    it "maps a clean exit to OK and a clean non-zero exit to ERROR":
+        expect(build_outcome_kind_label(build_outcome_classify_status(0, false))).to_equal("OK")
+        expect(build_outcome_kind_label(build_outcome_classify_status(1, false))).to_equal("ERROR")
+        expect(build_outcome_kind_label(build_outcome_classify_status(2, false))).to_equal("ERROR")
+
+    it "maps 128+N signal deaths to CRASHED for SIGSEGV, SIGABRT and SIGKILL/OOM":
+        expect(build_outcome_kind_label(build_outcome_classify_status(139, false))).to_equal("CRASHED")
+        expect(build_outcome_kind_label(build_outcome_classify_status(134, false))).to_equal("CRASHED")
+        expect(build_outcome_kind_label(build_outcome_classify_status(137, false))).to_equal("CRASHED")
+
+    it "keeps SIGTERM (143) in its own TERMINATED category, never CRASHED":
+        # earlyoom SIGTERMs `simple` on this host. 143 is infrastructure.
+        expect(build_outcome_kind_label(build_outcome_classify_status(143, false))).to_equal("TERMINATED")
+
+    it "reports a budget overrun as TIMEOUT regardless of the enforcing signal":
+        expect(build_outcome_kind_label(build_outcome_classify_status(137, true))).to_equal("TIMEOUT")
+        expect(build_outcome_kind_label(build_outcome_classify_status(0, true))).to_equal("TIMEOUT")
+
+    it "decodes the signal number out of a 128+N status and 0 out of an exit code":
+        expect(build_outcome_signal_of_status(139)).to_equal(11)
+        expect(build_outcome_signal_of_status(134)).to_equal(6)
+        expect(build_outcome_signal_of_status(137)).to_equal(9)
+        expect(build_outcome_signal_of_status(143)).to_equal(15)
+        expect(build_outcome_signal_of_status(1)).to_equal(0)
+        expect(build_outcome_signal_of_status(0)).to_equal(0)
+
+describe "TERMINATED and TIMEOUT are unverified, not failures":
+    it "classifies TERMINATED as unverified and not a failure":
+        expect(build_outcome_is_unverified(BuildOutcomeKind.TERMINATED)).to_equal(true)
+        expect(build_outcome_is_failure(BuildOutcomeKind.TERMINATED)).to_equal(false)
+
+    it "classifies TIMEOUT as unverified and not a failure":
+        expect(build_outcome_is_unverified(BuildOutcomeKind.TIMEOUT)).to_equal(true)
+        expect(build_outcome_is_failure(BuildOutcomeKind.TIMEOUT)).to_equal(false)
+
+    it "classifies ERROR and CRASHED as failures and not unverified":
+        expect(build_outcome_is_failure(BuildOutcomeKind.ERROR)).to_equal(true)
+        expect(build_outcome_is_failure(BuildOutcomeKind.CRASHED)).to_equal(true)
+        expect(build_outcome_is_unverified(BuildOutcomeKind.ERROR)).to_equal(false)
+        expect(build_outcome_is_unverified(BuildOutcomeKind.CRASHED)).to_equal(false)
+
+    it "does NOT count a SIGTERMed unit as a failure":
+        # The single most load-bearing assertion in this file. A set whose only
+        # non-OK unit was SIGTERMed has ZERO failures and ONE unverified unit.
+        var outcomes = BuildOutcomeSet.empty()
+        outcomes.record(BuildUnitOutcome.ok(1, "fixture/clean_a.spl", 12, 2048))
+        outcomes.record(BuildUnitOutcome.from_status(2, "fixture/killed.spl", 143,
+            false, 90000, 4096, ""))
+        expect(outcomes.failure_count()).to_equal(0)
+        expect(outcomes.unverified_count()).to_equal(1)
+        # It is still not OK: there is no object, and fabricating one is
+        # forbidden, so the link must refuse.
+        expect(outcomes.all_ok()).to_equal(false)
+
+describe "collect-all accumulation over the whole unit list":
+    it "reports every poisoned unit from a six-unit fixture in one pass":
+        val outcomes = fixture_six_unit_set()
+        expect(outcomes.len()).to_equal(6)
+        expect(outcomes.ok_count()).to_equal(2)
+        expect(outcomes.count_of(BuildOutcomeKind.ERROR)).to_equal(1)
+        expect(outcomes.count_of(BuildOutcomeKind.CRASHED)).to_equal(2)
+        expect(outcomes.count_of(BuildOutcomeKind.TIMEOUT)).to_equal(1)
+        # 4 poisoned units, and the count never claims six compiled.
+        expect(outcomes.failure_count() + outcomes.unverified_count()).to_equal(4)
+
+    it "names the units in a category rather than only the first":
+        val outcomes = fixture_six_unit_set()
+        val crashed = outcomes.paths_in(BuildOutcomeKind.CRASHED)
+        expect(crashed.len()).to_equal(2)
+        expect(crashed[0]).to_equal("fixture/bad_oom.spl")
+        expect(crashed[1]).to_equal("fixture/bad_segv.spl")
+
+    it "states a never-attempted unit as NOT_RUN instead of omitting it":
+        var outcomes = BuildOutcomeSet.empty()
+        outcomes.record(BuildUnitOutcome.ok(1, "fixture/clean_a.spl", 12, 2048))
+        outcomes.record(BuildUnitOutcome.not_run(2, "fixture/never.spl"))
+        expect(outcomes.not_run_count()).to_equal(1)
+        expect(outcomes.has_path("fixture/never.spl")).to_equal(true)
+        expect(outcomes.all_ok()).to_equal(false)
+
+    it "is all_ok only when every unit is OK":
+        var clean = BuildOutcomeSet.empty()
+        clean.record(BuildUnitOutcome.ok(1, "fixture/clean_a.spl", 12, 2048))
+        clean.record(BuildUnitOutcome.ok(2, "fixture/clean_b.spl", 14, 2048))
+        expect(clean.all_ok()).to_equal(true)
+        expect(clean.verdict()).to_equal("")
+        clean.record(BuildUnitOutcome.from_status(3, "fixture/bad_segv.spl", 139,
+            false, 7, 1024, ""))
+        expect(clean.all_ok()).to_equal(false)
+
+describe "the end-of-build summary is deterministic and complete":
+    it "returns byte-identical text across two calls over the same set":
+        val outcomes = fixture_six_unit_set()
+        expect(outcomes.summary()).to_equal(outcomes.summary())
+
+    it "is insensitive to the order units were recorded in":
+        # Units finish in whatever order the host schedules them, so insertion
+        # order is not reproducible; the summary must not depend on it.
+        var forward = BuildOutcomeSet.empty()
+        forward.record(BuildUnitOutcome.from_status(1, "fixture/bad_a.spl", 1, false, 1, 1, "a"))
+        forward.record(BuildUnitOutcome.from_status(2, "fixture/bad_b.spl", 1, false, 1, 1, "b"))
+        var backward = BuildOutcomeSet.empty()
+        backward.record(BuildUnitOutcome.from_status(2, "fixture/bad_b.spl", 1, false, 1, 1, "b"))
+        backward.record(BuildUnitOutcome.from_status(1, "fixture/bad_a.spl", 1, false, 1, 1, "a"))
+        expect(forward.summary()).to_equal(backward.summary())
+
+    it "names every non-OK unit and labels the unverified categories as such":
+        val summary = fixture_six_unit_set().summary()
+        expect(summary.contains("fixture/bad_parse.spl")).to_equal(true)
+        expect(summary.contains("fixture/bad_segv.spl")).to_equal(true)
+        expect(summary.contains("fixture/bad_oom.spl")).to_equal(true)
+        expect(summary.contains("fixture/bad_hang.spl")).to_equal(true)
+        expect(summary.contains("UNVERIFIED")).to_equal(true)
+        # Clean units are counted, not listed: the listing is the failure report.
+        expect(summary.contains("OK=2")).to_equal(true)
+
+    it "carries counts and every failing name into the fail-closed verdict":
+        val verdict = fixture_six_unit_set().verdict()
+        expect(verdict.contains("fixture/bad_parse.spl")).to_equal(true)
+        expect(verdict.contains("fixture/bad_segv.spl")).to_equal(true)
+        expect(verdict.contains("fixture/bad_oom.spl")).to_equal(true)
+        expect(verdict.contains("fixture/bad_hang.spl")).to_equal(true)
+        # 1 ERROR + 2 CRASHED = 3 failed; the TIMEOUT is unverified, not failed.
+        expect(verdict.contains("3 failed")).to_equal(true)
+        expect(verdict.contains("1 unverified")).to_equal(true)
+
+    it "records per-unit attribution: id, cause, wall time and peak RSS":
+        # This line is what was missing when stage 3 was SIGTERMed with 43 files
+        # left, and it answers "which file is slow" on a host where attach-based
+        # profiling is blocked.
+        val outcome = BuildUnitOutcome.from_status(7, "fixture/bad_segv.spl", 139,
+            false, 5321, 812345, "")
+        val line = outcome.attribution_line()
+        expect(line.contains("unit=7")).to_equal(true)
+        expect(line.contains("CRASHED")).to_equal(true)
+        expect(line.contains("signal=11")).to_equal(true)
+        expect(line.contains("wall_ms=5321")).to_equal(true)
+        expect(line.contains("rss_kb=812345")).to_equal(true)
+        expect(line.contains("fixture/bad_segv.spl")).to_equal(true)

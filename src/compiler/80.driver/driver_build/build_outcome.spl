@@ -1,0 +1,307 @@
+# Build Outcome Records
+#
+# The shared vocabulary for "what happened to one unit of work" during a build.
+# It exists so the supervisor, the parallel builder and the AOT native output
+# path all classify a unit's fate the SAME way instead of each inventing its own
+# incompatible notion of failure.
+#
+# The six categories are deliberately DISJOINT and must never collapse into one
+# another. See R2 of doc/02_requirements/compiler/supervised_builder.md.
+#
+# Read this before "simplifying" TERMINATED or TIMEOUT into a failure:
+#
+#   `earlyoom` on this host is configured `--prefer ^(simple|...) --avoid
+#   ^(claude|...)` and actively SIGTERMs `simple` processes. A wait status of 143
+#   is therefore INFRASTRUCTURE, not a compiler verdict: the unit is UNVERIFIED,
+#   not failed. The same is true of a TIMEOUT — a unit that exceeded its budget on
+#   a contended box was never given an answer to report. Conflating either with a
+#   real failure manufactures phantom compiler bugs, which has already happened on
+#   this repo today (see the stage-3 `exit 143` incident in that requirement doc).
+#
+# Fail-closed is still the rule at the LINK boundary: an UNVERIFIED unit produced
+# no object, and fabricating one is forbidden (R4 — cf. the existing defect at
+# linker/native_binary/stubs.rs:209-221, where fabricated zero-returning stubs
+# masked missing symbols). "UNVERIFIED, not failed" governs how the outcome is
+# REPORTED, never whether the build is allowed to link without the artifact.
+
+# ============================================================================
+# Categories
+# ============================================================================
+
+# | variant      | detection                                                   |
+# |--------------|-------------------------------------------------------------|
+# | OK           | exit 0 AND the declared artifact exists on disk             |
+# | ERROR        | clean exit, non-zero, diagnostics captured                  |
+# | CRASHED      | killed by signal — 139 SIGSEGV, 134 SIGABRT, 137 SIGKILL/OOM|
+# | TERMINATED   | 143 SIGTERM — external; UNVERIFIED, NOT a failure           |
+# | TIMEOUT      | exceeded the per-unit budget — UNVERIFIED, NOT a failure     |
+# | NOT_RUN      | never started (the build ended first) — stated, never silent |
+enum BuildOutcomeKind:
+    OK
+    ERROR
+    CRASHED
+    TERMINATED
+    TIMEOUT
+    NOT_RUN
+
+# Stable, lowercase-free label used in summaries and in the fail-closed message.
+# Kept as a free function rather than a method so it can be called on a kind read
+# back out of a record without an intermediate binding.
+fn build_outcome_kind_label(kind: BuildOutcomeKind) -> text:
+    match kind:
+        case OK: "OK"
+        case ERROR: "ERROR"
+        case CRASHED: "CRASHED"
+        case TERMINATED: "TERMINATED"
+        case TIMEOUT: "TIMEOUT"
+        case NOT_RUN: "NOT_RUN"
+
+# The fixed reporting order. Summaries iterate THIS, never a dict's key order, so
+# two runs over the same inputs emit byte-identical text.
+fn build_outcome_kind_order() -> [BuildOutcomeKind]:
+    [BuildOutcomeKind.OK, BuildOutcomeKind.ERROR, BuildOutcomeKind.CRASHED,
+     BuildOutcomeKind.TERMINATED, BuildOutcomeKind.TIMEOUT,
+     BuildOutcomeKind.NOT_RUN]
+
+# True for the categories that describe the HOST rather than the code. These are
+# reported as UNVERIFIED and are NOT counted as failures — see the header.
+fn build_outcome_is_unverified(kind: BuildOutcomeKind) -> bool:
+    match kind:
+        case TERMINATED: true
+        case TIMEOUT: true
+        case _: false
+
+# True only for a category that is a genuine verdict against the source.
+fn build_outcome_is_failure(kind: BuildOutcomeKind) -> bool:
+    match kind:
+        case ERROR: true
+        case CRASHED: true
+        case _: false
+
+# ============================================================================
+# Wait-status classification
+# ============================================================================
+#
+# A child's wait status is read DIRECTLY, never through a pipe: `$?` after a
+# pipeline is the pipeline's last status, which has already produced false greens
+# in this repo. By the shell convention a status of 128+N means "killed by signal
+# N", so 139 = SIGSEGV(11), 137 = SIGKILL(9), 134 = SIGABRT(6), 143 = SIGTERM(15).
+
+# Signal number encoded in a 128+N wait status, or 0 when the status is a plain
+# exit code.
+fn build_outcome_signal_of_status(status: i64) -> i64:
+    if status > 128 and status < 192:
+        return status - 128
+    0
+
+# Classify a raw wait status. `timed_out` is passed separately because a unit the
+# supervisor killed on its own budget is a TIMEOUT no matter which signal did the
+# killing — the budget is the fact that matters, not the SIGKILL that enforced it.
+fn build_outcome_classify_status(status: i64, timed_out: bool) -> BuildOutcomeKind:
+    if timed_out:
+        return BuildOutcomeKind.TIMEOUT
+    if status == 0:
+        return BuildOutcomeKind.OK
+    val signal_num = build_outcome_signal_of_status(status)
+    if signal_num == 15:
+        # SIGTERM: external. UNVERIFIED, not failed. See the header.
+        return BuildOutcomeKind.TERMINATED
+    if signal_num > 0:
+        # Any other signal death — SIGSEGV(11), SIGABRT(6), SIGKILL/OOM(9) — is a
+        # crash of the compiler itself.
+        return BuildOutcomeKind.CRASHED
+    BuildOutcomeKind.ERROR
+
+# ============================================================================
+# Per-unit record
+# ============================================================================
+
+struct BuildUnitOutcome:
+    unit_id: i64            # supervisor-assigned id, stable within one build
+    source_path: text       # the file this unit was compiling
+    kind: BuildOutcomeKind
+    # Plain exit code, or 128+N when the unit died by signal N. Kept RAW so the
+    # attribution log can state exactly what the supervisor saw (R5).
+    status: i64
+    signal_num: i64         # 0 when the unit exited rather than died
+    wall_ms: i64
+    peak_rss_kb: i64
+    diagnostics: text       # non-empty for ERROR; the compiler's own message
+
+impl BuildUnitOutcome:
+    static fn ok(unit_id: i64, source_path: text, wall_ms: i64, peak_rss_kb: i64) -> BuildUnitOutcome:
+        BuildUnitOutcome(unit_id: unit_id, source_path: source_path,
+                         kind: BuildOutcomeKind.OK, status: 0, signal_num: 0,
+                         wall_ms: wall_ms, peak_rss_kb: peak_rss_kb,
+                         diagnostics: "")
+
+    # A unit the build never got to. Stated explicitly — silent absence is
+    # forbidden (R3).
+    static fn not_run(unit_id: i64, source_path: text) -> BuildUnitOutcome:
+        BuildUnitOutcome(unit_id: unit_id, source_path: source_path,
+                         kind: BuildOutcomeKind.NOT_RUN, status: 0, signal_num: 0,
+                         wall_ms: 0, peak_rss_kb: 0,
+                         diagnostics: "never started (build ended first)")
+
+    # Build a record from what the supervisor actually observed. This is the
+    # normal constructor: classification lives in one place so no caller can
+    # invent its own mapping.
+    static fn from_status(unit_id: i64, source_path: text, status: i64,
+                          timed_out: bool, wall_ms: i64, peak_rss_kb: i64,
+                          diagnostics: text) -> BuildUnitOutcome:
+        BuildUnitOutcome(unit_id: unit_id, source_path: source_path,
+                         kind: build_outcome_classify_status(status, timed_out),
+                         status: status,
+                         signal_num: build_outcome_signal_of_status(status),
+                         wall_ms: wall_ms, peak_rss_kb: peak_rss_kb,
+                         diagnostics: diagnostics)
+
+    fn label() -> text:
+        build_outcome_kind_label(self.kind)
+
+    fn is_ok() -> bool:
+        match self.kind:
+            case OK: true
+            case _: false
+
+    # One line of death attribution: unit id, path, signal or exit code, wall
+    # time, peak RSS. This is exactly what was missing when stage 3 was SIGTERMed
+    # with 43 files left (R5), and it answers "which file is slow" on a host where
+    # attach-based profiling is blocked (ptrace_scope=1, perf_event_paranoid=4).
+    fn attribution_line() -> text:
+        val cause = if self.signal_num > 0:
+            "signal={self.signal_num}"
+        else:
+            "exit={self.status}"
+        "[build-outcome] unit={self.unit_id} {self.label()} {cause} wall_ms={self.wall_ms} rss_kb={self.peak_rss_kb} {self.source_path}"
+
+# ============================================================================
+# Accumulator
+# ============================================================================
+
+class BuildOutcomeSet:
+    """Accumulates one record per unit and answers questions about the whole set.
+
+    The point of accumulating rather than returning early: ONE build must report
+    EVERY bad unit. A phase that abandons the remaining work on the first failure
+    makes each defect cost a full build to find.
+    """
+    records: [BuildUnitOutcome]
+
+impl BuildOutcomeSet:
+    static fn empty() -> BuildOutcomeSet:
+        BuildOutcomeSet(records: [])
+
+    me record(outcome: BuildUnitOutcome):
+        self.records = self.records.push(outcome)
+
+    fn len() -> i64:
+        self.records.len()
+
+    fn has_path(source_path: text) -> bool:
+        for outcome in self.records:
+            if outcome.source_path == source_path:
+                return true
+        false
+
+    fn count_of(kind: BuildOutcomeKind) -> i64:
+        self.paths_in(kind).len()
+
+    # Paths in one category, sorted. Sorting is what makes the summary
+    # byte-identical across runs: units finish in whatever order the host
+    # schedules them, so insertion order is NOT reproducible.
+    fn paths_in(kind: BuildOutcomeKind) -> [text]:
+        val want = build_outcome_kind_label(kind)
+        var found: [text] = []
+        for outcome in self.records:
+            if build_outcome_kind_label(outcome.kind) == want:
+                found = found.push(outcome.source_path)
+        build_outcome_sort_text(found)
+
+    fn ok_count() -> i64:
+        self.count_of(BuildOutcomeKind.OK)
+
+    # Genuine verdicts against the source only — UNVERIFIED categories are
+    # excluded here by design.
+    fn failure_count() -> i64:
+        self.count_of(BuildOutcomeKind.ERROR) + self.count_of(BuildOutcomeKind.CRASHED)
+
+    fn unverified_count() -> i64:
+        self.count_of(BuildOutcomeKind.TERMINATED) + self.count_of(BuildOutcomeKind.TIMEOUT)
+
+    fn not_run_count() -> i64:
+        self.count_of(BuildOutcomeKind.NOT_RUN)
+
+    fn all_ok() -> bool:
+        for outcome in self.records:
+            if not outcome.is_ok():
+                return false
+        true
+
+    # The fail-closed message for the link boundary. Empty when every unit is OK.
+    # Non-OK is non-OK even when UNVERIFIED: there is no artifact to link, and
+    # fabricating one is forbidden. The wording keeps the distinction visible.
+    fn verdict() -> text:
+        if self.all_ok():
+            return ""
+        var parts = ""
+        for kind in build_outcome_kind_order():
+            if build_outcome_is_unverified(kind) or build_outcome_is_failure(kind) or build_outcome_kind_label(kind) == "NOT_RUN":
+                val paths = self.paths_in(kind)
+                if paths.len() > 0:
+                    if parts != "":
+                        parts = parts + "; "
+                    parts = parts + "{build_outcome_kind_label(kind)}: {build_outcome_text_list(paths)}"
+        "build failed: {self.failure_count()} failed, {self.unverified_count()} unverified, {self.not_run_count()} not run, {self.ok_count()} ok of {self.len()} unit(s) — {parts}"
+
+    # Deterministic end-of-build summary naming EVERY non-OK unit with its
+    # category. Returned as text rather than printed so a spec can compare two
+    # runs byte-for-byte.
+    fn summary() -> text:
+        var out = "===== build outcome summary =====\n"
+        for kind in build_outcome_kind_order():
+            val label = build_outcome_kind_label(kind)
+            out = out + "{label}={self.count_of(kind)}\n"
+        for kind in build_outcome_kind_order():
+            if build_outcome_kind_label(kind) == "OK":
+                continue
+            val paths = self.paths_in(kind)
+            if paths.len() > 0:
+                val tag = if build_outcome_is_unverified(kind):
+                    "{build_outcome_kind_label(kind)} (UNVERIFIED — infrastructure, not a compiler verdict)"
+                else:
+                    build_outcome_kind_label(kind)
+                out = out + "{tag}: {paths.len()} unit(s)\n"
+                for path in paths:
+                    out = out + "  - {path}\n"
+        out + "===== end build outcome summary =====\n"
+
+# ============================================================================
+# Small local helpers
+# ============================================================================
+
+# Insertion sort over text. Local rather than imported to keep this module free
+# of dependencies the bootstrap stages might not have loaded yet.
+fn build_outcome_sort_text(items: [text]) -> [text]:
+    var sorted: [text] = []
+    for item in items:
+        var placed: [text] = []
+        var inserted = false
+        for existing in sorted:
+            if not inserted and item < existing:
+                placed = placed.push(item)
+                inserted = true
+            placed = placed.push(existing)
+        if not inserted:
+            placed = placed.push(item)
+        sorted = placed
+    sorted
+
+# `join` is a reserved word in Simple, so comma-separate by hand.
+fn build_outcome_text_list(items: [text]) -> text:
+    var out = ""
+    for item in items:
+        if out != "":
+            out = out + ", "
+        out = out + item
+    out
