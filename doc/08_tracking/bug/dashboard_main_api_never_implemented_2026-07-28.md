@@ -1,7 +1,54 @@
 # `app.dashboard.main` is a 14-line stub — both dashboard modules import an API that was never written
 
-Status: DUPLICATE of dashboard_main_lost_table_model_2026-08-04.md
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: **OPEN (P2)** — tracked under `dashboard_main_lost_table_model_2026-08-04.md`,
+which is ITSELF OPEN. The defect is live and unfixed.
+
+> ~~Status: DUPLICATE of dashboard_main_lost_table_model_2026-08-04.md~~
+> ~~Status re-verified 2026-08-17 by source inspection (triage shard 00).~~
+> **SUPERSEDED 2026-08-17 — FALSE CLOSURE.** The `DUPLICATE` marker above was
+> wrong in effect, not in fact: the row it points at is open, so the tag closed
+> this row while nothing was fixed, making a live defect invisible. The
+> duplicate RELATIONSHIP is genuine and is retained; only the CLOSURE it implied
+> is withdrawn.
+
+## Status correction 2026-08-17 (source inspection only)
+
+**What the status claimed:** closed as a DUPLICATE.
+
+**What was actually verified** (2026-08-17, re-grepped from current working-tree
+source; no compiler, test, or build was run — SOURCE INSPECTION ONLY, and the
+prior status stamps were treated as claims, not evidence):
+
+- `src/app/dashboard/main.spl` is **87 lines** and defines **0** of the required
+  symbols: `grep -c 'DASHBOARD_CACHE_PATH\|TABLE_NAMES\|fn load_table\|fn ensure_dirs'`
+  returns `0`.
+- Two siblings still IMPORT that missing API:
+  - `src/app/dashboard/dashboard_collectors.spl:8` —
+    `use app.dashboard.main.{Table, load_table, load_table_named, header_index, get_field, count_eq, sum_int, count_nonempty, write_table, today_date, itos, DASHBOARD_TABLE_DIR}`
+  - `src/app/dashboard/dashboard_export_runtime.spl:7` — `use app.dashboard.main.{`
+- `doc/08_tracking/bug/dashboard_main_lost_table_model_2026-08-04.md` line 3 reads
+  `Status: OPEN (P2)`.
+
+**Corrected to:** OPEN (P2), duplicate-of relationship retained without closure.
+
+**Ownership:** the underlying fix belongs to the `llm-caret` lane via
+`dashboard_main_lost_table_model_2026-08-04.md`. This edit changed STATUS ONLY —
+no dashboard source was restored or modified here.
+
+### Traps for whoever fixes this later
+
+- **(a) A renamed-away repro proves nothing.** The `ce` repro that used to live
+  in `src/app/office/pptx_export.spl` was RENAMED AWAY — `grep -c '\bce\b'` on
+  that file is now `0`, the identifiers are `pic_end` (`:526`) and `tce`
+  (`:423,424,427,431`). Re-running that file therefore exercises nothing, even
+  though the parser fix itself is real and present at
+  `src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl:487-491`.
+- **(b) Do not cite `3c4e6551b7a` as the `ce`/`Grid` fix.** That commit
+  ("fix(parser): 11 soft keywords could not be used as identifiers") covers
+  `auto bind by examples export into lazy mod move on onto requires skip spawn
+  unwrap use where with` — verified from its own test file
+  `src/compiler_rust/parser/tests/contextual_keyword_identifiers.rs`. Neither
+  `ce` nor `Grid` is in it.
 
 **Date:** 2026-07-28 · **Status:** open · **Class:** NEVER-EXISTED (capability gap)
 **Found:** triage of `scripts/check/check-dangling-references.shs` findings scoped

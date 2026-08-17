@@ -1,6 +1,56 @@
 # `me` (receiver) reported as an unresolved NAME in class methods during stage-4 lowering
 
-**Status:** fixed (residual 20 — see Remaining)
+**Status:** **PARTIAL — fix landed for the dominant shape; 20 `me` errors remain
+UNFIXED and UNINVESTIGATED.** Do not treat this row as closed.
+
+> ~~**Status:** fixed (residual 20 — see Remaining)~~
+> **SUPERSEDED 2026-08-17.** `fixed` contradicted this document's own
+> `## Remaining` section, which states the residual 20 are "Not yet
+> investigated. Follow-up needed." A row with an uninvestigated residual is
+> PARTIAL, not fixed.
+
+## Status correction 2026-08-17 (source inspection only)
+
+**What the status claimed:** `fixed (residual 20 — see Remaining)`.
+
+**What was actually verified** (2026-08-17, by reading this document and current
+source; no compiler, test, or build was run — SOURCE INSPECTION ONLY, and
+existing status stamps were treated as claims, not evidence): the document's own
+body at `## Remaining` (line 101 ff.) says *"20 `me` errors survive — likely a
+different shape (e.g. `me` inside a nested/lambda scope, or a class whose
+receiver type failed to resolve). **Not yet investigated.** Follow-up needed."*
+The `Measured` block reports `unresolved name: me`: 543 → 20, i.e. a **96.3%
+reduction, not elimination**.
+
+**Corrected to: PARTIAL.** Precisely:
+
+- **FIXED:** the dominant shape — `me.field` member access and `me.method()`
+  calls inside `me`-declared class methods, which accounted for 523 of the
+  original 543 errors. Stage-4 side effects also confirmed in-doc: all 1,752 HIR
+  modules lower, zero segfaults, total stage-4 unresolved 2,224 → 1,681.
+- **NOT FIXED:** the residual **20** `unresolved name: me` errors. Shape unknown;
+  hypothesised to be `me` in a nested/lambda scope or a class whose receiver type
+  failed to resolve. **Never investigated** — no root cause, no repro isolated,
+  no owner. The residual count of 20 is itself a stale in-doc figure that has not
+  been re-measured since; re-measuring requires a stage-4 build, which this
+  correction deliberately did not run.
+
+### Traps for whoever fixes this later
+
+- **(a) A renamed-away repro proves nothing.** The `ce` repro in
+  `src/app/office/pptx_export.spl` was RENAMED AWAY — `grep -c '\bce\b'` on that
+  file is now `0`; the identifiers are `pic_end` (`:526`) and `tce`
+  (`:423,424,427,431`). Since the residual `me` errors were all in
+  `src/app/office/*`, re-running office files as a regression check can look
+  green purely because the triggering identifiers were renamed. The parser fix
+  is nonetheless real and present at
+  `src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl:487-491`.
+- **(b) Do not cite `3c4e6551b7a` as the `ce`/`Grid` fix.** That commit
+  ("fix(parser): 11 soft keywords could not be used as identifiers") covers
+  `auto bind by examples export into lazy mod move on onto requires skip spawn
+  unwrap use where with` — verified from its own test file
+  `src/compiler_rust/parser/tests/contextual_keyword_identifiers.rs`. Neither
+  `ce` nor `Grid` is in it.
 **Found:** 2026-07-27 (RISC-V hardening campaign, Lane H — stage-4 full-CLI bootstrap)
 **Area:** HIR lowering (`src/compiler/20.hir/`), bootstrap/stage-4 path
 **Severity:** high — 543 errors; one of the two remaining stage-4 full-CLI blockers
