@@ -29,6 +29,18 @@ length the spec requires, and every reader consumes bytes to match. There is no
 non-ASCII under-declaration gap. This is now pinned by the last scenario in the
 spec above.
 
+**From-source end-to-end proof** (the integration specs cannot see a source
+change — they run a prebuilt binary, as the harness note below records). A single
+framed `initialize` carrying `Content-Type: application/vscode-jsonrpc;
+charset=utf-8` piped into each server:
+
+| Server (run from source) | pre-fix | post-fix |
+|---|---|---|
+| `src/app/lsp_mcp/main.spl` | **0** framed replies | 1 |
+| `.../t32_lsp_mcp/main.spl` | **0** framed replies | 1 |
+
+Both were silently dropping every real VS Code message.
+
 D and E remain out of scope for the reasons already recorded.
 
 ## Triage 2026-08-17 — OPEN as designed (record, not a defect to close)
