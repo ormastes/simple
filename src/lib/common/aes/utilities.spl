@@ -6,6 +6,27 @@
 # Import dependencies (circular - types needs utilities for state_get)
 use std.common.aes.types
 
+# OS CSPRNG. Rust interpreter path: rand::rngs::OsRng (panics rather than
+# degrading on entropy failure). Native path: src/runtime/runtime.c reads
+# /dev/urandom. Backs generate_aes_key / generate_iv / generate_nonce below --
+# do NOT reroute these through std.common.random_pure, which is an LCG that
+# mirrors the same names.
+extern fn rt_random_i64() -> i64
+
+# Draw `count` uniformly-random bytes (0-255) from the OS CSPRNG.
+fn csprng_bytes(count: i64) -> list:
+    var out = []
+    var i = 0
+    while i < count:
+        # One CSPRNG draw per byte; take the low byte, normalising the sign so
+        # the result is exactly (value mod 256) with no modulo bias.
+        var byte_val = rt_random_i64() % 256
+        if byte_val < 0:
+            byte_val = byte_val + 256
+        out.append(byte_val)
+        i = i + 1
+    out
+
 # =============================================================================
 # BITWISE AND BYTE OPERATIONS
 # =============================================================================
@@ -268,39 +289,22 @@ fn generate_aes_key(size: i64) -> list:
         # Default to AES-128
         return generate_aes_key(16)
 
-    # Simple pseudo-random generation (NOT cryptographically secure)
-    # In production, use secure random number generator
-    var key = []
-    var seed = 42
-    var i = 0
+    csprng_bytes(size)
 
-    while i < size:
-        # Linear congruential generator
-        seed = (seed * 1103515245 + 12345) % 2147483648
-        val byte = seed % 256
-        key.append(byte)
-        i = i + 1
-
-    key
-
-# Generate random IV (16 bytes)
+# Generate a random IV (16 bytes) from the OS CSPRNG.
+#
+# An IV/nonce must be unpredictable and, under CTR/GCM, never repeated.
+# A previous revision expanded the CONSTANT seed 123 through an LCG, so this
+# returned the identical 16 bytes on every call in every process. Under
+# CTR/GCM that is a catastrophic keystream reuse (it leaks
+# plaintext_A XOR plaintext_B outright); under CBC it leaks first-block
+# equality. See the note on generate_iv_from_seed below.
 fn generate_iv() -> list:
-    var iv = []
-    var seed = 123
-    var i = 0
-
-    while i < 16:
-        # Linear congruential generator
-        seed = (seed * 1103515245 + 12345) % 2147483648
-        val byte = seed % 256
-        iv.append(byte)
-        i = i + 1
-
-    iv
+    csprng_bytes(16)
 
 # Generate random nonce for CTR mode (16 bytes)
 fn generate_nonce() -> list:
-    generate_iv()
+    csprng_bytes(16)
 
 # DEPRECATED — NOT CRYPTOGRAPHICALLY SUITABLE. Do not use this for a cipher IV
 # or nonce.
