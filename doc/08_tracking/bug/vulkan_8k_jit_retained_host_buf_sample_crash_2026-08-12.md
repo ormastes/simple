@@ -140,3 +140,17 @@ not attempted.
 **Correct classification: capacity-gated re-verification of an already-landed fix.
 Not hardware-gated.** Any future sweep that re-defers this as "needs a Vulkan GPU"
 is repeating an error that has now been made twice.
+
+## 2026-08-17 host-fixable evidence boundary
+
+The Engine2D backend now exposes `sample_host_mirror(indices)` so evidence
+sampling resolves and indexes `host_buf` inside the concrete physical
+`VulkanBackend` owner. Invalid indices fail closed without partial samples.
+The adjacent strict-JIT fixture models the exact full-width 64-row strided
+mirror update for 210 mutations and samples first/damaged/last pixels through
+the same owner-local shape. This supplements the earlier generic large-array
+negative reduction and directly guards the collision/mirror boundary.
+
+This Darwin ARM host enumerates Apple M4 through MoltenVK, not lavapipe. The
+focused owner and strict-JIT evidence can run here, but no 8K lavapipe or NVIDIA
+receipt is claimed; the full 7680x4320 capacity rerun remains pending.
