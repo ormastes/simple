@@ -1,0 +1,52 @@
+"""
+Reproducer: a tier-less `use std.<path>` that collides with a ROOT
+`src/lib/<name>/` module was never flagged at all.
+
+`_resolve_module_path_uncached` tries `src/lib/<path>` (step 3) BEFORE the
+lib/*/ tier search (step 4), so `use std.js.types` lands on
+`src/lib/js/types.spl` deterministically and shadows
+`src/lib/common/js/types.spl` from every importer. The stage-1 multiplicity
+map walked only the five tier directories, so this class produced a stable
+WRONG symbol with no diagnostic whatsoever. See
+doc/08_tracking/bug/tierless_std_import_ambiguity_resolves_by_registration_order_2026-07-29.md
+(narrowing dated 2026-08-01).
+"""
+
+use std.spec.*
+use compiler.loader.module_resolver.types.{ModuleResolver, ModulePath, moduleresolver_new}
+use compiler.loader.module_resolver.resolution
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_set(key: text, value_str: text) -> bool
+
+val FIXTURE = "/tmp/simple_root_lib_shadow_fixture"
+
+fn setup_fixture():
+    # `js/types.spl` exists BOTH at the lib root and under common/.
+    # `solo/only.spl` exists only under common/ (control).
+    val sh = "rm -rf " + FIXTURE + " && mkdir -p " + FIXTURE + "/src/lib/js " + FIXTURE + "/src/lib/common/js " + FIXTURE + "/src/lib/common/solo && printf 'fn root_js() -> i64:\\n    1\\n' > " + FIXTURE + "/src/lib/js/types.spl && printf 'fn common_js() -> i64:\\n    2\\n' > " + FIXTURE + "/src/lib/common/js/types.spl && printf 'fn solo_fn() -> i64:\\n    3\\n' > " + FIXTURE + "/src/lib/common/solo/only.spl"
+    rt_process_run("/bin/sh", ["-c", sh])
+
+describe "root src/lib/<name>/ shadowing is flagged":
+    it "warns when a tier-less path also exists at the lib root":
+        setup_fixture()
+        rt_env_set("SIMPLE_AMBIGUOUS_IMPORT_WARN", "1")
+        var resolver = moduleresolver_new(FIXTURE, FIXTURE + "/src")
+        val lib_dir = FIXTURE + "/src/lib"
+        resolver.maybe_warn_tier_ambiguity(lib_dir, ["js", "types"], FIXTURE + "/src/main.spl")
+        expect(resolver.tier_warn_count).to_equal(1)
+
+    it "records the lib root as a distinct source in the multiplicity map":
+        setup_fixture()
+        var resolver = moduleresolver_new(FIXTURE, FIXTURE + "/src")
+        resolver.build_tier_multiplicity(FIXTURE + "/src/lib")
+        expect(resolver.tier_multiplicity["js.types"].len()).to_equal(2)
+        expect(resolver.tier_multiplicity["js.types"]).to_contain("<lib-root>")
+        expect(resolver.tier_multiplicity["js.types"]).to_contain("common")
+
+    it "does not warn for a path that exists in only one place":
+        setup_fixture()
+        rt_env_set("SIMPLE_AMBIGUOUS_IMPORT_WARN", "1")
+        var resolver = moduleresolver_new(FIXTURE, FIXTURE + "/src")
+        resolver.maybe_warn_tier_ambiguity(FIXTURE + "/src/lib", ["solo", "only"], FIXTURE + "/src/main.spl")
+        expect(resolver.tier_warn_count).to_equal(0)

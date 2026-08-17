@@ -1,0 +1,56 @@
+# Reproducing spec for
+# doc/08_tracking/bug/trait_conformance_check_ignores_arity_2026-08-04.md
+#
+# Arity is already compared by ImplBlock.validate_methods. Parameter TYPES were
+# never compared, so `fn f(a: u64)` declared by a trait and `fn f(a: text)`
+# defined by the impl conformed silently, and every call through the trait
+# passed a wrong-typed value with no diagnostic.
+#
+# The comparison is deliberately CONSERVATIVE: it fires only when BOTH sides
+# carry a concrete, resolved, non-generic primitive type. Generic/`Self`/
+# associated/named/inferred/absent annotations are never reported.
+
+use compiler.traits.trait_impl.{param_type_conflict}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.frontend.core.lexer.*
+use std.io_runtime.{file_read}
+
+fn ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn u64_ty() -> HirType: ty(HirTypeKind.Int(bits: 64, signed: false))
+fn i64_ty() -> HirType: ty(HirTypeKind.Int(bits: 64, signed: true))
+fn i32_ty() -> HirType: ty(HirTypeKind.Int(bits: 32, signed: true))
+fn f64_ty() -> HirType: ty(HirTypeKind.Float(bits: 64))
+fn f32_ty() -> HirType: ty(HirTypeKind.Float(bits: 32))
+fn text_ty() -> HirType: ty(HirTypeKind.Str)
+fn bool_ty() -> HirType: ty(HirTypeKind.Bool)
+
+describe "trait conformance compares parameter types":
+
+    it "flags a trait u64 parameter implemented as text":
+        expect(param_type_conflict(u64_ty(), text_ty())).to_be_true()
+
+    it "flags signedness drift on the same width":
+        expect(param_type_conflict(u64_ty(), i64_ty())).to_be_true()
+
+    it "flags integer width drift":
+        expect(param_type_conflict(i64_ty(), i32_ty())).to_be_true()
+
+    it "flags float width drift":
+        expect(param_type_conflict(f64_ty(), f32_ty())).to_be_true()
+
+    it "flags bool implemented as text":
+        expect(param_type_conflict(bool_ty(), text_ty())).to_be_true()
+
+    it "accepts identical concrete parameter types":
+        expect(param_type_conflict(u64_ty(), u64_ty())).to_be_false()
+        expect(param_type_conflict(text_ty(), text_ty())).to_be_false()
+        expect(param_type_conflict(f64_ty(), f64_ty())).to_be_false()
+
+    it "wires the comparison into validate_methods":
+        val source = file_read("src/compiler/25.traits/trait_impl.spl")
+        expect(source).to_contain("fn param_type_conflict(")
+        expect(source).to_contain("param_type_conflict(")
+        # the arity check must survive alongside the new type check
+        expect(source).to_contain("provided.params.len() != method.arity()")

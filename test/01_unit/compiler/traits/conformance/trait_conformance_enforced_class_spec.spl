@@ -1,0 +1,86 @@
+# Trait conformance is enforced ON EVERY ENGINE — similar-problem detection spec
+#
+# The filed bug was "conformance matches by method name only". Measuring the
+# current tree 2026-08-17 showed the residual defect is a different shape, and
+# the reproducing spec alone would miss it:
+#
+#   * The conformance check is real and correct, but it lives in
+#     src/compiler_rust/compiler/src/interpreter_eval.rs:1097-1160 — the
+#     tree-walk INTERPRETER's impl-registration path.
+#   * `bin/simple run` uses the Cranelift JIT, which has no counterpart check.
+#     Measured A/B, one binary, one tree, one toggle:
+#         SIMPLE_EXECUTION_MODE=interpreter -> rc=1, correct diagnostic
+#         SIMPLE_EXECUTION_MODE=jit         -> rc=0, the bad impl RUNS
+#   * `src/compiler/25.traits/trait_impl.spl::validate_methods` is the
+#     pure-Simple checker and `grep -rn validate_methods src/compiler src/app`
+#     returns exactly one line: its own definition. Zero callers.
+#
+# So the class is "a semantic conformance obligation is enforced on one engine
+# and silently skipped on another". This spec pins BOTH violation axes (missing
+# required method, wrong arity) against BOTH engines, so a fix that lands on one
+# engine only cannot turn it green.
+#
+# THE ENGINE MUST BE PINNED EXPLICITLY. `bin/simple test` exports interpreter
+# mode to its children; an unpinned subprocess measures the interpreter twice
+# and reports a false green. That is exactly how this defect stayed invisible.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val WRONG_ARITY: text = "test/01_unit/compiler/traits/conformance/probe_wrong_arity.spl"
+val MISSING_METHOD: text = "test/01_unit/compiler/traits/conformance/probe_missing_method.spl"
+val CONFORMING: text = "test/01_unit/compiler/traits/conformance/probe_conforming.spl"
+
+fn compile_fixture(path: text, mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + path + " 2>&1; echo EXIT=" + "$?"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "every trait conformance obligation is checked on every engine":
+    it "rejects an impl that omits a required trait method, on the interpreter":
+        step("Fixture provides greet but not the required farewell")
+        val out = compile_fixture(MISSING_METHOD, "interpreter")
+
+        step("The compiler must name the unimplemented method")
+        expect(out).to_contain("farewell")
+
+        step("The ill-formed program must not run")
+        expect(out).to_not_contain("FIXTURE_RAN_MISSING_METHOD")
+        expect(out).to_not_contain("EXIT=0")
+
+    it "rejects an impl that omits a required trait method, on the JIT":
+        # EXPECTED RED as of 2026-08-17 — see the header. No JIT-path check exists.
+        step("Same fixture, engine pinned to jit")
+        val out = compile_fixture(MISSING_METHOD, "jit")
+
+        expect(out).to_not_contain("FIXTURE_RAN_MISSING_METHOD")
+        expect(out).to_not_contain("EXIT=0")
+
+    it "rejects an impl whose method has the wrong parameter count, on the interpreter":
+        step("The other axis of the same class — a name match is not a signature match")
+        val out = compile_fixture(WRONG_ARITY, "interpreter")
+
+        expect(out).to_not_contain("FIXTURE_RAN_WRONG_ARITY")
+        expect(out).to_not_contain("EXIT=0")
+
+    it "rejects an impl whose method has the wrong parameter count, on the JIT":
+        # EXPECTED RED as of 2026-08-17 — see the header.
+        step("Both axes must hold on both engines, or the obligation is not enforced")
+        val out = compile_fixture(WRONG_ARITY, "jit")
+
+        expect(out).to_not_contain("FIXTURE_RAN_WRONG_ARITY")
+        expect(out).to_not_contain("EXIT=0")
+
+    it "accepts a fully conforming impl on both engines":
+        step("Control arm: enforcement must be selective, not blanket rejection")
+        val interp = compile_fixture(CONFORMING, "interpreter")
+        expect(interp).to_contain("FIXTURE_RAN_CONFORMING")
+        expect(interp).to_contain("EXIT=0")
+
+        val jit = compile_fixture(CONFORMING, "jit")
+        expect(jit).to_contain("FIXTURE_RAN_CONFORMING")
+        expect(jit).to_contain("EXIT=0")

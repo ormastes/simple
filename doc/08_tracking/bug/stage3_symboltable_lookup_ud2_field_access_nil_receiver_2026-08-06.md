@@ -431,3 +431,63 @@ full stage3 self-compile, and (b) if time permits, add a one-shot
 actually hit during a real self-compile (if it's never hit, the true crash
 cause was probably candidate 3 above — a different code path — and this fix,
 while still correct, would not be why the crash stopped).
+
+## Update (2026-08-17): the landed guard covered 2 of 5 bracket reads — the other 3 are now guarded too
+
+Re-classified by CONTENT. The 2026-08-07 `next_scope_id` range check IS present
+in current source: `src/compiler/20.hir/hir_types.spl:432` (`lookup`) and `:461`
+(`lookup_or_invalid`), with both "DO NOT re-add `rt_dict_contains`" comments
+intact. The invariant it relies on is sound: `new()` and `reset_module()` both
+insert scope 0, and nothing ever removes a key from `self.scopes`.
+
+**But the fix was incomplete, and the gap is the same defect, not a new one.**
+At committed HEAD, `git show HEAD:src/compiler/20.hir/hir_types.spl | grep -n 'self.scopes\['`
+lists **five** reads keyed by a scope id:
+
+```
+292:            val scope = self.scopes[self.current_scope.id]   # declare(), type-symbol path
+321:        var scope = self.scopes[self.current_scope.id]       # declare(), all symbols
+325:        self.scopes[self.current_scope.id] = scope           # declare(), write-back
+434:            val scope = self.scopes[scope_id.id]             # lookup()          GUARDED
+463:            val scope = self.scopes[scope_id.id]             # lookup_or_invalid GUARDED
+587:        val scope = self.scopes[self.current_scope.id]       # pop_scope()
+```
+
+`declare` and `pop_scope` were left bare. They are reachable with precisely the
+corrupted `current_scope` this doc's own root-cause candidate #1 postulates
+("`self.current_scope` reads back corrupted/stale under native codegen"), and a
+missing struct-valued-Dict bracket read yields a nil receiver whose first field
+access is the same fatal `ud2`. Guarding `lookup` alone does not close the class.
+
+### Changed (this session)
+
+- `declare()` — same Dict-free range check, recovering to the always-present
+  root scope 0 rather than breaking, so the symbol is still registered and
+  still findable (a guard that merely swallowed the write would be worse than
+  the crash).
+- `pop_scope()` — same check; there is no parent to walk to from a bogus id, so
+  it resets to root and returns.
+- `push_scope()` — **reordered** to insert `self.scopes[raw_id]` BEFORE
+  advancing `next_scope_id = raw_id + 1`. It previously advanced first, which
+  made the guards' own comments literally false ("always inserting ... before
+  advancing") and left a window in which `next_scope_id` admitted a key
+  `self.scopes` did not yet hold — i.e. every range guard in the file silently
+  degraded to the unguarded, trapping behaviour inside that window.
+
+No `rt_dict_contains`-based guard was reintroduced anywhere.
+
+### Verification
+
+Interpreter only, and that limitation is unchanged from the 2026-08-07 update:
+`bin/simple` here is the Rust seed (banner + mtime 2026-08-16 22:59), and
+`bootstrap/stage3/simple` is a 3.4 MB `simple-bootstrap` stub that SIGSEGVs
+(rc 139, core dumped) even on `fn main(): print("hi")` — the control fails, so
+it cannot witness a native-codegen defect. **The native `ud2` is still not
+proven fixed, and nothing here should be read as claiming it is.**
+
+Detection spec added:
+`test/01_unit/compiler/hir/symbol_table_scope_bracket_read_class_spec.spl` —
+asserts the invariant across entry points (`declare` non-type path, `declare`
+type/first-write-wins path, `pop_scope` corrupted, `pop_scope` valid-pop
+non-regression, the `push_scope` insert-before-advance ordering, and the
+one-past-the-end id), so re-guarding a single function cannot make it pass.

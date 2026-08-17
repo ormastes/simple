@@ -1,0 +1,88 @@
+"""
+Similar-problem detection: the import-ambiguity multiplicity map must cover
+EVERY directory the resolver actually searches, in every module shape.
+
+The defect class is not "root src/lib/js was forgotten" — it is that the
+diagnostic's world model was narrower than the resolver's search order, so a
+whole search step produced silent, stable, wrong-symbol selection. This spec
+generalizes across module shapes (bare .spl file, nested path, package
+directory with __init__.spl), checks the real src/lib tree, and checks the
+negative direction (tier directories must not leak in as root modules, which
+would manufacture phantom ambiguity).
+"""
+
+use std.spec.*
+use compiler.loader.module_resolver.types.{ModuleResolver, ModulePath, moduleresolver_new}
+use compiler.loader.module_resolver.resolution
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val FX = "/tmp/simple_import_shadow_coverage_fixture"
+val RESOLUTION_SRC = "src/compiler/99.loader/module_resolver/resolution.spl"
+
+fn setup_fixture():
+    # Three collision SHAPES, each duplicated between the lib root and a tier:
+    #   alpha.spl                 - bare file module
+    #   deep/inner/leaf.spl       - nested path
+    #   pkg/__init__.spl          - package directory module
+    # Plus one root-only control (lonely.spl) that must never warn.
+    var sh = "rm -rf " + FX
+    sh = sh + " && mkdir -p " + FX + "/src/lib/deep/inner " + FX + "/src/lib/pkg " + FX + "/src/lib/common/deep/inner " + FX + "/src/lib/common/pkg"
+    sh = sh + " && printf 'fn a_root() -> i64:\\n    1\\n' > " + FX + "/src/lib/alpha.spl"
+    sh = sh + " && printf 'fn a_common() -> i64:\\n    2\\n' > " + FX + "/src/lib/common/alpha.spl"
+    sh = sh + " && printf 'fn l_root() -> i64:\\n    3\\n' > " + FX + "/src/lib/deep/inner/leaf.spl"
+    sh = sh + " && printf 'fn l_common() -> i64:\\n    4\\n' > " + FX + "/src/lib/common/deep/inner/leaf.spl"
+    sh = sh + " && printf 'fn p_root() -> i64:\\n    5\\n' > " + FX + "/src/lib/pkg/__init__.spl"
+    sh = sh + " && printf 'fn p_common() -> i64:\\n    6\\n' > " + FX + "/src/lib/common/pkg/__init__.spl"
+    sh = sh + " && printf 'fn lonely() -> i64:\\n    7\\n' > " + FX + "/src/lib/lonely.spl"
+    rt_process_run("/bin/sh", ["-c", sh])
+
+fn fixture_map() -> ModuleResolver:
+    setup_fixture()
+    var r = moduleresolver_new(FX, FX + "/src")
+    r.build_tier_multiplicity(FX + "/src/lib")
+    r
+
+fn _scan(pattern: text) -> text:
+    val cmd = "rg -n '" + pattern + "' " + RESOLUTION_SRC + " || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+describe "ambiguity map covers every searched location and module shape":
+    it "flags a bare root .spl file colliding with a tier file":
+        var r = fixture_map()
+        expect(r.tier_multiplicity["alpha"].len()).to_equal(2)
+        expect(r.tier_multiplicity["alpha"]).to_contain("<lib-root>")
+
+    it "flags a nested root path colliding with a tier path":
+        var r = fixture_map()
+        expect(r.tier_multiplicity["deep.inner.leaf"].len()).to_equal(2)
+        expect(r.tier_multiplicity["deep.inner.leaf"]).to_contain("<lib-root>")
+
+    it "flags a root package directory colliding with a tier package":
+        var r = fixture_map()
+        expect(r.tier_multiplicity["pkg"].len()).to_equal(2)
+        expect(r.tier_multiplicity["pkg"]).to_contain("<lib-root>")
+
+    it "does not manufacture ambiguity for a root-only module":
+        var r = fixture_map()
+        expect(r.tier_multiplicity["lonely"].len()).to_equal(1)
+
+    it "does not re-register tier directories as root modules":
+        # A tier dir must be walked as a tier, never also as `<lib-root>`;
+        # otherwise every tier module would look self-ambiguous.
+        var r = fixture_map()
+        expect(r.tier_multiplicity.contains_key("common.alpha")).to_equal(false)
+
+    it "flags a real collision in the actual src/lib tree":
+        # src/lib/text.spl and src/lib/common/text.spl both exist.
+        var r = moduleresolver_new(".", "src")
+        r.build_tier_multiplicity("src/lib")
+        expect(r.tier_multiplicity["text"].len() >= 2).to_equal(true)
+        expect(r.tier_multiplicity["text"]).to_contain("<lib-root>")
+
+    it "the direct src/lib/<path> resolve step is wired to the diagnostic":
+        # The step that produced the silent case must call the warning too,
+        # non-fatally, on its Ok path.
+        expect(_scan("self\\.maybe_warn_tier_ambiguity\\(root_lib_dir, inner_segments, from_file\\)").len() > 0).to_equal(true)
+        expect(_scan("fn collect_lib_root_modules\\(lib_dir: text, tier_names: \\[text\\]\\):").len() > 0).to_equal(true)

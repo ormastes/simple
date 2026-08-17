@@ -288,6 +288,21 @@ impl SymbolTable:
             case SymbolKind.Trait: true
             case _: false
 
+        # Same Dict-free `next_scope_id` range check `lookup()` uses (see its
+        # long comment): `self.scopes` is append-only with scope 0 always
+        # present (both `new()` and `reset_module()` insert it), so an
+        # out-of-range `current_scope` can only come from a corrupted/stale
+        # read of this scalar field. Without this, the bracket reads below
+        # trap ud2 "field access on nil receiver" exactly like `lookup()` did
+        # -- the guard landed there covered only 2 of the 5 bracket reads of
+        # `self.scopes` in this file. Recovering to the root scope is the
+        # behaviour-preserving repair: in every correct execution the guard
+        # is a no-op, and scope 0 is the scope a flat/bootstrap symbol table
+        # is supposed to be in anyway.
+        # doc/08_tracking/bug/stage3_symboltable_lookup_ud2_field_access_nil_receiver_2026-08-06.md
+        if self.current_scope.id < 0 or self.current_scope.id >= self.next_scope_id:
+            self.current_scope = ScopeId(id: 0)
+
         if is_type_symbol:
             val scope = self.scopes[self.current_scope.id]
             val existing = scope.symbols.get(name)
@@ -570,20 +585,34 @@ impl SymbolTable:
         """Push a new scope."""
         val raw_id = self.next_scope_id
         val id = ScopeId(id: raw_id)
-        self.next_scope_id = raw_id + 1
 
+        # Insert BEFORE advancing `next_scope_id`. The range guards in
+        # `lookup`/`lookup_or_invalid`/`declare`/`pop_scope` treat
+        # `0 <= id < next_scope_id` as an EXACT substitute for
+        # `id in self.scopes`, and that identity only holds if the counter
+        # never leads the dict. (This used to advance first, which made the
+        # guards' own comments false and left a window where `next_scope_id`
+        # admitted a key `self.scopes` did not yet have.)
         self.scopes[raw_id] = Scope(
             id: id,
             parent: Some(self.current_scope),
             kind: kind,
             symbols: {}
         )
+        self.next_scope_id = raw_id + 1
 
         self.current_scope = id
         id
 
     me pop_scope():
         """Pop current scope."""
+        # Same Dict-free range check as `lookup()`/`declare()`. An
+        # out-of-range `current_scope` here would trap ud2 "field access on
+        # nil receiver" on the bracket read below; there is no parent to walk
+        # to in that state, so reset to the always-present root scope.
+        if self.current_scope.id < 0 or self.current_scope.id >= self.next_scope_id:
+            self.current_scope = ScopeId(id: 0)
+            return
         val scope = self.scopes[self.current_scope.id]
         match scope.parent:
             case Some(parent):

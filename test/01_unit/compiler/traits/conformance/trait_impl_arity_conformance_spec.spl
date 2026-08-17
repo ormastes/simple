@@ -1,0 +1,83 @@
+# Trait impl arity — REPRODUCING spec
+#
+# doc/08_tracking/bug/trait_conformance_check_ignores_arity_2026-08-04.md
+#
+# An `impl` whose method takes a different NUMBER of parameters than the trait
+# declares is accepted silently. Every call dispatched through the trait then
+# passes the wrong argument count, and the program runs to completion with a
+# wrong answer and exit 0 — the silent-wrong-result class.
+#
+# WHY A SUBPROCESS. The defect is a missing COMPILE-TIME diagnostic. A spec body
+# runs interpreted inside an already-compiled process and can never observe
+# whether a *separate* ill-formed file was rejected. The oracle is therefore the
+# sibling fixture `probe_wrong_arity.spl`, compiled in its own subprocess, with
+# the exit code read from the command itself (never through a pipe).
+#
+# Root cause as measured 2026-08-17: `ImplBlock.validate_methods`
+# (src/compiler/25.traits/trait_impl.spl:120) matched on method NAME only, and
+# — more decisively — has ZERO callers anywhere in src/compiler, as does the
+# `TraitError.MissingMethod` variant, which is never constructed. The arity
+# comparison is now implemented in validate_methods; wiring conformance
+# validation into the semantic pass is still outstanding, so this spec is
+# expected RED until that lands.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val WRONG_ARITY: text = "test/01_unit/compiler/traits/conformance/probe_wrong_arity.spl"
+val CONFORMING: text = "test/01_unit/compiler/traits/conformance/probe_conforming.spl"
+
+fn compile_fixture(path: text, mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the default
+    # is whatever bin/simple currently resolves to, which is what ships.
+    #
+    # SIMPLE_EXECUTION_MODE is pinned EXPLICITLY and must never be left to
+    # inheritance. The test runner exports interpreter mode to its children, so
+    # an unpinned subprocess silently measures the interpreter twice and reports
+    # green while the JIT lane is broken — this spec did exactly that before the
+    # engine was pinned.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + path + " 2>&1; echo EXIT=" + "$?"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "an impl method must match the trait's parameter count":
+    it "rejects an impl whose method takes fewer parameters than the trait declares, on the interpreter":
+        step("Compile the wrong-arity fixture in its own subprocess, engine pinned to interpreter")
+        val out = compile_fixture(WRONG_ARITY, "interpreter")
+
+        step("The compiler must report a conformance error naming the method")
+        expect(out).to_contain("greet")
+
+        step("The ill-formed program must NOT reach its body — reaching it is the silent wrong result")
+        expect(out).to_not_contain("FIXTURE_RAN_WRONG_ARITY")
+
+        step("A rejected compile must exit non-zero")
+        expect(out).to_not_contain("EXIT=0")
+
+    it "rejects the same impl on the JIT — the engine ordinary programs actually run on":
+        # EXPECTED RED as of 2026-08-17. Measured A/B, one binary, one tree, one
+        # toggle: SIMPLE_EXECUTION_MODE=interpreter rejects (rc=1, correct
+        # diagnostic); =jit accepts and RUNS the body (rc=0). The conformance
+        # check lives in interpreter_eval.rs and has no JIT-path counterpart, so
+        # `bin/simple run` — the default engine — silently executes a
+        # non-conforming impl. Do not weaken this example to make it green.
+        step("Same fixture, same binary, engine pinned to jit")
+        val out = compile_fixture(WRONG_ARITY, "jit")
+
+        step("The JIT must reject it exactly as the interpreter does")
+        expect(out).to_not_contain("FIXTURE_RAN_WRONG_ARITY")
+        expect(out).to_not_contain("EXIT=0")
+
+    it "still accepts a correct impl on both engines — the control arm":
+        step("A compiler that rejects everything must not pass this spec")
+        val interp = compile_fixture(CONFORMING, "interpreter")
+        expect(interp).to_contain("FIXTURE_RAN_CONFORMING")
+        expect(interp).to_contain("EXIT=0")
+
+        val jit = compile_fixture(CONFORMING, "jit")
+        expect(jit).to_contain("FIXTURE_RAN_CONFORMING")
+        expect(jit).to_contain("EXIT=0")

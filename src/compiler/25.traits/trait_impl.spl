@@ -4,7 +4,7 @@
 # Split from traits.spl for modularity.
 
 use compiler.hir.hir_types.{HirSymbol, HirType, HirTypeKind}
-use compiler.hir.hir_definitions.{HirFunction}
+use compiler.hir.hir_definitions.{HirFunction, HirParam}
 use compiler.frontend.core.lexer.*
 use compiler.traits.trait_def.{TraitBound, TraitDef, AssocTypeDef, MethodSignature}
 
@@ -129,6 +129,12 @@ impl ImplBlock:
         Checks:
         1. All required (no default) trait methods must be in the impl
         2. Default methods are optional -- impl can override or inherit them
+        3. A provided method must accept the same NUMBER of parameters as the
+           trait declares. Matching on name alone silently accepted an impl
+           with the wrong arity, and every call through the trait then passed
+           the wrong argument count -- a wrong answer with no diagnostic.
+           See doc/08_tracking/bug/trait_conformance_check_ignores_arity_2026-08-04.md
+           (parameter TYPE comparison is still open; arity is checked here).
         """
         var errors: [text] = []
 
@@ -138,6 +144,30 @@ impl ImplBlock:
                 errors = errors.push(
                     "missing required method '{method.name}' in impl of '{trait_def.name}' for type"
                 )
+
+        # Arity check applies to every trait method the impl actually provides,
+        # including overridden defaults -- not just the required ones.
+        for method in trait_def.methods:
+            if val provided = self.get_method(method.name):
+                if provided.params.len() != method.arity():
+                    errors = errors.push(
+                        "method '{method.name}' in impl of '{trait_def.name}' takes {provided.params.len()} parameter(s) but the trait declares {method.arity()}"
+                    )
+                else:
+                    # Parameter TYPE comparison. Deliberately conservative: only
+                    # a pair of concrete, resolved, non-generic PRIMITIVE types
+                    # can ever conflict (see param_type_conflict). Generic
+                    # parameters, `Self`, associated-type projections, named
+                    # user types, `Any`, inference variables and absent
+                    # annotations are all skipped, so substitution never
+                    # manufactures a false report.
+                    val impl_params = non_receiver_params(provided.params)
+                    if impl_params.len() == method.params.len():
+                        for i in 0..impl_params.len():
+                            if param_type_conflict(method.params[i], impl_params[i].type_):
+                                errors = errors.push(
+                                    "method '{method.name}' in impl of '{trait_def.name}' declares parameter {i} as {concrete_prim_tag(impl_params[i].type_)} but the trait declares {concrete_prim_tag(method.params[i])}"
+                                )
 
         errors
 
@@ -181,6 +211,75 @@ impl ImplBlock:
                 )
 
         errors
+
+# ============================================================================
+# Conservative parameter-type conformance
+#
+# doc/08_tracking/bug/trait_conformance_check_ignores_arity_2026-08-04.md
+#
+# Trait conformance matched impl methods by NAME, then (since the arity was
+# armed) by parameter COUNT. Parameter TYPES were still never compared, so a
+# trait declaring `f(a: u64)` and an impl defining `f(a: text)` conformed
+# silently and every call through the trait handed over a wrong-typed value.
+#
+# Exact structural comparison cannot be used here: the trait side is written
+# against type parameters, `Self` and associated-type projections, while the
+# impl side carries them substituted. Comparing those would report the whole
+# tree as broken. So only a pair of CONCRETE, RESOLVED, NON-GENERIC PRIMITIVE
+# types can conflict. Everything else -- named user types (whose SymbolIds are
+# not comparable across the two declaration sites), type parameters, `Self`,
+# projections, `Any`, `Infer`, `Error`, and absent/inferred annotations --
+# yields no tag and is therefore never reported.
+# ============================================================================
+
+fn concrete_prim_tag(ty: HirType) -> text:
+    """Canonical name of a concrete primitive type, or "" if not one.
+
+    An empty tag means "not comparable" and suppresses any conflict report.
+    """
+    match ty.kind:
+        case Int(bits, signed):
+            if signed:
+                "i{bits}"
+            else:
+                "u{bits}"
+        case Float(bits):
+            "f{bits}"
+        case Bool:
+            "bool"
+        case Char:
+            "char"
+        case Str:
+            "text"
+        case Unit:
+            "unit"
+        case _:
+            ""
+
+fn param_type_conflict(declared: HirType, provided: HirType) -> bool:
+    """True only when both sides are concrete primitives that disagree."""
+    val a = concrete_prim_tag(declared)
+    if a == "":
+        return false
+    val b = concrete_prim_tag(provided)
+    if b == "":
+        return false
+    a != b
+
+fn non_receiver_params(params: [HirParam]) -> [HirParam]:
+    """Drop `self`/`me` receiver parameters, at any position.
+
+    The two sides are built by different paths and are not symmetric: an impl
+    method may carry an injected receiver the trait signature never wrote.
+    Filtering by name (rather than stripping a leading element) mirrors
+    `is_receiver` in scripts/check/check-trait-arity.spl, the reference
+    implementation.
+    """
+    var out: [HirParam] = []
+    for p in params:
+        if p.name != "self" and p.name != "me":
+            out = out.push(p)
+    out
 
 # ============================================================================
 # Generic Type Matching (Phase B.3.1)

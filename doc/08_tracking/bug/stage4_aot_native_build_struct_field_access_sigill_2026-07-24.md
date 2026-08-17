@@ -102,3 +102,68 @@ both desugared fields explicitly for structs and classes. No consumer-side nil
 default was added because that would hide malformed explicit ABI metadata.
 Source contract: 5/5 passing. Rebuilt positional execution is pending the next
 bounded cycle.
+
+## Update (2026-08-17): both cited nil-deref candidates are GONE from current source; native lane still unverifiable
+
+Classified by CONTENT (grep of current source), not commit ancestry.
+
+**Crash site A — `TypeLayout.compute_struct_layout` via `lower_struct_type`
+(the `LayoutAttr?`-in-value-position nil): FIXED in-tree.**
+`src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl:657,675` (and
+`:753` for structs) now reads
+
+```
+val layout: LayoutAttr = parse_layout_attrs(class_attributes)
+val has_layout = layout.layout_kind != TypeLayoutKind.Simple or layout.has_explicit_align or layout.is_packed
+```
+
+— a plain non-optional `LayoutAttr` value with the presence bit computed
+directly, exactly what this doc's own closing paragraph prescribed.
+`hir_definitions.spl:154,185` declares `layout_attr: LayoutAttr` (not
+`LayoutAttr?`), so no consumer can receive a true flag with a nil payload.
+All four `35.semantics` consumers (`effect_validation.spl:78`,
+`layer_eq_validation.spl:77`, `lint/sffi_lint.spl:298,613`) read
+`.layout_attr` only under `if ...has_layout_attr:` and are safe as a result.
+
+**Crash site B — the `expressions.spl` Field arm (L401 `get_symbol_type(...).unwrap().kind`,
+L409 `current_method_self_type.unwrap().kind`): those `.unwrap()`s no longer
+exist.** `src/compiler/20.hir/hir_lowering/expressions.spl` now contains **one**
+`.unwrap()` in the whole file, and the field-access type recovery goes through
+`self.symbols.get_symbol_named_type_raw(raw_base_symbol_id)` (`expressions.spl:225`)
+— a nil-safe raw-i64 helper added in `src/compiler/20.hir/hir_types.spl:738`
+alongside `get_symbol_type_raw` (`:723`), whose docstring names this exact bug.
+`hir_lowering/**` is owned by another lane this session and was NOT edited here.
+
+**Not proven:** that the SIGILL is actually gone. This host has no usable
+self-hosted `native-build`. `bin/simple` is the Rust seed (mtime 2026-08-16
+22:59, prints the seed banner). `bootstrap/stage3/simple` is a 3.4 MB
+`simple-bootstrap` stub that **SIGSEGVs (rc 139, core dumped) on a trivial
+`fn main(): print("hi")`** — the control fails, so it cannot witness this bug.
+Interpreter control passes: `bin/simple run repro.spl` prints `A`, rc 0.
+
+**Not a shared root cause with
+`stage3_symboltable_lookup_ud2_field_access_nil_receiver_2026-08-06.md`.**
+`"field access on nil receiver"` is the generic runtime trap emitted for ANY
+nil receiver; it is referenced by ~20 unrelated call sites across
+`10.frontend`, `20.hir`, `40.mono`, `50.mir`, `70.backend` and `src/lib`. The
+two docs are the same SYMPTOM class with three distinct nil sources. Do not
+merge them.
+
+### Native lane is fully unavailable in this worktree (2026-08-17, measured)
+
+Three independent attempts, all on the 5-line repro from this doc's own Repro
+section, none of which reached the defect:
+
+| binary | result |
+|---|---|
+| `bin/simple run` (interpreter) | prints `A`, rc 0 — control PASSES |
+| `bootstrap/stage3/simple native-build` | **SIGSEGV rc 139, core dumped, even on `fn main(): print("hi")`** — it is a 3.4 MB `simple-bootstrap` stub, not a stage3 self-host |
+| `bin/simple native-build` (Rust seed) | rc 1: `error: LLVM native linking failed: ... ld.lld: error: cannot ope[n]` then `native-build worker exited with code 1` |
+
+Note the third row contradicts this doc's "What works (isolation)" claim that
+the seed native-builds the repro fine: it no longer does *here*, and it fails
+at LINK time, i.e. before any lowering defect could be observed. So this is an
+environment/toolchain breakage, not evidence about the bug either way.
+
+**Nothing in this session verifies or refutes the native SIGILL.** The
+content-level findings above stand on source inspection alone.

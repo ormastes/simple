@@ -130,5 +130,37 @@ Two consequences for the drain list:
 Suggested addition to remediation step (1): include root-level `src/lib/<name>/`
 directories in the multiplicity map, not just the five tiers.
 
+### DONE 2026-08-17 — root-lib blindness closed (stage 1.5)
+
+Reproduced first, on current source, with the new spec and the fix line
+commented out: `Results: 3 total, 1 passed, 2 failed`. With the fix restored:
+`Results: 3 total, 3 passed, 0 failed`; detection spec
+`Results: 7 total, 7 passed, 0 failed`.
+
+Root cause: `build_tier_multiplicity` walked only the five tier names, and
+`maybe_warn_tier_ambiguity` was only called from the tier-search branch
+(`resolution.spl:139`), never from the direct `src/lib/<path>` step
+(`resolution.spl:99`) that actually wins for root modules.
+
+Changes (all in `src/compiler/99.loader/module_resolver/resolution.spl`):
+- new `collect_lib_root_modules`, recording every non-tier entry directly under
+  `src/lib/` (dir package with `__init__.spl`, nested paths, bare `.spl` file)
+  under the pseudo-tier `<lib-root>`; called from `build_tier_multiplicity`.
+- the direct `src/lib/<path>` resolve step now calls
+  `maybe_warn_tier_ambiguity` on its Ok path, still non-fatal, still before the
+  cache write, resolution unchanged.
+- the warning text says the root module wins deterministically (rather than "by
+  registration order") when `<lib-root>` is among the candidates.
+
+Specs: `test/01_unit/compiler/module_resolver/root_lib_shadow_ambiguity_spec.spl`
+(reproducer) and `.../import_shadow_source_coverage_spec.spl` (defect-class
+detection: three module shapes, a real `src/lib/text.spl` vs
+`src/lib/common/text.spl` collision, and negative checks).
+
+**Still open:** stage 2 (deterministic precedence by importer's own tier, then
+`common`) and stage 3 (error). Not attempted here — changing which module an
+ambiguous import binds is a behaviour change across 21,445 occurrences and was
+out of scope for a diagnostic-only fix.
+
 `src/lib/common/js/**` has been drained (30 files, 52 import lines) as part of
 that work.

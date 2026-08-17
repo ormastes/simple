@@ -1,0 +1,117 @@
+# Similar-problem-detection spec for the defect CLASS behind
+# doc/08_tracking/bug/trait_conformance_check_ignores_arity_2026-08-04.md
+#
+# The class is: "trait conformance accepts an impl on strictly less evidence
+# than the trait declaration carries." Name-only was the first instance, arity
+# the second, parameter types the third. This spec generalizes over the whole
+# signature-comparison surface instead of one hand-picked pair, and — just as
+# importantly — pins the FALSE-POSITIVE boundary, because an over-eager
+# comparison here breaks the whole tree (generic substitution, `Self`,
+# associated-type projections and inferred annotations legitimately differ
+# between the two declaration sites).
+
+use compiler.traits.trait_impl.{param_type_conflict, concrete_prim_tag, non_receiver_params}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_definitions.{HirParam, HirExpr, HirExprKind}
+use compiler.frontend.core.lexer.*
+use std.io_runtime.{file_read}
+
+fn ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn prim_matrix() -> [HirType]:
+    [
+        ty(HirTypeKind.Int(bits: 8, signed: true)),
+        ty(HirTypeKind.Int(bits: 8, signed: false)),
+        ty(HirTypeKind.Int(bits: 32, signed: true)),
+        ty(HirTypeKind.Int(bits: 64, signed: true)),
+        ty(HirTypeKind.Int(bits: 64, signed: false)),
+        ty(HirTypeKind.Float(bits: 32)),
+        ty(HirTypeKind.Float(bits: 64)),
+        ty(HirTypeKind.Bool),
+        ty(HirTypeKind.Char),
+        ty(HirTypeKind.Str),
+        ty(HirTypeKind.Unit)
+    ]
+
+fn erasable_matrix() -> [HirType]:
+    # Every kind that may legitimately differ between a trait declaration and
+    # a conforming impl. NONE of these may ever be reported as a conflict.
+    [
+        ty(HirTypeKind.Any),
+        ty(HirTypeKind.Error),
+        ty(HirTypeKind.Never),
+        ty(HirTypeKind.Infer(id: 1, level: 0)),
+        ty(HirTypeKind.TypeParam(name: "T", bounds: [])),
+        ty(HirTypeKind.TypeParam(name: "Self", bounds: [])),
+        ty(HirTypeKind.Projection(base: ty(HirTypeKind.TypeParam(name: "Self", bounds: [])), assoc_name: "Item")),
+        ty(HirTypeKind.Slice(element: ty(HirTypeKind.Int(bits: 8, signed: false)))),
+        ty(HirTypeKind.Optional(inner: ty(HirTypeKind.Str))),
+        ty(HirTypeKind.DynTrait(trait_: SymbolId(id: 7)))
+    ]
+
+fn mk_param(name: text, t: HirType) -> HirParam:
+    HirParam(
+        symbol: SymbolId(id: 0),
+        name: name,
+        type_: t,
+        has_default: false,
+        default: HirExpr(
+            kind: HirExprKind.NilLit,
+            has_type_: true,
+            type_: ty(HirTypeKind.Unit),
+            span: Span.empty()
+        ),
+        span: Span.empty(),
+        is_mutable: false
+    )
+
+describe "trait signature conformance -- defect class":
+
+    it "detects EVERY distinct concrete primitive pair, not just the filed one":
+        val prims = prim_matrix()
+        var checked = 0
+        for i in 0..prims.len():
+            for j in 0..prims.len():
+                checked = checked + 1
+                if concrete_prim_tag(prims[i]) == concrete_prim_tag(prims[j]):
+                    expect(param_type_conflict(prims[i], prims[j])).to_be_false()
+                else:
+                    expect(param_type_conflict(prims[i], prims[j])).to_be_true()
+        # non-vacuity: a silently empty matrix would pass every assertion above
+        expect(checked).to_equal(121)
+
+    it "never reports generic, Self, projected, erased or inferred types":
+        val erasable = erasable_matrix()
+        val prims = prim_matrix()
+        var checked = 0
+        for e in erasable:
+            expect(concrete_prim_tag(e)).to_equal("")
+            for p in prims:
+                checked = checked + 1
+                expect(param_type_conflict(e, p)).to_be_false()
+                expect(param_type_conflict(p, e)).to_be_false()
+        for a in erasable:
+            for b in erasable:
+                checked = checked + 1
+                expect(param_type_conflict(a, b)).to_be_false()
+        expect(checked).to_equal(210)
+
+    it "normalises the receiver on the impl side at any position":
+        val u64_t = ty(HirTypeKind.Int(bits: 64, signed: false))
+        val params = [
+            mk_param("self", u64_t),
+            mk_param("lba", u64_t),
+            mk_param("me", u64_t)
+        ]
+        val kept = non_receiver_params(params)
+        expect(kept.len()).to_equal(1)
+        expect(kept[0].name).to_equal("lba")
+
+    it "keeps every weaker conformance check that came before it":
+        # Regression fence for the class: each of these was a separate silent
+        # acceptance, and dropping any one of them reopens the bug.
+        val source = file_read("src/compiler/25.traits/trait_impl.spl")
+        expect(source).to_contain("if not self.has_method(method.name):")          # name
+        expect(source).to_contain("provided.params.len() != method.arity()")       # arity
+        expect(source).to_contain("param_type_conflict(method.params[i]")          # types
