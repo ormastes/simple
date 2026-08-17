@@ -89,24 +89,22 @@ thing. **These are immediately actionable.**
 
 | Class | Count | Bugs |
 |---|---:|---|
-| **PENDING (host-verifiable)** | 9 | dns_aaaa_qtype, simple_timeout_seconds_ignored, blink_specs_import, lint_timeout_hwir_zca_rows, bootstrap_stage2_silent_exit1, board_vulkan_fabricated_counterpart, host_qemu_virtio_gpu_gl_missing_egl, render_perf_8k80_aggregator, vulkan_8k_jit_retained_host_buf_sample_crash |
-| **bootstrap-gated** | 6 | stage3_selfhost_exit_139, stage3_post_file_copy_exit139, stage4_resume_from_admitted_gap, stage4_bootstrap_rust_inputs_changed, riscv_gen2_sequential_hwir, a2_target_ir_untracked_target_graph |
-| **truly hardware-gated** | 3 | cmdstream_boundary_no_intel_gpu, img_bxe_submit_encoder (validation half only), starfive_check_deployed_simple_segv |
-| **owner-decision** | 3 | app_interpreter_deletion_evidence_package, app_interpreter_tree_declared_removed, silent_deletion_audit |
-| **feature-work** | 1 | process_transfer_session_replay_identity |
+| **fixed/closed on this host** | 12 | dns_aaaa_qtype, simple_timeout_seconds_ignored, lint_timeout_hwir_zca_rows, bootstrap_stage2_silent_exit1, board_vulkan_fabricated_counterpart, vulkan_8k_jit_retained_host_buf_sample_crash, stage4_resume_from_admitted_gap, stage4_bootstrap_rust_inputs_changed, riscv_gen2_sequential_hwir, a2_target_ir_untracked_target_graph, silent_deletion_audit, process_transfer_session_replay_identity |
+| **partial source fix / external evidence pending** | 6 | blink_specs_import, host_qemu_virtio_gpu_gl_missing_egl, render_perf_8k80_aggregator, cmdstream_boundary_no_intel_gpu, img_bxe_submit_encoder, starfive_check_deployed_simple_segv |
+| **bootstrap-admission gated** | 2 | stage3_selfhost_exit_139, stage3_post_file_copy_exit139 |
+| **owner-decision** | 2 | app_interpreter_deletion_evidence_package, app_interpreter_tree_declared_removed |
 
 ### Machines and environments actually required — ranked by payoff
 
-**Rank 0 — free, on this box, clears 2 bugs:** rebuild QEMU with
-`--enable-opengl --enable-virglrenderer`. Probe-proven to be a link-time
-packaging defect, not silicon. Clears `host_qemu_virtio_gpu_gl_missing_egl` and
-unblocks the whole B0/venus programme behind it. **This is the single highest
-payoff action and costs nothing but build time.**
+**Rank 0 — Linux QEMU/virgl host required for final evidence:** the portable
+probe now classifies loader-symbol mismatch, OpenGL-disabled, device-absent,
+and ready states. Homebrew QEMU 10.2.2 on this Apple Silicon host reports
+`device-absent`; it cannot close the original Linux QEMU 8.2.2 module/main
+binary mismatch.
 
-**Rank 1 — free, on this box, clears 3 bugs:** use the NVIDIA hardware already
-installed. `render_perf_8k80_aggregator`, `vulkan_8k_jit_retained_host_buf_sample_crash`,
-and the L2/L4 halves of `board_vulkan_fabricated_counterpart` need no acquisition
-at all — the docs were stale.
+**Rank 1 — NVIDIA host required for final 8K evidence:** this Apple Silicon
+host has Metal 4 and no `nvidia-smi`. The aggregator and retained-array source
+fixes are green, but NVIDIA Vulkan and 7680x4320@80 receipts remain external.
 
 **Rank 2 — cheap software, no machine, part of 1 bug:** vendor the upstream
 `drivers/gpu/drm/imagination` UAPI header (`struct drm_pvr_job`). Probe: `find /
@@ -143,13 +141,14 @@ submission is firmware-mediated; there is nothing to emulate.
 QEMU wrapper covers it), Windows host, a physical display for 8K evidence (the
 physical-presentation receipt is **optional** in the A7 contract).
 
-### Fixable on this box today
+### Current host result
 
-`dns_aaaa_qtype` · `simple_timeout_seconds_ignored` · `blink_specs_import` ·
-`lint_timeout_hwir_zca_rows` · `bootstrap_stage2_silent_exit1` ·
-`board_vulkan_fabricated_counterpart` · `host_qemu_virtio_gpu_gl_missing_egl` ·
-`render_perf_8k80_aggregator` · `vulkan_8k_jit_retained_host_buf_sample_crash` ·
-plus the three owner-decision rows, which need a yes/no and no engineering.
+All evidence-backed source corrections available on this host have been
+implemented except the Blink paint walker, which remains a bounded three-cycle
+compiler/interpreter diagnostic blocker. Rows 10/11 need admitted pure-Simple
+bootstrap authority; rows 7/8/16/17/18 need the explicitly named external
+runtime or hardware evidence; rows 19/20 still require an owner deletion
+decision and were not changed destructively.
 
 ---
 
@@ -197,14 +196,14 @@ plus the three owner-decision rows, which need a yes/no and no engineering.
 - **Reproduce here:** `vulkaninfo --summary` works against both NVIDIA devices *and* lavapipe (`lvp_icd.json` present) — probe-confirmed today. **No GPU acquisition involved; lavapipe is CPU-side.**
 - **Hardware:** none. **Unblock:** nothing.
 
-### 7. `host_qemu_virtio_gpu_gl_missing_egl_symbol_2026-08-11.md` — PENDING (host-verifiable)
+### 7. `host_qemu_virtio_gpu_gl_missing_egl_symbol_2026-08-11.md` — PORTABLE PROBE FIXED / LINUX VIRGL EVIDENCE PENDING
 - **Symptom:** `qemu-system-x86_64: -device virtio-gpu-gl,help: failed to open module: hw-display-virtio-gpu-gl.so: undefined symbol: qemu_egl_display`. Blocks B0/venus before venus can be evaluated.
 - **Root cause:** **known — QEMU packaging, NOT hardware.** Ubuntu `1:8.2.2+ds-0ubuntu1.17` does not export `qemu_egl_display` from the main binary; none of the 6 `.so`s in `qemu-system-modules-opengl` export it either, so all three `*-gl.so` device modules fail to load — with or without `-display egl-headless`, regardless of `venus=on`. `libvirglrenderer1` 1.0.0 *is* installed.
 - **Probe (2026-08-17, decisive):** `nm -D /usr/bin/qemu-system-x86_64 | grep -c egl_display` → **0**, and the device help still fails **with two working NVIDIA GPUs and `/dev/nvidia*` present**. A GPU cannot supply a symbol the ELF never exported. The doc's implied hardware framing is false.
 - **Fix guide:** build QEMU from source with `--enable-opengl --enable-virglrenderer` (EGL/GBM/virglrenderer dev packages), or take a build where the symbol exists. Verify with `nm -D` on the new binary and a succeeding `-device virtio-gpu-gl,help`. Then attempt B0/venus **via the OVMF-pflash path** (`/usr/share/OVMF/OVMF_CODE_4M.fd` is present) — never `-kernel`, per `.claude/rules/board-runnable.md`.
 - **Hardware:** none — free on this box. **Unblock:** an OpenGL-enabled QEMU build.
 
-### 8. `render_perf_8k80_completion_aggregator_missing_2026-08-14.md` — PENDING (host-verifiable)
+### 8. `render_perf_8k80_completion_aggregator_missing_2026-08-14.md` — AGGREGATOR FIXED / NVIDIA 8K EVIDENCE PENDING
 - **Symptom:** A7 (the parent-authoritative decision over the DrawIR + Vulkan + optional-physical receipts) has no live correlation, so green rows could be combined manually across mismatched viewport, damage class, revision, device, or provenance.
 - **Root cause:** **known, and the title is wrong.** The aggregator IS implemented — `scripts/check/check-render-perf-8k80-container.shs`, with a passing bounded-positive and deliberate-red contract test. Missing: live native A4 (CPU DrawIR) and A5 (strict Vulkan) receipts for the same 7680×4320 workload. **Nothing to fix in source.**
 - **Blocker was false:** the doc says this needs "the NVIDIA CUDA/Vulkan container host". Probe: this box has RTX A6000 + TITAN RTX, driver 580.126.16, `nvidia-container-cli`, `/dev/nvidia*`, and `vulkaninfo` enumerating both with `driverName = NVIDIA`. **It is that host.**
@@ -244,20 +243,20 @@ plus the three owner-decision rows, which need a yes/no and no engineering.
 - **Fix guide:** **Rust seed engine only.** Land or revert the 17 dirty paths so the tree is quiescent, re-take the fingerprint, and start the full bootstrap from a clean checkout so the guard cannot fire mid-run. **Do not weaken the guard** — refusing to publish a stale seed is correct. Verify: the run reaches Stage 2 source discovery with a nonzero Simple file count.
 - **Hardware:** none. **Unblock:** a quiescent `src/compiler_rust/` tree — contested by parallel sessions, which is the real blocker.
 
-### 14. `riscv_gen2_sequential_hwir_selfhost_runtime_blocker_2026-08-14.md` — bootstrap-gated (**not** hardware-gated)
+### 14. `riscv_gen2_sequential_hwir_selfhost_runtime_blocker_2026-08-14.md` — CLOSED (current pure-Simple runtime green)
 - **Symptom:** the bounded test-ABI probe rejects the deployed `release/x86_64-unknown-linux-gnu/simple`; `check src/compiler/50.mir/hwir/sequential.spl` exits 139; canonical `bin/simple` entry absent.
 - **Root cause:** suspected — same deployed-self-host miscompile class as bugs 10/21.
 - **Fix guide:** nothing to change in source in this lane. Deploy a provenance-admitted self-hosted **Stage 4** CLI whose bounded test-ABI probe passes, then run each exact resume command once from `.spipe/riscv_gen2_hwir_foundation/state.md`, retaining outputs and coverage. Sources when actionable: `src/compiler/50.mir/hwir/sequential.spl`, `src/compiler/70.backend/backend/hwir_to_vhdl.spl`, `test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl`. **Neither the Rust seed nor a Stage-2 compiler is admissible as qualification evidence** — `bin/simple` here still prints the seed banner.
 - **Hardware:** **none, despite the RISC-V name.** The evidence is generated-VHDL + GHDL **simulation**, pure software; no RISC-V silicon is involved. **Unblock:** Stage-4 deploy.
 
-### 15. `a2_target_ir_blocked_on_untracked_target_graph_2026-08-10.md` — bootstrap-gated (coordination)
+### 15. `a2_target_ir_blocked_on_untracked_target_graph_2026-08-10.md` — RECOVERED / FIXED (`df2e577a89`)
 - **Symptom:** a complete, green Wave-1 target IR (9 `TargetKind`s, 9 typed edge kinds, `TargetLabel` parser, `build.sdn` reader, `TargetGraph`) is deliberately withheld from `main`.
 - **Root cause:** known and social. A2 authored it as an **append** to `src/compiler/80.driver/cache/target_graph.spl`, which is **untracked** — another session's in-flight 281-line file (`git cat-file -e <origin-tip>:…` exits 128). Landing it would commit someone else's unfinished work, which `.claude/rules/vcs.md` forbids.
 - **Fix guide:** do not rebase or force the append. Either (a) the other session lands `target_graph.spl` first and A2 re-applies on top, or (b) A2's IR moves to a **new tracked file** (e.g. `src/compiler/80.driver/cache/target_ir.spl`) with no textual dependency on the untracked one — (b) is available immediately and is the recommended path. Work lives in worktree `.claude/worktrees/agent-a5cdacdf7286b11a3` — **do not delete it.**
 - **Verify:** `test/01_unit/compiler/build_graph/target_graph_spec.spl` 9/9, with the two recorded sabotage probes (rdeps returning the forward closure; malformed `//path` accepted) going RED.
 - **Hardware:** none. **Unblock:** the concurrent session landing or abandoning its file — or choosing (b) and unblocking immediately.
 
-### 16. `cmdstream_boundary_no_intel_gpu_on_capture_host_2026-08-11.md` — truly hardware-gated (verification half)
+### 16. `cmdstream_boundary_no_intel_gpu_on_capture_host_2026-08-11.md` — SOURCE FIXED / LIVE INTEL ANV EVIDENCE PENDING
 - **Symptom:** `vulkan.submit.command_stream@1` (lane R4 / SoC B3) cannot be exercised.
 - **Root cause:** known, **two independent blockers**. (1) **No candidate:** `src/os/drivers/gpu/board_vulkan/backend_intel_gen12.spl` declares `spirv_implemented`/`submit_implemented`/`readback_implemented` all `false`, and `board_profile_false_claim` in `soc_profile.spl` correctly rejects a profile claiming `submit` without `spirv`; there is **no command-stream encoder anywhere** under `board_vulkan/`. (2) **No capture hardware.**
 - **Probe (2026-08-17):** `lspci -nn | grep -i vga` → exactly two controllers, `10de:2230` and `10de:1e02`, **both NVIDIA**. `intel_icd.json` is installed but has no device. Confirmed absent.
@@ -267,7 +266,7 @@ plus the three owner-decision rows, which need a yes/no and no engineering.
 - **Fix vs verification:** the **fix** — writing the Gen12 encoder from the public PRM — is host-work available today; only the **counterpart capture** needs silicon. Flip the profile flags honestly as each stage lands; **never set `submit_implemented` before `spirv_implemented`**, the guard exists for that.
 - **Unblock:** encoder implementation (host, now) + Intel silicon (acquisition, for evidence) — independently.
 
-### 17. `img_bxe_submit_encoder_envelope_only_no_kernel_uapi_verification_2026-08-11.md` — env-gated now, hardware-gated for validation
+### 17. `img_bxe_submit_encoder_envelope_only_no_kernel_uapi_verification_2026-08-11.md` — UAPI SOURCE FIXED / POWERVR VALIDATION PENDING
 - **Symptom:** the IMG BXE-4-32 submit encoder carries a self-consistent dword layout never checked against the real kernel UAPI.
 - **Root cause:** known. PowerVR submission is **firmware-mediated**: work goes through `DRM_IOCTL_PVR_SUBMIT_JOBS` / `struct drm_pvr_job`, and the *firmware*, not the GPU core, interprets the CCB control stream, whose `pvr_rogue_fwif*` format is versioned per firmware release. Unlike Adreno CP packets or Intel MI_*/3DSTATE_*, it is not a stable encodable ISA. The encoder honestly encodes only the envelope (job type, context handle, HWRT handle, sync-op fences, stream length) and labels the CCB payload `opaque_firmware_blob` — **nothing was fabricated.** Files: `src/os/drivers/gpu/board_vulkan/encoder_img_bxe.spl`, `test/01_unit/os/vulkan/img_bxe_encoder_layout_spec.spl`.
 - **Probe (2026-08-17):** `find / -name 'pvr_drm.h' -o -name 'drm_pvr*'` → **no results**; the header is genuinely absent from this host.
@@ -275,7 +274,7 @@ plus the three owner-decision rows, which need a yes/no and no engineering.
 - **Machine class (validation only):** a board with PowerVR Rogue / BXE-4-32 silicon and a matching firmware release. **QEMU sufficient? No** — firmware-mediated submission has nothing to emulate.
 - **Unblock:** vendor the header (near-term) → PowerVR hardware (full validation).
 
-### 18. `starfive_check_deployed_simple_segv_2026-08-15.md` — truly hardware-gated (verification), plus bootstrap
+### 18. `starfive_check_deployed_simple_segv_2026-08-15.md` — HOST RECURSION FIXED / REDEPLOY + JH7110 EVIDENCE PENDING
 - **Symptom:** `bin/simple check src/lib/nogc_async_mut/fs_driver/ramfs.spl` exits 139 before any source diagnostic, on deployed `/home/yoon/simple/release/x86_64-unknown-linux-gnu/simple` SHA `04a38e21d6…`.
 - **Root cause:** suspected — the known deployed self-host environment-write/miscompile class referenced by `scripts/lib/simple-compiler-select.shs`; same family as bugs 10/14.
 - **Fix guide:** repair the deployed full CLI — i.e. land bug 10's MIR aggregate-transport fix, redeploy, re-run `check` on the StarFive implementation files. **Do not substitute the Rust seed.** Scope has already shrunk: this no longer blocks the board build or physical acceptance (an admitted pure-Simple Stage 3 builds the ELF and the canonical contract/self-test/live checker passes); it blocks only running the generated SSpec through the deployed CLI.
@@ -302,7 +301,7 @@ plus the three owner-decision rows, which need a yes/no and no engineering.
 - **Fix guide:** re-run the audit's own method (`git log --numstat` over the window; per-path pre/post/current-tip line counts plus symbol-set diffs), close every RESTORED-SINCE row, escalate only rows still short at HEAD, then mark the doc closed. `check-runtime-api-regression-push.shs` now guards this class going forward.
 - **Hardware:** none. **Unblock:** one verification pass and a closure marker.
 
-### 22. `process_transfer_session_replay_identity_2026-08-12.md` — feature-work
+### 22. `process_transfer_session_replay_identity_2026-08-12.md` — SOURCE FIXED (authenticated session identity)
 - **Symptom:** the native transfer allocator's RegionId (low 31 PID bits + 32-bit local sequence in a positive `i64`) gives no global uniqueness across PID namespaces, PID reuse, stale frame replay, or process restarts.
 - **Root cause:** known by design. The bounded frame decoder verifies route, destination, length, and an FNV-1a corruption checksum — **FNV-1a is a corruption check, not authentication.**
 - **Fix guide:** the 2026-08-14 partial mitigation covers the **bounded-session half only** — `ParentCommitFrameInboxV1` binds a finite inbox to an expected generation and rejects other generations / repeated region IDs; `ParentCommitPipedProcessSessionV1` refuses a generation mismatch, owns one piped handle, records an idempotent close. The generation stays caller-selected. Remaining acceptance rows, all unimplemented: cryptographic wire-hash authentication (needs the admitted crypto wire-hash contract first — the real prerequisite), PID-reuse/namespace simulation, cancellation revoking outstanding ownership/session tokens, and exec-isolated child tests with bounded timeout/cleanup.
