@@ -1364,7 +1364,7 @@ impl MirLowering:
         # builtin set and reuse it in every non-static dispatch path.
         var dict_recv_local: LocalId = 0
         var dict_recv_lowered = false
-        val is_dict_method_name = method == "keys" or method == "values" or method == "has" or method == "contains" or method == "contains_key" or method == "get" or method == "remove" or method == "delete" or method == "set"
+        val is_dict_method_name = method == "keys" or method == "values" or method == "has" or method == "contains" or method == "contains_key" or method == "get" or method == "remove" or method == "delete" or method == "set" or method == "clear"
         # Resolved custom remove/delete may need indexed/field writeback below;
         # do not pre-evaluate those receivers. Their unresolved Dict fallback
         # keeps its existing behavior.
@@ -1572,6 +1572,38 @@ impl MirLowering:
             var b_rm = self.builder
             b_rm.emit_call(remove_op, [mir_operand_copy(receiver_local), mir_operand_copy(key_local)], MirType.i64())
             self.builder = b_rm
+            return receiver_local
+
+        # `.clear()` -> rt_dict_clear (mutates in place, returns i8 discarded
+        # here). Root cause of the Stage 3 self-host failure: "clear" was
+        # absent from `is_dict_method_name` above, so `.clear()` on a Dict
+        # never reached this dispatch and fell through to the *string*
+        # `clear`, whose runtime guard
+        # (`src/runtime/runtime_native.c:7873`) refuses a non-text receiver:
+        #   "str.clear was called on a receiver that is not text ...
+        #    a code-generation dispatch gap, not a program error."
+        # `HirLowering.begin_module()` (20.hir/hir_lowering/types.spl:283)
+        # is the per-module reset and is built out of 15 `Dict.clear()`
+        # calls -- including `materialized_payload_bindings.clear()` and
+        # `SymbolTable.reset_module()`'s own 8 dict clears. Those clears did
+        # not happen, while the *scalar* resets on the following lines
+        # (`next_symbol_id = 0`, `next_scope_id = 1`) did. So symbol NAMES
+        # from every previously-lowered module survived while symbol IDS
+        # restarted at 0, and each new module silently overwrote ids that
+        # stale names still pointed at -- making `lookup_or_invalid(type)`
+        # return the id of an unrelated function from another module. That
+        # is the whole "enum payload dependency conflicts" family (78 unique
+        # conflicts, 0 of which had matching names on both sides).
+        # Same shape as the `set` gap documented directly below.
+        if receiver_is_dict and method == "clear" and args.len() == 0:
+            val receiver_local = if dict_recv_lowered: dict_recv_local else: self.lower_expr(receiver)
+            val clear_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_dict_clear"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_clr = self.builder
+            b_clr.emit_call(clear_op, [mir_operand_copy(receiver_local)], MirType.i64())
+            self.builder = b_clr
             return receiver_local
 
         # `.set(key, value)` -> rt_dict_set, the same runtime call and boxing
