@@ -21,7 +21,22 @@ and `examples/09_embedded` files fails with
 `types.spl:248`), the exact collision failure mode. NOTE: the deployed lint binary still
 shows this until a bootstrap redeploy picks up the rename; verify after next bootstrap.
 
-## Function duplicates — FILED, not fixed (each needs a rename on one side or signature unification)
+## Function duplicates — PARTIALLY FIXED 2026-08-17
+
+Fixed (rename/unify, file-local, specs green):
+- `shell` in `semihost_capture.spl` → `semihost_shell`; unused `shell` wrapper in `mcp/fileio_temp.spl` deleted (5 defs → 3 remaining: io_runtime pub ShellResult, file_shell tuple export, ffi/sffi i64 wrappers — all exported APIs, deferred below).
+- `read_file`/`write_file`/`last_index_of` in `90.tools/formatter/main.spl` → `fmt_read_file`/`fmt_write_file`/`fmt_last_index_of` (resolves 3 rows).
+- `is_ident_char` (String→Bool) in `lint/_LintMain/traceability_and_assertions.spl` → `is_trace_ident_char`.
+- `detect_platform` (→u8) in `80.driver/shb/shb_types.spl` → `detect_platform_id`.
+- `file_delete` `(text)->()` in `src/{lib/nogc_sync_mut,app}/io/file_shell.spl` now returns `bool` (`code == 0`), matching the other 13 defs.
+
+Deferred (exported-API renames or intentional per-tier mirrors; needs coordinated caller migration):
+`shell` tuple/ShellResult/i64 trio, `text_to_bytes`/`bytes_to_text`/`file_read_bytes` families,
+`compile_native` (3 distinct entry points), `compiler_infer_types`/`compiler_instantiate_template`
+(loader SFFI decl pair), `detect_platform` text mirrors (identical sigs), `dir_remove_all` i32
+variant (exported std.io API with exit-code contract).
+
+## Original filing (each needs a rename on one side or signature unification)
 
 | Function | Defs | Signatures |
 |---|---|---|
