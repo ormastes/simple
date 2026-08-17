@@ -460,3 +460,28 @@ snapshots, UNIQUE), argv publish for delegated subcommands (`bdafd9d5b5a`,
 **Standing test rule:** every bug fix ships (1) a spec reproducing the exact
 defect and (2) a generalization spec probing similar problems nearby, both
 cited in the bug doc. A fix without its reproducing spec is not done.
+
+## Build-lane doctrine + pipeline bugs (2026-08-17, third round)
+
+- **Exactly ONE compile-build owner at a time.** Two concurrent stage-2 builds
+  nearly triggered earlyoom. Deconfliction: the SCRIPT-DRIVEN run survives;
+  any ad-hoc/manual build yields and waits or pins to a snapshot.
+- **Phase builds never wait for verification.** Sanity/tool-harness checks
+  always run in a parallel `nice`d lane beside the phase build, never inline.
+- **Phase 2 completed via dynload** — the phase-4 relink therefore needs
+  `--full-cli` / `--mode=one-binary`; a dynload-shaped phase-2 output is not
+  the one-binary artifact.
+- **Pipeline bugs observed this session** (no bug docs filed yet — file on
+  next touch): (1) stage-2 exits 1 SILENTLY with a 0-byte log under the
+  transcribed sandbox env; (2) a phantom `stage2-capability.log` reference in
+  the pipeline; (3) native-build has no keep-going flag — first error aborts
+  the whole build, forcing the per-directory/per-file sweep workaround above.
+- **Canonical phase-2-found compiler bug:** the LintDiag LLVM codegen defect —
+  a real miscompile surfaced only by building the compiler with the phase
+  binary. Treat phase 2 as a compiler-bug detector, not just a build step.
+- **Stale-base clobber pattern (3 incidents tonight):** an agent editing on a
+  stale base and landing verbatim reverts other sessions' fixes. Rules:
+  commit SCOPED immediately after editing (Edit-tool changes are not
+  auto-snapshotted), and the push lane must graft PER-FILE diffs onto current
+  origin — never land a whole file verbatim. See `.claude/rules/vcs.md`
+  (anti-revert protocol) for the general form.

@@ -2495,3 +2495,14 @@ generations land before phase 2 starts, phase 2 takes the NEWEST; never stop
 at first failure — collect all problems through phase 4. Every bug fix ships
 a reproducing spec plus a similar-problem generalization spec, cited in the
 bug doc.
+
+Build-lane doctrine (2026-08-17): exactly ONE compile-build owner at a time —
+two concurrent stage-2 builds nearly triggered earlyoom; the script-driven
+run survives, ad-hoc builds yield. Phase builds never wait for verification:
+sanity/tool-harness runs in a parallel niced lane. Phase 2 completed via
+dynload, so the phase-4 relink needs `--full-cli`/`--mode=one-binary`. Known
+pipeline traps (unfiled — file on next touch): silent stage-2 exit-1 with a
+0-byte log under the transcribed sandbox env; a phantom
+`stage2-capability.log` reference; native-build has no keep-going flag. The
+LintDiag LLVM codegen defect is the canonical phase-2-found compiler bug —
+phase 2 doubles as a compiler-bug detector.
