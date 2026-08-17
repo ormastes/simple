@@ -1,0 +1,141 @@
+"""
+# VerificationCache.invalidate_dependents — the "*" wildcard must not alias units
+
+**Category:** Infrastructure / verification cache correctness
+**Status:** Regression guard
+**Bug:** doc/08_tracking/bug/verification_cache_invalidate_wildcard_symbol_wipes_cache_2026-08-17.md
+
+## Overview
+
+`ProofUnit.source_symbol` is documented at
+`src/compiler_rust/lib/std/src/verification/proof_unit.spl:14` as
+"Primary symbol (fn/class name, or `*` for file-level)".
+
+`invalidate_dependents` grew its transitive walk by seeding the invalidated
+unit's `source_file`, `lean_module` AND `source_symbol` into `changed_keys`,
+then matching later units against that same set. For a **file-level** unit the
+symbol is the literal `"*"`, which is not a symbol name at all — it is a
+wildcard shared by every file-level unit in the program. Seeding it made all
+file-level units alias to one another, so invalidating a single genuine
+dependent cascaded into a full cache wipe.
+
+Both the repro and the generalization below exercise the same public API the
+compiler driver uses; nothing is stubbed.
+"""
+
+use std.spec.{describe, it, expect, context}
+use verification.cache.{VerificationCache, CacheEntry, CacheStats}
+use verification.fingerprint.{Fingerprint}
+use verification.state.{VerificationState}
+use verification.proof_unit.{ProofUnit}
+
+# @cover src/compiler_rust/lib/std/src/verification/cache.spl 80%
+
+describe "invalidate_dependents wildcard aliasing":
+
+    context "repro — the exact shape that regressed":
+        """
+        ### Minimal repro
+
+        Two file-level units. Only `b.spl` depends on `base_defs`. Invalidating
+        `base_defs` must drop `b.spl` and must LEAVE `a.spl` cached.
+
+        Before the fix: invalidating `b.spl` seeded its `source_symbol` `"*"`
+        into `changed_keys`; on the next pass `a.spl` matched on its own `"*"`
+        and was evicted too.
+        """
+
+        it "preserves a non-dependent file-level unit":
+            var cache = VerificationCache.new("/tmp/test-vcache-wildcard-repro")
+            val fp_a = Fingerprint.from_hashes("a", "la", [], "v4.x")
+            val fp_b = Fingerprint.from_hashes("b", "lb", [], "v4.x")
+            cache.store("a.spl", fp_a, VerificationState.Verified, {}, "v4.x")
+            cache.store("b.spl", fp_b, VerificationState.Verified, {}, "v4.x")
+
+            var unit_a = ProofUnit.create("a.spl", "*", "Verification.A", "a.lean")
+            var unit_b = ProofUnit.create("b.spl", "*", "Verification.B", "b.lean")
+            unit_b = unit_b.with_dependencies(["base_defs"])
+
+            cache.invalidate_dependents("base_defs", [unit_a, unit_b])
+
+            # the dependent is gone ...
+            expect(cache.lookup("b.spl", fp_b)).to_be_nil()
+            # ... and the non-dependent survived
+            val result_a = cache.lookup("a.spl", fp_a)
+            match result_a:
+                case Some(entry):
+                    expect(entry.fingerprint).to_equal(fp_a.combined)
+                case nil:
+                    expect("a.spl was evicted").to_equal("a.spl preserved")
+
+    context "generalization — the property, not the one shape":
+        """
+        ### Generalization
+
+        The repro pins two units. The defect's blast radius grew with the number
+        of file-level units, so the generalization checks the property across a
+        wider set and across the neighbouring axes the same seeding logic
+        touches: many independent units, a wildcard that must not act as a
+        changed-module key on its own, and a real named symbol that must still
+        propagate.
+        """
+
+        it "evicts only the dependent among many file-level units":
+            var cache = VerificationCache.new("/tmp/test-vcache-wildcard-many")
+            val names = ["u0.spl", "u1.spl", "u2.spl", "u3.spl", "u4.spl"]
+            var units: [ProofUnit] = []
+            var fps: [Fingerprint] = []
+            var i = 0
+            for n in names:
+                val fp = Fingerprint.from_hashes(n, "lean-{i}", [], "v4.x")
+                fps = fps.push(fp)
+                cache.store(n, fp, VerificationState.Verified, {}, "v4.x")
+                var u = ProofUnit.create(n, "*", "Verification.U{i}", "u{i}.lean")
+                # only u2 depends on the changed module
+                if n == "u2.spl":
+                    u = u.with_dependencies(["base_defs"])
+                units = units.push(u)
+                i = i + 1
+
+            cache.invalidate_dependents("base_defs", units)
+
+            expect(cache.lookup("u2.spl", fps[2])).to_be_nil()
+            # the other four are untouched
+            expect(cache.lookup("u0.spl", fps[0]).?).to_equal(true)
+            expect(cache.lookup("u1.spl", fps[1]).?).to_equal(true)
+            expect(cache.lookup("u3.spl", fps[3]).?).to_equal(true)
+            expect(cache.lookup("u4.spl", fps[4]).?).to_equal(true)
+
+        it "does not treat the bare wildcard as a changed-module key":
+            var cache = VerificationCache.new("/tmp/test-vcache-wildcard-bare")
+            val fp_a = Fingerprint.from_hashes("a", "la", [], "v4.x")
+            cache.store("a.spl", fp_a, VerificationState.Verified, {}, "v4.x")
+            val unit_a = ProofUnit.create("a.spl", "*", "Verification.A", "a.lean")
+
+            # Invalidating "*" must not be read as "everything file-level".
+            cache.invalidate_dependents("*", [unit_a])
+
+            expect(cache.lookup("a.spl", fp_a).?).to_equal(true)
+
+        it "still propagates through a real named symbol":
+            """
+            The fix excludes only the literal "*". A genuine symbol name must
+            keep working as a transitive key, otherwise the fix would have
+            traded over-invalidation for under-invalidation.
+            """
+            var cache = VerificationCache.new("/tmp/test-vcache-named-symbol")
+            val fp_a = Fingerprint.from_hashes("a", "la", [], "v4.x")
+            val fp_b = Fingerprint.from_hashes("b", "lb", [], "v4.x")
+            cache.store("a.spl", fp_a, VerificationState.Verified, {}, "v4.x")
+            cache.store("b.spl", fp_b, VerificationState.Verified, {}, "v4.x")
+
+            # a.spl is keyed by the named symbol "helper_fn"
+            val unit_a = ProofUnit.create("a.spl", "helper_fn", "Verification.A", "a.lean")
+            # b.spl depends on that symbol
+            var unit_b = ProofUnit.create("b.spl", "*", "Verification.B", "b.lean")
+            unit_b = unit_b.with_dependencies(["helper_fn"])
+
+            cache.invalidate_dependents("helper_fn", [unit_a, unit_b])
+
+            expect(cache.lookup("a.spl", fp_a)).to_be_nil()
+            expect(cache.lookup("b.spl", fp_b)).to_be_nil()
