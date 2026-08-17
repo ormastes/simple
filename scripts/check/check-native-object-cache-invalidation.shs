@@ -1,0 +1,144 @@
+#!/bin/sh
+# check-native-object-cache-invalidation.shs
+#
+# Fixture gate over the per-module native object cache, in BOTH directions.
+#
+#   SPEED  (over-invalidation): an entry whose own inputs did not change must
+#          still be reused. Editing ONE module body must reuse N-1.
+#   SAFETY (under-invalidation): an entry whose inputs DID change must MISS.
+#          Editing a leaf module's public INTERFACE (arity) must rebuild the
+#          leaf AND every dependent that calls it.
+#
+# Getting only the speed direction right is how a cache ships stale objects.
+#
+# Verdict is always the LAST line of stdout:
+#   PASS  — <n> scenario(s) checked, ...          exit 0
+#   FAIL  — ...                                   exit 1
+#   ERROR — nothing was checked                   exit 2
+#
+# Never read an exit status through a pipe: rc is assigned on the line AFTER
+# the invocation, never as `cmd | tail`.
+
+set -u
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+SIMPLE_BIN=${SIMPLE_BIN:-$REPO_ROOT/bin/simple}
+WORK=${TMPDIR:-/tmp}/native-obj-cache-gate.$$
+CHECKED=0
+FAILURES=""
+
+cleanup() { rm -rf "$WORK"; }
+trap cleanup EXIT INT TERM
+
+fail() { FAILURES="${FAILURES}${FAILURES:+; }$1"; }
+
+# Build the fixture: one leaf, DEPS dependents that call it, one entry.
+make_fixture() {
+    mf_dir=$1
+    rm -rf "$mf_dir"
+    mkdir -p "$mf_dir/src" || return 1
+    printf 'fun leaf_val() -> i64:\n    return 10\n' > "$mf_dir/src/leaf.spl"
+    mf_i=1
+    mf_uses=""
+    mf_sum=""
+    while [ "$mf_i" -le 4 ]; do
+        printf 'use leaf\n\nfun dep%s() -> i64:\n    return leaf_val() + %s\n' \
+            "$mf_i" "$mf_i" > "$mf_dir/src/dep$mf_i.spl"
+        mf_uses="${mf_uses}use dep${mf_i}
+"
+        mf_sum="${mf_sum}${mf_sum:+ + }dep${mf_i}()"
+        mf_i=$((mf_i + 1))
+    done
+    printf '%s\nfun main():\n    print("%s", %s)\n' \
+        "$mf_uses" '{}' "$mf_sum" > "$mf_dir/src/main.spl"
+}
+
+# Run one native-build over the fixture and echo "<reused> <rebuilt>".
+# The receipt line is authoritative; a run that prints none yields "? ?" so the
+# caller must treat it as an error rather than silently scoring it zero.
+build_once() {
+    bo_dir=$1
+    bo_log=$bo_dir/build.log
+    ( cd "$bo_dir" && \
+      SIMPLE_NATIVE_INCREMENTAL=1 SIMPLE_NATIVE_BUILD_RUST=1 \
+      "$SIMPLE_BIN" native-build --backend cranelift --source src \
+          --cache-dir "$bo_dir/cache" -o out src/main.spl ) > "$bo_log" 2>&1
+    # Link may legitimately fail in a bare fixture (no runtime archive); the
+    # compile-phase receipt is what this gate measures, so rc is not consulted.
+    bo_line=$(grep -o '\[native-incremental\] [0-9]* reused / [0-9]* rebuilt' "$bo_log" | head -1)
+    if [ -z "$bo_line" ]; then
+        echo "? ?"
+        return 0
+    fi
+    echo "$bo_line" | awk '{ print $2, $5 }'
+}
+
+scenario() {
+    sc_name=$1
+    sc_want_reused=$2
+    sc_want_rebuilt=$3
+    sc_got=$4
+    CHECKED=$((CHECKED + 1))
+    sc_r=${sc_got%% *}
+    sc_b=${sc_got##* }
+    if [ "$sc_r" = "?" ]; then
+        fail "$sc_name: no [native-incremental] receipt emitted"
+        echo "  $sc_name: NO RECEIPT"
+        return
+    fi
+    if [ "$sc_r" = "$sc_want_reused" ] && [ "$sc_b" = "$sc_want_rebuilt" ]; then
+        echo "  $sc_name: ${sc_r} reused / ${sc_b} rebuilt (expected ${sc_want_reused}/${sc_want_rebuilt}) OK"
+    else
+        fail "$sc_name: got ${sc_r} reused / ${sc_b} rebuilt, expected ${sc_want_reused}/${sc_want_rebuilt}"
+        echo "  $sc_name: ${sc_r} reused / ${sc_b} rebuilt (expected ${sc_want_reused}/${sc_want_rebuilt}) MISMATCH"
+    fi
+}
+
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "ERROR — nothing was checked: no usable compiler at $SIMPLE_BIN"
+    exit 2
+fi
+
+FX=$WORK/fx
+make_fixture "$FX"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "ERROR — nothing was checked: could not materialise fixture in $FX"
+    exit 2
+fi
+
+# 5 cache-eligible modules (leaf + 4 deps). The entry file is deliberately
+# excluded from the cache upstream, so it is never counted as reusable.
+echo "native object cache invalidation gate (fixture: leaf + 4 dependents + entry)"
+
+got=$(build_once "$FX")
+scenario "cold build" 0 6 "$got"
+
+got=$(build_once "$FX")
+scenario "no change (all valid)" 6 0 "$got"
+
+# SPEED direction: a body-only edit changes no interface, so every dependent
+# stays valid. Only the edited module may rebuild.
+printf 'fun leaf_val() -> i64:\n    return 20\n' > "$FX/src/leaf.spl"
+got=$(build_once "$FX")
+scenario "leaf BODY edit" 5 1 "$got"
+
+# SAFETY direction: the leaf's arity changes, so every dependent was compiled
+# against a signature that no longer exists. All four dependents MUST miss.
+# Reusing them is the silent-stale-object class this gate exists to catch.
+printf 'fun leaf_val(bias: i64) -> i64:\n    return 20 + bias\n' > "$FX/src/leaf.spl"
+got=$(build_once "$FX")
+scenario "leaf INTERFACE edit (arity)" 1 5 "$got"
+
+if [ "$CHECKED" -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ -n "$FAILURES" ]; then
+    echo "FAIL — $CHECKED scenario(s) checked: $FAILURES"
+    exit 1
+fi
+
+echo "PASS — $CHECKED scenario(s) checked, cache invalidates on interface change and reuses otherwise"
+exit 0
