@@ -161,6 +161,26 @@ the other is loudly ERROR at exit 2.
   generalization over the defect class: zero-examples, loader failure with no
   summary, SIGTERM kill, honest red, zero targets.
 
+Rust unit test, with a sabotage arm proving it is not vacuous. Note the test
+lives in the **lib** target, not the bin — `cargo test -p simple-driver --bin
+simple test_run_result_success` reports `0 passed; 9 filtered out`, which is a
+vacuous green if read as a pass. The correct invocation is `--lib`:
+
+```
+# fix in place
+test cli::test_runner::types::tests::test_run_result_success ... ok
+test result: ok. 1 passed; 0 failed; ... 457 filtered out
+
+# sabotage: success() reverted to `self.total_failed == 0`
+test cli::test_runner::types::tests::test_run_result_success ... FAILED
+panicked at driver/src/cli/test_runner/types.rs:428:9: assertion failed: !vacuous.success()
+test result: FAILED. 0 passed; 1 failed
+
+# restored
+test cli::test_runner::types::tests::test_run_result_success ... ok
+test result: ok. 1 passed; 0 failed
+```
+
 Spec run results (`SIMPLE_TIMEOUT_SECONDS=3600 bin/simple test <spec>`):
 
 ```
