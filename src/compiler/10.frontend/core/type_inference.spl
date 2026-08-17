@@ -7,6 +7,18 @@
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT}
 use compiler.core.types.{TYPE_ARRAY_ANY, TYPE_STRUCT, TYPE_FN, TYPE_ANY, TYPE_NAMED_BASE}
 use compiler.core.types.{named_type_find, named_type_fields, named_type_field_type_tags}
+use compiler.core.types.{TYPE_UNION_BASE, TYPE_INTERSECTION_BASE}
+use compiler.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key, dict_type_get_value}
+use compiler.core.types.{is_result_tag, result_tag_to_id, result_type_get_ok, result_type_get_err}
+use compiler.core.types.{is_array_generic_tag, array_generic_tag_to_id, array_generic_type_get_elem}
+use compiler.core.types.{is_option_generic_tag, option_generic_tag_to_id, option_generic_type_get_inner}
+use compiler.core.types.{is_isolated_tag, isolated_tag_to_id, isolated_type_get_inner}
+use compiler.core.types.{is_exclusive_tag, exclusive_tag_to_id, exclusive_type_get_inner}
+use compiler.core.types.{is_reference_tag, reference_tag_to_id, reference_type_get_inner}
+use compiler.core.types.{is_pointer_tag, pointer_tag_to_id, pointer_type_get_inner}
+use compiler.core.types.{is_atomic_tag, atomic_tag_to_id, atomic_type_get_inner}
+use compiler.core.types.{is_weak_tag, weak_tag_to_id, weak_type_get_inner}
+use compiler.core.types.{is_tuple_type_tag, tuple_type_tag_to_id, tuple_type_get_elems, union_type_get_members}
 use compiler.core.ast.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT}
 use compiler.core.ast.{EXPR_IDENT, EXPR_CALL, EXPR_FIELD_ACCESS}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left}
@@ -73,13 +85,83 @@ fn type_subst_apply(type_id: i64) -> i64:
 # ===== Occurs Check =====
 # Prevent infinite types in unification (e.g., T = List<T>)
 
+# Bounded structural descent. Type tags are flat i64 ids, but every composite
+# tag carries its component tags in a side registry in `types.spl`, so the
+# structure IS recoverable and the check must recurse into it. Before
+# 2026-08-17 this returned `false` for every composite tag, so
+# UNIFY_FAIL_OCCURS could never fire for a structural type and infinite types
+# (T = [T], T = (T, i64), T = fn() -> T, T = Dict<T, i64>, ...) were accepted
+# silently. See doc/08_tracking/bug/occurs_check_never_recurses_2026-08-17.md
+val OCCURS_MAX_DEPTH: i64 = 64
+
 fn occurs_check(var_id: i64, type_id: i64) -> bool:
+    occurs_check_depth(var_id, type_id, 0)
+
+fn occurs_check_any(var_id: i64, tags: [i64], depth: i64) -> bool:
+    for i in range(0, tags.len()):
+        if occurs_check_depth(var_id, tags[i], depth + 1):
+            return true
+    false
+
+fn occurs_check_depth(var_id: i64, type_id: i64, depth: i64) -> bool:
+    if depth > OCCURS_MAX_DEPTH:
+        # A cycle deeper than the bound is itself evidence of an infinite type.
+        return true
     val resolved = type_subst_apply(type_id)
     if resolved == var_id:
         return true  # Occurs!
-    # For complex types, would need to recurse into structure
-    # For now, simple check is sufficient
+    # A DIFFERENT unbound type variable is a leaf, not a composite. This guard
+    # is load-bearing: TYPE_VAR_BASE (50000) is above TYPE_NAMED_BASE (10000),
+    # so without it every unbound variable would be misread as a named type
+    # and descended into a bogus field-tag list.
+    if is_type_var(resolved):
+        return false
+    # Single-component wrappers
+    if is_array_generic_tag(resolved):
+        return occurs_check_depth(var_id, array_generic_type_get_elem(array_generic_tag_to_id(resolved)), depth + 1)
+    if is_option_generic_tag(resolved):
+        return occurs_check_depth(var_id, option_generic_type_get_inner(option_generic_tag_to_id(resolved)), depth + 1)
+    if is_isolated_tag(resolved):
+        return occurs_check_depth(var_id, isolated_type_get_inner(isolated_tag_to_id(resolved)), depth + 1)
+    if is_exclusive_tag(resolved):
+        return occurs_check_depth(var_id, exclusive_type_get_inner(exclusive_tag_to_id(resolved)), depth + 1)
+    if is_reference_tag(resolved):
+        return occurs_check_depth(var_id, reference_type_get_inner(reference_tag_to_id(resolved)), depth + 1)
+    if is_pointer_tag(resolved):
+        return occurs_check_depth(var_id, pointer_type_get_inner(pointer_tag_to_id(resolved)), depth + 1)
+    if is_atomic_tag(resolved):
+        return occurs_check_depth(var_id, atomic_type_get_inner(atomic_tag_to_id(resolved)), depth + 1)
+    if is_weak_tag(resolved):
+        return occurs_check_depth(var_id, weak_type_get_inner(weak_tag_to_id(resolved)), depth + 1)
+    # Two-component composites
+    if is_dict_tag(resolved):
+        val did = dict_tag_to_id(resolved)
+        if occurs_check_depth(var_id, dict_type_get_key(did), depth + 1):
+            return true
+        return occurs_check_depth(var_id, dict_type_get_value(did), depth + 1)
+    if is_result_tag(resolved):
+        val rid = result_tag_to_id(resolved)
+        if occurs_check_depth(var_id, result_type_get_ok(rid), depth + 1):
+            return true
+        return occurs_check_depth(var_id, result_type_get_err(rid), depth + 1)
+    # N-component composites
+    if is_tuple_type_tag(resolved):
+        return occurs_check_any(var_id, tuple_type_get_elems(tuple_type_tag_to_id(resolved)), depth)
+    if resolved >= TYPE_UNION_BASE and resolved < TYPE_INTERSECTION_BASE:
+        return occurs_check_any(var_id, union_type_get_members(resolved - TYPE_UNION_BASE), depth)
+    # Named (struct/class/enum) types: recurse through the field type tags.
+    if resolved >= TYPE_NAMED_BASE:
+        return occurs_check_any(var_id, named_type_field_type_tags(resolved), depth)
     false
+
+# ===== Function-Type Occurs Check =====
+# Function types have no flat composite tag in this registry, so the caller
+# supplies the parameter and return tags explicitly. Catches T = fn() -> T.
+
+fn occurs_check_fn(var_id: i64, param_tags: [i64], ret_tag: i64) -> bool:
+    if occurs_check_any(var_id, param_tags, 0):
+        return true
+    occurs_check_depth(var_id, ret_tag, 0)
 
 # ===== Unification Algorithm =====
 # Core type unification (bidirectional)

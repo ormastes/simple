@@ -1,0 +1,149 @@
+# Occurs Check — structural descent
+#
+# Covers src/compiler/10.frontend/core/type_inference.spl occurs_check.
+#
+# BUG (2026-08-17): occurs_check resolved the tag, compared it to var_id, and
+# returned false for everything else, with the comment "For complex types,
+# would need to recurse into structure / For now, simple check is sufficient".
+# It therefore NEVER recursed, so UNIFY_FAIL_OCCURS could not fire for any
+# structural type and every infinite type was accepted silently.
+#
+# This file has two halves:
+#   1. REPRODUCER — the exact shape named in the bug, T = [T].
+#   2. DETECTION  — the whole class. Every composite tag constructor reachable
+#      from types.spl is exercised, because the reproducer alone would have
+#      passed against a fix that special-cased arrays only. Any composite
+#      constructor added to types.spl without a matching arm in
+#      occurs_check_depth must fail here.
+
+use std.spec
+use compiler.frontend.core.type_inference.{
+    type_var_fresh, type_var_reset, unify_reset, unify_bind,
+    occurs_check, occurs_check_fn, unify_types,
+    UNIFY_SUCCESS, UNIFY_FAIL_OCCURS
+}
+use compiler.core.types.{TYPE_I64, TYPE_TEXT, TYPE_BOOL}
+use compiler.core.types.{array_generic_type_register, option_generic_type_register}
+use compiler.core.types.{dict_type_register, result_type_register}
+use compiler.core.types.{tuple_type_register, union_type_register}
+use compiler.core.types.{reference_type_register, pointer_type_register}
+use compiler.core.types.{isolated_type_register, exclusive_type_register}
+use compiler.core.types.{atomic_type_register, weak_type_register}
+
+fn fresh_var() -> i64:
+    type_var_reset()
+    unify_reset()
+    type_var_fresh()
+
+describe "occurs_check — reproducer (T = [T])":
+    it "detects the variable inside its own array element type":
+        val t = fresh_var()
+        val arr_of_t = array_generic_type_register(t)
+        expect(occurs_check(t, arr_of_t)).to_equal(true)
+
+    it "makes unify_types reject the infinite type T = [T]":
+        val t = fresh_var()
+        val arr_of_t = array_generic_type_register(t)
+        expect(unify_types(t, arr_of_t)).to_equal(UNIFY_FAIL_OCCURS)
+
+    it "still unifies a variable with an array that does NOT contain it":
+        val t = fresh_var()
+        val arr_of_i64 = array_generic_type_register(TYPE_I64)
+        expect(unify_types(t, arr_of_i64)).to_equal(UNIFY_SUCCESS)
+
+describe "occurs_check — detection across every composite shape":
+    it "detects T inside a tuple (T, i64)":
+        val t = fresh_var()
+        expect(occurs_check(t, tuple_type_register([t, TYPE_I64]))).to_equal(true)
+
+    it "detects T inside a tuple in trailing position (i64, T)":
+        val t = fresh_var()
+        expect(occurs_check(t, tuple_type_register([TYPE_I64, t]))).to_equal(true)
+
+    it "detects T as a function return type: T = fn() -> T":
+        val t = fresh_var()
+        expect(occurs_check_fn(t, [], t)).to_equal(true)
+
+    it "detects T as a function parameter type: T = fn(T) -> i64":
+        val t = fresh_var()
+        expect(occurs_check_fn(t, [t], TYPE_I64)).to_equal(true)
+
+    it "detects T in a dict key: Dict<T, i64>":
+        val t = fresh_var()
+        expect(occurs_check(t, dict_type_register(t, TYPE_I64))).to_equal(true)
+
+    it "detects T in a dict value: Dict<text, T>":
+        val t = fresh_var()
+        expect(occurs_check(t, dict_type_register(TYPE_TEXT, t))).to_equal(true)
+
+    it "detects T in a Result ok arm":
+        val t = fresh_var()
+        expect(occurs_check(t, result_type_register(t, TYPE_TEXT))).to_equal(true)
+
+    it "detects T in a Result err arm":
+        val t = fresh_var()
+        expect(occurs_check(t, result_type_register(TYPE_I64, t))).to_equal(true)
+
+    it "detects T inside an Option<T>":
+        val t = fresh_var()
+        expect(occurs_check(t, option_generic_type_register(t))).to_equal(true)
+
+    it "detects T inside a union member":
+        val t = fresh_var()
+        expect(occurs_check(t, union_type_register([TYPE_I64, t]))).to_equal(true)
+
+    it "detects T behind a reference wrapper":
+        val t = fresh_var()
+        expect(occurs_check(t, reference_type_register(t, false))).to_equal(true)
+
+    it "detects T behind a pointer wrapper":
+        val t = fresh_var()
+        expect(occurs_check(t, pointer_type_register(t, true))).to_equal(true)
+
+    it "detects T behind an iso wrapper":
+        val t = fresh_var()
+        expect(occurs_check(t, isolated_type_register(t))).to_equal(true)
+
+    it "detects T behind an exclusive wrapper":
+        val t = fresh_var()
+        expect(occurs_check(t, exclusive_type_register(t))).to_equal(true)
+
+    it "detects T behind an atomic wrapper":
+        val t = fresh_var()
+        expect(occurs_check(t, atomic_type_register(t))).to_equal(true)
+
+    it "detects T behind a weak wrapper":
+        val t = fresh_var()
+        expect(occurs_check(t, weak_type_register(t))).to_equal(true)
+
+describe "occurs_check — nesting and substitution":
+    it "detects T nested several composites deep: Dict<i64, [Option<T>]>":
+        val t = fresh_var()
+        val opt_t = option_generic_type_register(t)
+        val arr = array_generic_type_register(opt_t)
+        expect(occurs_check(t, dict_type_register(TYPE_I64, arr))).to_equal(true)
+
+    it "follows substitutions: U bound to [T] makes T occur in U":
+        type_var_reset()
+        unify_reset()
+        val t = type_var_fresh()
+        val u = type_var_fresh()
+        unify_bind(u, array_generic_type_register(t))
+        expect(occurs_check(t, u)).to_equal(true)
+
+describe "occurs_check — must not over-report":
+    it "reports false for an unrelated scalar":
+        val t = fresh_var()
+        expect(occurs_check(t, TYPE_I64)).to_equal(false)
+
+    it "reports false for a composite built only from scalars":
+        val t = fresh_var()
+        val inner = dict_type_register(TYPE_TEXT, TYPE_BOOL)
+        expect(occurs_check(t, tuple_type_register([inner, TYPE_I64]))).to_equal(false)
+
+    it "reports false for a DIFFERENT variable nested in a composite":
+        type_var_reset()
+        unify_reset()
+        val t = type_var_fresh()
+        val other = type_var_fresh()
+        expect(occurs_check(t, array_generic_type_register(other))).to_equal(false)
