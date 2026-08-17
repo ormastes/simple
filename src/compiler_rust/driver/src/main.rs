@@ -1576,6 +1576,19 @@ fn handle_test_rust(args: &[String], gc_log: bool, gc_off: bool) -> i32 {
             test_runner::print_summary(&result, format);
         }
 
+        if is_run_management {
+            // Run-management subcommands produce no examples by design.
+            return if result.total_failed == 0 { 0 } else { 1 };
+        }
+
+        // Fail-closed: a run that executed zero examples proves nothing. It
+        // exits 2 (ERROR — nothing was checked), never 0. See
+        // doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md
+        if result.executed_nothing() {
+            eprintln!("ERROR — nothing was checked: test run executed 0 examples (exit 2)");
+            return 2;
+        }
+
         if result.success() {
             0
         } else {

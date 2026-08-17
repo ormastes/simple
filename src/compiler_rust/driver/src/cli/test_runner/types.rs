@@ -366,8 +366,23 @@ pub struct TestRunResult {
 }
 
 impl TestRunResult {
+    /// True when the run produced no verdict of any kind: nothing passed,
+    /// nothing failed, nothing was skipped/ignored, and nothing was listed.
+    ///
+    /// Such a run carries zero evidence — it is indistinguishable from a spec
+    /// that never loaded. It must never be reported as success (fail-closed;
+    /// see `.claude/rules/vcs.md` verdict convention: a check that checked
+    /// nothing is `ERROR`, not `PASS`).
+    pub fn executed_nothing(&self) -> bool {
+        self.total_listed == 0
+            && self.total_passed == 0
+            && self.total_failed == 0
+            && self.total_skipped == 0
+            && self.total_ignored == 0
+    }
+
     pub fn success(&self) -> bool {
-        self.total_failed == 0
+        self.total_failed == 0 && !self.executed_nothing()
     }
 }
 
@@ -398,6 +413,32 @@ mod tests {
             total_duration_ms: 100,
         };
         assert!(!failed_result.success());
+
+        // Fail-closed: a run that produced no verdict at all is NOT success.
+        let vacuous = TestRunResult {
+            files: vec![],
+            total_listed: 0,
+            total_passed: 0,
+            total_failed: 0,
+            total_skipped: 0,
+            total_ignored: 0,
+            total_duration_ms: 100,
+        };
+        assert!(vacuous.executed_nothing());
+        assert!(!vacuous.success());
+
+        // A run that only skipped/ignored still produced a verdict.
+        let skipped_only = TestRunResult {
+            files: vec![],
+            total_listed: 0,
+            total_passed: 0,
+            total_failed: 0,
+            total_skipped: 3,
+            total_ignored: 0,
+            total_duration_ms: 100,
+        };
+        assert!(!skipped_only.executed_nothing());
+        assert!(skipped_only.success());
     }
 
     #[test]
