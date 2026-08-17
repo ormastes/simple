@@ -163,13 +163,46 @@ impl SheetsApp:
                 pass_do_nothing("non-keyboard UI events do not affect sheet navigation")
 
     me navigate_to(col: i32, row: i32):
-        """Change the active cell and update scroll position if needed."""
+        """Change the active cell and update scroll position if needed.
+
+        Hidden-row awareness matches the other two cursor-movement paths
+        (`_sheet_gui_move_within_bounds` in `app.office.gui` and `_tui_move` in
+        `app.office.interactive`): if the requested row is hidden, keep
+        stepping in the SAME direction of travel until a visible row is found,
+        and if the grid edge is reached first stay on the row the cursor came
+        from rather than landing on a hidden one (never wraps). Direction is
+        inferred from the delta against the current active cell, so a
+        pure-horizontal move (Tab, ArrowLeft/Right) never touches the row.
+
+        The scan only ever fires when the TARGET row is hidden, so an absolute
+        jump onto a visible row -- the only kind the UI-access controller's
+        cell `select` can produce, since a hidden row is not rendered and
+        cannot be clicked -- is bit-for-bit unchanged. That is what keeps the
+        `office_cli_tui_ui_access` golden output stable.
+
+        Index base: `hidden_rows`/`is_row_hidden` are 1-BASED while CellRef.row
+        is 0-BASED, hence the `+ 1` on every query.
+        """
         var c = col
         var r = row
         if c < 0:
             c = 0
         if r < 0:
             r = 0
+        val sheet = me.workbook.active()
+        val from_row = me.active_cell.row
+        var d_row = 0
+        if r > from_row:
+            d_row = 1
+        if r < from_row:
+            d_row = -1
+        if d_row != 0 and r >= 0 and r < sheet.row_count:
+            var scan = r
+            while scan >= 0 and scan < sheet.row_count and sheet.is_row_hidden((scan + 1).to_i64()):
+                scan = scan + d_row
+            if scan < 0 or scan >= sheet.row_count:
+                scan = from_row
+            r = scan
         me.active_cell = CellRef(col: c, row: r)
         # Update formula text to the cell's current value
         val ref_str = cell_ref_to_string(me.active_cell)

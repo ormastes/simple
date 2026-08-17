@@ -1,0 +1,78 @@
+"""SheetsApp.navigate_to hidden-row awareness spec.
+
+Regression for the third cursor-movement path in
+doc/08_tracking/bug/calc_cursor_hidden_row_awareness_divergence_2026-08-11.md.
+The GUI session (_sheet_gui_move_within_bounds) and the TUI (_tui_move) both
+skip hidden rows; SheetsApp.navigate_to -- the widget-app arrow/Tab handler --
+clamped to >= 0 and nothing else, so it parked the active cell ON a hidden row.
+
+Semantics asserted here are exactly the other two paths': step in the SAME
+direction of travel until a visible row is found; if the grid edge is reached
+first, stay on the row the cursor came from (no wrap). Vertical direction is
+inferred from the delta against the current active cell, so a pure-horizontal
+move (Tab, ArrowLeft/Right) never touches the row.
+
+Note the index base: hidden_rows / is_row_hidden are 1-BASED, CellRef.row is
+0-BASED, so row index r corresponds to is_row_hidden(r + 1).
+"""
+
+use std.spec
+use app.office.sheets.sheets_app.{SheetsApp}
+use app.office.sheets.cell.{CellRef}
+
+fn _app_with_hidden(rows: [i64]) -> SheetsApp:
+    """A fresh SheetsApp whose active sheet has the given 1-based rows hidden."""
+    val app = SheetsApp.new()
+    val sh = app.workbook.active()
+    for r in rows:
+        sh.hide_row(r)
+    app
+
+describe "SheetsApp.navigate_to: hidden-row awareness":
+    it "downward move skips a hidden row instead of landing on it":
+        var app = _app_with_hidden([2])
+        # cursor starts at row index 0 (1-based row 1); ArrowDown targets index
+        # 1 (1-based row 2) which is hidden -> must continue to index 2.
+        app.navigate_to(0, 1)
+        expect(app.active_cell.row).to_equal(2)
+
+    it "upward move skips a hidden row instead of landing on it":
+        var app = _app_with_hidden([2])
+        app.navigate_to(0, 2)
+        expect(app.active_cell.row).to_equal(2)
+        app.navigate_to(0, 1)
+        expect(app.active_cell.row).to_equal(0)
+
+    it "skips a run of consecutive hidden rows in one move":
+        var app = _app_with_hidden([2, 3, 4])
+        app.navigate_to(0, 1)
+        expect(app.active_cell.row).to_equal(4)
+
+    it "stays on the original row when every row below is hidden":
+        var app = _app_with_hidden([])
+        val sh = app.workbook.active()
+        var r = 2
+        while r <= 100:
+            sh.hide_row(r.to_i64())
+            r = r + 1
+        app.navigate_to(0, 1)
+        expect(app.active_cell.row).to_equal(0)
+
+    it "leaves a pure horizontal move untouched by hidden rows":
+        var app = _app_with_hidden([2])
+        app.navigate_to(0, 1)
+        expect(app.active_cell.row).to_equal(2)
+        # Tab: same row, next column -- the row must not be re-scanned or moved.
+        app.navigate_to(1, 2)
+        expect(app.active_cell.row).to_equal(2)
+        expect(app.active_cell.col).to_equal(1)
+
+    it "never lands on a hidden row for any downward step across the sheet":
+        var app = _app_with_hidden([3, 4, 7, 11])
+        val sh = app.workbook.active()
+        var step = 0
+        while step < 12:
+            val cur = app.active_cell.row
+            app.navigate_to(0, cur + 1)
+            assert_false(sh.is_row_hidden((app.active_cell.row + 1).to_i64()))
+            step = step + 1

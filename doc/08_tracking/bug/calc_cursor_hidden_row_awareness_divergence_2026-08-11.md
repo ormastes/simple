@@ -1,8 +1,87 @@
 # Calc cursor movement: only the GUI session honours hidden rows
 
 **Date:** 2026-08-11
-Status: OPEN (P2) — PARTIALLY FIXED 2026-08-17 (commit ff66bac92f85)
-Status re-verified 2026-08-17 by source inspection (triage shard 00).
+Status: RESOLVED 2026-08-17 — all three cursor paths are hidden-row aware.
+History: OPEN -> PARTIALLY FIXED 2026-08-17 (`ff66bac92f85`, TUI) -> RESOLVED
+2026-08-17 (this commit, `SheetsApp.navigate_to`).
+
+## Resolution 2026-08-17
+
+The third and last path, `SheetsApp.navigate_to`
+(`src/app/office/sheets/sheets_app.spl`), now skips hidden rows with the exact
+semantics of the other two: step in the SAME direction of travel until a
+visible row is found; on hitting the grid edge first, stay on the row the
+cursor came from (never wraps); a pure-horizontal move (`Tab`,
+`ArrowLeft/Right`) leaves the row untouched, because the direction is inferred
+from the delta against the current active cell and a zero delta skips the scan
+entirely. The 1-based/0-based mismatch is handled at the single query site
+(`is_row_hidden((scan + 1).to_i64())` against a 0-based `CellRef.row`).
+
+### The frozen-contract blocker in "Why this was not fixed by merging" is void
+
+Blocker 2 above assumed hidden-row skipping would change
+`CalcAccessController.tui_text()`, the frozen `office_cli_tui_ui_access`
+acceptance output. It does not, for two independent reasons:
+
+1. The scan only fires when the TARGET row is hidden. An absolute jump onto a
+   visible row — the only kind the controller's cell `select`
+   (`access_controller.spl:314`) can produce, since a hidden row is not
+   rendered and so cannot be clicked — is bit-for-bit unchanged.
+2. Neither the controller nor the frozen spec ever hides a row:
+   `grep -c "hide_row\|hidden" src/app/office/sheets/access_controller.spl
+   doc/06_spec/03_system/app/office/feature/office_cli_tui_ui_access_spec.md`
+   returns `0` for both. There is no golden output to re-baseline.
+
+### Evidence
+
+Reproducing spec (new):
+`test/01_unit/app/office/sheets/sheets_app_hidden_row_nav_spec.spl`
+
+```
+RED   (before the fix): Results: 6 total, 0 passed, 6 failed
+GREEN (after the fix):  Results: 6 total, 6 passed, 0 failed
+```
+
+The RED failures were genuine assertions, not a harness error — every one
+reported `expected 1 to equal N`, i.e. the cursor parked on row index 1, the
+hidden row.
+
+Defect-CLASS spec (new):
+`test/01_unit/app/office/cursor_hidden_row_invariant_spec.spl`
+
+```
+GREEN: Results: 6 total, 6 passed, 0 failed
+```
+
+This one exists because the recurring defect is not "path X is broken" but "a
+NEW cursor-movement entry point forgot hidden-row awareness" — which happened
+three times, and was found and fixed three separate times. It drives ALL THREE
+paths over ONE fixture through a single `_all_paths` helper and asserts the
+joint invariant: (I1) no path leaves the cursor on a hidden row, (I2) all
+paths agree on the landing row so divergence cannot reappear silently, (I3)
+every path stays put at a grid edge with no visible row left. A fourth entry
+point is covered the moment it is added to `_all_paths`.
+
+Non-regression on the two already-fixed paths:
+
+```
+test/01_unit/app/office/sheet_gui_session_spec.spl  Results: 31 total, 31 passed, 0 failed
+test/01_unit/app/office/interactive_spec.spl        Results: 19 total, 19 passed, 0 failed
+```
+
+### Residual (does not reopen this row)
+
+`test/01_unit/app/office/sheets/access_controller_spec.spl` could not be run to
+a verdict on this host: three attempts ended `reason=daemon-no-response` /
+`daemon-worker-timeout` with **no `Results:` line at all** under heavy load
+(21-30 concurrent `simple` processes), so those runs are INCONCLUSIVE — never
+read as a pass or a fail. The static argument above (the controller never hides
+a row, and the scan is a no-op on a visible target) is why this is recorded
+rather than treated as a blocker. Re-run when the box is quiet:
+
+```
+bin/simple test test/01_unit/app/office/sheets/access_controller_spec.spl
+```
 
 **Partial fix 2026-08-17 — `ff66bac92f85`:** path 1 (`_tui_move`,
 `src/app/office/interactive.spl`) is now hidden-row aware. Evidence: grepped
@@ -33,7 +112,7 @@ divergence is tracked rather than normalised away.
 | Path | File | Receiver | Addressing | Scroll policy | Hidden-row aware |
 |------|------|----------|-----------|---------------|------------------|
 | `_tui_move(state, d_col, d_row)` | `src/app/office/interactive.spl:202` | `TuiState` | relative delta | none — `TuiState` has no viewport state at all | **No** |
-| `SheetsApp.navigate_to(col, row)` | `src/app/office/sheets/sheets_app.spl:165` | `SheetsApp` | absolute `(col, row)` | naive window arithmetic on `scroll_row`/`scroll_col` | **No** |
+| `SheetsApp.navigate_to(col, row)` | `src/app/office/sheets/sheets_app.spl:165` | `SheetsApp` | absolute `(col, row)` | naive window arithmetic on `scroll_row`/`scroll_col` | **Yes (2026-08-17)** |
 | `session_select(session, ref_str, view_rows, view_cols)` | `src/app/office/gui.spl:1014` | `SheetGuiSession` | absolute A1-style ref string | minimal scroll over the *visible* row set | **Yes** |
 
 Only the third consults `sheet.is_row_hidden`, and it does so indirectly:
