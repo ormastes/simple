@@ -1,50 +1,270 @@
 #!/bin/sh
-set -eu
+# check-bootstrap-progress-watch.shs -- the bootstrap heartbeat must measure the
+# WORK, and must be able to say "no progress".
+#
+# Incident 2026-08-17 (the reproducing fixture below is a direct replay):
+# `bootstrap-from-scratch.sh` launches the watcher with `--pid="$$"`, the
+# WRAPPER SHELL's pid. That shell sleeps while its child builds, so the
+# heartbeat reported `cpu_pct=0.0 rss=2984KB` for a stage-3 compile genuinely
+# running at 98.8% CPU and 6.9GB RSS. `status=alive` was true and every metric
+# beside it was meaningless -- a monitor that always reads 0% cannot tell
+# progress from a stall, which is the one job it has. The heartbeat had just
+# been turned ON BY DEFAULT (47d116863dd) precisely to resolve that ambiguity,
+# after three sessions killed HEALTHY builds in one day, one already at 62/62.
+#
+# Two things are fenced here, because either alone fails open:
+#   (a) SUBJECT -- a parent that sleeps while a child burns CPU MUST read busy.
+#       This is the exact defect; a root-only sampler fails it.
+#   (b) STATISTIC -- a `ps` lifetime-average CPU column means a process that
+#       pegs then idles reads mid-range and the verdict depends on poll timing.
+#       A sibling lane hit and fixed exactly this in kill_simple_monitor.shs
+#       (bd3016a32a7). Reintroducing it here is fenced statically.
+# Plus the new `alive-no-progress` state in BOTH directions: an idle tree must
+# reach it, and a busy tree must NEVER reach it -- a false "hung" verdict feeds
+# human kill decisions and is more expensive than a late true one.
+#
+# Verdict is the LAST line of stdout. A run that checked nothing is ERROR(2),
+# never a pass -- a guard that passes vacuously is itself an instance of the
+# silent-fail-open class it exists to catch.
+#
+# NOTE: `set -e` is deliberately NOT used. Every assertion is `<command>`
+# followed by `expect "<desc>" $?`, and under `set -e` a failing assertion kills
+# the script BEFORE `expect` can record it -- the guard would exit non-zero
+# having printed no verdict and no failure name, which is the same
+# silent-fail-open shape it exists to prevent. Failures are accumulated
+# explicitly; every early abort prints an explicit ERROR line.
+set -u
 
-fail() { echo "FAIL: $*" >&2; exit 1; }
-watcher=scripts/bootstrap/bootstrap-progress-watch.shs
+# Overridable so the pre-fix watcher can be replayed through this guard and
+# shown to FAIL. A guard never run against the broken input is not known to
+# detect anything.
+watcher=${BOOTSTRAP_WATCH_SCRIPT:-scripts/bootstrap/bootstrap-progress-watch.shs}
 wrapper=scripts/bootstrap/bootstrap-from-scratch.sh
-tmp_dir=${TMPDIR:-/tmp}/simple-bootstrap-progress-test.$$
-mkdir -p "$tmp_dir"
-trap 'rm -rf "$tmp_dir"' EXIT INT TERM
+
+CHECKED=0
+FAILURES=""
+
+pass_check() { CHECKED=$((CHECKED + 1)); }
+fail_check() {
+  CHECKED=$((CHECKED + 1))
+  FAILURES="${FAILURES:+$FAILURES; }$1"
+  echo "  FAIL: $1" >&2
+}
+expect() { if [ "$2" -eq 0 ]; then pass_check; else fail_check "$1"; fi; }
+
+tmp_root=${TMPDIR:-/tmp}/simple-bootstrap-progress-check.$$
+mkdir -p "$tmp_root"
+fixture_pids=""
+cleanup() {
+  for _p in $fixture_pids; do kill "$_p" 2>/dev/null || true; done
+  rm -rf "$tmp_root"
+}
+trap cleanup EXIT INT TERM
+
+# Read a named field out of the last matching sample line. Field-addressed,
+# never position-addressed: this guard was previously anchored on a field being
+# LAST on the line and silently broke when the watcher grew new fields.
+field_of() { # field_of <log> <name> [grep-filter]
+  _filter=${3:-event=sample}
+  grep -F "$_filter" "$1" 2>/dev/null | tail -1 | tr ' ' '\n' |
+    sed -n "s/^$2=//p" | tail -1
+}
+
+num_ge() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a+0 >= b+0)}'; }
+num_lt() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a+0 <  b+0)}'; }
+
+# ---------------------------------------------------------------- selftest ----
+# Fatal, and runs before every scan. These fixtures prove the guard's own
+# extraction and comparison logic can distinguish the incident shape from a
+# healthy one -- otherwise "PASS" only means the greps did not crash.
+selftest() {
+  st_dir="$tmp_root/selftest"
+  mkdir -p "$st_dir"
+  st_fail=0
+  st_note() { echo "  selftest FAIL: $*" >&2; st_fail=1; }
+
+  # 1. The incident line itself: a busy build reported at 0% CPU. field_of must
+  #    read 0.0 out of it, and the busy assertion must REJECT it.
+  printf 'event=sample timestamp=1 status=alive pid=9 elapsed_s=1 cpu_pct=0.0 rss_kb=2984 tree_cpu_pct=0.0 tree_rss_kb=2984 tree_processes=1 top_comm=sh milestone=x\n' \
+    >"$st_dir/incident.log"
+  [ "$(field_of "$st_dir/incident.log" tree_cpu_pct)" = "0.0" ] ||
+    st_note "field_of failed to read tree_cpu_pct from the incident line"
+  if num_ge "$(field_of "$st_dir/incident.log" tree_cpu_pct)" 40; then
+    st_note "busy assertion accepted the incident's 0.0% reading"
+  fi
+
+  # 2. A healthy busy line must be ACCEPTED -- so the assertion is not simply
+  #    always-false, which would make every real check vacuously green.
+  printf 'event=sample timestamp=1 status=alive pid=9 cpu_pct=98.8 tree_cpu_pct=98.8 tree_rss_kb=6887148 top_comm=simple\n' \
+    >"$st_dir/healthy.log"
+  num_ge "$(field_of "$st_dir/healthy.log" tree_cpu_pct)" 40 ||
+    st_note "busy assertion rejected a genuine 98.8% reading"
+
+  # 3. Prefix-collision trap: reading `cpu_pct` must not match `tree_cpu_pct`
+  #    and silently compare the wrong number.
+  printf 'event=sample tree_cpu_pct=99.0 cpu_pct=1.0\n' >"$st_dir/prefix.log"
+  [ "$(field_of "$st_dir/prefix.log" cpu_pct)" = "1.0" ] ||
+    st_note "field_of confused cpu_pct with tree_cpu_pct"
+
+  # 4. Empty log must yield empty, and empty must never satisfy an assertion --
+  #    this is the vacuous-pass hole in field form.
+  : >"$st_dir/empty.log"
+  [ -z "$(field_of "$st_dir/empty.log" tree_cpu_pct)" ] ||
+    st_note "field_of invented a value for an empty log"
+  if num_ge "$(field_of "$st_dir/empty.log" tree_cpu_pct)" 40; then
+    st_note "busy assertion passed on an empty log"
+  fi
+
+  # 5. The fixture SHAPE this guard depends on must behave as claimed: a
+  #    sleeping parent with a CPU-burning child. If the host cannot produce
+  #    that, every process check below is meaningless and we must not pass.
+  sh -c 'awk "BEGIN{while(1){x++}}" & sleep 6' &
+  st_pid=$!
+  fixture_pids="$fixture_pids $st_pid"
+  sleep 2
+  st_root_ticks=$(awk '{r=$0; sub(/^.*\) /,"",r); split(r,a," "); print a[12]+a[13]}' \
+    "/proc/$st_pid/stat" 2>/dev/null || echo unknown)
+  case "$st_root_ticks" in
+    ''|unknown) st_note "cannot read /proc/<pid>/stat; CPU evidence unavailable on this host" ;;
+    *) [ "$st_root_ticks" -le 5 ] 2>/dev/null ||
+         st_note "fixture parent burned $st_root_ticks ticks; it is supposed to sleep" ;;
+  esac
+  kill "$st_pid" 2>/dev/null || true
+
+  [ "$st_fail" -eq 0 ] || { echo "ERROR — selftest failed; no scan was run"; exit 2; }
+}
+
+selftest
+
+# --------------------------------------------------------------- contract ----
+[ -f "$watcher" ] || { echo "ERROR — nothing was checked ($watcher missing)"; exit 2; }
+[ -f "$wrapper" ] || { echo "ERROR — nothing was checked ($wrapper missing)"; exit 2; }
 
 help=$(sh "$watcher" --help)
-printf '%s\n' "$help" | grep -Fq -- '--expected-start=TEXT' || fail "stale-PID help missing"
-wrapper_help=$(sh "$wrapper" --help)
-printf '%s\n' "$wrapper_help" | grep -Fq -- '--progress[=<path>]' || fail "wrapper progress option missing"
-grep -Fq 'trap bootstrap_cleanup EXIT INT TERM' "$wrapper" || fail "wrapper cleanup trap missing"
-grep -Fq 'bootstrap-progress-watch.shs' "$wrapper" || fail "wrapper watcher launch missing"
-grep -Fq 'bootstrap_progress_mark stage4 ' "$wrapper" || fail "Stage 4 milestone missing"
+printf '%s\n' "$help" | grep -Fq -- '--expected-start=TEXT'
+expect "watcher help missing --expected-start" $?
+printf '%s\n' "$help" | grep -Fq 'alive-no-progress'
+expect "watcher help does not document the alive-no-progress state" $?
+printf '%s\n' "$help" | grep -Fq 'descendants'
+expect "watcher help does not state that metrics cover descendants" $?
 
-sleep 5 &
-live_pid=$!
-printf 'milestone=stage-test\nmain_log=%s\n' "$tmp_dir/main.log" >"$tmp_dir/state"
-printf 'abc' >"$tmp_dir/main.log"
-sh "$watcher" --pid="$live_pid" --state-file="$tmp_dir/state" \
-  --progress-log="$tmp_dir/live.progress" --interval=1 --once
-# Assert the three live-sample facts as whole FIELDS, not by position.
-#
-# This assertion previously ended in `main_log_bytes=3$`, anchoring on
-# main_log_bytes being the LAST field on the line. The watcher later gained
-# phase/unit_kind/done/total/tasks_*/failed/cached/current/terminal fields,
-# which pushed main_log_bytes into the middle of the sample and made this
-# guard fail on a watcher that was working correctly. Nothing ran the guard,
-# so the drift went unnoticed until it was wired (2026-08-02).
-#
-# The `( |$)` tail keeps the match exact -- main_log_bytes=30 still fails --
-# so this repairs the coupling to field ORDER without weakening the check.
-grep -Eq 'status=alive .*milestone=stage-test .*main_log_bytes=3( |$)' "$tmp_dir/live.progress" || fail "live sample missing metrics/state"
+wrapper_help=$(sh "$wrapper" --help)
+printf '%s\n' "$wrapper_help" | grep -Fq -- '--progress[=<path>]'
+expect "wrapper progress option missing" $?
+# The wrapper must install a cleanup trap so the watcher is reaped. The previous
+# form of this assertion demanded the literal `trap bootstrap_cleanup EXIT INT
+# TERM`, but the wrapper actually installs `trap 'bootstrap_cleanup $?' EXIT` --
+# so this guard was ALREADY failing on a correct wrapper, more evidence nothing
+# was running it. Assert the intent, not one spelling of it. Separately noted
+# and NOT fenced here: INT/TERM are genuinely untrapped, so Ctrl-C leaves the
+# watcher running.
+grep -q "^[[:space:]]*trap .*bootstrap_cleanup" "$wrapper"
+expect "wrapper installs no bootstrap_cleanup trap" $?
+grep -Fq 'bootstrap-progress-watch.shs' "$wrapper"
+expect "wrapper watcher launch missing" $?
+grep -Fq 'bootstrap_progress_mark stage4 ' "$wrapper"
+expect "Stage 4 milestone missing" $?
+
+# (b) STATISTIC fence. Comments are stripped first: the watcher's own header
+# EXPLAINS why the lifetime-average column is wrong, and a naive scan flags that
+# prose as the defect it warns about -- the same false-positive class the
+# conflict-marker guard documents.
+sed 's/#.*$//' "$watcher" | grep -Eq 'ps[^|]*(-o[[:space:]]*)?(%cpu|pcpu)'
+lifetime_avg_present=$?
+[ "$lifetime_avg_present" -ne 0 ]
+expect "watcher samples CPU via a ps lifetime-average column (poll-timing dependent)" $?
+grep -Fq '/proc/' "$watcher"
+expect "watcher does not read /proc for CPU ticks" $?
+grep -Fq 'starttime' "$watcher"
+expect "watcher does not check starttime (a recycled pid could inherit a sample)" $?
+
+# ------------------------------------------------------- live/exited/stale ----
+sleep 8 & live_pid=$!
+fixture_pids="$fixture_pids $live_pid"
+printf 'milestone=stage-test\nmain_log=%s\n' "$tmp_root/main.log" >"$tmp_root/state"
+printf 'abc' >"$tmp_root/main.log"
+sh "$watcher" --pid="$live_pid" --state-file="$tmp_root/state" \
+  --progress-log="$tmp_root/live.progress" --interval=1 --once
+grep -Eq 'status=alive .*milestone=stage-test .*main_log_bytes=3( |$)' "$tmp_root/live.progress"
+expect "live sample missing metrics/state" $?
 
 wait "$live_pid" 2>/dev/null || true
-sh "$watcher" --pid="$live_pid" --progress-log="$tmp_dir/exited.progress" --once
-grep -Fq 'status=exited' "$tmp_dir/exited.progress" || fail "exited process not detected"
+sh "$watcher" --pid="$live_pid" --progress-log="$tmp_root/exited.progress" --once
+grep -Fq 'status=exited' "$tmp_root/exited.progress"
+expect "exited process not detected" $?
 
-set +e
 sh "$watcher" --pid="$$" --expected-start=definitely-not-this-process \
-  --progress-log="$tmp_dir/stale.progress" --once
+  --progress-log="$tmp_root/stale.progress" --once
 stale_status=$?
-set -e
-[ "$stale_status" -eq 3 ] || fail "stale PID returned $stale_status, expected 3"
-grep -Fq 'status=stale' "$tmp_dir/stale.progress" || fail "stale PID not logged"
+[ "$stale_status" -eq 3 ]
+expect "stale PID returned $stale_status, expected 3" $?
+grep -Fq 'status=stale' "$tmp_root/stale.progress"
+expect "stale PID not logged" $?
 
-echo "PASS: bootstrap progress watcher live/exited/stale coverage"
+# ---------------------------------- (a) SUBJECT: the reproducing fixture ------
+# A parent that SLEEPS while its child BURNS CPU. This is the incident verbatim.
+# Before the fix this reported cpu_pct=0.0; it must now report the child's work.
+sh -c 'awk "BEGIN{while(1){x++}}" & sleep 25' &
+busy_pid=$!
+fixture_pids="$fixture_pids $busy_pid"
+sleep 1
+printf 'milestone=busy\nmain_log=%s\n' "$tmp_root/busy_main.log" >"$tmp_root/busy_state"
+printf 'abc' >"$tmp_root/busy_main.log"
+BOOTSTRAP_WATCH_STALL_SAMPLES=2 timeout 12 sh "$watcher" --pid="$busy_pid" \
+  --state-file="$tmp_root/busy_state" --progress-log="$tmp_root/busy.progress" \
+  --interval=1 >/dev/null 2>&1
+
+busy_cpu=$(field_of "$tmp_root/busy.progress" tree_cpu_pct)
+busy_top=$(field_of "$tmp_root/busy.progress" top_comm)
+busy_root_rss=$(field_of "$tmp_root/busy.progress" rss_kb)
+busy_tree_rss=$(field_of "$tmp_root/busy.progress" tree_rss_kb)
+
+[ -n "$busy_cpu" ] && num_ge "$busy_cpu" 40
+expect "busy-child tree reported tree_cpu_pct='${busy_cpu:-<none>}' (<40); the watcher is sampling the sleeping parent, not the work" $?
+[ "$busy_top" = "awk" ]
+expect "heaviest descendant reported as '${busy_top:-<none>}', expected the CPU-burning child 'awk'" $?
+[ -n "$busy_tree_rss" ] && [ -n "$busy_root_rss" ] && num_ge "$busy_tree_rss" "$busy_root_rss"
+expect "tree_rss_kb (${busy_tree_rss:-<none>}) is not >= root rss_kb (${busy_root_rss:-<none>}); tree RSS is not aggregating" $?
+# A working build must NEVER be labelled stalled -- false 'hung' verdicts are
+# what got healthy builds killed in the first place.
+grep -Fq 'status=alive-no-progress' "$tmp_root/busy.progress"
+busy_stalled=$?
+[ "$busy_stalled" -ne 0 ]
+expect "busy tree was reported alive-no-progress (false stall verdict)" $?
+kill "$busy_pid" 2>/dev/null || true
+
+# ------------------------------------------ genuinely idle tree must say so ---
+sh -c 'sleep 25 & sleep 25' &
+idle_pid=$!
+fixture_pids="$fixture_pids $idle_pid"
+sleep 1
+printf 'milestone=idle\nmain_log=%s\n' "$tmp_root/idle_main.log" >"$tmp_root/idle_state"
+printf 'abc' >"$tmp_root/idle_main.log"
+BOOTSTRAP_WATCH_STALL_SAMPLES=2 timeout 12 sh "$watcher" --pid="$idle_pid" \
+  --state-file="$tmp_root/idle_state" --progress-log="$tmp_root/idle.progress" \
+  --interval=1 >/dev/null 2>&1
+
+idle_cpu=$(field_of "$tmp_root/idle.progress" tree_cpu_pct)
+[ -n "$idle_cpu" ] && num_lt "$idle_cpu" 5
+expect "idle tree reported tree_cpu_pct='${idle_cpu:-<none>}' (>=5)" $?
+grep -Fq 'status=alive-no-progress' "$tmp_root/idle.progress"
+expect "idle tree with a static log never reached alive-no-progress" $?
+# It must not jump there on the FIRST sample -- the consecutive-sample streak is
+# what makes the verdict conservative, and a 1-sample trigger would resurrect
+# the false-kill problem this whole heartbeat exists to end.
+head -1 "$tmp_root/idle.progress" 2>/dev/null | grep -Fq 'status=alive-no-progress'
+idle_first_stalled=$?
+[ "$idle_first_stalled" -ne 0 ]
+expect "first sample was already alive-no-progress; the consecutive-sample streak is not being applied" $?
+kill "$idle_pid" 2>/dev/null || true
+
+# ------------------------------------------------------------------ verdict ---
+if [ "$CHECKED" -eq 0 ]; then
+  echo "ERROR — nothing was checked"
+  exit 2
+fi
+if [ -n "$FAILURES" ]; then
+  echo "FAIL — $CHECKED checked: $FAILURES"
+  exit 1
+fi
+echo "PASS — $CHECKED checked"
