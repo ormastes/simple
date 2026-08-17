@@ -18,6 +18,7 @@
 # --- Extern declarations ---
 
 extern fn rt_file_exists(path: text) -> bool
+extern fn stdin_read_char() -> text
 use app.io.mod.{env_get, process_run}
 
 # --- Constants ---
@@ -172,25 +173,61 @@ fn text_byte_len(s: text) -> i64:
 
 # --- Protocol I/O ---
 
+fn read_line_raw() -> text:
+    var parts: [text] = []
+    while true:
+        val ch = stdin_read_char()
+        if ch == "":
+            if parts.len() == 0:
+                return ""
+            return parts.join("")
+        parts.push(ch)
+        if ch == "\n":
+            return parts.join("")
+
+fn read_chars_raw(count: i64) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < count:
+        val ch = stdin_read_char()
+        if ch == "":
+            break
+        parts.push(ch)
+        i = i + 1
+    return parts.join("")
+
+# Spec-conformant Content-Length header loop (LSP 3.17 / MCP stdio):
+# unrecognized header fields are skipped, the blank line ends the header part,
+# and exactly `Content-Length` bytes of body are consumed. The previous
+# implementation read one line then blindly called input() twice, which dropped
+# any message carrying a Content-Type header and corrupted any body containing
+# a newline. See doc/08_tracking/bug/jsonrpc_framing_divergence_2026-08-11.md
 fn read_stdin_message() -> text:
-    var line = input()
-    if line == "":
-        return ""
-    if line.ends_with("\r"):
-        line = mcp_substr(line, 0, line.len() - 1)
-    if line.starts_with(LB()):
-        USE_JSON_LINES = true
-        return line
-    if line.starts_with("Content-Length:"):
-        var len_str = line.replace("Content-Length:", "")
-        len_str = len_str.trim()
-        val content_length = int(len_str)
-        if content_length == 0:
+    var content_length = 0
+    while true:
+        var line = read_line_raw()
+        if line == "":
+            if content_length > 0:
+                break
             return ""
-        input()
-        var body = input()
-        return body
-    ""
+        if line == "\r\n" or line == "\r" or line == "\n":
+            if content_length > 0:
+                break
+            continue
+        if line.ends_with("\n"):
+            line = mcp_substr(line, 0, line.len() - 1)
+        if line.ends_with("\r"):
+            line = mcp_substr(line, 0, line.len() - 1)
+        if line.starts_with(LB()):
+            USE_JSON_LINES = true
+            return line
+        if line.starts_with("Content-Length:"):
+            var len_str = line.replace("Content-Length:", "")
+            len_str = len_str.trim()
+            content_length = int(len_str)
+    if content_length <= 0:
+        return ""
+    read_chars_raw(content_length)
 
 fn write_stdout_message(body: text):
     if USE_JSON_LINES:

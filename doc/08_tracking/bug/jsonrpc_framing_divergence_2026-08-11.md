@@ -1,3 +1,36 @@
+## 2026-08-17 — the two SPEC-VIOLATING families are fixed; the rest stays a record
+
+The triage note below is right that families D and E are a substrate/typing
+refactor to leave alone. It is wrong to file B and C alongside them: those two
+are not stylistic divergence, they **disagree with LSP 3.17**, which defines
+`Content-Type` as a header field and requires unknown header fields to be
+skipped.
+
+- **B** (`src/app/t32_lsp_mcp/protocol.spl`) returned any unrecognised header
+  line as a bare JSON-lines message. Real VS Code sends
+  `Content-Type: application/vscode-jsonrpc; charset=utf-8`, so B handed that
+  header to its JSON parser as a request. The `else:` branch is now a skip.
+- **C** (`src/app/lsp_mcp/main.spl`) had no header loop: one `input()`, then two
+  blind `input()` calls, declared length discarded. An extra header dropped the
+  message; a body containing a newline was truncated. Replaced with the
+  canonical loop over a new `stdin_read_char` reader, consuming exactly
+  `Content-Length` bytes.
+
+The shared policy those loops must implement is now a specified pure function,
+`frame_scan_headers` in `src/app/protocol/framing.spl` (the loops still cannot
+literally share code — they differ in their read primitive). Spec:
+`test/01_unit/app/protocol/jsonrpc_header_scan_spec.spl`, 7/7; a sabotage that
+made an unknown header abort the scan took it to 5/7, revert `diff -q` identical.
+
+**Correction to "All writers" below — that paragraph is FALSE.** Simple's
+`text.len()` and `substring` are BYTE-based, not character-based (measured:
+`"héllo€".len()` == 9, not 6). Every writer already declares the UTF-8 byte
+length the spec requires, and every reader consumes bytes to match. There is no
+non-ASCII under-declaration gap. This is now pinned by the last scenario in the
+spec above.
+
+D and E remain out of scope for the reasons already recorded.
+
 ## Triage 2026-08-17 — OPEN as designed (record, not a defect to close)
 
 This doc is an accurate enumeration, not a regression: 2 of 11 implementation
