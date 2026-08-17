@@ -1,0 +1,208 @@
+# @cover src/compiler/80.driver/driver_build/build_outcome.spl 0%
+# @req REQ-DRIVER-BUILD-OUTCOME-001
+"""
+# The build-side outcome contract, pinned at `BuildUnitOutcome.from_status`
+
+**Category:** Compiler / driver
+**Status:** Contract guard for an as-yet-UNWIRED classifier
+
+## Purpose and Audience
+
+`ParallelBuilder.build_supervised()` (`driver_build/parallel.spl:680`) is
+complete and has **zero callers**. Every classification decision it will make
+runs through `BuildUnitOutcome.from_status`, and an unexercised classifier is
+exactly where silent drift lives: nothing today would notice if 139 quietly
+started reporting TERMINATED, or if a SIGTERM began counting as a build failure.
+
+This spec fences the contract now, so that when the supervisor is wired the
+behaviour it inherits is already fixed. The audience is whoever wires it, and
+whoever is later tempted to "simplify" the six categories into two.
+
+## Scope and Preconditions
+
+Pure unit coverage of the RECORD constructor `BuildUnitOutcome.from_status` and
+the `BuildOutcomeSet` aggregate counters. Sibling spec
+`build_outcome_classification_spec.spl` covers the free function
+`build_outcome_classify_status` and the summary text; this one covers the
+constructor callers actually use, the aggregate arithmetic, and the OK/artifact
+join. No process spawning, no filesystem, no compiler invocation.
+
+Every expected value below is written as an absolute literal — `139` is asserted
+to yield the literal text `"CRASHED"`, never compared against another call into
+the same code path that produced it.
+
+## Expected Outcome
+
+A child that died by signal N arrives as 128+N from the supervising shell
+wrapper (`parallel_supervised_argv`, `parallel.spl:72`). SIGSEGV(139) and
+SIGABRT(134) are CRASHED and count as failures. SIGTERM(143) and SIGKILL(137)
+that the supervisor itself did not budget-kill are TERMINATED, and TERMINATED
+never reaches the failure count — `earlyoom` on this zero-swap host SIGTERMs
+`simple` at 10% memory, so counting a memory kill as a build failure would
+manufacture REDs that no code change can clear. A unit the build never reached
+is recorded NOT_RUN, never silently absent. And an OK unit requires exit 0 AND
+its declared artifact on disk: a clean exit that produced nothing is an ERROR.
+"""
+
+use std.spec.*
+use compiler.driver.driver_build.build_outcome.{
+    BuildOutcomeKind,
+    BuildUnitOutcome,
+    BuildOutcomeSet,
+    build_outcome_kind_label,
+    build_outcome_is_failure,
+    build_outcome_is_unverified
+}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+# One record straight out of the constructor the supervisor calls. Wall time and
+# RSS are fixed here because they are not what is under test.
+fn outcome_for(status: i64, timed_out: bool) -> BuildUnitOutcome:
+    BuildUnitOutcome.from_status(7, "src/unit.spl", status, timed_out, 12, 4096, "")
+
+describe "a dead child's 128+N status becomes exactly one build outcome class":
+    it "reports SIGSEGV (139) as CRASHED, carrying signal 11 and the raw status":
+        val record = outcome_for(139, false)
+        expect(record.label()).to_equal("CRASHED")
+        expect(record.signal_num).to_equal(11)
+        expect(record.status).to_equal(139)
+        assert_false(record.is_ok())
+
+    it "reports SIGABRT (134) as CRASHED, carrying signal 6":
+        val record = outcome_for(134, false)
+        expect(record.label()).to_equal("CRASHED")
+        expect(record.signal_num).to_equal(6)
+
+    it "reports SIGTERM (143) as TERMINATED, never CRASHED":
+        val record = outcome_for(143, false)
+        expect(record.label()).to_equal("TERMINATED")
+        expect(record.signal_num).to_equal(15)
+
+    it "reports SIGKILL (137) as TERMINATED when the supervisor did not budget-kill it":
+        val record = outcome_for(137, false)
+        expect(record.label()).to_equal("TERMINATED")
+        expect(record.signal_num).to_equal(9)
+
+    it "reports the same 137 as TIMEOUT when the supervisor killed it on its budget":
+        # The budget is the fact that matters, not the SIGKILL that enforced it.
+        val record = outcome_for(137, true)
+        expect(record.label()).to_equal("TIMEOUT")
+
+    it "reports a clean exit 0 as OK with no signal recorded":
+        val record = outcome_for(0, false)
+        expect(record.label()).to_equal("OK")
+        expect(record.signal_num).to_equal(0)
+        assert_true(record.is_ok())
+
+    it "reports any other clean non-zero exit as ERROR, not as a crash":
+        expect(outcome_for(1, false).label()).to_equal("ERROR")
+        expect(outcome_for(2, false).label()).to_equal("ERROR")
+        expect(outcome_for(64, false).label()).to_equal("ERROR")
+        # -1 is the spawn-failure sentinel; it is not a 128+N encoding.
+        expect(outcome_for(-1, false).label()).to_equal("ERROR")
+        expect(outcome_for(1, false).signal_num).to_equal(0)
+
+describe "TERMINATED and TIMEOUT never reach the failure count":
+    it "counts a SIGSEGV and a SIGABRT as two failures and nothing else":
+        val set = BuildOutcomeSet.empty()
+        set.record(BuildUnitOutcome.from_status(1, "seg.spl", 139, false, 5, 0, ""))
+        set.record(BuildUnitOutcome.from_status(2, "abort.spl", 134, false, 5, 0, ""))
+        expect(set.failure_count()).to_equal(2)
+        expect(set.unverified_count()).to_equal(0)
+        expect(set.ok_count()).to_equal(0)
+
+    it "counts an earlyoom SIGTERM as unverified and as ZERO failures":
+        val set = BuildOutcomeSet.empty()
+        set.record(BuildUnitOutcome.ok(1, "good.spl", 5, 0))
+        set.record(BuildUnitOutcome.from_status(2, "oomed.spl", 143, false, 5, 0, ""))
+        expect(set.failure_count()).to_equal(0)
+        expect(set.unverified_count()).to_equal(1)
+        expect(set.ok_count()).to_equal(1)
+        expect(set.paths_in(BuildOutcomeKind.TERMINATED)).to_contain("oomed.spl")
+
+    it "counts a budget timeout as unverified and as ZERO failures":
+        val set = BuildOutcomeSet.empty()
+        set.record(BuildUnitOutcome.from_status(1, "slow.spl", 137, true, 900, 0, ""))
+        expect(set.failure_count()).to_equal(0)
+        expect(set.unverified_count()).to_equal(1)
+
+    it "keeps the two unverified classes out of the failure count even in a mixed build":
+        # 6 units: 1 OK, 1 ERROR, 1 CRASHED, 1 TERMINATED, 1 TIMEOUT, 1 NOT_RUN.
+        val set = BuildOutcomeSet.empty()
+        set.record(BuildUnitOutcome.ok(1, "a.spl", 5, 0))
+        set.record(BuildUnitOutcome.from_status(2, "b.spl", 1, false, 5, 0, "type error"))
+        set.record(BuildUnitOutcome.from_status(3, "c.spl", 139, false, 5, 0, ""))
+        set.record(BuildUnitOutcome.from_status(4, "d.spl", 143, false, 5, 0, ""))
+        set.record(BuildUnitOutcome.from_status(5, "e.spl", 137, true, 5, 0, ""))
+        set.record(BuildUnitOutcome.not_run(6, "f.spl"))
+        expect(set.len()).to_equal(6)
+        expect(set.ok_count()).to_equal(1)
+        expect(set.failure_count()).to_equal(2)
+        expect(set.unverified_count()).to_equal(2)
+        expect(set.not_run_count()).to_equal(1)
+        assert_false(set.all_ok())
+
+    it "classifies each kind as failure or unverified but never as both":
+        assert_true(build_outcome_is_failure(BuildOutcomeKind.ERROR))
+        assert_true(build_outcome_is_failure(BuildOutcomeKind.CRASHED))
+        assert_false(build_outcome_is_failure(BuildOutcomeKind.TERMINATED))
+        assert_false(build_outcome_is_failure(BuildOutcomeKind.TIMEOUT))
+        assert_true(build_outcome_is_unverified(BuildOutcomeKind.TERMINATED))
+        assert_true(build_outcome_is_unverified(BuildOutcomeKind.TIMEOUT))
+        assert_false(build_outcome_is_unverified(BuildOutcomeKind.CRASHED))
+        assert_false(build_outcome_is_unverified(BuildOutcomeKind.NOT_RUN))
+
+describe "a unit the build never reached is stated, never silently missing":
+    it "records NOT_RUN with the reason instead of omitting the unit":
+        val record = BuildUnitOutcome.not_run(9, "never.spl")
+        expect(record.label()).to_equal("NOT_RUN")
+        expect(record.diagnostics).to_contain("never started")
+        assert_false(record.is_ok())
+
+    it "keeps an unreached unit present in the set, so the total still covers it":
+        val set = BuildOutcomeSet.empty()
+        set.record(BuildUnitOutcome.ok(1, "ran.spl", 5, 0))
+        set.record(BuildUnitOutcome.not_run(2, "never.spl"))
+        expect(set.len()).to_equal(2)
+        assert_true(set.has_path("never.spl"))
+        expect(set.not_run_count()).to_equal(1)
+
+    it "counts NOT_RUN as neither a failure nor an unverified kill":
+        val set = BuildOutcomeSet.empty()
+        set.record(BuildUnitOutcome.not_run(1, "never.spl"))
+        expect(set.failure_count()).to_equal(0)
+        expect(set.unverified_count()).to_equal(0)
+        expect(set.not_run_count()).to_equal(1)
+
+describe "OK requires exit 0 AND the declared artifact on disk":
+    it "records a clean exit with a missing artifact as ERROR, never OK":
+        # This is the join the supervisor performs before it may call
+        # `BuildUnitOutcome.ok`. Modelled here with the same status the
+        # supervisor substitutes (1) so the fabricated-success path is fenced.
+        val set = BuildOutcomeSet.empty()
+        set.record(BuildUnitOutcome.from_status(
+            1, "ghost.spl", 1, false, 5, 0,
+            "exit 0 but declared artifact is missing: build/ghost.o"))
+        expect(set.ok_count()).to_equal(0)
+        expect(set.failure_count()).to_equal(1)
+        expect(set.paths_in(BuildOutcomeKind.ERROR)).to_contain("ghost.spl")
+
+    it "carries the missing-artifact reason so the unit is attributable":
+        val record = BuildUnitOutcome.from_status(
+            1, "ghost.spl", 1, false, 5, 0,
+            "exit 0 but declared artifact is missing: build/ghost.o")
+        expect(record.diagnostics).to_contain("declared artifact is missing")
+        expect(record.attribution_line()).to_contain("ERROR")
+        expect(record.attribution_line()).to_contain("ghost.spl")
+
+    it "keeps the artifact check OUT of from_status, where the supervisor owns it":
+        # from_status sees only a wait status; it cannot know about a file. This
+        # pins WHERE the responsibility lives, so a future refactor cannot drop
+        # the check by assuming the classifier already made it.
+        expect(outcome_for(0, false).label()).to_equal("OK")
+
+    it "makes the supervisor consult the declared artifact before recording OK":
+        val src = file_read("src/compiler/80.driver/driver_build/parallel.spl")
+        expect(src).to_contain("val declared = artifact_fn(unit_path)")
+        expect(src).to_contain("if declared != \"\" and not rt_file_exists(declared):")
+        expect(src).to_contain("exit 0 but declared artifact is missing")
