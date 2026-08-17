@@ -3,6 +3,17 @@
 Status: OPEN (P2)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 
+**Re-verified LIVE 2026-08-17 by content.**
+`src/lib/nogc_sync_mut/js/engine/vm_object_store.spl` is still a flat set of
+parallel arrays with no reclamation of any kind: `get_object` (line 43),
+`set_property` (line 55), `get_property` (line 73) and `array_length` (line 96)
+each perform a full linear scan of `prop_obj_ids`, which only ever grows —
+`alloc_object` (line 31) hands out monotonically increasing ids and nothing but
+an explicit `remove_property` ever shrinks the arrays. So per-generation work is
+Theta(store size) and cumulative work is Theta(frames^2), exactly as filed. No
+patch attempted: the fix is the bounded tracing GC this doc describes, which the
+doc assigns to Root Codex and which is far outside "small change" scope.
+
 ## Status
 
 Open. No implementation, executable spec, or production receipt is merged.
