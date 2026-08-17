@@ -1,0 +1,146 @@
+# @cover src/compiler/80.driver/driver_build/build_outcome.spl 0%
+# @req REQ-DRIVER-BUILD-OUTCOME-004
+"""
+# A supervisor's status channel must preserve signal identity
+
+**Category:** Compiler / driver
+**Status:** Defect-CLASS detector (class-level twin of
+`build_supervisor_poisoned_fixture_spec.spl`)
+
+## Purpose and Audience
+
+`build_outcome.spl` classifies a unit's fate from a wait status, and the whole
+value of that classification rests on an assumption nobody had checked:
+
+> **that the status the supervisor reads still says WHICH signal killed the
+> child.**
+
+Collapse that and the categories collapse with it. 139 (SIGSEGV, a compiler
+crash), 137 (SIGKILL/OOM, a compiler crash) and 143 (SIGTERM from `earlyoom`,
+infrastructure — UNVERIFIED, explicitly *not* a failure) all become one
+indistinguishable value, and `build_outcome_classify_status` dutifully files all
+three under the same category. The build then either invents compiler bugs out of
+earlyoom kills, or hides real segfaults as "unverified". Both have happened in
+this repo.
+
+This is a defect CLASS, not one call site: it recurs at every boundary where a
+child's fate crosses into the supervisor — `shell()`, a spawn/wait pair, a job
+server, a `timeout` wrapper, a log line that got parsed back. Each is a fresh
+opportunity to lose the signal, and losing it is silent.
+
+The audience is anyone wiring a new process-launch path into the build.
+
+## Scope and Preconditions
+
+The detector is a contract over a *channel* — anything that turns "run this
+command" into a status the supervisor will classify:
+
+1. **Fidelity** — three different fatal signals must yield three different
+   statuses.
+2. **Correct categories** — those statuses must land as CRASHED, CRASHED and
+   TERMINATED respectively, keeping the compiler's crashes disjoint from the
+   host's interference.
+3. **Ordinary exits unharmed** — a clean 0 and a diagnostic non-zero must still
+   read OK and ERROR.
+
+Two channels are measured. This is what gives the detector teeth: a check that
+passes on everything it is pointed at detects nothing.
+
+- **wrapped** — `sh -c '<cmd>'; rc=$?; exit $rc`, the form the poisoned-fixture
+  harness uses. The inner shell dies by the signal; the outer shell reports the
+  POSIX `128+N` value as its own ordinary exit code.
+- **raw** — the command handed straight to `shell()`
+  (`std.nogc_sync_mut.io.process_ops`).
+
+**Measured, and the reason this spec exists:** the raw channel reports `-1` for
+*every* signal death. SIGSEGV, SIGKILL and SIGTERM are indistinguishable through
+it. That is not a hypothetical — it is why the fixture harness wraps.
+
+## Expected Outcome
+
+The wrapped channel satisfies all three clauses. The raw channel is asserted to
+FAIL clause 1, which is simultaneously the proof that the detector discriminates
+and the record of the live defect. When the raw channel is one day fixed to
+preserve `128+N`, the final example here goes red on purpose and should be
+flipped to expect fidelity — a detector that could not notice that would be
+worthless.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.process_ops.{shell}
+use compiler.driver.driver_build.build_outcome.{
+    BuildOutcomeKind, build_outcome_classify_status, build_outcome_kind_label
+}
+
+# Run `command` through the channel the supervisor is contracted to use.
+fn status_via_wrapped_channel(command: text) -> i64:
+    shell("sh -c '{command}'; rc=$?; exit $rc").exit_code
+
+# Run it through the runtime's status channel unmodified.
+fn status_via_raw_channel(command: text) -> i64:
+    shell(command).exit_code
+
+# The three fatal signals the build actually has to tell apart.
+fn fatal_signal_commands() -> [text]:
+    ["kill -SEGV $$", "kill -KILL $$", "kill -TERM $$"]
+
+# Clause 1 as a predicate, so it can be pointed at any channel. True when the
+# three signal deaths yield three DISTINCT statuses.
+fn channel_preserves_signal_identity(wrapped: bool) -> bool:
+    var seen: [i64] = []
+    for command in fatal_signal_commands():
+        val status = if wrapped:
+            status_via_wrapped_channel(command)
+        else:
+            status_via_raw_channel(command)
+        for previous in seen:
+            if previous == status:
+                return false
+        seen = seen.push(status)
+    true
+
+describe "the supervisor's status channel preserves signal identity":
+    it "gives three different fatal signals three different statuses":
+        assert_true(channel_preserves_signal_identity(true))
+
+    it "reports the exact POSIX 128+N status for each signal":
+        expect(status_via_wrapped_channel("kill -SEGV $$")).to_equal(139)
+        expect(status_via_wrapped_channel("kill -KILL $$")).to_equal(137)
+        expect(status_via_wrapped_channel("kill -TERM $$")).to_equal(143)
+
+describe "preserved statuses land in disjoint outcome categories":
+    it "keeps a compiler crash apart from host interference":
+        val segv = build_outcome_classify_status(
+            status_via_wrapped_channel("kill -SEGV $$"), false)
+        val oom = build_outcome_classify_status(
+            status_via_wrapped_channel("kill -KILL $$"), false)
+        val term = build_outcome_classify_status(
+            status_via_wrapped_channel("kill -TERM $$"), false)
+        expect(build_outcome_kind_label(segv)).to_equal("CRASHED")
+        expect(build_outcome_kind_label(oom)).to_equal("CRASHED")
+        # 143 is earlyoom, not the compiler. Filing it as CRASHED manufactures a
+        # phantom compiler bug; filing a real SIGSEGV as TERMINATED hides one.
+        expect(build_outcome_kind_label(term)).to_equal("TERMINATED")
+
+    it "leaves ordinary exits classified as before":
+        expect(build_outcome_kind_label(
+            build_outcome_classify_status(status_via_wrapped_channel("true"), false)))
+            .to_equal("OK")
+        expect(build_outcome_kind_label(
+            build_outcome_classify_status(status_via_wrapped_channel("exit 3"), false)))
+            .to_equal("ERROR")
+
+    it "lets a budget kill outrank the signal that enforced it":
+        # A unit killed on its own budget is TIMEOUT even though the enforcing
+        # signal was a SIGKILL that would otherwise read CRASHED(137).
+        expect(build_outcome_kind_label(build_outcome_classify_status(137, true)))
+            .to_equal("TIMEOUT")
+
+describe "the detector discriminates between a faithful and a lossy channel":
+    it "fails the raw runtime channel, which collapses every signal to one value":
+        # THE CONTROL. If this passed too, the detector above would prove
+        # nothing. `shell()` returns -1 for SIGSEGV, SIGKILL and SIGTERM alike,
+        # so all three would classify identically (ERROR, since -1 is not 128+N).
+        assert_false(channel_preserves_signal_identity(false))
+        expect(status_via_raw_channel("kill -SEGV $$"))
+            .to_equal(status_via_raw_channel("kill -TERM $$"))
