@@ -1,9 +1,85 @@
 # HIR lowering is quadratic in symbols-per-module (stage-4 blocker)
 
-- Status: OPEN (P1)
-- Status re-verified 2026-08-17 by source inspection (triage shard 01).
-  second pass on 2026-07-28 — see "CORRECTION" below before doing anything.
-  Root causes 2 and 3 remain unproven and unfixed; no fix landed.
+- Status: **RETIRED 2026-08-17 — all three root causes are refuted or fixed in
+  current source.** Do not re-open this row for the live stage-3/stage-4 parse
+  stall; that is a different defect (see
+  `stage3_parse_stalls_at_tail_43_files_2026-08-17.md`).
+- **Retirement independently corroborated 2026-08-17 (W1)** by grepping current
+  source: the `GLB2` memo (`glob_expand_memo`) exists at
+  `module_lowering.spl:1547-1572` with the field declared at
+  `hir_lowering/types.spl:158`, initialised `:209/:247` and cleared per module
+  `:312`; and `module_lowering.spl:1928` is `lowered_module.functions.values()`
+  with no accumulator rebuild loop. Both matching the RETIRED verdict below.
+- **The "one defect, two symptoms" link between this row, the stage-3 parse
+  stall, and `lint_timeout_hwir_zca_rows_2026-08-17.md` is REFUTED.** The
+  linter does not run the compiler frontend at all:
+  `/usr/bin/grep -rln "parse_full_frontend\|compiler.frontend"
+  src/compiler/tools/lint/ src/compiler/tools/fix/` returns **nothing**, and
+  `src/compiler/tools/lint/_LintMain/lint_checks.spl` iterates over `lines`
+  (3 `while ... < lines.len()` loops). So lint's superlinear cost shares no code
+  path with `phase=parse` in stage 3 or with HIR lowering, and neither cost curve
+  is evidence about the other. Anyone treating the lint fixture as a cheap
+  reproducer for the stage-3 stall is measuring a different program.
+- **Array-literal element count is NOT the linter's superlinear driver — measured
+  and NEGATIVE.** Recorded because it eliminates the most obvious candidate for
+  `lint_timeout_hwir_zca_rows_2026-08-17.md` (whose 1901-line offender
+  `50.mir/hwir/zca_rows.spl` is mostly one giant `[HwSignal]` literal per
+  function, which is why it looked like the driver).
+  Fixture: one function whose body is a single `[(text, i64, i64)]` array literal
+  of N elements, one per line (scratch-only). Binary: the stale Rust seed
+  `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple`, mtime
+  2026-08-16 22:59, 59,536,728 bytes. Shared box under heavy load:
+
+  | N array elements | wall | minus ~12 s startup | per element |
+  |---|---|---|---|
+  | 25 | 64 s | 52 s | 2.1 s |
+  | 50 | 149 s | 137 s | 2.7 s |
+  | 100 | 279 s | 267 s | 2.7 s |
+  | 200 | 477 s | 465 s | 2.3 s |
+
+  Per-element cost is FLAT across an 8x range — **linear**. The doubling ratios
+  fall (2.63 -> 1.95 -> 1.74) toward 2.0, i.e. the apparent superlinearity at the
+  two smallest points was startup mis-attribution, not a cost curve. **This is why
+  a two-point measurement is not evidence** — the first version of this note read
+  "exponent ~1.4" off the 25/50 pair and was wrong. Whatever makes `zca_rows.spl`
+  unlintable is something other than literal element count; the constant itself
+  (~2.3 s per source line of array literal, under the interpreted linter) is
+  awful but linear, and 1901 lines of it predicts ~70 min, which alone may explain
+  that file without any superlinear term at all.
+- The earlier line here ("Root causes 2 and 3 remain unproven and unfixed; no fix
+  landed", stamped "re-verified 2026-08-17 by source inspection") was WRONG on
+  both counts. Re-verified by grepping current source, not by SHA ancestry:
+
+  | root cause | verdict 2026-08-17 | proof in current source |
+  |---|---|---|
+  | 1. `SymbolTable.define` O(scope) copy | REFUTED on the native lane (see CORRECTION below; both forms linear, flat form slower) | unchanged, correctly so |
+  | 2. unmemoized recursive glob expansion | **FIXED** | `glob_expand_memo` memo (`GLB2`) at `module_lowering.spl:1566-1573`, field declared `hir_lowering/types.spl:158`, initialised `:209/:247`, cleared per module `:312`. Re-entry at same-or-shallower depth returns early. |
+  | 3. O(G²) per-module rebuild of the global fn accumulator | **FIXED** | `module_lowering.spl:1928` is now `val flat_functions: [HirFunction] = lowered_module.functions.values()` — the `while idx < bootstrap_hir_function_count(): flat_functions = flat_functions.push(...)` loop is gone. `bootstrap_hir_function_count` now has only two referencing files (`lowering_helpers.spl`, where it is defined, and an import line in `80.driver/driver_bootstrap.spl`); no per-module rebuild remains. |
+
+  The interpreter-only offshoot this report discovered ("`self.<dict field>[k] = v`
+  inside a `me` method copies the whole target dict, O(size) per write") also
+  **no longer reproduces**. Probe: a class with a `Dict<text,i64>` field, prefilled
+  to N, then 2000 writes to one hot key, run under
+  `env SIMPLE_EXECUTION_MODE=interpreter bin/simple run` (binary: the stale Rust
+  seed at `bin/simple`, mtime 2026-08-16 22:59 — stated because it is not current
+  source):
+
+  | N (prefill) | wall, 2000 hot writes | doc's 2026-07-28 figure |
+  |---|---|---|
+  | 1000 | 0.07 s | 387 ms |
+  | 2000 | 0.07 s | 572 ms |
+  | 4000 | 0.07 s | 929 ms |
+  | 8000 | 0.10 s | 1775 ms |
+
+  Flat, not quadratic (the residual 0.03 s at N=8000 is the linear prefill). No
+  separate interpreter bug needs filing.
+
+  Incidental observation from the same probe, NOT part of this row: under the JIT
+  (`bin/simple run` with no `SIMPLE_EXECUTION_MODE`) `Dict.len()` returned `-1`
+  while the interpreter returned the correct value. That is the old
+  native-`Dict.len()` defect which `.claude/rules/code-style.md` records as fixed
+  2026-08-01 — consistent with `bin/simple` being a pre-fix stale seed, so it is
+  evidence about that binary, not a live regression.
 - **Filed:** 2026-07-28
 - **Severity:** blocks the stage-4 bootstrap run (three-plus modules consume ~72% of total HIR phase time)
 - **Area:** `src/compiler/20.hir/hir_types.spl` (`SymbolTable.define`),

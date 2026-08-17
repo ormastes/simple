@@ -1425,3 +1425,24 @@ instrumentation needed).
 
 **Everything in this update is uncommitted** (per session constraints — no
 commit/push, no Rust seed, no `test/**`).
+
+---
+
+## Not reproducible on this host 2026-08-17 (W4 bug-fixing wave)
+
+This row is **macOS aarch64 only** by construction: the crash is in
+`llvm::ConstantFolder::FoldCmp` reached through `LLVMBuildICmp` as an *interpreted
+extern* from a `aarch64-apple-darwin-macho` self-hosted `bin/simple`, and the
+`[LIM-010]` message it surfaces comes from the Homebrew LLVM 18 lane. This host is
+`x86_64-unknown-linux-gnu` with `llc-20`; there is no aarch64-apple-darwin
+binary in the tree. No measurement was possible, so no status change is claimed —
+the row stays **OPEN, unverified**, not closed.
+
+One actionable item from this doc is independent of the platform and worth
+separating out: the recommendation that `[LIM-010]`
+(`driver/src/cli/commands/misc_commands.rs:558`) stop asserting an
+objcopy/LLVM-constructor cause unconditionally on worker exit 139. On this host
+exit 139 from a `native-build` worker has a completely different and now-measured
+cause — 169 direct `call 0` sites baked into the binary
+(`stage3_native_build_sigsegv_call_to_zero_root_cause_2026-08-11`) — which is a
+second concrete instance of the misleading hint costing debugging time.

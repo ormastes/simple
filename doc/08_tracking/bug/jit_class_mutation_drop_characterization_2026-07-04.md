@@ -1,5 +1,20 @@
 # Class-in-array mutation drop in interpret mode — characterization (task #112)
 
+> ## RETIRED 2026-08-17 by EXECUTION (worker W5)
+>
+> This doc's exact minimal repro (`class Counter`, `var arr = [Counter(val: 42)]`,
+> `var c = arr[0]`, `c.val = 777`) prints **777 under every mode** on the deployed
+> seed -- `SIMPLE_EXECUTION_MODE=interpret` (the spelling this doc used),
+> `=interpreter`, `=jit`, and the default. The doc's claim of `42` (mutation lost)
+> under `interpret` does not reproduce; class identity semantics are honoured.
+>
+> **FAMILY: collapsed with `struct_field_aliases_under_jit_2026-08-08`** -- see that
+> doc for the shared probe, the full four-shape table, and the positive control that
+> proves the engine switch is live rather than silently ignored.
+>
+> Regression guard: `test/01_unit/engine_divergence/check-engine-divergence-probes.shs`.
+
+
 - Status: OPEN (P1)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Discovered:** 2026-07-04 (task #112, following up on #108's discriminator work and #35's
@@ -244,3 +259,101 @@ The coordinator rebuilds from main post-gate; once `bin/simple` runs cleanly:
    (grep was clean this session: only re-exports in `backend.spl`/`__init__.spl`).
 6. Companion defect (array-param `push` leaking to caller, item #4 above) is
    NOT addressed by this change and remains open.
+
+---
+
+## 2026-08-17 — class half CORROBORATED as retired; the row's SECOND defect still reproduces
+
+Worker W5's RETIRED banner at the top of this file covers the **class-in-array
+mutation** half only. That half is corroborated here by an independent probe on
+a separate file, and the row's *other* documented defect is **not** retired — it
+still reproduces on both engines. Do not treat this row as fully closed.
+
+Binary for every number below: `bin/release/x86_64-unknown-linux-gnu/simple`,
+the stale Rust bootstrap seed (`bin/simple --version` prints the seed banner),
+size 59536728, mtime 2026-08-16 22:59:37. Nothing was rebuilt or redeployed.
+Probes run as subprocesses per engine, never as spec bodies — `bin/simple test`
+is the tree-walk interpreter and cannot reach the JIT, so a spec assertion on
+the JIT half would be vacuous.
+
+### Half 1 — class-in-array mutation: CORROBORATED, does not reproduce
+
+```
+class Counter:
+    var v: i64
+fn bump(items: [Counter]):
+    var c = items[0]
+    c.v = 777
+fn main():
+    var arr = [Counter(v: 42)]
+    var c = arr[0]
+    c.v = 777
+    print("CLS_ARR={arr[0].v}")        # doc claims 42 (mutation lost)
+    var c2 = Counter(v: 1)
+    var c3 = c2
+    c3.v = 9
+    print("CLS_LOCAL={c2.v}")
+    var arr2 = [Counter(v: 42)]
+    bump(arr2)
+    print("CALLEE_CLASS_MUT={arr2[0].v}")
+```
+
+| case | doc's claim | interpreter | jit |
+|---|---|---|---|
+| `arr[0]` mutated in place | 42 (lost) | **777 correct** | 777 correct |
+| plain local alias | — | 9 correct | 9 correct |
+| mutation inside a callee | 42 (lost) | **777 correct** | 777 correct |
+
+**Proving symbol** (the mechanism W5's execution result did not name):
+`Value::ClassInstance(Arc<ClassInstance>)`,
+`src/compiler_rust/compiler/src/value.rs:1240`, backed by
+`pub struct ClassInstance { class: String, fields: RwLock<HashMap<String, Value>> }`
+at the same file's lines 1111-1115, documented in place as *"Shared-identity
+class instance storage (source `class` values)"*. It is the ONLY `Arc`-shared
+aggregate variant, so cloning a class `Value` clones the handle and every alias
+observes the mutation — which is exactly the behaviour measured. Introduced by
+`a155bff913f4` ("interpreter nested field-assign, SIMD span write-back,
+class-name collisions"). Classified by CONTENT and by EXECUTION; SHA ancestry
+proves nothing in this tree because rebasing rewrites SHAs.
+
+### Half 2 — array-as-value-type param leak: STILL REPRODUCES, both engines
+
+This row's own text (see "A companion case in the same repro family" above)
+records a second, independent defect: appending to a whole-array **value-type**
+param inside a callee leaks to the caller. It was NOT covered by W5's
+retirement and it is live:
+
+```
+fn push_into(a: [i64]):
+    a.push(999)
+fn main():
+    var nums = [1, 2]
+    push_into(nums)
+    print("ARRAY_PARAM_LEN={nums.len()}")
+```
+
+| engine | measured | contract per this row + `struct_param_mutation_semantics_2026-07-03.md` |
+|---|---|---|
+| `SIMPLE_EXECUTION_MODE=interpreter` | **3** | 2 (arrays are VALUE types: copied on pass/assign) |
+| `SIMPLE_EXECUTION_MODE=jit` | **3** | 2 |
+
+Both engines agree with each other and disagree with the stated contract, so
+this is not an engine-divergence defect — it is a semantics question with a
+single uniform answer that may or may not still be the intended one. **That is
+precisely why this is left OPEN rather than closed or re-filed as a confident
+new root-cause row**: the "arrays are value types" contract is asserted by this
+row and by `struct_param_mutation_semantics_2026-07-03.md`, but was not
+re-confirmed against a current language-design source here, and a wrong close
+loses a real defect permanently.
+
+**Unblock condition:** confirm from the language spec whether `[T]` parameters
+are value-copied. If they are, this is a P1 wrong-answer defect in both engines
+and deserves its own row. If the contract has been superseded by reference
+semantics for arrays, delete the companion-case paragraph from this row and
+from `struct_param_mutation_semantics_2026-07-03.md` rather than leaving two
+docs asserting a contract the implementation deliberately does not hold.
+
+### Row status
+
+- class-in-array mutation drop: **RETIRED** (W5, corroborated here, mechanism named).
+- array value-type param leak: **OPEN**, unowned, see unblock condition above.

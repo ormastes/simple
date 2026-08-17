@@ -1,5 +1,35 @@
 # Seed stage4 lane: optional-in-argument + mixed-tail miscompiles
 
+> ## 2026-08-17 (worker W5): BLOCKED on verification lane; workarounds confirmed still load-bearing
+>
+> Both defects are properties of the Rust seed's `SIMPLE_BOOTSTRAP=1` stage4 NATIVE
+> lane. Reproducing or ablating either requires a stage4 full-CLI build, which this
+> session must not run, and the ordinary seed `run` path does not exercise that lane.
+> No probe in this session can speak to it, so none is quoted.
+>
+> What IS verifiable here is that the mandatory workarounds are still in place and
+> still commented as such -- e.g. `operand_type` in
+> `src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:1420` carries
+> `val local_value = local ?? LocalId(id: -1)` with the note that "Stage4 `if val`
+> can lose the LocalId payload", which is Defect 1's flat-optional shape, and
+> `local_type` just above it records a removed `local.?` gate that "is FALSE on the
+> stage4 lane and skipped EVERY local". So the lane's optional-handling hazard is
+> still being routed around rather than fixed.
+>
+> Consequence worth stating plainly: these workarounds are load-bearing, so any
+> future cleanup that "simplifies" them back to `if val` / `.?` will silently
+> reintroduce Defect 1. Still OPEN.
+>
+> **FAMILY checked and REJECTED:** this row's Defect 1 (optional in argument
+> position) was grouped with `pure_simple_text_extern_abi_audit_2026-07-30` as a
+> possible shared argument-passing-ABI cause. They are NOT the same defect. This row
+> is about an OPTIONAL argument's flat-nullable representation being lost on one
+> backend lane; that row is about `text` being deliberately passed as ONE word
+> instead of a `(ptr, len)` PAIR, i.e. an argument-count/convention mismatch that is
+> uniform across all three pure-Simple backends by design. Different mechanism,
+> different fix, correctly filed apart.
+
+
 - **Date:** 2026-07-23
 - **Component:** Rust seed `SIMPLE_BOOTSTRAP=1` native lane (stage4 full-CLI build)
 - **Severity:** critical (silently wrong code in the self-hosted AOT driver)

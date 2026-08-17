@@ -1,7 +1,38 @@
 # ByteSpan.starts_with dropped from the SimpleOS kernel closure and silently replaced by a nil-returning WEAK stub
 
-Status: OPEN (P1)
+Status: **RETIRED 2026-08-17 — fixed in current source.** Both defects (D1
+cache key, D2 fabrication fail-open) are present as landed code in the tree
+today; what remained on 07-28 was a *deployment* gap in a stale
+`bin/release/**` binary, and CLAUDE.md forbids this lane from redeploying it.
+See "Re-triage 2026-08-17" below.
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
+  (That stamp said OPEN; content grep says otherwise — see the re-triage.)
+
+## Re-triage 2026-08-17 (content grep of CURRENT source, not SHA ancestry)
+
+Classified by CONTENT. Each of the four claimed fixes was re-grepped; all four
+are present:
+
+| claimed fix | proving symbol / evidence in current source |
+|---|---|
+| D2 pure-Simple guard, channel 3 | `simpleos_undefined_simple_module_symbols` — 2 occurrences in `src/compiler/70.backend/backend/llvm_native_link.spl` |
+| D2 shrink-only ratchet | `config/simpleos_fabricated_lib_baseline.sdn` exists (1873 bytes) |
+| D2 seed-side backstop | `stale_module_move_report` (`src/compiler_rust/compiler/src/pipeline/native_project/stubs.rs:392`), called at line **561** — i.e. before the `FreestandingUnresolvedMode` match, as designed; `simple_module_symbol_tail` at line 374 excludes `rt_*` by construction (asserted at line 1367) |
+| D1 root: `GlobalBuildFingerprint` ungated | `src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:910-913` carries the explicit comment "This is deliberately NOT gated on `incr_hardening`. The dependency-blind [key] ... `incr_hardening` now only controls the ..."; the remaining `if incr_hardening` at line 1120 gates something else |
+
+Unit coverage for D2's backstop is in-tree at `stubs.rs:1353-1372`
+(`stale_module_move_is_detected_and_rt_channels_are_untouched`), including the
+negative controls: an `rt_*` symbol must NOT be reported (1367-1368) and a live
+symbol must NOT be reported (1372).
+
+Binary identity caveat, stated rather than hidden: this triage did **not** and
+could not rebuild the SimpleOS WM kernel — `bin/simple` here is the stale Rust
+seed (mtime 2026-08-16 22:59) and ~15 lanes share the checkout, so a redeploy
+is prohibited. The row is retired on the strength of the source containing the
+fixes plus in-tree unit coverage with negative controls, **not** on a fresh ELF.
+If a future SimpleOS WM ELF again shows an 8-byte WEAK `lib__*` / `os__*`
+`FUNC`, that is a NEW regression against a guard that now exists — file it
+fresh rather than reopening this row.
 
 - **Filed:** 2026-07-28
 - **Severity:** high (silent wrong answer, no diagnostic, in the WM render path)
@@ -222,3 +253,41 @@ change regresses. `rt_*` symbols are excluded by construction
 (`simple_module_symbol_tail` returns `None` for them), so the `rt_*` channels are
 untouched. Unit test:
 `stubs::tests::stale_module_move_is_detected_and_rt_channels_are_untouched`.
+
+---
+
+## Source re-verification 2026-08-17 (W4 bug-fixing wave) — both defects are fixed in source; only a redeploy is outstanding
+
+Verified by grep against current source, not by trusting the "re-verified by
+source inspection" stamp at the top of this file:
+
+- **D1 (cache key).** `src/compiler_rust/compiler/src/pipeline/native_project/mod.rs:910`
+  now carries the comment "This is deliberately NOT gated on `incr_hardening`",
+  with `incr_hardening` surviving only at line 1120 for a narrower purpose. The
+  dependency-blind content-only key this row's root cause depended on is gone
+  from source.
+- **D2 (fail-open).** Three independent refusal channels exist:
+  `simpleos_undefined_simple_module_symbols` +
+  channel 3 at `src/compiler/70.backend/backend/llvm_native_link.spl:1814` /
+  `:2647` / `:2666` (message present verbatim); `stale_module_move_report` in
+  `native_project/stubs.rs`, invoked BEFORE the `FreestandingUnresolvedMode`
+  match so `DeferToLinker`/`EmitStubs` cannot swallow it; and
+  `freestanding_unresolved_mode()`, which now **never** returns `EmitStubs` when
+  `SIMPLE_NO_STUB_FALLBACK=1` regardless of `SIMPLE_ALLOW_FREESTANDING_STUBS`.
+  The single surviving `EmitStubs` path is gated by
+  `check_fabricated_stub_ratchet` against
+  `config/freestanding_fabricated_stub_baseline.sdn`, and the pure-Simple channel
+  against `config/simpleos_fabricated_lib_baseline.sdn`; both files exist.
+
+The "Caveat — the guard is not live yet" section is still the operative
+blocker and is unchanged: the fixes are inert until a bootstrap redeploy. That
+redeploy was explicitly out of scope for this wave (rebuilding
+`bin/simple` / `bin/release/**` clobbers ~16 concurrent lanes), so this row is
+left open ONLY on the redeploy, with no source work outstanding.
+
+**Family:** this row is the *stub-fabricator* face of the same cause tracked in
+`stage3_native_build_sigsegv_call_to_zero_root_cause_2026-08-11` (the *linker*
+face, measured at 169 `call 0` sites per staged binary on 2026-08-17) and
+`stage2_native_build_link_undefined_method_symbols_2026-08-09` (the fix,
+`36673b6b6a3`). See the FAMILY RESOLUTION section of the first of those for the
+full five-row list.

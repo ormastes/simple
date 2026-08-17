@@ -1,9 +1,160 @@
 # `asm """..."""` template placeholders never bind — and `@cfg("target_arch", ...)` is inert
 
 - **Date:** 2026-08-07
-- Status: OPEN (P1)
+- Status: OPEN (P2 — downgraded from P1) — **root cause C and the arch-gating gap
+  are both FIXED in current source; only `timer.spl` / `topology.spl` and the
+  diagnostic gap remain.** See "Re-triage 2026-08-17" below.
 - Status re-verified 2026-08-17 by source inspection (triage shard 00).
-- **Severity:** blocker (Stage-3 self-host blocker #10)
+  **That stamp was wrong on two of the three root causes** — see the re-triage.
+- **Severity:** blocker (Stage-3 self-host blocker #10) — as originally filed.
+
+## Re-triage 2026-08-17 (content grep of CURRENT source, not SHA ancestry)
+
+Binary identity for every number below: `bin/simple` ->
+`bin/release/x86_64-unknown-linux-gnu/simple`, the **stale Rust seed**
+(`--version` self-declares "bootstrap seed only"). `src/compiler/**` and
+`src/lib/**` are read as SOURCE, so the greps below describe what a
+current-source compiler does, not what that seed does.
+
+### Root cause C (`out(reg)` write-back silently dropped) — FIXED in source
+
+`src/compiler/50.mir/_MirLowering/function_lowering.spl:1012-1093`
+(`lower_inline_asm`) no longer aliases an output operand onto the source
+local. Each `Out` / `LateOut` / `InOut` constraint now allocates a **fresh SSA
+temp** (`self.builder.new_temp(...)`, lines 1042 / 1058), the `InlineAsm`
+instruction's `outputs` carry those temps, and lines 1084-1093 emit an
+explicit `MirInstKind.Copy(output_destinations[i], output_results[i])`
+write-back per output. Proving symbols: `output_destinations`,
+`output_results`, and the comment "Explicit copies perform the source-level
+output writeback".
+
+The LLVM side consumes them at
+`src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl:548-624`
+(`translate_inline_asm`), including the multi-output `extractvalue` path.
+
+Existing coverage:
+`test/01_unit/compiler/frontend/flat_ast_inline_asm_bridge_spec.spl`
+(`mir_metadata_score`) scores the write-back `Copy` explicitly (+200 when the
+`Copy`'s source is the asm output temp and its destination is the named `var`).
+**Caveat — that spec does not currently execute here:** on this host it hits
+the runner's per-file budget, not an assertion.
+
+```
+SPEC FILE VERDICT: test/01_unit/compiler/frontend/flat_ast_inline_asm_bridge_spec.spl declared>=1 executed=1 passed=0 failed=1 dropped=0 timeout=1 reason=child-timeout budget_ms=120000
+Results: 1 total, 0 passed, 1 failed
+```
+
+So root cause C is fixed in source with real coverage written, but that
+coverage is inert on a loaded box. Filed as a separate concern, not re-opened
+here.
+
+### Root cause B (no working arch-gating mechanism) — FALSE in current source
+
+Two mechanisms now exist:
+
+1. `src/compiler_rust/compiler/src/pipeline/cfg_strip.rs` implements
+   `@cfg(<arch>)` gating for **both** globals
+   (`strip_inactive_cfg_arch_globals`, line 197 — called from
+   `native_project/compiler.rs:592`) and top-level functions
+   (`strip_inactive_cfg_arch_fns`, `fn_inactive_cfg_arch`,
+   `cfg_attr_arch_verdict`). `@cfg(not(x86_64))` is supported.
+2. `asm match:` is implemented end to end in the pure-Simple compiler:
+   `ExprKind.AsmMatch` / `AsmMatchArm`
+   (`src/compiler/10.frontend/parser_types_expr.spl:397,765`) lowered with real
+   target selection in `src/compiler/50.mir/_MirLowering/asm_and_targets.spl`
+   (`get_target_arch`, per-arm match, and a fail-closed
+   `error_fatal("no asm match case for target {target_arch}-{target_os}")` at
+   line 200).
+
+**What is still genuinely inert is only the two-argument spelling** this row
+used: `cfg_strip.rs:259-266` documents that `("target_arch", "arm")` pairs and
+an empty `@cfg()` return `None` (unrecognised), i.e. `@cfg("target_arch",
+"arm")` gates nothing. The supported spelling is `@cfg(x86_64)`. That is a
+spelling defect, not "no mechanism", and it does **not** fail open for the
+supported form.
+
+### Still open (unchanged, re-confirmed by grep)
+
+- `src/os/kernel/arch/x86_64/timer.spl:204-205` (`mov {lo}, rax` / `mov {hi},
+  rdx`) and `src/os/kernel/arch/x86_64/topology.spl:35-38` (`mov eax, {leaf}`
+  and three more) still carry bare-template placeholders. Confirmed present.
+  **Deliberately NOT rewritten in this triage pass.** Root cause C is fixed, so
+  the blocker the original entry named is gone — but `rdtsc` (EDX:EAX) and
+  `cpuid` (clobbers RBX) need *explicit register* constraints, and no
+  executable verification path for a freestanding `src/os` build exists on this
+  host. Landing an unverified `out(reg)` rewrite is exactly the "loud error
+  traded for a silent zero" outcome this row warned against, so they stay
+  loudly broken.
+- The diagnostic gap (a bare `asm` template containing `{ident}` with an empty
+  constraint list should error at the asm site) is unimplemented. Its stated
+  precondition — fixing `timer.spl` / `topology.spl` first — still holds.
+
+### Specs added by this triage — with ablation proofs
+
+Both run on `bin/simple` (the stale Rust seed) reading `src/**` as SOURCE, in
+under 500ms each, with `--no-session-daemon`.
+
+**1. `test/01_unit/compiler/mir/inline_asm_output_writeback_spec.spl`** —
+reproducing guard for root cause C (fresh output temp + explicit `Copy`
+write-back, per output constraint KIND).
+
+```
+Results: 5 total, 5 passed, 0 failed      # after (current source)
+```
+
+Ablation (`MirInstKind.Copy(output_destinations[i], output_results[i])` ->
+`MirInstKind.Nop` in `function_lowering.spl`, then restored):
+
+```
+✗ emits an explicit Copy write-back for every recorded output
+Results: 5 total, 4 passed, 1 failed
+```
+
+A first ablation attempt silently did NOT apply (a shell `||` short-circuit left
+the file untouched) and reported a false 5/5 green. The count of the target
+string is now printed before and after every ablation; without that control the
+"proof" would have been vacuous — the same trap this row's original root cause C
+fell into.
+
+**2. `test/01_unit/compiler/mir/inline_asm_bare_template_placeholder_spec.spl`**
+— class-level detection: no scanned `.spl` may combine a bare (operand-less)
+`asm` template with a `{ident}` placeholder. Shrink-only allowlist holds exactly
+`timer.spl` and `topology.spl`; a fixed file must be removed from it.
+
+```
+Results: 6 total, 6 passed, 0 failed      # after (current source)
+```
+
+Ablation A — fix the offender (`mov {lo}, rax` -> `mov rcx, rax` in
+`timer.spl`): the allowlist correctly reads as stale.
+
+```
+✗ detects the two known offenders (detector is not inert)
+✗ keeps the allowlist non-stale
+Results: 6 total, 4 passed, 2 failed
+```
+
+Ablation B — inject a NEW offender into a currently-clean file
+(`{port}` placeholder into `serial_test_kernel.spl`): the class guard fires,
+which is the regression it exists to catch.
+
+```
+✗ clears bare asm that legitimately has no placeholders
+✗ admits no offender outside the shrink-only allowlist
+Results: 6 total, 4 passed, 2 failed
+```
+
+All three ablations were reverted and `git diff --stat` confirmed empty on the
+mutated files afterwards.
+
+### Incidental finding (not this row, not fixed here)
+
+`list_dir_recursive` (`src/lib/nogc_sync_mut/sffi/io.spl:179`) is unusable as a
+spec primitive under `bin/simple`: the seed interpreter has no
+`rt_list_dir_recursive` ("unknown extern function: rt_list_dir_recursive",
+E1002) and the call returns an EMPTY list rather than failing. Any tree-scanning
+spec built on it is vacuously green. That is why spec 2 uses an explicit file
+list plus a non-vacuity control instead of a directory walk.
 
 ## Symptom
 
@@ -211,3 +362,106 @@ with `src/lib/m.spl` containing any bare `asm """..."""` block that mentions
 `{name}`.
 
 Full run: `/home/ormastes/dev/simple-s3red/run_stage3.shs <worktree> <tag>`.
+
+---
+
+## Re-verification 2026-08-17 (W4 bug-fixing wave) — root cause C is FIXED in the pure-Simple compiler and STRUCTURALLY IMPOSSIBLE in the Rust seed
+
+Root cause C ("`out(reg)` bindings compile and are then SILENTLY DROPPED") has
+two independent implementations behind it, and they are in opposite states.
+
+### Pure-Simple compiler (the self-hosting path): FIXED
+
+Both halves of the writeback now exist in source:
+
+- `src/compiler/50.mir/_MirLowering/function_lowering.spl:1084-1093` emits an
+  explicit `MirInstKind.Copy(output_destinations[i], output_results[i])` after
+  the `InlineAsm` instruction, with the comment "Inline asm defines fresh SSA
+  result locals. Explicit copies perform the source-level output writeback".
+  Landed by `8eef2f17338d` (2026-08-14) — **seven days after this doc was
+  filed**, which is why the doc still lists C as open.
+- `src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl:548-624`
+  (`translate_inline_asm`) builds the full constraint string from `outputs` /
+  `inputs` / `clobbers` / `clobber_abis`, handles `InOut` as an output plus a
+  numeric tied input, captures a single output directly into the operand's SSA
+  name and multiple outputs via a `{ i64, i64, ... }` struct return plus
+  per-index `extractvalue`, and rewrites the template through
+  `llvm_inline_asm_rewrite_template(asm_template, outputs, inputs)`.
+
+Nothing on this path discards the operand list.
+
+### Rust seed: cannot bind operands at all, by construction
+
+`src/compiler_rust/compiler/src/mir/inst_enum.rs:100`:
+
+```rust
+InlineAsm { instructions: Vec<String>, volatile: bool },
+```
+
+The seed's MIR `InlineAsm` variant **has no operand fields** — no `inputs`, no
+`outputs`, no `clobbers`. The operand list is therefore discarded at HIR→MIR
+lowering, before codegen is reached. Consistently, the seed's LLVM emitter
+matches with `..` and hard-codes an empty constraint string and a void return
+(`src/compiler_rust/compiler/src/codegen/llvm/functions.rs:983-995`):
+
+```rust
+MirInst::InlineAsm { instructions, .. } => {
+    let fn_type = self.context_ref().void_type().fn_type(&[], false);
+    let asm = self.context_ref().create_inline_asm(
+        fn_type, instructions.join("\n"), String::new(), /* constraints */
+        true, false, Some(InlineAsmDialect::ATT), false);
+    builder.build_indirect_call(fn_type, asm, &[], "")
+```
+
+So on the seed, `out(reg)` is not "dropped by a bug" — there is nowhere for it to
+be carried. Any measurement of root cause C taken through `bin/simple` (which is
+the seed, and says so in its own `--version` banner) is measuring the seed's
+absent feature, not the pure-Simple compiler's behaviour. This distinction is not
+made anywhere above and is the reason the two roots must be tracked separately.
+
+**Ownership:** repairing the seed requires adding operand fields to
+`src/compiler_rust/compiler/src/mir/inst_enum.rs` plus its `inst_effects.rs` /
+`inst_helpers.rs` match arms and the HIR→MIR asm lowering. Those files are
+outside this wave's `codegen/llvm/**` + `pipeline/native_project/**` scope, so
+the seed half is left filed rather than half-changed.
+
+### New, separate, reproducible defect found while probing: duplicate SSA name in the emitted `.ll`
+
+The bound form does not reach a "silent zero" through the seed today — it fails
+`llc` outright. Probe (`asm_probe.spl`, exactly this doc's two fixtures):
+
+```
+fn asm_const() -> i64:
+    var dst: i64 = 0
+    asm volatile("movq $$42, $0", dst = out(reg) dst)
+    dst
+
+fn asm_copy(src: i64) -> i64:
+    var dst: i64 = 0
+    asm volatile("movq $1, $0", dst = out(reg) dst, src = in(reg) src)
+    dst
+```
+
+```
+$ bin/simple native-build asm_probe.spl -o asm_probe      # bin/simple = Rust seed
+[NATIVE] OK=0 ERROR=1
+  AOT compile error: Compile error in backend (llvm): llc failed (exit 1):
+  /usr/bin/llc-20: /mnt/data/tmp/simple_llvm_1229394.ll:68:3:
+      error: multiple definition of local value named 'l2'
+rc=1   (no binary produced)
+```
+
+This is fail-closed, which is better than the silent zero the doc describes, but
+it is a distinct defect from C: an SSA local is emitted twice in the same
+function. It is filed here rather than closed because the emitting site was not
+isolated (the temporary `.ll` is unlinked on failure and no keep-flag was found),
+and because the same probe is the natural regression fixture once the seed's
+operand plumbing exists.
+
+### Status of this row
+
+Root cause A (bare-template placeholders) and B (`@cfg("target_arch")` inert)
+are untouched by the above and remain open as filed. Root cause C is **retired
+for the pure-Simple compiler** and **re-scoped to a seed MIR gap** (cross-owner).
+The `timer.spl` / `topology.spl` conversion is still correctly blocked: it is the
+seed that builds the SimpleOS lanes, and the seed still cannot bind operands.
