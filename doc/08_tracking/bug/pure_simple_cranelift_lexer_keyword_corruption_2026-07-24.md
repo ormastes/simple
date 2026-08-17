@@ -43,3 +43,30 @@ Add a focused native regression that tokenizes `for arg in raw:` and requires
 `TOK_KW_FOR`, `TOK_IDENT`, `TOK_KW_IN`, `TOK_IDENT`, `TOK_COLON` before
 rebuilding the full CLI. Do not deploy a version-only binary or fall back to
 the Rust seed.
+
+## 2026-08-17 (W6) — lexer LOGIC exonerated; row narrowed to the Cranelift lowering
+
+The "Required fix" section asks for "a focused native regression that tokenizes
+`for arg in raw:` and requires TOK_KW_FOR, TOK_IDENT, TOK_KW_IN, TOK_IDENT,
+TOK_COLON". That regression now exists at source level:
+
+    test/01_unit/compiler/frontend/pure_simple_lexer_keyword_lookup_spec.spl
+
+Reproduce (binary: the STALE Rust seed at
+`bin/release/x86_64-unknown-linux-gnu/simple`, mtime 2026-08-16 22:59):
+
+    bin/simple test test/01_unit/compiler/frontend/pure_simple_lexer_keyword_lookup_spec.spl
+
+Result: `Results: 4 total, 4 passed, 0 failed`. It drives
+`lex_init_with_path` + `lex_next` (`src/compiler/10.frontend/core/lexer.spl:106,538`)
+and `keyword_lookup` (`src/compiler/10.frontend/core/tokens.spl:359`, `in` ->
+`TOK_KW_IN`) live from disk, and adds the class generalization the row implies:
+no reserved spelling may degrade to `TOK_IDENT`, and no near-miss spelling
+(`i`, `inn`, `In`, `forx`) may over-match.
+
+**The pure-Simple lexer logic is therefore not the defect.** The row's remaining
+scope is the Cranelift text/array lowering it also names, reachable only through
+a native build of the full CLI (`build/native_probe/simple_dynload`) which this
+worker is not permitted to produce (rebuilding `bin/**` clobbers ~16 concurrent
+lanes). Status stays OPEN, but narrowed: retest against the backend, not
+`lexer.spl` / `tokens.spl`.

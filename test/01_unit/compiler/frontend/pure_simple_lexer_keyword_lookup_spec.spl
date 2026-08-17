@@ -1,0 +1,84 @@
+# Focused regression for the lexer/keyword-lookup half of
+# doc/08_tracking/bug/pure_simple_cranelift_lexer_keyword_corruption_2026-07-24.md
+#
+# That row reports the pure-Simple CLI, built native via Cranelift, tokenizing the
+# valid `for arg in raw:` with `in` as `Ident`, after which later tokens are
+# corrupt and execution dies with "field access on nil receiver" or SIGILL. Its
+# "Required fix" section asks, verbatim, for "a focused native regression that
+# tokenizes `for arg in raw:` and requires TOK_KW_FOR, TOK_IDENT, TOK_KW_IN,
+# TOK_IDENT, TOK_COLON before rebuilding the full CLI". This is that regression at
+# the source level: it drives `lex_init_with_path` + `lex_next` + `keyword_lookup`
+# from `src/compiler/10.frontend/core/` directly, read live from disk.
+#
+# SCOPE, stated honestly: this spec runs on the tree-walk interpreter, so it can
+# prove the pure-Simple lexer LOGIC is correct; it cannot by itself exercise a
+# Cranelift text/array lowering defect. If this spec is green and the native CLI
+# still mistokenizes, the defect is in the backend lowering, not in these
+# functions — which is exactly the isolation the row asks for.
+#
+# @cover src/compiler/10.frontend/core/tokens.spl
+# @cover src/compiler/10.frontend/core/lexer.spl
+
+use std.spec.{describe, it, expect}
+use compiler.core.tokens.{
+    TOK_IDENT, TOK_COLON, TOK_EOF,
+    TOK_KW_FOR, TOK_KW_IN, TOK_KW_WHILE, TOK_KW_RETURN, TOK_KW_IF,
+    keyword_lookup
+}
+use compiler.frontend.core.lexer.{lex_init_with_path, lex_next, lex_cur_kind_get_slot}
+
+# Tokenize `src` and return the first `n` token kinds, skipping the layout
+# tokens (Indent/Dedent/Newline) a one-line fragment cannot produce anyway.
+fn kinds_of(src: text, n: i64) -> [i64]:
+    lex_init_with_path(src, "")
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        val k = lex_next()
+        out.push(k)
+        if k == TOK_EOF:
+            return out
+        i = i + 1
+    out
+
+describe "pure-Simple lexer keyword lookup":
+
+    # ---- reproducer: the exact sequence named in the bug row ----
+    it "tokenizes `for arg in raw:` with in as a keyword, not an identifier":
+        val kinds = kinds_of("for arg in raw:", 5)
+        expect(kinds.len()).to_equal(5)
+        expect(kinds[0]).to_equal(TOK_KW_FOR)
+        expect(kinds[1]).to_equal(TOK_IDENT)
+        # RED shape reported by the row: this is TOK_IDENT, i.e. "Ident".
+        expect(kinds[2]).to_equal(TOK_KW_IN)
+        expect(kinds[2] == TOK_IDENT).to_equal(false)
+        expect(kinds[3]).to_equal(TOK_IDENT)
+        expect(kinds[4]).to_equal(TOK_COLON)
+
+    # ---- detection spec: generalize to the CLASS (any keyword read as Ident) ----
+    it "never returns TOK_IDENT for a reserved keyword spelling":
+        # keyword_lookup is the single table the lexer consults; a corrupted text
+        # compare there degrades EVERY keyword to Ident, not just `in`.
+        expect(keyword_lookup("for")).to_equal(TOK_KW_FOR)
+        expect(keyword_lookup("in")).to_equal(TOK_KW_IN)
+        expect(keyword_lookup("while")).to_equal(TOK_KW_WHILE)
+        expect(keyword_lookup("return")).to_equal(TOK_KW_RETURN)
+        expect(keyword_lookup("if")).to_equal(TOK_KW_IF)
+
+    it "still returns TOK_IDENT for near-miss spellings":
+        # The complement: a prefix/suffix-corrupted compare would over-match.
+        expect(keyword_lookup("i")).to_equal(TOK_IDENT)
+        expect(keyword_lookup("inn")).to_equal(TOK_IDENT)
+        expect(keyword_lookup("In")).to_equal(TOK_IDENT)
+        expect(keyword_lookup("forx")).to_equal(TOK_IDENT)
+        expect(keyword_lookup("raw")).to_equal(TOK_IDENT)
+        expect(keyword_lookup("arg")).to_equal(TOK_IDENT)
+
+    it "keeps keyword classification stable across a multi-keyword line":
+        val kinds = kinds_of("while x in y: return x", 6)
+        expect(kinds[0]).to_equal(TOK_KW_WHILE)
+        expect(kinds[1]).to_equal(TOK_IDENT)
+        expect(kinds[2]).to_equal(TOK_KW_IN)
+        expect(kinds[3]).to_equal(TOK_IDENT)
+        expect(kinds[4]).to_equal(TOK_COLON)
+        expect(kinds[5]).to_equal(TOK_KW_RETURN)
