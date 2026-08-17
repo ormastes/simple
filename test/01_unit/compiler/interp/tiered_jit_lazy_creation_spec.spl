@@ -1,0 +1,59 @@
+# Lazy JIT engine creation (startup perf plan Phase D, 2026-08-17)
+#
+# TieredJitManager.create() must NOT create a JIT engine. The engine is
+# created only when the first Tier-1 promotion candidate is admitted to
+# compilation. Created-state is observed only through the jit_created()
+# accessor, never by reading fields/module vars from it blocks.
+
+use compiler.interp.execution.tiered_jit.{TieredJitConfig, JitTier}
+use compiler.interp.execution.tiered_jit_manager.{TieredJitManager}
+
+fn lazy_config() -> TieredJitConfig:
+    TieredJitConfig(tier1_threshold: 3, tier2_threshold: 100, debug_mode: false)
+
+fn jit_source() -> text:
+    "fn lazy_add_one(x: i64) -> i64:\n    x + 1\n"
+
+fn cold_manager_created() -> bool:
+    var m = TieredJitManager.create(lazy_config())
+    m.register_function("lazy_add_one", jit_source())
+    m.record_call("lazy_add_one")
+    m.record_call("lazy_add_one")
+    val created = m.jit_created()
+    m.cleanup()
+    created
+
+fn hot_manager_probe() -> [bool]:
+    var m = TieredJitManager.create(lazy_config())
+    m.register_function("lazy_add_one", jit_source())
+    val before = m.jit_created()
+    var i = 0
+    var tier = JitTier.Interpreted
+    while i < 3:
+        tier = m.record_call("lazy_add_one")
+        i = i + 1
+    val after = m.jit_created()
+    val promoted = tier != JitTier.Interpreted
+    # extra calls after promotion must keep working (creation happens once;
+    # jit_created stays true, function stays callable/native)
+    m.record_call("lazy_add_one")
+    val still_created = m.jit_created()
+    val created_once = m.jit_creation_count() == 1
+    m.cleanup()
+    [before, after, promoted, still_created, created_once]
+
+describe "Tiered JIT lazy engine creation":
+    it "does not create a JIT engine at construction or below threshold":
+        val created = cold_manager_created()
+        expect created == false
+
+    it "creates the JIT engine on first tier-1 promotion and promotes":
+        val probe = hot_manager_probe()
+        expect probe[0] == false
+        expect probe[1] == true
+        expect probe[2] == true
+
+    it "keeps the engine created exactly once across further calls":
+        val probe = hot_manager_probe()
+        expect probe[3] == true
+        expect probe[4] == true

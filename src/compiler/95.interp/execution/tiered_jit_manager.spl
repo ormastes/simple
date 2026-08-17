@@ -25,14 +25,30 @@ class TieredJitManager:
     config: TieredJitConfig
     profiles: Dict<text, FunctionProfile>
     jit_handle: i64
+    jit_creations: i64
     tier1_compilations: i64
     tier2_compilations: i64
     total_compile_time_ms: f64
     hotspot_plans: i64
 
+    # Lazy JIT creation (startup perf plan Phase D, 2026-08-17): the engine is
+    # NOT created at construction. jit_handle stays 0 until the first Tier-1
+    # promotion candidate is admitted (_compile_function -> _ensure_jit), so
+    # cold/short interpreter programs never pay rt_jit_create().
     static fn create(config: TieredJitConfig) -> TieredJitManager:
-        var handle = rt_jit_create()
-        TieredJitManager(config: config, profiles: {}, jit_handle: handle, tier1_compilations: 0, tier2_compilations: 0, total_compile_time_ms: 0.0, hotspot_plans: 0)
+        TieredJitManager(config: config, profiles: {}, jit_handle: 0, jit_creations: 0, tier1_compilations: 0, tier2_compilations: 0, total_compile_time_ms: 0.0, hotspot_plans: 0)
+
+    fn jit_created() -> bool:
+        self.jit_handle != 0
+
+    fn jit_creation_count() -> i64:
+        self.jit_creations
+
+    me _ensure_jit() -> i64:
+        if self.jit_handle == 0:
+            self.jit_handle = rt_jit_create()
+            self.jit_creations = self.jit_creations + 1
+        self.jit_handle
 
     me register_function(name: text, source: text):
         if not self.profiles.has(name):
@@ -80,7 +96,7 @@ class TieredJitManager:
                         self.hotspot_plans = self.hotspot_plans + 1
                     if jit_hotspot_compile_decision_allows_compile(decision):
                         compile_ms = self._compile_function(decision.compile_source)
-                        if rt_jit_has_function(self.jit_handle, p.name):
+                        if self.is_native(p.name):
                             new_tier = JitTier.Fast
                             self.tier1_compilations = self.tier1_compilations + 1
             else if p.tier == JitTier.Fast:
@@ -98,8 +114,9 @@ class TieredJitManager:
     me _compile_function(source: text) -> f64:
         if source == "":
             return 0.0
+        var handle = self._ensure_jit()
         var t0 = rt_time_now_seconds()
-        var err = rt_jit_compile_source(self.jit_handle, source)
+        var err = rt_jit_compile_source(handle, source)
         var t1 = rt_time_now_seconds()
         var ms = (t1 - t0) * 1000.0
         self.total_compile_time_ms = self.total_compile_time_ms + ms
@@ -112,19 +129,22 @@ class TieredJitManager:
         ms
 
     fn call_i64(name: text, arg: i64) -> i64:
-        if rt_jit_has_function(self.jit_handle, name):
+        if self.is_native(name):
             rt_jit_call_i64(self.jit_handle, name, arg)
         else:
             -1
 
     fn call_void(name: text) -> i64:
-        if rt_jit_has_function(self.jit_handle, name):
+        if self.is_native(name):
             rt_jit_call_void(self.jit_handle, name)
         else:
             -1
 
     fn is_native(name: text) -> bool:
-        rt_jit_has_function(self.jit_handle, name)
+        if self.jit_handle == 0:
+            false
+        else:
+            rt_jit_has_function(self.jit_handle, name)
 
     fn get_tier(name: text) -> JitTier:
         if self.profiles.has(name):
@@ -215,4 +235,6 @@ class TieredJitManager:
         print("  Current tiers: " + interpreted.to_string() + " interpreted, " + fast.to_string() + " fast, " + optimized.to_string() + " optimized")
 
     me cleanup():
-        rt_jit_cleanup(self.jit_handle)
+        if self.jit_handle != 0:
+            rt_jit_cleanup(self.jit_handle)
+            self.jit_handle = 0
