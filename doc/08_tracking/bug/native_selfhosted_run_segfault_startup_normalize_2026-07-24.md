@@ -140,3 +140,32 @@ proving gate run is gated on the parse-memory-balloon fix (interning), not on
 anything in this bug. No user-facing regression meanwhile: `bin/simple` is the
 working seed. Guard-storm/PID-recycle and the sentinel PGID-pin (da7a702e199)
 were investigated and ruled out as the stage4 killer.
+
+## 2026-08-17 triage (wave W3) — FAMILY: no source-matched self-hosted binary deployed
+
+This row is one member of a single family, not an independent defect. On this
+host `bin/simple` -> `bin/release/x86_64-unknown-linux-gnu/simple` is the **Rust
+seed**, so every remaining blocker in this row requires building and deploying a
+source-matched self-hosted CLI. The rows sharing that blocker are:
+
+- `host_toolchain_seed_pinned_lint_fmt_doccov_unrunnable_2026-07-17`
+- `stage4_full_cli_source_check_blank_exit8_2026-07-23`
+- `self_hosted_cli_native_build_silent_no_artifact_2026-08-14`
+- `self_hosted_simpleos_target_native_build_crash_2026-07-11`
+- `native_selfhosted_run_segfault_startup_normalize_2026-07-24`
+- `bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17`
+- `mcp_full_program_native_codegen_and_arg_extract_2026-06-16`
+- `no_self_hosted_binary_deployed_blocks_bootstrap_gate_2026-08-09` (the family
+  statement itself: an ENVIRONMENT fact on this machine, not a code defect)
+
+W3 was explicitly barred from rebuilding or redeploying `bin/simple` /
+`bin/release/**` (~16 concurrent lanes share them), so **no execution evidence
+for this row was produced or is claimed**. Status is unchanged: OPEN, blocked on
+deploy. What W3 did instead was pin, by source spec, the fail-closed checks these
+rows depend on, so they cannot be silently lost again while the deploy blocker
+persists: `test/01_unit/app/cli/silent_success_fail_closed_source_spec.spl`
+(native-build worker exit 0 without an artifact; driver Success without a fresh
+staged artifact; argv read through `rt_cli_get_args` rather than a same-named
+import). Ablation-verified: neutralising the native_build_main.spl guard takes
+that spec from `Results: 3 total, 3 passed` to `3 total, 2 passed, 1 failed`.
+

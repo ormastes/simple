@@ -1,0 +1,46 @@
+extern fn rt_file_read_text(path: text) -> text
+use std.spec.{describe, it, expect}
+
+# Source-level family guard for the "silent success" CLI defect class:
+#   doc/08_tracking/bug/self_hosted_cli_native_build_silent_no_artifact_2026-08-14.md
+#   doc/08_tracking/bug/windows_build_subcommand_silent_noop_stale_binary_2026-08-05.md
+#   doc/08_tracking/bug/bootstrap_stage4_get_args_infinite_recursion_coredump_2026-06-21.md
+#
+# Why a SOURCE spec and not an execution spec: every one of those rows is
+# currently blocked on deploying a source-matched self-hosted binary. `bin/simple`
+# on this host is the Rust seed, so no runnable probe can exercise the deployed
+# path. The fail-closed checks these rows depend on DO exist in current source;
+# what has repeatedly been lost is the checks themselves, silently, during
+# truncated-tree recoveries and stale-snapshot clobbers. This spec pins them so a
+# revert is caught without a bootstrap.
+
+fn src(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "CLI silent-success fail-closed invariants":
+    it "rejects a native-build worker that exits 0 without an output binary":
+        val source = src("src/app/cli/native_build_main.spl")
+        expect(source.len()).to_be_greater_than(0)
+        expect(source).to_contain("if code == 0 and output_path != \"\" and not rt_file_exists(output_path):")
+        expect(source).to_contain("error: native-build worker exited 0 but produced no output binary")
+
+    it "rejects a compiler driver Success that wrote no artifact":
+        val source = src("src/app/io/_CliCompile/compile_targets.spl")
+        expect(source.len()).to_be_greater_than(0)
+        # The staged sibling is what makes the check meaningful: without it a
+        # STALE requested output would satisfy the success test.
+        expect(source).to_contain(".simple-native-build-")
+        expect(source).to_contain("error: native-build reported success but produced no fresh output binary")
+
+    it "reads argv through the runtime extern, never through a same-named import":
+        # `fn get_args()` importing `get_args` from std.io_runtime bound the call
+        # to itself and recursed until the stack died (Stage 4 SIGSEGV on every
+        # invocation, including `print(1)`). The wrapper must call the extern.
+        val source = src("src/app/io/cli_ops.spl")
+        expect(source.len()).to_be_greater_than(0)
+        expect(source).to_contain("extern fn rt_cli_get_args() -> [text]")
+        expect(source).to_contain("extern fn rt_exit(code: i64)")
+        expect(source).to_contain("rt_cli_get_args()")
+        # Re-importing either name here reintroduces the self-binding recursion.
+        expect(source.contains("use std.io_runtime")).to_equal(false)
+        expect(source.contains("use std.nogc_sync_mut.io_runtime")).to_equal(false)

@@ -87,3 +87,32 @@ not runnable. That doc's severity downgrade should be revisited.
 - `doc/08_tracking/bug/bootstrap_stage3_selfhost_seed_wrapper_fallback_2026-06-17.md`
 - `doc/08_tracking/bug/f64_self_hosted_call_result_codegen_2026-06-21.md` (blocked by this)
 - `doc/09_report/bootstrap_crash_report_2026_04_01.md` (LIM-010 history)
+
+## 2026-08-17 (wave W3) — RETIRED: fixed in current source
+
+The "re-verified 2026-08-17 by source inspection (triage shard 00)" stamp at the
+top of this file is **wrong**. The defect is fixed in current source, and the fix
+carries this bug's own id in its comment.
+
+`src/app/io/cli_ops.spl` no longer imports `get_args`/`exit` from
+`std.io_runtime`. It declares the runtime primitives as externs
+(`extern fn rt_cli_get_args() -> [text]`, `extern fn rt_exit(code: i64)`, lines
+15-16) and the wrappers call those directly:
+
+- `src/app/io/cli_ops.spl:331 fn get_args()` -> `rt_cli_get_args() ?? []`
+- `src/app/io/cli_ops.spl:342 fn exit(code)` -> `rt_exit(code)`
+- `src/app/io/cli_ops.spl:345 fn cli_get_args()` -> `rt_cli_get_args()`
+
+The in-file comment at lines 8-14 names the mechanism and this bug id: importing
+`get_args` under its own name made the wrapper body bind to *itself* rather than
+the import, giving the unbounded self-recursion in the gdb backtrace above.
+`grep -n io_runtime src/app/io/cli_ops.spl` now returns only that comment line.
+
+Caveat, stated rather than papered over: W3 was barred from rebuilding or
+redeploying, so this is a **source** retirement — the historical Stage 4 binary
+was never re-run. The invariant is now pinned by
+`test/01_unit/app/cli/silent_success_fail_closed_source_spec.spl` ("reads argv
+through the runtime extern, never through a same-named import"), which fails if
+either import is reintroduced.
+
+Status: RESOLVED (source). Reopen only with a fresh Stage 4 backtrace.

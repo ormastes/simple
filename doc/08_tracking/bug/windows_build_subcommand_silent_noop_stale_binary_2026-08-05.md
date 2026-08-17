@@ -337,3 +337,42 @@ reported signature (zero bytes) instead of reporting a green.
 — a binary that exits 0 with zero output, i.e. the incident's exact shape —
 gives `Results: 4 total, 2 passed, 2 failed`, both failures on the
 output-length/content oracles. Restoring `bin/simple` returns it to 4/4.
+
+## 2026-08-17 (wave W3) — dispatch-table half FIXED; Windows-staleness half unchanged
+
+Two distinct things were tangled in this row. The Windows binary-staleness claim
+is untouched (no Windows host here, and W3 was barred from deploying). But the
+"stale `app_path`" thread that this doc records as investigated-and-dismissed was
+still live, and it is a real family defect rather than one bad line:
+
+`CommandEntry.has_simple_impl()` (`src/app/cli/dispatch/types.spl:59`) tests only
+`app_path.len() > 0`. It never touches the filesystem, so an entry left behind by
+a rename still reports "implemented", and `dispatch_command` only discovers the
+truth when `cli_run_file` returns negative — at which point it falls through to
+`dispatch_to_rust`, whose message is the actively misleading
+`command '<x>' not implemented in Simple` plus a hint to create a file that in
+fact already exists under a different name. Nothing in the table was ever
+checked against the tree, so the class was invisible.
+
+Two of the 84 declared paths were stale:
+
+- `wrapper-gen` -> `src/app/wrapper_gen/main.spl` (the file is `mod.spl`; note
+  `main_and_help.spl:454` already used the correct `mod.spl`, so the two dispatch
+  routes disagreed)
+- `migrate` -> `src/app/migrate/main.spl` (no such directory at all; `migrate` is
+  handled statically by `cli_run_migrate` in
+  `src/app/io/_CliCommands/run_commands.spl:555`, so the entry now declares no
+  `app_path`)
+
+Fixed, and the class is pinned by
+`test/01_unit/app/cli/dispatch_table_app_path_resolves_spec.spl`, which sweeps
+every declared `app_path` for readability (with a non-vacuity floor so a run that
+checked nothing cannot pass) and rejects duplicate command names.
+
+Evidence: `bin/simple test <that spec> --no-session-daemon` (Rust seed
+`bin/simple`, tree-walk interpreter) went from
+`Results: 3 total, 1 passed, 2 failed` to `Results: 3 total, 3 passed, 0 failed`.
+The same-named `cli_run_file("...")` literals across `src/app/**` were swept too
+and are all clean.
+
+Status: still OPEN for the Windows redeploy; the table defect is resolved.
