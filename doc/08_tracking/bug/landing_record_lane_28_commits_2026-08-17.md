@@ -130,12 +130,8 @@ check-seed-builds-push: PASS — 60 file(s) checked, seed builds cleanly at 1b21
 ### check-c-runtime-compiles-push.shs                                   rc=0
 PASS — 104 file(s) compiled, 0 errors (2 skipped for unavailable external dependencies)
 
-### check-test-tree-divergence-delta.shs <base> <tip>                    rc=UNRESOLVED (still running at push time)
-check-test-tree-divergence-delta.shs: NO VERDICT LINE EMITTED.
-The guard was launched on c19b514ff2ed..1b2110db1cd, was confirmed alive
-(3 live processes), and had produced ZERO output when the rest of the
-sequence completed. It was NOT waited on further and is recorded here as
-UNRESOLVED -- not as a PASS, not as a FAIL.
+### check-test-tree-divergence-delta.shs <base> <tip>                    rc=1  (completed AFTER the push; corrected below)
+check-test-tree-divergence-delta: FAIL — 1 newly introduced: unit:app/doc_coverage/sdoctest_coverage_spec.spl
 ```
 
 **Seed-build is NOT a fast-path verdict here.** The range touches 2 files
@@ -264,3 +260,49 @@ The push is `git push` of the rebased tip to `refs/heads/main`, **no
 `--force`, no `+refs`**, `--no-verify` per the authorisation above. If it is
 rejected as non-fast-forward, the response is to re-fetch, rebase and retry --
 never to force.
+
+
+---
+
+# CORRECTION 1 — the divergence delta was a FAIL, and it was MINE
+
+The delta guard emitted no verdict before the push and was recorded above as
+UNRESOLVED. It finished afterwards and the verdict is **FAIL**, verbatim:
+
+```
+check-test-tree-divergence-delta: FAIL — 1 newly introduced: unit:app/doc_coverage/sdoctest_coverage_spec.spl
+rc=1
+```
+
+**This is not the pre-existing 876-vs-813 red. It is newly introduced by this
+range**, and the earlier framing ("the red is pre-existing and not mine") is
+withdrawn for this offender. Measured:
+
+- `test/01_unit/app/doc_coverage/sdoctest_coverage_spec.spl` and its mirror
+  `test/unit/app/doc_coverage/sdoctest_coverage_spec.spl` were **IDENTICAL**
+  at the merge-base `488f622ae12`.
+- After this range they **DIVERGED**, because `b25fd170949` rewrote only the
+  `01_unit` copy.
+
+Pushing before the verdict arrived was a real gap: the guard was still running
+and I proceeded on the assumption its red would be pre-existing. It was not.
+
+**Fixed forward** in the same commit as this correction: the mirror is synced
+to the `01_unit` content, restoring byte-identity and clearing the introduced
+divergence. No baseline was regenerated and `--generate-baseline` was not used.
+
+# CORRECTION 2 — the `c32e6c146e8c` cherry-pick was a duplicate
+
+While this lane was landing, another lane pushed the identical fix. Origin
+carried it at `1f7503c35ea31be9d2ad520883054118d551ae6a` with the same two
+files. Verified by content, not by log presence:
+
+- the pick **dropped out of the rebase as already-applied** — no duplicate
+  commit exists in the pushed range;
+- `scripts/check/check-nil-coalesce-option-gate.shs` at the pushed tip is
+  **IDENTICAL** to origin's landed copy.
+
+Nothing of the other lane's version was overwritten. This duplication is
+exactly what the standing order "when sync and push fix check other agents
+already fix" exists to prevent, and it was caught only because the check was
+run.
