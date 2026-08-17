@@ -1123,6 +1123,47 @@ mod tests {
 
         assert_eq!(chained, Value::text("HEllo".to_string()));
     }
+
+    #[test]
+    fn string_split_honors_limit_and_unicode_empty_separator() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let bounded = call_method_on_value(
+            Value::text("a:b:c"),
+            "split",
+            &[Value::text(":"), Value::Int(2)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("bounded split should dispatch");
+        assert_eq!(
+            bounded,
+            Value::array(vec![Value::text("a"), Value::text("b:c")])
+        );
+
+        let unicode = call_method_on_value(
+            Value::text("한글끝"),
+            "split",
+            &[Value::text(""), Value::Int(2)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("unicode character split should dispatch");
+        assert_eq!(
+            unicode,
+            Value::array(vec![Value::text("한"), Value::text("글끝")])
+        );
+    }
 }
 
 /// Try to call method_missing hook on a class/struct object.

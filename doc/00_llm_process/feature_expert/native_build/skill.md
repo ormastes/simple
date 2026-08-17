@@ -138,6 +138,13 @@ Standing test rule (2026-08-17): every native-build bug fix ships a spec
 reproducing the exact defect plus a generalization spec probing similar
 problems nearby, both cited in the bug doc. A fix without its reproducing
 spec is not done.
+
+Family-owned pure-Simple consumers must import their `std.<family>.*` facade,
+not the interpreter-compatibility `src.std.*` shim. Native-project deliberately
+refuses to choose a bare function when duplicate family providers exist. For
+aliased imports, regress both the production facade chain and an adjacent
+same-named decoy; see
+`native_project_src_std_platform_alias_owner_loss_2026_08_03.md`.
 ## Per-phase run-to-end loop and evidence bar (2026-08-17)
 
 A phase build runs to completion and yields a full error census; the landed
