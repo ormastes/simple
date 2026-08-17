@@ -204,6 +204,15 @@ is not later mistaken for a contradiction.
   `error: compile failed: parse: in ".../src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl": Unexpected token: expected Fn, found Assign`.
   That is a separate, pre-existing origin/main break; the ablation therefore ran
   against this session's working `src/` with only `module_surface.spl` swapped.
+mtime 2026-08-16 22:59:37 UTC.
+
+| version | `ELAPSED_MS` for `module_surfaces_from_modules` | `ORIGIN_COUNT` |
+|---|---|---|
+| BEFORE (linear scan) | see ablation log | — |
+| AFTER (Dict lookup) | see ablation log | — |
+
+Correctness gate: the sorted `ORIGIN ...` dumps must be **byte-identical**. A
+faster pass that resolves differently is a regression, not a fix.
 
 ## Progress receipts (so this window is never dark again)
 
