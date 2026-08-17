@@ -1,5 +1,52 @@
 # struct field dict mutation through a free function is a silent no-op
 
+## RESOLUTION 2026-08-17 — resolution (B) shallow, implemented in the interpreter
+
+Unblock condition 2 ("the write is propagated back to the caller"), scoped to
+the field kinds that are genuinely shared handles.
+
+**Engines.** Interpreter ONLY. JIT and native/AOT already made the write
+visible; the interpreter was the outlier, which is what made the divergence
+invisible to positive assertions. Re-measured on the deployed pre-fix binary
+with an absence control in every run:
+
+```
+== interpreter                     == jit
+struct has answer=false            struct has answer=true
+struct has never=false             struct has never=false
+class  has answer=true             class  has answer=true
+```
+
+**Root cause (exact).** Interpreter dicts/arrays are `Value::Dict(Arc<HashMap>)`
+with copy-on-write, so a callee mutation `Arc::make_mut`s a fork that dies with
+the frame. Visibility depends entirely on the post-call env write-back in
+`write_back_mutable_arguments`
+(`src/compiler_rust/compiler/src/interpreter_call/core/function_exec.rs:969`),
+and `is_value_type_struct` (`:953`) excluded EVERY value-type struct from it
+outright — correct for scalars, wrong for container handles. The
+`self.values[k] = v` code itself is identical for `class` and `struct`
+(`interpreter/node_exec.rs:1429-1487`); only the write-back gate differed.
+
+**Fix.** `merge_shared_collection_fields` carries back ONLY `Array`/`Dict`/
+`ByteArray`-valued fields of a value-type struct. Scalar and nested-struct
+fields keep strict value semantics, so "struct is a value type" still holds and
+task #91 is not regressed — deliberately NOT a whole-struct write-back.
+
+**Specs:**
+- reproducing: `test/01_unit/compiler/interpreter/struct_container_field_mutation_spec.spl`
+  (in-process examples + a subprocess interpreter-vs-JIT cross-check)
+- similar-problem detection: `test/01_unit/compiler/interpreter/value_type_field_mutation_class_spec.spl`
+  (array fields, second-hop and method mutation routes, nested depth, and the
+  scalar-stays-invisible control that fails on an over-corrected fix)
+
+Reproduce-first evidence, deployed pre-fix binary: `3 examples, 2 failures` and
+`5 examples, 3 failures` respectively.
+
+**The fix is SEED-SIDE and is only provable after a seed rebuild/redeploy.**
+
+- **Status:** FIXED in the seed interpreter (pending redeploy)
+- Original report follows.
+
 - **Status:** OPEN — spec left RED deliberately
 - **SUPERSEDED FRAMING — read first:**
   `struct_dict_field_mutation_engine_divergence_2026-08-10.md`. The "value

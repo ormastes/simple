@@ -1,5 +1,53 @@
 # Const-generic argument rejected in constructor-call position
 
+## RESOLUTION 2026-08-17 — diagnostic fixed; layer 1 below was WRONG
+
+**"Layer 1. Parser — no turbofish-style explicit generic-argument list in
+expression position" is FALSE.** Turbofish already works there and always did:
+`try_skip_ident_generic_args` (`src/compiler_rust/parser/src/expressions/postfix.rs`,
+mirrored in `src/compiler/10.frontend/core/parser_expr.spl:767`) commits when
+the closing `>` is followed by `(`, `.`, `::`, or `{`. Measured directly:
+
+```
+$ bin/simple run repro1.spl      # val a = Box2<i64, i32>(v: 7)
+a=<value:0x7>
+$ bin/simple run repro1b.spl     # val a = Box2<i64, 2>(v: 7)
+error: compile failed: parse: ... Unexpected token: expected expression, found Comma
+```
+
+Only layer 2 is real, and it is narrower than "no const generics": `2` is not a
+type, so `parse_type` rejected it, the WHOLE generic-argument list silently
+backtracked into a comparison chain, and the failure surfaced several tokens
+later at the comma — naming neither the construct nor the limitation.
+
+**Chosen fix: option (b)'s diagnostic half, not option (a).** Implementing const
+generic parameters is a language feature out of scope here, and quietly
+rewriting the spec was explicitly forbidden. Both parsers now consume a numeric
+generic argument, CONFIRM the shape really is a generic argument list, and then
+report the limitation by name. The misleading comma error is gone.
+
+**Design decision recorded for `Tensor<T, N>`:** rank stays a RUNTIME property
+of `_shape` — `Tensor.ndim()` is literally `self._shape.len()`
+(`src/lib/nogc_sync_mut/src/tensor.spl:94-96`) and `tensor.spl` itself only ever
+constructs with inferred generics (lines 160/181). `N` is a vestigial type
+parameter that constrains nothing. `test/01_unit/lib/nogc_sync_mut/src/array_builder_tensor_spec.spl`
+stays RED until someone either implements const generics or rewrites its oracle
+against `Tensor(...)` under this recorded decision.
+
+**Specs:**
+- reproducing: `test/01_unit/compiler/parser_const_generic_argument_diagnostic_spec.spl`
+- similar-problem detection: `test/01_unit/compiler/parser_generic_argument_position_class_spec.spl`
+
+Reproduce-first evidence, deployed pre-fix binary: `2 examples, 1 failure` and
+`4 examples, 2 failures` respectively.
+
+**The fix is SEED-SIDE and is only provable after a seed rebuild/redeploy.** A
+deployed binary older than 2026-08-17 still reports the stale
+`Unexpected token: expected expression, found Comma`.
+
+- Status: FIXED (diagnostic); const generics themselves remain unimplemented by design
+- Original report follows.
+
 - Status: OPEN
 - Found: 2026-08-17, `test/01_unit/lib/` sweep
 - Severity: MEDIUM (blocks one spec; language feature gap, not a regression)
