@@ -1000,27 +1000,3 @@ New acceptance criteria (extends AC-1..AC-12 above):
   Regression: audit 13/13, auth_throttle 6/6, conformance 8/8, back_office
   7/7, store_app 3/3. Posture doc updated: residual 1 closed, residual 7
   narrowed to normalisation-only; remainder renumbered 1-7.
-
-- W15-B (2026-08-17, done): RBAC data-driven table + equivalence fence.
-  Rust seed 59536728B 2026-08-16 22:59, interpreter mode, one spec/run,
-  SIMPLE_TIMEOUT_SECONDS=900, verdict read from "SPEC FILE VERDICT:" line.
-  Residual risk 2 (hardcoded role_allows) addressed WITHOUT touching the frozen
-  contract: new module src/lib/nogc_sync_mut/enterprise_sale/rbac_registry.spl
-  expresses the goods-sale RBAC policy as DATA — rbac_registry() grant rows
-  (sales/payments/procurement/booking/finance/hcm) + registry_role_allows with
-  the blanket admin-allows-all rule. foundation.role_allows is UNCHANGED; no
-  caller migrated (that is the ADR-gated follow-up). Exported via enterprise_sale
-  __init__.
-  Equivalence fence: test/.../enterprise_rbac_registry_equivalence_spec.spl
-  cross-products every role (7 named + empty + 2 unknown = 10) × every action
-  string in the suite (23 distinct grants + 6 deny-only = 29) = 290 pairs, all
-  asserted registry_role_allows == foundation.role_allows; granted=53.
-  BITE PROOF (green->red->green): baseline 4/4 passed. Dropped the
-  "booking.confirm" grant from the booking row -> 3/4 passed, 1 failed on
-  exactly that pair (registry denied what the frozen chain allows). Restored the
-  grant -> 4/4 passed. Verdicts recorded from the SPEC FILE VERDICT line each
-  run (declared>=4 executed=4).
-  Files: rbac_registry.spl (new), enterprise_sale/__init__.spl (+1 export),
-  enterprise_rbac_registry_equivalence_spec.spl (new), security_posture.md
-  (residual 2 updated: data-driven table exists + equivalence-proven, migration
-  ADR-gated), this state entry.

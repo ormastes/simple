@@ -1,0 +1,68 @@
+use std.spec
+
+# Generalization spec for the interpreter's indexed-lvalue augmented assignment
+# gap.
+#
+# Bug: doc/08_tracking/bug/spec_runner_indexed_augmented_assignment_unsupported_2026-08-15.md
+# Fix: src/compiler_rust/compiler/src/interpreter/node_exec.rs
+#      `exec_augmented_assignment` had arms only for `Expr::Identifier` and
+#      `Expr::FieldAccess`; every `Expr::Index` target fell through to the
+#      catch-all and raised
+#      "invalid assignment: unsupported augmented assignment target".
+#
+# The original bug was reported for `arr[i] += 1`, but the missing arm covers a
+# whole CLASS of lvalues, so this spec pins the class rather than the one case:
+# every augmented operator, array and dict receivers, a field-access receiver,
+# and a side-effecting subscript expression (which must be evaluated once).
+
+class CounterBox:
+    slots: [i64]
+
+var subscript_evaluations_: i64 = 0
+
+fn counting_index(i: i64) -> i64:
+    subscript_evaluations_ = subscript_evaluations_ + 1
+    i
+
+describe "interpreter indexed augmented assignment":
+    it "applies every augmented operator to an array element":
+        var xs = [10, 20, 30, 40, 50]
+        xs[0] += 5
+        xs[1] -= 5
+        xs[2] *= 2
+        xs[3] /= 4
+        xs[4] %= 7
+        expect(xs[0]).to_equal(15)
+        expect(xs[1]).to_equal(15)
+        expect(xs[2]).to_equal(60)
+        expect(xs[3]).to_equal(10)
+        expect(xs[4]).to_equal(1)
+
+    it "applies an augmented operator to a dict entry":
+        var counts = {"a": 1, "b": 2}
+        counts["a"] += 10
+        counts["b"] *= 3
+        expect(counts["a"]).to_equal(11)
+        expect(counts["b"]).to_equal(6)
+
+    it "applies an augmented operator through a field-access receiver":
+        var box = CounterBox(slots: [1, 2, 3])
+        box.slots[1] += 40
+        expect(box.slots[1]).to_equal(42)
+        expect(box.slots[0]).to_equal(1)
+
+    it "evaluates a side-effecting subscript exactly once":
+        var xs = [7, 7, 7]
+        subscript_evaluations_ = 0
+        xs[counting_index(2)] += 1
+        expect(xs[2]).to_equal(8)
+        expect(subscript_evaluations_).to_equal(1)
+
+    it "leaves no temporary bindings visible after the assignment":
+        var xs = [1, 2]
+        xs[0] += 1
+        # The desugaring binds `__aug_idx_temp__`/`__aug_rhs_temp__` internally
+        # and must restore the environment; the surrounding names stay intact.
+        val after = 9
+        expect(xs[0]).to_equal(2)
+        expect(after).to_equal(9)
