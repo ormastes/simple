@@ -1,7 +1,13 @@
 # Stage-3 vacuous binary: `??` on an `Option<UserEnum>` returns the enum's PAYLOAD
 
 Date: 2026-08-08
-Status: FIXED — landed on `main` at commit `ae07aaa2910` (`fix(runtime): gate
+Status: FIXED — landed on `main` at commit `ae07aaa2910`, and **independently
+re-validated 2026-08-17 by a different lane** with a full RED/GREEN ablation
+(both arms quoted verbatim in §7) plus a fail-closed regression guard,
+`scripts/check/check-nil-coalesce-option-gate.shs`, whose current verdict is
+`PASS — 3 case(s) checked, user enums pass through and canonical Option still
+unwraps`. §5 ("why the fix is not landed") is **historical**; both blockers it
+named are now cleared — see the annotations there. (`fix(runtime): gate
 rt_unwrap_or_self on canonical Option enum_id`). The predicate in both
 `src/runtime/runtime_native.c` and `src/runtime/simple_core/core_values.spl`
 now gates on `rt_enum_id(value) == 1` (canonical Option) before unwrapping,
@@ -192,13 +198,16 @@ tag, so the value is malformed and its bit fields carry no reliable meaning.
 `<value:0x…>` is `rt_to_string`'s opaque fallback for a value it recognises as
 *nothing* — consistent with a raw payload word escaping through `??`.
 
-## 5. Why the fix is not landed
+## 5. Why the fix was not landed — RESOLVED, both blockers cleared
+
+*Historical section. Both reasons the fix was withheld have since been settled;
+the fix landed at `ae07aaa2910`. Kept for the record.*
 
 The one-line change (gate on `rt_enum_id(value) == 1` instead of
-`rt_enum_discriminant(value) >= 0`, in both runtimes) is written and anchored as
+`rt_enum_discriminant(value) >= 0`, in both runtimes) was written and anchored as
 git blobs — `runtime_native.c` = `cf22da7f0b0c14c83ee722c9f4badd979c6f987f`,
-`core_values.spl` = `29943414ce481cec8ac2a2497269465a34f3ff77` — but it is
-**not landed**, for two reasons:
+`core_values.spl` = `29943414ce481cec8ac2a2497269465a34f3ff77` — but was withheld
+for two reasons:
 
 1. **It could not be validated.** Every available build lane links a *prebuilt*
    runtime (`--runtime-path .../stage2-runtime-authority`, and the default lane
@@ -206,29 +215,127 @@ git blobs — `runtime_native.c` = `cf22da7f0b0c14c83ee722c9f4badd979c6f987f`,
    still disassembles to the old body (`call rt_enum_discriminant … js`) and
    still prints `WILD v=7`. Validating requires rebuilding the runtime archive
    that supplies `rt_unwrap_or_self`; that archive member was not located inside
-   `libsimple_runtime.a` (452 members, none define the symbol), so the producer
-   of the linked copy is still unidentified. **This is the next action.**
+   `libsimple_runtime.a` (452 members, none define the symbol).
+   **CLEARED** — the prebuilt-runtime dependency was side-stepped rather than
+   solved: the predicate is validated by compiling `runtime_native.c` from tree
+   source directly into a standalone harness, so no build lane and no prebuilt
+   archive is involved. See §7.
 2. **There is a concrete regression risk.** `src/compiler_rust/compiler/src/
    codegen/codegen_instr_tests/calls.rs:250-315` asserts that bare `.unwrap()`
    and `.unwrap_or()` compile to `rt_unwrap_or_self`. Under the current
    implementation `.unwrap()` on a `Result` (enum id != 1) returns the Ok
    payload; under the proposed one it would return the `Result` enum itself.
-   Landing without settling `Result.unwrap()` would trade one silent
-   miscompile for another.
+   **CLEARED** — that risk was real and did materialise on a neighbouring path;
+   it is fixed and documented separately in
+   `doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md`.
+   `.unwrap_or()` no longer routes through `rt_unwrap_or_self` at all: the
+   comment block at `runtime_native.c:4052-4065` now records that
+   `rt_unwrap_or_self` is for the `??` operator alone, while
+   `rt_unwrap_or_trap`/`rt_unwrap_or_value` identify Ok/Err by
+   discriminant-hash comparison. The two concerns are now separate functions,
+   so the predicate change cannot trade one miscompile for another.
 
 The prior lane's refusal to land the unvalidated `bootstrap_globals.spl:408`
 guard change still stands and is unchanged by this work.
 
+## 7. Independent re-validation, 2026-08-17 (ablation, both arms verbatim)
+
+The fix was re-validated from scratch by a lane that did not write it, because
+the original landing's evidence was a scratch harness no longer present. Method:
+compile the tree's own `src/runtime/runtime_native.c` with `clang -c`, link it
+against a small C harness that calls `rt_enum_new` + `rt_unwrap_or_self`
+directly, and stub the 28 unrelated undefined symbols (`spl_*`, `rt_process_*`,
+`rt_simd_*`, …) with **aborting** bodies printing `STUB-CALLED`, so an
+accidental dependency is loud rather than silently wrong. No `STUB-CALLED` line
+appeared in either arm: the enum path ran real runtime code only.
+
+Two cases. Case 1 is the defect: a user enum `K.Slice(7)` built as
+`rt_enum_new(7, 0, 7)` — enum_id 7 is not the canonical Option id 1, so `??`
+must return the handle unchanged. Case 2 is the anti-vacuity control: the
+canonical `Some(7)` (`rt_enum_new(1, 0, 7)`) must **still** unwrap, otherwise
+"never unwrap anything" would pass case 1 for the wrong reason.
+
+**ARM 1 — RED, fix ablated** (only line 4048 reverted to the pre-fix predicate;
+`rt_is_none` at 4095, which shares the `rt_enum_id(value) == 1` text, was
+verified untouched):
+
+```
+case1 user-enum:   enum_id=7 disc=0 handle=0x630a718c72a1 payload=0x7 coalesced=0x7
+case1 VERDICT: FAIL - user enum unwrapped to PAYLOAD (defect reproduced)
+case2 option-some: enum_id=1 disc=0 handle=0x630a718c8af1 payload=0x7 coalesced=0x7
+case2 VERDICT: PASS - canonical Option still unwraps to payload
+RED rc=1
+```
+
+**ARM 2 — GREEN, fix as landed on `main`:**
+
+```
+case1 user-enum:   enum_id=7 disc=0 handle=0x5b19f7af32a1 payload=0x7 coalesced=0x5b19f7af32a1
+case1 VERDICT: PASS - user enum passed through unchanged
+case2 option-some: enum_id=1 disc=0 handle=0x5b19f7af4af1 payload=0x7 coalesced=0x7
+case2 VERDICT: PASS - canonical Option still unwraps to payload
+GREEN rc=0
+```
+
+The control fails in exactly one arm and for exactly the right reason, and case 2
+passes in both — the predicate change is the only variable. Exit codes were read
+from a shell variable on the line after each command, never through a pipe.
+
+### Regression guard
+
+`scripts/check/check-nil-coalesce-option-gate.shs` — exit 0 = safe,
+verdict is the last line of stdout (`PASS — 3 case(s) checked, …` / `FAIL` /
+`ERROR — nothing was checked`). It performs the ablation above as a **fatal
+selftest on every run**: it rebuilds the runtime with the fix removed and
+requires the harness to FAIL with `defect reproduced`; a control that fails to
+fail aborts the guard as untrustworthy rather than reporting a pass. A machine
+with no C compiler is `ERROR`, never a pass. Current verdict on `main`:
+
+```
+PASS — 3 case(s) checked, user enums pass through and canonical Option still unwraps
+```
+
+**Why this is a `.shs` guard and not a spec-suite example:** the defect lives in
+a C runtime primitive that only the NATIVE lane links, and `bin/simple test`
+hard-defaults to the tree-walk interpreter (`.claude/rules/testing.md`), which
+never calls `rt_unwrap_or_self` at all. No `it` block in the spec suite can
+observe this behaviour; the sibling spec can only assert the predicate's source
+TEXT. The `.shs` guard asserts the runtime behaviour.
+
+### Status of the sibling spec (unchanged, still another lane's)
+
+`test/01_unit/compiler/mir/null_coalesce_lowering_spec.spl` was run on
+2026-08-17: `bin/simple test` produced **1962 lines, all warnings, with no
+`Results:` line at all** and rc=144. Per `.claude/rules/testing.md` that is
+**INCONCLUSIVE, not a pass** — it is the known runner defect
+`doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md`.
+The staleness noted at the top of this doc is confirmed by direct grep: line 15
+asserts `left_value = unwrapped` against
+`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`, which now has **0**
+occurrences of that text and **4** of `option_payload_or_self`. That assertion
+is stale, not a real defect, but it belongs to the lane that did the
+`option_payload_or_self` refactor and was deliberately left untouched here
+rather than weakened.
+
 ## 6. Next actions
 
-1. Find which archive/object supplies the linked `rt_unwrap_or_self` and rebuild
-   it from patched source. The 2-second loop then validates or refutes the fix
-   directly (`enum30.spl` must print `A = Slice(7)`, `D = Pair(3,4)`,
-   `E = Bool`, `G = Str`).
-2. Settle `Result.unwrap()` before changing the predicate: either give Result a
-   distinct unwrap helper, or make the gate `enum_id == 1 || enum_id ==
-   <Result>`, or fix the callers.
-3. Only then re-run Stage 3. Do not spend another 1200s run before step 1.
+1. ~~Find which archive/object supplies the linked `rt_unwrap_or_self` and
+   rebuild it from patched source.~~ **DONE differently (2026-08-17)** — the
+   prebuilt-archive question was side-stepped, not answered: the predicate is
+   now validated by compiling `runtime_native.c` from tree source into a
+   standalone harness, so no build lane is involved. See §7. The end-to-end
+   `enum30.spl` print check (`A = Slice(7)`, `D = Pair(3,4)`, `E = Bool`,
+   `G = Str`) through a real native build is still **NOT** done, and remains
+   the honest gap in this row's evidence.
+2. ~~Settle `Result.unwrap()` before changing the predicate.~~ **DONE** — split
+   into separate functions; `.unwrap_or()` no longer routes through
+   `rt_unwrap_or_self`. See
+   `doc/08_tracking/bug/native_unwrap_returns_enum_wrapper_instead_of_payload_2026-08-11.md`.
+3. Re-run Stage 3 to confirm the downstream effect on the "3,629 const-0
+   placeholder substitutions" symptom. **Still outstanding** — no Stage-3 run
+   has been made since the fix landed, so the claim that this defect explains
+   that symptom remains an inference from the mechanism (§3), not a
+   measurement.
 4. `rt_enum_discriminant` returning garbage (`disc(Slice)=4126198529`) on the
    native lane is a **separate, independent defect** and needs its own bug —
    it makes every `rt_enum_discriminant`-based probe in the tree fail open.

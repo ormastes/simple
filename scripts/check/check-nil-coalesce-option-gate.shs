@@ -1,0 +1,206 @@
+#!/bin/sh
+# check-nil-coalesce-option-gate.shs
+#
+# Behavioural guard for
+# doc/08_tracking/bug/stage3_nil_coalesce_unwraps_user_enum_payload_2026-08-08.md
+#
+# THE DEFECT: `??` (nil-coalesce) on an `Option<UserEnum>` returned the enum's
+# raw PAYLOAD instead of the enum itself. rt_unwrap_or_self treated ANY boxed
+# enum (`rt_enum_discriminant(value) >= 0`) as unwrappable, but a flat-nullable
+# `Option<T>` is not double-boxed -- a present `o: K?` IS the raw K enum handle.
+# Every `match` over such a value then fell to its wildcard arm, which is the
+# Stage-3 "3,629 const-0 placeholder substitutions" symptom.
+#
+# WHY THIS IS A .shs AND NOT A `bin/simple test` SPEC: the defect lives in the C
+# runtime primitive that the NATIVE lane links. `bin/simple test` hard-defaults
+# to the tree-walk interpreter (.claude/rules/testing.md), which never calls
+# rt_unwrap_or_self at all, so no spec-suite example can observe this behaviour.
+# The sibling spec test/01_unit/compiler/mir/null_coalesce_lowering_spec.spl can
+# only assert the predicate's SOURCE TEXT. This guard asserts the RUNTIME
+# BEHAVIOUR by linking the real runtime_native.c and calling the primitive.
+#
+# Verdict line is always the LAST line of stdout, per .claude/rules/vcs.md:
+#   PASS  — <n> case(s) checked, ...        exit 0
+#   FAIL  — ...                             exit 1
+#   ERROR — nothing was checked             exit 2
+#
+# `--selftest` runs before every scan and is FATAL: it rebuilds the runtime with
+# the fix ABLATED (the pre-fix predicate restored) and requires the harness to
+# FAIL. A control that cannot fail is a broken test, not working code.
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+RUNTIME_C="$ROOT/src/runtime/runtime_native.c"
+CORE_VALUES="$ROOT/src/runtime/simple_core/core_values.spl"
+
+FIXED_PREDICATE='if (rt_enum_id(value) == 1 && rt_enum_discriminant(value) >= 0) return rt_enum_payload(value);'
+BUGGY_PREDICATE='if (rt_enum_discriminant(value) >= 0) return rt_enum_payload(value);'
+SPL_PREDICATE='if rt_enum_id(value) == 1 and rt_enum_discriminant(value) >= 0:'
+
+WORK=${TMPDIR:-/tmp}/nil_coalesce_gate.$$
+mkdir -p "$WORK" || { echo "ERROR — nothing was checked"; exit 2; }
+cleanup() { [ "${KEEP_BUILD_DIR:-0}" = "1" ] || rm -rf "$WORK"; }
+trap cleanup EXIT
+
+# --- locate a C compiler. Absence of a compiler is absence of evidence. ------
+CC_BIN=""
+for c in ${CC:-} clang cc gcc; do
+    if command -v "$c" >/dev/null 2>&1; then CC_BIN="$c"; break; fi
+done
+if [ -z "$CC_BIN" ]; then
+    echo "no C compiler (clang/cc/gcc) available -- cannot execute the runtime primitive"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+[ -f "$RUNTIME_C" ] || { echo "missing $RUNTIME_C"; echo "ERROR — nothing was checked"; exit 2; }
+
+# --- the harness ------------------------------------------------------------
+cat > "$WORK/harness.c" <<'HARNESS_EOF'
+#include <stdio.h>
+#include <stdint.h>
+extern int64_t rt_enum_new(int32_t enum_id, int32_t disc, int64_t payload);
+extern int64_t rt_enum_id(int64_t v);
+extern int64_t rt_enum_discriminant(int64_t v);
+extern int64_t rt_enum_payload(int64_t v);
+extern int64_t rt_unwrap_or_self(int64_t v);
+int main(void) {
+    int rc = 0;
+    const int64_t PAY = 7;
+    /* CASE 1 -- the defect: user enum K.Slice(7). enum_id 7 is NOT the
+     * canonical Option id 1, so `??` must return the enum handle unchanged. */
+    int64_t k_slice   = rt_enum_new(7, 0, PAY);
+    int64_t coalesced = rt_unwrap_or_self(k_slice);
+    printf("case1 user-enum:   enum_id=%lld disc=%lld handle=0x%llx payload=0x%llx coalesced=0x%llx\n",
+        (long long)rt_enum_id(k_slice), (long long)rt_enum_discriminant(k_slice),
+        (long long)k_slice, (long long)rt_enum_payload(k_slice), (long long)coalesced);
+    if (coalesced == k_slice) {
+        printf("case1 VERDICT: PASS - user enum passed through unchanged\n");
+    } else if (coalesced == rt_enum_payload(k_slice)) {
+        printf("case1 VERDICT: FAIL - user enum unwrapped to PAYLOAD (defect reproduced)\n");
+        rc = 1;
+    } else {
+        printf("case1 VERDICT: FAIL - unexpected value\n");
+        rc = 2;
+    }
+    /* CASE 2 -- the control: the canonical Option Some(7) MUST still unwrap.
+     * Without this, "never unwrap anything" would pass case 1 vacuously. */
+    int64_t some7 = rt_enum_new(1, 0, PAY);
+    int64_t u2    = rt_unwrap_or_self(some7);
+    printf("case2 option-some: enum_id=%lld disc=%lld handle=0x%llx payload=0x%llx coalesced=0x%llx\n",
+        (long long)rt_enum_id(some7), (long long)rt_enum_discriminant(some7),
+        (long long)some7, (long long)rt_enum_payload(some7), (long long)u2);
+    if (u2 == rt_enum_payload(some7)) {
+        printf("case2 VERDICT: PASS - canonical Option still unwraps to payload\n");
+    } else {
+        printf("case2 VERDICT: FAIL - Option no longer unwraps\n");
+        rc = 3;
+    }
+    return rc;
+}
+HARNESS_EOF
+
+# Build <out_binary> from <runtime_source>. Stubs every unrelated symbol with an
+# aborting body, so an accidental dependency is LOUD rather than silently wrong.
+build_arm() {
+    _src="$1"; _out="$2"; _obj="$WORK/$(basename "$_out").o"
+    "$CC_BIN" -c -O0 -w -I "$ROOT/src/runtime" -o "$_obj" "$_src" 2> "$WORK/cc.err"
+    _rc=$?
+    if [ $_rc -ne 0 ]; then echo "compile failed for $_src:"; tail -5 "$WORK/cc.err"; return 9; fi
+    # discover undefined symbols, then stub them
+    "$CC_BIN" -O0 -w -o "$_out" "$WORK/harness.c" "$_obj" -lm -lpthread -ldl 2> "$WORK/ld1.err"
+    if [ $? -ne 0 ]; then
+        sed -n "s/.*undefined reference to .\([a-zA-Z0-9_]*\).*/\1/p" "$WORK/ld1.err" | sort -u > "$WORK/undef.txt"
+        {   echo '#include <stdint.h>'; echo '#include <stdlib.h>'; echo '#include <stdio.h>'
+            while read -r s; do
+                [ -n "$s" ] || continue
+                printf 'int64_t %s(void); int64_t %s(void) { fprintf(stderr, "STUB-CALLED %s\\n"); abort(); }\n' "$s" "$s" "$s"
+            done < "$WORK/undef.txt"
+        } > "$WORK/stubs.c"
+        "$CC_BIN" -c -O0 -w -o "$WORK/stubs.o" "$WORK/stubs.c" 2>/dev/null || return 9
+        "$CC_BIN" -O0 -w -o "$_out" "$WORK/harness.c" "$_obj" "$WORK/stubs.o" -lm -lpthread -ldl 2> "$WORK/ld2.err"
+        _rc=$?
+        if [ $_rc -ne 0 ]; then echo "link failed for $_src:"; tail -5 "$WORK/ld2.err"; return 9; fi
+    fi
+    return 0
+}
+
+# --- selftest: the ablation. FATAL. -----------------------------------------
+# Restore the pre-fix predicate and require the harness to FAIL. If the ablated
+# build passes, the harness is not observing the predicate and proves nothing.
+selftest() {
+    echo "[selftest] ablating the fix (restoring the pre-fix predicate)"
+    sed "s|$FIXED_PREDICATE|$BUGGY_PREDICATE|" "$RUNTIME_C" > "$WORK/ablated.c"
+    if ! grep -q "^    $BUGGY_PREDICATE\$" "$WORK/ablated.c"; then
+        echo "[selftest] could not ablate: the fixed predicate was not found verbatim in"
+        echo "[selftest] $RUNTIME_C -- the guard cannot prove anything about a predicate it"
+        echo "[selftest] cannot locate. Update FIXED_PREDICATE if the code was refactored."
+        return 1
+    fi
+    build_arm "$WORK/ablated.c" "$WORK/bin_red" || { echo "[selftest] ablated build failed"; return 1; }
+    "$WORK/bin_red" > "$WORK/red.out" 2>&1
+    _red_rc=$?
+    sed 's/^/[selftest][RED] /' "$WORK/red.out"
+    echo "[selftest][RED] rc=$_red_rc"
+    if [ $_red_rc -eq 0 ]; then
+        echo "[selftest] CONTROL FAILED TO FAIL: the pre-fix predicate passed the harness."
+        echo "[selftest] The test is broken, not the code."
+        return 1
+    fi
+    if ! grep -q "defect reproduced" "$WORK/red.out"; then
+        echo "[selftest] ablated arm failed for the WRONG reason (no 'defect reproduced')."
+        return 1
+    fi
+    echo "[selftest] OK — ablated arm reproduces the defect (rc=$_red_rc), fixed arm checked below"
+    return 0
+}
+
+echo "guard: nil-coalesce must not unwrap a user enum to its payload"
+echo "compiler: $CC_BIN"
+selftest || { echo "FAIL — selftest failed; guard is not trustworthy"; exit 1; }
+
+# --- the real check ---------------------------------------------------------
+CHECKED=0
+
+# Static half: the pure-Simple runtime is a parallel implementation of the same
+# primitive and must carry the same gate. It is not linked by this harness, so
+# it is checked by source predicate.
+if [ -f "$CORE_VALUES" ]; then
+    if grep -qF "$SPL_PREDICATE" "$CORE_VALUES"; then
+        echo "core_values.spl: enum_id gate present"
+        CHECKED=$((CHECKED + 1))
+    else
+        echo "core_values.spl: MISSING the enum_id gate ($SPL_PREDICATE)"
+        echo "FAIL — src/runtime/simple_core/core_values.spl lost the canonical-Option gate"
+        exit 1
+    fi
+else
+    echo "FAIL — missing $CORE_VALUES"
+    exit 1
+fi
+
+# Behavioural half: build the runtime AS IT IS IN THE TREE and run the harness.
+build_arm "$RUNTIME_C" "$WORK/bin_green" || { echo "FAIL — could not build the current runtime"; exit 1; }
+"$WORK/bin_green" > "$WORK/green.out" 2>&1
+GREEN_RC=$?
+sed 's/^/[GREEN] /' "$WORK/green.out"
+echo "[GREEN] rc=$GREEN_RC"
+
+if grep -q "STUB-CALLED" "$WORK/green.out"; then
+    echo "FAIL — the enum path reached a stubbed symbol; result is not trustworthy"
+    exit 1
+fi
+CHECKED=$((CHECKED + 2))   # case1 + case2
+
+if [ $GREEN_RC -ne 0 ]; then
+    echo "FAIL — $CHECKED case(s) checked, runtime unwraps a user enum to its payload (rc=$GREEN_RC)"
+    exit 1
+fi
+if [ $CHECKED -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+echo "PASS — $CHECKED case(s) checked, user enums pass through and canonical Option still unwraps"
+exit 0
