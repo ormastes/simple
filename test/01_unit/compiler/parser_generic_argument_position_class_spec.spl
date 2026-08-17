@@ -1,0 +1,94 @@
+# Generic-argument positions — Similar-Problem Detection Spec
+#
+# Prevention companion to
+# test/01_unit/compiler/parser_const_generic_argument_diagnostic_spec.spl.
+# That spec pins the one reported shape (`Tensor<i64, 2>(...)`, a constructor
+# call). This spec generalises to the DEFECT CLASS: "an explicit generic
+# argument list that a speculative parse cannot validate backtracks silently
+# and reports a misleading error at a later token".
+#
+# It covers the OTHER positions the same lookahead commits on — a closing `>`
+# followed by `(`, by `.`, or by `::` — plus the nested case, plus the two
+# controls that stop the fix from over-firing:
+#
+#   * an ordinary comparison chain (`a < b, c > d` as arguments) must still
+#     parse as comparisons and must NOT be reported as a const generic;
+#   * an integer literal anywhere OTHER than generic-argument position (an
+#     array index, a plain argument) must be entirely unaffected.
+#
+# Whole-file parse failures cannot be in-process examples, so every example
+# drives a subprocess.
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+fn compile_source(name: text, source: text) -> text:
+    val path = "build/test-artifacts/generic_arg_position_" + name + ".spl"
+    file_write(path, source)
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = bin + " run " + path + " 2>&1"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+val PREAMBLE: text = "struct Box2<T, N>:\n" +
+    "    v: T\n" +
+    "\n"
+
+val NESTED_CONST_SOURCE: text = PREAMBLE +
+    "fn main():\n" +
+    "    val a = Box2<Box2<i64, 4>, i32>(v: 7)\n" +
+    "    print(\"unreachable\")\n"
+
+val METHOD_TURBOFISH_CONST_SOURCE: text = PREAMBLE +
+    "fn main():\n" +
+    "    val a = Box2<i64, 2>.make()\n" +
+    "    print(\"unreachable\")\n"
+
+val COMPARISON_CHAIN_SOURCE: text = "fn take(x: bool, y: bool) -> text:\n" +
+    "    \"compared ok\"\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val a = 1\n" +
+    "    val b = 2\n" +
+    "    val c = 3\n" +
+    "    val d = 4\n" +
+    "    print(take(a < b, c > d))\n"
+
+val PLAIN_INTEGER_SOURCE: text = "fn main():\n" +
+    "    val xs = [10, 20, 30]\n" +
+    "    print(\"indexed \" + xs[2].to_text())\n"
+
+describe "explicit generic-argument positions":
+    it "reports a const-generic argument nested inside another generic argument":
+        step("The numeric argument sits one generic level down")
+        val out = compile_source("nested", NESTED_CONST_SOURCE)
+
+        step("The diagnostic still names const generics, not a stray token")
+        expect(out).to_contain("const generic")
+        expect(out.contains("expected expression, found Comma")).to_equal(false)
+
+    it "reports a const-generic argument in the dotted (non-call) position":
+        step("The lookahead also commits when the closing > is followed by a dot")
+        val out = compile_source("dotted", METHOD_TURBOFISH_CONST_SOURCE)
+
+        step("The diagnostic names const generics rather than a comparison error")
+        expect(out).to_contain("const generic")
+
+    it "still parses an ordinary comparison chain that merely looks like generics":
+        step("`take(a < b, c > d)` is two comparisons, not a generic argument list")
+        val out = compile_source("comparison", COMPARISON_CHAIN_SOURCE)
+
+        step("It runs, so the speculative parse still backtracks correctly")
+        expect(out).to_contain("compared ok")
+
+        step("Absence control: no const-generic diagnostic was emitted here")
+        expect(out.contains("const generic")).to_equal(false)
+
+    it "leaves integer literals outside generic-argument position untouched":
+        step("An array index is an integer literal in a position the rule must ignore")
+        val out = compile_source("plain_integer", PLAIN_INTEGER_SOURCE)
+
+        expect(out).to_contain("indexed 30")
+        expect(out.contains("const generic")).to_equal(false)
