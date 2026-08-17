@@ -1,0 +1,682 @@
+#!/bin/sh
+# check-dict-engine-differential.shs
+#
+# ENGINE-DIFFERENTIAL CORRECTNESS MATRIX FOR `Dict`.
+#
+# WHY THIS EXISTS. This repo has a long, expensive history of Dict operations
+# that are correct in the tree-walk interpreter and silently WRONG on a
+# native/JIT lane. `Dict.len()` returned -1 for months; `.get()` on a
+# struct-valued dict returned a segfaulting corrupt Option; `rt_dict_contains`
+# under-reports membership on a struct-valued `Dict<i64, Scope>` so badly that
+# a "defense-in-depth" membership guard in
+# src/compiler/20.hir/hir_types.spl (see the long comments at lookup() and
+# lookup_or_invalid()) silently turned name resolution into a constant nil and
+# SIGSEGVed Stage 3 with zero diagnostic output. Every one of those was found
+# by luck, days or weeks after it landed, because nothing compared the engines.
+#
+# This guard does the comparison. THE INTERPRETER IS THE ORACLE: for every
+# probe, the JIT arm's stdout must match the interpreter arm's stdout
+# byte-for-byte. A divergence is a defect in the JIT arm by definition.
+#
+# WHY A .shs AND NOT A `bin/simple test` SPEC. Per .claude/rules/testing.md,
+# `bin/simple test` is the tree-walk INTERPRETER. A spec body therefore runs on
+# the oracle only and structurally CANNOT observe a JIT/native-only Dict defect
+# -- which is the entire class of defect this guard is about. The engines are
+# selected per-process by SIMPLE_EXECUTION_MODE, so the comparison has to
+# happen from outside, across two processes. Hence a script.
+#
+# HARNESS RULES (each learned expensively; violating any makes results worthless)
+#   * Every probe body lives inside a `fn`. A statement at TOP LEVEL of a script
+#     body runs INTERPRETED regardless of any engine pin, which would silently
+#     make the "JIT" arm a second interpreter run and every row a vacuous PASS.
+#   * Each probe is a SEPARATE, MINIMAL file. ONE unsupported operation demotes a
+#     whole module to the interpreter, so a fat probe file risks the same
+#     vacuous-PASS failure for every row it contains.
+#   * The JIT arm requires a POSITIVE ENGINE WITNESS: SIMPLE_JIT_TRACE_ADDR=1
+#     makes the backend print `[jit-addr] <fn> 0x...` per compiled function, and
+#     a JIT arm whose output lacks `[jit-addr] probe` is reported UNVERIFIED,
+#     never PASS. This witness is version-independent -- deliberately NOT a
+#     "does 2^60 disagree" control, which depends on the int61 truncation bug
+#     still existing and so fires backwards on a fixed binary.
+#   * SIMPLE_JIT_STRICT=1 turns a silent interpreter fallback into a hard error
+#     instead of a fake green.
+#   * rc 143/137 (SIGTERM/SIGKILL) is UNVERIFIED -- never a pass, never a fail.
+#   * Every rc is read from a variable on the line AFTER the command, NEVER
+#     through a pipe: a pipeline's $? is the last stage's status, which has
+#     produced a false green in this repo before.
+#
+# SCOPE, STATED PLAINLY. The two arms are the tree-walk interpreter and the
+# Cranelift JIT of whatever `bin/simple` points at. With `--with-smf` a third
+# arm compiles each probe with `simple compile` and runs the `.smf`. When
+# `bin/simple` is the Rust seed (it is, as of 2026-08-17), these are the SEED's
+# engines; the pure-Simple self-hosted MIR lowering in
+# src/compiler/50.mir/_MirLoweringExpr/ is NOT exercised, so a defect that lives
+# only there can be green here. This guard does not claim otherwise.
+#
+# Verdict line is always the LAST line of stdout, per .claude/rules/vcs.md:
+#   PASS  — <n> case(s) checked, ...   exit 0
+#   FAIL  — ...                        exit 1
+#   ERROR — nothing was checked        exit 2
+#
+# `--selftest` runs before every scan and is FATAL. It does not mutate the
+# compiler; it ablates THIS GUARD'S OWN MACHINERY, which is what could silently
+# fail: (a) the differ must report divergence on two known-different outputs,
+# (b) it must report agreement on identical ones, (c) the engine-witness check
+# must reject JIT output that carries no [jit-addr] line. A comparator that
+# cannot report a difference would turn every row into a vacuous PASS.
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE="$ROOT/bin/simple"
+WITH_SMF=0
+ONLY=""
+
+for arg in "$@"; do
+    case "$arg" in
+        --with-smf) WITH_SMF=1 ;;
+        --selftest) ;;   # always runs; accepted for symmetry with sibling guards
+        --only=*)   ONLY=${arg#--only=} ;;
+        *) echo "unknown argument: $arg"; echo "ERROR — nothing was checked"; exit 2 ;;
+    esac
+done
+
+WORK=${TMPDIR:-/tmp}/dict_engine_diff.$$
+mkdir -p "$WORK/probes" || { echo "ERROR — nothing was checked"; exit 2; }
+cleanup() { [ "${KEEP_BUILD_DIR:-0}" = "1" ] || rm -rf "$WORK"; }
+trap cleanup EXIT
+
+if [ ! -x "$SIMPLE" ]; then
+    echo "no executable $SIMPLE -- absence of a compiler is absence of evidence"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+# --- binary identity. Record it with EVERY measurement: the symlink target is
+# --- replaced by other lanes mid-session (3 distinct builds in one hour, seen).
+BIN_REAL=$(readlink -f "$SIMPLE" 2>/dev/null)
+BIN_STAT=$(stat -c '%s %y' "$BIN_REAL" 2>/dev/null)
+LOADAVG=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)
+echo "guard: Dict operations must agree between the interpreter (oracle) and the JIT"
+echo "binary:  $BIN_REAL"
+echo "identity: $BIN_STAT"
+echo "loadavg: $LOADAVG"
+echo "arms:    interpret, cranelift$([ "$WITH_SMF" = 1 ] && echo ', smf')"
+echo ""
+
+# ---------------------------------------------------------------------------
+# Probe corpus. One file per case, each minimal, each body inside `fn probe()`.
+# Naming: <key>_<value>_<shape>. Every probe prints one KEY=VALUE line per
+# assertion so the differ can compare stdout byte-for-byte.
+# ---------------------------------------------------------------------------
+emit_probes() {
+    P="$WORK/probes"
+
+    cat > "$P/text_i64_local.spl" <<'EOF'
+fn probe() -> i64:
+    var d: Dict<text, i64> = {}
+    d["a"] = 10
+    d["b"] = 20
+    d["z"] = 0
+    print("len={d.len()}")
+    print("get_hit={d.get(\"a\") ?? -1}")
+    print("get_hit_zero={d.get(\"z\") ?? -1}")
+    print("get_miss={d.get(\"absent\") ?? -1}")
+    print("get_miss_isnil={d.get(\"absent\") == nil}")
+    print("get_hit_isnil={d.get(\"a\") == nil}")
+    print("bracket={d[\"b\"]}")
+    print("contains={d.contains_key(\"a\")},{d.contains_key(\"absent\")}")
+    0
+
+fn main():
+    probe()
+EOF
+
+    cat > "$P/i64_i64_local.spl" <<'EOF'
+fn probe() -> i64:
+    var d: Dict<i64, i64> = {}
+    d[1] = 100
+    d[2] = 200
+    d[0] = 0
+    print("len={d.len()}")
+    print("get_hit={d.get(1) ?? -1}")
+    print("get_hit_zerokey={d.get(0) ?? -1}")
+    print("get_miss={d.get(99) ?? -1}")
+    print("get_miss_isnil={d.get(99) == nil}")
+    print("bracket={d[2]}")
+    print("contains={d.contains_key(1)},{d.contains_key(99)}")
+    0
+
+fn main():
+    probe()
+EOF
+
+    cat > "$P/text_bool_local.spl" <<'EOF'
+fn probe() -> i64:
+    var d: Dict<text, bool> = {}
+    d["t"] = true
+    d["f"] = false
+    print("len={d.len()}")
+    print("get_true={d.get(\"t\") ?? false}")
+    print("get_false={d.get(\"f\") ?? true}")
+    print("get_miss_isnil={d.get(\"absent\") == nil}")
+    print("bracket={d[\"t\"]},{d[\"f\"]}")
+    0
+
+fn main():
+    probe()
+EOF
+
+    # The f64 row the truth table lists as OPEN/unverified. Value 3.0 is chosen
+    # deliberately: the flat-Option nil sentinel is the integer 3, and the nil
+    # lane casts it to the merge type, so a STORED 3.0 can collide with nil.
+    cat > "$P/text_f64_local.spl" <<'EOF'
+fn probe() -> i64:
+    var d: Dict<text, f64> = {}
+    d["v3"] = 3.0
+    d["v4"] = 4.0
+    d["v0"] = 0.0
+    d["vn"] = -1.0
+    print("len={d.len()}")
+    print("get_v3={d.get(\"v3\") ?? -99.0}")
+    print("get_v4={d.get(\"v4\") ?? -99.0}")
+    print("get_v0={d.get(\"v0\") ?? -99.0}")
+    print("get_vn={d.get(\"vn\") ?? -99.0}")
+    print("get_miss={d.get(\"absent\") ?? -99.0}")
+    print("get_miss_isnil={d.get(\"absent\") == nil}")
+    print("get_v3_isnil={d.get(\"v3\") == nil}")
+    print("bracket_v3={d[\"v3\"]}")
+    0
+
+fn main():
+    probe()
+EOF
+
+    cat > "$P/text_text_local.spl" <<'EOF'
+fn probe() -> i64:
+    var d: Dict<text, text> = {}
+    d["a"] = "alpha"
+    d["e"] = ""
+    print("len={d.len()}")
+    print("get_hit={d.get(\"a\") ?? \"DEFAULT\"}")
+    print("get_hit_empty={d.get(\"e\") ?? \"DEFAULT\"}")
+    print("get_miss={d.get(\"absent\") ?? \"DEFAULT\"}")
+    print("get_miss_isnil={d.get(\"absent\") == nil}")
+    print("bracket={d[\"a\"]}")
+    print("contains={d.contains_key(\"e\")},{d.contains_key(\"absent\")}")
+    0
+
+fn main():
+    probe()
+EOF
+
+    cat > "$P/text_struct_local.spl" <<'EOF'
+struct Payload:
+    n: i64
+    s: text
+
+fn probe() -> i64:
+    var d: Dict<text, Payload> = {}
+    d["one"] = Payload(n: 1, s: "aaa")
+    d["two"] = Payload(n: 999, s: "zzz")
+    print("len={d.len()}")
+    val a = d["one"]
+    val b = d["two"]
+    print("bracket_one={a.n},{a.s}")
+    print("bracket_two={b.n},{b.s}")
+    if val g = d.get("two"):
+        print("get_two={g.n},{g.s}")
+    print("get_miss_isnil={d.get(\"absent\") == nil}")
+    print("contains={d.contains_key(\"one\")},{d.contains_key(\"absent\")}")
+    0
+
+fn main():
+    probe()
+EOF
+
+    cat > "$P/text_enum_local.spl" <<'EOF'
+enum Kind:
+    Alpha
+    Beta
+    Gamma
+
+fn name_of(k: Kind) -> text:
+    match k:
+        case Alpha: return "Alpha"
+        case Beta: return "Beta"
+        case Gamma: return "Gamma"
+    "other"
+
+fn probe() -> i64:
+    var d: Dict<text, Kind> = {}
+    d["a"] = Kind.Alpha
+    d["g"] = Kind.Gamma
+    print("len={d.len()}")
+    print("bracket_a={name_of(d[\"a\"])}")
+    print("bracket_g={name_of(d[\"g\"])}")
+    print("get_miss_isnil={d.get(\"absent\") == nil}")
+    print("contains={d.contains_key(\"a\")},{d.contains_key(\"absent\")}")
+    0
+
+fn main():
+    probe()
+EOF
+
+    cat > "$P/text_class_local.spl" <<'EOF'
+class Node:
+    id: i64
+    label: text
+
+fn probe() -> i64:
+    var d: Dict<text, Node> = {}
+    d["n1"] = Node(id: 1, label: "first")
+    d["n2"] = Node(id: 2, label: "second")
+    print("len={d.len()}")
+    val a = d["n1"]
+    val b = d["n2"]
+    print("bracket_n1={a.id},{a.label}")
+    print("bracket_n2={b.id},{b.label}")
+    print("get_miss_isnil={d.get(\"absent\") == nil}")
+    0
+
+fn main():
+    probe()
+EOF
+
+    # Array-valued dict, local AND class-field bracket read. The class-field
+    # array bracket-read is a row the truth table lists as OPEN (segfault).
+    cat > "$P/arr_value_local_and_field.spl" <<'EOF'
+class Holder:
+    rows: Dict<i64, Array<i64>>
+
+fn probe() -> i64:
+    var d: Dict<i64, Array<i64>> = {}
+    d[7] = [70, 71]
+    val c = d[7]
+    print("local_len={c.len()} local_first={c[0]} local_last={c[1]}")
+    var h = Holder(rows: {})
+    h.rows[1] = [10, 11, 12]
+    h.rows[2] = [20, 21]
+    val a = h.rows[1]
+    val b = h.rows[2]
+    print("field_len={a.len()} field_first={a[0]}")
+    print("field2_len={b.len()} field2_first={b[0]}")
+    print("field_dict_len={h.rows.len()}")
+    0
+
+fn main():
+    probe()
+EOF
+
+    # The bootstrap-blocker SHAPE: a class-field Dict<i64, Struct> reached
+    # through TWO chained field hops, read repeatedly. The reported symptom is
+    # ~13 different records per stable id, so this asserts (a) repeated reads of
+    # one key are STABLE and (b) id -> record is a BIJECTION over all keys.
+    cat > "$P/i64_struct_field_chain.spl" <<'EOF'
+struct Sym:
+    id: i64
+    name: text
+
+class Inner:
+    syms: Dict<i64, Sym>
+
+class Outer:
+    inner: Inner
+
+fn probe() -> i64:
+    var t = Inner(syms: {})
+    var i = 1
+    while i <= 8:
+        t.syms[i] = Sym(id: i, name: "sym_{i}")
+        i = i + 1
+    var o = Outer(inner: t)
+    # (a) repeated reads of ONE key through two hops must be stable
+    var r = 0
+    while r < 4:
+        val s = o.inner.syms[3]
+        print("chain_stable iter={r} id={s.id} name={s.name}")
+        r = r + 1
+    # (b) id -> record must be a bijection across all keys
+    var k = 1
+    while k <= 8:
+        val s = o.inner.syms[k]
+        print("chain_bijection key={k} id={s.id} name={s.name}")
+        k = k + 1
+    # (c) single hop, for contrast
+    val d1 = t.syms[3]
+    print("direct1 id={d1.id} name={d1.name}")
+    print("field_len={o.inner.syms.len()}")
+    0
+
+fn main():
+    probe()
+EOF
+
+    # rt_dict_contains on a struct-valued Dict<i64, _> is the exact operation
+    # that under-reported membership and SIGSEGVed Stage 3 (hir_types.spl
+    # lookup()). Every inserted key MUST report present.
+    cat > "$P/i64_struct_contains_field.spl" <<'EOF'
+struct Scope:
+    depth: i64
+
+class Table:
+    scopes: Dict<i64, Scope>
+    next_id: i64
+
+fn probe() -> i64:
+    var t = Table(scopes: {}, next_id: 0)
+    var i = 0
+    while i < 6:
+        t.scopes[i] = Scope(depth: i)
+        t.next_id = i + 1
+        i = i + 1
+    var missing = 0
+    var j = 0
+    while j < 6:
+        if not t.scopes.contains_key(j):
+            missing = missing + 1
+            print("contains_UNDER_REPORTS key={j}")
+        j = j + 1
+    print("inserted=6 reported_missing={missing}")
+    print("len={t.scopes.len()} next_id={t.next_id}")
+    print("absent_key_reported={t.scopes.contains_key(999)}")
+    0
+
+fn main():
+    probe()
+EOF
+
+    # A dict read through `self` inside a METHOD (one hop), the shape almost all
+    # real compiler code uses.
+    cat > "$P/self_method_struct.spl" <<'EOF'
+struct Sym:
+    id: i64
+    name: text
+
+class Table:
+    syms: Dict<i64, Sym>
+
+    fn get_name(key: i64) -> text:
+        if not self.syms.contains_key(key):
+            return "MISSING"
+        val s = self.syms[key]
+        s.name
+
+    fn count() -> i64:
+        self.syms.len()
+
+fn probe() -> i64:
+    var t = Table(syms: {})
+    t.syms[1] = Sym(id: 1, name: "one")
+    t.syms[2] = Sym(id: 2, name: "two")
+    print("method_get1={t.get_name(1)}")
+    print("method_get2={t.get_name(2)}")
+    print("method_miss={t.get_name(77)}")
+    print("method_count={t.count()}")
+    0
+
+fn main():
+    probe()
+EOF
+
+    # Insertion-order / mutation behaviour: overwrite, and len() after each.
+    cat > "$P/mutation_and_len.spl" <<'EOF'
+fn probe() -> i64:
+    var d: Dict<text, i64> = {}
+    print("len0={d.len()}")
+    d["a"] = 1
+    print("len1={d.len()}")
+    d["b"] = 2
+    print("len2={d.len()}")
+    d["a"] = 42
+    print("len_after_overwrite={d.len()}")
+    print("overwritten={d[\"a\"]}")
+    print("untouched={d[\"b\"]}")
+    0
+
+fn main():
+    probe()
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Arm runners. Each writes stdout to a file and reads rc from a VARIABLE on the
+# line immediately after the command -- never through a pipe.
+# ---------------------------------------------------------------------------
+
+# Strip the seed's two-line banner and any engine-witness/log noise, so the
+# differ compares PROGRAM OUTPUT only.
+normalize() {
+    grep -v 'bootstrap seed only' "$1" \
+        | grep -v 'Build and use the pure-Simple' \
+        | grep -v '^\[jit-addr\]' \
+        | grep -v '^\[INFO\]' \
+        | grep -v '^\[jit-fallback\]'
+}
+
+run_interp() {
+    _spl="$1"; _out="$2"
+    SIMPLE_EXECUTION_MODE=interpret timeout 180 "$SIMPLE" run "$_spl" > "$_out" 2>&1
+    RC_ARM=$?
+}
+
+run_jit() {
+    _spl="$1"; _out="$2"
+    SIMPLE_EXECUTION_MODE=cranelift SIMPLE_JIT_STRICT=1 SIMPLE_JIT_TRACE_ADDR=1 \
+        timeout 180 "$SIMPLE" run "$_spl" > "$_out" 2>&1
+    RC_ARM=$?
+}
+
+run_smf() {
+    _spl="$1"; _out="$2"; _smf="$WORK/$(basename "$_spl" .spl).smf"
+    timeout 600 "$SIMPLE" compile "$_spl" -o "$_smf" > "$_out.compile" 2>&1
+    RC_ARM=$?
+    if [ $RC_ARM -ne 0 ] || [ ! -f "$_smf" ]; then
+        cp "$_out.compile" "$_out" 2>/dev/null
+        RC_ARM=90
+        return
+    fi
+    timeout 180 "$SIMPLE" "$_smf" > "$_out" 2>&1
+    RC_ARM=$?
+}
+
+# ---------------------------------------------------------------------------
+# selftest -- FATAL. Ablates the guard's own comparator and witness check.
+# ---------------------------------------------------------------------------
+selftest() {
+    _st_fail=0
+    echo "[selftest] ablating the guard's own machinery (comparator + engine witness)"
+
+    printf 'len=2\nget_hit=10\n' > "$WORK/st_a.txt"
+    printf 'len=2\nget_hit=10\n' > "$WORK/st_b.txt"
+    printf 'len=2\nget_hit=99\n' > "$WORK/st_c.txt"
+
+    # (a) the differ MUST report divergence on known-different outputs
+    if cmp -s "$WORK/st_a.txt" "$WORK/st_c.txt"; then
+        echo "[selftest] COMPARATOR FAILED TO FAIL: two different outputs compared equal."
+        _st_fail=1
+    else
+        echo "[selftest] ok: comparator reports divergence on different outputs"
+    fi
+
+    # (b) ...and MUST report agreement on identical outputs, or every row FAILs
+    #     vacuously and the guard is noise rather than signal.
+    if cmp -s "$WORK/st_a.txt" "$WORK/st_b.txt"; then
+        echo "[selftest] ok: comparator reports agreement on identical outputs"
+    else
+        echo "[selftest] COMPARATOR IS BROKEN: identical outputs compared unequal."
+        _st_fail=1
+    fi
+
+    # (c) the engine witness MUST reject JIT output carrying no [jit-addr] line.
+    #     Without this, a silent interpreter fallback would be scored as a PASS.
+    printf 'len=2\n' > "$WORK/st_nowitness.txt"
+    if grep -q '^\[jit-addr\] probe' "$WORK/st_nowitness.txt"; then
+        echo "[selftest] WITNESS CHECK IS BROKEN: found a witness in witness-free output."
+        _st_fail=1
+    else
+        echo "[selftest] ok: witness check rejects output with no [jit-addr] line"
+    fi
+    printf '[jit-addr] probe 0x1234\nlen=2\n' > "$WORK/st_witness.txt"
+    if grep -q '^\[jit-addr\] probe' "$WORK/st_witness.txt"; then
+        echo "[selftest] ok: witness check accepts output with a real [jit-addr] line"
+    else
+        echo "[selftest] WITNESS CHECK IS BROKEN: missed a real witness line."
+        _st_fail=1
+    fi
+
+    # (d) the normalizer must not eat program output while stripping the banner
+    printf 'WARNING: this Rust-built Simple binary is a bootstrap seed only; do not use it as the normal tool.\nlen=2\n' > "$WORK/st_banner.txt"
+    if [ "$(normalize "$WORK/st_banner.txt")" = "len=2" ]; then
+        echo "[selftest] ok: normalizer strips the seed banner and keeps program output"
+    else
+        echo "[selftest] NORMALIZER IS BROKEN: got '$(normalize "$WORK/st_banner.txt")'"
+        _st_fail=1
+    fi
+
+    [ $_st_fail -eq 0 ] || return 1
+    echo "[selftest] OK — comparator, witness and normalizer all behave"
+    return 0
+}
+
+selftest || { echo "FAIL — selftest failed; guard is not trustworthy"; exit 1; }
+echo ""
+
+emit_probes
+
+# ---------------------------------------------------------------------------
+# The matrix.
+# ---------------------------------------------------------------------------
+CHECKED=0
+DIVERGED=0
+UNVERIFIED=0
+DIVERGED_NAMES=""
+UNVERIFIED_NAMES=""
+TABLE="$WORK/table.txt"
+: > "$TABLE"
+
+for spl in "$WORK"/probes/*.spl; do
+    case_name=$(basename "$spl" .spl)
+    if [ -n "$ONLY" ] && [ "$case_name" != "$ONLY" ]; then continue; fi
+
+    run_interp "$spl" "$WORK/$case_name.interp"
+    IRC=$RC_ARM
+    run_jit "$spl" "$WORK/$case_name.jit"
+    JRC=$RC_ARM
+
+    # rc 143/137 is a killed process: UNVERIFIED, never pass, never fail.
+    if [ $IRC -eq 143 ] || [ $IRC -eq 137 ] || [ $JRC -eq 143 ] || [ $JRC -eq 137 ]; then
+        printf '%-34s | %-11s | rc interp=%s jit=%s (killed; relaunch unwrapped)\n' \
+            "$case_name" "UNVERIFIED" "$IRC" "$JRC" >> "$TABLE"
+        UNVERIFIED=$((UNVERIFIED + 1))
+        UNVERIFIED_NAMES="$UNVERIFIED_NAMES $case_name(killed)"
+        continue
+    fi
+
+    # A JIT arm with no engine witness did not run on the JIT. Scoring it PASS
+    # would be the vacuous-green failure this whole guard exists to prevent.
+    if ! grep -q '^\[jit-addr\] probe' "$WORK/$case_name.jit"; then
+        _why="no [jit-addr] witness"
+        if grep -q 'jit-fallback\|SIMPLE_JIT_STRICT' "$WORK/$case_name.jit"; then
+            _why="fell back to the interpreter"
+        fi
+        printf '%-34s | %-11s | %s\n' "$case_name" "UNVERIFIED" "$_why" >> "$TABLE"
+        UNVERIFIED=$((UNVERIFIED + 1))
+        UNVERIFIED_NAMES="$UNVERIFIED_NAMES $case_name($_why)"
+        continue
+    fi
+
+    normalize "$WORK/$case_name.interp" > "$WORK/$case_name.interp.n"
+    normalize "$WORK/$case_name.jit"    > "$WORK/$case_name.jit.n"
+
+    # An empty oracle means the probe never ran; comparing two empties would be
+    # a vacuous PASS.
+    if [ ! -s "$WORK/$case_name.interp.n" ]; then
+        printf '%-34s | %-11s | interpreter arm produced no output (rc=%s)\n' \
+            "$case_name" "UNVERIFIED" "$IRC" >> "$TABLE"
+        UNVERIFIED=$((UNVERIFIED + 1))
+        UNVERIFIED_NAMES="$UNVERIFIED_NAMES $case_name(no-oracle-output)"
+        continue
+    fi
+
+    CHECKED=$((CHECKED + 1))
+    if cmp -s "$WORK/$case_name.interp.n" "$WORK/$case_name.jit.n" && [ $IRC -eq $JRC ]; then
+        printf '%-34s | %-11s | interp==jit (rc=%s)\n' "$case_name" "AGREE" "$IRC" >> "$TABLE"
+    else
+        DIVERGED=$((DIVERGED + 1))
+        DIVERGED_NAMES="$DIVERGED_NAMES $case_name"
+        printf '%-34s | %-11s | rc interp=%s jit=%s\n' "$case_name" "DIVERGE" "$IRC" "$JRC" >> "$TABLE"
+        {
+            echo "  --- $case_name: interpreter (oracle) vs jit ---"
+            diff -u "$WORK/$case_name.interp.n" "$WORK/$case_name.jit.n" \
+                | sed 's/^/  /' | head -40
+        } >> "$WORK/details.txt"
+    fi
+
+    # Optional third arm: `simple compile` -> .smf. Compared against the same
+    # oracle. Reported in the table but scored the same way.
+    if [ "$WITH_SMF" = 1 ]; then
+        run_smf "$spl" "$WORK/$case_name.smf"
+        SRC=$RC_ARM
+        if [ $SRC -eq 143 ] || [ $SRC -eq 137 ]; then
+            printf '%-34s | %-11s | smf arm killed (rc=%s)\n' "$case_name" "UNVERIFIED" "$SRC" >> "$TABLE"
+            UNVERIFIED=$((UNVERIFIED + 1))
+            UNVERIFIED_NAMES="$UNVERIFIED_NAMES $case_name/smf(killed)"
+        elif [ $SRC -eq 90 ]; then
+            printf '%-34s | %-11s | smf arm failed to compile\n' "$case_name" "UNVERIFIED" >> "$TABLE"
+            UNVERIFIED=$((UNVERIFIED + 1))
+            UNVERIFIED_NAMES="$UNVERIFIED_NAMES $case_name/smf(compile-failed)"
+        else
+            normalize "$WORK/$case_name.smf" > "$WORK/$case_name.smf.n"
+            CHECKED=$((CHECKED + 1))
+            if cmp -s "$WORK/$case_name.interp.n" "$WORK/$case_name.smf.n"; then
+                printf '%-34s | %-11s | interp==smf\n' "$case_name/smf" "AGREE" >> "$TABLE"
+            else
+                DIVERGED=$((DIVERGED + 1))
+                DIVERGED_NAMES="$DIVERGED_NAMES $case_name/smf"
+                printf '%-34s | %-11s | interp!=smf\n' "$case_name/smf" "DIVERGE" >> "$TABLE"
+                {
+                    echo "  --- $case_name/smf: interpreter (oracle) vs smf ---"
+                    diff -u "$WORK/$case_name.interp.n" "$WORK/$case_name.smf.n" \
+                        | sed 's/^/  /' | head -40
+                } >> "$WORK/details.txt"
+            fi
+        fi
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Report. The truth table is the deliverable -- a table naming 6 divergences is
+# a better result than a bare pass/fail, so it prints unconditionally.
+# ---------------------------------------------------------------------------
+echo "Dict engine-differential truth table (oracle = tree-walk interpreter)"
+echo "-------------------------------------------------------------------------------"
+printf '%-34s | %-11s | %s\n' "case" "verdict" "detail"
+echo "-------------------------------------------------------------------------------"
+cat "$TABLE"
+echo "-------------------------------------------------------------------------------"
+
+if [ -f "$WORK/details.txt" ]; then
+    echo ""
+    echo "Divergence details:"
+    cat "$WORK/details.txt"
+fi
+
+echo ""
+if [ $UNVERIFIED -gt 0 ]; then
+    echo "UNVERIFIED cases (neither pass nor fail):$UNVERIFIED_NAMES"
+fi
+
+if [ $CHECKED -eq 0 ]; then
+    echo "no case was compared on both arms"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+if [ $DIVERGED -gt 0 ]; then
+    echo "FAIL — $CHECKED case(s) checked, $DIVERGED diverged from the interpreter oracle:$DIVERGED_NAMES"
+    exit 1
+fi
+
+echo "PASS — $CHECKED case(s) checked, every Dict operation agrees with the interpreter oracle"
+exit 0

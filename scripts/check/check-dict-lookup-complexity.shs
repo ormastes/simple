@@ -1,0 +1,407 @@
+#!/bin/sh
+# check-dict-lookup-complexity.shs
+#
+# PERF GUARD FOR THE "LINEAR SCAN WHERE A DICT LOOKUP BELONGS" DEFECT CLASS.
+#
+# THE INCIDENT THIS GENERALISES. module_surface_index_by_name() in
+# src/compiler/20.hir/hir_lowering/module_surface.spl was a LINEAR TEXT SCAN over
+# every indexed module name -- O(M) per call, M~619. It was called once per
+# import declaration, inside a loop over export items, inside a fixpoint loop:
+#     O(passes x export_items x imports_per_facade x modules)
+# Measured cost: 1,193 seconds in one bootstrap stage-3 phase
+# (resolve_export_origins) -- the single largest cost in the entire build. Fixed
+# in aecf222a1ff by building a Dict<text,i64> once and looking up in O(1).
+#
+# THE INSTRUCTIVE PART. The old code carried a comment reading "Never
+# materialize Dict keys/values in this hot lookup". That was TRUE about
+# .keys()/.values() -- and it had been used to justify avoiding a Dict
+# ENTIRELY. A correct micro-observation caused a macro disaster. Nothing in the
+# tree prevents that reasoning from recurring, which is what this guard is for.
+#
+# WHY A COMPLEXITY SIGNAL AND NOT A WALL-CLOCK THRESHOLD. This box runs at load
+# 17-25 with ~16 concurrent lanes, and absolute wall-clock timings here have
+# already produced false verdicts. So the GATING signal is a GROWTH RATIO:
+# the same workload is run at N and 4N inside ONE process (which excludes the
+# ~12s process startup entirely), and the ratio of the two timings is asserted
+# to be sub-quadratic. An O(1)-lookup workload is O(N) overall and grows ~4x for
+# 4x input; an O(N)-lookup workload is O(N^2) and grows ~16x. Load noise scales
+# BOTH measurements together and therefore largely cancels in the ratio, which
+# is exactly why a ratio survives a contended box when an absolute number does
+# not.
+#
+# TOLERANCE, AND WHY. Gate: the Dict arm's ratio must be < 8.0 for a 4x input
+# increase. 8.0 is the geometric midpoint between the linear expectation (4.0)
+# and the quadratic one (16.0) -- i.e. a growth exponent of 1.5, halfway between
+# O(N) and O(N^2) in log space. That places the threshold maximally far from
+# both the healthy value and the defect value, so neither a noisy-but-linear run
+# nor a genuinely quadratic one lands near the line. MEASURED on this box at
+# load ~20 (see the receipt in the guard output): Dict arm 4.93x, scan arm
+# 16.10x. Both sit roughly a factor of two away from the 8.0 gate in opposite
+# directions.
+#
+# ABSOLUTE TIMES ARE RECORDED BUT NEVER GATING. They are stamped with binary
+# identity and box load and labelled indicative, because on this host they are
+# not a trustworthy pass/fail signal.
+#
+# THE STATIC HALF. A ratio probe on a synthetic workload cannot notice that the
+# REAL function regressed, so this guard also asserts that
+# module_surface_index_by_name still has its O(1) shape: a Dict-typed index
+# parameter, a contains_key/index-read body, and NO iteration or .keys() call in
+# its body. That is the specific regression that cost 1,193 seconds.
+#
+# HARNESS RULES (each learned expensively):
+#   * The whole probe lives inside `fn` bodies. A statement at TOP LEVEL of a
+#     script body runs INTERPRETED regardless of any engine pin.
+#   * SIMPLE_JIT_TRACE_ADDR=1 provides a positive, version-independent engine
+#     witness ([jit-addr] <fn> 0x...). A run with no witness is UNVERIFIED.
+#   * SIMPLE_JIT_STRICT=1 makes a silent interpreter fallback a hard error.
+#   * rc 143/137 is UNVERIFIED -- never a pass, never a fail.
+#   * Every rc is read from a variable on the line AFTER the command, never
+#     through a pipe.
+#
+# Verdict line is always the LAST line of stdout, per .claude/rules/vcs.md:
+#   PASS  — <n> check(s) checked, ...   exit 0
+#   FAIL  — ...                         exit 1
+#   ERROR — nothing was checked         exit 2
+#
+# `--selftest` runs before every scan and is FATAL. The ablation is built into
+# the probe: alongside the Dict arm it runs a SCAN arm that performs the same
+# lookups by linear scan and computes the SAME checksum. The selftest requires
+# the scan arm to be detected as super-linear. A probe that cannot detect the
+# defect it was written for proves nothing, and the equal checksums prove the
+# ablation is a true equivalent workload rather than a strawman.
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE="$ROOT/bin/simple"
+SURFACE="$ROOT/src/compiler/20.hir/hir_lowering/module_surface.spl"
+
+# Gate: growth ratio for a 4x input increase must be below this.
+# 8.00 = geometric midpoint of 4.00 (linear) and 16.00 (quadratic).
+#
+# Thresholds and ratios are held as INTEGER HUNDREDTHS ("centis") and only
+# formatted for display. An earlier draft compared the decimal STRINGS by
+# stripping the dot, which silently compared "4.91" -> 491 against "8.0" -> 80
+# and reported a healthy 4.91x run as a FAIL. Differing decimal widths make
+# string comparison wrong; integers cannot drift that way.
+MAX_RATIO_CENTI=800
+ABLATION_MIN_CENTI=1000
+N_SMALL=400
+N_LARGE=1600
+MAX_RATIO=$(printf '%d.%02d' $((MAX_RATIO_CENTI / 100)) $((MAX_RATIO_CENTI % 100)))
+ABLATION_MIN_RATIO=$(printf '%d.%02d' $((ABLATION_MIN_CENTI / 100)) $((ABLATION_MIN_CENTI % 100)))
+
+WORK=${TMPDIR:-/tmp}/dict_lookup_complexity.$$
+mkdir -p "$WORK" || { echo "ERROR — nothing was checked"; exit 2; }
+cleanup() { [ "${KEEP_BUILD_DIR:-0}" = "1" ] || rm -rf "$WORK"; }
+trap cleanup EXIT
+
+if [ ! -x "$SIMPLE" ]; then
+    echo "no executable $SIMPLE -- absence of a compiler is absence of evidence"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+BIN_REAL=$(readlink -f "$SIMPLE" 2>/dev/null)
+BIN_STAT=$(stat -c '%s %y' "$BIN_REAL" 2>/dev/null)
+LOADAVG=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)
+
+echo "guard: a Dict-keyed hot lookup must not degrade to a linear scan"
+echo "binary:   $BIN_REAL"
+echo "identity: $BIN_STAT"
+echo "loadavg:  $LOADAVG   (ratio signal is load-tolerant; absolute times are NOT gating)"
+echo "sizes:    N=$N_SMALL, 4N=$N_LARGE   gate: dict ratio < $MAX_RATIO"
+echo ""
+
+# ---------------------------------------------------------------------------
+# The probe. Both arms compute the SAME checksum over the SAME lookups, so the
+# scan arm is a true equivalent of the dict arm and not a strawman. Timing
+# brackets only the lookup loop, so index CONSTRUCTION is excluded from both.
+# ---------------------------------------------------------------------------
+# NOTE: this heredoc is deliberately UNQUOTED so N_SMALL/N_LARGE are substituted
+# into the probe. The probe body contains no `$` and no backticks, so nothing
+# else expands. Hardcoding 400/1600 here while the shell gated on its own
+# N_SMALL/N_LARGE would let the two drift apart silently and make the ratio
+# meaningless.
+cat > "$WORK/probe.spl" <<EOF
+extern fn rt_time_now_nanos() -> i64
+
+# DICT arm: the shape module_surface_index_by_name() has today (aecf222a1ff).
+# N lookups into an N-entry Dict<text,i64>. O(1) per lookup => O(N) overall.
+fn dict_arm(n: i64) -> i64:
+    var idx: Dict<text, i64> = {}
+    var names: Array<text> = []
+    var i = 0
+    while i < n:
+        val nm = "mod_{i}_name"
+        idx[nm] = i
+        names.push(nm)
+        i = i + 1
+    val t0 = rt_time_now_nanos()
+    var checksum = 0
+    var j = 0
+    while j < n:
+        val nm = names[j]
+        if idx.contains_key(nm):
+            checksum = checksum + idx[nm]
+        j = j + 1
+    val t1 = rt_time_now_nanos()
+    print("DICT n={n} ns={t1 - t0} checksum={checksum}")
+    0
+
+# SCAN arm (ABLATION): the pre-fix shape -- a linear text scan per lookup.
+# O(N) per lookup => O(N^2) overall. Same checksum as dict_arm by construction.
+fn scan_arm(n: i64) -> i64:
+    var names: Array<text> = []
+    var i = 0
+    while i < n:
+        names.push("mod_{i}_name")
+        i = i + 1
+    val t0 = rt_time_now_nanos()
+    var checksum = 0
+    var j = 0
+    while j < n:
+        val want = names[j]
+        var k = 0
+        var found = -1
+        while k < n:
+            if names[k] == want:
+                found = k
+                k = n
+            k = k + 1
+        if found >= 0:
+            checksum = checksum + found
+        j = j + 1
+    val t1 = rt_time_now_nanos()
+    print("SCAN n={n} ns={t1 - t0} checksum={checksum}")
+    0
+
+fn main():
+    dict_arm($N_SMALL)
+    dict_arm($N_LARGE)
+    scan_arm($N_SMALL)
+    scan_arm($N_LARGE)
+EOF
+
+# ---------------------------------------------------------------------------
+# Run it. rc read from a variable on the line AFTER the command, not a pipe.
+# ---------------------------------------------------------------------------
+SIMPLE_EXECUTION_MODE=cranelift SIMPLE_JIT_STRICT=1 SIMPLE_JIT_TRACE_ADDR=1 \
+    timeout 900 "$SIMPLE" run "$WORK/probe.spl" > "$WORK/probe.out" 2>&1
+PROBE_RC=$?
+
+sed 's/^/[probe] /' "$WORK/probe.out"
+echo "[probe] rc=$PROBE_RC"
+echo ""
+
+if [ $PROBE_RC -eq 143 ] || [ $PROBE_RC -eq 137 ]; then
+    echo "probe was killed (rc=$PROBE_RC) -- UNVERIFIED, neither pass nor fail; relaunch unwrapped"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ $PROBE_RC -ne 0 ]; then
+    echo "probe did not run to completion (rc=$PROBE_RC)"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+# Engine witness: without it the "JIT" measurement may be an interpreter run,
+# which would measure a different engine than the one being gated.
+ENGINE="cranelift-jit"
+if ! grep -q '^\[jit-addr\] dict_arm' "$WORK/probe.out"; then
+    if grep -q 'jit-fallback\|SIMPLE_JIT_STRICT' "$WORK/probe.out"; then
+        echo "the module fell back to the interpreter -- the timings do not measure the JIT"
+    else
+        echo "no [jit-addr] dict_arm witness -- cannot confirm the JIT compiled the probe"
+    fi
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+
+extract_ns() {   # $1=arm  $2=n
+    sed -n "s/^$1 n=$2 ns=\([0-9]*\) .*/\1/p" "$WORK/probe.out" | head -1
+}
+extract_ck() {
+    sed -n "s/^$1 n=$2 ns=[0-9]* checksum=\([0-9-]*\).*/\1/p" "$WORK/probe.out" | head -1
+}
+
+D_SMALL=$(extract_ns DICT $N_SMALL); D_LARGE=$(extract_ns DICT $N_LARGE)
+S_SMALL=$(extract_ns SCAN $N_SMALL); S_LARGE=$(extract_ns SCAN $N_LARGE)
+D_CK=$(extract_ck DICT $N_LARGE);    S_CK=$(extract_ck SCAN $N_LARGE)
+
+for v in "$D_SMALL" "$D_LARGE" "$S_SMALL" "$S_LARGE"; do
+    if [ -z "$v" ] || [ "$v" = "0" ]; then
+        echo "a timing was missing or zero (dict: $D_SMALL/$D_LARGE, scan: $S_SMALL/$S_LARGE)"
+        echo "ERROR — nothing was checked"
+        exit 2
+    fi
+done
+
+ratio_centi() {   # ($1/$2) x 100, integer arithmetic only (no bc dependency)
+    echo $(( ($1 * 100) / $2 ))
+}
+fmt_centi() {     # 491 -> "4.91"
+    printf '%d.%02d' $(( $1 / 100 )) $(( $1 % 100 ))
+}
+
+D_RATIO_CENTI=$(ratio_centi "$D_LARGE" "$D_SMALL")
+S_RATIO_CENTI=$(ratio_centi "$S_LARGE" "$S_SMALL")
+D_RATIO=$(fmt_centi "$D_RATIO_CENTI")
+S_RATIO=$(fmt_centi "$S_RATIO_CENTI")
+
+# ---------------------------------------------------------------------------
+# selftest -- FATAL. The ablation is the scan arm: it must be DETECTED as
+# super-linear, and it must compute the same answer as the dict arm.
+# ---------------------------------------------------------------------------
+ST_FAIL=0
+echo "[selftest] ablation = the pre-fix linear-scan arm; it must be detected as super-linear"
+if [ "$S_RATIO_CENTI" -ge "$ABLATION_MIN_CENTI" ]; then
+    echo "[selftest] ok: scan arm grew ${S_RATIO}x for 4x input (>= $ABLATION_MIN_RATIO) -- quadratic growth is detectable"
+else
+    echo "[selftest] CONTROL FAILED TO FAIL: the linear-scan arm grew only ${S_RATIO}x"
+    echo "[selftest] for 4x input. This probe cannot detect the very defect it exists"
+    echo "[selftest] to detect, so a green dict arm would prove nothing."
+    ST_FAIL=1
+fi
+if [ "$S_RATIO_CENTI" -ge "$MAX_RATIO_CENTI" ]; then
+    echo "[selftest] ok: the scan arm would be REJECTED by the ${MAX_RATIO}x gate"
+else
+    echo "[selftest] GATE IS TOO LOOSE: the scan arm (${S_RATIO}x) passes the ${MAX_RATIO}x gate."
+    ST_FAIL=1
+fi
+if [ -n "$D_CK" ] && [ "$D_CK" = "$S_CK" ]; then
+    echo "[selftest] ok: both arms computed the same checksum ($D_CK) -- the ablation is a"
+    echo "[selftest]     true equivalent workload, not a strawman"
+else
+    echo "[selftest] ABLATION IS NOT EQUIVALENT: dict checksum=$D_CK scan checksum=$S_CK."
+    echo "[selftest] The two arms are not doing the same work, so their ratios are not comparable."
+    ST_FAIL=1
+fi
+
+# The static half needs its own ablation: a grep-based shape predicate that
+# silently matches nothing would make check 2 a vacuous PASS forever. Feed it a
+# fixture carrying the ACTUAL pre-fix regression (a .keys() scan) and require it
+# to be rejected, and a fixture with the current shape and require it accepted.
+shape_verdict() {   # 0 = healthy shape, 1 = regressed
+    _f="$1"; _bad=0
+    grep -q 'name_index: Dict<text, i64>' "$_f" || _bad=1
+    grep -q 'contains_key' "$_f" || _bad=1
+    grep -qE '^\s+for |\.keys\(\)|\.values\(\)' "$_f" && _bad=1
+    return $_bad
+}
+cat > "$WORK/fixture_regressed.spl" <<'FIXEOF'
+fn module_surface_index_by_name(
+    name_index: Dict<text, i64>, name: text) -> i64:
+    for k in name_index.keys():
+        if k == name:
+            return name_index[k]
+    -1
+FIXEOF
+cat > "$WORK/fixture_healthy.spl" <<'FIXEOF'
+fn module_surface_index_by_name(
+    name_index: Dict<text, i64>, name: text) -> i64:
+    if not name_index.contains_key(name):
+        return -1
+    name_index[name]
+FIXEOF
+if shape_verdict "$WORK/fixture_regressed.spl"; then
+    echo "[selftest] SHAPE PREDICATE FAILED TO FAIL: it accepted a .keys() linear scan,"
+    echo "[selftest] which is the exact pre-fix regression that cost 1,193 seconds."
+    ST_FAIL=1
+else
+    echo "[selftest] ok: shape predicate rejects the pre-fix .keys() linear-scan fixture"
+fi
+if shape_verdict "$WORK/fixture_healthy.spl"; then
+    echo "[selftest] ok: shape predicate accepts the current O(1) Dict shape"
+else
+    echo "[selftest] SHAPE PREDICATE IS BROKEN: it rejected the known-healthy shape,"
+    echo "[selftest] so check 2 would FAIL vacuously rather than reporting a real regression."
+    ST_FAIL=1
+fi
+
+[ $ST_FAIL -eq 0 ] || { echo "FAIL — selftest failed; guard is not trustworthy"; exit 1; }
+echo "[selftest] OK"
+echo ""
+
+# ---------------------------------------------------------------------------
+# Report + gate.
+# ---------------------------------------------------------------------------
+echo "complexity receipt (engine=$ENGINE, gating signal = growth ratio, not wall clock)"
+echo "-------------------------------------------------------------------------------"
+printf '%-22s | %12s | %12s | %8s | %s\n' "arm" "ns @ N=$N_SMALL" "ns @ N=$N_LARGE" "ratio" "expected"
+echo "-------------------------------------------------------------------------------"
+printf '%-22s | %12s | %12s | %8s | %s\n' "dict (current shape)" "$D_SMALL" "$D_LARGE" "${D_RATIO}x" "~4x if O(1) lookup"
+printf '%-22s | %12s | %12s | %8s | %s\n' "scan (ablation)" "$S_SMALL" "$S_LARGE" "${S_RATIO}x" "~16x if O(N) lookup"
+echo "-------------------------------------------------------------------------------"
+echo "absolute times above are INDICATIVE ONLY (loadavg $LOADAVG, binary $BIN_STAT)."
+echo "the gate is the ratio: dict ratio must be < ${MAX_RATIO}x."
+echo ""
+
+CHECKED=0
+FAILED=0
+FAIL_MSG=""
+
+# --- check 1: the complexity gate -------------------------------------------
+CHECKED=$((CHECKED + 1))
+if [ "$D_RATIO_CENTI" -ge "$MAX_RATIO_CENTI" ]; then
+    echo "check 1 FAIL: Dict lookup grew ${D_RATIO}x for a 4x input increase (gate ${MAX_RATIO}x)."
+    echo "              That is super-linear -- Dict lookup is behaving like a scan."
+    FAILED=$((FAILED + 1))
+    FAIL_MSG="$FAIL_MSG dict-lookup-growth=${D_RATIO}x"
+else
+    echo "check 1 PASS: Dict lookup grew ${D_RATIO}x for a 4x input increase (< ${MAX_RATIO}x gate)"
+fi
+
+# --- check 2: the real function kept its O(1) shape -------------------------
+if [ ! -f "$SURFACE" ]; then
+    echo "check 2 ERROR: missing $SURFACE"
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+CHECKED=$((CHECKED + 1))
+# Extract the body of module_surface_index_by_name: from its `fn` line to the
+# next top-level `fn` line.
+awk '/^fn module_surface_index_by_name/{f=1} f&&/^fn /&&!/module_surface_index_by_name/{f=0} f' \
+    "$SURFACE" > "$WORK/fnbody.txt"
+if [ ! -s "$WORK/fnbody.txt" ]; then
+    echo "check 2 ERROR: could not locate module_surface_index_by_name() in $SURFACE."
+    echo "               The guard cannot assert the shape of a function it cannot find."
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+SHAPE_BAD=0
+if ! grep -q 'name_index: Dict<text, i64>' "$WORK/fnbody.txt"; then
+    echo "check 2 FAIL: module_surface_index_by_name() no longer takes a Dict<text, i64> index."
+    SHAPE_BAD=1
+fi
+if ! grep -q 'contains_key' "$WORK/fnbody.txt"; then
+    echo "check 2 FAIL: module_surface_index_by_name() no longer does a contains_key lookup."
+    SHAPE_BAD=1
+fi
+# The regression that cost 1,193s: iterating, or materializing keys, per call.
+if grep -qE '^\s+for |\.keys\(\)|\.values\(\)' "$WORK/fnbody.txt"; then
+    echo "check 2 FAIL: module_surface_index_by_name() iterates or materializes keys/values."
+    echo "              This is the exact O(modules)-per-call regression fixed in aecf222a1ff,"
+    echo "              which cost 1,193 seconds in one stage-3 phase."
+    grep -nE '^\s+for |\.keys\(\)|\.values\(\)' "$WORK/fnbody.txt" | sed 's/^/              /'
+    SHAPE_BAD=1
+fi
+if [ $SHAPE_BAD -eq 0 ]; then
+    echo "check 2 PASS: module_surface_index_by_name() still has its O(1) Dict shape"
+else
+    FAILED=$((FAILED + 1))
+    FAIL_MSG="$FAIL_MSG module_surface_index_by_name-shape"
+fi
+
+echo ""
+if [ $CHECKED -eq 0 ]; then
+    echo "ERROR — nothing was checked"
+    exit 2
+fi
+if [ $FAILED -gt 0 ]; then
+    echo "FAIL — $CHECKED check(s) checked, $FAILED failed:$FAIL_MSG"
+    exit 1
+fi
+echo "PASS — $CHECKED check(s) checked, Dict lookup is sub-quadratic (${D_RATIO}x for 4x input) and the hot lookup kept its O(1) shape"
+exit 0
