@@ -1,6 +1,6 @@
 # Named target execution lacks dependency inputs and authoritative receipts
 
-Status: partial; open (2026-08-14)
+Status: ALREADY-FIXED (re-verified 2026-08-17: src/app/build/targets/target_executor.spl exists and src/app/build/targets/artifact_receipt.spl:27,147,163 implements DependencyArtifactInputV1 inputs plus canonical dependency-manifest digests/receipts)
 
 The build CLI can parse, validate, deterministically resolve, and execute an
 independent named target. The old CLI printed the plan and then fell through to

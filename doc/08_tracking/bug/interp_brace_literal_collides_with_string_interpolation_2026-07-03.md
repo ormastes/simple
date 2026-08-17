@@ -136,6 +136,43 @@ follow-up session rather than fixed inline (shared frontend/MIR positional
 contract, not a small isolated change, per this lane's fix-vs-file
 threshold).
 
+## 2026-08-17: frontend half closed; the reported swallow is NOT in this lane
+
+Measured, not inferred. The 2026-07-17 sub-case above guessed the defect lived
+in `flat_bridge_build_string_interps` / `split_interpolation_segments`. It does
+not. `parse_interpolation_fragment`
+(`src/compiler/10.frontend/core/string_interpolation_expand.spl:35`) already
+returned `-1` for the reported **whitespace-padded** shapes `" {inner} "` and
+`" {inner}"` before any change today — proven by deleting the new guard and
+re-running the spec, which still passed. With the fragment rejected the whole
+string falls back to a verbatim literal, which is exactly what the oracle
+prints. So the pure-Simple frontend never produced the empty-string swallow;
+the remaining `N1:|END` report belongs to the other lowering lane and could not
+be reproduced here (see "not proven" below).
+
+What the sweep DID find, via the generalizing spec rather than the reported
+repro: the class was handled **inconsistently**. The padded spellings were
+rejected only because the padding fails to parse — `.trim()` is not normalising
+these fragments — while the **unpadded** `{inner}` / `{a: 1}` / `{1, 2}` parsed
+cleanly as dict/set literals and were accepted as interpolations, the precise
+shape that lowers to nothing. Only half the class was safe, by accident.
+
+Fix: `interpolation_fragment_is_brace_literal` (same file) rejects any region
+whose first non-blank character opens a brace literal, so the verbatim fallback
+is uniform. Leading blanks are skipped explicitly rather than by `.trim()`,
+because the padded-vs-unpadded split is itself evidence the trim does not
+normalise here. Regression spec:
+`test/01_unit/compiler/frontend/interp_brace_literal_fragment_spec.spl`
+(before: `Results: 3 total, 2 passed, 1 failed`; after: `Results: 3 total, 3
+passed, 0 failed`).
+
+**Not proven:** the native/`native-build` lane. `bin/simple` is a Rust
+bootstrap seed and no self-hosted binary is deployed, so the `N1:|END` output
+in the 2026-07-17 note could not be re-measured; this change fences the
+pure-Simple frontend only. Also unproven: whether an unpadded `{...}` region is
+reachable from source at all (`"{{inner}}"` is consumed by the `{{` escape
+first) — the guard closes it as a latent trap regardless.
+
 ## Symptom
 
 A double-quoted interpolated string that contains a literal `{ ... }` span
@@ -191,3 +228,46 @@ rather than a lookup on the immediate identifier) should require the same
 `{{`/`}}` escape uniformly, with a clear parse-time diagnostic when it's
 missing — not a silent swallow of the whole span in one case and a
 context-free "variable not found" in the other.
+
+## 2026-08-17 (later): the fix was CLOBBERED and restored; today's spec run is UNVERIFIED
+
+`e14a2ffb4df` ("three fail-open sites made fail-closed") was a stale-snapshot
+clobber, not a deliberate revert. It silently deleted
+`interpolation_fragment_is_brace_literal` and its guard call from
+`src/compiler/10.frontend/core/string_interpolation_expand.spl` (−32/+0) and the
+"frontend half closed" section of THIS record (−32/+0), while leaving
+`test/01_unit/compiler/frontend/interp_brace_literal_fragment_spec.spl` in place
+at origin. `git grep interpolation_fragment_is_brace_literal origin/main -- src/
+test/` returned zero hits, so nothing superseded the fix — it was simply gone,
+and the spec was fencing an implementation that no longer contained the fix.
+
+Restored here per-hunk from `e14a2ffb4df^` (never by `git revert`, which would
+have rewound the clobber's legitimate fail-closed payload and the int61
+restoration `1983ecdbce9f`).
+
+**The ablation could NOT be reproduced today, and this is recorded as
+UNVERIFIED rather than as a pass.** Measured with the Rust seed
+`bin/release/x86_64-unknown-linux-gnu/simple` (size 59537240, mtime 2026-08-17
+12:58:51 UTC), three runs — two on an isolated `git worktree` pinned at
+`origin/main` (reverted arm) and one on the restored tree (applied arm). All
+three produced the identical verdict:
+
+```
+SPEC FILE VERDICT: test/01_unit/compiler/frontend/interp_brace_literal_fragment_spec.spl declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=child-died-by-signal
+Results: 0 total, 0 passed, 0 failed
+```
+
+with the runner's own diagnosis:
+
+```
+error: test-runner: TERMINATED: child died by signal with no crash sentinel and no fault diagnostic (unverified -- an external killer such as earlyoom cannot be ruled out)
+```
+
+So the answer to "is the spec RED or vacuously green at origin" is **neither**:
+`executed=0` — it never ran a single `it`, in either arm. It is not an oracle on
+this host today. Because both arms are byte-identically unverified, the run also
+does not indicate the restoration made anything worse; the restoration is
+verified by CONTENT (identical to the parent's design) plus the contemporaneous
+`2 passed, 1 failed` -> `3 passed, 0 failed` measurement recorded in the section
+above, not by a re-run. A host with memory headroom should re-run this spec and
+replace this paragraph with a real two-arm result.

@@ -1,6 +1,21 @@
 # `std.spec.screenshot` SFFI API is declared but implemented nowhere
 
-**Status:** OPEN — re-verified 2026-08-09, unchanged
+**Status:** PARTIAL — title and the "implemented nowhere" claim are WRONG;
+corrected 2026-08-17. The **native runtime implementation exists**:
+`src/compiler_rust/runtime/src/value/screenshot_sffi.rs` defines 11
+`pub extern "C" fn rt_screenshot_*` symbols. The 2026-08-09 re-verification
+below searched only `src/runtime` and `src/compiler_rust/compiler/src` and so
+missed `src/compiler_rust/runtime/src` entirely — its "grep finds nothing"
+evidence is a scoping artifact, not an absence.
+
+The **real, still-open** gap is narrower: there are **zero** `rt_screenshot_*`
+registrations under `src/compiler_rust/compiler/src/interpreter_extern/`
+(verified 2026-08-17: `/usr/bin/grep -rc rt_screenshot` over that directory
+returns no non-zero file). So the API works natively and reports
+"unknown extern function" in interpreter mode. Fix shape: mirror the
+registration pattern already used by `interpreter_extern/io_file.rs`.
+**NOT proved:** no run was made in either engine to confirm the native path
+actually captures a screenshot; this is a symbol-presence finding only.
 **Found:** 2026-08-04
 
 ## Re-verification 2026-08-09

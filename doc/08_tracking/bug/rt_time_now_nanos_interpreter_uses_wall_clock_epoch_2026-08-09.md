@@ -1,6 +1,16 @@
 # `rt_time_now_nanos` returns a BOOT-relative epoch natively and a WALL-CLOCK epoch in the interpreter
 
-**Status:** OPEN — filed, deliberately not fixed in-stream (see "Why this is filed, not fixed")
+**Status:** FIXED — status line corrected 2026-08-17 (it read "OPEN — filed,
+deliberately not fixed in-stream", which is stale). The interpreter's
+`rt_time_now_nanos` is now `Instant`-backed, matching the native C runtime's
+`CLOCK_MONOTONIC`: `src/compiler_rust/compiler/src/interpreter_extern/time.rs:304-306`
+(`static BASELINE: OnceLock<Instant>` … `.elapsed().as_nanos()`), with the same
+baseline applied at `:340-343`. That file's own doc comment at `:315` records
+that it "returned wall-clock nanos here until 2026-08-10". Callers wanting an
+absolute wall-clock value are directed to `rt_time_now_unix_micros` (`:319`,
+`:326`, `:337`).
+**NOT proved:** verified by reading the Rust seed source only; no re-run of the
+divergence repro on a freshly built binary.
 **Found:** 2026-08-09 — stream G2, while converging `file_read_bytes`
 **Severity:** silent ~50-year value divergence across execution engines
 **Component:** `src/compiler_rust/compiler/src/interpreter_extern/time.rs` vs the C runtime
