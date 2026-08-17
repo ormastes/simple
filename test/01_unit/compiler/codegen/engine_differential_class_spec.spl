@@ -1,0 +1,103 @@
+# Cross-Engine Differential — Similar-Problem DETECTION spec (defect CLASS)
+#
+# THE CLASS: SILENT FAIL-OPEN in a code generator. Code that cannot determine
+# an answer guesses one and continues with no diagnostic, so the result is
+# wrong but plausible and reads as success.
+#
+# The seed instance is `hir/lower/expr/access.rs:288` — `.unwrap_or(0)` on the
+# `CannotInferFieldType` recovery path. A struct returned BY VALUE lost its
+# receiver type, so EVERY field read returned field 0's value:
+# `W3(first: 9, length: n, tag: 77)` printed `first=9 length=9 tag=9`. It
+# blocked the bootstrap six times before anyone noticed the numbers were wrong.
+#
+# WHY A REPRODUCING SPEC IS NOT ENOUGH, AND WHY THIS ONE SHELLS OUT.
+#
+# Two independent reasons an in-process example cannot catch this class:
+#
+#   1. A SPEC BODY RUNS INTERPRETED. Every codegen defect found on 2026-08-17
+#      lived in exactly one engine, and the interpreter was the CORRECT one in
+#      most of them. No number of in-process assertions can go red on a JIT or
+#      native/AOT defect. The oracle must therefore be a SUBPROCESS.
+#   2. An assertion needs an EXPECTED VALUE, and not knowing the right answer
+#      for one particular cell is precisely how each of these shipped. So the
+#      subprocess gate uses no oracle at all: it runs ONE deterministic program
+#      under interpreter, Cranelift JIT and native/AOT and fails on
+#      DISAGREEMENT. Three implementations of one language must not differ.
+#
+# The gate is `scripts/check/check-engine-differential.shs`, driving
+# `probe_engine_differential.spl` (150 observations covering struct field
+# read/write inline-built, returned-by-value, nested and in-array; tuples;
+# every scalar width; nullable `T?` bind/return/`!`/`??`; arrays of every
+# element type including packed `[u64]` and `[u8]`; and copy/value semantics).
+#
+# This spec asserts the GATE's own properties — that it cannot pass vacuously
+# and that it detects the real defect — because a differential harness that
+# runs zero engines would "agree" trivially, which would make the guard itself
+# a member of the class it exists to catch.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val GATE: text = "scripts/check/check-engine-differential.shs"
+
+fn run_gate(args: text) -> text:
+    val cmd = "sh " + GATE + " " + args + " 2>&1"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+fn last_line(s: text) -> text:
+    val parts = s.split("\n")
+    var i = parts.len() - 1
+    while i >= 0:
+        if parts[i].trim() != "":
+            return parts[i].trim()
+        i = i - 1
+    return ""
+
+describe "cross-engine differential gate defends the silent fail-open class":
+
+    it "proves it can FAIL before any run is trusted":
+        step("The gate's --selftest is fatal and runs before every real scan")
+        val out = run_gate("--selftest")
+
+        step("Fixture 1 replays the real access.rs:288 field collapse — a struct returned by value whose every field read returns field 0")
+        step("Fixture 3 replays a key ABSENT on one engine, the crash-after-partial-output shape an intersection-based comparator would silently pass")
+        step("Fixture 4 replays all engines truncating IDENTICALLY: the cells agree but no engine finished")
+        expect(last_line(out)).to_contain("PASS — 6 selftest fixture(s) checked, 0 failed")
+
+    it "reports a real observation count rather than a bare verdict":
+        step("A verdict that does not state how many cells were compared cannot be distinguished from one that compared none")
+        val out = run_gate("--selftest")
+
+        step("The house convention requires n > 0 in every PASS line — a `0 ... checked` verdict is ERROR, never a pass")
+        expect(out).to_contain("6 selftest fixture(s) checked")
+        expect(out.contains("0 selftest fixture(s) checked")).to_be_false()
+
+    it "names the disagreeing cells rather than only counting them":
+        step("A FAIL that says only 'engines differ' leaves the next reader to re-derive the finding by hand — which is how these defects survived")
+        val out = run_gate("--selftest")
+
+        step("Fixture 1 asserts the verdict names retval_w3_length and retval_w3_tag, the two fields that collapsed onto field 0; the selftest fails loudly if the comparator counts them without naming them")
+        expect(last_line(out)).to_contain("PASS")
+        expect(out.contains("did not name the collapsed fields")).to_be_false()
+
+describe "static fail-open audit gate covers both trees":
+
+    it "proves it can FAIL before any scan is trusted":
+        step("The Rust seed and the pure-Simple compiler express the same defect differently, so the audit carries pattern families for both plus the shell lanes")
+        val out = process_run("sh",
+            ["-c", "sh scripts/check/check-no-new-fail-open.shs --selftest 2>&1"]).0
+
+        step("Fixture 1 replays access.rs:288 — an unwrap_or(0) on a field-index resolution — and must be reported as NEW and NAMED")
+        step("Fixture 3 replays a file that already had one baselined hit growing a second: presence-only baselining would pass it, making a known-bad file a place to hide new instances")
+        step("Fixture 6 replays the pre-push guards that laundered their own failure with '|| true' and exited 0 without checking anything")
+        step("Fixture 7 runs the detector regexes against REAL source, because a detector that matches nothing would make every scan vacuously clean")
+        expect(last_line(out)).to_contain("PASS — 7 selftest fixture(s) checked, 0 failed")
+
+    it "refuses to pass when it examined nothing":
+        step("Pointing the audit at a directory that does not exist must ERROR, never PASS")
+        val out = process_run("sh",
+            ["-c", "sh scripts/check/check-no-new-fail-open.shs --root /nonexistent-fail-open-probe 2>&1"]).0
+
+        step("ERROR — nothing was checked, exit 2. A guard that passes having checked nothing is itself an instance of the class")
+        expect(last_line(out)).to_contain("ERROR — nothing was checked")

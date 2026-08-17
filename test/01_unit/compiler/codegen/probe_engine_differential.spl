@@ -1,0 +1,411 @@
+# Cross-engine DIFFERENTIAL probe — one program, three engines, no oracle.
+#
+# WHY THIS FILE HAS NO EXPECTED VALUES.
+#
+# Every codegen defect found on 2026-08-17 lived in exactly ONE engine:
+#
+#   doc/08_tracking/bug/f32_struct_field_reads_as_zero_2026-08-17.md
+#   doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md
+#   src/compiler_rust/compiler/src/hir/lower/expr/access.rs:288 — a struct
+#     returned BY VALUE lost its receiver type on the `CannotInferFieldType`
+#     recovery path, and `.unwrap_or(0)` then made EVERY field read return
+#     field 0. `W3(first: 9, length: n, tag: 77)` printed `first=9 length=9
+#     tag=9`. Silent: no diagnostic, plausible output, blocked the bootstrap
+#     six times.
+#
+# Writing an absolute oracle requires KNOWING the right answer, which is how
+# those bugs survived: nobody thought to check that particular cell. A
+# differential probe needs no such knowledge. It asserts only the invariant
+# that cannot be argued with — the interpreter, the Cranelift JIT and the
+# native/AOT backend are three implementations of ONE language, so for a
+# deterministic program they must not DISAGREE. Any disagreement is a defect in
+# at least one of them, and the harness names the cell without anyone having
+# predicted it in advance.
+#
+# CONTRACT WITH THE HARNESS (scripts/check/check-engine-differential.shs):
+#   - every observation is exactly one line `OBS <key> = <rendered>`
+#   - keys are unique, stable, and printed in a fixed order
+#   - the program is deterministic: no time, no randomness, no addresses,
+#     no iteration over unordered containers
+#   - the final line is `ENGINE_DIFFERENTIAL PROBE: <n> OBSERVATIONS`, so a
+#     truncated or crashed run cannot be mistaken for an agreeing one
+#
+# A missing key on one engine is a DISAGREEMENT, not a skip — that is how a
+# crash-after-partial-output shows up instead of being silently tolerated.
+
+use std.io_runtime.{exit}
+
+struct Widths:
+    i_8: i8
+    i_16: i16
+    i_32: i32
+    i_64: i64
+    u_8: u8
+    u_16: u16
+    u_32: u32
+    u_64: u64
+    f_32: f32
+    f_64: f64
+    b: bool
+    t: text
+
+# The access.rs shape, reproduced exactly: three same-typed i64 fields, so a
+# collapse onto field 0 is unambiguous rather than coincidentally right.
+struct W3:
+    first: i64
+    length: i64
+    tag: i64
+
+struct Inner:
+    a: i64
+    b: f64
+
+struct Outer:
+    name: text
+    inner: Inner
+    trailing: i64
+
+var count: i64 = 0
+
+fn obs(key: text, rendered: text):
+    count = count + 1
+    print("OBS " + key + " = " + rendered)
+
+# --- by-value struct returns: the access.rs defect's exact carrier -----------
+
+fn make_w3(n: i64) -> W3:
+    return W3(first: 9, length: n, tag: 77)
+
+fn make_inner(n: i64) -> Inner:
+    return Inner(a: n, b: 2.5)
+
+fn make_outer(n: i64) -> Outer:
+    return Outer(name: "outer", inner: Inner(a: n, b: 1.25), trailing: 77)
+
+fn make_widths() -> Widths:
+    return Widths(i_8: 3, i_16: 300, i_32: 70000, i_64: 42,
+        u_8: 200, u_16: 60000, u_32: 4000000000, u_64: 4294967297,
+        f_32: 1.5, f_64: 2.5, b: true, t: "ok")
+
+fn give_i64_opt() -> i64?:
+    return 7
+
+fn give_f64_opt() -> f64?:
+    return 2.5
+
+fn give_text_opt() -> text?:
+    return "ok"
+
+fn give_nil_opt() -> i64?:
+    return nil
+
+fn give_tuple() -> (i64, f64, text):
+    return (11, 3.5, "tup")
+
+fn main():
+    # === 1. scalar widths, plain locals ===================================
+    val a_i8: i8 = 3
+    val a_i16: i16 = 300
+    val a_i32: i32 = 70000
+    val a_i64: i64 = 42
+    val a_u8: u8 = 200
+    val a_u16: u16 = 60000
+    val a_u32: u32 = 4000000000
+    val a_u64: u64 = 4294967297
+    val a_f32: f32 = 1.5
+    val a_f64: f64 = 2.5
+    val a_bool: bool = true
+    val a_text: text = "ok"
+
+    obs("local_i8", a_i8.to_string())
+    obs("local_i16", a_i16.to_string())
+    obs("local_i32", a_i32.to_string())
+    obs("local_i64", a_i64.to_string())
+    obs("local_u8", a_u8.to_string())
+    obs("local_u16", a_u16.to_string())
+    obs("local_u32", a_u32.to_string())
+    obs("local_u64", a_u64.to_string())
+    obs("local_f32", a_f32.to_string())
+    obs("local_f64", a_f64.to_string())
+    obs("local_bool", a_bool.to_string())
+    obs("local_text", a_text)
+
+    # arithmetic, where a width truncation shows up as a wrong number rather
+    # than as a wrong rendering
+    obs("arith_i32_mul", (a_i32 * 3).to_string())
+    obs("arith_u64_add", (a_u64 + 1).to_string())
+    obs("arith_f32_add", (a_f32 + 1.25).to_string())
+    obs("arith_f64_div", (a_f64 / 2.0).to_string())
+    obs("arith_i8_add", (a_i8 + 1).to_string())
+    obs("arith_u8_add", (a_u8 + 1).to_string())
+
+    # === 2. struct field reads: INLINE-BUILT receiver ======================
+    val inline_w3 = W3(first: 9, length: 5, tag: 77)
+    obs("inline_w3_first", inline_w3.first.to_string())
+    obs("inline_w3_length", inline_w3.length.to_string())
+    obs("inline_w3_tag", inline_w3.tag.to_string())
+
+    val inline_widths = Widths(i_8: 3, i_16: 300, i_32: 70000, i_64: 42,
+        u_8: 200, u_16: 60000, u_32: 4000000000, u_64: 4294967297,
+        f_32: 1.5, f_64: 2.5, b: true, t: "ok")
+    obs("inline_field_i8", inline_widths.i_8.to_string())
+    obs("inline_field_i16", inline_widths.i_16.to_string())
+    obs("inline_field_i32", inline_widths.i_32.to_string())
+    obs("inline_field_i64", inline_widths.i_64.to_string())
+    obs("inline_field_u8", inline_widths.u_8.to_string())
+    obs("inline_field_u16", inline_widths.u_16.to_string())
+    obs("inline_field_u32", inline_widths.u_32.to_string())
+    obs("inline_field_u64", inline_widths.u_64.to_string())
+    obs("inline_field_f32", inline_widths.f_32.to_string())
+    obs("inline_field_f64", inline_widths.f_64.to_string())
+    obs("inline_field_bool", inline_widths.b.to_string())
+    obs("inline_field_text", inline_widths.t)
+
+    # === 3. struct field reads: RETURNED BY VALUE ==========================
+    # This is the access.rs cell. `make_w3(3)` printed first=9 length=9 tag=9
+    # under the defect, i.e. every field collapsed onto field 0.
+    val ret_w3 = make_w3(3)
+    obs("retval_w3_first", ret_w3.first.to_string())
+    obs("retval_w3_length", ret_w3.length.to_string())
+    obs("retval_w3_tag", ret_w3.tag.to_string())
+
+    # ...and the same read WITHOUT an intermediate binding, which is the form
+    # that loses the receiver type most easily.
+    obs("retval_direct_w3_first", make_w3(3).first.to_string())
+    obs("retval_direct_w3_length", make_w3(3).length.to_string())
+    obs("retval_direct_w3_tag", make_w3(3).tag.to_string())
+
+    val ret_widths = make_widths()
+    obs("retval_field_i32", ret_widths.i_32.to_string())
+    obs("retval_field_u64", ret_widths.u_64.to_string())
+    obs("retval_field_f32", ret_widths.f_32.to_string())
+    obs("retval_field_f64", ret_widths.f_64.to_string())
+    obs("retval_field_bool", ret_widths.b.to_string())
+    obs("retval_field_text", ret_widths.t)
+    obs("retval_direct_field_f32", make_widths().f_32.to_string())
+    obs("retval_direct_field_text", make_widths().t)
+
+    # === 4. NESTED struct field reads ======================================
+    val outer = Outer(name: "outer", inner: Inner(a: 5, b: 1.25), trailing: 77)
+    obs("nested_name", outer.name)
+    obs("nested_inner_a", outer.inner.a.to_string())
+    obs("nested_inner_b", outer.inner.b.to_string())
+    obs("nested_trailing", outer.trailing.to_string())
+
+    val ret_outer = make_outer(5)
+    obs("nested_retval_name", ret_outer.name)
+    obs("nested_retval_inner_a", ret_outer.inner.a.to_string())
+    obs("nested_retval_inner_b", ret_outer.inner.b.to_string())
+    obs("nested_retval_trailing", ret_outer.trailing.to_string())
+    obs("nested_direct_inner_a", make_outer(5).inner.a.to_string())
+
+    # === 5. struct field WRITES ============================================
+    var mut_w3 = W3(first: 1, length: 2, tag: 3)
+    mut_w3.first = 100
+    mut_w3.length = 200
+    mut_w3.tag = 300
+    obs("write_w3_first", mut_w3.first.to_string())
+    obs("write_w3_length", mut_w3.length.to_string())
+    obs("write_w3_tag", mut_w3.tag.to_string())
+
+    var mut_widths = make_widths()
+    mut_widths.f_32 = 7.5
+    mut_widths.u_64 = 8589934593
+    mut_widths.i_16 = 301
+    mut_widths.t = "changed"
+    obs("write_field_f32", mut_widths.f_32.to_string())
+    obs("write_field_u64", mut_widths.u_64.to_string())
+    obs("write_field_i16", mut_widths.i_16.to_string())
+    obs("write_field_text", mut_widths.t)
+
+    # a write must not disturb its NEIGHBOURS — the shape of an offset bug
+    obs("write_neighbour_f64", mut_widths.f_64.to_string())
+    obs("write_neighbour_i32", mut_widths.i_32.to_string())
+
+    # === 6. structs IN ARRAYS ==============================================
+    val w3s: [W3] = [W3(first: 9, length: 1, tag: 77),
+        W3(first: 9, length: 2, tag: 77),
+        W3(first: 9, length: 3, tag: 77)]
+    obs("array_struct_0_length", w3s[0].length.to_string())
+    obs("array_struct_1_length", w3s[1].length.to_string())
+    obs("array_struct_2_length", w3s[2].length.to_string())
+    obs("array_struct_1_first", w3s[1].first.to_string())
+    obs("array_struct_1_tag", w3s[1].tag.to_string())
+    obs("array_struct_len", w3s.len().to_string())
+
+    val ws: [Widths] = [make_widths()]
+    obs("array_widths_f32", ws[0].f_32.to_string())
+    obs("array_widths_u64", ws[0].u_64.to_string())
+    obs("array_widths_text", ws[0].t)
+
+    # === 7. TUPLES =========================================================
+    val tup = (11, 3.5, "tup")
+    obs("tuple_0", tup.0.to_string())
+    obs("tuple_1", tup.1.to_string())
+    obs("tuple_2", tup.2)
+
+    val rtup = give_tuple()
+    obs("tuple_retval_0", rtup.0.to_string())
+    obs("tuple_retval_1", rtup.1.to_string())
+    obs("tuple_retval_2", rtup.2)
+
+    # === 8. NULLABLE T? : bind, return, `!`, `??` ==========================
+    val o_i8: i8? = 3
+    val o_i16: i16? = 300
+    val o_i32: i32? = 70000
+    val o_i64: i64? = 42
+    val o_u8: u8? = 200
+    val o_u16: u16? = 60000
+    val o_u32: u32? = 4000000000
+    val o_u64: u64? = 4294967297
+    val o_f32: f32? = 1.5
+    val o_f64: f64? = 2.5
+    val o_bool: bool? = true
+    val o_text: text? = "ok"
+
+    obs("opt_bind_i8", o_i8.to_string())
+    obs("opt_bind_i16", o_i16.to_string())
+    obs("opt_bind_i32", o_i32.to_string())
+    obs("opt_bind_i64", o_i64.to_string())
+    obs("opt_bind_u8", o_u8.to_string())
+    obs("opt_bind_u16", o_u16.to_string())
+    obs("opt_bind_u32", o_u32.to_string())
+    obs("opt_bind_u64", o_u64.to_string())
+    obs("opt_bind_f32", o_f32.to_string())
+    obs("opt_bind_f64", o_f64.to_string())
+    obs("opt_bind_bool", o_bool.to_string())
+    obs("opt_bind_text", o_text.to_string())
+
+    obs("opt_bang_i64", (o_i64!).to_string())
+    obs("opt_bang_f64", (o_f64!).to_string())
+    obs("opt_bang_bool", (o_bool!).to_string())
+    obs("opt_bang_text", (o_text!))
+
+    obs("opt_coalesce_present_i64", (o_i64 ?? 99).to_string())
+    obs("opt_coalesce_present_f64", (o_f64 ?? 9.5).to_string())
+
+    val n_i64: i64? = nil
+    val n_f64: f64? = nil
+    val n_bool: bool? = nil
+    val n_text: text? = nil
+    obs("opt_coalesce_default_i64", (n_i64 ?? 9).to_string())
+    obs("opt_coalesce_default_f64", (n_f64 ?? 9.5).to_string())
+    obs("opt_coalesce_default_bool", (n_bool ?? true).to_string())
+    obs("opt_coalesce_default_text", (n_text ?? "dflt"))
+
+    obs("opt_return_i64", give_i64_opt().to_string())
+    obs("opt_return_f64", give_f64_opt().to_string())
+    obs("opt_return_text", give_text_opt().to_string())
+    obs("opt_return_nil_coalesce", (give_nil_opt() ?? 55).to_string())
+
+    # === 9. ARRAYS of each element type, incl. packed [u64] and [u8] =======
+    # The `[u64]` divide-by-8 defect and the `[u8]` aliasing defect both live
+    # here. Length is observed alongside the elements because a stride error
+    # shows up in one and not the other.
+    val arr_i64: [i64] = [1, 2, 3, 4]
+    val arr_u64: [u64] = [4294967296, 4294967297, 4294967298, 4294967299]
+    val arr_u8: [u8] = [1, 2, 3, 250]
+    val arr_i32: [i32] = [70000, 70001, 70002]
+    val arr_u32: [u32] = [4000000000, 4000000001]
+    val arr_i16: [i16] = [300, 301]
+    val arr_i8: [i8] = [3, 4]
+    val arr_u16: [u16] = [60000, 60001]
+    val arr_f32: [f32] = [1.5, 2.5, 3.5]
+    val arr_f64: [f64] = [1.25, 2.25]
+    val arr_bool: [bool] = [true, false, true]
+    val arr_text: [text] = ["a", "b", "c"]
+
+    obs("arr_i64_len", arr_i64.len().to_string())
+    obs("arr_i64_0", arr_i64[0].to_string())
+    obs("arr_i64_3", arr_i64[3].to_string())
+    obs("arr_u64_len", arr_u64.len().to_string())
+    obs("arr_u64_0", arr_u64[0].to_string())
+    obs("arr_u64_1", arr_u64[1].to_string())
+    obs("arr_u64_3", arr_u64[3].to_string())
+    obs("arr_u8_len", arr_u8.len().to_string())
+    obs("arr_u8_0", arr_u8[0].to_string())
+    obs("arr_u8_3", arr_u8[3].to_string())
+    obs("arr_i32_len", arr_i32.len().to_string())
+    obs("arr_i32_2", arr_i32[2].to_string())
+    obs("arr_u32_len", arr_u32.len().to_string())
+    obs("arr_u32_1", arr_u32[1].to_string())
+    obs("arr_i16_1", arr_i16[1].to_string())
+    obs("arr_i8_1", arr_i8[1].to_string())
+    obs("arr_u16_1", arr_u16[1].to_string())
+    obs("arr_f32_len", arr_f32.len().to_string())
+    obs("arr_f32_2", arr_f32[2].to_string())
+    obs("arr_f64_1", arr_f64[1].to_string())
+    obs("arr_bool_2", arr_bool[2].to_string())
+    obs("arr_text_2", arr_text[2])
+
+    # element WRITES, then re-read: stride is exercised in both directions
+    var warr_u64: [u64] = [4294967296, 4294967297, 4294967298]
+    warr_u64[1] = 8589934593
+    obs("arr_u64_write_1", warr_u64[1].to_string())
+    obs("arr_u64_write_neighbour_0", warr_u64[0].to_string())
+    obs("arr_u64_write_neighbour_2", warr_u64[2].to_string())
+
+    var warr_u8: [u8] = [1, 2, 3, 4]
+    warr_u8[2] = 200
+    obs("arr_u8_write_2", warr_u8[2].to_string())
+    obs("arr_u8_write_neighbour_1", warr_u8[1].to_string())
+    obs("arr_u8_write_neighbour_3", warr_u8[3].to_string())
+
+    var warr_f32: [f32] = [1.5, 2.5, 3.5]
+    warr_f32[0] = 9.5
+    obs("arr_f32_write_0", warr_f32[0].to_string())
+    obs("arr_f32_write_neighbour_1", warr_f32[1].to_string())
+
+    # === 10. COPY / VALUE SEMANTICS =======================================
+    # `val b = a` must not alias. `[u8]` is KNOWN to still alias as of
+    # 2026-08-17; recording it as an observation rather than an assertion means
+    # the harness reports whether the ENGINES agree about the aliasing, which
+    # is the separate question this probe is entitled to answer.
+    var src_w3 = W3(first: 1, length: 2, tag: 3)
+    val cp_w3 = src_w3
+    src_w3.length = 999
+    obs("copy_struct_original", src_w3.length.to_string())
+    obs("copy_struct_copy", cp_w3.length.to_string())
+
+    var src_i64: [i64] = [1, 2, 3]
+    val cp_i64 = src_i64
+    src_i64[1] = 999
+    obs("copy_arr_i64_original", src_i64[1].to_string())
+    obs("copy_arr_i64_copy", cp_i64[1].to_string())
+
+    var src_u64: [u64] = [1, 2, 3]
+    val cp_u64 = src_u64
+    src_u64[1] = 999
+    obs("copy_arr_u64_original", src_u64[1].to_string())
+    obs("copy_arr_u64_copy", cp_u64[1].to_string())
+
+    var src_u8: [u8] = [1, 2, 3]
+    val cp_u8 = src_u8
+    src_u8[1] = 99
+    obs("copy_arr_u8_original", src_u8[1].to_string())
+    obs("copy_arr_u8_copy", cp_u8[1].to_string())
+
+    var src_f64: [f64] = [1.5, 2.5]
+    val cp_f64 = src_f64
+    src_f64[0] = 9.5
+    obs("copy_arr_f64_original", src_f64[0].to_string())
+    obs("copy_arr_f64_copy", cp_f64[0].to_string())
+
+    var src_txt: [text] = ["a", "b"]
+    val cp_txt = src_txt
+    src_txt[0] = "z"
+    obs("copy_arr_text_original", src_txt[0])
+    obs("copy_arr_text_copy", cp_txt[0])
+
+    # a struct passed BY VALUE into a function must not be mutated for caller
+    var arg_w3 = W3(first: 1, length: 2, tag: 3)
+    val seen = mutate_arg(arg_w3)
+    obs("copy_arg_callee_saw", seen.to_string())
+    obs("copy_arg_caller_after", arg_w3.length.to_string())
+
+    print("ENGINE_DIFFERENTIAL PROBE: " + count.to_string() + " OBSERVATIONS")
+
+fn mutate_arg(w: W3) -> i64:
+    var local = w
+    local.length = 555
+    return local.length
