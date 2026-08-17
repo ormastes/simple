@@ -5,7 +5,7 @@ CSV <-> Sheet (Calc), plus that opened files render through the HTML adapter.
 """
 
 use std.spec
-use app.office.file_formats.{parse_markdown_document, document_to_markdown, parse_csv_sheet, sheet_to_csv}
+use app.office.file_formats.{parse_markdown_document, document_to_markdown, parse_csv_sheet, sheet_to_csv, parse_inline_spans}
 use app.office.render_adapter.{office_render_source}
 use app.office.sheets.cell.{cell_display_text}
 
@@ -74,3 +74,55 @@ describe "Calc CSV round-trip":
         val sheet = parse_csv_sheet("10,20\n30,40\n=A1+B2,=A1+A2", "s")
         expect(cell_display_text(sheet.get_cell("A3"))).to_equal("50")
         expect(cell_display_text(sheet.get_cell("B3"))).to_equal("40")
+
+describe "parse_inline_spans returns its declared result":
+    # Regression: parse_inline_spans is declared `-> InlineSpanParseResult` but
+    # its body ended on an `if` statement and never constructed one, so it
+    # returned nil. Every caller in _md_block reads `r.spans`/`r.comments`, so
+    # ANY call to parse_markdown_document died with
+    # "undefined field 'spans': cannot access field on value of type 'nil'".
+    it "returns spans for a plain line":
+        val r = parse_inline_spans("hello", 1)
+        expect(r.spans.len() > 0).to_equal(true)
+        expect(r.comments.len()).to_equal(0)
+
+    it "returns a span even for an empty line":
+        val r = parse_inline_spans("", 1)
+        expect(r.spans.len()).to_equal(1)
+
+    it "returns the comments it collected":
+        val r = parse_inline_spans("hi [>>ana: check this<<]", 1)
+        expect(r.comments.len()).to_equal(1)
+        expect(r.comments[0].author).to_equal("ana")
+
+describe "markdown parse covers every inline construct (defect class)":
+    # Class: a helper whose declared return type is a struct must construct it
+    # on EVERY path. parse_inline_spans is the widest such helper here -- one
+    # nil return took out the entire Writer import path. Drive each construct
+    # through the full public entry point so a missing/again-nil result on any
+    # branch fails loudly rather than only on the branch a single test happens
+    # to hit.
+    it "parses every block kind without faulting":
+        val md = "# H1\n\n## H2\n\n### H3\n\n- bullet\n\n1. ordered\n\n> quote\n\nplain para\n\n```\ncode\n```"
+        val doc = parse_markdown_document(md, "d")
+        # 8 blocks: H1, H2, H3, bullet, ordered, quote, paragraph, code fence
+        expect(doc.blocks.len()).to_equal(8)
+        for block in doc.blocks:
+            expect(block.spans.len() > 0).to_equal(true)
+
+    it "parses every inline style without faulting":
+        for line in ["**bold**", "*italic*", "`code`", "[text](http://x)",
+                "foot[^1]", "plain", "**bold** and *italic* and `code`"]:
+            val doc = parse_markdown_document(line, "d")
+            expect(doc.blocks.len()).to_equal(1)
+            expect(doc.blocks[0].spans.len() > 0).to_equal(true)
+
+    it "round-trips a document mixing blocks and inline styles":
+        val md = "# Report\n\nGrowth was **strong** and *steady*.\n\n- Ship v2"
+        expect(document_to_markdown(parse_markdown_document(md, "d"))).to_equal(md)
+
+    it "threads comment ids document-wide across lines":
+        val md = "a [>>ana: one<<]\n\nb [>>bo: two<<]"
+        val doc = parse_markdown_document(md, "d")
+        expect(doc.comments.len()).to_equal(2)
+        expect(doc.comments[0].id).to_not_equal(doc.comments[1].id)
