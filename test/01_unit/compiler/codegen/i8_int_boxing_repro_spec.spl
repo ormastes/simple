@@ -1,0 +1,70 @@
+# REPRODUCING spec for
+# doc/08_tracking/bug/i8_array_literal_reads_back_wrong_value_2026-08-17.md
+#
+# `[5i8, 6i8]` read element 0 back as 43 under the cranelift JIT, with exit 0
+# and no diagnostic. 43 == (5 << 3) | 0b011 — the runtime TAG_SPECIAL word whose
+# payload is the raw integer. Cause: TypeId::I8 and TypeId::BOOL both lower to
+# cranelift `types::I8`, and the MIR lowering treated that machine-width
+# coincidence as type identity, boxing every i8 through `rt_value_bool` (whose
+# C signature takes a `bool`).
+#
+# WHY A SUBPROCESS. `bin/simple test` runs spec bodies on the tree-walk
+# INTERPRETER, which is CORRECT here. An in-process example can therefore never
+# go red on this defect no matter what it asserts. The oracle is the sibling
+# run-path probe `probe_i8_int_boxing_jit.spl`, executed as a subprocess under
+# both engines; every check inside it compares against an ABSOLUTE literal, not
+# against the other engine.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_i8_int_boxing_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate binary; the
+    # default is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "i8 is boxed as an integer, not as a bool":
+    it "runs the probe to completion under the interpreter (control arm)":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The probe must have reached its end — a truncated run is not evidence")
+        expect(interp).to_contain("I8_INT_BOXING PROBE: DONE")
+
+        step("The interpreter was correct in this bug, so a red here means the probe is broken, not the engine")
+        expect(interp.contains("FAIL ")).to_equal(false)
+
+    it "reads back every i8 as the value that was written, under the JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit — the engine the defect lived in")
+        val jit = run_probe_in_mode("jit")
+
+        step("The probe must have reached its end")
+        expect(jit).to_contain("I8_INT_BOXING PROBE: DONE")
+
+        step("An i8 array literal read back in the same function")
+        expect(jit).to_contain("PASS arr_i8_elem0")
+        expect(jit).to_contain("PASS arr_i8_elem1")
+        expect(jit).to_contain("PASS arr_i8_elem2")
+
+        step("The same array returned across a call boundary")
+        expect(jit).to_contain("PASS ret_i8_elem0")
+        expect(jit).to_contain("PASS ret_i8_elem2")
+
+        step("The literal numeric signature: 5 must never read back as 43")
+        expect(jit).to_contain("PASS arr_i8_tag_special_signature")
+        expect(jit.contains("actual=43")).to_equal(false)
+
+        step("The fix routes i8 to the integer tag; bool must still reach rt_value_bool")
+        expect(jit).to_contain("PASS bool_true_unaffected")
+        expect(jit).to_contain("PASS bool_false_unaffected")
+
+        step("No check may have failed — this is the authoritative verdict")
+        expect(jit.contains("FAIL ")).to_equal(false)

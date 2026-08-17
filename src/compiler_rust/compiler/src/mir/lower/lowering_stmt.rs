@@ -573,7 +573,8 @@ impl<'a> MirLowerer<'a> {
                             let boxed_index = {
                                 let needs_int_boxing = matches!(
                                     index.ty,
-                                    TypeId::I16
+                                    TypeId::I8
+                                        | TypeId::I16
                                         | TypeId::I32
                                         | TypeId::I64
                                         | TypeId::U8
@@ -581,7 +582,7 @@ impl<'a> MirLowerer<'a> {
                                         | TypeId::U32
                                         | TypeId::U64
                                 );
-                                let needs_bool_boxing = index.ty == TypeId::BOOL || index.ty == TypeId::I8;
+                                let needs_bool_boxing = index.ty == TypeId::BOOL;
                                 if index.ty == TypeId::U64 {
                                     self.box_u64_runtime_value(index_reg)?
                                 } else if needs_int_boxing {
@@ -651,7 +652,8 @@ impl<'a> MirLowerer<'a> {
                                 let needs_int_boxing = !elem_is_heap
                                     && matches!(
                                         value.ty,
-                                        TypeId::I16
+                                        TypeId::I8
+                                            | TypeId::I16
                                             | TypeId::I32
                                             | TypeId::I64
                                             | TypeId::U8
@@ -661,7 +663,7 @@ impl<'a> MirLowerer<'a> {
                                     );
                                 let needs_float_boxing = !elem_is_heap && matches!(value.ty, TypeId::F32 | TypeId::F64);
                                 let needs_bool_boxing =
-                                    !elem_is_heap && (value.ty == TypeId::BOOL || value.ty == TypeId::I8);
+                                    !elem_is_heap && value.ty == TypeId::BOOL;
                                 if value.ty == TypeId::U64 && !elem_is_heap {
                                     self.box_u64_runtime_value(val_reg)?
                                 } else if needs_int_boxing {
@@ -880,6 +882,11 @@ impl<'a> MirLowerer<'a> {
                     // unwrapped to nil by `!`. Same rule as a `T?`/`Any` local.
                     let ret_ty = self.with_func(|func, _| func.return_type)?;
                     let reg = self.box_scalar_for_tagged_slot(ret_ty, v.ty, reg)?;
+                    // ...and the mirror: a RAW scalar return slot fed by a
+                    // TAGGED value (`-> i64` returning an `ANY` expression, e.g.
+                    // `l[i] & 0xFF` over an untyped `list`) must be untagged, or
+                    // the caller reads `v << 3`.
+                    let reg = self.unbox_scalar_for_raw_slot(ret_ty, v.ty, reg)?;
                     Some(reg)
                 } else {
                     None

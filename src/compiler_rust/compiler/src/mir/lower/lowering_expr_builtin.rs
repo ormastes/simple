@@ -656,10 +656,21 @@ impl<'a> MirLowerer<'a> {
                 // I64/U64 are handled above via the raw-to-string bypass (both can
                 // exceed the 61-bit boxed-int range); this list only covers widths
                 // that always fit.
-                let needs_int_boxing =
-                    matches!(arg.ty, TypeId::I16 | TypeId::I32 | TypeId::U8 | TypeId::U16 | TypeId::U32);
+                // `i8` is NOT a bool. TypeId::I8 and TypeId::BOOL both lower to the
+                // cranelift `types::I8` machine type, and that coincidence was baked in
+                // here as `arg.ty == TypeId::I8` being routed through `rt_value_bool`.
+                // `rt_value_bool` takes a C `bool`; handing it an arbitrary i8 payload is
+                // UB and in practice produced a TAG_SPECIAL word whose payload is the
+                // raw integer, so `print 5i8` rendered `<special:5>`, `print 0i8` rendered
+                // `false` and `print 1i8` rendered `true`. i8 must be tagged as an INT
+                // exactly like i16/i32/u8.
+                // doc/08_tracking/bug/i8_array_literal_reads_back_wrong_value_2026-08-17.md
+                let needs_int_boxing = matches!(
+                    arg.ty,
+                    TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::U8 | TypeId::U16 | TypeId::U32
+                );
                 let needs_float_boxing = matches!(arg.ty, TypeId::F32 | TypeId::F64);
-                let needs_bool_boxing = arg.ty == TypeId::BOOL || arg.ty == TypeId::I8;
+                let needs_bool_boxing = arg.ty == TypeId::BOOL;
                 if needs_int_boxing || needs_float_boxing || needs_bool_boxing {
                     let boxed = if needs_bool_boxing {
                         // Use rt_value_bool for bool → RuntimeValue conversion

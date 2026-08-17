@@ -1,0 +1,103 @@
+# SIMILAR-PROBLEM DETECTION spec — element-width / tagging defect CLASS.
+#
+# Two separately filed bugs are the same mistake at two different widths:
+#
+#   doc/08_tracking/bug/i8_array_literal_reads_back_wrong_value_2026-08-17.md
+#     i8 boxed through `rt_value_bool` because TypeId::I8 and TypeId::BOOL share
+#     the cranelift machine type `types::I8`; `[5i8,6i8][0]` read back as 43.
+#   doc/08_tracking/bug/jit_corrupts_i64_array_returned_from_sha1_bytes_2026-08-04.md
+#     a `[i64]` whose slots rendered as float / nil / heap tags — a raw tagged
+#     word read as if already untagged.
+#
+# Both were found ONE TYPE AT A TIME by a human noticing a wrong number. This
+# spec generalises the class instead: EVERY integer width (i8/i16/i32/i64 and
+# u8/u16/u32/u64) across four erased-slot boundaries — array literal, array
+# literal returned across a call, store-then-load via push, tuple element — so
+# the next omitted width fails here instead of shipping as plausible garbage.
+#
+# WHY A SUBPROCESS. Spec bodies run on the tree-walk INTERPRETER, which is
+# correct for every case below. Only a subprocess under SIMPLE_EXECUTION_MODE=jit
+# can go red. Every oracle inside the probe is an ABSOLUTE literal, never
+# "the two engines agree" — that would pass while both engines are wrong alike.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_int_width_boxing_matrix_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "integer width boxing matrix across erased-slot boundaries":
+    it "runs the matrix to completion under the interpreter (control arm)":
+        step("Run the run-path probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("A truncated run is not evidence — the probe must reach its end marker")
+        expect(interp).to_contain("INT_WIDTH_BOXING_MATRIX PROBE: DONE")
+
+        step("The interpreter is the control arm and must be clean")
+        expect(interp.contains("FAIL ")).to_equal(false)
+
+    it "round-trips every integer width through every erased slot on the JIT":
+        step("Run the same probe under SIMPLE_EXECUTION_MODE=jit")
+        val jit = run_probe_in_mode("jit")
+        expect(jit).to_contain("INT_WIDTH_BOXING_MATRIX PROBE: DONE")
+
+        step("Boundary 1 — array literal, signed widths")
+        expect(jit).to_contain("PASS lit_i8_0")
+        expect(jit).to_contain("PASS lit_i16_0")
+        expect(jit).to_contain("PASS lit_i32_0")
+        expect(jit).to_contain("PASS lit_i64_0")
+
+        step("Boundary 1 — unsigned widths; u64 is the width the untagging `>> 3` defect hit")
+        expect(jit).to_contain("PASS lit_u8_0")
+        expect(jit).to_contain("PASS lit_u16_0")
+        expect(jit).to_contain("PASS lit_u32_0")
+        expect(jit).to_contain("PASS lit_u64_0")
+
+        step("Boundary 2 — a typed array literal returned from a function is a separate lowering path")
+        expect(jit).to_contain("PASS ret_i8_0")
+        expect(jit).to_contain("PASS ret_i16_0")
+        expect(jit).to_contain("PASS ret_i32_0")
+        expect(jit).to_contain("PASS ret_i64_0")
+        expect(jit).to_contain("PASS ret_u8_0")
+        expect(jit).to_contain("PASS ret_u16_0")
+        expect(jit).to_contain("PASS ret_u32_0")
+        expect(jit).to_contain("PASS ret_u64_0")
+
+        step("Boundary 3 — push() writes through a different lowering than the literal; both directions must agree")
+        expect(jit).to_contain("PASS push_i8_0")
+        expect(jit).to_contain("PASS push_i16_0")
+        expect(jit).to_contain("PASS push_i32_0")
+        expect(jit).to_contain("PASS push_i64_0")
+        expect(jit).to_contain("PASS push_u8_0")
+        expect(jit).to_contain("PASS push_u32_0")
+        expect(jit).to_contain("PASS push_u64_0")
+
+        step("Boundary 4 — a tuple slot")
+        expect(jit).to_contain("PASS tuple_i8_0")
+        expect(jit).to_contain("PASS tuple_i32_0")
+        expect(jit).to_contain("PASS tuple_i64_0")
+        expect(jit).to_contain("PASS tuple_u64_0")
+
+        step("Neither known numeric signature of the class: `v << 3 | TAG_SPECIAL`, and an untagging `>> 3`")
+        expect(jit).to_contain("PASS sig_tag_special_shift_i8")
+        expect(jit).to_contain("PASS sig_untag_shift_u64")
+
+        step("A never-unboxed tagged word leaks as `<value:0x..>` or `<special:N>`")
+        expect(jit.contains("<value:0x")).to_equal(false)
+        expect(jit.contains("<special:")).to_equal(false)
+
+        step("Fixing the i8/bool machine-width collision must not push bool into the integer tag")
+        expect(jit).to_contain("PASS bool_elem_true")
+        expect(jit).to_contain("PASS bool_elem_false")
+
+        step("The aggregate verdict — any FAIL line anywhere is a red")
+        expect(jit.contains("FAIL ")).to_equal(false)

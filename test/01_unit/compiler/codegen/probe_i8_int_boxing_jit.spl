@@ -1,0 +1,69 @@
+# Run-path probe: `i8` must be boxed as an INT, never as a bool.
+#
+# Reproducer for
+# doc/08_tracking/bug/i8_array_literal_reads_back_wrong_value_2026-08-17.md
+#
+# TypeId::I8 and TypeId::BOOL both lower to the cranelift machine type
+# `types::I8`. The MIR builtin/collection lowering baked that coincidence in and
+# routed every `i8` through `rt_value_bool`, whose C signature takes a `bool`.
+# The result was a TAG_SPECIAL word carrying the raw integer as its payload:
+# `[5i8, 6i8]` read element 0 back as 43 (= 5 << 3 | TAG_SPECIAL).
+#
+# Every oracle below is an ABSOLUTE literal, never "the two engines agree".
+# Run under BOTH `SIMPLE_EXECUTION_MODE=interpreter` and `=jit`.
+
+fn check(name: text, actual: i64, expected: i64):
+    if actual == expected:
+        print "PASS " + name
+    else:
+        print "FAIL " + name + " actual=" + ("" + actual) + " expected=" + ("" + expected)
+
+fn check_text(name: text, actual: text, expected: text):
+    if actual == expected:
+        print "PASS " + name
+    else:
+        print "FAIL " + name + " actual=" + actual + " expected=" + expected
+
+fn make_i8_array() -> [i8]:
+    [5i8, 6i8, 7i8]
+
+fn main():
+    # --- scalar i8 through the value-boxing path -------------------------
+    val s0: i8 = 5i8
+    check_text("scalar_i8_five", "" + s0, "5")
+
+    val s1: i8 = 0i8
+    check_text("scalar_i8_zero", "" + s1, "0")
+
+    val s2: i8 = 1i8
+    check_text("scalar_i8_one", "" + s2, "1")
+
+    val s3: i8 = 100i8
+    check_text("scalar_i8_hundred", "" + s3, "100")
+
+    # --- i8 array literal, read back in the same function ---------------
+    val a = [5i8, 6i8, 7i8]
+    check("arr_i8_elem0", a[0] as i64, 5)
+    check("arr_i8_elem1", a[1] as i64, 6)
+    check("arr_i8_elem2", a[2] as i64, 7)
+    check_text("arr_i8_elem0_text", "" + a[0], "5")
+
+    # --- i8 array literal returned across a call boundary ---------------
+    val r = make_i8_array()
+    check("ret_i8_elem0", r[0] as i64, 5)
+    check("ret_i8_elem2", r[2] as i64, 7)
+
+    # --- the exact numeric signature of the defect ----------------------
+    # 5 mis-tagged as TAG_SPECIAL reads back as 43; assert it never does.
+    if (a[0] as i64) == 43:
+        print "FAIL arr_i8_tag_special_signature"
+    else:
+        print "PASS arr_i8_tag_special_signature"
+
+    # --- bool must STILL box as a bool (the fix must not overshoot) -----
+    val b0: bool = true
+    check_text("bool_true_unaffected", "" + b0, "true")
+    val b1: bool = false
+    check_text("bool_false_unaffected", "" + b1, "false")
+
+    print "I8_INT_BOXING PROBE: DONE"

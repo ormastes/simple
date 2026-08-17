@@ -1,0 +1,136 @@
+# Run-path probe: element-width / tagging matrix across EVERY integer width.
+#
+# Similar-problem DETECTION probe for the defect CLASS behind
+# doc/08_tracking/bug/i8_array_literal_reads_back_wrong_value_2026-08-17.md
+# and doc/08_tracking/bug/jit_corrupts_i64_array_returned_from_sha1_bytes_2026-08-04.md
+#
+# The class: a native integer written into an erased slot (array element, tuple
+# element, array element assignment, cross-call return) is tagged or re-read
+# using a rule chosen from the value's MACHINE width rather than its declared
+# type. `i8` and `bool` share cranelift `types::I8`, so `i8` was boxed with
+# `rt_value_bool`; `u64` has separately been seen divided by 8 by an untagging
+# `>> 3`. Both are the same mistake at different widths.
+#
+# So this probe sweeps ALL widths (i8/i16/i32/i64/u8/u16/u32/u64) through the
+# same four boundaries, in BOTH directions (store then load), and asserts an
+# ABSOLUTE literal for each — never "the engines agree", which would pass while
+# both engines are wrong in the same way.
+#
+# Run under BOTH `SIMPLE_EXECUTION_MODE=interpreter` and `=jit`.
+
+fn check(name: text, actual: i64, expected: i64):
+    if actual == expected:
+        print "PASS " + name
+    else:
+        print "FAIL " + name + " actual=" + ("" + actual) + " expected=" + ("" + expected)
+
+fn ret_i8() -> [i8]:
+    [5i8, 6i8]
+
+fn ret_i16() -> [i16]:
+    [5i16, 6i16]
+
+fn ret_i32() -> [i32]:
+    [5i32, 6i32]
+
+fn ret_i64() -> [i64]:
+    [5, 6]
+
+fn ret_u8() -> [u8]:
+    [5u8, 6u8]
+
+fn ret_u16() -> [u16]:
+    [5u16, 6u16]
+
+fn ret_u32() -> [u32]:
+    [5u32, 6u32]
+
+fn ret_u64() -> [u64]:
+    [5u64, 6u64]
+
+fn main():
+    # ---- boundary 1: array LITERAL, read back in the same function ------
+    val li8 = [5i8, 6i8]
+    check("lit_i8_0", li8[0] as i64, 5)
+    check("lit_i8_1", li8[1] as i64, 6)
+    val li16 = [5i16, 6i16]
+    check("lit_i16_0", li16[0] as i64, 5)
+    val li32 = [5i32, 6i32]
+    check("lit_i32_0", li32[0] as i64, 5)
+    val li64 = [5, 6]
+    check("lit_i64_0", li64[0], 5)
+    val lu8 = [5u8, 6u8]
+    check("lit_u8_0", lu8[0] as i64, 5)
+    val lu16 = [5u16, 6u16]
+    check("lit_u16_0", lu16[0] as i64, 5)
+    val lu32 = [5u32, 6u32]
+    check("lit_u32_0", lu32[0] as i64, 5)
+    val lu64 = [5u64, 6u64]
+    check("lit_u64_0", lu64[0] as i64, 5)
+
+    # ---- boundary 2: array literal RETURNED across a call boundary ------
+    check("ret_i8_0", ret_i8()[0] as i64, 5)
+    check("ret_i16_0", ret_i16()[0] as i64, 5)
+    check("ret_i32_0", ret_i32()[0] as i64, 5)
+    check("ret_i64_0", ret_i64()[0], 5)
+    check("ret_u8_0", ret_u8()[0] as i64, 5)
+    check("ret_u16_0", ret_u16()[0] as i64, 5)
+    check("ret_u32_0", ret_u32()[0] as i64, 5)
+    check("ret_u64_0", ret_u64()[0] as i64, 5)
+
+    # ---- boundary 3: STORE then LOAD via push ---------------------------
+    var pi8 = []
+    pi8.push(9i8)
+    check("push_i8_0", pi8[0] as i64, 9)
+    var pi16 = []
+    pi16.push(9i16)
+    check("push_i16_0", pi16[0] as i64, 9)
+    var pi32 = []
+    pi32.push(9i32)
+    check("push_i32_0", pi32[0] as i64, 9)
+    var pi64 = []
+    pi64.push(9)
+    check("push_i64_0", pi64[0], 9)
+    var pu8 = []
+    pu8.push(9u8)
+    check("push_u8_0", pu8[0] as i64, 9)
+    var pu32 = []
+    pu32.push(9u32)
+    check("push_u32_0", pu32[0] as i64, 9)
+    var pu64 = []
+    pu64.push(9u64)
+    check("push_u64_0", pu64[0] as i64, 9)
+
+    # ---- boundary 4: TUPLE element ---------------------------------------
+    val ti8 = (5i8, 6i8)
+    check("tuple_i8_0", ti8.get(0) as i64, 5)
+    val ti32 = (5i32, 6i32)
+    check("tuple_i32_0", ti32.get(0) as i64, 5)
+    val ti64 = (5, 6)
+    check("tuple_i64_0", ti64.get(0), 5)
+    val tu64 = (5u64, 6u64)
+    check("tuple_u64_0", tu64.get(0) as i64, 5)
+
+    # ---- the two known numeric signatures of this class ------------------
+    # `v << 3 | TAG_SPECIAL` (i8 boxed as a bool): 5 reads back as 43.
+    if (li8[0] as i64) == 43:
+        print "FAIL sig_tag_special_shift_i8"
+    else:
+        print "PASS sig_tag_special_shift_i8"
+    # an untagging `>> 3` applied to a raw value: 40 would read back as 5.
+    var big = []
+    big.push(40u64)
+    check("sig_untag_shift_u64", big[0] as i64, 40)
+
+    # ---- bool must remain a bool (a fix here must not overshoot) ---------
+    val bt = [true, false]
+    if bt[0]:
+        print "PASS bool_elem_true"
+    else:
+        print "FAIL bool_elem_true"
+    if bt[1]:
+        print "FAIL bool_elem_false"
+    else:
+        print "PASS bool_elem_false"
+
+    print "INT_WIDTH_BOXING_MATRIX PROBE: DONE"
