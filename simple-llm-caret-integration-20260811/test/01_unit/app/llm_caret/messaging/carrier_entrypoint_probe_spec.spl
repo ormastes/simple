@@ -1,0 +1,60 @@
+# @req REQ-LLM-MSG-013 REQ-LLM-MSG-016
+# @nfr NFR-LLM-MSG-006 NFR-LLM-MSG-009
+"""Compiled carrier entrypoints expose bounded real-composition probes."""
+
+use std.spec.*
+use std.io_runtime.{file_read, file_delete, getpid}
+use app.build.target_plan.{validate_manifest_build_plan}
+use app.llm_caret.messaging.database_worker.{MessagingDatabaseWorker}
+use app.llm_caret.messaging.cli.{messaging_probe_worker_args}
+use app.llm_caret.messaging.mcp_worker.{mcp_worker_database}
+use app.llm_caret.messaging.hook_worker.{hook_worker_database}
+use app.llm_caret.messaging.bridge_worker.{bridge_worker_database}
+use app.llm_caret.messaging.server_worker.{server_worker_database}
+use app.llm_caret.messaging.mcp.protocol.{probe_messaging_mcp}
+use app.llm_caret.messaging.adapter.agent.hook_command.{probe_hook_command}
+use app.llm_caret.messaging.adapter.agent.hook_bridge.{normalize_hook_event}
+use app.llm_caret.messaging.adapter.server.http_server.{probe_primitive_http_server}
+
+describe "LLM Caret compiled carrier probes":
+    it "executes database MCP hook bridge and server health composition":
+        val path = "/tmp/llm_caret_carrier_probe_" + getpid().to_text() + ".db"
+        file_delete(path)
+        var database = MessagingDatabaseWorker.open(path)
+        expect(database.ready()).to_equal(true)
+        expect(database.close()).to_equal(true)
+        expect(probe_messaging_mcp(path, "probe", "probe",
+            ["profile:read"])).to_equal(true)
+        expect(probe_hook_command(path, "claude", "SessionStart")).to_equal(true)
+        expect(normalize_hook_event("claude", "SessionStart").accepted).to_equal(true)
+        expect(probe_primitive_http_server(path)).to_equal(true)
+        file_delete(path)
+
+    it "decodes and plans every compiled entry artifact and health argument":
+        val manifest = file_read("plugins/llm_caret_messaging/build.sdn")
+        val planned = validate_manifest_build_plan(manifest, "all")
+        expect(planned.valid()).to_equal(true)
+        expect(planned.plans.len()).to_equal(5)
+        val names = ["database", "mcp", "hook", "bridge", "server"]
+        val artifacts = ["db", "mcp", "hook", "bridge", "server"]
+        var index: i64 = 0
+        while index < names.len():
+            val target = planned.plans[index].target
+            expect(target.name).to_equal(names[index])
+            expect(target.entry).to_equal("src/app/llm_caret/messaging/" +
+                names[index] + "_worker.spl")
+            expect(target.artifact).to_equal("build/database/llm_caret_messaging_" +
+                artifacts[index])
+            expect(target.health_args).to_equal(["--probe"])
+            index = index + 1
+
+    it "forwards and parses an explicit probe database across every applicable carrier":
+        val path = "/tmp/llm-caret-explicit-probe.db"
+        val args = ["caret", "messaging", "mcp", "--probe", "--db=" + path]
+        expect(messaging_probe_worker_args(args)).to_equal(["--probe", "--db=" + path])
+        val worker_args = ["--probe", "--db=" + path]
+        expect(mcp_worker_database(worker_args, "fallback.db")).to_equal(path)
+        expect(hook_worker_database(worker_args, "fallback.db")).to_equal(path)
+        expect(bridge_worker_database(worker_args, "fallback.db")).to_equal(path)
+        expect(server_worker_database(worker_args, "fallback.db")).to_equal(path)
+        expect(mcp_worker_database(["--probe"], "fallback.db")).to_equal("fallback.db")

@@ -1,0 +1,81 @@
+# @req REQ-LLM-MSG-003 REQ-LLM-MSG-016 REQ-LLM-MSG-017
+# @nfr NFR-LLM-MSG-001 NFR-LLM-MSG-002 NFR-LLM-MSG-004 NFR-LLM-MSG-005 NFR-LLM-MSG-006 NFR-LLM-MSG-009
+"""Second-wave concrete adapters enter the same durable safe outbox."""
+
+use std.spec.*
+use app.io.mod.{current_time_ms}
+use app.llm_caret.messaging.composition.{MessagingRuntime}
+use app.llm_caret.messaging.domain.model.{RoomKind, MessageOrigin}
+use app.llm_caret.messaging.adapter.chat.google_chat.{GoogleChatTransport}
+use app.llm_caret.messaging.adapter.chat.discord.{DiscordChatTransport}
+use app.llm_caret.messaging.adapter.chat.mattermost.{MattermostChatTransport}
+use app.llm_caret.messaging.adapter.chat.generic_http.{GenericHttpTransport}
+use app.llm_caret.messaging.adapter.chat.line.{LineChatTransport}
+use app.llm_caret.messaging.adapter.chat.kakao.{KakaoChatTransport}
+
+describe "LLM Caret second-wave transport queue composition":
+    it "queues all six concrete requests through credential-safe persistence":
+        var runtime = MessagingRuntime.memory()
+        expect(runtime.create_canonical_room("wave-two", "workspace", RoomKind.Channel,
+            "Wave Two", "", "public", "room", "human-1", 1).accepted).to_equal(true)
+        expect(runtime.send_message("wave-two-message", "workspace", "wave-two", "human-1",
+            "", MessageOrigin.Human, "ship second wave", "", "wave-two-correlation",
+            "", 0, 2, "wave-two-message-key").ok).to_equal(true)
+        val message = runtime.store.message("wave-two-message")
+
+        expect(runtime.bind_transport("google-binding", "wave-two", "google_chat",
+            "spaces/AAA", "full", "2").accepted).to_equal(true)
+        var google = GoogleChatTransport.with_store(runtime.store,
+            "google-secret", "secret://google/test")
+        expect(google.bind_space("google-binding", "wave-two", "spaces/AAA")).to_equal("binding_attached")
+        expect(google.send("google-binding", message, "google-delivery-key")).to_equal(
+            "queued:google_chat:google-binding:google-delivery-key")
+
+        expect(runtime.bind_transport("discord-binding", "wave-two", "discord",
+            "9988", "full", "2").accepted).to_equal(true)
+        var discord = DiscordChatTransport.with_store(runtime.store,
+            "discord-secret", "secret://discord/test")
+        expect(discord.bind_channel("discord-binding", "wave-two", "9988")).to_equal("binding_attached")
+        expect(discord.send("discord-binding", message, "discord-delivery-key")).to_equal(
+            "queued:discord:discord-binding:discord-delivery-key")
+
+        expect(runtime.bind_transport("mattermost-binding", "wave-two", "mattermost",
+            "channel-1", "full", "2").accepted).to_equal(true)
+        var mattermost = MattermostChatTransport.with_store(runtime.store,
+            "https://mattermost.example", "mattermost-secret", "secret://mattermost/test")
+        expect(mattermost.bind_channel("mattermost-binding", "wave-two", "channel-1")).to_equal("binding_attached")
+        expect(mattermost.send("mattermost-binding", message, "mattermost-delivery-key")).to_equal(
+            "queued:mattermost:mattermost-binding:mattermost-delivery-key")
+
+        expect(runtime.bind_transport("http-binding", "wave-two", "generic_http",
+            "https://hook.example", "full", "2").accepted).to_equal(true)
+        var generic = GenericHttpTransport.with_store(runtime.store,
+            "https://hook.example", "generic-secret-123", "secret://generic/test")
+        expect(generic.connect("http-binding")).to_equal("connected:generic_http:http-binding")
+        expect(generic.send("http-binding", message, "generic-delivery-key")).to_equal(
+            "queued:generic_http:http-binding:generic-delivery-key")
+
+        expect(runtime.bind_transport("line-binding", "wave-two", "line",
+            "line-user", "full", "2").accepted).to_equal(true)
+        var line = LineChatTransport.with_store(runtime.store,
+            "line-secret", "secret://line/test")
+        expect(line.bind_existing_chat("line-binding", "wave-two", "line-user")).to_equal("binding_attached")
+        expect(line.send("line-binding", message, "line-delivery-key")).to_equal(
+            "queued:line:line-binding:line-delivery-key")
+
+        expect(runtime.bind_transport("kakao-binding", "wave-two", "kakao",
+            "self", "full", "2").accepted).to_equal(true)
+        var kakao = KakaoChatTransport.with_store(runtime.store,
+            "kakao-secret", "secret://kakao/test")
+        expect(kakao.bind_self("kakao-binding", "wave-two")).to_equal("binding_attached")
+        expect(kakao.send("kakao-binding", message, "kakao-delivery-key")).to_equal(
+            "queued:kakao:kakao-binding:kakao-delivery-key")
+
+        val queued = runtime.store.queued_transport_requests(current_time_ms(), 20)
+        expect(queued.len()).to_equal(6)
+        for request in queued:
+            val persisted = request.url_template + request.headers.join("|") + request.body
+            for secret in ["google-secret", "discord-secret", "mattermost-secret",
+                    "generic-secret-123", "line-secret", "kakao-secret"]:
+                expect(persisted.contains(secret)).to_equal(false)
+        expect(runtime.close()).to_equal(true)

@@ -1,0 +1,578 @@
+#![allow(unnamed_duplicate_typed_args)]
+# Core Interpreter — Method Dispatch & Built-in Type Methods
+#
+# Split from eval_ops.spl. Contains:
+# - Method dispatch (eval_method_call, eval_method_with_args)
+# - Built-in array methods (eval_array_method)
+# - Built-in text methods (eval_text_method)
+#
+# All evaluation returns a value_id (i64). Errors indicated by -1 (VAL_NONE).
+
+extern fn rt_string_byte_at(s: text, index: i64) -> i64
+
+# ===== Method Call =====
+
+fn eval_method_call(eid: i64) -> i64:
+    val e_node = expr_get(eid)
+    val receiver_eid = e_node.left
+    val method_name = e_node.s_val
+    val arg_eids = e_node.args
+
+    val receiver = eval_expr(receiver_eid)
+    if eval_had_error: return -1
+
+    # Built-in methods on types
+    val kind = val_get_kind(receiver)
+
+    # Array methods
+    if kind == VAL_ARRAY:
+        return eval_array_method(receiver, method_name, arg_eids)
+
+    # Text methods — text is immutable so restore receiver after call
+    # (INTERP-METHOD-MUTATE: compiled binary may corrupt receiver binding)
+    if kind == VAL_TEXT:
+        val text_result = eval_text_method(receiver, method_name, arg_eids)
+        if expr_get_tag(receiver_eid) == EXPR_IDENT:
+            val txt_recv_name = expr_s_val[receiver_eid]
+            val txt_fast_slot = expr_i_val[receiver_eid]
+            if txt_fast_slot >= 0 and env_has_frame():
+                env_set_local(txt_fast_slot, receiver)
+            env_assign(txt_recv_name, receiver)
+        return text_result
+
+    # Dict built-in methods (for __dict structs)
+    if kind == VAL_STRUCT:
+        val type_name_chk = val_get_struct_name(receiver)
+        if type_name_chk == "__dict":
+            if method_name == "len":
+                val dict_fields = val_get_struct_fields(receiver)
+                return val_make_int(dict_fields.len())
+            if method_name == "keys":
+                val dict_fields2 = val_get_struct_fields(receiver)
+                var key_vals: [i64] = []
+                for kf in dict_fields2:
+                    key_vals.push(val_make_text(kf))
+                return val_make_array(key_vals)
+            if method_name == "values":
+                val dict_values = val_get_struct_values(receiver)
+                return val_make_array(dict_values)
+            if method_name == "contains":
+                if arg_eids.len() > 0:
+                    val ck = eval_expr(arg_eids[0])
+                    if eval_had_error: return -1
+                    val ck_text = val_to_text(ck)
+                    val cfi = val_struct_find_field_idx(receiver, ck_text)
+                    return val_make_bool(cfi >= 0)
+                return val_make_bool(false)
+            if method_name == "contains_key":
+                if arg_eids.len() > 0:
+                    val ck = eval_expr(arg_eids[0])
+                    if eval_had_error: return -1
+                    val ck_text = val_to_text(ck)
+                    val cfi = val_struct_find_field_idx(receiver, ck_text)
+                    return val_make_bool(cfi >= 0)
+                return val_make_bool(false)
+            if method_name == "get":
+                if arg_eids.len() > 0:
+                    val gk = eval_expr(arg_eids[0])
+                    if eval_had_error: return -1
+                    val gk_text = val_to_text(gk)
+                    val gfi = val_struct_find_field_idx(receiver, gk_text)
+                    if gfi >= 0:
+                        return val_struct_get_field_idx(receiver, gfi)
+                    return val_make_nil()
+                return val_make_nil()
+            if method_name == "get_or":
+                if arg_eids.len() >= 2:
+                    val gok = eval_expr(arg_eids[0])
+                    if eval_had_error: return -1
+                    val gok_text = val_to_text(gok)
+                    val gofi = val_struct_find_field_idx(receiver, gok_text)
+                    if gofi >= 0:
+                        return val_struct_get_field_idx(receiver, gofi)
+                    val godef = eval_expr(arg_eids[1])
+                    if eval_had_error: return -1
+                    return godef
+                return val_make_nil()
+            if method_name == "set" or method_name == "insert":
+                if arg_eids.len() >= 2:
+                    val sk = eval_expr(arg_eids[0])
+                    if eval_had_error: return -1
+                    val sv = eval_expr(arg_eids[1])
+                    if eval_had_error: return -1
+                    val sk_text = val_to_text(sk)
+                    val_struct_set_field(receiver, sk_text, sv)
+                    return receiver
+                return receiver
+
+    # Option/Result built-in methods on enum structs
+    if kind == VAL_STRUCT:
+        val opt_type = val_get_struct_name(receiver)
+        if opt_type.starts_with("Option::"):
+            if method_name == "unwrap":
+                if opt_type == "Option::Some":
+                    # Field 0 is "__tag", field 1 is "__payload" (see
+                    # eval_enum_variant_call in eval_access.spl).
+                    return val_struct_get_field_idx(receiver, 1)
+                eval_set_error("called unwrap on None")
+                return -1
+            if method_name == "unwrap_or":
+                if opt_type == "Option::Some":
+                    return val_struct_get_field_idx(receiver, 1)
+                if arg_eids.len() > 0:
+                    val uod = eval_expr(arg_eids[0])
+                    if eval_had_error: return -1
+                    return uod
+                return val_make_nil()
+            if method_name == "is_some":
+                return val_make_bool(opt_type == "Option::Some")
+            if method_name == "is_none":
+                return val_make_bool(opt_type == "Option::None")
+        if opt_type.starts_with("Result::"):
+            if method_name == "unwrap":
+                if opt_type == "Result::Ok":
+                    # Field 0 is "__tag", field 1 is "__payload".
+                    return val_struct_get_field_idx(receiver, 1)
+                eval_set_error("called unwrap on Err")
+                return -1
+            if method_name == "unwrap_err":
+                if opt_type == "Result::Err":
+                    return val_struct_get_field_idx(receiver, 1)
+                eval_set_error("called unwrap_err on Ok")
+                return -1
+            if method_name == "is_ok":
+                return val_make_bool(opt_type == "Result::Ok")
+            if method_name == "is_err":
+                return val_make_bool(opt_type == "Result::Err")
+
+    # Struct methods — look up Type__method in function table
+    if kind == VAL_STRUCT:
+        val type_name = val_get_struct_name(receiver)
+        val full_name = type_name + "__" + method_name
+        val decl_id = func_table_lookup(full_name)
+        if decl_id >= 0:
+            # Evaluate args, then call with receiver prepended
+            var arg_values: [i64] = []
+            arg_values.push(receiver)
+            for aeid in arg_eids:
+                val av = eval_expr(aeid)
+                if eval_had_error: return -1
+                arg_values.push(av)
+            return eval_method_with_args(decl_id, arg_values)
+        # Try deferred (lazy) modules for struct/class methods
+        val forced_mt = try_force_any_deferred_for(full_name)
+        if forced_mt == 1:
+            val decl_id2 = func_table_lookup(full_name)
+            if decl_id2 >= 0:
+                var arg_values2: [i64] = []
+                arg_values2.push(receiver)
+                for aeid2 in arg_eids:
+                    val av2 = eval_expr(aeid2)
+                    if eval_had_error: return -1
+                    arg_values2.push(av2)
+                return eval_method_with_args(decl_id2, arg_values2)
+        # Enum variant method dispatch: struct name "EnumType::Variant" -> try "EnumType__method"
+        var colon_pos: i64 = -1
+        var ci2: i64 = 0
+        for ch in type_name:
+            if ch == ":" and colon_pos == -1:
+                colon_pos = ci2
+            ci2 = ci2 + 1
+        if colon_pos > 0:
+            val enum_type_name = type_name[0:colon_pos]
+            val enum_full_name = enum_type_name + "__" + method_name
+            val enum_decl_id = func_table_lookup(enum_full_name)
+            if enum_decl_id >= 0:
+                var enum_arg_values: [i64] = []
+                enum_arg_values.push(receiver)
+                for aeid in arg_eids:
+                    val av = eval_expr(aeid)
+                    if eval_had_error: return -1
+                    enum_arg_values.push(av)
+                return eval_method_with_args(enum_decl_id, enum_arg_values)
+
+    eval_set_error("no method '" + method_name + "' on " + val_kind_name(kind))
+    -1
+
+fn eval_method_with_args(decl_id: i64, arg_values: [i64]) -> i64:
+    val d_node = decl_get(decl_id)
+    val param_names = d_node.param_names
+    val body_stmts = d_node.body_stmts
+
+    # LOAD_FAST frame isolation. Method bodies are DECL_FN decls, so
+    # resolve_module_locals() gives their idents (including `self`) local slot
+    # indices, while eval_ident's fast path is gated only on env_has_frame().
+    # Without our own frame, `self` resolved against the CALLER's frame and the
+    # receiver place pointed at the wrong object. Slots are pushed reset to -1
+    # and deliberately left unset here (this legacy binder does not bind params
+    # in slot order), so eval_ident falls back to the correct scope lookup.
+    val local_count = resolve_cached_local_count(decl_id)
+    val prev_decl_id = eval_current_decl_id
+    eval_current_decl_id = decl_id
+    if local_count > 0:
+        env_push_frame(local_count)
+    env_push_scope()
+    # Always bind 'self' to the receiver (first arg_value)
+    if arg_values.len() > 0:
+        env_define("self", arg_values[0])
+    # Bind declared params: skip 'self' if it appears, map rest to arg_values[1..]
+    var ai: i64 = 1  # Start after receiver
+    for pname in param_names:
+        if pname == "self":
+            # Already bound above, don't advance ai
+            pass_do_nothing
+        else:
+            if ai < arg_values.len():
+                env_define(pname, arg_values[ai])
+            else:
+                env_define(pname, val_make_nil())
+            ai = ai + 1
+
+    var last_val = val_make_nil()
+    for sid in body_stmts:
+        if eval_had_error: break
+        if eval_returning: break
+        last_val = eval_stmt(sid)
+
+    if eval_returning:
+        last_val = eval_return_value
+        eval_returning = false
+        eval_return_value = -1
+
+    env_pop_scope()
+    if local_count > 0:
+        env_pop_frame()
+    eval_current_decl_id = prev_decl_id
+    last_val
+
+# ===== Array Methods =====
+
+fn eval_array_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
+    val elements = val_get_array(receiver)
+
+    if method_name == "len":
+        return val_make_int(elements.len())
+
+    if method_name == "push":
+        if arg_eids.len() > 0:
+            val new_elem = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            # In-place append: arrays are reference-like at the value-id level
+            # (val_arrays[vid] is the shared backing store). Mutating it directly
+            # avoids copying the whole array + allocating a fresh value on every
+            # push, which made append-only arenas (parser AST node pools) O(n^2).
+            # Returning the same receiver id preserves the prior persistence
+            # behavior (array method calls have no lvalue writeback).
+            val_arrays[receiver].push(new_elem)
+            return receiver
+        return receiver
+
+    if method_name == "contains":
+        if arg_eids.len() > 0:
+            val target = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            for e in elements:
+                if val_equals(e, target): return val_make_bool(true)
+            return val_make_bool(false)
+        return val_make_bool(false)
+
+    # Array index_of: mirrors `contains` element equality, but reports the
+    # position. Contract matches text.index_of -- a plain i64 with -1 for
+    # not-found (NOT an Option). Previously unimplemented, so every call fell
+    # through to eval_set_error and returned VAL_NONE(-1), which callers read
+    # as "absent" even when the element was present.
+    if method_name == "index_of":
+        if arg_eids.len() > 0:
+            val idx_target = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            var idx_i = 0
+            while idx_i < elements.len():
+                if val_equals(elements[idx_i], idx_target): return val_make_int(idx_i)
+                idx_i = idx_i + 1
+            return val_make_int(-1)
+        return val_make_int(-1)
+
+    # Array `at`: bounds-checked element access returning Option. Uses the flat
+    # Option encoding (eval.spl match_pattern: the element itself is `Some`, nil is
+    # `None`), exactly like dict `get` above. 250+ call sites across the tree
+    # (skia, http_server, websocket, jwt) call `arr.at(i)` and `match Some(x)/None`;
+    # without this they hit the fallthrough error below.
+    if method_name == "at":
+        if arg_eids.len() > 0:
+            val at_idx_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val at_idx = val_get_int(at_idx_val)
+            if at_idx >= 0 and at_idx < elements.len():
+                return elements[at_idx]
+            return val_make_nil()
+        return val_make_nil()
+
+    eval_set_error("no method '" + method_name + "' on array")
+    -1
+
+# ===== Text Methods =====
+
+fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
+    val s = val_get_text(receiver)
+
+    if method_name == "len":
+        return val_make_int(s.len())
+
+    if method_name == "contains":
+        if arg_eids.len() > 0:
+            val target = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val t = val_get_text(target)
+            return val_make_bool(s.contains(t))
+        return val_make_bool(false)
+
+    if method_name == "char_code_at":
+        if arg_eids.len() > 0:
+            val idx_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val idx = val_get_int(idx_val)
+            if idx >= 0 and idx < s.len():
+                val ch = s[idx:idx + 1]
+                return val_make_int(ch.char_code_at(0))
+            return val_make_int(0)
+        if s.len() > 0:
+            val first_ch = s[0:1]
+            return val_make_int(first_ch.char_code_at(0))
+        return val_make_int(0)
+
+    # byte_at is BYTE-indexed, in contrast to char_code_at above which is
+    # CHARACTER-indexed: on non-ASCII text the two diverge (e.g.
+    # "café,".byte_at(3) == 195, the raw 0xC3 lead byte of 'é', while
+    # char_code_at(3) == 233, the decoded codepoint). `s[idx:idx+1]` (used
+    # above for char_code_at) is confirmed BYTE-addressed by probe, but
+    # slicing a single byte out of a multi-byte codepoint and then decoding
+    # it as UTF-8 (as char_code_at does) returns garbage, not the raw byte —
+    # so byte_at must not reuse that shape. It reads through
+    # rt_string_byte_at, a direct O(1) buffer read (matches
+    # src/lib/common/web/browser_renderer_protocol.spl's byte-framing scan,
+    # which relies on byte_at being byte-indexed). This deliberately does NOT
+    # go through rt_text_to_bytes: that materializes the whole byte array on
+    # every call, so a `while i < s.len(): s.byte_at(i)` scan would be O(n^2)
+    # -- the same quadratic-scan trap char_code_at was already fixed for.
+    # Bounds and negative indices are handled inside the extern, which
+    # returns 0 for both, matching the seed and compiled lanes.
+    if method_name == "byte_at":
+        if arg_eids.len() > 0:
+            val idx_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val idx = val_get_int(idx_val)
+            return val_make_int(rt_string_byte_at(s, idx))
+        return val_make_int(0)
+
+    if method_name == "substring":
+        if arg_eids.len() >= 2:
+            val start_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val end_val = eval_expr(arg_eids[1])
+            if eval_had_error: return -1
+            val start = val_get_int(start_val)
+            val end = val_get_int(end_val)
+            var s_start = start
+            var s_end = end
+            if s_start < 0: s_start = 0
+            if s_end > s.len(): s_end = s.len()
+            if s_start > s_end: s_start = s_end
+            return val_make_text(s[s_start:s_end])
+        elif arg_eids.len() == 1:
+            val start_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val start = val_get_int(start_val)
+            var s_start = start
+            if s_start < 0: s_start = 0
+            if s_start > s.len(): s_start = s.len()
+            return val_make_text(s[s_start:s.len()])
+        return val_make_text(s)
+
+    if method_name == "slice":
+        if arg_eids.len() >= 2:
+            val start_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val end_val = eval_expr(arg_eids[1])
+            if eval_had_error: return -1
+            val start = val_get_int(start_val)
+            val end = val_get_int(end_val)
+            var s_start = start
+            var s_end = end
+            if s_start < 0: s_start = 0
+            if s_end > s.len(): s_end = s.len()
+            if s_start > s_end: s_start = s_end
+            return val_make_text(s[s_start:s_end])
+        elif arg_eids.len() == 1:
+            val start_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val start = val_get_int(start_val)
+            var s_start = start
+            if s_start < 0: s_start = 0
+            if s_start > s.len(): s_start = s.len()
+            return val_make_text(s[s_start:s.len()])
+        return val_make_text(s)
+
+    if method_name == "starts_with":
+        if arg_eids.len() > 0:
+            val prefix_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val prefix = val_get_text(prefix_val)
+            return val_make_bool(s.starts_with(prefix))
+        return val_make_bool(false)
+
+    if method_name == "ends_with":
+        if arg_eids.len() > 0:
+            val suffix_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val suffix = val_get_text(suffix_val)
+            return val_make_bool(s.ends_with(suffix))
+        return val_make_bool(false)
+
+    if method_name == "replace":
+        if arg_eids.len() >= 2:
+            val old_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val new_val = eval_expr(arg_eids[1])
+            if eval_had_error: return -1
+            val old_t = val_get_text(old_val)
+            val new_t = val_get_text(new_val)
+            return val_make_text(s.replace(old_t, new_t))
+        return val_make_text(s)
+
+    if method_name == "split":
+        if arg_eids.len() > 0:
+            val sep_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val sep = val_get_text(sep_val)
+            val parts = s.split(sep)
+            # Bug (text-split-limit-ignored, 2026-07-20): a second `limit`
+            # arg (`.split(sep, N)`) was silently ignored here -- this
+            # handler always split on every occurrence of `sep`. splitn
+            # semantics: keep the first `limit - 1` parts as-is, then rejoin
+            # the remaining parts with `sep` to form the final element
+            # (mirrors Rust's str::splitn). NOTE: unverified against a live
+            # run -- the currently-deployed bin/simple is a Rust seed binary
+            # whose own dispatch (interpreter_method/string.rs,
+            # interpreter_helpers/method_dispatch.rs) has the identical bug
+            # and is intentionally NOT touched here (never edit Rust seed
+            # code); this .spl path only takes effect once a self-hosted
+            # redeploy replaces the pinned seed. See bug_db.sdn:
+            # text-split-limit-ignored.
+            var limited: [text] = parts
+            if arg_eids.len() > 1:
+                val limit_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                val limit = val_get_int(limit_val)
+                if limit > 0 and parts.len() > limit:
+                    var head: [text] = []
+                    var i = 0
+                    while i < limit - 1:
+                        head.push(parts[i])
+                        i = i + 1
+                    var tail: [text] = []
+                    var j = limit - 1
+                    while j < parts.len():
+                        tail.push(parts[j])
+                        j = j + 1
+                    head.push(tail.join(sep))
+                    limited = head
+            var result: [i64] = []
+            for p in limited:
+                result.push(val_make_text(p))
+            return val_make_array(result)
+        return val_make_array([val_make_text(s)])
+
+    if method_name == "split_lines" or method_name == "lines":
+        # Bug (pure_simple_text_split_lines_missing, 2026-07-16): canonical
+        # implementation shared in spirit with the MIR-lowering fix in
+        # method_calls_literals.spl's lower_text_split_lines -- same formula
+        # (replace CRLF->LF, drop exactly one trailing "\n" if present, then
+        # split on "\n") so interpreter and compiled pure-Simple execution
+        # agree on CRLF/trailing-empty-line behavior (matches Rust's
+        # str::lines()). `lines` is the canonical short alias.
+        if s == "":
+            return val_make_array([])
+        val normalized = s.replace("\r\n", "\n")
+        val ends_nl = normalized.ends_with("\n")
+        val body = if ends_nl: normalized[0:normalized.len() - 1] else: normalized
+        val parts = body.split("\n")
+        var result: [i64] = []
+        for p in parts:
+            result.push(val_make_text(p))
+        return val_make_array(result)
+
+    if method_name == "trim" or method_name == "strip":
+        return val_make_text(s.trim())
+
+    if method_name == "index_of" or method_name == "find" or method_name == "find_str":
+        if arg_eids.len() > 0:
+            val needle_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val needle = val_get_text(needle_val)
+            # Two-arg `index_of(needle, start)`: byte-offset search from
+            # `start`, delegated to the host builtin (which lowers to
+            # rt_text_find): start < 0 clamps to 0, empty needle returns
+            # min(start, len), start past the end returns -1. Scoped to
+            # `index_of` — `find`/`find_str` keep their one-arg contract.
+            if method_name == "index_of" and arg_eids.len() >= 2:
+                val start_val = eval_expr(arg_eids[1])
+                if eval_had_error: return -1
+                return val_make_int(s.index_of(needle, val_get_int(start_val)))
+            # index_of returns a raw i64 with -1 for not-found — NOT an
+            # Option. The `?? -1` that used to sit here was dead on a miss and
+            # turned a genuine hit at index 3 (the nil sentinel,
+            # TAG_SPECIAL = 0b011) into a miss.
+            return val_make_int(s.index_of(needle))
+        return val_make_int(-1)
+
+    if method_name == "last_index_of" or method_name == "rfind":
+        if arg_eids.len() > 0:
+            val needle_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val needle = val_get_text(needle_val)
+            # Same raw-i64 / -1 contract as the index_of branch above.
+            return val_make_int(s.last_index_of(needle))
+        return val_make_int(-1)
+
+    if method_name == "char_at":
+        if arg_eids.len() > 0:
+            val idx_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val idx = val_get_int(idx_val)
+            if idx >= 0 and idx < s.len():
+                return val_make_text(s[idx:idx + 1])
+            return val_make_text("")
+        return val_make_text("")
+
+    if method_name == "parse_int":
+        val parsed = s.parse_int()
+        if parsed.?:
+            val int_val = parsed ?? 0
+            # Return as enum-like struct so ?? works on the result
+            var field_names: [text] = []
+            field_names.push("__tag")
+            field_names.push("__payload")
+            var field_values: [i64] = []
+            field_values.push(val_make_text("Some"))
+            field_values.push(val_make_int(int_val))
+            return val_make_struct("Option", field_names, field_values)
+        # Return None variant
+        var none_names: [text] = []
+        none_names.push("__tag")
+        none_names.push("__payload")
+        var none_values: [i64] = []
+        none_values.push(val_make_text("None"))
+        none_values.push(val_make_nil())
+        return val_make_struct("Option", none_names, none_values)
+
+    if method_name == "to_upper":
+        return val_make_text(s.to_upper())
+
+    if method_name == "to_lower":
+        return val_make_text(s.to_lower())
+
+    if method_name == "to_string":
+        return val_make_text(s)
+
+    eval_set_error("no method '" + method_name + "' on text")
+    -1

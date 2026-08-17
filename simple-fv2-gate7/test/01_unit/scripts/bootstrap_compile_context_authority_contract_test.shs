@@ -1,0 +1,100 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+loading="$repo_root/src/compiler/80.driver/driver_source_pipeline_loading.spl"
+parsing="$repo_root/src/compiler/80.driver/driver_source_pipeline_parsing.spl"
+lowering="$repo_root/src/compiler/80.driver/driver_hir_pipeline_lowering.spl"
+orchestration="$repo_root/src/compiler/80.driver/driver_orchestration.spl"
+driver="$repo_root/src/compiler/80.driver/driver.spl"
+driver_type="$repo_root/src/compiler/80.driver/driver_compiler_type.spl"
+context_type="$repo_root/src/compiler/80.driver/driver_types.spl"
+mir_lowering="$repo_root/src/compiler/80.driver/driver_pipeline_lowering.spl"
+bootstrap="$repo_root/src/compiler/80.driver/driver_bootstrap.spl"
+aot="$repo_root/src/compiler/80.driver/driver_aot_pipeline.spl"
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+grep -Fq 'me load_sources_impl() -> bool:' "$loading" ||
+    fail "source loading still exports a copied CompileContext"
+grep -Fq 'self.ctx.sources = all_sources' "$loading" ||
+    fail "source loading does not update the authoritative driver context"
+if grep -Eq '(var|val) +loaded_ctx.*self\.ctx|return \(self\.ctx,' "$loading"; then
+    fail "source loading reintroduced a local/returned CompileContext copy"
+fi
+load_calls=$(grep -Fc 'val load_ok = self.load_sources_impl()' "$orchestration")
+[ "$load_calls" -eq 2 ] ||
+    fail "both compiler orchestration paths must consume the bool-only result"
+if grep -Fq 'val (loaded_ctx, load_ok) = self.load_sources_impl()' "$orchestration"; then
+    fail "compiler orchestration reintroduced aggregate tuple transport"
+fi
+grep -Fq 'me parse_all_impl() -> bool:' "$parsing" ||
+    fail "source parsing still exports a copied CompileContext"
+grep -Fq 'me parse_all_streaming_surfaces_impl() -> bool:' "$parsing" ||
+    fail "streaming parsing still exports a copied CompileContext"
+if grep -Eq 'var +(streaming_ctx|entry_ctx|bootstrap_parse_ctx|boot_poisoned_ctx|poisoned_ctx|parsed_all_ctx).*self\.ctx' "$parsing"; then
+    fail "source parsing reintroduced a local CompileContext copy"
+fi
+parse_calls=$(grep -Fc 'val parse_ok = self.parse_all_impl()' "$orchestration")
+[ "$parse_calls" -eq 2 ] ||
+    fail "both compiler orchestration paths must consume the bool-only parse result"
+if grep -Fq 'val (parsed_ctx, parse_ok) = self.parse_all_impl()' "$orchestration"; then
+    fail "compiler orchestration reintroduced parse-context tuple transport"
+fi
+grep -Fq 'me lower_and_check_impl() -> bool:' "$lowering" ||
+    fail "HIR lowering still exports a copied CompileContext"
+grep -Fq 'me lower_and_check_streaming_surfaces_impl() -> bool:' "$lowering" ||
+    fail "streaming HIR lowering still exports a copied CompileContext"
+if grep -Eq '(var phase_ctx|val summary_ctx|val poison_ctx|var bootstrap_ctx).*self\.ctx' "$lowering"; then
+    fail "HIR lowering reintroduced a local CompileContext copy"
+fi
+analyze_calls=$(grep -Fc 'val analyze_ok = self.lower_and_check_impl()' "$orchestration")
+[ "$analyze_calls" -eq 2 ] ||
+    fail "both compiler orchestration paths must consume the bool-only HIR result"
+if grep -Fq 'val (analyzed_ctx, analyze_ok) = self.lower_and_check_impl()' "$orchestration"; then
+    fail "compiler orchestration reintroduced HIR-context tuple transport"
+fi
+if grep -Fq 'rt_transient_heap_promote(ctx)' "$driver" ||
+        grep -Fq 'rt_transient_heap_promote(ctx)' "$driver_type"; then
+    fail "compiler context construction must not depend on parser-scope promotion"
+fi
+# Bootstrap MIR mutates the same context handle and returns status only. It
+# must not create or return a second aggregate owner.
+grep -Fq 'pub fn bootstrap_lower_to_mir_context(ctx: CompileContext) -> bool:' "$bootstrap" ||
+    fail "bootstrap MIR lowering still exports a copied CompileContext"
+if grep -Fq 'var next_ctx = ctx' "$bootstrap" ||
+        grep -Fq 'return (next_ctx,' "$bootstrap"; then
+    fail "bootstrap MIR lowering reintroduced a local/returned context copy"
+fi
+grep -Fq 'mir_ok = bootstrap_lower_to_mir_context(self.ctx)' "$aot" ||
+    fail "AOT pipeline does not consume the bool-only bootstrap MIR result"
+if grep -Fq 'val (next_ctx, ok) = bootstrap_lower_to_mir_context(self.ctx)' "$aot"; then
+    fail "AOT pipeline reintroduced bootstrap MIR tuple transport"
+fi
+# V2 manifests are retained alongside their MIR owners, but nothing may
+# populate or consume them until lowering emits exhaustive resolver captures.
+grep -Fq 'resolved_call_manifests_v2: Dict<text, ResolvedCallManifestV2>' "$context_type" ||
+    fail "CompileContext lacks the typed V2 call-manifest slot"
+grep -Fq 'resolved_call_manifests_v2: {}' "$context_type" ||
+    fail "CompileContext does not initialize the V2 call-manifest slot"
+grep -Fq 'self.resolved_call_manifests_v2.remove(name)' "$context_type" ||
+    fail "MIR eviction does not discard its paired V2 call manifest"
+grep -Fq 'resolved_call_capture_snapshots_v2: Dict<text, [ResolvedCallCaptureV2]>' "$context_type" ||
+    fail "CompileContext lacks the unfinalized V2 resolver-capture snapshot slot"
+grep -Fq 'resolved_call_capture_snapshots_v2: {}' "$context_type" ||
+    fail "CompileContext does not initialize the V2 resolver-capture snapshot slot"
+grep -Fq 'self.resolved_call_capture_snapshots_v2.remove(name)' "$context_type" ||
+    fail "MIR eviction does not discard its paired V2 resolver captures"
+grep -Fq 'self.ctx.resolved_call_capture_snapshots_v2 = {}' "$mir_lowering" ||
+    fail "MIR lowering retry does not clear stale V2 resolver-capture snapshots"
+grep -Fq 'direct_lowering.resolved_call_captures_snapshot_v2()' "$mir_lowering" ||
+    fail "entry-closure MIR lowering does not retain its V2 resolver-capture snapshot"
+grep -Fq 'lowering.resolved_call_captures_snapshot_v2()' "$mir_lowering" ||
+    fail "ordinary MIR lowering does not retain its V2 resolver-capture snapshot"
+
+echo "bootstrap_compile_context_authority_cases=29"
+echo "bootstrap_compile_context_authority_open=none_in_active_phase1_4_path"
+echo "bootstrap_compile_context_authority_status=PASS"

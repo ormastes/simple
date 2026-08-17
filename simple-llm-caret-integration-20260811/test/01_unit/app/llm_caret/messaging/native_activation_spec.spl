@@ -1,0 +1,131 @@
+# @req REQ-LLM-MSG-013
+# @nfr NFR-LLM-MSG-010
+"""Native activation is preflighted, journaled, and reversibly ordered."""
+
+use std.spec.*
+use std.io_runtime.{file_read, file_delete, getpid}
+use app.llm_caret.messaging.adapter.plugin.native_activation.*
+use app.llm_caret.messaging.cli.{messaging_write_native_activation_journal}
+
+fn activation_snapshot(marketplace: bool) -> NativeActivationSnapshot:
+    NativeActivationSnapshot(claude_ready: true, codex_ready: true,
+        gemini_ready: true, inventory_ready: true,
+        marketplace_present: marketplace, claude_present: false,
+        codex_present: false, gemini_present: false)
+
+describe "LLM Caret native activation transaction":
+    it "fails preflight before producing mutations when an inventory is unavailable":
+        var snapshot = activation_snapshot(false)
+        snapshot.inventory_ready = false
+        val plan = native_activation_plan("/tmp/plugin", snapshot)
+        expect(plan.ready).to_equal(false)
+        expect(plan.error).to_equal("native_inventory_unavailable")
+        expect(plan.steps.len()).to_equal(0)
+
+    it "refuses to overwrite a pre-existing provider registration":
+        var snapshot = activation_snapshot(true)
+        snapshot.codex_present = true
+        val plan = native_activation_plan("/tmp/plugin", snapshot)
+        expect(plan.ready).to_equal(false)
+        expect(plan.error).to_equal("native_registration_already_present")
+        expect(plan.steps.len()).to_equal(0)
+
+    it "owns and compensates a marketplace only when this transaction adds it":
+        val created = native_activation_plan("/tmp/plugin", activation_snapshot(false))
+        expect(created.ready).to_equal(true)
+        expect(created.steps.len()).to_equal(4)
+        expect(created.steps[0].name).to_equal("claude_marketplace")
+        expect(created.steps[0].rollback_args).to_contain("remove")
+
+        val shared = native_activation_plan("/tmp/plugin", activation_snapshot(true))
+        expect(shared.steps.len()).to_equal(3)
+        expect(shared.steps[0].name).to_equal("claude_plugin")
+        expect(shared.steps[2].name).to_equal("gemini_extension")
+
+    it "records applying progress and recovery state in the ownership journal":
+        val plan = native_activation_plan("/tmp/plugin", activation_snapshot(true))
+        val applying = native_activation_journal("activate", "/tmp/plugin",
+            "applying", plan.steps, 2, "")
+        expect(applying).to_contain("simple.llm-caret-messaging.native-activation/v3")
+        expect(applying).to_contain("operation: activate")
+        expect(applying).to_contain("target: /tmp/plugin")
+        expect(applying).to_contain("status: applying")
+        expect(applying).to_contain("completed: 2")
+        expect(applying).to_contain("step_1: codex_mcp")
+        val recovery = native_activation_journal("activate", "/tmp/plugin",
+            "recovery_required", plan.steps, 1, "step_failed:codex_mcp")
+        expect(recovery).to_contain("status: recovery_required")
+        expect(recovery).to_contain("error: step_failed:codex_mcp")
+
+    it "atomically replaces the durable journal with parseable recovery state":
+        val path = "/tmp/llm_caret_native_activation_" + getpid().to_text() + ".sdn"
+        file_delete(path)
+        val plan = native_activation_plan("/tmp/plugin", activation_snapshot(true))
+        val content = native_activation_journal("activate", "/tmp/plugin",
+            "recovery_required", plan.steps, 2, "step_failed:codex_mcp")
+        expect(messaging_write_native_activation_journal(path, content)).to_equal(true)
+        val recovered = native_activation_parse_journal(file_read(path))
+        expect(recovered.valid).to_equal(true)
+        expect(recovered.status).to_equal("recovery_required")
+        expect(recovered.completed).to_equal(2)
+        expect(file_delete(path)).to_equal(true)
+
+    it "parses and validates a resumable recovery journal as typed state":
+        val plan = native_activation_plan("/tmp/plugin", activation_snapshot(false))
+        val content = native_activation_journal("activate", "/tmp/plugin",
+            "recovery_required", plan.steps, 3, "step_failed:gemini_extension")
+        val journal = native_activation_parse_journal(content)
+        expect(journal.valid).to_equal(true)
+        expect(journal.operation).to_equal("activate")
+        expect(journal.target).to_equal("/tmp/plugin")
+        expect(journal.completed).to_equal(3)
+        expect(journal.steps.len()).to_equal(4)
+        val recovery = native_activation_recovery(journal)
+        expect(recovery.ready).to_equal(true)
+        expect(recovery.completed).to_equal(3)
+        expect(recovery.steps[recovery.completed - 1].name).to_equal("codex_mcp")
+
+        val interrupted = native_activation_parse_journal(
+            native_activation_journal("activate", "/tmp/plugin", "applying",
+                plan.steps, 1, ""))
+        expect(native_activation_recovery(interrupted).ready).to_equal(true)
+
+    it "rejects malformed stale and plan-substitution recovery journals":
+        val plan = native_deactivation_plan("/tmp/plugin")
+        val valid = native_activation_journal("deactivate", "/tmp/plugin",
+            "recovery_required", plan.steps, 2, "journal_update_failed")
+        val duplicate = valid.replace("  completed: 2\n",
+            "  completed: 2\n  completed: 1\n")
+        expect(native_activation_parse_journal(duplicate).valid).to_equal(false)
+        expect(native_activation_parse_journal(
+            valid.replace("/v3", "/v2")).error).to_equal("unsupported_schema")
+        val substituted = valid.replace("step_1: codex_mcp",
+            "step_1: arbitrary_command")
+        val parsed_substituted = native_activation_parse_journal(substituted)
+        expect(parsed_substituted.valid).to_equal(true)
+        expect(native_activation_recovery(parsed_substituted).ready).to_equal(false)
+        val out_of_range = valid.replace("completed: 2", "completed: 9")
+        expect(native_activation_parse_journal(out_of_range).error).to_equal(
+            "completed_out_of_range")
+
+    it "reconstructs only known compensation probes with idempotent desired state":
+        val activate = native_activation_plan("/tmp/plugin", activation_snapshot(true))
+        val remove_probe = native_activation_recovery_probe("activate", activate.steps[1])
+        expect(remove_probe.command).to_equal("codex")
+        expect(remove_probe.args).to_contain("list")
+        expect(remove_probe.entry).to_equal("llm-caret-messaging")
+        expect(remove_probe.expected_present).to_equal(false)
+
+        val deactivate = native_deactivation_plan("/tmp/plugin")
+        val restore_probe = native_activation_recovery_probe("deactivate",
+            deactivate.steps[1])
+        expect(restore_probe.command).to_equal("codex")
+        expect(restore_probe.expected_present).to_equal(true)
+
+    it "defines inverse operations for every deactivation mutation":
+        val plan = native_deactivation_plan("/tmp/plugin")
+        expect(plan.steps.len()).to_equal(3)
+        for step in plan.steps:
+            expect(step.rollback_command.trim() == "").to_equal(false)
+            expect(step.rollback_args.len()).to_be_greater_than(0)
+        expect(plan.steps[2].rollback_args).to_contain("link")

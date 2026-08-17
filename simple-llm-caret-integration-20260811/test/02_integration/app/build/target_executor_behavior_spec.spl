@@ -1,0 +1,115 @@
+use std.spec.*
+use app.build.target_executor.{BuildHealthCommand,
+    execute_manifest_build_with_hooks}
+use app.build.target_plan.{BuildTargetPlan}
+use std.io_runtime.{mkdir_p, file_write, file_read, file_exists, getpid}
+
+fn fake_build_success(plan: BuildTargetPlan) -> i64:
+    file_write(plan.staging_artifact, "fake native artifact: " + plan.target.name)
+    file_write(plan.staging_launch_metadata,
+        "simple_launch_metadata:\n  launch_kind: native\n")
+    0
+
+fn fake_health_success(command: BuildHealthCommand) -> i64:
+    0
+
+fn fake_health_fail(command: BuildHealthCommand) -> i64:
+    9
+
+fn fake_publish_allow(plans: [BuildTargetPlan]) -> bool:
+    true
+
+fn fake_publish_mutate_dependency(plans: [BuildTargetPlan]) -> bool:
+    if plans.len() > 0 and plans[0].target.dependencies.len() > 0:
+        file_write(plans[0].target.dependencies[0], "fn dependency() -> i64: 2\n")
+    true
+
+fn fake_publish_second_backup_collision(plans: [BuildTargetPlan]) -> bool:
+    if plans.len() < 2: return false
+    val marker = ".simple-build-stage-"
+    val marker_index = plans[0].staging_artifact.index_of(marker)
+    if marker_index < 0: return false
+    val nonce = plans[0].staging_artifact.substring(marker_index + marker.len())
+    file_write(plans[1].target.artifact + ".simple-build-backup-" + nonce,
+        "forced second-target backup collision")
+    true
+
+fn executor_fixture(root: text, two_targets: bool,
+        health: bool) -> (text, text, text, text):
+    mkdir_p(root)
+    val manifest_path = root + "/build.sdn"
+    val compiler_path = root + "/simple"
+    val entry_path = root + "/first.spl"
+    val dependency_path = root + "/dependency.spl"
+    val first_artifact = root + "/first"
+    file_write(compiler_path, "self-hosted compiler fixture")
+    file_write(entry_path, "fn main() -> i64: 0\n")
+    file_write(dependency_path, "fn dependency() -> i64: 1\n")
+    var content = "build:\n" +
+        "  schema: simple.build/v1\n" +
+        "  source_roots: [" + root + "]\n" +
+        "  targets:\n" +
+        "    first:\n" +
+        "      entry: " + entry_path + "\n" +
+        "      artifact: " + first_artifact + "\n" +
+        "      target_triple: x86_64-unknown-linux-gnu\n" +
+        "      backend: cranelift\n" +
+        "      runtime_bundle: simple-core\n" +
+        "      abi: gnu\n" +
+        "      dependencies: [" + dependency_path + "]\n" +
+        "      freshness_roots: [" + root + "]\n"
+    if health: content = content + "      health_args: [--probe]\n"
+    if two_targets:
+        val second_entry = root + "/second.spl"
+        file_write(second_entry, "fn main() -> i64: 0\n")
+        content = content +
+            "    second:\n" +
+            "      entry: " + second_entry + "\n" +
+            "      artifact: " + root + "/second\n" +
+            "      target_triple: x86_64-unknown-linux-gnu\n" +
+            "      backend: cranelift\n" +
+            "      runtime_bundle: simple-core\n" +
+            "      abi: gnu\n" +
+            "      dependencies: []\n" +
+            "      freshness_roots: [" + root + "]\n"
+    file_write(manifest_path, content)
+    (manifest_path, compiler_path, dependency_path, first_artifact)
+
+describe "manifest build executor behavioral seams":
+    it "rolls back the first target when second-target publication preparation fails":
+        val root = "build/verify/executor-second-fail-" + getpid().to_text()
+        val fixture = executor_fixture(root, true, false)
+        file_write(fixture.3, "old first")
+        file_write(fixture.3 + ".simple_launch.sdn", "old first launch")
+        file_write(root + "/second", "old second")
+        file_write(root + "/second.simple_launch.sdn", "old second launch")
+        val rc = execute_manifest_build_with_hooks(fixture.0, "all", fixture.1,
+            fake_build_success, fake_health_success,
+            fake_publish_second_backup_collision)
+        expect(rc).to_equal(1)
+        expect(file_read(fixture.3)).to_equal("old first")
+        expect(file_read(fixture.3 + ".simple_launch.sdn")).to_equal(
+            "old first launch")
+        expect(file_read(root + "/second")).to_equal("old second")
+        expect(file_read(root + "/second.simple_launch.sdn")).to_equal(
+            "old second launch")
+
+    it "does not publish an artifact whose staged health probe fails":
+        val root = "build/verify/executor-health-fail-" + getpid().to_text()
+        val fixture = executor_fixture(root, false, true)
+        val rc = execute_manifest_build_with_hooks(fixture.0, "first", fixture.1,
+            fake_build_success, fake_health_fail, fake_publish_allow)
+        expect(rc).to_equal(1)
+        expect(file_exists(fixture.3)).to_equal(false)
+        expect(file_exists(fixture.3 + ".simple_launch.sdn")).to_equal(false)
+
+    it "rehashes declared inputs and refuses publish after pre-publish drift":
+        val root = "build/verify/executor-drift-" + getpid().to_text()
+        val fixture = executor_fixture(root, false, false)
+        val rc = execute_manifest_build_with_hooks(fixture.0, "first", fixture.1,
+            fake_build_success, fake_health_success,
+            fake_publish_mutate_dependency)
+        expect(rc).to_equal(1)
+        expect(file_exists(fixture.3)).to_equal(false)
+        expect(file_exists(fixture.3 + ".simple_launch.sdn")).to_equal(false)
+        expect(file_read(fixture.2)).to_contain("i64: 2")

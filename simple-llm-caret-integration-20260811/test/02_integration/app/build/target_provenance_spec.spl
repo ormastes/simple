@@ -1,0 +1,178 @@
+use std.spec.*
+use app.build.target_manifest.{decode_build_manifest, BuildTarget}
+use app.build.target_plan.{select_build_targets, plan_build_target}
+use app.build.artifact_provenance.{build_artifact_provenance,
+    build_artifact_provenance_valid, build_target_artifact_fresh,
+    build_target_artifacts_fresh, build_target_input_hashes,
+    build_target_input_hashes_batch, build_target_input_hashes_equal}
+use std.io_runtime.{mkdir_p, file_write, file_read, file_hash_sha256,
+    file_delete, getpid}
+
+val DIGEST_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val DIGEST_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val DIGEST_C = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+val DIGEST_D = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
+describe "manifest target planning and provenance integration":
+    it "binds a v2 Core-C archive as the exact runtime provider":
+        val root = "build/verify/runtime-provenance-" + getpid().to_text()
+        mkdir_p(root)
+        val archive = root + "/libsimple_runtime.a"
+        file_write(archive, "core-c-bootstrap-archive-a")
+        val target = BuildTarget(name: "capsule",
+            entry: "src/app/capsule_worker.spl", artifact: root + "/worker",
+            target_triple: "x86_64-unknown-linux-gnu", backend: "cranelift",
+            runtime_bundle: "core-c-bootstrap", runtime_archive: archive,
+            abi: "gnu", dependencies: [], freshness_roots: [], health_args: [])
+        val provenance = build_artifact_provenance(target, "build/demo.sdn",
+            DIGEST_A, "bin/simple", DIGEST_B, DIGEST_C, DIGEST_D,
+            plan_build_target(target, ["src/app"], "fixture").canonical_args,
+            [DIGEST_A], [], [])
+        expect(provenance).to_contain(
+            "schema=simple.build-artifact-provenance/v2")
+        expect(provenance).to_contain("runtime_archive=" + archive)
+        expect(provenance).to_contain("runtime_provider=exact-runtime-archive")
+        expect(build_artifact_provenance_valid(provenance, target,
+            "build/demo.sdn", DIGEST_A, "bin/simple", DIGEST_B,
+            DIGEST_C, DIGEST_D,
+            plan_build_target(target, ["src/app"], "fixture").canonical_args,
+            [DIGEST_A], [], [])).to_equal(true)
+        file_write(archive, "core-c-bootstrap-archive-b")
+        expect(build_artifact_provenance_valid(provenance, target,
+            "build/demo.sdn", DIGEST_A, "bin/simple", DIGEST_B,
+            DIGEST_C, DIGEST_D,
+            plan_build_target(target, ["src/app"], "fixture").canonical_args,
+            [DIGEST_A], [], [])).to_equal(false)
+        file_delete(archive)
+
+    it "binds selected target policy and every declared input hash":
+        val manifest = decode_build_manifest("""
+build:
+  schema: simple.build/v1
+  source_roots: [src/app, src/lib]
+  targets:
+    database:
+      entry: src/app/demo/database_worker.spl
+      artifact: build/demo/database
+      target_triple: x86_64-unknown-linux-gnu
+      backend: cranelift
+      runtime_bundle: simple-core
+      abi: gnu
+      dependencies: [src/lib/demo/store.spl]
+      health_args: [--probe]
+""")
+        expect(manifest.valid()).to_equal(true)
+        val selected = select_build_targets(manifest, "database").unwrap()
+        val plan = plan_build_target(selected[0], manifest.source_roots, "fixture")
+        val provenance = build_artifact_provenance(selected[0],
+            "plugins/demo/integration.sdn", DIGEST_A, "bin/simple", DIGEST_B,
+            DIGEST_C, DIGEST_D, plan.canonical_args,
+            [DIGEST_D, DIGEST_A], [], [])
+        expect(build_artifact_provenance_valid(provenance, selected[0],
+            "plugins/demo/integration.sdn", DIGEST_A, "bin/simple", DIGEST_B,
+            DIGEST_C, DIGEST_D, plan.canonical_args,
+            [DIGEST_D, DIGEST_A], [], [])).to_equal(true)
+        expect(provenance).to_contain("schema=simple.build-artifact-provenance/v1")
+        expect(provenance).to_contain("target_triple=x86_64-unknown-linux-gnu")
+        expect(provenance).to_contain("backend=cranelift")
+        expect(provenance).to_contain("runtime_bundle=simple-core")
+        expect(provenance).to_contain(
+            "runtime_provider=compiler-selected-unbound")
+        expect(provenance).to_contain("abi=gnu")
+        expect(provenance).to_contain("launch_metadata=build/demo/database")
+        expect(provenance).to_contain("declared_dependency=src/lib/demo/store.spl")
+
+    it "rejects provenance after compiler artifact or dependency mutation":
+        val manifest = decode_build_manifest("""
+build:
+  schema: simple.build/v1
+  source_roots: [src/app]
+  targets:
+    hook:
+      entry: src/app/demo/hook_worker.spl
+      artifact: build/demo/hook
+      target_triple: x86_64-unknown-linux-gnu
+      backend: cranelift
+      runtime_bundle: simple-core
+      abi: gnu
+      dependencies: []
+""")
+        val target = manifest.targets[0]
+        val args = plan_build_target(target, manifest.source_roots, "fixture").canonical_args
+        val provenance = build_artifact_provenance(target, "demo.sdn", DIGEST_A,
+            "bin/simple", DIGEST_B, DIGEST_C, DIGEST_D, args,
+            [DIGEST_D], [], [])
+        expect(build_artifact_provenance_valid(provenance, target, "demo.sdn",
+            DIGEST_A, "bin/simple", DIGEST_A, DIGEST_C, DIGEST_D, args,
+            [DIGEST_D], [], [])).to_equal(false)
+        expect(build_artifact_provenance_valid(provenance, target, "demo.sdn",
+            DIGEST_A, "bin/simple", DIGEST_B, DIGEST_A, DIGEST_D, args,
+            [DIGEST_D], [], [])).to_equal(false)
+        expect(build_artifact_provenance_valid(provenance, target, "demo.sdn",
+            DIGEST_A, "bin/simple", DIGEST_B, DIGEST_C, DIGEST_D, args,
+            [DIGEST_A], [], [])).to_equal(false)
+
+    it "checks a real sidecar and fails closed after a declared input changes":
+        val root = "build/verify/target-provenance-" + getpid().to_text()
+        mkdir_p(root)
+        val manifest_path = root + "/build.sdn"
+        val compiler_path = root + "/simple"
+        val entry_path = root + "/worker.spl"
+        val dependency_path = root + "/dependency.spl"
+        val artifact_path = root + "/worker"
+        file_write(entry_path, "fn main() -> i64: 0\n")
+        file_write(dependency_path, "fn marker() -> i64: 1\n")
+        file_write(compiler_path, "self-hosted-compiler-fixture")
+        file_write(artifact_path, "native-artifact-fixture")
+        file_write(artifact_path + ".simple_launch.sdn",
+            "simple_launch_metadata:\n  launch_kind: native\n")
+        file_write(manifest_path, "build:\n" +
+            "  schema: simple.build/v1\n" +
+            "  source_roots: [" + root + "]\n" +
+            "  targets:\n" +
+            "    worker:\n" +
+            "      entry: " + entry_path + "\n" +
+            "      artifact: " + artifact_path + "\n" +
+            "      target_triple: x86_64-unknown-linux-gnu\n" +
+            "      backend: cranelift\n" +
+            "      runtime_bundle: simple-core\n" +
+            "      abi: gnu\n" +
+            "      dependencies: [" + dependency_path + "]\n" +
+            "      freshness_roots: [" + root + "]\n")
+        val manifest = decode_build_manifest(file_read(manifest_path))
+        val target = manifest.targets[0]
+        val args = plan_build_target(target, manifest.source_roots, "fixture").canonical_args
+        val inputs = build_target_input_hashes(target).unwrap()
+        val batched_inputs = build_target_input_hashes_batch([target, target]).unwrap()
+        expect(batched_inputs.len()).to_equal(2)
+        expect(build_target_input_hashes_equal(inputs,
+            batched_inputs[0])).to_equal(true)
+        val provenance = build_artifact_provenance(target, manifest_path,
+            file_hash_sha256(manifest_path), compiler_path,
+            file_hash_sha256(compiler_path), file_hash_sha256(artifact_path),
+            file_hash_sha256(artifact_path + ".simple_launch.sdn"), args,
+            inputs.dependency_hashes, inputs.freshness_paths,
+            inputs.freshness_hashes)
+        file_write(artifact_path + ".provenance.sdn", provenance)
+        expect(provenance).to_contain("declared_freshness=" + entry_path)
+        expect(build_target_artifact_fresh(manifest_path, "worker",
+            compiler_path)).to_equal(true)
+        expect(build_target_artifacts_fresh(manifest_path,
+            ["worker", "missing", "worker"], compiler_path)).to_equal(
+            [true, false, true])
+        file_write(artifact_path + ".simple_launch.sdn",
+            "simple_launch_metadata:\n  launch_kind: tampered\n")
+        expect(build_target_artifact_fresh(manifest_path, "worker",
+            compiler_path)).to_equal(false)
+        file_write(artifact_path + ".simple_launch.sdn",
+            "simple_launch_metadata:\n  launch_kind: native\n")
+        file_write(dependency_path, "fn marker() -> i64: 2\n")
+        expect(build_target_artifact_fresh(manifest_path, "worker",
+            compiler_path)).to_equal(false)
+        file_delete(artifact_path + ".provenance.sdn")
+        file_delete(artifact_path + ".simple_launch.sdn")
+        file_delete(artifact_path)
+        file_delete(dependency_path)
+        file_delete(entry_path)
+        file_delete(compiler_path)
+        file_delete(manifest_path)

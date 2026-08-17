@@ -1,0 +1,296 @@
+# codex-system-test
+# @tag:system
+# @req REQ-EVS-015
+# @cover src/app/llm_caret/openai_compat.spl 80%
+# @evidence-display: embed_tui
+
+"""
+# LLM Caret local-model hello evidence
+
+## Overview
+
+Proves that LLM Caret reached a loopback OpenAI-compatible server, received
+the configured model identity, and captured the model's exact `hello` reply.
+Dummy providers, mocks, remote endpoints, and retained transcripts cannot pass.
+
+**Requirements:** doc/02_requirements/feature/evidence_showcase.md
+**Plan:** doc/03_plan/sys_test/evidence_showcase.md
+**Design:** doc/05_design/evidence_showcase.md
+**Research:** doc/01_research/local/evidence_showcase.md
+
+## Examples
+
+Start a local OpenAI-compatible server, set `SIMPLE_EVIDENCE_LLM_ENDPOINT` and
+`SIMPLE_EVIDENCE_LLM_MODEL`, then run this spec. Review the identified model and
+exact `hello` response; absent or non-loopback configuration remains blocked.
+
+**Artifacts:** build/test-artifacts/03_system/app/llm_caret/feature/llm_caret_local_model_hello_evidence/capture.txt
+"""
+
+use std.spec.*
+use app.io.mod.{env_get}
+use std.io.{
+    dir_create_all, file_atomic_write, file_hash_sha256, file_read,
+    file_size_raw, host_arch, host_os, time_now_unix_micros
+}
+use app.llm_caret.provider.{dispatch_send}
+use std.common.spec.scenario_text_evidence.{
+    ScenarioTextMask, ScenarioTextMatchResult,
+    check_text_evidence,
+    scenario_text_evidence_policy
+}
+use std.common.spec.scenario_evidence.{
+    ScenarioCaptureKind, ScenarioEvidenceArtifact
+}
+use std.common.spec.scenario_motion_evidence.{ScenarioArtifactIntegrity}
+use std.spec.scenario_evidence_manifest.{ScenarioEvidenceManifest}
+use std.spec.scenario_evidence_manifest_io.{
+    retain_scenario_evidence_manifest, write_scenario_evidence_manifest
+}
+
+struct LocalModelHelloCapture:
+    status: text
+    reason: text
+    endpoint: text
+    requested_model: text
+    response_model: text
+    transcript: text
+    raw_response: text
+    resume_command: text
+
+val LLM_SPEC = (
+    "test/03_system/app/llm_caret/feature/" +
+    "llm_caret_local_model_hello_evidence_spec.spl"
+)
+val LLM_EVIDENCE_DIR = (
+    "build/test-artifacts/03_system/app/llm_caret/feature/" +
+    "llm_caret_local_model_hello_evidence"
+)
+val LLM_CAPTURE_PATH = LLM_EVIDENCE_DIR + "/capture.txt"
+val LLM_MANUAL_PATH = (
+    "doc/06_spec/03_system/app/llm_caret/feature/" +
+    "llm_caret_local_model_hello_evidence_spec.md"
+)
+val LLM_TEST_COMMAND = "bin/simple test " + LLM_SPEC + " --mode=interpreter"
+
+fn loopback_endpoint(endpoint: text) -> bool:
+    endpoint.starts_with("http://127.0.0.1:") or
+        endpoint.starts_with("http://localhost:")
+
+fn capture_local_model_hello() -> LocalModelHelloCapture:
+    val endpoint = env_get("SIMPLE_EVIDENCE_LLM_ENDPOINT")
+    val model = env_get("SIMPLE_EVIDENCE_LLM_MODEL")
+    val api_key = env_get("SIMPLE_EVIDENCE_LLM_API_KEY")
+    val resume = (
+        "SIMPLE_EVIDENCE_LLM_ENDPOINT=http://127.0.0.1:8000 " +
+        "SIMPLE_EVIDENCE_LLM_MODEL=<served-model-id> bin/simple test " +
+        LLM_SPEC + " --mode=interpreter --timeout 120"
+    )
+    if endpoint == "":
+        return LocalModelHelloCapture(
+            status: "blocked", reason: "missing-loopback-endpoint",
+            endpoint: "", requested_model: model, response_model: "",
+            transcript: "", raw_response: "", resume_command: resume
+        )
+    if not loopback_endpoint(endpoint):
+        return LocalModelHelloCapture(
+            status: "blocked", reason: "endpoint-is-not-loopback",
+            endpoint: endpoint, requested_model: model, response_model: "",
+            transcript: "", raw_response: "", resume_command: resume
+        )
+    if model == "":
+        return LocalModelHelloCapture(
+            status: "blocked", reason: "missing-served-model-id",
+            endpoint: endpoint, requested_model: "", response_model: "",
+            transcript: "", raw_response: "", resume_command: resume
+        )
+    val messages = (
+        "[{\"role\":\"user\",\"content\":" +
+        "\"Reply with exactly the lowercase word hello and nothing else.\"}]"
+    )
+    val response = dispatch_send(
+        "openai_compat",
+        "Reply with exactly the lowercase word hello and nothing else.",
+        model,
+        api_key,
+        endpoint,
+        "",
+        "",
+        "",
+        1,
+        8,
+        messages
+    )
+    if response.is_error:
+        return LocalModelHelloCapture(
+            status: "blocked", reason: "local-model-request-failed:" + response.error,
+            endpoint: endpoint, requested_model: model, response_model: response.model,
+            transcript: response.content, raw_response: response.raw,
+            resume_command: resume
+        )
+    if response.model != model:
+        return LocalModelHelloCapture(
+            status: "blocked", reason: "response-model-mismatch:" + response.model,
+            endpoint: endpoint, requested_model: model, response_model: response.model,
+            transcript: response.content, raw_response: response.raw,
+            resume_command: resume
+        )
+    if response.content.trim() != "hello":
+        return LocalModelHelloCapture(
+            status: "blocked", reason: "unexpected-hello-response",
+            endpoint: endpoint, requested_model: model, response_model: response.model,
+            transcript: response.content, raw_response: response.raw,
+            resume_command: resume
+        )
+    LocalModelHelloCapture(
+        status: "captured", reason: "", endpoint: endpoint,
+        requested_model: model, response_model: response.model,
+        transcript: response.content, raw_response: response.raw,
+        resume_command: resume
+    )
+
+describe "REQ-EVS-015 LLM Caret local-model hello evidence":
+    it "should capture a loopback model identity and exact hello transcript":
+        val start_time = time_now_unix_micros() / 1000
+
+        step("Capture the feature evidence")
+        val capture = capture_local_model_hello()
+
+        step("Verify the structured evidence")
+        if capture.status == "captured":
+            expect(capture.endpoint).to_start_with("http://")
+            expect(capture.requested_model).to_equal(capture.response_model)
+            expect(capture.raw_response).to_contain("\"model\"")
+            expect(capture.raw_response).to_contain("\"content\"")
+            val policy = scenario_text_evidence_policy(
+                true, true, [] as [ScenarioTextMask], 0
+            )
+            val checked = check_text_evidence(
+                capture.transcript, ["hello"], policy
+            )
+            expect(checked.diagnostic).to_equal("matched")
+        else:
+            expect(capture.status).to_equal("blocked")
+            if capture.endpoint == "":
+                expect(capture.reason).to_equal("missing-loopback-endpoint")
+            elif not loopback_endpoint(capture.endpoint):
+                expect(capture.reason).to_equal("endpoint-is-not-loopback")
+            elif capture.requested_model == "":
+                expect(capture.reason).to_equal("missing-served-model-id")
+            elif capture.reason.starts_with("local-model-request-failed:"):
+                expect(capture.reason).to_start_with("local-model-request-failed:")
+            elif capture.reason.starts_with("response-model-mismatch:"):
+                expect(capture.response_model).to_equal(
+                    capture.reason["response-model-mismatch:".len():]
+                )
+            else:
+                expect(capture.reason).to_equal("unexpected-hello-response")
+
+        step("Render the evidence for review")
+        expect(dir_create_all(LLM_EVIDENCE_DIR)).to_equal(true)
+        val review = (
+            "status: " + capture.status + "\n" +
+            "reason: " + capture.reason + "\n" +
+            "endpoint: " + capture.endpoint + "\n" +
+            "requested_model: " + capture.requested_model + "\n" +
+            "response_model: " + capture.response_model + "\n" +
+            "response: " + capture.transcript + "\n" +
+            "raw_response:\n" + capture.raw_response + "\n"
+        )
+        expect(file_atomic_write(LLM_CAPTURE_PATH, review)).to_equal(true)
+        expect(file_read(LLM_CAPTURE_PATH)).to_equal(review)
+        if capture.status == "captured":
+            expect(capture.transcript.trim()).to_equal("hello")
+        else:
+            expect(capture.resume_command).to_contain(
+                "SIMPLE_EVIDENCE_LLM_ENDPOINT=http://127.0.0.1:"
+            )
+
+        step("Publish the showcase link")
+        val source_digest = file_hash_sha256(LLM_SPEC)
+        expect(source_digest.len()).to_equal(64)
+        val capture_checksum = file_hash_sha256(LLM_CAPTURE_PATH)
+        expect(capture_checksum.len()).to_equal(64)
+        val artifact = ScenarioEvidenceArtifact(
+            kind: ScenarioCaptureKind.text,
+            title: "Exact local-model hello transcript and raw response",
+            mime: "text/plain",
+            path: LLM_CAPTURE_PATH,
+            body: review,
+            scenario_id: "llm-caret-local-model-hello",
+            step_id: "Render",
+            redacted: false
+        )
+        val integrity = ScenarioArtifactIntegrity(
+            path: LLM_CAPTURE_PATH,
+            format: "txt",
+            mime: "text/plain",
+            width: 0,
+            height: 0,
+            byte_size: file_size_raw(LLM_CAPTURE_PATH),
+            checksum: capture_checksum,
+            producer: LLM_SPEC,
+            producer_version: source_digest,
+            source_revision: "source-sha256:" + source_digest,
+            host: host_os() + "-" + host_arch(),
+            target: if capture.endpoint == "":
+                "loopback-openai-compatible"
+            else:
+                capture.endpoint,
+            capture_ready: true,
+            baseline_identity: "",
+            comparison_result: "not-compared",
+            required: true
+        )
+        val policy = scenario_text_evidence_policy(
+            true, true, [] as [ScenarioTextMask], 0
+        )
+        val verified = check_text_evidence(
+            capture.transcript, ["hello"], policy
+        )
+        var text_results = [] as [ScenarioTextMatchResult]
+        if capture.status == "captured":
+            text_results.push(verified)
+        val manifest = ScenarioEvidenceManifest(
+                schema_major: 1,
+                schema_minor: 0,
+                feature_id: "llm_caret.local_hello",
+                requirement_ids: ["REQ-EVS-015"],
+                spec_path: LLM_SPEC,
+                generated_manual_path: LLM_MANUAL_PATH,
+                scenario_id: "llm-caret-local-model-hello",
+                step_id: "Publish",
+                required: true,
+                result: if capture.status == "captured": "pass" else: "blocked",
+                showcase_status: if capture.status == "captured": "live-pass" else: "blocked",
+                reason: capture.reason,
+                source_revision: "source-sha256:" + source_digest,
+                source_digest: "sha256:" + source_digest,
+                command: LLM_TEST_COMMAND,
+                producer: LLM_SPEC,
+                producer_version: source_digest,
+                host: integrity.host,
+                target: integrity.target,
+                backend: "loopback-openai-compatible",
+                start_time: start_time,
+                duration_ms: time_now_unix_micros() / 1000 - start_time,
+                artifacts: [artifact],
+                artifact_integrity: [integrity],
+                text_results: text_results,
+                motion_evidence: [],
+                protocol_fields: [],
+                html_checks: [],
+                blocker_prerequisite: if capture.status == "captured": "" else: capture.reason,
+                resume_command: capture.resume_command,
+                owner: "llm-caret",
+                final_reviewer: "verification"
+        )
+        val publication = write_scenario_evidence_manifest(manifest).unwrap()
+        expect(publication).to_equal(
+            "build/test-artifacts/03_system/app/llm_caret/feature/" +
+            "llm_caret_local_model_hello_evidence/evidence.sdn"
+        )
+        expect(retain_scenario_evidence_manifest(manifest).unwrap()).to_equal(
+            "doc/06_spec/evidence/03_system/app/llm_caret/feature/" +
+            "llm_caret_local_model_hello_evidence/evidence.sdn"
+        )

@@ -1,0 +1,109 @@
+# @req REQ-LLM-MSG-006 REQ-LLM-MSG-007 REQ-LLM-MSG-008 REQ-LLM-MSG-014
+# @nfr NFR-LLM-MSG-005 NFR-LLM-MSG-008
+# @cover src/app/llm_caret/messaging/application/agent_control_service.spl 80%
+"""Agent control service routes provider ports into consumable delivery paths."""
+
+use std.spec.*
+use app.llm_caret.messaging.application.agent_control_service.{AgentControlService}
+use app.llm_caret.messaging.adapter.agent.codex_app_server.{CodexSessionLink}
+use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore}
+use app.llm_caret.messaging.domain.model.*
+
+fn service_binding(provider: text) -> AgentBinding:
+    AgentBinding(binding_id: messaging_id("binding", "binding-" + provider),
+        room_id: messaging_id("room", "room-1"),
+        agent_id: messaging_id("agent", "agent-" + provider),
+        handler: AgentHandler.Subagent, session_policy: "persistent_per_thread",
+        trigger_policy: "mention", update_policy: "milestones",
+        context_policy: "bounded", permissions: [])
+
+describe "LLM Caret AgentControlService provider routing":
+    it "durably routes attach context submit steer and cancel through every provider port":
+        var store = PureSqlMessagingStore.open_memory()
+        var service = AgentControlService.with_store(false, store)
+        for provider in ["claude", "codex", "gemini"]:
+            val attached = service.attach(provider, service_binding(provider))
+            expect(attached.ok).to_equal(true)
+            expect(service.inject_context(provider, attached.session_id,
+                "context-1", "bounded context").ok).to_equal(true)
+            expect(service.submit(provider, attached.session_id,
+                "task-1", "perform task").ok).to_equal(true)
+            expect(service.steer(provider, attached.session_id,
+                "task-1", "report progress").ok).to_equal(true)
+            expect(service.cancel(provider, attached.session_id, "task-1").ok).to_equal(true)
+            val queued = store.queued_agent_control_requests(provider, 9999999999999, 20)
+            expect(queued.len()).to_equal(5)
+            var operations = ""
+            for request in queued:
+                operations = operations + "|" + request.operation
+            expect(operations).to_contain("|attach")
+            val context_operation = if provider == "gemini": "|before_agent" else: "|inject_context"
+            expect(operations).to_contain(context_operation)
+            expect(operations).to_contain("|submit")
+            expect(operations).to_contain("|steer")
+            expect(operations).to_contain("|cancel")
+            expect(store.mark_agent_control_delivered(
+                queued[0].delivery_id, 9999999999999).ok).to_equal(true)
+            expect(store.queued_agent_control_requests(
+                provider, 9999999999999, 20).len()).to_equal(4)
+        expect(service.shutdown()).to_equal(true)
+        expect(store.close()).to_equal(true)
+
+    it "supervises buffered App Server notifications with a finite idle poll budget":
+        var store = PureSqlMessagingStore.open_memory()
+        var service = AgentControlService.with_store(false, store)
+        expect(service.codex.process.pid).to_equal(0)
+        val attached = service.attach("codex", service_binding("codex"))
+        expect(attached.ok).to_equal(true)
+        service.codex.put_link(CodexSessionLink(session_id: attached.session_id,
+            thread_id: "thread-1", turn_id: ""))
+        var buffered_process = service.codex.process
+        buffered_process.ingest_wire_chunk(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"turn/started\",\"params\":{\"threadId\":\"thread-1\",\"turn\":{\"id\":\"turn-1\"}}}\n" +
+            "{\"jsonrpc\":\"2.0\",\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}\n",
+            0)
+        service.codex.process = buffered_process
+        val pumped = service.pump_idle_notifications(3, 0)
+        expect(pumped.status).to_equal("bounded_complete")
+        expect(pumped.polls).to_equal(3)
+        expect(pumped.handled).to_equal(2)
+        expect(pumped.failed).to_equal(0)
+        expect(pumped.error).to_equal("")
+        expect(service.codex.link(attached.session_id).turn_id).to_equal("")
+        expect(service.codex.registry.session(attached.session_id).state).to_equal("completed")
+        expect(service.shutdown()).to_equal(true)
+        val after_shutdown = service.pump_idle_notifications(3, 0)
+        expect(after_shutdown.status).to_equal("stopped")
+        expect(after_shutdown.polls).to_equal(0)
+        expect(after_shutdown.clean_shutdown).to_equal(true)
+        expect(store.close()).to_equal(true)
+
+    it "fails the bounded pump closed when an App Server notification cannot be delivered":
+        var store = PureSqlMessagingStore.open_memory()
+        var service = AgentControlService.with_store(false, store)
+        expect(service.codex.process.pid).to_equal(0)
+        val invalid_budget = service.pump_idle_notifications(1025, 0)
+        expect(invalid_budget.status).to_equal("error")
+        expect(invalid_budget.error).to_equal("invalid_codex_notification_poll_budget")
+        val invalid_sleep = service.pump_idle_notifications(1, 1001)
+        expect(invalid_sleep.status).to_equal("error")
+        expect(invalid_sleep.error).to_equal("invalid_codex_notification_idle_sleep")
+        var buffered_process = service.codex.process
+        buffered_process.ingest_wire_chunk(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"turn/started\",\"params\":{\"threadId\":\"unknown-thread\",\"turn\":{\"id\":\"turn-1\"}}}\n",
+            0)
+        service.codex.process = buffered_process
+        val pumped = service.pump_idle_notifications(8, 0)
+        expect(pumped.status).to_equal("error")
+        expect(pumped.polls).to_equal(1)
+        expect(pumped.handled).to_equal(0)
+        expect(pumped.failed).to_equal(1)
+        expect(pumped.clean_shutdown).to_equal(false)
+        expect(pumped.error).to_equal("codex_notification_delivery_failed")
+        service.codex.app_server_available = true
+        val exited = service.pump_idle_notifications(8, 0)
+        expect(exited.status).to_equal("error")
+        expect(exited.polls).to_equal(0)
+        expect(exited.error).to_equal("codex_app_server_exited")
+        expect(service.shutdown()).to_equal(true)
+        expect(store.close()).to_equal(true)

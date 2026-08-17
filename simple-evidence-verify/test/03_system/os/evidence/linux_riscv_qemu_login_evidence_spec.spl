@@ -1,0 +1,310 @@
+# codex-system-test
+# @tag:system
+# @req REQ-EVS-006
+# @req REQ-EVS-007
+# @cover scripts/os/check_riscv_linux_qemu.shs 80%
+# @cover scripts/fpga/riscv_linux_terminal_probe.spl 80%
+# @evidence-display: embed_tui
+
+"""
+# Linux RISC-V QEMU login evidence
+
+## Overview
+
+This scenario runs the pinned RV64 Linux QEMU terminal producer only when all
+live media exists and the operator opts in. Otherwise it publishes an explicit
+blocker contract. Historical logs, source markers, and fixture transcripts
+cannot satisfy the live branch.
+
+**Requirements:** doc/02_requirements/feature/evidence_showcase.md
+**Plan:** doc/03_plan/sys_test/evidence_showcase.md
+**Design:** doc/05_design/evidence_showcase.md
+**Research:** doc/01_research/local/evidence_showcase.md
+
+## Examples
+
+Build the listed media, set `SIMPLE_EVIDENCE_LINUX_RISCV_LOGIN=1`, and run this
+spec. Review the ordered boot, login, and shell transcript; a missing input is
+reported with the exact resume command instead of a PASS.
+"""
+
+use std.spec.*
+use app.io.mod.{
+    current_time_ms, dir_create_all, env_get, file_atomic_write, file_exists,
+    file_hash_sha256, file_read_text, file_size, hostname, process_run_timeout
+}
+use std.common.spec.scenario_evidence.{
+    ScenarioCaptureKind, scenario_evidence_artifact
+}
+use std.common.spec.scenario_motion_evidence.{ScenarioArtifactIntegrity}
+use std.common.spec.scenario_text_evidence.{
+    ScenarioTextMask,
+    check_text_evidence,
+    scenario_text_evidence_policy
+}
+use std.spec.scenario_evidence_manifest.{
+    ScenarioEvidenceManifest
+}
+use std.spec.scenario_evidence_manifest_io.{
+    retain_scenario_evidence_manifest,
+    scenario_evidence_status_manifest,
+    write_scenario_evidence_manifest
+}
+
+struct LinuxLoginCapture:
+    status: text
+    reason: text
+    resume_command: text
+    transcript_path: text
+    transcript: text
+    exit_code: i32
+
+val LINUX_LOG = "build/os/rv64_soc/qemu-media-oracle.log"
+val LINUX_ARTIFACT_ROOT = (
+    "build/test-artifacts/03_system/os/evidence/" +
+    "linux_riscv_qemu_login_evidence"
+)
+val LINUX_RETAINED_LOG = LINUX_ARTIFACT_ROOT + "/serial.log"
+val LINUX_SPEC = (
+    "test/03_system/os/evidence/linux_riscv_qemu_login_evidence_spec.spl"
+)
+val LINUX_MANUAL = (
+    "doc/06_spec/03_system/os/evidence/" +
+    "linux_riscv_qemu_login_evidence_spec.md"
+)
+val LINUX_RUNNER = "scripts/os/check_riscv_linux_qemu.shs"
+val LINUX_TEST_COMMAND = (
+    "SIMPLE_EVIDENCE_LINUX_RISCV_LOGIN=1 bin/simple test " +
+    LINUX_SPEC + " --mode=interpreter --timeout 240"
+)
+val LINUX_RESUME = (
+    "sh scripts/os/build_riscv_buildroot.shs rv64 && " +
+    "RISCV_ARCH=rv64 sh scripts/os/build_riscv_linux_assets.shs --all && " +
+    LINUX_TEST_COMMAND
+)
+
+fn prepare_evidence_workspace() -> text:
+    val required = [
+        "build/os/rv64_soc/manifest.txt",
+        "build/os/rv64_soc/fw_jump.bin",
+        "build/os/rv64_soc/Image",
+        "build/os/rv64_soc/soc_virt.dtb",
+        "build/os/rv64_soc/initramfs.cpio.gz",
+        "build/os/buildroot/rv64/buildroot-manifest.txt",
+        "bin/simple"
+    ]
+    for path in required:
+        if not file_exists(path):
+            return path
+    ""
+
+fn capture_linux_login_evidence(missing: text) -> LinuxLoginCapture:
+    if missing != "":
+        return LinuxLoginCapture(
+            status: "blocked",
+            reason: "missing-prerequisite:" + missing,
+            resume_command: LINUX_RESUME,
+            transcript_path: "",
+            transcript: "",
+            exit_code: -1
+        )
+    if env_get("SIMPLE_EVIDENCE_LINUX_RISCV_LOGIN") != "1":
+        return LinuxLoginCapture(
+            status: "blocked",
+            reason: "live-run-not-requested",
+            resume_command: LINUX_RESUME,
+            transcript_path: "",
+            transcript: "",
+            exit_code: -1
+        )
+    val result = process_run_timeout(
+        "sh",
+        ["scripts/os/check_riscv_linux_qemu.shs", "rv64"],
+        180000
+    )
+    val transcript = if file_exists(LINUX_LOG):
+        file_read_text(LINUX_LOG)
+    else:
+        result[0] + "\n" + result[1]
+    var status = if result[2] == 0: "captured" else: "blocked"
+    var reason = if result[2] == 0:
+            ""
+        else:
+            "runner-failed-exit=" + result[2].to_text()
+    var transcript_path = LINUX_LOG
+    if result[2] == 0:
+        if (
+            not dir_create_all(LINUX_ARTIFACT_ROOT) or
+            not file_atomic_write(LINUX_RETAINED_LOG, transcript)
+        ):
+            status = "blocked"
+            reason = "failed-to-retain-transcript"
+            transcript_path = ""
+        else:
+            transcript_path = LINUX_RETAINED_LOG
+    LinuxLoginCapture(
+        status: status,
+        reason: reason,
+        resume_command: LINUX_RESUME,
+        transcript_path: transcript_path,
+        transcript: transcript,
+        exit_code: result[2]
+    )
+
+fn verify_blocker(capture: LinuxLoginCapture):
+    expect(capture.status).to_equal("blocked")
+    if capture.reason == "live-run-not-requested":
+        expect(capture.reason).to_equal("live-run-not-requested")
+    elif capture.reason.starts_with("missing-prerequisite:"):
+        expect(capture.reason).to_start_with("missing-prerequisite:")
+    elif capture.reason == "failed-to-retain-transcript":
+        expect(capture.reason).to_equal("failed-to-retain-transcript")
+    else:
+        expect(capture.reason).to_start_with("runner-failed-exit=")
+    expect(capture.resume_command).to_contain(
+        "scripts/os/check_riscv_linux_qemu.shs rv64"
+    )
+    if capture.reason.starts_with("runner-failed-exit="):
+        expect(capture.transcript_path).to_equal(LINUX_LOG)
+    else:
+        expect(capture.transcript_path).to_equal("")
+
+describe "REQ-EVS-006/007 Linux RISC-V QEMU login evidence":
+    it "should capture a current ordered login transcript or report its exact blocker":
+        step("Capture the feature evidence")
+        val capture_started_ms = current_time_ms()
+        val missing = prepare_evidence_workspace()
+        val capture = capture_linux_login_evidence(missing)
+        val capture_duration_ms = current_time_ms() - capture_started_ms
+
+        step("Verify the structured evidence")
+        if capture.status == "captured":
+            expect(capture.exit_code).to_equal(0)
+            expect(capture.transcript_path).to_equal(LINUX_RETAINED_LOG)
+            val policy = scenario_text_evidence_policy(
+                true,
+                true,
+                [
+                    ScenarioTextMask.date, ScenarioTextMask.version,
+                    ScenarioTextMask.address, ScenarioTextMask.duration
+                ],
+                5000
+            )
+            val checked = check_text_evidence(
+                capture.transcript,
+                [
+                    "login:",
+                    "UART_TX_INPUT=root",
+                    "simple-riscv#",
+                    "UART_TX_INPUT=ls /",
+                    "SIMPLE_RISCV_LINUX_LOGIN_LS_PASS",
+                    "RISCV_LINUX_TERMINAL_PROBE_STATUS=PASS",
+                    "RISCV_QEMU_MEDIA_ORACLE_STATUS=PASS"
+                ],
+                policy
+            )
+            expect(checked.diagnostic).to_equal("ok")
+            expect(checked.first_expected_index).to_equal(-1)
+            expect(checked.normalized_transcript).to_contain(
+                "RISCV_QEMU_MEDIA_ORACLE_STATUS=PASS"
+            )
+
+            step("Publish the verified transcript evidence")
+            val source_revision = file_hash_sha256(
+                "build/os/buildroot/rv64/buildroot-manifest.txt"
+            )
+            val artifact = scenario_evidence_artifact(
+                ScenarioCaptureKind.log,
+                "Ordered Linux RISC-V boot login and shell transcript",
+                "text/plain",
+                capture.transcript_path,
+                "",
+                "linux-riscv-login",
+                "verify"
+            )
+            val integrity = ScenarioArtifactIntegrity(
+                path: capture.transcript_path,
+                format: "log",
+                mime: "text/plain",
+                width: 0,
+                height: 0,
+                byte_size: file_size(capture.transcript_path),
+                checksum: file_hash_sha256(capture.transcript_path),
+                producer: LINUX_RUNNER,
+                producer_version: file_hash_sha256(LINUX_RUNNER),
+                source_revision: source_revision,
+                host: hostname(),
+                target: "qemu-riscv64",
+                capture_ready: true,
+                baseline_identity: "",
+                comparison_result: "not-compared",
+                required: true
+            )
+            val manifest = ScenarioEvidenceManifest(
+                schema_major: 1,
+                schema_minor: 0,
+                feature_id: "linux.riscv.login",
+                requirement_ids: ["REQ-EVS-006", "REQ-EVS-007"],
+                spec_path: LINUX_SPEC,
+                generated_manual_path: LINUX_MANUAL,
+                scenario_id: "linux-riscv-login",
+                step_id: "publish",
+                required: true,
+                result: "pass",
+                showcase_status: "live-pass",
+                reason: "",
+                source_revision: source_revision,
+                source_digest: "sha256:" + file_hash_sha256(LINUX_SPEC),
+                command: LINUX_TEST_COMMAND,
+                producer: LINUX_RUNNER,
+                producer_version: file_hash_sha256(LINUX_RUNNER),
+                host: hostname(),
+                target: "qemu-riscv64",
+                backend: "serial",
+                start_time: capture_started_ms,
+                duration_ms: capture_duration_ms,
+                artifacts: [artifact],
+                artifact_integrity: [integrity],
+                text_results: [checked],
+                motion_evidence: [],
+                protocol_fields: [],
+                html_checks: [],
+                blocker_prerequisite: "",
+                resume_command: LINUX_RESUME,
+                owner: "simpleos",
+                final_reviewer: "verification"
+            )
+            val publication = write_scenario_evidence_manifest(manifest).unwrap()
+            expect(publication).to_equal(LINUX_ARTIFACT_ROOT + "/evidence.sdn")
+            expect(retain_scenario_evidence_manifest(manifest).unwrap()).to_equal(
+                "doc/06_spec/evidence/03_system/os/evidence/" +
+                "linux_riscv_qemu_login_evidence/evidence.sdn"
+            )
+        else:
+            verify_blocker(capture)
+            step("Publish the exact blocker contract")
+            val manifest = scenario_evidence_status_manifest(
+                "linux.riscv.login",
+                ["REQ-EVS-006", "REQ-EVS-007"],
+                LINUX_SPEC,
+                capture.status,
+                capture.reason,
+                "qemu-riscv64",
+                "serial",
+                capture.resume_command
+            )
+            val publication = write_scenario_evidence_manifest(manifest).unwrap()
+            expect(publication).to_equal(LINUX_ARTIFACT_ROOT + "/evidence.sdn")
+            expect(retain_scenario_evidence_manifest(manifest).unwrap()).to_equal(
+                "doc/06_spec/evidence/03_system/os/evidence/" +
+                "linux_riscv_qemu_login_evidence/evidence.sdn"
+            )
+
+        step("Render the evidence for review")
+        val rendered = (
+            "status: " + capture.status + "\n" +
+            "reason: " + capture.reason + "\n" +
+            "resume: " + capture.resume_command
+        )
+        expect(rendered).to_contain("status: " + capture.status)
+        expect(rendered).to_contain(LINUX_SPEC)

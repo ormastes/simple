@@ -1,0 +1,376 @@
+# codex-system-test
+# @tag:system
+# @req REQ-EVS-016
+# @cover src/app/portable_compute_emit/main.spl 80%
+# @cover scripts/check/check-cuda-generated-2d-readback.shs 80%
+# @evidence-display: embed_tui
+
+"""
+# GPU evidence rung matrix
+
+## Overview
+
+Runs the canonical CUDA 2D readback checker only with explicit live opt-in.
+Generation, compilation, submission, completion, device readback, and CPU
+parity are independent rungs. Verification stops at the first unproved rung;
+CPU fallback and source inspection never promote a row.
+
+**Requirements:** doc/02_requirements/feature/evidence_showcase.md
+**Plan:** doc/03_plan/sys_test/evidence_showcase.md
+**Design:** doc/05_design/evidence_showcase.md
+**Research:** doc/01_research/local/evidence_showcase.md
+
+## Examples
+
+Set `SIMPLE_EVIDENCE_GPU_RUNG_MATRIX=1` on a CUDA-capable host and run this spec.
+Review the receipt from emission through device readback and CPU parity; the
+first unavailable rung is reported without fallback promotion.
+
+**Artifacts:** build/test-artifacts/03_system/app/simple_2d/gpu_evidence_rung_matrix/evidence.env; build/test-artifacts/03_system/app/simple_2d/gpu_evidence_rung_matrix/report.md; build/test-artifacts/03_system/app/simple_2d/gpu_evidence_rung_matrix/status.txt
+"""
+
+use std.spec.*
+use app.io.mod.{
+    dir_create_all,
+    env_get,
+    file_exists,
+    file_hash_sha256,
+    file_read,
+    file_read_text,
+    file_size_raw,
+    file_write,
+    process_run_timeout,
+    time_now_unix_micros
+}
+use std.io.{host_arch, host_os}
+use std.common.spec.scenario_evidence.{
+    ScenarioCaptureKind, ScenarioEvidenceArtifact
+}
+use std.common.spec.scenario_motion_evidence.{ScenarioArtifactIntegrity}
+use std.spec.scenario_evidence_manifest.{ScenarioEvidenceManifest}
+use std.spec.scenario_evidence_manifest_io.{
+    retain_scenario_evidence_manifest, write_scenario_evidence_manifest
+}
+
+val GPU_ROOT = "build/test-artifacts/03_system/app/simple_2d/gpu_evidence_rung_matrix"
+val GPU_RECEIPT = GPU_ROOT + "/evidence.env"
+val GPU_REPORT = GPU_ROOT + "/report.md"
+val GPU_STATUS = GPU_ROOT + "/status.txt"
+val GPU_CHECK = "scripts/check/check-cuda-generated-2d-readback.shs"
+val GPU_SPEC = "test/03_system/app/simple_2d/gpu_evidence_rung_matrix_spec.spl"
+val GPU_MANUAL = (
+    "doc/06_spec/03_system/app/simple_2d/" +
+    "gpu_evidence_rung_matrix_spec.md"
+)
+
+struct GpuRungCapture:
+    status: text
+    reason: text
+    first_unavailable_rung: text
+    receipt: text
+    exit_code: i32
+    resume_command: text
+
+fn receipt_value(receipt: text, key: text) -> text:
+    val prefix = key + "="
+    for line in receipt.split("\n"):
+        if line.starts_with(prefix):
+            return line[prefix.len():]
+    ""
+
+fn first_unavailable_cuda_rung(receipt: text) -> text:
+    if (
+        receipt_value(receipt, "cuda_generated_2d_readback_ptx_emitter_mode") !=
+            "source-cli" or
+        receipt_value(receipt, "cuda_generated_2d_readback_ptx_source_hash_equal") !=
+            "true"
+    ):
+        return "emission"
+    if (
+        receipt_value(receipt, "cuda_generated_2d_readback_ptx_status") !=
+            "compiled_artifact_verified" or
+        receipt_value(receipt, "cuda_generated_2d_readback_ptx_candidate_compiled") !=
+            "true" or
+        receipt_value(receipt, "cuda_generated_2d_readback_ptx_artifact_validated") !=
+            "true"
+    ):
+        return "compile"
+    if receipt_value(
+        receipt, "cuda_generated_2d_readback_submit_attempted"
+    ) != "true":
+        return "submit"
+    if receipt_value(
+        receipt, "cuda_generated_2d_readback_helper_exit_status"
+    ) != "0":
+        return "completion"
+    if (
+        receipt_value(receipt, "cuda_generated_2d_readback_readback_available") !=
+            "true" or
+        receipt_value(receipt, "cuda_generated_2d_readback_device_identity") == "" or
+        receipt_value(receipt, "cuda_generated_2d_readback_device_identity") == "0"
+    ):
+        return "device-readback"
+    if (
+        receipt_value(receipt, "cuda_generated_2d_readback_expected_checksum") == "" or
+        receipt_value(receipt, "cuda_generated_2d_readback_expected_checksum") !=
+            receipt_value(receipt, "cuda_generated_2d_readback_actual_checksum") or
+        receipt_value(receipt, "cuda_generated_2d_readback_mismatch_count") != "0"
+    ):
+        return "cpu-parity"
+    ""
+
+fn capture_gpu_rungs() -> GpuRungCapture:
+    val resume = (
+        "SIMPLE_EVIDENCE_GPU_RUNG_MATRIX=1 bin/simple test " + GPU_SPEC +
+        " --mode=interpreter --timeout 180"
+    )
+    if env_get("SIMPLE_EVIDENCE_GPU_RUNG_MATRIX") != "1":
+        return GpuRungCapture(
+            status: "blocked", reason: "live-run-not-requested",
+            first_unavailable_rung: "capture", receipt: "",
+            exit_code: -1, resume_command: resume
+        )
+    val result = process_run_timeout(
+        "/usr/bin/env",
+        [
+            "BUILD_DIR=" + GPU_ROOT,
+            "REPORT_PATH=" + GPU_REPORT,
+            "sh",
+            GPU_CHECK
+        ],
+        150000
+    )
+    if not file_exists(GPU_RECEIPT):
+        return GpuRungCapture(
+            status: "blocked", reason: "canonical-receipt-missing",
+            first_unavailable_rung: "capture",
+            receipt: result[0] + "\n" + result[1],
+            exit_code: result[2], resume_command: resume
+        )
+    val receipt = file_read_text(GPU_RECEIPT)
+    val first = first_unavailable_cuda_rung(receipt)
+    GpuRungCapture(
+        status: if first == "" and result[2] == 0 and file_exists(GPU_REPORT):
+            "captured"
+        else:
+            "blocked",
+        reason: if first != "":
+            "first-unavailable-rung:" + first
+        elif result[2] != 0:
+            "canonical-checker-failed-exit=" + result[2].to_text()
+        elif not file_exists(GPU_REPORT):
+            "canonical-report-missing"
+        else:
+            "",
+        first_unavailable_rung: first,
+        receipt: receipt,
+        exit_code: result[2],
+        resume_command: resume
+    )
+
+fn retained_gpu_artifact(
+    path: text,
+    title: text,
+    body: text
+) -> ScenarioEvidenceArtifact:
+    ScenarioEvidenceArtifact(
+        kind: ScenarioCaptureKind.artifact,
+        title: title,
+        mime: "text/plain",
+        path: path,
+        body: body,
+        scenario_id: "gpu-rung-matrix",
+        step_id: "Publish",
+        redacted: false
+    )
+
+fn retained_gpu_integrity(
+    path: text,
+    source_digest: text,
+    host: text,
+    target: text,
+    producer: text
+) -> ScenarioArtifactIntegrity:
+    ScenarioArtifactIntegrity(
+        path: path,
+        format: "log",
+        mime: "text/plain",
+        width: 0,
+        height: 0,
+        byte_size: file_size_raw(path),
+        checksum: file_hash_sha256(path),
+        producer: producer,
+        producer_version: source_digest,
+        source_revision: "source-sha256:" + source_digest,
+        host: host,
+        target: target,
+        capture_ready: true,
+        baseline_identity: "",
+        comparison_result: "not-compared",
+        required: true
+    )
+
+describe "REQ-EVS-016 GPU evidence rung matrix":
+    it "should stop at the first unavailable live GPU rung":
+        val start_time = time_now_unix_micros() / 1000
+
+        step("Capture the feature evidence")
+        val capture = capture_gpu_rungs()
+
+        step("Verify the structured evidence")
+        if capture.status == "captured":
+            expect(capture.exit_code).to_equal(0)
+            expect(capture.first_unavailable_rung).to_equal("")
+            expect(receipt_value(
+                capture.receipt,
+                "cuda_generated_2d_readback_ptx_emitter_mode"
+            )).to_equal("source-cli")
+            expect(receipt_value(
+                capture.receipt,
+                "cuda_generated_2d_readback_ptx_status"
+            )).to_equal("compiled_artifact_verified")
+            expect(receipt_value(
+                capture.receipt,
+                "cuda_generated_2d_readback_submit_attempted"
+            )).to_equal("true")
+            expect(receipt_value(
+                capture.receipt,
+                "cuda_generated_2d_readback_helper_exit_status"
+            )).to_equal("0")
+            expect(receipt_value(
+                capture.receipt,
+                "cuda_generated_2d_readback_readback_available"
+            )).to_equal("true")
+            expect(receipt_value(
+                capture.receipt,
+                "cuda_generated_2d_readback_expected_checksum"
+            )).to_equal(receipt_value(
+                capture.receipt,
+                "cuda_generated_2d_readback_actual_checksum"
+            ))
+        else:
+            expect(capture.status).to_equal("blocked")
+            if capture.reason.starts_with("first-unavailable-rung:"):
+                if capture.first_unavailable_rung == "emission":
+                    expect(capture.first_unavailable_rung).to_equal("emission")
+                elif capture.first_unavailable_rung == "compile":
+                    expect(capture.first_unavailable_rung).to_equal("compile")
+                elif capture.first_unavailable_rung == "submit":
+                    expect(capture.first_unavailable_rung).to_equal("submit")
+                elif capture.first_unavailable_rung == "completion":
+                    expect(capture.first_unavailable_rung).to_equal("completion")
+                elif capture.first_unavailable_rung == "device-readback":
+                    expect(capture.first_unavailable_rung).to_equal("device-readback")
+                else:
+                    expect(capture.first_unavailable_rung).to_equal("cpu-parity")
+                expect(capture.reason).to_equal(
+                    "first-unavailable-rung:" + capture.first_unavailable_rung
+                )
+            else:
+                if capture.reason == "live-run-not-requested":
+                    expect(capture.first_unavailable_rung).to_equal("capture")
+                elif capture.reason == "canonical-receipt-missing":
+                    expect(capture.first_unavailable_rung).to_equal("capture")
+                elif capture.reason == "canonical-report-missing":
+                    expect(capture.first_unavailable_rung).to_equal("")
+                else:
+                    expect(capture.reason).to_start_with(
+                        "canonical-checker-failed-exit="
+                    )
+
+        step("Render the evidence for review")
+        expect(dir_create_all(GPU_ROOT)).to_equal(true)
+        val status_receipt = (
+            "status: " + capture.status + "\n" +
+            "reason: " + capture.reason + "\n" +
+            "first_unavailable_rung: " + capture.first_unavailable_rung + "\n" +
+            "exit_code: " + capture.exit_code.to_text() + "\n"
+        )
+        expect(file_write(GPU_STATUS, status_receipt)).to_equal(true)
+        expect(file_read(GPU_STATUS)).to_equal(status_receipt)
+        if capture.status == "captured":
+            expect(GPU_REPORT).to_end_with("/report.md")
+        else:
+            expect(capture.resume_command).to_start_with(
+                "SIMPLE_EVIDENCE_GPU_RUNG_MATRIX=1"
+            )
+
+        step("Publish the showcase link")
+        val source_digest = file_hash_sha256(GPU_SPEC)
+        expect(source_digest.len()).to_equal(64)
+        val host = host_os() + "-" + host_arch()
+        val target = if capture.status == "captured":
+            receipt_value(
+                capture.receipt,
+                "cuda_generated_2d_readback_device_identity"
+            )
+        else:
+            "cuda-device"
+        val artifacts = [
+            retained_gpu_artifact(GPU_STATUS, "GPU rung status", status_receipt)
+        ]
+        val integrities = [
+            retained_gpu_integrity(
+                GPU_STATUS, source_digest, host, target, GPU_SPEC
+            )
+        ]
+        if file_exists(GPU_RECEIPT):
+            artifacts.push(retained_gpu_artifact(
+                GPU_RECEIPT, "CUDA readback receipt", file_read_text(GPU_RECEIPT)
+            ))
+            integrities.push(retained_gpu_integrity(
+                GPU_RECEIPT, source_digest, host, target, GPU_CHECK
+            ))
+        if file_exists(GPU_REPORT):
+            artifacts.push(retained_gpu_artifact(
+                GPU_REPORT, "CUDA readback report", file_read_text(GPU_REPORT)
+            ))
+            integrities.push(retained_gpu_integrity(
+                GPU_REPORT, source_digest, host, target, GPU_CHECK
+            ))
+        val manifest = ScenarioEvidenceManifest(
+                schema_major: 1,
+                schema_minor: 0,
+                feature_id: "gpu.programming.rungs",
+                requirement_ids: ["REQ-EVS-016"],
+                spec_path: GPU_SPEC,
+                generated_manual_path: GPU_MANUAL,
+                scenario_id: "gpu-rung-matrix",
+                step_id: "Publish",
+                required: true,
+                result: if capture.status == "captured": "pass" else: "blocked",
+                showcase_status: if capture.status == "captured":
+                    "live-pass"
+                else:
+                    "blocked",
+                reason: capture.reason,
+                source_revision: "source-sha256:" + source_digest,
+                source_digest: "sha256:" + source_digest,
+                command: capture.resume_command,
+                producer: GPU_CHECK,
+                producer_version: source_digest,
+                host: host,
+                target: target,
+                backend: "generated-2d-readback",
+                start_time: start_time,
+                duration_ms: time_now_unix_micros() / 1000 - start_time,
+                artifacts: artifacts,
+                artifact_integrity: integrities,
+                text_results: [],
+                motion_evidence: [],
+                protocol_fields: [],
+                html_checks: [],
+                blocker_prerequisite: if capture.status == "captured": "" else: capture.reason,
+                resume_command: capture.resume_command,
+                owner: "simple_2d",
+                final_reviewer: "verification"
+        )
+        val publication = write_scenario_evidence_manifest(manifest).unwrap()
+        expect(publication).to_equal(
+            "build/test-artifacts/03_system/app/simple_2d/" +
+            "gpu_evidence_rung_matrix/evidence.sdn"
+        )
+        expect(retain_scenario_evidence_manifest(manifest).unwrap()).to_equal(
+            "doc/06_spec/evidence/03_system/app/simple_2d/" +
+            "gpu_evidence_rung_matrix/evidence.sdn"
+        )

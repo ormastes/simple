@@ -1,0 +1,25 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_csr_provider.{strict_riscv_scalar_runtime_csr_provider}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan}
+
+describe "flat runtime scalar CSR provider":
+    it "owns one captured Zicsr completion and commit":
+        val owner = strict_riscv_scalar_runtime_csr_provider("runtime_csr", CoreConfig.rv32_zicsr_zifencei(), riscv_scalar_decoder_plan("rv32i_zicsr_zifencei").unwrap()).unwrap()
+        expect(owner.diagnostic()).to_equal("")
+        expect(owner.child_entity).to_equal("")
+        expect(owner.plan.rules[0].name).to_equal("protocol_fault")
+        expect(owner.plan.rules[1].name).to_equal("completion_consume_and_commit")
+        expect(owner.plan.rules[1].guards[0].lhs).to_equal("completion_ready")
+        expect(owner.plan.outputs.any(_.result == "csr_commit_valid")).to_be(true)
+        expect(owner.plan.outputs.any(_.result == "completion_valid")).to_be(true)
+        expect(owner.plan.named_width(owner.ports, "completion_decode_event_id")).to_equal(64)
+        expect(owner.plan.named_width(owner.ports, "csr_commit_value")).to_equal(32)
+        expect(owner.datapath_compare_ops.filter(\op: op.result == "tag_ok").len()).to_equal(1)
+        expect(owner.datapath_select_ops.any(\op: op.result == "completion_rd_value" and op.condition == "access_allowed" and op.when_true == "csr_read_value" and op.when_false == "zero_xlen")).to_be(true)
+        expect(owner.datapath_compare_ops.any(\op: op.result == "rd_zero" and op.lhs == "canonical_rd" and op.rhs == "zero5")).to_be(true)
+        expect(owner.datapath_comb_ops.any(\op: op.result == "not_rd_zero" and op.op == "xor" and op.lhs == "rd_zero" and op.rhs == "one1")).to_be(true)
+        expect(owner.datapath_comb_ops.any(\op: op.result == "completion_rd_write" and op.op == "and" and op.lhs == "access_allowed" and op.rhs == "not_rd_zero")).to_be(true)
+
+    it "rejects non-Zicsr profiles":
+        expect(strict_riscv_scalar_runtime_csr_provider("wrong", CoreConfig.rv32(), riscv_scalar_decoder_plan("rv32i").unwrap()).is_err()).to_be(true)

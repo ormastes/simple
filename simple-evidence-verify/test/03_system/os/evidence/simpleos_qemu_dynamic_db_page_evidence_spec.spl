@@ -1,0 +1,425 @@
+# codex-system-test
+# @tag:system
+# @req REQ-EVS-012
+# @cover src/os/services/database/simple_db_service.spl 80%
+# @evidence-display: embed_html
+
+"""
+# SimpleOS dynamic database page evidence
+
+## Overview
+
+The in-process branch executes the same `SimpleDbService` request owner used by
+the boot HTTP listener. The optional live branch boots the current-source RV64
+kernel through `qemu_rv64_http_test.shs`; that runner now requires the complete
+GET /db, create, insert, select, refreshed GET sequence before it passes.
+Missing live prerequisites publish an exact blocker and resume command.
+
+**Requirements:** doc/02_requirements/feature/evidence_showcase.md
+**Plan:** doc/03_plan/sys_test/evidence_showcase.md
+**Design:** doc/05_design/evidence_showcase.md
+**Research:** doc/01_research/local/evidence_showcase.md
+
+## Examples
+
+Run the spec for the in-process request flow. For QEMU evidence, build the RV64
+kernel, set `SIMPLE_EVIDENCE_SIMPLEOS_DYNAMIC_DB=1`, rerun it, and review the
+captured page plus create, insert, select, and refreshed GET sequence.
+"""
+
+use std.spec.*
+use app.io.mod.{
+    current_time_ms, dir_create_all, env_get, file_atomic_write, file_exists,
+    file_hash_sha256, file_read_text, file_size, hostname, process_run_timeout
+}
+use os.services.database.simple_db_service.{SimpleDbService}
+use std.security.sanitize.{sanitize_html}
+use std.common.spec.scenario_evidence.{
+    ScenarioCaptureKind, ScenarioEvidenceArtifact, ScenarioHtmlCheckResult,
+    ScenarioHtmlCheckTool
+}
+use std.common.spec.scenario_motion_evidence.{ScenarioArtifactIntegrity}
+use std.spec.scenario_evidence_manifest.{ScenarioEvidenceManifest}
+use std.spec.scenario_evidence_manifest_io.{
+    retain_scenario_evidence_manifest, write_scenario_evidence_manifest
+}
+
+struct DynamicDbLiveCapture:
+    status: text
+    reason: text
+    resume_command: text
+    exit_code: i32
+    serial_log: text
+    query_log: text
+    page_log: text
+    runner_output: text
+
+val DYNAMIC_DB_ARTIFACT_ROOT = (
+    "build/test-artifacts/03_system/os/evidence/" +
+    "simpleos_qemu_dynamic_db_page_evidence"
+)
+val DYNAMIC_DB_SERIAL_LOG = DYNAMIC_DB_ARTIFACT_ROOT + "/serial.log"
+val DYNAMIC_DB_QUERY_LOG = DYNAMIC_DB_ARTIFACT_ROOT + "/db_query.log"
+val DYNAMIC_DB_PAGE_LOG = DYNAMIC_DB_ARTIFACT_ROOT + "/db_page.log"
+val DYNAMIC_DB_CAPTURED_HTML = (
+    "doc/06_spec/image/03_system/os/evidence/" +
+    "simpleos_qemu_dynamic_db_page_evidence/captured.html"
+)
+val DYNAMIC_DB_KERNEL = "build/os/simpleos_riscv64.elf"
+val DYNAMIC_DB_BUILD_STAMP = "build/os/simpleos_riscv64.elf.build_stamp"
+val DYNAMIC_DB_SPEC = (
+    "test/03_system/os/evidence/" +
+    "simpleos_qemu_dynamic_db_page_evidence_spec.spl"
+)
+val DYNAMIC_DB_MANUAL = (
+    "doc/06_spec/03_system/os/evidence/" +
+    "simpleos_qemu_dynamic_db_page_evidence_spec.md"
+)
+val DYNAMIC_DB_RUNNER = "scripts/qemu/qemu_rv64_http_test.shs"
+val DYNAMIC_DB_TEST_COMMAND = (
+    "bin/simple test " + DYNAMIC_DB_SPEC +
+    " --mode=interpreter --timeout 180"
+)
+val DYNAMIC_DB_RESUME = (
+    "bin/simple os build --arch=riscv64 && " +
+    "SIMPLE_EVIDENCE_SIMPLEOS_DYNAMIC_DB=1 " +
+    DYNAMIC_DB_TEST_COMMAND
+)
+
+fn inert_html_capture(source: text, evidence_class: text) -> text:
+    (
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">" +
+        "<meta http-equiv=\"Content-Security-Policy\" " +
+        "content=\"default-src 'none'; style-src 'unsafe-inline'\">" +
+        "<title>SimpleOS dynamic DB evidence</title>" +
+        "<style>body{font-family:monospace;max-width:90rem;margin:2rem auto}" +
+        "pre{white-space:pre-wrap;overflow-wrap:anywhere}</style></head>" +
+        "<body><h1>SimpleOS dynamic DB evidence</h1>" +
+        "<p>Evidence class: " + sanitize_html(evidence_class) + "</p>" +
+        "<pre id=\"captured-response\">" + sanitize_html(source) +
+        "</pre></body></html>"
+    )
+
+fn blocked_dynamic_db_capture(reason: text) -> DynamicDbLiveCapture:
+    DynamicDbLiveCapture(
+        status: "blocked",
+        reason: reason,
+        resume_command: DYNAMIC_DB_RESUME,
+        exit_code: -1,
+        serial_log: "",
+        query_log: "",
+        page_log: "",
+        runner_output: ""
+    )
+
+fn capture_live_dynamic_db_page() -> DynamicDbLiveCapture:
+    if not file_exists(DYNAMIC_DB_KERNEL):
+        return blocked_dynamic_db_capture(
+            "missing-prerequisite:" + DYNAMIC_DB_KERNEL
+        )
+    if not file_exists(DYNAMIC_DB_BUILD_STAMP):
+        return blocked_dynamic_db_capture(
+            "missing-prerequisite:" + DYNAMIC_DB_BUILD_STAMP
+        )
+    if env_get("SIMPLE_EVIDENCE_SIMPLEOS_DYNAMIC_DB") != "1":
+        return blocked_dynamic_db_capture("live-run-not-requested")
+
+    val result = process_run_timeout(
+        "/usr/bin/env",
+        [
+            "SERIAL_LOG=" + DYNAMIC_DB_SERIAL_LOG,
+            "DB_QUERY_LOG=" + DYNAMIC_DB_QUERY_LOG,
+            "DB_PAGE_LOG=" + DYNAMIC_DB_PAGE_LOG,
+            "sh",
+            "scripts/qemu/qemu_rv64_http_test.shs",
+            "--with-db",
+            "--expect-http-only"
+        ],
+        150000
+    )
+    val output = result[0] + "\n" + result[1]
+    if result[2] != 0:
+        return DynamicDbLiveCapture(
+            status: "blocked",
+            reason: "runner-failed-exit=" + result[2].to_text(),
+            resume_command: DYNAMIC_DB_RESUME,
+            exit_code: result[2],
+            serial_log: DYNAMIC_DB_SERIAL_LOG,
+            query_log: DYNAMIC_DB_QUERY_LOG,
+            page_log: DYNAMIC_DB_PAGE_LOG,
+            runner_output: output
+        )
+    if not file_exists(DYNAMIC_DB_SERIAL_LOG):
+        return blocked_dynamic_db_capture(
+            "missing-artifact:" + DYNAMIC_DB_SERIAL_LOG
+        )
+    if not file_exists(DYNAMIC_DB_QUERY_LOG):
+        return blocked_dynamic_db_capture(
+            "missing-artifact:" + DYNAMIC_DB_QUERY_LOG
+        )
+    if not file_exists(DYNAMIC_DB_PAGE_LOG):
+        return blocked_dynamic_db_capture(
+            "missing-artifact:" + DYNAMIC_DB_PAGE_LOG
+        )
+    DynamicDbLiveCapture(
+        status: "captured",
+        reason: "",
+        resume_command: DYNAMIC_DB_RESUME,
+        exit_code: result[2],
+        serial_log: file_read_text(DYNAMIC_DB_SERIAL_LOG),
+        query_log: file_read_text(DYNAMIC_DB_QUERY_LOG),
+        page_log: file_read_text(DYNAMIC_DB_PAGE_LOG),
+        runner_output: output
+    )
+
+fn verify_live_capture_or_blocker(capture: DynamicDbLiveCapture):
+    if capture.status == "captured":
+        expect(capture.exit_code).to_equal(0)
+        expect(capture.serial_log).to_contain("Network service ready")
+        expect(capture.serial_log).to_contain(
+            "[http_baremetal] Listening on 0.0.0.0:8080"
+        )
+        expect(capture.query_log).to_contain("OK INSERT")
+        expect(capture.query_log).to_contain("codex-41")
+        expect(capture.page_log).to_contain("--- before insert ---")
+        expect(capture.page_log).to_contain("--- after insert ---")
+        expect(capture.page_log).to_contain("<td>codex</td>")
+        expect(capture.page_log).to_contain("<td>answer</td>")
+        expect(capture.page_log).to_contain("<td>codex-41</td>")
+        expect(capture.runner_output).to_contain("PASS (codex-41)")
+    else:
+        expect(capture.status).to_equal("blocked")
+        if capture.reason == "live-run-not-requested":
+            expect(capture.reason).to_equal("live-run-not-requested")
+        elif capture.reason.starts_with("runner-failed-exit="):
+            expect(capture.reason).to_start_with("runner-failed-exit=")
+        elif capture.reason.starts_with("missing-artifact:"):
+            expect(capture.reason).to_start_with("missing-artifact:")
+        else:
+            expect(capture.reason).to_start_with("missing-prerequisite:")
+        expect(capture.resume_command).to_contain(
+            "bin/simple os build --arch=riscv64"
+        )
+        expect(capture.resume_command).to_contain(
+            "SIMPLE_EVIDENCE_SIMPLEOS_DYNAMIC_DB=1"
+        )
+
+describe "REQ-EVS-012 SimpleOS dynamic database page evidence":
+    it "should boot or block exactly and prove insert query and refreshed HTML":
+        step("Capture the feature evidence")
+        val capture_started_ms = current_time_ms()
+        var db = SimpleDbService.new()
+        val initial_page = db.execute_http_request(
+            "GET /db HTTP/1.1\r\nHost: simpleos\r\n\r\n"
+        )
+        val create = db.execute_http_request(
+            "POST /db HTTP/1.1\r\n\r\nCREATE showcase"
+        )
+        val insert = db.execute_http_request(
+            "POST /db HTTP/1.1\r\n\r\nINSERT showcase greeting hello"
+        )
+        val query = db.execute_http_request(
+            "POST /db HTTP/1.1\r\n\r\nSELECT showcase greeting"
+        )
+        val refreshed_page = db.execute_http_request(
+            "GET /db HTTP/1.1\r\nHost: simpleos\r\n\r\n"
+        )
+        val live = capture_live_dynamic_db_page()
+        val capture_duration_ms = current_time_ms() - capture_started_ms
+
+        step("Verify the structured evidence")
+        expect(initial_page).to_start_with("HTTP/1.1 200 OK")
+        expect(initial_page).to_contain(
+            "Content-Type: text/html; charset=utf-8"
+        )
+        expect(initial_page).to_contain("<h1>SimpleOS DB</h1>")
+        expect(initial_page).to_contain("<table>")
+        expect(initial_page.find("<td>hello</td>")).to_equal(-1)
+        expect(create).to_end_with("\r\n\r\nOK CREATE")
+        expect(insert).to_end_with("\r\n\r\nOK INSERT")
+        expect(query).to_end_with("\r\n\r\nhello")
+        expect(refreshed_page).to_start_with("HTTP/1.1 200 OK")
+        expect(refreshed_page).to_contain("<td>showcase</td>")
+        expect(refreshed_page).to_contain("<td>greeting</td>")
+        expect(refreshed_page).to_contain("<td>hello</td>")
+        verify_live_capture_or_blocker(live)
+
+        step("Render the evidence for review")
+        # @capture(html)
+        expect(refreshed_page).to_contain(
+            "<tr><td>showcase</td><td>greeting</td><td>hello</td></tr>"
+        )
+        val evidence_source = if live.status == "captured":
+            live.page_log
+        else:
+            refreshed_page
+        val evidence_class = if live.status == "captured":
+            "live SimpleOS RV64 QEMU"
+        else:
+            "host in-process contract; SimpleOS RV64 QEMU blocked"
+        val captured_html = inert_html_capture(evidence_source, evidence_class)
+        expect(dir_create_all(
+            "doc/06_spec/image/03_system/os/evidence/" +
+            "simpleos_qemu_dynamic_db_page_evidence"
+        )).to_equal(true)
+        expect(file_atomic_write(
+            DYNAMIC_DB_CAPTURED_HTML, captured_html
+        )).to_equal(true)
+        expect(file_exists(DYNAMIC_DB_CAPTURED_HTML)).to_equal(true)
+        expect(file_size(DYNAMIC_DB_CAPTURED_HTML)).to_be_greater_than(0)
+
+        val captured_lower = captured_html.lower()
+        expect(captured_lower.find("<script")).to_equal(-1)
+        expect(captured_lower.find("javascript:")).to_equal(-1)
+        expect(captured_lower.find(" onerror=")).to_equal(-1)
+        expect(captured_html).to_contain(
+            "Content-Security-Policy"
+        )
+
+        val artifact = ScenarioEvidenceArtifact(
+            kind: ScenarioCaptureKind.html,
+            title: "Sanitized dynamic database page",
+            mime: "text/html",
+            path: DYNAMIC_DB_CAPTURED_HTML,
+            body: captured_html,
+            scenario_id: "simpleos-dynamic-db-page",
+            step_id: "render",
+            redacted: false
+        )
+        val content_type_check = ScenarioHtmlCheckResult(
+            tool: ScenarioHtmlCheckTool.simple_html_heuristic,
+            passed: evidence_source.contains(
+                "Content-Type: text/html; charset=utf-8"
+            ),
+            summary: "HTTP response declares UTF-8 HTML",
+            messages: "expected Content-Type: text/html; charset=utf-8",
+            artifact: artifact
+        )
+        val page_structure_check = ScenarioHtmlCheckResult(
+            tool: ScenarioHtmlCheckTool.simple_html_heuristic,
+            passed: evidence_source.contains("<h1>SimpleOS DB</h1>") and
+                evidence_source.contains("<table>"),
+            summary: "database heading and table are present",
+            messages: "expected SimpleOS DB heading and table",
+            artifact: artifact
+        )
+        val mutation_check = ScenarioHtmlCheckResult(
+            tool: ScenarioHtmlCheckTool.simple_html_heuristic,
+            passed: if live.status == "captured":
+                evidence_source.contains("<td>codex</td>") and
+                    evidence_source.contains("<td>answer</td>") and
+                    evidence_source.contains("<td>codex-41</td>")
+            else:
+                evidence_source.contains(
+                    "<tr><td>showcase</td><td>greeting</td>" +
+                    "<td>hello</td></tr>"
+                ),
+            summary: "inserted database row appears in refreshed HTML",
+            messages: "expected the inserted table, key, and value row",
+            artifact: artifact
+        )
+        val inert_check = ScenarioHtmlCheckResult(
+            tool: ScenarioHtmlCheckTool.simple_html_heuristic,
+            passed: captured_lower.find("<script") == -1 and
+                captured_lower.find("javascript:") == -1 and
+                captured_lower.find(" onerror=") == -1 and
+                captured_html.contains("default-src 'none'"),
+            summary: "review capture is escaped and inert",
+            messages: "expected escaped content and deny-all CSP",
+            artifact: artifact
+        )
+        expect(content_type_check.passed).to_equal(true)
+        expect(page_structure_check.passed).to_equal(true)
+        expect(mutation_check.passed).to_equal(true)
+        expect(inert_check.passed).to_equal(true)
+
+        step("Publish the showcase link")
+        val is_live = live.status == "captured"
+        val source_revision = if is_live:
+            "elf-sha256:" + file_hash_sha256(DYNAMIC_DB_KERNEL)
+        else:
+            "spec-sha256:" + file_hash_sha256(DYNAMIC_DB_SPEC)
+        val source_digest =
+            "sha256:" + file_hash_sha256(DYNAMIC_DB_SPEC)
+        val producer = if is_live: DYNAMIC_DB_RUNNER else: DYNAMIC_DB_SPEC
+        val producer_version = file_hash_sha256(producer)
+        val integrity = ScenarioArtifactIntegrity(
+            path: DYNAMIC_DB_CAPTURED_HTML,
+            format: "html",
+            mime: "text/html",
+            width: 0,
+            height: 0,
+            byte_size: file_size(DYNAMIC_DB_CAPTURED_HTML),
+            checksum: file_hash_sha256(DYNAMIC_DB_CAPTURED_HTML),
+            producer: producer,
+            producer_version: producer_version,
+            source_revision: source_revision,
+            host: hostname(),
+            target: if is_live: "qemu-riscv64" else: "host-contract",
+            capture_ready: true,
+            baseline_identity: "",
+            comparison_result: "not-compared",
+            required: true
+        )
+        val manifest = ScenarioEvidenceManifest(
+            schema_major: 1,
+            schema_minor: 0,
+            feature_id: "simpleos.web_db.dynamic_page",
+            requirement_ids: ["REQ-EVS-012"],
+            spec_path: DYNAMIC_DB_SPEC,
+            generated_manual_path: DYNAMIC_DB_MANUAL,
+            scenario_id: "simpleos-dynamic-db-page",
+            step_id: "publish",
+            required: true,
+            result: "blocked",
+            showcase_status: "blocked",
+            reason: if is_live:
+                "missing-required-qemu-framebuffer-still"
+            else:
+                live.reason,
+            source_revision: source_revision,
+            source_digest: source_digest,
+            command: DYNAMIC_DB_TEST_COMMAND,
+            producer: producer,
+            producer_version: producer_version,
+            host: hostname(),
+            target: "qemu-riscv64",
+            backend: "qemu-rv64-http",
+            start_time: capture_started_ms,
+            duration_ms: capture_duration_ms,
+            artifacts: [artifact],
+            artifact_integrity: [integrity],
+            text_results: [],
+            motion_evidence: [],
+            protocol_fields: [],
+            html_checks: [
+                content_type_check,
+                page_structure_check,
+                mutation_check,
+                inert_check
+            ],
+            blocker_prerequisite: if is_live:
+                "missing-required-qemu-framebuffer-still"
+            else:
+                live.reason,
+            resume_command: DYNAMIC_DB_RESUME,
+            owner: "simpleos",
+            final_reviewer: "verification"
+        )
+        val publication = write_scenario_evidence_manifest(manifest).unwrap()
+        expect(publication).to_equal(
+            DYNAMIC_DB_ARTIFACT_ROOT + "/evidence.sdn"
+        )
+        expect(retain_scenario_evidence_manifest(manifest).unwrap()).to_equal(
+            "doc/06_spec/evidence/03_system/os/evidence/" +
+            "simpleos_qemu_dynamic_db_page_evidence/evidence.sdn"
+        )
+        expect(file_exists(publication)).to_equal(true)
+        expect(manifest.showcase_status).to_equal("blocked")
+        expect(manifest.blocker_prerequisite).to_equal(
+            if is_live:
+                "missing-required-qemu-framebuffer-still"
+            else:
+                live.reason
+        )
+        expect(manifest.resume_command).to_equal(DYNAMIC_DB_RESUME)

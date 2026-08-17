@@ -1,0 +1,86 @@
+"""
+Fail-closed contract for SimpleOS compiler-in-filesystem QEMU evidence.
+
+These scenarios use a hermetic fake-QEMU transport. They validate the evidence
+parser and receipt binding; they do not claim a live guest boot.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+fn _run(script: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", script])
+
+describe "SimpleOS compiler-filesystem QEMU checker":
+    describe "REQ-SOS-CFS-QEMU-004: guest protocol and failure termination":
+        it "requires protocol v2 and a nonzero guest failure terminator":
+            val producer = "examples/09_embedded/simple_os/arch/x86_64/compiler_filesystem_entry.spl"
+            val stubs = "examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c"
+            val command = "grep -q 'protocol=2' \"$producer\" && grep -q 'rt_debug_exit_failure' \"$producer\" && grep -q 'outb((uint16_t)0xF4, (uint8_t)1)' \"$stubs\""
+            val (out, err, code) = _run(command)
+            expect(code).to_equal(0)
+
+        it "binds the selected image into the actual QEMU drive argv":
+            val runner = "src/os/_QemuRunner/scenario_exec.spl"
+            val checker = "scripts/check/check-simpleos-compiler-filesystem-qemu.shs"
+            val command = "grep -q 'SIMPLEOS_COMPILER_FS_IMAGE=\"$IMAGE\"' \"$checker\" && grep -q 'id=cfsexecns1,format=raw' \"$runner\" && grep -q 'SIMPLEOS_COMPILER_FS_QEMU_IMAGE path=' \"$runner\""
+            val (out, err, code) = _run(command)
+            expect(code).to_equal(0)
+
+        it "hashes captured guest stdout and validates the manifest role":
+            val producer = "examples/09_embedded/simple_os/arch/x86_64/compiler_filesystem_entry.spl"
+            val parser = "scripts/check/lib/simpleos-compiler-filesystem-receipt.shs"
+            val command = "grep -q 'rt_bare_exec_stdout_capture_begin' \"$producer\" && grep -q 'val version_sha = _sha256_hex(observed)' \"$producer\" && grep -q 'val stdout_sha = _sha256_hex(observed)' \"$producer\" && grep -q 'kind=manifest canonical=/SYS/SIMPLETOOL.SDN' \"$producer\" && grep -q 'role-manifest-hash-mismatch' \"$parser\""
+            val (out, err, code) = _run(command)
+            expect(code).to_equal(0)
+
+    describe "REQ-SOS-CFS-QEMU-001: hash-bound x86 evidence":
+        it "should accept one complete fake-QEMU transcript and bind its manifest":
+            step("Run the x86 checker through the hermetic fake-QEMU transport")
+            val command = "set -eu; out=build/test-artifacts/simpleos-compiler-filesystem-qemu/spec-pass; rm -rf \"$out\"; image=scripts/check/fixtures/simpleos-compiler-filesystem-fake-qemu.shs; SIMPLEOS_COMPILER_FS_QEMU_TEST_MODE=1 SIMPLEOS_COMPILER_FS_QEMU_RUNNER=$image sh scripts/check/check-simpleos-compiler-filesystem-qemu.shs --arch=x86_64 --timeout=7 --image=$image --output-dir=\"$out\"; hash=$(sed -n 's/^manifest_sha256=//p' \"$out/x86_64.receipt\"); test \"$(sha256sum \"$out/x86_64.manifest\" | awk '{print $1}')\" = \"$hash\"; grep -q '^serial_sha256=[0-9a-f]\\{64\\}$' \"$out/x86_64.manifest\"; grep -q '^evidence_class=hermetic-fake-qemu-contract$' \"$out/x86_64.manifest\"; grep -q '^exec_stdout_sha256=[0-9a-f]\\{64\\}$' \"$out/x86_64.manifest\"; echo HASH_BOUND_PASS"
+            val (out, err, code) = _run(command)
+            expect(code).to_equal(0)
+            expect(out).to_contain("simpleos_compiler_filesystem_qemu_status=contract-pass")
+            expect(out).to_contain("HASH_BOUND_PASS")
+
+    describe "REQ-SOS-CFS-QEMU-002: adversarial marker rejection":
+        it "should reject missing roles, guest skips, duplicate passes, and runner failure":
+            step("Run malformed, duplicate, binding, skip, and transport adversaries")
+            val command = "set -eu; root=build/test-artifacts/simpleos-compiler-filesystem-qemu/spec-negative; rm -rf \"$root\"; mkdir -p \"$root\"; image=scripts/check/fixtures/simpleos-compiler-filesystem-fake-qemu.shs; for c in missing-role extra-role guest-skip duplicate-pass runner-fail malformed-hash duplicate-field role-version-mismatch role-kind-mismatch manifest-role-hash-mismatch manifest-hash-mismatch nonce-mismatch stdout-mismatch stdout-payload-mismatch version-output-hash-mismatch version-output-payload-mismatch image-mismatch image-arg-mismatch; do if SIMPLEOS_COMPILER_FS_QEMU_TEST_MODE=1 SIMPLEOS_COMPILER_FS_QEMU_RUNNER=$image SIMPLEOS_COMPILER_FS_FAKE_CASE=$c sh scripts/check/check-simpleos-compiler-filesystem-qemu.shs --arch=x86_64 --image=$image --output-dir=\"$root/$c\" >\"$root/$c.out\" 2>&1; then exit 20; fi; test ! -e \"$root/$c/x86_64.manifest\"; test ! -e \"$root/$c/x86_64.receipt\"; echo FAIL_CLOSED_$c; done"
+            val (out, err, code) = _run(command)
+            expect(code).to_equal(0)
+            expect(out).to_contain("FAIL_CLOSED_missing-role")
+            expect(out).to_contain("FAIL_CLOSED_guest-skip")
+            expect(out).to_contain("FAIL_CLOSED_duplicate-pass")
+            expect(out).to_contain("FAIL_CLOSED_runner-fail")
+            expect(out).to_contain("FAIL_CLOSED_malformed-hash")
+            expect(out).to_contain("FAIL_CLOSED_duplicate-field")
+            expect(out).to_contain("FAIL_CLOSED_image-mismatch")
+            expect(out).to_contain("FAIL_CLOSED_image-arg-mismatch")
+            expect(out).to_contain("FAIL_CLOSED_manifest-hash-mismatch")
+            expect(out).to_contain("FAIL_CLOSED_version-output-hash-mismatch")
+
+        it "should invalidate stale publications and reject an unguarded runner override":
+            step("Seed stale passing names, then force rejection before transport")
+            val command = "set -eu; root=build/test-artifacts/simpleos-compiler-filesystem-qemu/spec-stale; rm -rf \"$root\"; mkdir -p \"$root\"; echo stale >\"$root/x86_64.manifest\"; echo stale >\"$root/x86_64.receipt\"; image=scripts/check/fixtures/simpleos-compiler-filesystem-fake-qemu.shs; if SIMPLEOS_COMPILER_FS_QEMU_RUNNER=$image sh scripts/check/check-simpleos-compiler-filesystem-qemu.shs --arch=x86_64 --image=$image --output-dir=\"$root\" >\"$root/out\" 2>&1; then exit 21; fi; test ! -e \"$root/x86_64.manifest\"; test ! -e \"$root/x86_64.receipt\"; grep -q runner-override-requires-test-mode \"$root/out\"; echo STALE_INVALIDATED"
+            val (out, err, code) = _run(command)
+            expect(code).to_equal(0)
+            expect(out).to_contain("STALE_INVALIDATED")
+
+    describe "REQ-SOS-CFS-QEMU-003: unavailable architecture honesty":
+        it "should report the absent AArch64 live route as a blocker":
+            step("Request the AArch64 checker lane")
+            val command = "set +e; out=$(sh scripts/check/check-simpleos-compiler-filesystem-qemu.shs --arch=aarch64 --timeout=7 2>&1); code=$?; set -e; printf '%s\\nexit=%s\\n' \"$out\" \"$code\"; test \"$code\" -eq 3"
+            val (out, err, code) = _run(command)
+            expect(code).to_equal(0)
+            expect(out).to_contain("simpleos_compiler_filesystem_qemu_status=blocked")
+            expect(out).to_contain("aarch64-live-compiler-filesystem-route-absent")
+            expect(out).to_contain("exit=3")
+
+        it "should report the absent x86 live producer rather than claim a pass":
+            step("Request the live x86 lane without a test transport")
+            val command = "set +e; out=$(sh scripts/check/check-simpleos-compiler-filesystem-qemu.shs --arch=x86_64 --timeout=7 --output-dir=build/test-artifacts/simpleos-compiler-filesystem-qemu/spec-live-blocked 2>&1); code=$?; set -e; printf '%s\\nexit=%s\\n' \"$out\" \"$code\"; test \"$code\" -eq 3"
+            val (out, err, code) = _run(command)
+            expect(code).to_equal(0)
+            expect(out).to_contain("x86-q35-image-unavailable")
+            expect(out).to_contain("exit=3")

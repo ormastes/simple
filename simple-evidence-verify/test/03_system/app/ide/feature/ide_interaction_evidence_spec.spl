@@ -1,0 +1,226 @@
+# codex-system-test
+# @tag:system
+# @req REQ-EVS-014
+# @cover src/app/ide/interaction_evidence.spl 80%
+"""
+# IDE Interaction Evidence
+
+## Overview
+
+Exercises the production IDE interaction contract through a real editor
+session, a direct edit, Markdown diagnostics, the Office launcher action
+contract, and the canonical UI-access snapshot/event owners.
+
+**Requirements:** doc/02_requirements/feature/evidence_showcase.md
+**Plan:** doc/03_plan/sys_test/evidence_showcase.md
+**Design:** doc/05_design/evidence_showcase.md
+**Research:** doc/01_research/local/evidence_showcase.md
+
+## Examples
+
+Run this spec to open and edit its Markdown fixture, verify diagnostics and the
+Office action, and inspect the UI-access event transcript. Image capture stays
+blocked until an image-backed provider is configured.
+
+**Artifacts:** build/test-artifacts/03_system/app/ide/feature/ide_interaction_evidence/gui_capture.blocker.txt; build/test-artifacts/03_system/app/ide/feature/ide_interaction_evidence/event_transcript.txt
+"""
+# @evidence-display: links
+
+use std.spec.*
+use std.io.{file_hash_sha256, file_size_raw, host_arch, host_os, time_now_unix_micros}
+use std.common.spec.scenario_evidence.{ScenarioCaptureKind, ScenarioEvidenceArtifact}
+use std.common.spec.scenario_motion_evidence.{ScenarioArtifactIntegrity}
+use std.spec.scenario_evidence_manifest.{ScenarioEvidenceManifest}
+use app.ide.interaction_evidence.{ide_interaction_evidence, ide_interaction_report, ide_interaction_exit_code}
+use app.io.mod.{dir_create_all, file_read, file_write}
+use app.office.launcher.{build_launcher_ui, launcher_open_action, launcher_action_to_component}
+use common.office.file_ops.{RecentFile}
+use common.ui.access.{UiAccessEvent, ui_access_find_nodes, ui_access_record_action, ui_access_snapshot_from_state}
+use common.ui.access_vision.{ui_access_visual_probe_from_snapshot}
+use common.ui.widget.{UIState}
+use std.spec.scenario_evidence_manifest_io.{
+    retain_scenario_evidence_manifest, write_scenario_evidence_manifest
+}
+
+val EVIDENCE_DIR = "build/test-artifacts/03_system/app/ide/feature/ide_interaction_evidence"
+val FIXTURE_PATH = "build/test-artifacts/03_system/app/ide/feature/ide_interaction_evidence/interaction.md"
+val BLOCKER_PATH = "build/test-artifacts/03_system/app/ide/feature/ide_interaction_evidence/gui_capture.blocker.txt"
+val TRANSCRIPT_PATH = "build/test-artifacts/03_system/app/ide/feature/ide_interaction_evidence/event_transcript.txt"
+val GUI_CAPTURE_BLOCKER = "blocked: gui-capture-host-unavailable (vision.no_image); resume: configure an image-backed UI-access provider and rerun test/03_system/app/ide/feature/ide_interaction_evidence_spec.spl"
+val IDE_EVIDENCE_SPEC = (
+    "test/03_system/app/ide/feature/ide_interaction_evidence_spec.spl"
+)
+val IDE_EVIDENCE_RESUME = (
+    "configure an image-backed UI-access provider and rerun bin/simple test " +
+    IDE_EVIDENCE_SPEC + " --mode=interpreter"
+)
+val IDE_EVIDENCE_MANUAL = (
+    "doc/06_spec/03_system/app/ide/feature/ide_interaction_evidence_spec.md"
+)
+val IDE_EVIDENCE_COMMAND = "bin/simple test " + IDE_EVIDENCE_SPEC + " --mode=interpreter"
+
+describe "REQ-EVS-014 IDE production interaction evidence":
+    it "should capture, verify, render, and publish an IDE interaction":
+        val started_at = time_now_unix_micros() / 1000
+        step("Capture the production IDE launch and edit interaction")
+        expect(dir_create_all(EVIDENCE_DIR)).to_equal(true)
+        expect(file_write(
+            FIXTURE_PATH, "# Interaction fixture\n\nReady\n"
+        )).to_equal(true)
+        expect(file_read(FIXTURE_PATH)).to_contain("Ready")
+        val evidence = ide_interaction_evidence("gui", FIXTURE_PATH)
+        expect(evidence.mode).to_equal("gui")
+        expect(evidence.path).to_equal(FIXTURE_PATH)
+        expect(evidence.opened).to_be(true)
+        expect(evidence.edited).to_be(true)
+        expect(evidence.edit_message).to_equal("inserted")
+
+        step("Verify diagnostics and the Office launcher action")
+        expect(evidence.diagnostic_count).to_equal(0)
+        expect(evidence.office_action).to_equal("open_sheets")
+        expect(evidence.office_component).to_equal("sheets")
+        val report = ide_interaction_report(evidence).join("\n")
+        expect(report).to_contain("opened: true")
+        expect(report).to_contain("edited: true")
+        expect(ide_interaction_exit_code(evidence)).to_equal(0)
+
+        var recent: [RecentFile] = []
+        val launcher = build_launcher_ui(recent)
+        var no_events: [UiAccessEvent] = []
+        val snapshot = ui_access_snapshot_from_state(UIState.new(launcher), no_events)
+        val sheets = ui_access_find_nodes(snapshot, "main", "", "Spreadsheets", false)
+        expect(snapshot.protocol_version).to_equal(1)
+        expect(sheets.len()).to_be_greater_than(0)
+        expect(launcher_open_action("sheets")).to_equal("open_sheets")
+        val component = launcher_action_to_component("open_sheets")
+        expect(component.unwrap()).to_equal("sheets")
+
+        # @capture(gui)
+        step("Render the IDE launcher still evidence")
+        val visual = ui_access_visual_probe_from_snapshot(snapshot, "main")
+        expect(visual.captured).to_be(false)
+        expect(visual.issues.len()).to_equal(1)
+        expect(visual.issues[0].code).to_equal("vision.no_image")
+        expect(file_write(BLOCKER_PATH, GUI_CAPTURE_BLOCKER + "\n")).to_be(true)
+        expect(file_read(BLOCKER_PATH)).to_equal(GUI_CAPTURE_BLOCKER + "\n")
+
+        # @capture(text)
+        step("Publish the IDE event transcript")
+        val events = ui_access_record_action(no_events, 1, "main", "card_sheets", "invoke", "open_sheets")
+        expect(events.len()).to_equal(1)
+        expect(events[0].event_kind).to_equal("invoke")
+        expect(events[0].payload).to_equal("open_sheets")
+        val transcript = "1 main#card_sheets invoke open_sheets\n"
+        expect(file_write(TRANSCRIPT_PATH, transcript)).to_be(true)
+        expect(file_read(TRANSCRIPT_PATH)).to_equal(transcript)
+
+        step("Verify the production entrypoint excludes test-only UI imports")
+        val production_entry = file_read("src/app/ide/main.spl")
+        expect(production_entry.find("std.ui_test.sgtti")).to_equal(-1)
+        expect(production_entry.find("SgttiTestDriver")).to_equal(-1)
+
+        step("Publish the exact capture blocker")
+        val source_digest = file_hash_sha256(IDE_EVIDENCE_SPEC)
+        expect(source_digest.len()).to_equal(64)
+        val source_revision = "source-sha256:" + source_digest
+        val host = host_os() + "-" + host_arch()
+        val blocker_artifact = ScenarioEvidenceArtifact(
+            kind: ScenarioCaptureKind.log,
+            title: "IDE image capture blocker",
+            mime: "text/plain",
+            path: BLOCKER_PATH,
+            body: GUI_CAPTURE_BLOCKER + "\n",
+            scenario_id: "ide-interaction",
+            step_id: "Render the IDE launcher still evidence",
+            redacted: false
+        )
+        val transcript_artifact = ScenarioEvidenceArtifact(
+            kind: ScenarioCaptureKind.text,
+            title: "IDE launcher action event transcript",
+            mime: "text/plain",
+            path: TRANSCRIPT_PATH,
+            body: transcript,
+            scenario_id: "ide-interaction",
+            step_id: "Publish the IDE event transcript",
+            redacted: false
+        )
+        val blocker_integrity = ScenarioArtifactIntegrity(
+            path: BLOCKER_PATH,
+            format: "log",
+            mime: "text/plain",
+            width: 0,
+            height: 0,
+            byte_size: file_size_raw(BLOCKER_PATH),
+            checksum: file_hash_sha256(BLOCKER_PATH),
+            producer: IDE_EVIDENCE_SPEC,
+            producer_version: source_digest,
+            source_revision: source_revision,
+            host: host,
+            target: "host-ui-access",
+            capture_ready: true,
+            baseline_identity: "",
+            comparison_result: "not-compared",
+            required: true
+        )
+        val transcript_integrity = ScenarioArtifactIntegrity(
+            path: TRANSCRIPT_PATH,
+            format: "txt",
+            mime: "text/plain",
+            width: 0,
+            height: 0,
+            byte_size: file_size_raw(TRANSCRIPT_PATH),
+            checksum: file_hash_sha256(TRANSCRIPT_PATH),
+            producer: IDE_EVIDENCE_SPEC,
+            producer_version: source_digest,
+            source_revision: source_revision,
+            host: host,
+            target: "host-ui-access",
+            capture_ready: true,
+            baseline_identity: "",
+            comparison_result: "not-compared",
+            required: true
+        )
+        expect(blocker_integrity.checksum.len()).to_equal(64)
+        expect(transcript_integrity.checksum.len()).to_equal(64)
+        val manifest = ScenarioEvidenceManifest(
+            schema_major: 1,
+            schema_minor: 0,
+            feature_id: "ide.interaction",
+            requirement_ids: ["REQ-EVS-014"],
+            spec_path: IDE_EVIDENCE_SPEC,
+            generated_manual_path: IDE_EVIDENCE_MANUAL,
+            scenario_id: "ide-interaction",
+            step_id: "Publish the exact capture blocker",
+            required: true,
+            result: "blocked",
+            showcase_status: "blocked",
+            reason: "missing-required-still-and-motion-media:vision.no_image",
+            source_revision: source_revision,
+            source_digest: "sha256:" + source_digest,
+            command: IDE_EVIDENCE_COMMAND,
+            producer: IDE_EVIDENCE_SPEC,
+            producer_version: source_digest,
+            host: host,
+            target: "host-ui-access",
+            backend: "ide-production-contract",
+            start_time: started_at,
+            duration_ms: time_now_unix_micros() / 1000 - started_at,
+            artifacts: [blocker_artifact, transcript_artifact],
+            artifact_integrity: [blocker_integrity, transcript_integrity],
+            text_results: [],
+            motion_evidence: [],
+            protocol_fields: [],
+            html_checks: [],
+            blocker_prerequisite: "missing-required-still-and-motion-media:vision.no_image",
+            resume_command: IDE_EVIDENCE_RESUME,
+            owner: "ide",
+            final_reviewer: "verification"
+        )
+        val publication = write_scenario_evidence_manifest(manifest).unwrap()
+        expect(publication).to_equal(
+            EVIDENCE_DIR + "/evidence.sdn"
+        )
+        expect(retain_scenario_evidence_manifest(manifest).unwrap()).to_equal(
+            "doc/06_spec/evidence/03_system/app/ide/feature/" +
+            "ide_interaction_evidence/evidence.sdn"
+        )

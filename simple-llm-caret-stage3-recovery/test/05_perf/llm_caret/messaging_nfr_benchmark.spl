@@ -1,0 +1,399 @@
+# @nfr NFR-LLM-MSG-007
+# NFR-LLM-MSG-007 fail-closed benchmark fixture.
+#
+# Invoke this file only with a deployed pure-Simple executable. The benchmark
+# rejects bootstrap mode. First capture a non-PASS baseline record:
+#
+#   <pure-simple> run test/05_perf/llm_caret/messaging_nfr_benchmark.spl \
+#     --mode=measure-baseline \
+#     --candidate-receipt=<path> --candidate-receipt-hash=<sha256> \
+#     --candidate-source-manifest=<path>
+#
+# Then gate a candidate against the accepted, checksum-bound record:
+#
+#   <pure-simple> run test/05_perf/llm_caret/messaging_nfr_benchmark.spl \
+#     --mode=gate-candidate \
+#     --accepted-baseline-receipt=<path> \
+#     --accepted-baseline-receipt-hash=<sha256> \
+#     --candidate-receipt=<path> --candidate-receipt-hash=<sha256> \
+#     --candidate-source-manifest=<path>
+#
+# It persists exactly 10,000 canonical messages across 32 simultaneously active
+# rooms, persists and verifies 32 distinct client identities through the
+# primitive dispatcher, installs three
+# agent bindings, closes and reopens the same PureDatabase file, then gates
+# restart, primitive-server request p95, and process high-water RSS. No subprocess,
+# bootstrap, Rust seed, or synthetic timing path is used.
+
+use std.io_runtime.{
+    env_get,
+    exit,
+    file_delete,
+    file_exists,
+    file_hash_sha256,
+    file_read,
+    get_args,
+    getpid,
+    time_now_unix_micros
+}
+use std.crypto.sha256.{sha256_text}
+use app.llm_caret.messaging.adapter.server.auth.{AuthPrincipal}
+use app.llm_caret.messaging.adapter.server.primitive_dispatch.{PrimitiveRequest, PrimitiveMessagingApplication}
+
+val FIXTURE_MESSAGE_COUNT: i64 = 10000
+val FIXTURE_CONCURRENT_ROOM_COUNT: i64 = 32
+val FIXTURE_CLIENT_COUNT: i64 = 32
+val FIXTURE_AGENT_BINDING_COUNT: i64 = 3
+val RESTART_HARD_LIMIT_US: i64 = 3000000
+val ACCEPTED_BASELINE_PERCENT: i64 = 125
+
+fn fail_closed(reason: text):
+    print "llm_caret_messaging_nfr status=fail reason={reason}"
+    exit(2)
+
+fn arg_text(args: [text], prefix: text) -> text:
+    var i: i64 = 0
+    while i < args.len():
+        if args[i].starts_with(prefix):
+            return args[i].substring(prefix.len())
+        i = i + 1
+    ""
+
+fn positive_decimal(value: text) -> i64:
+    if value == "":
+        return 0
+    var i: i64 = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if code < 48 or code > 57:
+            return 0
+        i = i + 1
+    val parsed = value.to_i64()
+    if parsed > 0: parsed else: 0
+
+fn sha256_hex(value: text) -> bool:
+    if value.len() != 64: return false
+    var i: i64 = 0
+    while i < value.len():
+        val code = value.char_code_at(i)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+        i = i + 1
+    true
+
+# Receipts are line-oriented, immutable evidence files.  Their supplied hashes
+# are verified against the file bytes before any measurement is admitted.
+fn receipt_field(receipt: text, key: text) -> text:
+    val prefix = key + "="
+    var result = ""
+    var matched = false
+    for line in receipt.split("\n"):
+        if line.starts_with(prefix):
+            # Duplicate keys make the receipt ambiguous and therefore invalid.
+            if matched: return ""
+            matched = true
+            result = line.substring(prefix.len()).trim()
+    result
+
+fn receipt_hash_matches(path: text, expected_hash: text) -> bool:
+    path != "" and sha256_hex(expected_hash) and file_exists(path) and
+        file_hash_sha256(path) == expected_hash
+
+fn receipt_positive(receipt: text, key: text) -> i64:
+    positive_decimal(receipt_field(receipt, key))
+
+fn checked_elapsed_us(started_us: i64, finished_us: i64) -> i64:
+    if started_us <= 0 or finished_us <= started_us: return 0
+    finished_us - started_us
+
+fn proc_status_kib(field: text) -> i64:
+    val path = "/proc/self/status"
+    if not file_exists(path):
+        return 0
+    val content = file_read(path)
+    val needle = field + ":"
+    var found: i64 = -1
+    var i: i64 = 0
+    while i + needle.len() <= content.len() and found < 0:
+        if content.substring(i, i + needle.len()) == needle:
+            found = i + needle.len()
+        i = i + 1
+    if found < 0:
+        return 0
+    while found < content.len():
+        val code = content.char_code_at(found)
+        if code >= 48 and code <= 57:
+            break
+        found = found + 1
+    var digits = ""
+    while found < content.len():
+        val code = content.char_code_at(found)
+        if code < 48 or code > 57:
+            break
+        digits = digits + content.substring(found, found + 1)
+        found = found + 1
+    positive_decimal(digits)
+
+fn p95_us(samples: [i64]) -> i64:
+    if samples.len() == 0:
+        return 0
+    var ordered = samples
+    ordered.sort()
+    val rank = (ordered.len() * 95 + 99) / 100
+    val index = if rank <= 0: 0 else: rank - 1
+    ordered[index]
+
+fn within_accepted_baseline(current: i64, baseline: i64) -> bool:
+    # Division-based quarter avoids multiplying untrusted metrics and overflowing.
+    current > 0 and baseline > 0 and current <= baseline + baseline / 4
+
+fn benchmark_principal(identity_id: text) -> AuthPrincipal:
+    AuthPrincipal(authenticated: true, identity_id: identity_id,
+        workspace_id: "perf-workspace",
+        scopes: ["admin:workspace"], expires_at: 9223372036854775807)
+
+fn client_identity(index: i64) -> text:
+    "perf-client-" + index.to_text()
+
+fn primitive_request(method: text, path: text, body: text, key: text, occurred_at: i64) -> PrimitiveRequest:
+    PrimitiveRequest(method: method, path: path, body: body,
+        idempotency_key: key, principal: benchmark_principal("perf-client-0"), occurred_at: occurred_at)
+
+fn primitive_request_as(method: text, path: text, body: text, key: text,
+        occurred_at: i64, identity_id: text) -> PrimitiveRequest:
+    PrimitiveRequest(method: method, path: path, body: body,
+        idempotency_key: key, principal: benchmark_principal(identity_id), occurred_at: occurred_at)
+
+fn room_body(index: i64) -> text:
+    val id = "perf-room-" + index.to_text()
+    "{\"room_id\":\"" + id + "\",\"kind\":\"channel\",\"name\":\"" + id +
+        "\",\"topic\":\"NFR-LLM-MSG-007\",\"visibility\":\"public\",\"mode\":\"mention\"}"
+
+fn message_body(index: i64) -> text:
+    "{\"message_id\":\"perf-message-" + index.to_text() +
+        "\",\"body\":\"representative persisted message " + index.to_text() +
+        "\",\"correlation_id\":\"perf-correlation-" + index.to_text() + "\"}"
+
+fn binding_body(index: i64) -> text:
+    val handler = if index == 0: "main" elif index == 1: "subagent" else: "advisor"
+    "{\"binding_id\":\"perf-binding-" + index.to_text() +
+        "\",\"room_id\":\"perf-room-" + index.to_text() +
+        "\",\"agent_id\":\"perf-agent-" + index.to_text() +
+        "\",\"provider\":\"primitive\",\"handler\":\"" + handler +
+        "\",\"session_policy\":\"persistent\",\"trigger_policy\":\"mention\"," +
+        "\"update_policy\":\"milestones\",\"context_policy\":\"previous:2\"}"
+
+fn main():
+    val args = get_args()
+    val mode = arg_text(args, "--mode=")
+    val baseline_receipt_path = arg_text(args, "--accepted-baseline-receipt=")
+    val baseline_receipt_hash = arg_text(args, "--accepted-baseline-receipt-hash=")
+    val candidate_receipt_path = arg_text(args, "--candidate-receipt=")
+    val candidate_receipt_hash = arg_text(args, "--candidate-receipt-hash=")
+    val candidate_source_manifest = arg_text(args, "--candidate-source-manifest=")
+    # This is the process that executes the measured workload.  Do not accept
+    # a caller-selected artifact path: it could name a different executable.
+    val running_artifact = "/proc/self/exe"
+
+    if env_get("SIMPLE_BOOTSTRAP") == "1" or env_get("SIMPLE_USE_RUST_SEED") == "1":
+        fail_closed("bootstrap_or_rust_seed_not_admitted")
+    if mode != "measure-baseline" and mode != "gate-candidate":
+        fail_closed("mode_must_be_measure_baseline_or_gate_candidate")
+    if candidate_source_manifest == "" or not file_exists(candidate_source_manifest):
+        fail_closed("candidate_provenance_files_required")
+    if not file_exists(running_artifact):
+        fail_closed("running_executable_provenance_required")
+    val running_artifact_hash = file_hash_sha256(running_artifact)
+    if not sha256_hex(running_artifact_hash):
+        fail_closed("running_executable_hash_required")
+    if not receipt_hash_matches(candidate_receipt_path, candidate_receipt_hash):
+        fail_closed("candidate_receipt_hash_required")
+    val candidate_receipt = file_read(candidate_receipt_path)
+    val candidate_source_hash = receipt_field(candidate_receipt, "source_manifest_sha256")
+    val candidate_artifact_hash = receipt_field(candidate_receipt, "artifact_sha256")
+    if receipt_field(candidate_receipt, "receipt_kind") != "candidate" or
+        not sha256_hex(candidate_source_hash) or not sha256_hex(candidate_artifact_hash):
+        fail_closed("candidate_receipt_schema_or_hash_required")
+    if file_hash_sha256(candidate_source_manifest) != candidate_source_hash or
+        running_artifact_hash != candidate_artifact_hash:
+        fail_closed("candidate_receipt_provenance_hash_mismatch")
+
+    var baseline_id = ""
+    var baseline_source_hash = ""
+    var baseline_artifact_hash = ""
+    var baseline_workload_checksum = ""
+    var baseline_restart_us: i64 = 0
+    var baseline_request_p95_us: i64 = 0
+    var baseline_max_rss_kib: i64 = 0
+    if mode == "gate-candidate":
+        if not receipt_hash_matches(baseline_receipt_path, baseline_receipt_hash):
+            fail_closed("accepted_baseline_receipt_hash_required")
+        val baseline_receipt = file_read(baseline_receipt_path)
+        if receipt_field(baseline_receipt, "receipt_kind") != "accepted_baseline":
+            fail_closed("accepted_baseline_receipt_kind_required")
+        if receipt_field(candidate_receipt, "accepted_baseline_receipt_sha256") != baseline_receipt_hash:
+            fail_closed("candidate_not_bound_to_accepted_baseline_receipt")
+        baseline_id = receipt_field(baseline_receipt, "baseline_id")
+        baseline_source_hash = receipt_field(baseline_receipt, "source_manifest_sha256")
+        baseline_artifact_hash = receipt_field(baseline_receipt, "artifact_sha256")
+        baseline_workload_checksum = receipt_field(baseline_receipt, "workload_checksum")
+        baseline_restart_us = receipt_positive(baseline_receipt, "restart_us")
+        baseline_request_p95_us = receipt_positive(baseline_receipt, "request_p95_us")
+        baseline_max_rss_kib = receipt_positive(baseline_receipt, "max_rss_kib")
+        if baseline_id == "": fail_closed("accepted_baseline_id_required")
+        if not sha256_hex(baseline_source_hash) or not sha256_hex(baseline_artifact_hash) or
+            not sha256_hex(baseline_workload_checksum):
+            fail_closed("accepted_baseline_provenance_or_checksum_required")
+        if baseline_restart_us <= 0 or baseline_request_p95_us <= 0 or baseline_max_rss_kib <= 0:
+            fail_closed("positive_accepted_baseline_metrics_required")
+
+    val path = "/tmp/llm_caret_messaging_nfr_" + getpid().to_text() + ".db"
+    file_delete(path)
+    var app = PrimitiveMessagingApplication.open(path)
+    if not app.runtime.store.ready():
+        file_delete(path)
+        fail_closed("primitive_application_open_failed")
+
+    var room_index: i64 = 0
+    while room_index < FIXTURE_CONCURRENT_ROOM_COUNT:
+        val created = app.handle(primitive_request("POST", "/v1/rooms", room_body(room_index),
+            "perf-room-key-" + room_index.to_text(), room_index + 1))
+        if created.status != 202:
+            app.close()
+            file_delete(path)
+            fail_closed("primitive_room_create_failed")
+        room_index = room_index + 1
+
+    var binding_index: i64 = 0
+    while binding_index < FIXTURE_AGENT_BINDING_COUNT:
+        val attached = app.handle(primitive_request("POST", "/v1/agent-bindings", binding_body(binding_index),
+            "perf-binding-key-" + binding_index.to_text(), binding_index + 40))
+        if attached.status != 201:
+            app.close()
+            file_delete(path)
+            fail_closed("primitive_agent_binding_create_failed")
+        binding_index = binding_index + 1
+
+    var append_samples_us: [i64] = []
+    var message_index: i64 = 0
+    while message_index < FIXTURE_MESSAGE_COUNT:
+        val active_room = message_index % FIXTURE_CONCURRENT_ROOM_COUNT
+        val started_us = time_now_unix_micros()
+        val sent = app.handle(primitive_request_as("POST", "/v1/rooms/perf-room-" + active_room.to_text() +
+            "/messages", message_body(message_index), "perf-message-key-" + message_index.to_text(),
+            message_index + 100, client_identity(active_room)))
+        val elapsed_us = checked_elapsed_us(started_us, time_now_unix_micros())
+        if sent.status != 202 or not sent.body.contains("\"accepted\":true") or elapsed_us <= 0:
+            app.close()
+            file_delete(path)
+            fail_closed("primitive_message_request_or_clock_failed")
+        append_samples_us = append_samples_us.push(elapsed_us)
+        message_index = message_index + 1
+
+    if app.runtime.store.message_count() != FIXTURE_MESSAGE_COUNT:
+        app.close()
+        file_delete(path)
+        fail_closed("pre_restart_message_count_mismatch")
+    if not app.close():
+        file_delete(path)
+        fail_closed("pre_restart_close_failed")
+
+    val restart_started_us = time_now_unix_micros()
+    app = PrimitiveMessagingApplication.open(path)
+    val restart_us = checked_elapsed_us(restart_started_us, time_now_unix_micros())
+    if not app.runtime.store.ready() or restart_us <= 0:
+        app.close()
+        file_delete(path)
+        fail_closed("restart_open_or_clock_failed")
+    if app.runtime.store.message_count() != FIXTURE_MESSAGE_COUNT:
+        app.close()
+        file_delete(path)
+        fail_closed("restart_message_count_mismatch")
+    if app.runtime.store.room_count() != FIXTURE_CONCURRENT_ROOM_COUNT:
+        app.close()
+        file_delete(path)
+        fail_closed("restart_room_count_mismatch")
+    if app.runtime.store.agent_bindings().len() != FIXTURE_AGENT_BINDING_COUNT:
+        app.close()
+        file_delete(path)
+        fail_closed("restart_agent_binding_count_mismatch")
+
+    var recovered_message_count: i64 = 0
+    var recovered_client_ids = "|"
+    var checksum_material = ""
+    var history_samples_us: [i64] = []
+    room_index = 0
+    while room_index < FIXTURE_CONCURRENT_ROOM_COUNT:
+        val history_started_us = time_now_unix_micros()
+        val history_response = app.handle(primitive_request("GET", "/v1/rooms/perf-room-" +
+            room_index.to_text() + "/messages?after_seq=0&limit=1000", "", "", 20000 + room_index))
+        val history_elapsed_us = checked_elapsed_us(history_started_us, time_now_unix_micros())
+        val history = app.runtime.store.message_history("perf-room-" + room_index.to_text(), 0, 1000)
+        if history_response.status != 200 or history_elapsed_us <= 0 or history.len() == 0:
+            app.close()
+            file_delete(path)
+            fail_closed("history_or_clock_failed")
+        history_samples_us = history_samples_us.push(history_elapsed_us)
+        recovered_message_count = recovered_message_count + history.len()
+        for message in history:
+            if message.sender_identity_id.value != client_identity(room_index):
+                app.close()
+                file_delete(path)
+                fail_closed("recovered_sender_identity_mismatch")
+            val identity_marker = "|" + message.sender_identity_id.value + "|"
+            if not recovered_client_ids.contains(identity_marker):
+                recovered_client_ids = recovered_client_ids + message.sender_identity_id.value + "|"
+            checksum_material = checksum_material + message.message_id.value + "|" +
+                message.room_id.value + "|" + message.room_seq.to_text() + "|" +
+                message.sender_identity_id.value + "|" + message.body + "\n"
+        room_index = room_index + 1
+    if recovered_message_count != FIXTURE_MESSAGE_COUNT:
+        app.close()
+        file_delete(path)
+        fail_closed("semantic_recovery_checksum_mismatch")
+    var identity_index: i64 = 0
+    while identity_index < FIXTURE_CLIENT_COUNT:
+        if not recovered_client_ids.contains("|" + client_identity(identity_index) + "|"):
+            app.close()
+            file_delete(path)
+            fail_closed("all_32_client_identities_not_observed")
+        identity_index = identity_index + 1
+
+    val workload_checksum = sha256_text(checksum_material)
+    if not sha256_hex(workload_checksum):
+        app.close()
+        file_delete(path)
+        fail_closed("workload_checksum_failed")
+    if mode == "gate-candidate" and workload_checksum != baseline_workload_checksum:
+        app.close()
+        file_delete(path)
+        fail_closed("baseline_workload_checksum_mismatch")
+
+    val request_p95_us = p95_us(append_samples_us)
+    val history_p95_us = p95_us(history_samples_us)
+    val max_rss_kib = proc_status_kib("VmHWM")
+    if not app.close():
+        file_delete(path)
+        fail_closed("post_restart_close_failed")
+    file_delete(path)
+
+    if history_p95_us <= 0:
+        fail_closed("history_p95_missing")
+
+    if mode == "measure-baseline":
+        print "llm_caret_messaging_nfr status=baseline_measurement_not_pass messages={FIXTURE_MESSAGE_COUNT} concurrent_rooms={FIXTURE_CONCURRENT_ROOM_COUNT} clients={FIXTURE_CLIENT_COUNT} observed_client_identities={FIXTURE_CLIENT_COUNT} agent_bindings={FIXTURE_AGENT_BINDING_COUNT} baseline_restart_us={restart_us} baseline_request_p95_us={request_p95_us} baseline_max_rss_kib={max_rss_kib} history_p95_us={history_p95_us} baseline_workload_checksum={workload_checksum} candidate_receipt_hash={candidate_receipt_hash} baseline_source_hash={candidate_source_hash} baseline_artifact_hash={candidate_artifact_hash} running_artifact_hash={running_artifact_hash}"
+        exit(3)
+
+    if restart_us > RESTART_HARD_LIMIT_US:
+        fail_closed("restart_exceeds_3000000us")
+    if not within_accepted_baseline(restart_us, baseline_restart_us):
+        fail_closed("restart_exceeds_125_percent_baseline")
+    if not within_accepted_baseline(request_p95_us, baseline_request_p95_us):
+        fail_closed("request_p95_exceeds_125_percent_baseline")
+    if not within_accepted_baseline(max_rss_kib, baseline_max_rss_kib):
+        fail_closed("max_rss_exceeds_125_percent_baseline")
+
+    print "llm_caret_messaging_nfr status=pass messages={FIXTURE_MESSAGE_COUNT} concurrent_rooms={FIXTURE_CONCURRENT_ROOM_COUNT} clients={FIXTURE_CLIENT_COUNT} observed_client_identities={FIXTURE_CLIENT_COUNT} agent_bindings={FIXTURE_AGENT_BINDING_COUNT} restart_us={restart_us} request_p95_us={request_p95_us} history_p95_us={history_p95_us} max_rss_kib={max_rss_kib} restart_hard_limit_us={RESTART_HARD_LIMIT_US} baseline_percent={ACCEPTED_BASELINE_PERCENT} accepted_baseline_id={baseline_id} accepted_baseline_receipt_hash={baseline_receipt_hash} candidate_receipt_hash={candidate_receipt_hash} baseline_source_hash={baseline_source_hash} baseline_artifact_hash={baseline_artifact_hash} candidate_source_hash={candidate_source_hash} candidate_artifact_hash={candidate_artifact_hash} running_artifact_hash={running_artifact_hash} workload_checksum={workload_checksum}"
+    exit(0)
+
+main()

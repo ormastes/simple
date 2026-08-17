@@ -1,0 +1,145 @@
+use std.spec.*
+use app.build.target_manifest.{BuildManifest, BuildTarget}
+use app.build.target_plan.{parse_manifest_build_request,
+    select_build_targets, plan_build_target, validate_manifest_build_plan,
+    render_manifest_build_plan, build_target_runtime_path}
+
+fn planner_manifest() -> BuildManifest:
+    BuildManifest(schema: "simple.build/v1", source_roots: ["src/app", "src/lib"],
+        targets: [
+            BuildTarget(name: "database", entry: "src/app/database_worker.spl",
+                artifact: "build/database/db", target_triple: "x86_64-unknown-linux-gnu",
+                backend: "cranelift", runtime_bundle: "simple-core", abi: "gnu",
+                dependencies: [], freshness_roots: [],
+                health_args: ["--probe"]),
+            BuildTarget(name: "server", entry: "src/app/server_worker.spl",
+                artifact: "build/database/server", target_triple: "x86_64-unknown-linux-gnu",
+                backend: "cranelift", runtime_bundle: "simple-core", abi: "gnu",
+                dependencies: [], freshness_roots: [],
+                health_args: ["--probe"])
+        ], issues: [])
+
+describe "manifest build request and target planner":
+    it "recognizes only the exact two-flag manifest grammar":
+        val request = parse_manifest_build_request([
+            "--target=all", "--manifest=plugins/demo/integration.sdn"])
+        expect(request.active).to_equal(true)
+        expect(request.validate_only).to_equal(false)
+        expect(request.valid()).to_equal(true)
+
+    it "recognizes exact validation-only grammar and rejects mixed modes":
+        val request = parse_manifest_build_request([
+            "--validate-manifest=plugins/demo/integration.sdn", "--target=all"])
+        expect(request.valid()).to_equal(true)
+        expect(request.validate_only).to_equal(true)
+        expect(parse_manifest_build_request(["--manifest=a.sdn",
+            "--validate-manifest=b.sdn", "--target=all"]).valid()).to_equal(false)
+        expect(request.selector).to_equal("all")
+        expect(request.manifest_path).to_equal("plugins/demo/integration.sdn")
+
+    it "leaves legacy build arguments outside manifest mode":
+        val request = parse_manifest_build_request(["--entry", "src/app/main.spl"])
+        expect(request.active).to_equal(false)
+        expect(request.valid()).to_equal(true)
+
+    it "rejects missing duplicate extra and traversing manifest arguments":
+        expect(parse_manifest_build_request(["--manifest=x.sdn"]).valid()).to_equal(false)
+        expect(parse_manifest_build_request(["--target=all"]).valid()).to_equal(false)
+        expect(parse_manifest_build_request(["--manifest", "x.sdn",
+            "--target=all"]).valid()).to_equal(false)
+        expect(parse_manifest_build_request([
+            "--manifest=x.sdn", "--manifest=y.sdn", "--target=all"]).valid()).to_equal(false)
+        expect(parse_manifest_build_request([
+            "--manifest=x.sdn", "--target=all", "--release"]).valid()).to_equal(false)
+        expect(parse_manifest_build_request([
+            "--manifest=../x.sdn", "--target=all"]).valid()).to_equal(false)
+
+    it "selects one known target or every lexically ordered target":
+        val manifest = planner_manifest()
+        val one = select_build_targets(manifest, "server")
+        expect(one.is_ok()).to_equal(true)
+        expect(one.unwrap()[0].name).to_equal("server")
+        val all = select_build_targets(manifest, "all")
+        expect(all.is_ok()).to_equal(true)
+        expect(all.unwrap().len()).to_equal(2)
+        expect(select_build_targets(manifest, "missing").is_err()).to_equal(true)
+
+    it "emits fixed pure-Simple native entry-closure arguments to staging":
+        val target = planner_manifest().targets[0]
+        val plan = plan_build_target(target, ["src/app", "src/lib"], "42")
+        expect(plan.staging_artifact).to_equal("build/database/db.simple-build-stage-42")
+        expect(plan.staging_launch_metadata).to_equal(
+            "build/database/db.simple-build-stage-42.simple_launch.sdn")
+        expect(plan.launch_metadata_path).to_equal(
+            "build/database/db.simple_launch.sdn")
+        expect(plan.args).to_equal(["native-build", "--source", "src/app",
+            "--source", "src/lib", "--entry-closure",
+            "--target=x86_64-unknown-linux-gnu", "--backend=cranelift",
+            "--runtime-bundle=simple-core", "--entry",
+            "src/app/database_worker.spl", "--strip", "--output",
+            "build/database/db.simple-build-stage-42"])
+        expect(plan.canonical_args).to_equal(["native-build", "--source", "src/app",
+            "--source", "src/lib", "--entry-closure",
+            "--target=x86_64-unknown-linux-gnu", "--backend=cranelift",
+            "--runtime-bundle=simple-core", "--entry",
+            "src/app/database_worker.spl", "--strip", "--output",
+            "build/database/db"])
+
+    it "pins a v2 Core-C archive by its canonical parent runtime path":
+        val target = BuildTarget(name: "capsule",
+            entry: "src/app/capsule_worker.spl", artifact: "build/capsule/worker",
+            target_triple: "x86_64-unknown-linux-gnu", backend: "cranelift",
+            runtime_bundle: "core-c-bootstrap",
+            runtime_archive: "build/capsule/runtime/libsimple_runtime.a", abi: "gnu",
+            dependencies: [], freshness_roots: [], health_args: [])
+        val plan = plan_build_target(target, ["src/app"], "42")
+        expect(build_target_runtime_path(target)).to_equal("build/capsule/runtime")
+        expect(plan.args).to_contain("--runtime-path")
+        expect(plan.args).to_contain("build/capsule/runtime")
+        expect(plan.canonical_args).to_contain("--runtime-path")
+        expect(plan.canonical_args).to_contain("build/capsule/runtime")
+
+    it "exposes canonical validation plans without executing a build":
+        val validation = validate_manifest_build_plan("""
+build:
+  schema: simple.build/v1
+  source_roots: [src/app]
+  targets:
+    worker:
+      entry: src/app/worker.spl
+      artifact: build/worker
+      target_triple: x86_64-unknown-linux-gnu
+      backend: cranelift
+      runtime_bundle: simple-core
+      abi: gnu
+      dependencies: []
+      freshness_roots: [src/app]
+""", "worker")
+        expect(validation.valid()).to_equal(true)
+        expect(validation.plans.len()).to_equal(1)
+        expect(validation.plans[0].canonical_args).to_contain(
+            "--target=x86_64-unknown-linux-gnu")
+        expect(validation.plans[0].target.abi).to_equal("gnu")
+        val rendered = render_manifest_build_plan(validation)
+        expect(rendered).to_contain("target=worker")
+        expect(rendered).to_contain(
+            "target.worker.runtime_bundle=simple-core")
+
+    it "rejects canonical plans whose freshness does not cover every source root":
+        val validation = validate_manifest_build_plan("""
+build:
+  schema: simple.build/v1
+  source_roots: [src/app, src/lib]
+  targets:
+    worker:
+      entry: src/app/worker.spl
+      artifact: build/worker
+      target_triple: x86_64-unknown-linux-gnu
+      backend: cranelift
+      runtime_bundle: simple-core
+      abi: gnu
+      dependencies: []
+      freshness_roots: [src/app/worker]
+""", "worker")
+        expect(validation.valid()).to_equal(false)
+        expect(validation.issues[0]).to_contain("every source root")

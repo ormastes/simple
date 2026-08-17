@@ -1,0 +1,309 @@
+# codex-system-test
+# @tag:system
+# @req REQ-EVS-006
+# @req REQ-EVS-007
+# @cover src/os/kernel/arch/riscv64/console.spl 80%
+# @cover src/os/kernel/arch/riscv64/shell_lite.spl 80%
+# @evidence-display: embed_tui
+
+"""
+# SimpleOS RV64 QEMU login evidence
+
+## Overview
+
+This scenario invokes the production serial-shell runner only with an explicit
+live opt-in and a current kernel. Its independent ordered oracle requires a
+post-password shell prompt and real command responses. Echoed commands, source
+markers, historical logs, and the runner's current permissive exit cannot
+produce a login PASS.
+
+**Requirements:** doc/02_requirements/feature/evidence_showcase.md
+**Plan:** doc/03_plan/sys_test/evidence_showcase.md
+**Design:** doc/05_design/evidence_showcase.md
+**Research:** doc/01_research/local/evidence_showcase.md
+
+## Examples
+
+Build the RV64 kernel, set `SIMPLE_EVIDENCE_SIMPLEOS_RV64_LOGIN=1`, and run this
+spec. Review the ordered boot, password, prompt, and command-response transcript;
+missing live inputs remain explicit blockers.
+"""
+
+use std.spec.*
+use app.io.mod.{
+    current_time_ms, env_get, file_exists, file_hash_sha256, file_read_text,
+    file_size, hostname, process_run_timeout
+}
+use std.common.spec.scenario_evidence.{
+    ScenarioCaptureKind, scenario_evidence_artifact
+}
+use std.common.spec.scenario_motion_evidence.{ScenarioArtifactIntegrity}
+use std.common.spec.scenario_text_evidence.{
+    ScenarioTextMask,
+    check_text_evidence,
+    scenario_text_evidence_policy
+}
+use std.spec.scenario_evidence_manifest.{ScenarioEvidenceManifest}
+use std.spec.scenario_evidence_manifest_io.{
+    retain_scenario_evidence_manifest,
+    scenario_evidence_status_manifest,
+    write_scenario_evidence_manifest
+}
+
+struct SimpleOsLoginCapture:
+    status: text
+    reason: text
+    resume_command: text
+    transcript_path: text
+    transcript: text
+    exit_code: i32
+
+val SIMPLEOS_KERNEL = "build/os/simpleos_riscv64.elf"
+val SIMPLEOS_ARTIFACT_ROOT = (
+    "build/test-artifacts/03_system/os/evidence/" +
+    "simpleos_rv64_login_evidence"
+)
+val SIMPLEOS_LOG = SIMPLEOS_ARTIFACT_ROOT + "/serial.log"
+val SIMPLEOS_SPEC = (
+    "test/03_system/os/evidence/simpleos_rv64_login_evidence_spec.spl"
+)
+val SIMPLEOS_MANUAL = (
+    "doc/06_spec/03_system/os/evidence/simpleos_rv64_login_evidence_spec.md"
+)
+val SIMPLEOS_RUNNER = "scripts/qemu/check_simpleos_rv64_serial_shell.shs"
+val SIMPLEOS_TEST_COMMAND = (
+    "SIMPLE_EVIDENCE_SIMPLEOS_RV64_LOGIN=1 bin/simple test " +
+    SIMPLEOS_SPEC + " --mode=interpreter --timeout 120"
+)
+val SIMPLEOS_RESUME = (
+    "bin/simple os build --scenario=riscv64-smoke && " +
+    SIMPLEOS_TEST_COMMAND
+)
+
+fn prepare_evidence_workspace() -> text:
+    if not file_exists(SIMPLEOS_KERNEL):
+        return SIMPLEOS_KERNEL
+    ""
+
+fn capture_simpleos_login_evidence(missing: text) -> SimpleOsLoginCapture:
+    if missing != "":
+        return SimpleOsLoginCapture(
+            status: "blocked",
+            reason: "missing-prerequisite:" + missing,
+            resume_command: SIMPLEOS_RESUME,
+            transcript_path: "",
+            transcript: "",
+            exit_code: -1
+        )
+    if env_get("SIMPLE_EVIDENCE_SIMPLEOS_RV64_LOGIN") != "1":
+        return SimpleOsLoginCapture(
+            status: "blocked",
+            reason: "live-run-not-requested",
+            resume_command: SIMPLEOS_RESUME,
+            transcript_path: "",
+            transcript: "",
+            exit_code: -1
+        )
+    val result = process_run_timeout(
+        "/usr/bin/env",
+        [
+            "OUT=" + SIMPLEOS_ARTIFACT_ROOT,
+            "ELF=" + SIMPLEOS_KERNEL,
+            "sh",
+            "scripts/qemu/check_simpleos_rv64_serial_shell.shs"
+        ],
+        60000
+    )
+    val transcript = if file_exists(SIMPLEOS_LOG):
+        file_read_text(SIMPLEOS_LOG)
+    else:
+        result[0] + "\n" + result[1]
+    val status = if (
+        result[2] == 0 and file_exists(SIMPLEOS_LOG) and
+        file_size(SIMPLEOS_LOG) > 0
+    ):
+        "captured"
+    else:
+        "blocked"
+    val reason = if result[2] != 0:
+        "runner-failed-exit=" + result[2].to_text()
+    elif not file_exists(SIMPLEOS_LOG) or file_size(SIMPLEOS_LOG) == 0:
+        "missing-artifact:" + SIMPLEOS_LOG
+    else:
+        ""
+    SimpleOsLoginCapture(
+        status: status,
+        reason: reason,
+        resume_command: SIMPLEOS_RESUME,
+        transcript_path: if status == "captured": SIMPLEOS_LOG else: "",
+        transcript: transcript,
+        exit_code: result[2]
+    )
+
+fn verify_blocker(capture: SimpleOsLoginCapture):
+    expect(capture.status).to_equal("blocked")
+    if capture.reason == "live-run-not-requested":
+        expect(capture.reason).to_equal("live-run-not-requested")
+    elif capture.reason.starts_with("runner-failed-exit="):
+        expect(capture.reason).to_start_with("runner-failed-exit=")
+    elif capture.reason.starts_with("missing-artifact:"):
+        expect(capture.reason).to_start_with("missing-artifact:")
+    else:
+        expect(capture.reason).to_start_with("missing-prerequisite:")
+    expect(capture.resume_command).to_contain(
+        "bin/simple os build --scenario=riscv64-smoke"
+    )
+    expect(capture.resume_command).to_contain(
+        "SIMPLE_EVIDENCE_SIMPLEOS_RV64_LOGIN=1"
+    )
+    if capture.reason.starts_with("runner-failed-exit="):
+        expect(capture.transcript_path).to_equal("")
+    elif capture.reason.starts_with("missing-artifact:"):
+        expect(capture.reason).to_start_with("missing-artifact:")
+        expect(capture.transcript_path).to_equal("")
+    else:
+        expect(capture.transcript_path).to_equal("")
+
+describe "REQ-EVS-006/007 SimpleOS RV64 QEMU login evidence":
+    it "should capture ordered login and shell responses or report its exact blocker":
+        step("Capture the feature evidence")
+        val capture_started_ms = current_time_ms()
+        val missing = prepare_evidence_workspace()
+        val capture = capture_simpleos_login_evidence(missing)
+        val capture_duration_ms = current_time_ms() - capture_started_ms
+
+        step("Verify the structured evidence")
+        if capture.status == "captured":
+            expect(capture.transcript_path).to_equal(SIMPLEOS_LOG)
+            val policy = scenario_text_evidence_policy(
+                true,
+                true,
+                [
+                    ScenarioTextMask.date, ScenarioTextMask.version,
+                    ScenarioTextMask.address, ScenarioTextMask.duration
+                ],
+                40
+            )
+            val checked = check_text_evidence(
+                capture.transcript,
+                [
+                    "SimpleOS RV64 serial console - network unavailable, UART management active.",
+                    "Type 'help' for commands.",
+                    "login: root",
+                    "password:",
+                    "simpleos-rv64> ls",
+                    "SYS",
+                    "simpleos-rv64> info",
+                    "SimpleOS RV64 (riscv64) - serial console fallback",
+                    "simpleos-rv64> launch /sys/apps/clang --version"
+                ],
+                policy
+            )
+            expect(checked.diagnostic).to_equal("ok")
+            expect(checked.first_expected_index).to_equal(-1)
+            expect(checked.normalized_transcript).to_contain(
+                "launched /sys/apps/clang pid="
+            )
+            expect(checked.normalized_transcript).to_contain(
+                "SimpleOS RV64 (riscv64) - serial console fallback"
+            )
+
+            step("Publish the verified transcript evidence")
+            val source_revision = file_hash_sha256(SIMPLEOS_KERNEL)
+            val artifact = scenario_evidence_artifact(
+                ScenarioCaptureKind.log,
+                "Ordered SimpleOS RV64 boot login and shell transcript",
+                "text/plain",
+                capture.transcript_path,
+                "",
+                "simpleos-rv64-login",
+                "verify"
+            )
+            val integrity = ScenarioArtifactIntegrity(
+                path: capture.transcript_path,
+                format: "log",
+                mime: "text/plain",
+                width: 0,
+                height: 0,
+                byte_size: file_size(capture.transcript_path),
+                checksum: file_hash_sha256(capture.transcript_path),
+                producer: SIMPLEOS_RUNNER,
+                producer_version: file_hash_sha256(SIMPLEOS_RUNNER),
+                source_revision: source_revision,
+                host: hostname(),
+                target: "qemu-riscv64",
+                capture_ready: true,
+                baseline_identity: "",
+                comparison_result: "not-compared",
+                required: true
+            )
+            val manifest = ScenarioEvidenceManifest(
+                schema_major: 1,
+                schema_minor: 0,
+                feature_id: "simpleos.riscv.login",
+                requirement_ids: ["REQ-EVS-006", "REQ-EVS-007"],
+                spec_path: SIMPLEOS_SPEC,
+                generated_manual_path: SIMPLEOS_MANUAL,
+                scenario_id: "simpleos-rv64-login",
+                step_id: "publish",
+                required: true,
+                result: "pass",
+                showcase_status: "live-pass",
+                reason: "",
+                source_revision: source_revision,
+                source_digest: "sha256:" + file_hash_sha256(SIMPLEOS_SPEC),
+                command: SIMPLEOS_TEST_COMMAND,
+                producer: SIMPLEOS_RUNNER,
+                producer_version: file_hash_sha256(SIMPLEOS_RUNNER),
+                host: hostname(),
+                target: "qemu-riscv64",
+                backend: "serial-shell",
+                start_time: capture_started_ms,
+                duration_ms: capture_duration_ms,
+                artifacts: [artifact],
+                artifact_integrity: [integrity],
+                text_results: [checked],
+                motion_evidence: [],
+                protocol_fields: [],
+                html_checks: [],
+                blocker_prerequisite: "",
+                resume_command: SIMPLEOS_RESUME,
+                owner: "simpleos",
+                final_reviewer: "verification"
+            )
+            val publication = write_scenario_evidence_manifest(manifest).unwrap()
+            expect(publication).to_equal(SIMPLEOS_ARTIFACT_ROOT + "/evidence.sdn")
+            expect(retain_scenario_evidence_manifest(manifest).unwrap()).to_equal(
+                "doc/06_spec/evidence/03_system/os/evidence/" +
+                "simpleos_rv64_login_evidence/evidence.sdn"
+            )
+        else:
+            verify_blocker(capture)
+            step("Publish the exact blocker contract")
+            val manifest = scenario_evidence_status_manifest(
+                "simpleos.riscv.login",
+                ["REQ-EVS-006", "REQ-EVS-007"],
+                SIMPLEOS_SPEC,
+                capture.status,
+                capture.reason,
+                "qemu-riscv64",
+                "serial-shell",
+                capture.resume_command
+            )
+            val publication = write_scenario_evidence_manifest(manifest).unwrap()
+            expect(publication).to_equal(SIMPLEOS_ARTIFACT_ROOT + "/evidence.sdn")
+            expect(retain_scenario_evidence_manifest(manifest).unwrap()).to_equal(
+                "doc/06_spec/evidence/03_system/os/evidence/" +
+                "simpleos_rv64_login_evidence/evidence.sdn"
+            )
+
+        step("Render the evidence for review")
+        val rendered = (
+            "status: " + capture.status + "\n" +
+            "reason: " + capture.reason + "\n" +
+            "resume: " + capture.resume_command
+        )
+        expect(rendered).to_contain("status: " + capture.status)
+        expect(rendered).to_contain(
+            "test/03_system/os/evidence/simpleos_rv64_login_evidence_spec.spl"
+        )

@@ -1,0 +1,280 @@
+"""Fail-closed decoder for declarative pure-Simple native build targets."""
+
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use std.common.sdn.schema.{SdnDecodeIssues, sdn_locate_issues,
+    sdn_require_text, sdn_require_dict, sdn_require_text_array,
+    sdn_get_text, sdn_get_text_array}
+use std.common.sdn.value.{SdnValue}
+
+pub class BuildTarget:
+    name: text
+    entry: text
+    artifact: text
+    target_triple: text
+    backend: text
+    runtime_bundle: text
+    abi: text
+    dependencies: [text]
+    freshness_roots: [text]
+    health_args: [text]
+    # `simple.build/v1` intentionally leaves this empty.  Version two may
+    # pin an in-tree Core-C archive; the build planner then passes only its
+    # containing directory to native-build as --runtime-path.
+    runtime_archive: text = ""
+
+pub class BuildManifest:
+    schema: text
+    source_roots: [text]
+    targets: [BuildTarget]
+    issues: [text]
+
+    fn valid(self) -> bool:
+        self.issues.len() == 0
+
+fn _manifest_issue_text(path: text, message: text, line: i64, col: i64) -> text:
+    if line > 0:
+        return path + ":" + line.to_text() + ":" + col.to_text() + ": " + message
+    path + ": " + message
+
+fn _manifest_empty(issue: text) -> BuildManifest:
+    BuildManifest(schema: "", source_roots: [], targets: [], issues: [issue])
+
+fn _manifest_allowed_key(key: text, allowed: [text]) -> bool:
+    for candidate in allowed:
+        if key == candidate: return true
+    false
+
+fn _manifest_safe_relative_path(path: text) -> bool:
+    if (path == "" or path.starts_with("/") or path.contains("\\") or
+            path.contains(":") or path.contains("\n") or
+            path.contains("\r") or path.contains("\t")):
+        return false
+    for part in path.split("/"):
+        if part == "" or part == "." or part == "..": return false
+    true
+
+fn _manifest_target_name_valid(name: text) -> bool:
+    if name == "" or name == "all": return false
+    val first = name.substring(0, 1)
+    if not "abcdefghijklmnopqrstuvwxyz".contains(first): return false
+    val allowed = "abcdefghijklmnopqrstuvwxyz0123456789_-"
+    var i = 0
+    while i < name.len():
+        if not allowed.contains(name.substring(i, i + 1)): return false
+        i = i + 1
+    true
+
+fn _manifest_entry_beneath_root(entry: text, roots: [text]) -> bool:
+    for root in roots:
+        if entry.starts_with(root + "/"): return true
+    false
+
+fn _decode_build_target(root: SdnValue, name: text, schema: text,
+        issues: SdnDecodeIssues) -> BuildTarget:
+    val prefix = "build.targets." + name
+    val entry = sdn_require_text(root, prefix + ".entry", issues) ?? ""
+    val artifact = sdn_require_text(root, prefix + ".artifact", issues) ?? ""
+    val target_triple = sdn_require_text(root, prefix + ".target_triple", issues) ?? ""
+    val backend = sdn_require_text(root, prefix + ".backend", issues) ?? ""
+    val runtime_bundle = sdn_require_text(root, prefix + ".runtime_bundle", issues) ?? ""
+    val runtime_archive = sdn_get_text(root, prefix + ".runtime_archive", issues) ?? ""
+    val abi = sdn_require_text(root, prefix + ".abi", issues) ?? ""
+    val dependencies = sdn_require_text_array(root, prefix + ".dependencies", issues) ?? []
+    val freshness_roots = sdn_get_text_array(root, prefix + ".freshness_roots", issues) ?? []
+    val health_args = sdn_get_text_array(root, prefix + ".health_args", issues) ?? []
+    match root.get_path(prefix):
+        case Some(value):
+            match value.as_dict():
+                case Some(fields):
+                    for key in fields.keys():
+                        var allowed = ["entry", "artifact", "target_triple", "backend",
+                            "runtime_bundle", "abi", "dependencies",
+                            "freshness_roots", "health_args"]
+                        if schema == "simple.build/v2":
+                            allowed.push("runtime_archive")
+                        if not _manifest_allowed_key(key, allowed):
+                            issues.add(prefix + "." + key, "unknown target field")
+                case None: ()
+        case None: ()
+    BuildTarget(name: name, entry: entry, artifact: artifact,
+        target_triple: target_triple, backend: backend,
+        runtime_bundle: runtime_bundle, runtime_archive: runtime_archive,
+        abi: abi, dependencies: dependencies,
+        freshness_roots: freshness_roots, health_args: health_args)
+
+fn _manifest_token_valid(value: text) -> bool:
+    if value == "": return false
+    val allowed = "abcdefghijklmnopqrstuvwxyz0123456789_.-"
+    var i = 0
+    while i < value.len():
+        if not allowed.contains(value.substring(i, i + 1)): return false
+        i = i + 1
+    true
+
+fn _validate_build_manifest(manifest: BuildManifest,
+        issues: SdnDecodeIssues):
+    if manifest.schema != "simple.build/v1" and manifest.schema != "simple.build/v2":
+        issues.add("build.schema", "unsupported schema")
+    if manifest.source_roots.len() == 0:
+        issues.add("build.source_roots", "at least one source root is required")
+    if manifest.source_roots.len() > 16:
+        issues.add("build.source_roots", "at most 16 source roots are supported")
+    for root in manifest.source_roots:
+        if not _manifest_safe_relative_path(root):
+            issues.add("build.source_roots", "source roots must be normalized repo-relative paths")
+    var unique_roots: [text] = []
+    for root in manifest.source_roots:
+        if unique_roots.contains(root):
+            issues.add("build.source_roots", "duplicate source root")
+        else:
+            unique_roots.push(root)
+    if manifest.targets.len() == 0:
+        issues.add("build.targets", "at least one target is required")
+    if manifest.targets.len() > 64:
+        issues.add("build.targets", "at most 64 targets are supported")
+    var entries: [text] = []
+    var artifacts: [text] = []
+    for target in manifest.targets:
+        val prefix = "build.targets." + target.name
+        if not _manifest_target_name_valid(target.name):
+            issues.add(prefix, "target name must match [a-z][a-z0-9_-]* and must not be all")
+        if not _manifest_safe_relative_path(target.entry) or not target.entry.ends_with(".spl"):
+            issues.add(prefix + ".entry", "entry must be a normalized repo-relative .spl path")
+        elif not _manifest_entry_beneath_root(target.entry, manifest.source_roots):
+            issues.add(prefix + ".entry", "entry must be beneath a declared source root")
+        if (not _manifest_safe_relative_path(target.artifact) or
+                not target.artifact.starts_with("build/")):
+            issues.add(prefix + ".artifact", "artifact must be a normalized path beneath build/")
+        if (target.artifact.ends_with(".provenance.sdn") or
+                target.artifact.ends_with(".simple_launch.sdn") or
+                target.artifact.contains(".simple-build-")):
+            issues.add(prefix + ".artifact", "artifact uses a reserved build sidecar or staging name")
+        if (not _manifest_token_valid(target.target_triple) or
+                target.target_triple.split("-").len() < 4):
+            issues.add(prefix + ".target_triple", "target triple must be an explicit normalized quadruple")
+        if target.backend != "llvm" and target.backend != "cranelift":
+            issues.add(prefix + ".backend", "backend must be llvm or cranelift")
+        if (target.runtime_bundle != "simple-core" and
+                target.runtime_bundle != "core-c-bootstrap"):
+            issues.add(prefix + ".runtime_bundle",
+                "runtime bundle must be simple-core or core-c-bootstrap")
+        if manifest.schema == "simple.build/v2" and
+                target.runtime_bundle != "core-c-bootstrap":
+            issues.add(prefix + ".runtime_bundle",
+                "simple.build/v2 requires core-c-bootstrap")
+        if manifest.schema == "simple.build/v2" and target.runtime_archive == "":
+            issues.add(prefix + ".runtime_archive",
+                "simple.build/v2 requires an explicit core-c-bootstrap runtime archive")
+        if target.runtime_archive != "":
+            if manifest.schema != "simple.build/v2":
+                issues.add(prefix + ".runtime_archive",
+                    "runtime archive requires simple.build/v2")
+            if target.runtime_bundle != "core-c-bootstrap":
+                issues.add(prefix + ".runtime_archive",
+                    "runtime archive is valid only for core-c-bootstrap")
+            if (not _manifest_safe_relative_path(target.runtime_archive) or
+                    not target.runtime_archive.starts_with("build/") or
+                    not target.runtime_archive.ends_with(".a")):
+                issues.add(prefix + ".runtime_archive",
+                    "runtime archive must be a normalized build-contained .a path")
+            if target.runtime_archive == target.artifact:
+                issues.add(prefix + ".runtime_archive",
+                    "runtime archive must not be the target artifact")
+        if (not _manifest_token_valid(target.abi) or
+                not target.target_triple.ends_with("-" + target.abi)):
+            issues.add(prefix + ".abi", "ABI must be explicit and match the target triple suffix")
+        if target.target_triple.contains("windows") and not target.artifact.ends_with(".exe"):
+            issues.add(prefix + ".artifact", "Windows target artifacts must declare the .exe suffix")
+        if entries.contains(target.entry):
+            issues.add(prefix + ".entry", "duplicate target entry")
+        else:
+            entries.push(target.entry)
+        if artifacts.contains(target.artifact):
+            issues.add(prefix + ".artifact", "duplicate target artifact")
+        else:
+            artifacts.push(target.artifact)
+        if target.dependencies.len() > 4096:
+            issues.add(prefix + ".dependencies", "too many declared dependencies")
+        var unique_dependencies: [text] = []
+        for dependency in target.dependencies:
+            if not _manifest_safe_relative_path(dependency):
+                issues.add(prefix + ".dependencies", "dependencies must be normalized repo-relative paths")
+            if unique_dependencies.contains(dependency):
+                issues.add(prefix + ".dependencies", "duplicate declared dependency")
+            else:
+                unique_dependencies.push(dependency)
+        if target.freshness_roots.len() > 16:
+            issues.add(prefix + ".freshness_roots", "at most 16 freshness roots are supported")
+        var unique_freshness_roots: [text] = []
+        for freshness_root in target.freshness_roots:
+            if not _manifest_safe_relative_path(freshness_root):
+                issues.add(prefix + ".freshness_roots",
+                    "freshness roots must be normalized repo-relative paths")
+            elif not _manifest_entry_beneath_root(freshness_root + "/_", manifest.source_roots):
+                issues.add(prefix + ".freshness_roots",
+                    "freshness roots must be beneath a declared source root")
+            if unique_freshness_roots.contains(freshness_root):
+                issues.add(prefix + ".freshness_roots", "duplicate freshness root")
+            else:
+                unique_freshness_roots.push(freshness_root)
+        if target.health_args.len() > 16:
+            issues.add(prefix + ".health_args", "at most 16 health arguments are supported")
+        for health_arg in target.health_args:
+            if health_arg == "" or health_arg.len() > 1024:
+                issues.add(prefix + ".health_args",
+                    "health arguments must be non-empty and at most 1024 bytes")
+    for artifact in artifacts:
+        if artifacts.contains(artifact + ".provenance.sdn"):
+            issues.add("build.targets", "artifact collides with another target provenance sidecar")
+        if artifacts.contains(artifact + ".simple_launch.sdn"):
+            issues.add("build.targets", "artifact collides with another target launch metadata sidecar")
+
+pub fn decode_build_manifest(content: text) -> BuildManifest:
+    match parse_with_spans_and_issues(content):
+        case Err(error):
+            _manifest_empty("build: invalid SDN: " + error)
+        case Ok(parsed):
+            val root = parsed.0
+            val spans = parsed.1
+            val parse_issues = parsed.2
+            val issues = SdnDecodeIssues.new()
+            for issue in parse_issues:
+                issues.add(issue.path, issue.message)
+            val schema = sdn_require_text(root, "build.schema", issues) ?? ""
+            val source_roots = sdn_require_text_array(root,
+                "build.source_roots", issues) ?? []
+            val target_values = sdn_require_dict(root, "build.targets", issues) ?? {}
+            match root.as_dict():
+                case Some(fields):
+                    for key in fields.keys():
+                        if key != "build":
+                            issues.add(key, "unknown build manifest root field")
+                case None:
+                    issues.add("build", "build manifest root must be a dict")
+            match root.get_path("build"):
+                case Some(value):
+                    match value.as_dict():
+                        case Some(fields):
+                            for key in fields.keys():
+                                if not _manifest_allowed_key(key,
+                                        ["schema", "source_roots", "targets"]):
+                                    issues.add("build." + key, "unknown build field")
+                        case None: ()
+                case None: ()
+            var names = target_values.keys()
+            names.sort()
+            var targets: [BuildTarget] = []
+            for name in names:
+                targets.push(_decode_build_target(root, name, schema, issues))
+            var manifest = BuildManifest(schema: schema, source_roots: source_roots,
+                targets: targets, issues: [])
+            _validate_build_manifest(manifest, issues)
+            val located = sdn_locate_issues(issues, spans)
+            var rendered: [text] = []
+            for issue in located:
+                rendered.push(_manifest_issue_text(issue.path, issue.message,
+                    issue.line, issue.col))
+            manifest.issues = rendered
+            manifest
+
+export BuildTarget, BuildManifest, decode_build_manifest

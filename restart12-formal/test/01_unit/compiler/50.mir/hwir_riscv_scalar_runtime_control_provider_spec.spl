@@ -1,0 +1,151 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.host_evaluator.{HwHostInput, evaluate_strict_comb_hwir}
+use compiler.mir.hwir.riscv_scalar_runtime_control_provider.{
+    strict_riscv_scalar_runtime_control_provider}
+use compiler.mir.hwir.riscv_scalar_runtime_control_datapath.{
+    strict_riscv_scalar_runtime_control_datapath}
+use lib.hardware.riscv_common.isa.scalar_database.{RiscvScalarDecoderPlan,
+    riscv_scalar_decoder_plan, riscv_scalar_semantic_opcode}
+
+fn row_for(plan: RiscvScalarDecoderPlan, instruction: i64) -> i64:
+    var index = 0
+    for entry in plan.entries:
+        if entry.matches(instruction as u32, plan.xlen): return index + 1
+        index = index + 1
+    0
+
+fn control_inputs(plan: RiscvScalarDecoderPlan, instruction: i64,
+    rs1: i64, rs2: i64, pc: i64, branch_target: i64,
+    jal_target: i64, jalr_target: i64, branch_misaligned: i64,
+    jal_misaligned: i64, jalr_misaligned: i64) -> [HwHostInput]:
+    val entry = plan.lookup(instruction as u32).unwrap()
+    val rd = (instruction >> 7) & 31
+    val rs1_field = (instruction >> 15) & 31
+    val rs2_field = (instruction >> 20) & 31
+    [HwHostInput.bits("uop_valid", 1), HwHostInput.bits("decode_legal", 1),
+        HwHostInput.bits("decoded_row_index", row_for(plan, instruction)),
+        HwHostInput.bits("decoded_execution_class", 2),
+        HwHostInput.bits("decoded_memory_effect", 0),
+        HwHostInput.bits("decoded_semantic_opcode", riscv_scalar_semantic_opcode(entry.semantic_operation)),
+        HwHostInput.bits("decoded_declared_operand_width_is_32", 0),
+        HwHostInput.bits("canonical_instruction", instruction),
+        HwHostInput.bits("original_instruction", instruction),
+        HwHostInput.bits("instruction_length_bytes", 4),
+        HwHostInput.bits("instruction_rd_field", rd),
+        HwHostInput.bits("instruction_rs1_field", rs1_field),
+        HwHostInput.bits("instruction_rs2_field", rs2_field),
+        HwHostInput.bits("rs1_value", rs1), HwHostInput.bits("rs2_value", rs2),
+        HwHostInput.bits("pc_before", pc), HwHostInput.bits("fallthrough_pc", pc + 4),
+        HwHostInput.bits("privilege", 3), HwHostInput.bits("provider_event_id", 19),
+        HwHostInput.bits("decode_event_id", 19), HwHostInput.bits("lineage_valid", 1),
+        HwHostInput.bits("branch_target", branch_target),
+        HwHostInput.bits("jal_target", jal_target), HwHostInput.bits("jalr_target", jalr_target),
+        HwHostInput.bits("branch_target_misaligned", branch_misaligned),
+        HwHostInput.bits("jal_target_misaligned", jal_misaligned),
+        HwHostInput.bits("jalr_target_misaligned", jalr_misaligned)]
+
+describe "plan-bound runtime scalar control provider":
+    it "admits exactly all eight base-I control rows for RV32 and RV64":
+        for product in [(CoreConfig.rv32(), "rv32i"), (CoreConfig.rv64(), "rv64i")]:
+            val plan = riscv_scalar_decoder_plan(product[1]).unwrap()
+            val module = strict_riscv_scalar_runtime_control_provider(
+                "runtime_control_" + product[1], product[0], plan).unwrap()
+            var admitted = 0
+            for entry in plan.entries:
+                if entry.execution_class == "control-flow":
+                    val result = evaluate_strict_comb_hwir(module, control_inputs(plan,
+                        entry.encoding_value as i64, 0, 0, 0x100, 0x104, 0x108, 0x10c,
+                        0, 0, 0)).unwrap()
+                    expect(result.value_of("completion_valid").unwrap()).to_equal(1)
+                    expect(result.value_of("protocol_fault").unwrap()).to_equal(0)
+                    admitted = admitted + 1
+            expect(admitted).to_equal(8)
+
+    it "projects aligned jump link and branch redirect semantics":
+        val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        val module = strict_riscv_scalar_runtime_control_provider(
+            "runtime_control_effects", CoreConfig.rv32(), plan).unwrap()
+        val jal = evaluate_strict_comb_hwir(module, control_inputs(plan,
+            0x008000EF, 0, 0, 0x100, 0, 0x108, 0, 0, 0, 0)).unwrap()
+        expect(jal.value_of("completion_redirect_valid").unwrap()).to_equal(1)
+        expect(jal.value_of("completion_redirect_target").unwrap()).to_equal(0x108)
+        expect(jal.value_of("completion_rd_write").unwrap()).to_equal(1)
+        expect(jal.value_of("completion_rd_value").unwrap()).to_equal(0x104)
+        val beq = evaluate_strict_comb_hwir(module, control_inputs(plan,
+            0x00208463, 7, 7, 0x100, 0x108, 0, 0, 0, 0, 0)).unwrap()
+        expect(beq.value_of("completion_redirect_valid").unwrap()).to_equal(1)
+        expect(beq.value_of("completion_rd_write").unwrap()).to_equal(0)
+
+    it "turns a taken misaligned target into a cause-zero precise trap":
+        val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        val module = strict_riscv_scalar_runtime_control_provider(
+            "runtime_control_trap", CoreConfig.rv32(), plan).unwrap()
+        val trapped = evaluate_strict_comb_hwir(module, control_inputs(plan,
+            0x008000EF, 0, 0, 0x102, 0, 0x10A, 0, 0, 1, 0)).unwrap()
+        expect(trapped.value_of("completion_valid").unwrap()).to_equal(1)
+        expect(trapped.value_of("completion_execute_trap_valid").unwrap()).to_equal(1)
+        expect(trapped.value_of("completion_execute_trap_cause").unwrap()).to_equal(0)
+        expect(trapped.value_of("completion_execute_trap_tval").unwrap()).to_equal(0x10A)
+        expect(trapped.value_of("completion_pc_after").unwrap()).to_equal(0x102)
+        expect(trapped.value_of("completion_redirect_valid").unwrap()).to_equal(0)
+        expect(trapped.value_of("completion_rd_write").unwrap()).to_equal(0)
+
+    it "consumes canonical dynamic target and alignment outputs":
+        val config = CoreConfig.rv32(); val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        val datapath = strict_riscv_scalar_runtime_control_datapath(
+            "runtime_control_canonical_datapath", config).unwrap()
+        val provider = strict_riscv_scalar_runtime_control_provider(
+            "runtime_control_canonical_provider", config, plan).unwrap()
+        val instruction = 0xFFF082E7
+        val values = evaluate_strict_comb_hwir(datapath, [
+            HwHostInput.bits("canonical_instruction", instruction),
+            HwHostInput.bits("instruction_rs1_field", 1),
+            HwHostInput.bits("pc_before", 0x200), HwHostInput.bits("rs1_value", 0x102),
+            HwHostInput.bits("rs2_value", 0)]).unwrap()
+        val result = evaluate_strict_comb_hwir(provider, control_inputs(plan,
+            instruction, 0x102, 0, 0x200,
+            values.value_of("branch_target").unwrap(),
+            values.value_of("jal_target").unwrap(),
+            values.value_of("jalr_target").unwrap(),
+            values.value_of("branch_target_misaligned").unwrap(),
+            values.value_of("jal_target_misaligned").unwrap(),
+            values.value_of("jalr_target_misaligned").unwrap())).unwrap()
+        expect(values.value_of("jalr_immediate").unwrap()).to_equal(0xFFFFFFFF)
+        expect(result.value_of("completion_redirect_valid").unwrap()).to_equal(1)
+        expect(result.value_of("completion_redirect_target").unwrap()).to_equal(0x100)
+
+    it "normalizes x0 operands and fails closed only inside its legal control claim":
+        val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        val module = strict_riscv_scalar_runtime_control_provider(
+            "runtime_control_claim", CoreConfig.rv32(), plan).unwrap()
+        val x0 = evaluate_strict_comb_hwir(module, control_inputs(plan,
+            0x00000463, 99, 77, 0x100, 0x108, 0, 0, 0, 0, 0)).unwrap()
+        expect(x0.value_of("completion_valid").unwrap()).to_equal(1)
+        expect(x0.value_of("completion_redirect_valid").unwrap()).to_equal(1)
+        var wrong = control_inputs(plan, 0x00000463, 0, 0, 0x100, 0x108, 0, 0, 0, 0, 0)
+        wrong[2] = HwHostInput.bits("decoded_row_index", 1)
+        val mismatch = evaluate_strict_comb_hwir(module, wrong).unwrap()
+        expect(mismatch.value_of("completion_valid").unwrap()).to_equal(0)
+        expect(mismatch.value_of("protocol_fault").unwrap()).to_equal(1)
+        wrong[0] = HwHostInput.bits("uop_valid", 0)
+        val outside = evaluate_strict_comb_hwir(module, wrong).unwrap()
+        expect(outside.value_of("protocol_fault").unwrap()).to_equal(0)
+
+        for index in [4, 5, 6, 10, 18, 19, 20]:
+            var malformed = control_inputs(plan, 0x00000463, 0, 0, 0x100,
+                0x108, 0, 0, 0, 0, 0)
+            malformed[index] = HwHostInput.bits(malformed[index].name,
+                malformed[index].value + 1)
+            val rejected = evaluate_strict_comb_hwir(module, malformed).unwrap()
+            expect(rejected.value_of("completion_valid").unwrap()).to_equal(0)
+            expect(rejected.value_of("protocol_fault").unwrap()).to_equal(1)
+
+    it "rejects missing identity and mismatched decoder plans":
+        val plan = riscv_scalar_decoder_plan("rv32i").unwrap()
+        expect(strict_riscv_scalar_runtime_control_provider("", CoreConfig.rv32(), plan).is_err()).to_be(true)
+        expect(strict_riscv_scalar_runtime_control_provider(
+            "wrong_control", CoreConfig.rv64(), plan).is_err()).to_be(true)
+        expect(strict_riscv_scalar_runtime_control_provider(
+            "compressed_control", CoreConfig.rv32_zca_integer(),
+            riscv_scalar_decoder_plan("rv32i_zca").unwrap()).is_err()).to_be(true)

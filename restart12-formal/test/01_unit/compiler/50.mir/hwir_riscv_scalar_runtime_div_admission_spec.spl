@@ -1,0 +1,132 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_scalar_runtime_div_admission.{
+    RiscvScalarRuntimeDivAdmissionContract, strict_riscv_scalar_runtime_div_admission}
+use lib.hardware.riscv_common.isa.scalar_database.{riscv_scalar_decoder_plan}
+
+fn rv32im() -> CoreConfig:
+    CoreConfig(xlen: 32, physical_address_bits: 32, register_count: 32,
+        profile: "rv32-im", isa_profile: "rv32im", compressed_decode_profile: "none")
+
+fn rv64im() -> CoreConfig:
+    CoreConfig(xlen: 64, physical_address_bits: 56, register_count: 32,
+        profile: "rv64-im", isa_profile: "rv64im", compressed_decode_profile: "none")
+
+describe "dynamic runtime DIV/REM admission contract":
+    it "freezes every RV32 DIV/REM row with exact row, form, semantic, and metadata checks":
+        val contract = strict_riscv_scalar_runtime_div_admission(rv32im(),
+            riscv_scalar_decoder_plan("rv32im").unwrap()).unwrap()
+        expect(contract.diagnostic()).to_equal("")
+        expect(contract.rows.len()).to_equal(4)
+        expect(contract.provider_tag).to_equal(2)
+        expect(contract.execution_class).to_equal(4)
+        expect(contract.memory_effect).to_equal(0)
+        expect(contract.rows.any(_.id == "rv.m.div" and _.operation_code == 0)).to_be(true)
+        expect(contract.rows.any(_.id == "rv.m.divu" and _.operation_code == 1)).to_be(true)
+        expect(contract.rows.any(_.id == "rv.m.rem" and _.operation_code == 2)).to_be(true)
+        expect(contract.rows.any(_.id == "rv.m.remu" and _.operation_code == 3)).to_be(true)
+        expect(contract.rows.all(not _.declared_width_is_32)).to_be(true)
+        expect(contract.required_metadata_checks.contains("canonical_form")).to_be(true)
+        expect(contract.required_metadata_checks.contains("decoded_row_index")).to_be(true)
+        expect(contract.required_metadata_checks.contains("semantic_opcode")).to_be(true)
+        expect(contract.protocol_fault_scope).to_equal("accepted_tag_two_request_with_any_admission_or_metadata_mismatch")
+
+    it "adds the four RV64 W operations with a W selector while retaining the full completion envelope":
+        val contract = strict_riscv_scalar_runtime_div_admission(rv64im(),
+            riscv_scalar_decoder_plan("rv64im").unwrap()).unwrap()
+        expect(contract.rows.len()).to_equal(8)
+        expect(contract.rows.any(_.id == "rv64.m.divw" and _.operation_code == 0 and _.declared_width_is_32)).to_be(true)
+        expect(contract.rows.any(_.id == "rv64.m.divuw" and _.operation_code == 1 and _.declared_width_is_32)).to_be(true)
+        expect(contract.rows.any(_.id == "rv64.m.remw" and _.operation_code == 2 and _.declared_width_is_32)).to_be(true)
+        expect(contract.rows.any(_.id == "rv64.m.remuw" and _.operation_code == 3 and _.declared_width_is_32)).to_be(true)
+        expect(contract.completion_fields.len()).to_equal(25)
+        expect(contract.completion_fields.contains("provider_event_id")).to_be(true)
+        expect(contract.completion_fields.contains("decode_event_id")).to_be(true)
+        expect(contract.completion_fields.contains("illegal_valid")).to_be(true)
+        expect(contract.plan_sha256).to_equal(riscv_scalar_decoder_plan("rv64im").unwrap().structural_sha256())
+        expect(contract.structural_sha256().len()).to_equal(64)
+
+    it "rejects non-IM or compressed products instead of silently admitting a tag-two row":
+        expect(strict_riscv_scalar_runtime_div_admission(CoreConfig.rv32(),
+            riscv_scalar_decoder_plan("rv32i").unwrap()).is_err()).to_be(true)
+        expect(strict_riscv_scalar_runtime_div_admission(CoreConfig.rv32_zca_integer(),
+            riscv_scalar_decoder_plan("rv32i_zca").unwrap()).is_err()).to_be(true)
+
+    it "rejects a forged row operation, semantic code, width selector, or missing exact row":
+        val contract = strict_riscv_scalar_runtime_div_admission(rv64im(),
+            riscv_scalar_decoder_plan("rv64im").unwrap()).unwrap()
+        var wrong_operation = contract.rows
+        var operation_row = wrong_operation[0]
+        operation_row.operation_code = 3
+        wrong_operation[0] = operation_row
+        val op_forged = RiscvScalarRuntimeDivAdmissionContract(
+            isa_profile: contract.isa_profile, plan_sha256: contract.plan_sha256, xlen: contract.xlen,
+            decoded_row_width: contract.decoded_row_width, provider_tag: contract.provider_tag,
+            execution_class: contract.execution_class, memory_effect: contract.memory_effect,
+            rows: wrong_operation, required_metadata_checks: contract.required_metadata_checks,
+            completion_fields: contract.completion_fields, protocol_fault_scope: contract.protocol_fault_scope)
+        expect(op_forged.diagnostic()).to_contain("OPERATION")
+        var wrong_width = contract.rows
+        var width_row = wrong_width[4]
+        width_row.declared_width_is_32 = false
+        wrong_width[4] = width_row
+        val width_forged = RiscvScalarRuntimeDivAdmissionContract(
+            isa_profile: contract.isa_profile, plan_sha256: contract.plan_sha256, xlen: contract.xlen,
+            decoded_row_width: contract.decoded_row_width, provider_tag: contract.provider_tag,
+            execution_class: contract.execution_class, memory_effect: contract.memory_effect,
+            rows: wrong_width, required_metadata_checks: contract.required_metadata_checks,
+            completion_fields: contract.completion_fields, protocol_fault_scope: contract.protocol_fault_scope)
+        expect(width_forged.diagnostic()).to_contain("WIDTH")
+
+    it "rejects plan-receipt, encoding, row-index, and order tampering against the canonical IM plan":
+        val contract = strict_riscv_scalar_runtime_div_admission(rv64im(),
+            riscv_scalar_decoder_plan("rv64im").unwrap()).unwrap()
+        val receipt_forged = RiscvScalarRuntimeDivAdmissionContract(
+            isa_profile: contract.isa_profile, plan_sha256: "0", xlen: contract.xlen,
+            decoded_row_width: contract.decoded_row_width, provider_tag: contract.provider_tag,
+            execution_class: contract.execution_class, memory_effect: contract.memory_effect,
+            rows: contract.rows, required_metadata_checks: contract.required_metadata_checks,
+            completion_fields: contract.completion_fields, protocol_fault_scope: contract.protocol_fault_scope)
+        expect(receipt_forged.diagnostic()).to_contain("PLAN")
+        var wrong_encoding = contract.rows
+        var encoding_row = wrong_encoding[0]
+        encoding_row.encoding_value = encoding_row.encoding_value ^ 4096
+        wrong_encoding[0] = encoding_row
+        val encoding_forged = RiscvScalarRuntimeDivAdmissionContract(
+            isa_profile: contract.isa_profile, plan_sha256: contract.plan_sha256, xlen: contract.xlen,
+            decoded_row_width: contract.decoded_row_width, provider_tag: contract.provider_tag,
+            execution_class: contract.execution_class, memory_effect: contract.memory_effect,
+            rows: wrong_encoding, required_metadata_checks: contract.required_metadata_checks,
+            completion_fields: contract.completion_fields, protocol_fault_scope: contract.protocol_fault_scope)
+        expect(encoding_forged.diagnostic()).to_contain("PROVENANCE")
+        var wrong_index = contract.rows
+        var index_row = wrong_index[0]
+        index_row.decoded_row_index = index_row.decoded_row_index + 1
+        wrong_index[0] = index_row
+        val index_forged = RiscvScalarRuntimeDivAdmissionContract(
+            isa_profile: contract.isa_profile, plan_sha256: contract.plan_sha256, xlen: contract.xlen,
+            decoded_row_width: contract.decoded_row_width, provider_tag: contract.provider_tag,
+            execution_class: contract.execution_class, memory_effect: contract.memory_effect,
+            rows: wrong_index, required_metadata_checks: contract.required_metadata_checks,
+            completion_fields: contract.completion_fields, protocol_fault_scope: contract.protocol_fault_scope)
+        expect(index_forged.diagnostic()).to_contain("PROVENANCE")
+        var wrong_order = contract.rows
+        val first = wrong_order[0]
+        wrong_order[0] = wrong_order[1]
+        wrong_order[1] = first
+        val order_forged = RiscvScalarRuntimeDivAdmissionContract(
+            isa_profile: contract.isa_profile, plan_sha256: contract.plan_sha256, xlen: contract.xlen,
+            decoded_row_width: contract.decoded_row_width, provider_tag: contract.provider_tag,
+            execution_class: contract.execution_class, memory_effect: contract.memory_effect,
+            rows: wrong_order, required_metadata_checks: contract.required_metadata_checks,
+            completion_fields: contract.completion_fields, protocol_fault_scope: contract.protocol_fault_scope)
+        expect(order_forged.diagnostic()).to_contain("PROVENANCE")
+
+    it "rejects a tampered RV64 W writeback policy before DIVW can enter the provider":
+        var plan = riscv_scalar_decoder_plan("rv64im").unwrap()
+        for index in 0..plan.entries.len() - 1:
+            if plan.entries[index].id == "rv64.m.divw":
+                var entry = plan.entries[index]
+                entry.writeback_rule = "rd=result"
+                plan.entries[index] = entry
+        expect(strict_riscv_scalar_runtime_div_admission(rv64im(), plan).is_err()).to_be(true)

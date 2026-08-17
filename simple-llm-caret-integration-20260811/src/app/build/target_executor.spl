@@ -1,0 +1,440 @@
+"""Transactional executor and SHA-256 provenance for manifest build targets."""
+
+use app.build.target_manifest.{BuildTarget}
+use app.build.target_plan.{BuildTargetPlan, validate_manifest_build_plan,
+    render_manifest_build_plan, plan_build_target, build_target_runtime_path}
+use app.build.artifact_provenance.{BuildTargetInputHashes,
+    build_target_input_hashes_batch, build_target_input_hashes_equal,
+    build_artifact_provenance}
+use app.io.cli_compile.{cli_native_build}
+use app.io.cli_ops.{cli_current_exe_path}
+use app.io.mod.{rt_file_rename, process_run_bounded, time_now_unix_micros}
+use std.nogc_sync_mut.env.{env_get, env_has, env_set, env_unset}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_is_regular_no_follow,
+    file_read, file_delete, file_atomic_write, file_hash_sha256, file_size_raw}
+use std.nogc_sync_mut.io.dir_ops.{is_dir, dir_create_all}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+
+class PreparedBuildTarget:
+    plan: BuildTargetPlan
+    input_hashes: BuildTargetInputHashes
+    artifact_hash: text
+    launch_metadata_hash: text
+    artifact_backup: text
+    launch_metadata_backup: text
+    provenance_backup: text
+    artifact_published: bool
+    launch_metadata_published: bool
+    provenance_published: bool
+
+pub class BuildHealthCommand:
+    command: text
+    args: [text]
+
+pub class BuildRuntimeEnvironment:
+    runtime_path_was_set: bool
+    runtime_path: text
+    core_runtime_path_was_set: bool
+    core_runtime_path: text
+    runtime_bundle_was_set: bool
+    runtime_bundle: text
+    link_objects_was_set: bool
+    link_objects: text
+
+fn _restore_runtime_value(name: text, was_set: bool, value: text) -> bool:
+    if was_set: return env_set(name, value)
+    env_unset(name)
+
+pub fn build_restore_runtime_environment(scope: BuildRuntimeEnvironment) -> bool:
+    val path_ok = _restore_runtime_value("SIMPLE_RUNTIME_PATH",
+        scope.runtime_path_was_set, scope.runtime_path)
+    val core_path_ok = _restore_runtime_value("SIMPLE_CORE_RUNTIME_PATH",
+        scope.core_runtime_path_was_set, scope.core_runtime_path)
+    val bundle_ok = _restore_runtime_value("SIMPLE_NATIVE_RUNTIME_BUNDLE",
+        scope.runtime_bundle_was_set, scope.runtime_bundle)
+    val link_objects_ok = _restore_runtime_value("SIMPLE_LINK_OBJECTS",
+        scope.link_objects_was_set, scope.link_objects)
+    path_ok and core_path_ok and bundle_ok and link_objects_ok
+
+pub fn build_scope_runtime_environment(plan: BuildTargetPlan) -> Result<BuildRuntimeEnvironment, text>:
+    val scope = BuildRuntimeEnvironment(
+        runtime_path_was_set: env_has("SIMPLE_RUNTIME_PATH"),
+        runtime_path: env_get("SIMPLE_RUNTIME_PATH") ?? "",
+        core_runtime_path_was_set: env_has("SIMPLE_CORE_RUNTIME_PATH"),
+        core_runtime_path: env_get("SIMPLE_CORE_RUNTIME_PATH") ?? "",
+        runtime_bundle_was_set: env_has("SIMPLE_NATIVE_RUNTIME_BUNDLE"),
+        runtime_bundle: env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? "",
+        link_objects_was_set: env_has("SIMPLE_LINK_OBJECTS"),
+        link_objects: env_get("SIMPLE_LINK_OBJECTS") ?? "")
+    val runtime_path = build_target_runtime_path(plan.target)
+    val path_ok = if runtime_path == "":
+        env_unset("SIMPLE_RUNTIME_PATH")
+    else:
+        env_set("SIMPLE_RUNTIME_PATH", runtime_path)
+    val core_path_ok = if runtime_path == "":
+        env_unset("SIMPLE_CORE_RUNTIME_PATH")
+    else:
+        env_set("SIMPLE_CORE_RUNTIME_PATH", runtime_path)
+    val bundle_ok = env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE",
+        plan.target.runtime_bundle)
+    # The v2 archive is the complete, exact external-link provider.  Do not
+    # inherit a colon-separated ambient provider list: it would make both the
+    # link and its receipt non-deterministic.  v1 has no archive authority, so
+    # it must clear the same override before the named bundle is resolved.
+    val link_objects_ok = if plan.target.runtime_archive == "":
+        env_unset("SIMPLE_LINK_OBJECTS")
+    else:
+        env_set("SIMPLE_LINK_OBJECTS", plan.target.runtime_archive)
+    if path_ok and core_path_ok and bundle_ok and link_objects_ok: return Ok(scope)
+    val _ = build_restore_runtime_environment(scope)
+    Err("could not scope manifest runtime environment")
+
+pub fn build_health_command(plan: BuildTargetPlan) -> BuildHealthCommand:
+    BuildHealthCommand(command: plan.staging_artifact,
+        args: plan.target.health_args)
+
+pub fn build_health_exit_valid(health_args: [text], exit_code: i64) -> bool:
+    health_args.len() == 0 or exit_code == 0
+
+pub fn build_restore_results_valid(results: [bool]) -> bool:
+    for result in results:
+        if not result: return false
+    true
+
+pub fn build_backup_cleanup_results_valid(results: [bool]) -> bool:
+    build_restore_results_valid(results)
+
+pub fn build_transaction_nonce(pid: i64, micros: i64,
+        manifest_hash: text) -> text:
+    val prefix = if manifest_hash.len() >= 12:
+        manifest_hash.substring(0, 12)
+    else:
+        manifest_hash
+    pid.to_text() + "-" + micros.to_text() + "-" + prefix
+
+fn _native_target_build(plan: BuildTargetPlan) -> i64:
+    val scope = match build_scope_runtime_environment(plan):
+        case Err(error):
+            eprint "Error: " + error
+            return 1
+        case Ok(value): value
+    val rc = cli_native_build(plan.args)
+    if not build_restore_runtime_environment(scope):
+        eprint "Error: could not restore manifest runtime environment"
+        return 1
+    rc
+
+fn _native_target_health(command: BuildHealthCommand) -> i64:
+    val health = process_run_bounded(command.command, command.args, 30000, 65536)
+    if health.1 != "": eprint health.1.trim()
+    health.2
+
+fn _allow_target_publish(plans: [BuildTargetPlan]) -> bool:
+    true
+
+pub fn validate_manifest_build_file(manifest_path: text,
+        selector: text) -> i64:
+    if not file_is_regular_no_follow(manifest_path):
+        eprint "Error: build manifest is not a regular no-follow file: " + manifest_path
+        return 2
+    val validation = validate_manifest_build_plan(file_read(manifest_path), selector)
+    if not validation.valid():
+        for issue in validation.issues: eprint "Error: " + issue
+        return 2
+    print render_manifest_build_plan(validation).trim()
+    0
+
+fn _target_parent(path: text) -> text:
+    val slash = path.last_index_of("/")
+    if slash <= 0: return ""
+    path.substring(0, slash)
+
+fn _cleanup_staging(prepared: [PreparedBuildTarget]):
+    for item in prepared:
+        file_delete(item.plan.staging_artifact)
+        file_delete(item.plan.staging_launch_metadata)
+        file_delete(item.plan.provenance_path)
+
+fn _restore_published(prepared: [PreparedBuildTarget]) -> bool:
+    var results: [bool] = []
+    for item in prepared:
+        if item.artifact_published:
+            val deleted = file_delete(item.plan.target.artifact)
+            results.push(deleted)
+            if not deleted:
+                eprint "Error: rollback could not delete published artifact: " +
+                    item.plan.target.artifact
+        if item.provenance_published:
+            val provenance = item.plan.target.artifact + ".provenance.sdn"
+            val deleted = file_delete(provenance)
+            results.push(deleted)
+            if not deleted:
+                eprint "Error: rollback could not delete published provenance: " +
+                    provenance
+        if item.launch_metadata_published:
+            val deleted = file_delete(item.plan.launch_metadata_path)
+            results.push(deleted)
+            if not deleted:
+                eprint "Error: rollback could not delete published launch metadata: " +
+                    item.plan.launch_metadata_path
+        if item.artifact_backup != "":
+            val restored = rt_file_rename(item.artifact_backup, item.plan.target.artifact)
+            results.push(restored)
+            if not restored:
+                eprint "Error: rollback could not restore artifact: " + item.plan.target.artifact
+        if item.provenance_backup != "":
+            val restored = rt_file_rename(item.provenance_backup,
+                item.plan.target.artifact + ".provenance.sdn")
+            results.push(restored)
+            if not restored:
+                eprint "Error: rollback could not restore provenance: " +
+                    item.plan.target.artifact + ".provenance.sdn"
+        if item.launch_metadata_backup != "":
+            val restored = rt_file_rename(item.launch_metadata_backup,
+                item.plan.launch_metadata_path)
+            results.push(restored)
+            if not restored:
+                eprint "Error: rollback could not restore launch metadata: " +
+                    item.plan.launch_metadata_path
+    build_restore_results_valid(results)
+
+fn _publish_prepared(mut prepared: [PreparedBuildTarget], nonce: text) -> bool:
+    var i = 0
+    while i < prepared.len():
+        var item = prepared[i]
+        val artifact = item.plan.target.artifact
+        val provenance = artifact + ".provenance.sdn"
+        if file_exists(artifact):
+            item.artifact_backup = artifact + ".simple-build-backup-" + nonce
+            if file_exists(item.artifact_backup):
+                eprint "Error: build backup collision: " + item.artifact_backup
+                val _ = _restore_published(prepared)
+                return false
+            if not rt_file_rename(artifact, item.artifact_backup):
+                val _ = _restore_published(prepared)
+                return false
+            prepared[i] = item
+        if file_exists(provenance):
+            item.provenance_backup = provenance + ".simple-build-backup-" + nonce
+            if file_exists(item.provenance_backup):
+                eprint "Error: build backup collision: " + item.provenance_backup
+                val _ = _restore_published(prepared)
+                return false
+            if not rt_file_rename(provenance, item.provenance_backup):
+                val _ = _restore_published(prepared)
+                return false
+            prepared[i] = item
+        if file_exists(item.plan.launch_metadata_path):
+            item.launch_metadata_backup = item.plan.launch_metadata_path +
+                ".simple-build-backup-" + nonce
+            if file_exists(item.launch_metadata_backup):
+                eprint "Error: build backup collision: " + item.launch_metadata_backup
+                val _ = _restore_published(prepared)
+                return false
+            if not rt_file_rename(item.plan.launch_metadata_path,
+                    item.launch_metadata_backup):
+                val _ = _restore_published(prepared)
+                return false
+            prepared[i] = item
+        prepared[i] = item
+        i = i + 1
+    i = 0
+    while i < prepared.len():
+        var item = prepared[i]
+        if not rt_file_rename(item.plan.staging_artifact, item.plan.target.artifact):
+            val _ = _restore_published(prepared)
+            return false
+        item.artifact_published = true
+        prepared[i] = item
+        if not rt_file_rename(item.plan.staging_launch_metadata,
+                item.plan.launch_metadata_path):
+            val _ = _restore_published(prepared)
+            return false
+        item.launch_metadata_published = true
+        prepared[i] = item
+        if not rt_file_rename(item.plan.provenance_path,
+                item.plan.target.artifact + ".provenance.sdn"):
+            val _ = _restore_published(prepared)
+            return false
+        item.provenance_published = true
+        prepared[i] = item
+        i = i + 1
+    var cleanup_results: [bool] = []
+    for item in prepared:
+        if item.artifact_backup != "":
+            val deleted = file_delete(item.artifact_backup)
+            cleanup_results.push(deleted)
+            if not deleted:
+                eprint "Warning: retained recovery backup after successful publish: " +
+                    item.artifact_backup
+        if item.provenance_backup != "":
+            val deleted = file_delete(item.provenance_backup)
+            cleanup_results.push(deleted)
+            if not deleted:
+                eprint "Warning: retained recovery backup after successful publish: " +
+                    item.provenance_backup
+        if item.launch_metadata_backup != "":
+            val deleted = file_delete(item.launch_metadata_backup)
+            cleanup_results.push(deleted)
+            if not deleted:
+                eprint "Warning: retained recovery backup after successful publish: " +
+                    item.launch_metadata_backup
+    # Cleanup failure does not invalidate already-published artifacts. The
+    # exact retained path is reported above so recovery remains possible.
+    val _ = build_backup_cleanup_results_valid(cleanup_results)
+    true
+
+pub fn execute_manifest_build_with_hooks(manifest_path: text, selector: text,
+        compiler_path: text, build_fn: fn(BuildTargetPlan) -> i64,
+        health_fn: fn(BuildHealthCommand) -> i64,
+        before_publish_fn: fn([BuildTargetPlan]) -> bool) -> i64:
+    if not file_is_regular_no_follow(manifest_path):
+        eprint "Error: build manifest is not a regular no-follow file: " + manifest_path
+        return 2
+    val manifest_hash = file_hash_sha256(manifest_path)
+    if manifest_hash.len() != 64:
+        eprint "Error: could not hash build manifest: " + manifest_path
+        return 2
+    val validation = validate_manifest_build_plan(file_read(manifest_path), selector)
+    if not validation.valid():
+        for issue in validation.issues: eprint "Error: " + issue
+        return 2
+    val manifest = validation.manifest
+    for root in manifest.source_roots:
+        if not is_dir(root):
+            eprint "Error: build source root is not a directory: " + root
+            return 2
+    if not file_is_regular_no_follow(compiler_path):
+        eprint "Error: compiler is not a regular no-follow file: " + compiler_path
+        return 2
+    val compiler_hash = file_hash_sha256(compiler_path)
+    if compiler_hash.len() != 64:
+        eprint "Error: could not hash compiler: " + compiler_path
+        return 2
+    val nonce = build_transaction_nonce(getpid(), time_now_unix_micros(),
+        manifest_hash)
+    var selected_targets: [BuildTarget] = []
+    for validation_plan in validation.plans:
+        selected_targets.push(validation_plan.target)
+    val initial_hashes = match build_target_input_hashes_batch(selected_targets):
+        case Err(error):
+            eprint "Error: " + error
+            return 2
+        case Ok(values): values
+    var prepared: [PreparedBuildTarget] = []
+    var selected_index = 0
+    while selected_index < selected_targets.len():
+        val target = selected_targets[selected_index]
+        val input_hashes = initial_hashes[selected_index]
+        val plan = plan_build_target(target, manifest.source_roots, nonce)
+        val parent = _target_parent(plan.staging_artifact)
+        if parent == "" or not dir_create_all(parent):
+            eprint "Error: cannot create build target directory: " + parent
+            _cleanup_staging(prepared)
+            return 1
+        if (file_exists(plan.staging_artifact) or
+                file_exists(plan.staging_launch_metadata) or
+                file_exists(plan.provenance_path)):
+            eprint "Error: build staging collision: " + plan.staging_artifact
+            _cleanup_staging(prepared)
+            return 1
+        val rc = build_fn(plan)
+        if (rc != 0 or not file_is_regular_no_follow(plan.staging_artifact) or
+                file_size_raw(plan.staging_artifact) <= 0 or
+                not file_is_regular_no_follow(plan.staging_launch_metadata) or
+                file_size_raw(plan.staging_launch_metadata) <= 0):
+            eprint "Error: target build failed or produced no regular artifact: " + target.name
+            file_delete(plan.staging_artifact)
+            file_delete(plan.staging_launch_metadata)
+            _cleanup_staging(prepared)
+            return if rc == 0: 1 else: rc
+        if target.health_args.len() > 0:
+            val health_command = build_health_command(plan)
+            val health_rc = health_fn(health_command)
+            if not build_health_exit_valid(target.health_args, health_rc):
+                eprint "Error: target health check failed: " + target.name
+                file_delete(plan.staging_artifact)
+                file_delete(plan.staging_launch_metadata)
+                _cleanup_staging(prepared)
+                return 1
+        val artifact_hash = file_hash_sha256(plan.staging_artifact)
+        val launch_metadata_hash = file_hash_sha256(plan.staging_launch_metadata)
+        if artifact_hash.len() != 64 or launch_metadata_hash.len() != 64:
+            eprint "Error: could not hash staged artifact companions: " + target.name
+            file_delete(plan.staging_artifact)
+            file_delete(plan.staging_launch_metadata)
+            _cleanup_staging(prepared)
+            return 1
+        val provenance = build_artifact_provenance(target, manifest_path,
+            manifest_hash, compiler_path, compiler_hash, artifact_hash,
+            launch_metadata_hash, plan.canonical_args, input_hashes.dependency_hashes,
+            input_hashes.freshness_paths, input_hashes.freshness_hashes)
+        if not file_atomic_write(plan.provenance_path, provenance):
+            eprint "Error: could not write staged artifact provenance: " + target.name
+            file_delete(plan.staging_artifact)
+            file_delete(plan.staging_launch_metadata)
+            _cleanup_staging(prepared)
+            return 1
+        prepared.push(PreparedBuildTarget(plan: plan, input_hashes: input_hashes,
+            artifact_hash: artifact_hash,
+            launch_metadata_hash: launch_metadata_hash, artifact_backup: "",
+            launch_metadata_backup: "", provenance_backup: "",
+            artifact_published: false, launch_metadata_published: false,
+            provenance_published: false))
+        selected_index = selected_index + 1
+    var prepared_plans: [BuildTargetPlan] = []
+    for item in prepared: prepared_plans.push(item.plan)
+    if not before_publish_fn(prepared_plans):
+        eprint "Error: pre-publish build policy rejected manifest targets"
+        _cleanup_staging(prepared)
+        return 1
+    if (not file_is_regular_no_follow(manifest_path) or
+            not file_is_regular_no_follow(compiler_path) or
+            file_hash_sha256(manifest_path) != manifest_hash or
+            file_hash_sha256(compiler_path) != compiler_hash):
+        eprint "Error: manifest or compiler changed during build; refusing publish"
+        _cleanup_staging(prepared)
+        return 1
+    val current_hashes = match build_target_input_hashes_batch(selected_targets):
+        case Err(error):
+            eprint "Error: pre-publish input rehash failed: " + error
+            _cleanup_staging(prepared)
+            return 1
+        case Ok(values): values
+    var prepared_index = 0
+    while prepared_index < prepared.len():
+        val item = prepared[prepared_index]
+        val current_inputs = current_hashes[prepared_index]
+        if (not file_is_regular_no_follow(item.plan.staging_artifact) or
+                file_size_raw(item.plan.staging_artifact) <= 0 or
+                not file_is_regular_no_follow(item.plan.staging_launch_metadata) or
+                file_size_raw(item.plan.staging_launch_metadata) <= 0 or
+                not build_target_input_hashes_equal(item.input_hashes, current_inputs) or
+                file_hash_sha256(item.plan.staging_artifact) != item.artifact_hash or
+                file_hash_sha256(item.plan.staging_launch_metadata) !=
+                    item.launch_metadata_hash):
+            eprint "Error: target inputs or artifact changed during build: " +
+                item.plan.target.name
+            _cleanup_staging(prepared)
+            return 1
+        prepared_index = prepared_index + 1
+    if not _publish_prepared(prepared, nonce):
+        eprint "Error: could not atomically publish manifest build targets"
+        _cleanup_staging(prepared)
+        return 1
+    for item in prepared:
+        print "built " + item.plan.target.name + ": " + item.plan.target.artifact
+    0
+
+pub fn execute_manifest_build(manifest_path: text, selector: text) -> i64:
+    execute_manifest_build_with_hooks(manifest_path, selector,
+        cli_current_exe_path(), _native_target_build, _native_target_health,
+        _allow_target_publish)
+
+export execute_manifest_build
+export execute_manifest_build_with_hooks, validate_manifest_build_file
+export BuildHealthCommand, build_health_command, build_health_exit_valid
+export build_restore_results_valid, build_backup_cleanup_results_valid
+export build_transaction_nonce
+export BuildRuntimeEnvironment, build_scope_runtime_environment
+export build_restore_runtime_environment

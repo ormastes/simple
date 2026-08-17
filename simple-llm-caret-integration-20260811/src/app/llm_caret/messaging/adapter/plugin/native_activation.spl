@@ -1,0 +1,293 @@
+"""Fail-closed native agent activation planning and recovery journal codec."""
+
+struct NativeActivationSnapshot:
+    claude_ready: bool
+    codex_ready: bool
+    gemini_ready: bool
+    inventory_ready: bool
+    marketplace_present: bool
+    claude_present: bool
+    codex_present: bool
+    gemini_present: bool
+
+struct NativeActivationStep:
+    name: text
+    command: text
+    args: [text]
+    rollback_command: text
+    rollback_args: [text]
+
+struct NativeActivationPlan:
+    ready: bool
+    error: text
+    steps: [NativeActivationStep]
+
+struct NativeActivationJournal:
+    valid: bool
+    error: text
+    operation: text
+    target: text
+    status: text
+    completed: i64
+    steps: [text]
+    cause: text
+
+struct NativeActivationRecovery:
+    ready: bool
+    error: text
+    operation: text
+    target: text
+    completed: i64
+    steps: [NativeActivationStep]
+
+struct NativeActivationProbe:
+    command: text
+    args: [text]
+    entry: text
+    expected_present: bool
+
+fn native_activation_entry_present(output: text, entry: text) -> bool:
+    output.lower().contains(entry.lower())
+
+fn native_activation_plan(target: text, snapshot: NativeActivationSnapshot) -> NativeActivationPlan:
+    if not snapshot.claude_ready:
+        return NativeActivationPlan(ready: false, error: "claude_cli_unavailable", steps: [])
+    if not snapshot.codex_ready:
+        return NativeActivationPlan(ready: false, error: "codex_cli_unavailable", steps: [])
+    if not snapshot.gemini_ready:
+        return NativeActivationPlan(ready: false, error: "gemini_cli_unavailable", steps: [])
+    if not snapshot.inventory_ready:
+        return NativeActivationPlan(ready: false, error: "native_inventory_unavailable", steps: [])
+    if snapshot.claude_present or snapshot.codex_present or snapshot.gemini_present:
+        return NativeActivationPlan(ready: false,
+            error: "native_registration_already_present", steps: [])
+
+    var steps: [NativeActivationStep] = []
+    if not snapshot.marketplace_present:
+        steps.push(NativeActivationStep(name: "claude_marketplace", command: "claude",
+            args: ["plugin", "marketplace", "add", ".", "--scope", "project"],
+            rollback_command: "claude", rollback_args: ["plugin", "marketplace", "remove", "simple-plugins", "--scope", "project"]))
+    steps.push(NativeActivationStep(name: "claude_plugin", command: "claude",
+        args: ["plugin", "install", "llm-caret-messaging@simple-plugins", "--scope", "project"],
+        rollback_command: "claude", rollback_args: ["plugin", "uninstall", "llm-caret-messaging@simple-plugins", "--scope", "project"]))
+    steps.push(NativeActivationStep(name: "codex_mcp", command: "codex",
+        args: ["mcp", "add", "--env", "LLM_CARET_MESSAGING_DB=.simple/state/llm-caret-messaging.db",
+            "--env", "LLM_CARET_MESSAGING_IDENTITY=local-agent", "--env", "LLM_CARET_MESSAGING_WORKSPACE=default",
+            "--env", "LLM_CARET_MESSAGING_SCOPES=room:read,room:write,profile:read,dm:write,agent:control",
+            "llm-caret-messaging", "--", "caret", "messaging", "mcp"],
+        rollback_command: "codex", rollback_args: ["mcp", "remove", "llm-caret-messaging"]))
+    steps.push(NativeActivationStep(name: "gemini_extension", command: "gemini",
+        args: ["extensions", "link", target + "/gemini", "--consent"],
+        rollback_command: "gemini", rollback_args: ["extensions", "uninstall", "llm-caret-messaging"]))
+    NativeActivationPlan(ready: true, error: "", steps: steps)
+
+fn native_deactivation_plan(target: text) -> NativeActivationPlan:
+    NativeActivationPlan(ready: true, error: "", steps: [
+        NativeActivationStep(name: "claude_plugin", command: "claude",
+            args: ["plugin", "uninstall", "llm-caret-messaging@simple-plugins", "--scope", "project"],
+            rollback_command: "claude", rollback_args: ["plugin", "install", "llm-caret-messaging@simple-plugins", "--scope", "project"]),
+        NativeActivationStep(name: "codex_mcp", command: "codex",
+            args: ["mcp", "remove", "llm-caret-messaging"], rollback_command: "codex",
+            rollback_args: ["mcp", "add", "--env", "LLM_CARET_MESSAGING_DB=.simple/state/llm-caret-messaging.db",
+                "--env", "LLM_CARET_MESSAGING_IDENTITY=local-agent", "--env", "LLM_CARET_MESSAGING_WORKSPACE=default",
+                "--env", "LLM_CARET_MESSAGING_SCOPES=room:read,room:write,profile:read,dm:write,agent:control",
+                "llm-caret-messaging", "--", "caret", "messaging", "mcp"]),
+        NativeActivationStep(name: "gemini_extension", command: "gemini",
+            args: ["extensions", "uninstall", "llm-caret-messaging"], rollback_command: "gemini",
+            rollback_args: ["extensions", "link", target + "/gemini", "--consent"])
+    ])
+
+fn native_activation_status_valid(status: text) -> bool:
+    (status == "applying" or status == "deactivating" or
+        status == "recovery_required" or status == "active" or status == "inactive")
+
+fn native_activation_scalar_valid(value: text) -> bool:
+    value != "" and not value.contains("\n") and not value.contains("\r")
+
+fn native_activation_decimal(value: text) -> i64:
+    if value == "0": return 0
+    if value == "" or value.len() > 6: return -1
+    var result: i64 = 0
+    var index: i64 = 0
+    while index < value.len():
+        val code = value.char_code_at(index)
+        if code < 48 or code > 57: return -1
+        result = result * 10 + code - 48
+        index = index + 1
+    result
+
+fn native_activation_colon_index(line: text) -> i64:
+    var index: i64 = 0
+    while index < line.len():
+        if line.char_code_at(index) == 58: return index
+        index = index + 1
+    -1
+
+fn native_activation_journal(operation: text, target: text, status: text,
+        steps: [NativeActivationStep], completed: i64, error: text) -> text:
+    if operation != "activate" and operation != "deactivate": return ""
+    if not native_activation_scalar_valid(target): return ""
+    if not native_activation_status_valid(status): return ""
+    if completed < 0 or completed > steps.len(): return ""
+    if error.contains("\n") or error.contains("\r"): return ""
+    var content = "activation:\n  schema: simple.llm-caret-messaging.native-activation/v3\n" +
+        "  operation: " + operation + "\n  target: " + target + "\n" +
+        "  status: " + status + "\n  completed: " + completed.to_text() + "\n"
+    if error != "": content = content + "  error: " + error + "\n"
+    var index: i64 = 0
+    while index < steps.len():
+        if not native_activation_scalar_valid(steps[index].name): return ""
+        content = content + "  step_" + index.to_text() + ": " + steps[index].name + "\n"
+        index = index + 1
+    content
+
+fn native_activation_invalid_journal(error: text) -> NativeActivationJournal:
+    NativeActivationJournal(valid: false, error: error, operation: "", target: "",
+        status: "", completed: -1, steps: [], cause: "")
+
+fn native_activation_parse_journal(content: text) -> NativeActivationJournal:
+    var root_seen = false
+    var schema_seen = false
+    var operation_seen = false
+    var target_seen = false
+    var status_seen = false
+    var completed_seen = false
+    var cause_seen = false
+    var schema = ""
+    var operation = ""
+    var target = ""
+    var status = ""
+    var completed: i64 = -1
+    var cause = ""
+    var steps: [text] = []
+    for raw_line in content.split("\n"):
+        if raw_line == "": continue
+        if raw_line == "activation:":
+            if root_seen: return native_activation_invalid_journal("duplicate_root")
+            root_seen = true
+            continue
+        if not root_seen or not raw_line.starts_with("  "):
+            return native_activation_invalid_journal("invalid_journal_shape")
+        val line = raw_line.substring(2)
+        val separator = native_activation_colon_index(line)
+        if separator <= 0:
+            return native_activation_invalid_journal("invalid_journal_field")
+        val key = line.substring(0, separator)
+        val value = line.substring(separator + 1).trim()
+        if key == "schema":
+            if schema_seen: return native_activation_invalid_journal("duplicate_schema")
+            schema_seen = true
+            schema = value
+        elif key == "operation":
+            if operation_seen: return native_activation_invalid_journal("duplicate_operation")
+            operation_seen = true
+            operation = value
+        elif key == "target":
+            if target_seen: return native_activation_invalid_journal("duplicate_target")
+            target_seen = true
+            target = value
+        elif key == "status":
+            if status_seen: return native_activation_invalid_journal("duplicate_status")
+            status_seen = true
+            status = value
+        elif key == "completed":
+            if completed_seen: return native_activation_invalid_journal("duplicate_completed")
+            completed_seen = true
+            completed = native_activation_decimal(value)
+            if completed < 0: return native_activation_invalid_journal("invalid_completed")
+        elif key == "error":
+            if cause_seen: return native_activation_invalid_journal("duplicate_error")
+            cause_seen = true
+            cause = value
+        elif key.starts_with("step_"):
+            val expected_key = "step_" + steps.len().to_text()
+            if key != expected_key or not native_activation_scalar_valid(value):
+                return native_activation_invalid_journal("invalid_step_sequence")
+            steps.push(value)
+        else:
+            return native_activation_invalid_journal("unknown_field:" + key)
+    if not root_seen: return native_activation_invalid_journal("missing_root")
+    if schema != "simple.llm-caret-messaging.native-activation/v3":
+        return native_activation_invalid_journal("unsupported_schema")
+    if operation != "activate" and operation != "deactivate":
+        return native_activation_invalid_journal("invalid_operation")
+    if not native_activation_scalar_valid(target):
+        return native_activation_invalid_journal("invalid_target")
+    if not native_activation_status_valid(status):
+        return native_activation_invalid_journal("invalid_status")
+    if completed < 0 or completed > steps.len():
+        return native_activation_invalid_journal("completed_out_of_range")
+    if status == "recovery_required" and cause == "":
+        return native_activation_invalid_journal("recovery_cause_required")
+    NativeActivationJournal(valid: true, error: "", operation: operation, target: target,
+        status: status, completed: completed, steps: steps, cause: cause)
+
+fn native_activation_steps_match(actual: [text], expected: [NativeActivationStep]) -> bool:
+    if actual.len() != expected.len(): return false
+    var index: i64 = 0
+    while index < actual.len():
+        if actual[index] != expected[index].name: return false
+        index = index + 1
+    true
+
+fn native_activation_journal_plan(journal: NativeActivationJournal) -> NativeActivationPlan:
+    if journal.operation == "activate":
+        val includes_marketplace = (journal.steps.len() == 4 and
+            journal.steps[0] == "claude_marketplace")
+        return native_activation_plan(journal.target, NativeActivationSnapshot(
+            claude_ready: true, codex_ready: true, gemini_ready: true,
+            inventory_ready: true, marketplace_present: not includes_marketplace,
+            claude_present: false, codex_present: false, gemini_present: false))
+    native_deactivation_plan(journal.target)
+
+fn native_activation_journal_plan_valid(journal: NativeActivationJournal) -> bool:
+    if not journal.valid: return false
+    val plan = native_activation_journal_plan(journal)
+    plan.ready and native_activation_steps_match(journal.steps, plan.steps)
+
+fn native_activation_recovery(journal: NativeActivationJournal) -> NativeActivationRecovery:
+    if not journal.valid:
+        return NativeActivationRecovery(ready: false, error: journal.error,
+            operation: "", target: "", completed: 0, steps: [])
+    val interrupted_activation = (journal.operation == "activate" and
+        journal.status == "applying")
+    val interrupted_deactivation = (journal.operation == "deactivate" and
+        journal.status == "deactivating")
+    if (journal.status != "recovery_required" and not interrupted_activation and
+            not interrupted_deactivation):
+        return NativeActivationRecovery(ready: false, error: "journal_not_recoverable",
+            operation: journal.operation, target: journal.target, completed: journal.completed,
+            steps: [])
+    val plan = native_activation_journal_plan(journal)
+    if not native_activation_journal_plan_valid(journal):
+        return NativeActivationRecovery(ready: false, error: "journal_steps_do_not_match_plan",
+            operation: journal.operation, target: journal.target,
+            completed: journal.completed, steps: [])
+    NativeActivationRecovery(ready: true, error: "", operation: journal.operation,
+        target: journal.target, completed: journal.completed, steps: plan.steps)
+
+fn native_activation_recovery_probe(operation: text,
+        step: NativeActivationStep) -> NativeActivationProbe:
+    val expected_present = operation == "deactivate"
+    if step.name == "claude_marketplace":
+        return NativeActivationProbe(command: "claude",
+            args: ["plugin", "marketplace", "list"], entry: "simple-plugins",
+            expected_present: expected_present)
+    if step.name == "claude_plugin":
+        return NativeActivationProbe(command: "claude", args: ["plugin", "list"],
+            entry: "llm-caret-messaging", expected_present: expected_present)
+    if step.name == "codex_mcp":
+        return NativeActivationProbe(command: "codex", args: ["mcp", "list"],
+            entry: "llm-caret-messaging", expected_present: expected_present)
+    if step.name == "gemini_extension":
+        return NativeActivationProbe(command: "gemini", args: ["extensions", "list"],
+            entry: "llm-caret-messaging", expected_present: expected_present)
+    NativeActivationProbe(command: "", args: [], entry: "",
+        expected_present: expected_present)
+
+export NativeActivationSnapshot, NativeActivationStep, NativeActivationPlan
+export NativeActivationJournal, NativeActivationRecovery, NativeActivationProbe
+export native_activation_entry_present, native_activation_plan, native_deactivation_plan
+export native_activation_journal, native_activation_parse_journal
+export native_activation_journal_plan_valid
+export native_activation_recovery, native_activation_recovery_probe

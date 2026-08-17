@@ -1,0 +1,295 @@
+"""Lightweight SHA-256 provenance and freshness for manifest build targets."""
+
+use app.build.target_manifest.{BuildTarget}
+use app.build.target_plan.{validate_manifest_build_plan, plan_build_target}
+use app.io.source_discovery.{discover_spl_files}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow, file_read,
+    file_hash_sha256, file_size_raw}
+use std.nogc_sync_mut.io.dir_ops.{is_dir}
+
+pub class BuildTargetInputHashes:
+    dependency_hashes: [text]
+    freshness_paths: [text]
+    freshness_hashes: [text]
+    runtime_archive_hash: text = ""
+
+class BuildFreshnessRootSnapshot:
+    root: text
+    paths: [text]
+
+pub fn build_target_input_hashes_equal(left: BuildTargetInputHashes,
+        right: BuildTargetInputHashes) -> bool:
+    (left.dependency_hashes == right.dependency_hashes and
+        left.freshness_paths == right.freshness_paths and
+        left.freshness_hashes == right.freshness_hashes and
+        left.runtime_archive_hash == right.runtime_archive_hash)
+
+pub fn build_target_runtime_input_hashes(target: BuildTarget) -> Result<BuildTargetInputHashes, text>:
+    var archive_hash = ""
+    if target.runtime_archive != "" and not file_is_regular_no_follow(target.runtime_archive):
+        return Err("runtime archive is not a regular no-follow file: " +
+            target.runtime_archive)
+    if target.runtime_archive != "":
+        archive_hash = file_hash_sha256(target.runtime_archive)
+    if target.runtime_archive != "" and archive_hash.len() != 64:
+        return Err("could not hash runtime archive: " + target.runtime_archive)
+    Ok(BuildTargetInputHashes(dependency_hashes: [], freshness_paths: [],
+        freshness_hashes: [], runtime_archive_hash: archive_hash))
+
+pub fn build_target_dependency_hashes(target: BuildTarget) -> Result<[text], text>:
+    if not file_is_regular_no_follow(target.entry):
+        return Err("entry is not a regular no-follow file: " + target.entry)
+    var hashes = [file_hash_sha256(target.entry)]
+    if hashes[0].len() != 64: return Err("could not hash entry: " + target.entry)
+    for dependency in target.dependencies:
+        if not file_is_regular_no_follow(dependency):
+            return Err("dependency is not a regular no-follow file: " + dependency)
+        val digest = file_hash_sha256(dependency)
+        if digest.len() != 64: return Err("could not hash dependency: " + dependency)
+        hashes.push(digest)
+    Ok(hashes)
+
+pub fn build_target_input_hashes(target: BuildTarget) -> Result<BuildTargetInputHashes, text>:
+    val dependency_hashes = build_target_dependency_hashes(target)?
+    var freshness_paths: [text] = []
+    for root in target.freshness_roots:
+        if not is_dir(root): return Err("freshness root is not a directory: " + root)
+        for path in discover_spl_files(root):
+            if not freshness_paths.contains(path): freshness_paths.push(path)
+            if freshness_paths.len() > 20000:
+                return Err("freshness roots exceed 20000 Simple source files")
+    freshness_paths.sort()
+    var freshness_hashes: [text] = []
+    for path in freshness_paths:
+        if not file_is_regular_no_follow(path):
+            return Err("freshness input is not a regular no-follow file: " + path)
+        val digest = file_hash_sha256(path)
+        if digest.len() != 64: return Err("could not hash freshness input: " + path)
+        freshness_hashes.push(digest)
+    val runtime = build_target_runtime_input_hashes(target)?
+    Ok(BuildTargetInputHashes(dependency_hashes: dependency_hashes,
+        freshness_paths: freshness_paths, freshness_hashes: freshness_hashes,
+        runtime_archive_hash: runtime.runtime_archive_hash))
+
+pub fn build_target_input_hashes_batch(targets: [BuildTarget]) -> Result<[BuildTargetInputHashes], text>:
+    var roots: [text] = []
+    var all_paths: [text] = []
+    var seen_all_paths: {text: bool} = {}
+    for target in targets:
+        if not seen_all_paths.contains_key(target.entry):
+            all_paths.push(target.entry)
+            seen_all_paths[target.entry] = true
+        for dependency in target.dependencies:
+            if not seen_all_paths.contains_key(dependency):
+                all_paths.push(dependency)
+                seen_all_paths[dependency] = true
+        for root in target.freshness_roots:
+            if not roots.contains(root): roots.push(root)
+        if target.runtime_archive != "" and not seen_all_paths.contains_key(target.runtime_archive):
+            all_paths.push(target.runtime_archive)
+            seen_all_paths[target.runtime_archive] = true
+    roots.sort()
+    var snapshots: [BuildFreshnessRootSnapshot] = []
+    var freshness_unique_count = 0
+    var seen_freshness: {text: bool} = {}
+    for root in roots:
+        if not is_dir(root): return Err("freshness root is not a directory: " + root)
+        var paths = discover_spl_files(root)
+        paths.sort()
+        snapshots.push(BuildFreshnessRootSnapshot(root: root, paths: paths))
+        for path in paths:
+            if not seen_freshness.contains_key(path):
+                freshness_unique_count = freshness_unique_count + 1
+                seen_freshness[path] = true
+            if not seen_all_paths.contains_key(path):
+                all_paths.push(path)
+                seen_all_paths[path] = true
+            if freshness_unique_count > 20000:
+                return Err("selected freshness roots exceed 20000 unique Simple source files")
+    all_paths.sort()
+    var all_hashes: [text] = []
+    var path_indices: {text: i64} = {}
+    var path_index = 0
+    for path in all_paths:
+        if not file_is_regular_no_follow(path):
+            return Err("declared input is not a regular no-follow file: " + path)
+        val digest = file_hash_sha256(path)
+        if digest.len() != 64: return Err("could not hash declared input: " + path)
+        all_hashes.push(digest)
+        path_indices[path] = path_index
+        path_index = path_index + 1
+    var result: [BuildTargetInputHashes] = []
+    for target in targets:
+        var dependency_hashes: [text] = []
+        if not path_indices.contains_key(target.entry):
+            return Err("entry was not snapshotted: " + target.entry)
+        val entry_index = path_indices[target.entry]
+        dependency_hashes.push(all_hashes[entry_index])
+        for dependency in target.dependencies:
+            if not path_indices.contains_key(dependency):
+                return Err("dependency was not snapshotted: " + dependency)
+            val dependency_index = path_indices[dependency]
+            dependency_hashes.push(all_hashes[dependency_index])
+        var freshness_paths: [text] = []
+        var seen_target_freshness: {text: bool} = {}
+        for snapshot in snapshots:
+            if target.freshness_roots.contains(snapshot.root):
+                for path in snapshot.paths:
+                    if not seen_target_freshness.contains_key(path):
+                        freshness_paths.push(path)
+                        seen_target_freshness[path] = true
+        freshness_paths.sort()
+        var freshness_hashes: [text] = []
+        for path in freshness_paths:
+            if not path_indices.contains_key(path):
+                return Err("freshness input was not snapshotted: " + path)
+            val freshness_index = path_indices[path]
+            freshness_hashes.push(all_hashes[freshness_index])
+        var runtime_archive_hash = ""
+        if target.runtime_archive != "":
+            if not path_indices.contains_key(target.runtime_archive):
+                return Err("runtime archive was not snapshotted: " + target.runtime_archive)
+            runtime_archive_hash = all_hashes[path_indices[target.runtime_archive]]
+        result.push(BuildTargetInputHashes(dependency_hashes: dependency_hashes,
+            freshness_paths: freshness_paths,
+            freshness_hashes: freshness_hashes,
+            runtime_archive_hash: runtime_archive_hash))
+    Ok(result)
+
+fn _provenance_row(kind: text, path: text, digest: text) -> text:
+    kind + "=" + path + "\u001f" + digest
+
+pub fn build_artifact_provenance(target: BuildTarget, manifest_path: text,
+        manifest_hash: text, compiler_path: text, compiler_hash: text,
+        artifact_hash: text, launch_metadata_hash: text, args: [text],
+        dependency_hashes: [text],
+        freshness_paths: [text], freshness_hashes: [text]) -> text:
+    val runtime = match build_target_runtime_input_hashes(target):
+        case Err(_): return ""
+        case Ok(value): value
+    var rows = ["schema=simple.build-artifact-provenance/" +
+        if target.runtime_archive == "": "v1" else: "v2",
+        "target=" + target.name,
+        "target_triple=" + target.target_triple,
+        "backend=" + target.backend,
+        "runtime_bundle=" + target.runtime_bundle,
+        "abi=" + target.abi,
+        _provenance_row("manifest", manifest_path, manifest_hash),
+        _provenance_row("compiler", compiler_path, compiler_hash),
+        _provenance_row("entry", target.entry,
+            if dependency_hashes.len() > 0: dependency_hashes[0] else: ""),
+        _provenance_row("artifact", target.artifact, artifact_hash),
+        _provenance_row("launch_metadata", target.artifact + ".simple_launch.sdn",
+            launch_metadata_hash),
+        "argv=" + args.join("\u001f")]
+    rows.push("runtime_provider=" + if target.runtime_archive == "":
+        "compiler-selected-unbound" else: "exact-runtime-archive")
+    if target.runtime_archive != "":
+        rows.push(_provenance_row("runtime_archive", target.runtime_archive,
+            runtime.runtime_archive_hash))
+    var i = 0
+    while i < target.dependencies.len():
+        val hash_index = i + 1
+        val digest = if hash_index < dependency_hashes.len(): dependency_hashes[hash_index] else: ""
+        rows.push(_provenance_row("declared_dependency", target.dependencies[i], digest))
+        i = i + 1
+    i = 0
+    while i < freshness_paths.len():
+        val digest = if i < freshness_hashes.len(): freshness_hashes[i] else: ""
+        rows.push(_provenance_row("declared_freshness", freshness_paths[i], digest))
+        i = i + 1
+    rows.join("\n") + "\n"
+
+pub fn build_artifact_provenance_valid(content: text, target: BuildTarget,
+        manifest_path: text, manifest_hash: text, compiler_path: text,
+        compiler_hash: text, artifact_hash: text, launch_metadata_hash: text,
+        args: [text],
+        dependency_hashes: [text], freshness_paths: [text],
+        freshness_hashes: [text]) -> bool:
+    if (manifest_hash.len() != 64 or compiler_hash.len() != 64 or
+            artifact_hash.len() != 64 or launch_metadata_hash.len() != 64):
+        return false
+    if dependency_hashes.len() != target.dependencies.len() + 1: return false
+    if freshness_paths.len() != freshness_hashes.len(): return false
+    val runtime = match build_target_runtime_input_hashes(target):
+        case Err(_): return false
+        case Ok(value): value
+    if target.runtime_archive != "" and runtime.runtime_archive_hash == "":
+        return false
+    for digest in dependency_hashes:
+        if digest.len() != 64: return false
+    for digest in freshness_hashes:
+        if digest.len() != 64: return false
+    content == build_artifact_provenance(target, manifest_path, manifest_hash,
+        compiler_path, compiler_hash, artifact_hash, launch_metadata_hash,
+        args, dependency_hashes,
+        freshness_paths, freshness_hashes)
+
+fn _artifact_fresh_from_snapshot(target: BuildTarget, source_roots: [text],
+        input_hashes: BuildTargetInputHashes, manifest_path: text,
+        manifest_hash: text, compiler_path: text, compiler_hash: text) -> bool:
+    val sidecar = target.artifact + ".provenance.sdn"
+    if (not file_is_regular_no_follow(target.artifact) or
+            file_size_raw(target.artifact) <= 0 or
+            not file_is_regular_no_follow(target.artifact + ".simple_launch.sdn") or
+            not file_is_regular_no_follow(sidecar)): return false
+    val artifact_hash = file_hash_sha256(target.artifact)
+    val launch_metadata_hash = file_hash_sha256(
+        target.artifact + ".simple_launch.sdn")
+    if artifact_hash.len() != 64 or launch_metadata_hash.len() != 64: return false
+    val canonical_args = plan_build_target(target, source_roots,
+        "freshness").canonical_args
+    build_artifact_provenance_valid(file_read(sidecar), target, manifest_path,
+        manifest_hash, compiler_path, compiler_hash, artifact_hash,
+        launch_metadata_hash, canonical_args, input_hashes.dependency_hashes,
+        input_hashes.freshness_paths, input_hashes.freshness_hashes)
+
+pub fn build_target_artifacts_fresh(manifest_path: text, target_names: [text],
+        compiler_path: text) -> [bool]:
+    var failed: [bool] = []
+    for name in target_names: failed.push(false)
+    if (not file_is_regular_no_follow(manifest_path) or
+            not file_is_regular_no_follow(compiler_path)): return failed
+    val manifest_hash = file_hash_sha256(manifest_path)
+    val compiler_hash = file_hash_sha256(compiler_path)
+    if manifest_hash.len() != 64 or compiler_hash.len() != 64: return failed
+    val validation = validate_manifest_build_plan(file_read(manifest_path), "all")
+    if not validation.valid(): return failed
+    val manifest = validation.manifest
+    var selected_names: [text] = []
+    var selected_targets: [BuildTarget] = []
+    for name in target_names:
+        if not selected_names.contains(name):
+            for plan in validation.plans:
+                if plan.target.name == name:
+                    selected_names.push(name)
+                    selected_targets.push(plan.target)
+    val batch = match build_target_input_hashes_batch(selected_targets):
+        case Err(_): return failed
+        case Ok(values): values
+    var selected_fresh: [bool] = []
+    var i = 0
+    while i < selected_targets.len():
+        selected_fresh.push(_artifact_fresh_from_snapshot(selected_targets[i],
+            manifest.source_roots, batch[i], manifest_path, manifest_hash,
+            compiler_path, compiler_hash))
+        i = i + 1
+    var result: [bool] = []
+    for name in target_names:
+        val selected_index = selected_names.index_of(name)
+        result.push(if selected_index < 0: false else: selected_fresh[selected_index])
+    result
+
+pub fn build_target_artifact_fresh(manifest_path: text, target_name: text,
+        compiler_path: text) -> bool:
+    val values = build_target_artifacts_fresh(manifest_path, [target_name],
+        compiler_path)
+    values.len() == 1 and values[0]
+
+export BuildTargetInputHashes, build_target_dependency_hashes, build_target_input_hashes
+export build_target_input_hashes_batch
+export build_target_input_hashes_equal
+export build_target_runtime_input_hashes
+export build_artifact_provenance, build_artifact_provenance_valid
+export build_target_artifact_fresh
+export build_target_artifacts_fresh

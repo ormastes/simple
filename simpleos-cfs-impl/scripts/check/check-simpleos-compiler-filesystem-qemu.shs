@@ -1,0 +1,167 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+. "$ROOT_DIR/scripts/check/lib/simpleos-compiler-filesystem-receipt.shs"
+
+ARCH=
+TIMEOUT=180
+OUTPUT_DIR="$ROOT_DIR/build/test-artifacts/simpleos-compiler-filesystem-qemu"
+IMAGE=
+
+usage() {
+    echo "usage: $0 --arch=x86_64|aarch64 [--timeout=N] [--output-dir=PATH] [--image=PATH]"
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --arch=x86_64|--arch=aarch64) ARCH=${arg#--arch=} ;;
+        --timeout=*) TIMEOUT=${arg#--timeout=} ;;
+        --output-dir=*) OUTPUT_DIR=${arg#--output-dir=} ;;
+        --image=*) IMAGE=${arg#--image=} ;;
+        --help|-h) usage; exit 0 ;;
+        *) echo "unknown argument: $arg" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+[ -n "$ARCH" ] || { usage >&2; exit 2; }
+case "$TIMEOUT" in *[!0-9]*|'') echo "invalid timeout: $TIMEOUT" >&2; exit 2 ;; esac
+[ "$TIMEOUT" -gt 0 ] || { echo "invalid timeout: $TIMEOUT" >&2; exit 2; }
+
+mkdir -p "$OUTPUT_DIR"
+LOG="$OUTPUT_DIR/$ARCH.serial.log"
+MANIFEST="$OUTPUT_DIR/$ARCH.manifest"
+RECEIPT="$OUTPUT_DIR/$ARCH.receipt"
+# A failed or blocked attempt must never leave a prior passing publication.
+rm -f "$LOG" "$MANIFEST" "$RECEIPT"
+command -v xxd >/dev/null 2>&1 || {
+    echo "simpleos_compiler_filesystem_qemu_status=fail" >&2
+    echo "simpleos_compiler_filesystem_qemu_reason=xxd-required-for-observed-output-validation" >&2
+    exit 1
+}
+
+if [ "$ARCH" = aarch64 ]; then
+    echo "simpleos_compiler_filesystem_qemu_status=blocked"
+    echo "simpleos_compiler_filesystem_qemu_reason=aarch64-live-compiler-filesystem-route-absent"
+    echo "simpleos_compiler_filesystem_qemu_resume=implement-target-native-payload-and-in-guest-exec-for-arm64-virtio-fat32-smf"
+    exit 3
+fi
+
+if [ -z "$IMAGE" ] && [ "$ARCH" = x86_64 ]; then
+    IMAGE="$ROOT_DIR/build/os/fat32-x86_64.img"
+fi
+case "$IMAGE" in *[!A-Za-z0-9_./-]*) echo "simpleos_compiler_filesystem_qemu_status=fail" >&2; echo "simpleos_compiler_filesystem_qemu_reason=image-path-not-marker-safe" >&2; exit 1 ;; esac
+
+TMP_LOG="$OUTPUT_DIR/.$ARCH.serial.log.tmp.$$"
+trap 'rm -f "$TMP_LOG" "$OUTPUT_DIR/.$ARCH.manifest.tmp.$$" "$OUTPUT_DIR/.$ARCH.receipt.tmp.$$"' EXIT HUP INT TERM
+
+EVIDENCE_STATUS=pass
+if [ -n "${SIMPLEOS_COMPILER_FS_QEMU_RUNNER:-}" ]; then
+    [ "${SIMPLEOS_COMPILER_FS_QEMU_TEST_MODE:-0}" = 1 ] || {
+        echo "simpleos_compiler_filesystem_qemu_status=fail" >&2
+        echo "simpleos_compiler_filesystem_qemu_reason=runner-override-requires-test-mode" >&2
+        exit 1
+    }
+    [ -n "$IMAGE" ] && [ -f "$IMAGE" ] || {
+        echo "simpleos_compiler_filesystem_qemu_status=fail" >&2
+        echo "simpleos_compiler_filesystem_qemu_reason=test-image-required" >&2
+        exit 1
+    }
+    IMAGE=$(realpath "$IMAGE")
+    image_sha=$(sha256sum "$IMAGE" | awk '{print $1}')
+    nonce=$(printf '%s\n' "$$:$ARCH:$image_sha" | sha256sum | awk '{print $1}')
+    EVIDENCE_STATUS=contract-pass
+    [ -x "$SIMPLEOS_COMPILER_FS_QEMU_RUNNER" ] || {
+        echo "simpleos_compiler_filesystem_qemu_status=fail" >&2
+        echo "simpleos_compiler_filesystem_qemu_reason=runner-not-executable" >&2
+        exit 1
+    }
+    set +e
+    "$SIMPLEOS_COMPILER_FS_QEMU_RUNNER" "$ARCH" "$TIMEOUT" "$TMP_LOG" "$IMAGE" "$image_sha" "$nonce"
+    runner_code=$?
+    set -e
+    if [ "$runner_code" -ne 0 ]; then
+        [ ! -f "$TMP_LOG" ] || mv "$TMP_LOG" "$LOG"
+        echo "simpleos_compiler_filesystem_qemu_status=fail" >&2
+        echo "simpleos_compiler_filesystem_qemu_reason=qemu-runner-exit-$runner_code" >&2
+        exit 1
+    fi
+    RUNNER_PATH="$SIMPLEOS_COMPILER_FS_QEMU_RUNNER"
+else
+    [ "$ARCH" = x86_64 ] || {
+        echo "simpleos_compiler_filesystem_qemu_status=blocked"
+        echo "simpleos_compiler_filesystem_qemu_reason=unsupported-live-architecture"
+        exit 3
+    }
+    [ -f "$IMAGE" ] || {
+        echo "simpleos_compiler_filesystem_qemu_status=blocked"
+        echo "simpleos_compiler_filesystem_qemu_reason=x86-q35-image-unavailable"
+        echo "simpleos_compiler_filesystem_qemu_resume=build-build-os-fat32-x86_64-img-and-stage-x86_64-compiler-filesystem-kernel"
+        exit 3
+    }
+    IMAGE=$(realpath "$IMAGE")
+    image_sha=$(sha256sum "$IMAGE" | awk '{print $1}')
+    nonce=$(printf '%s\n' "$$:$ARCH:$image_sha" | sha256sum | awk '{print $1}')
+    EVIDENCE_STATUS=pass
+    set +e
+    SIMPLEOS_COMPILER_FS_NONCE="$nonce" SIMPLEOS_COMPILER_FS_IMAGE="$IMAGE" SIMPLEOS_COMPILER_FS_IMAGE_SHA256="$image_sha" \
+        timeout --signal=TERM --kill-after=5s "$TIMEOUT" \
+        bin/simple os test --scenario=x86_64-compiler-filesystem >"$TMP_LOG" 2>&1
+    runner_code=$?
+    set -e
+    if [ "$runner_code" -ne 0 ]; then
+        [ ! -f "$TMP_LOG" ] || mv "$TMP_LOG" "$LOG"
+        echo "simpleos_compiler_filesystem_qemu_status=fail" >&2
+        echo "simpleos_compiler_filesystem_qemu_reason=qemu-runner-exit-$runner_code" >&2
+        exit 1
+    fi
+    RUNNER_PATH="$ROOT_DIR/bin/simple"
+fi
+mv "$TMP_LOG" "$LOG"
+
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+simple_sha=$(simpleos_compiler_fs_validate_log "$LOG" "$ARCH" "$IMAGE" "$image_sha" "$nonce") || exit 1
+exec_line=$(simpleos_compiler_fs_unique_line 'SIMPLEOS_COMPILER_FS_EXEC ' "$LOG") || exit 1
+exec_stdout_sha=$(simpleos_compiler_fs_field_once "$exec_line" stdout_sha256) || exit 1
+qemu_drive_arg="file=$IMAGE,if=none,id=cfsexecns1,format=raw"
+serial_sha=$(hash_file "$LOG")
+checker_sha=$(hash_file "$0")
+parser_sha=$(hash_file "$ROOT_DIR/scripts/check/lib/simpleos-compiler-filesystem-receipt.shs")
+runner_sha=$(hash_file "$RUNNER_PATH")
+
+MANIFEST_TMP="$OUTPUT_DIR/.$ARCH.manifest.tmp.$$"
+{
+    echo "schema=simpleos-compiler-filesystem-qemu-v2"
+    echo "status=$EVIDENCE_STATUS"
+    echo "evidence_class=$(if [ "$EVIDENCE_STATUS" = pass ]; then echo live-qemu; else echo hermetic-fake-qemu-contract; fi)"
+    echo "arch=$ARCH"
+    echo "image=$IMAGE"
+    echo "image_sha256=$image_sha"
+    echo "qemu_image_arg=$qemu_drive_arg"
+    echo "hello_nonce=$nonce"
+    echo "exec_stdout_sha256=$exec_stdout_sha"
+    echo "simple_sha256=$simple_sha"
+    echo "serial_log=$LOG"
+    echo "serial_sha256=$serial_sha"
+    echo "runner=$RUNNER_PATH"
+    echo "runner_sha256=$runner_sha"
+    echo "checker_sha256=$checker_sha"
+    echo "parser_sha256=$parser_sha"
+} >"$MANIFEST_TMP"
+mv "$MANIFEST_TMP" "$MANIFEST"
+manifest_sha=$(hash_file "$MANIFEST")
+
+RECEIPT_TMP="$OUTPUT_DIR/.$ARCH.receipt.tmp.$$"
+{
+    echo "schema=simpleos-compiler-filesystem-qemu-receipt-v2"
+    echo "status=$EVIDENCE_STATUS"
+    echo "arch=$ARCH"
+    echo "manifest=$MANIFEST"
+    echo "manifest_sha256=$manifest_sha"
+} >"$RECEIPT_TMP"
+mv "$RECEIPT_TMP" "$RECEIPT"
+
+echo "simpleos_compiler_filesystem_qemu_status=$EVIDENCE_STATUS"
+echo "simpleos_compiler_filesystem_qemu_arch=$ARCH"
+echo "simpleos_compiler_filesystem_qemu_manifest=$MANIFEST"
+echo "simpleos_compiler_filesystem_qemu_manifest_sha256=$manifest_sha"

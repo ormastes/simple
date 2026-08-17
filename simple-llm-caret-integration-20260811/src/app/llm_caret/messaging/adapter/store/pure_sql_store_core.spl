@@ -1,0 +1,398 @@
+"""Canonical messaging persistence on the in-tree pure-Simple SQL engine."""
+
+use std.database.pure_sql.{PureDatabase}
+use nogc_sync_mut.database.sql.types.{DbValue, DbRow}
+use app.llm_caret.messaging.domain.model.{Workspace, Identity, IdentityKind, AgentBinding, AgentHandler, Room, RoomKind, RoomMessage, MessageOrigin, AgentProfile, AgentStatus, messaging_id}
+use app.llm_caret.messaging.application.room_service.{RoomMembership}
+use app.llm_caret.messaging.application.task_service.{MessagingTask, TaskState}
+use app.llm_caret.messaging.application.enrollment.{EmailInvite, LocalAccount}
+use app.llm_caret.messaging.domain.receipt.{MessageReceipt, ReceiptState, ReceiptEvidence}
+
+struct StoreWriteResult:
+    ok: bool
+    error: text
+
+struct AppendMessageResult:
+    ok: bool
+    message_id: text
+    room_seq: i64
+    duplicate: bool
+    error: text
+
+struct StoredHookEvent:
+    event_id: text
+    provider: text
+    event_name: text
+    payload: text
+    state: text
+    received_at: i64
+
+struct StoredHookCorrelation:
+    event_id: text
+    task_id: text
+    room_id: text
+    agent_id: text
+
+struct StoredArtifact:
+    artifact_id: text
+    task_id: text
+    room_id: text
+    media_type: text
+    value: text
+    published_by: text
+    created_at: i64
+
+struct StoredIdempotency:
+    resource_id: text
+    evidence: text
+
+struct NotifyAllReservationResult:
+    acquired: bool
+    error: text
+    retry_after_ms: i64
+
+struct StoredNotifyAllLimit:
+    found: bool
+    has_accepted: bool
+    last_accepted_at_ms: i64
+    reservation_id: text
+    reserved_at_ms: i64
+
+struct StoredTransportBinding:
+    binding_id: text
+    canonical_room_id: text
+    transport: text
+    external_room_id: text
+    mirror_policy: text
+    capabilities_version: text
+    last_inbound_cursor: text
+    last_outbound_cursor: text
+
+struct StoredExternalRef:
+    ref_id: text
+    binding_id: text
+    canonical_message_id: text
+    external_message_id: text
+    external_thread_id: text
+    created_at: i64
+
+struct StoredTransportRequest:
+    delivery_id: text
+    message_id: text
+    binding_id: text
+    method: text
+    url_template: text
+    headers: [text]
+    body: text
+    credential_ref: text
+    credential_mode: text
+    idempotency_key: text
+
+"""A fenced reservation for one durable outbox delivery.
+
+The lease is separate from the outbox state: claiming never records delivery;
+only a holder with the exact fence may acknowledge or release the request.
+"""
+struct OutboxDeliveryClaim:
+    delivery_id: text
+    claimant_id: text
+    fence: text
+    lease_expires_at: i64
+
+struct ClaimedTransportRequest:
+    request: StoredTransportRequest
+    claim: OutboxDeliveryClaim
+
+"""Token-free record for an email verification delivery.
+
+The verification token is intentionally not persisted here: a delivery adapter
+derives it from the configured enrollment secret and this invite's issued time.
+"""
+struct StoredEmailNotification:
+    delivery_id: text
+    invite_id: text
+    recipient: text
+    issued_at: i64
+    expires_at: i64
+
+struct StoredAgentControlRequest:
+    delivery_id: text
+    provider: text
+    operation: text
+    session_id: text
+    payload: text
+    created_at: i64
+
+struct StoredCanonicalEvent:
+    event_id: text
+    workspace_id: text
+    aggregate_type: text
+    aggregate_id: text
+    event_kind: text
+    payload: text
+    occurred_at: i64
+
+struct StoredTaskEvent:
+    task_event_id: text
+    task_id: text
+    state: text
+    summary: text
+    required_input: text
+    occurred_at: i64
+
+fn ok_write() -> StoreWriteResult: StoreWriteResult(ok: true, error: "")
+fn failed_write(reason: text) -> StoreWriteResult: StoreWriteResult(ok: false, error: reason)
+fn q(value: text) -> text: "'" + value.replace("'", "''") + "'"
+fn cell(row: DbRow, index: i64) -> text:
+    if index < 0 or index >= row.values.len(): return ""
+    row.values[index].to_text()
+fn integer(row: DbRow, index: i64) -> i64:
+    val value = cell(row, index)
+    if value == "": return 0
+    int(value) ?? 0
+fn kind_text(kind: RoomKind) -> text:
+    match kind:
+        RoomKind.Channel: "channel"
+        RoomKind.Private: "private"
+        RoomKind.Direct: "direct"
+        RoomKind.Task: "task"
+fn kind_value(value: text) -> RoomKind:
+    match value:
+        "private": RoomKind.Private
+        "direct": RoomKind.Direct
+        "task": RoomKind.Task
+        _: RoomKind.Channel
+fn origin_text(origin: MessageOrigin) -> text:
+    match origin:
+        MessageOrigin.Human: "human"
+        MessageOrigin.AgentAnswer: "agent_answer"
+        MessageOrigin.AgentUpdate: "agent_update"
+        MessageOrigin.System: "system"
+        MessageOrigin.TransportBridge: "transport_bridge"
+        MessageOrigin.CommandResult: "command_result"
+fn origin_value(value: text) -> MessageOrigin:
+    match value:
+        "agent_answer": MessageOrigin.AgentAnswer
+        "agent_update": MessageOrigin.AgentUpdate
+        "system": MessageOrigin.System
+        "transport_bridge": MessageOrigin.TransportBridge
+        "command_result": MessageOrigin.CommandResult
+        _: MessageOrigin.Human
+fn identity_kind_text(kind: IdentityKind) -> text:
+    match kind:
+        IdentityKind.Human: "human"
+        IdentityKind.Agent: "agent"
+        IdentityKind.Bridge: "bridge"
+        IdentityKind.System: "system"
+fn identity_kind_value(value: text) -> IdentityKind:
+    match value:
+        "agent": IdentityKind.Agent
+        "bridge": IdentityKind.Bridge
+        "system": IdentityKind.System
+        _: IdentityKind.Human
+fn agent_handler_text(handler: AgentHandler) -> text:
+    match handler:
+        AgentHandler.Main: "main"
+        AgentHandler.Subagent: "subagent"
+        AgentHandler.Advisor: "advisor"
+        AgentHandler.Router: "router"
+fn agent_handler_value(value: text) -> AgentHandler:
+    match value:
+        "subagent": AgentHandler.Subagent
+        "advisor": AgentHandler.Advisor
+        "router": AgentHandler.Router
+        _: AgentHandler.Main
+fn agent_status_text(status: AgentStatus) -> text:
+    match status:
+        AgentStatus.Offline: "offline"
+        AgentStatus.Idle: "idle"
+        AgentStatus.Queued: "queued"
+        AgentStatus.Running: "running"
+        AgentStatus.WaitingInput: "waiting_input"
+        AgentStatus.Blocked: "blocked"
+        AgentStatus.Completed: "completed"
+        AgentStatus.Failed: "failed"
+        AgentStatus.Stopped: "stopped"
+fn agent_status_value(value: text) -> AgentStatus:
+    match value:
+        "idle": AgentStatus.Idle
+        "queued": AgentStatus.Queued
+        "running": AgentStatus.Running
+        "waiting_input": AgentStatus.WaitingInput
+        "blocked": AgentStatus.Blocked
+        "completed": AgentStatus.Completed
+        "failed": AgentStatus.Failed
+        "stopped": AgentStatus.Stopped
+        _: AgentStatus.Offline
+fn task_state_text(state: TaskState) -> text:
+    match state:
+        TaskState.Queued: "queued"
+        TaskState.Running: "running"
+        TaskState.WaitingInput: "waiting_input"
+        TaskState.Blocked: "blocked"
+        TaskState.Completed: "completed"
+        TaskState.Failed: "failed"
+        TaskState.Canceled: "canceled"
+fn task_state_value(value: text) -> TaskState:
+    match value:
+        "running": TaskState.Running
+        "waiting_input": TaskState.WaitingInput
+        "blocked": TaskState.Blocked
+        "completed": TaskState.Completed
+        "failed": TaskState.Failed
+        "canceled": TaskState.Canceled
+        _: TaskState.Queued
+fn receipt_state_text(state: ReceiptState) -> text:
+    match state:
+        ReceiptState.Accepted: "accepted"
+        ReceiptState.Transmitted: "transmitted"
+        ReceiptState.Delivered: "delivered"
+        ReceiptState.Read: "read"
+        ReceiptState.ConsumedByAgent: "consumed_by_agent"
+        ReceiptState.Handled: "handled"
+        ReceiptState.Failed: "failed"
+fn receipt_state_value(value: text) -> ReceiptState:
+    match value:
+        "transmitted": ReceiptState.Transmitted
+        "delivered": ReceiptState.Delivered
+        "read": ReceiptState.Read
+        "consumed_by_agent": ReceiptState.ConsumedByAgent
+        "handled": ReceiptState.Handled
+        "failed": ReceiptState.Failed
+        _: ReceiptState.Accepted
+fn receipt_evidence_text(evidence: ReceiptEvidence) -> text:
+    match evidence:
+        ReceiptEvidence.Native: "native"
+        ReceiptEvidence.LocalCursor: "local_cursor"
+        ReceiptEvidence.Synthetic: "synthetic"
+        ReceiptEvidence.Unknown: "unknown"
+fn receipt_evidence_value(value: text) -> ReceiptEvidence:
+    match value:
+        "native": ReceiptEvidence.Native
+        "local_cursor": ReceiptEvidence.LocalCursor
+        "synthetic": ReceiptEvidence.Synthetic
+        _: ReceiptEvidence.Unknown
+fn pack(values: [text]) -> text: values.join("\u001f")
+fn unpack(value: text) -> [text]:
+    if value == "": return []
+    value.split("\u001f")
+
+fn schema() -> [text]:
+    [
+        "CREATE TABLE IF NOT EXISTS messaging_metadata (id TEXT PRIMARY KEY, value TEXT)",
+        "CREATE TABLE IF NOT EXISTS canonical_events (event_id TEXT PRIMARY KEY, workspace_id TEXT, aggregate_type TEXT, aggregate_id TEXT, event_kind TEXT, payload TEXT, occurred_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS workspaces (workspace_id TEXT PRIMARY KEY, name TEXT, created_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS identities (identity_id TEXT PRIMARY KEY, workspace_id TEXT, kind TEXT, account_id TEXT, display_name TEXT, external_transport TEXT, external_id TEXT, created_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS rooms (room_id TEXT PRIMARY KEY, workspace_id TEXT, kind TEXT, name TEXT, topic TEXT, visibility TEXT, mode TEXT, update_policy TEXT, context_policy TEXT, created_by TEXT, created_at INTEGER, next_seq INTEGER)",
+        "CREATE TABLE IF NOT EXISTS memberships (membership_id TEXT PRIMARY KEY, room_id TEXT, identity_id TEXT, role TEXT, joined_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS agent_profiles (agent_id TEXT PRIMARY KEY, display_name TEXT, aliases TEXT, provider TEXT, role_summary TEXT, capabilities TEXT, current_task_id TEXT, status TEXT, owner_identity_id TEXT, room_ids TEXT, last_activity_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS agent_bindings (binding_id TEXT PRIMARY KEY, room_id TEXT, agent_id TEXT, handler TEXT, session_policy TEXT, trigger_policy TEXT, update_policy TEXT, context_policy TEXT, permissions TEXT)",
+        "CREATE TABLE IF NOT EXISTS email_invites (invite_id TEXT PRIMARY KEY, email TEXT, token_hash TEXT, expires_at INTEGER, attempts INTEGER, max_attempts INTEGER, used INTEGER)",
+        "CREATE TABLE IF NOT EXISTS local_accounts (account_id TEXT PRIMARY KEY, identity_id TEXT, email TEXT, created_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS email_notifications (delivery_id TEXT PRIMARY KEY, invite_id TEXT, recipient TEXT, issued_at INTEGER, expires_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS agent_hook_events (event_id TEXT PRIMARY KEY, provider TEXT, event_name TEXT, payload TEXT, state TEXT, received_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS agent_hook_correlations (event_id TEXT PRIMARY KEY, task_id TEXT, room_id TEXT, agent_id TEXT)",
+        "CREATE TABLE IF NOT EXISTS messages (message_id TEXT PRIMARY KEY, workspace_id TEXT, room_id TEXT, room_seq INTEGER, thread_root_id TEXT, reply_to_id TEXT, sender_identity_id TEXT, sender_agent_id TEXT, origin TEXT, body TEXT, mentions TEXT, command TEXT, audience TEXT, external_ref TEXT, correlation_id TEXT, causation_id TEXT, hop_count INTEGER, created_at INTEGER, edited_at INTEGER, idempotency_key TEXT)",
+        "CREATE TABLE IF NOT EXISTS message_receipts (receipt_id TEXT PRIMARY KEY, message_id TEXT, identity_id TEXT, state TEXT, evidence TEXT, occurred_at INTEGER, detail TEXT)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS messages_idempotency ON messages (idempotency_key)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS messages_room_sequence ON messages (room_id, room_seq)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS email_notifications_invite_id ON email_notifications (invite_id)",
+        "CREATE TABLE IF NOT EXISTS room_cursors (cursor_id TEXT PRIMARY KEY, room_id TEXT, identity_id TEXT, room_seq INTEGER, advanced_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS inbound_dedup (dedup_id TEXT PRIMARY KEY, binding_id TEXT, external_event_id TEXT, accepted_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS outbox (delivery_id TEXT PRIMARY KEY, message_id TEXT, binding_id TEXT, payload TEXT, state TEXT, attempts INTEGER, available_at INTEGER, last_error TEXT, updated_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS outbox_delivery_claims (delivery_id TEXT PRIMARY KEY, claimant_id TEXT, fence TEXT UNIQUE, lease_expires_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS dead_letters (delivery_id TEXT PRIMARY KEY, message_id TEXT, binding_id TEXT, payload TEXT, attempts INTEGER, final_error TEXT, failed_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS audit_events (audit_id TEXT PRIMARY KEY, event_kind TEXT, actor_id TEXT, subject_id TEXT, detail TEXT, occurred_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS context_manifests (context_bundle_id TEXT PRIMARY KEY, task_id TEXT, included_message_ids TEXT, included_profile_ids TEXT, source_pack_hash TEXT, summary_version TEXT, redaction_policy_version TEXT, token_estimate INTEGER, created_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS tasks (task_id TEXT PRIMARY KEY, origin_message_id TEXT, assigned_agent_id TEXT, state TEXT, objective TEXT, progress_summary TEXT, required_input TEXT, created_at INTEGER, updated_at INTEGER, completed_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS task_events (task_event_id TEXT PRIMARY KEY, task_id TEXT, state TEXT, summary TEXT, required_input TEXT, occurred_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS artifacts (artifact_id TEXT PRIMARY KEY, task_id TEXT, room_id TEXT, media_type TEXT, value TEXT, published_by TEXT, created_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS mcp_idempotency (idempotency_key TEXT PRIMARY KEY, resource_id TEXT, evidence TEXT, created_at INTEGER)",
+        "CREATE TABLE IF NOT EXISTS notify_all_limits (rate_key TEXT PRIMARY KEY, has_accepted INTEGER, last_accepted_at_ms INTEGER, reservation_id TEXT, reserved_at_ms INTEGER)",
+        "CREATE TABLE IF NOT EXISTS transport_bindings (binding_id TEXT PRIMARY KEY, canonical_room_id TEXT, transport TEXT, external_room_id TEXT, mirror_policy TEXT, capabilities_version TEXT, last_inbound_cursor TEXT, last_outbound_cursor TEXT)",
+        "CREATE TABLE IF NOT EXISTS external_refs (ref_id TEXT PRIMARY KEY, binding_id TEXT, canonical_message_id TEXT, external_message_id TEXT, external_thread_id TEXT, created_at INTEGER)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS external_refs_remote ON external_refs (binding_id, external_message_id)",
+        "CREATE TABLE IF NOT EXISTS transport_requests (delivery_id TEXT PRIMARY KEY, method TEXT, url_template TEXT, headers TEXT, body TEXT, credential_ref TEXT, credential_mode TEXT, idempotency_key TEXT)",
+        "CREATE TABLE IF NOT EXISTS agent_control_requests (delivery_id TEXT PRIMARY KEY, provider TEXT, operation TEXT, session_id TEXT, payload TEXT, created_at INTEGER)",
+        "CREATE INDEX IF NOT EXISTS agent_control_requests_provider_created ON agent_control_requests (provider,created_at)"
+    ]
+
+class PureSqlMessagingStore:
+    db: PureDatabase
+    path: text
+    is_open: bool
+    initialization_error: text
+
+    static fn open(path: text) -> PureSqlMessagingStore:
+        val database: PureDatabase = match PureDatabase.open_deferred(path):
+            case Ok(opened): opened
+            case Err(reason): panic("failed to open messaging database: " + reason.message())
+        val store = PureSqlMessagingStore(db: database, path: path, is_open: true,
+            initialization_error: "")
+        if store.initialize():
+            val checkpointed = store.db.checkpoint()
+            match checkpointed:
+                case Err(reason): store.initialization_error = reason.message()
+                case Ok(_): pass
+            store.db.set_auto_checkpoint(true)
+        store
+
+    static fn open_memory() -> PureSqlMessagingStore:
+        val database: PureDatabase = match PureDatabase.memory():
+            case Ok(opened): opened
+            case Err(reason): panic("failed to open in-memory messaging database: " + reason.message())
+        val store = PureSqlMessagingStore(db: database, path: "", is_open: true,
+            initialization_error: "")
+        store.initialize()
+        store
+
+    me initialize() -> bool:
+        for statement in schema():
+            val result = self.db.exec_sql(statement)
+            match result:
+                case Err(reason):
+                    self.initialization_error = reason.message()
+                    eprint("messaging database schema initialization failed: " + self.initialization_error)
+                    return false
+                case Ok(_): pass
+        val rows: [DbRow] = match self.db.query("SELECT value FROM messaging_metadata WHERE id = 'schema_version'", []):
+            case Ok(found): found
+            case Err(reason):
+                self.initialization_error = reason.message()
+                eprint("messaging database metadata initialization failed: " + self.initialization_error)
+                return false
+        if rows.len() == 0:
+            val inserted = self.db.exec_sql("INSERT INTO messaging_metadata (id,value) VALUES ('schema_version','1')")
+            match inserted:
+                case Err(reason):
+                    self.initialization_error = reason.message()
+                    eprint("messaging database metadata insert failed: " + self.initialization_error)
+                    return false
+                case Ok(_): pass
+        true
+
+    me close() -> bool:
+        if not self.is_open: return true
+        val result = self.db.close()
+        self.is_open = false
+        result.is_ok()
+    fn ready() -> bool: self.is_open and self.schema_version() == 1
+
+export StoreWriteResult, AppendMessageResult, StoredHookEvent, StoredArtifact, StoredIdempotency
+export NotifyAllReservationResult, StoredNotifyAllLimit
+export StoredHookCorrelation
+export StoredTransportBinding, StoredExternalRef
+export StoredTransportRequest
+export OutboxDeliveryClaim
+export ClaimedTransportRequest
+export StoredEmailNotification
+export StoredAgentControlRequest
+export StoredCanonicalEvent
+export StoredTaskEvent
+export PureSqlMessagingStore
+export ok_write, failed_write, q, cell, integer
+export kind_text, kind_value, origin_text, origin_value
+export identity_kind_text, identity_kind_value, agent_handler_text, agent_handler_value
+export agent_status_text, agent_status_value, task_state_text, task_state_value
+export receipt_state_text, receipt_state_value, receipt_evidence_text, receipt_evidence_value
+export pack, unpack, schema

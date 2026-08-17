@@ -1,0 +1,47 @@
+"""Standalone entry point for transactional manifest builds.
+
+This worker deliberately excludes the general CLI dispatcher and editor/tool
+commands. Its native closure contains only manifest planning, provenance, and
+the in-process native-build executor.
+"""
+
+use std.cli.cli_util.{get_cli_args}
+use app.build.target_plan.{ManifestBuildRequest, parse_manifest_build_request}
+use app.build.target_executor.{execute_manifest_build,
+    validate_manifest_build_file}
+
+pub fn parse_manifest_worker_request(args: [text]) -> ManifestBuildRequest:
+    if args.len() == 0 or args[0] != "build":
+        return ManifestBuildRequest(active: true, validate_only: false,
+            manifest_path: "", selector: "",
+            error: "manifest worker requires the build command")
+    var build_args: [text] = []
+    var index: i64 = 1
+    while index < args.len():
+        build_args.push(args[index])
+        index = index + 1
+    val request = parse_manifest_build_request(build_args)
+    if not request.active:
+        return ManifestBuildRequest(active: true, validate_only: false,
+            manifest_path: "", selector: "",
+            error: "build requires --manifest or --validate-manifest")
+    request
+
+pub fn manifest_worker_usage() -> text:
+    "Usage: simple-build-manifest-worker build " +
+        "(--manifest=<repo-relative.sdn> | " +
+        "--validate-manifest=<repo-relative.sdn>) --target=<name|all>"
+
+pub fn run_manifest_worker(args: [text]) -> i64:
+    val request = parse_manifest_worker_request(args)
+    if not request.valid():
+        eprint "Error: " + request.error
+        eprint manifest_worker_usage()
+        return 2
+    if request.validate_only:
+        return validate_manifest_build_file(request.manifest_path,
+            request.selector)
+    execute_manifest_build(request.manifest_path, request.selector)
+
+fn main() -> i64:
+    run_manifest_worker(get_cli_args())

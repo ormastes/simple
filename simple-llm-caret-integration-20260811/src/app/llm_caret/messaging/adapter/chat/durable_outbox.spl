@@ -1,0 +1,38 @@
+"""Credential-safe durable composition for concrete chat adapter sends."""
+
+use app.io.mod.{current_time_ms}
+use app.llm_caret.messaging.adapter.chat.rest_common.{ChatHttpRequest}
+use app.llm_caret.messaging.adapter.chat.http_delivery.{queue_prepared_transport_request}
+use app.llm_caret.messaging.adapter.store.pure_sql_store.{PureSqlMessagingStore}
+
+class DurableChatOutbox:
+    store: PureSqlMessagingStore
+    transport: text
+    credential_ref: text
+    credential_mode: text
+    resolved_value: text
+
+    static fn memory(transport: text, credential_ref: text, credential_mode: text,
+            resolved_value: text) -> DurableChatOutbox:
+        DurableChatOutbox(store: PureSqlMessagingStore.open_memory(), transport: transport,
+            credential_ref: credential_ref, credential_mode: credential_mode,
+            resolved_value: resolved_value)
+
+    static fn shared(store: PureSqlMessagingStore, transport: text, credential_ref: text,
+            credential_mode: text, resolved_value: text) -> DurableChatOutbox:
+        DurableChatOutbox(store: store, transport: transport, credential_ref: credential_ref,
+            credential_mode: credential_mode, resolved_value: resolved_value)
+
+    me queue(binding_id: text, message_id: text, prepared: ChatHttpRequest) -> text:
+        if not prepared.accepted: return prepared.error
+        if not self.store.ready(): return "store_unavailable"
+        val delivery_id = self.transport + ":" + binding_id + ":" + prepared.idempotency_key
+        val state = self.store.outbox_state(delivery_id)
+        if state != "": return "queued_duplicate:" + delivery_id
+        val queued = queue_prepared_transport_request(self.store, delivery_id, message_id,
+            binding_id, prepared, self.credential_ref, self.credential_mode,
+            self.resolved_value, current_time_ms())
+        if not queued.ok: return queued.error
+        "queued:" + delivery_id
+
+export DurableChatOutbox

@@ -1,0 +1,277 @@
+"""File-locked notify-all and MCP idempotency transaction owner."""
+
+use std.database.pure_sql.{PureDatabase}
+use app.io.mod.{file_lock, file_unlock}
+use app.llm_caret.messaging.domain.model.{RoomMessage}
+use app.llm_caret.messaging.adapter.store.pure_sql_store_core.{
+    PureSqlMessagingStore, StoreWriteResult, AppendMessageResult,
+    StoredIdempotency, NotifyAllReservationResult, StoredNotifyAllLimit,
+    ok_write, failed_write, q, cell, integer}
+
+impl PureSqlMessagingStore:
+    me put_mcp_idempotency(key: text, resource_id: text, evidence: text, at: i64) -> StoreWriteResult:
+        if key == "": return failed_write("idempotency_key_required")
+        val prior = self.mcp_idempotency(key)
+        if prior.resource_id != "": return ok_write()
+        val sql = "INSERT INTO mcp_idempotency (idempotency_key,resource_id,evidence,created_at) VALUES (" +
+            q(key) + "," + q(resource_id) + "," + q(evidence) + "," + at.to_string() + ")"
+        if self.db.exec_sql(sql).is_ok(): ok_write() else: failed_write("idempotency_write_failed")
+
+    fn mcp_idempotency(key: text) -> StoredIdempotency:
+        val rows = self.db.query("SELECT resource_id,evidence FROM mcp_idempotency WHERE idempotency_key = " + q(key), []).unwrap()
+        if rows.len() == 0: return StoredIdempotency(resource_id: "", evidence: "")
+        StoredIdempotency(resource_id: cell(rows[0], 0), evidence: cell(rows[0], 1))
+
+    fn notify_all_limit_loaded(rate_key: text) -> StoredNotifyAllLimit:
+        val rows = self.db.query("SELECT has_accepted,last_accepted_at_ms,reservation_id,reserved_at_ms FROM notify_all_limits WHERE rate_key = " + q(rate_key), []).unwrap()
+        if rows.len() == 0:
+            return StoredNotifyAllLimit(found: false, has_accepted: false, last_accepted_at_ms: 0,
+                reservation_id: "", reserved_at_ms: 0)
+        StoredNotifyAllLimit(found: true, has_accepted: integer(rows[0], 0) == 1,
+            last_accepted_at_ms: integer(rows[0], 1), reservation_id: cell(rows[0], 2),
+            reserved_at_ms: integer(rows[0], 3))
+
+    fn notify_all_lock_handle() -> i64:
+        if self.path == "": return 0
+        file_lock(self.path + ".notify-all-owner", 10)
+
+    fn notify_all_unlock(handle: i64) -> bool:
+        if handle == 0: return true
+        file_unlock(handle)
+
+    me notify_all_refresh_locked() -> bool:
+        if self.path == "": return true
+        if self.db.close().is_err(): return false
+        match PureDatabase.open(self.path):
+            case Ok(opened):
+                self.db = opened
+                true
+            case Err(reason):
+                self.initialization_error = reason.message()
+                false
+
+    me notify_all_limit(rate_key: text) -> StoredNotifyAllLimit:
+        val handle = self.notify_all_lock_handle()
+        if handle < 0:
+            return StoredNotifyAllLimit(found: false, has_accepted: false,
+                last_accepted_at_ms: 0, reservation_id: "", reserved_at_ms: 0)
+        if not self.notify_all_refresh_locked():
+            self.notify_all_unlock(handle)
+            return StoredNotifyAllLimit(found: false, has_accepted: false,
+                last_accepted_at_ms: 0, reservation_id: "", reserved_at_ms: 0)
+        val result = self.notify_all_limit_loaded(rate_key)
+        self.notify_all_unlock(handle)
+        result
+
+    me reserve_notify_all(rate_key: text, reservation_id: text, now_ms: i64,
+            minimum_interval_ms: i64) -> NotifyAllReservationResult:
+        if rate_key.trim() == "": return NotifyAllReservationResult(acquired: false, error: "invalid_notify_all_key", retry_after_ms: 0)
+        if reservation_id.trim() == "": return NotifyAllReservationResult(acquired: false, error: "invalid_notify_all_reservation", retry_after_ms: 0)
+        if now_ms < 0: return NotifyAllReservationResult(acquired: false, error: "invalid_notify_all_clock", retry_after_ms: 0)
+        if minimum_interval_ms < 0: return NotifyAllReservationResult(acquired: false, error: "invalid_notify_all_interval", retry_after_ms: 0)
+        val handle = self.notify_all_lock_handle()
+        if handle < 0: return NotifyAllReservationResult(acquired: false, error: "notify_all_owner_lock_failed", retry_after_ms: 0)
+        if not self.notify_all_refresh_locked():
+            self.notify_all_unlock(handle)
+            return NotifyAllReservationResult(acquired: false, error: "notify_all_owner_refresh_failed", retry_after_ms: 0)
+        if self.db.exec_sql("BEGIN").is_err():
+            self.notify_all_unlock(handle)
+            return NotifyAllReservationResult(acquired: false, error: "notify_all_reservation_begin_failed", retry_after_ms: 0)
+        val prior = self.notify_all_limit_loaded(rate_key)
+        if prior.found and prior.reservation_id != "":
+            if now_ms < prior.reserved_at_ms:
+                self.db.exec_sql("ROLLBACK")
+                self.notify_all_unlock(handle)
+                return NotifyAllReservationResult(acquired: false, error: "notify_all_clock_moved_backwards", retry_after_ms: 0)
+            if prior.reservation_id == reservation_id:
+                self.db.exec_sql("ROLLBACK")
+                self.notify_all_unlock(handle)
+                return NotifyAllReservationResult(acquired: true, error: "", retry_after_ms: 0)
+            val reservation_age = now_ms - prior.reserved_at_ms
+            if reservation_age < 30000:
+                self.db.exec_sql("ROLLBACK")
+                self.notify_all_unlock(handle)
+                return NotifyAllReservationResult(acquired: false, error: "notify_all_reservation_busy",
+                    retry_after_ms: 30000 - reservation_age)
+        if prior.found and prior.has_accepted:
+            if now_ms < prior.last_accepted_at_ms:
+                self.db.exec_sql("ROLLBACK")
+                self.notify_all_unlock(handle)
+                return NotifyAllReservationResult(acquired: false, error: "notify_all_clock_moved_backwards", retry_after_ms: 0)
+            val elapsed = now_ms - prior.last_accepted_at_ms
+            if elapsed < minimum_interval_ms:
+                self.db.exec_sql("ROLLBACK")
+                self.notify_all_unlock(handle)
+                return NotifyAllReservationResult(acquired: false, error: "notify_all_rate_limited",
+                    retry_after_ms: minimum_interval_ms - elapsed)
+        val write_sql = if prior.found:
+            "UPDATE notify_all_limits SET reservation_id=" + q(reservation_id) + ", reserved_at_ms=" + now_ms.to_string() + " WHERE rate_key=" + q(rate_key)
+        else:
+            "INSERT INTO notify_all_limits (rate_key,has_accepted,last_accepted_at_ms,reservation_id,reserved_at_ms) VALUES (" +
+                q(rate_key) + ",0,0," + q(reservation_id) + "," + now_ms.to_string() + ")"
+        if self.db.exec_sql(write_sql).is_err() or self.db.exec_sql("COMMIT").is_err():
+            self.db.exec_sql("ROLLBACK")
+            self.notify_all_unlock(handle)
+            return NotifyAllReservationResult(acquired: false, error: "notify_all_reservation_write_failed", retry_after_ms: 0)
+        self.notify_all_unlock(handle)
+        NotifyAllReservationResult(acquired: true, error: "", retry_after_ms: 0)
+
+    me commit_notify_all(rate_key: text, reservation_id: text, accepted_at_ms: i64) -> StoreWriteResult:
+        if rate_key.trim() == "": return failed_write("invalid_notify_all_key")
+        if reservation_id.trim() == "": return failed_write("invalid_notify_all_reservation")
+        if accepted_at_ms < 0: return failed_write("invalid_notify_all_clock")
+        val handle = self.notify_all_lock_handle()
+        if handle < 0: return failed_write("notify_all_owner_lock_failed")
+        if not self.notify_all_refresh_locked():
+            self.notify_all_unlock(handle)
+            return failed_write("notify_all_owner_refresh_failed")
+        if self.db.exec_sql("BEGIN").is_err():
+            self.notify_all_unlock(handle)
+            return failed_write("notify_all_commit_begin_failed")
+        val prior = self.notify_all_limit_loaded(rate_key)
+        if not prior.found or prior.reservation_id != reservation_id or accepted_at_ms < prior.reserved_at_ms:
+            self.db.exec_sql("ROLLBACK")
+            self.notify_all_unlock(handle)
+            return failed_write("notify_all_reservation_not_owned")
+        val sql = "UPDATE notify_all_limits SET has_accepted=1, last_accepted_at_ms=" + accepted_at_ms.to_string() +
+            ", reservation_id='', reserved_at_ms=0 WHERE rate_key=" + q(rate_key)
+        if self.db.exec_sql(sql).is_err() or self.db.exec_sql("COMMIT").is_err():
+            self.db.exec_sql("ROLLBACK")
+            self.notify_all_unlock(handle)
+            return failed_write("notify_all_commit_failed")
+        self.notify_all_unlock(handle)
+        ok_write()
+
+    me release_notify_all(rate_key: text, reservation_id: text) -> StoreWriteResult:
+        if rate_key.trim() == "": return failed_write("invalid_notify_all_key")
+        if reservation_id.trim() == "": return failed_write("invalid_notify_all_reservation")
+        val handle = self.notify_all_lock_handle()
+        if handle < 0: return failed_write("notify_all_owner_lock_failed")
+        if not self.notify_all_refresh_locked():
+            self.notify_all_unlock(handle)
+            return failed_write("notify_all_owner_refresh_failed")
+        if self.db.exec_sql("BEGIN").is_err():
+            self.notify_all_unlock(handle)
+            return failed_write("notify_all_release_begin_failed")
+        val prior = self.notify_all_limit_loaded(rate_key)
+        if not prior.found or prior.reservation_id != reservation_id:
+            self.db.exec_sql("ROLLBACK")
+            self.notify_all_unlock(handle)
+            return failed_write("notify_all_reservation_not_owned")
+        val sql = "UPDATE notify_all_limits SET reservation_id='', reserved_at_ms=0 WHERE rate_key=" + q(rate_key)
+        if self.db.exec_sql(sql).is_err() or self.db.exec_sql("COMMIT").is_err():
+            self.db.exec_sql("ROLLBACK")
+            self.notify_all_unlock(handle)
+            return failed_write("notify_all_release_failed")
+        self.notify_all_unlock(handle)
+        ok_write()
+
+    me append_notify_all(message: RoomMessage, idempotency_key: text,
+            evidence: text, rate_key: text, accepted_at_ms: i64,
+            minimum_interval_ms: i64) -> AppendMessageResult:
+        if rate_key.trim() == "":
+            return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                room_seq: 0, duplicate: false, error: "invalid_notify_all_key")
+        if idempotency_key.trim() == "":
+            return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                room_seq: 0, duplicate: false, error: "invalid_notify_all_reservation")
+        if accepted_at_ms < 0 or minimum_interval_ms < 0:
+            return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                room_seq: 0, duplicate: false, error: "invalid_notify_all_clock")
+        val handle = self.notify_all_lock_handle()
+        if handle < 0:
+            return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                room_seq: 0, duplicate: false, error: "notify_all_owner_lock_failed")
+        if not self.notify_all_refresh_locked():
+            self.notify_all_unlock(handle)
+            return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                room_seq: 0, duplicate: false, error: "notify_all_owner_refresh_failed")
+        if self.db.exec_sql("BEGIN").is_err():
+            self.notify_all_unlock(handle)
+            return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                room_seq: 0, duplicate: false, error: "notify_all_completion_begin_failed")
+
+        val replay = self.db.query(
+            "SELECT resource_id FROM mcp_idempotency WHERE idempotency_key = " +
+                q(idempotency_key), []).unwrap()
+        if replay.len() > 0:
+            self.db.exec_sql("ROLLBACK")
+            self.notify_all_unlock(handle)
+            return AppendMessageResult(ok: true, message_id: cell(replay[0], 0),
+                room_seq: 0, duplicate: true, error: "")
+
+        val prior = self.notify_all_limit_loaded(rate_key)
+        if prior.found and prior.reservation_id != "":
+            if accepted_at_ms < prior.reserved_at_ms:
+                self.db.exec_sql("ROLLBACK")
+                self.notify_all_unlock(handle)
+                return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                    room_seq: 0, duplicate: false, error: "notify_all_clock_moved_backwards")
+            val reservation_age = accepted_at_ms - prior.reserved_at_ms
+            if (prior.reservation_id != idempotency_key and
+                    reservation_age < 30000):
+                self.db.exec_sql("ROLLBACK")
+                self.notify_all_unlock(handle)
+                return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                    room_seq: 0, duplicate: false, error: "notify_all_reservation_busy")
+        if prior.found and prior.has_accepted:
+            if accepted_at_ms < prior.last_accepted_at_ms:
+                self.db.exec_sql("ROLLBACK")
+                self.notify_all_unlock(handle)
+                return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                    room_seq: 0, duplicate: false, error: "notify_all_clock_moved_backwards")
+            if accepted_at_ms - prior.last_accepted_at_ms < minimum_interval_ms:
+                self.db.exec_sql("ROLLBACK")
+                self.notify_all_unlock(handle)
+                return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                    room_seq: 0, duplicate: false, error: "notify_all_rate_limited")
+
+        val reservation_sql = if prior.found:
+            "UPDATE notify_all_limits SET reservation_id=" + q(idempotency_key) +
+                ", reserved_at_ms=" + accepted_at_ms.to_string() +
+                " WHERE rate_key=" + q(rate_key)
+        else:
+            "INSERT INTO notify_all_limits (rate_key,has_accepted,last_accepted_at_ms,reservation_id,reserved_at_ms) VALUES (" +
+                q(rate_key) + ",0,0," + q(idempotency_key) + "," +
+                accepted_at_ms.to_string() + ")"
+        if self.db.exec_sql(reservation_sql).is_err():
+            self.db.exec_sql("ROLLBACK")
+            self.notify_all_unlock(handle)
+            return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                room_seq: 0, duplicate: false, error: "notify_all_reservation_write_failed")
+
+        val appended = self.append_message_in_transaction(message, idempotency_key)
+        if not appended.ok:
+            self.db.exec_sql("ROLLBACK")
+            self.notify_all_unlock(handle)
+            return appended
+        val idempotency_sql = "INSERT INTO mcp_idempotency (idempotency_key,resource_id,evidence,created_at) VALUES (" +
+            q(idempotency_key) + "," + q(appended.message_id) + "," +
+            q(evidence) + "," + accepted_at_ms.to_string() + ")"
+        if self.db.exec_sql(idempotency_sql).is_err():
+            self.db.exec_sql("ROLLBACK")
+            self.notify_all_unlock(handle)
+            return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                room_seq: 0, duplicate: false, error: "idempotency_write_failed")
+
+        var completed_at_ms = accepted_at_ms
+        if appended.duplicate:
+            if prior.has_accepted:
+                completed_at_ms = prior.last_accepted_at_ms
+            else:
+                val accepted_rows = self.db.query(
+                    "SELECT created_at FROM messages WHERE message_id = " +
+                        q(appended.message_id), []).unwrap()
+                if accepted_rows.len() > 0:
+                    completed_at_ms = integer(accepted_rows[0], 0)
+        val completion_sql = "UPDATE notify_all_limits SET has_accepted=1, last_accepted_at_ms=" +
+            completed_at_ms.to_string() + ", reservation_id='', reserved_at_ms=0 WHERE rate_key=" +
+            q(rate_key)
+        val completed = self.db.exec_sql(completion_sql)
+        if completed.is_err() or completed.unwrap() != 1 or self.db.exec_sql("COMMIT").is_err():
+            self.db.exec_sql("ROLLBACK")
+            self.notify_all_unlock(handle)
+            return AppendMessageResult(ok: false, message_id: message.message_id.value,
+                room_seq: 0, duplicate: false, error: "notify_all_completion_failed")
+        self.notify_all_unlock(handle)
+        appended

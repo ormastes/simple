@@ -1,0 +1,163 @@
+# codex-system-test
+# Clocked black-box contract for V9's combined RV{32,64}IM+Zicsr direct product.
+# It observes only the frozen public completion and CSR service ports.
+use std.spec.*
+use app.io.vhdl_ffi.{ghdl_available, ghdl_unique_workdir, ghdl_analyze_in,
+    ghdl_elaborate_in, ghdl_run_in, vhdl_write_file}
+use compiler.mir.hwir.types.{CoreConfig}
+use compiler.mir.hwir.riscv_lsu_config.{LsuConfig}
+use compiler.backend.backend.riscv_scalar_runtime_pipeline_v9_flat_to_vhdl.{
+    compile_strict_riscv_scalar_runtime_pipeline_v9_flat}
+
+fn runtime_v9_rv32() -> CoreConfig: CoreConfig.rv32im_zicsr_zifencei()
+fn runtime_v9_rv64() -> CoreConfig: CoreConfig.rv64im_zicsr_zifencei()
+
+fn runtime_v9_tb(entity: text, xlen: i32, csr_value: text, word_case: text) -> text:
+    """
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use std.env.all;
+entity {entity}_tb is end entity;
+architecture sim of {entity}_tb is
+  signal clk, rst, in_valid, completion_ready : std_logic := '0';
+  signal instruction : std_logic_vector(31 downto 0) := (others=>'0');
+  signal instruction_length_bytes : std_logic_vector(2 downto 0) := "100";
+  signal rs1_value, rs2_value, pc_before, fallthrough_pc : std_logic_vector({xlen - 1} downto 0) := (others=>'0');
+  signal privilege : std_logic_vector(1 downto 0) := "11";
+  signal provider_event_id, decode_event_id : std_logic_vector(63 downto 0) := (others=>'0');
+  signal csr_present : std_logic := '1'; signal csr_read_value : std_logic_vector({xlen - 1} downto 0) := x"{csr_value}";
+  signal bus_request_ready, bus_response_valid, bus_response_fault, fence_effect_ready : std_logic := '0';
+  signal bus_response_id : std_logic_vector(63 downto 0) := (others=>'0');
+  signal bus_response_data, bus_response_cause, bus_response_tval : std_logic_vector({xlen - 1} downto 0) := (others=>'0');
+  signal in_ready, completion_valid, completion_rd_write, completion_execute_trap_valid, completion_illegal_valid, runtime_protocol_fault : std_logic;
+  signal completion_rd : std_logic_vector(4 downto 0); signal completion_rd_value, completion_execute_trap_cause, completion_execute_trap_tval, completion_pc_before, completion_pc_after : std_logic_vector({xlen - 1} downto 0);
+  signal completion_original_instruction, completion_canonical_instruction : std_logic_vector(31 downto 0); signal completion_instruction_length_bytes : std_logic_vector(2 downto 0); signal completion_provider_event_id, completion_decode_event_id : std_logic_vector(63 downto 0);
+  signal csr_lookup_valid, csr_lookup_read_enable, csr_commit_valid : std_logic; signal csr_lookup_address, csr_commit_address : std_logic_vector(11 downto 0); signal csr_commit_value : std_logic_vector({xlen - 1} downto 0);
+  signal fence_effect_valid : std_logic; signal fence_effect_kind : std_logic_vector(1 downto 0); signal fence_effect_fm, fence_effect_pred, fence_effect_succ : std_logic_vector(3 downto 0);
+begin
+  dut: entity work.{entity} port map(
+    clk=>clk,rst=>rst,in_valid=>in_valid,instruction=>instruction,instruction_length_bytes=>instruction_length_bytes,rs1_value=>rs1_value,rs2_value=>rs2_value,pc_before=>pc_before,fallthrough_pc=>fallthrough_pc,privilege=>privilege,provider_event_id=>provider_event_id,decode_event_id=>decode_event_id,completion_ready=>completion_ready,bus_request_ready=>bus_request_ready,bus_response_valid=>bus_response_valid,bus_response_id=>bus_response_id,bus_response_data=>bus_response_data,bus_response_fault=>bus_response_fault,bus_response_cause=>bus_response_cause,bus_response_tval=>bus_response_tval,fence_effect_ready=>fence_effect_ready,csr_present=>csr_present,csr_read_value=>csr_read_value,
+    in_ready=>in_ready,completion_valid=>completion_valid,completion_privilege=>open,completion_original_instruction=>completion_original_instruction,completion_canonical_instruction=>completion_canonical_instruction,completion_instruction_length_bytes=>completion_instruction_length_bytes,completion_pc_before=>completion_pc_before,completion_pc_after=>completion_pc_after,completion_rd=>completion_rd,completion_rd_write=>completion_rd_write,completion_rd_value=>completion_rd_value,completion_memory_address=>open,completion_memory_read_mask=>open,completion_memory_write_mask=>open,completion_memory_read_data=>open,completion_memory_write_data=>open,completion_execute_trap_valid=>completion_execute_trap_valid,completion_execute_trap_cause=>completion_execute_trap_cause,completion_execute_trap_tval=>completion_execute_trap_tval,completion_memory_trap_valid=>open,completion_memory_trap_cause=>open,completion_memory_trap_tval=>open,completion_redirect_valid=>open,completion_redirect_target=>open,completion_provider_event_id=>completion_provider_event_id,completion_decode_event_id=>completion_decode_event_id,completion_illegal_valid=>completion_illegal_valid,runtime_protocol_fault=>runtime_protocol_fault,bus_request_valid=>open,bus_request_id=>open,bus_request_address=>open,bus_request_write=>open,bus_request_byte_mask=>open,bus_request_write_data=>open,bus_response_ready=>open,fence_effect_valid=>fence_effect_valid,fence_effect_kind=>fence_effect_kind,fence_effect_fm=>fence_effect_fm,fence_effect_pred=>fence_effect_pred,fence_effect_succ=>fence_effect_succ,csr_lookup_valid=>csr_lookup_valid,csr_lookup_address=>csr_lookup_address,csr_lookup_read_enable=>csr_lookup_read_enable,csr_commit_valid=>csr_commit_valid,csr_commit_address=>csr_commit_address,csr_commit_value=>csr_commit_value);
+  process
+    procedure tick is begin wait for 1 ns; clk<='1'; wait for 1 ns; clk<='0'; wait for 1 ns; end procedure;
+    procedure drive(constant insn : std_logic_vector(31 downto 0); constant lhs, rhs : std_logic_vector({xlen - 1} downto 0); constant p : std_logic_vector(1 downto 0); constant event : natural) is begin in_valid<='1'; instruction<=insn; rs1_value<=lhs; rs2_value<=rhs; privilege<=p; pc_before<=std_logic_vector(to_unsigned(256,{xlen})); fallthrough_pc<=std_logic_vector(to_unsigned(260,{xlen})); provider_event_id<=std_logic_vector(to_unsigned(event,64)); decode_event_id<=std_logic_vector(to_unsigned(event+100,64)); end procedure;
+    procedure await_completion(constant label_text : string) is begin for n in 1 to {xlen + 20} loop if completion_valid='1' then return; end if; tick; end loop; assert false report label_text severity failure; end procedure;
+    procedure check_m(constant insn : std_logic_vector(31 downto 0); constant lhs, rhs, expected : std_logic_vector({xlen - 1} downto 0); constant event : natural; constant label_text : string) is begin
+      drive(insn,lhs,rhs,"11",event); tick; in_valid<='0'; await_completion(label_text);
+      assert completion_rd="00101" and completion_rd_write='1' and completion_rd_value=expected and completion_original_instruction=insn and completion_canonical_instruction=insn and completion_instruction_length_bytes="100" and completion_pc_before=std_logic_vector(to_unsigned(256,{xlen})) and completion_pc_after=std_logic_vector(to_unsigned(260,{xlen})) and completion_provider_event_id=std_logic_vector(to_unsigned(event,64)) and completion_decode_event_id=std_logic_vector(to_unsigned(event+100,64)) and completion_execute_trap_valid='0' and completion_illegal_valid='0' and csr_lookup_valid='0' and csr_lookup_read_enable='0' and csr_commit_valid='0' and runtime_protocol_fault='0' report label_text & " payload, public metadata, or service isolation mismatch" severity failure;
+      completion_ready<='1'; tick; completion_ready<='0'; assert completion_valid='0' and csr_commit_valid='0' report label_text & " was not consumed once" severity failure;
+    end procedure;
+    procedure check_fence(constant insn : std_logic_vector(31 downto 0); constant expected_kind : std_logic_vector(1 downto 0); constant expected_fm, expected_pred, expected_succ : std_logic_vector(3 downto 0); constant event : natural; constant label_text : string) is begin
+      fence_effect_ready<='0'; drive(insn,(others=>'0'),(others=>'0'),"11",event); tick; in_valid<='0';
+      assert fence_effect_valid='1' and completion_valid='0' and fence_effect_kind=expected_kind and fence_effect_fm=expected_fm and fence_effect_pred=expected_pred and fence_effect_succ=expected_succ report label_text & " effect mismatch" severity failure;
+      tick; assert fence_effect_valid='1' and completion_valid='0' and fence_effect_kind=expected_kind and fence_effect_fm=expected_fm and fence_effect_pred=expected_pred and fence_effect_succ=expected_succ report label_text & " effect was not held under ready-low" severity failure;
+      fence_effect_ready<='1'; tick; fence_effect_ready<='0'; assert fence_effect_valid='0' and completion_valid='1' and completion_rd_write='0' and completion_original_instruction=insn and completion_canonical_instruction=insn and completion_provider_event_id=std_logic_vector(to_unsigned(event,64)) and completion_decode_event_id=std_logic_vector(to_unsigned(event+100,64)) and completion_illegal_valid='0' and runtime_protocol_fault='0' report label_text & " acceptance/retirement mismatch" severity failure;
+      tick; assert completion_valid='1' and completion_rd_write='0' and completion_original_instruction=insn report label_text & " completion was not held" severity failure;
+      completion_ready<='1'; tick; completion_ready<='0'; assert completion_valid='0' and fence_effect_valid='0' report label_text & " retirement was not consumed once" severity failure;
+    end procedure;
+  begin
+    rst<='1'; tick; rst<='0'; wait for 1 ns;
+    assert in_ready='1' and runtime_protocol_fault='0' report "V9 reset state invalid" severity failure;
+    -- Each M family must remain wholly inside tag two: no CSR service, illegal, or trap side effect may escape.
+    check_m(x"023102B3",std_logic_vector(to_unsigned(17,{xlen})),std_logic_vector(to_unsigned(2,{xlen})),std_logic_vector(to_unsigned(34,{xlen})),1,"V9 MUL did not complete");
+    check_m(x"023112B3",std_logic_vector(to_unsigned(17,{xlen})),std_logic_vector(to_unsigned(2,{xlen})),std_logic_vector(to_unsigned(0,{xlen})),2,"V9 MULH did not complete");
+    check_m(x"023122B3",std_logic_vector(to_unsigned(17,{xlen})),std_logic_vector(to_unsigned(2,{xlen})),std_logic_vector(to_unsigned(0,{xlen})),3,"V9 MULHSU did not complete");
+    check_m(x"023132B3",std_logic_vector(to_unsigned(17,{xlen})),std_logic_vector(to_unsigned(2,{xlen})),std_logic_vector(to_unsigned(0,{xlen})),4,"V9 MULHU did not complete");
+    -- Negative/unsigned high-half witnesses distinguish all three high products.
+    check_m(x"023112B3",(others=>'1'),std_logic_vector(to_unsigned(2,{xlen})),(others=>'1'),40,"V9 MULH signed-negative high half did not complete");
+    check_m(x"023122B3",(others=>'1'),std_logic_vector(to_unsigned(2,{xlen})),(others=>'1'),41,"V9 MULHSU signed-negative high half did not complete");
+    check_m(x"023132B3",(others=>'1'),std_logic_vector(to_unsigned(2,{xlen})),std_logic_vector(to_unsigned(1,{xlen})),42,"V9 MULHU unsigned high half did not complete");
+    -- DIV x5,x6,x7 additionally proves that the held iterative result survives backpressure.
+    drive(x"027342B3",std_logic_vector(to_unsigned(17,{xlen})),std_logic_vector(to_unsigned(2,{xlen})),"11",5); tick; in_valid<='0'; await_completion("V9 DIV did not complete");
+    assert completion_rd="00101" and completion_rd_write='1' and completion_rd_value=std_logic_vector(to_unsigned(8,{xlen})) and completion_original_instruction=x"027342B3" and completion_canonical_instruction=x"027342B3" and completion_provider_event_id=std_logic_vector(to_unsigned(5,64)) and completion_decode_event_id=std_logic_vector(to_unsigned(105,64)) and completion_execute_trap_valid='0' and completion_illegal_valid='0' and csr_lookup_valid='0' and csr_lookup_read_enable='0' and csr_commit_valid='0' and runtime_protocol_fault='0' report "V9 DIV tag-two payload, provenance, or service isolation mismatch" severity failure;
+    tick; assert completion_valid='1' and completion_rd_value=std_logic_vector(to_unsigned(8,{xlen})) and csr_commit_valid='0' report "V9 DIV completion did not hold under backpressure" severity failure; completion_ready<='1'; tick; completion_ready<='0'; assert completion_valid='0' report "V9 DIV was not consumed once" severity failure;
+    check_m(x"027352B3",std_logic_vector(to_unsigned(17,{xlen})),std_logic_vector(to_unsigned(2,{xlen})),std_logic_vector(to_unsigned(8,{xlen})),6,"V9 DIVU did not complete");
+    check_m(x"027362B3",std_logic_vector(to_unsigned(17,{xlen})),std_logic_vector(to_unsigned(2,{xlen})),std_logic_vector(to_unsigned(1,{xlen})),7,"V9 REM did not complete");
+    check_m(x"027372B3",std_logic_vector(to_unsigned(17,{xlen})),std_logic_vector(to_unsigned(2,{xlen})),std_logic_vector(to_unsigned(1,{xlen})),8,"V9 REMU did not complete");
+    -- Divide-by-zero and signed-overflow are architectural M results, not traps or CSR operations.
+    check_m(x"027342B3",std_logic_vector(to_unsigned(17,{xlen})),(others=>'0'),(others=>'1'),9,"V9 DIV divide-by-zero did not complete");
+    check_m(x"027362B3",std_logic_vector(to_unsigned(17,{xlen})),(others=>'0'),std_logic_vector(to_unsigned(17,{xlen})),10,"V9 REM divide-by-zero did not complete");
+    check_m(x"027342B3",std_logic_vector(shift_left(to_signed(1,{xlen}),{xlen - 1})),(others=>'1'),std_logic_vector(shift_left(to_signed(1,{xlen}),{xlen - 1})),43,"V9 signed DIV minimum/-1 did not complete");
+    check_m(x"027362B3",std_logic_vector(shift_left(to_signed(1,{xlen}),{xlen - 1})),(others=>'1'),(others=>'0'),44,"V9 signed REM minimum/-1 did not complete");
+    drive(x"02310033",std_logic_vector(to_unsigned(17,{xlen})),std_logic_vector(to_unsigned(2,{xlen})),"11",11); tick; in_valid<='0'; await_completion("V9 MUL x0 did not complete");
+    assert completion_rd="00000" and completion_rd_write='0' and completion_rd_value=std_logic_vector(to_unsigned(34,{xlen})) and completion_execute_trap_valid='0' and completion_illegal_valid='0' and csr_lookup_valid='0' and csr_commit_valid='0' report "V9 MUL x0 did not suppress only destination write" severity failure; completion_ready<='1'; tick; completion_ready<='0';
+    check_m(x"023002B3",(others=>'1'),std_logic_vector(to_unsigned(2,{xlen})),(others=>'0'),45,"V9 M rs1=x0 did not ignore hostile input data");
+    {word_case}
+    -- CSRRW x5,mstatus,x1: tag three atomically captures the service read and only commits at consumption.
+    drive(x"300092F3",std_logic_vector(to_unsigned(16,{xlen})),(others=>'0'),"11",12); tick;
+    assert csr_lookup_valid='1' and csr_lookup_read_enable='1' and csr_lookup_address=x"300" report "V9 CSRRW did not expose tag-three lookup" severity failure;
+    in_valid<='0'; await_completion("V9 CSRRW did not complete");
+    assert completion_rd="00101" and completion_rd_write='1' and completion_rd_value=x"{csr_value}" and csr_commit_valid='0' report "V9 CSRRW completion mismatch" severity failure;
+    csr_read_value<=(others=>'1'); tick; assert completion_valid='1' and completion_rd_value=x"{csr_value}" and csr_commit_valid='0' report "V9 CSRRW did not hold captured CSR read under backpressure" severity failure;
+    completion_ready<='1'; wait for 1 ns; assert csr_commit_valid='1' and csr_commit_address=x"300" and csr_commit_value=std_logic_vector(to_unsigned(16,{xlen})) report "V9 CSRRW did not present exact commit" severity failure; tick; completion_ready<='0'; assert completion_valid='0' and csr_commit_valid='0' report "V9 CSRRW commit was not one-shot" severity failure;
+    -- The remaining five CSR encodings must derive exact RMW/write values and commit only at consume.
+    csr_read_value<=std_logic_vector(to_unsigned(16#A0#,{xlen})); drive(x"3001A2F3",std_logic_vector(to_unsigned(3,{xlen})),(others=>'0'),"11",13); tick; in_valid<='0'; await_completion("V9 CSRRS did not complete"); assert completion_provider_event_id=std_logic_vector(to_unsigned(13,64)) and completion_decode_event_id=std_logic_vector(to_unsigned(113,64)) report "V9 CSRRS provenance mismatch" severity failure; completion_ready<='1'; wait for 1 ns; assert csr_commit_valid='1' and csr_commit_address=x"300" and csr_commit_value=std_logic_vector(to_unsigned(16#A3#,{xlen})) report "V9 CSRRS OR commit mismatch" severity failure; tick; completion_ready<='0'; assert csr_commit_valid='0' report "V9 CSRRS commit was not one-shot" severity failure;
+    csr_read_value<=std_logic_vector(to_unsigned(16#A7#,{xlen})); drive(x"3001B2F3",std_logic_vector(to_unsigned(3,{xlen})),(others=>'0'),"11",14); tick; in_valid<='0'; await_completion("V9 CSRRC did not complete"); assert completion_provider_event_id=std_logic_vector(to_unsigned(14,64)) and completion_decode_event_id=std_logic_vector(to_unsigned(114,64)) report "V9 CSRRC provenance mismatch" severity failure; completion_ready<='1'; wait for 1 ns; assert csr_commit_valid='1' and csr_commit_address=x"300" and csr_commit_value=std_logic_vector(to_unsigned(16#A4#,{xlen})) report "V9 CSRRC clear commit mismatch" severity failure; tick; completion_ready<='0'; assert csr_commit_valid='0' report "V9 CSRRC commit was not one-shot" severity failure;
+    csr_read_value<=std_logic_vector(to_unsigned(16#A0#,{xlen})); drive(x"3001D2F3",(others=>'0'),(others=>'0'),"11",15); tick; in_valid<='0'; await_completion("V9 CSRRWI did not complete"); assert completion_provider_event_id=std_logic_vector(to_unsigned(15,64)) and completion_decode_event_id=std_logic_vector(to_unsigned(115,64)) report "V9 CSRRWI provenance mismatch" severity failure; completion_ready<='1'; wait for 1 ns; assert csr_commit_valid='1' and csr_commit_address=x"300" and csr_commit_value=std_logic_vector(to_unsigned(3,{xlen})) report "V9 CSRRWI commit mismatch" severity failure; tick; completion_ready<='0'; assert csr_commit_valid='0' report "V9 CSRRWI commit was not one-shot" severity failure;
+    csr_read_value<=std_logic_vector(to_unsigned(16#A0#,{xlen})); drive(x"3001E2F3",(others=>'0'),(others=>'0'),"11",16); tick; in_valid<='0'; await_completion("V9 CSRRSI did not complete"); assert completion_provider_event_id=std_logic_vector(to_unsigned(16,64)) and completion_decode_event_id=std_logic_vector(to_unsigned(116,64)) report "V9 CSRRSI provenance mismatch" severity failure; completion_ready<='1'; wait for 1 ns; assert csr_commit_valid='1' and csr_commit_address=x"300" and csr_commit_value=std_logic_vector(to_unsigned(16#A3#,{xlen})) report "V9 CSRRSI commit mismatch" severity failure; tick; completion_ready<='0'; assert csr_commit_valid='0' report "V9 CSRRSI commit was not one-shot" severity failure;
+    csr_read_value<=std_logic_vector(to_unsigned(16#A7#,{xlen})); drive(x"3001F2F3",(others=>'0'),(others=>'0'),"11",17); tick; in_valid<='0'; await_completion("V9 CSRRCI did not complete"); assert completion_provider_event_id=std_logic_vector(to_unsigned(17,64)) and completion_decode_event_id=std_logic_vector(to_unsigned(117,64)) report "V9 CSRRCI provenance mismatch" severity failure; completion_ready<='1'; wait for 1 ns; assert csr_commit_valid='1' and csr_commit_address=x"300" and csr_commit_value=std_logic_vector(to_unsigned(16#A4#,{xlen})) report "V9 CSRRCI commit mismatch" severity failure; tick; completion_ready<='0'; assert csr_commit_valid='0' report "V9 CSRRCI commit was not one-shot" severity failure;
+    -- CSRRS x0,x0 reads but writes neither destination nor service state; CSRRW x0 writes without a read.
+    csr_read_value<=x"{csr_value}"; drive(x"30002073",(others=>'0'),(others=>'0'),"11",18); tick; assert csr_lookup_valid='1' and csr_lookup_read_enable='1' report "V9 CSRRS x0 lost required lookup" severity failure; in_valid<='0'; await_completion("V9 CSRRS x0 did not complete"); assert completion_rd="00000" and completion_rd_write='0' and csr_commit_valid='0' report "V9 CSRRS x0 wrote destination or service" severity failure; completion_ready<='1'; tick; completion_ready<='0';
+    drive(x"30009073",std_logic_vector(to_unsigned(7,{xlen})),(others=>'0'),"11",19); tick; assert csr_lookup_valid='1' and csr_lookup_read_enable='0' report "V9 CSRRW x0 did not suppress read" severity failure; in_valid<='0'; await_completion("V9 CSRRW x0 did not complete"); assert completion_rd="00000" and completion_rd_write='0' report "V9 CSRRW x0 wrote destination" severity failure; completion_ready<='1'; wait for 1 ns; assert csr_commit_valid='1' and csr_commit_value=std_logic_vector(to_unsigned(7,{xlen})) report "V9 CSRRW x0 lost legal source write" severity failure; tick; completion_ready<='0';
+    -- Read-only, absent, and privilege policy fails architecturally, never through CSR commit or the sticky protocol fault.
+    drive(x"C00092F3",std_logic_vector(to_unsigned(1,{xlen})),(others=>'0'),"11",20); tick; in_valid<='0'; await_completion("V9 policy trap did not complete");
+    assert completion_execute_trap_valid='1' and completion_execute_trap_cause=std_logic_vector(to_unsigned(2,{xlen})) and completion_execute_trap_tval=std_logic_vector(to_unsigned(16#C00092F3#,{xlen})) and completion_illegal_valid='0' and csr_commit_valid='0' and runtime_protocol_fault='0' report "V9 CSR policy trap committed or faulted" severity failure;
+    completion_ready<='1'; wait for 1 ns; assert csr_commit_valid='0' report "V9 CSR policy trap committed on consume" severity failure; tick; completion_ready<='0';
+    csr_present<='0'; drive(x"301092F3",std_logic_vector(to_unsigned(1,{xlen})),(others=>'0'),"11",21); tick; in_valid<='0'; await_completion("V9 absent CSR did not trap");
+    assert completion_execute_trap_valid='1' and completion_rd_write='0' and completion_illegal_valid='0' and csr_lookup_valid='0' and csr_commit_valid='0' and runtime_protocol_fault='0' report "V9 absent CSR was not a held no-service trap" severity failure; tick; assert completion_valid='1' and completion_rd_write='0' and csr_commit_valid='0' report "V9 absent CSR trap did not hold" severity failure; completion_ready<='1'; tick; completion_ready<='0'; csr_present<='1';
+    drive(x"300092F3",std_logic_vector(to_unsigned(1,{xlen})),(others=>'0'),"00",22); tick; in_valid<='0'; await_completion("V9 privilege CSR did not trap");
+    assert completion_execute_trap_valid='1' and completion_rd_write='0' and completion_illegal_valid='0' and csr_lookup_valid='0' and csr_commit_valid='0' and runtime_protocol_fault='0' report "V9 privilege CSR was not a held no-service trap" severity failure; tick; assert completion_valid='1' and completion_rd_write='0' and csr_commit_valid='0' report "V9 privilege CSR trap did not hold" severity failure; completion_ready<='1'; tick; completion_ready<='0';
+    check_fence(x"0FF0000F","01","0000","1111","1111",30,"V9 FENCE");
+    check_fence(x"0000100F","10","0000","0000","0000",31,"V9 FENCE.I");
+    -- Reset must abandon an active iterative M operation without fabricating a completion.
+    drive(x"027342B3",std_logic_vector(to_unsigned(17,{xlen})),std_logic_vector(to_unsigned(2,{xlen})),"11",46); tick; in_valid<='0'; tick; rst<='1'; tick; rst<='0'; wait for 1 ns;
+    assert runtime_protocol_fault='0' and in_ready='1' and completion_valid='0' and csr_commit_valid='0' report "V9 reset did not abandon active M work" severity failure;
+    -- These are the malformed raw-length and PC-lineage inputs exposed by the public V9 ABI.
+    instruction_length_bytes<="010"; drive(x"023102B3",std_logic_vector(to_unsigned(17,{xlen})),std_logic_vector(to_unsigned(2,{xlen})),"11",47); tick; in_valid<='0'; tick;
+    assert runtime_protocol_fault='1' and in_ready='0' and completion_valid='0' and csr_commit_valid='0' report "V9 malformed instruction length did not fail closed" severity failure;
+    rst<='1'; tick; rst<='0'; instruction_length_bytes<="100"; wait for 1 ns;
+    drive(x"023102B3",std_logic_vector(to_unsigned(17,{xlen})),std_logic_vector(to_unsigned(2,{xlen})),"11",48); fallthrough_pc<=std_logic_vector(to_unsigned(264,{xlen})); tick; in_valid<='0'; tick;
+    assert runtime_protocol_fault='1' and in_ready='0' and completion_valid='0' and csr_commit_valid='0' report "V9 malformed PC lineage did not fail closed" severity failure;
+    rst<='1'; tick; rst<='0'; wait for 1 ns;
+    -- Orphan bus traffic is a global protocol fault; reset is the only recovery.
+    bus_response_id<=x"0000000000000042"; bus_response_valid<='1'; tick; bus_response_valid<='0';
+    assert runtime_protocol_fault='1' and in_ready='0' and completion_valid='0' and csr_commit_valid='0' report "V9 orphan response did not fail closed" severity failure;
+    rst<='1'; tick; rst<='0'; wait for 1 ns;
+    assert runtime_protocol_fault='0' and in_ready='1' and completion_valid='0' report "V9 reset did not recover orphan fault" severity failure;
+    finish;
+  end process;
+end architecture;
+"""
+
+fn simulate_runtime_v9(entity: text, config: CoreConfig, bus: LsuConfig) -> bool:
+    val emitted = compile_strict_riscv_scalar_runtime_pipeline_v9_flat(entity, config, bus)
+    if not emitted.is_success(): return false
+    val workdir = ghdl_unique_workdir(entity); if workdir.is_err(): return false
+    val isolated = workdir.ok().unwrap(); val path = isolated + "/" + entity + ".vhd"
+    var csr_value = "000000A5"
+    if config.xlen == 64: csr_value = "00000000000000A5"
+    var word_case = ""
+    if config.xlen == 64:
+        word_case = """
+    -- RV64 W forms use the independent 32-bit geometry and sign-extend every public result.
+    check_m(x"023102BB",x"00000000FFFFFFF7",x"0000000000000002",x"FFFFFFFFFFFFFFEE",23,"V9 MULW did not sign-extend");
+    check_m(x"027142BB",x"00000000FFFFFFF8",x"0000000000000002",x"FFFFFFFFFFFFFFFC",24,"V9 DIVW did not sign-extend");
+    check_m(x"027152BB",x"DEADBEEFFFFFFFFF",x"0123456700000001",x"FFFFFFFFFFFFFFFF",25,"V9 DIVUW did not sign-extend bit31 with hostile upper operands");
+    check_m(x"027162BB",x"00000000FFFFFFF9",x"0000000000000002",x"FFFFFFFFFFFFFFFF",26,"V9 REMW did not sign-extend");
+    check_m(x"027172BB",x"DEADBEEFFFFFFFFF",x"0123456700000000",x"FFFFFFFFFFFFFFFF",27,"V9 REMUW did not sign-extend bit31 with hostile upper operands");
+    check_m(x"027142BB",x"0000000080000000",x"FFFFFFFFFFFFFFFF",x"FFFFFFFF80000000",28,"V9 DIVW signed-overflow did not remain an architectural result");
+"""
+    if not vhdl_write_file(path, emitted.vhdl + "\n" + runtime_v9_tb(entity, config.xlen, csr_value, word_case)): return false
+    if not ghdl_analyze_in(path, isolated).success: return false
+    if not ghdl_elaborate_in(entity + "_tb", isolated).success: return false
+    ghdl_run_in(entity + "_tb", Some("6us"), isolated).success
+
+describe "runtime scalar pipeline v9 flat clocked GHDL integration":
+    slow_it "proves RV32IM+Zicsr tag-two DIV, tag-three CSR capture and commit, policy no-commit, orphan fault and reset":
+        val available = ghdl_available(); expect(available).to_equal(true)
+        expect(simulate_runtime_v9("runtime_pipeline_v9_flat_clocked_rv32", runtime_v9_rv32(), LsuConfig.rv32_product_default())).to_equal(true)
+
+    slow_it "proves RV64IM+Zicsr W sign extension on the same combined public ABI":
+        val available = ghdl_available(); expect(available).to_equal(true)
+        expect(simulate_runtime_v9("runtime_pipeline_v9_flat_clocked_rv64", runtime_v9_rv64(), LsuConfig.rv64_product_default())).to_equal(true)

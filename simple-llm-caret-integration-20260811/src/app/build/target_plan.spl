@@ -1,0 +1,181 @@
+"""Pure selection and argv planning for manifest build targets."""
+
+use app.build.target_manifest.{BuildManifest, BuildTarget, decode_build_manifest}
+
+pub class BuildTargetPlan:
+    target: BuildTarget
+    staging_artifact: text
+    provenance_path: text
+    staging_launch_metadata: text
+    launch_metadata_path: text
+    args: [text]
+    canonical_args: [text]
+
+pub class ManifestBuildRequest:
+    active: bool
+    validate_only: bool
+    manifest_path: text
+    selector: text
+    error: text
+
+    fn valid(self) -> bool:
+        self.error == ""
+
+pub class ManifestBuildPlan:
+    manifest: BuildManifest
+    plans: [BuildTargetPlan]
+    issues: [text]
+
+    fn valid(self) -> bool:
+        self.issues.len() == 0
+
+pub fn parse_manifest_build_request(args: [text]) -> ManifestBuildRequest:
+    var active = false
+    for arg in args:
+        if (arg == "--manifest" or arg == "--validate-manifest" or
+                arg == "--target" or arg.starts_with("--manifest=") or
+                arg.starts_with("--validate-manifest=") or
+                arg.starts_with("--target=")):
+            active = true
+    if not active:
+        return ManifestBuildRequest(active: false, validate_only: false, manifest_path: "",
+            selector: "", error: "")
+    var manifest_path = ""
+    var validate_only = false
+    var selector = ""
+    var manifest_seen = false
+    var target_seen = false
+    for arg in args:
+        if arg.starts_with("--manifest="):
+            if manifest_seen:
+                return ManifestBuildRequest(active: true, validate_only: false, manifest_path: "",
+                    selector: "", error: "duplicate --manifest")
+            manifest_seen = true
+            manifest_path = arg.substring(11)
+        elif arg.starts_with("--validate-manifest="):
+            if manifest_seen:
+                return ManifestBuildRequest(active: true, validate_only: true,
+                    manifest_path: "", selector: "",
+                    error: "--manifest and --validate-manifest are mutually exclusive")
+            manifest_seen = true
+            validate_only = true
+            manifest_path = arg.substring(20)
+        elif arg.starts_with("--target="):
+            if target_seen:
+                return ManifestBuildRequest(active: true, validate_only: validate_only, manifest_path: "",
+                    selector: "", error: "duplicate --target")
+            target_seen = true
+            selector = arg.substring(9)
+        else:
+            return ManifestBuildRequest(active: true, validate_only: validate_only, manifest_path: "",
+                selector: "", error: "manifest build does not accept positional or native-build arguments: " + arg)
+    if manifest_path == "":
+        return ManifestBuildRequest(active: true, validate_only: validate_only, manifest_path: "",
+            selector: selector, error: "manifest selector requires a non-empty value")
+    if selector == "":
+        return ManifestBuildRequest(active: true, validate_only: validate_only, manifest_path: manifest_path,
+            selector: "", error: "--target requires a non-empty value")
+    if manifest_path.starts_with("/") or manifest_path.contains("\\") or manifest_path.contains(":"):
+        return ManifestBuildRequest(active: true, validate_only: validate_only, manifest_path: manifest_path,
+            selector: selector, error: "--manifest must be a normalized repo-relative path")
+    for part in manifest_path.split("/"):
+        if part == "" or part == "." or part == "..":
+            return ManifestBuildRequest(active: true, validate_only: validate_only, manifest_path: manifest_path,
+                selector: selector, error: "--manifest must be a normalized repo-relative path")
+    ManifestBuildRequest(active: true, validate_only: validate_only, manifest_path: manifest_path,
+        selector: selector, error: "")
+
+pub fn select_build_targets(manifest: BuildManifest,
+        selector: text) -> Result<[BuildTarget], text>:
+    if not manifest.valid(): return Err("invalid build manifest")
+    if selector == "": return Err("missing build target")
+    if selector == "all": return Ok(manifest.targets)
+    for target in manifest.targets:
+        if target.name == selector: return Ok([target])
+    Err("unknown build target: " + selector)
+
+pub fn build_target_runtime_path(target: BuildTarget) -> text:
+    if target.runtime_archive == "": return ""
+    val slash = target.runtime_archive.last_index_of("/")
+    if slash <= 0: return ""
+    target.runtime_archive.substring(0, slash)
+
+pub fn plan_build_target(target: BuildTarget, source_roots: [text],
+        nonce: text) -> BuildTargetPlan:
+    val staging = target.artifact + ".simple-build-stage-" + nonce
+    var prefix: [text] = ["native-build"]
+    for root in source_roots:
+        prefix.push("--source")
+        prefix.push(root)
+    prefix.push("--entry-closure")
+    prefix.push("--target=" + target.target_triple)
+    prefix.push("--backend=" + target.backend)
+    prefix.push("--runtime-bundle=" + target.runtime_bundle)
+    val runtime_path = build_target_runtime_path(target)
+    if runtime_path != "":
+        # Use a separate value token so the native-build invocation is stable
+        # and the exact runtime directory is auditable in receipt argv.
+        prefix.push("--runtime-path")
+        prefix.push(runtime_path)
+    prefix.push("--entry")
+    prefix.push(target.entry)
+    prefix.push("--strip")
+    val args = prefix + ["--output", staging]
+    val canonical_args = prefix + ["--output", target.artifact]
+    BuildTargetPlan(target: target, staging_artifact: staging,
+        provenance_path: staging + ".provenance.sdn", args: args,
+        staging_launch_metadata: staging + ".simple_launch.sdn",
+        launch_metadata_path: target.artifact + ".simple_launch.sdn",
+        canonical_args: canonical_args)
+
+pub fn validate_manifest_build_plan(content: text,
+        selector: text) -> ManifestBuildPlan:
+    val manifest = decode_build_manifest(content)
+    if not manifest.valid():
+        return ManifestBuildPlan(manifest: manifest, plans: [],
+            issues: manifest.issues)
+    val selected = match select_build_targets(manifest, selector):
+        case Err(error):
+            return ManifestBuildPlan(manifest: manifest, plans: [],
+                issues: [error])
+        case Ok(targets): targets
+    var plans: [BuildTargetPlan] = []
+    for target in selected:
+        if target.freshness_roots.len() == 0:
+            return ManifestBuildPlan(manifest: manifest, plans: [],
+                issues: ["build.targets." + target.name +
+                    ".freshness_roots: canonical plans require declared freshness roots"])
+        for source_root in manifest.source_roots:
+            var covered = false
+            for freshness_root in target.freshness_roots:
+                if (freshness_root == source_root or
+                        freshness_root.starts_with(source_root + "/")):
+                    covered = true
+            if not covered:
+                return ManifestBuildPlan(manifest: manifest, plans: [],
+                    issues: ["build.targets." + target.name +
+                        ".freshness_roots: every source root requires a bounded freshness subtree"])
+        plans.push(plan_build_target(target, manifest.source_roots,
+            "validation"))
+    ManifestBuildPlan(manifest: manifest, plans: plans, issues: [])
+
+pub fn render_manifest_build_plan(plan: ManifestBuildPlan) -> text:
+    if not plan.valid(): return ""
+    var rows: [text] = []
+    for item in plan.plans:
+        val prefix = "target." + item.target.name + "."
+        rows.push("target=" + item.target.name)
+        rows.push(prefix + "entry=" + item.target.entry)
+        rows.push(prefix + "artifact=" + item.target.artifact)
+        rows.push(prefix + "target_triple=" + item.target.target_triple)
+        rows.push(prefix + "backend=" + item.target.backend)
+        rows.push(prefix + "runtime_bundle=" + item.target.runtime_bundle)
+        if item.target.runtime_archive != "":
+            rows.push(prefix + "runtime_archive=" + item.target.runtime_archive)
+        rows.push(prefix + "abi=" + item.target.abi)
+    rows.join("\n") + "\n"
+
+export BuildTargetPlan, ManifestBuildRequest, parse_manifest_build_request
+export ManifestBuildPlan, validate_manifest_build_plan
+export render_manifest_build_plan
+export select_build_targets, plan_build_target, build_target_runtime_path

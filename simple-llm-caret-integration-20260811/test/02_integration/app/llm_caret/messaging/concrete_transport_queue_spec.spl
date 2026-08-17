@@ -1,0 +1,69 @@
+# @req REQ-LLM-MSG-003 REQ-LLM-MSG-016 REQ-LLM-MSG-017
+# @nfr NFR-LLM-MSG-001 NFR-LLM-MSG-002 NFR-LLM-MSG-004 NFR-LLM-MSG-005 NFR-LLM-MSG-006 NFR-LLM-MSG-009
+"""First-wave concrete adapters enter the durable credential-safe outbox."""
+
+use std.spec.*
+use app.io.mod.{current_time_ms}
+use app.llm_caret.messaging.composition.{MessagingRuntime}
+use app.llm_caret.messaging.domain.model.{RoomKind, MessageOrigin}
+use app.llm_caret.messaging.adapter.chat.matrix.{MatrixChatTransport}
+use app.llm_caret.messaging.adapter.chat.slack.{SlackChatTransport}
+use app.llm_caret.messaging.adapter.chat.teams.{TeamsChatTransport}
+use app.llm_caret.messaging.adapter.chat.telegram.{TelegramChatTransport}
+
+describe "LLM Caret concrete transport queue composition":
+    it "queues Matrix Slack Teams and Telegram requests without persisting credentials":
+        var runtime = MessagingRuntime.memory()
+        expect(runtime.create_canonical_room("delivery-room", "workspace", RoomKind.Channel,
+            "Delivery", "", "public", "room", "human-1", 1).accepted).to_equal(true)
+        expect(runtime.send_message("delivery-message", "workspace", "delivery-room",
+            "human-1", "", MessageOrigin.Human, "ship this", "", "delivery-correlation",
+            "", 0, 2, "delivery-message-key").ok).to_equal(true)
+        val message = runtime.store.message("delivery-message")
+
+        expect(runtime.bind_transport("matrix-binding", "delivery-room", "matrix",
+            "!room:example.org", "full", "2").accepted).to_equal(true)
+        var matrix = MatrixChatTransport.with_store(runtime.store,
+            "https://matrix.example.org", "matrix-secret", "secret://matrix/test")
+        expect(matrix.bind_room("matrix-binding", "delivery-room", "!room:example.org")).to_equal("binding_attached")
+        expect(matrix.send("matrix-binding", message, "matrix-delivery-key")).to_equal(
+            "queued:matrix:matrix-binding:matrix-delivery-key")
+        expect(matrix.send("matrix-binding", message, "matrix-delivery-key")).to_equal(
+            "queued_duplicate:matrix:matrix-binding:matrix-delivery-key")
+
+        expect(runtime.bind_transport("slack-binding", "delivery-room", "slack",
+            "C123", "full", "2").accepted).to_equal(true)
+        var slack = SlackChatTransport.with_store(runtime.store,
+            "slack-secret", "secret://slack/test")
+        expect(slack.bind_room("slack-binding", "delivery-room", "C123")).to_equal("binding_attached")
+        expect(slack.send("slack-binding", message, "slack-delivery-key")).to_equal(
+            "queued:slack:slack-binding:slack-delivery-key")
+
+        expect(runtime.bind_transport("teams-binding", "delivery-room", "teams",
+            "conversation-1", "full", "2").accepted).to_equal(true)
+        var teams = TeamsChatTransport.with_store(runtime.store,
+            "teams-secret", "secret://teams/test")
+        expect(teams.bind_conversation("teams-binding", "delivery-room",
+            "https://teams.example.org", "conversation-1")).to_equal("binding_attached")
+        expect(teams.send("teams-binding", message, "teams-delivery-key")).to_equal(
+            "queued:teams:teams-binding:teams-delivery-key")
+
+        expect(runtime.bind_transport("telegram-binding", "delivery-room", "telegram",
+            "1234", "full", "2").accepted).to_equal(true)
+        var telegram = TelegramChatTransport.with_store(runtime.store,
+            "telegram-secret", "secret://telegram/test")
+        expect(telegram.bind_chat("telegram-binding", "delivery-room", "1234")).to_equal("binding_attached")
+        expect(telegram.send("telegram-binding", message, "telegram-delivery-key")).to_equal(
+            "queued:telegram:telegram-binding:telegram-delivery-key")
+
+        val queued = runtime.store.queued_transport_requests(current_time_ms(), 10)
+        expect(queued.len()).to_equal(4)
+        for request in queued:
+            val persisted = request.url_template + request.headers.join("|") + request.body
+            expect(persisted.contains("matrix-secret")).to_equal(false)
+            expect(persisted.contains("slack-secret")).to_equal(false)
+            expect(persisted.contains("teams-secret")).to_equal(false)
+            expect(persisted.contains("telegram-secret")).to_equal(false)
+        expect(runtime.close()).to_equal(true)
+        expect(matrix.send("matrix-binding", message, "matrix-after-close-key")).to_equal(
+            "store_unavailable")

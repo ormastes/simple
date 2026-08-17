@@ -1,0 +1,229 @@
+use std.spec.*
+use app.build.target_manifest.{decode_build_manifest}
+
+val VALID_BUILD_MANIFEST = """
+build:
+  schema: simple.build/v1
+  source_roots: [src/app, src/lib]
+  targets:
+    server:
+      entry: src/app/demo/server_worker.spl
+      artifact: build/demo/server
+      target_triple: x86_64-unknown-linux-gnu
+      backend: cranelift
+      runtime_bundle: simple-core
+      abi: gnu
+      dependencies: [src/lib/demo/store.spl]
+      freshness_roots: [src/app/demo]
+      health_args: [--probe]
+    database:
+      entry: src/app/demo/database_worker.spl
+      artifact: build/demo/database
+      target_triple: x86_64-unknown-linux-gnu
+      backend: cranelift
+      runtime_bundle: simple-core
+      abi: gnu
+      dependencies: [src/lib/demo/store.spl]
+      freshness_roots: [src/app/demo]
+"""
+
+describe "declarative build manifest decoder":
+    it "decodes targets in deterministic lexical order":
+        val manifest = decode_build_manifest(VALID_BUILD_MANIFEST)
+        expect(manifest.valid()).to_equal(true)
+        expect(manifest.schema).to_equal("simple.build/v1")
+        expect(manifest.targets.len()).to_equal(2)
+        expect(manifest.targets[0].name).to_equal("database")
+        expect(manifest.targets[1].name).to_equal("server")
+        expect(manifest.targets[1].health_args).to_equal(["--probe"])
+        expect(manifest.targets[1].freshness_roots).to_equal(["src/app/demo"])
+        expect(manifest.targets[1].target_triple).to_equal("x86_64-unknown-linux-gnu")
+        expect(manifest.targets[1].abi).to_equal("gnu")
+        # v1 remains portable: it does not carry a machine-local runtime
+        # archive and therefore leaves this v2-only field empty.
+        expect(manifest.targets[1].runtime_archive).to_equal("")
+
+    it "accepts a build-contained Core-C runtime archive only in v2":
+        val manifest = decode_build_manifest("""
+build:
+  schema: simple.build/v2
+  source_roots: [src/app]
+  targets:
+    capsule:
+      entry: src/app/capsule.spl
+      artifact: build/capsule/worker
+      target_triple: x86_64-unknown-linux-gnu
+      backend: cranelift
+      runtime_bundle: core-c-bootstrap
+      runtime_archive: build/capsule/runtime/libsimple_runtime.a
+      abi: gnu
+      dependencies: []
+""")
+        expect(manifest.valid()).to_equal(true)
+        expect(manifest.targets[0].runtime_archive).to_equal(
+            "build/capsule/runtime/libsimple_runtime.a")
+
+    it "rejects runtime archives outside v2 Core-C build containment":
+        val manifest = decode_build_manifest("""
+build:
+  schema: simple.build/v2
+  source_roots: [src/app]
+  targets:
+    portable:
+      entry: src/app/portable.spl
+      artifact: build/portable
+      target_triple: x86_64-unknown-linux-gnu
+      backend: cranelift
+      runtime_bundle: simple-core
+      runtime_archive: ../runtime.a
+      abi: gnu
+      dependencies: []
+""")
+        expect(manifest.valid()).to_equal(false)
+        val issues = manifest.issues.join("\n")
+        expect(issues).to_contain("valid only for core-c-bootstrap")
+        expect(issues).to_contain("build-contained .a path")
+
+    it "rejects a v2 target that omits its exact Core-C archive":
+        val manifest = decode_build_manifest("""
+build:
+  schema: simple.build/v2
+  source_roots: [src/app]
+  targets:
+    capsule:
+      entry: src/app/capsule.spl
+      artifact: build/capsule/worker
+      target_triple: x86_64-unknown-linux-gnu
+      backend: cranelift
+      runtime_bundle: core-c-bootstrap
+      abi: gnu
+      dependencies: []
+""")
+        expect(manifest.valid()).to_equal(false)
+        expect(manifest.issues.join("\n")).to_contain(
+            "requires an explicit core-c-bootstrap runtime archive")
+
+    it "rejects duplicate SDN keys instead of accepting last-wins parsing":
+        val manifest = decode_build_manifest("""
+build:
+  schema: simple.build/v1
+  schema: simple.build/v2
+  source_roots: [src/app]
+  targets:
+    demo: {entry: src/app/demo.spl, artifact: build/demo, dependencies: []}
+""")
+        expect(manifest.valid()).to_equal(false)
+        expect(manifest.issues.join("\n")).to_contain("duplicate")
+
+    it "rejects unknown target fields and unsupported schema":
+        val manifest = decode_build_manifest("""
+build:
+  schema: simple.build/v2
+  source_roots: [src/app]
+  targets:
+    demo: {entry: src/app/demo.spl, artifact: build/demo, dependencies: [], backend: rust}
+""")
+        expect(manifest.valid()).to_equal(false)
+        expect(manifest.issues.join("\n")).to_contain("unsupported schema")
+        expect(manifest.issues.join("\n")).to_contain("unknown target field")
+
+    it "rejects unknown standalone manifest root fields":
+        val manifest = decode_build_manifest(VALID_BUILD_MANIFEST +
+            "integration:\n  name: unrelated\n")
+        expect(manifest.valid()).to_equal(false)
+        expect(manifest.issues.join("\n")).to_contain(
+            "unknown build manifest root field")
+
+    it "rejects traversal absolute and out-of-root paths":
+        val manifest = decode_build_manifest("""
+build:
+  schema: simple.build/v1
+  source_roots: [src/app]
+  targets:
+    escape:
+      entry: src/lib/escape.spl
+      artifact: ../escape
+      dependencies: [/tmp/dependency.spl]
+""")
+        expect(manifest.valid()).to_equal(false)
+        val issues = manifest.issues.join("\n")
+        expect(issues).to_contain("beneath a declared source root")
+        expect(issues).to_contain("beneath build/")
+        expect(issues).to_contain("repo-relative paths")
+
+    it "rejects duplicate artifact ownership across targets":
+        val manifest = decode_build_manifest("""
+build:
+  schema: simple.build/v1
+  source_roots: [src/app]
+  targets:
+    one: {entry: src/app/one.spl, artifact: build/shared, dependencies: []}
+    two: {entry: src/app/two.spl, artifact: build/shared, dependencies: []}
+""")
+        expect(manifest.valid()).to_equal(false)
+        expect(manifest.issues.join("\n")).to_contain("duplicate target artifact")
+
+    it "rejects freshness roots outside declared source roots":
+        val manifest = decode_build_manifest("""
+build:
+  schema: simple.build/v1
+  source_roots: [src/app]
+  targets:
+    one:
+      entry: src/app/one.spl
+      artifact: build/one
+      dependencies: []
+      freshness_roots: [src/lib]
+""")
+        expect(manifest.valid()).to_equal(false)
+        expect(manifest.issues.join("\n")).to_contain(
+            "freshness roots must be beneath a declared source root")
+
+    it "rejects implicit backend runtime and mismatched ABI identity":
+        val manifest = decode_build_manifest("""
+build:
+  schema: simple.build/v1
+  source_roots: [src/app]
+  targets:
+    one:
+      entry: src/app/one.spl
+      artifact: build/one
+      target_triple: x86_64-unknown-linux-gnu
+      backend: auto
+      runtime_bundle: auto
+      abi: msvc
+      dependencies: []
+""")
+        expect(manifest.valid()).to_equal(false)
+        val issues = manifest.issues.join("\n")
+        expect(issues).to_contain("backend must be llvm or cranelift")
+        expect(issues).to_contain("runtime bundle must be simple-core or core-c-bootstrap")
+        expect(issues).to_contain("match the target triple suffix")
+
+    it "reserves launch metadata suffixes and rejects cross-target sidecar ownership":
+        val manifest = decode_build_manifest("""
+build:
+  schema: simple.build/v1
+  source_roots: [src/app]
+  targets:
+    base:
+      entry: src/app/base.spl
+      artifact: build/base
+      target_triple: x86_64-unknown-linux-gnu
+      backend: cranelift
+      runtime_bundle: simple-core
+      abi: gnu
+      dependencies: []
+    collision:
+      entry: src/app/collision.spl
+      artifact: build/base.simple_launch.sdn
+      target_triple: x86_64-unknown-linux-gnu
+      backend: cranelift
+      runtime_bundle: simple-core
+      abi: gnu
+      dependencies: []
+""")
+        expect(manifest.valid()).to_equal(false)
+        val issues = manifest.issues.join("\n")
+        expect(issues).to_contain("reserved build sidecar")
+        expect(issues).to_contain("launch metadata sidecar")

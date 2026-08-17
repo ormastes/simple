@@ -1,0 +1,244 @@
+# codex-system-test
+# @tag:system
+# @req REQ-EVS-011
+# @cover src/lib/common/spec/scenario_protocol_evidence.spl 80%
+"""
+# TLS Record Protocol Evidence Table
+
+## Overview
+
+Uses the production TLS 1.2 record layout owned by
+`src/os/tls12/tls12_record.spl`: content type, protocol version, big-endian
+fragment length, then fragment bytes. Exact wire bytes remain the primary
+oracle; typed rows make the important fields reviewable.
+
+**Requirements:** doc/02_requirements/feature/evidence_showcase.md
+**Plan:** doc/03_plan/sys_test/evidence_showcase.md
+**Design:** doc/05_design/evidence_showcase.md
+**Research:** doc/01_research/local/evidence_showcase.md
+
+## Examples
+
+Run this spec and compare the exact encoded TLS record bytes with the typed
+content-type, version, length, and payload rows. Invalid masks, overlaps, and
+out-of-range fields must fail validation.
+"""
+
+use std.spec.*
+use std.io.{
+    dir_create_all, file_atomic_write, file_hash_sha256, file_size_raw,
+    host_arch, host_os, time_now_unix_micros
+}
+use std.common.spec.scenario_evidence.{
+    ScenarioCaptureKind, ScenarioEvidenceArtifact
+}
+use std.common.spec.scenario_motion_evidence.{ScenarioArtifactIntegrity}
+use std.common.spec.scenario_protocol_evidence.{
+    ScenarioProtocolFieldEvidence,
+    scenario_protocol_field_evidence_validate,
+    scenario_protocol_evidence_validate
+}
+use os.tls12.tls12_record.{TlsRecord12, encode_record}
+use std.spec.scenario_evidence_manifest.{ScenarioEvidenceManifest}
+use std.spec.scenario_evidence_manifest_io.{
+    retain_scenario_evidence_manifest, write_scenario_evidence_manifest
+}
+
+val SPEC_PATH = "test/03_system/app/testing/feature/protocol_evidence_table_spec.spl"
+val MANUAL_PATH = "doc/06_spec/03_system/app/testing/feature/protocol_evidence_table_spec.md"
+val ARTIFACT_DIR = (
+    "doc/06_spec/image/03_system/app/testing/feature/" +
+    "protocol_evidence_table"
+)
+val RAW_PATH = ARTIFACT_DIR + "/tls-record.hex.txt"
+val TEST_COMMAND = "bin/simple test " + SPEC_PATH + " --mode=interpreter"
+
+fn protocol_field(
+    byte_offset: i64,
+    byte_length: i64,
+    bit_offset: i64,
+    bit_width: i64,
+    mask: text,
+    name: text,
+    actual: text,
+    expected: text,
+    importance: text
+) -> ScenarioProtocolFieldEvidence:
+    ScenarioProtocolFieldEvidence(
+        byte_offset: byte_offset,
+        byte_length: byte_length,
+        bit_offset: bit_offset,
+        bit_width: bit_width,
+        mask: mask,
+        endianness: "network",
+        name: name,
+        actual: actual,
+        expected: expected,
+        status: "pass",
+        importance: importance,
+        note: "TLS record header raw-byte range"
+    )
+
+describe "REQ-EVS-011: typed TLS protocol evidence":
+    it "should keep exact TLS wire bytes primary and publish typed field rows":
+        val start_time = time_now_unix_micros() / 1000
+
+        step("Capture")
+        val wire = encode_record(TlsRecord12(
+            content_type: 0x17u8,
+            version_major: 0x03u8,
+            version_minor: 0x03u8,
+            fragment: [0xCAu8, 0xFEu8]
+        ))
+        expect(wire).to_equal([
+            0x17u8, 0x03u8, 0x03u8, 0x00u8, 0x02u8, 0xCAu8, 0xFEu8
+        ])
+
+        step("Verify")
+        val fields = [
+            protocol_field(0, 1, 0, 8, "0xff", "content_type", "0x17", "0x17", "critical"),
+            protocol_field(1, 2, 0, 16, "0xffff", "legacy_version", "0x0303", "0x0303", "important"),
+            protocol_field(3, 2, 0, 16, "0xffff", "fragment_length", "2", "2", "supporting")
+        ]
+        val result = scenario_protocol_evidence_validate(fields)
+        expect(result).to_equal("ok")
+
+        step("Render")
+        expect(fields[0].name).to_equal("content_type")
+        expect(fields[0].importance).to_equal("critical")
+        expect(fields[1].importance).to_equal("important")
+        expect(fields[2].endianness).to_equal("network")
+
+        expect(fields.len()).to_equal(3)
+        val numbered_raw = "L1 0000: 17 03 03 00 02 ca fe\n"
+        expect(dir_create_all(ARTIFACT_DIR)).to_equal(true)
+        expect(file_atomic_write(RAW_PATH, numbered_raw)).to_equal(true)
+        expect(file_size_raw(RAW_PATH)).to_equal(numbered_raw.len())
+        val raw_checksum = file_hash_sha256(RAW_PATH)
+        expect(raw_checksum.len()).to_equal(64)
+
+        step("Publish")
+        val source_digest = file_hash_sha256(SPEC_PATH)
+        expect(source_digest.len()).to_equal(64)
+        val artifact = ScenarioEvidenceArtifact(
+            kind: ScenarioCaptureKind.protocol,
+            title: "Numbered TLS 1.2 record bytes",
+            mime: "text/plain",
+            path: RAW_PATH,
+            body: numbered_raw,
+            scenario_id: "tls12-record-fields",
+            step_id: "Render",
+            redacted: false
+        )
+        val integrity = ScenarioArtifactIntegrity(
+            path: RAW_PATH,
+            format: "txt",
+            mime: "text/plain",
+            width: 0,
+            height: 0,
+            byte_size: file_size_raw(RAW_PATH),
+            checksum: raw_checksum,
+            producer: SPEC_PATH,
+            producer_version: source_digest,
+            source_revision: source_digest,
+            host: host_os() + "-" + host_arch(),
+            target: "host-interpreter",
+            capture_ready: true,
+            baseline_identity: "",
+            comparison_result: "not-compared",
+            required: true
+        )
+        val manifest = ScenarioEvidenceManifest(
+                schema_major: 1,
+                schema_minor: 0,
+                feature_id: "protocol.crypto.fields",
+                requirement_ids: ["REQ-EVS-011"],
+                spec_path: SPEC_PATH,
+                generated_manual_path: MANUAL_PATH,
+                scenario_id: "tls12-record-fields",
+                step_id: "Publish",
+                required: true,
+                result: "pass",
+                showcase_status: "live-pass",
+                reason: "",
+                source_revision: "source-sha256:" + source_digest,
+                source_digest: "sha256:" + source_digest,
+                command: TEST_COMMAND,
+                producer: SPEC_PATH,
+                producer_version: source_digest,
+                host: integrity.host,
+                target: integrity.target,
+                backend: "interpreter",
+                start_time: start_time,
+                duration_ms: time_now_unix_micros() / 1000 - start_time,
+                artifacts: [artifact],
+                artifact_integrity: [integrity],
+                text_results: [],
+                motion_evidence: [],
+                protocol_fields: fields,
+                html_checks: [],
+                blocker_prerequisite: "",
+                resume_command: TEST_COMMAND,
+                owner: "spipe",
+                final_reviewer: "verification"
+        )
+        val publication = write_scenario_evidence_manifest(manifest).unwrap()
+        expect(publication).to_equal(
+            "build/test-artifacts/03_system/app/testing/feature/" +
+            "protocol_evidence_table/evidence.sdn"
+        )
+        expect(retain_scenario_evidence_manifest(manifest).unwrap()).to_equal(
+            "doc/06_spec/evidence/03_system/app/testing/feature/" +
+            "protocol_evidence_table/evidence.sdn"
+        )
+
+    it "should reject overlapping typed field rows":
+        step("Capture")
+        val fields = [
+            protocol_field(1, 2, 0, 16, "0xffff", "legacy_version", "0x0303", "0x0303", "critical"),
+            protocol_field(2, 1, 0, 8, "0xff", "version_minor", "0x03", "0x03", "important")
+        ]
+
+        step("Verify")
+        val result = scenario_protocol_evidence_validate(fields)
+        expect(result).to_equal("overlapping_fields")
+
+        step("Render")
+        expect(fields[0].byte_length).to_equal(2)
+
+        step("Publish")
+        expect(fields[1].byte_offset).to_equal(2)
+
+    it "should reject a bit field outside its declared byte range":
+        step("Capture")
+        val field = protocol_field(
+            0, 1, 7, 2, "0x03", "content_type_overflow",
+            "0x03", "0x03", "critical"
+        )
+
+        step("Verify")
+        val result = scenario_protocol_field_evidence_validate(field)
+        expect(result).to_equal("invalid_bit_width")
+
+        step("Render")
+        expect(field.bit_offset).to_equal(7)
+
+        step("Publish")
+        expect(field.bit_width).to_equal(2)
+
+    it "should reject mask metadata outside the required hexadecimal form":
+        step("Capture")
+        val field = protocol_field(
+            0, 1, 0, 8, "0b11111111", "content_type",
+            "0x17", "0x17", "important"
+        )
+
+        step("Verify")
+        val result = scenario_protocol_field_evidence_validate(field)
+        expect(result).to_equal("invalid_mask")
+
+        step("Render")
+        expect(field.mask).to_equal("0b11111111")
+
+        step("Publish")
+        expect(field.importance).to_equal("important")

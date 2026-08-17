@@ -1,0 +1,98 @@
+use std.spec.*
+use app.build.target_executor.{build_health_command, build_health_exit_valid,
+    build_restore_results_valid, build_backup_cleanup_results_valid,
+    build_transaction_nonce, build_scope_runtime_environment,
+    build_restore_runtime_environment}
+use app.build.target_manifest.{BuildTarget}
+use app.build.target_plan.{plan_build_target}
+use app.build.artifact_provenance.{BuildTargetInputHashes,
+    build_target_input_hashes_equal}
+use std.nogc_sync_mut.env.{env_get, env_has, env_set, env_unset}
+
+describe "manifest build executor fail-closed policy seams":
+    it "requires successful staged health when health args are declared":
+        expect(build_health_exit_valid([], 9)).to_equal(true)
+        expect(build_health_exit_valid(["--probe"], 0)).to_equal(true)
+        expect(build_health_exit_valid(["--probe"], 1)).to_equal(false)
+        val target = BuildTarget(name: "worker", entry: "src/app/worker.spl",
+            artifact: "build/worker", target_triple: "x86_64-unknown-linux-gnu",
+            backend: "cranelift", runtime_bundle: "simple-core", abi: "gnu",
+            dependencies: [], freshness_roots: [],
+            health_args: ["--probe"])
+        val health = build_health_command(plan_build_target(target,
+            ["src/app"], "nonce"))
+        expect(health.command).to_equal("build/worker.simple-build-stage-nonce")
+        expect(health.args).to_equal(["--probe"])
+
+    it "fails rollback if any requested restore rename fails":
+        expect(build_restore_results_valid([])).to_equal(true)
+        expect(build_restore_results_valid([true, true])).to_equal(true)
+        expect(build_restore_results_valid([true, false, true])).to_equal(false)
+        # The same aggregate includes deletes of newly published paths and
+        # renames of old backups; either kind of failure is rollback failure.
+        expect(build_restore_results_valid([false])).to_equal(false)
+
+    it "distinguishes retained recovery backups from successful cleanup":
+        expect(build_backup_cleanup_results_valid([])).to_equal(true)
+        expect(build_backup_cleanup_results_valid([true, true])).to_equal(true)
+        expect(build_backup_cleanup_results_valid([true, false])).to_equal(false)
+
+    it "detects dependency freshness-path and freshness-hash drift":
+        val original = BuildTargetInputHashes(dependency_hashes: ["a"],
+            freshness_paths: ["src/app/demo/a.spl"], freshness_hashes: ["b"])
+        expect(build_target_input_hashes_equal(original,
+            BuildTargetInputHashes(dependency_hashes: ["a"],
+                freshness_paths: ["src/app/demo/a.spl"],
+                freshness_hashes: ["b"]))).to_equal(true)
+        expect(build_target_input_hashes_equal(original,
+            BuildTargetInputHashes(dependency_hashes: ["changed"],
+                freshness_paths: ["src/app/demo/a.spl"],
+                freshness_hashes: ["b"]))).to_equal(false)
+
+    it "includes the exact Core-C archive binding in input-drift equality":
+        val original = BuildTargetInputHashes(dependency_hashes: ["a"],
+            freshness_paths: [], freshness_hashes: [],
+            runtime_archive_hash: "archive-a")
+        expect(build_target_input_hashes_equal(original,
+            BuildTargetInputHashes(dependency_hashes: ["a"],
+                freshness_paths: [], freshness_hashes: [],
+                runtime_archive_hash: "archive-b"))).to_equal(false)
+        expect(build_target_input_hashes_equal(original,
+            BuildTargetInputHashes(dependency_hashes: ["a"],
+                freshness_paths: ["src/app/demo/new.spl"],
+                freshness_hashes: ["b"]))).to_equal(false)
+
+    it "clears then restores an unset SIMPLE_LINK_OBJECTS for v1":
+        val _ = env_unset("SIMPLE_LINK_OBJECTS")
+        val target = BuildTarget(name: "v1", entry: "src/app/worker.spl",
+            artifact: "build/worker", target_triple: "x86_64-unknown-linux-gnu",
+            backend: "cranelift", runtime_bundle: "simple-core", abi: "gnu",
+            dependencies: [], freshness_roots: [], health_args: [])
+        val scope = build_scope_runtime_environment(plan_build_target(target,
+            ["src/app"], "v1")).unwrap()
+        expect(env_has("SIMPLE_LINK_OBJECTS")).to_equal(false)
+        expect(build_restore_runtime_environment(scope)).to_equal(true)
+        expect(env_has("SIMPLE_LINK_OBJECTS")).to_equal(false)
+
+    it "pins then restores the ambient SIMPLE_LINK_OBJECTS for v2":
+        val _ = env_set("SIMPLE_LINK_OBJECTS", "ambient-provider.a:other-provider.a")
+        val archive = "build/capsule/runtime/libsimple_runtime.a"
+        val target = BuildTarget(name: "v2", entry: "src/app/worker.spl",
+            artifact: "build/worker", target_triple: "x86_64-unknown-linux-gnu",
+            backend: "cranelift", runtime_bundle: "core-c-bootstrap",
+            runtime_archive: archive, abi: "gnu", dependencies: [],
+            freshness_roots: [], health_args: [])
+        val scope = build_scope_runtime_environment(plan_build_target(target,
+            ["src/app"], "v2")).unwrap()
+        expect(env_get("SIMPLE_LINK_OBJECTS") ?? "").to_equal(archive)
+        expect(build_restore_runtime_environment(scope)).to_equal(true)
+        expect(env_get("SIMPLE_LINK_OBJECTS") ?? "").to_equal(
+            "ambient-provider.a:other-provider.a")
+        val _ = env_unset("SIMPLE_LINK_OBJECTS")
+
+    it "changes transaction staging identity beyond the process id":
+        val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        expect(build_transaction_nonce(7, 100, digest)).to_equal(
+            "7-100-aaaaaaaaaaaa")
+        expect(build_transaction_nonce(7, 100, digest) ==
+            build_transaction_nonce(7, 101, digest)).to_equal(false)

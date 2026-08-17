@@ -1,0 +1,88 @@
+use std.spec.*
+use compiler.mir.hwir.types.{CoreConfig, HwClockDomain, HwCombOp, HwCostModel,
+    HwModule, HwModuleDef, HwNodeId, HwOrigin, HwPort}
+use compiler.mir.hwir.combinational_composition.{HwCombBinding,
+    HwCombChildInstance, HwCombCompositionDef, strict_comb_composition}
+use compiler.backend.backend.combinational_composition_to_vhdl.{
+    render_strict_comb_composition_vhdl}
+
+fn tiny_child(name: text, origin: text) -> HwModuleDef:
+    val config = CoreConfig.rv32()
+    val ports = [HwPort.input("input_value", "Bits", 32),
+        HwPort.output("output_value", "Bits", 32)]
+    HwModuleDef(summary: HwModule(name: name, profile: config.profile,
+            port_count: 2, signal_count: 0, register_count: 0,
+            memory_count: 0, comb_op_count: 1, clock_domain_count: 1,
+            fallback_function: "", cost: HwCostModel.empty()),
+        config: config, node_id: HwNodeId.module_root(name),
+        origins: [HwOrigin(node_id: HwNodeId.child(name, "origin"),
+            source_name: origin)], ports: ports, signals: [], constants: [],
+        comb_ops: [HwCombOp.unary("passthrough", "output_value", "input_value", 32)],
+        compare_ops: [], select_ops: [],
+        clock_domains: [HwClockDomain.default_domain()])
+
+fn two_child_composition(first: HwModuleDef,
+    second: HwModuleDef) -> HwCombCompositionDef:
+    strict_comb_composition("combined_children", CoreConfig.rv32(),
+        [HwPort.input("first_input", "Bits", 32),
+            HwPort.input("second_input", "Bits", 32),
+            HwPort.output("first_output", "Bits", 32),
+            HwPort.output("second_output", "Bits", 32)],
+        [HwCombChildInstance(owner: "first", module: first),
+            HwCombChildInstance(owner: "second", module: second)],
+        [HwCombBinding(source_owner: "composition", source_port: "first_input",
+                destination_owner: "first", destination_port: "input_value", bit_width: 32),
+            HwCombBinding(source_owner: "composition", source_port: "second_input",
+                destination_owner: "second", destination_port: "input_value", bit_width: 32),
+            HwCombBinding(source_owner: "first", source_port: "output_value",
+                destination_owner: "composition", destination_port: "first_output", bit_width: 32),
+            HwCombBinding(source_owner: "second", source_port: "output_value",
+                destination_owner: "composition", destination_port: "second_output", bit_width: 32)]).unwrap()
+
+describe "strict combinational composition VHDL emission":
+    it "emits canonical sources assignments instances and exact hashes":
+        val first_child = tiny_child("first_passthrough", "first")
+        val second_child = tiny_child("second_passthrough", "second")
+        val composition = two_child_composition(first_child, second_child)
+        val result = render_strict_comb_composition_vhdl(composition)
+        expect(result.is_success()).to_be(true)
+        expect(result.route).to_equal("hwir-gen2-combinational-composition-v1")
+        expect(result.hwir_graph_sha256).to_equal(composition.structural_sha256())
+        expect(result.vhdl).to_contain("-- simple-hwir child-first=" + first_child.structural_sha256())
+        expect(result.vhdl).to_contain("-- simple-hwir child-second=" + second_child.structural_sha256())
+        expect(result.vhdl).to_contain("signal source_o5_first_p12_output_value")
+        expect(result.vhdl).to_contain("first_output <= source_o5_first_p12_output_value;")
+        expect(result.vhdl).to_contain("first: entity work.first_passthrough")
+        expect(result.vhdl).to_contain("second: entity work.second_passthrough")
+
+    it "preserves the composition entity-identity rejection":
+        val first = tiny_child("colliding_child", "first")
+        val second = tiny_child("colliding_child", "second")
+        val valid = two_child_composition(
+            tiny_child("first_valid_child", "first"),
+            tiny_child("second_valid_child", "second"))
+        val composition = HwCombCompositionDef(node_id: valid.node_id,
+            entity_name: valid.entity_name, config: valid.config,
+            top_ports: valid.top_ports,
+            children: [HwCombChildInstance(owner: "first", module: first),
+                HwCombChildInstance(owner: "second", module: second)],
+            bindings: valid.bindings)
+        val result = render_strict_comb_composition_vhdl(composition)
+        expect(result.is_success()).to_be(false)
+        expect(result.route).to_equal("hwir-gen2-combinational-composition-v1")
+        expect(result.vhdl).to_equal("")
+        expect(result.diagnostic).to_equal(
+            "HWIR-E-COMB-COMPOSITION-ENTITY: child entities require unique identities")
+
+    it "preserves the exact composition diagnostic before rendering":
+        val valid = two_child_composition(
+            tiny_child("diagnostic_first", "first"),
+            tiny_child("diagnostic_second", "second"))
+        val invalid = HwCombCompositionDef(node_id: valid.node_id,
+            entity_name: valid.entity_name, config: valid.config,
+            top_ports: valid.top_ports, children: valid.children,
+            bindings: [valid.bindings[0]])
+        val result = render_strict_comb_composition_vhdl(invalid)
+        expect(result.is_success()).to_be(false)
+        expect(result.diagnostic).to_equal(
+            "HWIR-E-COMB-COMPOSITION-INPUT: every child input requires one driver")
