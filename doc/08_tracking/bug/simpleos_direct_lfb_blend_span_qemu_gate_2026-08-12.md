@@ -20,6 +20,35 @@ run must provide a freshly built kernel ELF, reach the desktop serial marker,
 capture scanout, and publish viewport/backend/revision/readback/p50/p95/RSS/
 fallback/checksum fields. Static disassembly is not sufficient.
 
-The static SIMD helper script also currently invokes GNU `objdump` with the
-unsupported option `--disassemble-symbols`; that tooling defect is independent
-of the rendering implementation and must not be reported as a kernel failure.
+## 2026-08-17 re-verification — objdump claim WRONG, a real regex defect found and FIXED
+
+The "GNU `objdump` doesn't support `--disassemble-symbols`" note above is
+incorrect as written: `scripts/check/check-simpleos-qemu-engine2d-simd-kernels.shs:9`
+defaults to `OBJDUMP:-llvm-objdump`, and llvm-objdump supports that option.
+Both `--disassemble-symbols` invocations succeed here (traced with `sh -x`).
+
+The script DID fail (exit 1), for a different, real reason: line 34 asserted
+the NEON store with `grep -Eq '[[:space:]]st1[[:space:]]+\\{'`. Inside single
+quotes `\\{` is a literal backslash then `{` — a malformed ERE repeat. It can
+never match the actual disassembly `st1\t{ v0.4s }, [x0]`:
+
+```
+ugrep: error: error at position 33
+(?m)[[:space:]]st1[[:space:]]+\\{
+               invalid repeat___/
+old=2   (never matched)
+new=0   (matches after fixing to \{)
+```
+
+So the NEON-store half of this static gate was **never actually asserting**,
+and `set -eu` turned it into a blanket failure of the whole gate. Fixed to
+`\{`. The gate now reports:
+
+`PASS: ARM64 NEON and x86_64 SSE2 fill kernels plus receipt symbols` (exit 0)
+
+The boot-evidence blocker above is UNCHANGED and still open: this is a static
+prerequisite gate only; no kernel ELF, QMP screenshot, checksum, or 8K timing
+has been observed. Spec-test note: this defect lives in a `.shs` host gate that
+shells out to clang/llvm-objdump on cross-target objects, so it is not
+expressible as an SSpec `.spl` example; the gate script itself is the
+regression test and it is now genuinely red-to-green.
