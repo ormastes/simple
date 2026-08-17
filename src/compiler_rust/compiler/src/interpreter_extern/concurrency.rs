@@ -207,6 +207,36 @@ pub fn spl_thread_pool_spawn_worker(_args: &[Value]) -> Result<Value, CompileErr
     Ok(Value::Int(0))
 }
 
+/// Allocate a thread handle id from the SAME store `rt_thread_join` will read.
+///
+/// `rt_thread_join`/`rt_thread_is_done`/`rt_thread_free` delegate to
+/// `registry.thread` for every non-`PureStd` backend, but the spawn entry points
+/// used to unconditionally allocate from the local `NEXT_HANDLE_ID` and store into
+/// the local `THREAD_RESULTS`. Under a `Native` backend that made join a lookup in
+/// a table nothing ever wrote, and `NativeThreadProvider::thread_join` ends in
+/// `.unwrap_or(Value::Nil)` — so every join silently returned nil. Spawn must be
+/// backend-aware exactly where join is.
+fn alloc_thread_handle_id() -> i64 {
+    let registry = get_concurrent_registry();
+    if registry.backend() != ConcurrentBackend::PureStd {
+        return registry.thread.next_handle_id();
+    }
+    let mut next_id = NEXT_HANDLE_ID.lock().unwrap();
+    let handle_id = *next_id;
+    *next_id += 1;
+    handle_id
+}
+
+/// Store a completed spawn result in the store `rt_thread_join` will read.
+fn store_thread_result(handle_id: i64, result: Value) -> Result<(), CompileError> {
+    let registry = get_concurrent_registry();
+    if registry.backend() != ConcurrentBackend::PureStd {
+        return registry.thread.thread_spawn(handle_id, result);
+    }
+    THREAD_RESULTS.lock().unwrap().insert(handle_id, result);
+    Ok(())
+}
+
 /// Spawn isolated thread with closure execution
 ///
 /// Accepts a closure and optional arguments. Executes the closure with full
@@ -236,11 +266,8 @@ pub fn rt_thread_spawn_isolated_with_context(
         }
     };
 
-    // Generate handle ID
-    let mut next_id = NEXT_HANDLE_ID.lock().unwrap();
-    let handle_id = *next_id;
-    *next_id += 1;
-    drop(next_id);
+    // Generate handle ID from whichever registry `rt_thread_join` will read.
+    let handle_id = alloc_thread_handle_id();
 
     // Execute the closure with bound parameters
     let mut local_env = captured_env.clone();
@@ -268,8 +295,8 @@ pub fn rt_thread_spawn_isolated_with_context(
         _ => body_value,
     };
 
-    // Store the result
-    THREAD_RESULTS.lock().unwrap().insert(handle_id, result);
+    // Store the result where `rt_thread_join` will look for it.
+    store_thread_result(handle_id, result)?;
     Ok(Value::Int(handle_id))
 }
 
@@ -305,11 +332,8 @@ pub fn rt_thread_spawn_isolated_with_args_context(
     let data1 = args[1].clone();
     let data2 = args[2].clone();
 
-    // Generate handle ID
-    let mut next_id = NEXT_HANDLE_ID.lock().unwrap();
-    let handle_id = *next_id;
-    *next_id += 1;
-    drop(next_id);
+    // Generate handle ID from whichever registry `rt_thread_join` will read.
+    let handle_id = alloc_thread_handle_id();
 
     // Execute the closure with bound parameters
     let mut local_env = captured_env.clone();
@@ -338,8 +362,8 @@ pub fn rt_thread_spawn_isolated_with_args_context(
         _ => body_value,
     };
 
-    // Store the result
-    THREAD_RESULTS.lock().unwrap().insert(handle_id, result);
+    // Store the result where `rt_thread_join` will look for it.
+    store_thread_result(handle_id, result)?;
     Ok(Value::Int(handle_id))
 }
 
@@ -846,4 +870,110 @@ pub fn rt_thread_local_free(args: &[Value]) -> Result<Value, CompileError> {
     };
     TLS_REGISTRY.lock().unwrap().remove(&handle);
     Ok(Value::Nil)
+}
+
+// ============================================================================
+// Tests: spawn/join must agree on WHICH registry holds the result
+// ============================================================================
+
+#[cfg(test)]
+mod backend_aware_spawn_tests {
+    use super::*;
+
+    /// Every backend the enum can name. A new variant added without a matching
+    /// spawn path will fail to compile here rather than silently return nil.
+    fn all_backends() -> Vec<ConcurrentBackend> {
+        vec![ConcurrentBackend::PureStd, ConcurrentBackend::Native]
+    }
+
+    /// REPRODUCING TEST for
+    /// `native_concurrent_backend_spawn_not_backend_aware_join_is_2026-08-04`.
+    ///
+    /// Before the fix, spawn always allocated from `NEXT_HANDLE_ID` and stored into
+    /// the local `THREAD_RESULTS`, while `rt_thread_join` under a non-PureStd
+    /// backend read `registry.thread`. The join found nothing and
+    /// `NativeThreadProvider::thread_join`'s `.unwrap_or(Value::Nil)` handed back
+    /// nil — silently, with no error. This asserts the exact reported symptom.
+    #[test]
+    fn native_backend_spawn_result_survives_join() {
+        set_concurrent_registry(ConcurrentProviderRegistry::new(ConcurrentBackend::Native));
+
+        let handle = alloc_thread_handle_id();
+        store_thread_result(handle, Value::Int(42)).expect("store must succeed");
+
+        let joined = rt_thread_join(&[Value::Int(handle)]).expect("join must succeed");
+        assert_eq!(
+            joined,
+            Value::Int(42),
+            "join returned {:?} — spawn stored the result somewhere join does not read",
+            joined
+        );
+        assert_ne!(joined, Value::Nil, "join silently returned nil");
+    }
+
+    /// SIMILAR-BUG-PREVENTION TEST — generalizes to the defect CLASS:
+    /// "a provider registry that only SOME paths on a round trip consult".
+    ///
+    /// For EVERY backend, and for several value shapes (not just the int in the
+    /// bug report), a spawn-side store must be observable by the join-side read,
+    /// and `rt_thread_is_done` must agree. Any future backend, or any future
+    /// divergence between the allocate/store/read halves, fails here.
+    #[test]
+    fn spawn_and_join_agree_for_every_backend_and_value_shape() {
+        let shapes = vec![
+            Value::Int(7),
+            Value::text("hello".to_string()),
+            Value::Bool(true),
+            Value::Float(1.5),
+        ];
+
+        for backend in all_backends() {
+            set_concurrent_registry(ConcurrentProviderRegistry::new(backend));
+
+            let mut expected = Vec::new();
+            // Allocate several handles first: a shared counter that is not
+            // backend-aware would also collide, not merely lose values.
+            for shape in &shapes {
+                let handle = alloc_thread_handle_id();
+                store_thread_result(handle, shape.clone())
+                    .unwrap_or_else(|e| panic!("{:?}: store failed: {:?}", backend, e));
+                expected.push((handle, shape.clone()));
+            }
+
+            let ids: Vec<i64> = expected.iter().map(|(h, _)| *h).collect();
+            let mut sorted = ids.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(
+                sorted.len(),
+                ids.len(),
+                "{:?}: spawn handed out duplicate handle ids {:?}",
+                backend,
+                ids
+            );
+
+            for (handle, want) in expected {
+                let done = rt_thread_is_done(&[Value::Int(handle)])
+                    .unwrap_or_else(|e| panic!("{:?}: is_done failed: {:?}", backend, e));
+                assert_eq!(
+                    done,
+                    Value::Int(1),
+                    "{:?}: handle {} reported not-done after a stored result",
+                    backend,
+                    handle
+                );
+
+                let got = rt_thread_join(&[Value::Int(handle)])
+                    .unwrap_or_else(|e| panic!("{:?}: join failed: {:?}", backend, e));
+                assert_eq!(
+                    got, want,
+                    "{:?}: handle {} joined as {:?}, expected {:?} — the spawn-side \
+                     store and the join-side read are consulting different stores",
+                    backend, handle, got, want
+                );
+            }
+        }
+
+        set_concurrent_registry(ConcurrentProviderRegistry::new(ConcurrentBackend::PureStd));
+    }
 }
