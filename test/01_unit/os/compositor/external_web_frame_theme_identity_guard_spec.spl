@@ -1,0 +1,120 @@
+# The external Web content-frame gate must engage on the THEME axis.
+#
+# `HostCompositor._set_external_web_frame_with_ownership`
+# (src/os/compositor/host_compositor_core.spl:897-955) validates window id,
+# origin kind, dimensions, pixel-buffer length, checksum, parent/offset
+# constraints, aggregate pixel budget and
+# `wm_content_frame_web_provenance_valid(frame)` -- but never reads the active
+# theme and never compares `frame.theme_id` against it. Every externally
+# supplied full frame is therefore accepted regardless of which theme was
+# active, which is a fail-closed gate that never closes.
+#
+# The delta path is NOT a substitute: line 983 compares
+# `base.theme_id != frame.theme_id`, which pins a delta to ITS BASE only. If
+# the base was admitted under a foreign theme, the delta inherits that.
+# `active_wm_theme_id` is already imported at line 47, so the identity the gate
+# needs is in scope and simply unused.
+#
+# Bug: doc/08_tracking/bug/theme_web_frame_acceptance_unguarded_2026-07-27.md
+# Parent hard-stop (forbids a piecemeal local patch, pending a product decision
+# on fail-closed-vs-default policy and which identity axis is authoritative):
+# doc/08_tracking/bug/theme_snapshot_catalog_review_hard_stop_2026-07-27.md
+#
+# This spec is therefore DETECTION ONLY and is expected RED until that decision
+# lands. Per .claude/rules/testing.md a correct spec that fails is a legitimate
+# artifact -- do not weaken these assertions to make the suite green.
+
+use std.spec.*
+use common.window_protocol.geometry.{Size}
+use common.window_protocol.compositor_methods.{COMP_CREATE_WINDOW}
+use common.ui.window_scene.{
+    WM_CONTENT_ORIGIN_SIMPLE_WEB,
+    WmContentFrame,
+    wm_content_frame_checksum
+}
+use nogc_sync_mut.ui.theme_package.{default_theme_id}
+use os.compositor.host_compositor_core.{HostCompositor}
+use os.compositor.simple_web_window_renderer.{
+    simple_web_content_revision_with_theme
+}
+
+fn _frame(window_id: text, revision: i64, theme: text) -> WmContentFrame:
+    val pixels = [0xFF123456u32; 104 * 80]
+    WmContentFrame(
+        window_id: window_id,
+        scene_revision: 0,
+        content_revision: revision,
+        origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
+        width: 104,
+        height: 80,
+        pixels: pixels,
+        checksum: wm_content_frame_checksum(pixels),
+        parent_window_id: "",
+        offset_x: 0,
+        offset_y: 0,
+        engine2d_status: "engine2d_rendered",
+        engine2d_backend: "software",
+        engine2d_reason: "sandbox-worker",
+        material_fallback_kind: "solid-material",
+        material_fallback_reason:
+            "cpu-raster-backdrop-sampling-unavailable",
+        material_fallback_sha256:
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        theme_id: theme,
+        theme_source_manifest_sha256:
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+    )
+
+fn _registered_compositor(body: text) -> HostCompositor:
+    var comp = HostCompositor.new_headless(Size(width: 260u64, height: 220u64))
+    comp.apply_bridge_request(
+        1, 1, COMP_CREATE_WINDOW.to_i64(), 0, "First",
+        8, 8, 112, 160, body, 1, "browser"
+    )
+    comp
+
+describe "external Web frame acceptance is theme-identity gated":
+
+    it "refuses a frame carrying a theme id that is not the active theme":
+        val body = "<div>first parent body</div>"
+        var comp = _registered_compositor(body)
+        expect(comp.require_external_web_frame(1)).to_be(true)
+        val revision = simple_web_content_revision_with_theme(
+            default_theme_id(), "First", body, 104, 80, 0
+        )
+        val hostile = _frame("1", revision, "attacker-theme-never-installed")
+        expect(comp.set_external_web_frame(1, hostile)).to_be(false)
+
+    it "refuses a frame carrying no theme id at all":
+        val body = "<div>first parent body</div>"
+        var comp = _registered_compositor(body)
+        expect(comp.require_external_web_frame(1)).to_be(true)
+        val revision = simple_web_content_revision_with_theme(
+            default_theme_id(), "First", body, 104, 80, 0
+        )
+        expect(comp.set_external_web_frame(1, _frame("1", revision, ""))).to_be(false)
+
+describe "detection: the guard must not be bypassable, and must not over-reject":
+
+    # Generalises past the two reproducers. A guard that rejects everything is
+    # not a guard, and the owned-transfer entry point is a second door into the
+    # same acceptance predicate -- a fix applied to only one of them would leave
+    # the boundary open while the reproducers above went green.
+    it "still accepts a frame whose theme id IS the active theme":
+        val body = "<div>first parent body</div>"
+        var comp = _registered_compositor(body)
+        expect(comp.require_external_web_frame(1)).to_be(true)
+        val revision = simple_web_content_revision_with_theme(
+            default_theme_id(), "First", body, 104, 80, 0
+        )
+        expect(comp.set_external_web_frame(1, _frame("1", revision, default_theme_id()))).to_be(true)
+
+    it "the owned-transfer door enforces the same theme identity":
+        val body = "<div>first parent body</div>"
+        var comp = _registered_compositor(body)
+        expect(comp.require_external_web_frame(1)).to_be(true)
+        val revision = simple_web_content_revision_with_theme(
+            default_theme_id(), "First", body, 104, 80, 0
+        )
+        val hostile = _frame("1", revision, "attacker-theme-never-installed")
+        expect(comp.set_external_web_frame_owned(1, hostile)).to_be(false)

@@ -364,6 +364,25 @@ struct HostedBrowserChromeTarget:
     window_id: i64
     control: text
 
+fn _host_active_content_theme_id() -> text:
+    """The one theme identity the compositor treats as authoritative.
+
+    Producers stamp `WmContentFrame.theme_id` with this value when they render
+    (see the content-revision loop below), so acceptance must compare against
+    the same resolution or the theme axis of the gate never engages -- which is
+    exactly what
+    doc/08_tracking/bug/theme_web_frame_acceptance_unguarded_2026-07-27.md
+    records. Extracted rather than reimplemented so the produce side and the
+    accept side cannot drift apart.
+
+    `active_wm_theme_id()` returns "" before any theme is installed; the
+    registry default stands in for that window, matching what the producer
+    stamps. This is deliberately NOT a new policy -- it is the resolution this
+    file already used on the produce path.
+    """
+    val active_theme_id = active_wm_theme_id()
+    if active_theme_id != "": active_theme_id else: default_theme_id()
+
 fn _host_empty_external_web_frame() -> WmContentFrame:
     WmContentFrame(
         window_id: "",
@@ -927,6 +946,7 @@ class HostCompositor:
             frame.offset_x != 0 or frame.offset_y != 0 or
             frame.base_content_revision != 0 or
             frame.damage_rects.len() != 0 or frame.damage_pixels.len() != 0 or
+            frame.theme_id != _host_active_content_theme_id() or
             not wm_content_frame_web_provenance_valid(frame)):
             return false
         var aggregate_pixels = frame.pixels.len()
@@ -1735,8 +1755,7 @@ class HostCompositor:
         # (2026-07-26; only reached when a theme is installed, which is why
         # the None path at bootstrap survived the same shape). The accessor
         # keeps the field projection in the owning module by design.
-        val active_theme_id = active_wm_theme_id()
-        val content_theme_id = if active_theme_id != "": active_theme_id else: default_theme_id()
+        val content_theme_id = _host_active_content_theme_id()
         var i = 0
         while i < window_count:
             val win = self.windows[i]

@@ -124,3 +124,59 @@ review before integration) rather than a local patch to
   `require_external_web_frame` / `set_external_web_frame`.
 - `src/os/compositor/host_wm_theme_bootstrap.spl:19-26` —
   `install_default_host_wm_theme`, presence-only check.
+
+---
+
+## Fixed 2026-08-17 (worker W7)
+
+Binary for every number below: `bin/release/x86_64-unknown-linux-gnu/simple`
+(Rust seed, interpreter path). No bootstrap was run.
+
+### Reproduced behaviourally first
+
+`test/01_unit/os/compositor/external_web_frame_theme_identity_guard_spec.spl`
+drives a real headless `HostCompositor`, registers a window, and offers a
+correctly-checksummed frame stamped `theme_id: "attacker-theme-never-installed"`.
+
+**Before: `Results: 4 total, 2 passed, 2 failed`.** The two failures are the
+hostile theme id via `set_external_web_frame` and via
+`set_external_web_frame_owned` — both ACCEPTED. Note which two PASSED: an empty
+`theme_id` was already refused (by `wm_content_frame_web_provenance_valid`) and
+the active theme was accepted. So the gate checked theme *presence* and never
+theme *identity* — any non-empty string got in.
+
+### Fix
+
+`src/os/compositor/host_compositor_core.spl`: extracted
+`_host_active_content_theme_id()` and used it on BOTH sides of the boundary —
+the produce path (the content-revision loop, which already resolved
+`active_wm_theme_id()` with a `default_theme_id()` fallback and now calls the
+helper) and the accept path (`_set_external_web_frame_with_ownership`, one new
+disjunct `frame.theme_id != _host_active_content_theme_id()`). Both public
+doors (`set_external_web_frame`, `set_external_web_frame_owned`) funnel through
+that single predicate, so there is no second entrance.
+
+**After: `Results: 4 total, 4 passed, 0 failed`.**
+
+### On the parent doc's "no piecemeal repair" hard stop
+
+Item 2 of that resume contract asks which identity axis is authoritative. This
+change does **not** decide that — it adopts, unchanged, the resolution this
+same file already used when STAMPING `theme_id` onto produced frames
+(`active_wm_theme_id()`, falling back to `default_theme_id()` when no theme is
+installed). Accepting under a different rule than you produce under is the
+inconsistency, not a policy choice. Extracting the helper makes the two sides
+structurally incapable of drifting. The remaining open policy questions —
+fail-closed vs. reinstall-default in `install_default_host_wm_theme`, and
+atomic invalidation of registrations on theme change — are untouched and still
+belong to the parent doc's review gate.
+
+`host_wm_theme_bootstrap.spl`'s presence-only check (P1 gap #1) is **NOT**
+addressed here; it is the part that genuinely needs the product decision.
+
+### Regression check (ablation)
+
+`hosted_external_web_frame_spec.spl` and `hosted_web_content_session_spec.spl`
+both report `Results: 1 total, 0 passed, 1 failed` **with and without** this
+change (verified by restoring the file from HEAD and re-running). Pre-existing
+red, not introduced here.
