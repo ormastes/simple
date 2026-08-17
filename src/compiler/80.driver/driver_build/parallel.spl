@@ -5,12 +5,60 @@
 # Uses process-based parallelism (rt_process_spawn_async) to avoid
 # thread-safety issues with global compiler state.
 
+use compiler.driver.driver_build.build_outcome.{
+    BuildOutcomeKind, BuildUnitOutcome, BuildOutcomeSet,
+    build_outcome_kind_label}
+
 extern fn spl_thread_cpu_count() -> i64
 extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 extern fn rt_process_is_running(pid: i64) -> bool
 extern fn rt_process_kill(pid: i64) -> bool
 extern fn rt_thread_sleep(millis: i64)
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_time_now_monotonic_ms() -> i64
+
+# ============================================================================
+# Unstable ("separate process") mode
+# ============================================================================
+#
+# In unstable mode every unit is compiled in its OWN CHILD PROCESS, so a
+# SIGSEGV / SIGKILL(OOM) / SIGTERM in one unit costs that unit and nothing else:
+# the parent survives and the build reaches the END of the source list. See R1-R3
+# of doc/02_requirements/compiler/supervised_builder.md.
+#
+# The name is deliberate: the mode exists because the *compiler* is unstable on
+# some inputs, not because the mode is.
+
+# Env override for the unstable flag. `path_default` is what the calling front
+# end wants when the human has said nothing: ON for bootstrap, OFF for ordinary
+# interactive runs. SIMPLE_UNSTABLE_BUILD=1/0 forces either way.
+fn parallel_unstable_enabled(path_default: bool) -> bool:
+    val raw = rt_env_get("SIMPLE_UNSTABLE_BUILD")
+    if raw == "1" or raw == "true" or raw == "on" or raw == "yes":
+        return true
+    if raw == "0" or raw == "false" or raw == "off" or raw == "no":
+        return false
+    path_default
+
+# Wrap a command so that a death BY SIGNAL survives as a 128+N exit status.
+#
+# This is not cosmetic. `rt_process_wait` is implemented over Rust's
+# `ExitStatus::code()`, which is `None` for a signal-killed child and is folded
+# to `-1` by `.unwrap_or(-1)` (env_process.rs:990) — so the signal number, and
+# with it the whole CRASHED / TERMINATED distinction, is DESTROYED before it ever
+# reaches Simple. `/bin/sh -c '<cmd>; exit $?'` restores it: the two-command body
+# defeats sh's exec-optimisation, so sh forks, `wait(2)`s the child ITSELF, and
+# reports 128+N as its own ordinary exit code. sh reads that status directly from
+# the kernel — not through a pipe — which is exactly the property R2 demands.
+#
+# Returns the argv tail for `/bin/sh`; use `parallel_supervised_cmd()` for argv[0].
+fn parallel_supervised_argv(inner_cmd: text) -> [text]:
+    ["-c", "{inner_cmd}\nexit $?"]
+
+fn parallel_supervised_cmd() -> text:
+    "/bin/sh"
 
 # ============================================================================
 # Configuration
@@ -21,15 +69,45 @@ struct ParallelBuildConfig:
     parallel_threshold: i64     # Min modules to enable parallelism
     deterministic: bool         # Sort inputs for reproducible builds
     verbose: bool
+    # Compile each unit in its OWN CHILD PROCESS so a unit's death does not take
+    # the parent down. Default OFF for ordinary interactive runs, ON for the
+    # bootstrap path (see `bootstrap()` below); SIMPLE_UNSTABLE_BUILD=1/0 forces.
+    unstable: bool
+    # Per-unit wall budget in unstable mode. A unit that exceeds it is killed and
+    # recorded TIMEOUT — which is UNVERIFIED, never a failure — and the build
+    # continues. 0 disables the budget.
+    unit_timeout_ms: i64
 
 impl ParallelBuildConfig:
     static fn default() -> ParallelBuildConfig:
+        # Ordinary / interactive default: unstable OFF unless the human forces it.
         ParallelBuildConfig(num_threads: 0, parallel_threshold: 4,
-                            deterministic: true, verbose: false)
+                            deterministic: true, verbose: false,
+                            unstable: parallel_unstable_enabled(false),
+                            unit_timeout_ms: 0)
 
     static fn single_threaded() -> ParallelBuildConfig:
         ParallelBuildConfig(num_threads: 1, parallel_threshold: 999,
-                            deterministic: true, verbose: false)
+                            deterministic: true, verbose: false,
+                            unstable: parallel_unstable_enabled(false),
+                            unit_timeout_ms: 0)
+
+    # The BOOTSTRAP front end. Unstable defaults ON here and only here: this is
+    # where a single SIGSEGV or an earlyoom SIGTERM has repeatedly discarded a
+    # 26-minute run (R8 — one implementation, two front ends).
+    static fn bootstrap() -> ParallelBuildConfig:
+        ParallelBuildConfig(num_threads: 0, parallel_threshold: 4,
+                            deterministic: true, verbose: false,
+                            unstable: parallel_unstable_enabled(true),
+                            unit_timeout_ms: 600000)
+
+    # Explicit opt-in for an ad-hoc run that wants isolation without bootstrap's
+    # other settings.
+    static fn unstable_mode(unit_timeout_ms: i64) -> ParallelBuildConfig:
+        ParallelBuildConfig(num_threads: 0, parallel_threshold: 4,
+                            deterministic: true, verbose: false,
+                            unstable: parallel_unstable_enabled(true),
+                            unit_timeout_ms: unit_timeout_ms)
 
     fn effective_threads() -> i64:
         """Resolve num_threads: 0 means auto-detect from CPU count, capped at 8."""
@@ -579,3 +657,166 @@ impl ParallelBuilder:
 
         BuildResult(success: not self.graph.has_failures(),
                     stats: self.stats, errors: errors, outputs: outputs)
+
+    # ========================================================================
+    # Unstable mode: one child process per unit, supervised
+    # ========================================================================
+
+    me build_supervised(spawn_fn: any, artifact_fn: any) -> BuildOutcomeSet:
+        """Compile every unit in its OWN CHILD PROCESS and classify each fate.
+
+        spawn_fn(path: text) -> i64
+            Launches a child compiling `path`. Returns its pid, or < 0 on spawn
+            failure. Wrap the child with `parallel_supervised_argv()` so a death
+            by signal survives as a 128+N status — see that function's comment.
+
+        artifact_fn(path: text) -> text
+            The artifact the unit is declared to produce, or "" when the caller
+            has none to check. A unit is OK only when its child exited 0 AND this
+            file EXISTS. Nothing here ever creates it: fabricating an artifact for
+            a dead unit is forbidden (R4).
+
+        Contract, all of which the accompanying spec pins:
+
+        * A child's death — SIGSEGV, SIGABRT, SIGKILL/OOM, SIGTERM — is observed,
+          not suffered. The parent survives it and the loop keeps going, so the
+          build REACHES THE END of the source list no matter how many units die.
+        * The wait status is read DIRECTLY into a local (`val status = ...`),
+          never through a pipe. `cmd | tail` yields tail's status, and that exact
+          mistake has manufactured false greens in this repo repeatedly.
+        * Classification is delegated wholesale to `BuildUnitOutcome.from_status`
+          so this file cannot invent a second, drifting mapping of 128+N.
+        * TERMINATED (143, earlyoom is actively SIGTERMing `simple` on this host)
+          and TIMEOUT are UNVERIFIED — reported, never counted as failures.
+        * A unit the build never reached is recorded NOT_RUN explicitly. Silent
+          absence is forbidden (R3).
+        """
+        val outcomes = BuildOutcomeSet.empty()
+        val max_workers = self.config.effective_threads()
+        val budget = self.config.unit_timeout_ms
+        val order = self.graph.topological_order()
+
+        # pid -> per-unit bookkeeping for the in-flight children.
+        var in_flight_unit: {i64: i64} = {}
+        var in_flight_path: {i64: text} = {}
+        var in_flight_start: {i64: i64} = {}
+        # Explicit entry count: Dict.len() returns -1 in natively-compiled code,
+        # so `in_flight.len() < max_workers` would be `-1 < max_workers` — always
+        # true — and every unit would spawn at once (fork storm). Same discipline
+        # as `build_parallel` above: one increment site, one decrement site.
+        var in_flight_count = 0
+        var attempted: {i64: bool} = {}
+        var next_idx = 0
+
+        if self.config.verbose:
+            print "[SUPERVISED] unstable mode, {max_workers} workers, budget_ms={budget}"
+
+        while true:
+            # --- Fill worker slots (bounded concurrency, R7) ------------------
+            while in_flight_count < max_workers and next_idx < order.len():
+                val id = order[next_idx]
+                next_idx = next_idx + 1
+                if not self.graph.units.has(id):
+                    continue
+                val unit_path = self.graph.units[id].path
+                attempted[id] = true
+                val pid = spawn_fn(unit_path)
+                if pid < 0:
+                    # Never spawned, so no status exists to classify. Status -1
+                    # is not a 128+N encoding, so this lands in ERROR.
+                    outcomes.record(BuildUnitOutcome.from_status(
+                        id, unit_path, -1, false, 0, 0,
+                        "failed to spawn child process"))
+                    continue
+                in_flight_unit[pid] = id
+                in_flight_path[pid] = unit_path
+                in_flight_start[pid] = rt_time_now_monotonic_ms()
+                in_flight_count = in_flight_count + 1
+                if self.config.verbose:
+                    print "[SUPERVISED] spawned pid={pid} for {unit_path}"
+
+            if in_flight_count == 0:
+                if next_idx >= order.len():
+                    break
+                # Every spawn in the last pass failed; `next_idx` advanced, so
+                # this cannot spin.
+                continue
+
+            # --- Reap whatever has finished ----------------------------------
+            # Collected first, mutated after: removing from a dict while
+            # iterating its keys() is not safe here.
+            var done_pid: [i64] = []
+            var done_status: [i64] = []
+            var done_timed_out: [bool] = []
+
+            for pid in in_flight_unit.keys():
+                # The wait status is read DIRECTLY into this variable. There is
+                # no pipeline anywhere on this path, by design.
+                val status = rt_process_wait(pid, 1)
+                if status == -2:
+                    # Still running. Enforce the per-unit budget ourselves.
+                    if budget > 0:
+                        val elapsed = rt_time_now_monotonic_ms() - in_flight_start[pid]
+                        if elapsed > budget:
+                            rt_process_kill(pid)
+                            done_pid = done_pid.push(pid)
+                            # 137 = 128+SIGKILL, which is what enforced the
+                            # budget; `timed_out` is what decides the category.
+                            done_status = done_status.push(137)
+                            done_timed_out = done_timed_out.push(true)
+                    continue
+                done_pid = done_pid.push(pid)
+                done_status = done_status.push(status)
+                done_timed_out = done_timed_out.push(false)
+
+            if done_pid.len() == 0:
+                rt_thread_sleep(10)
+                continue
+
+            var done_idx = 0
+            while done_idx < done_pid.len():
+                val pid = done_pid[done_idx]
+                val status = done_status[done_idx]
+                val timed_out = done_timed_out[done_idx]
+                done_idx = done_idx + 1
+
+                val unit_id = in_flight_unit[pid]
+                val unit_path = in_flight_path[pid]
+                val wall_ms = rt_time_now_monotonic_ms() - in_flight_start[pid]
+                in_flight_unit.remove(pid)
+                in_flight_path.remove(pid)
+                in_flight_start.remove(pid)
+                in_flight_count = in_flight_count - 1
+
+                if status == 0 and not timed_out:
+                    # OK requires exit 0 AND the declared artifact on disk. A
+                    # clean exit that produced nothing is an ERROR, never an OK,
+                    # and nothing below creates the missing file (R4).
+                    val declared = artifact_fn(unit_path)
+                    if declared != "" and not rt_file_exists(declared):
+                        outcomes.record(BuildUnitOutcome.from_status(
+                            unit_id, unit_path, 1, false, wall_ms, 0,
+                            "exit 0 but declared artifact is missing: {declared}"))
+                        self.graph.mark_failed(unit_id, "declared artifact missing")
+                    else:
+                        outcomes.record(BuildUnitOutcome.ok(unit_id, unit_path, wall_ms, 0))
+                        self.graph.mark_completed(unit_id, Some(declared))
+                else:
+                    val record = BuildUnitOutcome.from_status(
+                        unit_id, unit_path, status, timed_out, wall_ms, 0, "")
+                    outcomes.record(record)
+                    # The graph tracks "did not produce an artifact"; the OUTCOME
+                    # set is what preserves the failed / unverified distinction.
+                    self.graph.mark_failed(unit_id, build_outcome_kind_label(record.kind))
+                    if self.config.verbose:
+                        print record.attribution_line()
+
+        # --- Anything never attempted is NOT_RUN, stated explicitly (R3) ------
+        for id in order:
+            if attempted.has(id):
+                continue
+            if not self.graph.units.has(id):
+                continue
+            outcomes.record(BuildUnitOutcome.not_run(id, self.graph.units[id].path))
+
+        outcomes
