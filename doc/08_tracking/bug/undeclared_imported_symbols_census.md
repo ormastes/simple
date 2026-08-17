@@ -389,7 +389,22 @@ python3 scratchpad/undecl_census/sample.py               # 40-entry hand-verific
 | `src/app/hosted_apps/file_manager_client.spl:1` | `file_manager_remote_main` | `os.apps.file_manager.file_manager` | 1 |
 | `src/app/hosted_apps/hello_world_client.spl:1` | `hello_world_remote_main` | `os.apps.hello_world.hello_world` | 1 |
 | `src/app/hosted_apps/simple_browser_client.spl:1` | `simple_browser_remote_main` | `os.apps.simple_browser.simple_browser` | 1 |
-| `src/app/office/sheets/math_bridge.spl:17` | `variance_sample` | `std.common.math.statistics` | 1 |
+| ~~`src/app/office/sheets/math_bridge.spl:17`~~ | ~~`variance_sample`~~ | `std.common.math.statistics` | 1 | FIXED 2026-08-17 (see note below) |
+
+> **`variance_sample` — FIXED 2026-08-17, SOURCE-VERIFIED ONLY, NOT EXECUTION-VERIFIED.**
+> `math_bridge.spl:18` imported and `:156` called `variance_sample`; `src/lib/common/math/statistics.spl`
+> has zero definitions of that name and no other module provides it (`/usr/bin/grep -rn variance_sample`
+> over the tree hits only these two source lines plus docs/plans). The stdlib counterpart is
+> `var_sample` (statistics.spl:121), whose body divides by `(n - 1)` — genuine SAMPLE variance,
+> matching `excel_var`'s "SAMPLE VARIANCE (n-1 denominator)" contract; `var_pop` (:110) divides by
+> `n` and is NOT the right target. Fix direction: renamed the USE, not the library, because
+> statistics.spl's family is `var_pop`/`var_sample`/`stdev_pop`/`stdev_sample` — adding a
+> `variance_sample` alias would break that convention and add a duplicate public API for one caller.
+> **A compiler deploy was in progress, so nothing was executed. This fix is reasoned from source
+> only.** Deferred verification command:
+> `bin/simple test test/01_unit/app/office/sheets/math_bridge_stat_symbol_binding_spec.spl`
+> (per `.claude/rules/testing.md`: exit 0 is NOT a pass — require an explicit results/count line).
+> Regression spec added by the same commit and likewise UNVERIFIED.
 | `src/app/simple_process_manager/wm_spm_client.spl:21` | `window_record_encode` | `lib.common.win_fs.window_record` | 1 |
 | `src/app/test/x25519mlkem768_coverage_contract.spl:3` | `CoverageOwnerOutcomeSummary` | `std.test_runner.test_runner_coverage` | 1 |
 | `src/app/test/x25519mlkem768_coverage_receipt.spl:15` | `CoverageOwnerOutcomeSummary` | `std.test_runner.test_runner_coverage` | 1 |
