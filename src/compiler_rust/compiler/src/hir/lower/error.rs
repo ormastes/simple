@@ -5,6 +5,18 @@ use super::super::lifetime::LifetimeViolation;
 use super::super::types::TypeId;
 use super::memory_warning::{MemoryWarningCode, MemoryWarningCollector};
 
+/// Render the declared-field hint for `CannotInferFieldType`.
+///
+/// Returns the empty string when nothing is known, so the field-ACCESS path
+/// (which never populates `available_fields`) keeps its historical message.
+fn fmt_available_fields(available_fields: &[String]) -> String {
+    if available_fields.is_empty() {
+        String::new()
+    } else {
+        format!(" (declared fields: {})", available_fields.join(", "))
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum LowerError {
     #[error("Unknown type: {type_name}")]
@@ -40,7 +52,17 @@ pub enum LowerError {
     #[error("Cannot infer element type of empty array - use explicit annotation")]
     EmptyArrayNeedsType,
 
-    #[error("Cannot infer field type: struct '{struct_name}' field '{field}'")]
+    // The `available_fields` tail is what makes this diagnosable: when the error
+    // comes from a struct LITERAL naming a field the declaration does not have
+    // (hir/lower/expr/collections.rs), the declared set is known and printing it
+    // turns an unlocatable fleet-wide JIT de-optimisation into an obvious typo
+    // report. Empty vec (field-ACCESS path) prints nothing, preserving the old
+    // message byte-for-byte. See
+    // doc/08_tracking/bug/test_runner_jit_fallback_functionoutline_type_params_2026-08-17.md
+    #[error(
+        "Cannot infer field type: struct '{struct_name}' field '{field}'{}",
+        fmt_available_fields(available_fields)
+    )]
     CannotInferFieldType {
         struct_name: String,
         field: String,
