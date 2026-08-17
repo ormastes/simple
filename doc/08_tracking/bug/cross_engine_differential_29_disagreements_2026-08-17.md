@@ -3,8 +3,57 @@
 **Filed:** 2026-08-17
 **Severity:** HIGH — silent wrong results, no diagnostic on any of them
 **Found by:** `scripts/check/check-engine-differential.shs` on first run
-**Status:** REPORTED, NOT FIXED (this lane builds the detector; it does not own
-the codegen fixes)
+**Status:** RESOLVED for 28 of 29 cells; **ONE still live** — see the update
+below, which is the actionable part of this document.
+
+---
+
+## UPDATE (same day): re-run on a freshly built compiler — 28 of 29 were
+## already fixed in-tree, ONE survives
+
+The original run used the deployed `bin/simple`, a Rust seed whose mtime
+(2026-08-16 22:59) predates most of 2026-08-17's fixes. Rebuilding from the
+current tree into an isolated `CARGO_TARGET_DIR=/mnt/data/cargo-target-failopen`
+and re-running the identical probe:
+
+    fresh binary: 59402304 bytes, Aug 17 06:18
+    interpreter: 150 observations
+    jit:         150 observations    (was 149 — the dropped observation is fixed)
+    DISAGREEMENTS: 1
+
+| cell | interpreter | jit |
+|---|---|---|
+| `copy_arr_u8_copy` | 2 | 99 |
+
+**Everything in sections A, B, C and D below is already fixed in-tree and was
+merely not yet deployed.** That includes the whole divide-by-8 nullable family,
+every raw-tagged-word rendering, every `nil`-swallowed payload, the dropped
+`opt_bang_text` observation, and all five f32 struct-field cells. This document
+keeps them recorded because they are the calibration evidence that the gate
+detects real defects rather than noise — but no action is needed on them beyond
+redeploying the compiler.
+
+**The single live defect is section E: `[u8]` copy aliasing on the JIT only.**
+
+    var src: [u8] = [1, 2, 3]
+    val cp = src        # must be a copy
+    src[1] = 99
+    # interpreter: cp[1] == 2   (correct — `val cp = src` did not alias)
+    # JIT:         cp[1] == 99  (wrong — the copy aliases the source buffer)
+
+This is worth separating from the standing note that `[u8]` "is KNOWN to still
+alias". That note describes a uniform language-level limitation. What the probe
+shows is narrower and worse: the two engines DISAGREE about it, so the same
+source has different value semantics depending on how it is executed. The
+sibling cells `[i64]`, `[u64]`, `[f64]` and `[text]` all copy correctly on both
+engines, so this is specific to the packed byte-array representation in the
+JIT, not to array copying in general.
+
+Not fixed here: this lane owns the detector, not the codegen.
+
+---
+
+**Original run (deployed seed), retained as calibration evidence:**
 
 ## What was run
 
@@ -132,9 +181,8 @@ radius:
   above is interpreter-vs-JIT only. The gate refuses to call a 2-engine run a
   3-engine one: `--quick` records that fact in the verdict, and a native lane
   that fails to build is a FAIL, never a skip.
-- **Which of these are already fixed in-tree.** The deployed `bin/simple`
-  predates 2026-08-17's fixes. Re-run with `SIMPLE_BIN` pointed at a freshly
-  built compiler to split "already fixed, not deployed" from "still live".
+- ~~Which of these are already fixed in-tree.~~ **Answered by the UPDATE at the
+  top of this document: 28 of 29 were already fixed, 1 is live.**
 - **Root cause of any individual cell.** This lane detects disagreement; it
   does not localise it. In particular `access.rs` is owned by another lane and
   was not touched.
