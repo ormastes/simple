@@ -1,0 +1,160 @@
+"""
+# Self-hosted lexer: multiline `if` condition continued with a leading `and`
+
+**Category:** Syntax / Stage-2 self-host parity
+**Bug:** doc/08_tracking/bug/stage2_multiline_if_continuation_2026-08-14.md
+
+## Overview
+
+A boolean `if` condition split across two lines, with the operator at the START
+of the continuation line, must be ONE condition in the self-hosted frontend:
+
+```simple
+if declaration.function_symbol_id == function_symbol_id
+    and declaration.base_local_id == base_local_id:
+    ...
+```
+
+The Stage-2 self-hosted parser was reported to terminate the condition after the
+first operand and fail at the newline with `expected :, got Newline`, while the
+Rust seed accepted the same text. Bootstrap sources carried explicit parentheses
+as a workaround.
+
+## Why this spec drives the LEXER, not the language
+
+`test/01_unit/compiler/parser_leading_operator_continuation_spec.spl` already
+covers the leading-operator family, but a `.spl` spec's own source is lexed by
+whatever binary EXECUTES the spec — that is the Rust seed, which never had this
+defect. It therefore cannot say anything about the self-hosted frontend.
+
+This spec instead drives the pure-Simple scanner directly
+(`core.lexer.lex_init`/`lex_next`, i.e. `src/compiler/10.frontend/core/
+lexer_struct.spl`) over source held in a string. The oracle is absolute: the
+continuation is glued exactly when NO `Newline` token (kind 180) is emitted
+between the last token of the first line and the leading `and` (kind 55).
+
+The glue is produced by `CoreLexer.leading_op_continues`, whose three guards are
+each covered below — the two negative controls matter as much as the positive
+case, because folding either shape into the previous line silently miscompiles
+working code.
+
+## Token kinds used
+
+`6` Ident · `40` if · `55` and · `161` Colon · `180` Newline · `181` Indent ·
+`182` Dedent · `190` EOF.
+"""
+
+use std.spec
+use core.lexer.{lex_init, lex_next}
+
+val KIND_IDENT: i64 = 6
+val KIND_IF: i64 = 40
+val KIND_AND: i64 = 55
+val KIND_NEWLINE: i64 = 180
+val KIND_EOF: i64 = 190
+
+fn kinds_of(source: text) -> [i64]:
+    """Full token-kind stream for `source`, capped so a dead lexer cannot hang."""
+    lex_init(source)
+    var out: [i64] = []
+    var i: i64 = 0
+    while i < 200:
+        val k = lex_next()
+        out = out.push(k)
+        if k == KIND_EOF or k == 0:
+            break
+        i = i + 1
+    out
+
+fn index_of_kind(kinds: [i64], kind: i64) -> i64:
+    var i: i64 = 0
+    while i < kinds.len():
+        if kinds[i] == kind:
+            return i
+        i = i + 1
+    -1
+
+fn newlines_between(kinds: [i64], from_index: i64, to_index: i64) -> i64:
+    var count: i64 = 0
+    var i: i64 = from_index
+    while i < to_index:
+        if kinds[i] == KIND_NEWLINE:
+            count = count + 1
+        i = i + 1
+    count
+
+# The reproducer from the bug doc, in the shape the real source carries it:
+# `if` header at one level, the `and` continuation indented one level deeper,
+# and the block body at that same deeper column.
+val REPRO_IF: text = ("fn f(a: bool, b: bool) -> bool:\n" +
+    "    if a\n" +
+    "        and b:\n" +
+    "        return true\n" +
+    "    return false\n")
+
+# Negative control 1 (guard 1, token_can_end_expr): a block body that
+# legitimately BEGINS with a word that could read as an operator must not be
+# folded into the header.
+val CONTROL_BLOCK_BODY: text = ("fn g(c: bool) -> i64:\n" +
+    "    if c:\n" +
+    "        -1\n" +
+    "    else:\n" +
+    "        -2\n")
+
+# Negative control 2 (guard 2, strictly-deeper indent): a continuation written
+# at the SAME column as the header is not glue.
+val CONTROL_SAME_INDENT: text = ("fn h(a: bool, b: bool) -> bool:\n" +
+    "    val x = a\n" +
+    "    and_flag(b)\n" +
+    "    return x\n")
+
+describe "self-hosted lexer glues a leading `and` onto an `if` condition":
+
+    it "emits no Newline between the condition operand and the leading `and`":
+        step("Scan the two-line `if` condition through the pure-Simple lexer")
+        val kinds = kinds_of(REPRO_IF)
+
+        step("Locate the `if` keyword and the leading `and` in the token stream")
+        val if_at = index_of_kind(kinds, KIND_IF)
+        val and_at = index_of_kind(kinds, KIND_AND)
+        expect(if_at).to_be_greater_than(-1)
+        expect(and_at).to_be_greater_than(if_at)
+
+        step("Assert the condition was never terminated at the newline")
+        # This is the whole defect: a Newline here is the `expected :, got
+        # Newline` the Stage-2 parser reported.
+        expect(newlines_between(kinds, if_at, and_at)).to_equal(0)
+
+        step("Assert the token immediately before `and` is the first operand")
+        expect(kinds[and_at - 1]).to_equal(KIND_IDENT)
+
+    it "keeps a block body that starts with a unary minus out of the header":
+        step("Scan an `if c:` header whose body begins with `-1`")
+        val kinds = kinds_of(CONTROL_BLOCK_BODY)
+
+        step("Assert the header is still terminated by a Newline")
+        # Guard 1 (`token_can_end_expr`): the previous token is a Colon, which
+        # cannot end an expression, so the `-1` line must NOT be glued on.
+        val if_at = index_of_kind(kinds, KIND_IF)
+        expect(if_at).to_be_greater_than(-1)
+        expect(newlines_between(kinds, if_at, kinds.len())).to_be_greater_than(0)
+
+    it "does not glue a following line written at the same indent":
+        step("Scan a statement followed by a same-column line")
+        val kinds = kinds_of(CONTROL_SAME_INDENT)
+
+        step("Assert the statement is terminated rather than continued")
+        # Guard 2 (strictly-deeper indent): this is the implicit-return shape
+        # live in src/runtime/simple_core/core_string.spl. Gluing it would
+        # silently miscompile working code.
+        expect(newlines_between(kinds, 0, kinds.len())).to_be_greater_than(2)
+
+    it "reaches EOF rather than stalling on the continued condition":
+        step("Scan the reproducer to completion")
+        val kinds = kinds_of(REPRO_IF)
+
+        step("Assert the stream terminated with a real EOF token")
+        # A dead lexer returns kind 0 forever; the cap in kinds_of() would then
+        # hand back 200 tokens with no EOF.
+        expect(kinds[kinds.len() - 1]).to_equal(KIND_EOF)
+        expect(kinds.len()).to_be_less_than(200)

@@ -1,0 +1,81 @@
+# @req REQ-MODRES-DOTTED-002
+"""
+# Dotted Directory Convention Is General, Not A Hardcoded List
+
+**Category:** Compiler
+**Status:** Implemented
+
+## Purpose and Audience
+
+The dotted-directory convention broke once because each compiler encoded it
+differently: the pure-Simple driver carried a hand-maintained rewrite table with
+four entries, and the Rust seed could only ever join the current directory's own
+name with a single following segment. Both mechanisms happen to cover the
+directories that were listed or that were one level deep; neither covers the
+convention.
+
+This spec exists to make that drift fail loudly. It is aimed at anyone touching
+either resolver, and it deliberately exercises directories that no hardcoded
+four-entry list mentions.
+
+## Scope and Preconditions
+
+Two independent dotted directories are imported, chosen for the two shapes the
+old implementations could not handle:
+
+- `src/app/package.registry/` -- two segments joined by one dot, sitting under a
+  parent (`src/app/package/`) that does not exist at all, so no plain per-segment
+  walk can reach it.
+- `src/app/ui.chromium.acid2/` -- three segments joined by two dots, reachable
+  only by joining three pending segments at once. Additionally, the prefixes
+  `src/app/ui/` and `src/app/ui.chromium/` both exist, so a resolver must
+  backtrack out of two plausible wrong turns before it finds this one.
+
+## Primary Workflow
+
+Each import resolves and yields a real value from the module behind it. Nothing
+here asserts on source text or file existence -- the modules are loaded and used.
+
+## Recovery and Troubleshooting
+
+If only the `package.registry` scenario passes, the resolver most likely regained
+a single-level or list-based rule. If neither passes, resolution of dotted
+directories is broken outright. Fix the resolver; do not rename directories and
+do not add entries to a list.
+
+## Compatibility and Limitations
+
+Behavior is shared by both compilers, but the seed's half is Rust, so a seed
+predating the fix fails these scenarios until it is rebuilt and redeployed.
+"""
+
+use std.spec.*
+use app.package.registry.config.{default_config}
+use app.ui.chromium.acid2.{ACID2_GRID_WIDTH, ACID2_GRID_HEIGHT, ACID2_GRID_CELLS}
+
+describe "Dotted directory resolution generalises beyond any listed set":
+    it "reaches a dotted directory whose plain-path parent does not exist":
+        step("Import app.package.registry.config; there is no src/app/package/ directory to walk through")
+        val cfg = default_config()
+
+        step("Read values the module composes itself, proving the real module loaded")
+        expect(cfg.cache_dir).to_contain(".simple/cache/registry")
+        expect(cfg.registry_url).to_equal("ghcr.io/simple-lang")
+
+    it "joins three segments at once, past two prefixes that also exist as directories":
+        step("Import app.ui.chromium.acid2, whose directory name carries two dots")
+        step("Both src/app/ui/ and src/app/ui.chromium/ exist, so the resolver must backtrack out of each")
+        step("Read the Acid2 grid geometry the module declares")
+
+        expect(ACID2_GRID_WIDTH).to_equal(16)
+        expect(ACID2_GRID_HEIGHT).to_equal(16)
+
+        step("Confirm the constants are internally consistent, not defaults from an empty stand-in")
+        expect(ACID2_GRID_CELLS).to_equal(ACID2_GRID_WIDTH * ACID2_GRID_HEIGHT)
+
+    it "serves both dotted shapes from one resolver rather than two special cases":
+        step("Use a value from each dotted directory in the same example")
+        val cfg = default_config()
+
+        expect(cfg.index_url).to_contain("://")
+        expect(ACID2_GRID_CELLS).to_equal(256)

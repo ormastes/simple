@@ -1,0 +1,67 @@
+# @req REQ-MODRES-DOTTED-001
+"""
+# Dotted Package Directory Resolution
+
+**Category:** Compiler
+**Status:** Implemented
+
+## Purpose and Audience
+
+This repository names roughly twenty source directories with a literal dot in
+the directory name -- `src/app/package.registry/`, `src/app/ui.chromium/`,
+`src/app/ffi_gen.templates/`, and `src/app/ui.chromium.acid2/` among them. A
+module inside such a directory is imported with an ordinary dotted module path
+(`app.package.registry.config`), so the resolver has to decide, for each dot,
+whether it separates two directories or is part of one directory's name.
+
+The audience is anyone changing module resolution in either compiler. Both must
+agree on this convention: the pure-Simple driver handles it through a rewrite
+table in `src/compiler/80.driver/driver_source_loading.spl`, and the Rust seed
+handles it in `interpreter_module/path_resolution.rs`.
+
+## Scope and Preconditions
+
+These scenarios import real modules from real dotted directories in this tree.
+They need no fixtures, no network, and no build products -- if the import
+resolves, the module's own functions are callable and are called here.
+
+## Primary Workflow
+
+An import naming a dotted directory resolves to the module inside it, and the
+value that module returns is usable. The observable outcome is a real
+configuration record, not a boolean that the import "worked".
+
+## Recovery and Troubleshooting
+
+A failure here reads as `semantic: Cannot resolve module: <path>` and the
+example never runs. That is a resolver defect, not a defect in the imported
+module. It is fixed in the resolver -- never by renaming the directory, which
+would diverge this tree to suit one binary.
+
+## Compatibility and Limitations
+
+The seed half of this behavior is Rust code, so a seed older than the fix still
+fails these scenarios until it is rebuilt and redeployed.
+"""
+
+use std.spec.*
+use app.package.registry.config.{default_config}
+
+describe "Dotted package directory resolution":
+    it "loads a module from a dotted directory and returns its real value":
+        step("Import app.package.registry.config, whose directory is literally named package.registry")
+        step("Ask the imported module for the default registry configuration")
+        val cfg = default_config()
+
+        step("Confirm the value came from the real module, not an empty stand-in")
+        expect(cfg.registry_url).to_equal("ghcr.io/simple-lang")
+        expect(cfg.cache_dir).to_contain(".simple/cache/registry")
+        expect(cfg.credentials_path).to_contain("credentials.sdn")
+
+    it "keeps the dotted segments joined rather than reading them as nested directories":
+        step("Resolve the same module again and read a field whose value is built by the module itself")
+        val cfg = default_config()
+
+        step("A resolver that split package.registry into package/registry would never reach this module")
+        expect(cfg.index_url).to_contain("://")
+        expect(cfg.registry_url).to_not_equal("")

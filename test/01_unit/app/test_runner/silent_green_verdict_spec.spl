@@ -1,0 +1,64 @@
+# Reproducing spec for the silent-green defect.
+#
+# @req REQ-TESTRUNNER-VERDICT-001
+#
+# Bug: doc/08_tracking/bug/test_runner_emits_no_result_summary_silent_exit0_2026-08-17.md
+# `bin/simple test <spec>` emitted ~1897 lines (all warnings), ZERO pass/fail
+# lines, and exited 0. Exit 0 with no verdict line is read as GREEN by every
+# caller, so every "spec X passes" claim proven only by exit code was
+# unsupported.
+#
+# The runner cannot assert its own exit code from inside one of its own
+# examples, so this spec drives the fail-closed gate
+# `scripts/check/check-test-verdict-not-silent.shs` as a subprocess, feeding it
+# fixture runners that reproduce the incident's exact output shape.
+
+use std.spec.*
+use std.io_runtime.{process_run, file_write, dir_create_all}
+
+val GUARD = "scripts/check/check-test-verdict-not-silent.shs"
+val WORK = "build/test-artifacts/test_runner_silent_green"
+
+fn write_fixture(name: text, body: text) -> text:
+    dir_create_all(WORK)
+    val path = "{WORK}/{name}.sh"
+    file_write(path, body)
+    path
+
+# Run the guard against one fixture runner, return (stdout, exit_code).
+fn run_guard(fixture_path: text) -> (text, i64):
+    val (out, err, code) = process_run("sh", [
+        "-c",
+        "SIMPLE_TEST_CMD='sh {fixture_path}' sh {GUARD} dummy_target",
+    ])
+    (out + err, code)
+
+describe "Test runner verdict honesty":
+    """
+    A release engineer relies on `bin/simple test <spec>` to decide whether a
+    change is safe to land. This scenario proves the runner can no longer
+    report success by saying nothing at all.
+    """
+
+    it "reports a real pass only when it prints its counts":
+        step("Stand up a runner that prints an explicit results line and exits 0")
+        val fixture = write_fixture("counts", "echo 'warning: noise'\necho 'Results: 4 total, 4 passed, 0 failed'\nexit 0\n")
+
+        step("Ask the verdict gate to judge that run")
+        val (output, code) = run_guard(fixture)
+
+        step("The gate accepts it, because the counts are on the record")
+        expect(output).to_contain("PASS")
+        expect(code).to_equal(0)
+
+    it "rejects a run that printed only warnings and exited zero":
+        step("Reproduce the incident: warnings on stderr, no verdict, exit 0")
+        val fixture = write_fixture("silent", "echo \"warning: 'export use *' is deprecated\"\necho 'warning: compiler_cross_module_private_symbol_collision'\nexit 0\n")
+
+        step("Ask the verdict gate to judge that run")
+        val (output, code) = run_guard(fixture)
+
+        step("The gate calls it a silent green and fails, instead of passing it through")
+        expect(output).to_contain("FAIL")
+        expect(output).to_contain("silent green")
+        expect(code).to_equal(1)

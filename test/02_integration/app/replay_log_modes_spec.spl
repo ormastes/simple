@@ -9,6 +9,15 @@ fn _run_replay(args: [text]) -> (text, text, i64):
         "REPO=$(pwd); SIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/simple\" run \"$REPO/src/app/replay/main.spl\" " + joined
     ])
 
+# Hard-bounded variant. `timeout 120` makes a non-terminating self-spawn chain
+# observable as exit 124 instead of hanging the whole suite forever.
+fn _run_replay_bounded(args: [text]) -> (text, text, i64):
+    val joined = args.join(" ")
+    rt_process_run("/bin/sh", [
+        "-c",
+        "REPO=$(pwd); SIMPLE_LIB=\"$REPO/src\" timeout 120 \"$REPO/bin/simple\" run \"$REPO/src/app/replay/main.spl\" " + joined
+    ])
+
 describe "replay log mode CLI options":
     it "shows shared log options in help":
         val (out, err, code) = _run_replay(["--help"])
@@ -33,7 +42,47 @@ describe "replay log mode CLI options":
         val (out, err, code) = _run_replay(["--log-mode=noisy"])
         expect(code).to_equal(1)
 
-    it "delegates non-srr replay logs to the rust CLI":
-        val (out, err, code) = _run_replay(["missing-build-log.json"])
+    it "reports a missing build log without spawning another replay process":
+        """
+        An operator types `simple replay build.json` and mistypes the filename.
+        The command must tell them the file is missing and exit — it must never
+        hand the same arguments back to another `simple replay` child.
+
+        Reproduces doc/08_tracking/bug/
+        simple_replay_self_spawns_unbounded_process_chain_2026-08-10.md, where
+        `delegate_replay` re-invoked `./bin/simple replay <same args>`
+        unconditionally. Each hop stayed alive blocked in wait, so the ~124
+        processes/min, ~8.4 GB/min chain exhausted a 128 GB host and earlyoom
+        then killed unrelated healthy `simple` builds.
+
+        Two oracles, both required:
+          1. the run TERMINATES inside a hard 120 s bound — the defect's parent
+             never returned, so a bounded exit is what distinguishes the fixed
+             build from the broken one (timeout(1) reports 124);
+          2. the reported failure is the non-spawning branch, named by the path
+             the user actually typed.
+        """
+        step("Ask replay to open a build log that does not exist")
+        val (out, err, code) = _run_replay_bounded(["missing-build-log.json"])
+
+        step("The command returns instead of blocking on a self-spawned child")
         expect(code).to_equal(1)
-        expect(out).to_contain("Failed to read log file")
+
+        step("The failure names the missing path and no delegation was attempted")
+        expect(out + err).to_contain("log file not found: missing-build-log.json")
+
+    it "keeps the missing-log failure free of any self-delegation attempt":
+        """
+        Prevention oracle for the same defect. A future change that restores a
+        delegating fallback would either re-enter `simple replay` (the chain) or
+        shell out to the Rust CLI; both surface as the old build-log wording.
+        Assert that wording is absent so the guard bites before a fork bomb can
+        be reproduced on a developer's host.
+        """
+        step("Run the missing-log case under the same hard time bound")
+        val (out, err, code) = _run_replay_bounded(["missing-build-log.json"])
+        expect(code).to_equal(1)
+
+        step("No delegated Rust-CLI build-log reader ran")
+        expect(out + err).to_contain("log file not found")
+        expect((out + err).contains("Failed to read log file")).to_equal(false)
