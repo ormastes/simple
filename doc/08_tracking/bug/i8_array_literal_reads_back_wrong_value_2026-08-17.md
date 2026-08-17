@@ -128,3 +128,34 @@ Similar-problem detection (all 8 integer widths x 4 erased-slot boundaries):
 The detection probe immediately caught a SEPARATE live defect the reproducer
 could not see — see
 `doc/08_tracking/bug/jit_tuple_get_returns_raw_tagged_word_to_i64_sink_2026-08-17.md`.
+
+## Runner-level RED baseline (2026-08-17, coordinator-run)
+
+The reproducing spec was run against the DEPLOYED seed binary
+`bin/release/x86_64-unknown-linux-gnu/simple` (mtime 2026-08-16 22:59:37),
+which predates the fix in this commit:
+
+```
+$ KILL_SIMPLE_MIN_AGE_SECS=3000 nice -n 19 bin/simple test \
+    test/01_unit/compiler/codegen/i8_int_boxing_repro_spec.spl --timeout 900
+Results: 2 total, 1 passed, 1 failed
+rc=1
+```
+
+`rc` was captured on the line after the command, not through a pipe.
+
+This settles that the reproducing spec is NOT vacuous: it goes red on the
+defect, and the one passing example is its control. It is a genuine RED
+baseline.
+
+The matching GREEN is still MISSING and is not claimed. Producing it needs a
+compiler binary rebuilt with this fix, and both attempts were OOM-killed on a
+host at loadavg ~150 with ~2-3GB free. `cargo check --release --bin simple`
+passes clean (exit 0 via PIPESTATUS), so the fix compiles, but no post-fix
+binary has ever executed this spec.
+
+`KILL_SIMPLE_MIN_AGE_SECS=3000` was required: a `kill_simple_monitor.shs`
+instance from a foreign worktree was observed SIGTERMing healthy runs at
+`age>=60s`, well below this spec's runtime. Runs without it died at rc 143/144
+before printing a header, which through a pipe launders as a silent exit 0 --
+indistinguishable from the silent-green defect class this batch hunts.
