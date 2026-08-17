@@ -1403,39 +1403,42 @@ fn append_root_import_binding_markers(module: &mut Module, path: &Path) {
 /// Neither clause survives a two-module experiment (`a.spl` and `b.spl` each defining
 /// `fn who() -> text`, plus a third file importing both):
 ///
-/// - ~~The **interpreter does not resolve by bare name alone.** A call made from
+/// - The **interpreter does not resolve by bare name alone.** A call made from
 ///   *inside* a defining module is resolved against that module's owner tag (see
 ///   `FLATTEN_MODULE_OWNER_ATTR_PREFIX` and `FUNCTION_MODULE_OWNER`), so `a.call_a()`
 ///   keeps reaching `a.who` and `b.call_b()` keeps reaching `b.who`, in either import
 ///   order. It is only the bare-name *fallback* — a call from a third module that
-///   defines neither — that collapses.~~
+///   defines neither — that collapses.
 ///
-///   **RETRACTED 2026-08-17 — this bullet is FALSE, and it is the dangerous kind of
-///   false: it tells a maintainer that in-module calls are already safe.** Re-run of
-///   the very experiment it describes (`a.spl`/`b.spl` each defining `fn who() -> text`,
-///   a third file importing both, `bin/simple run`): `call_a()` AND `call_b()` both
-///   printed `from_A`. Swapping the two `use` lines made both print `from_B`. The
-///   interpreter is first-import-wins for the in-module call too, exactly like the
-///   third-module fallback — the owner tag does not rescue it.
+///   **RE-CONFIRMED 2026-08-17, and a correction to a retraction that briefly stood
+///   here.** A lane "retracted" this bullet as false after seeing `call_a()` and
+///   `call_b()` both print `from_A` under a plain `bin/simple run`. That retraction
+///   was itself wrong: plain `run` uses the **JIT**, not the interpreter. Re-run with
+///   the engine pinned explicitly, on `fixtures/probe_xmod_collision.spl`:
 ///
-///   Three further measurements pin the mechanism:
-///   * It is **not** specific to the `_` private-helper convention — a public `who()`
-///     collides identically (the bullet above used a public name and still got it wrong).
-///   * It is **not** limited to identical signatures. With A's `shared_arity()` taking
-///     no parameters and B's taking one, B's own wrapper calls `shared_arity(7)` and
+///   ```text
+///   SIMPLE_EXECUTION_MODE=interpreter -> XMOD_COLLISION PROBE: ALL PASS
+///   SIMPLE_EXECUTION_MODE=jit         -> FAIL b_private / b_public / b_arity
+///   ```
+///
+///   So this bullet is accurate **for the interpreter** and the owner-tag machinery
+///   does work there. The paragraph below ("Do not restate a registry policy here from
+///   reading one engine") is not boilerplate — it caught a real error, and the error
+///   was made by reading the DEFAULT engine without checking which engine that is.
+///
+/// - **NEW 2026-08-17 — the in-module call is NOT protected under the JIT.** The
+///   bullets here previously described codegen as first-import-wins only for the
+///   *third-module* caller. It is also first-import-wins for a call made from inside a
+///   defining module: `b.call_b()` reaches `a`'s body. Two further measurements:
+///   * Not specific to the `_` private-helper convention — a public `who()` collides
+///     identically under the JIT.
+///   * Not limited to identical signatures. With A's `shared_arity()` taking no
+///     parameters and B's taking one, B's own wrapper calls `shared_arity(7)` and
 ///     reaches A's zero-parameter body: the argument is silently DISCARDED and **no
-///     arity error fires**.
-///   * The owner-tag tie-break in `select_overload` (`interpreter_call/mod.rs:177`) is
-///     **never reached**. Under `SIMPLE_DEBUG_OVERLOAD_SELECT=1` the probe printed no
-///     `[module-tie]` line at all, so `FUNCTION_OVERLOADS[name]` holds fewer than two
-///     candidates by dispatch time — only one definition survives into the registry and
-///     there is nothing for the tie-break to choose between. Note this diagnostic
-///     (`warn_duplicate_private_signatures`) still sees BOTH definitions in
-///     `module.items` and warns about them, so the loss happens between this pass and
-///     interpreter registration. Fixing `select_overload` alone cannot help; the
-///     registry must keep both definitions (owner-scoped keys or mangling).
+///     arity error fires**. This is the strongest available proof that the JIT keeps
+///     only one definition rather than choosing badly between two.
 ///
-///   Regression fixtures + specs, all currently RED by design:
+///   Regression fixtures + specs (interpreter arm GREEN, JIT arm RED by design):
 ///   `test/01_unit/compiler/pipeline/cross_module_symbol_collision_spec.spl`,
 ///   `test/01_unit/compiler/pipeline/cross_module_collision_detection_spec.spl`,
 ///   `test/01_unit/compiler/pipeline/fixtures/probe_xmod_collision.spl`.

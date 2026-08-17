@@ -468,3 +468,64 @@ allows, recorded here so it is not silently lost:
 > Running the probe with `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=0` should still report
 > `_shared_helper`. Today it does not — the flag silences a warning about a
 > demonstrably wrong result.
+
+---
+
+## CORRECTION 2026-08-17 (same lane, later the same session) — the defect is JIT-ONLY
+
+**The section above overstated the defect, and this correction supersedes it on one
+axis.** The claim that "the in-module call is NOT protected" and that the interpreter
+is first-import-wins was produced by running `bin/simple run` **without pinning the
+engine**. Plain `run` uses the **JIT**. With the engine pinned explicitly:
+
+```
+SIMPLE_EXECUTION_MODE=interpreter  ->  XMOD_COLLISION PROBE: ALL PASS
+SIMPLE_EXECUTION_MODE=jit          ->  FAIL b_private / b_public / b_arity
+```
+
+Confirmed independently by the reproducing spec, whose two arms split cleanly:
+
+```
+cross-module same-name symbol collision
+  PASS resolves each module's calls against its own definitions on the interpreter
+  FAIL resolves each module's calls against its own definitions on the cranelift JIT
+Results: 2 total, 1 passed, 1 failed
+```
+
+### What is true after the correction
+
+- **Interpreter: CORRECT.** The owner-tag machinery
+  (`FLATTEN_MODULE_OWNER_ATTR_PREFIX` / `FUNCTION_MODULE_OWNER` / `select_overload`)
+  resolves in-module calls to the right module, for private names, public names, and
+  differing arity alike. The long-standing source comment describing this was right;
+  a retraction of it briefly written into `module_loader.rs` has been reverted.
+- **JIT: WRONG, and broader than filed.** First-import-wins, including for a call made
+  from *inside* a defining module — which the prior source comment covered only for the
+  third-module caller. Not `_`-prefix specific. Not limited to identical signatures:
+  `shared_arity(7)` reaches a zero-parameter body with the argument silently discarded
+  and **no arity error**.
+- **The `select_overload` "never reached" observation was measured on the JIT run** and
+  says nothing about the interpreter path, which demonstrably works.
+
+### Live collisions this run surfaced in the real tree
+
+Running the spec printed the compiler's own warnings for genuine stdlib collisions,
+including the one CRIT.md cited as corroboration:
+
+```
+public function `shell` has 3 co-compiled definitions with 2 differing signatures
+  ((text)->ProcessResult vs (text)->ShellResult)
+public function `dir_remove_all` ... ((text)->bool vs (text)->i32)
+public function `file_read_bytes` ... ((text)->[i64] vs (text)->[u8])
+public function `skip` ... (13-arg spec-DSL variant vs (text,text)->())
+```
+
+`file_read_bytes` returning `[i64]` under one definition and `[u8]` under the other is
+a silent-wrong-result waiting to happen on the JIT lane specifically.
+
+### Method note worth keeping
+
+The wrong conclusion came from trusting the default engine. **Pin
+`SIMPLE_EXECUTION_MODE` explicitly on every engine-sensitive measurement in this repo**
+— the two engines disagree here, and "I ran `bin/simple run`" does not identify which
+one answered.
