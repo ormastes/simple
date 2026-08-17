@@ -1134,3 +1134,36 @@ blockers are upstream of MIR (a bare `bytes` suffix hijack in the driver's sourc
 loader), so there is no fix pattern to grep for in
 `_MirLoweringExpr/expr_dispatch.spl`. Reaching MIR at all needs stage3, which
 per the governing fact was not available. Status left STILL UNVERIFIED.
+
+## 2026-08-17 (W6) — 169 call-to-zero sites measured in the shipped self-hosted binaries
+
+Directly relevant to this row's FIFTH-campaign line "Stage 2 links clean ...
+0 undefined refs, **0 call-to-zero sites**". That claim does not hold for the
+self-hosted binaries present in this checkout:
+
+    objdump -d bootstrap/stage3/simple | grep -cE '\scall\s+0 <'   -> 169
+    objdump -d bootstrap/stage2/simple | grep -cE '\scall\s+0 <'   -> 169
+
+(both 3464072 bytes, mtime 2026-08-11 22:10; stripped; **not** the Rust seed.)
+Each is a `call rel32` whose target is encoded as address 0 — a function that
+was referenced but never emitted. Any one of them segfaults with `RIP = 0` the
+moment control reaches it, producing exit 139 with no diagnostic and no
+meaningful backtrace, which is exactly the signature this row and the three
+`*_exit139_2026-08-14` / `*_sigsegv_2026_08_14` rows keep re-encountering under
+different names. One is confirmed live and reproducible in under five minutes —
+see the family write-up appended to
+`doc/08_tracking/bug/stage3_selfhost_exit_139_2026-08-14.md` (fixture, GDB
+transcript, and the `objdump` of the faulting site at `0x66b0e7`).
+
+Implication for this row specifically: exit 139 observed at a Stage-3 frontier
+is **not** evidence that the frontier's function is defective. It is evidence
+that some earlier compile emitted a call to a function it failed to lower. The
+`lower_expr` nil-receiver SIGILL this row is named for remains, as the doc
+already states across six campaigns, a fault site that has **never executed** —
+no SIGILL, no exit 132, `[mir-stmt-caller]` = 0. Nothing in
+`src/compiler/30.types/type_infer/inference_expr.spl` (this row's nominal owner
+and a file W6 owns) was found defective, and no in-scope RED exists to quote, so
+no spec and no source change were made here.
+
+Status unchanged: **STILL UNVERIFIED**, and it should stay open. The
+actionable lead is the 169 call-to-zero sites, not this fault site.

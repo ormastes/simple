@@ -205,3 +205,16 @@ rebuilding `bin/**` or `build/bootstrap/**` is forbidden in this wave (~16
 concurrent lanes). The stage3 binary used above is from 2026-08-11, so this is
 evidence about that binary; the reproducer is cheap enough to re-run against any
 newly admitted stage3 in seconds.
+
+### Addendum (W6, same session): the call-to-zero sites are not a one-off
+
+    objdump -d bootstrap/stage3/simple | grep -cE '\scall\s+0 <'   -> 169
+    objdump -d bootstrap/stage2/simple | grep -cE '\scall\s+0 <'   -> 169
+
+169 statically encoded calls to address 0 in each shipped self-hosted binary.
+The one symbolized above (`0x66b0e7`) is merely the one this fixture reaches
+first. A cheap, non-executing gate is therefore available today and should be
+added to the bootstrap admission checks: **a stage binary containing any
+`call 0` site must not be admitted.** That single grep would have failed every
+one of these three rows' builds at the point the defect was introduced, instead
+of surfacing days later as an unattributable exit 139.
