@@ -718,3 +718,33 @@ New acceptance criteria (extends AC-1..AC-12 above):
   bug and the recorded ?-TryOperator/standalone-SMF reason still holds.
   Merged-tree verification: c-runtime-compiles PASS (120 files), cross-OS PASS
   (8 probes), file_backend spec 6/6.
+- FRESH WHOLE-SUITE SWEEP ON TIP (2026-08-17, lane W10-A): 49/49 spec files
+  GREEN — 439 executed, 439 passed, 0 failed, 0 dropped, 0 timeouts, 0
+  environment-blocked, ~33 min, one spec per process, verdicts read from
+  SPEC FILE VERDICT. Landmine 9 did NOT recur (restaurant_lane declared>=12
+  executed=12 passed=12). This supersedes the stale 48/48 number. Gates:
+  cross-OS PASS (8 probes), c-runtime-compiles PASS (102 files), sqlite-acid
+  BLOCKED — and note this lane hit the REAL `undefined symbol: rt_sqlite_open`
+  form rather than the main tree's stale-runtime-archive form, confirming the
+  archive staleness is a local artifact that masks the true frontier.
+- COVERAGE HOLE FOUND (open, needs an owner): the recorded suite is
+  SELF-SELECTED and has never included 21 `*/http_server/*_spec.spl` files
+  present on disk. Swept separately: 12/21 green, 9 RED — 168 examples, 131
+  passed, 37 FAILED. These predate this round's merges and are not caused by
+  them, but "the suite is green" has been true only of the subset someone
+  chose to list.
+  (a) THREE ARE ORPHANED AGAINST AN API THAT DOES NOT EXIST:
+  lib/http_server/{security_headers 7/0, rate_limit 6/0, request_validation
+  11/0} all die with `semantic: function default_security_headers_config /
+  default_rate_limit_config not found`, and `grep -rn` over src/ returns ZERO
+  definitions of either. They test a surface that was never written or was
+  removed without them.
+  (b) SIX ASSERTION REDS: nogc_async_mut/http_server/compression 19/11
+  (`expected gzip to equal lz4`), protocol_handler 8/7,
+  static_compression_cache 8/7, range_numeric_guard 1/0 (both copies),
+  security_context_dispatch 6/5.
+  Next action: a dedicated lane must triage each — decide per spec whether the
+  IMPLEMENTATION is missing/wrong (fix it) or the SPEC is stale against a
+  deliberately removed API (delete it with justification) — and then FOLD ALL
+  21 INTO THE RECORDED SUITE so the enumeration can never silently drift
+  again. Deleting a spec merely because it is red is not acceptable.

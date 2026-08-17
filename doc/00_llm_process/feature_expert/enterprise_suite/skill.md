@@ -62,8 +62,23 @@ Contract doc: `doc/07_guide/app/enterprise/guarded_command_contract.md`.
 Run **one spec per process** (`SIMPLE_TIMEOUT_SECONDS=900`), read the
 `SPEC FILE VERDICT` line, and record the binary identity once
 (`readlink -f bin/simple` + `bin/simple --version | head -1`).
-A ready-made driver lives at `build/w9c/sweep.sh` in the W9-C worktree; the
-spec list is:
+A ready-made driver lives at `build/w10a/run.sh` in the W10-A worktree (writes
+one ANSI-stripped log per spec under `build/w10a/logs/` and one verdict line
+per spec into `build/w10a/verdicts.txt`).
+
+**Current whole-suite number (2026-08-17, lane W10-A, tip `0a12ca93433` — this
+supersedes the stale 48/48 429-example sweep, which ran on a tree predating the
+AP fix, native-ACID docs and security merges):**
+**49/49 spec files GREEN, 439 examples executed, 439 passed, 0 failed,
+0 dropped, 0 timeouts, 0 environment-blocked spec rows** — 14 unit + 14 system
++ 21 ubs_test, ~33 min wall total, one spec per process. The set grew from 48
+to 49 because `test/03_system/app/enterprise/enterprise_security_audit_spec.spl`
+(8 examples) landed since. No harness-plumbing red this time:
+`ubs_test/restaurant_lane_spec` reported `declared>=12 executed=12 passed=12`.
+Binary: `/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple`
+(Rust bootstrap seed, 59,536,728 bytes, 2026-08-16 22:59 UTC).
+
+The spec list is:
 
 ```bash
 # unit
@@ -94,6 +109,7 @@ bin/simple test test/03_system/app/enterprise/store_web_harden_spec.spl
 bin/simple test test/03_system/app/enterprise/enterprise_web_app_spec.spl
 bin/simple test test/03_system/app/enterprise/back_office_web_spec.spl
 bin/simple test test/03_system/app/enterprise/enterprise_auth_throttle_spec.spl
+bin/simple test test/03_system/app/enterprise/enterprise_security_audit_spec.spl
 bin/simple test test/03_system/web/server/http_dynamic_dispatch_live_socket_spec.spl
 # ERP example suite (21 specs)
 for s in examples/12_business/simple_erp/ubs_test/*_spec.spl; do bin/simple test "$s"; done
@@ -104,7 +120,20 @@ Standing gates:
 ```bash
 sh scripts/check/check-enterprise-cross-os.shs      # PASS — 8 probe(s), host + x86_64-unknown-simpleos, SMF magic
 sh scripts/check/check-c-runtime-compiles-push.shs  # PASS — 102 file(s) compiled, 0 errors (2 external-dep skips)
+sh scripts/check/check-sqlite-backend-acid.shs      # BLOCKED (expected) — see below
 ```
+
+Verbatim gate verdicts on tip `0a12ca93433` (2026-08-17, W10-A):
+
+- `PASS — 8 probe(s) checked, each compiles host + x86_64-unknown-simpleos with SMF magic`
+- `PASS — 102 file(s) compiled, 0 errors (2 skipped for unavailable external dependencies)`
+- `BLOCKED — AOT native build failed: error: codegen: undefined symbol: rt_sqlite_open`
+
+The ACID gate's BLOCKED message has TWO known shapes. In a lane worktree (this
+run) it is the real undefined-symbol error above — the seed's AOT codegen has no
+`rt_sqlite_*` symbols to link. The main tree instead blocks earlier on a stale
+runtime archive. Either way the gate is environment-blocked, not a red; the
+resume path is a stage4 self-hosted native deploy.
 
 Do NOT run the OVMF in-guest gate casually — it is very long and owned by the
 SimpleOS lanes.
@@ -118,6 +147,33 @@ SimpleOS lanes.
 | `riscv32` / `i686` / `armv7` cross-compile probes | Toolchain absent (incl. seed `--backend llvm`). | Re-run `sh scripts/check/check-enterprise-cross-os.shs` once those triples have a toolchain. |
 | Public TLS / HTTP2 termination | No direct public TLS from Simple servers yet. | Edge-proxy deployment per the assessment §3.2. |
 | `/fin/ap` line items | `fin_ap_open` gates on migration id `proc_001_payables`, which nothing applies; procurement books payables into the shared `journal` under `accounts_payable`. The route prints the authoritative journal total so the page is never silently wrong. | Lane W9-A: add a payables projection in procurement, or repoint `fin_ap_open` at the journal. |
+
+## Out-of-suite reds in the `http_server` tier specs (found 2026-08-17, W10-A)
+
+Enumerating the enterprise+http spec family from disk rather than from this
+list turned up **21 `*/http_server/*_spec.spl` files that the recorded suite
+never ran**. Swept them the same way (one per process): **12/21 green,
+9 RED — 168 examples, 131 passed, 37 failed.** These are NOT enterprise-suite
+regressions — they were never in the sweep list, and the dominant cause is a
+missing library API, not a merge:
+
+| Spec | executed/passed | Cause |
+|---|---|---|
+| `lib/http_server/security_headers_spec` | 7/0 | `semantic: function default_security_headers_config not found` |
+| `lib/http_server/rate_limit_spec` | 6/0 | `semantic: function default_rate_limit_config not found` |
+| `lib/http_server/request_validation_spec` | 11/0 | same class — missing config constructor |
+| `lib/http_server/range_numeric_guard_spec` | 1/0 | assertion: `expected subject to be truthy, got false` |
+| `lib/http_server/security_context_dispatch_spec` | 6/5 | 1 assertion |
+| `lib/nogc_async_mut/http_server/compression_spec` | 19/11 | 8 assertions (`expected gzip to equal lz4`) |
+| `lib/nogc_async_mut/http_server/protocol_handler_spec` | 8/7 | 1 assertion |
+| `lib/nogc_async_mut/http_server/range_numeric_guard_spec` | 1/0 | assertion |
+| `lib/nogc_async_mut/http_server/static_compression_cache_spec` | 8/7 | 1 assertion |
+
+`/usr/bin/grep -rn 'default_security_headers_config\|default_rate_limit_config' src/`
+returns **zero hits** — those functions exist nowhere in the tree, so the three
+worst specs are orphaned against an API that was never implemented (or was
+removed). Deliberately NOT fixed by W10-A: out of the enterprise lane's scope
+and not caused by this round's merges. Needs an owner.
 
 ## Landmines (each of these has already cost a lane real time)
 
@@ -164,7 +220,13 @@ SimpleOS lanes.
    timeout=1` — note the `declared>=1`, far below the spec's real example
    count, which is the tell. Observed on `ubs_test/restaurant_lane_spec.spl`
    during the 2026-08-16 sweep; a plain standalone re-run gave 12/12. Always
-   re-run a red once standalone before diagnosing the code.
+   re-run a red once standalone before diagnosing the code. (It did NOT recur
+   in the 2026-08-17 W10-A sweep — `declared>=12 executed=12 passed=12` — which
+   confirms it is load/timing-dependent plumbing, not the spec.)
+10. **Never trust the recorded spec list as the enumeration.** The 48-file list
+    in this doc silently omitted 21 `http_server` tier specs and predated
+    `enterprise_security_audit_spec`. Enumerate from disk every sweep and diff
+    against this list; a spec that appeared or vanished is itself a finding.
 
 ## Guides
 
