@@ -189,7 +189,14 @@ stop_after_stage2=0
 diagnostic_roots=""
 diagnostic_child_compiler="${SIMPLE_BOOTSTRAP_DIAGNOSTIC_CHILD_COMPILER:-bin/simple}"
 diagnostics_mode="${SIMPLE_BOOTSTRAP_DIAGNOSTICS_MODE:-off}"
-progress_log="${SIMPLE_BOOTSTRAP_PROGRESS_LOG:-}"
+# Progress heartbeat is ON by default. A stage can run 15+ minutes writing
+# nothing -- stage2-native-build.log was 337 bytes for an entire stage -- so a
+# silent run is indistinguishable from a hung one. Three sessions killed healthy
+# builds on that ambiguity (one had already finished 62/62). The watcher is a
+# separate process that wakes every progress_interval seconds; it does not touch
+# the build's own I/O path, so enabling it costs one sleeping process and one
+# short line per interval. Set SIMPLE_BOOTSTRAP_PROGRESS_LOG= (empty) to opt out.
+progress_log="${SIMPLE_BOOTSTRAP_PROGRESS_LOG-default}"
 progress_interval="${SIMPLE_BOOTSTRAP_PROGRESS_INTERVAL:-30}"
 execution_profile="${SIMPLE_BOOTSTRAP_EXECUTION_PROFILE:-incremental}"
 bootstrap_strategy="${SIMPLE_BOOTSTRAP_STRATEGY:-normal}"
