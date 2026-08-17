@@ -96,3 +96,50 @@ sh scripts/bootstrap/bootstrap-from-scratch.sh --progress --progress-interval=30
   stall had to be diagnosed from the events file rather than the stage log.
 - `15c3131f644` — the `Dict.clear()` fix that got stage 3 past the previous
   failure point and exposed this.
+
+## UPDATE — the run ended in an external SIGTERM, not a stall resolution
+
+At elapsed ~26 min the run ended:
+
+```
+warning: stage3 self-host failed (exit 143); Stage 4 unavailable
+Stage 3 unavailable — no provenance-verified compiler for Stage 4
+```
+
+**Exit 143 = 128+15 = SIGTERM.** Per `.claude/rules/testing.md`, `rc=143` with no
+result line means **UNVERIFIED, not failed**. So this run proves neither that the
+stall would have resolved nor that stage 3 is broken. The stall measurement above
+(547s at done=576) stands on its own; the ending does not.
+
+### The sender is NOT identified. Candidates checked and their status:
+
+- **`timeout`/`run_timeout` in the bootstrap script — RULED OUT.** `run_timeout`
+  and `run_timeout_kill` exist (lines 691, 703) and `timeout` does send SIGTERM,
+  which would produce exactly 143. But no caller wraps the stage-3 native-build:
+  every call site is a 10/30/60/180s smoke or gate (lines 1004, 1007, 2300, 2409,
+  2418, 2429, 2432, 2582, 2635, 2651). None is stage 3.
+- **`kill-simple-monitor.service` — NOT MATCHED by its own thresholds.** The unit
+  is `active` and `enabled`, respawning every ~15s (restart counter **429**), and
+  it is NOT logging kills. But its guards are `KILL_SIMPLE_MEM_MB=24000` (we
+  measured 8.0 GB) and `KILL_SIMPLE_CPU_PCT=95` with a consecutive-poll
+  requirement (we measured 75-83% of ONE core). It also targets `bin/simple
+  run|test`; the stage-3 process is `simple native-build`. On the recorded
+  numbers it should not have fired. **Not exonerated** — it is unlogged, so
+  absence of evidence is not evidence of absence — but not demonstrated either.
+  Note `KILL_SIMPLE_MIN_AGE_SECS=7200` was exported for the bootstrap, which does
+  NOT reach the systemd unit: it has its own environment.
+- **Another session/agent.** ~13 peer sessions and ~190 claude processes were
+  live. Unproven.
+
+### Why this matters more than the stall
+
+A single external SIGTERM discards a 26-minute build and every diagnostic in it.
+This is the same evidence-corruption class already recorded for specs, where a
+SIGTERMed run "launders through a pipe as exit 0 with no Results line". The
+durable fix is the one now being built: per-file process isolation with a
+supervisor, so a death — of a worker OR of the parent's child — is recorded
+against a named file and the remaining files still compile.
+
+**Do not re-run and hope.** Before the next attempt, either identify the sender
+or run the stage under a recorded wrapper that captures who signals it
+(e.g. keep the parent's `wait` status and log the signal number per child).
