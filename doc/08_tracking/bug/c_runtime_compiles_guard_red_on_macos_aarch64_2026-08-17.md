@@ -1,5 +1,23 @@
 # `check-c-runtime-compiles-push.shs` is RED on origin/main when run on macOS aarch64
 
+## FIXED — 2026-08-17
+
+Commit `a91c8282dc` restores the mandatory guard on macOS aarch64 without
+weakening its failure policy. The checker parses `hosted_cocoa.c` as
+Objective-C on Darwin; the AArch64 SIMD path no longer emits the invalid
+zero-shift NEON intrinsic; the SciLib probes request Darwin's native extension
+surface; and the receiver-valid selfcheck uses a portable mutex/condition
+rendezvous instead of optional POSIX barriers.
+
+Measured on macOS aarch64 after the fix:
+
+```text
+PASS — 101 file(s) compiled, 0 errors, 5 external-SDK skips
+```
+
+The five skips remain the checker's pre-existing explicit unavailable-SDK
+category; none of the five files named by this bug are skipped.
+
 - Date: 2026-08-17
 - Area: infra / pre-push guards / runtime portability
 - Severity: medium — the guard is MANDATORY per `.claude/rules/vcs.md`, and it
