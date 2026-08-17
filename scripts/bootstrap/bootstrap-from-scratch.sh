@@ -27,7 +27,8 @@ if [ "${SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED:-0}" != 1 ]; then
       --target=simpleos-*|--target=freebsd-*) bootstrap_strategy_bypass=1 ;;
     esac
   done
-  if [ "${bootstrap_strategy_bypass}" -eq 0 ]; then
+  if [ "${bootstrap_strategy_bypass}" -eq 0 ] &&
+     [ -x "${bootstrap_strategy_entry}/bootstrap-strategy.sh" ]; then
     exec "${bootstrap_strategy_entry}/bootstrap-strategy.sh" \
       --strategy="${bootstrap_strategy_arg}" \
       --output="${bootstrap_strategy_output}" -- "$@"
@@ -196,6 +197,7 @@ bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
 bootstrap_receipt_path="${SIMPLE_BOOTSTRAP_REASON_RECEIPT:-}"
 validate_bootstrap_receipt=0
 stop_after_stage3=0
+stage3_current_acceptance_status=unverified
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
   1|true|yes|on) strict_bootstrap=1 ;;
   *) strict_bootstrap=0 ;;
@@ -2669,7 +2671,40 @@ stage4_verify_candidate_provenance \
     echo "error: Stage 4 candidate provenance did not re-verify" >&2
     exit 1
   }
+stage3_acceptance_sanity=$(bootstrap_stage3_manifest_value \
+  stage3_sanity_evidence_path "${stage3_provenance_manifest}") || {
+  echo "error: Stage 3 acceptance lacks its sanity receipt" >&2
+  exit 1
+}
+bootstrap_stage3_verify_sanity_evidence_receipt \
+  "${stage3_acceptance_sanity}" "${stage3}" || {
+  echo "error: Stage 3 acceptance sanity receipt did not re-verify" >&2
+  exit 1
+}
+stage3_current_acceptance_status=verified
+stage3_acceptance_receipt="${full_bin}.stage3-acceptance.env"
+[ ! -L "${stage3_acceptance_receipt}" ] || {
+  echo "error: refusing symlinked Stage 3 acceptance receipt" >&2
+  exit 1
+}
+stage3_acceptance_tmp="${stage3_acceptance_receipt}.tmp.$$"
+{
+  echo "schema=simple-bootstrap-stage3-current-acceptance-v1"
+  echo "status=${stage3_current_acceptance_status}"
+  echo "stage3_provenance_path=$(absolute_path "${stage3_provenance_manifest}")"
+  echo "stage3_provenance_sha256=$(bootstrap_stage3_hash_file "${stage3_provenance_manifest}")"
+  echo "stage3_sanity_path=${stage3_acceptance_sanity}"
+  echo "stage3_sanity_sha256=$(bootstrap_stage3_hash_file "${stage3_acceptance_sanity}")"
+  echo "stage4_candidate_path=${full_bin}"
+  echo "stage4_candidate_sha256=$(bootstrap_stage3_hash_file "${full_bin}")"
+  echo "stage4_provenance_path=${stage4_provenance}"
+  echo "stage4_provenance_sha256=$(bootstrap_stage3_hash_file "${stage4_provenance}")"
+  echo "completed_gate=stage4-essential-tools-smoke"
+} >"${stage3_acceptance_tmp}" || exit 1
+chmod 400 "${stage3_acceptance_tmp}" || exit 1
+mv "${stage3_acceptance_tmp}" "${stage3_acceptance_receipt}" || exit 1
 echo "  Stage 4 provenance: ${stage4_provenance}"
+echo "  Stage 3 current acceptance: ${stage3_acceptance_receipt}"
 
 echo "Stage 4b: compiling cached UI backend..."
 bootstrap_progress_mark stage4b "$(absolute_path "${log_dir}/stage4b-ui-backend.log")"
@@ -2936,6 +2971,8 @@ if [ "${deploy}" -eq 1 ]; then
     echo "backup_sha256=${backup_hash}"
     echo "timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "deployment_status=pass"
+    echo "stage3_current_acceptance_status=${stage3_current_acceptance_status}"
+    echo "stage3_current_acceptance_receipt=${stage3_acceptance_receipt}"
     echo "platform_acceptance_claimed=false"
   } > "${receipt_tmp}"
   chmod 644 "${receipt_tmp}"
@@ -2972,4 +3009,8 @@ if [ "${stage3_ok:-0}" -eq 0 ]; then
   echo "  Treat any binary deployed by this run as unverified." >&2
   exit 2
 fi
+[ "${stage3_current_acceptance_status}" = verified ] || {
+  echo "ERROR: current Stage 3 acceptance was not bound to verified Stage 4 evidence." >&2
+  exit 2
+}
 bootstrap_progress_mark complete ""
