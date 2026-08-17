@@ -1,0 +1,147 @@
+# Packed Array Copy Round-Trip — Reproducing Spec
+#
+# Reproduces doc/08_tracking/bug/typed_array_variable_binding_zeroes_elements_2026-08-17.md.
+#
+# `[u64]` arrays use a PACKED heap layout (gc_flags::U64_PACKED) whose data
+# slots hold RAW 64-bit words rather than tagged RuntimeValues. `rt_array_copy`
+# — which every array-typed binding `val b = a` lowers to — walked the source
+# with the generic `as_slice()` + `rt_array_push` loop. That was wrong twice:
+# it reinterpreted each raw word as a tagged value, and it produced an UNPACKED
+# result whose reader then untagged whatever it found. The untag is a `>> 3`,
+# so every copied element came back DIVIDED BY EIGHT:
+#
+#   5                   -> 0                   (reads as a "zeroed" array)
+#   1234567890123456789 -> 154320986265432098  (exactly orig / 8)
+#
+# The large value is the discriminating oracle. A plain "the copy is zero"
+# check cannot tell a divide-by-eight apart from an uninitialised buffer, and
+# would also be satisfied by an array that was never written at all. Only an
+# exact-quotient value proves the elements were carried through a shift.
+#
+# The length was always correct (2), which is precisely why this went unnoticed:
+# a `.length()` assertion is the one check that passes in both worlds.
+#
+# ENGINES DIVERGE. The tree-walk interpreter was always CORRECT; only the
+# cranelift JIT was wrong. Spec files fall back to the interpreter, so the
+# in-process examples below could never have been red — they guard the
+# interpreter and any future native port. The SUBPROCESS example is the one
+# that reproduces the defect, and it pins BOTH engines against the same
+# absolute values.
+
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+# ============================================================================
+# Fixtures — the copy only misbehaves when the initializer is a PLACE read of
+# an existing binding, so every case binds through a second name.
+# ============================================================================
+
+fn _small_u64() -> [u64]:
+    [5u64, 6u64]
+
+fn _large_u64() -> [u64]:
+    [1234567890123456789u64, 18446744073709551615u64]
+
+val REPRO_SOURCE: text = "fn small() -> [u64]:\n" +
+    "    [5u64, 6u64]\n" +
+    "\n" +
+    "fn large() -> [u64]:\n" +
+    "    [1234567890123456789u64, 18446744073709551615u64]\n" +
+    "\n" +
+    "fn main():\n" +
+    "    val a = small()\n" +
+    "    val c = a\n" +
+    "    print c[0]\n" +
+    "    print c[1]\n" +
+    "    val b = large()\n" +
+    "    val d = b\n" +
+    "    print d[0]\n" +
+    "    print d[1]\n" +
+    "    print c.length()\n" +
+    "    print a[0]\n"
+
+fn _run_repro_in_mode(mode: text) -> text:
+    val path = "build/test-artifacts/packed_array_copy_repro.spl"
+    file_write(path, REPRO_SOURCE)
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate; the
+    # default is whatever bin/simple currently resolves to, which is what ships.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + path + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+# ============================================================================
+# In-process examples — guard the interpreter and any future native port
+# ============================================================================
+
+describe "copying a [u64] binding preserves small element values":
+
+    it "carries a small value through instead of dividing it by eight":
+        step("Build a packed [u64] whose first element is 5")
+        val original = _small_u64()
+
+        step("Bind it to a second name, which lowers to rt_array_copy")
+        val copied = original
+
+        step("Read the copy back and compare against the absolute stored value")
+        expect(copied[0]).to_equal(5u64)
+        expect(copied[1]).to_equal(6u64)
+
+    it "leaves the source array untouched":
+        step("Confirm copying did not disturb the original")
+        val original = _small_u64()
+        val copied = original
+        expect(original[0]).to_equal(5u64)
+
+describe "copying a [u64] binding preserves large element values":
+
+    it "carries a value that a divide-by-eight would visibly corrupt":
+        # 1234567890123456789 / 8 == 154320986265432098. Asserting the exact
+        # original is what distinguishes a real copy from a shifted one.
+        step("Build a packed [u64] holding a large word and the u64 maximum")
+        val original = _large_u64()
+
+        step("Bind it to a second name and read both elements back")
+        val copied = original
+        expect(copied[0]).to_equal(1234567890123456789u64)
+        expect(copied[1]).to_equal(18446744073709551615u64)
+
+describe "length was never the failing signal":
+
+    it "reports the length that the elements should back":
+        # The length was correct throughout the defect, so this assertion is
+        # the one that would MISS it. Kept as context for the element checks
+        # above, never as a substitute for them.
+        step("Confirm the copy reports two elements")
+        val original = _small_u64()
+        val copied = original
+        expect(copied.length()).to_equal(2)
+
+# ============================================================================
+# Subprocess example — the only one that could go red on the defect
+# ============================================================================
+
+describe "both execution engines agree on packed array copies":
+
+    it "produces identical correct output under the JIT and the interpreter":
+        step("Run the same repro program under the cranelift JIT")
+        val jit_out = _run_repro_in_mode("jit")
+
+        step("Run it again under the tree-walk interpreter")
+        val interp_out = _run_repro_in_mode("interpreter")
+
+        step("The JIT must report the stored values, not the values shifted right by three")
+        expect(jit_out).to_contain("5")
+        expect(jit_out).to_contain("1234567890123456789")
+        expect(jit_out).to_contain("18446744073709551615")
+
+        step("The divide-by-eight signatures must be absent from the JIT output")
+        expect(jit_out.contains("154320986265432098")).to_equal(false)
+
+        step("The interpreter was always correct and must stay that way")
+        expect(interp_out).to_contain("1234567890123456789")
+
+        step("Both engines must agree byte for byte")
+        expect(jit_out).to_equal(interp_out)
