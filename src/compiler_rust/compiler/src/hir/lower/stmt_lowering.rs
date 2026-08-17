@@ -1146,9 +1146,18 @@ impl Lowerer {
     /// match arm. Shared by statement-position (`lower_match_arms_stmt`) and
     /// expression-position (`lower_match_arms`) match lowering — the latter
     /// previously emitted NO extraction, leaving payload bindings nil in
-    /// compiled code. Or-patterns (`case Copy(x) | Move(x)`) are normalized to
-    /// their first alternative: every alternative must bind the same names,
-    /// the same invariant `collect_pattern_bindings` relies on.
+    /// compiled code.
+    ///
+    /// Or-patterns (`case Copy(x) | Move(x)`) used to be normalized to their
+    /// FIRST alternative on the theory that "every alternative binds the same
+    /// names". Binding the same NAMES does not imply binding them from the same
+    /// payload SLOT: `case Ptr(inner, _) | Ref(inner, _) | Slice(inner):`
+    /// matched `Slice(7)` correctly and then extracted `inner` using `Ptr`'s
+    /// two-field shape, silently yielding a wrong value with no error
+    /// (bug or_pattern_mixed_arity_binds_wrong_slot_2026-08-17). Each
+    /// alternative now gets its own extraction, guarded by its own condition
+    /// and chained as if/else-if so exactly one runs — the one that actually
+    /// matched.
     pub(crate) fn build_pattern_binding_stmts(
         &mut self,
         arm_pattern: &Pattern,
@@ -1157,6 +1166,24 @@ impl Lowerer {
         bindings: &[(String, TypeId)],
         ctx: &mut FunctionContext,
     ) -> Vec<HirStmt> {
+        if let Pattern::Or(alternatives) = arm_pattern {
+            if alternatives.len() > 1 {
+                let mut chain: Option<Vec<HirStmt>> = None;
+                for alt in alternatives.iter().rev() {
+                    let then_block = self.build_pattern_binding_stmts(alt, subject_idx, subject_ty, bindings, ctx);
+                    let Ok(condition) = self.lower_pattern_condition_stmt(subject_idx, subject_ty, alt, ctx) else {
+                        continue;
+                    };
+                    chain = Some(vec![HirStmt::If {
+                        condition,
+                        then_block,
+                        else_block: chain,
+                        span: None,
+                    }]);
+                }
+                return chain.unwrap_or_default();
+            }
+        }
         let binding_pattern: &Pattern = match arm_pattern {
             Pattern::Or(alternatives) => alternatives.first().unwrap_or(arm_pattern),
             other => other,
