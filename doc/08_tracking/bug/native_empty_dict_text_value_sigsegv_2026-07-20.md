@@ -89,3 +89,37 @@ arms break, it is dict-read type-loss as described.
 **Recommended retitle** once the discriminator lands: this is a native-only
 wrong-value defect on text concatenation of an `any`-typed value, not a dict
 SIGSEGV.
+
+## DISCRIMINATOR LANDED 2026-08-17 — root cause pinned; the dict is innocent
+
+Five arms in ONE native binary (the pointer varies with ASLR across runs, which
+confirms it is a raw address rather than a constant):
+
+| arm | native result | verdict |
+|---|---|---|
+| A plain text | `hello` | OK — positive control |
+| B `{"k":"hello"}` literal | `hello` | OK |
+| **C empty `{}` then assign** | **`99467552042465`** | **WRONG** |
+| D `v == "hello"` | `true` | value intact |
+| E `v.len()` | `5` | value intact |
+
+Arm A passing rules out a general text-rendering fault; arms D and E prove the
+dict stored and returned a correctly tagged text. **The dict is not the defect.**
+
+**Root cause: MIR concat lowering.** An empty `{}` gives the read a static type of
+`I64`, so `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:564`
+`local_is_str` is false, `:579` sets `is_numeric`, and `:594` renders through
+`rt_raw_i64_to_string` — printing the tagged pointer as a decimal integer. A
+non-empty dict literal infers `str` and passes through correctly at `:564`.
+
+The correct runtime primitives already exist and are simply not used on this
+path: `rt_to_string` (`runtime_native.c:2869`) and `rt_any_add` (`:2843`) both
+tag-dispatch correctly at runtime. So the fix is a lowering decision, not new
+runtime code.
+
+Scope: `src/compiler/50.mir/**`. Diagnosed and handed off, not patched.
+
+**Retitle required.** As filed this is a dict SIGSEGV; it is actually a
+native-only wrong-VALUE defect in text concatenation of a statically-`I64`
+`any` read. A crash-titled row will never be searched for by anyone hunting
+silently-wrong results, which is the class it belongs to.
