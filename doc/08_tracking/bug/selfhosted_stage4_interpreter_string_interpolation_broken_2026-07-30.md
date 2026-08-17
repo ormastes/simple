@@ -331,3 +331,83 @@ Crash debugging on `ae4c3d56ce3`'s `expand_string_interpolations` path is
 being handed to a fresh lane, starting from this localization (frontend
 wiring point identified, failure mode is a nil-receiver field access,
 reproducible via the regression spec above) rather than continued here.
+
+## 2026-08-17 lane D — root-cause path is FIXED IN-TREE (content-classified); end-to-end still UNVERIFIED
+
+**Verdict: the mechanism this row asked for EXISTS and WORKS. The reported
+end-to-end symptom could not be exercised — no self-hosted binary is runnable in
+this tree. Classified by CURRENT SOURCE CONTENT, not by SHA ancestry.**
+
+### The cited file is not the locus (path drift)
+
+The row cites `src/compiler/10.frontend/core/lexer_struct.spl`. That file is
+CORRECT and always was: its `{` branch (`:884-963`) deliberately copies the whole
+`{...}` region verbatim, brace-depth-tracking nested strings, exactly as the
+"Localization" section above describes. The defect was never there — the missing
+step was the post-parse promotion.
+
+### The promotion step is present and wired
+
+- `src/compiler/10.frontend/core/string_interpolation_expand.spl:155`
+  `expand_string_interpolations(start_expr)` — walks the arena, and for each
+  `EXPR_STRING_LIT` with unprocessed state promotes it via
+  `expr_promote_interpolated_string` when
+  `parse_string_interpolation_parts` yields regions, otherwise marks it processed
+  after decoding `{{`/`}}`.
+- `src/compiler/10.frontend/core/frontend.spl:27` — `core_frontend_parse` calls it
+  after every successful module parse, before
+  `transform_interpolated_placeholder_args`.
+- `src/compiler/10.frontend/core/interpreter/eval.spl:421` — dispatches
+  `EXPR_INTERPOLATED_STRING` to `eval_interpolated_string`.
+
+`eval_string_lit` (`eval.spl:469`) is still the bare
+`val_make_text(expr_get(eid).s_val)` the localization flagged — correctly so:
+under this design it only ever sees literals that have no interpolation regions.
+
+### Measured, and the old spec was VACUOUS
+
+`test/01_unit/compiler/interpreter/string_interpolation_spec.spl` (the row's
+repro hint) **cannot settle this row**: its examples are plain
+`expect("bare={a}")` literals, so they are lexed and interpolated by whichever
+binary runs the spec — today the Rust seed, whose interpolation always worked.
+It never touches the pure-Simple frontend. It also could not be run to a verdict
+today: three attempts under `bin/simple test` ended
+`reason=daemon-no-response budget_ms=480000` / SIGTERM at the 600s host monitor
+(the host is saturated by a live bootstrap).
+
+Replacement, which drives the pure-Simple frontend sources directly (read live
+from disk, no build) — new file
+`test/01_unit/compiler/interpreter/pure_simple_frontend_interpolation_promotion_spec.spl`:
+
+```
+pure-Simple frontend string interpolation promotion
+  ✓ promotes a bare {var} literal to an interpolated-string node
+  ✓ promotes an expression region and a multi-region literal
+  ✓ leaves a brace-free literal as a plain string literal
+  ✓ leaves a CSS-shaped brace literal unpromoted
+
+4 examples, 0 failures
+SPEC FILE VERDICT: .../pure_simple_frontend_interpolation_promotion_spec.spl declared>=4 executed=4 passed=4 failed=0 dropped=0
+```
+
+Non-vacuity: the same counter returns 1 and 2 in the first two examples and 0 in
+the last two, so it discriminates. Fixture sources are built by CONCATENATING
+`char_from_code(123)`/`(125)` — never embedded braces, which the spec's own lexer
+would resolve.
+
+### What this lane could NOT prove
+
+- **The end-to-end symptom.** `bootstrap/stage3/simple run` is
+  `error: unknown command 'run'` (verified directly) and `bin/simple` is the Rust
+  seed, so no self-hosted `run` of `print("x={x}")` was possible. The row's
+  headline claim remains UNVERIFIED end to end.
+- The nil-receiver crash the previous verification section reported for
+  `string_interpolation_spec.spl` under `stage4-fix3` — not reproducible without
+  a self-hosted binary.
+- No sabotage test (removing the `frontend.spl:27` call to confirm the new spec
+  goes RED): `frontend.spl` is outside this lane's file scope and ~15 lanes are
+  editing concurrently.
+
+**Recommended disposition:** do NOT close on this evidence alone. Re-run the new
+promotion spec plus a genuine self-hosted `run` when a stage4 binary next exists;
+if both are green, close.

@@ -1,5 +1,54 @@
 # Bug: struct-literal shorthand argument binds to `nil` when it follows an explicit named argument
 
+- **Status (2026-08-17, lane A): STILL LIVE — reproduced at tip, root cause now
+  isolated, fix NOT applied (owning file is outside this lane's scope).**
+
+  Reproduced with the deployed Rust seed `bin/simple`:
+  ```
+  bin/simple test test/feature/usage/struct_shorthand_spec.spl --no-session-daemon --timeout 900
+  Results: 15 total, 13 passed, 2 failed
+  ```
+  Failing: `uses explicit then shorthand` (expected 0 to equal 20) and
+  `mixes in complex struct` (expected 0 to equal 30). Note the observed value is
+  `0` (the i64 default), not `nil` as the 2026-07-20 write-up said.
+
+  **Root cause (isolated this pass):**
+  `src/compiler_rust/compiler/src/interpreter_call/core/class_instantiation.rs:358`
+  declares `let mut positional_idx = 0;` and `:417-420` consumes a positional
+  (shorthand) argument as `class_def.fields[positional_idx]`, incrementing the
+  counter **only for positional args** and never skipping field slots already
+  filled by a preceding named arg. For `Point(x: 10, y)`: `x: 10` is inserted by
+  name, then the shorthand `y` is taken as position 0 and overwrites field `x`
+  with 20, leaving `y` at its default `0`. For `Point(x, y: 20)` the positional
+  arg comes first, so index 0 is correct — exactly the reported asymmetry.
+  Same shape (latent) at `interpreter_call/core/bitfield_support.rs:115,129-132`.
+
+  **Fix shape:** mark a field consumed when a named arg fills it, and advance
+  `positional_idx` past already-filled fields before taking a positional arg.
+
+  **The HIR/compiled path is NOT affected:**
+  `src/compiler_rust/compiler/src/hir/lower/expr/collections.rs:425-449` splits
+  args into a named map plus a positional queue and walks declared field order,
+  preferring the named entry and otherwise pulling the next positional — so a
+  positional after a named arg lands in the first *unfilled* declared slot. The
+  Rust parser leaves bare identifiers unnamed
+  (`src/compiler_rust/parser/src/expressions/postfix.rs`); there is no
+  shorthand-to-named rewrite, so the interpreter's counter is the only place the
+  mix is resolved. **This is therefore an interpreter-only silent wrong result,
+  and the pure-Simple `10.frontend` parser is not implicated** — the original
+  "parser_stmts.spl" attribution was wrong.
+
+  Evidence specs added (both RED at tip, both run interpreted, which is where the
+  defect lives — no subprocess needed):
+  - `test/01_unit/compiler/frontend/struct_shorthand_after_named_arg_spec.spl`
+    (reproducing) — `Results: 3 total, 1 passed, 2 failed`
+  - `test/01_unit/compiler/frontend/name_resolved_argument_order_independence_class_spec.spl`
+    (class detection: any name-resolved argument must bind independently of
+    argument order) — `Results: 8 total, 3 passed, 5 failed`. It catches strictly
+    more than the reproducer: text/bool fields (whose defaults are not `0`, so
+    the desync shows a visibly different wrong value), a shorthand whose value is
+    a struct, and shorthands fed by expressions/calls.
+
 - **Date:** 2026-07-20
 - **Status:** open (found triaging `test/feature/usage/struct_shorthand_spec.spl`)
 - **Area:** struct-literal call argument binding (interpreter or HIR lowering,
