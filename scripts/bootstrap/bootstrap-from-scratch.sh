@@ -380,31 +380,42 @@ fi
 # This is the common staged-bootstrap boundary, including Windows forwarding
 # and admitted Stage 3 resume. A direct/ad-hoc invocation cannot start even
 # Stage 1 without the canonical receipt produced by the pure-Simple planner.
-if [ -z "${bootstrap_receipt_path}" ] || [ ! -f "${bootstrap_receipt_path}" ]; then
+bootstrap_stage2_trust_root=0
+if [ "${stop_after_stage2}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ] &&
+   { [ -z "${bootstrap_receipt_path}" ] || [ ! -f "${bootstrap_receipt_path}" ]; }; then
+  # The first independently admitted pure-Simple parent cannot itself require
+  # a receipt produced by that parent. Keep this trust-root exception narrower
+  # than every ordinary/resume/deploy path: explicit Rust rebuild, native
+  # Stage-2-only stop, dynload mode, and the full Stage 2 admission gates below.
+  bootstrap_stage2_trust_root=1
+  bootstrap_reason=stage2-trust-root-refresh
+elif [ -z "${bootstrap_receipt_path}" ] || [ ! -f "${bootstrap_receipt_path}" ]; then
   echo "bootstrap-policy-error: reason-receipt-required; run 'simple build bootstrap --bootstrap-reason=<typed-reason> --bootstrap-receipt=<path>'" >&2
   exit 64
 fi
-case "${bootstrap_receipt_path}" in
-  /*) ;;
-  *) bootstrap_receipt_path="${PWD}/${bootstrap_receipt_path}" ;;
-esac
-bootstrap_receipt_target='//bootstrap:stage4'
-if [ "${stop_after_stage2}" -eq 1 ]; then
-  bootstrap_receipt_target='//bootstrap:stage2'
-elif [ -n "${resume_stage3_output}" ] || [ "${stop_after_stage3}" -eq 1 ]; then
-  bootstrap_receipt_target='//bootstrap:stage3'
+if [ "${bootstrap_stage2_trust_root}" -eq 0 ]; then
+  case "${bootstrap_receipt_path}" in
+    /*) ;;
+    *) bootstrap_receipt_path="${PWD}/${bootstrap_receipt_path}" ;;
+  esac
+  bootstrap_receipt_target='//bootstrap:stage4'
+  if [ "${stop_after_stage2}" -eq 1 ]; then
+    bootstrap_receipt_target='//bootstrap:stage2'
+  elif [ -n "${resume_stage3_output}" ] || [ "${stop_after_stage3}" -eq 1 ]; then
+    bootstrap_receipt_target='//bootstrap:stage3'
+  fi
+  bootstrap_planner_v2_verify "${bootstrap_receipt_path}" "${bootstrap_early_repo_root}" || {
+    echo "bootstrap-policy-error: malformed-or-untrusted-planner-admission-v2" >&2
+    exit 64
+  }
+  [ "$(bootstrap_planner_v2_field target "${bootstrap_receipt_path}")" = "${bootstrap_receipt_target}" ] || {
+    echo "bootstrap-policy-error: planner-admission-target-mismatch" >&2
+    exit 64
+  }
+  bootstrap_reason=$(bootstrap_planner_v2_field reason "${bootstrap_receipt_path}") || exit 64
+  SIMPLE_BOOTSTRAP_REASON_RECEIPT=${bootstrap_receipt_path}
+  export SIMPLE_BOOTSTRAP_REASON_RECEIPT
 fi
-bootstrap_planner_v2_verify "${bootstrap_receipt_path}" "${bootstrap_early_repo_root}" || {
-  echo "bootstrap-policy-error: malformed-or-untrusted-planner-admission-v2" >&2
-  exit 64
-}
-[ "$(bootstrap_planner_v2_field target "${bootstrap_receipt_path}")" = "${bootstrap_receipt_target}" ] || {
-  echo "bootstrap-policy-error: planner-admission-target-mismatch" >&2
-  exit 64
-}
-bootstrap_reason=$(bootstrap_planner_v2_field reason "${bootstrap_receipt_path}") || exit 64
-SIMPLE_BOOTSTRAP_REASON_RECEIPT=${bootstrap_receipt_path}
-export SIMPLE_BOOTSTRAP_REASON_RECEIPT
 if [ "${validate_bootstrap_receipt}" -eq 1 ]; then
   echo "bootstrap-policy: receipt-valid target=${bootstrap_receipt_target} reason=${bootstrap_reason} execution=not-attempted"
   exit 0
@@ -2202,6 +2213,32 @@ else
         echo "error: could not publish immutable Stage 2 admission receipt" >&2
         stage2_status=4
       else
+        if [ "${bootstrap_stage2_trust_root}" -eq 1 ]; then
+          stage2_parent_dir=$(dirname -- "${stage2_bin}")
+          stage2_parent_sanity="${stage2_parent_dir}/stage2-sanity.receipt"
+          stage2_parent_provenance="${stage2_parent_dir}/stage2-provenance.receipt"
+          stage2_parent_sanity_tmp="${stage2_parent_sanity}.tmp.$$"
+          stage2_parent_provenance_tmp="${stage2_parent_provenance}.tmp.$$"
+          {
+            echo 'schema=simple-bootstrap-stage2-parent-sanity-v1'
+            echo 'stage2-sanity: pass'
+            echo "candidate_sha256=${stage2_origin_sha_before}"
+            echo "admission_receipt_sha256=$(bootstrap_stage3_hash_file "${stage2_admission_receipt_absolute}")"
+          } >"${stage2_parent_sanity_tmp}"
+          {
+            echo 'schema=simple-bootstrap-stage2-parent-provenance-v1'
+            echo 'stage2-provenance: pure-simple'
+            echo 'authority=explicit-full-bootstrap-stage2-trust-root'
+            echo "candidate_sha256=${stage2_origin_sha_before}"
+            echo "source_snapshot_sha256=$(bootstrap_stage3_hash_file "${stage3_source_before}")"
+            echo "runtime_snapshot_sha256=$(bootstrap_stage3_hash_file "${runtime_admitted_snapshot}")"
+            echo "tool_authority_sha256=$(bootstrap_stage3_hash_file "${tool_authority_before}")"
+            echo "admission_receipt_sha256=$(bootstrap_stage3_hash_file "${stage2_admission_receipt_absolute}")"
+          } >"${stage2_parent_provenance_tmp}"
+          chmod 400 "${stage2_parent_sanity_tmp}" "${stage2_parent_provenance_tmp}"
+          mv -f "${stage2_parent_sanity_tmp}" "${stage2_parent_sanity}"
+          mv -f "${stage2_parent_provenance_tmp}" "${stage2_parent_provenance}"
+        fi
         # Preserve the admitted phase-2 compiler as an immutable lineage snapshot.
         if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
           sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${stage2_admitted_bin}" phase2 || \

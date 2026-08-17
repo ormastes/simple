@@ -22,12 +22,26 @@ producer="$root/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs"
 
 checked=0
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-admission-gate.XXXXXX")
+scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
 trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
 
 fail() {
     echo "FAIL — $1"
     exit 1
 }
+
+replace_in_file() {
+    rif_expr=$1 rif_file=$2 rif_tmp="${2}.tmp.$$"
+    sed "$rif_expr" "$rif_file" >"$rif_tmp" || { rm -f -- "$rif_tmp"; return 1; }
+    mv -f -- "$rif_tmp" "$rif_file"
+}
+
+# The planner is intentionally a tiny leaf. Omitting entry-closure silently
+# compiles all of src/app/cli and src/lib, turning receipt production into a
+# multi-gigabyte full-tree build before any bootstrap phase can start.
+grep -F -- '--entry-closure --entry "$planner_source"' "$producer" >/dev/null ||
+    fail "producer does not constrain the planner build to its entry closure"
+checked=$((checked + 1))
 
 # Build a self-contained fixture repository root.
 #   $1 destination, $2 provenance body, $3 planner-shim policy
@@ -85,7 +99,7 @@ echo "bootstrap-plan: execution=not-attempted receipt=$receipt reason=$reason"
 PLANNER
 chmod +x "$out"
 FIXTURE_CC
-    sed -i "s/@POLICY@/$mf_policy/" "$mf_dst/build/bootstrap/stage2/fixture-triple/simple"
+    replace_in_file "s/@POLICY@/$mf_policy/" "$mf_dst/build/bootstrap/stage2/fixture-triple/simple"
     chmod +x "$mf_dst/build/bootstrap/stage2/fixture-triple/simple"
 }
 
@@ -112,7 +126,7 @@ checked=$((checked + 1))
 
 # --- fixture 2: a forged argv digest is refused ------------------------------
 cp -- "$ok_root/receipt.env" "$scratch/argv.env"
-sed -i 's/^build_argv_sha256=.*/build_argv_sha256=0000000000000000000000000000000000000000000000000000000000000000/' "$scratch/argv.env"
+replace_in_file 's/^build_argv_sha256=.*/build_argv_sha256=0000000000000000000000000000000000000000000000000000000000000000/' "$scratch/argv.env"
 bootstrap_planner_v2_verify_structure "$scratch/argv.env" "$ok_root" >/dev/null 2>&1 ||
     fail "argv fixture no longer passes the structural layer, so it does not isolate the argv binding"
 if bootstrap_planner_v2_verify "$scratch/argv.env" "$ok_root" >/dev/null 2>&1; then
@@ -122,7 +136,7 @@ checked=$((checked + 1))
 
 # --- fixture 3: a forged env digest is refused -------------------------------
 cp -- "$ok_root/receipt.env" "$scratch/env.env"
-sed -i 's/^build_env_sha256=.*/build_env_sha256=1111111111111111111111111111111111111111111111111111111111111111/' "$scratch/env.env"
+replace_in_file 's/^build_env_sha256=.*/build_env_sha256=1111111111111111111111111111111111111111111111111111111111111111/' "$scratch/env.env"
 if bootstrap_planner_v2_verify "$scratch/env.env" "$ok_root" >/dev/null 2>&1; then
     fail "a receipt with a forged build_env_sha256 was admitted"
 fi
@@ -134,7 +148,7 @@ checked=$((checked + 1))
 cp -- "$ok_root/receipt.env" "$scratch/outside.env"
 cp -- "$ok_root/build/bootstrap/admission/"*/git-state.txt "$scratch/git-state.txt"
 esc=$(printf '%s' "$scratch/git-state.txt" | sed 's/[\/&]/\\&/g')
-sed -i "s/^git_state_path=.*/git_state_path=$esc/" "$scratch/outside.env"
+replace_in_file "s/^git_state_path=.*/git_state_path=$esc/" "$scratch/outside.env"
 bootstrap_planner_v2_verify_structure "$scratch/outside.env" "$ok_root" >/dev/null 2>&1 ||
     fail "out-of-root fixture no longer passes the structural layer, so it does not isolate path pinning"
 if bootstrap_planner_v2_verify "$scratch/outside.env" "$ok_root" >/dev/null 2>&1; then
