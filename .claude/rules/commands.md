@@ -66,6 +66,25 @@ path containing a `build/` component, and `git add` on it is a silent no-op.)
   module's own source; `SmfManifestEntry` carries `source_hash` and has no
   interface-digest field. `SmfManifest` is written but never verified on load.
 
+**Partly superseded 2026-08-17 — "content-keyed" was never the whole story, and
+is now less of it.** `object_cache_key` (`native_project/mod.rs`) already folded
+`compiler_fingerprint()` (a hash of `current_exe`'s bytes) alongside backend,
+opt-level, CPU and SIMD tier, and the pure-Simple `native_build_cache_scope_key`
+(`src/compiler/80.driver/driver_build/incremental.spl`) already folded a full
+producer identity (`exe=…;compiler=…;runtime=…;bundle=…`) used as the cache
+SUBDIRECTORY name. Both now additionally carry a **lane** axis —
+`SIMPLE_CACHE_SCOPE`, or `--cache-scope <name>` on the Rust native-build /
+native-all CLIs — because two concurrent bootstrap lanes can legitimately share a
+compiler binary and still must not share entries. Entries are partitioned by a
+scope-derived DIRECTORY, so a cross-scope lookup cannot name an out-of-scope
+entry; unset ⇒ `default`, identical to previous behaviour. Bootstrap stages get
+`build/bootstrap/native_cache/<lane>/` plus a fail-closed ownership guard
+(`scripts/check/check-cache-scope-ownership.shs`, `.cache_scope` marker).
+What is NOT superseded: dependency-aware / partial rebuild. That still needs
+`interface_digest_of`, `simple.sdn` traversal, and `SmfManifest`
+load-verification — all still uncalled. Design:
+`doc/05_design/compiler/incremental_build/per_lane_private_caches.md`.
+
 ## Fast Path (measured 2026-08-09)
 
 ```bash
