@@ -1,0 +1,68 @@
+"""
+# Enterprise Web App — CSRF double-submit helper (dispatcher seam)
+
+Closes the `security_posture` residual "No CSRF token and no cookie flow": the
+app is bearer-token only, which genuinely sidesteps CSRF, but the moment a
+request rides an AMBIENT credential — a `Cookie` header a browser attaches
+automatically on any cross-site form POST — that request is forgeable and MUST
+carry a per-session CSRF token that the attacker's page cannot read or set.
+
+This module is the dispatcher seam for that check. It is deliberately narrow:
+
+- `csrf_required` is TRUE only for a state-changing method (`POST`/`PUT`/
+  `PATCH`/`DELETE`) that also carries a `Cookie` header. A bearer-only API
+  call (no cookie) cannot carry an ambient credential and so cannot be the
+  target of a cross-site forgery — it stays exempt, exactly as the current
+  bearer-only posture is. This is why introducing the check regresses no
+  existing bearer client.
+- `csrf_token` derives a per-session token from the session's own secret, so
+  it is unguessable and rotates with the session, yet is never byte-equal to
+  the bearer secret itself (a distinct namespace prefix), so echoing the CSRF
+  token in a header never leaks the bearer.
+- `csrf_ok` is the double-submit comparison: the `X-CSRF-Token` request header
+  must be present AND equal to `csrf_token(session)`.
+
+The dispatcher (`main.store_app_handle`) rejects a `csrf_required` request that
+is not `csrf_ok` with HTTP 403 BEFORE any route or command runs. This is a
+dispatcher-level control; it does not replace, and is not replaced by, the
+frozen in-command guarded sequence.
+"""
+
+use std.nogc_sync_mut.enterprise_sale.foundation.{SessionContext}
+
+# header_lookup returns the first value of a header (case-insensitive), or "".
+fn header_lookup(headers: [(text, text)], name: text) -> text:
+    for pair in headers:
+        if pair.0.to_lower() == name.to_lower():
+            return pair.1
+    ""
+
+# is_state_changing is TRUE for the methods that can mutate durable state.
+fn is_state_changing(method: text) -> bool:
+    method == "POST" or method == "PUT" or method == "PATCH" or method == "DELETE"
+
+# has_cookie is TRUE when the request carries any ambient cookie credential.
+fn has_cookie(headers: [(text, text)]) -> bool:
+    header_lookup(headers, "Cookie") != ""
+
+# csrf_token is the per-session double-submit token: bound to the session
+# secret, unguessable, rotating with the session, and never equal to the
+# bearer secret itself. An unauthenticated (tokenless) session has no CSRF
+# token, so no forged request can ever match.
+fn csrf_token(session: SessionContext) -> text:
+    if session.token == "":
+        return ""
+    "csrf." + session.token
+
+# csrf_required: a state-changing request that rides an ambient cookie session
+# is the only shape a browser can be tricked into forging cross-site.
+fn csrf_required(method: text, headers: [(text, text)]) -> bool:
+    is_state_changing(method) and has_cookie(headers)
+
+# csrf_ok is the double-submit comparison against the session's own token.
+fn csrf_ok(session: SessionContext, headers: [(text, text)]) -> bool:
+    val presented = header_lookup(headers, "X-CSRF-Token")
+    presented != "" and presented == csrf_token(session)
+
+export header_lookup, is_state_changing, has_cookie
+export csrf_token, csrf_required, csrf_ok
