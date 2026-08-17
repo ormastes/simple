@@ -1394,10 +1394,21 @@ fn builtin_method_result_type(method: &str, receiver_ty: Option<TypeId>) -> Opti
         "len" | "length" | "char_code_at" | "index_of" | "find_index" => Some(TypeId::I64),
         // Predicates are bool on every receiver.
         "is_empty" | "contains" | "starts_with" | "ends_with" => Some(TypeId::BOOL),
-        // Text-in/text-out. `slice`/`substring` are shared with array receivers,
-        // so they are only classified when the receiver is known to be text.
-        "substring" | "slice" | "trim" | "trim_start" | "trim_end" | "to_upper" | "to_uppercase" | "to_lower"
-        | "to_lowercase" | "char_at" | "replace" | "concat" => {
+        // Text-in/text-out on a TEXT RECEIVER AND ON NO OTHER RECEIVER. There
+        // is no array/dict `trim` or `to_upper`, so classifying these without
+        // knowing the receiver type cannot mis-type any other receiver — and
+        // an unknown receiver type is exactly the situation a CHAINED builtin
+        // creates, which is the case this whole function exists to fix.
+        // Requiring `receiver_ty == Some(STRING)` here left the chained form
+        // (`"  42  ".trim().to_i64()`) still returning the intermediate text's
+        // HEAP POINTER as a "successful" integer.
+        // doc/08_tracking/bug/seed_jit_string_to_i64_float_tagged_silent_wrong_2026-07-28.md
+        "trim" | "trim_start" | "trim_end" | "to_upper" | "to_uppercase" | "to_lower" | "to_lowercase"
+        | "char_at" | "replace" => Some(TypeId::STRING),
+        // `slice`/`substring`/`concat` are shared with array receivers, where
+        // the result is an array, not text — so they stay receiver-gated. A
+        // wrong entry here could make a previously-correct call worse.
+        "substring" | "slice" | "concat" => {
             if receiver_ty == Some(TypeId::STRING) {
                 Some(TypeId::STRING)
             } else {

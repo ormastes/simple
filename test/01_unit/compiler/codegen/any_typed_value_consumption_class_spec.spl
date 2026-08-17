@@ -1,0 +1,88 @@
+# ANY-typed value consumption — similar-problem DETECTION spec (defect CLASS)
+#
+# Three separately-filed P1 "silently wrong result" bugs are one defect:
+# a value whose static type the seed never recorded becomes `TypeId::ANY`, and
+# the CONSUMING site then handles the raw tagged word instead of decoding it.
+#
+#   untyped_list_element_read_seed_rootcause_2026-07-30.md
+#     `xs: list` -> HirType::Array{element: ANY}; lower_index_expr's
+#     `needs_int_unbox` is false, so no UnboxInt is emitted and `xs[0] & 0xFF`
+#     evaluates on `10 << 3` == 80.
+#   seed_jit_string_to_i64_float_tagged_silent_wrong_2026-07-28.md
+#     a CHAINED text builtin records no result type, so `.to_i64()` misses the
+#     `from_ty == TypeId::STRING` branch that routes to rt_string_to_int and
+#     returns the intermediate text's HEAP POINTER as a "successful" integer.
+#   untyped_fn_result_erased_to_zero_2026-08-01.md
+#     an untyped function's result stays tagged to the rendering site and
+#     prints `<value:0x5>` rather than `5`.
+#
+# WHY A SUBPROCESS. `bin/simple test` executes spec bodies on the tree-walk
+# INTERPRETER. An in-process example can therefore never go red on a JIT or
+# native codegen defect. The oracle is the sibling run-path probe
+# `probe_any_typed_value_consumption_jit.spl`, run as a subprocess under BOTH
+# engines; every check inside it compares against an ABSOLUTE literal, never
+# "the two engines agree" (which passes while both are wrong the same way).
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_any_typed_value_consumption_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    # SIMPLE_BIN lets a lane point this at a freshly built candidate seed;
+    # the default is whatever bin/simple currently resolves to.
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "an ANY-typed value must be decoded at every consumption site":
+    it "reads elements of an untyped `list` as numbers, not as boxed words":
+        step("Run the run-path probe under the cranelift JIT")
+        val jit = run_probe_in_mode("jit")
+
+        step("The typed-array control arm proves the fixture itself is sound")
+        expect(jit).to_contain("PASS typed_array_elem_mask")
+
+        step("`xs: list` must read 10, not 10 << 3 == 80")
+        expect(jit).to_contain("PASS list_elem_mask")
+
+        step("Arithmetic over two untyped elements must not scale by 8")
+        expect(jit).to_contain("PASS list_elem_add")
+
+    it "converts a CHAINED text builtin result, not its heap pointer":
+        val jit = run_probe_in_mode("jit")
+
+        step("The direct form records a STRING receiver and already works")
+        expect(jit).to_contain("PASS text_to_i64_direct")
+
+        step("Every text-in/text-out builtin must classify its result as text so the chained .to_i64() routes to rt_string_to_int")
+        expect(jit).to_contain("PASS text_to_i64_after_trim")
+        expect(jit).to_contain("PASS text_to_i64_after_upper")
+        expect(jit).to_contain("PASS text_to_i64_after_replace")
+
+    it "renders an untyped function result as a number":
+        val jit = run_probe_in_mode("jit")
+
+        step("A tagged word that reached rendering leaks as `<value:0x..>`")
+        expect(jit).to_contain("PASS untyped_fn_result_add")
+        expect(jit).to_contain("PASS untyped_fn_result_id")
+        expect(jit.contains("<value:0x")).to_equal(false)
+
+    it "shows the same answers on the interpreter, the correctness oracle":
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The interpreter decodes tags dynamically per value and is the reference")
+        expect(interp).to_contain("ANY_TYPED_CONSUMPTION PROBE: ALL PASS")
+
+    it "has no failing check under either engine":
+        val jit = run_probe_in_mode("jit")
+        val interp = run_probe_in_mode("interpreter")
+
+        step("The aggregate verdict line is the authoritative result")
+        expect(jit).to_contain("ANY_TYPED_CONSUMPTION PROBE: ALL PASS")
+        expect(jit.contains("FAIL ")).to_equal(false)
+        expect(interp.contains("FAIL ")).to_equal(false)

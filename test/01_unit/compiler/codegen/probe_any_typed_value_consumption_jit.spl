@@ -1,0 +1,72 @@
+# Run-path probe for the ANY-typed-value consumption defect CLASS.
+#
+# Executed as a SUBPROCESS by
+#   any_typed_value_consumption_class_spec.spl
+# under both SIMPLE_EXECUTION_MODE=interpreter and =jit, because a spec body
+# always runs interpreted and therefore can never go red on a codegen defect.
+#
+# The class: a value whose STATIC type the seed never recorded lands in
+# `TypeId::ANY`, and the consuming site then either
+#   (a) skips the tag decode entirely, handing downstream arithmetic the raw
+#       boxed word `v << 3` (untyped `list` element read), or
+#   (b) routes a method call through a generic raw-register path instead of
+#       the type-directed runtime helper, handing back a heap POINTER as a
+#       "successful" integer (chained text builtin -> .to_i64()), or
+#   (c) leaves the value tagged all the way to rendering, which prints
+#       `<value:0x..>` instead of the number (untyped fn result).
+#
+# Every oracle below is an ABSOLUTE literal, never "the two engines agree".
+#
+# Bugs:
+#   doc/08_tracking/bug/untyped_list_element_read_seed_rootcause_2026-07-30.md
+#   doc/08_tracking/bug/seed_jit_string_to_i64_float_tagged_silent_wrong_2026-07-28.md
+#   doc/08_tracking/bug/untyped_fn_result_erased_to_zero_2026-08-01.md
+
+var failures: i64 = 0
+
+fn check(name: text, got: text, want: text):
+    if got == want:
+        print("PASS " + name)
+    else:
+        print("FAIL " + name + " got=" + got + " want=" + want)
+        failures = failures + 1
+
+fn get_via_list(xs: list, i: i64) -> i64:
+    return xs[i] & 0xFF
+
+fn get_via_typed(xs: [i64], i: i64) -> i64:
+    return xs[i] & 0xFF
+
+fn sum_via_list(xs: list) -> i64:
+    return xs[0] + xs[1]
+
+fn untyped_result(a: i64, b: i64):
+    return a + b
+
+fn untyped_passthrough(v: i64):
+    return v
+
+fn main():
+    val tl: [i64] = [10, 20, 30]
+
+    # (a) untyped `list` element read: the control arm proves the probe itself
+    # is sound, so a red on the `list` arm is the engine, not the fixture.
+    check("typed_array_elem_mask", get_via_typed(tl, 0).to_string(), "10")
+    check("list_elem_mask", get_via_list(tl, 0).to_string(), "10")
+    check("list_elem_add", sum_via_list(tl).to_string(), "30")
+
+    # (b) chained text builtin feeding a numeric conversion. The direct form
+    # records a STRING receiver type and works; the CHAINED form is the defect.
+    check("text_to_i64_direct", "42".to_i64().to_string(), "42")
+    check("text_to_i64_after_trim", "  42  ".trim().to_i64().to_string(), "42")
+    check("text_to_i64_after_upper", "42".to_upper().to_i64().to_string(), "42")
+    check("text_to_i64_after_replace", "4x2".replace("x", "").to_i64().to_string(), "42")
+
+    # (c) untyped function result reaching rendering still tagged.
+    check("untyped_fn_result_add", untyped_result(2, 3).to_string(), "5")
+    check("untyped_fn_result_id", untyped_passthrough(7).to_string(), "7")
+
+    if failures == 0:
+        print("ANY_TYPED_CONSUMPTION PROBE: ALL PASS")
+    else:
+        print("ANY_TYPED_CONSUMPTION PROBE: " + failures.to_string() + " FAILURES")

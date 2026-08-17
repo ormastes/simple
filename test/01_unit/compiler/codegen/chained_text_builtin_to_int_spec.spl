@@ -1,0 +1,62 @@
+# Reproducing spec for
+# doc/08_tracking/bug/seed_jit_string_to_i64_float_tagged_silent_wrong_2026-07-28.md
+#
+# `"  42  ".trim().to_i64()` returned 5214297603201 — the intermediate text's
+# HEAP POINTER — with no error, no warning and exit 0.
+#
+# Root cause: src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs,
+# `builtin_method_result_type`. Builtin call sites record the result VALUE in
+# `ctx.vreg_values` but not its TYPE, so a directly chained builtin hands the
+# next method an untyped receiver. The numeric-cast block defaults a missing
+# type to `TypeId::I64` (`unwrap_or(TypeId::I64)`), so `to_i64`/`to_int` skips
+# the `from_ty == TypeId::STRING` branch that routes to `rt_string_to_int` and
+# falls into the generic raw-register conversion.
+#
+# `builtin_method_result_type` classified the text-in/text-out methods ONLY
+# when the receiver type was already known to be STRING — which is exactly the
+# information a chained call does not have. The fix classifies the methods that
+# exist on text and on NO other receiver (trim/trim_start/trim_end/to_upper/
+# to_uppercase/to_lower/to_lowercase/char_at/replace) unconditionally, and
+# leaves `slice`/`substring`/`concat` receiver-gated because those are shared
+# with array receivers where the result is an array, not text.
+#
+# A spec body runs INTERPRETED and the interpreter was always correct here, so
+# this shells out to the sibling run-path probe under the JIT.
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/compiler/codegen/probe_any_typed_value_consumption_jit.spl"
+
+fn run_probe_in_mode(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_TIMEOUT_SECONDS=600 " +
+        "SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " + PROBE_PATH + " 2>/dev/null"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+describe "a chained text builtin feeding .to_i64()":
+    it "parses the trimmed text instead of returning its heap pointer":
+        step("Run the run-path probe under the cranelift JIT")
+        val jit = run_probe_in_mode("jit")
+
+        step("The unchained control arm already worked and must keep working")
+        expect(jit).to_contain("PASS text_to_i64_direct")
+
+        step('"  42  ".trim().to_i64() must be 42, not a heap address')
+        expect(jit).to_contain("PASS text_to_i64_after_trim")
+
+    it "generalises to the other text-only text-returning builtins":
+        val jit = run_probe_in_mode("jit")
+
+        step("to_upper and replace return text on a text receiver and on no other receiver")
+        expect(jit).to_contain("PASS text_to_i64_after_upper")
+        expect(jit).to_contain("PASS text_to_i64_after_replace")
+
+    it "agrees with the interpreter, which decodes tags dynamically":
+        val interp = run_probe_in_mode("interpreter")
+        expect(interp).to_contain("PASS text_to_i64_after_trim")
+        expect(interp).to_contain("PASS text_to_i64_after_upper")
+        expect(interp).to_contain("PASS text_to_i64_after_replace")
