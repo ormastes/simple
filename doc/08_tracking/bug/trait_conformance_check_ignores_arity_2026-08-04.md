@@ -699,3 +699,62 @@ close the call-site hole where a missing argument reads as nil sentinel `3`.
 It also compares **arity only** — parameter *types* are still never checked, so
 a same-arity type drift remains invisible, exactly as the title of this bug
 says. Both are separate lanes.
+
+## Reproduction and engine A/B (2026-08-17)
+
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple`, 59536728 bytes,
+mtime 2026-08-16 22:59:37 (Rust seed; prints the seed banner). One binary, one
+tree, one toggle — `SIMPLE_EXECUTION_MODE` — over
+`test/01_unit/compiler/traits/conformance/probe_wrong_arity.spl` (trait declares
+`greet(name, punctuation)`, impl defines `greet(name)`):
+
+| engine | rc | observed |
+|--------|----|----------|
+| `interpreter` | 1 | ``error: semantic: type `Rude` implements method `greet` from trait `Greeter` with 1 parameter(s), but the trait declares 2`` |
+| `jit`         | 0 | no diagnostic; the impl body RUNS and prints `FIXTURE_RAN_WRONG_ARITY` |
+
+A bare `bin/simple run <fixture>` (no env pin) matches the `jit` row — so the
+DEFAULT engine for ordinary programs silently accepts a non-conforming impl.
+This confirms the status line's "fires only on the interpreter path" with a
+direct measurement rather than by inspection.
+
+### Trap that hid this, worth knowing
+
+`bin/simple test` exports interpreter mode to its child processes. A subprocess
+spec that shells out WITHOUT pinning `SIMPLE_EXECUTION_MODE` therefore measures
+the interpreter twice and reports green while the JIT lane is broken. Both specs
+below were written unpinned first and passed `Results: 2 total, 2 passed,
+0 failed` / `3 total, 3 passed, 0 failed` — a false green over a live defect.
+Pin the engine explicitly in any conformance subprocess spec.
+
+### Pure-Simple side: the checker has no callers
+
+`src/compiler/25.traits/trait_impl.spl::validate_methods` is the pure-Simple
+conformance checker. `grep -rn validate_methods src/compiler src/app` returns
+exactly ONE line — its own definition. Likewise `TraitError.MissingMethod`
+(`src/compiler/25.traits/trait_validation.spl:22`) is matched on by two driver
+files that RENDER it but is never CONSTRUCTED anywhere. Both mechanisms are
+inert on the self-hosted path, the same shape as `interface_digest_of`. Arity
+and a conservative primitive-parameter-type comparison are now implemented in
+`validate_methods`; WIRING it into the semantic pass remains open.
+
+### Specs
+
+- `test/01_unit/compiler/traits/conformance/trait_impl_arity_conformance_spec.spl`
+  (reproducing) — interpreter arm GREEN, **JIT arm expected RED**, conforming
+  control arm GREEN on both engines.
+- `test/01_unit/compiler/traits/conformance/trait_conformance_enforced_class_spec.spl`
+  (similar-problem detection) — generalises to the class "a semantic conformance
+  obligation enforced on one engine and skipped on another", covering BOTH
+  violation axes (missing required method, wrong arity) against BOTH engines, so
+  a single-engine or single-axis fix cannot turn it green.
+
+Do not weaken the RED examples to make them pass; the unblock condition is a
+JIT-path conformance check (or hoisting the check ahead of engine selection).
+
+### Runtime hazard
+
+The class spec runs 10 nested compiles and was SIGTERMed (`rc=143`) at the
+shared 600s kill-monitor threshold. It needs a raised threshold or a split to
+produce a verdict on a loaded host; its arms are individually verified by the
+A/B table above.
