@@ -114,6 +114,42 @@ fn hir_expr_is_optional_type(e: HirExpr) -> bool:
 # ============================================================================
 
 impl MirLowering:
+    me bare_scalar_const_pattern(name: text, span: Span) -> HirPattern?:
+        """Resolve a bare match binding to a current-module scalar `val`.
+
+        Flat HIR cannot distinguish `case NAME:` from a capture, so it emits
+        Binding for both. MIR already owns the complete current-module
+        constant table; reclassify only an exact scalar constant name here.
+        Genuine unbound captures and non-scalar constants remain bindings.
+        """
+        val constants = self.builder.module.constants.values()
+        var i = 0
+        while i < constants.len():
+            val constant = constants[i]
+            if constant.name == name:
+                # `module.constants` also carries foldable module `var`
+                # initializers. A mutable name remains capture syntax: only
+                # an immutable declaration is a stable value pattern.
+                if val declared = self.symbols.get_symbol_raw(constant.symbol.id):
+                    if declared.is_mutable:
+                        return nil
+                var literal = HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: span)
+                var supported = true
+                match constant.value:
+                    case MirConstValue.Int(value):
+                        literal = HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: false, type_: nil, span: span)
+                    case MirConstValue.Bool(value):
+                        literal = HirExpr(kind: HirExprKind.BoolLit(value), has_type_: false, type_: nil, span: span)
+                    case MirConstValue.Str(value):
+                        literal = HirExpr(kind: HirExprKind.StringLit(value, nil), has_type_: false, type_: nil, span: span)
+                    case _:
+                        supported = false
+                if supported:
+                    return Some(HirPattern(kind: HirPatternKind.Literal(literal), type_: nil, span: span))
+                return nil
+            i = i + 1
+        nil
+
     # mutglobal2 lane (module-level `var`/`val` mutation end-to-end, see
     # scratchpad/mutglobal_plan.md + scratchpad/mutglobal2 report). The prior
     # lane gave `MirModule.statics`/`LoadGlobal`/`StoreGlobal` real backend
@@ -4129,11 +4165,11 @@ impl MirLowering:
                 t_unsupported
 
     # ========================================================================
-    # B5b Phase 1 — MatchCase lowering (integer-literal patterns only)
+    # B5b — MatchCase lowering (scalar-literal patterns)
     # ========================================================================
 
     me lower_match_case(scrutinee: HirExpr, arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
-        """Lower a `match` expression on integer-literal patterns.
+        """Lower a `match` expression on scalar-literal patterns.
 
         Phase 1 supports:
           - HirPatternKind.Wildcard            (default arm)
@@ -4144,11 +4180,13 @@ impl MirLowering:
             that also binds the scrutinee to a local symbol; mutability
             flag is irrelevant at MIR-lowering time and is ignored here)
           - HirPatternKind.Or(patterns) when every alternative is
-            Literal(IntLit n) (each alternative becomes its own
-            int_cases entry pointing at the shared arm body)
+            a scalar literal (each alternative becomes its own dispatch
+            entry pointing at the shared arm body)
+          - Binding names that resolve to current-module scalar `val`
+            constants (normalized to int/bool/text Literal patterns)
 
         Anything else (Tuple, Array, Struct, Enum, Range, non-IntLit
-        Literal, Or with non-IntLit alternatives, or any guard) yields a
+        Literal, Or with non-scalar alternatives, or any guard) yields a
         clear diagnostic so users get a real error instead of
         `unsupported MIR expression`.
 
@@ -4178,6 +4216,18 @@ impl MirLowering:
                     val bsym_opt = self.symbols.get_symbol_raw(bsym.id)
                     if val bsym_found = bsym_opt:
                         bname = bsym_found.name
+                    # A current-module scalar `val` is a value pattern, not a
+                    # fresh capture. This must precede enum/capture fallback.
+                    if val const_pattern = self.bare_scalar_const_pattern(bname, arm0.pattern.span):
+                        norm_arms = norm_arms.push(HirMatchArm(
+                            pattern: const_pattern,
+                            has_guard: arm0.has_guard,
+                            guard: arm0.guard,
+                            body: arm0.body,
+                            span: arm0.span
+                        ))
+                        norm_i = norm_i + 1
+                        continue
                     # Step (c): owner search over the QUALIFIED keyspace, so two
                     # distinct same-bare-named enums are counted as two owners
                     # (the bare map keeps only the survivor) and a genuinely
@@ -4226,18 +4276,18 @@ impl MirLowering:
         if has_enum_arm:
             return self.lower_enum_match(scrutinee, norm_arms, expected_type)
 
-        # Phase 1+2a gate: every arm must be (Wildcard | Binding |
-        # Literal(IntLit) | Or(of IntLit)) with no guard. If anything else
+        # Scalar gate: every arm must be (Wildcard | Binding |
+        # Literal(Int/Bool/Text) | Or(of scalar literals)) with no guard. If anything else
         # is present, emit a Phase 2 diagnostic naming the offending kind
         # and bail out with a unit temp.
-        var int_cases: [(i64, HirBlock)] = []
+        var literal_cases: [(HirExpr, HirBlock)] = []
         var has_default_body = false
         var default_body_value = HirBlock(stmts: [], value: nil, span: scrutinee.span)
         var has_default_binding = false
         var default_binding_value = SymbolId.new(-1)
         var idx = 0
-        while idx < arms.len():
-            val arm = arms[idx]
+        while idx < norm_arms.len():
+            val arm = norm_arms[idx]
             if arm.has_guard:
                 # Guard clauses (`case x if cond:`) have no MIR lowering yet
                 # (B5b Phase 2). Fail loudly instead of silently: record a
@@ -4275,11 +4325,11 @@ impl MirLowering:
                     default_body_value = arm.body
                 case Literal(lit_expr):
                     match lit_expr.kind:
-                        case IntLit(n, _):
-                            int_cases = int_cases.push((n, arm.body))
+                        case IntLit(_, _) | BoolLit(_) | StringLit(_, _):
+                            literal_cases = literal_cases.push((lit_expr, arm.body))
                         case _:
                             self.error(
-                                "B5b Phase 2 not yet implemented: pattern kind Literal(non-IntLit)",
+                                "B5b Phase 2 not yet implemented: pattern kind Literal(non-scalar)",
                                 Some(arm.pattern.span)
                             )
                             var b_err3 = self.builder
@@ -4305,9 +4355,9 @@ impl MirLowering:
                     has_default_binding = true
                     default_binding_value = symbol
                 case Or(sub_patterns):
-                    # Phase 2a: Or-of-IntLit alternatives expand into one
-                    # int_cases entry per alternative, all pointing at the
-                    # same shared arm body. Any non-IntLit sub-pattern
+                    # Phase 2a: scalar-literal alternatives expand into one
+                    # literal_cases entry per alternative, all pointing at the
+                    # same shared arm body. Any non-scalar sub-pattern
                     # falls through to the Phase 2 diagnostic below.
                     var or_ok = true
                     var oi = 0
@@ -4316,8 +4366,8 @@ impl MirLowering:
                         match sp.kind:
                             case Literal(sp_lit):
                                 match sp_lit.kind:
-                                    case IntLit(sn, _):
-                                        int_cases = int_cases.push((sn, arm.body))
+                                    case IntLit(_, _) | BoolLit(_) | StringLit(_, _):
+                                        literal_cases = literal_cases.push((sp_lit, arm.body))
                                     case _:
                                         or_ok = false
                             case _:
@@ -4325,7 +4375,7 @@ impl MirLowering:
                         oi = oi + 1
                     if not or_ok:
                         self.error(
-                            "B5b Phase 2 not yet implemented: pattern kind Or with non-IntLit alternatives",
+                            "B5b Phase 2 not yet implemented: pattern kind Or with non-scalar alternatives",
                             Some(arm.pattern.span)
                         )
                         var b_o2 = self.builder
@@ -4402,6 +4452,25 @@ impl MirLowering:
 
         # Evaluate scrutinee once into a temp.
         val scrut_local = self.lower_expr(scrutinee)
+
+        # Preserve the integer jump-table path when every value pattern is an
+        # integer. Text/bool (including normalized bare constants) use the
+        # scalar equality chain so text compares by content.
+        var int_cases: [(i64, HirBlock)] = []
+        var all_int = true
+        var literal_i = 0
+        while literal_i < literal_cases.len():
+            val literal_case = literal_cases[literal_i]
+            match literal_case.0.kind:
+                case IntLit(value, _):
+                    int_cases = int_cases.push((value, literal_case.1))
+                case _:
+                    all_int = false
+            literal_i = literal_i + 1
+
+        if not all_int:
+            val default_binding = if has_default_binding: Some(default_binding_value) else: nil
+            return self.emit_scalar_literal_dispatch(scrut_local, literal_cases, default_body_value, default_binding, expected_type)
 
         # Decide dense vs sparse. Same heuristic as Rust seed:
         #   arms >= 4 and (max - min) <= 1024  =>  Switch
