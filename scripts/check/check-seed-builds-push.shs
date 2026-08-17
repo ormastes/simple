@@ -34,6 +34,24 @@
 #    -- the WC is contested by parallel sessions and proves nothing about
 #    what is actually being pushed (see .claude/rules/vcs.md "Land only your
 #    paths" and the shared-WC trap family in MEMORY.md).
+# SCOPE, as of 2026-08-17 (read this before trusting a PASS)
+#   Three legs, and the verdict line says which:
+#     GATING  `cargo check --release --bin simple`   (the original leg)
+#     GATING  `cargo check --release --tests`        (added 2026-08-17)
+#     ADVISORY `cargo check --release --all-targets` (examples/benches)
+#   A PASS therefore means: the bin target and the test targets COMPILE.
+#   It does NOT mean the tree LINKS, and it does not mean the tests pass.
+#   Why the --tests leg exists: `--bin simple` compiles no `#[cfg(test)]`
+#   module, no `tests/*.rs`, and no `examples/*.rs`, so at origin sha
+#   2fb45ea1960954447acf12f769935ac83277397e this guard said "seed builds
+#   cleanly" while `cargo test --release` produced NO test binary at all
+#   (TEST_RC=101, zero `test result:` lines). Fully written up in
+#   doc/08_tracking/bug/seed_build_guard_checks_only_bin_target_no_link_2026-08-17.md
+#   That row also records two further blind spots this script does NOT close:
+#   the missing LINK step (four duplicate rt_* symbols across the Rust and C
+#   runtimes are invisible to `check`), and deployed-binary staleness in the
+#   guards that native-build with bin/simple.
+#
 # 4. Run `cargo check --release --bin simple` (NOT a full `cargo build`)
 #    inside that worktree's src/compiler_rust, with a dedicated
 #    CARGO_TARGET_DIR under /mnt/data (fast NVMe, not the space-constrained
@@ -161,16 +179,53 @@ build_seed_worktree() {
 }
 
 # ---------------------------------------------------------------------------
-# run_cargo_check <worktree_dir>
-#   Runs `cargo check --release --bin simple` under <worktree_dir>/src/compiler_rust.
-#   Returns cargo's exit status. Output captured to $TMPROOT/cargo.out.
+# run_cargo_check <worktree_dir> <target_selector> <out_basename>
+#   Runs `cargo check --release <target_selector>` under
+#   <worktree_dir>/src/compiler_rust. Returns cargo's exit status. Output
+#   captured to $TMPROOT/<out_basename>.
+#
+# TARGET SCOPE — why there is more than one leg (2026-08-17)
+#
+# This guard originally ran ONLY `--bin simple`. That selector compiles the
+# binary target and the library code it transitively uses. It does NOT compile
+# `#[cfg(test)]` modules inside the library, `tests/*.rs` integration targets,
+# or `examples/*.rs` — so test code that does not compile was invisible to it
+# BY CONSTRUCTION. This is a scope gap layered on top of the check-vs-build gap
+# discussed below: even `cargo build --release --bin simple` would have missed
+# it, because none of that code is in the bin target's graph.
+#
+# Measured at origin 2fb45ea1960954447acf12f769935ac83277397e:
+#   ERROR — 0 tests executed; cargo test --release cannot build the test targets
+#   TEST_RC=101, and ZERO `test result:` lines in 546 log lines -- no test
+#   binary was ever produced -- while this guard reported
+#   `PASS — <n> file(s) checked, seed builds cleanly at <sha>`.
+# Three real defects lived in that blind spot: an E0061 `#[cfg(test)]` caller in
+# runtime/src/value/net.rs, an E0599 for `RuntimeValue::fits_inline_int`
+# (referenced only by runtime/tests/boxed_int_wide_roundtrip.rs and defined
+# nowhere), and E0599 x2 for two examples missing `required-features = ["llvm"]`.
+# See doc/08_tracking/bug/seed_build_guard_checks_only_bin_target_no_link_2026-08-17.md
+#
+# KNOWN REMAINING GAP, stated rather than papered over: `cargo check` does not
+# LINK. Four `rt_*` symbols are defined in both the Rust and the C runtime and
+# collide under `-Wl,--whole-archive`, which no `check` leg can see. That is
+# filed as doc/08_tracking/bug/runtime_duplicate_symbols_rust_and_c_whole_archive_2026-08-17.md
+# and is currently RED at origin, which is exactly why a linking leg is NOT
+# gated here yet: gating on a known-red condition gets routed around with
+# --no-verify, which is worse than an honest advisory. Promote a link leg once
+# that row is fixed -- the same way check-c-runtime-compiles-push.shs landed
+# advisory on 2026-08-11 and was promoted the same day.
 # ---------------------------------------------------------------------------
 run_cargo_check() {
     rc_dir="$1/src/compiler_rust"
-    [ -d "$rc_dir" ] || { echo "RC_ERR: $rc_dir does not exist in this worktree" >"$TMPROOT/cargo.out"; return 2; }
+    rc_sel="$2"
+    rc_out="$TMPROOT/$3"
+    [ -d "$rc_dir" ] || { echo "RC_ERR: $rc_dir does not exist in this worktree" >"$rc_out"; return 2; }
     mkdir -p "$CARGO_TARGET_ROOT" 2>/dev/null
-    ( cd "$rc_dir" && CARGO_TARGET_DIR="$CARGO_TARGET_ROOT" cargo check --release --bin simple ) \
-        >"$TMPROOT/cargo.out" 2>&1
+    # rc is captured on the line AFTER the invocation and never through a pipe:
+    # a pipeline's $? is the LAST stage's status and has produced false greens
+    # in this repo before.
+    ( cd "$rc_dir" && CARGO_TARGET_DIR="$CARGO_TARGET_ROOT" cargo check --release $rc_sel ) \
+        >"$rc_out" 2>&1
     return $?
 }
 
@@ -179,7 +234,7 @@ run_cargo_check() {
 # (E0432 unresolved import, E0599 missing enum variant / no method) and
 # that a clean fixture passes. Fatal if it does not pass.
 # ===========================================================================
-SELFTEST_EXPECTED=3
+SELFTEST_EXPECTED=4
 
 selftest() {
     st_dir="$TMPROOT/selftest-crate"
@@ -252,6 +307,75 @@ EOF
         st_fail=1
     fi
 
+    # --- Fixture D: the SCOPE gap this guard's --tests leg exists to close --
+    # A crate whose bin target is perfectly fine but whose #[cfg(test)] module
+    # calls a function that does not exist. `--bin` MUST pass and `--tests`
+    # MUST fail; if `--bin` also failed, the fixture would not be proving that
+    # the new leg catches anything the old leg missed. This is the exact shape
+    # of the 2026-08-17 origin defects (E0061 in a #[cfg(test)] caller in
+    # runtime/src/value/net.rs; E0599 for a never-defined
+    # RuntimeValue::fits_inline_int used only by an integration test).
+    st_dir_d="$TMPROOT/selftest-crate-tests"
+    rm -rf "$st_dir_d"
+    mkdir -p "$st_dir_d/src" "$st_dir_d/tests" || return 1
+    cat >"$st_dir_d/Cargo.toml" <<'EOF'
+[package]
+name = "seed-build-guard-selftest-tests"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "sbgst"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sbgst_bin"
+path = "src/main.rs"
+EOF
+    cat >"$st_dir_d/src/lib.rs" <<'EOF'
+pub fn takes_two(a: i64, b: i64) -> i64 { a + b }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn stale_caller() {
+        // E0061 shape: the function gained a second parameter and this
+        // #[cfg(test)] caller was never updated.
+        assert_eq!(takes_two(1), 1);
+    }
+}
+EOF
+    cat >"$st_dir_d/src/main.rs" <<'EOF'
+fn main() { println!("{}", sbgst::takes_two(1, 2)); }
+EOF
+    cat >"$st_dir_d/tests/integration.rs" <<'EOF'
+// E0599 shape: referenced by this test only, defined nowhere.
+#[test]
+fn calls_a_symbol_that_does_not_exist() {
+    assert!(sbgst::never_written_predicate(7));
+}
+EOF
+    st_ran=$((st_ran + 1))
+    ( cd "$st_dir_d" && CARGO_TARGET_DIR="$TMPROOT/selftest-target-d" cargo check --bin sbgst_bin 2>&1 ) >"$TMPROOT/st_d_bin.out"
+    st_got_bin=$?
+    ( cd "$st_dir_d" && CARGO_TARGET_DIR="$TMPROOT/selftest-target-d" cargo check --tests 2>&1 ) >"$TMPROOT/st_d_tests.out"
+    st_got_tests=$?
+    if [ "$st_got_bin" -ne 0 ]; then
+        echo "SELFTEST FAIL: scope fixture's --bin leg was expected to PASS (that is what makes the gap a gap), it failed" >&2
+        cat "$TMPROOT/st_d_bin.out" >&2
+        st_fail=1
+    fi
+    if [ "$st_got_tests" -eq 0 ]; then
+        echo "SELFTEST FAIL: scope fixture's --tests leg was expected to FAIL, it exited 0 -- the new leg is vacuous" >&2
+        cat "$TMPROOT/st_d_tests.out" >&2
+        st_fail=1
+    elif ! $GREP -qE 'E0061|E0599|this function takes|not found' "$TMPROOT/st_d_tests.out"; then
+        echo "SELFTEST FAIL: scope fixture's --tests leg failed but not with the expected E0061/E0599 shape" >&2
+        cat "$TMPROOT/st_d_tests.out" >&2
+        st_fail=1
+    fi
+
     # --- Fixture C: empty range must be treated as vacuous/ERROR ----------
     # (exercised via the path-filter contract, not cargo: 0 changed files
     # must never report PASS with n=0.)
@@ -268,7 +392,7 @@ EOF
         return 1
     fi
     [ "$st_fail" -eq 0 ] || return 1
-    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (E0432/E0599-shape FAIL, clean PASS, vacuous-range contract)"
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (E0432/E0599-shape FAIL, clean PASS, target-scope gap: --bin PASS + --tests FAIL, vacuous-range contract)"
     return 0
 }
 
@@ -352,7 +476,8 @@ if [ $? -ne 0 ]; then
     die 2 "cannot create a detached worktree for $tip: $(cat "$TMPROOT/worktree.err" 2>/dev/null | tail -n 5)"
 fi
 
-run_cargo_check "$WORKTREE"
+# --- GATING LEG 1: the bin target (the original check, unchanged) -----------
+run_cargo_check "$WORKTREE" "--bin simple" cargo.out
 cc_st=$?
 
 if [ "$cc_st" -ne 0 ]; then
@@ -375,6 +500,51 @@ EOF
     exit 1
 fi
 
+# --- GATING LEG 2: test targets --------------------------------------------
+# `--tests` covers `#[cfg(test)]` lib modules AND `tests/*.rs` integration
+# targets -- the blind spot that let an unbuildable test suite sit in main.
+# Measured clean on 2026-08-17 at the commit carrying the three fixes
+# (rc=0), which is why it is safe to GATE rather than advise. Examples are
+# deliberately NOT in this leg: a broken probe fixture is not product code and
+# must not be able to take down the gating path.
+run_cargo_check "$WORKTREE" "--tests" cargo_tests.out
+ct_st=$?
+
+if [ "$ct_st" -ne 0 ]; then
+    cat >&2 <<EOF
+
+DO NOT PUSH. src/compiler_rust compiles its bin target but its TEST targets do
+not compile at $tip (cargo check --release --tests failed). A tree in this state
+cannot run its own Rust test suite at all: cargo test produces no test binary
+and emits ZERO \`test result:\` lines, so any "tests passed" claim about it is
+impossible. This is the 2026-08-17 scope gap
+(doc/08_tracking/bug/seed_build_guard_checks_only_bin_target_no_link_2026-08-17.md).
+
+$(tail -n 40 "$TMPROOT/cargo_tests.out")
+
+Re-run standalone to iterate:
+  cd $WORKTREE/src/compiler_rust && CARGO_TARGET_DIR=$CARGO_TARGET_ROOT cargo check --release --tests
+EOF
+    VERDICT_EMITTED=1
+    err1=$($GREP -m1 -E '^error' "$TMPROOT/cargo_tests.out" 2>/dev/null)
+    echo "$SELF: FAIL — cargo check --tests failed in $tip: ${err1:-see stderr above}"
+    exit 1
+fi
+
+# --- ADVISORY LEG: every remaining target (examples, benches) ---------------
+# Reported, never fatal. Kept separate from leg 2 so that a breakage in a probe
+# fixture is visible without turning a genuine product-code PASS into a FAIL
+# for an unrelated reason.
+run_cargo_check "$WORKTREE" "--all-targets" cargo_all.out
+ca_st=$?
+advisory=""
+if [ "$ca_st" -ne 0 ]; then
+    err1=$($GREP -m1 -E '^error' "$TMPROOT/cargo_all.out" 2>/dev/null)
+    advisory=" [ADVISORY: --all-targets failed: ${err1:-see $TMPROOT/cargo_all.out}]"
+    echo "$SELF: ADVISORY — cargo check --release --all-targets failed at $tip (not gating): ${err1:-see stderr}" >&2
+    tail -n 20 "$TMPROOT/cargo_all.out" >&2
+fi
+
 VERDICT_EMITTED=1
-echo "$SELF: PASS — $nfiles file(s) checked, seed builds cleanly at $tip"
+echo "$SELF: PASS — $nfiles file(s) checked, seed bin + test targets compile cleanly at $tip (link NOT verified: cargo check does not link)$advisory"
 exit 0
