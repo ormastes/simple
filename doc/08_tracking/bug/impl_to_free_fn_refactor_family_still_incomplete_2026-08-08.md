@@ -2,11 +2,12 @@
 
 - **Filed:** 2026-08-08
 - **Severity:** High (dead call sites in live compiler passes; silent no-ops / unresolved calls)
-- **Status:** PARTIALLY FIXED — 24 of 64 oracle survivors restored. 40 oracle
-  hits remain, but only **27 are actual refactor damage**: 7 are `fuzz.spl`'s
-  missing-module defect, 5 are known regex false positives, 1 is a Class C
-  stdlib gap. Quote both numbers (oracle-40 / family-27) or the next reader
-  chases 13 non-issues. **The family is NOT closed.**
+- **Status:** PARTIALLY FIXED — re-measured 2026-08-17 (see "Re-measurement"
+  below): **25 oracle hits, of which 12 are actual refactor damage**. 7 are
+  `fuzz.spl`'s missing-module defect, 5 are known regex false positives, 1 is a
+  Class C stdlib gap. Quote both numbers (oracle-25 / family-12) or the next
+  reader chases 13 non-issues. **The family is NOT closed.**
+  (Superseded figures, 2026-08-08: oracle-40 / family-27.)
 - **Found by:** adversarial review of `b0c98541d2a`, `bc052a4470d`
 
 ## Update 2026-08-08: oracle rebuilt, 24 sites restored
@@ -400,3 +401,86 @@ unresolved-identifier error is gone and the next error is unrelated
 pre-existing damage. Push guards `check-no-conflict-tree-push`,
 `check-no-conflict-markers-push`, `check-tree-size-push` all PASS on the
 explicit landed range.
+
+## Re-measurement 2026-08-17 — oracle 40 -> 25; and the oracle itself was fail-OPEN
+
+Re-ran the tightened oracle against current source. **Two findings.**
+
+### Finding 1: the documented oracle under-counts definitions (`me fn`)
+
+The oracle's definition-extraction line
+
+```sh
+/usr/bin/grep -rEoh '\b(fn|me)[[:space:]]+[a-zA-Z0-9_]+' src/ --include=*.spl
+```
+
+is **wrong for the `me fn NAME` form**. `grep -o` matches non-overlapping, so on
+`    me fn cluster_to_sector(...)` the alternation matches `me fn` first and the
+trailing `sed 's/.*[[:space:]]//'` yields the literal name **`fn`** — the real
+name is never emitted. **341 definitions were missing from `defs.txt`.** Every
+one of them makes its call sites look like zero-definition survivors, i.e. the
+oracle was fail-OPEN in the *false-positive* direction (it invents damage, it
+does not hide it — so no previously-closed row is at risk, but the survivor
+count was inflated). Confirmed instance: `fat32_core.spl:355,382`
+`self.cluster_to_sector(cluster)` was reported as a survivor while
+`fat32_core.spl:319` reads `me fn cluster_to_sector(cluster: u32) -> u64:`.
+
+Corrected extraction:
+
+```sh
+/usr/bin/grep -rEoh '\b(fn|me)[[:space:]]+(fn[[:space:]]+)?[a-zA-Z0-9_]+' src/ --include=*.spl \
+  | /usr/bin/sed -E 's/.*[[:space:]]//' | sort -u > defs.txt
+```
+
+Definition count: 100,070 -> 100,411.
+
+### Finding 2: corrected count is 25 (was 40)
+
+With the corrected `defs.txt`, the tightened extraction (emit only the callee
+whose first argument re-passes its own prefix, `<X>_<Y>(<X>`) yields **25**
+surviving zero-definition call sites, down from the 08-08 figure of 40.
+
+Oracle self-test (fail-closed, run before accepting the count):
+
+| injected line | expected | observed |
+|---|---|---|
+| `zzq_frobnicate(zzq, 1)` — zero-def, prefix re-passed | +1 | 27 -> 28 ✓ |
+| `parse_or(parse, 1)` — callee HAS a definition | +0 | 27 ✓ |
+| `zzq_frobnicate(other, 1)` — zero-def, prefix NOT re-passed | +0 | 27 ✓ |
+
+(Self-test was run against the pre-correction 27-baseline; the correction to
+`defs.txt` then moved the baseline to 25.)
+
+### The 25 survivors
+
+| file:line | callee | class |
+|---|---|---|
+| `src/compiler/10.frontend/desugar/desugar_async.spl:44` | `response_text` | A |
+| `src/compiler/15.blocks/blocks/definition.spl:60` | `parser_set_mode` | A |
+| `src/compiler/15.blocks/blocks/definition.spl:61` | `parser_parse_expr` | A |
+| `src/compiler/15.blocks/blocks/easy.spl:113` | `pattern_trim` | A |
+| `src/compiler/15.blocks/blocks/registry.spl:26,182` | `blk_lexer_mode` | A |
+| `src/compiler/90.tools/desugar_async.spl:42` | `response_text` | A |
+| `src/compiler_rust/lib/std/src/spec/formatter/markdown.spl:164` | `path_file_exists` | A |
+| `src/lib/gc_async_mut/gpu/engine2d/engine.spl:1229,1234,1239,1244` | `vulkan_*` (4 distinct) | A |
+| `src/compiler/70.backend/backend/exhaustiveness_validator.spl:474` | `sys_exit` | C — stdlib gap |
+| `src/lib/nogc_sync_mut/fuzz.spl:164,169,199,231,246,291,299` | `rng_next_range` | C — missing module |
+| `src/os/kernel/ipc/syscall_spm.spl:396,406,419,423` | `queue_*` | false positive (docstring) |
+| `src/lib/gc_async_mut/gpu/engine2d/backend_metal_msl.spl:986` | `lut_lookup` | false positive (MSL shader source) |
+
+**12 Class A (actual refactor damage)** + 8 Class C + 5 known false positives.
+
+`engine.spl:1229-1244` (4 sites) is **newly surfaced** — not listed in the
+08-08 "remaining Class A" set.
+
+### Scope note: `src/compiler/00.common/**` is CLEAN
+
+**Zero of the 25 survivors are under `src/compiler/00.common/**`** — the path
+this doc names as its primary location. `predicate_parser.spl:125`, the one
+`00.common` site the 08-08 pass recorded as fixed, is confirmed fixed in current
+source: `if new_pos < tokens.len():`. (8 raw regex hits fall in `00.common`, all
+of which resolve to real definitions and are dropped by the def-filter.)
+
+Consequently **all 12 remaining Class A sites belong to other lanes**
+(`10.frontend`, `15.blocks`, `70.backend`, `90.tools`, `src/lib`, `compiler_rust`)
+and were deliberately not edited in this pass.

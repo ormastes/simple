@@ -1,0 +1,108 @@
+# REPRODUCING spec for the impl-to-free-fn refactor damage family.
+#
+# Bug: doc/08_tracking/bug/impl_to_free_fn_refactor_family_still_incomplete_2026-08-08.md
+#
+# Companion to impl_to_free_fn_zero_definition_census_spec.spl (the census /
+# prevention spec). This one pins the 12 individually-classified Class A sites:
+# for each, the called name must have at least one `fn` / `me fn` definition
+# somewhere in `src/`. A call whose callee has zero definitions is dead — it
+# never binds, and the surrounding check silently does nothing.
+#
+# EXPECTED STATE: RED. All 12 sites are live as of the 2026-08-17 re-measurement
+# and every one of them is owned by a lane other than `src/compiler/00.common`,
+# which is the only path this session was permitted to edit. This spec is
+# therefore filed as the standing reproducer for the owning lanes: it goes green
+# one assertion at a time as each callee is restored, and it is the artifact
+# that makes "the family is not closed" checkable instead of asserted.
+#
+# `src/compiler/00.common` itself is CLEAN — predicate_parser.spl:125, the one
+# 00.common site recorded as fixed, is confirmed fixed in current source
+# (`if new_pos < tokens.len():`). The last example below pins that, so a
+# regression in the one directory that was repaired is caught here too.
+
+extern fn rt_dir_walk(root: text) -> [text]
+extern fn rt_file_read_text(path: text) -> text
+
+fn is_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+
+fn leading_ident(s: text) -> text:
+    val n = s.len()
+    var i = 0
+    while i < n and is_ident_char(s.substring(i, i + 1)):
+        i = i + 1
+    s.substring(0, i)
+
+# Corrected definition extraction: the identifier after the FIRST "fn " on the
+# line, so `fn NAME`, `me fn NAME` and `extern fn NAME` all yield NAME. The bug
+# doc's published oracle used a non-overlapping `grep -o` alternation that
+# returned the literal "fn" for the `me fn` form, losing 341 definitions.
+fn def_name_on_line(line: text) -> text:
+    val at = line.index_of("fn ")
+    if at < 0:
+        return ""
+    leading_ident(line.substring(at + 3, line.len()))
+
+fn all_definition_names() -> Dict<text, bool>:
+    var defs: Dict<text, bool> = {}
+    for p in rt_dir_walk("src") ?? []:
+        if p.ends_with(".spl"):
+            for line in (rt_file_read_text(p) ?? "").split("\n"):
+                val d = def_name_on_line(line)
+                if d.len() > 0:
+                    defs[d] = true
+    defs
+
+describe "impl-to-free-fn Class A call sites resolve to a definition":
+
+    it "collects a non-empty definition set (non-vacuity guard)":
+        # Without this, a failed walk would make every lookup below report
+        # "undefined" and the spec would be red for the wrong reason.
+        val defs = all_definition_names()
+        expect(defs.len() > 1000).to_equal(true)
+        expect(defs.contains_key("parse_or")).to_equal(true)
+        # proves the me-fn form is really being captured
+        expect(defs.contains_key("cluster_to_sector")).to_equal(true)
+
+    it "restores the async desugar response accessor":
+        val defs = all_definition_names()
+        # src/compiler/10.frontend/desugar/desugar_async.spl:44  (lane: 10.frontend)
+        # src/compiler/90.tools/desugar_async.spl:42             (lane: 90.tools)
+        expect(defs.contains_key("response_text")).to_equal(true)
+
+    it "restores the blocks definition parser accessors":
+        val defs = all_definition_names()
+        # src/compiler/15.blocks/blocks/definition.spl:60,61  (lane: 15.blocks)
+        expect(defs.contains_key("parser_set_mode")).to_equal(true)
+        expect(defs.contains_key("parser_parse_expr")).to_equal(true)
+
+    it "restores the blocks easy/registry accessors":
+        val defs = all_definition_names()
+        # src/compiler/15.blocks/blocks/easy.spl:113      (lane: 15.blocks)
+        # src/compiler/15.blocks/blocks/registry.spl:26,182
+        expect(defs.contains_key("pattern_trim")).to_equal(true)
+        expect(defs.contains_key("blk_lexer_mode")).to_equal(true)
+
+    it "restores the spec markdown formatter path probe":
+        val defs = all_definition_names()
+        # src/compiler_rust/lib/std/src/spec/formatter/markdown.spl:164
+        expect(defs.contains_key("path_file_exists")).to_equal(true)
+
+    it "restores the engine2d vulkan submission accessors":
+        val defs = all_definition_names()
+        # src/lib/gc_async_mut/gpu/engine2d/engine.spl:1229,1234,1239,1244
+        # (lane: src/lib gpu) — newly surfaced by the 2026-08-17 re-measurement,
+        # not present in the 2026-08-08 remaining-Class-A list.
+        expect(defs.contains_key("vulkan_submitted_framebuffer_handle")).to_equal(true)
+        expect(defs.contains_key("vulkan_framebuffer_ownership_handle")).to_equal(true)
+        expect(defs.contains_key("vulkan_submitted_device_identity")).to_equal(true)
+        expect(defs.contains_key("vulkan_submitted_generation")).to_equal(true)
+
+    it "keeps src/compiler/00.common free of folded-receiver damage":
+        # predicate_parser.spl:125 was `tokens_len(tokens)`; the repaired form
+        # is the receiver method call. This pins the one directory that WAS
+        # repaired, so it cannot silently regress.
+        val src = rt_file_read_text("src/compiler/00.common/predicate_parser.spl") ?? ""
+        expect(src.len() > 0).to_equal(true)
+        expect(src).to_contain("tokens.len()")
+        expect(src.contains("tokens_len(tokens")).to_equal(false)

@@ -1,0 +1,183 @@
+# Census / similar-bug-PREVENTION spec for the impl-to-free-fn refactor damage family.
+#
+# Bug: doc/08_tracking/bug/impl_to_free_fn_refactor_family_still_incomplete_2026-08-08.md
+#
+# An impl-block -> free-function refactor left call sites of the shape
+#     <X>_<Y>(<X>, ...)          # bare free-function form
+#     recv.<X>_<Y>(<X>, ...)     # folded receiver, first argument re-passed
+# whose callee has ZERO `fn` / `me fn` definitions anywhere in the tree. Those
+# calls are dead: they compile-look-fine and silently never bind.
+#
+# This spec is the CENSUS, not a single-site reproducer. It re-derives the whole
+# survivor set on every run and fails the moment a NEW zero-definition call site
+# appears in `src/compiler/**`. The known-live survivors are listed in
+# known_survivors() with their owning lane; shrinking that list is the owning
+# lanes' visible, mechanical to-do, and removing an entry that is still present
+# fails this spec too (no silent staleness in either direction).
+#
+# IMPORTANT — this spec implements the CORRECTED oracle. The oracle published in
+# the bug doc was fail-OPEN on definitions:
+#     grep -rEoh '\b(fn|me)[[:space:]]+[a-zA-Z0-9_]+'
+# `grep -o` matches non-overlapping, so on `me fn cluster_to_sector(...)` the
+# alternation consumes `me fn` and the extracted "name" is the literal `fn` —
+# the real name is never recorded. That lost 341 definitions tree-wide and
+# invented false survivors (e.g. fat32_core.spl's `self.cluster_to_sector(cluster)`,
+# genuinely defined at fat32_core.spl:319 as `me fn cluster_to_sector`).
+# The fix, used below, is to take the identifier after the FIRST `fn ` on the
+# line, which handles `fn NAME`, `me fn NAME` and `extern fn NAME` alike.
+
+extern fn rt_dir_walk(root: text) -> [text]
+extern fn rt_file_read_text(path: text) -> text
+
+fn scan_root() -> text:
+    "src/compiler"
+
+# Known-live zero-definition call sites under scan_root(), keyed "<relpath>:<callee>".
+# Each is owned by a lane other than 00.common; see the bug doc's re-measurement
+# section (2026-08-17) for the full classification.
+fn known_survivors() -> [text]:
+    [
+    # --- Class A: actual refactor damage, target must be restored ---
+        "src/compiler/10.frontend/desugar/desugar_async.spl:response_text",
+        "src/compiler/90.tools/desugar_async.spl:response_text",
+        "src/compiler/15.blocks/blocks/definition.spl:parser_set_mode",
+        "src/compiler/15.blocks/blocks/definition.spl:parser_parse_expr",
+        "src/compiler/15.blocks/blocks/easy.spl:pattern_trim",
+        "src/compiler/15.blocks/blocks/registry.spl:blk_lexer_mode",
+    # --- Class C: not this family, filed separately (missing stdlib binding) ---
+        "src/compiler/70.backend/backend/exhaustiveness_validator.spl:sys_exit"
+    ]
+
+fn is_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c >= "0" and c <= "9") or c == "_"
+
+# Identifier ending at the end of `s` (the callee name sitting just before a "(").
+fn trailing_ident(s: text) -> text:
+    val e = s.len()
+    var i = e
+    while i > 0 and is_ident_char(s.substring(i - 1, i)):
+        i = i - 1
+    s.substring(i, e)
+
+# Identifier starting at the beginning of `s` (the first argument, just after "(").
+fn leading_ident(s: text) -> text:
+    val n = s.len()
+    var i = 0
+    while i < n and is_ident_char(s.substring(i, i + 1)):
+        i = i + 1
+    s.substring(0, i)
+
+# Definition names on one line. Deliberately over-broad (comments and strings
+# containing "fn " also register) so the census stays FAIL-CLOSED: an
+# over-broad definition set can only suppress a survivor, never invent one.
+fn def_name_on_line(line: text) -> text:
+    val at = line.index_of("fn ")
+    if at < 0:
+        return ""
+    leading_ident(line.substring(at + 3, line.len()))
+
+# Callee names on one line matching the damage shape: `<X>_<Y>(<X>` where the
+# first argument re-passes the callee's own prefix, and the argument is
+# terminated by "," or ")". Returns the callee names found.
+fn damage_callees_on_line(line: text) -> [text]:
+    var found: [text] = []
+    val segs = line.split("(")
+    var k = 0
+    while k + 1 < segs.len():
+        val callee = trailing_ident(segs[k])
+        val rest = segs[k + 1]
+        val arg = leading_ident(rest)
+        # the argument must be the WHOLE first argument: next char is "," or ")"
+        var terminated = false
+        if arg.len() > 0 and rest.len() > arg.len():
+            val nxt = rest.substring(arg.len(), arg.len() + 1)
+            terminated = nxt == "," or nxt == ")"
+        val us = callee.index_of("_")
+        if terminated and us > 0:
+            val prefix = callee.substring(0, us)
+            if prefix == arg:
+                found.push(callee)
+        k = k + 1
+    found
+
+describe "impl-to-free-fn refactor damage census":
+
+    # --- Non-vacuity self-test on synthetic input -------------------------
+    # This is the part that makes the census trustworthy. A census that scans a
+    # path which does not exist is GREEN and worthless; these examples prove the
+    # detector actually fires, and fires only on the right shape, without
+    # touching the repository.
+    it "detects an injected zero-definition call site (positive control)":
+        val hits = damage_callees_on_line("            zzq_frobnicate(zzq, 1)")
+        expect(hits.len()).to_equal(1)
+        expect(hits[0]).to_equal("zzq_frobnicate")
+
+    it "detects the folded-receiver form too":
+        val hits = damage_callees_on_line("        return recv.vulkan_submitted_handle(vulkan)")
+        expect(hits.len()).to_equal(1)
+        expect(hits[0]).to_equal("vulkan_submitted_handle")
+
+    it "ignores a call whose first argument does not re-pass the prefix":
+        expect(damage_callees_on_line("    zzq_frobnicate(other, 1)").len()).to_equal(0)
+
+    it "ignores a call whose first argument is only a prefix of the real argument":
+        # `zzq` vs `zzqx` must NOT match — this is the off-by-one that a naive
+        # startswith test gets wrong.
+        expect(damage_callees_on_line("    zzq_frobnicate(zzqx, 1)").len()).to_equal(0)
+
+    it "extracts a definition name from every definition form":
+        expect(def_name_on_line("fn parse_or(tokens: [Token], pos: i64) -> text:")).to_equal("parse_or")
+        expect(def_name_on_line("    me fn cluster_to_sector(cluster: u32) -> u64:")).to_equal("cluster_to_sector")
+        expect(def_name_on_line("extern fn rt_dir_walk(root: text) -> [text]")).to_equal("rt_dir_walk")
+
+    it "does not regress to the published oracle's me-fn blind spot":
+        # The bug doc's oracle yielded the literal "fn" here, losing 341 defs.
+        expect(def_name_on_line("    me fn cluster_to_sector(cluster: u32) -> u64:")).to_not_equal("fn")
+
+    # --- The census itself ------------------------------------------------
+    it "finds no NEW zero-definition call site in the compiler tree":
+        val all_paths = rt_dir_walk(scan_root()) ?? []
+        var files: [text] = []
+        for p in all_paths:
+            if p.ends_with(".spl"):
+                files.push(p)
+
+        # Non-vacuity guard: a walk that returned nothing would make every
+        # assertion below trivially true.
+        expect(files.len() > 500).to_equal(true)
+
+        var defs: Dict<text, bool> = {}
+        var sources: [text] = []
+        for f in files:
+            val src = rt_file_read_text(f) ?? ""
+            sources.push(src)
+            for line in src.split("\n"):
+                val d = def_name_on_line(line)
+                if d.len() > 0:
+                    defs[d] = true
+
+        # Non-vacuity guard: an empty definition set would report every call
+        # site as a survivor and drown the real signal.
+        expect(defs.len() > 1000).to_equal(true)
+
+        var survivors: [text] = []
+        var fi = 0
+        while fi < files.len():
+            val rel = files[fi]
+            for line in sources[fi].split("\n"):
+                for callee in damage_callees_on_line(line):
+                    if not defs.contains_key(callee):
+                        val key = rel + ":" + callee
+                        if not survivors.contains(key):
+                            survivors.push(key)
+            fi = fi + 1
+
+        # Every survivor must be a KNOWN one. A new one fails here.
+        for s in survivors:
+            expect(known_survivors().contains(s)).to_equal(true)
+
+        # And every KNOWN one must still be present. If a lane fixes one, this
+        # fails until the entry is removed from KNOWN_SURVIVORS — so the list
+        # cannot silently rot into a permanent blanket exemption.
+        for k in known_survivors():
+            expect(survivors.contains(k)).to_equal(true)
