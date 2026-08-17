@@ -2693,9 +2693,25 @@ impl MirLowering:
                 # self-host lane, so a second match cannot recover its owner.
                 # Use the symbol table's exact owner-qualified index only when
                 # the method leaf identifies one unique static Function.
-                if static_method_id == nil and static_receiver_kind_disc < 0:
+                # The `static_receiver_kind_disc < 0` guard below assumed
+                # rt_enum_discriminant returns -1 when it cannot identify the
+                # receiver's ExprKind. Measured 2026-08-17 under native-build it
+                # returns a garbage POSITIVE constant (1337030607) for every
+                # receiver shape -- Var, NamedVar and trait-typed local alike --
+                # so the guard never fired and this recovery was dead code on the
+                # native lane. `static_receiver_name == ""` is the condition that
+                # was actually meant: it is non-empty exactly when the receiver
+                # was successfully identified as a bare Class/Struct/Enum/Import
+                # name, so an empty one means the owner could not be determined
+                # and the unique-static-method fallback is the intended recovery.
+                # Without it `Widget.stat(2)` fell through to lowering the bare
+                # class name as a value -> "undefined variable Widget".
+                # lookup_unique_static_method is itself conservative (it resolves
+                # only when the leaf names exactly ONE static Function), so
+                # widening the guard cannot mis-dispatch an instance method.
+                if static_method_id == nil and (static_receiver_kind_disc < 0 or static_receiver_name == ""):
                     static_method_id = self.symbols.lookup_unique_static_method(method)
-                eprint("[mir-method-call] unresolved-static method={method}\n")
+                eprint("[mir-method-call] unresolved-static method={method} srn='{static_receiver_name}' disc={static_receiver_kind_disc} found={static_method_id != nil}\n")
                 if static_method_id != nil:
                     val resolved_static_method_id = static_method_id ?? SymbolId(id: -1)
                     var static_args: [MirOperand] = []
