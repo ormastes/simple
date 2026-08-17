@@ -1,6 +1,7 @@
 # BUG: os.port.disk_image builder is unbuildable (both interp and native paths)
 
-**Status:** open
+Status: OPEN (P2)
+Status re-verified 2026-08-17 by source inspection (triage shard 01).
 **Severity:** high (blocks building any SimpleOS FAT disk image from Simple)
 **Component:** compiler (interp semantic + LLVM native codegen) / `os.port.disk_image`
 **Found:** 2026-07-08, staging a clang hello ELF onto a FAT32 image
@@ -80,3 +81,15 @@ Probe: `probe10_disk_image.spl` (minimal reproduction of `os.port.disk_image` us
 
 **Status correction:** Interp path is now fixed; native path still open with
 altered error signature. Status remains OPEN (native blocker unchanged).
+
+## Re-verification 2026-08-17 (wave_01 G_os lane)
+
+`nice -n 19 bin/simple run src/os/port/disk_image.spl` → **rc=0**, and
+`grep -c "cannot iterate" <log>` → **0**. The filed semantic error
+("cannot iterate over this type") does **not** reproduce on the interpreter
+path in current source. Only `[use-warning]`/`[gc-warning]` lines on
+`std.*.simd` remain, unrelated to this bug.
+
+Confirms the existing "Status correction" above: the interpreter half is dead.
+The native/llc half was **not** exercised in this pass and is neither confirmed
+nor closed here.

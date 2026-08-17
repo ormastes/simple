@@ -1,6 +1,7 @@
 # FAT32 database atomic replace and mount recovery are missing
 
-- **Status:** open, release blocking for SimpleOS durable DB server
+- Status: OPEN (P1)
+- Status re-verified 2026-08-17 by source inspection (triage shard 01).
 - **Owner:** filesystem atomic-replace/recovery owner
 - **Observed:** `Fat32Filesystem.rename_at` links new then deletes old, rejects
   an existing destination, and explicitly disclaims pairwise atomicity.
@@ -88,3 +89,32 @@ quoted in `process_transfer_session_replay_identity_2026-08-12.md`. Follow-up
 worth filing separately: the `rt_file_facade.spl:137` docstring states an
 atomicity guarantee the FAT32 backend does not provide, which is how a caller
 would wrongly conclude this bug was already closed.
+
+## Content re-classification 2026-08-17 (wave_01 G_os lane) — ALREADY-FIXED candidate
+
+Classified against current source (not SHA ancestry). Every load-bearing claim
+in this doc is contradicted by the tree:
+
+- **"rename_at is not atomic"** — production no longer routes replaces through
+  `rename_at`. `Fat32Filesystem.atomic_replace_at` exists as a dedicated path
+  (`src/os/kernel/fs/fat32.spl:2322`), resolving both endpoints *before* taking
+  the mutation lock and revalidating identities under it via
+  `_atomic_replace_at_locked`.
+- **"mount performs no journal recovery"** — mount calls
+  `fat32_atomic_replace_recover_device` **before** reading or publishing
+  (`fat32.spl:730-740`), with an explicit `Fat32ReplaceError.Unsupported` branch.
+  `fat32.spl:2503` is the explicit recovery adapter ("normal boot invokes this
+  before publish").
+- **"dual-bank protocol unimplemented"** — `bank:` / `Fat32ReplaceState`
+  (`Committed`, …) / `generation` are present (`fat32.spl:2249`).
+- **"atomic_write cannot truthfully ack a durable replace"** — the adapter is
+  now honest, not falsely acking: `database_persistence_adapter.spl:43-44` gates
+  on `AtomicReplaceRecoveryLevel.RecoverableReplaceV1 and durable_flush and
+  mount_recovery_complete`, and returns the string
+  `"crash-recovery-unavailable"` (`:88-89`) when that is not met.
+
+**Not proven here:** no `Results:` line was obtained — this row's
+`reproducible_by` is `NONE` and no spec exercises the crash/recovery path, so
+this is a content-based already-fixed *candidate*, not a verified close. A
+crash-injection spec over `atomic_replace_at` + mount recovery is still owed
+before this doc is closed.
