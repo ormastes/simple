@@ -696,16 +696,19 @@ impl ParallelBuilder:
         val budget = self.config.unit_timeout_ms
         val order = self.graph.topological_order()
 
-        # pid -> per-unit bookkeeping for the in-flight children.
-        var in_flight_unit: {i64: i64} = {}
-        var in_flight_path: {i64: text} = {}
-        var in_flight_start: {i64: i64} = {}
-        # Explicit entry count: Dict.len() returns -1 in natively-compiled code,
-        # so `in_flight.len() < max_workers` would be `-1 < max_workers` — always
-        # true — and every unit would spawn at once (fork storm). Same discipline
-        # as `build_parallel` above: one increment site, one decrement site.
-        var in_flight_count = 0
-        var attempted: {i64: bool} = {}
+        # Per-unit bookkeeping for the in-flight children, held as PARALLEL TYPED
+        # ARRAYS rather than pid-keyed dicts. This is not a style choice: dict
+        # `keys()` yields type-ERASED elements, and handing one to an extern fails
+        # at runtime with "rt_process_wait: pid must be an integer" — a local
+        # `val pid: i64 = ...` does not re-narrow it. Arrays of `i64` keep the
+        # element type all the way to the extern call. They also make the
+        # in-flight count exact without a hand-maintained counter, sidestepping
+        # the `Dict.len() == -1` fork-storm hazard documented in `build_parallel`.
+        var live_pid: [i64] = []
+        var live_unit: [i64] = []
+        var live_path: [text] = []
+        var live_start: [i64] = []
+        var attempted: [i64] = []
         var next_idx = 0
 
         if self.config.verbose:
@@ -713,13 +716,13 @@ impl ParallelBuilder:
 
         while true:
             # --- Fill worker slots (bounded concurrency, R7) ------------------
-            while in_flight_count < max_workers and next_idx < order.len():
+            while live_pid.len() < max_workers and next_idx < order.len():
                 val id = order[next_idx]
                 next_idx = next_idx + 1
                 if not self.graph.units.has(id):
                     continue
                 val unit_path = self.graph.units[id].path
-                attempted[id] = true
+                attempted = attempted.push(id)
                 val pid = spawn_fn(unit_path)
                 if pid < 0:
                     # Never spawned, so no status exists to classify. Status -1
@@ -728,14 +731,14 @@ impl ParallelBuilder:
                         id, unit_path, -1, false, 0, 0,
                         "failed to spawn child process"))
                     continue
-                in_flight_unit[pid] = id
-                in_flight_path[pid] = unit_path
-                in_flight_start[pid] = rt_time_now_monotonic_ms()
-                in_flight_count = in_flight_count + 1
+                live_pid = live_pid.push(pid)
+                live_unit = live_unit.push(id)
+                live_path = live_path.push(unit_path)
+                live_start = live_start.push(rt_time_now_monotonic_ms())
                 if self.config.verbose:
                     print "[SUPERVISED] spawned pid={pid} for {unit_path}"
 
-            if in_flight_count == 0:
+            if live_pid.len() == 0:
                 if next_idx >= order.len():
                     break
                 # Every spawn in the last pass failed; `next_idx` advanced, so
@@ -743,50 +746,46 @@ impl ParallelBuilder:
                 continue
 
             # --- Reap whatever has finished ----------------------------------
-            # Collected first, mutated after: removing from a dict while
-            # iterating its keys() is not safe here.
-            var done_pid: [i64] = []
-            var done_status: [i64] = []
-            var done_timed_out: [bool] = []
+            # One pass over the in-flight set. Finished units are recorded and
+            # dropped; the survivors are carried into rebuilt arrays, so nothing
+            # is mutated while it is being scanned.
+            var kept_pid: [i64] = []
+            var kept_unit: [i64] = []
+            var kept_path: [text] = []
+            var kept_start: [i64] = []
+            var reaped = 0
 
-            for pid in in_flight_unit.keys():
+            var live_idx = 0
+            while live_idx < live_pid.len():
+                val pid = live_pid[live_idx]
+                val unit_id = live_unit[live_idx]
+                val unit_path = live_path[live_idx]
+                val started = live_start[live_idx]
+                live_idx = live_idx + 1
+
                 # The wait status is read DIRECTLY into this variable. There is
                 # no pipeline anywhere on this path, by design.
-                val status = rt_process_wait(pid, 1)
+                var status = rt_process_wait(pid, 1)
+                var timed_out = false
                 if status == -2:
                     # Still running. Enforce the per-unit budget ourselves.
-                    if budget > 0:
-                        val elapsed = rt_time_now_monotonic_ms() - in_flight_start[pid]
-                        if elapsed > budget:
-                            rt_process_kill(pid)
-                            done_pid = done_pid.push(pid)
-                            # 137 = 128+SIGKILL, which is what enforced the
-                            # budget; `timed_out` is what decides the category.
-                            done_status = done_status.push(137)
-                            done_timed_out = done_timed_out.push(true)
-                    continue
-                done_pid = done_pid.push(pid)
-                done_status = done_status.push(status)
-                done_timed_out = done_timed_out.push(false)
+                    var expired = false
+                    if budget > 0 and (rt_time_now_monotonic_ms() - started) > budget:
+                        expired = true
+                    if not expired:
+                        kept_pid = kept_pid.push(pid)
+                        kept_unit = kept_unit.push(unit_id)
+                        kept_path = kept_path.push(unit_path)
+                        kept_start = kept_start.push(started)
+                        continue
+                    rt_process_kill(pid)
+                    # 137 = 128+SIGKILL, which is what enforced the budget;
+                    # `timed_out` is what decides the category.
+                    status = 137
+                    timed_out = true
 
-            if done_pid.len() == 0:
-                rt_thread_sleep(10)
-                continue
-
-            var done_idx = 0
-            while done_idx < done_pid.len():
-                val pid = done_pid[done_idx]
-                val status = done_status[done_idx]
-                val timed_out = done_timed_out[done_idx]
-                done_idx = done_idx + 1
-
-                val unit_id = in_flight_unit[pid]
-                val unit_path = in_flight_path[pid]
-                val wall_ms = rt_time_now_monotonic_ms() - in_flight_start[pid]
-                in_flight_unit.remove(pid)
-                in_flight_path.remove(pid)
-                in_flight_start.remove(pid)
-                in_flight_count = in_flight_count - 1
+                reaped = reaped + 1
+                val wall_ms = rt_time_now_monotonic_ms() - started
 
                 if status == 0 and not timed_out:
                     # OK requires exit 0 AND the declared artifact on disk. A
@@ -811,9 +810,21 @@ impl ParallelBuilder:
                     if self.config.verbose:
                         print record.attribution_line()
 
+            # Survivors carry over; everything reaped above has been recorded.
+            live_pid = kept_pid
+            live_unit = kept_unit
+            live_path = kept_path
+            live_start = kept_start
+            if reaped == 0:
+                rt_thread_sleep(10)
+
         # --- Anything never attempted is NOT_RUN, stated explicitly (R3) ------
         for id in order:
-            if attempted.has(id):
+            var was_attempted = false
+            for done_id in attempted:
+                if done_id == id:
+                    was_attempted = true
+            if was_attempted:
                 continue
             if not self.graph.units.has(id):
                 continue

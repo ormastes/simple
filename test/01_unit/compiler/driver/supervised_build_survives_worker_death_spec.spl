@@ -1,0 +1,117 @@
+# Unstable ("separate process") build mode: a worker's death must not be the
+# parent's death.
+#
+# This is the REPRODUCING spec for the defect: before `build_supervised()`, the
+# module-compile fan-out ran units in-process, so a SIGSEGV in one unit took the
+# whole build down and the remaining source list was never attempted.
+#
+# It spawns GENUINE child processes that genuinely die by signal — nothing here
+# is simulated. The interesting assertion is the boring one: this spec's own
+# process is still alive at the end to make it.
+#
+# Requirement: doc/02_requirements/compiler/supervised_builder.md (R1, R2, R3)
+
+use std.spec.*
+use compiler.driver.driver_build.parallel.{
+    ParallelBuilder, ParallelBuildConfig, parallel_supervised_argv,
+    parallel_supervised_cmd}
+use compiler.driver.driver_build.build_outcome.{BuildOutcomeKind}
+
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+
+# The shell body each unit's child runs, keyed by the unit's "source path".
+# `kill -SEGV $$` / `kill -TERM $$` inside the inner shell kill THAT shell, so
+# the supervising `/bin/sh -c '<cmd>; exit $?'` wrapper reports 128+N.
+fn unit_body(path: text) -> text:
+    if path == "crash.spl":
+        return "/bin/sh -c 'kill -SEGV $$'"
+    if path == "oom.spl":
+        return "/bin/sh -c 'kill -KILL $$'"
+    if path == "terminated.spl":
+        return "/bin/sh -c 'kill -TERM $$'"
+    if path == "error.spl":
+        return "exit 3"
+    "true"
+
+describe "unstable build mode survives worker death":
+    it "records a signal death as CRASHED and still reaches the last unit":
+        val builder = ParallelBuilder.create(ParallelBuildConfig.unstable_mode(0))
+        builder.add_unit("first.spl", [])
+        builder.add_unit("crash.spl", [])
+        builder.add_unit("oom.spl", [])
+        builder.add_unit("error.spl", [])
+        builder.add_unit("terminated.spl", [])
+        builder.add_unit("last.spl", [])
+
+        val outcomes = builder.build_supervised(
+            \path: rt_process_spawn_async(parallel_supervised_cmd(),
+                                          parallel_supervised_argv(unit_body(path))),
+            \path: "")
+
+        # R3: the build reached the END of the source list. Four of the six units
+        # died; the parent is still here, and so is the last unit's record.
+        expect(outcomes.len()).to_equal(6)
+        expect(outcomes.has_path("last.spl")).to_be_true()
+
+        # R2: the categories are disjoint and correctly decoded from 128+N.
+        expect(outcomes.count_of(BuildOutcomeKind.OK)).to_equal(2)
+        expect(outcomes.count_of(BuildOutcomeKind.CRASHED)).to_equal(2)
+        expect(outcomes.count_of(BuildOutcomeKind.ERROR)).to_equal(1)
+        expect(outcomes.count_of(BuildOutcomeKind.TERMINATED)).to_equal(1)
+
+        expect(outcomes.paths_in(BuildOutcomeKind.CRASHED)).to_contain("crash.spl")
+        expect(outcomes.paths_in(BuildOutcomeKind.CRASHED)).to_contain("oom.spl")
+        expect(outcomes.paths_in(BuildOutcomeKind.OK)).to_contain("last.spl")
+
+    it "does not count an external SIGTERM as a failure":
+        # earlyoom on this host runs `--prefer ^(simple|...)` and is actively
+        # SIGTERMing `simple`. A 143 is INFRASTRUCTURE: the unit is UNVERIFIED,
+        # not failed. Conflating the two manufactures phantom compiler bugs.
+        val builder = ParallelBuilder.create(ParallelBuildConfig.unstable_mode(0))
+        builder.add_unit("terminated.spl", [])
+        builder.add_unit("error.spl", [])
+
+        val outcomes = builder.build_supervised(
+            \path: rt_process_spawn_async(parallel_supervised_cmd(),
+                                          parallel_supervised_argv(unit_body(path))),
+            \path: "")
+
+        expect(outcomes.count_of(BuildOutcomeKind.TERMINATED)).to_equal(1)
+        expect(outcomes.unverified_count()).to_equal(1)
+        # Only the ERROR unit counts. If 143 were folded into failures this is 2.
+        expect(outcomes.failure_count()).to_equal(1)
+        # ...and it is still not OK, so the link boundary stays fail-closed.
+        expect(outcomes.all_ok()).to_be_false()
+
+    it "kills a unit that exceeds its budget and records TIMEOUT, not a failure":
+        val builder = ParallelBuilder.create(ParallelBuildConfig.unstable_mode(300))
+        builder.add_unit("slow.spl", [])
+        builder.add_unit("after_slow.spl", [])
+
+        val outcomes = builder.build_supervised(
+            \path: rt_process_spawn_async(
+                parallel_supervised_cmd(),
+                parallel_supervised_argv(
+                    if path == "slow.spl": "sleep 30" else: "true")),
+            \path: "")
+
+        expect(outcomes.count_of(BuildOutcomeKind.TIMEOUT)).to_equal(1)
+        expect(outcomes.paths_in(BuildOutcomeKind.TIMEOUT)).to_contain("slow.spl")
+        # The build continued past the killed unit.
+        expect(outcomes.paths_in(BuildOutcomeKind.OK)).to_contain("after_slow.spl")
+        # UNVERIFIED, never a failure.
+        expect(outcomes.failure_count()).to_equal(0)
+
+    it "never fabricates an artifact for a unit that produced none":
+        # A clean exit that left no declared artifact is an ERROR, not an OK, and
+        # nothing in the supervisor creates the missing file (R4).
+        val builder = ParallelBuilder.create(ParallelBuildConfig.unstable_mode(0))
+        builder.add_unit("no_artifact.spl", [])
+
+        val outcomes = builder.build_supervised(
+            \path: rt_process_spawn_async(parallel_supervised_cmd(),
+                                          parallel_supervised_argv("true")),
+            \path: "/nonexistent/definitely/not/here.o")
+
+        expect(outcomes.count_of(BuildOutcomeKind.OK)).to_equal(0)
+        expect(outcomes.count_of(BuildOutcomeKind.ERROR)).to_equal(1)
