@@ -1,3 +1,9 @@
+> **Owner decision is consolidated in
+> `app_interpreter_deletion_evidence_package_2026-08-11.md` section 0**
+> (re-measured 2026-08-17: 100 files on disk, 99 tracked, 1.1 MB, 25,232 lines,
+> 62/99 using `from X import`, **zero** external `use app.interpreter` imports).
+> This doc remains the original diagnosis. No deletion performed.
+
 # `src/app/interpreter/` is declared REMOVED but is still on disk and still compiled
 
 **Status:** OPEN — filed rather than half-migrated

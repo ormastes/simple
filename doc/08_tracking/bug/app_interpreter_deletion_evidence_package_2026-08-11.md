@@ -1,4 +1,84 @@
-# Deletion evidence package: `src/app/interpreter/` (99 files)
+# Deletion evidence package: `src/app/interpreter/`
+
+> **OWNER DECISION PACKAGE — read section 0 only. Everything below it is the
+> supporting detail, kept verbatim.** No deletion has been performed and none
+> will be without an owner decision. The companion doc
+> `app_interpreter_tree_declared_removed_but_still_on_disk_2026-08-10.md` holds
+> the original diagnosis; section 0 folds its conclusions in so this file is a
+> single read.
+
+## 0. Decision package (re-measured 2026-08-17, current `HEAD` working tree)
+
+### 0.1 What is on disk
+
+| Metric | Value |
+|---|---|
+| Path | `src/app/interpreter/` |
+| Files on disk | **100** (99 `.spl` + 1 non-`.spl`) |
+| Files tracked in git | **99** — `git ls-tree -r --name-only HEAD -- src/app/interpreter/` |
+| Untracked residue | **0** (`git status --porcelain -uall` on the path is empty) |
+| Size on disk | **1.1 MB** (`du -sh`) |
+| Source lines | **25,232** across the 99 `.spl` files |
+| Files using the rejected `from X import {...}` form | **62 of 99** (was reported as 61 in 2026-08-11; re-counted today) |
+| Repo total tracked files | 114,545 — a 99-file removal is 0.086%, inside the tree-size guard's +/-0.15% band, so **no `--expect-files` override is needed** |
+
+### 0.2 What references it (complete, `git grep` over `HEAD`, code+scripts only)
+
+**Real compile-time imports from outside the tree: ZERO.**
+`git grep -n "use app\.interpreter" HEAD -- '*.spl' | grep -v src/app/interpreter/`
+returns **0 lines**. The only `use app.interpreter...` statements in the repo are
+inside the tree, in `collections/persistent_dict/*.spl`, importing each other.
+
+The 15 non-tree files that mention the path at all, classified:
+
+| Class | Files | Breaks on deletion? |
+|---|---|---|
+| **Real runtime dependency — content read** | `test/01_unit/lib/nogc_async_mut_noalloc/execution/watchdog_manager_spec.spl:41,48` (`read_file("src/app/interpreter/core/watchdog.spl")`, asserts on substrings) | **YES** — file-not-found. Must be edited in the same change. |
+| **Real runtime dependency — subprocess** | `test/03_system/feature/interpreter/runtime_error_stack_spec.spl:73` (`run_interpreter(["src/app/interpreter/main.spl", script])`; :30 is a commented twin) | **Already RED today** — the tree does not compile, so this cannot pass now. Deletion changes the failure mode, not the colour. |
+| **Path-string exclusion rules** (reference the path only to skip it) | `scripts/check/check-ui-backend-isolation.shs`, `src/app/doc_coverage/scanner/file_scanner.spl` | No — become dead exclusions; optional cleanup |
+| **Comments / prose only** | `src/app/__init__.spl` (the "REMOVED" declaration), `src/compiler/10.frontend/core/interpreter/mod.spl` (the "DELETED 2026-02-10" declaration), `src/lib/nogc_async_mut_noalloc/execution/watchdog_manager.spl`, and 7 spec files incl. both `generator_intensive_spec.spl` mirrors and both `compiler_interpreter_integration_spec.spl` mirrors | No |
+| **Tests a string constant, not the tree** | `test/03_system/app/ui/feature/backend_isolation_gate_spec.spl` (asserts the exclude-glob text) | No |
+
+### 0.3 If REMOVED
+
+* Compile-time breakage: **none** (zero external imports; the tree does not
+  compile as a unit today anyway — 62/99 files use `from X import`, which the
+  compiler rejects with `semantic: variable 'from' not found`).
+* Must be edited in the same commit: the two `it` blocks in
+  `watchdog_manager_spec.spl`, and `runtime_error_stack_spec.spl:73`.
+* Gains: 100 files / 1.1 MB / 25,232 lines off every `src/app/` walk;
+  `async_runtime/generators.spl` becomes importable so both
+  `generator_intensive_spec.spl` mirrors can drop their hand-copied
+  `GeneratorState` enum; two source comments stop contradicting the filesystem.
+* Risk actually accepted: nobody has read all 99 files to prove each is a dead
+  duplicate rather than a unique implementation. What IS proven is the weaker
+  but decision-relevant fact that **nothing outside the tree can reach any
+  symbol in it today**. Recovery path if wrong: `git log`.
+
+### 0.4 If KEPT
+
+* Nothing breaks — the status quo is stable, because nothing depends on it.
+* Ongoing costs: the two "REMOVED"/"DELETED" source comments stay false; 25,232
+  lines of uncompilable source stay in every scan, census, and lint sweep; the
+  two exclusion rules stay load-bearing; the generator-import unblock stays
+  unavailable and both spec mirrors keep their duplicated enum.
+
+### 0.5 Recommendation
+
+**Delete**, in one commit that also edits `watchdog_manager_spec.spl` and
+`runtime_error_stack_spec.spl`. The deciding fact is that two independent source
+comments authored months before any of this analysis already declare the tree
+removed, and the measurement agrees with them on every axis that matters:
+zero external imports, zero untracked residue, and a tree that does not compile.
+Keeping it preserves no capability — it only preserves the contradiction.
+
+**If the owner wants the stronger guarantee first**, the outstanding work is a
+file-by-file read of all 99 for logic absent from
+`src/compiler/10.frontend/core/interpreter/` and `src/lib/nogc_async_mut*`. That
+has not been done and is not claimed.
+
+---
+
 
 **Status:** EVIDENCE ONLY — no deletion performed. For the repo owner's decision.
 **Date:** 2026-08-11
