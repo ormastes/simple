@@ -263,3 +263,30 @@ this file parse" should be aware the result is not evidence of correctness.
    redeploy-gate/identity-marker check documented in the 2026-08-01 doc so this
    class of incident (stale-but-plausible binary silently serving an old command
    surface) is caught automatically instead of discovered by a silent no-op.
+
+## Re-verification 2026-08-17 (Linux host, source-level only)
+
+Confirmed current source state matches the doc's root-cause analysis exactly:
+
+```
+$ grep -n "handle_build\|main_and_help" src/app/cli/_CliMain/main_and_help.spl
+23:use app.build.cli_entry.{handle_build}
+492:        return handle_build(build_args)
+$ grep -n '"build"' src/app/cli/dispatch/table.spl
+513:            name: "build",
+```
+
+`main_and_help.spl` still dispatches `"build"` via the static import from
+`app.build.cli_entry`, not via `dispatch/table.spl`'s `app_path` table —
+confirming the doc's finding that the table entry is dead code for this path.
+No native-Windows or WSL host is available in this environment, and
+`bin/release/x86_64-pc-windows-msvc/simple.exe` is not present in this
+worktree, so the binary-staleness claim cannot be independently re-run here
+either, exactly as the doc already states.
+
+**Classification: NOT-REPRODUCED (platform-blocked), consistent with prior
+findings.** No `src/app/**` code defect is evident from source alone — the
+current dispatch logic looks correct; the doc's own most-likely explanation
+(stale compiled-in `simple.exe` predates current source) cannot be confirmed
+or refuted without a Windows/WSL redeploy. No source changes made; Status
+remains OPEN — architectural.

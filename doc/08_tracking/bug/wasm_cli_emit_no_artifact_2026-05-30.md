@@ -1,6 +1,7 @@
 # Bug: `simple compile/build --target=wasm32*` emits no artifact
 
-Status: likely-fixed (triaged 2026-06-11, evidence: fix implemented + GUI WASM unblocked per body)
+Status: OPEN (re-verified 2026-08-17 — non-GUI `--target wasm32*` still emits
+no artifact from the deployed binary; see Re-verification section below)
 
 **Date:** 2026-05-30
 **Area:** compiler / CLI / wasm backend
@@ -96,3 +97,33 @@ bar surface strings plus the command event response.
 Remaining work: this unblocks the first no-JavaScript generated GUI WASM
 artifact. It is not a full browser DOM glue implementation and does not claim
 general-purpose non-GUI WASM codegen without the LLVM/WASM backend.
+
+## Re-verification 2026-08-17
+
+Reproduced directly against the deployed binary:
+
+```
+$ readlink -f bin/simple
+/mnt/data/worktrees/simple-main/bin/release/x86_64-unknown-linux-gnu/simple
+$ printf 'pub fn add(a: i32, b: i32) -> i32:\n    return a + b\n' > /tmp/w.spl
+$ bin/simple compile /tmp/w.spl --target wasm32-wasi -o /tmp/w.wasm
+error: WASM compilation failed: compile failed: codegen: WebAssembly targets
+require the LLVM/WASM backend; rebuild `simple-driver` with `--features wasm`
+or `--features wasm-wasi`
+$ echo $?
+1
+$ ls /tmp/w.wasm
+ls: cannot access '/tmp/w.wasm': No such file or directory
+```
+
+Status update: **partially improved, not fixed**. Exit code is now `1` (not
+the doc's originally-reported `3`) and — unlike the original report's "no
+diagnostic" — there is now a clear, correct diagnostic naming the missing
+LLVM/WASM backend feature. No `/tmp/w.wasm` is written, consistent with the
+doc. This is IN-SCOPE-adjacent (`src/app/**` CLI dispatch) but the root
+blocker is the deployed binary lacking the `wasm`/`wasm-wasi` Cargo feature
+(a build/deploy configuration issue, not app-source logic) — no `src/app/**`
+change can fix a missing compiled-in backend feature. Leaving Status: OPEN,
+downgrading from "likely-fixed" framing since the non-GUI CLI path still
+produces no artifact. The 2026-05-31 GUI-WASM fallback update remains
+accurate and unaffected by this re-check.

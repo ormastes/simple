@@ -474,3 +474,36 @@ wrong in both directions, and a "0% false positives" claim derived by
 re-running a *similar* regex is not independent — pass 1's re-index used the
 same prefix assumption and so inherited the same blind spot. Confirming a
 census against a second copy of its own model confirms nothing.
+
+## Re-verification 2026-08-17
+
+```
+$ ls -la scripts/check/check-extern-registration.shs
+```
+
+## Re-verification 2026-08-17 — `check-extern-registration.shs` narrow check
+
+This session's assignment cites `scripts/check/check-extern-registration.shs`
+specifically. That file exists (`ls -la` confirms, 9782 bytes, executable,
+mtime Aug 11), and is **no longer orphaned**: it is now invoked directly from
+CI —
+
+```
+$ grep -n "check-extern-registration" .github/workflows/repo-hygiene.yml
+203:          sh scripts/check/check-extern-registration.shs
+```
+
+— which is one of this doc's own declared "real roots"
+(`.github/workflows/*`). So for this one guard specifically, Backlog 1
+("orphaned guard") is **resolved** as of the current tree; it would no longer
+appear in a fresh `check-guard-wiring.shs` orphan count reachable-from-root
+BFS. Per `check_script_wiring_orphans_2026-08-01.md:179`, it remains wired
+**report-only** (no `--strict`, so it cannot fail the workflow) — that
+report-only gap is a separate, still-open concern the doc's Backlog 2
+discussion already covers, not a dangling reference.
+
+No source changes made (guard-wiring status is a workflow-file fact, not an
+`src/app/**`/`scripts/check/**` code defect to fix). This narrow finding does
+not resolve the doc's two backlogs in general (367/7 orphaned-and-unexcused,
+per the table above) — only the one guard named in this session's row is
+confirmed no longer orphaned.

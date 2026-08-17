@@ -51,3 +51,20 @@ The gate-open branch of "invokes GHDL only when SIMPLE_VHDL_TEST is open"
 Until then that branch is expected to fail when the gate is opened — this is
 deliberate, not a spec defect. There is a related process-capture wrapper under
 `src/lib/nogc_sync_mut/` worth reusing rather than adding a second extern.
+
+## Re-verification 2026-08-17
+
+```
+$ /usr/bin/grep -rn "rt_process_run_capture" src/compiler_rust/ src/runtime/
+(no output)
+$ grep -n "extern fn rt_process_run_capture" src/app/io/vhdl_sffi.spl
+```
+Still zero runtime definitions; the extern declaration in
+`src/app/io/vhdl_sffi.spl` is unchanged and remains unimplemented.
+
+**Classification: BLOCKED (out of scope).** The actual fix is implementing
+`rt_process_run_capture` in the Rust seed (`src/compiler_rust/`) or the C
+runtime (`src/runtime/`), both explicitly outside this session's scope lock
+(`src/app/**`, `scripts/check/**`, `src/lib/nogc_sync_mut/test_runner/**`,
+`src/app/test_daemon/**` only). No `src/app/**`-only change can implement a
+missing extern symbol. Status stays OPEN; no source changes made.

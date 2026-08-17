@@ -174,3 +174,23 @@ sh scripts/check/check-simpleos-arm64-qmp-input-evidence.shs
 
 No bootstrap, Rust seed, stale artifact, direct-kernel shortcut, source-only
 contract, or screenshot alone may close either row.
+
+## Re-verification 2026-08-17
+
+Read the full doc. This is a process/evidence-contract gap doc (frozen-source
+manifests, kernel-admission receipts, parity oracles, strict-ordering
+correlation, timing/RSS retention for two FR-WM-GLASS QEMU rows) rather than a
+single code defect with a clear file:line fix. The listed "Committed-source
+blockers" are architectural evidence-contract gaps spanning the x86/ARM QEMU
+wrapper scripts and guard (`scripts/check/check-simpleos-wm-fullscreen-evidence.shs`,
+in scope) plus guest-side kernel/compositor code (out of scope). No single
+narrow patch closes either FR-WM-GLASS row; doing so would require the frozen
+admission manifest + receipt plumbing described in the doc's "bounded repair
+hard stop" section, which is multi-file, cross-lane work already tracked as
+its own bounded-repair effort.
+
+**Classification: SKIPPED-CLAIMED (documentation/process gap, not directly
+patchable in this pass).** Verified the doc's own framing is still accurate
+by re-reading `scripts/check/check-simpleos-wm-fullscreen-evidence.shs`'s
+overall shape; no code or doc content changes made beyond this
+re-verification note. Status remains open / fail-closed as recorded.

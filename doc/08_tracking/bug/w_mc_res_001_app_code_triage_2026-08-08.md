@@ -72,3 +72,29 @@ public-API retirement from riding along inside a leak fix.
 `src/os/drivers/audio/hda_dma_resources.spl` finding is now at **line 92**,
 not 91 — the file shifted by one line since the triage. Same single finding,
 same BOUNDARY class. All five non-TRUE findings re-verified unchanged.
+
+## Re-verification 2026-08-17
+
+```
+$ grep -n "dwarf_load\|fn dwarf_free\|deliberately no standalone" src/app/debug/remote/dwarf.spl
+6:use std.sffi.debug.{rt_dwarf_load, rt_dwarf_free, rt_dwarf_addr_to_line,
+21:        val h = rt_dwarf_load(path)
+114:# There is deliberately no standalone `dwarf_load` here: acquiring a DWARF
+117:# forwarder returning the raw `rt_dwarf_load` handle would let it escape
+121:fn dwarf_free(handle: i64):
+```
+
+Confirmed: the standalone `fn dwarf_load` forwarder at the app-side
+`src/app/debug/remote/dwarf.spl` is gone — line ~116 is now an explanatory
+comment documenting its deliberate absence, matching the doc's own
+2026-08-08 "Update" section. **This session's row description's evidence
+quote ("dwarf.spl:116 rt_dwarf_load forwarder still present") is STALE —
+the file content contradicts it.**
+
+**Classification: ALREADY-FIXED-CLOSED** for the app-side TRUE finding (the
+only one assigned in scope here, `src/app/**`). The doc's own "Still open"
+mirror concern (`src/lib/nogc_sync_mut/debug/remote/dwarf.spl`) is a
+`src/lib/**` file outside this session's scope lock and is left untouched;
+that sub-issue remains as the doc describes it. No source changes made (fix
+was already applied in a prior session). Status for the app-side TRUE
+finding: RESOLVED, re-confirmed by source inspection.
