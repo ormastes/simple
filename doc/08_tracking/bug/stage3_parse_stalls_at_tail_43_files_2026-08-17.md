@@ -143,3 +143,68 @@ against a named file and the remaining files still compile.
 **Do not re-run and hope.** Before the next attempt, either identify the sender
 or run the stage under a recorded wrapper that captures who signals it
 (e.g. keep the parent's `wait` status and log the signal number per child).
+cat >> "$D" <<'EOF'
+
+## RETRACTION (2026-08-17, later the same day)
+
+**The central claim of this document — that stage-3 parse stalled for >547s on
+its last 43 files — is FALSE.** Stage 3's native-build ran to COMPLETION and
+returned nonzero. Parse finished.
+
+Evidence, from the failing run's own artifacts:
+
+- `stage3-sanity.env` — the evidence path handed to `bootstrap_stage_sanity`
+  (`scripts/bootstrap/bootstrap-from-scratch.sh:1572`) — **does not exist**, so
+  the sanity branch at `:2062` was never entered.
+- `runtime-after-stage3.txt` **exists, mtime 08:28**, matching the 08:29 exit.
+  It is written at `:2050-2052`, i.e. **after** the native-build returned and
+  **after** the admitted-stage2 and frozen-runtime provenance checks passed.
+
+So: parse completed, the build completed, provenance was clean, and the compiler
+exited nonzero for some other reason. The `done=576 remaining=43` sample was
+simply the last receipt written before the phase advanced — precisely the
+staleness artifact that `4d1aca2d799` (per-file reporting) removes. Every
+measurement in the body above is real; the INFERENCE drawn from it was not.
+
+`src/std/nogc_sync_mut/sffi/dynamic.spl` is also empirically cleared: it lexes in
+**161 ms** (8,497 bytes), six orders of magnitude short of 550s.
+
+### What survives, and is the real defect
+
+**A stage-3 compile failure is currently UNATTRIBUTABLE.**
+`stage3-native-build.log` is 0 bytes after a 26-minute failing run. The redirect
+itself is correct (`) >"$log" 2>&1` at
+`scripts/check/lib/bootstrap-stage3/command-snapshot.shs:227`, with rc read on
+the next line at `:228`). The log is empty because the in-process pure-Simple
+driver is **silent on success** and routes diagnostics only to
+`SIMPLE_BUILD_PROGRESS_EVENTS` (`driver_log_helpers.spl:112,156`).
+
+That silence is load-bearing for a provenance gate: `bootstrap-from-scratch.sh:2114-2125`
+proves the Rust seed did NOT build stage 3 by grepping the log for
+`^Build complete: [0-9]+ compiled` or `^Linked: .* via clang`, which only
+`native_all/src/lib.rs` emits. **Important: that gate tests for the ABSENCE OF
+THOSE TWO MARKERS, not for an empty file.** So adding diagnostics is safe as long
+as no line begins with those markers — verified for the `[build] ...` lines added
+by `b4872f73454`, which match neither pattern.
+
+This is why three separate lanes guessed at this failure: there was no trail.
+
+### Corrected next steps
+
+1. Get the actual stage-3 failure text. `b4872f73454` (progress to stdout) plus
+   `4d1aca2d799` (per-file receipts) should make the next run attributable —
+   confirm the running stage-2 binary carries both before trusting its receipts.
+2. Do NOT chase a parse stall. Retired as non-causes: `hir_lowering_quadratic_symbol_define_2026-07-28`
+   (fixed at `027666759ff`, and the wrong phase), and
+   `bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20` (its signature is
+   memory GROWTH; RSS here was flat at ~51 KB/s).
+3. The superlinear-cost link to `lint_timeout_hwir_zca_rows_2026-08-17` remains an
+   open, unproven hypothesis — but it is no longer supported by this run.
+
+### Process note worth keeping
+
+This document was filed with a confident causal title on top of correct
+measurements. The measurements were fine; the inference was not, because a
+progress counter that only reports every 64 files was read as a position. A
+stale field is not evidence of a stall. Prefer "last observed receipt was X"
+over "it is stuck at X" unless the process's own artifacts corroborate it.
