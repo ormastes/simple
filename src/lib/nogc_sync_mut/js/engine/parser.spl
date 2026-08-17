@@ -275,6 +275,17 @@ fn _js_parser_expression(raw: text) -> JsExpression:
             target: _js_parser_expression(expr.slice(0, assign)),
             value: _js_parser_expression(expr.slice(assign + 1, expr.len()))
         )
+    # Conditional (ternary) sits just above assignment and below `||` in JS
+    # precedence, so it must be matched before every binary/unary production.
+    val question = _js_parser_find_ternary_question(expr)
+    if question >= 0:
+        val colon = _js_parser_find_ternary_colon(expr, question)
+        if colon > question:
+            return JsExpression.Ternary(
+                condition: _js_parser_expression(expr.slice(0, question)),
+                consequent: _js_parser_expression(expr.slice(question + 1, colon)),
+                alternate: _js_parser_expression(expr.slice(colon + 1, expr.len()))
+            )
     if expr.starts_with("-") and expr.len() > 1:
         return JsExpression.Unary(op: "-", operand: _js_parser_expression(expr.slice(1, expr.len())))
     if expr.starts_with("!") and expr.len() > 1:
@@ -541,6 +552,71 @@ fn _js_parser_skip_spaces(expr: text, pos: i64) -> i64:
         else:
             break
     i
+
+# Index of the `?` that opens a top-level conditional expression, or -1.
+# `??` (nullish coalescing) and `?.` (optional chaining) are NOT ternaries.
+fn _js_parser_find_ternary_question(expr: text) -> i64:
+    var depth = 0
+    var quote = ""
+    var i = 0
+    while i < expr.len():
+        val ch = expr.slice(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                i = i + 1
+            else if ch == quote:
+                quote = ""
+        else:
+            if ch == "'" or ch == "\"":
+                quote = ch
+            else if ch == "(" or ch == "[" or ch == "{":
+                depth = depth + 1
+            else if ch == ")" or ch == "]" or ch == "}":
+                depth = depth - 1
+            else if ch == "?":
+                val nxt = expr.slice(i + 1, i + 2)
+                if nxt == "?":
+                    i = i + 1
+                else if nxt != ".":
+                    if depth == 0:
+                        return i
+        i = i + 1
+    -1
+
+# Index of the `:` matching the ternary `?` at `question`, or -1.
+# Nested ternaries in the consequent consume their own colon first.
+fn _js_parser_find_ternary_colon(expr: text, question: i64) -> i64:
+    var depth = 0
+    var quote = ""
+    var pending = 0
+    var i = question + 1
+    while i < expr.len():
+        val ch = expr.slice(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                i = i + 1
+            else if ch == quote:
+                quote = ""
+        else:
+            if ch == "'" or ch == "\"":
+                quote = ch
+            else if ch == "(" or ch == "[" or ch == "{":
+                depth = depth + 1
+            else if ch == ")" or ch == "]" or ch == "}":
+                depth = depth - 1
+            else if ch == "?":
+                val nxt = expr.slice(i + 1, i + 2)
+                if nxt == "?":
+                    i = i + 1
+                else if nxt != ".":
+                    if depth == 0:
+                        pending = pending + 1
+            else if ch == ":" and depth == 0:
+                if pending == 0:
+                    return i
+                pending = pending - 1
+        i = i + 1
+    -1
 
 fn _js_parser_find_top_level(expr: text, needle: text) -> i64:
     var depth = 0
